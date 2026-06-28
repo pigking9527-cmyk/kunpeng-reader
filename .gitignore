@@ -1,0 +1,6 @@
+# Rust / Tauri build output (large, regenerated)
+/target
+
+# OS / editor
+Thumbs.db
+*.log

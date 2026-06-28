@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>阅读</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      body {
+        font-family: "Microsoft YaHei", system-ui, sans-serif;
+        display: flex; flex-direction: column; height: 100vh;
+        color: #222; background: #fff;
+      }
+      .toolbar {
+        display: flex; align-items: center; gap: 6px;
+        padding: 6px 10px; border-bottom: 1px solid #e3e3e6; background: #fafafa;
+        flex: 0 0 auto; position: relative; z-index: 20;
+      }
+      .toolbar .title { margin-left: auto; color: #555; font-size: 13px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+      .tbtn {
+        font: inherit; padding: 4px 10px; border: 1px solid #c9c9cf;
+        border-radius: 6px; background: #fff; cursor: pointer;
+      }
+      .tbtn:hover { background: #eef2ff; border-color: #93b4ff; }
+
+      /* 书内搜索栏：浮在正文之上，不挤占阅读区；最高占满整个阅读区高度 */
+      .rsearch {
+        display: none; flex-direction: column; gap: 6px;
+        position: absolute; top: 8px; left: 8px; right: 8px; z-index: 30;
+        max-height: calc(100% - 16px);
+        padding: 8px 10px; border: 1px solid #e3e3e6; border-radius: 10px;
+        background: #fafafa; box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+      }
+      .rsearch.show { display: flex; }
+      .rsearch-row { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+      .rsearch input {
+        flex: 1; font: inherit; padding: 5px 9px;
+        border: 1px solid #c9c9cf; border-radius: 6px; outline: none;
+      }
+      .rsearch input:focus { border-color: #5aa0ff; }
+      .rcount { color: #888; font-size: 12px; }
+      .rsearch-results { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+      .rs-item {
+        padding: 7px 8px; border-radius: 5px; cursor: pointer; font-size: 13px;
+        line-height: 1.6; border-bottom: 1px solid #ececec;
+      }
+      .rs-item:hover { background: #eef2ff; }
+      .rs-item mark { background: #ffe58a; color: inherit; }
+      .rs-ch { color: #aaa; font-size: 11px; margin-right: 6px; }
+      .rs-empty { padding: 8px; color: #aaa; font-size: 13px; }
+      body.theme-dark .rs-item { color: #ddd; border-color: #3a3a3d; }
+      body.theme-dark .rs-item:hover { background: #3a3a3d; }
+
+      /* 书籍信息弹窗 */
+      .modal {
+        display: none; position: fixed; inset: 0; z-index: 50;
+        background: rgba(0,0,0,0.35); align-items: center; justify-content: center;
+      }
+      .modal.show { display: flex; }
+      .modal-card {
+        background: #fff; width: 440px; max-width: 90vw; max-height: 80vh;
+        border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        padding: 16px 18px; overflow-y: auto;
+      }
+      .modal-head { display: flex; align-items: center; justify-content: space-between;
+        font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+      .info-row { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid #f0f0f2; font-size: 14px; }
+      .info-row.col { flex-direction: column; gap: 5px; }
+      .info-k { color: #888; flex: 0 0 48px; }
+      .info-v { color: #222; word-break: break-word; }
+      .info-desc { color: #333; line-height: 1.7; white-space: pre-wrap;
+        max-height: 38vh; overflow-y: auto; }
+
+      .body { position: relative; flex: 1 1 auto; min-height: 0; }
+
+      /* 加载动画：大书排版期间显示，避免空白卡住的观感 */
+      .loading {
+        position: absolute; inset: 0; z-index: 8;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 12px; background: #fff; color: #888;
+      }
+      .loading.hide { display: none; }
+      .spinner {
+        width: 32px; height: 32px; border: 3px solid #ddd; border-top-color: #5aa0ff;
+        border-radius: 50%; animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      body.theme-dark .loading { background: #1c1c1e; }
+
+      /* 右侧自定义垂直滚动条（代表全书进度，可拖动/点击跳页） */
+      .vbar {
+        position: absolute; top: 0; right: 0; bottom: 0; width: 12px; z-index: 7;
+      }
+      .vbar:hover { background: rgba(0,0,0,0.05); }
+      .vthumb {
+        position: absolute; right: 2px; top: 0; width: 8px; height: 40px;
+        border-radius: 4px; background: rgba(0,0,0,0.3); cursor: pointer;
+      }
+      .vthumb:hover { background: rgba(0,0,0,0.5); }
+      iframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+
+      .backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.18); z-index: 5; display: none; }
+      .backdrop.show { display: block; }
+
+      /* 目录抽屉：浮在正文之上，不挤占 */
+      .toc {
+        position: absolute; left: 0; top: 0; bottom: 0; width: 260px;
+        background: #fafafa; border-right: 1px solid #ddd;
+        box-shadow: 2px 0 10px rgba(0,0,0,0.2);
+        overflow-y: auto; padding: 8px 6px; z-index: 6;
+        transform: translateX(-100%); transition: transform 0.15s ease;
+      }
+      .toc.show { transform: translateX(0); }
+      .toc .toc-item {
+        padding: 6px 8px; border-radius: 5px; cursor: pointer; font-size: 14px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .toc .toc-item:hover { background: #e6e6ea; }
+      .toc .toc-item.toc-current { color: #1c4fb0; font-weight: 600; }
+      .toc .toc-item.toc-current::before { content: "✓ "; color: #2a9; }
+      body.theme-dark .toc .toc-item.toc-current { color: #8ab4ff; }
+      .info-desc[contenteditable] {
+        border: 1px solid #d8d8dc; border-radius: 6px; padding: 6px 8px; min-height: 3em;
+        outline: none;
+      }
+      .info-desc[contenteditable]:focus { border-color: #5aa0ff; }
+      body.theme-dark .info-desc[contenteditable] { border-color: #4a4a4d; }
+
+      /* 设置面板：锚定在齿轮按钮正下方 */
+      .gear-wrap { position: relative; display: inline-flex; }
+      .settings {
+        position: absolute; top: calc(100% + 8px); left: 0; width: 280px;
+        background: #fff; border: 1px solid #ccc; border-radius: 8px;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.2); padding: 12px 14px; z-index: 30;
+        display: none; font-size: 13px;
+      }
+      .settings.show { display: block; }
+      .settings .row { display: flex; align-items: center; margin: 9px 0; gap: 8px; }
+      .settings .row > label:first-child { width: 52px; color: #444; flex: 0 0 auto; }
+      .settings input[type="range"] { flex: 1; }
+      .settings .val { width: 42px; text-align: right; color: #666; }
+      .settings select { flex: 1; font: inherit; padding: 2px; }
+      .settings .margins { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-top: 4px; }
+      .settings .margins label { display: flex; align-items: center; gap: 4px; }
+      .settings .margins input { width: 56px; font: inherit; }
+      .settings h4 { margin: 4px 0 2px; font-size: 12px; color: #888; font-weight: normal; }
+      .theme-row { display: flex; gap: 6px; flex: 1; }
+      .theme-btn {
+        flex: 1; font: inherit; padding: 5px 0; border: 1px solid #c9c9cf;
+        border-radius: 6px; background: #fff; cursor: pointer; color: #444;
+      }
+      .theme-btn:hover { background: #eef2ff; }
+      .theme-btn.active { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
+
+      /* 深色主题下的外壳（工具栏/目录/设置/弹窗） */
+      body.theme-dark { background: #1c1c1e; color: #ddd; }
+      body.theme-dark .toolbar,
+      body.theme-dark .rsearch { background: #262628; border-color: #3a3a3d; }
+      body.theme-dark .tbtn {
+        background: #2e2e30; color: #ddd; border-color: #4a4a4d;
+      }
+      body.theme-dark .tbtn:hover { background: #3a3a3d; }
+      body.theme-dark .toolbar .title { color: #aaa; }
+      body.theme-dark .toc { background: #262628; border-color: #3a3a3d; }
+      body.theme-dark .toc .toc-item { color: #ddd; }
+      body.theme-dark .toc .toc-item:hover { background: #3a3a3d; }
+      body.theme-dark .settings,
+      body.theme-dark .modal-card { background: #2a2a2c; color: #ddd; border-color: #444; }
+      body.theme-dark .settings select,
+      body.theme-dark .rsearch input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .info-k { color: #999; }
+      body.theme-dark .info-v, body.theme-dark .info-desc { color: #ddd; }
+      body.theme-dark .info-row { border-color: #3a3a3d; }
+
+      /* 书签下拉 */
+      .bm-wrap { position: relative; display: inline-flex; }
+      .bm-panel {
+        position: absolute; top: calc(100% + 8px); right: 0; width: 260px;
+        background: #fff; border: 1px solid #ccc; border-radius: 8px;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.2); padding: 8px; z-index: 30; display: none;
+      }
+      .bm-panel.show { display: block; }
+      .bm-add {
+        width: 100%; font: inherit; padding: 7px; border: 1px solid #c9c9cf;
+        border-radius: 6px; background: #fff; cursor: pointer; margin-bottom: 6px;
+      }
+      .bm-add:hover { background: #eef2ff; }
+      .bm-list { max-height: 50vh; overflow-y: auto; }
+      .bm-item {
+        display: flex; align-items: center; gap: 8px;
+        padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 13px;
+      }
+      .bm-item:hover { background: #eef2ff; }
+      .bm-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .bm-del { color: #bbb; flex: 0 0 auto; padding: 0 4px; }
+      .bm-del:hover { color: #e85c50; }
+      .bm-empty { padding: 8px; color: #aaa; font-size: 13px; }
+      body.theme-dark .bm-panel { background: #2a2a2c; border-color: #444; }
+      body.theme-dark .bm-add { background: #2e2e30; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .bm-item { color: #ddd; }
+      body.theme-dark .bm-item:hover { background: #3a3a3d; }
+
+      /* PDF 模式：交给 WebView2 自带阅读器，隐藏分页相关控件 */
+      body.pdf-mode #toc-btn, body.pdf-mode #prev-btn, body.pdf-mode #next-btn,
+      body.pdf-mode #rsearch-btn, body.pdf-mode .gear-wrap, body.pdf-mode .bm-wrap,
+      body.pdf-mode #progress, body.pdf-mode #vbar { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button id="toc-btn" class="tbtn">☰ 目录</button>
+      <button id="prev-btn" class="tbtn" title="上一章">◀</button>
+      <button id="next-btn" class="tbtn" title="下一章">▶</button>
+      <button id="rsearch-btn" class="tbtn" title="搜索书中文字">🔍</button>
+      <button id="info-btn" class="tbtn" title="书籍信息">ⓘ</button>
+      <div class="bm-wrap">
+        <button id="bm-btn" class="tbtn" title="书签">🔖</button>
+        <div id="bm-panel" class="bm-panel">
+          <button id="bm-add" class="bm-add">➕ 在当前页加书签</button>
+          <div id="bm-list" class="bm-list"></div>
+        </div>
+      </div>
+      <div class="gear-wrap">
+        <button id="gear-btn" class="tbtn">⚙ 设置</button>
+        <div id="settings" class="settings">
+      <div class="row">
+        <label>主题</label>
+        <div class="theme-row">
+          <button class="theme-btn" data-theme="light">浅色</button>
+          <button class="theme-btn" data-theme="dark">深色</button>
+          <button class="theme-btn" data-theme="sepia">护眼</button>
+        </div>
+      </div>
+      <div class="row">
+        <label>字体</label>
+        <select id="set-font">
+          <option value="">书籍默认</option>
+          <option value="'Microsoft YaHei',sans-serif">微软雅黑</option>
+          <option value="'SimSun',serif">宋体</option>
+          <option value="'SimHei',sans-serif">黑体</option>
+          <option value="'KaiTi',serif">楷体</option>
+          <option value="serif">衬线</option>
+          <option value="sans-serif">无衬线</option>
+        </select>
+      </div>
+      <div class="row"><label>字号</label><input type="range" id="set-size" min="12" max="40" step="1" /><span class="val" id="v-size"></span></div>
+      <div class="row"><label>行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
+      <div class="row"><label>段间距</label><input type="range" id="set-para" min="0" max="2" step="0.1" /><span class="val" id="v-para"></span></div>
+      <div class="row"><label>字间距</label><input type="range" id="set-letter" min="0" max="5" step="0.5" /><span class="val" id="v-letter"></span></div>
+      <h4>页边距（像素）</h4>
+      <div class="margins">
+        <label>上 <input type="number" id="set-mt" min="0" max="160" /></label>
+        <label>下 <input type="number" id="set-mb" min="0" max="160" /></label>
+        <label>左 <input type="number" id="set-ml" min="0" max="240" /></label>
+        <label>右 <input type="number" id="set-mr" min="0" max="240" /></label>
+      </div>
+        </div>
+      </div>
+      <span id="progress" class="title">—</span>
+    </div>
+
+    <div class="body">
+      <iframe id="frame" referrerpolicy="no-referrer"></iframe>
+      <div id="rsearch" class="rsearch">
+        <div class="rsearch-row">
+          <input id="rsearch-input" type="text" autocomplete="off" placeholder="搜索全书文字…" />
+          <span id="rsearch-count" class="rcount"></span>
+          <button id="rsearch-close" class="tbtn" title="关闭">✕</button>
+        </div>
+        <div id="rsearch-results" class="rsearch-results"></div>
+      </div>
+      <div id="loading" class="loading"><div class="spinner"></div><div>加载中…</div></div>
+      <div id="backdrop" class="backdrop"></div>
+      <aside id="toc" class="toc"></aside>
+      <div id="vbar" class="vbar"><div id="vthumb" class="vthumb"></div></div>
+    </div>
+    <div id="info-modal" class="modal">
+      <div class="modal-card">
+        <div class="modal-head">
+          <span>书籍信息</span>
+          <button id="info-close" class="tbtn">✕</button>
+        </div>
+        <div class="info-row"><span class="info-k">书名</span><span id="info-title" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">作者</span><span id="info-author" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">格式</span><span id="info-format" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">字数</span><span id="info-words" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">大小</span><span id="info-size" class="info-v"></span></div>
+        <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="info-desc" class="info-desc" contenteditable="true"></div></div>
+      </div>
+    </div>
+    <script src="reader.js"></script>
+  </body>
+</html>

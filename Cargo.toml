@@ -1,0 +1,27 @@
+[package]
+name = "ebook-reader-tauri"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+epub = "2"
+image = "0.25"
+encoding_rs = "0.8"
+chardetng = "0.1"
+memchr = "2"
+fastembed = "4"
+instant-distance = { version = "0.6", features = ["with-serde"] }
+bincode = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
