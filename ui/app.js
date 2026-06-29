@@ -12,11 +12,13 @@ const searchInput = document.getElementById("search-input");
 
 let books = []; // 当前书架（原始顺序，供“随机打开”用）
 let sortKey = localStorage.getItem("shelfSort") || "title";
+if (sortKey === "rating") sortKey = "title"; // 已移除“按评分排序”，旧设置回落到书名
 let layout = localStorage.getItem("shelfLayout") || "grid";
 let readingFilter = { unread: true, reading: true, done: true };
 try {
   readingFilter = Object.assign(readingFilter, JSON.parse(localStorage.getItem("readingFilter") || "{}"));
 } catch (e) {}
+let minRating = +(localStorage.getItem("minRating") || 0); // 评分过滤下限（0=不过滤）
 // 阅读状态：done 已读 / unread 未读 / reading 正在阅读
 function readStatus(b) {
   const p = b.progress || 0;
@@ -26,6 +28,9 @@ function readStatus(b) {
 }
 let searchQuery = "";
 let selected = new Set(); // 已选中的图书 id（单击封面切换）
+let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0"; // 封面右下角是否显示阅读进度
+let showCoverRating = localStorage.getItem("showCoverRating") !== "0"; // 封面上是否显示评分小星
+let showCoverTitle = localStorage.getItem("showCoverTitle") === "1"; // 网格视图封面下是否显示书名（默认不显示）
 
 // 由书名稳定推导一个封面配色（与之前 egui 版一致的思路）
 const PALETTE = [
@@ -41,6 +46,26 @@ function colorFor(title) {
   return PALETTE[h % PALETTE.length];
 }
 
+// 只读的评分小星（支持半星），叠在封面底部
+function staticStars(v) {
+  const wrap = document.createElement("div");
+  wrap.className = "cover-stars";
+  for (let i = 0; i < 5; i++) {
+    const st = document.createElement("span");
+    st.className = "star";
+    const bg = document.createElement("span");
+    bg.className = "s-bg";
+    bg.textContent = "★";
+    const fg = document.createElement("span");
+    fg.className = "s-fg";
+    fg.textContent = "★";
+    fg.style.width = Math.max(0, Math.min(1, v - i)) * 100 + "%";
+    st.append(bg, fg);
+    wrap.appendChild(st);
+  }
+  return wrap;
+}
+
 function bookCard(b) {
   const card = document.createElement("div");
   card.className = "book";
@@ -49,10 +74,12 @@ function bookCard(b) {
   cover.className = "cover";
 
   if (b.cover) {
-    // EPUB 真实封面
+    // EPUB 真实封面。封面带 Cache-Control，命中缓存时同帧直接画出，无任何过渡。
+    // 占位底色仅在“首次、尚未缓存”的瞬间可能露出，避免露出黑块（不是黑就行，没有动画）。
+    cover.style.background = colorFor(b.title);
     const img = document.createElement("img");
-    img.src = b.cover;
     img.alt = b.title;
+    img.src = b.cover;
     cover.appendChild(img);
   } else {
     // 生成的占位封面：书名 + 配色
@@ -65,7 +92,7 @@ function bookCard(b) {
     cover.appendChild(spine);
     cover.appendChild(gen);
   }
-  if (b.progress > 0) {
+  if (b.progress > 0 && showCoverProgress) {
     const badge = document.createElement("div");
     badge.className = "badge";
     badge.textContent = b.progress.toFixed(0) + "%"; // 封面右下角阅读进度
@@ -78,6 +105,7 @@ function bookCard(b) {
     warn.textContent = "⚠ 文件丢失";
     cover.appendChild(warn);
   }
+  if (showCoverRating && b.rating > 0) cover.appendChild(staticStars(b.rating)); // 封面底部评分小星
 
   const title = document.createElement("div");
   title.className = "title";
@@ -193,11 +221,16 @@ function currentList() {
   if (!(readingFilter.unread && readingFilter.reading && readingFilter.done)) {
     list = list.filter((b) => readingFilter[readStatus(b)]);
   }
+  // 评分过滤（minRating>0 → 只显示评分≥该值的书）
+  if (minRating > 0) {
+    list = list.filter((b) => (b.rating || 0) >= minRating);
+  }
   return list;
 }
 
 function applyView() {
   shelfEl.classList.toggle("list", layout === "list");
+  shelfEl.classList.toggle("show-titles", showCoverTitle); // 网格视图是否显示书名
   shelfEl.innerHTML = "";
   const list = currentList();
   if (list.length) {
@@ -418,14 +451,171 @@ document.querySelectorAll(".rfilter").forEach((c) => {
   });
 });
 
-// 漏斗面板右上角齿轮 → 弹出（暂为空白）设置
+// 评分过滤：五颗星（支持半星），点星=只看≥该评分的书，再点同一处取消
+// 通用半星组件：左半=半星、右半=整星，悬停预览，点击回调 onPick(value)
+function makeStars(container, onPick) {
+  for (let i = 0; i < 5; i++) {
+    const st = document.createElement("span");
+    st.className = "star";
+    const bg = document.createElement("span");
+    bg.className = "s-bg";
+    bg.textContent = "★";
+    const fg = document.createElement("span");
+    fg.className = "s-fg";
+    fg.textContent = "★";
+    st.append(bg, fg);
+    container.appendChild(st);
+  }
+  const stars = [...container.querySelectorAll(".star")];
+  function paint(v) {
+    stars.forEach((st, i) => {
+      const f = Math.max(0, Math.min(1, v - i));
+      st.querySelector(".s-fg").style.width = f * 100 + "%";
+    });
+  }
+  function valAt(e) {
+    for (let i = 0; i < stars.length; i++) {
+      const r = stars[i].getBoundingClientRect();
+      if (e.clientX <= r.right) return i + (e.clientX < r.left + r.width / 2 ? 0.5 : 1);
+    }
+    return 5;
+  }
+  container.addEventListener("mousemove", (e) => paint(valAt(e)));
+  container.addEventListener("mouseleave", () => paint(container._val || 0));
+  container.addEventListener("click", (e) => {
+    let v = valAt(e);
+    if (v === container._val) v = 0;
+    container._val = v;
+    paint(v);
+    onPick(v);
+  });
+  container.setVal = (v) => {
+    container._val = v || 0;
+    paint(container._val);
+  };
+  paint(0);
+}
+const filterStarsEl = document.getElementById("filter-stars");
+makeStars(filterStarsEl, (v) => {
+  minRating = v;
+  localStorage.setItem("minRating", String(v));
+  applyView();
+});
+filterStarsEl.setVal(minRating);
+
+// ---- “我的书架”设置：封面进度开关 + 自动导入目录（多目录） ----
+let autoImport = { enabled: false, dirs: [] };
+const setAutoChk = document.getElementById("set-auto-import");
+const importDirsModal = document.getElementById("import-dirs-modal");
+const dirsListEl = document.getElementById("dirs-list");
+function renderDirsList() {
+  dirsListEl.innerHTML = "";
+  if (!autoImport.dirs.length) {
+    const e = document.createElement("div");
+    e.className = "dirs-empty";
+    e.textContent = "还没有添加目录";
+    dirsListEl.appendChild(e);
+    return;
+  }
+  autoImport.dirs.forEach((d) => {
+    const row = document.createElement("div");
+    row.className = "dir-item";
+    const p = document.createElement("span");
+    p.className = "dir-path";
+    p.textContent = d;
+    const del = document.createElement("button");
+    del.className = "dir-del";
+    del.textContent = "✕";
+    del.title = "移除该目录";
+    del.addEventListener("click", () => {
+      autoImport.dirs = autoImport.dirs.filter((x) => x !== d);
+      applyAutoImport(autoImport.enabled);
+    });
+    row.append(p, del);
+    dirsListEl.appendChild(row);
+  });
+}
+function reflectAutoImport() {
+  setAutoChk.checked = !!autoImport.enabled;
+  renderDirsList();
+}
+// 封面显示阅读进度开关
+const setCoverProg = document.getElementById("set-cover-prog");
+setCoverProg.checked = showCoverProgress;
+setCoverProg.addEventListener("change", () => {
+  showCoverProgress = setCoverProg.checked;
+  localStorage.setItem("showCoverProgress", showCoverProgress ? "1" : "0");
+  applyView();
+});
+// 封面上显示评分小星开关
+const setCoverRating = document.getElementById("set-cover-rating");
+setCoverRating.checked = showCoverRating;
+setCoverRating.addEventListener("change", () => {
+  showCoverRating = setCoverRating.checked;
+  localStorage.setItem("showCoverRating", showCoverRating ? "1" : "0");
+  applyView();
+});
+// 封面下显示书名开关
+const setCoverTitle = document.getElementById("set-cover-title");
+setCoverTitle.checked = showCoverTitle;
+setCoverTitle.addEventListener("change", () => {
+  showCoverTitle = setCoverTitle.checked;
+  localStorage.setItem("showCoverTitle", showCoverTitle ? "1" : "0");
+  applyView();
+});
+// 自动导入开关
+setAutoChk.addEventListener("change", async () => {
+  await applyAutoImport(setAutoChk.checked);
+  if (setAutoChk.checked && !autoImport.dirs.length) {
+    importDirsModal.classList.add("show"); // 还没设目录：顺手打开让用户添加
+  }
+});
+// 把当前 enabled + dirs 提交后端，立即扫描并刷新书架
+async function applyAutoImport(enabled) {
+  try {
+    const list = await invoke("set_auto_import", { enabled, dirs: autoImport.dirs });
+    autoImport.enabled = enabled;
+    const grew = list.length > books.length;
+    render(list);
+    if (grew) invoke("build_shelf_index").catch(() => {});
+  } catch (e) {
+    alert("设置自动导入失败：" + e);
+  }
+  reflectAutoImport();
+}
+async function addImportDirs() {
+  const sel = await dialog.open({ directory: true, multiple: true });
+  if (!sel) return;
+  const arr = Array.isArray(sel) ? sel : [sel];
+  let added = false;
+  for (const d of arr) {
+    if (d && !autoImport.dirs.includes(d)) {
+      autoImport.dirs.push(d);
+      added = true;
+    }
+  }
+  if (added) await applyAutoImport(autoImport.enabled);
+}
+// 漏斗面板右上角齿轮 → 打开“我的书架”设置弹窗
 const fpSettingsModal = document.getElementById("fp-settings-modal");
 document.getElementById("fp-gear").addEventListener("click", (e) => {
   e.stopPropagation();
   filterPanel.classList.remove("show");
+  reflectAutoImport();
   fpSettingsModal.classList.add("show");
 });
 document.getElementById("fp-settings-close").addEventListener("click", () => fpSettingsModal.classList.remove("show"));
+// “自动导入目录”行的齿轮 → 打开目录管理弹窗
+document.getElementById("dirs-gear").addEventListener("click", (e) => {
+  e.stopPropagation();
+  renderDirsList();
+  importDirsModal.classList.add("show");
+});
+document.getElementById("dirs-add").addEventListener("click", addImportDirs);
+document.getElementById("import-dirs-close").addEventListener("click", () => importDirsModal.classList.remove("show"));
+importDirsModal.addEventListener("click", (e) => {
+  if (e.target === importDirsModal) importDirsModal.classList.remove("show");
+});
 // GitHub 链接：在系统默认浏览器打开，而不是在 WebView 里跳转
 document.getElementById("about-github").addEventListener("click", (e) => {
   e.preventDefault();
@@ -617,11 +807,90 @@ statsModal.addEventListener("click", (e) => {
   if (e.target === statsModal) statsModal.classList.remove("show");
 });
 
+// ---- 检查更新（后端多源：Gitee 优先、GitHub 兜底）----
+const updateBar = document.getElementById("update-bar");
+let pendingRelease = null;
+// 比较两个版本号：a>b 返回 1，a<b 返回 -1，相等 0
+function cmpVer(a, b) {
+  const pa = String(a).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+function showUpdateBanner(ver, url) {
+  pendingRelease = { ver, url: url || "" };
+  document.getElementById("ub-ver").textContent = "v" + String(ver).replace(/^v/i, "");
+  updateBar.classList.add("show");
+}
+// force=true：手动“检查更新”，无论结果都给提示、并忽略“已忽略版本”
+async function checkUpdate(force) {
+  if (!force) {
+    const last = +(localStorage.getItem("lastUpdateCheck") || 0);
+    if (Date.now() - last < 6 * 3600 * 1000) return; // 6 小时内查过就不再自动查
+    localStorage.setItem("lastUpdateCheck", String(Date.now()));
+  }
+  let info;
+  try {
+    info = await invoke("check_update");
+  } catch (e) {
+    if (force) alert("检查更新失败：" + e);
+    return;
+  }
+  if (!info || !info.ok) {
+    if (force) alert("检查更新失败：无法连接更新服务器，请检查网络后重试。");
+    return;
+  }
+  if (!info.has_update) {
+    if (force) alert("当前已是最新版本（v" + info.current + "）。");
+    return;
+  }
+  if (!force) {
+    const ignored = localStorage.getItem("ignoredUpdate");
+    if (ignored && cmpVer(info.latest, ignored) <= 0) return; // 忽略过这个（或更早）版本
+  }
+  showUpdateBanner(info.latest, info.url);
+}
+document.getElementById("ub-view").addEventListener("click", () => {
+  if (pendingRelease && pendingRelease.url) invoke("open_url", { url: pendingRelease.url }).catch(() => {});
+});
+document.getElementById("ub-ignore").addEventListener("click", () => {
+  if (pendingRelease) localStorage.setItem("ignoredUpdate", pendingRelease.ver);
+  updateBar.classList.remove("show");
+});
+document.getElementById("ub-close").addEventListener("click", () => updateBar.classList.remove("show"));
+document.getElementById("about-update").addEventListener("click", () => checkUpdate(true));
+// 关于弹窗里展示“本版更新内容”（取当前版本对应的 GitHub 发行说明，带本地缓存以便离线显示）
+async function loadCurrentNotes() {
+  const el = document.getElementById("about-notes");
+  let ver = "";
+  try {
+    ver = await invoke("app_version");
+  } catch (e) {}
+  const v = "v" + String(ver || "").replace(/^v/i, "");
+  const cached = localStorage.getItem("notes_" + v);
+  el.textContent = cached || "加载中…";
+  let notes = "";
+  try {
+    notes = await invoke("release_notes", { tag: v });
+  } catch (e) {}
+  notes = (notes || "").trim();
+  if (notes) {
+    localStorage.setItem("notes_" + v, notes);
+    el.textContent = notes;
+  } else if (!cached) {
+    el.textContent = "（暂时无法获取更新说明：可能是网络问题，或该版本尚未发布说明）";
+  }
+}
+
 // ---- 关于（从 ⋮ 菜单打开）----
 const aboutModal = document.getElementById("about-modal");
 document.getElementById("mi-about").addEventListener("click", () => {
   menuEl.classList.remove("show");
   aboutModal.classList.add("show");
+  loadCurrentNotes();
 });
 document.getElementById("about-close").addEventListener("click", () => aboutModal.classList.remove("show"));
 aboutModal.addEventListener("click", (e) => {
@@ -712,6 +981,21 @@ window.addEventListener("focus", () => {
     render(await invoke("list_books"));
   } catch (e) {}
   invoke("shelf_books").then(render).catch(() => {});
+  // 读取自动导入配置并反映到设置面板
+  invoke("get_auto_import").then((c) => { autoImport = c || autoImport; reflectAutoImport(); }).catch(() => {});
+  // 启动时扫描自动导入目录，把新放进去的书加入书架
+  invoke("auto_import_scan").then((list) => {
+    const grew = list.length > books.length;
+    render(list);
+    if (grew) invoke("build_shelf_index").catch(() => {});
+  }).catch(() => {});
   // 空闲时后台统计缺失的字数（不影响 UI）
   setTimeout(() => invoke("compute_word_counts").catch(() => {}), 1500);
+  // 启动后台检查更新（不阻塞启动，6 小时节流）
+  setTimeout(() => checkUpdate(false), 3000);
+  // “关于”里的版本号取自后端，保持单一来源
+  invoke("app_version").then((v) => {
+    const el = document.getElementById("about-ver");
+    if (el && v) el.textContent = "v" + String(v).replace(/^v/i, "");
+  }).catch(() => {});
 })();

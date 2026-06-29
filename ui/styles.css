@@ -21,9 +21,14 @@ body {
 }
 .modal-head { display: flex; align-items: center; justify-content: space-between;
   font-size: 16px; font-weight: 600; margin-bottom: 10px; }
-.info-row { display: flex; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f0f2; font-size: 14px; }
+.info-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f0f2; font-size: 14px; }
+.info-row.col { flex-direction: column; align-items: stretch; gap: 6px; }
 .info-k { color: #888; flex: 0 0 80px; }
 .info-v { color: #222; }
+.about-update-btn { margin-left: auto; padding: 3px 12px; font-size: 13px; }
+.about-notes { white-space: pre-wrap; font-size: 13px; color: #444; line-height: 1.6;
+  max-height: 220px; overflow-y: auto; background: #f7f8fa; border: 1px solid #eef0f4;
+  border-radius: 8px; padding: 10px 12px; }
 
 /* 拖拽导入提示 */
 .drop-hint {
@@ -33,6 +38,22 @@ body {
   color: #2a6; font-size: 22px; color: #1c4fb0; pointer-events: none;
 }
 .drop-hint.show { display: flex; }
+
+/* 更新提示条（贴在工具栏下方） */
+.update-bar { display: none; align-items: center; gap: 12px; padding: 8px 16px;
+  background: #eef4ff; border-bottom: 1px solid #cfe0ff; color: #1c4fb0; font-size: 14px;
+  flex: 0 0 auto; }
+.update-bar.show { display: flex; }
+.update-bar .ub-text b { font-weight: 700; }
+.update-bar .ub-btn { font: inherit; padding: 4px 12px; border: none; border-radius: 6px;
+  background: #2b6cff; color: #fff; cursor: pointer; }
+.update-bar .ub-btn:hover { background: #1c5be0; }
+.update-bar .ub-link { font: inherit; border: none; background: transparent; color: #5a7bb5;
+  cursor: pointer; text-decoration: underline; padding: 0; }
+.update-bar .ub-link:hover { color: #1c4fb0; }
+.update-bar .ub-x { margin-left: auto; border: none; background: transparent; color: #7a93c0;
+  cursor: pointer; font-size: 14px; line-height: 1; }
+.update-bar .ub-x:hover { color: #1c4fb0; }
 
 /* 批量删除相关按钮 */
 .btn-danger {
@@ -166,7 +187,39 @@ body {
 .fp-col { display: flex; flex-direction: column; gap: 7px; }
 .fp-title { font-weight: 600; font-size: 13px; color: #333; margin-bottom: 2px; }
 .fp-col label { font-size: 14px; display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+/* “我的书架”设置行：左文字右控件 */
+.fp-set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  font-size: 14px; color: #333; padding: 6px 0; white-space: nowrap; }
+.fp-set-tail { display: inline-flex; align-items: center; gap: 10px; }
+.fp-row-gear { border: none; background: transparent; cursor: pointer; font-size: 17px;
+  color: #888; line-height: 1; padding: 2px; }
+.fp-row-gear:hover { color: #2b6cff; }
+/* iOS 风格开关 */
+.switch { position: relative; display: inline-block; width: 38px; height: 20px; flex: 0 0 auto; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .slider { position: absolute; inset: 0; background: #cfcfd6; border-radius: 20px;
+  transition: 0.18s; cursor: pointer; }
+.switch .slider::before { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+  background: #fff; border-radius: 50%; transition: 0.18s; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+.switch input:checked + .slider { background: #5aa0ff; }
+.switch input:checked + .slider::before { transform: translateX(18px); }
+/* 自动导入目录设置弹窗 */
+.ai-note { font-size: 13px; color: #777; line-height: 1.6; margin: 4px 0 12px; }
+.ai-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.dirs-list { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+.dir-item { display: flex; align-items: center; gap: 8px; background: #f6f8fc;
+  border: 1px solid #eef0f4; border-radius: 8px; padding: 8px 10px; }
+.dir-path { flex: 1 1 auto; min-width: 0; font-size: 13px; color: #333; word-break: break-all; }
+.dir-del { flex: 0 0 auto; border: none; background: transparent; cursor: pointer;
+  color: #bbb; font-size: 14px; line-height: 1; padding: 2px 4px; }
+.dir-del:hover { color: #e85c50; }
+.dirs-empty { text-align: center; color: #aaa; font-size: 13px; padding: 18px 0; }
 .fp-sep { width: 1px; background: #e3e3e6; }
+/* 评分过滤：五颗星（支持半星），点星=只看该评分及以上 */
+.fp-stars { display: inline-flex; gap: 3px; cursor: pointer; margin-top: 2px; }
+.fp-stars .star { position: relative; width: 1em; height: 1em; font-size: 19px; line-height: 1; user-select: none; }
+.fp-stars .s-bg { color: #d4d4d8; }
+.fp-stars .s-fg { position: absolute; left: 0; top: 0; width: 0; overflow: hidden; color: #f5a623; white-space: nowrap; }
 .fp-sep-h { height: 1px; background: #e3e3e6; margin: 12px 0; }
 .layout-row { display: flex; gap: 8px; }
 .layout-btn {
@@ -190,7 +243,8 @@ body {
 }
 .shelf.list .cover { width: 52px; height: 70px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
 .shelf.list .cover .gen { padding: 8px 6px; font-size: 11px; }
-.shelf.list .title { margin-top: 0; flex: 1 1 auto; font-size: 15px; max-height: none; }
+.shelf.show-titles .book .title { display: block; } /* 开启开关后，网格视图显示书名 */
+.shelf.list .title { display: block; margin-top: 0; flex: 1 1 auto; font-size: 15px; max-height: none; }
 .shelf.list .prog { flex: 0 0 auto; color: #888; font-size: 13px; min-width: 56px; text-align: right; }
 
 /* 进度只在列表布局显示 */
@@ -225,7 +279,7 @@ body {
   background: #3e5a8c;
 }
 .book:hover .cover { outline: 3px solid #5aa0ff; }
-.cover img { width: 100%; height: 100%; object-fit: contain; background: #1c1c1c; }
+.cover img { width: 100%; height: 100%; object-fit: contain; background: transparent; }
 .cover .gen {
   flex: 1;
   color: #fff;
@@ -272,9 +326,17 @@ body {
 .sbook .fin { color: #1c9a5a; font-weight: 600; }
 .stats-empty { text-align: center; color: #aaa; padding: 30px; }
 .book .title {
+  display: none; /* 网格布局默认只显示封面；开启“在封面下显示书名”后再显示 */
   margin-top: 6px;
   font-size: 13px;
   line-height: 1.3;
   max-height: 2.6em;
   overflow: hidden;
 }
+/* 评分小星：叠在封面底部（只读，支持半星） */
+.cover .cover-stars { position: absolute; left: 6px; bottom: 5px; display: inline-flex; gap: 1px;
+  filter: drop-shadow(0 1px 1.5px rgba(0,0,0,0.7)); }
+.cover .cover-stars .star { position: relative; width: 1em; height: 1em; font-size: 13px; line-height: 1; }
+.cover .cover-stars .s-bg { color: rgba(255,255,255,0.5); }
+.cover .cover-stars .s-fg { position: absolute; left: 0; top: 0; width: 0; overflow: hidden; color: #ffcf33; white-space: nowrap; }
+.shelf.list .cover-stars { display: none; } /* 列表布局封面太小，不叠星 */

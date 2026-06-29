@@ -73,6 +73,11 @@
       .info-row.col { flex-direction: column; gap: 5px; }
       .info-k { color: #888; flex: 0 0 48px; }
       .info-v { color: #222; word-break: break-word; }
+      .stars { display: inline-flex; gap: 4px; cursor: pointer; }
+      .stars .star { position: relative; width: 1em; height: 1em; font-size: 20px; line-height: 1; user-select: none; }
+      .stars .s-bg { color: #d4d4d8; }
+      .stars .s-fg { position: absolute; left: 0; top: 0; width: 0; overflow: hidden; color: #f5a623; white-space: nowrap; }
+      body.theme-dark .stars .s-bg { color: #555; }
       .info-desc { color: #333; line-height: 1.7; white-space: pre-wrap;
         max-height: 38vh; overflow-y: auto; }
 
@@ -385,6 +390,7 @@
         <div class="info-row"><span class="info-k">格式</span><span id="info-format" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">字数</span><span id="info-words" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">大小</span><span id="info-size" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">评分</span><span id="info-stars" class="stars" title="点击打分，再点同一颗清除"></span></div>
         <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="info-desc" class="info-desc" contenteditable="true"></div></div>
       </div>
     </div>

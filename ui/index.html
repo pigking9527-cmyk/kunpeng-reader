@@ -35,7 +35,7 @@
           </svg>
         </button>
         <div id="filter-panel" class="filter-panel">
-          <button id="fp-gear" class="fp-gear" title="更多设置">⚙</button>
+          <button id="fp-gear" class="fp-gear" title="我的书架设置">⚙</button>
           <div class="fp-row">
             <div class="fp-col">
               <div class="fp-title">排序</div>
@@ -50,6 +50,7 @@
               <label><input type="checkbox" class="rfilter" value="unread" /> 未读</label>
               <label><input type="checkbox" class="rfilter" value="reading" /> 正在阅读</label>
               <label><input type="checkbox" class="rfilter" value="done" /> 已读</label>
+              <div id="filter-stars" class="fp-stars" title="按评分过滤：点星=只看该评分及以上，再点同一处取消"></div>
             </div>
           </div>
           <div class="fp-sep-h"></div>
@@ -86,6 +87,12 @@
         </div>
       </div>
     </header>
+    <div id="update-bar" class="update-bar">
+      <span class="ub-text">🎉 发现新版本 <b id="ub-ver"></b></span>
+      <button id="ub-view" class="ub-btn">查看更新</button>
+      <button id="ub-ignore" class="ub-link">忽略此版本</button>
+      <button id="ub-close" class="ub-x" title="关闭">✕</button>
+    </div>
     <div id="stats-modal" class="modal">
       <div class="modal-card stats-card">
         <div class="modal-head"><span>📊 阅读统计</span><button id="stats-close" class="btn-plain">✕</button></div>
@@ -105,15 +112,45 @@
     </div>
     <div id="fp-settings-modal" class="modal">
       <div class="modal-card">
-        <div class="modal-head"><span>⚙ 设置</span><button id="fp-settings-close" class="btn-plain">✕</button></div>
-        <div style="padding: 28px 8px; color: #aaa; text-align: center;">（设置项待添加）</div>
+        <div class="modal-head"><span>⚙ 我的书架</span><button id="fp-settings-close" class="btn-plain">✕</button></div>
+        <div class="fp-set-row">
+          <span>在封面上显示阅读进度</span>
+          <label class="switch"><input type="checkbox" id="set-cover-prog" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>在封面上显示评分</span>
+          <label class="switch"><input type="checkbox" id="set-cover-rating" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>在封面下显示书名</span>
+          <label class="switch"><input type="checkbox" id="set-cover-title" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>自动导入目录</span>
+          <span class="fp-set-tail">
+            <button id="dirs-gear" class="fp-row-gear" title="设置自动导入目录">⚙</button>
+            <label class="switch"><input type="checkbox" id="set-auto-import" /><span class="slider"></span></label>
+          </span>
+        </div>
+        <p class="ai-note">开启「自动导入目录」后，每次启动会扫描齿轮里设置的目录（含子目录），把其中的电子书自动加入书架。已在书架里的不会重复添加。</p>
+      </div>
+    </div>
+    <div id="import-dirs-modal" class="modal">
+      <div class="modal-card">
+        <div class="modal-head"><span>📁 自动导入目录</span><button id="import-dirs-close" class="btn-plain">✕</button></div>
+        <p class="ai-note">下列目录（含子目录）里的电子书会在每次启动时自动加入书架。可添加多个目录。</p>
+        <div id="dirs-list" class="dirs-list"></div>
+        <div class="ai-actions">
+          <button id="dirs-add" class="btn-plain">＋ 添加目录…</button>
+        </div>
       </div>
     </div>
     <div id="about-modal" class="modal">
       <div class="modal-card">
         <div class="modal-head"><span>ℹ️ 关于</span><button id="about-close" class="btn-plain">✕</button></div>
         <div class="info-row"><span class="info-k">软件</span><span class="info-v">鲲鹏阅读器 · Kunpeng Reader</span></div>
-        <div class="info-row"><span class="info-k">版本</span><span class="info-v">v1.5.0</span></div>
+        <div class="info-row"><span class="info-k">版本</span><span class="info-v" id="about-ver">v1.6.0</span><button id="about-update" class="btn-plain about-update-btn">检查更新</button></div>
+        <div class="info-row col"><span class="info-k">本版更新内容</span><div id="about-notes" class="about-notes">加载中…</div></div>
         <div class="info-row"><span class="info-k">GitHub</span><span class="info-v"><a id="about-github" href="https://github.com/pigking9527-cmyk/kunpeng-reader" style="color:#2b6cff;text-decoration:none;cursor:pointer;">github.com/pigking9527-cmyk/kunpeng-reader</a></span></div>
       </div>
     </div>

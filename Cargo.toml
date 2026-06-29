@@ -1,6 +1,6 @@
 [package]
 name = "ebook-reader-tauri"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 
 [build-dependencies]
@@ -27,6 +27,8 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
+ureq = { version = "2", features = ["json"] }
+tokio = { version = "1", features = ["rt"] }
 
 # 正式发布档：满优化（体积更小、运行更快）。
 [profile.release]

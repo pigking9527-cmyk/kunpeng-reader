@@ -93,6 +93,7 @@ struct BookDto {
     last_read_at: u64,
     missing: bool, // 源文件是否已找不到
     path: String,  // 文件完整路径（用于"按存储目录"排序）
+    rating: f32,   // 用户评分 0~5（0.5 刻度，用于书架按评分过滤）
 }
 
 #[derive(Serialize)]
@@ -125,21 +126,15 @@ fn to_dto(b: &book::Book) -> BookDto {
         author: b.author.clone(),
         description: b.description.clone(),
         format: b.format.clone(),
-        cover: b.cover.as_ref().map(|p| {
-            // 带封面文件 mtime 作缓存破坏参数：换封面后 URL 变化 → 书架立即刷新新图（?后缀被协议层忽略）
-            let v = std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("{RES_BASE}/cover/{id}?v={v}")
-        }),
+        // 用封面版本号做缓存破坏参数：换封面后 cover_ver+1 → URL 变化 → 书架刷新新图。
+        // 不再每次渲染都去 stat 封面文件（几百本书时那是持锁的几百次系统调用，拖慢封面加载）。
+        cover: b.cover.as_ref().map(|_| format!("{RES_BASE}/cover/{id}?v={}", b.cover_ver)),
         progress: b.progress,
         added_at: b.added_at,
         last_read_at: b.last_read_at,
         missing: !b.path.exists(),
         path: b.path.to_string_lossy().into_owned(),
+        rating: b.rating,
     }
 }
 
@@ -154,6 +149,131 @@ fn snapshot(lib: &Library) -> Vec<BookDto> {
 #[tauri::command]
 fn list_books(state: tauri::State<AppState>) -> Vec<BookDto> {
     snapshot(&state.library.lock().unwrap())
+}
+
+/// 当前 app 版本号（取自 Cargo.toml，供"检查更新"和"关于"使用，单一来源）。
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+// ---- 检查更新：后端发请求（避免前端跨域被拦），方便以后扩展多个源 ----
+const GITHUB_REPO: &str = "pigking9527-cmyk/kunpeng-reader";
+
+#[derive(Serialize, Default)]
+struct UpdateInfo {
+    ok: bool,         // 是否成功联网取到信息
+    current: String,  // 当前版本（去掉前导 v）
+    latest: String,   // 最新版本（去掉前导 v）
+    notes: String,    // 最新版更新说明
+    url: String,      // 下载/发布页（来自命中的源）
+    source: String,   // 命中的源（目前 github）
+    has_update: bool, // 是否有更新
+}
+
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(6))
+        .timeout_read(std::time::Duration::from_secs(8))
+        .build()
+}
+
+/// 版本号比较：a 比 b 新返回 true（如 1.6.0 > 1.5.0）。
+fn ver_gt(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Vec<u32> {
+        s.trim()
+            .trim_start_matches(['v', 'V'])
+            .split('.')
+            .map(|x| x.trim().parse().unwrap_or(0))
+            .collect()
+    };
+    let (pa, pb) = (parse(a), parse(b));
+    for i in 0..pa.len().max(pb.len()) {
+        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+fn fetch_json(agent: &ureq::Agent, url: &str) -> Option<serde_json::Value> {
+    agent
+        .get(url)
+        .set("User-Agent", "kunpeng-reader")
+        .set("Accept", "application/json")
+        .call()
+        .ok()?
+        .into_json::<serde_json::Value>()
+        .ok()
+}
+
+fn rel_tag(v: &serde_json::Value) -> String {
+    v.get("tag_name")
+        .and_then(|x| x.as_str())
+        .or_else(|| v.get("name").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+#[tauri::command]
+async fn check_update() -> UpdateInfo {
+    tokio::task::spawn_blocking(check_update_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+fn check_update_blocking() -> UpdateInfo {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let agent = http_agent();
+    let sources = [(
+        "github",
+        format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest"),
+        format!("https://github.com/{GITHUB_REPO}/releases/latest"),
+    )];
+    for (name, api, page) in sources {
+        if let Some(v) = fetch_json(&agent, &api) {
+            let tag = rel_tag(&v);
+            if tag.is_empty() {
+                continue;
+            }
+            let latest = tag.trim_start_matches(['v', 'V']).to_string();
+            let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            return UpdateInfo {
+                ok: true,
+                has_update: ver_gt(&latest, &current),
+                latest,
+                notes,
+                url: page,
+                source: name.to_string(),
+                current,
+            };
+        }
+    }
+    UpdateInfo { current, ..Default::default() }
+}
+
+/// 取某个版本（tag）的更新说明，供"关于"里"本版更新内容"用。多源尝试，失败返回空串。
+#[tauri::command]
+async fn release_notes(tag: String) -> String {
+    tokio::task::spawn_blocking(move || release_notes_blocking(&tag))
+        .await
+        .unwrap_or_default()
+}
+
+fn release_notes_blocking(tag: &str) -> String {
+    let agent = http_agent();
+    let urls = [format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{tag}")];
+    for url in urls {
+        if let Some(v) = fetch_json(&agent, &url) {
+            let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if !notes.is_empty() {
+                return notes;
+            }
+        }
+    }
+    String::new()
 }
 
 /// 首次加载：回填旧书缺失的作者（重读 EPUB 元数据）和导入时间，然后返回书单。
@@ -214,6 +334,111 @@ async fn add_books(
     Ok(snapshot(&lib))
 }
 
+// ---- 自动导入目录 ----
+#[derive(Serialize)]
+struct AutoImportCfg {
+    enabled: bool,
+    dirs: Vec<String>,
+}
+
+/// 递归扫描目录里支持的电子书文件（限深 8 层，防符号链接/超深目录）。
+fn scan_dir_books(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: u32) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if p.is_dir() {
+            scan_dir_books(&p, out, depth + 1);
+        } else if matches!(book::ext_lower(&p).as_str(), "epub" | "pdf" | "txt" | "md" | "markdown") {
+            out.push(p);
+        }
+    }
+}
+
+/// 把自动导入目录里的新书加入书架（已存在的由 lib.add 去重）。返回是否有新增。
+/// 关键：扫描目录、过滤已知书都在锁外做，绝不在持锁状态下遍历整个目录，
+/// 否则封面等请求会因为抢不到书架锁而一直加载不出来（稳态下根本不取写锁）。
+fn run_auto_import(state: &AppState) -> bool {
+    use std::collections::HashSet;
+    // 1) 短暂持锁，取出目录列表 + 已知书的路径集合
+    let (dirs, known): (Vec<String>, HashSet<std::path::PathBuf>) = {
+        let lib = state.library.lock().unwrap();
+        if !lib.auto_import_enabled {
+            return false;
+        }
+        (
+            lib.auto_import_dirs.clone(),
+            lib.books.iter().map(|b| b.path.clone()).collect(),
+        )
+    };
+    if dirs.is_empty() {
+        return false;
+    }
+    // 2) 锁外扫描目录
+    let mut found = Vec::new();
+    for d in &dirs {
+        scan_dir_books(std::path::Path::new(d), &mut found, 0);
+    }
+    // 3) 锁外过滤掉路径已在书架里的（稳态：没有新文件 → 候选为空，下面整段都不取写锁）
+    let candidates: Vec<std::path::PathBuf> = found.into_iter().filter(|p| !known.contains(p)).collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    // 4) 只为真正的新书逐本短暂持锁，给封面等请求留出穿插的间隙
+    let mut changed = false;
+    for p in candidates {
+        let mut lib = state.library.lock().unwrap();
+        if lib.add(p) {
+            changed = true;
+        }
+    }
+    if changed {
+        state.library.lock().unwrap().save();
+    }
+    changed
+}
+
+#[tauri::command]
+fn get_auto_import(state: tauri::State<AppState>) -> AutoImportCfg {
+    let lib = state.library.lock().unwrap();
+    AutoImportCfg {
+        enabled: lib.auto_import_enabled,
+        dirs: lib.auto_import_dirs.clone(),
+    }
+}
+
+/// 设置自动导入开关 / 目录列表。改完立即扫描一次并返回更新后的书单。
+#[tauri::command]
+async fn set_auto_import(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+    dirs: Vec<String>,
+) -> Result<Vec<BookDto>, String> {
+    {
+        let mut lib = state.library.lock().unwrap();
+        lib.auto_import_enabled = enabled;
+        // 去重 + 去空
+        let mut seen = std::collections::HashSet::new();
+        lib.auto_import_dirs = dirs
+            .into_iter()
+            .filter(|d| !d.trim().is_empty() && seen.insert(d.clone()))
+            .collect();
+        lib.auto_import_dir = None; // 清掉已迁移的旧字段
+        lib.save();
+    }
+    run_auto_import(state.inner());
+    Ok(snapshot(&state.library.lock().unwrap()))
+}
+
+/// 启动/回到书架时调用：若开启自动导入则扫描目录，返回最新书单。
+#[tauri::command]
+async fn auto_import_scan(state: tauri::State<'_, AppState>) -> Result<Vec<BookDto>, ()> {
+    run_auto_import(state.inner());
+    Ok(snapshot(&state.library.lock().unwrap()))
+}
+
 /// 阅读窗口上报阅读位置（进度% + 章节 + 章内比例）。
 #[tauri::command]
 async fn set_progress(
@@ -251,6 +476,7 @@ fn set_cover(state: tauri::State<AppState>, id: String, path: String) -> Result<
     let mut lib = state.library.lock().unwrap();
     if let Some(b) = lib.books.iter_mut().find(|b| b.id == id_num) {
         b.cover = Some(cover);
+        b.cover_ver += 1; // 换图后让前端缓存失效，立即显示新封面
     }
     lib.save();
     Ok(snapshot(&lib))
@@ -710,6 +936,16 @@ fn set_description(window: tauri::WebviewWindow, state: tauri::State<AppState>, 
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.set_description(id, description);
+        lib.save();
+    }
+}
+
+/// 给当前阅读的书打分（0~5，0.5 刻度，0=清除评分）。
+#[tauri::command]
+fn set_rating(window: tauri::WebviewWindow, state: tauri::State<AppState>, rating: f32) {
+    if let Some(id) = reader_window_id(&window) {
+        let mut lib = state.library.lock().unwrap();
+        lib.set_rating(id, rating);
         lib.save();
     }
 }
@@ -1417,7 +1653,8 @@ struct BookMeta {
     description: String,
     format: String,
     word_count: u64,
-    size: u64, // 文件字节数
+    size: u64,   // 文件字节数
+    rating: f32, // 用户评分 0~5（0.5 刻度）
 }
 
 /// 书籍信息（含字数统计），供阅读页的信息弹窗用。按需调用（不拖慢打开）。
@@ -1432,7 +1669,7 @@ async fn book_meta(
         .and_then(|s| s.parse().ok())
         .ok_or("非阅读窗口")?;
 
-    let (title, mut author, description, format) = {
+    let (title, mut author, description, format, rating) = {
         let lib = state.library.lock().unwrap();
         let b = lib.get(id).ok_or("找不到这本书")?;
         (
@@ -1440,6 +1677,7 @@ async fn book_meta(
             b.author.clone(),
             b.description.clone(),
             b.format.clone(),
+            b.rating,
         )
     };
 
@@ -1487,6 +1725,7 @@ async fn book_meta(
         format,
         word_count,
         size,
+        rating,
     })
 }
 
@@ -1623,8 +1862,12 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
 
     match kind {
         "cover" => {
-            let lib = state.library.lock().unwrap();
-            let cover = lib.get(id)?.cover.clone()?;
+            // 取到封面路径后立刻放锁，再读盘——否则每个封面请求都会在读 167KB 图片
+            // 时一直占着书架全局锁，几百张封面并发时会全部挤在一把锁上、严重变慢。
+            let cover = {
+                let lib = state.library.lock().unwrap();
+                lib.get(id)?.cover.clone()?
+            };
             let bytes = std::fs::read(cover).ok()?;
             Some((bytes, "image/png".to_string()))
         }
@@ -2165,16 +2408,26 @@ function popFootnote(a,html){
   if(top<8)top=8;
   fnPop.style.top=top+'px';
 }
+// 取注释正文：id 常落在内联回链角标(<a>/<sup>)上，其内容只是"[n]"，正文是它的兄弟
+// → 此时取它所在的块（p/li/aside…）的内容；id 本身就在块上则直接用。
+function noteHtml(el){
+  var block=el;
+  if(el.nodeType===1&&/^(A|SUP|SPAN|B|I|EM|FONT|SMALL)$/.test(el.nodeName)){
+    block=(el.closest&&el.closest('p,li,div,dd,aside,section,td,blockquote'))||el.parentNode||el;
+  }
+  var h=(block.innerHTML||'').trim();
+  return h||el.innerHTML||'';
+}
 function showFootnote(a,ci,frag){
   if(ci===curCh){
     var el=document.querySelector(fnSelector(frag));
-    if(el){popFootnote(a,el.innerHTML);return;}
+    if(el){popFootnote(a,noteHtml(el));return;}
   }
   popFootnote(a,'加载中…');
   fetch(location.origin+'/chapter/'+ID+'/'+ci).then(function(r){return r.json();}).then(function(d){
     var tmp=document.createElement('div');tmp.innerHTML=d.body||'';
     var el=tmp.querySelector(fnSelector(frag));
-    popFootnote(a,el?el.innerHTML:'（未找到注释内容）');
+    popFootnote(a,el?noteHtml(el):'（未找到注释内容）');
   }).catch(function(){popFootnote(a,'（注释加载失败）');});
 }
 var sMarks=[],sIdx=-1;
@@ -4143,9 +4396,19 @@ fn main() {
                 let response = match handle_request(&state, &path) {
                     Some((bytes, mime)) => {
                         log(&format!("  -> 200 {} bytes, {}", bytes.len(), mime));
+                        // 封面/EPUB 内嵌资源是稳定内容（封面换图时 URL 带 ?v= mtime 会自动失效），
+                        // 让 WebView2 缓存它们：再次渲染书架时直接命中缓存、不再走异步协议重取，
+                        // 避免封面“先黑一下再出图”。
+                        let cacheable = path.starts_with("/cover/") || path.starts_with("/res/");
+                        let cache_ctl = if cacheable {
+                            "public, max-age=604800, immutable"
+                        } else {
+                            "no-cache"
+                        };
                         tauri::http::Response::builder()
                             .status(200)
                             .header(tauri::http::header::CONTENT_TYPE, mime)
+                            .header(tauri::http::header::CACHE_CONTROL, cache_ctl)
                             .header("Access-Control-Allow-Origin", "*")
                             .body(bytes)
                             .unwrap()
@@ -4163,11 +4426,17 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             list_books,
+            app_version,
+            check_update,
+            release_notes,
             shelf_books,
             add_books,
             remove_book,
             remove_books,
             set_cover,
+            get_auto_import,
+            set_auto_import,
+            auto_import_scan,
             open_book,
             book_info,
             book_meta,
@@ -4187,6 +4456,7 @@ fn main() {
             set_pdf_state,
             search_book,
             set_description,
+            set_rating,
             web_search,
             open_book_at,
             take_pending_jump,

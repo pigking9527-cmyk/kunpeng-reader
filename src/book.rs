@@ -78,6 +78,10 @@ pub struct Book {
     pub words_read: u64, // 累计"真正读过"的字数（停留若干秒+逐页翻过的页才计入）
     #[serde(default)]
     pub finished_at: u64, // 首次读完（进度≥99%）的 unix 秒，0=未读完
+    #[serde(default)]
+    pub cover_ver: u64, // 封面版本号：换封面时 +1，用于刷新前端缓存（避免每次渲染都去 stat 封面文件）
+    #[serde(default)]
+    pub rating: f32, // 用户评分 0~5，0.5 为刻度（0=未评分）
 }
 
 /// 当前 unix 时间戳（秒）。
@@ -137,6 +141,8 @@ impl Book {
             reading_seconds: 0,
             words_read: 0,
             finished_at: 0,
+            cover_ver: 0,
+            rating: 0.0,
         }
     }
 }
@@ -216,6 +222,12 @@ pub struct Library {
     pub reader_geom_pdf: Option<WinGeom>, // 上次 PDF 阅读窗口的大小/位置（与 EPUB 分开记）
     #[serde(default)]
     pub main_geom: Option<WinGeom>, // 上次主窗口（书架）的大小/位置
+    #[serde(default)]
+    pub auto_import_dir: Option<String>, // 旧：单个自动导入目录（已迁移到 auto_import_dirs）
+    #[serde(default)]
+    pub auto_import_dirs: Vec<String>, // 自动导入目录列表（启动时扫描其中的电子书加入书架）
+    #[serde(default)]
+    pub auto_import_enabled: bool, // 是否开启自动导入
 }
 
 impl Library {
@@ -267,6 +279,12 @@ impl Library {
     pub fn set_description(&mut self, id: u64, desc: String) {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
             b.description = desc;
+        }
+    }
+
+    pub fn set_rating(&mut self, id: u64, rating: f32) {
+        if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
+            b.rating = rating.clamp(0.0, 5.0);
         }
     }
 
@@ -360,6 +378,14 @@ impl Library {
         for b in &mut lib.books {
             if b.id == 0 {
                 b.id = id_for_path(&b.path);
+            }
+        }
+        // 迁移：旧的单目录字段 → 目录列表
+        if lib.auto_import_dirs.is_empty() {
+            if let Some(d) = lib.auto_import_dir.take() {
+                if !d.trim().is_empty() {
+                    lib.auto_import_dirs.push(d);
+                }
             }
         }
         lib
@@ -482,6 +508,8 @@ fn prepare_epub(path: &Path) -> Option<Book> {
         reading_seconds: 0,
         words_read: 0,
         finished_at: 0,
+        cover_ver: 0,
+        rating: 0.0,
     })
 }
 

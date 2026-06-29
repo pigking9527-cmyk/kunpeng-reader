@@ -205,6 +205,53 @@ function fmtSize(b) {
   if (b >= 1024) return Math.round(b / 1024) + "K";
   return b + "B";
 }
+// ---- 评分（五颗星，支持半星 0.5 刻度；点左半=半星、右半=整星，再点同一处清除）----
+// 通用半星组件：在 container 里建 5 颗叠层星，鼠标悬停预览、点击回调 onPick(value)。
+function makeStars(container, onPick) {
+  for (let i = 0; i < 5; i++) {
+    const st = document.createElement("span");
+    st.className = "star";
+    const bg = document.createElement("span");
+    bg.className = "s-bg";
+    bg.textContent = "★";
+    const fg = document.createElement("span");
+    fg.className = "s-fg";
+    fg.textContent = "★";
+    st.append(bg, fg);
+    container.appendChild(st);
+  }
+  const stars = [...container.querySelectorAll(".star")];
+  function paint(v) {
+    stars.forEach((st, i) => {
+      const f = Math.max(0, Math.min(1, v - i)); // 该颗的填充比例：0 / .5 / 1
+      st.querySelector(".s-fg").style.width = f * 100 + "%";
+    });
+  }
+  function valAt(e) {
+    for (let i = 0; i < stars.length; i++) {
+      const r = stars[i].getBoundingClientRect();
+      if (e.clientX <= r.right) return i + (e.clientX < r.left + r.width / 2 ? 0.5 : 1);
+    }
+    return 5;
+  }
+  container.addEventListener("mousemove", (e) => paint(valAt(e)));
+  container.addEventListener("mouseleave", () => paint(container._val || 0));
+  container.addEventListener("click", (e) => {
+    let v = valAt(e);
+    if (v === container._val) v = 0; // 点中当前值 → 清除
+    container._val = v;
+    paint(v);
+    onPick(v);
+  });
+  container.setVal = (v) => {
+    container._val = v || 0;
+    paint(container._val);
+  };
+  paint(0);
+}
+const infoStars = document.getElementById("info-stars");
+makeStars(infoStars, (v) => invoke("set_rating", { rating: v }).catch(() => {}));
+
 document.getElementById("info-btn").addEventListener("click", async () => {
   document.getElementById("info-words").textContent = "统计中…";
   infoModal.classList.add("show");
@@ -216,6 +263,7 @@ document.getElementById("info-btn").addEventListener("click", async () => {
     document.getElementById("info-words").textContent = fmtWords(m.word_count);
     document.getElementById("info-size").textContent = fmtSize(m.size);
     document.getElementById("info-desc").textContent = m.description || "";
+    infoStars.setVal(m.rating || 0);
   } catch (e) {
     document.getElementById("info-words").textContent = "读取失败：" + e;
   }
