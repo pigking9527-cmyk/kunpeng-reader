@@ -825,13 +825,8 @@ function showUpdateBanner(ver, url) {
   document.getElementById("ub-ver").textContent = "v" + String(ver).replace(/^v/i, "");
   updateBar.classList.add("show");
 }
-// force=true：手动“检查更新”，无论结果都给提示、并忽略“已忽略版本”
+// 每次启动都查一次（不再节流）；force=true 为手动检查，结果都给提示、并忽略“已忽略版本”
 async function checkUpdate(force) {
-  if (!force) {
-    const last = +(localStorage.getItem("lastUpdateCheck") || 0);
-    if (Date.now() - last < 6 * 3600 * 1000) return; // 6 小时内查过就不再自动查
-    localStorage.setItem("lastUpdateCheck", String(Date.now()));
-  }
   let info;
   try {
     info = await invoke("check_update");
@@ -991,7 +986,7 @@ window.addEventListener("focus", () => {
   }).catch(() => {});
   // 空闲时后台统计缺失的字数（不影响 UI）
   setTimeout(() => invoke("compute_word_counts").catch(() => {}), 1500);
-  // 启动后台检查更新（不阻塞启动，6 小时节流）
+  // 启动后台检查更新（不阻塞启动，每次启动查一次）
   setTimeout(() => checkUpdate(false), 3000);
   // “关于”里的版本号取自后端，保持单一来源
   invoke("app_version").then((v) => {
