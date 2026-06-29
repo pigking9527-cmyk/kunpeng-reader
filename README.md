@@ -1,22 +1,41 @@
 # 鲲鹏阅读器（Kunpeng Reader）
 
-一个面向 Windows 的高性能本地电子书阅读器。Rust + Tauri 2 + 系统 WebView2，书架与阅读页相互独立、EPUB 原生渲染、按章虚拟化加载，大书秒开。
+一个面向 Windows 的高性能本地电子书阅读器。**Rust + Tauri 2 + 系统 WebView2**，书架与阅读页相互独立、EPUB 原生渲染、按章虚拟化加载，大书秒开。
+
+> 最新版本：**v1.5.0** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（免安装绿色版，双击即用，Win10/11 自带 WebView2）。
 
 ## 特性
-- **多格式**：EPUB / PDF / TXT / Markdown，批量导入、封面墙、拖拽导入
-- **独立窗口**：书架窗口与每个阅读窗口彼此独立，记忆大小/位置
-- **流畅阅读**：CSS 多栏按章虚拟化分页；目录虚拟章节、书内搜索、书签、主题、翻页留余量
-- **书架全文检索**：缓存逐章纯文本索引 + 多线程 + 字节级 `memmem` 匹配
-- **语义检索**：`bge-small-zh-v1.5`（fastembed/ONNX，离线）向量嵌入；逐本向量 + 全库 HNSW 近邻索引（instant-distance），按"意思相近"检索
-- **划词 web 搜索**、阅读统计、阅读时长等
 
-详见 [开发文档.md](开发文档.md)。
+**阅读**
+- **多格式**：EPUB / PDF / TXT / Markdown，批量导入、封面墙、拖拽导入、更换封面
+- **EPUB**：CSS 多栏按章虚拟化分页、目录/虚拟章节、书签、书内搜索、脚注就地弹窗、主题（浅/深/护眼）、字体/字号/行距/边距随心调
+- **PDF（PDF.js 自渲染）**：连续滚动、文字层选择、内置目录、缩放（适配窗口 + 细粒度）、**双页模式**、PDF 内搜索、PDF 高亮/批注、记住缩放/双页
+- **TXT**：网文按「第X章」自动切章建目录，百万字大文件虚拟化加载、秒开
+- **高亮 / 批注**：选中即高亮或批注，大批注页统一管理（含上下文、可编辑跳转）
+- **沉浸模式**：隐藏工具栏、点屏幕中间唤出，切换零重排不跳页
+- **朗读（TTS）**：逐词高亮 + 自动翻页；系统语音（离线）或在线·微软神经（edge-tts，免费 Azure 级中文音色）
+
+**检索**
+- **书架全文检索**：逐章纯文本缓存 + 多线程 + 字节级 `memmem`，全库秒搜
+- **语义检索**：`bge-small-zh-v1.5`（fastembed / ONNX，离线）向量嵌入；分片 HNSW 近邻索引（instant-distance）+ 按内存自适应，按「意思相近」检索全库
+
+**统计与其它**
+- **详细阅读统计**：日 / 月 / 年 / 总四视图，时长、字数、读过/读完、高亮/批注，SVG 图表
+- 划词 web 搜索、独立窗口（EPUB 与 PDF 各自记忆几何）、关于页
+
+更多细节见 [开发文档.md](开发文档.md)；版本变更见 [开发记录.md](开发记录.md)。
 
 ## 构建
+
 ```powershell
-cd ebook-reader-tauri   # 或仓库根目录
+cd ebook-reader-tauri
 cargo build --release
-# 产物：target/release/ebook-reader-tauri.exe
+# 产物：target/release/ebook-reader-tauri.exe（自包含，可直接运行）
 ```
 
-首次使用语义检索会自动下载约 120MB 的中文语义模型（之后离线运行）。
+- 首次使用**语义检索**会自动下载约 120MB 的中文语义模型（之后离线运行）。
+- **在线朗读**（edge-tts）需联网；离线可在「设置 → 朗读」切到系统语音。
+
+## 技术栈
+
+Rust · Tauri 2 · WebView2 · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)

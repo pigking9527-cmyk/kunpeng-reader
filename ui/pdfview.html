@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #525659; }
+      body { overflow-y: auto; overflow-x: auto; }
+      *::-webkit-scrollbar { width: 10px; height: 10px; }
+      *::-webkit-scrollbar-thumb { background: rgba(0,0,0,.35); border-radius: 5px; }
+      #pages { padding: 10px 0 50px; }
+      .pg { position: relative; margin: 12px auto; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.45); }
+      /* 双页模式：两页并排，整行居中 */
+      body.dual #pages { display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start; gap: 12px; }
+      body.dual .pg { margin: 0; }
+      .pg canvas { display: block; }
+      /* 文字层（透明，覆盖在画布上以支持选择/复制） */
+      .textLayer { position: absolute; left: 0; top: 0; right: 0; bottom: 0; overflow: hidden;
+        line-height: 1; text-align: initial; user-select: text; }
+      .textLayer span, .textLayer br { color: transparent; position: absolute; white-space: pre;
+        cursor: text; transform-origin: 0 0; }
+      .textLayer ::selection { background: rgba(0,120,255,.35); }
+      .loading { color: #ddd; text-align: center; padding: 40px; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+      /* 主题 */
+      body.theme-dark { background: #1c1c1e; }
+      body.theme-dark .pg canvas { filter: invert(0.92) hue-rotate(180deg); }
+      body.theme-sepia { background: #d9cba8; }
+      body.theme-sepia .pg canvas { filter: sepia(0.4) brightness(0.97); }
+      /* 选区菜单 */
+      #sel-menu { position: fixed; display: none; z-index: 99999; }
+      #sel-menu button { font: 12px/1 system-ui, "Microsoft YaHei", sans-serif; color: #4a463e;
+        background: #faf8f2; border: 1px solid #e4ddcd; border-radius: 6px; padding: 5px 9px; cursor: pointer;
+        box-shadow: 0 2px 8px rgba(0,0,0,.14); white-space: nowrap; }
+      #sel-menu button:hover { background: #f1ebdc; }
+      #sel-menu button + button { margin-left: 4px; }
+      /* 高亮叠层（按页+归一化矩形绘制，与缩放无关） */
+      .hl-box { position: absolute; background: rgba(255,217,90,.42); border-radius: 2px; cursor: pointer; mix-blend-mode: multiply; }
+      .hl-box.has-note { background: rgba(90,150,255,.34); }
+      body.theme-dark .hl-box { mix-blend-mode: screen; }
+      /* 书内搜索命中（标在文字层 span 上） */
+      .textLayer span.search-hit { background: rgba(255,200,0,.5); border-radius: 2px; }
+      .textLayer span.search-hit.cur { background: rgba(255,130,0,.7); }
+      /* 已高亮的菜单 */
+      #hl-menu { position: fixed; display: none; z-index: 99999; }
+      #hl-menu button { font: 12px/1 system-ui, "Microsoft YaHei", sans-serif; color: #4a463e;
+        background: #faf8f2; border: 1px solid #e4ddcd; border-radius: 6px; padding: 5px 9px; cursor: pointer;
+        box-shadow: 0 2px 8px rgba(0,0,0,.14); white-space: nowrap; }
+      #hl-menu button:hover { background: #f1ebdc; }
+      #hl-menu button + button { margin-left: 4px; }
+    </style>
+  </head>
+  <body>
+    <div id="pages"><div class="loading">PDF 加载中…</div></div>
+    <script type="module" src="pdfview.js"></script>
+  </body>
+</html>

@@ -3,12 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>电子书阅读器 - 书架</title>
+    <title>鲲鹏阅读器</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header class="toolbar">
       <div id="del-group" class="del-group">
+        <button id="cover-btn" class="btn-plain">🖼 更换封面</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
         <button id="del-cancel" class="btn-plain">取消</button>
       </div>
@@ -34,14 +35,24 @@
           </svg>
         </button>
         <div id="filter-panel" class="filter-panel">
-          <div class="fp-col">
-            <div class="fp-title">排序</div>
-            <label><input type="radio" name="sort" value="title" /> 书名</label>
-            <label><input type="radio" name="sort" value="author" /> 作者</label>
-            <label><input type="radio" name="sort" value="added" /> 导入时间</label>
-            <label><input type="radio" name="sort" value="read" /> 最近阅读</label>
+          <button id="fp-gear" class="fp-gear" title="更多设置">⚙</button>
+          <div class="fp-row">
+            <div class="fp-col">
+              <div class="fp-title">排序</div>
+              <label><input type="radio" name="sort" value="title" /> 书名</label>
+              <label><input type="radio" name="sort" value="author" /> 作者</label>
+              <label><input type="radio" name="sort" value="added" /> 导入时间</label>
+              <label><input type="radio" name="sort" value="dir" /> 存储目录</label>
+              <label><input type="radio" name="sort" value="read" /> 最近阅读</label>
+            </div>
+            <div class="fp-col">
+              <div class="fp-title">阅读过滤</div>
+              <label><input type="checkbox" class="rfilter" value="unread" /> 未读</label>
+              <label><input type="checkbox" class="rfilter" value="reading" /> 正在阅读</label>
+              <label><input type="checkbox" class="rfilter" value="done" /> 已读</label>
+            </div>
           </div>
-          <div class="fp-sep"></div>
+          <div class="fp-sep-h"></div>
           <div class="fp-col">
             <div class="fp-title">布局</div>
             <div class="layout-row">
@@ -71,17 +82,39 @@
           <div class="menu-item" id="mi-import">➕ 导入书籍</div>
           <div class="menu-item" id="mi-stats">📊 阅读统计</div>
           <div class="menu-item" id="mi-selectall">☑ 全选（批量删除）</div>
+          <div class="menu-item" id="mi-about">ℹ️ 关于</div>
         </div>
       </div>
     </header>
     <div id="stats-modal" class="modal">
-      <div class="modal-card">
+      <div class="modal-card stats-card">
         <div class="modal-head"><span>📊 阅读统计</span><button id="stats-close" class="btn-plain">✕</button></div>
-        <div class="info-row"><span class="info-k">阅读时长</span><span id="st-time" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">已读字数</span><span id="st-words" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">在读</span><span id="st-started" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">读完</span><span id="st-finished" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">藏书</span><span id="st-total" class="info-v"></span></div>
+        <div class="stats-tabs">
+          <button class="stats-tab active" data-scope="day">日</button>
+          <button class="stats-tab" data-scope="month">月</button>
+          <button class="stats-tab" data-scope="year">年</button>
+          <button class="stats-tab" data-scope="total">总</button>
+        </div>
+        <div class="stats-nav">
+          <button id="stats-prev" class="btn-plain">◀</button>
+          <span id="stats-period">—</span>
+          <button id="stats-next" class="btn-plain">▶</button>
+        </div>
+        <div id="stats-body" class="stats-body"></div>
+      </div>
+    </div>
+    <div id="fp-settings-modal" class="modal">
+      <div class="modal-card">
+        <div class="modal-head"><span>⚙ 设置</span><button id="fp-settings-close" class="btn-plain">✕</button></div>
+        <div style="padding: 28px 8px; color: #aaa; text-align: center;">（设置项待添加）</div>
+      </div>
+    </div>
+    <div id="about-modal" class="modal">
+      <div class="modal-card">
+        <div class="modal-head"><span>ℹ️ 关于</span><button id="about-close" class="btn-plain">✕</button></div>
+        <div class="info-row"><span class="info-k">软件</span><span class="info-v">鲲鹏阅读器 · Kunpeng Reader</span></div>
+        <div class="info-row"><span class="info-k">版本</span><span class="info-v">v1.5.0</span></div>
+        <div class="info-row"><span class="info-k">GitHub</span><span class="info-v"><a id="about-github" href="https://github.com/pigking9527-cmyk/kunpeng-reader" style="color:#2b6cff;text-decoration:none;cursor:pointer;">github.com/pigking9527-cmyk/kunpeng-reader</a></span></div>
       </div>
     </div>
     <div id="drop-hint" class="drop-hint">松开即可导入书籍</div>

@@ -3,11 +3,11 @@
 
 mod book;
 
-use book::{id_for_path, Library, WinGeom};
+use book::{Library, WinGeom};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -36,13 +36,41 @@ struct AppState {
     backfilled: std::sync::atomic::AtomicBool, // 是否已回填旧书的作者/导入时间
     pending_jump: Mutex<HashMap<u64, (u32, String)>>, // 书架检索点击 → 阅读窗口待跳转位置
     text_cache: Mutex<HashMap<u64, (u64, Arc<Vec<String>>)>>, // 检索用：内存缓存的逐章纯文本 (mtime, 章节)
+    txt_chapters: Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>, // txt 阅读用：切分好的章节 (标题, 正文)
     cache_bytes: AtomicUsize,                                 // 已缓存的总字节数（限额用）
     embedder: Mutex<Option<Arc<fastembed::TextEmbedding>>>,   // 语义模型（懒加载，首次会下载）
     sem_cache: Mutex<HashMap<u64, Arc<SemData>>>,             // 语义检索：内存缓存的向量
     sem_cache_bytes: AtomicUsize,
     sem_progress: Mutex<SemProgress>, // 建立语义索引的进度
-    global_hnsw: Mutex<Option<Arc<(GlobalHnsw, Vec<GlobalEntry>, Vec<u64>)>>>, // (图, 映射, 参与的书id)
+    global_index: Mutex<Option<Arc<LoadedShards>>>, // 全库近邻索引：已载入内存的分片集合
+    index_resume_at: AtomicU64, // 语义索引“让路”截止时刻(ms,0=不暂停)：打开阅读窗口时临时暂停建索引，让窗口秒开
+    stats: Mutex<StatsStore>, // 详细阅读统计的小时桶
 }
+
+/// 当前时刻（毫秒）。用于语义索引的“让路”节流。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 把当前线程降到“后台优先级”，让前台（阅读/书架窗口）优先拿到 CPU。仅 Windows，尽力而为。
+#[cfg(windows)]
+fn set_thread_background(on: bool) {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThread() -> isize;
+        fn SetThreadPriority(h: isize, p: i32) -> i32;
+    }
+    // THREAD_MODE_BACKGROUND_BEGIN=0x00010000 / END=0x00020000：同时降低 CPU 与 I/O 优先级
+    let p: i32 = if on { 0x0001_0000 } else { 0x0002_0000 };
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), p);
+    }
+}
+#[cfg(not(windows))]
+fn set_thread_background(_on: bool) {}
 
 /// 内存缓存上限：超过后不再缓存新书（避免超大书库吃光内存）。
 const TEXT_CACHE_BUDGET: usize = 700 * 1024 * 1024;
@@ -63,6 +91,8 @@ struct BookDto {
     progress: f32,
     added_at: u64,
     last_read_at: u64,
+    missing: bool, // 源文件是否已找不到
+    path: String,  // 文件完整路径（用于"按存储目录"排序）
 }
 
 #[derive(Serialize)]
@@ -84,20 +114,32 @@ struct BookInfo {
     resume_chapter: u32, // 续读：章节
     resume_frac: f32,    // 续读：章内比例
     bookmarks: Vec<book::Bookmark>,
+    highlights: Vec<book::Highlight>,
 }
 
 fn to_dto(b: &book::Book) -> BookDto {
-    let id = id_for_path(&b.path);
+    let id = b.id;
     BookDto {
         id: id.to_string(),
         title: b.title.clone(),
         author: b.author.clone(),
         description: b.description.clone(),
         format: b.format.clone(),
-        cover: b.cover.as_ref().map(|_| format!("{RES_BASE}/cover/{id}")),
+        cover: b.cover.as_ref().map(|p| {
+            // 带封面文件 mtime 作缓存破坏参数：换封面后 URL 变化 → 书架立即刷新新图（?后缀被协议层忽略）
+            let v = std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{RES_BASE}/cover/{id}?v={v}")
+        }),
         progress: b.progress,
         added_at: b.added_at,
         last_read_at: b.last_read_at,
+        missing: !b.path.exists(),
+        path: b.path.to_string_lossy().into_owned(),
     }
 }
 
@@ -200,6 +242,20 @@ fn remove_book(state: tauri::State<AppState>, id: String) -> Vec<BookDto> {
     snapshot(&state.library.lock().unwrap())
 }
 
+/// 用用户挑选的图片更换某本书的封面。
+#[tauri::command]
+fn set_cover(state: tauri::State<AppState>, id: String, path: String) -> Result<Vec<BookDto>, String> {
+    let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    let cover = book::make_cover_from_image(std::path::Path::new(&path), id_num)
+        .ok_or_else(|| "无法处理这张图片（支持 png/jpg/webp 等）".to_string())?;
+    let mut lib = state.library.lock().unwrap();
+    if let Some(b) = lib.books.iter_mut().find(|b| b.id == id_num) {
+        b.cover = Some(cover);
+    }
+    lib.save();
+    Ok(snapshot(&lib))
+}
+
 /// 批量删除选中的书。
 #[tauri::command]
 fn remove_books(state: tauri::State<AppState>, ids: Vec<String>) -> Vec<BookDto> {
@@ -226,6 +282,15 @@ async fn open_book(
 ) -> Result<(), String> {
     log(&format!("open_book id={id}"));
     let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    // 源文件丢失则不开空窗，直接给出可读的提示
+    {
+        let lib = state.library.lock().unwrap();
+        if let Some(b) = lib.get(id_num) {
+            if !b.path.exists() {
+                return Err("源文件已丢失，请在书架上对这本书「重新定位」。".to_string());
+            }
+        }
+    }
     ensure_reader_window(&app, state.inner(), id_num).map(|_| ())
 }
 
@@ -279,6 +344,11 @@ fn ensure_reader_window(
         return Ok(w);
     }
 
+    // 新开窗口期间，暂停语义索引几秒，把 CPU 让给 WebView2 冷启动 → 窗口秒开
+    state
+        .index_resume_at
+        .store(now_ms() + 6000, Ordering::Relaxed);
+
     // 只读一下书名（快），先把窗口建出来，优先让页面打开
     let title = {
         let lib = state.library.lock().unwrap();
@@ -287,8 +357,14 @@ fn ensure_reader_window(
             .unwrap_or_else(|| "阅读".to_string())
     };
 
-    // 读取上次阅读窗口的大小/位置，本次按它恢复
-    let geom = { state.library.lock().unwrap().reader_geom.clone() };
+    // 读取上次阅读窗口的大小/位置，本次按它恢复（EPUB 与 PDF 分开记，各自适应）
+    let is_pdf = {
+        state.library.lock().unwrap().get(id_num).map(|b| b.format == "pdf").unwrap_or(false)
+    };
+    let geom = {
+        let lib = state.library.lock().unwrap();
+        if is_pdf { lib.reader_geom_pdf.clone() } else { lib.reader_geom.clone() }
+    };
     // 用主窗口的显示器信息判断保存的位置是否还在屏幕内（防止阅读窗口跑到屏幕外）
     let on_screen = geom
         .as_ref()
@@ -414,8 +490,16 @@ fn centered_position(win: &tauri::WebviewWindow, w: f64, h: f64) -> Option<(f64,
 }
 
 /// 把当前阅读窗口的大小/位置写入内存中的书库（不立即落盘，关闭时再统一保存）。
+/// EPUB 与 PDF 各存各的，互不影响。
 fn update_reader_geom(lib: &mut Library, win: &tauri::WebviewWindow) {
-    lib.reader_geom = Some(capture_geom(lib.reader_geom.clone(), win));
+    let is_pdf = reader_window_id(win)
+        .and_then(|id| lib.get(id).map(|b| b.format == "pdf"))
+        .unwrap_or(false);
+    if is_pdf {
+        lib.reader_geom_pdf = Some(capture_geom(lib.reader_geom_pdf.clone(), win));
+    } else {
+        lib.reader_geom = Some(capture_geom(lib.reader_geom.clone(), win));
+    }
 }
 
 /// 判断保存的几何位置是否还落在某个显示器内（避免窗口跑到屏幕外、只剩任务栏图标）。
@@ -488,7 +572,7 @@ async fn book_info(
         .to_string();
     let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
 
-    let (title, format, progress, resume_chapter, resume_frac, bookmarks) = {
+    let (title, format, progress, resume_chapter, resume_frac, bookmarks, highlights, path) = {
         let lib = state.library.lock().unwrap();
         let b = lib.get(id_num).ok_or("找不到这本书")?;
         (
@@ -498,26 +582,51 @@ async fn book_info(
             b.resume_chapter,
             b.resume_frac,
             b.bookmarks.clone(),
+            b.highlights.clone(),
+            b.path.clone(),
         )
     };
 
+    if !path.exists() {
+        return Err("源文件已丢失。请回到书架，对这本书「重新定位」到文件的新位置。".to_string());
+    }
+
     if format != "epub" {
-        // pdf 用 WebView2 自带阅读器；txt/md 用生成的文本页
+        // pdf 用 WebView2 自带阅读器；txt/md 走与 EPUB 相同的合并阅读页（整本当作单章），
+        // 这样才有翻页/设置/进度/书签，且会上报 {ready} 隐藏加载圈
         let url = if format == "pdf" {
             format!("{RES_BASE}/pdf/{id_num}")
         } else {
-            format!("{RES_BASE}/txt/{id_num}")
+            format!("{RES_BASE}/book/{id_num}")
+        };
+        // txt/md：用切分好的章节做目录与章数（网文按"第X章"切，否则按节切）
+        let (chapter_count, toc) = if format == "pdf" {
+            (1u32, Vec::new())
+        } else {
+            let chs = get_txt_chapters(state.inner(), id_num).unwrap_or_else(|| Arc::new(Vec::new()));
+            let toc: Vec<TocDto> = chs
+                .iter()
+                .enumerate()
+                .map(|(i, (label, _))| TocDto {
+                    label: label.clone(),
+                    chapter: i as u32,
+                    frag: String::new(),
+                    level: 0,
+                })
+                .collect();
+            (chs.len().max(1) as u32, toc)
         };
         return Ok(BookInfo {
             title,
             format,
             url,
-            chapter_count: 1,
-            toc: Vec::new(),
+            chapter_count,
+            toc,
             progress,
             resume_chapter,
             resume_frac,
             bookmarks,
+            highlights,
         });
     }
 
@@ -556,6 +665,7 @@ async fn book_info(
         resume_chapter,
         resume_frac,
         bookmarks,
+        highlights,
     })
 }
 
@@ -602,6 +712,109 @@ fn set_description(window: tauri::WebviewWindow, state: tauri::State<AppState>, 
         lib.set_description(id, description);
         lib.save();
     }
+}
+
+/// 新增一处高亮/批注，返回该书全部高亮。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn add_highlight(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    chapter: u32,
+    start: u32,
+    end: u32,
+    text: String,
+    context: String,
+    rects: String,
+    color: String,
+    note: String,
+) -> Vec<book::Highlight> {
+    if let Some(id) = reader_window_id(&window) {
+        let mut lib = state.library.lock().unwrap();
+        lib.add_highlight(
+            id,
+            book::Highlight {
+                chapter,
+                start,
+                end,
+                text,
+                context,
+                rects,
+                color,
+                note,
+                created_at: book::now_secs(),
+            },
+        );
+        lib.save();
+        return lib.highlights(id);
+    }
+    Vec::new()
+}
+
+#[tauri::command]
+fn remove_highlight(window: tauri::WebviewWindow, state: tauri::State<AppState>, index: usize) -> Vec<book::Highlight> {
+    if let Some(id) = reader_window_id(&window) {
+        let mut lib = state.library.lock().unwrap();
+        lib.remove_highlight(id, index);
+        lib.save();
+        return lib.highlights(id);
+    }
+    Vec::new()
+}
+
+#[tauri::command]
+fn set_highlight_note(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    index: usize,
+    note: String,
+) -> Vec<book::Highlight> {
+    if let Some(id) = reader_window_id(&window) {
+        let mut lib = state.library.lock().unwrap();
+        lib.set_highlight_note(id, index, note);
+        lib.save();
+        return lib.highlights(id);
+    }
+    Vec::new()
+}
+
+/// 文件丢失后把某本书重新指向新路径，返回更新后的书单。
+#[tauri::command]
+fn relocate_book(state: tauri::State<AppState>, id: String, path: String) -> Vec<BookDto> {
+    if let Ok(id_num) = id.parse::<u64>() {
+        let mut lib = state.library.lock().unwrap();
+        if lib.relocate(id_num, std::path::PathBuf::from(path)) {
+            lib.save();
+        }
+    }
+    snapshot(&state.library.lock().unwrap())
+}
+
+/// 后台为旧书补算内容指纹（让"移动后重新导入即识别为同一本书"对存量书也生效）。
+fn spawn_fingerprint_fill(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let pending: Vec<(u64, std::path::PathBuf)> = {
+            let lib = state.library.lock().unwrap();
+            lib.books
+                .iter()
+                .filter(|b| b.fingerprint == 0)
+                .map(|b| (b.id, b.path.clone()))
+                .collect()
+        };
+        let mut changed = false;
+        for (id, path) in pending {
+            let fp = book::compute_fingerprint(&path);
+            if fp != 0 {
+                state.library.lock().unwrap().set_fingerprint(id, fp);
+                changed = true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if changed {
+            state.library.lock().unwrap().save();
+        }
+    });
 }
 
 #[derive(Serialize)]
@@ -689,7 +902,7 @@ fn reading_stats(state: tauri::State<AppState>) -> Stats {
     for b in &lib.books {
         s.total_books += 1;
         s.total_seconds += b.reading_seconds;
-        s.total_words += (b.progress as f64 / 100.0 * b.word_count as f64) as u64;
+        s.total_words += b.words_read; // 真正读过的字数（逐页+停留计入），不再用"进度×字数"高估
         if b.progress > 0.5 {
             s.started += 1;
         }
@@ -700,6 +913,198 @@ fn reading_stats(state: tauri::State<AppState>) -> Stats {
     s
 }
 
+// ===========================================================================
+//  详细阅读统计：按 (本地日 yyyymmdd, 小时 0–23, 书 id) 累成"小时桶"。
+//  日/月/年/总 全部由桶按日期区间聚合得到；高亮/批注用其 created_at，读完用书的 finished_at。
+// ===========================================================================
+#[derive(Serialize, Deserialize, Clone)]
+struct ReadBucket {
+    day: u32,
+    hour: u8,
+    book: u64,
+    secs: u32,
+    words: u32,
+}
+#[derive(Default)]
+struct StatsStore {
+    map: HashMap<(u32, u8, u64), (u32, u32)>, // (day,hour,book) -> (secs,words)
+    dirty: bool,
+}
+fn stats_path() -> Option<std::path::PathBuf> {
+    let mut d = dirs::config_dir()?; // 和 library.json 同处（%APPDATA%），属持久用户数据
+    d.push("ebook-reader");
+    Some(d.join("stats.json"))
+}
+fn local_day_hour() -> (u32, u8) {
+    use chrono::{Datelike, Local, Timelike};
+    let n = Local::now();
+    (n.year() as u32 * 10000 + n.month() * 100 + n.day(), n.hour() as u8)
+}
+fn unix_to_local_day(secs: u64) -> u32 {
+    use chrono::{Datelike, Local, TimeZone};
+    match Local.timestamp_opt(secs as i64, 0).single() {
+        Some(t) => t.year() as u32 * 10000 + t.month() * 100 + t.day(),
+        None => 0,
+    }
+}
+impl StatsStore {
+    fn load() -> Self {
+        let mut s = StatsStore::default();
+        if let Some(p) = stats_path() {
+            if let Ok(txt) = std::fs::read_to_string(&p) {
+                if let Ok(v) = serde_json::from_str::<Vec<ReadBucket>>(&txt) {
+                    for b in v {
+                        s.map.insert((b.day, b.hour, b.book), (b.secs, b.words));
+                    }
+                }
+            }
+        }
+        s
+    }
+    fn add(&mut self, book: u64, secs: u32, words: u32) {
+        let (day, hour) = local_day_hour();
+        let e = self.map.entry((day, hour, book)).or_insert((0, 0));
+        e.0 = e.0.saturating_add(secs);
+        e.1 = e.1.saturating_add(words);
+        self.dirty = true;
+    }
+    fn save(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        if let Some(p) = stats_path() {
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let v: Vec<ReadBucket> = self
+                .map
+                .iter()
+                .map(|(&(day, hour, book), &(secs, words))| ReadBucket { day, hour, book, secs, words })
+                .collect();
+            if let Ok(j) = serde_json::to_string(&v) {
+                let _ = std::fs::write(p, j);
+            }
+        }
+        self.dirty = false;
+    }
+}
+
+#[derive(Serialize)]
+struct BookStat {
+    id: String,
+    title: String,
+    seconds: u64,
+    words: u64,
+    highlights: u32,
+    notes: u32,
+    finished: bool,
+}
+#[derive(Serialize)]
+struct DayStat {
+    day: u32,
+    seconds: u64,
+}
+#[derive(Serialize)]
+struct StatsRange {
+    total_seconds: u64,
+    total_words: u64,
+    hours: Vec<u64>,      // 24 个，时段分布
+    days: Vec<DayStat>,   // 该区间每个有阅读的天
+    books: Vec<BookStat>, // 该区间读过的书（按时长降序）
+    finished: Vec<BookStat>, // 该区间读完的书
+    book_count: u32,
+    finished_count: u32,
+    total_highlights: u32,
+    total_notes: u32,
+}
+
+/// 按本地日期区间 [from,to]（yyyymmdd）聚合阅读统计。日/月/年/总都用它，前端算好区间即可。
+#[tauri::command]
+fn reading_stats_range(state: tauri::State<AppState>, from: u32, to: u32) -> StatsRange {
+    let stats = state.stats.lock().unwrap();
+    let lib = state.library.lock().unwrap();
+    let mut hours = vec![0u64; 24];
+    let mut per_book: HashMap<u64, (u64, u64)> = HashMap::new(); // book -> (secs, words)
+    let mut per_day: HashMap<u32, u64> = HashMap::new();
+    let mut total_seconds = 0u64;
+    let mut total_words = 0u64;
+    for (&(day, hour, book), &(secs, words)) in stats.map.iter() {
+        if day < from || day > to {
+            continue;
+        }
+        total_seconds += secs as u64;
+        total_words += words as u64;
+        hours[hour.min(23) as usize] += secs as u64;
+        *per_day.entry(day).or_insert(0) += secs as u64;
+        let e = per_book.entry(book).or_insert((0, 0));
+        e.0 += secs as u64;
+        e.1 += words as u64;
+    }
+    // 高亮/批注（按 created_at 落在区间）与"读完"，从书库取
+    let title_of = |id: u64| lib.get(id).map(|b| b.title.clone()).unwrap_or_else(|| "（已删除）".into());
+    let mut hl_count: HashMap<u64, (u32, u32)> = HashMap::new(); // book -> (highlights, notes)
+    let mut total_highlights = 0u32;
+    let mut total_notes = 0u32;
+    for b in &lib.books {
+        for h in &b.highlights {
+            let d = unix_to_local_day(h.created_at);
+            if d >= from && d <= to {
+                let e = hl_count.entry(b.id).or_insert((0, 0));
+                e.0 += 1;
+                total_highlights += 1;
+                if !h.note.trim().is_empty() {
+                    e.1 += 1;
+                    total_notes += 1;
+                }
+            }
+        }
+    }
+    let finished_in_range: std::collections::HashSet<u64> = lib
+        .books
+        .iter()
+        .filter(|b| b.finished_at > 0 && {
+            let d = unix_to_local_day(b.finished_at);
+            d >= from && d <= to
+        })
+        .map(|b| b.id)
+        .collect();
+    let mk = |id: u64, secs: u64, words: u64| {
+        let (hl, nt) = hl_count.get(&id).copied().unwrap_or((0, 0));
+        BookStat {
+            id: id.to_string(),
+            title: title_of(id),
+            seconds: secs,
+            words,
+            highlights: hl,
+            notes: nt,
+            finished: finished_in_range.contains(&id),
+        }
+    };
+    let mut books: Vec<BookStat> = per_book.iter().map(|(&id, &(s, w))| mk(id, s, w)).collect();
+    books.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+    let finished: Vec<BookStat> = finished_in_range
+        .iter()
+        .map(|&id| {
+            let (s, w) = per_book.get(&id).copied().unwrap_or((0, 0));
+            mk(id, s, w)
+        })
+        .collect();
+    let mut days: Vec<DayStat> = per_day.into_iter().map(|(day, seconds)| DayStat { day, seconds }).collect();
+    days.sort_by_key(|d| d.day);
+    StatsRange {
+        total_seconds,
+        total_words,
+        hours,
+        days,
+        book_count: books.len() as u32,
+        finished_count: finished.len() as u32,
+        books,
+        finished,
+        total_highlights,
+        total_notes,
+    }
+}
+
 /// 阅读窗口定时上报阅读时长（秒）。
 #[tauri::command]
 async fn add_reading_time(
@@ -708,13 +1113,269 @@ async fn add_reading_time(
     seconds: u64,
 ) -> Result<(), ()> {
     if let Some(id) = reader_window_id(&window) {
-        let mut lib = state.library.lock().unwrap();
-        if let Some(b) = lib.books.iter_mut().find(|b| id_for_path(&b.path) == id) {
-            b.reading_seconds += seconds;
+        {
+            let mut lib = state.library.lock().unwrap();
+            if let Some(b) = lib.books.iter_mut().find(|b| b.id == id) {
+                b.reading_seconds += seconds;
+            }
+            lib.save();
         }
-        lib.save();
+        let mut st = state.stats.lock().unwrap();
+        st.add(id, seconds as u32, 0); // 累进当前小时桶
+        st.save(); // 15 秒一次，文件很小
     }
     Ok(())
+}
+
+/// 阅读窗口上报"真正读过"的字数：仅停留若干秒、且逐页翻过的页才会累加（前端判定）。
+#[tauri::command]
+async fn add_read_words(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    words: u64,
+) -> Result<(), ()> {
+    if words == 0 {
+        return Ok(());
+    }
+    if let Some(id) = reader_window_id(&window) {
+        {
+            let mut lib = state.library.lock().unwrap();
+            if let Some(b) = lib.books.iter_mut().find(|b| b.id == id) {
+                b.words_read += words;
+            }
+            lib.save();
+        }
+        state.stats.lock().unwrap().add(id, 0, words as u32); // 累进字数（落盘交给 15s 的 add_reading_time）
+    }
+    Ok(())
+}
+
+/// 每本书的"页数缓存"：版式签名 + 各章页数。版式（窗口尺寸/字体/边距…）一致就直接复用，免重算。
+#[derive(Serialize, Deserialize)]
+struct PageCacheData {
+    sig: String,
+    pages: Vec<u32>,
+}
+fn pages_dir() -> Option<std::path::PathBuf> {
+    let mut d = dirs::cache_dir()?;
+    d.push("ebook-reader");
+    d.push("pages");
+    Some(d)
+}
+fn page_cache_path(id: u64) -> Option<std::path::PathBuf> {
+    Some(pages_dir()?.join(format!("{id}.json")))
+}
+/// 读取这本书已缓存的页数（阅读窗口就绪后取，交给合并页判断版式是否一致）。
+#[tauri::command]
+fn get_page_cache(window: tauri::WebviewWindow) -> Option<PageCacheData> {
+    let id = reader_window_id(&window)?;
+    let s = std::fs::read_to_string(page_cache_path(id)?).ok()?;
+    serde_json::from_str(&s).ok()
+}
+/// 合并页测完整书页数后落盘缓存。
+#[tauri::command]
+fn save_page_cache(window: tauri::WebviewWindow, sig: String, pages: Vec<u32>) -> Result<(), ()> {
+    if let Some(id) = reader_window_id(&window) {
+        if let Some(p) = page_cache_path(id) {
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            if let Ok(j) = serde_json::to_string(&PageCacheData { sig, pages }) {
+                let _ = std::fs::write(p, j);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 每本 PDF 的视图状态：缩放倍数 + 是否双页。让 PDF 记住自己上次的缩放。
+#[derive(Serialize, Deserialize)]
+struct PdfState {
+    scale: f32,
+    dual: bool,
+}
+fn pdf_state_path(id: u64) -> Option<std::path::PathBuf> {
+    let mut d = dirs::cache_dir()?;
+    d.push("ebook-reader");
+    d.push("pdfstate");
+    Some(d.join(format!("{id}.json")))
+}
+/// 读取这本 PDF 上次的缩放/双页状态（打开时取，用来恢复视图）。
+#[tauri::command]
+fn get_pdf_state(window: tauri::WebviewWindow) -> Option<PdfState> {
+    let id = reader_window_id(&window)?;
+    let s = std::fs::read_to_string(pdf_state_path(id)?).ok()?;
+    serde_json::from_str(&s).ok()
+}
+/// 保存这本 PDF 的缩放/双页状态（缩放或切换双页时调用）。
+#[tauri::command]
+fn set_pdf_state(window: tauri::WebviewWindow, scale: f32, dual: bool) -> Result<(), ()> {
+    if let Some(id) = reader_window_id(&window) {
+        if let Some(p) = pdf_state_path(id) {
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            if let Ok(j) = serde_json::to_string(&PdfState { scale, dual }) {
+                let _ = std::fs::write(p, j);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 在系统默认浏览器打开一个 URL（用于"关于"里的 GitHub 链接，不在 WebView 里跳转）。
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let u = url.trim();
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return Err("非法链接".into());
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", u])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open").arg(u).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ===========================================================================
+//  edge-tts：用微软 Edge 在线朗读端点合成（免费、Azure 级中文音色）。
+//  返回整段 MP3(base64) + 词边界时间戳，前端播放并按时间高亮当前词。
+// ===========================================================================
+#[derive(Serialize)]
+struct TtsMark {
+    at: u32, // 音频时间(ms)
+    word: String,
+}
+#[derive(Serialize)]
+struct TtsAudio {
+    audio: String, // base64 mp3
+    marks: Vec<TtsMark>,
+}
+const EDGE_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+fn sha256_upper(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02X}")).collect()
+}
+fn sec_ms_gec() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut ticks = now + 11_644_473_600; // Windows 纪元偏移
+    ticks -= ticks % 300; // 向下取整到 5 分钟
+    let ticks = (ticks as u128) * 10_000_000; // 转 100ns
+    sha256_upper(&format!("{ticks}{EDGE_TOKEN}"))
+}
+
+#[tauri::command]
+async fn edge_tts(text: String, voice: String, rate: i32) -> Result<TtsAudio, String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let voice = if voice.trim().is_empty() { "zh-CN-XiaoxiaoNeural".to_string() } else { voice };
+    let gec = sec_ms_gec();
+    // ConnectionId：每次连接唯一的 32 位十六进制（缺它/版本过旧都会 403）
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let cid = sha256_upper(&format!("{nanos}conn"))[..32].to_lowercase();
+    let url = format!(
+        "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken={EDGE_TOKEN}&ConnectionId={cid}&Sec-MS-GEC={gec}&Sec-MS-GEC-Version=1-143.0.3650.75"
+    );
+    let mut req = url.into_client_request().map_err(|e| e.to_string())?;
+    {
+        let h = req.headers_mut();
+        h.insert("Pragma", "no-cache".parse().unwrap());
+        h.insert("Cache-Control", "no-cache".parse().unwrap());
+        h.insert("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold".parse().unwrap());
+        h.insert("Accept-Encoding", "gzip, deflate, br, zstd".parse().unwrap());
+        h.insert("Accept-Language", "en-US,en;q=0.9".parse().unwrap());
+        h.insert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0".parse().unwrap());
+    }
+    let (mut ws, _) = tokio_tungstenite::connect_async(req)
+        .await
+        .map_err(|e| format!("连接微软语音失败：{e}"))?;
+
+    let ts = chrono::Utc::now()
+        .format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
+        .to_string();
+    let cfg = "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"true\"},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}";
+    let config_msg = format!(
+        "X-Timestamp:{ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{cfg}"
+    );
+    ws.send(Message::Text(config_msg)).await.map_err(|e| e.to_string())?;
+
+    let rid = sha256_upper(&format!("{ts}{text}"))[..32].to_lowercase();
+    let safe = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let ssml = format!(
+        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='{voice}'><prosody pitch='+0Hz' rate='{rate:+}%' volume='+0%'>{safe}</prosody></voice></speak>"
+    );
+    let ssml_msg = format!(
+        "X-RequestId:{rid}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:{ts}\r\nPath:ssml\r\n\r\n{ssml}"
+    );
+    ws.send(Message::Text(ssml_msg)).await.map_err(|e| e.to_string())?;
+
+    let mut audio: Vec<u8> = Vec::new();
+    let mut marks: Vec<TtsMark> = Vec::new();
+    while let Some(msg) = ws.next().await {
+        match msg.map_err(|e| e.to_string())? {
+            Message::Text(t) => {
+                if t.contains("Path:turn.end") {
+                    break;
+                }
+                if t.contains("Path:audio.metadata") {
+                    if let Some(idx) = t.find("\r\n\r\n") {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t[idx + 4..]) {
+                            if let Some(arr) = v.get("Metadata").and_then(|m| m.as_array()) {
+                                for it in arr {
+                                    if it.get("Type").and_then(|x| x.as_str()) == Some("WordBoundary") {
+                                        let off = it.pointer("/Data/Offset").and_then(|x| x.as_u64()).unwrap_or(0);
+                                        let word = it
+                                            .pointer("/Data/text/Text")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        marks.push(TtsMark { at: (off / 10000) as u32, word });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Message::Binary(b) => {
+                if b.len() >= 2 {
+                    let hlen = ((b[0] as usize) << 8) | (b[1] as usize);
+                    let start = 2 + hlen;
+                    if start <= b.len() {
+                        audio.extend_from_slice(&b[start..]);
+                    }
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    let _ = ws.close(None).await;
+    if audio.is_empty() {
+        return Err("没有取到音频（可能网络/地区限制）".into());
+    }
+    use base64::Engine;
+    Ok(TtsAudio {
+        audio: base64::engine::general_purpose::STANDARD.encode(&audio),
+        marks,
+    })
 }
 
 #[tauri::command]
@@ -771,7 +1432,7 @@ async fn book_meta(
         .and_then(|s| s.parse().ok())
         .ok_or("非阅读窗口")?;
 
-    let (title, author, description, format) = {
+    let (title, mut author, description, format) = {
         let lib = state.library.lock().unwrap();
         let b = lib.get(id).ok_or("找不到这本书")?;
         (
@@ -792,7 +1453,12 @@ async fn book_meta(
     let word_count = if stored > 0 {
         stored
     } else {
-        let wc = book::compute_word_count(&book_clone); // 不持锁，慢操作
+        // PDF 走专门的取文本计数；其它交给 compute_word_count
+        let wc = if format == "pdf" {
+            pdf_word_count(&book_clone.path)
+        } else {
+            book::compute_word_count(&book_clone) // 不持锁，慢操作
+        };
         if wc > 0 {
             let mut lib = state.library.lock().unwrap();
             lib.set_word_count(id, wc);
@@ -800,6 +1466,19 @@ async fn book_meta(
         }
         wc
     };
+
+    // PDF 作者：库里还没有就从 PDF 元数据补一次并存起来
+    if format == "pdf" && author.trim().is_empty() {
+        let a = pdf_author(&book_clone.path);
+        if !a.trim().is_empty() {
+            author = a.clone();
+            let mut lib = state.library.lock().unwrap();
+            if let Some(b) = lib.books.iter_mut().find(|b| b.id == id) {
+                b.author = a;
+            }
+            lib.save();
+        }
+    }
 
     Ok(BookMeta {
         title,
@@ -809,6 +1488,50 @@ async fn book_meta(
         word_count,
         size,
     })
+}
+
+/// PDF 字数：抽取每页文本，统计非空白字符数。
+fn pdf_word_count(path: &Path) -> u64 {
+    extract_pdf_pages(path)
+        .iter()
+        .map(|s| s.chars().filter(|c| !c.is_whitespace()).count() as u64)
+        .sum()
+}
+
+/// 从 PDF 的 Info 字典读 /Author（支持 UTF-16BE BOM 与普通编码）。读不到返回空串。
+fn pdf_author(path: &Path) -> String {
+    let Ok(doc) = lopdf::Document::load(path) else {
+        return String::new();
+    };
+    let Ok(info_obj) = doc.trailer.get(b"Info") else {
+        return String::new();
+    };
+    let dict = match info_obj.as_reference().and_then(|r| doc.get_dictionary(r)) {
+        Ok(d) => d,
+        Err(_) => match info_obj.as_dict() {
+            Ok(d) => d,
+            Err(_) => return String::new(),
+        },
+    };
+    match dict.get(b"Author") {
+        Ok(lopdf::Object::String(bytes, _)) => decode_pdf_string(bytes),
+        _ => String::new(),
+    }
+}
+
+/// 解码 PDF 文本串：FE FF 开头→UTF-16BE；否则按 Latin-1/UTF-8 兜底。
+fn decode_pdf_string(b: &[u8]) -> String {
+    if b.len() >= 2 && b[0] == 0xFE && b[1] == 0xFF {
+        let u16s: Vec<u16> = b[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s).trim().to_string()
+    } else if let Ok(s) = std::str::from_utf8(b) {
+        s.trim().to_string()
+    } else {
+        b.iter().map(|&c| c as char).collect::<String>().trim().to_string()
+    }
 }
 
 /// 后台批量统计还没字数的书。立刻返回，真正的统计放到独立后台线程，
@@ -822,7 +1545,7 @@ fn compute_word_counts(app: tauri::AppHandle) {
             lib.books
                 .iter()
                 .filter(|b| b.word_count == 0)
-                .map(|b| (id_for_path(&b.path), b.clone()))
+                .map(|b| (b.id, b.clone()))
                 .collect()
         };
         let mut changed = false;
@@ -927,10 +1650,13 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
         }
         "book" => {
             // 返回一个空壳页面（含分页+渐进加载脚本）；正文由前端逐章 fetch 追加
-            ensure_epub_loaded(state, id).ok()?;
-            let count = {
+            let format = { state.library.lock().unwrap().get(id).map(|b| b.format.clone()).unwrap_or_default() };
+            let count = if format == "epub" {
+                ensure_epub_loaded(state, id).ok()?;
                 let mut epubs = state.epubs.lock().unwrap();
                 epubs.get_mut(&id).map(|d| d.spine.len()).unwrap_or(0)
+            } else {
+                get_txt_chapters(state, id).map(|c| c.len()).unwrap_or(1) // txt/md：切分后的章数
             };
             let shell = format!(
                 "<!doctype html><html><head><meta charset=\"utf-8\">\
@@ -945,6 +1671,14 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
         "chapter" => {
             // 单章内容（虚拟化：一次只渲染一章）。返回 JSON {head, body}
             let idx: usize = rest.parse().ok()?;
+            let format = { state.library.lock().unwrap().get(id).map(|b| b.format.clone()).unwrap_or_default() };
+            if format != "epub" {
+                // txt/md：取第 idx 个切分章节，段落化返回
+                let chapters = get_txt_chapters(state, id)?;
+                let body = chapters.get(idx).map(|(_, c)| txt_body(c)).unwrap_or_default();
+                let json = serde_json::json!({"head": "", "body": body}).to_string();
+                return Some((json.into_bytes(), "application/json".to_string()));
+            }
             ensure_epub_loaded(state, id).ok()?;
             let mut epubs = state.epubs.lock().unwrap();
             let doc = epubs.get_mut(&id)?;
@@ -995,7 +1729,7 @@ body{opacity:0;transition:opacity .12s ease}
 body.ready{opacity:1}
 *::-webkit-scrollbar{width:0;height:0;display:none}
 #pager{position:fixed;inset:0;overflow:hidden}
-.rr{height:100vh;box-sizing:border-box;column-fill:auto;overflow-wrap:break-word;word-break:break-word}
+.rr{height:100vh;box-sizing:border-box;column-fill:auto;overflow-wrap:break-word;word-break:break-word;text-align:justify}
 .rr img{max-width:100%;max-height:86vh;height:auto}
 /* 任何内容都不得超过一栏宽，否则该栏会变宽、后续页码错位导致正文整体右移 */
 .rr *{max-width:100%}
@@ -1004,16 +1738,42 @@ body.ready{opacity:1}
 .rr-end{break-before:column;-webkit-column-break-before:always;width:1px;height:1px;font-size:0}
 #measurer{position:fixed;left:-99999px;top:0;overflow:hidden;pointer-events:none}
 mark.search-hit{background:#ffe58a;color:inherit}
+::highlight(tts){background:#ffd54a;color:#111}
 mark.search-hit.cur{background:#ff9f40}
+mark.hl{background:#fff3a0;color:inherit;border-radius:2px;cursor:pointer;box-shadow:inset 0 -2px 0 rgba(214,170,30,.5)}
+mark.hl.has-note{box-shadow:inset 0 -2px 0 rgba(43,108,255,.6)}
 #sel-menu{position:fixed;display:none;z-index:99999}
 #sel-menu button{font:12px/1 system-ui,'Microsoft YaHei',sans-serif;color:#4a463e;background:#faf8f2;border:1px solid #e4ddcd;border-radius:6px;padding:5px 9px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.14);white-space:nowrap}
 #sel-menu button:hover{background:#f1ebdc}
+#sel-menu button+button{margin-left:4px}
+#hl-menu{position:fixed;display:none;z-index:99999}
+#hl-menu button{font:12px/1 system-ui,'Microsoft YaHei',sans-serif;color:#4a463e;background:#faf8f2;border:1px solid #e4ddcd;border-radius:6px;padding:5px 9px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.14);white-space:nowrap}
+#hl-menu button:hover{background:#f1ebdc}
+#hl-menu button+button{margin-left:4px}
+#fn-pop{position:fixed;display:none;z-index:100001;left:8px;right:8px;max-height:58vh;overflow:auto;background:#fff7c0;border:1px solid #e6d77a;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:12px 16px 16px;font-size:16px;line-height:1.85;color:#3a3320;font-family:system-ui,'Microsoft YaHei',sans-serif}
+#fn-pop .fn-close{float:right;cursor:pointer;color:#8a7a30;font-size:20px;line-height:1;margin:-2px -4px 0 10px}
+#fn-pop .fn-body p{margin:0 0 .5em}
+#fn-pop a{color:#2b6cff;text-decoration:none}
+#hl-note{position:fixed;display:none;z-index:100000;width:400px;max-width:92vw;background:#fffdf5;border:1px solid #e4ddcd;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.22);padding:14px;font-family:system-ui,'Microsoft YaHei',sans-serif}
+#hl-note .ctx{font-size:15px;line-height:1.8;color:#444;max-height:150px;overflow:auto;margin-bottom:10px;padding:10px 12px;background:#fbf5e3;border-radius:8px}
+#hl-note .ctx mark.hl{background:#ffd95a;color:inherit;box-shadow:none}
+#hl-note textarea{width:100%;box-sizing:border-box;font-size:16px;line-height:1.65;min-height:100px;border:1px solid #ddd;border-radius:8px;padding:10px;resize:vertical;font-family:inherit;outline:none}
+#hl-note textarea:focus{border-color:#5aa0ff}
+#hl-note .row{display:flex;justify-content:space-between;align-items:center;margin-top:10px}
+#hl-note button.act{font:14px/1 system-ui,'Microsoft YaHei',sans-serif;padding:8px 16px;border-radius:8px;border:1px solid #ccc;background:#fff;cursor:pointer}
+#hl-note button.save{background:#2b6cff;color:#fff;border-color:#2b6cff}
+#hl-note button.del{color:#c0392b;border-color:#e2b6ae;background:#fff}
 </style>
 <script>
 var S={fontFamily:"",fontSize:18,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28};
-var root,pager,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,headSeen={};
+var root,pager,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,headSeen={},chapChars=0;
 var downX=null,downY=null,didDrag=false;
-var measurer,chapterPages=[],measureDone=false,measureToken=0,measureTimer=null;
+var overlayOpen=false; // 外壳里搜索框/设置面板是否打开（打开时正文点击只用于关闭它）
+var ttsOn=false,ttsMap=[],ttsText='',ttsSents=[],ttsVoice=null,ttsRate=1,ttsSi=0,ttsGen=0,ttsAudioEl=null,ttsCache={},ttsWaiting=-1,ttsPlayedAny=false; // 朗读状态
+function userNav(){parent.postMessage({userNav:1},'*');} // 用户主动翻页（键盘/滚轮）通知外壳关闭浮层
+var measurer,chapterPages=[],measureDone=false,measureToken=0,measureTimer=null,pageSig='';
+// 版式签名：窗口尺寸+字体/字号/行距/段距/字间距/页边距 都一致才能复用缓存的页数
+function layoutSig(){return [window.innerWidth,window.innerHeight,S.fontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight].join('|');}
 var CH=window.__CH__||0, ID=window.__ID__||0;
 var VC=null; // 虚拟章节列表 [{ch:spine序号, frag:锚点}]（按目录顺序），用于在大文件内细分逻辑章节
 // 算出“当前在第几个逻辑章节（0 基）”：取目录顺序中位置 <= 当前阅读位置的最后一条
@@ -1033,7 +1793,7 @@ function computeLogical(){
 function applyStyle(){
   var st=document.getElementById('user-style');
   if(!st){st=document.createElement('style');st.id='user-style';document.head.appendChild(st);}
-  var c='.rr{padding:'+S.marginTop+'px '+S.marginRight+'px '+S.marginBottom+'px '+S.marginLeft+'px;';
+  var c='.rr{padding:'+mg(S.marginTop)+'px '+mg(S.marginRight)+'px '+mg(S.marginBottom)+'px '+mg(S.marginLeft)+'px;';
   if(S.fontSize)c+='font-size:'+S.fontSize+'px;';
   if(S.lineHeight)c+='line-height:'+S.lineHeight+';';
   c+='letter-spacing:'+S.letterSpacing+'px;';
@@ -1042,6 +1802,12 @@ function applyStyle(){
   if(S.fontFamily)c+='.rr *{font-family:'+S.fontFamily+' !important;}';
   if(S.lineHeight)c+='.rr p,.rr div,.rr li{line-height:'+S.lineHeight+';}';
   c+='.rr p{margin-top:0;margin-bottom:'+S.paraSpacing+'em;}';
+  // 有些书给每个元素写死了内联 font-size（如本书 16px），会压过阅读器字号设置 → 让其继承（正文跟随设置）
+  if(S.fontSize){
+    c+='.rr [style*="font-size"]{font-size:inherit !important;}';
+    c+='.rr h1{font-size:1.7em;} .rr h2{font-size:1.4em;} .rr h3{font-size:1.2em;} .rr h4{font-size:1.1em;}';
+    c+='.rr sup,.rr sub{font-size:.75em;}'; // 上下标（注释角标）仍保持小一号
+  }
   var bg='#fff',fg='#222';
   if(S.theme==='dark'){bg='#1c1c1e';fg='#d2d2d2';}
   else if(S.theme==='sepia'){bg='#f4ecd8';fg='#5b4636';}
@@ -1051,9 +1817,11 @@ function applyStyle(){
   c+='html,body,.rr,.rr *{writing-mode:horizontal-tb !important;-webkit-writing-mode:horizontal-tb !important;-epub-writing-mode:horizontal-tb !important;text-orientation:mixed !important;}.rr{direction:ltr !important;}';
   st.textContent=c;
 }
+// 页边距夹到非负且有上限：负内边距会破坏分栏排版（正文溢出/整体变形）
+function mg(v){v=parseInt(v,10);if(isNaN(v)||v<0)return 0;return v>240?240:v;}
 function applyCols(){
-  var vw=window.innerWidth, vh=window.innerHeight, colW=Math.max(100, vw-S.marginLeft-S.marginRight);
-  root.style.height=vh+'px';root.style.columnWidth=colW+'px';root.style.columnGap=(S.marginLeft+S.marginRight)+'px';
+  var vw=window.innerWidth, vh=window.innerHeight, ml=mg(S.marginLeft), mr=mg(S.marginRight), colW=Math.max(100, vw-ml-mr);
+  root.style.height=vh+'px';root.style.columnWidth=colW+'px';root.style.columnGap=(ml+mr)+'px';
   // 末尾有一个强制分栏的占位空栏（rr-end），让滚动条能到达真正的最后一页；页数要减掉它
   pageStep=vw;pagesInCh=Math.max(1,Math.round(pager.scrollWidth/vw)-1);
 }
@@ -1066,8 +1834,14 @@ function report(){
   if(measureDone&&gT>0)prog=(gP/gT)*100;
   else prog=CH>0?((curCh+chFrac)/CH)*100:0;
   var L=computeLogical();
-  parent.postMessage({chapter:curCh,chFrac:chFrac,page:pageInCh+1,total:pagesInCh,totalCh:CH,progress:prog,gPage:gP,gTotal:gT,logicalCh:L.lc,logicalTotal:L.lt},'*');
+  var pageChars=pagesInCh>0?Math.round(chapChars/pagesInCh):chapChars; // 当前页约略字数（按本章字数/页数均摊）
+  parent.postMessage({chapter:curCh,chFrac:chFrac,page:pageInCh+1,total:pagesInCh,totalCh:CH,progress:prog,gPage:gP,gTotal:gT,logicalCh:L.lc,logicalTotal:L.lt,pageChars:pageChars},'*');
+  // 注意：不在这里记录锚点。report() 也会被 relayout() 调到；若每次都重取锚点，
+  // 拖动字号滑块时会把“重排后已偏移的顶部”当成新锚点，逐步累积漂移→整页跑掉。
+  // 锚点只在用户“导航”（翻页/跳章/跳搜索命中）时更新，见 captureAnchor()。
 }
+// 记录当前页顶部锚点（精确到字符）。仅在用户主动导航后调用，供之后的重排锁定位置。
+function captureAnchor(){curTopAnchor=topAnchor();}
 function measureChapterPages(html){
   if(!measurer)return 1;
   var vw=window.innerWidth,vh=window.innerHeight,colW=Math.max(100,vw-S.marginLeft-S.marginRight);
@@ -1076,34 +1850,132 @@ function measureChapterPages(html){
   return Math.max(1,Math.round(measurer.scrollWidth/vw));
 }
 function measureAll(){
+  if(measureDone&&pageSig===layoutSig())return; // 版式没变、已有页数 → 不重算
   var tok=++measureToken;measureDone=false;chapterPages=new Array(CH).fill(0);
   var i=0;
   function step(){
     if(tok!==measureToken)return;
-    if(i>=CH){if(measurer)measurer.innerHTML='';measureDone=true;report();return;}
+    if(i>=CH){if(measurer)measurer.innerHTML='';measureDone=true;pageSig=layoutSig();report();
+      parent.postMessage({measured:{sig:pageSig,pages:chapterPages.slice()}},'*');return;} // 测完落盘缓存
     fetch(location.origin+'/chapter/'+ID+'/'+i).then(function(r){return r.json();}).then(function(d){
       if(tok!==measureToken)return;chapterPages[i]=measureChapterPages(d.body||'');i++;setTimeout(step,0);
     }).catch(function(){chapterPages[i]=1;i++;setTimeout(step,0);});
   }
   step();
 }
+// 外壳送来缓存的页数：版式签名一致就直接采用，跳过测量
+function applyPageCache(pc){
+  if(!pc||!pc.pages||pc.pages.length!==CH)return;
+  if(pc.sig!==layoutSig())return; // 版式变了，缓存作废，照常测量
+  measureToken++; // 作废可能在跑的测量
+  chapterPages=pc.pages.slice();measureDone=true;pageSig=pc.sig;
+  if(measureTimer){clearTimeout(measureTimer);measureTimer=null;}
+  report();
+}
 function scheduleMeasure(){if(measureTimer)clearTimeout(measureTimer);measureTimer=setTimeout(measureAll,1200);}
-function gotoPage(p){pageInCh=Math.max(0,Math.min(pagesInCh-1,p));pager.scrollLeft=pageInCh*pageStep;report();}
+// 滚动条按“全书页位置”精确定位：已测量完→映射到具体章+页（同章直接翻页，平滑；跨章才加载）；
+// 未测量完→退回按章节粗跳。这样点滑块附近不再原地跳，拖动也能平滑跟随。
+function gotoGlobalFrac(frac){
+  frac=Math.max(0,Math.min(1,frac));
+  if(measureDone){
+    var gt=0,i;for(i=0;i<CH;i++)gt+=chapterPages[i]||1;if(gt<1)gt=1;
+    var gp=Math.round(frac*(gt-1)),acc=0,tc=CH-1,tp=0;
+    for(i=0;i<CH;i++){var cp=chapterPages[i]||1;if(gp<acc+cp){tc=i;tp=gp-acc;break;}acc+=cp;}
+    if(tc===curCh)gotoPage(tp);else showChapter(tc,tp);
+  }else{
+    showChapter(Math.min(CH-1,Math.floor(frac*CH)),'start');
+  }
+}
+function gotoPage(p){pageInCh=Math.max(0,Math.min(pagesInCh-1,p));pager.scrollLeft=pageInCh*pageStep;report();captureAnchor();}
 function pageOf(el){var r=el.getBoundingClientRect(),pr=pager.getBoundingClientRect();var x=r.left-pr.left+pager.scrollLeft;return Math.floor((x+1)/pageStep);}
 function showChapter(i,where,frag){
   i=Math.max(0,Math.min(CH-1,i));
   return fetch(location.origin+'/chapter/'+ID+'/'+i).then(function(r){return r.json();}).then(function(d){
-    curCh=i;if(d.head)injectHead(d.head,headSeen);root.innerHTML=(d.body||'')+'<div class="rr-end"></div>';applyStyle();applyCols();
+    curCh=i;if(d.head)injectHead(d.head,headSeen);root.innerHTML=(d.body||'')+'<div class="rr-end"></div>';chapChars=(root.textContent||'').replace(/\s/g,'').length;applyStyle();applyCols();applyHighlights();
     pageInCh=0;
     if(where==='end')pageInCh=pagesInCh-1;else if(typeof where==='number')pageInCh=Math.max(0,Math.min(pagesInCh-1,where));
     if(frag){var el=document.getElementById(frag);if(el)pageInCh=pageOf(el);}
-    pager.scrollLeft=pageInCh*pageStep;report();
+    pager.scrollLeft=pageInCh*pageStep;report();captureAnchor();
   }).catch(function(){});
 }
-function relayout(){if(!root)return;applyStyle();applyCols();if(pageInCh>pagesInCh-1)pageInCh=pagesInCh-1;pager.scrollLeft=pageInCh*pageStep;report();}
+var curTopAnchor=null; // 实时记录的当前页顶部锚点（精确到字符）
+// 视口左上角对应的"字符级"锚点。长段落跨多列时，元素级锚点的 left 是段首所在列，
+// 会让重排后跳回段首（如金庸全集的超长段落）；用 caret 定位到具体字符即可避免。
+function topAnchor(){
+  var x=Math.max(2,(S.marginLeft||0)+8), y=Math.max(2,(S.marginTop||0)+8);
+  var rng=null;
+  if(document.caretRangeFromPoint){ rng=document.caretRangeFromPoint(x,y); }
+  else if(document.caretPositionFromPoint){ var cp=document.caretPositionFromPoint(x,y); if(cp){rng=document.createRange();rng.setStart(cp.offsetNode,cp.offset);rng.collapse(true);} }
+  if(rng){
+    try{var n=rng.startContainer,o=rng.startOffset;if(n.nodeType===3&&o<n.nodeValue.length)rng.setEnd(n,o+1);}catch(e){}
+    return {range:rng};
+  }
+  var el=document.elementFromPoint(x,y);
+  while(el&&el!==root&&el.nodeType===1){ if((el.textContent||'').trim()) return {el:el}; el=el.parentNode; }
+  return null;
+}
+function anchorValid(a){
+  if(!a)return false;
+  if(a.range){var n=a.range.startContainer;return !!(n&&n.isConnected);}
+  if(a.el){return !!a.el.isConnected;}
+  return false;
+}
+function anchorPage(a){
+  var r=null;
+  if(a.range){ r=a.range.getBoundingClientRect(); if(r&&!r.width&&!r.height&&!r.left&&!r.top){var rs=a.range.getClientRects();if(rs&&rs.length)r=rs[0];} }
+  else if(a.el){ r=a.el.getBoundingClientRect(); }
+  if(!r)return pageInCh;
+  var pr=pager.getBoundingClientRect();
+  var x=r.left-pr.left+pager.scrollLeft;
+  return Math.max(0,Math.min(pagesInCh-1,Math.floor((x+1)/pageStep)));
+}
+function relayout(){
+  if(!root)return;
+  // 用"重排前"就记好的锚点（resize 时浏览器已先重排，临时再取就晚了）
+  var anchor=anchorValid(curTopAnchor)?curTopAnchor:topAnchor();
+  applyStyle();applyCols();
+  if(anchor){ pageInCh=anchorPage(anchor); }
+  else if(pageInCh>pagesInCh-1){ pageInCh=pagesInCh-1; }
+  pager.scrollLeft=pageInCh*pageStep;report();
+}
 function nextPage(){if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1);else if(curCh<CH-1)showChapter(curCh+1,'start');}
 function prevPage(){if(pageInCh>0)gotoPage(pageInCh-1);else if(curCh>0)showChapter(curCh-1,'end');}
 function reveal(){document.body.classList.add('ready');}
+// ---- 高亮/批注 ----
+var HL=[]; // 全书高亮 [{chapter,start,end,text,note}]，数组下标即后端 index
+function clearHighlights(){
+  if(!root)return;var ms=root.querySelectorAll('mark.hl');
+  for(var i=0;i<ms.length;i++){var m=ms[i];if(m.parentNode)m.parentNode.replaceChild(document.createTextNode(m.textContent),m);}
+  root.normalize();
+}
+function wrapRange(s,e,idx,note){
+  var walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null);
+  var pos=0,node,segs=[];
+  while(node=walker.nextNode()){
+    var len=node.nodeValue.length,ns=pos,ne=pos+len;pos=ne;
+    var a=Math.max(s,ns),b=Math.min(e,ne);
+    if(a<b)segs.push({node:node,from:a-ns,to:b-ns});
+    if(ne>=e)break;
+  }
+  for(var i=segs.length-1;i>=0;i--){var w=segs[i];try{
+    var r=document.createRange();r.setStart(w.node,w.from);r.setEnd(w.node,w.to);
+    var mk=document.createElement('mark');mk.className='hl'+(note?' has-note':'');mk.setAttribute('data-hi',idx);if(note)mk.title=note;
+    r.surroundContents(mk);
+  }catch(_){}}
+}
+function applyHighlights(){
+  if(!root)return;
+  for(var i=0;i<HL.length;i++){var h=HL[i];if(h.chapter===curCh)wrapRange(h.start,h.end,i,h.note||'');}
+}
+function refreshHighlights(){clearHighlights();applyHighlights();}
+function selOffsets(){
+  var sel=window.getSelection?window.getSelection():null;if(!sel||!sel.rangeCount)return null;
+  var r=sel.getRangeAt(0);var t=r.toString();if(!t||!t.length)return null;
+  var pre=document.createRange();pre.selectNodeContents(root);
+  try{pre.setEnd(r.startContainer,r.startOffset);}catch(e){return null;}
+  var start=pre.toString().length;
+  return {start:start,end:start+t.length,text:t};
+}
 function injectHead(htmlStr,seen){
   var tmp=document.createElement('div');tmp.innerHTML=htmlStr;
   var nodes=tmp.querySelectorAll('link,style');
@@ -1128,28 +2000,39 @@ function init(){
   document.addEventListener('mousemove',function(e){if(downX!==null&&(Math.abs(e.clientX-downX)>4||Math.abs(e.clientY-downY)>4))didDrag=true;});
   document.addEventListener('click',function(e){
     parent.postMessage({uiClick:1},'*');
+    if(overlayOpen){return;} // 有搜索框/设置浮层时，点击正文只用于关闭浮层，不翻页/不弹菜单
+    // 点到已高亮的文字 → 出高亮菜单，不翻页
+    var hm=e.target.closest?e.target.closest('mark.hl'):null;
+    if(hm){e.stopPropagation();showHlMenu(parseInt(hm.getAttribute('data-hi'),10));return;}
+    if(e.target.closest&&e.target.closest('#fn-pop'))return; // 注释弹窗内点击：不翻页
     var a=e.target.closest?e.target.closest('a'):null;
     if(a){var href=a.getAttribute('href')||'';
       if(href.charAt(0)==='#'){e.preventDefault();
         var m=/^#c(\d+)(?:~(.+))?$/.exec(href);
-        if(m){var ci=parseInt(m[1],10),fr=m[2];if(ci===curCh){if(fr){var el=document.getElementById(fr);if(el)gotoPage(pageOf(el));}}else showChapter(ci,'start',fr);}
+        var frag=m?m[2]:href.slice(1), ciT=m?parseInt(m[1],10):curCh;
+        if(isNoteLink(a)&&frag){showFootnote(a,ciT,frag);return;} // 注释角标 → 弹注释正文
+        if(m){var ci=ciT,fr=frag;if(ci===curCh){if(fr){var el=document.getElementById(fr);if(el)gotoPage(pageOf(el));}}else showChapter(ci,'start',fr);}
         else{var el2=document.getElementById(href.slice(1));if(el2)gotoPage(pageOf(el2));}
       }
       return;
     }
+    hideFn(); // 点别处 → 收起注释弹窗
     // 拖动选字（或存在选中文字）时不翻页，让 web 搜索菜单稳定停在高亮处
     var sel=window.getSelection?window.getSelection():null;
     if(didDrag||(sel&&!sel.isCollapsed&&sel.toString().trim())){return;}
-    var x=e.clientX;if(x>window.innerWidth*0.6)nextPage();else if(x<window.innerWidth*0.4)prevPage();
+    var x=e.clientX;if(x>window.innerWidth*0.6)nextPage();else if(x<window.innerWidth*0.4)prevPage();else parent.postMessage({centerTap:1},'*');
   });
   document.addEventListener('keydown',function(e){
-    if(e.key==='PageDown'||e.key==='ArrowRight'||(e.key===' '&&!e.shiftKey)){e.preventDefault();nextPage();}
-    else if(e.key==='PageUp'||e.key==='ArrowLeft'||(e.key===' '&&e.shiftKey)){e.preventDefault();prevPage();}
+    if(e.key==='PageDown'||e.key==='ArrowRight'||(e.key===' '&&!e.shiftKey)){e.preventDefault();userNav();nextPage();}
+    else if(e.key==='PageUp'||e.key==='ArrowLeft'||(e.key===' '&&e.shiftKey)){e.preventDefault();userNav();prevPage();}
   });
   var wheelLock=false;
-  document.addEventListener('wheel',function(e){e.preventDefault();if(wheelLock)return;if(Math.abs(e.deltaY)<4&&Math.abs(e.deltaX)<4)return;if(e.deltaY>0||e.deltaX>0)nextPage();else prevPage();wheelLock=true;setTimeout(function(){wheelLock=false;},220);},{passive:false});
+  document.addEventListener('wheel',function(e){e.preventDefault();if(wheelLock)return;if(Math.abs(e.deltaY)<4&&Math.abs(e.deltaX)<4)return;userNav();if(e.deltaY>0||e.deltaX>0)nextPage();else prevPage();wheelLock=true;setTimeout(function(){wheelLock=false;},220);},{passive:false});
   window.addEventListener('resize',function(){relayout();scheduleMeasure();});
   setupSelMenu();
+  setupHlUi();
+  setupFn();
+  document.addEventListener('contextmenu',function(e){e.preventDefault();}); // 禁用浏览器右键菜单
 }
 // 选中文字后弹出“web搜索”菜单 → 通知父窗口用浏览器搜索
 var selMenu=null;
@@ -1157,12 +2040,33 @@ function hideSelMenu(){if(selMenu)selMenu.style.display='none';}
 function setupSelMenu(){
   selMenu=document.createElement('div');selMenu.id='sel-menu';
   var btn=document.createElement('button');btn.type='button';btn.textContent='🔍 web搜索';
-  selMenu.appendChild(btn);document.body.appendChild(selMenu);
-  btn.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});
+  var btnHL=document.createElement('button');btnHL.type='button';btnHL.textContent='🖍 高亮';
+  var btnNote=document.createElement('button');btnNote.type='button';btnNote.textContent='📝 批注';
+  var btnBm=document.createElement('button');btnBm.type='button';btnBm.textContent='🔖 书签';
+  selMenu.appendChild(btn);selMenu.appendChild(btnHL);selMenu.appendChild(btnNote);selMenu.appendChild(btnBm);
+  document.body.appendChild(selMenu);
+  [btn,btnHL,btnNote,btnBm].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  btnBm.addEventListener('click',function(e){
+    e.preventDefault();e.stopPropagation();
+    var t=(window.getSelection?window.getSelection().toString():'').trim();
+    var frac=pagesInCh>1?pageInCh/(pagesInCh-1):0;
+    parent.postMessage({addBookmark:{chapter:curCh,frac:frac,label:t.slice(0,40)}},'*');
+    hideSelMenu();
+  });
   btn.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
     var t=(window.getSelection?window.getSelection().toString():'').trim();
     if(t)parent.postMessage({webSearch:t},'*');
+    hideSelMenu();
+  });
+  btnHL.addEventListener('click',function(e){
+    e.preventDefault();e.stopPropagation();
+    var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();parent.postMessage({addHighlight:o},'*');}
+    hideSelMenu();
+  });
+  btnNote.addEventListener('click',function(e){
+    e.preventDefault();e.stopPropagation();
+    var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();parent.postMessage({addHighlightNote:o},'*');}
     hideSelMenu();
   });
   document.addEventListener('mouseup',function(){
@@ -1170,6 +2074,7 @@ function setupSelMenu(){
       var sel=window.getSelection?window.getSelection():null;
       var t=sel?sel.toString().trim():'';
       if(!t){hideSelMenu();return;}
+      hideHlMenu(); // 出选区菜单时，先收起"已高亮"菜单，保证同时只有一个
       var rect;try{rect=sel.getRangeAt(0).getBoundingClientRect();}catch(_){hideSelMenu();return;}
       if(!rect||(!rect.width&&!rect.height)){hideSelMenu();return;}
       selMenu.style.display='block';
@@ -1182,6 +2087,95 @@ function setupSelMenu(){
   document.addEventListener('mousedown',function(e){if(selMenu&&!selMenu.contains(e.target))hideSelMenu();});
   document.addEventListener('wheel',hideSelMenu,{passive:true});
   document.addEventListener('keydown',hideSelMenu);
+}
+
+// ---- 点击/悬停"已高亮文字" → 一个菜单（web搜索 / 取消高亮 / 批注）；批注用父窗口的大批注页 ----
+var hlMenu=null,activeHi=-1,hlHideTimer=null;
+function mkBtn(txt){var b=document.createElement('button');b.type='button';b.textContent=txt;return b;}
+function hideHlMenu(){if(hlMenu)hlMenu.style.display='none';}
+function markEl(idx){return root?root.querySelector('mark.hl[data-hi="'+idx+'"]'):null;}
+function selActive(){var s=window.getSelection?window.getSelection():null;return !!(s&&!s.isCollapsed&&s.toString().trim());}
+function showHlMenu(idx){
+  if(selActive())return;          // 还在选字（如刚高亮完）就不弹，避免和选区菜单同时出现
+  hideSelMenu();                  // 任何时候只保留一个工具栏
+  activeHi=idx;var el=markEl(idx);if(!el)return;
+  hlMenu.style.display='block';
+  var rect=el.getBoundingClientRect();
+  var mw=hlMenu.offsetWidth||200,mh=hlMenu.offsetHeight||34;
+  var left=rect.left+rect.width/2-mw/2;left=Math.max(6,Math.min(window.innerWidth-mw-6,left));
+  var top=rect.top-mh-8;if(top<6)top=rect.bottom+8;
+  hlMenu.style.left=left+'px';hlMenu.style.top=top+'px';
+}
+function setupHlUi(){
+  hlMenu=document.createElement('div');hlMenu.id='hl-menu';
+  var mWeb=mkBtn('🔍 web搜索'),mDel=mkBtn('🗑 取消高亮'),mNote=mkBtn('📝 批注');
+  hlMenu.append(mWeb,mDel,mNote);document.body.appendChild(hlMenu);
+  [mWeb,mDel,mNote].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  mWeb.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({webSearch:h.text},'*');hideHlMenu();});
+  mDel.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({removeHighlight:activeHi},'*');hideHlMenu();});
+  mNote.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({openAnnotations:activeHi},'*');hideHlMenu();});
+  hlMenu.addEventListener('mouseenter',function(){if(hlHideTimer)clearTimeout(hlHideTimer);});
+  hlMenu.addEventListener('mouseleave',function(){hlHideTimer=setTimeout(hideHlMenu,400);});
+
+  // 悬停高亮 → 出菜单；移开延时收起
+  root.addEventListener('mouseover',function(e){var m=e.target.closest?e.target.closest('mark.hl'):null;if(m){if(hlHideTimer)clearTimeout(hlHideTimer);showHlMenu(parseInt(m.getAttribute('data-hi'),10));}});
+  root.addEventListener('mouseout',function(e){var m=e.target.closest?e.target.closest('mark.hl'):null;if(m){hlHideTimer=setTimeout(hideHlMenu,400);}});
+  document.addEventListener('mousedown',function(e){if(hlMenu&&!hlMenu.contains(e.target))hideHlMenu();});
+  document.addEventListener('wheel',function(){hideHlMenu();},{passive:true});
+}
+// 取选区所在"整段"的纯文本（作为批注上下文，存起来供大批注页展示）
+function getSelContext(){
+  var sel=window.getSelection?window.getSelection():null;if(!sel||!sel.rangeCount)return '';
+  var node=sel.getRangeAt(0).startContainer;var el=node.nodeType===1?node:node.parentNode;
+  // 优先取最近的段落元素 <p>，没有再退回其它块级元素
+  var block=el&&el.closest?(el.closest('p')||el.closest('li,blockquote,td,div,section')):el;
+  var txt=((block||el).textContent||'').replace(/\s+/g,' ').trim();
+  return txt.length>800?txt.slice(0,800)+'…':txt; // 整段，过长才截断
+}
+
+// ---- 注释/脚注：点角标 → 就地弹出注释正文（而不是跳过去）----
+var fnPop=null;
+function hideFn(){if(fnPop)fnPop.style.display='none';}
+function setupFn(){
+  fnPop=document.createElement('div');fnPop.id='fn-pop';
+  fnPop.innerHTML='<span class="fn-close">✕</span><div class="fn-body"></div>';
+  document.body.appendChild(fnPop);
+  fnPop.querySelector('.fn-close').addEventListener('click',function(e){e.stopPropagation();hideFn();});
+  fnPop.addEventListener('mousedown',function(e){e.stopPropagation();});
+  fnPop.addEventListener('click',function(e){e.stopPropagation();if(e.target.closest&&e.target.closest('a'))e.preventDefault();}); // 弹窗内点击不翻页/不跳锚
+  document.addEventListener('mousedown',function(e){if(fnPop&&fnPop.style.display==='block'&&!fnPop.contains(e.target))hideFn();});
+  document.addEventListener('wheel',hideFn,{passive:true});
+}
+// 是否是"注释角标"链接：epub:type/role/class 含 note，或链接文字形如 [23] / (3) / 23
+function isNoteLink(a){
+  var ty=((a.getAttribute('epub:type')||'')+' '+(a.getAttribute('role')||'')+' '+(a.className||'')).toLowerCase();
+  if(/note|footnote|endnote|annoref/.test(ty))return true;
+  var t=(a.textContent||'').trim();
+  return /^[\[【（(]?\s*\d{1,4}\s*[\]】）)]?$/.test(t);
+}
+function fnSelector(frag){return '[id="'+String(frag).replace(/"/g,'\\"')+'"]';}
+function popFootnote(a,html){
+  if(!fnPop)setupFn();
+  fnPop.querySelector('.fn-body').innerHTML=html;
+  fnPop.style.display='block';
+  var rect=a.getBoundingClientRect();
+  var ph=fnPop.offsetHeight;
+  var top=rect.bottom+10;
+  if(top+ph>window.innerHeight-8)top=rect.top-ph-10; // 下方放不下 → 放上方
+  if(top<8)top=8;
+  fnPop.style.top=top+'px';
+}
+function showFootnote(a,ci,frag){
+  if(ci===curCh){
+    var el=document.querySelector(fnSelector(frag));
+    if(el){popFootnote(a,el.innerHTML);return;}
+  }
+  popFootnote(a,'加载中…');
+  fetch(location.origin+'/chapter/'+ID+'/'+ci).then(function(r){return r.json();}).then(function(d){
+    var tmp=document.createElement('div');tmp.innerHTML=d.body||'';
+    var el=tmp.querySelector(fnSelector(frag));
+    popFootnote(a,el?el.innerHTML:'（未找到注释内容）');
+  }).catch(function(){popFootnote(a,'（注释加载失败）');});
 }
 var sMarks=[],sIdx=-1;
 function clearSearch(){
@@ -1228,17 +2222,122 @@ function focusMatch(){
   parent.postMessage({searchPos:sIdx+1,searchCount:sMarks.length},'*');
 }
 function searchNav(d){if(!sMarks.length)return;sIdx=(sIdx+d+sMarks.length)%sMarks.length;focusMatch();}
+// ---- 朗读：Web Speech API + 当前词高亮(CSS Highlight) + 自动翻页/跳章 ----
+function ttsPickVoice(){
+  var vs=(window.speechSynthesis&&speechSynthesis.getVoices())||[];
+  var zh=null;for(var i=0;i<vs.length;i++){if(/zh|chinese|中文|普通话/i.test((vs[i].lang||'')+(vs[i].name||''))){zh=vs[i];break;}}
+  ttsVoice=zh||vs[0]||null;return {count:vs.length,zh:!!zh};
+}
+function ttsBuildChapter(){
+  var w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode:function(n){
+    var p=n.parentNode?n.parentNode.nodeName:'';if(p==='SCRIPT'||p==='STYLE')return NodeFilter.FILTER_REJECT;
+    return n.nodeValue&&n.nodeValue.trim()?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_REJECT;}});
+  ttsMap=[];var node,base=0,t='';
+  while(node=w.nextNode()){ttsMap.push({node:node,start:base,end:base+node.nodeValue.length});t+=node.nodeValue;base+=node.nodeValue.length;}
+  ttsText=t;
+  // 切句（中文标点/换行/过长断开），记录每句在全文的起始偏移
+  ttsSents=[];var cur='',cb=0;
+  for(var i=0;i<t.length;i++){var ch=t[i];cur+=ch;
+    if('。！？!?…\n'.indexOf(ch)>=0||cur.length>=120){if(cur.trim())ttsSents.push({text:cur,base:cb});cb=i+1;cur='';}}
+  if(cur.trim())ttsSents.push({text:cur,base:cb});
+}
+function ttsHighlight(gs,len){
+  len=len||1;
+  var seg=null;for(var i=0;i<ttsMap.length;i++){if(gs>=ttsMap[i].start&&gs<ttsMap[i].end){seg=ttsMap[i];break;}}
+  if(!seg)return;var node=seg.node,o=gs-seg.start;
+  try{var r=document.createRange();r.setStart(node,o);r.setEnd(node,Math.min(node.nodeValue.length,o+len));
+    if(window.CSS&&CSS.highlights)CSS.highlights.set('tts',new Highlight(r));
+    var rr=r.getBoundingClientRect(),pr=pager.getBoundingClientRect();
+    var x=rr.left-pr.left+pager.scrollLeft,pg=Math.floor((x+1)/pageStep);
+    if(pg>=0&&pg<pagesInCh&&pg!==pageInCh)gotoPage(pg);
+  }catch(_){}
+}
+function ttsCurrentOffset(){
+  var a=topAnchor();if(a&&a.range){var n=a.range.startContainer,o=a.range.startOffset;
+    for(var i=0;i<ttsMap.length;i++){if(ttsMap[i].node===n)return ttsMap[i].start+o;}}
+  return 0;
+}
+function ttsAdvance(edge){ // 本章读完 → 下一章
+  if(curCh<CH-1){showChapter(curCh+1,'start').then(function(){if(ttsOn){ttsBuildChapter();if(edge){ttsCache={};ttsPlayIndex(0);}else ttsSpeakFrom(0);}});}else ttsStop();
+}
+function ttsSpeakFrom(i){ // 系统语音
+  if(!ttsOn)return;
+  if(i>=ttsSents.length){ttsAdvance(false);return;}
+  ttsSi=i;var s=ttsSents[i],u=new SpeechSynthesisUtterance(s.text);
+  if(ttsVoice)u.voice=ttsVoice;u.lang='zh-CN';u.rate=ttsRate;
+  u.onboundary=function(e){if(e.charIndex!=null)ttsHighlight(s.base+e.charIndex);};
+  u.onend=function(){if(ttsOn)ttsSpeakFrom(i+1);};
+  speechSynthesis.speak(u);
+}
+// edge-tts：流水线——边读边预取后两句，句间几乎无缝
+function ttsReq(i){
+  if(i<0||i>=ttsSents.length)return;
+  if(ttsCache[i]!==undefined)return; // null=请求中，对象=已到
+  ttsCache[i]=null;
+  var rate=Math.round(((S.ttsRate||1)-1)*100);
+  parent.postMessage({ttsSynth:{seq:ttsGen,idx:i,text:ttsSents[i].text,voice:S.ttsVoice||'',rate:rate}},'*');
+}
+function ttsPlayIndex(i){
+  if(!ttsOn)return;
+  if(i>=ttsSents.length){ttsAdvance(true);return;}
+  ttsSi=i;ttsReq(i);ttsReq(i+1);ttsReq(i+2); // 预取后两句
+  var c=ttsCache[i];
+  if(c&&c.err){ttsPlayIndex(i+1);return;} // 这句取音失败 → 跳过
+  if(c)ttsRenderAudio(i,c);else ttsWaiting=i;
+}
+function ttsRenderAudio(i,a){
+  if(!ttsOn)return;ttsWaiting=-1;ttsSi=i;ttsPlayedAny=true;
+  var s=ttsSents[i],marks=[],cur=0;
+  for(var k=0;k<a.marks.length;k++){var w=a.marks[k].word||'';var idx=w?s.text.indexOf(w,cur):-1;if(idx<0)idx=cur;marks.push({at:a.marks[k].at,off:s.base+idx,len:Math.max(1,w.length)});cur=idx+Math.max(1,w.length);}
+  var au=new Audio('data:audio/mpeg;base64,'+a.audio);ttsAudioEl=au;var mi=0;
+  au.ontimeupdate=function(){var ms=au.currentTime*1000,hl=-1;for(var k=mi;k<marks.length;k++){if(marks[k].at<=ms)hl=k;else break;}if(hl>=0){mi=hl+1;ttsHighlight(marks[hl].off,marks[hl].len);}};
+  au.onended=function(){if(ttsOn)ttsPlayIndex(i+1);};
+  au.onerror=function(){if(ttsOn)ttsPlayIndex(i+1);};
+  au.play().catch(function(){if(ttsOn)ttsPlayIndex(i+1);});
+  ttsReq(i+1);ttsReq(i+2);
+}
+function ttsIsEdge(){return (S.ttsSource||'edge')==='edge';}
+function ttsBegin(){
+  parent.postMessage({ttsState:1},'*');
+  var off=ttsCurrentOffset(),si=0;
+  for(var k=0;k<ttsSents.length;k++){if(ttsSents[k].base+ttsSents[k].text.length>off){si=k;break;}}
+  if(ttsIsEdge()){ttsCache={};ttsWaiting=-1;ttsPlayedAny=false;ttsPlayIndex(si);}else ttsSpeakFrom(si);
+}
+function ttsStart(){
+  ttsOn=true;ttsBuildChapter();
+  if(ttsIsEdge()){ttsBegin();return;} // 在线音源不需要本地语音
+  if(!window.speechSynthesis){parent.postMessage({ttsErr:1},'*');ttsOn=false;return;}
+  var pv=ttsPickVoice();
+  if(pv.count===0){speechSynthesis.onvoiceschanged=function(){if(ttsOn){var p2=ttsPickVoice();if(!p2.zh)parent.postMessage({ttsNoZh:1},'*');ttsBegin();speechSynthesis.onvoiceschanged=null;}};return;}
+  if(!pv.zh)parent.postMessage({ttsNoZh:1},'*');
+  ttsBegin();
+}
+function ttsStop(){
+  ttsOn=false;ttsGen++;ttsCache={};ttsWaiting=-1;
+  try{speechSynthesis.cancel();}catch(_){}
+  if(ttsAudioEl){try{ttsAudioEl.pause();}catch(_){}ttsAudioEl=null;}
+  if(window.CSS&&CSS.highlights)CSS.highlights.delete('tts');
+  parent.postMessage({ttsState:0},'*');
+}
 window.addEventListener('message',function(e){
   if(!e.data)return;
   if(e.data.settings){S=Object.assign(S,e.data.settings);relayout();scheduleMeasure();}
+  if(e.data.tts){if(e.data.tts==='start')ttsStart();else ttsStop();}
+  if(e.data.ttsAudio){var a=e.data.ttsAudio;if(ttsOn&&a.seq===ttsGen){ttsCache[a.idx]=a;if(ttsWaiting===a.idx)ttsRenderAudio(a.idx,a);}}
+  if(e.data.ttsAudioErr){var er=e.data.ttsAudioErr;if(ttsOn&&er.seq===ttsGen){ttsCache[er.idx]={err:1};if(ttsWaiting===er.idx){ttsWaiting=-1;if(!ttsPlayedAny){parent.postMessage({ttsErr:er.err||2},'*');ttsStop();}else ttsPlayIndex(er.idx+1);}}}
+  if(e.data.overlayOpen!==undefined){overlayOpen=!!e.data.overlayOpen;}
+  if(e.data.pageCache){applyPageCache(e.data.pageCache);}
   if(e.data.clearMarks){clearMarksKeepPage();}
   if(e.data.gotoChapter!==undefined){var cf=e.data.chFrac,fr=e.data.frag,sq=e.data.search;showChapter(e.data.gotoChapter,'start',fr).then(function(){if(cf!==undefined&&cf>0)gotoPage(Math.round(cf*(pagesInCh-1)));if(sq)doSearch(sq);});}
-  if(e.data.gotoFrac!==undefined){showChapter(Math.min(CH-1,Math.floor(e.data.gotoFrac*CH)),'start');}
+  if(e.data.gotoFrac!==undefined){gotoGlobalFrac(e.data.gotoFrac);}
   if(e.data.pageTurn){if(e.data.pageTurn>0)nextPage();else prevPage();}
   if(e.data.reveal){reveal();}
   if(e.data.search!==undefined){doSearch(e.data.search);}
   if(e.data.searchNav){searchNav(e.data.searchNav);}
   if(e.data.vchaps){VC=e.data.vchaps;report();}
+  if(e.data.highlights){HL=e.data.highlights;refreshHighlights();}
+  if(e.data.showHlMenuFor!==undefined){var si=e.data.showHlMenuFor;setTimeout(function(){if(window.getSelection)window.getSelection().removeAllRanges();showHlMenu(si);},40);}
+  if(e.data.gotoHighlight!==undefined){var hi=e.data.gotoHighlight,h=HL[hi];if(h){showChapter(h.chapter,'start').then(function(){var el=root.querySelector('mark.hl[data-hi="'+hi+'"]');if(el)gotoPage(pageOf(el));});}}
   if(e.data.resolveToc){
     // 在当前章里，找出当前页或之前最近的一个目录锚点
     var frags=e.data.resolveToc,bestFrag=frags.length?frags[0]:'',bestPage=-1;
@@ -1513,6 +2612,98 @@ fn guess_mime(path: &str) -> String {
 }
 
 /// 把纯文本包成一个排版好看的 HTML 阅读页。
+/// 一行是否像章节标题（中文网文："第X章/节/回 …"，或独立的"楔子/序章/番外"等短行）。
+fn is_txt_heading(line: &str) -> bool {
+    let t = line.trim();
+    let cc = t.chars().count();
+    if cc == 0 || cc > 40 {
+        return false;
+    }
+    let head: String = t.chars().take(14).collect();
+    if t.starts_with('第') && (head.contains('章') || head.contains('节') || head.contains('回')) {
+        return true;
+    }
+    matches!(t, "楔子" | "序" | "序章" | "序言" | "前言" | "引子" | "后记" | "尾声" | "番外")
+}
+
+/// 把整本 txt 切成章节 (标题, 正文)。优先按"第X章"标题切（网文）；否则按 ~5 万字切块。
+/// 切块是为了"虚拟化加载"——打开只排第一章，秒开；其余在后台测量。
+fn build_txt_chapters(text: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let heads: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| is_txt_heading(l))
+        .map(|(i, _)| i)
+        .collect();
+    // 标题足够多、又不至于每行都是 → 按标题切
+    if heads.len() >= 5 && heads.len() < lines.len() / 2 {
+        let mut out: Vec<(String, String)> = Vec::new();
+        if heads[0] > 0 {
+            let pre = lines[..heads[0]].join("\n");
+            if !pre.trim().is_empty() {
+                out.push(("卷首".to_string(), pre));
+            }
+        }
+        for (k, &h) in heads.iter().enumerate() {
+            let end = if k + 1 < heads.len() { heads[k + 1] } else { lines.len() };
+            out.push((lines[h].trim().to_string(), lines[h..end].join("\n")));
+        }
+        return out;
+    }
+    // 否则按 ~5 万字切块
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut cur = String::new();
+    let mut n = 0usize;
+    for line in &lines {
+        cur.push_str(line);
+        cur.push('\n');
+        n += line.chars().count() + 1;
+        if n >= 50000 {
+            out.push((format!("第 {} 节", out.len() + 1), std::mem::take(&mut cur)));
+            n = 0;
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push((format!("第 {} 节", out.len() + 1), cur));
+    }
+    if out.is_empty() {
+        out.push(("正文".to_string(), text.to_string()));
+    }
+    out
+}
+
+/// 取（并缓存）一本 txt 的切分章节。
+fn get_txt_chapters(state: &AppState, id: u64) -> Option<Arc<Vec<(String, String)>>> {
+    {
+        let c = state.txt_chapters.lock().unwrap();
+        if let Some(v) = c.get(&id) {
+            return Some(v.clone());
+        }
+    }
+    let path = { state.library.lock().unwrap().get(id)?.path.clone() };
+    let bytes = std::fs::read(&path).ok()?;
+    let text = book::normalize_text(&book::decode_bytes(&bytes));
+    let arc = Arc::new(build_txt_chapters(&text));
+    state.txt_chapters.lock().unwrap().insert(id, arc.clone());
+    Some(arc)
+}
+
+/// 把纯文本段落化为合并阅读页用的正文 HTML（每段一个 <p>，首行缩进）。
+fn txt_body(text: &str) -> String {
+    let mut body = String::new();
+    for para in text.split('\n') {
+        let para = para.trim();
+        if para.is_empty() {
+            continue;
+        }
+        body.push_str("<p style=\"text-indent:2em\">");
+        body.push_str(&html_escape(para));
+        body.push_str("</p>\n");
+    }
+    body
+}
+
 fn txt_html(text: &str) -> String {
     let mut body = String::new();
     for para in text.split('\n') {
@@ -1600,11 +2791,23 @@ fn extract_book_text(book: &book::Book) -> Vec<String> {
                 })
                 .collect()
         }
-        "pdf" => Vec::new(),
+        "pdf" => extract_pdf_pages(&book.path),
         _ => match std::fs::read(&book.path) {
             Ok(b) => vec![book::normalize_text(&book::decode_bytes(&b))],
             Err(_) => Vec::new(),
         },
+    }
+}
+
+/// 抽取 PDF 每页文字（数字版有效；扫描版/无文字层返回空）。pdf-extract 可能 panic，做兜底。
+fn extract_pdf_pages(path: &Path) -> Vec<String> {
+    let path = path.to_owned();
+    let res = std::panic::catch_unwind(move || {
+        pdf_extract::extract_text_by_pages(&path).unwrap_or_default()
+    });
+    match res {
+        Ok(pages) => pages.into_iter().map(|p| book::normalize_text(&p)).collect(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -1628,7 +2831,7 @@ fn ensure_book_index(book: &book::Book) -> Option<BookIndex> {
     if book.format == "pdf" {
         return None;
     }
-    let id = id_for_path(&book.path);
+    let id = book.id;
     let mtime = file_mtime(&book.path);
     if let Some(idx) = load_index(id) {
         if idx.v == INDEX_VERSION && idx.mtime == mtime {
@@ -1683,7 +2886,7 @@ struct ShelfBookHits {
 
 /// 取一本书的逐章纯文本：优先内存缓存；未命中则读索引文件并（在限额内）缓存。
 fn get_book_chapters(state: &AppState, book: &book::Book) -> Option<Arc<Vec<String>>> {
-    let id = id_for_path(&book.path);
+    let id = book.id;
     let mtime = file_mtime(&book.path);
     {
         let cache = state.text_cache.lock().unwrap();
@@ -1779,7 +2982,7 @@ fn search_one_book(
         return None;
     }
     Some(ShelfBookHits {
-        book_id: id_for_path(&book.path).to_string(),
+        book_id: book.id.to_string(),
         title: book.title.clone(),
         author: book.author.clone(),
         count,
@@ -1807,7 +3010,7 @@ async fn shelf_search(
             .filter(|b| b.format != "pdf")
             .filter(|b| {
                 want.as_ref()
-                    .map(|w| w.contains(&id_for_path(&b.path)))
+                    .map(|w| w.contains(&b.id))
                     .unwrap_or(true)
             })
             .cloned()
@@ -1994,21 +3197,80 @@ struct GlobalEntry {
     c: u32, // 章节
     t: String, // 片段
 }
+type GlobalHnsw = instant_distance::HnswMap<SemPoint, u32>;
+#[derive(Serialize, Deserialize)]
+struct ShardMeta {
+    books: Vec<u64>, // 本分片包含的书（整本归属一片，不跨片）
+    chunks: usize,   // 本分片段落数（估算载入内存用）
+}
 #[derive(Serialize, Deserialize)]
 struct GlobalMeta {
     v: u32,
     model: String,
-    book_ids: Vec<u64>, // 参与建图的书（排序），用于判断是否过期
+    dim: usize,
+    book_ids: Vec<u64>,     // 参与建图的全部书（排序），用于判断是否过期
+    shards: Vec<ShardMeta>, // 各分片描述
 }
-type GlobalHnsw = instant_distance::HnswMap<SemPoint, u32>;
-/// 同时建图的段落数上限：超过则不建全库 HNSW（内存吃不消），检索退回并行暴力。
-const HNSW_MAX_CHUNKS: usize = 2_000_000;
+/// 已载入内存、可供查询的分片集合。
+struct LoadedShards {
+    graphs: Vec<(GlobalHnsw, Vec<GlobalEntry>)>, // 每片：近邻图 + 段落映射
+    covered: std::collections::HashSet<u64>,     // 这些分片覆盖到的书；其余的书查询时退回暴力
+    book_ids: Vec<u64>,                          // 建图时的全部书集合（判过期）
+}
+/// 单个分片的段落上限——决定“建图峰值内存”，与整库大小无关。
+/// 60万×512维f32≈1.2GB 向量，建图峰值约 2~3GB，8GB 内存的机器也安全。
+/// 库再大只是分片更多、建图更久，绝不会因此爆内存（这正是分片的意义）。
+const SHARD_MAX_CHUNKS: usize = 600_000;
 
-fn global_hnsw_path() -> Option<std::path::PathBuf> {
-    Some(sem_dir()?.join("global.hnsw"))
+/// 物理内存总量 / 可用量（字节）。Windows 用 GlobalMemoryStatusEx；其它平台给保守默认。
+#[cfg(windows)]
+fn ram_total_avail() -> (u64, u64) {
+    #[repr(C)]
+    struct MemStatusEx {
+        length: u32,
+        mem_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page: u64,
+        avail_page: u64,
+        total_virt: u64,
+        avail_virt: u64,
+        avail_ext_virt: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(p: *mut MemStatusEx) -> i32;
+    }
+    let mut m: MemStatusEx = unsafe { std::mem::zeroed() };
+    m.length = std::mem::size_of::<MemStatusEx>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 {
+        (m.total_phys, m.avail_phys)
+    } else {
+        (8 << 30, 4 << 30)
+    }
 }
-fn global_map_path() -> Option<std::path::PathBuf> {
-    Some(sem_dir()?.join("global.map"))
+#[cfg(not(windows))]
+fn ram_total_avail() -> (u64, u64) {
+    (8 << 30, 4 << 30)
+}
+
+/// 载入近邻索引可用的内存预算（字节）：物理一半 与 (可用-1GB)的七成 取较小，至少 512MB。
+fn index_ram_budget() -> u64 {
+    let (total, avail) = ram_total_avail();
+    (total / 2)
+        .min(avail.saturating_sub(1 << 30) * 7 / 10)
+        .max(512 << 20)
+}
+/// 估算一个分片载入内存后的占用（向量 + 段落文本 + 图结构的粗略经验值）。
+fn shard_est_bytes(chunks: usize, dim: usize) -> u64 {
+    chunks as u64 * (dim as u64 * 4 + 400)
+}
+
+fn global_shard_hnsw_path(k: usize) -> Option<std::path::PathBuf> {
+    Some(sem_dir()?.join(format!("global_{k}.hnsw")))
+}
+fn global_shard_map_path(k: usize) -> Option<std::path::PathBuf> {
+    Some(sem_dir()?.join(format!("global_{k}.map")))
 }
 fn global_meta_path() -> Option<std::path::PathBuf> {
     Some(sem_dir()?.join("global.json"))
@@ -2021,7 +3283,7 @@ fn indexed_book_ids(state: &AppState) -> Vec<u64> {
         .books
         .iter()
         .filter(|b| b.format != "pdf")
-        .map(|b| id_for_path(&b.path))
+        .map(|b| b.id)
         .filter(|id| sem_meta_path(*id).map(|p| p.exists()).unwrap_or(false))
         .collect();
     v.sort_unstable();
@@ -2127,6 +3389,7 @@ fn sem_build_book(
     id: u64,
     mtime: u64,
     chapters: &[String],
+    resume_at: &AtomicU64,
 ) -> Result<(), String> {
     use std::io::Write;
     let mut items: Vec<(u32, String)> = Vec::new();
@@ -2146,9 +3409,20 @@ fn sem_build_book(
     let mut meta_chunks: Vec<SemChunk> = Vec::with_capacity(items.len());
     let mut dim = 0usize;
     for batch in items.chunks(128) {
+        // 若正在“让路”（用户刚打开阅读窗口），先等到截止时刻，把 CPU 留给窗口冷启动
+        loop {
+            let r = resume_at.load(Ordering::Relaxed);
+            let now = now_ms();
+            if now >= r {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis((r - now).min(200)));
+        }
         // bge 段落不加前缀，直接用原文
         let inputs: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
         let embs = embedder.embed(inputs, None).map_err(|e| e.to_string())?;
+        // 每批后让一小步，给前台留出调度间隙（稳态下也不至于把 8 核占满）
+        std::thread::sleep(std::time::Duration::from_millis(6));
         for (k, (c, t)) in batch.iter().enumerate() {
             let mut v = embs[k].clone();
             normalize(&mut v);
@@ -2221,7 +3495,7 @@ struct SemBookHits {
 
 /// 在一本书里做语义检索，返回该书最相近的前若干段。
 fn sem_search_book(state: &AppState, book: &book::Book, q: &[f32]) -> Option<SemBookHits> {
-    let id = id_for_path(&book.path);
+    let id = book.id;
     let data = get_sem_data(state, id)?;
     let dim = data.dim;
     if dim == 0 || data.chunks.is_empty() {
@@ -2256,6 +3530,52 @@ fn sem_search_book(state: &AppState, book: &book::Book, q: &[f32]) -> Option<Sem
     })
 }
 
+/// 全库分片快速索引是否存在且新鲜（版本/模型/参与书集合都匹配当前已索引的书）。
+fn global_index_fresh(state: &AppState) -> bool {
+    let Some(p) = global_meta_path() else {
+        return false;
+    };
+    let Ok(s) = std::fs::read_to_string(&p) else {
+        return false;
+    };
+    match serde_json::from_str::<GlobalMeta>(&s) {
+        Ok(m) => m.v == SEM_VERSION && m.model == SEM_MODEL && m.book_ids == indexed_book_ids(state),
+        Err(_) => false,
+    }
+}
+
+/// 给定范围（want=None 表示全库）的语义索引是否“已完整”：每本逐书索引都新鲜；
+/// 若是全库范围，还要求分片快速索引也已建好且新鲜。完整则无需重建。
+fn semantic_complete(state: &AppState, want: &Option<std::collections::HashSet<u64>>) -> bool {
+    let books: Vec<(u64, std::path::PathBuf)> = {
+        let lib = state.library.lock().unwrap();
+        lib.books
+            .iter()
+            .filter(|b| b.format != "pdf")
+            .filter(|b| want.as_ref().map(|w| w.contains(&b.id)).unwrap_or(true))
+            .map(|b| (b.id, b.path.clone()))
+            .collect()
+    };
+    if books.is_empty() {
+        return false;
+    }
+    if !books.iter().all(|(id, path)| sem_is_fresh(*id, file_mtime(path))) {
+        return false;
+    }
+    if want.is_none() && !global_index_fresh(state) {
+        return false; // 全库范围：缺分片快速索引也算没完成
+    }
+    true
+}
+
+/// 查询某范围的语义索引是否已建立完成（供 UI 在点“建立”前判断、避免重复建立）。
+#[tauri::command]
+fn semantic_index_done(state: tauri::State<AppState>, ids: Option<Vec<String>>) -> bool {
+    let want: Option<std::collections::HashSet<u64>> =
+        ids.map(|v| v.iter().filter_map(|s| s.parse::<u64>().ok()).collect());
+    semantic_complete(state.inner(), &want)
+}
+
 /// 后台为全部/选定图书建立语义索引（耗时，逐本进行，可看进度）。
 #[tauri::command]
 async fn build_semantic_index(
@@ -2263,6 +3583,17 @@ async fn build_semantic_index(
     state: tauri::State<'_, AppState>,
     ids: Option<Vec<String>>,
 ) -> Result<(), String> {
+    let want: Option<std::collections::HashSet<u64>> =
+        ids.map(|v| v.iter().filter_map(|s| s.parse::<u64>().ok()).collect());
+    // 已是最新（每本都新鲜 + 全库分片图新鲜）→ 不重建，直接报“已完成”
+    if semantic_complete(state.inner(), &want) {
+        let mut p = state.sem_progress.lock().unwrap();
+        if !p.building {
+            p.error = String::new();
+            p.current = "语义索引已是最新，无需重建".into();
+        }
+        return Ok(());
+    }
     {
         let mut p = state.sem_progress.lock().unwrap();
         if p.building {
@@ -2274,9 +3605,8 @@ async fn build_semantic_index(
             ..Default::default()
         };
     }
-    let want: Option<std::collections::HashSet<u64>> =
-        ids.map(|v| v.iter().filter_map(|s| s.parse::<u64>().ok()).collect());
     std::thread::spawn(move || {
+        set_thread_background(true); // 后台优先级，绝不和前台抢 CPU
         let state = app.state::<AppState>();
         let embedder = match get_embedder(state.inner()) {
             Ok(e) => e,
@@ -2297,7 +3627,7 @@ async fn build_semantic_index(
                 .filter(|b| b.format != "pdf")
                 .filter(|b| {
                     want.as_ref()
-                        .map(|w| w.contains(&id_for_path(&b.path)))
+                        .map(|w| w.contains(&b.id))
                         .unwrap_or(true)
                 })
                 .cloned()
@@ -2313,104 +3643,137 @@ async fn build_semantic_index(
                 p.done = i as u32;
                 p.current = b.title.clone();
             }
-            let id = id_for_path(&b.path);
+            let id = b.id;
             let mtime = file_mtime(&b.path);
             if sem_is_fresh(id, mtime) {
                 continue;
             }
             if let Some(ch) = get_book_chapters(state.inner(), b) {
-                let _ = sem_build_book(&embedder, id, mtime, &ch);
+                let _ = sem_build_book(&embedder, id, mtime, &ch, &state.index_resume_at);
             }
         }
         {
             let mut p = state.sem_progress.lock().unwrap();
             p.done = p.total;
-            p.current = "建立全库快速索引（HNSW）…".into();
+            p.current = "建立加速索引（分片）…".into();
         }
-        let hnsw_err = build_global_hnsw(state.inner()).err().unwrap_or_default();
+        // 注意：加速索引建不成「不算失败」——逐书向量已就绪、检索照常可用，只是慢一点。
+        // 因此这里绝不写 p.error（p.error 只留给模型加载等真正的失败）。
+        let idx_err = build_global_index(state.inner()).err().unwrap_or_default();
         let mut p = state.sem_progress.lock().unwrap();
         p.building = false;
-        p.current = "完成".into();
-        if !hnsw_err.is_empty() {
-            p.error = hnsw_err;
-        }
+        p.current = if idx_err.is_empty() {
+            "完成".into()
+        } else {
+            format!("完成（检索可用；加速索引未建成：{idx_err}）")
+        };
     });
     Ok(())
 }
 
-/// 用所有已建索引的书，构建一张全库 HNSW 近邻图并落盘（供毫秒级检索）。
-fn build_global_hnsw(state: &AppState) -> Result<(), String> {
+/// 把一片的向量建图并落盘（global_{k}.hnsw 图 + global_{k}.map 映射）。
+fn write_shard(k: usize, points: Vec<SemPoint>, values: Vec<u32>, mapping: &[GlobalEntry]) -> Result<(), String> {
     use std::io::Write;
+    let hp = global_shard_hnsw_path(k).ok_or("无缓存路径")?;
+    if let Some(d) = hp.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let map: GlobalHnsw = instant_distance::Builder::default().build(points, values);
+    let mut f = std::io::BufWriter::new(std::fs::File::create(&hp).map_err(|e| e.to_string())?);
+    bincode::serialize_into(&mut f, &map).map_err(|e| e.to_string())?;
+    f.flush().ok();
+    let mp = global_shard_map_path(k).ok_or("无缓存路径")?;
+    let mut mf = std::io::BufWriter::new(std::fs::File::create(&mp).map_err(|e| e.to_string())?);
+    bincode::serialize_into(&mut mf, &mapping).map_err(|e| e.to_string())?;
+    mf.flush().ok();
+    Ok(())
+}
+
+/// 用所有已建索引的书，构建“分片”近邻索引并落盘。一次只建一片→建图内存恒定，
+/// 任何机器、任何库大小都不会因此爆内存（再大只是分片更多）。整本书归属同一片，不跨片。
+fn build_global_index(state: &AppState) -> Result<(), String> {
     let ids = indexed_book_ids(state);
+    // 先清掉旧的全库索引文件（含上一版单图的 global.hnsw/global.map）
+    if let Some(d) = sem_dir() {
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if n.starts_with("global_") || n == "global.hnsw" || n == "global.map" || n == "global.json" {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
     if ids.is_empty() {
         return Ok(());
     }
+    let mut shards: Vec<ShardMeta> = Vec::new();
+    let mut dim = 0usize;
     let mut points: Vec<SemPoint> = Vec::new();
     let mut values: Vec<u32> = Vec::new();
     let mut mapping: Vec<GlobalEntry> = Vec::new();
+    let mut shard_books: Vec<u64> = Vec::new();
+    let mut k = 0usize;
     for id in &ids {
         let Some(data) = get_sem_data(state, *id) else {
             continue;
         };
-        let dim = data.dim;
-        if dim == 0 {
+        if data.dim == 0 {
             continue;
         }
-        for (i, chunk) in data.chunks.iter().enumerate() {
-            if mapping.len() >= HNSW_MAX_CHUNKS {
-                return Err(format!(
-                    "段落数超过 {} 万，未建全库快速索引（检索将用并行暴力）",
-                    HNSW_MAX_CHUNKS / 10000
-                ));
+        dim = data.dim;
+        // 当前片再加这本会超额 → 先把当前片落盘，开新片
+        if !mapping.is_empty() && mapping.len() + data.chunks.len() > SHARD_MAX_CHUNKS {
+            let n = mapping.len();
+            write_shard(k, std::mem::take(&mut points), std::mem::take(&mut values), &mapping)?;
+            shards.push(ShardMeta { books: std::mem::take(&mut shard_books), chunks: n });
+            mapping.clear();
+            k += 1;
+            if let Ok(mut p) = state.sem_progress.lock() {
+                p.current = format!("建立加速索引（第 {} 片）…", k + 1);
             }
-            let v = data.vecs[i * dim..(i + 1) * dim].to_vec();
+        }
+        for (i, chunk) in data.chunks.iter().enumerate() {
+            let v = data.vecs[i * data.dim..(i + 1) * data.dim].to_vec();
             values.push(mapping.len() as u32);
             points.push(SemPoint(v));
-            mapping.push(GlobalEntry {
-                b: *id,
-                c: chunk.c,
-                t: chunk.t.clone(),
-            });
+            mapping.push(GlobalEntry { b: *id, c: chunk.c, t: chunk.t.clone() });
         }
-        // 建图阶段不长期占用逐书缓存，建完即释放
+        shard_books.push(*id);
+        // 建图阶段不长期占用逐书缓存，加完即释放
         let _ = state.sem_cache.lock().map(|mut c| c.remove(id));
     }
-    if points.is_empty() {
+    if !mapping.is_empty() {
+        let n = mapping.len();
+        write_shard(k, std::mem::take(&mut points), std::mem::take(&mut values), &mapping)?;
+        shards.push(ShardMeta { books: std::mem::take(&mut shard_books), chunks: n });
+    }
+    if shards.is_empty() {
         return Ok(());
     }
-    let map: GlobalHnsw = instant_distance::Builder::default().build(points, values);
-
-    let hp = global_hnsw_path().ok_or("无缓存路径")?;
-    if let Some(d) = hp.parent() {
-        let _ = std::fs::create_dir_all(d);
-    }
-    let mut f = std::io::BufWriter::new(std::fs::File::create(&hp).map_err(|e| e.to_string())?);
-    bincode::serialize_into(&mut f, &map).map_err(|e| e.to_string())?;
-    f.flush().ok();
-    let mp = global_map_path().ok_or("无缓存路径")?;
-    let mut mf = std::io::BufWriter::new(std::fs::File::create(&mp).map_err(|e| e.to_string())?);
-    bincode::serialize_into(&mut mf, &mapping).map_err(|e| e.to_string())?;
-    mf.flush().ok();
     let meta = GlobalMeta {
         v: SEM_VERSION,
         model: SEM_MODEL.to_string(),
+        dim,
         book_ids: ids,
+        shards,
     };
     std::fs::write(
         global_meta_path().ok_or("无缓存路径")?,
         serde_json::to_string(&meta).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    *state.global_hnsw.lock().unwrap() = None; // 让下次查询重新载入
+    *state.global_index.lock().unwrap() = None; // 让下次查询重新载入
     Ok(())
 }
 
-/// 载入（并缓存）全库 HNSW 图；与当前已索引书集合不一致则视为过期，返回 None。
-fn get_global_hnsw(state: &AppState) -> Option<Arc<(GlobalHnsw, Vec<GlobalEntry>, Vec<u64>)>> {
+/// 载入（并缓存）分片近邻索引。按内存预算尽量多载入分片；与当前已索引书集合不一致则视为过期。
+/// 返回 None 表示无索引/过期/损坏（应整体退回暴力）。
+fn load_global_index(state: &AppState) -> Option<Arc<LoadedShards>> {
     {
-        let g = state.global_hnsw.lock().unwrap();
+        let g = state.global_index.lock().unwrap();
         if let Some(a) = g.as_ref() {
-            if a.2 == indexed_book_ids(state) {
+            if a.book_ids == indexed_book_ids(state) {
                 return Some(a.clone());
             }
         }
@@ -2423,52 +3786,60 @@ fn get_global_hnsw(state: &AppState) -> Option<Arc<(GlobalHnsw, Vec<GlobalEntry>
     if meta.book_ids != indexed_book_ids(state) {
         return None; // 索引集合变了 → 过期，退回暴力
     }
-    let map: GlobalHnsw = bincode::deserialize_from(std::io::BufReader::new(
-        std::fs::File::open(global_hnsw_path()?).ok()?,
-    ))
-    .ok()?;
-    let mapping: Vec<GlobalEntry> = bincode::deserialize_from(std::io::BufReader::new(
-        std::fs::File::open(global_map_path()?).ok()?,
-    ))
-    .ok()?;
-    let arc = Arc::new((map, mapping, meta.book_ids));
-    *state.global_hnsw.lock().unwrap() = Some(arc.clone());
+    let budget = index_ram_budget();
+    let mut graphs: Vec<(GlobalHnsw, Vec<GlobalEntry>)> = Vec::new();
+    let mut covered: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut used: u64 = 0;
+    for (k, sh) in meta.shards.iter().enumerate() {
+        let est = shard_est_bytes(sh.chunks, meta.dim);
+        // 预算用尽就停（但至少载入一片，保证有加速）；其余分片的书查询时退回暴力
+        if !graphs.is_empty() && used + est > budget {
+            break;
+        }
+        let map: GlobalHnsw = bincode::deserialize_from(std::io::BufReader::new(
+            std::fs::File::open(global_shard_hnsw_path(k)?).ok()?,
+        ))
+        .ok()?;
+        let mapping: Vec<GlobalEntry> = bincode::deserialize_from(std::io::BufReader::new(
+            std::fs::File::open(global_shard_map_path(k)?).ok()?,
+        ))
+        .ok()?;
+        for id in &sh.books {
+            covered.insert(*id);
+        }
+        graphs.push((map, mapping));
+        used += est;
+    }
+    if graphs.is_empty() {
+        return None;
+    }
+    let arc = Arc::new(LoadedShards { graphs, covered, book_ids: meta.book_ids });
+    *state.global_index.lock().unwrap() = Some(arc.clone());
     Some(arc)
 }
 
-/// 用全库 HNSW 检索（仅在全库查询、且图新鲜时）。返回 None 表示无图/过期，应退回暴力。
-fn sem_search_global(state: &AppState, q: &[f32]) -> Option<Vec<SemBookHits>> {
-    let g = get_global_hnsw(state)?;
-    let titles: HashMap<u64, (String, String)> = {
-        let lib = state.library.lock().unwrap();
-        lib.books
-            .iter()
-            .map(|b| (id_for_path(&b.path), (b.title.clone(), b.author.clone())))
-            .collect()
-    };
+/// 在已载入内存的分片上做近邻检索，返回每本书的命中聚合。
+fn search_loaded_shards(li: &LoadedShards, q: &[f32], titles: &HashMap<u64, (String, String)>) -> Vec<SemBookHits> {
     let qp = SemPoint(q.to_vec());
-    let mut search = instant_distance::Search::default();
     let mut per: HashMap<u64, Vec<SemHit>> = HashMap::new();
     let mut best: HashMap<u64, f32> = HashMap::new();
-    for item in g.0.search(&qp, &mut search).take(400) {
-        let gid = *item.value as usize;
-        let Some(e) = g.1.get(gid) else { continue };
-        let sim = 1.0 - item.distance;
-        let v = per.entry(e.b).or_default();
-        if v.len() < 8 {
-            v.push(SemHit {
-                chapter: e.c,
-                snippet: e.t.clone(),
-                score: sim,
-            });
-        }
-        let bb = best.entry(e.b).or_insert(sim);
-        if sim > *bb {
-            *bb = sim;
+    for (graph, mapping) in &li.graphs {
+        let mut search = instant_distance::Search::default();
+        for item in graph.search(&qp, &mut search).take(400) {
+            let gid = *item.value as usize;
+            let Some(e) = mapping.get(gid) else { continue };
+            let sim = 1.0 - item.distance;
+            let v = per.entry(e.b).or_default();
+            if v.len() < 8 {
+                v.push(SemHit { chapter: e.c, snippet: e.t.clone(), score: sim });
+            }
+            let bb = best.entry(e.b).or_insert(sim);
+            if sim > *bb {
+                *bb = sim;
+            }
         }
     }
-    let mut out: Vec<SemBookHits> = per
-        .into_iter()
+    per.into_iter()
         .map(|(id, hits)| {
             let (title, author) = titles.get(&id).cloned().unwrap_or_default();
             SemBookHits {
@@ -2479,10 +3850,40 @@ fn sem_search_global(state: &AppState, q: &[f32]) -> Option<Vec<SemBookHits>> {
                 hits,
             }
         })
-        .collect();
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    out.truncate(60);
-    Some(out)
+        .collect()
+}
+
+/// 对一组书做并行暴力语义检索（无近邻图、或分片没覆盖到的书走这里）。
+fn brute_force_books(state: &AppState, targets: &[book::Book], q: &[f32]) -> Vec<SemBookHits> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let qref: &[f32] = q;
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(4)
+        .max(1);
+    let chunk_size = targets.len().div_ceil(nthreads).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut out = Vec::new();
+                    for b in chunk {
+                        if let Some(h) = sem_search_book(state, b, qref) {
+                            out.push(h);
+                        }
+                    }
+                    out
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    })
 }
 
 /// 查询建立语义索引的进度。
@@ -2509,60 +3910,41 @@ async fn semantic_search(
         .remove(0);
     normalize(&mut q);
 
-    // 全库查询（未限定书）优先走 HNSW 近邻索引（毫秒级）；无图/过期则退回并行暴力
-    if ids.is_none() {
-        if let Some(res) = sem_search_global(state.inner(), &q) {
-            return Ok(res);
+    let st: &AppState = state.inner();
+    let want: Option<std::collections::HashSet<u64>> =
+        ids.map(|v| v.iter().filter_map(|s| s.parse::<u64>().ok()).collect());
+
+    // 全库查询：已载入的分片走近邻（毫秒级）；分片没覆盖到的书（内存装不下/未建索引）退回暴力，合并。
+    let mut covered: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut results: Vec<SemBookHits> = Vec::new();
+    if want.is_none() {
+        if let Some(li) = load_global_index(st) {
+            let titles: HashMap<u64, (String, String)> = {
+                let lib = st.library.lock().unwrap();
+                lib.books
+                    .iter()
+                    .map(|b| (b.id, (b.title.clone(), b.author.clone())))
+                    .collect()
+            };
+            covered = li.covered.clone();
+            results.extend(search_loaded_shards(&li, &q, &titles));
         }
     }
 
-    let want: Option<std::collections::HashSet<u64>> =
-        ids.map(|v| v.iter().filter_map(|s| s.parse::<u64>().ok()).collect());
+    // 需要暴力的书：限定集合内（或全库）中，已建索引、且未被已载入分片覆盖的书
     let targets: Vec<book::Book> = {
-        let lib = state.library.lock().unwrap();
+        let lib = st.library.lock().unwrap();
         lib.books
             .iter()
             .filter(|b| b.format != "pdf")
-            .filter(|b| {
-                want.as_ref()
-                    .map(|w| w.contains(&id_for_path(&b.path)))
-                    .unwrap_or(true)
-            })
-            .filter(|b| sem_meta_path(id_for_path(&b.path)).map(|p| p.exists()).unwrap_or(false))
+            .filter(|b| want.as_ref().map(|w| w.contains(&b.id)).unwrap_or(true))
+            .filter(|b| !covered.contains(&b.id))
+            .filter(|b| sem_meta_path(b.id).map(|p| p.exists()).unwrap_or(false))
             .cloned()
             .collect()
     };
-    if targets.is_empty() {
-        return Ok(Vec::new());
-    }
+    results.extend(brute_force_books(st, &targets, &q));
 
-    let st: &AppState = state.inner();
-    let qref: &[f32] = &q;
-    let nthreads = std::thread::available_parallelism()
-        .map(|n| n.get().min(8))
-        .unwrap_or(4)
-        .max(1);
-    let chunk_size = targets.len().div_ceil(nthreads).max(1);
-    let mut results: Vec<SemBookHits> = std::thread::scope(|scope| {
-        let handles: Vec<_> = targets
-            .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    let mut out = Vec::new();
-                    for b in chunk {
-                        if let Some(h) = sem_search_book(st, b, qref) {
-                            out.push(h);
-                        }
-                    }
-                    out
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(60);
     Ok(results)
@@ -2712,16 +4094,20 @@ fn main() {
             backfilled: std::sync::atomic::AtomicBool::new(false),
             pending_jump: Mutex::new(HashMap::new()),
             text_cache: Mutex::new(HashMap::new()),
+            txt_chapters: Mutex::new(HashMap::new()),
             cache_bytes: AtomicUsize::new(0),
             embedder: Mutex::new(None),
             sem_cache: Mutex::new(HashMap::new()),
             sem_cache_bytes: AtomicUsize::new(0),
             sem_progress: Mutex::new(SemProgress::default()),
-            global_hnsw: Mutex::new(None),
+            global_index: Mutex::new(None),
+            index_resume_at: AtomicU64::new(0),
+            stats: Mutex::new(StatsStore::load()),
         })
         // 主窗口（书架）：恢复上次的大小/位置，并在移动/缩放/关闭时记忆
         .setup(|app| {
             spawn_build_index(app.handle().clone()); // 后台建立/更新全文检索索引
+            spawn_fingerprint_fill(app.handle().clone()); // 后台为旧书补内容指纹
             if let Some(win) = app.get_webview_window("main") {
                 let geom = { app.state::<AppState>().library.lock().unwrap().main_geom.clone() };
                 // 先在隐藏状态下摆好位置/大小再显示（避免闪动）；位置越界则回到屏幕中央
@@ -2781,6 +4167,7 @@ fn main() {
             add_books,
             remove_book,
             remove_books,
+            set_cover,
             open_book,
             book_info,
             book_meta,
@@ -2789,7 +4176,15 @@ fn main() {
             add_bookmark,
             remove_bookmark,
             reading_stats,
+            reading_stats_range,
             add_reading_time,
+            add_read_words,
+            open_url,
+            edge_tts,
+            get_page_cache,
+            save_page_cache,
+            get_pdf_state,
+            set_pdf_state,
             search_book,
             set_description,
             web_search,
@@ -2799,8 +4194,13 @@ fn main() {
             build_shelf_index,
             open_search_window,
             build_semantic_index,
+            semantic_index_done,
             semantic_status,
-            semantic_search
+            semantic_search,
+            add_highlight,
+            remove_highlight,
+            set_highlight_note,
+            relocate_book
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 失败");

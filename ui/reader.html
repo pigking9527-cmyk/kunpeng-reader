@@ -14,7 +14,8 @@
       }
       .toolbar {
         display: flex; align-items: center; gap: 6px;
-        padding: 6px 10px; border-bottom: 1px solid #e3e3e6; background: #fafafa;
+        height: 35px; box-sizing: border-box; padding: 0 10px;
+        border-bottom: 1px solid #e3e3e6; background: #fafafa;
         flex: 0 0 auto; position: relative; z-index: 20;
       }
       .toolbar .title { margin-left: auto; color: #555; font-size: 13px;
@@ -24,14 +25,16 @@
         border-radius: 6px; background: #fff; cursor: pointer;
       }
       .tbtn:hover { background: #eef2ff; border-color: #93b4ff; }
+      .tbtn.active { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
 
-      /* 书内搜索栏：浮在正文之上，不挤占阅读区；最高占满整个阅读区高度 */
+      /* 书内搜索框：贴着搜索键的下拉面板（与设置面板一致），不再占满整行 */
+      .search-wrap { position: relative; display: inline-flex; }
       .rsearch {
         display: none; flex-direction: column; gap: 6px;
-        position: absolute; top: 8px; left: 8px; right: 8px; z-index: 30;
-        max-height: calc(100% - 16px);
-        padding: 8px 10px; border: 1px solid #e3e3e6; border-radius: 10px;
-        background: #fafafa; box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+        position: absolute; top: calc(100% + 8px); left: 0; z-index: 30;
+        width: 340px; max-width: 86vw; max-height: 70vh;
+        padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px;
+        background: #fff; box-shadow: 0 6px 20px rgba(0,0,0,0.2);
       }
       .rsearch.show { display: flex; }
       .rsearch-row { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
@@ -109,10 +112,19 @@
         position: absolute; left: 0; top: 0; bottom: 0; width: 260px;
         background: #fafafa; border-right: 1px solid #ddd;
         box-shadow: 2px 0 10px rgba(0,0,0,0.2);
-        overflow-y: auto; padding: 8px 6px; z-index: 6;
+        z-index: 6; display: flex; flex-direction: column;
         transform: translateX(-100%); transition: transform 0.15s ease;
       }
       .toc.show { transform: translateX(0); }
+      .toc-tabs { display: flex; flex: 0 0 auto; border-bottom: 1px solid #ddd; }
+      .toc-tab { flex: 1; padding: 10px 0; border: none; background: transparent; cursor: pointer;
+        font: inherit; font-size: 14px; color: #666; }
+      .toc-tab.active { color: #1c4fb0; font-weight: 600; box-shadow: inset 0 -2px 0 #2b6cff; }
+      .toc-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 6px; }
+      .toc-pane[hidden] { display: none; }
+      body.theme-dark .toc-tab { color: #aaa; }
+      body.theme-dark .toc-tab.active { color: #8ab4ff; }
+      body.theme-dark .toc-tabs { border-color: #3a3a3d; }
       .toc .toc-item {
         padding: 6px 8px; border-radius: 5px; cursor: pointer; font-size: 14px;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -201,11 +213,73 @@
       body.theme-dark .bm-add { background: #2e2e30; color: #ddd; border-color: #4a4a4d; }
       body.theme-dark .bm-item { color: #ddd; }
       body.theme-dark .bm-item:hover { background: #3a3a3d; }
+      /* 高亮列表项 */
+      .hl-hint { padding: 4px 8px 8px; color: #aaa; font-size: 12px; line-height: 1.5; }
+      .hl-item { position: relative; padding: 7px 22px 7px 8px; border-radius: 6px; cursor: pointer;
+        font-size: 13px; border-bottom: 1px solid #f0f0f2; }
+      .hl-item:hover { background: #fff8e0; }
+      .hl-text { line-height: 1.5; color: #333; }
+      .hl-note { margin-top: 3px; color: #5a78d0; font-size: 12px; }
+      .hl-item .bm-del { position: absolute; right: 4px; top: 6px; }
+      body.theme-dark .hl-item { color: #ddd; border-color: #3a3a3d; }
+      body.theme-dark .hl-text { color: #ddd; }
+      body.theme-dark .hl-item:hover { background: #3a3a30; }
 
-      /* PDF 模式：交给 WebView2 自带阅读器，隐藏分页相关控件 */
-      body.pdf-mode #toc-btn, body.pdf-mode #prev-btn, body.pdf-mode #next-btn,
-      body.pdf-mode #rsearch-btn, body.pdf-mode .gear-wrap, body.pdf-mode .bm-wrap,
-      body.pdf-mode #progress, body.pdf-mode #vbar { display: none; }
+      /* PDF 模式（PDF.js 渲染）：保留工具栏，仅缩放按钮 PDF 专用；高亮/侧滚条暂隐 */
+      .pdf-only { display: none; }
+      body.pdf-mode .pdf-only { display: inline-block; }
+      body.pdf-mode .epub-only { display: none; } /* 朗读暂仅 EPUB/txt */
+      body.pdf-mode #vbar { display: none; }
+      /* 沉浸模式：工具栏淡出但保留其占位（不改阅读区高度）→ 切换沉浸时零重排、绝不跳页；
+         点屏幕中间唤出（bar-show 时淡入）。关键：不能用 position:absolute，那会释放占位、
+         令 iframe 变高触发整书重排，正是金庸全集跳页的根因。 */
+      /* 沉浸模式：保留工具栏占位（不改阅读区高度→零重排不跳页）。只淡出按钮，
+         右上角阅读统计始终可见；点屏幕中间唤出时按钮淡入。隐藏时工具栏背景透明，
+         只剩统计文字浮在顶部，更干净；唤出时恢复背景+阴影。 */
+      body.immersive .toolbar > button,
+      body.immersive .toolbar > .search-wrap,
+      body.immersive .toolbar > .gear-wrap { opacity: 0; pointer-events: none; transition: opacity 0.18s ease; }
+      body.immersive.bar-show .toolbar > button,
+      body.immersive.bar-show .toolbar > .search-wrap,
+      body.immersive.bar-show .toolbar > .gear-wrap { opacity: 1; pointer-events: auto; }
+      body.immersive .toolbar { background: transparent; border-bottom-color: transparent; }
+      body.immersive.bar-show .toolbar { background: #fafafa; border-bottom-color: #e3e3e6;
+        box-shadow: 0 3px 12px rgba(0,0,0,0.18); }
+      body.theme-dark.immersive.bar-show .toolbar { background: #262628; border-bottom-color: #3a3a3d; }
+      /* 批注页（大） */
+      .anno-card { width: 680px; max-width: 92vw; max-height: 84vh; display: flex; flex-direction: column; }
+      #anno-list { overflow-y: auto; }
+      .anno-empty { padding: 28px; text-align: center; color: #aaa; }
+      .anno-item { border-top: 1px solid #eee; padding: 14px 2px; }
+      .anno-item:first-child { border-top: none; }
+      .anno-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+      .anno-ch { color: #2b6cff; font-size: 13px; cursor: pointer; }
+      .anno-ch:hover { text-decoration: underline; }
+      .anno-del { margin-left: auto; color: #c0392b; cursor: pointer; font-size: 13px; }
+      .anno-edit-btn { color: #2b6cff; cursor: pointer; font-size: 13px; }
+      .anno-edit-btn:hover, .anno-ch:hover, .anno-del:hover { text-decoration: underline; }
+      .anno-ctx { font-size: 15px; line-height: 1.85; color: #444; background: #fbf5e3;
+        border-radius: 8px; padding: 10px 12px; max-height: 180px; overflow: auto; }
+      .anno-ctx mark { background: #ffd95a; color: inherit; padding: 0 1px; border-radius: 2px; }
+      .anno-note-view { margin-top: 8px; font-size: 15px; line-height: 1.6; color: #2f63c8;
+        background: #eef3ff; border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
+      /* 编辑区：默认收起，点"编辑"才滑开 */
+      .anno-edit { max-height: 0; overflow: hidden; transition: max-height 0.25s ease; }
+      .anno-edit.open { max-height: 280px; margin-top: 8px; }
+      .anno-note { width: 100%; box-sizing: border-box; font-size: 16px; line-height: 1.6;
+        min-height: 80px; border: 1px solid #ddd; border-radius: 8px; padding: 10px; resize: vertical;
+        font-family: inherit; outline: none; }
+      .anno-note:focus { border-color: #5aa0ff; }
+      .anno-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+      .anno-edit-actions button { font: 14px/1 inherit; padding: 7px 16px; border-radius: 8px;
+        border: 1px solid #ccc; background: #fff; cursor: pointer; }
+      .anno-edit-actions .save { background: #2b6cff; color: #fff; border-color: #2b6cff; }
+      .anno-item.target { background: #fff7d6; border-radius: 8px; padding-left: 8px; padding-right: 8px; }
+      body.theme-dark .anno-ctx { background: #34301f; color: #ddd; }
+      body.theme-dark .anno-note-view { background: #23304a; color: #cfe0ff; }
+      body.theme-dark .anno-note { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .anno-item { border-color: #3a3a3d; }
+      body.theme-dark .anno-item.target { background: #3a3520; }
     </style>
   </head>
   <body>
@@ -213,15 +287,24 @@
       <button id="toc-btn" class="tbtn">☰ 目录</button>
       <button id="prev-btn" class="tbtn" title="上一章">◀</button>
       <button id="next-btn" class="tbtn" title="下一章">▶</button>
-      <button id="rsearch-btn" class="tbtn" title="搜索书中文字">🔍</button>
-      <button id="info-btn" class="tbtn" title="书籍信息">ⓘ</button>
-      <div class="bm-wrap">
-        <button id="bm-btn" class="tbtn" title="书签">🔖</button>
-        <div id="bm-panel" class="bm-panel">
-          <button id="bm-add" class="bm-add">➕ 在当前页加书签</button>
-          <div id="bm-list" class="bm-list"></div>
+      <div class="search-wrap">
+        <button id="rsearch-btn" class="tbtn" title="搜索书中文字">🔍</button>
+        <div id="rsearch" class="rsearch">
+          <div class="rsearch-row">
+            <input id="rsearch-input" type="text" autocomplete="off" placeholder="搜索全书文字…" />
+            <span id="rsearch-count" class="rcount"></span>
+            <button id="rsearch-close" class="tbtn" title="关闭">✕</button>
+          </div>
+          <div id="rsearch-results" class="rsearch-results"></div>
         </div>
       </div>
+      <button id="info-btn" class="tbtn" title="书籍信息">ⓘ</button>
+      <button id="tts-btn" class="tbtn epub-only" title="朗读（从当前页开始，自动翻页）">🔊</button>
+      <button id="hl-btn" class="tbtn" title="批注 / 高亮">🖍</button>
+      <button id="zoom-out" class="tbtn pdf-only" title="缩小">－</button>
+      <button id="zoom-in" class="tbtn pdf-only" title="放大">＋</button>
+      <button id="pdf-dual" class="tbtn pdf-only" title="单页 / 双页">▥</button>
+      <button id="immersive-btn" class="tbtn" title="沉浸模式（隐藏工具栏，点屏幕中间唤出）">⛶</button>
       <div class="gear-wrap">
         <button id="gear-btn" class="tbtn">⚙ 设置</button>
         <div id="settings" class="settings">
@@ -256,6 +339,19 @@
         <label>左 <input type="number" id="set-ml" min="0" max="240" /></label>
         <label>右 <input type="number" id="set-mr" min="0" max="240" /></label>
       </div>
+      <h4>朗读 🔊</h4>
+      <div class="row"><label>音源</label><select id="set-ttssrc">
+        <option value="edge">在线 · 微软神经（中文好）</option>
+        <option value="system">系统语音（离线）</option>
+      </select></div>
+      <div class="row"><label>音色</label><select id="set-ttsvoice">
+        <option value="zh-CN-XiaoxiaoNeural">晓晓（女）</option>
+        <option value="zh-CN-YunxiNeural">云希（男）</option>
+        <option value="zh-CN-YunyangNeural">云扬（男·播音）</option>
+        <option value="zh-CN-XiaoyiNeural">晓伊（女）</option>
+        <option value="zh-CN-liaoning-XiaobeiNeural">小北（东北话）</option>
+      </select></div>
+      <div class="row"><label>语速</label><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.1" /><span class="val" id="v-ttsrate"></span></div>
         </div>
       </div>
       <span id="progress" class="title">—</span>
@@ -263,17 +359,19 @@
 
     <div class="body">
       <iframe id="frame" referrerpolicy="no-referrer"></iframe>
-      <div id="rsearch" class="rsearch">
-        <div class="rsearch-row">
-          <input id="rsearch-input" type="text" autocomplete="off" placeholder="搜索全书文字…" />
-          <span id="rsearch-count" class="rcount"></span>
-          <button id="rsearch-close" class="tbtn" title="关闭">✕</button>
-        </div>
-        <div id="rsearch-results" class="rsearch-results"></div>
-      </div>
       <div id="loading" class="loading"><div class="spinner"></div><div>加载中…</div></div>
       <div id="backdrop" class="backdrop"></div>
-      <aside id="toc" class="toc"></aside>
+      <aside id="toc" class="toc">
+        <div class="toc-tabs">
+          <button id="tab-toc" class="toc-tab active" type="button">目录</button>
+          <button id="tab-bm" class="toc-tab" type="button">书签</button>
+        </div>
+        <div id="toc-pane" class="toc-pane"></div>
+        <div id="bm-pane" class="toc-pane" hidden>
+          <button id="bm-add2" class="bm-add">➕ 在当前页加书签</button>
+          <div id="bm-list2" class="bm-list"></div>
+        </div>
+      </aside>
       <div id="vbar" class="vbar"><div id="vthumb" class="vthumb"></div></div>
     </div>
     <div id="info-modal" class="modal">
@@ -288,6 +386,15 @@
         <div class="info-row"><span class="info-k">字数</span><span id="info-words" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">大小</span><span id="info-size" class="info-v"></span></div>
         <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="info-desc" class="info-desc" contenteditable="true"></div></div>
+      </div>
+    </div>
+    <div id="anno-modal" class="modal">
+      <div class="modal-card anno-card">
+        <div class="modal-head">
+          <span>批注 / 高亮</span>
+          <button id="anno-close" class="tbtn">✕</button>
+        </div>
+        <div id="anno-list"></div>
       </div>
     </div>
     <script src="reader.js"></script>

@@ -158,11 +158,16 @@ body {
   box-shadow: 0 6px 20px rgba(0,0,0,0.18); padding: 12px 14px; z-index: 30;
   display: none;
 }
-.filter-panel.show { display: flex; gap: 16px; }
+.filter-panel.show { display: block; }
+.fp-gear { position: absolute; top: 8px; right: 10px; border: none; background: transparent;
+  cursor: pointer; font-size: 18px; color: #888; line-height: 1; padding: 2px; }
+.fp-gear:hover { color: #2b6cff; }
+.fp-row { display: flex; gap: 26px; padding-right: 22px; }
 .fp-col { display: flex; flex-direction: column; gap: 7px; }
 .fp-title { font-weight: 600; font-size: 13px; color: #333; margin-bottom: 2px; }
 .fp-col label { font-size: 14px; display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
 .fp-sep { width: 1px; background: #e3e3e6; }
+.fp-sep-h { height: 1px; background: #e3e3e6; margin: 12px 0; }
 .layout-row { display: flex; gap: 8px; }
 .layout-btn {
   width: 42px; height: 38px; border: 1px solid #c9c9cf; border-radius: 6px;
@@ -199,7 +204,7 @@ body {
   gap: 18px;
   padding: 20px;
   align-content: start;
-  justify-content: start;
+  justify-content: center; /* 整排封面居中，左右留白均等（原来 start 会把空隙都堆到右边）*/
 }
 .empty {
   text-align: center;
@@ -238,6 +243,34 @@ body {
   position: absolute; right: 6px; bottom: 5px;
   font-size: 10px; color: rgba(255,255,255,0.85);
 }
+.cover .missing-badge {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  background: rgba(200,50,40,0.88); color: #fff;
+  font-size: 11px; text-align: center; padding: 3px 0;
+}
+.book.missing .cover { outline: 2px solid #d8483a; filter: grayscale(0.5) brightness(0.92); }
+/* ---- 阅读统计 ---- */
+.stats-card { width: 640px; max-width: 94vw; max-height: 86vh; display: flex; flex-direction: column; }
+.stats-tabs { display: flex; gap: 6px; margin: 4px 0 8px; }
+.stats-tab { flex: 1; padding: 7px 0; border: 1px solid #e0e0e4; background: #f7f7f9; border-radius: 8px;
+  cursor: pointer; font: inherit; color: #555; }
+.stats-tab.active { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; font-weight: 600; }
+.stats-nav { display: flex; align-items: center; justify-content: center; gap: 14px; margin-bottom: 10px; }
+.stats-nav #stats-period { font-size: 15px; font-weight: 600; min-width: 130px; text-align: center; }
+.stats-nav button { width: 30px; }
+.stats-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.stat-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+.stat-cell { background: #f6f8fc; border: 1px solid #eef0f4; border-radius: 10px; padding: 10px 12px; }
+.stat-cell .k { font-size: 12px; color: #8a8a92; }
+.stat-cell .v { font-size: 18px; font-weight: 700; color: #2b3a55; margin-top: 2px; }
+.stat-chart { margin: 6px 0 14px; }
+.stat-chart svg { width: 100%; display: block; }
+.stat-sec-title { font-size: 13px; color: #888; margin: 12px 0 6px; }
+.sbook { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-top: 1px solid #f0f0f2; }
+.sbook .st-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.sbook .st-meta { flex: 0 0 auto; color: #888; font-size: 12px; text-align: right; line-height: 1.4; }
+.sbook .fin { color: #1c9a5a; font-weight: 600; }
+.stats-empty { text-align: center; color: #aaa; padding: 30px; }
 .book .title {
   margin-top: 6px;
   font-size: 13px;

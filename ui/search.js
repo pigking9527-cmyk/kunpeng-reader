@@ -1,6 +1,7 @@
 // 书架全文检索结果窗口
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
+window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
 
 const qEl = document.getElementById("q");
 const goEl = document.getElementById("go");
@@ -107,15 +108,38 @@ function sortResults(list) {
   return a;
 }
 
+// 把某本书的命中片段实际建进 DOM（懒加载：展开时才建，避免一次性渲染上千条而卡顿）
+function buildHits(book, hitsWrap) {
+  const frag = document.createDocumentFragment();
+  book.hits.forEach((h) => {
+    const hit = document.createElement("div");
+    hit.className = "hit";
+    const scoreTag = typeof h.score === "number" ? '<span class="score">' + Math.round(h.score * 100) + "%</span>" : "";
+    const body = mode === "sem" ? escapeHtml(h.snippet) : highlight(h.snippet, curTerm);
+    hit.innerHTML = scoreTag + '<span class="ch">第' + (h.chapter + 1) + "章</span>" + body;
+    hit.addEventListener("click", () => openHit(book.book_id, h.chapter));
+    frag.appendChild(hit);
+  });
+  if (typeof book.count === "number" && book.count > book.hits.length) {
+    const more = document.createElement("div");
+    more.className = "more";
+    more.textContent = "… 另有 " + (book.count - book.hits.length) + " 处未显示";
+    frag.appendChild(more);
+  }
+  hitsWrap.appendChild(frag);
+}
+
 function render() {
   resultsEl.innerHTML = "";
   if (!curResults.length) {
     resultsEl.innerHTML = '<div class="empty">未找到「' + escapeHtml(curTerm) + "」</div>";
     return;
   }
-  for (const book of sortResults(curResults)) {
+  const list = sortResults(curResults);
+  const frag = document.createDocumentFragment(); // 一次性插入，避免逐条 reflow
+  list.forEach((book) => {
     const group = document.createElement("div");
-    group.className = "book-group";
+    group.className = "book-group"; // 默认展开
 
     const head = document.createElement("div");
     head.className = "book-head";
@@ -128,28 +152,13 @@ function render() {
       "</span>";
     const hitsWrap = document.createElement("div");
     hitsWrap.className = "hits";
-    // 点书名这一行 → 收起/展开本书的检索结果
-    head.addEventListener("click", () => group.classList.toggle("collapsed"));
+    head.addEventListener("click", () => group.classList.toggle("collapsed")); // 仍可手动收起
+    buildHits(book, hitsWrap); // 默认就把片段建好（展开）
     group.appendChild(head);
-
-    book.hits.forEach((h) => {
-      const hit = document.createElement("div");
-      hit.className = "hit";
-      const scoreTag = typeof h.score === "number" ? '<span class="score">' + Math.round(h.score * 100) + "%</span>" : "";
-      const body = mode === "sem" ? escapeHtml(h.snippet) : highlight(h.snippet, curTerm);
-      hit.innerHTML = scoreTag + '<span class="ch">第' + (h.chapter + 1) + "章</span>" + body;
-      hit.addEventListener("click", () => openHit(book.book_id, h.chapter)); // 点具体片段才跳转
-      hitsWrap.appendChild(hit);
-    });
-    if (typeof book.count === "number" && book.count > book.hits.length) {
-      const more = document.createElement("div");
-      more.className = "more";
-      more.textContent = "… 另有 " + (book.count - book.hits.length) + " 处未显示";
-      hitsWrap.appendChild(more);
-    }
     group.appendChild(hitsWrap);
-    resultsEl.appendChild(group);
-  }
+    frag.appendChild(group);
+  });
+  resultsEl.appendChild(frag);
 }
 
 function openHit(bookId, chapter) {
@@ -220,7 +229,7 @@ function pollSemStatus() {
   invoke("semantic_status")
     .then((p) => {
       if (p.error) {
-        semProgEl.textContent = "建立索引失败：" + p.error;
+        semProgEl.textContent = "无法建立语义索引：" + p.error;
         buildBtn.disabled = false;
         if (semPoll) clearInterval(semPoll);
         semPoll = null;
@@ -229,7 +238,10 @@ function pollSemStatus() {
       if (p.building) {
         semProgEl.textContent = "建立语义索引中… " + p.done + "/" + p.total + "（" + (p.current || "") + "）";
       } else {
-        semProgEl.textContent = p.total ? "语义索引已就绪（" + p.total + " 本）" : "";
+        // p.current 在结束时可能带“加速索引未建成”的温和说明（检索仍可用），优先展示
+        semProgEl.textContent = p.current && p.current !== "完成"
+          ? p.current
+          : (p.total ? "语义索引已就绪（" + p.total + " 本）" : "");
         buildBtn.disabled = false;
         if (semPoll) clearInterval(semPoll);
         semPoll = null;
@@ -237,9 +249,18 @@ function pollSemStatus() {
     })
     .catch(() => {});
 }
-buildBtn.addEventListener("click", () => {
+buildBtn.addEventListener("click", async () => {
   const limit = curIds.length ? curIds : null;
   const scope = curIds.length ? "选定的 " + curIds.length + " 本" : "全部图书";
+  // 已建立完成就别重复建了
+  try {
+    const done = await invoke("semantic_index_done", { ids: limit });
+    if (done) {
+      alert("语义索引已建立完成（" + scope + "），无需重复建立。");
+      semProgEl.textContent = "语义索引已就绪（已完成）";
+      return;
+    }
+  } catch (e) {}
   if (!confirm("将为" + scope + "建立语义索引。\n首次会下载约120MB模型；大书库可能耗时较长（后台进行）。\n继续？")) return;
   buildBtn.disabled = true;
   semProgEl.textContent = "正在启动…";
