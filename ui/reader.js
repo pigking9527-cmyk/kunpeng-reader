@@ -2,6 +2,10 @@
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
+// 禁用浏览器自带查找（Ctrl+F / F3），用阅读器自带搜索
+window.addEventListener("keydown", (e) => {
+  if (((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) || e.key === "F3") e.preventDefault();
+}, true);
 
 // 沉浸模式：工具栏隐藏，点屏幕中间唤出
 let immersive = localStorage.getItem("immersive") === "1";
@@ -539,6 +543,17 @@ window.addEventListener("message", (e) => {
   if (e.data.webSearch) {
     invoke("web_search", { term: e.data.webSearch }).catch(() => {});
   }
+  if (e.data.dict !== undefined) {
+    invoke("dict_lookup", { term: e.data.dict })
+      .then((r) => sendToPage({ dictResult: r }))
+      .catch(() => sendToPage({ dictResult: { found: false, word: e.data.dict } }));
+  }
+  if (e.data.vocabAdd) {
+    const v = e.data.vocabAdd;
+    invoke("vocab_add", {
+      entry: { word: v.word, lang: v.lang, def: v.def || "", def_en: v.def_en || "", phonetic: v.phonetic || "" },
+    }).catch(() => {});
+  }
   if (e.data.addHighlight) {
     addHighlight(e.data.addHighlight, "");
   }
@@ -792,9 +807,130 @@ function markToc(el) {
 document.getElementById("toc-btn").addEventListener("click", () => {
   closeSettings();
   if (rsearch.classList.contains("show")) toggleSearch(false);
+  setVocab(false); // 与生词本互斥
   setToc(!tocEl.classList.contains("show"));
 });
-backdropEl.addEventListener("click", () => setToc(false));
+backdropEl.addEventListener("click", () => {
+  setToc(false);
+  setVocab(false);
+});
+
+// ---------- 生词本（查过的词，中/英分开）----------
+const vocabEl = document.getElementById("vocab");
+const vocabPane = document.getElementById("vocab-pane");
+const vocabSettings = document.getElementById("vocab-settings");
+const vocabGear = document.getElementById("vocab-gear");
+const vocabCountToggle = document.getElementById("vocab-count-toggle");
+const vocabSortTime = document.getElementById("vsort-time");
+const vocabSortCount = document.getElementById("vsort-count");
+let vocabLang = "zh";
+let vocabShowCount = localStorage.getItem("vocabShowCount") !== "0";
+let vocabSort = localStorage.getItem("vocabSort") || "time";
+function applyVocabSettings() {
+  vocabCountToggle.checked = vocabShowCount;
+  vocabEl.classList.toggle("hide-count", !vocabShowCount);
+  vocabSortTime.classList.toggle("active", vocabSort === "time");
+  vocabSortCount.classList.toggle("active", vocabSort === "count");
+}
+function setVocab(open) {
+  vocabEl.classList.toggle("show", open);
+  backdropEl.classList.toggle("show", open);
+  if (!open) vocabSettings.classList.remove("show");
+  if (open) {
+    tocEl.classList.remove("show"); // 与目录互斥
+    applyVocabSettings();
+    renderVocab();
+  }
+}
+function setVocabTab(lang) {
+  vocabLang = lang;
+  document.getElementById("vtab-zh").classList.toggle("active", lang === "zh");
+  document.getElementById("vtab-en").classList.toggle("active", lang === "en");
+  renderVocab();
+}
+function renderVocab() {
+  invoke("vocab_list", { lang: vocabLang })
+    .then((list) => {
+      vocabPane.innerHTML = "";
+      list = list.slice().sort((a, b) => {
+        if (vocabSort === "count") return (b.count || 0) - (a.count || 0) || (b.last_at || 0) - (a.last_at || 0);
+        return (b.last_at || 0) - (a.last_at || 0);
+      });
+      if (!list.length) {
+        const e = document.createElement("div");
+        e.className = "vc-empty";
+        e.textContent = "还没有查过的" + (vocabLang === "zh" ? "中文" : "英文") + "词";
+        vocabPane.appendChild(e);
+        return;
+      }
+      list.forEach((it) => {
+        const row = document.createElement("div");
+        row.className = "vc-item";
+        const main = document.createElement("div");
+        main.className = "vc-main";
+        const head = document.createElement("div");
+        head.className = "vc-head";
+        const wd = document.createElement("div");
+        wd.className = "vc-word";
+        wd.textContent = it.word;
+        if (it.phonetic) {
+          const ph = document.createElement("span");
+          ph.className = "vc-phon";
+          ph.textContent = it.lang === "en" ? " [" + it.phonetic + "]" : " " + it.phonetic;
+          wd.appendChild(ph);
+        }
+        const c = document.createElement("span");
+        c.className = "vc-cnt";
+        c.textContent = it.count || 1;
+        const df = document.createElement("div");
+        df.className = "vc-def";
+        df.textContent = it.def || it.def_en || "";
+        head.append(wd, c);
+        main.append(head, df);
+        const del = document.createElement("button");
+        del.className = "vc-del";
+        del.textContent = "✕";
+        del.title = "从生词本删除";
+        del.addEventListener("click", () => {
+          invoke("vocab_remove", { word: it.word, lang: it.lang }).then(() => renderVocab()).catch(() => {});
+        });
+        row.append(main, del);
+        vocabPane.appendChild(row);
+      });
+    })
+    .catch(() => {});
+}
+document.getElementById("vtab-zh").addEventListener("click", () => setVocabTab("zh"));
+document.getElementById("vtab-en").addEventListener("click", () => setVocabTab("en"));
+vocabGear.addEventListener("click", (e) => {
+  e.stopPropagation();
+  vocabSettings.classList.toggle("show");
+});
+vocabSettings.addEventListener("click", (e) => e.stopPropagation());
+vocabEl.addEventListener("click", (e) => {
+  if (e.target.closest("#vocab-gear") || e.target.closest("#vocab-settings")) return;
+  vocabSettings.classList.remove("show");
+});
+vocabCountToggle.addEventListener("change", () => {
+  vocabShowCount = vocabCountToggle.checked;
+  localStorage.setItem("vocabShowCount", vocabShowCount ? "1" : "0");
+  applyVocabSettings();
+});
+function setVocabSort(sort) {
+  vocabSort = sort;
+  localStorage.setItem("vocabSort", sort);
+  applyVocabSettings();
+  renderVocab();
+}
+vocabSortTime.addEventListener("click", () => setVocabSort("time"));
+vocabSortCount.addEventListener("click", () => setVocabSort("count"));
+applyVocabSettings();
+document.getElementById("vocab-btn").addEventListener("click", () => {
+  closeSettings();
+  if (rsearch.classList.contains("show")) toggleSearch(false);
+  setToc(false); // 与目录互斥
+  setVocab(!vocabEl.classList.contains("show"));
+});
 document.getElementById("gear-btn").addEventListener("click", () => {
   const willShow = !settingsEl.classList.contains("show");
   if (willShow && rsearch.classList.contains("show")) toggleSearch(false); // 一次只开一个浮层

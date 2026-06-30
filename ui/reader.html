@@ -17,7 +17,9 @@
         height: 35px; box-sizing: border-box; padding: 0 10px;
         border-bottom: 1px solid #e3e3e6; background: #fafafa;
         flex: 0 0 auto; position: relative; z-index: 20;
+        user-select: none; /* 外壳不可选，避免从工具栏拖拽把整页（含 iframe）选中变灰 */
       }
+      .body { user-select: none; } /* 正文选择由 iframe 内部处理，外壳层不参与选择 */
       .toolbar .title { margin-left: auto; color: #555; font-size: 13px;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
       .tbtn {
@@ -138,6 +140,93 @@
       .toc .toc-item.toc-current { color: #1c4fb0; font-weight: 600; }
       .toc .toc-item.toc-current::before { content: "✓ "; color: #2a9; }
       body.theme-dark .toc .toc-item.toc-current { color: #8ab4ff; }
+      /* 生词本：居中宽面板，词条按内容自适应展开 */
+      .vocab {
+        left: 50%; top: 18px; bottom: 18px;
+        width: min(820px, calc(100vw - 64px));
+        max-width: calc(100vw - 32px);
+        border: 1px solid #ddd; border-radius: 10px;
+        box-shadow: 0 12px 36px rgba(0,0,0,0.28);
+        transform: translate(-50%, 10px);
+        opacity: 0; pointer-events: none;
+      }
+      .vocab.show { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
+      .vocab .toc-tabs { align-items: center; gap: 8px; padding: 0 12px; }
+      .vocab .toc-tab { flex: 0 0 auto; padding: 10px 14px; min-width: 56px; }
+      .vocab .vc-gear {
+        margin-left: auto; border: none; background: transparent; cursor: pointer;
+        color: #888; font-size: 17px; line-height: 1; padding: 7px 6px;
+      }
+      .vocab .vc-gear:hover { color: #2b6cff; }
+      .vocab .vc-settings {
+        position: absolute; top: 42px; right: 12px; z-index: 2;
+        display: none; min-width: 190px; padding: 8px 10px;
+        background: #fff; border: 1px solid #d8d8de; border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+      }
+      .vocab .vc-settings.show { display: block; }
+      .vocab .vc-set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 14px; color: #333; }
+      .vocab .vc-set-row + .vc-set-row { margin-top: 8px; }
+      .vocab .vc-seg { display: inline-flex; border: 1px solid #d8d8de; border-radius: 6px; overflow: hidden; }
+      .vocab .vc-sort {
+        border: none; background: #fff; color: #666; cursor: pointer;
+        font: inherit; font-size: 12px; padding: 3px 9px;
+      }
+      .vocab .vc-sort + .vc-sort { border-left: 1px solid #d8d8de; }
+      .vocab .vc-sort.active { background: #2b6cff; color: #fff; }
+      .vc-switch { position: relative; display: inline-block; width: 38px; height: 20px; flex: 0 0 auto; }
+      .vc-switch input { opacity: 0; width: 0; height: 0; }
+      .vc-switch .vc-slider {
+        position: absolute; inset: 0; background: #cfcfd6; border-radius: 20px;
+        transition: 0.18s; cursor: pointer;
+      }
+      .vc-switch .vc-slider::before {
+        content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+        background: #fff; border-radius: 50%; transition: 0.18s; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+      }
+      .vc-switch input:checked + .vc-slider { background: #5aa0ff; }
+      .vc-switch input:checked + .vc-slider::before { transform: translateX(18px); }
+      .vc-pane {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-content: start;
+        gap: 10px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 12px;
+      }
+      .vc-item {
+        display: flex; align-items: flex-start; gap: 10px;
+        min-width: 0; width: 100%;
+        padding: 10px 12px; border: 1px solid #e5e5ea; border-radius: 8px;
+        background: #fff;
+      }
+      .vc-item:hover { background: #f5f7fb; border-color: #d9e2ff; }
+      .vc-main { flex: 1 1 auto; min-width: 0; }
+      .vc-head { display: flex; align-items: baseline; gap: 8px; }
+      .vc-word { font-size: 15px; font-weight: 600; color: #1a1a1a; word-break: break-word; }
+      .vc-phon { font-size: 12px; font-weight: 400; color: #2b6cff; }
+      .vc-cnt { margin-left: auto; flex: 0 0 auto; font-size: 12px; font-weight: 500; color: #e09000; }
+      .vocab.hide-count .vc-cnt { display: none; }
+      .vc-def { font-size: 13px; line-height: 1.65; color: #555; margin-top: 4px;
+        white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+      .vc-del { flex: 0 0 auto; border: none; background: transparent; cursor: pointer; color: #bbb; font-size: 14px; padding: 2px 4px; }
+      .vc-del:hover { color: #e85c50; }
+      .vc-empty { text-align: center; color: #aaa; padding: 30px 10px; font-size: 14px; }
+      body.theme-dark .vocab { border-color: #3a3a3d; box-shadow: 0 12px 36px rgba(0,0,0,0.45); }
+      body.theme-dark .vocab .vc-item { border-color: #3a3a3d; }
+      body.theme-dark .vocab .vc-item:hover { background: #333; }
+      body.theme-dark .vocab .vc-item { background: #2a2a2c; }
+      body.theme-dark .vocab .vc-gear { color: #aaa; }
+      body.theme-dark .vocab .vc-gear:hover { color: #8ab4ff; }
+      body.theme-dark .vocab .vc-settings { background: #2a2a2c; border-color: #444; }
+      body.theme-dark .vocab .vc-set-row { color: #ddd; }
+      body.theme-dark .vocab .vc-seg { border-color: #555; }
+      body.theme-dark .vocab .vc-sort { background: #2e2e30; color: #bbb; }
+      body.theme-dark .vocab .vc-sort + .vc-sort { border-left-color: #555; }
+      body.theme-dark .vocab .vc-sort.active { background: #2b6cff; color: #fff; }
+      body.theme-dark .vc-word { color: #eee; }
+      body.theme-dark .vc-def { color: #bbb; }
       .info-desc[contenteditable] {
         border: 1px solid #d8d8dc; border-radius: 6px; padding: 6px 8px; min-height: 3em;
         outline: none;
@@ -359,6 +448,7 @@
       <div class="row"><label>语速</label><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.1" /><span class="val" id="v-ttsrate"></span></div>
         </div>
       </div>
+      <button id="vocab-btn" class="tbtn" title="生词本（查过的词）">📒 生词本</button>
       <span id="progress" class="title">—</span>
     </div>
 
@@ -376,6 +466,30 @@
           <button id="bm-add2" class="bm-add">➕ 在当前页加书签</button>
           <div id="bm-list2" class="bm-list"></div>
         </div>
+      </aside>
+      <aside id="vocab" class="toc vocab">
+        <div class="toc-tabs">
+          <button id="vtab-zh" class="toc-tab active" type="button">中文</button>
+          <button id="vtab-en" class="toc-tab" type="button">英文</button>
+          <button id="vocab-gear" class="vc-gear" type="button" title="生词本设置">⚙</button>
+        </div>
+        <div id="vocab-settings" class="vc-settings">
+          <label class="vc-set-row">
+            <span>查询记录</span>
+            <span class="vc-switch">
+              <input id="vocab-count-toggle" type="checkbox" />
+              <span class="vc-slider"></span>
+            </span>
+          </label>
+          <div class="vc-set-row">
+            <span>排序</span>
+            <span class="vc-seg">
+              <button id="vsort-time" class="vc-sort active" type="button">查询时间</button>
+              <button id="vsort-count" class="vc-sort" type="button">查询次数</button>
+            </span>
+          </div>
+        </div>
+        <div id="vocab-pane" class="toc-pane vc-pane"></div>
       </aside>
       <div id="vbar" class="vbar"><div id="vthumb" class="vthumb"></div></div>
     </div>

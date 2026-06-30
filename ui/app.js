@@ -2,6 +2,10 @@
 const invoke = window.__TAURI__.core.invoke;
 const dialog = window.__TAURI__.dialog;
 window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
+// 禁用浏览器自带查找（Ctrl+F / F3）
+window.addEventListener("keydown", (e) => {
+  if (((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) || e.key === "F3") e.preventDefault();
+}, true);
 
 const shelfEl = document.getElementById("shelf");
 const emptyEl = document.getElementById("empty");
@@ -177,7 +181,7 @@ async function relocateBook(b) {
   const ext = (b.format || "").toLowerCase();
   const sel = await dialog.open({
     multiple: false,
-    filters: [{ name: "电子书", extensions: ext ? [ext] : ["epub", "pdf", "txt", "md", "markdown"] }],
+    filters: [{ name: "电子书", extensions: ext ? [ext] : ["epub", "pdf", "txt", "md", "markdown", "mobi", "azw3", "azw"] }],
   });
   if (!sel) return;
   const path = Array.isArray(sel) ? sel[0] : sel;
@@ -199,8 +203,12 @@ function sortBooks(list) {
         return (a.path || "").localeCompare(b.path || "", "zh"); // 按存储目录/路径
       case "read":
         return (b.last_read_at || 0) - (a.last_read_at || 0); // 最近读的在前
-      default:
-        return a.title.localeCompare(b.title, "zh"); // 书名
+      default: {
+        // 书名：按拼音首字母分组排序（# 组排最后），同字母内按书名
+        const ra = !a.initial || a.initial === "#" ? "~" : a.initial;
+        const rb = !b.initial || b.initial === "#" ? "~" : b.initial;
+        return ra.localeCompare(rb) || a.title.localeCompare(b.title, "zh");
+      }
     }
   });
   return arr;
@@ -643,7 +651,7 @@ updateLayoutButtons();
 async function importBooks() {
   const sel = await dialog.open({
     multiple: true,
-    filters: [{ name: "电子书", extensions: ["epub", "pdf", "txt", "md", "markdown"] }],
+    filters: [{ name: "电子书", extensions: ["epub", "pdf", "txt", "md", "markdown", "mobi", "azw3", "azw"] }],
   });
   if (!sel) return;
   const paths = Array.isArray(sel) ? sel : [sel];
@@ -894,7 +902,7 @@ aboutModal.addEventListener("click", (e) => {
 
 // ---- 拖拽导入 ----
 const dropHint = document.getElementById("drop-hint");
-const SUPPORTED = /\.(epub|pdf|txt|md|markdown)$/i;
+const SUPPORTED = /\.(epub|pdf|txt|md|markdown|mobi|azw3|azw)$/i;
 const tauriEvent = window.__TAURI__.event;
 tauriEvent.listen("tauri://drag-enter", () => dropHint.classList.add("show"));
 tauriEvent.listen("tauri://drag-leave", () => dropHint.classList.remove("show"));

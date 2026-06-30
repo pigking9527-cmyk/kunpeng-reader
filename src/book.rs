@@ -95,8 +95,13 @@ pub fn now_secs() -> u64 {
 impl Book {
     /// 导入一个文件：EPUB 顺便读出书名、提取封面缩略图（只在导入时做一次）。
     pub fn prepare(path: PathBuf) -> Self {
-        if ext_lower(&path) == "epub" {
+        let ext = ext_lower(&path);
+        if ext == "epub" {
             if let Some(book) = prepare_epub(&path) {
+                return book;
+            }
+        } else if matches!(ext.as_str(), "mobi" | "azw3" | "azw") {
+            if let Some(book) = prepare_mobi(&path) {
                 return book;
             }
         }
@@ -166,6 +171,16 @@ pub(crate) fn count_text_chars(html: &str) -> usize {
 pub fn compute_word_count(book: &Book) -> u64 {
     if book.format == "pdf" {
         return 0; // PDF 不统计字数
+    }
+    if matches!(book.format.as_str(), "mobi" | "azw3" | "azw") {
+        let p = book.path.clone();
+        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            mobi::Mobi::from_path(&p)
+                .ok()
+                .map(|m| count_text_chars(&m.content_as_string_lossy()) as u64)
+                .unwrap_or(0)
+        }))
+        .unwrap_or(0);
     }
     if book.format == "epub" {
         if let Ok(mut doc) = epub::doc::EpubDoc::new(&book.path) {
@@ -502,6 +517,56 @@ fn prepare_epub(path: &Path) -> Option<Book> {
         resume_chapter: 0,
         resume_frac: 0.0,
         meta_done: true, // 导入时已读取元数据
+        word_count,
+        bookmarks: Vec::new(),
+        highlights: Vec::new(),
+        reading_seconds: 0,
+        words_read: 0,
+        finished_at: 0,
+        cover_ver: 0,
+        rating: 0.0,
+    })
+}
+
+/// 导入 MOBI/AZW3：读出书名/作者/简介与字数（封面暂用占位）。
+/// mobi 库对个别文件可能 panic（DRM/KF8 异常等）；用 catch_unwind 兜住，
+/// 避免在持有书架锁时 panic 把 Mutex 毒化、导致全局崩溃（封面/打开书全失效）。
+fn prepare_mobi(path: &Path) -> Option<Book> {
+    let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let m = mobi::Mobi::from_path(path).ok()?;
+        let title = {
+            let t = m.title();
+            if t.trim().is_empty() {
+                title_from_path(path)
+            } else {
+                t
+            }
+        };
+        Some((
+            title,
+            m.author().unwrap_or_default(),
+            m.description().unwrap_or_default(),
+            count_text_chars(&m.content_as_string_lossy()) as u64,
+        ))
+    }))
+    .ok()
+    .flatten()?;
+    let (title, author, description, word_count) = parsed;
+    Some(Book {
+        id: id_for_path(path),
+        fingerprint: compute_fingerprint(path),
+        path: path.to_owned(),
+        title,
+        format: ext_lower(path),
+        cover: None,
+        author,
+        description,
+        added_at: now_secs(),
+        last_read_at: 0,
+        progress: 0.0,
+        resume_chapter: 0,
+        resume_frac: 0.0,
+        meta_done: true,
         word_count,
         bookmarks: Vec::new(),
         highlights: Vec::new(),

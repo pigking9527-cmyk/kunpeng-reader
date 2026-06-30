@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod book;
+mod dict;
 
 use book::{Library, WinGeom};
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,7 @@ struct AppState {
     global_index: Mutex<Option<Arc<LoadedShards>>>, // 全库近邻索引：已载入内存的分片集合
     index_resume_at: AtomicU64, // 语义索引“让路”截止时刻(ms,0=不暂停)：打开阅读窗口时临时暂停建索引，让窗口秒开
     stats: Mutex<StatsStore>, // 详细阅读统计的小时桶
+    vocab: Mutex<VocabStore>, // 生词本：查过的词
 }
 
 /// 当前时刻（毫秒）。用于语义索引的“让路”节流。
@@ -94,6 +96,64 @@ struct BookDto {
     missing: bool, // 源文件是否已找不到
     path: String,  // 文件完整路径（用于"按存储目录"排序）
     rating: f32,   // 用户评分 0~5（0.5 刻度，用于书架按评分过滤）
+    initial: String, // 书名拼音首字母（A~Z / #），用于"按书名"分组
+}
+
+/// 一个汉字的拼音首字母（GB2312 编码区间法，覆盖绝大多数常用字）；非常用字/非汉字返回 None。
+fn pinyin_initial(c: char) -> Option<char> {
+    if c.is_ascii_alphabetic() {
+        return Some(c.to_ascii_uppercase());
+    }
+    if !('\u{4e00}'..='\u{9fff}').contains(&c) {
+        return None;
+    }
+    let mut buf = [0u8; 4];
+    let s = c.encode_utf8(&mut buf);
+    let (bytes, _, _) = encoding_rs::GBK.encode(s);
+    if bytes.len() != 2 {
+        return None;
+    }
+    let code = ((bytes[0] as u16) << 8) | (bytes[1] as u16);
+    // 各拼音首字母在 GB2312 里的起始码
+    const T: [(u16, char); 23] = [
+        (0xB0A1, 'A'), (0xB0C5, 'B'), (0xB2C1, 'C'), (0xB4EE, 'D'), (0xB6EA, 'E'),
+        (0xB7A2, 'F'), (0xB8C1, 'G'), (0xB9FE, 'H'), (0xBBF7, 'J'), (0xBFA6, 'K'),
+        (0xC0AC, 'L'), (0xC2E8, 'M'), (0xC4C3, 'N'), (0xC5B6, 'O'), (0xC5BE, 'P'),
+        (0xC6DA, 'Q'), (0xC8BB, 'R'), (0xC8F6, 'S'), (0xCBFA, 'T'), (0xCDDA, 'W'),
+        (0xCEF4, 'X'), (0xD1B9, 'Y'), (0xD4D1, 'Z'),
+    ];
+    if code < T[0].0 || code > 0xD7F9 {
+        return None;
+    }
+    let mut ans = 'A';
+    for (start, ch) in T.iter() {
+        if code >= *start {
+            ans = *ch;
+        } else {
+            break;
+        }
+    }
+    Some(ans)
+}
+
+fn is_skip_punct(c: char) -> bool {
+    matches!(
+        c,
+        '《' | '》' | '「' | '」' | '『' | '』' | '【' | '】' | '(' | ')' | '（' | '）'
+            | '[' | ']' | '"' | '\'' | '“' | '”' | '‘' | '’' | '·' | '…' | '—' | '-' | '_'
+            | '.' | '、' | ',' | '，' | '*' | '#'
+    )
+}
+
+/// 书名的分组首字母：跳过前导标点/书名号，取第一个有效字符的拼音首字母；数字/其它符号归 '#'。
+fn title_initial(title: &str) -> char {
+    for c in title.chars() {
+        if c.is_whitespace() || is_skip_punct(c) {
+            continue;
+        }
+        return pinyin_initial(c).unwrap_or('#');
+    }
+    '#'
 }
 
 #[derive(Serialize)]
@@ -135,6 +195,7 @@ fn to_dto(b: &book::Book) -> BookDto {
         missing: !b.path.exists(),
         path: b.path.to_string_lossy().into_owned(),
         rating: b.rating,
+        initial: title_initial(&b.title).to_string(),
     }
 }
 
@@ -155,6 +216,130 @@ fn list_books(state: tauri::State<AppState>) -> Vec<BookDto> {
 #[tauri::command]
 fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// 离线词典查词（按中/英自动选库）。
+#[tauri::command]
+fn dict_lookup(term: String) -> dict::DictResult {
+    dict::lookup(&term)
+}
+
+// ---- 生词本：记录查过的词（中/英分开），同词不重复、累计次数 ----
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct VocabEntry {
+    word: String,
+    lang: String, // "zh" / "en"
+    #[serde(default)]
+    def: String,
+    #[serde(default)]
+    def_en: String,
+    #[serde(default)]
+    phonetic: String,
+    #[serde(default)]
+    count: u32,
+    #[serde(default)]
+    added_at: u64,
+    #[serde(default)]
+    last_at: u64,
+}
+
+#[derive(Default)]
+struct VocabStore {
+    list: Vec<VocabEntry>,
+}
+
+impl VocabStore {
+    fn file() -> Option<std::path::PathBuf> {
+        let mut d = dirs::config_dir()?;
+        d.push("ebook-reader");
+        Some(d.join("vocab.json"))
+    }
+    fn load() -> Self {
+        let list = Self::file()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|t| serde_json::from_str::<Vec<VocabEntry>>(&t).ok())
+            .unwrap_or_default();
+        Self { list }
+    }
+    fn save(&self) {
+        let Some(f) = Self::file() else { return };
+        if let Some(p) = f.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        if let Ok(t) = serde_json::to_string(&self.list) {
+            let _ = std::fs::write(f, t);
+        }
+    }
+    fn add(&mut self, e: VocabIn) {
+        let word = e.word.trim().to_string();
+        if word.is_empty() {
+            return;
+        }
+        let now = book::now_secs();
+        if let Some(x) = self.list.iter_mut().find(|x| x.word == word && x.lang == e.lang) {
+            x.count += 1;
+            x.last_at = now;
+            if !e.def.is_empty() {
+                x.def = e.def;
+            }
+            if !e.def_en.is_empty() {
+                x.def_en = e.def_en;
+            }
+            if !e.phonetic.is_empty() {
+                x.phonetic = e.phonetic;
+            }
+        } else {
+            self.list.push(VocabEntry {
+                word,
+                lang: e.lang,
+                def: e.def,
+                def_en: e.def_en,
+                phonetic: e.phonetic,
+                count: 1,
+                added_at: now,
+                last_at: now,
+            });
+        }
+        self.save();
+    }
+    fn remove(&mut self, word: &str, lang: &str) {
+        self.list.retain(|x| !(x.word == word && x.lang == lang));
+        self.save();
+    }
+    fn list_lang(&self, lang: &str) -> Vec<VocabEntry> {
+        let mut v: Vec<VocabEntry> = self.list.iter().filter(|x| x.lang == lang).cloned().collect();
+        v.sort_by(|a, b| b.last_at.cmp(&a.last_at)); // 最近查的在前
+        v
+    }
+}
+
+#[derive(Deserialize)]
+struct VocabIn {
+    word: String,
+    lang: String,
+    #[serde(default)]
+    def: String,
+    #[serde(default)]
+    def_en: String,
+    #[serde(default)]
+    phonetic: String,
+}
+
+#[tauri::command]
+fn vocab_add(state: tauri::State<AppState>, entry: VocabIn) {
+    state.vocab.lock().unwrap().add(entry);
+}
+
+#[tauri::command]
+fn vocab_list(state: tauri::State<AppState>, lang: String) -> Vec<VocabEntry> {
+    state.vocab.lock().unwrap().list_lang(&lang)
+}
+
+#[tauri::command]
+fn vocab_remove(state: tauri::State<AppState>, word: String, lang: String) -> Vec<VocabEntry> {
+    let mut v = state.vocab.lock().unwrap();
+    v.remove(&word, &lang);
+    v.list_lang(&lang)
 }
 
 // ---- 检查更新：后端发请求（避免前端跨域被拦），方便以后扩展多个源 ----
@@ -351,7 +536,10 @@ fn scan_dir_books(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, dept
         let p = ent.path();
         if p.is_dir() {
             scan_dir_books(&p, out, depth + 1);
-        } else if matches!(book::ext_lower(&p).as_str(), "epub" | "pdf" | "txt" | "md" | "markdown") {
+        } else if matches!(
+            book::ext_lower(&p).as_str(),
+            "epub" | "pdf" | "txt" | "md" | "markdown" | "mobi" | "azw3" | "azw"
+        ) {
             out.push(p);
         }
     }
@@ -568,6 +756,12 @@ fn ensure_reader_window(
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.set_focus();
         return Ok(w);
+    }
+    // 禁止多开：打开新书前，关掉其它已打开的阅读窗口（始终只保留一个阅读窗口）
+    for (lbl, win) in app.webview_windows() {
+        if lbl.starts_with("reader-") && lbl != label {
+            let _ = win.close();
+        }
     }
 
     // 新开窗口期间，暂停语义索引几秒，把 CPU 让给 WebView2 冷启动 → 窗口秒开
@@ -1916,9 +2110,16 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
             let idx: usize = rest.parse().ok()?;
             let format = { state.library.lock().unwrap().get(id).map(|b| b.format.clone()).unwrap_or_default() };
             if format != "epub" {
-                // txt/md：取第 idx 个切分章节，段落化返回
+                // txt/md：取第 idx 个切分章节。md 渲染 markdown；txt 段落化。
                 let chapters = get_txt_chapters(state, id)?;
-                let body = chapters.get(idx).map(|(_, c)| txt_body(c)).unwrap_or_default();
+                let raw = chapters.get(idx).map(|(_, c)| c.clone()).unwrap_or_default();
+                let body = if is_mobi(&format) {
+                    format!("<div class=\"mobi-body\">{raw}</div>") // mobi 内容本就是 HTML，直接渲染
+                } else if is_md(&format) {
+                    format!("<div class=\"md-body\">{}</div>", md_to_html(&raw))
+                } else {
+                    txt_body(&raw)
+                };
                 let json = serde_json::json!({"head": "", "body": body}).to_string();
                 return Some((json.into_bytes(), "application/json".to_string()));
             }
@@ -1978,6 +2179,30 @@ body.ready{opacity:1}
 .rr *{max-width:100%}
 .rr pre{white-space:pre-wrap;word-break:break-word}
 .rr table{table-layout:fixed;width:100%}
+/* markdown 渲染样式 */
+.md-body h1{font-size:1.6em;margin:.6em 0 .4em;font-weight:700;line-height:1.3}
+.md-body h2{font-size:1.35em;margin:.6em 0 .4em;font-weight:700;line-height:1.3}
+.md-body h3{font-size:1.15em;margin:.5em 0 .3em;font-weight:700}
+.md-body h4,.md-body h5,.md-body h6{margin:.5em 0 .3em;font-weight:700}
+.md-body p{margin:.5em 0}
+.md-body ul,.md-body ol{margin:.4em 0;padding-left:1.6em}
+.md-body li{margin:.2em 0}
+.md-body blockquote{margin:.6em 0;padding:.2em .9em;border-left:3px solid #bbb;color:#666}
+.md-body code{font-family:Consolas,Menlo,monospace;background:rgba(135,131,120,.15);border-radius:4px;padding:.1em .3em;font-size:.92em}
+.md-body pre{background:rgba(135,131,120,.12);border-radius:6px;padding:.7em .9em;overflow:auto;white-space:pre-wrap}
+.md-body pre code{background:none;padding:0}
+.md-body a{color:#2b6cff;text-decoration:none}
+.md-body hr{border:none;border-top:1px solid #ccc;margin:1em 0}
+.md-body table{border-collapse:collapse;width:auto}
+.md-body th,.md-body td{border:1px solid #ccc;padding:4px 8px}
+.md-body h1,.md-body h2,.md-body h3{break-after:avoid;-webkit-column-break-after:avoid}
+body.theme-dark .md-body blockquote{color:#aaa;border-color:#555}
+body.theme-dark .md-body code,body.theme-dark .md-body pre{background:rgba(255,255,255,.08)}
+body.theme-dark .md-body hr{border-color:#444}
+body.theme-dark .md-body th,body.theme-dark .md-body td{border-color:#555}
+/* MOBI/AZW3：内容本就是 HTML；按记录号引用的图片无法解析 src，隐藏避免破图 */
+.mobi-body img:not([src]){display:none}
+.mobi-body p{margin:.5em 0}
 .rr-end{break-before:column;-webkit-column-break-before:always;width:1px;height:1px;font-size:0}
 #measurer{position:fixed;left:-99999px;top:0;overflow:hidden;pointer-events:none}
 mark.search-hit{background:#ffe58a;color:inherit}
@@ -1997,6 +2222,28 @@ mark.hl.has-note{box-shadow:inset 0 -2px 0 rgba(43,108,255,.6)}
 #fn-pop .fn-close{float:right;cursor:pointer;color:#8a7a30;font-size:20px;line-height:1;margin:-2px -4px 0 10px}
 #fn-pop .fn-body p{margin:0 0 .5em}
 #fn-pop a{color:#2b6cff;text-decoration:none}
+#dict-pop{position:fixed;display:none;z-index:100002;left:8px;right:8px;max-width:560px;margin:0 auto;max-height:52vh;overflow:auto;background:#fff;border:1px solid #e2e2e6;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.28);padding:12px 16px 14px;font-family:system-ui,'Microsoft YaHei',sans-serif;color:#222}
+#dict-pop .dc-close{float:right;cursor:pointer;color:#aaa;font-size:18px;line-height:1;margin:-2px -4px 0 10px}
+#dict-pop .dc-word{font-size:18px;font-weight:700;color:#1a1a1a}
+#dict-pop .dc-phon{font-size:14px;color:#2b6cff;margin-left:8px;font-weight:400}
+#dict-pop .dc-spk{cursor:pointer;margin-left:10px;font-size:16px;user-select:none;vertical-align:-1px}
+#dict-pop .dc-spk:hover{opacity:.7}
+#dict-pop .dc-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 6px;padding-right:24px}
+#dict-pop .dc-toggle{margin-left:auto;align-self:center;display:inline-flex;border:1px solid #d8d8de;border-radius:6px;overflow:hidden}
+#dict-pop .dc-toggle .dt{cursor:pointer;font-size:12px;padding:2px 9px;color:#666;user-select:none}
+#dict-pop .dc-toggle .dt.on{background:#2b6cff;color:#fff}
+body.theme-dark #dict-pop .dc-toggle{border-color:#555}
+body.theme-dark #dict-pop .dc-toggle .dt{color:#bbb}
+#dict-pop .dc-def{font-size:15px;line-height:1.85;color:#333;margin-top:8px;text-align:left;text-align-last:left}
+#dict-pop .dc-defblk{white-space:pre-wrap;margin-top:8px;text-align:left;text-align-last:left}
+#dict-pop .dc-defblk:first-child{margin-top:0}
+#dict-pop .dc-lb{display:inline-block;font-size:11px;color:#fff;background:#9aa3b2;border-radius:4px;padding:0 6px;margin-right:6px;vertical-align:2px}
+#dict-pop .dc-miss{color:#999}
+body.theme-dark #dict-pop .dc-def{color:#cfcfcf}
+body.theme-dark #dict-pop{background:#2a2a2e;border-color:#444;color:#ddd}
+body.theme-dark #dict-pop .dc-word{color:#fff}
+body.theme-dark #dict-pop .dc-def{color:#cfcfcf}
+body.theme-sepia #dict-pop{background:#fbf5e3;border-color:#e4ddcd}
 #hl-note{position:fixed;display:none;z-index:100000;width:400px;max-width:92vw;background:#fffdf5;border:1px solid #e4ddcd;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.22);padding:14px;font-family:system-ui,'Microsoft YaHei',sans-serif}
 #hl-note .ctx{font-size:15px;line-height:1.8;color:#444;max-height:150px;overflow:auto;margin-bottom:10px;padding:10px 12px;background:#fbf5e3;border-radius:8px}
 #hl-note .ctx mark.hl{background:#ffd95a;color:inherit;box-shadow:none}
@@ -2073,8 +2320,9 @@ function report(){
   var gP=0,gT=0;
   if(measureDone){for(var i=0;i<CH;i++)gT+=chapterPages[i]||1;for(var j=0;j<curCh;j++)gP+=chapterPages[j]||1;gP+=pageInCh+1;}
   // 进度优先按“整书页位置”算（章节大小不均时仍平滑）；未测量完再退回按章节估算
+  // 用 0 基：首页(gP=1)=0%、末页(gP=gT)=100%
   var prog;
-  if(measureDone&&gT>0)prog=(gP/gT)*100;
+  if(measureDone&&gT>0)prog=gT>1?((gP-1)/(gT-1))*100:0;
   else prog=CH>0?((curCh+chFrac)/CH)*100:0;
   var L=computeLogical();
   var pageChars=pagesInCh>0?Math.round(chapChars/pagesInCh):chapChars; // 当前页约略字数（按本章字数/页数均摊）
@@ -2239,7 +2487,7 @@ function init(){
   loadInit();
   setTimeout(function(){reveal();parent.postMessage({ready:1},'*');},8000); // 兜底
   // 记录是否发生了拖动（用于区分“单击翻页”与“拖动选字”）
-  document.addEventListener('mousedown',function(e){downX=e.clientX;downY=e.clientY;didDrag=false;});
+  document.addEventListener('mousedown',function(e){downX=e.clientX;downY=e.clientY;didDrag=false;if(e.detail>1)e.preventDefault();}); // e.detail>1：双击/三击 → 阻止浏览器选词/选段（连点翻页常被当双击而误选）
   document.addEventListener('mousemove',function(e){if(downX!==null&&(Math.abs(e.clientX-downX)>4||Math.abs(e.clientY-downY)>4))didDrag=true;});
   document.addEventListener('click',function(e){
     parent.postMessage({uiClick:1},'*');
@@ -2265,6 +2513,7 @@ function init(){
     if(didDrag||(sel&&!sel.isCollapsed&&sel.toString().trim())){return;}
     var x=e.clientX;if(x>window.innerWidth*0.6)nextPage();else if(x<window.innerWidth*0.4)prevPage();else parent.postMessage({centerTap:1},'*');
   });
+  document.addEventListener('keydown',function(e){if(((e.ctrlKey||e.metaKey)&&(e.key==='f'||e.key==='F'))||e.key==='F3')e.preventDefault();},true); // 禁用浏览器自带查找
   document.addEventListener('keydown',function(e){
     if(e.key==='PageDown'||e.key==='ArrowRight'||(e.key===' '&&!e.shiftKey)){e.preventDefault();userNav();nextPage();}
     else if(e.key==='PageUp'||e.key==='ArrowLeft'||(e.key===' '&&e.shiftKey)){e.preventDefault();userNav();prevPage();}
@@ -2275,6 +2524,7 @@ function init(){
   setupSelMenu();
   setupHlUi();
   setupFn();
+  setupDict();
   document.addEventListener('contextmenu',function(e){e.preventDefault();}); // 禁用浏览器右键菜单
 }
 // 选中文字后弹出“web搜索”菜单 → 通知父窗口用浏览器搜索
@@ -2283,12 +2533,19 @@ function hideSelMenu(){if(selMenu)selMenu.style.display='none';}
 function setupSelMenu(){
   selMenu=document.createElement('div');selMenu.id='sel-menu';
   var btn=document.createElement('button');btn.type='button';btn.textContent='🔍 web搜索';
+  var btnDict=document.createElement('button');btnDict.type='button';btnDict.textContent='📖 词典';
   var btnHL=document.createElement('button');btnHL.type='button';btnHL.textContent='🖍 高亮';
   var btnNote=document.createElement('button');btnNote.type='button';btnNote.textContent='📝 批注';
   var btnBm=document.createElement('button');btnBm.type='button';btnBm.textContent='🔖 书签';
-  selMenu.appendChild(btn);selMenu.appendChild(btnHL);selMenu.appendChild(btnNote);selMenu.appendChild(btnBm);
+  selMenu.appendChild(btn);selMenu.appendChild(btnDict);selMenu.appendChild(btnHL);selMenu.appendChild(btnNote);selMenu.appendChild(btnBm);
   document.body.appendChild(selMenu);
-  [btn,btnHL,btnNote,btnBm].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  [btn,btnDict,btnHL,btnNote,btnBm].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  btnDict.addEventListener('click',function(e){
+    e.preventDefault();e.stopPropagation();
+    var t=(window.getSelection?window.getSelection().toString():'').trim();
+    if(t)openDict(t);
+    hideSelMenu();
+  });
   btnBm.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
     var t=(window.getSelection?window.getSelection().toString():'').trim();
@@ -2312,19 +2569,26 @@ function setupSelMenu(){
     var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();parent.postMessage({addHighlightNote:o},'*');}
     hideSelMenu();
   });
-  document.addEventListener('mouseup',function(){
+  function showSelMenuAtSelection(){
+    var sel=window.getSelection?window.getSelection():null;
+    var t=sel?sel.toString().trim():'';
+    if(!t){hideSelMenu();return;}
+    hideHlMenu(); // 出选区菜单时，先收起"已高亮"菜单，保证同时只有一个
+    var rect;try{rect=sel.getRangeAt(0).getBoundingClientRect();}catch(_){hideSelMenu();return;}
+    if(!rect||(!rect.width&&!rect.height)){hideSelMenu();return;}
+    selMenu.style.display='block';
+    var mw=selMenu.offsetWidth||100,mh=selMenu.offsetHeight||34;
+    var left=rect.left+rect.width/2-mw/2;left=Math.max(6,Math.min(window.innerWidth-mw-6,left));
+    var top=rect.top-mh-8;if(top<6)top=rect.bottom+8;
+    selMenu.style.left=left+'px';selMenu.style.top=top+'px';
+  }
+  document.addEventListener('mouseup',function(e){
+    if(selMenu&&selMenu.contains(e.target))return; // 在选区菜单上松开（如点"高亮"按钮）：保留选区，别清
+    if((dictPop&&dictPop.contains(e.target))||(fnPop&&fnPop.contains(e.target)))return; // 在词典/注释弹窗内选字：正常选中、不弹高亮菜单
     setTimeout(function(){
-      var sel=window.getSelection?window.getSelection():null;
-      var t=sel?sel.toString().trim():'';
-      if(!t){hideSelMenu();return;}
-      hideHlMenu(); // 出选区菜单时，先收起"已高亮"菜单，保证同时只有一个
-      var rect;try{rect=sel.getRangeAt(0).getBoundingClientRect();}catch(_){hideSelMenu();return;}
-      if(!rect||(!rect.width&&!rect.height)){hideSelMenu();return;}
-      selMenu.style.display='block';
-      var mw=selMenu.offsetWidth||100,mh=selMenu.offsetHeight||34;
-      var left=rect.left+rect.width/2-mw/2;left=Math.max(6,Math.min(window.innerWidth-mw-6,left));
-      var top=rect.top-mh-8;if(top<6)top=rect.bottom+8;
-      selMenu.style.left=left+'px';selMenu.style.top=top+'px';
+      // 非拖动（单击/双击/连点翻页）：清掉任何选区并收菜单，避免单击误选/误高亮文本
+      if(!didDrag){if(window.getSelection)window.getSelection().removeAllRanges();hideSelMenu();return;}
+      showSelMenuAtSelection(); // 只有按住拖动选择才弹菜单
     },0);
   });
   document.addEventListener('mousedown',function(e){if(selMenu&&!selMenu.contains(e.target))hideSelMenu();});
@@ -2351,10 +2615,11 @@ function showHlMenu(idx){
 }
 function setupHlUi(){
   hlMenu=document.createElement('div');hlMenu.id='hl-menu';
-  var mWeb=mkBtn('🔍 web搜索'),mDel=mkBtn('🗑 取消高亮'),mNote=mkBtn('📝 批注');
-  hlMenu.append(mWeb,mDel,mNote);document.body.appendChild(hlMenu);
-  [mWeb,mDel,mNote].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  var mWeb=mkBtn('🔍 web搜索'),mDict=mkBtn('📖 词典'),mDel=mkBtn('🗑 取消高亮'),mNote=mkBtn('📝 批注');
+  hlMenu.append(mWeb,mDict,mDel,mNote);document.body.appendChild(hlMenu);
+  [mWeb,mDict,mDel,mNote].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
   mWeb.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({webSearch:h.text},'*');hideHlMenu();});
+  mDict.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)openDict(h.text);hideHlMenu();});
   mDel.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({removeHighlight:activeHi},'*');hideHlMenu();});
   mNote.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({openAnnotations:activeHi},'*');hideHlMenu();});
   hlMenu.addEventListener('mouseenter',function(){if(hlHideTimer)clearTimeout(hlHideTimer);});
@@ -2388,6 +2653,98 @@ function setupFn(){
   fnPop.addEventListener('click',function(e){e.stopPropagation();if(e.target.closest&&e.target.closest('a'))e.preventDefault();}); // 弹窗内点击不翻页/不跳锚
   document.addEventListener('mousedown',function(e){if(fnPop&&fnPop.style.display==='block'&&!fnPop.contains(e.target))hideFn();});
   document.addEventListener('wheel',hideFn,{passive:true});
+}
+// ---- 离线词典：选中文字/已高亮 → 就地弹释义（释义由外壳查后端再回传）----
+var dictPop=null,dictRect=null;
+function hideDict(){if(dictPop)dictPop.style.display='none';}
+function setupDict(){
+  dictPop=document.createElement('div');dictPop.id='dict-pop';
+  dictPop.innerHTML='<span class="dc-close">✕</span><div class="dc-head"></div><div class="dc-def"></div>';
+  document.body.appendChild(dictPop);
+  dictPop.querySelector('.dc-close').addEventListener('click',function(e){e.stopPropagation();hideDict();});
+  dictPop.addEventListener('mousedown',function(e){e.stopPropagation();});
+  dictPop.addEventListener('click',function(e){e.stopPropagation();});
+  document.addEventListener('mousedown',function(e){if(dictPop&&dictPop.style.display==='block'&&!dictPop.contains(e.target))hideDict();});
+  document.addEventListener('wheel',function(){hideDict();},{passive:true});
+}
+function placeDict(){
+  dictPop.style.display='block';
+  var ph=dictPop.offsetHeight,r=dictRect;
+  var top=(r?r.bottom:120)+10;
+  if(top+ph>window.innerHeight-8)top=(r?r.top:120)-ph-10;
+  if(top<8)top=8;
+  dictPop.style.top=top+'px';
+}
+function openDict(term){
+  if(!dictPop)setupDict();
+  try{var s=window.getSelection();dictRect=(s&&s.rangeCount)?s.getRangeAt(0).getBoundingClientRect():null;}catch(_){dictRect=null;}
+  dictPop.querySelector('.dc-head').textContent='查词中…';
+  dictPop.querySelector('.dc-def').textContent='';dictPop.querySelector('.dc-def').className='dc-def';
+  placeDict();
+  parent.postMessage({dict:term},'*');
+}
+function speakWord(w){
+  try{
+    if(!window.speechSynthesis||!w)return;
+    window.speechSynthesis.cancel();
+    var u=new SpeechSynthesisUtterance(w);u.lang='en-US';u.rate=.9;
+    var vs=window.speechSynthesis.getVoices();
+    for(var i=0;i<vs.length;i++){if(/^en/i.test(vs[i].lang)){u.voice=vs[i];break;}}
+    window.speechSynthesis.speak(u);
+  }catch(_){}
+}
+// 释义来源多选记忆（按语种分开）：中文词 中=中中/英=中英；英文词 中=英中/英=英英
+var lastDict=null;
+function dictSel(lang){try{var v=localStorage.getItem('dictSel_'+lang);return v?v.split(','):null;}catch(_){return null;}}
+function setDictSel(lang,a){try{localStorage.setItem('dictSel_'+lang,a.join(','));}catch(_){}}
+function renderDict(){
+  if(!dictPop||!lastDict)return;
+  var r=lastDict,head=dictPop.querySelector('.dc-head'),def=dictPop.querySelector('.dc-def');
+  head.innerHTML='';def.innerHTML='';
+  var w=document.createElement('span');w.className='dc-word';w.textContent=r.word||'';head.appendChild(w);
+  if(!r.found){def.textContent='（未找到该词的释义）';def.className='dc-def dc-miss';return;}
+  if(r.phonetic){var ph=document.createElement('span');ph.className='dc-phon';ph.textContent=(r.lang==='en')?('['+r.phonetic+']'):r.phonetic;head.appendChild(ph);}
+  if(r.lang==='en'){
+    var spk=document.createElement('span');spk.className='dc-spk';spk.textContent='🔊';spk.title='发音';
+    spk.addEventListener('click',function(e){e.stopPropagation();speakWord(r.word);});head.appendChild(spk);
+  }
+  var sources=[];
+  if(r.def)sources.push({k:'c',label:'中',text:r.def});
+  if(r.def_en)sources.push({k:'e',label:'英',text:r.def_en});
+  if(!sources.length){def.textContent='（无释义）';def.className='dc-def dc-miss';return;}
+  var avail=sources.map(function(s){return s.k;});
+  var sel=dictSel(r.lang)||[sources[0].k];
+  sel=sel.filter(function(k){return avail.indexOf(k)>=0;});
+  if(!sel.length)sel=[sources[0].k];
+  if(sources.length>1){ // 两种释义都有 → 显示多选切换键（可同时选中）
+    var tg=document.createElement('span');tg.className='dc-toggle';
+    sources.forEach(function(s){
+      var b=document.createElement('span');b.className='dt'+(sel.indexOf(s.k)>=0?' on':'');b.textContent=s.label;
+      b.addEventListener('click',function(e){e.stopPropagation();
+        var i=sel.indexOf(s.k);
+        if(i>=0){if(sel.length>1)sel.splice(i,1);}else{sel.push(s.k);}
+        setDictSel(r.lang,sel);renderDict();
+      });
+      tg.appendChild(b);
+    });
+    head.appendChild(tg);
+  }
+  var multi=sel.length>1;
+  sources.forEach(function(s){
+    if(sel.indexOf(s.k)<0)return;
+    var blk=document.createElement('div');blk.className='dc-defblk';
+    if(multi){var lb=document.createElement('span');lb.className='dc-lb';lb.textContent=s.label;blk.appendChild(lb);}
+    var tx=document.createElement('span');tx.textContent=s.text;blk.appendChild(tx);
+    def.appendChild(blk);
+  });
+  def.className='dc-def';
+}
+function showDictResult(r){
+  if(!dictPop)setupDict();
+  lastDict=r;renderDict();
+  if(r&&r.found&&r.lang==='en')speakWord(r.word); // 英文词自动读一次
+  if(r&&r.found)parent.postMessage({vocabAdd:{word:r.word,lang:r.lang,def:r.def||'',def_en:r.def_en||'',phonetic:r.phonetic||''}},'*'); // 记入生词本
+  placeDict();
 }
 // 是否是"注释角标"链接：epub:type/role/class 含 note，或链接文字形如 [23] / (3) / 23
 function isNoteLink(a){
@@ -2590,6 +2947,7 @@ window.addEventListener('message',function(e){
   if(e.data.vchaps){VC=e.data.vchaps;report();}
   if(e.data.highlights){HL=e.data.highlights;refreshHighlights();}
   if(e.data.showHlMenuFor!==undefined){var si=e.data.showHlMenuFor;setTimeout(function(){if(window.getSelection)window.getSelection().removeAllRanges();showHlMenu(si);},40);}
+  if(e.data.dictResult!==undefined){showDictResult(e.data.dictResult);}
   if(e.data.gotoHighlight!==undefined){var hi=e.data.gotoHighlight,h=HL[hi];if(h){showChapter(h.chapter,'start').then(function(){var el=root.querySelector('mark.hl[data-hi="'+hi+'"]');if(el)gotoPage(pageOf(el));});}}
   if(e.data.resolveToc){
     // 在当前章里，找出当前页或之前最近的一个目录锚点
@@ -2926,7 +3284,135 @@ fn build_txt_chapters(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// 取（并缓存）一本 txt 的切分章节。
+fn is_md(format: &str) -> bool {
+    matches!(format, "md" | "markdown")
+}
+
+/// markdown → HTML（用 pulldown-cmark，开启表格/删除线/任务列表）。
+fn md_to_html(text: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_FOOTNOTES);
+    let mut out = String::new();
+    html::push_html(&mut out, Parser::new_ext(text, opts));
+    out
+}
+
+/// 取一行的 markdown 一级/二级标题文字（# 或 ##），否则 None。
+fn md_heading_title(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    if t.starts_with("# ") || t.starts_with("## ") {
+        Some(t.trim_start_matches('#').trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// markdown 文件按 # / ## 标题切章；标题不足 2 个则整篇一章。
+fn build_md_chapters(text: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let heads: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| md_heading_title(l).is_some())
+        .map(|(i, _)| i)
+        .collect();
+    if heads.len() < 2 {
+        return vec![("正文".to_string(), text.to_string())];
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    if heads[0] > 0 {
+        let pre = lines[..heads[0]].join("\n");
+        if !pre.trim().is_empty() {
+            out.push(("开头".to_string(), pre));
+        }
+    }
+    for (k, &h) in heads.iter().enumerate() {
+        let end = if k + 1 < heads.len() { heads[k + 1] } else { lines.len() };
+        let title = md_heading_title(lines[h]).unwrap_or_default();
+        out.push((title, lines[h..end].join("\n")));
+    }
+    out
+}
+
+fn is_mobi(format: &str) -> bool {
+    matches!(format, "mobi" | "azw3" | "azw")
+}
+
+/// 取 HTML 片段里第一个标题（h1~h3）的文字，作章节标题。
+fn mobi_chunk_title(html: &str) -> Option<String> {
+    for tag in ["h1", "h2", "h3"] {
+        let open = format!("<{tag}");
+        if let Some(s) = html.find(&open) {
+            if let Some(gt) = html[s..].find('>') {
+                let inner = s + gt + 1;
+                if let Some(e) = html[inner..].find(&format!("</{tag}>")) {
+                    let t = strip_tags(&html[inner..inner + e]);
+                    let t = t.trim();
+                    if !t.is_empty() {
+                        return Some(t.chars().take(40).collect());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 把 MOBI/AZW3 整本 HTML 按分页符 <mbp:pagebreak> 切成章节；切不出就整本一章。
+fn split_mobi_html(html: &str) -> Vec<(String, String)> {
+    let parts: Vec<&str> = html.split("<mbp:pagebreak").collect();
+    let chunks: Vec<String> = if parts.len() >= 3 {
+        parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if i == 0 {
+                    (*p).to_string()
+                } else {
+                    // 段首残留 "/>…" 或 " …/>…"，去掉到第一个 '>'
+                    match p.find('>') {
+                        Some(j) => p[j + 1..].to_string(),
+                        None => (*p).to_string(),
+                    }
+                }
+            })
+            .filter(|s| !s.trim().is_empty())
+            .collect()
+    } else {
+        vec![html.to_string()]
+    };
+    let mut out = Vec::new();
+    for (i, c) in chunks.into_iter().enumerate() {
+        let title = mobi_chunk_title(&c).unwrap_or_else(|| format!("第 {} 章", i + 1));
+        out.push((title, c));
+    }
+    if out.is_empty() {
+        out.push(("正文".to_string(), html.to_string()));
+    }
+    out
+}
+
+/// 读取并切分 MOBI/AZW3 内容为章节 (标题, HTML)。mobi 解析对个别文件可能 panic，用 catch_unwind 兜住。
+fn mobi_chapters(path: &std::path::Path) -> Vec<(String, String)> {
+    let p = path.to_path_buf();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let Ok(m) = mobi::Mobi::from_path(&p) else {
+            return vec![("正文".to_string(), "<p>无法解析该 MOBI/AZW3 文件。</p>".to_string())];
+        };
+        let content = m.content_as_string_lossy();
+        let body = extract_body_inner(&content);
+        let body = if body.trim().is_empty() { content.as_str() } else { body };
+        split_mobi_html(body)
+    }))
+    .unwrap_or_else(|_| vec![("正文".to_string(), "<p>解析该 MOBI/AZW3 文件时出错（可能是 DRM 或暂不支持的格式）。</p>".to_string())])
+}
+
+
+/// 取（并缓存）一本 txt/md/mobi 的切分章节（md 按标题切，mobi 按分页符切，txt 按"第X章"或字数切）。
 fn get_txt_chapters(state: &AppState, id: u64) -> Option<Arc<Vec<(String, String)>>> {
     {
         let c = state.txt_chapters.lock().unwrap();
@@ -2934,10 +3420,23 @@ fn get_txt_chapters(state: &AppState, id: u64) -> Option<Arc<Vec<(String, String
             return Some(v.clone());
         }
     }
-    let path = { state.library.lock().unwrap().get(id)?.path.clone() };
-    let bytes = std::fs::read(&path).ok()?;
-    let text = book::normalize_text(&book::decode_bytes(&bytes));
-    let arc = Arc::new(build_txt_chapters(&text));
+    let (path, format) = {
+        let lib = state.library.lock().unwrap();
+        let b = lib.get(id)?;
+        (b.path.clone(), b.format.clone())
+    };
+    let chapters = if is_mobi(&format) {
+        mobi_chapters(&path)
+    } else {
+        let bytes = std::fs::read(&path).ok()?;
+        let text = book::normalize_text(&book::decode_bytes(&bytes));
+        if is_md(&format) {
+            build_md_chapters(&text)
+        } else {
+            build_txt_chapters(&text)
+        }
+    };
+    let arc = Arc::new(chapters);
     state.txt_chapters.lock().unwrap().insert(id, arc.clone());
     Some(arc)
 }
@@ -3462,6 +3961,7 @@ struct GlobalMeta {
     model: String,
     dim: usize,
     book_ids: Vec<u64>,     // 参与建图的全部书（排序），用于判断是否过期
+    source_sig: Vec<(u64, u64)>, // (书 id, 源文件修改时间)，用于判断源文件变更
     shards: Vec<ShardMeta>, // 各分片描述
 }
 /// 已载入内存、可供查询的分片集合。
@@ -3540,6 +4040,19 @@ fn indexed_book_ids(state: &AppState) -> Vec<u64> {
         .filter(|id| sem_meta_path(*id).map(|p| p.exists()).unwrap_or(false))
         .collect();
     v.sort_unstable();
+    v
+}
+
+fn indexed_book_signature(state: &AppState) -> Vec<(u64, u64)> {
+    let lib = state.library.lock().unwrap();
+    let mut v: Vec<(u64, u64)> = lib
+        .books
+        .iter()
+        .filter(|b| b.format != "pdf")
+        .filter(|b| sem_meta_path(b.id).map(|p| p.exists()).unwrap_or(false))
+        .map(|b| (b.id, file_mtime(&b.path)))
+        .collect();
+    v.sort_unstable_by_key(|(id, _)| *id);
     v
 }
 
@@ -3651,12 +4164,23 @@ fn sem_build_book(
             items.push((ci as u32, c));
         }
     }
-    if items.is_empty() {
-        return Ok(());
-    }
     let vec_path = sem_vec_path(id).ok_or("无缓存路径")?;
     if let Some(d) = vec_path.parent() {
         let _ = std::fs::create_dir_all(d);
+    }
+    if items.is_empty() {
+        let _ = std::fs::write(&vec_path, []);
+        let meta = SemMeta {
+            v: SEM_VERSION,
+            model: SEM_MODEL.to_string(),
+            mtime,
+            dim: 0,
+            chunks: Vec::new(),
+        };
+        let mp = sem_meta_path(id).ok_or("无缓存路径")?;
+        std::fs::write(&mp, serde_json::to_string(&meta).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        return Ok(());
     }
     let mut vf = std::io::BufWriter::new(std::fs::File::create(&vec_path).map_err(|e| e.to_string())?);
     let mut meta_chunks: Vec<SemChunk> = Vec::with_capacity(items.len());
@@ -3792,7 +4316,12 @@ fn global_index_fresh(state: &AppState) -> bool {
         return false;
     };
     match serde_json::from_str::<GlobalMeta>(&s) {
-        Ok(m) => m.v == SEM_VERSION && m.model == SEM_MODEL && m.book_ids == indexed_book_ids(state),
+        Ok(m) => {
+            m.v == SEM_VERSION
+                && m.model == SEM_MODEL
+                && m.book_ids == indexed_book_ids(state)
+                && m.source_sig == indexed_book_signature(state)
+        }
         Err(_) => false,
     }
 }
@@ -3890,6 +4419,7 @@ async fn build_semantic_index(
             let mut p = state.sem_progress.lock().unwrap();
             p.total = books.len() as u32;
         }
+        let mut failures: Vec<String> = Vec::new();
         for (i, b) in books.iter().enumerate() {
             {
                 let mut p = state.sem_progress.lock().unwrap();
@@ -3901,8 +4431,13 @@ async fn build_semantic_index(
             if sem_is_fresh(id, mtime) {
                 continue;
             }
-            if let Some(ch) = get_book_chapters(state.inner(), b) {
-                let _ = sem_build_book(&embedder, id, mtime, &ch, &state.index_resume_at);
+            match get_book_chapters(state.inner(), b) {
+                Some(ch) => {
+                    if let Err(err) = sem_build_book(&embedder, id, mtime, &ch, &state.index_resume_at) {
+                        failures.push(format!("{}：{}", b.title, err));
+                    }
+                }
+                None => failures.push(format!("{}：无法读取正文", b.title)),
             }
         }
         {
@@ -3915,7 +4450,13 @@ async fn build_semantic_index(
         let idx_err = build_global_index(state.inner()).err().unwrap_or_default();
         let mut p = state.sem_progress.lock().unwrap();
         p.building = false;
-        p.current = if idx_err.is_empty() {
+        p.current = if !failures.is_empty() {
+            format!(
+                "完成（{} 本未建立索引；{}）",
+                failures.len(),
+                failures.iter().take(3).cloned().collect::<Vec<_>>().join("；")
+            )
+        } else if idx_err.is_empty() {
             "完成".into()
         } else {
             format!("完成（检索可用；加速索引未建成：{idx_err}）")
@@ -3994,7 +4535,11 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
         }
         shard_books.push(*id);
         // 建图阶段不长期占用逐书缓存，加完即释放
-        let _ = state.sem_cache.lock().map(|mut c| c.remove(id));
+        if let Ok(mut c) = state.sem_cache.lock() {
+            if let Some(old) = c.remove(id) {
+                state.sem_cache_bytes.fetch_sub(old.vecs.len() * 4, Ordering::Relaxed);
+            }
+        }
     }
     if !mapping.is_empty() {
         let n = mapping.len();
@@ -4009,6 +4554,7 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
         model: SEM_MODEL.to_string(),
         dim,
         book_ids: ids,
+        source_sig: indexed_book_signature(state),
         shards,
     };
     std::fs::write(
@@ -4036,7 +4582,7 @@ fn load_global_index(state: &AppState) -> Option<Arc<LoadedShards>> {
     if meta.v != SEM_VERSION || meta.model != SEM_MODEL {
         return None;
     }
-    if meta.book_ids != indexed_book_ids(state) {
+    if meta.book_ids != indexed_book_ids(state) || meta.source_sig != indexed_book_signature(state) {
         return None; // 索引集合变了 → 过期，退回暴力
     }
     let budget = index_ram_budget();
@@ -4330,6 +4876,54 @@ fn hnsw_probe() {
     write(&format!("OK bytes={} top={:?}", bytes.len(), got));
 }
 
+/// 主窗口单实例（Windows 原生，命名互斥量）：已有实例在跑则把它的主窗口拉到前台，返回 false。
+#[cfg(windows)]
+fn ensure_single_instance() -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::AtomicPtr;
+    type Handle = *mut core::ffi::c_void;
+    static SINGLE_INSTANCE_MUTEX: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(attr: *const core::ffi::c_void, owner: i32, name: *const u16) -> Handle;
+        fn GetLastError() -> u32;
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
+        fn SetForegroundWindow(hwnd: Handle) -> i32;
+        fn ShowWindow(hwnd: Handle, cmd: i32) -> i32;
+        fn IsIconic(hwnd: Handle) -> i32;
+    }
+    fn wide(s: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    const SW_RESTORE: i32 = 9;
+    unsafe {
+        let name = wide("KunpengReader_SingleInstance_Mutex");
+        let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        if !h.is_null() && GetLastError() == ERROR_ALREADY_EXISTS {
+            // 已有实例 → 把它的主窗口（标题“鲲鹏阅读器”）拉到前台
+            let title = wide("鲲鹏阅读器");
+            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+            if !hwnd.is_null() {
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_RESTORE);
+                }
+                SetForegroundWindow(hwnd);
+            }
+            return false;
+        }
+        SINGLE_INSTANCE_MUTEX.store(h, Ordering::Relaxed); // 保持互斥量句柄存活到进程退出
+        true
+    }
+}
+#[cfg(not(windows))]
+fn ensure_single_instance() -> bool {
+    true
+}
+
 fn main() {
     if std::env::args().any(|a| a == "--sem-probe") {
         sem_probe();
@@ -4337,6 +4931,10 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--hnsw-probe") {
         hnsw_probe();
+        return;
+    }
+    // 主窗口只允许一个实例：已有实例在运行 → 聚焦它并退出本次启动
+    if !ensure_single_instance() {
         return;
     }
     tauri::Builder::default()
@@ -4356,6 +4954,7 @@ fn main() {
             global_index: Mutex::new(None),
             index_resume_at: AtomicU64::new(0),
             stats: Mutex::new(StatsStore::load()),
+            vocab: Mutex::new(VocabStore::load()),
         })
         // 主窗口（书架）：恢复上次的大小/位置，并在移动/缩放/关闭时记忆
         .setup(|app| {
@@ -4427,6 +5026,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_books,
             app_version,
+            dict_lookup,
+            vocab_add,
+            vocab_list,
+            vocab_remove,
             check_update,
             release_notes,
             shelf_books,

@@ -1,6 +1,6 @@
 [package]
 name = "ebook-reader-tauri"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 
 [build-dependencies]
@@ -29,9 +29,13 @@ sha2 = "0.10"
 base64 = "0.22"
 ureq = { version = "2", features = ["json"] }
 tokio = { version = "1", features = ["rt"] }
+flate2 = "1"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+mobi = "0.8"
 
-# 正式发布档：满优化（体积更小、运行更快）。
+# 正式发布档：保留优化，同时加快日常 release 构建。
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
+incremental = true

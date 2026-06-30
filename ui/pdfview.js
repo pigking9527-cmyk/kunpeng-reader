@@ -3,6 +3,10 @@ import * as pdfjsLib from "./pdfjs/pdf.min.mjs";
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", location.href).href;
 
 window.addEventListener("contextmenu", (e) => e.preventDefault());
+// 禁用浏览器自带查找（Ctrl+F / F3），用 PDF 自带搜索
+window.addEventListener("keydown", (e) => {
+  if (((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) || e.key === "F3") e.preventDefault();
+}, true);
 
 const P = new URLSearchParams(location.search);
 const pdfUrl = P.get("u");

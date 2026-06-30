@@ -2,6 +2,10 @@
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
+// 禁用浏览器自带查找（Ctrl+F / F3）
+window.addEventListener("keydown", (e) => {
+  if (((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) || e.key === "F3") e.preventDefault();
+}, true);
 
 const qEl = document.getElementById("q");
 const goEl = document.getElementById("go");
