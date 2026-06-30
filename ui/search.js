@@ -16,13 +16,22 @@ const qhistEl = document.getElementById("qhistory");
 
 // ---- 搜索历史 ----
 let qhist = [];
+let qcommon = {};
 try {
   qhist = JSON.parse(localStorage.getItem("shelfSearchHistory") || "[]");
 } catch (e) {
   qhist = [];
 }
+try {
+  qcommon = JSON.parse(localStorage.getItem("shelfSearchCommon") || "{}");
+} catch (e) {
+  qcommon = {};
+}
 function saveQHist() {
   localStorage.setItem("shelfSearchHistory", JSON.stringify(qhist.slice(0, 12)));
+}
+function saveQCommon() {
+  localStorage.setItem("shelfSearchCommon", JSON.stringify(qcommon));
 }
 function addQHist(q) {
   q = (q || "").trim();
@@ -30,10 +39,35 @@ function addQHist(q) {
   qhist = qhist.filter((h) => h !== q);
   qhist.unshift(q);
   qhist = qhist.slice(0, 12);
+  const old = qcommon[q] || { count: 0, last: 0 };
+  qcommon[q] = { count: old.count + 1, last: Date.now() };
   saveQHist();
+  saveQCommon();
 }
 function renderQHist() {
   qhistEl.innerHTML = "";
+  const common = Object.entries(qcommon)
+    .sort((a, b) => (b[1].count || 0) - (a[1].count || 0) || (b[1].last || 0) - (a[1].last || 0))
+    .slice(0, 6)
+    .map(([q, v]) => ({ q, count: v.count || 0 }));
+  if (common.length) {
+    const title = document.createElement("div");
+    title.className = "qh-empty";
+    title.textContent = "常搜词";
+    qhistEl.appendChild(title);
+    common.forEach(({ q, count }) => {
+      const item = document.createElement("div");
+      item.className = "qh-item";
+      item.innerHTML = '<span class="qh-text"></span><span class="qh-del">×' + count + "</span>";
+      item.querySelector(".qh-text").textContent = q;
+      item.addEventListener("click", () => {
+        qEl.value = q;
+        hideQHist();
+        runSearch(q);
+      });
+      qhistEl.appendChild(item);
+    });
+  }
   if (!qhist.length) {
     const e = document.createElement("div");
     e.className = "qh-empty";
@@ -41,6 +75,10 @@ function renderQHist() {
     qhistEl.appendChild(e);
     return;
   }
+  const histTitle = document.createElement("div");
+  histTitle.className = "qh-empty";
+  histTitle.textContent = "搜索历史";
+  qhistEl.appendChild(histTitle);
   qhist.forEach((q) => {
     const item = document.createElement("div");
     item.className = "qh-item";
@@ -76,6 +114,8 @@ function hideQHist() {
 let curTerm = "";
 let curIds = []; // 限定的图书 id（空 = 全部）
 let curResults = []; // 后端返回的分组结果
+let curSimilar = []; // 关键词搜索时顺带展示的语义相似段落
+let searchSeq = 0;
 
 function parseInitial() {
   const p = new URLSearchParams(location.search);
@@ -135,10 +175,30 @@ function buildHits(book, hitsWrap) {
 
 function render() {
   resultsEl.innerHTML = "";
-  if (!curResults.length) {
+  if (!curResults.length && !curSimilar.length) {
     resultsEl.innerHTML = '<div class="empty">未找到「' + escapeHtml(curTerm) + "」</div>";
     return;
   }
+  if (mode === "kw" && curSimilar.length) {
+    const sim = document.createElement("div");
+    sim.className = "book-group similar-group collapsed";
+    const head = document.createElement("div");
+    head.className = "book-head";
+    head.innerHTML = '<span class="caret">▾</span><span class="book-title">相似段落推荐</span><span class="book-count">' + curSimilar.length + " 本</span>";
+    const hitsWrap = document.createElement("div");
+    hitsWrap.className = "hits";
+    head.addEventListener("click", () => {
+      const willOpen = sim.classList.contains("collapsed");
+      sim.classList.toggle("collapsed");
+      if (willOpen && !hitsWrap.dataset.built) {
+        curSimilar.slice(0, 3).forEach((book) => buildHits({ ...book, hits: (book.hits || []).slice(0, 2) }, hitsWrap));
+        hitsWrap.dataset.built = "1";
+      }
+    });
+    sim.append(head, hitsWrap);
+    resultsEl.appendChild(sim);
+  }
+  if (!curResults.length) return;
   const list = sortResults(curResults);
   const frag = document.createDocumentFragment(); // 一次性插入，避免逐条 reflow
   list.forEach((book) => {
@@ -170,10 +230,12 @@ function openHit(bookId, chapter) {
 }
 
 async function runSearch(term) {
+  const seq = ++searchSeq;
   curTerm = (term || "").trim();
   qEl.value = curTerm;
   if (!curTerm) {
     curResults = [];
+    curSimilar = [];
     summaryEl.textContent = "";
     resultsEl.innerHTML = '<div class="empty">输入文字后回车检索</div>';
     return;
@@ -186,11 +248,14 @@ async function runSearch(term) {
   try {
     if (mode === "sem") {
       curResults = await invoke("semantic_search", { query: curTerm, ids: limit });
+      curSimilar = [];
     } else {
       curResults = await invoke("shelf_search", { term: curTerm, ids: limit });
+      curSimilar = [];
     }
   } catch (e) {
     curResults = [];
+    curSimilar = [];
     summaryEl.textContent = "检索出错：" + e;
     resultsEl.innerHTML = "";
     return;
@@ -207,6 +272,18 @@ async function runSearch(term) {
       : "未找到结果";
   }
   render();
+  if (mode === "kw") {
+    const q = curTerm;
+    Promise.resolve()
+      .then(() => invoke("semantic_index_done", { ids: limit }))
+      .then((semReady) => semReady ? invoke("semantic_search", { query: q, ids: limit }) : [])
+      .then((similar) => {
+        if (seq !== searchSeq || mode !== "kw" || q !== curTerm) return;
+        curSimilar = similar || [];
+        render();
+      })
+      .catch(() => {});
+  }
 }
 
 // ---- 关键词 / 语义 模式切换 ----

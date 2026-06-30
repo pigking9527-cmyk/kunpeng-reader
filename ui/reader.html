@@ -160,13 +160,36 @@
       .vocab .vc-gear:hover { color: #2b6cff; }
       .vocab .vc-settings {
         position: absolute; top: 42px; right: 12px; z-index: 2;
-        display: none; min-width: 190px; padding: 8px 10px;
+        display: none; min-width: 260px; padding: 8px 10px;
         background: #fff; border: 1px solid #d8d8de; border-radius: 8px;
         box-shadow: 0 8px 24px rgba(0,0,0,0.18);
       }
       .vocab .vc-settings.show { display: block; }
       .vocab .vc-set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 14px; color: #333; }
       .vocab .vc-set-row + .vc-set-row { margin-top: 8px; }
+      .vocab .vc-cache-info { color: #777; font-size: 12px; }
+      .vocab .vc-cache-info[hidden] { display: none; }
+      .vocab .vc-cache-del {
+        border: 1px solid #d8d8de; border-radius: 5px; background: #fff; color: #666;
+        cursor: pointer; font: inherit; font-size: 12px; padding: 3px 8px;
+      }
+      .vocab .vc-cache-del:hover { color: #d94b43; border-color: #e2a09c; }
+      .vocab .vc-pack {
+        margin-top: 8px; padding-top: 8px; border-top: 1px solid #ececf0;
+        font-size: 12px; color: #666;
+      }
+      .vocab .vc-pack[hidden] { display: none; }
+      .vocab .vc-pack-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .vocab .vc-pack-progress { width: 100%; height: 7px; margin: 7px 0 5px; accent-color: #2b6cff; display: block; }
+      .vocab .vc-pack-meta { min-height: 18px; line-height: 1.4; overflow-wrap: anywhere; }
+      .vocab .vc-pack-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; }
+      .vocab .vc-pack-btn {
+        border: 1px solid #d8d8de; border-radius: 5px; background: #fff; color: #555;
+        cursor: pointer; font: inherit; font-size: 12px; padding: 4px 10px;
+      }
+      .vocab .vc-pack-btn.primary { color: #fff; background: #2b6cff; border-color: #2b6cff; }
+      .vocab .vc-pack-btn:disabled { opacity: 0.55; cursor: default; }
+      .vocab .vc-pack-btn:not(:disabled):hover { border-color: #93b4ff; }
       .vocab .vc-seg { display: inline-flex; border: 1px solid #d8d8de; border-radius: 6px; overflow: hidden; }
       .vocab .vc-sort {
         border: none; background: #fff; color: #666; cursor: pointer;
@@ -187,14 +210,14 @@
       .vc-switch input:checked + .vc-slider { background: #5aa0ff; }
       .vc-switch input:checked + .vc-slider::before { transform: translateX(18px); }
       .vc-pane {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        align-content: start;
+        display: flex;
         gap: 10px;
+        align-items: flex-start;
         overflow-y: auto;
         overflow-x: hidden;
         padding: 12px;
       }
+      .vc-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
       .vc-item {
         display: flex; align-items: flex-start; gap: 10px;
         min-width: 0; width: 100%;
@@ -202,6 +225,8 @@
         background: #fff;
       }
       .vc-item:hover { background: #f5f7fb; border-color: #d9e2ff; }
+      .vc-item.vc-speak { cursor: pointer; }
+      .vc-item.vc-speak:active { transform: translateY(1px); }
       .vc-main { flex: 1 1 auto; min-width: 0; }
       .vc-head { display: flex; align-items: baseline; gap: 8px; }
       .vc-word { font-size: 15px; font-weight: 600; color: #1a1a1a; word-break: break-word; }
@@ -210,6 +235,21 @@
       .vocab.hide-count .vc-cnt { display: none; }
       .vc-def { font-size: 13px; line-height: 1.65; color: #555; margin-top: 4px;
         white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+      .vc-example {
+        margin-top: 6px; padding-left: 8px; border-left: 2px solid #d7e2ff;
+        font-size: 12px; line-height: 1.55; color: #777;
+        white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+      }
+      .vc-level {
+        display: inline-flex; margin-top: 8px; border: 1px solid #d8d8de;
+        border-radius: 6px; overflow: hidden;
+      }
+      .vc-level button {
+        border: none; border-right: 1px solid #d8d8de; background: #fff; color: #666;
+        cursor: pointer; font: inherit; font-size: 12px; padding: 3px 8px;
+      }
+      .vc-level button:last-child { border-right: none; }
+      .vc-level button.active { background: #2b6cff; color: #fff; }
       .vc-del { flex: 0 0 auto; border: none; background: transparent; cursor: pointer; color: #bbb; font-size: 14px; padding: 2px 4px; }
       .vc-del:hover { color: #e85c50; }
       .vc-empty { text-align: center; color: #aaa; padding: 30px 10px; font-size: 14px; }
@@ -227,6 +267,10 @@
       body.theme-dark .vocab .vc-sort.active { background: #2b6cff; color: #fff; }
       body.theme-dark .vc-word { color: #eee; }
       body.theme-dark .vc-def { color: #bbb; }
+      body.theme-dark .vc-example { color: #aaa; border-left-color: #435070; }
+      body.theme-dark .vc-level { border-color: #555; }
+      body.theme-dark .vc-level button { background: #2e2e30; color: #bbb; border-right-color: #555; }
+      body.theme-dark .vc-level button.active { background: #2b6cff; color: #fff; }
       .info-desc[contenteditable] {
         border: 1px solid #d8d8dc; border-radius: 6px; padding: 6px 8px; min-height: 3em;
         outline: none;
@@ -385,7 +429,7 @@
         <button id="rsearch-btn" class="tbtn" title="搜索书中文字">🔍</button>
         <div id="rsearch" class="rsearch">
           <div class="rsearch-row">
-            <input id="rsearch-input" type="text" autocomplete="off" placeholder="搜索全书文字…" />
+            <input id="rsearch-input" type="text" autocomplete="off" />
             <span id="rsearch-count" class="rcount"></span>
             <button id="rsearch-close" class="tbtn" title="关闭">✕</button>
           </div>
@@ -474,6 +518,13 @@
           <button id="vocab-gear" class="vc-gear" type="button" title="生词本设置">⚙</button>
         </div>
         <div id="vocab-settings" class="vc-settings">
+          <div class="vc-set-row">
+            <span>排序</span>
+            <span class="vc-seg">
+              <button id="vsort-time" class="vc-sort active" type="button">查询时间</button>
+              <button id="vsort-count" class="vc-sort" type="button">查询次数</button>
+            </span>
+          </div>
           <label class="vc-set-row">
             <span>查询记录</span>
             <span class="vc-switch">
@@ -481,12 +532,35 @@
               <span class="vc-slider"></span>
             </span>
           </label>
-          <div class="vc-set-row">
-            <span>排序</span>
-            <span class="vc-seg">
-              <button id="vsort-time" class="vc-sort active" type="button">查询时间</button>
-              <button id="vsort-count" class="vc-sort" type="button">查询次数</button>
+          <label class="vc-set-row">
+            <span>英文自动发音</span>
+            <span class="vc-switch">
+              <input id="dict-auto-speak-toggle" type="checkbox" />
+              <span class="vc-slider"></span>
             </span>
+          </label>
+          <label class="vc-set-row">
+            <span>缓存英文语音</span>
+            <span class="vc-switch">
+              <input id="word-audio-cache-toggle" type="checkbox" />
+              <span class="vc-slider"></span>
+            </span>
+          </label>
+          <div id="word-audio-cache-info" class="vc-set-row vc-cache-info" hidden>
+            <span id="word-audio-cache-size">缓存：0 B</span>
+            <button id="word-audio-cache-delete" class="vc-cache-del" type="button">删除缓存</button>
+          </div>
+          <div id="word-audio-pack" class="vc-pack" hidden>
+            <div class="vc-pack-head">
+              <span>高频词语音包</span>
+              <span id="word-pack-count">0 / 10000</span>
+            </div>
+            <progress id="word-pack-progress" class="vc-pack-progress" max="10000" value="0"></progress>
+            <div id="word-pack-meta" class="vc-pack-meta">尚未生成</div>
+            <div class="vc-pack-actions">
+              <button id="word-pack-delete" class="vc-pack-btn" type="button">删除语音包</button>
+              <button id="word-pack-toggle" class="vc-pack-btn primary" type="button">开始生成</button>
+            </div>
           </div>
         </div>
         <div id="vocab-pane" class="toc-pane vc-pane"></div>

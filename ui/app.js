@@ -32,6 +32,8 @@ function readStatus(b) {
 }
 let searchQuery = "";
 let selected = new Set(); // 已选中的图书 id（单击封面切换）
+let shelfLoaded = false;
+const SHELF_CACHE_KEY = "shelfBooksCacheV1";
 let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0"; // 封面右下角是否显示阅读进度
 let showCoverRating = localStorage.getItem("showCoverRating") !== "0"; // 封面上是否显示评分小星
 let showCoverTitle = localStorage.getItem("showCoverTitle") === "1"; // 网格视图封面下是否显示书名（默认不显示）
@@ -79,10 +81,12 @@ function bookCard(b) {
 
   if (b.cover) {
     // EPUB 真实封面。封面带 Cache-Control，命中缓存时同帧直接画出，无任何过渡。
-    // 占位底色仅在“首次、尚未缓存”的瞬间可能露出，避免露出黑块（不是黑就行，没有动画）。
-    cover.style.background = colorFor(b.title);
+    // 真实封面加载前只用中性底色，避免用户看到“纯色封面”再跳成图片。
+    cover.classList.add("has-img");
     const img = document.createElement("img");
     img.alt = b.title;
+    img.loading = "eager";
+    img.decoding = "sync";
     img.src = b.cover;
     cover.appendChild(img);
   } else {
@@ -241,7 +245,9 @@ function applyView() {
   shelfEl.classList.toggle("show-titles", showCoverTitle); // 网格视图是否显示书名
   shelfEl.innerHTML = "";
   const list = currentList();
-  if (list.length) {
+  if (!shelfLoaded) {
+    emptyEl.style.display = "none";
+  } else if (list.length) {
     emptyEl.style.display = "none";
   } else {
     emptyEl.textContent = searchQuery
@@ -318,19 +324,23 @@ function hideHistory() {
 }
 
 function closeSearch(clear) {
-  if (searchInput.value.trim()) addHistory(searchInput.value); // 记下这次搜索
+  const hadInput = !!searchInput.value.trim();
+  const hadQuery = !!searchQuery;
+  const wasOpen = searchWrap.classList.contains("open");
+  if (hadInput) addHistory(searchInput.value); // 记下这次搜索
   hideHistory();
   searchWrap.classList.remove("open");
   if (clear) {
     searchInput.value = "";
     searchQuery = "";
-    applyView();
+    if (hadQuery || (wasOpen && hadInput)) applyView();
   }
 }
 document.getElementById("search-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
+  closeAccountPanel();
   const open = !searchWrap.classList.contains("open");
   searchWrap.classList.toggle("open", open);
   if (open) {
@@ -358,6 +368,7 @@ searchWrap.addEventListener("mouseenter", () => {
   cancelSearchCollapse();
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
+  closeAccountPanel();
   searchWrap.classList.add("open");
   showHistory();
 });
@@ -421,18 +432,34 @@ searchInput.addEventListener("keydown", (e) => {
 });
 
 let lastJSON = ""; // 上次渲染的数据快照，数据没变就不重渲染（避免封面重载闪烁）
-function render(list) {
+function readShelfCache() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(SHELF_CACHE_KEY) || "[]");
+    return Array.isArray(cached) ? cached : [];
+  } catch (e) {
+    return [];
+  }
+}
+function writeShelfCache(list) {
+  try {
+    localStorage.setItem(SHELF_CACHE_KEY, JSON.stringify(list || []));
+  } catch (e) {}
+}
+function render(list, opts = {}) {
+  shelfLoaded = true;
   books = list;
   const j = JSON.stringify(list);
   if (j === lastJSON) return;
   lastJSON = j;
   applyView();
+  if (!opts.fromCache) writeShelfCache(list);
 }
 
 // ---- 排序与布局面板 ----
 document.getElementById("filter-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   menuEl.classList.remove("show");
+  closeAccountPanel();
   closeSearch(true);
   filterPanel.classList.toggle("show");
 });
@@ -606,9 +633,155 @@ async function addImportDirs() {
 }
 // 漏斗面板右上角齿轮 → 打开“我的书架”设置弹窗
 const fpSettingsModal = document.getElementById("fp-settings-modal");
+const accountBtn = document.getElementById("account-btn");
+const accountPanel = document.getElementById("account-panel");
+const syncFormEl = document.getElementById("sync-form");
+const syncAccountEl = document.getElementById("sync-account");
+const syncAccountNameEl = document.getElementById("sync-account-name");
+const syncUsernameEl = document.getElementById("sync-username");
+const syncPasswordEl = document.getElementById("sync-password");
+const savedAccountsEl = document.getElementById("saved-accounts");
+const syncStatusEl = document.getElementById("sync-status");
+const syncNowBtn = document.getElementById("sync-now");
+const syncLogoutBtn = document.getElementById("sync-logout");
+const syncRegisterBtn = document.getElementById("sync-register");
+const syncLoginBtn = document.getElementById("sync-login");
+const SAVED_ACCOUNTS_KEY = "readerSavedAccountsV1";
+function formatSyncTime(v) {
+  const n = Number(v) || 0;
+  if (!n) return "尚未同步";
+  const ms = n > 100000000000 ? n : n * 1000;
+  return new Date(ms).toLocaleString();
+}
+function setSyncButtonState(state, text, title = "") {
+  syncNowBtn.classList.remove("syncing", "ok", "fail");
+  if (state) syncNowBtn.classList.add(state);
+  syncNowBtn.textContent = text || "同步";
+  syncNowBtn.title = title;
+}
+function readSavedAccounts() {
+  try {
+    const list = JSON.parse(localStorage.getItem(SAVED_ACCOUNTS_KEY) || "[]");
+    return Array.isArray(list) ? list.filter((x) => x && x.username) : [];
+  } catch (e) {
+    return [];
+  }
+}
+function writeSavedAccounts(list) {
+  try {
+    localStorage.setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(list.slice(0, 12)));
+  } catch (e) {}
+}
+function saveAccountInfo(username, password) {
+  username = (username || "").trim();
+  if (!username || !password) return;
+  const list = readSavedAccounts().filter((x) => x.username !== username);
+  list.unshift({ username, password, saved_at: Date.now() });
+  writeSavedAccounts(list);
+}
+function hideSavedAccounts() {
+  savedAccountsEl.classList.remove("show");
+}
+function closeAccountPanel() {
+  accountPanel.classList.remove("show");
+  accountBtn.classList.remove("active");
+  hideSavedAccounts();
+}
+function openAccountPanel() {
+  accountPanel.classList.add("show");
+  accountBtn.classList.add("active");
+}
+function renderSavedAccounts() {
+  const list = readSavedAccounts();
+  savedAccountsEl.innerHTML = "";
+  if (!list.length) {
+    hideSavedAccounts();
+    return;
+  }
+  for (const item of list) {
+    const row = document.createElement("div");
+    row.className = "saved-account-item";
+    const name = document.createElement("span");
+    name.textContent = item.username;
+    const remove = document.createElement("button");
+    remove.className = "saved-account-remove";
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.title = "删除这条账号信息";
+    remove.addEventListener("click", (e) => {
+      e.stopPropagation();
+      writeSavedAccounts(readSavedAccounts().filter((x) => x.username !== item.username));
+      renderSavedAccounts();
+    });
+    row.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      syncUsernameEl.value = item.username;
+      syncPasswordEl.value = item.password || "";
+      hideSavedAccounts();
+      syncPasswordEl.focus();
+    });
+    row.append(name, remove);
+    savedAccountsEl.appendChild(row);
+  }
+  savedAccountsEl.classList.add("show");
+}
+function updateAccountView(settings = {}) {
+  const username = settings.username || syncUsernameEl.value.trim();
+  if (username) {
+    syncFormEl.classList.add("hidden");
+    syncAccountEl.classList.add("show");
+    syncStatusEl.classList.add("hidden");
+    syncAccountNameEl.textContent = "账号：" + username;
+    setSyncButtonState("", "同步");
+  } else {
+    syncFormEl.classList.remove("hidden");
+    syncAccountEl.classList.remove("show");
+    syncStatusEl.classList.remove("hidden");
+    syncStatusEl.textContent = "尚未登录";
+    setSyncButtonState("", "同步");
+  }
+}
+async function loadSyncSettings() {
+  try {
+    const s = await invoke("sync_get_settings");
+    syncUsernameEl.value = s.username || "";
+    updateAccountView(s);
+  } catch (e) {
+    syncStatusEl.classList.remove("hidden");
+    syncStatusEl.textContent = "读取同步设置失败：" + e;
+  }
+}
+let syncSettingsLoaded = false;
+let syncSettingsLoading = false;
+async function loadSyncSettingsOnce() {
+  if (syncSettingsLoaded || syncSettingsLoading) return;
+  syncSettingsLoading = true;
+  try {
+    await loadSyncSettings();
+    syncSettingsLoaded = true;
+  } finally {
+    syncSettingsLoading = false;
+  }
+}
+accountBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  menuEl.classList.remove("show");
+  filterPanel.classList.remove("show");
+  if (accountPanel.classList.contains("show")) {
+    closeAccountPanel();
+  } else {
+    openAccountPanel();
+    loadSyncSettingsOnce();
+  }
+});
+accountPanel.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!e.target.closest(".account-input-wrap")) hideSavedAccounts();
+});
 document.getElementById("fp-gear").addEventListener("click", (e) => {
   e.stopPropagation();
   filterPanel.classList.remove("show");
+  closeAccountPanel();
   reflectAutoImport();
   fpSettingsModal.classList.add("show");
 });
@@ -631,6 +804,85 @@ document.getElementById("about-github").addEventListener("click", (e) => {
 });
 fpSettingsModal.addEventListener("click", (e) => {
   if (e.target === fpSettingsModal) fpSettingsModal.classList.remove("show");
+});
+async function syncAuth(action) {
+  const isRegister = action === "register";
+  const activeBtn = isRegister ? syncRegisterBtn : syncLoginBtn;
+  const idleText = isRegister ? "注册" : "登录";
+  syncRegisterBtn.disabled = true;
+  syncLoginBtn.disabled = true;
+  activeBtn.textContent = isRegister ? "注册中…" : "登录中…";
+  syncStatusEl.textContent = isRegister ? "注册中…" : "登录中…";
+  const username = syncUsernameEl.value.trim();
+  const password = syncPasswordEl.value;
+  closeAccountPanel();
+  try {
+    const res = await invoke(isRegister ? "auth_register" : "auth_login", {
+      url: "",
+      username,
+      password,
+    });
+    syncUsernameEl.value = res.user?.username || syncUsernameEl.value;
+    saveAccountInfo(syncUsernameEl.value, password);
+    syncPasswordEl.value = "";
+    hideSavedAccounts();
+    syncSettingsLoaded = true;
+    updateAccountView({ username: syncUsernameEl.value });
+  } catch (e) {
+    openAccountPanel();
+    syncStatusEl.classList.remove("hidden");
+    syncStatusEl.textContent = `${isRegister ? "注册" : "登录"}失败：${e}`;
+  } finally {
+    syncRegisterBtn.disabled = false;
+    syncLoginBtn.disabled = false;
+    activeBtn.textContent = idleText;
+  }
+}
+syncRegisterBtn.addEventListener("click", () => syncAuth("register"));
+syncLoginBtn.addEventListener("click", () => syncAuth("login"));
+syncUsernameEl.addEventListener("focus", renderSavedAccounts);
+syncUsernameEl.addEventListener("click", renderSavedAccounts);
+syncUsernameEl.addEventListener("input", () => {
+  const q = syncUsernameEl.value.trim().toLowerCase();
+  renderSavedAccounts();
+  if (q) {
+    savedAccountsEl.querySelectorAll(".saved-account-item").forEach((row) => {
+      row.style.display = row.textContent.toLowerCase().includes(q) ? "" : "none";
+    });
+  }
+});
+[syncUsernameEl, syncPasswordEl].forEach((el) => {
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      syncAuth("login");
+    } else if (e.key === "Escape") {
+      hideSavedAccounts();
+    }
+  });
+});
+syncLogoutBtn.addEventListener("click", async () => {
+  try {
+    await invoke("auth_logout");
+  } catch (e) {
+    syncStatusEl.classList.remove("hidden");
+    syncStatusEl.textContent = "退出登录失败：" + e;
+    return;
+  }
+  syncUsernameEl.value = "";
+  syncPasswordEl.value = "";
+  syncSettingsLoaded = true;
+  updateAccountView({ username: "" });
+});
+syncNowBtn.addEventListener("click", async () => {
+  setSyncButtonState("syncing", "同步中");
+  try {
+    const report = await invoke("sync_now");
+    setSyncButtonState("ok", "同步成功", report.message + "；服务器时间：" + formatSyncTime(report.server_time));
+    render(await invoke("shelf_books"));
+  } catch (e) {
+    setSyncButtonState("fail", "同步失败", String(e));
+  }
 });
 
 function updateLayoutButtons() {
@@ -659,6 +911,26 @@ async function importBooks() {
   invoke("build_shelf_index").catch(() => {}); // 后台为新书建检索索引
 }
 
+async function exportDataPackage() {
+  const path = await dialog.save({
+    defaultPath: "kunpeng-reader-data.json",
+    filters: [{ name: "鲲鹏阅读器数据包", extensions: ["json"] }],
+  });
+  if (!path) return;
+  await invoke("export_data_package", { path });
+  alert("数据包已导出。");
+}
+
+async function importDataPackage() {
+  const path = await dialog.open({
+    multiple: false,
+    filters: [{ name: "鲲鹏阅读器数据包", extensions: ["json"] }],
+  });
+  if (!path) return;
+  const count = await invoke("import_data_package", { path });
+  alert("已导入 " + count + " 条同步数据。重启软件后可继续迁移/合并到运行数据。");
+}
+
 function openRandom() {
   if (!books.length) {
     alert("书架还是空的，先导入书籍吧～");
@@ -672,13 +944,16 @@ function openRandom() {
 document.getElementById("menu-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   filterPanel.classList.remove("show");
+  closeAccountPanel();
   closeSearch(true);
   menuEl.classList.toggle("show");
 });
 document.addEventListener("click", () => {
   menuEl.classList.remove("show");
+  closeAccountPanel();
   filterPanel.classList.remove("show");
-  closeSearch(true);
+  hideHistory();
+  if (!searchInput.value.trim() && !searchQuery) searchWrap.classList.remove("open");
 });
 document.getElementById("mi-random").addEventListener("click", () => {
   menuEl.classList.remove("show");
@@ -687,6 +962,12 @@ document.getElementById("mi-random").addEventListener("click", () => {
 document.getElementById("mi-import").addEventListener("click", () => {
   menuEl.classList.remove("show");
   importBooks();
+});
+document.getElementById("settings-export-data").addEventListener("click", () => {
+  exportDataPackage().catch((e) => alert("导出数据包失败：" + e));
+});
+document.getElementById("settings-import-data").addEventListener("click", () => {
+  importDataPackage().catch((e) => alert("导入数据包失败：" + e));
 });
 
 // ---- 阅读统计 ----
@@ -707,6 +988,15 @@ let statScope = "day";
 let statAnchor = new Date(); // 当前查看的日/月/年
 function pad2(n) { return (n < 10 ? "0" : "") + n; }
 function ymd(d) { return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
+function dateFromYmd(v) {
+  const y = Math.floor(v / 10000), m = Math.floor(v / 100) % 100, d = v % 100;
+  return new Date(y, m - 1, d);
+}
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
 function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); } // m: 0-based
 function escapeHtml(s) { return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 function statRange() {
@@ -761,14 +1051,98 @@ function statBars(data) {
   data.days.forEach((d) => { const yy = Math.floor(d.day / 10000); yr[yy] = (yr[yy] || 0) + d.seconds; });
   return Object.keys(yr).sort().map((y) => ({ label: y, value: yr[y] }));
 }
+function streakStats(days) {
+  const active = new Set(days.filter((d) => d.seconds > 0).map((d) => d.day));
+  const today = new Date();
+  let cur = 0;
+  for (let d = new Date(today); active.has(ymd(d)); d = addDays(d, -1)) cur++;
+  const sorted = Array.from(active).sort((a, b) => a - b).map(dateFromYmd);
+  let longest = 0, run = 0, prev = null;
+  sorted.forEach((d) => {
+    if (prev && Math.round((d - prev) / 86400000) === 1) run += 1;
+    else run = 1;
+    if (run > longest) longest = run;
+    prev = d;
+  });
+  return { current: cur, longest };
+}
+function contributionLevel(seconds) {
+  if (!seconds) return 0;
+  if (seconds < 20 * 60) return 1;
+  if (seconds < 40 * 60) return 2;
+  if (seconds < 60 * 60) return 3;
+  if (seconds < 120 * 60) return 4;
+  return 4;
+}
+function monthLabelsForContribution(start, cell, gap) {
+  const labels = [];
+  let lastLeft = -999;
+  const today = new Date();
+  const end = addDays(start, 53 * 7 - 1);
+  let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+  if (cursor < start) cursor = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+  while (cursor <= end) {
+    const diff = Math.floor((cursor - start) / 86400000);
+    const left = Math.floor(diff / 7) * (cell + gap);
+    const isCurrentMonth = cursor.getFullYear() === today.getFullYear() && cursor.getMonth() === today.getMonth();
+    if (isCurrentMonth) {
+      labels.push(`<span style="right:0">${cursor.getMonth() + 1}月</span>`);
+    } else if (left - lastLeft >= 34) {
+      labels.push(`<span style="left:${left}px">${cursor.getMonth() + 1}月</span>`);
+      lastLeft = left;
+    }
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+  }
+  return labels.join("");
+}
+function contributionGraph(allData) {
+  const map = {};
+  allData.days.forEach((d) => (map[d.day] = d.seconds));
+  const today = new Date();
+  const start = addDays(today, -364);
+  start.setDate(start.getDate() - start.getDay());
+  const cell = 10, gap = 4;
+  let cells = "";
+  for (let w = 0; w < 53; w++) {
+    for (let r = 0; r < 7; r++) {
+      const d = addDays(start, w * 7 + r);
+      const key = ymd(d), seconds = map[key] || 0;
+      cells += `<span class="contrib-cell lv${contributionLevel(seconds)}" title="${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} · ${fmtTime(seconds)}"></span>`;
+    }
+  }
+  return (
+    '<div class="contrib-card">' +
+    '<div class="contrib-head"><span>阅读贡献图</span><span>过去一年</span></div>' +
+    `<div class="contrib-months">${monthLabelsForContribution(start, cell, gap)}</div>` +
+    `<div class="contrib-grid">${cells}</div>` +
+    "</div>"
+  );
+}
+function overviewStats(allData) {
+  const streak = streakStats(allData.days);
+  const peak = allData.days.reduce((m, d) => Math.max(m, d.seconds || 0), 0);
+  return (
+    '<div class="stat-overview">' +
+    `<div><b>${fmtTime(allData.total_seconds)}</b><span>累计阅读时长</span></div>` +
+    `<div><b>${fmtTime(peak)}</b><span>单日峰值</span></div>` +
+    `<div><b>${streak.current} 天</b><span>当前连续阅读</span></div>` +
+    `<div><b>${streak.longest} 天</b><span>最长连续阅读</span></div>` +
+    "</div>"
+  );
+}
 async function renderStats() {
   document.getElementById("stats-period").textContent = statPeriodLabel();
   const navVis = statScope === "total" ? "hidden" : "visible";
   document.getElementById("stats-prev").style.visibility = navVis;
   document.getElementById("stats-next").style.visibility = navVis;
   const [from, to] = statRange();
-  let data;
-  try { data = await invoke("reading_stats_range", { from, to }); } catch (e) { return; }
+  let data, allData;
+  try {
+    [data, allData] = await Promise.all([
+      invoke("reading_stats_range", { from, to }),
+      invoke("reading_stats_range", { from: 0, to: 99999999 }),
+    ]);
+  } catch (e) { return; }
   const unit = { day: "天", month: "月", year: "年", total: "段时间" }[statScope];
   const cards =
     '<div class="stat-cards">' +
@@ -791,10 +1165,14 @@ async function renderStats() {
   } else {
     books = '<div class="stats-empty">这段时间还没有阅读记录</div>';
   }
-  document.getElementById("stats-body").innerHTML = cards + chart + books;
+  document.getElementById("stats-body").innerHTML =
+    overviewStats(allData) + contributionGraph(allData) + cards + chart + books;
 }
-document.getElementById("mi-stats").addEventListener("click", () => {
+document.getElementById("stats-toolbar-btn").addEventListener("click", () => {
   menuEl.classList.remove("show");
+  filterPanel.classList.remove("show");
+  closeAccountPanel();
+  closeSearch(true);
   statScope = "day";
   statAnchor = new Date();
   document.querySelectorAll(".stats-tab").forEach((t) => t.classList.toggle("active", t.dataset.scope === "day"));
@@ -813,6 +1191,82 @@ document.getElementById("stats-next").addEventListener("click", () => statStep(1
 document.getElementById("stats-close").addEventListener("click", () => statsModal.classList.remove("show"));
 statsModal.addEventListener("click", (e) => {
   if (e.target === statsModal) statsModal.classList.remove("show");
+});
+
+// ---- 笔记汇总 ----
+const notesModal = document.getElementById("notes-modal");
+const notesBody = document.getElementById("notes-body");
+let notesData = [];
+function renderNotes(data) {
+  if (!data.length) {
+    notesBody.innerHTML = '<div class="stats-empty">还没有高亮、批注或可关联的查词记录</div>';
+    return;
+  }
+  notesBody.innerHTML = data.map((book) => {
+    const highlights = (book.highlights || []).map((h) => (
+      '<div class="note-item">' +
+      '<div class="note-text">' + escapeHtml(h.text || "") + "</div>" +
+      (h.context ? '<div class="note-context">' + escapeHtml(h.context) + "</div>" : "") +
+      (h.note ? '<div class="note-note">' + escapeHtml(h.note) + "</div>" : "") +
+      "</div>"
+    )).join("");
+    const words = (book.vocab || []).map((v) => (
+      '<span class="note-word">' + escapeHtml(v.word || "") + (v.count ? " ×" + v.count : "") + "</span>"
+    )).join("");
+    return (
+      '<section class="note-book">' +
+      "<h3>" + escapeHtml(book.title || "未命名书籍") + "</h3>" +
+      (highlights ? '<div class="note-sec"><h4>高亮 / 批注</h4>' + highlights + "</div>" : "") +
+      (words ? '<div class="note-sec"><h4>查词</h4><div class="note-vocab">' + words + "</div></div>" : "") +
+      "</section>"
+    );
+  }).join("");
+}
+function notesToMarkdown(data) {
+  let md = "# 书籍笔记汇总\n\n";
+  data.forEach((book) => {
+    md += "## " + (book.title || "未命名书籍") + "\n\n";
+    if ((book.highlights || []).length) {
+      md += "### 高亮 / 批注\n\n";
+      book.highlights.forEach((h) => {
+        md += "- " + (h.text || "").replace(/\s+/g, " ").trim() + "\n";
+        if (h.context) md += "  - 上下文：" + h.context.replace(/\s+/g, " ").trim() + "\n";
+        if (h.note) md += "  - 批注：" + h.note.replace(/\s+/g, " ").trim() + "\n";
+      });
+      md += "\n";
+    }
+    if ((book.vocab || []).length) {
+      md += "### 查词\n\n";
+      book.vocab.forEach((v) => {
+        md += "- " + (v.word || "") + (v.count ? " ×" + v.count : "") + (v.def ? "：" + v.def : "") + "\n";
+      });
+      md += "\n";
+    }
+  });
+  return md;
+}
+document.getElementById("mi-notes").addEventListener("click", async () => {
+  menuEl.classList.remove("show");
+  notesModal.classList.add("show");
+  notesBody.innerHTML = '<div class="stats-empty">正在汇总…</div>';
+  try {
+    notesData = await invoke("notes_summary");
+    renderNotes(notesData);
+  } catch (e) {
+    notesBody.innerHTML = '<div class="stats-empty">读取失败：' + escapeHtml(String(e)) + "</div>";
+  }
+});
+document.getElementById("notes-export").addEventListener("click", () => {
+  const blob = new Blob([notesToMarkdown(notesData)], { type: "text/markdown;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "书籍笔记汇总.md";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+document.getElementById("notes-close").addEventListener("click", () => notesModal.classList.remove("show"));
+notesModal.addEventListener("click", (e) => {
+  if (e.target === notesModal) notesModal.classList.remove("show");
 });
 
 // ---- 检查更新（后端多源：Gitee 优先、GitHub 兜底）----
@@ -973,25 +1427,38 @@ delBtn.addEventListener("click", async () => {
 });
 document.getElementById("del-cancel").addEventListener("click", clearSelection);
 
+let initialShelfLoading = true;
 // 回到书架窗口时刷新（更新“最近阅读”、进度等）
 window.addEventListener("focus", () => {
-  invoke("list_books").then(render).catch(() => {});
+  if (initialShelfLoading) return;
+  invoke("shelf_books").then(render).catch(() => {});
 });
 
-// 启动：先快速显示，再回填作者/导入时间后重渲染
+// 启动：先用内存里的书架立刻渲染，随后再做一次必要的元数据回填。
+// 空提示默认隐藏，所以不会在书架数据回来前闪出“书架为空”。
 (async () => {
-  try {
-    render(await invoke("list_books"));
-  } catch (e) {}
-  invoke("shelf_books").then(render).catch(() => {});
+  const cachedBooks = readShelfCache();
+  if (cachedBooks.length) render(cachedBooks, { fromCache: true });
+  invoke("list_books").then(render).catch(() => {});
+  invoke("shelf_books")
+    .then(render)
+    .catch(() => {})
+    .finally(() => {
+      initialShelfLoading = false;
+    });
+  loadSyncSettingsOnce();
   // 读取自动导入配置并反映到设置面板
   invoke("get_auto_import").then((c) => { autoImport = c || autoImport; reflectAutoImport(); }).catch(() => {});
-  // 启动时扫描自动导入目录，把新放进去的书加入书架
-  invoke("auto_import_scan").then((list) => {
-    const grew = list.length > books.length;
-    render(list);
-    if (grew) invoke("build_shelf_index").catch(() => {});
-  }).catch(() => {});
+  // 启动时扫描自动导入目录：延后到首屏书架稳定后，并在后端阻塞线程执行，避免偶发启动卡顿。
+  setTimeout(() => {
+    invoke("auto_import_scan").then((list) => {
+      const grew = list.length > books.length;
+      if (grew) {
+        render(list);
+        invoke("build_shelf_index").catch(() => {});
+      }
+    }).catch(() => {});
+  }, 2000);
   // 空闲时后台统计缺失的字数（不影响 UI）
   setTimeout(() => invoke("compute_word_counts").catch(() => {}), 1500);
   // 启动后台检查更新（不阻塞启动，每次启动查一次）
