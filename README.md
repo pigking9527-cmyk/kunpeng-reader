@@ -2,7 +2,7 @@
 
 一个面向 Windows 的高性能本地电子书阅读器。**Rust + Tauri 2 + 系统 WebView2**，书架与阅读页相互独立、EPUB 原生渲染、按章虚拟化加载，大书秒开。
 
-> 最新版本：**v1.7.0** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（免安装绿色版，双击即用，Win10/11 自带 WebView2）。
+> 最新版本：**v1.8.0** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 绿色版，Win10/11 自带 WebView2）。
 
 ## 特性
 
@@ -23,6 +23,10 @@
 
 **统计与其它**
 - **详细阅读统计**：日 / 月 / 年 / 总四视图，时长、字数、读过/读完、高亮/批注，SVG 图表
+- **账号与同步**：支持注册 / 登录，将阅读进度、高亮、批注、生词本、阅读统计、设置等轻数据同步到服务器；账号窗口可保存多个本机账号信息
+- **本地 SQLite 数据层**：书籍、阅读进度、高亮、批注、生词本、设置、阅读统计等统一写入本地 SQLite，并为后续多端同步预留 `updated_at / deleted_at / device_id / sync_version`
+- **数据包导入 / 导出**：可导出轻数据包，用于备份或迁移
+- **高频词语音包**：可在本机生成前 10,000 高频英文词语音缓存，支持暂停、继续、进度显示和删除
 - **「我的书架」显示设置**：封面是否显示阅读进度 / 评分 / 书名，各自开关；网格视图可只显示封面
 - **新版提示**：启动后台检查 GitHub 最新发行版，有更新弹横幅；「关于」里可手动检查更新、看本版更新内容
 - 划词 web 搜索、独立窗口（EPUB 与 PDF 各自记忆几何）、关于页
@@ -34,10 +38,11 @@
 ```powershell
 cd ebook-reader-tauri
 cargo build --release
-# 产物：target/release/ebook-reader-tauri.exe（自包含，可直接运行）
+# 绿色版：target/release/ebook-reader-tauri.exe
+# 安装包：target/release/bundle/
 ```
 
-- v1.7.0 起 release 构建改为 ThinLTO + 多 codegen units + 增量编译，保留 `opt-level=3` 的同时加快日常迭代。
+- v1.8.0 继续使用 ThinLTO + 多 codegen units + 增量编译，保留 `opt-level=3` 的同时加快日常迭代。
 - 首次使用**语义检索**会自动下载约 120MB 的中文语义模型（之后离线运行）。
 - **在线朗读**（edge-tts）需联网；离线可在「设置 → 朗读」切到系统语音。
 
