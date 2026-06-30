@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod book;
+mod db;
 mod dict;
 
 use book::{Library, WinGeom};
@@ -14,6 +15,7 @@ use tauri::{Emitter, Manager};
 
 /// 自定义协议的基地址（Windows 下 WebView2 把自定义协议映射到 http://<scheme>.localhost）
 const RES_BASE: &str = "http://reader.localhost";
+const DEFAULT_SYNC_URL: &str = "http://sync.example.invalid";
 
 type EpubDoc = epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>;
 
@@ -33,10 +35,12 @@ fn log(msg: &str) {
 /// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
 struct AppState {
     library: Mutex<Library>,
+    db: Mutex<Option<db::AppDb>>,
     epubs: Mutex<HashMap<u64, EpubDoc>>,
     backfilled: std::sync::atomic::AtomicBool, // 是否已回填旧书的作者/导入时间
     pending_jump: Mutex<HashMap<u64, (u32, String)>>, // 书架检索点击 → 阅读窗口待跳转位置
     text_cache: Mutex<HashMap<u64, (u64, Arc<Vec<String>>)>>, // 检索用：内存缓存的逐章纯文本 (mtime, 章节)
+    lower_text_cache: Mutex<HashMap<u64, (u64, Arc<Vec<Vec<u8>>>)>>, // 英文检索用：ASCII 小写后的章节字节
     txt_chapters: Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>, // txt 阅读用：切分好的章节 (标题, 正文)
     cache_bytes: AtomicUsize,                                 // 已缓存的总字节数（限额用）
     embedder: Mutex<Option<Arc<fastembed::TextEmbedding>>>,   // 语义模型（懒加载，首次会下载）
@@ -47,6 +51,7 @@ struct AppState {
     index_resume_at: AtomicU64, // 语义索引“让路”截止时刻(ms,0=不暂停)：打开阅读窗口时临时暂停建索引，让窗口秒开
     stats: Mutex<StatsStore>, // 详细阅读统计的小时桶
     vocab: Mutex<VocabStore>, // 生词本：查过的词
+    word_pack: Mutex<WordPackState>, // 高频词语音包后台生成状态
 }
 
 /// 当前时刻（毫秒）。用于语义索引的“让路”节流。
@@ -192,7 +197,9 @@ fn to_dto(b: &book::Book) -> BookDto {
         progress: b.progress,
         added_at: b.added_at,
         last_read_at: b.last_read_at,
-        missing: !b.path.exists(),
+        // 不在书架首屏为每本书做磁盘 exists() 检查；慢盘/移动盘/同步盘会偶发卡住启动。
+        // 真正打开失败时仍会提示用户重新定位。
+        missing: false,
         path: b.path.to_string_lossy().into_owned(),
         rating: b.rating,
         initial: title_initial(&b.title).to_string(),
@@ -241,6 +248,14 @@ struct VocabEntry {
     added_at: u64,
     #[serde(default)]
     last_at: u64,
+    #[serde(default)]
+    level: u8, // 0=陌生, 1=认识, 2=掌握
+    #[serde(default)]
+    example: String,
+    #[serde(default)]
+    book_id: u64,
+    #[serde(default)]
+    book_title: String,
 }
 
 #[derive(Default)]
@@ -288,6 +303,15 @@ impl VocabStore {
             if !e.phonetic.is_empty() {
                 x.phonetic = e.phonetic;
             }
+            if !e.example.is_empty() {
+                x.example = e.example;
+            }
+            if e.book_id != 0 {
+                x.book_id = e.book_id;
+            }
+            if !e.book_title.is_empty() {
+                x.book_title = e.book_title;
+            }
         } else {
             self.list.push(VocabEntry {
                 word,
@@ -298,6 +322,10 @@ impl VocabStore {
                 count: 1,
                 added_at: now,
                 last_at: now,
+                level: 0,
+                example: e.example,
+                book_id: e.book_id,
+                book_title: e.book_title,
             });
         }
         self.save();
@@ -311,6 +339,38 @@ impl VocabStore {
         v.sort_by(|a, b| b.last_at.cmp(&a.last_at)); // 最近查的在前
         v
     }
+    fn set_level(&mut self, word: &str, lang: &str, level: u8) {
+        if let Some(x) = self.list.iter_mut().find(|x| x.word == word && x.lang == lang) {
+            x.level = level.min(2);
+            self.save();
+        }
+    }
+    fn review(&self, lang: &str) -> Vec<VocabEntry> {
+        let now = book::now_secs();
+        let mut v: Vec<VocabEntry> = self
+            .list
+            .iter()
+            .filter(|x| x.lang == lang && x.level < 2)
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| {
+            let sa = review_score(a, now);
+            let sb = review_score(b, now);
+            sb.cmp(&sa).then_with(|| a.last_at.cmp(&b.last_at))
+        });
+        v.truncate(30);
+        v
+    }
+}
+
+fn review_score(e: &VocabEntry, now: u64) -> u64 {
+    let age_days = now.saturating_sub(e.last_at) / 86_400;
+    let level_weight = match e.level {
+        0 => 80,
+        1 => 25,
+        _ => 0,
+    };
+    level_weight + (e.count as u64 * 3) + age_days.min(30)
 }
 
 #[derive(Deserialize)]
@@ -323,6 +383,12 @@ struct VocabIn {
     def_en: String,
     #[serde(default)]
     phonetic: String,
+    #[serde(default)]
+    example: String,
+    #[serde(default)]
+    book_id: u64,
+    #[serde(default)]
+    book_title: String,
 }
 
 #[tauri::command]
@@ -340,6 +406,420 @@ fn vocab_remove(state: tauri::State<AppState>, word: String, lang: String) -> Ve
     let mut v = state.vocab.lock().unwrap();
     v.remove(&word, &lang);
     v.list_lang(&lang)
+}
+
+#[tauri::command]
+fn vocab_set_level(state: tauri::State<AppState>, word: String, lang: String, level: u8) -> Vec<VocabEntry> {
+    let mut v = state.vocab.lock().unwrap();
+    v.set_level(&word, &lang, level);
+    v.list_lang(&lang)
+}
+
+#[tauri::command]
+fn vocab_review(state: tauri::State<AppState>, lang: String) -> Vec<VocabEntry> {
+    state.vocab.lock().unwrap().review(&lang)
+}
+
+#[derive(Serialize)]
+struct BookNotesSummary {
+    id: u64,
+    title: String,
+    highlights: Vec<book::Highlight>,
+    vocab: Vec<VocabEntry>,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct SyncSettings {
+    url: String,
+    token: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
+    last_sync_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct AuthUser {
+    id: String,
+    username: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct AuthResponse {
+    #[serde(default)]
+    ok: bool,
+    token: String,
+    user: AuthUser,
+}
+
+#[derive(Serialize)]
+struct SyncReport {
+    ok: bool,
+    message: String,
+    pushed: usize,
+    pulled: usize,
+    server_time: i64,
+}
+
+#[derive(Deserialize)]
+struct SyncPushResponse {
+    server_time: i64,
+    #[serde(default)]
+    entities: Vec<db::SyncEntity>,
+    #[serde(default)]
+    accepted_count: u32,
+    #[serde(default)]
+    ignored_count: u32,
+}
+
+#[derive(Deserialize)]
+struct SyncPullResponse {
+    server_time: i64,
+    #[serde(default)]
+    entities: Vec<db::SyncEntity>,
+}
+
+#[tauri::command]
+fn notes_summary(state: tauri::State<AppState>) -> Vec<BookNotesSummary> {
+    let books = state.library.lock().unwrap().books.clone();
+    let vocab = state.vocab.lock().unwrap().list.clone();
+    let mut out = Vec::new();
+    for b in books {
+        let words: Vec<VocabEntry> = vocab
+            .iter()
+            .filter(|v| v.book_id == b.id || (!v.book_title.is_empty() && v.book_title == b.title))
+            .cloned()
+            .collect();
+        if b.highlights.is_empty() && words.is_empty() {
+            continue;
+        }
+        out.push(BookNotesSummary { id: b.id, title: b.title, highlights: b.highlights, vocab: words });
+    }
+    out.sort_by(|a, b| a.title.cmp(&b.title));
+    out
+}
+
+fn migrate_json_to_sqlite(state: &AppState) {
+    let Ok(db_guard) = state.db.lock() else { return };
+    let Some(db) = db_guard.as_ref() else { return };
+    if let Ok(lib) = state.library.lock() {
+        for b in &lib.books {
+            if let Ok(v) = serde_json::to_value(b) {
+                let _ = db.upsert_json("book", &b.id.to_string(), &v);
+            }
+            for (i, h) in b.highlights.iter().enumerate() {
+                let v = serde_json::json!({
+                    "book_id": b.id,
+                    "book_title": b.title,
+                    "highlight": h,
+                });
+                let _ = db.upsert_json("highlight", &format!("{}:{i}", b.id), &v);
+                if !h.note.trim().is_empty() {
+                    let _ = db.upsert_json("annotation", &format!("{}:{i}", b.id), &v);
+                }
+            }
+            for (i, bm) in b.bookmarks.iter().enumerate() {
+                let v = serde_json::json!({
+                    "book_id": b.id,
+                    "book_title": b.title,
+                    "bookmark": bm,
+                });
+                let _ = db.upsert_json("bookmark", &format!("{}:{i}", b.id), &v);
+            }
+        }
+        let settings = serde_json::json!({
+            "main_geom": lib.main_geom,
+            "reader_geom": lib.reader_geom,
+            "reader_geom_pdf": lib.reader_geom_pdf,
+            "auto_import_dirs": lib.auto_import_dirs,
+            "auto_import_enabled": lib.auto_import_enabled,
+        });
+        let _ = db.upsert_json("settings", "library", &settings);
+    }
+    if let Ok(vocab) = state.vocab.lock() {
+        for e in &vocab.list {
+            if let Ok(v) = serde_json::to_value(e) {
+                let _ = db.upsert_json("vocab", &format!("{}:{}", e.lang, e.word), &v);
+            }
+        }
+    }
+    if let Ok(stats) = state.stats.lock() {
+        for (&(day, hour, book), &(secs, words)) in &stats.map {
+            let bucket = ReadBucket { day, hour, book, secs, words };
+            if let Ok(v) = serde_json::to_value(&bucket) {
+                let _ = db.upsert_json("reading_bucket", &format!("{day}:{hour}:{book}"), &v);
+            }
+        }
+    }
+}
+
+fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
+    SyncSettings {
+        url: db.metadata("sync_url").unwrap_or_else(|| DEFAULT_SYNC_URL.to_string()),
+        token: db.metadata("sync_token").unwrap_or_default(),
+        username: db.metadata("sync_username").unwrap_or_default(),
+        user_id: db.metadata("sync_user_id").unwrap_or_default(),
+        last_sync_at: db.metadata("sync_last_sync_at").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+    }
+}
+
+fn save_auth_response(db: &db::AppDb, res: &AuthResponse) -> Result<(), String> {
+    if res.token.trim().is_empty() {
+        return Err("服务器没有返回登录 token".into());
+    }
+    db.set_metadata("sync_token", res.token.trim())?;
+    db.set_metadata("sync_username", res.user.username.trim())?;
+    db.set_metadata("sync_user_id", res.user.id.trim())?;
+    Ok(())
+}
+
+fn auth_request_inner(
+    state: &AppState,
+    endpoint: &str,
+    url: String,
+    username: String,
+    password: String,
+) -> Result<AuthResponse, String> {
+    let base = if url.trim().is_empty() {
+        DEFAULT_SYNC_URL.to_string()
+    } else {
+        url.trim().trim_end_matches('/').to_string()
+    };
+    let username = username.trim().to_string();
+    if username.is_empty() || password.is_empty() {
+        return Err("请输入账号和密码".into());
+    }
+    {
+        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        db.set_metadata("sync_url", &base)?;
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(20))
+        .build();
+    let body = serde_json::json!({
+        "username": username,
+        "password": password,
+    });
+    let res: AuthResponse = agent
+        .post(&format!("{base}{endpoint}"))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+        .map_err(|e| format!("认证请求失败：{e}"))?
+        .into_json()
+        .map_err(|e| format!("认证返回解析失败：{e}"))?;
+    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    save_auth_response(db, &res)?;
+    Ok(res)
+}
+
+fn apply_sqlite_to_runtime(state: &AppState) {
+    let Ok(db_guard) = state.db.lock() else { return };
+    let Some(db) = db_guard.as_ref() else { return };
+    let Ok(items) = db.all_sync_entities() else { return };
+    let mut books: Vec<book::Book> = Vec::new();
+    let mut vocab: Vec<VocabEntry> = Vec::new();
+    let mut buckets: Vec<ReadBucket> = Vec::new();
+    for item in items {
+        if item.deleted_at != 0 {
+            continue;
+        }
+        match item.kind.as_str() {
+            "book" => {
+                if let Ok(b) = serde_json::from_value::<book::Book>(item.json.clone()) {
+                    books.push(b);
+                }
+            }
+            "vocab" => {
+                if let Ok(v) = serde_json::from_value::<VocabEntry>(item.json.clone()) {
+                    vocab.push(v);
+                }
+            }
+            "reading_bucket" => {
+                if let Ok(b) = serde_json::from_value::<ReadBucket>(item.json.clone()) {
+                    buckets.push(b);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !books.is_empty() {
+        if let Ok(mut lib) = state.library.lock() {
+            books.sort_by(|a, b| b.last_read_at.cmp(&a.last_read_at).then_with(|| a.title.cmp(&b.title)));
+            lib.books = books;
+            lib.save();
+        }
+    }
+    if let Ok(mut vs) = state.vocab.lock() {
+        vs.list = vocab;
+        vs.save();
+    }
+    if let Ok(mut st) = state.stats.lock() {
+        st.map.clear();
+        for b in buckets {
+            st.map.insert((b.day, b.hour, b.book), (b.secs, b.words));
+        }
+        st.dirty = true;
+        st.save();
+    }
+}
+
+#[tauri::command]
+fn sync_get_settings(state: tauri::State<AppState>) -> Result<SyncSettings, String> {
+    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    Ok(sync_settings_from_db(db))
+}
+
+#[tauri::command]
+fn sync_set_settings(state: tauri::State<AppState>, url: String, token: String) -> Result<SyncSettings, String> {
+    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    db.set_metadata("sync_url", url.trim().trim_end_matches('/'))?;
+    db.set_metadata("sync_token", token.trim())?;
+    Ok(sync_settings_from_db(db))
+}
+
+#[tauri::command]
+fn auth_logout(state: tauri::State<AppState>) -> Result<SyncSettings, String> {
+    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    db.set_metadata("sync_token", "")?;
+    db.set_metadata("sync_username", "")?;
+    db.set_metadata("sync_user_id", "")?;
+    Ok(sync_settings_from_db(db))
+}
+
+#[tauri::command]
+async fn auth_register(
+    app: tauri::AppHandle,
+    url: String,
+    username: String,
+    password: String,
+) -> Result<AuthResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        auth_request_inner(state.inner(), "/auth/register", url, username, password)
+    })
+    .await
+    .map_err(|e| format!("认证任务失败：{e}"))?
+}
+
+#[tauri::command]
+async fn auth_login(
+    app: tauri::AppHandle,
+    url: String,
+    username: String,
+    password: String,
+) -> Result<AuthResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        auth_request_inner(state.inner(), "/auth/login", url, username, password)
+    })
+    .await
+    .map_err(|e| format!("认证任务失败：{e}"))?
+}
+
+fn sync_now_inner(state: &AppState) -> Result<SyncReport, String> {
+    migrate_json_to_sqlite(state);
+    let (settings, device_id, entities) = {
+        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        let settings = sync_settings_from_db(db);
+        if settings.url.trim().is_empty() || settings.token.trim().is_empty() {
+            return Err("请先登录账号".into());
+        }
+        (settings, db.device_id(), db.all_sync_entities()?)
+    };
+    let base = settings.url.trim().trim_end_matches('/').to_string();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(20))
+        .build();
+    let push_body = serde_json::json!({
+        "device_id": device_id,
+        "entities": entities,
+    });
+    let push: SyncPushResponse = agent
+        .post(&format!("{base}/sync/push"))
+        .set("Authorization", &format!("Bearer {}", settings.token))
+        .set("Content-Type", "application/json")
+        .send_json(push_body)
+        .map_err(|e| format!("push 失败：{e}"))?
+        .into_json()
+        .map_err(|e| format!("push 返回解析失败：{e}"))?;
+
+    let pull: SyncPullResponse = agent
+        .get(&format!("{base}/sync/pull"))
+        .query("since", &settings.last_sync_at.to_string())
+        .set("Authorization", &format!("Bearer {}", settings.token))
+        .call()
+        .map_err(|e| format!("pull 失败：{e}"))?
+        .into_json()
+        .map_err(|e| format!("pull 返回解析失败：{e}"))?;
+
+    let (pulled, server_time) = {
+        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        if !push.entities.is_empty() {
+            let _ = db.import_sync_entities(&push.entities)?;
+        }
+        let pulled = db.import_sync_entities(&pull.entities)?;
+        let server_time = push.server_time.max(pull.server_time);
+        db.set_metadata("sync_last_sync_at", &server_time.to_string())?;
+        (pulled, server_time)
+    };
+    apply_sqlite_to_runtime(state);
+    Ok(SyncReport {
+        ok: true,
+        message: format!(
+            "同步完成：推送 {} 条，服务端接受 {} 条，忽略 {} 条，拉取 {} 条",
+            entities.len(),
+            push.accepted_count,
+            push.ignored_count,
+            pulled
+        ),
+        pushed: entities.len(),
+        pulled: pulled as usize,
+        server_time,
+    })
+}
+
+#[tauri::command]
+async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        sync_now_inner(state.inner())
+    })
+        .await
+        .map_err(|e| format!("同步任务失败：{e}"))?
+}
+
+#[tauri::command]
+fn migrate_data_to_sqlite(state: tauri::State<AppState>) -> Result<(), String> {
+    migrate_json_to_sqlite(state.inner());
+    Ok(())
+}
+
+#[tauri::command]
+fn export_data_package(state: tauri::State<AppState>, path: String) -> Result<(), String> {
+    migrate_json_to_sqlite(state.inner());
+    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    let package = db.export_package()?;
+    let text = serde_json::to_string_pretty(&package).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn import_data_package(state: tauri::State<AppState>, path: String) -> Result<u32, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    db.import_package(&value)
 }
 
 // ---- 检查更新：后端发请求（避免前端跨域被拦），方便以后扩展多个源 ----
@@ -622,9 +1102,15 @@ async fn set_auto_import(
 
 /// 启动/回到书架时调用：若开启自动导入则扫描目录，返回最新书单。
 #[tauri::command]
-async fn auto_import_scan(state: tauri::State<'_, AppState>) -> Result<Vec<BookDto>, ()> {
-    run_auto_import(state.inner());
-    Ok(snapshot(&state.library.lock().unwrap()))
+async fn auto_import_scan(app: tauri::AppHandle) -> Result<Vec<BookDto>, ()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        run_auto_import(state.inner());
+        let books = snapshot(&state.library.lock().unwrap());
+        books
+    })
+    .await
+    .map_err(|_| ())
 }
 
 /// 阅读窗口上报阅读位置（进度% + 章节 + 章内比例）。
@@ -1808,6 +2294,257 @@ async fn edge_tts(text: String, voice: String, rate: i32) -> Result<TtsAudio, St
     })
 }
 
+fn word_tts_cache_dir() -> Result<std::path::PathBuf, String> {
+    let mut dir = dirs::config_dir().ok_or("无法确定用户配置目录")?;
+    dir.push("ebook-reader");
+    dir.push("word-tts-cache");
+    Ok(dir)
+}
+
+fn word_tts_cache_path(word: &str) -> Result<std::path::PathBuf, String> {
+    let key = sha256_upper(&format!("en-US-JennyNeural:{}", word.trim().to_lowercase())).to_lowercase();
+    Ok(word_tts_cache_dir()?.join(format!("{key}.mp3")))
+}
+
+#[tauri::command]
+async fn word_tts(text: String, cache: bool) -> Result<TtsAudio, String> {
+    use base64::Engine;
+
+    let word = text.trim();
+    if word.is_empty() {
+        return Err("单词为空".into());
+    }
+    let cache_path = word_tts_cache_path(word)?;
+    if cache {
+        if let Ok(audio) = std::fs::read(&cache_path) {
+            if !audio.is_empty() {
+                return Ok(TtsAudio {
+                    audio: base64::engine::general_purpose::STANDARD.encode(audio),
+                    marks: Vec::new(),
+                });
+            }
+        }
+    }
+
+    let result = edge_tts(word.to_string(), "en-US-JennyNeural".into(), 0).await?;
+    if cache {
+        if let Some(parent) = cache_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建语音缓存目录失败：{e}"))?;
+        }
+        let audio = base64::engine::general_purpose::STANDARD
+            .decode(&result.audio)
+            .map_err(|e| format!("解码语音缓存失败：{e}"))?;
+        std::fs::write(&cache_path, audio).map_err(|e| format!("写入语音缓存失败：{e}"))?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn word_tts_cache_size() -> u64 {
+    let Ok(dir) = word_tts_cache_dir() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|meta| meta.is_file())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+#[tauri::command]
+fn clear_word_tts_cache() -> Result<(), String> {
+    let dir = word_tts_cache_dir()?;
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(());
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("mp3") {
+            std::fs::remove_file(&path).map_err(|e| format!("删除语音缓存失败：{e}"))?;
+        }
+    }
+    Ok(())
+}
+
+const FREQUENT_EN_10000: &str = include_str!("dict/frequent_en_10000.txt");
+
+fn frequent_en_words() -> impl Iterator<Item = &'static str> {
+    FREQUENT_EN_10000.lines().filter(|word| !word.is_empty())
+}
+
+#[derive(Serialize)]
+struct WordTtsPackStatus {
+    total: usize,
+    cached: usize,
+    bytes: u64,
+    running: bool,
+    current: String,
+    message: String,
+}
+
+#[derive(Default)]
+struct WordPackState {
+    running: bool,
+    stop: bool,
+    current: String,
+    message: String,
+}
+
+#[tauri::command]
+fn word_tts_pack_status(state: tauri::State<AppState>) -> WordTtsPackStatus {
+    let mut total = 0;
+    let mut cached = 0;
+    let mut bytes = 0;
+    for word in frequent_en_words() {
+        total += 1;
+        if let Ok(path) = word_tts_cache_path(word) {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if meta.is_file() && meta.len() > 0 {
+                    cached += 1;
+                    bytes += meta.len();
+                }
+            }
+        }
+    }
+    let pack = state.word_pack.lock().unwrap();
+    WordTtsPackStatus {
+        total,
+        cached,
+        bytes,
+        running: pack.running,
+        current: pack.current.clone(),
+        message: pack.message.clone(),
+    }
+}
+
+#[tauri::command]
+fn word_tts_pack_missing() -> Vec<String> {
+    frequent_en_words()
+        .filter(|word| {
+            word_tts_cache_path(word)
+                .ok()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .map(|meta| !meta.is_file() || meta.len() == 0)
+                .unwrap_or(true)
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+#[tauri::command]
+fn clear_word_tts_pack() -> Result<(), String> {
+    for word in frequent_en_words() {
+        let path = word_tts_cache_path(word)?;
+        if path.is_file() {
+            std::fs::remove_file(&path).map_err(|e| format!("删除高频词语音包失败：{e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn pause_word_tts_pack(state: tauri::State<AppState>) {
+    let mut pack = state.word_pack.lock().unwrap();
+    pack.stop = true;
+    if pack.running {
+        pack.message = "正在暂停，当前请求完成后停止…".into();
+    }
+}
+
+#[tauri::command]
+fn start_word_tts_pack(app: tauri::AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut pack = state.word_pack.lock().unwrap();
+        if pack.running {
+            return Ok(());
+        }
+        pack.running = true;
+        pack.stop = false;
+        pack.current.clear();
+        pack.message = "准备生成…".into();
+    }
+
+    tauri::async_runtime::spawn(async move {
+        use base64::Engine;
+
+        for word in frequent_en_words() {
+            let state = app.state::<AppState>();
+            {
+                let mut pack = state.word_pack.lock().unwrap();
+                if pack.stop {
+                    pack.running = false;
+                    pack.current.clear();
+                    pack.message = "已暂停".into();
+                    return;
+                }
+                pack.current = word.to_string();
+                pack.message = format!("生成中：{word}");
+            }
+
+            let path = match word_tts_cache_path(word) {
+                Ok(p) => p,
+                Err(err) => {
+                    let mut pack = state.word_pack.lock().unwrap();
+                    pack.message = err;
+                    continue;
+                }
+            };
+            if path.is_file() && path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                continue;
+            }
+
+            loop {
+                let state = app.state::<AppState>();
+                if state.word_pack.lock().unwrap().stop {
+                    let mut pack = state.word_pack.lock().unwrap();
+                    pack.running = false;
+                    pack.current.clear();
+                    pack.message = "已暂停".into();
+                    return;
+                }
+                match edge_tts(word.to_string(), "en-US-JennyNeural".into(), 0).await {
+                    Ok(result) => {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match base64::engine::general_purpose::STANDARD.decode(&result.audio) {
+                            Ok(audio) => {
+                                let _ = std::fs::write(&path, audio);
+                                break;
+                            }
+                            Err(err) => {
+                                let mut pack = state.word_pack.lock().unwrap();
+                                pack.message = format!("解码失败：{word} · {err}");
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        {
+                            let mut pack = state.word_pack.lock().unwrap();
+                            pack.message = format!("请求失败：{word} · 3 秒后重试");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                }
+            }
+        }
+
+        let state = app.state::<AppState>();
+        let mut pack = state.word_pack.lock().unwrap();
+        pack.running = false;
+        pack.stop = false;
+        pack.current.clear();
+        pack.message = "已完成".into();
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn add_bookmark(
     window: tauri::WebviewWindow,
@@ -2047,7 +2784,6 @@ fn ensure_epub_loaded(state: &AppState, id: u64) -> Result<(), String> {
 }
 
 fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
-    log(&format!("request {path}"));
     let decoded = percent_decode(path);
     let mut parts = decoded.trim_start_matches('/').splitn(3, '/');
     let kind = parts.next()?;
@@ -2543,7 +3279,7 @@ function setupSelMenu(){
   btnDict.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
     var t=(window.getSelection?window.getSelection().toString():'').trim();
-    if(t)openDict(t);
+    if(t)openDict(t,getSelContext());
     hideSelMenu();
   });
   btnBm.addEventListener('click',function(e){
@@ -2619,7 +3355,7 @@ function setupHlUi(){
   hlMenu.append(mWeb,mDict,mDel,mNote);document.body.appendChild(hlMenu);
   [mWeb,mDict,mDel,mNote].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
   mWeb.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({webSearch:h.text},'*');hideHlMenu();});
-  mDict.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)openDict(h.text);hideHlMenu();});
+  mDict.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)openDict(h.text,h.context||'');hideHlMenu();});
   mDel.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({removeHighlight:activeHi},'*');hideHlMenu();});
   mNote.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({openAnnotations:activeHi},'*');hideHlMenu();});
   hlMenu.addEventListener('mouseenter',function(){if(hlHideTimer)clearTimeout(hlHideTimer);});
@@ -2655,7 +3391,7 @@ function setupFn(){
   document.addEventListener('wheel',hideFn,{passive:true});
 }
 // ---- 离线词典：选中文字/已高亮 → 就地弹释义（释义由外壳查后端再回传）----
-var dictPop=null,dictRect=null;
+var dictPop=null,dictRect=null,dictContext='';
 function hideDict(){if(dictPop)dictPop.style.display='none';}
 function setupDict(){
   dictPop=document.createElement('div');dictPop.id='dict-pop';
@@ -2675,9 +3411,11 @@ function placeDict(){
   if(top<8)top=8;
   dictPop.style.top=top+'px';
 }
-function openDict(term){
+function openDict(term,context){
   if(!dictPop)setupDict();
   try{var s=window.getSelection();dictRect=(s&&s.rangeCount)?s.getRangeAt(0).getBoundingClientRect():null;}catch(_){dictRect=null;}
+  dictContext=(context||'').replace(/\s+/g,' ').trim();
+  if(!dictContext)dictContext=getSelContext();
   dictPop.querySelector('.dc-head').textContent='查词中…';
   dictPop.querySelector('.dc-def').textContent='';dictPop.querySelector('.dc-def').className='dc-def';
   placeDict();
@@ -2685,12 +3423,8 @@ function openDict(term){
 }
 function speakWord(w){
   try{
-    if(!window.speechSynthesis||!w)return;
-    window.speechSynthesis.cancel();
-    var u=new SpeechSynthesisUtterance(w);u.lang='en-US';u.rate=.9;
-    var vs=window.speechSynthesis.getVoices();
-    for(var i=0;i<vs.length;i++){if(/^en/i.test(vs[i].lang)){u.voice=vs[i];break;}}
-    window.speechSynthesis.speak(u);
+    if(!w)return;
+    parent.postMessage({dictSpeak:w},'*');
   }catch(_){}
 }
 // 释义来源多选记忆（按语种分开）：中文词 中=中中/英=中英；英文词 中=英中/英=英英
@@ -2705,6 +3439,7 @@ function renderDict(){
   if(!r.found){def.textContent='（未找到该词的释义）';def.className='dc-def dc-miss';return;}
   if(r.phonetic){var ph=document.createElement('span');ph.className='dc-phon';ph.textContent=(r.lang==='en')?('['+r.phonetic+']'):r.phonetic;head.appendChild(ph);}
   if(r.lang==='en'){
+    parent.postMessage({dictPrefetch:r.word},'*');
     var spk=document.createElement('span');spk.className='dc-spk';spk.textContent='🔊';spk.title='发音';
     spk.addEventListener('click',function(e){e.stopPropagation();speakWord(r.word);});head.appendChild(spk);
   }
@@ -2742,8 +3477,8 @@ function renderDict(){
 function showDictResult(r){
   if(!dictPop)setupDict();
   lastDict=r;renderDict();
-  if(r&&r.found&&r.lang==='en')speakWord(r.word); // 英文词自动读一次
-  if(r&&r.found)parent.postMessage({vocabAdd:{word:r.word,lang:r.lang,def:r.def||'',def_en:r.def_en||'',phonetic:r.phonetic||''}},'*'); // 记入生词本
+  if(r&&r.found&&r.lang==='en'&&r.autoSpeak)speakWord(r.word); // 按生词本设置决定是否自动读一次
+  if(r&&r.found)parent.postMessage({vocabAdd:{word:r.word,lang:r.lang,def:r.def||'',def_en:r.def_en||'',phonetic:r.phonetic||'',example:dictContext||''}},'*'); // 记入生词本
   placeDict();
 }
 // 是否是"注释角标"链接：epub:type/role/class 含 note，或链接文字形如 [23] / (3) / 23
@@ -3578,6 +4313,52 @@ fn save_index(id: u64, idx: &BookIndex) {
     }
 }
 
+fn simple_ascii_query_key(term: &str) -> Option<String> {
+    let t = term.trim();
+    if t.len() < 2 || !t.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(t.to_ascii_lowercase())
+}
+
+fn ascii_terms(text: &str) -> Vec<(String, usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        while i < bytes.len() && !bytes[i].is_ascii_alphanumeric() {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
+            i += 1;
+        }
+        if i > start + 1 {
+            let term = text[start..i].to_ascii_lowercase();
+            out.push((term, start, i - start));
+        }
+    }
+    out
+}
+
+fn index_book_keywords(state: &AppState, book: &book::Book, chapters: &[String]) {
+    let Ok(db_guard) = state.db.lock() else { return };
+    let Some(db) = db_guard.as_ref() else { return };
+    for (ci, text) in chapters.iter().enumerate() {
+        let mut map: HashMap<String, (u32, Vec<String>)> = HashMap::new();
+        for (term, pos, len) in ascii_terms(text) {
+            let entry = map.entry(term).or_insert((0, Vec::new()));
+            entry.0 = entry.0.saturating_add(1);
+            if entry.1.len() < 8 {
+                entry.1.push(snippet_at(text, pos, len));
+            }
+        }
+        for (term, (count, snippets)) in map {
+            let _ = db.upsert_keyword_posting(&term, book.id, ci as u32, count, &snippets);
+        }
+    }
+}
+
 /// 确保某书索引存在且新鲜，返回它（pdf 或抽取失败返回 None）。
 fn ensure_book_index(book: &book::Book) -> Option<BookIndex> {
     if book.format == "pdf" {
@@ -3608,8 +4389,15 @@ fn spawn_build_index(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
         let books: Vec<book::Book> = { state.library.lock().unwrap().books.clone() };
+        if let Ok(mut db_guard) = state.db.lock() {
+            if let Some(db) = db_guard.as_mut() {
+                let _ = db.clear_keyword_index();
+            }
+        }
         for b in books {
-            ensure_book_index(&b);
+            if let Some(idx) = ensure_book_index(&b) {
+                index_book_keywords(state.inner(), &b, &idx.chapters);
+            }
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
     });
@@ -3661,6 +4449,29 @@ fn get_book_chapters(state: &AppState, book: &book::Book) -> Option<Arc<Vec<Stri
     Some(arc)
 }
 
+fn get_lower_book_chapters(state: &AppState, book: &book::Book, chapters: &Arc<Vec<String>>) -> Arc<Vec<Vec<u8>>> {
+    let id = book.id;
+    let mtime = file_mtime(&book.path);
+    {
+        let cache = state.lower_text_cache.lock().unwrap();
+        if let Some((mt, arc)) = cache.get(&id) {
+            if *mt == mtime {
+                return arc.clone();
+            }
+        }
+    }
+    let arc = Arc::new(chapters.iter().map(|s| ascii_lower_bytes(s)).collect::<Vec<_>>());
+    let size: usize = arc.iter().map(|s| s.len()).sum();
+    {
+        let mut cache = state.lower_text_cache.lock().unwrap();
+        if state.cache_bytes.load(Ordering::Relaxed) + size <= TEXT_CACHE_BUDGET {
+            cache.insert(id, (mtime, arc.clone()));
+            state.cache_bytes.fetch_add(size, Ordering::Relaxed);
+        }
+    }
+    arc
+}
+
 /// 只把 ASCII 大写转小写（多字节 UTF-8/中文保持原字节，长度不变 → 字节偏移仍有效）。
 fn ascii_lower_bytes(s: &str) -> Vec<u8> {
     s.bytes().map(|b| b.to_ascii_lowercase()).collect()
@@ -3697,10 +4508,11 @@ fn search_one_book(
     let finder = memchr::memmem::Finder::new(term_lower);
     let mut count = 0u32;
     let mut hits: Vec<ChapterHit> = Vec::new();
-    for (ci, text) in chapters.iter().enumerate() {
-        if needs_ci {
-            let lower = ascii_lower_bytes(text);
-            for mb in finder.find_iter(&lower) {
+    if needs_ci {
+        let lower_chapters = get_lower_book_chapters(state, book, &chapters);
+        for (ci, lower) in lower_chapters.iter().enumerate() {
+            let text = &chapters[ci];
+            for mb in finder.find_iter(lower) {
                 count += 1;
                 if hits.len() < 60 {
                     hits.push(ChapterHit {
@@ -3712,7 +4524,12 @@ fn search_one_book(
                     break;
                 }
             }
-        } else {
+            if count >= 3000 {
+                break;
+            }
+        }
+    } else {
+        for (ci, text) in chapters.iter().enumerate() {
             for mb in finder.find_iter(text.as_bytes()) {
                 count += 1;
                 if hits.len() < 60 {
@@ -3725,9 +4542,9 @@ fn search_one_book(
                     break;
                 }
             }
-        }
-        if count >= 3000 {
-            break;
+            if count >= 3000 {
+                break;
+            }
         }
     }
     if count == 0 {
@@ -3740,6 +4557,45 @@ fn search_one_book(
         count,
         hits,
     })
+}
+
+fn search_keyword_index(
+    state: &AppState,
+    targets: &[book::Book],
+    term: &str,
+    want: Option<&std::collections::HashSet<u64>>,
+) -> Option<Vec<ShelfBookHits>> {
+    let key = simple_ascii_query_key(term)?;
+    let db_guard = state.db.lock().ok()?;
+    let db = db_guard.as_ref()?;
+    let rows = db.keyword_search(&key, want).ok()?;
+    if rows.is_empty() && !db.has_keyword_index() {
+        return None;
+    }
+    let mut titles: HashMap<u64, (&str, &str)> = HashMap::new();
+    for b in targets {
+        titles.insert(b.id, (&b.title, &b.author));
+    }
+    let mut grouped: HashMap<u64, ShelfBookHits> = HashMap::new();
+    for row in rows {
+        let (title, author) = titles.get(&row.book_id).copied().unwrap_or(("", ""));
+        let entry = grouped.entry(row.book_id).or_insert_with(|| ShelfBookHits {
+            book_id: row.book_id.to_string(),
+            title: title.to_string(),
+            author: author.to_string(),
+            count: 0,
+            hits: Vec::new(),
+        });
+        entry.count = entry.count.saturating_add(row.count);
+        for snippet in row.snippets {
+            if entry.hits.len() < 60 {
+                entry.hits.push(ChapterHit { chapter: row.chapter, snippet });
+            }
+        }
+    }
+    let mut out: Vec<ShelfBookHits> = grouped.into_values().collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count));
+    Some(out)
 }
 
 /// 书架全文检索：ids 为空 → 全部图书；否则只搜选定的几本。多线程 + 字节级匹配 + 内存缓存。
@@ -3774,6 +4630,9 @@ async fn shelf_search(
     let term_lower = ascii_lower_bytes(&term);
 
     let st: &AppState = state.inner();
+    if let Some(results) = search_keyword_index(st, &targets, &term, want.as_ref()) {
+        return Ok(results);
+    }
     let nthreads = std::thread::available_parallelism()
         .map(|n| n.get().min(8))
         .unwrap_or(4)
@@ -4941,10 +5800,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             library: Mutex::new(Library::load()),
+            db: Mutex::new(db::AppDb::open().ok()),
             epubs: Mutex::new(HashMap::new()),
             backfilled: std::sync::atomic::AtomicBool::new(false),
             pending_jump: Mutex::new(HashMap::new()),
             text_cache: Mutex::new(HashMap::new()),
+            lower_text_cache: Mutex::new(HashMap::new()),
             txt_chapters: Mutex::new(HashMap::new()),
             cache_bytes: AtomicUsize::new(0),
             embedder: Mutex::new(None),
@@ -4955,9 +5816,14 @@ fn main() {
             index_resume_at: AtomicU64::new(0),
             stats: Mutex::new(StatsStore::load()),
             vocab: Mutex::new(VocabStore::load()),
+            word_pack: Mutex::new(WordPackState::default()),
         })
         // 主窗口（书架）：恢复上次的大小/位置，并在移动/缩放/关闭时记忆
         .setup(|app| {
+            {
+                let state = app.state::<AppState>();
+                migrate_json_to_sqlite(state.inner());
+            }
             spawn_build_index(app.handle().clone()); // 后台建立/更新全文检索索引
             spawn_fingerprint_fill(app.handle().clone()); // 后台为旧书补内容指纹
             if let Some(win) = app.get_webview_window("main") {
@@ -4994,7 +5860,6 @@ fn main() {
                 let state = app.state::<AppState>();
                 let response = match handle_request(&state, &path) {
                     Some((bytes, mime)) => {
-                        log(&format!("  -> 200 {} bytes, {}", bytes.len(), mime));
                         // 封面/EPUB 内嵌资源是稳定内容（封面换图时 URL 带 ?v= mtime 会自动失效），
                         // 让 WebView2 缓存它们：再次渲染书架时直接命中缓存、不再走异步协议重取，
                         // 避免封面“先黑一下再出图”。
@@ -5013,7 +5878,6 @@ fn main() {
                             .unwrap()
                     }
                     None => {
-                        log(&format!("  -> 404 {path}"));
                         tauri::http::Response::builder()
                             .status(404)
                             .body(Vec::new())
@@ -5030,6 +5894,18 @@ fn main() {
             vocab_add,
             vocab_list,
             vocab_remove,
+            vocab_set_level,
+            vocab_review,
+            notes_summary,
+            sync_get_settings,
+            sync_set_settings,
+            auth_register,
+            auth_login,
+            auth_logout,
+            sync_now,
+            migrate_data_to_sqlite,
+            export_data_package,
+            import_data_package,
             check_update,
             release_notes,
             shelf_books,
@@ -5053,6 +5929,14 @@ fn main() {
             add_read_words,
             open_url,
             edge_tts,
+            word_tts,
+            word_tts_cache_size,
+            clear_word_tts_cache,
+            word_tts_pack_status,
+            word_tts_pack_missing,
+            clear_word_tts_pack,
+            start_word_tts_pack,
+            pause_word_tts_pack,
             get_page_cache,
             save_page_cache,
             get_pdf_state,

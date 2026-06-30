@@ -77,11 +77,55 @@
         </div>
       </div>
       <div class="menu-wrap">
+        <div class="account-wrap">
+          <button id="account-btn" class="avatar-btn" title="账号与同步" aria-label="账号与同步">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <circle cx="12" cy="8" r="4" fill="currentColor" />
+              <path d="M4.5 20c1.2-4 4-6 7.5-6s6.3 2 7.5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </button>
+          <div id="account-panel" class="account-panel">
+            <div id="sync-form" class="sync-form">
+              <div class="fp-title">同步</div>
+              <label class="sync-field">
+                <span>账号</span>
+                <span class="account-input-wrap">
+                  <input id="sync-username" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" />
+                  <div id="saved-accounts" class="saved-accounts"></div>
+                </span>
+              </label>
+              <label class="sync-field">
+                <span>密码</span>
+                <input id="sync-password" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" />
+              </label>
+              <div class="fp-set-actions">
+                <button id="sync-register" class="btn-plain" type="button">注册</button>
+                <button id="sync-login" class="btn-plain" type="button">登录</button>
+              </div>
+            </div>
+            <div id="sync-account" class="sync-account">
+              <span id="sync-account-name">账号：</span>
+              <span class="sync-account-actions">
+                <button id="sync-now" class="sync-now-btn" type="button">同步</button>
+                <button id="sync-logout" class="sync-logout-btn" type="button">退出登录</button>
+              </span>
+            </div>
+            <div class="account-settings-space"></div>
+            <div id="sync-status" class="sync-status">尚未同步</div>
+          </div>
+        </div>
+        <button id="stats-toolbar-btn" class="icon-btn" title="阅读统计" aria-label="阅读统计">
+          <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
+            <path d="M5 20V10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            <path d="M12 20V5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            <path d="M19 20v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          </svg>
+        </button>
         <button id="menu-btn" class="icon-btn" title="菜单">⋮</button>
         <div id="menu" class="menu">
           <div class="menu-item" id="mi-random">🎲 随机打开一本书</div>
           <div class="menu-item" id="mi-import">➕ 导入书籍</div>
-          <div class="menu-item" id="mi-stats">📊 阅读统计</div>
+          <div class="menu-item" id="mi-notes">📝 笔记汇总</div>
           <div class="menu-item" id="mi-selectall">☑ 全选（批量删除）</div>
           <div class="menu-item" id="mi-about">ℹ️ 关于</div>
         </div>
@@ -110,6 +154,18 @@
         <div id="stats-body" class="stats-body"></div>
       </div>
     </div>
+    <div id="notes-modal" class="modal">
+      <div class="modal-card notes-card">
+        <div class="modal-head">
+          <span>📝 笔记汇总</span>
+          <span class="modal-actions">
+            <button id="notes-export" class="btn-plain">导出 Markdown</button>
+            <button id="notes-close" class="btn-plain">✕</button>
+          </span>
+        </div>
+        <div id="notes-body" class="notes-body"></div>
+      </div>
+    </div>
     <div id="fp-settings-modal" class="modal">
       <div class="modal-card">
         <div class="modal-head"><span>⚙ 我的书架</span><button id="fp-settings-close" class="btn-plain">✕</button></div>
@@ -133,6 +189,10 @@
           </span>
         </div>
         <p class="ai-note">开启「自动导入目录」后，每次启动会扫描齿轮里设置的目录（含子目录），把其中的电子书自动加入书架。已在书架里的不会重复添加。</p>
+        <div class="fp-set-actions">
+          <button id="settings-export-data" class="btn-plain" type="button">⬆ 导出数据包</button>
+          <button id="settings-import-data" class="btn-plain" type="button">⬇ 导入数据包</button>
+        </div>
       </div>
     </div>
     <div id="import-dirs-modal" class="modal">
@@ -157,7 +217,7 @@
     <div id="drop-hint" class="drop-hint">松开即可导入书籍</div>
     <div class="content">
       <main id="shelf" class="shelf"></main>
-      <div id="empty" class="empty">书架还是空的。点右上角「⋮」→「导入书籍」添加（可一次选多本）。</div>
+      <div id="empty" class="empty"></div>
     </div>
     <script src="app.js"></script>
   </body>

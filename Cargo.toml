@@ -1,6 +1,6 @@
 [package]
 name = "ebook-reader-tauri"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 
 [build-dependencies]
@@ -32,6 +32,7 @@ tokio = { version = "1", features = ["rt"] }
 flate2 = "1"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 mobi = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # 正式发布档：保留优化，同时加快日常 release 构建。
 [profile.release]
