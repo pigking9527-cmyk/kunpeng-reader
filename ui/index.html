@@ -22,10 +22,11 @@
         </button>
         <div class="sbox">
           <input id="search-input" class="search-input" type="text" autocomplete="off" placeholder="搜索 书名 / 作者 / 简介" />
+          <button id="search-clear" class="search-clear" type="button" title="清空搜索" aria-label="清空搜索">×</button>
           <div id="search-history" class="search-history"></div>
         </div>
-        <label class="shelf-toggle" id="shelf-toggle" title="勾选后回车，对全书架正文做检索">
-          <input type="checkbox" id="shelf-search-chk" /> 书架搜索
+        <label class="shelf-toggle" id="shelf-toggle" title="全书架正文检索">
+          <input type="checkbox" id="shelf-search-chk" />
         </label>
       </div>
       <div class="filter-wrap">
@@ -139,7 +140,18 @@
     </div>
     <div id="stats-modal" class="modal">
       <div class="modal-card stats-card">
-        <div class="modal-head"><span>📊 阅读统计</span><button id="stats-close" class="btn-plain">✕</button></div>
+        <div class="modal-head stats-head">
+          <span>阅读统计</span>
+          <button id="stats-settings-btn" class="btn-plain stats-settings-btn" title="阅读统计设置">⚙</button>
+        </div>
+        <div id="stats-settings" class="stats-settings">
+          <label><input type="checkbox" data-stat-item="duration" checked /> 阅读时长</label>
+          <label><input type="checkbox" data-stat-item="words" checked /> 阅读字数</label>
+          <label><input type="checkbox" data-stat-item="books" checked /> 读过</label>
+          <label><input type="checkbox" data-stat-item="finished" checked /> 读完</label>
+          <label><input type="checkbox" data-stat-item="highlights" checked /> 高亮</label>
+          <label><input type="checkbox" data-stat-item="notes" checked /> 批注</label>
+        </div>
         <div class="stats-tabs">
           <button class="stats-tab active" data-scope="day">日</button>
           <button class="stats-tab" data-scope="month">月</button>
@@ -222,3 +234,5 @@
     <script src="app.js"></script>
   </body>
 </html>
+
+

@@ -34,9 +34,18 @@ fn now_secs() -> u64 {
 }
 
 fn db_path() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        let mut d = PathBuf::from("/data/user/0/com.pigking.ebookreader/files/ebook-reader");
+        d.push("reader.db");
+        return Some(d);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
     let mut d = dirs::config_dir()?;
     d.push("ebook-reader");
     Some(d.join("reader.db"))
+    }
 }
 
 fn new_device_id() -> String {
