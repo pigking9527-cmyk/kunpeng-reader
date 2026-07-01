@@ -256,7 +256,7 @@ impl Library {
         if fp != 0 {
             if let Some(b) = self.books.iter_mut().find(|b| b.fingerprint == fp) {
                 b.path = path; // 同一本书换了位置 → 重定位，其它数据不动
-                return false;
+                return true;
             }
         }
         self.books.push(Book::prepare(path));
@@ -375,10 +375,39 @@ impl Library {
         false
     }
 
+    fn app_config_dir() -> Option<PathBuf> {
+        #[cfg(target_os = "android")]
+        {
+            return Some(PathBuf::from("/data/user/0/com.pigking.ebookreader/files/ebook-reader"));
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut dir = dirs::config_dir()?;
+            dir.push("ebook-reader");
+            Some(dir)
+        }
+    }
+
     fn data_file() -> Option<PathBuf> {
-        let mut dir = dirs::config_dir()?;
-        dir.push("ebook-reader");
+        let dir = Self::app_config_dir()?;
         Some(dir.join("library.json"))
+    }
+
+    pub fn data_dir() -> Option<PathBuf> {
+        Self::app_config_dir()
+    }
+
+    pub fn cache_dir() -> Option<PathBuf> {
+        #[cfg(target_os = "android")]
+        {
+            return Some(PathBuf::from("/data/user/0/com.pigking.ebookreader/cache/ebook-reader"));
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut dir = dirs::cache_dir()?;
+            dir.push("ebook-reader");
+            Some(dir)
+        }
     }
 
     pub fn load() -> Self {
@@ -469,8 +498,7 @@ pub fn compute_fingerprint(path: &Path) -> u64 {
 }
 
 fn cover_cache_dir() -> Option<PathBuf> {
-    let mut dir = dirs::cache_dir()?;
-    dir.push("ebook-reader");
+    let mut dir = Library::cache_dir()?;
     dir.push("covers");
     Some(dir)
 }

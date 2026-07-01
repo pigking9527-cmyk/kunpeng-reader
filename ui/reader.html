@@ -140,17 +140,23 @@
       .toc .toc-item.toc-current { color: #1c4fb0; font-weight: 600; }
       .toc .toc-item.toc-current::before { content: "✓ "; color: #2a9; }
       body.theme-dark .toc .toc-item.toc-current { color: #8ab4ff; }
-      /* 生词本：居中宽面板，词条按内容自适应展开 */
-      .vocab {
-        left: 50%; top: 18px; bottom: 18px;
-        width: min(820px, calc(100vw - 64px));
-        max-width: calc(100vw - 32px);
+      /* 生词本：独立居中浮层，覆盖目录抽屉的左侧布局 */
+      .toc.vocab {
+        left: 50%; top: 50%; bottom: auto;
+        width: min(700px, calc(100vw - 140px));
+        max-width: calc(100vw - 48px);
+        height: min(820px, calc((100vh - 96px) * 0.8));
+        max-height: calc(100vh - 96px);
         border: 1px solid #ddd; border-radius: 10px;
         box-shadow: 0 12px 36px rgba(0,0,0,0.28);
-        transform: translate(-50%, 10px);
+        transform: translate(-50%, calc(-50% + 10px));
         opacity: 0; pointer-events: none;
       }
-      .vocab.show { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
+      .toc.vocab.show {
+        left: 50%;
+        transform: translate(-50%, -50%);
+        opacity: 1; pointer-events: auto;
+      }
       .vocab .toc-tabs { align-items: center; gap: 8px; padding: 0 12px; }
       .vocab .toc-tab { flex: 0 0 auto; padding: 10px 14px; min-width: 56px; }
       .vocab .vc-gear {
@@ -215,8 +221,11 @@
         align-items: flex-start;
         overflow-y: auto;
         overflow-x: hidden;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
         padding: 12px;
       }
+      .vc-pane::-webkit-scrollbar { width: 0; height: 0; display: none; }
       .vc-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
       .vc-item {
         display: flex; align-items: flex-start; gap: 10px;

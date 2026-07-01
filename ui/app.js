@@ -13,6 +13,7 @@ const menuEl = document.getElementById("menu");
 const filterPanel = document.getElementById("filter-panel");
 const searchWrap = document.getElementById("search-wrap");
 const searchInput = document.getElementById("search-input");
+const searchClear = document.getElementById("search-clear");
 
 let books = []; // 当前书架（原始顺序，供“随机打开”用）
 let sortKey = localStorage.getItem("shelfSort") || "title";
@@ -304,6 +305,7 @@ function renderHistory() {
         return;
       }
       searchInput.value = q;
+      updateSearchClear();
       if (document.getElementById("shelf-search-chk").checked) {
         runShelfSearch(q);
       } else {
@@ -322,6 +324,22 @@ function showHistory() {
 function hideHistory() {
   historyEl.classList.remove("show");
 }
+function updateSearchClear() {
+  if (!searchClear) return;
+  searchClear.classList.toggle("show", !!searchInput.value);
+}
+function clearSearchInput() {
+  searchInput.value = "";
+  updateSearchClear();
+  if (shelfChk && shelfChk.checked) {
+    showHistory();
+  } else {
+    searchQuery = "";
+    applyView();
+    showHistory();
+  }
+  searchInput.focus();
+}
 
 function closeSearch(clear) {
   const hadInput = !!searchInput.value.trim();
@@ -332,6 +350,7 @@ function closeSearch(clear) {
   searchWrap.classList.remove("open");
   if (clear) {
     searchInput.value = "";
+    updateSearchClear();
     searchQuery = "";
     if (hadQuery || (wasOpen && hadInput)) applyView();
   }
@@ -407,9 +426,15 @@ function runShelfSearch(term) {
 }
 
 searchInput.addEventListener("click", (e) => e.stopPropagation());
+searchClear.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  clearSearchInput();
+});
 historyEl.addEventListener("click", (e) => e.stopPropagation());
 searchInput.addEventListener("focus", showHistory);
 searchInput.addEventListener("input", () => {
+  updateSearchClear();
   if (shelfChk.checked) {
     showHistory();
     return; // 书架检索模式：输入时不过滤书架
@@ -986,6 +1011,31 @@ function fmtWords(n) {
 }
 let statScope = "day";
 let statAnchor = new Date(); // 当前查看的日/月/年
+const STAT_VISIBLE_KEY = "readingStatsVisibleItems";
+const DEFAULT_STAT_VISIBLE = {
+  duration: true,
+  words: true,
+  books: true,
+  finished: true,
+  highlights: true,
+  notes: true,
+};
+let statVisible = readStatVisible();
+function readStatVisible() {
+  try {
+    return Object.assign({}, DEFAULT_STAT_VISIBLE, JSON.parse(localStorage.getItem(STAT_VISIBLE_KEY) || "{}"));
+  } catch (e) {
+    return Object.assign({}, DEFAULT_STAT_VISIBLE);
+  }
+}
+function saveStatVisible() {
+  localStorage.setItem(STAT_VISIBLE_KEY, JSON.stringify(statVisible));
+}
+function syncStatVisibleControls() {
+  document.querySelectorAll("[data-stat-item]").forEach((input) => {
+    input.checked = statVisible[input.dataset.statItem] !== false;
+  });
+}
 function pad2(n) { return (n < 10 ? "0" : "") + n; }
 function ymd(d) { return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
 function dateFromYmd(v) {
@@ -1074,23 +1124,16 @@ function contributionLevel(seconds) {
   if (seconds < 120 * 60) return 4;
   return 4;
 }
-function monthLabelsForContribution(start, cell, gap) {
+function monthLabelsForContribution(start) {
   const labels = [];
-  let lastLeft = -999;
-  const today = new Date();
   const end = addDays(start, 53 * 7 - 1);
   let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
   if (cursor < start) cursor = new Date(start.getFullYear(), start.getMonth() + 1, 1);
   while (cursor <= end) {
     const diff = Math.floor((cursor - start) / 86400000);
-    const left = Math.floor(diff / 7) * (cell + gap);
-    const isCurrentMonth = cursor.getFullYear() === today.getFullYear() && cursor.getMonth() === today.getMonth();
-    if (isCurrentMonth) {
-      labels.push(`<span style="right:0">${cursor.getMonth() + 1}月</span>`);
-    } else if (left - lastLeft >= 34) {
-      labels.push(`<span style="left:${left}px">${cursor.getMonth() + 1}月</span>`);
-      lastLeft = left;
-    }
+    const week = Math.max(0, Math.min(52, Math.floor(diff / 7)));
+    const left = (week / 53) * 100;
+    labels.push(`<span class="${left > 95 ? "edge" : ""}" style="left:${left.toFixed(3)}%">${cursor.getMonth() + 1}月</span>`);
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
   }
   return labels.join("");
@@ -1101,7 +1144,6 @@ function contributionGraph(allData) {
   const today = new Date();
   const start = addDays(today, -364);
   start.setDate(start.getDate() - start.getDay());
-  const cell = 10, gap = 4;
   let cells = "";
   for (let w = 0; w < 53; w++) {
     for (let r = 0; r < 7; r++) {
@@ -1112,8 +1154,7 @@ function contributionGraph(allData) {
   }
   return (
     '<div class="contrib-card">' +
-    '<div class="contrib-head"><span>阅读贡献图</span><span>过去一年</span></div>' +
-    `<div class="contrib-months">${monthLabelsForContribution(start, cell, gap)}</div>` +
+    `<div class="contrib-months">${monthLabelsForContribution(start)}</div>` +
     `<div class="contrib-grid">${cells}</div>` +
     "</div>"
   );
@@ -1144,15 +1185,17 @@ async function renderStats() {
     ]);
   } catch (e) { return; }
   const unit = { day: "天", month: "月", year: "年", total: "段时间" }[statScope];
-  const cards =
-    '<div class="stat-cards">' +
-    `<div class="stat-cell"><div class="k">阅读时长</div><div class="v">${fmtTime(data.total_seconds)}</div></div>` +
-    `<div class="stat-cell"><div class="k">阅读字数</div><div class="v">${fmtWords(data.total_words)}</div></div>` +
-    `<div class="stat-cell"><div class="k">读过</div><div class="v">${data.book_count} 本</div></div>` +
-    `<div class="stat-cell"><div class="k">读完</div><div class="v">${data.finished_count} 本</div></div>` +
-    `<div class="stat-cell"><div class="k">高亮</div><div class="v">${data.total_highlights}</div></div>` +
-    `<div class="stat-cell"><div class="k">批注</div><div class="v">${data.total_notes}</div></div>` +
-    "</div>";
+  const statItems = [
+    ["duration", "阅读时长", fmtTime(data.total_seconds)],
+    ["words", "阅读字数", fmtWords(data.total_words)],
+    ["books", "读过", data.book_count + " 本"],
+    ["finished", "读完", data.finished_count + " 本"],
+    ["highlights", "高亮", data.total_highlights],
+    ["notes", "批注", data.total_notes],
+  ].filter((item) => statVisible[item[0]] !== false);
+  const cards = statItems.length
+    ? '<div class="stat-cards">' + statItems.map((item) => `<div class="stat-cell"><div class="k">${item[1]}</div><div class="v">${item[2]}</div></div>`).join("") + "</div>"
+    : "";
   const chart = `<div class="stat-chart">${barChart(statBars(data), "#5aa0ff")}</div>`;
   let books;
   if (data.books.length) {
@@ -1188,9 +1231,30 @@ document.querySelectorAll(".stats-tab").forEach((t) => {
 });
 document.getElementById("stats-prev").addEventListener("click", () => statStep(-1));
 document.getElementById("stats-next").addEventListener("click", () => statStep(1));
-document.getElementById("stats-close").addEventListener("click", () => statsModal.classList.remove("show"));
+const statsSettings = document.getElementById("stats-settings");
+const statsSettingsBtn = document.getElementById("stats-settings-btn");
+syncStatVisibleControls();
+statsSettingsBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  statsSettings.classList.toggle("show");
+});
+statsSettings.addEventListener("click", (e) => e.stopPropagation());
+document.querySelectorAll("[data-stat-item]").forEach((input) => {
+  input.addEventListener("change", () => {
+    statVisible[input.dataset.statItem] = input.checked;
+    saveStatVisible();
+    renderStats();
+  });
+});
 statsModal.addEventListener("click", (e) => {
-  if (e.target === statsModal) statsModal.classList.remove("show");
+  if (e.target === statsModal) {
+    statsModal.classList.remove("show");
+    statsSettings.classList.remove("show");
+    return;
+  }
+  if (!statsSettings.contains(e.target) && e.target !== statsSettingsBtn) {
+    statsSettings.classList.remove("show");
+  }
 });
 
 // ---- 笔记汇总 ----
@@ -1301,7 +1365,10 @@ async function checkUpdate(force) {
     return;
   }
   if (!info.has_update) {
-    if (force) alert("当前已是最新版本（v" + info.current + "）。");
+    if (force) {
+      const btn = document.getElementById("about-update");
+      if (btn) btn.textContent = "最新版本";
+    }
     return;
   }
   if (!force) {
@@ -1318,7 +1385,11 @@ document.getElementById("ub-ignore").addEventListener("click", () => {
   updateBar.classList.remove("show");
 });
 document.getElementById("ub-close").addEventListener("click", () => updateBar.classList.remove("show"));
-document.getElementById("about-update").addEventListener("click", () => checkUpdate(true));
+document.getElementById("about-update").addEventListener("click", () => {
+  const btn = document.getElementById("about-update");
+  if (btn) btn.textContent = "检查中…";
+  checkUpdate(true);
+});
 // 关于弹窗里展示“本版更新内容”（取当前版本对应的 GitHub 发行说明，带本地缓存以便离线显示）
 async function loadCurrentNotes() {
   const el = document.getElementById("about-notes");
@@ -1428,18 +1499,21 @@ delBtn.addEventListener("click", async () => {
 document.getElementById("del-cancel").addEventListener("click", clearSelection);
 
 let initialShelfLoading = true;
-// 回到书架窗口时刷新（更新“最近阅读”、进度等）
+let lastShelfFocusRefreshAt = 0;
+// 回到书架窗口时刷新（更新“最近阅读”、进度等），但做节流，避免窗口焦点抖动时连续重刷。
 window.addEventListener("focus", () => {
   if (initialShelfLoading) return;
+  const now = Date.now();
+  if (now - lastShelfFocusRefreshAt < 1500) return;
+  lastShelfFocusRefreshAt = now;
   invoke("shelf_books").then(render).catch(() => {});
 });
 
-// 启动：先用内存里的书架立刻渲染，随后再做一次必要的元数据回填。
-// 空提示默认隐藏，所以不会在书架数据回来前闪出“书架为空”。
+// 启动：先用本地缓存立刻渲染，再只做一次轻量书架读取。
+// list_books 会补元数据，容易在大书架启动时造成偶发卡顿，放弃在首屏阶段调用。
 (async () => {
   const cachedBooks = readShelfCache();
   if (cachedBooks.length) render(cachedBooks, { fromCache: true });
-  invoke("list_books").then(render).catch(() => {});
   invoke("shelf_books")
     .then(render)
     .catch(() => {})
@@ -1447,20 +1521,20 @@ window.addEventListener("focus", () => {
       initialShelfLoading = false;
     });
   loadSyncSettingsOnce();
-  // 读取自动导入配置并反映到设置面板
+  // 读取自动导入配置并反映到设置面板。真正扫描延后，避免和首屏封面加载抢资源。
   invoke("get_auto_import").then((c) => { autoImport = c || autoImport; reflectAutoImport(); }).catch(() => {});
-  // 启动时扫描自动导入目录：延后到首屏书架稳定后，并在后端阻塞线程执行，避免偶发启动卡顿。
   setTimeout(() => {
+    if (!autoImport.enabled || !autoImport.dirs || !autoImport.dirs.length) return;
     invoke("auto_import_scan").then((list) => {
       const grew = list.length > books.length;
       if (grew) {
         render(list);
-        invoke("build_shelf_index").catch(() => {});
+        setTimeout(() => invoke("build_shelf_index").catch(() => {}), 3000);
       }
     }).catch(() => {});
-  }, 2000);
-  // 空闲时后台统计缺失的字数（不影响 UI）
-  setTimeout(() => invoke("compute_word_counts").catch(() => {}), 1500);
+  }, 8000);
+  // 字数统计是锦上添花，延后到启动稳定之后。
+  setTimeout(() => invoke("compute_word_counts").catch(() => {}), 12000);
   // 启动后台检查更新（不阻塞启动，每次启动查一次）
   setTimeout(() => checkUpdate(false), 3000);
   // “关于”里的版本号取自后端，保持单一来源
@@ -1469,3 +1543,5 @@ window.addEventListener("focus", () => {
     if (el && v) el.textContent = "v" + String(v).replace(/^v/i, "");
   }).catch(() => {});
 })();
+
+
