@@ -26,7 +26,11 @@ fn log(msg: &str) {
         let _ = std::fs::create_dir_all(&dir);
         dir.push("debug.log");
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&dir) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&dir)
+        {
             let _ = writeln!(f, "{msg}");
         }
     }
@@ -42,15 +46,15 @@ struct AppState {
     text_cache: Mutex<HashMap<u64, (u64, Arc<Vec<String>>)>>, // 检索用：内存缓存的逐章纯文本 (mtime, 章节)
     lower_text_cache: Mutex<HashMap<u64, (u64, Arc<Vec<Vec<u8>>>)>>, // 英文检索用：ASCII 小写后的章节字节
     txt_chapters: Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>, // txt 阅读用：切分好的章节 (标题, 正文)
-    cache_bytes: AtomicUsize,                                 // 已缓存的总字节数（限额用）
-    embedder: Mutex<Option<Arc<fastembed::TextEmbedding>>>,   // 语义模型（懒加载，首次会下载）
-    sem_cache: Mutex<HashMap<u64, Arc<SemData>>>,             // 语义检索：内存缓存的向量
+    cache_bytes: AtomicUsize,                                      // 已缓存的总字节数（限额用）
+    embedder: Mutex<Option<Arc<fastembed::TextEmbedding>>>,        // 语义模型（懒加载，首次会下载）
+    sem_cache: Mutex<HashMap<u64, Arc<SemData>>>,                  // 语义检索：内存缓存的向量
     sem_cache_bytes: AtomicUsize,
     sem_progress: Mutex<SemProgress>, // 建立语义索引的进度
     global_index: Mutex<Option<Arc<LoadedShards>>>, // 全库近邻索引：已载入内存的分片集合
     index_resume_at: AtomicU64, // 语义索引“让路”截止时刻(ms,0=不暂停)：打开阅读窗口时临时暂停建索引，让窗口秒开
-    stats: Mutex<StatsStore>, // 详细阅读统计的小时桶
-    vocab: Mutex<VocabStore>, // 生词本：查过的词
+    stats: Mutex<StatsStore>,   // 详细阅读统计的小时桶
+    vocab: Mutex<VocabStore>,   // 生词本：查过的词
     word_pack: Mutex<WordPackState>, // 高频词语音包后台生成状态
 }
 
@@ -98,9 +102,9 @@ struct BookDto {
     progress: f32,
     added_at: u64,
     last_read_at: u64,
-    missing: bool, // 源文件是否已找不到
-    path: String,  // 文件完整路径（用于"按存储目录"排序）
-    rating: f32,   // 用户评分 0~5（0.5 刻度，用于书架按评分过滤）
+    missing: bool,   // 源文件是否已找不到
+    path: String,    // 文件完整路径（用于"按存储目录"排序）
+    rating: f32,     // 用户评分 0~5（0.5 刻度，用于书架按评分过滤）
     initial: String, // 书名拼音首字母（A~Z / #），用于"按书名"分组
 }
 
@@ -121,11 +125,29 @@ fn pinyin_initial(c: char) -> Option<char> {
     let code = ((bytes[0] as u16) << 8) | (bytes[1] as u16);
     // 各拼音首字母在 GB2312 里的起始码
     const T: [(u16, char); 23] = [
-        (0xB0A1, 'A'), (0xB0C5, 'B'), (0xB2C1, 'C'), (0xB4EE, 'D'), (0xB6EA, 'E'),
-        (0xB7A2, 'F'), (0xB8C1, 'G'), (0xB9FE, 'H'), (0xBBF7, 'J'), (0xBFA6, 'K'),
-        (0xC0AC, 'L'), (0xC2E8, 'M'), (0xC4C3, 'N'), (0xC5B6, 'O'), (0xC5BE, 'P'),
-        (0xC6DA, 'Q'), (0xC8BB, 'R'), (0xC8F6, 'S'), (0xCBFA, 'T'), (0xCDDA, 'W'),
-        (0xCEF4, 'X'), (0xD1B9, 'Y'), (0xD4D1, 'Z'),
+        (0xB0A1, 'A'),
+        (0xB0C5, 'B'),
+        (0xB2C1, 'C'),
+        (0xB4EE, 'D'),
+        (0xB6EA, 'E'),
+        (0xB7A2, 'F'),
+        (0xB8C1, 'G'),
+        (0xB9FE, 'H'),
+        (0xBBF7, 'J'),
+        (0xBFA6, 'K'),
+        (0xC0AC, 'L'),
+        (0xC2E8, 'M'),
+        (0xC4C3, 'N'),
+        (0xC5B6, 'O'),
+        (0xC5BE, 'P'),
+        (0xC6DA, 'Q'),
+        (0xC8BB, 'R'),
+        (0xC8F6, 'S'),
+        (0xCBFA, 'T'),
+        (0xCDDA, 'W'),
+        (0xCEF4, 'X'),
+        (0xD1B9, 'Y'),
+        (0xD4D1, 'Z'),
     ];
     if code < T[0].0 || code > 0xD7F9 {
         return None;
@@ -144,9 +166,36 @@ fn pinyin_initial(c: char) -> Option<char> {
 fn is_skip_punct(c: char) -> bool {
     matches!(
         c,
-        '《' | '》' | '「' | '」' | '『' | '』' | '【' | '】' | '(' | ')' | '（' | '）'
-            | '[' | ']' | '"' | '\'' | '“' | '”' | '‘' | '’' | '·' | '…' | '—' | '-' | '_'
-            | '.' | '、' | ',' | '，' | '*' | '#'
+        '《' | '》'
+            | '「'
+            | '」'
+            | '『'
+            | '』'
+            | '【'
+            | '】'
+            | '('
+            | ')'
+            | '（'
+            | '）'
+            | '['
+            | ']'
+            | '"'
+            | '\''
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+            | '·'
+            | '…'
+            | '—'
+            | '-'
+            | '_'
+            | '.'
+            | '、'
+            | ','
+            | '，'
+            | '*'
+            | '#'
     )
 }
 
@@ -164,8 +213,8 @@ fn title_initial(title: &str) -> char {
 #[derive(Serialize)]
 struct TocDto {
     label: String,
-    chapter: u32,  // 目标章节序号
-    frag: String,  // 章内锚点 id（可空）
+    chapter: u32, // 目标章节序号
+    frag: String, // 章内锚点 id（可空）
     level: u8,
 }
 
@@ -193,7 +242,10 @@ fn to_dto(b: &book::Book) -> BookDto {
         format: b.format.clone(),
         // 用封面版本号做缓存破坏参数：换封面后 cover_ver+1 → URL 变化 → 书架刷新新图。
         // 不再每次渲染都去 stat 封面文件（几百本书时那是持锁的几百次系统调用，拖慢封面加载）。
-        cover: b.cover.as_ref().map(|_| format!("{RES_BASE}/cover/{id}?v={}", b.cover_ver)),
+        cover: b
+            .cover
+            .as_ref()
+            .map(|_| format!("{RES_BASE}/cover/{id}?v={}", b.cover_ver)),
         progress: b.progress,
         added_at: b.added_at,
         last_read_at: b.last_read_at,
@@ -291,7 +343,11 @@ impl VocabStore {
             return;
         }
         let now = book::now_secs();
-        if let Some(x) = self.list.iter_mut().find(|x| x.word == word && x.lang == e.lang) {
+        if let Some(x) = self
+            .list
+            .iter_mut()
+            .find(|x| x.word == word && x.lang == e.lang)
+        {
             x.count += 1;
             x.last_at = now;
             if !e.def.is_empty() {
@@ -335,12 +391,21 @@ impl VocabStore {
         self.save();
     }
     fn list_lang(&self, lang: &str) -> Vec<VocabEntry> {
-        let mut v: Vec<VocabEntry> = self.list.iter().filter(|x| x.lang == lang).cloned().collect();
+        let mut v: Vec<VocabEntry> = self
+            .list
+            .iter()
+            .filter(|x| x.lang == lang)
+            .cloned()
+            .collect();
         v.sort_by(|a, b| b.last_at.cmp(&a.last_at)); // 最近查的在前
         v
     }
     fn set_level(&mut self, word: &str, lang: &str, level: u8) {
-        if let Some(x) = self.list.iter_mut().find(|x| x.word == word && x.lang == lang) {
+        if let Some(x) = self
+            .list
+            .iter_mut()
+            .find(|x| x.word == word && x.lang == lang)
+        {
             x.level = level.min(2);
             self.save();
         }
@@ -409,7 +474,12 @@ fn vocab_remove(state: tauri::State<AppState>, word: String, lang: String) -> Ve
 }
 
 #[tauri::command]
-fn vocab_set_level(state: tauri::State<AppState>, word: String, lang: String, level: u8) -> Vec<VocabEntry> {
+fn vocab_set_level(
+    state: tauri::State<AppState>,
+    word: String,
+    lang: String,
+    level: u8,
+) -> Vec<VocabEntry> {
     let mut v = state.vocab.lock().unwrap();
     v.set_level(&word, &lang, level);
     v.list_lang(&lang)
@@ -495,14 +565,21 @@ fn notes_summary(state: tauri::State<AppState>) -> Vec<BookNotesSummary> {
         if b.highlights.is_empty() && words.is_empty() {
             continue;
         }
-        out.push(BookNotesSummary { id: b.id, title: b.title, highlights: b.highlights, vocab: words });
+        out.push(BookNotesSummary {
+            id: b.id,
+            title: b.title,
+            highlights: b.highlights,
+            vocab: words,
+        });
     }
     out.sort_by(|a, b| a.title.cmp(&b.title));
     out
 }
 
 fn migrate_json_to_sqlite(state: &AppState) {
-    let Ok(db_guard) = state.db.lock() else { return };
+    let Ok(db_guard) = state.db.lock() else {
+        return;
+    };
     let Some(db) = db_guard.as_ref() else { return };
     if let Ok(lib) = state.library.lock() {
         for b in &lib.books {
@@ -547,7 +624,13 @@ fn migrate_json_to_sqlite(state: &AppState) {
     }
     if let Ok(stats) = state.stats.lock() {
         for (&(day, hour, book), &(secs, words)) in &stats.map {
-            let bucket = ReadBucket { day, hour, book, secs, words };
+            let bucket = ReadBucket {
+                day,
+                hour,
+                book,
+                secs,
+                words,
+            };
             if let Ok(v) = serde_json::to_value(&bucket) {
                 let _ = db.upsert_json("reading_bucket", &format!("{day}:{hour}:{book}"), &v);
             }
@@ -557,11 +640,16 @@ fn migrate_json_to_sqlite(state: &AppState) {
 
 fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
     SyncSettings {
-        url: db.metadata("sync_url").unwrap_or_else(|| DEFAULT_SYNC_URL.to_string()),
+        url: db
+            .metadata("sync_url")
+            .unwrap_or_else(|| DEFAULT_SYNC_URL.to_string()),
         token: db.metadata("sync_token").unwrap_or_default(),
         username: db.metadata("sync_username").unwrap_or_default(),
         user_id: db.metadata("sync_user_id").unwrap_or_default(),
-        last_sync_at: db.metadata("sync_last_sync_at").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+        last_sync_at: db
+            .metadata("sync_last_sync_at")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0),
     }
 }
 
@@ -617,9 +705,13 @@ fn auth_request_inner(
 }
 
 fn apply_sqlite_to_runtime(state: &AppState) {
-    let Ok(db_guard) = state.db.lock() else { return };
+    let Ok(db_guard) = state.db.lock() else {
+        return;
+    };
     let Some(db) = db_guard.as_ref() else { return };
-    let Ok(items) = db.all_sync_entities() else { return };
+    let Ok(items) = db.all_sync_entities() else {
+        return;
+    };
     let mut books: Vec<book::Book> = Vec::new();
     let mut vocab: Vec<VocabEntry> = Vec::new();
     let mut buckets: Vec<ReadBucket> = Vec::new();
@@ -648,7 +740,11 @@ fn apply_sqlite_to_runtime(state: &AppState) {
     }
     if !books.is_empty() {
         if let Ok(mut lib) = state.library.lock() {
-            books.sort_by(|a, b| b.last_read_at.cmp(&a.last_read_at).then_with(|| a.title.cmp(&b.title)));
+            books.sort_by(|a, b| {
+                b.last_read_at
+                    .cmp(&a.last_read_at)
+                    .then_with(|| a.title.cmp(&b.title))
+            });
             lib.books = books;
             lib.save();
         }
@@ -675,7 +771,11 @@ fn sync_get_settings(state: tauri::State<AppState>) -> Result<SyncSettings, Stri
 }
 
 #[tauri::command]
-fn sync_set_settings(state: tauri::State<AppState>, url: String, token: String) -> Result<SyncSettings, String> {
+fn sync_set_settings(
+    state: tauri::State<AppState>,
+    url: String,
+    token: String,
+) -> Result<SyncSettings, String> {
     let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
     db.set_metadata("sync_url", url.trim().trim_end_matches('/'))?;
@@ -793,8 +893,8 @@ async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String> {
         let state = app.state::<AppState>();
         sync_now_inner(state.inner())
     })
-        .await
-        .map_err(|e| format!("同步任务失败：{e}"))?
+    .await
+    .map_err(|e| format!("同步任务失败：{e}"))?
 }
 
 #[tauri::command]
@@ -824,6 +924,7 @@ fn import_data_package(state: tauri::State<AppState>, path: String) -> Result<u3
 
 // ---- 检查更新：后端发请求（避免前端跨域被拦），方便以后扩展多个源 ----
 const GITHUB_REPO: &str = "pigking9527-cmyk/kunpeng-reader";
+const UPDATE_MANIFEST_URL: &str = "http://sync.example.invalid/kunpeng-reader/update.json";
 
 #[derive(Serialize, Default)]
 struct UpdateInfo {
@@ -854,7 +955,10 @@ fn ver_gt(a: &str, b: &str) -> bool {
     };
     let (pa, pb) = (parse(a), parse(b));
     for i in 0..pa.len().max(pb.len()) {
-        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            pa.get(i).copied().unwrap_or(0),
+            pb.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return x > y;
         }
@@ -876,8 +980,30 @@ fn fetch_json(agent: &ureq::Agent, url: &str) -> Option<serde_json::Value> {
 fn rel_tag(v: &serde_json::Value) -> String {
     v.get("tag_name")
         .and_then(|x| x.as_str())
+        .or_else(|| v.get("version").and_then(|x| x.as_str()))
+        .or_else(|| v.get("latest").and_then(|x| x.as_str()))
         .or_else(|| v.get("name").and_then(|x| x.as_str()))
         .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn rel_notes(v: &serde_json::Value) -> String {
+    v.get("body")
+        .and_then(|x| x.as_str())
+        .or_else(|| v.get("notes").and_then(|x| x.as_str()))
+        .or_else(|| v.get("release_notes").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn rel_url(v: &serde_json::Value, fallback: &str) -> String {
+    v.get("html_url")
+        .and_then(|x| x.as_str())
+        .or_else(|| v.get("url").and_then(|x| x.as_str()))
+        .or_else(|| v.get("download_url").and_then(|x| x.as_str()))
+        .unwrap_or(fallback)
         .trim()
         .to_string()
 }
@@ -892,11 +1018,18 @@ async fn check_update() -> UpdateInfo {
 fn check_update_blocking() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let agent = http_agent();
-    let sources = [(
-        "github",
-        format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest"),
-        format!("https://github.com/{GITHUB_REPO}/releases/latest"),
-    )];
+    let sources = [
+        (
+            "github",
+            format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest"),
+            format!("https://github.com/{GITHUB_REPO}/releases/latest"),
+        ),
+        (
+            "server",
+            UPDATE_MANIFEST_URL.to_string(),
+            UPDATE_MANIFEST_URL.to_string(),
+        ),
+    ];
     for (name, api, page) in sources {
         if let Some(v) = fetch_json(&agent, &api) {
             let tag = rel_tag(&v);
@@ -904,19 +1037,23 @@ fn check_update_blocking() -> UpdateInfo {
                 continue;
             }
             let latest = tag.trim_start_matches(['v', 'V']).to_string();
-            let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let notes = rel_notes(&v);
+            let url = rel_url(&v, &page);
             return UpdateInfo {
                 ok: true,
                 has_update: ver_gt(&latest, &current),
                 latest,
                 notes,
-                url: page,
+                url,
                 source: name.to_string(),
                 current,
             };
         }
     }
-    UpdateInfo { current, ..Default::default() }
+    UpdateInfo {
+        current,
+        ..Default::default()
+    }
 }
 
 /// 取某个版本（tag）的更新说明，供"关于"里"本版更新内容"用。多源尝试，失败返回空串。
@@ -929,10 +1066,18 @@ async fn release_notes(tag: String) -> String {
 
 fn release_notes_blocking(tag: &str) -> String {
     let agent = http_agent();
-    let urls = [format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{tag}")];
+    let urls = [
+        format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{tag}"),
+        UPDATE_MANIFEST_URL.to_string(),
+    ];
+    let want = tag.trim_start_matches(['v', 'V']);
     for url in urls {
         if let Some(v) = fetch_json(&agent, &url) {
-            let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let got = rel_tag(&v);
+            if !got.is_empty() && got.trim_start_matches(['v', 'V']) != want {
+                continue;
+            }
+            let notes = rel_notes(&v);
             if !notes.is_empty() {
                 return notes;
             }
@@ -940,12 +1085,14 @@ fn release_notes_blocking(tag: &str) -> String {
     }
     String::new()
 }
-
 /// 首次加载：回填旧书缺失的作者（重读 EPUB 元数据）和导入时间，然后返回书单。
 /// 之后的刷新走 list_books（快，不再重读）。
 #[tauri::command]
 async fn shelf_books(state: tauri::State<'_, AppState>) -> Result<Vec<BookDto>, ()> {
-    if !state.backfilled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if !state
+        .backfilled
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
         let mut lib = state.library.lock().unwrap();
         let mut changed = false;
         for b in lib.books.iter_mut() {
@@ -1011,7 +1158,9 @@ fn scan_dir_books(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, dept
     if depth > 8 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for ent in rd.flatten() {
         let p = ent.path();
         if p.is_dir() {
@@ -1050,7 +1199,8 @@ fn run_auto_import(state: &AppState) -> bool {
         scan_dir_books(std::path::Path::new(d), &mut found, 0);
     }
     // 3) 锁外过滤掉路径已在书架里的（稳态：没有新文件 → 候选为空，下面整段都不取写锁）
-    let candidates: Vec<std::path::PathBuf> = found.into_iter().filter(|p| !known.contains(p)).collect();
+    let candidates: Vec<std::path::PathBuf> =
+        found.into_iter().filter(|p| !known.contains(p)).collect();
     if candidates.is_empty() {
         return false;
     }
@@ -1143,7 +1293,11 @@ fn remove_book(state: tauri::State<AppState>, id: String) -> Vec<BookDto> {
 
 /// 用用户挑选的图片更换某本书的封面。
 #[tauri::command]
-fn set_cover(state: tauri::State<AppState>, id: String, path: String) -> Result<Vec<BookDto>, String> {
+fn set_cover(
+    state: tauri::State<AppState>,
+    id: String,
+    path: String,
+) -> Result<Vec<BookDto>, String> {
     let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
     let cover = book::make_cover_from_image(std::path::Path::new(&path), id_num)
         .ok_or_else(|| "无法处理这张图片（支持 png/jpg/webp 等）".to_string())?;
@@ -1222,7 +1376,10 @@ async fn open_book_at(
 
 /// 阅读窗口加载后取走（并清除）待跳转位置。
 #[tauri::command]
-fn take_pending_jump(window: tauri::WebviewWindow, state: tauri::State<AppState>) -> Option<JumpPayload> {
+fn take_pending_jump(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+) -> Option<JumpPayload> {
     let id = reader_window_id(&window)?;
     state
         .pending_jump
@@ -1265,11 +1422,21 @@ fn ensure_reader_window(
 
     // 读取上次阅读窗口的大小/位置，本次按它恢复（EPUB 与 PDF 分开记，各自适应）
     let is_pdf = {
-        state.library.lock().unwrap().get(id_num).map(|b| b.format == "pdf").unwrap_or(false)
+        state
+            .library
+            .lock()
+            .unwrap()
+            .get(id_num)
+            .map(|b| b.format == "pdf")
+            .unwrap_or(false)
     };
     let geom = {
         let lib = state.library.lock().unwrap();
-        if is_pdf { lib.reader_geom_pdf.clone() } else { lib.reader_geom.clone() }
+        if is_pdf {
+            lib.reader_geom_pdf.clone()
+        } else {
+            lib.reader_geom.clone()
+        }
     };
     // 用主窗口的显示器信息判断保存的位置是否还在屏幕内（防止阅读窗口跑到屏幕外）
     let on_screen = geom
@@ -1370,11 +1537,11 @@ fn capture_geom(prev: Option<WinGeom>, win: &tauri::WebviewWindow) -> WinGeom {
 
 /// 主显示器的逻辑尺寸（宽,高）。
 fn primary_logical_size(win: &tauri::WebviewWindow) -> Option<(f64, f64)> {
-    let m = win
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .or_else(|| win.available_monitors().ok().and_then(|v| v.into_iter().next()))?;
+    let m = win.primary_monitor().ok().flatten().or_else(|| {
+        win.available_monitors()
+            .ok()
+            .and_then(|v| v.into_iter().next())
+    })?;
     let scale = m.scale_factor();
     let ms = m.size();
     Some((ms.width as f64 / scale, ms.height as f64 / scale))
@@ -1382,11 +1549,11 @@ fn primary_logical_size(win: &tauri::WebviewWindow) -> Option<(f64, f64)> {
 
 /// 在主显示器上居中放置一个 w×h 窗口时的左上角逻辑坐标。
 fn centered_position(win: &tauri::WebviewWindow, w: f64, h: f64) -> Option<(f64, f64)> {
-    let m = win
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .or_else(|| win.available_monitors().ok().and_then(|v| v.into_iter().next()))?;
+    let m = win.primary_monitor().ok().flatten().or_else(|| {
+        win.available_monitors()
+            .ok()
+            .and_then(|v| v.into_iter().next())
+    })?;
     let scale = m.scale_factor();
     let mp = m.position();
     let ms = m.size();
@@ -1509,7 +1676,8 @@ async fn book_info(
         let (chapter_count, toc) = if format == "pdf" {
             (1u32, Vec::new())
         } else {
-            let chs = get_txt_chapters(state.inner(), id_num).unwrap_or_else(|| Arc::new(Vec::new()));
+            let chs =
+                get_txt_chapters(state.inner(), id_num).unwrap_or_else(|| Arc::new(Vec::new()));
             let toc: Vec<TocDto> = chs
                 .iter()
                 .enumerate()
@@ -1577,7 +1745,10 @@ async fn book_info(
 
 /// 从阅读窗口 label 取图书 id。
 fn reader_window_id(window: &tauri::WebviewWindow) -> Option<u64> {
-    window.label().strip_prefix("reader-").and_then(|s| s.parse().ok())
+    window
+        .label()
+        .strip_prefix("reader-")
+        .and_then(|s| s.parse().ok())
 }
 
 /// 去掉 HTML 标签，得到纯文本（合并连续空白）。
@@ -1612,7 +1783,11 @@ fn strip_tags(html: &str) -> String {
 
 /// 修改简介（信息弹窗里可编辑）。
 #[tauri::command]
-fn set_description(window: tauri::WebviewWindow, state: tauri::State<AppState>, description: String) {
+fn set_description(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    description: String,
+) {
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.set_description(id, description);
@@ -1668,7 +1843,11 @@ fn add_highlight(
 }
 
 #[tauri::command]
-fn remove_highlight(window: tauri::WebviewWindow, state: tauri::State<AppState>, index: usize) -> Vec<book::Highlight> {
+fn remove_highlight(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    index: usize,
+) -> Vec<book::Highlight> {
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.remove_highlight(id, index);
@@ -1854,7 +2033,10 @@ fn stats_path() -> Option<std::path::PathBuf> {
 fn local_day_hour() -> (u32, u8) {
     use chrono::{Datelike, Local, Timelike};
     let n = Local::now();
-    (n.year() as u32 * 10000 + n.month() * 100 + n.day(), n.hour() as u8)
+    (
+        n.year() as u32 * 10000 + n.month() * 100 + n.day(),
+        n.hour() as u8,
+    )
 }
 fn unix_to_local_day(secs: u64) -> u32 {
     use chrono::{Datelike, Local, TimeZone};
@@ -1895,7 +2077,13 @@ impl StatsStore {
             let v: Vec<ReadBucket> = self
                 .map
                 .iter()
-                .map(|(&(day, hour, book), &(secs, words))| ReadBucket { day, hour, book, secs, words })
+                .map(|(&(day, hour, book), &(secs, words))| ReadBucket {
+                    day,
+                    hour,
+                    book,
+                    secs,
+                    words,
+                })
                 .collect();
             if let Ok(j) = serde_json::to_string(&v) {
                 let _ = std::fs::write(p, j);
@@ -1924,9 +2112,9 @@ struct DayStat {
 struct StatsRange {
     total_seconds: u64,
     total_words: u64,
-    hours: Vec<u64>,      // 24 个，时段分布
-    days: Vec<DayStat>,   // 该区间每个有阅读的天
-    books: Vec<BookStat>, // 该区间读过的书（按时长降序）
+    hours: Vec<u64>,         // 24 个，时段分布
+    days: Vec<DayStat>,      // 该区间每个有阅读的天
+    books: Vec<BookStat>,    // 该区间读过的书（按时长降序）
     finished: Vec<BookStat>, // 该区间读完的书
     book_count: u32,
     finished_count: u32,
@@ -1957,7 +2145,11 @@ fn reading_stats_range(state: tauri::State<AppState>, from: u32, to: u32) -> Sta
         e.1 += words as u64;
     }
     // 高亮/批注（按 created_at 落在区间）与"读完"，从书库取
-    let title_of = |id: u64| lib.get(id).map(|b| b.title.clone()).unwrap_or_else(|| "（已删除）".into());
+    let title_of = |id: u64| {
+        lib.get(id)
+            .map(|b| b.title.clone())
+            .unwrap_or_else(|| "（已删除）".into())
+    };
     let mut hl_count: HashMap<u64, (u32, u32)> = HashMap::new(); // book -> (highlights, notes)
     let mut total_highlights = 0u32;
     let mut total_notes = 0u32;
@@ -1978,9 +2170,11 @@ fn reading_stats_range(state: tauri::State<AppState>, from: u32, to: u32) -> Sta
     let finished_in_range: std::collections::HashSet<u64> = lib
         .books
         .iter()
-        .filter(|b| b.finished_at > 0 && {
-            let d = unix_to_local_day(b.finished_at);
-            d >= from && d <= to
+        .filter(|b| {
+            b.finished_at > 0 && {
+                let d = unix_to_local_day(b.finished_at);
+                d >= from && d <= to
+            }
         })
         .map(|b| b.id)
         .collect();
@@ -2005,7 +2199,10 @@ fn reading_stats_range(state: tauri::State<AppState>, from: u32, to: u32) -> Sta
             mk(id, s, w)
         })
         .collect();
-    let mut days: Vec<DayStat> = per_day.into_iter().map(|(day, seconds)| DayStat { day, seconds }).collect();
+    let mut days: Vec<DayStat> = per_day
+        .into_iter()
+        .map(|(day, seconds)| DayStat { day, seconds })
+        .collect();
     days.sort_by_key(|d| d.day);
     StatsRange {
         total_seconds,
@@ -2155,7 +2352,10 @@ fn open_url(url: String) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        std::process::Command::new("xdg-open").arg(u).spawn().map_err(|e| e.to_string())?;
+        std::process::Command::new("xdg-open")
+            .arg(u)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -2198,7 +2398,11 @@ async fn edge_tts(text: String, voice: String, rate: i32) -> Result<TtsAudio, St
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::Message;
 
-    let voice = if voice.trim().is_empty() { "zh-CN-XiaoxiaoNeural".to_string() } else { voice };
+    let voice = if voice.trim().is_empty() {
+        "zh-CN-XiaoxiaoNeural".to_string()
+    } else {
+        voice
+    };
     let gec = sec_ms_gec();
     // ConnectionId：每次连接唯一的 32 位十六进制（缺它/版本过旧都会 403）
     let nanos = std::time::SystemTime::now()
@@ -2214,8 +2418,16 @@ async fn edge_tts(text: String, voice: String, rate: i32) -> Result<TtsAudio, St
         let h = req.headers_mut();
         h.insert("Pragma", "no-cache".parse().unwrap());
         h.insert("Cache-Control", "no-cache".parse().unwrap());
-        h.insert("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold".parse().unwrap());
-        h.insert("Accept-Encoding", "gzip, deflate, br, zstd".parse().unwrap());
+        h.insert(
+            "Origin",
+            "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold"
+                .parse()
+                .unwrap(),
+        );
+        h.insert(
+            "Accept-Encoding",
+            "gzip, deflate, br, zstd".parse().unwrap(),
+        );
         h.insert("Accept-Language", "en-US,en;q=0.9".parse().unwrap());
         h.insert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0".parse().unwrap());
     }
@@ -2230,17 +2442,24 @@ async fn edge_tts(text: String, voice: String, rate: i32) -> Result<TtsAudio, St
     let config_msg = format!(
         "X-Timestamp:{ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{cfg}"
     );
-    ws.send(Message::Text(config_msg)).await.map_err(|e| e.to_string())?;
+    ws.send(Message::Text(config_msg))
+        .await
+        .map_err(|e| e.to_string())?;
 
     let rid = sha256_upper(&format!("{ts}{text}"))[..32].to_lowercase();
-    let safe = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let safe = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     let ssml = format!(
         "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='{voice}'><prosody pitch='+0Hz' rate='{rate:+}%' volume='+0%'>{safe}</prosody></voice></speak>"
     );
     let ssml_msg = format!(
         "X-RequestId:{rid}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:{ts}\r\nPath:ssml\r\n\r\n{ssml}"
     );
-    ws.send(Message::Text(ssml_msg)).await.map_err(|e| e.to_string())?;
+    ws.send(Message::Text(ssml_msg))
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut audio: Vec<u8> = Vec::new();
     let mut marks: Vec<TtsMark> = Vec::new();
@@ -2255,14 +2474,22 @@ async fn edge_tts(text: String, voice: String, rate: i32) -> Result<TtsAudio, St
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t[idx + 4..]) {
                             if let Some(arr) = v.get("Metadata").and_then(|m| m.as_array()) {
                                 for it in arr {
-                                    if it.get("Type").and_then(|x| x.as_str()) == Some("WordBoundary") {
-                                        let off = it.pointer("/Data/Offset").and_then(|x| x.as_u64()).unwrap_or(0);
+                                    if it.get("Type").and_then(|x| x.as_str())
+                                        == Some("WordBoundary")
+                                    {
+                                        let off = it
+                                            .pointer("/Data/Offset")
+                                            .and_then(|x| x.as_u64())
+                                            .unwrap_or(0);
                                         let word = it
                                             .pointer("/Data/text/Text")
                                             .and_then(|x| x.as_str())
                                             .unwrap_or("")
                                             .to_string();
-                                        marks.push(TtsMark { at: (off / 10000) as u32, word });
+                                        marks.push(TtsMark {
+                                            at: (off / 10000) as u32,
+                                            word,
+                                        });
                                     }
                                 }
                             }
@@ -2302,7 +2529,8 @@ fn word_tts_cache_dir() -> Result<std::path::PathBuf, String> {
 }
 
 fn word_tts_cache_path(word: &str) -> Result<std::path::PathBuf, String> {
-    let key = sha256_upper(&format!("en-US-JennyNeural:{}", word.trim().to_lowercase())).to_lowercase();
+    let key =
+        sha256_upper(&format!("en-US-JennyNeural:{}", word.trim().to_lowercase())).to_lowercase();
     Ok(word_tts_cache_dir()?.join(format!("{key}.mp3")))
 }
 
@@ -2618,7 +2846,9 @@ async fn book_meta(
         let b = lib.get(id).ok_or("找不到这本书")?;
         (b.word_count, b.clone())
     };
-    let size = std::fs::metadata(&book_clone.path).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(&book_clone.path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     let word_count = if stored > 0 {
         stored
     } else {
@@ -2700,7 +2930,11 @@ fn decode_pdf_string(b: &[u8]) -> String {
     } else if let Ok(s) = std::str::from_utf8(b) {
         s.trim().to_string()
     } else {
-        b.iter().map(|&c| c as char).collect::<String>().trim().to_string()
+        b.iter()
+            .map(|&c| c as char)
+            .collect::<String>()
+            .trim()
+            .to_string()
     }
 }
 
@@ -2823,7 +3057,15 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
         }
         "book" => {
             // 返回一个空壳页面（含分页+渐进加载脚本）；正文由前端逐章 fetch 追加
-            let format = { state.library.lock().unwrap().get(id).map(|b| b.format.clone()).unwrap_or_default() };
+            let format = {
+                state
+                    .library
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .map(|b| b.format.clone())
+                    .unwrap_or_default()
+            };
             let count = if format == "epub" {
                 ensure_epub_loaded(state, id).ok()?;
                 let mut epubs = state.epubs.lock().unwrap();
@@ -2844,11 +3086,22 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
         "chapter" => {
             // 单章内容（虚拟化：一次只渲染一章）。返回 JSON {head, body}
             let idx: usize = rest.parse().ok()?;
-            let format = { state.library.lock().unwrap().get(id).map(|b| b.format.clone()).unwrap_or_default() };
+            let format = {
+                state
+                    .library
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .map(|b| b.format.clone())
+                    .unwrap_or_default()
+            };
             if format != "epub" {
                 // txt/md：取第 idx 个切分章节。md 渲染 markdown；txt 段落化。
                 let chapters = get_txt_chapters(state, id)?;
-                let raw = chapters.get(idx).map(|(_, c)| c.clone()).unwrap_or_default();
+                let raw = chapters
+                    .get(idx)
+                    .map(|(_, c)| c.clone())
+                    .unwrap_or_default();
                 let body = if is_mobi(&format) {
                     format!("<div class=\"mobi-body\">{raw}</div>") // mobi 内容本就是 HTML，直接渲染
                 } else if is_md(&format) {
@@ -2876,8 +3129,11 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
             let cpath = spine_paths.get(idx)?.clone();
             let html = doc.get_resource_str_by_path(&cpath).unwrap_or_default();
             let base_dir = cpath.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-            let rewritten =
-                rewrite_css_url(&rewrite_attrs(&html, id, base_dir, &chapter_map), id, base_dir);
+            let rewritten = rewrite_css_url(
+                &rewrite_attrs(&html, id, base_dir, &chapter_map),
+                id,
+                base_dir,
+            );
             let mut head = String::new();
             let mut seen = std::collections::HashSet::new();
             collect_head_assets(&rewritten, &mut head, &mut seen);
@@ -2896,7 +3152,6 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
         _ => None,
     }
 }
-
 
 /// 合并页的基础样式 + 分页脚本。
 ///  - CSS 多栏(column)把整本内容按“一屏一栏”排版，行只会在栏间断开 → 永不切字。
@@ -3854,7 +4109,11 @@ fn attr_value(tag: &str, key: &str) -> Option<String> {
 }
 
 /// 从一章 HTML 里收集 <link rel=stylesheet> 与 <style> 块到合并页头部（去重）。
-fn collect_head_assets(html: &str, head: &mut String, seen: &mut std::collections::HashSet<String>) {
+fn collect_head_assets(
+    html: &str,
+    head: &mut String,
+    seen: &mut std::collections::HashSet<String>,
+) {
     // <link ...>
     let mut i = 0;
     while let Some(p) = html[i..].find("<link") {
@@ -3921,10 +4180,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(b) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 out.push(b);
                 i += 3;
                 continue;
@@ -3966,10 +4224,69 @@ fn is_txt_heading(line: &str) -> bool {
         return false;
     }
     let head: String = t.chars().take(14).collect();
-    if t.starts_with('第') && (head.contains('章') || head.contains('节') || head.contains('回')) {
+    if t.starts_with('第') && (head.contains('章') || head.contains('节') || head.contains('回'))
+    {
         return true;
     }
-    matches!(t, "楔子" | "序" | "序章" | "序言" | "前言" | "引子" | "后记" | "尾声" | "番外")
+    matches!(
+        t,
+        "楔子" | "序" | "序章" | "序言" | "前言" | "引子" | "后记" | "尾声" | "番外"
+    )
+}
+
+fn txt_chapter_is_heading_only(text: &str) -> bool {
+    let mut non_empty = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = match non_empty.next() {
+        Some(line) => line,
+        None => return false,
+    };
+    non_empty.next().is_none() && is_txt_heading(first)
+}
+
+fn first_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn merge_title_only_txt_chapters(chapters: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::with_capacity(chapters.len());
+    let mut pending: Option<(String, String)> = None;
+
+    for (title, body) in chapters {
+        if txt_chapter_is_heading_only(&body) {
+            pending = Some(match pending.take() {
+                Some((pending_title, mut pending_body)) => {
+                    if !pending_body.ends_with('\n') {
+                        pending_body.push('\n');
+                    }
+                    pending_body.push_str(&body);
+                    (pending_title, pending_body)
+                }
+                None => (title, body),
+            });
+            continue;
+        }
+
+        if let Some((pending_title, mut pending_body)) = pending.take() {
+            let pending_line = first_non_empty_line(&pending_body).unwrap_or("");
+            let body_line = first_non_empty_line(&body).unwrap_or("");
+            if pending_line == body_line {
+                out.push((pending_title, body));
+            } else {
+                if !pending_body.ends_with('\n') {
+                    pending_body.push('\n');
+                }
+                pending_body.push_str(&body);
+                out.push((pending_title, pending_body));
+            }
+        } else {
+            out.push((title, body));
+        }
+    }
+
+    if let Some(item) = pending {
+        out.push(item);
+    }
+    out
 }
 
 /// 把整本 txt 切成章节 (标题, 正文)。优先按"第X章"标题切（网文）；否则按 ~5 万字切块。
@@ -3992,10 +4309,14 @@ fn build_txt_chapters(text: &str) -> Vec<(String, String)> {
             }
         }
         for (k, &h) in heads.iter().enumerate() {
-            let end = if k + 1 < heads.len() { heads[k + 1] } else { lines.len() };
+            let end = if k + 1 < heads.len() {
+                heads[k + 1]
+            } else {
+                lines.len()
+            };
             out.push((lines[h].trim().to_string(), lines[h..end].join("\n")));
         }
-        return out;
+        return merge_title_only_txt_chapters(out);
     }
     // 否则按 ~5 万字切块
     let mut out: Vec<(String, String)> = Vec::new();
@@ -4066,7 +4387,11 @@ fn build_md_chapters(text: &str) -> Vec<(String, String)> {
         }
     }
     for (k, &h) in heads.iter().enumerate() {
-        let end = if k + 1 < heads.len() { heads[k + 1] } else { lines.len() };
+        let end = if k + 1 < heads.len() {
+            heads[k + 1]
+        } else {
+            lines.len()
+        };
         let title = md_heading_title(lines[h]).unwrap_or_default();
         out.push((title, lines[h..end].join("\n")));
     }
@@ -4136,16 +4461,27 @@ fn mobi_chapters(path: &std::path::Path) -> Vec<(String, String)> {
     let p = path.to_path_buf();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let Ok(m) = mobi::Mobi::from_path(&p) else {
-            return vec![("正文".to_string(), "<p>无法解析该 MOBI/AZW3 文件。</p>".to_string())];
+            return vec![(
+                "正文".to_string(),
+                "<p>无法解析该 MOBI/AZW3 文件。</p>".to_string(),
+            )];
         };
         let content = m.content_as_string_lossy();
         let body = extract_body_inner(&content);
-        let body = if body.trim().is_empty() { content.as_str() } else { body };
+        let body = if body.trim().is_empty() {
+            content.as_str()
+        } else {
+            body
+        };
         split_mobi_html(body)
     }))
-    .unwrap_or_else(|_| vec![("正文".to_string(), "<p>解析该 MOBI/AZW3 文件时出错（可能是 DRM 或暂不支持的格式）。</p>".to_string())])
+    .unwrap_or_else(|_| {
+        vec![(
+            "正文".to_string(),
+            "<p>解析该 MOBI/AZW3 文件时出错（可能是 DRM 或暂不支持的格式）。</p>".to_string(),
+        )]
+    })
 }
-
 
 /// 取（并缓存）一本 txt/md/mobi 的切分章节（md 按标题切，mobi 按分页符切，txt 按"第X章"或字数切）。
 fn get_txt_chapters(state: &AppState, id: u64) -> Option<Arc<Vec<(String, String)>>> {
@@ -4211,7 +4547,9 @@ p{{margin:0 0 0.7em;text-indent:2em;}}</style></head><body>{body}</body></html>"
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 // ---------------------------------------------------------------------------
@@ -4293,7 +4631,10 @@ fn extract_pdf_pages(path: &Path) -> Vec<String> {
         pdf_extract::extract_text_by_pages(&path).unwrap_or_default()
     });
     match res {
-        Ok(pages) => pages.into_iter().map(|p| book::normalize_text(&p)).collect(),
+        Ok(pages) => pages
+            .into_iter()
+            .map(|p| book::normalize_text(&p))
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -4342,7 +4683,9 @@ fn ascii_terms(text: &str) -> Vec<(String, usize, usize)> {
 }
 
 fn index_book_keywords(state: &AppState, book: &book::Book, chapters: &[String]) {
-    let Ok(db_guard) = state.db.lock() else { return };
+    let Ok(db_guard) = state.db.lock() else {
+        return;
+    };
     let Some(db) = db_guard.as_ref() else { return };
     for (ci, text) in chapters.iter().enumerate() {
         let mut map: HashMap<String, (u32, Vec<String>)> = HashMap::new();
@@ -4449,7 +4792,11 @@ fn get_book_chapters(state: &AppState, book: &book::Book) -> Option<Arc<Vec<Stri
     Some(arc)
 }
 
-fn get_lower_book_chapters(state: &AppState, book: &book::Book, chapters: &Arc<Vec<String>>) -> Arc<Vec<Vec<u8>>> {
+fn get_lower_book_chapters(
+    state: &AppState,
+    book: &book::Book,
+    chapters: &Arc<Vec<String>>,
+) -> Arc<Vec<Vec<u8>>> {
     let id = book.id;
     let mtime = file_mtime(&book.path);
     {
@@ -4460,7 +4807,12 @@ fn get_lower_book_chapters(state: &AppState, book: &book::Book, chapters: &Arc<V
             }
         }
     }
-    let arc = Arc::new(chapters.iter().map(|s| ascii_lower_bytes(s)).collect::<Vec<_>>());
+    let arc = Arc::new(
+        chapters
+            .iter()
+            .map(|s| ascii_lower_bytes(s))
+            .collect::<Vec<_>>(),
+    );
     let size: usize = arc.iter().map(|s| s.len()).sum();
     {
         let mut cache = state.lower_text_cache.lock().unwrap();
@@ -4589,7 +4941,10 @@ fn search_keyword_index(
         entry.count = entry.count.saturating_add(row.count);
         for snippet in row.snippets {
             if entry.hits.len() < 60 {
-                entry.hits.push(ChapterHit { chapter: row.chapter, snippet });
+                entry.hits.push(ChapterHit {
+                    chapter: row.chapter,
+                    snippet,
+                });
             }
         }
     }
@@ -4616,11 +4971,7 @@ async fn shelf_search(
         lib.books
             .iter()
             .filter(|b| b.format != "pdf")
-            .filter(|b| {
-                want.as_ref()
-                    .map(|w| w.contains(&b.id))
-                    .unwrap_or(true)
-            })
+            .filter(|b| want.as_ref().map(|w| w.contains(&b.id)).unwrap_or(true))
             .cloned()
             .collect()
     };
@@ -4686,7 +5037,11 @@ async fn open_search_window(
         );
         return Ok(());
     }
-    let url = format!("search.html?q={}&ids={}", url_encode(&term), url_encode(&ids_csv));
+    let url = format!(
+        "search.html?q={}&ids={}",
+        url_encode(&term),
+        url_encode(&ids_csv)
+    );
     tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
         .title("书架全文检索")
         .inner_size(1000.0, 760.0)
@@ -4804,8 +5159,8 @@ impl instant_distance::Point for SemPoint {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct GlobalEntry {
-    b: u64, // 书 id
-    c: u32, // 章节
+    b: u64,    // 书 id
+    c: u32,    // 章节
     t: String, // 片段
 }
 type GlobalHnsw = instant_distance::HnswMap<SemPoint, u32>;
@@ -4819,9 +5174,9 @@ struct GlobalMeta {
     v: u32,
     model: String,
     dim: usize,
-    book_ids: Vec<u64>,     // 参与建图的全部书（排序），用于判断是否过期
+    book_ids: Vec<u64>,          // 参与建图的全部书（排序），用于判断是否过期
     source_sig: Vec<(u64, u64)>, // (书 id, 源文件修改时间)，用于判断源文件变更
-    shards: Vec<ShardMeta>, // 各分片描述
+    shards: Vec<ShardMeta>,      // 各分片描述
 }
 /// 已载入内存、可供查询的分片集合。
 struct LoadedShards {
@@ -5037,11 +5392,15 @@ fn sem_build_book(
             chunks: Vec::new(),
         };
         let mp = sem_meta_path(id).ok_or("无缓存路径")?;
-        std::fs::write(&mp, serde_json::to_string(&meta).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        std::fs::write(
+            &mp,
+            serde_json::to_string(&meta).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
         return Ok(());
     }
-    let mut vf = std::io::BufWriter::new(std::fs::File::create(&vec_path).map_err(|e| e.to_string())?);
+    let mut vf =
+        std::io::BufWriter::new(std::fs::File::create(&vec_path).map_err(|e| e.to_string())?);
     let mut meta_chunks: Vec<SemChunk> = Vec::with_capacity(items.len());
     let mut dim = 0usize;
     for batch in items.chunks(128) {
@@ -5066,7 +5425,10 @@ fn sem_build_book(
             for x in &v {
                 vf.write_all(&x.to_le_bytes()).map_err(|e| e.to_string())?;
             }
-            meta_chunks.push(SemChunk { c: *c, t: t.clone() });
+            meta_chunks.push(SemChunk {
+                c: *c,
+                t: t.clone(),
+            });
         }
     }
     vf.flush().ok();
@@ -5078,8 +5440,11 @@ fn sem_build_book(
         chunks: meta_chunks,
     };
     let mp = sem_meta_path(id).ok_or("无缓存路径")?;
-    std::fs::write(&mp, serde_json::to_string(&meta).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        &mp,
+        serde_json::to_string(&meta).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -5200,7 +5565,10 @@ fn semantic_complete(state: &AppState, want: &Option<std::collections::HashSet<u
     if books.is_empty() {
         return false;
     }
-    if !books.iter().all(|(id, path)| sem_is_fresh(*id, file_mtime(path))) {
+    if !books
+        .iter()
+        .all(|(id, path)| sem_is_fresh(*id, file_mtime(path)))
+    {
         return false;
     }
     if want.is_none() && !global_index_fresh(state) {
@@ -5266,11 +5634,7 @@ async fn build_semantic_index(
                 .books
                 .iter()
                 .filter(|b| b.format != "pdf")
-                .filter(|b| {
-                    want.as_ref()
-                        .map(|w| w.contains(&b.id))
-                        .unwrap_or(true)
-                })
+                .filter(|b| want.as_ref().map(|w| w.contains(&b.id)).unwrap_or(true))
                 .cloned()
                 .collect()
         };
@@ -5292,7 +5656,9 @@ async fn build_semantic_index(
             }
             match get_book_chapters(state.inner(), b) {
                 Some(ch) => {
-                    if let Err(err) = sem_build_book(&embedder, id, mtime, &ch, &state.index_resume_at) {
+                    if let Err(err) =
+                        sem_build_book(&embedder, id, mtime, &ch, &state.index_resume_at)
+                    {
                         failures.push(format!("{}：{}", b.title, err));
                     }
                 }
@@ -5313,7 +5679,12 @@ async fn build_semantic_index(
             format!(
                 "完成（{} 本未建立索引；{}）",
                 failures.len(),
-                failures.iter().take(3).cloned().collect::<Vec<_>>().join("；")
+                failures
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("；")
             )
         } else if idx_err.is_empty() {
             "完成".into()
@@ -5325,7 +5696,12 @@ async fn build_semantic_index(
 }
 
 /// 把一片的向量建图并落盘（global_{k}.hnsw 图 + global_{k}.map 映射）。
-fn write_shard(k: usize, points: Vec<SemPoint>, values: Vec<u32>, mapping: &[GlobalEntry]) -> Result<(), String> {
+fn write_shard(
+    k: usize,
+    points: Vec<SemPoint>,
+    values: Vec<u32>,
+    mapping: &[GlobalEntry],
+) -> Result<(), String> {
     use std::io::Write;
     let hp = global_shard_hnsw_path(k).ok_or("无缓存路径")?;
     if let Some(d) = hp.parent() {
@@ -5351,7 +5727,11 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
                 let n = e.file_name().to_string_lossy().to_string();
-                if n.starts_with("global_") || n == "global.hnsw" || n == "global.map" || n == "global.json" {
+                if n.starts_with("global_")
+                    || n == "global.hnsw"
+                    || n == "global.map"
+                    || n == "global.json"
+                {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -5378,8 +5758,16 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
         // 当前片再加这本会超额 → 先把当前片落盘，开新片
         if !mapping.is_empty() && mapping.len() + data.chunks.len() > SHARD_MAX_CHUNKS {
             let n = mapping.len();
-            write_shard(k, std::mem::take(&mut points), std::mem::take(&mut values), &mapping)?;
-            shards.push(ShardMeta { books: std::mem::take(&mut shard_books), chunks: n });
+            write_shard(
+                k,
+                std::mem::take(&mut points),
+                std::mem::take(&mut values),
+                &mapping,
+            )?;
+            shards.push(ShardMeta {
+                books: std::mem::take(&mut shard_books),
+                chunks: n,
+            });
             mapping.clear();
             k += 1;
             if let Ok(mut p) = state.sem_progress.lock() {
@@ -5390,20 +5778,34 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
             let v = data.vecs[i * data.dim..(i + 1) * data.dim].to_vec();
             values.push(mapping.len() as u32);
             points.push(SemPoint(v));
-            mapping.push(GlobalEntry { b: *id, c: chunk.c, t: chunk.t.clone() });
+            mapping.push(GlobalEntry {
+                b: *id,
+                c: chunk.c,
+                t: chunk.t.clone(),
+            });
         }
         shard_books.push(*id);
         // 建图阶段不长期占用逐书缓存，加完即释放
         if let Ok(mut c) = state.sem_cache.lock() {
             if let Some(old) = c.remove(id) {
-                state.sem_cache_bytes.fetch_sub(old.vecs.len() * 4, Ordering::Relaxed);
+                state
+                    .sem_cache_bytes
+                    .fetch_sub(old.vecs.len() * 4, Ordering::Relaxed);
             }
         }
     }
     if !mapping.is_empty() {
         let n = mapping.len();
-        write_shard(k, std::mem::take(&mut points), std::mem::take(&mut values), &mapping)?;
-        shards.push(ShardMeta { books: std::mem::take(&mut shard_books), chunks: n });
+        write_shard(
+            k,
+            std::mem::take(&mut points),
+            std::mem::take(&mut values),
+            &mapping,
+        )?;
+        shards.push(ShardMeta {
+            books: std::mem::take(&mut shard_books),
+            chunks: n,
+        });
     }
     if shards.is_empty() {
         return Ok(());
@@ -5441,7 +5843,8 @@ fn load_global_index(state: &AppState) -> Option<Arc<LoadedShards>> {
     if meta.v != SEM_VERSION || meta.model != SEM_MODEL {
         return None;
     }
-    if meta.book_ids != indexed_book_ids(state) || meta.source_sig != indexed_book_signature(state) {
+    if meta.book_ids != indexed_book_ids(state) || meta.source_sig != indexed_book_signature(state)
+    {
         return None; // 索引集合变了 → 过期，退回暴力
     }
     let budget = index_ram_budget();
@@ -5471,13 +5874,21 @@ fn load_global_index(state: &AppState) -> Option<Arc<LoadedShards>> {
     if graphs.is_empty() {
         return None;
     }
-    let arc = Arc::new(LoadedShards { graphs, covered, book_ids: meta.book_ids });
+    let arc = Arc::new(LoadedShards {
+        graphs,
+        covered,
+        book_ids: meta.book_ids,
+    });
     *state.global_index.lock().unwrap() = Some(arc.clone());
     Some(arc)
 }
 
 /// 在已载入内存的分片上做近邻检索，返回每本书的命中聚合。
-fn search_loaded_shards(li: &LoadedShards, q: &[f32], titles: &HashMap<u64, (String, String)>) -> Vec<SemBookHits> {
+fn search_loaded_shards(
+    li: &LoadedShards,
+    q: &[f32],
+    titles: &HashMap<u64, (String, String)>,
+) -> Vec<SemBookHits> {
     let qp = SemPoint(q.to_vec());
     let mut per: HashMap<u64, Vec<SemHit>> = HashMap::new();
     let mut best: HashMap<u64, f32> = HashMap::new();
@@ -5489,7 +5900,11 @@ fn search_loaded_shards(li: &LoadedShards, q: &[f32], titles: &HashMap<u64, (Str
             let sim = 1.0 - item.distance;
             let v = per.entry(e.b).or_default();
             if v.len() < 8 {
-                v.push(SemHit { chapter: e.c, snippet: e.t.clone(), score: sim });
+                v.push(SemHit {
+                    chapter: e.c,
+                    snippet: e.t.clone(),
+                    score: sim,
+                });
             }
             let bb = best.entry(e.b).or_insert(sim);
             if sim > *bb {
@@ -5603,7 +6018,11 @@ async fn semantic_search(
     };
     results.extend(brute_force_books(st, &targets, &q));
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(60);
     Ok(results)
 }
@@ -5666,7 +6085,9 @@ fn sem_probe() {
             "万念俱灰".to_string(),
             "木头桌子".to_string(),
         ];
-        let e = model.embed(texts, None).map_err(|e| format!("EMBED ERR: {e}"))?;
+        let e = model
+            .embed(texts, None)
+            .map_err(|e| format!("EMBED ERR: {e}"))?;
         sem_probe_write(&format!(
             "OK dim={} 高兴~开心={:.3} 高兴~万念俱灰={:.3} 高兴~桌子={:.3}",
             e[0].len(),
@@ -5741,7 +6162,8 @@ fn ensure_single_instance() -> bool {
     use std::os::windows::ffi::OsStrExt;
     use std::sync::atomic::AtomicPtr;
     type Handle = *mut core::ffi::c_void;
-    static SINGLE_INSTANCE_MUTEX: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+    static SINGLE_INSTANCE_MUTEX: AtomicPtr<core::ffi::c_void> =
+        AtomicPtr::new(std::ptr::null_mut());
     #[link(name = "kernel32")]
     extern "system" {
         fn CreateMutexW(attr: *const core::ffi::c_void, owner: i32, name: *const u16) -> Handle;
@@ -5755,7 +6177,10 @@ fn ensure_single_instance() -> bool {
         fn IsIconic(hwnd: Handle) -> i32;
     }
     fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
     const ERROR_ALREADY_EXISTS: u32 = 183;
     const SW_RESTORE: i32 = 9;
@@ -5827,7 +6252,14 @@ fn main() {
             spawn_build_index(app.handle().clone()); // 后台建立/更新全文检索索引
             spawn_fingerprint_fill(app.handle().clone()); // 后台为旧书补内容指纹
             if let Some(win) = app.get_webview_window("main") {
-                let geom = { app.state::<AppState>().library.lock().unwrap().main_geom.clone() };
+                let geom = {
+                    app.state::<AppState>()
+                        .library
+                        .lock()
+                        .unwrap()
+                        .main_geom
+                        .clone()
+                };
                 // 先在隐藏状态下摆好位置/大小再显示（避免闪动）；位置越界则回到屏幕中央
                 apply_geom_safe(&win, &geom);
                 let app_ev = app.handle().clone();
@@ -5877,12 +6309,10 @@ fn main() {
                             .body(bytes)
                             .unwrap()
                     }
-                    None => {
-                        tauri::http::Response::builder()
-                            .status(404)
-                            .body(Vec::new())
-                            .unwrap()
-                    }
+                    None => tauri::http::Response::builder()
+                        .status(404)
+                        .body(Vec::new())
+                        .unwrap(),
                 };
                 responder.respond(response);
             });
