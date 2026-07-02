@@ -36,6 +36,26 @@ fn log(msg: &str) {
     }
 }
 
+#[derive(Serialize, Clone)]
+struct StartupPerfEvent {
+    name: String,
+    phase: String,
+    detail: String,
+}
+
+fn emit_startup_perf(app: &tauri::AppHandle, name: &str, phase: &str, detail: impl Into<String>) {
+    let detail = detail.into();
+    log(&format!("[startup] {name} {phase} {detail}"));
+    let _ = app.emit(
+        "startup-perf",
+        StartupPerfEvent {
+            name: name.to_string(),
+            phase: phase.to_string(),
+            detail,
+        },
+    );
+}
+
 /// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
 struct AppState {
     library: Mutex<Library>,
@@ -1127,23 +1147,130 @@ async fn shelf_books(state: tauri::State<'_, AppState>) -> Result<Vec<BookDto>, 
     Ok(snapshot(&state.library.lock().unwrap()))
 }
 
-// async：导入要解析 EPUB、提取封面（慢），必须在主线程之外执行，否则卡死 UI
+#[derive(Serialize, Clone)]
+struct BookImportProgress {
+    phase: String,
+    processed: usize,
+    added: usize,
+    total: usize,
+    current: String,
+}
+
+fn emit_book_import_progress(
+    app: &tauri::AppHandle,
+    phase: &str,
+    processed: usize,
+    added: usize,
+    total: usize,
+    current: &str,
+) {
+    let _ = app.emit(
+        "book-import-progress",
+        BookImportProgress {
+            phase: phase.to_string(),
+            processed,
+            added,
+            total,
+            current: current.to_string(),
+        },
+    );
+}
+
 #[tauri::command]
-async fn add_books(
-    state: tauri::State<'_, AppState>,
-    paths: Vec<String>,
-) -> Result<Vec<BookDto>, String> {
-    let mut lib = state.library.lock().unwrap();
-    let mut changed = false;
-    for p in paths {
-        if lib.add(std::path::PathBuf::from(p)) {
-            changed = true;
+async fn add_books(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<BookDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        set_thread_background(true);
+        let state = app.state::<AppState>();
+        let total = paths.len();
+        let mut processed = 0usize;
+        let mut added = 0usize;
+        let mut changed = false;
+        let mut save_after = 0usize;
+        emit_book_import_progress(&app, "start", 0, 0, total, "");
+
+        for p in paths {
+            processed += 1;
+            let path = std::path::PathBuf::from(&p);
+            let current = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.clone());
+
+            let exact_exists = {
+                let lib = state.library.lock().unwrap();
+                lib.books.iter().any(|b| b.path == path)
+            };
+            if exact_exists {
+                emit_book_import_progress(&app, "import", processed, added, total, &current);
+                continue;
+            }
+
+            let fp = book::compute_fingerprint(&path);
+            let relocated = if fp != 0 {
+                let mut lib = state.library.lock().unwrap();
+                if let Some(b) = lib.books.iter_mut().find(|b| b.fingerprint == fp) {
+                    b.path = path.clone();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if relocated {
+                changed = true;
+                added += 1;
+                save_after += 1;
+                if save_after >= 50 {
+                    state.library.lock().unwrap().save();
+                    save_after = 0;
+                }
+                emit_book_import_progress(&app, "import", processed, added, total, &current);
+                continue;
+            }
+
+            let prepared = book::Book::prepare(path.clone());
+            let prepared_path = prepared.path.clone();
+            let prepared_fp = prepared.fingerprint;
+            let inserted = {
+                let mut lib = state.library.lock().unwrap();
+                if lib.books.iter().any(|b| b.path == prepared_path) {
+                    false
+                } else if prepared_fp != 0 {
+                    if let Some(b) = lib.books.iter_mut().find(|b| b.fingerprint == prepared_fp) {
+                        b.path = prepared_path;
+                        true
+                    } else {
+                        lib.books.push(prepared);
+                        true
+                    }
+                } else {
+                    lib.books.push(prepared);
+                    true
+                }
+            };
+            if inserted {
+                changed = true;
+                added += 1;
+                save_after += 1;
+                if save_after >= 50 {
+                    state.library.lock().unwrap().save();
+                    save_after = 0;
+                }
+            }
+            emit_book_import_progress(&app, "import", processed, added, total, &current);
         }
-    }
-    if changed {
-        lib.save();
-    }
-    Ok(snapshot(&lib))
+
+        if changed {
+            state.library.lock().unwrap().save();
+        }
+        emit_book_import_progress(&app, "done", processed, added, total, "");
+        let books = snapshot(&state.library.lock().unwrap());
+        set_thread_background(false);
+        books
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ---- 自动导入目录 ----
@@ -1174,10 +1301,44 @@ fn scan_dir_books(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, dept
     }
 }
 
+#[derive(Serialize, Clone)]
+struct AutoImportProgress {
+    phase: String,
+    found: usize,
+    processed: usize,
+    added: usize,
+    total: usize,
+    current: String,
+}
+
+fn emit_auto_import_progress(
+    app: Option<&tauri::AppHandle>,
+    phase: &str,
+    found: usize,
+    processed: usize,
+    added: usize,
+    total: usize,
+    current: &str,
+) {
+    if let Some(app) = app {
+        let _ = app.emit(
+            "auto-import-progress",
+            AutoImportProgress {
+                phase: phase.to_string(),
+                found,
+                processed,
+                added,
+                total,
+                current: current.to_string(),
+            },
+        );
+    }
+}
+
 /// 把自动导入目录里的新书加入书架（已存在的由 lib.add 去重）。返回是否有新增。
 /// 关键：扫描目录、过滤已知书都在锁外做，绝不在持锁状态下遍历整个目录，
 /// 否则封面等请求会因为抢不到书架锁而一直加载不出来（稳态下根本不取写锁）。
-fn run_auto_import(state: &AppState) -> bool {
+fn run_auto_import_with_progress(app: Option<&tauri::AppHandle>, state: &AppState) -> bool {
     use std::collections::HashSet;
     // 1) 短暂持锁，取出目录列表 + 已知书的路径集合
     let (dirs, known): (Vec<String>, HashSet<std::path::PathBuf>) = {
@@ -1197,24 +1358,53 @@ fn run_auto_import(state: &AppState) -> bool {
     let mut found = Vec::new();
     for d in &dirs {
         scan_dir_books(std::path::Path::new(d), &mut found, 0);
+        emit_auto_import_progress(app, "scan", found.len(), 0, 0, 0, d);
     }
     // 3) 锁外过滤掉路径已在书架里的（稳态：没有新文件 → 候选为空，下面整段都不取写锁）
-    let candidates: Vec<std::path::PathBuf> =
-        found.into_iter().filter(|p| !known.contains(p)).collect();
-    if candidates.is_empty() {
+    let candidates: Vec<std::path::PathBuf> = found
+        .iter()
+        .filter(|p| !known.contains(*p))
+        .cloned()
+        .collect();
+    let total = candidates.len();
+    if total == 0 {
+        emit_auto_import_progress(app, "done", found.len(), 0, 0, 0, "");
         return false;
     }
     // 4) 只为真正的新书逐本短暂持锁，给封面等请求留出穿插的间隙
     let mut changed = false;
+    let mut processed = 0usize;
+    let mut added = 0usize;
     for p in candidates {
-        let mut lib = state.library.lock().unwrap();
-        if lib.add(p) {
-            changed = true;
+        processed += 1;
+        let current = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        {
+            let mut lib = state.library.lock().unwrap();
+            if lib.add(p) {
+                changed = true;
+                added += 1;
+            }
+        }
+        if processed == total || processed % 5 == 0 {
+            emit_auto_import_progress(
+                app,
+                "import",
+                found.len(),
+                processed,
+                added,
+                total,
+                &current,
+            );
         }
     }
     if changed {
         state.library.lock().unwrap().save();
     }
+    emit_auto_import_progress(app, "done", found.len(), processed, added, total, "");
     changed
 }
 
@@ -1227,14 +1417,14 @@ fn get_auto_import(state: tauri::State<AppState>) -> AutoImportCfg {
     }
 }
 
-/// 设置自动导入开关 / 目录列表。改完立即扫描一次并返回更新后的书单。
+/// 设置自动导入开关 / 目录列表。只保存设置，不在这个命令里扫描，避免设置窗口等待导入完成。
 #[tauri::command]
 async fn set_auto_import(
     state: tauri::State<'_, AppState>,
     enabled: bool,
     dirs: Vec<String>,
-) -> Result<Vec<BookDto>, String> {
-    {
+) -> Result<AutoImportCfg, String> {
+    let cfg = {
         let mut lib = state.library.lock().unwrap();
         lib.auto_import_enabled = enabled;
         // 去重 + 去空
@@ -1245,24 +1435,25 @@ async fn set_auto_import(
             .collect();
         lib.auto_import_dir = None; // 清掉已迁移的旧字段
         lib.save();
-    }
-    run_auto_import(state.inner());
-    Ok(snapshot(&state.library.lock().unwrap()))
+        AutoImportCfg {
+            enabled: lib.auto_import_enabled,
+            dirs: lib.auto_import_dirs.clone(),
+        }
+    };
+    Ok(cfg)
 }
-
 /// 启动/回到书架时调用：若开启自动导入则扫描目录，返回最新书单。
 #[tauri::command]
 async fn auto_import_scan(app: tauri::AppHandle) -> Result<Vec<BookDto>, ()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        run_auto_import(state.inner());
+        run_auto_import_with_progress(Some(&app), state.inner());
         let books = snapshot(&state.library.lock().unwrap());
         books
     })
     .await
     .map_err(|_| ())
 }
-
 /// 阅读窗口上报阅读位置（进度% + 章节 + 章内比例）。
 #[tauri::command]
 async fn set_progress(
@@ -4727,22 +4918,79 @@ fn ensure_book_index(book: &book::Book) -> Option<BookIndex> {
     Some(idx)
 }
 
-/// 后台为全书架建立/更新索引（导入新书或启动时调用，温和不抢资源）。
+/// 后台为全书架建立/更新索引（导入新书或启动维护时调用）。
+/// 关键：不要在启动时清空并全量重建。已有关键词索引的书直接跳过，只补缺失，
+/// 避免刚打开软件时大量磁盘/SQLite 写入抢占 UI 响应。
 fn spawn_build_index(app: tauri::AppHandle) {
     std::thread::spawn(move || {
+        set_thread_background(true);
+        let started = std::time::Instant::now();
+        emit_startup_perf(&app, "keyword-index", "start", "background incremental");
         let state = app.state::<AppState>();
         let books: Vec<book::Book> = { state.library.lock().unwrap().books.clone() };
-        if let Ok(mut db_guard) = state.db.lock() {
-            if let Some(db) = db_guard.as_mut() {
-                let _ = db.clear_keyword_index();
-            }
-        }
+        let total = books.len();
+        let mut skipped = 0usize;
+        let mut indexed = 0usize;
         for b in books {
-            if let Some(idx) = ensure_book_index(&b) {
-                index_book_keywords(state.inner(), &b, &idx.chapters);
+            let already_indexed = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|db| db.has_keyword_index_for_book(b.id)))
+                .unwrap_or(false);
+            if already_indexed {
+                skipped += 1;
+                continue;
             }
-            std::thread::sleep(std::time::Duration::from_millis(15));
+            if let Some(idx) = ensure_book_index(&b) {
+                if let Ok(db_guard) = state.db.lock() {
+                    if let Some(db) = db_guard.as_ref() {
+                        let _ = db.clear_keyword_index_for_book(b.id);
+                    }
+                }
+                index_book_keywords(state.inner(), &b, &idx.chapters);
+                indexed += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
         }
+        emit_startup_perf(
+            &app,
+            "keyword-index",
+            "end",
+            format!(
+                "{}ms total={} indexed={} skipped={}",
+                started.elapsed().as_millis(),
+                total,
+                indexed,
+                skipped
+            ),
+        );
+        set_thread_background(false);
+    });
+}
+
+fn spawn_startup_maintenance(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        set_thread_background(true);
+        emit_startup_perf(
+            &app,
+            "startup-maintenance",
+            "scheduled",
+            "background delay=45s",
+        );
+        // 让首屏渲染、封面加载、窗口拖动和账号状态先稳定下来。
+        std::thread::sleep(std::time::Duration::from_secs(45));
+        emit_startup_perf(&app, "fingerprint-fill", "start", "background");
+        spawn_fingerprint_fill(app.clone());
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        spawn_build_index(app.clone());
+        emit_startup_perf(
+            &app,
+            "startup-maintenance",
+            "end",
+            "spawned background jobs",
+        );
+        set_thread_background(false);
     });
 }
 
@@ -6249,8 +6497,7 @@ fn main() {
                 let state = app.state::<AppState>();
                 migrate_json_to_sqlite(state.inner());
             }
-            spawn_build_index(app.handle().clone()); // 后台建立/更新全文检索索引
-            spawn_fingerprint_fill(app.handle().clone()); // 后台为旧书补内容指纹
+            spawn_startup_maintenance(app.handle().clone()); // 延后低抢占维护任务，避免刚打开窗口拖动卡顿
             if let Some(win) = app.get_webview_window("main") {
                 let geom = {
                     app.state::<AppState>()

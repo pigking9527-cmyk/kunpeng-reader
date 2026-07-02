@@ -223,7 +223,13 @@ pub struct WinGeom {
 
 impl Default for WinGeom {
     fn default() -> Self {
-        Self { x: 0.0, y: 0.0, w: 880.0, h: 760.0, maximized: false }
+        Self {
+            x: 0.0,
+            y: 0.0,
+            w: 880.0,
+            h: 760.0,
+            maximized: false,
+        }
     }
 }
 
@@ -332,7 +338,9 @@ impl Library {
         }
     }
     pub fn bookmarks(&self, id: u64) -> Vec<Bookmark> {
-        self.get(id).map(|b| b.bookmarks.clone()).unwrap_or_default()
+        self.get(id)
+            .map(|b| b.bookmarks.clone())
+            .unwrap_or_default()
     }
 
     pub fn add_highlight(&mut self, id: u64, h: Highlight) {
@@ -355,7 +363,9 @@ impl Library {
         }
     }
     pub fn highlights(&self, id: u64) -> Vec<Highlight> {
-        self.get(id).map(|b| b.highlights.clone()).unwrap_or_default()
+        self.get(id)
+            .map(|b| b.highlights.clone())
+            .unwrap_or_default()
     }
 
     /// 更新阅读位置（进度% + 续读章节/章内比例）；进度变化足够大才返回 true（决定是否写盘）。
@@ -378,7 +388,9 @@ impl Library {
     fn app_config_dir() -> Option<PathBuf> {
         #[cfg(target_os = "android")]
         {
-            return Some(PathBuf::from("/data/user/0/com.pigking.ebookreader/files/ebook-reader"));
+            return Some(PathBuf::from(
+                "/data/user/0/com.pigking.ebookreader/files/ebook-reader",
+            ));
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -393,14 +405,12 @@ impl Library {
         Some(dir.join("library.json"))
     }
 
-    pub fn data_dir() -> Option<PathBuf> {
-        Self::app_config_dir()
-    }
-
     pub fn cache_dir() -> Option<PathBuf> {
         #[cfg(target_os = "android")]
         {
-            return Some(PathBuf::from("/data/user/0/com.pigking.ebookreader/cache/ebook-reader"));
+            return Some(PathBuf::from(
+                "/data/user/0/com.pigking.ebookreader/cache/ebook-reader",
+            ));
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -436,7 +446,9 @@ impl Library {
     }
 
     pub fn save(&self) {
-        let Some(file) = Self::data_file() else { return };
+        let Some(file) = Self::data_file() else {
+            return;
+        };
         if let Some(parent) = file.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

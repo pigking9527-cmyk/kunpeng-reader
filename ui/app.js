@@ -2,6 +2,39 @@
 const invoke = window.__TAURI__.core.invoke;
 const dialog = window.__TAURI__.dialog;
 window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
+
+const STARTUP_PERF_KEY = "startupPerfLogV1";
+const startupPerfOrigin = performance.now();
+const startupPerfSession = new Date().toISOString();
+try { localStorage.setItem(STARTUP_PERF_KEY, JSON.stringify([{ session: startupPerfSession, at: 0, name: "app", phase: "start", detail: "main window script loaded" }])); } catch (e) {}
+function startupPerfLog(name, phase = "mark", detail = "") {
+  const at = Math.round(performance.now() - startupPerfOrigin);
+  const entry = { session: startupPerfSession, at, name, phase, detail: String(detail || "") };
+  console.info("[startup] +" + at + "ms " + name + " " + phase + (entry.detail ? " " + entry.detail : ""));
+  try {
+    const logs = JSON.parse(localStorage.getItem(STARTUP_PERF_KEY) || "[]");
+    logs.push(entry);
+    localStorage.setItem(STARTUP_PERF_KEY, JSON.stringify(logs.slice(-160)));
+  } catch (e) {}
+}
+function startupPerfStart(name, detail = "") {
+  const started = performance.now();
+  startupPerfLog(name, "start", detail);
+  return (extra = "") => startupPerfLog(name, "end", Math.round(performance.now() - started) + "ms" + (extra ? " " + extra : ""));
+}
+function startupTimed(name, task, detail = "") {
+  const done = startupPerfStart(name, detail);
+  return Promise.resolve()
+    .then(task)
+    .then((value) => {
+      done();
+      return value;
+    })
+    .catch((err) => {
+      startupPerfLog(name, "error", err && err.message ? err.message : String(err));
+      throw err;
+    });
+}
 // 禁用浏览器自带查找（Ctrl+F / F3）
 window.addEventListener("keydown", (e) => {
   if (((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) || e.key === "F3") e.preventDefault();
@@ -34,7 +67,6 @@ function readStatus(b) {
 let searchQuery = "";
 let selected = new Set(); // 已选中的图书 id（单击封面切换）
 let shelfLoaded = false;
-const SHELF_CACHE_KEY = "shelfBooksCacheV1";
 let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0"; // 封面右下角是否显示阅读进度
 let showCoverRating = localStorage.getItem("showCoverRating") !== "0"; // 封面上是否显示评分小星
 let showCoverTitle = localStorage.getItem("showCoverTitle") === "1"; // 网格视图封面下是否显示书名（默认不显示）
@@ -73,7 +105,7 @@ function staticStars(v) {
   return wrap;
 }
 
-function bookCard(b) {
+function bookCard(b, index = 0) {
   const card = document.createElement("div");
   card.className = "book";
 
@@ -86,8 +118,8 @@ function bookCard(b) {
     cover.classList.add("has-img");
     const img = document.createElement("img");
     img.alt = b.title;
-    img.loading = "eager";
-    img.decoding = "sync";
+    img.loading = index < 24 ? "eager" : "lazy";
+    img.decoding = index < 24 ? "sync" : "async";
     img.src = b.cover;
     cover.appendChild(img);
   } else {
@@ -241,10 +273,12 @@ function currentList() {
   return list;
 }
 
+let viewRenderToken = 0;
 function applyView() {
+  const token = ++viewRenderToken;
   shelfEl.classList.toggle("list", layout === "list");
   shelfEl.classList.toggle("show-titles", showCoverTitle); // 网格视图是否显示书名
-  shelfEl.innerHTML = "";
+  shelfEl.replaceChildren();
   const list = currentList();
   if (!shelfLoaded) {
     emptyEl.style.display = "none";
@@ -256,9 +290,22 @@ function applyView() {
       : "书架还是空的。点右上角「⋮」→「导入书籍」添加（可一次选多本）。";
     emptyEl.style.display = "block";
   }
-  for (const b of sortBooks(list)) shelfEl.appendChild(bookCard(b));
+  const sorted = sortBooks(list);
+  const finishCoverRender = startupPerfStart("cover-render", "critical books=" + sorted.length + " layout=" + layout);
+  let i = 0;
+  let chunks = 0;
+  function appendChunk() {
+    if (token !== viewRenderToken) return;
+    const frag = document.createDocumentFragment();
+    const end = Math.min(i + 28, sorted.length);
+    for (; i < end; i++) frag.appendChild(bookCard(sorted[i], i));
+    shelfEl.appendChild(frag);
+    chunks += 1;
+    if (i < sorted.length) setTimeout(appendChunk, 0);
+    else finishCoverRender("chunks=" + chunks);
+  }
+  appendChunk();
 }
-
 // ---- 搜索 + 历史记录 ----
 const historyEl = document.getElementById("search-history");
 let history = [];
@@ -406,12 +453,18 @@ shelfChk.addEventListener("click", (e) => e.stopPropagation());
 document.getElementById("shelf-toggle").addEventListener("click", (e) => e.stopPropagation());
 shelfChk.addEventListener("change", () => {
   searchInput.placeholder = shelfChk.checked ? "全书架正文检索，回车搜索…" : "搜索 书名 / 作者 / 简介";
+  const term = searchInput.value.trim();
   if (shelfChk.checked) {
-    // 进入书架检索模式：不再按书名过滤书架
-    searchQuery = "";
-    applyView();
+    // 有关键词时，切到全书架正文检索就直接打开全文检索页。
+    if (term) {
+      runShelfSearch(term);
+    } else {
+      searchQuery = "";
+      applyView();
+      showHistory();
+    }
   } else {
-    searchQuery = searchInput.value.trim().toLowerCase();
+    searchQuery = term.toLowerCase();
     applyView();
   }
   searchInput.focus();
@@ -457,29 +510,14 @@ searchInput.addEventListener("keydown", (e) => {
 });
 
 let lastJSON = ""; // 上次渲染的数据快照，数据没变就不重渲染（避免封面重载闪烁）
-function readShelfCache() {
-  try {
-    const cached = JSON.parse(localStorage.getItem(SHELF_CACHE_KEY) || "[]");
-    return Array.isArray(cached) ? cached : [];
-  } catch (e) {
-    return [];
-  }
-}
-function writeShelfCache(list) {
-  try {
-    localStorage.setItem(SHELF_CACHE_KEY, JSON.stringify(list || []));
-  } catch (e) {}
-}
-function render(list, opts = {}) {
+function render(list) {
   shelfLoaded = true;
   books = list;
   const j = JSON.stringify(list);
   if (j === lastJSON) return;
   lastJSON = j;
   applyView();
-  if (!opts.fromCache) writeShelfCache(list);
 }
-
 // ---- 排序与布局面板 ----
 document.getElementById("filter-btn").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -568,6 +606,13 @@ let autoImport = { enabled: false, dirs: [] };
 const setAutoChk = document.getElementById("set-auto-import");
 const importDirsModal = document.getElementById("import-dirs-modal");
 const dirsListEl = document.getElementById("dirs-list");
+const dirsStatusEl = document.getElementById("dirs-status");
+let autoImportScanSeq = 0;
+function setDirsStatus(text = "", kind = "") {
+  if (!dirsStatusEl) return;
+  dirsStatusEl.textContent = text || "";
+  dirsStatusEl.className = "ai-status" + (kind ? " " + kind : "");
+}
 function renderDirsList() {
   dirsListEl.innerHTML = "";
   if (!autoImport.dirs.length) {
@@ -587,9 +632,11 @@ function renderDirsList() {
     del.className = "dir-del";
     del.textContent = "✕";
     del.title = "移除该目录";
-    del.addEventListener("click", () => {
+    del.addEventListener("click", async () => {
       autoImport.dirs = autoImport.dirs.filter((x) => x !== d);
-      applyAutoImport(autoImport.enabled);
+      reflectAutoImport();
+      setDirsStatus("目录已移除，正在保存…", "busy");
+      await applyAutoImport(autoImport.enabled, { scan: false });
     });
     row.append(p, del);
     dirsListEl.appendChild(row);
@@ -598,6 +645,30 @@ function renderDirsList() {
 function reflectAutoImport() {
   setAutoChk.checked = !!autoImport.enabled;
   renderDirsList();
+}
+async function startAutoImportScan(reason = "正在扫描并导入目录…") {
+  if (!autoImport.enabled || !autoImport.dirs.length) return;
+  const finishAutoImport = startupPerfStart("auto-import-scan", "background dirs=" + autoImport.dirs.length);
+  const seq = ++autoImportScanSeq;
+  const before = books.length;
+  setDirsStatus(reason, "busy");
+  try {
+    const list = await invoke("auto_import_scan");
+    if (seq !== autoImportScanSeq) return;
+    const added = Math.max(0, (list || []).length - before);
+    render(list || []);
+    if (added > 0) {
+      setDirsStatus("导入完成，新增 " + added + " 本书", "ok");
+      finishAutoImport("added=" + added);
+      setTimeout(() => startupTimed("keyword-index-after-import", () => invoke("build_shelf_index"), "background").catch(() => {}), 1500);
+    } else {
+      setDirsStatus("扫描完成，没有新书", "ok");
+      finishAutoImport("added=0");
+    }
+  } catch (e) {
+    startupPerfLog("auto-import-scan", "error", e && e.message ? e.message : String(e));
+    if (seq === autoImportScanSeq) setDirsStatus("扫描失败：" + e, "error");
+  }
 }
 // 封面显示阅读进度开关
 const setCoverProg = document.getElementById("set-cover-prog");
@@ -625,23 +696,32 @@ setCoverTitle.addEventListener("change", () => {
 });
 // 自动导入开关
 setAutoChk.addEventListener("change", async () => {
-  await applyAutoImport(setAutoChk.checked);
-  if (setAutoChk.checked && !autoImport.dirs.length) {
+  const enabled = setAutoChk.checked;
+  autoImport.enabled = enabled;
+  reflectAutoImport();
+  if (enabled && !autoImport.dirs.length) {
     importDirsModal.classList.add("show"); // 还没设目录：顺手打开让用户添加
   }
+  await applyAutoImport(enabled, {
+    scan: enabled && autoImport.dirs.length > 0,
+    reason: "正在扫描并导入目录…",
+  });
 });
-// 把当前 enabled + dirs 提交后端，立即扫描并刷新书架
-async function applyAutoImport(enabled) {
+// 把当前 enabled + dirs 提交后端；扫描导入单独走后台，避免设置窗口卡住。
+async function applyAutoImport(enabled, opts = {}) {
   try {
-    const list = await invoke("set_auto_import", { enabled, dirs: autoImport.dirs });
-    autoImport.enabled = enabled;
-    const grew = list.length > books.length;
-    render(list);
-    if (grew) invoke("build_shelf_index").catch(() => {});
+    const cfg = await invoke("set_auto_import", { enabled, dirs: autoImport.dirs });
+    autoImport = cfg || { enabled, dirs: autoImport.dirs };
+    reflectAutoImport();
+    setDirsStatus("目录设置已保存", "ok");
+    if (opts.scan && autoImport.enabled && autoImport.dirs.length) {
+      startAutoImportScan(opts.reason || "正在扫描并导入目录…");
+    }
   } catch (e) {
+    setDirsStatus("保存目录设置失败：" + e, "error");
     alert("设置自动导入失败：" + e);
+    reflectAutoImport();
   }
-  reflectAutoImport();
 }
 async function addImportDirs() {
   const sel = await dialog.open({ directory: true, multiple: true });
@@ -654,7 +734,14 @@ async function addImportDirs() {
       added = true;
     }
   }
-  if (added) await applyAutoImport(autoImport.enabled);
+  if (added) {
+    reflectAutoImport();
+    setDirsStatus("目录已添加，正在保存…", "busy");
+    await applyAutoImport(autoImport.enabled, {
+      scan: autoImport.enabled,
+      reason: "正在扫描新目录…",
+    });
+  }
 }
 // 漏斗面板右上角齿轮 → 打开“我的书架”设置弹窗
 const fpSettingsModal = document.getElementById("fp-settings-modal");
@@ -666,6 +753,7 @@ const syncAccountNameEl = document.getElementById("sync-account-name");
 const syncUsernameEl = document.getElementById("sync-username");
 const syncPasswordEl = document.getElementById("sync-password");
 const savedAccountsEl = document.getElementById("saved-accounts");
+const SYNC_ACCOUNT_CACHE_KEY = "syncAccountCacheV1";
 const syncStatusEl = document.getElementById("sync-status");
 const syncNowBtn = document.getElementById("sync-now");
 const syncLogoutBtn = document.getElementById("sync-logout");
@@ -677,6 +765,27 @@ function formatSyncTime(v) {
   if (!n) return "尚未同步";
   const ms = n > 100000000000 ? n : n * 1000;
   return new Date(ms).toLocaleString();
+}
+function readCachedSyncAccount() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(SYNC_ACCOUNT_CACHE_KEY) || "{}");
+    return cached && cached.username ? cached : null;
+  } catch (e) {
+    return null;
+  }
+}
+function writeCachedSyncAccount(username) {
+  try {
+    if (username) localStorage.setItem(SYNC_ACCOUNT_CACHE_KEY, JSON.stringify({ username, saved_at: Date.now() }));
+    else localStorage.removeItem(SYNC_ACCOUNT_CACHE_KEY);
+  } catch (e) {}
+}
+function applyCachedSyncAccount() {
+  const cached = readCachedSyncAccount();
+  if (!cached) return false;
+  syncUsernameEl.value = cached.username || "";
+  updateAccountView({ username: cached.username });
+  return true;
 }
 function setSyncButtonState(state, text, title = "") {
   syncNowBtn.classList.remove("syncing", "ok", "fail");
@@ -753,12 +862,14 @@ function renderSavedAccounts() {
 function updateAccountView(settings = {}) {
   const username = settings.username || syncUsernameEl.value.trim();
   if (username) {
+    writeCachedSyncAccount(username);
     syncFormEl.classList.add("hidden");
     syncAccountEl.classList.add("show");
     syncStatusEl.classList.add("hidden");
     syncAccountNameEl.textContent = "账号：" + username;
     setSyncButtonState("", "同步");
   } else {
+    writeCachedSyncAccount("");
     syncFormEl.classList.remove("hidden");
     syncAccountEl.classList.remove("show");
     syncStatusEl.classList.remove("hidden");
@@ -778,15 +889,21 @@ async function loadSyncSettings() {
 }
 let syncSettingsLoaded = false;
 let syncSettingsLoading = false;
+let syncSettingsPromise = null;
 async function loadSyncSettingsOnce() {
-  if (syncSettingsLoaded || syncSettingsLoading) return;
+  if (syncSettingsLoaded) return;
+  if (syncSettingsLoading && syncSettingsPromise) return syncSettingsPromise;
   syncSettingsLoading = true;
-  try {
-    await loadSyncSettings();
-    syncSettingsLoaded = true;
-  } finally {
-    syncSettingsLoading = false;
-  }
+  syncSettingsPromise = (async () => {
+    try {
+      await loadSyncSettings();
+      syncSettingsLoaded = true;
+    } finally {
+      syncSettingsLoading = false;
+      syncSettingsPromise = null;
+    }
+  })();
+  return syncSettingsPromise;
 }
 accountBtn.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -794,10 +911,10 @@ accountBtn.addEventListener("click", (e) => {
   filterPanel.classList.remove("show");
   if (accountPanel.classList.contains("show")) {
     closeAccountPanel();
-  } else {
-    openAccountPanel();
-    loadSyncSettingsOnce();
+    return;
   }
+  applyCachedSyncAccount();
+  openAccountPanel();
 });
 accountPanel.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -925,6 +1042,43 @@ document.querySelectorAll(".layout-btn").forEach((b) => {
 });
 updateLayoutButtons();
 
+let importStatusEl = null;
+let importStatusTimer = 0;
+function ensureImportStatus() {
+  if (importStatusEl) return importStatusEl;
+  importStatusEl = document.createElement("div");
+  importStatusEl.className = "import-status";
+  document.body.appendChild(importStatusEl);
+  return importStatusEl;
+}
+function setImportStatus(text, kind = "busy") {
+  const el = ensureImportStatus();
+  clearTimeout(importStatusTimer);
+  el.className = "import-status show " + kind;
+  el.textContent = text || "";
+}
+function hideImportStatus(delay = 0) {
+  clearTimeout(importStatusTimer);
+  importStatusTimer = setTimeout(() => {
+    if (importStatusEl) importStatusEl.classList.remove("show");
+  }, delay);
+}
+async function importBookPaths(paths) {
+  paths = (paths || []).filter(Boolean);
+  if (!paths.length) return;
+  setImportStatus("准备导入 " + paths.length + " 本书...", "busy");
+  try {
+    const list = await startupTimed("manual-import", () => invoke("add_books", { paths }), paths.length + " files");
+    setImportStatus("正在刷新书架...", "busy");
+    render(list);
+    setImportStatus("导入完成，共 " + paths.length + " 个文件", "ok");
+    hideImportStatus(3200);
+    invoke("build_shelf_index").catch(() => {}); // 后台为新书建检索索引
+  } catch (e) {
+    setImportStatus("导入失败：" + (e && e.message ? e.message : e), "error");
+    hideImportStatus(7000);
+  }
+}
 async function importBooks() {
   const sel = await dialog.open({
     multiple: true,
@@ -932,10 +1086,8 @@ async function importBooks() {
   });
   if (!sel) return;
   const paths = Array.isArray(sel) ? sel : [sel];
-  render(await invoke("add_books", { paths }));
-  invoke("build_shelf_index").catch(() => {}); // 后台为新书建检索索引
+  await importBookPaths(paths);
 }
-
 async function exportDataPackage() {
   const path = await dialog.save({
     defaultPath: "kunpeng-reader-data.json",
@@ -1429,15 +1581,42 @@ aboutModal.addEventListener("click", (e) => {
 const dropHint = document.getElementById("drop-hint");
 const SUPPORTED = /\.(epub|pdf|txt|md|markdown|mobi|azw3|azw)$/i;
 const tauriEvent = window.__TAURI__.event;
+tauriEvent.listen("startup-perf", (e) => {
+  const p = (e && e.payload) || {};
+  startupPerfLog("rust:" + (p.name || "unknown"), p.phase || "mark", p.detail || "");
+});
+tauriEvent.listen("auto-import-progress", (e) => {
+  const p = (e && e.payload) || {};
+  if (!p.phase) return;
+  if (p.phase === "scan") {
+    setDirsStatus("正在扫描目录…已发现 " + (p.found || 0) + " 个文件", "busy");
+  } else if (p.phase === "import") {
+    setDirsStatus("正在导入 " + (p.processed || 0) + "/" + (p.total || 0) + "，已新增 " + (p.added || 0) + " 本" + (p.current ? "：" + p.current : ""), "busy");
+  } else if (p.phase === "done") {
+    setDirsStatus("扫描完成，新增 " + (p.added || 0) + " 本书", "ok");
+  }
+});
+tauriEvent.listen("book-import-progress", (e) => {
+  const p = (e && e.payload) || {};
+  if (!p.phase) return;
+  const total = p.total || 0;
+  if (p.phase === "start") {
+    setImportStatus("准备导入 " + total + " 本书...", "busy");
+  } else if (p.phase === "import") {
+    setImportStatus(
+      "正在导入 " + (p.processed || 0) + "/" + total + "，已新增 " + (p.added || 0) + " 本" + (p.current ? "：" + p.current : ""),
+      "busy"
+    );
+  } else if (p.phase === "done") {
+    setImportStatus("导入完成，新增 " + (p.added || 0) + " 本", "ok");
+  }
+});
 tauriEvent.listen("tauri://drag-enter", () => dropHint.classList.add("show"));
 tauriEvent.listen("tauri://drag-leave", () => dropHint.classList.remove("show"));
 tauriEvent.listen("tauri://drag-drop", async (e) => {
   dropHint.classList.remove("show");
   const paths = ((e.payload && e.payload.paths) || []).filter((p) => SUPPORTED.test(p));
-  if (paths.length) {
-    render(await invoke("add_books", { paths }));
-    invoke("build_shelf_index").catch(() => {}); // 后台为新书建检索索引
-  }
+  if (paths.length) await importBookPaths(paths);
 });
 document.getElementById("mi-selectall").addEventListener("click", () => {
   menuEl.classList.remove("show");
@@ -1506,42 +1685,44 @@ window.addEventListener("focus", () => {
   const now = Date.now();
   if (now - lastShelfFocusRefreshAt < 1500) return;
   lastShelfFocusRefreshAt = now;
-  invoke("shelf_books").then(render).catch(() => {});
+  invoke("list_books").then(render).catch(() => {});
 });
 
-// 启动：先用本地缓存立刻渲染，再只做一次轻量书架读取。
-// list_books 会补元数据，容易在大书架启动时造成偶发卡顿，放弃在首屏阶段调用。
-(async () => {
-  const cachedBooks = readShelfCache();
-  if (cachedBooks.length) render(cachedBooks, { fromCache: true });
-  invoke("shelf_books")
-    .then(render)
+// 启动：先用 list_books 快速返回现有书架，让菜单栏立刻可点；旧数据元信息回填延后执行。
+  startupPerfLog("startup", "schedule", "critical=list_books+cover-render background=sync/settings/import/index/update");
+  startupTimed("shelf-list-books", () => invoke("list_books"), "critical")
+    .then((list) => {
+      startupPerfLog("shelf-list-books", "data", "books=" + ((list && list.length) || 0));
+      render(list);
+    })
     .catch(() => {})
     .finally(() => {
       initialShelfLoading = false;
+      startupPerfLog("startup", "interactive", "main toolbar should be responsive");
     });
-  loadSyncSettingsOnce();
+  setTimeout(() => {
+    startupTimed("shelf-books-backfill", () => invoke("shelf_books"), "background")
+      .then(render)
+      .catch(() => {});
+  }, 10000);
   // 读取自动导入配置并反映到设置面板。真正扫描延后，避免和首屏封面加载抢资源。
-  invoke("get_auto_import").then((c) => { autoImport = c || autoImport; reflectAutoImport(); }).catch(() => {});
+  setTimeout(() => startupTimed("sync-settings", () => loadSyncSettingsOnce(), "background").catch(() => {}), 1200);
+  startupTimed("auto-import-config", () => invoke("get_auto_import"), "background")
+    .then((c) => { autoImport = c || autoImport; reflectAutoImport(); })
+    .catch(() => {});
   setTimeout(() => {
     if (!autoImport.enabled || !autoImport.dirs || !autoImport.dirs.length) return;
-    invoke("auto_import_scan").then((list) => {
-      const grew = list.length > books.length;
-      if (grew) {
-        render(list);
-        setTimeout(() => invoke("build_shelf_index").catch(() => {}), 3000);
-      }
-    }).catch(() => {});
-  }, 8000);
+    startAutoImportScan("正在自动扫描导入目录…");
+  }, 20000);
   // 字数统计是锦上添花，延后到启动稳定之后。
-  setTimeout(() => invoke("compute_word_counts").catch(() => {}), 12000);
+  setTimeout(() => startupTimed("word-counts", () => invoke("compute_word_counts"), "background").catch(() => {}), 25000);
   // 启动后台检查更新（不阻塞启动，每次启动查一次）
-  setTimeout(() => checkUpdate(false), 3000);
+  setTimeout(() => startupTimed("update-check", () => checkUpdate(false), "background").catch(() => {}), 15000);
   // “关于”里的版本号取自后端，保持单一来源
-  invoke("app_version").then((v) => {
-    const el = document.getElementById("about-ver");
-    if (el && v) el.textContent = "v" + String(v).replace(/^v/i, "");
-  }).catch(() => {});
-})();
-
+  startupTimed("app-version", () => invoke("app_version"), "background")
+    .then((v) => {
+      const el = document.getElementById("about-ver");
+      if (el && v) el.textContent = "v" + String(v).replace(/^v/i, "");
+    })
+    .catch(() => {});
 

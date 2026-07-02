@@ -42,9 +42,9 @@ fn db_path() -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "android"))]
     {
-    let mut d = dirs::config_dir()?;
-    d.push("ebook-reader");
-    Some(d.join("reader.db"))
+        let mut d = dirs::config_dir()?;
+        d.push("ebook-reader");
+        Some(d.join("reader.db"))
     }
 }
 
@@ -65,7 +65,10 @@ impl AppDb {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        let mut db = Self { conn, device_id: String::new() };
+        let mut db = Self {
+            conn,
+            device_id: String::new(),
+        };
         db.init()?;
         db.device_id = db.ensure_device_id()?;
         Ok(db)
@@ -109,7 +112,11 @@ impl AppDb {
     fn ensure_device_id(&self) -> Result<String, String> {
         if let Some(v) = self
             .conn
-            .query_row("SELECT value FROM metadata WHERE key='device_id'", [], |r| r.get::<_, String>(0))
+            .query_row(
+                "SELECT value FROM metadata WHERE key='device_id'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
             .optional()
             .map_err(|e| e.to_string())?
         {
@@ -117,7 +124,10 @@ impl AppDb {
         }
         let id = new_device_id();
         self.conn
-            .execute("INSERT INTO metadata(key,value) VALUES('device_id',?)", params![id])
+            .execute(
+                "INSERT INTO metadata(key,value) VALUES('device_id',?)",
+                params![id],
+            )
             .map_err(|e| e.to_string())?;
         Ok(id)
     }
@@ -128,7 +138,11 @@ impl AppDb {
 
     pub fn metadata(&self, key: &str) -> Option<String> {
         self.conn
-            .query_row("SELECT value FROM metadata WHERE key=?", params![key], |r| r.get::<_, String>(0))
+            .query_row(
+                "SELECT value FROM metadata WHERE key=?",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
             .optional()
             .ok()
             .flatten()
@@ -221,11 +235,24 @@ impl AppDb {
             if kind.is_empty() || id.is_empty() {
                 continue;
             }
-            let data = item.get("data").or_else(|| item.get("json")).cloned().unwrap_or(Value::Null);
-            let updated_at = item.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(now_secs() as i64);
+            let data = item
+                .get("data")
+                .or_else(|| item.get("json"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let updated_at = item
+                .get("updated_at")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(now_secs() as i64);
             let deleted_at = item.get("deleted_at").and_then(|v| v.as_i64()).unwrap_or(0);
-            let device_id = item.get("device_id").and_then(|v| v.as_str()).unwrap_or(&self.device_id);
-            let sync_version = item.get("sync_version").and_then(|v| v.as_i64()).unwrap_or(1);
+            let device_id = item
+                .get("device_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.device_id);
+            let sync_version = item
+                .get("sync_version")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(1);
             let txt = serde_json::to_string(&data).map_err(|e| e.to_string())?;
             self.conn
                 .execute(
@@ -315,9 +342,23 @@ impl AppDb {
         Ok(count)
     }
 
-    pub fn clear_keyword_index(&mut self) -> Result<(), String> {
+    pub fn has_keyword_index_for_book(&self, book_id: u64) -> bool {
         self.conn
-            .execute("DELETE FROM keyword_postings", [])
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM keyword_postings WHERE book_id=? LIMIT 1)",
+                params![book_id as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .unwrap_or(false)
+    }
+
+    pub fn clear_keyword_index_for_book(&self, book_id: u64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM keyword_postings WHERE book_id=?",
+                params![book_id as i64],
+            )
             .map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -346,10 +387,16 @@ impl AppDb {
         Ok(())
     }
 
-    pub fn keyword_search(&self, term: &str, ids: Option<&std::collections::HashSet<u64>>) -> Result<Vec<DbSearchHit>, String> {
+    pub fn keyword_search(
+        &self,
+        term: &str,
+        ids: Option<&std::collections::HashSet<u64>>,
+    ) -> Result<Vec<DbSearchHit>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT book_id,chapter,count,snippets_json FROM keyword_postings WHERE term=?")
+            .prepare(
+                "SELECT book_id,chapter,count,snippets_json FROM keyword_postings WHERE term=?",
+            )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![term], |r| {
@@ -375,7 +422,11 @@ impl AppDb {
 
     pub fn has_keyword_index(&self) -> bool {
         self.conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM keyword_postings LIMIT 1)", [], |r| r.get::<_, i64>(0))
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM keyword_postings LIMIT 1)",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
             .map(|v| v != 0)
             .unwrap_or(false)
     }

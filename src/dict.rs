@@ -149,12 +149,20 @@ pub fn lookup(term: &str) -> DictResult {
                 };
             }
         }
-        DictResult { lang: "zh".into(), word: t.to_string(), ..Default::default() }
+        DictResult {
+            lang: "zh".into(),
+            word: t.to_string(),
+            ..Default::default()
+        }
     } else {
         let en = en_map();
         let key: String = t.to_lowercase();
         let hit = en.get(&key).map(|v| (key.clone(), v));
-        let hit = hit.or_else(|| en_lemmas(&key).into_iter().find_map(|b| en.get(&b).map(|v| (b, v))));
+        let hit = hit.or_else(|| {
+            en_lemmas(&key)
+                .into_iter()
+                .find_map(|b| en.get(&b).map(|v| (b, v)))
+        });
         if let Some((w, (p, trans, endef))) = hit {
             return DictResult {
                 found: true,
@@ -165,6 +173,10 @@ pub fn lookup(term: &str) -> DictResult {
                 def_en: endef.clone(), // 英英
             };
         }
-        DictResult { lang: "en".into(), word: t.to_string(), ..Default::default() }
+        DictResult {
+            lang: "en".into(),
+            word: t.to_string(),
+            ..Default::default()
+        }
     }
 }

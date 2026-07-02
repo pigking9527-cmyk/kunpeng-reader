@@ -22,6 +22,7 @@ body {
   font-size: 16px; font-weight: 600; margin-bottom: 10px; }
 .info-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f0f2; font-size: 14px; }
 .info-row.col { flex-direction: column; align-items: stretch; gap: 6px; }
+.info-row.col .info-k { flex: 0 0 auto; }
 .info-k { color: #888; flex: 0 0 80px; }
 .info-v { color: #222; }
 .about-update-btn { margin-left: auto; padding: 3px 12px; font-size: 13px; }
@@ -37,6 +38,28 @@ body {
   color: #2a6; font-size: 22px; color: #1c4fb0; pointer-events: none;
 }
 .drop-hint.show { display: flex; }
+
+/* 大批量导入进度：不挡操作，只提示当前后台导入状态 */
+.import-status {
+  display: none;
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 70;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border: 1px solid #d9dde6;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.96);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.18);
+  color: #293241;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.import-status.show { display: block; }
+.import-status.busy { border-color: #b9cdf8; }
+.import-status.ok { border-color: #9ed7aa; color: #1f7a35; }
+.import-status.error { border-color: #f0aaa5; color: #b42318; }
 
 /* 更新提示条（贴在工具栏下方） */
 .update-bar { display: none; align-items: center; gap: 12px; padding: 8px 16px;
@@ -292,6 +315,10 @@ body {
   color: #bbb; font-size: 14px; line-height: 1; padding: 2px 4px; }
 .dir-del:hover { color: #e85c50; }
 .dirs-empty { text-align: center; color: #aaa; font-size: 13px; padding: 18px 0; }
+.ai-status { min-height: 18px; margin-top: 8px; font-size: 12px; line-height: 1.5; color: #777; overflow-wrap: anywhere; }
+.ai-status.busy { color: #2b6cff; }
+.ai-status.ok { color: #238636; }
+.ai-status.error { color: #c43; }
 .fp-sep { width: 1px; background: #e3e3e6; }
 /* 评分过滤：五颗星（支持半星），点星=只看该评分及以上 */
 .fp-stars { display: inline-flex; gap: 3px; cursor: pointer; margin-top: 2px; }
