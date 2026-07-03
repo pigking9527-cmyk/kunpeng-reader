@@ -14,14 +14,24 @@
       }
       .toolbar {
         display: flex; align-items: center; gap: 6px;
-        height: 35px; box-sizing: border-box; padding: 0 10px;
+        height: 39px; box-sizing: border-box; padding: 0 6px 0 10px;
         border-bottom: 1px solid #e3e3e6; background: #fafafa;
         flex: 0 0 auto; position: relative; z-index: 20;
         user-select: none; /* 外壳不可选，避免从工具栏拖拽把整页（含 iframe）选中变灰 */
       }
       .body { user-select: none; } /* 正文选择由 iframe 内部处理，外壳层不参与选择 */
-      .toolbar .title { margin-left: auto; color: #555; font-size: 13px;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+      .toolbar .title { color: #555; font-size: 13px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 32%; }
+      .reader-drag-space { flex: 1 1 auto; align-self: stretch; min-width: 96px; cursor: default; }
+      .window-controls { display: inline-flex; align-items: center; height: 36px; margin-left: 2px; }
+      .win-btn {
+        width: 38px; height: 34px; border: 1px solid transparent; border-radius: 6px;
+        background: transparent; color: #333; cursor: pointer;
+        font: 20px/1 "Segoe UI", system-ui, sans-serif;
+        display: inline-flex; align-items: center; justify-content: center;
+      }
+      .win-btn:hover { background: #edf1f7; }
+      .win-btn.close:hover { background: #e81123; color: #fff; }
       .tbtn {
         font: inherit; padding: 4px 10px; border: 1px solid #c9c9cf;
         border-radius: 6px; background: #fff; cursor: pointer;
@@ -322,6 +332,9 @@
       }
       body.theme-dark .tbtn:hover { background: #3a3a3d; }
       body.theme-dark .toolbar .title { color: #aaa; }
+      body.theme-dark .win-btn { color: #ddd; }
+      body.theme-dark .win-btn:hover { background: #3a3a3d; }
+      body.theme-dark .win-btn.close:hover { background: #e81123; color: #fff; }
       body.theme-dark .toc { background: #262628; border-color: #3a3a3d; }
       body.theme-dark .toc .toc-item { color: #ddd; }
       body.theme-dark .toc .toc-item:hover { background: #3a3a3d; }
@@ -390,8 +403,7 @@
       body.immersive.bar-show .toolbar > .search-wrap,
       body.immersive.bar-show .toolbar > .gear-wrap { opacity: 1; pointer-events: auto; }
       body.immersive .toolbar { background: transparent; border-bottom-color: transparent; }
-      body.immersive.bar-show .toolbar { background: #fafafa; border-bottom-color: #e3e3e6;
-        box-shadow: 0 3px 12px rgba(0,0,0,0.18); }
+      body.immersive.bar-show .toolbar { background: transparent; border-bottom-color: transparent; }
       body.theme-dark.immersive.bar-show .toolbar { background: #262628; border-bottom-color: #3a3a3d; }
       /* 批注页（大） */
       .anno-card { width: 680px; max-width: 92vw; max-height: 84vh; display: flex; flex-direction: column; }
@@ -502,11 +514,17 @@
         </div>
       </div>
       <button id="vocab-btn" class="tbtn" title="生词本（查过的词）">📒 生词本</button>
-      <span id="progress" class="title">—</span>
+      <div class="reader-drag-space" title="拖动窗口" data-tauri-drag-region></div>
+      <span id="progress" class="title" data-tauri-drag-region>—</span>
+      <div class="window-controls" aria-label="窗口控制">
+        <button id="win-min" class="win-btn" type="button" title="最小化" aria-label="最小化">−</button>
+        <button id="win-max" class="win-btn" type="button" title="最大化" aria-label="最大化">□</button>
+        <button id="win-close" class="win-btn close" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
     </div>
 
     <div class="body">
-      <iframe id="frame" referrerpolicy="no-referrer"></iframe>
+      <iframe id="frame" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin"></iframe>
       <div id="loading" class="loading"><div class="spinner"></div><div>加载中…</div></div>
       <div id="backdrop" class="backdrop"></div>
       <aside id="toc" class="toc">
@@ -600,6 +618,10 @@
         <div id="anno-list"></div>
       </div>
     </div>
+    <script src="reader-search-ui.js"></script>
+    <script src="reader-settings-ui.js"></script>
     <script src="reader.js"></script>
+    <script src="reader-notes-ui.js"></script>
+    <script src="vocab-ui.js"></script>
   </body>
 </html>

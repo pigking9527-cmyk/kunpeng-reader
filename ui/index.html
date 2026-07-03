@@ -8,6 +8,45 @@
   </head>
   <body>
     <header class="toolbar">
+      <div class="account-wrap">
+        <button id="account-btn" class="avatar-btn" title="账号与同步" aria-label="账号与同步">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <circle cx="12" cy="8" r="4" fill="currentColor" />
+            <path d="M4.5 20c1.2-4 4-6 7.5-6s6.3 2 7.5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          </svg>
+        </button>
+        <div id="account-panel" class="account-panel">
+          <div id="sync-form" class="sync-form">
+            <div class="fp-title">同步</div>
+            <label class="sync-field">
+              <span>账号</span>
+              <span class="account-input-wrap">
+                <input id="sync-username" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" />
+                <div id="saved-accounts" class="saved-accounts"></div>
+              </span>
+            </label>
+            <label class="sync-field">
+              <span>密码</span>
+              <input id="sync-password" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" />
+            </label>
+            <div class="fp-set-actions">
+              <button id="sync-register" class="btn-plain" type="button">注册</button>
+              <button id="sync-login" class="btn-plain" type="button">登录</button>
+            </div>
+          </div>
+          <div id="sync-account" class="sync-account">
+            <span id="sync-account-name">账号：</span>
+            <span class="sync-account-actions">
+              <button id="sync-now" class="sync-now-btn" type="button">同步</button>
+              <button id="sync-logout" class="sync-logout-btn" type="button">退出登录</button>
+            </span>
+          </div>
+          <div class="account-settings-space"></div>
+          <div id="sync-status" class="sync-status">尚未同步</div>
+        </div>
+      </div>
+
+      <div id="title-drag-space" class="title-drag-space" data-tauri-drag-region></div>
       <div id="del-group" class="del-group">
         <button id="cover-btn" class="btn-plain">🖼 更换封面</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
@@ -21,12 +60,12 @@
           </svg>
         </button>
         <div class="sbox">
-          <input id="search-input" class="search-input" type="text" autocomplete="off" placeholder="搜索 书名 / 作者 / 简介" />
-          <button id="search-clear" class="search-clear" type="button" title="清空搜索" aria-label="清空搜索">×</button>
+          <input id="search-input" class="search-input" type="text" autocomplete="off" tabindex="-1" placeholder="搜索 书名 / 作者 / 简介" />
+          <button id="search-clear" class="search-clear" type="button" tabindex="-1" title="清空搜索" aria-label="清空搜索">×</button>
           <div id="search-history" class="search-history"></div>
         </div>
         <label class="shelf-toggle" id="shelf-toggle" title="全书架正文检索">
-          <input type="checkbox" id="shelf-search-chk" />
+          <input type="checkbox" id="shelf-search-chk" tabindex="-1" />
         </label>
       </div>
       <div class="filter-wrap">
@@ -78,43 +117,6 @@
         </div>
       </div>
       <div class="menu-wrap">
-        <div class="account-wrap">
-          <button id="account-btn" class="avatar-btn" title="账号与同步" aria-label="账号与同步">
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <circle cx="12" cy="8" r="4" fill="currentColor" />
-              <path d="M4.5 20c1.2-4 4-6 7.5-6s6.3 2 7.5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-            </svg>
-          </button>
-          <div id="account-panel" class="account-panel">
-            <div id="sync-form" class="sync-form">
-              <div class="fp-title">同步</div>
-              <label class="sync-field">
-                <span>账号</span>
-                <span class="account-input-wrap">
-                  <input id="sync-username" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" />
-                  <div id="saved-accounts" class="saved-accounts"></div>
-                </span>
-              </label>
-              <label class="sync-field">
-                <span>密码</span>
-                <input id="sync-password" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" />
-              </label>
-              <div class="fp-set-actions">
-                <button id="sync-register" class="btn-plain" type="button">注册</button>
-                <button id="sync-login" class="btn-plain" type="button">登录</button>
-              </div>
-            </div>
-            <div id="sync-account" class="sync-account">
-              <span id="sync-account-name">账号：</span>
-              <span class="sync-account-actions">
-                <button id="sync-now" class="sync-now-btn" type="button">同步</button>
-                <button id="sync-logout" class="sync-logout-btn" type="button">退出登录</button>
-              </span>
-            </div>
-            <div class="account-settings-space"></div>
-            <div id="sync-status" class="sync-status">尚未同步</div>
-          </div>
-        </div>
         <button id="stats-toolbar-btn" class="icon-btn" title="阅读统计" aria-label="阅读统计">
           <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
             <path d="M5 20V10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
@@ -130,6 +132,11 @@
           <div class="menu-item" id="mi-selectall">☑ 全选（批量删除）</div>
           <div class="menu-item" id="mi-about">ℹ️ 关于</div>
         </div>
+      </div>
+      <div class="window-controls" aria-label="窗口控制">
+        <button id="win-min" class="win-btn" type="button" title="最小化" aria-label="最小化">−</button>
+        <button id="win-max" class="win-btn" type="button" title="最大化" aria-label="最大化">□</button>
+        <button id="win-close" class="win-btn close" type="button" title="关闭" aria-label="关闭">×</button>
       </div>
     </header>
     <div id="update-bar" class="update-bar">
@@ -228,12 +235,28 @@
       </div>
     </div>
     <div id="drop-hint" class="drop-hint">松开即可导入书籍</div>
-    <div class="content">
-      <main id="shelf" class="shelf"></main>
-      <div id="empty" class="empty"></div>
+    <div class="content-shell">
+      <div class="content" tabindex="-1">
+        <main id="shelf" class="shelf"></main>
+        <div id="empty" class="empty"></div>
+      </div>
+      <div id="shelf-scrollbar" class="shelf-scrollbar" aria-hidden="true">
+        <div id="shelf-scrollbar-thumb" class="shelf-scrollbar-thumb"></div>
+      </div>
     </div>
+    <script src="startup-perf.js"></script>
+    <script src="titlebar.js"></script>
     <script src="app.js"></script>
+    <script src="sync-ui.js"></script>
+    <script src="shelf-ui.js"></script>
+    <script src="search-ui.js"></script>
+    <script src="stats-ui.js"></script>
   </body>
 </html>
+
+
+
+
+
 
 

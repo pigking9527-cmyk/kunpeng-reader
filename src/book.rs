@@ -254,18 +254,22 @@ pub struct Library {
 impl Library {
     /// 添加一本书。已存在（同路径或同内容指纹）则不重复添加；
     /// 指纹相同但路径变了（同一本书被移动后重新导入）→ 更新路径，保留进度/书签/高亮。
-    pub fn add(&mut self, path: PathBuf) -> bool {
-        if self.books.iter().any(|b| b.path == path) {
+    /// 插入锁外已解析好的书籍。调用方可先在锁外做 Book::prepare，锁内只做去重/重定位。
+    pub fn add_prepared(&mut self, book: Book) -> bool {
+        if self.books.iter().any(|b| b.path == book.path) {
             return false;
         }
-        let fp = compute_fingerprint(&path);
-        if fp != 0 {
-            if let Some(b) = self.books.iter_mut().find(|b| b.fingerprint == fp) {
-                b.path = path; // 同一本书换了位置 → 重定位，其它数据不动
+        if book.fingerprint != 0 {
+            if let Some(existing) = self
+                .books
+                .iter_mut()
+                .find(|b| b.fingerprint == book.fingerprint)
+            {
+                existing.path = book.path;
                 return true;
             }
         }
-        self.books.push(Book::prepare(path));
+        self.books.push(book);
         true
     }
 
@@ -674,4 +678,227 @@ pub fn normalize_text(s: &str) -> String {
         }
     }
     out.trim().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_fingerprint, Book, Highlight, Library};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("kunpeng-reader-test-{name}-{stamp}"));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn file(&self, name: &str, content: &str) -> PathBuf {
+            let path = self.path.join(name);
+            fs::write(&path, content).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn path_str(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn add_same_path_only_once() {
+        let dir = TempDir::new("same-path");
+        let book = dir.file("same.txt", "第一章\n正文");
+        let mut lib = Library::default();
+
+        assert!(lib.add_prepared(Book::prepare(book.clone())));
+        assert!(!lib.add_prepared(Book::prepare(book.clone())));
+        assert_eq!(lib.books.len(), 1);
+        assert_eq!(path_str(&lib.books[0].path), path_str(&book));
+    }
+
+    #[test]
+    fn add_same_fingerprint_relocates_existing_book_and_keeps_progress() {
+        let dir = TempDir::new("same-fingerprint");
+        let old_path = dir.file("old.txt", "同一本书内容\n第二行");
+        let new_path = dir.file("new.txt", "同一本书内容\n第二行");
+        let mut lib = Library::default();
+
+        assert!(lib.add_prepared(Book::prepare(old_path.clone())));
+        lib.books[0].progress = 42.0;
+        lib.books[0].resume_chapter = 3;
+        let original_id = lib.books[0].id;
+        let original_fp = lib.books[0].fingerprint;
+
+        assert!(lib.add_prepared(Book::prepare(new_path.clone())));
+        assert_eq!(lib.books.len(), 1);
+        assert_eq!(lib.books[0].id, original_id);
+        assert_eq!(lib.books[0].fingerprint, original_fp);
+        assert_eq!(lib.books[0].progress, 42.0);
+        assert_eq!(lib.books[0].resume_chapter, 3);
+        assert_eq!(path_str(&lib.books[0].path), path_str(&new_path));
+    }
+
+    #[test]
+    fn add_different_content_creates_new_book() {
+        let dir = TempDir::new("different-content");
+        let first = dir.file("first.txt", "第一本书");
+        let second = dir.file("second.txt", "第二本书");
+        let mut lib = Library::default();
+
+        assert!(lib.add_prepared(Book::prepare(first)));
+        assert!(lib.add_prepared(Book::prepare(second)));
+        assert_eq!(lib.books.len(), 2);
+        assert_ne!(lib.books[0].fingerprint, lib.books[1].fingerprint);
+    }
+
+    #[test]
+    fn relocate_updates_path_and_nonzero_fingerprint() {
+        let dir = TempDir::new("relocate");
+        let old_path = dir.file("old.txt", "旧内容");
+        let new_path = dir.file("new.txt", "新内容更多一点");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(old_path)));
+        let id = lib.books[0].id;
+        let expected_fp = compute_fingerprint(&new_path);
+
+        assert!(lib.relocate(id, new_path.clone()));
+        assert_eq!(path_str(&lib.books[0].path), path_str(&new_path));
+        assert_eq!(lib.books[0].fingerprint, expected_fp);
+        assert_ne!(lib.books[0].fingerprint, 0);
+    }
+
+    #[test]
+    fn set_position_ignores_tiny_progress_and_fraction_jitter() {
+        let dir = TempDir::new("position-jitter");
+        let path = dir.file("book.txt", "正文");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(path)));
+        let id = lib.books[0].id;
+
+        assert!(lib.set_position(id, 10.0, 2, 0.50));
+        assert!(!lib.set_position(id, 10.03, 2, 0.51));
+        assert_eq!(lib.books[0].progress, 10.03);
+        assert_eq!(lib.books[0].resume_chapter, 2);
+        assert!((lib.books[0].resume_frac - 0.51).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn set_position_reports_meaningful_progress_and_chapter_changes() {
+        let dir = TempDir::new("position-changed");
+        let path = dir.file("book.txt", "正文");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(path)));
+        let id = lib.books[0].id;
+
+        assert!(lib.set_position(id, 1.0, 1, 0.10));
+        assert!(lib.set_position(id, 1.06, 1, 0.10));
+        assert!(lib.set_position(id, 1.06, 2, 0.10));
+        assert!(lib.set_position(id, 1.06, 2, 0.13));
+        assert_eq!(lib.books[0].resume_chapter, 2);
+        assert!((lib.books[0].resume_frac - 0.13).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn set_position_marks_finished_only_once() {
+        let dir = TempDir::new("position-finished");
+        let path = dir.file("book.txt", "正文");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(path)));
+        let id = lib.books[0].id;
+
+        assert!(lib.set_position(id, 99.0, 9, 0.90));
+        let first_finished_at = lib.books[0].finished_at;
+        assert!(first_finished_at > 0);
+        lib.books[0].finished_at = 12345;
+        assert!(lib.set_position(id, 100.0, 9, 1.0));
+        assert_eq!(lib.books[0].finished_at, 12345);
+    }
+
+    #[test]
+    fn description_and_rating_update_reader_metadata() {
+        let dir = TempDir::new("reader-metadata");
+        let path = dir.file("book.txt", "正文");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(path)));
+        let id = lib.books[0].id;
+
+        lib.set_description(id, "新的简介".to_string());
+        lib.set_rating(id, 7.5);
+        assert_eq!(lib.books[0].description, "新的简介");
+        assert_eq!(lib.books[0].rating, 5.0);
+
+        lib.set_rating(id, -2.0);
+        assert_eq!(lib.books[0].rating, 0.0);
+    }
+
+    #[test]
+    fn bookmarks_can_be_added_removed_and_ignore_out_of_range() {
+        let dir = TempDir::new("bookmarks");
+        let path = dir.file("book.txt", "正文");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(path)));
+        let id = lib.books[0].id;
+
+        lib.add_bookmark(id, 3, 0.25, "第三章".to_string());
+        lib.add_bookmark(id, 4, 0.50, "第四章".to_string());
+        assert_eq!(lib.bookmarks(id).len(), 2);
+        assert_eq!(lib.bookmarks(id)[0].label, "第三章");
+
+        lib.remove_bookmark(id, 99);
+        assert_eq!(lib.bookmarks(id).len(), 2);
+        lib.remove_bookmark(id, 0);
+        let remaining = lib.bookmarks(id);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].chapter, 4);
+    }
+
+    #[test]
+    fn highlights_can_be_added_noted_removed_and_ignore_out_of_range() {
+        let dir = TempDir::new("highlights");
+        let path = dir.file("book.txt", "正文");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(path)));
+        let id = lib.books[0].id;
+
+        lib.add_highlight(
+            id,
+            Highlight {
+                chapter: 2,
+                start: 10,
+                end: 14,
+                text: "高亮".to_string(),
+                context: "上下文".to_string(),
+                rects: String::new(),
+                color: "#ffee88".to_string(),
+                note: String::new(),
+                created_at: 1,
+            },
+        );
+        assert_eq!(lib.highlights(id).len(), 1);
+        assert_eq!(lib.highlights(id)[0].text, "高亮");
+
+        lib.set_highlight_note(id, 0, "批注".to_string());
+        lib.set_highlight_note(id, 9, "越界".to_string());
+        assert_eq!(lib.highlights(id)[0].note, "批注");
+
+        lib.remove_highlight(id, 9);
+        assert_eq!(lib.highlights(id).len(), 1);
+        lib.remove_highlight(id, 0);
+        assert!(lib.highlights(id).is_empty());
+    }
 }

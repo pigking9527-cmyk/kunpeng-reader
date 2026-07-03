@@ -1,0 +1,113 @@
+// 阅读设置状态与设置面板绑定
+// 先于 reader.js 加载：提供 settings/applyShellTheme/initSettingsUI 给阅读页启动逻辑使用。
+
+const DEFAULTS = {
+  theme: "light",
+  fontFamily: "",
+  fontSize: 18,
+  lineHeight: 1.7,
+  paraSpacing: 0.6,
+  letterSpacing: 0,
+  marginTop: 18,
+  marginBottom: 24,
+  marginLeft: 28,
+  marginRight: 28,
+  ttsSource: "edge",
+  ttsVoice: "zh-CN-XiaoxiaoNeural",
+  ttsRate: 1,
+};
+
+// 外壳（工具栏/目录/设置）的深色应用
+function applyShellTheme(theme) {
+  document.body.classList.toggle("theme-dark", theme === "dark");
+}
+
+function loadSettings() {
+  try {
+    return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem("readerSettings") || "{}"));
+  } catch (e) {
+    return Object.assign({}, DEFAULTS);
+  }
+}
+let settings = loadSettings();
+
+function saveSettings() {
+  localStorage.setItem("readerSettings", JSON.stringify(settings));
+}
+// 把设置发给合并页（实时注入样式）
+function pushSettings() {
+  if (frame.contentWindow) frame.contentWindow.postMessage({ settings }, "*");
+}
+function onChange() {
+  saveSettings();
+  pushSettings();
+}
+
+function bindRange(id, vid, key, fmt) {
+  const el = document.getElementById(id);
+  const vEl = document.getElementById(vid);
+  el.value = settings[key];
+  vEl.textContent = fmt(settings[key]);
+  el.addEventListener("input", () => {
+    settings[key] = parseFloat(el.value);
+    vEl.textContent = fmt(settings[key]);
+    onChange();
+  });
+}
+function bindNum(id, key) {
+  const el = document.getElementById(id);
+  const lo = el.min !== "" ? parseInt(el.min, 10) : 0;
+  const hi = el.max !== "" ? parseInt(el.max, 10) : 9999;
+  const clamp = (v) => Math.max(lo, Math.min(hi, isNaN(v) ? 0 : v));
+  el.value = clamp(parseInt(settings[key], 10));
+  el.addEventListener("input", () => {
+    settings[key] = clamp(parseInt(el.value, 10)); // 用于排版的值始终夹紧（负边距会让页面变形）
+    onChange();
+  });
+  el.addEventListener("change", () => {
+    el.value = clamp(parseInt(el.value, 10)); // 失焦时把输入框也纠正回合法范围
+  });
+}
+
+function initSettingsUI() {
+  // 主题按钮
+  function refreshThemeBtns() {
+    document
+      .querySelectorAll(".theme-btn")
+      .forEach((b) => b.classList.toggle("active", b.dataset.theme === settings.theme));
+  }
+  document.querySelectorAll(".theme-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      settings.theme = b.dataset.theme;
+      refreshThemeBtns();
+      applyShellTheme(settings.theme);
+      onChange();
+    });
+  });
+  refreshThemeBtns();
+
+  const font = document.getElementById("set-font");
+  font.value = settings.fontFamily;
+  font.addEventListener("change", () => {
+    settings.fontFamily = font.value;
+    onChange();
+  });
+  bindRange("set-size", "v-size", "fontSize", (v) => v + "px");
+  bindRange("set-line", "v-line", "lineHeight", (v) => v.toFixed(1));
+  bindRange("set-para", "v-para", "paraSpacing", (v) => v.toFixed(1) + "em");
+  bindRange("set-letter", "v-letter", "letterSpacing", (v) => v + "px");
+  bindNum("set-mt", "marginTop");
+  bindNum("set-mb", "marginBottom");
+  bindNum("set-ml", "marginLeft");
+  bindNum("set-mr", "marginRight");
+  // 朗读设置
+  const bindSel = (id, key) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = settings[key];
+    el.addEventListener("change", () => { settings[key] = el.value; onChange(); });
+  };
+  bindSel("set-ttssrc", "ttsSource");
+  bindSel("set-ttsvoice", "ttsVoice");
+  bindRange("set-ttsrate", "v-ttsrate", "ttsRate", (v) => v.toFixed(1) + "×");
+}

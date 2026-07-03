@@ -99,11 +99,47 @@ body {
 }
 
 /* 内容滚动区：唯一会滚动的部分，工具栏因此永远不被卷走 */
-.content {
+.content-shell {
   flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.content {
+  width: 100%;
+  height: 100%;
   overflow-y: auto;
   min-height: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+.content::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.content:focus { outline: none; }
+.shelf-scrollbar {
+  position: absolute;
+  top: 6px;
+  right: 3px;
+  bottom: 6px;
+  width: 12px;
+  z-index: 10;
+  display: none;
+  touch-action: none;
+  user-select: none;
+}
+.shelf-scrollbar.show { display: block; }
+.shelf-scrollbar-thumb {
+  position: absolute;
+  left: 2px;
+  top: 0;
+  width: 8px;
+  min-height: 28px;
+  border-radius: 999px;
+  background: rgba(120, 124, 132, 0.58);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.22);
+  cursor: default;
+}
+.shelf-scrollbar:hover .shelf-scrollbar-thumb,
+.shelf-scrollbar.dragging .shelf-scrollbar-thumb { background: rgba(88, 92, 100, 0.76); }
 
 /* 顶栏：固定高度的 flex 项，不参与滚动，始终可见 */
 .toolbar {
@@ -227,7 +263,8 @@ body {
 .shelf-toggle { display: inline-flex; align-items: center; justify-content: center;
   font-size: 0; color: #555; white-space: nowrap; cursor: pointer; user-select: none;
   max-width: 0; margin-left: 0; opacity: 0; overflow: hidden;
-  transition: max-width 0.25s ease, margin-left 0.25s ease, opacity 0.2s ease; }
+  transition: max-width 0.25s ease, margin-left 0.25s ease, opacity 0.2s ease;
+}
 .search-wrap.open .shelf-toggle { max-width: 44px; margin-left: 8px; opacity: 1; }
 .shelf-toggle input {
   appearance: none; -webkit-appearance: none;
@@ -687,5 +724,37 @@ body {
   .stat-cell .v { font-size: 13px; white-space: nowrap; }
   .stat-chart { margin: 2px 0 8px; }
 }
+
+
+
+/* 自定义主窗口标题栏：主窗口关闭系统标题栏后，由工具栏承担拖动和窗口控制 */
+.toolbar { padding-right: 6px; }
+.title-drag-space {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 96px;
+  cursor: default;
+}
+.window-controls {
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  margin-left: 6px;
+}
+.win-btn {
+  width: 40px;
+  height: 36px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #333;
+  font: 21px/1 "Segoe UI", system-ui, sans-serif;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.win-btn:hover { background: #edf1f7; }
+.win-btn.close:hover { background: #e81123; color: #fff; }
 
 

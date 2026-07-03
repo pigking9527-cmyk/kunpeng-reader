@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"默认权限：允许窗口调用核心 API 与自定义命令","local":true,"windows":["*"],"permissions":["core:default","dialog:default"]}}
+{"default":{"identifier":"default","description":"默认权限：允许窗口调用核心 API、自定义命令、窗口拖动与窗口控制","local":true,"windows":["*"],"permissions":["core:default","core:window:allow-start-dragging","core:window:allow-minimize","core:window:allow-maximize","core:window:allow-unmaximize","core:window:allow-toggle-maximize","core:window:allow-close","dialog:default"]}}

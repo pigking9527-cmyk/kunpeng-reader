@@ -1,3 +1,4 @@
+use crate::sync_core::{decide_sync_merge, MergeDecision, SyncMeta};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -224,6 +225,68 @@ impl AppDb {
         }))
     }
 
+    fn existing_sync_meta(&self, kind: &str, id: &str) -> Result<Option<SyncMeta>, String> {
+        self.conn
+            .query_row(
+                "SELECT updated_at, deleted_at, sync_version FROM entities WHERE kind=? AND id=?",
+                params![kind, id],
+                |r| {
+                    Ok(SyncMeta {
+                        updated_at: r.get(0)?,
+                        deleted_at: r.get(1)?,
+                        sync_version: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    fn upsert_incoming_entity(
+        &self,
+        kind: &str,
+        id: &str,
+        json_text: &str,
+        updated_at: i64,
+        deleted_at: i64,
+        device_id: &str,
+        sync_version: i64,
+    ) -> Result<bool, String> {
+        let incoming = SyncMeta {
+            updated_at,
+            deleted_at,
+            sync_version,
+        };
+        let existing = self.existing_sync_meta(kind, id)?;
+        if decide_sync_merge(existing, incoming) == MergeDecision::KeepExisting {
+            return Ok(false);
+        }
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO entities(kind,id,json,updated_at,deleted_at,device_id,sync_version)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(kind,id) DO UPDATE SET
+                    json=excluded.json,
+                    updated_at=excluded.updated_at,
+                    deleted_at=excluded.deleted_at,
+                    device_id=excluded.device_id,
+                    sync_version=excluded.sync_version
+                "#,
+                params![
+                    kind,
+                    id,
+                    json_text,
+                    updated_at,
+                    deleted_at,
+                    device_id,
+                    sync_version
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
     pub fn import_package(&self, value: &Value) -> Result<u32, String> {
         let Some(items) = value.get("entities").and_then(|v| v.as_array()) else {
             return Err("数据包缺少 entities".into());
@@ -254,26 +317,20 @@ impl AppDb {
                 .and_then(|v| v.as_i64())
                 .unwrap_or(1);
             let txt = serde_json::to_string(&data).map_err(|e| e.to_string())?;
-            self.conn
-                .execute(
-                    r#"
-                    INSERT INTO entities(kind,id,json,updated_at,deleted_at,device_id,sync_version)
-                    VALUES(?,?,?,?,?,?,?)
-                    ON CONFLICT(kind,id) DO UPDATE SET
-                        json=CASE WHEN excluded.updated_at >= entities.updated_at THEN excluded.json ELSE entities.json END,
-                        updated_at=MAX(entities.updated_at, excluded.updated_at),
-                        deleted_at=CASE WHEN excluded.updated_at >= entities.updated_at THEN excluded.deleted_at ELSE entities.deleted_at END,
-                        device_id=CASE WHEN excluded.updated_at >= entities.updated_at THEN excluded.device_id ELSE entities.device_id END,
-                        sync_version=MAX(entities.sync_version, excluded.sync_version)
-                    "#,
-                    params![kind, id, txt, updated_at, deleted_at, device_id, sync_version],
-                )
-                .map_err(|e| e.to_string())?;
-            count += 1;
+            if self.upsert_incoming_entity(
+                kind,
+                id,
+                &txt,
+                updated_at,
+                deleted_at,
+                device_id,
+                sync_version,
+            )? {
+                count += 1;
+            }
         }
         Ok(count)
     }
-
     pub fn all_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
         let mut stmt = self
             .conn
@@ -305,43 +362,20 @@ impl AppDb {
         let mut count = 0u32;
         for item in items {
             let txt = serde_json::to_string(&item.json).map_err(|e| e.to_string())?;
-            self.conn
-                .execute(
-                    r#"
-                    INSERT INTO entities(kind,id,json,updated_at,deleted_at,device_id,sync_version)
-                    VALUES(?,?,?,?,?,?,?)
-                    ON CONFLICT(kind,id) DO UPDATE SET
-                        json=CASE
-                          WHEN excluded.updated_at > entities.updated_at
-                            OR (excluded.updated_at = entities.updated_at AND excluded.sync_version >= entities.sync_version)
-                          THEN excluded.json ELSE entities.json END,
-                        updated_at=MAX(entities.updated_at, excluded.updated_at),
-                        deleted_at=CASE
-                          WHEN excluded.updated_at > entities.updated_at
-                            OR (excluded.updated_at = entities.updated_at AND excluded.sync_version >= entities.sync_version)
-                          THEN excluded.deleted_at ELSE entities.deleted_at END,
-                        device_id=CASE
-                          WHEN excluded.updated_at > entities.updated_at
-                            OR (excluded.updated_at = entities.updated_at AND excluded.sync_version >= entities.sync_version)
-                          THEN excluded.device_id ELSE entities.device_id END,
-                        sync_version=MAX(entities.sync_version, excluded.sync_version)
-                    "#,
-                    params![
-                        item.kind,
-                        item.id,
-                        txt,
-                        item.updated_at,
-                        item.deleted_at,
-                        item.device_id,
-                        item.sync_version
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-            count += 1;
+            if self.upsert_incoming_entity(
+                &item.kind,
+                &item.id,
+                &txt,
+                item.updated_at,
+                item.deleted_at,
+                &item.device_id,
+                item.sync_version,
+            )? {
+                count += 1;
+            }
         }
         Ok(count)
     }
-
     pub fn has_keyword_index_for_book(&self, book_id: u64) -> bool {
         self.conn
             .query_row(
