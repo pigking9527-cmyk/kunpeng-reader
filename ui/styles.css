@@ -557,6 +557,64 @@ body {
 .notes-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; padding-right: 4px; }
 .note-book { border-top: 1px solid #edf0f4; padding: 12px 0; }
 .note-book:first-child { border-top: none; }
+
+/* 隐藏调试设置页 */
+.debug-card {
+  width: min(920px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+}
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.debug-section {
+  border: 1px solid #eef0f4;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfcff;
+}
+.debug-section h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+.debug-wide { grid-column: 1 / -1; }
+.debug-toggles { display: grid; gap: 8px; }
+.debug-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  color: #333;
+  font-size: 13px;
+}
+.debug-note {
+  margin: 0 0 10px;
+  color: #777;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.debug-perf {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: #555;
+  max-height: 230px;
+  overflow: auto;
+}
+.debug-perf-row {
+  display: grid;
+  grid-template-columns: 72px 1fr 54px;
+  gap: 8px;
+  align-items: baseline;
+  border-bottom: 1px solid #eef0f4;
+  padding-bottom: 5px;
+}
+.debug-perf-row .muted { color: #999; }
+@media (max-width: 760px) {
+  .debug-grid { grid-template-columns: 1fr; }
+}
 .note-book h3 { margin: 0 0 8px; font-size: 16px; color: #20242a; }
 .note-sec { margin-top: 10px; }
 .note-sec h4 { margin: 0 0 6px; color: #767b83; font-size: 13px; font-weight: 600; }

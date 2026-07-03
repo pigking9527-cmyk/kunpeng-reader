@@ -19,10 +19,14 @@ let pdf = null, total = 0, scale = 1.3, divs = [], baseW = 600, baseH = 800, cur
 let nativeW = 600, nativeH = 800, dualMode = false; // 页面原生尺寸(scale=1) + 双页模式
 let HLD = []; // 高亮列表（外壳传来）
 let pageText = {}; // 每页文字缓存
+let pageTextChars = {}; // 每页可统计文字数；扫描页通常为 0
 let searchTerm = "", searchMatches = [], searchIdx = 0;
 let overlayOpen = false; // 外壳里搜索框/设置面板是否打开
 let hlMenu = null, activeHi = -1;
 
+function countReadablePdfChars(text) {
+  return (text || "").replace(/\s+/g, "").length;
+}
 async function getPageText(i) {
   if (pageText[i] != null) return pageText[i];
   try {
@@ -30,6 +34,7 @@ async function getPageText(i) {
     const tc = await page.getTextContent();
     pageText[i] = tc.items.map((it) => it.str).join("");
   } catch (e) { pageText[i] = ""; }
+  pageTextChars[i] = countReadablePdfChars(pageText[i]);
   return pageText[i];
 }
 
@@ -208,6 +213,9 @@ async function renderPage(i) {
     tl.style.height = vp.height + "px";
     d.appendChild(tl);
     const tc = await page.getTextContent();
+    const text = tc.items.map((it) => it.str).join("");
+    pageText[i] = text;
+    pageTextChars[i] = countReadablePdfChars(text);
     const layer = new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport: vp });
     await layer.render();
   } catch (err) {}
@@ -227,10 +235,15 @@ function pageAtTop() {
 }
 function report() {
   const prog = total > 1 ? ((curPage - 1) / (total - 1)) * 100 : 100;
+  const pageNo = curPage;
+  const pageChars = pageTextChars[pageNo] || 0;
   parent.postMessage(
-    { progress: prog, chapter: curPage - 1, chFrac: 0, totalCh: total, page: curPage, total: total, gPage: curPage, gTotal: total, isPdf: 1 },
+    { progress: prog, chapter: pageNo - 1, chFrac: 0, totalCh: total, page: pageNo, total: total, gPage: pageNo, gTotal: total, isPdf: 1, pageChars },
     "*"
   );
+  if (pageTextChars[pageNo] == null) {
+    getPageText(pageNo).then(() => { if (curPage === pageNo) report(); }).catch(() => {});
+  }
   reportPdfState(); // 持续同步缩放/双页，保证关闭前一定保存过（不只在手动缩放时）
 }
 // 翻页目标页：单页 = ±1；双页 = 整对(行)前后移 2，对齐到行首(奇数页)，

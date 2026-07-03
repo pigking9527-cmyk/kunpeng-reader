@@ -81,9 +81,17 @@ function refreshWordPackStatus() {
 function ensureWordPackPolling() {
   if (wordPackPoll) return;
   wordPackPoll = setInterval(() => {
-    if (!wordAudioDiskCache) return;
+    if (!wordAudioDiskCache || !vocabSettings.classList.contains("show")) {
+      clearInterval(wordPackPoll);
+      wordPackPoll = null;
+      return;
+    }
     refreshWordPackStatus().then((status) => {
-      if (!status.running) refreshWordAudioCacheSize();
+      if (!status.running) {
+        refreshWordAudioCacheSize();
+        clearInterval(wordPackPoll);
+        wordPackPoll = null;
+      }
     });
   }, 2000);
 }
@@ -150,15 +158,12 @@ function applyVocabSettings() {
   vocabEl.classList.toggle("hide-count", !vocabShowCount);
   vocabSortTime.classList.toggle("active", vocabSort === "time");
   vocabSortCount.classList.toggle("active", vocabSort === "count");
-  if (wordAudioDiskCache) {
-    ensureWordPackPolling();
-    refreshWordAudioCacheSize();
-    refreshWordPackStatus();
-  } else {
+  if (!wordAudioDiskCache) {
     renderWordPackState();
   }
 }
 function setVocab(open) {
+  if (open) window.pauseReadTracking?.("vocab");
   vocabEl.classList.toggle("show", open);
   backdropEl.classList.toggle("show", open);
   if (!open) vocabSettings.classList.remove("show");
@@ -264,6 +269,12 @@ document.getElementById("vtab-en").addEventListener("click", () => setVocabTab("
 vocabGear.addEventListener("click", (e) => {
   e.stopPropagation();
   vocabSettings.classList.toggle("show");
+  if (vocabSettings.classList.contains("show") && wordAudioDiskCache) {
+    refreshWordAudioCacheSize();
+    refreshWordPackStatus().then((status) => {
+      if (status.running) ensureWordPackPolling();
+    });
+  }
 });
 vocabSettings.addEventListener("click", (e) => e.stopPropagation());
 vocabEl.addEventListener("click", (e) => {

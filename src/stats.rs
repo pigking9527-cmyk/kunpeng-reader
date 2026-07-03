@@ -5,6 +5,12 @@ use crate::stats_core::{
 };
 use crate::{reader_window_id, AppState};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+use tauri::Manager;
+
+static READING_STATS_SAVE_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static READING_STATS_SAVE_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 fn unix_to_local_day(secs: u64) -> u32 {
     use chrono::{Datelike, Local, TimeZone};
@@ -121,6 +127,47 @@ impl StatsStore {
     }
 }
 
+fn schedule_reading_stats_save(app: tauri::AppHandle) {
+    READING_STATS_SAVE_EPOCH.fetch_add(1, Ordering::AcqRel);
+    if READING_STATS_SAVE_SCHEDULED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        loop {
+            let before_wait = READING_STATS_SAVE_EPOCH.load(Ordering::Acquire);
+            std::thread::sleep(Duration::from_secs(5));
+            if app
+                .webview_windows()
+                .keys()
+                .any(|label| label.starts_with("reader-"))
+            {
+                std::thread::sleep(Duration::from_secs(25));
+                continue;
+            }
+            {
+                let state = app.state::<AppState>();
+                state.library.lock().unwrap().save();
+                state.stats.lock().unwrap().save();
+            }
+            let after_save = READING_STATS_SAVE_EPOCH.load(Ordering::Acquire);
+            READING_STATS_SAVE_SCHEDULED.store(false, Ordering::Release);
+            if after_save == before_wait {
+                break;
+            }
+            if READING_STATS_SAVE_SCHEDULED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+}
+
 /// 按本地日期区间 [from,to]（yyyymmdd）聚合阅读统计。日/月/年/总都用它，前端算好区间即可。
 #[tauri::command]
 pub(crate) fn reading_stats_range(state: tauri::State<AppState>, from: u32, to: u32) -> StatsRange {
@@ -148,11 +195,9 @@ pub(crate) async fn add_reading_time(
             if let Some(b) = lib.books.iter_mut().find(|b| b.id == id) {
                 b.reading_seconds += seconds;
             }
-            lib.save();
         }
-        let mut st = state.stats.lock().unwrap();
-        st.add(id, seconds as u32, 0); // 累进当前小时桶
-        st.save(); // 15 秒一次，文件很小
+        state.stats.lock().unwrap().add(id, seconds as u32, 0); // 累进当前小时桶
+        schedule_reading_stats_save(window.app_handle().clone());
     }
     Ok(())
 }
@@ -173,9 +218,9 @@ pub(crate) async fn add_read_words(
             if let Some(b) = lib.books.iter_mut().find(|b| b.id == id) {
                 b.words_read += words;
             }
-            lib.save();
         }
-        state.stats.lock().unwrap().add(id, 0, words as u32); // 累进字数（落盘交给 15s 的 add_reading_time）
+        state.stats.lock().unwrap().add(id, 0, words as u32);
+        schedule_reading_stats_save(window.app_handle().clone());
     }
     Ok(())
 }

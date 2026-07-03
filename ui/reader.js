@@ -2,15 +2,44 @@
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 let currentBookTitle = "";
+let currentBookId = "";
+window.currentBookId = "";
 window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
+function readerDebugSettingOn(key) {
+  try {
+    const settings = JSON.parse(localStorage.getItem("debugSettingsV1") || "{}");
+    return settings[key] !== false;
+  } catch (e) {
+    return true;
+  }
+}
+const DIAG_DISABLE_READER_REPORTS = !readerDebugSettingOn("reader_stats_report");
+let windowDraggingUntil = 0;
+let windowDragReleaseTimer = null;
+function markWindowDragging() {
+  // Tauri 的原生拖窗过程不总能把 move/up 事件稳定回传给 WebView。
+  // 给一个较长保护窗，松手事件回来时再缩短，避免拖动数秒后后台写盘插入造成卡顿。
+  windowDraggingUntil = Date.now() + 20000;
+  if (typeof sendToPage === "function") sendToPage({ windowDragging: 1 });
+  if (windowDragReleaseTimer) clearTimeout(windowDragReleaseTimer);
+  windowDragReleaseTimer = setTimeout(() => {
+    if (!isWindowDragging() && typeof sendToPage === "function") sendToPage({ windowDragging: 0 });
+  }, 20500);
+}
+function isWindowDragging() {
+  return Date.now() < windowDraggingUntil;
+}
+function endWindowDraggingSoon() {
+  windowDraggingUntil = Date.now() + 500;
+  if (windowDragReleaseTimer) clearTimeout(windowDragReleaseTimer);
+  windowDragReleaseTimer = setTimeout(() => {
+    if (!isWindowDragging() && typeof sendToPage === "function") sendToPage({ windowDragging: 0 });
+  }, 650);
+}
 
 function initWindowControls() {
-  const startDrag = (e) => {
-    if (e.button !== 0) return;
-    invoke("main_window_start_dragging").catch(() => {});
-  };
-  document.querySelector(".reader-drag-space")?.addEventListener("pointerdown", startDrag);
-  document.getElementById("progress")?.addEventListener("pointerdown", startDrag);
+  document.querySelector(".reader-drag-space")?.addEventListener("pointerdown", markWindowDragging);
+  document.getElementById("progress")?.addEventListener("pointerdown", markWindowDragging);
   document.getElementById("win-min")?.addEventListener("click", (e) => {
     e.stopPropagation();
     invoke("main_window_minimize").catch(() => {});
@@ -23,9 +52,8 @@ function initWindowControls() {
     e.stopPropagation();
     invoke("main_window_close").catch(() => {});
   });
-  document.querySelector(".reader-drag-space")?.addEventListener("dblclick", () => {
-    invoke("main_window_toggle_maximize").catch(() => {});
-  });
+  window.addEventListener("pointerup", endWindowDraggingSoon);
+  window.addEventListener("mouseup", endWindowDraggingSoon);
 }
 initWindowControls();
 
@@ -72,7 +100,10 @@ ttsBtn.addEventListener("click", (e) => {
 let frameReady = false;
 let pendingJump = null;
 function doJump(j) {
-  if (!j || !j.term) return;
+  if (!j || !j.term) {
+    window.consumePendingCrossSearch?.();
+    return;
+  }
   if (frameReady) sendToPage({ gotoChapter: j.chapter || 0, search: j.term });
   else pendingJump = j;
 }
@@ -92,9 +123,19 @@ function hideLoading() {
 const settingsEl = document.getElementById("settings");
 const progressEl = document.getElementById("progress");
 function showProgressLoading() {
-  progressEl.innerHTML = '<span class="mini-spinner" aria-label="加载中"></span>';
+  if (isPdf) {
+    progressEl.innerHTML = '<span class="mini-spinner" aria-label="加载中"></span>';
+    return;
+  }
+  progressEl.innerHTML =
+    '<span class="mini-spinner" aria-label="页数加载中"></span> 第' +
+    (curVchap + 1) +
+    "/" +
+    vchapTotal +
+    "章 " +
+    curProgress.toFixed(1) +
+    "%";
 }
-showProgressLoading();
 
 let resumeChapter = 0;
 let resumeFrac = 0;
@@ -105,10 +146,16 @@ let curChFrac = 0; // 章内比例
 let curTotalCh = 1;
 let isPdf = false; // PDF.js 模式
 let lastPosSig = ""; // 阅读位置签名，用于沉浸模式翻页时自动收起工具栏
+let keepImmersiveBarUntil = 0;
+window.keepImmersiveBarAfterNav = function () {
+  keepImmersiveBarUntil = Date.now() + 1800;
+  if (immersive) document.body.classList.add("bar-show");
+};
 // 逻辑（虚拟）章节：按目录把大文件细分。vchaps 为 [{ch:spine序号, frag}]
 let vchaps = [];
 let curVchap = 0;
 let vchapTotal = 1;
+showProgressLoading();
 
 function closeSettings() {
   settingsEl.classList.remove("show");
@@ -117,14 +164,18 @@ function closeSettings() {
 // 把"搜索框/设置面板是否打开"同步给合并页：打开时正文点击只用于关闭浮层
 function syncOverlay() {
   const open = rsearch.classList.contains("show") || settingsEl.classList.contains("show");
+  if (open) pauseReadTracking("overlay");
   sendToPage({ overlayOpen: open ? 1 : 0 });
 }
 
 // 把阅读位置回传后端（节流，避免频繁写盘）
 let progTimer = null;
 function reportProgress() {
+  if (DIAG_DISABLE_READER_REPORTS) return;
+  if (isWindowDragging()) return;
   if (progTimer) clearTimeout(progTimer);
   progTimer = setTimeout(() => {
+    if (isWindowDragging()) return;
     invoke("set_progress", {
       progress: curProgress,
       chapter: curChapter,
@@ -133,43 +184,162 @@ function reportProgress() {
   }, 800);
 }
 
-// ---- 已读字数统计：只把"停留≥READ_SEC 秒、且逐页前进翻过"的页计入，避免按进度高估 ----
-const READ_SEC = 3;
-let rwPrevGP = 0,
-  rwPrevChars = 0,
-  rwPrevTime = 0,
+// ---- 已读字数统计：按可见字数、停留时间、短页和快速翻页折算，避免大窗口短停虚高 ----
+const READ_TRACK = {
+  normalCpmLimit: 1200,
+  shortPageCpmLimit: 900,
+  shortPageChars: 150,
+  tinyPageChars: 30,
+  shortMinMs: 2000,
+  shortMaxMs: 8000,
+  fastTurnRatio: 0.3,
+  fastTurnStreak: 3,
+  fastTurnCredit: 0.25,
+  idleCapMs: 2 * 60 * 1000,
+  minDwellMs: 500,
+  maxCreditedPages: 3000,
+};
+let rwSegment = null,
   rwAccum = 0,
-  rwTimer = null;
-const rwCredited = new Set();
-function flushReadWords() {
-  if (rwTimer) return;
+  rwTimer = null,
+  rwFastStreak = 0;
+const rwCreditedByPage = new Map();
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+function flushReadWords(immediate = false) {
+  if (DIAG_DISABLE_READER_REPORTS) return;
+  if (isWindowDragging() && !immediate) return;
+  if (rwTimer) {
+    clearTimeout(rwTimer);
+    rwTimer = null;
+  }
+  const flush = () => {
+    if (isWindowDragging() && !immediate) return;
+    const charsToAdd = Math.floor(rwAccum);
+    if (charsToAdd > 0) {
+      rwAccum -= charsToAdd;
+      invoke("add_read_words", { words: charsToAdd }).catch(() => {});
+    }
+  };
+  if (immediate) {
+    flush();
+    return;
+  }
   rwTimer = setTimeout(() => {
     rwTimer = null;
-    if (rwAccum > 0) {
-      invoke("add_read_words", { words: rwAccum }).catch(() => {});
-      rwAccum = 0;
-    }
+    flush();
   }, 1500);
 }
-function trackReadWords(d) {
-  if (isPdf) return; // PDF 暂不计入已读字数
-  const gp = d.gPage || 0,
-    chars = d.pageChars || 0,
-    now = Date.now();
-  if (gp === rwPrevGP) return; // 同一页的重复上报：不重置停留计时
-  // 仅"前一页停够时间 + 这次是逐页前进一页"才把前一页计入
-  if (rwPrevTime && rwPrevGP > 0 && gp === rwPrevGP + 1) {
-    if ((now - rwPrevTime) / 1000 >= READ_SEC && !rwCredited.has(rwPrevGP)) {
-      rwCredited.add(rwPrevGP);
-      rwAccum += rwPrevChars;
-      flushReadWords();
-    }
-  }
-  rwPrevGP = gp;
-  rwPrevChars = chars;
-  rwPrevTime = now;
+function hasShown(el) {
+  return !!el && el.classList && el.classList.contains("show");
 }
-
+function readTrackingBlocked() {
+  if (isWindowDragging()) return true;
+  if (!document.hasFocus() || document.hidden) return true;
+  return (
+    hasShown(window.rsearch || rsearch) ||
+    hasShown(window.settingsEl || settingsEl) ||
+    hasShown(window.tocEl || tocEl) ||
+    document.body.classList.contains("vocab-open")
+  );
+}
+function readPageKey(d) {
+  const chapter = Number.isFinite(d.chapter) ? d.chapter : curChapter || 0;
+  const gp = Number(d.gPage || 0);
+  const page = Number(d.page || 0);
+  return chapter + ":" + (gp > 0 ? "g" + gp : "p" + page);
+}
+function requiredReadMs(chars) {
+  if (chars <= 0) return 0;
+  if (chars < READ_TRACK.tinyPageChars) return 1000;
+  if (chars < READ_TRACK.shortPageChars) {
+    return clamp((chars / READ_TRACK.shortPageCpmLimit) * 60000, READ_TRACK.shortMinMs, READ_TRACK.shortMaxMs);
+  }
+  return (chars / READ_TRACK.normalCpmLimit) * 60000;
+}
+function pruneCreditedPages() {
+  while (rwCreditedByPage.size > READ_TRACK.maxCreditedPages) {
+    const first = rwCreditedByPage.keys().next().value;
+    rwCreditedByPage.delete(first);
+  }
+}
+function creditReadSegment(reason, options = {}) {
+  if (!rwSegment) return;
+  const seg = rwSegment;
+  rwSegment = null;
+  if (options.discard) return;
+  const rawDwell = Math.max(0, Date.now() - seg.startedAt);
+  const chars = Math.max(0, seg.chars || 0);
+  if (chars <= 0 || rawDwell < READ_TRACK.minDwellMs) return;
+  const required = requiredReadMs(chars);
+  if (required <= 0) return;
+  const dwellCap = Math.max(READ_TRACK.idleCapMs, required);
+  const dwell = clamp(rawDwell, 0, dwellCap);
+  const ratio = clamp(dwell / required, 0, 1);
+  if (ratio < READ_TRACK.fastTurnRatio) rwFastStreak += 1;
+  else rwFastStreak = 0;
+  const creditRatio = rwFastStreak >= READ_TRACK.fastTurnStreak ? ratio * READ_TRACK.fastTurnCredit : ratio;
+  const totalCreditForPage = Math.floor(chars * creditRatio);
+  const alreadyCredited = rwCreditedByPage.get(seg.key) || 0;
+  const delta = Math.max(0, totalCreditForPage - alreadyCredited);
+  if (delta <= 0) return;
+  rwCreditedByPage.set(seg.key, alreadyCredited + delta);
+  pruneCreditedPages();
+  rwAccum += delta;
+  if (window.__kunpengReadDebug) {
+    console.debug("read-track", {
+      key: seg.key,
+      reason,
+      chars,
+      rawDwell,
+      dwell,
+      required,
+      ratio,
+      creditRatio,
+      totalCreditForPage,
+      alreadyCredited,
+      delta,
+    });
+  }
+  flushReadWords();
+}
+function pauseReadTracking(reason) {
+  creditReadSegment(reason || "pause");
+}
+function discardReadTracking(reason) {
+  if (window.__kunpengReadDebug && rwSegment) console.debug("read-track-discard", { key: rwSegment.key, reason });
+  rwSegment = null;
+}
+function trackReadWords(d) {
+  if (!readerDebugSettingOn("reader_words_detect")) return;
+  if (readTrackingBlocked()) {
+    pauseReadTracking("blocked");
+    return;
+  }
+  const key = readPageKey(d);
+  const chars = Math.max(0, d.pageChars || 0);
+  if (!key || chars <= 0) return;
+  if (rwSegment && rwSegment.key === key) {
+    rwSegment.chars = Math.max(rwSegment.chars, chars);
+    return;
+  }
+  creditReadSegment("page_change");
+  rwSegment = { key, chars, startedAt: Date.now() };
+}
+window.addEventListener("blur", () => pauseReadTracking("blur"));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    pauseReadTracking("hidden");
+    flushReadWords(true);
+  }
+});
+window.addEventListener("beforeunload", () => {
+  pauseReadTracking("beforeunload");
+  flushReadWords(true);
+});
+window.pauseReadTracking = pauseReadTracking;
+window.discardReadTracking = discardReadTracking;
 // ---- 右侧自定义垂直滚动条（代表全书进度）----
 const vbar = document.getElementById("vbar");
 const vthumb = document.getElementById("vthumb");
@@ -356,7 +526,7 @@ window.addEventListener("message", (e) => {
     // 误判为“翻页”而把工具栏（连同打开的设置面板）一起隐藏。
     const sig = (e.data.gPage || 0) + "_" + (e.data.page || 0) + "_" + (e.data.chapter || 0);
     const panelOpen = settingsEl.classList.contains("show") || rsearch.classList.contains("show");
-    if (lastPosSig && sig !== lastPosSig && immersive && document.body.classList.contains("bar-show") && !panelOpen) {
+    if (lastPosSig && sig !== lastPosSig && immersive && document.body.classList.contains("bar-show") && !panelOpen && Date.now() > keepImmersiveBarUntil) {
       document.body.classList.remove("bar-show");
     }
     lastPosSig = sig;
@@ -436,6 +606,9 @@ window.addEventListener("message", (e) => {
   }
   if (e.data.webSearch) {
     invoke("web_search", { term: e.data.webSearch }).catch(() => {});
+  }
+  if (e.data.crossSearch) {
+    openCrossSearch(e.data.crossSearch);
   }
   if (e.data.dict !== undefined) {
     invoke("dict_lookup", { term: e.data.dict })
@@ -544,7 +717,8 @@ frame.addEventListener("load", () => {
 
 // 阅读时长统计：窗口在前台时每 15 秒累计一次
 setInterval(() => {
-  if (document.hasFocus()) invoke("add_reading_time", { seconds: 15 }).catch(() => {});
+  if (DIAG_DISABLE_READER_REPORTS) return;
+  if (document.hasFocus() && !isWindowDragging()) invoke("add_reading_time", { seconds: 15 }).catch(() => {});
 }, 15000);
 
 // 目录、书签、批注/高亮 UI 在 reader-notes-ui.js。
@@ -554,6 +728,11 @@ setInterval(() => {
   applyShellTheme(settings.theme);
   try {
     const info = await invoke("book_info");
+    currentBookId = info.id || "";
+    window.currentBookId = currentBookId;
+    window.updateCrossReturnButton?.();
+    window.consumePendingCrossSearch?.();
+    currentBookTitle = info.title || currentBookTitle || "";
     bookmarks = info.bookmarks || [];
     renderBookmarks();
     highlights = info.highlights || [];

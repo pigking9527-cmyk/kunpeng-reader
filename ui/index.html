@@ -239,6 +239,35 @@
         <div class="info-row"><span class="info-k">GitHub</span><span class="info-v"><a id="about-github" href="https://github.com/pigking9527-cmyk/kunpeng-reader" style="color:#2b6cff;text-decoration:none;cursor:pointer;">github.com/pigking9527-cmyk/kunpeng-reader</a></span></div>
       </div>
     </div>
+    <div id="debug-modal" class="modal">
+      <div class="modal-card debug-card">
+        <div class="modal-head"><span>调试设置</span><button id="debug-close" class="btn-plain">✕</button></div>
+        <div class="debug-grid">
+          <section class="debug-section">
+            <h3>后台任务开关</h3>
+            <div id="debug-bg-toggles" class="debug-toggles"></div>
+          </section>
+          <section class="debug-section">
+            <h3>阅读页开关</h3>
+            <div id="debug-reader-toggles" class="debug-toggles"></div>
+          </section>
+          <section class="debug-section">
+            <h3>性能面板</h3>
+            <div id="debug-perf" class="debug-perf"></div>
+          </section>
+          <section class="debug-section">
+            <h3>安全模式</h3>
+            <p class="debug-note">关闭后台任务，只保留书架和阅读，用于排查卡顿。</p>
+            <button id="debug-safe-mode" class="btn-plain">启用安全模式</button>
+          </section>
+          <section class="debug-section debug-wide">
+            <h3>导出诊断</h3>
+            <p id="debug-summary" class="debug-note"></p>
+            <button id="debug-export" class="btn-plain">导出诊断 JSON</button>
+          </section>
+        </div>
+      </div>
+    </div>
     <div id="drop-hint" class="drop-hint">松开即可导入书籍</div>
     <div class="content-shell">
       <div class="content" tabindex="-1">
@@ -256,6 +285,7 @@
     <script src="shelf-ui.js"></script>
     <script src="search-ui.js"></script>
     <script src="stats-ui.js"></script>
+    <script src="debug-ui.js"></script>
   </body>
 </html>
 

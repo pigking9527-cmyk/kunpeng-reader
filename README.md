@@ -3,7 +3,7 @@
 一个面向 Windows 的高性能本地电子书阅读器。**Rust + Tauri 2 + 系统 WebView2**，书架与阅读页相互独立、EPUB 原生渲染、按章虚拟化加载，大书秒开。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
-> 最新版本：**v1.8.3** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版，Win10/11 自带 WebView2）。
+> 最新版本：**v1.8.4** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版，Win10/11 自带 WebView2）。
 
 ## 特性
 
@@ -17,6 +17,7 @@
 - **沉浸模式**：隐藏工具栏、点屏幕中间唤出，切换零重排不跳页
 - **朗读（TTS）**：逐词高亮 + 自动翻页；系统语音（离线）或在线·微软神经（edge-tts，免费 Azure 级中文音色）
 - **词典 / 生词本**：划词或高亮文字可离线查词，支持**中中 / 中英 / 英中 / 英英**；查过的词自动进入生词本，可按查询时间或次数排序，并可隐藏/显示查询次数
+- **跨书搜索**：阅读页划词菜单可直接跨全书架搜索选中文字或句子，按书分组展示结果，支持折叠、分批展开和跳回来源书页
 
 **检索**
 - **书架全文检索**：逐章纯文本缓存 + 多线程 + 字节级 `memmem`，全库秒搜
@@ -62,6 +63,7 @@ cargo tauri build
 - 单文件绿色版：`target/release/ebook-reader-tauri.exe` 或桌面 `鲲鹏阅读器.exe`
 - 安装包：`target/release/bundle/nsis/`
 - v1.8.3 继续使用 ThinLTO + 多 codegen units + 增量编译，保留 `opt-level=3` 的同时加快日常迭代；同时加强模块边界、HTTPS/URL 打开安全、真实容器烟测、阅读统计交互和发布资产完整性。
+- v1.8.4 聚焦阅读页交互和调试能力：跨书搜索、划词菜单设置入口、沉浸模式切章体验、隐藏调试设置页和后台任务诊断开关。
 - 首次使用**语义检索**会自动下载约 120MB 的中文语义模型（之后离线运行）。
 - **在线朗读**（edge-tts）需联网；离线可在「设置 → 朗读」切到系统语音。
 

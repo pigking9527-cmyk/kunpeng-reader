@@ -89,6 +89,16 @@ fn emit_startup_perf(app: &tauri::AppHandle, name: &str, phase: &str, detail: im
         },
     );
 }
+fn any_reader_window_open(app: &tauri::AppHandle) -> bool {
+    app.webview_windows()
+        .keys()
+        .any(|label| label.starts_with("reader-"))
+}
+
+#[tauri::command]
+fn reader_window_open(app: tauri::AppHandle) -> bool {
+    any_reader_window_open(&app)
+}
 
 /// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
 pub(crate) struct AppState {
@@ -264,6 +274,7 @@ fn title_initial(title: &str) -> char {
 
 #[derive(Serialize)]
 struct BookInfo {
+    id: String,
     title: String,
     format: String,
     url: String,        // 要加载的页面（EPUB=整本合并页，txt=文本页）
@@ -580,7 +591,11 @@ fn ensure_reader_window(
         .unwrap_or(false);
 
     let mut builder =
-        tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("reader.html".into()))
+        tauri::WebviewWindowBuilder::new(
+            app,
+            &label,
+            tauri::WebviewUrl::App("reader.html".into()),
+        )
             .title(title)
             .decorations(false)
             .min_inner_size(420.0, 320.0);
@@ -605,23 +620,18 @@ fn ensure_reader_window(
         let _ = w.maximize();
     }
 
-    // 监听窗口移动/缩放/关闭：把几何信息持久化，供下次打开恢复
+    // 只在关闭阅读窗口时保存几何信息。
+    // Moved/Resized 在拖窗期间会高频触发；每次都跨 Rust 取位置并锁书库，会让阅读页拖动周期性卡顿。
     let app_ev = app.clone();
     let label_ev = label.clone();
     w.on_window_event(move |ev| match ev {
-        tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
-            if let Some(win) = app_ev.get_webview_window(&label_ev) {
-                let st = app_ev.state::<AppState>();
-                let mut lib = st.library.lock().unwrap();
-                update_reader_geom(&mut lib, &win);
-            }
-        }
         tauri::WindowEvent::CloseRequested { .. } => {
             if let Some(win) = app_ev.get_webview_window(&label_ev) {
                 let st = app_ev.state::<AppState>();
                 let mut lib = st.library.lock().unwrap();
                 update_reader_geom(&mut lib, &win);
                 lib.save();
+                st.stats.lock().unwrap().save();
             }
         }
         _ => {}
@@ -823,6 +833,7 @@ async fn book_info(
             (chs.len().max(1) as u32, toc)
         };
         return Ok(BookInfo {
+            id: id_num.to_string(),
             title,
             format,
             url,
@@ -865,6 +876,7 @@ async fn book_info(
         toc.len()
     ));
     Ok(BookInfo {
+        id: id_num.to_string(),
         title,
         format,
         url: format!("{RES_BASE}/book/{id_num}"),
@@ -1044,6 +1056,9 @@ fn compute_word_counts(app: tauri::AppHandle) {
         };
         let mut changed = false;
         for (id, b) in pending {
+            while any_reader_window_open(&app) {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
             let wc = book::compute_word_count(&b); // 不持锁
             if wc > 0 {
                 state.library.lock().unwrap().set_word_count(id, wc);
@@ -1240,9 +1255,27 @@ fn spawn_startup_maintenance(app: tauri::AppHandle) {
         );
         // 让首屏渲染、封面加载、窗口拖动和账号状态先稳定下来。
         std::thread::sleep(std::time::Duration::from_secs(45));
+        while any_reader_window_open(&app) {
+            emit_startup_perf(
+                &app,
+                "startup-maintenance",
+                "paused",
+                "reader window open",
+            );
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
         emit_startup_perf(&app, "fingerprint-fill", "start", "background");
         spawn_fingerprint_fill(app.clone());
         std::thread::sleep(std::time::Duration::from_secs(15));
+        while any_reader_window_open(&app) {
+            emit_startup_perf(
+                &app,
+                "keyword-index",
+                "paused",
+                "reader window open",
+            );
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
         search::spawn_build_index(app.clone());
         emit_startup_perf(
             &app,
@@ -1374,6 +1407,7 @@ fn main() {
                             let mut lib = st.library.lock().unwrap();
                             lib.main_geom = Some(capture_geom(lib.main_geom.clone(), &w));
                             lib.save();
+                            st.stats.lock().unwrap().save();
                         }
                     }
                     _ => {}
@@ -1420,6 +1454,7 @@ fn main() {
             window_commands::main_window_close,
             window_commands::main_window_start_dragging,
             list_books,
+            reader_window_open,
             app_version,
             dict_lookup,
             vocab::vocab_add,

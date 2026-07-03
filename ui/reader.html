@@ -67,6 +67,42 @@
       .rs-empty { padding: 8px; color: #aaa; font-size: 13px; }
       body.theme-dark .rs-item { color: #ddd; border-color: #3a3a3d; }
       body.theme-dark .rs-item:hover { background: #3a3a3d; }
+      /* 阅读页跨书搜索 */
+      .cross-card { width: clamp(560px, 58vw, 760px); height: clamp(420px, 62vh, 620px); max-width: 92vw; max-height: 84vh; display: flex; flex-direction: column; overflow: hidden; }
+      .cross-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+      .cross-row input { flex: 1; font: inherit; padding: 7px 10px; border: 1px solid #c9c9cf; border-radius: 7px; outline: none; }
+      .cross-row input:focus { border-color: #5aa0ff; }
+      .cross-status { color: #888; font-size: 13px; min-width: 96px; text-align: right; }
+      .cross-results { flex: 1 1 auto; min-height: 0; overflow-y: auto; border-top: 1px solid #eee; padding-top: 8px; }
+      .cross-empty { padding: 28px; color: #aaa; text-align: center; }
+      .cross-book { border-bottom: 1px solid #eee; padding: 8px 0 10px; }
+      .cross-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; padding: 3px 6px; border-radius: 6px; cursor: pointer; }
+      .cross-head:hover { background: #f3f6ff; }
+      .cross-toggle { color: #999; font-size: 13px; width: 16px; flex: 0 0 auto; }
+      .cross-title { font-weight: 600; color: #222; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cross-author { color: #888; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cross-count { margin-left: auto; color: #999; font-size: 12px; white-space: nowrap; }
+      .cross-hit { padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; line-height: 1.65; }
+      .cross-hit:hover { background: #eef2ff; }
+      .cross-hit mark { background: #ffe58a; color: inherit; }
+      .cross-ch { color: #999; font-size: 11px; margin-right: 6px; }
+      .cross-more { display: inline-flex; align-items: center; gap: 8px; color: #888; font-size: 12px; padding: 7px 10px; margin: 4px 0 0 6px; border: 1px solid #e3e6ef; border-radius: 999px; background: #fafbff; cursor: pointer; }
+      .cross-more:hover { background: #eef2ff; border-color: #b7c8ff; color: #1c4fb0; }
+      .cross-more-ico { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 20px; border-radius: 999px; background: #e8efff; color: #2b6cff; font-weight: 700; }
+      .cross-book.collapsed .cross-hit, .cross-book.collapsed .cross-more { display: none; }
+      .cross-return {
+        position: fixed; left: 18px; bottom: 18px; z-index: 80; display: none;
+        width: 54px; height: 54px; border-radius: 50%; border: 1px solid #a9d6bd;
+        background: #27ae60; color: #fff; font: 30px/1 system-ui, sans-serif;
+        box-shadow: 0 10px 28px rgba(39,174,96,.32); cursor: pointer;
+      }
+      .cross-return.show { display: inline-flex; align-items: center; justify-content: center; }
+      .cross-return:hover { background: #219653; }
+      body.theme-dark .cross-row input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .cross-results, body.theme-dark .cross-book { border-color: #3a3a3d; }
+      body.theme-dark .cross-title { color: #eee; }
+      body.theme-dark .cross-hit:hover { background: #3a3a3d; }
+      body.theme-dark .cross-head:hover { background: #31343b; }
 
       /* 书籍信息弹窗 */
       .modal {
@@ -519,7 +555,7 @@
         </div>
       </div>
       <button id="vocab-btn" class="tbtn" title="生词本（查过的词）">📒 生词本</button>
-      <div class="reader-drag-space" title="拖动窗口" data-tauri-drag-region></div>
+      <div class="reader-drag-space" data-tauri-drag-region></div>
       <span id="progress" class="title" data-tauri-drag-region>—</span>
       <div class="window-controls" aria-label="窗口控制">
         <button id="win-min" class="win-btn" type="button" title="最小化" aria-label="最小化">−</button>
@@ -623,10 +659,26 @@
         <div id="anno-list"></div>
       </div>
     </div>
+    <div id="cross-modal" class="modal">
+      <div class="modal-card cross-card">
+        <div class="modal-head">
+          <span>跨书搜索</span>
+          <button id="cross-close" class="tbtn">✕</button>
+        </div>
+        <div class="cross-row">
+          <input id="cross-input" type="text" autocomplete="off" />
+          <button id="cross-run" class="tbtn" type="button">搜索</button>
+          <span id="cross-status" class="cross-status"></span>
+        </div>
+        <div id="cross-results" class="cross-results"></div>
+      </div>
+    </div>
+    <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果">✓</button>
     <script src="reader-search-ui.js"></script>
     <script src="reader-settings-ui.js"></script>
     <script src="reader.js"></script>
     <script src="reader-notes-ui.js"></script>
     <script src="vocab-ui.js"></script>
+    <script src="reader-cross-search-ui.js"></script>
   </body>
 </html>

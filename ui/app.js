@@ -20,6 +20,15 @@ const searchInput = document.getElementById("search-input");
 const searchClear = document.getElementById("search-clear");
 const toolbarEl = document.querySelector(".toolbar");
 
+function debugSettingOn(key) {
+  try {
+    const settings = JSON.parse(localStorage.getItem("debugSettingsV1") || "{}");
+    return settings[key] !== false;
+  } catch (e) {
+    return true;
+  }
+}
+
 let books = []; // 当前书架（原始顺序，供“随机打开”用）
 let sortKey = localStorage.getItem("shelfSort") || "title";
 if (sortKey === "rating") sortKey = "title"; // 已移除“按评分排序”，旧设置回落到书名
@@ -54,6 +63,19 @@ toolbarEl?.addEventListener("pointerdown", (e) => {
   if (e.target.closest(".account-wrap,.search-wrap,.filter-wrap,.menu-wrap,.window-controls,.del-group")) return;
   closeMainFloaters();
 }, true);
+
+function runWhenNoReader(name, work, retryMs = 30000) {
+  invoke("reader_window_open")
+    .then((open) => {
+      if (open) {
+        startupPerfLog(name, "paused", "reader window open");
+        setTimeout(() => runWhenNoReader(name, work, retryMs), retryMs);
+        return;
+      }
+      return startupTimed(name, work, "background");
+    })
+    .catch(() => {});
+}
 
 // ---- 排序与布局面板 ----
 document.getElementById("filter-btn").addEventListener("click", (e) => {
@@ -199,7 +221,9 @@ async function startAutoImportScan(reason = "正在扫描并导入目录…") {
     if (added > 0) {
       setDirsStatus("导入完成，新增 " + added + " 本书", "ok");
       finishAutoImport("added=" + added);
-      setTimeout(() => startupTimed("keyword-index-after-import", () => invoke("build_shelf_index"), "background").catch(() => {}), 1500);
+      if (debugSettingOn("bg_fulltext_index")) {
+        setTimeout(() => runWhenNoReader("keyword-index-after-import", () => invoke("build_shelf_index")), 1500);
+      }
     } else {
       setDirsStatus("扫描完成，没有新书", "ok");
       finishAutoImport("added=0");
@@ -331,7 +355,9 @@ async function importBookPaths(paths) {
     render(list);
     setImportStatus("导入完成，共 " + paths.length + " 个文件", "ok");
     hideImportStatus(3200);
-    invoke("build_shelf_index").catch(() => {}); // 后台为新书建检索索引
+    if (debugSettingOn("bg_fulltext_index")) {
+      runWhenNoReader("keyword-index-after-import", () => invoke("build_shelf_index")); // 后台为新书建检索索引
+    }
   } catch (e) {
     setImportStatus("导入失败：" + (e && e.message ? e.message : e), "error");
     hideImportStatus(7000);
@@ -696,23 +722,32 @@ window.addEventListener("DOMContentLoaded", () => {
         startupPerfLog("startup", "interactive", "main toolbar should be responsive");
       });
     setTimeout(() => {
-      startupTimed("shelf-books-backfill", () => invoke("shelf_books"), "background")
-        .then(render)
-        .catch(() => {});
+      if (!debugSettingOn("bg_cover_preload")) return;
+      runWhenNoReader("shelf-books-backfill", () => invoke("shelf_books").then(render));
     }, 10000);
     // 读取自动导入配置并反映到设置面板。真正扫描延后，避免和首屏封面加载抢资源。
-    setTimeout(() => startupTimed("sync-settings", () => loadSyncSettingsOnce(), "background").catch(() => {}), 1200);
+    setTimeout(() => {
+      if (!debugSettingOn("bg_sync")) return;
+      startupTimed("sync-settings", () => loadSyncSettingsOnce(), "background").catch(() => {});
+    }, 1200);
     startupTimed("auto-import-config", () => invoke("get_auto_import"), "background")
       .then((c) => { autoImport = c || autoImport; reflectAutoImport(); })
       .catch(() => {});
     setTimeout(() => {
+      if (!debugSettingOn("bg_auto_import")) return;
       if (!autoImport.enabled || !autoImport.dirs || !autoImport.dirs.length) return;
-      startAutoImportScan("正在自动扫描导入目录…");
+      runWhenNoReader("auto-import-scan", () => startAutoImportScan("正在自动扫描导入目录…"));
     }, 20000);
     // 字数统计是锦上添花，延后到启动稳定之后。
-    setTimeout(() => startupTimed("word-counts", () => invoke("compute_word_counts"), "background").catch(() => {}), 25000);
+    setTimeout(() => {
+      if (!debugSettingOn("reader_words_detect")) return;
+      runWhenNoReader("word-counts", () => invoke("compute_word_counts"));
+    }, 25000);
     // 启动后台检查更新（不阻塞启动，每次启动查一次）
-    setTimeout(() => startupTimed("update-check", () => checkUpdate(false), "background").catch(() => {}), 15000);
+    setTimeout(() => {
+      if (!debugSettingOn("bg_update_check")) return;
+      runWhenNoReader("update-check", () => checkUpdate(false));
+    }, 15000);
     // “关于”里的版本号取自后端，保持单一来源
     startupTimed("app-version", () => invoke("app_version"), "background")
       .then((v) => {

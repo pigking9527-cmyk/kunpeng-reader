@@ -210,6 +210,15 @@ searchInput.addEventListener("input", () => {
 searchInput.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeSearch(true);
   else if (e.key === "Enter") {
+    const raw = searchInput.value.trim();
+    if (raw === "--debug-ui") {
+      e.preventDefault();
+      hideHistory();
+      searchWrap.classList.remove("open");
+      searchInput.blur();
+      window.openDebugModal?.();
+      return;
+    }
     if (shelfChk.checked) {
       runShelfSearch(searchInput.value);
     } else {

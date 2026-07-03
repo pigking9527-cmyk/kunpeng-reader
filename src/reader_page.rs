@@ -54,7 +54,10 @@ mark.hl.has-note{box-shadow:inset 0 -2px 0 rgba(43,108,255,.6)}
 #hl-menu button{font:12px/1 system-ui,'Microsoft YaHei',sans-serif;color:#4a463e;background:#faf8f2;border:1px solid #e4ddcd;border-radius:6px;padding:5px 9px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.14);white-space:nowrap}
 #hl-menu button:hover{background:#f1ebdc}
 #hl-menu button+button{margin-left:4px}
-#fn-pop{position:fixed;display:none;z-index:100001;left:8px;right:8px;max-height:58vh;overflow:auto;background:#fff7c0;border:1px solid #e6d77a;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:12px 16px 16px;font-size:16px;line-height:1.85;color:#3a3320;font-family:system-ui,'Microsoft YaHei',sans-serif}
+#hl-settings-pop{position:fixed;display:none;z-index:100003;width:280px;height:180px;background:#fff;border:1px solid #e1e1e8;border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.24);box-sizing:border-box}
+#hl-settings-pop .hs-close{position:absolute;right:8px;top:8px;width:28px;height:28px;border:1px solid #d8d8de;border-radius:7px;background:#fff;color:#333;font:20px/1 system-ui,'Microsoft YaHei',sans-serif;cursor:pointer}
+#hl-settings-pop .hs-close:hover{background:#f2f2f5}
+#fn-pop{position:fixed;display:none;z-index:100001;width:min(520px,calc(100vw - 24px));min-width:min(280px,calc(100vw - 24px));max-height:46vh;overflow:auto;background:#fff7c0;border:1px solid #e6d77a;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:12px 16px 16px;font-size:16px;line-height:1.85;color:#3a3320;font-family:system-ui,'Microsoft YaHei',sans-serif;box-sizing:border-box;overflow-wrap:anywhere}
 #fn-pop .fn-close{float:right;cursor:pointer;color:#8a7a30;font-size:20px;line-height:1;margin:-2px -4px 0 10px}
 #fn-pop .fn-body p{margin:0 0 .5em}
 #fn-pop a{color:#2b6cff;text-decoration:none}
@@ -96,8 +99,11 @@ var root,pager,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,headSeen={},chapChars=0
 var downX=null,downY=null,didDrag=false;
 var overlayOpen=false; // 外壳里搜索框/设置面板是否打开（打开时正文点击只用于关闭它）
 var ttsOn=false,ttsMap=[],ttsText='',ttsSents=[],ttsVoice=null,ttsRate=1,ttsSi=0,ttsGen=0,ttsAudioEl=null,ttsCache={},ttsWaiting=-1,ttsPlayedAny=false; // 朗读状态
+function pageDebugSettingOn(k){try{var s=JSON.parse(localStorage.getItem('debugSettingsV1')||'{}');return s[k]!==false;}catch(_){return true;}}
 function userNav(){parent.postMessage({userNav:1},'*');} // 用户主动翻页（键盘/滚轮）通知外壳关闭浮层
-var measurer,chapterPages=[],measureDone=false,measureToken=0,measureTimer=null,pageSig='';
+var measurer,chapterPages=[],measureDone=false,measureToken=0,measureTimer=null,pageSig='',measurePaused=false;
+var fullBookMeasureEnabled=false;
+function perfLog(name,detail){}
 // 版式签名：窗口尺寸+字体/字号/行距/段距/字间距/页边距 都一致才能复用缓存的页数
 function layoutSig(){return [window.innerWidth,window.innerHeight,S.fontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight].join('|');}
 var CH=window.__CH__||0, ID=window.__ID__||0;
@@ -177,16 +183,24 @@ function measureChapterPages(html){
   return Math.max(1,Math.round(measurer.scrollWidth/vw));
 }
 function measureAll(){
+  if(!fullBookMeasureEnabled)return;
+  if(measurePaused){perfLog('measure.skip','paused-before-start');scheduleMeasure(900);return;}
   if(measureDone&&pageSig===layoutSig())return; // 版式没变、已有页数 → 不重算
   var tok=++measureToken;measureDone=false;chapterPages=new Array(CH).fill(0);
-  var i=0;
+  var i=0,tAll=performance.now();
+  perfLog('measure.start','chapters='+CH);
   function step(){
     if(tok!==measureToken)return;
+    if(measurePaused){perfLog('measure.pause','chapter='+i);scheduleMeasure(900);return;}
     if(i>=CH){if(measurer)measurer.innerHTML='';measureDone=true;pageSig=layoutSig();report();
+      perfLog('measure.end','chapters='+CH+' dt='+(performance.now()-tAll).toFixed(1)+'ms');
       parent.postMessage({measured:{sig:pageSig,pages:chapterPages.slice()}},'*');return;} // 测完落盘缓存
+    var tStep=performance.now(),idx=i;
     fetch(location.origin+'/chapter/'+ID+'/'+i).then(function(r){return r.json();}).then(function(d){
-      if(tok!==measureToken)return;chapterPages[i]=measureChapterPages(d.body||'');i++;setTimeout(step,0);
-    }).catch(function(){chapterPages[i]=1;i++;setTimeout(step,0);});
+      if(tok!==measureToken)return;if(measurePaused){perfLog('measure.pause','chapter='+idx+' after-fetch');scheduleMeasure(900);return;}chapterPages[i]=measureChapterPages(d.body||'');
+      var dt=performance.now()-tStep;if(dt>40)perfLog('measure.chapter','chapter='+idx+' dt='+dt.toFixed(1)+'ms html='+(d.body||'').length);
+      i++;setTimeout(step,16);
+    }).catch(function(){if(tok!==measureToken)return;if(measurePaused){perfLog('measure.pause','chapter='+idx+' after-error');scheduleMeasure(900);return;}chapterPages[i]=1;i++;setTimeout(step,16);});
   }
   step();
 }
@@ -199,7 +213,19 @@ function applyPageCache(pc){
   if(measureTimer){clearTimeout(measureTimer);measureTimer=null;}
   report();
 }
-function scheduleMeasure(){if(measureTimer)clearTimeout(measureTimer);measureTimer=setTimeout(measureAll,1200);}
+function invalidateMeasure(){measureToken++;measureDone=false;pageSig='';chapterPages=new Array(CH).fill(0);}
+function scheduleMeasure(delay){if(!fullBookMeasureEnabled)return;if(measureTimer)clearTimeout(measureTimer);measureTimer=setTimeout(measureAll,delay||1200);}
+function setMeasurePaused(paused){
+  measurePaused=!!paused;
+  perfLog('measure.paused',measurePaused?1:0);
+  if(measurePaused){
+    measureToken++;
+    if(measureTimer){clearTimeout(measureTimer);measureTimer=null;}
+    if(measurer)measurer.innerHTML='';
+  }else if(!measureDone){
+    scheduleMeasure(1200);
+  }
+}
 // 滚动条按“全书页位置”精确定位：已测量完→映射到具体章+页（同章直接翻页，平滑；跨章才加载）；
 // 未测量完→退回按章节粗跳。这样点滑块附近不再原地跳，拖动也能平滑跟随。
 function gotoGlobalFrac(frac){
@@ -315,7 +341,10 @@ function loadInit(){
   showChapter(rc,'start').then(function(){
     if(rf>0.005)gotoPage(Math.round(rf*(pagesInCh-1)));
     reveal();parent.postMessage({ready:1},'*');
-    scheduleMeasure(); // 后台测量全书页数
+    // 不再启动“全书精确页数”后台测量。
+    // 该测量需要把每章 HTML 注入隐藏 DOM 计算 scrollWidth；大书（上千章/长 HTML）会在 WebView 主线程
+    // 周期性阻塞几十到上百毫秒，连拖动原生标题栏都会卡顿。当前章页数仍由 showChapter 精确计算，
+    // 全书进度在未测量状态下按章节比例估算，阅读流畅优先。
   });
 }
 function init(){
@@ -337,7 +366,7 @@ function init(){
       if(href.charAt(0)==='#'){e.preventDefault();
         var m=/^#c(\d+)(?:~(.+))?$/.exec(href);
         var frag=m?m[2]:href.slice(1), ciT=m?parseInt(m[1],10):curCh;
-        if(isNoteLink(a)&&frag){showFootnote(a,ciT,frag);return;} // 注释角标 → 弹注释正文
+        if(pageDebugSettingOn('reader_footnotes')&&isNoteLink(a)&&frag){showFootnote(a,ciT,frag);return;} // 注释角标 → 弹注释正文
         if(m){var ci=ciT,fr=frag;if(ci===curCh){if(fr){var el=document.getElementById(fr);if(el)gotoPage(pageOf(el));}}else showChapter(ci,'start',fr);}
         else{var el2=document.getElementById(href.slice(1));if(el2)gotoPage(pageOf(el2));}
       }
@@ -356,7 +385,7 @@ function init(){
   });
   var wheelLock=false;
   document.addEventListener('wheel',function(e){e.preventDefault();if(wheelLock)return;if(Math.abs(e.deltaY)<4&&Math.abs(e.deltaX)<4)return;userNav();if(e.deltaY>0||e.deltaX>0)nextPage();else prevPage();wheelLock=true;setTimeout(function(){wheelLock=false;},220);},{passive:false});
-  window.addEventListener('resize',function(){parent.postMessage({layoutBusy:1},'*');relayout();scheduleMeasure();});
+  window.addEventListener('resize',function(){parent.postMessage({layoutBusy:1},'*');invalidateMeasure();relayout();scheduleMeasure();});
   setupSelMenu();
   setupHlUi();
   setupFn();
@@ -364,18 +393,34 @@ function init(){
   document.addEventListener('contextmenu',function(e){e.preventDefault();}); // 禁用浏览器右键菜单
 }
 // 选中文字后弹出“web搜索”菜单 → 通知父窗口用浏览器搜索
-var selMenu=null;
+var selMenu=null,hlSettingsPop=null;
 function hideSelMenu(){if(selMenu)selMenu.style.display='none';}
+function hideHlSettings(){if(hlSettingsPop)hlSettingsPop.style.display='none';}
+function showHlSettings(anchor){
+  if(!hlSettingsPop){
+    hlSettingsPop=document.createElement('div');hlSettingsPop.id='hl-settings-pop';hlSettingsPop.innerHTML='<button class="hs-close" type="button" title="关闭">×</button>';
+    document.body.appendChild(hlSettingsPop);
+    ['mousedown','mouseup','click','wheel'].forEach(function(t){hlSettingsPop.addEventListener(t,function(e){e.stopPropagation();});});
+    hlSettingsPop.querySelector('.hs-close').addEventListener('click',function(e){e.preventDefault();e.stopPropagation();hideHlSettings();});
+    document.addEventListener('mousedown',function(e){if(!hlSettingsPop||hlSettingsPop.style.display==='none')return;if(hlSettingsPop.contains(e.target))return;hideHlSettings();},true);
+  }
+  var r=anchor&&anchor.getBoundingClientRect?anchor.getBoundingClientRect():{left:window.innerWidth/2,top:window.innerHeight/2,right:window.innerWidth/2,bottom:window.innerHeight/2};
+  var w=280,h=180,left=Math.max(8,Math.min(window.innerWidth-w-8,r.right-w)),top=r.bottom+8;
+  if(top+h>window.innerHeight-8)top=Math.max(8,r.top-h-8);
+  hlSettingsPop.style.left=left+'px';hlSettingsPop.style.top=top+'px';hlSettingsPop.style.display='block';
+}
 function setupSelMenu(){
   selMenu=document.createElement('div');selMenu.id='sel-menu';
   var btn=document.createElement('button');btn.type='button';btn.textContent='🔍 web搜索';
   var btnDict=document.createElement('button');btnDict.type='button';btnDict.textContent='📖 词典';
   var btnHL=document.createElement('button');btnHL.type='button';btnHL.textContent='🖍 高亮';
+  var btnCross=document.createElement('button');btnCross.type='button';btnCross.textContent='跨书搜索';
   var btnNote=document.createElement('button');btnNote.type='button';btnNote.textContent='📝 批注';
   var btnBm=document.createElement('button');btnBm.type='button';btnBm.textContent='🔖 书签';
-  selMenu.appendChild(btn);selMenu.appendChild(btnDict);selMenu.appendChild(btnHL);selMenu.appendChild(btnNote);selMenu.appendChild(btnBm);
+  var btnSet=document.createElement('button');btnSet.type='button';btnSet.textContent='⚙';
+  selMenu.appendChild(btn);selMenu.appendChild(btnDict);selMenu.appendChild(btnHL);selMenu.appendChild(btnCross);selMenu.appendChild(btnNote);selMenu.appendChild(btnBm);selMenu.appendChild(btnSet);
   document.body.appendChild(selMenu);
-  [btn,btnDict,btnHL,btnNote,btnBm].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  [btn,btnDict,btnHL,btnCross,btnNote,btnBm,btnSet].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
   btnDict.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
     var t=(window.getSelection?window.getSelection().toString():'').trim();
@@ -400,11 +445,18 @@ function setupSelMenu(){
     var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();parent.postMessage({addHighlight:o},'*');}
     hideSelMenu();
   });
+  btnCross.addEventListener('click',function(e){
+    e.preventDefault();e.stopPropagation();
+    var t=(window.getSelection?window.getSelection().toString():'').trim();
+    if(t)parent.postMessage({crossSearch:t},'*');
+    hideSelMenu();
+  });
   btnNote.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
     var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();parent.postMessage({addHighlightNote:o},'*');}
     hideSelMenu();
   });
+  btnSet.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();showHlSettings(selMenu);hideSelMenu();});
   function showSelMenuAtSelection(){
     var sel=window.getSelection?window.getSelection():null;
     var t=sel?sel.toString().trim():'';
@@ -431,7 +483,6 @@ function setupSelMenu(){
   document.addEventListener('wheel',hideSelMenu,{passive:true});
   document.addEventListener('keydown',hideSelMenu);
 }
-
 // ---- 点击/悬停"已高亮文字" → 一个菜单（web搜索 / 取消高亮 / 批注）；批注用父窗口的大批注页 ----
 var hlMenu=null,activeHi=-1,hlHideTimer=null;
 function mkBtn(txt){var b=document.createElement('button');b.type='button';b.textContent=txt;return b;}
@@ -451,13 +502,15 @@ function showHlMenu(idx){
 }
 function setupHlUi(){
   hlMenu=document.createElement('div');hlMenu.id='hl-menu';
-  var mWeb=mkBtn('🔍 web搜索'),mDict=mkBtn('📖 词典'),mDel=mkBtn('🗑 取消高亮'),mNote=mkBtn('📝 批注');
-  hlMenu.append(mWeb,mDict,mDel,mNote);document.body.appendChild(hlMenu);
-  [mWeb,mDict,mDel,mNote].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  var mWeb=mkBtn('🔍 web搜索'),mDict=mkBtn('📖 词典'),mCross=mkBtn('跨书搜索'),mDel=mkBtn('🗑 取消高亮'),mNote=mkBtn('📝 批注'),mSet=mkBtn('⚙');
+  hlMenu.append(mWeb,mDict,mCross,mDel,mNote,mSet);document.body.appendChild(hlMenu);
+  [mWeb,mDict,mCross,mDel,mNote,mSet].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
   mWeb.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({webSearch:h.text},'*');hideHlMenu();});
   mDict.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)openDict(h.text,h.context||'');hideHlMenu();});
+  mCross.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({crossSearch:h.text},'*');hideHlMenu();});
   mDel.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({removeHighlight:activeHi},'*');hideHlMenu();});
   mNote.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({openAnnotations:activeHi},'*');hideHlMenu();});
+  mSet.addEventListener('click',function(e){e.stopPropagation();showHlSettings(hlMenu);hideHlMenu();});
   hlMenu.addEventListener('mouseenter',function(){if(hlHideTimer)clearTimeout(hlHideTimer);});
   hlMenu.addEventListener('mouseleave',function(){hlHideTimer=setTimeout(hideHlMenu,400);});
 
@@ -594,10 +647,14 @@ function popFootnote(a,html){
   fnPop.querySelector('.fn-body').innerHTML=html;
   fnPop.style.display='block';
   var rect=a.getBoundingClientRect();
+  var pw=fnPop.offsetWidth;
   var ph=fnPop.offsetHeight;
+  var left=rect.left+rect.width/2-pw/2;
+  left=Math.max(8,Math.min(left,window.innerWidth-pw-8));
   var top=rect.bottom+10;
   if(top+ph>window.innerHeight-8)top=rect.top-ph-10; // 下方放不下 → 放上方
   if(top<8)top=8;
+  fnPop.style.left=left+'px';
   fnPop.style.top=top+'px';
 }
 // 取注释正文：id 常落在内联回链角标(<a>/<sup>)上，其内容只是"[n]"，正文是它的兄弟
@@ -766,7 +823,8 @@ function ttsStop(){
 }
 window.addEventListener('message',function(e){
   if(!e.data)return;
-  if(e.data.settings){S=Object.assign(S,e.data.settings);relayout();scheduleMeasure();}
+  if(e.data.windowDragging!==undefined){setMeasurePaused(!!e.data.windowDragging);}
+  if(e.data.settings){S=Object.assign(S,e.data.settings);parent.postMessage({layoutBusy:1},'*');invalidateMeasure();relayout();scheduleMeasure();}
   if(e.data.tts){if(e.data.tts==='start')ttsStart();else ttsStop();}
   if(e.data.ttsAudio){var a=e.data.ttsAudio;if(ttsOn&&a.seq===ttsGen){ttsCache[a.idx]=a;if(ttsWaiting===a.idx)ttsRenderAudio(a.idx,a);}}
   if(e.data.ttsAudioErr){var er=e.data.ttsAudioErr;if(ttsOn&&er.seq===ttsGen){ttsCache[er.idx]={err:1};if(ttsWaiting===er.idx){ttsWaiting=-1;if(!ttsPlayedAny){parent.postMessage({ttsErr:er.err||2},'*');ttsStop();}else ttsPlayIndex(er.idx+1);}}}

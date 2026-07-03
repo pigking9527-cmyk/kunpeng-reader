@@ -5,6 +5,7 @@
 const tocPane = document.getElementById("toc-pane");
 const bmPane = document.getElementById("bm-pane");
 function setToc(open) {
+  if (open) window.pauseReadTracking?.("toc");
   tocEl.classList.toggle("show", open);
   backdropEl.classList.toggle("show", open);
   if (open) setTocTab("toc"); // 每次打开默认目录页
@@ -69,6 +70,7 @@ document.getElementById("gear-btn").addEventListener("click", () => {
   syncOverlay();
 });
 document.getElementById("prev-btn").addEventListener("click", () => {
+  window.keepImmersiveBarAfterNav?.();
   if (vchaps.length) {
     if (curVchap > 0) {
       const v = vchaps[curVchap - 1];
@@ -77,6 +79,7 @@ document.getElementById("prev-btn").addEventListener("click", () => {
   } else if (curChapter > 0) sendToPage({ gotoChapter: curChapter - 1 });
 });
 document.getElementById("next-btn").addEventListener("click", () => {
+  window.keepImmersiveBarAfterNav?.();
   if (vchaps.length) {
     if (curVchap < vchapTotal - 1) {
       const v = vchaps[curVchap + 1];
@@ -273,6 +276,7 @@ function renderAnnotations(targetIdx) {
   });
 }
 function openAnnotations(idx) {
+  window.pauseReadTracking?.("annotations");
   annoModal.classList.add("show");
   renderAnnotations(idx);
   if (typeof idx === "number") {
