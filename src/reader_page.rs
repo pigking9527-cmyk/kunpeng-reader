@@ -356,7 +356,7 @@ function init(){
   });
   var wheelLock=false;
   document.addEventListener('wheel',function(e){e.preventDefault();if(wheelLock)return;if(Math.abs(e.deltaY)<4&&Math.abs(e.deltaX)<4)return;userNav();if(e.deltaY>0||e.deltaX>0)nextPage();else prevPage();wheelLock=true;setTimeout(function(){wheelLock=false;},220);},{passive:false});
-  window.addEventListener('resize',function(){relayout();scheduleMeasure();});
+  window.addEventListener('resize',function(){parent.postMessage({layoutBusy:1},'*');relayout();scheduleMeasure();});
   setupSelMenu();
   setupHlUi();
   setupFn();

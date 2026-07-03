@@ -46,12 +46,12 @@
         </div>
       </div>
 
-      <div id="title-drag-space" class="title-drag-space" data-tauri-drag-region></div>
       <div id="del-group" class="del-group">
         <button id="cover-btn" class="btn-plain">🖼 更换封面</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
         <button id="del-cancel" class="btn-plain">取消</button>
       </div>
+      <div id="title-drag-space" class="title-drag-space" data-tauri-drag-region></div>
       <div class="search-wrap" id="search-wrap">
         <button id="search-btn" class="icon-btn" title="搜索书籍">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
@@ -158,6 +158,11 @@
           <label><input type="checkbox" data-stat-item="finished" checked /> 读完</label>
           <label><input type="checkbox" data-stat-item="highlights" checked /> 高亮</label>
           <label><input type="checkbox" data-stat-item="notes" checked /> 批注</label>
+          <label class="stats-chart-switch">
+            <span>柱状图切换</span>
+            <span id="stats-chart-mode">时间</span>
+            <input type="checkbox" id="stats-chart-metric" title="切换柱状图时间 / 字数" />
+          </label>
         </div>
         <div class="stats-tabs">
           <button class="stats-tab active" data-scope="day">日</button>

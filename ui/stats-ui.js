@@ -16,6 +16,7 @@ function fmtWords(n) {
 let statScope = "day";
 let statAnchor = new Date(); // 当前查看的日/月/年
 const STAT_VISIBLE_KEY = "readingStatsVisibleItems";
+const STAT_CHART_METRIC_KEY = "readingStatsChartMetric";
 const DEFAULT_STAT_VISIBLE = {
   duration: true,
   words: true,
@@ -25,6 +26,7 @@ const DEFAULT_STAT_VISIBLE = {
   notes: true,
 };
 let statVisible = readStatVisible();
+let statChartMetric = localStorage.getItem(STAT_CHART_METRIC_KEY) === "words" ? "words" : "time";
 function readStatVisible() {
   try {
     return Object.assign({}, DEFAULT_STAT_VISIBLE, JSON.parse(localStorage.getItem(STAT_VISIBLE_KEY) || "{}"));
@@ -75,27 +77,46 @@ function statStep(dir) {
   else return;
   renderStats();
 }
-function barChart(bars, color) {
-  const W = 600, H = 130, pad = 18;
-  const rawSlot = bars.length ? (W - pad * 2) / bars.length : 0;
+function fmtAxisTime(sec) {
+  sec = Math.round(sec || 0);
+  if (sec < 60) return sec + "秒";
+  if (sec < 3600) return Math.round(sec / 60) + "分";
+  const h = sec / 3600;
+  return (Math.round(h * 10) / 10).toFixed(1).replace(/\.0$/, "") + "小时";
+}
+function fmtAxisValue(v, metric) {
+  return metric === "words" ? fmtWords(v || 0) : fmtAxisTime(v || 0);
+}
+function barChart(bars, color, metric) {
+  const W = 600, H = 142, padL = 42, padR = 14, padT = 10, padB = 22;
+  const rawSlot = bars.length ? (W - padL - padR) / bars.length : 0;
   const slot = bars.length <= 12 ? Math.min(rawSlot, 58) : rawSlot;
   const chartWidth = slot * bars.length;
-  const left = pad + Math.max(0, (W - pad * 2 - chartWidth) / 2);
+  const left = padL + Math.max(0, (W - padL - padR - chartWidth) / 2);
   const max = Math.max(1, ...bars.map((b) => b.value));
   const everyLabel = bars.length <= 24 ? 1 : Math.ceil(bars.length / 12);
   let s = `<svg viewBox="0 0 ${W} ${H}">`;
+  [0.5, 1].forEach((ratio) => {
+    const y = padT + (1 - ratio) * (H - padT - padB);
+    s += `<line class="axis-line" x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}"></line>`;
+    s += `<text class="axis-label" x="${padL - 5}" y="${y + 3}" text-anchor="end">${fmtAxisValue(max * ratio, metric)}</text>`;
+  });
   bars.forEach((b, i) => {
-    const h = (b.value / max) * (H - 30), x = left + i * slot, y = H - 20 - h;
+    const h = (b.value / max) * (H - padT - padB), x = left + i * slot, y = H - padB - h;
     const rectW = Math.max(4, slot * 0.72);
-    s += `<rect x="${x + (slot - rectW) / 2}" y="${y}" width="${rectW}" height="${h}" rx="2" fill="${b.value ? color : "#e3e6ec"}"></rect>`;
+    s += `<rect x="${x + (slot - rectW) / 2}" y="${y}" width="${rectW}" height="${h}" rx="2" fill="${b.value ? color : "#e3e6ec"}"><title>${b.label}：${metric === "words" ? fmtWords(b.value || 0) : fmtTime(b.value || 0)}</title></rect>`;
     if (i % everyLabel === 0) s += `<text x="${x + slot / 2}" y="${H - 6}" font-size="9" fill="#aaa" text-anchor="middle">${b.label}</text>`;
   });
   return s + "</svg>";
 }
 function statBars(data) {
-  if (statScope === "day") return data.hours.map((v, h) => ({ label: h, value: v }));
+  const metric = statChartMetric;
+  if (statScope === "day") {
+    const source = metric === "words" ? (data.hours_words || []) : data.hours;
+    return source.map((v, h) => ({ label: h, value: v }));
+  }
   const dayMap = {};
-  data.days.forEach((d) => (dayMap[d.day] = d.seconds));
+  data.days.forEach((d) => (dayMap[d.day] = metric === "words" ? (d.words || 0) : d.seconds));
   if (statScope === "month") {
     const y = statAnchor.getFullYear(), m = statAnchor.getMonth(), n = daysInMonth(y, m), bars = [];
     for (let i = 1; i <= n; i++) bars.push({ label: i, value: dayMap[y * 10000 + (m + 1) * 100 + i] || 0 });
@@ -103,11 +124,11 @@ function statBars(data) {
   }
   if (statScope === "year") {
     const mo = new Array(12).fill(0);
-    data.days.forEach((d) => (mo[(Math.floor(d.day / 100) % 100) - 1] += d.seconds));
+    data.days.forEach((d) => (mo[(Math.floor(d.day / 100) % 100) - 1] += metric === "words" ? (d.words || 0) : d.seconds));
     return mo.map((v, i) => ({ label: i + 1 + "月", value: v }));
   }
   const yr = {};
-  data.days.forEach((d) => { const yy = Math.floor(d.day / 10000); yr[yy] = (yr[yy] || 0) + d.seconds; });
+  data.days.forEach((d) => { const yy = Math.floor(d.day / 10000); yr[yy] = (yr[yy] || 0) + (metric === "words" ? (d.words || 0) : d.seconds); });
   return Object.keys(yr).sort().map((y) => ({ label: y, value: yr[y] }));
 }
 function streakStats(days) {
@@ -181,6 +202,13 @@ function overviewStats(allData) {
   );
 }
 async function renderStats() {
+  const bodyEl = document.getElementById("stats-body");
+  const prevScrollTop = bodyEl ? bodyEl.scrollTop : 0;
+  const prevHeight = bodyEl ? Math.max(bodyEl.clientHeight, bodyEl.scrollHeight) : 0;
+  if (bodyEl && prevHeight > 0) {
+    bodyEl.style.setProperty("--stats-refresh-height", `${prevHeight}px`);
+    bodyEl.classList.add("refreshing");
+  }
   document.getElementById("stats-period").textContent = statPeriodLabel();
   const navVis = statScope === "total" ? "hidden" : "visible";
   document.getElementById("stats-prev").style.visibility = navVis;
@@ -192,7 +220,10 @@ async function renderStats() {
       invoke("reading_stats_range", { from, to }),
       invoke("reading_stats_range", { from: 0, to: 99999999 }),
     ]);
-  } catch (e) { return; }
+  } catch (e) {
+    if (bodyEl) bodyEl.classList.remove("refreshing");
+    return;
+  }
   const unit = { day: "天", month: "月", year: "年", total: "段时间" }[statScope];
   const statItems = [
     ["duration", "阅读时长", fmtTime(data.total_seconds)],
@@ -205,7 +236,7 @@ async function renderStats() {
   const cards = statItems.length
     ? '<div class="stat-cards">' + statItems.map((item) => `<div class="stat-cell"><div class="k">${item[1]}</div><div class="v">${item[2]}</div></div>`).join("") + "</div>"
     : "";
-  const chart = `<div class="stat-chart">${barChart(statBars(data), "#5aa0ff")}</div>`;
+  const chart = `<div class="stat-chart">${barChart(statBars(data), "#5aa0ff", statChartMetric)}</div>`;
   let books;
   if (data.books.length) {
     books = `<div class="stat-sec-title">这一${unit}读过的书</div>`;
@@ -217,8 +248,13 @@ async function renderStats() {
   } else {
     books = '<div class="stats-empty">这段时间还没有阅读记录</div>';
   }
-  document.getElementById("stats-body").innerHTML =
-    overviewStats(allData) + contributionGraph(allData) + cards + chart + books;
+  if (!bodyEl) return;
+  bodyEl.innerHTML = overviewStats(allData) + contributionGraph(allData) + cards + chart + books;
+  requestAnimationFrame(() => {
+    const maxScrollTop = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
+    bodyEl.scrollTop = Math.min(prevScrollTop, maxScrollTop);
+    bodyEl.classList.remove("refreshing");
+  });
 }
 document.getElementById("stats-toolbar-btn").addEventListener("click", () => {
   menuEl.classList.remove("show");
@@ -242,7 +278,15 @@ document.getElementById("stats-prev").addEventListener("click", () => statStep(-
 document.getElementById("stats-next").addEventListener("click", () => statStep(1));
 const statsSettings = document.getElementById("stats-settings");
 const statsSettingsBtn = document.getElementById("stats-settings-btn");
+const statsChartMetric = document.getElementById("stats-chart-metric");
+const statsChartMode = document.getElementById("stats-chart-mode");
+function syncStatsChartMetricControl() {
+  if (!statsChartMetric || !statsChartMode) return;
+  statsChartMetric.checked = statChartMetric === "words";
+  statsChartMode.textContent = statChartMetric === "words" ? "字数" : "时间";
+}
 syncStatVisibleControls();
+syncStatsChartMetricControl();
 statsSettingsBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   statsSettings.classList.toggle("show");
@@ -254,6 +298,12 @@ document.querySelectorAll("[data-stat-item]").forEach((input) => {
     saveStatVisible();
     renderStats();
   });
+});
+statsChartMetric?.addEventListener("change", () => {
+  statChartMetric = statsChartMetric.checked ? "words" : "time";
+  localStorage.setItem(STAT_CHART_METRIC_KEY, statChartMetric);
+  syncStatsChartMetricControl();
+  renderStats();
 });
 statsModal.addEventListener("click", (e) => {
   if (e.target === statsModal) {

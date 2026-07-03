@@ -157,7 +157,7 @@ body {
 }
 
 /* 批量删除按钮组（选中图书后出现在工具栏左侧） */
-.del-group { display: none; gap: 8px; margin-right: auto; }
+.del-group { display: none; gap: 8px; margin-left: 10px; margin-right: 10px; }
 .del-group.show { display: flex; }
 
 /* 右上角账号与三点菜单 */
@@ -464,7 +464,7 @@ body {
 }
 .book.missing .cover { outline: 2px solid #d8483a; filter: grayscale(0.5) brightness(0.92); }
 /* ---- 阅读统计 ---- */
-.stats-card { width: 920px; max-width: 94vw; max-height: 88vh; display: flex; flex-direction: column; }
+.stats-card { width: 920px; max-width: 94vw; height: min(760px, 88vh); max-height: 88vh; display: flex; flex-direction: column; }
 .stats-card { position: relative; }
 .stats-head { margin-bottom: 8px; }
 .stats-head > span { margin-right: auto; }
@@ -477,6 +477,9 @@ body {
 }
 .stats-settings.show { display: grid; }
 .stats-settings label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.stats-chart-switch { grid-column: 1 / -1; justify-content: space-between; padding-top: 8px; border-top: 1px solid #eef0f4; }
+.stats-chart-switch input { margin-left: 8px; }
+.stats-chart-mode { color: #888; margin-left: auto; }
 .stats-tabs { display: flex; gap: 6px; margin: 4px 0 8px; }
 .stats-tab { flex: 1; padding: 7px 0; border: 1px solid #e0e0e4; background: #f7f7f9; border-radius: 8px;
   cursor: pointer; font: inherit; color: #555; }
@@ -486,6 +489,7 @@ body {
 .stats-nav button { width: 32px; height: 28px; padding: 0; border: none; background: transparent; box-shadow: none; font-size: 18px; line-height: 1; }
 .stats-nav button:hover { background: transparent; }
 .stats-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; scrollbar-width: none; -ms-overflow-style: none; }
+.stats-body.refreshing { min-height: var(--stats-refresh-height, 0); }
 .stats-body::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .stat-overview { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid #edf0f4; border-radius: 14px;
   overflow: hidden; margin: 4px 0 16px; background: #fff; }
@@ -540,12 +544,14 @@ body {
 .stat-cell .v { font-size: 18px; font-weight: 700; color: #2b3a55; margin-top: 2px; }
 .stat-chart { margin: 6px 0 14px; }
 .stat-chart svg { width: 100%; display: block; }
+.stat-chart .axis-line { stroke: #edf0f5; stroke-width: 1; }
+.stat-chart .axis-label { fill: #9aa1ad; font-size: 8px; }
 .stat-sec-title { font-size: 13px; color: #888; margin: 12px 0 6px; }
 .sbook { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-top: 1px solid #f0f0f2; }
 .sbook .st-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .sbook .st-meta { flex: 0 0 auto; color: #888; font-size: 12px; text-align: right; line-height: 1.4; }
 .sbook .fin { color: #1c9a5a; font-weight: 600; }
-.stats-empty { text-align: center; color: #aaa; padding: 30px; }
+.stats-empty { text-align: center; color: #aaa; padding: 30px; min-height: 86px; box-sizing: border-box; }
 .notes-card { width: 900px; max-width: 94vw; max-height: 88vh; display: flex; flex-direction: column; }
 .modal-actions { display: inline-flex; align-items: center; gap: 8px; }
 .notes-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; padding-right: 4px; }

@@ -18,6 +18,7 @@ const filterPanel = document.getElementById("filter-panel");
 const searchWrap = document.getElementById("search-wrap");
 const searchInput = document.getElementById("search-input");
 const searchClear = document.getElementById("search-clear");
+const toolbarEl = document.querySelector(".toolbar");
 
 let books = []; // 当前书架（原始顺序，供“随机打开”用）
 let sortKey = localStorage.getItem("shelfSort") || "title";
@@ -35,6 +36,24 @@ let shelfLoaded = false;
 let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0"; // 封面右下角是否显示阅读进度
 let showCoverRating = localStorage.getItem("showCoverRating") !== "0"; // 封面上是否显示评分小星
 let showCoverTitle = localStorage.getItem("showCoverTitle") === "1"; // 网格视图封面下是否显示书名（默认不显示）
+
+function closeMainFloaters(options = {}) {
+  if (!options.keepMenu) menuEl.classList.remove("show");
+  if (!options.keepFilter) filterPanel.classList.remove("show");
+  if (!options.keepAccount) closeAccountPanel();
+  if (!options.keepSearch) {
+    hideHistory();
+    if (!searchInput.value.trim() && !searchQuery) {
+      searchWrap.classList.remove("open");
+      searchInput.blur();
+    }
+  }
+}
+
+toolbarEl?.addEventListener("pointerdown", (e) => {
+  if (e.target.closest(".account-wrap,.search-wrap,.filter-wrap,.menu-wrap,.window-controls,.del-group")) return;
+  closeMainFloaters();
+}, true);
 
 // ---- 排序与布局面板 ----
 document.getElementById("filter-btn").addEventListener("click", (e) => {
@@ -365,11 +384,7 @@ document.getElementById("menu-btn").addEventListener("click", (e) => {
   menuEl.classList.toggle("show");
 });
 document.addEventListener("click", () => {
-  menuEl.classList.remove("show");
-  closeAccountPanel();
-  filterPanel.classList.remove("show");
-  hideHistory();
-  if (!searchInput.value.trim() && !searchQuery) searchWrap.classList.remove("open");
+  closeMainFloaters();
 });
 document.getElementById("mi-random").addEventListener("click", () => {
   menuEl.classList.remove("show");

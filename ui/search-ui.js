@@ -98,6 +98,7 @@ function closeSearch(clear) {
   if (hadInput) addHistory(searchInput.value); // 记下这次搜索
   hideHistory();
   searchWrap.classList.remove("open");
+  searchInput.blur();
   syncSearchTabStops();
   if (clear) {
     searchInput.value = "";
@@ -132,6 +133,7 @@ function cancelSearchCollapse() {
 function maybeCollapseSearch() {
   if (!searchInput.value.trim() && document.activeElement !== searchInput) {
     searchWrap.classList.remove("open");
+    searchInput.blur();
     syncSearchTabStops();
     hideHistory();
   }

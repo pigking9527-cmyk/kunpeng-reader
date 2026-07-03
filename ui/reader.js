@@ -91,6 +91,10 @@ function hideLoading() {
 }
 const settingsEl = document.getElementById("settings");
 const progressEl = document.getElementById("progress");
+function showProgressLoading() {
+  progressEl.innerHTML = '<span class="mini-spinner" aria-label="加载中"></span>';
+}
+showProgressLoading();
 
 let resumeChapter = 0;
 let resumeFrac = 0;
@@ -221,7 +225,10 @@ document.addEventListener("mouseup", () => {
     sendToPage({ gotoFrac: vLastFrac }); // 收尾：精确落到松手处
   }
 });
-window.addEventListener("resize", updateThumb);
+window.addEventListener("resize", () => {
+  if (!isPdf) showProgressLoading();
+  updateThumb();
+});
 
 // ---- 书籍信息弹窗 ----
 const infoModal = document.getElementById("info-modal");
@@ -316,6 +323,10 @@ document.getElementById("info-desc").addEventListener("blur", () => {
 // 接收合并页上报：阅读进度 / 正文被点击 / 搜索结果数
 window.addEventListener("message", (e) => {
   if (!e.data) return;
+  if (e.data.layoutBusy) {
+    if (!isPdf) showProgressLoading();
+    return;
+  }
   if (typeof e.data.progress === "number") {
     curProgress = e.data.progress;
     curChapter = e.data.chapter || 0;
@@ -329,12 +340,12 @@ window.addEventListener("message", (e) => {
     } else {
       const gP = e.data.gPage || 0,
         gT = e.data.gTotal || 0;
-      const pageStr =
-        gT > 0
-          ? gP + "/" + gT + "页"
-          : (e.data.page || 1) + "/" + (e.data.total || 1) + "页(本章)";
-      progressEl.textContent =
-        "第" + (curVchap + 1) + "/" + vchapTotal + "章 · " + pageStr + " · " + curProgress.toFixed(1) + "%";
+      if (gT > 0) {
+        progressEl.textContent =
+          "第" + (curVchap + 1) + "/" + vchapTotal + "章 · " + gP + "/" + gT + "页 · " + curProgress.toFixed(1) + "%";
+      } else {
+        showProgressLoading();
+      }
     }
     reportProgress();
     trackReadWords(e.data); // 累计真正读过的字数

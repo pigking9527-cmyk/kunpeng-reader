@@ -51,6 +51,7 @@ pub struct BookStat {
 pub struct DayStat {
     pub day: u32,
     pub seconds: u64,
+    pub words: u64,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -58,6 +59,7 @@ pub struct StatsRange {
     pub total_seconds: u64,
     pub total_words: u64,
     pub hours: Vec<u64>,
+    pub hours_words: Vec<u64>,
     pub days: Vec<DayStat>,
     pub books: Vec<BookStat>,
     pub finished: Vec<BookStat>,
@@ -95,8 +97,9 @@ pub fn aggregate_stats_range(
     to: u32,
 ) -> StatsRange {
     let mut hours = vec![0u64; 24];
+    let mut hours_words = vec![0u64; 24];
     let mut per_book: HashMap<u64, (u64, u64)> = HashMap::new();
-    let mut per_day: HashMap<u32, u64> = HashMap::new();
+    let mut per_day: HashMap<u32, (u64, u64)> = HashMap::new();
     let mut total_seconds = 0u64;
     let mut total_words = 0u64;
     for (&(day, hour, book), &(secs, words)) in buckets.iter() {
@@ -106,7 +109,10 @@ pub fn aggregate_stats_range(
         total_seconds += secs as u64;
         total_words += words as u64;
         hours[hour.min(23) as usize] += secs as u64;
-        *per_day.entry(day).or_insert(0) += secs as u64;
+        hours_words[hour.min(23) as usize] += words as u64;
+        let de = per_day.entry(day).or_insert((0, 0));
+        de.0 += secs as u64;
+        de.1 += words as u64;
         let e = per_book.entry(book).or_insert((0, 0));
         e.0 += secs as u64;
         e.1 += words as u64;
@@ -173,7 +179,11 @@ pub fn aggregate_stats_range(
 
     let mut days: Vec<DayStat> = per_day
         .into_iter()
-        .map(|(day, seconds)| DayStat { day, seconds })
+        .map(|(day, (seconds, words))| DayStat {
+            day,
+            seconds,
+            words,
+        })
         .collect();
     days.sort_by_key(|d| d.day);
 
@@ -181,6 +191,7 @@ pub fn aggregate_stats_range(
         total_seconds,
         total_words,
         hours,
+        hours_words,
         days,
         book_count: books_out.len() as u32,
         finished_count: finished.len() as u32,
@@ -244,7 +255,8 @@ mod tests {
             r.days,
             vec![DayStat {
                 day: 20260701,
-                seconds: 70
+                seconds: 70,
+                words: 700
             }]
         );
         assert_eq!(r.books[0].title, "beta");
