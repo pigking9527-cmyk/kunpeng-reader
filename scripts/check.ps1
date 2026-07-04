@@ -164,10 +164,24 @@ try {
   if ($srcText -match 'Command::new\("cmd"\)') {
     throw 'Do not open external URLs through cmd.exe; use ShellExecuteW/url_open instead.'
   }
-  $httpHits = rg -n 'http://' tauri.conf.json src ui scripts --glob '!ui/pdfjs/**' --glob '!src/dict/**' 2>$null
-  if ($LASTEXITCODE -gt 1) {
-    throw 'Public HTTP scan failed.'
-  }
+  $httpScanFiles = @()
+  $httpScanFiles += Get-Item -LiteralPath (Join-Path $repo 'tauri.conf.json')
+  $httpScanFiles += Get-ChildItem -LiteralPath (Join-Path $repo 'src') -File -Recurse |
+    Where-Object { $_.FullName -notlike (Join-Path $repo 'src\dict\*') }
+  $httpScanFiles += Get-ChildItem -LiteralPath (Join-Path $repo 'ui') -File -Recurse |
+    Where-Object { $_.FullName -notlike (Join-Path $repo 'ui\pdfjs\*') }
+  $httpScanFiles += Get-ChildItem -LiteralPath (Join-Path $repo 'scripts') -File -Recurse
+  $httpHits = @(
+    Select-String -LiteralPath ($httpScanFiles | Select-Object -ExpandProperty FullName) -Pattern 'http://' |
+      ForEach-Object {
+        $rel = $_.Path
+        $prefix = $repo.TrimEnd('\') + '\'
+        if ($rel.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+          $rel = $rel.Substring($prefix.Length)
+        }
+        "${rel}:$($_.LineNumber):$($_.Line)"
+      }
+  )
   $publicHttpHits = @($httpHits | Where-Object {
     $_ -notmatch 'scripts\\check\.ps1' -and
     $_ -notmatch 'starts_with\("http://"\)' -and
