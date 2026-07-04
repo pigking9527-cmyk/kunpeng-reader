@@ -33,17 +33,25 @@ try {
   if ($appJsPos -lt 0 -or $syncUiPos -lt 0 -or $syncUiPos -lt $appJsPos) {
     throw 'sync-ui.js must be loaded after app.js because it binds account/sync UI to app globals.'
   }
+  foreach ($requiredIndexId in @('shelf-search-modal', 'shelf-search-frame', 'stats-chart-metric')) {
+    if ($indexHtmlForScripts -notmatch [regex]::Escape($requiredIndexId)) {
+      throw "ui/index.html missing required integrated UI element: $requiredIndexId"
+    }
+  }
 
   $readerSearchJs = Join-Path $repo 'ui\reader-search-ui.js'
   $readerSettingsJs = Join-Path $repo 'ui\reader-settings-ui.js'
   $readerNotesJs = Join-Path $repo 'ui\reader-notes-ui.js'
+  $readerCrossJs = Join-Path $repo 'ui\reader-cross-search-ui.js'
   if (-not (Test-Path -LiteralPath $readerSearchJs)) { throw 'ui/reader-search-ui.js missing.' }
   if (-not (Test-Path -LiteralPath $readerSettingsJs)) { throw 'ui/reader-settings-ui.js missing.' }
   if (-not (Test-Path -LiteralPath $readerNotesJs)) { throw 'ui/reader-notes-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $readerCrossJs)) { throw 'ui/reader-cross-search-ui.js missing.' }
   $readerHtmlForScripts = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader.html'), [System.Text.Encoding]::UTF8)
   $readerSearchPos = $readerHtmlForScripts.IndexOf('reader-search-ui.js')
   $readerSettingsPos = $readerHtmlForScripts.IndexOf('reader-settings-ui.js')
   $readerNotesPos = $readerHtmlForScripts.IndexOf('reader-notes-ui.js')
+  $readerCrossPos = $readerHtmlForScripts.IndexOf('reader-cross-search-ui.js')
   $readerJsPos = $readerHtmlForScripts.IndexOf('reader.js')
   $vocabUiPos = $readerHtmlForScripts.IndexOf('vocab-ui.js')
   if ($readerSearchPos -lt 0 -or $readerJsPos -lt 0 -or $readerSearchPos -gt $readerJsPos) {
@@ -57,6 +65,31 @@ try {
   }
   if ($vocabUiPos -ge 0 -and $readerNotesPos -gt $vocabUiPos) {
     throw 'reader-notes-ui.js must be loaded before vocab-ui.js because vocab UI calls setToc.'
+  }
+  if ($readerCrossPos -lt 0 -or $readerJsPos -lt 0 -or $readerCrossPos -lt $readerJsPos) {
+    throw 'reader-cross-search-ui.js must be loaded after reader.js because it uses reader window globals and invokes open_book_at.'
+  }
+  $readerPageRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\reader_page.rs'), [System.Text.Encoding]::UTF8)
+  if ($readerPageRs -notmatch 'include_str!\("../ui/reader-page-head.html"\)') {
+    throw 'reader_page.rs must keep reader injected HTML/CSS/JS in ui/reader-page-head.html via include_str.'
+  }
+  $readerInjectedHead = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader-page-head.html'), [System.Text.Encoding]::UTF8)
+  foreach ($requiredReaderHook in @('showTranslateResult', 'translateText', 'hl-settings-pop', 'highlightMenuActionsV1', 'highlightMenuDisplayModeV1', 'highlightMenuSizeV1', 'showFootnote')) {
+    if ($readerInjectedHead -notmatch [regex]::Escape($requiredReaderHook)) {
+      throw "ui/reader-page-head.html missing required injected reader hook: $requiredReaderHook"
+    }
+  }
+  $readerJsText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader.js'), [System.Text.Encoding]::UTF8)
+  foreach ($requiredReaderJsHook in @('translate_text')) {
+    if ($readerJsText -notmatch [regex]::Escape($requiredReaderJsHook)) {
+      throw "ui/reader.js missing required reader bridge hook: $requiredReaderJsHook"
+    }
+  }
+  $readerCrossText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader-cross-search-ui.js'), [System.Text.Encoding]::UTF8)
+  foreach ($requiredCrossHook in @('reader_cross_search', 'open_book_at', 'pendingCrossSearch')) {
+    if ($readerCrossText -notmatch [regex]::Escape($requiredCrossHook)) {
+      throw "ui/reader-cross-search-ui.js missing required cross-search hook: $requiredCrossHook"
+    }
   }
 
   Write-Host '== UTF-8 strict check =='

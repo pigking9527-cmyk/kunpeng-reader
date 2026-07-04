@@ -154,7 +154,7 @@ pub fn keyword_postings_for_chapter(text: &str) -> Vec<KeywordPostingDraft> {
 mod tests {
     use super::{
         ascii_lower_bytes, ascii_terms, cjk_ngrams, keyword_postings_for_chapter,
-        keyword_query_terms, snippet_at,
+        keyword_query_terms, snippet_at, snippet_at_with_context,
     };
 
     #[test]
@@ -182,6 +182,17 @@ mod tests {
         let s = snippet_at(&text, mb + 1, "南明史".len());
         assert!(s.contains("南明史"));
         assert!(std::str::from_utf8(s.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn long_context_snippet_keeps_more_cross_book_text() {
+        let text = "前文".repeat(120) + "毛泽东" + &"后文".repeat(120);
+        let mb = text.find("毛泽东").unwrap();
+        let short = snippet_at(text.as_str(), mb, "毛泽东".len());
+        let long = snippet_at_with_context(text.as_str(), mb, "毛泽东".len(), 260);
+        assert!(long.contains("毛泽东"));
+        assert!(long.len() > short.len());
+        assert!(std::str::from_utf8(long.as_bytes()).is_ok());
     }
 
     #[test]

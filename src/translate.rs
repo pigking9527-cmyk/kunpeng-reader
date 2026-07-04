@@ -520,7 +520,7 @@ pub(crate) fn translate_text(
 
 #[cfg(test)]
 mod tests {
-    use super::{md5_hex, normalize_baidu_lang};
+    use super::{md5_hex, normalize_baidu_lang, normalize_common_lang, normalize_deepl_lang};
 
     #[test]
     fn md5_matches_known_vectors() {
@@ -533,5 +533,20 @@ mod tests {
         assert_eq!(normalize_baidu_lang("zh-CN", "en"), "zh");
         assert_eq!(normalize_baidu_lang("ja", "zh"), "jp");
         assert_eq!(normalize_baidu_lang("ko", "zh"), "kor");
+    }
+
+    #[test]
+    fn normalize_common_lang_maps_provider_aliases() {
+        assert_eq!(normalize_common_lang("system", "zh"), "zh");
+        assert_eq!(normalize_common_lang("zh-CN", "en"), "zh");
+        assert_eq!(normalize_common_lang("ja", "en"), "ja");
+        assert_eq!(normalize_common_lang("ko", "en"), "ko");
+    }
+
+    #[test]
+    fn normalize_deepl_target_uses_supported_locale_forms() {
+        assert_eq!(normalize_deepl_lang("zh-CN", "en", true), "ZH");
+        assert_eq!(normalize_deepl_lang("en", "zh", true), "EN-US");
+        assert_eq!(normalize_deepl_lang("ja", "en", false), "JA");
     }
 }
