@@ -68,7 +68,7 @@
       body.theme-dark .rs-item { color: #ddd; border-color: #3a3a3d; }
       body.theme-dark .rs-item:hover { background: #3a3a3d; }
       /* 阅读页跨书搜索 */
-      .cross-card { width: clamp(560px, 58vw, 760px); height: clamp(420px, 62vh, 620px); max-width: 92vw; max-height: 84vh; display: flex; flex-direction: column; overflow: hidden; }
+      .cross-card { width: clamp(640px, 68vw, 1040px); height: clamp(500px, 72vh, 820px); max-width: 96vw; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
       .cross-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
       .cross-row input { flex: 1; font: inherit; padding: 7px 10px; border: 1px solid #c9c9cf; border-radius: 7px; outline: none; }
       .cross-row input:focus { border-color: #5aa0ff; }
@@ -83,6 +83,15 @@
       .cross-author { color: #888; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .cross-count { margin-left: auto; color: #999; font-size: 12px; white-space: nowrap; }
       .cross-hit { padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; line-height: 1.65; }
+      .cross-hit-line {
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 4;
+        overflow: hidden;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        max-width: 100%;
+      }
       .cross-hit:hover { background: #eef2ff; }
       .cross-hit mark { background: #ffe58a; color: inherit; }
       .cross-ch { color: #999; font-size: 11px; margin-right: 6px; }
@@ -92,12 +101,12 @@
       .cross-book.collapsed .cross-hit, .cross-book.collapsed .cross-more { display: none; }
       .cross-return {
         position: fixed; left: 18px; bottom: 18px; z-index: 80; display: none;
-        width: 54px; height: 54px; border-radius: 50%; border: 1px solid #a9d6bd;
-        background: #27ae60; color: #fff; font: 30px/1 system-ui, sans-serif;
-        box-shadow: 0 10px 28px rgba(39,174,96,.32); cursor: pointer;
+        width: 54px; height: 54px; border: 0; border-radius: 50%;
+        background: transparent; color: #777; font: 42px/1 system-ui, sans-serif;
+        box-shadow: none; cursor: pointer;
       }
       .cross-return.show { display: inline-flex; align-items: center; justify-content: center; }
-      .cross-return:hover { background: #219653; }
+      .cross-return:hover { background: transparent; color: #444; }
       body.theme-dark .cross-row input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
       body.theme-dark .cross-results, body.theme-dark .cross-book { border-color: #3a3a3d; }
       body.theme-dark .cross-title { color: #eee; }
@@ -114,6 +123,13 @@
         background: #fff; width: 440px; max-width: 90vw; max-height: 80vh;
         border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3);
         padding: 16px 18px; overflow-y: auto;
+      }
+      .modal-card.cross-card {
+        width: clamp(720px, 74vw, 1180px);
+        height: clamp(560px, 78vh, 900px);
+        max-width: 96vw;
+        max-height: 92vh;
+        overflow: hidden;
       }
       .modal-head { display: flex; align-items: center; justify-content: space-between;
         font-size: 16px; font-weight: 600; margin-bottom: 10px; }
@@ -498,7 +514,6 @@
           <div id="rsearch-results" class="rsearch-results"></div>
         </div>
       </div>
-      <button id="info-btn" class="tbtn" title="书籍信息">ⓘ</button>
       <button id="tts-btn" class="tbtn epub-only" title="朗读（从当前页开始，自动翻页）">🔊</button>
       <button id="hl-btn" class="tbtn" title="批注 / 高亮">🖍</button>
       <button id="zoom-out" class="tbtn pdf-only" title="缩小">－</button>
@@ -673,7 +688,7 @@
         <div id="cross-results" class="cross-results"></div>
       </div>
     </div>
-    <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果">✓</button>
+    <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果">←</button>
     <script src="reader-search-ui.js"></script>
     <script src="reader-settings-ui.js"></script>
     <script src="reader.js"></script>

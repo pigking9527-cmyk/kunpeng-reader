@@ -647,7 +647,82 @@ document.getElementById("mi-selectall").addEventListener("click", () => {
 const delGroup = document.getElementById("del-group");
 const delBtn = document.getElementById("del-btn");
 const coverBtn = document.getElementById("cover-btn");
-// 仅选中"一本"时才显示"更换封面"
+const bookInfoBtn = document.getElementById("book-info-btn");
+const bookInfoModal = document.getElementById("book-info-modal");
+const bookInfoTitle = document.getElementById("book-info-title");
+const bookInfoDesc = document.getElementById("book-info-desc");
+const bookInfoStars = document.getElementById("book-info-stars");
+let currentInfoBookId = "";
+
+function fmtWords(n) {
+  n = n || 0;
+  if (n >= 10000) return (n / 10000).toFixed(2) + " 万字";
+  return n + " 字";
+}
+function fmtSize(bytes) {
+  bytes = bytes || 0;
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + "M";
+  if (bytes >= 1024) return Math.round(bytes / 1024) + "K";
+  return bytes + "B";
+}
+function updateBookInShelf(id, patch) {
+  const idx = books.findIndex((b) => String(b.id) === String(id));
+  if (idx >= 0) books[idx] = Object.assign({}, books[idx], patch);
+  applyView();
+  updateDeleteUI();
+}
+async function openSelectedBookInfo() {
+  if (selected.size !== 1) return;
+  currentInfoBookId = String([...selected][0]);
+  bookInfoModal.classList.add("show");
+  document.getElementById("book-info-words").textContent = "统计中…";
+  try {
+    const m = await invoke("book_meta_by_id", { id: currentInfoBookId });
+    bookInfoTitle.value = m.title || "";
+    document.getElementById("book-info-author").textContent = m.author || "未知";
+    document.getElementById("book-info-format").textContent = (m.format || "").toUpperCase();
+    document.getElementById("book-info-words").textContent = fmtWords(m.word_count);
+    document.getElementById("book-info-size").textContent = fmtSize(m.size);
+    bookInfoDesc.textContent = m.description || "";
+    bookInfoStars.setVal(m.rating || 0);
+  } catch (e) {
+    document.getElementById("book-info-words").textContent = "读取失败：" + e;
+  }
+}
+makeStars(bookInfoStars, (rating) => {
+  if (!currentInfoBookId) return;
+  bookInfoStars.setVal(rating);
+  updateBookInShelf(currentInfoBookId, { rating });
+  invoke("set_book_rating", { id: currentInfoBookId, rating }).catch(() => {});
+});
+bookInfoBtn.addEventListener("click", openSelectedBookInfo);
+document.getElementById("book-info-close").addEventListener("click", () => bookInfoModal.classList.remove("show"));
+bookInfoModal.addEventListener("click", (e) => {
+  if (e.target === bookInfoModal) bookInfoModal.classList.remove("show");
+});
+bookInfoTitle.addEventListener("blur", async () => {
+  if (!currentInfoBookId) return;
+  const title = bookInfoTitle.value.trim();
+  if (!title) {
+    const b = books.find((x) => String(x.id) === String(currentInfoBookId));
+    bookInfoTitle.value = b?.title || "";
+    return;
+  }
+  try {
+    await invoke("set_book_title", { id: currentInfoBookId, title });
+    updateBookInShelf(currentInfoBookId, { title });
+  } catch (e) {
+    alert("保存书名失败：" + e);
+  }
+});
+bookInfoDesc.addEventListener("blur", () => {
+  if (!currentInfoBookId) return;
+  const description = bookInfoDesc.textContent.trim();
+  updateBookInShelf(currentInfoBookId, { description });
+  invoke("set_book_description", { id: currentInfoBookId, description }).catch(() => {});
+});
+
+// 仅选中"一本"时才显示"图书信息 / 更换封面"
 coverBtn.addEventListener("click", () => {
   if (selected.size !== 1) return;
   const id = [...selected][0];
@@ -658,6 +733,7 @@ coverBtn.addEventListener("click", () => {
 function updateDeleteUI() {
   if (selected.size > 0) {
     delGroup.classList.add("show");
+    bookInfoBtn.style.display = selected.size === 1 ? "" : "none";
     coverBtn.style.display = selected.size === 1 ? "" : "none";
     delBtn.textContent = "🗑 删除选中 (" + selected.size + ")";
   } else {

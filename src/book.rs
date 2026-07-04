@@ -307,6 +307,12 @@ impl Library {
         }
     }
 
+    pub fn set_title(&mut self, id: u64, title: String) {
+        if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
+            b.title = title;
+        }
+    }
+
     pub fn set_rating(&mut self, id: u64, rating: f32) {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
             b.rating = rating.clamp(0.0, 5.0);

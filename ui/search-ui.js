@@ -155,8 +155,11 @@ historyEl.addEventListener("mouseenter", cancelSearchCollapse);
 historyEl.addEventListener("mouseleave", () => {
   searchCollapseTimer = setTimeout(maybeCollapseSearch, 250);
 });
-// “书架搜索”开关：勾选后回车 → 对全书架（或选中的若干本）正文检索，结果开新窗口展示
+// “书架搜索”开关：勾选后回车 → 对全书架（或选中的若干本）正文检索，结果在主窗口内展示
 const shelfChk = document.getElementById("shelf-search-chk");
+const shelfSearchModal = document.getElementById("shelf-search-modal");
+const shelfSearchFrame = document.getElementById("shelf-search-frame");
+const shelfSearchClose = document.getElementById("shelf-search-close");
 syncSearchTabStops();
 shelfChk.addEventListener("click", (e) => e.stopPropagation());
 // 整个开关（含“书架搜索”四个字）点击都不要冒泡到 document 的关闭逻辑，否则勾选会收起搜索框
@@ -185,8 +188,19 @@ function runShelfSearch(term) {
   addHistory(term);
   hideHistory();
   const ids = selected.size ? [...selected] : null; // 有选中 → 只搜这几本；否则全部
-  invoke("open_search_window", { term, ids }).catch(() => {});
+  const idsCsv = ids ? ids.join(",") : "";
+  shelfSearchFrame.src = "search.html?q=" + encodeURIComponent(term) + "&ids=" + encodeURIComponent(idsCsv);
+  shelfSearchModal.classList.add("show");
+  closeSearch(false);
 }
+
+function closeShelfSearchModal() {
+  shelfSearchModal.classList.remove("show");
+}
+shelfSearchClose.addEventListener("click", closeShelfSearchModal);
+shelfSearchModal.addEventListener("click", (e) => {
+  if (e.target === shelfSearchModal) closeShelfSearchModal();
+});
 
 searchInput.addEventListener("click", (e) => e.stopPropagation());
 searchClear.addEventListener("click", (e) => {

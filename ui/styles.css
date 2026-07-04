@@ -25,6 +25,39 @@ body {
 .info-row.col .info-k { flex: 0 0 auto; }
 .info-k { color: #888; flex: 0 0 80px; }
 .info-v { color: #222; }
+.book-info-card { width: 520px; max-height: 82vh; overflow-y: auto; }
+.shelf-search-card {
+  width: min(1000px, calc(100vw - 72px));
+  height: min(760px, calc(100vh - 92px));
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px;
+}
+.shelf-search-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid #e6e8ee;
+  border-radius: 8px;
+  background: #f6f6f8;
+}
+.info-input {
+  flex: 1 1 auto; min-width: 0; padding: 7px 9px; border: 1px solid #d8dce4;
+  border-radius: 7px; font: inherit; color: #222; background: #fff;
+}
+.info-input:focus { outline: none; border-color: #5aa0ff; box-shadow: 0 0 0 2px rgba(90,160,255,.14); }
+.info-desc {
+  color: #333; line-height: 1.7; white-space: pre-wrap; max-height: 200px;
+  overflow-y: auto; border: 1px solid #eef0f4; border-radius: 8px;
+  padding: 10px 12px; background: #fbfcff; outline: none;
+}
+.info-desc:focus { border-color: #5aa0ff; box-shadow: 0 0 0 2px rgba(90,160,255,.12); }
+.info-stars { display: inline-flex; gap: 4px; cursor: pointer; }
+.info-stars .star { position: relative; width: 1em; height: 1em; font-size: 20px; line-height: 1; user-select: none; }
+.info-stars .s-bg { color: #d4d4d8; }
+.info-stars .s-fg { position: absolute; left: 0; top: 0; width: 0; overflow: hidden; color: #f5a623; white-space: nowrap; }
 .about-update-btn { margin-left: auto; padding: 3px 12px; font-size: 13px; }
 .about-notes { white-space: pre-wrap; font-size: 13px; color: #444; line-height: 1.6;
   max-height: 220px; overflow-y: auto; background: #f7f8fa; border: 1px solid #eef0f4;
@@ -238,7 +271,7 @@ body {
 .search-wrap { display: inline-flex; align-items: center; position: relative; }
 /* 输入框 + 历史下拉同处一个相对定位盒，下拉与输入框左右对齐 */
 .sbox { position: relative; display: inline-flex; align-items: center; }
-.search-wrap.open .sbox { margin-left: 6px; }
+.search-wrap.open .sbox { margin-left: 8px; }
 .search-input {
   width: 0; min-width: 0; height: 32px; padding: 0; margin: 0;
   border: 1px solid transparent; border-radius: 6px; outline: none;
@@ -262,10 +295,10 @@ body {
 /* “书架搜索”开关：随搜索框一起滑入/滑出 */
 .shelf-toggle { display: inline-flex; align-items: center; justify-content: center;
   font-size: 0; color: #555; white-space: nowrap; cursor: pointer; user-select: none;
-  max-width: 0; margin-left: 0; opacity: 0; overflow: hidden;
-  transition: max-width 0.25s ease, margin-left 0.25s ease, opacity 0.2s ease;
+  max-width: 0; margin-left: 0; margin-right: 0; opacity: 0; overflow: hidden;
+  transition: max-width 0.25s ease, margin-left 0.25s ease, margin-right 0.25s ease, opacity 0.2s ease;
 }
-.search-wrap.open .shelf-toggle { max-width: 44px; margin-left: 8px; opacity: 1; }
+.search-wrap.open .shelf-toggle { max-width: 44px; margin-left: 8px; margin-right: 0; opacity: 1; }
 .shelf-toggle input {
   appearance: none; -webkit-appearance: none;
   width: 38px; height: 22px; border: 1px solid #c9c9cf; border-radius: 999px;
@@ -526,9 +559,21 @@ body {
 .contrib-strip.slide-older { transform: translateX(0); }
 .contrib-strip.slide-newer { transform: translateX(-66.6667%); }
 .contrib-page { flex: 0 0 33.3333%; min-width: 0; padding: 0 1px; }
-.contrib-months { position: relative; width: 100%; height: 18px; color: #888; font-size: 12px; margin: 2px auto 4px; }
-.contrib-months span { position: absolute; top: 0; transform: translateX(-1px); white-space: nowrap; }
-.contrib-months span.edge { transform: translateX(-100%); }
+.contrib-months {
+  display: grid;
+  grid-template-columns: repeat(53, minmax(0, 1fr));
+  gap: 4px;
+  width: 100%;
+  height: 18px;
+  color: #888;
+  font-size: 12px;
+  margin: 2px auto 4px;
+  overflow: visible;
+}
+.contrib-months span { min-width: 0; white-space: nowrap; }
+.contrib-months span.edge { text-align: right; }
+.contrib-months span.first { text-align: left; }
+.contrib-months .mw0{grid-column:1}.contrib-months .mw1{grid-column:2}.contrib-months .mw2{grid-column:3}.contrib-months .mw3{grid-column:4}.contrib-months .mw4{grid-column:5}.contrib-months .mw5{grid-column:6}.contrib-months .mw6{grid-column:7}.contrib-months .mw7{grid-column:8}.contrib-months .mw8{grid-column:9}.contrib-months .mw9{grid-column:10}.contrib-months .mw10{grid-column:11}.contrib-months .mw11{grid-column:12}.contrib-months .mw12{grid-column:13}.contrib-months .mw13{grid-column:14}.contrib-months .mw14{grid-column:15}.contrib-months .mw15{grid-column:16}.contrib-months .mw16{grid-column:17}.contrib-months .mw17{grid-column:18}.contrib-months .mw18{grid-column:19}.contrib-months .mw19{grid-column:20}.contrib-months .mw20{grid-column:21}.contrib-months .mw21{grid-column:22}.contrib-months .mw22{grid-column:23}.contrib-months .mw23{grid-column:24}.contrib-months .mw24{grid-column:25}.contrib-months .mw25{grid-column:26}.contrib-months .mw26{grid-column:27}.contrib-months .mw27{grid-column:28}.contrib-months .mw28{grid-column:29}.contrib-months .mw29{grid-column:30}.contrib-months .mw30{grid-column:31}.contrib-months .mw31{grid-column:32}.contrib-months .mw32{grid-column:33}.contrib-months .mw33{grid-column:34}.contrib-months .mw34{grid-column:35}.contrib-months .mw35{grid-column:36}.contrib-months .mw36{grid-column:37}.contrib-months .mw37{grid-column:38}.contrib-months .mw38{grid-column:39}.contrib-months .mw39{grid-column:40}.contrib-months .mw40{grid-column:41}.contrib-months .mw41{grid-column:42}.contrib-months .mw42{grid-column:43}.contrib-months .mw43{grid-column:44}.contrib-months .mw44{grid-column:45}.contrib-months .mw45{grid-column:46}.contrib-months .mw46{grid-column:47}.contrib-months .mw47{grid-column:48}.contrib-months .mw48{grid-column:49}.contrib-months .mw49{grid-column:50}.contrib-months .mw50{grid-column:51}.contrib-months .mw51{grid-column:52}.contrib-months .mw52{grid-column:53}
 .contrib-grid {
   display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, auto); grid-auto-columns: 1fr;
   gap: 4px; width: 100%; overflow: visible; margin-left: auto; margin-right: auto;
@@ -674,7 +719,7 @@ body {
   .search-wrap,
   .search-input { flex: 0 0 auto; }
   .search-wrap.open .search-input { width: 110px; padding-right: 28px; }
-  .search-wrap.open .shelf-toggle { max-width: 40px; margin-left: 6px; }
+  .search-wrap.open .shelf-toggle { max-width: 40px; margin-left: 6px; margin-right: 0; }
   .search-wrap.open .search-history {
     position: fixed;
     top: calc(max(env(safe-area-inset-top), 28px) + 56px);

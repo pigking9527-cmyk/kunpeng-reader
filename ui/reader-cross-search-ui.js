@@ -11,6 +11,7 @@ let crossTerm = "";
 let crossLastResults = [];
 let crossExpanded = new Map();
 let crossCollapsed = new Set();
+let crossReturnPoll = 0;
 
 function crossEscapeHtml(s) {
   return String(s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -55,6 +56,7 @@ function crossStoreReturnTarget(bookId, chapter) {
     targetChapter: chapter || 0,
     term: keepFirstOrigin ? String(existing.term || crossTerm) : crossTerm,
     lastTerm: crossTerm,
+    chain: keepFirstOrigin ? String(existing.chain || "") : String(Date.now()),
     ts: Date.now(),
   };
   localStorage.setItem("crossReturnState", JSON.stringify(state));
@@ -76,6 +78,18 @@ function updateCrossReturnButton() {
   const show = !!(state && current && String(state.originBookId) !== current);
   crossReturn.classList.toggle("show", show);
 }
+function scheduleCrossReturnRefresh() {
+  if (!crossReturn || crossReturnPoll) return;
+  let ticks = 0;
+  crossReturnPoll = window.setInterval(() => {
+    ticks += 1;
+    updateCrossReturnButton();
+    if (crossCurrentBookId() || ticks >= 12) {
+      window.clearInterval(crossReturnPoll);
+      crossReturnPoll = 0;
+    }
+  }, 250);
+}
 function consumePendingCrossSearch() {
   let pending = null;
   try {
@@ -84,7 +98,11 @@ function consumePendingCrossSearch() {
     pending = null;
   }
   if (!pending || !pending.term) return;
-  if (pending.originBookId && crossCurrentBookId() && String(pending.originBookId) !== crossCurrentBookId()) return;
+  const current = crossCurrentBookId();
+  if (pending.originBookId && (!current || String(pending.originBookId) !== current)) {
+    setTimeout(consumePendingCrossSearch, 250);
+    return;
+  }
   localStorage.removeItem("pendingCrossSearch");
   openCrossSearch(pending.term);
 }
@@ -127,7 +145,7 @@ function renderCrossSearch(results) {
     hits.slice(0, limit).forEach((hit) => {
       const item = document.createElement("div");
       item.className = "cross-hit";
-      item.innerHTML = '<span class="cross-ch">第' + ((hit.chapter || 0) + 1) + "章</span>" + crossHighlight(hit.snippet || "", crossTerm);
+      item.innerHTML = '<div class="cross-hit-line"><span class="cross-ch">第' + ((hit.chapter || 0) + 1) + "章</span>" + crossHighlight(hit.snippet || "", crossTerm) + "</div>";
       item.addEventListener("click", () => {
         crossStoreReturnTarget(bookId, hit.chapter || 0);
         invoke("open_book_at", { id: String(book.book_id || ""), chapter: hit.chapter || 0, term: crossTerm }).catch(() => {});
@@ -205,7 +223,12 @@ if (crossReturn) {
   crossReturn.addEventListener("click", () => {
     const state = readCrossReturnState();
     if (!state) return;
-    localStorage.setItem("pendingCrossSearch", JSON.stringify(state));
+    localStorage.setItem("pendingCrossSearch", JSON.stringify({
+      term: state.term || state.lastTerm || "",
+      originBookId: state.originBookId,
+      ts: Date.now(),
+    }));
+    closeCrossSearch();
     invoke("open_book_at", {
       id: String(state.originBookId),
       chapter: Number(state.originChapter || 0),
@@ -214,4 +237,5 @@ if (crossReturn) {
   });
   setTimeout(updateCrossReturnButton, 400);
   setTimeout(consumePendingCrossSearch, 900);
+  scheduleCrossReturnRefresh();
 }

@@ -25,6 +25,7 @@ mod sync_core;
 mod text_chapters;
 mod tts;
 mod tts_core;
+mod translate;
 mod update;
 mod url_open;
 mod vocab;
@@ -336,6 +337,47 @@ fn app_version() -> String {
 #[tauri::command]
 fn dict_lookup(term: String) -> dict::DictResult {
     dict::lookup(&term)
+}
+
+#[tauri::command]
+async fn translate_text(
+    text: String,
+    source_lang: Option<String>,
+    target_lang: Option<String>,
+    provider: Option<String>,
+    api_id: Option<String>,
+    api_key: Option<String>,
+    baidu_app_id: Option<String>,
+    baidu_key: Option<String>,
+) -> translate::TranslateResult {
+    let fallback_provider = provider.clone().unwrap_or_else(|| "baidu".to_string());
+    let fallback_source = source_lang.clone().unwrap_or_else(|| "auto".to_string());
+    let fallback_target = target_lang.clone().unwrap_or_else(|| "zh-CN".to_string());
+    match tokio::task::spawn_blocking(move || {
+        translate::translate_text(
+            text,
+            source_lang,
+            target_lang,
+            provider,
+            api_id,
+            api_key,
+            baidu_app_id,
+            baidu_key,
+        )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => translate::TranslateResult {
+            ok: false,
+            provider: fallback_provider,
+            source_lang: fallback_source,
+            target_lang: fallback_target,
+            original: String::new(),
+            translated: String::new(),
+            error: format!("翻译任务失败：{e}"),
+        },
+    }
 }
 
 #[tauri::command]
@@ -1457,6 +1499,7 @@ fn main() {
             reader_window_open,
             app_version,
             dict_lookup,
+            translate_text,
             vocab::vocab_add,
             vocab::vocab_list,
             vocab::vocab_remove,
@@ -1485,6 +1528,7 @@ fn main() {
             open_book,
             book_info,
             reader_commands::book_meta,
+            reader_commands::book_meta_by_id,
             compute_word_counts,
             set_progress,
             reader_commands::add_bookmark,
@@ -1509,7 +1553,10 @@ fn main() {
             pdf_support::set_pdf_state,
             search_book,
             reader_commands::set_description,
+            reader_commands::set_book_description,
+            reader_commands::set_book_title,
             reader_commands::set_rating,
+            reader_commands::set_book_rating,
             search::web_search,
             open_book_at,
             take_pending_jump,

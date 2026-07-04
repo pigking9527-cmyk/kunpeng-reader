@@ -47,6 +47,7 @@
       </div>
 
       <div id="del-group" class="del-group">
+        <button id="book-info-btn" class="btn-plain">图书信息</button>
         <button id="cover-btn" class="btn-plain">🖼 更换封面</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
         <button id="del-cancel" class="btn-plain">取消</button>
@@ -59,14 +60,14 @@
             <line x1="16" y1="16" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
           </svg>
         </button>
+        <label class="shelf-toggle" id="shelf-toggle" title="全书架正文检索">
+          <input type="checkbox" id="shelf-search-chk" tabindex="-1" />
+        </label>
         <div class="sbox">
           <input id="search-input" class="search-input" type="text" autocomplete="off" tabindex="-1" placeholder="搜索 书名 / 作者 / 简介" />
           <button id="search-clear" class="search-clear" type="button" tabindex="-1" title="清空搜索" aria-label="清空搜索">×</button>
           <div id="search-history" class="search-history"></div>
         </div>
-        <label class="shelf-toggle" id="shelf-toggle" title="全书架正文检索">
-          <input type="checkbox" id="shelf-search-chk" tabindex="-1" />
-        </label>
       </div>
       <div class="filter-wrap">
         <button id="filter-btn" class="icon-btn" title="排序与布局">
@@ -239,6 +240,18 @@
         <div class="info-row"><span class="info-k">GitHub</span><span class="info-v"><a id="about-github" href="https://github.com/pigking9527-cmyk/kunpeng-reader" style="color:#2b6cff;text-decoration:none;cursor:pointer;">github.com/pigking9527-cmyk/kunpeng-reader</a></span></div>
       </div>
     </div>
+    <div id="book-info-modal" class="modal">
+      <div class="modal-card book-info-card">
+        <div class="modal-head"><span>图书信息</span><button id="book-info-close" class="btn-plain">✕</button></div>
+        <div class="info-row"><span class="info-k">书名</span><input id="book-info-title" class="info-input" type="text" autocomplete="off" /></div>
+        <div class="info-row"><span class="info-k">作者</span><span id="book-info-author" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">格式</span><span id="book-info-format" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">字数</span><span id="book-info-words" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">大小</span><span id="book-info-size" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k">评分</span><span id="book-info-stars" class="info-stars" title="点击打分，再点同一颗清除"></span></div>
+        <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="book-info-desc" class="info-desc" contenteditable="true"></div></div>
+      </div>
+    </div>
     <div id="debug-modal" class="modal">
       <div class="modal-card debug-card">
         <div class="modal-head"><span>调试设置</span><button id="debug-close" class="btn-plain">✕</button></div>
@@ -266,6 +279,12 @@
             <button id="debug-export" class="btn-plain">导出诊断 JSON</button>
           </section>
         </div>
+      </div>
+    </div>
+    <div id="shelf-search-modal" class="modal">
+      <div class="modal-card shelf-search-card">
+        <div class="modal-head"><span>书架全文检索</span><button id="shelf-search-close" class="btn-plain">✕</button></div>
+        <iframe id="shelf-search-frame" class="shelf-search-frame" title="书架全文检索"></iframe>
       </div>
     </div>
     <div id="drop-hint" class="drop-hint">松开即可导入书籍</div>

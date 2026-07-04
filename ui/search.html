@@ -72,6 +72,7 @@
       }
       .hit:hover { background: #f7f9ff; }
       .hit .ch { color: #aaa; font-size: 11px; margin-right: 8px; }
+      .hit .hit-meta { color: #8a98b8; font-size: 11px; margin-right: 8px; }
       .hit mark { background: #ffe58a; color: inherit; padding: 0 1px; border-radius: 2px; }
       .more { padding: 7px 14px; color: #aaa; font-size: 12px; border-top: 1px solid #f1f1f4; }
       .empty { padding: 40px; text-align: center; color: #aaa; }
@@ -86,7 +87,8 @@
       </div>
       <button id="go">搜索</button>
       <select id="sort" title="排序">
-        <option value="count">命中最多</option>
+        <option value="count">相关度</option>
+        <option value="hits">命中最多</option>
         <option value="title">按书名</option>
         <option value="author">按作者</option>
       </select>

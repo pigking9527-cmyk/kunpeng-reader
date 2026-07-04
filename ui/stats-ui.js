@@ -162,8 +162,8 @@ function monthLabelsForContribution(start) {
   while (cursor <= end) {
     const diff = Math.floor((cursor - start) / 86400000);
     const week = Math.max(0, Math.min(52, Math.floor(diff / 7)));
-    const left = (week / 53) * 100;
-    labels.push(`<span class="${left > 95 ? "edge" : ""}" style="left:${left.toFixed(3)}%">${cursor.getMonth() + 1}月</span>`);
+    const cls = week >= 51 ? "edge" : week <= 0 ? "first" : "";
+    labels.push(`<span class="mw${week} ${cls}">${cursor.getMonth() + 1}月</span>`);
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
   }
   return labels.join("");

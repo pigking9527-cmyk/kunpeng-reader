@@ -1,6 +1,61 @@
 use crate::{book, pdf_support, reader_window_id, AppState};
 use serde::Serialize;
 
+/// 修改指定书籍的书名（主窗口图书信息页使用）。
+#[tauri::command]
+pub(crate) fn set_book_title(
+    state: tauri::State<AppState>,
+    id: String,
+    title: String,
+) -> Result<(), String> {
+    let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("书名不能为空".to_string());
+    }
+    let mut lib = state.library.lock().unwrap();
+    if lib.get(id_num).is_none() {
+        return Err("找不到这本书".to_string());
+    }
+    lib.set_title(id_num, title);
+    lib.save();
+    Ok(())
+}
+
+/// 修改指定书籍简介（主窗口图书信息页使用）。
+#[tauri::command]
+pub(crate) fn set_book_description(
+    state: tauri::State<AppState>,
+    id: String,
+    description: String,
+) -> Result<(), String> {
+    let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    let mut lib = state.library.lock().unwrap();
+    if lib.get(id_num).is_none() {
+        return Err("找不到这本书".to_string());
+    }
+    lib.set_description(id_num, description);
+    lib.save();
+    Ok(())
+}
+
+/// 修改指定书籍评分（主窗口图书信息页使用）。
+#[tauri::command]
+pub(crate) fn set_book_rating(
+    state: tauri::State<AppState>,
+    id: String,
+    rating: f32,
+) -> Result<(), String> {
+    let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    let mut lib = state.library.lock().unwrap();
+    if lib.get(id_num).is_none() {
+        return Err("找不到这本书".to_string());
+    }
+    lib.set_rating(id_num, rating);
+    lib.save();
+    Ok(())
+}
+
 /// 修改简介（信息弹窗里可编辑）。
 #[tauri::command]
 pub(crate) fn set_description(
@@ -140,18 +195,7 @@ pub(crate) struct BookMeta {
     rating: f32, // 用户评分 0~5（0.5 刻度）
 }
 
-/// 书籍信息（含字数统计），供阅读页的信息弹窗用。按需调用（不拖慢打开）。
-#[tauri::command]
-pub(crate) async fn book_meta(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, AppState>,
-) -> Result<BookMeta, String> {
-    let label = window.label().to_string();
-    let id: u64 = label
-        .strip_prefix("reader-")
-        .and_then(|s| s.parse().ok())
-        .ok_or("非阅读窗口")?;
-
+async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String> {
     let (title, mut author, description, format, rating) = {
         let lib = state.library.lock().unwrap();
         let b = lib.get(id).ok_or("找不到这本书")?;
@@ -212,4 +256,28 @@ pub(crate) async fn book_meta(
         size,
         rating,
     })
+}
+
+/// 书籍信息（含字数统计），供阅读页的信息弹窗用。按需调用（不拖慢打开）。
+#[tauri::command]
+pub(crate) async fn book_meta(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<BookMeta, String> {
+    let label = window.label().to_string();
+    let id: u64 = label
+        .strip_prefix("reader-")
+        .and_then(|s| s.parse().ok())
+        .ok_or("非阅读窗口")?;
+    book_meta_for_id(state.inner(), id).await
+}
+
+/// 书籍信息（含字数统计），供主窗口选中书籍后打开信息页使用。
+#[tauri::command]
+pub(crate) async fn book_meta_by_id(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<BookMeta, String> {
+    let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    book_meta_for_id(state.inner(), id_num).await
 }

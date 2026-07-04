@@ -127,19 +127,56 @@ function parseInitial() {
 function escapeHtml(s) {
   return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
-function highlight(snippet, term) {
-  if (!term) return escapeHtml(snippet);
-  const low = snippet.toLowerCase(),
-    t = term.toLowerCase();
-  let html = "",
-    last = 0,
-    idx = low.indexOf(t);
-  while (idx >= 0) {
-    html += escapeHtml(snippet.slice(last, idx)) + "<mark>" + escapeHtml(snippet.slice(idx, idx + term.length)) + "</mark>";
-    last = idx + term.length;
-    idx = low.indexOf(t, last);
+function cjkNgramsForHighlight(text) {
+  const chars = Array.from(text).filter((ch) => /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u.test(ch));
+  const out = [];
+  for (const n of [3, 2]) {
+    if (chars.length < n) continue;
+    for (let i = 0; i + n <= chars.length; i++) out.push(chars.slice(i, i + n).join(""));
   }
-  html += escapeHtml(snippet.slice(last));
+  return out;
+}
+function highlightNeedles(term) {
+  const raw = (term || "").trim();
+  const seen = new Set();
+  const out = [];
+  function add(s) {
+    s = (s || "").trim();
+    if (s.length < 2) return;
+    const key = s.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(s);
+    }
+  }
+  add(raw);
+  (raw.match(/[A-Za-z0-9]{2,}/g) || []).forEach(add);
+  cjkNgramsForHighlight(raw).forEach(add);
+  out.sort((a, b) => b.length - a.length);
+  return out;
+}
+function highlight(snippet, term) {
+  const needles = highlightNeedles(term);
+  if (!needles.length) return escapeHtml(snippet);
+  const low = snippet.toLowerCase();
+  let html = "";
+  let pos = 0;
+  while (pos < snippet.length) {
+    let match = null;
+    for (const needle of needles) {
+      if (low.startsWith(needle.toLowerCase(), pos)) {
+        match = needle;
+        break;
+      }
+    }
+    if (match) {
+      html += "<mark>" + escapeHtml(snippet.slice(pos, pos + match.length)) + "</mark>";
+      pos += match.length;
+    } else {
+      html += escapeHtml(snippet[pos]);
+      pos += 1;
+    }
+  }
   return html;
 }
 
@@ -148,7 +185,8 @@ function sortResults(list) {
   const mode = sortEl.value;
   if (mode === "title") a.sort((x, y) => (x.title || "").localeCompare(y.title || "", "zh"));
   else if (mode === "author") a.sort((x, y) => (x.author || "").localeCompare(y.author || "", "zh"));
-  else a.sort((x, y) => y.count - x.count);
+  else if (mode === "hits") a.sort((x, y) => y.count - x.count);
+  else a.sort((x, y) => (y.score || y.count || 0) - (x.score || x.count || 0));
   return a;
 }
 
@@ -158,7 +196,10 @@ function buildHits(book, hitsWrap) {
   book.hits.forEach((h) => {
     const hit = document.createElement("div");
     hit.className = "hit";
-    const scoreTag = typeof h.score === "number" ? '<span class="score">' + Math.round(h.score * 100) + "%</span>" : "";
+    const meta = [];
+    if (typeof h.count === "number" && h.count > 1) meta.push(h.count + " 处");
+    if (typeof h.score === "number" && h.score > 0) meta.push("BM25 " + h.score.toFixed(2));
+    const scoreTag = meta.length ? '<span class="hit-meta">' + meta.join(" · ") + "</span>" : "";
     const body = mode === "sem" ? escapeHtml(h.snippet) : highlight(h.snippet, curTerm);
     hit.innerHTML = scoreTag + '<span class="ch">第' + (h.chapter + 1) + "章</span>" + body;
     hit.addEventListener("click", () => openHit(book.book_id, h.chapter));
@@ -253,7 +294,9 @@ async function runSearch(term) {
       curResults = await invoke("shelf_search", { term: curTerm, ids: limit });
       curSimilar = [];
     }
+    if (seq !== searchSeq) return;
   } catch (e) {
+    if (seq !== searchSeq) return;
     curResults = [];
     curSimilar = [];
     summaryEl.textContent = "检索出错：" + e;

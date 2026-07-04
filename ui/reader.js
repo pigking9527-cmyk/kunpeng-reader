@@ -100,12 +100,16 @@ ttsBtn.addEventListener("click", (e) => {
 let frameReady = false;
 let pendingJump = null;
 function doJump(j) {
-  if (!j || !j.term) {
+  if (!j) {
     window.consumePendingCrossSearch?.();
     return;
   }
-  if (frameReady) sendToPage({ gotoChapter: j.chapter || 0, search: j.term });
-  else pendingJump = j;
+  if (frameReady) {
+    sendToPage({ gotoChapter: j.chapter || 0, search: j.term || "" });
+    if (!j.term) setTimeout(() => window.consumePendingCrossSearch?.(), 120);
+  } else {
+    pendingJump = j;
+  }
 }
 listen("shelf-jump", (e) => doJump(e.payload));
 
@@ -461,7 +465,7 @@ const infoStars = document.getElementById("info-stars");
 makeStars(infoStars, (v) => invoke("set_rating", { rating: v }).catch(() => {}));
 invoke("book_meta").then((m) => { currentBookTitle = m.title || ""; }).catch(() => {});
 
-document.getElementById("info-btn").addEventListener("click", async () => {
+document.getElementById("info-btn")?.addEventListener("click", async () => {
   document.getElementById("info-words").textContent = "统计中…";
   infoModal.classList.add("show");
   try {
@@ -609,6 +613,33 @@ window.addEventListener("message", (e) => {
   }
   if (e.data.crossSearch) {
     openCrossSearch(e.data.crossSearch);
+  }
+  if (e.data.translateText) {
+    const req = e.data.translateText;
+    invoke("translate_text", {
+      text: req.text || "",
+      sourceLang: req.source || "auto",
+      targetLang: req.target || "system",
+      provider: req.provider || "baidu",
+      apiId: req.apiId || "",
+      apiKey: req.apiKey || "",
+      baiduAppId: req.baiduAppId || "",
+      baiduKey: req.baiduKey || "",
+    })
+      .then((r) => sendToPage({ translateResult: r }))
+      .catch((err) =>
+        sendToPage({
+          translateResult: {
+            ok: false,
+            provider: req.provider || "baidu",
+            source_lang: req.source || "auto",
+            target_lang: req.target || "system",
+            original: req.text || "",
+            translated: "",
+            error: String(err || "翻译失败"),
+          },
+        }),
+      );
   }
   if (e.data.dict !== undefined) {
     invoke("dict_lookup", { term: e.data.dict })

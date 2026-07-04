@@ -1,5 +1,5 @@
 use crate::search_core::{
-    ascii_lower_bytes, keyword_postings_for_chapter, simple_ascii_query_key, snippet_at,
+    ascii_lower_bytes, keyword_postings_for_chapter, keyword_query_terms, snippet_at_with_context,
 };
 use crate::{book, emit_startup_perf, set_thread_background, strip_tags, url_open, AppState};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use tauri::{Emitter, Manager};
 
 type EpubDoc = epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>;
 
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 const TEXT_CACHE_BUDGET: usize = 700 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -107,6 +107,8 @@ fn index_book_keywords(state: &AppState, book: &book::Book, chapters: &[String])
     };
     let Some(db) = db_guard.as_ref() else { return };
     for (ci, text) in chapters.iter().enumerate() {
+        let doc_len = text.chars().count().max(1).min(u32::MAX as usize) as u32;
+        let _ = db.upsert_keyword_doc(book.id, ci as u32, doc_len);
         for posting in keyword_postings_for_chapter(text) {
             let _ = db.upsert_keyword_posting(
                 &posting.term,
@@ -155,11 +157,20 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
         let mut skipped = 0usize;
         let mut indexed = 0usize;
         for b in books {
+            let mtime = file_mtime(&b.path);
             let already_indexed = state
                 .db
                 .lock()
                 .ok()
-                .and_then(|guard| guard.as_ref().map(|db| db.has_keyword_index_for_book(b.id)))
+                .and_then(|guard| {
+                    guard.as_ref().map(|db| {
+                        db.has_keyword_index_for_book(b.id)
+                            && db.has_keyword_doc_for_book(b.id)
+                            && load_index(b.id)
+                                .map(|idx| idx.v == INDEX_VERSION && idx.mtime == mtime)
+                                .unwrap_or(false)
+                    })
+                })
                 .unwrap_or(false);
             if already_indexed {
                 skipped += 1;
@@ -201,6 +212,8 @@ pub(crate) fn build_shelf_index(app: tauri::AppHandle) {
 struct ChapterHit {
     chapter: u32,
     snippet: String,
+    count: u32,
+    score: f64,
 }
 
 #[derive(Serialize)]
@@ -209,6 +222,7 @@ pub(crate) struct ShelfBookHits {
     title: String,
     author: String,
     count: u32,
+    score: f64,
     hits: Vec<ChapterHit>,
 }
 
@@ -287,7 +301,9 @@ fn search_one_book(
                 if hits.len() < 60 {
                     hits.push(ChapterHit {
                         chapter: ci as u32,
-                        snippet: snippet_at(text, mb, term_lower.len()),
+                        snippet: snippet_at_with_context(text, mb, term_lower.len(), 260),
+                        count: 1,
+                        score: 0.0,
                     });
                 }
                 if count >= 3000 {
@@ -305,7 +321,9 @@ fn search_one_book(
                 if hits.len() < 60 {
                     hits.push(ChapterHit {
                         chapter: ci as u32,
-                        snippet: snippet_at(text, mb, term_lower.len()),
+                        snippet: snippet_at_with_context(text, mb, term_lower.len(), 260),
+                        count: 1,
+                        score: 0.0,
                     });
                 }
                 if count >= 3000 {
@@ -325,8 +343,24 @@ fn search_one_book(
         title: book.title.clone(),
         author: book.author.clone(),
         count,
+        score: count as f64,
         hits,
     })
+}
+
+fn bm25_score(tf: u32, doc_len: u32, doc_freq: u32, total_docs: u32, avg_doc_len: f64) -> f64 {
+    if tf == 0 || doc_freq == 0 || total_docs == 0 {
+        return 0.0;
+    }
+    let k1 = 1.2;
+    let b = 0.75;
+    let tf = tf as f64;
+    let dl = (doc_len as f64).max(1.0);
+    let avgdl = avg_doc_len.max(1.0);
+    let n = total_docs as f64;
+    let df = doc_freq as f64;
+    let idf = (1.0 + (n - df + 0.5).max(0.0) / (df + 0.5)).ln();
+    idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avgdl))
 }
 
 fn search_keyword_index(
@@ -335,45 +369,110 @@ fn search_keyword_index(
     term: &str,
     want: Option<&HashSet<u64>>,
 ) -> Option<Vec<ShelfBookHits>> {
-    let key = simple_ascii_query_key(term)?;
+    let terms = keyword_query_terms(term);
+    if terms.is_empty() {
+        return None;
+    }
     let db_guard = state.db.lock().ok()?;
     let db = db_guard.as_ref()?;
-    let rows = db.keyword_search(&key, want).ok()?;
-    if rows.is_empty() && !db.has_keyword_index() {
-        return None;
+    let rows = db.keyword_search_terms(&terms, want).ok()?;
+    if rows.is_empty() {
+        let missing_new_index = targets.iter().any(|b| !db.has_keyword_doc_for_book(b.id));
+        if !db.has_keyword_index() || missing_new_index {
+            return None;
+        }
     }
     let mut titles: HashMap<u64, (&str, &str)> = HashMap::new();
     for b in targets {
         titles.insert(b.id, (&b.title, &b.author));
     }
+    #[derive(Default)]
+    struct ChapterAgg {
+        count: u32,
+        score: f64,
+        snippets: Vec<String>,
+    }
     let mut grouped: HashMap<u64, ShelfBookHits> = HashMap::new();
+    let mut chapter_hits: HashMap<(u64, u32), ChapterAgg> = HashMap::new();
     for row in rows {
+        let score = bm25_score(
+            row.count,
+            row.doc_len,
+            row.doc_freq,
+            row.total_docs,
+            row.avg_doc_len,
+        );
         let (title, author) = titles.get(&row.book_id).copied().unwrap_or(("", ""));
         let entry = grouped.entry(row.book_id).or_insert_with(|| ShelfBookHits {
             book_id: row.book_id.to_string(),
             title: title.to_string(),
             author: author.to_string(),
             count: 0,
+            score: 0.0,
             hits: Vec::new(),
         });
         entry.count = entry.count.saturating_add(row.count);
+        entry.score += score;
+        let ch = chapter_hits.entry((row.book_id, row.chapter)).or_default();
+        ch.count = ch.count.saturating_add(row.count);
+        ch.score += score;
         for snippet in row.snippets {
-            if entry.hits.len() < 60 {
-                entry.hits.push(ChapterHit {
-                    chapter: row.chapter,
-                    snippet,
+            if ch.snippets.len() < 3 && !ch.snippets.iter().any(|s| s == &snippet) {
+                ch.snippets.push(snippet);
+            }
+        }
+    }
+    for ((book_id, chapter), ch) in chapter_hits {
+        if let Some(book) = grouped.get_mut(&book_id) {
+            if book.hits.len() < 80 {
+                book.hits.push(ChapterHit {
+                    chapter,
+                    snippet: ch.snippets.join(" / "),
+                    count: ch.count,
+                    score: ch.score,
                 });
             }
         }
     }
-    let mut out: Vec<ShelfBookHits> = grouped.into_values().collect();
-    out.sort_by(|a, b| b.count.cmp(&a.count));
+    let mut out: Vec<ShelfBookHits> = grouped
+        .into_values()
+        .map(|mut book| {
+            book.hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.count.cmp(&a.count))
+            });
+            book
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.count.cmp(&a.count))
+    });
     Some(out)
 }
 
 #[tauri::command]
 pub(crate) async fn shelf_search(
-    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    term: String,
+    ids: Option<Vec<String>>,
+) -> Result<Vec<ShelfBookHits>, ()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        set_thread_background(true);
+        let result = shelf_search_blocking(&app, term, ids);
+        set_thread_background(false);
+        result
+    })
+    .await
+    .map_err(|_| ())?
+}
+
+fn shelf_search_blocking(
+    app: &tauri::AppHandle,
     term: String,
     ids: Option<Vec<String>>,
 ) -> Result<Vec<ShelfBookHits>, ()> {
@@ -381,13 +480,13 @@ pub(crate) async fn shelf_search(
     if term.is_empty() {
         return Ok(Vec::new());
     }
+    let state = app.state::<AppState>();
     let want: Option<HashSet<u64>> =
         ids.map(|v| v.iter().filter_map(|s| s.parse::<u64>().ok()).collect());
     let targets: Vec<book::Book> = {
         let lib = state.library.lock().unwrap();
         lib.books
             .iter()
-            .filter(|b| b.format != "pdf")
             .filter(|b| want.as_ref().map(|w| w.contains(&b.id)).unwrap_or(true))
             .cloned()
             .collect()
@@ -397,9 +496,8 @@ pub(crate) async fn shelf_search(
     let term_lower = ascii_lower_bytes(&term);
 
     let st: &AppState = state.inner();
-    if let Some(results) = search_keyword_index(st, &targets, &term, want.as_ref()) {
-        return Ok(results);
-    }
+    // 先以精确原文扫描保证结果完整。当前倒排索引仍可能是部分索引或旧索引，
+    // 直接采用会导致书架全文检索/阅读页跨书搜索漏书、漏命中。
     let nthreads = std::thread::available_parallelism()
         .map(|n| n.get().min(8))
         .unwrap_or(4)

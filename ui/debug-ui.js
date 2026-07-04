@@ -15,7 +15,7 @@
     bg_vocab_polling: true,
     reader_stats_report: true,
     reader_words_detect: true,
-    reader_page_measure: false,
+    reader_page_measure: true,
     reader_immersive: true,
     reader_cross_search: true,
     reader_footnotes: true,
@@ -164,7 +164,7 @@
     });
     settings.reader_stats_report = false;
     settings.reader_words_detect = false;
-    settings.reader_page_measure = false;
+    settings.reader_page_measure = true;
     saveSettings(settings);
     renderToggles();
     renderSummary();

@@ -10,9 +10,14 @@ pub struct AppDb {
 
 #[derive(Clone, serde::Serialize)]
 pub struct DbSearchHit {
+    pub term: String,
     pub book_id: u64,
     pub chapter: u32,
     pub count: u32,
+    pub doc_len: u32,
+    pub doc_freq: u32,
+    pub total_docs: u32,
+    pub avg_doc_len: f64,
     pub snippets: Vec<String>,
 }
 
@@ -105,6 +110,14 @@ impl AppDb {
                 );
                 CREATE INDEX IF NOT EXISTS idx_keyword_postings_term
                     ON keyword_postings(term);
+                CREATE TABLE IF NOT EXISTS keyword_docs (
+                    book_id INTEGER NOT NULL,
+                    chapter INTEGER NOT NULL,
+                    length INTEGER NOT NULL,
+                    PRIMARY KEY(book_id, chapter)
+                );
+                CREATE INDEX IF NOT EXISTS idx_keyword_docs_book
+                    ON keyword_docs(book_id);
                 "#,
             )
             .map_err(|e| e.to_string())
@@ -394,6 +407,43 @@ impl AppDb {
                 params![book_id as i64],
             )
             .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM keyword_docs WHERE book_id=?",
+                params![book_id as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn has_keyword_doc_for_book(&self, book_id: u64) -> bool {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM keyword_docs WHERE book_id=? LIMIT 1)",
+                params![book_id as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .unwrap_or(false)
+    }
+
+    pub fn upsert_keyword_doc(
+        &self,
+        book_id: u64,
+        chapter: u32,
+        length: u32,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO keyword_docs(book_id,chapter,length)
+                VALUES(?,?,?)
+                ON CONFLICT(book_id,chapter) DO UPDATE SET
+                    length=excluded.length
+                "#,
+                params![book_id as i64, chapter as i64, length as i64],
+            )
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -421,34 +471,74 @@ impl AppDb {
         Ok(())
     }
 
-    pub fn keyword_search(
+    pub fn keyword_search_terms(
         &self,
-        term: &str,
+        terms: &[String],
         ids: Option<&std::collections::HashSet<u64>>,
     ) -> Result<Vec<DbSearchHit>, String> {
+        let mut out = Vec::new();
+        if terms.is_empty() {
+            return Ok(out);
+        }
+        let total_docs = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM keyword_docs", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or(0)
+            .max(0) as u32;
+        let avg_doc_len = self
+            .conn
+            .query_row("SELECT AVG(length) FROM keyword_docs", [], |r| {
+                r.get::<_, Option<f64>>(0)
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(1.0)
+            .max(1.0);
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT book_id,chapter,count,snippets_json FROM keyword_postings WHERE term=?",
+                r#"
+                SELECT p.book_id,p.chapter,p.count,p.snippets_json,COALESCE(d.length,1)
+                FROM keyword_postings p
+                LEFT JOIN keyword_docs d ON d.book_id=p.book_id AND d.chapter=p.chapter
+                WHERE p.term=?
+                "#,
             )
             .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![term], |r| {
-                let txt: String = r.get(3)?;
-                let snippets: Vec<String> = serde_json::from_str(&txt).unwrap_or_default();
-                Ok(DbSearchHit {
-                    book_id: r.get::<_, i64>(0)? as u64,
-                    chapter: r.get::<_, i64>(1)? as u32,
-                    count: r.get::<_, i64>(2)? as u32,
-                    snippets,
+        for term in terms {
+            let doc_freq = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM keyword_postings WHERE term=?",
+                    params![term],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                .max(0) as u32;
+            let rows = stmt
+                .query_map(params![term], |r| {
+                    let txt: String = r.get(3)?;
+                    let snippets: Vec<String> = serde_json::from_str(&txt).unwrap_or_default();
+                    Ok(DbSearchHit {
+                        term: term.clone(),
+                        book_id: r.get::<_, i64>(0)? as u64,
+                        chapter: r.get::<_, i64>(1)? as u32,
+                        count: r.get::<_, i64>(2)? as u32,
+                        snippets,
+                        doc_len: r.get::<_, i64>(4)?.max(1) as u32,
+                        doc_freq,
+                        total_docs,
+                        avg_doc_len,
+                    })
                 })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for row in rows {
-            let hit = row.map_err(|e| e.to_string())?;
-            if ids.map(|set| set.contains(&hit.book_id)).unwrap_or(true) {
-                out.push(hit);
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let hit = row.map_err(|e| e.to_string())?;
+                if ids.map(|set| set.contains(&hit.book_id)).unwrap_or(true) {
+                    out.push(hit);
+                }
             }
         }
         Ok(out)

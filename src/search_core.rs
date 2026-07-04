@@ -1,10 +1,14 @@
-/// 简单 ASCII 查询走倒排索引：只接受 2 位以上英数字，和索引分词保持一致。
-pub fn simple_ascii_query_key(term: &str) -> Option<String> {
-    let t = term.trim();
-    if t.len() < 2 || !t.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(t.to_ascii_lowercase())
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+    )
 }
 
 /// 提取 ASCII 英数字词，返回 (小写词, 起始字节偏移, 字节长度)。
@@ -34,6 +38,61 @@ pub fn ascii_lower_bytes(s: &str) -> Vec<u8> {
     s.bytes().map(|b| b.to_ascii_lowercase()).collect()
 }
 
+/// 提取连续 CJK 文本的 2/3 字 ngram，返回 (ngram, 起始字节偏移, 字节长度)。
+/// 这样中文查询可以走倒排索引，而不是每次全库扫描。
+pub fn cjk_ngrams(text: &str) -> Vec<(String, usize, usize)> {
+    let mut out = Vec::new();
+    let mut run: Vec<(char, usize, usize)> = Vec::new();
+    let flush = |run: &mut Vec<(char, usize, usize)>, out: &mut Vec<(String, usize, usize)>| {
+        if run.len() < 2 {
+            run.clear();
+            return;
+        }
+        for n in 2..=3 {
+            if run.len() < n {
+                continue;
+            }
+            for win in run.windows(n) {
+                let mut term = String::new();
+                for (ch, _, _) in win {
+                    term.push(*ch);
+                }
+                let start = win[0].1;
+                let end = win[n - 1].2;
+                out.push((term, start, end - start));
+            }
+        }
+        run.clear();
+    };
+    for (idx, ch) in text.char_indices() {
+        let end = idx + ch.len_utf8();
+        if is_cjk(ch) {
+            run.push((ch, idx, end));
+        } else {
+            flush(&mut run, &mut out);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// 倒排索引用查询词：英文按词，中文按 2/3 字 ngram。去重并保持稳定顺序。
+pub fn keyword_query_terms(term: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (t, _, _) in ascii_terms(term) {
+        if seen.insert(t.clone()) {
+            out.push(t);
+        }
+    }
+    for (t, _, _) in cjk_ngrams(term) {
+        if seen.insert(t.clone()) {
+            out.push(t);
+        }
+    }
+    out
+}
+
 fn floor_char_boundary(s: &str, mut i: usize) -> usize {
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;
@@ -49,11 +108,16 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
+/// 命中位置（字节偏移）前后取一段上下文；保持 UTF-8 边界安全。
+pub fn snippet_at_with_context(text: &str, mb: usize, ml: usize, context: usize) -> String {
+    let s = floor_char_boundary(text, mb.saturating_sub(context));
+    let e = ceil_char_boundary(text, (mb + ml + context).min(text.len()));
+    text[s..e].trim().to_string()
+}
+
 /// 命中位置（字节偏移）前后各取约 80 字节作为上下文片段；保持 UTF-8 边界安全。
 pub fn snippet_at(text: &str, mb: usize, ml: usize) -> String {
-    let s = floor_char_boundary(text, mb.saturating_sub(80));
-    let e = ceil_char_boundary(text, (mb + ml + 80).min(text.len()));
-    text[s..e].trim().to_string()
+    snippet_at_with_context(text, mb, ml, 80)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,10 +131,10 @@ pub struct KeywordPostingDraft {
 pub fn keyword_postings_for_chapter(text: &str) -> Vec<KeywordPostingDraft> {
     let mut map: std::collections::HashMap<String, (u32, Vec<String>)> =
         std::collections::HashMap::new();
-    for (term, pos, len) in ascii_terms(text) {
+    for (term, pos, len) in ascii_terms(text).into_iter().chain(cjk_ngrams(text)) {
         let entry = map.entry(term).or_insert((0, Vec::new()));
         entry.0 = entry.0.saturating_add(1);
-        if entry.1.len() < 8 {
+        if entry.1.len() < 6 {
             entry.1.push(snippet_at(text, pos, len));
         }
     }
@@ -89,20 +153,9 @@ pub fn keyword_postings_for_chapter(text: &str) -> Vec<KeywordPostingDraft> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ascii_lower_bytes, ascii_terms, keyword_postings_for_chapter, simple_ascii_query_key,
-        snippet_at,
+        ascii_lower_bytes, ascii_terms, cjk_ngrams, keyword_postings_for_chapter,
+        keyword_query_terms, snippet_at,
     };
-
-    #[test]
-    fn query_key_accepts_only_simple_ascii_terms() {
-        assert_eq!(
-            simple_ascii_query_key(" ASPNET "),
-            Some("aspnet".to_string())
-        );
-        assert_eq!(simple_ascii_query_key("A"), None);
-        assert_eq!(simple_ascii_query_key("南明"), None);
-        assert_eq!(simple_ascii_query_key("hello-world"), None);
-    }
 
     #[test]
     fn ascii_terms_extract_words_with_byte_offsets() {
@@ -140,7 +193,27 @@ mod tests {
         assert_eq!(rust.snippets.len(), 3);
         let term = postings.iter().find(|p| p.term == "term").unwrap();
         assert_eq!(term.count, 12);
-        assert_eq!(term.snippets.len(), 8);
+        assert_eq!(term.snippets.len(), 6);
         assert!(postings.iter().all(|p| p.term != "a"));
+    }
+
+    #[test]
+    fn cjk_ngrams_extracts_bigrams_and_trigrams_with_offsets() {
+        let text = "南明史，清史";
+        let grams = cjk_ngrams(text);
+        assert!(grams.iter().any(|g| g.0 == "南明"));
+        assert!(grams.iter().any(|g| g.0 == "明史"));
+        assert!(grams.iter().any(|g| g.0 == "南明史"));
+        let nanming = grams.iter().find(|g| g.0 == "南明").unwrap();
+        assert_eq!(&text[nanming.1..nanming.1 + nanming.2], "南明");
+    }
+
+    #[test]
+    fn keyword_query_terms_mixes_ascii_and_cjk() {
+        let terms = keyword_query_terms("ASP.NET 南明史");
+        assert!(terms.contains(&"asp".to_string()));
+        assert!(terms.contains(&"net".to_string()));
+        assert!(terms.contains(&"南明".to_string()));
+        assert!(terms.contains(&"南明史".to_string()));
     }
 }
