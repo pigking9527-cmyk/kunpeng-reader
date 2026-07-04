@@ -234,4 +234,19 @@ mod tests {
         let html = r#"<div srcdoc="<script>x</script>" style="background:expression(alert(1))" class="note">x</div>"#;
         assert_eq!(sanitize_mobi_html(html), r#"<div class="note">x</div>"#);
     }
+
+    #[test]
+    fn removes_mixed_case_dangerous_blocks_without_touching_safe_text() {
+        let html = r#"<p>before</p><ScRiPt type="text/javascript">bad()</ScRiPt><OBJECT data="x"></OBJECT><p>after</p>"#;
+        assert_eq!(sanitize_mobi_html(html), "<p>before</p><p>after</p>");
+    }
+
+    #[test]
+    fn blocks_html_data_urls_but_keeps_safe_image_data() {
+        let html = r#"<a href=" data:text/html,<script>x</script>">bad</a><img src="data:image/png;base64,abc" alt="ok">"#;
+        assert_eq!(
+            sanitize_mobi_html(html),
+            r#"<a>bad</a><img src="data:image/png;base64,abc" alt="ok">"#
+        );
+    }
 }

@@ -141,6 +141,16 @@ mod tests {
     }
 
     #[test]
+    fn chunk_text_uses_newlines_as_boundaries_when_segment_is_long_enough() {
+        let a = "第一段内容足够长，用来确认换行可以形成独立语义片段。".repeat(5);
+        let b = "第二段内容也足够长，用来确认后续内容不会被前一段吞掉。".repeat(5);
+        let chunks = chunk_text(&format!("{a}\n{b}"));
+        assert!(chunks.len() >= 2);
+        assert!(chunks.first().unwrap().contains("第一段内容"));
+        assert!(chunks.last().unwrap().contains("第二段内容"));
+    }
+
+    #[test]
     fn shard_estimate_scales_with_chunks_and_dimensions() {
         assert_eq!(shard_est_bytes(2, 3), 824);
         assert!(index_ram_budget() >= 512 << 20);
