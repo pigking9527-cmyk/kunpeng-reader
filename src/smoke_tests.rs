@@ -16,13 +16,9 @@ fn temp_file(name: &str, ext: &str) -> PathBuf {
     path
 }
 
-fn write_zip_file<W: Write + std::io::Seek>(
-    zip: &mut zip::ZipWriter<W>,
-    path: &str,
-    body: &str,
-) {
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+fn write_zip_file<W: Write + std::io::Seek>(zip: &mut zip::ZipWriter<W>, path: &str, body: &str) {
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip.start_file(path, options).unwrap();
     zip.write_all(body.as_bytes()).unwrap();
 }

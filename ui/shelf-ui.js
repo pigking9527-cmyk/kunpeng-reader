@@ -137,6 +137,7 @@ function bookCard(b, index = 0) {
       relocateBook(b);
       return;
     }
+    if (typeof window.clearCrossReturnMemory === "function") window.clearCrossReturnMemory();
     invoke("open_book", { id: b.id }).catch((err) => {
       const s = String(err);
       if (s.includes("丢失") || s.includes("定位")) relocateBook(b);

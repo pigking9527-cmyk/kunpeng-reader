@@ -22,6 +22,7 @@ mod tests {
         assert!(READER_PAGE_HEAD.contains("highlightMenuActionsV1"));
         assert!(READER_PAGE_HEAD.contains("highlightMenuDisplayModeV1"));
         assert!(READER_PAGE_HEAD.contains("highlightMenuSizeV1"));
+        assert!(READER_PAGE_HEAD.contains("semanticSearch"));
         assert!(READER_PAGE_HEAD.contains("translateResult"));
         assert!(READER_PAGE_HEAD.contains("dictResult"));
     }

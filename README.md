@@ -3,7 +3,7 @@
 一个面向 Windows 的高性能本地电子书阅读器。**Rust + Tauri 2 + 系统 WebView2**，书架与阅读页相互独立、EPUB 原生渲染、按章虚拟化加载，大书秒开。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
-> 最新版本：**v1.8.5** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版，Win10/11 自带 WebView2）。
+> 最新版本：**v1.8.6** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版，Win10/11 自带 WebView2）。
 
 ## 特性
 
@@ -68,9 +68,11 @@ cargo tauri build
 - v1.8.3 继续使用 ThinLTO + 多 codegen units + 增量编译，保留 `opt-level=3` 的同时加快日常迭代；同时加强模块边界、HTTPS/URL 打开安全、真实容器烟测、阅读统计交互和发布资产完整性。
 - v1.8.4 聚焦阅读页交互和调试能力：跨书搜索、划词菜单设置入口、沉浸模式切章体验、隐藏调试设置页和后台任务诊断开关。
 - v1.8.5 聚焦阅读页工具和统计修复：划词菜单显示/排序/大小设置、翻译接口配置、跨书搜索窗口与返回、贡献图月份标签、页数加载状态和若干搜索体验问题。
+- v1.8.6 聚焦阅读页分页和模式切换：滚动/整页分页稳定性、图片跨页预览与完整显示、物理页数统计、滚动模式锁定单页，以及设置面板显示当前模式。
 - 首次使用**语义检索**会自动下载约 120MB 的中文语义模型（之后离线运行）。
 - **在线朗读**（edge-tts）需联网；离线可在「设置 → 朗读」切到系统语音。
 
 ## 技术栈
 
 Rust · Tauri 2 · WebView2 · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)
+

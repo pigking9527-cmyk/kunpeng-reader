@@ -12,6 +12,8 @@ const DEFAULTS = {
   marginBottom: 24,
   marginLeft: 28,
   marginRight: 28,
+  pageMode: "single",
+  flowMode: "paged",
   ttsSource: "edge",
   ttsVoice: "zh-CN-XiaoxiaoNeural",
   ttsRate: 1,
@@ -31,7 +33,16 @@ function loadSettings() {
 }
 let settings = loadSettings();
 
+function normalizeModeSettings() {
+  if (settings.flowMode === "scroll" && settings.pageMode !== "single") {
+    settings.pageMode = "single";
+    return true;
+  }
+  return false;
+}
+
 function saveSettings() {
+  normalizeModeSettings();
   localStorage.setItem("readerSettings", JSON.stringify(settings));
 }
 // 把设置发给合并页（实时注入样式）
@@ -62,6 +73,7 @@ function bindNum(id, key) {
   el.value = clamp(parseInt(settings[key], 10));
   el.addEventListener("input", () => {
     settings[key] = clamp(parseInt(el.value, 10)); // 用于排版的值始终夹紧（负边距会让页面变形）
+    if (String(el.value) !== String(settings[key])) el.value = settings[key];
     onChange();
   });
   el.addEventListener("change", () => {
@@ -70,6 +82,7 @@ function bindNum(id, key) {
 }
 
 function initSettingsUI() {
+  if (normalizeModeSettings()) saveSettings();
   // 主题按钮
   function refreshThemeBtns() {
     document
@@ -100,6 +113,48 @@ function initSettingsUI() {
   bindNum("set-mb", "marginBottom");
   bindNum("set-ml", "marginLeft");
   bindNum("set-mr", "marginRight");
+  function refreshPageModeBtns() {
+    normalizeModeSettings();
+    const locked = settings.flowMode === "scroll";
+    document.querySelectorAll(".page-mode-btn").forEach((b) => {
+      const target = b.dataset.pageMode || "single";
+      const current = target === settings.pageMode;
+      b.hidden = !current;
+      b.disabled = locked;
+      b.classList.toggle("active", current);
+      b.title = locked ? "滚动模式固定为单页" : "点击切换单页 / 双页";
+    });
+  }
+  document.querySelectorAll(".page-mode-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      if (settings.flowMode === "scroll") return;
+      settings.pageMode = settings.pageMode === "dual" ? "single" : "dual";
+      refreshPageModeBtns();
+      onChange();
+    });
+  });
+  refreshPageModeBtns();
+
+  function refreshFlowModeBtns() {
+    document.querySelectorAll(".flow-mode-btn").forEach((b) => {
+      const target = b.dataset.flowMode || "paged";
+      const current = target === settings.flowMode;
+      b.hidden = !current;
+      b.disabled = false;
+      b.classList.toggle("active", current);
+      b.title = "点击切换整页 / 滚动模式";
+    });
+  }
+  document.querySelectorAll(".flow-mode-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      settings.flowMode = settings.flowMode === "scroll" ? "paged" : "scroll";
+      normalizeModeSettings();
+      refreshFlowModeBtns();
+      refreshPageModeBtns();
+      onChange();
+    });
+  });
+  refreshFlowModeBtns();
   // 朗读设置
   const bindSel = (id, key) => {
     const el = document.getElementById(id);
@@ -111,3 +166,5 @@ function initSettingsUI() {
   bindSel("set-ttsvoice", "ttsVoice");
   bindRange("set-ttsrate", "v-ttsrate", "ttsRate", (v) => v.toFixed(1) + "×");
 }
+
+

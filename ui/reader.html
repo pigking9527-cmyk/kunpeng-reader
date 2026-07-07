@@ -20,8 +20,11 @@
         user-select: none; /* 外壳不可选，避免从工具栏拖拽把整页（含 iframe）选中变灰 */
       }
       .body { user-select: none; } /* 正文选择由 iframe 内部处理，外壳层不参与选择 */
-      .toolbar .title { color: #555; font-size: 13px;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 32%; }
+      .toolbar .title {
+        color: #555; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        width: 245px; max-width: 34vw; min-width: 245px; text-align: center;
+        display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+      }
       .reader-drag-space { flex: 1 1 auto; align-self: stretch; min-width: 96px; cursor: default; }
       .window-controls { display: inline-flex; align-items: center; height: 36px; margin-left: 2px; }
       .win-btn {
@@ -95,6 +98,7 @@
       .cross-hit:hover { background: #eef2ff; }
       .cross-hit mark { background: #ffe58a; color: inherit; }
       .cross-ch { color: #999; font-size: 11px; margin-right: 6px; }
+      .cross-score { color: #4b72aa; font-size: 11px; margin-right: 8px; white-space: nowrap; }
       .cross-more { display: inline-flex; align-items: center; gap: 8px; color: #888; font-size: 12px; padding: 7px 10px; margin: 4px 0 0 6px; border: 1px solid #e3e6ef; border-radius: 999px; background: #fafbff; cursor: pointer; }
       .cross-more:hover { background: #eef2ff; border-color: #b7c8ff; color: #1c4fb0; }
       .cross-more-ico { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 20px; border-radius: 999px; background: #e8efff; color: #2b6cff; font-weight: 700; }
@@ -159,12 +163,13 @@
         border-radius: 50%; animation: spin 0.8s linear infinite;
       }
       .title .mini-spinner {
-        display: inline-block; width: 14px; height: 14px; vertical-align: -2px;
+        display: inline-block; flex: 0 0 auto; width: 14px; height: 14px; vertical-align: -2px;
         border: 2px solid rgba(80,90,110,.22); border-top-color: #5aa0ff;
         border-radius: 50%; animation: spin .75s linear infinite;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
       body.theme-dark .loading { background: #1c1c1e; }
+      .mode-switch-btn[hidden] { display: none; }
 
       /* 右侧自定义垂直滚动条（代表全书进度，可拖动/点击跳页） */
       .vbar {
@@ -379,6 +384,9 @@
       }
       .theme-btn:hover { background: #eef2ff; }
       .theme-btn.active { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
+      .theme-btn:disabled { opacity: 0.62; cursor: default; }
+      .theme-btn:disabled:hover { background: #fff; }
+      .theme-btn.active:disabled { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
 
       /* 深色主题下的外壳（工具栏/目录/设置/弹窗） */
       body.theme-dark { background: #1c1c1e; color: #ddd; }
@@ -547,6 +555,20 @@
       <div class="row"><label>行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
       <div class="row"><label>段间距</label><input type="range" id="set-para" min="0" max="2" step="0.1" /><span class="val" id="v-para"></span></div>
       <div class="row"><label>字间距</label><input type="range" id="set-letter" min="0" max="5" step="0.5" /><span class="val" id="v-letter"></span></div>
+      <div class="row">
+        <label>页面</label>
+        <div class="theme-row">
+          <button class="theme-btn mode-switch-btn page-mode-btn" data-page-mode="single">单页</button>
+          <button class="theme-btn mode-switch-btn page-mode-btn" data-page-mode="dual">双页</button>
+        </div>
+      </div>
+      <div class="row">
+        <label>切换</label>
+        <div class="theme-row">
+          <button class="theme-btn mode-switch-btn flow-mode-btn" data-flow-mode="paged">整页模式</button>
+          <button class="theme-btn mode-switch-btn flow-mode-btn" data-flow-mode="scroll">滚动模式</button>
+        </div>
+      </div>
       <h4>页边距（像素）</h4>
       <div class="margins">
         <label>上 <input type="number" id="set-mt" min="0" max="160" /></label>
@@ -677,7 +699,7 @@
     <div id="cross-modal" class="modal">
       <div class="modal-card cross-card">
         <div class="modal-head">
-          <span>跨书搜索</span>
+          <span id="cross-title">跨书搜索</span>
           <button id="cross-close" class="tbtn">✕</button>
         </div>
         <div class="cross-row">
@@ -697,3 +719,4 @@
     <script src="reader-cross-search-ui.js"></script>
   </body>
 </html>
+

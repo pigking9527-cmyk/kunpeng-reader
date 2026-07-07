@@ -26,6 +26,29 @@ body {
 .info-k { color: #888; flex: 0 0 80px; }
 .info-v { color: #222; }
 .book-info-card { width: 520px; max-height: 82vh; overflow-y: auto; }
+.similar-books-card { width: 620px; max-width: 92vw; max-height: 82vh; overflow-y: auto; }
+.similar-source { color: #777; font-size: 13px; margin: 0 0 10px; }
+.similar-list { display: flex; flex-direction: column; gap: 8px; }
+.similar-empty { color: #888; text-align: center; padding: 24px 10px; font-size: 14px; }
+.similar-item {
+  display: grid; grid-template-columns: 54px 1fr; gap: 12px; align-items: center;
+  width: 100%; border: 1px solid #ececf1; border-radius: 8px; background: #fff;
+  padding: 8px; text-align: left; cursor: pointer; font: inherit; color: inherit;
+}
+.similar-item:hover { background: #f4f7ff; border-color: #cbd9ff; }
+.similar-cover {
+  width: 54px; height: 74px; border-radius: 6px; overflow: hidden; position: relative;
+  display: flex; background: #3e5a8c; box-shadow: 0 1px 4px rgba(0,0,0,.18);
+}
+.similar-cover.has-img { background: #f1f2f5; }
+.similar-cover img { width: 100%; height: 100%; object-fit: contain; background: transparent; }
+.similar-cover .spine { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; background: rgba(0,0,0,.22); }
+.similar-cover .gen { flex: 1; color: #fff; padding: 8px 6px 8px 10px; font-size: 11px; line-height: 1.35; overflow: hidden; }
+.similar-body { min-width: 0; }
+.similar-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 6px; }
+.similar-meta { color: #777; font-size: 12px; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.similar-score { height: 5px; border-radius: 999px; background: #eef0f5; overflow: hidden; }
+.similar-score span { display: block; height: 100%; border-radius: inherit; background: #4d8df7; }
 .shelf-search-card {
   width: min(1000px, calc(100vw - 72px));
   height: min(760px, calc(100vh - 92px));

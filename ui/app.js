@@ -20,6 +20,16 @@ const searchInput = document.getElementById("search-input");
 const searchClear = document.getElementById("search-clear");
 const toolbarEl = document.querySelector(".toolbar");
 
+function clearCrossReturnMemory() {
+  try {
+    localStorage.removeItem("crossReturnState");
+    localStorage.removeItem("pendingCrossSearch");
+  } catch (e) {}
+}
+window.clearCrossReturnMemory = clearCrossReturnMemory;
+// 应用重新启动进入书架时，跨书搜索的回跳记忆不应继续保留。
+clearCrossReturnMemory();
+
 function debugSettingOn(key) {
   try {
     const settings = JSON.parse(localStorage.getItem("debugSettingsV1") || "{}");
@@ -398,6 +408,7 @@ function openRandom() {
     return;
   }
   const b = books[Math.floor(Math.random() * books.length)];
+  clearCrossReturnMemory();
   invoke("open_book", { id: b.id });
 }
 
@@ -648,10 +659,14 @@ const delGroup = document.getElementById("del-group");
 const delBtn = document.getElementById("del-btn");
 const coverBtn = document.getElementById("cover-btn");
 const bookInfoBtn = document.getElementById("book-info-btn");
+const similarBooksBtn = document.getElementById("similar-books-btn");
 const bookInfoModal = document.getElementById("book-info-modal");
 const bookInfoTitle = document.getElementById("book-info-title");
 const bookInfoDesc = document.getElementById("book-info-desc");
 const bookInfoStars = document.getElementById("book-info-stars");
+const similarBooksModal = document.getElementById("similar-books-modal");
+const similarBooksSource = document.getElementById("similar-books-source");
+const similarBooksList = document.getElementById("similar-books-list");
 let currentInfoBookId = "";
 
 function fmtWords(n) {
@@ -722,6 +737,82 @@ bookInfoDesc.addEventListener("blur", () => {
   invoke("set_book_description", { id: currentInfoBookId, description }).catch(() => {});
 });
 
+function renderSimilarCover(b) {
+  const cover = document.createElement("div");
+  cover.className = "similar-cover";
+  if (b.cover) {
+    cover.classList.add("has-img");
+    const img = document.createElement("img");
+    img.alt = b.title || "";
+    img.src = b.cover;
+    cover.appendChild(img);
+  } else {
+    cover.style.background = colorFor(b.title || "");
+    const spine = document.createElement("div");
+    spine.className = "spine";
+    const gen = document.createElement("div");
+    gen.className = "gen";
+    gen.textContent = b.title || "未命名";
+    cover.append(spine, gen);
+  }
+  return cover;
+}
+function renderSimilarBooks(sourceTitle, list) {
+  similarBooksSource.textContent = sourceTitle ? "基于《" + sourceTitle + "》的正文语义相似度" : "基于正文语义相似度";
+  similarBooksList.innerHTML = "";
+  if (!list.length) {
+    similarBooksList.innerHTML = '<div class="similar-empty">没有找到相似图书。可能需要先建立语义索引，或其它图书尚未参与索引。</div>';
+    return;
+  }
+  list.forEach((b) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "similar-item";
+    item.appendChild(renderSimilarCover(b));
+    const body = document.createElement("div");
+    body.className = "similar-body";
+    const title = document.createElement("div");
+    title.className = "similar-title";
+    title.textContent = b.title || "未命名";
+    const meta = document.createElement("div");
+    meta.className = "similar-meta";
+    const pct = Math.round(Math.max(0, Math.min(1, Number(b.score || 0))) * 100);
+    meta.textContent = (b.author ? b.author + " · " : "") + "相关性 " + pct + "%";
+    const bar = document.createElement("div");
+    bar.className = "similar-score";
+    const fill = document.createElement("span");
+    fill.style.width = pct + "%";
+    bar.appendChild(fill);
+    body.append(title, meta, bar);
+    item.appendChild(body);
+    item.addEventListener("click", () => {
+      similarBooksModal.classList.remove("show");
+      clearCrossReturnMemory();
+      invoke("open_book", { id: b.id }).catch((e) => alert("打开失败：" + e));
+    });
+    similarBooksList.appendChild(item);
+  });
+}
+async function openSimilarBooks() {
+  if (selected.size !== 1) return;
+  const id = String([...selected][0]);
+  const source = books.find((x) => String(x.id) === id);
+  similarBooksModal.classList.add("show");
+  similarBooksSource.textContent = source ? "基于《" + source.title + "》的正文语义相似度" : "基于正文语义相似度";
+  similarBooksList.innerHTML = '<div class="similar-empty">正在计算相似图书…</div>';
+  try {
+    const list = await invoke("similar_books", { id });
+    renderSimilarBooks(source && source.title, list || []);
+  } catch (e) {
+    similarBooksList.innerHTML = '<div class="similar-empty">读取失败：' + escapeHtml(String(e || "")) + "</div>";
+  }
+}
+similarBooksBtn.addEventListener("click", openSimilarBooks);
+document.getElementById("similar-books-close").addEventListener("click", () => similarBooksModal.classList.remove("show"));
+similarBooksModal.addEventListener("click", (e) => {
+  if (e.target === similarBooksModal) similarBooksModal.classList.remove("show");
+});
+
 // 仅选中"一本"时才显示"图书信息 / 更换封面"
 coverBtn.addEventListener("click", () => {
   if (selected.size !== 1) return;
@@ -734,6 +825,7 @@ function updateDeleteUI() {
   if (selected.size > 0) {
     delGroup.classList.add("show");
     bookInfoBtn.style.display = selected.size === 1 ? "" : "none";
+    similarBooksBtn.style.display = selected.size === 1 ? "" : "none";
     coverBtn.style.display = selected.size === 1 ? "" : "none";
     delBtn.textContent = "🗑 删除选中 (" + selected.size + ")";
   } else {

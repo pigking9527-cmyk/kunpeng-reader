@@ -74,19 +74,19 @@ try {
     throw 'reader_page.rs must keep reader injected HTML/CSS/JS in ui/reader-page-head.html via include_str.'
   }
   $readerInjectedHead = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader-page-head.html'), [System.Text.Encoding]::UTF8)
-  foreach ($requiredReaderHook in @('showTranslateResult', 'translateText', 'hl-settings-pop', 'highlightMenuActionsV1', 'highlightMenuDisplayModeV1', 'highlightMenuSizeV1', 'showFootnote')) {
+  foreach ($requiredReaderHook in @('showTranslateResult', 'translateText', 'semanticSearch', 'hl-settings-pop', 'highlightMenuActionsV1', 'highlightMenuDisplayModeV1', 'highlightMenuSizeV1', 'showFootnote')) {
     if ($readerInjectedHead -notmatch [regex]::Escape($requiredReaderHook)) {
       throw "ui/reader-page-head.html missing required injected reader hook: $requiredReaderHook"
     }
   }
   $readerJsText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader.js'), [System.Text.Encoding]::UTF8)
-  foreach ($requiredReaderJsHook in @('translate_text')) {
+  foreach ($requiredReaderJsHook in @('translate_text', 'semanticSearch')) {
     if ($readerJsText -notmatch [regex]::Escape($requiredReaderJsHook)) {
       throw "ui/reader.js missing required reader bridge hook: $requiredReaderJsHook"
     }
   }
   $readerCrossText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader-cross-search-ui.js'), [System.Text.Encoding]::UTF8)
-  foreach ($requiredCrossHook in @('reader_cross_search', 'open_book_at', 'pendingCrossSearch')) {
+  foreach ($requiredCrossHook in @('reader_cross_search', 'open_book_at', 'pendingCrossSearch', 'semantic_search', 'openSemanticSearch')) {
     if ($readerCrossText -notmatch [regex]::Escape($requiredCrossHook)) {
       throw "ui/reader-cross-search-ui.js missing required cross-search hook: $requiredCrossHook"
     }

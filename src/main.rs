@@ -10,9 +10,9 @@ mod html_sanitize;
 mod import;
 mod import_core;
 mod pdf_support;
-mod reader_protocol;
-mod reader_page;
 mod reader_commands;
+mod reader_page;
+mod reader_protocol;
 mod search;
 mod search_core;
 mod secret_store;
@@ -23,9 +23,9 @@ mod stats_core;
 mod sync;
 mod sync_core;
 mod text_chapters;
+mod translate;
 mod tts;
 mod tts_core;
-mod translate;
 mod update;
 mod url_open;
 mod vocab;
@@ -633,11 +633,7 @@ fn ensure_reader_window(
         .unwrap_or(false);
 
     let mut builder =
-        tauri::WebviewWindowBuilder::new(
-            app,
-            &label,
-            tauri::WebviewUrl::App("reader.html".into()),
-        )
+        tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("reader.html".into()))
             .title(title)
             .decorations(false)
             .min_inner_size(420.0, 320.0);
@@ -1202,7 +1198,7 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
             let shell = format!(
                 "<!doctype html><html><head><meta charset=\"utf-8\">\
 <script>window.__ID__='{id}';window.__CH__={count};</script>{head}</head>\
-<body><div id=\"pager\"><div id=\"reader-root\" class=\"rr\"></div></div><div id=\"measurer\" class=\"rr\"></div></body></html>",
+<body><div id=\"pager\"><div id=\"scroller\"><div id=\"reader-root\" class=\"rr\"></div></div></div><div id=\"measurer\" class=\"rr\"></div></body></html>",
                 id = id,
                 count = count,
                 head = reader_page::READER_PAGE_HEAD
@@ -1298,24 +1294,14 @@ fn spawn_startup_maintenance(app: tauri::AppHandle) {
         // 让首屏渲染、封面加载、窗口拖动和账号状态先稳定下来。
         std::thread::sleep(std::time::Duration::from_secs(45));
         while any_reader_window_open(&app) {
-            emit_startup_perf(
-                &app,
-                "startup-maintenance",
-                "paused",
-                "reader window open",
-            );
+            emit_startup_perf(&app, "startup-maintenance", "paused", "reader window open");
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         emit_startup_perf(&app, "fingerprint-fill", "start", "background");
         spawn_fingerprint_fill(app.clone());
         std::thread::sleep(std::time::Duration::from_secs(15));
         while any_reader_window_open(&app) {
-            emit_startup_perf(
-                &app,
-                "keyword-index",
-                "paused",
-                "reader window open",
-            );
+            emit_startup_perf(&app, "keyword-index", "paused", "reader window open");
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         search::spawn_build_index(app.clone());
@@ -1567,6 +1553,7 @@ fn main() {
             semantic::semantic_index_done,
             semantic::semantic_status,
             semantic::semantic_search,
+            semantic::similar_books,
             reader_commands::add_highlight,
             reader_commands::remove_highlight,
             reader_commands::set_highlight_note,
@@ -1575,3 +1562,4 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("启动 Tauri 失败");
 }
+

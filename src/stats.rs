@@ -136,34 +136,32 @@ fn schedule_reading_stats_save(app: tauri::AppHandle) {
         return;
     }
 
-    std::thread::spawn(move || {
-        loop {
-            let before_wait = READING_STATS_SAVE_EPOCH.load(Ordering::Acquire);
-            std::thread::sleep(Duration::from_secs(5));
-            if app
-                .webview_windows()
-                .keys()
-                .any(|label| label.starts_with("reader-"))
-            {
-                std::thread::sleep(Duration::from_secs(25));
-                continue;
-            }
-            {
-                let state = app.state::<AppState>();
-                state.library.lock().unwrap().save();
-                state.stats.lock().unwrap().save();
-            }
-            let after_save = READING_STATS_SAVE_EPOCH.load(Ordering::Acquire);
-            READING_STATS_SAVE_SCHEDULED.store(false, Ordering::Release);
-            if after_save == before_wait {
-                break;
-            }
-            if READING_STATS_SAVE_SCHEDULED
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                break;
-            }
+    std::thread::spawn(move || loop {
+        let before_wait = READING_STATS_SAVE_EPOCH.load(Ordering::Acquire);
+        std::thread::sleep(Duration::from_secs(5));
+        if app
+            .webview_windows()
+            .keys()
+            .any(|label| label.starts_with("reader-"))
+        {
+            std::thread::sleep(Duration::from_secs(25));
+            continue;
+        }
+        {
+            let state = app.state::<AppState>();
+            state.library.lock().unwrap().save();
+            state.stats.lock().unwrap().save();
+        }
+        let after_save = READING_STATS_SAVE_EPOCH.load(Ordering::Acquire);
+        READING_STATS_SAVE_SCHEDULED.store(false, Ordering::Release);
+        if after_save == before_wait {
+            break;
+        }
+        if READING_STATS_SAVE_SCHEDULED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            break;
         }
     });
 }

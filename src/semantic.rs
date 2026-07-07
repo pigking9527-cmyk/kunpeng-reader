@@ -2,7 +2,7 @@ use crate::semantic_core::{
     chunk_text, cosine, dot, index_ram_budget, normalize, shard_est_bytes, SEM_CACHE_BUDGET,
     SEM_MODEL, SEM_QUERY_PREFIX, SEM_VERSION, SHARD_MAX_CHUNKS,
 };
-use crate::{book, now_ms, search, set_thread_background, AppState};
+use crate::{book, now_ms, search, set_thread_background, AppState, RES_BASE};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,6 +33,14 @@ struct SemMeta {
     dim: usize,
     chunks: Vec<SemChunk>,
 }
+#[derive(Serialize, Deserialize)]
+struct SemProfileMeta {
+    v: u32,
+    model: String,
+    mtime: u64,
+    dim: usize,
+    chunks: usize,
+}
 /// 内存里的一本书向量数据：vecs 为扁平的 [chunk0 dim 维][chunk1 …]，已 L2 归一化
 pub(crate) struct SemData {
     dim: usize,
@@ -44,6 +52,8 @@ pub(crate) struct SemProgress {
     building: bool,
     done: u32,
     total: u32,
+    shard_done: u32,
+    shard_total: u32,
     current: String,
     error: String,
 }
@@ -68,7 +78,7 @@ struct GlobalEntry {
     t: String, // 片段
 }
 type GlobalHnsw = instant_distance::HnswMap<SemPoint, u32>;
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ShardMeta {
     books: Vec<u64>, // 本分片包含的书（整本归属一片，不跨片）
     chunks: usize,   // 本分片段落数（估算载入内存用）
@@ -81,6 +91,16 @@ struct GlobalMeta {
     book_ids: Vec<u64>,          // 参与建图的全部书（排序），用于判断是否过期
     source_sig: Vec<(u64, u64)>, // (书 id, 源文件修改时间)，用于判断源文件变更
     shards: Vec<ShardMeta>,      // 各分片描述
+}
+#[derive(Serialize, Deserialize)]
+struct GlobalBuildMeta {
+    v: u32,
+    model: String,
+    dim: usize,
+    book_ids: Vec<u64>,
+    source_sig: Vec<(u64, u64)>,
+    processed_books: usize,
+    shards: Vec<ShardMeta>,
 }
 /// 已载入内存、可供查询的分片集合。
 pub(crate) struct LoadedShards {
@@ -98,16 +118,41 @@ fn global_shard_map_path(k: usize) -> Option<std::path::PathBuf> {
 fn global_meta_path() -> Option<std::path::PathBuf> {
     Some(sem_dir()?.join("global.json"))
 }
+fn global_build_meta_path() -> Option<std::path::PathBuf> {
+    Some(sem_dir()?.join("global.build.json"))
+}
 
-/// 当前已建立语义索引的书 id（排序）。
+fn read_sem_meta(id: u64) -> Option<SemMeta> {
+    serde_json::from_str(&std::fs::read_to_string(sem_meta_path(id)?).ok()?).ok()
+}
+
+fn sem_meta_is_fresh(meta: &SemMeta, mtime: u64) -> bool {
+    meta.v == SEM_VERSION && meta.model == SEM_MODEL && meta.mtime == mtime
+}
+
+fn sem_meta_has_vectors(meta: &SemMeta) -> bool {
+    meta.dim > 0 && !meta.chunks.is_empty()
+}
+
+fn sem_index_can_accelerate(id: u64, mtime: u64) -> bool {
+    let Some(meta) = read_sem_meta(id) else {
+        return false;
+    };
+    if !sem_meta_is_fresh(&meta, mtime) || !sem_meta_has_vectors(&meta) {
+        return false;
+    }
+    sem_vec_path(id).map(|p| p.exists()).unwrap_or(false) && read_sem_profile(id, mtime).is_some()
+}
+
+/// 当前可进入全库加速分片的书 id（排序）。
 fn indexed_book_ids(state: &AppState) -> Vec<u64> {
     let lib = state.library.lock().unwrap();
     let mut v: Vec<u64> = lib
         .books
         .iter()
         .filter(|b| b.format != "pdf")
+        .filter(|b| sem_index_can_accelerate(b.id, search::file_mtime(&b.path)))
         .map(|b| b.id)
-        .filter(|id| sem_meta_path(*id).map(|p| p.exists()).unwrap_or(false))
         .collect();
     v.sort_unstable();
     v
@@ -119,7 +164,7 @@ fn indexed_book_signature(state: &AppState) -> Vec<(u64, u64)> {
         .books
         .iter()
         .filter(|b| b.format != "pdf")
-        .filter(|b| sem_meta_path(b.id).map(|p| p.exists()).unwrap_or(false))
+        .filter(|b| sem_index_can_accelerate(b.id, search::file_mtime(&b.path)))
         .map(|b| (b.id, search::file_mtime(&b.path)))
         .collect();
     v.sort_unstable_by_key(|(id, _)| *id);
@@ -137,6 +182,12 @@ fn sem_meta_path(id: u64) -> Option<std::path::PathBuf> {
 }
 fn sem_vec_path(id: u64) -> Option<std::path::PathBuf> {
     Some(sem_dir()?.join(format!("sem_{id}.vec")))
+}
+fn sem_profile_meta_path(id: u64) -> Option<std::path::PathBuf> {
+    Some(sem_dir()?.join(format!("sem_{id}.profile.json")))
+}
+fn sem_profile_vec_path(id: u64) -> Option<std::path::PathBuf> {
+    Some(sem_dir()?.join(format!("sem_{id}.profile.vec")))
 }
 
 /// 懒加载语义模型（首次会下载到 %LOCALAPPDATA%/ebook-reader/models，约 120MB）。
@@ -162,16 +213,100 @@ fn get_embedder(state: &AppState) -> Result<Arc<fastembed::TextEmbedding>, Strin
 
 /// 该书的语义索引是否已是最新（版本/模型/源文件时间都匹配）。
 fn sem_is_fresh(id: u64, mtime: u64) -> bool {
-    let Some(p) = sem_meta_path(id) else {
+    read_sem_meta(id)
+        .map(|m| sem_meta_is_fresh(&m, mtime))
+        .unwrap_or(false)
+}
+
+fn sem_index_done_for_book(id: u64, mtime: u64) -> bool {
+    let Some(meta) = read_sem_meta(id) else {
         return false;
     };
-    let Ok(s) = std::fs::read_to_string(&p) else {
+    if !sem_meta_is_fresh(&meta, mtime) {
         return false;
-    };
-    match serde_json::from_str::<SemMeta>(&s) {
-        Ok(m) => m.v == SEM_VERSION && m.model == SEM_MODEL && m.mtime == mtime,
-        Err(_) => false,
     }
+    if !sem_meta_has_vectors(&meta) {
+        return true;
+    }
+    sem_vec_path(id).map(|p| p.exists()).unwrap_or(false) && read_sem_profile(id, mtime).is_some()
+}
+
+fn sem_profile_from_parts(dim: usize, chunks: usize, vecs: &[f32]) -> Option<Vec<f32>> {
+    if dim == 0 || chunks == 0 || vecs.len() < dim * chunks {
+        return None;
+    }
+    let mut profile = vec![0.0f32; dim];
+    for i in 0..chunks {
+        let base = i * dim;
+        for (j, v) in profile.iter_mut().enumerate() {
+            *v += vecs[base + j];
+        }
+    }
+    let inv = 1.0f32 / chunks as f32;
+    for v in &mut profile {
+        *v *= inv;
+    }
+    normalize(&mut profile);
+    Some(profile)
+}
+
+fn write_sem_profile(
+    id: u64,
+    mtime: u64,
+    dim: usize,
+    chunks: usize,
+    profile: &[f32],
+) -> Result<(), String> {
+    let vec_path = sem_profile_vec_path(id).ok_or("无缓存路径")?;
+    if let Some(d) = vec_path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let mut bytes = Vec::with_capacity(profile.len() * 4);
+    for x in profile {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    std::fs::write(&vec_path, bytes).map_err(|e| e.to_string())?;
+    let meta = SemProfileMeta {
+        v: SEM_VERSION,
+        model: SEM_MODEL.to_string(),
+        mtime,
+        dim,
+        chunks,
+    };
+    std::fs::write(
+        sem_profile_meta_path(id).ok_or("无缓存路径")?,
+        serde_json::to_string(&meta).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn read_sem_profile(id: u64, mtime: u64) -> Option<(Vec<f32>, usize)> {
+    let meta: SemProfileMeta =
+        serde_json::from_str(&std::fs::read_to_string(sem_profile_meta_path(id)?).ok()?).ok()?;
+    if meta.v != SEM_VERSION || meta.model != SEM_MODEL || meta.mtime != mtime || meta.dim == 0 {
+        return None;
+    }
+    let bytes = std::fs::read(sem_profile_vec_path(id)?).ok()?;
+    let profile: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    if profile.len() != meta.dim {
+        return None;
+    }
+    Some((profile, meta.chunks))
+}
+
+fn read_or_backfill_sem_profile(state: &AppState, book: &book::Book) -> Option<(Vec<f32>, usize)> {
+    let mtime = search::file_mtime(&book.path);
+    if let Some(profile) = read_sem_profile(book.id, mtime) {
+        return Some(profile);
+    }
+    let data = get_sem_data(state, book.id)?;
+    let profile = sem_book_profile(&data)?;
+    let _ = write_sem_profile(book.id, mtime, data.dim, data.chunks.len(), &profile);
+    Some((profile, data.chunks.len()))
 }
 
 /// 为一本书建立语义索引：切块 → 批量嵌入（归一化）→ 落盘（.vec 原始 f32 + .json 元信息）。
@@ -195,6 +330,12 @@ fn sem_build_book(
     }
     if items.is_empty() {
         let _ = std::fs::write(&vec_path, []);
+        if let Some(p) = sem_profile_vec_path(id) {
+            let _ = std::fs::remove_file(p);
+        }
+        if let Some(p) = sem_profile_meta_path(id) {
+            let _ = std::fs::remove_file(p);
+        }
         let meta = SemMeta {
             v: SEM_VERSION,
             model: SEM_MODEL.to_string(),
@@ -214,6 +355,8 @@ fn sem_build_book(
         std::io::BufWriter::new(std::fs::File::create(&vec_path).map_err(|e| e.to_string())?);
     let mut meta_chunks: Vec<SemChunk> = Vec::with_capacity(items.len());
     let mut dim = 0usize;
+    let mut profile_acc: Vec<f32> = Vec::new();
+    let mut profile_count = 0usize;
     for batch in items.chunks(128) {
         // 若正在“让路”（用户刚打开阅读窗口），先等到截止时刻，把 CPU 留给窗口冷启动
         loop {
@@ -233,6 +376,15 @@ fn sem_build_book(
             let mut v = embs[k].clone();
             normalize(&mut v);
             dim = v.len();
+            if profile_acc.is_empty() {
+                profile_acc.resize(dim, 0.0);
+            }
+            if profile_acc.len() == dim {
+                for (dst, src) in profile_acc.iter_mut().zip(v.iter()) {
+                    *dst += *src;
+                }
+                profile_count += 1;
+            }
             for x in &v {
                 vf.write_all(&x.to_le_bytes()).map_err(|e| e.to_string())?;
             }
@@ -243,6 +395,14 @@ fn sem_build_book(
         }
     }
     vf.flush().ok();
+    if profile_count > 0 && profile_acc.len() == dim {
+        let inv = 1.0f32 / profile_count as f32;
+        for v in &mut profile_acc {
+            *v *= inv;
+        }
+        normalize(&mut profile_acc);
+        write_sem_profile(id, mtime, dim, profile_count, &profile_acc)?;
+    }
     let meta = SemMeta {
         v: SEM_VERSION,
         model: SEM_MODEL.to_string(),
@@ -305,6 +465,21 @@ pub(crate) struct SemBookHits {
     hits: Vec<SemHit>,
 }
 
+#[derive(Serialize)]
+pub(crate) struct SimilarBook {
+    id: String,
+    title: String,
+    author: String,
+    cover: Option<String>,
+    progress: f32,
+    score: f32,
+    indexed_chunks: usize,
+}
+
+fn sem_book_profile(data: &SemData) -> Option<Vec<f32>> {
+    sem_profile_from_parts(data.dim, data.chunks.len(), &data.vecs)
+}
+
 /// 在一本书里做语义检索，返回该书最相近的前若干段。
 fn sem_search_book(state: &AppState, book: &book::Book, q: &[f32]) -> Option<SemBookHits> {
     let id = book.id;
@@ -356,9 +531,99 @@ fn global_index_fresh(state: &AppState) -> bool {
                 && m.model == SEM_MODEL
                 && m.book_ids == indexed_book_ids(state)
                 && m.source_sig == indexed_book_signature(state)
+                && !m.shards.is_empty()
+                && m.shards.iter().enumerate().all(|(k, _)| {
+                    global_shard_hnsw_path(k)
+                        .map(|p| p.exists())
+                        .unwrap_or(false)
+                        && global_shard_map_path(k)
+                            .map(|p| p.exists())
+                            .unwrap_or(false)
+                })
         }
         Err(_) => false,
     }
+}
+
+fn global_build_meta_compatible(
+    m: &GlobalBuildMeta,
+    ids: &[u64],
+    source_sig: &[(u64, u64)],
+) -> bool {
+    m.v == SEM_VERSION
+        && m.model == SEM_MODEL
+        && m.book_ids == ids
+        && m.source_sig == source_sig
+        && m.processed_books <= ids.len()
+        && m.shards.iter().enumerate().all(|(k, _)| {
+            global_shard_hnsw_path(k)
+                .map(|p| p.exists())
+                .unwrap_or(false)
+                && global_shard_map_path(k)
+                    .map(|p| p.exists())
+                    .unwrap_or(false)
+        })
+}
+
+fn read_global_build_meta(ids: &[u64], source_sig: &[(u64, u64)]) -> Option<GlobalBuildMeta> {
+    let meta: GlobalBuildMeta =
+        serde_json::from_str(&std::fs::read_to_string(global_build_meta_path()?).ok()?).ok()?;
+    if global_build_meta_compatible(&meta, ids, source_sig) {
+        Some(meta)
+    } else {
+        None
+    }
+}
+
+fn write_global_build_meta(meta: &GlobalBuildMeta) -> Result<(), String> {
+    let path = global_build_meta_path().ok_or("无缓存路径")?;
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string(meta).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn remove_global_build_meta() {
+    if let Some(p) = global_build_meta_path() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+fn estimate_global_shard_total(ids: &[u64]) -> u32 {
+    let mut total = 0u32;
+    let mut current = 0usize;
+    for id in ids {
+        let Some(path) = sem_meta_path(*id) else {
+            continue;
+        };
+        let Ok(s) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_str::<SemMeta>(&s) else {
+            continue;
+        };
+        if meta.v != SEM_VERSION
+            || meta.model != SEM_MODEL
+            || meta.dim == 0
+            || meta.chunks.is_empty()
+        {
+            continue;
+        }
+        let chunks = meta.chunks.len();
+        if current > 0 && current + chunks > SHARD_MAX_CHUNKS {
+            total += 1;
+            current = 0;
+        }
+        current += chunks;
+    }
+    if current > 0 {
+        total += 1;
+    }
+    total
 }
 
 /// 给定范围（want=None 表示全库）的语义索引是否“已完整”：每本逐书索引都新鲜；
@@ -378,7 +643,7 @@ fn semantic_complete(state: &AppState, want: &Option<std::collections::HashSet<u
     }
     if !books
         .iter()
-        .all(|(id, path)| sem_is_fresh(*id, search::file_mtime(path)))
+        .all(|(id, path)| sem_index_done_for_book(*id, search::file_mtime(path)))
     {
         return false;
     }
@@ -463,6 +728,11 @@ pub(crate) async fn build_semantic_index(
             let id = b.id;
             let mtime = search::file_mtime(&b.path);
             if sem_is_fresh(id, mtime) {
+                if read_sem_profile(id, mtime).is_none()
+                    && read_or_backfill_sem_profile(state.inner(), b).is_none()
+                {
+                    failures.push(format!("{}：无法生成相似图书缓存", b.title));
+                }
                 continue;
             }
             match search::get_book_chapters(state.inner(), b) {
@@ -529,11 +799,7 @@ fn write_shard(
     Ok(())
 }
 
-/// 用所有已建索引的书，构建“分片”近邻索引并落盘。一次只建一片→建图内存恒定，
-/// 任何机器、任何库大小都不会因此爆内存（再大只是分片更多）。整本书归属同一片，不跨片。
-fn build_global_index(state: &AppState) -> Result<(), String> {
-    let ids = indexed_book_ids(state);
-    // 先清掉旧的全库索引文件（含上一版单图的 global.hnsw/global.map）
+fn clear_global_index_files() {
     if let Some(d) = sem_dir() {
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
@@ -542,23 +808,63 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
                     || n == "global.hnsw"
                     || n == "global.map"
                     || n == "global.json"
+                    || n == "global.build.json"
                 {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
         }
     }
+}
+
+/// 用所有已建索引的书，构建“分片”近邻索引并落盘。一次只建一片→建图内存恒定，
+/// 任何机器、任何库大小都不会因此爆内存（再大只是分片更多）。整本书归属同一片，不跨片。
+fn build_global_index(state: &AppState) -> Result<(), String> {
+    let ids = indexed_book_ids(state);
     if ids.is_empty() {
         return Ok(());
     }
-    let mut shards: Vec<ShardMeta> = Vec::new();
+    let source_sig = indexed_book_signature(state);
+    let shard_total = estimate_global_shard_total(&ids);
+
+    let mut shards: Vec<ShardMeta>;
+    let mut processed_books = 0usize;
     let mut dim = 0usize;
+    if let Some(meta) = read_global_build_meta(&ids, &source_sig) {
+        shards = meta.shards;
+        processed_books = meta.processed_books.min(ids.len());
+        dim = meta.dim;
+    } else {
+        clear_global_index_files();
+        shards = Vec::new();
+    }
+
+    let mut k = shards.len();
+    if let Ok(mut p) = state.sem_progress.lock() {
+        p.shard_done = k as u32;
+        p.shard_total = shard_total;
+        p.current = if k > 0 {
+            format!(
+                "续建加速索引（已完成 {}/{} 片，已处理 {}/{} 本）…",
+                k,
+                shard_total.max(k as u32),
+                processed_books,
+                ids.len()
+            )
+        } else {
+            format!(
+                "建立加速索引（第 1/{} 片，已处理 0/{} 本）…",
+                shard_total.max(1),
+                ids.len()
+            )
+        };
+    }
+
     let mut points: Vec<SemPoint> = Vec::new();
     let mut values: Vec<u32> = Vec::new();
     let mut mapping: Vec<GlobalEntry> = Vec::new();
     let mut shard_books: Vec<u64> = Vec::new();
-    let mut k = 0usize;
-    for id in &ids {
+    for (idx, id) in ids.iter().enumerate().skip(processed_books) {
         let Some(data) = get_sem_data(state, *id) else {
             continue;
         };
@@ -581,8 +887,26 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
             });
             mapping.clear();
             k += 1;
+            processed_books = idx;
+            write_global_build_meta(&GlobalBuildMeta {
+                v: SEM_VERSION,
+                model: SEM_MODEL.to_string(),
+                dim,
+                book_ids: ids.clone(),
+                source_sig: source_sig.clone(),
+                processed_books,
+                shards: shards.clone(),
+            })?;
             if let Ok(mut p) = state.sem_progress.lock() {
-                p.current = format!("建立加速索引（第 {} 片）…", k + 1);
+                p.shard_done = k as u32;
+                p.shard_total = shard_total;
+                p.current = format!(
+                    "建立加速索引（已完成 {}/{} 片，已处理 {}/{} 本）…",
+                    k,
+                    shard_total.max(k as u32),
+                    processed_books,
+                    ids.len()
+                );
             }
         }
         for (i, chunk) in data.chunks.iter().enumerate() {
@@ -617,6 +941,28 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
             books: std::mem::take(&mut shard_books),
             chunks: n,
         });
+        k += 1;
+        processed_books = ids.len();
+        write_global_build_meta(&GlobalBuildMeta {
+            v: SEM_VERSION,
+            model: SEM_MODEL.to_string(),
+            dim,
+            book_ids: ids.clone(),
+            source_sig: source_sig.clone(),
+            processed_books,
+            shards: shards.clone(),
+        })?;
+        if let Ok(mut p) = state.sem_progress.lock() {
+            p.shard_done = k as u32;
+            p.shard_total = shard_total.max(k as u32);
+            p.current = format!(
+                "建立加速索引（已完成 {}/{} 片，已处理 {}/{} 本）…",
+                k,
+                shard_total.max(k as u32),
+                processed_books,
+                ids.len()
+            );
+        }
     }
     if shards.is_empty() {
         return Ok(());
@@ -626,7 +972,7 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
         model: SEM_MODEL.to_string(),
         dim,
         book_ids: ids,
-        source_sig: indexed_book_signature(state),
+        source_sig,
         shards,
     };
     std::fs::write(
@@ -634,6 +980,7 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
         serde_json::to_string(&meta).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    remove_global_build_meta();
     *state.global_index.lock().unwrap() = None; // 让下次查询重新载入
     Ok(())
 }
@@ -836,6 +1183,68 @@ pub(crate) async fn semantic_search(
     });
     results.truncate(60);
     Ok(results)
+}
+
+#[tauri::command]
+pub(crate) async fn similar_books(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<SimilarBook>, String> {
+    let source_id = id.parse::<u64>().map_err(|_| "无效图书 id".to_string())?;
+    let source_book = {
+        let lib = state.library.lock().unwrap();
+        lib.books
+            .iter()
+            .find(|b| b.id == source_id)
+            .cloned()
+            .ok_or_else(|| "找不到这本书".to_string())?
+    };
+    let source_mtime = search::file_mtime(&source_book.path);
+    let (source_profile, _) = read_sem_profile(source_book.id, source_mtime)
+        .ok_or_else(|| "请先建立或刷新语义索引，以生成相似图书缓存".to_string())?;
+
+    let books: Vec<book::Book> = {
+        let lib = state.library.lock().unwrap();
+        lib.books
+            .iter()
+            .filter(|b| b.id != source_id)
+            .filter(|b| b.format != "pdf")
+            .filter(|b| sem_meta_path(b.id).map(|p| p.exists()).unwrap_or(false))
+            .cloned()
+            .collect()
+    };
+
+    let mut out = Vec::new();
+    for b in books {
+        let mtime = search::file_mtime(&b.path);
+        let Some((profile, indexed_chunks)) = read_sem_profile(b.id, mtime) else {
+            continue;
+        };
+        let score = dot(&source_profile, &profile).clamp(0.0, 1.0);
+        if score <= 0.0 {
+            continue;
+        }
+        let id = b.id;
+        out.push(SimilarBook {
+            id: id.to_string(),
+            title: b.title.clone(),
+            author: b.author.clone(),
+            cover: b
+                .cover
+                .as_ref()
+                .map(|_| format!("{RES_BASE}/cover/{id}?v={}", b.cover_ver)),
+            progress: b.progress,
+            score,
+            indexed_chunks,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out.truncate(5);
+    Ok(out)
 }
 
 /// 余弦相似度

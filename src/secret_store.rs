@@ -6,7 +6,8 @@ pub(crate) fn protect_secret(secret: &str) -> Result<String, String> {
     if secret.is_empty() {
         return Ok(String::new());
     }
-    protect_bytes(secret.as_bytes()).map(|bytes| format!("{DPAPI_PREFIX}{}", STANDARD.encode(bytes)))
+    protect_bytes(secret.as_bytes())
+        .map(|bytes| format!("{DPAPI_PREFIX}{}", STANDARD.encode(bytes)))
 }
 
 pub(crate) fn unprotect_secret(stored: &str) -> Result<String, String> {

@@ -1,5 +1,6 @@
 // 阅读页跨书搜索：从选区/高亮文字直接检索其它书中的同词或同句。
 const crossModal = document.getElementById("cross-modal");
+const crossTitle = document.getElementById("cross-title");
 const crossInput = document.getElementById("cross-input");
 const crossStatus = document.getElementById("cross-status");
 const crossResults = document.getElementById("cross-results");
@@ -8,6 +9,7 @@ const crossRun = document.getElementById("cross-run");
 const crossReturn = document.getElementById("cross-return");
 let crossSeq = 0;
 let crossTerm = "";
+let crossMode = "keyword";
 let crossLastResults = [];
 let crossExpanded = new Map();
 let crossCollapsed = new Set();
@@ -18,6 +20,7 @@ function crossEscapeHtml(s) {
 }
 function crossHighlight(snippet, term) {
   snippet = String(snippet || "");
+  if (crossMode === "semantic") return crossEscapeHtml(snippet);
   term = String(term || "").trim();
   if (!term) return crossEscapeHtml(snippet);
   const low = snippet.toLowerCase();
@@ -43,6 +46,14 @@ function crossResultLimit(book) {
   const bookId = String(book.book_id || "");
   return Math.max(8, crossExpanded.get(bookId) || 8);
 }
+function crossHitCount(book) {
+  return Number(book.count || ((book.hits || []).length) || 0);
+}
+function updateCrossModeUi() {
+  if (crossTitle) crossTitle.textContent = crossMode === "semantic" ? "相似语义" : "跨书搜索";
+  if (crossRun) crossRun.textContent = crossMode === "semantic" ? "查找" : "搜索";
+  if (crossInput) crossInput.placeholder = crossMode === "semantic" ? "输入字、词、句、段，查找全书架相似文本" : "";
+}
 function crossStoreReturnTarget(bookId, chapter) {
   const currentBookId = crossCurrentBookId();
   if (!currentBookId || !bookId || String(bookId) === currentBookId) return;
@@ -56,6 +67,8 @@ function crossStoreReturnTarget(bookId, chapter) {
     targetChapter: chapter || 0,
     term: keepFirstOrigin ? String(existing.term || crossTerm) : crossTerm,
     lastTerm: crossTerm,
+    mode: keepFirstOrigin ? String(existing.mode || crossMode) : crossMode,
+    lastMode: crossMode,
     chain: keepFirstOrigin ? String(existing.chain || "") : String(Date.now()),
     ts: Date.now(),
   };
@@ -104,7 +117,8 @@ function consumePendingCrossSearch() {
     return;
   }
   localStorage.removeItem("pendingCrossSearch");
-  openCrossSearch(pending.term);
+  if (pending.mode === "semantic") openSemanticSearch(pending.term);
+  else openCrossSearch(pending.term);
 }
 window.updateCrossReturnButton = updateCrossReturnButton;
 window.consumePendingCrossSearch = consumePendingCrossSearch;
@@ -115,11 +129,14 @@ function renderCrossSearch(results) {
   const currentId = crossCurrentBookId();
   const list = crossLastResults.filter((book) => String(book.book_id || "") !== String(currentId));
   if (!list.length) {
-    crossResults.innerHTML = '<div class="cross-empty">其它书里没有找到「' + crossEscapeHtml(crossTerm) + '」</div>';
+    const hint = crossMode === "semantic"
+      ? "语义索引里没有找到与「" + crossEscapeHtml(crossTerm) + "」相似的文本。若很多书未建语义索引，请先建立索引。"
+      : "其它书里没有找到「" + crossEscapeHtml(crossTerm) + "」";
+    crossResults.innerHTML = '<div class="cross-empty">' + hint + "</div>";
     crossStatus.textContent = "未找到";
     return;
   }
-  const total = list.reduce((sum, book) => sum + (book.count || 0), 0);
+  const total = list.reduce((sum, book) => sum + crossHitCount(book), 0);
   crossStatus.textContent = list.length + " 本 · " + total + " 处";
   const frag = document.createDocumentFragment();
   list.slice(0, 30).forEach((book) => {
@@ -135,7 +152,7 @@ function renderCrossSearch(results) {
       '<span class="cross-toggle">' + (collapsed ? "▸" : "▾") + "</span>" +
       '<span class="cross-title">' + crossEscapeHtml(book.title || "未命名") + "</span>" +
       (book.author ? '<span class="cross-author">' + crossEscapeHtml(book.author) + "</span>" : "") +
-      '<span class="cross-count">' + (book.count || 0) + " 处</span>";
+      '<span class="cross-count">' + crossHitCount(book) + " 处</span>";
     head.addEventListener("click", () => {
       if (crossCollapsed.has(bookId)) crossCollapsed.delete(bookId);
       else crossCollapsed.add(bookId);
@@ -145,17 +162,21 @@ function renderCrossSearch(results) {
     hits.slice(0, limit).forEach((hit) => {
       const item = document.createElement("div");
       item.className = "cross-hit";
-      item.innerHTML = '<div class="cross-hit-line"><span class="cross-ch">第' + ((hit.chapter || 0) + 1) + "章</span>" + crossHighlight(hit.snippet || "", crossTerm) + "</div>";
+      const score = Number(hit.score || 0);
+      const scoreHtml = crossMode === "semantic" && score
+        ? '<span class="cross-score">相似 ' + Math.max(0, Math.min(1, score)).toFixed(2) + "</span>"
+        : "";
+      item.innerHTML = '<div class="cross-hit-line"><span class="cross-ch">第' + ((hit.chapter || 0) + 1) + "章</span>" + scoreHtml + crossHighlight(hit.snippet || "", crossTerm) + "</div>";
       item.addEventListener("click", () => {
         crossStoreReturnTarget(bookId, hit.chapter || 0);
-        invoke("open_book_at", { id: String(book.book_id || ""), chapter: hit.chapter || 0, term: crossTerm }).catch(() => {});
+        invoke("open_book_at", { id: String(book.book_id || ""), chapter: hit.chapter || 0, term: crossMode === "semantic" ? "" : crossTerm }).catch(() => {});
       });
       group.appendChild(item);
     });
-    if ((book.count || 0) > limit) {
+    if (crossHitCount(book) > limit) {
       const more = document.createElement("button");
       more.className = "cross-more";
-      const rest = (book.count || 0) - limit;
+      const rest = crossHitCount(book) - limit;
       const canExpand = limit < hits.length;
       more.innerHTML =
         '<span class="cross-more-ico">' + (canExpand ? "+25" : "…") + "</span>" +
@@ -177,6 +198,7 @@ async function runCrossSearch(term) {
   const seq = ++crossSeq;
   crossTerm = String(term || "").replace(/\s+/g, " ").trim();
   crossInput.value = crossTerm;
+  updateCrossModeUi();
   if (!crossTerm) {
     crossStatus.textContent = "";
     crossResults.innerHTML = '<div class="cross-empty">输入文字后搜索</div>';
@@ -185,7 +207,9 @@ async function runCrossSearch(term) {
   crossStatus.textContent = "检索中…";
   crossResults.innerHTML = '<div class="cross-empty">检索中…</div>';
   try {
-    const results = await invoke("shelf_search", { term: crossTerm, ids: null });
+    const results = crossMode === "semantic"
+      ? await invoke("semantic_search", { query: crossTerm, ids: null })
+      : await invoke("shelf_search", { term: crossTerm, ids: null });
     if (seq === crossSeq) renderCrossSearch(results);
   } catch (e) {
     if (seq !== crossSeq) return;
@@ -197,6 +221,7 @@ function openCrossSearch(term) {
   term = String(term || "").trim();
   if (!term) return;
   if (typeof readerDebugSettingOn === "function" && !readerDebugSettingOn("reader_cross_search")) return;
+  crossMode = "keyword";
   crossExpanded = new Map();
   crossCollapsed = new Set();
   window.pauseReadTracking?.("cross-search");
@@ -207,8 +232,29 @@ function openCrossSearch(term) {
   crossModal.classList.add("show");
   crossInput.focus();
   crossInput.select();
+  updateCrossModeUi();
   runCrossSearch(term);
 }
+function openSemanticSearch(term) {
+  term = String(term || "").trim();
+  if (!term) return;
+  if (typeof readerDebugSettingOn === "function" && !readerDebugSettingOn("reader_cross_search")) return;
+  crossMode = "semantic";
+  crossExpanded = new Map();
+  crossCollapsed = new Set();
+  window.pauseReadTracking?.("semantic-search");
+  closeSettings();
+  if (rsearch.classList.contains("show")) toggleSearch(false);
+  if (typeof setToc === "function") setToc(false);
+  if (typeof setVocab === "function") setVocab(false);
+  crossModal.classList.add("show");
+  crossInput.focus();
+  crossInput.select();
+  updateCrossModeUi();
+  runCrossSearch(term);
+}
+window.openCrossSearch = openCrossSearch;
+window.openSemanticSearch = openSemanticSearch;
 
 crossClose.addEventListener("click", closeCrossSearch);
 crossModal.addEventListener("click", (e) => {
@@ -225,6 +271,7 @@ if (crossReturn) {
     if (!state) return;
     localStorage.setItem("pendingCrossSearch", JSON.stringify({
       term: state.term || state.lastTerm || "",
+      mode: state.mode || state.lastMode || "keyword",
       originBookId: state.originBookId,
       ts: Date.now(),
     }));

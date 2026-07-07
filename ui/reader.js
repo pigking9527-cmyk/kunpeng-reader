@@ -614,6 +614,9 @@ window.addEventListener("message", (e) => {
   if (e.data.crossSearch) {
     openCrossSearch(e.data.crossSearch);
   }
+  if (e.data.semanticSearch) {
+    openSemanticSearch(e.data.semanticSearch);
+  }
   if (e.data.translateText) {
     const req = e.data.translateText;
     invoke("translate_text", {
@@ -726,8 +729,8 @@ window.addEventListener("keydown", (e) => {
   const ae = document.activeElement;
   if (ae && (ae.tagName === "INPUT" || ae.tagName === "SELECT" || ae.tagName === "TEXTAREA")) return;
   let dir = 0;
-  if (e.key === "PageDown" || e.key === "ArrowRight" || (e.key === " " && !e.shiftKey)) dir = 1;
-  else if (e.key === "PageUp" || e.key === "ArrowLeft" || (e.key === " " && e.shiftKey)) dir = -1;
+  if (e.key === "PageDown" || e.key === "ArrowRight" || e.key === "ArrowDown" || (e.key === " " && !e.shiftKey)) dir = 1;
+  else if (e.key === "PageUp" || e.key === "ArrowLeft" || e.key === "ArrowUp" || (e.key === " " && e.shiftKey)) dir = -1;
   if (dir !== 0) {
     e.preventDefault();
     // 翻页同时收起浮层与沉浸工具栏

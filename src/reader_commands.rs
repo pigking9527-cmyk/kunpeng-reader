@@ -72,11 +72,7 @@ pub(crate) fn set_description(
 
 /// 给当前阅读的书打分（0~5，0.5 刻度，0=清除评分）。
 #[tauri::command]
-pub(crate) fn set_rating(
-    window: tauri::WebviewWindow,
-    state: tauri::State<AppState>,
-    rating: f32,
-) {
+pub(crate) fn set_rating(window: tauri::WebviewWindow, state: tauri::State<AppState>, rating: f32) {
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.set_rating(id, rating);

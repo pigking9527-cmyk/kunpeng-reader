@@ -140,16 +140,16 @@ function highlightNeedles(term) {
   const raw = (term || "").trim();
   const seen = new Set();
   const out = [];
-  function add(s) {
+  function add(s, allowSingleCjk) {
     s = (s || "").trim();
-    if (s.length < 2) return;
+    if (s.length < 2 && !allowSingleCjk) return;
     const key = s.toLowerCase();
     if (!seen.has(key)) {
       seen.add(key);
       out.push(s);
     }
   }
-  add(raw);
+  add(raw, /^[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]$/u.test(raw));
   (raw.match(/[A-Za-z0-9]{2,}/g) || []).forEach(add);
   cjkNgramsForHighlight(raw).forEach(add);
   out.sort((a, b) => b.length - a.length);
@@ -267,6 +267,10 @@ function render() {
 }
 
 function openHit(bookId, chapter) {
+  try {
+    localStorage.removeItem("crossReturnState");
+    localStorage.removeItem("pendingCrossSearch");
+  } catch (e) {}
   invoke("open_book_at", { id: bookId, chapter, term: curTerm }).catch(() => {});
 }
 
@@ -360,7 +364,13 @@ function pollSemStatus() {
         return;
       }
       if (p.building) {
-        semProgEl.textContent = "建立语义索引中… " + p.done + "/" + p.total + "（" + (p.current || "") + "）";
+        if (p.shard_total) {
+          semProgEl.textContent = "建立语义索引中… " + p.done + "/" + p.total +
+            "；加速分片 " + p.shard_done + "/" + p.shard_total +
+            "（" + (p.current || "") + "）";
+        } else {
+          semProgEl.textContent = "建立语义索引中… " + p.done + "/" + p.total + "（" + (p.current || "") + "）";
+        }
       } else {
         // p.current 在结束时可能带“加速索引未建成”的温和说明（检索仍可用），优先展示
         semProgEl.textContent = p.current && p.current !== "完成"

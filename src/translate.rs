@@ -15,9 +15,9 @@ pub(crate) struct TranslateResult {
 
 fn md5_hex(input: &[u8]) -> String {
     const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14,
-        20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,
-        16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
     const K: [u32; 64] = [
         0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
@@ -305,7 +305,8 @@ fn google_translate(
     }
     let source = normalize_common_lang(source_lang, "auto");
     let target = normalize_common_lang(target_lang, "zh-CN");
-    let endpoint = format!("https://translation.googleapis.com/language/translate/v2?key={api_key}");
+    let endpoint =
+        format!("https://translation.googleapis.com/language/translate/v2?key={api_key}");
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
         .timeout_read(Duration::from_secs(30))
@@ -384,12 +385,13 @@ fn tencent_translate(
     })
     .to_string();
     let hashed_payload = sha256_hex(payload.as_bytes());
-    let canonical_headers =
-        format!("content-type:application/json; charset=utf-8\nhost:{host}\nx-tc-action:{}\n", action.to_ascii_lowercase());
-    let signed_headers = "content-type;host;x-tc-action";
-    let canonical_request = format!(
-        "POST\n/\n\n{canonical_headers}\n{signed_headers}\n{hashed_payload}"
+    let canonical_headers = format!(
+        "content-type:application/json; charset=utf-8\nhost:{host}\nx-tc-action:{}\n",
+        action.to_ascii_lowercase()
     );
+    let signed_headers = "content-type;host;x-tc-action";
+    let canonical_request =
+        format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{hashed_payload}");
     let credential_scope = format!("{date}/{service}/tc3_request");
     let string_to_sign = format!(
         "TC3-HMAC-SHA256\n{timestamp}\n{credential_scope}\n{}",
@@ -424,7 +426,10 @@ fn tencent_translate(
         .and_then(|v| v.get("Error"))
         .and_then(|v| v.as_object())
     {
-        let code = err.get("Code").and_then(|v| v.as_str()).unwrap_or("Unknown");
+        let code = err
+            .get("Code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown");
         let msg = err
             .get("Message")
             .and_then(|v| v.as_str())

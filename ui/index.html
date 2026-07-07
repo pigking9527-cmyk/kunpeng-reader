@@ -48,6 +48,7 @@
 
       <div id="del-group" class="del-group">
         <button id="book-info-btn" class="btn-plain">图书信息</button>
+        <button id="similar-books-btn" class="btn-plain">相似图书</button>
         <button id="cover-btn" class="btn-plain">🖼 更换封面</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
         <button id="del-cancel" class="btn-plain">取消</button>
@@ -250,6 +251,13 @@
         <div class="info-row"><span class="info-k">大小</span><span id="book-info-size" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">评分</span><span id="book-info-stars" class="info-stars" title="点击打分，再点同一颗清除"></span></div>
         <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="book-info-desc" class="info-desc" contenteditable="true"></div></div>
+      </div>
+    </div>
+    <div id="similar-books-modal" class="modal">
+      <div class="modal-card similar-books-card">
+        <div class="modal-head"><span>相似图书</span><button id="similar-books-close" class="btn-plain">✕</button></div>
+        <div id="similar-books-source" class="similar-source"></div>
+        <div id="similar-books-list" class="similar-list"></div>
       </div>
     </div>
     <div id="debug-modal" class="modal">
