@@ -165,7 +165,7 @@ function renderHighlights() {
   // 兼容旧调用名；实际只在批注页打开时才需要重绘
   if (annoModal.classList.contains("show")) renderAnnotations();
 }
-async function addHighlight(o, note, openNote) {
+async function addHighlight(o, note, openNote, openCorrect) {
   highlights = await invoke("add_highlight", {
     chapter: o.chapter,
     start: o.start,
@@ -178,17 +178,36 @@ async function addHighlight(o, note, openNote) {
   });
   sendToPage({ highlights }); // 让合并页重绘高亮（带正确的下标）
   if (openNote) openAnnotations(highlights.length - 1); // 批注：打开大批注页
-  // EPUB：就地把工具栏换成"取消高亮"菜单；PDF：高亮后直接收菜单，不再弹（避免叠菜单）
-  else if (!isPdf) sendToPage({ showHlMenuFor: highlights.length - 1 });
+  else if (openCorrect && !isPdf) sendToPage({ editHighlightTextFor: highlights.length - 1 });
+  // 纯高亮只保存并重绘，不再自动弹出工具栏；已有高亮可通过悬停/点击打开“取消高亮”菜单。
+}
+async function addCorrectedHighlight(o, correctedText) {
+  const text = (correctedText || "").trim();
+  if (!text) return;
+  highlights = await invoke("add_highlight", {
+    chapter: o.chapter,
+    start: o.start,
+    end: o.end,
+    text: o.text || "",
+    context: o.context || "",
+    rects: o.rects || "",
+    color: "y",
+    note: "",
+  });
+  const idx = highlights.length - 1;
+  highlights = await invoke("set_highlight_text", { index: idx, text });
+  sendToPage({ highlights });
+  renderHighlights();
 }
 // 在上下文里把"被批注的文字本身"高亮出来
 function ctxHtml(h) {
   const ctx = h.context || h.text || "";
   const t = (h.text || "").trim();
+  const display = (h.corrected_text || h.text || "").trim();
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   if (t && ctx.includes(t)) {
     const i = ctx.indexOf(t);
-    return esc(ctx.slice(0, i)) + "<mark>" + esc(t) + "</mark>" + esc(ctx.slice(i + t.length));
+    return esc(ctx.slice(0, i)) + "<mark>" + esc(display || t) + "</mark>" + esc(ctx.slice(i + t.length));
   }
   return esc(ctx);
 }
@@ -227,6 +246,7 @@ function renderAnnotations(targetIdx) {
 
     const ctx = document.createElement("div");
     ctx.className = "anno-ctx";
+    ctx.title = "高亮文字上下文";
     ctx.innerHTML = ctxHtml(h);
 
     // 批注只读展示（有批注才显示，不白占空间）

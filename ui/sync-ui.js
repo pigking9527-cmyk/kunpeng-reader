@@ -189,11 +189,17 @@ document.getElementById("fp-gear").addEventListener("click", (e) => {
 document.getElementById("fp-settings-close").addEventListener("click", () => fpSettingsModal.classList.remove("show"));
 // “自动导入目录”行的齿轮 → 打开目录管理弹窗
 document.getElementById("dirs-gear").addEventListener("click", (e) => {
+  e.preventDefault();
   e.stopPropagation();
+  if (typeof reflectAutoImport === "function") reflectAutoImport();
   renderDirsList();
   importDirsModal.classList.add("show");
 });
-document.getElementById("dirs-add").addEventListener("click", addImportDirs);
+document.getElementById("dirs-add").addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  addImportDirs();
+});
 document.getElementById("import-dirs-close").addEventListener("click", () => importDirsModal.classList.remove("show"));
 importDirsModal.addEventListener("click", (e) => {
   if (e.target === importDirsModal) importDirsModal.classList.remove("show");

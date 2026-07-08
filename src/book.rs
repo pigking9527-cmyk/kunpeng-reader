@@ -27,6 +27,8 @@ pub struct Highlight {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
+    pub corrected_text: String,
+    #[serde(default)]
     pub context: String, // 被高亮文字所在段落（用于批注页展示上下文）
     #[serde(default)]
     pub rects: String, // PDF 专用：归一化矩形 JSON（[[x,y,w,h],...]）；EPUB 为空
@@ -64,6 +66,8 @@ pub struct Book {
     pub resume_chapter: u32, // 续读：上次所在章节
     #[serde(default)]
     pub resume_frac: f32, // 续读：上次章内比例 0~1
+    #[serde(default)]
+    pub chapter_index_version: u32, // 章节索引版本：EPUB 大章拆分后用于区分旧物理章号/新虚拟章号
     #[serde(default)]
     pub meta_done: bool, // 元数据（作者/简介）是否已回填过，避免每次启动重读
     #[serde(default)]
@@ -139,6 +143,7 @@ impl Book {
             progress: 0.0,
             resume_chapter: 0,
             resume_frac: 0.0,
+            chapter_index_version: 0,
             meta_done: true, // 新建/txt 无需回填
             word_count,
             bookmarks: Vec::new(),
@@ -372,6 +377,13 @@ impl Library {
             }
         }
     }
+    pub fn set_highlight_text(&mut self, id: u64, index: usize, text: String) {
+        if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
+            if let Some(h) = b.highlights.get_mut(index) {
+                h.corrected_text = text;
+            }
+        }
+    }
     pub fn highlights(&self, id: u64) -> Vec<Highlight> {
         self.get(id)
             .map(|b| b.highlights.clone())
@@ -566,6 +578,7 @@ fn prepare_epub(path: &Path) -> Option<Book> {
         progress: 0.0,
         resume_chapter: 0,
         resume_frac: 0.0,
+        chapter_index_version: 0,
         meta_done: true, // 导入时已读取元数据
         word_count,
         bookmarks: Vec::new(),
@@ -616,6 +629,7 @@ fn prepare_mobi(path: &Path) -> Option<Book> {
         progress: 0.0,
         resume_chapter: 0,
         resume_frac: 0.0,
+        chapter_index_version: 0,
         meta_done: true,
         word_count,
         bookmarks: Vec::new(),
@@ -888,6 +902,7 @@ mod tests {
                 start: 10,
                 end: 14,
                 text: "高亮".to_string(),
+                corrected_text: String::new(),
                 context: "上下文".to_string(),
                 rects: String::new(),
                 color: "#ffee88".to_string(),
@@ -901,6 +916,10 @@ mod tests {
         lib.set_highlight_note(id, 0, "批注".to_string());
         lib.set_highlight_note(id, 9, "越界".to_string());
         assert_eq!(lib.highlights(id)[0].note, "批注");
+
+        lib.set_highlight_text(id, 0, "改错".to_string());
+        lib.set_highlight_text(id, 9, "越界".to_string());
+        assert_eq!(lib.highlights(id)[0].corrected_text, "改错");
 
         lib.remove_highlight(id, 9);
         assert_eq!(lib.highlights(id).len(), 1);

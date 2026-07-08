@@ -202,14 +202,60 @@ const READ_TRACK = {
   idleCapMs: 2 * 60 * 1000,
   minDwellMs: 500,
   maxCreditedPages: 3000,
+  periodicCreditMs: 10000,
+  backtrackCooldownMs: 2500,
+  readingTimeTickMs: 15000,
+  readingTimeMaxCreditSec: 20,
 };
 let rwSegment = null,
   rwAccum = 0,
   rwTimer = null,
   rwFastStreak = 0;
 const rwCreditedByPage = new Map();
+let rwCreditStorageKey = "",
+  rwCreditSaveTimer = null,
+  rwLastPosition = 0,
+  rwLastPageData = null,
+  rwBacktrackBlockedUntil = 0,
+  rwBacktrackResumeTimer = null,
+  rtLastActiveAt = Date.now();
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
+}
+function readCreditKey() {
+  return currentBookId ? "readWordsCredit:v1:" + currentBookId : "";
+}
+function ensureReadCreditCache() {
+  const key = readCreditKey();
+  if (!key || key === rwCreditStorageKey) return;
+  rwCreditStorageKey = key;
+  rwCreditedByPage.clear();
+  try {
+    const entries = JSON.parse(localStorage.getItem(key) || "[]");
+    if (Array.isArray(entries)) {
+      entries.forEach((entry) => {
+        if (!Array.isArray(entry) || entry.length < 2) return;
+        const pageKey = String(entry[0] || "");
+        const credited = Math.max(0, Math.floor(Number(entry[1]) || 0));
+        if (pageKey && credited > 0) rwCreditedByPage.set(pageKey, credited);
+      });
+    }
+  } catch (e) {}
+  pruneCreditedPages();
+}
+function saveReadCreditCache(immediate = false) {
+  if (!rwCreditStorageKey) return;
+  if (rwCreditSaveTimer) {
+    clearTimeout(rwCreditSaveTimer);
+    rwCreditSaveTimer = null;
+  }
+  const save = () => {
+    try {
+      localStorage.setItem(rwCreditStorageKey, JSON.stringify([...rwCreditedByPage.entries()]));
+    } catch (e) {}
+  };
+  if (immediate) save();
+  else rwCreditSaveTimer = setTimeout(save, 1000);
 }
 function flushReadWords(immediate = false) {
   if (DIAG_DISABLE_READER_REPORTS) return;
@@ -241,6 +287,7 @@ function hasShown(el) {
 function readTrackingBlocked() {
   if (isWindowDragging()) return true;
   if (!document.hasFocus() || document.hidden) return true;
+  if (Date.now() < rwBacktrackBlockedUntil) return true;
   return (
     hasShown(window.rsearch || rsearch) ||
     hasShown(window.settingsEl || settingsEl) ||
@@ -253,6 +300,13 @@ function readPageKey(d) {
   const gp = Number(d.gPage || 0);
   const page = Number(d.page || 0);
   return chapter + ":" + (gp > 0 ? "g" + gp : "p" + page);
+}
+function readPagePosition(d) {
+  const gp = Number(d.gPage || 0);
+  if (gp > 0) return gp;
+  const chapter = Number.isFinite(d.chapter) ? d.chapter : curChapter || 0;
+  const page = Number(d.page || 0);
+  return chapter * 100000 + page;
 }
 function requiredReadMs(chars) {
   if (chars <= 0) return 0;
@@ -271,8 +325,9 @@ function pruneCreditedPages() {
 function creditReadSegment(reason, options = {}) {
   if (!rwSegment) return;
   const seg = rwSegment;
-  rwSegment = null;
+  if (!options.keep) rwSegment = null;
   if (options.discard) return;
+  ensureReadCreditCache();
   const rawDwell = Math.max(0, Date.now() - seg.startedAt);
   const chars = Math.max(0, seg.chars || 0);
   if (chars <= 0 || rawDwell < READ_TRACK.minDwellMs) return;
@@ -290,6 +345,7 @@ function creditReadSegment(reason, options = {}) {
   if (delta <= 0) return;
   rwCreditedByPage.set(seg.key, alreadyCredited + delta);
   pruneCreditedPages();
+  saveReadCreditCache();
   rwAccum += delta;
   if (window.__kunpengReadDebug) {
     console.debug("read-track", {
@@ -315,15 +371,40 @@ function discardReadTracking(reason) {
   if (window.__kunpengReadDebug && rwSegment) console.debug("read-track-discard", { key: rwSegment.key, reason });
   rwSegment = null;
 }
+function resetReadingTimeClock() {
+  rtLastActiveAt = readTrackingBlocked() ? 0 : Date.now();
+}
+function scheduleBacktrackResume(d) {
+  rwLastPageData = d;
+  if (rwBacktrackResumeTimer) clearTimeout(rwBacktrackResumeTimer);
+  const delay = Math.max(READ_TRACK.backtrackCooldownMs, rwBacktrackBlockedUntil - Date.now() + 20);
+  rwBacktrackResumeTimer = setTimeout(() => {
+    rwBacktrackResumeTimer = null;
+    if (rwLastPageData === d && !readTrackingBlocked()) trackReadWords(d, { resumeAfterBacktrack: true });
+  }, delay);
+}
 function trackReadWords(d) {
   if (!readerDebugSettingOn("reader_words_detect")) return;
-  if (readTrackingBlocked()) {
-    pauseReadTracking("blocked");
-    return;
-  }
   const key = readPageKey(d);
   const chars = Math.max(0, d.pageChars || 0);
   if (!key || chars <= 0) return;
+  ensureReadCreditCache();
+  const pos = readPagePosition(d);
+  if (pos > 0 && rwLastPosition > 0 && pos < rwLastPosition) {
+    rwBacktrackBlockedUntil = Date.now() + READ_TRACK.backtrackCooldownMs;
+    discardReadTracking("backtrack");
+    resetReadingTimeClock();
+    rwLastPosition = pos;
+    scheduleBacktrackResume(d);
+    return;
+  }
+  if (pos > 0) rwLastPosition = pos;
+  rwLastPageData = d;
+  if (readTrackingBlocked()) {
+    pauseReadTracking("blocked");
+    scheduleBacktrackResume(d);
+    return;
+  }
   if (rwSegment && rwSegment.key === key) {
     rwSegment.chars = Math.max(rwSegment.chars, chars);
     return;
@@ -331,16 +412,47 @@ function trackReadWords(d) {
   creditReadSegment("page_change");
   rwSegment = { key, chars, startedAt: Date.now() };
 }
-window.addEventListener("blur", () => pauseReadTracking("blur"));
+function creditCurrentReadPage() {
+  if (!readerDebugSettingOn("reader_words_detect")) return;
+  if (readTrackingBlocked()) {
+    pauseReadTracking("periodic_blocked");
+    return;
+  }
+  creditReadSegment("periodic", { keep: true });
+}
+function tickReadingTime() {
+  if (DIAG_DISABLE_READER_REPORTS) return;
+  const now = Date.now();
+  if (readTrackingBlocked()) {
+    rtLastActiveAt = 0;
+    return;
+  }
+  if (!rtLastActiveAt) {
+    rtLastActiveAt = now;
+    return;
+  }
+  const seconds = Math.floor(Math.min((now - rtLastActiveAt) / 1000, READ_TRACK.readingTimeMaxCreditSec));
+  rtLastActiveAt = now;
+  if (seconds > 0) invoke("add_reading_time", { seconds }).catch(() => {});
+}
+window.addEventListener("blur", () => {
+  pauseReadTracking("blur");
+  resetReadingTimeClock();
+});
+window.addEventListener("focus", resetReadingTimeClock);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     pauseReadTracking("hidden");
     flushReadWords(true);
+    resetReadingTimeClock();
+  } else {
+    resetReadingTimeClock();
   }
 });
 window.addEventListener("beforeunload", () => {
   pauseReadTracking("beforeunload");
   flushReadWords(true);
+  saveReadCreditCache(true);
 });
 window.pauseReadTracking = pauseReadTracking;
 window.discardReadTracking = discardReadTracking;
@@ -518,7 +630,9 @@ window.addEventListener("message", (e) => {
         progressEl.textContent =
           "第" + (curVchap + 1) + "/" + vchapTotal + "章 · " + gP + "/" + gT + "页 · " + curProgress.toFixed(1) + "%";
       } else {
-        showProgressLoading();
+        progressEl.textContent =
+          "第" + (curVchap + 1) + "/" + vchapTotal + "章 · 本章 " +
+          (e.data.page || 1) + "/" + (e.data.total || 1) + "页 · " + curProgress.toFixed(1) + "%";
       }
     }
     reportProgress();
@@ -608,6 +722,18 @@ window.addEventListener("message", (e) => {
     // 合并页测完整书页数 → 落盘缓存，下次同版式直接用
     invoke("save_page_cache", { sig: e.data.measured.sig, pages: e.data.measured.pages }).catch(() => {});
   }
+  if (e.data.downloadImage) {
+    const img = e.data.downloadImage || {};
+    const dataUrl = String(img.dataUrl || "");
+    if (dataUrl.startsWith("data:image/")) {
+      const a = document.createElement("a");
+      a.download = String(img.name || "书摘.png").replace(/[\\/:*?"<>|]/g, "_");
+      a.href = dataUrl;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+  }
   if (e.data.webSearch) {
     invoke("web_search", { term: e.data.webSearch }).catch(() => {});
   }
@@ -666,6 +792,13 @@ window.addEventListener("message", (e) => {
   if (e.data.addHighlight) {
     addHighlight(e.data.addHighlight, "");
   }
+  if (e.data.addHighlightCorrect) {
+    addHighlight(e.data.addHighlightCorrect, "", false, true);
+  }
+  if (e.data.addHighlightCorrectDraft) {
+    const d = e.data.addHighlightCorrectDraft;
+    addCorrectedHighlight(d, d.correctedText || "");
+  }
   if (e.data.addHighlightNote) {
     addHighlight(e.data.addHighlightNote, "", true); // 先建高亮，随即打开批注面板
   }
@@ -682,6 +815,14 @@ window.addEventListener("message", (e) => {
   if (e.data.setHighlightNote) {
     const { index, note } = e.data.setHighlightNote;
     invoke("set_highlight_note", { index, note }).then((list) => {
+      highlights = list;
+      sendToPage({ highlights });
+      renderHighlights();
+    });
+  }
+  if (e.data.setHighlightText) {
+    const { index, text } = e.data.setHighlightText;
+    invoke("set_highlight_text", { index, text }).then((list) => {
       highlights = list;
       sendToPage({ highlights });
       renderHighlights();
@@ -749,11 +890,9 @@ frame.addEventListener("load", () => {
   if (document.body.classList.contains("pdf-mode")) hideLoading();
 });
 
-// 阅读时长统计：窗口在前台时每 15 秒累计一次
-setInterval(() => {
-  if (DIAG_DISABLE_READER_REPORTS) return;
-  if (document.hasFocus() && !isWindowDragging()) invoke("add_reading_time", { seconds: 15 }).catch(() => {});
-}, 15000);
+// 阅读统计：只在有效阅读状态下按真实间隔累计；当前页也会定期结算字数。
+setInterval(tickReadingTime, READ_TRACK.readingTimeTickMs);
+setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
 
 // 目录、书签、批注/高亮 UI 在 reader-notes-ui.js。
 
@@ -764,6 +903,7 @@ setInterval(() => {
     const info = await invoke("book_info");
     currentBookId = info.id || "";
     window.currentBookId = currentBookId;
+    ensureReadCreditCache();
     window.updateCrossReturnButton?.();
     window.consumePendingCrossSearch?.();
     currentBookTitle = info.title || currentBookTitle || "";

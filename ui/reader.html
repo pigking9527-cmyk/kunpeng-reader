@@ -369,7 +369,7 @@
       }
       .settings.show { display: block; }
       .settings .row { display: flex; align-items: center; margin: 9px 0; gap: 8px; }
-      .settings .row > label:first-child { width: 52px; color: #444; flex: 0 0 auto; }
+      .settings .row > label:first-child { width: 72px; color: #444; flex: 0 0 auto; white-space: nowrap; }
       .settings input[type="range"] { flex: 1; }
       .settings .val { width: 42px; text-align: right; color: #666; }
       .settings select { flex: 1; font: inherit; padding: 2px; }
@@ -552,6 +552,7 @@
         </select>
       </div>
       <div class="row"><label>字号</label><input type="range" id="set-size" min="12" max="40" step="1" /><span class="val" id="v-size"></span></div>
+      <div class="row"><label>注释字号</label><input type="range" id="set-note-size" min="10" max="22" step="1" /><span class="val" id="v-note-size"></span></div>
       <div class="row"><label>行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
       <div class="row"><label>段间距</label><input type="range" id="set-para" min="0" max="2" step="0.1" /><span class="val" id="v-para"></span></div>
       <div class="row"><label>字间距</label><input type="range" id="set-letter" min="0" max="5" step="0.5" /><span class="val" id="v-letter"></span></div>
@@ -569,6 +570,14 @@
           <button class="theme-btn mode-switch-btn flow-mode-btn" data-flow-mode="scroll">滚动模式</button>
         </div>
       </div>
+      <div class="row">
+        <label>动画</label>
+        <select id="set-turnfx">
+          <option value="off">关闭</option>
+          <option value="google-paper">纸张效果（Google）</option>
+        </select>
+      </div>
+      <div class="row"><label>速度</label><input type="range" id="set-turnspeed" min="0.5" max="2" step="0.1" /><span class="val" id="v-turnspeed"></span></div>
       <h4>页边距（像素）</h4>
       <div class="margins">
         <label>上 <input type="number" id="set-mt" min="0" max="160" /></label>

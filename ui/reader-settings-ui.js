@@ -5,6 +5,7 @@ const DEFAULTS = {
   theme: "light",
   fontFamily: "",
   fontSize: 18,
+  noteFontSize: 14,
   lineHeight: 1.7,
   paraSpacing: 0.6,
   letterSpacing: 0,
@@ -14,6 +15,8 @@ const DEFAULTS = {
   marginRight: 28,
   pageMode: "single",
   flowMode: "paged",
+  pageTurnEffect: "off",
+  pageTurnSpeed: 1,
   ttsSource: "edge",
   ttsVoice: "zh-CN-XiaoxiaoNeural",
   ttsRate: 1,
@@ -34,11 +37,27 @@ function loadSettings() {
 let settings = loadSettings();
 
 function normalizeModeSettings() {
+  let changed = false;
+  if (!["off", "google-paper"].includes(settings.pageTurnEffect)) {
+    settings.pageTurnEffect = "off";
+    changed = true;
+  }
+  const speed = parseFloat(settings.pageTurnSpeed);
+  if (!Number.isFinite(speed)) {
+    settings.pageTurnSpeed = DEFAULTS.pageTurnSpeed;
+    changed = true;
+  } else {
+    const next = Math.max(0.5, Math.min(2, speed));
+    if (next !== settings.pageTurnSpeed) {
+      settings.pageTurnSpeed = next;
+      changed = true;
+    }
+  }
   if (settings.flowMode === "scroll" && settings.pageMode !== "single") {
     settings.pageMode = "single";
-    return true;
+    changed = true;
   }
-  return false;
+  return changed;
 }
 
 function saveSettings() {
@@ -57,6 +76,7 @@ function onChange() {
 function bindRange(id, vid, key, fmt) {
   const el = document.getElementById(id);
   const vEl = document.getElementById(vid);
+  if (!el || !vEl) return;
   el.value = settings[key];
   vEl.textContent = fmt(settings[key]);
   el.addEventListener("input", () => {
@@ -64,6 +84,16 @@ function bindRange(id, vid, key, fmt) {
     vEl.textContent = fmt(settings[key]);
     onChange();
   });
+}
+function ensureNoteSizeControl() {
+  if (document.getElementById("set-note-size")) return;
+  const size = document.getElementById("set-size");
+  const sizeRow = size && size.closest ? size.closest(".row") : null;
+  if (!sizeRow || !sizeRow.parentNode) return;
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = '<label>注释字号</label><input type="range" id="set-note-size" min="10" max="22" step="1" /><span class="val" id="v-note-size"></span>';
+  sizeRow.parentNode.insertBefore(row, sizeRow.nextSibling);
 }
 function bindNum(id, key) {
   const el = document.getElementById(id);
@@ -83,6 +113,7 @@ function bindNum(id, key) {
 
 function initSettingsUI() {
   if (normalizeModeSettings()) saveSettings();
+  ensureNoteSizeControl();
   // 主题按钮
   function refreshThemeBtns() {
     document
@@ -106,13 +137,23 @@ function initSettingsUI() {
     onChange();
   });
   bindRange("set-size", "v-size", "fontSize", (v) => v + "px");
+  bindRange("set-note-size", "v-note-size", "noteFontSize", (v) => v + "px");
   bindRange("set-line", "v-line", "lineHeight", (v) => v.toFixed(1));
   bindRange("set-para", "v-para", "paraSpacing", (v) => v.toFixed(1) + "em");
   bindRange("set-letter", "v-letter", "letterSpacing", (v) => v + "px");
+  bindRange("set-turnspeed", "v-turnspeed", "pageTurnSpeed", (v) => parseFloat(v).toFixed(1) + "x");
   bindNum("set-mt", "marginTop");
   bindNum("set-mb", "marginBottom");
   bindNum("set-ml", "marginLeft");
   bindNum("set-mr", "marginRight");
+  const turnFx = document.getElementById("set-turnfx");
+  if (turnFx) {
+    turnFx.value = settings.pageTurnEffect || DEFAULTS.pageTurnEffect;
+    turnFx.addEventListener("change", () => {
+      settings.pageTurnEffect = turnFx.value;
+      onChange();
+    });
+  }
   function refreshPageModeBtns() {
     normalizeModeSettings();
     const locked = settings.flowMode === "scroll";

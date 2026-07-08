@@ -175,10 +175,16 @@ filterStarsEl.setVal(minRating);
 // ---- “我的书架”设置：封面进度开关 + 自动导入目录（多目录） ----
 let autoImport = { enabled: false, dirs: [] };
 const setAutoChk = document.getElementById("set-auto-import");
+const importDirsEnabledChk = document.getElementById("import-dirs-enabled");
+const importDirsEnabledRow = document.getElementById("import-dirs-enabled-row");
 const importDirsModal = document.getElementById("import-dirs-modal");
 const dirsListEl = document.getElementById("dirs-list");
 const dirsStatusEl = document.getElementById("dirs-status");
+const dirsGearBtn = document.getElementById("dirs-gear");
+const importDirsCloseBtn = document.getElementById("import-dirs-close");
+const dirsAddBtn = document.getElementById("dirs-add");
 let autoImportScanSeq = 0;
+let autoImportToggleBusy = false;
 function setDirsStatus(text = "", kind = "") {
   if (!dirsStatusEl) return;
   dirsStatusEl.textContent = text || "";
@@ -215,6 +221,7 @@ function renderDirsList() {
 }
 function reflectAutoImport() {
   setAutoChk.checked = !!autoImport.enabled;
+  if (importDirsEnabledChk) importDirsEnabledChk.checked = !!autoImport.enabled;
   renderDirsList();
 }
 async function startAutoImportScan(reason = "正在扫描并导入目录…") {
@@ -268,25 +275,52 @@ setCoverTitle.addEventListener("change", () => {
   applyView();
 });
 // 自动导入开关
-setAutoChk.addEventListener("change", async () => {
-  const enabled = setAutoChk.checked;
+async function setAutoImportEnabled(enabled, opts = {}) {
+  if (autoImportToggleBusy) return;
+  autoImportToggleBusy = true;
+  const prev = !!autoImport.enabled;
   autoImport.enabled = enabled;
   reflectAutoImport();
   if (enabled && !autoImport.dirs.length) {
     importDirsModal.classList.add("show"); // 还没设目录：顺手打开让用户添加
   }
-  await applyAutoImport(enabled, {
-    scan: enabled && autoImport.dirs.length > 0,
-    reason: "正在扫描并导入目录…",
-  });
+  try {
+    await applyAutoImport(enabled, Object.assign({
+      scan: enabled && autoImport.dirs.length > 0,
+      reason: "正在扫描并导入目录…",
+      status: enabled ? "自动导入已开启" : "自动导入已关闭",
+    }, opts));
+  } catch (e) {
+    autoImport.enabled = prev;
+    reflectAutoImport();
+  } finally {
+    autoImportToggleBusy = false;
+  }
+}
+setAutoChk.addEventListener("change", async () => {
+  await setAutoImportEnabled(setAutoChk.checked);
 });
+if (importDirsEnabledChk) {
+  importDirsEnabledChk.addEventListener("change", async (e) => {
+    e.stopPropagation();
+    await setAutoImportEnabled(importDirsEnabledChk.checked);
+  });
+}
+if (importDirsEnabledRow) {
+  importDirsEnabledRow.addEventListener("click", async (e) => {
+    if (e.target === importDirsEnabledChk) return;
+    e.preventDefault();
+    e.stopPropagation();
+    await setAutoImportEnabled(!autoImport.enabled);
+  });
+}
 // 把当前 enabled + dirs 提交后端；扫描导入单独走后台，避免设置窗口卡住。
 async function applyAutoImport(enabled, opts = {}) {
   try {
     const cfg = await invoke("set_auto_import", { enabled, dirs: autoImport.dirs });
     autoImport = cfg || { enabled, dirs: autoImport.dirs };
     reflectAutoImport();
-    setDirsStatus("目录设置已保存", "ok");
+    setDirsStatus(opts.status || "目录设置已保存", "ok");
     if (opts.scan && autoImport.enabled && autoImport.dirs.length) {
       startAutoImportScan(opts.reason || "正在扫描并导入目录…");
     }
@@ -294,6 +328,7 @@ async function applyAutoImport(enabled, opts = {}) {
     setDirsStatus("保存目录设置失败：" + e, "error");
     alert("设置自动导入失败：" + e);
     reflectAutoImport();
+    throw e;
   }
 }
 async function addImportDirs() {
@@ -316,8 +351,50 @@ async function addImportDirs() {
     });
   }
 }
-// 漏斗面板右上角齿轮 → 打开“我的书架”设置弹窗
+function openImportDirsSettings() {
+  reflectAutoImport();
+  setDirsStatus("");
+  importDirsModal.classList.add("show");
+}
+if (dirsGearBtn) {
+  dirsGearBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openImportDirsSettings();
+  });
+}
+if (importDirsCloseBtn) {
+  importDirsCloseBtn.addEventListener("click", () => importDirsModal.classList.remove("show"));
+}
+if (importDirsModal) {
+  importDirsModal.addEventListener("click", (e) => {
+    if (e.target === importDirsModal) importDirsModal.classList.remove("show");
+  });
+}
+if (dirsAddBtn) {
+  dirsAddBtn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await addImportDirs();
+  });
+}
+// 工具栏齿轮 → 打开“常用设置”弹窗
 const fpSettingsModal = document.getElementById("fp-settings-modal");
+function openCommonSettings() {
+  menuEl.classList.remove("show");
+  filterPanel.classList.remove("show");
+  closeAccountPanel();
+  closeSearch(true);
+  fpSettingsModal.classList.add("show");
+}
+document.getElementById("settings-toolbar-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  openCommonSettings();
+});
+document.getElementById("fp-settings-close").addEventListener("click", () => fpSettingsModal.classList.remove("show"));
+fpSettingsModal.addEventListener("click", (e) => {
+  if (e.target === fpSettingsModal) fpSettingsModal.classList.remove("show");
+});
 // 账号、登录和同步面板 UI 在 sync-ui.js。
 function updateLayoutButtons() {
   document
@@ -793,9 +870,9 @@ function renderSimilarBooks(sourceTitle, list) {
     similarBooksList.appendChild(item);
   });
 }
-async function openSimilarBooks() {
-  if (selected.size !== 1) return;
-  const id = String([...selected][0]);
+async function openSimilarBooks(id = currentInfoBookId) {
+  if (!id) return;
+  id = String(id);
   const source = books.find((x) => String(x.id) === id);
   similarBooksModal.classList.add("show");
   similarBooksSource.textContent = source ? "基于《" + source.title + "》的正文语义相似度" : "基于正文语义相似度";
@@ -807,17 +884,16 @@ async function openSimilarBooks() {
     similarBooksList.innerHTML = '<div class="similar-empty">读取失败：' + escapeHtml(String(e || "")) + "</div>";
   }
 }
-similarBooksBtn.addEventListener("click", openSimilarBooks);
+similarBooksBtn.addEventListener("click", () => openSimilarBooks());
 document.getElementById("similar-books-close").addEventListener("click", () => similarBooksModal.classList.remove("show"));
 similarBooksModal.addEventListener("click", (e) => {
   if (e.target === similarBooksModal) similarBooksModal.classList.remove("show");
 });
 
-// 仅选中"一本"时才显示"图书信息 / 更换封面"
+// 图书信息里的单本操作。
 coverBtn.addEventListener("click", () => {
-  if (selected.size !== 1) return;
-  const id = [...selected][0];
-  const b = books.find((x) => String(x.id) === String(id));
+  if (!currentInfoBookId) return;
+  const b = books.find((x) => String(x.id) === String(currentInfoBookId));
   if (b) changeCover(b);
 });
 
@@ -825,8 +901,6 @@ function updateDeleteUI() {
   if (selected.size > 0) {
     delGroup.classList.add("show");
     bookInfoBtn.style.display = selected.size === 1 ? "" : "none";
-    similarBooksBtn.style.display = selected.size === 1 ? "" : "none";
-    coverBtn.style.display = selected.size === 1 ? "" : "none";
     delBtn.textContent = "🗑 删除选中 (" + selected.size + ")";
   } else {
     delGroup.classList.remove("show");

@@ -48,8 +48,6 @@
 
       <div id="del-group" class="del-group">
         <button id="book-info-btn" class="btn-plain">图书信息</button>
-        <button id="similar-books-btn" class="btn-plain">相似图书</button>
-        <button id="cover-btn" class="btn-plain">🖼 更换封面</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
         <button id="del-cancel" class="btn-plain">取消</button>
       </div>
@@ -77,7 +75,6 @@
           </svg>
         </button>
         <div id="filter-panel" class="filter-panel">
-          <button id="fp-gear" class="fp-gear" title="我的书架设置">⚙</button>
           <div class="fp-row">
             <div class="fp-col">
               <div class="fp-title">排序</div>
@@ -127,6 +124,7 @@
           </svg>
         </button>
         <button id="menu-btn" class="icon-btn" title="菜单">⋮</button>
+        <button id="settings-toolbar-btn" class="icon-btn settings-toolbar-btn" title="常用设置" aria-label="常用设置">⚙</button>
         <div id="menu" class="menu">
           <div class="menu-item" id="mi-random">🎲 随机打开一本书</div>
           <div class="menu-item" id="mi-import">➕ 导入书籍</div>
@@ -156,6 +154,7 @@
         <div id="stats-settings" class="stats-settings">
           <label><input type="checkbox" data-stat-item="duration" checked /> 阅读时长</label>
           <label><input type="checkbox" data-stat-item="words" checked /> 阅读字数</label>
+          <label><input type="checkbox" data-stat-item="speed" checked /> 平均速度</label>
           <label><input type="checkbox" data-stat-item="books" checked /> 读过</label>
           <label><input type="checkbox" data-stat-item="finished" checked /> 读完</label>
           <label><input type="checkbox" data-stat-item="highlights" checked /> 高亮</label>
@@ -194,7 +193,7 @@
     </div>
     <div id="fp-settings-modal" class="modal">
       <div class="modal-card">
-        <div class="modal-head"><span>⚙ 我的书架</span><button id="fp-settings-close" class="btn-plain">✕</button></div>
+        <div class="modal-head"><span>⚙ 常用设置</span><button id="fp-settings-close" class="btn-plain">✕</button></div>
         <div class="fp-set-row">
           <span>在封面上显示阅读进度</span>
           <label class="switch"><input type="checkbox" id="set-cover-prog" /><span class="slider"></span></label>
@@ -224,6 +223,10 @@
     <div id="import-dirs-modal" class="modal">
       <div class="modal-card">
         <div class="modal-head"><span>📁 自动导入目录</span><button id="import-dirs-close" class="btn-plain">✕</button></div>
+        <div class="ai-toggle-row" id="import-dirs-enabled-row">
+          <span>启用自动导入</span>
+          <label class="switch" id="import-dirs-enabled-switch"><input type="checkbox" id="import-dirs-enabled" /><span class="slider"></span></label>
+        </div>
         <p class="ai-note">下列目录（含子目录）里的电子书会在每次启动时自动加入书架。可添加多个目录。</p>
         <div id="dirs-list" class="dirs-list"></div>
         <div id="dirs-status" class="ai-status" aria-live="polite"></div>
@@ -250,6 +253,13 @@
         <div class="info-row"><span class="info-k">字数</span><span id="book-info-words" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">大小</span><span id="book-info-size" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">评分</span><span id="book-info-stars" class="info-stars" title="点击打分，再点同一颗清除"></span></div>
+        <div class="info-row book-info-actions">
+          <span class="info-k">操作</span>
+          <div class="info-action-buttons">
+            <button id="similar-books-btn" class="btn-plain">相似图书</button>
+            <button id="cover-btn" class="btn-plain">更换封面</button>
+          </div>
+        </div>
         <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="book-info-desc" class="info-desc" contenteditable="true"></div></div>
       </div>
     </div>

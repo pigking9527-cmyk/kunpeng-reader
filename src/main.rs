@@ -41,9 +41,10 @@ use reader_protocol::{
     collect_head_assets, extract_body_inner, get_txt_chapters, guess_mime, is_md, is_mobi,
     md_to_html, percent_decode, rewrite_attrs, rewrite_css_url, txt_body, txt_html,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use stats::StatsStore;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -106,6 +107,8 @@ pub(crate) struct AppState {
     pub(crate) library: Mutex<Library>,
     pub(crate) db: Mutex<Option<db::AppDb>>,
     epubs: Mutex<HashMap<u64, EpubDoc>>,
+    epub_meta_cache: Mutex<HashMap<u64, Arc<EpubMetaCache>>>,
+    chapter_html_cache: Mutex<HashMap<(u64, u64, usize), Arc<ProcessedChapterHtml>>>,
     backfilled: std::sync::atomic::AtomicBool, // 是否已回填旧书的作者/导入时间
     pending_jump: Mutex<HashMap<u64, (u32, String)>>, // 书架检索点击 → 阅读窗口待跳转位置
     pub(crate) text_cache: Mutex<HashMap<u64, (u64, Arc<Vec<String>>)>>, // 检索用：内存缓存的逐章纯文本 (mtime, 章节)
@@ -121,6 +124,48 @@ pub(crate) struct AppState {
     pub(crate) stats: Mutex<StatsStore>,   // 详细阅读统计的小时桶
     pub(crate) vocab: Mutex<vocab::VocabStore>, // 生词本：查过的词
     word_pack: Mutex<tts::WordPackState>,  // 高频词语音包后台生成状态
+}
+
+const BIG_EPUB_CHAPTER_BYTES: usize = 800 * 1024;
+const BIG_EPUB_CHAPTER_CHARS: usize = 1_000_000;
+const VIRTUAL_CHAPTER_TARGET_BYTES: usize = 520 * 1024;
+const VIRTUAL_CHAPTER_SEARCH_BYTES: usize = 160 * 1024;
+const EPUB_CACHE_VERSION: u32 = 2;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct EpubVirtualChapter {
+    spine_idx: usize,
+    path: String,
+    base_dir: String,
+    part: usize,
+    body_start: usize,
+    body_end: usize,
+}
+
+#[derive(Clone)]
+struct EpubMetaCache {
+    mtime: u64,
+    spine_paths: Vec<String>,
+    chapter_map: HashMap<String, usize>,
+    virtuals: Vec<EpubVirtualChapter>,
+    toc: Vec<TocDto>,
+    physical_to_virtual: Vec<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EpubMetaDiskCache {
+    version: u32,
+    mtime: u64,
+    spine_paths: Vec<String>,
+    virtuals: Vec<EpubVirtualChapter>,
+    toc: Vec<TocDto>,
+    physical_to_virtual: Vec<u32>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ProcessedChapterHtml {
+    head: String,
+    body: String,
 }
 
 /// 当前时刻（毫秒）。用于语义索引的“让路”节流。
@@ -458,7 +503,14 @@ async fn set_progress(
 ) -> Result<(), ()> {
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
-        if lib.set_position(id, progress, chapter, frac) {
+        let mut changed = lib.set_position(id, progress, chapter, frac);
+        if let Some(book) = lib.books.iter_mut().find(|b| b.id == id) {
+            if book.format == "epub" && book.chapter_index_version != EPUB_CACHE_VERSION {
+                book.chapter_index_version = EPUB_CACHE_VERSION;
+                changed = true;
+            }
+        }
+        if changed {
             lib.save();
         }
     }
@@ -542,6 +594,22 @@ async fn open_book_at(
     term: String,
 ) -> Result<(), String> {
     let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    let chapter = {
+        let format = state
+            .library
+            .lock()
+            .unwrap()
+            .get(id_num)
+            .map(|b| b.format.clone())
+            .unwrap_or_default();
+        if format == "epub" {
+            ensure_epub_meta(&state, id_num)
+                .map(|meta| map_physical_chapter_to_virtual(&meta, chapter))
+                .unwrap_or(chapter)
+        } else {
+            chapter
+        }
+    };
     let label = format!("reader-{id_num}");
     let existed = app.get_webview_window(&label).is_some();
     if !existed {
@@ -825,7 +893,17 @@ async fn book_info(
         .to_string();
     let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
 
-    let (title, format, progress, resume_chapter, resume_frac, bookmarks, highlights, path) = {
+    let (
+        title,
+        format,
+        progress,
+        resume_chapter,
+        resume_frac,
+        chapter_index_version,
+        bookmarks,
+        highlights,
+        path,
+    ) = {
         let lib = state.library.lock().unwrap();
         let b = lib.get(id_num).ok_or("找不到这本书")?;
         (
@@ -834,6 +912,7 @@ async fn book_info(
             b.progress,
             b.resume_chapter,
             b.resume_frac,
+            b.chapter_index_version,
             b.bookmarks.clone(),
             b.highlights.clone(),
             b.path.clone(),
@@ -885,41 +964,38 @@ async fn book_info(
         });
     }
 
-    ensure_epub_loaded(&state, id_num)?;
-    let mut epubs = state.epubs.lock().unwrap();
-    let doc = epubs.get_mut(&id_num).ok_or("无法打开 EPUB")?;
-
-    // spine 各章节的归档路径 -> 序号，用于把目录/链接映射成页面内锚点
-    let spine_paths: Vec<String> = doc
-        .spine
-        .iter()
-        .filter_map(|s| doc.resources.get(&s.idref))
-        .map(|r| r.path.to_string_lossy().replace('\\', "/"))
-        .collect();
-    let chapter_map: HashMap<String, usize> = spine_paths
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.clone(), i))
-        .collect();
-
-    let mut toc = Vec::new();
-    flatten_toc(&doc.toc, 0, &chapter_map, &mut toc);
-    if toc.is_empty() {
-        toc = epub3_nav_toc(doc, &chapter_map);
+    let meta = ensure_epub_meta(&state, id_num)?;
+    let should_map_old_chapters = chapter_index_version < EPUB_CACHE_VERSION;
+    let resume_chapter = if should_map_old_chapters {
+        map_physical_chapter_to_virtual(&meta, resume_chapter)
+    } else {
+        resume_chapter.min(meta.virtuals.len().saturating_sub(1) as u32)
+    };
+    let mut bookmarks = bookmarks;
+    if should_map_old_chapters {
+        for bookmark in &mut bookmarks {
+            bookmark.chapter = map_physical_chapter_to_virtual(&meta, bookmark.chapter);
+        }
+    }
+    let mut highlights = highlights;
+    if should_map_old_chapters {
+        for highlight in &mut highlights {
+            highlight.chapter = map_physical_chapter_to_virtual(&meta, highlight.chapter);
+        }
     }
 
     log(&format!(
         "book_info -> {} chapters, {} toc",
-        spine_paths.len(),
-        toc.len()
+        meta.virtuals.len(),
+        meta.toc.len()
     ));
     Ok(BookInfo {
         id: id_num.to_string(),
         title,
         format,
         url: format!("{RES_BASE}/book/{id_num}"),
-        chapter_count: spine_paths.len() as u32,
-        toc,
+        chapter_count: meta.virtuals.len() as u32,
+        toc: meta.toc.clone(),
         progress,
         resume_chapter,
         resume_frac,
@@ -1139,6 +1215,377 @@ fn ensure_epub_loaded(state: &AppState, id: u64) -> Result<(), String> {
     Ok(())
 }
 
+fn file_mtime_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().saturating_mul(1000) + u64::from(d.subsec_millis()))
+        .unwrap_or(0)
+}
+
+fn epub_cache_dir() -> Option<PathBuf> {
+    let mut dir = dirs::cache_dir()?;
+    dir.push("ebook-reader");
+    dir.push("epub-cache");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+}
+
+fn meta_cache_path(id: u64, mtime: u64) -> Option<PathBuf> {
+    Some(epub_cache_dir()?.join(format!("meta-v{EPUB_CACHE_VERSION}-{id}-{mtime}.json")))
+}
+
+fn chapter_cache_path(id: u64, mtime: u64, idx: usize) -> Option<PathBuf> {
+    Some(epub_cache_dir()?.join(format!(
+        "chapter-v{EPUB_CACHE_VERSION}-{id}-{mtime}-{idx}.json"
+    )))
+}
+
+fn build_virtual_chapter_map(
+    spine_paths: &[String],
+    physical_to_virtual: &[u32],
+) -> HashMap<String, usize> {
+    spine_paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                p.clone(),
+                physical_to_virtual
+                    .get(i)
+                    .copied()
+                    .unwrap_or(i as u32) as usize,
+            )
+        })
+        .collect()
+}
+
+fn load_epub_meta_disk_cache(id: u64, mtime: u64) -> Option<Arc<EpubMetaCache>> {
+    let path = meta_cache_path(id, mtime)?;
+    let bytes = std::fs::read(path).ok()?;
+    let disk: EpubMetaDiskCache = serde_json::from_slice(&bytes).ok()?;
+    if disk.version != EPUB_CACHE_VERSION
+        || disk.mtime != mtime
+        || disk.spine_paths.is_empty()
+        || disk.virtuals.is_empty()
+    {
+        return None;
+    }
+    let chapter_map = build_virtual_chapter_map(&disk.spine_paths, &disk.physical_to_virtual);
+    Some(Arc::new(EpubMetaCache {
+        mtime,
+        spine_paths: disk.spine_paths,
+        chapter_map,
+        virtuals: disk.virtuals,
+        toc: disk.toc,
+        physical_to_virtual: disk.physical_to_virtual,
+    }))
+}
+
+fn save_epub_meta_disk_cache(id: u64, meta: &EpubMetaCache) {
+    let Some(path) = meta_cache_path(id, meta.mtime) else {
+        return;
+    };
+    let disk = EpubMetaDiskCache {
+        version: EPUB_CACHE_VERSION,
+        mtime: meta.mtime,
+        spine_paths: meta.spine_paths.clone(),
+        virtuals: meta.virtuals.clone(),
+        toc: meta.toc.clone(),
+        physical_to_virtual: meta.physical_to_virtual.clone(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&disk) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+fn clamp_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn first_needle_pos(hay: &str, needles: &[&str]) -> Option<usize> {
+    needles.iter().filter_map(|n| hay.find(n)).min()
+}
+
+fn last_needle_pos(hay: &str, needles: &[&str]) -> Option<(usize, usize)> {
+    needles
+        .iter()
+        .filter_map(|n| hay.rfind(n).map(|pos| (pos, n.len())))
+        .max_by_key(|(pos, _)| *pos)
+}
+
+fn find_virtual_split(body: &str, start: usize, target: usize) -> usize {
+    let len = body.len();
+    let target = clamp_char_boundary(body, target.min(len));
+    if target >= len {
+        return len;
+    }
+
+    let forward_end = clamp_char_boundary(body, (target + VIRTUAL_CHAPTER_SEARCH_BYTES).min(len));
+    if forward_end > target {
+        let window = &body[target..forward_end];
+        if let Some(pos) = first_needle_pos(
+            window,
+            &[
+                "<h1", "<h2", "<h3", "<h4", "<h5", "<h6", "<p", "<div", "<section",
+                "<H1", "<H2", "<H3", "<H4", "<H5", "<H6", "<P", "<DIV", "<SECTION",
+            ],
+        ) {
+            return clamp_char_boundary(body, target + pos);
+        }
+        if let Some((pos, needle_len)) = first_needle_pos(window, &["</p>", "</P>"])
+            .map(|pos| (pos, 4usize))
+        {
+            return clamp_char_boundary(body, target + pos + needle_len);
+        }
+    }
+
+    let backward_start = clamp_char_boundary(
+        body,
+        target.saturating_sub(VIRTUAL_CHAPTER_SEARCH_BYTES).max(start),
+    );
+    if backward_start < target {
+        let window = &body[backward_start..target];
+        if let Some((pos, needle_len)) =
+            last_needle_pos(
+                window,
+                &[
+                    "</p>",
+                    "</div>",
+                    "</section>",
+                    "</h1>",
+                    "</h2>",
+                    "</h3>",
+                    "</P>",
+                    "</DIV>",
+                    "</SECTION>",
+                    "</H1>",
+                    "</H2>",
+                    "</H3>",
+                ],
+            )
+        {
+            let split = backward_start + pos + needle_len;
+            if split > start {
+                return clamp_char_boundary(body, split);
+            }
+        }
+    }
+
+    target
+}
+
+fn split_body_ranges(body: &str, html_len: usize) -> Vec<(usize, usize)> {
+    if html_len <= BIG_EPUB_CHAPTER_BYTES && body.chars().count() <= BIG_EPUB_CHAPTER_CHARS {
+        return vec![(0, body.len())];
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let len = body.len();
+    while start < len {
+        let target = start.saturating_add(VIRTUAL_CHAPTER_TARGET_BYTES).min(len);
+        let mut end = find_virtual_split(body, start, target);
+        if end <= start {
+            end = clamp_char_boundary(body, target);
+        }
+        if end <= start {
+            end = len;
+        }
+        ranges.push((start, end));
+        start = end;
+    }
+    if ranges.is_empty() {
+        ranges.push((0, body.len()));
+    }
+    ranges
+}
+
+fn build_epub_meta_cache(state: &AppState, id: u64, mtime: u64) -> Result<Arc<EpubMetaCache>, String> {
+    ensure_epub_loaded(state, id)?;
+    let mut epubs = state.epubs.lock().unwrap();
+    let doc = epubs.get_mut(&id).ok_or("无法打开 EPUB")?;
+
+    let spine_paths: Vec<String> = doc
+        .spine
+        .iter()
+        .filter_map(|s| doc.resources.get(&s.idref))
+        .map(|r| r.path.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    let mut virtuals = Vec::new();
+    let mut physical_to_virtual = Vec::with_capacity(spine_paths.len());
+    for (spine_idx, cpath) in spine_paths.iter().enumerate() {
+        physical_to_virtual.push(virtuals.len() as u32);
+        let html = doc.get_resource_str_by_path(cpath).unwrap_or_default();
+        let base_dir = cpath.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
+        let body = extract_body_inner(&html);
+        let ranges = split_body_ranges(body, html.len());
+        for (part, (body_start, body_end)) in ranges.into_iter().enumerate() {
+            virtuals.push(EpubVirtualChapter {
+                spine_idx,
+                path: cpath.clone(),
+                base_dir: base_dir.clone(),
+                part,
+                body_start,
+                body_end,
+            });
+        }
+    }
+
+    let chapter_map = build_virtual_chapter_map(&spine_paths, &physical_to_virtual);
+    let mut toc = Vec::new();
+    flatten_toc(&doc.toc, 0, &chapter_map, &mut toc);
+    if toc.is_empty() {
+        toc = epub3_nav_toc(doc, &chapter_map);
+    }
+
+    let meta = Arc::new(EpubMetaCache {
+        mtime,
+        spine_paths,
+        chapter_map,
+        virtuals,
+        toc,
+        physical_to_virtual,
+    });
+    save_epub_meta_disk_cache(id, &meta);
+    log(&format!(
+        "epub_meta id={id} physical={} virtual={} toc={}",
+        meta.spine_paths.len(),
+        meta.virtuals.len(),
+        meta.toc.len()
+    ));
+    Ok(meta)
+}
+
+fn ensure_epub_meta(state: &AppState, id: u64) -> Result<Arc<EpubMetaCache>, String> {
+    let path = {
+        let lib = state.library.lock().unwrap();
+        lib.get(id).ok_or("找不到这本书")?.path.clone()
+    };
+    let mtime = file_mtime_ms(&path);
+    {
+        let cache = state.epub_meta_cache.lock().unwrap();
+        if let Some(meta) = cache.get(&id) {
+            if meta.mtime == mtime {
+                return Ok(Arc::clone(meta));
+            }
+        }
+    }
+    if let Some(meta) = load_epub_meta_disk_cache(id, mtime) {
+        state
+            .epub_meta_cache
+            .lock()
+            .unwrap()
+            .insert(id, Arc::clone(&meta));
+        return Ok(meta);
+    }
+    let meta = build_epub_meta_cache(state, id, mtime)?;
+    state
+        .epub_meta_cache
+        .lock()
+        .unwrap()
+        .insert(id, Arc::clone(&meta));
+    Ok(meta)
+}
+
+fn map_physical_chapter_to_virtual(meta: &EpubMetaCache, chapter: u32) -> u32 {
+    let idx = chapter as usize;
+    if idx < meta.physical_to_virtual.len() {
+        meta.physical_to_virtual[idx]
+    } else {
+        chapter.min(meta.virtuals.len().saturating_sub(1) as u32)
+    }
+}
+
+fn load_processed_chapter_disk_cache(
+    id: u64,
+    mtime: u64,
+    idx: usize,
+) -> Option<Arc<ProcessedChapterHtml>> {
+    let path = chapter_cache_path(id, mtime, idx)?;
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<ProcessedChapterHtml>(&bytes)
+        .ok()
+        .map(Arc::new)
+}
+
+fn save_processed_chapter_disk_cache(id: u64, mtime: u64, idx: usize, chapter: &ProcessedChapterHtml) {
+    let Some(path) = chapter_cache_path(id, mtime, idx) else {
+        return;
+    };
+    if let Ok(bytes) = serde_json::to_vec(chapter) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+fn process_virtual_chapter(
+    state: &AppState,
+    id: u64,
+    idx: usize,
+    meta: &EpubMetaCache,
+) -> Option<Arc<ProcessedChapterHtml>> {
+    let key = (id, meta.mtime, idx);
+    {
+        let cache = state.chapter_html_cache.lock().unwrap();
+        if let Some(chapter) = cache.get(&key) {
+            return Some(Arc::clone(chapter));
+        }
+    }
+    if let Some(chapter) = load_processed_chapter_disk_cache(id, meta.mtime, idx) {
+        state
+            .chapter_html_cache
+            .lock()
+            .unwrap()
+            .insert(key, Arc::clone(&chapter));
+        return Some(chapter);
+    }
+
+    ensure_epub_loaded(state, id).ok()?;
+    let vc = meta.virtuals.get(idx)?;
+    let mut epubs = state.epubs.lock().unwrap();
+    let doc = epubs.get_mut(&id)?;
+    let html = doc.get_resource_str_by_path(&vc.path).unwrap_or_default();
+    let rewritten_full = rewrite_css_url(
+        &rewrite_attrs(&html, id, &vc.base_dir, &meta.chapter_map),
+        id,
+        &vc.base_dir,
+    );
+    let mut head = String::new();
+    let mut seen = std::collections::HashSet::new();
+    collect_head_assets(&rewritten_full, &mut head, &mut seen);
+
+    let raw_body = extract_body_inner(&html);
+    let start = clamp_char_boundary(raw_body, vc.body_start.min(raw_body.len()));
+    let end = clamp_char_boundary(raw_body, vc.body_end.min(raw_body.len())).max(start);
+    let fragment = &raw_body[start..end];
+    let body = rewrite_css_url(
+        &rewrite_attrs(fragment, id, &vc.base_dir, &meta.chapter_map),
+        id,
+        &vc.base_dir,
+    );
+    let body = if meta.virtuals.iter().filter(|v| v.spine_idx == vc.spine_idx).count() > 1 {
+        format!(
+            "<section class=\"rr-virtual-chapter\" data-spine=\"{}\" data-part=\"{}\">{}</section>",
+            vc.spine_idx, vc.part, body
+        )
+    } else {
+        body
+    };
+    let chapter = Arc::new(ProcessedChapterHtml { head, body });
+    save_processed_chapter_disk_cache(id, meta.mtime, idx, &chapter);
+    state
+        .chapter_html_cache
+        .lock()
+        .unwrap()
+        .insert(key, Arc::clone(&chapter));
+    Some(chapter)
+}
+
 fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
     let decoded = percent_decode(path);
     let mut parts = decoded.trim_start_matches('/').splitn(3, '/');
@@ -1189,9 +1636,9 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
                     .unwrap_or_default()
             };
             let count = if format == "epub" {
-                ensure_epub_loaded(state, id).ok()?;
-                let mut epubs = state.epubs.lock().unwrap();
-                epubs.get_mut(&id).map(|d| d.spine.len()).unwrap_or(0)
+                ensure_epub_meta(state, id)
+                    .map(|meta| meta.virtuals.len())
+                    .unwrap_or(0)
             } else {
                 get_txt_chapters(state, id).map(|c| c.len()).unwrap_or(1) // txt/md：切分后的章数
             };
@@ -1237,33 +1684,9 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
                 let json = serde_json::json!({"head": "", "body": body}).to_string();
                 return Some((json.into_bytes(), "application/json".to_string()));
             }
-            ensure_epub_loaded(state, id).ok()?;
-            let mut epubs = state.epubs.lock().unwrap();
-            let doc = epubs.get_mut(&id)?;
-            let spine_paths: Vec<String> = doc
-                .spine
-                .iter()
-                .filter_map(|s| doc.resources.get(&s.idref))
-                .map(|r| r.path.to_string_lossy().replace('\\', "/"))
-                .collect();
-            let chapter_map: HashMap<String, usize> = spine_paths
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.clone(), i))
-                .collect();
-            let cpath = spine_paths.get(idx)?.clone();
-            let html = doc.get_resource_str_by_path(&cpath).unwrap_or_default();
-            let base_dir = cpath.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-            let rewritten = rewrite_css_url(
-                &rewrite_attrs(&html, id, base_dir, &chapter_map),
-                id,
-                base_dir,
-            );
-            let mut head = String::new();
-            let mut seen = std::collections::HashSet::new();
-            collect_head_assets(&rewritten, &mut head, &mut seen);
-            let body = extract_body_inner(&rewritten).to_string();
-            let json = serde_json::json!({"head": head, "body": body}).to_string();
+            let meta = ensure_epub_meta(state, id).ok()?;
+            let chapter = process_virtual_chapter(state, id, idx, &meta)?;
+            let json = serde_json::json!({"head": chapter.head, "body": chapter.body}).to_string();
             Some((json.into_bytes(), "application/json".to_string()))
         }
         "pdf" => {
@@ -1386,6 +1809,8 @@ fn main() {
             library: Mutex::new(Library::load()),
             db: Mutex::new(db::AppDb::open().ok()),
             epubs: Mutex::new(HashMap::new()),
+            epub_meta_cache: Mutex::new(HashMap::new()),
+            chapter_html_cache: Mutex::new(HashMap::new()),
             backfilled: std::sync::atomic::AtomicBool::new(false),
             pending_jump: Mutex::new(HashMap::new()),
             text_cache: Mutex::new(HashMap::new()),
@@ -1557,6 +1982,7 @@ fn main() {
             reader_commands::add_highlight,
             reader_commands::remove_highlight,
             reader_commands::set_highlight_note,
+            reader_commands::set_highlight_text,
             relocate_book
         ])
         .run(tauri::generate_context!())

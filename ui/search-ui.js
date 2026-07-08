@@ -160,12 +160,20 @@ const shelfChk = document.getElementById("shelf-search-chk");
 const shelfSearchModal = document.getElementById("shelf-search-modal");
 const shelfSearchFrame = document.getElementById("shelf-search-frame");
 const shelfSearchClose = document.getElementById("shelf-search-close");
+try {
+  shelfChk.checked = localStorage.getItem("shelfSearchEnabled") === "1";
+} catch (e) {}
+function updateShelfSearchMode() {
+  searchInput.placeholder = shelfChk.checked ? "全书架正文检索，回车搜索…" : "搜索 书名 / 作者 / 简介";
+}
+updateShelfSearchMode();
 syncSearchTabStops();
 shelfChk.addEventListener("click", (e) => e.stopPropagation());
 // 整个开关（含“书架搜索”四个字）点击都不要冒泡到 document 的关闭逻辑，否则勾选会收起搜索框
 document.getElementById("shelf-toggle").addEventListener("click", (e) => e.stopPropagation());
 shelfChk.addEventListener("change", () => {
-  searchInput.placeholder = shelfChk.checked ? "全书架正文检索，回车搜索…" : "搜索 书名 / 作者 / 简介";
+  localStorage.setItem("shelfSearchEnabled", shelfChk.checked ? "1" : "0");
+  updateShelfSearchMode();
   const term = searchInput.value.trim();
   if (shelfChk.checked) {
     // 有关键词时，切到全书架正文检索就直接打开全文检索页。

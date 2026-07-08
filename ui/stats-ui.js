@@ -20,6 +20,7 @@ const STAT_CHART_METRIC_KEY = "readingStatsChartMetric";
 const DEFAULT_STAT_VISIBLE = {
   duration: true,
   words: true,
+  speed: true,
   books: true,
   finished: true,
   highlights: true,
@@ -55,6 +56,20 @@ function addDays(d, n) {
 }
 function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); } // m: 0-based
 function statsEscapeHtml(s) { return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function fmtReadingSpeed(words, seconds) {
+  if (!words || !seconds) return "—";
+  return Math.round(words / Math.max(1, seconds / 60)) + " 字/分钟";
+}
+function statsQualityNote(data) {
+  const seconds = data.total_seconds || 0;
+  const words = data.total_words || 0;
+  if (seconds < 60 || words <= 0) return "";
+  const speed = words / Math.max(1, seconds / 60);
+  if (seconds >= 1800 && words < 100) return "这段统计可能包含停留时间：阅读时长较长，但计入字数很少。";
+  if (speed > 3000) return "这段统计的平均速度偏高，可能包含快速翻页或重复计字。";
+  if (speed < 20 && seconds >= 600) return "这段统计的平均速度偏低，可能包含停留时间或扫描版 PDF。";
+  return "";
+}
 function statRange() {
   const d = statAnchor, y = d.getFullYear(), m = d.getMonth();
   if (statScope === "day") { const v = ymd(d); return [v, v]; }
@@ -228,6 +243,7 @@ async function renderStats() {
   const statItems = [
     ["duration", "阅读时长", fmtTime(data.total_seconds)],
     ["words", "阅读字数", fmtWords(data.total_words)],
+    ["speed", "平均速度", fmtReadingSpeed(data.total_words, data.total_seconds)],
     ["books", "读过", data.book_count + " 本"],
     ["finished", "读完", data.finished_count + " 本"],
     ["highlights", "高亮", data.total_highlights],
@@ -236,6 +252,8 @@ async function renderStats() {
   const cards = statItems.length
     ? '<div class="stat-cards">' + statItems.map((item) => `<div class="stat-cell"><div class="k">${item[1]}</div><div class="v">${item[2]}</div></div>`).join("") + "</div>"
     : "";
+  const quality = statsQualityNote(data);
+  const qualityNote = quality ? `<div class="stats-quality-note">${statsEscapeHtml(quality)}</div>` : "";
   const chart = `<div class="stat-chart">${barChart(statBars(data), "#5aa0ff", statChartMetric)}</div>`;
   let books;
   if (data.books.length) {
@@ -249,7 +267,7 @@ async function renderStats() {
     books = '<div class="stats-empty">这段时间还没有阅读记录</div>';
   }
   if (!bodyEl) return;
-  bodyEl.innerHTML = overviewStats(allData) + contributionGraph(allData) + cards + chart + books;
+  bodyEl.innerHTML = overviewStats(allData) + contributionGraph(allData) + cards + qualityNote + chart + books;
   requestAnimationFrame(() => {
     const maxScrollTop = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
     bodyEl.scrollTop = Math.min(prevScrollTop, maxScrollTop);

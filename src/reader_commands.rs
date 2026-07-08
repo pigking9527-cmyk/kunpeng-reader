@@ -104,6 +104,7 @@ pub(crate) fn add_highlight(
                 start,
                 end,
                 text,
+                corrected_text: String::new(),
                 context,
                 rects,
                 color,
@@ -142,6 +143,22 @@ pub(crate) fn set_highlight_note(
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.set_highlight_note(id, index, note);
+        lib.save();
+        return lib.highlights(id);
+    }
+    Vec::new()
+}
+
+#[tauri::command]
+pub(crate) fn set_highlight_text(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    index: usize,
+    text: String,
+) -> Vec<book::Highlight> {
+    if let Some(id) = reader_window_id(&window) {
+        let mut lib = state.library.lock().unwrap();
+        lib.set_highlight_text(id, index, text);
         lib.save();
         return lib.highlights(id);
     }
