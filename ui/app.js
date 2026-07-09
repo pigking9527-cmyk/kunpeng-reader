@@ -43,6 +43,15 @@ let books = []; // 当前书架（原始顺序，供“随机打开”用）
 let sortKey = localStorage.getItem("shelfSort") || "title";
 if (sortKey === "rating") sortKey = "title"; // 已移除“按评分排序”，旧设置回落到书名
 let layout = localStorage.getItem("shelfLayout") || "grid";
+const GRID_COL_MIN = 1;
+const GRID_COL_MAX = 12;
+function parseGridColumns(v) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.max(GRID_COL_MIN, Math.min(GRID_COL_MAX, n));
+}
+let shelfGridColumns = parseGridColumns(localStorage.getItem("shelfGridColumns") || "0"); // 0=默认自适应
+let shelfGridColumnsValue = parseGridColumns(localStorage.getItem("shelfGridColumnsValue") || "3") || 3;
 let readingFilter = { unread: true, reading: true, done: true };
 try {
   readingFilter = Object.assign(readingFilter, JSON.parse(localStorage.getItem("readingFilter") || "{}"));
@@ -395,11 +404,440 @@ document.getElementById("fp-settings-close").addEventListener("click", () => fpS
 fpSettingsModal.addEventListener("click", (e) => {
   if (e.target === fpSettingsModal) fpSettingsModal.classList.remove("show");
 });
+
+// ---- 主设置页：语义模型 / 语义索引 / 加速索引 ----
+const semanticIndexModal = document.getElementById("semantic-index-modal");
+const semanticGearBtn = document.getElementById("semantic-gear");
+const semanticIndexCloseBtn = document.getElementById("semantic-index-close");
+const semModelMeta = document.getElementById("sem-model-meta");
+const semVectorMeta = document.getElementById("sem-vector-meta");
+const semAccelMeta = document.getElementById("sem-accel-meta");
+const semStatusEl = document.getElementById("sem-status");
+const semVectorBar = document.getElementById("sem-vector-bar");
+const semAccelBar = document.getElementById("sem-accel-bar");
+const semModelDownloadBtn = document.getElementById("sem-model-download");
+const semModelDeleteBtn = document.getElementById("sem-model-delete");
+const semVectorBuildBtn = document.getElementById("sem-vector-build");
+const semVectorDeleteBtn = document.getElementById("sem-vector-delete");
+const semAccelBuildBtn = document.getElementById("sem-accel-build");
+const semAccelDeleteBtn = document.getElementById("sem-accel-delete");
+let semStatusPoll = null;
+let semStatusInFlight = false;
+const SEM_STATUS_KEY = "semanticIndexStatusV1";
+let lastSemStatus = loadSemanticStatusCache();
+
+function semanticStatusSnapshot(p = {}) {
+  return {
+    model_ready: !!p.model_ready,
+    model_path: p.model_path || "",
+    model_bytes: Number(p.model_bytes || 0),
+    semantic_done: Number(p.semantic_done || 0),
+    semantic_total: Number(p.semantic_total || 0),
+    semantic_ready: !!p.semantic_ready,
+    semantic_bytes: Number(p.semantic_bytes || 0),
+    accelerator_done: Number(p.accelerator_done || 0),
+    accelerator_total: Number(p.accelerator_total || 0),
+    accelerator_ready: !!p.accelerator_ready,
+    accelerator_resumable: !!p.accelerator_resumable,
+    accelerator_bytes: Number(p.accelerator_bytes || 0),
+    saved_at: Date.now(),
+  };
+}
+
+function loadSemanticStatusCache() {
+  try {
+    const p = JSON.parse(localStorage.getItem(SEM_STATUS_KEY) || "null");
+    return p && typeof p === "object" ? p : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveSemanticStatusCache(p = {}) {
+  const snap = semanticStatusSnapshot(p);
+  if (!snap.model_ready && !snap.semantic_total && !snap.accelerator_total) return;
+  lastSemStatus = snap;
+  try {
+    localStorage.setItem(SEM_STATUS_KEY, JSON.stringify(snap));
+  } catch (e) {}
+}
+
+function clearSemanticStatusCache() {
+  lastSemStatus = null;
+  try {
+    localStorage.removeItem(SEM_STATUS_KEY);
+  } catch (e) {}
+}
+
+function updateSemanticStatusCache(patch = {}) {
+  const base = lastSemStatus || semanticStatusSnapshot({});
+  lastSemStatus = Object.assign({}, base, patch, { saved_at: Date.now() });
+  try {
+    localStorage.setItem(SEM_STATUS_KEY, JSON.stringify(lastSemStatus));
+  } catch (e) {}
+}
+
+function mergeSemanticStatusWithCache(p = {}) {
+  if (!p.status_refreshing || !lastSemStatus) return p;
+  return Object.assign({}, lastSemStatus, p, {
+    model_ready: p.model_ready || lastSemStatus.model_ready,
+    model_path: p.model_path || lastSemStatus.model_path || "",
+    model_bytes: p.model_bytes || lastSemStatus.model_bytes || 0,
+    semantic_done: p.semantic_done || lastSemStatus.semantic_done || 0,
+    semantic_total: p.semantic_total || lastSemStatus.semantic_total || 0,
+    semantic_ready: p.semantic_ready || lastSemStatus.semantic_ready,
+    semantic_bytes: p.semantic_bytes || lastSemStatus.semantic_bytes || 0,
+    accelerator_done: p.accelerator_done || lastSemStatus.accelerator_done || 0,
+    accelerator_total: p.accelerator_total || lastSemStatus.accelerator_total || 0,
+    accelerator_ready: p.accelerator_ready || lastSemStatus.accelerator_ready,
+    accelerator_resumable: p.accelerator_resumable || lastSemStatus.accelerator_resumable,
+    accelerator_bytes: p.accelerator_bytes || lastSemStatus.accelerator_bytes || 0,
+  });
+}
+
+function semBytes(n) {
+  n = Number(n || 0);
+  if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + " GB";
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+  return n ? n + " B" : "0 B";
+}
+
+function setSemBar(bar, done, total, ready) {
+  const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done * 100 / total))) : 0;
+  if (bar) {
+    bar.style.width = pct + "%";
+    bar.parentElement?.classList.toggle("done", !!ready);
+  }
+}
+
+function setSemStatus(text = "", kind = "") {
+  if (!semStatusEl) return;
+  semStatusEl.textContent = text || "";
+  semStatusEl.className = "ai-status" + (kind ? " " + kind : "");
+}
+
+function renderSemanticStatus(p = {}) {
+  p = mergeSemanticStatusWithCache(p);
+  const busy = !!(p.building || p.model_downloading);
+  const refreshing = !!p.status_refreshing;
+  const vectorLive = p.building && !p.shard_total && p.total > 0;
+  const vectorDone = vectorLive ? (p.done || 0) : (p.semantic_done || 0);
+  const vectorTotal = vectorLive ? (p.total || 0) : (p.semantic_total || 0);
+  const accelDone = p.accelerator_done || 0;
+  const accelTotal = p.accelerator_total || 0;
+  const vectorSize = p.semantic_bytes ? "，占用 " + semBytes(p.semantic_bytes) : "";
+  const accelSize = p.accelerator_bytes ? "，占用 " + semBytes(p.accelerator_bytes) : "";
+
+  semModelMeta.textContent = p.model_downloading
+    ? "正在下载/加载模型…"
+    : (p.model_ready ? ("已就绪" + (p.model_bytes ? "，缓存大小 " + semBytes(p.model_bytes) : "")) : (refreshing ? "正在读取模型状态…" : "未下载。首次下载约 120MB。"));
+  semVectorMeta.textContent = refreshing && !vectorTotal
+    ? "正在读取语义索引状态…"
+    : (vectorTotal
+    ? (vectorDone + "/" + vectorTotal + " 本" + (p.semantic_ready ? "，已完成" : "") + vectorSize)
+    : "书架中暂无可建立语义索引的图书");
+  semAccelMeta.textContent = refreshing && !accelTotal
+    ? "正在读取加速索引状态…"
+    : (accelTotal
+    ? (accelDone + "/" + accelTotal + " 片" + (p.accelerator_ready ? "，已完成" : (p.accelerator_resumable ? "，可续建" : "")) + accelSize)
+    : "建立语义索引后可建立加速索引");
+
+  setSemBar(semVectorBar, vectorDone, vectorTotal, p.semantic_ready);
+  setSemBar(semAccelBar, accelDone, accelTotal, p.accelerator_ready);
+
+  semModelDownloadBtn.disabled = busy || refreshing;
+  semModelDeleteBtn.disabled = busy || !p.model_ready;
+  semVectorBuildBtn.disabled = busy || refreshing || !p.model_ready || !vectorTotal;
+  semVectorDeleteBtn.disabled = busy || vectorDone <= 0;
+  semAccelBuildBtn.disabled = busy || refreshing || !p.model_ready || vectorDone <= 0;
+  semAccelDeleteBtn.disabled = busy || (!p.accelerator_ready && accelDone <= 0);
+  semVectorBuildBtn.textContent = vectorDone > 0 && !p.semantic_ready ? "续建语义索引" : "建立语义索引";
+  semAccelBuildBtn.textContent = p.accelerator_resumable ? "续建加速索引" : "建立加速索引";
+
+  if (p.error) setSemStatus(p.error, "error");
+  else if (p.model_downloading || p.building) setSemStatus(p.current || "任务正在后台运行…", "busy");
+  else if (refreshing) setSemStatus("正在后台读取索引状态…", "busy");
+  else setSemStatus(p.current || "", p.current ? "ok" : "");
+
+  if ((p.model_downloading || p.building) && !semStatusPoll) {
+    semStatusPoll = setInterval(refreshSemanticStatus, 1500);
+  }
+  if (!refreshing || p.model_ready || vectorTotal || accelTotal || p.building || p.model_downloading) saveSemanticStatusCache(p);
+}
+
+async function refreshSemanticStatus() {
+  if (semStatusInFlight) return;
+  semStatusInFlight = true;
+  try {
+    renderSemanticStatus(await invoke("semantic_status"));
+  } catch (e) {
+    setSemStatus("读取语义索引状态失败：" + e, "error");
+  } finally {
+    semStatusInFlight = false;
+  }
+}
+
+function openSemanticIndexSettings() {
+  fpSettingsModal.classList.remove("show");
+  semanticIndexModal.classList.add("show");
+  if (lastSemStatus) renderSemanticStatus(lastSemStatus);
+  setTimeout(refreshSemanticStatus, 30);
+  if (semStatusPoll) clearInterval(semStatusPoll);
+  semStatusPoll = setInterval(refreshSemanticStatus, 1500);
+}
+
+function closeSemanticIndexSettings() {
+  semanticIndexModal.classList.remove("show");
+  if (semStatusPoll) clearInterval(semStatusPoll);
+  semStatusPoll = null;
+}
+
+semanticGearBtn?.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  openSemanticIndexSettings();
+});
+semanticIndexCloseBtn?.addEventListener("click", closeSemanticIndexSettings);
+semanticIndexModal?.addEventListener("click", (e) => {
+  if (e.target === semanticIndexModal) closeSemanticIndexSettings();
+});
+semModelDownloadBtn?.addEventListener("click", async () => {
+  setSemStatus("正在启动模型下载…", "busy");
+  try {
+    await invoke("download_semantic_model");
+    await refreshSemanticStatus();
+  } catch (e) {
+    setSemStatus("启动模型下载失败：" + e, "error");
+  }
+});
+semModelDeleteBtn?.addEventListener("click", async () => {
+  if (!confirm("确定删除本机语义模型缓存？之后使用语义检索需要重新下载模型。")) return;
+  try {
+    await invoke("delete_semantic_model");
+    updateSemanticStatusCache({ model_ready: false, model_bytes: 0 });
+    await refreshSemanticStatus();
+  } catch (e) {
+    setSemStatus("删除模型失败：" + e, "error");
+  }
+});
+semVectorBuildBtn?.addEventListener("click", async () => {
+  setSemStatus("正在启动语义索引任务…", "busy");
+  try {
+    await invoke("build_semantic_vectors");
+    await refreshSemanticStatus();
+  } catch (e) {
+    setSemStatus("启动语义索引失败：" + e, "error");
+  }
+});
+semAccelBuildBtn?.addEventListener("click", async () => {
+  setSemStatus("正在启动加速索引任务…", "busy");
+  try {
+    await invoke("build_semantic_accelerator");
+    await refreshSemanticStatus();
+  } catch (e) {
+    setSemStatus("启动加速索引失败：" + e, "error");
+  }
+});
+semVectorDeleteBtn?.addEventListener("click", async () => {
+  if (!confirm("确定删除语义索引？加速索引也会一起删除。")) return;
+  try {
+    await invoke("delete_semantic_index", { kind: "semantic" });
+    clearSemanticStatusCache();
+    await refreshSemanticStatus();
+  } catch (e) {
+    setSemStatus("删除语义索引失败：" + e, "error");
+  }
+});
+semAccelDeleteBtn?.addEventListener("click", async () => {
+  if (!confirm("确定删除加速索引？语义索引会保留，可之后续建加速索引。")) return;
+  try {
+    await invoke("delete_semantic_index", { kind: "accelerator" });
+    updateSemanticStatusCache({
+      accelerator_done: 0,
+      accelerator_total: 0,
+      accelerator_ready: false,
+      accelerator_resumable: false,
+      accelerator_bytes: 0,
+    });
+    await refreshSemanticStatus();
+  } catch (e) {
+    setSemStatus("删除加速索引失败：" + e, "error");
+  }
+});
+
+// ---- 主设置页：外置词典 ----
+const externalDictModal = document.getElementById("external-dict-modal");
+const externalDictGear = document.getElementById("dict-gear");
+const externalDictClose = document.getElementById("external-dict-close");
+const externalDictAdd = document.getElementById("external-dict-add");
+const externalDictList = document.getElementById("external-dict-list");
+const externalDictStatus = document.getElementById("external-dict-status");
+let externalDicts = [];
+
+function setExternalDictStatus(text = "", kind = "") {
+  if (!externalDictStatus) return;
+  externalDictStatus.textContent = text || "";
+  externalDictStatus.className = "ai-status" + (kind ? " " + kind : "");
+}
+
+function dictFormatBytes(n) {
+  n = Number(n || 0);
+  if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + " GB";
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+  return n ? n + " B" : "0 B";
+}
+
+function renderExternalDicts(list = externalDicts) {
+  externalDicts = list || [];
+  if (!externalDictList) return;
+  externalDictList.innerHTML = "";
+  if (!externalDicts.length) {
+    externalDictList.innerHTML = '<div class="dict-empty">还没有外置词典。添加后会优先于内置词典查询。</div>';
+    return;
+  }
+  externalDicts.forEach((d, idx) => {
+    const item = document.createElement("div");
+    item.className = "dict-item";
+    const main = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "dict-name";
+    name.textContent = d.name || "未命名词典";
+    const meta = document.createElement("div");
+    meta.className = "dict-meta";
+    meta.textContent = [
+      d.lang === "zh" ? "中文" : "英文",
+      d.format || "词典",
+      (d.entry_count || 0) + " 词条",
+      dictFormatBytes(d.size_bytes),
+    ].join(" · ");
+    const path = document.createElement("div");
+    path.className = "dict-meta";
+    path.textContent = d.source_path || "";
+    main.append(name, meta, path);
+
+    const actions = document.createElement("div");
+    actions.className = "dict-actions";
+    const enable = document.createElement("label");
+    enable.className = "switch";
+    const chk = document.createElement("input");
+    chk.type = "checkbox";
+    chk.checked = !!d.enabled;
+    const slider = document.createElement("span");
+    slider.className = "slider";
+    enable.append(chk, slider);
+    chk.addEventListener("change", async () => {
+      setExternalDictStatus("正在更新词典状态…", "busy");
+      try {
+        renderExternalDicts(await invoke("external_dict_set_enabled", { id: d.id, enabled: chk.checked }));
+        setExternalDictStatus("词典状态已更新", "ok");
+      } catch (e) {
+        chk.checked = !chk.checked;
+        setExternalDictStatus("更新词典状态失败：" + e, "error");
+      }
+    });
+    const up = document.createElement("button");
+    up.className = "btn-plain";
+    up.textContent = "↑";
+    up.title = "提高优先级";
+    up.disabled = idx === 0;
+    up.addEventListener("click", async () => {
+      renderExternalDicts(await invoke("external_dict_move_priority", { id: d.id, dir: -1 }));
+    });
+    const down = document.createElement("button");
+    down.className = "btn-plain";
+    down.textContent = "↓";
+    down.title = "降低优先级";
+    down.disabled = idx === externalDicts.length - 1;
+    down.addEventListener("click", async () => {
+      renderExternalDicts(await invoke("external_dict_move_priority", { id: d.id, dir: 1 }));
+    });
+    const del = document.createElement("button");
+    del.className = "btn-plain danger-lite";
+    del.textContent = "删除";
+    del.addEventListener("click", async () => {
+      if (!confirm("确定删除词典「" + (d.name || "未命名词典") + "」？")) return;
+      setExternalDictStatus("正在删除词典…", "busy");
+      try {
+        renderExternalDicts(await invoke("external_dict_delete", { id: d.id }));
+        setExternalDictStatus("词典已删除", "ok");
+      } catch (e) {
+        setExternalDictStatus("删除词典失败：" + e, "error");
+      }
+    });
+    actions.append(enable, up, down, del);
+    item.append(main, actions);
+    externalDictList.appendChild(item);
+  });
+}
+
+async function refreshExternalDicts() {
+  try {
+    renderExternalDicts(await invoke("external_dict_list"));
+  } catch (e) {
+    setExternalDictStatus("读取词典列表失败：" + e, "error");
+  }
+}
+
+function openExternalDictSettings() {
+  fpSettingsModal.classList.remove("show");
+  externalDictModal.classList.add("show");
+  setExternalDictStatus("");
+  refreshExternalDicts();
+}
+
+function closeExternalDictSettings() {
+  externalDictModal.classList.remove("show");
+}
+
+externalDictGear?.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  openExternalDictSettings();
+});
+externalDictClose?.addEventListener("click", closeExternalDictSettings);
+externalDictModal?.addEventListener("click", (e) => {
+  if (e.target === externalDictModal) closeExternalDictSettings();
+});
+externalDictAdd?.addEventListener("click", async () => {
+  const sel = await dialog.open({
+    multiple: true,
+    filters: [
+      { name: "词典", extensions: ["tsv", "csv", "json", "ifo", "idx", "dict", "dz", "mdx", "mdd"] },
+    ],
+  });
+  if (!sel) return;
+  const paths = Array.isArray(sel) ? sel : [sel];
+  setExternalDictStatus("正在导入词典…", "busy");
+  try {
+    renderExternalDicts(await invoke("external_dict_import", { paths }));
+    setExternalDictStatus("词典已导入", "ok");
+  } catch (e) {
+    setExternalDictStatus("导入词典失败：" + e, "error");
+  }
+});
 // 账号、登录和同步面板 UI 在 sync-ui.js。
 function updateLayoutButtons() {
   document
     .querySelectorAll(".layout-btn")
     .forEach((b) => b.classList.toggle("active", b.dataset.layout === layout));
+}
+function updateGridColumnsControls() {
+  const defBtn = document.getElementById("grid-cols-default");
+  const valEl = document.getElementById("grid-cols-value");
+  if (defBtn) defBtn.classList.toggle("active", !shelfGridColumns);
+  if (valEl) valEl.textContent = String(shelfGridColumns || shelfGridColumnsValue);
+}
+function saveGridColumns() {
+  localStorage.setItem("shelfGridColumns", shelfGridColumns ? String(shelfGridColumns) : "0");
+  localStorage.setItem("shelfGridColumnsValue", String(shelfGridColumnsValue));
+}
+function applyShelfGridColumns() {
+  const fixed = layout === "grid" && shelfGridColumns > 0;
+  shelfEl.classList.toggle("fixed-cols", fixed);
+  if (fixed) shelfEl.style.setProperty("--shelf-grid-cols", String(shelfGridColumns));
+  else shelfEl.style.removeProperty("--shelf-grid-cols");
 }
 document.querySelectorAll(".layout-btn").forEach((b) => {
   b.addEventListener("click", () => {
@@ -410,6 +848,34 @@ document.querySelectorAll(".layout-btn").forEach((b) => {
   });
 });
 updateLayoutButtons();
+updateGridColumnsControls();
+
+document.getElementById("grid-cols-default")?.addEventListener("click", () => {
+  shelfGridColumns = 0;
+  saveGridColumns();
+  updateGridColumnsControls();
+  applyView();
+});
+document.getElementById("grid-cols-dec")?.addEventListener("click", () => {
+  shelfGridColumnsValue = Math.max(GRID_COL_MIN, (shelfGridColumns || shelfGridColumnsValue) - 1);
+  shelfGridColumns = shelfGridColumnsValue;
+  layout = "grid";
+  localStorage.setItem("shelfLayout", layout);
+  saveGridColumns();
+  updateLayoutButtons();
+  updateGridColumnsControls();
+  applyView();
+});
+document.getElementById("grid-cols-inc")?.addEventListener("click", () => {
+  shelfGridColumnsValue = Math.min(GRID_COL_MAX, (shelfGridColumns || shelfGridColumnsValue) + 1);
+  shelfGridColumns = shelfGridColumnsValue;
+  layout = "grid";
+  localStorage.setItem("shelfLayout", layout);
+  saveGridColumns();
+  updateLayoutButtons();
+  updateGridColumnsControls();
+  applyView();
+});
 
 let importStatusEl = null;
 let importStatusTimer = 0;

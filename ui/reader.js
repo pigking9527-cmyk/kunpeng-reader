@@ -726,12 +726,20 @@ window.addEventListener("message", (e) => {
     const img = e.data.downloadImage || {};
     const dataUrl = String(img.dataUrl || "");
     if (dataUrl.startsWith("data:image/")) {
-      const a = document.createElement("a");
-      a.download = String(img.name || "书摘.png").replace(/[\\/:*?"<>|]/g, "_");
-      a.href = dataUrl;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      invoke("save_download_image", {
+        name: String(img.name || "书摘.png"),
+        dataUrl,
+      })
+        .then((path) => sendToPage({ excerptSaved: path || "" }))
+        .catch((err) => {
+          sendToPage({ excerptSaveError: String(err || "保存图片失败") });
+          const a = document.createElement("a");
+          a.download = String(img.name || "书摘.png").replace(/[\\/:*?"<>|]/g, "_");
+          a.href = dataUrl;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        });
     }
   }
   if (e.data.webSearch) {
@@ -771,7 +779,7 @@ window.addEventListener("message", (e) => {
       );
   }
   if (e.data.dict !== undefined) {
-    invoke("dict_lookup", { term: e.data.dict })
+    invoke("dict_lookup", { term: e.data.dict, context: e.data.dictContext || "" })
       .then((r) => sendToPage({ dictResult: { ...r, autoSpeak: vocabAutoSpeak } }))
       .catch(() => sendToPage({ dictResult: { found: false, word: e.data.dict } }));
   }

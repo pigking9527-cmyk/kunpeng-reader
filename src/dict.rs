@@ -3,6 +3,8 @@
 //  运行时解压建表（懒加载）。按选中文字的语种自动选库。
 // ============================================================================
 
+use crate::external_dict;
+use crate::hownet::{self, HowNetEnhancement};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
@@ -24,6 +26,19 @@ pub struct DictResult {
     pub phonetic: String, // 英文音标 / 中文拼音
     pub def: String,      // 主释义：英文词→中文翻译；中文词→中中释义
     pub def_en: String,   // 中文词的中英释义（CC-CEDICT），供切换；英文词为空
+    pub hownet: Option<HowNetEnhancement>, // 中文词 OpenHowNet 语义增强
+    pub source_name: String, // 命中来源：外置词典名或“内置词典”
+    pub sources: Vec<DictSourceResult>, // 多个外置词典命中时，用于前端折叠/展开
+}
+
+#[derive(Serialize, Default, Clone)]
+pub struct DictSourceResult {
+    pub source_name: String,
+    pub word: String,
+    pub lang: String,
+    pub phonetic: String,
+    pub def: String,
+    pub def_en: String,
 }
 
 fn gunzip(data: &[u8]) -> String {
@@ -119,15 +134,43 @@ fn has_cjk(s: &str) -> bool {
 }
 
 /// 查词：自动按语种选库。中文按"整段→前缀"逐步缩短；英文做小写 + 词形还原回退。
-pub fn lookup(term: &str) -> DictResult {
+pub fn lookup(term: &str, context: &str) -> DictResult {
     let t = term.trim();
     if t.is_empty() {
         return DictResult::default();
     }
     if has_cjk(t) {
+        let chars: Vec<char> = t.chars().collect();
+        let candidates: Vec<String> = (1..=chars.len())
+            .rev()
+            .map(|len| chars[..len].iter().collect())
+            .collect();
+        let external = external_dict::lookup(t, &candidates);
+        if let Some(first) = external.first() {
+            return DictResult {
+                found: true,
+                lang: first.lang.clone(),
+                word: first.word.clone(),
+                phonetic: first.phonetic.clone(),
+                def: first.def.clone(),
+                def_en: first.def_en.clone(),
+                hownet: hownet::enhance(&first.word, context),
+                source_name: first.source_name.clone(),
+                sources: external
+                    .into_iter()
+                    .map(|h| DictSourceResult {
+                        source_name: h.source_name,
+                        word: h.word,
+                        lang: h.lang,
+                        phonetic: h.phonetic,
+                        def: h.def,
+                        def_en: h.def_en,
+                    })
+                    .collect(),
+            };
+        }
         let cc = zh_cc_map(); // 中中（萌典）
         let zw = zh_word_map(); // 中英（CC-CEDICT）
-        let chars: Vec<char> = t.chars().collect();
         // 整段优先，再取越来越短的前缀；命中即返回中中+中英两种释义供切换
         for len in (1..=chars.len()).rev() {
             let sub: String = chars[..len].iter().collect();
@@ -142,10 +185,13 @@ pub fn lookup(term: &str) -> DictResult {
                 return DictResult {
                     found: true,
                     lang: "zh".into(),
-                    word: sub,
+                    word: sub.clone(),
                     phonetic,
                     def: m_cc.map(|(_, d)| d.clone()).unwrap_or_default(),
                     def_en: m_en.map(|(_, d)| d.clone()).unwrap_or_default(),
+                    hownet: hownet::enhance(&sub, context),
+                    source_name: "内置词典".into(),
+                    sources: Vec::new(),
                 };
             }
         }
@@ -157,6 +203,32 @@ pub fn lookup(term: &str) -> DictResult {
     } else {
         let en = en_map();
         let key: String = t.to_lowercase();
+        let mut candidates = vec![key.clone()];
+        candidates.extend(en_lemmas(&key));
+        let external = external_dict::lookup(t, &candidates);
+        if let Some(first) = external.first() {
+            return DictResult {
+                found: true,
+                lang: first.lang.clone(),
+                word: first.word.clone(),
+                phonetic: first.phonetic.clone(),
+                def: first.def.clone(),
+                def_en: first.def_en.clone(),
+                hownet: None,
+                source_name: first.source_name.clone(),
+                sources: external
+                    .into_iter()
+                    .map(|h| DictSourceResult {
+                        source_name: h.source_name,
+                        word: h.word,
+                        lang: h.lang,
+                        phonetic: h.phonetic,
+                        def: h.def,
+                        def_en: h.def_en,
+                    })
+                    .collect(),
+            };
+        }
         let hit = en.get(&key).map(|v| (key.clone(), v));
         let hit = hit.or_else(|| {
             en_lemmas(&key)
@@ -171,6 +243,9 @@ pub fn lookup(term: &str) -> DictResult {
                 phonetic: p.clone(),
                 def: trans.clone(),    // 英中
                 def_en: endef.clone(), // 英英
+                hownet: None,
+                source_name: "内置词典".into(),
+                sources: Vec::new(),
             };
         }
         DictResult {

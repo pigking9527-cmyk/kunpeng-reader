@@ -354,6 +354,7 @@ const buildBtn = document.getElementById("build-sem");
 const semProgEl = document.getElementById("sem-progress");
 let semPoll = null;
 function pollSemStatus() {
+  if (!semProgEl || !buildBtn) return;
   invoke("semantic_status")
     .then((p) => {
       if (p.error) {
@@ -383,7 +384,7 @@ function pollSemStatus() {
     })
     .catch(() => {});
 }
-buildBtn.addEventListener("click", async () => {
+if (buildBtn) buildBtn.addEventListener("click", async () => {
   const limit = curIds.length ? curIds : null;
   const scope = curIds.length ? "选定的 " + curIds.length + " 本" : "全部图书";
   // 已建立完成就别重复建了

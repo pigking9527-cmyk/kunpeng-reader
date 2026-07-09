@@ -387,6 +387,24 @@
       .theme-btn:disabled { opacity: 0.62; cursor: default; }
       .theme-btn:disabled:hover { background: #fff; }
       .theme-btn.active:disabled { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
+      .reading-mode-row { justify-content: space-between; gap: 12px; }
+      .mode-toggle-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
+      .mode-toggle-item {
+        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        min-width: 0; color: #444; white-space: nowrap;
+      }
+      .settings-switch { position: relative; display: inline-block; width: 38px; height: 20px; flex: 0 0 auto; }
+      .settings-switch input { opacity: 0; width: 0; height: 0; }
+      .settings-slider {
+        position: absolute; inset: 0; background: #cfcfd6; border-radius: 20px;
+        transition: 0.18s; cursor: pointer;
+      }
+      .settings-slider::before {
+        content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+        background: #fff; border-radius: 50%; transition: 0.18s; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+      }
+      .settings-switch input:checked + .settings-slider { background: #5aa0ff; }
+      .settings-switch input:checked + .settings-slider::before { transform: translateX(18px); }
 
       /* 深色主题下的外壳（工具栏/目录/设置/弹窗） */
       body.theme-dark { background: #1c1c1e; color: #ddd; }
@@ -407,6 +425,7 @@
       body.theme-dark .modal-card { background: #2a2a2c; color: #ddd; border-color: #444; }
       body.theme-dark .settings select,
       body.theme-dark .rsearch input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .mode-toggle-item { color: #ddd; }
       body.theme-dark .info-k { color: #999; }
       body.theme-dark .info-v, body.theme-dark .info-desc { color: #ddd; }
       body.theme-dark .info-row { border-color: #3a3a3d; }
@@ -556,18 +575,22 @@
       <div class="row"><label>行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
       <div class="row"><label>段间距</label><input type="range" id="set-para" min="0" max="2" step="0.1" /><span class="val" id="v-para"></span></div>
       <div class="row"><label>字间距</label><input type="range" id="set-letter" min="0" max="5" step="0.5" /><span class="val" id="v-letter"></span></div>
-      <div class="row">
-        <label>页面</label>
-        <div class="theme-row">
-          <button class="theme-btn mode-switch-btn page-mode-btn" data-page-mode="single">单页</button>
-          <button class="theme-btn mode-switch-btn page-mode-btn" data-page-mode="dual">双页</button>
-        </div>
-      </div>
-      <div class="row">
-        <label>切换</label>
-        <div class="theme-row">
-          <button class="theme-btn mode-switch-btn flow-mode-btn" data-flow-mode="paged">整页模式</button>
-          <button class="theme-btn mode-switch-btn flow-mode-btn" data-flow-mode="scroll">滚动模式</button>
+      <div class="row reading-mode-row">
+        <div class="mode-toggle-group">
+          <label class="mode-toggle-item" for="set-dual-mode">
+            <span>双页</span>
+            <span class="settings-switch">
+              <input id="set-dual-mode" type="checkbox" />
+              <span class="settings-slider"></span>
+            </span>
+          </label>
+          <label class="mode-toggle-item" for="set-scroll-mode">
+            <span>滚动模式</span>
+            <span class="settings-switch">
+              <input id="set-scroll-mode" type="checkbox" />
+              <span class="settings-slider"></span>
+            </span>
+          </label>
         </div>
       </div>
       <div class="row">
@@ -575,6 +598,7 @@
         <select id="set-turnfx">
           <option value="off">关闭</option>
           <option value="google-paper">纸张效果（Google）</option>
+          <option value="curl">仿真翻页</option>
         </select>
       </div>
       <div class="row"><label>速度</label><input type="range" id="set-turnspeed" min="0.5" max="2" step="0.1" /><span class="val" id="v-turnspeed"></span></div>

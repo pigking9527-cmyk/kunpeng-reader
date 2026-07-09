@@ -157,7 +157,7 @@ document.getElementById("bm-add2").addEventListener("click", async () => {
   renderBookmarks();
 });
 
-// ---- 批注 / 高亮（大批注页：列出多条，含上下文，可点编辑）----
+// ---- 批注 / 高亮（大批注页：列出多条，只显示高亮文字，可点编辑）----
 const annoModal = document.getElementById("anno-modal");
 const annoList = document.getElementById("anno-list");
 let highlights = [];
@@ -199,17 +199,11 @@ async function addCorrectedHighlight(o, correctedText) {
   sendToPage({ highlights });
   renderHighlights();
 }
-// 在上下文里把"被批注的文字本身"高亮出来
+// 批注页只展示高亮文字本身，不拼接上下文。
 function ctxHtml(h) {
-  const ctx = h.context || h.text || "";
-  const t = (h.text || "").trim();
   const display = (h.corrected_text || h.text || "").trim();
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-  if (t && ctx.includes(t)) {
-    const i = ctx.indexOf(t);
-    return esc(ctx.slice(0, i)) + "<mark>" + esc(display || t) + "</mark>" + esc(ctx.slice(i + t.length));
-  }
-  return esc(ctx);
+  return esc(display);
 }
 function renderAnnotations(targetIdx) {
   annoList.innerHTML = "";
@@ -246,7 +240,7 @@ function renderAnnotations(targetIdx) {
 
     const ctx = document.createElement("div");
     ctx.className = "anno-ctx";
-    ctx.title = "高亮文字上下文";
+    ctx.title = "高亮文字";
     ctx.innerHTML = ctxHtml(h);
 
     // 批注只读展示（有批注才显示，不白占空间）

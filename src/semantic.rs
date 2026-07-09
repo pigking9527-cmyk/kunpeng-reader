@@ -6,7 +6,7 @@ use crate::{book, now_ms, search, set_thread_background, AppState, RES_BASE};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Manager;
 // ===========================================================================
 //  语义检索（向量嵌入）：把段落转成向量，按余弦相似度排序，找“意思相近”的文本
@@ -18,6 +18,44 @@ fn sem_model_dir() -> Option<std::path::PathBuf> {
     d.push("ebook-reader");
     d.push("models");
     Some(d)
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    rd.flatten()
+        .map(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                dir_size(&p)
+            } else {
+                e.metadata().map(|m| m.len()).unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+fn dir_contains_model_file(path: &std::path::Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if dir_contains_model_file(&p) {
+                return true;
+            }
+        } else if p
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("onnx"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,12 +88,39 @@ pub(crate) struct SemData {
 #[derive(Default, Clone, Serialize)]
 pub(crate) struct SemProgress {
     building: bool,
+    model_downloading: bool,
+    status_refreshing: bool,
     done: u32,
     total: u32,
     shard_done: u32,
     shard_total: u32,
+    model_ready: bool,
+    model_path: String,
+    model_bytes: u64,
+    semantic_done: u32,
+    semantic_total: u32,
+    semantic_ready: bool,
+    semantic_bytes: u64,
+    accelerator_done: u32,
+    accelerator_total: u32,
+    accelerator_ready: bool,
+    accelerator_resumable: bool,
+    accelerator_bytes: u64,
     current: String,
     error: String,
+}
+
+#[derive(Default)]
+struct SemStatusCache {
+    snapshot: Option<SemProgress>,
+    refreshing: bool,
+    updated_at: u64,
+}
+
+static SEM_STATUS_CACHE: OnceLock<Mutex<SemStatusCache>> = OnceLock::new();
+
+fn sem_status_cache() -> &'static Mutex<SemStatusCache> {
+    SEM_STATUS_CACHE.get_or_init(|| Mutex::new(SemStatusCache::default()))
 }
 
 // 全库 HNSW 近邻索引：把所有书的向量合到一张图里，查询走近邻、毫秒级。
@@ -626,6 +691,151 @@ fn estimate_global_shard_total(ids: &[u64]) -> u32 {
     total
 }
 
+fn semantic_book_progress(state: &AppState) -> (u32, u32) {
+    let books: Vec<(u64, std::path::PathBuf)> = {
+        let lib = state.library.lock().unwrap();
+        lib.books
+            .iter()
+            .filter(|b| b.format != "pdf")
+            .map(|b| (b.id, b.path.clone()))
+            .collect()
+    };
+    let total = books.len() as u32;
+    let done = books
+        .iter()
+        .filter(|(id, path)| sem_index_done_for_book(*id, search::file_mtime(path)))
+        .count() as u32;
+    (done, total)
+}
+
+fn accelerator_progress(state: &AppState) -> (u32, u32, bool, bool) {
+    let ids = indexed_book_ids(state);
+    if ids.is_empty() {
+        return (0, 0, false, false);
+    }
+    let total = estimate_global_shard_total(&ids);
+    if global_index_fresh(state) {
+        return (total.max(1), total.max(1), true, false);
+    }
+    let source_sig = indexed_book_signature(state);
+    if let Some(meta) = read_global_build_meta(&ids, &source_sig) {
+        let done = meta.shards.len() as u32;
+        let total = total.max(done);
+        return (done, total, false, done > 0 || meta.processed_books > 0);
+    }
+    (0, total, false, false)
+}
+
+fn semantic_index_bytes() -> u64 {
+    let Some(d) = sem_dir() else {
+        return 0;
+    };
+    let Ok(rd) = std::fs::read_dir(d) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n.starts_with("sem_") {
+                e.metadata().ok().map(|m| m.len())
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+fn accelerator_index_bytes() -> u64 {
+    let Some(d) = sem_dir() else {
+        return 0;
+    };
+    let Ok(rd) = std::fs::read_dir(d) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n.starts_with("global_")
+                || n == "global.json"
+                || n == "global.build.json"
+                || n == "global.hnsw"
+                || n == "global.map"
+            {
+                e.metadata().ok().map(|m| m.len())
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+fn enrich_sem_progress(state: &AppState, mut p: SemProgress) -> SemProgress {
+    let model_path = sem_model_dir();
+    let model_bytes = model_path
+        .as_ref()
+        .map(|p| dir_size(p))
+        .unwrap_or(0);
+    p.model_path = model_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    p.model_bytes = model_bytes;
+    p.model_ready = state.embedder.lock().unwrap().is_some()
+        || model_path
+            .as_ref()
+            .map(|p| dir_contains_model_file(p) || model_bytes > 40 * 1024 * 1024)
+            .unwrap_or(false);
+
+    let (sem_done, sem_total) = semantic_book_progress(state);
+    p.semantic_done = sem_done;
+    p.semantic_total = sem_total;
+    p.semantic_ready = sem_total > 0 && sem_done == sem_total;
+    p.semantic_bytes = semantic_index_bytes();
+
+    let (acc_done, acc_total, acc_ready, acc_resumable) = accelerator_progress(state);
+    p.accelerator_done = if p.building && p.shard_total > 0 {
+        p.shard_done
+    } else {
+        acc_done
+    };
+    p.accelerator_total = if p.building && p.shard_total > 0 {
+        p.shard_total
+    } else {
+        acc_total
+    };
+    p.accelerator_ready = acc_ready;
+    p.accelerator_resumable = acc_resumable;
+    p.accelerator_bytes = accelerator_index_bytes();
+    p
+}
+
+fn merge_sem_status_snapshot(mut live: SemProgress, cached: &SemProgress) -> SemProgress {
+    live.model_ready = cached.model_ready;
+    live.model_path = cached.model_path.clone();
+    live.model_bytes = cached.model_bytes;
+    live.semantic_done = cached.semantic_done;
+    live.semantic_total = cached.semantic_total;
+    live.semantic_ready = cached.semantic_ready;
+    live.semantic_bytes = cached.semantic_bytes;
+    live.accelerator_done = cached.accelerator_done;
+    live.accelerator_total = cached.accelerator_total;
+    live.accelerator_ready = cached.accelerator_ready;
+    live.accelerator_resumable = cached.accelerator_resumable;
+    live.accelerator_bytes = cached.accelerator_bytes;
+    if live.building && live.shard_total > 0 {
+        live.accelerator_done = live.shard_done;
+        live.accelerator_total = live.shard_total;
+    }
+    live
+}
+
+fn clear_sem_status_cache() {
+    if let Ok(mut cache) = sem_status_cache().lock() {
+        cache.snapshot = None;
+        cache.updated_at = 0;
+    }
+}
+
 /// 给定范围（want=None 表示全库）的语义索引是否“已完整”：每本逐书索引都新鲜；
 /// 若是全库范围，还要求分片快速索引也已建好且新鲜。完整则无需重建。
 fn semantic_complete(state: &AppState, want: &Option<std::collections::HashSet<u64>>) -> bool {
@@ -690,6 +900,7 @@ pub(crate) async fn build_semantic_index(
             ..Default::default()
         };
     }
+    clear_sem_status_cache();
     std::thread::spawn(move || {
         set_thread_background(true); // 后台优先级，绝不和前台抢 CPU
         let state = app.state::<AppState>();
@@ -771,6 +982,248 @@ pub(crate) async fn build_semantic_index(
             "完成".into()
         } else {
             format!("完成（检索可用；加速索引未建成：{idx_err}）")
+        };
+        drop(p);
+        clear_sem_status_cache();
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn download_semantic_model(app: tauri::AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut p = state.sem_progress.lock().unwrap();
+        if p.model_downloading {
+            return Ok(());
+        }
+        if p.building {
+            return Err("索引任务正在运行，请稍候".into());
+        }
+        p.model_downloading = true;
+        p.error.clear();
+        p.current = "下载/加载语义模型…".into();
+    }
+    clear_sem_status_cache();
+    std::thread::spawn(move || {
+        set_thread_background(true);
+        let state = app.state::<AppState>();
+        let result = get_embedder(state.inner()).map(|_| ());
+        let mut p = state.sem_progress.lock().unwrap();
+        p.model_downloading = false;
+        match result {
+            Ok(()) => {
+                p.error.clear();
+                p.current = "语义模型已就绪".into();
+                drop(p);
+                clear_sem_status_cache();
+            }
+            Err(err) => {
+                p.error = err;
+                p.current.clear();
+                drop(p);
+                clear_sem_status_cache();
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn delete_semantic_model(state: tauri::State<AppState>) -> Result<(), String> {
+    {
+        let p = state.sem_progress.lock().unwrap();
+        if p.building || p.model_downloading {
+            return Err("索引或模型任务正在运行，请稍候".into());
+        }
+    }
+    *state.embedder.lock().unwrap() = None;
+    if let Some(dir) = sem_model_dir() {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("删除模型失败：{e}"))?;
+        }
+    }
+    clear_sem_status_cache();
+    let mut p = state.sem_progress.lock().unwrap();
+    p.current = "语义模型已删除".into();
+    p.error.clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn delete_semantic_index(
+    state: tauri::State<AppState>,
+    kind: String,
+) -> Result<(), String> {
+    {
+        let p = state.sem_progress.lock().unwrap();
+        if p.building || p.model_downloading {
+            return Err("索引或模型任务正在运行，请稍候".into());
+        }
+    }
+    let kind = kind.trim();
+    if kind == "semantic" {
+        if let Some(d) = sem_dir() {
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                for e in rd.flatten() {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    if n.starts_with("sem_") {
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+            }
+        }
+        clear_global_index_files();
+        state.sem_cache.lock().unwrap().clear();
+        state.sem_cache_bytes.store(0, Ordering::Relaxed);
+        *state.global_index.lock().unwrap() = None;
+        clear_sem_status_cache();
+        let mut p = state.sem_progress.lock().unwrap();
+        p.current = "语义索引和加速索引已删除".into();
+        p.error.clear();
+        Ok(())
+    } else if kind == "accelerator" {
+        clear_global_index_files();
+        *state.global_index.lock().unwrap() = None;
+        clear_sem_status_cache();
+        let mut p = state.sem_progress.lock().unwrap();
+        p.current = "加速索引已删除".into();
+        p.error.clear();
+        Ok(())
+    } else {
+        Err("未知索引类型".into())
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn build_semantic_vectors(app: tauri::AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut p = state.sem_progress.lock().unwrap();
+        if p.building {
+            return Err("正在建立索引，请稍候".into());
+        }
+        if p.model_downloading {
+            return Err("语义模型正在下载，请稍候".into());
+        }
+        *p = SemProgress {
+            building: true,
+            current: "加载模型…".into(),
+            ..Default::default()
+        };
+    }
+    clear_sem_status_cache();
+    std::thread::spawn(move || {
+        set_thread_background(true);
+        let state = app.state::<AppState>();
+        let embedder = match get_embedder(state.inner()) {
+            Ok(e) => e,
+            Err(err) => {
+                let mut p = state.sem_progress.lock().unwrap();
+                p.building = false;
+                p.error = err;
+                return;
+            }
+        };
+        let books: Vec<book::Book> = {
+            state
+                .library
+                .lock()
+                .unwrap()
+                .books
+                .iter()
+                .filter(|b| b.format != "pdf")
+                .cloned()
+                .collect()
+        };
+        {
+            let mut p = state.sem_progress.lock().unwrap();
+            p.total = books.len() as u32;
+        }
+        let mut failures: Vec<String> = Vec::new();
+        for (i, b) in books.iter().enumerate() {
+            {
+                let mut p = state.sem_progress.lock().unwrap();
+                p.done = i as u32;
+                p.current = b.title.clone();
+            }
+            let id = b.id;
+            let mtime = search::file_mtime(&b.path);
+            if sem_is_fresh(id, mtime) {
+                if read_sem_profile(id, mtime).is_none()
+                    && read_or_backfill_sem_profile(state.inner(), b).is_none()
+                {
+                    failures.push(format!("{}：无法生成相似图书缓存", b.title));
+                }
+                continue;
+            }
+            match search::get_book_chapters(state.inner(), b) {
+                Some(ch) => {
+                    if let Err(err) =
+                        sem_build_book(&embedder, id, mtime, &ch, &state.index_resume_at)
+                    {
+                        failures.push(format!("{}：{}", b.title, err));
+                    }
+                }
+                None => failures.push(format!("{}：无法读取正文", b.title)),
+            }
+        }
+        let mut p = state.sem_progress.lock().unwrap();
+        p.done = p.total;
+        p.building = false;
+        p.current = if failures.is_empty() {
+            "语义索引完成".into()
+        } else {
+            format!(
+                "语义索引完成（{} 本失败；{}）",
+                failures.len(),
+                failures
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("；")
+            )
+        };
+        drop(p);
+        clear_sem_status_cache();
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn build_semantic_accelerator(app: tauri::AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut p = state.sem_progress.lock().unwrap();
+        if p.building {
+            return Err("正在建立索引，请稍候".into());
+        }
+        if p.model_downloading {
+            return Err("语义模型正在下载，请稍候".into());
+        }
+        *p = SemProgress {
+            building: true,
+            current: "准备建立加速索引…".into(),
+            ..Default::default()
+        };
+    }
+    std::thread::spawn(move || {
+        set_thread_background(true);
+        let state = app.state::<AppState>();
+        if indexed_book_ids(state.inner()).is_empty() {
+            let mut p = state.sem_progress.lock().unwrap();
+            p.building = false;
+            p.current = "请先建立语义索引".into();
+            return;
+        }
+        let idx_err = build_global_index(state.inner()).err().unwrap_or_default();
+        let mut p = state.sem_progress.lock().unwrap();
+        p.building = false;
+        p.current = if idx_err.is_empty() {
+            "加速索引完成".into()
+        } else {
+            format!("加速索引未建成：{idx_err}")
         };
     });
     Ok(())
@@ -1119,8 +1572,43 @@ fn brute_force_books(state: &AppState, targets: &[book::Book], q: &[f32]) -> Vec
 
 /// 查询建立语义索引的进度。
 #[tauri::command]
-pub(crate) fn semantic_status(state: tauri::State<AppState>) -> SemProgress {
-    state.sem_progress.lock().unwrap().clone()
+pub(crate) fn semantic_status(app: tauri::AppHandle, state: tauri::State<AppState>) -> SemProgress {
+    let mut live = state.sem_progress.lock().unwrap().clone();
+    let now = now_ms();
+    let mut should_refresh = false;
+    let cached_snapshot = {
+        let mut cache = sem_status_cache().lock().unwrap();
+        let snapshot = cache.snapshot.clone();
+        if cache
+            .snapshot
+            .as_ref()
+            .is_none_or(|_| now.saturating_sub(cache.updated_at) > 5_000)
+            && !cache.refreshing
+        {
+            cache.refreshing = true;
+            should_refresh = true;
+        }
+        snapshot
+    };
+    if should_refresh {
+        let app_for_refresh = app.clone();
+        std::thread::spawn(move || {
+            let state = app_for_refresh.state::<AppState>();
+            let live = state.sem_progress.lock().unwrap().clone();
+            let snapshot = enrich_sem_progress(state.inner(), live);
+            if let Ok(mut cache) = sem_status_cache().lock() {
+                cache.snapshot = Some(snapshot);
+                cache.updated_at = now_ms();
+                cache.refreshing = false;
+            }
+        });
+    }
+    if let Some(cached) = cached_snapshot.as_ref() {
+        live = merge_sem_status_snapshot(live, cached);
+    } else {
+        live.status_refreshing = true;
+    }
+    live
 }
 
 /// 语义检索：把查询转成向量，在已建索引的图书里按相似度排序返回。

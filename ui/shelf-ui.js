@@ -313,6 +313,7 @@ function applyView(options = {}) {
   const savedScrollTop = preserveScroll && contentEl ? contentEl.scrollTop : 0;
   shelfEl.classList.toggle("list", layout === "list");
   shelfEl.classList.toggle("show-titles", showCoverTitle); // 网格视图是否显示书名
+  applyShelfGridColumns();
   shelfRendering = true;
   const list = currentList();
   if (!shelfLoaded) {

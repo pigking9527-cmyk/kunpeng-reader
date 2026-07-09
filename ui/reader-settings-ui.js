@@ -38,7 +38,7 @@ let settings = loadSettings();
 
 function normalizeModeSettings() {
   let changed = false;
-  if (!["off", "google-paper"].includes(settings.pageTurnEffect)) {
+  if (!["off", "google-paper", "curl"].includes(settings.pageTurnEffect)) {
     settings.pageTurnEffect = "off";
     changed = true;
   }
@@ -154,48 +154,44 @@ function initSettingsUI() {
       onChange();
     });
   }
-  function refreshPageModeBtns() {
+  const dualModeToggle = document.getElementById("set-dual-mode");
+  const scrollModeToggle = document.getElementById("set-scroll-mode");
+  function refreshReadingModeToggles() {
     normalizeModeSettings();
-    const locked = settings.flowMode === "scroll";
-    document.querySelectorAll(".page-mode-btn").forEach((b) => {
-      const target = b.dataset.pageMode || "single";
-      const current = target === settings.pageMode;
-      b.hidden = !current;
-      b.disabled = locked;
-      b.classList.toggle("active", current);
-      b.title = locked ? "滚动模式固定为单页" : "点击切换单页 / 双页";
-    });
+    if (dualModeToggle) {
+      dualModeToggle.checked = settings.flowMode !== "scroll" && settings.pageMode === "dual";
+      dualModeToggle.title = "开启双页";
+    }
+    if (scrollModeToggle) {
+      scrollModeToggle.checked = settings.flowMode === "scroll";
+      scrollModeToggle.title = "开启滚动模式";
+    }
   }
-  document.querySelectorAll(".page-mode-btn").forEach((b) => {
-    b.addEventListener("click", () => {
-      if (settings.flowMode === "scroll") return;
-      settings.pageMode = settings.pageMode === "dual" ? "single" : "dual";
-      refreshPageModeBtns();
+  if (dualModeToggle) {
+    dualModeToggle.addEventListener("change", () => {
+      if (dualModeToggle.checked) {
+        settings.flowMode = "paged";
+        settings.pageMode = "dual";
+      } else {
+        settings.pageMode = "single";
+      }
+      refreshReadingModeToggles();
       onChange();
     });
-  });
-  refreshPageModeBtns();
-
-  function refreshFlowModeBtns() {
-    document.querySelectorAll(".flow-mode-btn").forEach((b) => {
-      const target = b.dataset.flowMode || "paged";
-      const current = target === settings.flowMode;
-      b.hidden = !current;
-      b.disabled = false;
-      b.classList.toggle("active", current);
-      b.title = "点击切换整页 / 滚动模式";
-    });
   }
-  document.querySelectorAll(".flow-mode-btn").forEach((b) => {
-    b.addEventListener("click", () => {
-      settings.flowMode = settings.flowMode === "scroll" ? "paged" : "scroll";
-      normalizeModeSettings();
-      refreshFlowModeBtns();
-      refreshPageModeBtns();
+  if (scrollModeToggle) {
+    scrollModeToggle.addEventListener("change", () => {
+      if (scrollModeToggle.checked) {
+        settings.flowMode = "scroll";
+        settings.pageMode = "single";
+      } else {
+        settings.flowMode = "paged";
+      }
+      refreshReadingModeToggles();
       onChange();
     });
-  });
-  refreshFlowModeBtns();
+  }
+  refreshReadingModeToggles();
   // 朗读设置
   const bindSel = (id, key) => {
     const el = document.getElementById(id);

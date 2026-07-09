@@ -112,6 +112,15 @@
                 </svg>
               </button>
             </div>
+            <div class="grid-cols-setting">
+              <div class="fp-title">列数</div>
+              <div class="grid-cols-row">
+                <button id="grid-cols-default" class="grid-cols-default" type="button">默认</button>
+                <span id="grid-cols-value" class="grid-cols-value">3</span>
+                <button id="grid-cols-dec" class="grid-cols-step" type="button" title="减少列数">-</button>
+                <button id="grid-cols-inc" class="grid-cols-step" type="button" title="增加列数">+</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -195,15 +204,15 @@
       <div class="modal-card">
         <div class="modal-head"><span>⚙ 常用设置</span><button id="fp-settings-close" class="btn-plain">✕</button></div>
         <div class="fp-set-row">
-          <span>在封面上显示阅读进度</span>
+          <span>显示阅读进度</span>
           <label class="switch"><input type="checkbox" id="set-cover-prog" /><span class="slider"></span></label>
         </div>
         <div class="fp-set-row">
-          <span>在封面上显示评分</span>
+          <span>显示评分</span>
           <label class="switch"><input type="checkbox" id="set-cover-rating" /><span class="slider"></span></label>
         </div>
         <div class="fp-set-row">
-          <span>在封面下显示书名</span>
+          <span>显示书名</span>
           <label class="switch"><input type="checkbox" id="set-cover-title" /><span class="slider"></span></label>
         </div>
         <div class="fp-set-row">
@@ -213,7 +222,18 @@
             <label class="switch"><input type="checkbox" id="set-auto-import" /><span class="slider"></span></label>
           </span>
         </div>
-        <p class="ai-note">开启「自动导入目录」后，每次启动会扫描齿轮里设置的目录（含子目录），把其中的电子书自动加入书架。已在书架里的不会重复添加。</p>
+        <div class="fp-set-row">
+          <span>语义索引</span>
+          <span class="fp-set-tail">
+            <button id="semantic-gear" class="fp-row-gear" title="管理语义索引">⚙</button>
+          </span>
+        </div>
+        <div class="fp-set-row">
+          <span>词典</span>
+          <span class="fp-set-tail">
+            <button id="dict-gear" class="fp-row-gear" title="管理外置词典">⚙</button>
+          </span>
+        </div>
         <div class="fp-set-actions">
           <button id="settings-export-data" class="btn-plain" type="button">⬆ 导出数据包</button>
           <button id="settings-import-data" class="btn-plain" type="button">⬇ 导入数据包</button>
@@ -232,6 +252,62 @@
         <div id="dirs-status" class="ai-status" aria-live="polite"></div>
         <div class="ai-actions">
           <button id="dirs-add" class="btn-plain">＋ 添加目录…</button>
+        </div>
+      </div>
+    </div>
+    <div id="semantic-index-modal" class="modal">
+      <div class="modal-card semantic-card">
+        <div class="modal-head"><span>语义索引</span><button id="semantic-index-close" class="btn-plain">✕</button></div>
+        <p class="ai-note">语义模型用于理解查询含义；语义索引按图书建立向量；加速索引用于让全书架语义检索更快。关闭本窗口后，正在运行的任务会继续在后台执行。</p>
+        <section class="sem-section">
+          <div class="sem-section-head">
+            <div>
+              <div class="sem-title">语义模型</div>
+              <div id="sem-model-meta" class="sem-meta">正在读取状态…</div>
+            </div>
+            <div class="sem-actions">
+              <button id="sem-model-download" class="btn-plain" type="button">下载模型</button>
+              <button id="sem-model-delete" class="btn-plain danger-lite" type="button">删除模型</button>
+            </div>
+          </div>
+        </section>
+        <section class="sem-section">
+          <div class="sem-section-head">
+            <div>
+              <div class="sem-title">语义索引</div>
+              <div id="sem-vector-meta" class="sem-meta">尚未建立</div>
+            </div>
+            <div class="sem-actions">
+              <button id="sem-vector-build" class="btn-plain" type="button">建立语义索引</button>
+              <button id="sem-vector-delete" class="btn-plain danger-lite" type="button">删除</button>
+            </div>
+          </div>
+          <div class="sem-progressbar"><span id="sem-vector-bar"></span></div>
+        </section>
+        <section class="sem-section">
+          <div class="sem-section-head">
+            <div>
+              <div class="sem-title">加速索引</div>
+              <div id="sem-accel-meta" class="sem-meta">尚未建立</div>
+            </div>
+            <div class="sem-actions">
+              <button id="sem-accel-build" class="btn-plain" type="button">建立加速索引</button>
+              <button id="sem-accel-delete" class="btn-plain danger-lite" type="button">删除</button>
+            </div>
+          </div>
+          <div class="sem-progressbar"><span id="sem-accel-bar"></span></div>
+        </section>
+        <div id="sem-status" class="ai-status" aria-live="polite"></div>
+      </div>
+    </div>
+    <div id="external-dict-modal" class="modal">
+      <div class="modal-card dict-card">
+        <div class="modal-head"><span>词典</span><button id="external-dict-close" class="btn-plain">✕</button></div>
+        <p class="ai-note">外置词典会优先于内置词典查询。支持 TSV / CSV / JSON、StarDict（.ifo/.idx/.dict/.dict.dz）和常见未加密 MDX；使用 LZO 压缩或加密的 MDX/MDD 会提示转换后再导入。</p>
+        <div id="external-dict-list" class="dict-list"></div>
+        <div id="external-dict-status" class="ai-status" aria-live="polite"></div>
+        <div class="ai-actions">
+          <button id="external-dict-add" class="btn-plain" type="button">＋ 添加词典…</button>
         </div>
       </div>
     </div>
