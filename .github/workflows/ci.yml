@@ -21,6 +21,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-audit
+        shell: pwsh
+        run: cargo install cargo-audit --locked
+
       - name: Run project checks
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/check.ps1

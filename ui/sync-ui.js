@@ -10,6 +10,8 @@ const syncPasswordEl = document.getElementById("sync-password");
 const savedAccountsEl = document.getElementById("saved-accounts");
 const SYNC_ACCOUNT_CACHE_KEY = "syncAccountCacheV1";
 const syncStatusEl = document.getElementById("sync-status");
+const syncLastTimeEl = document.getElementById("sync-last-time");
+const syncLastCountsEl = document.getElementById("sync-last-counts");
 const syncNowBtn = document.getElementById("sync-now");
 const syncLogoutBtn = document.getElementById("sync-logout");
 const syncRegisterBtn = document.getElementById("sync-register");
@@ -47,6 +49,22 @@ function setSyncButtonState(state, text, title = "") {
   if (state) syncNowBtn.classList.add(state);
   syncNowBtn.textContent = text || "同步";
   syncNowBtn.title = title;
+}
+function updateSyncSummary(settings = {}) {
+  if (Object.prototype.hasOwnProperty.call(settings, "last_sync_at")) {
+    syncLastTimeEl.textContent = "最近同步：" + formatSyncTime(settings.last_sync_at);
+  }
+  const hasCounts = Object.prototype.hasOwnProperty.call(settings, "last_sync_pushed")
+    || Object.prototype.hasOwnProperty.call(settings, "last_sync_pulled")
+    || Object.prototype.hasOwnProperty.call(settings, "last_sync_accepted")
+    || Object.prototype.hasOwnProperty.call(settings, "last_sync_ignored");
+  if (hasCounts) {
+    const pushed = Number(settings.last_sync_pushed) || 0;
+    const pulled = Number(settings.last_sync_pulled) || 0;
+    const accepted = Number(settings.last_sync_accepted) || 0;
+    const ignored = Number(settings.last_sync_ignored) || 0;
+    syncLastCountsEl.textContent = `上次尝试上传 ${pushed} 项，新增 ${accepted} 项，重复/冲突 ${ignored} 项，接收 ${pulled} 项；图书文件本身不会上传`;
+  }
 }
 function readSavedAccounts() {
   try {
@@ -119,6 +137,7 @@ function renderSavedAccounts() {
   savedAccountsEl.classList.add("show");
 }
 function updateAccountView(settings = {}) {
+  updateSyncSummary(settings);
   const username = settings.username || syncUsernameEl.value.trim();
   if (username) {
     writeCachedSyncAccount(username);
@@ -179,39 +198,6 @@ accountPanel.addEventListener("click", (e) => {
   e.stopPropagation();
   if (!e.target.closest(".account-input-wrap")) hideSavedAccounts();
 });
-document.getElementById("fp-gear").addEventListener("click", (e) => {
-  e.stopPropagation();
-  filterPanel.classList.remove("show");
-  closeAccountPanel();
-  reflectAutoImport();
-  fpSettingsModal.classList.add("show");
-});
-document.getElementById("fp-settings-close").addEventListener("click", () => fpSettingsModal.classList.remove("show"));
-// “自动导入目录”行的齿轮 → 打开目录管理弹窗
-document.getElementById("dirs-gear").addEventListener("click", (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  if (typeof reflectAutoImport === "function") reflectAutoImport();
-  renderDirsList();
-  importDirsModal.classList.add("show");
-});
-document.getElementById("dirs-add").addEventListener("click", (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  addImportDirs();
-});
-document.getElementById("import-dirs-close").addEventListener("click", () => importDirsModal.classList.remove("show"));
-importDirsModal.addEventListener("click", (e) => {
-  if (e.target === importDirsModal) importDirsModal.classList.remove("show");
-});
-// GitHub 链接：在系统默认浏览器打开，而不是在 WebView 里跳转
-document.getElementById("about-github").addEventListener("click", (e) => {
-  e.preventDefault();
-  invoke("open_url", { url: e.currentTarget.href }).catch(() => {});
-});
-fpSettingsModal.addEventListener("click", (e) => {
-  if (e.target === fpSettingsModal) fpSettingsModal.classList.remove("show");
-});
 async function syncAuth(action) {
   const isRegister = action === "register";
   const activeBtn = isRegister ? syncRegisterBtn : syncLoginBtn;
@@ -235,6 +221,23 @@ async function syncAuth(action) {
     hideSavedAccounts();
     syncSettingsLoaded = true;
     updateAccountView({ username: syncUsernameEl.value });
+    setSyncButtonState("syncing", "首次同步中");
+    try {
+      const report = await invoke("sync_now");
+      setSyncButtonState("ok", "同步成功", report.message);
+      updateSyncSummary({
+        last_sync_at: report.server_time,
+        last_sync_pushed: report.pushed,
+        last_sync_pulled: report.pulled,
+        last_sync_accepted: report.accepted,
+        last_sync_ignored: report.ignored,
+      });
+      render(await invoke("shelf_books"));
+    } catch (syncError) {
+      // Authentication succeeded. Keep the account signed in and let the user
+      // retry synchronization without re-entering the password.
+      setSyncButtonState("fail", "同步失败", String(syncError));
+    }
   } catch (e) {
     openAccountPanel();
     syncStatusEl.classList.remove("hidden");
@@ -282,13 +285,28 @@ syncLogoutBtn.addEventListener("click", async () => {
   updateAccountView({ username: "" });
 });
 syncNowBtn.addEventListener("click", async () => {
+  if (syncNowBtn.disabled) return;
+  syncNowBtn.disabled = true;
   setSyncButtonState("syncing", "同步中");
+  syncStatusEl.classList.remove("hidden");
+  syncStatusEl.textContent = "正在连接同步服务器…";
   try {
     const report = await invoke("sync_now");
     setSyncButtonState("ok", "同步成功", report.message + "；服务器时间：" + formatSyncTime(report.server_time));
+    syncStatusEl.textContent = report.message;
+    updateSyncSummary({
+      last_sync_at: report.server_time,
+      last_sync_pushed: report.pushed,
+      last_sync_pulled: report.pulled,
+      last_sync_accepted: report.accepted,
+      last_sync_ignored: report.ignored,
+    });
     render(await invoke("shelf_books"));
   } catch (e) {
     setSyncButtonState("fail", "同步失败", String(e));
+    syncStatusEl.textContent = "同步失败：" + e;
+  } finally {
+    syncNowBtn.disabled = false;
   }
 });
 

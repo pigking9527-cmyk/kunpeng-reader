@@ -76,23 +76,6 @@ pub fn cjk_ngrams(text: &str) -> Vec<(String, usize, usize)> {
     out
 }
 
-/// 倒排索引用查询词：英文按词，中文按 2/3 字 ngram。去重并保持稳定顺序。
-pub fn keyword_query_terms(term: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (t, _, _) in ascii_terms(term) {
-        if seen.insert(t.clone()) {
-            out.push(t);
-        }
-    }
-    for (t, _, _) in cjk_ngrams(term) {
-        if seen.insert(t.clone()) {
-            out.push(t);
-        }
-    }
-    out
-}
-
 fn floor_char_boundary(s: &str, mut i: usize) -> usize {
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;
@@ -153,8 +136,8 @@ pub fn keyword_postings_for_chapter(text: &str) -> Vec<KeywordPostingDraft> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ascii_lower_bytes, ascii_terms, cjk_ngrams, keyword_postings_for_chapter,
-        keyword_query_terms, snippet_at, snippet_at_with_context,
+        ascii_lower_bytes, ascii_terms, cjk_ngrams, keyword_postings_for_chapter, snippet_at,
+        snippet_at_with_context,
     };
 
     #[test]
@@ -217,14 +200,5 @@ mod tests {
         assert!(grams.iter().any(|g| g.0 == "南明史"));
         let nanming = grams.iter().find(|g| g.0 == "南明").unwrap();
         assert_eq!(&text[nanming.1..nanming.1 + nanming.2], "南明");
-    }
-
-    #[test]
-    fn keyword_query_terms_mixes_ascii_and_cjk() {
-        let terms = keyword_query_terms("ASP.NET 南明史");
-        assert!(terms.contains(&"asp".to_string()));
-        assert!(terms.contains(&"net".to_string()));
-        assert!(terms.contains(&"南明".to_string()));
-        assert!(terms.contains(&"南明史".to_string()));
     }
 }

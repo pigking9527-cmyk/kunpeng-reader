@@ -250,7 +250,10 @@ fn example_note(row: &SenseRow, context: &str) -> String {
         if example.is_empty() {
             return String::new();
         }
-        return format!("可以把例句“{}”理解为这个义项的用法。", example.replace('~', &row.word));
+        return format!(
+            "可以把例句“{}”理解为这个义项的用法。",
+            example.replace('~', &row.word)
+        );
     }
     let sememes: Vec<&str> = row.sememes.iter().take(2).map(|s| sememe_zh(s)).collect();
     if sememes.is_empty() {
@@ -275,7 +278,7 @@ pub fn enhance(word: &str, context: &str) -> Option<HowNetEnhancement> {
         .iter()
         .map(|&idx| (idx, score_sense(&st.rows[idx], context, &terms)))
         .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|item| std::cmp::Reverse(item.1));
     let (best_idx, best_score) = scored[0];
     let row = &st.rows[best_idx];
     let confidence = if context.trim().is_empty() {
@@ -283,7 +286,12 @@ pub fn enhance(word: &str, context: &str) -> Option<HowNetEnhancement> {
     } else {
         (0.45 + (best_score.max(0) as f32 / 24.0)).min(0.92)
     };
-    let sememe_names: Vec<String> = row.sememes.iter().take(5).map(|s| sememe_zh(s).to_string()).collect();
+    let sememe_names: Vec<String> = row
+        .sememes
+        .iter()
+        .take(5)
+        .map(|s| sememe_zh(s).to_string())
+        .collect();
     let synonyms = words_for_sememes(st, &row.sememes, &row.word, 6);
     let antonyms = relation_words(st, &row.sememes, &st.antonym_sememes, &row.word, 6);
     let mut hypernyms: Vec<String> = row
@@ -301,7 +309,11 @@ pub fn enhance(word: &str, context: &str) -> Option<HowNetEnhancement> {
         sense: if sememe_names.is_empty() {
             row.def.clone()
         } else {
-            format!("可能义项：{}；义原：{}。", pos_zh(&row.pos), sememe_names.join("、"))
+            format!(
+                "可能义项：{}；义原：{}。",
+                pos_zh(&row.pos),
+                sememe_names.join("、")
+            )
         },
         confidence,
         synonyms,

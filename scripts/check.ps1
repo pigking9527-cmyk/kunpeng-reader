@@ -6,6 +6,12 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
+  Write-Host '== cargo fmt --check =='
+  cargo fmt -- --check
+
+  Write-Host '== cargo clippy =='
+  cargo clippy --all-targets -- -D warnings
+
   Write-Host '== cargo check =='
   cargo check
 
@@ -22,6 +28,16 @@ try {
     Sort-Object FullName
   foreach ($file in $jsFiles) {
     node --check $file.FullName
+  }
+
+  Write-Host '== frontend behavior tests =='
+  node --test 'ui/tests/*.test.cjs'
+
+  if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
+    Write-Host '== cargo audit =='
+    cargo audit
+  } else {
+    Write-Warning 'cargo-audit is not installed; CI installs it and enforces the audit gate.'
   }
 
   Write-Host '== frontend module boundaries =='
@@ -186,7 +202,7 @@ try {
     $_ -notmatch 'scripts\\check\.ps1' -and
     $_ -notmatch 'starts_with\("http://"\)' -and
     $_ -notmatch 'normalize_sync_base\("http://' -and
-    $_ -notmatch 'http://(localhost|127\.0\.0\.1|\[::1\]|reader\.localhost|ipc\.localhost)' -and
+    $_ -notmatch 'http://(localhost|127\.0\.0\.1|\[::1\]|reader\.localhost|ipc\.localhost|tauri\.localhost)' -and
     $_ -notmatch 'http://<scheme>\.localhost' -and
     $_ -notmatch 'http://www\.w3\.org/'
   })
@@ -202,6 +218,18 @@ try {
   }
   $mainRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\main.rs'), [System.Text.Encoding]::UTF8)
   if ($mainRs -notmatch 'sanitize_mobi_html\(&raw\)') { throw 'MOBI render path must sanitize raw HTML before embedding.' }
+  if ($mainRs -notmatch 'sanitize_book_html\(&body\)' -or $mainRs -notmatch 'sanitize_book_html\(&md_to_html') {
+    throw 'EPUB and Markdown render paths must use the shared parser-based sanitizer.'
+  }
+  if ($readerJsText -notmatch 'ReaderMessageGuard\?\.validateEvent\(e, frame') {
+    throw 'Reader message bridge must validate frame source, action and payload bounds.'
+  }
+  if ($readerInjectedHead -match "localStorage\.setItem\(translateApiStorageKey") {
+    throw 'Translation credentials must not be persisted in reader localStorage.'
+  }
+  if ($readerInjectedHead -notmatch 'credentialConfigId') {
+    throw 'Translation requests must pass only a backend credential config ID.'
+  }
   Write-Host '== CSS sanity =='
   $cssFiles = Get-ChildItem -LiteralPath 'ui' -Filter '*.css' -File -Recurse
   foreach ($css in $cssFiles) {

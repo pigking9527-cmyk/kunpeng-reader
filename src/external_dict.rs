@@ -223,8 +223,11 @@ fn parse_delimited(path: &Path, delim: char) -> Result<Vec<ImportEntry>, String>
         None
     };
     let di = if has_header {
-        column_index(&headers, &["def", "definition", "translation", "释义", "解释", "中文"])
-            .or_else(|| if headers.len() > 1 { Some(1) } else { None })
+        column_index(
+            &headers,
+            &["def", "definition", "translation", "释义", "解释", "中文"],
+        )
+        .or(if headers.len() > 1 { Some(1) } else { None })
     } else if rows.first().map(|r| r.len()).unwrap_or(0) >= 3 {
         Some(2)
     } else {
@@ -248,7 +251,10 @@ fn parse_delimited(path: &Path, delim: char) -> Result<Vec<ImportEntry>, String>
         if word.is_empty() {
             continue;
         }
-        let lang = guess_lang(word, li.and_then(|i| r.get(i)).map(|s| s.as_str()).unwrap_or(""));
+        let lang = guess_lang(
+            word,
+            li.and_then(|i| r.get(i)).map(|s| s.as_str()).unwrap_or(""),
+        );
         let def = di.and_then(|i| r.get(i)).cloned().unwrap_or_default();
         let def_en = dei.and_then(|i| r.get(i)).cloned().unwrap_or_default();
         if def.trim().is_empty() && def_en.trim().is_empty() {
@@ -269,7 +275,10 @@ fn parse_json(path: &Path) -> Result<Vec<ImportEntry>, String> {
     let text = read_text(path)?;
     let v: Value = serde_json::from_str(&text).map_err(|e| format!("JSON 词典格式错误：{e}"))?;
     let mut out = Vec::new();
-    fn entry_from_obj(o: &serde_json::Map<String, Value>, fallback_word: Option<&str>) -> Option<ImportEntry> {
+    fn entry_from_obj(
+        o: &serde_json::Map<String, Value>,
+        fallback_word: Option<&str>,
+    ) -> Option<ImportEntry> {
         let word = o
             .get("word")
             .or_else(|| o.get("term"))
@@ -281,7 +290,11 @@ fn parse_json(path: &Path) -> Result<Vec<ImportEntry>, String> {
         if word.is_empty() {
             return None;
         }
-        let lang_raw = o.get("lang").or_else(|| o.get("language")).and_then(|v| v.as_str()).unwrap_or("");
+        let lang_raw = o
+            .get("lang")
+            .or_else(|| o.get("language"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let lang = guess_lang(word, lang_raw);
         let phonetic = o
             .get("phonetic")
@@ -306,7 +319,13 @@ fn parse_json(path: &Path) -> Result<Vec<ImportEntry>, String> {
         if def.trim().is_empty() && def_en.trim().is_empty() {
             return None;
         }
-        Some(ImportEntry { word: word.to_string(), lang, phonetic, def, def_en })
+        Some(ImportEntry {
+            word: word.to_string(),
+            lang,
+            phonetic,
+            def,
+            def_en,
+        })
     }
     match v {
         Value::Array(arr) => {
@@ -378,7 +397,12 @@ fn parse_ifo(path: &Path) -> Result<HashMap<String, String>, String> {
 }
 
 fn parse_stardict(path: &Path) -> Result<(String, Vec<ImportEntry>), String> {
-    let ifo = if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("ifo")).unwrap_or(false) {
+    let ifo = if path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("ifo"))
+        .unwrap_or(false)
+    {
         path.to_path_buf()
     } else {
         let mut p = path.to_path_buf();
@@ -393,10 +417,12 @@ fn parse_stardict(path: &Path) -> Result<(String, Vec<ImportEntry>), String> {
         return Err("StarDict 需要同名 .ifo、.idx、.dict 或 .dict.dz 文件".to_string());
     }
     let meta = parse_ifo(&ifo)?;
-    let name = meta
-        .get("bookname")
-        .cloned()
-        .unwrap_or_else(|| base.file_name().and_then(|s| s.to_str()).unwrap_or("StarDict").to_string());
+    let name = meta.get("bookname").cloned().unwrap_or_else(|| {
+        base.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("StarDict")
+            .to_string()
+    });
     let idx_bytes = fs::read(&idx).map_err(|e| format!("读取 StarDict idx 失败：{e}"))?;
     let dict_bytes = if dict.exists() {
         fs::read(&dict).map_err(|e| format!("读取 StarDict dict 失败：{e}"))?
@@ -423,8 +449,18 @@ fn parse_stardict(path: &Path) -> Result<(String, Vec<ImportEntry>), String> {
         if i + 8 > idx_bytes.len() {
             break;
         }
-        let off = u32::from_be_bytes([idx_bytes[i], idx_bytes[i + 1], idx_bytes[i + 2], idx_bytes[i + 3]]) as usize;
-        let len = u32::from_be_bytes([idx_bytes[i + 4], idx_bytes[i + 5], idx_bytes[i + 6], idx_bytes[i + 7]]) as usize;
+        let off = u32::from_be_bytes([
+            idx_bytes[i],
+            idx_bytes[i + 1],
+            idx_bytes[i + 2],
+            idx_bytes[i + 3],
+        ]) as usize;
+        let len = u32::from_be_bytes([
+            idx_bytes[i + 4],
+            idx_bytes[i + 5],
+            idx_bytes[i + 6],
+            idx_bytes[i + 7],
+        ]) as usize;
         i += 8;
         if word.is_empty() || off >= dict_bytes.len() {
             continue;
@@ -485,7 +521,12 @@ impl<'a> MdxParser<'a> {
         let encoding = mdx_attr(&header_text, "Encoding").unwrap_or_else(|| "UTF-8".to_string());
         let title = mdx_attr(&header_text, "Title")
             .or_else(|| mdx_attr(&header_text, "Description"))
-            .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("MDX").to_string());
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("MDX")
+                    .to_string()
+            });
         let encrypted = mdx_attr(&header_text, "Encrypted")
             .map(|v| v != "0" && v.to_lowercase() != "no" && v.to_lowercase() != "false")
             .unwrap_or(false);
@@ -509,7 +550,10 @@ impl<'a> MdxParser<'a> {
 
     fn parse(mut self) -> Result<(String, Vec<ImportEntry>), String> {
         if self.header.encrypted {
-            return Err(format!("MDX/MDD「{}」启用了加密，当前无法导入", self.header.title));
+            return Err(format!(
+                "MDX/MDD「{}」启用了加密，当前无法导入",
+                self.header.title
+            ));
         }
         if self.header.version < 2.0 {
             return Err("暂不支持 MDict 1.x 词典，请转换为新版 MDX 或 StarDict".to_string());
@@ -574,11 +618,7 @@ impl<'a> MdxParser<'a> {
         Ok(out)
     }
 
-    fn parse_key_blocks(
-        &self,
-        data: &[u8],
-        infos: &[KeyBlockInfo],
-    ) -> Result<Vec<MdxKey>, String> {
+    fn parse_key_blocks(&self, data: &[u8], infos: &[KeyBlockInfo]) -> Result<Vec<MdxKey>, String> {
         let mut pos = 0usize;
         let mut out = Vec::new();
         for info in infos {
@@ -733,7 +773,10 @@ impl<'a> SliceReader<'a> {
         Ok(s)
     }
     fn skip_text_term(&mut self) {
-        if self.pos + 2 <= self.data.len() && self.data[self.pos] == 0 && self.data[self.pos + 1] == 0 {
+        if self.pos + 2 <= self.data.len()
+            && self.data[self.pos] == 0
+            && self.data[self.pos + 1] == 0
+        {
             self.pos += 2;
         } else if self.pos < self.data.len() && self.data[self.pos] == 0 {
             self.pos += 1;
@@ -779,7 +822,12 @@ fn be_u32_at(data: &[u8], pos: usize) -> Result<u32, String> {
     if pos + 4 > data.len() {
         return Err("MDX 数据不完整".to_string());
     }
-    Ok(u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]))
+    Ok(u32::from_be_bytes([
+        data[pos],
+        data[pos + 1],
+        data[pos + 2],
+        data[pos + 3],
+    ]))
 }
 
 fn be_u64_at(data: &[u8], pos: usize) -> Result<u64, String> {
@@ -819,10 +867,12 @@ fn decode_mdx_text(bytes: &[u8], enc: &str) -> String {
     let e = enc.to_ascii_uppercase();
     if e.contains("UTF-16") || e.contains("UTF16") {
         if bytes.starts_with(&[0xfe, 0xff]) || e.contains("BE") {
-            let (s, _, _) = encoding_rs::UTF_16BE.decode(bytes.strip_prefix(&[0xfe, 0xff]).unwrap_or(bytes));
+            let (s, _, _) =
+                encoding_rs::UTF_16BE.decode(bytes.strip_prefix(&[0xfe, 0xff]).unwrap_or(bytes));
             s.into_owned()
         } else {
-            let (s, _, _) = encoding_rs::UTF_16LE.decode(bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(bytes));
+            let (s, _, _) =
+                encoding_rs::UTF_16LE.decode(bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(bytes));
             s.into_owned()
         }
     } else if e.contains("GB") || e.contains("BIG5") {
@@ -905,7 +955,12 @@ fn file_size(path: &Path) -> u64 {
 }
 
 fn stardict_total_size(path: &Path) -> u64 {
-    let ifo = if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("ifo")).unwrap_or(false) {
+    let ifo = if path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("ifo"))
+        .unwrap_or(false)
+    {
         path.to_path_buf()
     } else {
         let mut p = path.to_path_buf();
@@ -920,15 +975,38 @@ fn stardict_total_size(path: &Path) -> u64 {
 }
 
 fn import_entries(path: &Path) -> Result<(String, String, Vec<ImportEntry>, u64), String> {
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("外置词典").to_string();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("外置词典")
+        .to_string();
     match ext.as_str() {
-        "tsv" => Ok((stem, "TSV".to_string(), parse_delimited(path, '\t')?, file_size(path))),
-        "csv" => Ok((stem, "CSV".to_string(), parse_delimited(path, ',')?, file_size(path))),
+        "tsv" => Ok((
+            stem,
+            "TSV".to_string(),
+            parse_delimited(path, '\t')?,
+            file_size(path),
+        )),
+        "csv" => Ok((
+            stem,
+            "CSV".to_string(),
+            parse_delimited(path, ',')?,
+            file_size(path),
+        )),
         "json" => Ok((stem, "JSON".to_string(), parse_json(path)?, file_size(path))),
         "ifo" | "idx" | "dict" | "dz" => {
             let (name, entries) = parse_stardict(path)?;
-            Ok((name, "StarDict".to_string(), entries, stardict_total_size(path)))
+            Ok((
+                name,
+                "StarDict".to_string(),
+                entries,
+                stardict_total_size(path),
+            ))
         }
         "mdx" | "mdd" => {
             let (name, entries) = parse_mdx_or_mdd(path)?;
@@ -987,11 +1065,14 @@ pub fn list() -> Result<Vec<ExternalDictMeta>, String> {
 pub fn import(paths: Vec<String>) -> Result<Vec<ExternalDictMeta>, String> {
     let mut conn = open_db()?;
     let max_pri: i64 = conn
-        .query_row("SELECT COALESCE(MAX(priority),0) FROM dictionaries", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(priority),0) FROM dictionaries",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
-    let mut next_pri = max_pri + 1;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    for p in paths {
+    for (next_pri, p) in (max_pri + 1..).zip(paths) {
         let path = PathBuf::from(&p);
         let (name, format, entries, size_bytes) = import_entries(&path)?;
         if entries.is_empty() {
@@ -1000,8 +1081,10 @@ pub fn import(paths: Vec<String>) -> Result<Vec<ExternalDictMeta>, String> {
         let id = dict_id_for(&path);
         let zh = entries.iter().filter(|e| e.lang == "zh").count();
         let lang = if zh * 2 >= entries.len() { "zh" } else { "en" };
-        tx.execute("DELETE FROM entries WHERE dict_id=?", params![id]).map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM dictionaries WHERE id=?", params![id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM entries WHERE dict_id=?", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM dictionaries WHERE id=?", params![id])
+            .map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO dictionaries (id,name,lang,format,source_path,enabled,priority,entry_count,size_bytes,imported_at)
              VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -1028,11 +1111,12 @@ pub fn import(paths: Vec<String>) -> Result<Vec<ExternalDictMeta>, String> {
                 .map_err(|e| e.to_string())?;
             for e in entries {
                 let norm = normalize_word(&e.word, &e.lang);
-                stmt.execute(params![id, e.word, norm, e.lang, e.phonetic, e.def, e.def_en])
-                    .map_err(|err| err.to_string())?;
+                stmt.execute(params![
+                    id, e.word, norm, e.lang, e.phonetic, e.def, e.def_en
+                ])
+                .map_err(|err| err.to_string())?;
             }
         }
-        next_pri += 1;
     }
     tx.commit().map_err(|e| e.to_string())?;
     list()
@@ -1118,7 +1202,10 @@ pub fn lookup(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
             Err(_) => continue,
         };
         for row in rows.flatten() {
-            if !out.iter().any(|h: &ExternalDictHit| h.dict_id == row.dict_id && h.word == row.word) {
+            if !out
+                .iter()
+                .any(|h: &ExternalDictHit| h.dict_id == row.dict_id && h.word == row.word)
+            {
                 out.push(row);
             }
         }

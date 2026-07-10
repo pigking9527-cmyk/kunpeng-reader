@@ -34,6 +34,7 @@ pulldown-cmark = { version = "0.12", default-features = false, features = ["html
 mobi = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 zip = "3.0.0"
+ammonia = "4.1"
 
 # 正式发布档：保留优化，同时加快日常 release 构建。
 [profile.release]

@@ -118,9 +118,7 @@ fn extract_toc_nav_fragment(html: &str) -> Option<&str> {
     let mut pos = 0usize;
     while let Some(rel_start) = lower[pos..].find("<nav") {
         let start = pos + rel_start;
-        let Some(rel_end) = lower[start..].find('>') else {
-            return None;
-        };
+        let rel_end = lower[start..].find('>')?;
         let tag_end = start + rel_end;
         let tag = &lower[start..=tag_end];
         let is_toc =

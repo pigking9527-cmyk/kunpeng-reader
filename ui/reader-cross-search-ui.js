@@ -207,6 +207,7 @@ async function runCrossSearch(term) {
   crossStatus.textContent = "检索中…";
   crossResults.innerHTML = '<div class="cross-empty">检索中…</div>';
   try {
+    if (crossMode === "semantic") await invoke("prepare_semantic_search").catch(() => false);
     const results = crossMode === "semantic"
       ? await invoke("semantic_search", { query: crossTerm, ids: null })
       : await invoke("shelf_search", { term: crossTerm, ids: null });

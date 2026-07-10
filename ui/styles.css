@@ -246,7 +246,7 @@ body {
 .avatar-btn:hover, .avatar-btn.active { background: #eef2ff; color: #2b6cff; border-color: #9db8ff; }
 .account-panel {
   position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
-  width: 520px; max-width: calc(100vw - 36px); min-height: 620px; max-height: calc(100vh - 48px);
+  width: 520px; max-width: calc(100vw - 36px); min-height: 360px; max-height: calc(100vh - 48px);
   background: #fff; border: 1px solid #d8dce4; border-radius: 10px;
   box-shadow: 0 12px 42px rgba(0,0,0,0.22); padding: 18px 20px; z-index: 70;
   display: none; overflow-y: auto;
@@ -265,12 +265,24 @@ body {
   border-radius: 6px; background: #fff; color: #222; cursor: pointer;
 }
 .sync-now-btn:hover { background: #eef2ff; border-color: #9db8ff; }
+.sync-now-btn:disabled { cursor: wait; opacity: 0.78; }
 .sync-logout-btn { padding: 6px 12px; color: #666; }
 .sync-logout-btn:hover { background: #f4f4f5; border-color: #bfc3ca; color: #333; }
 .sync-now-btn.syncing { background: #eef4ff; border-color: #8fb2ff; color: #1c5be0; }
 .sync-now-btn.ok { background: #e8f7ee; border-color: #76c893; color: #16834a; }
 .sync-now-btn.fail { background: #fff0ef; border-color: #ef9a93; color: #c5392f; }
-.account-settings-space { min-height: 440px; border-top: 1px solid #eef0f4; margin-top: 18px; }
+.account-sync-overview {
+  margin-top: 18px; padding: 16px; border: 1px solid #e5e9f0; border-radius: 10px;
+  background: #fafbfe;
+}
+.account-sync-title { color: #222; font-size: 15px; font-weight: 650; margin-bottom: 12px; }
+.account-sync-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 18px; }
+.account-sync-grid span { position: relative; padding-left: 17px; color: #4f5663; font-size: 13px; line-height: 1.45; }
+.account-sync-grid span::before {
+  content: "✓"; position: absolute; left: 0; top: 0; color: #2b6cff; font-weight: 700;
+}
+.sync-last-time { margin-top: 16px; padding-top: 12px; border-top: 1px solid #e8ebf1; color: #252a33; font-size: 13px; }
+.sync-last-counts { margin-top: 6px; color: #7a818d; font-size: 12px; }
 .saved-accounts {
   position: absolute; left: 0; right: 0; top: calc(100% + 4px);
   background: #fff; border: 1px solid #d8dce4; border-radius: 8px;
@@ -850,7 +862,7 @@ body {
   .sync-form .sync-field { grid-template-columns: 48px minmax(0, 1fr); }
   .sync-account { align-items: flex-start; flex-direction: column; }
   .sync-account-actions { width: 100%; justify-content: flex-end; }
-  .account-settings-space { min-height: 190px; }
+  .account-sync-grid { grid-template-columns: 1fr; }
   .shelf {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 16px 14px;

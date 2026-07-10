@@ -1,9 +1,9 @@
 use crate::search_core::{
-    ascii_lower_bytes, keyword_postings_for_chapter, keyword_query_terms, snippet_at_with_context,
+    ascii_lower_bytes, keyword_postings_for_chapter, snippet_at_with_context,
 };
 use crate::{book, emit_startup_perf, set_thread_background, strip_tags, url_open, AppState};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -348,113 +348,6 @@ fn search_one_book(
     })
 }
 
-fn bm25_score(tf: u32, doc_len: u32, doc_freq: u32, total_docs: u32, avg_doc_len: f64) -> f64 {
-    if tf == 0 || doc_freq == 0 || total_docs == 0 {
-        return 0.0;
-    }
-    let k1 = 1.2;
-    let b = 0.75;
-    let tf = tf as f64;
-    let dl = (doc_len as f64).max(1.0);
-    let avgdl = avg_doc_len.max(1.0);
-    let n = total_docs as f64;
-    let df = doc_freq as f64;
-    let idf = (1.0 + (n - df + 0.5).max(0.0) / (df + 0.5)).ln();
-    idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avgdl))
-}
-
-fn search_keyword_index(
-    state: &AppState,
-    targets: &[book::Book],
-    term: &str,
-    want: Option<&HashSet<u64>>,
-) -> Option<Vec<ShelfBookHits>> {
-    let terms = keyword_query_terms(term);
-    if terms.is_empty() {
-        return None;
-    }
-    let db_guard = state.db.lock().ok()?;
-    let db = db_guard.as_ref()?;
-    let rows = db.keyword_search_terms(&terms, want).ok()?;
-    if rows.is_empty() {
-        let missing_new_index = targets.iter().any(|b| !db.has_keyword_doc_for_book(b.id));
-        if !db.has_keyword_index() || missing_new_index {
-            return None;
-        }
-    }
-    let mut titles: HashMap<u64, (&str, &str)> = HashMap::new();
-    for b in targets {
-        titles.insert(b.id, (&b.title, &b.author));
-    }
-    #[derive(Default)]
-    struct ChapterAgg {
-        count: u32,
-        score: f64,
-        snippets: Vec<String>,
-    }
-    let mut grouped: HashMap<u64, ShelfBookHits> = HashMap::new();
-    let mut chapter_hits: HashMap<(u64, u32), ChapterAgg> = HashMap::new();
-    for row in rows {
-        let score = bm25_score(
-            row.count,
-            row.doc_len,
-            row.doc_freq,
-            row.total_docs,
-            row.avg_doc_len,
-        );
-        let (title, author) = titles.get(&row.book_id).copied().unwrap_or(("", ""));
-        let entry = grouped.entry(row.book_id).or_insert_with(|| ShelfBookHits {
-            book_id: row.book_id.to_string(),
-            title: title.to_string(),
-            author: author.to_string(),
-            count: 0,
-            score: 0.0,
-            hits: Vec::new(),
-        });
-        entry.count = entry.count.saturating_add(row.count);
-        entry.score += score;
-        let ch = chapter_hits.entry((row.book_id, row.chapter)).or_default();
-        ch.count = ch.count.saturating_add(row.count);
-        ch.score += score;
-        for snippet in row.snippets {
-            if ch.snippets.len() < 3 && !ch.snippets.iter().any(|s| s == &snippet) {
-                ch.snippets.push(snippet);
-            }
-        }
-    }
-    for ((book_id, chapter), ch) in chapter_hits {
-        if let Some(book) = grouped.get_mut(&book_id) {
-            if book.hits.len() < 80 {
-                book.hits.push(ChapterHit {
-                    chapter,
-                    snippet: ch.snippets.join(" / "),
-                    count: ch.count,
-                    score: ch.score,
-                });
-            }
-        }
-    }
-    let mut out: Vec<ShelfBookHits> = grouped
-        .into_values()
-        .map(|mut book| {
-            book.hits.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.count.cmp(&a.count))
-            });
-            book
-        })
-        .collect();
-    out.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.count.cmp(&a.count))
-    });
-    Some(out)
-}
-
 #[tauri::command]
 pub(crate) async fn shelf_search(
     app: tauri::AppHandle,
@@ -526,7 +419,7 @@ fn shelf_search_blocking(
             .collect()
     });
 
-    results.sort_by(|a, b| b.count.cmp(&a.count));
+    results.sort_by_key(|item| std::cmp::Reverse(item.count));
     Ok(results)
 }
 

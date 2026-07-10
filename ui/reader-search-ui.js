@@ -9,7 +9,13 @@ const rsearchResults = document.getElementById("rsearch-results");
 let searchTimer = null;
 
 function sendToPage(msg) {
-  if (frame.contentWindow) frame.contentWindow.postMessage(msg, "*");
+  if (!frame.contentWindow) return;
+  let targetOrigin = "*";
+  try {
+    const origin = new URL(frame.src, window.location.href).origin;
+    if (origin && origin !== "null") targetOrigin = origin;
+  } catch (_) {}
+  frame.contentWindow.postMessage(msg, targetOrigin);
 }
 function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

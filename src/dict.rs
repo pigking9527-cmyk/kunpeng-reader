@@ -21,14 +21,14 @@ static ZH_WORD: OnceLock<HashMap<String, (String, String)>> = OnceLock::new();
 #[derive(Serialize, Default)]
 pub struct DictResult {
     pub found: bool,
-    pub lang: String,     // "en" / "zh" / ""
-    pub word: String,     // 实际命中的词（可能是词根/前缀）
-    pub phonetic: String, // 英文音标 / 中文拼音
-    pub def: String,      // 主释义：英文词→中文翻译；中文词→中中释义
-    pub def_en: String,   // 中文词的中英释义（CC-CEDICT），供切换；英文词为空
+    pub lang: String,                      // "en" / "zh" / ""
+    pub word: String,                      // 实际命中的词（可能是词根/前缀）
+    pub phonetic: String,                  // 英文音标 / 中文拼音
+    pub def: String,                       // 主释义：英文词→中文翻译；中文词→中中释义
+    pub def_en: String,                    // 中文词的中英释义（CC-CEDICT），供切换；英文词为空
     pub hownet: Option<HowNetEnhancement>, // 中文词 OpenHowNet 语义增强
-    pub source_name: String, // 命中来源：外置词典名或“内置词典”
-    pub sources: Vec<DictSourceResult>, // 多个外置词典命中时，用于前端折叠/展开
+    pub source_name: String,               // 命中来源：外置词典名或“内置词典”
+    pub sources: Vec<DictSourceResult>,    // 多个外置词典命中时，用于前端折叠/展开
 }
 
 #[derive(Serialize, Default, Clone)]
@@ -171,7 +171,7 @@ pub fn lookup(term: &str, context: &str) -> DictResult {
         }
         let cc = zh_cc_map(); // 中中（萌典）
         let zw = zh_word_map(); // 中英（CC-CEDICT）
-        // 整段优先，再取越来越短的前缀；命中即返回中中+中英两种释义供切换
+                                // 整段优先，再取越来越短的前缀；命中即返回中中+中英两种释义供切换
         for len in (1..=chars.len()).rev() {
             let sub: String = chars[..len].iter().collect();
             let m_cc = cc.get(&sub);

@@ -404,23 +404,32 @@ document.getElementById("fp-settings-close").addEventListener("click", () => fpS
 fpSettingsModal.addEventListener("click", (e) => {
   if (e.target === fpSettingsModal) fpSettingsModal.classList.remove("show");
 });
+// GitHub 链接：在系统默认浏览器打开，而不是在 WebView 里跳转。
+document.getElementById("about-github")?.addEventListener("click", (e) => {
+  e.preventDefault();
+  invoke("open_url", { url: e.currentTarget.href }).catch(() => {});
+});
 
-// ---- 主设置页：语义模型 / 语义索引 / 加速索引 ----
+// ---- 主设置页：语义模型 / 语义索引 / 加速索引 / 多中心画像 ----
 const semanticIndexModal = document.getElementById("semantic-index-modal");
 const semanticGearBtn = document.getElementById("semantic-gear");
 const semanticIndexCloseBtn = document.getElementById("semantic-index-close");
 const semModelMeta = document.getElementById("sem-model-meta");
 const semVectorMeta = document.getElementById("sem-vector-meta");
 const semAccelMeta = document.getElementById("sem-accel-meta");
+const semMultiMeta = document.getElementById("sem-multi-meta");
 const semStatusEl = document.getElementById("sem-status");
 const semVectorBar = document.getElementById("sem-vector-bar");
 const semAccelBar = document.getElementById("sem-accel-bar");
+const semMultiBar = document.getElementById("sem-multi-bar");
 const semModelDownloadBtn = document.getElementById("sem-model-download");
 const semModelDeleteBtn = document.getElementById("sem-model-delete");
 const semVectorBuildBtn = document.getElementById("sem-vector-build");
 const semVectorDeleteBtn = document.getElementById("sem-vector-delete");
 const semAccelBuildBtn = document.getElementById("sem-accel-build");
 const semAccelDeleteBtn = document.getElementById("sem-accel-delete");
+const semMultiBuildBtn = document.getElementById("sem-multi-build");
+const semMultiDeleteBtn = document.getElementById("sem-multi-delete");
 let semStatusPoll = null;
 let semStatusInFlight = false;
 const SEM_STATUS_KEY = "semanticIndexStatusV1";
@@ -440,6 +449,10 @@ function semanticStatusSnapshot(p = {}) {
     accelerator_ready: !!p.accelerator_ready,
     accelerator_resumable: !!p.accelerator_resumable,
     accelerator_bytes: Number(p.accelerator_bytes || 0),
+    multi_profile_done: Number(p.multi_profile_done || 0),
+    multi_profile_total: Number(p.multi_profile_total || 0),
+    multi_profile_ready: !!p.multi_profile_ready,
+    multi_profile_bytes: Number(p.multi_profile_bytes || 0),
     saved_at: Date.now(),
   };
 }
@@ -455,7 +468,7 @@ function loadSemanticStatusCache() {
 
 function saveSemanticStatusCache(p = {}) {
   const snap = semanticStatusSnapshot(p);
-  if (!snap.model_ready && !snap.semantic_total && !snap.accelerator_total) return;
+  if (!snap.model_ready && !snap.semantic_total && !snap.accelerator_total && !snap.multi_profile_total) return;
   lastSemStatus = snap;
   try {
     localStorage.setItem(SEM_STATUS_KEY, JSON.stringify(snap));
@@ -492,6 +505,10 @@ function mergeSemanticStatusWithCache(p = {}) {
     accelerator_ready: p.accelerator_ready || lastSemStatus.accelerator_ready,
     accelerator_resumable: p.accelerator_resumable || lastSemStatus.accelerator_resumable,
     accelerator_bytes: p.accelerator_bytes || lastSemStatus.accelerator_bytes || 0,
+    multi_profile_done: p.multi_profile_done || lastSemStatus.multi_profile_done || 0,
+    multi_profile_total: p.multi_profile_total || lastSemStatus.multi_profile_total || 0,
+    multi_profile_ready: p.multi_profile_ready || lastSemStatus.multi_profile_ready,
+    multi_profile_bytes: p.multi_profile_bytes || lastSemStatus.multi_profile_bytes || 0,
   });
 }
 
@@ -517,60 +534,107 @@ function setSemStatus(text = "", kind = "") {
   semStatusEl.className = "ai-status" + (kind ? " " + kind : "");
 }
 
+function semTask(center, id) {
+  return Array.isArray(center?.tasks) ? center.tasks.find((t) => t.id === id) : null;
+}
+
 function renderSemanticStatus(p = {}) {
+  const center = Array.isArray(p?.tasks) ? p : null;
+  if (center) p = center.progress || {};
   p = mergeSemanticStatusWithCache(p);
   const busy = !!(p.building || p.model_downloading);
   const refreshing = !!p.status_refreshing;
-  const vectorLive = p.building && !p.shard_total && p.total > 0;
+  // 后端正在后台校验时，任务 detail 只是“正在读取…”。优先展示上次可靠快照，
+  // 避免四张卡片一起闪回加载态；按钮仍保持禁用直到校验完成。
+  const taskSource = refreshing && lastSemStatus ? null : center;
+  const modelTask = semTask(taskSource, "semantic_model");
+  const vectorTask = semTask(taskSource, "semantic_vectors");
+  const accelTask = semTask(taskSource, "semantic_accelerator");
+  const multiTask = semTask(taskSource, "semantic_multi_profile");
+  const activeTask = p.active_task || "";
+  const vectorLive = p.building && p.total > 0 && (
+    activeTask === "semantic_vectors" ||
+    activeTask === "semantic_full" ||
+    (!activeTask && !p.shard_total)
+  );
   const vectorDone = vectorLive ? (p.done || 0) : (p.semantic_done || 0);
   const vectorTotal = vectorLive ? (p.total || 0) : (p.semantic_total || 0);
   const accelDone = p.accelerator_done || 0;
   const accelTotal = p.accelerator_total || 0;
+  const multiDone = p.multi_profile_done || 0;
+  const multiTotal = p.multi_profile_total || 0;
   const vectorSize = p.semantic_bytes ? "，占用 " + semBytes(p.semantic_bytes) : "";
   const accelSize = p.accelerator_bytes ? "，占用 " + semBytes(p.accelerator_bytes) : "";
+  const multiSize = p.multi_profile_bytes ? "，占用 " + semBytes(p.multi_profile_bytes) : "";
 
-  semModelMeta.textContent = p.model_downloading
+  semModelMeta.textContent = modelTask?.detail
+    ? (modelTask.detail + (modelTask.bytes ? "，缓存大小 " + semBytes(modelTask.bytes) : ""))
+    : p.model_downloading
     ? "正在下载/加载模型…"
     : (p.model_ready ? ("已就绪" + (p.model_bytes ? "，缓存大小 " + semBytes(p.model_bytes) : "")) : (refreshing ? "正在读取模型状态…" : "未下载。首次下载约 120MB。"));
-  semVectorMeta.textContent = refreshing && !vectorTotal
+  semVectorMeta.textContent = vectorTask?.detail
+    ? (vectorTask.detail + (vectorTask.bytes ? "，占用 " + semBytes(vectorTask.bytes) : ""))
+    : refreshing && !vectorTotal
     ? "正在读取语义索引状态…"
     : (vectorTotal
     ? (vectorDone + "/" + vectorTotal + " 本" + (p.semantic_ready ? "，已完成" : "") + vectorSize)
     : "书架中暂无可建立语义索引的图书");
-  semAccelMeta.textContent = refreshing && !accelTotal
+  semAccelMeta.textContent = accelTask?.detail
+    ? (accelTask.detail + (accelTask.bytes ? "，占用 " + semBytes(accelTask.bytes) : ""))
+    : refreshing && !accelTotal
     ? "正在读取加速索引状态…"
     : (accelTotal
     ? (accelDone + "/" + accelTotal + " 片" + (p.accelerator_ready ? "，已完成" : (p.accelerator_resumable ? "，可续建" : "")) + accelSize)
     : "建立语义索引后可建立加速索引");
+  semMultiMeta.textContent = multiTask?.detail
+    ? (multiTask.detail + (multiTask.bytes ? "，占用 " + semBytes(multiTask.bytes) : ""))
+    : refreshing && !multiTotal
+    ? "正在读取多中心画像状态…"
+    : (multiTotal
+    ? (multiDone + "/" + multiTotal + " 本" + (p.multi_profile_ready ? "，已完成" : (multiDone ? "，需要更新" : "")) + multiSize)
+    : "建立语义索引后可生成多中心画像");
 
-  setSemBar(semVectorBar, vectorDone, vectorTotal, p.semantic_ready);
-  setSemBar(semAccelBar, accelDone, accelTotal, p.accelerator_ready);
+  setSemBar(semVectorBar, vectorTask?.done ?? vectorDone, vectorTask?.total ?? vectorTotal, vectorTask?.ready ?? p.semantic_ready);
+  setSemBar(semAccelBar, accelTask?.done ?? accelDone, accelTask?.total ?? accelTotal, accelTask?.ready ?? p.accelerator_ready);
+  setSemBar(semMultiBar, multiTask?.done ?? multiDone, multiTask?.total ?? multiTotal, multiTask?.ready ?? p.multi_profile_ready);
 
-  semModelDownloadBtn.disabled = busy || refreshing;
-  semModelDeleteBtn.disabled = busy || !p.model_ready;
-  semVectorBuildBtn.disabled = busy || refreshing || !p.model_ready || !vectorTotal;
-  semVectorDeleteBtn.disabled = busy || vectorDone <= 0;
-  semAccelBuildBtn.disabled = busy || refreshing || !p.model_ready || vectorDone <= 0;
-  semAccelDeleteBtn.disabled = busy || (!p.accelerator_ready && accelDone <= 0);
-  semVectorBuildBtn.textContent = vectorDone > 0 && !p.semantic_ready ? "续建语义索引" : "建立语义索引";
-  semAccelBuildBtn.textContent = p.accelerator_resumable ? "续建加速索引" : "建立加速索引";
+  semModelDownloadBtn.disabled = modelTask ? !modelTask.can_start : (busy || refreshing);
+  semModelDeleteBtn.disabled = modelTask ? !modelTask.can_delete : (busy || !p.model_ready);
+  semVectorBuildBtn.disabled = vectorTask ? !vectorTask.can_start : (busy || refreshing || !p.model_ready || !vectorTotal);
+  semVectorDeleteBtn.disabled = vectorTask ? !vectorTask.can_delete : (busy || vectorDone <= 0);
+  semAccelBuildBtn.disabled = accelTask ? !accelTask.can_start : (busy || refreshing || !p.model_ready || vectorDone <= 0);
+  semAccelDeleteBtn.disabled = accelTask ? !accelTask.can_delete : (busy || (!p.accelerator_ready && accelDone <= 0));
+  semMultiBuildBtn.disabled = multiTask ? !multiTask.can_start : (busy || refreshing || vectorDone <= 0);
+  semMultiDeleteBtn.disabled = multiTask ? !multiTask.can_delete : (busy || !p.multi_profile_bytes);
+  semModelDownloadBtn.textContent = modelTask?.primary_label || "下载模型";
+  semModelDeleteBtn.textContent = modelTask?.delete_label || "删除模型";
+  semVectorBuildBtn.textContent = vectorTask?.primary_label || (vectorDone > 0 && !p.semantic_ready ? "续建语义索引" : "建立语义索引");
+  semVectorDeleteBtn.textContent = vectorTask?.delete_label || "删除";
+  semAccelBuildBtn.textContent = accelTask?.primary_label || (p.accelerator_resumable ? "续建加速索引" : "建立加速索引");
+  semAccelDeleteBtn.textContent = accelTask?.delete_label || "删除";
+  semMultiBuildBtn.textContent = multiTask?.primary_label || (multiDone > 0 && !p.multi_profile_ready ? "更新多中心画像" : "建立多中心画像");
+  semMultiDeleteBtn.textContent = multiTask?.delete_label || "删除";
 
   if (p.error) setSemStatus(p.error, "error");
   else if (p.model_downloading || p.building) setSemStatus(p.current || "任务正在后台运行…", "busy");
   else if (refreshing) setSemStatus("正在后台读取索引状态…", "busy");
   else setSemStatus(p.current || "", p.current ? "ok" : "");
 
-  if ((p.model_downloading || p.building) && !semStatusPoll) {
+  const shouldPoll = !!(p.model_downloading || p.building || refreshing);
+  if (shouldPoll && !semStatusPoll) {
     semStatusPoll = setInterval(refreshSemanticStatus, 1500);
+  } else if (!shouldPoll && semStatusPoll) {
+    clearInterval(semStatusPoll);
+    semStatusPoll = null;
   }
-  if (!refreshing || p.model_ready || vectorTotal || accelTotal || p.building || p.model_downloading) saveSemanticStatusCache(p);
+  if (!refreshing || p.model_ready || vectorTotal || accelTotal || multiTotal || p.building || p.model_downloading) saveSemanticStatusCache(p);
 }
 
 async function refreshSemanticStatus() {
   if (semStatusInFlight) return;
   semStatusInFlight = true;
   try {
-    renderSemanticStatus(await invoke("semantic_status"));
+    renderSemanticStatus(await invoke("semantic_tasks"));
   } catch (e) {
     setSemStatus("读取语义索引状态失败：" + e, "error");
   } finally {
@@ -584,7 +648,7 @@ function openSemanticIndexSettings() {
   if (lastSemStatus) renderSemanticStatus(lastSemStatus);
   setTimeout(refreshSemanticStatus, 30);
   if (semStatusPoll) clearInterval(semStatusPoll);
-  semStatusPoll = setInterval(refreshSemanticStatus, 1500);
+  semStatusPoll = null;
 }
 
 function closeSemanticIndexSettings() {
@@ -639,6 +703,15 @@ semAccelBuildBtn?.addEventListener("click", async () => {
     setSemStatus("启动加速索引失败：" + e, "error");
   }
 });
+semMultiBuildBtn?.addEventListener("click", async () => {
+  setSemStatus("正在启动多中心画像任务…", "busy");
+  try {
+    await invoke("build_semantic_multi_profile");
+    await refreshSemanticStatus();
+  } catch (e) {
+    setSemStatus("启动多中心画像失败：" + e, "error");
+  }
+});
 semVectorDeleteBtn?.addEventListener("click", async () => {
   if (!confirm("确定删除语义索引？加速索引也会一起删除。")) return;
   try {
@@ -663,6 +736,20 @@ semAccelDeleteBtn?.addEventListener("click", async () => {
     await refreshSemanticStatus();
   } catch (e) {
     setSemStatus("删除加速索引失败：" + e, "error");
+  }
+});
+semMultiDeleteBtn?.addEventListener("click", async () => {
+  if (!confirm("确定删除多中心画像索引？语义索引和加速索引会保留。")) return;
+  try {
+    await invoke("delete_semantic_index", { kind: "multi_profile" });
+    updateSemanticStatusCache({
+      multi_profile_done: 0,
+      multi_profile_ready: false,
+      multi_profile_bytes: 0,
+    });
+    await refreshSemanticStatus();
+  } catch (e) {
+    setSemStatus("删除多中心画像失败：" + e, "error");
   }
 });
 

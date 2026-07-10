@@ -41,7 +41,17 @@
               <button id="sync-logout" class="sync-logout-btn" type="button">退出登录</button>
             </span>
           </div>
-          <div class="account-settings-space"></div>
+          <section class="account-sync-overview" aria-label="同步内容">
+            <div class="account-sync-title">同步内容</div>
+            <div class="account-sync-grid">
+              <span>阅读进度与续读位置</span>
+              <span>书签、高亮、批注与评分</span>
+              <span>生词本</span>
+              <span>阅读统计</span>
+            </div>
+            <div id="sync-last-time" class="sync-last-time">最近同步：尚未同步</div>
+            <div id="sync-last-counts" class="sync-last-counts">登录后可跨设备同步；图书文件本身不会上传</div>
+          </section>
           <div id="sync-status" class="sync-status">尚未同步</div>
         </div>
       </div>
@@ -258,7 +268,7 @@
     <div id="semantic-index-modal" class="modal">
       <div class="modal-card semantic-card">
         <div class="modal-head"><span>语义索引</span><button id="semantic-index-close" class="btn-plain">✕</button></div>
-        <p class="ai-note">语义模型用于理解查询含义；语义索引按图书建立向量；加速索引用于让全书架语义检索更快。关闭本窗口后，正在运行的任务会继续在后台执行。</p>
+        <p class="ai-note">语义模型用于理解查询含义；语义索引按图书建立向量；加速索引用于完整全书架检索；多中心画像用于冷启动时快速筛选且保留一本书里的多个局部主题。关闭本窗口后，正在运行的任务会继续在后台执行。</p>
         <section class="sem-section">
           <div class="sem-section-head">
             <div>
@@ -296,6 +306,19 @@
             </div>
           </div>
           <div class="sem-progressbar"><span id="sem-accel-bar"></span></div>
+        </section>
+        <section class="sem-section">
+          <div class="sem-section-head">
+            <div>
+              <div class="sem-title">多中心画像索引</div>
+              <div id="sem-multi-meta" class="sem-meta">尚未建立</div>
+            </div>
+            <div class="sem-actions">
+              <button id="sem-multi-build" class="btn-plain" type="button">建立多中心画像</button>
+              <button id="sem-multi-delete" class="btn-plain danger-lite" type="button">删除</button>
+            </div>
+          </div>
+          <div class="sem-progressbar"><span id="sem-multi-bar"></span></div>
         </section>
         <div id="sem-status" class="ai-status" aria-live="polite"></div>
       </div>

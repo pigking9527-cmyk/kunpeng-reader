@@ -1,14 +1,15 @@
 // 防止 Windows release 构建弹出控制台窗口
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod atomic_file;
 mod book;
 mod data_migration;
 mod db;
 mod dict;
 mod epub_toc;
 mod external_dict;
-mod html_sanitize;
 mod hownet;
+mod html_sanitize;
 mod import;
 mod import_core;
 mod pdf_support;
@@ -38,14 +39,14 @@ mod smoke_tests;
 
 use book::{Library, WinGeom};
 use epub_toc::{epub3_nav_toc, flatten_toc, TocDto};
-use html_sanitize::sanitize_mobi_html;
+use html_sanitize::{sanitize_book_html, sanitize_epub_head, sanitize_mobi_html};
 use reader_protocol::{
     collect_head_assets, extract_body_inner, get_txt_chapters, guess_mime, is_md, is_mobi,
     md_to_html, percent_decode, rewrite_attrs, rewrite_css_url, txt_body, txt_html,
 };
 use serde::{Deserialize, Serialize};
 use stats::StatsStore;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -71,6 +72,12 @@ fn log(msg: &str) {
         {
             let _ = writeln!(f, "{msg}");
         }
+    }
+}
+
+fn report_save_error(context: &str, result: Result<(), String>) {
+    if let Err(error) = result {
+        log(&format!("{context}保存失败：{error}"));
     }
 }
 
@@ -105,6 +112,10 @@ fn reader_window_open(app: tauri::AppHandle) -> bool {
 }
 
 /// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
+type TextCache = Mutex<HashMap<u64, (u64, Arc<Vec<String>>)>>;
+type LowerTextCache = Mutex<HashMap<u64, (u64, Arc<Vec<Vec<u8>>>)>>;
+type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
+
 pub(crate) struct AppState {
     pub(crate) library: Mutex<Library>,
     pub(crate) db: Mutex<Option<db::AppDb>>,
@@ -113,12 +124,13 @@ pub(crate) struct AppState {
     chapter_html_cache: Mutex<HashMap<(u64, u64, usize), Arc<ProcessedChapterHtml>>>,
     backfilled: std::sync::atomic::AtomicBool, // 是否已回填旧书的作者/导入时间
     pending_jump: Mutex<HashMap<u64, (u32, String)>>, // 书架检索点击 → 阅读窗口待跳转位置
-    pub(crate) text_cache: Mutex<HashMap<u64, (u64, Arc<Vec<String>>)>>, // 检索用：内存缓存的逐章纯文本 (mtime, 章节)
-    pub(crate) lower_text_cache: Mutex<HashMap<u64, (u64, Arc<Vec<Vec<u8>>>)>>, // 英文检索用：ASCII 小写后的章节字节
-    pub(crate) txt_chapters: Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>, // txt 阅读用：切分好的章节 (标题, 正文)
-    pub(crate) cache_bytes: AtomicUsize, // 已缓存的总字节数（限额用）
+    pub(crate) text_cache: TextCache,          // 检索用：内存缓存的逐章纯文本 (mtime, 章节)
+    pub(crate) lower_text_cache: LowerTextCache, // 英文检索用：ASCII 小写后的章节字节
+    pub(crate) txt_chapters: TextChaptersCache, // txt 阅读用：切分好的章节 (标题, 正文)
+    pub(crate) cache_bytes: AtomicUsize,       // 已缓存的总字节数（限额用）
     pub(crate) embedder: Mutex<Option<Arc<fastembed::TextEmbedding>>>, // 语义模型（懒加载，首次会下载）
     pub(crate) sem_cache: Mutex<HashMap<u64, Arc<semantic::SemData>>>, // 语义检索：内存缓存的向量
+    pub(crate) sem_cache_order: Mutex<VecDeque<u64>>, // 逐书向量 LRU：换词时淘汰旧书，避免缓存被首批结果永久占满
     pub(crate) sem_cache_bytes: AtomicUsize,
     pub(crate) sem_progress: Mutex<semantic::SemProgress>, // 建立语义索引的进度
     pub(crate) global_index: Mutex<Option<Arc<semantic::LoadedShards>>>, // 全库近邻索引：已载入内存的分片集合
@@ -132,7 +144,7 @@ const BIG_EPUB_CHAPTER_BYTES: usize = 800 * 1024;
 const BIG_EPUB_CHAPTER_CHARS: usize = 1_000_000;
 const VIRTUAL_CHAPTER_TARGET_BYTES: usize = 520 * 1024;
 const VIRTUAL_CHAPTER_SEARCH_BYTES: usize = 160 * 1024;
-const EPUB_CACHE_VERSION: u32 = 2;
+const EPUB_CACHE_VERSION: u32 = 3;
 const EPUB_CACHE_COMPAT_VERSIONS: &[u32] = &[2, 3];
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -342,7 +354,7 @@ fn to_dto(b: &book::Book) -> BookDto {
         id: id.to_string(),
         title: b.title.clone(),
         author: b.author.clone(),
-        description: b.description.clone(),
+        description: html_sanitize::html_to_plain_text(&b.description),
         format: b.format.clone(),
         // 用封面版本号做缓存破坏参数：换封面后 cover_ver+1 → URL 变化 → 书架刷新新图。
         // 不再每次渲染都去 stat 封面文件（几百本书时那是持锁的几百次系统调用，拖慢封面加载）。
@@ -432,7 +444,9 @@ fn external_dict_list() -> Result<Vec<external_dict::ExternalDictMeta>, String> 
 }
 
 #[tauri::command]
-fn external_dict_import(paths: Vec<String>) -> Result<Vec<external_dict::ExternalDictMeta>, String> {
+fn external_dict_import(
+    paths: Vec<String>,
+) -> Result<Vec<external_dict::ExternalDictMeta>, String> {
     external_dict::import(paths)
 }
 
@@ -459,34 +473,52 @@ fn external_dict_move_priority(
 
 #[tauri::command]
 async fn translate_text(
+    state: tauri::State<'_, AppState>,
     text: String,
     source_lang: Option<String>,
     target_lang: Option<String>,
     provider: Option<String>,
-    api_id: Option<String>,
-    api_key: Option<String>,
-    baidu_app_id: Option<String>,
-    baidu_key: Option<String>,
-) -> translate::TranslateResult {
+    credential_config_id: String,
+) -> Result<translate::TranslateResult, String> {
     let fallback_provider = provider.clone().unwrap_or_else(|| "baidu".to_string());
     let fallback_source = source_lang.clone().unwrap_or_else(|| "auto".to_string());
     let fallback_target = target_lang.clone().unwrap_or_else(|| "zh-CN".to_string());
+    let credential = state
+        .db
+        .lock()
+        .map_err(|_| "数据库锁定失败".to_string())
+        .and_then(|guard| {
+            let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+            translate::resolve_translation_credential(db, &credential_config_id)
+        });
+    let (stored_provider, api_id, api_key) = match credential {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(translate::TranslateResult {
+                ok: false,
+                provider: fallback_provider,
+                source_lang: fallback_source,
+                target_lang: fallback_target,
+                original: text,
+                translated: String::new(),
+                error,
+            });
+        }
+    };
     match tokio::task::spawn_blocking(move || {
         translate::translate_text(
             text,
             source_lang,
             target_lang,
-            provider,
-            api_id,
-            api_key,
-            baidu_app_id,
-            baidu_key,
+            Some(stored_provider),
+            Some(api_id),
+            Some(api_key),
         )
     })
     .await
     {
-        Ok(result) => result,
-        Err(e) => translate::TranslateResult {
+        Ok(result) => Ok(result),
+        Err(e) => Ok(translate::TranslateResult {
             ok: false,
             provider: fallback_provider,
             source_lang: fallback_source,
@@ -494,32 +526,52 @@ async fn translate_text(
             original: String::new(),
             translated: String::new(),
             error: format!("翻译任务失败：{e}"),
-        },
+        }),
     }
 }
 
 #[tauri::command]
+fn translation_credential_status(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+) -> Result<translate::TranslationCredentialStatus, String> {
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    translate::translation_credential_status(db, &provider)
+}
+
+#[tauri::command]
+fn save_translation_credential(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    api_id: String,
+    api_key: String,
+) -> Result<translate::TranslationCredentialStatus, String> {
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    translate::save_translation_credential(db, &provider, &api_id, &api_key)
+}
+
+#[tauri::command]
 fn migrate_data_to_sqlite(state: tauri::State<AppState>) -> Result<(), String> {
-    data_migration::migrate_json_to_sqlite(state.inner());
-    Ok(())
+    data_migration::migrate_json_to_sqlite(state.inner())
 }
 
 #[tauri::command]
 fn export_data_package(state: tauri::State<AppState>, path: String) -> Result<(), String> {
-    data_migration::migrate_json_to_sqlite(state.inner());
-    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    data_migration::migrate_json_to_sqlite(state.inner())?;
+    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
     let package = db.export_package()?;
-    let text = serde_json::to_string_pretty(&package).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    atomic_file::write_json(std::path::Path::new(&path), &package, true)
 }
 
 #[tauri::command]
 fn import_data_package(state: tauri::State<AppState>, path: String) -> Result<u32, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
     db.import_package(&value)
 }
 
@@ -534,6 +586,11 @@ async fn shelf_books(state: tauri::State<'_, AppState>) -> Result<Vec<BookDto>, 
         let mut lib = state.library.lock().unwrap();
         let mut changed = false;
         for b in lib.books.iter_mut() {
+            let plain_description = html_sanitize::html_to_plain_text(&b.description);
+            if plain_description != b.description {
+                b.description = plain_description;
+                changed = true;
+            }
             if b.meta_done {
                 continue; // 已回填过的书，永不再重读（解决每次启动卡顿）
             }
@@ -550,7 +607,7 @@ async fn shelf_books(state: tauri::State<'_, AppState>) -> Result<Vec<BookDto>, 
                     }
                     if b.description.trim().is_empty() {
                         if let Some(m) = doc.mdata("description") {
-                            b.description = m.value.clone();
+                            b.description = html_sanitize::html_to_plain_text(&m.value);
                         }
                     }
                 }
@@ -559,7 +616,7 @@ async fn shelf_books(state: tauri::State<'_, AppState>) -> Result<Vec<BookDto>, 
             changed = true;
         }
         if changed {
-            lib.save();
+            report_save_error("书架", lib.save());
         }
     }
     Ok(snapshot(&state.library.lock().unwrap()))
@@ -584,7 +641,7 @@ async fn set_progress(
             }
         }
         if changed {
-            lib.save();
+            report_save_error("书架", lib.save());
         }
     }
     Ok(())
@@ -595,7 +652,7 @@ fn remove_book(state: tauri::State<AppState>, id: String) -> Vec<BookDto> {
     if let Ok(id_num) = id.parse::<u64>() {
         let mut lib = state.library.lock().unwrap();
         lib.remove(id_num);
-        lib.save();
+        report_save_error("书架", lib.save());
     }
     snapshot(&state.library.lock().unwrap())
 }
@@ -615,7 +672,7 @@ fn set_cover(
         b.cover = Some(cover);
         b.cover_ver += 1; // 换图后让前端缓存失效，立即显示新封面
     }
-    lib.save();
+    report_save_error("书架", lib.save());
     Ok(snapshot(&lib))
 }
 
@@ -629,7 +686,7 @@ fn remove_books(state: tauri::State<AppState>, ids: Vec<String>) -> Vec<BookDto>
                 lib.remove(n);
             }
         }
-        lib.save();
+        report_save_error("书架", lib.save());
     }
     snapshot(&state.library.lock().unwrap())
 }
@@ -803,24 +860,23 @@ fn ensure_reader_window(
     // Moved/Resized 在拖窗期间会高频触发；每次都跨 Rust 取位置并锁书库，会让阅读页拖动周期性卡顿。
     let app_ev = app.clone();
     let label_ev = label.clone();
-    w.on_window_event(move |ev| match ev {
-        tauri::WindowEvent::CloseRequested { .. } => {
+    w.on_window_event(move |ev| {
+        if let tauri::WindowEvent::CloseRequested { .. } = ev {
             if let Some(win) = app_ev.get_webview_window(&label_ev) {
                 let st = app_ev.state::<AppState>();
                 let mut lib = st.library.lock().unwrap();
                 update_reader_geom(&mut lib, &win);
-                lib.save();
-                st.stats.lock().unwrap().save();
+                report_save_error("书架", lib.save());
+                report_save_error("统计", st.stats.lock().unwrap().save());
             }
         }
-        _ => {}
     });
 
     // 窗口建好后再记录“最近阅读”并写盘（不拖慢打开）
     {
         let mut lib = state.library.lock().unwrap();
         lib.mark_read(id_num);
-        lib.save();
+        report_save_error("书架", lib.save());
     }
     Ok(w)
 }
@@ -1128,7 +1184,7 @@ fn relocate_book(state: tauri::State<AppState>, id: String, path: String) -> Vec
     if let Ok(id_num) = id.parse::<u64>() {
         let mut lib = state.library.lock().unwrap();
         if lib.relocate(id_num, std::path::PathBuf::from(path)) {
-            lib.save();
+            report_save_error("书架", lib.save());
         }
     }
     snapshot(&state.library.lock().unwrap())
@@ -1138,25 +1194,41 @@ fn relocate_book(state: tauri::State<AppState>, id: String, path: String) -> Vec
 fn spawn_fingerprint_fill(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
-        let pending: Vec<(u64, std::path::PathBuf)> = {
+        let pending: Vec<(u64, std::path::PathBuf, bool, bool)> = {
             let lib = state.library.lock().unwrap();
             lib.books
                 .iter()
-                .filter(|b| b.fingerprint == 0)
-                .map(|b| (b.id, b.path.clone()))
+                .filter(|b| b.fingerprint == 0 || b.content_id.is_empty())
+                .map(|b| {
+                    (
+                        b.id,
+                        b.path.clone(),
+                        b.fingerprint == 0,
+                        b.content_id.is_empty(),
+                    )
+                })
                 .collect()
         };
         let mut changed = false;
-        for (id, path) in pending {
-            let fp = book::compute_fingerprint(&path);
-            if fp != 0 {
-                state.library.lock().unwrap().set_fingerprint(id, fp);
-                changed = true;
+        for (id, path, need_fingerprint, need_content_id) in pending {
+            if need_fingerprint {
+                let fp = book::compute_fingerprint(&path);
+                if fp != 0 {
+                    state.library.lock().unwrap().set_fingerprint(id, fp);
+                    changed = true;
+                }
+            }
+            if need_content_id {
+                let content_id = book::compute_content_id(&path);
+                if !content_id.is_empty() {
+                    state.library.lock().unwrap().set_content_id(id, content_id);
+                    changed = true;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         if changed {
-            state.library.lock().unwrap().save();
+            report_save_error("书架", state.library.lock().unwrap().save());
         }
     });
 }
@@ -1254,7 +1326,7 @@ fn compute_word_counts(app: tauri::AppHandle) {
             std::thread::sleep(std::time::Duration::from_millis(25)); // 温和，别抢资源
         }
         if changed {
-            state.library.lock().unwrap().save();
+            report_save_error("书架", state.library.lock().unwrap().save());
         }
     });
 }
@@ -1332,9 +1404,7 @@ fn meta_cache_path(id: u64, mtime: u64) -> Option<PathBuf> {
 }
 
 fn chapter_cache_path_for(id: u64, mtime: u64, idx: usize, version: u32) -> Option<PathBuf> {
-    Some(epub_cache_dir()?.join(format!(
-        "chapter-v{version}-{id}-{mtime}-{idx}.json"
-    )))
+    Some(epub_cache_dir()?.join(format!("chapter-v{version}-{id}-{mtime}-{idx}.json")))
 }
 
 fn chapter_cache_path(id: u64, mtime: u64, idx: usize) -> Option<PathBuf> {
@@ -1701,6 +1771,7 @@ fn process_virtual_chapter(
     let mut head = String::new();
     let mut seen = std::collections::HashSet::new();
     collect_head_assets(&rewritten_head, &mut head, &mut seen);
+    let head = sanitize_epub_head(&head);
 
     let raw_body = extract_body_inner(&html);
     let start = clamp_char_boundary(raw_body, vc.body_start.min(raw_body.len()));
@@ -1711,6 +1782,7 @@ fn process_virtual_chapter(
         id,
         &vc.base_dir,
     );
+    let body = sanitize_book_html(&body);
     let body = if meta
         .virtuals
         .iter()
@@ -1826,7 +1898,10 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
                         sanitize_mobi_html(&raw)
                     )
                 } else if is_md(&format) {
-                    format!("<div class=\"md-body\">{}</div>", md_to_html(&raw))
+                    format!(
+                        "<div class=\"md-body\">{}</div>",
+                        sanitize_book_html(&md_to_html(&raw))
+                    )
                 } else {
                     txt_body(&raw)
                 };
@@ -1968,6 +2043,7 @@ fn main() {
             cache_bytes: AtomicUsize::new(0),
             embedder: Mutex::new(None),
             sem_cache: Mutex::new(HashMap::new()),
+            sem_cache_order: Mutex::new(VecDeque::new()),
             sem_cache_bytes: AtomicUsize::new(0),
             sem_progress: Mutex::new(semantic::SemProgress::default()),
             global_index: Mutex::new(None),
@@ -1980,7 +2056,9 @@ fn main() {
         .setup(|app| {
             {
                 let state = app.state::<AppState>();
-                data_migration::migrate_json_to_sqlite(state.inner());
+                if let Err(error) = data_migration::migrate_json_to_sqlite(state.inner()) {
+                    log(&format!("SQLite 迁移失败：{error}"));
+                }
             }
             spawn_startup_maintenance(app.handle().clone()); // 延后低抢占维护任务，避免刚打开窗口拖动卡顿
             if let Some(win) = app.get_webview_window("main") {
@@ -2008,8 +2086,8 @@ fn main() {
                             let st = app_ev.state::<AppState>();
                             let mut lib = st.library.lock().unwrap();
                             lib.main_geom = Some(capture_geom(lib.main_geom.clone(), &w));
-                            lib.save();
-                            st.stats.lock().unwrap().save();
+                            report_save_error("书架", lib.save());
+                            report_save_error("统计", st.stats.lock().unwrap().save());
                         }
                     }
                     _ => {}
@@ -2065,6 +2143,8 @@ fn main() {
             external_dict_delete,
             external_dict_set_enabled,
             external_dict_move_priority,
+            translation_credential_status,
+            save_translation_credential,
             translate_text,
             vocab::vocab_add,
             vocab::vocab_list,
@@ -2135,8 +2215,11 @@ fn main() {
             semantic::delete_semantic_index,
             semantic::build_semantic_vectors,
             semantic::build_semantic_accelerator,
+            semantic::build_semantic_multi_profile,
             semantic::semantic_index_done,
             semantic::semantic_status,
+            semantic::semantic_tasks,
+            semantic::prepare_semantic_search,
             semantic::semantic_search,
             semantic::similar_books,
             reader_commands::add_highlight,

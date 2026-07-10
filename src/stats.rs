@@ -100,30 +100,56 @@ impl StatsStore {
         self.dirty = true;
     }
 
-    pub(crate) fn save(&mut self) {
+    pub(crate) fn save(&mut self) -> Result<(), String> {
         if !self.dirty {
-            return;
+            return Ok(());
         }
-        if let Some(p) = stats_path() {
-            if let Some(d) = p.parent() {
-                let _ = std::fs::create_dir_all(d);
-            }
-            let v: Vec<ReadBucket> = self
-                .map
-                .iter()
-                .map(|(&(day, hour, book), &(secs, words))| ReadBucket {
-                    day,
-                    hour,
-                    book,
-                    secs,
-                    words,
-                })
-                .collect();
-            if let Ok(j) = serde_json::to_string(&v) {
-                let _ = std::fs::write(p, j);
-            }
-        }
+        let p = stats_path().ok_or("无法确定统计数据路径")?;
+        self.save_to(&p)
+    }
+
+    fn save_to(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let v: Vec<ReadBucket> = self
+            .map
+            .iter()
+            .map(|(&(day, hour, book), &(secs, words))| ReadBucket {
+                day,
+                hour,
+                book,
+                secs,
+                words,
+            })
+            .collect();
+        crate::atomic_file::write_json(path, &v, false)?;
         self.dirty = false;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_save_keeps_dirty_until_a_successful_retry() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-stats-test-{}-{}",
+            std::process::id(),
+            READING_STATS_SAVE_EPOCH.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let blocked_parent = root.join("not-a-directory");
+        std::fs::write(&blocked_parent, b"file").unwrap();
+
+        let mut store = StatsStore::default();
+        store.map.insert((20260710, 12, 7), (60, 1000));
+        store.dirty = true;
+        assert!(store.save_to(&blocked_parent.join("stats.json")).is_err());
+        assert!(store.dirty);
+
+        store.save_to(&root.join("stats.json")).unwrap();
+        assert!(!store.dirty);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -149,8 +175,8 @@ fn schedule_reading_stats_save(app: tauri::AppHandle) {
         }
         {
             let state = app.state::<AppState>();
-            state.library.lock().unwrap().save();
-            state.stats.lock().unwrap().save();
+            crate::report_save_error("书架", state.library.lock().unwrap().save());
+            crate::report_save_error("统计", state.stats.lock().unwrap().save());
         }
         let after_save = READING_STATS_SAVE_EPOCH.load(Ordering::Acquire);
         READING_STATS_SAVE_SCHEDULED.store(false, Ordering::Release);

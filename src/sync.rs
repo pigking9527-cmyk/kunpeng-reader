@@ -2,6 +2,12 @@ use crate::{data_migration, db, secret_store, AppState, DEFAULT_SYNC_URL};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+const LEGACY_SYNC_HTTP_URL: &str = "http://sync.example.invalid";
+const SYNC_PULL_PAGE_SIZE: usize = 1_000;
+const MAX_SYNC_PULL_PAGES: usize = 1_000;
+const SYNC_PUSH_BATCH_ENTITIES: usize = 400;
+const SYNC_PUSH_BATCH_BYTES: usize = 2 * 1024 * 1024;
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub(crate) struct SyncSettings {
     url: String,
@@ -13,6 +19,14 @@ pub(crate) struct SyncSettings {
     user_id: String,
     #[serde(default)]
     last_sync_at: i64,
+    #[serde(default)]
+    last_sync_pushed: usize,
+    #[serde(default)]
+    last_sync_pulled: usize,
+    #[serde(default)]
+    last_sync_accepted: usize,
+    #[serde(default)]
+    last_sync_ignored: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -36,6 +50,8 @@ pub(crate) struct SyncReport {
     message: String,
     pushed: usize,
     pulled: usize,
+    accepted: usize,
+    ignored: usize,
     server_time: i64,
 }
 
@@ -45,9 +61,36 @@ struct SyncPushResponse {
     #[serde(default)]
     entities: Vec<db::SyncEntity>,
     #[serde(default)]
-    accepted_count: u32,
+    accepted_count: Option<u32>,
     #[serde(default)]
-    ignored_count: u32,
+    accepted: Option<serde_json::Value>,
+    #[serde(default)]
+    ignored_count: Option<u32>,
+    #[serde(default)]
+    ignored: Option<serde_json::Value>,
+}
+
+impl SyncPushResponse {
+    fn accepted_total(&self) -> u32 {
+        self.accepted_count
+            .unwrap_or_else(|| legacy_sync_count(self.accepted.as_ref()))
+    }
+
+    fn ignored_total(&self) -> u32 {
+        self.ignored_count
+            .unwrap_or_else(|| legacy_sync_count(self.ignored.as_ref()))
+    }
+}
+
+fn legacy_sync_count(value: Option<&serde_json::Value>) -> u32 {
+    match value {
+        Some(serde_json::Value::Number(n)) => n
+            .as_u64()
+            .and_then(|count| u32::try_from(count).ok())
+            .unwrap_or_default(),
+        Some(serde_json::Value::Array(items)) => u32::try_from(items.len()).unwrap_or(u32::MAX),
+        _ => 0,
+    }
 }
 
 #[derive(Deserialize)]
@@ -55,6 +98,10 @@ struct SyncPullResponse {
     server_time: i64,
     #[serde(default)]
     entities: Vec<db::SyncEntity>,
+    #[serde(default)]
+    next_cursor: String,
+    #[serde(default)]
+    has_more: bool,
 }
 
 fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
@@ -68,6 +115,22 @@ fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
         last_sync_at: db
             .metadata("sync_last_sync_at")
             .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0),
+        last_sync_pushed: db
+            .metadata("sync_last_pushed")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0),
+        last_sync_pulled: db
+            .metadata("sync_last_pulled")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0),
+        last_sync_accepted: db
+            .metadata("sync_last_accepted")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0),
+        last_sync_ignored: db
+            .metadata("sync_last_ignored")
+            .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(0),
     }
 }
@@ -108,6 +171,11 @@ fn normalize_sync_base(input: &str) -> Result<String, String> {
     if base.starts_with("https://") {
         return Ok(base);
     }
+    // Versions before the HTTPS rollout persisted this exact public endpoint.
+    // Upgrade only the known legacy origin; arbitrary public HTTP remains blocked.
+    if base == LEGACY_SYNC_HTTP_URL {
+        return Ok(DEFAULT_SYNC_URL.to_string());
+    }
     if base.starts_with("http://") {
         // 只允许本机调试使用明文 HTTP；公网同步必须走 HTTPS。
         if is_local_http_base(&base) {
@@ -116,6 +184,42 @@ fn normalize_sync_base(input: &str) -> Result<String, String> {
         return Err("同步服务器必须使用 HTTPS；只有本机调试地址允许 HTTP".into());
     }
     Err("同步服务器地址必须以 https:// 开头".into())
+}
+
+fn sync_push_batches(entities: &[db::SyncEntity]) -> Result<Vec<Vec<db::SyncEntity>>, String> {
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0usize;
+
+    for entity in entities {
+        let entity_bytes = serde_json::to_vec(entity)
+            .map_err(|e| format!("同步实体序列化失败：{e}"))?
+            .len();
+        if !batch.is_empty()
+            && (batch.len() >= SYNC_PUSH_BATCH_ENTITIES
+                || batch_bytes.saturating_add(entity_bytes) > SYNC_PUSH_BATCH_BYTES)
+        {
+            batches.push(batch);
+            batch = Vec::new();
+            batch_bytes = 0;
+        }
+        batch_bytes = batch_bytes.saturating_add(entity_bytes);
+        batch.push(entity.clone());
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+fn newer_cursor(current: &str, candidate: &str) -> String {
+    let current_value = current.trim().parse::<i128>().unwrap_or(0);
+    let candidate_value = candidate.trim().parse::<i128>().unwrap_or(0);
+    if candidate_value > current_value {
+        candidate.trim().to_string()
+    } else {
+        current.trim().to_string()
+    }
 }
 
 fn save_auth_response(db: &db::AppDb, res: &AuthResponse) -> Result<(), String> {
@@ -141,8 +245,8 @@ fn auth_request_inner(
         return Err("请输入账号和密码".into());
     }
     {
-        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
         db.set_metadata("sync_url", &base)?;
     }
     let agent = ureq::AgentBuilder::new()
@@ -187,13 +291,36 @@ pub(crate) fn sync_set_settings(
 }
 
 #[tauri::command]
-pub(crate) fn auth_logout(state: tauri::State<AppState>) -> Result<SyncSettings, String> {
-    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    write_sync_token(db, "")?;
-    db.set_metadata("sync_username", "")?;
-    db.set_metadata("sync_user_id", "")?;
-    Ok(sync_settings_from_db(db))
+pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let settings = {
+            let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+            let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+            sync_settings_from_db(db)
+        };
+        if !settings.token.is_empty() {
+            if let Ok(base) = normalize_sync_base(&settings.url) {
+                // Remote revocation is best effort: an offline user must still
+                // be able to remove credentials from this device immediately.
+                let _ = ureq::AgentBuilder::new()
+                    .timeout(std::time::Duration::from_secs(8))
+                    .build()
+                    .post(&format!("{base}/auth/logout"))
+                    .set("Authorization", &format!("Bearer {}", settings.token))
+                    .set("Content-Type", "application/json")
+                    .send_json(serde_json::json!({}));
+            }
+        }
+        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        write_sync_token(db, "")?;
+        db.set_metadata("sync_username", "")?;
+        db.set_metadata("sync_user_id", "")?;
+        Ok(sync_settings_from_db(db))
+    })
+    .await
+    .map_err(|e| format!("退出登录任务失败：{e}"))?
 }
 
 #[tauri::command]
@@ -227,65 +354,139 @@ pub(crate) async fn auth_login(
 }
 
 fn sync_now_inner(state: &AppState) -> Result<SyncReport, String> {
-    data_migration::migrate_json_to_sqlite(state);
-    let (settings, device_id, entities) = {
+    data_migration::ensure_content_ids_for_sync(state)?;
+    // Snapshot local JSON first so unsynced edits are represented in SQLite.
+    data_migration::migrate_json_to_sqlite(state)?;
+    let (settings, device_id, cursor) = {
         let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
         let settings = sync_settings_from_db(db);
         if settings.url.trim().is_empty() || settings.token.trim().is_empty() {
             return Err("请先登录账号".into());
         }
-        (settings, db.device_id(), db.all_sync_entities()?)
+        let cursor = db.metadata("sync_cursor").unwrap_or_default();
+        (settings, db.device_id(), cursor)
     };
     let base = normalize_sync_base(&settings.url)?;
+    if base != settings.url {
+        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        db.set_metadata("sync_url", &base)?;
+    }
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(20))
         .build();
-    let push_body = serde_json::json!({
-        "device_id": device_id,
-        "entities": entities,
-    });
-    let push: SyncPushResponse = agent
-        .post(&format!("{base}/sync/push"))
-        .set("Authorization", &format!("Bearer {}", settings.token))
-        .set("Content-Type", "application/json")
-        .send_json(push_body)
-        .map_err(|e| format!("push 失败：{e}"))?
-        .into_json()
-        .map_err(|e| format!("push 返回解析失败：{e}"))?;
 
-    let pull: SyncPullResponse = agent
-        .get(&format!("{base}/sync/pull"))
-        .query("since", &settings.last_sync_at.to_string())
-        .set("Authorization", &format!("Bearer {}", settings.token))
-        .call()
-        .map_err(|e| format!("pull 失败：{e}"))?
-        .into_json()
-        .map_err(|e| format!("pull 返回解析失败：{e}"))?;
-
-    let (pulled, server_time) = {
+    // Pull before push. A newly imported zero-progress book must not overwrite
+    // the established position from another computer. Continue paging until the
+    // server confirms that this cursor has caught up.
+    let mut pulled = 0u32;
+    let mut pull_server_time = 0i64;
+    let mut sync_cursor = cursor.clone();
+    let mut pull_cursor = if cursor.is_empty() {
+        settings.last_sync_at.to_string()
+    } else {
+        cursor
+    };
+    let mut pull_completed = false;
+    for _ in 0..MAX_SYNC_PULL_PAGES {
+        let pull: SyncPullResponse = agent
+            .get(&format!("{base}/sync/pull"))
+            .query("cursor", &pull_cursor)
+            .query("limit", &SYNC_PULL_PAGE_SIZE.to_string())
+            .set("Authorization", &format!("Bearer {}", settings.token))
+            .call()
+            .map_err(|e| format!("pull 失败：{e}"))?
+            .into_json()
+            .map_err(|e| format!("pull 返回解析失败：{e}"))?;
+        pull_server_time = pull_server_time.max(pull.server_time);
+        data_migration::merge_pulled_book_states(state, &pull.entities)?;
+        pulled += {
+            let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+            let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+            db.import_sync_entities(&pull.entities)?
+        };
+        let next_cursor = pull.next_cursor.trim();
+        if !next_cursor.is_empty() {
+            sync_cursor = newer_cursor(&sync_cursor, next_cursor);
+        }
+        if !pull.has_more {
+            pull_completed = true;
+            break;
+        }
+        if next_cursor.is_empty() || next_cursor == pull_cursor {
+            return Err("pull 游标没有前进，已停止以避免重复同步".into());
+        }
+        pull_cursor = next_cursor.to_string();
+    }
+    if !pull_completed {
+        return Err("pull 分页数量超过安全上限，稍后可继续同步".into());
+    }
+    data_migration::apply_sqlite_to_runtime(state)?;
+    // Persist the field-wise book merge; unchanged JSON does not become dirty.
+    data_migration::migrate_json_to_sqlite(state)?;
+    let entities = {
         let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        db.dirty_sync_entities()?
+    };
+    let mut pushed = 0usize;
+    let mut accepted = 0usize;
+    let mut ignored = 0usize;
+    let mut push_server_time = 0i64;
+    for batch in sync_push_batches(&entities)? {
+        let push_body = serde_json::json!({
+            "schema_version": 2,
+            "device_id": device_id,
+            "entities": batch,
+        });
+        let push: SyncPushResponse = agent
+            .post(&format!("{base}/sync/push"))
+            .set("Authorization", &format!("Bearer {}", settings.token))
+            .set("Content-Type", "application/json")
+            .send_json(push_body)
+            .map_err(|e| format!("push 失败：{e}"))?
+            .into_json()
+            .map_err(|e| format!("push 返回解析失败：{e}"))?;
+        pushed += batch.len();
+        accepted += push.accepted_total() as usize;
+        ignored += push.ignored_total() as usize;
+        push_server_time = push_server_time.max(push.server_time);
+        // The server has decided this exact version. Conditional updates ensure
+        // a concurrent local edit stays dirty and is uploaded on the next run.
+        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        db.mark_sync_entities_clean(&batch)?;
         if !push.entities.is_empty() {
             let _ = db.import_sync_entities(&push.entities)?;
         }
-        let pulled = db.import_sync_entities(&pull.entities)?;
-        let server_time = push.server_time.max(pull.server_time);
+    }
+
+    let server_time = {
+        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        let server_time = push_server_time.max(pull_server_time);
         db.set_metadata("sync_last_sync_at", &server_time.to_string())?;
-        (pulled, server_time)
+        if !sync_cursor.is_empty() {
+            db.set_metadata("sync_cursor", &sync_cursor)?;
+        }
+        db.set_metadata("sync_last_pushed", &pushed.to_string())?;
+        db.set_metadata("sync_last_pulled", &pulled.to_string())?;
+        db.set_metadata("sync_last_accepted", &accepted.to_string())?;
+        db.set_metadata("sync_last_ignored", &ignored.to_string())?;
+        server_time
     };
-    data_migration::apply_sqlite_to_runtime(state);
+    data_migration::apply_sqlite_to_runtime(state)?;
     Ok(SyncReport {
         ok: true,
         message: format!(
             "同步完成：推送 {} 条，服务端接受 {} 条，忽略 {} 条，拉取 {} 条",
-            entities.len(),
-            push.accepted_count,
-            push.ignored_count,
-            pulled
+            pushed, accepted, ignored, pulled
         ),
-        pushed: entities.len(),
+        pushed,
         pulled: pulled as usize,
+        accepted,
+        ignored,
         server_time,
     })
 }
@@ -312,6 +513,10 @@ mod tests {
             username: "alice".to_string(),
             user_id: "u1".to_string(),
             last_sync_at: 123,
+            last_sync_pushed: 2,
+            last_sync_pulled: 3,
+            last_sync_accepted: 2,
+            last_sync_ignored: 0,
         };
         let auth = AuthResponse {
             ok: true,
@@ -341,9 +546,66 @@ mod tests {
             normalize_sync_base("http://127.0.0.1:8787/").unwrap(),
             "http://127.0.0.1:8787"
         );
-        assert!(normalize_sync_base("http://sync.example.invalid").is_err());
+        assert_eq!(
+            normalize_sync_base("http://sync.example.invalid").unwrap(),
+            DEFAULT_SYNC_URL
+        );
+        assert!(normalize_sync_base("http://sync.example.invalid:8787").is_err());
+        assert!(normalize_sync_base("http://sync.example.invalid/sync").is_err());
         assert!(normalize_sync_base("http://example.com").is_err());
         assert!(normalize_sync_base("ftp://example.com").is_err());
         assert!(normalize_sync_base("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn push_response_accepts_v1_v2_and_combined_count_fields() {
+        for (json, accepted, ignored) in [
+            (r#"{"server_time":1,"accepted":2,"ignored":3}"#, 2, 3),
+            (
+                r#"{"server_time":1,"accepted":["a","b"],"ignored":["c"]}"#,
+                2,
+                1,
+            ),
+            (
+                r#"{"server_time":1,"accepted_count":4,"ignored_count":5}"#,
+                4,
+                5,
+            ),
+            (
+                r#"{"server_time":1,"accepted_count":6,"accepted":["a","b"],"ignored_count":7,"ignored":["c"]}"#,
+                6,
+                7,
+            ),
+        ] {
+            let response: SyncPushResponse = serde_json::from_str(json).unwrap();
+            assert_eq!(response.accepted_total(), accepted);
+            assert_eq!(response.ignored_total(), ignored);
+        }
+    }
+
+    #[test]
+    fn sync_push_batches_bound_entity_count() {
+        let entities = (0..(SYNC_PUSH_BATCH_ENTITIES + 1))
+            .map(|index| db::SyncEntity {
+                kind: "vocab".to_string(),
+                id: index.to_string(),
+                json: serde_json::json!({"word": "test"}),
+                updated_at: index as i64,
+                deleted_at: 0,
+                device_id: "test".to_string(),
+                sync_version: 1,
+            })
+            .collect::<Vec<_>>();
+        let batches = sync_push_batches(&entities).unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), SYNC_PUSH_BATCH_ENTITIES);
+        assert_eq!(batches[1].len(), 1);
+    }
+
+    #[test]
+    fn newer_cursor_never_moves_backwards() {
+        assert_eq!(newer_cursor("100", "99"), "100");
+        assert_eq!(newer_cursor("100", "101"), "101");
+        assert_eq!(newer_cursor("", "101"), "101");
     }
 }

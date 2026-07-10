@@ -292,6 +292,7 @@ async function runSearch(term) {
   const limit = curIds.length ? curIds : null;
   try {
     if (mode === "sem") {
+      await invoke("prepare_semantic_search").catch(() => false);
       curResults = await invoke("semantic_search", { query: curTerm, ids: limit });
       curSimilar = [];
     } else {
@@ -340,6 +341,7 @@ const modeSem = document.getElementById("mode-sem");
 const sortBox = sortEl;
 function setMode(m) {
   mode = m;
+  if (m === "sem") invoke("prepare_semantic_search").catch(() => {});
   modeKw.classList.toggle("active", m === "kw");
   modeSem.classList.toggle("active", m === "sem");
   sortBox.style.display = m === "sem" ? "none" : ""; // 语义按相似度固定排序

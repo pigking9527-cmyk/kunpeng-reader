@@ -1,6 +1,12 @@
 use crate::{book, pdf_support, reader_window_id, AppState};
 use serde::Serialize;
 
+fn report_save_error(result: Result<(), String>) {
+    if let Err(error) = result {
+        eprintln!("保存书架失败：{error}");
+    }
+}
+
 /// 修改指定书籍的书名（主窗口图书信息页使用）。
 #[tauri::command]
 pub(crate) fn set_book_title(
@@ -18,7 +24,7 @@ pub(crate) fn set_book_title(
         return Err("找不到这本书".to_string());
     }
     lib.set_title(id_num, title);
-    lib.save();
+    lib.save()?;
     Ok(())
 }
 
@@ -35,7 +41,7 @@ pub(crate) fn set_book_description(
         return Err("找不到这本书".to_string());
     }
     lib.set_description(id_num, description);
-    lib.save();
+    lib.save()?;
     Ok(())
 }
 
@@ -52,7 +58,7 @@ pub(crate) fn set_book_rating(
         return Err("找不到这本书".to_string());
     }
     lib.set_rating(id_num, rating);
-    lib.save();
+    lib.save()?;
     Ok(())
 }
 
@@ -66,7 +72,7 @@ pub(crate) fn set_description(
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.set_description(id, description);
-        lib.save();
+        report_save_error(lib.save());
     }
 }
 
@@ -76,7 +82,7 @@ pub(crate) fn set_rating(window: tauri::WebviewWindow, state: tauri::State<AppSt
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.set_rating(id, rating);
-        lib.save();
+        report_save_error(lib.save());
     }
 }
 
@@ -112,7 +118,7 @@ pub(crate) fn add_highlight(
                 created_at: book::now_secs(),
             },
         );
-        lib.save();
+        report_save_error(lib.save());
         return lib.highlights(id);
     }
     Vec::new()
@@ -127,7 +133,7 @@ pub(crate) fn remove_highlight(
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.remove_highlight(id, index);
-        lib.save();
+        report_save_error(lib.save());
         return lib.highlights(id);
     }
     Vec::new()
@@ -143,7 +149,7 @@ pub(crate) fn set_highlight_note(
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.set_highlight_note(id, index, note);
-        lib.save();
+        report_save_error(lib.save());
         return lib.highlights(id);
     }
     Vec::new()
@@ -159,7 +165,7 @@ pub(crate) fn set_highlight_text(
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.set_highlight_text(id, index, text);
-        lib.save();
+        report_save_error(lib.save());
         return lib.highlights(id);
     }
     Vec::new()
@@ -176,7 +182,7 @@ pub(crate) fn add_bookmark(
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.add_bookmark(id, chapter, frac, label);
-        lib.save();
+        report_save_error(lib.save());
         return lib.bookmarks(id);
     }
     Vec::new()
@@ -191,7 +197,7 @@ pub(crate) fn remove_bookmark(
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.remove_bookmark(id, index);
-        lib.save();
+        report_save_error(lib.save());
         return lib.bookmarks(id);
     }
     Vec::new()
@@ -242,7 +248,7 @@ async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String>
         if wc > 0 {
             let mut lib = state.library.lock().unwrap();
             lib.set_word_count(id, wc);
-            lib.save();
+            report_save_error(lib.save());
         }
         wc
     };
@@ -256,14 +262,14 @@ async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String>
             if let Some(b) = lib.books.iter_mut().find(|b| b.id == id) {
                 b.author = a;
             }
-            lib.save();
+            report_save_error(lib.save());
         }
     }
 
     Ok(BookMeta {
         title,
         author,
-        description,
+        description: crate::html_sanitize::html_to_plain_text(&description),
         format,
         word_count,
         size,

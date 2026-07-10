@@ -635,6 +635,7 @@
     </div>
 
     <div class="body">
+      <!-- reader:// 内容位于独立 reader.localhost 源；allow-same-origin 仅用于章内容 fetch，仍与宿主源隔离。 -->
       <iframe id="frame" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin"></iframe>
       <div id="loading" class="loading"><div class="spinner"></div><div>加载中…</div></div>
       <div id="backdrop" class="backdrop"></div>
@@ -744,6 +745,7 @@
       </div>
     </div>
     <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果">←</button>
+    <script src="reader-message.js"></script>
     <script src="reader-search-ui.js"></script>
     <script src="reader-settings-ui.js"></script>
     <script src="reader.js"></script>

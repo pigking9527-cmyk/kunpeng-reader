@@ -608,7 +608,7 @@ document.getElementById("info-desc").addEventListener("blur", () => {
 
 // 接收合并页上报：阅读进度 / 正文被点击 / 搜索结果数
 window.addEventListener("message", (e) => {
-  if (!e.data) return;
+  if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
   if (e.data.layoutBusy) {
     if (!isPdf) showProgressLoading();
     return;
@@ -751,6 +751,22 @@ window.addEventListener("message", (e) => {
   if (e.data.semanticSearch) {
     openSemanticSearch(e.data.semanticSearch);
   }
+  if (e.data.getTranslationCredentialStatus) {
+    const provider = String(e.data.getTranslationCredentialStatus || "");
+    invoke("translation_credential_status", { provider })
+      .then((status) => sendToPage({ translationCredentialStatus: status }))
+      .catch((err) => sendToPage({ translationCredentialStatus: { provider, configured: false, error: String(err) } }));
+  }
+  if (e.data.saveTranslationCredential) {
+    const credential = e.data.saveTranslationCredential;
+    invoke("save_translation_credential", {
+      provider: credential.provider || "",
+      apiId: credential.apiId || "",
+      apiKey: credential.apiKey || "",
+    })
+      .then((status) => sendToPage({ translationCredentialSaved: status }))
+      .catch((err) => sendToPage({ translationCredentialSaved: { provider: credential.provider || "", configured: false, error: String(err) } }));
+  }
   if (e.data.translateText) {
     const req = e.data.translateText;
     invoke("translate_text", {
@@ -758,10 +774,7 @@ window.addEventListener("message", (e) => {
       sourceLang: req.source || "auto",
       targetLang: req.target || "system",
       provider: req.provider || "baidu",
-      apiId: req.apiId || "",
-      apiKey: req.apiKey || "",
-      baiduAppId: req.baiduAppId || "",
-      baiduKey: req.baiduKey || "",
+      credentialConfigId: req.credentialConfigId || "",
     })
       .then((r) => sendToPage({ translateResult: r }))
       .catch((err) =>

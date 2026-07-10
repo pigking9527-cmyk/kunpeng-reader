@@ -1,3 +1,4 @@
+use crate::{db::AppDb, secret_store};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -11,6 +12,114 @@ pub(crate) struct TranslateResult {
     pub original: String,
     pub translated: String,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TranslationCredential {
+    provider: String,
+    api_id: String,
+    api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TranslationCredentialStatus {
+    pub config_id: String,
+    pub provider: String,
+    pub configured: bool,
+}
+
+fn normalize_provider(provider: &str) -> Result<&'static str, String> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "baidu" => Ok("baidu"),
+        "tencent" => Ok("tencent"),
+        "deepl" => Ok("deepl"),
+        "google" => Ok("google"),
+        _ => Err("未知翻译 API".to_string()),
+    }
+}
+
+fn credential_config_id(provider: &str) -> String {
+    format!("translate:{provider}")
+}
+
+fn credential_metadata_key(provider: &str) -> String {
+    format!("translate_credential_protected:{provider}")
+}
+
+fn credential_is_complete(credential: &TranslationCredential) -> bool {
+    !credential.api_id.trim().is_empty()
+        && (!matches!(credential.provider.as_str(), "baidu" | "tencent")
+            || !credential.api_key.trim().is_empty())
+}
+
+fn load_translation_credential(
+    db: &AppDb,
+    config_id: &str,
+) -> Result<TranslationCredential, String> {
+    let provider = config_id
+        .trim()
+        .strip_prefix("translate:")
+        .ok_or("无效的翻译凭据配置 ID")?;
+    let provider = normalize_provider(provider)?;
+    let stored = db
+        .metadata(&credential_metadata_key(provider))
+        .ok_or("尚未配置该翻译服务的凭据")?;
+    let json = secret_store::unprotect_secret(&stored)?;
+    let credential: TranslationCredential =
+        serde_json::from_str(&json).map_err(|e| format!("翻译凭据损坏：{e}"))?;
+    if credential.provider != provider || !credential_is_complete(&credential) {
+        return Err("翻译凭据配置不完整".to_string());
+    }
+    Ok(credential)
+}
+
+pub(crate) fn translation_credential_status(
+    db: &AppDb,
+    provider: &str,
+) -> Result<TranslationCredentialStatus, String> {
+    let provider = normalize_provider(provider)?.to_string();
+    let config_id = credential_config_id(&provider);
+    let configured = load_translation_credential(db, &config_id).is_ok();
+    Ok(TranslationCredentialStatus {
+        config_id,
+        provider,
+        configured,
+    })
+}
+
+pub(crate) fn save_translation_credential(
+    db: &AppDb,
+    provider: &str,
+    api_id: &str,
+    api_key: &str,
+) -> Result<TranslationCredentialStatus, String> {
+    let provider = normalize_provider(provider)?.to_string();
+    let api_id = api_id.trim();
+    let api_key = api_key.trim();
+    if api_id.len() > 4096 || api_key.len() > 4096 {
+        return Err("翻译凭据过长".to_string());
+    }
+    if api_id.is_empty() || (matches!(provider.as_str(), "baidu" | "tencent") && api_key.is_empty())
+    {
+        return Err("翻译凭据不完整".to_string());
+    }
+    let credential = TranslationCredential {
+        provider: provider.clone(),
+        api_id: api_id.to_string(),
+        api_key: api_key.to_string(),
+    };
+    let json = serde_json::to_string(&credential).map_err(|e| e.to_string())?;
+    let protected = secret_store::protect_secret(&json)?;
+    db.set_metadata(&credential_metadata_key(&provider), &protected)?;
+    translation_credential_status(db, &provider)
+}
+
+pub(crate) fn resolve_translation_credential(
+    db: &AppDb,
+    config_id: &str,
+) -> Result<(String, String, String), String> {
+    let credential = load_translation_credential(db, config_id)?;
+    Ok((credential.provider, credential.api_id, credential.api_key))
 }
 
 fn md5_hex(input: &[u8]) -> String {
@@ -457,8 +566,6 @@ pub(crate) fn translate_text(
     provider: Option<String>,
     api_id: Option<String>,
     api_key: Option<String>,
-    baidu_app_id: Option<String>,
-    baidu_key: Option<String>,
 ) -> TranslateResult {
     let original = text.trim().to_string();
     let provider = provider.unwrap_or_else(|| "baidu".to_string());
@@ -489,13 +596,7 @@ pub(crate) fn translate_text(
     let api_id = api_id.unwrap_or_default();
     let api_key = api_key.unwrap_or_default();
     let result = match provider.as_str() {
-        "baidu" => baidu_translate(
-            &original,
-            &source_lang,
-            &target_lang,
-            baidu_app_id.as_deref().unwrap_or(api_id.as_str()),
-            baidu_key.as_deref().unwrap_or(api_key.as_str()),
-        ),
+        "baidu" => baidu_translate(&original, &source_lang, &target_lang, &api_id, &api_key),
         "tencent" => tencent_translate(&original, &source_lang, &target_lang, &api_id, &api_key),
         "deepl" => deepl_translate(&original, &source_lang, &target_lang, &api_id),
         "google" => google_translate(&original, &source_lang, &target_lang, &api_id),

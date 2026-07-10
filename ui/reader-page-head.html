@@ -1776,11 +1776,19 @@ function currentScrollPageClipBlank(){
   var blank=0;
   blank=Math.max(blank,maskBlank);
   if(slice){
+    // 分页器会为底部留出少量安全区，避免把一行字切在页边。原始滚动内容
+    // 仍会把这行完整绘制在视口内；若不按虚拟页的最后一项裁切，它既出现在
+    // 当前页底部，也会作为下一页首行出现。
+    var items=scrollPageItems();
+    var nextIdx=typeof slice.nextIndex==='number'?slice.nextIndex:-1;
+    var next=nextIdx>=0&&nextIdx<items.length?items[nextIdx]:null;
+    var virtualBottom=Math.max(0,Math.min(viewH,Math.ceil(slice.virtualBottom||0)));
+    var nextTop=next?Math.round((next.top||0)-top):viewH;
+    if(next&&next.type==='line'&&virtualBottom>0&&virtualBottom<viewH-1&&nextTop>=virtualBottom-1&&nextTop<viewH-1){
+      blank=Math.max(blank,Math.ceil(viewH-virtualBottom));
+    }
     var bottom=Math.max(top,Math.min(top+viewH,Math.round(slice.bottom==null?top+viewH:slice.bottom)));
     if(bottom<top+viewH-1){
-      var items=scrollPageItems();
-      var nextIdx=typeof slice.nextIndex==='number'?slice.nextIndex:-1;
-      var next=nextIdx>=0&&nextIdx<items.length?items[nextIdx]:null;
       if(next&&next.type==='block'&&next.atomic&&!isPreviewableBlock(next)){
         blank=Math.max(blank,Math.ceil(top+viewH-bottom));
       }
@@ -3356,7 +3364,7 @@ function showHlSettings(anchor){
   hlSettingsPop.style.left=left+'px';hlSettingsPop.style.top=top+'px';hlSettingsPop.style.display='block';
 }
 // ---- 翻译面板：UI 先就位；实际 API 需用户配置后才发送文本到外部服务 ----
-var trPop=null,trRect=null,trText='';
+var trPop=null,trRect=null,trText='',trCredentialDirty=false,trCredentialStatus={};
 function hideTranslate(){if(trPop)trPop.style.display='none';}
 function setupTranslate(){
   trPop=document.createElement('div');trPop.id='tr-pop';
@@ -3371,10 +3379,10 @@ function setupTranslate(){
   trPop.addEventListener('click',function(e){e.stopPropagation();});
   ['.tr-source','.tr-target'].forEach(function(sel){trPop.querySelector(sel).addEventListener('change',function(){saveTranslatePrefs();requestTranslate();});});
   trPop.querySelector('.tr-api').addEventListener('change',function(){try{localStorage.setItem('translateProvider',trPop.querySelector('.tr-api').value);}catch(_){} updateTranslateApiFields();requestTranslate();});
-  ['.tr-api-id','.tr-api-key'].forEach(function(sel){trPop.querySelector(sel).addEventListener('change',function(){saveTranslatePrefs();requestTranslate();});});
+  ['.tr-api-id','.tr-api-key'].forEach(function(sel){trPop.querySelector(sel).addEventListener('input',function(){trCredentialDirty=true;});trPop.querySelector(sel).addEventListener('change',function(){requestTranslate();});});
   document.addEventListener('mousedown',function(e){if(trPop&&trPop.style.display==='block'&&!trPop.contains(e.target))hideTranslate();});
   document.addEventListener('wheel',function(){hideTranslate();},{passive:true});
-  updateTranslateApiFields();
+  migrateLegacyTranslateCredentials();updateTranslateApiFields();
 }
 function translateApiStorageKey(provider,field){
   if(provider==='baidu')return field==='id'?'translateBaiduAppId':'translateBaiduKey';
@@ -3393,18 +3401,30 @@ function saveTranslatePrefs(){
     localStorage.setItem('translateProvider',provider);
     localStorage.setItem('translateSourceLang',trPop.querySelector('.tr-source').value);
     localStorage.setItem('translateTargetLang',trPop.querySelector('.tr-target').value);
-    localStorage.setItem(translateApiStorageKey(provider,'id'),trPop.querySelector('.tr-api-id').value.trim());
-    localStorage.setItem(translateApiStorageKey(provider,'key'),trPop.querySelector('.tr-api-key').value.trim());
   }catch(_){}
+}
+function migrateLegacyTranslateCredentials(){
+  ['baidu','tencent','deepl','google'].forEach(function(provider){
+    try{
+      var idKey=translateApiStorageKey(provider,'id'),secretKey=translateApiStorageKey(provider,'key');
+      var apiId=(localStorage.getItem(idKey)||'').trim(),apiKey=(localStorage.getItem(secretKey)||'').trim();
+      localStorage.removeItem(idKey);localStorage.removeItem(secretKey);
+      if(apiId&&((provider!=='baidu'&&provider!=='tencent')||apiKey)){
+        parent.postMessage({saveTranslationCredential:{provider:provider,apiId:apiId,apiKey:apiKey}},'*');
+      }
+    }catch(_){}
+  });
 }
 function updateTranslateApiFields(){
   if(!trPop)return;
   var provider=trPop.querySelector('.tr-api').value;
   var label=translateApiLabel(provider);
   var idInput=trPop.querySelector('.tr-api-id'),keyInput=trPop.querySelector('.tr-api-key');
-  idInput.placeholder=label.id;keyInput.placeholder=label.key;
-  idInput.value=localStorage.getItem(translateApiStorageKey(provider,'id'))||'';
-  keyInput.value=localStorage.getItem(translateApiStorageKey(provider,'key'))||'';
+  var configured=trCredentialStatus[provider]&&trCredentialStatus[provider].configured;
+  idInput.placeholder=label.id+(configured?'（已安全保存，留空沿用）':'');
+  keyInput.placeholder=label.key+(configured?'（已安全保存，留空沿用）':'');
+  idInput.value='';keyInput.value='';trCredentialDirty=false;
+  parent.postMessage({getTranslationCredentialStatus:provider},'*');
 }
 function placeTranslate(){
   trPop.style.display='block';
@@ -3428,16 +3448,27 @@ function requestTranslate(){
   if(!trPop||trPop.style.display==='none')return;
   var api=trPop.querySelector('.tr-api').value;
   var dst=trPop.querySelector('.tr-dst');
-  saveTranslatePrefs();updateTranslateApiFields();
+  saveTranslatePrefs();
   var apiId=trPop.querySelector('.tr-api-id').value.trim(),apiKey=trPop.querySelector('.tr-api-key').value.trim();
-  if(!apiId||(api==='baidu'||api==='tencent')&&!apiKey){
+  if(trCredentialDirty){
+    if(!apiId||(api==='baidu'||api==='tencent')&&!apiKey){
+      var dirtyLabel=translateApiLabel(api);
+      dst.textContent=(api==='deepl'||api==='google')?'请填写'+dirtyLabel.id+'。':'请填写'+dirtyLabel.id+' 和 '+dirtyLabel.key+'。';
+      dst.className='tr-text tr-dst tr-error';placeTranslate();return;
+    }
+    dst.textContent='正在安全保存凭据...';dst.className='tr-text tr-dst tr-muted';placeTranslate();
+    parent.postMessage({saveTranslationCredential:{provider:api,apiId:apiId,apiKey:apiKey}},'*');return;
+  }
+  var status=trCredentialStatus[api];
+  if(!status){dst.textContent='正在检查凭据配置...';dst.className='tr-text tr-dst tr-muted';parent.postMessage({getTranslationCredentialStatus:api},'*');placeTranslate();return;}
+  if(!status.configured){
     var label=translateApiLabel(api);
     dst.textContent=(api==='deepl'||api==='google')?'请先填写'+label.id+'。':'请先填写'+label.id+' 和 '+label.key+'。';
     dst.className='tr-text tr-dst tr-error';
     placeTranslate();return;
   }
   dst.textContent='加载中...';dst.className='tr-text tr-dst tr-muted';placeTranslate();
-  parent.postMessage({translateText:{text:trText,source:trPop.querySelector('.tr-source').value,target:trPop.querySelector('.tr-target').value,provider:api,apiId:apiId,apiKey:apiKey,baiduAppId:api==='baidu'?apiId:'',baiduKey:api==='baidu'?apiKey:''}},'*');
+  parent.postMessage({translateText:{text:trText,source:trPop.querySelector('.tr-source').value,target:trPop.querySelector('.tr-target').value,provider:api,credentialConfigId:status.config_id||('translate:'+api)}},'*');
 }
 function showTranslateResult(r){
   if(!trPop)return;
@@ -4208,6 +4239,14 @@ window.addEventListener('message',function(e){
   if(e.data.editHighlightTextFor!==undefined){var ei=e.data.editHighlightTextFor;setTimeout(function(){if(window.getSelection)window.getSelection().removeAllRanges();showHighlightTextEditor(ei);},40);}
   if(e.data.showHlMenuFor!==undefined){var si=e.data.showHlMenuFor;setTimeout(function(){if(window.getSelection)window.getSelection().removeAllRanges();showHlMenu(si);},40);}
   if(e.data.dictResult!==undefined){showDictResult(e.data.dictResult);}
+  if(e.data.translationCredentialStatus!==undefined){
+    var cs=e.data.translationCredentialStatus,p=cs&&cs.provider;
+    if(p){trCredentialStatus[p]=cs;if(trPop&&trPop.querySelector('.tr-api').value===p){var lbl=translateApiLabel(p),ok=!!cs.configured;trPop.querySelector('.tr-api-id').placeholder=lbl.id+(ok?'（已安全保存，留空沿用）':'');trPop.querySelector('.tr-api-key').placeholder=lbl.key+(ok?'（已安全保存，留空沿用）':'');if(ok&&trText&&trPop.style.display!=='none'&&!trCredentialDirty)requestTranslate();}}
+  }
+  if(e.data.translationCredentialSaved!==undefined){
+    var saved=e.data.translationCredentialSaved,sp=saved&&saved.provider;
+    if(sp){trCredentialStatus[sp]=saved;if(trPop&&trPop.querySelector('.tr-api').value===sp){if(saved.configured){trCredentialDirty=false;trPop.querySelector('.tr-api-id').value='';trPop.querySelector('.tr-api-key').value='';var sl=translateApiLabel(sp);trPop.querySelector('.tr-api-id').placeholder=sl.id+'（已安全保存，留空沿用）';trPop.querySelector('.tr-api-key').placeholder=sl.key+'（已安全保存，留空沿用）';if(trText&&trPop.style.display!=='none')requestTranslate();}else{var sd=trPop.querySelector('.tr-dst');sd.textContent=saved.error||'保存翻译凭据失败';sd.className='tr-text tr-dst tr-error';placeTranslate();}}}
+  }
   if(e.data.translateResult!==undefined){showTranslateResult(e.data.translateResult);}
   if(e.data.gotoHighlight!==undefined){var hi=e.data.gotoHighlight,h=HL[hi];if(h){showChapter(h.chapter,'start').then(function(){var r=highlightRange(hi),rect=null;if(r){try{rect=r.getBoundingClientRect();}catch(_){rect=null;}}if(rect)gotoPage(pageOf({getBoundingClientRect:function(){return rect;}}));});}}
   if(e.data.resolveToc){

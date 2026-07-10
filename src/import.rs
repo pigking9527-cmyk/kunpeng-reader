@@ -1,5 +1,5 @@
 use crate::import_core::{filter_new_book_paths, is_supported_book_path, normalize_import_dirs};
-use crate::{book, set_thread_background, snapshot, AppState, BookDto};
+use crate::{book, data_migration, set_thread_background, snapshot, AppState, BookDto};
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 #[derive(Serialize, Clone)]
@@ -63,31 +63,14 @@ pub(crate) async fn add_books(
                 continue;
             }
 
-            let fp = book::compute_fingerprint(&path);
-            let relocated = if fp != 0 {
-                let mut lib = state.library.lock().unwrap();
-                if let Some(b) = lib.books.iter_mut().find(|b| b.fingerprint == fp) {
-                    b.path = path.clone();
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if relocated {
-                changed = true;
-                added += 1;
-                save_after += 1;
-                if save_after >= 50 {
-                    state.library.lock().unwrap().save();
-                    save_after = 0;
-                }
-                emit_book_import_progress(&app, "import", processed, added, total, &current);
-                continue;
+            let mut prepared = book::Book::prepare(path.clone());
+            // A remote state can arrive before this file exists locally. Match
+            // it by full content hash and restore progress during the import.
+            if let Err(error) =
+                data_migration::apply_pending_book_state(state.inner(), &mut prepared)
+            {
+                eprintln!("[sync] apply pending book state failed: {error}");
             }
-
-            let prepared = book::Book::prepare(path.clone());
             let inserted = {
                 let mut lib = state.library.lock().unwrap();
                 lib.add_prepared(prepared)
@@ -97,7 +80,7 @@ pub(crate) async fn add_books(
                 added += 1;
                 save_after += 1;
                 if save_after >= 50 {
-                    state.library.lock().unwrap().save();
+                    crate::report_save_error("书架", state.library.lock().unwrap().save());
                     save_after = 0;
                 }
             }
@@ -105,7 +88,7 @@ pub(crate) async fn add_books(
         }
 
         if changed {
-            state.library.lock().unwrap().save();
+            crate::report_save_error("书架", state.library.lock().unwrap().save());
         }
         emit_book_import_progress(&app, "done", processed, added, total, "");
         let books = snapshot(&state.library.lock().unwrap());
@@ -218,7 +201,10 @@ fn run_auto_import_with_progress(app: Option<&tauri::AppHandle>, state: &AppStat
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
-        let prepared = book::Book::prepare(p);
+        let mut prepared = book::Book::prepare(p);
+        if let Err(error) = data_migration::apply_pending_book_state(state, &mut prepared) {
+            eprintln!("[sync] apply pending book state failed: {error}");
+        }
         {
             let mut lib = state.library.lock().unwrap();
             if lib.add_prepared(prepared) {
@@ -226,7 +212,7 @@ fn run_auto_import_with_progress(app: Option<&tauri::AppHandle>, state: &AppStat
                 added += 1;
             }
         }
-        if processed == total || processed % 5 == 0 {
+        if processed == total || processed.is_multiple_of(5) {
             emit_auto_import_progress(
                 app,
                 "import",
@@ -239,7 +225,7 @@ fn run_auto_import_with_progress(app: Option<&tauri::AppHandle>, state: &AppStat
         }
     }
     if changed {
-        state.library.lock().unwrap().save();
+        crate::report_save_error("书架", state.library.lock().unwrap().save());
     }
     emit_auto_import_progress(app, "done", found.len(), processed, added, total, "");
     changed
@@ -267,7 +253,7 @@ pub(crate) async fn set_auto_import(
         // 去重 + 去空
         lib.auto_import_dirs = normalize_import_dirs(dirs);
         lib.auto_import_dir = None; // 清掉已迁移的旧字段
-        lib.save();
+        lib.save()?;
         AutoImportCfg {
             enabled: lib.auto_import_enabled,
             dirs: lib.auto_import_dirs.clone(),

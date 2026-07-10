@@ -47,6 +47,8 @@ pub struct Book {
     pub id: u64, // 稳定 id（导入时分配，之后即使文件移动也不变；0=旧数据待迁移）
     #[serde(default)]
     pub fingerprint: u64, // 内容指纹（大小+首尾采样），用于"换了位置的同一本书"去重/重定位
+    #[serde(default)]
+    pub content_id: String, // 跨设备稳定身份：完整文件 SHA-256；本机路径不参与同步主键
     pub path: PathBuf,
     pub title: String,
     pub format: String,
@@ -132,6 +134,7 @@ impl Book {
         Self {
             id: id_for_path(&path),
             fingerprint: compute_fingerprint(&path),
+            content_id: compute_content_id(&path),
             path,
             title,
             format,
@@ -264,6 +267,16 @@ impl Library {
         if self.books.iter().any(|b| b.path == book.path) {
             return false;
         }
+        if !book.content_id.is_empty() {
+            if let Some(existing) = self
+                .books
+                .iter_mut()
+                .find(|b| b.content_id == book.content_id)
+            {
+                existing.path = book.path;
+                return true;
+            }
+        }
         if book.fingerprint != 0 {
             if let Some(existing) = self
                 .books
@@ -289,10 +302,14 @@ impl Library {
     /// 把某本书重新指向一个新文件（文件丢失后用户重新定位）。返回是否成功。
     pub fn relocate(&mut self, id: u64, new_path: PathBuf) -> bool {
         let fp = compute_fingerprint(&new_path);
+        let content_id = compute_content_id(&new_path);
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
             b.path = new_path;
             if fp != 0 {
                 b.fingerprint = fp;
+            }
+            if !content_id.is_empty() {
+                b.content_id = content_id;
             }
             return true;
         }
@@ -308,7 +325,7 @@ impl Library {
 
     pub fn set_description(&mut self, id: u64, desc: String) {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
-            b.description = desc;
+            b.description = crate::html_sanitize::html_to_plain_text(&desc);
         }
     }
 
@@ -333,6 +350,12 @@ impl Library {
     pub fn set_fingerprint(&mut self, id: u64, fp: u64) {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
             b.fingerprint = fp;
+        }
+    }
+
+    pub fn set_content_id(&mut self, id: u64, content_id: String) {
+        if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
+            b.content_id = content_id;
         }
     }
 
@@ -467,16 +490,9 @@ impl Library {
         lib
     }
 
-    pub fn save(&self) {
-        let Some(file) = Self::data_file() else {
-            return;
-        };
-        if let Some(parent) = file.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&file, text);
-        }
+    pub fn save(&self) -> Result<(), String> {
+        let file = Self::data_file().ok_or("无法确定书架数据路径")?;
+        crate::atomic_file::write_json(&file, self, true)
     }
 }
 
@@ -531,6 +547,34 @@ pub fn compute_fingerprint(path: &Path) -> u64 {
     hasher.finish()
 }
 
+/// 完整文件 SHA-256，作为跨设备同步身份。只在导入、迁移或重新定位时计算一次。
+pub fn compute_content_id(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let Ok(read) = file.read(&mut buffer) else {
+            return String::new();
+        };
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
 fn cover_cache_dir() -> Option<PathBuf> {
     let mut dir = Library::cache_dir()?;
     dir.push("covers");
@@ -550,7 +594,7 @@ fn prepare_epub(path: &Path) -> Option<Book> {
         .unwrap_or_default();
     let description = doc
         .mdata("description")
-        .map(|m| m.value.clone())
+        .map(|m| crate::html_sanitize::html_to_plain_text(&m.value))
         .unwrap_or_default();
     let cover = extract_cover_thumbnail(&mut doc, path);
     // 导入时顺手统计字数（doc 已打开）
@@ -567,6 +611,7 @@ fn prepare_epub(path: &Path) -> Option<Book> {
     Some(Book {
         id: id_for_path(path),
         fingerprint: compute_fingerprint(path),
+        content_id: compute_content_id(path),
         path: path.to_owned(),
         title,
         format: "epub".to_owned(),
@@ -608,7 +653,7 @@ fn prepare_mobi(path: &Path) -> Option<Book> {
         Some((
             title,
             m.author().unwrap_or_default(),
-            m.description().unwrap_or_default(),
+            crate::html_sanitize::html_to_plain_text(&m.description().unwrap_or_default()),
             count_text_chars(&m.content_as_string_lossy()) as u64,
         ))
     }))
@@ -618,6 +663,7 @@ fn prepare_mobi(path: &Path) -> Option<Book> {
     Some(Book {
         id: id_for_path(path),
         fingerprint: compute_fingerprint(path),
+        content_id: compute_content_id(path),
         path: path.to_owned(),
         title,
         format: ext_lower(path),
@@ -702,7 +748,7 @@ pub fn normalize_text(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_fingerprint, Book, Highlight, Library};
+    use super::{compute_content_id, compute_fingerprint, Book, Highlight, Library};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -771,6 +817,16 @@ mod tests {
         assert_eq!(lib.books[0].progress, 42.0);
         assert_eq!(lib.books[0].resume_chapter, 3);
         assert_eq!(path_str(&lib.books[0].path), path_str(&new_path));
+    }
+
+    #[test]
+    fn content_id_is_stable_across_different_paths() {
+        let first_dir = TempDir::new("content-id-a");
+        let second_dir = TempDir::new("content-id-b");
+        let first = first_dir.file("a.epub", "same bytes");
+        let second = second_dir.file("renamed.epub", "same bytes");
+        assert_eq!(compute_content_id(&first), compute_content_id(&second));
+        assert_eq!(compute_content_id(&first).len(), 64);
     }
 
     #[test]
@@ -857,9 +913,9 @@ mod tests {
         assert!(lib.add_prepared(Book::prepare(path)));
         let id = lib.books[0].id;
 
-        lib.set_description(id, "新的简介".to_string());
+        lib.set_description(id, "<h3>新的简介</h3><p>正文 &amp; 补充</p>".to_string());
         lib.set_rating(id, 7.5);
-        assert_eq!(lib.books[0].description, "新的简介");
+        assert_eq!(lib.books[0].description, "新的简介\n正文 & 补充");
         assert_eq!(lib.books[0].rating, 5.0);
 
         lib.set_rating(id, -2.0);

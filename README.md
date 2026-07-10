@@ -57,6 +57,12 @@ GitHub Actions 会在 `main` 的 push / pull request 上自动运行同一套检
 powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1
 ```
 
+完整发布（检查、绿色版、NSIS 安装包、tag、GitHub Release 和资产上传）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/release.ps1
+```
+
 安装包：
 
 ```powershell

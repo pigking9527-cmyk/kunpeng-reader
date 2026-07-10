@@ -46,18 +46,13 @@ impl VocabStore {
             .unwrap_or_default();
         Self { list }
     }
-    pub(crate) fn save(&self) {
-        let Some(f) = Self::file() else { return };
-        if let Some(p) = f.parent() {
-            let _ = std::fs::create_dir_all(p);
-        }
-        if let Ok(t) = serde_json::to_string(&self.list) {
-            let _ = std::fs::write(f, t);
-        }
+    pub(crate) fn save(&self) -> Result<(), String> {
+        let f = Self::file().ok_or("无法确定生词本数据路径")?;
+        crate::atomic_file::write_json(&f, &self.list, false)
     }
-    fn add(&mut self, e: VocabIn) {
+    fn add(&mut self, e: VocabIn) -> Result<(), String> {
         self.add_in_memory(e, book::now_secs());
-        self.save();
+        self.save()
     }
     fn add_in_memory(&mut self, e: VocabIn, now: u64) {
         let word = e.word.trim().to_string();
@@ -106,9 +101,9 @@ impl VocabStore {
             });
         }
     }
-    fn remove(&mut self, word: &str, lang: &str) {
+    fn remove(&mut self, word: &str, lang: &str) -> Result<(), String> {
         self.list.retain(|x| !(x.word == word && x.lang == lang));
-        self.save();
+        self.save()
     }
     fn list_lang(&self, lang: &str) -> Vec<VocabEntry> {
         let mut v: Vec<VocabEntry> = self
@@ -117,18 +112,19 @@ impl VocabStore {
             .filter(|x| x.lang == lang)
             .cloned()
             .collect();
-        v.sort_by(|a, b| b.last_at.cmp(&a.last_at)); // 最近查的在前
+        v.sort_by_key(|item| std::cmp::Reverse(item.last_at)); // 最近查的在前
         v
     }
-    fn set_level(&mut self, word: &str, lang: &str, level: u8) {
+    fn set_level(&mut self, word: &str, lang: &str, level: u8) -> Result<(), String> {
         if let Some(x) = self
             .list
             .iter_mut()
             .find(|x| x.word == word && x.lang == lang)
         {
             x.level = level.min(2);
-            self.save();
+            self.save()?;
         }
+        Ok(())
     }
     fn review(&self, lang: &str) -> Vec<VocabEntry> {
         let now = book::now_secs();
@@ -177,8 +173,8 @@ pub(crate) struct VocabIn {
 }
 
 #[tauri::command]
-pub(crate) fn vocab_add(state: tauri::State<AppState>, entry: VocabIn) {
-    state.vocab.lock().unwrap().add(entry);
+pub(crate) fn vocab_add(state: tauri::State<AppState>, entry: VocabIn) -> Result<(), String> {
+    state.vocab.lock().unwrap().add(entry)
 }
 
 #[tauri::command]
@@ -191,10 +187,10 @@ pub(crate) fn vocab_remove(
     state: tauri::State<AppState>,
     word: String,
     lang: String,
-) -> Vec<VocabEntry> {
+) -> Result<Vec<VocabEntry>, String> {
     let mut v = state.vocab.lock().unwrap();
-    v.remove(&word, &lang);
-    v.list_lang(&lang)
+    v.remove(&word, &lang)?;
+    Ok(v.list_lang(&lang))
 }
 
 #[tauri::command]
@@ -203,10 +199,10 @@ pub(crate) fn vocab_set_level(
     word: String,
     lang: String,
     level: u8,
-) -> Vec<VocabEntry> {
+) -> Result<Vec<VocabEntry>, String> {
     let mut v = state.vocab.lock().unwrap();
-    v.set_level(&word, &lang, level);
-    v.list_lang(&lang)
+    v.set_level(&word, &lang, level)?;
+    Ok(v.list_lang(&lang))
 }
 
 #[tauri::command]
