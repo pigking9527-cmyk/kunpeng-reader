@@ -43,6 +43,8 @@ pub(crate) struct BookSyncStateV2 {
     finished_at: u64,
     #[serde(default)]
     rating: f32,
+    #[serde(default)]
+    progress_history: Vec<book::ProgressTimelineEntry>,
 }
 
 fn book_state_schema_version() -> u32 {
@@ -79,6 +81,7 @@ impl BookSyncStateV2 {
             words_read: book.words_read,
             finished_at: book.finished_at,
             rating: book.rating,
+            progress_history: book.progress_history.clone(),
         }
     }
 
@@ -105,6 +108,7 @@ impl BookSyncStateV2 {
         target.words_read = self.words_read;
         target.finished_at = self.finished_at;
         target.rating = self.rating.clamp(0.0, 5.0);
+        book::merge_daily_progress_history(&mut target.progress_history, &self.progress_history);
     }
 
     fn merge_into_book(&self, target: &mut book::Book) {
@@ -138,6 +142,7 @@ impl BookSyncStateV2 {
         if target.rating == 0.0 && self.rating > 0.0 {
             target.rating = self.rating.clamp(0.0, 5.0);
         }
+        book::merge_daily_progress_history(&mut target.progress_history, &self.progress_history);
     }
 }
 

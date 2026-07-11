@@ -267,7 +267,7 @@ async function renderStats() {
     books = '<div class="stats-empty">这段时间还没有阅读记录</div>';
   }
   if (!bodyEl) return;
-  bodyEl.innerHTML = overviewStats(allData) + contributionGraph(allData) + cards + qualityNote + chart + books;
+  bodyEl.innerHTML = overviewStats(allData) + '<div class="stat-sec-title">近一年每日阅读热力图</div>' + contributionGraph(allData) + cards + qualityNote + chart + books;
   requestAnimationFrame(() => {
     const maxScrollTop = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
     bodyEl.scrollTop = Math.min(prevScrollTop, maxScrollTop);

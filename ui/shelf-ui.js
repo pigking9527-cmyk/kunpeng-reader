@@ -113,10 +113,14 @@ function bookCard(b, index = 0) {
   card.appendChild(title);
   card.appendChild(prog);
 
-  // 单击选中（防抖以区分双击）；双击打开
+  // 单击选中；需覆盖正常双击间隔，避免双击时第一下先被当作单击执行。
   let clickTimer = null;
   card.addEventListener("click", (e) => {
     e.stopPropagation();
+    // 卡片自己拦截了事件，显式收起“排序与布局”面板，避免它悬在书架上。
+    filterPanel.classList.remove("show");
+    // 同样收起搜索框，但保留已输入的检索词与当前结果。
+    closeSearch(false);
     if (clickTimer) {
       clearTimeout(clickTimer);
       clickTimer = null;
@@ -125,10 +129,12 @@ function bookCard(b, index = 0) {
     clickTimer = setTimeout(() => {
       clickTimer = null;
       toggleSelect(b.id, card);
-    }, 230);
+    }, 200);
   });
   card.addEventListener("dblclick", (e) => {
     e.stopPropagation();
+    filterPanel.classList.remove("show");
+    closeSearch(false);
     if (clickTimer) {
       clearTimeout(clickTimer);
       clickTimer = null;

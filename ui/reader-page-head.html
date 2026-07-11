@@ -258,7 +258,7 @@ body.theme-dark #hl-text-pop .ht-original{background:#1f1f21;color:#aaa}
 body.theme-dark #hl-text-pop textarea{background:#1f1f21;color:#ddd;border-color:#4a4a4d}
 </style>
 <script>
-var S={fontFamily:"",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"off",pageTurnSpeed:1};
+var S={fontFamily:"",styleMode:"local",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"off",pageTurnSpeed:1};
 var root,pager,scroller,pageMask,virtualPage,scrollPreview,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,headSeen={},chapChars=0,scrollBreaks=[0],scrollPages=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache=[],scrollProgrammaticUntil=0,scrollProgrammaticTarget=null,scrollActiveSlice=null,scrollPagedView=true;
 var downX=null,downY=null,didDrag=false;
 var overlayOpen=false; // 外壳里搜索框/设置面板是否打开（打开时正文点击只用于关闭它）
@@ -354,7 +354,7 @@ function isLinePagedMode(){return false;}
 function usesLineBreakPaging(){return isScrollMode();}
 function columnsPerView(){return isDualPage()?2:1;}
 function columnPitch(){return window.innerWidth/columnsPerView();}
-function layoutSig(){return [window.innerWidth,viewportHeight(),S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.pageMode,S.flowMode].join('|');}
+function layoutSig(){return [window.innerWidth,viewportHeight(),S.styleMode,S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.pageMode,S.flowMode].join('|');}
 var CH=window.__CH__||0, ID=window.__ID__||0;
 var VC=null; // 虚拟章节列表 [{ch:spine序号, frag:锚点}]（按目录顺序），用于在大文件内细分逻辑章节
 // 算出“当前在第几个逻辑章节（0 基）”：取目录顺序中位置 <= 当前阅读位置的最后一条
@@ -379,28 +379,31 @@ function applyStyle(){
   var padT=scroll?0:mg(S.marginTop),padB=scroll?0:mg(S.marginBottom);
   var padL=scroll?0:(isDualPage()?0:hm.l);
   var padR=scroll?0:(isDualPage()?0:hm.r);
+  var useLocalStyle=S.styleMode!=='book';
   var c='.rr{margin:0 !important;padding:'+padT+'px '+padR+'px '+padB+'px '+padL+'px;';
-  if(S.fontSize)c+='font-size:'+S.fontSize+'px;';
-  if(S.lineHeight)c+='line-height:'+S.lineHeight+';';
-  c+='letter-spacing:'+S.letterSpacing+'px;';
-  if(S.fontFamily)c+='font-family:'+S.fontFamily+';';
+  if(useLocalStyle&&S.fontSize)c+='font-size:'+S.fontSize+'px;';
+  if(useLocalStyle&&S.lineHeight)c+='line-height:'+S.lineHeight+';';
+  if(useLocalStyle)c+='letter-spacing:'+S.letterSpacing+'px;';
+  if(useLocalStyle&&S.fontFamily)c+='font-family:'+S.fontFamily+';';
   c+='}';
-  if(S.fontFamily)c+='.rr *{font-family:'+S.fontFamily+' !important;}';
-  if(S.lineHeight)c+='.rr p,.rr div,.rr li{line-height:'+S.lineHeight+';}';
-  c+='.rr body,.rr section,.rr article,.rr main,.rr header,.rr footer,.rr nav{margin-top:0 !important;margin-bottom:0 !important;padding-top:0 !important;padding-bottom:0 !important;}';
-  c+='.rr p,.rr li,.rr blockquote{margin-top:0 !important;margin-bottom:'+S.paraSpacing+'em !important;padding-top:0 !important;padding-bottom:0 !important;}';
-  c+='.rr div{margin-top:0 !important;margin-bottom:0 !important;padding-top:0 !important;padding-bottom:0 !important;}';
+  if(useLocalStyle&&S.fontFamily)c+='.rr *{font-family:'+S.fontFamily+' !important;}';
+  if(useLocalStyle&&S.lineHeight)c+='.rr p,.rr div,.rr li{line-height:'+S.lineHeight+';}';
+  if(useLocalStyle){
+    c+='.rr body,.rr section,.rr article,.rr main,.rr header,.rr footer,.rr nav{margin-top:0 !important;margin-bottom:0 !important;padding-top:0 !important;padding-bottom:0 !important;}';
+    c+='.rr p,.rr li,.rr blockquote{margin-top:0 !important;margin-bottom:'+S.paraSpacing+'em !important;padding-top:0 !important;padding-bottom:0 !important;}';
+    c+='.rr div{margin-top:0 !important;margin-bottom:0 !important;padding-top:0 !important;padding-bottom:0 !important;}';
+  }
   c+='.rr hr.rr-note-sep{display:none !important;}';
   c+='.rr *{break-before:auto !important;break-after:auto !important;break-inside:auto !important;page-break-before:auto !important;page-break-after:auto !important;page-break-inside:auto !important;-webkit-column-break-before:auto !important;-webkit-column-break-after:auto !important;-webkit-column-break-inside:auto !important;}';
   if(mg(S.marginTop)===0)c+='.rr>:first-child,.rr body>:first-child{margin-top:0 !important;padding-top:0 !important;}';
   if(mg(S.marginBottom)===0)c+='.rr>:last-child,.rr body>:last-child{margin-bottom:0 !important;padding-bottom:0 !important;}';
   if(mg(S.marginLeft)===0)c+='.rr,.rr>*,.rr body{margin-left:0 !important;padding-left:0 !important;}';
   if(mg(S.marginRight)===0)c+='.rr,.rr>*,.rr body{margin-right:0 !important;padding-right:0 !important;}';
-  // 有些书给每个元素写死了内联 font-size（如本书 16px），会压过阅读器字号设置 → 让其继承（正文跟随设置）
-  if(S.fontSize){
-    c+='.rr [style*="font-size"]{font-size:inherit !important;}';
-    c+='.rr h1{font-size:1.7em;} .rr h2{font-size:1.4em;} .rr h3{font-size:1.2em;} .rr h4{font-size:1.1em;}';
-    c+='.rr sup,.rr sub{font-size:.75em;}'; // 上下标（注释角标）仍保持小一号
+  // 本地样式覆盖书籍 CSS（包括类名和内联字号），避免某些 EPUB 把正文压得过小。
+  if(useLocalStyle&&S.fontSize){
+    c+='.rr *{font-size:inherit !important;}';
+    c+='.rr h1{font-size:1.7em !important;} .rr h2{font-size:1.4em !important;} .rr h3{font-size:1.2em !important;} .rr h4{font-size:1.1em !important;}';
+    c+='.rr sup,.rr sub{font-size:.75em !important;}'; // 上下标（注释角标）仍保持小一号
   }
   var bg='#fff',fg='#222';
   if(S.theme==='dark'){bg='#1c1c1e';fg='#d2d2d2';}

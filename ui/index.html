@@ -142,11 +142,12 @@
             <path d="M19 20v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
           </svg>
         </button>
-        <button id="menu-btn" class="icon-btn" title="菜单">⋮</button>
         <button id="settings-toolbar-btn" class="icon-btn settings-toolbar-btn" title="常用设置" aria-label="常用设置">⚙</button>
+        <button id="menu-btn" class="icon-btn" title="菜单">⋮</button>
         <div id="menu" class="menu">
           <div class="menu-item" id="mi-random">🎲 随机打开一本书</div>
           <div class="menu-item" id="mi-import">➕ 导入书籍</div>
+          <div class="menu-item" id="mi-library-health">🩺 书库体检</div>
           <div class="menu-item" id="mi-notes">📝 笔记汇总</div>
           <div class="menu-item" id="mi-selectall">☑ 全选（批量删除）</div>
           <div class="menu-item" id="mi-about">ℹ️ 关于</div>
@@ -244,6 +245,13 @@
             <button id="dict-gear" class="fp-row-gear" title="管理外置词典">⚙</button>
           </span>
         </div>
+        <section class="default-apps-setting" aria-label="默认打开方式">
+          <div>
+            <div class="fp-title">默认打开方式</div>
+            <p>安装版支持将 EPUB 和 PDF 设为由鲲鹏阅读器打开；请在系统的“按文件类型选择默认值”中分别设置。</p>
+          </div>
+          <button id="open-default-apps-settings" class="btn-plain" type="button">设置 EPUB / PDF 默认应用</button>
+        </section>
         <div class="fp-set-actions">
           <button id="settings-export-data" class="btn-plain" type="button">⬆ 导出数据包</button>
           <button id="settings-import-data" class="btn-plain" type="button">⬇ 导入数据包</button>
@@ -263,6 +271,18 @@
         <div class="ai-actions">
           <button id="dirs-add" class="btn-plain">＋ 添加目录…</button>
         </div>
+      </div>
+    </div>
+    <div id="library-health-modal" class="modal">
+      <div class="modal-card library-health-card">
+        <div class="modal-head"><span>🩺 书库体检</span><button id="library-health-close" class="btn-plain">✕</button></div>
+        <div id="library-health-body" class="library-health-body"></div>
+      </div>
+    </div>
+    <div id="reading-timeline-modal" class="modal">
+      <div class="modal-card timeline-card">
+        <div class="modal-head"><span id="reading-timeline-title">阅读时间线</span><button id="reading-timeline-close" class="btn-plain">✕</button></div>
+        <div id="reading-timeline-body" class="timeline-body"></div>
       </div>
     </div>
     <div id="semantic-index-modal" class="modal">
@@ -356,6 +376,7 @@
           <span class="info-k">操作</span>
           <div class="info-action-buttons">
             <button id="similar-books-btn" class="btn-plain">相似图书</button>
+            <button id="reading-timeline-btn" class="btn-plain">阅读时间线</button>
             <button id="cover-btn" class="btn-plain">更换封面</button>
           </div>
         </div>

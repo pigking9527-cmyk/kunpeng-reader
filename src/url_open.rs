@@ -14,6 +14,17 @@ pub(crate) fn open_https_url(url: &str) -> Result<(), String> {
     open_validated_url(u)
 }
 
+pub(crate) fn open_default_apps_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        open_validated_url("ms-settings:defaultapps")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("默认应用设置仅在 Windows 上可用".into())
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn open_validated_url(url: &str) -> Result<(), String> {
     use std::ffi::c_void;

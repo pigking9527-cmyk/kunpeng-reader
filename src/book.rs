@@ -3,6 +3,7 @@
 // ============================================================================
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// 一个书签：定位到 章节 + 章内比例（虚拟化按章渲染下稳定），label 仅作显示。
@@ -38,6 +39,19 @@ pub struct Highlight {
     pub note: String,
     #[serde(default)]
     pub created_at: u64,
+}
+
+/// 每日最后阅读位置：一书一天一条，用于长期时间线而非逐章流水。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProgressTimelineEntry {
+    #[serde(default)]
+    pub at: u64,
+    #[serde(default)]
+    pub progress: f32,
+    #[serde(default)]
+    pub chapter: u32,
+    #[serde(default)]
+    pub frac: f32,
 }
 
 /// 书架上的一本书。
@@ -85,6 +99,8 @@ pub struct Book {
     #[serde(default)]
     pub finished_at: u64, // 首次读完（进度≥99%）的 unix 秒，0=未读完
     #[serde(default)]
+    pub progress_history: Vec<ProgressTimelineEntry>, // 单本书每日最后阅读位置摘要
+    #[serde(default)]
     pub cover_ver: u64, // 封面版本号：换封面时 +1，用于刷新前端缓存（避免每次渲染都去 stat 封面文件）
     #[serde(default)]
     pub rating: f32, // 用户评分 0~5，0.5 为刻度（0=未评分）
@@ -96,6 +112,32 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn local_day_key(secs: u64) -> u32 {
+    use chrono::{Datelike, Local, TimeZone};
+    Local
+        .timestamp_opt(secs as i64, 0)
+        .single()
+        .map(|time| time.year() as u32 * 10000 + time.month() * 100 + time.day())
+        .unwrap_or(0)
+}
+
+/// 合并并压缩每日位置摘要：同一天只保留时间更晚的那条，最多保留十年。
+pub(crate) fn merge_daily_progress_history(
+    target: &mut Vec<ProgressTimelineEntry>,
+    incoming: &[ProgressTimelineEntry],
+) {
+    let mut days = std::collections::BTreeMap::<u32, ProgressTimelineEntry>::new();
+    for entry in target.iter().chain(incoming.iter()) {
+        let day = local_day_key(entry.at);
+        if days.get(&day).is_none_or(|old| entry.at >= old.at) {
+            days.insert(day, entry.clone());
+        }
+    }
+    const MAX_DAILY_PROGRESS_HISTORY: usize = 3650;
+    let skip = days.len().saturating_sub(MAX_DAILY_PROGRESS_HISTORY);
+    *target = days.into_values().skip(skip).collect();
 }
 
 impl Book {
@@ -154,6 +196,7 @@ impl Book {
             reading_seconds: 0,
             words_read: 0,
             finished_at: 0,
+            progress_history: Vec::new(),
             cover_ver: 0,
             rating: 0.0,
         }
@@ -422,12 +465,137 @@ impl Library {
             b.progress = progress;
             b.resume_chapter = chapter;
             b.resume_frac = frac;
+            if changed {
+                let at = now_secs();
+                let entry = ProgressTimelineEntry {
+                    at,
+                    progress: progress.clamp(0.0, 100.0),
+                    chapter,
+                    frac: frac.clamp(0.0, 1.0),
+                };
+                if b.progress_history
+                    .last()
+                    .is_some_and(|last| local_day_key(last.at) == local_day_key(at))
+                {
+                    *b.progress_history.last_mut().unwrap() = entry;
+                } else {
+                    b.progress_history.push(entry);
+                }
+                merge_daily_progress_history(&mut b.progress_history, &[]);
+            }
             if progress >= 99.0 && b.finished_at == 0 {
                 b.finished_at = now_secs(); // 首次读完打时间戳，供"本月/本年读完了哪些书"
             }
             return changed;
         }
         false
+    }
+
+    /// 合并同一内容的重复书架条目，返回被保留的书籍 id。
+    /// 只接受内容 ID（旧数据则文件指纹）完全相同的一组，避免误合并相近书名。
+    pub fn merge_duplicates(&mut self, ids: &[u64]) -> Result<u64, String> {
+        if ids.len() < 2 {
+            return Err("至少选择两本重复书籍".to_string());
+        }
+        let wanted: HashSet<u64> = ids.iter().copied().collect();
+        if wanted.len() != ids.len() {
+            return Err("重复的图书 ID".to_string());
+        }
+        let mut candidates: Vec<Book> = self
+            .books
+            .iter()
+            .filter(|book| wanted.contains(&book.id))
+            .cloned()
+            .collect();
+        if candidates.len() != wanted.len() {
+            return Err("有图书已不存在".to_string());
+        }
+        let first = &candidates[0];
+        let same_content = if !first.content_id.is_empty() {
+            candidates
+                .iter()
+                .all(|book| book.content_id == first.content_id)
+        } else if first.fingerprint != 0 {
+            candidates
+                .iter()
+                .all(|book| book.content_id.is_empty() && book.fingerprint == first.fingerprint)
+        } else {
+            false
+        };
+        if !same_content {
+            return Err("只能合并检测为相同内容的书籍".to_string());
+        }
+
+        // 优先保留文件仍在、最近阅读、进度更靠后的条目。
+        candidates.sort_by(|a, b| {
+            let a_present = a.path.is_file();
+            let b_present = b.path.is_file();
+            b_present
+                .cmp(&a_present)
+                .then_with(|| b.last_read_at.cmp(&a.last_read_at))
+                .then_with(|| {
+                    b.progress
+                        .partial_cmp(&a.progress)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        let mut merged = candidates.remove(0);
+        let keep_id = merged.id;
+        let mut bookmark_keys: HashSet<String> = merged
+            .bookmarks
+            .iter()
+            .filter_map(|item| serde_json::to_string(item).ok())
+            .collect();
+        let mut highlight_keys: HashSet<String> = merged
+            .highlights
+            .iter()
+            .filter_map(|item| serde_json::to_string(item).ok())
+            .collect();
+
+        for book in candidates {
+            if book.last_read_at > merged.last_read_at {
+                merged.last_read_at = book.last_read_at;
+                merged.progress = book.progress;
+                merged.resume_chapter = book.resume_chapter;
+                merged.resume_frac = book.resume_frac;
+            }
+            merged.reading_seconds = merged.reading_seconds.max(book.reading_seconds);
+            merged.words_read = merged.words_read.max(book.words_read);
+            merged.word_count = merged.word_count.max(book.word_count);
+            merged.rating = merged.rating.max(book.rating);
+            if merged.author.trim().is_empty() {
+                merged.author = book.author;
+            }
+            if merged.description.trim().is_empty() {
+                merged.description = book.description;
+            }
+            if merged.finished_at == 0
+                || (book.finished_at != 0 && book.finished_at < merged.finished_at)
+            {
+                merged.finished_at = book.finished_at;
+            }
+            for item in book.bookmarks {
+                if let Ok(key) = serde_json::to_string(&item) {
+                    if bookmark_keys.insert(key) {
+                        merged.bookmarks.push(item);
+                    }
+                }
+            }
+            for item in book.highlights {
+                if let Ok(key) = serde_json::to_string(&item) {
+                    if highlight_keys.insert(key) {
+                        merged.highlights.push(item);
+                    }
+                }
+            }
+            for item in book.progress_history {
+                merged.progress_history.push(item);
+            }
+        }
+        merge_daily_progress_history(&mut merged.progress_history, &[]);
+        self.books.retain(|book| !wanted.contains(&book.id));
+        self.books.push(merged);
+        Ok(keep_id)
     }
 
     fn app_config_dir() -> Option<PathBuf> {
@@ -474,10 +642,14 @@ impl Library {
             Err(_) => Self::default(),
         };
         // 迁移：旧数据没有稳定 id，用原来的"路径哈希"补上（与已有缓存文件名一致，无缝）。
+        let mut compacted_daily_history = false;
         for b in &mut lib.books {
             if b.id == 0 {
                 b.id = id_for_path(&b.path);
             }
+            let before = b.progress_history.clone();
+            merge_daily_progress_history(&mut b.progress_history, &[]);
+            compacted_daily_history |= before.len() != b.progress_history.len();
         }
         // 迁移：旧的单目录字段 → 目录列表
         if lib.auto_import_dirs.is_empty() {
@@ -486,6 +658,9 @@ impl Library {
                     lib.auto_import_dirs.push(d);
                 }
             }
+        }
+        if compacted_daily_history {
+            let _ = lib.save();
         }
         lib
     }
@@ -631,6 +806,7 @@ fn prepare_epub(path: &Path) -> Option<Book> {
         reading_seconds: 0,
         words_read: 0,
         finished_at: 0,
+        progress_history: Vec::new(),
         cover_ver: 0,
         rating: 0.0,
     })
@@ -683,6 +859,7 @@ fn prepare_mobi(path: &Path) -> Option<Book> {
         reading_seconds: 0,
         words_read: 0,
         finished_at: 0,
+        progress_history: Vec::new(),
         cover_ver: 0,
         rating: 0.0,
     })
@@ -748,7 +925,10 @@ pub fn normalize_text(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_content_id, compute_fingerprint, Book, Highlight, Library};
+    use super::{
+        compute_content_id, compute_fingerprint, merge_daily_progress_history, Book, Bookmark,
+        Highlight, Library, ProgressTimelineEntry,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -903,6 +1083,72 @@ mod tests {
         lib.books[0].finished_at = 12345;
         assert!(lib.set_position(id, 100.0, 9, 1.0));
         assert_eq!(lib.books[0].finished_at, 12345);
+    }
+
+    #[test]
+    fn daily_progress_history_keeps_only_the_latest_position_per_day() {
+        let base = 1_700_000_000;
+        let mut history = vec![
+            ProgressTimelineEntry {
+                at: base,
+                progress: 10.0,
+                chapter: 1,
+                frac: 0.1,
+            },
+            ProgressTimelineEntry {
+                at: base + 60,
+                progress: 20.0,
+                chapter: 2,
+                frac: 0.2,
+            },
+            ProgressTimelineEntry {
+                at: base + 86_400,
+                progress: 30.0,
+                chapter: 3,
+                frac: 0.3,
+            },
+        ];
+
+        merge_daily_progress_history(&mut history, &[]);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].progress, 20.0);
+        assert_eq!(history[1].progress, 30.0);
+    }
+
+    #[test]
+    fn merge_duplicates_keeps_latest_position_and_unions_annotations() {
+        let dir = TempDir::new("merge-duplicates");
+        let first_path = dir.file("first.txt", "same book content");
+        let second_path = dir.file("renamed.txt", "same book content");
+        let mut first = Book::prepare(first_path);
+        let mut second = Book::prepare(second_path);
+        first.id = 1;
+        second.id = 2;
+        first.last_read_at = 100;
+        first.progress = 20.0;
+        first.bookmarks.push(Bookmark {
+            chapter: 1,
+            frac: 0.2,
+            label: "first".into(),
+        });
+        second.last_read_at = 200;
+        second.progress = 60.0;
+        second.resume_chapter = 6;
+        second.bookmarks.push(Bookmark {
+            chapter: 2,
+            frac: 0.4,
+            label: "second".into(),
+        });
+        let mut lib = Library {
+            books: vec![first, second],
+            ..Default::default()
+        };
+
+        assert_eq!(lib.merge_duplicates(&[1, 2]).unwrap(), 2);
+        assert_eq!(lib.books.len(), 1);
+        assert_eq!(lib.books[0].progress, 60.0);
+        assert_eq!(lib.books[0].resume_chapter, 6);
+        assert_eq!(lib.books[0].bookmarks.len(), 2);
     }
 
     #[test]

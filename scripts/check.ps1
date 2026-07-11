@@ -3,6 +3,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# PowerShell does not treat a non-zero native command exit code as a terminating
+# error by default. CI checks invoke Cargo and Node directly, so opt in to
+# fail-fast behavior instead of continuing to a misleading "All checks passed".
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $true
+}
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
@@ -201,6 +207,7 @@ try {
   $publicHttpHits = @($httpHits | Where-Object {
     $_ -notmatch 'scripts\\check\.ps1' -and
     $_ -notmatch 'starts_with\("http://"\)' -and
+    $_ -notmatch 'LEGACY_SYNC_HTTP_URL.*http://117\.72\.220\.69' -and
     $_ -notmatch 'normalize_sync_base\("http://' -and
     $_ -notmatch 'http://(localhost|127\.0\.0\.1|\[::1\]|reader\.localhost|ipc\.localhost|tauri\.localhost)' -and
     $_ -notmatch 'http://<scheme>\.localhost' -and

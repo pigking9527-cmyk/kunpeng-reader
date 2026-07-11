@@ -32,7 +32,7 @@ body {
 .info-row.col .info-k { flex: 0 0 auto; }
 .info-k { color: #888; flex: 0 0 80px; }
 .info-v { color: #222; }
-.book-info-card { width: 520px; max-height: 82vh; overflow-y: auto; }
+.book-info-card { width: min(680px, 92vw); max-height: 82vh; overflow-y: auto; }
 .similar-books-card { width: 620px; max-width: 92vw; max-height: 82vh; overflow-y: auto; }
 .similar-source { color: #777; font-size: 13px; margin: 0 0 10px; }
 .similar-list { display: flex; flex-direction: column; gap: 8px; }
@@ -235,7 +235,7 @@ body {
 }
 .icon-btn:hover { background: #eef2ff; }
 .settings-toolbar-btn { font-size: 18px; }
-.menu-wrap .menu { right: 42px; }
+.menu-wrap .menu { right: 0; }
 .account-wrap { position: relative; }
 .avatar-btn {
   display: inline-flex; align-items: center; justify-content: center;
@@ -401,6 +401,9 @@ body {
 .fp-row-gear { border: none; background: transparent; cursor: pointer; font-size: 17px;
   color: #888; line-height: 1; padding: 2px; }
 .fp-row-gear:hover { color: #2b6cff; }
+.default-apps-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 8px; padding: 12px 0; border-top: 1px solid #eef0f4; }
+.default-apps-setting p { margin: 4px 0 0; color: #777; font-size: 12px; line-height: 1.45; }
+.default-apps-setting .btn-plain { flex: 0 0 auto; font-size: 13px; padding: 5px 10px; }
 .fp-set-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .fp-set-actions .btn-plain { font-size: 13px; padding: 5px 10px; }
 .sync-settings { border-top: 1px solid #eef0f4; border-bottom: 1px solid #eef0f4; padding: 10px 0 12px; margin: 8px 0 10px; }
@@ -491,22 +494,23 @@ body {
 /* 横向列表布局 */
 .shelf.list {
   grid-template-columns: 1fr;
-  gap: 10px;
-  padding: 16px;
+  gap: 12px;
+  padding: 18px;
 }
 .shelf.list .book {
   width: auto;
-  display: flex; align-items: center; gap: 14px;
-  padding: 8px 10px; border: 1px solid #eaeaee; border-radius: 8px; background: #fff;
+  display: flex; align-items: center; gap: 16px;
+  height: 96px; min-height: 96px; box-sizing: border-box;
+  padding: 0 14px; border: 1px solid #eaeaee; border-radius: 8px; background: #fff;
   min-width: 0;
   overflow: hidden;
 }
 .shelf.list .cover {
-  width: 52px;
-  height: 70px;
-  max-height: 70px;
-  flex: 0 0 52px;
-  min-width: 52px;
+  width: 72px;
+  height: 96px;
+  max-height: 96px;
+  flex: 0 0 72px;
+  min-width: 72px;
   align-self: center;
   box-shadow: 0 1px 3px rgba(0,0,0,0.2);
 }
@@ -516,7 +520,7 @@ body {
   height: 100%;
   max-height: 100%;
 }
-.shelf.list .cover .gen { padding: 8px 6px; font-size: 11px; }
+.shelf.list .cover .gen { padding: 10px 7px; font-size: 12px; }
 .shelf.show-titles .book .title { display: block; } /* 开启开关后，网格视图显示书名 */
 .shelf.list .title { display: block; margin-top: 0; flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 15px; max-height: none; }
 .shelf.list .prog { flex: 0 0 auto; color: #888; font-size: 13px; min-width: 56px; text-align: right; }
@@ -554,8 +558,8 @@ body {
 }
 .shelf.list.fixed-cols .book { width: auto; }
 .shelf.list.fixed-cols .cover {
-  width: 52px;
-  height: 70px;
+  width: 72px;
+  height: 96px;
   aspect-ratio: auto;
 }
 .empty {
@@ -717,6 +721,45 @@ body {
 .notes-card { width: 900px; max-width: 94vw; max-height: 88vh; display: flex; flex-direction: column; }
 .modal-actions { display: inline-flex; align-items: center; gap: 8px; }
 .notes-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; padding-right: 4px; }
+.library-health-card, .timeline-card { width: min(820px, calc(100vw - 48px)); max-height: min(760px, calc(100vh - 64px)); display: flex; flex-direction: column; }
+.library-health-body, .timeline-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; padding-right: 4px; }
+.timeline-section { border-top: 1px solid #edf0f4; padding: 14px 0; }
+.timeline-section:first-child { border-top: 0; padding-top: 0; }
+.timeline-section h4 { margin: 0 0 10px; font-size: 14px; color: #444; }
+.timeline-event { display: grid; grid-template-columns: 148px 1fr auto; gap: 10px; align-items: center; padding: 8px 4px; border-top: 1px solid #f3f4f6; font-size: 13px; }
+.timeline-event time { color: #888; font-variant-numeric: tabular-nums; }
+.timeline-progress { color: #2864c7; font-weight: 600; }
+.timeline-legend { display: flex; align-items: center; justify-content: flex-end; gap: 14px; margin: -2px 2px 4px; color: #737f90; font-size: 12px; }
+.timeline-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.timeline-legend .timeline-peak { margin-left: auto; color: #566b8d; font-variant-numeric: tabular-nums; }
+.timeline-legend i { width: 9px; height: 9px; border-radius: 3px; }
+.timeline-legend i.time { background: linear-gradient(180deg, #76adff, #3778df); }
+.timeline-legend i.words { background: linear-gradient(180deg, #ba8bf6, #8053ca); }
+.timeline-chart { overflow-x: auto; padding: 2px 0 0; }
+.timeline-chart svg { display: block; width: 100%; min-width: 640px; height: 196px; }
+.timeline-chart text { font: 11px "Microsoft YaHei", sans-serif; }
+.timeline-chart .timeline-gridline { stroke: #d9e1ed; stroke-width: 1; stroke-dasharray: 3 3; }
+.timeline-chart .timeline-axis-time { fill: #3778df; }
+.timeline-chart .timeline-axis-words { fill: #8053ca; }
+.timeline-chart .timeline-day-label { fill: #718099; }
+.timeline-bar-group { cursor: default; }
+.timeline-svg-tooltip { display: none; }
+.timeline-bar-group:hover .timeline-svg-tooltip { display: block; }
+.timeline-svg-tooltip rect { fill: #263550; opacity: .95; }
+.timeline-svg-tooltip text { fill: #fff; font-size: 10px; }
+.timeline-chart-note { margin-top: 8px; color: #8a94a5; font-size: 12px; text-align: center; }
+.health-summary { display: flex; gap: 10px; margin-bottom: 12px; }
+.health-summary span { flex: 1; padding: 10px; border-radius: 8px; background: #f5f7fb; color: #556070; font-size: 13px; text-align: center; }
+.health-section { border-top: 1px solid #edf0f4; padding: 12px 0; }
+.health-section h4 { margin: 0 0 8px; font-size: 14px; color: #444; }
+.health-row { display: flex; align-items: center; gap: 10px; padding: 9px 4px; border-top: 1px solid #f3f4f6; }
+.health-row:first-of-type { border-top: 0; }
+.health-book { flex: 1; min-width: 0; }
+.health-book strong, .health-book small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.health-book small { margin-top: 3px; color: #888; font-size: 12px; }
+.health-group { padding: 8px 0; border-top: 1px solid #f3f4f6; }
+.health-group:first-of-type { border-top: 0; }
+.health-group-title { color: #666; font-size: 13px; margin-bottom: 5px; }
 .note-book { border-top: 1px solid #edf0f4; padding: 12px 0; }
 .note-book:first-child { border-top: none; }
 
@@ -886,10 +929,11 @@ body {
   .shelf.list .book {
     align-items: center;
     gap: 14px;
-    padding: 10px;
-    height: 186px;
-    min-height: 186px;
-    max-height: 186px;
+    padding: 0 12px;
+    height: 164px;
+    min-height: 164px;
+    max-height: 164px;
+    box-sizing: border-box;
     overflow: hidden;
   }
   .shelf.list .cover {

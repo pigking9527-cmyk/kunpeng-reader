@@ -20,8 +20,8 @@ memchr = "2"
 fastembed = "4"
 instant-distance = { version = "0.6", features = ["with-serde"] }
 bincode = "1"
-pdf-extract = "0.7"
-lopdf = "0.34"
+pdf-extract = "0.12"
+lopdf = "0.44"
 chrono = "0.4"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"

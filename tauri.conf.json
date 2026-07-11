@@ -28,6 +28,20 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "fileAssociations": [
+      {
+        "ext": ["epub"],
+        "mimeType": "application/epub+zip",
+        "name": "KunpengReader.Epub",
+        "description": "EPUB 电子书"
+      },
+      {
+        "ext": ["pdf"],
+        "mimeType": "application/pdf",
+        "name": "KunpengReader.Pdf",
+        "description": "PDF 文档"
+      }
+    ],
     "icon": ["icons/icon.ico", "icons/icon.png"]
   }
 }

@@ -4,6 +4,7 @@
 const DEFAULTS = {
   theme: "light",
   fontFamily: "",
+  styleMode: "local",
   fontSize: 18,
   noteFontSize: 14,
   lineHeight: 1.7,
@@ -38,6 +39,10 @@ let settings = loadSettings();
 
 function normalizeModeSettings() {
   let changed = false;
+  if (!["local", "book"].includes(settings.styleMode)) {
+    settings.styleMode = DEFAULTS.styleMode;
+    changed = true;
+  }
   if (!["off", "google-paper", "curl"].includes(settings.pageTurnEffect)) {
     settings.pageTurnEffect = "off";
     changed = true;
@@ -136,6 +141,14 @@ function initSettingsUI() {
     settings.fontFamily = font.value;
     onChange();
   });
+  const styleMode = document.getElementById("set-style-mode");
+  if (styleMode) {
+    styleMode.value = settings.styleMode;
+    styleMode.addEventListener("change", () => {
+      settings.styleMode = styleMode.value === "book" ? "book" : "local";
+      onChange();
+    });
+  }
   bindRange("set-size", "v-size", "fontSize", (v) => v + "px");
   bindRange("set-note-size", "v-note-size", "noteFontSize", (v) => v + "px");
   bindRange("set-line", "v-line", "lineHeight", (v) => v.toFixed(1));

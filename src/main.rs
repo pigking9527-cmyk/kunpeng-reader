@@ -52,6 +52,16 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
+struct StartupBookPaths(Mutex<Vec<String>>);
+
+#[derive(Serialize, Deserialize)]
+struct AssociatedBookRequest {
+    id: u64,
+    paths: Vec<String>,
+}
+
+static NEXT_ASSOCIATED_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+
 /// 自定义协议的基地址（Windows 下 WebView2 把自定义协议映射到 http://<scheme>.localhost）
 pub(crate) const RES_BASE: &str = "http://reader.localhost";
 pub(crate) const DEFAULT_SYNC_URL: &str = "https://sync.example.invalid";
@@ -231,6 +241,50 @@ pub(crate) struct BookDto {
     initial: String, // 书名拼音首字母（A~Z / #），用于"按书名"分组
 }
 
+#[derive(Serialize)]
+struct LibraryHealthBook {
+    id: String,
+    title: String,
+    format: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct LibraryDuplicateGroup {
+    books: Vec<LibraryHealthBook>,
+}
+
+#[derive(Serialize)]
+struct LibraryHealthReport {
+    total: u32,
+    healthy: u32,
+    missing: Vec<LibraryHealthBook>,
+    duplicates: Vec<LibraryDuplicateGroup>,
+}
+
+#[derive(Serialize)]
+struct ProgressTimelinePoint {
+    at: u64,
+    progress: f32,
+    chapter: u32,
+    frac: f32,
+}
+
+#[derive(Serialize)]
+struct ReadingTimelineBucket {
+    day: u32,
+    hour: u8,
+    seconds: u32,
+    words: u32,
+}
+
+#[derive(Serialize)]
+struct BookReadingTimeline {
+    title: String,
+    events: Vec<ProgressTimelinePoint>,
+    buckets: Vec<ReadingTimelineBucket>,
+}
+
 /// 一个汉字的拼音首字母（GB2312 编码区间法，覆盖绝大多数常用字）；非常用字/非汉字返回 None。
 fn pinyin_initial(c: char) -> Option<char> {
     if c.is_ascii_alphabetic() {
@@ -385,6 +439,112 @@ pub(crate) fn snapshot(lib: &Library) -> Vec<BookDto> {
 #[tauri::command]
 fn list_books(state: tauri::State<AppState>) -> Vec<BookDto> {
     snapshot(&state.library.lock().unwrap())
+}
+
+#[tauri::command]
+fn library_health(state: tauri::State<AppState>) -> LibraryHealthReport {
+    let lib = state.library.lock().unwrap();
+    let compact = |b: &book::Book| LibraryHealthBook {
+        id: b.id.to_string(),
+        title: b.title.clone(),
+        format: b.format.clone(),
+        path: b.path.to_string_lossy().into_owned(),
+    };
+    let missing: Vec<LibraryHealthBook> = lib
+        .books
+        .iter()
+        .filter(|b| !b.path.is_file())
+        .map(compact)
+        .collect();
+    let mut grouped: HashMap<String, Vec<&book::Book>> = HashMap::new();
+    for b in &lib.books {
+        let key = if !b.content_id.is_empty() {
+            format!("content:{}", b.content_id)
+        } else if b.fingerprint != 0 {
+            format!("fingerprint:{}", b.fingerprint)
+        } else {
+            continue;
+        };
+        grouped.entry(key).or_default().push(b);
+    }
+    let mut duplicates: Vec<LibraryDuplicateGroup> = grouped
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .map(|group| LibraryDuplicateGroup {
+            books: group.into_iter().map(compact).collect(),
+        })
+        .collect();
+    duplicates.sort_by(|a, b| a.books[0].title.cmp(&b.books[0].title));
+    LibraryHealthReport {
+        total: lib.books.len() as u32,
+        healthy: lib.books.len().saturating_sub(missing.len()) as u32,
+        missing,
+        duplicates,
+    }
+}
+
+#[tauri::command]
+fn merge_duplicate_books(
+    state: tauri::State<AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<BookDto>, String> {
+    let ids: Vec<u64> = ids
+        .into_iter()
+        .map(|id| id.parse().map_err(|_| "无效的图书 ID".to_string()))
+        .collect::<Result<_, _>>()?;
+    let mut lib = state.library.lock().unwrap();
+    lib.merge_duplicates(&ids)?;
+    lib.save()?;
+    Ok(snapshot(&lib))
+}
+
+#[tauri::command]
+fn book_reading_timeline(
+    state: tauri::State<AppState>,
+    id: String,
+) -> Result<BookReadingTimeline, String> {
+    let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    reading_timeline_for_book(&state, id_num)
+}
+
+fn reading_timeline_for_book(state: &AppState, id_num: u64) -> Result<BookReadingTimeline, String> {
+    let (title, events) = {
+        let lib = state.library.lock().unwrap();
+        let book = lib.get(id_num).ok_or("图书不存在")?;
+        (
+            book.title.clone(),
+            book.progress_history
+                .iter()
+                .map(|event| ProgressTimelinePoint {
+                    at: event.at,
+                    progress: event.progress,
+                    chapter: event.chapter,
+                    frac: event.frac,
+                })
+                .collect(),
+        )
+    };
+    let mut buckets: Vec<ReadingTimelineBucket> = state
+        .stats
+        .lock()
+        .unwrap()
+        .map
+        .iter()
+        .filter_map(|(&(day, hour, book), &(seconds, words))| {
+            (book == id_num).then_some(ReadingTimelineBucket {
+                day,
+                hour,
+                seconds,
+                words,
+            })
+        })
+        .collect();
+    buckets.sort_by_key(|bucket| (bucket.day, bucket.hour));
+    Ok(BookReadingTimeline {
+        title,
+        events,
+        buckets,
+    })
 }
 
 /// 当前 app 版本号（取自 Cargo.toml，供"检查更新"和"关于"使用，单一来源）。
@@ -1300,6 +1460,16 @@ fn open_url(url: String) -> Result<(), String> {
     url_open::open_https_url(&url)
 }
 
+#[tauri::command]
+fn open_default_apps_settings() -> Result<(), String> {
+    url_open::open_default_apps_settings()
+}
+
+#[tauri::command]
+fn take_startup_book_paths(state: tauri::State<StartupBookPaths>) -> Vec<String> {
+    std::mem::take(&mut *state.0.lock().unwrap())
+}
+
 /// 既不占主线程、也不占 tokio 命令线程池，每本之间略作停顿，绝不卡界面。
 #[tauri::command]
 fn compute_word_counts(app: tauri::AppHandle) {
@@ -1962,9 +2132,89 @@ fn spawn_startup_maintenance(app: tauri::AppHandle) {
     });
 }
 
-/// 主窗口单实例（Windows 原生，命名互斥量）：已有实例在跑则把它的主窗口拉到前台，返回 false。
+fn associated_book_paths(args: &[String], cwd: &Path) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    args.iter()
+        .skip(1)
+        .filter_map(|arg| {
+            let path = PathBuf::from(arg);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            };
+            (path.is_file() && import_core::is_supported_book_path(&path))
+                .then(|| path.to_string_lossy().into_owned())
+        })
+        .filter(|path| seen.insert(path.to_ascii_lowercase()))
+        .collect()
+}
+
+fn associated_book_request_path() -> Option<PathBuf> {
+    let mut dir = dirs::cache_dir()?;
+    dir.push("ebook-reader");
+    dir.push("associated-book-request.json");
+    Some(dir)
+}
+
+fn next_associated_request_id() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    loop {
+        let previous = NEXT_ASSOCIATED_REQUEST_ID.load(Ordering::Relaxed);
+        let next = now.max(previous.saturating_add(1));
+        if NEXT_ASSOCIATED_REQUEST_ID
+            .compare_exchange(previous, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+fn forward_associated_book_paths(paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    let Some(path) = associated_book_request_path() else {
+        return;
+    };
+    let request = AssociatedBookRequest {
+        id: next_associated_request_id(),
+        paths,
+    };
+    if let Err(error) = atomic_file::write_json(&path, &request, false) {
+        log(&format!("转发关联文件失败：{error}"));
+    }
+}
+
+fn spawn_associated_book_watcher(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut seen_id = next_associated_request_id().saturating_sub(1);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let Some(path) = associated_book_request_path() else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(request) = serde_json::from_str::<AssociatedBookRequest>(&text) else {
+                continue;
+            };
+            if request.id > seen_id {
+                seen_id = request.id;
+                let _ = app.emit("associated-book-open", request.paths);
+            }
+        }
+    });
+}
+
+/// 主窗口单实例（Windows 原生，命名互斥量）：已有实例在运行时，把关联文件路径交给它并聚焦。
 #[cfg(windows)]
-fn ensure_single_instance() -> bool {
+fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use std::sync::atomic::AtomicPtr;
     type Handle = *mut core::ffi::c_void;
@@ -1994,7 +2244,7 @@ fn ensure_single_instance() -> bool {
         let name = wide("KunpengReader_SingleInstance_Mutex");
         let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
         if !h.is_null() && GetLastError() == ERROR_ALREADY_EXISTS {
-            // 已有实例 → 把它的主窗口（标题“鲲鹏阅读器”）拉到前台
+            forward_associated_book_paths(startup_book_paths);
             let title = wide("鲲鹏阅读器");
             let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
             if !hwnd.is_null() {
@@ -2005,12 +2255,13 @@ fn ensure_single_instance() -> bool {
             }
             return false;
         }
-        SINGLE_INSTANCE_MUTEX.store(h, Ordering::Relaxed); // 保持互斥量句柄存活到进程退出
+        SINGLE_INSTANCE_MUTEX.store(h, Ordering::Relaxed);
         true
     }
 }
+
 #[cfg(not(windows))]
-fn ensure_single_instance() -> bool {
+fn ensure_single_instance(_startup_book_paths: Vec<String>) -> bool {
     true
 }
 
@@ -2023,12 +2274,15 @@ fn main() {
         semantic::hnsw_probe();
         return;
     }
-    // 主窗口只允许一个实例：已有实例在运行 → 聚焦它并退出本次启动
-    if !ensure_single_instance() {
+    let startup_args = std::env::args().collect::<Vec<_>>();
+    let startup_cwd = std::env::current_dir().unwrap_or_default();
+    let startup_book_paths = associated_book_paths(&startup_args, &startup_cwd);
+    if !ensure_single_instance(startup_book_paths.clone()) {
         return;
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(StartupBookPaths(Mutex::new(startup_book_paths)))
         .manage(AppState {
             library: Mutex::new(Library::load()),
             db: Mutex::new(db::AppDb::open().ok()),
@@ -2060,6 +2314,7 @@ fn main() {
                     log(&format!("SQLite 迁移失败：{error}"));
                 }
             }
+            spawn_associated_book_watcher(app.handle().clone());
             spawn_startup_maintenance(app.handle().clone()); // 延后低抢占维护任务，避免刚打开窗口拖动卡顿
             if let Some(win) = app.get_webview_window("main") {
                 let geom = {
@@ -2134,8 +2389,13 @@ fn main() {
             window_commands::main_window_close,
             window_commands::main_window_start_dragging,
             list_books,
+            library_health,
+            merge_duplicate_books,
+            book_reading_timeline,
             reader_window_open,
             app_version,
+            open_default_apps_settings,
+            take_startup_book_paths,
             save_download_image,
             dict_lookup,
             external_dict_list,

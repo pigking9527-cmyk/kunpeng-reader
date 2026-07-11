@@ -14,6 +14,7 @@ mod tests {
         assert!(READER_PAGE_HEAD.contains("parent.postMessage"));
         assert!(READER_PAGE_HEAD.contains("ttsStart"));
         assert!(READER_PAGE_HEAD.contains("function showTranslateResult"));
+        assert!(READER_PAGE_HEAD.contains("styleMode"));
         assert!(READER_PAGE_HEAD.contains("function showDictResult"));
         assert!(READER_PAGE_HEAD.contains("function showFootnote"));
         assert!(READER_PAGE_HEAD.contains("function measureAll"));

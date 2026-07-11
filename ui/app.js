@@ -400,6 +400,14 @@ document.getElementById("settings-toolbar-btn").addEventListener("click", (e) =>
   e.stopPropagation();
   openCommonSettings();
 });
+document.getElementById("open-default-apps-settings")?.addEventListener("click", async () => {
+  try {
+    await invoke("open_default_apps_settings");
+    alert("已打开 Windows 默认应用设置。请在“按文件类型选择默认值”中，分别将 .epub 和 .pdf 设为由“鲲鹏阅读器”打开。");
+  } catch (e) {
+    alert("打开默认应用设置失败：" + (e && e.message ? e.message : e));
+  }
+});
 document.getElementById("fp-settings-close").addEventListener("click", () => fpSettingsModal.classList.remove("show"));
 fpSettingsModal.addEventListener("click", (e) => {
   if (e.target === fpSettingsModal) fpSettingsModal.classList.remove("show");
@@ -998,10 +1006,31 @@ async function importBookPaths(paths) {
     if (debugSettingOn("bg_fulltext_index")) {
       runWhenNoReader("keyword-index-after-import", () => invoke("build_shelf_index")); // 后台为新书建检索索引
     }
+    return list;
   } catch (e) {
     setImportStatus("导入失败：" + (e && e.message ? e.message : e), "error");
     hideImportStatus(7000);
+    return null;
   }
+}
+let associatedBookOpenQueue = Promise.resolve();
+function normalizeBookPath(path) {
+  return String(path || "").replace(/\//g, "\\").toLocaleLowerCase();
+}
+async function openAssociatedBookPaths(paths) {
+  paths = (paths || []).filter((path) => SUPPORTED.test(String(path || "")));
+  if (!paths.length) return;
+  const list = await importBookPaths(paths);
+  if (!Array.isArray(list)) return;
+  const wanted = new Set(paths.map(normalizeBookPath));
+  const book = list.find((item) => wanted.has(normalizeBookPath(item.path)));
+  if (book) await invoke("open_book", { id: String(book.id) });
+}
+function enqueueAssociatedBookOpen(paths) {
+  associatedBookOpenQueue = associatedBookOpenQueue
+    .then(() => openAssociatedBookPaths(paths))
+    .catch((e) => setImportStatus("打开文件失败：" + (e && e.message ? e.message : e), "error"));
+  return associatedBookOpenQueue;
 }
 async function importBooks() {
   const sel = await dialog.open({
@@ -1133,6 +1162,71 @@ document.getElementById("mi-notes").addEventListener("click", async () => {
     notesBody.innerHTML = '<div class="stats-empty">读取失败：' + escapeHtml(String(e)) + "</div>";
   }
 });
+const libraryHealthModal = document.getElementById("library-health-modal");
+const libraryHealthBody = document.getElementById("library-health-body");
+function libraryHealthEscape(value) {
+  return String(value || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+function renderLibraryHealth(report) {
+  const missing = report.missing || [];
+  const duplicates = report.duplicates || [];
+  let html = '<div class="health-summary">' +
+    `<span>书籍 ${report.total || 0} 本</span><span>文件正常 ${report.healthy || 0} 本</span>` +
+    `<span>失效路径 ${missing.length} 本</span><span>重复组 ${duplicates.length} 组</span></div>`;
+  html += '<section class="health-section"><h4>失效路径</h4>';
+  html += missing.length ? missing.map((book) =>
+    `<div class="health-row"><div class="health-book"><strong>${libraryHealthEscape(book.title)}</strong><small>${libraryHealthEscape(book.path)}</small></div>` +
+    `<button class="btn-plain health-relocate" data-id="${libraryHealthEscape(book.id)}" data-format="${libraryHealthEscape(book.format)}">重新定位…</button></div>`
+  ).join("") : '<div class="stats-empty">没有发现失效路径</div>';
+  html += '</section><section class="health-section"><h4>重复内容</h4>';
+  html += duplicates.length ? duplicates.map((group) =>
+    `<div class="health-group"><div class="health-group-title">检测到 ${group.books.length} 个相同内容的条目。合并时会保留可用文件、较新的进度、书签和批注。</div>` +
+    group.books.map((book) => `<div class="health-row"><div class="health-book"><strong>${libraryHealthEscape(book.title)}</strong><small>${libraryHealthEscape(book.path)}</small></div></div>`).join("") +
+    `<button class="btn-plain health-merge" data-ids="${group.books.map((book) => libraryHealthEscape(book.id)).join(",")}">合并为一条</button>` +
+    '</div>'
+  ).join("") : '<div class="stats-empty">没有发现重复内容</div>';
+  html += '</section>';
+  libraryHealthBody.innerHTML = html;
+  libraryHealthBody.querySelectorAll(".health-relocate").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const format = String(button.dataset.format || "").toLowerCase();
+      const picked = await dialog.open({ multiple: false, filters: [{ name: "电子书", extensions: format ? [format] : ["epub", "pdf", "txt", "md", "markdown", "mobi", "azw3", "azw"] }] });
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      if (!path) return;
+      render(await invoke("relocate_book", { id: button.dataset.id, path }));
+      await openLibraryHealth();
+    });
+  });
+  libraryHealthBody.querySelectorAll(".health-merge").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const ids = String(button.dataset.ids || "").split(",").filter(Boolean);
+      if (ids.length < 2 || !confirm("确认合并这组重复书籍吗？会保留一个书架条目，并合并书签、批注和较新的进度。")) return;
+      button.disabled = true;
+      try {
+        render(await invoke("merge_duplicate_books", { ids }));
+        await openLibraryHealth();
+      } catch (e) {
+        alert("合并失败：" + e);
+        button.disabled = false;
+      }
+    });
+  });
+}
+async function openLibraryHealth() {
+  libraryHealthModal.classList.add("show");
+  libraryHealthBody.innerHTML = '<div class="stats-empty">正在检查书库文件…</div>';
+  try {
+    renderLibraryHealth(await invoke("library_health"));
+  } catch (e) {
+    libraryHealthBody.innerHTML = '<div class="stats-empty">体检失败：' + libraryHealthEscape(e) + '</div>';
+  }
+}
+document.getElementById("mi-library-health").addEventListener("click", () => {
+  menuEl.classList.remove("show");
+  openLibraryHealth();
+});
+document.getElementById("library-health-close").addEventListener("click", () => libraryHealthModal.classList.remove("show"));
+libraryHealthModal.addEventListener("click", (e) => { if (e.target === libraryHealthModal) libraryHealthModal.classList.remove("show"); });
 document.getElementById("notes-export").addEventListener("click", () => {
   const blob = new Blob([notesToMarkdown(notesData)], { type: "text/markdown;charset=utf-8" });
   const a = document.createElement("a");
@@ -1272,6 +1366,9 @@ tauriEvent.listen("book-import-progress", (e) => {
     setImportStatus("导入完成，新增 " + (p.added || 0) + " 本", "ok");
   }
 });
+tauriEvent.listen("associated-book-open", (e) => {
+  enqueueAssociatedBookOpen((e && e.payload) || []);
+});
 tauriEvent.listen("tauri://drag-enter", () => dropHint.classList.add("show"));
 tauriEvent.listen("tauri://drag-leave", () => dropHint.classList.remove("show"));
 tauriEvent.listen("tauri://drag-drop", async (e) => {
@@ -1290,6 +1387,7 @@ const delBtn = document.getElementById("del-btn");
 const coverBtn = document.getElementById("cover-btn");
 const bookInfoBtn = document.getElementById("book-info-btn");
 const similarBooksBtn = document.getElementById("similar-books-btn");
+const readingTimelineBtn = document.getElementById("reading-timeline-btn");
 const bookInfoModal = document.getElementById("book-info-modal");
 const bookInfoTitle = document.getElementById("book-info-title");
 const bookInfoDesc = document.getElementById("book-info-desc");
@@ -1298,6 +1396,83 @@ const similarBooksModal = document.getElementById("similar-books-modal");
 const similarBooksSource = document.getElementById("similar-books-source");
 const similarBooksList = document.getElementById("similar-books-list");
 let currentInfoBookId = "";
+
+function timelineDateTime(seconds) {
+  return seconds ? new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false }) : "—";
+}
+function timelineDayLabel(day) {
+  const raw = String(day || "");
+  return raw.length === 8 ? `${raw.slice(4, 6)}/${raw.slice(6)}` : "—";
+}
+function timelineAxisTime(seconds) {
+  const minutes = Math.round(Number(seconds || 0) / 60);
+  return minutes >= 60 ? `${(minutes / 60).toFixed(minutes % 60 ? 1 : 0)}时` : `${minutes}分`;
+}
+function timelineAxisWords(words) {
+  words = Number(words || 0);
+  return words >= 10000 ? `${(words / 10000).toFixed(1)}万` : `${Math.round(words)}`;
+}
+function timelineDailyBars(buckets) {
+  const days = new Map();
+  (buckets || []).forEach((bucket) => {
+    const key = String(bucket.day || "");
+    const item = days.get(key) || { day: bucket.day, seconds: 0, words: 0 };
+    item.seconds += Number(bucket.seconds || 0);
+    item.words += Number(bucket.words || 0);
+    days.set(key, item);
+  });
+  const items = [...days.values()].sort((a, b) => Number(a.day) - Number(b.day)).slice(-28);
+  if (!items.length) return '<div class="stats-empty">暂无历史阅读时段</div>';
+  const maxSeconds = Math.max(...items.map((item) => item.seconds), 1);
+  const maxWords = Math.max(...items.map((item) => item.words), 1);
+  return `<div class="timeline-legend"><span><i class="time"></i>阅读时长</span><span><i class="words"></i>阅读字数</span><span class="timeline-peak">峰值参考：${fmtTime(maxSeconds)} · ${fmtWords(maxWords)}</span></div>` +
+    (() => {
+      const plotWidth = Math.max(640, items.length * 58);
+      const axisWidth = 48, chartWidth = plotWidth + axisWidth * 2;
+      const top = 24, baseline = 170, chartHeight = baseline - top;
+      const left = axisWidth, right = left + plotWidth;
+      const step = plotWidth / items.length;
+      const grid = Array.from({ length: 5 }, (_, index) => {
+        const ratio = index / 4;
+        const y = baseline - chartHeight * ratio;
+        return `<line class="timeline-gridline" x1="${left}" y1="${y}" x2="${right}" y2="${y}"/><text class="timeline-axis-time" x="${left - 7}" y="${y + 4}" text-anchor="end">${timelineAxisTime(maxSeconds * ratio)}</text><text class="timeline-axis-words" x="${right + 7}" y="${y + 4}">${timelineAxisWords(maxWords * ratio)}</text>`;
+      }).join("");
+      const bars = items.map((item, index) => {
+      const timeHeight = Math.max(1, Math.round(item.seconds / maxSeconds * chartHeight));
+      const wordsHeight = Math.max(1, Math.round(item.words / maxWords * chartHeight));
+      const raw = String(item.day || "");
+      const date = raw.length === 8 ? `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6)}` : "未知日期";
+      const tip = `${date} · 阅读 ${fmtTime(item.seconds)} · ${fmtWords(item.words)}`;
+      const x = Math.round(left + index * step + step / 2);
+      const tooltipWidth = 126, tooltipHeight = 52;
+      const tooltipX = Math.max(left, Math.min(x - tooltipWidth / 2, right - tooltipWidth));
+      return `<g class="timeline-bar-group"><title>${tip}</title><rect x="${x - 8}" y="${baseline - timeHeight}" width="7" height="${timeHeight}" rx="2" fill="#3778df"/><rect x="${x + 2}" y="${baseline - wordsHeight}" width="7" height="${wordsHeight}" rx="2" fill="#8053ca"/><text class="timeline-day-label" x="${x}" y="188" text-anchor="middle">${timelineDayLabel(item.day)}</text><g class="timeline-svg-tooltip" pointer-events="none"><rect x="${tooltipX}" y="${top + 5}" width="${tooltipWidth}" height="${tooltipHeight}" rx="5"/><text x="${tooltipX + 8}" y="${top + 21}">${date}</text><text x="${tooltipX + 8}" y="${top + 36}">时长 ${fmtTime(item.seconds)} · ${fmtWords(item.words)}</text></g></g>`;
+      }).join("");
+      return `<div class="timeline-chart" aria-label="每日阅读时长和字数柱状图"><svg viewBox="0 0 ${chartWidth} 196" role="img">${grid}${bars}</svg></div>`;
+    })() + '<div class="timeline-chart-note">左轴为时长、右轴为字数；横线为两项峰值参考线。悬停任一天柱组可查看具体数据</div>';
+}
+async function openReadingTimeline() {
+  if (!currentInfoBookId) return;
+  const modal = document.getElementById("reading-timeline-modal");
+  const body = document.getElementById("reading-timeline-body");
+  bookInfoModal.classList.remove("show");
+  modal.classList.add("show");
+  body.innerHTML = '<div class="stats-empty">正在整理阅读记录…</div>';
+  try {
+    const data = await invoke("book_reading_timeline", { id: currentInfoBookId });
+    document.getElementById("reading-timeline-title").textContent = "阅读时间线 · " + (data.title || "");
+    const events = (data.events || []).slice().reverse();
+    const eventHtml = events.length ? events.map((event) =>
+      `<div class="timeline-event"><time>${timelineDateTime(event.at)}</time><span>第 ${Number(event.chapter || 0) + 1} 章</span><span class="timeline-progress">${Number(event.progress || 0).toFixed(1)}%</span></div>`
+    ).join("") : '<div class="stats-empty">从现在起，阅读到新的章节或进度时会记录在这里。</div>';
+    body.innerHTML = `<section class="timeline-section"><h4>何时阅读</h4>${timelineDailyBars(data.buckets)}</section><section class="timeline-section"><h4>每天最后读到哪里</h4>${eventHtml}</section>`;
+  } catch (e) {
+    body.innerHTML = '<div class="stats-empty">读取失败：' + libraryHealthEscape(e) + '</div>';
+  }
+}
+readingTimelineBtn.addEventListener("click", openReadingTimeline);
+document.getElementById("reading-timeline-close").addEventListener("click", () => document.getElementById("reading-timeline-modal").classList.remove("show"));
+document.getElementById("reading-timeline-modal").addEventListener("click", (e) => { if (e.target.id === "reading-timeline-modal") e.currentTarget.classList.remove("show"); });
 
 function fmtWords(n) {
   n = n || 0;
@@ -1510,7 +1685,9 @@ window.addEventListener("DOMContentLoaded", () => {
       .then((list) => {
         startupPerfLog("shelf-list-books", "data", "books=" + ((list && list.length) || 0));
         render(list);
+        return invoke("take_startup_book_paths");
       })
+      .then((paths) => enqueueAssociatedBookOpen(paths))
       .catch(() => {})
       .finally(() => {
         initialShelfLoading = false;
