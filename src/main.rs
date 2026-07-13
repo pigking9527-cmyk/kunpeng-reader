@@ -64,7 +64,7 @@ static NEXT_ASSOCIATED_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// 自定义协议的基地址（Windows 下 WebView2 把自定义协议映射到 http://<scheme>.localhost）
 pub(crate) const RES_BASE: &str = "http://reader.localhost";
-pub(crate) const DEFAULT_SYNC_URL: &str = "https://sync.example.invalid";
+pub(crate) const DEFAULT_SYNC_URL: &str = "";
 
 type EpubDoc = epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>;
 

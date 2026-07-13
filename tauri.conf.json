@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' blob: reader: http://reader.localhost; style-src 'self'; img-src 'self' data: blob: reader: http://reader.localhost; font-src 'self' data: reader: http://reader.localhost; media-src 'self' data: blob: reader: http://reader.localhost; connect-src 'self' ipc: http://ipc.localhost reader: http://reader.localhost https://sync.example.invalid https://api.github.com https://github.com; frame-src 'self' reader: http://reader.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+      "csp": "default-src 'self'; script-src 'self' blob: reader: http://reader.localhost; style-src 'self'; img-src 'self' data: blob: reader: http://reader.localhost; font-src 'self' data: reader: http://reader.localhost; media-src 'self' data: blob: reader: http://reader.localhost; connect-src 'self' ipc: http://ipc.localhost reader: http://reader.localhost https://api.github.com https://github.com; frame-src 'self' reader: http://reader.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
     }
   },
   "bundle": {

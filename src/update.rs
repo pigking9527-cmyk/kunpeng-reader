@@ -1,7 +1,6 @@
 use serde::Serialize;
 
 const GITHUB_REPO: &str = "pigking9527-cmyk/kunpeng-reader";
-const UPDATE_MANIFEST_URL: &str = "https://sync.example.invalid/kunpeng-reader/update.json";
 
 #[derive(Serialize, Default)]
 pub(crate) struct UpdateInfo {
@@ -94,24 +93,11 @@ pub(crate) async fn check_update() -> UpdateInfo {
 fn check_update_blocking() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let agent = http_agent();
-    let sources = [
-        (
-            "github",
-            format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest"),
-            format!("https://github.com/{GITHUB_REPO}/releases/latest"),
-        ),
-        (
-            "server",
-            UPDATE_MANIFEST_URL.to_string(),
-            UPDATE_MANIFEST_URL.to_string(),
-        ),
-    ];
-    for (name, api, page) in sources {
-        if let Some(v) = fetch_json(&agent, &api) {
-            let tag = rel_tag(&v);
-            if tag.is_empty() {
-                continue;
-            }
+    let api = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let page = format!("https://github.com/{GITHUB_REPO}/releases/latest");
+    if let Some(v) = fetch_json(&agent, &api) {
+        let tag = rel_tag(&v);
+        if !tag.is_empty() {
             let latest = tag.trim_start_matches(['v', 'V']).to_string();
             let notes = rel_notes(&v);
             let url = rel_url(&v, &page);
@@ -121,7 +107,7 @@ fn check_update_blocking() -> UpdateInfo {
                 latest,
                 notes,
                 url,
-                source: name.to_string(),
+                source: "github".to_string(),
                 current,
             };
         }
@@ -141,21 +127,16 @@ pub(crate) async fn release_notes(tag: String) -> String {
 
 fn release_notes_blocking(tag: &str) -> String {
     let agent = http_agent();
-    let urls = [
-        format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{tag}"),
-        UPDATE_MANIFEST_URL.to_string(),
-    ];
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{tag}");
     let want = tag.trim_start_matches(['v', 'V']);
-    for url in urls {
-        if let Some(v) = fetch_json(&agent, &url) {
-            let got = rel_tag(&v);
-            if !got.is_empty() && got.trim_start_matches(['v', 'V']) != want {
-                continue;
-            }
-            let notes = rel_notes(&v);
-            if !notes.is_empty() {
-                return notes;
-            }
+    if let Some(v) = fetch_json(&agent, &url) {
+        let got = rel_tag(&v);
+        if !got.is_empty() && got.trim_start_matches(['v', 'V']) != want {
+            return String::new();
+        }
+        let notes = rel_notes(&v);
+        if !notes.is_empty() {
+            return notes;
         }
     }
     String::new()

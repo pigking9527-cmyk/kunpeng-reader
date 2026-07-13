@@ -2,7 +2,6 @@ use crate::{data_migration, db, secret_store, AppState, DEFAULT_SYNC_URL};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-const LEGACY_SYNC_HTTP_URL: &str = "http://sync.example.invalid";
 const SYNC_PULL_PAGE_SIZE: usize = 1_000;
 const MAX_SYNC_PULL_PAGES: usize = 1_000;
 const SYNC_PUSH_BATCH_ENTITIES: usize = 400;
@@ -160,21 +159,15 @@ fn is_local_http_base(base: &str) -> bool {
 }
 
 fn normalize_sync_base(input: &str) -> Result<String, String> {
-    let base = if input.trim().is_empty() {
-        DEFAULT_SYNC_URL.to_string()
-    } else {
-        input.trim().trim_end_matches('/').to_string()
-    };
+    let base = input.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err("请先在同步设置中填写 HTTPS 服务器地址".into());
+    }
     if base.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err("同步服务器地址包含非法空白字符".into());
     }
     if base.starts_with("https://") {
         return Ok(base);
-    }
-    // Versions before the HTTPS rollout persisted this exact public endpoint.
-    // Upgrade only the known legacy origin; arbitrary public HTTP remains blocked.
-    if base == LEGACY_SYNC_HTTP_URL {
-        return Ok(DEFAULT_SYNC_URL.to_string());
     }
     if base.starts_with("http://") {
         // 只允许本机调试使用明文 HTTP；公网同步必须走 HTTPS。
@@ -541,17 +534,11 @@ mod tests {
             normalize_sync_base(" https://reader.example.com/ ").unwrap(),
             "https://reader.example.com"
         );
-        assert_eq!(normalize_sync_base("").unwrap(), DEFAULT_SYNC_URL);
+        assert!(normalize_sync_base("").is_err());
         assert_eq!(
             normalize_sync_base("http://127.0.0.1:8787/").unwrap(),
             "http://127.0.0.1:8787"
         );
-        assert_eq!(
-            normalize_sync_base("http://sync.example.invalid").unwrap(),
-            DEFAULT_SYNC_URL
-        );
-        assert!(normalize_sync_base("http://sync.example.invalid:8787").is_err());
-        assert!(normalize_sync_base("http://sync.example.invalid/sync").is_err());
         assert!(normalize_sync_base("http://example.com").is_err());
         assert!(normalize_sync_base("ftp://example.com").is_err());
         assert!(normalize_sync_base("https://example.com/a b").is_err());
