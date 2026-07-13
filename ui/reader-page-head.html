@@ -635,7 +635,15 @@ function applyCols(){
   document.body.classList.toggle('scroll-mode',isScrollMode());
   document.body.classList.toggle('line-paged-mode',false);
   if(pageMask&&!isScrollMode())pageMask.style.height='0px';
-  if(!isScrollMode()){clearVirtualPage();clearScrollPreview();}
+  if(!isScrollMode()){
+    // 切回分页后滚动容器虽被隐藏，scrollTop 仍会保留。若不清空，下一次
+    // 切回滚动模式会把旧的纵向偏移和新的锚点恢复叠加，表现为每切一次跳一页。
+    var inactiveScrollPort=scrollPort();
+    if(inactiveScrollPort)inactiveScrollPort.scrollTop=0;
+    scrollProgrammaticTarget=null;
+    scrollActiveSlice=null;
+    clearVirtualPage();clearScrollPreview();
+  }
   if(!isScrollMode()&&scroller){scroller.style.clipPath='none';scroller.style.webkitClipPath='none';}
   if(isLinePagedMode()){
 pager.style.top=linePagedViewportTopGapPx()+'px';
@@ -2113,7 +2121,11 @@ function report(){
   // 锚点只在用户“导航”（翻页/跳章/跳搜索命中）时更新，见 captureAnchor()。
 }
 // 记录当前页顶部锚点（精确到字符）。仅在用户主动导航后调用，供之后的重排锁定位置。
-function captureAnchor(){curTopAnchor=topAnchor();}
+function captureAnchor(){
+  var anchor=topAnchor();
+  if(anchorValid(anchor))curTopAnchor=anchor;
+  return curTopAnchor;
+}
 function measureChapterPages(html){
   if(!measurer)return 1;
   var vw=window.innerWidth,vh=pagedBoxHeight(),pl=pageLayout();
@@ -2387,6 +2399,11 @@ function invalidateScrollBreaksSoon(){
     report();
   },80);
 }
+function refreshLayoutAfterMedia(){
+  invalidateScrollBreaksSoon();
+  // 图片异步解码后，分页布局已确定；重新检查上一页是否需要图片预览。
+  setTimeout(schedulePagedImagePreview,0);
+}
 function watchFlowMedia(){
   if(!root)return;
   var imgs=root.querySelectorAll('img,svg,canvas,video');
@@ -2394,8 +2411,8 @@ function watchFlowMedia(){
     var el=imgs[i];
     if(el.__kpFlowWatch)continue;
     el.__kpFlowWatch=1;
-    el.addEventListener('load',invalidateScrollBreaksSoon,{once:false});
-    el.addEventListener('error',invalidateScrollBreaksSoon,{once:false});
+    el.addEventListener('load',refreshLayoutAfterMedia,{once:false});
+    el.addEventListener('error',refreshLayoutAfterMedia,{once:false});
   }
 }
 function markNoteSeparators(){
@@ -2598,34 +2615,53 @@ function showChapter(i,where,frag){
 var curTopAnchor=null; // 实时记录的当前页顶部锚点（精确到字符）
 // 视口左上角对应的"字符级"锚点。长段落跨多列时，元素级锚点的 left 是段首所在列，
 // 会让重排后跳回段首（如金庸全集的超长段落）；用 caret 定位到具体字符即可避免。
+function anchorNodeInReader(n){return !!(n&&root&&root.contains(n)&&!generatedTextNode(n));}
+function caretRangeInReader(x,y){
+  var oldVirtual=null,rng=null;
+  if(virtualPage){oldVirtual=virtualPage.style.pointerEvents;virtualPage.style.pointerEvents='none';}
+  try{
+    if(document.caretRangeFromPoint){rng=document.caretRangeFromPoint(x,y);}
+    else if(document.caretPositionFromPoint){var cp=document.caretPositionFromPoint(x,y);if(cp){rng=document.createRange();rng.setStart(cp.offsetNode,cp.offset);rng.collapse(true);}}
+  }catch(_){}finally{
+    if(virtualPage)virtualPage.style.pointerEvents=oldVirtual;
+  }
+  return anchorNodeInReader(rng&&rng.startContainer)?rng:null;
+}
 function topAnchor(){
   var hm=hMargins();
   var x=Math.max(2,hm.l+8), y=Math.max(2,mg(S.marginTop)+8);
   if(isScrollMode()&&pager){
     var pr=viewRect();
-    x=Math.max(2,pr.left+8);
-    y=Math.max(2,pr.top+8);
+    x=Math.max(2,pr.left+mg(S.marginLeft)+8);
+    y=Math.max(2,pr.top+mg(S.marginTop)+8);
   }
-  var rng=null;
-  if(document.caretRangeFromPoint){ rng=document.caretRangeFromPoint(x,y); }
-  else if(document.caretPositionFromPoint){ var cp=document.caretPositionFromPoint(x,y); if(cp){rng=document.createRange();rng.setStart(cp.offsetNode,cp.offset);rng.collapse(true);} }
+  var rng=caretRangeInReader(x,y);
   if(rng){
-    try{var n=rng.startContainer,o=rng.startOffset;if(n.nodeType===3&&o<n.nodeValue.length)rng.setEnd(n,o+1);}catch(e){}
-    return {range:rng};
+    try{var n=rng.startContainer,o=rng.startOffset;if(n.nodeType===3&&o<n.nodeValue.length)rng.setEnd(n,o+1);if(anchorNodeInReader(n))return {range:rng};}catch(e){}
   }
   var el=document.elementFromPoint(x,y);
-  while(el&&el!==root&&el.nodeType===1){ if((el.textContent||'').trim()) return {el:el}; el=el.parentNode; }
+  while(el&&el!==root&&el.nodeType===1){ if(anchorNodeInReader(el)&&(el.textContent||'').trim()) return {el:el}; el=el.parentNode; }
   return null;
 }
 function anchorValid(a){
   if(!a)return false;
-  if(a.range){var n=a.range.startContainer;return !!(n&&n.isConnected);}
-  if(a.el){return !!a.el.isConnected;}
+  if(a.range){return anchorNodeInReader(a.range.startContainer);}
+  if(a.el){return anchorNodeInReader(a.el);}
   return false;
 }
+function anchorTextOffset(a){
+  if(!anchorValid(a))return null;
+  if(a.range)return sourceBoundaryOffset(a.range.startContainer,a.range.startOffset);
+  var node=a.el;
+  if(!node)return null;
+  var range=document.createRange();
+  try{range.selectNodeContents(node);range.collapse(true);}catch(_){return null;}
+  return sourceBoundaryOffset(range.startContainer,range.startOffset);
+}
 function anchorPage(a){
+  if(!anchorValid(a))return pageInCh;
   var r=null;
-  if(a.range){ r=a.range.getBoundingClientRect(); if(r&&!r.width&&!r.height&&!r.left&&!r.top){var rs=a.range.getClientRects();if(rs&&rs.length)r=rs[0];} }
+  if(a.range){var rs=a.range.getClientRects();r=rs&&rs.length?rs[0]:a.range.getBoundingClientRect();}
   else if(a.el){ r=a.el.getBoundingClientRect(); }
   if(!r)return pageInCh;
   var pr=viewRect();
@@ -2638,7 +2674,7 @@ function anchorPage(a){
   return Math.max(0,Math.min(pagesInCh-1,Math.floor((x+1)/pageStep)));
 }
 function anchorRect(a){
-  if(!a)return null;
+  if(!anchorValid(a))return null;
   var r=null;
   try{
     if(a.range){
@@ -2693,15 +2729,24 @@ function relayout(opts){
   // 用"重排前"就记好的锚点（resize 时浏览器已先重排，临时再取就晚了）
   opts=opts||{};
   var anchor=anchorValid(opts.anchor)?opts.anchor:(anchorValid(curTopAnchor)?curTopAnchor:topAnchor());
+  var anchorOffset=opts.anchorOffset;
   if(isScrollMode()){scrollActiveSlice=null;scrollBreakSig='';invalidateScrollItemsCache();}
   applyStyle();applyCols();
+  if(anchorOffset!=null){
+    var restoredRange=sourceRangeForOffsets(anchorOffset,anchorOffset+1);
+    if(restoredRange)anchor={range:restoredRange};
+  }
   var restoredScroll=opts.exactScroll?restoreScrollAnchorExact(anchor,opts.scrollOffset):restoreScrollAnchorToBreak(anchor);
   if(!restoredScroll){
     if(anchor){ pageInCh=anchorPage(anchor); }
     else if(pageInCh>pagesInCh-1){ pageInCh=pagesInCh-1; }
     setViewOffset();
   }
-  report();captureAnchor();scheduleNoteNumberDisplayRefresh();
+  report();
+  // 切换分页/滚动时只能沿用切换前的字符锚点；若此处重新取页顶，
+  // 整页/滚动两套坐标的取整误差会在每次切换后累积成跳页。
+  if(!opts.modeSwitch)captureAnchor();
+  scheduleNoteNumberDisplayRefresh();
 }
 function nextPage(){
   if(usesLineBreakPaging()&&scrollPageBy(1))return;
@@ -3722,8 +3767,8 @@ function getSelContext(){
 }
 
 // ---- 注释/脚注：点角标 → 就地弹出注释正文（而不是跳过去）----
-var fnPop=null;
-function hideFn(){if(fnPop)fnPop.style.display='none';}
+var fnPop=null,fnPopKey='';
+function hideFn(){if(fnPop)fnPop.style.display='none';fnPopKey='';}
 function setupFn(){
   fnPop=document.createElement('div');fnPop.id='fn-pop';
   fnPop.innerHTML='<span class="fn-close">✕</span><div class="fn-body"></div>';
@@ -3732,7 +3777,12 @@ function setupFn(){
   fnPop.addEventListener('mousedown',function(e){e.stopPropagation();});
   fnPop.addEventListener('click',function(e){e.stopPropagation();if(e.target.closest&&e.target.closest('a'))e.preventDefault();}); // 弹窗内点击不翻页/不跳锚
   fnPop.addEventListener('wheel',function(e){e.stopPropagation();},{passive:true});
-  document.addEventListener('mousedown',function(e){if(fnPop&&fnPop.style.display==='block'&&!fnPop.contains(e.target))hideFn();});
+  document.addEventListener('mousedown',function(e){
+    if(!fnPop||fnPop.style.display!=='block'||fnPop.contains(e.target))return;
+    var note=e.target.closest&&e.target.closest('a');
+    if(note&&isNoteLink(note))return; // 让 click 处理同一条“注”的开关
+    hideFn();
+  });
   document.addEventListener('wheel',hideFn,{passive:true});
 }
 // ---- 离线词典：选中文字/已高亮 → 就地弹释义（释义由外壳查后端再回传）----
@@ -3973,9 +4023,10 @@ function isNoteLink(a){
   return /^[\[【（(]?\s*\d{1,4}\s*[\]】）)]?$/.test(t);
 }
 function fnSelector(frag){return '[id="'+String(frag).replace(/"/g,'\\"')+'"]';}
-function popFootnote(a,html){
+function popFootnote(a,html,key){
   if(!fnPop)setupFn();
   try{parent.postMessage({uiClick:1},'*');}catch(_){}
+  fnPopKey=key||'';
   fnPop.querySelector('.fn-body').innerHTML=html;
   fnPop.scrollTop=0;
   fnPop.style.display='block';
@@ -4050,12 +4101,14 @@ function findFootnoteHtmlAcrossChapters(order,frag){
   });
 }
 function showFootnote(a,ci,frag){
+  var key=String(ci)+':'+String(frag);
+  if(fnPop&&fnPop.style.display==='block'&&fnPopKey===key){hideFn();return;}
   var el=document.querySelector(fnSelector(frag));
-  if(el){popFootnote(a,noteHtml(el));return;}
-  popFootnote(a,'加载中…');
+  if(el){popFootnote(a,noteHtml(el),key);return;}
+  popFootnote(a,'加载中…',key);
   findFootnoteHtmlAcrossChapters(footnoteSearchOrder(ci),frag).then(function(html){
-    popFootnote(a,html||'（未找到注释内容）');
-  }).catch(function(){popFootnote(a,'（注释加载失败）');});
+    if(fnPopKey===key)popFootnote(a,html||'（未找到注释内容）',key);
+  }).catch(function(){if(fnPopKey===key)popFootnote(a,'（注释加载失败）',key);});
 }
 var sMarks=[],sIdx=-1;
 function clearSearch(){
@@ -4204,14 +4257,22 @@ window.addEventListener('message',function(e){
   if(e.data.windowDragging!==undefined){setMeasurePaused(!!e.data.windowDragging);}
   if(e.data.settings){
     var prevFlow=S.flowMode,prevPageMode=S.pageMode;
+    if(prevFlow==='scroll'){
+      scrollPagedView=false;
+      clearVirtualPage();clearScrollPreview();
+      if(scroller){scroller.style.clipPath='none';scroller.style.webkitClipPath='none';}
+    }
     var anchor=topAnchor();
-    curTopAnchor=anchor;
+    if(!anchorValid(anchor)&&anchorValid(curTopAnchor))anchor=curTopAnchor;
+    if(anchorValid(anchor))curTopAnchor=anchor;
+    var anchorOffset=anchorTextOffset(anchor);
     S=Object.assign(S,e.data.settings);
     var flowChanged=prevFlow!==S.flowMode;
     var pageModeChanged=prevPageMode!==S.pageMode;
+    if(flowChanged&&isScrollMode())scrollPagedView=false;
     parent.postMessage({layoutBusy:1},'*');
     invalidateMeasure();
-    relayout({anchor:anchor,exactScroll:flowChanged&&isScrollMode(),scrollOffset:8,modeSwitch:flowChanged||pageModeChanged});
+    relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode(),scrollOffset:Math.max(8,mg(S.marginTop)+8),modeSwitch:flowChanged||pageModeChanged});
     scheduleMeasure();
   }
   if(e.data.tts){if(e.data.tts==='start')ttsStart();else ttsStop();}
@@ -4263,6 +4324,94 @@ window.addEventListener('message',function(e){
     parent.postMessage({tocResolved:{chapter:curCh,frag:bestFrag}},'*');
   }
 });
+var pagedImagePreview=null;
+function clearPagedImagePreview(){
+  if(!pagedImagePreview)return;
+  pagedImagePreview.style.display='none';
+  pagedImagePreview.innerHTML='';
+}
+function ensurePagedImagePreview(){
+  if(pagedImagePreview&&pagedImagePreview.isConnected)return pagedImagePreview;
+  if(!pager)return null;
+  pagedImagePreview=document.getElementById('paged-image-preview');
+  if(!pagedImagePreview){
+    pagedImagePreview=document.createElement('div');
+    pagedImagePreview.id='paged-image-preview';
+    pagedImagePreview.style.cssText='position:absolute;display:none;overflow:hidden;pointer-events:none;z-index:2147483636;contain:paint;';
+    pager.appendChild(pagedImagePreview);
+  }
+  return pagedImagePreview;
+}
+function refreshPagedImagePreview(){
+  if(!root||!pager||isScrollMode()||isDualPage()){clearPagedImagePreview();return;}
+  var pr=viewRect(),step=pageStep||window.innerWidth||1,current=pageInCh;
+  // 大多数页面没有“下一页顶端图片”；先做轻量检查，避免每次翻页都扫描整章字符。
+  var hasPreviewCandidate=false,previewImgs=root.querySelectorAll('img');
+  for(var pi=0;pi<previewImgs.length;pi++){
+    var candidate=previewImgs[pi],candidateRect=null;
+    try{candidateRect=candidate.getBoundingClientRect();}catch(_){candidateRect=null;}
+    if(!candidateRect||candidateRect.width<20||candidateRect.height<48)continue;
+    var candidateLeft=candidateRect.left-pr.left+viewOffset;
+    if(Math.floor((candidateLeft+1)/step)!==current+1)continue;
+    if(candidateRect.top-pr.top>mg(S.marginTop)+Math.max(32,lineHeightPx()*1.5))continue;
+    hasPreviewCandidate=true;
+    break;
+  }
+  if(!hasPreviewCandidate){clearPagedImagePreview();return;}
+  var lines=filterTextLines(documentTextLineRects()),last=mg(S.marginTop);
+  for(var i=0;i<lines.length;i++){
+    var line=lines[i],logicalLeft=line.left+viewOffset;
+    if(Math.floor((logicalLeft+1)/step)===current)last=Math.max(last,line.bottom);
+  }
+  var pageBottom=Math.min(pr.height||viewportHeight(),pagedBoxHeight())-mg(S.marginBottom);
+  var free=Math.floor(pageBottom-last-6);
+  if(free<32){clearPagedImagePreview();return;}
+  var imgs=root.querySelectorAll('img');
+  for(var j=0;j<imgs.length;j++){
+    var img=imgs[j],r=null;
+    try{r=img.getBoundingClientRect();}catch(_){r=null;}
+    if(!r||r.width<20||r.height<48)continue;
+    var logicalLeft=r.left-pr.left+viewOffset;
+    if(Math.floor((logicalLeft+1)/step)!==current+1)continue;
+    if(r.top-pr.top>mg(S.marginTop)+Math.max(32,lineHeightPx()*1.5))continue;
+    // 当前页可容纳多少就显示多少；下一页仍保留从顶部开始的完整原图。
+    var crop=Math.min(free,Math.floor(r.height));
+    if(crop<32||crop>=r.height-2)continue;
+    var box=ensurePagedImagePreview();
+    if(!box)return;
+    var clone=clonePreviewElement(img);
+    if(!clone){clearPagedImagePreview();return;}
+    var left=((logicalLeft%step)+step)%step;
+    box.innerHTML='';
+    box.style.left=Math.round(left)+'px';
+    box.style.top=Math.round(last+4)+'px';
+    box.style.width=Math.round(r.width)+'px';
+    box.style.height=Math.round(crop)+'px';
+    box.style.display='block';
+    clone.style.setProperty('width',Math.round(r.width)+'px','important');
+    clone.style.setProperty('height',Math.round(r.height)+'px','important');
+    clone.style.setProperty('max-width','none','important');
+    clone.style.setProperty('max-height','none','important');
+    box.appendChild(clone);
+    return;
+  }
+  clearPagedImagePreview();
+}
+var pagedImagePreviewFrame=0,pagedImagePreviewGeneration=0;
+function schedulePagedImagePreview(){
+  var generation=++pagedImagePreviewGeneration;
+  if(pagedImagePreviewFrame){cancelAnimationFrame(pagedImagePreviewFrame);pagedImagePreviewFrame=0;}
+  if(!root||!pager||isScrollMode()||isDualPage()){clearPagedImagePreview();return;}
+  // 让页面位移和翻页动画先提交到屏幕，预览测量放到下一帧执行。
+  clearPagedImagePreview();
+  pagedImagePreviewFrame=requestAnimationFrame(function(){
+    pagedImagePreviewFrame=0;
+    if(generation!==pagedImagePreviewGeneration)return;
+    refreshPagedImagePreview();
+  });
+}
+var baseSetViewOffset=setViewOffset;
+setViewOffset=function(){baseSetViewOffset();schedulePagedImagePreview();};
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
 </script>
 

@@ -663,6 +663,7 @@ function closeSemanticIndexSettings() {
   semanticIndexModal.classList.remove("show");
   if (semStatusPoll) clearInterval(semStatusPoll);
   semStatusPoll = null;
+  fpSettingsModal.classList.add("show");
 }
 
 semanticGearBtn?.addEventListener("click", (e) => {
@@ -884,6 +885,7 @@ function openExternalDictSettings() {
 
 function closeExternalDictSettings() {
   externalDictModal.classList.remove("show");
+  fpSettingsModal.classList.add("show");
 }
 
 externalDictGear?.addEventListener("click", (e) => {
