@@ -27,7 +27,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 tokio = { version = "1", features = ["rt"] }
 flate2 = "1"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
