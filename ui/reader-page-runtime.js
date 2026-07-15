@@ -100,6 +100,7 @@ window.addEventListener('message',function(e){
   if(e.data.windowDragging!==undefined){setMeasurePaused(!!e.data.windowDragging);}
   if(e.data.settings){
     var prevFlow=S.flowMode,prevPageMode=S.pageMode;
+    var imageAnchor=captureImageVisualAnchor();
     if(prevFlow==='scroll'){
       scrollPagedView=false;
       clearVirtualPage();clearScrollPreview();
@@ -112,10 +113,13 @@ window.addEventListener('message',function(e){
     S=Object.assign(S,e.data.settings);
     var flowChanged=prevFlow!==S.flowMode;
     var pageModeChanged=prevPageMode!==S.pageMode;
-    if(flowChanged&&isScrollMode())scrollPagedView=false;
+    if(flowChanged||pageModeChanged)cancelPagedImagePreview();
+    if(flowChanged&&isScrollMode())scrollPagedView=!!imageAnchor;
     parent.postMessage({layoutBusy:1},'*');
     invalidateMeasure();
-    relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode(),scrollOffset:Math.max(8,mg(S.marginTop)+8),modeSwitch:flowChanged||pageModeChanged});
+    // 滚动容器已经按阅读边距内缩；恢复锚点时使用容器内偏移，避免重复叠加 marginTop。
+    relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode()&&!imageAnchor,scrollOffset:8,modeSwitch:flowChanged||pageModeChanged});
+    if(flowChanged||pageModeChanged)scheduleImageVisualAnchorRestore(imageAnchor);
     scheduleMeasure();
   }
   if(e.data.tts){if(e.data.tts==='start')ttsStart();else ttsStop();}
@@ -167,11 +171,18 @@ window.addEventListener('message',function(e){
     parent.postMessage({tocResolved:{chapter:curCh,frag:bestFrag}},'*');
   }
 });
+
 var pagedImagePreview=null;
 function clearPagedImagePreview(){
   if(!pagedImagePreview)return;
+  pagedImagePreview._rrPreviewSource=null;
   pagedImagePreview.style.display='none';
   pagedImagePreview.innerHTML='';
+}
+function cancelPagedImagePreview(){
+  pagedImagePreviewGeneration++;
+  if(pagedImagePreviewFrame){cancelAnimationFrame(pagedImagePreviewFrame);pagedImagePreviewFrame=0;}
+  clearPagedImagePreview();
 }
 function ensurePagedImagePreview(){
   if(pagedImagePreview&&pagedImagePreview.isConnected)return pagedImagePreview;
@@ -185,68 +196,60 @@ function ensurePagedImagePreview(){
   }
   return pagedImagePreview;
 }
+function pagedImageSourcePage(rect,rootRect,step){
+  if(!rect||!rootRect)return -1;
+  return Math.max(0,Math.floor((rect.left-rootRect.left+1)/Math.max(1,step||1)));
+}
 function refreshPagedImagePreview(){
   if(!root||!pager||isScrollMode()||isDualPage()){clearPagedImagePreview();return;}
-  var pr=viewRect(),step=pageStep||window.innerWidth||1,current=pageInCh;
-  // 大多数页面没有“下一页顶端图片”；先做轻量检查，避免每次翻页都扫描整章字符。
-  var hasPreviewCandidate=false,previewImgs=root.querySelectorAll('img');
-  for(var pi=0;pi<previewImgs.length;pi++){
-    var candidate=previewImgs[pi],candidateRect=null;
-    try{candidateRect=candidate.getBoundingClientRect();}catch(_){candidateRect=null;}
-    if(!candidateRect||candidateRect.width<20||candidateRect.height<48)continue;
-    var candidateLeft=candidateRect.left-pr.left+viewOffset;
-    if(Math.floor((candidateLeft+1)/step)!==current+1)continue;
-    if(candidateRect.top-pr.top>mg(S.marginTop)+Math.max(32,lineHeightPx()*1.5))continue;
-    hasPreviewCandidate=true;
-    break;
+  var pr=viewRect(),rr=root.getBoundingClientRect(),step=pageStep||window.innerWidth||1,current=pageInCh;
+  var imgs=root.querySelectorAll('img'),candidate=null,candidateRect=null,sourcePage=-1;
+  for(var i=0;i<imgs.length;i++){
+    var img=imgs[i],r=null;
+    if(img.closest&&img.closest('sup,sub,a.duokan-footnote,.rr-note-ref,.rr-note-wrap'))continue;
+    try{r=img.getBoundingClientRect();}catch(_){r=null;}
+    if(!r||r.width<20||r.height<48)continue;
+    var page=pagedImageSourcePage(r,rr,step);
+    if(page!==current+1)continue;
+    if(r.top-pr.top>mg(S.marginTop)+Math.max(32,lineHeightPx()*1.5))continue;
+    candidate=img;candidateRect=r;sourcePage=page;break;
   }
-  if(!hasPreviewCandidate){clearPagedImagePreview();return;}
+  if(!candidate){clearPagedImagePreview();return;}
   var lines=filterTextLines(documentTextLineRects()),last=mg(S.marginTop);
-  for(var i=0;i<lines.length;i++){
-    var line=lines[i],logicalLeft=line.left+viewOffset;
-    if(Math.floor((logicalLeft+1)/step)===current)last=Math.max(last,line.bottom);
+  for(var j=0;j<lines.length;j++){
+    var line=lines[j];
+    if(pagedImageSourcePage(line,rr,step)===current)last=Math.max(last,line.bottom);
   }
   var pageBottom=Math.min(pr.height||viewportHeight(),pagedBoxHeight())-mg(S.marginBottom);
   var free=Math.floor(pageBottom-last-6);
   if(free<32){clearPagedImagePreview();return;}
-  var imgs=root.querySelectorAll('img');
-  for(var j=0;j<imgs.length;j++){
-    var img=imgs[j],r=null;
-    try{r=img.getBoundingClientRect();}catch(_){r=null;}
-    if(!r||r.width<20||r.height<48)continue;
-    var logicalLeft=r.left-pr.left+viewOffset;
-    if(Math.floor((logicalLeft+1)/step)!==current+1)continue;
-    if(r.top-pr.top>mg(S.marginTop)+Math.max(32,lineHeightPx()*1.5))continue;
-    // 当前页可容纳多少就显示多少；下一页仍保留从顶部开始的完整原图。
-    var crop=Math.min(free,Math.floor(r.height));
-    if(crop<32||crop>=r.height-2)continue;
-    var box=ensurePagedImagePreview();
-    if(!box)return;
-    var clone=clonePreviewElement(img);
-    if(!clone){clearPagedImagePreview();return;}
-    var left=((logicalLeft%step)+step)%step;
-    box.innerHTML='';
-    box.style.left=Math.round(left)+'px';
-    box.style.top=Math.round(last+4)+'px';
-    box.style.width=Math.round(r.width)+'px';
-    box.style.height=Math.round(crop)+'px';
-    box.style.display='block';
-    clone.style.setProperty('width',Math.round(r.width)+'px','important');
-    clone.style.setProperty('height',Math.round(r.height)+'px','important');
-    clone.style.setProperty('max-width','none','important');
-    clone.style.setProperty('max-height','none','important');
-    box.appendChild(clone);
-    return;
-  }
-  clearPagedImagePreview();
+  var crop=Math.min(free,Math.floor(candidateRect.height));
+  if(crop<32||crop>=candidateRect.height-2){clearPagedImagePreview();return;}
+  var box=ensurePagedImagePreview();
+  if(!box)return;
+  var clone=clonePreviewElement(candidate);
+  if(!clone){clearPagedImagePreview();return;}
+  var logicalLeft=candidateRect.left-rr.left;
+  var left=logicalLeft-sourcePage*step;
+  box.innerHTML='';
+  box.style.left=Math.max(0,Math.round(left))+'px';
+  box.style.top=(Math.round(last)+imagePreviewGapPx())+'px';
+  box.style.width=Math.round(candidateRect.width)+'px';
+  box.style.height=Math.round(crop)+'px';
+  box.style.display='block';
+  box._rrPreviewSource=candidate;
+  clone.style.setProperty('width',Math.round(candidateRect.width)+'px','important');
+  clone.style.setProperty('height',Math.round(candidateRect.height)+'px','important');
+  clone.style.setProperty('max-width','none','important');
+  clone.style.setProperty('max-height','none','important');
+  box.appendChild(clone);
 }
 var pagedImagePreviewFrame=0,pagedImagePreviewGeneration=0;
 function schedulePagedImagePreview(){
   var generation=++pagedImagePreviewGeneration;
   if(pagedImagePreviewFrame){cancelAnimationFrame(pagedImagePreviewFrame);pagedImagePreviewFrame=0;}
-  if(!root||!pager||isScrollMode()||isDualPage()){clearPagedImagePreview();return;}
-  // 让页面位移和翻页动画先提交到屏幕，预览测量放到下一帧执行。
   clearPagedImagePreview();
+  if(!root||!pager||isScrollMode()||isDualPage())return;
   pagedImagePreviewFrame=requestAnimationFrame(function(){
     pagedImagePreviewFrame=0;
     if(generation!==pagedImagePreviewGeneration)return;

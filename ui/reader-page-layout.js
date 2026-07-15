@@ -1063,6 +1063,7 @@ function scrollNextTopFromDocument(cur,dir){
 }
 function clearScrollPreview(){
   if(!scrollPreview)return;
+  scrollPreview._rrPreviewSource=null;
   scrollPreview.style.display='none';
   scrollPreview.style.height='0px';
   scrollPreview.innerHTML='';
@@ -1111,6 +1112,54 @@ function clonePreviewElement(el){
   clone.style.width='auto';
   clone.style.height='auto';
   return clone;
+}
+function imagePreviewGapPx(){return 4;}
+var imageVisualAnchorFrame=0;
+function visiblePreviewLayerForSource(source){
+  var layers=[];
+  if(typeof pagedImagePreview!=='undefined'&&pagedImagePreview)layers.push(pagedImagePreview);
+  if(scrollPreview)layers.push(scrollPreview);
+  for(var i=0;i<layers.length;i++){
+    var layer=layers[i];
+    if(layer._rrPreviewSource!==source||layer.style.display==='none')continue;
+    var r=null;try{r=layer.getBoundingClientRect();}catch(_){r=null;}
+    if(r&&r.width>1&&r.height>1&&r.bottom>0&&r.top<viewportHeight())return {layer:layer,rect:r};
+  }
+  return null;
+}
+function captureImageVisualAnchor(){
+  var layers=[];
+  if(typeof pagedImagePreview!=='undefined'&&pagedImagePreview)layers.push(pagedImagePreview);
+  if(scrollPreview)layers.push(scrollPreview);
+  for(var i=0;i<layers.length;i++){
+    var layer=layers[i],source=layer&&layer._rrPreviewSource;
+    if(!source||layer.style.display==='none')continue;
+    var r=null;try{r=layer.getBoundingClientRect();}catch(_){r=null;}
+    if(r&&r.width>1&&r.height>1&&r.bottom>0&&r.top<viewportHeight())return {source:source,top:r.top};
+  }
+  return null;
+}
+function restoreImageVisualAnchor(anchor){
+  if(!anchor||!anchor.source)return false;
+  var match=visiblePreviewLayerForSource(anchor.source);
+  if(!match)return false;
+  var delta=anchor.top-match.rect.top;
+  if(Math.abs(delta)<0.5)return true;
+  var top=parseFloat(match.layer.style.top);
+  if(!isFinite(top))return false;
+  match.layer.style.top=Math.round(top+delta)+'px';
+  return true;
+}
+function scheduleImageVisualAnchorRestore(anchor){
+  if(imageVisualAnchorFrame){cancelAnimationFrame(imageVisualAnchorFrame);imageVisualAnchorFrame=0;}
+  if(!anchor)return;
+  var attempts=3;
+  function tick(){
+    imageVisualAnchorFrame=0;
+    if(restoreImageVisualAnchor(anchor)||--attempts<=0)return;
+    imageVisualAnchorFrame=requestAnimationFrame(tick);
+  }
+  imageVisualAnchorFrame=requestAnimationFrame(tick);
 }
 function clearVirtualPage(){
   if(!virtualPage)return;
@@ -1416,7 +1465,7 @@ function renderVirtualBlockSlice(page,entry){
 function renderVirtualPreview(page,viewH){
   var it=page&&page.previewItem?page.previewItem:null;
   if(!it||!isPreviewableBlock(it)||!it.el)return null;
-  var y=Math.max(0,Math.ceil((page.virtualBottom||0)+Math.max(2,lineHeightPx()*0.12)));
+  var y=Math.max(0,Math.round(page.virtualBottom||0)+imagePreviewGapPx());
   var h=Math.floor(viewH-y);
   if(h<Math.max(24,Math.ceil(lineHeightPx()*0.75)))return null;
   var box=document.createElement('div');
@@ -1450,6 +1499,11 @@ function renderVirtualScrollPage(){
   if(preview)layer.appendChild(preview);
   layer.style.display='block';
 }
+function scrollImagePreviewEligible(next,slice,nextIdx,pageBottom){
+  if(!next||!slice)return false;
+  if(next.top>=pageBottom-2)return true;
+  return next.bottom>pageBottom+0.5&&(slice.previewItem===next||slice.previewIndex===nextIdx);
+}
 function applyScrollImagePreview(){
   if(!isScrollMode()||!scrollPagedView||!pager||!root){clearScrollPreview();return;}
   var sp=scrollPort();
@@ -1470,7 +1524,8 @@ function applyScrollImagePreview(){
   if(nextIdx<0||nextIdx>=items.length){clearScrollPreview();return;}
   var next=items[nextIdx];
   if(!next||!isPreviewableBlock(next)||!next.el){clearScrollPreview();return;}
-  if(next.top<pageBottom-2){clearScrollPreview();return;}
+  // 大图虽然已经从正文流进入视口，但整张放不下时，仍应使用与单页模式一致的裁剪预览。
+  if(!scrollImagePreviewEligible(next,slice,nextIdx,pageBottom)){clearScrollPreview();return;}
   var contentBottom=top;
   var start=Math.max(0,Math.min(items.length-1,slice.startIndex||0));
   var end=Math.max(start,Math.min(items.length-1,slice.endIndex==null?nextIdx-1:slice.endIndex));
@@ -1486,11 +1541,12 @@ function applyScrollImagePreview(){
       contentBottom=Math.max(contentBottom,it2.bottom);
     }
   }
-  var gapTop=Math.max(0,Math.ceil(contentBottom-top+2));
+  var gapTop=Math.max(0,Math.round(contentBottom-top)+imagePreviewGapPx());
   var gapH=Math.floor(viewH-gapTop);
   if(gapH<Math.max(24,Math.ceil(lineHeightPx()*0.75))){clearScrollPreview();return;}
   var clone=clonePreviewElement(next.el);
   if(!clone){clearScrollPreview();return;}
+  sizeVirtualPreviewClone(clone,next);
   var src=previewSourceElement(next.el),r=null,pr=viewRect();
   try{r=src.getBoundingClientRect();}catch(_){r=null;}
   scrollPreview.innerHTML='';
@@ -1498,6 +1554,7 @@ function applyScrollImagePreview(){
   scrollPreview.style.top=gapTop+'px';
   scrollPreview.style.height=gapH+'px';
   scrollPreview.style.bottom='auto';
+  scrollPreview._rrPreviewSource=src||previewSourceElement(next.el);
   var inner=document.createElement('div');
   inner.className='rr-preview-inner';
   if(r&&r.width>2){
@@ -1512,6 +1569,7 @@ function applyScrollImagePreview(){
   scrollPreview.appendChild(inner);
 }
 function applyScrollPageMask(){
+  if(typeof clearPagedImagePreview==='function')clearPagedImagePreview();
   if(pageMask){
     pageMask.style.height='0px';
     pageMask.style.display='none';
@@ -1529,6 +1587,7 @@ function applyScrollPageMask(){
     }
   }
   refreshHighlights();
+  applyScrollImagePreview();
 }
 function currentScrollPageClipBlank(){
   if(!isScrollMode()||!scrollPagedView||!pager||!root)return 0;
@@ -2178,7 +2237,6 @@ function invalidateScrollBreaksSoon(){
 }
 function refreshLayoutAfterMedia(){
   invalidateScrollBreaksSoon();
-  // 图片异步解码后，分页布局已确定；重新检查上一页是否需要图片预览。
   setTimeout(schedulePagedImagePreview,0);
 }
 function watchFlowMedia(){
@@ -2414,8 +2472,9 @@ function topAnchor(){
   var x=Math.max(2,hm.l+8), y=Math.max(2,mg(S.marginTop)+8);
   if(isScrollMode()&&pager){
     var pr=viewRect();
-    x=Math.max(2,pr.left+mg(S.marginLeft)+8);
-    y=Math.max(2,pr.top+mg(S.marginTop)+8);
+    // viewRect() 已经是扣除阅读边距后的滚动容器，不能再次加 marginLeft/marginTop。
+    x=Math.max(2,pr.left+8);
+    y=Math.max(2,pr.top+8);
   }
   var rng=caretRangeInReader(x,y);
   if(rng){
@@ -2423,7 +2482,23 @@ function topAnchor(){
   }
   var el=document.elementFromPoint(x,y);
   while(el&&el!==root&&el.nodeType===1){ if(anchorNodeInReader(el)&&(el.textContent||'').trim()) return {el:el}; el=el.parentNode; }
+  var media=topVisibleOriginalMedia();
+  if(media)return {el:media,media:true};
   return null;
+}
+function topVisibleOriginalMedia(){
+  if(!root||!pager)return null;
+  var pr=viewRect(),topBand=pr.top+Math.max(48,lineHeightPx()*2.2);
+  var media=root.querySelectorAll('img,svg,canvas,video');
+  var best=null,bestTop=Number.POSITIVE_INFINITY;
+  for(var i=0;i<media.length;i++){
+    var el=media[i];
+    if(el.closest&&el.closest('sup,sub,a.duokan-footnote,.rr-note-ref,.rr-note-wrap'))continue;
+    var r=null;try{r=el.getBoundingClientRect();}catch(_){r=null;}
+    if(!r||r.width<80||r.height<80||r.bottom<=pr.top+8||r.top>=pr.bottom-8||r.top>topBand)continue;
+    if(r.top<bestTop){best=el;bestTop=r.top;}
+  }
+  return best;
 }
 function anchorValid(a){
   if(!a)return false;
@@ -2433,6 +2508,7 @@ function anchorValid(a){
 }
 function anchorTextOffset(a){
   if(!anchorValid(a))return null;
+  if(a.media)return null;
   if(a.range)return sourceBoundaryOffset(a.range.startContainer,a.range.startOffset);
   var node=a.el;
   if(!node)return null;

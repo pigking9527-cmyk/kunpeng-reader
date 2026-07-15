@@ -64,7 +64,16 @@ fn open_validated_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn open_validated_url(url: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn open_validated_url(url: &str) -> Result<(), String> {
     std::process::Command::new("xdg-open")
         .arg(url)

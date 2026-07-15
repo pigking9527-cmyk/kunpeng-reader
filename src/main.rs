@@ -1,6 +1,8 @@
 // 防止 Windows release 构建弹出控制台窗口
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 mod atomic_file;
 mod backup;
 mod book;
