@@ -1,4 +1,4 @@
-name: macOS universal build
+name: macOS Apple Silicon build
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Universal app and DMG
+    name: Apple Silicon app and DMG
     runs-on: macos-14
     timeout-minutes: 90
     env:
@@ -24,12 +24,12 @@ jobs:
       - name: Setup Rust targets
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: macos-universal
+          shared-key: macos-aarch64
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -42,14 +42,15 @@ jobs:
       - name: Run UI tests
         run: node --test ui/tests/*.test.cjs
 
-      - name: Build universal macOS bundles
-        run: cargo tauri build --target universal-apple-darwin --bundles app,dmg
+      # The semantic search runtime does not ship Intel macOS prebuilt binaries.
+      - name: Build Apple Silicon macOS bundles
+        run: cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
 
       - name: Prepare artifacts and checksums
         shell: bash
         run: |
           set -euo pipefail
-          bundle_dir="target/universal-apple-darwin/release/bundle"
+          bundle_dir="target/aarch64-apple-darwin/release/bundle"
           out_dir="target/macos-release"
           mkdir -p "$out_dir"
 
@@ -58,14 +59,14 @@ jobs:
           test -n "$app_path"
           test -n "$dmg_path"
 
-          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$out_dir/Kunpeng-Reader-v1.9.0-macOS-universal.app.zip"
-          cp "$dmg_path" "$out_dir/Kunpeng-Reader-v1.9.0-macOS-universal.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$out_dir/Kunpeng-Reader-v1.9.0-macOS-Apple-Silicon.app.zip"
+          cp "$dmg_path" "$out_dir/Kunpeng-Reader-v1.9.0-macOS-Apple-Silicon.dmg"
           (cd "$out_dir" && shasum -a 256 * > SHA256SUMS.txt)
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: Kunpeng-Reader-v1.9.0-macOS-universal
+          name: Kunpeng-Reader-v1.9.0-macOS-Apple-Silicon
           path: target/macos-release/*
           if-no-files-found: error
           retention-days: 14
