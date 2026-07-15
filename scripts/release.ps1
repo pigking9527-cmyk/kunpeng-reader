@@ -73,7 +73,14 @@ function Copy-ReleaseAssets {
   $installerOut = Join-Path $dir "Kunpeng-Reader-v$Ver-x64-setup.exe"
   Copy-Item -LiteralPath $portable.FullName -Destination $portableOut -Force
   Copy-Item -LiteralPath $installer.FullName -Destination $installerOut -Force
-  return @($portableOut, $installerOut)
+
+  $checksumOut = Join-Path $dir "SHA256SUMS.txt"
+  $checksumLines = @($portableOut, $installerOut) | ForEach-Object {
+    $hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$hash  $([IO.Path]::GetFileName($_))"
+  }
+  [IO.File]::WriteAllLines($checksumOut, $checksumLines, [Text.UTF8Encoding]::new($false))
+  return @($portableOut, $installerOut, $checksumOut)
 }
 
 Push-Location $repoRoot
@@ -131,7 +138,7 @@ try {
         if ($Draft) { $args += "--draft" }
         gh @args
       }
-      gh release upload $tag $assets[0] $assets[1] --repo $Repo --clobber
+      gh release upload $tag $assets[0] $assets[1] $assets[2] --repo $Repo --clobber
       gh release view $tag --repo $Repo --json url,assets
     }
   }

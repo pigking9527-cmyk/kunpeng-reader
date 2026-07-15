@@ -31,6 +31,7 @@ MAX_TOKENS_PER_USER = 5
 TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000
 MAX_CONCURRENT_REQUESTS = 32
 MAX_IGNORED_DETAILS = 100
+SUPPORTED_ENTITY_KINDS = frozenset(("book_state_v2", "vocab", "reading_bucket_v2"))
 
 
 class RateLimiter:
@@ -236,6 +237,13 @@ def migrate(conn):
         # delivery channel is configured. Remove the retired support-code table.
         conn.execute("DROP TABLE IF EXISTS password_reset_codes")
         record_migration(conn, 5)
+        # V2 portable entities replace machine-local book paths and v1 reading buckets.
+        placeholders = ",".join("?" for _ in SUPPORTED_ENTITY_KINDS)
+        conn.execute(
+            f"DELETE FROM entities WHERE kind NOT IN ({placeholders})",
+            tuple(sorted(SUPPORTED_ENTITY_KINDS)),
+        )
+        record_migration(conn, 6)
 
 
 def next_server_stamp(conn):
@@ -468,14 +476,17 @@ class Handler(BaseHTTPRequestHandler):
         rows = conn.execute(
             """
             SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at
-            FROM entities WHERE user_id=? AND server_updated_at>?
+            FROM entities
+            WHERE user_id=? AND server_updated_at>?
+              AND kind IN ('book_state_v2','vocab','reading_bucket_v2')
             ORDER BY server_updated_at ASC LIMIT ?
             """,
             (user["id"], cursor, limit),
         ).fetchall()
         next_cursor = rows[-1]["server_updated_at"] if rows else cursor
         has_more = conn.execute(
-            "SELECT 1 FROM entities WHERE user_id=? AND server_updated_at>? LIMIT 1",
+            "SELECT 1 FROM entities WHERE user_id=? AND server_updated_at>? "
+            "AND kind IN ('book_state_v2','vocab','reading_bucket_v2') LIMIT 1",
             (user["id"], next_cursor),
         ).fetchone() is not None
         self.send_json(
@@ -644,6 +655,13 @@ class Handler(BaseHTTPRequestHandler):
                     record_ignored(
                         ignored,
                         {"kind": kind[:128], "id": entity_id[:512], "error": "INVALID_ID"},
+                    )
+                    continue
+                if kind not in SUPPORTED_ENTITY_KINDS:
+                    ignored_count += 1
+                    record_ignored(
+                        ignored,
+                        {"kind": kind[:128], "id": entity_id[:512], "error": "UNSUPPORTED_KIND"},
                     )
                     continue
                 payload = entity.get("json", entity.get("data", {}))

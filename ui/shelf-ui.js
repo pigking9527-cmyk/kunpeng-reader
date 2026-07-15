@@ -54,6 +54,14 @@ function bookRenderKey(b) {
     showCoverRating ? 1 : 0,
   ].join("\u001f");
 }
+function closeShelfCardFloaters() {
+  // 书卡会阻止事件冒泡，因此不能依赖 document 的兜底点击处理器。
+  menuEl.classList.remove("show");
+  filterPanel.classList.remove("show");
+  closeAccountPanel();
+  closeSearch(false);
+}
+
 function bookCard(b, index = 0) {
   const card = document.createElement("div");
   card.className = "book";
@@ -117,10 +125,7 @@ function bookCard(b, index = 0) {
   let clickTimer = null;
   card.addEventListener("click", (e) => {
     e.stopPropagation();
-    // 卡片自己拦截了事件，显式收起“排序与布局”面板，避免它悬在书架上。
-    filterPanel.classList.remove("show");
-    // 同样收起搜索框，但保留已输入的检索词与当前结果。
-    closeSearch(false);
+    closeShelfCardFloaters();
     if (clickTimer) {
       clearTimeout(clickTimer);
       clickTimer = null;
@@ -133,8 +138,7 @@ function bookCard(b, index = 0) {
   });
   card.addEventListener("dblclick", (e) => {
     e.stopPropagation();
-    filterPanel.classList.remove("show");
-    closeSearch(false);
+    closeShelfCardFloaters();
     if (clickTimer) {
       clearTimeout(clickTimer);
       clickTimer = null;

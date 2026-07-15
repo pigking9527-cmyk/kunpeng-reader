@@ -170,7 +170,10 @@ const SEM_BRUTE_FORCE_READ_BUDGET: u64 = 192 * 1024 * 1024;
 const SEM_INDEX_SNAPSHOT_TTL_MS: u64 = 10_000;
 const SEM_STATUS_CACHE_TTL_MS: u64 = 60_000;
 const SEM_HNSW_HITS_PER_SHARD: usize = 128;
-const MULTI_PROFILE_VERSION: u32 = 1;
+const MULTI_PROFILE_VERSION: u32 = 2;
+const LEGACY_MULTI_PROFILE_VERSION: u32 = 1;
+const GLOBAL_CACHE_VERSION: u32 = 3;
+const LEGACY_GLOBAL_CACHE_VERSION: u32 = 2;
 const MULTI_PROFILE_MIN_CENTERS: usize = 4;
 const MULTI_PROFILE_MAX_CENTERS: usize = 16;
 const MULTI_PROFILE_CHUNKS_PER_CENTER: usize = 256;
@@ -361,6 +364,16 @@ fn indexed_book_snapshot_cached(state: &AppState) -> (Vec<u64>, Vec<(u64, u64)>)
             return (cache.book_ids.clone(), cache.source_sig.clone());
         }
     }
+    // 合并画像已经携带全部书籍的源签名。优先从一个文件恢复快照，
+    // 避免冷启动时读取 777 份 profile 元数据和向量。
+    if let Some((book_ids, source_sig)) = merged_profile_snapshot(state) {
+        if let Ok(mut cache) = sem_index_snapshot_cache().lock() {
+            cache.updated_at = now;
+            cache.book_ids = book_ids.clone();
+            cache.source_sig = source_sig.clone();
+        }
+        return (book_ids, source_sig);
+    }
     let (book_ids, source_sig) = indexed_book_snapshot(state);
     if let Ok(mut cache) = sem_index_snapshot_cache().lock() {
         cache.updated_at = now;
@@ -409,16 +422,40 @@ fn clear_multi_profile_cache() {
     }
 }
 
+fn decode_multi_profile_index(bytes: &[u8]) -> Option<(MultiProfileIndex, bool)> {
+    if let Ok(index) = rmp_serde::from_slice::<MultiProfileIndex>(bytes) {
+        if index.v == MULTI_PROFILE_VERSION && index.model == SEM_MODEL {
+            return Some((index, false));
+        }
+    }
+    let index = bincode::deserialize::<MultiProfileIndex>(bytes).ok()?;
+    if index.v != LEGACY_MULTI_PROFILE_VERSION || index.model != SEM_MODEL {
+        return None;
+    }
+    Some((index, true))
+}
+
 fn load_multi_profile_index() -> Option<Arc<MultiProfileIndex>> {
     if let Ok(cache) = sem_multi_profile_cache().lock() {
         if let Some(index) = cache.as_ref() {
             return Some(index.clone());
         }
     }
-    let bytes = std::fs::read(multi_profile_path()?).ok()?;
-    let index: MultiProfileIndex = bincode::deserialize(&bytes).ok()?;
-    if index.v != MULTI_PROFILE_VERSION || index.model != SEM_MODEL {
-        return None;
+    let path = multi_profile_path()?;
+    let bytes = std::fs::read(&path).ok()?;
+    let (mut index, legacy) = decode_multi_profile_index(&bytes)?;
+    if legacy {
+        index.v = MULTI_PROFILE_VERSION;
+        if let Ok(migrated) = rmp_serde::to_vec(&index) {
+            if crate::atomic_file::write(&path, &migrated).is_ok() {
+                crate::log(&format!(
+                    "semantic_profile_bundle migrated books={} bytes_before={} bytes_after={}",
+                    index.books.len(),
+                    bytes.len(),
+                    migrated.len()
+                ));
+            }
+        }
     }
     let index = Arc::new(index);
     if let Ok(mut cache) = sem_multi_profile_cache().lock() {
@@ -427,8 +464,77 @@ fn load_multi_profile_index() -> Option<Arc<MultiProfileIndex>> {
     Some(index)
 }
 
+/// 从单个合并画像文件取得已索引书签名。新增或删除已索引图书时退回完整校验；
+/// 原文件内容是否改变仍由后台状态刷新负责，不阻塞前台首次查询。
+type IndexedBookSnapshot = (Vec<u64>, Vec<(u64, u64)>);
+
+fn merged_profile_snapshot(state: &AppState) -> Option<IndexedBookSnapshot> {
+    let index = load_multi_profile_index()?;
+    let library = state.library.lock().ok()?;
+    let library_ids = library
+        .books
+        .iter()
+        .filter(|book| book.format != "pdf")
+        .map(|book| book.id)
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut source_sig = index.source_sig.clone();
+    source_sig.sort_unstable_by_key(|(id, _)| *id);
+    if source_sig.is_empty()
+        || source_sig.len() != index.books.len()
+        || source_sig.iter().any(|(id, mtime)| {
+            !library_ids.contains(id)
+                || index
+                    .books
+                    .get(id)
+                    .map(|profile| profile.mtime != *mtime)
+                    .unwrap_or(true)
+        })
+    {
+        return None;
+    }
+
+    // 合并文件生成后若又新增了逐书画像，必须退回完整扫描并重建合并文件。
+    for book in library.books.iter().filter(|book| book.format != "pdf") {
+        if index.books.contains_key(&book.id) {
+            continue;
+        }
+        if sem_profile_meta_path(book.id).is_some_and(|path| path.exists())
+            && sem_profile_vec_path(book.id).is_some_and(|path| path.exists())
+        {
+            return None;
+        }
+    }
+    let book_ids = source_sig.iter().map(|(id, _)| *id).collect();
+    Some((book_ids, source_sig))
+}
+
+/// 启动后低成本预载合并画像。13 MB 左右的单文件换来首查不再打开上千个小文件。
+pub(crate) fn spawn_semantic_profile_warmup(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        set_thread_background(true);
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        let started = Instant::now();
+        let state = app.state::<AppState>();
+        let merged = load_multi_profile_index();
+        let snapshot = merged_profile_snapshot(state.inner());
+        crate::log(&format!(
+            "semantic_profile_bundle warm books={} snapshot={} elapsed_ms={}",
+            merged.as_ref().map(|index| index.books.len()).unwrap_or(0),
+            snapshot.as_ref().map(|(ids, _)| ids.len()).unwrap_or(0),
+            started.elapsed().as_millis()
+        ));
+        set_thread_background(false);
+
+        // 仅供本地兼容性验证；正常用户仍在首次语义查询时后台载入大图。
+        if std::env::var_os("KUNPENG_SEMANTIC_PREPARE_ON_START").is_some() {
+            let _ = prepare_semantic_search(app);
+        }
+    });
+}
+
 /// 懒加载语义模型（首次会下载到 %LOCALAPPDATA%/ebook-reader/models，约 120MB）。
-fn get_embedder(state: &AppState) -> Result<Arc<fastembed::TextEmbedding>, String> {
+fn get_embedder(state: &AppState) -> Result<Arc<Mutex<fastembed::TextEmbedding>>, String> {
     let mut slot = state.embedder.lock().unwrap();
     if let Some(m) = slot.as_ref() {
         return Ok(m.clone());
@@ -441,7 +547,7 @@ fn get_embedder(state: &AppState) -> Result<Arc<fastembed::TextEmbedding>, Strin
         opt = opt.with_cache_dir(d);
     }
     let m = TextEmbedding::try_new(opt).map_err(|e| format!("加载语义模型失败：{e}"))?;
-    let arc = Arc::new(m);
+    let arc = Arc::new(Mutex::new(m));
     *slot = Some(arc.clone());
     Ok(arc)
 }
@@ -556,7 +662,7 @@ fn read_or_backfill_sem_profile(state: &AppState, book: &book::Book) -> Option<(
 
 /// 为一本书建立语义索引：切块 → 批量嵌入（归一化）→ 落盘（.vec 原始 f32 + .json 元信息）。
 fn sem_build_book(
-    embedder: &fastembed::TextEmbedding,
+    embedder: &Mutex<fastembed::TextEmbedding>,
     id: u64,
     mtime: u64,
     chapters: &[String],
@@ -614,7 +720,11 @@ fn sem_build_book(
         }
         // bge 段落不加前缀，直接用原文
         let inputs: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
-        let embs = embedder.embed(inputs, None).map_err(|e| e.to_string())?;
+        let embs = embedder
+            .lock()
+            .map_err(|_| "语义模型锁定失败".to_string())?
+            .embed(inputs, None)
+            .map_err(|e| e.to_string())?;
         // 每批后让一小步，给前台留出调度间隙（稳态下也不至于把 8 核占满）
         std::thread::sleep(std::time::Duration::from_millis(6));
         for (k, (c, t)) in batch.iter().enumerate() {
@@ -855,7 +965,7 @@ fn build_multi_profile_file(state: &AppState) -> Result<(usize, usize), String> 
         books: entries,
     };
     let bytes =
-        bincode::serialize(&index).map_err(|error| format!("序列化多中心画像失败：{error}"))?;
+        rmp_serde::to_vec(&index).map_err(|error| format!("序列化多中心画像失败：{error}"))?;
     let path = multi_profile_path().ok_or("无缓存路径")?;
     crate::atomic_file::write(&path, &bytes)?;
     let built = index.books.len();
@@ -903,6 +1013,10 @@ fn sem_search_book(state: &AppState, book: &book::Book, q: &[f32]) -> Option<Sem
 }
 
 /// 全库分片快速索引是否存在且新鲜（版本/模型/参与书集合都匹配当前已索引的书）。
+fn global_cache_version_supported(version: u32) -> bool {
+    matches!(version, LEGACY_GLOBAL_CACHE_VERSION | GLOBAL_CACHE_VERSION)
+}
+
 fn global_index_fresh(state: &AppState) -> bool {
     let Some(p) = global_meta_path() else {
         return false;
@@ -913,7 +1027,7 @@ fn global_index_fresh(state: &AppState) -> bool {
     let (book_ids, source_sig) = indexed_book_snapshot_cached(state);
     match serde_json::from_str::<GlobalMeta>(&s) {
         Ok(m) => {
-            m.v == SEM_VERSION
+            global_cache_version_supported(m.v)
                 && m.model == SEM_MODEL
                 && m.book_ids == book_ids
                 && m.source_sig == source_sig
@@ -936,7 +1050,7 @@ fn global_build_meta_compatible(
     ids: &[u64],
     source_sig: &[(u64, u64)],
 ) -> bool {
-    m.v == SEM_VERSION
+    m.v == GLOBAL_CACHE_VERSION
         && m.model == SEM_MODEL
         && m.book_ids == ids
         && m.source_sig == source_sig
@@ -1987,11 +2101,11 @@ fn write_shard(
     }
     let map: GlobalHnsw = instant_distance::Builder::default().build(points, values);
     let mut f = std::io::BufWriter::new(std::fs::File::create(&hp).map_err(|e| e.to_string())?);
-    bincode::serialize_into(&mut f, &map).map_err(|e| e.to_string())?;
+    rmp_serde::encode::write(&mut f, &map).map_err(|e| e.to_string())?;
     f.flush().ok();
     let mp = global_shard_map_path(k).ok_or("无缓存路径")?;
     let mut mf = std::io::BufWriter::new(std::fs::File::create(&mp).map_err(|e| e.to_string())?);
-    bincode::serialize_into(&mut mf, &mapping).map_err(|e| e.to_string())?;
+    rmp_serde::encode::write(&mut mf, mapping).map_err(|e| e.to_string())?;
     mf.flush().ok();
     Ok(())
 }
@@ -2085,7 +2199,7 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
             k += 1;
             processed_books = idx;
             write_global_build_meta(&GlobalBuildMeta {
-                v: SEM_VERSION,
+                v: GLOBAL_CACHE_VERSION,
                 model: SEM_MODEL.to_string(),
                 dim,
                 book_ids: ids.clone(),
@@ -2143,7 +2257,7 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
         k += 1;
         processed_books = ids.len();
         write_global_build_meta(&GlobalBuildMeta {
-            v: SEM_VERSION,
+            v: GLOBAL_CACHE_VERSION,
             model: SEM_MODEL.to_string(),
             dim,
             book_ids: ids.clone(),
@@ -2167,7 +2281,7 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
         return Ok(());
     }
     let meta = GlobalMeta {
-        v: SEM_VERSION,
+        v: GLOBAL_CACHE_VERSION,
         model: SEM_MODEL.to_string(),
         dim,
         book_ids: ids,
@@ -2186,6 +2300,29 @@ fn build_global_index(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+fn decode_global_hnsw<R: std::io::Read>(version: u32, reader: R) -> Result<GlobalHnsw, String> {
+    if version == LEGACY_GLOBAL_CACHE_VERSION {
+        bincode::deserialize_from(reader).map_err(|error| error.to_string())
+    } else if version == GLOBAL_CACHE_VERSION {
+        rmp_serde::decode::from_read(reader).map_err(|error| error.to_string())
+    } else {
+        Err(format!("不支持的 HNSW 版本：{version}"))
+    }
+}
+
+fn decode_global_mapping<R: std::io::Read>(
+    version: u32,
+    reader: R,
+) -> Result<Vec<GlobalEntry>, String> {
+    if version == LEGACY_GLOBAL_CACHE_VERSION {
+        bincode::deserialize_from(reader).map_err(|error| error.to_string())
+    } else if version == GLOBAL_CACHE_VERSION {
+        rmp_serde::decode::from_read(reader).map_err(|error| error.to_string())
+    } else {
+        Err(format!("不支持的 HNSW 映射版本：{version}"))
+    }
+}
+
 /// 载入（并缓存）分片近邻索引。按内存预算尽量多载入分片；与当前已索引书集合不一致则视为过期。
 /// 返回 None 表示无索引/过期/损坏（应整体退回暴力）。
 fn load_global_index(state: &AppState) -> Option<Arc<LoadedShards>> {
@@ -2201,7 +2338,7 @@ fn load_global_index(state: &AppState) -> Option<Arc<LoadedShards>> {
     }
     let meta: GlobalMeta =
         serde_json::from_str(&std::fs::read_to_string(global_meta_path()?).ok()?).ok()?;
-    if meta.v != SEM_VERSION || meta.model != SEM_MODEL {
+    if !global_cache_version_supported(meta.v) || meta.model != SEM_MODEL {
         return None;
     }
     if meta.book_ids != current_ids || meta.source_sig != current_sig {
@@ -2225,13 +2362,32 @@ fn load_global_index(state: &AppState) -> Option<Arc<LoadedShards>> {
             break;
         }
         let shard_started = Instant::now();
-        let map: GlobalHnsw = bincode::deserialize_from(std::io::BufReader::new(
-            std::fs::File::open(hnsw_path).ok()?,
-        ))
-        .ok()?;
-        let mapping: Vec<GlobalEntry> =
-            bincode::deserialize_from(std::io::BufReader::new(std::fs::File::open(map_path).ok()?))
-                .ok()?;
+        let map = match decode_global_hnsw(
+            meta.v,
+            std::io::BufReader::new(std::fs::File::open(hnsw_path).ok()?),
+        ) {
+            Ok(map) => map,
+            Err(error) => {
+                crate::log(&format!(
+                    "semantic_index_load failed shard={k} format_v={} stage=hnsw error={error}",
+                    meta.v
+                ));
+                return None;
+            }
+        };
+        let mapping = match decode_global_mapping(
+            meta.v,
+            std::io::BufReader::new(std::fs::File::open(map_path).ok()?),
+        ) {
+            Ok(mapping) => mapping,
+            Err(error) => {
+                crate::log(&format!(
+                    "semantic_index_load failed shard={k} format_v={} stage=map error={error}",
+                    meta.v
+                ));
+                return None;
+            }
+        };
         for id in &sh.books {
             covered.insert(*id);
         }
@@ -2256,7 +2412,8 @@ fn load_global_index(state: &AppState) -> Option<Arc<LoadedShards>> {
     });
     *state.global_index.lock().unwrap() = Some(arc.clone());
     crate::log(&format!(
-        "semantic_index_load complete shards={} covered={} budget_mb={} used_mb={} elapsed_ms={}",
+        "semantic_index_load complete format_v={} shards={} covered={} budget_mb={} used_mb={} elapsed_ms={}",
+        meta.v,
         arc.graphs.len(),
         arc.covered.len(),
         budget / (1024 * 1024),
@@ -2526,6 +2683,8 @@ pub(crate) fn prepare_semantic_search(app: tauri::AppHandle) -> Result<bool, Str
                     .lock()
                     .map_err(|_| "语义编码锁定失败".to_string())?;
                 let _ = embedder
+                    .lock()
+                    .map_err(|_| "语义模型锁定失败".to_string())?
                     .embed(
                         vec![format!("{SEM_QUERY_PREFIX}阅读")],
                         None,
@@ -2593,6 +2752,8 @@ fn semantic_search_inner(
             .lock()
             .map_err(|_| "语义编码锁定失败".to_string())?;
         embedder
+            .lock()
+            .map_err(|_| "语义模型锁定失败".to_string())?
             .embed(vec![format!("{SEM_QUERY_PREFIX}{query}")], None)
             .map_err(|e| e.to_string())?
             .remove(0)
@@ -2798,7 +2959,7 @@ pub(crate) fn sem_probe() {
             let _ = std::fs::create_dir_all(&d);
             opt = opt.with_cache_dir(d);
         }
-        let model = TextEmbedding::try_new(opt).map_err(|e| format!("MODEL ERR: {e}"))?;
+        let mut model = TextEmbedding::try_new(opt).map_err(|e| format!("MODEL ERR: {e}"))?;
         sem_probe_write("model loaded, embedding...");
         let texts = vec![
             format!("{SEM_QUERY_PREFIX}高兴"),
@@ -2854,14 +3015,14 @@ pub(crate) fn hnsw_probe() {
     ];
     let vals: Vec<u32> = vec![10, 11, 12, 13];
     let map: HnswMap<V, u32> = Builder::default().build(pts, vals);
-    let bytes = match bincode::serialize(&map) {
+    let bytes = match rmp_serde::to_vec(&map) {
         Ok(b) => b,
         Err(e) => {
             write(&format!("SER ERR: {e}"));
             return;
         }
     };
-    let map2: HnswMap<V, u32> = match bincode::deserialize(&bytes) {
+    let map2: HnswMap<V, u32> = match rmp_serde::from_slice(&bytes) {
         Ok(m) => m,
         Err(e) => {
             write(&format!("DE ERR: {e}"));
@@ -2933,11 +3094,80 @@ mod tests {
             source_sig: vec![(7, 11)],
             books,
         };
-        let bytes = bincode::serialize(&index).unwrap();
-        let decoded: MultiProfileIndex = bincode::deserialize(&bytes).unwrap();
+        let bytes = rmp_serde::to_vec(&index).unwrap();
+        let decoded: MultiProfileIndex = rmp_serde::from_slice(&bytes).unwrap();
         let book = decoded.books.get(&7).unwrap();
         assert_eq!(book.mtime, 11);
         assert_eq!(book.vector_bytes, 16);
         assert_eq!(book.centers.len(), 4);
+    }
+
+    #[test]
+    fn legacy_multi_profile_decodes_and_is_marked_for_migration() {
+        let mut books = HashMap::new();
+        books.insert(
+            7,
+            MultiProfileBook {
+                mtime: 11,
+                dim: 2,
+                vector_bytes: 16,
+                centers: vec![1.0, 0.0],
+            },
+        );
+        let legacy = MultiProfileIndex {
+            v: LEGACY_MULTI_PROFILE_VERSION,
+            model: SEM_MODEL.into(),
+            source_sig: vec![(7, 11)],
+            books,
+        };
+        let bytes = bincode::serialize(&legacy).unwrap();
+        let (decoded, needs_migration) = decode_multi_profile_index(&bytes).unwrap();
+        assert!(needs_migration);
+        assert_eq!(decoded.books.len(), 1);
+    }
+
+    #[test]
+    fn legacy_and_current_hnsw_shards_decode_through_the_same_reader() {
+        let points = vec![
+            SemPoint(vec![1.0, 0.0]),
+            SemPoint(vec![0.0, 1.0]),
+            SemPoint(vec![0.9, 0.1]),
+        ];
+        let values = vec![10u32, 11, 12];
+        let map: GlobalHnsw = instant_distance::Builder::default().build(points, values);
+        let mapping = vec![GlobalEntry {
+            b: 7,
+            c: 3,
+            t: "测试".into(),
+        }];
+
+        let legacy_map = bincode::serialize(&map).unwrap();
+        let legacy_mapping = bincode::serialize(&mapping).unwrap();
+        let current_map = rmp_serde::to_vec(&map).unwrap();
+        let current_mapping = rmp_serde::to_vec(&mapping).unwrap();
+
+        for (version, map_bytes, mapping_bytes) in [
+            (
+                LEGACY_GLOBAL_CACHE_VERSION,
+                legacy_map.as_slice(),
+                legacy_mapping.as_slice(),
+            ),
+            (
+                GLOBAL_CACHE_VERSION,
+                current_map.as_slice(),
+                current_mapping.as_slice(),
+            ),
+        ] {
+            let decoded = decode_global_hnsw(version, std::io::Cursor::new(map_bytes)).unwrap();
+            let decoded_mapping =
+                decode_global_mapping(version, std::io::Cursor::new(mapping_bytes)).unwrap();
+            let mut search = instant_distance::Search::default();
+            let hits = decoded
+                .search(&SemPoint(vec![1.0, 0.0]), &mut search)
+                .take(1)
+                .collect::<Vec<_>>();
+            assert_eq!(*hits[0].value, 10);
+            assert_eq!(decoded_mapping[0].b, 7);
+        }
     }
 }

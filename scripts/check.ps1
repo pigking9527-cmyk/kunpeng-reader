@@ -3,27 +3,35 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# PowerShell does not treat a non-zero native command exit code as a terminating
-# error by default. CI checks invoke Cargo and Node directly, so opt in to
-# fail-fast behavior instead of continuing to a misleading "All checks passed".
-if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
-  $PSNativeCommandUseErrorActionPreference = $true
+
+function Invoke-NativeCheck {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    [Parameter(Mandatory = $true)]
+    [scriptblock]$Command
+  )
+
+  & $Command
+  $exitCode = $LASTEXITCODE
+  if ($exitCode -ne 0) {
+    throw "$Name failed with exit code $exitCode."
+  }
 }
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
   Write-Host '== cargo fmt --check =='
-  cargo fmt -- --check
+  Invoke-NativeCheck 'cargo fmt --check' { cargo fmt -- --check }
 
   Write-Host '== cargo clippy =='
-  cargo clippy --all-targets -- -D warnings
+  Invoke-NativeCheck 'cargo clippy' { cargo clippy --all-targets -- -D warnings }
 
   Write-Host '== cargo check =='
-  cargo check
-
+  Invoke-NativeCheck 'cargo check' { cargo check }
 
   Write-Host '== cargo test =='
-  cargo test
+  Invoke-NativeCheck 'cargo test' { cargo test }
   if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     throw 'Node.js not found: cannot run JavaScript syntax checks.'
   }
@@ -33,15 +41,29 @@ try {
     Where-Object { $_.FullName -notlike "*\ui\pdfjs\*" } |
     Sort-Object FullName
   foreach ($file in $jsFiles) {
-    node --check $file.FullName
+    Invoke-NativeCheck "node --check $($file.FullName)" { node --check $file.FullName }
   }
 
   Write-Host '== frontend behavior tests =='
-  node --test 'ui/tests/*.test.cjs'
+  Invoke-NativeCheck 'frontend behavior tests' { node --test 'ui/tests/*.test.cjs' }
+
+  if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    throw 'Python not found: cannot run sync server tests.'
+  }
+  Write-Host '== sync server tests =='
+  $previousNoBytecode = $env:PYTHONDONTWRITEBYTECODE
+  $env:PYTHONDONTWRITEBYTECODE = '1'
+  Push-Location (Join-Path $repo 'server\reader-sync-api')
+  try {
+    Invoke-NativeCheck 'sync server tests' { python -m unittest -v test_app.py }
+  } finally {
+    Pop-Location
+    $env:PYTHONDONTWRITEBYTECODE = $previousNoBytecode
+  }
 
   if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
     Write-Host '== cargo audit =='
-    cargo audit
+    Invoke-NativeCheck 'cargo audit' { cargo audit --no-yanked }
   } else {
     Write-Warning 'cargo-audit is not installed; CI installs it and enforces the audit gate.'
   }
@@ -92,13 +114,19 @@ try {
     throw 'reader-cross-search-ui.js must be loaded after reader.js because it uses reader window globals and invokes open_book_at.'
   }
   $readerPageRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\reader_page.rs'), [System.Text.Encoding]::UTF8)
-  if ($readerPageRs -notmatch 'include_str!\("../ui/reader-page-head.html"\)') {
-    throw 'reader_page.rs must keep reader injected HTML/CSS/JS in ui/reader-page-head.html via include_str.'
+  $readerModuleNames = @('reader-page-style.html', 'reader-page-layout.js', 'reader-page-annotations.js', 'reader-page-runtime.js')
+  foreach ($readerModuleName in $readerModuleNames) {
+    $readerModuleNeedle = 'include_str!("../ui/' + $readerModuleName + '")'
+    if ($readerPageRs -notmatch [regex]::Escape($readerModuleNeedle)) {
+      throw "reader_page.rs missing injected reader module: $readerModuleName"
+    }
   }
-  $readerInjectedHead = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader-page-head.html'), [System.Text.Encoding]::UTF8)
+  $readerInjectedHead = ($readerModuleNames | ForEach-Object {
+    [System.IO.File]::ReadAllText((Join-Path $repo "ui\$_"), [System.Text.Encoding]::UTF8)
+  }) -join ''
   foreach ($requiredReaderHook in @('showTranslateResult', 'translateText', 'semanticSearch', 'hl-settings-pop', 'highlightMenuActionsV1', 'highlightMenuDisplayModeV1', 'highlightMenuSizeV1', 'showFootnote')) {
     if ($readerInjectedHead -notmatch [regex]::Escape($requiredReaderHook)) {
-      throw "ui/reader-page-head.html missing required injected reader hook: $requiredReaderHook"
+      throw "reader injected modules missing required hook: $requiredReaderHook"
     }
   }
   $readerJsText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader.js'), [System.Text.Encoding]::UTF8)
@@ -133,6 +161,14 @@ try {
   if ($bad.Count) {
     $bad | ForEach-Object { Write-Error "Invalid UTF-8: $_" }
     throw "$($bad.Count) file(s) failed UTF-8 strict check."
+  }
+
+  Write-Host '== release asset integrity =='
+  $releaseScript = [System.IO.File]::ReadAllText((Join-Path $repo 'scripts\release.ps1'), [System.Text.Encoding]::UTF8)
+  foreach ($requiredReleaseHook in @('Get-FileHash -LiteralPath $_ -Algorithm SHA256', 'SHA256SUMS.txt')) {
+    if ($releaseScript -notmatch [regex]::Escape($requiredReleaseHook)) {
+      throw "scripts/release.ps1 missing required release integrity hook: $requiredReleaseHook"
+    }
   }
 
   Write-Host '== version consistency =='
@@ -270,10 +306,3 @@ try {
 } finally {
   Pop-Location
 }
-
-
-
-
-
-
-

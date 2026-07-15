@@ -389,16 +389,50 @@ if (dirsAddBtn) {
 }
 // 工具栏齿轮 → 打开“常用设置”弹窗
 const fpSettingsModal = document.getElementById("fp-settings-modal");
+const recoveryBackupStatus = document.getElementById("recovery-backup-status");
+const recoveryBackupButton = document.getElementById("settings-create-backup");
+function backupBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+}
+function renderRecoveryBackupStatus(status) {
+  if (!recoveryBackupStatus) return;
+  recoveryBackupStatus.textContent = status.count
+    ? ("已保留 " + status.count + " 个恢复点，共 " + backupBytes(status.total_bytes) +
+       "；最近一次 " + status.latest + "。每日自动创建，最多保留 7 个。")
+    : "尚无恢复点；软件会每日自动创建，最多保留 7 个。";
+  recoveryBackupStatus.title = status.directory || "";
+}
+async function refreshRecoveryBackupStatus() {
+  renderRecoveryBackupStatus(await invoke("recovery_backup_status"));
+}
 function openCommonSettings() {
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
   closeAccountPanel();
   closeSearch(true);
   fpSettingsModal.classList.add("show");
+  refreshRecoveryBackupStatus().catch((e) => {
+    if (recoveryBackupStatus) recoveryBackupStatus.textContent = "恢复点状态读取失败：" + e;
+  });
 }
 document.getElementById("settings-toolbar-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   openCommonSettings();
+});
+recoveryBackupButton?.addEventListener("click", async () => {
+  recoveryBackupButton.disabled = true;
+  recoveryBackupButton.textContent = "正在创建…";
+  try {
+    const status = await invoke("create_recovery_backup");
+    renderRecoveryBackupStatus(status);
+  } catch (e) {
+    alert("创建恢复点失败：" + e);
+  } finally {
+    recoveryBackupButton.disabled = false;
+    recoveryBackupButton.textContent = "立即创建";
+  }
 });
 document.getElementById("open-default-apps-settings")?.addEventListener("click", async () => {
   try {
@@ -1060,7 +1094,7 @@ async function importDataPackage() {
   });
   if (!path) return;
   const count = await invoke("import_data_package", { path });
-  alert("已导入 " + count + " 条同步数据。重启软件后可继续迁移/合并到运行数据。");
+  alert("已创建导入前恢复点，并导入 " + count + " 条同步数据。数据已立即合并到当前书架。");
 }
 
 function openRandom() {
@@ -1169,7 +1203,13 @@ const libraryHealthBody = document.getElementById("library-health-body");
 function libraryHealthEscape(value) {
   return String(value || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
-function renderLibraryHealth(report) {
+function libraryHealthBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
+}function renderLibraryHealth(report) {
   const missing = report.missing || [];
   const duplicates = report.duplicates || [];
   let html = '<div class="health-summary">' +
@@ -1187,8 +1227,27 @@ function renderLibraryHealth(report) {
     `<button class="btn-plain health-merge" data-ids="${group.books.map((book) => libraryHealthEscape(book.id)).join(",")}">合并为一条</button>` +
     '</div>'
   ).join("") : '<div class="stats-empty">没有发现重复内容</div>';
-  html += '</section>';
+  const index = report.search_index || {};
+  html += '</section><section class="health-section"><h4>全文索引与缓存</h4>' +
+    '<div class="health-summary">' +
+    `<span>压缩索引 ${index.binary_files || 0}</span><span>旧 JSON ${index.legacy_files || 0}</span>` +
+    `<span>孤儿文件 ${index.orphan_files || 0}</span><span>磁盘 ${libraryHealthBytes(index.disk_bytes)}</span></div>` +
+    `<div class="health-group-title">内存 LRU：${libraryHealthBytes(index.memory_bytes)} / ${libraryHealthBytes(index.memory_limit_bytes)}，${index.memory_entries || 0} 个缓存条目；磁盘上限 ${libraryHealthBytes(index.disk_limit_bytes)}。</div>` +
+    '<button class="btn-plain health-index-clean" type="button">清理孤儿索引并执行配额治理</button></section>';
   libraryHealthBody.innerHTML = html;
+  libraryHealthBody.querySelector(".health-index-clean")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "正在清理…";
+    try {
+      await invoke("maintain_search_index");
+      await openLibraryHealth();
+    } catch (e) {
+      alert("索引清理失败：" + e);
+      button.disabled = false;
+      button.textContent = "清理孤儿索引并执行配额治理";
+    }
+  });
   libraryHealthBody.querySelectorAll(".health-relocate").forEach((button) => {
     button.addEventListener("click", async () => {
       const format = String(button.dataset.format || "").toLowerCase();
@@ -1701,8 +1760,11 @@ window.addEventListener("DOMContentLoaded", () => {
     }, 10000);
     // 读取自动导入配置并反映到设置面板。真正扫描延后，避免和首屏封面加载抢资源。
     setTimeout(() => {
-      if (!debugSettingOn("bg_sync")) return;
-      startupTimed("sync-settings", () => loadSyncSettingsOnce(), "background").catch(() => {});
+      // 账号状态始终从 SQLite 恢复；后台开关只控制联网同步，不能让已登录账号看起来丢失。
+      startupTimed("sync-settings", async () => {
+        await loadSyncSettingsOnce();
+        if (debugSettingOn("bg_sync")) await syncOnStartup();
+      }, "background").catch(() => {});
     }, 1200);
     startupTimed("auto-import-config", () => invoke("get_auto_import"), "background")
       .then((c) => { autoImport = c || autoImport; reflectAutoImport(); })

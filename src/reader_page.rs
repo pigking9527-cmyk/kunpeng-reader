@@ -1,7 +1,15 @@
 /// 合并页的基础样式 + 分页脚本。
 ///
-/// 具体 HTML/CSS/JS 放在 ui/reader-page-head.html，避免把阅读页注入脚本继续塞进 Rust 大文件。
-pub(crate) const READER_PAGE_HEAD: &str = include_str!("../ui/reader-page-head.html");
+/// 注入页按职责拆分；编译期拼接为一个文档头，不增加运行时请求。
+pub(crate) const READER_PAGE_HEAD: &str = concat!(
+    include_str!("../ui/reader-page-style.html"),
+    "<script>",
+    include_str!("../ui/reader-page-layout.js"),
+    include_str!("../ui/reader-page-annotations.js"),
+    include_str!("../ui/reader-page-runtime.js"),
+    "</script>
+"
+);
 
 #[cfg(test)]
 mod tests {
@@ -26,5 +34,9 @@ mod tests {
         assert!(READER_PAGE_HEAD.contains("semanticSearch"));
         assert!(READER_PAGE_HEAD.contains("translateResult"));
         assert!(READER_PAGE_HEAD.contains("dictResult"));
+        let layout = READER_PAGE_HEAD.find("function showChapter").unwrap();
+        let annotations = READER_PAGE_HEAD.find("// ---- 高亮/批注 ----").unwrap();
+        let runtime = READER_PAGE_HEAD.find("// ---- 朗读").unwrap();
+        assert!(layout < annotations && annotations < runtime);
     }
 }

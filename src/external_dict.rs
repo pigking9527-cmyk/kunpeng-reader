@@ -1027,7 +1027,11 @@ fn dict_id_for(path: &Path) -> String {
             }
         }
     }
-    let hex = format!("{:x}", h.finalize());
+    let hex = h
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     hex[..16].to_string()
 }
 

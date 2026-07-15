@@ -12,28 +12,29 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
-epub = "2"
+epub = { version = "2.1.5", path = "vendor/epub" }
 image = "0.25"
 encoding_rs = "0.8"
 chardetng = "0.1"
 memchr = "2"
-fastembed = "4"
+fastembed = "5.17"
 instant-distance = { version = "0.6", features = ["with-serde"] }
-bincode = "1"
+rmp-serde = "1.3"
+bincode = "1.3" # 只用于无损读取并迁移 v1/v2 语义索引
 pdf-extract = "0.12"
 lopdf = "0.44"
 chrono = "0.4"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3.3", features = ["json"] }
 tokio = { version = "1", features = ["rt"] }
 flate2 = "1"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 mobi = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
-zip = "3.0.0"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 ammonia = "4.1"
 
 # 正式发布档：保留优化，同时加快日常 release 构建。

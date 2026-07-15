@@ -1,4 +1,4 @@
-// 阅读页跨书搜索：从选区/高亮文字直接检索其它书中的同词或同句。
+// 阅读页全书架搜索：从选区/高亮文字检索全部图书，包含当前正在阅读的书。
 const crossModal = document.getElementById("cross-modal");
 const crossTitle = document.getElementById("cross-title");
 const crossInput = document.getElementById("cross-input");
@@ -126,12 +126,12 @@ window.consumePendingCrossSearch = consumePendingCrossSearch;
 function renderCrossSearch(results) {
   crossLastResults = results || [];
   crossResults.innerHTML = "";
-  const currentId = crossCurrentBookId();
-  const list = crossLastResults.filter((book) => String(book.book_id || "") !== String(currentId));
+  // 后端结果包含当前书；阅读页也必须展示它，点击时 open_book_at 会在当前窗口内跳转。
+  const list = crossLastResults;
   if (!list.length) {
     const hint = crossMode === "semantic"
       ? "语义索引里没有找到与「" + crossEscapeHtml(crossTerm) + "」相似的文本。若很多书未建语义索引，请先建立索引。"
-      : "其它书里没有找到「" + crossEscapeHtml(crossTerm) + "」";
+      : "全书架没有找到「" + crossEscapeHtml(crossTerm) + "」";
     crossResults.innerHTML = '<div class="cross-empty">' + hint + "</div>";
     crossStatus.textContent = "未找到";
     return;

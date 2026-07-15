@@ -14,10 +14,12 @@ pub(crate) struct UpdateInfo {
 }
 
 fn http_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(6))
-        .timeout_read(std::time::Duration::from_secs(8))
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(6)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(8)))
+        .timeout_recv_body(Some(std::time::Duration::from_secs(8)))
         .build()
+        .into()
 }
 
 fn ver_gt(a: &str, b: &str) -> bool {
@@ -44,11 +46,12 @@ fn ver_gt(a: &str, b: &str) -> bool {
 fn fetch_json(agent: &ureq::Agent, url: &str) -> Option<serde_json::Value> {
     agent
         .get(url)
-        .set("User-Agent", "kunpeng-reader")
-        .set("Accept", "application/json")
+        .header("User-Agent", "kunpeng-reader")
+        .header("Accept", "application/json")
         .call()
         .ok()?
-        .into_json::<serde_json::Value>()
+        .body_mut()
+        .read_json::<serde_json::Value>()
         .ok()
 }
 

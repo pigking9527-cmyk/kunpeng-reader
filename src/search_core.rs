@@ -1,81 +1,115 @@
-fn is_cjk(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x3400..=0x4DBF
-            | 0x4E00..=0x9FFF
-            | 0xF900..=0xFAFF
-            | 0x20000..=0x2A6DF
-            | 0x2A700..=0x2B73F
-            | 0x2B740..=0x2B81F
-            | 0x2B820..=0x2CEAF
-    )
-}
-
-/// 提取 ASCII 英数字词，返回 (小写词, 起始字节偏移, 字节长度)。
-/// 只索引长度 >= 2 的词，避免 a/i 等噪声词撑爆索引。
-pub fn ascii_terms(text: &str) -> Vec<(String, usize, usize)> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        while i < bytes.len() && !bytes[i].is_ascii_alphanumeric() {
-            i += 1;
-        }
-        let start = i;
-        while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
-            i += 1;
-        }
-        if i > start + 1 {
-            let term = text[start..i].to_ascii_lowercase();
-            out.push((term, start, i - start));
-        }
-    }
-    out
-}
-
 /// 只把 ASCII 大写转小写（多字节 UTF-8/中文保持原字节，长度不变 → 字节偏移仍有效）。
 pub fn ascii_lower_bytes(s: &str) -> Vec<u8> {
     s.bytes().map(|b| b.to_ascii_lowercase()).collect()
 }
 
-/// 提取连续 CJK 文本的 2/3 字 ngram，返回 (ngram, 起始字节偏移, 字节长度)。
-/// 这样中文查询可以走倒排索引，而不是每次全库扫描。
-pub fn cjk_ngrams(text: &str) -> Vec<(String, usize, usize)> {
-    let mut out = Vec::new();
-    let mut run: Vec<(char, usize, usize)> = Vec::new();
-    let flush = |run: &mut Vec<(char, usize, usize)>, out: &mut Vec<(String, usize, usize)>| {
-        if run.len() < 2 {
-            run.clear();
-            return;
-        }
-        for n in 2..=3 {
-            if run.len() < n {
-                continue;
-            }
-            for win in run.windows(n) {
-                let mut term = String::new();
-                for (ch, _, _) in win {
-                    term.push(*ch);
-                }
-                let start = win[0].1;
-                let end = win[n - 1].2;
-                out.push((term, start, end - start));
-            }
-        }
-        run.clear();
-    };
-    for (idx, ch) in text.char_indices() {
-        let end = idx + ch.len_utf8();
-        if is_cjk(ch) {
-            run.push((ch, idx, end));
-        } else {
-            flush(&mut run, &mut out);
-        }
-    }
-    flush(&mut run, &mut out);
-    out
+const BLOOM_MIN_BYTES: usize = 16 * 1024;
+const BLOOM_MAX_BYTES: usize = 1024 * 1024;
+const BLOOM_SOURCE_BYTES_PER_FILTER_BYTE: usize = 16;
+
+#[derive(Debug, Clone)]
+pub struct BookSearchBloom {
+    bits: Vec<u8>,
 }
 
+fn bloom_storage_bytes(source_bytes: usize) -> usize {
+    source_bytes
+        .div_ceil(BLOOM_SOURCE_BYTES_PER_FILTER_BYTE)
+        .clamp(BLOOM_MIN_BYTES, BLOOM_MAX_BYTES)
+}
+
+fn normalized_search_char(ch: char) -> u32 {
+    if ch.is_ascii_uppercase() {
+        ch.to_ascii_lowercase() as u32
+    } else {
+        ch as u32
+    }
+}
+
+fn bigram_hash(first: char, second: char) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for value in [
+        normalized_search_char(first),
+        normalized_search_char(second),
+    ] {
+        hash ^= value as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+        hash ^= (value as u64).rotate_left(17);
+        hash = hash.wrapping_mul(0x9e37_79b1_85eb_ca87);
+    }
+    hash
+}
+
+impl BookSearchBloom {
+    pub fn from_chapters(chapters: &[String]) -> Self {
+        let source_bytes = chapters.iter().map(String::len).sum();
+        let mut bloom = Self {
+            bits: vec![0; bloom_storage_bytes(source_bytes)],
+        };
+        for chapter in chapters {
+            let mut chars = chapter.chars();
+            let Some(mut previous) = chars.next() else {
+                continue;
+            };
+            for current in chars {
+                bloom.insert_bigram(previous, current);
+                previous = current;
+            }
+        }
+        bloom
+    }
+
+    pub fn from_bits(bits: Vec<u8>) -> Option<Self> {
+        if !(BLOOM_MIN_BYTES..=BLOOM_MAX_BYTES).contains(&bits.len()) {
+            return None;
+        }
+        Some(Self { bits })
+    }
+
+    pub fn bits(&self) -> &[u8] {
+        &self.bits
+    }
+
+    pub fn might_contain(&self, query: &str) -> bool {
+        let mut chars = query.chars();
+        let Some(mut previous) = chars.next() else {
+            return true;
+        };
+        for current in chars {
+            if !self.contains_bigram(previous, current) {
+                return false;
+            }
+            previous = current;
+        }
+        true
+    }
+
+    fn positions(&self, first: char, second: char) -> (usize, usize) {
+        let bit_count = self.bits.len() * 8;
+        let hash = bigram_hash(first, second);
+        let first = (hash % bit_count as u64) as usize;
+        let mut second =
+            ((hash.rotate_left(29) ^ 0x9e37_79b9_7f4a_7c15) % bit_count as u64) as usize;
+        if second == first {
+            second = (second + 1) % bit_count;
+        }
+        (first, second)
+    }
+
+    fn insert_bigram(&mut self, first: char, second: char) {
+        let (first, second) = self.positions(first, second);
+        for position in [first, second] {
+            self.bits[position / 8] |= 1 << (position % 8);
+        }
+    }
+
+    fn contains_bigram(&self, first: char, second: char) -> bool {
+        let (first, second) = self.positions(first, second);
+        [first, second]
+            .into_iter()
+            .all(|position| self.bits[position / 8] & (1 << (position % 8)) != 0)
+    }
+}
 fn floor_char_boundary(s: &str, mut i: usize) -> usize {
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;
@@ -99,56 +133,17 @@ pub fn snippet_at_with_context(text: &str, mb: usize, ml: usize, context: usize)
 }
 
 /// 命中位置（字节偏移）前后各取约 80 字节作为上下文片段；保持 UTF-8 边界安全。
+#[cfg(test)]
 pub fn snippet_at(text: &str, mb: usize, ml: usize) -> String {
     snippet_at_with_context(text, mb, ml, 80)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeywordPostingDraft {
-    pub term: String,
-    pub count: u32,
-    pub snippets: Vec<String>,
-}
-
-/// 为单章文本生成倒排索引入库前的中间结果。调用方负责补 book_id/chapter 并写库。
-pub fn keyword_postings_for_chapter(text: &str) -> Vec<KeywordPostingDraft> {
-    let mut map: std::collections::HashMap<String, (u32, Vec<String>)> =
-        std::collections::HashMap::new();
-    for (term, pos, len) in ascii_terms(text).into_iter().chain(cjk_ngrams(text)) {
-        let entry = map.entry(term).or_insert((0, Vec::new()));
-        entry.0 = entry.0.saturating_add(1);
-        if entry.1.len() < 6 {
-            entry.1.push(snippet_at(text, pos, len));
-        }
-    }
-    let mut out: Vec<KeywordPostingDraft> = map
-        .into_iter()
-        .map(|(term, (count, snippets))| KeywordPostingDraft {
-            term,
-            count,
-            snippets,
-        })
-        .collect();
-    out.sort_by(|a, b| a.term.cmp(&b.term));
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ascii_lower_bytes, ascii_terms, cjk_ngrams, keyword_postings_for_chapter, snippet_at,
-        snippet_at_with_context,
+        ascii_lower_bytes, bloom_storage_bytes, snippet_at, snippet_at_with_context,
+        BookSearchBloom, BLOOM_MAX_BYTES, BLOOM_MIN_BYTES,
     };
-
-    #[test]
-    fn ascii_terms_extract_words_with_byte_offsets() {
-        let terms = ascii_terms("Hi, ASP.NET Core 8 与 Rust2026!");
-        assert_eq!(terms[0], ("hi".to_string(), 0, 2));
-        assert_eq!(terms[1], ("asp".to_string(), 4, 3));
-        assert_eq!(terms[2], ("net".to_string(), 8, 3));
-        assert_eq!(terms[3], ("core".to_string(), 12, 4));
-        assert_eq!(terms[4].0, "rust2026");
-    }
 
     #[test]
     fn ascii_lower_keeps_utf8_byte_shape() {
@@ -177,28 +172,25 @@ mod tests {
         assert!(long.len() > short.len());
         assert!(std::str::from_utf8(long.as_bytes()).is_ok());
     }
-
     #[test]
-    fn keyword_postings_count_terms_and_limit_snippets() {
-        let text = "Rust rust RUST go a ".to_string() + &"term ".repeat(12);
-        let postings = keyword_postings_for_chapter(&text);
-        let rust = postings.iter().find(|p| p.term == "rust").unwrap();
-        assert_eq!(rust.count, 3);
-        assert_eq!(rust.snippets.len(), 3);
-        let term = postings.iter().find(|p| p.term == "term").unwrap();
-        assert_eq!(term.count, 12);
-        assert_eq!(term.snippets.len(), 6);
-        assert!(postings.iter().all(|p| p.term != "a"));
+    fn bloom_never_rejects_real_substrings_and_normalizes_ascii_case() {
+        let text = "中国文史哲大辞典 Rust Language 南明史".to_string();
+        let bloom = BookSearchBloom::from_chapters(std::slice::from_ref(&text));
+        let chars: Vec<char> = text.chars().collect();
+        for width in 2..=8 {
+            for window in chars.windows(width) {
+                let query: String = window.iter().collect();
+                assert!(bloom.might_contain(&query), "false negative: {query}");
+            }
+        }
+        assert!(bloom.might_contain("RUST"));
+        assert!(!bloom.might_contain("量子纠缠"));
     }
 
     #[test]
-    fn cjk_ngrams_extracts_bigrams_and_trigrams_with_offsets() {
-        let text = "南明史，清史";
-        let grams = cjk_ngrams(text);
-        assert!(grams.iter().any(|g| g.0 == "南明"));
-        assert!(grams.iter().any(|g| g.0 == "明史"));
-        assert!(grams.iter().any(|g| g.0 == "南明史"));
-        let nanming = grams.iter().find(|g| g.0 == "南明").unwrap();
-        assert_eq!(&text[nanming.1..nanming.1 + nanming.2], "南明");
+    fn bloom_storage_is_strictly_bounded() {
+        assert_eq!(bloom_storage_bytes(0), BLOOM_MIN_BYTES);
+        assert_eq!(bloom_storage_bytes(16 * 100_000), 100_000);
+        assert_eq!(bloom_storage_bytes(usize::MAX), BLOOM_MAX_BYTES);
     }
 }

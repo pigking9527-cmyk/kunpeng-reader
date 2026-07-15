@@ -305,14 +305,16 @@ fn baidu_translate(
     let to = normalize_baidu_lang(target_lang, "zh");
     let salt = chrono::Utc::now().timestamp_millis().to_string();
     let sign = md5_hex(format!("{app_id}{text}{salt}{key}").as_bytes());
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(20))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_recv_response(Some(Duration::from_secs(20)))
+        .timeout_recv_body(Some(Duration::from_secs(20)))
+        .build()
+        .into();
     let value = agent
         .post("https://fanyi-api.baidu.com/api/trans/vip/translate")
-        .set("User-Agent", "kunpeng-reader")
-        .send_form(&[
+        .header("User-Agent", "kunpeng-reader")
+        .send_form([
             ("q", text),
             ("from", &from),
             ("to", &to),
@@ -321,7 +323,8 @@ fn baidu_translate(
             ("sign", &sign),
         ])
         .map_err(|e| format!("百度翻译请求失败：{e}"))?
-        .into_json::<serde_json::Value>()
+        .body_mut()
+        .read_json::<serde_json::Value>()
         .map_err(|e| format!("百度翻译返回解析失败：{e}"))?;
     if let Some(code) = value.get("error_code").and_then(|v| v.as_str()) {
         let msg = value
@@ -366,22 +369,25 @@ fn deepl_translate(
     } else {
         "https://api.deepl.com/v2/translate"
     };
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(30))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(30)))
+        .build()
+        .into();
     let req = agent
         .post(url)
-        .set("User-Agent", "kunpeng-reader")
-        .set("Authorization", &format!("DeepL-Auth-Key {api_key}"));
+        .header("User-Agent", "kunpeng-reader")
+        .header("Authorization", &format!("DeepL-Auth-Key {api_key}"));
     let mut form = vec![("text", text), ("target_lang", target.as_str())];
     if source != "auto" {
         form.push(("source_lang", source.as_str()));
     }
     let value = req
-        .send_form(&form)
+        .send_form(form)
         .map_err(|e| format!("DeepL 翻译请求失败：{e}"))?
-        .into_json::<serde_json::Value>()
+        .body_mut()
+        .read_json::<serde_json::Value>()
         .map_err(|e| format!("DeepL 翻译返回解析失败：{e}"))?;
     let mut out = String::new();
     if let Some(arr) = value.get("translations").and_then(|v| v.as_array()) {
@@ -416,20 +422,23 @@ fn google_translate(
     let target = normalize_common_lang(target_lang, "zh-CN");
     let endpoint =
         format!("https://translation.googleapis.com/language/translate/v2?key={api_key}");
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(30))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(30)))
+        .build()
+        .into();
     let mut form = vec![("q", text), ("target", target.as_str()), ("format", "text")];
     if source != "auto" {
         form.push(("source", source.as_str()));
     }
     let value = agent
         .post(&endpoint)
-        .set("User-Agent", "kunpeng-reader")
-        .send_form(&form)
+        .header("User-Agent", "kunpeng-reader")
+        .send_form(form)
         .map_err(|e| format!("Google 翻译请求失败：{e}"))?
-        .into_json::<serde_json::Value>()
+        .body_mut()
+        .read_json::<serde_json::Value>()
         .map_err(|e| format!("Google 翻译返回解析失败：{e}"))?;
     if let Some(err) = value.get("error") {
         let msg = err
@@ -513,22 +522,25 @@ fn tencent_translate(
     let authorization = format!(
         "TC3-HMAC-SHA256 Credential={secret_id}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
     );
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(30))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(30)))
+        .build()
+        .into();
     let value = agent
         .post(endpoint)
-        .set("Authorization", &authorization)
-        .set("Content-Type", "application/json; charset=utf-8")
-        .set("Host", host)
-        .set("X-TC-Action", action)
-        .set("X-TC-Timestamp", &timestamp.to_string())
-        .set("X-TC-Version", version)
-        .set("X-TC-Region", region)
-        .send_string(&payload)
+        .header("Authorization", &authorization)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .header("Host", host)
+        .header("X-TC-Action", action)
+        .header("X-TC-Timestamp", &timestamp.to_string())
+        .header("X-TC-Version", version)
+        .header("X-TC-Region", region)
+        .send(payload.as_str())
         .map_err(|e| format!("腾讯翻译请求失败：{e}"))?
-        .into_json::<serde_json::Value>()
+        .body_mut()
+        .read_json::<serde_json::Value>()
         .map_err(|e| format!("腾讯翻译返回解析失败：{e}"))?;
     if let Some(err) = value
         .get("Response")

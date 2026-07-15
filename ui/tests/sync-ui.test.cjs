@@ -19,3 +19,11 @@ test("sync UI only binds elements that exist in the main page", () => {
 test("manual sync button has a click handler", () => {
   assert.match(syncSource, /syncNowBtn\.addEventListener\("click",\s*async\s*\(\)\s*=>/);
 });
+
+test("persisted account is restored and automatically synced on startup", () => {
+  const appSource = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
+  assert.match(syncSource, /async function syncOnStartup\(\)/);
+  assert.match(syncSource, /await loadSyncSettingsOnce\(\)/);
+  assert.match(syncSource, /await invoke\("sync_now"\)/);
+  assert.match(appSource, /await loadSyncSettingsOnce\(\);[\s\S]*await syncOnStartup\(\)/);
+});

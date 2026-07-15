@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod atomic_file;
+mod backup;
 mod book;
 mod data_migration;
 mod db;
@@ -17,7 +18,9 @@ mod reader_commands;
 mod reader_page;
 mod reader_protocol;
 mod search;
+mod search_cache;
 mod search_core;
+mod search_index;
 mod secret_store;
 mod semantic;
 mod semantic_core;
@@ -48,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use stats::StatsStore;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -122,8 +125,6 @@ fn reader_window_open(app: tauri::AppHandle) -> bool {
 }
 
 /// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
-type TextCache = Mutex<HashMap<u64, (u64, Arc<Vec<String>>)>>;
-type LowerTextCache = Mutex<HashMap<u64, (u64, Arc<Vec<Vec<u8>>>)>>;
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
 
 pub(crate) struct AppState {
@@ -134,11 +135,9 @@ pub(crate) struct AppState {
     chapter_html_cache: Mutex<HashMap<(u64, u64, usize), Arc<ProcessedChapterHtml>>>,
     backfilled: std::sync::atomic::AtomicBool, // 是否已回填旧书的作者/导入时间
     pending_jump: Mutex<HashMap<u64, (u32, String)>>, // 书架检索点击 → 阅读窗口待跳转位置
-    pub(crate) text_cache: TextCache,          // 检索用：内存缓存的逐章纯文本 (mtime, 章节)
-    pub(crate) lower_text_cache: LowerTextCache, // 英文检索用：ASCII 小写后的章节字节
+    pub(crate) search_text_cache: Mutex<search_cache::SearchTextCache>, // 全文检索原文/小写副本共享 LRU 预算
     pub(crate) txt_chapters: TextChaptersCache, // txt 阅读用：切分好的章节 (标题, 正文)
-    pub(crate) cache_bytes: AtomicUsize,       // 已缓存的总字节数（限额用）
-    pub(crate) embedder: Mutex<Option<Arc<fastembed::TextEmbedding>>>, // 语义模型（懒加载，首次会下载）
+    pub(crate) embedder: Mutex<Option<Arc<Mutex<fastembed::TextEmbedding>>>>, // 语义模型（懒加载，首次会下载）
     pub(crate) sem_cache: Mutex<HashMap<u64, Arc<semantic::SemData>>>, // 语义检索：内存缓存的向量
     pub(crate) sem_cache_order: Mutex<VecDeque<u64>>, // 逐书向量 LRU：换词时淘汰旧书，避免缓存被首批结果永久占满
     pub(crate) sem_cache_bytes: AtomicUsize,
@@ -148,6 +147,8 @@ pub(crate) struct AppState {
     pub(crate) stats: Mutex<StatsStore>,   // 详细阅读统计的小时桶
     pub(crate) vocab: Mutex<vocab::VocabStore>, // 生词本：查过的词
     word_pack: Mutex<tts::WordPackState>,  // 高频词语音包后台生成状态
+    main_close_sync_started: AtomicBool,   // 主窗口首次关闭先短暂同步；再次关闭立即退出
+    pub(crate) sync_running: AtomicBool,   // 防止启动、手动和退出同步并发上传同一批实体
 }
 
 const BIG_EPUB_CHAPTER_BYTES: usize = 800 * 1024;
@@ -260,6 +261,7 @@ struct LibraryHealthReport {
     healthy: u32,
     missing: Vec<LibraryHealthBook>,
     duplicates: Vec<LibraryDuplicateGroup>,
+    search_index: search_index::SearchIndexDiskHealth,
 }
 
 #[derive(Serialize)]
@@ -442,7 +444,13 @@ fn list_books(state: tauri::State<AppState>) -> Vec<BookDto> {
 }
 
 #[tauri::command]
+fn maintain_search_index(state: tauri::State<AppState>) -> search_index::SearchIndexDiskHealth {
+    search::maintain_index(state.inner(), true)
+}
+
+#[tauri::command]
 fn library_health(state: tauri::State<AppState>) -> LibraryHealthReport {
+    let search_index = search::index_health(state.inner());
     let lib = state.library.lock().unwrap();
     let compact = |b: &book::Book| LibraryHealthBook {
         id: b.id.to_string(),
@@ -480,6 +488,7 @@ fn library_health(state: tauri::State<AppState>) -> LibraryHealthReport {
         healthy: lib.books.len().saturating_sub(missing.len()) as u32,
         missing,
         duplicates,
+        search_index,
     }
 }
 
@@ -713,6 +722,16 @@ fn save_translation_credential(
 }
 
 #[tauri::command]
+fn recovery_backup_status() -> Result<backup::BackupStatus, String> {
+    backup::status()
+}
+
+#[tauri::command]
+fn create_recovery_backup(state: tauri::State<AppState>) -> Result<backup::BackupStatus, String> {
+    backup::create(state.inner(), true)
+}
+
+#[tauri::command]
 fn migrate_data_to_sqlite(state: tauri::State<AppState>) -> Result<(), String> {
     data_migration::migrate_json_to_sqlite(state.inner())
 }
@@ -730,9 +749,14 @@ fn export_data_package(state: tauri::State<AppState>, path: String) -> Result<()
 fn import_data_package(state: tauri::State<AppState>, path: String) -> Result<u32, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    db.import_package(&value)
+    backup::create(state.inner(), true)?;
+    let imported = {
+        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        db.import_package(&value)?
+    };
+    data_migration::apply_sqlite_to_runtime(state.inner())?;
+    Ok(imported)
 }
 
 /// 首次加载：回填旧书缺失的作者（重读 EPUB 元数据）和导入时间，然后返回书单。
@@ -2291,10 +2315,8 @@ fn main() {
             chapter_html_cache: Mutex::new(HashMap::new()),
             backfilled: std::sync::atomic::AtomicBool::new(false),
             pending_jump: Mutex::new(HashMap::new()),
-            text_cache: Mutex::new(HashMap::new()),
-            lower_text_cache: Mutex::new(HashMap::new()),
+            search_text_cache: Mutex::new(search_cache::SearchTextCache::default()),
             txt_chapters: Mutex::new(HashMap::new()),
-            cache_bytes: AtomicUsize::new(0),
             embedder: Mutex::new(None),
             sem_cache: Mutex::new(HashMap::new()),
             sem_cache_order: Mutex::new(VecDeque::new()),
@@ -2305,6 +2327,8 @@ fn main() {
             stats: Mutex::new(StatsStore::load()),
             vocab: Mutex::new(vocab::VocabStore::load()),
             word_pack: Mutex::new(tts::WordPackState::default()),
+            main_close_sync_started: AtomicBool::new(false),
+            sync_running: AtomicBool::new(false),
         })
         // 主窗口（书架）：恢复上次的大小/位置，并在移动/缩放/关闭时记忆
         .setup(|app| {
@@ -2312,8 +2336,18 @@ fn main() {
                 let state = app.state::<AppState>();
                 if let Err(error) = data_migration::migrate_json_to_sqlite(state.inner()) {
                     log(&format!("SQLite 迁移失败：{error}"));
+                } else {
+                    match data_migration::converge_entity_model(state.inner()) {
+                        Ok(removed) if removed > 0 => {
+                            log(&format!("实体模型已收敛，移除旧实体 {removed} 条"))
+                        }
+                        Ok(_) => {}
+                        Err(error) => log(&format!("实体模型收敛已安全跳过：{error}")),
+                    }
                 }
             }
+            backup::spawn_daily(app.handle().clone());
+            semantic::spawn_semantic_profile_warmup(app.handle().clone());
             spawn_associated_book_watcher(app.handle().clone());
             spawn_startup_maintenance(app.handle().clone()); // 延后低抢占维护任务，避免刚打开窗口拖动卡顿
             if let Some(win) = app.get_webview_window("main") {
@@ -2336,13 +2370,45 @@ fn main() {
                             lib.main_geom = Some(capture_geom(lib.main_geom.clone(), &w));
                         }
                     }
-                    tauri::WindowEvent::CloseRequested { .. } => {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
                         if let Some(w) = app_ev.get_webview_window("main") {
                             let st = app_ev.state::<AppState>();
                             let mut lib = st.library.lock().unwrap();
                             lib.main_geom = Some(capture_geom(lib.main_geom.clone(), &w));
                             report_save_error("书架", lib.save());
                             report_save_error("统计", st.stats.lock().unwrap().save());
+                            drop(lib);
+
+                            if sync::sync_account_configured(st.inner())
+                                && st
+                                    .main_close_sync_started
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                    )
+                                    .is_ok()
+                            {
+                                api.prevent_close();
+                                let close_app = app_ev.clone();
+                                std::thread::spawn(move || {
+                                    log("[sync] exit automatic sync start");
+                                    let result = {
+                                        let state = close_app.state::<AppState>();
+                                        sync::sync_before_exit(state.inner())
+                                    };
+                                    match result {
+                                        Ok(_) => log("[sync] exit automatic sync ok"),
+                                        Err(error) => log(&format!(
+                                            "[sync] exit automatic sync skipped/failed: {error}"
+                                        )),
+                                    }
+                                    if let Some(main) = close_app.get_webview_window("main") {
+                                        let _ = main.close();
+                                    }
+                                });
+                            }
                         }
                     }
                     _ => {}
@@ -2390,6 +2456,7 @@ fn main() {
             window_commands::main_window_start_dragging,
             list_books,
             library_health,
+            maintain_search_index,
             merge_duplicate_books,
             book_reading_timeline,
             reader_window_open,
@@ -2418,6 +2485,8 @@ fn main() {
             sync::auth_login,
             sync::auth_logout,
             sync::sync_now,
+            recovery_backup_status,
+            create_recovery_backup,
             migrate_data_to_sqlite,
             export_data_package,
             import_data_package,

@@ -8,3 +8,7 @@ Thumbs.db
 # Local release copy; upload through GitHub Releases, not source history
 /鲲鹏阅读器.exe
 
+
+# Python test/runtime cache
+__pycache__/
+*.py[cod]

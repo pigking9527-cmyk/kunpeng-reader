@@ -2,7 +2,26 @@ use crate::sync_core::{decide_sync_merge, MergeDecision, SyncMeta};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const DB_SCHEMA_VERSION: i64 = 3;
+const WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
+const WAL_JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
+
+pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &["book_state_v2", "vocab", "reading_bucket_v2"];
+
+pub(crate) fn is_supported_entity_kind(kind: &str) -> bool {
+    SUPPORTED_ENTITY_KINDS.contains(&kind)
+}
+
+type CoreEntityRow = (String, String, String, i64, i64, String, i64, i64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CoreSnapshot {
+    metadata: Vec<(String, String)>,
+    entities: Vec<CoreEntityRow>,
+}
 
 pub struct AppDb {
     conn: Connection,
@@ -45,6 +64,223 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn core_schema_sql() -> &'static str {
+    r#"
+    CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS entities (
+        kind TEXT NOT NULL,
+        id TEXT NOT NULL,
+        json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER NOT NULL DEFAULT 0,
+        device_id TEXT NOT NULL,
+        sync_version INTEGER NOT NULL DEFAULT 1,
+        dirty INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY(kind, id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_entities_kind_updated
+        ON entities(kind, updated_at);
+    "#
+}
+
+fn configure_connection(conn: &Connection) -> Result<(), String> {
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "journal_size_limit", WAL_JOURNAL_SIZE_LIMIT)
+        .map_err(|e| e.to_string())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)",
+        params![name],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .map_err(|e| e.to_string())
+}
+
+fn load_core_snapshot(conn: &Connection) -> Result<CoreSnapshot, String> {
+    let metadata = {
+        let mut statement = conn
+            .prepare("SELECT key,value FROM metadata ORDER BY key")
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+    let entities = {
+        let mut statement = conn
+            .prepare(
+                "SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,dirty FROM entities ORDER BY kind,id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+    Ok(CoreSnapshot { metadata, entities })
+}
+
+fn write_core_snapshot(conn: &mut Connection, snapshot: &CoreSnapshot) -> Result<(), String> {
+    let transaction = conn.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut metadata = transaction
+            .prepare("INSERT INTO metadata(key,value) VALUES(?,?)")
+            .map_err(|e| e.to_string())?;
+        for (key, value) in &snapshot.metadata {
+            metadata
+                .execute(params![key, value])
+                .map_err(|e| e.to_string())?;
+        }
+        let mut entities = transaction
+            .prepare(
+                "INSERT INTO entities(kind,id,json,updated_at,deleted_at,device_id,sync_version,dirty) VALUES(?,?,?,?,?,?,?,?)",
+            )
+            .map_err(|e| e.to_string())?;
+        for (kind, id, json, updated_at, deleted_at, device_id, sync_version, dirty) in
+            &snapshot.entities
+        {
+            entities
+                .execute(params![
+                    kind,
+                    id,
+                    json,
+                    updated_at,
+                    deleted_at,
+                    device_id,
+                    sync_version,
+                    dirty
+                ])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|e| e.to_string())
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn migration_sibling(path: &Path, label: &str) -> PathBuf {
+    let file = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("reader.db");
+    path.with_file_name(format!(
+        "{file}.{label}-{}-{}",
+        now_secs(),
+        std::process::id()
+    ))
+}
+
+fn compact_legacy_database(path: &Path) -> Result<Option<PathBuf>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = Connection::open(path).map_err(|e| e.to_string())?;
+    source
+        .busy_timeout(Duration::from_secs(8))
+        .map_err(|e| e.to_string())?;
+    if !table_exists(&source, "keyword_postings")? && !table_exists(&source, "keyword_docs")? {
+        return Ok(None);
+    }
+    let checkpoint = source
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    if checkpoint.0 != 0 {
+        return Err(format!(
+            "reader.db 仍被其他连接占用，WAL 检查点未完成：{checkpoint:?}"
+        ));
+    }
+    let snapshot = load_core_snapshot(&source)?;
+    let temporary = migration_sibling(path, "compacting");
+    let backup = migration_sibling(path, "pre-v3");
+    let mut target = Connection::open(&temporary).map_err(|e| e.to_string())?;
+    target
+        .pragma_update(None, "journal_mode", "DELETE")
+        .map_err(|e| e.to_string())?;
+    target
+        .pragma_update(None, "synchronous", "FULL")
+        .map_err(|e| e.to_string())?;
+    target
+        .execute_batch(core_schema_sql())
+        .map_err(|e| e.to_string())?;
+    write_core_snapshot(&mut target, &snapshot)?;
+    target
+        .pragma_update(None, "user_version", DB_SCHEMA_VERSION)
+        .map_err(|e| e.to_string())?;
+    let check: String = target
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if check != "ok" {
+        return Err(format!("紧凑数据库完整性检查失败：{check}"));
+    }
+    let copied = load_core_snapshot(&target)?;
+    if copied != snapshot {
+        return Err("紧凑数据库的数据逐行校验失败".to_string());
+    }
+    target.close().map_err(|(_, error)| error.to_string())?;
+    source.close().map_err(|(_, error)| error.to_string())?;
+
+    std::fs::rename(path, &backup).map_err(|e| e.to_string())?;
+    let mut moved_sidecars = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        let from = sidecar_path(path, suffix);
+        if !from.exists() {
+            continue;
+        }
+        let to = sidecar_path(&backup, suffix);
+        if let Err(error) = std::fs::rename(&from, &to) {
+            for (moved_from, moved_to) in moved_sidecars.into_iter().rev() {
+                let _ = std::fs::rename(moved_to, moved_from);
+            }
+            let _ = std::fs::rename(&backup, path);
+            return Err(error.to_string());
+        }
+        moved_sidecars.push((from, to));
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        for (from, to) in moved_sidecars.into_iter().rev() {
+            let _ = std::fs::rename(to, from);
+        }
+        let _ = std::fs::rename(&backup, path);
+        return Err(error.to_string());
+    }
+    Ok(Some(backup))
+}
 fn db_path() -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     {
@@ -74,9 +310,16 @@ impl AppDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+        match compact_legacy_database(&path) {
+            Ok(Some(backup)) => eprintln!(
+                "reader.db 已完成紧凑迁移，旧数据库保留于 {}",
+                backup.display()
+            ),
+            Ok(None) => {}
+            Err(error) => eprintln!("reader.db 紧凑迁移已安全跳过：{error}"),
+        }
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        conn.pragma_update(None, "journal_mode", "WAL").ok();
-        conn.pragma_update(None, "synchronous", "NORMAL").ok();
+        configure_connection(&conn)?;
         let mut db = Self {
             conn,
             device_id: String::new(),
@@ -88,45 +331,7 @@ impl AppDb {
 
     fn init(&mut self) -> Result<(), String> {
         self.conn
-            .execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS entities (
-                    kind TEXT NOT NULL,
-                    id TEXT NOT NULL,
-                    json TEXT NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    deleted_at INTEGER NOT NULL DEFAULT 0,
-                    device_id TEXT NOT NULL,
-                    sync_version INTEGER NOT NULL DEFAULT 1,
-                    dirty INTEGER NOT NULL DEFAULT 1,
-                    PRIMARY KEY(kind, id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_entities_kind_updated
-                    ON entities(kind, updated_at);
-                CREATE TABLE IF NOT EXISTS keyword_postings (
-                    term TEXT NOT NULL,
-                    book_id INTEGER NOT NULL,
-                    chapter INTEGER NOT NULL,
-                    count INTEGER NOT NULL,
-                    snippets_json TEXT NOT NULL,
-                    PRIMARY KEY(term, book_id, chapter)
-                );
-                CREATE INDEX IF NOT EXISTS idx_keyword_postings_term
-                    ON keyword_postings(term);
-                CREATE TABLE IF NOT EXISTS keyword_docs (
-                    book_id INTEGER NOT NULL,
-                    chapter INTEGER NOT NULL,
-                    length INTEGER NOT NULL,
-                    PRIMARY KEY(book_id, chapter)
-                );
-                CREATE INDEX IF NOT EXISTS idx_keyword_docs_book
-                    ON keyword_docs(book_id);
-                "#,
-            )
+            .execute_batch(core_schema_sql())
             .map_err(|e| e.to_string())?;
         let has_dirty = {
             let mut stmt = self
@@ -154,7 +359,7 @@ impl AppDb {
                 .map_err(|e| e.to_string())?;
         }
         self.conn
-            .pragma_update(None, "user_version", 2)
+            .pragma_update(None, "user_version", DB_SCHEMA_VERSION)
             .map_err(|e| e.to_string())
     }
 
@@ -207,6 +412,40 @@ impl AppDb {
         Ok(())
     }
 
+    /// Create a transactionally consistent standalone database snapshot. The
+    /// destination must not already exist; recovery points are assembled in a
+    /// new temporary directory before being atomically renamed into place.
+    pub fn backup_to(&self, path: &Path) -> Result<(), String> {
+        if path.exists() {
+            return Err(format!("备份目标已存在：{}", path.display()));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy().as_ref()])
+            .map_err(|e| format!("创建 SQLite 快照失败：{e}"))?;
+        let snapshot = Connection::open(path).map_err(|e| e.to_string())?;
+        let check: String = snapshot
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if check != "ok" {
+            return Err(format!("SQLite 快照完整性检查失败：{check}"));
+        }
+        Ok(())
+    }
+
+    /// Remove superseded v1 entity rows after a recovery point has been made.
+    pub fn purge_legacy_entities(&mut self) -> Result<u32, String> {
+        self.conn
+            .execute(
+                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','vocab','reading_bucket_v2')",
+                [],
+            )
+            .map(|count| count as u32)
+            .map_err(|e| e.to_string())
+    }
+
     pub fn upsert_json_batch(&mut self, items: &[(String, String, Value)]) -> Result<(), String> {
         let now = now_secs() as i64;
         let device_id = self.device_id.clone();
@@ -253,7 +492,7 @@ impl AppDb {
     pub fn export_package(&self) -> Result<Value, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities ORDER BY kind,id")
+            .prepare("SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities WHERE kind IN ('book_state_v2','vocab','reading_bucket_v2') ORDER BY kind,id")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -276,7 +515,7 @@ impl AppDb {
         }
         Ok(json!({
             "format": "kunpeng-reader-data-package",
-            "version": 1,
+            "version": 2,
             "exported_at": now_secs(),
             "device_id": self.device_id,
             "entities": entities,
@@ -351,7 +590,7 @@ impl AppDb {
         for item in items {
             let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            if kind.is_empty() || id.is_empty() {
+            if !is_supported_entity_kind(kind) || id.is_empty() {
                 continue;
             }
             let data = item
@@ -394,7 +633,7 @@ impl AppDb {
     pub fn all_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities ORDER BY kind,id")
+            .prepare("SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities WHERE kind IN ('book_state_v2','vocab','reading_bucket_v2') ORDER BY kind,id")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -489,6 +728,9 @@ impl AppDb {
         let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
         let mut count = 0u32;
         for item in items {
+            if !is_supported_entity_kind(&item.kind) {
+                continue;
+            }
             let txt = serde_json::to_string(&item.json).map_err(|e| e.to_string())?;
             if Self::upsert_incoming_entity(
                 &transaction,
@@ -507,87 +749,6 @@ impl AppDb {
         }
         transaction.commit().map_err(|e| e.to_string())?;
         Ok(count)
-    }
-    pub fn has_keyword_index_for_book(&self, book_id: u64) -> bool {
-        self.conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM keyword_postings WHERE book_id=? LIMIT 1)",
-                params![book_id as i64],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|v| v != 0)
-            .unwrap_or(false)
-    }
-
-    pub fn clear_keyword_index_for_book(&self, book_id: u64) -> Result<(), String> {
-        self.conn
-            .execute(
-                "DELETE FROM keyword_postings WHERE book_id=?",
-                params![book_id as i64],
-            )
-            .map_err(|e| e.to_string())?;
-        self.conn
-            .execute(
-                "DELETE FROM keyword_docs WHERE book_id=?",
-                params![book_id as i64],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn has_keyword_doc_for_book(&self, book_id: u64) -> bool {
-        self.conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM keyword_docs WHERE book_id=? LIMIT 1)",
-                params![book_id as i64],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|v| v != 0)
-            .unwrap_or(false)
-    }
-
-    pub fn upsert_keyword_doc(
-        &self,
-        book_id: u64,
-        chapter: u32,
-        length: u32,
-    ) -> Result<(), String> {
-        self.conn
-            .execute(
-                r#"
-                INSERT INTO keyword_docs(book_id,chapter,length)
-                VALUES(?,?,?)
-                ON CONFLICT(book_id,chapter) DO UPDATE SET
-                    length=excluded.length
-                "#,
-                params![book_id as i64, chapter as i64, length as i64],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn upsert_keyword_posting(
-        &self,
-        term: &str,
-        book_id: u64,
-        chapter: u32,
-        count: u32,
-        snippets: &[String],
-    ) -> Result<(), String> {
-        let txt = serde_json::to_string(snippets).map_err(|e| e.to_string())?;
-        self.conn
-            .execute(
-                r#"
-                INSERT INTO keyword_postings(term,book_id,chapter,count,snippets_json)
-                VALUES(?,?,?,?,?)
-                ON CONFLICT(term,book_id,chapter) DO UPDATE SET
-                    count=excluded.count,
-                    snippets_json=excluded.snippets_json
-                "#,
-                params![term, book_id as i64, chapter as i64, count as i64, txt],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(())
     }
 }
 
@@ -611,7 +772,9 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, DB_SCHEMA_VERSION);
+        assert!(!table_exists(&db.conn, "keyword_postings").unwrap());
+        assert!(!table_exists(&db.conn, "keyword_docs").unwrap());
     }
 
     #[test]
@@ -649,5 +812,142 @@ mod tests {
             .unwrap();
         db.upsert_json_batch(&row).unwrap();
         assert!(db.dirty_sync_entities().unwrap().is_empty());
+    }
+
+    #[test]
+    fn package_and_sync_import_ignore_legacy_entity_kinds() {
+        let mut db = memory_db();
+        let package = json!({"entities": [
+            {"kind":"book","id":"old","data":{"path":"C:/private.epub"}},
+            {"kind":"vocab","id":"zh:词","data":{"word":"词"}}
+        ]});
+        assert_eq!(db.import_package(&package).unwrap(), 1);
+        assert!(db.entity_json("book", "old").unwrap().is_none());
+        assert!(db.entity_json("vocab", "zh:词").unwrap().is_some());
+
+        let legacy = SyncEntity {
+            kind: "reading_bucket".into(),
+            id: "old".into(),
+            json: json!({}),
+            updated_at: 1,
+            deleted_at: 0,
+            device_id: "remote".into(),
+            sync_version: 1,
+        };
+        assert_eq!(db.import_sync_entities(&[legacy]).unwrap(), 0);
+    }
+
+    #[test]
+    fn purge_legacy_entities_and_backup_preserve_supported_rows() {
+        let mut db = memory_db();
+        db.upsert_json_batch(&[
+            ("book".into(), "old".into(), json!({"path":"local"})),
+            ("book_state_v2".into(), "sha".into(), json!({"progress":42})),
+        ])
+        .unwrap();
+        assert_eq!(db.purge_legacy_entities().unwrap(), 1);
+
+        let path = std::env::temp_dir().join(format!(
+            "ebook-reader-recovery-test-{}-{}.db",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = std::fs::remove_file(&path);
+        db.backup_to(&path).unwrap();
+        let copy = Connection::open(&path).unwrap();
+        assert_eq!(
+            copy.query_row("SELECT COUNT(*) FROM entities", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        copy.close().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_keyword_database_is_compacted_without_losing_core_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "ebook-reader-db-v3-test-{}-{}.db",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let source = Connection::open(&path).unwrap();
+        source.execute_batch(core_schema_sql()).unwrap();
+        source
+            .execute_batch(
+                r#"
+                CREATE TABLE keyword_postings (
+                    term TEXT NOT NULL,
+                    book_id INTEGER NOT NULL,
+                    chapter INTEGER NOT NULL,
+                    count INTEGER NOT NULL,
+                    snippets_json TEXT NOT NULL,
+                    PRIMARY KEY(term, book_id, chapter)
+                );
+                CREATE TABLE keyword_docs (
+                    book_id INTEGER NOT NULL,
+                    chapter INTEGER NOT NULL,
+                    length INTEGER NOT NULL,
+                    PRIMARY KEY(book_id, chapter)
+                );
+                INSERT INTO metadata(key,value) VALUES('device_id','device-1');
+                INSERT INTO entities(kind,id,json,updated_at,deleted_at,device_id,sync_version,dirty)
+                    VALUES('book_state_v2','sha','{"progress":12}',10,0,'device-1',7,1);
+                INSERT INTO keyword_docs(book_id,chapter,length) VALUES(1,0,100);
+                INSERT INTO keyword_postings(term,book_id,chapter,count,snippets_json)
+                    VALUES('南明',1,0,2,'["片段"]');
+                PRAGMA user_version=2;
+                "#,
+            )
+            .unwrap();
+        source.close().unwrap();
+
+        let backup = compact_legacy_database(&path).unwrap().unwrap();
+        let compacted = Connection::open(&path).unwrap();
+        assert_eq!(
+            compacted
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            DB_SCHEMA_VERSION
+        );
+        assert!(!table_exists(&compacted, "keyword_postings").unwrap());
+        assert!(!table_exists(&compacted, "keyword_docs").unwrap());
+        assert_eq!(
+            compacted
+                .query_row(
+                    "SELECT json FROM entities WHERE kind='book_state_v2'",
+                    [],
+                    |row| { row.get::<_, String>(0) }
+                )
+                .unwrap(),
+            "{\"progress\":12}"
+        );
+        assert_eq!(
+            compacted
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='device_id'",
+                    [],
+                    |row| { row.get::<_, String>(0) }
+                )
+                .unwrap(),
+            "device-1"
+        );
+        compacted.close().unwrap();
+        let original = Connection::open(&backup).unwrap();
+        assert!(table_exists(&original, "keyword_postings").unwrap());
+        original.close().unwrap();
+
+        for file in [
+            path.clone(),
+            sidecar_path(&path, "-wal"),
+            sidecar_path(&path, "-shm"),
+            backup.clone(),
+            sidecar_path(&backup, "-wal"),
+            sidecar_path(&backup, "-shm"),
+        ] {
+            let _ = std::fs::remove_file(file);
+        }
     }
 }

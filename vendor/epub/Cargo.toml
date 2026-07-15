@@ -1,0 +1,34 @@
+[package]
+authors = ["Daniel García Moreno <dani@danigm.net>"]
+description = """
+Library to support the reading of epub files.
+"""
+documentation = "https://docs.rs/epub/"
+exclude = ["test.epub"]
+keywords = ["epub", "ebook"]
+license = "GPL-3.0"
+name = "epub"
+repository = "https://github.com/danigm/epub-rs.git"
+version = "2.1.5"
+edition = "2024"
+
+[dependencies]
+xml-rs = "1.0.0"
+percent-encoding = "2.3.2"
+thiserror = "2.0.17"
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[features]
+mock = []
+
+[dependencies.regex]
+version = "1.12.2"
+default-features = false
+# regex currently requires the standard library, you must re-enable it.
+features = [
+    "std",
+    "unicode",
+    "perf-cache",
+    "perf-dfa",
+    "perf-inline",
+]

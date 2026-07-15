@@ -1,25 +1,88 @@
-use crate::search_core::{
-    ascii_lower_bytes, keyword_postings_for_chapter, snippet_at_with_context,
+use crate::search_core::{ascii_lower_bytes, snippet_at_with_context, BookSearchBloom};
+use crate::search_index::{self, BookIndex, INDEX_VERSION};
+use crate::{
+    atomic_file, book, emit_startup_perf, set_thread_background, strip_tags, url_open, AppState,
 };
-use crate::{book, emit_startup_perf, set_thread_background, strip_tags, url_open, AppState};
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use serde::Serialize;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
 type EpubDoc = epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>;
 
-const INDEX_VERSION: u32 = 2;
-const TEXT_CACHE_BUDGET: usize = 700 * 1024 * 1024;
+const FILTER_MAGIC: &[u8; 8] = b"KPBLOOM1";
+const FILTER_HEADER_LEN: usize = 8 + 8 + 4;
 
-#[derive(Serialize, Deserialize)]
-struct BookIndex {
-    v: u32,
+const FILTER_CACHE_BUDGET: usize = 128 * 1024 * 1024;
+
+struct CachedBookFilter {
     mtime: u64,
-    chapters: Vec<String>,
+    bloom: Arc<BookSearchBloom>,
+    bytes: usize,
 }
+
+#[derive(Default)]
+struct BookFilterCache {
+    entries: HashMap<u64, CachedBookFilter>,
+    order: VecDeque<u64>,
+    bytes: usize,
+}
+
+impl BookFilterCache {
+    fn get(&mut self, id: u64, mtime: u64) -> Option<Arc<BookSearchBloom>> {
+        let value = match self.entries.get(&id) {
+            Some(entry) if entry.mtime == mtime => Some(entry.bloom.clone()),
+            Some(_) => {
+                self.remove(id);
+                None
+            }
+            None => None,
+        };
+        if value.is_some() {
+            self.touch(id);
+        }
+        value
+    }
+
+    fn touch(&mut self, id: u64) {
+        self.order.retain(|existing| *existing != id);
+        self.order.push_back(id);
+    }
+
+    fn remove(&mut self, id: u64) {
+        if let Some(entry) = self.entries.remove(&id) {
+            self.bytes = self.bytes.saturating_sub(entry.bytes);
+        }
+        self.order.retain(|existing| *existing != id);
+    }
+
+    fn insert(&mut self, id: u64, mtime: u64, bloom: Arc<BookSearchBloom>) {
+        self.remove(id);
+        let bytes = bloom.bits().len();
+        if bytes > FILTER_CACHE_BUDGET {
+            return;
+        }
+        while self.bytes.saturating_add(bytes) > FILTER_CACHE_BUDGET {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.remove(oldest);
+        }
+        self.entries.insert(
+            id,
+            CachedBookFilter {
+                mtime,
+                bloom,
+                bytes,
+            },
+        );
+        self.bytes += bytes;
+        self.touch(id);
+    }
+}
+
+static BOOK_FILTER_CACHE: OnceLock<Mutex<BookFilterCache>> = OnceLock::new();
 
 #[derive(Clone, Serialize)]
 struct SearchQueryPayload {
@@ -27,15 +90,74 @@ struct SearchQueryPayload {
     ids: Vec<String>,
 }
 
-fn index_dir() -> Option<std::path::PathBuf> {
-    let mut d = dirs::cache_dir()?;
-    d.push("ebook-reader");
-    d.push("index");
-    Some(d)
+fn filter_cache() -> &'static Mutex<BookFilterCache> {
+    BOOK_FILTER_CACHE.get_or_init(|| Mutex::new(BookFilterCache::default()))
 }
 
-fn index_path(id: u64) -> Option<std::path::PathBuf> {
-    Some(index_dir()?.join(format!("idx_{id}.json")))
+fn encode_book_filter(mtime: u64, bloom: &BookSearchBloom) -> Vec<u8> {
+    let bits = bloom.bits();
+    let mut bytes = Vec::with_capacity(FILTER_HEADER_LEN + bits.len());
+    bytes.extend_from_slice(FILTER_MAGIC);
+    bytes.extend_from_slice(&mtime.to_le_bytes());
+    bytes.extend_from_slice(&(bits.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(bits);
+    bytes
+}
+
+fn decode_book_filter(bytes: &[u8], expected_mtime: u64) -> Option<BookSearchBloom> {
+    if bytes.len() < FILTER_HEADER_LEN || &bytes[..8] != FILTER_MAGIC {
+        return None;
+    }
+    let mtime = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+    let length = u32::from_le_bytes(bytes[16..20].try_into().ok()?) as usize;
+    if mtime != expected_mtime || bytes.len() != FILTER_HEADER_LEN + length {
+        return None;
+    }
+    BookSearchBloom::from_bits(bytes[FILTER_HEADER_LEN..].to_vec())
+}
+
+fn load_book_filter(id: u64, mtime: u64) -> Option<Arc<BookSearchBloom>> {
+    if let Ok(mut cache) = filter_cache().lock() {
+        if let Some(bloom) = cache.get(id, mtime) {
+            return Some(bloom);
+        }
+    }
+    let bytes = std::fs::read(search_index::filter_path(id)?).ok()?;
+    let bloom = Arc::new(decode_book_filter(&bytes, mtime)?);
+    if let Ok(mut cache) = filter_cache().lock() {
+        cache.insert(id, mtime, bloom.clone());
+    }
+    Some(bloom)
+}
+
+fn save_book_filter(id: u64, mtime: u64, chapters: &[String]) -> Result<(), String> {
+    let bloom = Arc::new(BookSearchBloom::from_chapters(chapters));
+    let path = search_index::filter_path(id).ok_or("无法确定检索预筛选索引目录")?;
+    atomic_file::write(&path, &encode_book_filter(mtime, &bloom))?;
+    let mut cache = filter_cache().lock().map_err(|e| e.to_string())?;
+    cache.insert(id, mtime, bloom);
+    Ok(())
+}
+
+fn book_might_contain(book: &book::Book, query: &str) -> bool {
+    let mtime = file_mtime(&book.path);
+    load_book_filter(book.id, mtime)
+        .map(|bloom| bloom.might_contain(query))
+        .unwrap_or(true)
+}
+
+fn search_assets_current(book: &book::Book, mtime: u64) -> bool {
+    search_index::index_path(book.id)
+        .map(|path| path.exists())
+        .unwrap_or(false)
+        && load_book_filter(book.id, mtime).is_some()
+}
+
+fn ensure_search_assets(book: &book::Book, mtime: u64) -> bool {
+    let Some(index) = ensure_book_index(book) else {
+        return false;
+    };
+    save_book_filter(book.id, mtime, &index.chapters).is_ok()
 }
 
 pub(crate) fn file_mtime(path: &Path) -> u64 {
@@ -86,49 +208,18 @@ pub(crate) fn extract_pdf_pages(path: &Path) -> Vec<String> {
     }
 }
 
-fn load_index(id: u64) -> Option<BookIndex> {
-    let p = index_path(id)?;
-    serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()
-}
-
-fn save_index(id: u64, idx: &BookIndex) {
-    let Some(p) = index_path(id) else { return };
-    if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(s) = serde_json::to_string(idx) {
-        let _ = std::fs::write(&p, s);
-    }
-}
-
-fn index_book_keywords(state: &AppState, book: &book::Book, chapters: &[String]) {
-    let Ok(db_guard) = state.db.lock() else {
-        return;
-    };
-    let Some(db) = db_guard.as_ref() else { return };
-    for (ci, text) in chapters.iter().enumerate() {
-        let doc_len = text.chars().count().max(1).min(u32::MAX as usize) as u32;
-        let _ = db.upsert_keyword_doc(book.id, ci as u32, doc_len);
-        for posting in keyword_postings_for_chapter(text) {
-            let _ = db.upsert_keyword_posting(
-                &posting.term,
-                book.id,
-                ci as u32,
-                posting.count,
-                &posting.snippets,
-            );
-        }
-    }
-}
-
 fn ensure_book_index(book: &book::Book) -> Option<BookIndex> {
     if book.format == "pdf" {
         return None;
     }
     let id = book.id;
     let mtime = file_mtime(&book.path);
-    if let Some(idx) = load_index(id) {
-        if idx.v == INDEX_VERSION && idx.mtime == mtime {
+    if let Some((mut idx, legacy)) = search_index::load_index(id) {
+        if idx.mtime == mtime && (idx.v == INDEX_VERSION || idx.v == 2) {
+            if legacy || idx.v != INDEX_VERSION {
+                idx.v = INDEX_VERSION;
+                let _ = search_index::save_index(id, &idx);
+            }
             return Some(idx);
         }
     }
@@ -141,10 +232,49 @@ fn ensure_book_index(book: &book::Book) -> Option<BookIndex> {
         mtime,
         chapters,
     };
-    save_index(id, &idx);
+    let _ = search_index::save_index(id, &idx);
     Some(idx)
 }
 
+fn valid_index_ids(state: &AppState) -> HashSet<u64> {
+    state
+        .library
+        .lock()
+        .map(|library| library.books.iter().map(|book| book.id).collect())
+        .unwrap_or_default()
+}
+
+fn attach_memory_health(
+    state: &AppState,
+    mut health: search_index::SearchIndexDiskHealth,
+) -> search_index::SearchIndexDiskHealth {
+    health.memory_limit_bytes =
+        (crate::search_cache::SEARCH_TEXT_CACHE_BUDGET + FILTER_CACHE_BUDGET) as u64;
+    if let Ok(cache) = state.search_text_cache.lock() {
+        health.memory_bytes = cache.bytes() as u64;
+        health.memory_entries = cache.entries() as u32;
+    }
+    if let Ok(cache) = filter_cache().lock() {
+        health.memory_bytes = health.memory_bytes.saturating_add(cache.bytes as u64);
+        health.memory_entries = health
+            .memory_entries
+            .saturating_add(cache.entries.len() as u32);
+    }
+    health
+}
+
+pub(crate) fn index_health(state: &AppState) -> search_index::SearchIndexDiskHealth {
+    let valid_ids = valid_index_ids(state);
+    attach_memory_health(state, search_index::inspect(&valid_ids))
+}
+
+pub(crate) fn maintain_index(
+    state: &AppState,
+    enforce_quota: bool,
+) -> search_index::SearchIndexDiskHealth {
+    let valid_ids = valid_index_ids(state);
+    attach_memory_health(state, search_index::maintain(&valid_ids, enforce_quota))
+}
 /// 后台为全书架建立/更新索引。只补缺失，避免启动时全量重建抢 UI。
 pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
     std::thread::spawn(move || {
@@ -153,50 +283,36 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
         emit_startup_perf(&app, "keyword-index", "start", "background incremental");
         let state = app.state::<AppState>();
         let books: Vec<book::Book> = { state.library.lock().unwrap().books.clone() };
+        let valid_ids: HashSet<u64> = books.iter().map(|book| book.id).collect();
+        let _ = search_index::maintain(&valid_ids, false);
         let total = books.len();
         let mut skipped = 0usize;
         let mut indexed = 0usize;
         for b in books {
             let mtime = file_mtime(&b.path);
-            let already_indexed = state
-                .db
-                .lock()
-                .ok()
-                .and_then(|guard| {
-                    guard.as_ref().map(|db| {
-                        db.has_keyword_index_for_book(b.id)
-                            && db.has_keyword_doc_for_book(b.id)
-                            && load_index(b.id)
-                                .map(|idx| idx.v == INDEX_VERSION && idx.mtime == mtime)
-                                .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
+            let already_indexed = search_assets_current(&b, mtime);
             if already_indexed {
                 skipped += 1;
                 continue;
             }
-            if let Some(idx) = ensure_book_index(&b) {
-                if let Ok(db_guard) = state.db.lock() {
-                    if let Some(db) = db_guard.as_ref() {
-                        let _ = db.clear_keyword_index_for_book(b.id);
-                    }
-                }
-                index_book_keywords(state.inner(), &b, &idx.chapters);
+            if ensure_search_assets(&b, mtime) {
                 indexed += 1;
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
+        let maintenance = search_index::maintain(&valid_ids, true);
         emit_startup_perf(
             &app,
             "keyword-index",
             "end",
             format!(
-                "{}ms total={} indexed={} skipped={}",
+                "{}ms total={} indexed={} skipped={} removed={} disk_mb={}",
                 started.elapsed().as_millis(),
                 total,
                 indexed,
-                skipped
+                skipped,
+                maintenance.removed_files,
+                maintenance.disk_bytes / (1024 * 1024)
             ),
         );
         set_thread_background(false);
@@ -230,23 +346,18 @@ pub(crate) fn get_book_chapters(state: &AppState, book: &book::Book) -> Option<A
     let id = book.id;
     let mtime = file_mtime(&book.path);
     {
-        let cache = state.text_cache.lock().unwrap();
-        if let Some((mt, arc)) = cache.get(&id) {
-            if *mt == mtime {
-                return Some(arc.clone());
-            }
+        let mut cache = state.search_text_cache.lock().unwrap();
+        if let Some(arc) = cache.get_text(id, mtime) {
+            return Some(arc);
         }
     }
     let idx = ensure_book_index(book)?;
     let arc = Arc::new(idx.chapters);
-    let size: usize = arc.iter().map(|s| s.len()).sum();
-    {
-        let mut cache = state.text_cache.lock().unwrap();
-        if state.cache_bytes.load(Ordering::Relaxed) + size <= TEXT_CACHE_BUDGET {
-            cache.insert(id, (mtime, arc.clone()));
-            state.cache_bytes.fetch_add(size, Ordering::Relaxed);
-        }
-    }
+    state
+        .search_text_cache
+        .lock()
+        .unwrap()
+        .insert_text(id, mtime, arc.clone());
     Some(arc)
 }
 
@@ -258,11 +369,9 @@ fn get_lower_book_chapters(
     let id = book.id;
     let mtime = file_mtime(&book.path);
     {
-        let cache = state.lower_text_cache.lock().unwrap();
-        if let Some((mt, arc)) = cache.get(&id) {
-            if *mt == mtime {
-                return arc.clone();
-            }
+        let mut cache = state.search_text_cache.lock().unwrap();
+        if let Some(arc) = cache.get_lower(id, mtime) {
+            return arc;
         }
     }
     let arc = Arc::new(
@@ -271,14 +380,11 @@ fn get_lower_book_chapters(
             .map(|s| ascii_lower_bytes(s))
             .collect::<Vec<_>>(),
     );
-    let size: usize = arc.iter().map(|s| s.len()).sum();
-    {
-        let mut cache = state.lower_text_cache.lock().unwrap();
-        if state.cache_bytes.load(Ordering::Relaxed) + size <= TEXT_CACHE_BUDGET {
-            cache.insert(id, (mtime, arc.clone()));
-            state.cache_bytes.fetch_add(size, Ordering::Relaxed);
-        }
-    }
+    state
+        .search_text_cache
+        .lock()
+        .unwrap()
+        .insert_lower(id, mtime, arc.clone());
     arc
 }
 
@@ -397,6 +503,7 @@ fn shelf_search_blocking(
         .max(1);
     let chunk_size = targets.len().div_ceil(nthreads).max(1);
 
+    let query = &term;
     let mut results: Vec<ShelfBookHits> = std::thread::scope(|scope| {
         let handles: Vec<_> = targets
             .chunks(chunk_size)
@@ -405,6 +512,9 @@ fn shelf_search_blocking(
                 scope.spawn(move || {
                     let mut out = Vec::new();
                     for b in chunk {
+                        if !book_might_contain(b, query) {
+                            continue;
+                        }
                         if let Some(h) = search_one_book(st, b, term_lower, needs_ci) {
                             out.push(h);
                         }
@@ -495,5 +605,15 @@ mod tests {
             file_mtime(Path::new("__definitely_missing_kunpeng_reader__")),
             0
         );
+    }
+    #[test]
+    fn bloom_file_roundtrip_checks_mtime_and_payload_length() {
+        let bloom = BookSearchBloom::from_chapters(&["中国文史哲 Rust".to_string()]);
+        let bytes = encode_book_filter(42, &bloom);
+        let decoded = decode_book_filter(&bytes, 42).unwrap();
+        assert!(decoded.might_contain("文史哲"));
+        assert!(decoded.might_contain("RUST"));
+        assert!(decode_book_filter(&bytes, 43).is_none());
+        assert!(decode_book_filter(&bytes[..bytes.len() - 1], 42).is_none());
     }
 }

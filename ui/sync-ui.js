@@ -160,9 +160,11 @@ async function loadSyncSettings() {
     const s = await invoke("sync_get_settings");
     syncUsernameEl.value = s.username || "";
     updateAccountView(s);
+    return s;
   } catch (e) {
     syncStatusEl.classList.remove("hidden");
     syncStatusEl.textContent = "读取同步设置失败：" + e;
+    return null;
   }
 }
 let syncSettingsLoaded = false;
@@ -182,6 +184,31 @@ async function loadSyncSettingsOnce() {
     }
   })();
   return syncSettingsPromise;
+}
+let startupAutoSyncStarted = false;
+async function syncOnStartup() {
+  await loadSyncSettingsOnce();
+  if (startupAutoSyncStarted || !syncUsernameEl.value.trim()) return;
+  startupAutoSyncStarted = true;
+  syncNowBtn.disabled = true;
+  setSyncButtonState("syncing", "自动同步中");
+  try {
+    const report = await invoke("sync_now");
+    setSyncButtonState("ok", "同步成功", report.message);
+    updateSyncSummary({
+      last_sync_at: report.server_time,
+      last_sync_pushed: report.pushed,
+      last_sync_pulled: report.pulled,
+      last_sync_accepted: report.accepted,
+      last_sync_ignored: report.ignored,
+    });
+    render(await invoke("shelf_books"));
+  } catch (e) {
+    // Keep the persisted login. Offline startup should not turn into logout.
+    setSyncButtonState("fail", "自动同步失败", String(e));
+  } finally {
+    syncNowBtn.disabled = false;
+  }
 }
 accountBtn.addEventListener("click", (e) => {
   e.stopPropagation();

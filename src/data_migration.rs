@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub(crate) const BOOK_STATE_KIND_V2: &str = "book_state_v2";
+const ENTITY_MODEL_VERSION_KEY: &str = "entity_model_version";
+const ENTITY_MODEL_VERSION: &str = "2";
 
 /// Cross-device state for one book. Machine-local paths and cover-cache paths
 /// never leave the device; the full file hash is the stable identity.
@@ -403,6 +405,25 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     stats.dirty = true;
     stats.save()?;
     Ok(())
+}
+
+/// Converge the local store once all portable v2 rows have been materialized.
+pub(crate) fn converge_entity_model(state: &AppState) -> Result<u32, String> {
+    {
+        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        if db.metadata(ENTITY_MODEL_VERSION_KEY).as_deref() == Some(ENTITY_MODEL_VERSION) {
+            return Ok(0);
+        }
+    }
+
+    // Never discard a legacy row until a complete recovery point exists.
+    crate::backup::create(state, true)?;
+    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    let removed = db.purge_legacy_entities()?;
+    db.set_metadata(ENTITY_MODEL_VERSION_KEY, ENTITY_MODEL_VERSION)?;
+    Ok(removed)
 }
 
 #[cfg(test)]

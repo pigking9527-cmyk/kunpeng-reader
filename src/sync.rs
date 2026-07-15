@@ -1,11 +1,23 @@
 use crate::{data_migration, db, secret_store, AppState, DEFAULT_SYNC_URL};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tauri::Manager;
 
 const SYNC_PULL_PAGE_SIZE: usize = 1_000;
 const MAX_SYNC_PULL_PAGES: usize = 1_000;
 const SYNC_PUSH_BATCH_ENTITIES: usize = 400;
 const SYNC_PUSH_BATCH_BYTES: usize = 2 * 1024 * 1024;
+const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const EXIT_SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const EXIT_SYNC_MAX_PULL_PAGES: usize = 4;
+struct SyncRunGuard<'a>(&'a AtomicBool);
+
+impl Drop for SyncRunGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub(crate) struct SyncSettings {
@@ -242,19 +254,21 @@ fn auth_request_inner(
         let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
         db.set_metadata("sync_url", &base)?;
     }
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(20))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(20)))
+        .build()
+        .into();
     let body = serde_json::json!({
         "username": username,
         "password": password,
     });
     let res: AuthResponse = agent
         .post(&format!("{base}{endpoint}"))
-        .set("Content-Type", "application/json")
+        .header("Content-Type", "application/json")
         .send_json(body)
         .map_err(|e| format!("认证请求失败：{e}"))?
-        .into_json()
+        .body_mut()
+        .read_json()
         .map_err(|e| format!("认证返回解析失败：{e}"))?;
     let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
@@ -296,12 +310,14 @@ pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, S
             if let Ok(base) = normalize_sync_base(&settings.url) {
                 // Remote revocation is best effort: an offline user must still
                 // be able to remove credentials from this device immediately.
-                let _ = ureq::AgentBuilder::new()
-                    .timeout(std::time::Duration::from_secs(8))
+                let agent: ureq::Agent = ureq::Agent::config_builder()
+                    .timeout_global(Some(std::time::Duration::from_secs(8)))
                     .build()
+                    .into();
+                let _ = agent
                     .post(&format!("{base}/auth/logout"))
-                    .set("Authorization", &format!("Bearer {}", settings.token))
-                    .set("Content-Type", "application/json")
+                    .header("Authorization", &format!("Bearer {}", settings.token))
+                    .header("Content-Type", "application/json")
                     .send_json(serde_json::json!({}));
             }
         }
@@ -346,7 +362,20 @@ pub(crate) async fn auth_login(
     .map_err(|e| format!("认证任务失败：{e}"))?
 }
 
-fn sync_now_inner(state: &AppState) -> Result<SyncReport, String> {
+fn sync_now_inner_with_limits(
+    state: &AppState,
+    request_timeout: Duration,
+    max_pull_pages: usize,
+) -> Result<SyncReport, String> {
+    if state
+        .sync_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("同步任务正在进行".into());
+    }
+    let _sync_guard = SyncRunGuard(&state.sync_running);
+
     data_migration::ensure_content_ids_for_sync(state)?;
     // Snapshot local JSON first so unsynced edits are represented in SQLite.
     data_migration::migrate_json_to_sqlite(state)?;
@@ -366,9 +395,10 @@ fn sync_now_inner(state: &AppState) -> Result<SyncReport, String> {
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
         db.set_metadata("sync_url", &base)?;
     }
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(20))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(request_timeout))
+        .build()
+        .into();
 
     // Pull before push. A newly imported zero-progress book must not overwrite
     // the established position from another computer. Continue paging until the
@@ -382,15 +412,16 @@ fn sync_now_inner(state: &AppState) -> Result<SyncReport, String> {
         cursor
     };
     let mut pull_completed = false;
-    for _ in 0..MAX_SYNC_PULL_PAGES {
+    for _ in 0..max_pull_pages {
         let pull: SyncPullResponse = agent
             .get(&format!("{base}/sync/pull"))
             .query("cursor", &pull_cursor)
-            .query("limit", &SYNC_PULL_PAGE_SIZE.to_string())
-            .set("Authorization", &format!("Bearer {}", settings.token))
+            .query("limit", SYNC_PULL_PAGE_SIZE.to_string())
+            .header("Authorization", &format!("Bearer {}", settings.token))
             .call()
             .map_err(|e| format!("pull 失败：{e}"))?
-            .into_json()
+            .body_mut()
+            .read_json()
             .map_err(|e| format!("pull 返回解析失败：{e}"))?;
         pull_server_time = pull_server_time.max(pull.server_time);
         data_migration::merge_pulled_book_states(state, &pull.entities)?;
@@ -435,11 +466,12 @@ fn sync_now_inner(state: &AppState) -> Result<SyncReport, String> {
         });
         let push: SyncPushResponse = agent
             .post(&format!("{base}/sync/push"))
-            .set("Authorization", &format!("Bearer {}", settings.token))
-            .set("Content-Type", "application/json")
+            .header("Authorization", &format!("Bearer {}", settings.token))
+            .header("Content-Type", "application/json")
             .send_json(push_body)
             .map_err(|e| format!("push 失败：{e}"))?
-            .into_json()
+            .body_mut()
+            .read_json()
             .map_err(|e| format!("push 返回解析失败：{e}"))?;
         pushed += batch.len();
         accepted += push.accepted_total() as usize;
@@ -482,6 +514,32 @@ fn sync_now_inner(state: &AppState) -> Result<SyncReport, String> {
         ignored,
         server_time,
     })
+}
+
+fn sync_now_inner(state: &AppState) -> Result<SyncReport, String> {
+    sync_now_inner_with_limits(state, SYNC_REQUEST_TIMEOUT, MAX_SYNC_PULL_PAGES)
+}
+
+/// Whether this device has a complete saved login. The token stays in Rust and
+/// is only decrypted long enough to decide whether an automatic sync is useful.
+pub(crate) fn sync_account_configured(state: &AppState) -> bool {
+    let Ok(db_guard) = state.db.lock() else {
+        return false;
+    };
+    let Some(db) = db_guard.as_ref() else {
+        return false;
+    };
+    let settings = sync_settings_from_db(db);
+    !settings.username.trim().is_empty()
+        && !settings.token.trim().is_empty()
+        && normalize_sync_base(&settings.url).is_ok()
+}
+
+/// Closing must remain responsive when the network is unavailable. Limit both
+/// each request and the number of pull pages; an unfinished sync resumes on the
+/// next startup without discarding local dirty entities.
+pub(crate) fn sync_before_exit(state: &AppState) -> Result<SyncReport, String> {
+    sync_now_inner_with_limits(state, EXIT_SYNC_REQUEST_TIMEOUT, EXIT_SYNC_MAX_PULL_PAGES)
 }
 
 #[tauri::command]
