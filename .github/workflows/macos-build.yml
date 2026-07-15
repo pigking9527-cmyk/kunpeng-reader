@@ -16,6 +16,10 @@ jobs:
     timeout-minutes: 90
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # Ad-hoc signing prevents Gatekeeper from treating an unsigned app bundle
+      # as structurally damaged. A public release still needs Developer ID
+      # signing and Apple notarization.
+      APPLE_SIGNING_IDENTITY: "-"
 
     steps:
       - name: Checkout
@@ -45,6 +49,15 @@ jobs:
       # The semantic search runtime does not ship Intel macOS prebuilt binaries.
       - name: Build Apple Silicon macOS bundles
         run: cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Verify macOS application signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app_path"
+          codesign --verify --deep --strict --verbose=4 "$app_path"
+          codesign --display --verbose=4 "$app_path"
 
       - name: Prepare artifacts and checksums
         shell: bash
