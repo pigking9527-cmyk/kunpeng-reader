@@ -8,7 +8,8 @@
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; overflow: hidden; }
       body {
-        font-family: "Microsoft YaHei", system-ui, sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
+          "PingFang SC", "Hiragino Sans GB", sans-serif;
         display: flex; flex-direction: column; height: 100vh;
         color: #222; background: #fff;
       }
@@ -22,11 +23,11 @@
       .body { user-select: none; } /* 正文选择由 iframe 内部处理，外壳层不参与选择 */
       .toolbar .title {
         color: #555; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-        width: 245px; max-width: 34vw; min-width: 245px; text-align: center;
+        width: 245px; max-width: 34vw; min-width: 0; flex: 0 1 245px; text-align: center;
         display: inline-flex; align-items: center; justify-content: center; gap: 4px;
       }
-      .reader-drag-space { flex: 1 1 auto; align-self: stretch; min-width: 96px; cursor: default; }
-      .window-controls { display: inline-flex; align-items: center; height: 36px; margin-left: 2px; }
+      .reader-drag-space { flex: 1 1 auto; align-self: stretch; min-width: 24px; cursor: default; }
+      .window-controls { display: inline-flex; align-items: center; height: 36px; margin-left: 2px; flex: 0 0 auto; }
       .win-btn {
         width: 38px; height: 34px; border: 1px solid transparent; border-radius: 6px;
         background: transparent; color: #333; cursor: pointer;
@@ -38,9 +39,23 @@
       .tbtn {
         font: inherit; padding: 4px 10px; border: 1px solid #c9c9cf;
         border-radius: 6px; background: #fff; cursor: pointer;
+        white-space: nowrap; flex: 0 0 auto;
       }
       .tbtn:hover { background: #eef2ff; border-color: #93b4ff; }
       .tbtn.active { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
+
+      /* 窄窗口优先压缩标题和空白，不让滚动容器裁掉绝对定位的设置面板。 */
+      @media (max-width: 760px) {
+        .toolbar { gap: 3px; padding-left: 6px; }
+        .toolbar .title { max-width: 20vw; }
+        .reader-drag-space { min-width: 0; }
+        .tbtn { padding-left: 6px; padding-right: 6px; }
+        .win-btn { width: 32px; }
+      }
+      @media (max-width: 600px) {
+        .toolbar .title, .reader-drag-space { display: none; }
+        #tts-btn, #hl-btn, #immersive-btn { display: none; }
+      }
 
       /* 书内搜索框：贴着搜索键的下拉面板（与设置面板一致），不再占满整行 */
       .search-wrap { position: relative; display: inline-flex; }
@@ -360,7 +375,7 @@
       body.theme-dark .info-desc[contenteditable] { border-color: #4a4a4d; }
 
       /* 设置面板：锚定在齿轮按钮正下方 */
-      .gear-wrap { position: relative; display: inline-flex; }
+      .gear-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
       .settings {
         position: absolute; top: calc(100% + 8px); left: 0; width: 280px;
         background: #fff; border: 1px solid #ccc; border-radius: 8px;
@@ -368,11 +383,13 @@
         display: none; font-size: 13px;
       }
       .settings.show { display: block; }
-      .settings .row { display: flex; align-items: center; margin: 9px 0; gap: 8px; }
+      .settings .row { display: flex; align-items: center; margin: 9px 0; gap: 8px; min-width: 0; }
       .settings .row > label:first-child { width: 72px; color: #444; flex: 0 0 auto; white-space: nowrap; }
       .settings input[type="range"] { flex: 1; }
       .settings .val { width: 42px; text-align: right; color: #666; }
-      .settings select { flex: 1; font: inherit; padding: 2px; }
+      /* WKWebView 会按最长选项保留 select 的固有宽度；width:0 让它真正按
+         剩余空间收缩，Windows WebView2 中的尺寸保持不变。 */
+      .settings select { flex: 1 1 0; width: 0; min-width: 0; max-width: 100%; font: inherit; padding: 2px; }
       .settings .margins { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-top: 4px; }
       .settings .margins label { display: flex; align-items: center; gap: 4px; }
       .settings .margins input { width: 56px; font: inherit; }
@@ -405,6 +422,16 @@
       }
       .settings-switch input:checked + .settings-slider { background: #5aa0ff; }
       .settings-switch input:checked + .settings-slider::before { transform: translateX(18px); }
+      @keyframes settings-switch-auto-off {
+        from { transform: translateX(18px); }
+        to { transform: translateX(0); }
+      }
+      .settings-switch.auto-off .settings-slider::before {
+        /* WKWebView 会在 keyframes 结束后补跑 transform transition。禁用这一层的
+           transition 并保持最终帧，可避免“正常滑完后又快速滑一次”。 */
+        transition: none;
+        animation: settings-switch-auto-off 0.24s cubic-bezier(0.4, 0, 0.2, 1) both;
+      }
 
       /* 深色主题下的外壳（工具栏/目录/设置/弹窗） */
       body.theme-dark { background: #1c1c1e; color: #ddd; }
@@ -480,15 +507,20 @@
       /* 沉浸模式：保留工具栏占位（不改阅读区高度→零重排不跳页）。只淡出按钮，
          右上角阅读统计始终可见；点屏幕中间唤出时按钮淡入。隐藏时工具栏背景透明，
          只剩统计文字浮在顶部，更干净；唤出时恢复背景+阴影。 */
-      body.immersive .toolbar > button,
-      body.immersive .toolbar > .search-wrap,
-      body.immersive .toolbar > .gear-wrap { opacity: 0; pointer-events: none; transition: opacity 0.18s ease; }
-      body.immersive.bar-show .toolbar > button,
-      body.immersive.bar-show .toolbar > .search-wrap,
-      body.immersive.bar-show .toolbar > .gear-wrap { opacity: 1; pointer-events: auto; }
+      body.immersive .toolbar > * {
+        opacity: 0; visibility: hidden; pointer-events: none;
+        transition: opacity 0.18s ease, visibility 0s linear 0.18s;
+      }
+      body.immersive.bar-show .toolbar > *,
+      body.immersive.bar-hover .toolbar > * {
+        opacity: 1; visibility: visible; pointer-events: auto;
+        transition: opacity 0.18s ease;
+      }
       body.immersive .toolbar { background: transparent; border-bottom-color: transparent; }
-      body.immersive.bar-show .toolbar { background: transparent; border-bottom-color: transparent; }
-      body.theme-dark.immersive.bar-show .toolbar { background: #262628; border-bottom-color: #3a3a3d; }
+      body.immersive.bar-show .toolbar,
+      body.immersive.bar-hover .toolbar { background: transparent; border-bottom-color: transparent; }
+      body.theme-dark.immersive.bar-show .toolbar,
+      body.theme-dark.immersive.bar-hover .toolbar { background: #262628; border-bottom-color: #3a3a3d; }
       /* 批注页（大） */
       .anno-card { width: 680px; max-width: 92vw; max-height: 84vh; display: flex; flex-direction: column; }
       #anno-list { overflow-y: auto; }
@@ -761,4 +793,3 @@
     <script src="reader-cross-search-ui.js"></script>
   </body>
 </html>
-

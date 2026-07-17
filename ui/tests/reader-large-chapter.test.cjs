@@ -15,10 +15,14 @@ test("large chapter layout threshold selects only large HTML", () => {
     /var FAST_CHAPTER_LAYOUT_CHARS=.*?;\s*function largeChapterFastLayout\(html\)\{.*?\}/s
   );
   assert.ok(snippet, "large chapter layout helper must remain testable");
-  const context = {};
+  const context = { IS_MAC_WEBKIT: false };
   vm.runInNewContext(snippet[0], context);
   assert.equal(context.largeChapterFastLayout("x".repeat(120 * 1024 - 1)), false);
   assert.equal(context.largeChapterFastLayout("x".repeat(120 * 1024)), true);
+  const macContext = { IS_MAC_WEBKIT: true };
+  vm.runInNewContext(snippet[0], macContext);
+  assert.equal(macContext.largeChapterFastLayout("x".repeat(16 * 1024 - 1)), false);
+  assert.equal(macContext.largeChapterFastLayout("x".repeat(16 * 1024)), true);
 });
 
 test("large chapters use batched geometry and skip repeated exact layout", () => {
@@ -44,7 +48,7 @@ test("paged image preview is limited to the page immediately before the stable o
   assert.match(source, /applyScrollImagePreview\(\);/);
   assert.match(source, /sizeVirtualPreviewClone\(clone,next\)/);
   assert.match(source, /if\(flowChanged\|\|pageModeChanged\)cancelPagedImagePreview\(\)/);
-  assert.match(source, /function applyScrollPageMask\(\)\{\s*if\(typeof clearPagedImagePreview==='function'\)clearPagedImagePreview\(\)/);
+  assert.match(source, /function applyScrollPageMask\(force\)\{[\s\S]*?if\(typeof clearPagedImagePreview==='function'\)clearPagedImagePreview\(\)/);
   assert.doesNotMatch(source, /rr-paged-media-fitted|pagedMediaFitHeight/);
 });
 test("mode switches restore anchors inside the already inset scroll viewport", () => {
@@ -74,4 +78,12 @@ test("scroll mode previews an oversized image that starts inside the viewport", 
   assert.equal(context.scrollImagePreviewEligible(oversized, { previewIndex: 4 }, 4, 1200), true);
   assert.equal(context.scrollImagePreviewEligible(fitting, { previewItem: fitting }, 4, 1200), false);
   assert.equal(context.scrollImagePreviewEligible(below, { previewItem: null }, 4, 1200), true);
+});
+
+test("scroll paging reuses cached geometry and skips duplicate mask renders", () => {
+  assert.match(source, /if\(!force&&maskSig===scrollMaskSig\)return/);
+  assert.match(source, /var items=scrollPageItems\(\);/);
+  const clip = source.match(/function currentScrollPageClipBlank\(\)[\s\S]*?\n\}/);
+  assert.ok(clip, "scroll clipping helper must remain inspectable");
+  assert.doesNotMatch(clip[0], /documentTextLineRects\(\)/);
 });

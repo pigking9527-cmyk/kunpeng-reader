@@ -23,6 +23,11 @@ const DEFAULTS = {
   ttsRate: 1,
 };
 
+// Windows WebView2 的原生 switch transition 正常；仅 macOS WKWebView 需要补偿动画。
+const READER_SHELL_IS_MAC_WEBKIT = /Macintosh|Mac OS X/.test(navigator.userAgent || "")
+  && /AppleWebKit/.test(navigator.userAgent || "")
+  && !/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent || "");
+
 // 外壳（工具栏/目录/设置）的深色应用
 function applyShellTheme(theme) {
   document.body.classList.toggle("theme-dark", theme === "dark");
@@ -169,10 +174,19 @@ function initSettingsUI() {
   }
   const dualModeToggle = document.getElementById("set-dual-mode");
   const scrollModeToggle = document.getElementById("set-scroll-mode");
+  function animateToggleOff(input) {
+    const shell = input?.closest?.(".settings-switch");
+    if (!shell) return;
+    shell.classList.remove("auto-off");
+    void shell.offsetWidth; // 允许连续切换时重新触发动画
+    shell.classList.add("auto-off");
+  }
   function refreshReadingModeToggles() {
     normalizeModeSettings();
     if (dualModeToggle) {
       dualModeToggle.checked = settings.flowMode !== "scroll" && settings.pageMode === "dual";
+      // auto-off 用 fill-mode 保持关闭终态；重新开启双页时才解除它。
+      if (dualModeToggle.checked) dualModeToggle.closest(".settings-switch")?.classList.remove("auto-off");
       dualModeToggle.title = "开启双页";
     }
     if (scrollModeToggle) {
@@ -194,11 +208,17 @@ function initSettingsUI() {
   }
   if (scrollModeToggle) {
     scrollModeToggle.addEventListener("change", () => {
+      const dualWasOn = !!dualModeToggle?.checked;
       if (scrollModeToggle.checked) {
         settings.flowMode = "scroll";
         settings.pageMode = "single";
       } else {
         settings.flowMode = "paged";
+      }
+      // 先占用圆点的 transform，再取消 checked。否则原生 transition 会先滑一次，
+      // 随后的 keyframes 又从开启位置滑一次，看起来就像动画播放了两遍。
+      if (READER_SHELL_IS_MAC_WEBKIT && scrollModeToggle.checked && dualWasOn) {
+        animateToggleOff(dualModeToggle);
       }
       refreshReadingModeToggles();
       onChange();
@@ -216,5 +236,3 @@ function initSettingsUI() {
   bindSel("set-ttsvoice", "ttsVoice");
   bindRange("set-ttsrate", "v-ttsrate", "ttsRate", (v) => v.toFixed(1) + "×");
 }
-
-

@@ -55,6 +55,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::{Emitter, Manager};
 
 struct StartupBookPaths(Mutex<Vec<String>>);
@@ -66,8 +67,14 @@ struct AssociatedBookRequest {
 }
 
 static NEXT_ASSOCIATED_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+static READER_RESOURCE_REQUEST_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// 自定义协议的基地址（Windows 下 WebView2 把自定义协议映射到 http://<scheme>.localhost）
+/// 自定义协议的基地址。
+/// Windows WebView2 把它映射到 `http://<scheme>.localhost`，而 Apple WebKit
+/// 使用注册时的原生 scheme URL。其他平台暂时保留既有地址，避免改变行为。
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) const RES_BASE: &str = "reader://localhost";
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub(crate) const RES_BASE: &str = "http://reader.localhost";
 pub(crate) const DEFAULT_SYNC_URL: &str = "";
 
@@ -87,6 +94,13 @@ fn log(msg: &str) {
         {
             let _ = writeln!(f, "{msg}");
         }
+    }
+}
+
+#[tauri::command]
+fn reader_perf_log(window: tauri::WebviewWindow, event: String) {
+    if event.len() <= 1000 && window.label().starts_with("reader-") {
+        log(&format!("reader_perf label={} {event}", window.label()));
     }
 }
 
@@ -886,6 +900,7 @@ async fn open_book(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    let started = Instant::now();
     log(&format!("open_book id={id}"));
     let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
     // 源文件丢失则不开空窗，直接给出可读的提示
@@ -897,7 +912,13 @@ async fn open_book(
             }
         }
     }
-    ensure_reader_window(&app, state.inner(), id_num).map(|_| ())
+    let result = ensure_reader_window(&app, state.inner(), id_num).map(|_| ());
+    log(&format!(
+        "open_book complete id={id_num} ok={} elapsed_ms={}",
+        result.is_ok(),
+        started.elapsed().as_millis()
+    ));
+    result
 }
 
 /// 书架全文检索点击结果：打开（或聚焦）这本书，并跳到命中所在章节、高亮搜索词。
@@ -1058,12 +1079,18 @@ fn ensure_reader_window(
         }
     });
 
-    // 窗口建好后再记录“最近阅读”并写盘（不拖慢打开）
+    // 先只更新内存里的“最近阅读”。旧实现此处持有书架锁同步写盘，恰好会
+    // 挡住新 WebView 紧接着发出的 book_info，导致窗口出现后仍长时间空白。
     {
         let mut lib = state.library.lock().unwrap();
         lib.mark_read(id_num);
-        report_save_error("书架", lib.save());
     }
+    let save_app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let st = save_app.state::<AppState>();
+        report_save_error("书架", st.library.lock().unwrap().save());
+    });
     Ok(w)
 }
 
@@ -1200,6 +1227,7 @@ async fn book_info(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
 ) -> Result<BookInfo, String> {
+    let started = Instant::now();
     let label = window.label().to_string();
     log(&format!("book_info label={label}"));
     let id = label
@@ -1300,9 +1328,10 @@ async fn book_info(
     }
 
     log(&format!(
-        "book_info -> {} chapters, {} toc",
+        "book_info -> {} chapters, {} toc elapsed_ms={}",
         meta.virtuals.len(),
-        meta.toc.len()
+        meta.toc.len(),
+        started.elapsed().as_millis()
     ));
     Ok(BookInfo {
         id: id_num.to_string(),
@@ -2421,7 +2450,15 @@ fn main() {
         // 异步协议：在后台线程处理，绝不阻塞 UI 主线程（避免空白/卡死）
         .register_asynchronous_uri_scheme_protocol("reader", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
+            let uri = request.uri().to_string();
             let path = request.uri().path().to_string();
+            if path.starts_with("/cover/")
+                || path.starts_with("/book/")
+                || (path.starts_with("/res/")
+                    && !READER_RESOURCE_REQUEST_LOGGED.swap(true, Ordering::Relaxed))
+            {
+                log(&format!("reader_protocol uri={uri} path={path}"));
+            }
             std::thread::spawn(move || {
                 let state = app.state::<AppState>();
                 let response = match handle_request(&state, &path) {
@@ -2504,6 +2541,7 @@ fn main() {
             import::auto_import_scan,
             open_book,
             book_info,
+            reader_perf_log,
             reader_commands::book_meta,
             reader_commands::book_meta_by_id,
             compute_word_counts,

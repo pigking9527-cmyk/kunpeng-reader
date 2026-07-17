@@ -461,7 +461,7 @@ mod tests {
         );
         assert_eq!(
             rewrite_url("../img/封面 图.png", false, 7, "OPS/Text", &map),
-            "http://reader.localhost/res/7/OPS/img/%E5%B0%81%E9%9D%A2%20%E5%9B%BE.png"
+            format!("{RES_BASE}/res/7/OPS/img/%E5%B0%81%E9%9D%A2%20%E5%9B%BE.png")
         );
         assert_eq!(
             rewrite_url("https://example.com/a.png", false, 7, "", &map),
@@ -474,11 +474,20 @@ mod tests {
         let map = HashMap::new();
         let html = r#"<img src="../img/a b.png"><a href="next.xhtml">next</a>"#;
         let out = rewrite_attrs(html, 9, "OPS/Text", &map);
-        assert!(out.contains("http://reader.localhost/res/9/OPS/img/a%20b.png"));
-        assert!(out.contains("http://reader.localhost/res/9/OPS/Text/next.xhtml"));
+        assert!(out.contains(&format!("{RES_BASE}/res/9/OPS/img/a%20b.png")));
+        assert!(out.contains(&format!("{RES_BASE}/res/9/OPS/Text/next.xhtml")));
 
         let css = "body{background:url('../img/bg.png')}";
         assert!(rewrite_css_url(css, 9, "OPS/Text").contains("/res/9/OPS/img/bg.png"));
+    }
+
+    #[test]
+    fn resource_base_matches_webview_platform() {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        assert_eq!(RES_BASE, "reader://localhost");
+
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        assert_eq!(RES_BASE, "http://reader.localhost");
     }
 
     #[test]

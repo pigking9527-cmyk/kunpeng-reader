@@ -43,6 +43,16 @@ test("reader injection is composed from responsibility-focused modules", () => {
   assert.ok(!fs.existsSync(path.join(root, "ui", "reader-page-head.html")));
 });
 
+test("reader performance events are bounded and forwarded to the backend", () => {
+  const guard = read("ui", "reader-message.js");
+  const reader = read("ui", "reader.js");
+  const layout = read("ui", "reader-page-layout.js");
+  assert.match(guard, /"readerPerf"/);
+  assert.match(guard, /action === "readerPerf"[^\n]*1000/);
+  assert.match(reader, /invoke\("reader_perf_log", \{ event: e\.data\.readerPerf \}\)/);
+  assert.match(layout, /function reportReaderPaintPerf\(name,started,detail\)/);
+});
+
 test("reader cross and semantic search keep results from the current book", () => {
   const cross = read("ui", "reader-cross-search-ui.js");
   assert.match(cross, /const list = crossLastResults;/);

@@ -58,9 +58,13 @@ document.getElementById("toc-btn").addEventListener("click", () => {
   setVocab(false); // 与生词本互斥
   setToc(!tocEl.classList.contains("show"));
 });
-backdropEl.addEventListener("click", () => {
+backdropEl.addEventListener("click", (e) => {
   setToc(false);
   setVocab(false);
+  // 目录遮罩盖住 iframe 时，中间点击仍应切换整条工具栏。
+  if (e.clientX >= window.innerWidth * 0.4 && e.clientX <= window.innerWidth * 0.6) {
+    window.toggleReaderToolbar?.();
+  }
 });
 
 document.getElementById("gear-btn").addEventListener("click", () => {

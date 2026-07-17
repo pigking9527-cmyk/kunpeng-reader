@@ -244,9 +244,20 @@ function init(){
   // 记录是否发生了拖动（用于区分“单击翻页”与“拖动选字”）
   document.addEventListener('mousedown',function(e){downX=e.clientX;downY=e.clientY;didDrag=false;if(e.detail>1)e.preventDefault();}); // e.detail>1：双击/三击 → 阻止浏览器选词/选段（连点翻页常被当双击而误选）
   document.addEventListener('mousemove',function(e){if(downX!==null&&(Math.abs(e.clientX-downX)>4||Math.abs(e.clientY-downY)>4))didDrag=true;});
-  document.addEventListener('click',function(e){
+  var macFastTap=null;
+  var isMacWebKit=IS_MAC_WEBKIT;
+  function tapHasSelection(){
+    var sel=window.getSelection?window.getSelection():null;
+    return !!(sel&&!sel.isCollapsed&&sel.toString().trim());
+  }
+  function handleReaderTap(e){
     parent.postMessage({uiClick:1},'*');
-    if(overlayOpen){return;} // 有搜索框/设置浮层时，点击正文只用于关闭浮层，不翻页/不弹菜单
+    var x=e.clientX;
+    if(overlayOpen){
+      // 关闭浮层的同一次中间点击也切换工具栏，不要求用户再点一次。
+      if(x>=window.innerWidth*0.4&&x<=window.innerWidth*0.6)parent.postMessage({centerTap:1},'*');
+      return;
+    }
     // 点到已高亮的文字 → 出高亮菜单，不翻页
     var hm=e.target.closest?e.target.closest('.hl-rect[data-hi],mark.hl'):null;
     if(hm){e.stopPropagation();showHlMenu(parseInt(hm.getAttribute('data-hi'),10),true,hm,e);return;}
@@ -264,9 +275,26 @@ function init(){
     }
     hideFn(); // 点别处 → 收起注释弹窗
     // 拖动选字（或存在选中文字）时不翻页，让 web 搜索菜单稳定停在高亮处
-    var sel=window.getSelection?window.getSelection():null;
-    if(didDrag||(sel&&!sel.isCollapsed&&sel.toString().trim())){return;}
-    var x=e.clientX;if(x>window.innerWidth*0.6)nextPage();else if(x<window.innerWidth*0.4)prevPage();else parent.postMessage({centerTap:1},'*');
+    if(didDrag||tapHasSelection()){return;}
+    var tapStarted=performance.now();
+    if(x>window.innerWidth*0.6){nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
+    else if(x<window.innerWidth*0.4){prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
+    else parent.postMessage({centerTap:1},'*');
+  }
+  // macOS 的 WKWebView 在部分点击序列中较晚派发 click。只对正文空白/文字区
+  // 使用更早的 pointerup 翻页，并吞掉紧随其后的 click，避免 Windows 行为变化。
+  if(isMacWebKit)document.addEventListener('pointerup',function(e){
+    if(e.button!==0||e.isPrimary===false||didDrag||tapHasSelection())return;
+    if(e.target.closest&&e.target.closest('a,button,input,select,textarea,#fn-pop,.hl-rect[data-hi],mark.hl'))return;
+    macFastTap={at:Date.now(),x:e.clientX,y:e.clientY,target:e.target};
+    handleReaderTap(e);
+  });
+  document.addEventListener('click',function(e){
+    if(macFastTap&&Date.now()-macFastTap.at<700&&macFastTap.target===e.target&&Math.abs(macFastTap.x-e.clientX)<5&&Math.abs(macFastTap.y-e.clientY)<5){
+      macFastTap=null;e.preventDefault();e.stopPropagation();return;
+    }
+    macFastTap=null;
+    handleReaderTap(e);
   });
   document.addEventListener('keydown',function(e){if(((e.ctrlKey||e.metaKey)&&(e.key==='f'||e.key==='F'))||e.key==='F3')e.preventDefault();},true); // 禁用浏览器自带查找
   document.addEventListener('keydown',function(e){

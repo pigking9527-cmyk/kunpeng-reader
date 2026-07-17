@@ -8,7 +8,7 @@
   const ACTIONS = new Set([
     "layoutBusy", "progress", "ttsState", "ttsSynth", "dictPrefetch", "dictSpeak",
     "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav",
-    "centerTap", "ready", "measured", "downloadImage", "webSearch", "crossSearch",
+    "centerTap", "readerPerf", "ready", "measured", "downloadImage", "webSearch", "crossSearch",
     "semanticSearch", "translateText", "dict", "vocabAdd", "addHighlight",
     "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations",
     "removeHighlight", "setHighlightNote", "setHighlightText", "addBookmark", "tocResolved",
@@ -38,6 +38,7 @@
   }
 
   function validActionPayload(action, data) {
+    if (action === "readerPerf") return textWithin(data[action], 1000);
     if (["webSearch", "crossSearch", "semanticSearch", "dict", "dictPrefetch", "dictSpeak"].includes(action)) {
       return textWithin(data[action], MAX_TEXT_CHARS);
     }

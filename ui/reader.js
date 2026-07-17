@@ -67,9 +67,28 @@ let immersive = localStorage.getItem("immersive") === "1";
 function setImmersive(on) {
   immersive = on;
   document.body.classList.toggle("immersive", on);
-  if (!on) document.body.classList.remove("bar-show");
+  if (!on) document.body.classList.remove("bar-show", "bar-hover");
   localStorage.setItem("immersive", on ? "1" : "0");
 }
+function toggleReaderToolbar() {
+  // 中间点击就是工具栏的总开关。普通模式下第一次点击进入沉浸并隐藏；
+  // 沉浸模式下继续在显示/隐藏之间切换。
+  if (!immersive) {
+    setImmersive(true);
+    return;
+  }
+  document.body.classList.toggle("bar-show");
+}
+window.toggleReaderToolbar = toggleReaderToolbar;
+const readerToolbar = document.querySelector(".toolbar");
+readerToolbar?.addEventListener("pointerenter", () => {
+  if (immersive) document.body.classList.add("bar-hover");
+});
+readerToolbar?.addEventListener("pointerleave", () => {
+  if (!immersive) return;
+  // 鼠标离开菜单栏后统一收起；同时清掉中间点击留下的常驻显示状态。
+  document.body.classList.remove("bar-hover", "bar-show");
+});
 document.getElementById("immersive-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   setImmersive(!immersive);
@@ -609,6 +628,10 @@ document.getElementById("info-desc").addEventListener("blur", () => {
 // 接收合并页上报：阅读进度 / 正文被点击 / 搜索结果数
 window.addEventListener("message", (e) => {
   if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
+  if (typeof e.data.readerPerf === "string") {
+    invoke("reader_perf_log", { event: e.data.readerPerf }).catch(() => {});
+    return;
+  }
   if (e.data.layoutBusy) {
     if (!isPdf) showProgressLoading();
     return;
@@ -688,11 +711,8 @@ window.addEventListener("message", (e) => {
   if (e.data.searchResults && isPdf) renderResults(rsearchTerm, e.data.searchResults); // PDF 书内搜索结果
   if (e.data.uiClick) {
     // 正文被点击：关闭已打开的搜索框/设置面板（沉浸与非沉浸一致）
-    const had = rsearch.classList.contains("show") || settingsEl.classList.contains("show");
     if (rsearch.classList.contains("show")) toggleSearch(false);
     closeSettings();
-    // 沉浸模式：同一次点击在关闭浮层的同时也收起工具栏，避免还要再点一下
-    if (had && immersive) document.body.classList.remove("bar-show");
   }
   if (e.data.userNav) {
     // 正文区键盘/滚轮翻页：收起搜索框与沉浸工具栏。
@@ -701,7 +721,7 @@ window.addEventListener("message", (e) => {
     if (rsearch.classList.contains("show")) toggleSearch(false);
     if (immersive) document.body.classList.remove("bar-show");
   }
-  if (e.data.centerTap && immersive) document.body.classList.toggle("bar-show");
+  if (e.data.centerTap) toggleReaderToolbar();
   if (e.data.ready) {
     hideLoading();
     frameReady = true;

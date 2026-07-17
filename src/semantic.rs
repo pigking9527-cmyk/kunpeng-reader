@@ -59,6 +59,22 @@ fn dir_contains_model_file(path: &std::path::Path) -> bool {
     false
 }
 
+const SEMANTIC_MODEL_MISSING: &str = "尚未下载语义模型，请先在书架的语义索引设置中下载模型。";
+
+/// 只检查本地状态，不等待可能正在下载模型的互斥锁，也不触发联网下载。
+fn semantic_model_available(state: &AppState) -> bool {
+    let loaded = state
+        .embedder
+        .try_lock()
+        .map(|slot| slot.is_some())
+        .unwrap_or(false);
+    loaded
+        || sem_model_dir()
+            .as_deref()
+            .map(dir_contains_model_file)
+            .unwrap_or(false)
+}
+
 #[derive(Serialize, Deserialize)]
 struct SemChunk {
     c: u32,    // 章节序号
@@ -1238,11 +1254,10 @@ fn enrich_sem_progress(state: &AppState, mut p: SemProgress) -> SemProgress {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     p.model_bytes = model_bytes;
-    p.model_ready = state.embedder.lock().unwrap().is_some()
-        || model_path
-            .as_ref()
-            .map(|p| dir_contains_model_file(p) || model_bytes > 40 * 1024 * 1024)
-            .unwrap_or(false);
+    // 状态刷新绝不能排队等待模型下载。下载过程可能持续数十秒，旧实现会让
+    // 整个任务中心一直停在“正在读取模型状态”。只有完整的 ONNX 文件或已经
+    // 载入内存的模型才算可用，部分下载不能误报为就绪。
+    p.model_ready = semantic_model_available(state);
 
     let (sem_done, sem_total) = semantic_book_progress(state);
     p.semantic_done = sem_done;
@@ -2660,6 +2675,12 @@ pub(crate) fn semantic_tasks(
 /// 命令立即返回；真正工作在后台线程完成。查询若紧接着到来，会复用同一加载锁而不会重复读 9GB 索引。
 #[tauri::command]
 pub(crate) fn prepare_semantic_search(app: tauri::AppHandle) -> Result<bool, String> {
+    {
+        let state = app.state::<AppState>();
+        if !semantic_model_available(state.inner()) {
+            return Err(SEMANTIC_MODEL_MISSING.to_string());
+        }
+    }
     if SEM_PREPARED.load(Ordering::Acquire) {
         return Ok(false);
     }
@@ -2849,6 +2870,12 @@ pub(crate) async fn semantic_search(
     query: String,
     ids: Option<Vec<String>>,
 ) -> Result<Vec<SemBookHits>, String> {
+    {
+        let state = app.state::<AppState>();
+        if !semantic_model_available(state.inner()) {
+            return Err(SEMANTIC_MODEL_MISSING.to_string());
+        }
+    }
     let query_activity = SemanticQueryActivity::enter();
     // 冷启动时后台载入模型和全局图。查询本身不会再等待大图载入，
     // 而是先通过书籍画像给出一批快速结果。
