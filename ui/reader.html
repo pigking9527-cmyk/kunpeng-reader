@@ -377,7 +377,7 @@
       /* 设置面板：锚定在齿轮按钮正下方 */
       .gear-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
       .settings {
-        position: absolute; top: calc(100% + 8px); left: 0; width: 280px;
+        position: absolute; top: 100%; left: 0; width: 280px;
         background: #fff; border: 1px solid #ccc; border-radius: 8px;
         box-shadow: 0 6px 20px rgba(0,0,0,0.2); padding: 12px 14px; z-index: 30;
         display: none; font-size: 13px;
@@ -785,6 +785,7 @@
     </div>
     <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果">←</button>
     <script src="reader-message.js"></script>
+    <script src="reader-shell-state.js"></script>
     <script src="reader-search-ui.js"></script>
     <script src="reader-settings-ui.js"></script>
     <script src="reader.js"></script>

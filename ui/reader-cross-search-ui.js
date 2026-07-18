@@ -37,7 +37,7 @@ function crossHighlight(snippet, term) {
   return html;
 }
 function closeCrossSearch() {
-  crossModal.classList.remove("show");
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.CROSS_SEARCH, false);
 }
 function crossCurrentBookId() {
   return String(window.currentBookId || (typeof currentBookId !== "undefined" ? currentBookId : "") || "");
@@ -228,11 +228,7 @@ function openCrossSearch(term) {
   crossExpanded = new Map();
   crossCollapsed = new Set();
   window.pauseReadTracking?.("cross-search");
-  closeSettings();
-  if (rsearch.classList.contains("show")) toggleSearch(false);
-  if (typeof setToc === "function") setToc(false);
-  if (typeof setVocab === "function") setVocab(false);
-  crossModal.classList.add("show");
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.CROSS_SEARCH, true);
   crossInput.focus();
   crossInput.select();
   updateCrossModeUi();
@@ -246,11 +242,7 @@ function openSemanticSearch(term) {
   crossExpanded = new Map();
   crossCollapsed = new Set();
   window.pauseReadTracking?.("semantic-search");
-  closeSettings();
-  if (rsearch.classList.contains("show")) toggleSearch(false);
-  if (typeof setToc === "function") setToc(false);
-  if (typeof setVocab === "function") setVocab(false);
-  crossModal.classList.add("show");
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.CROSS_SEARCH, true);
   crossInput.focus();
   crossInput.select();
   updateCrossModeUi();

@@ -5,10 +5,7 @@
 const tocPane = document.getElementById("toc-pane");
 const bmPane = document.getElementById("bm-pane");
 function setToc(open) {
-  if (open) window.pauseReadTracking?.("toc");
-  tocEl.classList.toggle("show", open);
-  backdropEl.classList.toggle("show", open);
-  if (open) setTocTab("toc"); // 每次打开默认目录页
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.TOC, !!open);
 }
 // 目录 / 书签 标签切换
 function setTocTab(which) {
@@ -20,6 +17,12 @@ function setTocTab(which) {
   if (isToc) highlightCurrentToc();
   else renderBookmarks();
 }
+ReaderShell.registerOverlay(ReaderShell.OVERLAY.TOC, {
+  onOpen() {
+    window.pauseReadTracking?.("toc");
+    setTocTab("toc");
+  },
+});
 document.getElementById("tab-toc").addEventListener("click", () => setTocTab("toc"));
 document.getElementById("tab-bm").addEventListener("click", () => setTocTab("bm"));
 // 高亮当前阅读位置对应的目录条目，打勾并滚到中间
@@ -53,14 +56,10 @@ function markToc(el) {
   el.scrollIntoView({ block: "center" });
 }
 document.getElementById("toc-btn").addEventListener("click", () => {
-  closeSettings();
-  if (rsearch.classList.contains("show")) toggleSearch(false);
-  setVocab(false); // 与生词本互斥
-  setToc(!tocEl.classList.contains("show"));
+  setToc(!ReaderShell.isOverlay(ReaderShell.OVERLAY.TOC));
 });
 backdropEl.addEventListener("click", (e) => {
-  setToc(false);
-  setVocab(false);
+  ReaderShell.closeOverlay();
   // 目录遮罩盖住 iframe 时，中间点击仍应切换整条工具栏。
   if (e.clientX >= window.innerWidth * 0.4 && e.clientX <= window.innerWidth * 0.6) {
     window.toggleReaderToolbar?.();
@@ -68,10 +67,8 @@ backdropEl.addEventListener("click", (e) => {
 });
 
 document.getElementById("gear-btn").addEventListener("click", () => {
-  const willShow = !settingsEl.classList.contains("show");
-  if (willShow && rsearch.classList.contains("show")) toggleSearch(false); // 一次只开一个浮层
-  settingsEl.classList.toggle("show");
-  syncOverlay();
+  const willShow = !ReaderShell.isOverlay(ReaderShell.OVERLAY.SETTINGS);
+  setSettingsOpen(willShow);
 });
 document.getElementById("prev-btn").addEventListener("click", () => {
   window.keepImmersiveBarAfterNav?.();
@@ -167,7 +164,7 @@ const annoList = document.getElementById("anno-list");
 let highlights = [];
 function renderHighlights() {
   // 兼容旧调用名；实际只在批注页打开时才需要重绘
-  if (annoModal.classList.contains("show")) renderAnnotations();
+  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.ANNOTATIONS)) renderAnnotations();
 }
 async function addHighlight(o, note, openNote, openCorrect) {
   highlights = await invoke("add_highlight", {
@@ -227,7 +224,7 @@ function renderAnnotations(targetIdx) {
     ch.textContent = "第 " + ((h.chapter || 0) + 1) + " 章 · 跳转";
     ch.addEventListener("click", () => {
       sendToPage({ gotoHighlight: i });
-      annoModal.classList.remove("show");
+      ReaderShell.setOverlay(ReaderShell.OVERLAY.ANNOTATIONS, false);
     });
     const editBtn = document.createElement("span");
     editBtn.className = "anno-edit-btn";
@@ -294,8 +291,7 @@ function renderAnnotations(targetIdx) {
   });
 }
 function openAnnotations(idx) {
-  window.pauseReadTracking?.("annotations");
-  annoModal.classList.add("show");
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.ANNOTATIONS, true);
   renderAnnotations(idx);
   if (typeof idx === "number") {
     const items = annoList.querySelectorAll(".anno-item");
@@ -308,11 +304,18 @@ function openAnnotations(idx) {
     }
   }
 }
+ReaderShell.registerOverlay(ReaderShell.OVERLAY.ANNOTATIONS, {
+  onOpen() {
+    window.pauseReadTracking?.("annotations");
+  },
+});
 document.getElementById("hl-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   openAnnotations();
 });
-document.getElementById("anno-close").addEventListener("click", () => annoModal.classList.remove("show"));
+document.getElementById("anno-close").addEventListener("click", () => {
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.ANNOTATIONS, false);
+});
 annoModal.addEventListener("click", (e) => {
-  if (e.target === annoModal) annoModal.classList.remove("show"); // 点遮罩关闭
+  if (e.target === annoModal) ReaderShell.setOverlay(ReaderShell.OVERLAY.ANNOTATIONS, false);
 });

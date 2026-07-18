@@ -163,16 +163,18 @@ function applyVocabSettings() {
   }
 }
 function setVocab(open) {
-  if (open) window.pauseReadTracking?.("vocab");
-  vocabEl.classList.toggle("show", open);
-  backdropEl.classList.toggle("show", open);
-  if (!open) vocabSettings.classList.remove("show");
-  if (open) {
-    tocEl.classList.remove("show"); // 与目录互斥
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.VOCAB, !!open);
+}
+ReaderShell.registerOverlay(ReaderShell.OVERLAY.VOCAB, {
+  onOpen() {
+    window.pauseReadTracking?.("vocab");
     applyVocabSettings();
     renderVocab();
-  }
-}
+  },
+  onClose() {
+    vocabSettings.classList.remove("show");
+  },
+});
 function setVocabTab(lang) {
   vocabLang = lang;
   document.getElementById("vtab-zh").classList.toggle("active", lang === "zh");
@@ -343,8 +345,5 @@ vocabSortTime.addEventListener("click", () => setVocabSort("time"));
 vocabSortCount.addEventListener("click", () => setVocabSort("count"));
 applyVocabSettings();
 document.getElementById("vocab-btn").addEventListener("click", () => {
-  closeSettings();
-  if (rsearch.classList.contains("show")) toggleSearch(false);
-  setToc(false); // 与目录互斥
-  setVocab(!vocabEl.classList.contains("show"));
+  setVocab(!ReaderShell.isOverlay(ReaderShell.OVERLAY.VOCAB));
 });

@@ -129,36 +129,37 @@ function runSearch(q) {
     .catch(() => {});
 }
 function toggleSearch(show) {
-  rsearch.classList.toggle("show", show);
-  if (show) {
-    closeSettings(); // 一次只开一个浮层
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.SEARCH, !!show);
+}
+ReaderShell.registerOverlay(ReaderShell.OVERLAY.SEARCH, {
+  onOpen() {
     rsearchInput.value = "";
     renderRHistory(); // 打开就显示自有历史
     rsearchInput.focus();
-  } else {
+  },
+  onClose() {
     sendToPage({ clearMarks: 1 }); // 只清高亮，不改变阅读位置
     rsearchInput.value = "";
     rsearchCount.textContent = "";
     rsearchResults.innerHTML = "";
-  }
-  syncOverlay();
-}
+  },
+});
 document.getElementById("rsearch-btn").addEventListener("click", () => {
-  toggleSearch(!rsearch.classList.contains("show"));
+  toggleSearch(!ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH));
 });
 document.getElementById("rsearch-close").addEventListener("click", () => toggleSearch(false));
 document.querySelector(".toolbar").addEventListener("click", (e) => {
-  if (!rsearch.classList.contains("show")) return;
+  if (!ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH)) return;
   if (e.target.closest(".search-wrap")) return;
   toggleSearch(false);
 });
 window.addEventListener("mouseout", (e) => {
-  if (!rsearch.classList.contains("show")) return;
+  if (!ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH)) return;
   if (e.relatedTarget) return;
   if (e.clientY <= 0) toggleSearch(false);
 });
 window.addEventListener("blur", () => {
-  if (rsearch.classList.contains("show")) toggleSearch(false);
+  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH)) toggleSearch(false);
 });
 rsearchInput.addEventListener("input", () => {
   if (searchTimer) clearTimeout(searchTimer);

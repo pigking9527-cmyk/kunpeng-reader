@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const html = fs.readFileSync(path.join(__dirname, "..", "reader.html"), "utf8");
 const reader = fs.readFileSync(path.join(__dirname, "..", "reader.js"), "utf8");
+const shell = fs.readFileSync(path.join(__dirname, "..", "reader-shell-state.js"), "utf8");
 const notes = fs.readFileSync(path.join(__dirname, "..", "reader-notes-ui.js"), "utf8");
 const annotations = fs.readFileSync(path.join(__dirname, "..", "reader-page-annotations.js"), "utf8");
 const layout = fs.readFileSync(path.join(__dirname, "..", "reader-page-layout.js"), "utf8");
@@ -27,6 +28,19 @@ test("reader settings dropdown is not clipped by the toolbar", () => {
   assert.match(html, /\.settings\s*\{[^}]*position:\s*absolute;[^}]*z-index:\s*30;/s);
 });
 
+test("reader settings dropdown has no pointer gap below the toolbar", () => {
+  assert.match(html, /\.settings\s*\{[^}]*top:\s*100%;/s);
+  assert.doesNotMatch(html, /\.settings\s*\{[^}]*top:\s*calc\(100%\s*\+\s*8px\);/s);
+});
+
+test("returning to the toolbar closes settings left open after a pointer exit", () => {
+  assert.match(shell, /settingsPointerExited:\s*current\.overlay === OVERLAY\.SETTINGS/);
+  assert.match(shell, /current\.overlay === OVERLAY\.SETTINGS && current\.settingsPointerExited/);
+  assert.match(reader, /pointerenter[\s\S]*TOOLBAR_POINTER_ENTER/);
+  assert.match(reader, /pointerleave[\s\S]*TOOLBAR_POINTER_LEAVE/);
+  assert.match(notes, /ReaderShell\.isOverlay\(ReaderShell\.OVERLAY\.SETTINGS\)/);
+});
+
 test("reader settings selects shrink inside the settings panel", () => {
   assert.match(html, /\.settings \.row\s*\{[^}]*min-width:\s*0;/s);
   assert.match(html, /\.settings select\s*\{[^}]*flex:\s*1\s+1\s+0;[^}]*width:\s*0;[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/s);
@@ -44,8 +58,10 @@ test("immersive mode hides and restores every toolbar child without ghost hit ta
 });
 
 test("immersive toolbar appears on hover and retracts when the pointer leaves", () => {
-  assert.match(reader, /readerToolbar\?\.addEventListener\("pointerenter"[\s\S]*classList\.add\("bar-hover"\)/);
-  assert.match(reader, /readerToolbar\?\.addEventListener\("pointerleave"[\s\S]*classList\.remove\("bar-hover", "bar-show"\)/);
+  assert.match(reader, /readerToolbar\?\.addEventListener\("pointerenter"[\s\S]*TOOLBAR_POINTER_ENTER/);
+  assert.match(reader, /readerToolbar\?\.addEventListener\("pointerleave"[\s\S]*TOOLBAR_POINTER_LEAVE/);
+  assert.match(shell, /bar-hover[\s\S]*TOOLBAR\.IMMERSIVE_HOVER/);
+  assert.match(shell, /bar-show[\s\S]*TOOLBAR\.IMMERSIVE_PINNED/);
   assert.match(html, /body\.immersive\.bar-hover \.toolbar > \*\s*\{[^}]*visibility:\s*visible;[^}]*pointer-events:\s*auto;/s);
 });
 
