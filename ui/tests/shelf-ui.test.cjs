@@ -4,6 +4,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "shelf-ui.js"), "utf8");
+const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
+
+test("common settings dialog stays compact on desktop", () => {
+  assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*width:\s*min\(600px,\s*calc\(100vw - 48px\)\);/s);
+});
 
 test("book card clicks explicitly close main-window floaters", () => {
   const helper = source.match(/function closeShelfCardFloaters\(\)\s*\{([\s\S]*?)\n\}/);

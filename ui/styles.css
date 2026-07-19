@@ -19,7 +19,7 @@ body {
   box-shadow: 0 10px 40px rgba(0,0,0,0.3); padding: 16px 18px;
 }
 #fp-settings-modal .modal-card {
-  width: min(720px, calc(100vw - 48px));
+  width: min(600px, calc(100vw - 48px));
   height: min(720px, calc(100vh - 64px));
   max-width: calc(100vw - 48px);
   max-height: calc(100vh - 64px);

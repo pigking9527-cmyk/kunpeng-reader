@@ -3,7 +3,16 @@
 一个面向 Windows 的高性能本地电子书阅读器。**Rust + Tauri 2 + 系统 WebView2**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
-> 最新版本：**v1.9.0** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版，Win10/11 自带 WebView2）。
+> 最新版本：**v1.9.1** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版，Win10/11 自带 WebView2）。
+
+## v1.9.1
+
+- Windows：发布 64 位安装包与便携版，继续支持 Windows 10/11。
+- macOS：首次提供 Apple Silicon 版本，并修复应用资源定位、窗口启动与阅读器状态切换问题。
+- 阅读器：统一菜单与弹层状态，修复滚动/分页切换后的界面残留，并将设置窗口宽度收窄到 600px。
+- 服务：恢复同步服务 HTTPS 证书，并启用自动续期。
+
+> macOS 包当前使用临时签名，尚未经过 Apple 公证；首次打开时需按项目发布说明在“隐私与安全性”中允许。
 
 ## 特性
 
@@ -86,4 +95,3 @@ cargo tauri build
 ## 技术栈
 
 Rust · Tauri 2 · WebView2 · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)
-
