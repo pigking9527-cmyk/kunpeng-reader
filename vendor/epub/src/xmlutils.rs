@@ -36,6 +36,59 @@ pub enum XMLError {
     NoContent,
 }
 
+/// EPUBs in the wild occasionally contain `--` inside XML comments.  That is
+/// invalid XML, even though the comment is otherwise harmless and ignored by
+/// readers.  Normalize only those comment bodies before handing the document
+/// to the strict XML parser.
+fn normalize_invalid_comments(content: &[u8]) -> Cow<'_, [u8]> {
+    let mut search_from = 0;
+    let mut copy_from = 0;
+    let mut normalized: Option<Vec<u8>> = None;
+
+    while let Some(comment_rel) = content[search_from..]
+        .windows(4)
+        .position(|window| window == b"<!--")
+    {
+        let comment_start = search_from + comment_rel;
+        let body_start = comment_start + 4;
+        let Some(comment_end_rel) = content[body_start..]
+            .windows(3)
+            .position(|window| window == b"-->")
+        else {
+            // Let the XML parser report malformed, unclosed comments normally.
+            break;
+        };
+        let body_end = body_start + comment_end_rel;
+        let body = &content[body_start..body_end];
+
+        if body.windows(2).any(|window| window == b"--") {
+            let output = normalized.get_or_insert_with(Vec::new);
+            output.extend_from_slice(&content[copy_from..body_start]);
+            let mut index = 0;
+            while index < body.len() {
+                if body[index..].starts_with(b"--") {
+                    output.extend_from_slice(b"- ");
+                    index += 2;
+                } else {
+                    output.push(body[index]);
+                    index += 1;
+                }
+            }
+            output.extend_from_slice(b"-->");
+            copy_from = body_end + 3;
+        }
+
+        search_from = body_end + 3;
+    }
+
+    if let Some(mut output) = normalized {
+        output.extend_from_slice(&content[copy_from..]);
+        Cow::Owned(output)
+    } else {
+        Cow::Borrowed(content)
+    }
+}
+
 pub struct XMLReader<'a> {
     reader: EventReader<&'a [u8]>,
 }
@@ -69,12 +122,13 @@ impl<'a> XMLReader<'a> {
             content
         };
 
+        let normalized = normalize_invalid_comments(content_slice);
         let reader = XMLReader {
             reader: ParserConfig::new()
                 .add_entity("nbsp", " ")
                 .add_entity("copy", "©")
                 .add_entity("reg", "®")
-                .create_reader(content_slice),
+                .create_reader(normalized.as_ref()),
         };
 
         reader.parse_xml()
@@ -86,6 +140,7 @@ impl<'a> XMLReader<'a> {
 
         for e in self.reader {
             match e {
+                Err(error) => return Err(error.into()),
                 Ok(ReaderEvent::StartElement {
                     name,
                     attributes,
@@ -144,6 +199,25 @@ impl<'a> XMLReader<'a> {
             }
         }
         Err(XMLError::NoElements)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{XMLError, XMLReader};
+
+    #[test]
+    fn accepts_epub_metadata_with_invalid_comment_double_dash() {
+        let xml = "<package><!-- generated -- Chinese source --><metadata><title>人物志</title></metadata></package>";
+        let root = XMLReader::parse(xml.as_bytes()).expect("invalid comment should be normalized");
+        assert_eq!(root.borrow().name.local_name, "package");
+        assert!(root.borrow().find("title").is_some());
+    }
+
+    #[test]
+    fn reports_real_xml_errors() {
+        let result = XMLReader::parse(b"<package><metadata>");
+        assert!(matches!(result, Err(XMLError::Reader(_))));
     }
 }
 
