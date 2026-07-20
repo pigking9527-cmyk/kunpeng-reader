@@ -25,6 +25,8 @@ body {
   max-height: calc(100vh - 64px);
   overflow-y: auto;
 }
+.recovery-backup-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.recovery-backup-actions select { min-width: 0; flex: 1; }
 .modal-head { display: flex; align-items: center; justify-content: space-between;
   font-size: 16px; font-weight: 600; margin-bottom: 10px; }
 .info-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f0f2; font-size: 14px; }

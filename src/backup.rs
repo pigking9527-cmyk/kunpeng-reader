@@ -1,6 +1,6 @@
-use crate::{atomic_file, AppState};
+use crate::{atomic_file, db, stats::StatsStore, vocab::VocabStore, AppState};
 use chrono::Local;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
@@ -17,13 +17,21 @@ pub(crate) struct BackupStatus {
     count: u32,
     total_bytes: u64,
     created: bool,
+    backups: Vec<BackupEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
+pub(crate) struct BackupEntry {
+    id: String,
+    created_at: String,
+    total_bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
 struct BackupManifest {
-    format: &'static str,
+    format: String,
     version: u32,
-    app_version: &'static str,
+    app_version: String,
     created_at: String,
     files: Vec<String>,
 }
@@ -75,6 +83,35 @@ fn backup_directories() -> Result<Vec<PathBuf>, String> {
     Ok(backups)
 }
 
+fn manifest_for(path: &Path) -> Result<BackupManifest, String> {
+    let manifest = std::fs::read_to_string(path.join("manifest.json"))
+        .map_err(|e| format!("读取恢复点清单失败 {}：{e}", path.display()))?;
+    let manifest: BackupManifest = serde_json::from_str(&manifest)
+        .map_err(|e| format!("恢复点清单格式无效 {}：{e}", path.display()))?;
+    if manifest.format != "kunpeng-reader-recovery" || manifest.version != 1 {
+        return Err(format!("不支持的恢复点格式：{}", path.display()));
+    }
+    if !manifest.files.iter().any(|name| name == "reader.db") {
+        return Err(format!("恢复点缺少 reader.db：{}", path.display()));
+    }
+    Ok(manifest)
+}
+
+fn backup_entry(path: &Path) -> BackupEntry {
+    let id = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let created_at = manifest_for(path)
+        .map(|manifest| manifest.created_at)
+        .unwrap_or_else(|_| id.clone());
+    BackupEntry {
+        id,
+        created_at,
+        total_bytes: directory_bytes(path),
+    }
+}
+
 pub(crate) fn status() -> Result<BackupStatus, String> {
     let root = backup_root()?;
     let backups = backup_directories()?;
@@ -88,6 +125,11 @@ pub(crate) fn status() -> Result<BackupStatus, String> {
         count: backups.len() as u32,
         total_bytes: backups.iter().map(|path| directory_bytes(path)).sum(),
         created: false,
+        backups: backups
+            .iter()
+            .rev()
+            .map(|path| backup_entry(path))
+            .collect(),
     })
 }
 
@@ -172,9 +214,9 @@ pub(crate) fn create(state: &AppState, force: bool) -> Result<BackupStatus, Stri
         atomic_file::write_json(
             &temp_dir.join("manifest.json"),
             &BackupManifest {
-                format: "kunpeng-reader-recovery",
+                format: "kunpeng-reader-recovery".to_string(),
                 version: 1,
-                app_version: env!("CARGO_PKG_VERSION"),
+                app_version: env!("CARGO_PKG_VERSION").to_string(),
                 created_at: Local::now().to_rfc3339(),
                 files,
             },
@@ -193,6 +235,135 @@ pub(crate) fn create(state: &AppState, force: bool) -> Result<BackupStatus, Stri
     let mut current = status()?;
     current.created = true;
     Ok(current)
+}
+
+fn safe_backup_id(id: &str) -> bool {
+    !id.is_empty()
+        && std::path::Path::new(id).components().count() == 1
+        && !id.contains(['/', '\\'])
+        && !id.starts_with('.')
+}
+
+fn recovery_directory(id: &str) -> Result<PathBuf, String> {
+    if !safe_backup_id(id) {
+        return Err("恢复点标识无效".to_string());
+    }
+    let path = backup_root()?.join(id);
+    if !path.is_dir() {
+        return Err("所选恢复点不存在或已被清理".to_string());
+    }
+    Ok(path)
+}
+
+fn staging_path(destination: &Path, label: &str) -> Result<PathBuf, String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("无法确定恢复目标目录：{}", destination.display()))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| format!("恢复目标无文件名：{}", destination.display()))?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{name}.{label}-{}", std::process::id())))
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.is_file() {
+        return Err(format!("恢复点文件缺失：{}", source.display()));
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let staged = staging_path(destination, "restore-new")?;
+    let previous = staging_path(destination, "restore-previous")?;
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_file(&previous);
+    std::fs::copy(source, &staged)
+        .map_err(|e| format!("复制恢复点文件失败 {}：{e}", source.display()))?;
+
+    let had_previous = destination.exists();
+    if had_previous {
+        std::fs::rename(destination, &previous)
+            .map_err(|e| format!("暂存当前文件失败 {}：{e}", destination.display()))?;
+    }
+    if let Err(error) = std::fs::rename(&staged, destination) {
+        if had_previous {
+            let _ = std::fs::rename(&previous, destination);
+        }
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!(
+            "提交恢复文件失败 {}：{error}",
+            destination.display()
+        ));
+    }
+    let _ = std::fs::remove_file(&previous);
+    Ok(())
+}
+
+fn remove_sqlite_sidecars(path: &Path) {
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{}", path.to_string_lossy(), suffix));
+        let _ = std::fs::remove_file(sidecar);
+    }
+}
+
+/// Restore a recovery point after first capturing the current state. The
+/// database connection is deliberately reopened before returning so the UI can
+/// immediately reload the recovered shelf without asking users to restart.
+pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String> {
+    let recovery = recovery_directory(id)?;
+    let manifest = manifest_for(&recovery)?;
+    let snapshot_db = recovery.join("reader.db");
+    let snapshot = rusqlite::Connection::open(&snapshot_db)
+        .map_err(|e| format!("打开恢复点数据库失败：{e}"))?;
+    let quick_check: String = snapshot
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| format!("检查恢复点数据库失败：{e}"))?;
+    if quick_check != "ok" {
+        return Err(format!("恢复点数据库完整性检查失败：{quick_check}"));
+    }
+    drop(snapshot);
+
+    // Never overwrite the current state without a fresh, independently
+    // verified recovery point that the user can return to.
+    create(state, true)?;
+    let _operation = BACKUP_LOCK
+        .lock()
+        .map_err(|_| "恢复点任务锁定失败".to_string())?;
+
+    let config = config_dir()?;
+    let database_path = db::database_path()?;
+    {
+        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        *guard = None;
+    }
+    remove_sqlite_sidecars(&database_path);
+    replace_file(&snapshot_db, &database_path)?;
+
+    for name in PORTABLE_FILES.iter().chain(SQLITE_FILES.iter()) {
+        if manifest.files.iter().any(|file| file == name) {
+            let destination = config.join(name);
+            if *name == "external-dicts.db" {
+                remove_sqlite_sidecars(&destination);
+            }
+            replace_file(&recovery.join(name), &destination)?;
+        }
+    }
+
+    {
+        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        *guard = Some(db::AppDb::open()?);
+    }
+    *state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())? = crate::book::Library::load();
+    *state.stats.lock().map_err(|_| "统计锁定失败".to_string())? = StatsStore::load();
+    *state
+        .vocab
+        .lock()
+        .map_err(|_| "生词本锁定失败".to_string())? = VocabStore::load();
+    state.reset_runtime_caches_after_restore();
+    status()
 }
 
 pub(crate) fn spawn_daily(app: tauri::AppHandle) {
@@ -216,5 +387,13 @@ mod tests {
         assert!(PORTABLE_FILES.contains(&"stats.json"));
         assert!(PORTABLE_FILES.contains(&"vocab.json"));
         assert!(SQLITE_FILES.contains(&"external-dicts.db"));
+    }
+
+    #[test]
+    fn recovery_ids_cannot_escape_the_backup_directory() {
+        assert!(safe_backup_id("20260720-185825-180"));
+        assert!(!safe_backup_id("../reader.db"));
+        assert!(!safe_backup_id("a/b"));
+        assert!(!safe_backup_id(".temporary"));
     }
 }

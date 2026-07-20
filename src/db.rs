@@ -281,18 +281,18 @@ fn compact_legacy_database(path: &Path) -> Result<Option<PathBuf>, String> {
     }
     Ok(Some(backup))
 }
-fn db_path() -> Option<PathBuf> {
+pub(crate) fn database_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "android")]
     {
         let mut d = PathBuf::from("/data/user/0/com.pigking.ebookreader/files/ebook-reader");
         d.push("reader.db");
-        return Some(d);
+        return Ok(d);
     }
     #[cfg(not(target_os = "android"))]
     {
-        let mut d = dirs::config_dir()?;
+        let mut d = dirs::config_dir().ok_or("无法确定应用配置目录")?;
         d.push("ebook-reader");
-        Some(d.join("reader.db"))
+        Ok(d.join("reader.db"))
     }
 }
 
@@ -306,7 +306,7 @@ fn new_device_id() -> String {
 
 impl AppDb {
     pub fn open() -> Result<Self, String> {
-        let path = db_path().ok_or("无法确定数据库路径")?;
+        let path = database_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }

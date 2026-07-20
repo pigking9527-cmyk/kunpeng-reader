@@ -167,6 +167,34 @@ pub(crate) struct AppState {
     pub(crate) sync_running: AtomicBool,   // 防止启动、手动和退出同步并发上传同一批实体
 }
 
+impl AppState {
+    pub(crate) fn reset_runtime_caches_after_restore(&self) {
+        self.epubs.lock().map(|mut cache| cache.clear()).ok();
+        self.epub_meta_cache
+            .lock()
+            .map(|mut cache| cache.clear())
+            .ok();
+        self.chapter_html_cache
+            .lock()
+            .map(|mut cache| cache.clear())
+            .ok();
+        self.pending_jump.lock().map(|mut cache| cache.clear()).ok();
+        self.search_text_cache
+            .lock()
+            .map(|mut cache| *cache = search_cache::SearchTextCache::default())
+            .ok();
+        self.txt_chapters.lock().map(|mut cache| cache.clear()).ok();
+        self.sem_cache.lock().map(|mut cache| cache.clear()).ok();
+        self.sem_cache_order
+            .lock()
+            .map(|mut order| order.clear())
+            .ok();
+        self.sem_cache_bytes.store(0, Ordering::Relaxed);
+        self.global_index.lock().map(|mut index| *index = None).ok();
+        self.backfilled.store(false, Ordering::Relaxed);
+    }
+}
+
 const BIG_EPUB_CHAPTER_BYTES: usize = 800 * 1024;
 const BIG_EPUB_CHAPTER_CHARS: usize = 1_000_000;
 const VIRTUAL_CHAPTER_TARGET_BYTES: usize = 520 * 1024;
@@ -745,6 +773,18 @@ fn recovery_backup_status() -> Result<backup::BackupStatus, String> {
 #[tauri::command]
 fn create_recovery_backup(state: tauri::State<AppState>) -> Result<backup::BackupStatus, String> {
     backup::create(state.inner(), true)
+}
+
+#[tauri::command]
+fn restore_recovery_backup(
+    state: tauri::State<AppState>,
+    app: tauri::AppHandle,
+    backup_id: String,
+) -> Result<backup::BackupStatus, String> {
+    if any_reader_window_open(&app) {
+        return Err("恢复前请先关闭所有阅读窗口，避免覆盖尚未保存的阅读进度".to_string());
+    }
+    backup::restore(state.inner(), &backup_id)
 }
 
 #[tauri::command]
@@ -2526,6 +2566,7 @@ fn main() {
             sync::sync_now,
             recovery_backup_status,
             create_recovery_backup,
+            restore_recovery_backup,
             migrate_data_to_sqlite,
             export_data_package,
             import_data_package,

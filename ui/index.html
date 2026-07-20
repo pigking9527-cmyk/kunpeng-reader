@@ -256,6 +256,10 @@
           <div>
             <div class="fp-title">数据恢复点</div>
             <p id="recovery-backup-status">正在读取恢复点状态…</p>
+            <div id="recovery-backup-actions" class="recovery-backup-actions" hidden>
+              <select id="settings-restore-backup" aria-label="选择数据恢复点"></select>
+              <button id="settings-restore-backup-button" class="btn-plain" type="button">恢复选中恢复点</button>
+            </div>
           </div>
           <button id="settings-create-backup" class="btn-plain" type="button">立即创建</button>
         </section>
@@ -452,8 +456,6 @@
     <script src="debug-ui.js"></script>
   </body>
 </html>
-
-
 
 
 

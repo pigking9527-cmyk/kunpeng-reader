@@ -391,6 +391,9 @@ if (dirsAddBtn) {
 const fpSettingsModal = document.getElementById("fp-settings-modal");
 const recoveryBackupStatus = document.getElementById("recovery-backup-status");
 const recoveryBackupButton = document.getElementById("settings-create-backup");
+const recoveryBackupActions = document.getElementById("recovery-backup-actions");
+const recoveryBackupSelect = document.getElementById("settings-restore-backup");
+const restoreRecoveryBackupButton = document.getElementById("settings-restore-backup-button");
 function backupBytes(value) {
   const bytes = Number(value) || 0;
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
@@ -403,6 +406,19 @@ function renderRecoveryBackupStatus(status) {
        "；最近一次 " + status.latest + "。每日自动创建，最多保留 7 个。")
     : "尚无恢复点；软件会每日自动创建，最多保留 7 个。";
   recoveryBackupStatus.title = status.directory || "";
+  const backups = Array.isArray(status.backups) ? status.backups : [];
+  if (recoveryBackupActions) recoveryBackupActions.hidden = backups.length === 0;
+  if (recoveryBackupSelect) {
+    const selected = recoveryBackupSelect.value;
+    recoveryBackupSelect.replaceChildren(...backups.map((backup) => {
+      const option = document.createElement("option");
+      option.value = backup.id;
+      option.textContent = "恢复点 " + (backup.created_at || backup.id) + "（" + backupBytes(backup.total_bytes) + "）";
+      return option;
+    }));
+    if (backups.some((backup) => backup.id === selected)) recoveryBackupSelect.value = selected;
+  }
+  if (restoreRecoveryBackupButton) restoreRecoveryBackupButton.disabled = backups.length === 0;
 }
 async function refreshRecoveryBackupStatus() {
   renderRecoveryBackupStatus(await invoke("recovery_backup_status"));
@@ -432,6 +448,26 @@ recoveryBackupButton?.addEventListener("click", async () => {
   } finally {
     recoveryBackupButton.disabled = false;
     recoveryBackupButton.textContent = "立即创建";
+  }
+});
+restoreRecoveryBackupButton?.addEventListener("click", async () => {
+  const backupId = recoveryBackupSelect?.value;
+  if (!backupId) return;
+  const choice = recoveryBackupSelect.options[recoveryBackupSelect.selectedIndex]?.textContent || backupId;
+  if (!confirm("恢复到“" + choice + "”吗？\n\n软件会先自动创建一个当前数据的保护恢复点，然后覆盖书架、统计、生词本和同步数据。请先关闭所有阅读窗口。")) return;
+  restoreRecoveryBackupButton.disabled = true;
+  restoreRecoveryBackupButton.textContent = "正在恢复…";
+  try {
+    const status = await invoke("restore_recovery_backup", { backupId });
+    renderRecoveryBackupStatus(status);
+    await refreshRecoveryBackupStatus();
+    alert("数据已恢复。书架将重新加载以显示恢复后的内容。");
+    window.location.reload();
+  } catch (e) {
+    alert("恢复数据失败：" + e);
+  } finally {
+    restoreRecoveryBackupButton.disabled = false;
+    restoreRecoveryBackupButton.textContent = "恢复选中恢复点";
   }
 });
 document.getElementById("open-default-apps-settings")?.addEventListener("click", async () => {
@@ -1792,8 +1828,6 @@ window.addEventListener("DOMContentLoaded", () => {
       })
       .catch(() => {});
 }, { once: true });
-
-
 
 
 

@@ -17,6 +17,20 @@ test("data import is protected by a recovery point and applied immediately", () 
   assert.match(main, /backup::spawn_daily/);
 });
 
+test("recovery points can be selected and restored with a current-state safeguard", () => {
+  const main = read("src", "main.rs");
+  const backup = read("src", "backup.rs");
+  const html = read("ui", "index.html");
+  const app = read("ui", "app.js");
+  assert.match(main, /fn restore_recovery_backup/);
+  assert.match(main, /any_reader_window_open/);
+  assert.match(backup, /create\(state, true\)\?/);
+  assert.match(backup, /reset_runtime_caches_after_restore/);
+  assert.match(html, /settings-restore-backup/);
+  assert.match(app, /invoke\("restore_recovery_backup", \{ backupId \}\)/);
+  assert.match(app, /软件会先自动创建一个当前数据的保护恢复点/);
+});
+
 test("portable entity model is identical on client and sync server", () => {
   const db = read("src", "db.rs");
   const server = read("server", "reader-sync-api", "app.py");
