@@ -114,8 +114,12 @@ function hideQHist() {
 let curTerm = "";
 let curIds = []; // 限定的图书 id（空 = 全部）
 let curResults = []; // 后端返回的分组结果
-let curSimilar = []; // 关键词搜索时顺带展示的语义相似段落
+let curSimilar = []; // 保留结果结构兼容；关键词检索不再偷偷追加语义计算
+let pendingBooks = 0; // 缺少已发布全文索引、已转交后台补建的图书数
 let searchSeq = 0;
+let renderGeneration = 0;
+const RESULT_GROUPS_PER_FRAME = 8;
+const INITIAL_EXPANDED_BOOKS = 1;
 
 function parseInitial() {
   const p = new URLSearchParams(location.search);
@@ -193,28 +197,102 @@ function sortResults(list) {
 // 把某本书的命中片段实际建进 DOM（懒加载：展开时才建，避免一次性渲染上千条而卡顿）
 function buildHits(book, hitsWrap) {
   const frag = document.createDocumentFragment();
-  book.hits.forEach((h) => {
+  const visibleHits = Array.isArray(book.hits) ? book.hits : [];
+  function createHit(h) {
     const hit = document.createElement("div");
     hit.className = "hit";
     const meta = [];
     if (typeof h.count === "number" && h.count > 1) meta.push(h.count + " 处");
-    if (typeof h.score === "number" && h.score > 0) meta.push("BM25 " + h.score.toFixed(2));
+    if (typeof h.score === "number" && h.score > 0 && mode === "sem") {
+      meta.push("相似 " + Math.round(h.score * 100) + "%");
+    }
     const scoreTag = meta.length ? '<span class="hit-meta">' + meta.join(" · ") + "</span>" : "";
     const body = mode === "sem" ? escapeHtml(h.snippet) : highlight(h.snippet, curTerm);
     hit.innerHTML = scoreTag + '<span class="ch">第' + (h.chapter + 1) + "章</span>" + body;
     hit.addEventListener("click", () => openHit(book.book_id, h.chapter));
-    frag.appendChild(hit);
-  });
-  if (typeof book.count === "number" && book.count > book.hits.length) {
+    return hit;
+  }
+  visibleHits.forEach((hit) => frag.appendChild(createHit(hit)));
+  if (typeof book.count === "number" && book.count > visibleHits.length) {
     const more = document.createElement("div");
     more.className = "more";
-    more.textContent = "… 另有 " + (book.count - book.hits.length) + " 处未显示";
+    let loaded = visibleHits.length;
+    let loading = false;
+    const query = curTerm;
+    const generation = renderGeneration;
+    function updateMore() {
+      const remaining = Math.max(0, book.count - loaded);
+      if (!remaining) {
+        more.remove();
+        return;
+      }
+      more.textContent = "… 另有 " + remaining + " 处未显示，点击再显示 " + Math.min(10, remaining) + " 处";
+    }
+    more.addEventListener("click", async () => {
+      if (loading) return;
+      loading = true;
+      more.textContent = "正在加载…";
+      try {
+        const extra = await invoke("shelf_search_book_hits", {
+          request: { bookId: book.book_id, term: query, offset: loaded, limit: 10 },
+        });
+        if (generation !== renderGeneration || query !== curTerm || mode !== "kw") return;
+        const page = Array.isArray(extra) ? extra : [];
+        const pageFragment = document.createDocumentFragment();
+        page.forEach((hit) => pageFragment.appendChild(createHit(hit)));
+        hitsWrap.insertBefore(pageFragment, more);
+        loaded += page.length;
+        if (!page.length) {
+          loaded = book.count;
+          updateMore();
+          return;
+        }
+        updateMore();
+      } catch (error) {
+        more.textContent = "加载失败，点击重试";
+      } finally {
+        loading = false;
+      }
+    });
+    updateMore();
     frag.appendChild(more);
   }
   hitsWrap.appendChild(frag);
 }
 
+function createBookGroup(book, index) {
+  const group = document.createElement("div");
+  const startsExpanded = index < INITIAL_EXPANDED_BOOKS;
+  group.className = "book-group" + (startsExpanded ? "" : " collapsed");
+
+  const head = document.createElement("div");
+  head.className = "book-head";
+  head.innerHTML =
+    '<span class="caret">▾</span>' +
+    '<span class="book-title">' + escapeHtml(book.title || "未命名") + "</span>" +
+    (book.author ? '<span class="book-author">' + escapeHtml(book.author) + "</span>" : "") +
+    '<span class="book-count">' +
+      (typeof book.count === "number" ? book.count + " 处" : "相似 " + Math.round(book.score * 100) + "%") +
+    "</span>";
+  const hitsWrap = document.createElement("div");
+  hitsWrap.className = "hits";
+  function ensureHits() {
+    if (hitsWrap.dataset.built) return;
+    buildHits(book, hitsWrap);
+    hitsWrap.dataset.built = "1";
+  }
+  head.addEventListener("click", () => {
+    const willOpen = group.classList.contains("collapsed");
+    if (willOpen) ensureHits();
+    group.classList.toggle("collapsed");
+  });
+  if (startsExpanded) ensureHits();
+  group.append(head, hitsWrap);
+  return group;
+}
+
 function render() {
+  const generation = ++renderGeneration;
   resultsEl.innerHTML = "";
   if (!curResults.length && !curSimilar.length) {
     resultsEl.innerHTML = '<div class="empty">未找到「' + escapeHtml(curTerm) + "」</div>";
@@ -241,29 +319,19 @@ function render() {
   }
   if (!curResults.length) return;
   const list = sortResults(curResults);
-  const frag = document.createDocumentFragment(); // 一次性插入，避免逐条 reflow
-  list.forEach((book) => {
-    const group = document.createElement("div");
-    group.className = "book-group"; // 默认展开
-
-    const head = document.createElement("div");
-    head.className = "book-head";
-    head.innerHTML =
-      '<span class="caret">▾</span>' +
-      '<span class="book-title">' + escapeHtml(book.title || "未命名") + "</span>" +
-      (book.author ? '<span class="book-author">' + escapeHtml(book.author) + "</span>" : "") +
-      '<span class="book-count">' +
-        (typeof book.count === "number" ? book.count + " 处" : "相似 " + Math.round(book.score * 100) + "%") +
-      "</span>";
-    const hitsWrap = document.createElement("div");
-    hitsWrap.className = "hits";
-    head.addEventListener("click", () => group.classList.toggle("collapsed")); // 仍可手动收起
-    buildHits(book, hitsWrap); // 默认就把片段建好（展开）
-    group.appendChild(head);
-    group.appendChild(hitsWrap);
-    frag.appendChild(group);
-  });
-  resultsEl.appendChild(frag);
+  let nextIndex = 0;
+  function appendNextFrame() {
+    if (generation !== renderGeneration) return;
+    const frag = document.createDocumentFragment();
+    const end = Math.min(nextIndex + RESULT_GROUPS_PER_FRAME, list.length);
+    while (nextIndex < end) {
+      frag.appendChild(createBookGroup(list[nextIndex], nextIndex));
+      nextIndex += 1;
+    }
+    resultsEl.appendChild(frag);
+    if (nextIndex < list.length) window.requestAnimationFrame(appendNextFrame);
+  }
+  appendNextFrame();
 }
 
 function openHit(bookId, chapter) {
@@ -271,16 +339,18 @@ function openHit(bookId, chapter) {
     localStorage.removeItem("crossReturnState");
     localStorage.removeItem("pendingCrossSearch");
   } catch (e) {}
-  invoke("open_book_at", { id: bookId, chapter, term: curTerm }).catch(() => {});
+  invoke("open_book_at", { request: { id: bookId, chapter, term: curTerm } }).catch(() => {});
 }
 
 async function runSearch(term) {
   const seq = ++searchSeq;
+  renderGeneration += 1; // 立即终止上一轮仍在分帧追加的结果
   curTerm = (term || "").trim();
   qEl.value = curTerm;
   if (!curTerm) {
     curResults = [];
     curSimilar = [];
+    pendingBooks = 0;
     summaryEl.textContent = "";
     resultsEl.innerHTML = '<div class="empty">输入文字后回车检索</div>';
     return;
@@ -292,11 +362,15 @@ async function runSearch(term) {
   const limit = curIds.length ? curIds : null;
   try {
     if (mode === "sem") {
-      await invoke("prepare_semantic_search").catch(() => false);
       curResults = await invoke("semantic_search", { query: curTerm, ids: limit });
       curSimilar = [];
+      pendingBooks = 0;
     } else {
-      curResults = await invoke("shelf_search", { term: curTerm, ids: limit });
+      const response = await invoke("shelf_search", { term: curTerm, ids: limit });
+      // 兼容旧后端直接返回数组；新后端会把缺失索引的图书转后台建立，避免
+      // 首次检索在 IPC 中同步解压大量 EPUB 而把窗口卡死。
+      curResults = Array.isArray(response) ? response : (response?.results || []);
+      pendingBooks = Array.isArray(response) ? 0 : Math.max(0, Number(response?.pendingBooks || 0));
       curSimilar = [];
     }
     if (seq !== searchSeq) return;
@@ -315,23 +389,14 @@ async function runSearch(term) {
       : "没有匹配（这些书是否已建立语义索引？）";
   } else {
     const hits = curResults.reduce((s, b) => s + b.count, 0);
+    const pendingHint = pendingBooks
+      ? "；另有 " + pendingBooks + " 本正在后台建立全文索引，完成后再次搜索即可纳入"
+      : "";
     summaryEl.textContent = books
-      ? "在 " + books + " 本书中找到 " + hits + " 处" + (curIds.length ? "（限定 " + curIds.length + " 本）" : "")
-      : "未找到结果";
+      ? "在 " + books + " 本书中找到 " + hits + " 处" + (curIds.length ? "（限定 " + curIds.length + " 本）" : "") + pendingHint
+      : (pendingBooks ? "全文索引正在后台准备 " + pendingBooks + " 本书，完成后再次搜索" : "未找到结果");
   }
   render();
-  if (mode === "kw") {
-    const q = curTerm;
-    Promise.resolve()
-      .then(() => invoke("semantic_index_done", { ids: limit }))
-      .then((semReady) => semReady ? invoke("semantic_search", { query: q, ids: limit }) : [])
-      .then((similar) => {
-        if (seq !== searchSeq || mode !== "kw" || q !== curTerm) return;
-        curSimilar = similar || [];
-        render();
-      })
-      .catch(() => {});
-  }
 }
 
 // ---- 关键词 / 语义 模式切换 ----
@@ -340,13 +405,17 @@ const modeKw = document.getElementById("mode-kw");
 const modeSem = document.getElementById("mode-sem");
 const sortBox = sortEl;
 function setMode(m) {
+  if (mode === m) return;
   mode = m;
-  if (m === "sem") invoke("prepare_semantic_search").catch(() => {});
   modeKw.classList.toggle("active", m === "kw");
   modeSem.classList.toggle("active", m === "sem");
   sortBox.style.display = m === "sem" ? "none" : ""; // 语义按相似度固定排序
   qEl.placeholder = m === "sem" ? "描述你想找的“意思”，回车检索…" : "输入要在书架中检索的文字…";
-  if (curTerm) runSearch(curTerm);
+  if (m === "sem") {
+    window.setTimeout(() => invoke("warm_semantic_model").catch(() => {}), 0);
+  }
+  const inputTerm = qEl.value.trim();
+  if (inputTerm) runSearch(inputTerm);
 }
 modeKw.addEventListener("click", () => setMode("kw"));
 modeSem.addEventListener("click", () => setMode("sem"));
@@ -415,6 +484,9 @@ qEl.addEventListener("keydown", (e) => {
 });
 qEl.addEventListener("focus", showQHist);
 qEl.addEventListener("input", () => {
+  // 用户已经开始改下一次查询时，旧请求即使随后返回也不得重建结果 DOM。
+  searchSeq += 1;
+  renderGeneration += 1;
   if (qEl.value.trim()) hideQHist();
   else showQHist();
 });

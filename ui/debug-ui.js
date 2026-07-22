@@ -113,6 +113,7 @@
     const logs = readPerfLog();
     let version = "";
     let bookCount = 0;
+    let runtimeDiagnostics = null;
     try {
       version = await invoke("app_version");
     } catch (_) {}
@@ -120,6 +121,11 @@
       const list = await invoke("list_books");
       bookCount = Array.isArray(list) ? list.length : 0;
     } catch (_) {}
+    try {
+      runtimeDiagnostics = await invoke("runtime_diagnostics");
+    } catch (_) {
+      runtimeDiagnostics = { unavailable: true };
+    }
     return {
       exported_at: new Date().toISOString(),
       version,
@@ -127,6 +133,7 @@
       db_size: "待接入后端诊断命令",
       debug_settings: settings,
       startup_logs: logs,
+      runtime_diagnostics: runtimeDiagnostics,
       local_storage_keys: Object.keys(localStorage).filter((k) => /^debug|startup|shelf|sync|vocab|show|stats|reading|import/i.test(k)),
     };
   }

@@ -53,7 +53,8 @@
         .win-btn { width: 32px; }
       }
       @media (max-width: 600px) {
-        .toolbar .title, .reader-drag-space { display: none; }
+        .toolbar .title:not(#progress), .reader-drag-space { display: none; }
+        #progress { display: inline-flex; }
         #tts-btn, #hl-btn, #immersive-btn { display: none; }
       }
 
@@ -178,10 +179,14 @@
         border-radius: 50%; animation: spin 0.8s linear infinite;
       }
       .title .mini-spinner {
-        display: inline-block; flex: 0 0 auto; width: 14px; height: 14px; vertical-align: -2px;
+        display: inline-block; flex: 0 0 auto; width: 16px; height: 16px; vertical-align: -3px;
         border: 2px solid rgba(80,90,110,.22); border-top-color: #5aa0ff;
         border-radius: 50%; animation: spin .75s linear infinite;
       }
+      .reader-progress-group { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; margin-right: 4px; }
+      #chapter-progress { width: auto; max-width: min(38vw, 290px); flex: 0 1 auto; }
+      #progress.page-count-loading { width: 30px; max-width: 30px; flex-basis: 30px; }
+      #progress.page-count-total { width: auto; max-width: none; flex: 0 0 auto; }
       @keyframes spin { to { transform: rotate(360deg); } }
       body.theme-dark .loading { background: #1c1c1e; }
       .mode-switch-btn[hidden] { display: none; }
@@ -507,15 +512,23 @@
       /* 沉浸模式：保留工具栏占位（不改阅读区高度→零重排不跳页）。只淡出按钮，
          右上角阅读统计始终可见；点屏幕中间唤出时按钮淡入。隐藏时工具栏背景透明，
          只剩统计文字浮在顶部，更干净；唤出时恢复背景+阴影。 */
-      body.immersive .toolbar > * {
+      body.immersive .toolbar > *:not(#reader-progress-group) {
         opacity: 0; visibility: hidden; pointer-events: none;
         transition: opacity 0.18s ease, visibility 0s linear 0.18s;
       }
-      body.immersive.bar-show .toolbar > *,
-      body.immersive.bar-hover .toolbar > * {
+      body.immersive.bar-show .toolbar > *:not(#reader-progress-group),
+      body.immersive.bar-hover .toolbar > *:not(#reader-progress-group) {
         opacity: 1; visibility: visible; pointer-events: auto;
         transition: opacity 0.18s ease;
       }
+      /* 沉浸模式下仍保留阅读位置和全书页数；后者也是测量中的加载指示。 */
+      body.immersive #reader-progress-group { opacity: 1; visibility: visible; pointer-events: auto; }
+      /* 收起工具栏时不再让已隐藏的按钮、拖拽区和窗口控制占据横向空间，
+         两段阅读状态紧贴右侧显示；工具栏本身仍保留原高度，所以不会改变阅读区尺寸。 */
+      body.immersive:not(.bar-show):not(.bar-hover) .toolbar > *:not(#reader-progress-group):not(.window-controls) { display: none; }
+      body.immersive:not(.bar-show):not(.bar-hover) #reader-progress-group { margin-left: auto; }
+      /* 即使按钮淡出，也保留最小化/最大化/关闭三键的原有槽位；
+         进度组因此始终停在与按钮可见时相同的位置。 */
       body.immersive .toolbar { background: transparent; border-bottom-color: transparent; }
       body.immersive.bar-show .toolbar,
       body.immersive.bar-hover .toolbar { background: transparent; border-bottom-color: transparent; }
@@ -665,7 +678,10 @@
       </div>
       <button id="vocab-btn" class="tbtn" title="生词本（查过的词）">📒 生词本</button>
       <div class="reader-drag-space" data-tauri-drag-region></div>
-      <span id="progress" class="title" data-tauri-drag-region>—</span>
+      <div id="reader-progress-group" data-tauri-drag-region>
+        <span id="chapter-progress" class="title epub-only" title="阅读进度">正在定位阅读进度…</span>
+        <span id="progress" class="title page-count-loading" title="全书页数统计中" aria-label="全书页数统计中"><span class="mini-spinner"></span></span>
+      </div>
       <div class="window-controls" aria-label="窗口控制">
         <button id="win-min" class="win-btn" type="button" title="最小化" aria-label="最小化">−</button>
         <button id="win-max" class="win-btn" type="button" title="最大化" aria-label="最大化">□</button>

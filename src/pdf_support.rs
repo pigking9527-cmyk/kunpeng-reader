@@ -1,4 +1,4 @@
-use crate::{reader_window_id, search};
+use crate::{search, window_commands::reader_window_id};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -7,6 +7,11 @@ use std::path::Path;
 pub(crate) struct PageCacheData {
     pub(crate) sig: String,
     pub(crate) pages: Vec<u32>,
+    /// `false` means this is an interrupted/incremental measurement.  Older
+    /// cache files did not carry this field and are still recognized by the
+    /// web reader when every chapter has a page count.
+    #[serde(default)]
+    pub(crate) complete: bool,
 }
 
 fn pages_dir() -> Option<std::path::PathBuf> {
@@ -29,18 +34,35 @@ pub(crate) fn get_page_cache(window: tauri::WebviewWindow) -> Option<PageCacheDa
 }
 
 /// 合并页测完整书页数后落盘缓存。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SavePageCacheRequest {
+    sig: String,
+    pages: Vec<u32>,
+    #[serde(default)]
+    complete: bool,
+}
+
 #[tauri::command]
 pub(crate) fn save_page_cache(
     window: tauri::WebviewWindow,
-    sig: String,
-    pages: Vec<u32>,
+    request: SavePageCacheRequest,
 ) -> Result<(), ()> {
+    let SavePageCacheRequest {
+        sig,
+        pages,
+        complete,
+    } = request;
     if let Some(id) = reader_window_id(&window) {
         if let Some(p) = page_cache_path(id) {
             if let Some(d) = p.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            if let Ok(j) = serde_json::to_string(&PageCacheData { sig, pages }) {
+            if let Ok(j) = serde_json::to_string(&PageCacheData {
+                sig,
+                pages,
+                complete,
+            }) {
                 let _ = std::fs::write(p, j);
             }
         }
@@ -156,5 +178,18 @@ mod tests {
     #[test]
     fn decode_pdf_latin1_fallback() {
         assert_eq!(decode_pdf_string(&[0xC9, b'm', b'i', b'l', b'e']), "Émile");
+    }
+
+    #[test]
+    fn page_cache_request_deserializes_as_one_object() {
+        let request: SavePageCacheRequest = serde_json::from_value(serde_json::json!({
+            "sig": "layout-v1",
+            "pages": [3, 5, 8],
+            "complete": true
+        }))
+        .unwrap();
+        assert_eq!(request.sig, "layout-v1");
+        assert_eq!(request.pages, vec![3, 5, 8]);
+        assert!(request.complete);
     }
 }

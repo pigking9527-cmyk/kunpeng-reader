@@ -1,5 +1,27 @@
-// 阅读统计页逻辑。独立于书架渲染，减少 app.js 的全局交互体积。
-// ---- 阅读统计 ----
+// 阅读统计面板。依赖由 app.js 通过 ReaderStatsUI.init 显式注入。
+(function exposeStatsUi(global) {
+"use strict";
+
+let activeController = null;
+
+function init(options = {}) {
+  if (activeController) return activeController;
+  const document = options.root;
+  const invoke = options.invoke;
+  const menuEl = options.menuElement;
+  const filterPanel = options.filterPanel;
+  const closeAccountPanel = options.closeAccountPanel;
+  const closeSearch = options.closeSearch;
+  const localStorage = options.storage || global.localStorage;
+  const scheduleFrame = options.requestAnimationFrame || ((callback) => global.requestAnimationFrame(callback));
+  if (!document || typeof document.getElementById !== "function") throw new Error("ReaderStatsUI.init 缺少 root");
+  if (typeof invoke !== "function") throw new Error("ReaderStatsUI.init 缺少 invoke");
+  if (!menuEl || !filterPanel) throw new Error("ReaderStatsUI.init 缺少浮层元素");
+  if (typeof closeAccountPanel !== "function" || typeof closeSearch !== "function") {
+    throw new Error("ReaderStatsUI.init 缺少浮层关闭接口");
+  }
+  if (typeof scheduleFrame !== "function") throw new Error("ReaderStatsUI.init 缺少 requestAnimationFrame");
+
 const statsModal = document.getElementById("stats-modal");
 function fmtTime(sec) {
   sec = sec || 0;
@@ -268,13 +290,13 @@ async function renderStats() {
   }
   if (!bodyEl) return;
   bodyEl.innerHTML = overviewStats(allData) + '<div class="stat-sec-title">近一年每日阅读热力图</div>' + contributionGraph(allData) + cards + qualityNote + chart + books;
-  requestAnimationFrame(() => {
+  scheduleFrame(() => {
     const maxScrollTop = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
     bodyEl.scrollTop = Math.min(prevScrollTop, maxScrollTop);
     bodyEl.classList.remove("refreshing");
   });
 }
-document.getElementById("stats-toolbar-btn").addEventListener("click", () => {
+function openStats() {
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
   closeAccountPanel();
@@ -284,7 +306,12 @@ document.getElementById("stats-toolbar-btn").addEventListener("click", () => {
   document.querySelectorAll(".stats-tab").forEach((t) => t.classList.toggle("active", t.dataset.scope === "day"));
   statsModal.classList.add("show");
   renderStats();
-});
+}
+function closeStats() {
+  statsModal.classList.remove("show");
+  statsSettings.classList.remove("show");
+}
+document.getElementById("stats-toolbar-btn").addEventListener("click", openStats);
 document.querySelectorAll(".stats-tab").forEach((t) => {
   t.addEventListener("click", () => {
     statScope = t.dataset.scope;
@@ -325,11 +352,31 @@ statsChartMetric?.addEventListener("change", () => {
 });
 statsModal.addEventListener("click", (e) => {
   if (e.target === statsModal) {
-    statsModal.classList.remove("show");
-    statsSettings.classList.remove("show");
+    closeStats();
     return;
   }
   if (!statsSettings.contains(e.target) && e.target !== statsSettingsBtn) {
     statsSettings.classList.remove("show");
   }
 });
+
+  activeController = Object.freeze({
+    close: closeStats,
+    open: openStats,
+    render: renderStats,
+  });
+  return activeController;
+}
+
+function controller() {
+  if (!activeController) throw new Error("ReaderStatsUI 尚未初始化");
+  return activeController;
+}
+
+global.ReaderStatsUI = Object.freeze({
+  close: () => controller().close(),
+  init,
+  open: () => controller().open(),
+  render: () => controller().render(),
+});
+})(typeof window !== "undefined" ? window : globalThis);

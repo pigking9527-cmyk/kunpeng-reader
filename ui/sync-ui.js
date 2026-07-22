@@ -1,5 +1,22 @@
-// 账号、登录和同步面板 UI
-// 依赖 app.js 的 invoke/menuEl/filterPanel，以及 shelf-ui.js 的 render（仅在用户点击同步后调用）。
+// 账号、登录和同步面板。依赖由 app.js 通过 ReaderSyncUI.init 显式注入。
+(function exposeSyncUi(global) {
+"use strict";
+
+let activeController = null;
+
+function init(options = {}) {
+  if (activeController) return activeController;
+  const document = options.root;
+  const invoke = options.invoke;
+  const menuEl = options.menuElement;
+  const filterPanel = options.filterPanel;
+  const renderShelf = options.renderShelf;
+  const localStorage = options.storage || global.localStorage;
+  if (!document || typeof document.getElementById !== "function") throw new Error("ReaderSyncUI.init 缺少 root");
+  if (typeof invoke !== "function") throw new Error("ReaderSyncUI.init 缺少 invoke");
+  if (!menuEl || !filterPanel) throw new Error("ReaderSyncUI.init 缺少浮层元素");
+  if (typeof renderShelf !== "function") throw new Error("ReaderSyncUI.init 缺少 renderShelf");
+
 const accountBtn = document.getElementById("account-btn");
 const accountPanel = document.getElementById("account-panel");
 const syncFormEl = document.getElementById("sync-form");
@@ -202,7 +219,7 @@ async function syncOnStartup() {
       last_sync_accepted: report.accepted,
       last_sync_ignored: report.ignored,
     });
-    render(await invoke("shelf_books"));
+    renderShelf(await invoke("shelf_books"));
   } catch (e) {
     // Keep the persisted login. Offline startup should not turn into logout.
     setSyncButtonState("fail", "自动同步失败", String(e));
@@ -238,9 +255,11 @@ async function syncAuth(action) {
   closeAccountPanel();
   try {
     const res = await invoke(isRegister ? "auth_register" : "auth_login", {
-      url: "",
-      username,
-      password,
+      request: {
+        url: "",
+        username,
+        password,
+      },
     });
     syncUsernameEl.value = res.user?.username || syncUsernameEl.value;
     saveAccountInfo(syncUsernameEl.value);
@@ -259,7 +278,7 @@ async function syncAuth(action) {
         last_sync_accepted: report.accepted,
         last_sync_ignored: report.ignored,
       });
-      render(await invoke("shelf_books"));
+      renderShelf(await invoke("shelf_books"));
     } catch (syncError) {
       // Authentication succeeded. Keep the account signed in and let the user
       // retry synchronization without re-entering the password.
@@ -328,7 +347,7 @@ syncNowBtn.addEventListener("click", async () => {
       last_sync_accepted: report.accepted,
       last_sync_ignored: report.ignored,
     });
-    render(await invoke("shelf_books"));
+    renderShelf(await invoke("shelf_books"));
   } catch (e) {
     setSyncButtonState("fail", "同步失败", String(e));
     syncStatusEl.textContent = "同步失败：" + e;
@@ -337,3 +356,26 @@ syncNowBtn.addEventListener("click", async () => {
   }
 });
 
+  activeController = Object.freeze({
+    close: closeAccountPanel,
+    loadSettings: loadSyncSettings,
+    loadSettingsOnce: loadSyncSettingsOnce,
+    open: openAccountPanel,
+    syncOnStartup,
+  });
+  return activeController;
+}
+
+function controller() {
+  if (!activeController) throw new Error("ReaderSyncUI 尚未初始化");
+  return activeController;
+}
+
+global.ReaderSyncUI = Object.freeze({
+  close: () => controller().close(),
+  init,
+  loadSettingsOnce: () => controller().loadSettingsOnce(),
+  open: () => controller().open(),
+  syncOnStartup: () => controller().syncOnStartup(),
+});
+})(typeof window !== "undefined" ? window : globalThis);

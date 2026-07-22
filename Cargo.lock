@@ -103,9 +103,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "ammonia"
-version = "4.1.3"
+version = "4.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68b9d3370580a12f4b7a10fdcc18b28942c083ba570e3d954fe59d10951b85a2"
+checksum = "dc6d763210e2eb7670d1a5183a08bebefa3f97db2a738a684f2ce00bd49f681d"
 dependencies = [
  "cssparser 0.37.0",
  "html5ever 0.39.0",
@@ -1284,7 +1284,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ebook-reader-tauri"
-version = "1.9.1"
+version = "1.9.2"
 dependencies = [
  "ammonia",
  "base64 0.22.1",
@@ -1299,11 +1299,13 @@ dependencies = [
  "futures-util",
  "image",
  "instant-distance",
+ "libc",
  "lopdf 0.44.0",
  "memchr",
  "mobi",
  "pdf-extract",
  "pulldown-cmark",
+ "rayon",
  "rmp-serde",
  "rusqlite",
  "serde",

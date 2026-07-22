@@ -72,14 +72,16 @@ jobs:
           test -n "$app_path"
           test -n "$dmg_path"
 
-          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$out_dir/Kunpeng-Reader-v1.9.1-macOS-Apple-Silicon.app.zip"
-          cp "$dmg_path" "$out_dir/Kunpeng-Reader-v1.9.1-macOS-Apple-Silicon.dmg"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.app.zip"
+          cp "$dmg_path" "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.dmg"
           (cd "$out_dir" && shasum -a 256 * > SHA256SUMS.txt)
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: Kunpeng-Reader-v1.9.1-macOS-Apple-Silicon
+          name: Kunpeng-Reader-macOS-Apple-Silicon
           path: target/macos-release/*
           if-no-files-found: error
           retention-days: 14

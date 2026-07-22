@@ -39,6 +39,8 @@ function endWindowDraggingSoon() {
 
 function initWindowControls() {
   document.querySelector(".reader-drag-space")?.addEventListener("pointerdown", markWindowDragging);
+  document.getElementById("reader-progress-group")?.addEventListener("pointerdown", markWindowDragging);
+  document.getElementById("chapter-progress")?.addEventListener("pointerdown", markWindowDragging);
   document.getElementById("progress")?.addEventListener("pointerdown", markWindowDragging);
   document.getElementById("win-min")?.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -135,20 +137,38 @@ function hideLoading() {
   }
 }
 const settingsEl = document.getElementById("settings");
+const chapterProgressEl = document.getElementById("chapter-progress");
 const progressEl = document.getElementById("progress");
+let pageCountMeasuring = true;
 function showProgressLoading() {
   if (isPdf) {
     progressEl.innerHTML = '<span class="mini-spinner" aria-label="加载中"></span>';
     return;
   }
-  progressEl.innerHTML =
-    '<span class="mini-spinner" aria-label="页数加载中"></span> 第' +
-    (curVchap + 1) +
-    "/" +
-    vchapTotal +
-    "章 " +
-    curProgress.toFixed(1) +
-    "%";
+  pageCountMeasuring = true;
+  progressEl.classList.remove("page-count-total");
+  progressEl.classList.add("page-count-loading");
+  progressEl.title = "全书页数统计中";
+  progressEl.setAttribute("aria-label", "全书页数统计中");
+  progressEl.innerHTML = '<span class="mini-spinner" aria-label="全书页数统计中"></span>';
+}
+function showWholeBookPages(page, total) {
+  pageCountMeasuring = false;
+  progressEl.classList.remove("page-count-loading");
+  progressEl.classList.add("page-count-total");
+  const text = page + "/" + total + "页";
+  progressEl.title = text;
+  progressEl.setAttribute("aria-label", text);
+  progressEl.textContent = text;
+}
+function showChapterProgress(page, total, progress) {
+  if (!chapterProgressEl) return;
+  const text =
+    "第" + (curVchap + 1) + "/" + vchapTotal + "章 · 本章 " +
+    (page || 1) + "/" + (total || 1) + "页 · " + progress.toFixed(1) + "%";
+  chapterProgressEl.title = text;
+  chapterProgressEl.setAttribute("aria-label", text);
+  chapterProgressEl.textContent = text;
 }
 
 let resumeChapter = 0;
@@ -196,9 +216,11 @@ function reportProgress() {
   progTimer = setTimeout(() => {
     if (isWindowDragging()) return;
     invoke("set_progress", {
-      progress: curProgress,
-      chapter: curChapter,
-      frac: curChFrac,
+      request: {
+        progress: curProgress,
+        chapter: curChapter,
+        frac: curChFrac,
+      },
     }).catch(() => {});
   }, 800);
 }
@@ -642,15 +664,15 @@ window.addEventListener("message", (e) => {
       progressEl.textContent =
         "第 " + (e.data.page || 1) + "/" + (e.data.total || 1) + " 页 · " + curProgress.toFixed(1) + "%";
     } else {
+      // 全书页数是补充信息，不能覆盖原有的章节、本章页数和百分比。
+      showChapterProgress(e.data.page, e.data.total, curProgress);
       const gP = e.data.gPage || 0,
         gT = e.data.gTotal || 0;
       if (gT > 0) {
-        progressEl.textContent =
-          "第" + (curVchap + 1) + "/" + vchapTotal + "章 · " + gP + "/" + gT + "页 · " + curProgress.toFixed(1) + "%";
-      } else {
-        progressEl.textContent =
-          "第" + (curVchap + 1) + "/" + vchapTotal + "章 · 本章 " +
-          (e.data.page || 1) + "/" + (e.data.total || 1) + "页 · " + curProgress.toFixed(1) + "%";
+        showWholeBookPages(gP, gT);
+      } else if (pageCountMeasuring) {
+        // 章节位置上报不能把右上角的全书测量状态覆盖掉。
+        showProgressLoading();
       }
     }
     reportProgress();
@@ -676,7 +698,7 @@ window.addEventListener("message", (e) => {
   if (e.data.ttsSynth) {
     // 合并页要某句的在线音频 → 调 edge_tts → 回传音频+词时间戳
     const r = e.data.ttsSynth;
-    invoke("edge_tts", { text: r.text, voice: r.voice, rate: r.rate })
+    invoke("edge_tts", { request: { text: r.text, voice: r.voice, rate: r.rate } })
       .then((res) => sendToPage({ ttsAudio: { seq: r.seq, idx: r.idx, audio: res.audio, marks: res.marks } }))
       .catch((err) => sendToPage({ ttsAudioErr: { seq: r.seq, idx: r.idx, err: String(err) } }));
   }
@@ -733,9 +755,16 @@ window.addEventListener("message", (e) => {
       pendingJump = null;
     }
   }
-  if (e.data.measured) {
-    // 合并页测完整书页数 → 落盘缓存，下次同版式直接用
-    invoke("save_page_cache", { sig: e.data.measured.sig, pages: e.data.measured.pages }).catch(() => {});
+  if (e.data.pageCache) {
+    // 每 4 章保存一次：超大书中途关闭后，下次按当前版式继续测量。
+    const pc = e.data.pageCache;
+    invoke("save_page_cache", {
+      request: {
+        sig: pc.sig,
+        pages: pc.pages,
+        complete: !!pc.complete,
+      },
+    }).catch(() => {});
   }
   if (e.data.downloadImage) {
     const img = e.data.downloadImage || {};
@@ -775,9 +804,11 @@ window.addEventListener("message", (e) => {
   if (e.data.saveTranslationCredential) {
     const credential = e.data.saveTranslationCredential;
     invoke("save_translation_credential", {
-      provider: credential.provider || "",
-      apiId: credential.apiId || "",
-      apiKey: credential.apiKey || "",
+      request: {
+        provider: credential.provider || "",
+        apiId: credential.apiId || "",
+        apiKey: credential.apiKey || "",
+      },
     })
       .then((status) => sendToPage({ translationCredentialSaved: status }))
       .catch((err) => sendToPage({ translationCredentialSaved: { provider: credential.provider || "", configured: false, error: String(err) } }));
@@ -785,11 +816,13 @@ window.addEventListener("message", (e) => {
   if (e.data.translateText) {
     const req = e.data.translateText;
     invoke("translate_text", {
-      text: req.text || "",
-      sourceLang: req.source || "auto",
-      targetLang: req.target || "system",
-      provider: req.provider || "baidu",
-      credentialConfigId: req.credentialConfigId || "",
+      request: {
+        text: req.text || "",
+        sourceLang: req.source || "auto",
+        targetLang: req.target || "system",
+        provider: req.provider || "baidu",
+        credentialConfigId: req.credentialConfigId || "",
+      },
     })
       .then((r) => sendToPage({ translateResult: r }))
       .catch((err) =>

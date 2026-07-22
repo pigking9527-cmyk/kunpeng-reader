@@ -8,17 +8,46 @@ window.addEventListener("keydown", (e) => {
   if (((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) || e.key === "F3") e.preventDefault();
 }, true);
 
-const shelfEl = document.getElementById("shelf");
-const emptyEl = document.getElementById("empty");
-const contentEl = document.querySelector(".content");
-const shelfScrollbar = document.getElementById("shelf-scrollbar");
-const shelfScrollbarThumb = document.getElementById("shelf-scrollbar-thumb");
 const menuEl = document.getElementById("menu");
 const filterPanel = document.getElementById("filter-panel");
 const searchWrap = document.getElementById("search-wrap");
 const searchInput = document.getElementById("search-input");
 const searchClear = document.getElementById("search-clear");
 const toolbarEl = document.querySelector(".toolbar");
+
+const syncUI = window.ReaderSyncUI.init({
+  root: document,
+  invoke,
+  menuElement: menuEl,
+  filterPanel,
+  storage: window.localStorage,
+  renderShelf: (list) => window.ReaderShelfUI.render(list),
+});
+const shelfUI = window.ReaderShelfUI.init({
+  root: document,
+  invoke,
+  dialog,
+  menuElement: menuEl,
+  filterPanel,
+  storage: window.localStorage,
+  closeAccountPanel: () => syncUI.close(),
+  closeSearch: (clear) => closeSearch(clear),
+  clearCrossReturnMemory: () => clearCrossReturnMemory(),
+  startPerformance: (name, detail) => startupPerfStart(name, detail),
+  confirmAction: (message) => window.confirm(message),
+  alertAction: (message) => window.alert(message),
+  requestAnimationFrame: (callback) => window.requestAnimationFrame(callback),
+});
+window.ReaderStatsUI.init({
+  root: document,
+  invoke,
+  menuElement: menuEl,
+  filterPanel,
+  storage: window.localStorage,
+  closeAccountPanel: () => syncUI.close(),
+  closeSearch: (clear) => closeSearch(clear),
+  requestAnimationFrame: (callback) => window.requestAnimationFrame(callback),
+});
 
 function clearCrossReturnMemory() {
   try {
@@ -39,39 +68,13 @@ function debugSettingOn(key) {
   }
 }
 
-let books = []; // 当前书架（原始顺序，供“随机打开”用）
-let sortKey = localStorage.getItem("shelfSort") || "title";
-if (sortKey === "rating") sortKey = "title"; // 已移除“按评分排序”，旧设置回落到书名
-let layout = localStorage.getItem("shelfLayout") || "grid";
-const GRID_COL_MIN = 1;
-const GRID_COL_MAX = 12;
-function parseGridColumns(v) {
-  const n = parseInt(v, 10);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.max(GRID_COL_MIN, Math.min(GRID_COL_MAX, n));
-}
-let shelfGridColumns = parseGridColumns(localStorage.getItem("shelfGridColumns") || "0"); // 0=默认自适应
-let shelfGridColumnsValue = parseGridColumns(localStorage.getItem("shelfGridColumnsValue") || "3") || 3;
-let readingFilter = { unread: true, reading: true, done: true };
-try {
-  readingFilter = Object.assign(readingFilter, JSON.parse(localStorage.getItem("readingFilter") || "{}"));
-} catch (e) {}
-let minRating = +(localStorage.getItem("minRating") || 0); // 评分过滤下限（0=不过滤）
-// 书架渲染/排序/滚动在 shelf-ui.js；这里保留状态与应用事件。
-let searchQuery = "";
-let selected = new Set(); // 已选中的图书 id（单击封面切换）
-let shelfLoaded = false;
-let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0"; // 封面右下角是否显示阅读进度
-let showCoverRating = localStorage.getItem("showCoverRating") !== "0"; // 封面上是否显示评分小星
-let showCoverTitle = localStorage.getItem("showCoverTitle") === "1"; // 网格视图封面下是否显示书名（默认不显示）
-
 function closeMainFloaters(options = {}) {
   if (!options.keepMenu) menuEl.classList.remove("show");
   if (!options.keepFilter) filterPanel.classList.remove("show");
-  if (!options.keepAccount) closeAccountPanel();
+  if (!options.keepAccount) syncUI.close();
   if (!options.keepSearch) {
     hideHistory();
-    if (!searchInput.value.trim() && !searchQuery) {
+    if (!searchInput.value.trim() && !shelfUI.getSearchQuery()) {
       searchWrap.classList.remove("open");
       searchInput.blur();
     }
@@ -96,91 +99,7 @@ function runWhenNoReader(name, work, retryMs = 30000) {
     .catch(() => {});
 }
 
-// ---- 排序与布局面板 ----
-document.getElementById("filter-btn").addEventListener("click", (e) => {
-  e.stopPropagation();
-  menuEl.classList.remove("show");
-  closeAccountPanel();
-  closeSearch(true);
-  filterPanel.classList.toggle("show");
-});
-filterPanel.addEventListener("click", (e) => e.stopPropagation()); // 面板内点击不收起
-
-document.querySelectorAll('input[name="sort"]').forEach((r) => {
-  r.checked = r.value === sortKey;
-  r.addEventListener("change", () => {
-    if (r.checked) {
-      sortKey = r.value;
-      localStorage.setItem("shelfSort", sortKey);
-      applyView();
-    }
-  });
-});
-
-// 阅读过滤复选框
-document.querySelectorAll(".rfilter").forEach((c) => {
-  c.checked = !!readingFilter[c.value];
-  c.addEventListener("change", () => {
-    readingFilter[c.value] = c.checked;
-    localStorage.setItem("readingFilter", JSON.stringify(readingFilter));
-    applyView();
-  });
-});
-
-// 评分过滤：五颗星（支持半星），点星=只看≥该评分的书，再点同一处取消
-// 通用半星组件：左半=半星、右半=整星，悬停预览，点击回调 onPick(value)
-function makeStars(container, onPick) {
-  for (let i = 0; i < 5; i++) {
-    const st = document.createElement("span");
-    st.className = "star";
-    const bg = document.createElement("span");
-    bg.className = "s-bg";
-    bg.textContent = "★";
-    const fg = document.createElement("span");
-    fg.className = "s-fg";
-    fg.textContent = "★";
-    st.append(bg, fg);
-    container.appendChild(st);
-  }
-  const stars = [...container.querySelectorAll(".star")];
-  function paint(v) {
-    stars.forEach((st, i) => {
-      const f = Math.max(0, Math.min(1, v - i));
-      st.querySelector(".s-fg").style.width = f * 100 + "%";
-    });
-  }
-  function valAt(e) {
-    for (let i = 0; i < stars.length; i++) {
-      const r = stars[i].getBoundingClientRect();
-      if (e.clientX <= r.right) return i + (e.clientX < r.left + r.width / 2 ? 0.5 : 1);
-    }
-    return 5;
-  }
-  container.addEventListener("mousemove", (e) => paint(valAt(e)));
-  container.addEventListener("mouseleave", () => paint(container._val || 0));
-  container.addEventListener("click", (e) => {
-    let v = valAt(e);
-    if (v === container._val) v = 0;
-    container._val = v;
-    paint(v);
-    onPick(v);
-  });
-  container.setVal = (v) => {
-    container._val = v || 0;
-    paint(container._val);
-  };
-  paint(0);
-}
-const filterStarsEl = document.getElementById("filter-stars");
-makeStars(filterStarsEl, (v) => {
-  minRating = v > 0 && books.length && !books.some((b) => (b.rating || 0) >= v) ? 0 : v;
-  if (minRating > 0) localStorage.setItem("minRating", String(minRating));
-  else localStorage.removeItem("minRating");
-  filterStarsEl.setVal(minRating);
-  applyView();
-});
-filterStarsEl.setVal(minRating);
-
+// 书架筛选、排序与评分控件由 ReaderShelfUI 管理。
 // ---- “我的书架”设置：封面进度开关 + 自动导入目录（多目录） ----
 let autoImport = { enabled: false, dirs: [] };
 const setAutoChk = document.getElementById("set-auto-import");
@@ -237,13 +156,13 @@ async function startAutoImportScan(reason = "正在扫描并导入目录…") {
   if (!autoImport.enabled || !autoImport.dirs.length) return;
   const finishAutoImport = startupPerfStart("auto-import-scan", "background dirs=" + autoImport.dirs.length);
   const seq = ++autoImportScanSeq;
-  const before = books.length;
+  const before = shelfUI.count();
   setDirsStatus(reason, "busy");
   try {
     const list = await invoke("auto_import_scan");
     if (seq !== autoImportScanSeq) return;
     const added = Math.max(0, (list || []).length - before);
-    render(list || []);
+    shelfUI.render(list || []);
     if (added > 0) {
       setDirsStatus("导入完成，新增 " + added + " 本书", "ok");
       finishAutoImport("added=" + added);
@@ -259,30 +178,6 @@ async function startAutoImportScan(reason = "正在扫描并导入目录…") {
     if (seq === autoImportScanSeq) setDirsStatus("扫描失败：" + e, "error");
   }
 }
-// 封面显示阅读进度开关
-const setCoverProg = document.getElementById("set-cover-prog");
-setCoverProg.checked = showCoverProgress;
-setCoverProg.addEventListener("change", () => {
-  showCoverProgress = setCoverProg.checked;
-  localStorage.setItem("showCoverProgress", showCoverProgress ? "1" : "0");
-  applyView();
-});
-// 封面上显示评分小星开关
-const setCoverRating = document.getElementById("set-cover-rating");
-setCoverRating.checked = showCoverRating;
-setCoverRating.addEventListener("change", () => {
-  showCoverRating = setCoverRating.checked;
-  localStorage.setItem("showCoverRating", showCoverRating ? "1" : "0");
-  applyView();
-});
-// 封面下显示书名开关
-const setCoverTitle = document.getElementById("set-cover-title");
-setCoverTitle.checked = showCoverTitle;
-setCoverTitle.addEventListener("change", () => {
-  showCoverTitle = setCoverTitle.checked;
-  localStorage.setItem("showCoverTitle", showCoverTitle ? "1" : "0");
-  applyView();
-});
 // 自动导入开关
 async function setAutoImportEnabled(enabled, opts = {}) {
   if (autoImportToggleBusy) return;
@@ -426,7 +321,7 @@ async function refreshRecoveryBackupStatus() {
 function openCommonSettings() {
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
-  closeAccountPanel();
+  syncUI.close();
   closeSearch(true);
   fpSettingsModal.classList.add("show");
   refreshRecoveryBackupStatus().catch((e) => {
@@ -488,350 +383,14 @@ document.getElementById("about-github")?.addEventListener("click", (e) => {
   invoke("open_url", { url: e.currentTarget.href }).catch(() => {});
 });
 
-// ---- 主设置页：语义模型 / 语义索引 / 加速索引 / 多中心画像 ----
-const semanticIndexModal = document.getElementById("semantic-index-modal");
-const semanticGearBtn = document.getElementById("semantic-gear");
-const semanticIndexCloseBtn = document.getElementById("semantic-index-close");
-const semModelMeta = document.getElementById("sem-model-meta");
-const semVectorMeta = document.getElementById("sem-vector-meta");
-const semAccelMeta = document.getElementById("sem-accel-meta");
-const semMultiMeta = document.getElementById("sem-multi-meta");
-const semStatusEl = document.getElementById("sem-status");
-const semVectorBar = document.getElementById("sem-vector-bar");
-const semAccelBar = document.getElementById("sem-accel-bar");
-const semMultiBar = document.getElementById("sem-multi-bar");
-const semModelDownloadBtn = document.getElementById("sem-model-download");
-const semModelDeleteBtn = document.getElementById("sem-model-delete");
-const semVectorBuildBtn = document.getElementById("sem-vector-build");
-const semVectorDeleteBtn = document.getElementById("sem-vector-delete");
-const semAccelBuildBtn = document.getElementById("sem-accel-build");
-const semAccelDeleteBtn = document.getElementById("sem-accel-delete");
-const semMultiBuildBtn = document.getElementById("sem-multi-build");
-const semMultiDeleteBtn = document.getElementById("sem-multi-delete");
-let semStatusPoll = null;
-let semStatusInFlight = false;
-const SEM_STATUS_KEY = "semanticIndexStatusV1";
-let lastSemStatus = loadSemanticStatusCache();
-
-function semanticStatusSnapshot(p = {}) {
-  return {
-    model_ready: !!p.model_ready,
-    model_path: p.model_path || "",
-    model_bytes: Number(p.model_bytes || 0),
-    semantic_done: Number(p.semantic_done || 0),
-    semantic_total: Number(p.semantic_total || 0),
-    semantic_ready: !!p.semantic_ready,
-    semantic_bytes: Number(p.semantic_bytes || 0),
-    accelerator_done: Number(p.accelerator_done || 0),
-    accelerator_total: Number(p.accelerator_total || 0),
-    accelerator_ready: !!p.accelerator_ready,
-    accelerator_resumable: !!p.accelerator_resumable,
-    accelerator_bytes: Number(p.accelerator_bytes || 0),
-    multi_profile_done: Number(p.multi_profile_done || 0),
-    multi_profile_total: Number(p.multi_profile_total || 0),
-    multi_profile_ready: !!p.multi_profile_ready,
-    multi_profile_bytes: Number(p.multi_profile_bytes || 0),
-    saved_at: Date.now(),
-  };
-}
-
-function loadSemanticStatusCache() {
-  try {
-    const p = JSON.parse(localStorage.getItem(SEM_STATUS_KEY) || "null");
-    return p && typeof p === "object" ? p : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function saveSemanticStatusCache(p = {}) {
-  const snap = semanticStatusSnapshot(p);
-  if (!snap.model_ready && !snap.semantic_total && !snap.accelerator_total && !snap.multi_profile_total) return;
-  lastSemStatus = snap;
-  try {
-    localStorage.setItem(SEM_STATUS_KEY, JSON.stringify(snap));
-  } catch (e) {}
-}
-
-function clearSemanticStatusCache() {
-  lastSemStatus = null;
-  try {
-    localStorage.removeItem(SEM_STATUS_KEY);
-  } catch (e) {}
-}
-
-function updateSemanticStatusCache(patch = {}) {
-  const base = lastSemStatus || semanticStatusSnapshot({});
-  lastSemStatus = Object.assign({}, base, patch, { saved_at: Date.now() });
-  try {
-    localStorage.setItem(SEM_STATUS_KEY, JSON.stringify(lastSemStatus));
-  } catch (e) {}
-}
-
-function mergeSemanticStatusWithCache(p = {}) {
-  if (!p.status_refreshing || !lastSemStatus) return p;
-  return Object.assign({}, lastSemStatus, p, {
-    model_ready: p.model_ready || lastSemStatus.model_ready,
-    model_path: p.model_path || lastSemStatus.model_path || "",
-    model_bytes: p.model_bytes || lastSemStatus.model_bytes || 0,
-    semantic_done: p.semantic_done || lastSemStatus.semantic_done || 0,
-    semantic_total: p.semantic_total || lastSemStatus.semantic_total || 0,
-    semantic_ready: p.semantic_ready || lastSemStatus.semantic_ready,
-    semantic_bytes: p.semantic_bytes || lastSemStatus.semantic_bytes || 0,
-    accelerator_done: p.accelerator_done || lastSemStatus.accelerator_done || 0,
-    accelerator_total: p.accelerator_total || lastSemStatus.accelerator_total || 0,
-    accelerator_ready: p.accelerator_ready || lastSemStatus.accelerator_ready,
-    accelerator_resumable: p.accelerator_resumable || lastSemStatus.accelerator_resumable,
-    accelerator_bytes: p.accelerator_bytes || lastSemStatus.accelerator_bytes || 0,
-    multi_profile_done: p.multi_profile_done || lastSemStatus.multi_profile_done || 0,
-    multi_profile_total: p.multi_profile_total || lastSemStatus.multi_profile_total || 0,
-    multi_profile_ready: p.multi_profile_ready || lastSemStatus.multi_profile_ready,
-    multi_profile_bytes: p.multi_profile_bytes || lastSemStatus.multi_profile_bytes || 0,
-  });
-}
-
-function semBytes(n) {
-  n = Number(n || 0);
-  if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + " GB";
-  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
-  if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
-  return n ? n + " B" : "0 B";
-}
-
-function setSemBar(bar, done, total, ready) {
-  const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done * 100 / total))) : 0;
-  if (bar) {
-    bar.style.width = pct + "%";
-    bar.parentElement?.classList.toggle("done", !!ready);
-  }
-}
-
-function setSemStatus(text = "", kind = "") {
-  if (!semStatusEl) return;
-  semStatusEl.textContent = text || "";
-  semStatusEl.className = "ai-status" + (kind ? " " + kind : "");
-}
-
-function semTask(center, id) {
-  return Array.isArray(center?.tasks) ? center.tasks.find((t) => t.id === id) : null;
-}
-
-function renderSemanticStatus(p = {}) {
-  const center = Array.isArray(p?.tasks) ? p : null;
-  if (center) p = center.progress || {};
-  p = mergeSemanticStatusWithCache(p);
-  const busy = !!(p.building || p.model_downloading);
-  const refreshing = !!p.status_refreshing;
-  // 后端正在后台校验时，任务 detail 只是“正在读取…”。优先展示上次可靠快照，
-  // 避免四张卡片一起闪回加载态；按钮仍保持禁用直到校验完成。
-  const taskSource = refreshing && lastSemStatus ? null : center;
-  const modelTask = semTask(taskSource, "semantic_model");
-  const vectorTask = semTask(taskSource, "semantic_vectors");
-  const accelTask = semTask(taskSource, "semantic_accelerator");
-  const multiTask = semTask(taskSource, "semantic_multi_profile");
-  const activeTask = p.active_task || "";
-  const vectorLive = p.building && p.total > 0 && (
-    activeTask === "semantic_vectors" ||
-    activeTask === "semantic_full" ||
-    (!activeTask && !p.shard_total)
-  );
-  const vectorDone = vectorLive ? (p.done || 0) : (p.semantic_done || 0);
-  const vectorTotal = vectorLive ? (p.total || 0) : (p.semantic_total || 0);
-  const accelDone = p.accelerator_done || 0;
-  const accelTotal = p.accelerator_total || 0;
-  const multiDone = p.multi_profile_done || 0;
-  const multiTotal = p.multi_profile_total || 0;
-  const vectorSize = p.semantic_bytes ? "，占用 " + semBytes(p.semantic_bytes) : "";
-  const accelSize = p.accelerator_bytes ? "，占用 " + semBytes(p.accelerator_bytes) : "";
-  const multiSize = p.multi_profile_bytes ? "，占用 " + semBytes(p.multi_profile_bytes) : "";
-
-  semModelMeta.textContent = modelTask?.detail
-    ? (modelTask.detail + (modelTask.bytes ? "，缓存大小 " + semBytes(modelTask.bytes) : ""))
-    : p.model_downloading
-    ? "正在下载/加载模型…"
-    : (p.model_ready ? ("已就绪" + (p.model_bytes ? "，缓存大小 " + semBytes(p.model_bytes) : "")) : (refreshing ? "正在读取模型状态…" : "未下载。首次下载约 120MB。"));
-  semVectorMeta.textContent = vectorTask?.detail
-    ? (vectorTask.detail + (vectorTask.bytes ? "，占用 " + semBytes(vectorTask.bytes) : ""))
-    : refreshing && !vectorTotal
-    ? "正在读取语义索引状态…"
-    : (vectorTotal
-    ? (vectorDone + "/" + vectorTotal + " 本" + (p.semantic_ready ? "，已完成" : "") + vectorSize)
-    : "书架中暂无可建立语义索引的图书");
-  semAccelMeta.textContent = accelTask?.detail
-    ? (accelTask.detail + (accelTask.bytes ? "，占用 " + semBytes(accelTask.bytes) : ""))
-    : refreshing && !accelTotal
-    ? "正在读取加速索引状态…"
-    : (accelTotal
-    ? (accelDone + "/" + accelTotal + " 片" + (p.accelerator_ready ? "，已完成" : (p.accelerator_resumable ? "，可续建" : "")) + accelSize)
-    : "建立语义索引后可建立加速索引");
-  semMultiMeta.textContent = multiTask?.detail
-    ? (multiTask.detail + (multiTask.bytes ? "，占用 " + semBytes(multiTask.bytes) : ""))
-    : refreshing && !multiTotal
-    ? "正在读取多中心画像状态…"
-    : (multiTotal
-    ? (multiDone + "/" + multiTotal + " 本" + (p.multi_profile_ready ? "，已完成" : (multiDone ? "，需要更新" : "")) + multiSize)
-    : "建立语义索引后可生成多中心画像");
-
-  setSemBar(semVectorBar, vectorTask?.done ?? vectorDone, vectorTask?.total ?? vectorTotal, vectorTask?.ready ?? p.semantic_ready);
-  setSemBar(semAccelBar, accelTask?.done ?? accelDone, accelTask?.total ?? accelTotal, accelTask?.ready ?? p.accelerator_ready);
-  setSemBar(semMultiBar, multiTask?.done ?? multiDone, multiTask?.total ?? multiTotal, multiTask?.ready ?? p.multi_profile_ready);
-
-  semModelDownloadBtn.disabled = modelTask ? !modelTask.can_start : (busy || refreshing);
-  semModelDeleteBtn.disabled = modelTask ? !modelTask.can_delete : (busy || !p.model_ready);
-  semVectorBuildBtn.disabled = vectorTask ? !vectorTask.can_start : (busy || refreshing || !p.model_ready || !vectorTotal);
-  semVectorDeleteBtn.disabled = vectorTask ? !vectorTask.can_delete : (busy || vectorDone <= 0);
-  semAccelBuildBtn.disabled = accelTask ? !accelTask.can_start : (busy || refreshing || !p.model_ready || vectorDone <= 0);
-  semAccelDeleteBtn.disabled = accelTask ? !accelTask.can_delete : (busy || (!p.accelerator_ready && accelDone <= 0));
-  semMultiBuildBtn.disabled = multiTask ? !multiTask.can_start : (busy || refreshing || vectorDone <= 0);
-  semMultiDeleteBtn.disabled = multiTask ? !multiTask.can_delete : (busy || !p.multi_profile_bytes);
-  semModelDownloadBtn.textContent = modelTask?.primary_label || "下载模型";
-  semModelDeleteBtn.textContent = modelTask?.delete_label || "删除模型";
-  semVectorBuildBtn.textContent = vectorTask?.primary_label || (vectorDone > 0 && !p.semantic_ready ? "续建语义索引" : "建立语义索引");
-  semVectorDeleteBtn.textContent = vectorTask?.delete_label || "删除";
-  semAccelBuildBtn.textContent = accelTask?.primary_label || (p.accelerator_resumable ? "续建加速索引" : "建立加速索引");
-  semAccelDeleteBtn.textContent = accelTask?.delete_label || "删除";
-  semMultiBuildBtn.textContent = multiTask?.primary_label || (multiDone > 0 && !p.multi_profile_ready ? "更新多中心画像" : "建立多中心画像");
-  semMultiDeleteBtn.textContent = multiTask?.delete_label || "删除";
-
-  if (p.error) setSemStatus(p.error, "error");
-  else if (p.model_downloading || p.building) setSemStatus(p.current || "任务正在后台运行…", "busy");
-  else if (refreshing) setSemStatus("正在后台读取索引状态…", "busy");
-  else setSemStatus(p.current || "", p.current ? "ok" : "");
-
-  const shouldPoll = !!(p.model_downloading || p.building || refreshing);
-  if (shouldPoll && !semStatusPoll) {
-    semStatusPoll = setInterval(refreshSemanticStatus, 1500);
-  } else if (!shouldPoll && semStatusPoll) {
-    clearInterval(semStatusPoll);
-    semStatusPoll = null;
-  }
-  if (!refreshing || p.model_ready || vectorTotal || accelTotal || multiTotal || p.building || p.model_downloading) saveSemanticStatusCache(p);
-}
-
-async function refreshSemanticStatus() {
-  if (semStatusInFlight) return;
-  semStatusInFlight = true;
-  try {
-    renderSemanticStatus(await invoke("semantic_tasks"));
-  } catch (e) {
-    setSemStatus("读取语义索引状态失败：" + e, "error");
-  } finally {
-    semStatusInFlight = false;
-  }
-}
-
-function openSemanticIndexSettings() {
-  fpSettingsModal.classList.remove("show");
-  semanticIndexModal.classList.add("show");
-  if (lastSemStatus) renderSemanticStatus(lastSemStatus);
-  setTimeout(refreshSemanticStatus, 30);
-  if (semStatusPoll) clearInterval(semStatusPoll);
-  semStatusPoll = null;
-}
-
-function closeSemanticIndexSettings() {
-  semanticIndexModal.classList.remove("show");
-  if (semStatusPoll) clearInterval(semStatusPoll);
-  semStatusPoll = null;
-  fpSettingsModal.classList.add("show");
-}
-
-semanticGearBtn?.addEventListener("click", (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  openSemanticIndexSettings();
+// 语义设置由独立模块管理；这里只注入书架应用拥有的依赖。
+window.ReaderSemanticUI.init({
+  root: document,
+  invoke,
+  settingsModal: fpSettingsModal,
+  cache: window.ReaderSemanticStatusCache,
+  confirmAction: (message) => window.confirm(message),
 });
-semanticIndexCloseBtn?.addEventListener("click", closeSemanticIndexSettings);
-semanticIndexModal?.addEventListener("click", (e) => {
-  if (e.target === semanticIndexModal) closeSemanticIndexSettings();
-});
-semModelDownloadBtn?.addEventListener("click", async () => {
-  setSemStatus("正在启动模型下载…", "busy");
-  try {
-    await invoke("download_semantic_model");
-    await refreshSemanticStatus();
-  } catch (e) {
-    setSemStatus("启动模型下载失败：" + e, "error");
-  }
-});
-semModelDeleteBtn?.addEventListener("click", async () => {
-  if (!confirm("确定删除本机语义模型缓存？之后使用语义检索需要重新下载模型。")) return;
-  try {
-    await invoke("delete_semantic_model");
-    updateSemanticStatusCache({ model_ready: false, model_bytes: 0 });
-    await refreshSemanticStatus();
-  } catch (e) {
-    setSemStatus("删除模型失败：" + e, "error");
-  }
-});
-semVectorBuildBtn?.addEventListener("click", async () => {
-  setSemStatus("正在启动语义索引任务…", "busy");
-  try {
-    await invoke("build_semantic_vectors");
-    await refreshSemanticStatus();
-  } catch (e) {
-    setSemStatus("启动语义索引失败：" + e, "error");
-  }
-});
-semAccelBuildBtn?.addEventListener("click", async () => {
-  setSemStatus("正在启动加速索引任务…", "busy");
-  try {
-    await invoke("build_semantic_accelerator");
-    await refreshSemanticStatus();
-  } catch (e) {
-    setSemStatus("启动加速索引失败：" + e, "error");
-  }
-});
-semMultiBuildBtn?.addEventListener("click", async () => {
-  setSemStatus("正在启动多中心画像任务…", "busy");
-  try {
-    await invoke("build_semantic_multi_profile");
-    await refreshSemanticStatus();
-  } catch (e) {
-    setSemStatus("启动多中心画像失败：" + e, "error");
-  }
-});
-semVectorDeleteBtn?.addEventListener("click", async () => {
-  if (!confirm("确定删除语义索引？加速索引也会一起删除。")) return;
-  try {
-    await invoke("delete_semantic_index", { kind: "semantic" });
-    clearSemanticStatusCache();
-    await refreshSemanticStatus();
-  } catch (e) {
-    setSemStatus("删除语义索引失败：" + e, "error");
-  }
-});
-semAccelDeleteBtn?.addEventListener("click", async () => {
-  if (!confirm("确定删除加速索引？语义索引会保留，可之后续建加速索引。")) return;
-  try {
-    await invoke("delete_semantic_index", { kind: "accelerator" });
-    updateSemanticStatusCache({
-      accelerator_done: 0,
-      accelerator_total: 0,
-      accelerator_ready: false,
-      accelerator_resumable: false,
-      accelerator_bytes: 0,
-    });
-    await refreshSemanticStatus();
-  } catch (e) {
-    setSemStatus("删除加速索引失败：" + e, "error");
-  }
-});
-semMultiDeleteBtn?.addEventListener("click", async () => {
-  if (!confirm("确定删除多中心画像索引？语义索引和加速索引会保留。")) return;
-  try {
-    await invoke("delete_semantic_index", { kind: "multi_profile" });
-    updateSemanticStatusCache({
-      multi_profile_done: 0,
-      multi_profile_ready: false,
-      multi_profile_bytes: 0,
-    });
-    await refreshSemanticStatus();
-  } catch (e) {
-    setSemStatus("删除多中心画像失败：" + e, "error");
-  }
-});
-
 // ---- 主设置页：外置词典 ----
 const externalDictModal = document.getElementById("external-dict-modal");
 const externalDictGear = document.getElementById("dict-gear");
@@ -984,66 +543,7 @@ externalDictAdd?.addEventListener("click", async () => {
     setExternalDictStatus("导入词典失败：" + e, "error");
   }
 });
-// 账号、登录和同步面板 UI 在 sync-ui.js。
-function updateLayoutButtons() {
-  document
-    .querySelectorAll(".layout-btn")
-    .forEach((b) => b.classList.toggle("active", b.dataset.layout === layout));
-}
-function updateGridColumnsControls() {
-  const defBtn = document.getElementById("grid-cols-default");
-  const valEl = document.getElementById("grid-cols-value");
-  if (defBtn) defBtn.classList.toggle("active", !shelfGridColumns);
-  if (valEl) valEl.textContent = String(shelfGridColumns || shelfGridColumnsValue);
-}
-function saveGridColumns() {
-  localStorage.setItem("shelfGridColumns", shelfGridColumns ? String(shelfGridColumns) : "0");
-  localStorage.setItem("shelfGridColumnsValue", String(shelfGridColumnsValue));
-}
-function applyShelfGridColumns() {
-  const fixed = layout === "grid" && shelfGridColumns > 0;
-  shelfEl.classList.toggle("fixed-cols", fixed);
-  if (fixed) shelfEl.style.setProperty("--shelf-grid-cols", String(shelfGridColumns));
-  else shelfEl.style.removeProperty("--shelf-grid-cols");
-}
-document.querySelectorAll(".layout-btn").forEach((b) => {
-  b.addEventListener("click", () => {
-    layout = b.dataset.layout;
-    localStorage.setItem("shelfLayout", layout);
-    updateLayoutButtons();
-    applyView();
-  });
-});
-updateLayoutButtons();
-updateGridColumnsControls();
-
-document.getElementById("grid-cols-default")?.addEventListener("click", () => {
-  shelfGridColumns = 0;
-  saveGridColumns();
-  updateGridColumnsControls();
-  applyView();
-});
-document.getElementById("grid-cols-dec")?.addEventListener("click", () => {
-  shelfGridColumnsValue = Math.max(GRID_COL_MIN, (shelfGridColumns || shelfGridColumnsValue) - 1);
-  shelfGridColumns = shelfGridColumnsValue;
-  layout = "grid";
-  localStorage.setItem("shelfLayout", layout);
-  saveGridColumns();
-  updateLayoutButtons();
-  updateGridColumnsControls();
-  applyView();
-});
-document.getElementById("grid-cols-inc")?.addEventListener("click", () => {
-  shelfGridColumnsValue = Math.min(GRID_COL_MAX, (shelfGridColumns || shelfGridColumnsValue) + 1);
-  shelfGridColumns = shelfGridColumnsValue;
-  layout = "grid";
-  localStorage.setItem("shelfLayout", layout);
-  saveGridColumns();
-  updateLayoutButtons();
-  updateGridColumnsControls();
-  applyView();
-});
-
+// 书架布局与列数设置由 ReaderShelfUI 管理。
 let importStatusEl = null;
 let importStatusTimer = 0;
 function ensureImportStatus() {
@@ -1072,7 +572,7 @@ async function importBookPaths(paths) {
   try {
     const list = await startupTimed("manual-import", () => invoke("add_books", { paths }), paths.length + " files");
     setImportStatus("正在刷新书架...", "busy");
-    render(list);
+    shelfUI.render(list);
     setImportStatus("导入完成，共 " + paths.length + " 个文件", "ok");
     hideImportStatus(3200);
     if (debugSettingOn("bg_fulltext_index")) {
@@ -1133,30 +633,16 @@ async function importDataPackage() {
   alert("已创建导入前恢复点，并导入 " + count + " 条同步数据。数据已立即合并到当前书架。");
 }
 
-function openRandom() {
-  if (!books.length) {
-    alert("书架还是空的，先导入书籍吧～");
-    return;
-  }
-  const b = books[Math.floor(Math.random() * books.length)];
-  clearCrossReturnMemory();
-  invoke("open_book", { id: b.id });
-}
-
 // 三点菜单
 document.getElementById("menu-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   filterPanel.classList.remove("show");
-  closeAccountPanel();
+  syncUI.close();
   closeSearch(true);
   menuEl.classList.toggle("show");
 });
 document.addEventListener("click", () => {
   closeMainFloaters();
-});
-document.getElementById("mi-random").addEventListener("click", () => {
-  menuEl.classList.remove("show");
-  openRandom();
 });
 document.getElementById("mi-import").addEventListener("click", () => {
   menuEl.classList.remove("show");
@@ -1290,7 +776,7 @@ function libraryHealthBytes(value) {
       const picked = await dialog.open({ multiple: false, filters: [{ name: "电子书", extensions: format ? [format] : ["epub", "pdf", "txt", "md", "markdown", "mobi", "azw3", "azw"] }] });
       const path = Array.isArray(picked) ? picked[0] : picked;
       if (!path) return;
-      render(await invoke("relocate_book", { id: button.dataset.id, path }));
+      shelfUI.render(await invoke("relocate_book", { id: button.dataset.id, path }));
       await openLibraryHealth();
     });
   });
@@ -1300,7 +786,7 @@ function libraryHealthBytes(value) {
       if (ids.length < 2 || !confirm("确认合并这组重复书籍吗？会保留一个书架条目，并合并书签、批注和较新的进度。")) return;
       button.disabled = true;
       try {
-        render(await invoke("merge_duplicate_books", { ids }));
+        shelfUI.render(await invoke("merge_duplicate_books", { ids }));
         await openLibraryHealth();
       } catch (e) {
         alert("合并失败：" + e);
@@ -1473,14 +959,7 @@ tauriEvent.listen("tauri://drag-drop", async (e) => {
   const paths = ((e.payload && e.payload.paths) || []).filter((p) => SUPPORTED.test(p));
   if (paths.length) await importBookPaths(paths);
 });
-document.getElementById("mi-selectall").addEventListener("click", () => {
-  menuEl.classList.remove("show");
-  selectAll();
-});
-
-// ---- 选中 / 批量删除 ----
-const delGroup = document.getElementById("del-group");
-const delBtn = document.getElementById("del-btn");
+// ---- 单本图书信息与相关内容 ----
 const coverBtn = document.getElementById("cover-btn");
 const bookInfoBtn = document.getElementById("book-info-btn");
 const similarBooksBtn = document.getElementById("similar-books-btn");
@@ -1582,15 +1061,10 @@ function fmtSize(bytes) {
   if (bytes >= 1024) return Math.round(bytes / 1024) + "K";
   return bytes + "B";
 }
-function updateBookInShelf(id, patch) {
-  const idx = books.findIndex((b) => String(b.id) === String(id));
-  if (idx >= 0) books[idx] = Object.assign({}, books[idx], patch);
-  applyView();
-  updateDeleteUI();
-}
 async function openSelectedBookInfo() {
-  if (selected.size !== 1) return;
-  currentInfoBookId = String([...selected][0]);
+  const selectedIds = shelfUI.getSelectedIds();
+  if (selectedIds.length !== 1) return;
+  currentInfoBookId = String(selectedIds[0]);
   bookInfoModal.classList.add("show");
   document.getElementById("book-info-words").textContent = "统计中…";
   try {
@@ -1606,10 +1080,10 @@ async function openSelectedBookInfo() {
     document.getElementById("book-info-words").textContent = "读取失败：" + e;
   }
 }
-makeStars(bookInfoStars, (rating) => {
+shelfUI.makeStars(bookInfoStars, (rating) => {
   if (!currentInfoBookId) return;
   bookInfoStars.setVal(rating);
-  updateBookInShelf(currentInfoBookId, { rating });
+  shelfUI.updateBook(currentInfoBookId, { rating });
   invoke("set_book_rating", { id: currentInfoBookId, rating }).catch(() => {});
 });
 bookInfoBtn.addEventListener("click", openSelectedBookInfo);
@@ -1621,13 +1095,13 @@ bookInfoTitle.addEventListener("blur", async () => {
   if (!currentInfoBookId) return;
   const title = bookInfoTitle.value.trim();
   if (!title) {
-    const b = books.find((x) => String(x.id) === String(currentInfoBookId));
+    const b = shelfUI.getBook(currentInfoBookId);
     bookInfoTitle.value = b?.title || "";
     return;
   }
   try {
     await invoke("set_book_title", { id: currentInfoBookId, title });
-    updateBookInShelf(currentInfoBookId, { title });
+    shelfUI.updateBook(currentInfoBookId, { title });
   } catch (e) {
     alert("保存书名失败：" + e);
   }
@@ -1635,7 +1109,7 @@ bookInfoTitle.addEventListener("blur", async () => {
 bookInfoDesc.addEventListener("blur", () => {
   if (!currentInfoBookId) return;
   const description = bookInfoDesc.textContent.trim();
-  updateBookInShelf(currentInfoBookId, { description });
+  shelfUI.updateBook(currentInfoBookId, { description });
   invoke("set_book_description", { id: currentInfoBookId, description }).catch(() => {});
 });
 
@@ -1649,7 +1123,7 @@ function renderSimilarCover(b) {
     img.src = b.cover;
     cover.appendChild(img);
   } else {
-    cover.style.background = colorFor(b.title || "");
+    cover.style.background = shelfUI.coverColor(b.title || "");
     const spine = document.createElement("div");
     spine.className = "spine";
     const gen = document.createElement("div");
@@ -1698,7 +1172,7 @@ function renderSimilarBooks(sourceTitle, list) {
 async function openSimilarBooks(id = currentInfoBookId) {
   if (!id) return;
   id = String(id);
-  const source = books.find((x) => String(x.id) === id);
+  const source = shelfUI.getBook(id);
   similarBooksModal.classList.add("show");
   similarBooksSource.textContent = source ? "基于《" + source.title + "》的正文语义相似度" : "基于正文语义相似度";
   similarBooksList.innerHTML = '<div class="similar-empty">正在计算相似图书…</div>';
@@ -1718,88 +1192,34 @@ similarBooksModal.addEventListener("click", (e) => {
 // 图书信息里的单本操作。
 coverBtn.addEventListener("click", () => {
   if (!currentInfoBookId) return;
-  const b = books.find((x) => String(x.id) === String(currentInfoBookId));
-  if (b) changeCover(b);
+  shelfUI.changeCoverById(currentInfoBookId);
 });
 
-function updateDeleteUI() {
-  if (selected.size > 0) {
-    delGroup.classList.add("show");
-    bookInfoBtn.style.display = selected.size === 1 ? "" : "none";
-    delBtn.textContent = "🗑 删除选中 (" + selected.size + ")";
-  } else {
-    delGroup.classList.remove("show");
-  }
-}
-function toggleSelect(id, card) {
-  if (selected.has(id)) {
-    selected.delete(id);
-    card.classList.remove("selected");
-  } else {
-    selected.add(id);
-    card.classList.add("selected");
-  }
-  updateDeleteUI();
-}
-function clearSelection() {
-  selected = new Set();
-  applyView();
-  updateDeleteUI();
-}
-function selectAll() {
-  const list = currentList(); // 只选当前过滤/搜索后真正显示的这些书
-  closeSearch(true);
-  selected = new Set(list.map((b) => b.id));
-  applyView();
-  updateDeleteUI();
-}
-delBtn.addEventListener("click", async () => {
-  if (!selected.size) return;
-  if (!confirm("确定删除选中的 " + selected.size + " 本书？（不会删除磁盘上的文件）")) return;
-  const ids = Array.from(selected);
-  const list = await invoke("remove_books", { ids });
-  selected = new Set();
-  updateDeleteUI();
-  render(list);
-});
-document.getElementById("del-cancel").addEventListener("click", clearSelection);
-
-let initialShelfLoading = true;
-let lastShelfFocusRefreshAt = 0;
-// 回到书架窗口时刷新（更新“最近阅读”、进度等），但做节流，避免窗口焦点抖动时连续重刷。
-window.addEventListener("focus", () => {
-  if (initialShelfLoading) return;
-  const now = Date.now();
-  if (now - lastShelfFocusRefreshAt < 1500) return;
-  lastShelfFocusRefreshAt = now;
-  invoke("list_books").then(render).catch(() => {});
-});
-
+// 书架选择、批量删除与焦点刷新由 ReaderShelfUI 管理。
 window.addEventListener("DOMContentLoaded", () => {
   // 启动：先用 list_books 快速返回现有书架，让菜单栏立刻可点；旧数据元信息回填延后执行。
     startupPerfLog("startup", "schedule", "critical=list_books+cover-render background=sync/settings/import/index/update");
     startupTimed("shelf-list-books", () => invoke("list_books"), "critical")
       .then((list) => {
         startupPerfLog("shelf-list-books", "data", "books=" + ((list && list.length) || 0));
-        render(list);
+        shelfUI.render(list);
         return invoke("take_startup_book_paths");
       })
       .then((paths) => enqueueAssociatedBookOpen(paths))
       .catch(() => {})
       .finally(() => {
-        initialShelfLoading = false;
         startupPerfLog("startup", "interactive", "main toolbar should be responsive");
       });
     setTimeout(() => {
       if (!debugSettingOn("bg_cover_preload")) return;
-      runWhenNoReader("shelf-books-backfill", () => invoke("shelf_books").then(render));
+      runWhenNoReader("shelf-books-backfill", () => invoke("shelf_books").then((list) => shelfUI.render(list)));
     }, 10000);
     // 读取自动导入配置并反映到设置面板。真正扫描延后，避免和首屏封面加载抢资源。
     setTimeout(() => {
       // 账号状态始终从 SQLite 恢复；后台开关只控制联网同步，不能让已登录账号看起来丢失。
       startupTimed("sync-settings", async () => {
-        await loadSyncSettingsOnce();
-        if (debugSettingOn("bg_sync")) await syncOnStartup();
+        await syncUI.loadSettingsOnce();
+        if (debugSettingOn("bg_sync")) await syncUI.syncOnStartup();
       }, "background").catch(() => {});
     }, 1200);
     startupTimed("auto-import-config", () => invoke("get_auto_import"), "background")
@@ -1828,12 +1248,3 @@ window.addEventListener("DOMContentLoaded", () => {
       })
       .catch(() => {});
 }, { once: true });
-
-
-
-
-
-
-
-
-

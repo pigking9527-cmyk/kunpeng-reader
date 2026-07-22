@@ -1,5 +1,5 @@
-use crate::{book, pdf_support, reader_window_id, AppState};
-use serde::Serialize;
+use crate::{book, pdf_support, window_commands::reader_window_id, AppState};
+use serde::{Deserialize, Serialize};
 
 fn report_save_error(result: Result<(), String>) {
     if let Err(error) = result {
@@ -87,11 +87,9 @@ pub(crate) fn set_rating(window: tauri::WebviewWindow, state: tauri::State<AppSt
 }
 
 /// 新增一处高亮/批注，返回该书全部高亮。
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn add_highlight(
-    window: tauri::WebviewWindow,
-    state: tauri::State<AppState>,
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AddHighlightRequest {
     chapter: u32,
     start: u32,
     end: u32,
@@ -100,7 +98,24 @@ pub(crate) fn add_highlight(
     rects: String,
     color: String,
     note: String,
+}
+
+#[tauri::command]
+pub(crate) fn add_highlight(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    request: AddHighlightRequest,
 ) -> Vec<book::Highlight> {
+    let AddHighlightRequest {
+        chapter,
+        start,
+        end,
+        text,
+        context,
+        rects,
+        color,
+        note,
+    } = request;
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
         lib.add_highlight(
@@ -299,4 +314,26 @@ pub(crate) async fn book_meta_by_id(
 ) -> Result<BookMeta, String> {
     let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
     book_meta_for_id(state.inner(), id_num).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_highlight_request_deserializes_as_one_object() {
+        let request: AddHighlightRequest = serde_json::from_value(serde_json::json!({
+            "chapter": 2,
+            "start": 3,
+            "end": 8,
+            "text": "原文",
+            "context": "上下文",
+            "rects": "[]",
+            "color": "y",
+            "note": "批注"
+        }))
+        .unwrap();
+        assert_eq!(request.chapter, 2);
+        assert_eq!(request.note, "批注");
+    }
 }

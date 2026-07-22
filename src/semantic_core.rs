@@ -1,46 +1,9 @@
 pub const SEM_VERSION: u32 = 2;
-pub const SEM_MODEL: &str = "bge-small-zh-v1.5";
-pub const SEM_QUERY_PREFIX: &str = "为这个句子生成表示以用于检索相关文章：";
+pub const SEM_CHUNK_PIPELINE_REVISION: u32 = 1;
 pub const SHARD_MAX_CHUNKS: usize = 600_000;
-pub const SEM_CACHE_BUDGET: usize = 1200 * 1024 * 1024;
-
-#[cfg(windows)]
-pub fn ram_total_avail() -> (u64, u64) {
-    #[repr(C)]
-    struct MemStatusEx {
-        length: u32,
-        mem_load: u32,
-        total_phys: u64,
-        avail_phys: u64,
-        total_page: u64,
-        avail_page: u64,
-        total_virt: u64,
-        avail_virt: u64,
-        avail_ext_virt: u64,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GlobalMemoryStatusEx(p: *mut MemStatusEx) -> i32;
-    }
-    let mut m: MemStatusEx = unsafe { std::mem::zeroed() };
-    m.length = std::mem::size_of::<MemStatusEx>() as u32;
-    if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 {
-        (m.total_phys, m.avail_phys)
-    } else {
-        (8 << 30, 4 << 30)
-    }
-}
-
-#[cfg(not(windows))]
-pub fn ram_total_avail() -> (u64, u64) {
-    (8 << 30, 4 << 30)
-}
 
 pub fn index_ram_budget() -> u64 {
-    let (total, avail) = ram_total_avail();
-    (total / 2)
-        .min(avail.saturating_sub(1 << 30) * 7 / 10)
-        .max(512 << 20)
+    crate::memory_budget::plan().semantic_graph_bytes
 }
 
 pub fn shard_est_bytes(chunks: usize, dim: usize) -> u64 {
@@ -153,6 +116,9 @@ mod tests {
     #[test]
     fn shard_estimate_scales_with_chunks_and_dimensions() {
         assert_eq!(shard_est_bytes(2, 3), 824);
-        assert!(index_ram_budget() >= 512 << 20);
+        assert_eq!(
+            index_ram_budget(),
+            crate::memory_budget::plan().semantic_graph_bytes
+        );
     }
 }

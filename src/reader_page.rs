@@ -5,6 +5,8 @@ pub(crate) const READER_PAGE_HEAD: &str = concat!(
     include_str!("../ui/reader-page-style.html"),
     "<script>",
     include_str!("../ui/reader-page-layout.js"),
+    include_str!("../ui/reader-page-pagination.js"),
+    include_str!("../ui/reader-page-measurement.js"),
     include_str!("../ui/reader-page-annotations.js"),
     include_str!("../ui/reader-page-runtime.js"),
     "</script>
@@ -26,6 +28,7 @@ mod tests {
         assert!(READER_PAGE_HEAD.contains("function showDictResult"));
         assert!(READER_PAGE_HEAD.contains("function showFootnote"));
         assert!(READER_PAGE_HEAD.contains("function measureAll"));
+        assert!(READER_PAGE_HEAD.contains("function pageCountSig"));
         assert!(READER_PAGE_HEAD.contains("function renderHlSettings"));
         assert!(READER_PAGE_HEAD.contains("function applyConfiguredMenu"));
         assert!(READER_PAGE_HEAD.contains("highlightMenuActionsV1"));
@@ -35,8 +38,15 @@ mod tests {
         assert!(READER_PAGE_HEAD.contains("translateResult"));
         assert!(READER_PAGE_HEAD.contains("dictResult"));
         let layout = READER_PAGE_HEAD.find("function showChapter").unwrap();
+        let pagination = READER_PAGE_HEAD.find("// ---- 分页几何").unwrap();
+        let measurement = READER_PAGE_HEAD.find("// ---- 全书页数").unwrap();
         let annotations = READER_PAGE_HEAD.find("// ---- 高亮/批注 ----").unwrap();
         let runtime = READER_PAGE_HEAD.find("// ---- 朗读").unwrap();
-        assert!(layout < annotations && annotations < runtime);
+        assert!(
+            layout < pagination
+                && pagination < measurement
+                && measurement < annotations
+                && annotations < runtime
+        );
     }
 }

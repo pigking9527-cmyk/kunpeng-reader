@@ -90,6 +90,23 @@ impl<R: Read + Seek> EpubArchive<R> {
             }
         };
 
+        // Some legacy EPUBs were produced on Windows and spell the OPF/resource
+        // path with a different ASCII case than the entry stored in the ZIP
+        // (for example `ops/fb.opf` in container.xml but `OPS/fb.opf` in the
+        // archive). ZIP paths are case-sensitive, whereas the original authoring
+        // environment often was not. Keep the exact-name lookup above preferred,
+        // then accept an unambiguous ASCII-case equivalent as a compatibility
+        // fallback before trying a percent-decoded resource name.
+        if let Some(actual_name) = self
+            .files
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(name))
+        {
+            let mut zipfile = self.zip.by_name(actual_name)?;
+            zipfile.read_to_end(&mut entry)?;
+            return Ok(entry);
+        }
+
         // try percent encoding
         let name = percent_encoding::percent_decode(name.as_bytes()).decode_utf8()?;
         let mut zipfile = self.zip.by_name(&name)?;
@@ -115,5 +132,28 @@ impl<R: Read + Seek> EpubArchive<R> {
     pub fn get_container_file(&mut self) -> Result<Vec<u8>, ArchiveError> {
         let content = self.get_entry("META-INF/container.xml")?;
         Ok(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EpubArchive;
+    use std::io::{Cursor, Write};
+
+    #[test]
+    fn reads_entry_when_archive_path_only_differs_in_ascii_case() {
+        let mut bytes = Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut bytes);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("OPS/fb.opf", options).unwrap();
+            zip.write_all(b"ok").unwrap();
+            zip.finish().unwrap();
+        }
+        bytes.set_position(0);
+
+        let mut archive = EpubArchive::from_reader(bytes).unwrap();
+        assert_eq!(archive.get_entry("ops/fb.opf").unwrap(), b"ok");
     }
 }

@@ -7,7 +7,29 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// SQLite WAL only coordinates individual database transactions. This lock also
+/// protects the larger read/modify/write sequences (and lets backup/restore
+/// exclude every in-process external-dictionary connection for its full run).
+static EXTERNAL_DICT_DB_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_external_dict_db() -> MutexGuard<'static, ()> {
+    // A panic while holding the lock does not make SQLite itself unusable. Keep
+    // serializing subsequent access instead of permanently disabling dictionaries.
+    EXTERNAL_DICT_DB_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Hold this guard across backup/restore file operations. Callers must acquire
+/// their higher-level maintenance/backup lock first and must not call this
+/// module's public operations while the guard is alive (use unlocked internals
+/// here when composition is required).
+pub(crate) fn maintenance_lock() -> MutexGuard<'static, ()> {
+    lock_external_dict_db()
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExternalDictMeta {
@@ -1035,7 +1057,7 @@ fn dict_id_for(path: &Path) -> String {
     hex[..16].to_string()
 }
 
-pub fn list() -> Result<Vec<ExternalDictMeta>, String> {
+fn list_unlocked() -> Result<Vec<ExternalDictMeta>, String> {
     let conn = open_db()?;
     let mut stmt = conn
         .prepare(
@@ -1066,7 +1088,12 @@ pub fn list() -> Result<Vec<ExternalDictMeta>, String> {
     Ok(out)
 }
 
-pub fn import(paths: Vec<String>) -> Result<Vec<ExternalDictMeta>, String> {
+pub fn list() -> Result<Vec<ExternalDictMeta>, String> {
+    let _guard = lock_external_dict_db();
+    list_unlocked()
+}
+
+fn import_unlocked(paths: Vec<String>) -> Result<Vec<ExternalDictMeta>, String> {
     let mut conn = open_db()?;
     let max_pri: i64 = conn
         .query_row(
@@ -1123,31 +1150,46 @@ pub fn import(paths: Vec<String>) -> Result<Vec<ExternalDictMeta>, String> {
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
-    list()
+    list_unlocked()
 }
 
-pub fn delete(id: String) -> Result<Vec<ExternalDictMeta>, String> {
+pub fn import(paths: Vec<String>) -> Result<Vec<ExternalDictMeta>, String> {
+    let _guard = lock_external_dict_db();
+    import_unlocked(paths)
+}
+
+fn delete_unlocked(id: String) -> Result<Vec<ExternalDictMeta>, String> {
     let conn = open_db()?;
     conn.execute("DELETE FROM entries WHERE dict_id=?", params![id])
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM dictionaries WHERE id=?", params![id])
         .map_err(|e| e.to_string())?;
-    list()
+    list_unlocked()
 }
 
-pub fn set_enabled(id: String, enabled: bool) -> Result<Vec<ExternalDictMeta>, String> {
+pub fn delete(id: String) -> Result<Vec<ExternalDictMeta>, String> {
+    let _guard = lock_external_dict_db();
+    delete_unlocked(id)
+}
+
+fn set_enabled_unlocked(id: String, enabled: bool) -> Result<Vec<ExternalDictMeta>, String> {
     let conn = open_db()?;
     conn.execute(
         "UPDATE dictionaries SET enabled=? WHERE id=?",
         params![if enabled { 1i64 } else { 0i64 }, id],
     )
     .map_err(|e| e.to_string())?;
-    list()
+    list_unlocked()
 }
 
-pub fn move_priority(id: String, dir: i32) -> Result<Vec<ExternalDictMeta>, String> {
+pub fn set_enabled(id: String, enabled: bool) -> Result<Vec<ExternalDictMeta>, String> {
+    let _guard = lock_external_dict_db();
+    set_enabled_unlocked(id, enabled)
+}
+
+fn move_priority_unlocked(id: String, dir: i32) -> Result<Vec<ExternalDictMeta>, String> {
     let conn = open_db()?;
-    let rows = list()?;
+    let rows = list_unlocked()?;
     let Some(pos) = rows.iter().position(|d| d.id == id) else {
         return Ok(rows);
     };
@@ -1171,10 +1213,15 @@ pub fn move_priority(id: String, dir: i32) -> Result<Vec<ExternalDictMeta>, Stri
         params![a.priority, b.id],
     )
     .map_err(|e| e.to_string())?;
-    list()
+    list_unlocked()
 }
 
-pub fn lookup(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
+pub fn move_priority(id: String, dir: i32) -> Result<Vec<ExternalDictMeta>, String> {
+    let _guard = lock_external_dict_db();
+    move_priority_unlocked(id, dir)
+}
+
+fn lookup_unlocked(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
     let Ok(conn) = open_db() else {
         return Vec::new();
     };
@@ -1218,4 +1265,34 @@ pub fn lookup(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
         }
     }
     out
+}
+
+pub fn lookup(term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
+    let _guard = lock_external_dict_db();
+    lookup_unlocked(term, candidates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn maintenance_lock_excludes_normal_dictionary_access() {
+        let maintenance = maintenance_lock();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _normal_access = lock_external_dict_db();
+            acquired_tx.send(()).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(acquired_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(maintenance);
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
 }

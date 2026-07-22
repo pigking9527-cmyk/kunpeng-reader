@@ -70,12 +70,27 @@ try {
 
   Write-Host '== frontend module boundaries =='
   $mainSyncJs = Join-Path $repo 'ui\sync-ui.js'
+  $mainStatsJs = Join-Path $repo 'ui\stats-ui.js'
+  $mainShelfJs = Join-Path $repo 'ui\shelf-ui.js'
+  $semanticStatusCacheJs = Join-Path $repo 'ui\semantic-status-cache.js'
+  $semanticUiJs = Join-Path $repo 'ui\semantic-ui.js'
   if (-not (Test-Path -LiteralPath $mainSyncJs)) { throw 'ui/sync-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $mainStatsJs)) { throw 'ui/stats-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $mainShelfJs)) { throw 'ui/shelf-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $semanticStatusCacheJs)) { throw 'ui/semantic-status-cache.js missing.' }
+  if (-not (Test-Path -LiteralPath $semanticUiJs)) { throw 'ui/semantic-ui.js missing.' }
   $indexHtmlForScripts = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\index.html'), [System.Text.Encoding]::UTF8)
   $appJsPos = $indexHtmlForScripts.IndexOf('app.js')
   $syncUiPos = $indexHtmlForScripts.IndexOf('sync-ui.js')
-  if ($appJsPos -lt 0 -or $syncUiPos -lt 0 -or $syncUiPos -lt $appJsPos) {
-    throw 'sync-ui.js must be loaded after app.js because it binds account/sync UI to app globals.'
+  $statsUiPos = $indexHtmlForScripts.IndexOf('stats-ui.js')
+  $shelfUiPos = $indexHtmlForScripts.IndexOf('shelf-ui.js')
+  $semanticStatusCachePos = $indexHtmlForScripts.IndexOf('semantic-status-cache.js')
+  $semanticUiPos = $indexHtmlForScripts.IndexOf('semantic-ui.js')
+  if ($semanticStatusCachePos -lt 0 -or $semanticUiPos -lt $semanticStatusCachePos -or $semanticUiPos -gt $appJsPos) {
+    throw 'semantic-status-cache.js and semantic-ui.js must be loaded in dependency order before app.js.'
+  }
+  if ($appJsPos -lt 0 -or $syncUiPos -lt 0 -or $statsUiPos -lt 0 -or $shelfUiPos -lt 0 -or $syncUiPos -gt $appJsPos -or $statsUiPos -gt $appJsPos -or $shelfUiPos -gt $appJsPos) {
+    throw 'sync-ui.js, stats-ui.js and shelf-ui.js must be loaded before app.js so app.js can initialize their explicit APIs.'
   }
   foreach ($requiredIndexId in @('shelf-search-modal', 'shelf-search-frame', 'stats-chart-metric')) {
     if ($indexHtmlForScripts -notmatch [regex]::Escape($requiredIndexId)) {
@@ -114,7 +129,7 @@ try {
     throw 'reader-cross-search-ui.js must be loaded after reader.js because it uses reader window globals and invokes open_book_at.'
   }
   $readerPageRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\reader_page.rs'), [System.Text.Encoding]::UTF8)
-  $readerModuleNames = @('reader-page-style.html', 'reader-page-layout.js', 'reader-page-annotations.js', 'reader-page-runtime.js')
+  $readerModuleNames = @('reader-page-style.html', 'reader-page-layout.js', 'reader-page-pagination.js', 'reader-page-measurement.js', 'reader-page-annotations.js', 'reader-page-runtime.js')
   foreach ($readerModuleName in $readerModuleNames) {
     $readerModuleNeedle = 'include_str!("../ui/' + $readerModuleName + '")'
     if ($readerPageRs -notmatch [regex]::Escape($readerModuleNeedle)) {
@@ -245,6 +260,7 @@ try {
     $_ -notmatch 'starts_with\("http://"\)' -and
     $_ -notmatch 'LEGACY_SYNC_HTTP_URL.*http://117\.72\.220\.69' -and
     $_ -notmatch 'normalize_sync_base\("http://' -and
+    $_ -notmatch 'src\\sync\.rs:\d+:\s*let url = format!\("http://\{address\}/sync-test"\);' -and
     $_ -notmatch 'http://(localhost|127\.0\.0\.1|\[::1\]|reader\.localhost|ipc\.localhost|tauri\.localhost)' -and
     $_ -notmatch 'http://<scheme>\.localhost' -and
     $_ -notmatch 'http://www\.w3\.org/'
@@ -260,8 +276,10 @@ try {
     if ($iframe.Value -notmatch '\bsandbox\s*=') { throw "iframe without sandbox in ui/reader.html: $($iframe.Value)" }
   }
   $mainRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\main.rs'), [System.Text.Encoding]::UTF8)
-  if ($mainRs -notmatch 'sanitize_mobi_html\(&raw\)') { throw 'MOBI render path must sanitize raw HTML before embedding.' }
-  if ($mainRs -notmatch 'sanitize_book_html\(&body\)' -or $mainRs -notmatch 'sanitize_book_html\(&md_to_html') {
+  $epubRuntimeRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\epub_runtime.rs'), [System.Text.Encoding]::UTF8)
+  $readerBackendRs = $mainRs + "`n" + $epubRuntimeRs
+  if ($readerBackendRs -notmatch 'sanitize_mobi_html\(&raw\)') { throw 'MOBI render path must sanitize raw HTML before embedding.' }
+  if ($readerBackendRs -notmatch 'sanitize_book_html\(&body\)' -or $readerBackendRs -notmatch 'sanitize_book_html\(&md_to_html') {
     throw 'EPUB and Markdown render paths must use the shared parser-based sanitizer.'
   }
   if ($readerJsText -notmatch 'ReaderMessageGuard\?\.validateEvent\(e, frame') {

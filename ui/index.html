@@ -299,11 +299,22 @@
     <div id="semantic-index-modal" class="modal">
       <div class="modal-card semantic-card">
         <div class="modal-head"><span>语义索引</span><button id="semantic-index-close" class="btn-plain">✕</button></div>
-        <p class="ai-note">语义模型用于理解查询含义；语义索引按图书建立向量；加速索引用于完整全书架检索；多中心画像用于冷启动时快速筛选且保留一本书里的多个局部主题。关闭本窗口后，正在运行的任务会继续在后台执行。</p>
+        <p class="ai-note">语义检索在本机离线运行。首次建立索引会较久，但可以暂停、续建；关闭本窗口后，正在运行的任务会继续在后台执行。</p>
         <section class="sem-section">
-          <div class="sem-section-head">
-            <div>
-              <div class="sem-title">语义模型</div>
+          <div id="sem-model-setup-title" class="sem-title">轻量语义检索 · BGE Small 中文</div>
+          <div id="sem-model-setup-copy" class="sem-model-copy">默认的轻量中文语义模型，适合大多数书库；下载、建索引和查询都更快，占用也更小。</div>
+          <div class="sem-model-controls">
+            <label for="sem-model-select">切换语义模型</label>
+            <select id="sem-model-select" class="sem-model-select" aria-label="切换语义模型">
+              <option value="bge-small-zh-v1.5">BGE Small 中文（默认，轻量）</option>
+              <option value="bge-large-zh-v1.5">BGE Large 中文（高精度）</option>
+            </select>
+          </div>
+        </section>
+        <section class="sem-section">
+            <div class="sem-section-head">
+              <div>
+              <div class="sem-title">当前模型状态</div>
               <div id="sem-model-meta" class="sem-meta">正在读取状态…</div>
             </div>
             <div class="sem-actions">
@@ -320,37 +331,41 @@
             </div>
             <div class="sem-actions">
               <button id="sem-vector-build" class="btn-plain" type="button">建立语义索引</button>
+              <button id="sem-vector-pause" class="btn-plain" type="button" hidden>暂停</button>
               <button id="sem-vector-delete" class="btn-plain danger-lite" type="button">删除</button>
             </div>
           </div>
           <div class="sem-progressbar"><span id="sem-vector-bar"></span></div>
         </section>
-        <section class="sem-section">
-          <div class="sem-section-head">
-            <div>
-              <div class="sem-title">加速索引</div>
-              <div id="sem-accel-meta" class="sem-meta">尚未建立</div>
+        <details class="sem-advanced-tools">
+          <summary>高级管理：加速索引、画像索引与单项删除</summary>
+          <section class="sem-section">
+            <div class="sem-section-head">
+              <div>
+                <div class="sem-title">加速索引</div>
+                <div id="sem-accel-meta" class="sem-meta">尚未建立</div>
+              </div>
+              <div class="sem-actions">
+                <button id="sem-accel-build" class="btn-plain" type="button">建立加速索引</button>
+                <button id="sem-accel-delete" class="btn-plain danger-lite" type="button">删除</button>
+              </div>
             </div>
-            <div class="sem-actions">
-              <button id="sem-accel-build" class="btn-plain" type="button">建立加速索引</button>
-              <button id="sem-accel-delete" class="btn-plain danger-lite" type="button">删除</button>
+            <div class="sem-progressbar"><span id="sem-accel-bar"></span></div>
+          </section>
+          <section class="sem-section">
+            <div class="sem-section-head">
+              <div>
+                <div class="sem-title">多中心画像索引</div>
+                <div id="sem-multi-meta" class="sem-meta">尚未建立</div>
+              </div>
+              <div class="sem-actions">
+                <button id="sem-multi-build" class="btn-plain" type="button">建立多中心画像</button>
+                <button id="sem-multi-delete" class="btn-plain danger-lite" type="button">删除</button>
+              </div>
             </div>
-          </div>
-          <div class="sem-progressbar"><span id="sem-accel-bar"></span></div>
-        </section>
-        <section class="sem-section">
-          <div class="sem-section-head">
-            <div>
-              <div class="sem-title">多中心画像索引</div>
-              <div id="sem-multi-meta" class="sem-meta">尚未建立</div>
-            </div>
-            <div class="sem-actions">
-              <button id="sem-multi-build" class="btn-plain" type="button">建立多中心画像</button>
-              <button id="sem-multi-delete" class="btn-plain danger-lite" type="button">删除</button>
-            </div>
-          </div>
-          <div class="sem-progressbar"><span id="sem-multi-bar"></span></div>
-        </section>
+            <div class="sem-progressbar"><span id="sem-multi-bar"></span></div>
+          </section>
+        </details>
         <div id="sem-status" class="ai-status" aria-live="polite"></div>
       </div>
     </div>
@@ -448,16 +463,13 @@
     </div>
     <script src="startup-perf.js"></script>
     <script src="titlebar.js"></script>
-    <script src="app.js"></script>
+    <script src="semantic-status-cache.js"></script>
+    <script src="semantic-ui.js"></script>
     <script src="sync-ui.js"></script>
-    <script src="shelf-ui.js"></script>
-    <script src="search-ui.js"></script>
     <script src="stats-ui.js"></script>
+    <script src="shelf-ui.js"></script>
+    <script src="app.js"></script>
+    <script src="search-ui.js"></script>
     <script src="debug-ui.js"></script>
   </body>
 </html>
-
-
-
-
-

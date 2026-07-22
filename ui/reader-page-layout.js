@@ -87,8 +87,7 @@ function beginTurnFx(dir,move){
   move();
   turnFxTimer=setTimeout(clearTurnFx,ms+40);
 }
-var measurer,chapterPages=[],measureDone=false,measureToken=0,measureTimer=null,pageSig='',measurePaused=false,scrollCaptureTimer=null;
-var fullBookMeasureEnabled=false;
+var scrollCaptureTimer=null;
 // WKWebView 对逐字 Range.getClientRects() 的成本远高于 Chromium；普通中文章节
 // 达到 16KB 就使用已有的批量几何路径，避免首章和每次翻页卡住。Windows 保持
 // 原来的 120KB 阈值，不改变 WebView2 已验证的精确排版行为。
@@ -100,14 +99,6 @@ function scrollGlyphSafePx(){return Math.max(4,Math.min(8,Math.ceil(lineHeightPx
 function scrollBottomSafePx(){return Math.max(4,Math.min(10,Math.ceil(lineHeightPx()*0.14)));}
 function scrollStartEpsilonPx(){return Math.max(16,Math.ceil(lineHeightPx()*0.65));}
 function perfLog(name,detail){}
-// 版式签名：窗口尺寸+字体/字号/行距/段距/字间距/页边距 都一致才能复用缓存的页数
-function isScrollMode(){return S.flowMode==='scroll';}
-function isDualPage(){return !isScrollMode()&&S.pageMode==='dual'&&window.innerWidth>=900;}
-function isLinePagedMode(){return false;}
-function usesLineBreakPaging(){return isScrollMode();}
-function columnsPerView(){return isDualPage()?2:1;}
-function columnPitch(){return window.innerWidth/columnsPerView();}
-function layoutSig(){return [window.innerWidth,viewportHeight(),S.styleMode,S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.pageMode,S.flowMode].join('|');}
 var CH=window.__CH__||0, ID=window.__ID__||0;
 var VC=null; // 虚拟章节列表 [{ch:spine序号, frag:锚点}]（按目录顺序），用于在大文件内细分逻辑章节
 // 算出“当前在第几个逻辑章节（0 基）”：取目录顺序中位置 <= 当前阅读位置的最后一条
@@ -179,156 +170,6 @@ function applyStyle(){
   c+='body.line-paged-mode .rr{height:auto !important;min-height:100vh !important;padding-top:0 !important;padding-bottom:0 !important;column-count:auto !important;column-width:auto !important;column-gap:normal !important;}';
   c+='body.line-paged-mode .rr-end{display:none !important;}';
   st.textContent=c;
-}
-function scrollBottomBuffer(){
-  if(!usesLineBreakPaging())return 0;
-  return mg(S.marginBottom)+Math.ceil(lineHeightPx()*0.9);
-}
-function scrollBottomMaskPx(){
-  return 0;
-}
-function scrollSafeBottomGapPx(){
-  if(!usesLineBreakPaging())return 0;
-  var raw=window.innerHeight||1;
-  var lh=Math.max(12,Math.ceil((parseFloat(S.fontSize)||18)*(parseFloat(S.lineHeight)||1.7)));
-  var topPad=Math.max(2,mg(S.marginTop));
-  var minGap=mg(S.marginBottom)+2;
-  var maxVisible=Math.max(1,raw-minGap);
-  var usable=Math.max(0,maxVisible-topPad);
-  var wholeLines=Math.max(1,Math.floor((usable-1)/lh));
-  var visible=Math.max(1,Math.min(maxVisible,topPad+wholeLines*lh));
-  return Math.max(minGap,Math.ceil(raw-visible));
-}
-function scrollViewportTopGapPx(){
-  return 0;
-}
-function linePagedViewportTopGapPx(){
-  return 0;
-}
-function lineBreakViewportTopGapPx(){
-  return 0;
-}
-function lineBreakTopPadPx(){
-  return 0;
-}
-function scrollViewportBottomGapPx(){
-  return 0;
-}
-function linePagedViewportBottomGapPx(){
-  return 0;
-}
-function lineBreakViewportBottomGapPx(){
-  return 0;
-}
-function viewportHeight(){
-  var h=document.documentElement.clientHeight||window.innerHeight||(pager&&pager.clientHeight)||1;
-  return Math.max(1,Math.floor(h));
-}
-function scrollPageBox(){
-  var raw=viewportHeight();
-  var top=mg(S.marginTop),bottom=mg(S.marginBottom),pl=pageLayout();
-  var usable=Math.max(1,raw-top-bottom);
-  var lh=lineHeightPx();
-  var whole=Math.max(1,Math.floor((usable-1)/lh));
-  var h=Math.max(1,Math.min(usable,whole*lh));
-  bottom=Math.max(0,raw-top-h);
-  return {top:top,bottom:bottom,left:pl.l,right:pl.r,height:h};
-}
-function pagedBoxHeight(){
-  var raw=viewportHeight();
-  var top=mg(S.marginTop),bottom=mg(S.marginBottom);
-  var usable=Math.max(1,raw-top-bottom);
-  var lh=lineHeightPx();
-  var whole=Math.max(1,Math.floor((usable-1)/lh));
-  var h=top+whole*lh+bottom;
-  return Math.max(1,Math.min(raw,Math.floor(h)));
-}
-function scrollVisualHeight(){
-  var sp=scrollPort();var raw=sp?(sp.clientHeight||scrollPageBox().height||window.innerHeight||1):(window.innerHeight||1);
-  return Math.max(1,Math.floor(raw));
-}
-function lineBreakPagerHeight(){
-  return Math.max(1,(window.innerHeight||1)-lineBreakViewportTopGapPx()-lineBreakViewportBottomGapPx());
-}
-function lineBreakVisibleHeight(){
-  return lineBreakPagerHeight();
-}
-// 页边距夹到非负且有上限：负内边距会破坏分栏排版（正文溢出/整体变形）
-function mg(v){v=parseInt(v,10);if(isNaN(v)||v<0)return 0;return v>240?240:v;}
-function pageLayout(){
-  var vw=window.innerWidth,l=mg(S.marginLeft),r=mg(S.marginRight);
-  if(isDualPage()){
-    var gap=Math.max(32,Math.min(56,Math.round(vw*0.024)));
-    var maxOuter=Math.max(0,vw-gap-320);
-    if(l+r>maxOuter&&l+r>0){
-      var s=maxOuter/(l+r);
-      l=Math.floor(l*s);r=Math.floor(r*s);
-    }
-    var colW=Math.max(120,Math.floor((vw-l-r-gap)/2));
-    var colPitch=colW+gap;
-    return {l:l,r:r,gap:gap,colW:colW,colPitch:colPitch,pageStep:colPitch*2};
-  }
-  var maxTotal=Math.max(0,vw-160);
-  if(l+r>maxTotal&&l+r>0){
-    var ss=maxTotal/(l+r);
-    l=Math.floor(l*ss);r=Math.floor(r*ss);
-  }
-  var singleW=Math.max(100,vw-l-r);
-  return {l:l,r:r,gap:l+r,colW:singleW,colPitch:vw,pageStep:vw};
-}
-function hMargins(){
-  return pageLayout();
-}
-function columnCountFromWidth(w,hasEnd){
-  if(usesLineBreakPaging()){
-    var h=measurer&&measurer.innerHTML?measurer.scrollHeight:(root?root.scrollHeight:0);
-    var step=lineBreakVisibleHeight();
-    return Math.max(1,Math.ceil(h/step));
-  }
-  var pl=pageLayout();
-  if(isDualPage()){
-    // w 是横向多列条带的 scrollWidth。双页模式下 UI 翻动的是 spread，
-    // 每个 spread 包含两个物理栏，所以页数 = 物理栏数 / 2 向上取整。
-    var physical=Math.max(1,Math.round((w-pl.l+pl.gap)/pl.colPitch));
-    if(hasEnd)physical=Math.max(1,physical-1);
-    return Math.max(1,Math.ceil(physical/2));
-  }
-  var count=Math.max(1,Math.round(w/pl.pageStep));
-  if(hasEnd)count=Math.max(1,count-1);
-  return count;
-}
-function contentRectExtent(el){
-  if(!el)return 0;
-  var base=el.getBoundingClientRect().left,maxRight=0;
-  function addRect(r){
-    if(!r||r.width<1||r.height<1)return;
-    maxRight=Math.max(maxRight,r.right-base);
-  }
-  var walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT,null),node;
-  while((node=walker.nextNode())){
-    if(!(node.nodeValue||'').trim())continue;
-    var range=document.createRange();
-    try{range.selectNodeContents(node);}catch(e){continue;}
-    var rects=range.getClientRects();
-    for(var i=0;i<rects.length;i++)addRect(rects[i]);
-  }
-  var els=el.querySelectorAll('img,svg,canvas,table,pre,blockquote,h1,h2,h3,h4,h5,h6,p,li');
-  for(var j=0;j<els.length;j++){
-    if(els[j].classList&&els[j].classList.contains('rr-end'))continue;
-    var rs=els[j].getClientRects();
-    for(var k=0;k<rs.length;k++)addRect(rs[k]);
-  }
-  return Math.max(0,maxRight);
-}
-function physicalPageCountFromContent(el){
-  var pl=pageLayout(),extent=contentRectExtent(el);
-  if(extent<2)return 1;
-  if(isDualPage())return Math.max(1,Math.ceil((extent+1)/pl.colPitch));
-  return Math.max(1,Math.ceil((extent+1)/pl.pageStep));
-}
-function pagedPageCountFromContent(el){
-  var physical=physicalPageCountFromContent(el);
-  return isDualPage()?Math.max(1,Math.ceil(physical/2)):physical;
 }
 function fastPagedPageCount(el){
   if(!el)return 1;
@@ -1964,7 +1805,10 @@ function report(){
     var chFrac=pagesInCh>1?pageInCh/(pagesInCh-1):0;
   }
   var progressPagesInCh=useScrollPagesForReport?Math.max(1,pagesInCh||1):((measureDone&&chapterPages[curCh])?chapterPages[curCh]:pagesInCh);
-  var progressPage=Math.round(chFrac*Math.max(0,progressPagesInCh-1));
+  // 双页展示一次翻两页，但右上角仍显示左页在整本书中的真实页码（1、3、5…）。
+  var progressPage=isDualPage()&&!useScrollPagesForReport
+    ?Math.min(Math.max(0,progressPagesInCh-1),pageInCh*2)
+    :Math.round(chFrac*Math.max(0,progressPagesInCh-1));
   var gP=0,gT=0;
   if(measureDone){
     for(var i=0;i<CH;i++)gT+=(useScrollPagesForReport&&i===curCh)?progressPagesInCh:(chapterPages[i]||1);
@@ -1989,84 +1833,6 @@ function captureAnchor(){
   if(anchorValid(anchor))curTopAnchor=anchor;
   return curTopAnchor;
 }
-function measureChapterPages(html){
-  if(!measurer)return 1;
-  var vw=window.innerWidth,vh=pagedBoxHeight(),pl=pageLayout();
-  if(isScrollMode()){
-    measurer.style.minHeight='';
-    measurer.style.height='auto';
-    measurer.style.width=pl.colW+'px';
-    measurer.style.columnWidth='auto';
-    measurer.style.columnCount='auto';
-    measurer.style.columnGap='normal';
-    measurer.innerHTML=html;
-    var contentH=Math.max(measurer.scrollHeight||0,Math.ceil(measurer.getBoundingClientRect().height||0));
-    var pageH=Math.max(1,scrollPageBox().height||scrollVisualHeight()||viewportHeight());
-    var step=Math.max(1,pageH-Math.max(2,Math.ceil(lineHeightPx()*0.08)));
-    return Math.max(1,Math.ceil(contentH/step));
-  }
-  if(isDualPage()){
-    measurer.style.minHeight='';
-    measurer.style.height=vh+'px';
-    measurer.style.width=pl.colW+'px';
-    measurer.style.columnWidth=pl.colW+'px';
-    measurer.style.columnCount='auto';
-    measurer.style.columnGap=pl.gap+'px';
-  }else{
-    measurer.style.minHeight='';
-    measurer.style.height=vh+'px';
-    measurer.style.width=vw+'px';
-    measurer.style.columnWidth=pl.colW+'px';
-    measurer.style.columnCount='auto';
-    measurer.style.columnGap=pl.gap+'px';
-  }
-  measurer.innerHTML=html;
-  return physicalPageCountFromContent(measurer);
-}
-function measureAll(){
-  if(!fullBookMeasureEnabled)return;
-  if(measurePaused){perfLog('measure.skip','paused-before-start');scheduleMeasure(900);return;}
-  if(measureDone&&pageSig===layoutSig())return; // 版式没变、已有页数 → 不重算
-  var tok=++measureToken;measureDone=false;chapterPages=new Array(CH).fill(0);
-  var i=0,tAll=performance.now();
-  perfLog('measure.start','chapters='+CH);
-  function step(){
-    if(tok!==measureToken)return;
-    if(measurePaused){perfLog('measure.pause','chapter='+i);scheduleMeasure(900);return;}
-    if(i>=CH){if(measurer)measurer.innerHTML='';measureDone=true;pageSig=layoutSig();report();
-      perfLog('measure.end','chapters='+CH+' dt='+(performance.now()-tAll).toFixed(1)+'ms');
-      parent.postMessage({measured:{sig:pageSig,pages:chapterPages.slice()}},'*');return;} // 测完落盘缓存
-    var tStep=performance.now(),idx=i;
-    fetch(location.origin+'/chapter/'+ID+'/'+i).then(function(r){return r.json();}).then(function(d){
-      if(tok!==measureToken)return;if(measurePaused){perfLog('measure.pause','chapter='+idx+' after-fetch');scheduleMeasure(900);return;}chapterPages[i]=measureChapterPages(d.body||'');
-      var dt=performance.now()-tStep;if(dt>40)perfLog('measure.chapter','chapter='+idx+' dt='+dt.toFixed(1)+'ms html='+(d.body||'').length);
-      i++;setTimeout(step,16);
-    }).catch(function(){if(tok!==measureToken)return;if(measurePaused){perfLog('measure.pause','chapter='+idx+' after-error');scheduleMeasure(900);return;}chapterPages[i]=1;i++;setTimeout(step,16);});
-  }
-  step();
-}
-// 外壳送来缓存的页数：版式签名一致就直接采用，跳过测量
-function applyPageCache(pc){
-  if(!pc||!pc.pages||pc.pages.length!==CH)return;
-  if(pc.sig!==layoutSig())return; // 版式变了，缓存作废，照常测量
-  measureToken++; // 作废可能在跑的测量
-  chapterPages=pc.pages.slice();measureDone=true;pageSig=pc.sig;
-  if(measureTimer){clearTimeout(measureTimer);measureTimer=null;}
-  report();
-}
-function invalidateMeasure(){measureToken++;measureDone=false;pageSig='';chapterPages=new Array(CH).fill(0);}
-function scheduleMeasure(delay){if(!fullBookMeasureEnabled)return;if(measureTimer)clearTimeout(measureTimer);measureTimer=setTimeout(measureAll,delay||1200);}
-function setMeasurePaused(paused){
-  measurePaused=!!paused;
-  perfLog('measure.paused',measurePaused?1:0);
-  if(measurePaused){
-    measureToken++;
-    if(measureTimer){clearTimeout(measureTimer);measureTimer=null;}
-    if(measurer)measurer.innerHTML='';
-  }else if(!measureDone){
-    scheduleMeasure(1200);
-  }
-}
 // 滚动条按“全书页位置”精确定位：已测量完→映射到具体章+页（同章直接翻页，平滑；跨章才加载）；
 // 未测量完→退回按章节粗跳。这样点滑块附近不再原地跳，拖动也能平滑跟随。
 function gotoGlobalFrac(frac){
@@ -2075,7 +1841,8 @@ function gotoGlobalFrac(frac){
     var gt=0,i;for(i=0;i<CH;i++)gt+=chapterPages[i]||1;if(gt<1)gt=1;
     var gp=Math.round(frac*(gt-1)),acc=0,tc=CH-1,tp=0;
     for(i=0;i<CH;i++){var cp=chapterPages[i]||1;if(gp<acc+cp){tc=i;tp=gp-acc;break;}acc+=cp;}
-    if(tc===curCh)gotoPage(tp);else showChapter(tc,tp);
+    var displayPage=isDualPage()?Math.floor(tp/2):tp;
+    if(tc===curCh)gotoPage(displayPage);else showChapter(tc,displayPage);
   }else{
     showChapter(Math.min(CH-1,Math.floor(frac*CH)),'start');
   }

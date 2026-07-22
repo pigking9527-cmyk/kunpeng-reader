@@ -1,5 +1,5 @@
 // 主窗口搜索框、搜索历史和全书架正文检索入口。
-// 书架过滤仍由 app.js 的 searchQuery/currentList/applyView 负责。
+// 书架过滤状态通过 ReaderShelfUI API 读写。
 // ---- 搜索 + 历史记录 ----
 const historyEl = document.getElementById("search-history");
 let history = [];
@@ -50,8 +50,7 @@ function renderHistory() {
       if (document.getElementById("shelf-search-chk").checked) {
         runShelfSearch(q);
       } else {
-        searchQuery = q.toLowerCase();
-        applyView();
+        window.ReaderShelfUI.setSearchQuery(q);
         hideHistory();
       }
     });
@@ -84,8 +83,7 @@ function clearSearchInput() {
   if (shelfChk && shelfChk.checked) {
     showHistory();
   } else {
-    searchQuery = "";
-    applyView();
+    window.ReaderShelfUI.setSearchQuery("");
     showHistory();
   }
   searchInput.focus();
@@ -93,7 +91,7 @@ function clearSearchInput() {
 
 function closeSearch(clear) {
   const hadInput = !!searchInput.value.trim();
-  const hadQuery = !!searchQuery;
+  const hadQuery = !!window.ReaderShelfUI.getSearchQuery();
   const wasOpen = searchWrap.classList.contains("open");
   if (hadInput) addHistory(searchInput.value); // 记下这次搜索
   hideHistory();
@@ -103,15 +101,15 @@ function closeSearch(clear) {
   if (clear) {
     searchInput.value = "";
     updateSearchClear();
-    searchQuery = "";
-    if (hadQuery || (wasOpen && hadInput)) applyView();
+    window.ReaderShelfUI.setSearchQuery("");
+    if (!hadQuery && wasOpen && hadInput) window.ReaderShelfUI.refresh();
   }
 }
 document.getElementById("search-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
-  closeAccountPanel();
+  window.ReaderSyncUI.close();
   const open = !searchWrap.classList.contains("open");
   searchWrap.classList.toggle("open", open);
   syncSearchTabStops();
@@ -142,7 +140,7 @@ searchWrap.addEventListener("mouseenter", () => {
   cancelSearchCollapse();
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
-  closeAccountPanel();
+  window.ReaderSyncUI.close();
   searchWrap.classList.add("open");
   syncSearchTabStops();
   showHistory();
@@ -180,13 +178,11 @@ shelfChk.addEventListener("change", () => {
     if (term) {
       runShelfSearch(term);
     } else {
-      searchQuery = "";
-      applyView();
+      window.ReaderShelfUI.setSearchQuery("");
       showHistory();
     }
   } else {
-    searchQuery = term.toLowerCase();
-    applyView();
+    window.ReaderShelfUI.setSearchQuery(term);
   }
   searchInput.focus();
 });
@@ -195,15 +191,21 @@ function runShelfSearch(term) {
   if (!term) return;
   addHistory(term);
   hideHistory();
-  const ids = selected.size ? [...selected] : null; // 有选中 → 只搜这几本；否则全部
+  const selectedIds = window.ReaderShelfUI.getSelectedIds();
+  const ids = selectedIds.length ? selectedIds : null; // 有选中 → 只搜这几本；否则全部
   const idsCsv = ids ? ids.join(",") : "";
   shelfSearchFrame.src = "search.html?q=" + encodeURIComponent(term) + "&ids=" + encodeURIComponent(idsCsv);
   shelfSearchModal.classList.add("show");
-  closeSearch(false);
+  // 全文检索页已经接管了查询词。主窗口不应保留它，否则关闭结果页后再次
+  // 展开搜索框会出现陈旧关键词，并让“点击空白处收起”的规则失效。
+  closeSearch(true);
 }
 
 function closeShelfSearchModal() {
   shelfSearchModal.classList.remove("show");
+  // 卸载结果页，避免下次打开时短暂显示上一轮搜索结果或保留其滚动/焦点状态。
+  shelfSearchFrame.removeAttribute("src");
+  closeSearch(true);
 }
 shelfSearchClose.addEventListener("click", closeShelfSearchModal);
 shelfSearchModal.addEventListener("click", (e) => {
@@ -224,8 +226,7 @@ searchInput.addEventListener("input", () => {
     showHistory();
     return; // 书架检索模式：输入时不过滤书架
   }
-  searchQuery = searchInput.value.trim().toLowerCase();
-  applyView();
+  window.ReaderShelfUI.setSearchQuery(searchInput.value);
   if (searchInput.value.trim()) hideHistory();
   else showHistory();
 });

@@ -1,6 +1,6 @@
 use crate::tts_core::{build_edge_ssml, frequent_words, sha256_upper, word_cache_key, EDGE_TOKEN};
 use crate::AppState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 #[derive(Serialize)]
@@ -26,8 +26,20 @@ fn sec_ms_gec() -> String {
     sha256_upper(&format!("{ticks}{EDGE_TOKEN}"))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EdgeTtsRequest {
+    text: String,
+    voice: String,
+    rate: i32,
+}
+
 #[tauri::command]
-pub(crate) async fn edge_tts(text: String, voice: String, rate: i32) -> Result<TtsAudio, String> {
+pub(crate) async fn edge_tts(request: EdgeTtsRequest) -> Result<TtsAudio, String> {
+    edge_tts_inner(request.text, request.voice, request.rate).await
+}
+
+async fn edge_tts_inner(text: String, voice: String, rate: i32) -> Result<TtsAudio, String> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::Message;
@@ -180,7 +192,7 @@ pub(crate) async fn word_tts(text: String, cache: bool) -> Result<TtsAudio, Stri
         }
     }
 
-    let result = edge_tts(word.to_string(), "en-US-JennyNeural".into(), 0).await?;
+    let result = edge_tts_inner(word.to_string(), "en-US-JennyNeural".into(), 0).await?;
     if cache {
         if let Some(parent) = cache_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("创建语音缓存目录失败：{e}"))?;
@@ -361,7 +373,7 @@ pub(crate) fn start_word_tts_pack(app: tauri::AppHandle) -> Result<(), String> {
                     pack.message = "已暂停".into();
                     return;
                 }
-                match edge_tts(word.to_string(), "en-US-JennyNeural".into(), 0).await {
+                match edge_tts_inner(word.to_string(), "en-US-JennyNeural".into(), 0).await {
                     Ok(result) => {
                         if let Some(parent) = path.parent() {
                             let _ = std::fs::create_dir_all(parent);
@@ -397,4 +409,22 @@ pub(crate) fn start_word_tts_pack(app: tauri::AppHandle) -> Result<(), String> {
         pack.message = "已完成".into();
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_tts_request_deserializes_as_one_object() {
+        let request: EdgeTtsRequest = serde_json::from_value(serde_json::json!({
+            "text": "你好",
+            "voice": "zh-CN-XiaoxiaoNeural",
+            "rate": 15
+        }))
+        .unwrap();
+        assert_eq!(request.text, "你好");
+        assert_eq!(request.voice, "zh-CN-XiaoxiaoNeural");
+        assert_eq!(request.rate, 15);
+    }
 }

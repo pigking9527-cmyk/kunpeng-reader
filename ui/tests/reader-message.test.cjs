@@ -55,3 +55,12 @@ test("download images require an allowlisted data URL and size bound", () => {
     downloadImage: { name: "x", dataUrl: "data:text/html;base64,AAAA" },
   }), false);
 });
+
+test("page-count caches are allowlisted with bounded numeric contents", () => {
+  assert.equal(guard.validateData({
+    pageCache: { sig: "1024|700|18", pages: [4, 7, 2], complete: true },
+  }), true);
+  assert.equal(guard.validateData({
+    pageCache: { sig: "x", pages: [1, -1], complete: false },
+  }), false);
+});

@@ -6,6 +6,8 @@ const vm = require("node:vm");
 
 const source = [
   "reader-page-layout.js",
+  "reader-page-pagination.js",
+  "reader-page-measurement.js",
   "reader-page-annotations.js",
   "reader-page-runtime.js",
 ].map((name) => fs.readFileSync(path.join(__dirname, "..", name), "utf8")).join("");
@@ -23,6 +25,23 @@ test("large chapter layout threshold selects only large HTML", () => {
   vm.runInNewContext(snippet[0], macContext);
   assert.equal(macContext.largeChapterFastLayout("x".repeat(16 * 1024 - 1)), false);
   assert.equal(macContext.largeChapterFastLayout("x".repeat(16 * 1024)), true);
+});
+
+test("whole-book page counts are enabled and resume from incremental cache", () => {
+  assert.match(source, /var fullBookMeasureEnabled=true;/);
+  assert.match(source, /function pageCountSig\(\)\{[\s\S]*?S\.flowMode/);
+  const pageCountSig = source.match(/function pageCountSig\(\)\{.*?\}/s)?.[0] || "";
+  assert.doesNotMatch(pageCountSig, /S\.pageMode/);
+  assert.match(source, /function pageCountFromMeasuredContent\(el\)/);
+  assert.match(source, /return pageCountFromMeasuredContent\(measurer\);/);
+  assert.match(source, /var progressPage=isDualPage\(\)&&!useScrollPagesForReport[\s\S]*?pageInCh\*2/);
+  assert.match(source, /var displayPage=isDualPage\(\)\?Math\.floor\(tp\/2\):tp/);
+  assert.match(source, /function publishPageCache\(complete\)/);
+  assert.match(source, /while\(i<CH&&chapterPages\[i\]>0\)i\+\+;/);
+  assert.match(source, /if\(i%4===0\)publishPageCache\(false\)/);
+  assert.match(source, /publishPageCache\(false\);\s*measureToken\+\+;/);
+  assert.match(source, /measureDone=!!pc\.complete\|\|chapterPages\.every/);
+  assert.match(source, /if\(!measureDone\)scheduleMeasure\(60\)/);
 });
 
 test("large chapters use batched geometry and skip repeated exact layout", () => {

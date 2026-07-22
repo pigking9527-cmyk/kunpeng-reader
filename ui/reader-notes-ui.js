@@ -168,14 +168,16 @@ function renderHighlights() {
 }
 async function addHighlight(o, note, openNote, openCorrect) {
   highlights = await invoke("add_highlight", {
-    chapter: o.chapter,
-    start: o.start,
-    end: o.end,
-    text: o.text || "",
-    context: o.context || "",
-    rects: o.rects || "",
-    color: "y",
-    note: note || "",
+    request: {
+      chapter: o.chapter,
+      start: o.start,
+      end: o.end,
+      text: o.text || "",
+      context: o.context || "",
+      rects: o.rects || "",
+      color: "y",
+      note: note || "",
+    },
   });
   sendToPage({ highlights }); // 让合并页重绘高亮（带正确的下标）
   if (openNote) openAnnotations(highlights.length - 1); // 批注：打开大批注页
@@ -186,14 +188,16 @@ async function addCorrectedHighlight(o, correctedText) {
   const text = (correctedText || "").trim();
   if (!text) return;
   highlights = await invoke("add_highlight", {
-    chapter: o.chapter,
-    start: o.start,
-    end: o.end,
-    text: o.text || "",
-    context: o.context || "",
-    rects: o.rects || "",
-    color: "y",
-    note: "",
+    request: {
+      chapter: o.chapter,
+      start: o.start,
+      end: o.end,
+      text: o.text || "",
+      context: o.context || "",
+      rects: o.rects || "",
+      color: "y",
+      note: "",
+    },
   });
   const idx = highlights.length - 1;
   highlights = await invoke("set_highlight_text", { index: idx, text });

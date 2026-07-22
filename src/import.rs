@@ -1,5 +1,10 @@
 use crate::import_core::{filter_new_book_paths, is_supported_book_path, normalize_import_dirs};
-use crate::{book, data_migration, set_thread_background, snapshot, AppState, BookDto};
+use crate::{
+    background_tasks::{BackgroundTaskKind, TaskControlSignal, TaskRunGuard},
+    book, data_migration,
+    library_commands::{snapshot, BookDto},
+    AppState,
+};
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 #[derive(Serialize, Clone)]
@@ -9,6 +14,31 @@ struct BookImportProgress {
     added: usize,
     total: usize,
     current: String,
+}
+
+const IMPORT_PAUSED: &str = "__import_paused__";
+const IMPORT_CANCELLED: &str = "__import_cancelled__";
+
+fn import_control(task: &TaskRunGuard) -> Result<(), String> {
+    match task.control_signal() {
+        TaskControlSignal::Pause => Err(IMPORT_PAUSED.into()),
+        TaskControlSignal::Cancel => Err(IMPORT_CANCELLED.into()),
+        TaskControlSignal::Continue => Ok(()),
+    }
+}
+
+fn checkpoint_import(
+    task: &TaskRunGuard,
+    processed: usize,
+    total: usize,
+    current: &str,
+) -> Result<(), String> {
+    task.checkpoint(
+        processed as u64,
+        total as u64,
+        current.to_string(),
+        serde_json::json!({ "processed": processed, "current": current }).to_string(),
+    )
 }
 
 fn emit_book_import_progress(
@@ -36,67 +66,90 @@ pub(crate) async fn add_books(
     app: tauri::AppHandle,
     paths: Vec<String>,
 ) -> Result<Vec<BookDto>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        set_thread_background(true);
-        let state = app.state::<AppState>();
-        let total = paths.len();
-        let mut processed = 0usize;
-        let mut added = 0usize;
-        let mut changed = false;
-        let mut save_after = 0usize;
-        emit_book_import_progress(&app, "start", 0, 0, total, "");
+    let task_handle = app
+        .state::<AppState>()
+        .background_tasks
+        .enqueue(BackgroundTaskKind::Import, "导入图书");
+    task_handle
+        .run_blocking(move |task| -> Result<Vec<BookDto>, String> {
+            let state = app.state::<AppState>();
+            let total = paths.len();
+            let mut processed = 0usize;
+            let mut added = 0usize;
+            let mut changed = false;
+            let mut save_after = 0usize;
+            emit_book_import_progress(&app, "start", 0, 0, total, "");
 
-        for p in paths {
-            processed += 1;
-            let path = std::path::PathBuf::from(&p);
-            let current = path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| p.clone());
-
-            let exact_exists = {
-                let lib = state.library.lock().unwrap();
-                lib.books.iter().any(|b| b.path == path)
-            };
-            if exact_exists {
-                emit_book_import_progress(&app, "import", processed, added, total, &current);
-                continue;
-            }
-
-            let mut prepared = book::Book::prepare(path.clone());
-            // A remote state can arrive before this file exists locally. Match
-            // it by full content hash and restore progress during the import.
-            if let Err(error) =
-                data_migration::apply_pending_book_state(state.inner(), &mut prepared)
-            {
-                eprintln!("[sync] apply pending book state failed: {error}");
-            }
-            let inserted = {
-                let mut lib = state.library.lock().unwrap();
-                lib.add_prepared(prepared)
-            };
-            if inserted {
-                changed = true;
-                added += 1;
-                save_after += 1;
-                if save_after >= 50 {
-                    crate::report_save_error("书架", state.library.lock().unwrap().save());
-                    save_after = 0;
+            for p in paths {
+                match task.control_signal() {
+                    TaskControlSignal::Pause => {
+                        emit_book_import_progress(&app, "paused", processed, added, total, "");
+                        let books = snapshot(&state.library.lock().unwrap());
+                        let _ = task.pause();
+                        return Ok(books);
+                    }
+                    TaskControlSignal::Cancel => {
+                        emit_book_import_progress(&app, "cancelled", processed, added, total, "");
+                        let books = snapshot(&state.library.lock().unwrap());
+                        let _ = task.cancel();
+                        return Ok(books);
+                    }
+                    TaskControlSignal::Continue => {}
                 }
-            }
-            emit_book_import_progress(&app, "import", processed, added, total, &current);
-        }
+                processed += 1;
+                let path = std::path::PathBuf::from(&p);
+                let current = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.clone());
+                // Import is intentionally not resumable across process restarts;
+                // publish progress without advertising a durable checkpoint.
+                task.update_progress(processed as u64, total as u64, current.clone())?;
 
-        if changed {
-            crate::report_save_error("书架", state.library.lock().unwrap().save());
-        }
-        emit_book_import_progress(&app, "done", processed, added, total, "");
-        let books = snapshot(&state.library.lock().unwrap());
-        set_thread_background(false);
-        books
-    })
-    .await
-    .map_err(|e| e.to_string())
+                let exact_exists = {
+                    let lib = state.library.lock().unwrap();
+                    lib.books.iter().any(|b| b.path == path)
+                };
+                if exact_exists {
+                    checkpoint_import(&task, processed, total, &current)?;
+                    emit_book_import_progress(&app, "import", processed, added, total, &current);
+                    continue;
+                }
+
+                let mut prepared = book::Book::prepare(path.clone());
+                // A remote state can arrive before this file exists locally. Match
+                // it by full content hash and restore progress during the import.
+                if let Err(error) =
+                    data_migration::apply_pending_book_state(state.inner(), &mut prepared)
+                {
+                    eprintln!("[sync] apply pending book state failed: {error}");
+                }
+                let inserted = {
+                    let mut lib = state.library.lock().unwrap();
+                    lib.add_prepared(prepared)
+                };
+                if inserted {
+                    changed = true;
+                    added += 1;
+                    save_after += 1;
+                    if save_after >= 50 {
+                        crate::report_save_error("书架", state.library.lock().unwrap().save());
+                        save_after = 0;
+                    }
+                }
+                checkpoint_import(&task, processed, total, &current)?;
+                emit_book_import_progress(&app, "import", processed, added, total, &current);
+            }
+
+            if changed {
+                crate::report_save_error("书架", state.library.lock().unwrap().save());
+            }
+            emit_book_import_progress(&app, "done", processed, added, total, "");
+            let books = snapshot(&state.library.lock().unwrap());
+            let _ = task.complete();
+            Ok(books)
+        })
+        .await
 }
 
 // ---- 自动导入目录 ----
@@ -107,21 +160,29 @@ pub(crate) struct AutoImportCfg {
 }
 
 /// 递归扫描目录里支持的电子书文件（限深 8 层，防符号链接/超深目录）。
-fn scan_dir_books(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: u32) {
+fn scan_dir_books(
+    dir: &std::path::Path,
+    out: &mut Vec<std::path::PathBuf>,
+    depth: u32,
+    task: &TaskRunGuard,
+) -> Result<(), String> {
+    import_control(task)?;
     if depth > 8 {
-        return;
+        return Ok(());
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
+        return Ok(());
     };
     for ent in rd.flatten() {
+        import_control(task)?;
         let p = ent.path();
         if p.is_dir() {
-            scan_dir_books(&p, out, depth + 1);
+            scan_dir_books(&p, out, depth + 1, task)?;
         } else if is_supported_book_path(&p) {
             out.push(p);
         }
     }
+    Ok(())
 }
 
 #[derive(Serialize, Clone)]
@@ -161,13 +222,17 @@ fn emit_auto_import_progress(
 /// 把自动导入目录里的新书加入书架（已存在的由 lib.add 去重）。返回是否有新增。
 /// 关键：扫描目录、过滤已知书都在锁外做，绝不在持锁状态下遍历整个目录，
 /// 否则封面等请求会因为抢不到书架锁而一直加载不出来（稳态下根本不取写锁）。
-fn run_auto_import_with_progress(app: Option<&tauri::AppHandle>, state: &AppState) -> bool {
+fn run_auto_import_with_progress(
+    app: Option<&tauri::AppHandle>,
+    state: &AppState,
+    task: &TaskRunGuard,
+) -> Result<bool, String> {
     use std::collections::HashSet;
     // 1) 短暂持锁，取出目录列表 + 已知书的路径集合
     let (dirs, known): (Vec<String>, HashSet<std::path::PathBuf>) = {
         let lib = state.library.lock().unwrap();
         if !lib.auto_import_enabled {
-            return false;
+            return Ok(false);
         }
         (
             lib.auto_import_dirs.clone(),
@@ -175,12 +240,12 @@ fn run_auto_import_with_progress(app: Option<&tauri::AppHandle>, state: &AppStat
         )
     };
     if dirs.is_empty() {
-        return false;
+        return Ok(false);
     }
     // 2) 锁外扫描目录
     let mut found = Vec::new();
     for d in &dirs {
-        scan_dir_books(std::path::Path::new(d), &mut found, 0);
+        scan_dir_books(std::path::Path::new(d), &mut found, 0, task)?;
         emit_auto_import_progress(app, "scan", found.len(), 0, 0, 0, d);
     }
     // 3) 锁外过滤掉路径已在书架里的（稳态：没有新文件 → 候选为空，下面整段都不取写锁）
@@ -188,13 +253,14 @@ fn run_auto_import_with_progress(app: Option<&tauri::AppHandle>, state: &AppStat
     let total = candidates.len();
     if total == 0 {
         emit_auto_import_progress(app, "done", found.len(), 0, 0, 0, "");
-        return false;
+        return Ok(false);
     }
     // 4) 只为真正的新书逐本短暂持锁，给封面等请求留出穿插的间隙
     let mut changed = false;
     let mut processed = 0usize;
     let mut added = 0usize;
     for p in candidates {
+        import_control(task)?;
         processed += 1;
         let current = p
             .file_name()
@@ -223,12 +289,13 @@ fn run_auto_import_with_progress(app: Option<&tauri::AppHandle>, state: &AppStat
                 &current,
             );
         }
+        checkpoint_import(task, processed, total, &current)?;
     }
     if changed {
         crate::report_save_error("书架", state.library.lock().unwrap().save());
     }
     emit_auto_import_progress(app, "done", found.len(), processed, added, total, "");
-    changed
+    Ok(changed)
 }
 
 #[tauri::command]
@@ -264,12 +331,34 @@ pub(crate) async fn set_auto_import(
 /// 启动/回到书架时调用：若开启自动导入则扫描目录，返回最新书单。
 #[tauri::command]
 pub(crate) async fn auto_import_scan(app: tauri::AppHandle) -> Result<Vec<BookDto>, ()> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        run_auto_import_with_progress(Some(&app), state.inner());
-        let books = snapshot(&state.library.lock().unwrap());
-        books
-    })
-    .await
-    .map_err(|_| ())
+    let task_handle = app
+        .state::<AppState>()
+        .background_tasks
+        .enqueue(BackgroundTaskKind::Import, "自动扫描导入目录");
+    task_handle
+        .run_blocking(move |task| {
+            let state = app.state::<AppState>();
+            let result = run_auto_import_with_progress(Some(&app), state.inner(), &task);
+            let books = snapshot(&state.library.lock().unwrap());
+            match result {
+                Ok(_) => {
+                    let _ = task.complete();
+                    Ok(books)
+                }
+                Err(error) if error == IMPORT_PAUSED => {
+                    let _ = task.pause();
+                    Ok(books)
+                }
+                Err(error) if error == IMPORT_CANCELLED => {
+                    let _ = task.cancel();
+                    Ok(books)
+                }
+                Err(error) => {
+                    let _ = task.fail(error.clone());
+                    Err(error)
+                }
+            }
+        })
+        .await
+        .map_err(|_| ())
 }

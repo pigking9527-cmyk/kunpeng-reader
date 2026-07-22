@@ -100,6 +100,7 @@ window.addEventListener('message',function(e){
   if(e.data.windowDragging!==undefined){setMeasurePaused(!!e.data.windowDragging);}
   if(e.data.settings){
     var prevFlow=S.flowMode,prevPageMode=S.pageMode;
+    var prevPageCountSig=pageCountSig();
     var imageAnchor=captureImageVisualAnchor();
     if(prevFlow==='scroll'){
       scrollPagedView=false;
@@ -116,7 +117,8 @@ window.addEventListener('message',function(e){
     if(flowChanged||pageModeChanged)cancelPagedImagePreview();
     if(flowChanged&&isScrollMode())scrollPagedView=!!imageAnchor;
     parent.postMessage({layoutBusy:1},'*');
-    invalidateMeasure();
+    // 单页/双页共用同一套总页数；字体、边距、窗口或滚动模式改变才作废缓存。
+    if(prevPageCountSig!==pageCountSig())invalidateMeasure();
     // 滚动容器已经按阅读边距内缩；恢复锚点时使用容器内偏移，避免重复叠加 marginTop。
     relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode()&&!imageAnchor,scrollOffset:8,modeSwitch:flowChanged||pageModeChanged});
     if(flowChanged||pageModeChanged)scheduleImageVisualAnchorRestore(imageAnchor);

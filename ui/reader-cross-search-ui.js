@@ -169,7 +169,13 @@ function renderCrossSearch(results) {
       item.innerHTML = '<div class="cross-hit-line"><span class="cross-ch">第' + ((hit.chapter || 0) + 1) + "章</span>" + scoreHtml + crossHighlight(hit.snippet || "", crossTerm) + "</div>";
       item.addEventListener("click", () => {
         crossStoreReturnTarget(bookId, hit.chapter || 0);
-        invoke("open_book_at", { id: String(book.book_id || ""), chapter: hit.chapter || 0, term: crossMode === "semantic" ? "" : crossTerm }).catch(() => {});
+        invoke("open_book_at", {
+          request: {
+            id: String(book.book_id || ""),
+            chapter: hit.chapter || 0,
+            term: crossMode === "semantic" ? "" : crossTerm,
+          },
+        }).catch(() => {});
       });
       group.appendChild(item);
     });
@@ -209,11 +215,17 @@ async function runCrossSearch(term) {
   try {
     // 无模型时由后端立即返回明确提示；不要吞掉错误后再次发起语义检索，
     // 否则会重复触发耗时的模型初始化并让界面看起来一直在加载。
-    if (crossMode === "semantic") await invoke("prepare_semantic_search");
-    const results = crossMode === "semantic"
+    const response = crossMode === "semantic"
       ? await invoke("semantic_search", { query: crossTerm, ids: null })
       : await invoke("shelf_search", { term: crossTerm, ids: null });
-    if (seq === crossSeq) renderCrossSearch(results);
+    if (seq === crossSeq) {
+      const results = Array.isArray(response) ? response : (response?.results || []);
+      renderCrossSearch(results);
+      const pendingBooks = Array.isArray(response) ? 0 : Math.max(0, Number(response?.pendingBooks || 0));
+      if (crossMode === "keyword" && pendingBooks) {
+        crossStatus.textContent += "；" + pendingBooks + " 本正在后台建立全文索引";
+      }
+    }
   } catch (e) {
     if (seq !== crossSeq) return;
     crossStatus.textContent = "检索失败";
@@ -243,6 +255,7 @@ function openSemanticSearch(term) {
   crossCollapsed = new Set();
   window.pauseReadTracking?.("semantic-search");
   ReaderShell.setOverlay(ReaderShell.OVERLAY.CROSS_SEARCH, true);
+  invoke("warm_semantic_model").catch(() => {});
   crossInput.focus();
   crossInput.select();
   updateCrossModeUi();
@@ -272,9 +285,11 @@ if (crossReturn) {
     }));
     closeCrossSearch();
     invoke("open_book_at", {
-      id: String(state.originBookId),
-      chapter: Number(state.originChapter || 0),
-      term: "",
+      request: {
+        id: String(state.originBookId),
+        chapter: Number(state.originChapter || 0),
+        term: "",
+      },
     }).catch(() => {});
   });
   setTimeout(updateCrossReturnButton, 400);

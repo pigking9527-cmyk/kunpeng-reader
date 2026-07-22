@@ -3,7 +3,7 @@ use crate::stats_core::{
     aggregate_stats_range, summarize_books, BookStatInput, HighlightStatInput, ReadBucket,
     StatsRange, StatsSummary,
 };
-use crate::{reader_window_id, AppState};
+use crate::{window_commands::reader_window_id, AppState};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;

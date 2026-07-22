@@ -332,7 +332,15 @@ def is_newer(incoming, existing):
     if incoming_updated > int(existing["updated_at"]):
         return True
     if incoming_updated == int(existing["updated_at"]):
-        return incoming_version > int(existing["sync_version"])
+        existing_version = int(existing["sync_version"])
+        if incoming_version != existing_version:
+            return incoming_version > existing_version
+        # Millisecond clocks and offline edits can produce an exact timestamp
+        # and version tie.  Use the same stable device-id tiebreaker as the
+        # desktop client so arrival order cannot leave clients diverged.
+        incoming_device = str(incoming.get("device_id", "") or "")
+        existing_device = str(existing["device_id"] or "")
+        return incoming_device > existing_device
     return False
 
 
@@ -346,7 +354,15 @@ class PayloadTooLarge(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ReaderSyncAPI/0.3"
+    server_version = "ReaderSyncAPI/0.5"
+
+    def begin_push_transaction(self, conn):
+        # `with conn` only commits/rolls back an already-open transaction; it
+        # does not acquire a write lock on entry.  Take the write reservation
+        # before reading usage or the current entity so concurrent requests
+        # cannot both decide against the same stale row and let the later
+        # writer overwrite the deterministic conflict winner.
+        conn.execute("BEGIN IMMEDIATE")
 
     def log_message(self, fmt, *args):
         print(
@@ -435,7 +451,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.send_json(
                     200,
-                    {"ok": True, "schema_version": 2, "server_time": now_ms(), "service": "reader-sync"},
+                    {
+                        "ok": True,
+                        "schema_version": 2,
+                        "api_version": "0.5",
+                        "server_time": now_ms(),
+                        "service": "reader-sync",
+                    },
                 )
                 return
             if parsed.path == "/auth/me":
@@ -633,35 +655,57 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return
         default_device_id = str(body.get("device_id", "") or "")[:128]
+        capabilities = body.get("capabilities")
+        supports_dispositions = isinstance(capabilities, list) and "push_dispositions_v1" in capabilities
         accepted, ignored = [], []
+        dispositions = []
+        authoritative_entities = []
         ignored_count = 0
-        usage = conn.execute(
-            "SELECT COUNT(*) AS entity_count, COALESCE(SUM(LENGTH(json)),0) AS json_bytes "
-            "FROM entities WHERE user_id=?",
-            (user["id"],),
-        ).fetchone()
-        user_entity_count = int(usage["entity_count"])
-        user_json_bytes = int(usage["json_bytes"])
+        rejected_count = 0
         with conn:
+            self.begin_push_transaction(conn)
+            usage = conn.execute(
+                "SELECT COUNT(*) AS entity_count, COALESCE(SUM(LENGTH(json)),0) AS json_bytes "
+                "FROM entities WHERE user_id=?",
+                (user["id"],),
+            ).fetchone()
+            user_entity_count = int(usage["entity_count"])
+            user_json_bytes = int(usage["json_bytes"])
             for entity in entities:
                 if not isinstance(entity, dict):
                     ignored_count += 1
+                    rejected_count += 1
                     record_ignored(ignored, {"error": "ENTITY_MUST_BE_OBJECT"})
+                    dispositions.append({"status": "rejected", "error": "ENTITY_MUST_BE_OBJECT"})
                     continue
                 kind = str(entity.get("kind", "") or "")
                 entity_id = str(entity.get("id", "") or "")
+                input_identity = {
+                    "kind": kind[:128],
+                    "id": entity_id[:512],
+                    "device_id": str(entity.get("device_id", default_device_id) or "")[:128],
+                    "sync_version": safe_int(entity.get("sync_version")),
+                }
                 if not kind or not entity_id or len(kind) > 128 or len(entity_id) > 512:
                     ignored_count += 1
+                    rejected_count += 1
                     record_ignored(
                         ignored,
                         {"kind": kind[:128], "id": entity_id[:512], "error": "INVALID_ID"},
                     )
+                    dispositions.append(
+                        {**input_identity, "status": "rejected", "error": "INVALID_ID"}
+                    )
                     continue
                 if kind not in SUPPORTED_ENTITY_KINDS:
                     ignored_count += 1
+                    rejected_count += 1
                     record_ignored(
                         ignored,
                         {"kind": kind[:128], "id": entity_id[:512], "error": "UNSUPPORTED_KIND"},
+                    )
+                    dispositions.append(
+                        {**input_identity, "status": "rejected", "error": "UNSUPPORTED_KIND"}
                     )
                     continue
                 payload = entity.get("json", entity.get("data", {}))
@@ -669,7 +713,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload_bytes = len(payload_text.encode("utf-8"))
                 if payload_bytes > MAX_ENTITY_JSON_BYTES:
                     ignored_count += 1
+                    rejected_count += 1
                     record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "PAYLOAD_TOO_LARGE"})
+                    dispositions.append(
+                        {**input_identity, "status": "rejected", "error": "PAYLOAD_TOO_LARGE"}
+                    )
                     continue
                 normalized = {
                     "kind": kind,
@@ -681,13 +729,16 @@ class Handler(BaseHTTPRequestHandler):
                     "sync_version": safe_int(entity.get("sync_version")),
                 }
                 existing = conn.execute(
-                    "SELECT updated_at,sync_version,LENGTH(json) AS json_bytes "
+                    "SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,"
+                    "server_updated_at,LENGTH(json) AS json_bytes "
                     "FROM entities WHERE user_id=? AND kind=? AND id=?",
                     (user["id"], kind, entity_id),
                 ).fetchone()
                 if not is_newer(normalized, existing):
                     ignored_count += 1
                     record_ignored(ignored, {"kind": kind, "id": entity_id, "reason": "CONFLICT_IGNORED"})
+                    dispositions.append({**input_identity, "status": "conflict"})
+                    authoritative_entities.append(row_to_entity(existing))
                     continue
                 existing_bytes = int(existing["json_bytes"]) if existing else 0
                 entity_delta = 0 if existing else 1
@@ -697,7 +748,11 @@ class Handler(BaseHTTPRequestHandler):
                     or user_json_bytes + byte_delta > MAX_USER_JSON_BYTES
                 ):
                     ignored_count += 1
+                    rejected_count += 1
                     record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "QUOTA_EXCEEDED"})
+                    dispositions.append(
+                        {**input_identity, "status": "rejected", "error": "QUOTA_EXCEEDED"}
+                    )
                     continue
                 normalized["server_updated_at"] = next_server_stamp(conn)
                 conn.execute(
@@ -719,9 +774,18 @@ class Handler(BaseHTTPRequestHandler):
                 user_entity_count += entity_delta
                 user_json_bytes += byte_delta
                 accepted.append(normalized)
+                dispositions.append({**input_identity, "status": "accepted"})
         response_cursor = max(
             [safe_int(item.get("server_updated_at")) for item in accepted] or [0]
         )
+        # Older desktop builds clear an entire batch after any HTTP 200 because
+        # they cannot identify individual rejects.  Refuse a mixed/invalid
+        # response for those clients so quota or validation failures remain
+        # dirty and retryable. Accepted rows are idempotent on the next attempt.
+        if rejected_count and not supports_dispositions:
+            self.send_error_code(409, "PUSH_DISPOSITIONS_REQUIRED")
+            conn.close()
+            return
         self.send_json(
             200,
             {
@@ -729,7 +793,11 @@ class Handler(BaseHTTPRequestHandler):
                 "schema_version": 2,
                 "server_time": now_ms(),
                 "next_cursor": str(response_cursor),
-                "entities": [],
+                # Conflict rows are returned immediately so the client can
+                # acknowledge its exact losing version and install the
+                # authoritative server row in one local SQLite transaction.
+                "entities": authoritative_entities,
+                "dispositions": dispositions,
                 "accepted": len(accepted),
                 "accepted_count": len(accepted),
                 "ignored_count": ignored_count,

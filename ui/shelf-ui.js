@@ -1,5 +1,217 @@
-// 书架渲染、排序、过滤与自定义滚动条
-// 依赖 app.js 中的书架状态变量；保持纯 JS 轻量边界。
+// 书架渲染、选择、批量操作、排序、过滤与自定义滚动条。
+// 所有外部能力由 app.js 通过 ReaderShelfUI.init 显式注入。
+(function exposeShelfUi(global) {
+"use strict";
+
+let activeController = null;
+
+function init(options = {}) {
+  if (activeController) return activeController;
+  const document = options.root;
+  const invoke = options.invoke;
+  const dialog = options.dialog;
+  const localStorage = options.storage || global.localStorage;
+  const menuEl = options.menuElement;
+  const filterPanel = options.filterPanel;
+  const closeAccountPanel = options.closeAccountPanel;
+  const closeSearch = options.closeSearch;
+  const clearCrossReturnMemory = options.clearCrossReturnMemory;
+  const startPerformance = options.startPerformance;
+  const confirmAction = options.confirmAction || ((message) => global.confirm(message));
+  const alertAction = options.alertAction || ((message) => global.alert(message));
+  const requestFrame = options.requestAnimationFrame || ((callback) => global.requestAnimationFrame(callback));
+  if (!document || typeof document.getElementById !== "function") throw new Error("ReaderShelfUI.init 缺少 root");
+  if (typeof invoke !== "function" || !dialog) throw new Error("ReaderShelfUI.init 缺少后端或对话框接口");
+  if (!menuEl || !filterPanel) throw new Error("ReaderShelfUI.init 缺少浮层元素");
+  if (typeof closeAccountPanel !== "function" || typeof closeSearch !== "function") throw new Error("ReaderShelfUI.init 缺少浮层关闭接口");
+  if (typeof clearCrossReturnMemory !== "function" || typeof startPerformance !== "function") throw new Error("ReaderShelfUI.init 缺少书架生命周期接口");
+
+const shelfEl = document.getElementById("shelf");
+const emptyEl = document.getElementById("empty");
+const contentEl = document.querySelector(".content");
+const shelfScrollbar = document.getElementById("shelf-scrollbar");
+const shelfScrollbarThumb = document.getElementById("shelf-scrollbar-thumb");
+let books = [];
+let sortKey = localStorage.getItem("shelfSort") || "title";
+if (sortKey === "rating") sortKey = "title";
+let layout = localStorage.getItem("shelfLayout") || "grid";
+const GRID_COL_MIN = 1;
+const GRID_COL_MAX = 12;
+function parseGridColumns(value) {
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.max(GRID_COL_MIN, Math.min(GRID_COL_MAX, parsed));
+}
+let shelfGridColumns = parseGridColumns(localStorage.getItem("shelfGridColumns") || "0");
+let shelfGridColumnsValue = parseGridColumns(localStorage.getItem("shelfGridColumnsValue") || "3") || 3;
+let readingFilter = { unread: true, reading: true, done: true };
+try {
+  readingFilter = Object.assign(readingFilter, JSON.parse(localStorage.getItem("readingFilter") || "{}"));
+} catch (e) {}
+let minRating = +(localStorage.getItem("minRating") || 0);
+let searchQuery = "";
+let selected = new Set();
+let shelfLoaded = false;
+let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0";
+let showCoverRating = localStorage.getItem("showCoverRating") !== "0";
+let showCoverTitle = localStorage.getItem("showCoverTitle") === "1";
+
+// 通用半星组件：左半=半星、右半=整星。
+function makeStars(container, onPick) {
+  for (let i = 0; i < 5; i++) {
+    const star = document.createElement("span");
+    star.className = "star";
+    const background = document.createElement("span");
+    background.className = "s-bg";
+    background.textContent = "★";
+    const foreground = document.createElement("span");
+    foreground.className = "s-fg";
+    foreground.textContent = "★";
+    star.append(background, foreground);
+    container.appendChild(star);
+  }
+  const stars = [...container.querySelectorAll(".star")];
+  function paint(value) {
+    stars.forEach((star, index) => {
+      const fill = Math.max(0, Math.min(1, value - index));
+      star.querySelector(".s-fg").style.width = fill * 100 + "%";
+    });
+  }
+  function valueAt(event) {
+    for (let i = 0; i < stars.length; i++) {
+      const rect = stars[i].getBoundingClientRect();
+      if (event.clientX <= rect.right) return i + (event.clientX < rect.left + rect.width / 2 ? 0.5 : 1);
+    }
+    return 5;
+  }
+  container.addEventListener("mousemove", (event) => paint(valueAt(event)));
+  container.addEventListener("mouseleave", () => paint(container._val || 0));
+  container.addEventListener("click", (event) => {
+    let value = valueAt(event);
+    if (value === container._val) value = 0;
+    container._val = value;
+    paint(value);
+    onPick(value);
+  });
+  container.setVal = (value) => {
+    container._val = value || 0;
+    paint(container._val);
+  };
+  paint(0);
+}
+
+document.getElementById("filter-btn").addEventListener("click", (event) => {
+  event.stopPropagation();
+  menuEl.classList.remove("show");
+  closeAccountPanel();
+  closeSearch(true);
+  filterPanel.classList.toggle("show");
+});
+filterPanel.addEventListener("click", (event) => event.stopPropagation());
+document.querySelectorAll('input[name="sort"]').forEach((radio) => {
+  radio.checked = radio.value === sortKey;
+  radio.addEventListener("change", () => {
+    if (!radio.checked) return;
+    sortKey = radio.value;
+    localStorage.setItem("shelfSort", sortKey);
+    applyView();
+  });
+});
+document.querySelectorAll(".rfilter").forEach((checkbox) => {
+  checkbox.checked = !!readingFilter[checkbox.value];
+  checkbox.addEventListener("change", () => {
+    readingFilter[checkbox.value] = checkbox.checked;
+    localStorage.setItem("readingFilter", JSON.stringify(readingFilter));
+    applyView();
+  });
+});
+const filterStarsEl = document.getElementById("filter-stars");
+makeStars(filterStarsEl, (value) => {
+  minRating = value > 0 && books.length && !books.some((book) => (book.rating || 0) >= value) ? 0 : value;
+  if (minRating > 0) localStorage.setItem("minRating", String(minRating));
+  else localStorage.removeItem("minRating");
+  filterStarsEl.setVal(minRating);
+  applyView();
+});
+filterStarsEl.setVal(minRating);
+
+const setCoverProgress = document.getElementById("set-cover-prog");
+const setCoverRating = document.getElementById("set-cover-rating");
+const setCoverTitle = document.getElementById("set-cover-title");
+setCoverProgress.checked = showCoverProgress;
+setCoverProgress.addEventListener("change", () => {
+  showCoverProgress = setCoverProgress.checked;
+  localStorage.setItem("showCoverProgress", showCoverProgress ? "1" : "0");
+  applyView();
+});
+setCoverRating.checked = showCoverRating;
+setCoverRating.addEventListener("change", () => {
+  showCoverRating = setCoverRating.checked;
+  localStorage.setItem("showCoverRating", showCoverRating ? "1" : "0");
+  applyView();
+});
+setCoverTitle.checked = showCoverTitle;
+setCoverTitle.addEventListener("change", () => {
+  showCoverTitle = setCoverTitle.checked;
+  localStorage.setItem("showCoverTitle", showCoverTitle ? "1" : "0");
+  applyView();
+});
+
+function updateLayoutButtons() {
+  document.querySelectorAll(".layout-btn").forEach((button) => button.classList.toggle("active", button.dataset.layout === layout));
+}
+function updateGridColumnsControls() {
+  const defaultButton = document.getElementById("grid-cols-default");
+  const valueElement = document.getElementById("grid-cols-value");
+  if (defaultButton) defaultButton.classList.toggle("active", !shelfGridColumns);
+  if (valueElement) valueElement.textContent = String(shelfGridColumns || shelfGridColumnsValue);
+}
+function saveGridColumns() {
+  localStorage.setItem("shelfGridColumns", shelfGridColumns ? String(shelfGridColumns) : "0");
+  localStorage.setItem("shelfGridColumnsValue", String(shelfGridColumnsValue));
+}
+function applyShelfGridColumns() {
+  const fixed = layout === "grid" && shelfGridColumns > 0;
+  shelfEl.classList.toggle("fixed-cols", fixed);
+  if (fixed) shelfEl.style.setProperty("--shelf-grid-cols", String(shelfGridColumns));
+  else shelfEl.style.removeProperty("--shelf-grid-cols");
+}
+document.querySelectorAll(".layout-btn").forEach((button) => {
+  button.addEventListener("click", () => {
+    layout = button.dataset.layout;
+    localStorage.setItem("shelfLayout", layout);
+    updateLayoutButtons();
+    applyView();
+  });
+});
+updateLayoutButtons();
+updateGridColumnsControls();
+document.getElementById("grid-cols-default")?.addEventListener("click", () => {
+  shelfGridColumns = 0;
+  saveGridColumns();
+  updateGridColumnsControls();
+  applyView();
+});
+document.getElementById("grid-cols-dec")?.addEventListener("click", () => {
+  shelfGridColumnsValue = Math.max(GRID_COL_MIN, (shelfGridColumns || shelfGridColumnsValue) - 1);
+  shelfGridColumns = shelfGridColumnsValue;
+  layout = "grid";
+  localStorage.setItem("shelfLayout", layout);
+  saveGridColumns();
+  updateLayoutButtons();
+  updateGridColumnsControls();
+  applyView();
+});
+document.getElementById("grid-cols-inc")?.addEventListener("click", () => {
+  shelfGridColumnsValue = Math.min(GRID_COL_MAX, (shelfGridColumns || shelfGridColumnsValue) + 1);
+  shelfGridColumns = shelfGridColumnsValue;
+  layout = "grid";
+  localStorage.setItem("shelfLayout", layout);
+  saveGridColumns();
+  updateLayoutButtons();
+  updateGridColumnsControls();
+  applyView();
+});
 
 // 阅读状态：done 已读 / unread 未读 / reading 正在阅读
 function readStatus(b) {
@@ -147,11 +359,11 @@ function bookCard(b, index = 0) {
       relocateBook(b);
       return;
     }
-    if (typeof window.clearCrossReturnMemory === "function") window.clearCrossReturnMemory();
+    clearCrossReturnMemory();
     invoke("open_book", { id: b.id }).catch((err) => {
       const s = String(err);
       if (s.includes("丢失") || s.includes("定位")) relocateBook(b);
-      else alert("打开失败：" + s);
+      else alertAction("打开失败：" + s);
     });
   });
 
@@ -169,13 +381,13 @@ async function changeCover(b) {
   try {
     render(await invoke("set_cover", { id: b.id, path }));
   } catch (e) {
-    alert("更换封面失败：" + e);
+    alertAction("更换封面失败：" + e);
   }
 }
 
 // 文件丢失 → 让用户重新定位到文件新位置（指纹一致则各项数据都保留）
 async function relocateBook(b) {
-  if (!confirm("《" + b.title + "》的源文件找不到了。\n是否重新定位到它现在的位置？")) return;
+  if (!confirmAction("《" + b.title + "》的源文件找不到了。\n是否重新定位到它现在的位置？")) return;
   const ext = (b.format || "").toLowerCase();
   const sel = await dialog.open({
     multiple: false,
@@ -241,6 +453,65 @@ function currentList() {
   return list;
 }
 
+const selectionGroup = document.getElementById("del-group");
+const selectionDeleteButton = document.getElementById("del-btn");
+const bookInfoButton = document.getElementById("book-info-btn");
+function updateSelectionUi() {
+  if (selected.size > 0) {
+    selectionGroup.classList.add("show");
+    bookInfoButton.style.display = selected.size === 1 ? "" : "none";
+    selectionDeleteButton.textContent = "🗑 删除选中 (" + selected.size + ")";
+  } else {
+    selectionGroup.classList.remove("show");
+  }
+}
+function toggleSelect(id, card) {
+  if (selected.has(id)) {
+    selected.delete(id);
+    card.classList.remove("selected");
+  } else {
+    selected.add(id);
+    card.classList.add("selected");
+  }
+  updateSelectionUi();
+}
+function clearSelection() {
+  selected = new Set();
+  applyView();
+  updateSelectionUi();
+}
+function selectAll() {
+  const visibleBooks = currentList();
+  closeSearch(true);
+  selected = new Set(visibleBooks.map((book) => book.id));
+  applyView();
+  updateSelectionUi();
+}
+selectionDeleteButton.addEventListener("click", async () => {
+  if (!selected.size) return;
+  if (!confirmAction("确定删除选中的 " + selected.size + " 本书？（不会删除磁盘上的文件）")) return;
+  const ids = Array.from(selected);
+  const list = await invoke("remove_books", { ids });
+  selected = new Set();
+  updateSelectionUi();
+  render(list);
+});
+document.getElementById("del-cancel").addEventListener("click", clearSelection);
+document.getElementById("mi-selectall").addEventListener("click", () => {
+  menuEl.classList.remove("show");
+  selectAll();
+});
+document.getElementById("mi-random").addEventListener("click", () => {
+  menuEl.classList.remove("show");
+  if (!books.length) {
+    alertAction("书架还是空的，先导入书籍吧～");
+    return;
+  }
+  const book = books[Math.floor(Math.random() * books.length)];
+  clearCrossReturnMemory();
+  invoke("open_book", { id: book.id });
+});
+
 let shelfScrollUpdateRaf = 0;
 let shelfRendering = false;
 function updateShelfScrollbar() {
@@ -264,7 +535,7 @@ function updateShelfScrollbar() {
 }
 function scheduleShelfScrollbarUpdate() {
   if (shelfScrollUpdateRaf) return;
-  shelfScrollUpdateRaf = requestAnimationFrame(updateShelfScrollbar);
+  shelfScrollUpdateRaf = requestFrame(updateShelfScrollbar);
 }
 function initShelfScrollbar() {
   if (!contentEl || !shelfScrollbar || !shelfScrollbarThumb) return;
@@ -273,7 +544,7 @@ function initShelfScrollbar() {
   let dragStartScrollTop = 0;
 
   contentEl.addEventListener("scroll", scheduleShelfScrollbarUpdate, { passive: true });
-  window.addEventListener("resize", scheduleShelfScrollbarUpdate);
+  global.addEventListener("resize", scheduleShelfScrollbarUpdate);
 
   shelfScrollbar.addEventListener("pointerdown", (e) => {
     if (!shelfScrollbar.classList.contains("show")) return;
@@ -339,7 +610,7 @@ function applyView(options = {}) {
     emptyEl.style.display = "block";
   }
   const sorted = sortBooks(list);
-  const finishCoverRender = startupPerfStart("cover-render", "critical books=" + sorted.length + " layout=" + layout);
+  const finishCoverRender = startPerformance("cover-render", "critical books=" + sorted.length + " layout=" + layout);
   let chunks = 0;
   function restoreShelfScroll() {
     if (!preserveScroll || !contentEl) return;
@@ -423,3 +694,69 @@ function render(list) {
   lastJSON = j;
   applyView();
 }
+
+function getBook(id) {
+  return books.find((book) => String(book.id) === String(id)) || null;
+}
+function updateBook(id, patch) {
+  const index = books.findIndex((book) => String(book.id) === String(id));
+  if (index >= 0) books[index] = Object.assign({}, books[index], patch);
+  lastJSON = JSON.stringify(books);
+  applyView();
+  updateSelectionUi();
+}
+function setSearchQuery(value) {
+  const next = String(value || "").trim().toLowerCase();
+  if (next === searchQuery) return;
+  searchQuery = next;
+  applyView();
+}
+async function changeCoverById(id) {
+  const book = getBook(id);
+  if (book) await changeCover(book);
+}
+
+let lastFocusRefreshAt = 0;
+global.addEventListener("focus", () => {
+  if (!shelfLoaded) return;
+  const now = Date.now();
+  if (now - lastFocusRefreshAt < 1500) return;
+  lastFocusRefreshAt = now;
+  invoke("list_books").then(render).catch(() => {});
+});
+
+  activeController = Object.freeze({
+    applyView,
+    changeCoverById,
+    clearSelection,
+    count: () => books.length,
+    coverColor: colorFor,
+    getBook,
+    getBooks: () => books.slice(),
+    getSearchQuery: () => searchQuery,
+    getSelectedIds: () => Array.from(selected),
+    getVisibleBooks: () => currentList().slice(),
+    makeStars,
+    render,
+    selectAll,
+    setSearchQuery,
+    updateBook,
+  });
+  return activeController;
+}
+
+function controller() {
+  if (!activeController) throw new Error("ReaderShelfUI 尚未初始化");
+  return activeController;
+}
+
+global.ReaderShelfUI = Object.freeze({
+  clearSelection: () => controller().clearSelection(),
+  getSearchQuery: () => controller().getSearchQuery(),
+  getSelectedIds: () => controller().getSelectedIds(),
+  init,
+  refresh: () => controller().applyView(),
+  render: (list) => controller().render(list),
+  setSearchQuery: (value) => controller().setSearchQuery(value),
+});
+})(typeof window !== "undefined" ? window : globalThis);

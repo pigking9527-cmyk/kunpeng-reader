@@ -448,6 +448,18 @@ body {
 .sem-meta { color: #777; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
 .sem-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .sem-actions .btn-plain { min-height: 34px; }
+.sem-model-copy { color: #556070; font-size: 13px; line-height: 1.55; margin: 2px 0 8px; }
+.sem-model-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.sem-model-controls label { color: #596273; font-size: 13px; }
+.sem-model-controls .sem-model-select { min-width: 242px; max-width: 100%; }
+.sem-advanced-tools { margin: 10px 0; border: 1px solid #eef0f4; border-radius: 8px; background: #fff; }
+.sem-advanced-tools > summary { cursor: pointer; padding: 11px 12px; color: #5d6878; font-size: 13px; user-select: none; }
+.sem-advanced-tools > .sem-section { margin: 0 10px 10px; }
+.sem-model-picker-label { display: inline-block; margin-right: 7px; color: #777; font-size: 13px; }
+.sem-model-select { min-width: 215px; height: 32px; padding: 0 28px 0 9px; border: 1px solid #cfd4dd; border-radius: 7px; background: #fff; color: #30343b; font: inherit; font-size: 14px; }
+.sem-model-select:disabled { opacity: .65; cursor: not-allowed; }
+@media (max-width: 620px) { .sem-section-head { grid-template-columns: 1fr; } .sem-actions { justify-content: flex-start; } }
+@media (max-width: 620px) { .sem-model-controls { align-items: stretch; } .sem-model-controls .sem-model-select { width: 100%; } }
 .danger-lite { color: #c43; border-color: #efc8c1 !important; background: #fffafa !important; }
 .danger-lite:hover { background: #fff1ee !important; }
 .sem-progressbar { height: 8px; margin-top: 12px; border-radius: 999px; background: #edf0f6; overflow: hidden; }

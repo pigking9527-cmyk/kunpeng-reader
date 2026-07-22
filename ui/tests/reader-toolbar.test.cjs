@@ -16,6 +16,22 @@ test("reader toolbar buttons stay horizontal and do not flex-shrink", () => {
   assert.match(html, /\.tbtn\s*\{[^}]*flex:\s*0\s+0\s+auto;/s);
 });
 
+test("reader progress names the whole-book page total once it is measured", () => {
+  assert.match(html, /id="reader-progress-group" data-tauri-drag-region/);
+  assert.match(html, /id="chapter-progress" class="title epub-only"/);
+  assert.match(html, /id="progress" class="title page-count-loading"/);
+  assert.match(html, /\.reader-progress-group\s*\{[^}]*gap:\s*8px;[^}]*flex:\s*0\s+0\s+auto;/s);
+  assert.match(html, /#progress\.page-count-total\s*\{[^}]*width:\s*auto;[^}]*flex:\s*0\s+0\s+auto;/s);
+  assert.match(html, /#progress\.page-count-loading/);
+  assert.match(reader, /function showWholeBookPages\(page, total\)/);
+  assert.match(reader, /const text = page \+ "\/" \+ total \+ "页";/);
+  assert.match(reader, /function showChapterProgress\(page, total, progress\)/);
+  assert.match(reader, /showChapterProgress\(e\.data\.page, e\.data\.total, curProgress\)/);
+  assert.match(reader, /else if \(pageCountMeasuring\)[\s\S]*?showProgressLoading\(\)/);
+  assert.match(reader, /if \(e\.data\.pageCache\)/);
+  assert.match(reader, /complete: !!pc\.complete/);
+});
+
 test("reader toolbar supports narrow windows and macOS system fonts", () => {
   const toolbarRule = html.match(/\.toolbar\s*\{([^}]*)\}/s)?.[1] || "";
   assert.doesNotMatch(toolbarRule, /overflow-[xy]:\s*(?:auto|hidden)/);
@@ -52,9 +68,12 @@ test("center taps toggle the whole toolbar even while an overlay is closing", ()
   assert.match(annotations, /if\(overlayOpen\)[\s\S]*parent\.postMessage\(\{centerTap:1\}/);
 });
 
-test("immersive mode hides and restores every toolbar child without ghost hit targets", () => {
-  assert.match(html, /body\.immersive \.toolbar > \*\s*\{[^}]*visibility:\s*hidden;[^}]*pointer-events:\s*none;/s);
-  assert.match(html, /body\.immersive\.bar-show \.toolbar > \*,\s*body\.immersive\.bar-hover \.toolbar > \*\s*\{[^}]*visibility:\s*visible;[^}]*pointer-events:\s*auto;/s);
+test("immersive mode hides controls but keeps reading and page-count status visible", () => {
+  assert.match(html, /body\.immersive \.toolbar > \*:not\(#reader-progress-group\)\s*\{[^}]*visibility:\s*hidden;[^}]*pointer-events:\s*none;/s);
+  assert.match(html, /body\.immersive\.bar-show \.toolbar > \*:not\(#reader-progress-group\),\s*body\.immersive\.bar-hover \.toolbar > \*:not\(#reader-progress-group\)\s*\{[^}]*visibility:\s*visible;[^}]*pointer-events:\s*auto;/s);
+  assert.match(html, /body\.immersive #reader-progress-group\s*\{[^}]*opacity:\s*1;[^}]*visibility:\s*visible;/s);
+  assert.match(html, /body\.immersive:not\(\.bar-show\):not\(\.bar-hover\) \.toolbar > \*:not\(#reader-progress-group\):not\(\.window-controls\)\s*\{[^}]*display:\s*none;/s);
+  assert.match(html, /body\.immersive:not\(\.bar-show\):not\(\.bar-hover\) #reader-progress-group\s*\{[^}]*margin-left:\s*auto;/s);
 });
 
 test("immersive toolbar appears on hover and retracts when the pointer leaves", () => {
@@ -62,7 +81,7 @@ test("immersive toolbar appears on hover and retracts when the pointer leaves", 
   assert.match(reader, /readerToolbar\?\.addEventListener\("pointerleave"[\s\S]*TOOLBAR_POINTER_LEAVE/);
   assert.match(shell, /bar-hover[\s\S]*TOOLBAR\.IMMERSIVE_HOVER/);
   assert.match(shell, /bar-show[\s\S]*TOOLBAR\.IMMERSIVE_PINNED/);
-  assert.match(html, /body\.immersive\.bar-hover \.toolbar > \*\s*\{[^}]*visibility:\s*visible;[^}]*pointer-events:\s*auto;/s);
+  assert.match(html, /body\.immersive\.bar-hover \.toolbar > \*:not\(#reader-progress-group\)\s*\{[^}]*visibility:\s*visible;[^}]*pointer-events:\s*auto;/s);
 });
 
 test("enabling scroll mode animates an active dual-page switch off", () => {

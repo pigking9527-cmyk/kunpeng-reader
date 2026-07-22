@@ -12,3 +12,10 @@ Thumbs.db
 # Python test/runtime cache
 __pycache__/
 *.py[cod]
+
+# Local AI model conversion environment and downloaded weights
+/.tools/
+
+# Build output generated when the vendored EPUB crate is tested directly
+/vendor/*/target/
+/vendor/*/Cargo.lock

@@ -8,7 +8,7 @@
   const ACTIONS = new Set([
     "layoutBusy", "progress", "ttsState", "ttsSynth", "dictPrefetch", "dictSpeak",
     "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav",
-    "centerTap", "readerPerf", "ready", "measured", "downloadImage", "webSearch", "crossSearch",
+    "centerTap", "readerPerf", "ready", "measured", "pageCache", "downloadImage", "webSearch", "crossSearch",
     "semanticSearch", "translateText", "dict", "vocabAdd", "addHighlight",
     "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations",
     "removeHighlight", "setHighlightNote", "setHighlightText", "addBookmark", "tocResolved",
@@ -68,6 +68,15 @@
         && typeof image.dataUrl === "string"
         && image.dataUrl.length <= MAX_IMAGE_CHARS
         && /^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(image.dataUrl);
+    }
+    if (action === "pageCache") {
+      const cache = data.pageCache;
+      return isRecord(cache)
+        && textWithin(cache.sig, 4096)
+        && Array.isArray(cache.pages)
+        && cache.pages.length <= 100_000
+        && cache.pages.every((page) => Number.isInteger(page) && page >= 0 && page <= 10_000_000)
+        && (cache.complete === undefined || typeof cache.complete === "boolean");
     }
     return true;
   }

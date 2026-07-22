@@ -3,6 +3,36 @@ use crate::{book, AppState, RES_BASE};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// 去掉 HTML 标签，得到纯文本（合并连续空白）。
+pub(crate) fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut last_ws = false;
+    for character in html.chars() {
+        if character == '<' {
+            in_tag = true;
+            continue;
+        }
+        if character == '>' {
+            in_tag = false;
+            continue;
+        }
+        if in_tag {
+            continue;
+        }
+        if character.is_whitespace() {
+            if !last_ws {
+                out.push(' ');
+                last_ws = true;
+            }
+        } else {
+            out.push(character);
+            last_ws = false;
+        }
+    }
+    out
+}
+
 /// 把相对路径 rel 基于 base_dir 解析成归档内的绝对路径（处理 ./ 和 ../）。
 pub(crate) fn resolve_rel(base_dir: &str, rel: &str) -> String {
     let mut parts: Vec<&str> = if rel.starts_with('/') {
