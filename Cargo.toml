@@ -21,7 +21,7 @@ fastembed = "5.17"
 instant-distance = { version = "0.6", features = ["with-serde"] }
 rayon = "1"
 rmp-serde = "1.3"
-bincode = "1.3" # 只用于无损读取并迁移 v1/v2 语义索引
+bincode = "3.0" # 只用于无损读取并迁移 v1/v2 语义索引
 pdf-extract = "0.12"
 lopdf = "0.44"
 chrono = "0.4"
