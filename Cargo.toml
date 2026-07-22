@@ -32,7 +32,7 @@ base64 = "0.22"
 ureq = { version = "3.3", features = ["json"] }
 tokio = { version = "1", features = ["rt", "sync"] }
 flate2 = "1"
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 mobi = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
