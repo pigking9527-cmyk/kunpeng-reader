@@ -10,6 +10,7 @@ const source = [
   "reader-page-measurement.js",
   "reader-page-annotations.js",
   "reader-page-runtime.js",
+  "reader-page-transition.js",
 ].map((name) => fs.readFileSync(path.join(__dirname, "..", name), "utf8")).join("");
 
 test("large chapter layout threshold selects only large HTML", () => {
@@ -70,20 +71,41 @@ test("paged image preview is limited to the page immediately before the stable o
   assert.match(source, /function applyScrollPageMask\(force\)\{[\s\S]*?if\(typeof clearPagedImagePreview==='function'\)clearPagedImagePreview\(\)/);
   assert.doesNotMatch(source, /rr-paged-media-fitted|pagedMediaFitHeight/);
 });
+test("scroll image preview reflows through the virtual page instead of covering text", () => {
+  assert.match(source, /var virtualSlice=activeScrollSliceAtTop\(maskTop\);/);
+  assert.match(source, /function scrollPagePreviewCandidate\(slice,top,viewH\)\{/);
+  assert.match(source, /var virtualPreview=virtualSlice\?scrollPagePreviewCandidate\(virtualSlice,maskTop,maskPort\?maskPort\.clientHeight:0\):null;/);
+  assert.match(source, /if\(virtualSlice&&virtualPreview\)\{[\s\S]*?renderVirtualScrollPage\(virtualPageSlice\);[\s\S]*?return;/);
+  assert.match(source, /function renderVirtualScrollPage\(pageOverride\)[\s\S]*?var preview=renderVirtualPreview\(page,viewH\);/);
+  assert.match(source, /function buildVirtualPageFromIndex\([\s\S]*?if\(!fits\)\{[\s\S]*?previewIndex=i;/);
+  assert.match(source, /function isInlineAuxiliaryImage\(el\)\{/);
+  assert.match(source, /if\(overlapsText\(top,bottom\)&&!\(tag==='img'&&!isInlineAuxiliaryImage\(el\)\)\)continue;/);
+  const style = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
+  assert.match(style, /#virtual-page\{[^}]*background:var\(--reader-bg,#fff\)/);
+  assert.match(style, /#scroll-preview\{[^}]*background:transparent/);
+});
 test("mode switches restore anchors inside the already inset scroll viewport", () => {
+  assert.match(source, /function applyCols\(\)\{[\s\S]*?if\(isScrollMode\(\)\)\{\s*\/\/[\s\S]*?viewOffset=0;\s*var sb=scrollPageBox\(\)/);
   assert.match(source, /x=Math\.max\(2,pr\.left\+8\)/);
   assert.match(source, /y=Math\.max\(2,pr\.top\+8\)/);
   assert.doesNotMatch(source, /pr\.left\+mg\(S\.marginLeft\)\+8/);
   assert.doesNotMatch(source, /pr\.top\+mg\(S\.marginTop\)\+8/);
   assert.match(source, /scrollOffset:8/);
-  assert.match(source, /var imageAnchor=captureImageVisualAnchor\(\);[\s\S]*?if\(prevFlow==='scroll'\)/);
+  assert.match(source, /var anchor=topAnchor\(\);[\s\S]*?var anchorOffset=anchorTextOffset\(anchor\);[\s\S]*?var imageAnchor=anchorOffset==null\?captureImageVisualAnchor\(\):null;[\s\S]*?if\(prevFlow==='scroll'\)/);
+  assert.doesNotMatch(source, /if\(prevFlow==='scroll'\)[\s\S]{0,300}?var anchor=topAnchor\(\)/);
   assert.match(source, /relayout\([\s\S]*?scheduleImageVisualAnchorRestore\(imageAnchor\)/);
   assert.match(source, /scrollPagedView=!!imageAnchor/);
   assert.match(source, /exactScroll:flowChanged&&isScrollMode\(\)&&!imageAnchor/);
+  assert.doesNotMatch(source, /forwardPagedAnchor/);
   assert.match(source, /box\._rrPreviewSource=candidate/);
   assert.match(source, /scrollPreview\._rrPreviewSource=src\|\|previewSourceElement\(next\.el\)/);
   assert.match(source, /Math\.round\(last\)\+imagePreviewGapPx\(\)/);
   assert.match(source, /Math\.round\(contentBottom-top\)\+imagePreviewGapPx\(\)/);
+  assert.match(source, /function modeSwitchDiagBegin\(/);
+  assert.match(source, /modeSwitchDiagLog\(modeDiagSeq,'after_relayout',anchorOffset\)/);
+  assert.match(source, /modeSwitchDiagSchedule\(modeDiagSeq,anchorOffset\)/);
+  assert.match(source, /modeSwitchDiagEvent\('resize_before'\)/);
+  assert.match(source, /modeSwitchDiagEvent\('media_refresh'\)/);
 });
 test("scroll mode previews an oversized image that starts inside the viewport", () => {
   const helper = source.match(/function scrollImagePreviewEligible\(.*?\n\}/s);
@@ -105,4 +127,37 @@ test("scroll paging reuses cached geometry and skips duplicate mask renders", ()
   const clip = source.match(/function currentScrollPageClipBlank\(\)[\s\S]*?\n\}/);
   assert.ok(clip, "scroll clipping helper must remain inspectable");
   assert.doesNotMatch(clip[0], /documentTextLineRects\(\)/);
+});
+
+test("highlight menus support a persisted three-column layout below the selection", () => {
+  const style = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
+  assert.match(source, /var HL_MENU_LAYOUT_KEY='highlightMenuLayoutV1'/);
+  assert.match(source, /data-layout="row">横排<\/button><button type="button" data-layout="grid">九宫格/);
+  assert.match(source, /var top=rect\.bottom\+8;/);
+  assert.match(source, /var safe=6,gap=6,aboveTop=rect\.top-mh-gap,belowTop=rect\.bottom\+gap/);
+  assert.match(style, /\.hm-layout-grid \.hm-action-host[^\{]*\{display:grid;grid-template-columns:repeat\(3/);
+});
+
+test("highlight web search keeps a local Baidu or Google choice", () => {
+  assert.match(source, /var HL_WEB_ENGINE_KEY='highlightWebSearchEngineV1'/);
+  assert.match(source, /engines\.className='hs-mode-buttons hs-engine-buttons'/);
+  assert.match(source, /\['baidu','google'\]\.forEach/);
+  assert.match(source, /b\.textContent=engine==='google'\?'谷歌':'百度'/);
+  assert.match(source, /webSearch:\{term:t,engine:readHlWebEngine\(\)\}/);
+  assert.match(source, /webSearch:\{term:highlightDisplayText\(h\),engine:readHlWebEngine\(\)\}/);
+});
+
+test("highlight menu keeps appearance compact and supports persisted four-color highlights", () => {
+  const style = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
+  assert.match(source, /var HL_MENU_COLOR_KEY='highlightMenuMultiColorV1'/);
+  assert.match(source, /var HL_COLORS=\[/);
+  assert.match(source, /hs-mode hs-appearance/);
+  assert.match(source, /hs-mode hs-layout-size/);
+  assert.match(source, /hs-color-enabled/);
+  assert.match(source, /o\.color=readHlColor\(\);parent\.postMessage\(\{addHighlight:o\}/);
+  assert.match(source, /setHighlightColor:\{index:activeHi,color:color\}/);
+  assert.match(style, /\.hs-appearance\{grid-template-columns:auto auto 1fr 38px/);
+  assert.match(style, /\.hs-layout-size\{grid-template-columns:auto auto auto auto/);
+  assert.match(style, /\.hm-color-host .hm-color-button/);
+  assert.match(style, /var\(--hl-color,rgba\(255,218,92,.34\)\)/);
 });

@@ -23,9 +23,11 @@ pub(crate) struct BookDto {
     progress: f32,
     added_at: u64,
     last_read_at: u64,
-    missing: bool,   // 源文件是否已找不到
-    path: String,    // 文件完整路径（用于"按存储目录"排序）
-    rating: f32,     // 用户评分 0~5（0.5 刻度，用于书架按评分过滤）
+    missing: bool, // 源文件是否已找不到
+    path: String,  // 文件完整路径（用于"按存储目录"排序）
+    rating: f32,   // 用户评分 0~5（0.5 刻度，用于书架按评分过滤）
+    tags: Vec<String>,
+    collections: Vec<String>,
     initial: String, // 书名拼音首字母（A~Z / #），用于"按书名"分组
 }
 
@@ -198,6 +200,8 @@ fn to_dto(b: &book::Book) -> BookDto {
         missing: false,
         path: b.path.to_string_lossy().into_owned(),
         rating: b.rating,
+        tags: b.tags.clone(),
+        collections: b.collections.clone(),
         initial: title_initial(&b.title).to_string(),
     }
 }
@@ -209,6 +213,69 @@ pub(crate) fn snapshot(lib: &Library) -> Vec<BookDto> {
 #[tauri::command]
 pub(crate) fn list_books(state: tauri::State<AppState>) -> Vec<BookDto> {
     snapshot(&state.library.lock().unwrap())
+}
+
+/// 设置一册图书的标签与收藏夹。收藏夹仅是逻辑归类，不会移动或删除文件。
+#[tauri::command]
+pub(crate) fn set_book_organization(
+    state: tauri::State<AppState>,
+    id: String,
+    tags: Vec<String>,
+    collections: Vec<String>,
+) -> Result<Vec<BookDto>, String> {
+    let id = id.parse::<u64>().map_err(|_| "无效的图书 ID".to_string())?;
+    let mut lib = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    if lib.get(id).is_none() {
+        return Err("找不到这本书".to_string());
+    }
+    if lib.set_organization(id, tags, collections) {
+        lib.save()?;
+    }
+    Ok(snapshot(&lib))
+}
+
+/// 重命名全书架范围内的一个标签或收藏夹。
+#[tauri::command]
+pub(crate) fn rename_book_organization(
+    state: tauri::State<AppState>,
+    kind: String,
+    name: String,
+    new_name: String,
+) -> Result<Vec<BookDto>, String> {
+    if !matches!(kind.as_str(), "tag" | "collection") {
+        return Err("无效的分类类型".to_string());
+    }
+    let mut lib = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    if lib.rename_organization(&kind, &name, new_name) {
+        lib.save()?;
+    }
+    Ok(snapshot(&lib))
+}
+
+/// 删除全书架范围内的一个标签或收藏夹；仅移除关联，不会删除图书。
+#[tauri::command]
+pub(crate) fn delete_book_organization(
+    state: tauri::State<AppState>,
+    kind: String,
+    name: String,
+) -> Result<Vec<BookDto>, String> {
+    if !matches!(kind.as_str(), "tag" | "collection") {
+        return Err("无效的分类类型".to_string());
+    }
+    let mut lib = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    if lib.delete_organization(&kind, &name) {
+        lib.save()?;
+    }
+    Ok(snapshot(&lib))
 }
 
 #[tauri::command]

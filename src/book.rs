@@ -104,6 +104,10 @@ pub struct Book {
     pub cover_ver: u64, // 封面版本号：换封面时 +1，用于刷新前端缓存（避免每次渲染都去 stat 封面文件）
     #[serde(default)]
     pub rating: f32, // 用户评分 0~5，0.5 为刻度（0=未评分）
+    #[serde(default)]
+    pub tags: Vec<String>, // 多个标签；用于书架多维筛选
+    #[serde(default)]
+    pub collections: Vec<String>, // 多个收藏夹；不会改变图书在“全部书架”中的位置
 }
 
 /// 当前 unix 时间戳（秒）。
@@ -112,6 +116,23 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn organization_name_key(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn normalize_organization_names(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let value = value.trim().to_string();
+            let key = organization_name_key(&value);
+            (!key.is_empty() && value.chars().count() <= 32 && seen.insert(key)).then_some(value)
+        })
+        .take(32)
+        .collect()
 }
 
 fn local_day_key(secs: u64) -> u32 {
@@ -199,6 +220,8 @@ impl Book {
             progress_history: Vec::new(),
             cover_ver: 0,
             rating: 0.0,
+            tags: Vec::new(),
+            collections: Vec::new(),
         }
     }
 }
@@ -384,6 +407,86 @@ impl Library {
         }
     }
 
+    /// 设置一本书的标签与收藏夹。名称在本地与同步载荷中都保持规范、去重。
+    pub fn set_organization(
+        &mut self,
+        id: u64,
+        tags: Vec<String>,
+        collections: Vec<String>,
+    ) -> bool {
+        let tags = normalize_organization_names(tags);
+        let collections = normalize_organization_names(collections);
+        if let Some(book) = self.books.iter_mut().find(|book| book.id == id) {
+            let changed = book.tags != tags || book.collections != collections;
+            book.tags = tags;
+            book.collections = collections;
+            return changed;
+        }
+        false
+    }
+
+    /// 管理全书架范围内的一个标签或收藏夹：重命名时同时更新所有关联图书。
+    pub fn rename_organization(&mut self, kind: &str, from: &str, to: String) -> bool {
+        let from = organization_name_key(from);
+        let to = normalize_organization_names(vec![to]).into_iter().next();
+        let Some(to) = to else {
+            return false;
+        };
+        if from.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for book in &mut self.books {
+            let values = if kind == "tag" {
+                &mut book.tags
+            } else {
+                &mut book.collections
+            };
+            let replaced = values
+                .iter()
+                .map(|name| {
+                    if organization_name_key(name) == from {
+                        to.clone()
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let normalized = normalize_organization_names(replaced);
+            if *values != normalized {
+                *values = normalized;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// 从所有图书中移除一个标签或收藏夹；不删除图书本身。
+    pub fn delete_organization(&mut self, kind: &str, name: &str) -> bool {
+        let name = organization_name_key(name);
+        if name.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for book in &mut self.books {
+            let values = if kind == "tag" {
+                &mut book.tags
+            } else {
+                &mut book.collections
+            };
+            let next = values
+                .iter()
+                .filter(|value| organization_name_key(value) != name)
+                .cloned()
+                .collect::<Vec<_>>();
+            if *values != next {
+                *values = next;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn set_word_count(&mut self, id: u64, wc: u64) {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
             b.word_count = wc;
@@ -447,6 +550,13 @@ impl Library {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
             if let Some(h) = b.highlights.get_mut(index) {
                 h.corrected_text = text;
+            }
+        }
+    }
+    pub fn set_highlight_color(&mut self, id: u64, index: usize, color: String) {
+        if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
+            if let Some(h) = b.highlights.get_mut(index) {
+                h.color = color;
             }
         }
     }
@@ -809,6 +919,8 @@ fn prepare_epub(path: &Path) -> Option<Book> {
         progress_history: Vec::new(),
         cover_ver: 0,
         rating: 0.0,
+        tags: Vec::new(),
+        collections: Vec::new(),
     })
 }
 
@@ -862,6 +974,8 @@ fn prepare_mobi(path: &Path) -> Option<Book> {
         progress_history: Vec::new(),
         cover_ver: 0,
         rating: 0.0,
+        tags: Vec::new(),
+        collections: Vec::new(),
     })
 }
 

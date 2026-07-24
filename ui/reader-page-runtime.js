@@ -98,19 +98,76 @@ function ttsStop(){
 window.addEventListener('message',function(e){
   if(!e.data)return;
   if(e.data.windowDragging!==undefined){setMeasurePaused(!!e.data.windowDragging);}
+  if(e.data.pageCountViewportWidth!==undefined){
+    var nextPageCountWidth=Math.max(1,Math.round(Number(e.data.pageCountViewportWidth)||window.innerWidth||1));
+    var oldPageCountSig=pageCountSig();
+    pageCountViewportWidth=nextPageCountWidth;
+    if(oldPageCountSig!==pageCountSig()){
+      invalidateMeasure();
+      parent.postMessage({layoutBusy:1},'*');
+      scheduleMeasure(60);
+    }
+  }
+  // 智读侧栏是一项独立的阅读区宽度变更事务：先保存不可变的源文本偏移，
+  // 父页面改宽度后再发 commit，最终由正文页等待实际宽度稳定后恢复。
+  if(e.data.preserveAnchor){
+    var sideAnchor=null;
+    var sideViewportOffset=8;
+    // 若上一轮侧栏开关正在展示锚定临时页，真实 root 位于它下方的完整页首；
+    // 此时必须继续使用临时页的起点，不能重新采样被遮住的 root。
+    var sideOffset=sideAnchorVirtualOffset!=null?sideAnchorVirtualOffset:null;
+    if(sideOffset==null){
+      sideAnchor=topAnchor();
+      if(!anchorValid(sideAnchor)&&anchorValid(curTopAnchor))sideAnchor=curTopAnchor;
+      sideOffset=anchorTextOffset(sideAnchor);
+      if(anchorValid(sideAnchor)){
+        var sideRect=anchorRect(sideAnchor),sideView=viewRect();
+        if(sideRect&&sideView)sideViewportOffset=Math.max(0,Math.round(sideRect.top-sideView.top));
+      }
+    }
+    if(sideOffset!=null&&typeof sourceRangeForOffsets==='function'){
+      var stableSideRange=sourceRangeForOffsets(sideOffset,sideOffset+1);
+      if(stableSideRange)curTopAnchor={range:stableSideRange};
+      window.__readerSideViewportTxn={
+        id:e.data.aiReaderSideRequestId||0,offset:sideOffset,chapter:curCh,
+        viewportOffset:sideViewportOffset,preparedWidth:Math.round(window.innerWidth||0),
+        preparedAt:Date.now(),committed:false,finished:false
+      };
+      if(typeof readerSideViewportDiag==='function')readerSideViewportDiag(window.__readerSideViewportTxn,'prepared');
+    }else if(anchorValid(sideAnchor))curTopAnchor=sideAnchor;
+    parent.postMessage({readerAnchorReady:1,aiReaderSideRequestId:e.data.aiReaderSideRequestId||0},'*');
+  }
+  if(e.data.aiReaderSideCommit!==undefined){
+    var sideTxn=window.__readerSideViewportTxn;
+    if(sideTxn&&sideTxn.id===(e.data.aiReaderSideCommit||0)&&!sideTxn.finished){
+      sideTxn.committed=true;
+      sideTxn.expectedWidth=Math.round(Number(e.data.aiReaderSideExpectedWidth)||0);
+      sideTxn.committedAt=Date.now();
+      if(typeof readerSideViewportDiag==='function')readerSideViewportDiag(sideTxn,'committed');
+      if(typeof scheduleReaderSideViewportRestore==='function')scheduleReaderSideViewportRestore(sideTxn);
+    }
+  }
   if(e.data.settings){
     var prevFlow=S.flowMode,prevPageMode=S.pageMode;
+    var nextFlow=e.data.settings.flowMode||prevFlow,nextPageMode=e.data.settings.pageMode||prevPageMode;
+    var incomingModeChange=prevFlow!==nextFlow||prevPageMode!==nextPageMode;
     var prevPageCountSig=pageCountSig();
-    var imageAnchor=captureImageVisualAnchor();
+    // 模式切换会清空滚动模式的虚拟页和图片预览层。必须在动这些层之前
+    // 记录当前左上角的字符位置；否则 topAnchor() 读到的是清理后的底层正文，
+    // 切回整页时就会落到相邻页。只有纯图片页没有字符锚点时，才让图片
+    // 预览锚点接管恢复，避免页面下方一张可见图片覆盖正常正文锚点。
+    var storedOffsetBefore=anchorTextOffset(curTopAnchor);
+    var anchor=topAnchor();
+    if(!anchorValid(anchor)&&anchorValid(curTopAnchor))anchor=curTopAnchor;
+    if(anchorValid(anchor))curTopAnchor=anchor;
+    var anchorOffset=anchorTextOffset(anchor);
+    var imageAnchor=anchorOffset==null?captureImageVisualAnchor():null;
+    var modeDiagSeq=incomingModeChange?modeSwitchDiagBegin(prevFlow,nextFlow,prevPageMode,nextPageMode,anchorOffset,storedOffsetBefore):0;
     if(prevFlow==='scroll'){
       scrollPagedView=false;
       clearVirtualPage();clearScrollPreview();
       if(scroller){scroller.style.clipPath='none';scroller.style.webkitClipPath='none';}
     }
-    var anchor=topAnchor();
-    if(!anchorValid(anchor)&&anchorValid(curTopAnchor))anchor=curTopAnchor;
-    if(anchorValid(anchor))curTopAnchor=anchor;
-    var anchorOffset=anchorTextOffset(anchor);
     S=Object.assign(S,e.data.settings);
     var flowChanged=prevFlow!==S.flowMode;
     var pageModeChanged=prevPageMode!==S.pageMode;
@@ -121,6 +178,7 @@ window.addEventListener('message',function(e){
     if(prevPageCountSig!==pageCountSig())invalidateMeasure();
     // 滚动容器已经按阅读边距内缩；恢复锚点时使用容器内偏移，避免重复叠加 marginTop。
     relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode()&&!imageAnchor,scrollOffset:8,modeSwitch:flowChanged||pageModeChanged});
+    if(modeDiagSeq){modeSwitchDiagLog(modeDiagSeq,'after_relayout',anchorOffset);modeSwitchDiagSchedule(modeDiagSeq,anchorOffset);}
     if(flowChanged||pageModeChanged)scheduleImageVisualAnchorRestore(imageAnchor);
     scheduleMeasure();
   }
@@ -202,6 +260,20 @@ function pagedImageSourcePage(rect,rootRect,step){
   if(!rect||!rootRect)return -1;
   return Math.max(0,Math.floor((rect.left-rootRect.left+1)/Math.max(1,step||1)));
 }
+function pagedTextLineBottomOnPage(line,rootRect,step,page){
+  if(!line)return -1;
+  var fragments=line.fragments||[];
+  if(fragments.length){
+    var bottom=-1;
+    for(var i=0;i<fragments.length;i++){
+      var fragment=fragments[i];
+      if(!fragment||pagedImageSourcePage(fragment,rootRect,step)!==page)continue;
+      bottom=Math.max(bottom,Number(fragment.bottom)||Number(line.bottom)||-1);
+    }
+    return bottom;
+  }
+  return pagedImageSourcePage(line,rootRect,step)===page?(Number(line.bottom)||-1):-1;
+}
 function refreshPagedImagePreview(){
   if(!root||!pager||isScrollMode()||isDualPage()){clearPagedImagePreview();return;}
   var pr=viewRect(),rr=root.getBoundingClientRect(),step=pageStep||window.innerWidth||1,current=pageInCh;
@@ -220,7 +292,11 @@ function refreshPagedImagePreview(){
   var lines=filterTextLines(documentTextLineRects()),last=mg(S.marginTop);
   for(var j=0;j<lines.length;j++){
     var line=lines[j];
-    if(pagedImageSourcePage(line,rr,step)===current)last=Math.max(last,line.bottom);
+    // 相同纵坐标的文字会被 documentTextLineRects 合并为一条逻辑行，且可能
+    // 同时包含多个分栏的片段。使用整行 left 判断所属页会漏掉当前栏末尾正文，
+    // 让图片预览提前覆盖文字。必须逐片段判断所属栏并取当前栏真实底部。
+    var lineBottom=pagedTextLineBottomOnPage(line,rr,step,current);
+    if(lineBottom>=0)last=Math.max(last,lineBottom);
   }
   var pageBottom=Math.min(pr.height||viewportHeight(),pagedBoxHeight())-mg(S.marginBottom);
   var free=Math.floor(pageBottom-last-6);

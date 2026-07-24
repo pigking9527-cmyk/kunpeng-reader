@@ -48,12 +48,29 @@
     switch (action.type) {
       case "SET_OVERLAY": {
         const overlay = overlayValues.has(action.overlay) ? action.overlay : OVERLAY.NONE;
-        return Object.freeze({ ...current, overlay, settingsPointerExited: false });
+        // 书内搜索属于工具栏；沉浸模式下即使焦点暂时被 Windows 输入法
+        // 候选窗拿走，也不能让搜索框跟着工具栏一起隐去。
+        return Object.freeze({
+          ...current,
+          overlay,
+          toolbar:
+            overlay === OVERLAY.SEARCH && isImmersiveState(current.toolbar)
+              ? TOOLBAR.IMMERSIVE_PINNED
+              : current.toolbar,
+          settingsPointerExited: false,
+        });
       }
       case "TOOLBAR_POINTER_LEAVE":
         return Object.freeze({
           ...current,
-          toolbar: isImmersiveState(current.toolbar) ? TOOLBAR.IMMERSIVE_HIDDEN : TOOLBAR.NORMAL,
+          // 中文 IME 的候选窗可能导致 WebView 收到一次 pointerleave。
+          // 搜索仍打开时保持工具栏可见，不能仅因这个事件把输入框视觉隐藏。
+          toolbar:
+            current.overlay === OVERLAY.SEARCH && isImmersiveState(current.toolbar)
+              ? TOOLBAR.IMMERSIVE_PINNED
+              : isImmersiveState(current.toolbar)
+                ? TOOLBAR.IMMERSIVE_HIDDEN
+                : TOOLBAR.NORMAL,
           settingsPointerExited: current.overlay === OVERLAY.SETTINGS,
         });
       case "TOOLBAR_POINTER_ENTER":

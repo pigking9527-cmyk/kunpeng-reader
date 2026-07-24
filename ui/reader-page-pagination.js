@@ -7,11 +7,15 @@ function isLinePagedMode(){return false;}
 function usesLineBreakPaging(){return isScrollMode();}
 function columnsPerView(){return isDualPage()?2:1;}
 function columnPitch(){return window.innerWidth/columnsPerView();}
+// 全书页数按没有打开智读侧栏时的阅读窗口宽度统计。智读只临时压缩正文，
+// 不应产生另一套页数缓存；真正调整窗口时由父页面更新此宽度。
+var pageCountViewportWidth=Math.max(1,Math.round(window.innerWidth||1));
+function pageCountWidth(){return Math.max(1,Math.round(pageCountViewportWidth||window.innerWidth||1));}
 // 版式签名：窗口尺寸+字体/字号/行距/段距/字间距/页边距必须一致。
 function layoutSig(){return [window.innerWidth,viewportHeight(),S.styleMode,S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.pageMode,S.flowMode].join('|');}
 // 书籍总页数以单页版式为基准：双页只改变一次展示几页，不能把总页数除以二。
-// 因此页数缓存不包含 pageMode；滚动模式的页高口径不同，仍独立缓存。
-function pageCountSig(){return [window.innerWidth,viewportHeight(),S.styleMode,S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.flowMode].join('|');}
+// 因此页数缓存不包含 pageMode；智读侧栏宽度也不参与；滚动模式的页高口径不同，仍独立缓存。
+function pageCountSig(){return [pageCountWidth(),viewportHeight(),S.styleMode,S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.flowMode].join('|');}
 
 function scrollBottomBuffer(){
   if(!usesLineBreakPaging())return 0;
@@ -164,7 +168,7 @@ function pagedPageCountFromContent(el){
   return isDualPage()?Math.max(1,Math.ceil(physical/2)):physical;
 }
 function pageCountLayout(){
-  var vw=window.innerWidth,l=mg(S.marginLeft),r=mg(S.marginRight);
+  var vw=pageCountWidth(),l=mg(S.marginLeft),r=mg(S.marginRight);
   var maxTotal=Math.max(0,vw-160);
   if(l+r>maxTotal&&l+r>0){
     var s=maxTotal/(l+r);l=Math.floor(l*s);r=Math.floor(r*s);

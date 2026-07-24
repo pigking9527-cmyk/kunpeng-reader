@@ -76,6 +76,300 @@ function toggleReaderToolbar() {
 }
 window.toggleReaderToolbar = toggleReaderToolbar;
 const readerToolbar = document.querySelector(".toolbar");
+const aiReaderSide = document.getElementById("ai-reader-side");
+const aiReaderStatus = document.getElementById("ai-reader-status");
+const aiReaderAnswer = document.getElementById("ai-reader-answer");
+const aiReaderSources = document.getElementById("ai-reader-sources");
+const aiReaderQuestion = document.getElementById("ai-reader-question");
+const aiReaderHistory = document.getElementById("ai-reader-history");
+let aiReaderSelectedText = "";
+let aiReaderRequestRunning = false;
+let aiReaderSidePending = null;
+let aiReaderSideTimer = null;
+let aiReaderSideRequestId = 0;
+function applyAiReaderSide(open, requestId = 0) {
+  aiReaderSidePending = null;
+  if (aiReaderSideTimer) { clearTimeout(aiReaderSideTimer); aiReaderSideTimer = null; }
+  if (!aiReaderSide) return;
+  document.body.classList.toggle("ai-reader-open", !!open);
+  // 强制读取最终 iframe 宽度后再通知正文页。正文页会等到这个宽度连续两帧稳定，
+  // 才按准备阶段记录的字符偏移重新分页，避免 WebView2 的 resize 时序竞争。
+  if (requestId && frameReady && !isPdf) {
+    requestAnimationFrame(() => {
+      const width = Math.round(frame.getBoundingClientRect().width || 0);
+      sendToPage({ aiReaderSideCommit: requestId, aiReaderSideExpectedWidth: width });
+    });
+  }
+}
+function setAiReaderSide(open, focusAnchor = null) {
+  const next = !!open;
+  if (!frameReady || isPdf) { applyAiReaderSide(next); return; }
+  const requestId = ++aiReaderSideRequestId;
+  aiReaderSidePending = { open: next, requestId };
+  // 侧栏会改变正文宽度。这里不再用刚被高亮的文字作为分页锚点：它可能位于
+  // 视口中部，窄屏重排后会被分到另一页。正文 iframe 会保存当前视口顶部的
+  // 源文本偏移，并在 resize 后以该偏移恢复页面。
+  sendToPage({
+    preserveAnchor: 1,
+    aiReaderSideRequestId: requestId,
+    pageCountViewportWidth: Math.round(document.documentElement.clientWidth || window.innerWidth || 1),
+  });
+  if (aiReaderSideTimer) clearTimeout(aiReaderSideTimer);
+  // 页面尚未就绪或消息丢失时仍能打开；正常路径会在锚点确认后更快执行。
+  aiReaderSideTimer = setTimeout(() => {
+    if (aiReaderSidePending?.requestId === requestId) applyAiReaderSide(next, requestId);
+  }, 420);
+}
+function aiReaderSetStatus(value) { if (aiReaderStatus) aiReaderStatus.textContent = value || ""; }
+const aiReaderProviderInput = document.getElementById("ai-reader-provider");
+const aiReaderBaseUrlInput = document.getElementById("ai-reader-base-url");
+const aiReaderModelInput = document.getElementById("ai-reader-model");
+const aiReaderCustomModelInput = document.getElementById("ai-reader-custom-model");
+const aiReaderModelTip = document.getElementById("ai-reader-model-tip");
+const AI_READER_PROVIDERS = {
+  deepseek: {
+    baseUrl: "https://api.deepseek.com",
+    models: [["deepseek-v4-flash", "DeepSeek V4 Flash（推荐，较快）"], ["deepseek-v4-pro", "DeepSeek V4 Pro（更强）"]],
+    tip: "DeepSeek 使用 OpenAI 兼容接口；旧 deepseek-chat 已停止支持。",
+  },
+  openai: {
+    baseUrl: "https://api.openai.com/v1",
+    models: [["gpt-5.6-luna", "GPT-5.6 Luna（经济）"], ["gpt-5.6-terra", "GPT-5.6 Terra（平衡）"], ["gpt-5.6-sol", "GPT-5.6 Sol（高能力）"]],
+    tip: "OpenAI 使用 Chat Completions API；建议阅读问答从 Luna 或 Terra 开始。",
+  },
+  anthropic: {
+    baseUrl: "https://api.anthropic.com",
+    models: [["claude-haiku-4-5", "Claude Haiku 4.5（较快）"], ["claude-sonnet-5", "Claude Sonnet 5（平衡）"], ["claude-opus-5", "Claude Opus 5（高能力）"]],
+    tip: "Anthropic 使用原生 Messages API，程序会使用 x-api-key，不会套用 OpenAI 协议。",
+  },
+  compatible: {
+    baseUrl: "",
+    models: [],
+    tip: "适用于 OpenAI 兼容接口；填写服务商提供的基础地址和模型名。",
+  },
+};
+function normalizeAiReaderProvider(provider) {
+  return Object.prototype.hasOwnProperty.call(AI_READER_PROVIDERS, provider) ? provider : "compatible";
+}
+function aiReaderSelectedModel() {
+  return aiReaderProviderInput?.value === "compatible"
+    ? (aiReaderCustomModelInput?.value || "").trim()
+    : (aiReaderModelInput?.value || "").trim();
+}
+function configureAiReaderProvider(provider, selectedModel = "", resetBase = false) {
+  const key = normalizeAiReaderProvider(provider);
+  const preset = AI_READER_PROVIDERS[key];
+  if (aiReaderProviderInput) aiReaderProviderInput.value = key;
+  if (resetBase && aiReaderBaseUrlInput) aiReaderBaseUrlInput.value = preset.baseUrl;
+  if (aiReaderModelTip) aiReaderModelTip.textContent = preset.tip;
+  if (!aiReaderModelInput || !aiReaderCustomModelInput) return;
+  const isCustom = key === "compatible";
+  aiReaderModelInput.hidden = isCustom;
+  aiReaderCustomModelInput.hidden = !isCustom;
+  if (isCustom) {
+    aiReaderCustomModelInput.value = selectedModel || aiReaderCustomModelInput.value || "";
+    return;
+  }
+  aiReaderModelInput.replaceChildren();
+  preset.models.forEach(([value, label]) => {
+    const option = document.createElement("option"); option.value = value; option.textContent = label; aiReaderModelInput.appendChild(option);
+  });
+  const known = preset.models.some(([value]) => value === selectedModel);
+  aiReaderModelInput.value = known ? selectedModel : preset.models[0][0];
+}
+aiReaderProviderInput?.addEventListener("change", () => configureAiReaderProvider(aiReaderProviderInput.value, "", true));
+configureAiReaderProvider(aiReaderProviderInput?.value || "deepseek", "deepseek-v4-flash", false);
+function aiReaderHistoryKey() { return "aiReaderHistoryV1:" + String(window.currentBookId || currentBookId || "unknown"); }
+function aiReaderTaskLabel(task) { return task === "summary" ? "总结已读内容" : task === "mindmap" ? "生成脑图" : "提问"; }
+function aiReaderReadHistory() {
+  try {
+    const entries = JSON.parse(localStorage.getItem(aiReaderHistoryKey()) || "[]");
+    return Array.isArray(entries) ? entries.slice(0, 40) : [];
+  } catch (_) { return []; }
+}
+function aiReaderSaveHistory(entry) {
+  try {
+    const entries = aiReaderReadHistory();
+    entries.unshift(entry);
+    localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(entries.slice(0, 40)));
+  } catch (_) { /* 历史不可用不影响本次问答。 */ }
+}
+function aiReaderRenderSources(sources) {
+  if (!aiReaderSources) return;
+  const list = aiReaderSources.querySelector("ul");
+  if (!sources || !sources.length) { aiReaderSources.hidden = true; return; }
+  list.replaceChildren(...sources.map((source) => {
+    const item = document.createElement("li");
+    item.textContent = "第 " + (Number(source.chapter || 0) + 1) + " 章：" + String(source.excerpt || "");
+    return item;
+  }));
+  aiReaderSources.hidden = false;
+}
+function aiReaderParseMindmap(content) {
+  let text = String(content || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const first = text.indexOf("{"); const last = text.lastIndexOf("}");
+  if (first >= 0 && last > first) text = text.slice(first, last + 1);
+  try {
+    const root = JSON.parse(text);
+    return root && typeof root === "object" && root.title ? root : null;
+  } catch (_) { return null; }
+}
+function aiReaderMindmapNode(title, x, y, root) {
+  const ns = "http://www.w3.org/2000/svg";
+  const group = document.createElementNS(ns, "g");
+  if (root) group.setAttribute("class", "root");
+  const rect = document.createElementNS(ns, "rect");
+  rect.setAttribute("x", String(x)); rect.setAttribute("y", String(y - 19));
+  rect.setAttribute("width", "158"); rect.setAttribute("height", "38"); rect.setAttribute("rx", "9");
+  const label = document.createElementNS(ns, "text");
+  label.setAttribute("x", String(x + 79)); label.setAttribute("y", String(y + 5)); label.setAttribute("text-anchor", "middle");
+  label.textContent = String(title || "未命名").replace(/\s+/g, " ").slice(0, 16);
+  group.append(rect, label);
+  return group;
+}
+function aiReaderRenderMindmap(tree) {
+  const wrap = document.createElement("div"); wrap.className = "ai-reader-mindmap";
+  const ns = "http://www.w3.org/2000/svg";
+  const leaves = (node) => {
+    const children = Array.isArray(node.children) ? node.children.filter((child) => child && typeof child === "object") : [];
+    return children.length ? children.reduce((total, child) => total + leaves(child), 0) : 1;
+  };
+  const depth = (node) => {
+    const children = Array.isArray(node.children) ? node.children : [];
+    return children.length ? 1 + Math.max(...children.map(depth)) : 1;
+  };
+  const svg = document.createElementNS(ns, "svg");
+  const leafCount = Math.min(80, leaves(tree));
+  svg.setAttribute("width", String(Math.max(420, depth(tree) * 194 + 28)));
+  svg.setAttribute("height", String(Math.max(180, leafCount * 62 + 32)));
+  let nextLeaf = 0;
+  const draw = (node, level) => {
+    const children = Array.isArray(node.children) ? node.children.filter((child) => child && typeof child === "object") : [];
+    const childLayouts = children.map((child) => draw(child, level + 1));
+    const y = childLayouts.length ? childLayouts.reduce((sum, child) => sum + child.y, 0) / childLayouts.length : 32 + (nextLeaf++) * 62;
+    const x = 14 + level * 194;
+    childLayouts.forEach((child) => {
+      const path = document.createElementNS(ns, "path");
+      path.setAttribute("d", `M ${x + 158} ${y} C ${x + 178} ${y}, ${child.x - 20} ${child.y}, ${child.x} ${child.y}`);
+      svg.appendChild(path);
+    });
+    svg.appendChild(aiReaderMindmapNode(node.title, x, y, level === 0));
+    return { x, y };
+  };
+  draw(tree, 0); wrap.appendChild(svg); return wrap;
+}
+function aiReaderRenderAnswer(answer, task) {
+  if (!aiReaderAnswer) return;
+  let content = String(answer.content || "");
+  if (task === "mindmap") {
+    const tree = aiReaderParseMindmap(content);
+    if (tree) aiReaderAnswer.replaceChildren(aiReaderRenderMindmap(tree));
+    else aiReaderAnswer.textContent = content || "模型没有返回可绘制的脑图，请重试。";
+  } else {
+    aiReaderAnswer.textContent = content || "没有得到可显示的回答。";
+  }
+  aiReaderAnswer.hidden = false;
+  aiReaderHistory?.classList.remove("show");
+  aiReaderAnswer.classList.remove("empty");
+  aiReaderRenderSources(answer.sources);
+}
+function aiReaderShowHistory() {
+  if (!aiReaderHistory) return;
+  const showing = aiReaderHistory.classList.toggle("show");
+  if (!showing) { aiReaderAnswer.hidden = false; return; }
+  aiReaderAnswer.hidden = true;
+  aiReaderSources.hidden = true;
+  const entries = aiReaderReadHistory();
+  aiReaderHistory.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement("div"); empty.className = "ai-reader-history-empty"; empty.textContent = "这本书还没有智读记录。"; aiReaderHistory.appendChild(empty); return;
+  }
+  entries.forEach((entry) => {
+    const item = document.createElement("button"); item.type = "button"; item.className = "ai-reader-history-item";
+    const question = document.createElement("span"); question.className = "ai-reader-history-question";
+    question.textContent = entry.question || aiReaderTaskLabel(entry.task);
+    const meta = document.createElement("span"); meta.className = "ai-reader-history-meta";
+    meta.textContent = `${aiReaderTaskLabel(entry.task)} · ${entry.at ? new Date(entry.at).toLocaleString() : "历史记录"}`;
+    item.append(question, meta);
+    item.addEventListener("click", () => aiReaderRenderAnswer(entry, entry.task || "question"));
+    aiReaderHistory.appendChild(item);
+  });
+}
+async function openAiReader(prefill = "", focusAnchor = null) {
+  setAiReaderSide(true, focusAnchor);
+  if (typeof closeSettings === "function") closeSettings();
+  aiReaderSelectedText = String(prefill || "").trim().slice(0, 2400);
+  if (prefill && aiReaderQuestion) {
+    aiReaderQuestion.value = `请结合已读内容解释这段文字：\n${String(prefill).trim().slice(0, 900)}`;
+    setTimeout(() => aiReaderQuestion.focus(), 0);
+  }
+  try {
+    const status = await invoke("ai_reader_status");
+    configureAiReaderProvider(status.provider || "deepseek", status.model || "deepseek-v4-flash", false);
+    aiReaderBaseUrlInput.value = status.baseUrl || AI_READER_PROVIDERS[normalizeAiReaderProvider(status.provider)].baseUrl;
+    aiReaderSetStatus(status.configured ? "已配置本机 API" : "请先保存 API 配置");
+    document.getElementById("ai-reader-config").open = !status.configured;
+  } catch (error) { aiReaderSetStatus("读取配置失败：" + error); }
+}
+async function runAiReader(task) {
+  if (aiReaderRequestRunning) return;
+  const question = aiReaderQuestion?.value?.trim() || (task === "summary" ? "总结目前已读的内容" : task === "mindmap" ? "梳理目前已读内容的脑图" : "");
+  if (task === "question" && !question) { aiReaderSetStatus("请输入问题"); aiReaderQuestion?.focus(); return; }
+  aiReaderRequestRunning = true;
+  aiReaderSetStatus("智读正在整理已读内容…");
+  aiReaderHistory?.classList.remove("show");
+  aiReaderAnswer.hidden = false;
+  aiReaderAnswer.textContent = "正在请求模型…";
+  aiReaderAnswer.classList.add("empty");
+  aiReaderSources.hidden = true;
+  try {
+    const answer = await invoke("ask_reading_assistant", { request: {
+      task,
+      question,
+      currentChapter: curChapter,
+      currentFraction: curChFrac,
+      selectedText: aiReaderSelectedText,
+    } });
+    aiReaderRenderAnswer(answer, task);
+    aiReaderSaveHistory({ task, question, content: answer.content || "", sources: answer.sources || [], at: new Date().toISOString() });
+    aiReaderSetStatus("完成");
+  } catch (error) {
+    aiReaderAnswer.textContent = "智读失败：" + String(error);
+    aiReaderAnswer.classList.remove("empty");
+    aiReaderSetStatus("失败");
+  } finally { aiReaderRequestRunning = false; }
+}
+document.getElementById("ai-reader-btn")?.addEventListener("click", (event) => { event.stopPropagation(); openAiReader(); });
+document.getElementById("ai-reader-close")?.addEventListener("click", () => setAiReaderSide(false));
+document.getElementById("ai-reader-history-btn")?.addEventListener("click", aiReaderShowHistory);
+document.getElementById("ai-reader-enter-submit")?.addEventListener("click", () => runAiReader("question"));
+aiReaderQuestion?.addEventListener("keydown", (event) => {
+  // Enter 提问，Shift + Enter 换行；候选词确认的 Enter 不得提前请求 API。
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+    event.preventDefault();
+    event.stopPropagation();
+    runAiReader("question");
+  }
+});
+document.getElementById("ai-reader-save-config")?.addEventListener("click", async () => {
+  const button = document.getElementById("ai-reader-save-config");
+  button.disabled = true;
+  try {
+    const status = await invoke("save_ai_reader_config", { request: {
+      provider: aiReaderProviderInput?.value || "compatible",
+      baseUrl: aiReaderBaseUrlInput?.value || "",
+      model: aiReaderSelectedModel(),
+      apiKey: document.getElementById("ai-reader-api-key").value,
+    }});
+    document.getElementById("ai-reader-api-key").value = "";
+    aiReaderSetStatus(status.configured ? "已安全保存到本机" : "配置不完整");
+    if (status.configured) document.getElementById("ai-reader-config").open = false;
+  } catch (error) { aiReaderSetStatus("保存失败：" + error); }
+  finally { button.disabled = false; }
+});
+document.getElementById("ai-reader-ask")?.addEventListener("click", () => runAiReader("question"));
+document.getElementById("ai-reader-summary")?.addEventListener("click", () => runAiReader("summary"));
+document.getElementById("ai-reader-mindmap")?.addEventListener("click", () => runAiReader("mindmap"));
 readerToolbar?.addEventListener("pointerenter", () => {
   ReaderShell.dispatch({ type: "TOOLBAR_POINTER_ENTER" });
 });
@@ -196,6 +490,9 @@ function setSettingsOpen(open) {
 }
 function closeSettings() {
   setSettingsOpen(false);
+}
+function isSearchInputEditActive() {
+  return typeof window.isReaderSearchEditing === "function" && window.isReaderSearchEditing();
 }
 // 把"搜索框/设置面板是否打开"同步给合并页：打开时正文点击只用于关闭浮层
 function syncOverlay() {
@@ -541,7 +838,14 @@ document.addEventListener("mouseup", () => {
   }
 });
 window.addEventListener("resize", () => {
-  if (!isPdf) showProgressLoading();
+  if (!isPdf) {
+    showProgressLoading();
+    if (frameReady) {
+      sendToPage({
+        pageCountViewportWidth: Math.round(document.documentElement.clientWidth || window.innerWidth || 1),
+      });
+    }
+  }
   updateThumb();
 });
 
@@ -645,6 +949,13 @@ document.getElementById("info-desc").addEventListener("blur", () => {
 // 接收合并页上报：阅读进度 / 正文被点击 / 搜索结果数
 window.addEventListener("message", (e) => {
   if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
+  if (e.data.readerAnchorReady) {
+    const pending = aiReaderSidePending;
+    if (pending && (!e.data.aiReaderSideRequestId || e.data.aiReaderSideRequestId === pending.requestId)) {
+      applyAiReaderSide(pending.open, pending.requestId);
+    }
+    return;
+  }
   if (typeof e.data.readerPerf === "string") {
     invoke("reader_perf_log", { event: e.data.readerPerf }).catch(() => {});
     return;
@@ -729,13 +1040,13 @@ window.addEventListener("message", (e) => {
   if (e.data.searchResults && isPdf) renderResults(rsearchTerm, e.data.searchResults); // PDF 书内搜索结果
   if (e.data.uiClick) {
     // 正文被点击：关闭外壳浮层（沉浸与非沉浸一致）。
-    ReaderShell.closeOverlay();
+    if (!isSearchInputEditActive()) ReaderShell.closeOverlay();
   }
   if (e.data.userNav) {
     // 正文区键盘/滚轮翻页：收起搜索框与沉浸工具栏。
     // 不在这里关设置面板——设置途中（滑块/数字框调节）可能触发翻页类事件，会误关；
     // 设置面板只在“点设置页之外”时关闭（见 uiClick 与下方 document 点击处理）。
-    if (ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH)) toggleSearch(false);
+    if (ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH) && !isSearchInputEditActive()) toggleSearch(false);
     ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
   }
   if (e.data.centerTap) toggleReaderToolbar();
@@ -745,6 +1056,10 @@ window.addEventListener("message", (e) => {
     if (vchaps.length) sendToPage({ vchaps }); // 把逻辑章节表交给合并页
     sendToPage({ highlights }); // 把高亮交给合并页渲染
     if (!isPdf) {
+      // 页数使用阅读窗口的稳定宽度；智读侧栏之后只压缩正文，不生成另一套缓存。
+      sendToPage({
+        pageCountViewportWidth: Math.round(document.documentElement.clientWidth || window.innerWidth || 1),
+      });
       // 取上次测好的页数缓存：版式一致则合并页直接采用，免重算
       invoke("get_page_cache")
         .then((pc) => { if (pc) sendToPage({ pageCache: pc }); })
@@ -787,13 +1102,23 @@ window.addEventListener("message", (e) => {
     }
   }
   if (e.data.webSearch) {
-    invoke("web_search", { term: e.data.webSearch }).catch(() => {});
+    const request = typeof e.data.webSearch === "string"
+      ? { term: e.data.webSearch, engine: "baidu" }
+      : e.data.webSearch;
+    invoke("web_search", { term: request.term, engine: request.engine || "baidu" }).catch(() => {});
   }
   if (e.data.crossSearch) {
     openCrossSearch(e.data.crossSearch);
   }
   if (e.data.semanticSearch) {
     openSemanticSearch(e.data.semanticSearch);
+  }
+  if (e.data.aiReader) {
+    const request = e.data.aiReader;
+    openAiReader(request.text || "", {
+      start: request.anchorStart,
+      end: request.anchorEnd,
+    });
   }
   if (e.data.getTranslationCredentialStatus) {
     const provider = String(e.data.getTranslationCredentialStatus || "");
@@ -897,6 +1222,14 @@ window.addEventListener("message", (e) => {
       renderHighlights();
     });
   }
+  if (e.data.setHighlightColor) {
+    const { index, color } = e.data.setHighlightColor;
+    invoke("set_highlight_color", { index, color }).then((list) => {
+      highlights = list;
+      sendToPage({ highlights });
+      renderHighlights();
+    });
+  }
   if (e.data.addBookmark) {
     const o = e.data.addBookmark;
     // 统一标签：第 N 页/章 · 百分比 ·（选中的文字片段，若有）
@@ -934,6 +1267,9 @@ document.addEventListener("click", (e) => {
 
 // 焦点在外壳时，把翻页键转发给合并页
 window.addEventListener("keydown", (e) => {
+  // 中文输入法候选/上屏会发 Process（keyCode 229）及组合键事件；
+  // 这些事件不能触发阅读器的翻页和关闭浮层逻辑。
+  if (e.isComposing || e.key === "Process" || e.keyCode === 229) return;
   // 焦点在输入控件（搜索框、设置里的滑块/数字框/下拉）时，方向键用于调节数值，
   // 不能抢去翻页，否则会 preventDefault 掉调节、还顺手关掉设置面板
   const ae = document.activeElement;

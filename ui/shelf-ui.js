@@ -31,6 +31,17 @@ const emptyEl = document.getElementById("empty");
 const contentEl = document.querySelector(".content");
 const shelfScrollbar = document.getElementById("shelf-scrollbar");
 const shelfScrollbarThumb = document.getElementById("shelf-scrollbar-thumb");
+const tagFilterList = document.getElementById("tag-filter-list");
+const collectionFilterList = document.getElementById("collection-filter-list");
+const organizationFilterModal = document.getElementById("organization-filter-modal");
+const organizationFilterTitle = document.getElementById("organization-filter-title");
+const organizationFilterNote = document.getElementById("organization-filter-note");
+const organizationFilterOptions = document.getElementById("organization-filter-options");
+const organizationFilterClose = document.getElementById("organization-filter-close");
+const organizationFilterCancel = document.getElementById("organization-filter-cancel");
+const organizationFilterClear = document.getElementById("organization-filter-clear");
+const organizationFilterApply = document.getElementById("organization-filter-apply");
+const organizerMenu = options.organizerMenuElement || document.getElementById("book-organizer-menu");
 let books = [];
 let sortKey = localStorage.getItem("shelfSort") || "title";
 if (sortKey === "rating") sortKey = "title";
@@ -51,6 +62,20 @@ try {
 let minRating = +(localStorage.getItem("minRating") || 0);
 let searchQuery = "";
 let selected = new Set();
+function organizationName(value) { return String(value || "").trim(); }
+function organizationKey(value) { return organizationName(value).toLocaleLowerCase("zh-CN"); }
+function loadOrganizationFilter(key) {
+  try {
+    const values = JSON.parse(localStorage.getItem(key) || "[]");
+    return new Set(Array.isArray(values) ? values.map(organizationKey).filter(Boolean) : []);
+  } catch (_) { return new Set(); }
+}
+function saveOrganizationFilter(key, values) {
+  localStorage.setItem(key, JSON.stringify(Array.from(values)));
+}
+let tagFilter = loadOrganizationFilter("shelfTagFilter");
+let collectionFilter = loadOrganizationFilter("shelfCollectionFilter");
+let organizationFilterDraft = null;
 let shelfLoaded = false;
 let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0";
 let showCoverRating = localStorage.getItem("showCoverRating") !== "0";
@@ -134,6 +159,21 @@ makeStars(filterStarsEl, (value) => {
   applyView();
 });
 filterStarsEl.setVal(minRating);
+
+document.getElementById("reading-filter-all")?.addEventListener("click", () => {
+  readingFilter = { unread: true, reading: true, done: true };
+  localStorage.setItem("readingFilter", JSON.stringify(readingFilter));
+  document.querySelectorAll(".rfilter").forEach((checkbox) => { checkbox.checked = true; });
+  minRating = 0;
+  localStorage.removeItem("minRating");
+  filterStarsEl.setVal(0);
+  tagFilter.clear();
+  collectionFilter.clear();
+  saveOrganizationFilter("shelfTagFilter", tagFilter);
+  saveOrganizationFilter("shelfCollectionFilter", collectionFilter);
+  renderOrganizationFilters();
+  applyView();
+});
 
 const setCoverProgress = document.getElementById("set-cover-prog");
 const setCoverRating = document.getElementById("set-cover-rating");
@@ -272,6 +312,7 @@ function closeShelfCardFloaters() {
   filterPanel.classList.remove("show");
   closeAccountPanel();
   closeSearch(false);
+  closeBookOrganizer();
 }
 
 function bookCard(b, index = 0) {
@@ -366,6 +407,13 @@ function bookCard(b, index = 0) {
       else alertAction("打开失败：" + s);
     });
   });
+  card.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // 书卡会为避免封面闪烁而复用；右键整理必须拿到书架中的最新数据，
+    // 不能使用创建卡片时闭包保存的旧标签/收藏夹快照。
+    openBookOrganizer(getBook(b.id) || b, e);
+  });
 
   return card;
 }
@@ -433,7 +481,15 @@ function matchesShelfSearch(b) {
   );
 }
 function hasActiveShelfFilters() {
-  return minRating > 0 || !(readingFilter.unread && readingFilter.reading && readingFilter.done);
+  return minRating > 0 || tagFilter.size > 0 || collectionFilter.size > 0 || !(readingFilter.unread && readingFilter.reading && readingFilter.done);
+}
+
+function hasOrganization(book, selectedKeys, field) {
+  if (!selectedKeys.size) return true;
+  return (book[field] || []).some((value) => selectedKeys.has(organizationKey(value)));
+}
+function matchesOrganizationFilters(book) {
+  return hasOrganization(book, tagFilter, "tags") && hasOrganization(book, collectionFilter, "collections");
 }
 
 // 当前真正显示在书架上的书。搜索永远搜索整座书架，避免被评分/阅读过滤误挡住。
@@ -450,7 +506,310 @@ function currentList() {
   if (minRating > 0) {
     list = list.filter((b) => (b.rating || 0) >= minRating);
   }
+  list = list.filter(matchesOrganizationFilters);
   return list;
+}
+
+function organizationEntries(field) {
+  const entries = new Map();
+  books.forEach((book) => (book[field] || []).forEach((rawName) => {
+    const name = organizationName(rawName);
+    const key = organizationKey(name);
+    if (!key) return;
+    const entry = entries.get(key) || { name, key, count: 0 };
+    entry.count += 1;
+    entries.set(key, entry);
+  }));
+  return Array.from(entries.values()).sort((a, b) => a.name.localeCompare(b.name, "zh"));
+}
+function pruneOrganizationFilter(field, values, storageKey) {
+  const known = new Set(organizationEntries(field).map((entry) => entry.key));
+  let changed = false;
+  Array.from(values).forEach((key) => {
+    if (!known.has(key)) { values.delete(key); changed = true; }
+  });
+  if (changed) saveOrganizationFilter(storageKey, values);
+}
+function renderOrganizationFilterList(element, field, selectedKeys, emptyText) {
+  if (!element) return;
+  element.replaceChildren();
+  const entries = organizationEntries(field);
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "fp-choice-empty";
+    empty.textContent = emptyText;
+    element.appendChild(empty);
+    return;
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "fp-choice-open";
+  const label = document.createElement("span");
+  label.textContent = field === "tags" ? "选择标签" : "选择收藏夹";
+  const summary = document.createElement("small");
+  summary.textContent = selectedKeys.size ? "已选 " + selectedKeys.size + " 项" : "全部";
+  button.append(label, summary);
+  button.addEventListener("click", (event) => openOrganizationFilter(field, event.currentTarget));
+  element.appendChild(button);
+}
+function renderOrganizationFilters() {
+  pruneOrganizationFilter("tags", tagFilter, "shelfTagFilter");
+  pruneOrganizationFilter("collections", collectionFilter, "shelfCollectionFilter");
+  renderOrganizationFilterList(tagFilterList, "tags", tagFilter, "暂无标签");
+  renderOrganizationFilterList(collectionFilterList, "collections", collectionFilter, "暂无收藏夹");
+}
+
+function organizationFilterConfig(field) {
+  return field === "tags"
+    ? { field, title: "标签", selected: tagFilter, storageKey: "shelfTagFilter", empty: "暂无标签" }
+    : { field, title: "收藏夹", selected: collectionFilter, storageKey: "shelfCollectionFilter", empty: "暂无收藏夹" };
+}
+function renderOrganizationFilterOptions() {
+  if (!organizationFilterOptions || !organizationFilterDraft) return;
+  const config = organizationFilterConfig(organizationFilterDraft.field);
+  organizationFilterOptions.replaceChildren();
+  const entries = organizationEntries(config.field);
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "organization-filter-empty";
+    empty.textContent = config.empty;
+    organizationFilterOptions.appendChild(empty);
+    return;
+  }
+  entries.forEach((entry) => {
+    const label = document.createElement("label");
+    label.className = "organization-filter-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = organizationFilterDraft.keys.has(entry.key);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) organizationFilterDraft.keys.add(entry.key);
+      else organizationFilterDraft.keys.delete(entry.key);
+    });
+    const name = document.createElement("span");
+    name.textContent = entry.name;
+    label.append(checkbox, name);
+    organizationFilterOptions.appendChild(label);
+  });
+}
+function closeOrganizationFilter() {
+  organizationFilterDraft = null;
+  organizationFilterModal?.classList?.remove("show");
+}
+function positionOrganizationFilter(anchor) {
+  if (!anchor?.getBoundingClientRect || !organizationFilterModal) return;
+  const rect = anchor.getBoundingClientRect();
+  const viewportWidth = global.innerWidth || 1280;
+  const viewportHeight = global.innerHeight || 800;
+  const width = Math.min(430, viewportWidth - 32);
+  const height = 320;
+  const left = Math.max(8, Math.min(rect.left, viewportWidth - width - 8));
+  const top = Math.max(8, Math.min(rect.top, viewportHeight - height - 8));
+  organizationFilterModal.style.setProperty("--organization-filter-left", left + "px");
+  organizationFilterModal.style.setProperty("--organization-filter-top", top + "px");
+}
+function openOrganizationFilter(field, anchor) {
+  if (!organizationFilterModal || !organizationFilterOptions) return;
+  const config = organizationFilterConfig(field);
+  organizationFilterDraft = { field, keys: new Set(config.selected) };
+  organizationFilterTitle.textContent = "选择" + config.title;
+  organizationFilterNote.textContent = "可多选；不选择则不过滤。";
+  renderOrganizationFilterOptions();
+  // 必须在隐藏漏斗面板前取坐标；隐藏后的按钮 rect 会退化为 (0,0)，导致弹窗跑到左上角。
+  positionOrganizationFilter(anchor);
+  filterPanel.classList.remove("show");
+  organizationFilterModal.classList.add("show");
+}
+organizationFilterClose?.addEventListener("click", closeOrganizationFilter);
+organizationFilterCancel?.addEventListener("click", closeOrganizationFilter);
+organizationFilterClear?.addEventListener("click", () => {
+  if (!organizationFilterDraft) return;
+  organizationFilterDraft.keys.clear();
+  renderOrganizationFilterOptions();
+});
+organizationFilterApply?.addEventListener("click", () => {
+  if (!organizationFilterDraft) return;
+  const config = organizationFilterConfig(organizationFilterDraft.field);
+  if (config.field === "tags") tagFilter = new Set(organizationFilterDraft.keys);
+  else collectionFilter = new Set(organizationFilterDraft.keys);
+  saveOrganizationFilter(config.storageKey, config.field === "tags" ? tagFilter : collectionFilter);
+  closeOrganizationFilter();
+  renderOrganizationFilters();
+  applyView();
+});
+organizationFilterModal?.addEventListener("click", (event) => {
+  if (event.target === organizationFilterModal) closeOrganizationFilter();
+});
+
+let organizerBookId = null;
+function closeBookOrganizer() {
+  organizerBookId = null;
+  organizerMenu?.classList?.remove("show");
+}
+function menuButton(text, className = "org-action") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = text;
+  return button;
+}
+function positionBookOrganizer(event) {
+  if (!organizerMenu) return;
+  const margin = 8;
+  const width = organizerMenu.offsetWidth || 300;
+  const height = organizerMenu.offsetHeight || 360;
+  const viewportWidth = global.innerWidth || 1280;
+  const viewportHeight = global.innerHeight || 800;
+  organizerMenu.style.left = Math.max(margin, Math.min(event.clientX || margin, viewportWidth - width - margin)) + "px";
+  organizerMenu.style.top = Math.max(margin, Math.min(event.clientY || margin, viewportHeight - height - margin)) + "px";
+}
+function applyOrganizationChoice(book, field, entry, checked) {
+  const values = new Map((book[field] || []).map((value) => [organizationKey(value), organizationName(value)]));
+  if (checked) values.set(entry.key, entry.name); else values.delete(entry.key);
+  return Array.from(values.values());
+}
+async function saveBookOrganization(book, tags, collections) {
+  try {
+    const list = await invoke("set_book_organization", { id: book.id, tags, collections });
+    render(list);
+    const refreshed = getBook(book.id);
+    if (refreshed) renderBookOrganizer(refreshed);
+  } catch (error) {
+    alertAction("保存标签或收藏夹失败：" + error);
+  }
+}
+function appendOrganizationSection(menu, book, field, heading, addPlaceholder) {
+  const section = document.createElement("section");
+  section.className = "org-section";
+  const head = document.createElement("div");
+  head.className = "org-section-head";
+  const title = document.createElement("strong");
+  title.textContent = heading;
+  const manage = menuButton("管理");
+  manage.addEventListener("click", () => renderOrganizationManager(field, heading));
+  head.append(title, manage);
+  section.appendChild(head);
+
+  const entries = organizationEntries(field);
+  const selectedKeys = new Set((book[field] || []).map(organizationKey));
+  if (entries.length) {
+    const choices = document.createElement("div");
+    choices.className = "org-choices";
+    entries.forEach((entry) => {
+      const label = document.createElement("label");
+      label.className = "org-choice";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selectedKeys.has(entry.key);
+      checkbox.addEventListener("change", () => {
+        const values = applyOrganizationChoice(book, field, entry, checkbox.checked);
+        saveBookOrganization(book, field === "tags" ? values : (book.tags || []), field === "collections" ? values : (book.collections || []));
+      });
+      const labelText = document.createElement("span");
+      labelText.textContent = entry.name;
+      label.append(checkbox, labelText);
+      choices.appendChild(label);
+    });
+    section.appendChild(choices);
+  }
+  const create = document.createElement("div");
+  create.className = "org-create";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.maxLength = 32;
+  input.placeholder = addPlaceholder;
+  const add = menuButton("添加", "org-add");
+  const addValue = () => {
+    const name = organizationName(input.value);
+    if (!name) return;
+    const entry = { name, key: organizationKey(name) };
+    const values = applyOrganizationChoice(book, field, entry, true);
+    saveBookOrganization(book, field === "tags" ? values : (book.tags || []), field === "collections" ? values : (book.collections || []));
+  };
+  add.addEventListener("click", addValue);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); addValue(); }
+  });
+  create.append(input, add);
+  section.appendChild(create);
+  menu.appendChild(section);
+}
+function renderBookOrganizer(book) {
+  if (!organizerMenu || !book) return;
+  organizerBookId = String(book.id);
+  organizerMenu.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "org-menu-head";
+  const title = document.createElement("strong");
+  title.textContent = "整理《" + (book.title || "未命名图书") + "》";
+  const close = menuButton("×", "org-close");
+  close.setAttribute("aria-label", "关闭");
+  close.addEventListener("click", closeBookOrganizer);
+  head.append(title, close);
+  organizerMenu.appendChild(head);
+  appendOrganizationSection(organizerMenu, book, "tags", "标签", "新建标签");
+  appendOrganizationSection(organizerMenu, book, "collections", "收藏夹", "新建收藏夹");
+}
+function renderOrganizationManager(field, heading) {
+  if (!organizerMenu) return;
+  organizerMenu.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "org-menu-head";
+  const back = menuButton("‹ 返回", "org-back");
+  back.addEventListener("click", () => {
+    const book = getBook(organizerBookId);
+    if (book) renderBookOrganizer(book); else closeBookOrganizer();
+  });
+  const title = document.createElement("strong");
+  title.textContent = "管理" + heading;
+  head.append(back, title);
+  organizerMenu.appendChild(head);
+  const entries = organizationEntries(field);
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "org-empty";
+    empty.textContent = "暂无" + heading;
+    organizerMenu.appendChild(empty);
+    return;
+  }
+  entries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "org-manage-row";
+    const name = document.createElement("span");
+    name.textContent = entry.name + "（" + entry.count + "）";
+    const rename = menuButton("改名");
+    rename.addEventListener("click", async () => {
+      const next = organizationName(global.prompt("新的" + heading + "名称：", entry.name));
+      if (!next || next === entry.name) return;
+      try {
+        render(await invoke("rename_book_organization", { kind: field === "tags" ? "tag" : "collection", name: entry.name, newName: next }));
+        renderOrganizationManager(field, heading);
+      } catch (error) { alertAction("改名失败：" + error); }
+    });
+    const remove = menuButton("删除", "org-danger");
+    remove.addEventListener("click", async () => {
+      if (!confirmAction("删除“" + entry.name + "”？它会从所有图书中移除。")) return;
+      try {
+        render(await invoke("delete_book_organization", { kind: field === "tags" ? "tag" : "collection", name: entry.name }));
+        renderOrganizationManager(field, heading);
+      } catch (error) { alertAction("删除失败：" + error); }
+    });
+    row.append(name, rename, remove);
+    organizerMenu.appendChild(row);
+  });
+}
+function openBookOrganizer(book, event) {
+  if (!organizerMenu) return;
+  renderBookOrganizer(book);
+  organizerMenu.classList.add("show");
+  positionBookOrganizer(event);
+}
+if (organizerMenu) organizerMenu.addEventListener("click", (event) => event.stopPropagation());
+if (typeof document.addEventListener === "function") {
+  document.addEventListener("pointerdown", (event) => {
+    if (organizerMenu?.classList?.contains("show") && !organizerMenu.contains?.(event.target)) closeBookOrganizer();
+  });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeBookOrganizer(); });
 }
 
 const selectionGroup = document.getElementById("del-group");
@@ -684,6 +1043,7 @@ let lastJSON = ""; // 上次渲染的数据快照，数据没变就不重渲染�
 function render(list) {
   shelfLoaded = true;
   books = list;
+  renderOrganizationFilters();
   if (books.length && minRating > 0 && !books.some((b) => (b.rating || 0) >= minRating)) {
     minRating = 0;
     localStorage.removeItem("minRating");

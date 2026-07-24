@@ -19,6 +19,12 @@ test("accepts a bounded allowlisted message from the current frame", () => {
   assert.equal(guard.validateEvent(event, frame, { href: "http://tauri.localhost/reader.html" }), true);
 });
 
+test("web search accepts only the supported local engine choices", () => {
+  assert.equal(guard.validateData({ webSearch: { term: "南明史", engine: "baidu" } }), true);
+  assert.equal(guard.validateData({ webSearch: { term: "南明史", engine: "google" } }), true);
+  assert.equal(guard.validateData({ webSearch: { term: "南明史", engine: "other" } }), false);
+});
+
 test("rejects forged sources and origins", () => {
   const { event, frame } = eventFor({ ready: 1 });
   const location = { href: "http://tauri.localhost/reader.html" };
@@ -30,6 +36,20 @@ test("rejects unknown or ambiguous actions", () => {
   assert.equal(guard.validateData({ launchAnything: 1 }), false);
   assert.equal(guard.validateData({ webSearch: "x", semanticSearch: "x" }), false);
   assert.equal(guard.validateData([]), false);
+});
+
+test("智读选区请求只接受受限文本", () => {
+  assert.equal(guard.validateData({ aiReader: { text: "这一段是什么意思？" } }), true);
+  assert.equal(guard.validateData({ aiReader: { text: "这一段是什么意思？", anchorStart: 20, anchorEnd: 42 } }), true);
+  assert.equal(guard.validateData({ aiReader: { text: "这一段是什么意思？", anchorStart: 42, anchorEnd: 20 } }), false);
+  assert.equal(guard.validateData({ aiReader: { text: "x".repeat(20_001) } }), false);
+  assert.equal(guard.validateData({ aiReader: "任意对象外的内容" }), false);
+});
+
+test("highlight color changes allow only the four built-in palette keys", () => {
+  assert.equal(guard.validateData({ setHighlightColor: { index: 3, color: "g" } }), true);
+  assert.equal(guard.validateData({ setHighlightColor: { index: -1, color: "g" } }), false);
+  assert.equal(guard.validateData({ setHighlightColor: { index: 3, color: "orange" } }), false);
 });
 
 test("translation actions accept only a credential config id", () => {

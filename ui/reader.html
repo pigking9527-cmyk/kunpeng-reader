@@ -62,7 +62,8 @@
       .search-wrap { position: relative; display: inline-flex; }
       .rsearch {
         display: none; flex-direction: column; gap: 6px;
-        position: absolute; top: calc(100% + 8px); left: 0; z-index: 30;
+        /* 紧贴触发按钮，避免鼠标经过空隙时触发沉浸工具栏的 pointerleave。 */
+        position: absolute; top: 100%; left: 0; z-index: 30;
         width: 340px; max-width: 86vw; max-height: 70vh;
         padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px;
         background: #fff; box-shadow: 0 6px 20px rgba(0,0,0,0.2);
@@ -437,6 +438,64 @@
         transition: none;
         animation: settings-switch-auto-off 0.24s cubic-bezier(0.4, 0, 0.2, 1) both;
       }
+      :root { --ai-reader-width: clamp(320px, 29vw, 420px); }
+      body.ai-reader-open #frame { width: calc(100% - var(--ai-reader-width)); }
+      body.ai-reader-open #vbar { right: var(--ai-reader-width); }
+      body.ai-reader-open #loading { right: var(--ai-reader-width); }
+      .ai-reader-side {
+        position: absolute; z-index: 9; top: 0; right: 0; bottom: 0; width: var(--ai-reader-width);
+        display: none; flex-direction: column; min-width: 0; padding: 13px;
+        border-left: 1px solid #d9dee8; background: #fbfcff; box-shadow: -8px 0 20px rgba(25,39,70,.08);
+      }
+      body.ai-reader-open .ai-reader-side { display: flex; }
+      .ai-reader-side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .ai-reader-side-title { font-size: 17px; font-weight: 700; }
+      .ai-reader-help { margin: 10px 0 0; color: #687386; font-size: 12px; line-height: 1.5; }
+      .ai-reader-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+      .ai-reader-actions .tbtn { padding: 4px 7px; }
+      .ai-reader-question { width: 100%; min-height: 72px; resize: vertical; box-sizing: border-box; font: inherit; line-height: 1.5; padding: 9px; border: 1px solid #c9c9cf; border-radius: 7px; margin-top: 10px; }
+      .ai-reader-submit { display: flex; justify-content: flex-end; margin-top: 6px; }
+      .ai-reader-submit .tbtn { min-width: 106px; padding: 5px 10px; }
+      .ai-reader-submit + .ai-reader-answer { margin-top: 8px; }
+      .ai-reader-answer { flex: 1 1 auto; min-height: 100px; overflow: auto; white-space: pre-wrap; line-height: 1.65; padding: 10px; border: 1px solid #e1e4eb; border-radius: 7px; background: #fff; margin-top: 10px; }
+      .ai-reader-answer.empty { color: #8490a3; }
+      .ai-reader-mindmap { height: 100%; overflow: auto; border-radius: 6px; background: linear-gradient(135deg, #fafcff, #f4f7fd); }
+      .ai-reader-mindmap svg { display: block; min-width: 100%; }
+      .ai-reader-mindmap path { fill: none; stroke: #8eb1ef; stroke-width: 2; }
+      .ai-reader-mindmap rect { fill: #fff; stroke: #8cb0ef; stroke-width: 1.2; }
+      .ai-reader-mindmap .root rect { fill: #356ee4; stroke: #356ee4; }
+      .ai-reader-mindmap text { fill: #23334d; font: 13px "Microsoft YaHei", system-ui, sans-serif; pointer-events: none; }
+      .ai-reader-mindmap .root text { fill: #fff; font-weight: 600; }
+      .ai-reader-sources { color: #687386; font-size: 12px; }
+      .ai-reader-sources summary, .ai-reader-config summary { cursor: pointer; }
+      .ai-reader-sources ul { margin: 7px 0 0; padding-left: 20px; }
+      .ai-reader-config { border-top: 1px solid #e5e7ed; padding-top: 10px; }
+      .ai-reader-config-grid { display: grid; grid-template-columns: 88px 1fr; gap: 8px; align-items: center; margin-top: 10px; }
+      .ai-reader-config-grid input, .ai-reader-config-grid select { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; border: 1px solid #c9c9cf; border-radius: 6px; }
+      .ai-reader-model-control { min-width: 0; }
+      .ai-reader-model-tip { grid-column: 2; margin: -2px 0 2px; color: #687386; font-size: 11px; line-height: 1.45; }
+      .ai-reader-history { display: none; flex: 1 1 auto; min-height: 0; overflow: auto; margin-top: 10px; }
+      .ai-reader-history.show { display: block; }
+      .ai-reader-history-item { width: 100%; text-align: left; font: inherit; padding: 9px; margin: 0 0 7px; border: 1px solid #e1e4eb; border-radius: 7px; background: #fff; cursor: pointer; }
+      .ai-reader-history-item:hover { border-color: #93b4ff; background: #f3f7ff; }
+      .ai-reader-history-question { display: block; color: #263a5d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ai-reader-history-meta { display: block; color: #8490a3; font-size: 11px; margin-top: 4px; }
+      .ai-reader-history-empty { color: #8490a3; padding: 16px 2px; font-size: 13px; }
+      body.theme-dark .ai-reader-answer { background: #242529; border-color: #414248; color: #ddd; }
+      body.theme-dark .ai-reader-question, body.theme-dark .ai-reader-config-grid input, body.theme-dark .ai-reader-config-grid select { background: #2e2e30; color: #eee; border-color: #555; }
+      body.theme-dark .ai-reader-config { border-color: #444; }
+      body.theme-dark .ai-reader-side { background: #242529; border-color: #414248; }
+      body.theme-dark .ai-reader-mindmap { background: linear-gradient(135deg, #262a32, #202226); }
+      body.theme-dark .ai-reader-mindmap rect { fill: #30333a; stroke: #6f94d5; }
+      body.theme-dark .ai-reader-mindmap .root rect { fill: #356ee4; stroke: #4d84f0; }
+      body.theme-dark .ai-reader-mindmap text { fill: #e3ebff; }
+      body.theme-dark .ai-reader-history-item { background: #2e2e30; border-color: #414248; color: #ddd; }
+      body.theme-dark .ai-reader-history-item:hover { background: #36373c; border-color: #5a82ca; }
+      body.theme-dark .ai-reader-history-question { color: #bcd1ff; }
+      @media (max-width: 760px) {
+        :root { --ai-reader-width: min(88vw, 360px); }
+        body.ai-reader-open #frame { width: calc(100% - var(--ai-reader-width)); }
+      }
 
       /* 深色主题下的外壳（工具栏/目录/设置/弹窗） */
       body.theme-dark { background: #1c1c1e; color: #ddd; }
@@ -649,8 +708,7 @@
         <label>动画</label>
         <select id="set-turnfx">
           <option value="off">关闭</option>
-          <option value="google-paper">纸张效果（Google）</option>
-          <option value="curl">仿真翻页</option>
+          <option value="horizontal">水平翻页（整页左移）</option>
         </select>
       </div>
       <div class="row"><label>速度</label><input type="range" id="set-turnspeed" min="0.5" max="2" step="0.1" /><span class="val" id="v-turnspeed"></span></div>
@@ -692,6 +750,36 @@
     <div class="body">
       <!-- reader:// 内容位于独立 reader.localhost 源；allow-same-origin 仅用于章内容 fetch，仍与宿主源隔离。 -->
       <iframe id="frame" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin"></iframe>
+      <aside id="ai-reader-side" class="ai-reader-side" aria-label="智读">
+        <div class="ai-reader-side-head">
+          <span class="ai-reader-side-title">✨ 智读</span>
+          <button id="ai-reader-close" class="tbtn" type="button" title="关闭智读">✕</button>
+        </div>
+        <p class="ai-reader-help">只会发送当前书中已经读到的相关文字，不会自动上传整本书。</p>
+        <div class="ai-reader-actions">
+          <button id="ai-reader-ask" class="tbtn" type="button">提问</button>
+          <button id="ai-reader-summary" class="tbtn" type="button">总结</button>
+          <button id="ai-reader-mindmap" class="tbtn" type="button">生成脑图</button>
+          <button id="ai-reader-history-btn" class="tbtn" type="button">历史</button>
+          <span id="ai-reader-status" class="cross-status"></span>
+        </div>
+        <textarea id="ai-reader-question" class="ai-reader-question" placeholder="输入问题，按 Enter 自动提问；Shift + Enter 换行"></textarea>
+        <div class="ai-reader-submit"><button id="ai-reader-enter-submit" class="tbtn" type="button" title="与键盘 Enter 相同，向 API 发起提问">↵ 回车提问</button></div>
+        <div id="ai-reader-answer" class="ai-reader-answer empty">配置 API 后即可开始智读。</div>
+        <div id="ai-reader-history" class="ai-reader-history"></div>
+        <details id="ai-reader-sources" class="ai-reader-sources" hidden><summary>本次依据</summary><ul></ul></details>
+        <details id="ai-reader-config" class="ai-reader-config">
+          <summary>智读 API 配置（仅保存在本机）</summary>
+          <div class="ai-reader-config-grid">
+            <label for="ai-reader-provider">服务商</label><select id="ai-reader-provider"><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible">OpenAI 兼容接口</option></select>
+            <label for="ai-reader-base-url">接口地址</label><input id="ai-reader-base-url" type="url" value="https://api.deepseek.com" autocomplete="off" />
+            <label for="ai-reader-model">模型名</label><div class="ai-reader-model-control"><select id="ai-reader-model"></select><input id="ai-reader-custom-model" type="text" placeholder="填写兼容接口的模型名" autocomplete="off" hidden /></div>
+            <small id="ai-reader-model-tip" class="ai-reader-model-tip"></small>
+            <label for="ai-reader-api-key">API Key</label><input id="ai-reader-api-key" type="password" placeholder="填写或更新 API Key" autocomplete="off" />
+          </div>
+          <div class="ai-reader-actions" style="margin-top:10px"><button id="ai-reader-save-config" class="tbtn" type="button">保存本机配置</button></div>
+        </details>
+      </aside>
       <div id="loading" class="loading"><div class="spinner"></div><div>加载中…</div></div>
       <div id="backdrop" class="backdrop"></div>
       <aside id="toc" class="toc">

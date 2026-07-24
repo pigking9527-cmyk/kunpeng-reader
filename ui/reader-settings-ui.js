@@ -16,7 +16,7 @@ const DEFAULTS = {
   marginRight: 28,
   pageMode: "single",
   flowMode: "paged",
-  pageTurnEffect: "off",
+  pageTurnEffect: "horizontal",
   pageTurnSpeed: 1,
   ttsSource: "edge",
   ttsVoice: "zh-CN-XiaoxiaoNeural",
@@ -48,8 +48,12 @@ function normalizeModeSettings() {
     settings.styleMode = DEFAULTS.styleMode;
     changed = true;
   }
-  if (!["off", "google-paper", "curl"].includes(settings.pageTurnEffect)) {
-    settings.pageTurnEffect = "off";
+  if (["google-paper", "curl"].includes(settings.pageTurnEffect)) {
+    // 旧的两种动画统一迁移到新的水平整页翻动。
+    settings.pageTurnEffect = "horizontal";
+    changed = true;
+  } else if (!["off", "horizontal"].includes(settings.pageTurnEffect)) {
+    settings.pageTurnEffect = DEFAULTS.pageTurnEffect;
     changed = true;
   }
   const speed = parseFloat(settings.pageTurnSpeed);

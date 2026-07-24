@@ -8,8 +8,12 @@ const reader = fs.readFileSync(path.join(__dirname, "..", "reader.js"), "utf8");
 const shell = fs.readFileSync(path.join(__dirname, "..", "reader-shell-state.js"), "utf8");
 const notes = fs.readFileSync(path.join(__dirname, "..", "reader-notes-ui.js"), "utf8");
 const annotations = fs.readFileSync(path.join(__dirname, "..", "reader-page-annotations.js"), "utf8");
+const runtime = fs.readFileSync(path.join(__dirname, "..", "reader-page-runtime.js"), "utf8");
 const layout = fs.readFileSync(path.join(__dirname, "..", "reader-page-layout.js"), "utf8");
+const transition = fs.readFileSync(path.join(__dirname, "..", "reader-page-transition.js"), "utf8");
+const pageStyle = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
 const settingsUi = fs.readFileSync(path.join(__dirname, "..", "reader-settings-ui.js"), "utf8");
+const searchUi = fs.readFileSync(path.join(__dirname, "..", "reader-search-ui.js"), "utf8");
 
 test("reader toolbar buttons stay horizontal and do not flex-shrink", () => {
   assert.match(html, /\.tbtn\s*\{[^}]*white-space:\s*nowrap;/s);
@@ -30,6 +34,8 @@ test("reader progress names the whole-book page total once it is measured", () =
   assert.match(reader, /else if \(pageCountMeasuring\)[\s\S]*?showProgressLoading\(\)/);
   assert.match(reader, /if \(e\.data\.pageCache\)/);
   assert.match(reader, /complete: !!pc\.complete/);
+  assert.match(reader, /pageCountViewportWidth:\s*Math\.round\(document\.documentElement\.clientWidth/);
+  assert.match(annotations, /if\(!sideTxn\)[\s\S]*?pageSig!==pageCountSig\(\)/);
 });
 
 test("reader toolbar supports narrow windows and macOS system fonts", () => {
@@ -47,6 +53,98 @@ test("reader settings dropdown is not clipped by the toolbar", () => {
 test("reader settings dropdown has no pointer gap below the toolbar", () => {
   assert.match(html, /\.settings\s*\{[^}]*top:\s*100%;/s);
   assert.doesNotMatch(html, /\.settings\s*\{[^}]*top:\s*calc\(100%\s*\+\s*8px\);/s);
+});
+
+test("整页翻页仅保留水平滑动动画，并迁移旧动画设置", () => {
+  assert.match(html, /option value="horizontal">水平翻页（整页左移）<\/option>/);
+  assert.doesNotMatch(html, /纸张效果（Google）|仿真翻页/);
+  assert.match(settingsUi, /pageTurnEffect: "horizontal"/);
+  assert.match(settingsUi, /\["google-paper", "curl"\]\.includes\(settings\.pageTurnEffect\)/);
+  assert.match(transition, /return \/.*off\|horizontal.*test\(fx\)\?fx:'horizontal';/);
+  assert.match(transition, /turnFxDuration\(360\)/);
+  assert.match(transition, /captureTurnFxPage\('turn-fx-outgoing'\)[\s\S]*?move\(\);[\s\S]*?captureTurnFxPage\('turn-fx-incoming'\)/);
+  assert.match(transition, /function beginChapterTurnFx[\s\S]*?captureTurnFxPage\('turn-fx-outgoing'\)[\s\S]*?return showChapter\(chapter,where\)\.then[\s\S]*?captureTurnFxPage\('turn-fx-incoming'\)/);
+  assert.match(layout, /beginChapterTurnFx\(1,curCh\+1,'start'\)/);
+  assert.match(layout, /beginChapterTurnFx\(-1,curCh-1,'end'\)/);
+  assert.match(pageStyle, /#pager\.turn-fx-horizontal\.turn-fx-next[\s\S]*?turnFxHorizontalOutNext/);
+  assert.match(pageStyle, /@keyframes turnFxHorizontalOutNext[\s\S]*?translate3d\(-100%,0,0\)/);
+  assert.match(pageStyle, /@keyframes turnFxHorizontalInNext[\s\S]*?translate3d\(100%,0,0\)[\s\S]*?translate3d\(0,0,0\)/);
+  assert.match(pageStyle, /@keyframes turnFxHorizontalOutPrev[\s\S]*?translate3d\(100%,0,0\)/);
+  assert.doesNotMatch(pageStyle, /turn-fx-google-paper|turn-fx-curl|turn-fx-fold|turnFxGoogle|turnFxCurl/);
+});
+
+test("in-book search dropdown has no pointer gap below the toolbar", () => {
+  assert.match(html, /\.rsearch\s*\{[^}]*top:\s*100%;/s);
+  assert.doesNotMatch(html, /\.rsearch\s*\{[^}]*top:\s*calc\(100%\s*\+\s*8px\);/s);
+});
+
+test("in-book search remains open while the WebView briefly loses focus", () => {
+  assert.doesNotMatch(searchUi, /window\.addEventListener\("(?:blur|mouseout)"[\s\S]*?toggleSearch\(false\)/);
+  assert.match(searchUi, /window\.isReaderSearchEditing = function \(\)/);
+  assert.match(searchUi, /rsearchEditingUntil = Date\.now\(\) \+ 1200/);
+  assert.match(searchUi, /compositionstart/);
+  assert.match(searchUi, /rsearchComposing \|\| rsearch\.contains\(document\.activeElement\)/);
+  assert.match(reader, /function isSearchInputEditActive\(\)/);
+  assert.match(reader, /if \(!isSearchInputEditActive\(\)\) ReaderShell\.closeOverlay\(\)/);
+  assert.match(reader, /e\.isComposing \|\| e\.key === "Process" \|\| e\.keyCode === 229/);
+  assert.match(annotations, /e\.isComposing\|\|e\.key==='Process'\|\|e\.keyCode===229/);
+  assert.match(searchUi, /e\.key === "Escape"\) toggleSearch\(false\)/);
+});
+
+test("an open in-book search pins the immersive toolbar during IME pointer transitions", () => {
+  assert.match(shell, /overlay === OVERLAY\.SEARCH && isImmersiveState\(current\.toolbar\)[\s\S]*?TOOLBAR\.IMMERSIVE_PINNED/);
+  assert.match(shell, /current\.overlay === OVERLAY\.SEARCH && isImmersiveState\(current\.toolbar\)[\s\S]*?TOOLBAR\.IMMERSIVE_PINNED/);
+});
+
+test("智读提交携带实时已读位置、选区，并用 Enter 发起提问", () => {
+  assert.match(reader, /currentChapter:\s*curChapter/);
+  assert.match(reader, /currentFraction:\s*curChFrac/);
+  assert.match(reader, /selectedText:\s*aiReaderSelectedText/);
+  assert.match(reader, /event\.key === "Enter" && !event\.shiftKey && !event\.isComposing && event\.keyCode !== 229/);
+  assert.match(reader, /event\.stopPropagation\(\);\s*runAiReader\("question"\)/s);
+  assert.match(html, /id="ai-reader-enter-submit"[^>]*>↵ 回车提问<\/button>/);
+  assert.match(reader, /getElementById\("ai-reader-enter-submit"\)\?\.addEventListener\("click", \(\) => runAiReader\("question"\)\)/);
+});
+
+test("智读配置提供 DeepSeek、GPT 与 Claude，并区分 Claude 的原生协议", () => {
+  assert.match(html, /id="ai-reader-provider"[\s\S]*?value="deepseek"[\s\S]*?value="openai"[\s\S]*?value="anthropic"/);
+  assert.match(html, /id="ai-reader-model"/);
+  assert.match(reader, /deepseek-v4-flash[\s\S]*?deepseek-v4-pro/);
+  assert.match(reader, /gpt-5\.6-luna[\s\S]*?gpt-5\.6-terra[\s\S]*?gpt-5\.6-sol/);
+  assert.match(reader, /claude-haiku-4-5[\s\S]*?claude-sonnet-5[\s\S]*?claude-opus-5/);
+  assert.match(reader, /provider:\s*aiReaderProviderInput\?\.value \|\| "compatible"/);
+});
+
+test("开关智读后按当前视口正文偏移恢复，而不是把高亮文字当分页锚点", () => {
+  assert.match(reader, /aiReaderSideRequestId/);
+  assert.match(reader, /openAiReader\(request\.text \|\| "", \{[\s\S]*?start: request\.anchorStart/);
+  assert.match(annotations, /aiReader:\{text:t,anchorStart:o&&o\.start,anchorEnd:o&&o\.end\}/);
+  assert.match(annotations, /aiReader:\{text:highlightDisplayText\(h\),anchorStart:h\.start,anchorEnd:h\.end\}/);
+  assert.match(runtime, /sideAnchor=topAnchor\(\)[\s\S]*?sideOffset=anchorTextOffset\(sideAnchor\)[\s\S]*?__readerSideViewportTxn/);
+  assert.match(reader, /aiReaderSideCommit: requestId[\s\S]*?aiReaderSideExpectedWidth: width/);
+  assert.match(annotations, /scheduleReaderSideViewportRestore[\s\S]*?finishReaderSideViewportRestore/);
+  assert.match(runtime, /viewportOffset:sideViewportOffset/);
+  assert.match(annotations, /exactScroll:isScrollMode\(\),scrollOffset:tx\.viewportOffset/);
+  assert.match(annotations, /renderSideAnchorVirtualPage\(tx\.offset\)/);
+  assert.match(layout, /renderSideAnchorFallbackPage\(offset,source/);
+  assert.match(layout, /ai_side_virtual/);
+  assert.match(layout, /function consumeSideAnchorVirtualPage\(\)[\s\S]*?function nextPage\(\)/);
+});
+
+test("单行高亮菜单跟随鼠标，多行锚定末行，跨页锚定页末部分上方", () => {
+  assert.match(annotations, /function visibleHighlightLineRects\(idx,fallbackEl\)/);
+  assert.match(annotations, /function nearestHighlightRect\(rects,evt\)/);
+  assert.match(annotations, /function highlightLineGroups\(rects\)/);
+  assert.match(annotations, /function highlightMenuPlacement\(idx,fallbackEl,evt\)/);
+  assert.match(annotations, /keys\.length>1[\s\S]*?highlightRectEnvelope\(groups\[keys\[0\]\]\),above:true/);
+  assert.match(annotations, /lines\.length<=1[\s\S]*?nearestHighlightRect\(rects,evt\)/);
+  assert.match(annotations, /var last=lines\[0\][\s\S]*?return \{rect:last,above:false\}/);
+  assert.match(annotations, /highlightMenuPlacement\(idx,el,evt\)/);
+  assert.match(annotations, /function highlightMenuLeft\(rect,width,evt\)/);
+  assert.match(annotations, /evt&&typeof evt\.clientX==='number'\?evt\.clientX/);
+  assert.match(annotations, /addEventListener\('mousemove',[\s\S]*?showHlMenu\(activeHi,false,m,e\)/);
+  assert.match(annotations, /var safe=6,gap=6,aboveTop=rect\.top-mh-gap,belowTop=rect\.bottom\+gap/);
+  assert.match(annotations, /!placement\.above&&belowTop\+mh>window\.innerHeight-safe&&aboveTop>=safe\)top=aboveTop/);
 });
 
 test("returning to the toolbar closes settings left open after a pointer exit", () => {
@@ -106,5 +204,5 @@ test("macOS WebKit uses a fast pointerup path without changing Chromium clicks",
 
 test("macOS WebKit switches ordinary chapters to batched geometry earlier", () => {
   assert.match(layout, /var IS_MAC_WEBKIT=.*AppleWebKit/);
-  assert.match(layout, /FAST_CHAPTER_LAYOUT_CHARS=\(IS_MAC_WEBKIT\?16:120\)\*1024/);
+  assert.match(transition, /FAST_CHAPTER_LAYOUT_CHARS=\(IS_MAC_WEBKIT\?16:120\)\*1024/);
 });

@@ -76,6 +76,68 @@ function sourceRangeForOffsets(s,e){
   try{range.setStart(start.node,start.offset);range.setEnd(end.node,end.offset);}catch(_){return null;}
   return range;
 }
+// 智读侧栏开关专用的锚点事务。它不依赖第一次 resize 事件：父窗口会给出真实
+// iframe 宽度，正文页等到该宽度连续两帧不变后才恢复，避免重排后又被后续 resize 覆盖。
+var readerSideViewportRestoreRaf=0;
+function readerSideViewportDiag(tx,phase,extra){
+  if(!tx)return;
+  var sampled=null,sampledOffset=null;
+  try{sampled=topAnchor();sampledOffset=sideAnchorVirtualOffset!=null?sideAnchorVirtualOffset:anchorTextOffset(sampled);}catch(_){}
+  var payload={
+    id:tx.id,phase:phase,chapter:curCh,page:pageInCh+1,pages:pagesInCh,
+    targetOffset:tx.offset,sampledOffset:sampledOffset,width:Math.round(window.innerWidth||0),
+    expectedWidth:tx.expectedWidth||0,preparedWidth:tx.preparedWidth||0,
+    flow:S.flowMode,pageMode:S.pageMode,virtualOffset:sideAnchorVirtualOffset
+  };
+  if(extra)for(var k in extra)payload[k]=extra[k];
+  parent.postMessage({readerPerf:'ai_side_anchor '+JSON.stringify(payload)},'*');
+}
+function finishReaderSideViewportRestore(tx,reason){
+  if(!tx||tx!==window.__readerSideViewportTxn||tx.finished)return;
+  tx.finished=true;
+  var range=sourceRangeForOffsets(tx.offset,tx.offset+1);
+  if(range){
+    curTopAnchor={range:range};
+    relayout({
+      anchor:curTopAnchor,anchorOffset:tx.offset,sidePaneResize:true,
+      exactScroll:isScrollMode(),scrollOffset:tx.viewportOffset
+    });
+  }
+  requestAnimationFrame(function(){
+    if(tx!==window.__readerSideViewportTxn)return;
+    // 再以同一原始偏移定位一次，确保浏览器在本帧完成列宽计算后不会覆盖落点。
+    var latestRange=sourceRangeForOffsets(tx.offset,tx.offset+1);
+    if(latestRange){
+      curTopAnchor={range:latestRange};
+      relayout({
+        anchor:curTopAnchor,anchorOffset:tx.offset,sidePaneResize:true,
+        exactScroll:isScrollMode(),scrollOffset:tx.viewportOffset
+      });
+      captureAnchor();
+      // 常规整页只能显示页首；这里在上层展示从原阅读锚点开始的临时页，
+      // 让开/关智读不会把当前文字吸回宽页的章节开头。
+      if(!isScrollMode())renderSideAnchorVirtualPage(tx.offset);
+    }
+    readerSideViewportDiag(tx,'restored',{reason:reason||'stable'});
+    window.__readerSideViewportTxn=null;
+  });
+}
+function scheduleReaderSideViewportRestore(tx){
+  if(!tx||tx!==window.__readerSideViewportTxn||!tx.committed||tx.finished)return;
+  if(readerSideViewportRestoreRaf)cancelAnimationFrame(readerSideViewportRestoreRaf);
+  var started=performance.now(),lastWidth=-1,stableFrames=0;
+  function waitForStableWidth(){
+    if(tx!==window.__readerSideViewportTxn||tx.finished)return;
+    var width=Math.round(window.innerWidth||0),expected=Math.round(tx.expectedWidth||0);
+    var matches=!expected||Math.abs(width-expected)<=2;
+    stableFrames=(matches&&width===lastWidth)?stableFrames+1:0;
+    lastWidth=width;
+    if(matches&&stableFrames>=2){finishReaderSideViewportRestore(tx,'stable');return;}
+    if(performance.now()-started>1200){finishReaderSideViewportRestore(tx,'timeout');return;}
+    readerSideViewportRestoreRaf=requestAnimationFrame(waitForStableWidth);
+  }
+  readerSideViewportRestoreRaf=requestAnimationFrame(waitForStableWidth);
+}
 function ensureHighlightOverlay(){
   if(!hlOverlay){
     hlOverlay=document.getElementById('hl-overlay');
@@ -150,6 +212,7 @@ function applyHighlights(){
       var d=document.createElement('span');
       d.className='hl-rect'+(h.note?' has-note':'');
       d.setAttribute('data-hi',String(i));
+      d.style.setProperty('--hl-color',highlightColorValue(h.color));
       if(h.note)d.title=h.note;
       d.style.left=Math.round(r.left)+'px';
       d.style.top=Math.round(r.top)+'px';
@@ -298,6 +361,7 @@ function init(){
   });
   document.addEventListener('keydown',function(e){if(((e.ctrlKey||e.metaKey)&&(e.key==='f'||e.key==='F'))||e.key==='F3')e.preventDefault();},true); // 禁用浏览器自带查找
   document.addEventListener('keydown',function(e){
+    if(e.isComposing||e.key==='Process'||e.keyCode===229)return;
     if(e.key==='PageDown'||e.key==='ArrowRight'||e.key==='ArrowDown'||(e.key===' '&&!e.shiftKey)){e.preventDefault();userNav();nextPage();}
     else if(e.key==='PageUp'||e.key==='ArrowLeft'||e.key==='ArrowUp'||(e.key===' '&&e.shiftKey)){e.preventDefault();userNav();prevPage();}
   });
@@ -342,7 +406,21 @@ function init(){
     }
     e.preventDefault();if(wheelLock)return;if(Math.abs(e.deltaY)<4&&Math.abs(e.deltaX)<4)return;userNav();if(e.deltaY>0||e.deltaX>0)nextPage();else prevPage();wheelLock=true;setTimeout(function(){wheelLock=false;},220);
   },{passive:false});
-  window.addEventListener('resize',function(){parent.postMessage({layoutBusy:1},'*');invalidateMeasure();relayout();scheduleMeasure();});
+  window.addEventListener('resize',function(){
+    var sideTxn=window.__readerSideViewportTxn;
+    modeSwitchDiagEvent('resize_before');
+    // 智读只改变临时正文宽度：保留已完成/增量页数缓存，也不把右上角页数
+    // 切回加载图标。真实窗口变化会由父页面发送新的稳定统计宽度。
+    if(!sideTxn){
+      if(pageSig&&pageSig!==pageCountSig())invalidateMeasure();
+      parent.postMessage({layoutBusy:1},'*');
+    }
+    // commit 前的瞬间 resize 不使用新页面顶部作为锚点；commit 后由事务在最终宽度稳定时恢复。
+    if(sideTxn&&sideTxn.committed&&!sideTxn.finished)scheduleReaderSideViewportRestore(sideTxn);
+    else if(!sideTxn)relayout();
+    modeSwitchDiagEvent('resize_after');
+    if(!sideTxn)scheduleMeasure();
+  });
   setupSelMenu();
   setupHlUi();
   setupFn();
@@ -355,6 +433,16 @@ var HL_MENU_CFG_KEY='highlightMenuActionsV1';
 var HL_MENU_CFG_VERSION_KEY='highlightMenuActionsVersionV1';
 var HL_MENU_MODE_KEY='highlightMenuDisplayModeV1';
 var HL_MENU_SIZE_KEY='highlightMenuSizeV1';
+var HL_MENU_LAYOUT_KEY='highlightMenuLayoutV1';
+var HL_WEB_ENGINE_KEY='highlightWebSearchEngineV1';
+var HL_MENU_COLOR_KEY='highlightMenuMultiColorV1';
+var HL_SELECTED_COLOR_KEY='highlightMenuColorV1';
+var HL_COLORS=[
+  {key:'y',label:'黄色',value:'rgba(255,218,92,.42)'},
+  {key:'g',label:'绿色',value:'rgba(135,220,151,.42)'},
+  {key:'b',label:'蓝色',value:'rgba(119,185,255,.42)'},
+  {key:'p',label:'粉色',value:'rgba(255,143,184,.42)'}
+];
 var HL_MENU_ACTIONS=[
   {key:'web',label:'web搜索',icon:'🔍'},
   {key:'dict',label:'词典',icon:'📖'},
@@ -365,6 +453,7 @@ var HL_MENU_ACTIONS=[
   {key:'excerpt',label:'书摘',icon:'▣'},
   {key:'cross',label:'跨书搜索',icon:'📚'},
   {key:'semantic',label:'相似语义',icon:'≈'},
+  {key:'aiReader',label:'智读',icon:'✨'},
   {key:'note',label:'批注',icon:'📝'},
   {key:'bookmark',label:'书签',icon:'🔖'}
 ];
@@ -375,6 +464,15 @@ function readHlMenuMode(){var m='';try{m=localStorage.getItem(HL_MENU_MODE_KEY)|
 function saveHlMenuMode(mode){localStorage.setItem(HL_MENU_MODE_KEY,mode);}
 function readHlMenuSize(){var s='';try{s=localStorage.getItem(HL_MENU_SIZE_KEY)||'';}catch(_){}return (s==='medium'||s==='large'||s==='small')?s:'small';}
 function saveHlMenuSize(size){localStorage.setItem(HL_MENU_SIZE_KEY,size);}
+function readHlMenuLayout(){var s='';try{s=localStorage.getItem(HL_MENU_LAYOUT_KEY)||'';}catch(_){}return s==='grid'?'grid':'row';}
+function saveHlMenuLayout(layout){localStorage.setItem(HL_MENU_LAYOUT_KEY,layout==='grid'?'grid':'row');}
+function readHlWebEngine(){var s='';try{s=localStorage.getItem(HL_WEB_ENGINE_KEY)||'';}catch(_){}return s==='google'?'google':'baidu';}
+function saveHlWebEngine(engine){try{localStorage.setItem(HL_WEB_ENGINE_KEY,engine==='google'?'google':'baidu');}catch(_){}}
+function readHlMenuColorEnabled(){var s='';try{s=localStorage.getItem(HL_MENU_COLOR_KEY)||'';}catch(_){}return s!=='0';}
+function saveHlMenuColorEnabled(enabled){try{localStorage.setItem(HL_MENU_COLOR_KEY,enabled?'1':'0');}catch(_){}}
+function readHlColor(){var s='';try{s=localStorage.getItem(HL_SELECTED_COLOR_KEY)||'';}catch(_){}return HL_COLORS.some(function(c){return c.key===s;})?s:'y';}
+function saveHlColor(color){try{localStorage.setItem(HL_SELECTED_COLOR_KEY,HL_COLORS.some(function(c){return c.key===color;})?color:'y');}catch(_){}}
+function highlightColorValue(color){for(var i=0;i<HL_COLORS.length;i++)if(HL_COLORS[i].key===color)return HL_COLORS[i].value;return HL_COLORS[0].value;}
 function updateMenuSizeClass(container){
   if(!container)return;
   var size=readHlMenuSize();
@@ -435,17 +533,40 @@ function saveHlMenuConfig(cfg){localStorage.setItem(HL_MENU_CFG_KEY,JSON.stringi
 function applyConfiguredMenu(container,items,setBtn){
   if(!container)return;
   updateMenuSizeClass(container);
+  var layout=readHlMenuLayout();
+  container.classList.toggle('hm-layout-grid',layout==='grid');
+  container.classList.toggle('hm-layout-row',layout!=='grid');
+  var actionHost=container._actionHost;
+  if(!actionHost){actionHost=document.createElement('span');actionHost.className='hm-action-host';container._actionHost=actionHost;}
+  var colorHost=container._colorHost;
+  if(!colorHost){colorHost=document.createElement('span');colorHost.className='hm-color-host';container._colorHost=colorHost;}
   var cfg=readHlMenuConfig(),map={};
   items.forEach(function(it){map[it.key]=it;});
-  items.forEach(function(it){if(it.button&&it.button.parentNode===container)container.removeChild(it.button);});
-  if(setBtn&&setBtn.parentNode===container)container.removeChild(setBtn);
-  cfg.forEach(function(c){var it=map[c.key];if(it&&c.show!==false){updateActionButton(it);container.appendChild(it.button);}});
-  if(setBtn)container.appendChild(setBtn);
+  items.forEach(function(it){var node=it.host||it.button;if(node&&node.parentNode)node.parentNode.removeChild(node);});
+  if(actionHost.parentNode)actionHost.parentNode.removeChild(actionHost);
+  if(colorHost.parentNode)colorHost.parentNode.removeChild(colorHost);
+  if(setBtn&&setBtn.parentNode)setBtn.parentNode.removeChild(setBtn);
+  cfg.forEach(function(c){var it=map[c.key];if(it&&c.show!==false){updateActionButton(it);var node=it.host||it.button;node.classList.add('hm-menu-item');actionHost.appendChild(node);}});
+  container.appendChild(actionHost);
+  var useColors=readHlMenuColorEnabled();
+  container.classList.toggle('hm-with-colors',useColors);
+  if(useColors){
+    colorHost.innerHTML='';
+    var selected=readHlColor();
+    HL_COLORS.forEach(function(c){
+      var b=document.createElement('button');b.type='button';b.className='hm-color-button'+(c.key===selected?' selected':'');b.title='用'+c.label+'高亮';b.setAttribute('aria-label',b.title);b.style.setProperty('--hm-color',c.value);
+      b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});
+      b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();saveHlColor(c.key);if(typeof container._onColorPick==='function')container._onColorPick(c.key);refreshConfiguredMenus();});
+      colorHost.appendChild(b);
+    });
+    container.appendChild(colorHost);
+  }
+  if(setBtn){setBtn.classList.add('hm-settings-button');container.appendChild(setBtn);}
 }
 function renderHlSettings(){
   if(!hlSettingsPop)return;
   var cfg=readHlMenuConfig();
-  hlSettingsPop.innerHTML='<div class="hs-mode"><span class="hs-mode-label">显示</span><span class="hs-mode-buttons hs-display-buttons"><button type="button" data-mode="both">图文</button><button type="button" data-mode="text">文字</button><button type="button" data-mode="icon">图标</button></span></div><div class="hs-mode"><span class="hs-mode-label">大小</span><span class="hs-mode-buttons hs-size-buttons"><button type="button" data-size="small">小</button><button type="button" data-size="medium">中</button><button type="button" data-size="large">大</button></span></div><div class="hs-list"></div>';
+  hlSettingsPop.innerHTML='<div class="hs-mode hs-appearance"><span class="hs-mode-label">显示</span><span class="hs-mode-buttons hs-display-buttons"><button type="button" data-mode="both">图文</button><button type="button" data-mode="text">文字</button><button type="button" data-mode="icon">图标</button></span><span class="hs-mode-label hs-color-label">多彩高亮</span><label class="hs-switch"><input class="hs-color-enabled" type="checkbox"><span class="hs-slider"></span></label></div><div class="hs-mode hs-layout-size"><span class="hs-mode-label">布局</span><span class="hs-mode-buttons hs-layout-buttons"><button type="button" data-layout="row">横排</button><button type="button" data-layout="grid">九宫格</button></span><span class="hs-mode-label">大小</span><span class="hs-mode-buttons hs-size-buttons"><button type="button" data-size="small">小</button><button type="button" data-size="medium">中</button><button type="button" data-size="large">大</button></span></div><div class="hs-list"></div>';
   var mode=readHlMenuMode();
   [].slice.call(hlSettingsPop.querySelectorAll('.hs-display-buttons button')).forEach(function(b){
     b.className=b.dataset.mode===mode?'on':'';
@@ -462,6 +583,17 @@ function renderHlSettings(){
       renderHlSettings();refreshConfiguredMenus();
     });
   });
+  var layout=readHlMenuLayout();
+  [].slice.call(hlSettingsPop.querySelectorAll('.hs-layout-buttons button')).forEach(function(b){
+    b.className=b.dataset.layout===layout?'on':'';
+    b.addEventListener('click',function(e){
+      e.preventDefault();e.stopPropagation();saveHlMenuLayout(b.dataset.layout);
+      renderHlSettings();refreshConfiguredMenus();
+    });
+  });
+  var colorEnabled=hlSettingsPop.querySelector('.hs-color-enabled');
+  colorEnabled.checked=readHlMenuColorEnabled();
+  colorEnabled.addEventListener('change',function(){saveHlMenuColorEnabled(colorEnabled.checked);refreshConfiguredMenus();});
   var list=hlSettingsPop.querySelector('.hs-list'),dragState=null;
   function saveCurrentOrder(){
     var old=readHlMenuConfig(),show={};old.forEach(function(x){show[x.key]=x.show!==false;});
@@ -504,7 +636,18 @@ function renderHlSettings(){
     var input=document.createElement('input');input.type='checkbox';input.checked=c.show!==false;
     var slider=document.createElement('span');slider.className='hs-slider';sw.append(input,slider);
     var grip=document.createElement('button');grip.type='button';grip.className='hs-grip';grip.title='拖动排序';
-    row.append(name,sw,grip);list.appendChild(row);
+    if(c.key==='web'){
+      row.classList.add('hs-web-row');
+      var engines=document.createElement('span');engines.className='hs-mode-buttons hs-engine-buttons';
+      ['baidu','google'].forEach(function(engine){
+        var b=document.createElement('button');b.type='button';b.dataset.engine=engine;b.textContent=engine==='google'?'谷歌':'百度';
+        b.className=readHlWebEngine()===engine?'on':'';
+        b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();saveHlWebEngine(engine);renderHlSettings();});
+        engines.appendChild(b);
+      });
+      row.append(name,engines,sw,grip);
+    }else row.append(name,sw,grip);
+    list.appendChild(row);
     input.addEventListener('change',function(){
       var next=readHlMenuConfig();next.forEach(function(x){if(x.key===c.key)x.show=input.checked;});
       saveHlMenuConfig(next);refreshConfiguredMenus();
@@ -790,6 +933,12 @@ function showTranslateResult(r){
 }
 function setupSelMenu(){
   selMenu=document.createElement('div');selMenu.id='sel-menu';
+  selMenu._onColorPick=function(color){
+    var o=selOffsets();
+    if(o){o.chapter=curCh;o.context=getSelContext();o.color=color;parent.postMessage({addHighlight:o},'*');}
+    if(window.getSelection)window.getSelection().removeAllRanges();
+    hideSelMenu();
+  };
   var btn=document.createElement('button');btn.type='button';btn.textContent='🔍 web搜索';
   var btnDict=document.createElement('button');btnDict.type='button';btnDict.textContent='📖 词典';
   var btnTr=document.createElement('button');btnTr.type='button';btnTr.textContent='译 翻译';
@@ -799,6 +948,7 @@ function setupSelMenu(){
   var btnExcerpt=document.createElement('button');btnExcerpt.type='button';btnExcerpt.textContent='▣ 书摘';
   var btnCross=document.createElement('button');btnCross.type='button';btnCross.textContent='跨书搜索';
   var btnSemantic=document.createElement('button');btnSemantic.type='button';btnSemantic.textContent='≈ 相似语义';
+  var btnAiReader=document.createElement('button');btnAiReader.type='button';btnAiReader.textContent='✨ 智读';
   var btnNote=document.createElement('button');btnNote.type='button';btnNote.textContent='📝 批注';
   var btnBm=document.createElement('button');btnBm.type='button';btnBm.textContent='🔖 书签';
   var btnSet=document.createElement('button');btnSet.type='button';btnSet.textContent='⚙';
@@ -812,13 +962,14 @@ function setupSelMenu(){
     {key:'excerpt',button:btnExcerpt},
     {key:'cross',button:btnCross},
     {key:'semantic',button:btnSemantic},
+    {key:'aiReader',button:btnAiReader},
     {key:'note',button:btnNote},
     {key:'bookmark',button:btnBm}
   ];
   selMenu._setBtn=btnSet;
   applyConfiguredMenu(selMenu,selMenuItems,btnSet);
   document.body.appendChild(selMenu);
-  [btn,btnDict,btnTr,btnCopy,btnHL,btnCorrect,btnExcerpt,btnCross,btnSemantic,btnNote,btnBm,btnSet].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  [btn,btnDict,btnTr,btnCopy,btnHL,btnCorrect,btnExcerpt,btnCross,btnSemantic,btnAiReader,btnNote,btnBm,btnSet].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
   btnDict.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
     var t=(window.getSelection?window.getSelection().toString():'').trim();
@@ -842,12 +993,12 @@ function setupSelMenu(){
   btn.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
     var t=(window.getSelection?window.getSelection().toString():'').trim();
-    if(t)parent.postMessage({webSearch:t},'*');
+    if(t)parent.postMessage({webSearch:{term:t,engine:readHlWebEngine()}},'*');
     hideSelMenu();
   });
   btnHL.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
-    var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();parent.postMessage({addHighlight:o},'*');}
+    var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();o.color=readHlColor();parent.postMessage({addHighlight:o},'*');}
     if(window.getSelection)window.getSelection().removeAllRanges();
     hideSelMenu();
   });
@@ -876,9 +1027,16 @@ function setupSelMenu(){
     if(t)parent.postMessage({semanticSearch:t},'*');
     hideSelMenu();
   });
+  btnAiReader.addEventListener('click',function(e){
+    e.preventDefault();e.stopPropagation();
+    var o=selOffsets(),t=(o?o.text:(window.getSelection?window.getSelection().toString():''))||'';t=t.trim();
+    if(t)parent.postMessage({aiReader:{text:t,anchorStart:o&&o.start,anchorEnd:o&&o.end}},'*');
+    if(window.getSelection)window.getSelection().removeAllRanges();
+    hideSelMenu();
+  });
   btnNote.addEventListener('click',function(e){
     e.preventDefault();e.stopPropagation();
-    var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();parent.postMessage({addHighlightNote:o},'*');}
+    var o=selOffsets();if(o){o.chapter=curCh;o.context=getSelContext();o.color=readHlColor();parent.postMessage({addHighlightNote:o},'*');}
     if(window.getSelection)window.getSelection().removeAllRanges();
     hideSelMenu();
   });
@@ -903,7 +1061,7 @@ function setupSelMenu(){
     selMenu.style.display='block';
     var mw=selMenu.offsetWidth||100,mh=selMenu.offsetHeight||34;
     var left=rect.left+rect.width/2-mw/2;left=Math.max(6,Math.min(window.innerWidth-mw-6,left));
-    var top=rect.top-mh-8;if(top<6)top=rect.bottom+8;
+    var top=rect.bottom+8;
     selMenu.style.left=left+'px';selMenu.style.top=top+'px';
   }
   document.addEventListener('mouseup',function(e){
@@ -950,6 +1108,69 @@ function selectedHighlightIndex(){
   var o=selOffsets();
   return o?highlightIndexForRange(o.start,o.end):-1;
 }
+function visibleHighlightLineRects(idx,fallbackEl){
+  var rects=[],range=highlightRange(idx);
+  try{if(range)rects=[].slice.call(range.getClientRects());}catch(_){rects=[];}
+  if(!rects.length&&fallbackEl&&fallbackEl.getClientRects){try{rects=[].slice.call(fallbackEl.getClientRects());}catch(_){rects=[];}}
+  var vw=window.innerWidth||1,vh=window.innerHeight||1;
+  return rects.filter(function(r){return r&&r.width>0&&r.height>0&&r.right>0&&r.left<vw&&r.bottom>0&&r.top<vh;});
+}
+function highlightPageKey(rect){
+  // 与 anchorPage() 一致：分页模式用横向列位置区分页；滚动模式没有“跨页菜单”概念。
+  if(typeof usesLineBreakPaging==='function'&&usesLineBreakPaging())return 0;
+  if(typeof pageStep!=='number'||pageStep<=0||typeof viewRect!=='function')return 0;
+  var pr=viewRect();
+  return Math.floor((rect.left-pr.left+viewOffset+1)/pageStep);
+}
+function highlightRectEnvelope(rects){
+  var left=Infinity,top=Infinity,right=-Infinity,bottom=-Infinity;
+  rects.forEach(function(r){left=Math.min(left,r.left);top=Math.min(top,r.top);right=Math.max(right,r.right);bottom=Math.max(bottom,r.bottom);});
+  return {left:left,top:top,right:right,bottom:bottom,width:Math.max(0,right-left),height:Math.max(0,bottom-top)};
+}
+function nearestHighlightRect(rects,evt){
+  if(!evt||typeof evt.clientX!=='number'||typeof evt.clientY!=='number')return rects[0];
+  var x=evt.clientX,y=evt.clientY,best=rects[0],bestD=Infinity;
+  for(var i=0;i<rects.length;i++){
+    var r=rects[i];
+    if(x>=r.left-3&&x<=r.right+3&&y>=r.top-5&&y<=r.bottom+5)return r;
+    var cx=Math.max(r.left,Math.min(r.right,x)),cy=Math.max(r.top,Math.min(r.bottom,y));
+    var dx=x-cx,dy=y-cy,d=dx*dx+dy*dy;
+    if(d<bestD){bestD=d;best=r;}
+  }
+  return best;
+}
+function highlightLineGroups(rects){
+  var groups={};
+  rects.forEach(function(r){
+    // 同一行内的多个内联片段应看成一行，否则单行高亮会误判为多行。
+    var key=highlightPageKey(r)+':'+Math.round(r.top)+':'+Math.round(r.bottom);
+    (groups[key]||(groups[key]=[])).push(r);
+  });
+  return Object.keys(groups).map(function(key){return highlightRectEnvelope(groups[key]);});
+}
+function highlightMenuPlacement(idx,fallbackEl,evt){
+  var rects=visibleHighlightLineRects(idx,fallbackEl);
+  if(!rects.length){var fallback=anchorRectForElement(fallbackEl,evt);return {rect:fallback,above:false};}
+  var groups={};rects.forEach(function(r){var key=highlightPageKey(r);(groups[key]||(groups[key]=[])).push(r);});
+  var keys=Object.keys(groups).map(Number).sort(function(a,b){return a-b;});
+  if(keys.length>1){
+    // 高亮跨页：优先取较早一页（其文字位于页末）的完整区块，并把菜单放在区块上方。
+    return {rect:highlightRectEnvelope(groups[keys[0]]),above:true};
+  }
+  var lines=highlightLineGroups(rects);
+  if(lines.length<=1){
+    // 单行仍以鼠标所在文字片段为锚点，保留原来的跟随手感。
+    return {rect:nearestHighlightRect(rects,evt),above:false};
+  }
+  // 同页多行：锚在最末一行，菜单紧跟在高亮之后，不再遮住中间行。
+  var last=lines[0];lines.forEach(function(r){if(r.bottom>last.bottom||(r.bottom===last.bottom&&r.right>last.right))last=r;});
+  return {rect:last,above:false};
+}
+function highlightMenuLeft(rect,width,evt){
+  // 横向始终以鼠标为中心；纵向仍交给多行/跨页规则，避免菜单盖住末行文字。
+  var x=evt&&typeof evt.clientX==='number'?evt.clientX:rect.left+rect.width/2;
+  return Math.max(6,Math.min(window.innerWidth-width-6,x-width/2));
+}
 function showHlMenu(idx,force,anchor,evt){
   if(selActive()&&!force)return;   // 还在选字（如刚高亮完）就不弹，避免和选区菜单同时出现
   hideSelMenu();                  // 任何时候只保留一个工具栏
@@ -958,16 +1179,23 @@ function showHlMenu(idx,force,anchor,evt){
   if(!el)return;
   applyConfiguredMenu(hlMenu,hlMenuItems,hlMenu&&hlMenu._setBtn);
   hlMenu.style.display='block';
-  var rect=anchorRectForElement(el,evt);
+  var placement=highlightMenuPlacement(idx,el,evt),rect=placement.rect;
   hlMenu._anchorRect=rect;
   var mw=hlMenu.offsetWidth||200,mh=hlMenu.offsetHeight||34;
-  var left=rect.left+rect.width/2-mw/2;left=Math.max(6,Math.min(window.innerWidth-mw-6,left));
-  var gap=4,top=rect.top-mh-gap;if(top<6)top=rect.bottom+gap;
+  var left=highlightMenuLeft(rect,mw,evt);
+  var safe=6,gap=6,aboveTop=rect.top-mh-gap,belowTop=rect.bottom+gap;
+  var top=placement.above?aboveTop:belowTop;
+  // 页末没有下方空间时必须翻到高亮上方，不能把菜单钳进高亮文字里。
+  if(!placement.above&&belowTop+mh>window.innerHeight-safe&&aboveTop>=safe)top=aboveTop;
+  // 页首跨页高亮若上方不足，则退回下方；随后才做最后的视口边界钳制。
+  if(placement.above&&aboveTop<safe&&belowTop+mh<=window.innerHeight-safe)top=belowTop;
+  top=Math.max(safe,Math.min(window.innerHeight-mh-safe,top));
   hlMenu.style.left=left+'px';hlMenu.style.top=top+'px';
 }
 function setupHlUi(){
   hlMenu=document.createElement('div');hlMenu.id='hl-menu';
-  var mWeb=mkBtn('🔍 web搜索'),mDict=mkBtn('📖 词典'),mTr=mkBtn('译 翻译'),mCopy=mkBtn('复制'),mDel=mkBtn('🗑 取消高亮'),mCorrect=mkBtn('✎ 改错'),mExcerpt=mkBtn('▣ 书摘'),mCross=mkBtn('跨书搜索'),mSemantic=mkBtn('≈ 相似语义'),mNote=mkBtn('📝 批注'),mSet=mkBtn('⚙');
+  hlMenu._onColorPick=function(color){if(activeHi>=0)parent.postMessage({setHighlightColor:{index:activeHi,color:color}},'*');};
+  var mWeb=mkBtn('🔍 web搜索'),mDict=mkBtn('📖 词典'),mTr=mkBtn('译 翻译'),mCopy=mkBtn('复制'),mDel=mkBtn('🗑 取消高亮'),mCorrect=mkBtn('✎ 改错'),mExcerpt=mkBtn('▣ 书摘'),mCross=mkBtn('跨书搜索'),mSemantic=mkBtn('≈ 相似语义'),mAiReader=mkBtn('✨ 智读'),mNote=mkBtn('📝 批注'),mSet=mkBtn('⚙');
   hlMenuItems=[
     {key:'web',button:mWeb},
     {key:'dict',button:mDict},
@@ -978,13 +1206,14 @@ function setupHlUi(){
     {key:'excerpt',button:mExcerpt},
     {key:'cross',button:mCross},
     {key:'semantic',button:mSemantic},
+    {key:'aiReader',button:mAiReader},
     {key:'note',button:mNote}
   ];
   hlMenu._setBtn=mSet;
   applyConfiguredMenu(hlMenu,hlMenuItems,mSet);
   document.body.appendChild(hlMenu);
-  [mWeb,mDict,mTr,mCopy,mDel,mCorrect,mExcerpt,mCross,mSemantic,mNote,mSet].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
-  mWeb.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({webSearch:highlightDisplayText(h)},'*');hideHlMenu();});
+  [mWeb,mDict,mTr,mCopy,mDel,mCorrect,mExcerpt,mCross,mSemantic,mAiReader,mNote,mSet].forEach(function(b){b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});});
+  mWeb.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({webSearch:{term:highlightDisplayText(h),engine:readHlWebEngine()}},'*');hideHlMenu();});
   mDict.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)openDict(highlightDisplayText(h),h.context||'');hideHlMenu();});
   mTr.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi],el=markEl(activeHi);if(h)openTranslate(highlightDisplayText(h),el?el.getBoundingClientRect():null);hideHlMenu();});
   mCopy.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)copyTextToClipboard(highlightDisplayText(h));hideHlMenu();});
@@ -993,6 +1222,7 @@ function setupHlUi(){
   mExcerpt.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];hideHlMenu();if(h)showExcerptPage(highlightDisplayText(h));});
   mCross.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({crossSearch:highlightDisplayText(h)},'*');hideHlMenu();});
   mSemantic.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];if(h)parent.postMessage({semanticSearch:highlightDisplayText(h)},'*');hideHlMenu();});
+  mAiReader.addEventListener('click',function(e){e.stopPropagation();var h=HL[activeHi];hideHlMenu();if(h)parent.postMessage({aiReader:{text:highlightDisplayText(h),anchorStart:h.start,anchorEnd:h.end}},'*');});
   mNote.addEventListener('click',function(e){e.stopPropagation();if(activeHi>=0)parent.postMessage({openAnnotations:activeHi},'*');hideHlMenu();});
   mSet.addEventListener('click',function(e){e.stopPropagation();showHlSettings(hlMenu);});
   hlMenu.addEventListener('mouseenter',function(){if(hlHideTimer)clearTimeout(hlHideTimer);});
@@ -1000,14 +1230,17 @@ function setupHlUi(){
 
   // 悬停高亮 → 出菜单；移开延时收起
   root.addEventListener('mouseover',function(e){var m=e.target.closest?e.target.closest('mark.hl'):null;if(m){if(hlHideTimer)clearTimeout(hlHideTimer);showHlMenu(parseInt(m.getAttribute('data-hi'),10),false,m,e);}});
+  root.addEventListener('mousemove',function(e){var m=e.target.closest?e.target.closest('mark.hl'):null;if(m&&activeHi===parseInt(m.getAttribute('data-hi'),10))showHlMenu(activeHi,false,m,e);});
   root.addEventListener('mouseout',function(e){var m=e.target.closest?e.target.closest('mark.hl'):null;if(m){hlHideTimer=setTimeout(hideHlMenu,400);}});
   if(hlOverlay){
     hlOverlay.addEventListener('mouseover',function(e){var m=e.target.closest?e.target.closest('.hl-rect[data-hi]'):null;if(m){if(hlHideTimer)clearTimeout(hlHideTimer);showHlMenu(parseInt(m.getAttribute('data-hi'),10),false,m,e);}});
+    hlOverlay.addEventListener('mousemove',function(e){var m=e.target.closest?e.target.closest('.hl-rect[data-hi]'):null;if(m&&activeHi===parseInt(m.getAttribute('data-hi'),10))showHlMenu(activeHi,false,m,e);});
     hlOverlay.addEventListener('mouseout',function(e){var m=e.target.closest?e.target.closest('.hl-rect[data-hi]'):null;if(m){hlHideTimer=setTimeout(hideHlMenu,400);}});
     hlOverlay.addEventListener('click',function(e){var m=e.target.closest?e.target.closest('.hl-rect[data-hi]'):null;if(m){e.preventDefault();e.stopPropagation();showHlMenu(parseInt(m.getAttribute('data-hi'),10),true,m,e);}});
   }
   if(virtualPage){
     virtualPage.addEventListener('mouseover',function(e){var m=e.target.closest?e.target.closest('.vp-hl[data-hi]'):null;if(m){if(hlHideTimer)clearTimeout(hlHideTimer);showHlMenu(parseInt(m.getAttribute('data-hi'),10),false,m,e);}});
+    virtualPage.addEventListener('mousemove',function(e){var m=e.target.closest?e.target.closest('.vp-hl[data-hi]'):null;if(m&&activeHi===parseInt(m.getAttribute('data-hi'),10))showHlMenu(activeHi,false,m,e);});
     virtualPage.addEventListener('mouseout',function(e){var m=e.target.closest?e.target.closest('.vp-hl[data-hi]'):null;if(m){hlHideTimer=setTimeout(hideHlMenu,400);}});
     virtualPage.addEventListener('click',function(e){var m=e.target.closest?e.target.closest('.vp-hl[data-hi]'):null;if(m){e.preventDefault();e.stopPropagation();showHlMenu(parseInt(m.getAttribute('data-hi'),10),true,m,e);}});
   }

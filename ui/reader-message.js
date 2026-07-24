@@ -8,10 +8,10 @@
   const ACTIONS = new Set([
     "layoutBusy", "progress", "ttsState", "ttsSynth", "dictPrefetch", "dictSpeak",
     "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav",
-    "centerTap", "readerPerf", "ready", "measured", "pageCache", "downloadImage", "webSearch", "crossSearch",
-    "semanticSearch", "translateText", "dict", "vocabAdd", "addHighlight",
+    "centerTap", "readerPerf", "ready", "readerAnchorReady", "measured", "pageCache", "downloadImage", "webSearch", "crossSearch",
+    "semanticSearch", "aiReader", "translateText", "dict", "vocabAdd", "addHighlight",
     "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations",
-    "removeHighlight", "setHighlightNote", "setHighlightText", "addBookmark", "tocResolved",
+    "removeHighlight", "setHighlightNote", "setHighlightText", "setHighlightColor", "addBookmark", "tocResolved",
     "getTranslationCredentialStatus", "saveTranslationCredential",
   ]);
   const MAX_MESSAGE_CHARS = 12 * 1024 * 1024;
@@ -39,8 +39,32 @@
 
   function validActionPayload(action, data) {
     if (action === "readerPerf") return textWithin(data[action], 1000);
-    if (["webSearch", "crossSearch", "semanticSearch", "dict", "dictPrefetch", "dictSpeak"].includes(action)) {
+    if (action === "webSearch") {
+      const request = data.webSearch;
+      return textWithin(request, MAX_TEXT_CHARS)
+        || (isRecord(request)
+          && typeof request.term === "string"
+          && request.term.length <= MAX_TEXT_CHARS
+          && (request.engine === "baidu" || request.engine === "google"));
+    }
+    if (["crossSearch", "semanticSearch", "dict", "dictPrefetch", "dictSpeak"].includes(action)) {
       return textWithin(data[action], MAX_TEXT_CHARS);
+    }
+    if (action === "aiReader") {
+      const request = data.aiReader;
+      const hasStart = request && (request.anchorStart === undefined
+        || (Number.isInteger(request.anchorStart) && request.anchorStart >= 0));
+      const hasEnd = request && (request.anchorEnd === undefined
+        || (Number.isInteger(request.anchorEnd) && request.anchorEnd > 0));
+      const ordered = request && (request.anchorStart === undefined || request.anchorEnd === undefined
+        || request.anchorEnd > request.anchorStart);
+      return isRecord(request) && textWithin(request.text, MAX_TEXT_CHARS) && hasStart && hasEnd && ordered;
+    }
+    if (action === "setHighlightColor") {
+      const request = data.setHighlightColor;
+      return isRecord(request)
+        && Number.isInteger(request.index) && request.index >= 0
+        && ["y", "g", "b", "p"].includes(request.color);
     }
     if (action === "translateText") {
       const request = data.translateText;

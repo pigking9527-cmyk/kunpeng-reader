@@ -22,6 +22,25 @@ test("book card clicks explicitly close main-window floaters", () => {
   const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
   assert.match(card, /addEventListener\("click",[\s\S]*?closeShelfCardFloaters\(\)/);
   assert.match(card, /addEventListener\("dblclick",[\s\S]*?closeShelfCardFloaters\(\)/);
+  assert.match(card, /addEventListener\("contextmenu"/);
+  assert.match(card, /openBookOrganizer\(getBook\(b\.id\) \|\| b, e\)/);
+});
+
+test("book organization uses right-click controls and the existing funnel filters", () => {
+  assert.match(source, /tag-filter-list/);
+  assert.match(source, /collection-filter-list/);
+  assert.match(source, /set_book_organization/);
+  assert.match(source, /rename_book_organization/);
+  assert.match(source, /delete_book_organization/);
+  assert.match(source, /matchesOrganizationFilters/);
+  assert.match(source, /openOrganizationFilter/);
+  assert.match(source, /organization-filter-modal/);
+  const opener = source.match(/function openOrganizationFilter\([\s\S]*?\n\}/);
+  assert.ok(opener, "organization picker opener must exist");
+  assert.ok(opener[0].indexOf("positionOrganizationFilter(anchor)") < opener[0].indexOf('filterPanel.classList.remove("show")'), "must capture the trigger position before hiding its panel");
+  assert.match(styles, /\.book-organizer-menu/);
+  assert.match(styles, /\.organization-filter-card/);
+  assert.match(styles, /\.fp-org-row/);
 });
 
 test("shelf state, filtered selection and batch removal stay inside the injected API", async () => {

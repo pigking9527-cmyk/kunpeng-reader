@@ -7,6 +7,15 @@ const rsearchInput = document.getElementById("rsearch-input");
 const rsearchCount = document.getElementById("rsearch-count");
 const rsearchResults = document.getElementById("rsearch-results");
 let searchTimer = null;
+let rsearchEditingUntil = 0;
+let rsearchComposing = false;
+function keepRsearchEditing() {
+  rsearchEditingUntil = Date.now() + 1200;
+}
+window.isReaderSearchEditing = function () {
+  return ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH) &&
+    (rsearchComposing || rsearch.contains(document.activeElement) || Date.now() < rsearchEditingUntil);
+};
 
 function sendToPage(msg) {
   if (!frame.contentWindow) return;
@@ -135,9 +144,12 @@ ReaderShell.registerOverlay(ReaderShell.OVERLAY.SEARCH, {
   onOpen() {
     rsearchInput.value = "";
     renderRHistory(); // 打开就显示自有历史
+    keepRsearchEditing();
     rsearchInput.focus();
   },
   onClose() {
+    rsearchComposing = false;
+    rsearchEditingUntil = 0;
     sendToPage({ clearMarks: 1 }); // 只清高亮，不改变阅读位置
     rsearchInput.value = "";
     rsearchCount.textContent = "";
@@ -153,20 +165,29 @@ document.querySelector(".toolbar").addEventListener("click", (e) => {
   if (e.target.closest(".search-wrap")) return;
   toggleSearch(false);
 });
-window.addEventListener("mouseout", (e) => {
-  if (!ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH)) return;
-  if (e.relatedTarget) return;
-  if (e.clientY <= 0) toggleSearch(false);
-});
-window.addEventListener("blur", () => {
-  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH)) toggleSearch(false);
-});
+// 不用 mouseout 自动关闭搜索。Windows 输入法候选窗会让 WebView 收到伪造的
+// 窗口离开事件，中文输入会被误判成“用户离开搜索”。关闭只由 X、Esc 或工具栏内
+// 点击搜索框以外的位置触发。
+// 不要在 window blur 时关闭搜索：Windows WebView/输入法会出现短暂失焦，
+// 这会让用户刚开始键入就把搜索面板误关。
 rsearchInput.addEventListener("input", () => {
+  keepRsearchEditing();
   if (searchTimer) clearTimeout(searchTimer);
   const q = rsearchInput.value.trim();
   searchTimer = setTimeout(() => runSearch(q), 350);
 });
+rsearchInput.addEventListener("focus", keepRsearchEditing);
+rsearchInput.addEventListener("compositionstart", () => {
+  rsearchComposing = true;
+  keepRsearchEditing();
+});
+rsearchInput.addEventListener("compositionupdate", keepRsearchEditing);
+rsearchInput.addEventListener("compositionend", () => {
+  rsearchComposing = false;
+  keepRsearchEditing();
+});
 rsearchInput.addEventListener("keydown", (e) => {
+  keepRsearchEditing();
   if (e.key === "Escape") toggleSearch(false);
   else if (e.key === "Enter") addRHistory(rsearchInput.value);
 });

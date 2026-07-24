@@ -62,6 +62,18 @@ test("pagination geometry keeps whole-book signatures independent from dual-page
   assert.equal(context.pageLayout().pageStep, 899);
 });
 
+test("whole-book page cache keeps its base width while a side pane shrinks the live reader", () => {
+  const context = paginationContext(1200, "single");
+  const baseSig = context.pageCountSig();
+  assert.equal(context.pageCountLayout().width, 1200);
+  context.window.innerWidth = 820;
+  assert.equal(context.pageCountSig(), baseSig);
+  assert.equal(context.pageCountLayout().width, 1200);
+  context.pageCountViewportWidth = 1280;
+  assert.notEqual(context.pageCountSig(), baseSig);
+  assert.equal(context.pageCountLayout().width, 1280);
+});
+
 test("pagination geometry clamps unsafe margins and keeps dual counts in spreads", () => {
   const context = paginationContext(1200, "dual");
   assert.equal(context.mg(-8), 0);

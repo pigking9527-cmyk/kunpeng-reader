@@ -187,6 +187,25 @@ pub(crate) fn set_highlight_text(
 }
 
 #[tauri::command]
+pub(crate) fn set_highlight_color(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    index: usize,
+    color: String,
+) -> Vec<book::Highlight> {
+    if !matches!(color.as_str(), "y" | "g" | "b" | "p") {
+        return Vec::new();
+    }
+    if let Some(id) = reader_window_id(&window) {
+        let mut lib = state.library.lock().unwrap();
+        lib.set_highlight_color(id, index, color);
+        report_save_error(lib.save());
+        return lib.highlights(id);
+    }
+    Vec::new()
+}
+
+#[tauri::command]
 pub(crate) fn add_bookmark(
     window: tauri::WebviewWindow,
     state: tauri::State<AppState>,

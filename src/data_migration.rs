@@ -46,11 +46,15 @@ pub(crate) struct BookSyncStateV2 {
     #[serde(default)]
     rating: f32,
     #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    collections: Vec<String>,
+    #[serde(default)]
     progress_history: Vec<book::ProgressTimelineEntry>,
 }
 
 fn book_state_schema_version() -> u32 {
-    2
+    3
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -65,7 +69,7 @@ struct PortableReadBucketV2 {
 impl BookSyncStateV2 {
     fn from_book(book: &book::Book) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             content_id: book.content_id.clone(),
             fingerprint: book.fingerprint,
             title: book.title.clone(),
@@ -83,6 +87,8 @@ impl BookSyncStateV2 {
             words_read: book.words_read,
             finished_at: book.finished_at,
             rating: book.rating,
+            tags: book.tags.clone(),
+            collections: book.collections.clone(),
             progress_history: book.progress_history.clone(),
         }
     }
@@ -110,6 +116,8 @@ impl BookSyncStateV2 {
         target.words_read = self.words_read;
         target.finished_at = self.finished_at;
         target.rating = self.rating.clamp(0.0, 5.0);
+        target.tags = self.tags.clone();
+        target.collections = self.collections.clone();
         book::merge_daily_progress_history(&mut target.progress_history, &self.progress_history);
     }
 
@@ -143,6 +151,12 @@ impl BookSyncStateV2 {
         };
         if target.rating == 0.0 && self.rating > 0.0 {
             target.rating = self.rating.clamp(0.0, 5.0);
+        }
+        if target.tags.is_empty() && !self.tags.is_empty() {
+            target.tags = self.tags.clone();
+        }
+        if target.collections.is_empty() && !self.collections.is_empty() {
+            target.collections = self.collections.clone();
         }
         book::merge_daily_progress_history(&mut target.progress_history, &self.progress_history);
     }
@@ -453,6 +467,18 @@ mod tests {
         assert_eq!(local.path, local_path);
         assert_eq!(local.progress, 64.0);
         assert_eq!(local.resume_chapter, 9);
+    }
+
+    #[test]
+    fn v3_state_carries_tags_and_collections_between_devices() {
+        let mut source = sample_book("remote.epub");
+        source.tags = vec!["史料".into(), "明史".into()];
+        source.collections = vec!["待读".into()];
+        let state = BookSyncStateV2::from_book(&source);
+        let mut local = sample_book("local.epub");
+        state.apply_to_book(&mut local);
+        assert_eq!(local.tags, vec!["史料", "明史"]);
+        assert_eq!(local.collections, vec!["待读"]);
     }
 
     #[test]

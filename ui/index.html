@@ -78,6 +78,13 @@
           <div id="search-history" class="search-history"></div>
         </div>
       </div>
+      <button id="stats-toolbar-btn" class="icon-btn" title="阅读统计" aria-label="阅读统计">
+        <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
+          <path d="M5 20V10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          <path d="M12 20V5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          <path d="M19 20v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </svg>
+      </button>
       <div class="filter-wrap">
         <button id="filter-btn" class="icon-btn" title="排序与布局">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
@@ -101,47 +108,56 @@
               <label><input type="checkbox" class="rfilter" value="done" /> 已读</label>
               <div id="filter-stars" class="fp-stars" title="按评分过滤：点星=只看该评分及以上，再点同一处取消"></div>
             </div>
+            <div class="fp-col fp-all-books-col"><button id="reading-filter-all" type="button" class="fp-all-books">全部图书</button></div>
+          </div>
+          <div class="fp-sep-h"></div>
+          <div class="fp-org-row">
+            <div class="fp-org-col">
+              <div class="fp-title">标签</div>
+              <div id="tag-filter-list" class="fp-choice-list"></div>
+            </div>
+            <div class="fp-org-col">
+              <div class="fp-title">收藏夹</div>
+              <div id="collection-filter-list" class="fp-choice-list"></div>
+            </div>
           </div>
           <div class="fp-sep-h"></div>
           <div class="fp-col">
-            <div class="fp-title">布局</div>
-            <div class="layout-row">
-              <button class="layout-btn" data-layout="list" title="横向列表">
-                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                  <rect x="3" y="5" width="18" height="2.4" fill="currentColor" />
-                  <rect x="3" y="10.8" width="18" height="2.4" fill="currentColor" />
-                  <rect x="3" y="16.6" width="18" height="2.4" fill="currentColor" />
-                </svg>
-              </button>
-              <button class="layout-btn" data-layout="grid" title="网格">
-                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                  <rect x="3" y="3" width="8" height="8" fill="currentColor" />
-                  <rect x="13" y="3" width="8" height="8" fill="currentColor" />
-                  <rect x="3" y="13" width="8" height="8" fill="currentColor" />
-                  <rect x="13" y="13" width="8" height="8" fill="currentColor" />
-                </svg>
-              </button>
-            </div>
-            <div class="grid-cols-setting">
-              <div class="fp-title">列数</div>
-              <div class="grid-cols-row">
-                <button id="grid-cols-default" class="grid-cols-default" type="button">默认</button>
-                <span id="grid-cols-value" class="grid-cols-value">3</span>
-                <button id="grid-cols-dec" class="grid-cols-step" type="button" title="减少列数">-</button>
-                <button id="grid-cols-inc" class="grid-cols-step" type="button" title="增加列数">+</button>
+            <div class="layout-config-row">
+              <div class="layout-setting">
+                <div class="fp-title">布局</div>
+                <div class="layout-row">
+                  <button class="layout-btn" data-layout="list" title="横向列表">
+                    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                      <rect x="3" y="5" width="18" height="2.4" fill="currentColor" />
+                      <rect x="3" y="10.8" width="18" height="2.4" fill="currentColor" />
+                      <rect x="3" y="16.6" width="18" height="2.4" fill="currentColor" />
+                    </svg>
+                  </button>
+                  <button class="layout-btn" data-layout="grid" title="网格">
+                    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                      <rect x="3" y="3" width="8" height="8" fill="currentColor" />
+                      <rect x="13" y="3" width="8" height="8" fill="currentColor" />
+                      <rect x="3" y="13" width="8" height="8" fill="currentColor" />
+                      <rect x="13" y="13" width="8" height="8" fill="currentColor" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div class="grid-cols-setting">
+                <div class="fp-title">列数</div>
+                <div class="grid-cols-row">
+                  <button id="grid-cols-default" class="grid-cols-default" type="button">默认</button>
+                  <span id="grid-cols-value" class="grid-cols-value">3</span>
+                  <button id="grid-cols-dec" class="grid-cols-step" type="button" title="减少列数">-</button>
+                  <button id="grid-cols-inc" class="grid-cols-step" type="button" title="增加列数">+</button>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </div>
       <div class="menu-wrap">
-        <button id="stats-toolbar-btn" class="icon-btn" title="阅读统计" aria-label="阅读统计">
-          <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
-            <path d="M5 20V10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-            <path d="M12 20V5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-            <path d="M19 20v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-          </svg>
-        </button>
         <button id="settings-toolbar-btn" class="icon-btn settings-toolbar-btn" title="常用设置" aria-label="常用设置">⚙</button>
         <button id="menu-btn" class="icon-btn" title="菜单">⋮</button>
         <div id="menu" class="menu">
@@ -451,7 +467,21 @@
         <iframe id="shelf-search-frame" class="shelf-search-frame" title="书架全文检索"></iframe>
       </div>
     </div>
+    <div id="organization-filter-modal" class="modal">
+      <div class="modal-card organization-filter-card">
+        <div class="modal-head"><span id="organization-filter-title">选择标签</span><button id="organization-filter-close" class="btn-plain">✕</button></div>
+        <p id="organization-filter-note" class="organization-filter-note">可多选；不选择则不过滤。</p>
+        <div id="organization-filter-options" class="organization-filter-options"></div>
+        <div class="organization-filter-actions">
+          <button id="organization-filter-clear" class="btn-plain">清除选择</button>
+          <span></span>
+          <button id="organization-filter-cancel" class="btn-plain">取消</button>
+          <button id="organization-filter-apply" class="btn-primary">确定</button>
+        </div>
+      </div>
+    </div>
     <div id="drop-hint" class="drop-hint">松开即可导入书籍</div>
+    <div id="book-organizer-menu" class="book-organizer-menu" role="menu" aria-label="图书标签与收藏夹"></div>
     <div class="content-shell">
       <div class="content" tabindex="-1">
         <main id="shelf" class="shelf"></main>

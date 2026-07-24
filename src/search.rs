@@ -981,12 +981,16 @@ pub(crate) async fn open_search_window(
 }
 
 #[tauri::command]
-pub(crate) async fn web_search(term: String) -> Result<(), String> {
+pub(crate) async fn web_search(term: String, engine: Option<String>) -> Result<(), String> {
     let t = term.trim();
     if t.is_empty() {
         return Ok(());
     }
-    let url = format!("https://www.baidu.com/s?wd={}", url_encode(t));
+    let url = if engine.as_deref() == Some("google") {
+        format!("https://www.google.com/search?q={}", url_encode(t))
+    } else {
+        format!("https://www.baidu.com/s?wd={}", url_encode(t))
+    };
     url_open::open_https_url(&url)
 }
 

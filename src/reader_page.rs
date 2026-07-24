@@ -9,6 +9,7 @@ pub(crate) const READER_PAGE_HEAD: &str = concat!(
     include_str!("../ui/reader-page-measurement.js"),
     include_str!("../ui/reader-page-annotations.js"),
     include_str!("../ui/reader-page-runtime.js"),
+    include_str!("../ui/reader-page-transition.js"),
     "</script>
 "
 );

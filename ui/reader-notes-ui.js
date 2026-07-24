@@ -175,7 +175,7 @@ async function addHighlight(o, note, openNote, openCorrect) {
       text: o.text || "",
       context: o.context || "",
       rects: o.rects || "",
-      color: "y",
+      color: o.color || "y",
       note: note || "",
     },
   });
@@ -195,7 +195,7 @@ async function addCorrectedHighlight(o, correctedText) {
       text: o.text || "",
       context: o.context || "",
       rects: o.rects || "",
-      color: "y",
+      color: o.color || "y",
       note: "",
     },
   });

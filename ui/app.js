@@ -568,13 +568,16 @@ function hideImportStatus(delay = 0) {
 async function importBookPaths(paths) {
   paths = (paths || []).filter(Boolean);
   if (!paths.length) return;
+  const shelfWasEmpty = shelfUI.count() === 0;
   setImportStatus("准备导入 " + paths.length + " 本书...", "busy");
   try {
     const list = await startupTimed("manual-import", () => invoke("add_books", { paths }), paths.length + " files");
     setImportStatus("正在刷新书架...", "busy");
     shelfUI.render(list);
-    setImportStatus("导入完成，共 " + paths.length + " 个文件", "ok");
-    hideImportStatus(3200);
+    const shouldShowOpenHint = shelfWasEmpty && (list || []).length > 0 && localStorage.getItem("shelfDoubleClickHintSeen") !== "1";
+    if (shouldShowOpenHint) localStorage.setItem("shelfDoubleClickHintSeen", "1");
+    setImportStatus(shouldShowOpenHint ? "导入完成。双击打开图书" : "导入完成，共 " + paths.length + " 个文件", "ok");
+    hideImportStatus(shouldShowOpenHint ? 5200 : 3200);
     if (debugSettingOn("bg_fulltext_index")) {
       runWhenNoReader("keyword-index-after-import", () => invoke("build_shelf_index")); // 后台为新书建检索索引
     }

@@ -6,7 +6,7 @@ var fullBookMeasureEnabled=true;
 
 function measureChapterPages(html){
   if(!measurer)return 1;
-  var vw=window.innerWidth,vh=pagedBoxHeight(),pl=pageCountLayout();
+  var vw=pageCountWidth(),vh=pagedBoxHeight(),pl=pageCountLayout();
   if(isScrollMode()){
     measurer.style.minHeight='';
     measurer.style.height='auto';
@@ -55,7 +55,10 @@ function measureAll(){
     fetch(location.origin+'/chapter/'+ID+'/'+i).then(function(r){return r.json();}).then(function(d){
       if(tok!==measureToken)return;if(measurePaused){perfLog('measure.pause','chapter='+idx+' after-fetch');scheduleMeasure(900);return;}chapterPages[i]=measureChapterPages(d.body||'');
       var dt=performance.now()-tStep;if(dt>40)perfLog('measure.chapter','chapter='+idx+' dt='+dt.toFixed(1)+'ms html='+(d.body||'').length);
-      i++;if(i%4===0)publishPageCache(false);setTimeout(step,16);
+      i++;if(i%4===0)publishPageCache(false);
+      // 本地章节读取通常很快，不必每章固定等待一帧；每 8 章或遇到重章时
+      // 主动让出一次界面线程，兼顾统计速度与阅读交互响应。
+      setTimeout(step,dt>30?16:(i%8===0?8:0));
     }).catch(function(){if(tok!==measureToken)return;if(measurePaused){perfLog('measure.pause','chapter='+idx+' after-error');scheduleMeasure(900);return;}chapterPages[i]=1;i++;if(i%4===0)publishPageCache(false);setTimeout(step,16);});
   }
   step();

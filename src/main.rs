@@ -3,6 +3,7 @@
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
 )]
+mod ai_reader;
 mod app_commands;
 mod atomic_file;
 pub mod background_tasks;
@@ -320,6 +321,9 @@ fn main() {
             window_commands::main_window_close,
             window_commands::main_window_start_dragging,
             library_commands::list_books,
+            library_commands::set_book_organization,
+            library_commands::rename_book_organization,
+            library_commands::delete_book_organization,
             library_commands::library_health,
             library_commands::maintain_search_index,
             library_commands::merge_duplicate_books,
@@ -343,6 +347,9 @@ fn main() {
             app_commands::translation_credential_status,
             app_commands::save_translation_credential,
             app_commands::translate_text,
+            ai_reader::ai_reader_status,
+            ai_reader::save_ai_reader_config,
+            ai_reader::ask_reading_assistant,
             vocab::vocab_add,
             vocab::vocab_list,
             vocab::vocab_remove,
@@ -431,6 +438,7 @@ fn main() {
             reader_commands::remove_highlight,
             reader_commands::set_highlight_note,
             reader_commands::set_highlight_text,
+            reader_commands::set_highlight_color,
             library_commands::relocate_book
         ])
         .run(tauri::generate_context!())

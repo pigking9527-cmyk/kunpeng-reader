@@ -253,6 +253,7 @@ test("reader injection is composed from responsibility-focused modules", () => {
     "reader-page-measurement.js",
     "reader-page-annotations.js",
     "reader-page-runtime.js",
+    "reader-page-transition.js",
   ];
   for (const name of modules) {
     assert.match(rust, new RegExp(name.replaceAll(".", "\\.")));
@@ -318,11 +319,11 @@ test("shelf rendering, filters and selection are owned by ReaderShelfUI", () => 
 test("reader performance events are bounded and forwarded to the backend", () => {
   const guard = read("ui", "reader-message.js");
   const reader = read("ui", "reader.js");
-  const layout = read("ui", "reader-page-layout.js");
+  const transition = read("ui", "reader-page-transition.js");
   assert.match(guard, /"readerPerf"/);
   assert.match(guard, /action === "readerPerf"[^\n]*1000/);
   assert.match(reader, /invoke\("reader_perf_log", \{ event: e\.data\.readerPerf \}\)/);
-  assert.match(layout, /function reportReaderPaintPerf\(name,started,detail\)/);
+  assert.match(transition, /function reportReaderPaintPerf\(name,started,detail\)/);
 });
 
 test("reader cross and semantic search keep results from the current book", () => {
