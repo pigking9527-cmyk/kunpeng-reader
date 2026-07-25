@@ -1,18 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub fn ext_lower(path: &Path) -> String {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-}
-
 pub fn is_supported_book_path(path: &Path) -> bool {
-    matches!(
-        ext_lower(path).as_str(),
-        "epub" | "pdf" | "txt" | "md" | "markdown" | "mobi" | "azw3" | "azw"
-    )
+    reader_core::import::is_supported_book_name(&path.to_string_lossy())
 }
 
 pub fn filter_new_book_paths(
@@ -27,11 +17,7 @@ pub fn filter_new_book_paths(
 }
 
 pub fn normalize_import_dirs(dirs: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    dirs.into_iter()
-        .map(|dir| dir.trim().to_string())
-        .filter(|dir| !dir.is_empty() && seen.insert(dir.clone()))
-        .collect()
+    reader_core::import::normalize_import_locations(dirs)
 }
 
 #[cfg(test)]

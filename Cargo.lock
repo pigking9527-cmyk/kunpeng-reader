@@ -1284,7 +1284,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ebook-reader-tauri"
-version = "1.9.3"
+version = "1.9.4"
 dependencies = [
  "ammonia",
  "base64 0.22.1",
@@ -1306,6 +1306,7 @@ dependencies = [
  "pdf-extract",
  "pulldown-cmark",
  "rayon",
+ "reader-core",
  "rmp-serde",
  "rusqlite",
  "serde",
@@ -4234,6 +4235,19 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "reader-core"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "chardetng",
+ "encoding_rs",
+ "epub",
+ "mobi",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,3 +1,4 @@
+import base64
 import json
 import sqlite3
 import tempfile
@@ -64,6 +65,54 @@ class ReaderSyncApiTests(unittest.TestCase):
         )
         self.assertNotIn("book", app.SUPPORTED_ENTITY_KINDS)
         self.assertNotIn("reading_bucket", app.SUPPORTED_ENTITY_KINDS)
+
+    def test_feedback_migration_and_text_payload(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        app.migrate(conn)
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        versions = {
+            row[0] for row in conn.execute("SELECT version FROM schema_migrations")
+        }
+        self.assertIn("feedback", tables)
+        self.assertIn(7, versions)
+        normalized = app.normalize_feedback(
+            {
+                "kind": "feature",
+                "text": "希望增加阅读计划",
+                "images": [],
+                "appVersion": "1.9.4",
+                "platform": "test",
+            }
+        )
+        self.assertEqual(normalized["kind"], "feature")
+        self.assertEqual(normalized["text"], "希望增加阅读计划")
+        conn.close()
+
+    def test_feedback_rejects_oversized_or_fake_images(self):
+        fake = base64.b64encode(b"not-a-jpeg").decode("ascii")
+        with self.assertRaisesRegex(ValueError, "INVALID_FEEDBACK_IMAGE_DATA"):
+            app.normalize_feedback(
+                {
+                    "kind": "bug",
+                    "text": "图片异常",
+                    "images": [{"name": "x.jpg", "mime": "image/jpeg", "data": fake}],
+                }
+            )
+        oversized = base64.b64encode(
+            b"\xff\xd8\xff" + b"x" * app.MAX_FEEDBACK_IMAGE_BYTES
+        ).decode("ascii")
+        with self.assertRaisesRegex(ValueError, "FEEDBACK_IMAGE_TOO_LARGE"):
+            app.normalize_feedback(
+                {
+                    "kind": "bug",
+                    "text": "图片异常",
+                    "images": [{"name": "x.jpg", "mime": "image/jpeg", "data": oversized}],
+                }
+            )
 
     def test_ignored_details_are_bounded(self):
         details = []
@@ -226,7 +275,67 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         health = self.request_json("GET", "/health")
         self.assertTrue(health["ok"])
         self.assertEqual(health["schema_version"], 2)
-        self.assertEqual(health["api_version"], "0.5")
+        self.assertEqual(health["api_version"], "0.7")
+
+    def test_inventory_digest_changes_when_server_loses_an_acknowledged_entity(self):
+        first = self.entity("zh:仍在")
+        missing = self.entity("zh:被回退")
+        self.push([first, missing])
+        before = self.request_json("GET", "/sync/inventory")
+
+        conn = app.connect()
+        with conn:
+            conn.execute(
+                "DELETE FROM entities WHERE user_id=? AND kind=? AND id=?",
+                (self.USER_ID, missing["kind"], missing["id"]),
+            )
+        conn.close()
+        after = self.request_json("GET", "/sync/inventory")
+
+        self.assertEqual(before["entity_count"], 2)
+        self.assertEqual(after["entity_count"], 1)
+        self.assertNotEqual(before["inventory_digest"], after["inventory_digest"])
+
+    def test_reconcile_requests_only_missing_or_newer_local_entities(self):
+        unchanged = self.entity("zh:相同", value="same", updated_at=100, version=1)
+        server_newer = self.entity("zh:服务器新", value="server", updated_at=200, version=2)
+        local_newer_server_copy = self.entity(
+            "zh:本地新", value="old-server", updated_at=100, version=1
+        )
+        self.push([unchanged, server_newer, local_newer_server_copy])
+
+        local_newer = self.entity("zh:本地新", value="new-local", updated_at=300, version=3)
+        local_only = self.entity("zh:服务器缺失", value="local-only", updated_at=150, version=1)
+        manifest = []
+        for item in (unchanged, local_newer, local_only):
+            manifest.append(
+                {
+                    key: item[key]
+                    for key in (
+                        "kind",
+                        "id",
+                        "updated_at",
+                        "deleted_at",
+                        "device_id",
+                        "sync_version",
+                    )
+                }
+            )
+
+        response = self.request_json(
+            "POST",
+            "/sync/reconcile",
+            {"schema_version": 2, "manifest": manifest},
+        )
+
+        self.assertEqual(
+            {(item["kind"], item["id"]) for item in response["upload"]},
+            {("vocab", "zh:本地新"), ("vocab", "zh:服务器缺失")},
+        )
+        self.assertEqual(
+            {(item["kind"], item["id"]) for item in response["entities"]},
+            {("vocab", "zh:服务器新")},
+        )
 
     def test_exact_conflict_tie_is_independent_of_arrival_order(self):
         lower = self.entity("zh:冲突", "device-a", "a", 100, 3)

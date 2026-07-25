@@ -160,6 +160,19 @@ test("reader settings selects shrink inside the settings panel", () => {
   assert.match(html, /\.settings select\s*\{[^}]*flex:\s*1\s+1\s+0;[^}]*width:\s*0;[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/s);
 });
 
+test("阅读设置提供三款按需下载并校验的开源中文字体", () => {
+  assert.match(html, /data-reader-font-id="lxgw-wenkai-lite"[^>]*>霞鹜文楷 Lite/);
+  assert.match(html, /data-reader-font-id="source-han-serif-sc"[^>]*>思源宋体/);
+  assert.match(html, /data-reader-font-id="zhuque-fangsong"[^>]*>朱雀仿宋/);
+  assert.match(html, /id="reader-font-download-status"/);
+  assert.match(settingsUi, /invoke\("reader_font_status"\)/);
+  assert.match(settingsUi, /invoke\("download_reader_font", \{ fontId: id \}\)/);
+  assert.match(settingsUi, /下载后自动应用/);
+  assert.match(layout, /@font-face\{font-family:"Kunpeng LXGW WenKai Lite"/);
+  assert.match(layout, /reader:\/\/localhost\/font\/2\/SourceHanSerifSC-Regular\.otf/);
+  assert.match(layout, /reader:\/\/localhost\/font\/3\/ZhuqueFangsong-Regular\.ttf/);
+});
+
 test("center taps toggle the whole toolbar even while an overlay is closing", () => {
   assert.match(reader, /if \(e\.data\.centerTap\) toggleReaderToolbar\(\);/);
   assert.match(notes, /window\.toggleReaderToolbar\?\.\(\)/);

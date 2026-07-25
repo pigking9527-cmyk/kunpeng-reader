@@ -154,7 +154,12 @@ function renderBookmarks() {
 }
 document.getElementById("bm-add2").addEventListener("click", async () => {
   const label = "第 " + (curChapter + 1) + " " + (isPdf ? "页" : "章") + " · " + curProgress.toFixed(1) + "%";
-  bookmarks = await invoke("add_bookmark", { chapter: curChapter, frac: curChFrac, label });
+  bookmarks = await invoke("add_bookmark", {
+    chapter: curChapter,
+    frac: curChFrac,
+    label,
+    position: curReadingAnchor ? { chapter: curChapter, anchor: curReadingAnchor, fraction: curChFrac } : null,
+  });
   renderBookmarks();
 });
 
@@ -177,10 +182,11 @@ async function addHighlight(o, note, openNote, openCorrect) {
       rects: o.rects || "",
       color: o.color || "y",
       note: note || "",
+      rangeAnchor: o.range_anchor || null,
     },
   });
   sendToPage({ highlights }); // 让合并页重绘高亮（带正确的下标）
-  if (openNote) openAnnotations(highlights.length - 1); // 批注：打开大批注页
+  if (openNote) openAnnotations(highlights.length - 1, true); // 批注：打开大批注页并标记新建反馈动画
   else if (openCorrect && !isPdf) sendToPage({ editHighlightTextFor: highlights.length - 1 });
   // 纯高亮只保存并重绘，不再自动弹出工具栏；已有高亮可通过悬停/点击打开“取消高亮”菜单。
 }
@@ -197,6 +203,7 @@ async function addCorrectedHighlight(o, correctedText) {
       rects: o.rects || "",
       color: o.color || "y",
       note: "",
+      rangeAnchor: o.range_anchor || null,
     },
   });
   const idx = highlights.length - 1;
@@ -210,7 +217,7 @@ function ctxHtml(h) {
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   return esc(display);
 }
-function renderAnnotations(targetIdx) {
+function renderAnnotations(targetIdx, animateTarget) {
   annoList.innerHTML = "";
   if (!highlights.length) {
     annoList.innerHTML = '<div class="anno-empty">还没有批注 / 高亮。<br>在正文里选中文字 → 点「高亮」或「批注」即可添加。</div>';
@@ -220,6 +227,7 @@ function renderAnnotations(targetIdx) {
     const item = document.createElement("div");
     item.className = "anno-item";
     if (i === targetIdx) item.classList.add("target");
+    if (i === targetIdx && animateTarget) item.classList.add("annotation-added");
 
     const meta = document.createElement("div");
     meta.className = "anno-meta";
@@ -294,9 +302,9 @@ function renderAnnotations(targetIdx) {
     annoList.appendChild(item);
   });
 }
-function openAnnotations(idx) {
+function openAnnotations(idx, animateAdded) {
   ReaderShell.setOverlay(ReaderShell.OVERLAY.ANNOTATIONS, true);
-  renderAnnotations(idx);
+  renderAnnotations(idx, animateAdded);
   if (typeof idx === "number") {
     const items = annoList.querySelectorAll(".anno-item");
     if (items[idx]) {

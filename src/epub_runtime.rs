@@ -73,6 +73,8 @@ pub(crate) struct BookInfo {
     progress: f32,
     resume_chapter: u32,
     resume_frac: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_position: Option<reader_core::ReadingPosition>,
     bookmarks: Vec<book::Bookmark>,
     highlights: Vec<book::Highlight>,
 }
@@ -648,6 +650,7 @@ pub(crate) async fn book_info(
         progress,
         resume_chapter,
         resume_frac,
+        resume_position,
         chapter_index_version,
         bookmarks,
         highlights,
@@ -661,6 +664,7 @@ pub(crate) async fn book_info(
             book.progress,
             book.resume_chapter,
             book.resume_frac,
+            book.resume_position.clone(),
             book.chapter_index_version,
             book.bookmarks.clone(),
             book.highlights.clone(),
@@ -705,6 +709,7 @@ pub(crate) async fn book_info(
             progress,
             resume_chapter,
             resume_frac,
+            resume_position,
             bookmarks,
             highlights,
         });
@@ -717,6 +722,16 @@ pub(crate) async fn book_info(
     } else {
         resume_chapter.min(meta.virtuals.len().saturating_sub(1) as u32)
     };
+    let resume_position = resume_position.map(|mut position| {
+        if should_map_old_chapters {
+            position.chapter = map_physical_chapter_to_virtual(&meta, position.chapter);
+        } else {
+            position.chapter = position
+                .chapter
+                .min(meta.virtuals.len().saturating_sub(1) as u32);
+        }
+        position.normalized()
+    });
     let mut bookmarks = bookmarks;
     if should_map_old_chapters {
         for bookmark in &mut bookmarks {
@@ -746,6 +761,7 @@ pub(crate) async fn book_info(
         progress,
         resume_chapter,
         resume_frac,
+        resume_position,
         bookmarks,
         highlights,
     })
@@ -824,6 +840,7 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
     let (kind, id, rest) = parse_request_path(path)?;
 
     match kind.as_str() {
+        "font" => crate::reader_fonts::read_font(id),
         "cover" => {
             let cover = {
                 let library = state.library.lock().unwrap();
@@ -946,7 +963,9 @@ pub(crate) fn handle_protocol_request<R: tauri::Runtime>(
         let state = app.state::<AppState>();
         let response = match handle_request(&state, &path) {
             Some((bytes, mime)) => {
-                let cacheable = path.starts_with("/cover/") || path.starts_with("/res/");
+                let cacheable = path.starts_with("/cover/")
+                    || path.starts_with("/res/")
+                    || path.starts_with("/font/");
                 let cache_control = if cacheable {
                     "public, max-age=604800, immutable"
                 } else {

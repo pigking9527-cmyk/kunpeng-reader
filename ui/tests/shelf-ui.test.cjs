@@ -6,6 +6,7 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "shelf-ui.js"), "utf8");
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
+const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 
 test("common settings dialog stays compact on desktop", () => {
   assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*width:\s*min\(600px,\s*calc\(100vw - 48px\)\);/s);
@@ -22,8 +23,59 @@ test("book card clicks explicitly close main-window floaters", () => {
   const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
   assert.match(card, /addEventListener\("click",[\s\S]*?closeShelfCardFloaters\(\)/);
   assert.match(card, /addEventListener\("dblclick",[\s\S]*?closeShelfCardFloaters\(\)/);
+  assert.match(card, /if \(selected\.size > 0\)[\s\S]*?toggleSelect\(b\.id, card\)/);
+  assert.match(card, /openTimer = setTimeout\([\s\S]*?if \(!selected\.size\) openBook\(\)/);
+  assert.match(card, /addEventListener\("dblclick",[\s\S]*?if \(!selected\.size\) toggleSelect\(b\.id, card\)/);
   assert.match(card, /addEventListener\("contextmenu"/);
   assert.match(card, /openBookOrganizer\(getBook\(b\.id\) \|\| b, e\)/);
+});
+
+test("startup shelf can receive keyboard paging focus without stealing it on refresh", () => {
+  assert.match(source, /function focusShelf\(\)[\s\S]*?contentEl\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(source, /focusShelf,/);
+  assert.match(html, /<div class="content" tabindex="-1">/);
+  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  assert.match(app, /shelfUI\.render\(list\);[\s\S]*?requestAnimationFrame\(\(\) => shelfUI\.focusShelf\(\)\)/);
+});
+
+test("account sync description includes book tags and collections", () => {
+  assert.match(html, /书签、高亮、批注、评分、标签与收藏夹/);
+});
+
+test("funnel keeps sorting in two columns and reading filters on the right", () => {
+  const panel = html.slice(html.indexOf('<div id="filter-panel"'), html.indexOf('<div class="menu-wrap">'));
+  assert.match(panel, /id="filter-result-summary"[^>]*>0\/0/);
+  assert.ok(panel.indexOf('id="filter-result-summary"') > panel.indexOf('class="layout-config-row"'));
+  const primary = panel.indexOf("fp-sort-primary");
+  const secondary = panel.indexOf("fp-sort-secondary");
+  const reading = panel.indexOf("fp-reading-filter-col");
+  assert.ok(primary >= 0 && primary < secondary && secondary < reading);
+  for (const value of ["read", "reading-time", "size", "progress"]) {
+    assert.match(panel, new RegExp(`name="sort" value="${value}"`));
+  }
+  assert.ok(panel.indexOf('id="reading-filter-all"') > secondary);
+  assert.ok(panel.indexOf('id="reading-filter-all"') < reading);
+  assert.ok(panel.indexOf('id="reading-filter-all"') < panel.indexOf('name="sort" value="read"'));
+  assert.ok(panel.indexOf('id="filter-stars"') > reading);
+  assert.match(styles, /\.fp-row\s*\{[^}]*grid-template-columns:\s*max-content max-content max-content/s);
+});
+
+test("active shelf filters pulse blue, explain their state and show the visible book count", () => {
+  assert.match(source, /function updateShelfFilterStatus\(visibleCount\)/);
+  assert.match(source, /filterButton\.classList\.toggle\("filters-active", active\)/);
+  assert.match(source, /filterButton\.title = active \? "已启用筛选" : "排序与布局"/);
+  assert.match(source, /filterResultSummary\.textContent = visibleCount \+ "\/" \+ books\.length/);
+  assert.match(styles, /#filter-btn\.filters-active\s*\{[^}]*animation:\s*shelf-filter-pulse/s);
+  assert.match(styles, /@keyframes shelf-filter-pulse/);
+  assert.match(styles, /\.fp-result-summary\s*\{[^}]*text-align:\s*right/s);
+});
+
+test("new shelf sorting uses reading duration, real file size and progress", () => {
+  const sorter = source.slice(source.indexOf("function sortBooks"), source.indexOf("function matchesShelfSearch"));
+  assert.match(sorter, /case "reading-time":[\s\S]*reading_seconds/);
+  assert.match(sorter, /case "size":[\s\S]*bookFileSizes/);
+  assert.match(sorter, /case "progress":[\s\S]*\.progress/);
+  assert.match(source, /invoke\("book_file_sizes"\)/);
 });
 
 test("book organization uses right-click controls and the existing funnel filters", () => {
@@ -33,14 +85,52 @@ test("book organization uses right-click controls and the existing funnel filter
   assert.match(source, /rename_book_organization/);
   assert.match(source, /delete_book_organization/);
   assert.match(source, /matchesOrganizationFilters/);
+  assert.match(source, /mode === "all"[\s\S]*?selectedTags\)\.every[\s\S]*?selectedCollections\)\.every/);
+  assert.match(source, /selectedTags\)\.some[\s\S]*?selectedCollections\)\.some/);
+  assert.match(source, /shelfOrganizationMatchMode/);
+  assert.match(source, /"匹配全部" : "匹配任一"/);
+  assert.match(html, /id="organization-match-mode"[^>]*>匹配任一/);
+  assert.match(styles, /\.fp-org-col\s*\{[^}]*flex:\s*1 1 0;[^}]*max-width:\s*none;/s);
+  assert.match(styles, /\.fp-org-title-row\s*\{[^}]*width:\s*100%;/s);
+  assert.match(styles, /\.fp-match-mode\s*\{[^}]*margin-left:\s*auto;[^}]*margin-right:\s*8px;/s);
   assert.match(source, /openOrganizationFilter/);
   assert.match(source, /organization-filter-modal/);
+  assert.match(source, /className = "fp-choice-clear"/);
+  assert.match(source, /selectedKeys\.clear\(\)/);
+  assert.match(styles, /\.fp-choice-clear/);
   const opener = source.match(/function openOrganizationFilter\([\s\S]*?\n\}/);
   assert.ok(opener, "organization picker opener must exist");
   assert.ok(opener[0].indexOf("positionOrganizationFilter(anchor)") < opener[0].indexOf('filterPanel.classList.remove("show")'), "must capture the trigger position before hiding its panel");
+  assert.match(opener[0], /organizationFilterReturnToPanel = filterPanel\.classList\.contains\("show"\)/);
+  const closer = source.match(/function closeOrganizationFilter\(\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(closer, "organization picker closer must exist");
+  assert.match(closer[1], /requestFrame\(\(\) =>/);
+  assert.match(closer[1], /filterPanel\.classList\.add\("show"\)/);
   assert.match(styles, /\.book-organizer-menu/);
   assert.match(styles, /\.organization-filter-card/);
   assert.match(styles, /\.fp-org-row/);
+});
+
+test("organization match mode applies to every selected tag and collection", () => {
+  const nameFn = source.match(/function organizationName\([^)]*\)\s*\{[^}]*\}/)?.[0];
+  const keyFn = source.match(/function organizationKey\([^)]*\)\s*\{[^}]*\}/)?.[0];
+  const matcherStart = source.indexOf("function matchesOrganizationSelection");
+  const matcherEnd = source.indexOf("function matchesOrganizationFilters", matcherStart);
+  const matcherFn = matcherStart >= 0 && matcherEnd > matcherStart ? source.slice(matcherStart, matcherEnd) : "";
+  assert.ok(nameFn && keyFn && matcherFn, "pure organization matcher must remain testable");
+  const context = {};
+  vm.runInNewContext(`${nameFn}\n${keyFn}\n${matcherFn}`, context);
+  const book = { tags: ["古文"], collections: ["历史"] };
+  const tags = new Set(["古文", "历史著作"]);
+  const collections = new Set(["历史", "武侠小说"]);
+  assert.equal(context.matchesOrganizationSelection(book, tags, collections, "any"), true);
+  assert.equal(context.matchesOrganizationSelection(book, tags, collections, "all"), false);
+  assert.equal(context.matchesOrganizationSelection(
+    { tags: ["古文", "历史著作"], collections: ["历史", "武侠小说"] },
+    tags,
+    collections,
+    "all",
+  ), true);
 });
 
 test("shelf state, filtered selection and batch removal stay inside the injected API", async () => {

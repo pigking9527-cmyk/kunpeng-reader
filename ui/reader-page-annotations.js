@@ -3,7 +3,7 @@ var HL=[]; // 全书高亮 [{chapter,start,end,text,note}]，数组下标即后�
 var hlOverlay=null,sourceTextCache=null,highlightRenderTimer=null;
 function generatedTextNode(node){
   var el=node&&node.nodeType===3?node.parentElement:(node&&node.nodeType===1?node:null);
-  return !!(el&&el.closest&&el.closest('.rr-note-num,#hl-overlay,#virtual-page,#scroll-preview,#turn-fx-sheet,#page-mask'));
+  return !!(el&&el.closest&&el.closest('.rr-note-num,.rr-mode-switch-anchor,#hl-overlay,#virtual-page,#scroll-preview,#turn-fx-sheet,#page-mask'));
 }
 function sourceTextRecords(){
   if(sourceTextCache)return sourceTextCache;
@@ -273,21 +273,68 @@ function selOffsets(){
   var end=sourceBoundaryOffset(r.endContainer,r.endOffset);
   if(start==null||end==null)return null;
   if(end<start){var tmp=start;start=end;end=tmp;}
-  return {start:start,end:end,text:t};
+  return {start:start,end:end,text:t,range_anchor:{start:sourceOffsetAnchor(start),end:sourceOffsetAnchor(end)}};
+}
+function sourceOffsetAnchor(offset){
+  offset=Math.max(0,parseInt(offset,10)||0);
+  return {
+    chapter:curCh,
+    dom_path:'',
+    text_offset:offset,
+    context_before:sourceTextAround(Math.max(0,offset-72),offset,0,0),
+    context_after:sourceTextAround(offset,offset+112,0,0),
+    viewport_offset:0
+  };
 }
 function injectHead(htmlStr,seen){
   var tmp=document.createElement('div');tmp.innerHTML=htmlStr;
   var nodes=tmp.querySelectorAll('link,style');
   for(var i=0;i<nodes.length;i++){var key=nodes[i].outerHTML;if(seen[key])continue;seen[key]=1;document.head.appendChild(nodes[i]);}
 }
+function restoreStoredReadingAnchor(anchor){
+  if(!anchor||typeof sourceRangeForOffsets!=='function')return false;
+  var offset=Math.max(0,parseInt(anchor.text_offset,10)||0);
+  var before=String(anchor.context_before||''),after=String(anchor.context_after||'');
+  // 若书籍导入后 HTML 略有变化，优先用附近上下文校验；偏移已不可靠时再在本章中寻找锚点。
+  var directBefore=before?sourceTextAround(Math.max(0,offset-before.length),offset,0,0):'';
+  var directAfter=after?sourceTextAround(offset,offset+after.length,0,0):'';
+  if((before&&directBefore!==before)||(after&&directAfter!==after)){
+    var probe=after||before;
+    if(probe){
+      var whole=sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0);
+      var found=whole.indexOf(probe);
+      if(found>=0)offset=after?found:found+probe.length;
+    }
+  }
+  var range=sourceRangeForOffsets(offset,offset+1);
+  if(!range)return false;
+  var rect=null;try{rect=range.getBoundingClientRect();}catch(_){rect=null;}
+  if(!rect)return false;
+  if(isScrollMode()&&scrollPort()){
+    var pr=viewRect(),sp=scrollPort();
+    var top=Math.max(0,Math.round((sp.scrollTop||0)+rect.top-pr.top-(Number(anchor.viewport_offset)||0)));
+    scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=top;sp.scrollTop=top;
+    pageInCh=pageIndexForScrollTop(top);
+  }else{
+    gotoPage(pageOf({getBoundingClientRect:function(){return rect;}}));
+  }
+  curTopAnchor={range:range};
+  return true;
+}
 function loadInit(){
   var p=new URLSearchParams(location.search);
   try{S=Object.assign(S,JSON.parse(decodeURIComponent(p.get('s')||'{}')));}catch(e){}
+  var storedPosition=null;try{storedPosition=JSON.parse(decodeURIComponent(p.get('ra')||'null'));}catch(_){storedPosition=null;}
   var rc=parseInt(p.get('rc')||'0',10)||0, rf=parseFloat(p.get('rf')||'0')||0;
+  if(storedPosition&&storedPosition.anchor&&Number.isFinite(storedPosition.chapter))rc=storedPosition.chapter;
   showChapter(rc,'start').then(function(){
+    var restored=storedPosition&&storedPosition.anchor&&restoreStoredReadingAnchor(storedPosition.anchor);
     var resumePage=Math.round(rf*(pagesInCh-1));
-    if(resumePage>0)gotoPage(resumePage);
-    else if(isScrollMode()&&scrollPort()){pageInCh=0;scrollPort().scrollTop=0;scrollProgrammaticTarget=0;report();}
+    if(!restored){
+      if(resumePage>0)gotoPage(resumePage);
+      else if(isScrollMode()&&scrollPort()){pageInCh=0;scrollPort().scrollTop=0;scrollProgrammaticTarget=0;}
+    }
+    report();
     reveal();parent.postMessage({ready:1},'*');
     scheduleMeasure(500);
   });
@@ -605,6 +652,7 @@ function renderHlSettings(){
       var ph=dragState.placeholder;
       if((beforeNode&&beforeNode===ph)||ph.nextSibling===beforeNode)return;
       if(!beforeNode&&ph===list.lastElementChild)return;
+      if(!readerAnimationSettingOn('highlightSettings')){list.insertBefore(ph,beforeNode||null);return;}
       var beforePos=new Map();
       [].slice.call(list.children).forEach(function(r){if(r!==dragState.row)beforePos.set(r,r.getBoundingClientRect().top);});
       list.insertBefore(ph,beforeNode||null);
@@ -681,7 +729,7 @@ function renderHlSettings(){
   });
 }
 function hideSelMenu(){if(selMenu)selMenu.style.display='none';}
-function hideHlSettings(){if(hlSettingsPop)hlSettingsPop.style.display='none';}
+function hideHlSettings(){if(hlSettingsPop){hlSettingsPop.style.display='none';hlSettingsPop.classList.remove('hs-opening');}}
 var hlTextPop=null,excerptPage=null,excerptText='',correctDraft=null;
 function hideHlTextPop(){if(hlTextPop)hlTextPop.style.display='none';}
 function ensureHighlightTextPop(){
@@ -816,6 +864,8 @@ function showHlSettings(anchor){
   var top=r.top-h-10;if(top<8)top=r.bottom+10;
   if(top+h>window.innerHeight-8)top=Math.max(8,window.innerHeight-h-8);
   hlSettingsPop.style.left=left+'px';hlSettingsPop.style.top=top+'px';hlSettingsPop.style.display='block';
+  hlSettingsPop.classList.remove('hs-opening');
+  if(readerAnimationSettingOn('highlightSettings')){void hlSettingsPop.offsetWidth;hlSettingsPop.classList.add('hs-opening');}
 }
 // ---- 翻译面板：UI 先就位；实际 API 需用户配置后才发送文本到外部服务 ----
 var trPop=null,trRect=null,trText='',trCredentialDirty=false,trCredentialStatus={};

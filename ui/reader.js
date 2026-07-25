@@ -3,7 +3,24 @@ const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 let currentBookTitle = "";
 let currentBookId = "";
+// 页面测量仍在阅读 WebView 中完成；该 id 把它纳入统一任务中心，
+// 以便暂停/取消和可观察进度不再是另一套孤立状态。
+let pageCountTaskId = "";
 window.currentBookId = "";
+window.ReaderAnimationSettings?.applyReader?.(document);
+function syncAnimationSettingsToPage(settings) {
+  if (!frameReady || isPdf || typeof sendToPage !== "function") return;
+  sendToPage({ animationSettings: settings || window.ReaderAnimationSettings?.read?.() || {} });
+}
+window.addEventListener("reader-animation-settings-changed", (event) => {
+  window.ReaderAnimationSettings?.applyReader?.(document);
+  syncAnimationSettingsToPage(event.detail);
+});
+window.addEventListener("storage", (event) => {
+  if (event.key !== window.ReaderAnimationSettings?.STORAGE_KEY) return;
+  window.ReaderAnimationSettings?.applyReader?.(document);
+  syncAnimationSettingsToPage();
+});
 window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
 function readerDebugSettingOn(key) {
   try {
@@ -471,6 +488,7 @@ let resumeFrac = 0;
 let curProgress = 0; // 全书进度 0~100
 let curChapter = 0;
 let curChFrac = 0; // 章内比例
+let curReadingAnchor = null; // 排版无关的正文字符锚点，供下次续读恢复
 let curTotalCh = 1;
 let isPdf = false; // PDF.js 模式
 let lastPosSig = ""; // 阅读位置签名，用于沉浸模式翻页时自动收起工具栏
@@ -517,6 +535,7 @@ function reportProgress() {
         progress: curProgress,
         chapter: curChapter,
         frac: curChFrac,
+        anchor: curReadingAnchor,
       },
     }).catch(() => {});
   }, 800);
@@ -867,6 +886,23 @@ function fmtSize(b) {
   if (b >= 1024) return Math.round(b / 1024) + "K";
   return b + "B";
 }
+function renderInfoChips(element, values) {
+  element.replaceChildren();
+  const items = Array.isArray(values) ? values.filter(Boolean) : [];
+  if (!items.length) {
+    const empty = document.createElement("span");
+    empty.className = "info-chip empty";
+    empty.textContent = "未添加";
+    element.appendChild(empty);
+    return;
+  }
+  items.forEach((value) => {
+    const chip = document.createElement("span");
+    chip.className = "info-chip";
+    chip.textContent = value;
+    element.appendChild(chip);
+  });
+}
 // ---- 评分（五颗星，支持半星 0.5 刻度；点左半=半星、右半=整星，再点同一处清除）----
 // 通用半星组件：在 container 里建 5 颗叠层星，鼠标悬停预览、点击回调 onPick(value)。
 function makeStars(container, onPick) {
@@ -926,6 +962,8 @@ document.getElementById("info-btn")?.addEventListener("click", async () => {
     document.getElementById("info-format").textContent = (m.format || "").toUpperCase();
     document.getElementById("info-words").textContent = fmtWords(m.word_count);
     document.getElementById("info-size").textContent = fmtSize(m.size);
+    renderInfoChips(document.getElementById("info-tags"), m.tags);
+    renderInfoChips(document.getElementById("info-collections"), m.collections);
     document.getElementById("info-desc").textContent = m.description || "";
     infoStars.setVal(m.rating || 0);
   } catch (e) {
@@ -944,11 +982,92 @@ document.getElementById("info-desc").addEventListener("blur", () => {
   invoke("set_description", { description: desc }).catch(() => {});
 });
 
+const readerEndModal = document.getElementById("reader-end-modal");
+const readerEndList = document.getElementById("reader-end-list");
+function closeReaderEnd() {
+  readerEndModal?.classList.remove("show");
+}
+async function openReaderEnd() {
+  if (!readerEndModal || !readerEndList || !currentBookId) return;
+  readerEndModal.classList.add("show");
+  readerEndList.innerHTML = '<div class="reader-end-empty">正在寻找相似图书…</div>';
+  try {
+    const list = await invoke("similar_books", { id: String(currentBookId) });
+    readerEndList.replaceChildren();
+    if (!Array.isArray(list) || !list.length) {
+      const empty = document.createElement("div");
+      empty.className = "reader-end-empty";
+      empty.textContent = "暂时没有相似图书。可以先在语义索引中完成建库。";
+      readerEndList.appendChild(empty);
+      return;
+    }
+    list.slice(0, 5).forEach((book) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "reader-end-item";
+      const cover = document.createElement("div");
+      cover.className = "reader-end-cover";
+      if (book.cover) {
+        const image = document.createElement("img");
+        image.src = book.cover;
+        image.alt = book.title || "";
+        cover.appendChild(image);
+      } else {
+        cover.textContent = book.title || "未命名";
+      }
+      const body = document.createElement("div");
+      const title = document.createElement("div");
+      title.className = "reader-end-title";
+      title.textContent = book.title || "未命名";
+      const meta = document.createElement("div");
+      meta.className = "reader-end-meta";
+      const score = Math.round(Math.max(0, Math.min(1, Number(book.score) || 0)) * 100);
+      meta.textContent = (book.author ? book.author + " · " : "") + "相关性 " + score + "%";
+      body.append(title, meta);
+      if (book.description) {
+        const description = document.createElement("div");
+        description.className = "reader-end-desc";
+        description.textContent = book.description;
+        body.appendChild(description);
+      }
+      item.append(cover, body);
+      item.addEventListener("click", () => {
+        closeReaderEnd();
+        invoke("open_book_at", {
+          request: { id: String(book.id), chapter: 0, term: "" },
+        }).catch((error) => {
+          readerEndModal.classList.add("show");
+          readerEndList.innerHTML = "";
+          const empty = document.createElement("div");
+          empty.className = "reader-end-empty";
+          empty.textContent = "打开失败：" + error;
+          readerEndList.appendChild(empty);
+        });
+      });
+      readerEndList.appendChild(item);
+    });
+  } catch (error) {
+    readerEndList.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "reader-end-empty";
+    empty.textContent = "读取失败：" + error;
+    readerEndList.appendChild(empty);
+  }
+}
+document.getElementById("reader-end-close")?.addEventListener("click", closeReaderEnd);
+readerEndModal?.addEventListener("click", (event) => {
+  if (event.target === readerEndModal) closeReaderEnd();
+});
+
 // 全书搜索 UI 与 sendToPage 消息桥在 reader-search-ui.js。
 
 // 接收合并页上报：阅读进度 / 正文被点击 / 搜索结果数
 window.addEventListener("message", (e) => {
   if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
+  if (e.data.bookEnd) {
+    openReaderEnd();
+    return;
+  }
   if (e.data.readerAnchorReady) {
     const pending = aiReaderSidePending;
     if (pending && (!e.data.aiReaderSideRequestId || e.data.aiReaderSideRequestId === pending.requestId)) {
@@ -968,6 +1087,7 @@ window.addEventListener("message", (e) => {
     curProgress = e.data.progress;
     curChapter = e.data.chapter || 0;
     curChFrac = e.data.chFrac || 0;
+    curReadingAnchor = e.data.anchor || null;
     curTotalCh = e.data.totalCh || 1;
     if (typeof e.data.logicalCh === "number") curVchap = e.data.logicalCh;
     if (e.data.logicalTotal) vchapTotal = e.data.logicalTotal;
@@ -1053,6 +1173,7 @@ window.addEventListener("message", (e) => {
   if (e.data.ready) {
     hideLoading();
     frameReady = true;
+    syncAnimationSettingsToPage();
     if (vchaps.length) sendToPage({ vchaps }); // 把逻辑章节表交给合并页
     sendToPage({ highlights }); // 把高亮交给合并页渲染
     if (!isPdf) {
@@ -1060,10 +1181,21 @@ window.addEventListener("message", (e) => {
       sendToPage({
         pageCountViewportWidth: Math.round(document.documentElement.clientWidth || window.innerWidth || 1),
       });
-      // 取上次测好的页数缓存：版式一致则合并页直接采用，免重算
-      invoke("get_page_cache")
+      const chapterTotal = Array.isArray(vchaps) ? vchaps.length : 0;
+      invoke("begin_page_count_task", { total: chapterTotal })
+        .then((id) => {
+          pageCountTaskId = String(id || "");
+          // 取上次测好的页数缓存：版式一致则合并页直接采用，免重算。
+          // 必须在任务登记后发送，完整缓存才能立即把该任务收口为完成。
+          return invoke("get_page_cache");
+        })
         .then((pc) => { if (pc) sendToPage({ pageCache: pc }); })
-        .catch(() => {});
+        .catch(() => {
+          pageCountTaskId = "";
+          invoke("get_page_cache")
+            .then((pc) => { if (pc) sendToPage({ pageCache: pc }); })
+            .catch(() => {});
+        });
     }
     if (pendingJump) {
       doJump(pendingJump);
@@ -1080,6 +1212,24 @@ window.addEventListener("message", (e) => {
         complete: !!pc.complete,
       },
     }).catch(() => {});
+    const done = Array.isArray(pc.pages)
+      ? pc.pages.reduce((sum, pageCount) => sum + (Number(pageCount) > 0 ? 1 : 0), 0)
+      : 0;
+    if (pageCountTaskId || pc.pages?.length) {
+      invoke("report_page_count_task", {
+        request: {
+          done,
+          total: Array.isArray(pc.pages) ? pc.pages.length : 0,
+          sig: String(pc.sig || ""),
+          complete: !!pc.complete,
+        },
+      }).then((control) => {
+        if (control === "pause" || control === "cancel") {
+          sendToPage({ pageCountTaskControl: control });
+        }
+        if (control === "complete" || control === "cancel") pageCountTaskId = "";
+      }).catch(() => {});
+    }
   }
   if (e.data.downloadImage) {
     const img = e.data.downloadImage || {};
@@ -1359,6 +1509,7 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
     const q =
       "?rc=" + resumeChapter +
       "&rf=" + resumeFrac +
+      "&ra=" + encodeURIComponent(JSON.stringify(info.resume_position || null)) +
       "&s=" + encodeURIComponent(JSON.stringify(settings));
     frame.src = info.url + q;
     // 若本次是从书架检索点开的，取走待跳转位置，合并页就绪后跳过去

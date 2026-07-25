@@ -1,4 +1,5 @@
-use crate::{book, stats_core::ReadBucket, vocab, AppState};
+use crate::{book, vocab, AppState};
+use reader_core::stats::ReadBucket;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -32,6 +33,8 @@ pub(crate) struct BookSyncStateV2 {
     #[serde(default)]
     resume_frac: f32,
     #[serde(default)]
+    resume_position: Option<reader_core::ReadingPosition>,
+    #[serde(default)]
     chapter_index_version: u32,
     #[serde(default)]
     bookmarks: Vec<book::Bookmark>,
@@ -54,7 +57,7 @@ pub(crate) struct BookSyncStateV2 {
 }
 
 fn book_state_schema_version() -> u32 {
-    3
+    4
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -69,7 +72,7 @@ struct PortableReadBucketV2 {
 impl BookSyncStateV2 {
     fn from_book(book: &book::Book) -> Self {
         Self {
-            schema_version: 3,
+            schema_version: 4,
             content_id: book.content_id.clone(),
             fingerprint: book.fingerprint,
             title: book.title.clone(),
@@ -80,6 +83,7 @@ impl BookSyncStateV2 {
             progress: book.progress,
             resume_chapter: book.resume_chapter,
             resume_frac: book.resume_frac,
+            resume_position: book.resume_position.clone(),
             chapter_index_version: book.chapter_index_version,
             bookmarks: book.bookmarks.clone(),
             highlights: book.highlights.clone(),
@@ -109,6 +113,10 @@ impl BookSyncStateV2 {
         target.progress = self.progress.clamp(0.0, 100.0);
         target.resume_chapter = self.resume_chapter;
         target.resume_frac = self.resume_frac.clamp(0.0, 1.0);
+        target.resume_position = self
+            .resume_position
+            .clone()
+            .map(reader_core::ReadingPosition::normalized);
         target.chapter_index_version = self.chapter_index_version;
         target.bookmarks = self.bookmarks.clone();
         target.highlights = self.highlights.clone();
@@ -129,6 +137,10 @@ impl BookSyncStateV2 {
             target.progress = self.progress.clamp(0.0, 100.0);
             target.resume_chapter = self.resume_chapter;
             target.resume_frac = self.resume_frac.clamp(0.0, 1.0);
+            target.resume_position = self
+                .resume_position
+                .clone()
+                .map(reader_core::ReadingPosition::normalized);
             target.chapter_index_version = self.chapter_index_version;
         }
         if target.title.trim().is_empty() && !self.title.trim().is_empty() {
@@ -490,6 +502,7 @@ mod tests {
             chapter: 1,
             frac: 0.2,
             label: "local".into(),
+            ..Default::default()
         });
         let mut remote_book = sample_book("remote.epub");
         remote_book.last_read_at = 100;
@@ -498,6 +511,7 @@ mod tests {
             chapter: 2,
             frac: 0.3,
             label: "remote".into(),
+            ..Default::default()
         });
         BookSyncStateV2::from_book(&remote_book).merge_into_book(&mut local);
         assert_eq!(local.progress, 80.0);

@@ -129,7 +129,7 @@ function modeSwitchDiagLog(seq,phase,expectedOffset,extra){
   var sampled=null,sampledOffset=null;
   try{sampled=topAnchor();sampledOffset=anchorTextOffset(sampled);}catch(_){}
   var expectedRange=null;
-  if(expectedOffset!=null)try{expectedRange=sourceRangeForOffsets(expectedOffset,expectedOffset+1);}catch(_){}
+  if(expectedOffset!=null)try{expectedRange=sourceAnchorRangeForOffset(expectedOffset);}catch(_){}
   var sp=scrollPort(),payload={
     seq:seq,phase:phase,ts:Math.round(performance.now()),chapter:curCh,
     flow:S.flowMode,pageMode:S.pageMode,page:pageInCh+1,pages:pagesInCh,

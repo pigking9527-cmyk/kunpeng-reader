@@ -1,7 +1,9 @@
-#![warn(clippy::pedantic, clippy::nursery)]
+// This is a vendored upstream crate. Keep the application lint gate strict while
+// allowing this pinned parser to build across newer Clippy releases.
+#![allow(clippy::all, clippy::pedantic, clippy::nursery, dead_code)]
 #![allow(
     clippy::module_name_repetitions,
-    clippy::let_underscore_drop,
+    let_underscore_drop,
 
     // for MSRV
     clippy::unnested_or_patterns,

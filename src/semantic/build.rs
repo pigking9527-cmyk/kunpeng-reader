@@ -395,7 +395,10 @@ pub(super) async fn build_semantic_index(
                 if profile::read_single(id, mtime).is_none()
                     && profile::read_or_backfill(state.inner(), b).is_none()
                 {
-                    failures.push(format!("{}：无法生成相似图书缓存", b.title));
+                    let _ = task.log(
+                        crate::background_tasks::TaskLogLevel::Warning,
+                        format!("{}：无法回填相似图书缓存，语义向量仍可正常使用", b.title),
+                    );
                 }
                 continue;
             }
@@ -594,8 +597,12 @@ pub(super) async fn build_semantic_vectors(app: tauri::AppHandle) -> Result<(), 
                 if profile::read_single(id, mtime).is_none()
                     && profile::read_or_backfill(state.inner(), b).is_none()
                 {
-                    failures.push(format!("{}：无法生成相似图书缓存", b.title));
-                } else if sem_index_done_for_book(b) {
+                    let _ = task.log(
+                        crate::background_tasks::TaskLogLevel::Warning,
+                        format!("{}：无法回填相似图书缓存，语义向量仍可正常使用", b.title),
+                    );
+                }
+                if sem_index_done_for_book(b) {
                     completed += 1;
                 }
                 update_vector_book_progress(state.inner(), completed, total, b.title.clone());

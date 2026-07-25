@@ -120,6 +120,14 @@ pub enum BackgroundTaskKind {
     SemanticVectors,
     Accelerator,
     MultiProfile,
+    /// Persistent full-text/Bloom index.  It is independent of semantic
+    /// vectors and can resume at a completed-book boundary.
+    FullTextIndex,
+    /// Renderer-side whole-book page measurement, mirrored here so the task
+    /// center can expose its lifecycle consistently across platforms.
+    PageCount,
+    /// Cover extraction or thumbnail regeneration.
+    CoverGeneration,
     Import,
     Sync,
 }
@@ -131,6 +139,9 @@ impl BackgroundTaskKind {
             Self::SemanticVectors => "semantic_vectors",
             Self::Accelerator => "accelerator",
             Self::MultiProfile => "multi_profile",
+            Self::FullTextIndex => "full_text_index",
+            Self::PageCount => "page_count",
+            Self::CoverGeneration => "cover_generation",
             Self::Import => "import",
             Self::Sync => "sync",
         }
@@ -696,6 +707,67 @@ impl BackgroundTaskRegistry {
         self.enqueue(kind, label)
     }
 
+    /// Resume only a paused task that belongs to the same durable work scope.
+    /// This is for independent renderer jobs such as per-book page counting:
+    /// two open books must never resume each other's checkpoint merely because
+    /// they share the same task kind.
+    pub fn enqueue_or_resume_scoped(
+        &self,
+        kind: BackgroundTaskKind,
+        label: impl Into<String>,
+        scope_prefix: &str,
+    ) -> TaskHandle {
+        let label = truncate_chars(label.into(), MAX_LABEL_CHARS);
+        let now = timestamp_ms();
+        let mut inner = self.lock_inner();
+        let latest_paused = inner
+            .tasks
+            .values()
+            .filter(|record| {
+                record.kind == kind
+                    && record.state == BackgroundTaskState::Paused
+                    && !record.cancel_requested.load(Ordering::Acquire)
+                    && record
+                        .checkpoint
+                        .as_deref()
+                        .is_some_and(|checkpoint| checkpoint.starts_with(scope_prefix))
+            })
+            .max_by_key(|record| record.sequence)
+            .map(|record| record.id.clone());
+        if let Some(id) = latest_paused {
+            let record = inner
+                .tasks
+                .get_mut(&id)
+                .expect("paused task selected from the same registry");
+            record.pause_requested.store(false, Ordering::Release);
+            record.state = BackgroundTaskState::Queued;
+            record.label = label;
+            record.current = "准备从检查点继续".into();
+            record.error = None;
+            record.finished_at_ms = None;
+            record.updated_at_ms = now;
+            push_log(
+                record,
+                self.shared.log_limit,
+                TaskLogLevel::Info,
+                "任务已按工作范围从暂停检查点重新排队",
+                now,
+            );
+            let cancellation_token = TaskCancellationToken {
+                requested: Arc::clone(&record.cancel_requested),
+            };
+            self.persist_best_effort(&inner, true);
+            drop(inner);
+            return TaskHandle {
+                id,
+                registry: self.clone(),
+                cancellation_token,
+            };
+        }
+        drop(inner);
+        self.enqueue(kind, label)
+    }
+
     pub fn snapshot(&self, id: &str) -> Option<BackgroundTaskSnapshot> {
         self.lock_inner().tasks.get(id).map(TaskRecord::snapshot)
     }
@@ -1070,6 +1142,14 @@ impl TaskHandle {
         })
     }
 
+    /// Start a renderer-driven task whose units of work are performed in a
+    /// webview (for example page measurement).  The host keeps the guard and
+    /// reports durable checkpoints from renderer messages, so the task gets
+    /// the same pause/cancel/terminal guarantees as a worker-pool task.
+    pub fn start_external(self) -> Result<TaskRunGuard, String> {
+        self.start()
+    }
+
     /// 在统一的固定大小工作池中执行无需等待返回值的长任务。
     ///
     /// 调度器负责排队和后台优先级；任务函数只负责业务检查点和最终状态。若任务
@@ -1226,6 +1306,14 @@ impl TaskRunGuard {
             Some(current.into()),
             Some(checkpoint.into()),
         )
+    }
+
+    /// Returns the last durable checkpoint for a worker that is being resumed.
+    /// The task body owns parsing; the registry deliberately keeps it opaque.
+    pub fn checkpoint_value(&self) -> Option<String> {
+        self.handle
+            .snapshot()
+            .and_then(|snapshot| snapshot.checkpoint)
     }
 
     pub fn log(&self, level: TaskLogLevel, message: impl Into<String>) -> Result<(), String> {
@@ -1486,16 +1574,53 @@ mod tests {
             BackgroundTaskKind::SemanticVectors,
             BackgroundTaskKind::Accelerator,
             BackgroundTaskKind::MultiProfile,
+            BackgroundTaskKind::FullTextIndex,
+            BackgroundTaskKind::PageCount,
+            BackgroundTaskKind::CoverGeneration,
             BackgroundTaskKind::Import,
             BackgroundTaskKind::Sync,
         ] {
             registry.enqueue(kind, kind.id_prefix());
         }
         let snapshots = registry.snapshots();
-        assert_eq!(snapshots.len(), 6);
+        assert_eq!(snapshots.len(), 9);
         assert!(snapshots
             .iter()
             .all(|snapshot| snapshot.state == BackgroundTaskState::Queued));
+    }
+
+    #[test]
+    fn scoped_resume_never_crosses_page_count_book_boundaries() {
+        let registry = BackgroundTaskRegistry::new();
+        let first = registry.enqueue(BackgroundTaskKind::PageCount, "统计甲");
+        let first_id = first.id().to_owned();
+        let first_task = first.start().unwrap();
+        first_task
+            .checkpoint(2, 8, "已测量 2/8 章", "book=101;sig=layout-a;done=2")
+            .unwrap();
+        first_task.pause().unwrap();
+
+        let second = registry.enqueue(BackgroundTaskKind::PageCount, "统计乙");
+        let second_task = second.start().unwrap();
+        second_task
+            .checkpoint(3, 9, "已测量 3/9 章", "book=202;sig=layout-a;done=3")
+            .unwrap();
+        second_task.pause().unwrap();
+
+        let resumed = registry.enqueue_or_resume_scoped(
+            BackgroundTaskKind::PageCount,
+            "继续统计甲",
+            "book=101;",
+        );
+        assert_eq!(resumed.id(), first_id);
+        assert_eq!(
+            resumed.snapshot().unwrap().state,
+            BackgroundTaskState::Queued
+        );
+        assert_eq!(
+            second.snapshot().unwrap().state,
+            BackgroundTaskState::Paused
+        );
     }
 
     #[test]

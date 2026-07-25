@@ -1,4 +1,9 @@
-use crate::{search, window_commands::reader_window_id};
+use crate::{
+    background_tasks::{BackgroundTaskKind, TaskControlSignal},
+    search,
+    window_commands::reader_window_id,
+    AppState,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -41,6 +46,93 @@ pub(crate) struct SavePageCacheRequest {
     pages: Vec<u32>,
     #[serde(default)]
     complete: bool,
+}
+
+/// Renderer-side whole-book measurement reports a compact checkpoint after a
+/// few completed chapters.  Page layout is browser work, but its lifecycle is
+/// owned by the same persistent task center as imports, search and sync.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PageCountTaskProgressRequest {
+    done: u64,
+    total: u64,
+    sig: String,
+    #[serde(default)]
+    complete: bool,
+}
+
+#[tauri::command]
+pub(crate) fn begin_page_count_task(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    total: u64,
+) -> Result<String, String> {
+    let book_id = reader_window_id(&window).ok_or_else(|| "无法确定阅读图书".to_string())?;
+    let mut tasks = state.page_count_tasks.lock().unwrap();
+    if let Some(task) = tasks.get(&book_id) {
+        return Ok(task.id().to_owned());
+    }
+    let title = state
+        .library
+        .lock()
+        .unwrap()
+        .books
+        .iter()
+        .find(|book| book.id == book_id)
+        .map(|book| book.title.clone())
+        .unwrap_or_else(|| "当前图书".to_string());
+    let handle = state.background_tasks.enqueue_or_resume_scoped(
+        BackgroundTaskKind::PageCount,
+        format!("统计《{title}》总页数"),
+        &format!("book={book_id};"),
+    );
+    let task = handle.start_external()?;
+    if task.checkpoint_value().is_none() {
+        task.checkpoint(0, total, "等待阅读页测量", format!("book={book_id};"))?;
+    }
+    let id = task.id().to_owned();
+    tasks.insert(book_id, task);
+    Ok(id)
+}
+
+/// Report a durable page-count checkpoint and return the control state that
+/// the renderer must apply before measuring another chapter.
+#[tauri::command]
+pub(crate) fn report_page_count_task(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    request: PageCountTaskProgressRequest,
+) -> Result<String, String> {
+    let book_id = reader_window_id(&window).ok_or_else(|| "无法确定阅读图书".to_string())?;
+    let Some(task) = state.page_count_tasks.lock().unwrap().remove(&book_id) else {
+        return Ok("inactive".to_string());
+    };
+    match task.control_signal() {
+        TaskControlSignal::Cancel => {
+            task.cancel()?;
+            Ok("cancel".to_string())
+        }
+        TaskControlSignal::Pause => {
+            task.pause()?;
+            Ok("pause".to_string())
+        }
+        TaskControlSignal::Continue => {
+            let done = request.done.min(request.total);
+            task.checkpoint(
+                done,
+                request.total,
+                format!("已测量 {done}/{} 章", request.total),
+                format!("book={book_id};sig={};done={done}", request.sig),
+            )?;
+            if request.complete {
+                task.complete()?;
+                Ok("complete".to_string())
+            } else {
+                state.page_count_tasks.lock().unwrap().insert(book_id, task);
+                Ok("continue".to_string())
+            }
+        }
+    }
 }
 
 #[tauri::command]

@@ -77,7 +77,31 @@ function addDays(d, n) {
   return x;
 }
 function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); } // m: 0-based
-function statsEscapeHtml(s) { return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function statsEscapeHtml(s) { return String(s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function statsEscapeAttr(s) {
+  return String(s || "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+function statsCoverHue(title) {
+  let hash = 0;
+  for (const ch of String(title || "书")) hash = ((hash * 31) + ch.codePointAt(0)) >>> 0;
+  return hash % 360;
+}
+function statsBookCard(book) {
+  const title = statsEscapeHtml(book.title);
+  const cover = book.cover
+    ? `<img src="${statsEscapeAttr(book.cover)}" alt="${statsEscapeAttr(book.title)}" loading="lazy" />`
+    : `<span class="stats-book-fallback" style="--stats-cover-hue:${statsCoverHue(book.title)}">${title}</span>`;
+  return (
+    `<article class="stats-book-card" title="${statsEscapeAttr(book.title)}">` +
+      `<div class="stats-book-cover">${cover}${book.finished ? '<span class="stats-book-finished">读完</span>' : ""}</div>` +
+      `<div class="stats-book-title">${title}</div>` +
+      `<div class="stats-book-reading">${fmtTime(book.seconds)} · ${fmtWords(book.words)}</div>` +
+      `<div class="stats-book-notes">高亮 ${book.highlights} · 批注 ${book.notes}</div>` +
+    "</article>"
+  );
+}
 function fmtReadingSpeed(words, seconds) {
   if (!words || !seconds) return "—";
   return Math.round(words / Math.max(1, seconds / 60)) + " 字/分钟";
@@ -280,11 +304,10 @@ async function renderStats() {
   let books;
   if (data.books.length) {
     books = `<div class="stat-sec-title">这一${unit}读过的书</div>`;
-    data.books.forEach((b) => {
-      books +=
-        `<div class="sbook"><span class="st-name">${statsEscapeHtml(b.title)} ${b.finished ? '<span class="fin">✓读完</span>' : ""}</span>` +
-        `<span class="st-meta">${fmtTime(b.seconds)} · ${fmtWords(b.words)}<br>高亮 ${b.highlights} · 批注 ${b.notes}</span></div>`;
-    });
+    const orderedBooks = data.books.slice().sort((a, b) => (
+      (b.seconds || 0) - (a.seconds || 0) || String(a.title || "").localeCompare(String(b.title || ""), "zh-CN")
+    ));
+    books += `<div class="stats-book-strip">${orderedBooks.map(statsBookCard).join("")}</div>`;
   } else {
     books = '<div class="stats-empty">这段时间还没有阅读记录</div>';
   }

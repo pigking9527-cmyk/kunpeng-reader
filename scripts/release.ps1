@@ -49,7 +49,7 @@ function Get-ChangelogNotes {
   if (-not $path -or -not (Test-Path -LiteralPath $path)) { return "v$Ver" }
   $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
   $escaped = [regex]::Escape($Ver)
-  $m = [regex]::Match($text, "(?ms)^##\s+v$escaped\s*\r?\n(?<body>.*?)(?:\r?\n---\r?\n|$)")
+  $m = [regex]::Match($text, "(?ms)^##\s+v$escaped\s*\r?\n(?<body>.*?)(?=^##\s+v|\z)")
   if ($m.Success) { return $m.Groups["body"].Value.Trim() }
   return "v$Ver"
 }

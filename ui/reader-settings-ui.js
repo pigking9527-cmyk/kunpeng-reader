@@ -1,6 +1,15 @@
 // 阅读设置状态与设置面板绑定
 // 先于 reader.js 加载：提供 settings/applyShellTheme/initSettingsUI 给阅读页启动逻辑使用。
 
+function applyReaderAnimationSettings() {
+  window.ReaderAnimationSettings?.applyReader(document);
+}
+window.addEventListener("reader-animation-settings-changed", applyReaderAnimationSettings);
+window.addEventListener("storage", (event) => {
+  if (event.key === window.ReaderAnimationSettings?.STORAGE_KEY) applyReaderAnimationSettings();
+});
+applyReaderAnimationSettings();
+
 const DEFAULTS = {
   theme: "light",
   fontFamily: "",
@@ -41,6 +50,14 @@ function loadSettings() {
   }
 }
 let settings = loadSettings();
+window.addEventListener("storage", (event) => {
+  if (event.key !== "readerSettings") return;
+  settings = loadSettings();
+  normalizeModeSettings();
+  const turnFx = document.getElementById("set-turnfx");
+  if (turnFx) turnFx.value = settings.pageTurnEffect;
+  pushSettings();
+});
 
 function normalizeModeSettings() {
   let changed = false;
@@ -145,11 +162,90 @@ function initSettingsUI() {
   refreshThemeBtns();
 
   const font = document.getElementById("set-font");
+  const fontDownloadRow = document.getElementById("reader-font-download-row");
+  const fontDownloadStatus = document.getElementById("reader-font-download-status");
+  const fontDownloadAction = document.getElementById("reader-font-download-action");
+  const readerFontState = new Map();
+  let fontDownloadBusy = false;
+  const selectedOptionalFont = () => {
+    const option = font.options[font.selectedIndex];
+    return option?.dataset?.readerFontId ? option : null;
+  };
+  const fontSizeText = (bytes) => {
+    const mb = Number(bytes || 0) / (1024 * 1024);
+    return (mb >= 10 ? mb.toFixed(1) : mb.toFixed(2)) + " MB";
+  };
+  function refreshOptionalFontUI() {
+    font.querySelectorAll("option[data-reader-font-id]").forEach((option) => {
+      const state = readerFontState.get(option.dataset.readerFontId);
+      const label = option.dataset.readerFontLabel || option.textContent;
+      option.textContent = state?.installed
+        ? label + "（已安装）"
+        : label + "（需下载" + (state?.download_bytes ? " " + fontSizeText(state.download_bytes) : "") + "）";
+    });
+    const option = selectedOptionalFont();
+    if (!option) {
+      if (fontDownloadRow) fontDownloadRow.hidden = true;
+      return;
+    }
+    const state = readerFontState.get(option.dataset.readerFontId);
+    if (fontDownloadRow) fontDownloadRow.hidden = false;
+    if (fontDownloadStatus) {
+      fontDownloadStatus.textContent = fontDownloadBusy
+        ? "正在下载并校验字体…"
+        : state?.installed
+          ? "已安装到本机，断网也可使用。"
+          : "首次使用需下载 " + fontSizeText(state?.download_bytes) + "，下载后自动应用。";
+    }
+    if (fontDownloadAction) {
+      fontDownloadAction.hidden = !!state?.installed;
+      fontDownloadAction.disabled = fontDownloadBusy;
+      fontDownloadAction.textContent = fontDownloadBusy ? "下载中…" : "下载";
+    }
+  }
+  async function loadReaderFontStatus() {
+    try {
+      const states = await invoke("reader_font_status");
+      states.forEach((state) => readerFontState.set(state.id, state));
+    } catch (_) {}
+    refreshOptionalFontUI();
+  }
+  async function installSelectedFont() {
+    const option = selectedOptionalFont();
+    if (!option || fontDownloadBusy) return;
+    const id = option.dataset.readerFontId;
+    if (readerFontState.get(id)?.installed) {
+      settings.fontFamily = font.value;
+      onChange();
+      return;
+    }
+    fontDownloadBusy = true;
+    refreshOptionalFontUI();
+    try {
+      const state = await invoke("download_reader_font", { fontId: id });
+      readerFontState.set(id, state);
+      settings.fontFamily = font.value;
+      onChange();
+    } catch (error) {
+      if (fontDownloadStatus) fontDownloadStatus.textContent = "字体下载失败：" + String(error);
+    } finally {
+      fontDownloadBusy = false;
+      refreshOptionalFontUI();
+    }
+  }
   font.value = settings.fontFamily;
   font.addEventListener("change", () => {
+    refreshOptionalFontUI();
+    const option = selectedOptionalFont();
+    if (option && !readerFontState.get(option.dataset.readerFontId)?.installed) {
+      installSelectedFont();
+      return;
+    }
     settings.fontFamily = font.value;
     onChange();
   });
+  fontDownloadAction?.addEventListener("click", installSelectedFont);
+  loadReaderFontStatus();
   const styleMode = document.getElementById("set-style-mode");
   if (styleMode) {
     styleMode.value = settings.styleMode;
@@ -173,6 +269,7 @@ function initSettingsUI() {
     turnFx.value = settings.pageTurnEffect || DEFAULTS.pageTurnEffect;
     turnFx.addEventListener("change", () => {
       settings.pageTurnEffect = turnFx.value;
+      window.ReaderAnimationSettings?.set?.("pageTurn", turnFx.value !== "off");
       onChange();
     });
   }

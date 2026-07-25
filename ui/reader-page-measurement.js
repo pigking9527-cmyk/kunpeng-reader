@@ -72,6 +72,9 @@ function applyPageCache(pc){
   measureDone=!!pc.complete||chapterPages.every(function(p){return p>0;});pageSig=pc.sig;
   if(measureTimer){clearTimeout(measureTimer);measureTimer=null;}
   report();
+  // 回填的完整缓存同样要通知外壳：统一任务中心才能把“统计总页数”
+  // 立即标为完成，而不是留下一个没有实际工作的 running 任务。
+  if(typeof parent!=='undefined'&&parent.postMessage)publishPageCache(measureDone);
   if(!measureDone)scheduleMeasure(60);
 }
 function invalidateMeasure(){measureToken++;measureDone=false;pageSig='';chapterPages=new Array(CH).fill(0);}

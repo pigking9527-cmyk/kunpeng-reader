@@ -792,6 +792,7 @@ pub(crate) struct SimilarBook {
     progress: f32,
     score: f32,
     indexed_chunks: usize,
+    description: String,
 }
 
 pub(super) async fn similar_books(
@@ -850,6 +851,7 @@ pub(super) async fn similar_books(
             progress: book.progress,
             score,
             indexed_chunks,
+            description: crate::html_sanitize::html_to_plain_text(&book.description),
         });
     }
     output.sort_by(|left, right| {

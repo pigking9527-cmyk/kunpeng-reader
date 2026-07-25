@@ -2,56 +2,15 @@
 //  book.rs —— 图书馆（持久化）、图书元信息、封面缩略图、文本解码
 // ============================================================================
 
+use reader_core::{ReadingAnchor, ReadingPosition};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// 一个书签：定位到 章节 + 章内比例（虚拟化按章渲染下稳定），label 仅作显示。
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Bookmark {
-    #[serde(default)]
-    pub chapter: u32,
-    #[serde(default)]
-    pub frac: f32,
-    pub label: String,
-}
+pub use reader_core::{Bookmark, Highlight, ProgressTimelineEntry};
 
-/// 一处高亮/批注：章节 + 章内字符区间 [start,end)，附文本、颜色、批注。
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Highlight {
-    #[serde(default)]
-    pub chapter: u32,
-    #[serde(default)]
-    pub start: u32,
-    #[serde(default)]
-    pub end: u32,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub corrected_text: String,
-    #[serde(default)]
-    pub context: String, // 被高亮文字所在段落（用于批注页展示上下文）
-    #[serde(default)]
-    pub rects: String, // PDF 专用：归一化矩形 JSON（[[x,y,w,h],...]）；EPUB 为空
-    #[serde(default)]
-    pub color: String,
-    #[serde(default)]
-    pub note: String,
-    #[serde(default)]
-    pub created_at: u64,
-}
-
-/// 每日最后阅读位置：一书一天一条，用于长期时间线而非逐章流水。
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ProgressTimelineEntry {
-    #[serde(default)]
-    pub at: u64,
-    #[serde(default)]
-    pub progress: f32,
-    #[serde(default)]
-    pub chapter: u32,
-    #[serde(default)]
-    pub frac: f32,
+fn organization_name_key(value: &str) -> String {
+    reader_core::domain::organization_name_key(value)
 }
 
 /// 书架上的一本书。
@@ -82,6 +41,9 @@ pub struct Book {
     pub resume_chapter: u32, // 续读：上次所在章节
     #[serde(default)]
     pub resume_frac: f32, // 续读：上次章内比例 0~1
+    /// 独立于排版的正文锚点；旧版字段保留用于兼容与无法取 DOM 锚点的文档。
+    #[serde(default)]
+    pub resume_position: Option<ReadingPosition>,
     #[serde(default)]
     pub chapter_index_version: u32, // 章节索引版本：EPUB 大章拆分后用于区分旧物理章号/新虚拟章号
     #[serde(default)]
@@ -118,21 +80,8 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn organization_name_key(value: &str) -> String {
-    value.trim().to_lowercase()
-}
-
 fn normalize_organization_names(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    values
-        .into_iter()
-        .filter_map(|value| {
-            let value = value.trim().to_string();
-            let key = organization_name_key(&value);
-            (!key.is_empty() && value.chars().count() <= 32 && seen.insert(key)).then_some(value)
-        })
-        .take(32)
-        .collect()
+    reader_core::domain::normalize_names(values)
 }
 
 fn local_day_key(secs: u64) -> u32 {
@@ -209,6 +158,7 @@ impl Book {
             progress: 0.0,
             resume_chapter: 0,
             resume_frac: 0.0,
+            resume_position: None,
             chapter_index_version: 0,
             meta_done: true, // 新建/txt 无需回填
             word_count,
@@ -307,10 +257,24 @@ impl Default for WinGeom {
     }
 }
 
+/// 收藏夹的展示元数据。成员关系仍存放在 Book.collections 中，以保持现有同步协议兼容。
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct BookList {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub cover_book_id: u64,
+    #[serde(default)]
+    pub book_order: Vec<u64>,
+}
+
 /// 整个书架，序列化成 JSON 持久化。
 #[derive(Default, Serialize, Deserialize)]
 pub struct Library {
     pub books: Vec<Book>,
+    #[serde(default)]
+    pub booklists: Vec<BookList>,
     #[serde(default)]
     pub reader_geom: Option<WinGeom>, // 上次 EPUB 阅读窗口的大小/位置
     #[serde(default)]
@@ -359,6 +323,12 @@ impl Library {
 
     pub fn remove(&mut self, id: u64) {
         self.books.retain(|b| b.id != id);
+        for list in &mut self.booklists {
+            list.book_order.retain(|book_id| *book_id != id);
+            if list.cover_book_id == id {
+                list.cover_book_id = list.book_order.first().copied().unwrap_or(0);
+            }
+        }
     }
 
     pub fn get(&self, id: u64) -> Option<&Book> {
@@ -416,13 +386,18 @@ impl Library {
     ) -> bool {
         let tags = normalize_organization_names(tags);
         let collections = normalize_organization_names(collections);
-        if let Some(book) = self.books.iter_mut().find(|book| book.id == id) {
+        let changed = if let Some(book) = self.books.iter_mut().find(|book| book.id == id) {
             let changed = book.tags != tags || book.collections != collections;
             book.tags = tags;
             book.collections = collections;
-            return changed;
+            changed
+        } else {
+            false
+        };
+        if changed {
+            self.reconcile_booklists();
         }
-        false
+        changed
     }
 
     /// 管理全书架范围内的一个标签或收藏夹：重命名时同时更新所有关联图书。
@@ -458,6 +433,16 @@ impl Library {
                 changed = true;
             }
         }
+        if changed && kind == "collection" {
+            if let Some(existing) = self
+                .booklists
+                .iter_mut()
+                .find(|list| organization_name_key(&list.name) == from)
+            {
+                existing.name = to;
+            }
+            self.reconcile_booklists();
+        }
         changed
     }
 
@@ -484,6 +469,120 @@ impl Library {
                 changed = true;
             }
         }
+        if changed && kind == "collection" {
+            self.booklists
+                .retain(|list| organization_name_key(&list.name) != name);
+            self.reconcile_booklists();
+        }
+        changed
+    }
+
+    /// 让书单元数据与图书成员关系保持一致，同时保留用户手动排列的已有成员。
+    pub fn reconcile_booklists(&mut self) {
+        let mut names = Vec::<String>::new();
+        let mut seen = HashSet::new();
+        for book in &self.books {
+            for name in &book.collections {
+                let key = organization_name_key(name);
+                if !key.is_empty() && seen.insert(key) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        self.booklists.retain(|list| {
+            names
+                .iter()
+                .any(|name| organization_name_key(name) == organization_name_key(&list.name))
+        });
+        for name in names {
+            let key = organization_name_key(&name);
+            if !self
+                .booklists
+                .iter()
+                .any(|list| organization_name_key(&list.name) == key)
+            {
+                self.booklists.push(BookList {
+                    name: name.clone(),
+                    ..BookList::default()
+                });
+            }
+            let members = self
+                .books
+                .iter()
+                .filter(|book| {
+                    book.collections
+                        .iter()
+                        .any(|value| organization_name_key(value) == key)
+                })
+                .map(|book| book.id)
+                .collect::<Vec<_>>();
+            if let Some(list) = self
+                .booklists
+                .iter_mut()
+                .find(|list| organization_name_key(&list.name) == key)
+            {
+                list.name = name;
+                list.book_order.retain(|id| members.contains(id));
+                for id in members {
+                    if !list.book_order.contains(&id) {
+                        list.book_order.push(id);
+                    }
+                }
+                if !list.book_order.contains(&list.cover_book_id) {
+                    list.cover_book_id = list.book_order.first().copied().unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    pub fn update_booklist(
+        &mut self,
+        name: &str,
+        description: String,
+        cover_book_id: u64,
+        book_order: Vec<u64>,
+    ) -> bool {
+        self.reconcile_booklists();
+        let key = organization_name_key(name);
+        let Some(list) = self
+            .booklists
+            .iter_mut()
+            .find(|list| organization_name_key(&list.name) == key)
+        else {
+            return false;
+        };
+        let members = self
+            .books
+            .iter()
+            .filter(|book| {
+                book.collections
+                    .iter()
+                    .any(|value| organization_name_key(value) == key)
+            })
+            .map(|book| book.id)
+            .collect::<HashSet<_>>();
+        let mut seen = HashSet::new();
+        let mut order = book_order
+            .into_iter()
+            .filter(|id| members.contains(id) && seen.insert(*id))
+            .collect::<Vec<_>>();
+        for id in &list.book_order {
+            if members.contains(id) && seen.insert(*id) {
+                order.push(*id);
+            }
+        }
+        let description = crate::html_sanitize::html_to_plain_text(&description);
+        let cover_book_id = if members.contains(&cover_book_id) {
+            cover_book_id
+        } else {
+            order.first().copied().unwrap_or(0)
+        };
+        let changed = list.description != description
+            || list.cover_book_id != cover_book_id
+            || list.book_order != order;
+        list.description = description;
+        list.cover_book_id = cover_book_id;
+        list.book_order = order;
         changed
     }
 
@@ -505,12 +604,25 @@ impl Library {
         }
     }
 
+    #[cfg(test)]
     pub fn add_bookmark(&mut self, id: u64, chapter: u32, frac: f32, label: String) {
+        self.add_bookmark_at(id, chapter, frac, label, None);
+    }
+
+    pub fn add_bookmark_at(
+        &mut self,
+        id: u64,
+        chapter: u32,
+        frac: f32,
+        label: String,
+        position: Option<ReadingPosition>,
+    ) {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
             b.bookmarks.push(Bookmark {
                 chapter,
                 frac,
                 label,
+                position: position.or_else(|| b.resume_position.clone()),
             });
         }
     }
@@ -566,22 +678,52 @@ impl Library {
             .unwrap_or_default()
     }
 
-    /// 更新阅读位置（进度% + 续读章节/章内比例）；进度变化足够大才返回 true（决定是否写盘）。
+    /// Legacy position update. New readers should call `set_position_with_anchor`
+    /// so width, font and side-panel changes can restore the same source text.
+    #[cfg(test)]
     pub fn set_position(&mut self, id: u64, progress: f32, chapter: u32, frac: f32) -> bool {
+        self.set_position_with_anchor(id, progress, chapter, frac, None)
+    }
+
+    /// Update reading progress with an optional source-text anchor. Page number
+    /// is deliberately absent here: it is only a renderer-derived value.
+    pub fn set_position_with_anchor(
+        &mut self,
+        id: u64,
+        progress: f32,
+        chapter: u32,
+        frac: f32,
+        anchor: Option<ReadingAnchor>,
+    ) -> bool {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
+            let position = ReadingPosition {
+                chapter,
+                anchor,
+                fraction: frac,
+            }
+            .normalized();
+            let anchor_changed =
+                position.anchor.is_some() && b.resume_position.as_ref() != Some(&position);
             let changed = (b.progress - progress).abs() >= 0.05
                 || b.resume_chapter != chapter
-                || (b.resume_frac - frac).abs() >= 0.02;
+                || (b.resume_frac - frac).abs() >= 0.02
+                || anchor_changed;
             b.progress = progress;
-            b.resume_chapter = chapter;
-            b.resume_frac = frac;
+            b.resume_chapter = position.authoritative_chapter();
+            b.resume_frac = position.fraction;
+            // Older clients keep reporting fraction-only positions. Do not let
+            // them erase a newer source anchor saved by another device.
+            if position.anchor.is_some() {
+                b.resume_position = Some(position.clone());
+            }
             if changed {
                 let at = now_secs();
                 let entry = ProgressTimelineEntry {
                     at,
                     progress: progress.clamp(0.0, 100.0),
-                    chapter,
-                    frac: frac.clamp(0.0, 1.0),
+                    chapter: position.authoritative_chapter(),
+                    frac: position.fraction,
+                    position: position.anchor.is_some().then_some(position),
                 };
                 if b.progress_history
                     .last()
@@ -867,50 +1009,28 @@ fn cover_cache_dir() -> Option<PathBuf> {
 }
 
 fn prepare_epub(path: &Path) -> Option<Book> {
+    let parsed = reader_core::parser::parse_epub_metadata(path, title_from_path(path))?;
     let mut doc = epub::doc::EpubDoc::new(path).ok()?;
-    let title = doc
-        .mdata("title")
-        .map(|m| m.value.clone())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| title_from_path(path));
-    let author = doc
-        .mdata("creator")
-        .map(|m| m.value.clone())
-        .unwrap_or_default();
-    let description = doc
-        .mdata("description")
-        .map(|m| crate::html_sanitize::html_to_plain_text(&m.value))
-        .unwrap_or_default();
     let cover = extract_cover_thumbnail(&mut doc, path);
-    // 导入时顺手统计字数（doc 已打开）
-    let word_count = {
-        let spine: Vec<String> = doc.spine.iter().map(|s| s.idref.clone()).collect();
-        let mut n = 0usize;
-        for idref in spine {
-            if let Some((s, _)) = doc.get_resource_str(&idref) {
-                n += count_text_chars(&s);
-            }
-        }
-        n as u64
-    };
     Some(Book {
         id: id_for_path(path),
         fingerprint: compute_fingerprint(path),
         content_id: compute_content_id(path),
         path: path.to_owned(),
-        title,
+        title: parsed.title,
         format: "epub".to_owned(),
         cover,
-        author,
-        description,
+        author: parsed.author,
+        description: parsed.description,
         added_at: now_secs(),
         last_read_at: 0,
         progress: 0.0,
         resume_chapter: 0,
         resume_frac: 0.0,
+        resume_position: None,
         chapter_index_version: 0,
         meta_done: true, // 导入时已读取元数据
-        word_count,
+        word_count: parsed.word_count,
         bookmarks: Vec::new(),
         highlights: Vec::new(),
         reading_seconds: 0,
@@ -928,44 +1048,26 @@ fn prepare_epub(path: &Path) -> Option<Book> {
 /// mobi 库对个别文件可能 panic（DRM/KF8 异常等）；用 catch_unwind 兜住，
 /// 避免在持有书架锁时 panic 把 Mutex 毒化、导致全局崩溃（封面/打开书全失效）。
 fn prepare_mobi(path: &Path) -> Option<Book> {
-    let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let m = mobi::Mobi::from_path(path).ok()?;
-        let title = {
-            let t = m.title();
-            if t.trim().is_empty() {
-                title_from_path(path)
-            } else {
-                t
-            }
-        };
-        Some((
-            title,
-            m.author().unwrap_or_default(),
-            crate::html_sanitize::html_to_plain_text(&m.description().unwrap_or_default()),
-            count_text_chars(&m.content_as_string_lossy()) as u64,
-        ))
-    }))
-    .ok()
-    .flatten()?;
-    let (title, author, description, word_count) = parsed;
+    let parsed = reader_core::parser::parse_mobi_metadata(path, title_from_path(path))?;
     Some(Book {
         id: id_for_path(path),
         fingerprint: compute_fingerprint(path),
         content_id: compute_content_id(path),
         path: path.to_owned(),
-        title,
+        title: parsed.title,
         format: ext_lower(path),
         cover: None,
-        author,
-        description,
+        author: parsed.author,
+        description: parsed.description,
         added_at: now_secs(),
         last_read_at: 0,
         progress: 0.0,
         resume_chapter: 0,
         resume_frac: 0.0,
+        resume_position: None,
         chapter_index_version: 0,
         meta_done: true,
-        word_count,
+        word_count: parsed.word_count,
         bookmarks: Vec::new(),
         highlights: Vec::new(),
         reading_seconds: 0,
@@ -1009,39 +1111,18 @@ fn extract_cover_thumbnail<R: std::io::Read + std::io::Seek>(
 // ---------------------------------------------------------------------------
 
 pub fn decode_bytes(bytes: &[u8]) -> String {
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return s.to_owned();
-    }
-    let mut detector = chardetng::EncodingDetector::new();
-    detector.feed(bytes, true);
-    let encoding = detector.guess(None, true);
-    let (text, _, _) = encoding.decode(bytes);
-    text.into_owned()
+    reader_core::text::decode_text_bytes(bytes)
 }
 
 pub fn normalize_text(s: &str) -> String {
-    let unified = s.replace("\r\n", "\n").replace('\r', "\n");
-    let mut out = String::with_capacity(unified.len());
-    let mut newline_run = 0;
-    for ch in unified.chars() {
-        if ch == '\n' {
-            newline_run += 1;
-            if newline_run <= 2 {
-                out.push('\n');
-            }
-        } else {
-            newline_run = 0;
-            out.push(ch);
-        }
-    }
-    out.trim().to_owned()
+    reader_core::text::normalize_text(s)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         compute_content_id, compute_fingerprint, merge_daily_progress_history, Book, Bookmark,
-        Highlight, Library, ProgressTimelineEntry,
+        Highlight, Library, ProgressTimelineEntry, ReadingAnchor,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1184,6 +1265,32 @@ mod tests {
     }
 
     #[test]
+    fn anchored_position_is_saved_independently_of_physical_page_fraction() {
+        let dir = TempDir::new("anchored-position");
+        let path = dir.file("book.txt", "正文");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(path)));
+        let id = lib.books[0].id;
+        let anchor = ReadingAnchor {
+            chapter: 4,
+            dom_path: "p:3/span:0".into(),
+            text_offset: 1024,
+            context_before: "前文".into(),
+            context_after: "后文".into(),
+            viewport_offset: 18.0,
+        };
+
+        assert!(lib.set_position_with_anchor(id, 42.0, 4, 0.31, Some(anchor)));
+        let saved = lib.books[0]
+            .resume_position
+            .as_ref()
+            .expect("source anchor saved");
+        assert_eq!(saved.authoritative_chapter(), 4);
+        assert_eq!(saved.anchor.as_ref().unwrap().text_offset, 1024);
+        assert!((lib.books[0].resume_frac - 0.31).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn set_position_marks_finished_only_once() {
         let dir = TempDir::new("position-finished");
         let path = dir.file("book.txt", "正文");
@@ -1208,18 +1315,21 @@ mod tests {
                 progress: 10.0,
                 chapter: 1,
                 frac: 0.1,
+                ..Default::default()
             },
             ProgressTimelineEntry {
                 at: base + 60,
                 progress: 20.0,
                 chapter: 2,
                 frac: 0.2,
+                ..Default::default()
             },
             ProgressTimelineEntry {
                 at: base + 86_400,
                 progress: 30.0,
                 chapter: 3,
                 frac: 0.3,
+                ..Default::default()
             },
         ];
 
@@ -1244,6 +1354,7 @@ mod tests {
             chapter: 1,
             frac: 0.2,
             label: "first".into(),
+            ..Default::default()
         });
         second.last_read_at = 200;
         second.progress = 60.0;
@@ -1252,6 +1363,7 @@ mod tests {
             chapter: 2,
             frac: 0.4,
             label: "second".into(),
+            ..Default::default()
         });
         let mut lib = Library {
             books: vec![first, second],
@@ -1280,6 +1392,33 @@ mod tests {
 
         lib.set_rating(id, -2.0);
         assert_eq!(lib.books[0].rating, 0.0);
+    }
+
+    #[test]
+    fn collections_gain_booklist_metadata_and_keep_manual_order() {
+        let dir = TempDir::new("booklists");
+        let mut first = Book::prepare(dir.file("first.txt", "第一本"));
+        let mut second = Book::prepare(dir.file("second.txt", "第二本"));
+        first.id = 101;
+        second.id = 202;
+        let mut lib = Library {
+            books: vec![first, second],
+            ..Default::default()
+        };
+
+        assert!(lib.set_organization(101, vec!["历史".into()], vec!["明清".into()]));
+        assert!(lib.set_organization(202, Vec::new(), vec!["明清".into()]));
+        assert_eq!(lib.booklists.len(), 1);
+        assert_eq!(lib.booklists[0].book_order, vec![101, 202]);
+
+        assert!(lib.update_booklist("明清", "<b>按时代阅读</b>".into(), 202, vec![202, 101],));
+        assert_eq!(lib.booklists[0].description, "按时代阅读");
+        assert_eq!(lib.booklists[0].cover_book_id, 202);
+        assert_eq!(lib.booklists[0].book_order, vec![202, 101]);
+
+        assert!(lib.rename_organization("collection", "明清", "明清史".into()));
+        assert_eq!(lib.booklists[0].name, "明清史");
+        assert_eq!(lib.booklists[0].book_order, vec![202, 101]);
     }
 
     #[test]
@@ -1324,6 +1463,7 @@ mod tests {
                 color: "#ffee88".to_string(),
                 note: String::new(),
                 created_at: 1,
+                ..Default::default()
             },
         );
         assert_eq!(lib.highlights(id).len(), 1);

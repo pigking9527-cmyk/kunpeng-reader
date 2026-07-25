@@ -4,7 +4,7 @@
 //! 向量组成。此模块是该格式的唯一拥有者；搜索、画像和加速索引只通过只读
 //! 访问器使用已经验证的数据。
 
-use super::{model, profile};
+use super::model;
 use crate::semantic_core::{SEM_CHUNK_PIPELINE_REVISION, SEM_VERSION};
 use crate::{book, search, AppState};
 use serde::{Deserialize, Serialize};
@@ -515,17 +515,12 @@ pub(super) fn is_complete(book: &book::Book) -> bool {
     if !metadata_has_vectors(&metadata) {
         return true;
     }
-    // 单中心画像的旧格式只记录 mtime；向量元数据已用内容身份确认仍是同一
-    // 本书时，继续读取其原时间戳对应的画像即可，无须因文件时间漂移重建。
-    let profile_mtime = if metadata.mtime == search::file_mtime(&book.path) {
-        search::file_mtime(&book.path)
-    } else {
-        metadata.mtime
-    };
+    // 单中心画像只是相似图书候选筛选的派生缓存，不属于逐书语义向量本体。
+    // 画像缺失或过期时可由现有向量快速回填，不能因此把完整语义索引记成
+    // “未完成”，更不能触发整本书重新嵌入。
     vector_path(book.id)
         .map(|path| vector_file_shape_valid(&metadata, &path))
         .unwrap_or(false)
-        && profile::read_single(book.id, profile_mtime).is_some()
 }
 
 /// 加速索引只需要已发布元数据中的维度和段落数，不接触磁盘格式字段。
@@ -784,6 +779,25 @@ mod tests {
         assert!(metadata.vector_sha256.is_empty());
         assert!(metadata.source_id.is_empty());
         assert_eq!(metadata.chunk_revision, 0);
+    }
+
+    #[test]
+    fn vector_completion_does_not_depend_on_auxiliary_profiles() {
+        let source = include_str!("vector.rs");
+        let start = source
+            .find("pub(super) fn is_complete")
+            .expect("completion predicate must exist");
+        let end = start
+            + source[start..]
+                .find("pub(super) fn stored_shape")
+                .expect("completion predicate must stay bounded");
+        let completion = &source[start..end];
+        assert!(completion.contains("metadata_is_fresh"));
+        assert!(completion.contains("vector_file_shape_valid"));
+        assert!(
+            !completion.contains("profile::"),
+            "auxiliary profiles must not reduce the semantic vector completion count"
+        );
     }
 
     #[test]

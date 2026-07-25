@@ -6,10 +6,12 @@ import ipaddress
 import json
 import os
 import secrets
+import smtplib
 import sqlite3
 import threading
 import time
 import uuid
+from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -32,6 +34,18 @@ TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000
 MAX_CONCURRENT_REQUESTS = 32
 MAX_IGNORED_DETAILS = 100
 SUPPORTED_ENTITY_KINDS = frozenset(("book_state_v2", "vocab", "reading_bucket_v2"))
+FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "pigking9527@gmail.com").strip()
+FEEDBACK_SMTP_HOST = os.environ.get("FEEDBACK_SMTP_HOST", "").strip()
+FEEDBACK_SMTP_PORT = int(os.environ.get("FEEDBACK_SMTP_PORT", "465"))
+FEEDBACK_SMTP_USER = os.environ.get("FEEDBACK_SMTP_USER", "").strip()
+FEEDBACK_SMTP_PASSWORD = os.environ.get("FEEDBACK_SMTP_PASSWORD", "")
+FEEDBACK_SMTP_FROM = os.environ.get("FEEDBACK_SMTP_FROM", FEEDBACK_SMTP_USER).strip()
+FEEDBACK_SMTP_SSL = os.environ.get("FEEDBACK_SMTP_SSL", "1") != "0"
+FEEDBACK_SMTP_STARTTLS = os.environ.get("FEEDBACK_SMTP_STARTTLS", "0") == "1"
+MAX_FEEDBACK_TEXT_CHARS = 20_000
+MAX_FEEDBACK_IMAGES = 3
+MAX_FEEDBACK_IMAGE_BYTES = 1024 * 1024
+MAX_FEEDBACK_ROWS = 2_000
 
 
 class RateLimiter:
@@ -244,6 +258,27 @@ def migrate(conn):
             tuple(sorted(SUPPORTED_ENTITY_KINDS)),
         )
         record_migration(conn, 6)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feedback (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                images_json TEXT NOT NULL,
+                app_version TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                client_ip TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                emailed_at INTEGER NOT NULL DEFAULT 0,
+                mail_error TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feedback_email_queue "
+            "ON feedback(emailed_at,created_at)"
+        )
+        record_migration(conn, 7)
 
 
 def next_server_stamp(conn):
@@ -317,6 +352,52 @@ def row_to_entity(row):
     }
 
 
+def inventory_rows(conn, user_id):
+    return conn.execute(
+        """
+        SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at
+        FROM entities
+        WHERE user_id=? AND kind IN ('book_state_v2','vocab','reading_bucket_v2')
+        ORDER BY kind,id
+        """,
+        (user_id,),
+    ).fetchall()
+
+
+def inventory_summary(rows):
+    """Hash the exact portable entity versions held by one account.
+
+    The desktop client uses the same length-prefixed binary representation.
+    JSON is deliberately excluded: an exact device/version/timestamp identifies
+    immutable payload content in the sync protocol, while excluding it keeps
+    this check cheap enough to run after every normal incremental sync.
+    """
+    digest = hashlib.sha256()
+    revision = 0
+    for row in rows:
+        for field in ("kind", "id", "device_id"):
+            raw = str(row[field] or "").encode("utf-8")
+            digest.update(len(raw).to_bytes(4, "big"))
+            digest.update(raw)
+        for field in ("sync_version", "updated_at", "deleted_at"):
+            digest.update(int(row[field]).to_bytes(8, "big", signed=True))
+        revision = max(revision, safe_int(row["server_updated_at"]))
+    return {
+        "entity_count": len(rows),
+        "inventory_digest": digest.hexdigest(),
+        "revision": str(revision),
+    }
+
+
+def manifest_meta_equal(left, right):
+    return all(
+        str(left[field] or "") == str(right[field] or "")
+        if field == "device_id"
+        else safe_int(left[field]) == safe_int(right[field])
+        for field in ("device_id", "sync_version", "updated_at", "deleted_at")
+    )
+
+
 def safe_int(value, default=0):
     try:
         return int(value or default)
@@ -349,12 +430,140 @@ def record_ignored(details, detail):
         details.append(detail)
 
 
+def feedback_mail_configured():
+    return bool(FEEDBACK_TO and FEEDBACK_SMTP_HOST and FEEDBACK_SMTP_FROM)
+
+
+def decode_feedback_image(item):
+    if not isinstance(item, dict):
+        raise ValueError("INVALID_FEEDBACK_IMAGE")
+    name = str(item.get("name", "") or "feedback-image.jpg")[:160]
+    mime = str(item.get("mime", "") or "")
+    if mime not in ("image/jpeg", "image/png", "image/webp"):
+        raise ValueError("INVALID_FEEDBACK_IMAGE_TYPE")
+    try:
+        raw = base64.b64decode(str(item.get("data", "") or ""), validate=True)
+    except (ValueError, TypeError):
+        raise ValueError("INVALID_FEEDBACK_IMAGE_DATA") from None
+    if not raw or len(raw) > MAX_FEEDBACK_IMAGE_BYTES:
+        raise ValueError("FEEDBACK_IMAGE_TOO_LARGE")
+    valid_magic = (
+        mime == "image/jpeg" and raw.startswith(b"\xff\xd8\xff")
+        or mime == "image/png" and raw.startswith(b"\x89PNG\r\n\x1a\n")
+        or mime == "image/webp" and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"
+    )
+    if not valid_magic:
+        raise ValueError("INVALID_FEEDBACK_IMAGE_DATA")
+    return {"name": name, "mime": mime, "data": str(item.get("data", "") or "")}, raw
+
+
+def normalize_feedback(body):
+    if not isinstance(body, dict):
+        raise ValueError("INVALID_FEEDBACK")
+    kind = str(body.get("kind", "") or "")
+    if kind not in ("bug", "feature"):
+        raise ValueError("INVALID_FEEDBACK_KIND")
+    text = str(body.get("text", "") or "").strip()
+    images = body.get("images", [])
+    if not isinstance(images, list) or len(images) > MAX_FEEDBACK_IMAGES:
+        raise ValueError("TOO_MANY_FEEDBACK_IMAGES")
+    if not text and not images:
+        raise ValueError("EMPTY_FEEDBACK")
+    if len(text) > MAX_FEEDBACK_TEXT_CHARS:
+        raise ValueError("FEEDBACK_TEXT_TOO_LONG")
+    normalized_images = []
+    for item in images:
+        normalized, _ = decode_feedback_image(item)
+        normalized_images.append(normalized)
+    return {
+        "kind": kind,
+        "text": text,
+        "images": normalized_images,
+        "app_version": str(body.get("appVersion", "") or "")[:64],
+        "platform": str(body.get("platform", "") or "")[:1000],
+    }
+
+
+def send_feedback_email(feedback):
+    if not feedback_mail_configured():
+        raise RuntimeError("SMTP_NOT_CONFIGURED")
+    labels = {"bug": "Bug", "feature": "功能提议"}
+    message = EmailMessage()
+    message["Subject"] = f"[鲲鹏阅读器 {labels.get(feedback['kind'], '反馈')}] {feedback['id']}"
+    message["From"] = FEEDBACK_SMTP_FROM
+    message["To"] = FEEDBACK_TO
+    message.set_content(
+        "\n".join(
+            (
+                f"反馈编号：{feedback['id']}",
+                f"类型：{labels.get(feedback['kind'], feedback['kind'])}",
+                f"应用版本：{feedback.get('app_version', '') or '未知'}",
+                f"客户端：{feedback.get('platform', '') or '未知'}",
+                f"提交时间：{feedback.get('created_at', 0)}",
+                "",
+                feedback.get("text", "") or "（仅提交了图片）",
+            )
+        )
+    )
+    for item in feedback.get("images", []):
+        _, raw = decode_feedback_image(item)
+        subtype = item["mime"].split("/", 1)[1]
+        message.add_attachment(raw, maintype="image", subtype=subtype, filename=item["name"])
+    smtp_cls = smtplib.SMTP_SSL if FEEDBACK_SMTP_SSL else smtplib.SMTP
+    with smtp_cls(FEEDBACK_SMTP_HOST, FEEDBACK_SMTP_PORT, timeout=20) as smtp:
+        if not FEEDBACK_SMTP_SSL and FEEDBACK_SMTP_STARTTLS:
+            smtp.starttls()
+        if FEEDBACK_SMTP_USER:
+            smtp.login(FEEDBACK_SMTP_USER, FEEDBACK_SMTP_PASSWORD)
+        smtp.send_message(message)
+
+
+def deliver_feedback_row(conn, row):
+    feedback = {
+        "id": row["id"],
+        "kind": row["kind"],
+        "text": row["text"],
+        "images": json.loads(row["images_json"]),
+        "app_version": row["app_version"],
+        "platform": row["platform"],
+        "created_at": row["created_at"],
+    }
+    try:
+        send_feedback_email(feedback)
+    except Exception as error:
+        with conn:
+            conn.execute(
+                "UPDATE feedback SET mail_error=? WHERE id=?",
+                (str(error)[:1000], row["id"]),
+            )
+        return False
+    with conn:
+        conn.execute(
+            "UPDATE feedback SET emailed_at=?,mail_error='' WHERE id=?",
+            (now_ms(), row["id"]),
+        )
+    return True
+
+
+def deliver_pending_feedback(limit=20):
+    if not feedback_mail_configured():
+        return 0
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM feedback WHERE emailed_at=0 ORDER BY created_at ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    delivered = sum(1 for row in rows if deliver_feedback_row(conn, row))
+    conn.close()
+    return delivered
+
+
 class PayloadTooLarge(Exception):
     pass
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ReaderSyncAPI/0.5"
+    server_version = "ReaderSyncAPI/0.7"
 
     def begin_push_transaction(self, conn):
         # `with conn` only commits/rolls back an already-open transaction; it
@@ -454,7 +663,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "schema_version": 2,
-                        "api_version": "0.5",
+                        "api_version": "0.7",
                         "server_time": now_ms(),
                         "service": "reader-sync",
                     },
@@ -479,6 +688,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/sync/pull":
                 self.handle_pull(parsed)
+                return
+            if parsed.path == "/sync/inventory":
+                self.handle_inventory()
                 return
             self.send_error_code(404, "NOT_FOUND")
         finally:
@@ -525,6 +737,25 @@ class Handler(BaseHTTPRequestHandler):
         )
         conn.close()
 
+    def handle_inventory(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("sync_user", user["id"], 30, 60):
+            conn.close()
+            return
+        rows = inventory_rows(conn, user["id"])
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "schema_version": 2,
+                "server_time": now_ms(),
+                **inventory_summary(rows),
+            },
+        )
+        conn.close()
+
     def do_POST(self):
         if not self.begin_request():
             return
@@ -538,10 +769,173 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_logout()
             elif parsed.path == "/sync/push":
                 self.handle_push()
+            elif parsed.path == "/sync/reconcile":
+                self.handle_reconcile()
+            elif parsed.path == "/feedback":
+                self.handle_feedback()
             else:
                 self.send_error_code(404, "NOT_FOUND")
         finally:
             REQUEST_SLOTS.release()
+
+    def handle_feedback(self):
+        client_ip = self.client_ip()
+        if not self.allow_rate("feedback_ip_hour", client_ip, 3, 3600):
+            return
+        if not self.allow_rate("feedback_ip_day", client_ip, 8, 24 * 3600):
+            return
+        if not self.allow_rate("feedback_global_hour", "all", 100, 3600):
+            return
+        try:
+            body = self.read_json()
+            feedback = normalize_feedback(body)
+        except PayloadTooLarge:
+            self.send_error_code(413, "PAYLOAD_TOO_LARGE", "反馈内容超过大小限制")
+            return
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.send_error_code(400, "INVALID_JSON")
+            return
+        except ValueError as error:
+            self.send_error_code(400, str(error), "反馈内容格式不正确")
+            return
+        feedback_id = str(uuid.uuid4())
+        created_at = now_ms()
+        conn = connect()
+        row_count = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+        if row_count >= MAX_FEEDBACK_ROWS:
+            with conn:
+                conn.execute(
+                    "DELETE FROM feedback WHERE id IN "
+                    "(SELECT id FROM feedback WHERE emailed_at>0 ORDER BY created_at ASC LIMIT 200)"
+                )
+            row_count = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+        if row_count >= MAX_FEEDBACK_ROWS:
+            conn.close()
+            self.send_error_code(503, "FEEDBACK_CAPACITY", "反馈箱暂时已满，请稍后再试")
+            return
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO feedback(
+                    id,kind,text,images_json,app_version,platform,client_ip,created_at
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    feedback_id,
+                    feedback["kind"],
+                    feedback["text"],
+                    json.dumps(feedback["images"], ensure_ascii=False, separators=(",", ":")),
+                    feedback["app_version"],
+                    feedback["platform"],
+                    client_ip,
+                    created_at,
+                ),
+            )
+        row = conn.execute("SELECT * FROM feedback WHERE id=?", (feedback_id,)).fetchone()
+        emailed = deliver_feedback_row(conn, row) if feedback_mail_configured() else False
+        conn.close()
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "id": feedback_id,
+                "emailed": emailed,
+                "message": (
+                    "反馈已提交并发送，谢谢。"
+                    if emailed
+                    else "反馈已安全收件；邮件通知暂时排队。"
+                ),
+            },
+        )
+
+    def handle_reconcile(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("sync_user", user["id"], 30, 60):
+            conn.close()
+            return
+        try:
+            body = self.read_json()
+        except PayloadTooLarge:
+            self.send_error_code(413, "PAYLOAD_TOO_LARGE")
+            conn.close()
+            return
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.send_error_code(400, "INVALID_JSON")
+            conn.close()
+            return
+        manifest = body.get("manifest")
+        if not isinstance(manifest, list):
+            self.send_error_code(400, "MANIFEST_MUST_BE_ARRAY")
+            conn.close()
+            return
+        if len(manifest) > MAX_USER_ENTITIES:
+            self.send_error_code(413, "TOO_MANY_ENTITIES")
+            conn.close()
+            return
+
+        local_by_key = {}
+        for item in manifest:
+            if not isinstance(item, dict):
+                self.send_error_code(400, "MANIFEST_ENTRY_MUST_BE_OBJECT")
+                conn.close()
+                return
+            kind = str(item.get("kind", "") or "")
+            entity_id = str(item.get("id", "") or "")
+            if (
+                kind not in SUPPORTED_ENTITY_KINDS
+                or not entity_id
+                or len(kind) > 128
+                or len(entity_id) > 512
+            ):
+                self.send_error_code(400, "INVALID_MANIFEST_ID")
+                conn.close()
+                return
+            key = (kind, entity_id)
+            if key in local_by_key:
+                self.send_error_code(400, "DUPLICATE_MANIFEST_ID")
+                conn.close()
+                return
+            local_by_key[key] = {
+                "kind": kind,
+                "id": entity_id,
+                "updated_at": safe_int(item.get("updated_at")),
+                "deleted_at": safe_int(item.get("deleted_at")),
+                "device_id": str(item.get("device_id", "") or "")[:128],
+                "sync_version": safe_int(item.get("sync_version")),
+            }
+
+        rows = inventory_rows(conn, user["id"])
+        server_by_key = {(row["kind"], row["id"]): row for row in rows}
+        upload = []
+        authoritative = []
+        for key in sorted(set(local_by_key) | set(server_by_key)):
+            local = local_by_key.get(key)
+            server = server_by_key.get(key)
+            if server is None:
+                upload.append({"kind": key[0], "id": key[1]})
+            elif local is None:
+                authoritative.append(row_to_entity(server))
+            elif manifest_meta_equal(local, server):
+                continue
+            elif is_newer(local, server):
+                upload.append({"kind": key[0], "id": key[1]})
+            else:
+                authoritative.append(row_to_entity(server))
+
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "schema_version": 2,
+                "server_time": now_ms(),
+                **inventory_summary(rows),
+                "upload": upload,
+                "entities": authoritative,
+            },
+        )
+        conn.close()
 
     def read_auth_body(self):
         try:
@@ -809,6 +1203,9 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     connect().close()
+    delivered = deliver_pending_feedback()
+    if delivered:
+        print(f"Delivered {delivered} queued feedback messages", flush=True)
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Reader sync API listening on http://{HOST}:{PORT}", flush=True)
     httpd.serve_forever()

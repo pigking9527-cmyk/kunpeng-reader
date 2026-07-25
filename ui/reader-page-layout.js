@@ -1,7 +1,10 @@
 
 var S={fontFamily:"",styleMode:"local",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1};
+var READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
+var readerAnimationSettingsOverride=null;
+function readerAnimationSettingOn(key){if(readerAnimationSettingsOverride&&Object.prototype.hasOwnProperty.call(readerAnimationSettingsOverride,key))return readerAnimationSettingsOverride[key]!==false;try{var value=JSON.parse(localStorage.getItem(READER_ANIMATION_SETTINGS_KEY)||'{}');return !value||value[key]!==false;}catch(_){return true;}}
 var IS_MAC_WEBKIT=/Macintosh|Mac OS X/.test(navigator.userAgent||'')&&/AppleWebKit/.test(navigator.userAgent||'')&&!/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent||'');
-var root,pager,scroller,pageMask,virtualPage,scrollPreview,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,headSeen={},chapChars=0,scrollBreaks=[0],scrollPages=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget=null,scrollActiveSlice=null,scrollPagedView=true,sideAnchorVirtualOffset=null;
+var root,pager,scroller,pageMask,virtualPage,scrollPreview,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,dualStartColumn=0,headSeen={},chapChars=0,scrollBreaks=[0],scrollPages=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget=null,scrollActiveSlice=null,scrollPagedView=true,sideAnchorVirtualOffset=null;
 var downX=null,downY=null,didDrag=false;
 var overlayOpen=false; // 外壳里搜索框/设置面板是否打开（打开时正文点击只用于关闭它）
 var ttsOn=false,ttsMap=[],ttsText='',ttsSents=[],ttsVoice=null,ttsRate=1,ttsSi=0,ttsGen=0,ttsAudioEl=null,ttsCache={},ttsWaiting=-1,ttsPlayedAny=false; // 朗读状态
@@ -30,7 +33,10 @@ function applyStyle(){
   var padL=scroll?0:(isDualPage()?0:hm.l);
   var padR=scroll?0:(isDualPage()?0:hm.r);
   var useLocalStyle=S.styleMode!=='book';
-  var c='.rr{margin:0 !important;padding:'+padT+'px '+padR+'px '+padB+'px '+padL+'px;';
+  var c='@font-face{font-family:"Kunpeng LXGW WenKai Lite";src:url("reader://localhost/font/1/LXGWWenKaiLite-Regular.ttf") format("truetype");font-display:swap;}';
+  c+='@font-face{font-family:"Kunpeng Source Han Serif SC";src:url("reader://localhost/font/2/SourceHanSerifSC-Regular.otf") format("opentype");font-display:swap;}';
+  c+='@font-face{font-family:"Kunpeng Zhuque Fangsong";src:url("reader://localhost/font/3/ZhuqueFangsong-Regular.ttf") format("truetype");font-display:swap;}';
+  c+='.rr{margin:0 !important;padding:'+padT+'px '+padR+'px '+padB+'px '+padL+'px;';
   if(useLocalStyle&&S.fontSize)c+='font-size:'+S.fontSize+'px;';
   if(useLocalStyle&&S.lineHeight)c+='line-height:'+S.lineHeight+';';
   if(useLocalStyle)c+='letter-spacing:'+S.letterSpacing+'px;';
@@ -45,6 +51,9 @@ function applyStyle(){
   }
   c+='.rr hr.rr-note-sep{display:none !important;}';
   c+='.rr *{break-before:auto !important;break-after:auto !important;break-inside:auto !important;page-break-before:auto !important;page-break-after:auto !important;page-break-inside:auto !important;-webkit-column-break-before:auto !important;-webkit-column-break-after:auto !important;-webkit-column-break-inside:auto !important;}';
+  // 单页/双页切换时插入的零高度锚点：让切换前视口的首行成为新栏的首行。
+  // 这条规则必须放在通用 break-before 重置之后，才能覆盖书籍自身及上面的重置。
+  c+='.rr .rr-mode-switch-anchor{display:block !important;width:0 !important;height:0 !important;overflow:hidden !important;margin:0 !important;padding:0 !important;border:0 !important;font-size:0 !important;line-height:0 !important;break-before:column !important;page-break-before:always !important;-webkit-column-break-before:always !important;}body.scroll-mode .rr .rr-mode-switch-anchor{display:none !important;}';
   if(mg(S.marginTop)===0)c+='.rr>:first-child,.rr body>:first-child{margin-top:0 !important;padding-top:0 !important;}';
   if(mg(S.marginBottom)===0)c+='.rr>:last-child,.rr body>:last-child{margin-bottom:0 !important;padding-bottom:0 !important;}';
   if(mg(S.marginLeft)===0)c+='.rr,.rr>*,.rr body{margin-left:0 !important;padding-left:0 !important;}';
@@ -168,6 +177,7 @@ pager.style.bottom=linePagedViewportBottomGapPx()+'px';
     buildScrollBreaks();
     return;
   }
+  if(!isDualPage())dualStartColumn=0;
   if(isScrollMode()){
     // 横向 viewOffset 只属于整页分栏布局。由整页切到滚动时，锚点恢复会
     // 直接设置 scrollTop，不一定经过 setViewOffset()；若不在这里清零，
@@ -265,7 +275,7 @@ pager.style.bottom=linePagedViewportBottomGapPx()+'px';
     refreshHighlights();
     return;
   }
-  viewOffset=pageInCh*pageStep;
+  viewOffset=pageInCh*pageStep+(isDualPage()?dualStartColumn*pageLayout().colPitch:0);
   if(pager)pager.scrollLeft=0;
   if(root)root.style.transform='translateX(-'+viewOffset+'px)';
   refreshHighlights();
@@ -1879,7 +1889,7 @@ function report(){
   var progressPagesInCh=(measureDone&&chapterPages[curCh])?chapterPages[curCh]:Math.max(1,pagesInCh||1);
   // 双页展示一次翻两页，但右上角仍显示左页在整本书中的真实页码（1、3、5…）。
   var progressPage=isDualPage()&&!useScrollPagesForReport
-    ?Math.min(Math.max(0,progressPagesInCh-1),pageInCh*2)
+    ?Math.min(Math.max(0,progressPagesInCh-1),pageInCh*2+dualStartColumn)
     :Math.round(chFrac*Math.max(0,progressPagesInCh-1));
   var gP=0,gT=0;
   if(measureDone){
@@ -1894,7 +1904,7 @@ function report(){
   else prog=CH>0?((curCh+chFrac)/CH)*100:0;
   var L=computeLogical();
   var pageChars=pagesInCh>0?Math.round(chapChars/pagesInCh):chapChars; // 当前页约略字数（按本章字数/页数均摊）
-  parent.postMessage({chapter:curCh,chFrac:chFrac,page:pageInCh+1,total:pagesInCh,totalCh:CH,progress:prog,gPage:gP,gTotal:gT,logicalCh:L.lc,logicalTotal:L.lt,pageChars:pageChars},'*');
+  parent.postMessage({chapter:curCh,chFrac:chFrac,page:pageInCh+1,total:pagesInCh,totalCh:CH,progress:prog,gPage:gP,gTotal:gT,logicalCh:L.lc,logicalTotal:L.lt,pageChars:pageChars,anchor:persistentReadingAnchor()},'*');
   // 注意：不在这里记录锚点。report() 也会被 relayout() 调到；若每次都重取锚点，
   // 拖动字号滑块时会把“重排后已偏移的顶部”当成新锚点，逐步累积漂移→整页跑掉。
   // 锚点只在用户“导航”（翻页/跳章/跳搜索命中）时更新，见 captureAnchor()。
@@ -1913,7 +1923,7 @@ function gotoGlobalFrac(frac){
     var gt=0,i;for(i=0;i<CH;i++)gt+=chapterPages[i]||1;if(gt<1)gt=1;
     var gp=Math.round(frac*(gt-1)),acc=0,tc=CH-1,tp=0;
     for(i=0;i<CH;i++){var cp=chapterPages[i]||1;if(gp<acc+cp){tc=i;tp=gp-acc;break;}acc+=cp;}
-    var displayPage=isDualPage()?Math.floor(tp/2):tp;
+    var displayPage=isDualPage()?Math.floor(Math.max(0,tp-dualStartColumn)/2):tp;
     if(tc===curCh)gotoPage(displayPage);else showChapter(tc,displayPage);
   }else{
     showChapter(Math.min(CH-1,Math.floor(frac*CH)),'start');
@@ -2088,7 +2098,40 @@ function pageOf(el){
     buildScrollBreaks();
     return pageIndexForScrollTop(y);
   }
-  var x=r.left-pr.left+viewOffset;return Math.floor((x+1)/pageStep);
+  var x=r.left-pr.left+viewOffset;
+  if(isDualPage()){
+    var pl=pageLayout(),physical=Math.max(0,Math.floor((x-pl.l+1)/pl.colPitch));
+    return Math.max(0,Math.floor(Math.max(0,physical-dualStartColumn)/2));
+  }
+  return Math.floor((x+1)/pageStep);
+}
+// 将当前视口锚点转为可持久化的“源文本坐标”。它不携带物理页码，
+// 所以字体、页宽、单双页、智读侧栏变化后仍能定位同一段文字。
+function persistentReadingAnchor(){
+  var anchor=anchorValid(curTopAnchor)?curTopAnchor:null;
+  if(!anchor)return null;
+  var offset=anchorTextOffset(anchor);
+  if(offset==null)return null;
+  var node=anchor.range?anchor.range.startContainer:(anchor.el||null);
+  var el=node&&node.nodeType===3?node.parentElement:node;
+  var parts=[];
+  while(el&&el!==root&&parts.length<12){
+    var parent=el.parentElement;
+    if(!parent)break;
+    var index=0,sibling=parent.firstElementChild;
+    while(sibling&&sibling!==el){index++;sibling=sibling.nextElementSibling;}
+    parts.unshift((el.tagName||'node').toLowerCase()+':'+index);
+    el=parent;
+  }
+  var rect=anchorRect(anchor),view=viewRect();
+  return {
+    chapter:curCh,
+    dom_path:parts.join('/'),
+    text_offset:Math.max(0,Math.round(offset)),
+    context_before:sourceTextAround(Math.max(0,offset-72),offset,0,0),
+    context_after:sourceTextAround(offset,offset+112,0,0),
+    viewport_offset:rect&&view?Math.max(0,Math.round(rect.top-view.top)):0
+  };
 }
 function invalidateScrollBreaksSoon(){
   if(!isScrollMode())return;
@@ -2305,7 +2348,7 @@ function showChapter(i,where,frag){
   return fetch(location.origin+'/chapter/'+ID+'/'+i).then(function(r){return r.json();}).then(function(d){
     fetchDone=performance.now();
     var body=d.body||'';fastChapterLayout=largeChapterFastLayout(body);
-    curCh=i;pageInCh=0;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;if(scrollPort())scrollPort().scrollTop=0;if(d.head)injectHead(d.head,headSeen);root.innerHTML=body+'<div class="rr-end"></div>';normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();
+    curCh=i;pageInCh=0;dualStartColumn=0;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;if(scrollPort())scrollPort().scrollTop=0;if(d.head)injectHead(d.head,headSeen);root.innerHTML=body+'<div class="rr-end"></div>';normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();
     return new Promise(function(resolve){
       requestAnimationFrame(function(){requestAnimationFrame(function(){
         if(fastChapterLayout){
@@ -2386,21 +2429,6 @@ function anchorTextOffset(a){
   try{range.selectNodeContents(node);range.collapse(true);}catch(_){return null;}
   return sourceBoundaryOffset(range.startContainer,range.startOffset);
 }
-function anchorPage(a){
-  if(!anchorValid(a))return pageInCh;
-  var r=null;
-  if(a.range){var rs=a.range.getClientRects();r=rs&&rs.length?rs[0]:a.range.getBoundingClientRect();}
-  else if(a.el){ r=a.el.getBoundingClientRect(); }
-  if(!r)return pageInCh;
-  var pr=viewRect();
-  if(usesLineBreakPaging()){
-    var y=r.top-pr.top+(scrollPort()?scrollPort().scrollTop:0);
-    buildScrollBreaks();
-    return pageIndexForScrollTop(y);
-  }
-  var x=r.left-pr.left+viewOffset;
-  return Math.max(0,Math.min(pagesInCh-1,Math.floor((x+1)/pageStep)));
-}
 function anchorRect(a){
   if(!anchorValid(a))return null;
   var r=null;
@@ -2413,6 +2441,45 @@ function anchorRect(a){
     }
   }catch(_){r=null;}
   return r;
+}
+// 高亮范围允许起点落在前一个文本节点的末尾；阅读位置不行。单双页切换时
+// 临时分栏标记恰好会把文本在锚点处切成两段，若仍取前半段末尾，Range 的第一个
+// 矩形是旧栏的零宽边界，页码会被误算为章首。阅读锚点必须优先取边界后的首字符。
+function sourceAnchorRangeForOffset(offset){
+  var recs=sourceTextRecords();
+  var at=Math.max(0,parseInt(offset,10)||0);
+  for(var i=0;i<recs.length;i++){
+    var rec=recs[i],len=(rec.node.nodeValue||'').length;
+    if(at>=rec.end&&i<recs.length-1)continue;
+    if(at>rec.end)continue;
+    var start=Math.max(0,Math.min(len,at-rec.start));
+    var end=Math.min(len,start+1);
+    if(end===start&&i<recs.length-1)continue;
+    var range=document.createRange();
+    try{range.setStart(rec.node,start);range.setEnd(rec.node,end);return range;}catch(_){return null;}
+  }
+  return null;
+}
+// CSS 多栏在栏宽变化后只能把锚点放进“包含它的栏”，不能保证它正好位于栏顶。
+// 在单双页互切时放一个不含正文的强制分栏标记，才能保证用户原来看到的第一行
+// 仍然就是新视口的第一行；标记不参与原文偏移、高亮或搜索。
+function clearModeSwitchAnchor(){
+  if(!root)return;
+  var marks=root.querySelectorAll('.rr-mode-switch-anchor');
+  for(var i=0;i<marks.length;i++)marks[i].remove();
+  if(marks.length)sourceTextCache=null;
+}
+function forceModeSwitchAnchorColumn(offset){
+  if(!root||offset==null)return false;
+  var range=sourceAnchorRangeForOffset(offset);
+  if(!range)return false;
+  var mark=document.createElement('span');
+  mark.className='rr-mode-switch-anchor';
+  mark.setAttribute('aria-hidden','true');
+  mark.setAttribute('data-reader-generated','mode-switch-anchor');
+  try{range.collapse(true);range.insertNode(mark);}catch(_){return false;}
+  sourceTextCache=null;
+  return true;
 }
 function restoreScrollAnchorToBreak(anchor){
   if(!anchor||!isScrollMode()||!pager)return false;
@@ -2458,15 +2525,27 @@ function relayout(opts){
   opts=opts||{};
   var anchor=anchorValid(opts.anchor)?opts.anchor:(anchorValid(curTopAnchor)?curTopAnchor:topAnchor());
   var anchorOffset=opts.anchorOffset;
+  // 滚动模式不需要列起点；离开分页时及时移除临时标记。
+  if(opts.modeSwitch&&isScrollMode())clearModeSwitchAnchor();
   if(isScrollMode()){scrollActiveSlice=null;scrollBreakSig='';invalidateScrollItemsCache();}
   applyStyle();applyCols();
   if(anchorOffset!=null){
-    var restoredRange=sourceRangeForOffsets(anchorOffset,anchorOffset+1);
+    var restoredRange=sourceAnchorRangeForOffset(anchorOffset);
     if(restoredRange)anchor={range:restoredRange};
   }
+  if(opts.forceAnchorColumn&&anchorOffset!=null){
+    clearModeSwitchAnchor();
+    if(forceModeSwitchAnchorColumn(anchorOffset)){
+      // 标记会增加一个物理栏，必须在它已进入 DOM 后重新计算页数和栏坐标。
+      applyStyle();applyCols();
+      var columnStartRange=sourceAnchorRangeForOffset(anchorOffset);
+      if(columnStartRange)anchor={range:columnStartRange};
+    }
+  }
+  var dualAligned=opts.alignDualAnchor&&alignDualAnchorToLeftPage(anchor);
   var restoredScroll=opts.exactScroll?restoreScrollAnchorExact(anchor,opts.scrollOffset):restoreScrollAnchorToBreak(anchor);
   if(!restoredScroll){
-    if(anchor){ pageInCh=anchorPage(anchor); }
+    if(anchor&&!dualAligned){ pageInCh=anchorPage(anchor); }
     else if(pageInCh>pagesInCh-1){ pageInCh=pagesInCh-1; }
     setViewOffset();
   }
@@ -2479,11 +2558,17 @@ function relayout(opts){
 function nextPage(){
   consumeSideAnchorVirtualPage();
   if(usesLineBreakPaging()&&scrollPageBy(1))return;
-  if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1,1);else if(curCh<CH-1)beginChapterTurnFx(1,curCh+1,'start');
+  if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1,1);else if(curCh<CH-1)beginChapterTurnFx(1,curCh+1,'start');else parent.postMessage({bookEnd:true},'*');
 }
 function prevPage(){
   consumeSideAnchorVirtualPage();
   if(usesLineBreakPaging()&&scrollPageBy(-1))return;
+  if(isDualPage()&&dualStartColumn>0&&pageInCh===0){
+    dualStartColumn=0;
+    pagesInCh=fastChapterLayout?fastPagedPageCount(root):pagedPageCountFromContent(root);
+    gotoPage(0,-1);
+    return;
+  }
   if(pageInCh>0)gotoPage(pageInCh-1,-1);else if(curCh>0)beginChapterTurnFx(-1,curCh-1,'end');
 }
 function wheelDeltaPx(e){

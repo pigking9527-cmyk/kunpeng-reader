@@ -24,7 +24,11 @@ function ttsHighlight(gs,len){
   try{var r=document.createRange();r.setStart(node,o);r.setEnd(node,Math.min(node.nodeValue.length,o+len));
     if(window.CSS&&CSS.highlights)CSS.highlights.set('tts',new Highlight(r));
     var rr=r.getBoundingClientRect(),pr=viewRect();
-    var x=rr.left-pr.left+viewOffset,pg=Math.floor((x+1)/pageStep);
+    var x=rr.left-pr.left+viewOffset,pg;
+    if(isDualPage()){
+      var pl=pageLayout(),physical=Math.max(0,Math.floor((x-pl.l+1)/pl.colPitch));
+      pg=Math.max(0,Math.floor(Math.max(0,physical-dualStartColumn)/2));
+    }else pg=Math.floor((x+1)/pageStep);
     if(pg>=0&&pg<pagesInCh&&pg!==pageInCh)gotoPage(pg);
   }catch(_){}
 }
@@ -97,7 +101,16 @@ function ttsStop(){
 }
 window.addEventListener('message',function(e){
   if(!e.data)return;
+  if(e.data.animationSettings){
+    readerAnimationSettingsOverride=Object.assign({},e.data.animationSettings);
+    document.documentElement.classList.toggle('anim-highlight-settings-off',!readerAnimationSettingOn('highlightSettings'));
+    if(!readerAnimationSettingOn('highlightSettings')&&typeof hlSettingsPop!=='undefined'&&hlSettingsPop)hlSettingsPop.classList.remove('hs-opening');
+  }
   if(e.data.windowDragging!==undefined){setMeasurePaused(!!e.data.windowDragging);}
+  if(e.data.pageCountTaskControl!==undefined){
+    var pageTaskControl=String(e.data.pageCountTaskControl||'');
+    if(pageTaskControl==='pause'||pageTaskControl==='cancel')setMeasurePaused(true);
+  }
   if(e.data.pageCountViewportWidth!==undefined){
     var nextPageCountWidth=Math.max(1,Math.round(Number(e.data.pageCountViewportWidth)||window.innerWidth||1));
     var oldPageCountSig=pageCountSig();
@@ -148,7 +161,7 @@ window.addEventListener('message',function(e){
     }
   }
   if(e.data.settings){
-    var prevFlow=S.flowMode,prevPageMode=S.pageMode;
+    var prevFlow=S.flowMode,prevPageMode=S.pageMode,prevFontFamily=S.fontFamily;
     var nextFlow=e.data.settings.flowMode||prevFlow,nextPageMode=e.data.settings.pageMode||prevPageMode;
     var incomingModeChange=prevFlow!==nextFlow||prevPageMode!==nextPageMode;
     var prevPageCountSig=pageCountSig();
@@ -157,6 +170,10 @@ window.addEventListener('message',function(e){
     // 切回整页时就会落到相邻页。只有纯图片页没有字符锚点时，才让图片
     // 预览锚点接管恢复，避免页面下方一张可见图片覆盖正常正文锚点。
     var storedOffsetBefore=anchorTextOffset(curTopAnchor);
+    // 任何模式互切都固定取切换瞬间视口左上角的正文。单双页的栏宽变化
+    // 不能改用中央阅读点：用户明确看到的第一行必须仍然落在新布局左页
+    // 的第一行。重排后 alignDualAnchorToLeftPage 会把该源字符所在物理栏
+    // 对齐成双页的左栏，而不是按旧页码除以二。
     var anchor=topAnchor();
     if(!anchorValid(anchor)&&anchorValid(curTopAnchor))anchor=curTopAnchor;
     if(anchorValid(anchor))curTopAnchor=anchor;
@@ -177,7 +194,15 @@ window.addEventListener('message',function(e){
     // 单页/双页共用同一套总页数；字体、边距、窗口或滚动模式改变才作废缓存。
     if(prevPageCountSig!==pageCountSig())invalidateMeasure();
     // 滚动容器已经按阅读边距内缩；恢复锚点时使用容器内偏移，避免重复叠加 marginTop。
-    relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode()&&!imageAnchor,scrollOffset:8,modeSwitch:flowChanged||pageModeChanged});
+    relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode()&&!imageAnchor,scrollOffset:8,modeSwitch:flowChanged||pageModeChanged,alignDualAnchor:pageModeChanged&&isDualPage(),forceAnchorColumn:pageModeChanged&&!isScrollMode()});
+    if(prevFontFamily!==S.fontFamily&&document.fonts&&document.fonts.ready){
+      var selectedFont=S.fontFamily,fontAnchorOffset=anchorOffset;
+      document.fonts.ready.then(function(){
+        if(S.fontFamily!==selectedFont)return;
+        relayout({anchorOffset:fontAnchorOffset,modeSwitch:true,alignDualAnchor:isDualPage()});
+        invalidateMeasure();scheduleMeasure();
+      }).catch(function(){});
+    }
     if(modeDiagSeq){modeSwitchDiagLog(modeDiagSeq,'after_relayout',anchorOffset);modeSwitchDiagSchedule(modeDiagSeq,anchorOffset);}
     if(flowChanged||pageModeChanged)scheduleImageVisualAnchorRestore(imageAnchor);
     scheduleMeasure();

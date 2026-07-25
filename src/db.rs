@@ -1,4 +1,4 @@
-use crate::sync_core::{decide_sync_merge_with_device, MergeDecision, SyncMeta};
+use reader_core::sync::{decide_sync_merge_with_device, MergeDecision, SyncMeta};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1161,6 +1161,24 @@ impl AppDb {
         }
         transaction.commit().map_err(|e| e.to_string())?;
         log_db_operation("import_sync_page", started, items.len());
+        Ok(count)
+    }
+
+    /// Install authoritative entities returned by the server's inventory
+    /// reconciliation without changing the incremental pull cursor. The entity
+    /// rows and their exact server acknowledgements commit atomically.
+    pub fn import_reconciled_sync_entities(
+        &mut self,
+        scope: &str,
+        items: &[SyncEntity],
+    ) -> Result<u32, String> {
+        let started = Instant::now();
+        let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
+        Self::ensure_active_sync_scope_on(&transaction, scope)?;
+        let count = Self::import_sync_entities_in_transaction(&transaction, items)?;
+        Self::upsert_sync_acknowledgements(&transaction, scope, items)?;
+        transaction.commit().map_err(|e| e.to_string())?;
+        log_db_operation("import_reconciled_sync_entities", started, items.len());
         Ok(count)
     }
 

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -8,15 +8,6 @@ pub struct StatsSummary {
     pub total_books: u32,
     pub started: u32,
     pub finished: u32,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ReadBucket {
-    pub day: u32,
-    pub hour: u8,
-    pub book: u64,
-    pub secs: u32,
-    pub words: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +20,7 @@ pub struct HighlightStatInput {
 pub struct BookStatInput {
     pub id: u64,
     pub title: String,
+    pub cover: Option<String>,
     pub reading_seconds: u64,
     pub words_read: u64,
     pub progress: f32,
@@ -40,6 +32,7 @@ pub struct BookStatInput {
 pub struct BookStat {
     pub id: String,
     pub title: String,
+    pub cover: Option<String>,
     pub seconds: u64,
     pub words: u64,
     pub highlights: u32,
@@ -119,6 +112,7 @@ pub fn aggregate_stats_range(
     }
 
     let mut title_by_id: HashMap<u64, String> = HashMap::new();
+    let mut cover_by_id: HashMap<u64, String> = HashMap::new();
     let mut hl_count: HashMap<u64, (u32, u32)> = HashMap::new();
     let mut total_highlights = 0u32;
     let mut total_notes = 0u32;
@@ -126,6 +120,9 @@ pub fn aggregate_stats_range(
 
     for b in books {
         title_by_id.insert(b.id, b.title.clone());
+        if let Some(cover) = &b.cover {
+            cover_by_id.insert(b.id, cover.clone());
+        }
         for h in &b.highlights {
             if h.day >= from && h.day <= to {
                 let e = hl_count.entry(b.id).or_insert((0, 0));
@@ -150,6 +147,7 @@ pub fn aggregate_stats_range(
                 .get(&id)
                 .cloned()
                 .unwrap_or_else(|| "（已删除）".to_string()),
+            cover: cover_by_id.get(&id).cloned(),
             seconds: secs,
             words,
             highlights,
@@ -210,6 +208,7 @@ mod tests {
         BookStatInput {
             id,
             title: title.to_string(),
+            cover: None,
             reading_seconds: 0,
             words_read: 0,
             progress,

@@ -91,3 +91,11 @@ test("stats and sync APIs load before app.js initializes them", () => {
   assert.ok(statsPosition >= 0 && statsPosition < appPosition);
   assert.match(statsSource, /global\.ReaderStatsUI = Object\.freeze/);
 });
+
+test("read books render as one clipped cover row ordered by reading duration", () => {
+  assert.match(statsSource, /data\.books\.slice\(\)\.sort/);
+  assert.match(statsSource, /\(b\.seconds \|\| 0\) - \(a\.seconds \|\| 0\)/);
+  assert.match(statsSource, /class="stats-book-strip"/);
+  assert.match(statsSource, /class="stats-book-cover"/);
+  assert.match(statsSource, /高亮 \$\{book\.highlights\} · 批注 \$\{book\.notes\}/);
+});

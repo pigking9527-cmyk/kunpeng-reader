@@ -36,7 +36,7 @@ test("whole-book page counts are enabled and resume from incremental cache", () 
   assert.match(source, /function pageCountFromMeasuredContent\(el\)/);
   assert.match(source, /return pageCountFromMeasuredContent\(measurer\);/);
   assert.match(source, /var progressPage=isDualPage\(\)&&!useScrollPagesForReport[\s\S]*?pageInCh\*2/);
-  assert.match(source, /var displayPage=isDualPage\(\)\?Math\.floor\(tp\/2\):tp/);
+  assert.match(source, /var displayPage=isDualPage\(\)\?Math\.floor\(Math\.max\(0,tp-dualStartColumn\)\/2\):tp/);
   assert.match(source, /function publishPageCache\(complete\)/);
   assert.match(source, /while\(i<CH&&chapterPages\[i\]>0\)i\+\+;/);
   assert.match(source, /if\(i%4===0\)publishPageCache\(false\)/);
@@ -106,6 +106,23 @@ test("mode switches restore anchors inside the already inset scroll viewport", (
   assert.match(source, /modeSwitchDiagSchedule\(modeDiagSeq,anchorOffset\)/);
   assert.match(source, /modeSwitchDiagEvent\('resize_before'\)/);
   assert.match(source, /modeSwitchDiagEvent\('media_refresh'\)/);
+});
+
+test("single and dual page switches keep the viewport first line on the left page", () => {
+  assert.doesNotMatch(source, /function pageModeAnchor\(\)/);
+  assert.match(source, /var anchor=topAnchor\(\);/);
+  assert.match(source, /function forceModeSwitchAnchorColumn\(offset\)/);
+  assert.match(source, /function sourceAnchorRangeForOffset\(offset\)/);
+  assert.match(source, /if\(at>=rec\.end&&i<recs\.length-1\)continue/);
+  assert.match(source, /break-before:column !important/);
+  assert.match(source, /forceAnchorColumn:pageModeChanged&&!isScrollMode\(\)/);
+  assert.match(source, /var root,[\s\S]*?dualStartColumn=0/);
+  assert.match(source, /function alignDualAnchorToLeftPage\(a\)/);
+  assert.match(source, /dualStartColumn=physical%2/);
+  assert.match(source, /viewOffset=pageInCh\*pageStep\+\(isDualPage\(\)\?dualStartColumn\*pageLayout\(\)\.colPitch:0\)/);
+  assert.match(source, /alignDualAnchor:pageModeChanged&&isDualPage\(\)/);
+  assert.match(source, /pageInCh\*2\+dualStartColumn/);
+  assert.match(source, /dualStartColumn>0&&pageInCh===0/);
 });
 test("scroll mode previews an oversized image that starts inside the viewport", () => {
   const helper = source.match(/function scrollImagePreviewEligible\(.*?\n\}/s);

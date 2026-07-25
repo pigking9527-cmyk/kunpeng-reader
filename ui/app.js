@@ -284,11 +284,63 @@ if (dirsAddBtn) {
 }
 // 工具栏齿轮 → 打开“常用设置”弹窗
 const fpSettingsModal = document.getElementById("fp-settings-modal");
+const animationSettingsModal = document.getElementById("animation-settings-modal");
+const animationSettingsClose = document.getElementById("animation-settings-close");
+const animationSettingsInputs = [...document.querySelectorAll("[data-animation-setting]")];
+const animationSettingsLabel = document.getElementById("animation-settings-label");
 const recoveryBackupStatus = document.getElementById("recovery-backup-status");
 const recoveryBackupButton = document.getElementById("settings-create-backup");
 const recoveryBackupActions = document.getElementById("recovery-backup-actions");
 const recoveryBackupSelect = document.getElementById("settings-restore-backup");
 const restoreRecoveryBackupButton = document.getElementById("settings-restore-backup-button");
+function applyMainAnimationSettings() {
+  window.ReaderAnimationSettings?.applyMain(document);
+  const settings = window.ReaderAnimationSettings?.read?.() || {};
+  const keys = Object.keys(window.ReaderAnimationSettings?.DEFAULTS || {});
+  if (animationSettingsLabel) {
+    animationSettingsLabel.textContent = keys.length && keys.every((key) => settings[key] === false)
+      ? "讨厌动画"
+      : "动画";
+  }
+}
+function renderAnimationSettings() {
+  const settings = window.ReaderAnimationSettings?.read?.() || {};
+  animationSettingsInputs.forEach((input) => {
+    input.checked = settings[input.dataset.animationSetting] !== false;
+  });
+  applyMainAnimationSettings();
+}
+function openAnimationSettings() {
+  renderAnimationSettings();
+  fpSettingsModal.classList.remove("show");
+  animationSettingsModal?.classList.add("show");
+}
+function closeAnimationSettings(returnToCommon = true) {
+  animationSettingsModal?.classList.remove("show");
+  if (returnToCommon) fpSettingsModal.classList.add("show");
+}
+document.getElementById("animation-gear")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  openAnimationSettings();
+});
+animationSettingsClose?.addEventListener("click", () => closeAnimationSettings(true));
+animationSettingsModal?.addEventListener("click", (event) => {
+  if (event.target === animationSettingsModal) closeAnimationSettings(true);
+});
+animationSettingsInputs.forEach((input) => {
+  input.addEventListener("change", () => {
+    window.ReaderAnimationSettings?.set?.(input.dataset.animationSetting, input.checked);
+    applyMainAnimationSettings();
+  });
+});
+window.addEventListener("reader-animation-settings-changed", applyMainAnimationSettings);
+window.addEventListener("storage", (event) => {
+  if (event.key === window.ReaderAnimationSettings?.STORAGE_KEY) {
+    renderAnimationSettings();
+  }
+});
+applyMainAnimationSettings();
 function backupBytes(value) {
   const bytes = Number(value) || 0;
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
@@ -574,9 +626,9 @@ async function importBookPaths(paths) {
     const list = await startupTimed("manual-import", () => invoke("add_books", { paths }), paths.length + " files");
     setImportStatus("正在刷新书架...", "busy");
     shelfUI.render(list);
-    const shouldShowOpenHint = shelfWasEmpty && (list || []).length > 0 && localStorage.getItem("shelfDoubleClickHintSeen") !== "1";
-    if (shouldShowOpenHint) localStorage.setItem("shelfDoubleClickHintSeen", "1");
-    setImportStatus(shouldShowOpenHint ? "导入完成。双击打开图书" : "导入完成，共 " + paths.length + " 个文件", "ok");
+    const shouldShowOpenHint = shelfWasEmpty && (list || []).length > 0 && localStorage.getItem("shelfClickOpenHintSeen") !== "1";
+    if (shouldShowOpenHint) localStorage.setItem("shelfClickOpenHintSeen", "1");
+    setImportStatus(shouldShowOpenHint ? "导入完成。单击打开图书；双击选中图书" : "导入完成，共 " + paths.length + " 个文件", "ok");
     hideImportStatus(shouldShowOpenHint ? 5200 : 3200);
     if (debugSettingOn("bg_fulltext_index")) {
       runWhenNoReader("keyword-index-after-import", () => invoke("build_shelf_index")); // 后台为新书建检索索引
@@ -1030,6 +1082,15 @@ function timelineDailyBars(buckets) {
       return `<div class="timeline-chart" aria-label="每日阅读时长和字数柱状图"><svg viewBox="0 0 ${chartWidth} 196" role="img">${grid}${bars}</svg></div>`;
     })() + '<div class="timeline-chart-note">左轴为时长、右轴为字数；横线为两项峰值参考线。悬停任一天柱组可查看具体数据</div>';
 }
+
+function fmtTime(sec) {
+  sec = Math.max(0, Number(sec) || 0);
+  const hours = Math.floor(sec / 3600);
+  const minutes = Math.floor((sec % 3600) / 60);
+  if (hours > 0) return hours + " 小时 " + minutes + " 分钟";
+  if (minutes > 0) return minutes + " 分钟";
+  return Math.floor(sec) + " 秒";
+}
 async function openReadingTimeline() {
   if (!currentInfoBookId) return;
   const modal = document.getElementById("reading-timeline-modal");
@@ -1064,6 +1125,23 @@ function fmtSize(bytes) {
   if (bytes >= 1024) return Math.round(bytes / 1024) + "K";
   return bytes + "B";
 }
+function renderInfoChips(element, values) {
+  element.replaceChildren();
+  const items = Array.isArray(values) ? values.filter(Boolean) : [];
+  if (!items.length) {
+    const empty = document.createElement("span");
+    empty.className = "info-chip empty";
+    empty.textContent = "未添加";
+    element.appendChild(empty);
+    return;
+  }
+  items.forEach((value) => {
+    const chip = document.createElement("span");
+    chip.className = "info-chip";
+    chip.textContent = value;
+    element.appendChild(chip);
+  });
+}
 async function openSelectedBookInfo() {
   const selectedIds = shelfUI.getSelectedIds();
   if (selectedIds.length !== 1) return;
@@ -1077,6 +1155,8 @@ async function openSelectedBookInfo() {
     document.getElementById("book-info-format").textContent = (m.format || "").toUpperCase();
     document.getElementById("book-info-words").textContent = fmtWords(m.word_count);
     document.getElementById("book-info-size").textContent = fmtSize(m.size);
+    renderInfoChips(document.getElementById("book-info-tags"), m.tags);
+    renderInfoChips(document.getElementById("book-info-collections"), m.collections);
     bookInfoDesc.textContent = m.description || "";
     bookInfoStars.setVal(m.rating || 0);
   } catch (e) {
@@ -1162,7 +1242,14 @@ function renderSimilarBooks(sourceTitle, list) {
     const fill = document.createElement("span");
     fill.style.width = pct + "%";
     bar.appendChild(fill);
-    body.append(title, meta, bar);
+    body.append(title, meta);
+    if (b.description) {
+      const description = document.createElement("div");
+      description.className = "similar-description";
+      description.textContent = b.description;
+      body.appendChild(description);
+    }
+    body.appendChild(bar);
     item.appendChild(body);
     item.addEventListener("click", () => {
       similarBooksModal.classList.remove("show");
@@ -1206,6 +1293,9 @@ window.addEventListener("DOMContentLoaded", () => {
       .then((list) => {
         startupPerfLog("shelf-list-books", "data", "books=" + ((list && list.length) || 0));
         shelfUI.render(list);
+        // 首屏渲染完成后只聚焦一次书架滚动容器，让 PgUp/PgDn 开箱即用。
+        // 后续后台刷新不重复聚焦，避免抢走搜索框或弹窗里的输入焦点。
+        requestAnimationFrame(() => shelfUI.focusShelf());
         return invoke("take_startup_book_paths");
       })
       .then((paths) => enqueueAssociatedBookOpen(paths))

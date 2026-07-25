@@ -23,6 +23,7 @@ pub(crate) struct BookDto {
     progress: f32,
     added_at: u64,
     last_read_at: u64,
+    reading_seconds: u64,
     missing: bool, // 源文件是否已找不到
     path: String,  // 文件完整路径（用于"按存储目录"排序）
     rating: f32,   // 用户评分 0~5（0.5 刻度，用于书架按评分过滤）
@@ -74,6 +75,35 @@ pub(crate) struct BookReadingTimeline {
     title: String,
     events: Vec<ProgressTimelinePoint>,
     buckets: Vec<ReadingTimelineBucket>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct BookListDto {
+    name: String,
+    description: String,
+    cover_book_id: String,
+    cover: Option<String>,
+    book_ids: Vec<String>,
+}
+
+fn booklist_snapshot(lib: &Library) -> Vec<BookListDto> {
+    lib.booklists
+        .iter()
+        .map(|list| {
+            let cover_book = lib.get(list.cover_book_id);
+            BookListDto {
+                name: list.name.clone(),
+                description: list.description.clone(),
+                cover_book_id: list.cover_book_id.to_string(),
+                cover: cover_book.and_then(|book| {
+                    book.cover
+                        .as_ref()
+                        .map(|_| format!("{RES_BASE}/cover/{}?v={}", book.id, book.cover_ver))
+                }),
+                book_ids: list.book_order.iter().map(u64::to_string).collect(),
+            }
+        })
+        .collect()
 }
 
 /// 一个汉字的拼音首字母（GB2312 编码区间法，覆盖绝大多数常用字）；非常用字/非汉字返回 None。
@@ -195,6 +225,7 @@ fn to_dto(b: &book::Book) -> BookDto {
         progress: b.progress,
         added_at: b.added_at,
         last_read_at: b.last_read_at,
+        reading_seconds: b.reading_seconds,
         // 不在书架首屏为每本书做磁盘 exists() 检查；慢盘/移动盘/同步盘会偶发卡住启动。
         // 真正打开失败时仍会提示用户重新定位。
         missing: false,
@@ -213,6 +244,35 @@ pub(crate) fn snapshot(lib: &Library) -> Vec<BookDto> {
 #[tauri::command]
 pub(crate) fn list_books(state: tauri::State<AppState>) -> Vec<BookDto> {
     snapshot(&state.library.lock().unwrap())
+}
+
+/// 文件大小只在用户选择“按大小排序”时按需读取。大型书架可能位于移动盘、
+/// 网络盘或同步盘，不能把数百次 metadata() 访问塞进启动期书单快照。
+#[tauri::command]
+pub(crate) async fn book_file_sizes(
+    state: tauri::State<'_, AppState>,
+) -> Result<HashMap<String, u64>, ()> {
+    let targets: Vec<(String, std::path::PathBuf)> = {
+        let library = state.library.lock().map_err(|_| ())?;
+        library
+            .books
+            .iter()
+            .map(|book| (book.id.to_string(), book.path.clone()))
+            .collect()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        targets
+            .into_iter()
+            .map(|(id, path)| {
+                let bytes = std::fs::metadata(path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                (id, bytes)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|_| ())
 }
 
 /// 设置一册图书的标签与收藏夹。收藏夹仅是逻辑归类，不会移动或删除文件。
@@ -276,6 +336,55 @@ pub(crate) fn delete_book_organization(
         lib.save()?;
     }
     Ok(snapshot(&lib))
+}
+
+/// 独立书单页面所需的简介、封面和手动顺序。
+#[tauri::command]
+pub(crate) fn list_booklists(state: tauri::State<AppState>) -> Result<Vec<BookListDto>, String> {
+    let mut lib = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    lib.reconcile_booklists();
+    Ok(booklist_snapshot(&lib))
+}
+
+#[tauri::command]
+pub(crate) fn update_booklist(
+    state: tauri::State<AppState>,
+    name: String,
+    description: String,
+    cover_book_id: String,
+    book_ids: Vec<String>,
+) -> Result<Vec<BookListDto>, String> {
+    let cover_book_id = cover_book_id.parse::<u64>().unwrap_or(0);
+    let book_order = book_ids
+        .into_iter()
+        .filter_map(|id| id.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    let mut lib = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    if !lib
+        .booklists
+        .iter()
+        .any(|list| list.name.eq_ignore_ascii_case(name.trim()))
+    {
+        lib.reconcile_booklists();
+    }
+    lib.reconcile_booklists();
+    if !lib
+        .booklists
+        .iter()
+        .any(|list| list.name.eq_ignore_ascii_case(name.trim()))
+    {
+        return Err("找不到这个书单".to_string());
+    }
+    if lib.update_booklist(&name, description, cover_book_id, book_order) {
+        lib.save()?;
+    }
+    Ok(booklist_snapshot(&lib))
 }
 
 #[tauri::command]
@@ -447,6 +556,8 @@ pub(crate) struct SetProgressRequest {
     progress: f32,
     chapter: u32,
     frac: f32,
+    #[serde(default)]
+    anchor: Option<reader_core::ReadingAnchor>,
 }
 
 #[tauri::command]
@@ -459,10 +570,11 @@ pub(crate) async fn set_progress(
         progress,
         chapter,
         frac,
+        anchor,
     } = request;
     if let Some(id) = window_commands::reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
-        let mut changed = lib.set_position(id, progress, chapter, frac);
+        let mut changed = lib.set_position_with_anchor(id, progress, chapter, frac, anchor);
         if let Some(book) = lib.books.iter_mut().find(|b| b.id == id) {
             if book.format == "epub" && book.chapter_index_version != epub_runtime::CACHE_VERSION {
                 book.chapter_index_version = epub_runtime::CACHE_VERSION;

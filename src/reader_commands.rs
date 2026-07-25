@@ -98,6 +98,8 @@ pub(crate) struct AddHighlightRequest {
     rects: String,
     color: String,
     note: String,
+    #[serde(default)]
+    range_anchor: Option<reader_core::TextRangeAnchor>,
 }
 
 #[tauri::command]
@@ -115,6 +117,7 @@ pub(crate) fn add_highlight(
         rects,
         color,
         note,
+        range_anchor,
     } = request;
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
@@ -131,6 +134,7 @@ pub(crate) fn add_highlight(
                 color,
                 note,
                 created_at: book::now_secs(),
+                range_anchor,
             },
         );
         report_save_error(lib.save());
@@ -212,10 +216,11 @@ pub(crate) fn add_bookmark(
     chapter: u32,
     frac: f32,
     label: String,
+    position: Option<reader_core::ReadingPosition>,
 ) -> Vec<book::Bookmark> {
     if let Some(id) = reader_window_id(&window) {
         let mut lib = state.library.lock().unwrap();
-        lib.add_bookmark(id, chapter, frac, label);
+        lib.add_bookmark_at(id, chapter, frac, label, position);
         report_save_error(lib.save());
         return lib.bookmarks(id);
     }
@@ -246,10 +251,12 @@ pub(crate) struct BookMeta {
     word_count: u64,
     size: u64,   // 文件字节数
     rating: f32, // 用户评分 0~5（0.5 刻度）
+    tags: Vec<String>,
+    collections: Vec<String>,
 }
 
 async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String> {
-    let (title, mut author, description, format, rating) = {
+    let (title, mut author, description, format, rating, tags, collections) = {
         let lib = state.library.lock().unwrap();
         let b = lib.get(id).ok_or("找不到这本书")?;
         (
@@ -258,6 +265,8 @@ async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String>
             b.description.clone(),
             b.format.clone(),
             b.rating,
+            b.tags.clone(),
+            b.collections.clone(),
         )
     };
 
@@ -308,6 +317,8 @@ async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String>
         word_count,
         size,
         rating,
+        tags,
+        collections,
     })
 }
 

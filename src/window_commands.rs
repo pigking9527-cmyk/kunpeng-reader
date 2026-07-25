@@ -140,6 +140,11 @@ pub(crate) fn ensure_reader_window(
         if let tauri::WindowEvent::CloseRequested { .. } = event {
             if let Some(closing) = event_app.get_webview_window(&event_label) {
                 let state = event_app.state::<AppState>();
+                // 页数测量的实际工作在这个 WebView 中。关闭时把已经落盘的
+                // 逐章缓存当作检查点暂停，不能让统一任务中心遗留 running 记录。
+                if let Some(task) = state.page_count_tasks.lock().unwrap().remove(&id_num) {
+                    let _ = task.pause();
+                }
                 let mut library = state.library.lock().unwrap();
                 update_reader_geom(&mut library, &closing);
                 report_save_error("书架", library.save());

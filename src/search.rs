@@ -1,7 +1,10 @@
 use crate::search_core::{ascii_lower_bytes, snippet_at_with_context, BookSearchBloom};
 use crate::search_index::{self, BookIndex, SourceFingerprint, INDEX_VERSION};
 use crate::{
-    atomic_file, book, emit_startup_perf, interactive_search_workers, reader_protocol::strip_tags,
+    atomic_file,
+    background_tasks::{BackgroundTaskKind, TaskControlSignal},
+    book, emit_startup_perf, interactive_search_workers,
+    reader_protocol::strip_tags,
     set_thread_background, url_open, with_thread_background_priority, AppState,
 };
 use serde::{Deserialize, Serialize};
@@ -475,9 +478,13 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
     {
         return;
     }
-    std::thread::spawn(move || {
+    let state = app.state::<AppState>();
+    let task = state
+        .background_tasks
+        .enqueue_or_resume(BackgroundTaskKind::FullTextIndex, "建立关键词索引");
+    let task_id = task.id().to_string();
+    if let Err(error) = task.spawn_detached("keyword-index", move |task| {
         let _build_guard = IndexBuildGuard;
-        set_thread_background(true);
         let started = std::time::Instant::now();
         emit_startup_perf(&app, "keyword-index", "start", "background incremental");
         let state = app.state::<AppState>();
@@ -485,11 +492,39 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
         let valid_ids: HashSet<u64> = books.iter().map(|book| book.id).collect();
         let _ = search_index::maintain(&valid_ids, false);
         let total = books.len();
+        let resume_from = task
+            .checkpoint_value()
+            .and_then(|checkpoint| checkpoint.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(total);
         let mut skipped = 0usize;
         let mut indexed = 0usize;
         let mut content_ids_changed = false;
-        for mut b in books {
+        for (index, mut b) in books.into_iter().enumerate().skip(resume_from) {
+            match task.control_signal() {
+                TaskControlSignal::Continue => {}
+                TaskControlSignal::Pause => {
+                    let _ = task.checkpoint(
+                        index as u64,
+                        total as u64,
+                        format!("已完成 {index}/{total} 本"),
+                        index.to_string(),
+                    );
+                    let _ = task.pause();
+                    return;
+                }
+                TaskControlSignal::Cancel => {
+                    let _ = task.cancel();
+                    return;
+                }
+            }
             let Ok(source) = search_index::source_fingerprint(Path::new(&b.path)) else {
+                let _ = task.checkpoint(
+                    (index + 1) as u64,
+                    total as u64,
+                    format!("跳过无效图书 {}/{}", index + 1, total),
+                    (index + 1).to_string(),
+                );
                 continue;
             };
             let verified_content_id = source_content_id(&source);
@@ -505,11 +540,23 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
             let already_indexed = search_assets_current(&b, &source);
             if already_indexed {
                 skipped += 1;
+                let _ = task.checkpoint(
+                    (index + 1) as u64,
+                    total as u64,
+                    format!("已检查 {}/{} 本", index + 1, total),
+                    (index + 1).to_string(),
+                );
                 continue;
             }
             if ensure_search_assets(&b, &source) {
                 indexed += 1;
             }
+            let _ = task.checkpoint(
+                (index + 1) as u64,
+                total as u64,
+                format!("已建立 {}/{} 本", index + 1, total),
+                (index + 1).to_string(),
+            );
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
         if content_ids_changed {
@@ -530,8 +577,13 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
                 maintenance.disk_bytes / (1024 * 1024)
             ),
         );
-        set_thread_background(false);
-    });
+        let _ = task.complete();
+    }) {
+        INDEX_BUILD_RUNNING.store(false, Ordering::Release);
+        crate::log(&format!(
+            "keyword index task {task_id} could not start: {error}"
+        ));
+    }
 }
 
 #[tauri::command]

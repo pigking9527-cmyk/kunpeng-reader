@@ -12,7 +12,7 @@
     "semanticSearch", "aiReader", "translateText", "dict", "vocabAdd", "addHighlight",
     "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations",
     "removeHighlight", "setHighlightNote", "setHighlightText", "setHighlightColor", "addBookmark", "tocResolved",
-    "getTranslationCredentialStatus", "saveTranslationCredential",
+    "getTranslationCredentialStatus", "saveTranslationCredential", "bookEnd",
   ]);
   const MAX_MESSAGE_CHARS = 12 * 1024 * 1024;
   const MAX_TEXT_CHARS = 20_000;

@@ -45,7 +45,7 @@
             <div class="account-sync-title">同步内容</div>
             <div class="account-sync-grid">
               <span>阅读进度与续读位置</span>
-              <span>书签、高亮、批注与评分</span>
+              <span>书签、高亮、批注、评分、标签与收藏夹</span>
               <span>生词本</span>
               <span>阅读统计</span>
             </div>
@@ -93,22 +93,27 @@
         </button>
         <div id="filter-panel" class="filter-panel">
           <div class="fp-row">
-            <div class="fp-col">
+            <div class="fp-col fp-sort-primary">
               <div class="fp-title">排序</div>
               <label><input type="radio" name="sort" value="title" /> 书名</label>
               <label><input type="radio" name="sort" value="author" /> 作者</label>
               <label><input type="radio" name="sort" value="added" /> 导入时间</label>
               <label><input type="radio" name="sort" value="dir" /> 存储目录</label>
-              <label><input type="radio" name="sort" value="read" /> 最近阅读</label>
             </div>
-            <div class="fp-col">
+            <div class="fp-col fp-sort-secondary">
+              <button id="reading-filter-all" type="button" class="fp-all-books">全部图书</button>
+              <label><input type="radio" name="sort" value="read" /> 最近阅读</label>
+              <label><input type="radio" name="sort" value="reading-time" /> 阅读时间</label>
+              <label><input type="radio" name="sort" value="size" /> 大小</label>
+              <label><input type="radio" name="sort" value="progress" /> 阅读进度</label>
+            </div>
+            <div class="fp-col fp-reading-filter-col">
               <div class="fp-title">阅读过滤</div>
               <label><input type="checkbox" class="rfilter" value="unread" /> 未读</label>
               <label><input type="checkbox" class="rfilter" value="reading" /> 正在阅读</label>
               <label><input type="checkbox" class="rfilter" value="done" /> 已读</label>
               <div id="filter-stars" class="fp-stars" title="按评分过滤：点星=只看该评分及以上，再点同一处取消"></div>
             </div>
-            <div class="fp-col fp-all-books-col"><button id="reading-filter-all" type="button" class="fp-all-books">全部图书</button></div>
           </div>
           <div class="fp-sep-h"></div>
           <div class="fp-org-row">
@@ -117,7 +122,10 @@
               <div id="tag-filter-list" class="fp-choice-list"></div>
             </div>
             <div class="fp-org-col">
-              <div class="fp-title">收藏夹</div>
+              <div class="fp-title fp-org-title-row">
+                <span>收藏夹</span>
+                <button id="organization-match-mode" class="fp-match-mode" type="button">匹配任一</button>
+              </div>
               <div id="collection-filter-list" class="fp-choice-list"></div>
             </div>
           </div>
@@ -153,6 +161,7 @@
                   <button id="grid-cols-inc" class="grid-cols-step" type="button" title="增加列数">+</button>
                 </div>
               </div>
+              <div id="filter-result-summary" class="fp-result-summary" aria-live="polite">0/0</div>
             </div>
           </div>
         </div>
@@ -161,12 +170,12 @@
         <button id="settings-toolbar-btn" class="icon-btn settings-toolbar-btn" title="常用设置" aria-label="常用设置">⚙</button>
         <button id="menu-btn" class="icon-btn" title="菜单">⋮</button>
         <div id="menu" class="menu">
-          <div class="menu-item" id="mi-random">🎲 随机打开一本书</div>
-          <div class="menu-item" id="mi-import">➕ 导入书籍</div>
-          <div class="menu-item" id="mi-library-health">🩺 书库体检</div>
-          <div class="menu-item" id="mi-notes">📝 笔记汇总</div>
-          <div class="menu-item" id="mi-selectall">☑ 全选（批量删除）</div>
-          <div class="menu-item" id="mi-about">ℹ️ 关于</div>
+          <div class="menu-item" id="mi-random">随机打开一本书</div>
+          <div class="menu-item" id="mi-import">导入书籍</div>
+          <div class="menu-item" id="mi-library-health">书库体检</div>
+          <div class="menu-item" id="mi-notes">笔记汇总</div>
+          <div class="menu-item" id="mi-selectall">全选（批量删除）</div>
+          <div class="menu-item" id="mi-about">关于</div>
         </div>
       </div>
       <div class="window-controls" aria-label="窗口控制">
@@ -243,6 +252,12 @@
           <label class="switch"><input type="checkbox" id="set-cover-title" /><span class="slider"></span></label>
         </div>
         <div class="fp-set-row">
+          <span id="animation-settings-label">动画</span>
+          <span class="fp-set-tail">
+            <button id="animation-gear" class="fp-row-gear" title="设置界面动画">⚙</button>
+          </span>
+        </div>
+        <div class="fp-set-row">
           <span>自动导入目录</span>
           <span class="fp-set-tail">
             <button id="dirs-gear" class="fp-row-gear" title="设置自动导入目录">⚙</button>
@@ -282,6 +297,47 @@
         <div class="fp-set-actions">
           <button id="settings-export-data" class="btn-plain" type="button">⬆ 导出数据包</button>
           <button id="settings-import-data" class="btn-plain" type="button">⬇ 导入数据包</button>
+        </div>
+      </div>
+    </div>
+    <div id="animation-settings-modal" class="modal">
+      <div class="modal-card animation-settings-card">
+        <div class="modal-head"><span>动画设置</span><button id="animation-settings-close" class="btn-plain">✕</button></div>
+        <div class="fp-set-row">
+          <span>搜索框弹出动画</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="searchPopup" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>全书架搜索按键动画</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="shelfSearchToggle" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>常用设置开关动画</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="commonSettingsSwitch" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>漏斗筛选按键动画</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="filterButton" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>添加批注动画</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="annotationAdd" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>阅读页设置项动画（双页、滚动模式）</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="readingMode" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>翻页动画</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="pageTurn" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>高亮菜单设置页动画</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="highlightSettings" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span>收藏／书单拖拽排序动画</span>
+          <label class="switch"><input type="checkbox" data-animation-setting="booklistSort" /><span class="slider"></span></label>
         </div>
       </div>
     </div>
@@ -403,6 +459,24 @@
         <div class="info-row"><span class="info-k">版本</span><span class="info-v" id="about-ver">v1.8.0</span><button id="about-update" class="btn-plain about-update-btn">检查更新</button></div>
         <div class="info-row col"><span class="info-k">本版更新内容</span><div id="about-notes" class="about-notes">加载中…</div></div>
         <div class="info-row"><span class="info-k">GitHub</span><span class="info-v"><a id="about-github" href="https://github.com/pigking9527-cmyk/kunpeng-reader" style="color:#2b6cff;text-decoration:none;cursor:pointer;">github.com/pigking9527-cmyk/kunpeng-reader</a></span></div>
+        <div class="about-feedback-actions">
+          <button id="about-feedback-bug" class="btn-plain" type="button">提交 Bug</button>
+          <button id="about-feedback-feature" class="btn-plain" type="button">功能提议</button>
+        </div>
+      </div>
+    </div>
+    <div id="feedback-modal" class="modal">
+      <div class="modal-card feedback-card">
+        <div class="modal-head"><span id="feedback-title">提交 Bug</span><button id="feedback-close" class="btn-plain">✕</button></div>
+        <p class="feedback-note">可输入文字，也可粘贴、拖入或选择图片；每张图片会自动压缩到 1 MB 以内。</p>
+        <div id="feedback-editor" class="feedback-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="请描述发生了什么、期望结果，或希望增加的功能…"></div>
+        <input id="feedback-image-input" type="file" accept="image/*" multiple hidden />
+        <div class="feedback-actions">
+          <button id="feedback-insert-image" class="btn-plain" type="button">插入图片</button>
+          <span id="feedback-image-status" class="feedback-image-status">最多 3 张</span>
+          <button id="feedback-submit" class="btn-plain primary" type="button">提交</button>
+        </div>
+        <div id="feedback-status" class="ai-status" aria-live="polite"></div>
       </div>
     </div>
     <div id="book-info-modal" class="modal">
@@ -414,6 +488,8 @@
         <div class="info-row"><span class="info-k">字数</span><span id="book-info-words" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">大小</span><span id="book-info-size" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">评分</span><span id="book-info-stars" class="info-stars" title="点击打分，再点同一颗清除"></span></div>
+        <div class="info-row"><span class="info-k">标签</span><span id="book-info-tags" class="info-v info-chips"></span></div>
+        <div class="info-row"><span class="info-k">书单</span><span id="book-info-collections" class="info-v info-chips"></span></div>
         <div class="info-row book-info-actions">
           <span class="info-k">操作</span>
           <div class="info-action-buttons">
@@ -430,6 +506,20 @@
         <div class="modal-head"><span>相似图书</span><button id="similar-books-close" class="btn-plain">✕</button></div>
         <div id="similar-books-source" class="similar-source"></div>
         <div id="similar-books-list" class="similar-list"></div>
+      </div>
+    </div>
+    <div id="booklist-modal" class="modal">
+      <div class="modal-card booklist-card">
+        <div class="modal-head"><span id="booklist-title">书单</span><button id="booklist-close" class="btn-plain">✕</button></div>
+        <div class="booklist-hero">
+          <div id="booklist-cover" class="booklist-cover"></div>
+          <div class="booklist-summary">
+            <label for="booklist-description">书单简介</label>
+            <textarea id="booklist-description" maxlength="1000" placeholder="写下这份书单的主题、阅读顺序或推荐理由"></textarea>
+            <div class="booklist-hint">失焦自动保存；拖动右侧手柄可调整顺序。</div>
+          </div>
+        </div>
+        <div id="booklist-books" class="booklist-books"></div>
       </div>
     </div>
     <div id="debug-modal" class="modal">
@@ -493,9 +583,11 @@
     </div>
     <script src="startup-perf.js"></script>
     <script src="titlebar.js"></script>
+    <script src="animation-settings.js"></script>
     <script src="semantic-status-cache.js"></script>
     <script src="semantic-ui.js"></script>
     <script src="sync-ui.js"></script>
+    <script src="feedback-ui.js"></script>
     <script src="stats-ui.js"></script>
     <script src="shelf-ui.js"></script>
     <script src="app.js"></script>

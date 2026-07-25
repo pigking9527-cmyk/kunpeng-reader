@@ -1,9 +1,9 @@
 use crate::book::Library;
-use crate::stats_core::{
+use crate::{window_commands::reader_window_id, AppState, RES_BASE};
+use reader_core::stats::{
     aggregate_stats_range, summarize_books, BookStatInput, HighlightStatInput, ReadBucket,
     StatsRange, StatsSummary,
 };
-use crate::{window_commands::reader_window_id, AppState};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -26,6 +26,10 @@ fn stats_book_inputs(lib: &Library) -> Vec<BookStatInput> {
         .map(|b| BookStatInput {
             id: b.id,
             title: b.title.clone(),
+            cover: b
+                .cover
+                .as_ref()
+                .map(|_| format!("{RES_BASE}/cover/{}?v={}", b.id, b.cover_ver)),
             reading_seconds: b.reading_seconds,
             words_read: b.words_read,
             progress: b.progress,

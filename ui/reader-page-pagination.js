@@ -128,7 +128,8 @@ function columnCountFromWidth(w,hasEnd){
     // 每个 spread 包含两个物理栏，所以页数 = 物理栏数 / 2 向上取整。
     var physical=Math.max(1,Math.round((w-pl.l+pl.gap)/pl.colPitch));
     if(hasEnd)physical=Math.max(1,physical-1);
-    return Math.max(1,Math.ceil(physical/2));
+    var bias=typeof dualStartColumn==='number'?dualStartColumn:0;
+    return Math.max(1,Math.ceil(Math.max(1,physical-bias)/2));
   }
   var count=Math.max(1,Math.round(w/pl.pageStep));
   if(hasEnd)count=Math.max(1,count-1);
@@ -165,7 +166,8 @@ function physicalPageCountFromContent(el){
 }
 function pagedPageCountFromContent(el){
   var physical=physicalPageCountFromContent(el);
-  return isDualPage()?Math.max(1,Math.ceil(physical/2)):physical;
+  var bias=typeof dualStartColumn==='number'?dualStartColumn:0;
+  return isDualPage()?Math.max(1,Math.ceil(Math.max(1,physical-bias)/2)):physical;
 }
 function pageCountLayout(){
   var vw=pageCountWidth(),l=mg(S.marginLeft),r=mg(S.marginRight);
@@ -179,4 +181,37 @@ function pageCountFromMeasuredContent(el){
   var extent=contentRectExtent(el),pl=pageCountLayout();
   if(extent<2)return 1;
   return Math.max(1,Math.ceil((extent+1)/pl.pageStep));
+}
+
+// 单页/双页切换使用字符锚点，而不是把旧页码按二换算。若锚点在标准
+// spread 的右栏，则把该物理栏作为新双页的左栏，避免视口向前跳一整页。
+function anchorPage(a){
+  if(!anchorValid(a))return pageInCh;
+  var r=null;
+  if(a.range){var rs=a.range.getClientRects();r=rs&&rs.length?rs[0]:a.range.getBoundingClientRect();}
+  else if(a.el)r=a.el.getBoundingClientRect();
+  if(!r)return pageInCh;
+  var pr=viewRect();
+  if(usesLineBreakPaging()){
+    var y=r.top-pr.top+(scrollPort()?scrollPort().scrollTop:0);
+    buildScrollBreaks();
+    return pageIndexForScrollTop(y);
+  }
+  var x=r.left-pr.left+viewOffset;
+  if(isDualPage()){
+    var pl=pageLayout(),physical=Math.max(0,Math.floor((x-pl.l+1)/pl.colPitch));
+    return Math.max(0,Math.min(pagesInCh-1,Math.floor(Math.max(0,physical-dualStartColumn)/2)));
+  }
+  return Math.max(0,Math.min(pagesInCh-1,Math.floor((x+1)/pageStep)));
+}
+function alignDualAnchorToLeftPage(a){
+  if(!isDualPage()||!anchorValid(a))return false;
+  var r=anchorRect(a),pr=viewRect(),pl=pageLayout();
+  if(!r)return false;
+  var x=r.left-pr.left+viewOffset-pl.l;
+  var physical=Math.max(0,Math.floor((x+1)/pl.colPitch));
+  dualStartColumn=physical%2;
+  pagesInCh=fastChapterLayout?fastPagedPageCount(root):pagedPageCountFromContent(root);
+  pageInCh=Math.max(0,Math.min(pagesInCh-1,Math.floor((physical-dualStartColumn)/2)));
+  return true;
 }

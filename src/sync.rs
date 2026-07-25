@@ -1,10 +1,11 @@
 use crate::{
     background_tasks::{BackgroundTaskKind, TaskControlSignal, TaskRunGuard},
-    data_migration, db, secret_store,
-    sync_core::sync_scope_id,
-    AppState, DEFAULT_SYNC_URL,
+    data_migration, db, secret_store, AppState, DEFAULT_SYNC_URL,
 };
+use reader_core::sync::sync_scope_id;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -14,9 +15,11 @@ const MAX_SYNC_PULL_PAGES: usize = 1_000;
 const SYNC_PUSH_BATCH_ENTITIES: usize = 400;
 const SYNC_PUSH_BATCH_BYTES: usize = 2 * 1024 * 1024;
 const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const EXIT_SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const EXIT_SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 const EXIT_SYNC_MAX_PULL_PAGES: usize = 4;
 const SYNC_REQUEST_ATTEMPTS: usize = 3;
+const SYNC_RETRY_DELAYS_MS: &[u64] = &[250, 500];
+const EXIT_SYNC_RETRY_DELAYS_MS: &[u64] = &[];
 const SYNC_PAUSED: &str = "__sync_paused__";
 const SYNC_CANCELLED: &str = "__sync_cancelled__";
 struct SyncRunGuard<'a>(&'a AtomicBool);
@@ -69,14 +72,6 @@ fn sync_error_class(error: &ureq::Error) -> &'static str {
         ureq::Error::Protocol(_) => "protocol",
         _ => "other",
     }
-}
-
-fn sync_request_with_retry<T>(
-    stage: &str,
-    task: Option<&TaskRunGuard>,
-    request: impl FnMut() -> Result<T, ureq::Error>,
-) -> Result<T, String> {
-    sync_request_with_retry_delays(stage, task, &[250, 500], request)
 }
 
 fn sync_request_with_retry_delays<T>(
@@ -345,6 +340,87 @@ struct SyncPullResponse {
     has_more: bool,
 }
 
+#[derive(Deserialize)]
+struct SyncInventoryResponse {
+    server_time: i64,
+    entity_count: usize,
+    inventory_digest: String,
+    #[serde(default)]
+    revision: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SyncManifestEntry {
+    kind: String,
+    id: String,
+    updated_at: i64,
+    deleted_at: i64,
+    device_id: String,
+    sync_version: i64,
+}
+
+impl From<&db::SyncEntity> for SyncManifestEntry {
+    fn from(entity: &db::SyncEntity) -> Self {
+        Self {
+            kind: entity.kind.clone(),
+            id: entity.id.clone(),
+            updated_at: entity.updated_at,
+            deleted_at: entity.deleted_at,
+            device_id: entity.device_id.clone(),
+            sync_version: entity.sync_version,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SyncEntityKey {
+    kind: String,
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct SyncReconcileResponse {
+    server_time: i64,
+    #[serde(default)]
+    upload: Vec<SyncEntityKey>,
+    #[serde(default)]
+    entities: Vec<db::SyncEntity>,
+}
+
+fn update_inventory_text(hasher: &mut Sha256, value: &str) {
+    let bytes = value.as_bytes();
+    hasher.update(u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn sync_inventory_digest(entities: &[db::SyncEntity]) -> String {
+    let mut sorted = entities.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut hasher = Sha256::new();
+    for entity in sorted {
+        update_inventory_text(&mut hasher, &entity.kind);
+        update_inventory_text(&mut hasher, &entity.id);
+        update_inventory_text(&mut hasher, &entity.device_id);
+        hasher.update(entity.sync_version.to_be_bytes());
+        hasher.update(entity.updated_at.to_be_bytes());
+        hasher.update(entity.deleted_at.to_be_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn inventory_matches(local: &[db::SyncEntity], remote: &SyncInventoryResponse) -> bool {
+    local.len() == remote.entity_count
+        && sync_inventory_digest(local).eq_ignore_ascii_case(&remote.inventory_digest)
+}
+
 fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
     let url = db
         .metadata("sync_url")
@@ -584,6 +660,78 @@ fn sync_push_batches(entities: &[db::SyncEntity]) -> Result<Vec<Vec<db::SyncEnti
     Ok(batches)
 }
 
+#[derive(Default)]
+struct PushTotals {
+    pushed: usize,
+    accepted: usize,
+    ignored: usize,
+    server_time: i64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_sync_entities(
+    state: &AppState,
+    task: Option<&TaskRunGuard>,
+    retry_delays_ms: &[u64],
+    agent: &ureq::Agent,
+    base: &str,
+    token: &str,
+    device_id: &str,
+    scope: &str,
+    entities: &[db::SyncEntity],
+    progress_base: usize,
+) -> Result<PushTotals, String> {
+    let mut totals = PushTotals::default();
+    for (batch_index, batch) in sync_push_batches(entities)?.into_iter().enumerate() {
+        check_sync_control(task)?;
+        let push_body = serde_json::json!({
+            "schema_version": 2,
+            "device_id": device_id,
+            "capabilities": ["push_dispositions_v1"],
+            "entities": batch,
+        });
+        let push: SyncPushResponse =
+            sync_request_with_retry_delays("push", task, retry_delays_ms, || {
+                agent
+                    .post(&format!("{base}/sync/push"))
+                    .header("Authorization", &format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    // kind + id + device_id + sync_version make retries idempotent.
+                    .send_json(push_body.clone())?
+                    .body_mut()
+                    .read_json()
+            })?;
+        totals.pushed += batch.len();
+        totals.accepted += push.accepted_total() as usize;
+        totals.ignored += push.ignored_total() as usize;
+        totals.server_time = totals.server_time.max(push.server_time);
+        let commit_started = Instant::now();
+        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        let acknowledged = push.acknowledged_entities(&batch);
+        let _ = db.commit_sync_push(scope, &acknowledged, &push.entities)?;
+        log_sync_stage(
+            "push_commit",
+            commit_started,
+            format_args!("batch={} entities={}", batch_index + 1, batch.len()),
+        );
+        drop(db_guard);
+        if let Some(task) = task {
+            task.checkpoint(
+                (progress_base + totals.pushed) as u64,
+                (progress_base + entities.len()) as u64,
+                format!("已推送第 {} 批，共 {} 条", batch_index + 1, totals.pushed),
+                format!(
+                    r#"{{"phase":"push","batch":{},"pushed":{}}}"#,
+                    batch_index + 1,
+                    totals.pushed
+                ),
+            )?;
+        }
+    }
+    Ok(totals)
+}
+
 fn newer_cursor(current: &str, candidate: &str) -> String {
     let current = current.trim();
     let candidate = candidate.trim();
@@ -784,6 +932,7 @@ fn sync_now_inner_with_limits_impl(
     state: &AppState,
     request_timeout: Duration,
     max_pull_pages: usize,
+    retry_delays_ms: &[u64],
     task: Option<&TaskRunGuard>,
 ) -> Result<SyncReport, String> {
     let sync_started = Instant::now();
@@ -867,16 +1016,17 @@ fn sync_now_inner_with_limits_impl(
     let mut pull_completed = false;
     for page_index in 0..max_pull_pages {
         check_sync_control(task)?;
-        let pull: SyncPullResponse = sync_request_with_retry("pull", task, || {
-            agent
-                .get(&format!("{base}/sync/pull"))
-                .query("cursor", &pull_cursor)
-                .query("limit", SYNC_PULL_PAGE_SIZE.to_string())
-                .header("Authorization", &format!("Bearer {}", settings.token))
-                .call()?
-                .body_mut()
-                .read_json()
-        })?;
+        let pull: SyncPullResponse =
+            sync_request_with_retry_delays("pull", task, retry_delays_ms, || {
+                agent
+                    .get(&format!("{base}/sync/pull"))
+                    .query("cursor", &pull_cursor)
+                    .query("limit", SYNC_PULL_PAGE_SIZE.to_string())
+                    .header("Authorization", &format!("Bearer {}", settings.token))
+                    .call()?
+                    .body_mut()
+                    .read_json()
+            })?;
         pull_server_time = pull_server_time.max(pull.server_time);
         let next_cursor = pull.next_cursor.trim();
         if pull.has_more && !cursor_strictly_advances(&pull_cursor, next_cursor) {
@@ -939,57 +1089,143 @@ fn sync_now_inner_with_limits_impl(
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
         db.pending_sync_entities(&scope)?
     };
-    let mut pushed = 0usize;
-    let mut accepted = 0usize;
-    let mut ignored = 0usize;
-    let mut push_server_time = 0i64;
-    for (batch_index, batch) in sync_push_batches(&entities)?.into_iter().enumerate() {
+    let initial_push = push_sync_entities(
+        state,
+        task,
+        retry_delays_ms,
+        &agent,
+        &base,
+        &settings.token,
+        &device_id,
+        &scope,
+        &entities,
+        pulled as usize,
+    )?;
+    let mut pushed = initial_push.pushed;
+    let mut accepted = initial_push.accepted;
+    let mut ignored = initial_push.ignored;
+    let mut push_server_time = initial_push.server_time;
+
+    // A local acknowledgement is only a cache of a previous server response;
+    // it is not proof that a restored or repaired server still owns that row.
+    // Verify the actual account inventory after every incremental sync. A
+    // matching digest costs one tiny request. On mismatch, exchange only
+    // version metadata and transfer just the missing/winning entities.
+    let mut inventory_verified = false;
+    for reconcile_pass in 0..=3 {
         check_sync_control(task)?;
-        let push_body = serde_json::json!({
-            "schema_version": 2,
-            "device_id": device_id,
-            "capabilities": ["push_dispositions_v1"],
-            "entities": batch,
-        });
-        let push: SyncPushResponse = sync_request_with_retry("push", task, || {
-            agent
-                .post(&format!("{base}/sync/push"))
-                .header("Authorization", &format!("Bearer {}", settings.token))
-                .header("Content-Type", "application/json")
-                // 实体 id + sync_version 使同一批重试具备幂等语义；响应丢失时可安全重发。
-                .send_json(push_body.clone())?
-                .body_mut()
-                .read_json()
-        })?;
-        pushed += batch.len();
-        accepted += push.accepted_total() as usize;
-        ignored += push.ignored_total() as usize;
-        push_server_time = push_server_time.max(push.server_time);
-        // Only exact accepted/conflicting versions are settled. Validation and
-        // quota rejects stay dirty and can be retried after the cause is fixed.
-        // The clean markers and authoritative conflict rows share one SQLite
-        // transaction, so a crash cannot leave a losing local row falsely clean.
-        let commit_started = Instant::now();
-        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        let acknowledged = push.acknowledged_entities(&batch);
-        let _ = db.commit_sync_push(&scope, &acknowledged, &push.entities)?;
-        log_sync_stage(
-            "push_commit",
-            commit_started,
-            format_args!("batch={} entities={}", batch_index + 1, batch.len()),
-        );
-        if let Some(task) = task {
-            task.checkpoint(
-                (pulled as usize + pushed) as u64,
-                (pulled as usize + entities.len()) as u64,
-                format!("已推送第 {} 批，共 {pushed} 条", batch_index + 1),
-                format!(
-                    r#"{{"phase":"push","batch":{},"pushed":{pushed}}}"#,
-                    batch_index + 1
-                ),
-            )?;
+        let inventory: SyncInventoryResponse =
+            sync_request_with_retry_delays("inventory", task, retry_delays_ms, || {
+                agent
+                    .get(&format!("{base}/sync/inventory"))
+                    .header("Authorization", &format!("Bearer {}", settings.token))
+                    .call()?
+                    .body_mut()
+                    .read_json()
+            })?;
+        push_server_time = push_server_time.max(inventory.server_time);
+        let local = {
+            let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+            let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+            db.all_sync_entities()?
+        };
+        if inventory_matches(&local, &inventory) {
+            inventory_verified = true;
+            crate::log(&format!(
+                "[sync] inventory=verified entities={} revision={}",
+                local.len(),
+                inventory.revision
+            ));
+            break;
         }
+
+        crate::log(&format!(
+            "[sync] inventory=mismatch pass={} local_count={} server_count={} revision={}",
+            reconcile_pass + 1,
+            local.len(),
+            inventory.entity_count,
+            inventory.revision
+        ));
+        if reconcile_pass == 3 {
+            break;
+        }
+        let manifest = local
+            .iter()
+            .map(SyncManifestEntry::from)
+            .collect::<Vec<_>>();
+        let reconcile_body = serde_json::json!({
+            "schema_version": 2,
+            "manifest": manifest,
+        });
+        let reconcile: SyncReconcileResponse =
+            sync_request_with_retry_delays("reconcile", task, retry_delays_ms, || {
+                agent
+                    .post(&format!("{base}/sync/reconcile"))
+                    .header("Authorization", &format!("Bearer {}", settings.token))
+                    .header("Content-Type", "application/json")
+                    .send_json(reconcile_body.clone())?
+                    .body_mut()
+                    .read_json()
+            })?;
+        push_server_time = push_server_time.max(reconcile.server_time);
+
+        if !reconcile.entities.is_empty() {
+            data_migration::merge_pulled_book_states(state, &reconcile.entities)?;
+            pulled =
+                pulled.saturating_add(u32::try_from(reconcile.entities.len()).unwrap_or(u32::MAX));
+            let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+            let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+            let _ = db.import_reconciled_sync_entities(&scope, &reconcile.entities)?;
+            drop(db_guard);
+            data_migration::apply_sqlite_to_runtime(state)?;
+            data_migration::migrate_json_to_sqlite(state)?;
+        }
+
+        let upload_keys = reconcile
+            .upload
+            .into_iter()
+            .map(|item| (item.kind, item.id))
+            .collect::<HashSet<_>>();
+        if !upload_keys.is_empty() {
+            let local_by_key = {
+                let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+                let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+                db.all_sync_entities()?
+                    .into_iter()
+                    .map(|entity| ((entity.kind.clone(), entity.id.clone()), entity))
+                    .collect::<HashMap<_, _>>()
+            };
+            let missing_local = upload_keys
+                .iter()
+                .filter(|key| !local_by_key.contains_key(*key))
+                .collect::<Vec<_>>();
+            if !missing_local.is_empty() {
+                return Err("服务器请求补传的实体已不在本地，请重新同步".into());
+            }
+            let repair_entities = upload_keys
+                .iter()
+                .filter_map(|key| local_by_key.get(key).cloned())
+                .collect::<Vec<_>>();
+            let repair = push_sync_entities(
+                state,
+                task,
+                retry_delays_ms,
+                &agent,
+                &base,
+                &settings.token,
+                &device_id,
+                &scope,
+                &repair_entities,
+                pulled as usize + pushed,
+            )?;
+            pushed += repair.pushed;
+            accepted += repair.accepted;
+            ignored += repair.ignored;
+            push_server_time = push_server_time.max(repair.server_time);
+        }
+    }
+    if !inventory_verified {
+        return Err("同步后本地与服务器库存仍不一致，已停止并保留未确认状态".into());
     }
 
     let server_time = {
@@ -1031,10 +1267,17 @@ fn sync_now_inner_with_limits(
     state: &AppState,
     request_timeout: Duration,
     max_pull_pages: usize,
+    retry_delays_ms: &[u64],
     task: Option<&TaskRunGuard>,
 ) -> Result<SyncReport, String> {
     let started = Instant::now();
-    let result = sync_now_inner_with_limits_impl(state, request_timeout, max_pull_pages, task);
+    let result = sync_now_inner_with_limits_impl(
+        state,
+        request_timeout,
+        max_pull_pages,
+        retry_delays_ms,
+        task,
+    );
     crate::diagnostics::record_sync_stage(
         "sync_total",
         u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1044,7 +1287,13 @@ fn sync_now_inner_with_limits(
 }
 
 fn sync_now_inner(state: &AppState, task: Option<&TaskRunGuard>) -> Result<SyncReport, String> {
-    sync_now_inner_with_limits(state, SYNC_REQUEST_TIMEOUT, MAX_SYNC_PULL_PAGES, task)
+    sync_now_inner_with_limits(
+        state,
+        SYNC_REQUEST_TIMEOUT,
+        MAX_SYNC_PULL_PAGES,
+        SYNC_RETRY_DELAYS_MS,
+        task,
+    )
 }
 
 /// Whether this device has a complete saved login. The token stays in Rust and
@@ -1098,6 +1347,7 @@ pub(crate) fn spawn_sync_before_exit(app: tauri::AppHandle) -> Result<(), String
                 state.inner(),
                 EXIT_SYNC_REQUEST_TIMEOUT,
                 EXIT_SYNC_MAX_PULL_PAGES,
+                EXIT_SYNC_RETRY_DELAYS_MS,
                 Some(&task),
             )
         };
@@ -1209,6 +1459,42 @@ mod tests {
         assert!(normalize_sync_base("http://example.com").is_err());
         assert!(normalize_sync_base("ftp://example.com").is_err());
         assert!(normalize_sync_base("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn inventory_digest_matches_server_binary_format() {
+        let entities = vec![
+            db::SyncEntity {
+                kind: "vocab".into(),
+                id: "zh:词".into(),
+                json: serde_json::json!({}),
+                updated_at: 1_700_000_000_100,
+                deleted_at: 1_700_000_000_200,
+                device_id: "device-b".into(),
+                sync_version: 7,
+            },
+            db::SyncEntity {
+                kind: "book_state_v2".into(),
+                id: "书-1".into(),
+                json: serde_json::json!({}),
+                updated_at: 1_700_000_000_000,
+                deleted_at: 0,
+                device_id: "device-a".into(),
+                sync_version: 3,
+            },
+        ];
+        assert_eq!(
+            sync_inventory_digest(&entities),
+            "5b47a5b8875ddb2d9cf9fc65c7698eaa3de450ccb547b84a11f2f688fa41c267"
+        );
+        let inventory = SyncInventoryResponse {
+            server_time: 0,
+            entity_count: 2,
+            inventory_digest: "5b47a5b8875ddb2d9cf9fc65c7698eaa3de450ccb547b84a11f2f688fa41c267"
+                .into(),
+            revision: "10".into(),
+        };
+        assert!(inventory_matches(&entities, &inventory));
     }
 
     #[test]
@@ -1381,6 +1667,25 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.contains("401"));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn exit_sync_uses_one_short_network_attempt() {
+        assert_eq!(EXIT_SYNC_REQUEST_TIMEOUT, Duration::from_secs(1));
+        assert!(EXIT_SYNC_RETRY_DELAYS_MS.is_empty());
+        let mut attempts = 0usize;
+        let error = sync_request_with_retry_delays::<()>(
+            "exit-test",
+            None,
+            EXIT_SYNC_RETRY_DELAYS_MS,
+            || {
+                attempts += 1;
+                Err(ureq::Error::HostNotFound)
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("exit-test"));
         assert_eq!(attempts, 1);
     }
 

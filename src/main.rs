@@ -17,6 +17,7 @@ mod dict;
 mod epub_runtime;
 mod epub_toc;
 mod external_dict;
+mod feedback;
 mod hownet;
 mod html_sanitize;
 mod import;
@@ -25,6 +26,7 @@ mod library_commands;
 mod memory_budget;
 mod pdf_support;
 mod reader_commands;
+mod reader_fonts;
 mod reader_page;
 mod reader_protocol;
 mod runtime_support;
@@ -38,8 +40,10 @@ mod semantic_core;
 mod semantic_tasks;
 mod startup;
 mod stats;
+#[cfg(test)]
 mod stats_core;
 mod sync;
+#[cfg(test)]
 mod sync_core;
 mod text_chapters;
 mod translate;
@@ -70,6 +74,10 @@ type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
 
 pub(crate) struct AppState {
     pub(crate) background_tasks: background_tasks::BackgroundTaskRegistry,
+    /// Guards for work whose actual chunks run in a reader webview.  Keeping
+    /// the guard here gives page measurement the same durable lifecycle as
+    /// native background work without moving browser layout work to Rust.
+    pub(crate) page_count_tasks: Mutex<HashMap<u64, background_tasks::TaskRunGuard>>,
     pub(crate) library: Mutex<Library>,
     pub(crate) db: Mutex<Option<db::AppDb>>,
     epub_runtime: epub_runtime::EpubRuntime,
@@ -209,6 +217,7 @@ fn main() {
         .manage(startup::StartupBookPaths::new(startup_book_paths))
         .manage(AppState {
             background_tasks: background_tasks::BackgroundTaskRegistry::new_persistent_default(),
+            page_count_tasks: Mutex::new(HashMap::new()),
             library: Mutex::new(Library::load()),
             db: Mutex::new(startup_database),
             epub_runtime: epub_runtime::EpubRuntime::default(),
@@ -279,6 +288,11 @@ fn main() {
                             let mut lib = st.library.lock().unwrap();
                             lib.main_geom =
                                 Some(window_commands::capture_geom(lib.main_geom.clone(), &w));
+                            // Make closing feel immediate. Durable local saves and the bounded
+                            // exit sync may continue briefly after the window has disappeared.
+                            // If the sync cannot finish, its dirty entities remain queued for
+                            // the next startup.
+                            let _ = w.hide();
                             report_save_error("书架", lib.save());
                             report_save_error("统计", st.stats.lock().unwrap().save());
                             drop(lib);
@@ -321,9 +335,12 @@ fn main() {
             window_commands::main_window_close,
             window_commands::main_window_start_dragging,
             library_commands::list_books,
+            library_commands::book_file_sizes,
             library_commands::set_book_organization,
             library_commands::rename_book_organization,
             library_commands::delete_book_organization,
+            library_commands::list_booklists,
+            library_commands::update_booklist,
             library_commands::library_health,
             library_commands::maintain_search_index,
             library_commands::merge_duplicate_books,
@@ -347,6 +364,7 @@ fn main() {
             app_commands::translation_credential_status,
             app_commands::save_translation_credential,
             app_commands::translate_text,
+            feedback::submit_feedback,
             ai_reader::ai_reader_status,
             ai_reader::save_ai_reader_config,
             ai_reader::ask_reading_assistant,
@@ -383,6 +401,8 @@ fn main() {
             app_commands::reader_perf_log,
             reader_commands::book_meta,
             reader_commands::book_meta_by_id,
+            reader_fonts::reader_font_status,
+            reader_fonts::download_reader_font,
             library_commands::compute_word_counts,
             library_commands::set_progress,
             reader_commands::add_bookmark,
@@ -403,6 +423,8 @@ fn main() {
             tts::pause_word_tts_pack,
             pdf_support::get_page_cache,
             pdf_support::save_page_cache,
+            pdf_support::begin_page_count_task,
+            pdf_support::report_page_count_task,
             pdf_support::get_pdf_state,
             pdf_support::set_pdf_state,
             epub_runtime::search_book,

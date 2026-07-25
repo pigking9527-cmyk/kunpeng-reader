@@ -158,6 +158,9 @@
       .info-row.col { flex-direction: column; gap: 5px; }
       .info-k { color: #888; flex: 0 0 48px; }
       .info-v { color: #222; word-break: break-word; }
+      .info-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+      .info-chip { padding: 3px 9px; border-radius: 999px; background: #edf3ff; color: #315f9e; font-size: 12px; }
+      .info-chip.empty { background: transparent; color: #999; padding-left: 0; }
       .stars { display: inline-flex; gap: 4px; cursor: pointer; }
       .stars .star { position: relative; width: 1em; height: 1em; font-size: 20px; line-height: 1; user-select: none; }
       .stars .s-bg { color: #d4d4d8; }
@@ -396,6 +399,10 @@
       /* WKWebView 会按最长选项保留 select 的固有宽度；width:0 让它真正按
          剩余空间收缩，Windows WebView2 中的尺寸保持不变。 */
       .settings select { flex: 1 1 0; width: 0; min-width: 0; max-width: 100%; font: inherit; padding: 2px; }
+      .settings .reader-font-download-row { margin-top: -4px; align-items: flex-start; }
+      .reader-font-download-row[hidden] { display: none; }
+      .reader-font-download-status { flex: 1 1 auto; min-width: 0; color: #777; font-size: 12px; line-height: 1.45; }
+      .reader-font-download-action { flex: 0 0 auto; padding: 3px 9px; }
       .settings .margins { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-top: 4px; }
       .settings .margins label { display: flex; align-items: center; gap: 4px; }
       .settings .margins input { width: 56px; font: inherit; }
@@ -437,6 +444,13 @@
            transition 并保持最终帧，可避免“正常滑完后又快速滑一次”。 */
         transition: none;
         animation: settings-switch-auto-off 0.24s cubic-bezier(0.4, 0, 0.2, 1) both;
+      }
+      body.anim-reading-mode-off .settings-slider,
+      body.anim-reading-mode-off .settings-slider::before {
+        transition: none;
+      }
+      body.anim-reading-mode-off .settings-switch.auto-off .settings-slider::before {
+        animation: none;
       }
       :root { --ai-reader-width: clamp(320px, 29vw, 420px); }
       body.ai-reader-open #frame { width: calc(100% - var(--ai-reader-width)); }
@@ -520,6 +534,17 @@
       body.theme-dark .info-k { color: #999; }
       body.theme-dark .info-v, body.theme-dark .info-desc { color: #ddd; }
       body.theme-dark .info-row { border-color: #3a3a3d; }
+      .reader-end-card { width: min(760px, calc(100vw - 48px)); max-height: min(760px, calc(100vh - 64px)); display: flex; flex-direction: column; }
+      .reader-end-intro { color: #777; font-size: 13px; margin: 0 0 12px; }
+      .reader-end-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
+      .reader-end-item { display: grid; grid-template-columns: 58px 1fr; gap: 12px; align-items: center; border: 1px solid #e5e8ef; border-radius: 9px; background: transparent; color: inherit; padding: 9px; text-align: left; cursor: pointer; font: inherit; }
+      .reader-end-item:hover { border-color: #9fbcf4; background: rgba(73,126,220,.07); }
+      .reader-end-cover { width: 58px; height: 80px; border-radius: 6px; overflow: hidden; background: #e8ebf1; display: flex; align-items: center; justify-content: center; font-size: 10px; text-align: center; }
+      .reader-end-cover img { width: 100%; height: 100%; object-fit: contain; }
+      .reader-end-title { font-weight: 600; margin-bottom: 4px; }
+      .reader-end-meta { color: #7a8494; font-size: 12px; }
+      .reader-end-desc { color: #555; font-size: 12px; line-height: 1.55; margin-top: 7px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .reader-end-empty { color: #888; text-align: center; padding: 26px 10px; }
 
       /* 书签下拉 */
       .bm-wrap { position: relative; display: inline-flex; }
@@ -622,6 +647,16 @@
         border: 1px solid #ccc; background: #fff; cursor: pointer; }
       .anno-edit-actions .save { background: #2b6cff; color: #fff; border-color: #2b6cff; }
       .anno-item.target { background: #fff7d6; border-radius: 8px; padding-left: 8px; padding-right: 8px; }
+      @keyframes annotation-item-added {
+        from { opacity: 0.25; transform: translateY(12px) scale(0.985); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
+      .anno-item.target.annotation-added {
+        animation: annotation-item-added .32s cubic-bezier(.2,.8,.2,1) both;
+      }
+      body.anim-annotation-add-off .anno-item.target.annotation-added {
+        animation: none;
+      }
       body.theme-dark .anno-ctx { background: #34301f; color: #ddd; }
       body.theme-dark .anno-note-view { background: #23304a; color: #cfe0ff; }
       body.theme-dark .anno-note { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
@@ -670,9 +705,17 @@
           <option value="'SimSun',serif">宋体</option>
           <option value="'SimHei',sans-serif">黑体</option>
           <option value="'KaiTi',serif">楷体</option>
+          <option value="'Kunpeng LXGW WenKai Lite','Microsoft YaHei',sans-serif" data-reader-font-id="lxgw-wenkai-lite" data-reader-font-label="霞鹜文楷 Lite">霞鹜文楷 Lite（需下载）</option>
+          <option value="'Kunpeng Source Han Serif SC','SimSun',serif" data-reader-font-id="source-han-serif-sc" data-reader-font-label="思源宋体">思源宋体（需下载）</option>
+          <option value="'Kunpeng Zhuque Fangsong','FangSong','SimSun',serif" data-reader-font-id="zhuque-fangsong" data-reader-font-label="朱雀仿宋">朱雀仿宋（需下载）</option>
           <option value="serif">衬线</option>
           <option value="sans-serif">无衬线</option>
         </select>
+      </div>
+      <div class="row reader-font-download-row" id="reader-font-download-row" hidden>
+        <label></label>
+        <span class="reader-font-download-status" id="reader-font-download-status"></span>
+        <button class="reader-font-download-action" id="reader-font-download-action" type="button">下载</button>
       </div>
       <div class="row">
         <label>样式</label>
@@ -861,7 +904,19 @@
         <div class="info-row"><span class="info-k">字数</span><span id="info-words" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">大小</span><span id="info-size" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">评分</span><span id="info-stars" class="stars" title="点击打分，再点同一颗清除"></span></div>
+        <div class="info-row"><span class="info-k">标签</span><span id="info-tags" class="info-v info-chips"></span></div>
+        <div class="info-row"><span class="info-k">书单</span><span id="info-collections" class="info-v info-chips"></span></div>
         <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="info-desc" class="info-desc" contenteditable="true"></div></div>
+      </div>
+    </div>
+    <div id="reader-end-modal" class="modal">
+      <div class="modal-card reader-end-card">
+        <div class="modal-head">
+          <span>读完了 · 接下来读什么</span>
+          <button id="reader-end-close" class="tbtn">✕</button>
+        </div>
+        <p class="reader-end-intro">根据正文语义为你挑选五本相似图书。</p>
+        <div id="reader-end-list" class="reader-end-list"></div>
       </div>
     </div>
     <div id="anno-modal" class="modal">
@@ -891,6 +946,7 @@
     <script src="reader-message.js"></script>
     <script src="reader-shell-state.js"></script>
     <script src="reader-search-ui.js"></script>
+    <script src="animation-settings.js"></script>
     <script src="reader-settings-ui.js"></script>
     <script src="reader.js"></script>
     <script src="reader-notes-ui.js"></script>
