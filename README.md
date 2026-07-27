@@ -23,6 +23,11 @@
 - **跨书搜索**：阅读页划词菜单可直接跨全书架（包含当前书）搜索选中文字或句子，按书分组展示结果，支持折叠、分批展开和跳回来源书页
 - **划词翻译**：阅读页划词菜单支持翻译大段文字，预留并接入 DeepL / Google / 百度 / 腾讯翻译配置，用户可自行填写 API 凭据
 
+**Android v1.9.5 首版**
+- **书架与导入**：账号、搜索、统计、筛选与布局、设置、更多六个一级入口；支持系统文件选择导入 EPUB / TXT、Download 自动导入、批量导入及封面墙阅读进度显示
+- **阅读与 EPUB 兼容**：后台解析与缓存改善大书打开；兼容 EPUB 封面/正文图片、章节头图与脚注；支持滚动、整页左右翻页、点击翻页和长按自定义划词菜单
+- **划词工具**：高亮、批注、书签、词典、翻译与 Web 搜索；菜单会随选区空间显示在上方或下方，并支持多彩高亮
+
 **检索**
 - **书架全文检索**：压缩逐章文本索引 + Bloom 预筛选 + 有界 LRU 缓存 + 多线程字节级 `memmem`；保留精确扫描兜底，兼顾速度与结果完整性
 - **语义检索**：`bge-small-zh-v1.5`（fastembed / ONNX，离线）向量嵌入；合并多中心画像 + 分片 HNSW 近邻索引，兼容并自动迁移旧版语义画像/HNSW；主设置页可管理模型、语义索引和加速索引
@@ -81,4 +86,4 @@ cargo tauri build
 
 ## 技术栈
 
-桌面：Rust · Tauri 2 · WebView2 / WKWebView · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`）。
+桌面：Rust · Tauri 2 · WebView2 / WKWebView · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`；v1.9.5 发布书架、导入、阅读和划词工具首版）。
