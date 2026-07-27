@@ -56,6 +56,17 @@ test("large chapters use batched geometry and skip repeated exact layout", () =>
   );
 });
 
+test("macOS preserves reader line height and clips only an incomplete next line", () => {
+  const pagination = fs.readFileSync(path.join(__dirname, "..", "reader-page-pagination.js"), "utf8");
+  assert.doesNotMatch(source, /function effectiveLineHeight\(/);
+  assert.match(source, /line-height:'\+S\.lineHeight/);
+  assert.match(source, /if\(IS_MAC_WEBKIT\)\{[\s\S]*?var macBlank=currentScrollPageClipBlank\(\)/);
+  assert.match(source, /root\.style\.overflow=''/);
+  assert.match(pagination, /return \{top:top,bottom:bottom,left:pl\.l,right:pl\.r,height:usable\}/);
+  assert.match(pagination, /function pagedBoxHeight\(\)\{\s*return viewportHeight\(\)/);
+  assert.doesNotMatch(pagination, /whole=Math\.max\(1,whole-1\)/);
+});
+
 test("paged image preview is limited to the page immediately before the stable original", () => {
   const helper = source.match(/function pagedImageSourcePage\(.*?\n\}/s);
   assert.ok(helper, "paged image source-page helper must remain testable");
