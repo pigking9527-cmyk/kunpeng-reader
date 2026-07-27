@@ -67,6 +67,10 @@ function scrollPageBox(){
   var usable=Math.max(1,raw-top-bottom);
   var lh=lineHeightPx();
   var whole=Math.max(1,Math.floor((usable-1)/lh));
+  // WKWebView 的字形实际边界偶尔会比 CSS 行盒多出 1–2 像素。整页滚动时
+  // 预留一个完整行位，让可见区只在行与行之间结束；这是阅读区本身的下边距，
+  // 不使用遮罩、裁切或覆盖层。
+  if(typeof IS_MAC_WEBKIT!=='undefined'&&IS_MAC_WEBKIT)whole=Math.max(1,whole-1);
   var h=Math.max(1,Math.min(usable,whole*lh));
   bottom=Math.max(0,raw-top-h);
   return {top:top,bottom:bottom,left:pl.l,right:pl.r,height:h};
@@ -77,6 +81,10 @@ function pagedBoxHeight(){
   var usable=Math.max(1,raw-top-bottom);
   var lh=lineHeightPx();
   var whole=Math.max(1,Math.floor((usable-1)/lh));
+  // 大章节在 macOS 上走快速分页路径，不遍历全文做逐行校准。WKWebView 的实际
+  // 字形边界会略高于 CSS 行盒，少留一整行就可能在页底显示半个字；这里直接
+  // 少放一行，让下一行由 CSS 多栏布局自然移入下一页，不使用任何遮挡层。
+  if(typeof IS_MAC_WEBKIT!=='undefined'&&IS_MAC_WEBKIT)whole=Math.max(1,whole-1);
   var h=top+whole*lh+bottom;
   return Math.max(1,Math.min(raw,Math.floor(h)));
 }
