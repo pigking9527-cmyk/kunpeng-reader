@@ -1,0 +1,32 @@
+{
+  "syncProtocolVersion": 1,
+  "entities": [
+    {
+      "id": "progress-book-a",
+      "kind": "reading_progress",
+      "updated_at": "2026-07-27T00:00:00Z",
+      "deleted_at": null,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": { "book_id": "book-a", "chapter": 3, "offset": 1200, "progress": 0.25 }
+    },
+    {
+      "id": "highlight-book-a-1",
+      "kind": "highlight",
+      "updated_at": "2026-07-27T00:01:00Z",
+      "deleted_at": null,
+      "device_id": "fixture-ios",
+      "sync_version": 1,
+      "payload": { "book_id": "book-a", "chapter": 3, "start": 1180, "end": 1220, "color": "yellow" }
+    },
+    {
+      "id": "booklist-history",
+      "kind": "booklist",
+      "updated_at": "2026-07-27T00:02:00Z",
+      "deleted_at": null,
+      "device_id": "fixture-android",
+      "sync_version": 1,
+      "payload": { "name": "历史", "description": "fixture only", "cover_book_id": "book-a" }
+    }
+  ]
+}

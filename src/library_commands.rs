@@ -297,6 +297,38 @@ pub(crate) fn set_book_organization(
     Ok(snapshot(&lib))
 }
 
+/// 批量追加标签或收藏夹。与 set_book_organization 不同，它不会覆盖每本书原有的分类。
+#[tauri::command]
+pub(crate) fn add_books_organization(
+    state: tauri::State<AppState>,
+    ids: Vec<String>,
+    field: String,
+    names: Vec<String>,
+) -> Result<Vec<BookDto>, String> {
+    if !matches!(field.as_str(), "tag" | "collection") {
+        return Err("无效的分类类型".to_string());
+    }
+    let ids = ids
+        .into_iter()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| "无效的图书 ID".to_string())
+        })
+        .collect::<Result<std::collections::HashSet<_>, _>>()?;
+    if ids.is_empty() {
+        return Err("请先选择图书".to_string());
+    }
+    let mut lib = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    if lib.add_organization_to_books(&ids, &field, names) {
+        lib.save()?;
+    }
+    Ok(snapshot(&lib))
+}
+
 /// 重命名全书架范围内的一个标签或收藏夹。
 #[tauri::command]
 pub(crate) fn rename_book_organization(

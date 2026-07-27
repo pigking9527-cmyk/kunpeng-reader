@@ -131,7 +131,7 @@ test("开关智读后按当前视口正文偏移恢复，而不是把高亮文�
   assert.match(layout, /function consumeSideAnchorVirtualPage\(\)[\s\S]*?function nextPage\(\)/);
 });
 
-test("单行高亮菜单跟随鼠标，多行锚定末行，跨页锚定页末部分上方", () => {
+test("高亮菜单按真实高度避让页末：横排和九宫格都完整可见", () => {
   assert.match(annotations, /function visibleHighlightLineRects\(idx,fallbackEl\)/);
   assert.match(annotations, /function nearestHighlightRect\(rects,evt\)/);
   assert.match(annotations, /function highlightLineGroups\(rects\)/);
@@ -140,11 +140,16 @@ test("单行高亮菜单跟随鼠标，多行锚定末行，跨页锚定页末�
   assert.match(annotations, /lines\.length<=1[\s\S]*?nearestHighlightRect\(rects,evt\)/);
   assert.match(annotations, /var last=lines\[0\][\s\S]*?return \{rect:last,above:false\}/);
   assert.match(annotations, /highlightMenuPlacement\(idx,el,evt\)/);
-  assert.match(annotations, /function highlightMenuLeft\(rect,width,evt\)/);
-  assert.match(annotations, /evt&&typeof evt\.clientX==='number'\?evt\.clientX/);
   assert.match(annotations, /addEventListener\('mousemove',[\s\S]*?showHlMenu\(activeHi,false,m,e\)/);
-  assert.match(annotations, /var safe=6,gap=6,aboveTop=rect\.top-mh-gap,belowTop=rect\.bottom\+gap/);
-  assert.match(annotations, /!placement\.above&&belowTop\+mh>window\.innerHeight-safe&&aboveTop>=safe\)top=aboveTop/);
+  assert.match(annotations, /function readerViewportHeight\(\)/);
+  assert.match(annotations, /function placeHighlightMenuVertically\(menu,rect,preferAbove\)/);
+  assert.match(annotations, /Number\(menu&&menu\.offsetHeight\)\|\|34/);
+  assert.match(annotations, /var canAbove=aboveTop>=safe,canBelow=belowTop\+mh<=vh-safe/);
+  assert.match(annotations, /function repositionVisibleHighlightMenu\(menu\)/);
+  assert.match(annotations, /placeHighlightMenuVertically\(menu,rect,!!menu\._menuPreferredAbove\)/);
+  assert.match(annotations, /selMenu\._menuPreferredAbove=false[\s\S]*?repositionVisibleHighlightMenu\(selMenu\)/);
+  assert.match(annotations, /refreshConfiguredMenus\(\)[\s\S]*?repositionVisibleHighlightMenu\(hlMenu\)/);
+  assert.match(annotations, /hlMenu\._menuPreferredAbove=placement\.above[\s\S]*?repositionVisibleHighlightMenu\(hlMenu\)/);
 });
 
 test("returning to the toolbar closes settings left open after a pointer exit", () => {
