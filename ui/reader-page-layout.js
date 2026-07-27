@@ -213,11 +213,9 @@ if(scroller){scroller.style.top='0';scroller.style.bottom='0';scroller.style.lef
   pager.style.height='auto';
   root.style.minHeight='';
   root.style.height=pageH+'px';
-  // WebKit 会把跨越多栏末行的少量字形绘制到 .rr 盒子外，随后才被外层
-  // #pager 截断，视觉上就成了阅读页底部的一条半截文字。裁剪边界必须是
-  // 当前页的正文盒子本身；配合 pagedBoxHeight 的整行安全高度，溢出内容会
-  // 自然进入下一栏/下一页，而不会留下任何遮挡条或半个字。
-  root.style.overflow=IS_MAC_WEBKIT?'hidden':'';
+  // 多栏布局应由浏览器按完整行盒换栏；不要裁剪 .rr 本身，否则 WKWebView
+  // 字形超出行盒的部分会在页底被截成半个字。
+  root.style.overflow='';
   root.style.position='absolute';
   root.style.top='0';
   if(isDualPage()){
@@ -1505,10 +1503,17 @@ function applyScrollPageMask(force){
   clearVirtualPage();
   clearScrollPreview();
   var virtualSlice=activeScrollSliceAtTop(maskTop);
-  // macOS 通过 scrollPageBox 预留完整的原生阅读区下边距，使页面只在行间结束。
-  // 因此不使用任何遮罩、裁切或虚拟页，避免 WKWebView 的切字和空白页问题。
+  // macOS 不重绘虚拟正文，避免克隆行造成右侧切字或重复文字；仅按已测得的
+  // 实际文字行边界裁掉“下一页首行”越过视口的那一小段。这里没有遮罩元素，
+  // 不改变字号、行高、行数或正文位置。
   if(IS_MAC_WEBKIT){
-    if(scroller){scroller.style.clipPath='none';scroller.style.webkitClipPath='none';}
+    var macBlank=currentScrollPageClipBlank();
+    if(scroller&&macBlank>1){
+      scroller.style.clipPath='inset(0px 0px '+macBlank+'px 0px)';
+      scroller.style.webkitClipPath='inset(0px 0px '+macBlank+'px 0px)';
+    }else if(scroller){
+      scroller.style.clipPath='none';scroller.style.webkitClipPath='none';
+    }
     refreshHighlights();
     return;
   }
@@ -2373,7 +2378,15 @@ function showChapter(i,where,frag){
         if(where==='end')pageInCh=pagesInCh-1;else if(typeof where==='number')pageInCh=Math.max(0,Math.min(pagesInCh-1,where));
         if(frag){var el=document.getElementById(frag);if(el)pageInCh=pageOf(el);}
         setViewOffset();refreshHighlights();report();captureAnchor();scheduleNoteNumberDisplayRefresh();
-        reportReaderPaintPerf('chapter_ready',showStarted,'chapter='+i+' bytes='+body.length+' fetch_ms='+(fetchDone-showStarted).toFixed(1));resolve();
+        var rrBox=root.getBoundingClientRect(),pagerBox=pager.getBoundingClientRect(),rrStyle=getComputedStyle(root);
+        reportReaderPaintPerf(
+          'chapter_ready',
+          showStarted,
+          'chapter='+i+' bytes='+body.length+' fetch_ms='+(fetchDone-showStarted).toFixed(1)
+            +' mac_webkit='+(IS_MAC_WEBKIT?1:0)+' font_px='+parseFloat(rrStyle.fontSize).toFixed(1)
+            +' line_px='+parseFloat(rrStyle.lineHeight).toFixed(1)+' viewport_h='+viewportHeight()
+            +' pager_h='+pagerBox.height.toFixed(1)+' root_h='+rrBox.height.toFixed(1)
+        );resolve();
       });});
     });
   }).catch(function(){});
