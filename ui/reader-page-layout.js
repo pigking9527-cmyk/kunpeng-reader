@@ -196,6 +196,7 @@ pager.style.bottom=linePagedViewportBottomGapPx()+'px';
     root.style.width='100%';
     root.style.height='auto';
     root.style.minHeight=Math.max(1,(scrollPort()&&scrollPort().clientHeight)||sb.height)+'px';
+    root.style.overflow='visible';
     root.style.setProperty('--scroll-tail-space',Math.max(1,Math.ceil((scrollPort()&&scrollPort().clientHeight)||sb.height||vh))+'px');
     root.style.columnWidth='auto';
     root.style.columnCount='auto';
@@ -212,6 +213,11 @@ if(scroller){scroller.style.top='0';scroller.style.bottom='0';scroller.style.lef
   pager.style.height='auto';
   root.style.minHeight='';
   root.style.height=pageH+'px';
+  // WebKit 会把跨越多栏末行的少量字形绘制到 .rr 盒子外，随后才被外层
+  // #pager 截断，视觉上就成了阅读页底部的一条半截文字。裁剪边界必须是
+  // 当前页的正文盒子本身；配合 pagedBoxHeight 的整行安全高度，溢出内容会
+  // 自然进入下一栏/下一页，而不会留下任何遮挡条或半个字。
+  root.style.overflow=IS_MAC_WEBKIT?'hidden':'';
   root.style.position='absolute';
   root.style.top='0';
   if(isDualPage()){
@@ -1498,11 +1504,18 @@ function applyScrollPageMask(force){
   }
   clearVirtualPage();
   clearScrollPreview();
+  var virtualSlice=activeScrollSliceAtTop(maskTop);
+  // macOS 通过 scrollPageBox 预留完整的原生阅读区下边距，使页面只在行间结束。
+  // 因此不使用任何遮罩、裁切或虚拟页，避免 WKWebView 的切字和空白页问题。
+  if(IS_MAC_WEBKIT){
+    if(scroller){scroller.style.clipPath='none';scroller.style.webkitClipPath='none';}
+    refreshHighlights();
+    return;
+  }
   // 图片恰好跨越分页底部时，不能在原始滚动正文上叠一张预览图：原书的
   // 浮动/绝对定位图片会让文字继续排在图旁或图下。此时使用分页器已经算好的
   // virtualLayout 重绘本页：只绘制图片前的正文，再把剩余空间交给图片预览。
   // 下一页仍从原图片本身开始，因而会显示完整原图。
-  var virtualSlice=activeScrollSliceAtTop(maskTop);
   var virtualPreview=virtualSlice?scrollPagePreviewCandidate(virtualSlice,maskTop,maskPort?maskPort.clientHeight:0):null;
   if(virtualSlice&&virtualPreview){
     // 图片既可能跨过页底，也可能恰好从下一页起点开始。两种情况都必须使用
