@@ -537,6 +537,10 @@ function updateActionButton(it){
 function refreshConfiguredMenus(){
   applyConfiguredMenu(selMenu,selMenuItems,selMenu&&selMenu._setBtn);
   applyConfiguredMenu(hlMenu,hlMenuItems,hlMenu&&hlMenu._setBtn);
+  // 切换横排/九宫格、字号、显示方式或多彩高亮都会改变菜单尺寸；
+  // 可见菜单必须立即按新尺寸重算，不能沿用切换前的 top。
+  repositionVisibleHighlightMenu(selMenu);
+  repositionVisibleHighlightMenu(hlMenu);
 }
 function readHlMenuConfig(){
   var raw=null;try{raw=JSON.parse(localStorage.getItem(HL_MENU_CFG_KEY)||'null');}catch(_){}
@@ -1107,12 +1111,11 @@ function setupSelMenu(){
     var rect;try{rect=sel.getRangeAt(0).getBoundingClientRect();}catch(_){hideSelMenu();return;}
     if(!rect||(!rect.width&&!rect.height)){hideSelMenu();return;}
     selMenu._anchorRect=rect;
+    selMenu._menuPreferredAbove=false;
+    selMenu._menuPointerX=rect.left+rect.width/2;
     applyConfiguredMenu(selMenu,selMenuItems,selMenu._setBtn);
     selMenu.style.display='block';
-    var mw=selMenu.offsetWidth||100,mh=selMenu.offsetHeight||34;
-    var left=rect.left+rect.width/2-mw/2;left=Math.max(6,Math.min(window.innerWidth-mw-6,left));
-    var top=rect.bottom+8;
-    selMenu.style.left=left+'px';selMenu.style.top=top+'px';
+    repositionVisibleHighlightMenu(selMenu);
   }
   document.addEventListener('mouseup',function(e){
     if(selMenu&&selMenu.contains(e.target))return; // 在选区菜单上松开（如点"高亮"按钮）：保留选区，别清
@@ -1216,10 +1219,46 @@ function highlightMenuPlacement(idx,fallbackEl,evt){
   var last=lines[0];lines.forEach(function(r){if(r.bottom>last.bottom||(r.bottom===last.bottom&&r.right>last.right))last=r;});
   return {rect:last,above:false};
 }
-function highlightMenuLeft(rect,width,evt){
-  // 横向始终以鼠标为中心；纵向仍交给多行/跨页规则，避免菜单盖住末行文字。
-  var x=evt&&typeof evt.clientX==='number'?evt.clientX:rect.left+rect.width/2;
-  return Math.max(6,Math.min(window.innerWidth-width-6,x-width/2));
+function readerViewportHeight(){
+  // iframe 的 innerHeight 偶尔会滞后一帧；以 layout viewport 的较小值为准，
+  // 避免把菜单误判为“下方还有空间”而塞到页末文字里。
+  var inner=Number(window.innerHeight)||0;
+  var client=Number(document.documentElement&&document.documentElement.clientHeight)||0;
+  if(inner&&client)return Math.min(inner,client);
+  return inner||client||800;
+}
+function placeHighlightMenuVertically(menu,rect,preferAbove){
+  var safe=6,gap=6,vh=readerViewportHeight();
+  // 必须在菜单 display:block 后读取。横排、九宫格、多彩高亮的真实高度都不同，
+  // 不能再用固定 34px 估算。
+  var mh=Math.min(Math.max(Number(menu&&menu.offsetHeight)||34,1),Math.max(1,vh-safe*2));
+  var aboveTop=rect.top-mh-gap,belowTop=rect.bottom+gap;
+  var canAbove=aboveTop>=safe,canBelow=belowTop+mh<=vh-safe;
+  var above=!!preferAbove,top;
+  if(preferAbove){
+    if(canAbove){above=true;top=aboveTop;}
+    else if(canBelow){above=false;top=belowTop;}
+  }else{
+    if(canBelow){above=false;top=belowTop;}
+    else if(canAbove){above=true;top=aboveTop;}
+  }
+  // 视口非常矮时两侧都不足：仍完整留在可视区，优先留在空间更多的一侧。
+  if(top===undefined){
+    var roomAbove=Math.max(0,rect.top-safe-gap),roomBelow=Math.max(0,vh-safe-rect.bottom-gap);
+    above=roomAbove>=roomBelow;
+    top=above?aboveTop:belowTop;
+  }
+  top=Math.max(safe,Math.min(vh-mh-safe,top));
+  return {top:top,above:above,height:mh};
+}
+function repositionVisibleHighlightMenu(menu){
+  if(!menu||menu.style.display!=='block'||!menu._anchorRect)return;
+  var rect=menu._anchorRect,mw=menu.offsetWidth||200;
+  var x=typeof menu._menuPointerX==='number'?menu._menuPointerX:rect.left+rect.width/2;
+  var left=Math.max(6,Math.min(window.innerWidth-mw-6,x-mw/2));
+  var vertical=placeHighlightMenuVertically(menu,rect,!!menu._menuPreferredAbove);
+  menu.style.left=left+'px';menu.style.top=vertical.top+'px';
+  menu._menuAbove=vertical.above;
 }
 function showHlMenu(idx,force,anchor,evt){
   if(selActive()&&!force)return;   // 还在选字（如刚高亮完）就不弹，避免和选区菜单同时出现
@@ -1231,16 +1270,9 @@ function showHlMenu(idx,force,anchor,evt){
   hlMenu.style.display='block';
   var placement=highlightMenuPlacement(idx,el,evt),rect=placement.rect;
   hlMenu._anchorRect=rect;
-  var mw=hlMenu.offsetWidth||200,mh=hlMenu.offsetHeight||34;
-  var left=highlightMenuLeft(rect,mw,evt);
-  var safe=6,gap=6,aboveTop=rect.top-mh-gap,belowTop=rect.bottom+gap;
-  var top=placement.above?aboveTop:belowTop;
-  // 页末没有下方空间时必须翻到高亮上方，不能把菜单钳进高亮文字里。
-  if(!placement.above&&belowTop+mh>window.innerHeight-safe&&aboveTop>=safe)top=aboveTop;
-  // 页首跨页高亮若上方不足，则退回下方；随后才做最后的视口边界钳制。
-  if(placement.above&&aboveTop<safe&&belowTop+mh<=window.innerHeight-safe)top=belowTop;
-  top=Math.max(safe,Math.min(window.innerHeight-mh-safe,top));
-  hlMenu.style.left=left+'px';hlMenu.style.top=top+'px';
+  hlMenu._menuPreferredAbove=placement.above;
+  hlMenu._menuPointerX=evt&&typeof evt.clientX==='number'?evt.clientX:rect.left+rect.width/2;
+  repositionVisibleHighlightMenu(hlMenu);
 }
 function setupHlUi(){
   hlMenu=document.createElement('div');hlMenu.id='hl-menu';

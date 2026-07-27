@@ -44,6 +44,17 @@ const organizationFilterClose = document.getElementById("organization-filter-clo
 const organizationFilterCancel = document.getElementById("organization-filter-cancel");
 const organizationFilterClear = document.getElementById("organization-filter-clear");
 const organizationFilterApply = document.getElementById("organization-filter-apply");
+const batchTagButton = document.getElementById("batch-tag-btn");
+const batchCollectionButton = document.getElementById("batch-collection-btn");
+const batchOrganizationModal = document.getElementById("batch-organization-modal");
+const batchOrganizationTitle = document.getElementById("batch-organization-title");
+const batchOrganizationNote = document.getElementById("batch-organization-note");
+const batchOrganizationOptions = document.getElementById("batch-organization-options");
+const batchOrganizationNew = document.getElementById("batch-organization-new");
+const batchOrganizationAdd = document.getElementById("batch-organization-add");
+const batchOrganizationClose = document.getElementById("batch-organization-close");
+const batchOrganizationCancel = document.getElementById("batch-organization-cancel");
+const batchOrganizationApply = document.getElementById("batch-organization-apply");
 const organizerMenu = options.organizerMenuElement || document.getElementById("book-organizer-menu");
 const booklistModal = document.getElementById("booklist-modal");
 const booklistTitle = document.getElementById("booklist-title");
@@ -768,6 +779,125 @@ organizationFilterModal?.addEventListener("click", (event) => {
   if (event.target === organizationFilterModal) closeOrganizationFilter();
 });
 
+// 多选图书时只做“加入”，绝不覆盖或移除各书已有的标签/书单，避免一次误操作清空整理结果。
+let batchOrganizationDraft = null;
+function closeBatchOrganization() {
+  batchOrganizationDraft = null;
+  batchOrganizationModal?.classList?.remove("show");
+}
+function batchOrganizationConfig(field) {
+  return field === "tags"
+    ? { field, title: "标签", action: "添加标签", placeholder: "新建标签" }
+    : { field, title: "收藏书单", action: "加入收藏书单", placeholder: "新建收藏书单" };
+}
+function renderBatchOrganizationOptions() {
+  if (!batchOrganizationOptions || !batchOrganizationDraft) return;
+  const config = batchOrganizationConfig(batchOrganizationDraft.field);
+  batchOrganizationOptions.replaceChildren();
+  const entries = organizationEntries(config.field);
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "organization-filter-empty";
+    empty.textContent = "还没有" + config.title + "，可在下方新建。";
+    batchOrganizationOptions.appendChild(empty);
+  }
+  entries.forEach((entry) => {
+    const label = document.createElement("label");
+    label.className = "organization-filter-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = batchOrganizationDraft.names.has(entry.key);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) batchOrganizationDraft.names.set(entry.key, entry.name);
+      else batchOrganizationDraft.names.delete(entry.key);
+    });
+    const name = document.createElement("span");
+    name.textContent = entry.name;
+    label.append(checkbox, name);
+    batchOrganizationOptions.appendChild(label);
+  });
+  // 新建但尚未用于其它图书的名称也要在当前草稿中可见。
+  Array.from(batchOrganizationDraft.names.entries()).forEach(([key, name]) => {
+    if (entries.some((entry) => entry.key === key)) return;
+    const label = document.createElement("label");
+    label.className = "organization-filter-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = true;
+    checkbox.addEventListener("change", () => {
+      if (!checkbox.checked) batchOrganizationDraft.names.delete(key);
+    });
+    const text = document.createElement("span");
+    text.textContent = name;
+    label.append(checkbox, text);
+    batchOrganizationOptions.appendChild(label);
+  });
+}
+function openBatchOrganization(field) {
+  if (!selected.size || !batchOrganizationModal) return;
+  const config = batchOrganizationConfig(field);
+  batchOrganizationDraft = { field, names: new Map() };
+  batchOrganizationTitle.textContent = "为已选 " + selected.size + " 本图书" + config.action;
+  batchOrganizationNote.textContent = "可多选；确认后会加入全部已选图书，不会移除它们原有的标签或书单。";
+  batchOrganizationNew.value = "";
+  batchOrganizationNew.placeholder = config.placeholder;
+  renderBatchOrganizationOptions();
+  batchOrganizationModal.classList.add("show");
+}
+function addBatchOrganizationName() {
+  if (!batchOrganizationDraft) return;
+  const name = organizationName(batchOrganizationNew?.value);
+  if (!name) return;
+  batchOrganizationDraft.names.set(organizationKey(name), name);
+  batchOrganizationNew.value = "";
+  renderBatchOrganizationOptions();
+}
+function organizationAlreadyAssigned(book, field, names) {
+  if (!book || !Array.isArray(names) || !names.length) return false;
+  const wanted = new Set(names.map(organizationKey).filter(Boolean));
+  return (book[field] || []).some((value) => wanted.has(organizationKey(value)));
+}
+function alreadyAssignedMessages(ids, field, names) {
+  const kind = field === "tags" ? "标签" : "收藏";
+  return ids
+    .map((id) => getBook(id))
+    .filter((book) => organizationAlreadyAssigned(book, field, names))
+    .map((book) => "《" + (book.title || "未命名图书") + "》已加入" + kind);
+}
+async function applyBatchOrganization() {
+  if (!batchOrganizationDraft || !selected.size) return;
+  const names = Array.from(batchOrganizationDraft.names.values());
+  if (!names.length) {
+    alertAction("请至少选择或新建一个" + batchOrganizationConfig(batchOrganizationDraft.field).title + "。");
+    return;
+  }
+  const ids = Array.from(selected);
+  const organizationField = batchOrganizationDraft.field;
+  const field = organizationField === "tags" ? "tag" : "collection";
+  // 写入前保存重复成员关系。后端依然会做去重，前端仅负责把用户关心的状态说明出来。
+  const existingMessages = alreadyAssignedMessages(ids, organizationField, names);
+  try {
+    const list = await invoke("add_books_organization", { ids, field, names });
+    closeBatchOrganization();
+    render(list);
+    if (existingMessages.length) alertAction(existingMessages.join("\n"));
+  } catch (error) {
+    alertAction("批量加入失败：" + error);
+  }
+}
+batchTagButton?.addEventListener("click", () => openBatchOrganization("tags"));
+batchCollectionButton?.addEventListener("click", () => openBatchOrganization("collections"));
+batchOrganizationClose?.addEventListener("click", closeBatchOrganization);
+batchOrganizationCancel?.addEventListener("click", closeBatchOrganization);
+batchOrganizationAdd?.addEventListener("click", addBatchOrganizationName);
+batchOrganizationNew?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); addBatchOrganizationName(); }
+});
+batchOrganizationApply?.addEventListener("click", applyBatchOrganization);
+batchOrganizationModal?.addEventListener("click", (event) => {
+  if (event.target === batchOrganizationModal) closeBatchOrganization();
+});
+
 let organizerBookId = null;
 function booklistBook(id) {
   return books.find((book) => String(book.id) === String(id));
@@ -1057,6 +1187,10 @@ function appendOrganizationSection(menu, book, field, heading, addPlaceholder) {
   const addValue = () => {
     const name = organizationName(input.value);
     if (!name) return;
+    if (organizationAlreadyAssigned(book, field, [name])) {
+      alertAction("《" + (book.title || "未命名图书") + "》已加入" + (field === "tags" ? "标签" : "收藏"));
+      return;
+    }
     const entry = { name, key: organizationKey(name) };
     const values = applyOrganizationChoice(book, field, entry, true);
     saveBookOrganization(book, field === "tags" ? values : (book.tags || []), field === "collections" ? values : (book.collections || []));

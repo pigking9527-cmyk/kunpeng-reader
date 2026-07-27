@@ -58,6 +58,8 @@
 
       <div id="del-group" class="del-group">
         <button id="book-info-btn" class="btn-plain">图书信息</button>
+        <button id="batch-tag-btn" class="btn-plain">标签</button>
+        <button id="batch-collection-btn" class="btn-plain">加入收藏书单</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
         <button id="del-cancel" class="btn-plain">取消</button>
       </div>
@@ -567,6 +569,22 @@
           <span></span>
           <button id="organization-filter-cancel" class="btn-plain">取消</button>
           <button id="organization-filter-apply" class="btn-primary">确定</button>
+        </div>
+      </div>
+    </div>
+    <div id="batch-organization-modal" class="modal">
+      <div class="modal-card batch-organization-card">
+        <div class="modal-head"><span id="batch-organization-title">为已选图书添加标签</span><button id="batch-organization-close" class="btn-plain">✕</button></div>
+        <p id="batch-organization-note" class="organization-filter-note">可多选；确认后会加入全部已选图书，不会移除它们原有的标签或书单。</p>
+        <div id="batch-organization-options" class="organization-filter-options"></div>
+        <div class="org-create batch-organization-create">
+          <input id="batch-organization-new" type="text" maxlength="32" placeholder="新建标签" />
+          <button id="batch-organization-add" class="org-add" type="button">新建并加入</button>
+        </div>
+        <div class="organization-filter-actions">
+          <span></span><span></span>
+          <button id="batch-organization-cancel" class="btn-plain" type="button">取消</button>
+          <button id="batch-organization-apply" class="btn-plain" type="button">加入</button>
         </div>
       </div>
     </div>

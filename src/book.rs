@@ -400,6 +400,45 @@ impl Library {
         changed
     }
 
+    /// 为多本图书追加标签或收藏夹。此操作只增加成员关系，不会覆盖已有分类，
+    /// 因而适合书架的批量“添加标签 / 加入收藏书单”。
+    pub fn add_organization_to_books(
+        &mut self,
+        ids: &HashSet<u64>,
+        kind: &str,
+        names: Vec<String>,
+    ) -> bool {
+        if ids.is_empty() || !matches!(kind, "tag" | "collection") {
+            return false;
+        }
+        let names = normalize_organization_names(names);
+        if names.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for book in &mut self.books {
+            if !ids.contains(&book.id) {
+                continue;
+            }
+            let values = if kind == "tag" {
+                &mut book.tags
+            } else {
+                &mut book.collections
+            };
+            let mut next = values.clone();
+            next.extend(names.iter().cloned());
+            let next = normalize_organization_names(next);
+            if *values != next {
+                *values = next;
+                changed = true;
+            }
+        }
+        if changed && kind == "collection" {
+            self.reconcile_booklists();
+        }
+        changed
+    }
+
     /// 管理全书架范围内的一个标签或收藏夹：重命名时同时更新所有关联图书。
     pub fn rename_organization(&mut self, kind: &str, from: &str, to: String) -> bool {
         let from = organization_name_key(from);
@@ -1419,6 +1458,33 @@ mod tests {
         assert!(lib.rename_organization("collection", "明清", "明清史".into()));
         assert_eq!(lib.booklists[0].name, "明清史");
         assert_eq!(lib.booklists[0].book_order, vec![202, 101]);
+    }
+
+    #[test]
+    fn batch_organization_adds_without_overwriting_existing_values() {
+        let dir = TempDir::new("batch-organization");
+        let mut first = Book::prepare(dir.file("first.txt", "第一本"));
+        let mut second = Book::prepare(dir.file("second.txt", "第二本"));
+        first.id = 101;
+        second.id = 202;
+        let mut lib = Library {
+            books: vec![first, second],
+            ..Default::default()
+        };
+        assert!(lib.set_organization(101, vec!["古文".into()], vec!["已读".into()]));
+        assert!(lib.set_organization(202, vec!["历史".into()], Vec::new()));
+
+        let ids = [101, 202]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        assert!(lib.add_organization_to_books(&ids, "tag", vec!["历史".into(), "军事".into()]));
+        assert_eq!(lib.get(101).unwrap().tags, vec!["古文", "历史", "军事"]);
+        assert_eq!(lib.get(202).unwrap().tags, vec!["历史", "军事"]);
+
+        assert!(lib.add_organization_to_books(&ids, "collection", vec!["专题".into()]));
+        assert_eq!(lib.get(101).unwrap().collections, vec!["已读", "专题"]);
+        assert_eq!(lib.get(202).unwrap().collections, vec!["专题"]);
+        assert_eq!(lib.booklists.len(), 2);
     }
 
     #[test]

@@ -337,6 +337,7 @@ fn main() {
             library_commands::list_books,
             library_commands::book_file_sizes,
             library_commands::set_book_organization,
+            library_commands::add_books_organization,
             library_commands::rename_book_organization,
             library_commands::delete_book_organization,
             library_commands::list_booklists,
