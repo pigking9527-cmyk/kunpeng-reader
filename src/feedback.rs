@@ -115,7 +115,7 @@ mod tests {
         FeedbackRequest {
             kind: "bug".to_string(),
             text: "窗口异常".to_string(),
-            app_version: "1.9.4".to_string(),
+            app_version: "1.9.5".to_string(),
             platform: "test".to_string(),
             images: vec![],
         }

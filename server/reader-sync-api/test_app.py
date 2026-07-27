@@ -84,7 +84,7 @@ class ReaderSyncApiTests(unittest.TestCase):
                 "kind": "feature",
                 "text": "希望增加阅读计划",
                 "images": [],
-                "appVersion": "1.9.4",
+                "appVersion": "1.9.5",
                 "platform": "test",
             }
         )
