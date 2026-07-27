@@ -400,19 +400,6 @@ function computedLineStyleForElement(el,cache){
 function sameLineKey(a,b){
   return Math.abs(a-b)<2;
 }
-function primaryCharacterRect(rects){
-  if(!rects||!rects.length)return null;
-  var best=null,bestScore=-1;
-  for(var i=0;i<rects.length;i++){
-    var r=rects[i];
-    if(!r||r.height<3)continue;
-    var score=Math.max(0,r.width)*r.height;
-    // 行尾换行字符在 WKWebView 中可能同时返回“上一行零宽占位矩形”和
-    // “下一行真实字形矩形”。每个字符只能采用面积最大的那个矩形。
-    if(score>bestScore){best=r;bestScore=score;}
-  }
-  return best;
-}
 function closestInlineNoteElement(node){
   var el=node&&node.nodeType===1?node:(node&&node.parentElement);
   if(!el||!root)return null;
@@ -551,66 +538,6 @@ function documentTextLineRects(){
     out[j].fragments.sort(function(a,b){return a.top-b.top||a.left-b.left;});
   }
   return out;
-}
-// 大章节的全章分页只测量文本节点的整行矩形，避免 WKWebView 逐字扫描卡顿。
-// 真正显示某一页时，只对与该页相交的文本节点做逐字测量，既保留快速打开，
-// 又能构造不含下一页首行的完整文字图层。
-function exactTextLineItemsForBand(bandTop,bandBottom){
-  if(!root||!pager)return [];
-  var pr=viewRect(),sp=scrollPort(),scrollTop=sp?sp.scrollTop||0:0;
-  var linesByKey={},keys=[],styleCache=new WeakMap();
-  var walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null),node,range=document.createRange(),docPos=0;
-  var extra=Math.max(4,lineHeightPx()*0.25);
-  while((node=walker.nextNode())){
-    var text=node.nodeValue||'';
-    var parent=node.parentElement;
-    if(!parent||generatedTextNode(node)||closestInlineNoteElement(node))continue;
-    var nodeStart=docPos;docPos+=text.length;
-    if(!text.trim())continue;
-    var pcs=window.getComputedStyle(parent);
-    if(pcs.display==='none'||pcs.visibility==='hidden')continue;
-    var nodeVisible=false;
-    try{
-      range.selectNodeContents(node);
-      var nodeRects=range.getClientRects();
-      for(var nri=0;nri<nodeRects.length;nri++){
-        var nr=nodeRects[nri],nt=nr.top-pr.top+scrollTop,nb=nr.bottom-pr.top+scrollTop;
-        if(nb>=bandTop-extra&&nt<=bandBottom+extra){nodeVisible=true;break;}
-      }
-    }catch(_){nodeVisible=false;}
-    if(!nodeVisible)continue;
-    var style=computedLineStyleForNode(node,styleCache);
-    for(var i=0;i<text.length;i++){
-      var ch=text.charAt(i);
-      if(ch==='\r'||ch==='\n'||ch==='\t')continue;
-      try{range.setStart(node,i);range.setEnd(node,i+1);}catch(e){continue;}
-      var rects=range.getClientRects();
-      if(!rects||!rects.length)continue;
-      var r=primaryCharacterRect(rects);
-      if(!r)continue;
-      var top=r.top-pr.top+scrollTop,bottom=r.bottom-pr.top+scrollTop;
-      if(bottom<bandTop-extra||top>bandBottom+extra||r.width<0.1&&!ch.trim())continue;
-      appendMeasuredCharLine(linesByKey,keys,node,ch,r,pr,scrollTop,style,nodeStart+i);
-    }
-  }
-  var noteEls=root.querySelectorAll('.rr-note-ref,a,sup,sub,span'),seenNotes=new WeakSet();
-  for(var ne=0;ne<noteEls.length;ne++){
-    var noteEl=closestInlineNoteElement(noteEls[ne]);
-    if(!noteEl||seenNotes.has(noteEl))continue;
-    seenNotes.add(noteEl);
-    var ncs=window.getComputedStyle(noteEl);
-    if(ncs.display==='none'||ncs.visibility==='hidden')continue;
-    var nrect=null;try{nrect=noteEl.getBoundingClientRect();}catch(_){nrect=null;}
-    if(!nrect||nrect.width<1||nrect.height<3)continue;
-    var ntop=nrect.top-pr.top+scrollTop,nbottom=nrect.bottom-pr.top+scrollTop;
-    if(nbottom<bandTop-extra||ntop>bandBottom+extra)continue;
-    appendMeasuredInlineLine(linesByKey,keys,noteEl,nrect,pr,scrollTop);
-  }
-  var out=keys.map(function(k){return linesByKey[k];}).sort(function(a,b){return a.top-b.top||a.left-b.left;});
-  for(var j=0;j<out.length;j++)out[j].fragments.sort(function(a,b){return a.top-b.top||a.left-b.left;});
-  return filterTextLines(out).map(function(line,idx){
-    return {top:line.top,bottom:line.bottom,height:line.height,type:'line',index:idx,left:line.left,right:line.right,fragments:line.fragments||[],flowNodes:line.flowNodes||[]};
-  });
 }
 function documentFlowItems(){
   if(!root||!pager)return [];
