@@ -4,7 +4,7 @@ var READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
 var readerAnimationSettingsOverride=null;
 function readerAnimationSettingOn(key){if(readerAnimationSettingsOverride&&Object.prototype.hasOwnProperty.call(readerAnimationSettingsOverride,key))return readerAnimationSettingsOverride[key]!==false;try{var value=JSON.parse(localStorage.getItem(READER_ANIMATION_SETTINGS_KEY)||'{}');return !value||value[key]!==false;}catch(_){return true;}}
 var IS_MAC_WEBKIT=/Macintosh|Mac OS X/.test(navigator.userAgent||'')&&/AppleWebKit/.test(navigator.userAgent||'')&&!/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent||'');
-var root,pager,scroller,pageMask,virtualPage,scrollPreview,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,dualStartColumn=0,headSeen={},chapChars=0,scrollBreaks=[0],scrollPages=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget=null,scrollActiveSlice=null,scrollPagedView=true,sideAnchorVirtualOffset=null;
+var root,pager,scroller,pageMask,virtualPage,scrollPreview,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,dualStartColumn=0,headSeen={},chapChars=0,scrollBreaks=[0],scrollPages=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget=null,scrollActiveSlice=null,scrollPagedView=true,sideAnchorVirtualOffset=null,macPageRenderDiagSig='',macVirtualPageCacheKey='',macVirtualPageCache=null;
 var downX=null,downY=null,didDrag=false;
 var overlayOpen=false; // 外壳里搜索框/设置面板是否打开（打开时正文点击只用于关闭它）
 var ttsOn=false,ttsMap=[],ttsText='',ttsSents=[],ttsVoice=null,ttsRate=1,ttsSi=0,ttsGen=0,ttsAudioEl=null,ttsCache={},ttsWaiting=-1,ttsPlayedAny=false; // 朗读状态
@@ -400,6 +400,19 @@ function computedLineStyleForElement(el,cache){
 function sameLineKey(a,b){
   return Math.abs(a-b)<2;
 }
+function primaryCharacterRect(rects){
+  if(!rects||!rects.length)return null;
+  var best=null,bestScore=-1;
+  for(var i=0;i<rects.length;i++){
+    var r=rects[i];
+    if(!r||r.height<3)continue;
+    var score=Math.max(0,r.width)*r.height;
+    // 行尾换行字符在 WKWebView 中可能同时返回“上一行零宽占位矩形”和
+    // “下一行真实字形矩形”。每个字符只能采用面积最大的那个矩形。
+    if(score>bestScore){best=r;bestScore=score;}
+  }
+  return best;
+}
 function closestInlineNoteElement(node){
   var el=node&&node.nodeType===1?node:(node&&node.parentElement);
   if(!el||!root)return null;
@@ -505,12 +518,9 @@ function documentTextLineRects(){
       try{range.setStart(node,i);range.setEnd(node,i+1);}catch(e){continue;}
       var rects=range.getClientRects();
       if(!rects||!rects.length)continue;
-      for(var ri=0;ri<rects.length;ri++){
-        var r=rects[ri];
-        if(r.height<3)continue;
-        if(r.width<0.1&&!ch.trim())continue;
-        appendMeasuredCharLine(linesByKey,keys,node,ch,r,pr,scrollTop,style,nodeStart+i);
-      }
+      var r=primaryCharacterRect(rects);
+      if(!r||r.width<0.1&&!ch.trim())continue;
+      appendMeasuredCharLine(linesByKey,keys,node,ch,r,pr,scrollTop,style,nodeStart+i);
     }
   }
   var noteEls=root.querySelectorAll('.rr-note-ref,a,sup,sub,span'),seenNotes=new WeakSet();
@@ -541,6 +551,66 @@ function documentTextLineRects(){
     out[j].fragments.sort(function(a,b){return a.top-b.top||a.left-b.left;});
   }
   return out;
+}
+// 大章节的全章分页只测量文本节点的整行矩形，避免 WKWebView 逐字扫描卡顿。
+// 真正显示某一页时，只对与该页相交的文本节点做逐字测量，既保留快速打开，
+// 又能构造不含下一页首行的完整文字图层。
+function exactTextLineItemsForBand(bandTop,bandBottom){
+  if(!root||!pager)return [];
+  var pr=viewRect(),sp=scrollPort(),scrollTop=sp?sp.scrollTop||0:0;
+  var linesByKey={},keys=[],styleCache=new WeakMap();
+  var walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null),node,range=document.createRange(),docPos=0;
+  var extra=Math.max(4,lineHeightPx()*0.25);
+  while((node=walker.nextNode())){
+    var text=node.nodeValue||'';
+    var parent=node.parentElement;
+    if(!parent||generatedTextNode(node)||closestInlineNoteElement(node))continue;
+    var nodeStart=docPos;docPos+=text.length;
+    if(!text.trim())continue;
+    var pcs=window.getComputedStyle(parent);
+    if(pcs.display==='none'||pcs.visibility==='hidden')continue;
+    var nodeVisible=false;
+    try{
+      range.selectNodeContents(node);
+      var nodeRects=range.getClientRects();
+      for(var nri=0;nri<nodeRects.length;nri++){
+        var nr=nodeRects[nri],nt=nr.top-pr.top+scrollTop,nb=nr.bottom-pr.top+scrollTop;
+        if(nb>=bandTop-extra&&nt<=bandBottom+extra){nodeVisible=true;break;}
+      }
+    }catch(_){nodeVisible=false;}
+    if(!nodeVisible)continue;
+    var style=computedLineStyleForNode(node,styleCache);
+    for(var i=0;i<text.length;i++){
+      var ch=text.charAt(i);
+      if(ch==='\r'||ch==='\n'||ch==='\t')continue;
+      try{range.setStart(node,i);range.setEnd(node,i+1);}catch(e){continue;}
+      var rects=range.getClientRects();
+      if(!rects||!rects.length)continue;
+      var r=primaryCharacterRect(rects);
+      if(!r)continue;
+      var top=r.top-pr.top+scrollTop,bottom=r.bottom-pr.top+scrollTop;
+      if(bottom<bandTop-extra||top>bandBottom+extra||r.width<0.1&&!ch.trim())continue;
+      appendMeasuredCharLine(linesByKey,keys,node,ch,r,pr,scrollTop,style,nodeStart+i);
+    }
+  }
+  var noteEls=root.querySelectorAll('.rr-note-ref,a,sup,sub,span'),seenNotes=new WeakSet();
+  for(var ne=0;ne<noteEls.length;ne++){
+    var noteEl=closestInlineNoteElement(noteEls[ne]);
+    if(!noteEl||seenNotes.has(noteEl))continue;
+    seenNotes.add(noteEl);
+    var ncs=window.getComputedStyle(noteEl);
+    if(ncs.display==='none'||ncs.visibility==='hidden')continue;
+    var nrect=null;try{nrect=noteEl.getBoundingClientRect();}catch(_){nrect=null;}
+    if(!nrect||nrect.width<1||nrect.height<3)continue;
+    var ntop=nrect.top-pr.top+scrollTop,nbottom=nrect.bottom-pr.top+scrollTop;
+    if(nbottom<bandTop-extra||ntop>bandBottom+extra)continue;
+    appendMeasuredInlineLine(linesByKey,keys,noteEl,nrect,pr,scrollTop);
+  }
+  var out=keys.map(function(k){return linesByKey[k];}).sort(function(a,b){return a.top-b.top||a.left-b.left;});
+  for(var j=0;j<out.length;j++)out[j].fragments.sort(function(a,b){return a.top-b.top||a.left-b.left;});
+  return filterTextLines(out).map(function(line,idx){
+    return {top:line.top,bottom:line.bottom,height:line.height,type:'line',index:idx,left:line.left,right:line.right,fragments:line.fragments||[],flowNodes:line.flowNodes||[]};
+  });
 }
 function documentFlowItems(){
   if(!root||!pager)return [];
@@ -993,6 +1063,8 @@ function invalidateScrollItemsCache(){
   scrollItemsSig='';
   scrollItemsCache=[];
   scrollMaskSig='';
+  macVirtualPageCacheKey='';
+  macVirtualPageCache=null;
 }
 function ensureVirtualPage(){
   if(virtualPage&&virtualPage.isConnected)return virtualPage;
@@ -1101,14 +1173,18 @@ function virtualGapBetween(prev,it){
 }
 function buildVirtualPageFromIndex(items,startIdx,viewH,navMaxTop){
   startIdx=Math.max(0,Math.min(items.length-1,startIdx||0));
-  var lh=lineHeightPx(),bottomGuard=Math.max(2,Math.ceil(lh*0.08));
+  var lh=lineHeightPx(),bottomGuard=IS_MAC_WEBKIT?0:Math.max(2,Math.ceil(lh*0.08));
   var pageTop=Math.max(0,Math.min(navMaxTop,Math.round((items[startIdx]&&items[startIdx].top)||0)));
   var y=0,endIdx=startIdx-1,layout=[],previewIndex=-1,guard=0;
   for(var i=startIdx;i<items.length&&guard++<1000;i++){
     var it=items[i],h=virtualItemHeight(it);
-    var y0=Math.max(0,Math.round((it.top||0)-pageTop));
+    var y0=Math.max(0,(it.top||0)-pageTop);
     if(y0>=viewH-bottomGuard+0.5)break;
-    var fits=y0+h<=viewH-bottomGuard+0.5;
+    // macOS 的 1.0 行距下，相邻字形矩形会彼此重叠。以该行真实 bottom
+    // 判断是否完整可见，而不是以行高或下一行 top 放置水平裁切线。
+    var fits=IS_MAC_WEBKIT&&it.type==='line'
+      ?(it.bottom||((it.top||0)+h))-pageTop<=viewH+0.1
+      :y0+h<=viewH-bottomGuard+0.5;
     if(!fits){
       if(it.type==='block'&&isPreviewableBlock(it)){
         previewIndex=i;
@@ -1304,7 +1380,7 @@ function renderVirtualLine(entry){
   if(!it||!it.fragments||!it.fragments.length)return null;
   var line=document.createElement('div');
   line.className='vp-line';
-  line.style.top=Math.round(entry.top)+'px';
+  line.style.top=entry.top+'px';
   line.style.height=Math.max(1,Math.ceil(entry.height))+'px';
   for(var i=0;i<it.fragments.length;i++){
     var f=it.fragments[i];
@@ -1312,10 +1388,10 @@ function renderVirtualLine(entry){
     var span=document.createElement('span');
     span.className=f.kind==='inline'?'vp-inline':'vp-frag';
     if(f.kind==='note-number')span.classList.add('vp-note-num');
-    span.style.left=Math.round(f.left||0)+'px';
-    span.style.top=Math.round((f.top||it.top||0)-(it.top||0))+'px';
+    span.style.left=(f.left||0)+'px';
+    span.style.top=((f.top||it.top||0)-(it.top||0))+'px';
     span.style.height=Math.max(1,Math.ceil(f.height||it.height||entry.height))+'px';
-    if(f.width)span.style.width=Math.max(1,Math.ceil(f.width))+'px';
+    if(f.width&&f.kind)span.style.width=Math.max(1,Math.ceil(f.width))+'px';
     if(f.kind==='note-number'){
       if(!f.text)continue;
       span.textContent=f.text;
@@ -1342,7 +1418,9 @@ function renderVirtualLine(entry){
       if(f.end!=null)span.setAttribute('data-vend',String(f.end));
       var hi=highlightIndexForRange(f.start,f.end);
       if(hi>=0){span.classList.add('vp-hl');span.setAttribute('data-hi',String(hi));}
-      if(f.width)span.style.minWidth=Math.max(1,Math.ceil(f.width))+'px';
+      // 普通文字使用其本身的固有宽度。把 Range 测得宽度再次设为 span 宽度，
+      // WKWebView 会把最右侧字形按整数像素二次取整，曾造成右边切字。
+      if(f.width&&f.kind)span.style.minWidth=Math.max(1,Math.ceil(f.width))+'px';
       applyVirtualFragmentStyle(span,f.style);
     }
     line.appendChild(span);
@@ -1390,14 +1468,14 @@ function renderVirtualPreview(page,viewH){
   return box;
 }
 function renderVirtualScrollPage(pageOverride){
-  if(!isScrollMode()||!scrollPagedView||!pager||!root){clearVirtualPage();return;}
+  if(!isScrollMode()||!scrollPagedView||!pager||!root){clearVirtualPage();return false;}
   var sp=scrollPort();
-  if(!sp){clearVirtualPage();return;}
+  if(!sp){clearVirtualPage();return false;}
   var layer=ensureVirtualPage();
-  if(!layer)return;
+  if(!layer)return false;
   var top=Math.round(sp.scrollTop||0),viewH=Math.max(1,sp.clientHeight||window.innerHeight||1);
   var page=pageOverride||activeScrollSliceAtTop(top);
-  if(!page){clearVirtualPage();return;}
+  if(!page){clearVirtualPage();return false;}
   var layout=page.virtualLayout||[];
   layer.innerHTML='';
   for(var i=0;i<layout.length;i++){
@@ -1406,7 +1484,51 @@ function renderVirtualScrollPage(pageOverride){
   }
   var preview=renderVirtualPreview(page,viewH);
   if(preview)layer.appendChild(preview);
+  layer._rrRenderLayoutCount=layout.length;
+  layer._rrRenderNodeCount=layer.childNodes.length;
+  if(!layer.childNodes.length){clearVirtualPage();return false;}
   layer.style.display='block';
+  return true;
+}
+function virtualScrollPageHasCompleteText(page){
+  var layout=page&&page.virtualLayout?page.virtualLayout:[];
+  if(!layout.length)return false;
+  for(var i=0;i<layout.length;i++){
+    var entry=layout[i],it=entry&&entry.item;
+    if(entry&&entry.type==='line'&&(!it||!it.fragments||!it.fragments.length))return false;
+  }
+  return true;
+}
+function macVirtualPageForSlice(page){
+  if(!page||!pager)return null;
+  if(!fastChapterLayout&&virtualScrollPageHasCompleteText(page)){
+    page._rrExactLineCount=page.virtualLayout?page.virtualLayout.length:0;
+    page._rrFragmentCount=(page.virtualLayout||[]).reduce(function(n,x){return n+(x&&x.item&&x.item.fragments?x.item.fragments.length:0);},0);
+    return page;
+  }
+  var sp=scrollPort(),viewH=Math.max(1,(sp&&sp.clientHeight)||window.innerHeight||1);
+  var top=Math.round(page.top||0),key=[curCh,top,viewH,layoutSig()].join('|');
+  if(key===macVirtualPageCacheKey&&macVirtualPageCache)return macVirtualPageCache;
+  var exact=exactTextLineItemsForBand(top,top+viewH);
+  var layout=[];
+  var fragmentCount=0;
+  for(var i=0;i<exact.length;i++){
+    var line=exact[i];
+    if(line.top<top-1||line.bottom>top+viewH+0.1)continue;
+    fragmentCount+=line.fragments?line.fragments.length:0;
+    layout.push({index:i,type:'line',top:line.top-top,height:line.height,sourceTop:line.top,item:line});
+  }
+  // 图片和其他原子块沿用快速分页器已经生成的布局；文字行使用当前页精确结果。
+  var oldLayout=page.virtualLayout||[];
+  for(var j=0;j<oldLayout.length;j++)if(oldLayout[j]&&oldLayout[j].type==='block')layout.push(oldLayout[j]);
+  layout.sort(function(a,b){return a.top-b.top||(a.type==='block'?-1:1);});
+  if(!layout.length)return null;
+  var rebuilt=Object.assign({},page,{virtualLayout:layout,virtualBottom:layout.reduce(function(m,x){return Math.max(m,(x.top||0)+(x.height||0));},0)});
+  rebuilt._rrExactLineCount=exact.length;
+  rebuilt._rrFragmentCount=fragmentCount;
+  macVirtualPageCacheKey=key;
+  macVirtualPageCache=rebuilt;
+  return rebuilt;
 }
 function scrollImagePreviewEligible(next,slice,nextIdx,pageBottom){
   if(!next||!slice)return false;
@@ -1503,16 +1625,20 @@ function applyScrollPageMask(force){
   clearVirtualPage();
   clearScrollPreview();
   var virtualSlice=activeScrollSliceAtTop(maskTop);
-  // macOS 不重绘虚拟正文，避免克隆行造成右侧切字或重复文字；仅按已测得的
-  // 实际文字行边界裁掉“下一页首行”越过视口的那一小段。这里没有遮罩元素，
-  // 不改变字号、行高、行数或正文位置。
+  // macOS 的相邻字形矩形在 1.0 行距下会重叠，任何水平 clip-path 都会切到
+  // 上一行字底或露出下一行字头。逐行绘制本页完整行，下一页首行不加入当前
+  // 图层；因此无需水平裁切，也不改变字号、行高、行数或正文位置。
   if(IS_MAC_WEBKIT){
-    var macBlank=currentScrollPageClipBlank();
-    if(scroller&&macBlank>1){
-      scroller.style.clipPath='inset(0px 0px '+macBlank+'px 0px)';
-      scroller.style.webkitClipPath='inset(0px 0px '+macBlank+'px 0px)';
-    }else if(scroller){
-      scroller.style.clipPath='none';scroller.style.webkitClipPath='none';
+    var macPage=virtualSlice?macVirtualPageForSlice(virtualSlice):null;
+    var rendered=!!(macPage&&renderVirtualScrollPage(macPage));
+    if(scroller){scroller.style.clipPath='none';scroller.style.webkitClipPath='none';}
+    var diagSig=[curCh,pageInCh,rendered?1:0,macPage&&macPage.virtualLayout?macPage.virtualLayout.length:0,macPage&&macPage._rrFragmentCount||0].join('|');
+    if(diagSig!==macPageRenderDiagSig){
+      macPageRenderDiagSig=diagSig;
+      parent.postMessage({readerPerf:'mac_page_render chapter='+curCh+' page='+(pageInCh+1)+' virtual='+(rendered?1:0)
+        +' items='+(macPage&&macPage.virtualLayout?macPage.virtualLayout.length:0)
+        +' exact='+(macPage&&macPage._rrExactLineCount||0)+' fragments='+(macPage&&macPage._rrFragmentCount||0)
+        +' nodes='+(virtualPage&&virtualPage._rrRenderNodeCount||0)},'*');
     }
     refreshHighlights();
     return;
