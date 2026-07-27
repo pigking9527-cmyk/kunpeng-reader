@@ -1,9 +1,9 @@
 # 鲲鹏阅读器（Kunpeng Reader）
 
-一个面向 Windows 与 macOS 的高性能本地电子书阅读器。**Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
+一个面向 Windows、macOS 与 Android 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
-> 最新版本：**v1.9.4** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP）。
+> 最新版本：**v1.9.5** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP；Android APK）。
 
 ## 特性
 
@@ -37,7 +37,7 @@
 - **高频词语音包**：可在本机生成前 10,000 高频英文词语音缓存，支持暂停、继续、进度显示和删除
 - **「我的书架」显示设置**：封面是否显示阅读进度 / 评分 / 书名，各自开关；网格视图可只显示封面，筛选面板可保持默认自适应或指定封面列数
 - **新版提示**：启动后台优先检查 GitHub 最新发行版，连接失败时走服务器更新清单兜底；「关于」里可手动检查更新、看本版更新内容
-- **稳定发布流程**：GitHub Actions CI 与本地固定检查脚本共用 `scripts/check.ps1`，覆盖测试、UTF-8、版本一致、图标、安全基线和 CSS；release 构建脚本自动校验图标并刷新 Windows 图标缓存；GitHub Release 同时发布 Windows 单文件绿色版/安装包、macOS Apple Silicon DMG/App ZIP 与统一 SHA-256 校验清单
+- **稳定发布流程**：GitHub Actions CI 与本地固定检查脚本共用 `scripts/check.ps1`，覆盖测试、UTF-8、版本一致、图标、安全基线和 CSS；release 构建脚本自动校验图标并刷新 Windows 图标缓存；GitHub Release 同时发布 Windows 单文件绿色版/安装包、macOS Apple Silicon DMG/App ZIP、Android APK 与各平台 SHA-256 校验清单
 - 划词 web 搜索、独立窗口（EPUB 与 PDF 各自记忆几何）、关于页
 
 > 智读采用用户自备 API Key。接口配置经系统能力保护后仅保存在本机，不进入同步实体；发送内容限制为当前书已经读到的相关章节和用户明确选择的文字。
@@ -81,4 +81,4 @@ cargo tauri build
 
 ## 技术栈
 
-Rust · Tauri 2 · WebView2 · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)
+桌面：Rust · Tauri 2 · WebView2 / WKWebView · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`）。

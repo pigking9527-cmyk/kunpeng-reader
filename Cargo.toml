@@ -1,6 +1,6 @@
 [package]
 name = "ebook-reader-tauri"
-version = "1.9.4"
+version = "1.9.5"
 edition = "2021"
 
 [workspace]
