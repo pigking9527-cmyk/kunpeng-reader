@@ -56,11 +56,18 @@ test("large chapters use batched geometry and skip repeated exact layout", () =>
   );
 });
 
-test("macOS preserves reader line height and clips only an incomplete next line", () => {
+test("macOS preserves reader line height and renders only complete page lines", () => {
   const pagination = fs.readFileSync(path.join(__dirname, "..", "reader-page-pagination.js"), "utf8");
   assert.doesNotMatch(source, /function effectiveLineHeight\(/);
   assert.match(source, /line-height:'\+S\.lineHeight/);
-  assert.match(source, /if\(IS_MAC_WEBKIT\)\{[\s\S]*?var macBlank=currentScrollPageClipBlank\(\)/);
+  assert.match(source, /if\(IS_MAC_WEBKIT\)\{[\s\S]*?macVirtualPageForSlice\(virtualSlice\)[\s\S]*?renderVirtualScrollPage\(macPage\)/);
+  assert.match(source, /function exactTextLineItemsForBand\(/);
+  assert.match(source, /function macVirtualPageForSlice\([\s\S]*?exactTextLineItemsForBand\(top,top\+viewH\)/);
+  assert.match(source, /function primaryCharacterRect\(rects\)[\s\S]*?score>bestScore/);
+  assert.doesNotMatch(source, /for\(var ri=0;ri<rects\.length;ri\+\+\)\{\s*var r=rects\[ri\]/);
+  assert.match(source, /var fits=IS_MAC_WEBKIT&&it\.type==='line'[\s\S]*?it\.bottom/);
+  assert.match(source, /if\(scroller\)\{scroller\.style\.clipPath='none'/);
+  assert.doesNotMatch(source, /var macBlank=currentScrollPageClipBlank\(\)/);
   assert.match(source, /root\.style\.overflow=''/);
   assert.match(pagination, /return \{top:top,bottom:bottom,left:pl\.l,right:pl\.r,height:usable\}/);
   assert.match(pagination, /function pagedBoxHeight\(\)\{\s*return viewportHeight\(\)/);
