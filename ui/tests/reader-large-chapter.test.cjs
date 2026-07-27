@@ -168,7 +168,10 @@ test("highlight menus support a persisted three-column layout below the selectio
   const style = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
   assert.match(source, /var HL_MENU_LAYOUT_KEY='highlightMenuLayoutV1'/);
   assert.match(source, /data-layout="row">横排<\/button><button type="button" data-layout="grid">九宫格/);
-  assert.match(source, /var top=rect\.bottom\+8;/);
+  assert.match(source, /function placeHighlightMenuVertically\(menu,rect,preferAbove\)/);
+  assert.match(source, /var mh=Math\.min\(Math\.max\(Number\(menu&&menu\.offsetHeight\)\|\|34,1\)/);
+  assert.match(source, /function repositionVisibleHighlightMenu\(menu\)/);
+  assert.match(source, /repositionVisibleHighlightMenu\(selMenu\);[\s\S]*?repositionVisibleHighlightMenu\(hlMenu\);/);
   assert.match(source, /var safe=6,gap=6,aboveTop=rect\.top-mh-gap,belowTop=rect\.bottom\+gap/);
   assert.match(style, /\.hm-layout-grid \.hm-action-host[^\{]*\{display:grid;grid-template-columns:repeat\(3/);
 });
