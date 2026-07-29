@@ -80,7 +80,14 @@ jobs:
         run: node --test ui/tests/*.test.cjs
 
       - name: Run Rust tests on Linux
-        run: cargo test --workspace --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ebook-reader-tauri -p reader-core --locked
+          # The vendored crate's doctests reference upstream-only sample books
+          # that are not distributed in this repository. Its library tests are
+          # still run explicitly.
+          cargo test -p epub --lib --locked
 
       - name: Build AppImage and Debian package
         run: cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --verbose
