@@ -1784,6 +1784,7 @@ mod tests {
 
     #[test]
     fn sync_base_requires_https_except_localhost() {
+        assert_eq!(normalize_auth_base("").unwrap(), "https://117.72.220.69");
         assert_eq!(
             normalize_sync_base(" https://reader.example.com/ ").unwrap(),
             "https://reader.example.com"

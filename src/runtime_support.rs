@@ -9,7 +9,9 @@ pub(crate) const RES_BASE: &str = "reader://localhost";
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub(crate) const RES_BASE: &str = "http://reader.localhost";
 
-pub(crate) const DEFAULT_SYNC_URL: &str = "";
+/// 公共发行版的默认同步端点。数据库中已经保存的自定义地址始终优先，
+/// 因此自托管用户不会被迁移或覆盖。
+pub(crate) const DEFAULT_SYNC_URL: &str = "https://117.72.220.69";
 
 /// 调试日志：写到 %LOCALAPPDATA%\ebook-reader\debug.log（windows 子系统下没有 stderr）。
 pub(crate) fn log(msg: &str) {
@@ -146,6 +148,7 @@ mod tests {
     #[test]
     fn now_ms_is_nonzero_and_resource_base_matches_platform() {
         assert!(now_ms() > 0);
+        assert_eq!(DEFAULT_SYNC_URL, "https://117.72.220.69");
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         assert_eq!(RES_BASE, "reader://localhost");
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
