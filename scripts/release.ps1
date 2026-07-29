@@ -6,6 +6,7 @@ param(
   [switch]$SkipInstaller,
   [switch]$SkipPush,
   [switch]$SkipGitHubRelease,
+  [switch]$SkipServerUpdateManifest,
   [switch]$Draft,
   [switch]$AllowDirty
 )
@@ -140,6 +141,12 @@ try {
       }
       gh release upload $tag $assets[0] $assets[1] $assets[2] --repo $Repo --clobber
       gh release view $tag --repo $Repo --json url,assets
+    }
+  }
+
+  if (-not $SkipGitHubRelease -and -not $SkipServerUpdateManifest) {
+    Invoke-Step "server update manifest" {
+      & (Join-Path $repoRoot "scripts\publish-update-manifest.ps1") -Version $Version
     }
   }
 } finally {

@@ -1,6 +1,11 @@
 use serde::Serialize;
 
 const GITHUB_REPO: &str = "pigking9527-cmyk/kunpeng-reader";
+// GitHub is the source of truth; the sync server mirrors only public release metadata
+// so version checks and current-version notes remain available when GitHub is blocked.
+// Public source must not embed deployment addresses. Release builders may inject an
+// HTTPS endpoint such as `https://reader.example/updates`.
+const SERVER_UPDATE_BASE: Option<&str> = option_env!("KUNPENG_UPDATE_BASE");
 
 #[derive(Serialize, Default)]
 pub(crate) struct UpdateInfo {
@@ -86,6 +91,25 @@ fn rel_url(v: &serde_json::Value, fallback: &str) -> String {
         .to_string()
 }
 
+fn safe_release_tag(tag: &str) -> String {
+    tag.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .take(80)
+        .collect()
+}
+
+fn join_server_update_url(base: &str, suffix: &str) -> Option<String> {
+    let base = base.trim().trim_end_matches('/');
+    if !base.starts_with("https://") || base.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(format!("{base}/{}", suffix.trim_start_matches('/')))
+}
+
+fn configured_server_update_url(suffix: &str) -> Option<String> {
+    join_server_update_url(SERVER_UPDATE_BASE?, suffix)
+}
+
 #[tauri::command]
 pub(crate) async fn check_update() -> UpdateInfo {
     tokio::task::spawn_blocking(check_update_blocking)
@@ -115,6 +139,23 @@ fn check_update_blocking() -> UpdateInfo {
             };
         }
     }
+    if let Some(server_api) = configured_server_update_url("latest") {
+        if let Some(v) = fetch_json(&agent, &server_api) {
+            let tag = rel_tag(&v);
+            if !tag.is_empty() {
+                let latest = tag.trim_start_matches(['v', 'V']).to_string();
+                return UpdateInfo {
+                    ok: true,
+                    has_update: ver_gt(&latest, &current),
+                    latest,
+                    notes: rel_notes(&v),
+                    url: rel_url(&v, &page),
+                    source: "server".to_string(),
+                    current,
+                };
+            }
+        }
+    }
     UpdateInfo {
         current,
         ..Default::default()
@@ -134,12 +175,23 @@ fn release_notes_blocking(tag: &str) -> String {
     let want = tag.trim_start_matches(['v', 'V']);
     if let Some(v) = fetch_json(&agent, &url) {
         let got = rel_tag(&v);
-        if !got.is_empty() && got.trim_start_matches(['v', 'V']) != want {
-            return String::new();
+        if got.is_empty() || got.trim_start_matches(['v', 'V']) == want {
+            let notes = rel_notes(&v);
+            if !notes.is_empty() {
+                return notes;
+            }
         }
-        let notes = rel_notes(&v);
-        if !notes.is_empty() {
-            return notes;
+    }
+    let safe_tag = safe_release_tag(tag);
+    if safe_tag.is_empty() {
+        return String::new();
+    }
+    if let Some(server_url) = configured_server_update_url(&format!("notes?tag={safe_tag}")) {
+        if let Some(v) = fetch_json(&agent, &server_url) {
+            let got = rel_tag(&v);
+            if got.is_empty() || got.trim_start_matches(['v', 'V']) == want {
+                return rel_notes(&v);
+            }
         }
     }
     String::new()
@@ -173,5 +225,22 @@ mod tests {
             rel_url(&manifest, "fallback"),
             "https://example.com/app.exe"
         );
+    }
+
+    #[test]
+    fn release_tag_query_only_keeps_safe_characters() {
+        assert_eq!(safe_release_tag("v1.9.5"), "v1.9.5");
+        assert_eq!(safe_release_tag("v1.9.5?bad=<x>"), "v1.9.5badx");
+    }
+
+    #[test]
+    fn server_update_fallback_requires_an_https_build_endpoint() {
+        assert_eq!(
+            join_server_update_url("https://reader.example/updates/", "latest"),
+            Some("https://reader.example/updates/latest".into())
+        );
+        let insecure = ["http:", "//reader.example/updates"].concat();
+        assert!(join_server_update_url(&insecure, "latest").is_none());
+        assert!(join_server_update_url(" https://reader.example/bad path ", "latest").is_none());
     }
 }
