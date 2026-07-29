@@ -2,6 +2,12 @@ name: macOS Apple Silicon build
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Replace the matching vX.Y.Z macOS assets in GitHub Release"
+        required: false
+        type: boolean
+        default: false
   push:
     branches:
       - codex/macos-build
@@ -85,3 +91,36 @@ jobs:
           path: target/macos-release/*
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    name: Publish macOS release assets
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download verified macOS artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: Kunpeng-Reader-macOS-Apple-Silicon
+          path: target/macos-release
+
+      - name: Replace GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          out_dir="target/macos-release"
+          mv "$out_dir/SHA256SUMS.txt" "$out_dir/SHA256SUMS-macOS.txt"
+          gh release upload "v${version}" \
+            "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.app.zip" \
+            "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.dmg" \
+            "$out_dir/SHA256SUMS-macOS.txt" \
+            --clobber
