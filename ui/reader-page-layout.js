@@ -1,8 +1,9 @@
 
 var S={fontFamily:"",styleMode:"local",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1};
 var READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
+var readerAnimationGroupByKey={annotationAdd:'readerPage',readingMode:'readerPage',pageTurn:'readerPage',highlightSettings:'readerPage'};
 var readerAnimationSettingsOverride=null;
-function readerAnimationSettingOn(key){if(readerAnimationSettingsOverride&&Object.prototype.hasOwnProperty.call(readerAnimationSettingsOverride,key))return readerAnimationSettingsOverride[key]!==false;try{var value=JSON.parse(localStorage.getItem(READER_ANIMATION_SETTINGS_KEY)||'{}');return !value||value[key]!==false;}catch(_){return true;}}
+function readerAnimationSettingOn(key){var values=readerAnimationSettingsOverride||null;try{if(!values)values=JSON.parse(localStorage.getItem(READER_ANIMATION_SETTINGS_KEY)||'{}');}catch(_){values={};}var group=readerAnimationGroupByKey[key];return (!values||values[key]!==false)&&(!group||values[group]!==false);}
 var IS_MAC_WEBKIT=/Macintosh|Mac OS X/.test(navigator.userAgent||'')&&/AppleWebKit/.test(navigator.userAgent||'')&&!/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent||'');
 var root,pager,scroller,pageMask,virtualPage,scrollPreview,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,dualStartColumn=0,headSeen={},chapChars=0,scrollBreaks=[0],scrollPages=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget=null,scrollActiveSlice=null,scrollPagedView=true,sideAnchorVirtualOffset=null,macPageRenderDiagSig='',macVirtualPageCacheKey='',macVirtualPageCache=null;
 var downX=null,downY=null,didDrag=false;
@@ -48,12 +49,17 @@ function applyStyle(){
     c+='.rr body,.rr section,.rr article,.rr main,.rr header,.rr footer,.rr nav{margin-top:0 !important;margin-bottom:0 !important;padding-top:0 !important;padding-bottom:0 !important;}';
     c+='.rr p,.rr li,.rr blockquote{margin-top:0 !important;margin-bottom:'+S.paraSpacing+'em !important;padding-top:0 !important;padding-bottom:0 !important;}';
     c+='.rr div{margin-top:0 !important;margin-bottom:0 !important;padding-top:0 !important;padding-bottom:0 !important;}';
+    // 保留章节首 logo 所在 div 的正常高度，但不要让 EPUB 自带的 h3{margin:2em 0}
+    // 在标题前后再各塞进数行空白。标题上下间距保持在一行以内。
+    c+='.rr h1,.rr h2,.rr h3,.rr h4,.rr h5,.rr h6{margin-top:.55em !important;margin-bottom:.55em !important;padding-top:0 !important;padding-bottom:0 !important;}';
   }
   c+='.rr hr.rr-note-sep{display:none !important;}';
   c+='.rr *{break-before:auto !important;break-after:auto !important;break-inside:auto !important;page-break-before:auto !important;page-break-after:auto !important;page-break-inside:auto !important;-webkit-column-break-before:auto !important;-webkit-column-break-after:auto !important;-webkit-column-break-inside:auto !important;}';
-  // 单页/双页切换时插入的零高度锚点：让切换前视口的首行成为新栏的首行。
+  // 单页/双页切换时，把切换前首行所在段落从该字符处分成两个真实块，并让后半块
+  // 强制从新栏开始。不能使用零宽零高空节点：Chromium 只保证空节点在栏首，并不保证
+  // 紧随其后的文字也在栏首，长段落因此会落到新栏中部。
   // 这条规则必须放在通用 break-before 重置之后，才能覆盖书籍自身及上面的重置。
-  c+='.rr .rr-mode-switch-anchor{display:block !important;width:0 !important;height:0 !important;overflow:hidden !important;margin:0 !important;padding:0 !important;border:0 !important;font-size:0 !important;line-height:0 !important;break-before:column !important;page-break-before:always !important;-webkit-column-break-before:always !important;}body.scroll-mode .rr .rr-mode-switch-anchor{display:none !important;}';
+  c+='.rr .rr-mode-switch-anchor{display:block !important;margin-top:0 !important;padding-top:0 !important;break-before:column !important;page-break-before:always !important;-webkit-column-break-before:always !important;}.rr .rr-mode-switch-continuation{text-indent:0 !important;}body.scroll-mode .rr .rr-mode-switch-anchor{break-before:auto !important;page-break-before:auto !important;-webkit-column-break-before:auto !important;}';
   if(mg(S.marginTop)===0)c+='.rr>:first-child,.rr body>:first-child{margin-top:0 !important;padding-top:0 !important;}';
   if(mg(S.marginBottom)===0)c+='.rr>:last-child,.rr body>:last-child{margin-bottom:0 !important;padding-bottom:0 !important;}';
   if(mg(S.marginLeft)===0)c+='.rr,.rr>*,.rr body{margin-left:0 !important;padding-left:0 !important;}';
@@ -143,6 +149,14 @@ function calibratePagedBoxHeight(baseH){
     h=next;
   }
   return Math.max(1,Math.min(raw,Math.floor(h)));
+}
+function packedPagedBoxHeight(baseH){
+  // 页底校准只用于避免最后一行被切半；若缩短过多，正文会被提前推到下一页，
+  // 形成远大于一行的无意义留白。底部已有页边距，因此额外收缩最多补足一行行高。
+  var raw=Math.max(1,Math.floor(baseH||viewportHeight()));
+  var calibrated=calibratePagedBoxHeight(raw);
+  var allowedTrim=Math.max(0,Math.floor(lineHeightPx())-mg(S.marginBottom));
+  return Math.max(raw-allowedTrim,calibrated);
 }
 function applyCols(){
   var vw=window.innerWidth, vh=viewportHeight(), pageH=pagedBoxHeight(), pl=pageLayout();
@@ -234,7 +248,7 @@ if(scroller){scroller.style.top='0';scroller.style.bottom='0';scroller.style.lef
     root.style.columnGap=pl.gap+'px';
   }
   // 大章节首屏避免遍历全部文本节点；小章节继续执行精确行边界校准。
-  if(!fastLargeChapter)pageH=calibratePagedBoxHeight(pageH);
+  if(!fastLargeChapter)pageH=packedPagedBoxHeight(pageH);
   root.style.height=pageH+'px';
   // 末尾有一个强制分栏的占位空栏（rr-end），让滚动条能到达真正的最后一页；页数要减掉它
   pageStep=pl.pageStep;
@@ -1984,6 +1998,7 @@ function report(){
 function captureAnchor(){
   var anchor=topAnchor();
   if(anchorValid(anchor))curTopAnchor=anchor;
+  modeSwitchRecoveryOffset=null;
   return curTopAnchor;
 }
 // 滚动条按“全书页位置”精确定位：已测量完→映射到具体章+页（同章直接翻页，平滑；跨章才加载）；
@@ -2445,6 +2460,9 @@ function showChapter(i,where,frag){
   }).catch(function(){});
 }
 var curTopAnchor=null; // 实时记录的当前页顶部锚点（精确到字符）
+// 一次模式重排若没有把目标字符放在可见首行，就保留切换前的源偏移。
+// 用户真实翻页或跳转时 captureAnchor() 会清空它，因此只保护紧接着的模式互切。
+var modeSwitchRecoveryOffset=null;
 // 视口左上角对应的"字符级"锚点。长段落跨多列时，元素级锚点的 left 是段首所在列，
 // 会让重排后跳回段首（如金庸全集的超长段落）；用 caret 定位到具体字符即可避免。
 function anchorNodeInReader(n){return !!(n&&root&&root.contains(n)&&!generatedTextNode(n));}
@@ -2458,6 +2476,56 @@ function caretRangeInReader(x,y){
     if(virtualPage)virtualPage.style.pointerEvents=oldVirtual;
   }
   return anchorNodeInReader(rng&&rng.startContainer)?rng:null;
+}
+// 仅用于“布局将要切换”的瞬间，找当前真正露在视口里的首个文字行。
+//
+// 不能用 marginTop+8 作为取点：EPUB 章节常在页顶放一段留白、题图或大标题，
+// 该坐标会落在空白处。此前取点失败后 runtime 会沿用旧的 curTopAnchor，
+// 于是用户明明停在第二页首行，单双页互切却被送回前面某一页。这里直接从
+// 文本 Range 的真实屏幕矩形反查 caret，确保锚点就是当前可见正文的第一行。
+// 双页以左页优先，符合“切换后原来的第一行仍在新左页第一行”的阅读顺序。
+function visibleTopTextAnchor(){
+  if(!root||!pager)return null;
+  var pr=viewRect(),walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null),node;
+  var best=null,dualBoundary=pr.left+(pr.width/2);
+  while((node=walker.nextNode())){
+    if(!anchorNodeInReader(node)||!(node.nodeValue||'').trim())continue;
+    var range=document.createRange();
+    try{range.selectNodeContents(node);}catch(_){continue;}
+    var rects=range.getClientRects();
+    for(var i=0;i<rects.length;i++){
+      var r=rects[i];
+      if(r.width<1||r.height<3||r.bottom<=pr.top+1||r.top>=pr.bottom-1||r.right<=pr.left+1||r.left>=pr.right-1)continue;
+      var pageRank=isDualPage()&&r.left>=dualBoundary?1:0;
+      if(!best||pageRank<best.pageRank||(pageRank===best.pageRank&&(r.top<best.rect.top-1||(Math.abs(r.top-best.rect.top)<=1&&r.left<best.rect.left)))){
+        best={node:node,rect:r,pageRank:pageRank};
+      }
+    }
+  }
+  if(!best)return null;
+  var r=best.rect;
+  // 尽量取这一行的第一个字符，而不是向右偏 6px；中文字宽较大，偏移过多会把
+  // 第二、第三个字符保存成锚点，模式来回切换时会产生可见的横向漂移。
+  var x=Math.max(pr.left+1,Math.min(pr.right-2,r.left+1));
+  var y=Math.max(pr.top+2,Math.min(pr.bottom-2,r.top+Math.min(Math.max(2,r.height/2),8)));
+  var rng=caretRangeInReader(x,y);
+  if(rng){
+    try{
+      var n=rng.startContainer,o=rng.startOffset;
+      if(n.nodeType===3&&o<n.nodeValue.length)rng.setEnd(n,o+1);
+      if(anchorNodeInReader(n))return {range:rng};
+    }catch(_){}
+  }
+  // 极少数 WebView 在文字装饰上不能给 caret，仍返回当前行的文本节点，
+  // 而不是退回旧缓存锚点。常规浏览器路径始终会走上面的字符级 caret。
+  var text=best.node.nodeValue||'',at=0;
+  while(at<text.length&&!text.charAt(at).trim())at++;
+  try{
+    var fallback=document.createRange();
+    fallback.setStart(best.node,Math.min(at,text.length));
+    fallback.setEnd(best.node,Math.min(text.length,at+1));
+    return {range:fallback};
+  }catch(_){return null;}
 }
 function topAnchor(){
   var hm=hMargins();
@@ -2521,45 +2589,6 @@ function anchorRect(a){
   }catch(_){r=null;}
   return r;
 }
-// 高亮范围允许起点落在前一个文本节点的末尾；阅读位置不行。单双页切换时
-// 临时分栏标记恰好会把文本在锚点处切成两段，若仍取前半段末尾，Range 的第一个
-// 矩形是旧栏的零宽边界，页码会被误算为章首。阅读锚点必须优先取边界后的首字符。
-function sourceAnchorRangeForOffset(offset){
-  var recs=sourceTextRecords();
-  var at=Math.max(0,parseInt(offset,10)||0);
-  for(var i=0;i<recs.length;i++){
-    var rec=recs[i],len=(rec.node.nodeValue||'').length;
-    if(at>=rec.end&&i<recs.length-1)continue;
-    if(at>rec.end)continue;
-    var start=Math.max(0,Math.min(len,at-rec.start));
-    var end=Math.min(len,start+1);
-    if(end===start&&i<recs.length-1)continue;
-    var range=document.createRange();
-    try{range.setStart(rec.node,start);range.setEnd(rec.node,end);return range;}catch(_){return null;}
-  }
-  return null;
-}
-// CSS 多栏在栏宽变化后只能把锚点放进“包含它的栏”，不能保证它正好位于栏顶。
-// 在单双页互切时放一个不含正文的强制分栏标记，才能保证用户原来看到的第一行
-// 仍然就是新视口的第一行；标记不参与原文偏移、高亮或搜索。
-function clearModeSwitchAnchor(){
-  if(!root)return;
-  var marks=root.querySelectorAll('.rr-mode-switch-anchor');
-  for(var i=0;i<marks.length;i++)marks[i].remove();
-  if(marks.length)sourceTextCache=null;
-}
-function forceModeSwitchAnchorColumn(offset){
-  if(!root||offset==null)return false;
-  var range=sourceAnchorRangeForOffset(offset);
-  if(!range)return false;
-  var mark=document.createElement('span');
-  mark.className='rr-mode-switch-anchor';
-  mark.setAttribute('aria-hidden','true');
-  mark.setAttribute('data-reader-generated','mode-switch-anchor');
-  try{range.collapse(true);range.insertNode(mark);}catch(_){return false;}
-  sourceTextCache=null;
-  return true;
-}
 function restoreScrollAnchorToBreak(anchor){
   if(!anchor||!isScrollMode()||!pager)return false;
   var sp=scrollPort();
@@ -2599,7 +2628,7 @@ function restoreScrollAnchorExact(anchor,offset){
   return true;
 }
 function relayout(opts){
-  if(!root)return;
+  if(!root)return {modeSwitchVerified:false};
   // 用"重排前"就记好的锚点（resize 时浏览器已先重排，临时再取就晚了）
   opts=opts||{};
   var anchor=anchorValid(opts.anchor)?opts.anchor:(anchorValid(curTopAnchor)?curTopAnchor:topAnchor());
@@ -2612,13 +2641,18 @@ function relayout(opts){
     var restoredRange=sourceAnchorRangeForOffset(anchorOffset);
     if(restoredRange)anchor={range:restoredRange};
   }
+  var forcedMarker=null;
   if(opts.forceAnchorColumn&&anchorOffset!=null){
     clearModeSwitchAnchor();
-    if(forceModeSwitchAnchorColumn(anchorOffset)){
+    forcedMarker=forceModeSwitchAnchorColumn(anchorOffset,!!opts.preserveLeadMedia);
+    if(forcedMarker){
       // 标记会增加一个物理栏，必须在它已进入 DOM 后重新计算页数和栏坐标。
       applyStyle();applyCols();
+      if(padModeSwitchAnchorToColumnTop(forcedMarker))applyCols();
       var columnStartRange=sourceAnchorRangeForOffset(anchorOffset);
-      if(columnStartRange)anchor={range:columnStartRange};
+      // 以强制分栏标记的真实物理栏定位；文字 Range 只作为下一次切换的字符锚点。
+      anchor={el:forcedMarker,modeSwitchMarker:true};
+      if(columnStartRange)curTopAnchor={range:columnStartRange};
     }
   }
   var dualAligned=opts.alignDualAnchor&&alignDualAnchorToLeftPage(anchor);
@@ -2629,10 +2663,16 @@ function relayout(opts){
     setViewOffset();
   }
   report();
-  // 切换分页/滚动时只能沿用切换前的字符锚点；若此处重新取页顶，
-  // 整页/滚动两套坐标的取整误差会在每次切换后累积成跳页。
+  var modeSwitchVerified=true;
+  if(opts.modeSwitch&&anchorOffset!=null){
+    modeSwitchVerified=modeSwitchAnchorAtVisibleTop(anchorOffset);
+    var stableRange=sourceAnchorRangeForOffset(anchorOffset);
+    if(stableRange)curTopAnchor={range:stableRange};
+  }
+  // 模式切换只沿用切换前的字符锚点，避免两套坐标的取整误差累积成跳页。
   if(!opts.modeSwitch)captureAnchor();
   scheduleNoteNumberDisplayRefresh();
+  return {modeSwitchVerified:modeSwitchVerified,anchorOffset:anchorOffset};
 }
 function nextPage(){
   consumeSideAnchorVirtualPage();

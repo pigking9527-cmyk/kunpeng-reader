@@ -7,7 +7,7 @@
 
   const ACTIONS = new Set([
     "layoutBusy", "progress", "ttsState", "ttsSynth", "dictPrefetch", "dictSpeak",
-    "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav",
+    "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav", "readerNavigated",
     "centerTap", "readerPerf", "ready", "readerAnchorReady", "measured", "pageCache", "downloadImage", "webSearch", "crossSearch",
     "semanticSearch", "aiReader", "translateText", "dict", "vocabAdd", "addHighlight",
     "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations",

@@ -170,15 +170,32 @@ window.addEventListener('message',function(e){
     // 切回整页时就会落到相邻页。只有纯图片页没有字符锚点时，才让图片
     // 预览锚点接管恢复，避免页面下方一张可见图片覆盖正常正文锚点。
     var storedOffsetBefore=anchorTextOffset(curTopAnchor);
-    // 任何模式互切都固定取切换瞬间视口左上角的正文。单双页的栏宽变化
-    // 不能改用中央阅读点：用户明确看到的第一行必须仍然落在新布局左页
-    // 的第一行。重排后 alignDualAnchorToLeftPage 会把该源字符所在物理栏
-    // 对齐成双页的左栏，而不是按旧页码除以二。
-    var anchor=topAnchor();
+    // 用户翻页、滚动停止和跳转后都会由 captureAnchor() 记录当前首行。
+    // 多栏正文和滚动分页遮罩仍会给被裁掉的文字返回 getClientRects()，
+    // 所以模式切换时重新扫描“可见文字”反而可能得到另一页。诊断日志中
+    // storedOffsetBefore=1292 正是截图首行，而几何扫描误报成了 896。
+    // 因此已记录的导航锚点是模式互切的唯一首选；只有尚未记录锚点时，
+    // 才用即时几何采样和普通 topAnchor() 兜底。
+    var anchor=null;
+    if(incomingModeChange&&storedOffsetBefore!=null&&anchorValid(curTopAnchor)){
+      anchor=curTopAnchor;
+    }else if(incomingModeChange&&typeof visibleTopTextAnchor==='function'){
+      anchor=visibleTopTextAnchor();
+    }
+    if(!anchorValid(anchor))anchor=topAnchor();
+    // 失败验证只用于本次切换后的诊断，绝不能在下一次切换时覆盖用户
+    // 已经翻到的新位置。旧逻辑会把一次失败的 offset 长期粘住：
+    // 用户在第二页切换双页，仍被强制拉回上一次失败所在的章首附近。
+    modeSwitchRecoveryOffset=null;
     if(!anchorValid(anchor)&&anchorValid(curTopAnchor))anchor=curTopAnchor;
     if(anchorValid(anchor))curTopAnchor=anchor;
     var anchorOffset=anchorTextOffset(anchor);
     var imageAnchor=anchorOffset==null?captureImageVisualAnchor():null;
+    // 章节题图是否应与标题一起保留，必须在旧布局仍然可见时判断。
+    // 若等到双页重排之后再检查，较宽的新 spread 可能重新露出章首题图，
+    // 从而误判当前第二页仍在章首并跳过首行强制对齐。
+    var preserveLeadMedia=incomingModeChange&&anchorOffset!=null&&typeof hasVisibleLeadMediaBeforeAnchor==='function'
+      ?hasVisibleLeadMediaBeforeAnchor(anchorOffset):false;
     var modeDiagSeq=incomingModeChange?modeSwitchDiagBegin(prevFlow,nextFlow,prevPageMode,nextPageMode,anchorOffset,storedOffsetBefore):0;
     if(prevFlow==='scroll'){
       scrollPagedView=false;
@@ -194,7 +211,10 @@ window.addEventListener('message',function(e){
     // 单页/双页共用同一套总页数；字体、边距、窗口或滚动模式改变才作废缓存。
     if(prevPageCountSig!==pageCountSig())invalidateMeasure();
     // 滚动容器已经按阅读边距内缩；恢复锚点时使用容器内偏移，避免重复叠加 marginTop。
-    relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode()&&!imageAnchor,scrollOffset:8,modeSwitch:flowChanged||pageModeChanged,alignDualAnchor:pageModeChanged&&isDualPage(),forceAnchorColumn:pageModeChanged&&!isScrollMode()});
+    var layoutResult=relayout({anchor:anchor,anchorOffset:anchorOffset,exactScroll:flowChanged&&isScrollMode()&&!imageAnchor,scrollOffset:8,modeSwitch:incomingModeChange,alignDualAnchor:incomingModeChange&&isDualPage(),forceAnchorColumn:incomingModeChange&&!isScrollMode(),preserveLeadMedia:preserveLeadMedia});
+    if(incomingModeChange){
+      modeSwitchRecoveryOffset=layoutResult&&layoutResult.modeSwitchVerified===false?anchorOffset:null;
+    }
     if(prevFontFamily!==S.fontFamily&&document.fonts&&document.fonts.ready){
       var selectedFont=S.fontFamily,fontAnchorOffset=anchorOffset;
       document.fonts.ready.then(function(){

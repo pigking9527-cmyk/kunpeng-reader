@@ -179,9 +179,19 @@ test("阅读设置提供三款按需下载并校验的开源中文字体", () =>
 });
 
 test("center taps toggle the whole toolbar even while an overlay is closing", () => {
-  assert.match(reader, /if \(e\.data\.centerTap\) toggleReaderToolbar\(\);/);
+  assert.match(reader, /if \(e\.data\.centerTap\) \{\s*toggleReaderToolbar\(\);\s*\}/);
+  assert.doesNotMatch(reader, /function toggleBookProgress\(/);
   assert.match(notes, /window\.toggleReaderToolbar\?\.\(\)/);
   assert.match(annotations, /if\(overlayOpen\)[\s\S]*parent\.postMessage\(\{centerTap:1\}/);
+});
+
+test("bottom progress and the reading toolbar share one visibility state", () => {
+  assert.match(shell, /classList\.toggle\("reader-controls-visible", controlsVisible\)/);
+  assert.match(html, /\.book-progress\s*\{[^}]*display:\s*none;[^}]*pointer-events:\s*none;/s);
+  assert.match(html, /body\.reader-controls-visible \.book-progress\s*\{[^}]*display:\s*flex;[^}]*pointer-events:\s*auto;/s);
+  assert.match(html, /body\.reader-controls-visible \.book-progress-thumb\s*\{[^}]*opacity:\s*1;[^}]*pointer-events:\s*auto;/s);
+  assert.doesNotMatch(html, /\.book-progress\.active/);
+  assert.doesNotMatch(settingsUi, /hideBookProgress/);
 });
 
 test("immersive mode hides controls but keeps reading and page-count status visible", () => {

@@ -205,6 +205,18 @@
         border-radius: 4px; background: rgba(0,0,0,0.3); cursor: pointer;
       }
       .vthumb:hover { background: rgba(0,0,0,0.5); }
+      /* 底部整本书进度与顶部阅读工具栏共用 reader-controls-visible。 */
+      .book-progress { position: absolute; left: 20px; right: 20px; bottom: 10px; z-index: 10; height: 30px; display: none; align-items: center; gap: 9px; padding: 0 11px; border-radius: 999px; box-sizing: border-box; background: rgba(232,235,241,.94); box-shadow: 0 4px 16px rgba(30,45,70,.15); pointer-events: none; }
+      body.reader-controls-visible .book-progress { display: flex; pointer-events: auto; }
+      .book-progress-track { position: relative; flex: 1 1 auto; height: 4px; min-width: 32px; border-radius: 999px; background: rgba(120,130,148,.34); cursor: pointer; transition: height .14s ease, background .14s ease; }
+      .book-progress:hover .book-progress-track, body.reader-controls-visible .book-progress-track { height: 6px; background: rgba(120,130,148,.44); }
+      .book-progress-fill { position: absolute; inset: 0 auto 0 0; width: 0%; border-radius: inherit; background: #438cff; pointer-events: none; }
+      .book-progress-thumb { position: absolute; left: 0%; top: 50%; width: 18px; height: 18px; border: 4px solid #438cff; border-radius: 50%; box-sizing: border-box; background: #fff; box-shadow: 0 1px 5px rgba(30,70,145,.5); transform: translate(-50%,-50%) scale(.35); opacity: 0; pointer-events: none; transition: transform .14s ease, opacity .14s ease; cursor: grab; }
+      body.reader-controls-visible .book-progress-thumb { opacity: 1; pointer-events: auto; transform: translate(-50%,-50%) scale(1); }
+      .book-progress-thumb:active { cursor: grabbing; }
+      .book-progress-restore { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #5d6b82; font: 20px/1 sans-serif; cursor: pointer; opacity: 0; transform: scale(.65); pointer-events: none; transition: opacity .14s ease, transform .14s ease, background .14s ease; }
+      .book-progress.can-restore .book-progress-restore { opacity: 1; transform: scale(1); pointer-events: auto; }
+      .book-progress-restore:hover { background: rgba(67,140,255,.12); color: #246bd7; }
       iframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
 
       .backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.18); z-index: 5; display: none; }
@@ -455,6 +467,7 @@
       :root { --ai-reader-width: clamp(320px, 29vw, 420px); }
       body.ai-reader-open #frame { width: calc(100% - var(--ai-reader-width)); }
       body.ai-reader-open #vbar { right: var(--ai-reader-width); }
+      body.ai-reader-open .book-progress { right: calc(var(--ai-reader-width) + 20px); }
       body.ai-reader-open #loading { right: var(--ai-reader-width); }
       .ai-reader-side {
         position: absolute; z-index: 9; top: 0; right: 0; bottom: 0; width: var(--ai-reader-width);
@@ -506,6 +519,9 @@
       body.theme-dark .ai-reader-history-item { background: #2e2e30; border-color: #414248; color: #ddd; }
       body.theme-dark .ai-reader-history-item:hover { background: #36373c; border-color: #5a82ca; }
       body.theme-dark .ai-reader-history-question { color: #bcd1ff; }
+      body.theme-dark .book-progress-track { background: rgba(210,220,240,.28); }
+      body.theme-dark .book-progress-restore { color: #b7c2d5; }
+      body.theme-dark .book-progress-restore:hover { background: rgba(100,158,255,.18); color: #c8dcff; }
       @media (max-width: 760px) {
         :root { --ai-reader-width: min(88vw, 360px); }
         body.ai-reader-open #frame { width: calc(100% - var(--ai-reader-width)); }
@@ -891,6 +907,13 @@
         <div id="vocab-pane" class="toc-pane vc-pane"></div>
       </aside>
       <div id="vbar" class="vbar"><div id="vthumb" class="vthumb"></div></div>
+      <div id="book-progress" class="book-progress" aria-label="整本书阅读进度">
+        <div id="book-progress-track" class="book-progress-track" role="slider" tabindex="0" aria-label="调整整本书阅读进度" aria-valuemin="1" aria-valuemax="100" aria-valuenow="1">
+          <div id="book-progress-fill" class="book-progress-fill"></div>
+          <div id="book-progress-thumb" class="book-progress-thumb"></div>
+        </div>
+        <button id="book-progress-restore" class="book-progress-restore" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置">↶</button>
+      </div>
     </div>
     <div id="info-modal" class="modal">
       <div class="modal-card">

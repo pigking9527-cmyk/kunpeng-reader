@@ -3,10 +3,12 @@ const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 let currentBookTitle = "";
 let currentBookId = "";
+let currentBookContentId = "";
 // 页面测量仍在阅读 WebView 中完成；该 id 把它纳入统一任务中心，
 // 以便暂停/取消和可观察进度不再是另一套孤立状态。
 let pageCountTaskId = "";
 window.currentBookId = "";
+window.currentBookContentId = "";
 window.ReaderAnimationSettings?.applyReader?.(document);
 function syncAnimationSettingsToPage(settings) {
   if (!frameReady || isPdf || typeof sendToPage !== "function") return;
@@ -196,7 +198,8 @@ function configureAiReaderProvider(provider, selectedModel = "", resetBase = fal
 }
 aiReaderProviderInput?.addEventListener("change", () => configureAiReaderProvider(aiReaderProviderInput.value, "", true));
 configureAiReaderProvider(aiReaderProviderInput?.value || "deepseek", "deepseek-v4-flash", false);
-function aiReaderHistoryKey() { return "aiReaderHistoryV1:" + String(window.currentBookId || currentBookId || "unknown"); }
+function aiReaderHistoryIdentity() { return String(window.currentBookContentId || currentBookContentId || window.currentBookId || currentBookId || "unknown"); }
+function aiReaderHistoryKey() { return "aiReaderHistoryV1:" + aiReaderHistoryIdentity(); }
 function aiReaderTaskLabel(task) { return task === "summary" ? "总结已读内容" : task === "mindmap" ? "生成脑图" : "提问"; }
 function aiReaderReadHistory() {
   try {
@@ -210,6 +213,23 @@ function aiReaderSaveHistory(entry) {
     entries.unshift(entry);
     localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(entries.slice(0, 40)));
   } catch (_) { /* 历史不可用不影响本次问答。 */ }
+  if (currentBookContentId) {
+    invoke("private_sync_history_merge", { request: { contentId: currentBookContentId, entries: [entry] } }).catch(() => {
+      // 未开启历史同步、旧数据库或离线均不影响本地智读。
+    });
+  }
+}
+async function aiReaderMergeSyncedHistory() {
+  if (!currentBookContentId) return;
+  try {
+    const remote = await invoke("private_sync_history_list", { contentId: currentBookContentId });
+    if (!Array.isArray(remote) || !remote.length) return;
+    const known = aiReaderReadHistory();
+    const merged = [...remote, ...known].filter((entry, index, all) => entry && all.findIndex((candidate) =>
+      candidate && candidate.at === entry.at && candidate.question === entry.question && candidate.content === entry.content
+    ) === index).slice(0, 40);
+    localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(merged));
+  } catch (_) { /* 同步历史不可用时继续使用本机历史。 */ }
 }
 function aiReaderRenderSources(sources) {
   if (!aiReaderSources) return;
@@ -315,6 +335,7 @@ function aiReaderShowHistory() {
 async function openAiReader(prefill = "", focusAnchor = null) {
   setAiReaderSide(true, focusAnchor);
   if (typeof closeSettings === "function") closeSettings();
+  aiReaderMergeSyncedHistory();
   aiReaderSelectedText = String(prefill || "").trim().slice(0, 2400);
   if (prefill && aiReaderQuestion) {
     aiReaderQuestion.value = `请结合已读内容解释这段文字：\n${String(prefill).trim().slice(0, 900)}`;
@@ -801,20 +822,95 @@ window.addEventListener("beforeunload", () => {
 });
 window.pauseReadTracking = pauseReadTracking;
 window.discardReadTracking = discardReadTracking;
-// ---- 右侧自定义垂直滚动条（代表全书进度）----
+// ---- 底部整本书进度条（与顶部阅读工具栏同现同隐）----
 const vbar = document.getElementById("vbar");
 const vthumb = document.getElementById("vthumb");
+const bookProgressEl = document.getElementById("book-progress");
+const bookProgressTrack = document.getElementById("book-progress-track");
+const bookProgressFill = document.getElementById("book-progress-fill");
+const bookProgressThumb = document.getElementById("book-progress-thumb");
+const bookProgressRestore = document.getElementById("book-progress-restore");
 let vdragging = false;
+let bookProgressDragging = false;
+let bookProgressRestorePoint = null;
+let bookProgressLastFrac = 0;
+let bookProgressLastSent = 0;
 
+function showBookProgress() {
+  ReaderShell.dispatch({ type: "SHOW_TOOLBAR" });
+  updateBookProgress();
+}
+function hideBookProgress() {
+  ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
+}
 function updateThumb() {
   const h = vbar.clientHeight;
-  if (h <= 0) return;
-  const th = 30;
-  let top = (curProgress / 100) * (h - th);
-  top = Math.max(0, Math.min(h - th, top));
-  vthumb.style.height = th + "px";
-  vthumb.style.top = top + "px";
+  if (h > 0) {
+    const th = 30;
+    let top = (curProgress / 100) * (h - th);
+    top = Math.max(0, Math.min(h - th, top));
+    vthumb.style.height = th + "px";
+    vthumb.style.top = top + "px";
+  }
+  updateBookProgress();
 }
+function updateBookProgress() {
+  if (!bookProgressTrack) return;
+  paintBookProgress(Math.max(0, Math.min(100, Number(curProgress) || 0)));
+  bookProgressEl.classList.toggle("can-restore", !!bookProgressRestorePoint);
+}
+function paintBookProgress(percent) {
+  if (!bookProgressTrack) return;
+  bookProgressFill.style.width = percent + "%";
+  bookProgressThumb.style.left = percent + "%";
+  bookProgressTrack.setAttribute("aria-valuenow", String(Math.max(1, Math.round(percent))));
+}
+function rememberBookProgressRestorePoint() {
+  if (bookProgressRestorePoint) return;
+  bookProgressRestorePoint = {
+    chapter: Math.max(0, Number(curChapter) || 0),
+    chFrac: Math.max(0, Math.min(1, Number(curChFrac) || 0)),
+    progress: Math.max(0, Math.min(100, Number(curProgress) || 0)),
+  };
+  updateBookProgress();
+}
+function bookProgressFracFromX(clientX) {
+  const rect = bookProgressTrack.getBoundingClientRect();
+  if (!rect.width) return 0.01;
+  return Math.max(0.01, Math.min(1, (clientX - rect.left) / rect.width));
+}
+function jumpByBookProgress(frac) {
+  if (isPdf) return;
+  rememberBookProgressRestorePoint();
+  const target = Math.max(0.01, Math.min(1, frac));
+  paintBookProgress(target * 100);
+  sendToPage({ gotoFrac: target });
+}
+bookProgressThumb?.addEventListener("mousedown", (e) => {
+  if (isPdf) return;
+  e.preventDefault();
+  e.stopPropagation();
+  showBookProgress();
+  rememberBookProgressRestorePoint();
+  bookProgressDragging = true;
+  bookProgressLastFrac = Math.max(0.01, Math.min(1, (Number(curProgress) || 0) / 100));
+  bookProgressLastSent = 0;
+  document.body.style.userSelect = "none";
+  frame.style.pointerEvents = "none";
+});
+bookProgressTrack?.addEventListener("mousedown", (e) => {
+  if (isPdf || e.target === bookProgressThumb) return;
+  e.preventDefault();
+  showBookProgress();
+  jumpByBookProgress(bookProgressFracFromX(e.clientX));
+});
+bookProgressRestore?.addEventListener("click", () => {
+  const point = bookProgressRestorePoint;
+  if (!point || isPdf) return;
+  bookProgressRestorePoint = null;
+  updateBookProgress();
+  sendToPage({ gotoChapter: point.chapter, chFrac: point.chFrac });
+});
 function fracFromY(clientY) {
   const rect = vbar.getBoundingClientRect();
   const th = vthumb.offsetHeight;
@@ -822,26 +918,36 @@ function fracFromY(clientY) {
   const range = rect.height - th;
   top = Math.max(0, Math.min(range, top));
   vthumb.style.top = top + "px";
-  return range > 0 ? top / range : 0; // 0~1 全书比例
+  return range > 0 ? top / range : 0;
 }
 vthumb.addEventListener("mousedown", (e) => {
   e.preventDefault();
   e.stopPropagation();
+  hideBookProgress();
   vdragging = true;
   document.body.style.userSelect = "none";
-  // 拖动期间让 iframe 不吃鼠标事件，否则光标移到正文上时 mousemove/mouseup 被 iframe 截走，拖动卡住
   frame.style.pointerEvents = "none";
 });
 vbar.addEventListener("mousedown", (e) => {
-  if (e.target === vthumb) return; // 点轨道空白处跳转
+  if (e.target === vthumb) return;
+  hideBookProgress();
   sendToPage({ gotoFrac: fracFromY(e.clientY) });
 });
-let vLastFrac = 0,
-  vLastSent = 0;
+let vLastFrac = 0;
+let vLastSent = 0;
 document.addEventListener("mousemove", (e) => {
+  if (bookProgressDragging) {
+    bookProgressLastFrac = bookProgressFracFromX(e.clientX);
+    paintBookProgress(bookProgressLastFrac * 100); // 拖动时先本地跟手，正文跳转节流处理
+    const now = Date.now();
+    if (now - bookProgressLastSent >= 40) {
+      bookProgressLastSent = now;
+      jumpByBookProgress(bookProgressLastFrac);
+    }
+    return;
+  }
   if (!vdragging) return;
-  vLastFrac = fracFromY(e.clientY); // 立即移动滑块（视觉跟手）
-  // 节流导航：跨章要加载，过密会卡；同章翻页很轻，40ms 足够平滑
+  vLastFrac = fracFromY(e.clientY);
   const now = Date.now();
   if (now - vLastSent >= 40) {
     vLastSent = now;
@@ -849,11 +955,18 @@ document.addEventListener("mousemove", (e) => {
   }
 });
 document.addEventListener("mouseup", () => {
+  if (bookProgressDragging) {
+    bookProgressDragging = false;
+    document.body.style.userSelect = "";
+    frame.style.pointerEvents = "";
+    jumpByBookProgress(bookProgressLastFrac); // 松手时确保精确落到最后位置
+    return;
+  }
   if (vdragging) {
     vdragging = false;
     document.body.style.userSelect = "";
-    frame.style.pointerEvents = ""; // 恢复正文交互
-    sendToPage({ gotoFrac: vLastFrac }); // 收尾：精确落到松手处
+    frame.style.pointerEvents = "";
+    sendToPage({ gotoFrac: vLastFrac });
   }
 });
 window.addEventListener("resize", () => {
@@ -865,7 +978,7 @@ window.addEventListener("resize", () => {
       });
     }
   }
-  updateThumb();
+  updateBookProgress();
 });
 
 // ---- 书籍信息弹窗 ----
@@ -1109,6 +1222,7 @@ window.addEventListener("message", (e) => {
     reportProgress();
     trackReadWords(e.data); // 累计真正读过的字数
     if (!vdragging && !isPdf) updateThumb();
+    else updateBookProgress();
     hideLoading(); // 当前章/页排版完成
     // 沉浸模式下：翻页/滚到新页 → 自动收起浮现的工具栏，避免挡住正文。
     // 但若设置面板/搜索框正开着，则不收——否则调节滑块时正文重排会改变页码签名，
@@ -1169,7 +1283,10 @@ window.addEventListener("message", (e) => {
     if (ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH) && !isSearchInputEditActive()) toggleSearch(false);
     ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
   }
-  if (e.data.centerTap) toggleReaderToolbar();
+  if (e.data.readerNavigated) hideBookProgress();
+  if (e.data.centerTap) {
+    toggleReaderToolbar();
+  }
   if (e.data.ready) {
     hideLoading();
     frameReady = true;
@@ -1460,6 +1577,9 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
     const info = await invoke("book_info");
     currentBookId = info.id || "";
     window.currentBookId = currentBookId;
+    currentBookContentId = info.content_id || "";
+    window.currentBookContentId = currentBookContentId;
+    aiReaderMergeSyncedHistory();
     ensureReadCreditCache();
     window.updateCrossReturnButton?.();
     window.consumePendingCrossSearch?.();

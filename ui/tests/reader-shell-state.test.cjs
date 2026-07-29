@@ -84,6 +84,7 @@ test("settings stay open across the contiguous panel and close after leave-retur
 
 test("sidebar, modal and toolbar rendering all come from shell state", () => {
   const { shell, elements, body } = boot();
+  assert.equal(body.classList.contains("reader-controls-visible"), true);
   shell.setOverlay(shell.OVERLAY.TOC, true);
   assert.equal(elements.toc.classList.contains("show"), true);
   assert.equal(elements.backdrop.classList.contains("show"), true);
@@ -100,12 +101,15 @@ test("sidebar, modal and toolbar rendering all come from shell state", () => {
   shell.dispatch({ type: "TOGGLE_TOOLBAR" });
   assert.equal(shell.getState().toolbar, shell.TOOLBAR.IMMERSIVE_HIDDEN);
   assert.equal(body.classList.contains("immersive"), true);
+  assert.equal(body.classList.contains("reader-controls-visible"), false);
   shell.dispatch({ type: "TOGGLE_TOOLBAR" });
   assert.equal(shell.getState().toolbar, shell.TOOLBAR.IMMERSIVE_PINNED);
   assert.equal(body.classList.contains("bar-show"), true);
+  assert.equal(body.classList.contains("reader-controls-visible"), true);
   shell.dispatch({ type: "TOOLBAR_POINTER_LEAVE" });
   assert.equal(shell.getState().toolbar, shell.TOOLBAR.IMMERSIVE_HIDDEN);
   assert.equal(body.classList.contains("bar-show"), false);
+  assert.equal(body.classList.contains("reader-controls-visible"), false);
 });
 
 test("managed shell modules do not mutate overlay visibility directly", () => {

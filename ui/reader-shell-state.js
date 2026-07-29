@@ -114,9 +114,16 @@
 
   function render(next) {
     const immersive = isImmersiveState(next.toolbar);
+    const controlsVisible =
+      next.toolbar === TOOLBAR.NORMAL ||
+      next.toolbar === TOOLBAR.IMMERSIVE_HOVER ||
+      next.toolbar === TOOLBAR.IMMERSIVE_PINNED;
     document.body.classList.toggle("immersive", immersive);
     document.body.classList.toggle("bar-hover", next.toolbar === TOOLBAR.IMMERSIVE_HOVER);
     document.body.classList.toggle("bar-show", next.toolbar === TOOLBAR.IMMERSIVE_PINNED);
+    // 顶部阅读工具栏和底部整书进度条必须由同一个状态驱动。
+    // 禁止两个组件各自 toggle，否则一次中部点击会把它们切成相反状态。
+    document.body.classList.toggle("reader-controls-visible", controlsVisible);
     overlayElements.forEach((element, name) => element?.classList.toggle("show", next.overlay === name));
     backdrop?.classList.toggle("show", next.overlay === OVERLAY.TOC || next.overlay === OVERLAY.VOCAB);
     if (next.overlay !== OVERLAY.VOCAB) vocabSettings?.classList.remove("show");
