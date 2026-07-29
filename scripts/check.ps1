@@ -214,7 +214,7 @@ try {
     throw "Linux desktop template missing: $desktopTemplate"
   }
   $desktopTemplateText = [System.IO.File]::ReadAllText((Join-Path $repo $desktopTemplate), [System.Text.Encoding]::UTF8)
-  if ($desktopTemplateText -notmatch '(?m)^Name=鲲鹏阅读器$') {
+  if ($desktopTemplateText -notmatch '(?m)^Name=鲲鹏阅读器\r?$') {
     throw 'Linux desktop entry must preserve the Chinese display name.'
   }
 
