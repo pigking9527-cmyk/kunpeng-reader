@@ -18,6 +18,8 @@ from urllib.parse import parse_qs, urlparse
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "entities.db"
 DB_PATH = os.environ.get("SYNC_DB_PATH", str(DEFAULT_DB_PATH))
+DEFAULT_UPDATE_MANIFEST_PATH = Path(__file__).resolve().parent / "updates.json"
+UPDATE_MANIFEST_PATH = Path(os.environ.get("UPDATE_MANIFEST_PATH", str(DEFAULT_UPDATE_MANIFEST_PATH)))
 LEGACY_TOKEN = os.environ.get("SYNC_TOKEN", "")
 HOST = os.environ.get("SYNC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SYNC_PORT", "8787"))
@@ -33,7 +35,10 @@ MAX_TOKENS_PER_USER = 5
 TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000
 MAX_CONCURRENT_REQUESTS = 32
 MAX_IGNORED_DETAILS = 100
-SUPPORTED_ENTITY_KINDS = frozenset(("book_state_v2", "vocab", "reading_bucket_v2"))
+SUPPORTED_ENTITY_KINDS = frozenset((
+    "book_state_v2", "vocab", "reading_bucket_v2",
+    "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1",
+))
 FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "pigking9527@gmail.com").strip()
 FEEDBACK_SMTP_HOST = os.environ.get("FEEDBACK_SMTP_HOST", "").strip()
 FEEDBACK_SMTP_PORT = int(os.environ.get("FEEDBACK_SMTP_PORT", "465"))
@@ -42,10 +47,60 @@ FEEDBACK_SMTP_PASSWORD = os.environ.get("FEEDBACK_SMTP_PASSWORD", "")
 FEEDBACK_SMTP_FROM = os.environ.get("FEEDBACK_SMTP_FROM", FEEDBACK_SMTP_USER).strip()
 FEEDBACK_SMTP_SSL = os.environ.get("FEEDBACK_SMTP_SSL", "1") != "0"
 FEEDBACK_SMTP_STARTTLS = os.environ.get("FEEDBACK_SMTP_STARTTLS", "0") == "1"
+ACCOUNT_SMTP_HOST = os.environ.get("ACCOUNT_SMTP_HOST", "").strip()
+ACCOUNT_SMTP_PORT = int(os.environ.get("ACCOUNT_SMTP_PORT", "465"))
+ACCOUNT_SMTP_USER = os.environ.get("ACCOUNT_SMTP_USER", "").strip()
+ACCOUNT_SMTP_PASSWORD = os.environ.get("ACCOUNT_SMTP_PASSWORD", "")
+ACCOUNT_SMTP_FROM = os.environ.get("ACCOUNT_SMTP_FROM", ACCOUNT_SMTP_USER).strip()
+ACCOUNT_SMTP_SSL = os.environ.get("ACCOUNT_SMTP_SSL", "1") != "0"
+ACCOUNT_SMTP_STARTTLS = os.environ.get("ACCOUNT_SMTP_STARTTLS", "0") == "1"
+ACCOUNT_CODE_TTL_MS = 15 * 60 * 1000
+ACCOUNT_CODE_ATTEMPTS = 8
 MAX_FEEDBACK_TEXT_CHARS = 20_000
 MAX_FEEDBACK_IMAGES = 3
 MAX_FEEDBACK_IMAGE_BYTES = 1024 * 1024
 MAX_FEEDBACK_ROWS = 2_000
+MAX_UPDATE_NOTES_CHARS = 40_000
+
+
+def _clean_update_text(value, limit=MAX_UPDATE_NOTES_CHARS):
+    return str(value or "").strip()[:limit]
+
+
+def load_update_manifest():
+    """Read the public release metadata only; a missing/bad file never affects sync."""
+    try:
+        raw = json.loads(UPDATE_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {"schema_version": 1, "latest": "", "releases": {}}
+    if not isinstance(raw, dict):
+        return {"schema_version": 1, "latest": "", "releases": {}}
+    releases = raw.get("releases")
+    if not isinstance(releases, dict):
+        releases = {}
+    cleaned = {}
+    for version, item in releases.items():
+        version = _clean_update_text(version, 64).lstrip("vV")
+        if not version or not isinstance(item, dict):
+            continue
+        cleaned[version] = {
+            "version": version,
+            "release_notes": _clean_update_text(item.get("release_notes")),
+            "url": _clean_update_text(item.get("url"), 2048),
+            "published_at": _clean_update_text(item.get("published_at"), 64),
+        }
+    latest = _clean_update_text(raw.get("latest"), 64).lstrip("vV")
+    if latest not in cleaned:
+        latest = ""
+    return {"schema_version": 1, "latest": latest, "releases": cleaned}
+
+
+def public_update_entry(version):
+    manifest = load_update_manifest()
+    entry = manifest["releases"].get(str(version or "").strip().lstrip("vV"))
+    if not entry:
+        return None
+    return {"ok": True, "schema_version": manifest["schema_version"], **entry}
 
 
 class RateLimiter:
@@ -116,6 +171,31 @@ def verify_password(password, stored):
         return hmac.compare_digest(b64d(digest), actual)
     except Exception:
         return False
+
+
+def hash_one_time_code(code):
+    return hashlib.sha256(str(code).encode("utf-8")).hexdigest()
+
+
+def new_one_time_code():
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def normalize_email(value):
+    email = str(value or "").strip().casefold()
+    if len(email) > 254 or "@" not in email or email.count("@") != 1:
+        return ""
+    local, domain = email.rsplit("@", 1)
+    if not local or not domain or "." not in domain or any(ch.isspace() for ch in email):
+        return ""
+    return email
+
+
+def mask_email(email):
+    local, _, domain = str(email or "").partition("@")
+    if not local or not domain:
+        return ""
+    return f"{local[:1]}***@{domain}"
 
 
 def new_token():
@@ -279,6 +359,47 @@ def migrate(conn):
             "ON feedback(emailed_at,created_at)"
         )
         record_migration(conn, 7)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_emails (
+                user_id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                verified_at INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_codes (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                email TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                used_at INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_account_codes_lookup "
+            "ON account_codes(user_id,purpose,email,expires_at)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS secret_bundle_epochs (
+                user_id TEXT PRIMARY KEY,
+                epoch INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        record_migration(conn, 8)
 
 
 def next_server_stamp(conn):
@@ -434,6 +555,118 @@ def feedback_mail_configured():
     return bool(FEEDBACK_TO and FEEDBACK_SMTP_HOST and FEEDBACK_SMTP_FROM)
 
 
+def account_mail_configured():
+    # Security mail intentionally does not inherit feedback's SMTP variables.
+    # A feedback relay is not proof that the account-recovery channel is ready.
+    return bool(ACCOUNT_SMTP_HOST and ACCOUNT_SMTP_FROM)
+
+
+def send_account_email(recipient, subject, text):
+    if not account_mail_configured():
+        raise RuntimeError("ACCOUNT_EMAIL_NOT_CONFIGURED")
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = ACCOUNT_SMTP_FROM
+    message["To"] = recipient
+    message.set_content(text)
+    smtp_cls = smtplib.SMTP_SSL if ACCOUNT_SMTP_SSL else smtplib.SMTP
+    with smtp_cls(ACCOUNT_SMTP_HOST, ACCOUNT_SMTP_PORT, timeout=20) as smtp:
+        if not ACCOUNT_SMTP_SSL and ACCOUNT_SMTP_STARTTLS:
+            smtp.starttls()
+        if ACCOUNT_SMTP_USER:
+            smtp.login(ACCOUNT_SMTP_USER, ACCOUNT_SMTP_PASSWORD)
+        smtp.send_message(message)
+
+
+def issue_account_code(conn, user_id, purpose, email):
+    now = now_ms()
+    code = new_one_time_code()
+    with conn:
+        conn.execute(
+            "DELETE FROM account_codes WHERE user_id=? AND purpose=? AND email=?",
+            (user_id, purpose, email),
+        )
+        conn.execute(
+            """
+            INSERT INTO account_codes(
+                id,user_id,purpose,email,code_hash,created_at,expires_at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                str(uuid.uuid4()), user_id, purpose, email, hash_one_time_code(code), now,
+                now + ACCOUNT_CODE_TTL_MS,
+            ),
+        )
+    return code
+
+
+def consume_account_code(conn, user_id, purpose, email, code):
+    row = conn.execute(
+        """
+        SELECT id,code_hash,expires_at,attempts,used_at FROM account_codes
+        WHERE user_id=? AND purpose=? AND email=?
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (user_id, purpose, email),
+    ).fetchone()
+    if not row or row["used_at"] or row["expires_at"] < now_ms():
+        return False
+    if row["attempts"] >= ACCOUNT_CODE_ATTEMPTS:
+        return False
+    if not hmac.compare_digest(row["code_hash"], hash_one_time_code(code)):
+        with conn:
+            conn.execute("UPDATE account_codes SET attempts=attempts+1 WHERE id=?", (row["id"],))
+        return False
+    with conn:
+        conn.execute("UPDATE account_codes SET used_at=? WHERE id=?", (now_ms(), row["id"]))
+    return True
+
+
+def secret_bundle_epoch(conn, user_id):
+    row = conn.execute(
+        "SELECT epoch FROM secret_bundle_epochs WHERE user_id=?", (user_id,)
+    ).fetchone()
+    if row:
+        return int(row["epoch"])
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO secret_bundle_epochs(user_id,epoch,updated_at) VALUES(?,?,?)",
+            (user_id, 1, now_ms()),
+        )
+    return 1
+
+
+def reset_secret_bundle_epoch(conn, user_id):
+    current = secret_bundle_epoch(conn, user_id)
+    next_epoch = current + 1
+    now = now_ms()
+    with conn:
+        conn.execute(
+            "UPDATE secret_bundle_epochs SET epoch=?,updated_at=? WHERE user_id=?",
+            (next_epoch, now, user_id),
+        )
+        existing = conn.execute(
+            "SELECT sync_version FROM entities WHERE user_id=? AND kind='secret_bundle_v1' AND id='default'",
+            (user_id,),
+        ).fetchone()
+        version = int(existing["sync_version"]) + 1 if existing else 1
+        stamp = next_server_stamp(conn)
+        conn.execute(
+            """
+            INSERT INTO entities(
+                user_id,kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(user_id,kind,id) DO UPDATE SET
+                json=excluded.json,updated_at=excluded.updated_at,deleted_at=excluded.deleted_at,
+                device_id=excluded.device_id,sync_version=excluded.sync_version,
+                server_updated_at=excluded.server_updated_at
+            """,
+            (user_id, "secret_bundle_v1", "default", "{}", now, now,
+             "server-secret-reset", version, stamp),
+        )
+    return next_epoch
+
+
 def decode_feedback_image(item):
     if not isinstance(item, dict):
         raise ValueError("INVALID_FEEDBACK_IMAGE")
@@ -563,7 +796,7 @@ class PayloadTooLarge(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ReaderSyncAPI/0.7"
+    server_version = "ReaderSyncAPI/0.8"
 
     def begin_push_transaction(self, conn):
         # `with conn` only commits/rolls back an already-open transaction; it
@@ -663,11 +896,30 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "schema_version": 2,
-                        "api_version": "0.7",
+                        "api_version": "0.8",
                         "server_time": now_ms(),
                         "service": "reader-sync",
                     },
                 )
+                return
+            if parsed.path == "/updates/latest":
+                if not self.allow_rate("updates_ip", self.client_ip(), 60, 60):
+                    return
+                entry = public_update_entry(load_update_manifest()["latest"])
+                if not entry:
+                    self.send_error_code(503, "UPDATE_MANIFEST_UNAVAILABLE")
+                    return
+                self.send_json(200, entry)
+                return
+            if parsed.path == "/updates/notes":
+                if not self.allow_rate("updates_ip", self.client_ip(), 60, 60):
+                    return
+                tag = (parse_qs(parsed.query).get("tag") or [""])[0]
+                entry = public_update_entry(tag)
+                if not entry:
+                    self.send_error_code(404, "RELEASE_NOT_FOUND")
+                    return
+                self.send_json(200, entry)
                 return
             if parsed.path == "/auth/me":
                 conn, user = self.require_user()
@@ -686,11 +938,17 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 conn.close()
                 return
+            if parsed.path == "/auth/security":
+                self.handle_auth_security()
+                return
             if parsed.path == "/sync/pull":
                 self.handle_pull(parsed)
                 return
             if parsed.path == "/sync/inventory":
                 self.handle_inventory()
+                return
+            if parsed.path == "/sync/secret-state":
+                self.handle_secret_state()
                 return
             self.send_error_code(404, "NOT_FOUND")
         finally:
@@ -712,15 +970,13 @@ class Handler(BaseHTTPRequestHandler):
             SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at
             FROM entities
             WHERE user_id=? AND server_updated_at>?
-              AND kind IN ('book_state_v2','vocab','reading_bucket_v2')
             ORDER BY server_updated_at ASC LIMIT ?
             """,
             (user["id"], cursor, limit),
         ).fetchall()
         next_cursor = rows[-1]["server_updated_at"] if rows else cursor
         has_more = conn.execute(
-            "SELECT 1 FROM entities WHERE user_id=? AND server_updated_at>? "
-            "AND kind IN ('book_state_v2','vocab','reading_bucket_v2') LIMIT 1",
+            "SELECT 1 FROM entities WHERE user_id=? AND server_updated_at>? LIMIT 1",
             (user["id"], next_cursor),
         ).fetchone() is not None
         self.send_json(
@@ -765,12 +1021,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_register()
             elif parsed.path == "/auth/login":
                 self.handle_login()
+            elif parsed.path == "/auth/email/start":
+                self.handle_email_start()
+            elif parsed.path == "/auth/email/confirm":
+                self.handle_email_confirm()
+            elif parsed.path == "/auth/email/rebind/old/start":
+                self.handle_email_rebind_old_start()
+            elif parsed.path == "/auth/email/rebind/old/confirm":
+                self.handle_email_rebind_old_confirm()
+            elif parsed.path == "/auth/email/rebind/new/start":
+                self.handle_email_rebind_new_start()
+            elif parsed.path == "/auth/email/rebind/new/confirm":
+                self.handle_email_rebind_new_confirm()
+            elif parsed.path == "/auth/password/change":
+                self.handle_password_change()
+            elif parsed.path == "/auth/password/reset/request":
+                self.handle_password_reset_request()
+            elif parsed.path == "/auth/password/reset/confirm":
+                self.handle_password_reset_confirm()
             elif parsed.path in ("/auth/logout", "/auth/revoke"):
                 self.handle_logout()
             elif parsed.path == "/sync/push":
                 self.handle_push()
             elif parsed.path == "/sync/reconcile":
                 self.handle_reconcile()
+            elif parsed.path == "/sync/secret-state/reset":
+                self.handle_secret_state_reset()
             elif parsed.path == "/feedback":
                 self.handle_feedback()
             else:
@@ -1017,6 +1293,372 @@ class Handler(BaseHTTPRequestHandler):
         conn.close()
         self.send_json(200, {"ok": True})
 
+    def handle_auth_security(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        row = conn.execute(
+            "SELECT email FROM account_emails WHERE user_id=?", (user["id"],)
+        ).fetchone()
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "emailBound": bool(row),
+                "email": mask_email(row["email"]) if row else "",
+                "recoveryAvailable": bool(row) and account_mail_configured(),
+                "mailConfigured": account_mail_configured(),
+            },
+        )
+        conn.close()
+
+    def handle_email_start(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("account_email_user", user["id"], 4, 3600):
+            conn.close()
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        email = normalize_email(body.get("email"))
+        if not email:
+            self.send_error_code(400, "INVALID_EMAIL", "请输入有效邮箱地址")
+            conn.close()
+            return
+        if not account_mail_configured():
+            self.send_error_code(503, "ACCOUNT_EMAIL_NOT_CONFIGURED", "账户安全邮件尚未配置")
+            conn.close()
+            return
+        existing = conn.execute(
+            "SELECT email FROM account_emails WHERE user_id=?", (user["id"],)
+        ).fetchone()
+        if existing:
+            self.send_error_code(
+                409,
+                "EMAIL_ALREADY_BOUND",
+                "已绑定验证邮箱；请先验证旧邮箱再更换新邮箱",
+            )
+            conn.close()
+            return
+        owner = conn.execute(
+            "SELECT user_id FROM account_emails WHERE email=?", (email,)
+        ).fetchone()
+        if owner and owner["user_id"] != user["id"]:
+            self.send_error_code(409, "EMAIL_ALREADY_BOUND")
+            conn.close()
+            return
+        code = issue_account_code(conn, user["id"], "bind_email", email)
+        try:
+            send_account_email(
+                email,
+                "鲲鹏阅读器：验证绑定邮箱",
+                f"你的邮箱验证码是：{code}\n\n验证码 15 分钟内有效，请勿转发给他人。",
+            )
+        except Exception:
+            self.send_error_code(503, "ACCOUNT_EMAIL_DELIVERY_FAILED", "验证码邮件暂时无法发送")
+            conn.close()
+            return
+        self.send_json(200, {"ok": True, "message": "验证码已发送"})
+        conn.close()
+
+    def handle_email_confirm(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        email = normalize_email(body.get("email"))
+        code = str(body.get("code", "") or "").strip()
+        existing = conn.execute(
+            "SELECT email FROM account_emails WHERE user_id=?", (user["id"],)
+        ).fetchone()
+        if existing:
+            self.send_error_code(
+                409,
+                "EMAIL_ALREADY_BOUND",
+                "已绑定验证邮箱；请先验证旧邮箱再更换新邮箱",
+            )
+            conn.close()
+            return
+        if not email or not code or not consume_account_code(conn, user["id"], "bind_email", email, code):
+            self.send_error_code(400, "INVALID_OR_EXPIRED_CODE")
+            conn.close()
+            return
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO account_emails(user_id,email,verified_at) VALUES(?,?,?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,verified_at=excluded.verified_at",
+                    (user["id"], email, now_ms()),
+                )
+        except sqlite3.IntegrityError:
+            self.send_error_code(409, "EMAIL_ALREADY_BOUND")
+            conn.close()
+            return
+        self.send_json(200, {"ok": True, "email": mask_email(email)})
+        conn.close()
+
+    def handle_email_rebind_old_start(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("account_rebind_user", user["id"], 4, 3600):
+            conn.close()
+            return
+        if not account_mail_configured():
+            self.send_error_code(503, "ACCOUNT_EMAIL_NOT_CONFIGURED", "账户安全邮件尚未配置")
+            conn.close()
+            return
+        existing = conn.execute(
+            "SELECT email FROM account_emails WHERE user_id=?", (user["id"],)
+        ).fetchone()
+        if not existing:
+            self.send_error_code(400, "EMAIL_NOT_BOUND", "当前账号尚未绑定验证邮箱")
+            conn.close()
+            return
+        email = existing["email"]
+        code = issue_account_code(conn, user["id"], "rebind_old", email)
+        try:
+            send_account_email(
+                email,
+                "鲲鹏阅读器：验证更换绑定邮箱",
+                f"你正在更换鲲鹏阅读器的绑定邮箱。旧邮箱验证码是：{code}\n\n"
+                "验证码 15 分钟内有效。若不是你本人操作，请修改登录密码。",
+            )
+        except Exception:
+            self.send_error_code(503, "ACCOUNT_EMAIL_DELIVERY_FAILED", "验证码邮件暂时无法发送")
+            conn.close()
+            return
+        self.send_json(200, {"ok": True, "email": mask_email(email)})
+        conn.close()
+
+    def handle_email_rebind_old_confirm(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        existing = conn.execute(
+            "SELECT email FROM account_emails WHERE user_id=?", (user["id"],)
+        ).fetchone()
+        code = str(body.get("code", "") or "").strip()
+        if not existing or not code or not consume_account_code(
+            conn, user["id"], "rebind_old", existing["email"], code
+        ):
+            self.send_error_code(400, "INVALID_OR_EXPIRED_CODE")
+            conn.close()
+            return
+        # This short-lived one-time credential proves control of the old mailbox.
+        # It is returned only over the authenticated TLS session and is consumed
+        # before a new-mail verification message is sent.
+        grant = issue_account_code(conn, user["id"], "rebind_grant", existing["email"])
+        self.send_json(200, {"ok": True, "rebindGrant": grant})
+        conn.close()
+
+    def handle_email_rebind_new_start(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("account_rebind_user", user["id"], 4, 3600):
+            conn.close()
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        if not account_mail_configured():
+            self.send_error_code(503, "ACCOUNT_EMAIL_NOT_CONFIGURED", "账户安全邮件尚未配置")
+            conn.close()
+            return
+        existing = conn.execute(
+            "SELECT email FROM account_emails WHERE user_id=?", (user["id"],)
+        ).fetchone()
+        email = normalize_email(body.get("email"))
+        grant = str(body.get("rebindGrant", "") or "").strip()
+        if not existing or not email or not grant:
+            self.send_error_code(400, "INVALID_REBIND_REQUEST", "请先验证旧邮箱并输入新邮箱")
+            conn.close()
+            return
+        if email == existing["email"]:
+            self.send_error_code(400, "EMAIL_UNCHANGED", "新邮箱不能与当前绑定邮箱相同")
+            conn.close()
+            return
+        owner = conn.execute(
+            "SELECT user_id FROM account_emails WHERE email=?", (email,)
+        ).fetchone()
+        if owner:
+            self.send_error_code(409, "EMAIL_ALREADY_BOUND")
+            conn.close()
+            return
+        if not consume_account_code(conn, user["id"], "rebind_grant", existing["email"], grant):
+            self.send_error_code(400, "INVALID_OR_EXPIRED_REBIND_GRANT", "旧邮箱验证已失效，请重新验证")
+            conn.close()
+            return
+        code = issue_account_code(conn, user["id"], "rebind_new", email)
+        try:
+            send_account_email(
+                email,
+                "鲲鹏阅读器：确认新的绑定邮箱",
+                f"你正在将鲲鹏阅读器的绑定邮箱更换为此邮箱。验证码是：{code}\n\n"
+                "验证码 15 分钟内有效。若不是你本人操作，请忽略此邮件。",
+            )
+        except Exception:
+            self.send_error_code(503, "ACCOUNT_EMAIL_DELIVERY_FAILED", "验证码邮件暂时无法发送")
+            conn.close()
+            return
+        self.send_json(200, {"ok": True, "message": "验证码已发送到新邮箱"})
+        conn.close()
+
+    def handle_email_rebind_new_confirm(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        email = normalize_email(body.get("email"))
+        code = str(body.get("code", "") or "").strip()
+        if not email or not code or not consume_account_code(conn, user["id"], "rebind_new", email, code):
+            self.send_error_code(400, "INVALID_OR_EXPIRED_CODE")
+            conn.close()
+            return
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE account_emails SET email=?,verified_at=? WHERE user_id=?",
+                    (email, now_ms(), user["id"]),
+                )
+        except sqlite3.IntegrityError:
+            self.send_error_code(409, "EMAIL_ALREADY_BOUND")
+            conn.close()
+            return
+        self.send_json(200, {"ok": True, "email": mask_email(email)})
+        conn.close()
+
+    def handle_password_change(self):
+        token = self.bearer_token()
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("password_change_user", user["id"], 5, 3600):
+            conn.close()
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        current = str(body.get("currentPassword", "") or "")
+        new_password = str(body.get("newPassword", "") or "")
+        if len(new_password) < 8:
+            self.send_error_code(400, "WEAK_PASSWORD", "新密码至少需要 8 个字符")
+            conn.close()
+            return
+        row = conn.execute("SELECT password_hash FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not row or not verify_password(current, row["password_hash"]):
+            self.send_error_code(401, "INVALID_CREDENTIALS")
+            conn.close()
+            return
+        with conn:
+            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new_password), user["id"]))
+            conn.execute("DELETE FROM tokens WHERE user_id=? AND token<>?", (user["id"], token))
+        self.send_json(200, {"ok": True, "message": "登录密码已修改，其他设备已退出登录"})
+        conn.close()
+
+    def handle_password_reset_request(self):
+        if not self.allow_rate("password_reset_ip", self.client_ip(), 4, 3600):
+            return
+        body = self.read_auth_body()
+        if body is None:
+            return
+        username = str(body.get("username", "") or "").strip()
+        email = normalize_email(body.get("email"))
+        # Always return the same result to avoid exposing whether an account or
+        # binding exists. The actual code is sent only on an exact match.
+        if not account_mail_configured() or not email:
+            self.send_json(200, {"ok": True, "message": "若账号已绑定该邮箱，验证码将发送至邮箱"})
+            return
+        conn = connect()
+        row = conn.execute(
+            """
+            SELECT users.id FROM users JOIN account_emails ON account_emails.user_id=users.id
+            WHERE users.username=? AND account_emails.email=?
+            """,
+            (username, email),
+        ).fetchone()
+        if row:
+            if not self.allow_rate("password_reset_user", row["id"], 4, 3600):
+                conn.close()
+                return
+            code = issue_account_code(conn, row["id"], "reset_password", email)
+            try:
+                send_account_email(
+                    email,
+                    "鲲鹏阅读器：重置登录密码",
+                    f"你的密码重置验证码是：{code}\n\n验证码 15 分钟内有效；若不是你本人操作，请忽略此邮件。",
+                )
+            except Exception:
+                # Do not turn mail transport state into account enumeration.
+                pass
+        conn.close()
+        self.send_json(200, {"ok": True, "message": "若账号已绑定该邮箱，验证码将发送至邮箱"})
+
+    def handle_password_reset_confirm(self):
+        if not self.allow_rate("password_reset_confirm_ip", self.client_ip(), 8, 3600):
+            return
+        body = self.read_auth_body()
+        if body is None:
+            return
+        username = str(body.get("username", "") or "").strip()
+        code = str(body.get("code", "") or "").strip()
+        new_password = str(body.get("newPassword", "") or "")
+        if len(new_password) < 8:
+            self.send_error_code(400, "WEAK_PASSWORD", "新密码至少需要 8 个字符")
+            return
+        conn = connect()
+        row = conn.execute(
+            """
+            SELECT users.id,users.username,account_emails.email FROM users
+            JOIN account_emails ON account_emails.user_id=users.id WHERE users.username=?
+            """,
+            (username,),
+        ).fetchone()
+        if not row or not consume_account_code(conn, row["id"], "reset_password", row["email"], code):
+            self.send_error_code(400, "INVALID_OR_EXPIRED_CODE")
+            conn.close()
+            return
+        with conn:
+            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new_password), row["id"]))
+            conn.execute("DELETE FROM tokens WHERE user_id=?", (row["id"],))
+            token = issue_token(conn, row["id"])
+        self.send_json(200, {"ok": True, "token": token, "user": {"id": row["id"], "username": row["username"]}})
+        conn.close()
+
+    def handle_secret_state(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        self.send_json(200, {"ok": True, "secretBundleEpoch": secret_bundle_epoch(conn, user["id"])})
+        conn.close()
+
+    def handle_secret_state_reset(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("secret_reset_user", user["id"], 4, 3600):
+            conn.close()
+            return
+        epoch = reset_secret_bundle_epoch(conn, user["id"])
+        self.send_json(200, {"ok": True, "secretBundleEpoch": epoch})
+        conn.close()
+
     def handle_push(self):
         conn, user = self.require_user()
         if not user:
@@ -1128,6 +1770,23 @@ class Handler(BaseHTTPRequestHandler):
                     "FROM entities WHERE user_id=? AND kind=? AND id=?",
                     (user["id"], kind, entity_id),
                 ).fetchone()
+                if kind == "secret_bundle_v1" and not normalized["deleted_at"]:
+                    # Version 1 secret envelopes had no epoch. Treat them as the
+                    # initial epoch so existing encrypted bundles keep working
+                    # until their owner explicitly revokes them.
+                    payload_epoch = safe_int(payload.get("epoch"), 1) if isinstance(payload, dict) else 0
+                    current_epoch = secret_bundle_epoch(conn, user["id"])
+                    if payload_epoch != current_epoch:
+                        ignored_count += 1
+                        record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "SECRET_EPOCH_MISMATCH"})
+                        # Treat an obsolete encrypted package as an authoritative
+                        # conflict, not an acknowledged rejection. New clients
+                        # therefore install the reset tombstone and never retry
+                        # a stale offline secret bundle forever.
+                        dispositions.append({**input_identity, "status": "conflict", "error": "SECRET_EPOCH_MISMATCH"})
+                        if existing:
+                            authoritative_entities.append(row_to_entity(existing))
+                        continue
                 if not is_newer(normalized, existing):
                     ignored_count += 1
                     record_ignored(ignored, {"kind": kind, "id": entity_id, "reason": "CONFLICT_IGNORED"})

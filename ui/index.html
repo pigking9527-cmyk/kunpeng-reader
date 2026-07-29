@@ -32,12 +32,24 @@
             <div class="fp-set-actions">
               <button id="sync-register" class="btn-plain" type="button">注册</button>
               <button id="sync-login" class="btn-plain" type="button">登录</button>
+              <button id="sync-password-reset-open" class="btn-plain" type="button">找回密码</button>
             </div>
+            <section id="sync-password-reset" class="account-security-panel" hidden>
+              <strong>找回登录密码</strong>
+              <small>仅已绑定并验证邮箱的账户可找回；重置后其他设备会退出登录。</small>
+              <input id="sync-reset-email" type="email" autocomplete="email" placeholder="已绑定的邮箱" />
+              <div class="account-security-actions"><button id="sync-reset-request" class="btn-plain" type="button">发送验证码</button></div>
+              <input id="sync-reset-code" inputmode="numeric" autocomplete="one-time-code" placeholder="邮箱验证码" />
+              <input id="sync-reset-new-password" type="password" autocomplete="new-password" placeholder="新登录密码（至少 8 个字符）" />
+              <div class="account-security-actions"><button id="sync-reset-confirm" class="btn-plain" type="button">确认重置并登录</button></div>
+              <div id="sync-reset-status" class="private-sync-status"></div>
+            </section>
           </div>
           <div id="sync-account" class="sync-account">
             <span id="sync-account-name">账号：</span>
             <span class="sync-account-actions">
               <button id="sync-now" class="sync-now-btn" type="button">同步</button>
+              <button id="account-security-open" class="btn-plain" type="button">账户安全</button>
               <button id="sync-logout" class="sync-logout-btn" type="button">退出登录</button>
             </span>
           </div>
@@ -49,11 +61,87 @@
               <span>生词本</span>
               <span>阅读统计</span>
             </div>
+            <div class="private-sync-row">
+              <div>
+                <strong>智读与翻译</strong>
+                <small>配置默认同步；历史和密钥由你决定。</small>
+              </div>
+              <button id="private-sync-open" class="btn-plain" type="button">同步设置</button>
+            </div>
             <div id="sync-last-time" class="sync-last-time">最近同步：尚未同步</div>
             <div id="sync-last-counts" class="sync-last-counts">登录后可跨设备同步；图书文件本身不会上传</div>
           </section>
           <div id="sync-status" class="sync-status">尚未同步</div>
         </div>
+
+        <section id="account-security-panel" class="account-subpage account-security-panel" hidden aria-label="账户安全" aria-modal="true">
+            <div class="private-sync-header"><strong>账户安全</strong><button id="account-security-close" class="icon-btn" type="button" aria-label="关闭">×</button></div>
+            <p id="account-security-summary" class="private-sync-note">读取账户安全状态中…</p>
+            <div class="account-security-disclosure">
+              <button id="account-email-toggle" class="account-security-toggle" type="button" aria-expanded="false">绑定邮箱</button>
+              <div id="account-email-form" class="account-security-form" hidden>
+                <div id="account-email-bind-flow">
+                  <label class="account-security-field"><span>邮箱</span><input id="account-email" type="email" autocomplete="email" placeholder="用于找回登录密码" /></label>
+                  <div class="account-security-actions"><button id="account-email-start" class="btn-plain" type="button">发送验证码</button></div>
+                  <label class="account-security-field"><span>验证码</span><input id="account-email-code" inputmode="numeric" autocomplete="one-time-code" /></label>
+                  <div class="account-security-actions"><button id="account-email-confirm" class="btn-plain" type="button">确认绑定</button></div>
+                </div>
+                <div id="account-email-rebind-flow" hidden>
+                  <p id="account-email-rebind-note" class="account-security-help">为保护账号，先向当前绑定邮箱发送验证码。</p>
+                  <div id="account-email-old-step">
+                    <div class="account-security-actions"><button id="account-email-old-start" class="btn-plain" type="button">发送旧邮箱验证码</button></div>
+                    <label class="account-security-field account-security-code-field"><span>旧邮箱验证码</span><input id="account-email-old-code" inputmode="numeric" autocomplete="one-time-code" /></label>
+                    <div class="account-security-actions"><button id="account-email-old-confirm" class="btn-plain" type="button">验证旧邮箱</button></div>
+                  </div>
+                  <div id="account-email-new-step" hidden>
+                    <p class="account-security-help">旧邮箱已验证。现在验证新的绑定邮箱。</p>
+                    <label class="account-security-field"><span>新邮箱</span><input id="account-email-new" type="email" autocomplete="email" placeholder="新的验证邮箱" /></label>
+                    <div class="account-security-actions"><button id="account-email-new-start" class="btn-plain" type="button">发送新邮箱验证码</button></div>
+                    <label class="account-security-field account-security-code-field"><span>新邮箱验证码</span><input id="account-email-new-code" inputmode="numeric" autocomplete="one-time-code" /></label>
+                    <div class="account-security-actions"><button id="account-email-new-confirm" class="btn-plain" type="button">确认更换</button></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="account-security-disclosure">
+              <button id="account-password-toggle" class="account-security-toggle" type="button" aria-expanded="false">修改登录密码</button>
+              <div id="account-password-form" class="account-security-form" hidden>
+                <label class="account-security-field"><span>当前登录密码</span><input id="account-current-password" type="password" autocomplete="current-password" /></label>
+                <label class="account-security-field"><span>新登录密码</span><input id="account-new-password" type="password" autocomplete="new-password" placeholder="至少 8 个字符" /></label>
+                <div class="account-security-actions"><button id="account-password-change" class="btn-plain" type="button">确认修改</button></div>
+              </div>
+            </div>
+            <div class="account-security-disclosure">
+              <button id="account-password-recover-toggle" class="account-security-toggle" type="button" aria-expanded="false">找回登录密码</button>
+              <div id="account-password-recover-form" class="account-security-form" hidden>
+                <p class="account-security-help">向已绑定邮箱发送验证码后，可直接设置新密码；重置后其他设备会退出登录。</p>
+                <label class="account-security-field"><span>绑定邮箱</span><input id="account-password-recover-email" type="email" autocomplete="email" placeholder="已绑定的邮箱" /></label>
+                <div class="account-security-actions"><button id="account-password-recover-start" class="btn-plain" type="button">发送验证码</button></div>
+                <label class="account-security-field account-security-code-field"><span>验证码</span><input id="account-password-recover-code" inputmode="numeric" autocomplete="one-time-code" /></label>
+                <label class="account-security-field"><span>新登录密码</span><input id="account-password-recover-new" type="password" autocomplete="new-password" placeholder="至少 8 个字符" /></label>
+                <div class="account-security-actions"><button id="account-password-recover-confirm" class="btn-plain" type="button">确认重置</button></div>
+              </div>
+            </div>
+            <div id="account-security-status" class="private-sync-status"></div>
+        </section>
+
+        <section id="private-sync-panel" class="account-subpage private-sync-panel" hidden aria-label="智读与翻译同步设置" aria-modal="true">
+            <div class="private-sync-header">
+              <strong>智读与翻译同步</strong>
+              <button id="private-sync-close" class="icon-btn" type="button" aria-label="关闭">×</button>
+            </div>
+            <p class="private-sync-note">普通配置不含 API Key，会跟随账户同步。历史与密钥默认只留在本机。</p>
+            <label class="private-sync-option"><span><b>同步服务配置</b><small>智读服务商、接口地址、模型名和翻译服务偏好</small></span><input id="private-sync-configs" type="checkbox" /></label>
+            <label class="private-sync-option"><span><b>同步智读历史</b><small>按同一本书的文件内容匹配，最多保留 40 条问答</small></span><input id="private-sync-history" type="checkbox" /></label>
+            <label class="private-sync-option"><span><b>同步 API Key 与翻译密钥</b><small>须设置同步密码，服务器仅保存加密密文</small></span><input id="private-sync-secrets" type="checkbox" /></label>
+            <div class="private-sync-password">
+              <input id="private-sync-password" type="password" autocomplete="new-password" placeholder="设置或输入同步密码（至少 10 个字）" />
+              <button id="private-sync-save-password" class="btn-plain" type="button">加密并同步密钥</button>
+              <button id="private-sync-unlock" class="btn-plain" type="button">解锁云端密钥</button>
+            </div>
+            <div class="private-sync-danger"><button id="private-sync-forget" class="btn-plain" type="button">遗忘同步密码并撤销云端密钥</button><small>同步密码无法找回；本机 API Key 不会被删除，可用新密码重新加密。</small></div>
+            <div id="private-sync-status" class="private-sync-status"></div>
+        </section>
       </div>
 
       <div id="del-group" class="del-group">
@@ -254,7 +342,7 @@
           <label class="switch"><input type="checkbox" id="set-cover-title" /><span class="slider"></span></label>
         </div>
         <div class="fp-set-row">
-          <span id="animation-settings-label">动画</span>
+          <span>动画</span>
           <span class="fp-set-tail">
             <button id="animation-gear" class="fp-row-gear" title="设置界面动画">⚙</button>
           </span>
@@ -305,42 +393,33 @@
     <div id="animation-settings-modal" class="modal">
       <div class="modal-card animation-settings-card">
         <div class="modal-head"><span>动画设置</span><button id="animation-settings-close" class="btn-plain">✕</button></div>
-        <div class="fp-set-row">
-          <span>搜索框弹出动画</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="searchPopup" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span>全书架搜索按键动画</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="shelfSearchToggle" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span>常用设置开关动画</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="commonSettingsSwitch" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span>漏斗筛选按键动画</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="filterButton" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span>添加批注动画</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="annotationAdd" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span>阅读页设置项动画（双页、滚动模式）</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="readingMode" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span>翻页动画</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="pageTurn" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span>高亮菜单设置页动画</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="highlightSettings" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span>收藏／书单拖拽排序动画</span>
-          <label class="switch"><input type="checkbox" data-animation-setting="booklistSort" /><span class="slider"></span></label>
-        </div>
+        <section class="animation-setting-group" data-animation-group-section="mainWindow">
+          <div class="fp-set-row animation-group-head">
+            <span>主窗口动画</span>
+            <label class="switch"><input type="checkbox" data-animation-group="mainWindow" aria-label="启用主窗口动画" /><span class="slider"></span></label>
+          </div>
+          <p class="animation-group-help">关闭后会关闭主窗口全部动效；单独开启任意一项会自动启用本组。</p>
+          <div class="animation-group-options">
+            <div class="fp-set-row"><span>搜索框弹出动画</span><label class="switch"><input type="checkbox" data-animation-setting="searchPopup" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span>全书架搜索按键动画</span><label class="switch"><input type="checkbox" data-animation-setting="shelfSearchToggle" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span>常用设置开关动画</span><label class="switch"><input type="checkbox" data-animation-setting="commonSettingsSwitch" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span>漏斗筛选按键动画</span><label class="switch"><input type="checkbox" data-animation-setting="filterButton" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span>收藏／书单拖拽排序动画</span><label class="switch"><input type="checkbox" data-animation-setting="booklistSort" /><span class="slider"></span></label></div>
+          </div>
+        </section>
+        <section class="animation-setting-group" data-animation-group-section="readerPage">
+          <div class="fp-set-row animation-group-head">
+            <span>书页动画</span>
+            <label class="switch"><input type="checkbox" data-animation-group="readerPage" aria-label="启用书页动画" /><span class="slider"></span></label>
+          </div>
+          <p class="animation-group-help">关闭后会关闭阅读页全部动效；单独开启任意一项会自动启用本组。</p>
+          <div class="animation-group-options">
+            <div class="fp-set-row"><span>添加批注动画</span><label class="switch"><input type="checkbox" data-animation-setting="annotationAdd" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span>阅读页设置项动画（双页、滚动模式）</span><label class="switch"><input type="checkbox" data-animation-setting="readingMode" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span>翻页动画</span><label class="switch"><input type="checkbox" data-animation-setting="pageTurn" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span>高亮菜单设置页动画</span><label class="switch"><input type="checkbox" data-animation-setting="highlightSettings" /><span class="slider"></span></label></div>
+          </div>
+        </section>
       </div>
     </div>
     <div id="import-dirs-modal" class="modal">
@@ -602,6 +681,7 @@
     <script src="startup-perf.js"></script>
     <script src="titlebar.js"></script>
     <script src="animation-settings.js"></script>
+    <script src="animation-settings-ui.js"></script>
     <script src="semantic-status-cache.js"></script>
     <script src="semantic-ui.js"></script>
     <script src="sync-ui.js"></script>

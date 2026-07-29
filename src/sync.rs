@@ -3,7 +3,7 @@ use crate::{
     data_migration, db, secret_store, AppState, DEFAULT_SYNC_URL,
 };
 use reader_core::sync::sync_scope_id;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -421,7 +421,7 @@ fn inventory_matches(local: &[db::SyncEntity], remote: &SyncInventoryResponse) -
         && sync_inventory_digest(local).eq_ignore_ascii_case(&remote.inventory_digest)
 }
 
-fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
+pub(crate) fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
     let url = db
         .metadata("sync_url")
         .unwrap_or_else(|| DEFAULT_SYNC_URL.to_string());
@@ -478,7 +478,7 @@ fn is_local_http_base(base: &str) -> bool {
         || base.starts_with("http://[::1]:")
 }
 
-fn normalize_sync_base(input: &str) -> Result<String, String> {
+pub(crate) fn normalize_sync_base(input: &str) -> Result<String, String> {
     let base = input.trim().trim_end_matches('/').to_string();
     if base.is_empty() {
         return Err("请先在同步设置中填写 HTTPS 服务器地址".into());
@@ -497,6 +497,24 @@ fn normalize_sync_base(input: &str) -> Result<String, String> {
         return Err("同步服务器必须使用 HTTPS；只有本机调试地址允许 HTTP".into());
     }
     Err("同步服务器地址必须以 https:// 开头".into())
+}
+
+fn normalize_auth_base(input: &str) -> Result<String, String> {
+    let value = if input.trim().is_empty() {
+        DEFAULT_SYNC_URL
+    } else {
+        input
+    };
+    normalize_sync_base(value)
+}
+
+fn auth_base_from_state(state: &AppState, requested: &str) -> Result<String, String> {
+    if !requested.trim().is_empty() {
+        return normalize_auth_base(requested);
+    }
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    normalize_auth_base(&sync_settings_from_db(db).url)
 }
 
 fn account_sync_scope(base: &str, user_id: &str) -> Result<String, String> {
@@ -768,7 +786,7 @@ fn auth_request_inner(
     username: String,
     password: String,
 ) -> Result<AuthResponse, String> {
-    let base = normalize_sync_base(&url)?;
+    let base = normalize_auth_base(&url)?;
     let username = username.trim().to_string();
     if username.is_empty() || password.is_empty() {
         return Err("请输入账号和密码".into());
@@ -926,6 +944,325 @@ pub(crate) async fn auth_login(
     })
     .await
     .map_err(|e| format!("认证任务失败：{e}"))?
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthSecurityStatus {
+    pub email_bound: bool,
+    pub email: String,
+    pub recovery_available: bool,
+    pub mail_configured: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EmailBindRequest {
+    pub email: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EmailConfirmRequest {
+    pub email: String,
+    pub code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EmailCodeRequest {
+    pub code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EmailRebindNewRequest {
+    pub email: String,
+    pub rebind_grant: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmailRebindGrantResponse {
+    rebind_grant: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PasswordChangeRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PasswordResetRequest {
+    pub url: String,
+    pub username: String,
+    pub email: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PasswordResetConfirmRequest {
+    pub url: String,
+    pub username: String,
+    pub code: String,
+    pub new_password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretBundleState {
+    pub secret_bundle_epoch: u64,
+}
+
+fn authenticated_endpoint<T: DeserializeOwned>(
+    state: &AppState,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<T, String> {
+    let settings = {
+        let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        sync_settings_from_db(db)
+    };
+    let base = normalize_sync_base(&settings.url)?;
+    if settings.token.trim().is_empty() {
+        return Err("请先登录账号".into());
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(SYNC_REQUEST_TIMEOUT))
+        .build()
+        .into();
+    let request = if let Some(body) = body {
+        agent
+            .post(&format!("{base}{path}"))
+            .header("Authorization", &format!("Bearer {}", settings.token))
+            .header("Content-Type", "application/json")
+            .send_json(body)
+    } else {
+        agent
+            .get(&format!("{base}{path}"))
+            .header("Authorization", &format!("Bearer {}", settings.token))
+            .call()
+    };
+    request
+        .map_err(|e| format!("账户安全请求失败：{e}"))?
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("账户安全返回解析失败：{e}"))
+}
+
+pub(crate) fn private_secret_bundle_state(state: &AppState) -> Result<SecretBundleState, String> {
+    authenticated_endpoint(state, "/sync/secret-state", None)
+}
+
+pub(crate) fn reset_private_secret_bundle_state(
+    state: &AppState,
+) -> Result<SecretBundleState, String> {
+    authenticated_endpoint(
+        state,
+        "/sync/secret-state/reset",
+        Some(serde_json::json!({})),
+    )
+}
+
+#[tauri::command]
+pub(crate) async fn auth_security_status(
+    app: tauri::AppHandle,
+) -> Result<AuthSecurityStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        authenticated_endpoint(app.state::<AppState>().inner(), "/auth/security", None)
+    })
+    .await
+    .map_err(|e| format!("账户安全任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_bind_email_start(
+    app: tauri::AppHandle,
+    request: EmailBindRequest,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _: serde_json::Value = authenticated_endpoint(
+            app.state::<AppState>().inner(),
+            "/auth/email/start",
+            Some(serde_json::json!({"email": request.email})),
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("绑定邮箱任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_bind_email_confirm(
+    app: tauri::AppHandle,
+    request: EmailConfirmRequest,
+) -> Result<AuthSecurityStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _: serde_json::Value = authenticated_endpoint(
+            app.state::<AppState>().inner(),
+            "/auth/email/confirm",
+            Some(serde_json::json!({"email": request.email, "code": request.code})),
+        )?;
+        authenticated_endpoint(app.state::<AppState>().inner(), "/auth/security", None)
+    })
+    .await
+    .map_err(|e| format!("确认邮箱任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_rebind_email_old_start(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _: serde_json::Value = authenticated_endpoint(
+            app.state::<AppState>().inner(),
+            "/auth/email/rebind/old/start",
+            Some(serde_json::json!({})),
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("验证旧邮箱任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_rebind_email_old_confirm(
+    app: tauri::AppHandle,
+    request: EmailCodeRequest,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let response: EmailRebindGrantResponse = authenticated_endpoint(
+            app.state::<AppState>().inner(),
+            "/auth/email/rebind/old/confirm",
+            Some(serde_json::json!({"code": request.code})),
+        )?;
+        Ok(response.rebind_grant)
+    })
+    .await
+    .map_err(|e| format!("确认旧邮箱失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_rebind_email_new_start(
+    app: tauri::AppHandle,
+    request: EmailRebindNewRequest,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _: serde_json::Value = authenticated_endpoint(
+            app.state::<AppState>().inner(),
+            "/auth/email/rebind/new/start",
+            Some(serde_json::json!({
+                "email": request.email,
+                "rebindGrant": request.rebind_grant,
+            })),
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("发送新邮箱验证码失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_rebind_email_new_confirm(
+    app: tauri::AppHandle,
+    request: EmailConfirmRequest,
+) -> Result<AuthSecurityStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _: serde_json::Value = authenticated_endpoint(
+            app.state::<AppState>().inner(),
+            "/auth/email/rebind/new/confirm",
+            Some(serde_json::json!({"email": request.email, "code": request.code})),
+        )?;
+        authenticated_endpoint(app.state::<AppState>().inner(), "/auth/security", None)
+    })
+    .await
+    .map_err(|e| format!("确认新邮箱失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_change_password(
+    app: tauri::AppHandle,
+    request: PasswordChangeRequest,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _: serde_json::Value = authenticated_endpoint(
+            app.state::<AppState>().inner(),
+            "/auth/password/change",
+            Some(serde_json::json!({
+                "currentPassword": request.current_password,
+                "newPassword": request.new_password,
+            })),
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("修改密码任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_request_password_reset(
+    app: tauri::AppHandle,
+    request: PasswordResetRequest,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let base = auth_base_from_state(state.inner(), &request.url)?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(SYNC_REQUEST_TIMEOUT))
+            .build()
+            .into();
+        let _: serde_json::Value = agent
+            .post(&format!("{base}/auth/password/reset/request"))
+            .header("Content-Type", "application/json")
+            .send_json(serde_json::json!({"username": request.username, "email": request.email}))
+            .map_err(|e| format!("找回密码请求失败：{e}"))?
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("找回密码返回解析失败：{e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("找回密码任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_confirm_password_reset(
+    app: tauri::AppHandle,
+    request: PasswordResetConfirmRequest,
+) -> Result<AuthResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let base = auth_base_from_state(state.inner(), &request.url)?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(SYNC_REQUEST_TIMEOUT))
+            .build()
+            .into();
+        let response: AuthResponse = agent
+            .post(&format!("{base}/auth/password/reset/confirm"))
+            .header("Content-Type", "application/json")
+            .send_json(serde_json::json!({
+                "username": request.username,
+                "code": request.code,
+                "newPassword": request.new_password,
+            }))
+            .map_err(|e| format!("重置密码请求失败：{e}"))?
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("重置密码返回解析失败：{e}"))?;
+        if response.token.trim().is_empty() || response.user.id.trim().is_empty() {
+            return Err("服务器返回的登录身份不完整".into());
+        }
+        let state = app.state::<AppState>();
+        prepare_saved_account_for_switch(state.inner())?;
+        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        save_auth_response(db, &base, &response)?;
+        Ok(response)
+    })
+    .await
+    .map_err(|e| format!("重置密码任务失败：{e}"))?
 }
 
 fn sync_now_inner_with_limits_impl(

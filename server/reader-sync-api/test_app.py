@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -61,10 +62,28 @@ class ReaderSyncApiTests(unittest.TestCase):
     def test_supported_entity_kinds_are_portable_v2_only(self):
         self.assertEqual(
             app.SUPPORTED_ENTITY_KINDS,
-            {"book_state_v2", "vocab", "reading_bucket_v2"},
+            {"book_state_v2", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1"},
         )
         self.assertNotIn("book", app.SUPPORTED_ENTITY_KINDS)
         self.assertNotIn("reading_bucket", app.SUPPORTED_ENTITY_KINDS)
+
+    def test_secret_epoch_reset_invalidates_old_bundle_generation(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        app.migrate(conn)
+        with conn:
+            conn.execute(
+                "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
+                ("epoch-user", "epoch-user", "not-used", app.now_ms()),
+            )
+        self.assertEqual(app.secret_bundle_epoch(conn, "epoch-user"), 1)
+        self.assertEqual(app.reset_secret_bundle_epoch(conn, "epoch-user"), 2)
+        tombstone = conn.execute(
+            "SELECT deleted_at FROM entities WHERE user_id=? AND kind=? AND id=?",
+            ("epoch-user", "secret_bundle_v1", "default"),
+        ).fetchone()
+        self.assertGreater(tombstone["deleted_at"], 0)
+        conn.close()
 
     def test_feedback_migration_and_text_payload(self):
         conn = sqlite3.connect(":memory:")
@@ -167,8 +186,26 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.original_db_path = app.DB_PATH
+        cls.original_update_manifest_path = app.UPDATE_MANIFEST_PATH
         cls.temp_dir = tempfile.TemporaryDirectory(prefix="reader-sync-http-")
         app.DB_PATH = f"{cls.temp_dir.name}/entities.db"
+        app.UPDATE_MANIFEST_PATH = app.Path(cls.temp_dir.name) / "updates.json"
+        app.UPDATE_MANIFEST_PATH.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "latest": "1.9.5",
+                    "releases": {
+                        "1.9.5": {
+                            "release_notes": "服务器更新说明",
+                            "url": "https://example.com/v1.9.5",
+                            "published_at": "2026-07-27",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         app.RATE_LIMITER = app.RateLimiter()
         conn = app.connect()
         with conn:
@@ -207,6 +244,7 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         cls.server.server_close()
         cls.server_thread.join(timeout=3)
         app.DB_PATH = cls.original_db_path
+        app.UPDATE_MANIFEST_PATH = cls.original_update_manifest_path
         cls.temp_dir.cleanup()
 
     def setUp(self):
@@ -214,6 +252,7 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         conn = app.connect()
         with conn:
             conn.execute("DELETE FROM entities WHERE user_id=?", (self.USER_ID,))
+            conn.execute("DELETE FROM secret_bundle_epochs WHERE user_id=?", (self.USER_ID,))
             conn.execute("UPDATE sync_clock SET value=0 WHERE id=1")
         conn.close()
 
@@ -228,6 +267,27 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
                 "Content-Type": "application/json",
             },
         )
+        with self.opener.open(request, timeout=3) as response:
+            self.assertEqual(response.status, 200)
+            return json.loads(response.read().decode("utf-8"))
+
+    def request_error_json(self, method, path, body=None):
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        request = urllib.request.Request(
+            self.base_url + path,
+            data=data,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {self.TOKEN}",
+                "Content-Type": "application/json",
+            },
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.opener.open(request, timeout=3)
+        return raised.exception.code, json.loads(raised.exception.read().decode("utf-8"))
+
+    def request_public_json(self, path):
+        request = urllib.request.Request(self.base_url + path, method="GET")
         with self.opener.open(request, timeout=3) as response:
             self.assertEqual(response.status, 200)
             return json.loads(response.read().decode("utf-8"))
@@ -275,7 +335,66 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         health = self.request_json("GET", "/health")
         self.assertTrue(health["ok"])
         self.assertEqual(health["schema_version"], 2)
-        self.assertEqual(health["api_version"], "0.7")
+        self.assertEqual(health["api_version"], "0.8")
+
+    def test_public_update_manifest_exposes_latest_and_versioned_notes(self):
+        latest = self.request_public_json("/updates/latest")
+        notes = self.request_public_json("/updates/notes?tag=v1.9.5")
+        self.assertEqual(latest["version"], "1.9.5")
+        self.assertEqual(latest["release_notes"], "服务器更新说明")
+        self.assertEqual(notes["version"], "1.9.5")
+        self.assertEqual(notes["url"], "https://example.com/v1.9.5")
+
+    def test_rebinding_email_requires_old_then_new_mailbox_proof(self):
+        conn = app.connect()
+        with conn:
+            conn.execute(
+                "INSERT INTO account_emails(user_id,email,verified_at) VALUES(?,?,?)",
+                (self.USER_ID, "old@example.com", app.now_ms()),
+            )
+            old_legacy_code = app.issue_account_code(
+                conn, self.USER_ID, "bind_email", "new@example.com"
+            )
+        conn.close()
+
+        sent = []
+        old_mail_configured = app.account_mail_configured
+        old_send_mail = app.send_account_email
+        app.account_mail_configured = lambda: True
+        app.send_account_email = lambda recipient, _subject, text: sent.append((recipient, text))
+        try:
+            code, payload = self.request_error_json(
+                "POST", "/auth/email/confirm", {"email": "new@example.com", "code": old_legacy_code}
+            )
+            self.assertEqual(code, 409)
+            self.assertEqual(payload["error"], "EMAIL_ALREADY_BOUND")
+
+            self.request_json("POST", "/auth/email/rebind/old/start", {})
+            self.assertEqual(sent[-1][0], "old@example.com")
+            old_code = sent[-1][1].split("：", 1)[1].split("\n", 1)[0]
+            grant = self.request_json(
+                "POST", "/auth/email/rebind/old/confirm", {"code": old_code}
+            )["rebindGrant"]
+            self.request_json(
+                "POST", "/auth/email/rebind/new/start",
+                {"email": "new@example.com", "rebindGrant": grant},
+            )
+            self.assertEqual(sent[-1][0], "new@example.com")
+            new_code = sent[-1][1].split("：", 1)[1].split("\n", 1)[0]
+            self.request_json(
+                "POST", "/auth/email/rebind/new/confirm",
+                {"email": "new@example.com", "code": new_code},
+            )
+        finally:
+            app.account_mail_configured = old_mail_configured
+            app.send_account_email = old_send_mail
+
+        conn = app.connect()
+        row = conn.execute(
+            "SELECT email FROM account_emails WHERE user_id=?", (self.USER_ID,)
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row["email"], "new@example.com")
 
     def test_inventory_digest_changes_when_server_loses_an_acknowledged_entity(self):
         first = self.entity("zh:仍在")
@@ -295,6 +414,20 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(before["entity_count"], 2)
         self.assertEqual(after["entity_count"], 1)
         self.assertNotEqual(before["inventory_digest"], after["inventory_digest"])
+
+    def test_reset_secret_state_returns_tombstone_for_stale_bundle(self):
+        before = self.request_json("GET", "/sync/secret-state")
+        self.assertEqual(before["secretBundleEpoch"], 1)
+        reset = self.request_json("POST", "/sync/secret-state/reset", {})
+        self.assertEqual(reset["secretBundleEpoch"], 2)
+        stale = self.entity("default")
+        stale["kind"] = "secret_bundle_v1"
+        stale["json"] = {"version": 2, "epoch": 1, "ciphertext": "old"}
+        response = self.push([stale])
+        self.assertEqual(response["accepted_count"], 0)
+        self.assertEqual(response["dispositions"][0]["status"], "conflict")
+        self.assertEqual(response["dispositions"][0]["error"], "SECRET_EPOCH_MISMATCH")
+        self.assertTrue(response["entities"][0]["deleted_at"])
 
     def test_reconcile_requests_only_missing_or_newer_local_entities(self):
         unchanged = self.entity("zh:相同", value="same", updated_at=100, version=1)

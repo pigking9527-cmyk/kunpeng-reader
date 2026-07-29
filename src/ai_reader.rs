@@ -194,6 +194,82 @@ fn load_config(db: &crate::db::AppDb) -> Result<StoredConfig, String> {
     serde_json::from_str(&json).map_err(|error| format!("阅读助手配置损坏：{error}"))
 }
 
+/// Portable configuration deliberately omits the credential. It is safe to
+/// sync by default and lets another device prefill the selected service.
+pub(crate) fn export_public_config(
+    db: &crate::db::AppDb,
+) -> Result<Option<serde_json::Value>, String> {
+    let config = canonicalize_deepseek_config(load_config(db)?);
+    if config.base_url.is_empty() && config.model.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::json!({
+        "version": 1,
+        "provider": config.provider,
+        "baseUrl": config.base_url,
+        "model": config.model,
+    })))
+}
+
+pub(crate) fn import_public_config(
+    db: &crate::db::AppDb,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let provider = value
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let base_url = value
+        .get("baseUrl")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let model = value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if base_url.is_empty() || model.is_empty() {
+        return Ok(());
+    }
+    let mut current = load_config(db)?;
+    current.provider = known_provider(provider).to_string();
+    current.base_url = normalize_base_url(base_url)?;
+    current.model = model.trim().to_string();
+    let current = canonicalize_deepseek_config(current);
+    let json = serde_json::to_string(&current).map_err(|e| e.to_string())?;
+    db.set_metadata(CONFIG_KEY, &secret_store::protect_secret(&json)?)
+}
+
+pub(crate) fn export_secret_config(
+    db: &crate::db::AppDb,
+) -> Result<Option<serde_json::Value>, String> {
+    let config = canonicalize_deepseek_config(load_config(db)?);
+    if config.api_key.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_value(config)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn import_secret_config(
+    db: &crate::db::AppDb,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let config: StoredConfig =
+        serde_json::from_value(value.clone()).map_err(|e| format!("智读密钥包格式无效：{e}"))?;
+    if config.api_key.trim().is_empty() {
+        return Ok(());
+    }
+    let config = canonicalize_deepseek_config(StoredConfig {
+        provider: config.provider,
+        base_url: normalize_base_url(&config.base_url)?,
+        model: config.model.trim().to_string(),
+        api_key: config.api_key.trim().to_string(),
+    });
+    let json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
+    db.set_metadata(CONFIG_KEY, &secret_store::protect_secret(&json)?)
+}
+
 fn status(config: &StoredConfig) -> AiReaderStatus {
     AiReaderStatus {
         configured: !config.base_url.is_empty()
