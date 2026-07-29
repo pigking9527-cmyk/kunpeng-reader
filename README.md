@@ -84,6 +84,29 @@ cargo tauri build
 - 单文件绿色版：`target/release/ebook-reader-tauri.exe` 或桌面 `鲲鹏阅读器.exe`
 - 安装包：`target/release/bundle/nsis/`
 
+### Linux 测试构建
+
+GitHub Actions 的 `Linux x86_64 build` 工作流使用 Ubuntu 22.04 构建并验证以下测试产物：
+
+- `Kunpeng-Reader-v<版本>-Linux-x86_64.AppImage`
+- `Kunpeng-Reader-v<版本>-Linux-x86_64.deb`
+- `SHA256SUMS-Linux.txt`
+
+AppImage 下载后需要增加可执行权限：
+
+```bash
+chmod +x Kunpeng-Reader-v*-Linux-x86_64.AppImage
+./Kunpeng-Reader-v*-Linux-x86_64.AppImage
+```
+
+Ubuntu / Debian 也可以安装 deb：
+
+```bash
+sudo apt install ./Kunpeng-Reader-v*-Linux-x86_64.deb
+```
+
+Linux 产物当前用于兼容性测试，尚未作为正式签名发布版本。
+
 ## 技术栈
 
 桌面：Rust · Tauri 2 · WebView2 / WKWebView · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`；v1.9.5 发布书架、导入、阅读和划词工具首版）。

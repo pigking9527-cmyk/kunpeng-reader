@@ -1,0 +1,152 @@
+name: Linux x86_64 build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/linux-build.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "tauri.conf.json"
+      - "icons/**"
+      - "reader-core/**"
+      - "src/**"
+      - "ui/**"
+      - "vendor/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-x86_64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: AppImage and Debian package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2 \
+            xvfb \
+            dbus-x11
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64-ubuntu-22.04
+          cache-on-failure: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Run frontend tests
+        run: node --test ui/tests/*.test.cjs
+
+      - name: Run Rust tests on Linux
+        run: cargo test --workspace --locked
+
+      - name: Build AppImage and Debian package
+        run: cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --verbose
+
+      - name: Check native binary linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd target/x86_64-unknown-linux-gnu/release/ebook-reader-tauri | tee target/linux-ldd.txt
+          if grep -q "not found" target/linux-ldd.txt; then
+            echo "The Linux executable has unresolved shared libraries." >&2
+            exit 1
+          fi
+
+      - name: Smoke-test application startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          timeout 15s xvfb-run -a \
+            target/x86_64-unknown-linux-gnu/release/ebook-reader-tauri \
+            >target/linux-startup.log 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 124 ]; then
+            cat target/linux-startup.log
+            echo "The Linux application exited during the startup smoke test (status $status)." >&2
+            exit "$status"
+          fi
+
+      - name: Prepare artifacts and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="target/x86_64-unknown-linux-gnu/release/bundle"
+          out_dir="target/linux-release"
+          mkdir -p "$out_dir"
+
+          mapfile -t appimages < <(find "$bundle_dir/appimage" -maxdepth 1 -type f -name '*.AppImage' -print)
+          mapfile -t debs < <(find "$bundle_dir/deb" -maxdepth 1 -type f -name '*.deb' -print)
+          test "${#appimages[@]}" -eq 1
+          test "${#debs[@]}" -eq 1
+
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+
+          appimage_name="Kunpeng-Reader-v${version}-Linux-x86_64.AppImage"
+          deb_name="Kunpeng-Reader-v${version}-Linux-x86_64.deb"
+          cp "${appimages[0]}" "$out_dir/$appimage_name"
+          cp "${debs[0]}" "$out_dir/$deb_name"
+          chmod +x "$out_dir/$appimage_name"
+
+          file "$out_dir/$appimage_name" "$out_dir/$deb_name"
+          dpkg-deb --info "$out_dir/$deb_name"
+          (cd "$out_dir" && sha256sum "$appimage_name" "$deb_name" > SHA256SUMS-Linux.txt)
+
+          {
+            echo "### Linux x86_64 test artifacts"
+            echo
+            echo "- \`$appimage_name\`"
+            echo "- \`$deb_name\`"
+            echo "- \`SHA256SUMS-Linux.txt\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: Kunpeng-Reader-Linux-x86_64
+          path: target/linux-release/*
+          if-no-files-found: error
+          retention-days: 14
