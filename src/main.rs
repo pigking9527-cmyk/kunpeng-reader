@@ -240,7 +240,9 @@ fn main() {
             sync_running: AtomicBool::new(false),
             memory_reclaimers: Mutex::new(Vec::new()),
         })
-        // 主窗口（书架）：恢复上次的大小/位置，并在移动/缩放/关闭时记忆
+        // 主窗口（书架）：恢复上次的大小/位置，并在关闭时记忆。
+        // Windows 拖窗会高频发送 Moved/Resized；事件回调里同步查询窗口状态并锁书库，
+        // 会逐渐堵住 UI 事件队列，因此不能在拖动过程中采集几何信息。
         .setup(|app| {
             semantic::initialize_semantic_model_selection();
             {
@@ -274,26 +276,26 @@ fn main() {
                 // 先在隐藏状态下摆好位置/大小再显示（避免闪动）；位置越界则回到屏幕中央
                 window_commands::apply_geom_safe(&win, &geom);
                 let app_ev = app.handle().clone();
-                win.on_window_event(move |ev| match ev {
-                    tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
+                win.on_window_event(move |ev| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
                         if let Some(w) = app_ev.get_webview_window("main") {
                             let st = app_ev.state::<AppState>();
+                            // 先用非阻塞方式取得旧几何信息，再采集一次当前窗口状态。
+                            // 即使后台任务暂时持有书库锁，也不能推迟窗口隐藏。
+                            let previous_geom = st
+                                .library
+                                .try_lock()
+                                .ok()
+                                .and_then(|lib| lib.main_geom.clone());
+                            let closing_geom = window_commands::capture_geom(previous_geom, &w);
+                            let _ = w.hide();
+
                             let mut lib = st.library.lock().unwrap();
-                            lib.main_geom =
-                                Some(window_commands::capture_geom(lib.main_geom.clone(), &w));
-                        }
-                    }
-                    tauri::WindowEvent::CloseRequested { api, .. } => {
-                        if let Some(w) = app_ev.get_webview_window("main") {
-                            let st = app_ev.state::<AppState>();
-                            let mut lib = st.library.lock().unwrap();
-                            lib.main_geom =
-                                Some(window_commands::capture_geom(lib.main_geom.clone(), &w));
+                            lib.main_geom = Some(closing_geom);
                             // Make closing feel immediate. Durable local saves and the bounded
                             // exit sync may continue briefly after the window has disappeared.
                             // If the sync cannot finish, its dirty entities remain queued for
                             // the next startup.
-                            let _ = w.hide();
                             report_save_error("书架", lib.save());
                             report_save_error("统计", st.stats.lock().unwrap().save());
                             drop(lib);
@@ -323,7 +325,6 @@ fn main() {
                             }
                         }
                     }
-                    _ => {}
                 });
             }
             Ok(())
