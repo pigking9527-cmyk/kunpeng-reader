@@ -37,7 +37,15 @@ fn log_db_operation(operation: &str, started: Instant, rows: usize) {
     }
 }
 
-pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &["book_state_v2", "vocab", "reading_bucket_v2"];
+pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &[
+    "book_state_v2",
+    "vocab",
+    "reading_bucket_v2",
+    "ai_reader_config_v1",
+    "translation_config_v1",
+    "ai_reader_history_v1",
+    "secret_bundle_v1",
+];
 
 pub(crate) fn is_supported_entity_kind(kind: &str) -> bool {
     SUPPORTED_ENTITY_KINDS.contains(&kind)
@@ -91,6 +99,18 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Sync entity timestamps use Unix milliseconds, matching the server's
+/// `server_updated_at` clock.  Do not use the second-based timestamps used by
+/// legacy library metadata here: a newly encrypted local secret bundle must
+/// be newer than an existing server tombstone during the pull-before-push
+/// phase of synchronization.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
@@ -532,6 +552,22 @@ impl AppDb {
             .flatten()
     }
 
+    /// Enumerate application-owned metadata without exposing the SQLite
+    /// connection to feature modules. Callers must use a stable, narrow
+    /// prefix; this is used for opt-in per-book AI history only.
+    pub fn metadata_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, String> {
+        let like = format!("{prefix}%");
+        let mut statement = self
+            .conn
+            .prepare("SELECT key,value FROM metadata WHERE key LIKE ? ORDER BY key")
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map(params![like], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
     pub fn set_metadata(&self, key: &str, value: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -728,7 +764,7 @@ impl AppDb {
 
     pub fn upsert_json_batch(&mut self, items: &[(String, String, Value)]) -> Result<(), String> {
         let started = Instant::now();
-        let now = now_secs() as i64;
+        let now = now_millis();
         let device_id = self.device_id.clone();
         let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
         {
@@ -762,7 +798,7 @@ impl AppDb {
 
     #[allow(dead_code)]
     pub fn soft_delete(&self, kind: &str, id: &str) -> Result<(), String> {
-        let now = now_secs() as i64;
+        let now = now_millis();
         self.conn
             .execute(
                 "UPDATE entities SET deleted_at=?, updated_at=?, device_id=?, sync_version=sync_version+1, dirty=1 WHERE kind=? AND id=?",
@@ -897,7 +933,7 @@ impl AppDb {
             let updated_at = item
                 .get("updated_at")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(now_secs() as i64);
+                .unwrap_or_else(now_millis);
             let deleted_at = item.get("deleted_at").and_then(|v| v.as_i64()).unwrap_or(0);
             let device_id = item
                 .get("device_id")
@@ -979,7 +1015,11 @@ impl AppDb {
                  FROM entities e \
                  LEFT JOIN sync_acknowledgements a \
                    ON a.scope=?1 AND a.kind=e.kind AND a.id=e.id \
-                 WHERE e.kind IN ('book_state_v2','vocab','reading_bucket_v2') \
+                 WHERE e.kind IN (\
+                       'book_state_v2','vocab','reading_bucket_v2',\
+                       'ai_reader_config_v1','translation_config_v1',\
+                       'ai_reader_history_v1','secret_bundle_v1'\
+                   ) \
                    AND (a.kind IS NULL \
                      OR a.device_id<>e.device_id \
                      OR a.sync_version<>e.sync_version \
@@ -1353,6 +1393,65 @@ mod tests {
         assert_eq!(
             db.entity_json("vocab", "zh:断点").unwrap(),
             Some(json!({"word":"断点"}))
+        );
+    }
+
+    #[test]
+    fn private_entities_are_pushed_but_excluded_from_inventory() {
+        let mut db = memory_db();
+        activate_sync_scope(&db, "test-scope");
+        db.upsert_json_batch(&[(
+            "secret_bundle_v1".into(),
+            "default".into(),
+            json!({"ciphertext":"opaque"}),
+        )])
+        .unwrap();
+
+        let pending = db.pending_sync_entities("test-scope").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, "secret_bundle_v1");
+        assert!(db.all_sync_entities().unwrap().is_empty());
+
+        db.commit_sync_push("test-scope", &pending, &[]).unwrap();
+        assert!(db.pending_sync_entities("test-scope").unwrap().is_empty());
+    }
+
+    #[test]
+    fn newly_encrypted_secret_is_newer_than_a_server_tombstone() {
+        let mut db = memory_db();
+        let local_start = now_millis();
+        let tombstone = SyncEntity {
+            kind: "secret_bundle_v1".into(),
+            id: "default".into(),
+            json: json!({}),
+            updated_at: local_start - 1,
+            deleted_at: local_start - 1,
+            device_id: "server-secret-reset".into(),
+            sync_version: 1,
+        };
+        assert_eq!(
+            db.import_sync_entities(std::slice::from_ref(&tombstone))
+                .unwrap(),
+            1
+        );
+
+        db.upsert_json_batch(&[(
+            "secret_bundle_v1".into(),
+            "default".into(),
+            json!({"ciphertext":"fresh"}),
+        )])
+        .unwrap();
+        let local = db.pending_sync_entities("unverified-scope").unwrap();
+        assert_eq!(local.len(), 1);
+        assert!(local[0].updated_at >= local_start);
+        assert_eq!(local[0].sync_version, 2);
+
+        // A normal pull-before-push must retain the locally re-encrypted
+        // bundle instead of reinstalling the older server tombstone.
+        assert_eq!(db.import_sync_entities(&[tombstone]).unwrap(), 0);
+        assert_eq!(
+            db.entity_json("secret_bundle_v1", "default").unwrap(),
+            Some(json!({"ciphertext":"fresh"}))
         );
     }
 

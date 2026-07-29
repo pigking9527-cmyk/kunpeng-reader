@@ -25,6 +25,7 @@ mod import_core;
 mod library_commands;
 mod memory_budget;
 mod pdf_support;
+mod private_sync;
 mod reader_commands;
 mod reader_fonts;
 mod reader_page;
@@ -369,6 +370,13 @@ fn main() {
             ai_reader::ai_reader_status,
             ai_reader::save_ai_reader_config,
             ai_reader::ask_reading_assistant,
+            private_sync::private_sync_get_settings,
+            private_sync::private_sync_set_options,
+            private_sync::private_sync_history_list,
+            private_sync::private_sync_history_merge,
+            private_sync::private_sync_set_password,
+            private_sync::private_sync_unlock_secrets,
+            private_sync::private_sync_forget_password,
             vocab::vocab_add,
             vocab::vocab_list,
             vocab::vocab_remove,
@@ -379,6 +387,16 @@ fn main() {
             sync::sync_set_settings,
             sync::auth_register,
             sync::auth_login,
+            sync::auth_security_status,
+            sync::auth_bind_email_start,
+            sync::auth_bind_email_confirm,
+            sync::auth_rebind_email_old_start,
+            sync::auth_rebind_email_old_confirm,
+            sync::auth_rebind_email_new_start,
+            sync::auth_rebind_email_new_confirm,
+            sync::auth_change_password,
+            sync::auth_request_password_reset,
+            sync::auth_confirm_password_reset,
             sync::auth_logout,
             sync::sync_now,
             data_commands::recovery_backup_status,

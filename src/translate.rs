@@ -73,6 +73,48 @@ fn load_translation_credential(
     Ok(credential)
 }
 
+pub(crate) fn export_public_config(db: &AppDb) -> Result<serde_json::Value, String> {
+    let providers = ["baidu", "tencent", "deepl", "google"]
+        .into_iter()
+        .filter(|provider| {
+            translation_credential_status(db, provider)
+                .map(|status| status.configured)
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({ "version": 1, "providers": providers }))
+}
+
+pub(crate) fn export_secret_configs(db: &AppDb) -> Result<Vec<serde_json::Value>, String> {
+    let values = ["baidu", "tencent", "deepl", "google"]
+        .into_iter()
+        .filter_map(|provider| {
+            let config_id = credential_config_id(provider);
+            load_translation_credential(db, &config_id)
+                .ok()
+                .and_then(|credential| serde_json::to_value(credential).ok())
+        })
+        .collect::<Vec<_>>();
+    Ok(values)
+}
+
+pub(crate) fn import_secret_configs(
+    db: &AppDb,
+    values: &[serde_json::Value],
+) -> Result<(), String> {
+    for value in values {
+        let credential: TranslationCredential = serde_json::from_value(value.clone())
+            .map_err(|e| format!("翻译密钥包格式无效：{e}"))?;
+        save_translation_credential(
+            db,
+            &credential.provider,
+            &credential.api_id,
+            &credential.api_key,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn translation_credential_status(
     db: &AppDb,
     provider: &str,

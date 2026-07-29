@@ -33,7 +33,65 @@ const syncNowBtn = document.getElementById("sync-now");
 const syncLogoutBtn = document.getElementById("sync-logout");
 const syncRegisterBtn = document.getElementById("sync-register");
 const syncLoginBtn = document.getElementById("sync-login");
+const syncPasswordResetOpenBtn = document.getElementById("sync-password-reset-open");
+const syncPasswordResetEl = document.getElementById("sync-password-reset");
+const syncResetEmailEl = document.getElementById("sync-reset-email");
+const syncResetCodeEl = document.getElementById("sync-reset-code");
+const syncResetNewPasswordEl = document.getElementById("sync-reset-new-password");
+const syncResetRequestBtn = document.getElementById("sync-reset-request");
+const syncResetConfirmBtn = document.getElementById("sync-reset-confirm");
+const syncResetStatusEl = document.getElementById("sync-reset-status");
+const accountSecurityOpenBtn = document.getElementById("account-security-open");
+const accountSecurityPanel = document.getElementById("account-security-panel");
+const accountSecurityCloseBtn = document.getElementById("account-security-close");
+const accountSecuritySummaryEl = document.getElementById("account-security-summary");
+const accountSecurityStatusEl = document.getElementById("account-security-status");
+const accountEmailToggleBtn = document.getElementById("account-email-toggle");
+const accountEmailFormEl = document.getElementById("account-email-form");
+const accountEmailBindFlowEl = document.getElementById("account-email-bind-flow");
+const accountEmailRebindFlowEl = document.getElementById("account-email-rebind-flow");
+const accountEmailEl = document.getElementById("account-email");
+const accountEmailCodeEl = document.getElementById("account-email-code");
+const accountEmailStartBtn = document.getElementById("account-email-start");
+const accountEmailConfirmBtn = document.getElementById("account-email-confirm");
+const accountEmailOldStartBtn = document.getElementById("account-email-old-start");
+const accountEmailOldCodeEl = document.getElementById("account-email-old-code");
+const accountEmailOldConfirmBtn = document.getElementById("account-email-old-confirm");
+const accountEmailNewStepEl = document.getElementById("account-email-new-step");
+const accountEmailNewEl = document.getElementById("account-email-new");
+const accountEmailNewStartBtn = document.getElementById("account-email-new-start");
+const accountEmailNewCodeEl = document.getElementById("account-email-new-code");
+const accountEmailNewConfirmBtn = document.getElementById("account-email-new-confirm");
+const accountPasswordToggleBtn = document.getElementById("account-password-toggle");
+const accountPasswordFormEl = document.getElementById("account-password-form");
+const accountCurrentPasswordEl = document.getElementById("account-current-password");
+const accountNewPasswordEl = document.getElementById("account-new-password");
+const accountPasswordChangeBtn = document.getElementById("account-password-change");
+const accountPasswordRecoverToggleBtn = document.getElementById("account-password-recover-toggle");
+const accountPasswordRecoverFormEl = document.getElementById("account-password-recover-form");
+const accountPasswordRecoverEmailEl = document.getElementById("account-password-recover-email");
+const accountPasswordRecoverCodeEl = document.getElementById("account-password-recover-code");
+const accountPasswordRecoverNewEl = document.getElementById("account-password-recover-new");
+const accountPasswordRecoverStartBtn = document.getElementById("account-password-recover-start");
+const accountPasswordRecoverConfirmBtn = document.getElementById("account-password-recover-confirm");
+const privateSyncOpenBtn = document.getElementById("private-sync-open");
+const privateSyncPanel = document.getElementById("private-sync-panel");
+const privateSyncCloseBtn = document.getElementById("private-sync-close");
+const privateSyncConfigsEl = document.getElementById("private-sync-configs");
+const privateSyncHistoryEl = document.getElementById("private-sync-history");
+const privateSyncSecretsEl = document.getElementById("private-sync-secrets");
+const privateSyncPasswordEl = document.getElementById("private-sync-password");
+const privateSyncSavePasswordBtn = document.getElementById("private-sync-save-password");
+const privateSyncUnlockBtn = document.getElementById("private-sync-unlock");
+const privateSyncForgetBtn = document.getElementById("private-sync-forget");
+const privateSyncStatusEl = document.getElementById("private-sync-status");
 const SAVED_ACCOUNTS_KEY = "readerSavedAccountsV1";
+let accountEmailCooldownUntil = 0;
+let accountEmailCooldownTimer = 0;
+let accountEmailRebindGrant = "";
+let accountEmailBound = false;
+let accountPasswordRecoverCooldownUntil = 0;
+let accountPasswordRecoverCooldownTimer = 0;
 function formatSyncTime(v) {
   const n = Number(v) || 0;
   if (!n) return "尚未同步";
@@ -112,8 +170,120 @@ function hideSavedAccounts() {
 }
 function closeAccountPanel() {
   accountPanel.classList.remove("show");
+  privateSyncPanel.hidden = true;
+  accountSecurityPanel.hidden = true;
+  setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
+  setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
+  setAccountSecurityDisclosure(accountPasswordRecoverToggleBtn, accountPasswordRecoverFormEl, false);
+  syncPasswordResetEl.hidden = true;
   accountBtn.classList.remove("active");
   hideSavedAccounts();
+}
+function setAccountSecurityStatus(text = "", type = "") {
+  accountSecurityStatusEl.textContent = text;
+  accountSecurityStatusEl.className = "private-sync-status" + (type ? " " + type : "");
+}
+function setAccountSecurityDisclosure(toggle, form, open) {
+  form.hidden = !open;
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.classList.toggle("open", open);
+}
+function updateAccountEmailCooldown() {
+  const remaining = Math.max(0, Math.ceil((accountEmailCooldownUntil - Date.now()) / 1000));
+  if (!remaining) {
+    accountEmailStartBtn.disabled = false;
+    accountEmailStartBtn.textContent = "发送验证码";
+    if (accountEmailCooldownTimer) {
+      global.clearInterval(accountEmailCooldownTimer);
+      accountEmailCooldownTimer = 0;
+    }
+    return;
+  }
+  accountEmailStartBtn.disabled = true;
+  accountEmailStartBtn.textContent = `已发送（${remaining} 秒）`;
+}
+function beginAccountEmailCooldown() {
+  accountEmailCooldownUntil = Date.now() + 60 * 1000;
+  updateAccountEmailCooldown();
+  if (!accountEmailCooldownTimer) {
+    accountEmailCooldownTimer = global.setInterval(updateAccountEmailCooldown, 1000);
+  }
+}
+function updateAccountPasswordRecoverCooldown() {
+  const remaining = Math.max(0, Math.ceil((accountPasswordRecoverCooldownUntil - Date.now()) / 1000));
+  if (!remaining) {
+    accountPasswordRecoverStartBtn.disabled = false;
+    accountPasswordRecoverStartBtn.textContent = "发送验证码";
+    if (accountPasswordRecoverCooldownTimer) {
+      global.clearInterval(accountPasswordRecoverCooldownTimer);
+      accountPasswordRecoverCooldownTimer = 0;
+    }
+    return;
+  }
+  accountPasswordRecoverStartBtn.disabled = true;
+  accountPasswordRecoverStartBtn.textContent = `已发送（${remaining} 秒）`;
+}
+function beginAccountPasswordRecoverCooldown() {
+  accountPasswordRecoverCooldownUntil = Date.now() + 60 * 1000;
+  updateAccountPasswordRecoverCooldown();
+  if (!accountPasswordRecoverCooldownTimer) {
+    accountPasswordRecoverCooldownTimer = global.setInterval(updateAccountPasswordRecoverCooldown, 1000);
+  }
+}
+function setResetStatus(text = "", type = "") {
+  syncResetStatusEl.textContent = text;
+  syncResetStatusEl.className = "private-sync-status" + (type ? " " + type : "");
+}
+function applyAccountSecurityStatus(status = {}) {
+  const email = status.email || "";
+  accountEmailBound = !!status.emailBound;
+  accountSecuritySummaryEl.textContent = status.emailBound
+    ? `已绑定验证邮箱：${email}。可用于找回登录密码。`
+    : (status.mailConfigured ? "尚未绑定验证邮箱。绑定后才能找回登录密码。" : "账户安全邮件暂未配置；暂时不能绑定或找回登录密码。");
+  accountEmailEl.value = "";
+  accountEmailToggleBtn.textContent = accountEmailBound ? "更换绑定邮箱" : "绑定邮箱";
+  accountEmailBindFlowEl.hidden = accountEmailBound;
+  accountEmailRebindFlowEl.hidden = !accountEmailBound;
+  if (!accountEmailBound) {
+    accountEmailRebindGrant = "";
+    accountEmailNewStepEl.hidden = true;
+  }
+}
+async function loadAccountSecurityStatus() {
+  try { applyAccountSecurityStatus(await invoke("auth_security_status")); }
+  catch (error) { setAccountSecurityStatus("读取账户安全状态失败：" + error, "error"); }
+}
+function setPrivateSyncStatus(text = "", type = "") {
+  privateSyncStatusEl.textContent = text;
+  privateSyncStatusEl.className = "private-sync-status" + (type ? " " + type : "");
+}
+function applyPrivateSyncStatus(status = {}) {
+  privateSyncConfigsEl.checked = status.syncConfigs !== false;
+  privateSyncHistoryEl.checked = !!status.syncAiHistory;
+  privateSyncSecretsEl.checked = !!status.syncSecrets;
+  const secretText = status.cloudSecretAvailable
+    ? "云端已有加密密钥包；需要同步密码才能在本机解锁。"
+    : "API Key 和翻译密钥默认仅保留在本机。";
+  setPrivateSyncStatus(secretText);
+}
+async function loadPrivateSyncStatus() {
+  try { applyPrivateSyncStatus(await invoke("private_sync_get_settings")); }
+  catch (error) { setPrivateSyncStatus("读取私密同步设置失败：" + error, "error"); }
+}
+async function savePrivateSyncOptions() {
+  const options = {
+    syncConfigs: !!privateSyncConfigsEl.checked,
+    syncAiHistory: !!privateSyncHistoryEl.checked,
+    syncSecrets: !!privateSyncSecretsEl.checked,
+  };
+  try {
+    const status = await invoke("private_sync_set_options", { options });
+    applyPrivateSyncStatus(status);
+    setPrivateSyncStatus("已保存；下次同步会按这个范围上传。", "ok");
+  } catch (error) {
+    setPrivateSyncStatus("保存失败：" + error, "error");
+    await loadPrivateSyncStatus();
+  }
 }
 function openAccountPanel() {
   accountPanel.classList.add("show");
@@ -177,6 +347,7 @@ async function loadSyncSettings() {
     const s = await invoke("sync_get_settings");
     syncUsernameEl.value = s.username || "";
     updateAccountView(s);
+    await loadPrivateSyncStatus();
     return s;
   } catch (e) {
     syncStatusEl.classList.remove("hidden");
@@ -241,6 +412,214 @@ accountBtn.addEventListener("click", (e) => {
 accountPanel.addEventListener("click", (e) => {
   e.stopPropagation();
   if (!e.target.closest(".account-input-wrap")) hideSavedAccounts();
+});
+privateSyncOpenBtn.addEventListener("click", async () => {
+  privateSyncPanel.hidden = false;
+  accountSecurityPanel.hidden = true;
+  await loadPrivateSyncStatus();
+});
+privateSyncCloseBtn.addEventListener("click", () => { privateSyncPanel.hidden = true; });
+privateSyncPanel.addEventListener("click", (e) => e.stopPropagation());
+privateSyncConfigsEl.addEventListener("change", savePrivateSyncOptions);
+privateSyncHistoryEl.addEventListener("change", savePrivateSyncOptions);
+privateSyncSecretsEl.addEventListener("change", async () => {
+  if (!privateSyncSecretsEl.checked) { await savePrivateSyncOptions(); return; }
+  privateSyncSecretsEl.checked = false;
+  privateSyncPasswordEl.focus();
+  setPrivateSyncStatus("密钥同步需要先输入同步密码并点击“加密并同步密钥”。");
+});
+privateSyncSavePasswordBtn.addEventListener("click", async () => {
+  const password = privateSyncPasswordEl.value;
+  try {
+    const status = await invoke("private_sync_set_password", { password });
+    privateSyncPasswordEl.value = "";
+    applyPrivateSyncStatus(status);
+    setPrivateSyncStatus("密钥已在本机加密并加入下次同步；服务器无法读取明文。", "ok");
+  } catch (error) { setPrivateSyncStatus("无法同步密钥：" + error, "error"); }
+});
+privateSyncUnlockBtn.addEventListener("click", async () => {
+  const password = privateSyncPasswordEl.value;
+  try {
+    await invoke("private_sync_unlock_secrets", { password });
+    privateSyncPasswordEl.value = "";
+    setPrivateSyncStatus("已在本机解锁并保存智读、翻译密钥。", "ok");
+  } catch (error) { setPrivateSyncStatus("无法解锁云端密钥：" + error, "error"); }
+});
+privateSyncForgetBtn.addEventListener("click", async () => {
+  if (!global.confirm("这会撤销云端的智读和翻译密钥包。同步密码无法找回；本机现有 API Key 不会删除。确定继续吗？")) return;
+  try {
+    const status = await invoke("private_sync_forget_password");
+    privateSyncPasswordEl.value = "";
+    applyPrivateSyncStatus(status);
+    setPrivateSyncStatus("旧云端密钥包已撤销。若本机仍有 API Key，请输入新同步密码后重新加密。", "ok");
+  } catch (error) { setPrivateSyncStatus("撤销失败：" + error, "error"); }
+});
+syncPasswordResetOpenBtn.addEventListener("click", () => {
+  syncPasswordResetEl.hidden = !syncPasswordResetEl.hidden;
+  if (!syncPasswordResetEl.hidden) syncResetEmailEl.focus();
+});
+syncResetRequestBtn.addEventListener("click", async () => {
+  try {
+    await invoke("auth_request_password_reset", { request: {
+      url: "", username: syncUsernameEl.value.trim(), email: syncResetEmailEl.value.trim(),
+    }});
+    setResetStatus("若账号已绑定该邮箱，验证码将发送至邮箱。", "ok");
+  } catch (error) { setResetStatus("发送验证码失败：" + error, "error"); }
+});
+syncResetConfirmBtn.addEventListener("click", async () => {
+  try {
+    const res = await invoke("auth_confirm_password_reset", { request: {
+      url: "", username: syncUsernameEl.value.trim(), email: syncResetEmailEl.value.trim(),
+      code: syncResetCodeEl.value.trim(), newPassword: syncResetNewPasswordEl.value,
+    }});
+    syncResetCodeEl.value = "";
+    syncResetNewPasswordEl.value = "";
+    syncPasswordResetEl.hidden = true;
+    syncSettingsLoaded = true;
+    updateAccountView({ username: res.user?.username || syncUsernameEl.value });
+    saveAccountInfo(res.user?.username || syncUsernameEl.value);
+    setSyncButtonState("ok", "同步", "登录密码已重置");
+    syncStatusEl.textContent = "密码已重置并登录；其他设备已退出登录。";
+  } catch (error) { setResetStatus("重置失败：" + error, "error"); }
+});
+accountSecurityOpenBtn.addEventListener("click", async () => {
+  accountSecurityPanel.hidden = false;
+  privateSyncPanel.hidden = true;
+  setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
+  setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
+  setAccountSecurityStatus("");
+  await loadAccountSecurityStatus();
+});
+accountSecurityCloseBtn.addEventListener("click", () => { accountSecurityPanel.hidden = true; });
+accountSecurityPanel.addEventListener("click", (e) => e.stopPropagation());
+accountEmailToggleBtn.addEventListener("click", () => {
+  const open = accountEmailFormEl.hidden;
+  setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, open);
+  if (open) {
+    if (accountEmailBound) {
+      accountEmailRebindGrant = "";
+      accountEmailOldCodeEl.value = "";
+      accountEmailNewEl.value = "";
+      accountEmailNewCodeEl.value = "";
+      accountEmailNewStepEl.hidden = true;
+      accountEmailOldStartBtn.focus();
+    } else {
+      accountEmailEl.focus();
+    }
+  }
+});
+accountPasswordToggleBtn.addEventListener("click", () => {
+  const open = accountPasswordFormEl.hidden;
+  setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, open);
+  if (open) accountCurrentPasswordEl.focus();
+});
+accountPasswordRecoverToggleBtn.addEventListener("click", () => {
+  const open = accountPasswordRecoverFormEl.hidden;
+  setAccountSecurityDisclosure(accountPasswordRecoverToggleBtn, accountPasswordRecoverFormEl, open);
+  if (open) accountPasswordRecoverEmailEl.focus();
+});
+accountEmailStartBtn.addEventListener("click", async () => {
+  try {
+    await invoke("auth_bind_email_start", { request: { email: accountEmailEl.value.trim() } });
+    beginAccountEmailCooldown();
+    setAccountSecurityStatus("验证码已发送到该邮箱，请输入后确认绑定。", "ok");
+    accountEmailCodeEl.focus();
+  } catch (error) { setAccountSecurityStatus("发送验证码失败：" + error, "error"); }
+});
+accountEmailConfirmBtn.addEventListener("click", async () => {
+  try {
+    applyAccountSecurityStatus(await invoke("auth_bind_email_confirm", { request: {
+      email: accountEmailEl.value.trim(), code: accountEmailCodeEl.value.trim(),
+    }}));
+    accountEmailCodeEl.value = "";
+    setAccountSecurityStatus("邮箱已验证绑定，可用于找回登录密码。", "ok");
+  } catch (error) { setAccountSecurityStatus("绑定失败：" + error, "error"); }
+});
+function beginRebindButtonCooldown(button) {
+  if (!button.dataset.defaultLabel) button.dataset.defaultLabel = button.textContent;
+  const until = Date.now() + 60 * 1000;
+  const tick = () => {
+    const remaining = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+    button.disabled = remaining > 0;
+    button.textContent = remaining ? `已发送（${remaining} 秒）` : button.dataset.defaultLabel;
+    if (!remaining) global.clearInterval(timer);
+  };
+  const timer = global.setInterval(tick, 1000);
+  tick();
+}
+accountEmailOldStartBtn.addEventListener("click", async () => {
+  try {
+    await invoke("auth_rebind_email_old_start");
+    beginRebindButtonCooldown(accountEmailOldStartBtn);
+    setAccountSecurityStatus("验证码已发送到当前绑定邮箱，请输入后验证。", "ok");
+    accountEmailOldCodeEl.focus();
+  } catch (error) { setAccountSecurityStatus("发送旧邮箱验证码失败：" + error, "error"); }
+});
+accountEmailOldConfirmBtn.addEventListener("click", async () => {
+  try {
+    accountEmailRebindGrant = await invoke("auth_rebind_email_old_confirm", { request: {
+      code: accountEmailOldCodeEl.value.trim(),
+    }});
+    accountEmailOldCodeEl.value = "";
+    accountEmailNewStepEl.hidden = false;
+    setAccountSecurityStatus("旧邮箱已验证，请填写并验证新邮箱。", "ok");
+    accountEmailNewEl.focus();
+  } catch (error) { setAccountSecurityStatus("旧邮箱验证失败：" + error, "error"); }
+});
+accountEmailNewStartBtn.addEventListener("click", async () => {
+  try {
+    await invoke("auth_rebind_email_new_start", { request: {
+      email: accountEmailNewEl.value.trim(), rebindGrant: accountEmailRebindGrant,
+    }});
+    accountEmailRebindGrant = "";
+    beginRebindButtonCooldown(accountEmailNewStartBtn);
+    setAccountSecurityStatus("验证码已发送到新邮箱，请输入后确认更换。", "ok");
+    accountEmailNewCodeEl.focus();
+  } catch (error) { setAccountSecurityStatus("发送新邮箱验证码失败：" + error, "error"); }
+});
+accountEmailNewConfirmBtn.addEventListener("click", async () => {
+  try {
+    applyAccountSecurityStatus(await invoke("auth_rebind_email_new_confirm", { request: {
+      email: accountEmailNewEl.value.trim(), code: accountEmailNewCodeEl.value.trim(),
+    }}));
+    accountEmailNewCodeEl.value = "";
+    accountEmailNewStepEl.hidden = true;
+    setAccountSecurityStatus("新的验证邮箱已绑定，可用于找回登录密码。", "ok");
+  } catch (error) { setAccountSecurityStatus("更换绑定邮箱失败：" + error, "error"); }
+});
+accountPasswordChangeBtn.addEventListener("click", async () => {
+  try {
+    await invoke("auth_change_password", { request: {
+      currentPassword: accountCurrentPasswordEl.value,
+      newPassword: accountNewPasswordEl.value,
+    }});
+    accountCurrentPasswordEl.value = "";
+    accountNewPasswordEl.value = "";
+    setAccountSecurityStatus("登录密码已修改，其他设备已退出登录。", "ok");
+  } catch (error) { setAccountSecurityStatus("修改失败：" + error, "error"); }
+});
+accountPasswordRecoverStartBtn.addEventListener("click", async () => {
+  try {
+    await invoke("auth_request_password_reset", { request: {
+      url: "", username: syncUsernameEl.value.trim(), email: accountPasswordRecoverEmailEl.value.trim(),
+    }});
+    beginAccountPasswordRecoverCooldown();
+    setAccountSecurityStatus("若账号已绑定该邮箱，验证码将发送至邮箱。", "ok");
+    accountPasswordRecoverCodeEl.focus();
+  } catch (error) { setAccountSecurityStatus("发送验证码失败：" + error, "error"); }
+});
+accountPasswordRecoverConfirmBtn.addEventListener("click", async () => {
+  try {
+    const res = await invoke("auth_confirm_password_reset", { request: {
+      url: "", username: syncUsernameEl.value.trim(), email: accountPasswordRecoverEmailEl.value.trim(),
+      code: accountPasswordRecoverCodeEl.value.trim(), newPassword: accountPasswordRecoverNewEl.value,
+    }});
+    accountPasswordRecoverCodeEl.value = "";
+    accountPasswordRecoverNewEl.value = "";
+    applyAccountSecurityStatus(await invoke("auth_security_status"));
+    updateAccountView({ username: res.user?.username || syncUsernameEl.value });
+    setAccountSecurityStatus("登录密码已重置，其他设备已退出登录。", "ok");
+  } catch (error) { setAccountSecurityStatus("重置失败：" + error, "error"); }
 });
 async function syncAuth(action) {
   const isRegister = action === "register";

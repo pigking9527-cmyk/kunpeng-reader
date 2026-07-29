@@ -37,22 +37,48 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
         add: (...names) => names.forEach((name) => classes.add(name)),
         contains: (name) => classes.has(name),
         remove: (...names) => names.forEach((name) => classes.delete(name)),
+        toggle: (name, force) => {
+          if (force === undefined) {
+            if (classes.has(name)) classes.delete(name);
+            else classes.add(name);
+          } else if (force) classes.add(name);
+          else classes.delete(name);
+          return classes.has(name);
+        },
       };
       this.handlers = new Map();
       this.style = {};
       this.value = "";
       this.disabled = false;
       this.textContent = "";
+      this.hidden = false;
     }
     addEventListener(name, handler) { this.handlers.set(name, handler); }
     emit(name, event = {}) { return this.handlers.get(name)?.(event); }
     focus() {}
+    setAttribute() {}
     querySelectorAll() { return []; }
   }
   const ids = [
     "account-btn", "account-panel", "sync-form", "sync-account", "sync-account-name",
     "sync-username", "sync-password", "saved-accounts", "sync-status", "sync-last-time",
     "sync-last-counts", "sync-now", "sync-logout", "sync-register", "sync-login",
+    "sync-password-reset-open", "sync-password-reset", "sync-reset-email", "sync-reset-code",
+    "sync-reset-new-password", "sync-reset-request", "sync-reset-confirm", "sync-reset-status",
+    "account-security-open", "account-security-panel", "account-security-close",
+    "account-security-summary", "account-security-status", "account-email-toggle", "account-email-form",
+    "account-email", "account-email-code", "account-email-start", "account-email-confirm",
+    "account-email-bind-flow", "account-email-rebind-flow", "account-email-old-start",
+    "account-email-old-code", "account-email-old-confirm", "account-email-new-step",
+    "account-email-new", "account-email-new-start", "account-email-new-code", "account-email-new-confirm",
+    "account-password-toggle", "account-password-form", "account-current-password",
+    "account-new-password", "account-password-change", "private-sync-open", "private-sync-panel",
+    "account-password-recover-toggle", "account-password-recover-form", "account-password-recover-email",
+    "account-password-recover-code", "account-password-recover-new", "account-password-recover-start",
+    "account-password-recover-confirm",
+    "private-sync-close", "private-sync-configs", "private-sync-history", "private-sync-secrets",
+    "private-sync-password", "private-sync-save-password", "private-sync-unlock",
+    "private-sync-forget", "private-sync-status",
   ];
   const elements = new Map(ids.map((id) => [id, new FakeElement()]));
   const root = {

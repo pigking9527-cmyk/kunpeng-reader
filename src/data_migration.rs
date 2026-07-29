@@ -327,7 +327,8 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
     }
     let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    db.upsert_json_batch(&batch)
+    db.upsert_json_batch(&batch)?;
+    crate::private_sync::append_sync_entities(db)
 }
 
 /// Apply a state that was downloaded before the corresponding local file was
@@ -361,23 +362,24 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     let mut remote_books: Vec<BookSyncStateV2> = Vec::new();
     let mut vocab: Vec<vocab::VocabEntry> = Vec::new();
     let mut buckets: Vec<PortableReadBucketV2> = Vec::new();
-    for item in items {
+    for item in &items {
         if item.deleted_at != 0 {
             continue;
         }
         match item.kind.as_str() {
             BOOK_STATE_KIND_V2 => {
-                if let Ok(book) = serde_json::from_value::<BookSyncStateV2>(item.json) {
+                if let Ok(book) = serde_json::from_value::<BookSyncStateV2>(item.json.clone()) {
                     remote_books.push(book);
                 }
             }
             "vocab" => {
-                if let Ok(value) = serde_json::from_value::<vocab::VocabEntry>(item.json) {
+                if let Ok(value) = serde_json::from_value::<vocab::VocabEntry>(item.json.clone()) {
                     vocab.push(value);
                 }
             }
             "reading_bucket_v2" => {
-                if let Ok(value) = serde_json::from_value::<PortableReadBucketV2>(item.json) {
+                if let Ok(value) = serde_json::from_value::<PortableReadBucketV2>(item.json.clone())
+                {
                     buckets.push(value);
                 }
             }
@@ -430,6 +432,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     }
     stats.dirty = true;
     stats.save()?;
+    crate::private_sync::apply_downloaded_entities(state, &items)?;
     Ok(())
 }
 

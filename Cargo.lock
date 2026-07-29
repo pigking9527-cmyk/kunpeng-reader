@@ -1307,6 +1307,7 @@ dependencies = [
  "pulldown-cmark",
  "rayon",
  "reader-core",
+ "ring",
  "rmp-serde",
  "rusqlite",
  "serde",
