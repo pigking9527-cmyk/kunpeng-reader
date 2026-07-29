@@ -27,7 +27,21 @@ test("book card clicks explicitly close main-window floaters", () => {
   assert.match(card, /openTimer = setTimeout\([\s\S]*?if \(!selected\.size\) openBook\(\)/);
   assert.match(card, /addEventListener\("dblclick",[\s\S]*?if \(!selected\.size\) toggleSelect\(b\.id, card\)/);
   assert.match(card, /addEventListener\("contextmenu"/);
-  assert.match(card, /openBookOrganizer\(getBook\(b\.id\) \|\| b, e\)/);
+  assert.match(card, /openBookOrganizer\(getBook\(b\.id\) \|\| b, e, card\)/);
+});
+
+test("book organizer stays anchored to its cover while the shelf scrolls", () => {
+  const positioner = source.slice(source.indexOf("function createBookOrganizerAnchor"), source.indexOf("function applyOrganizationChoice"));
+  assert.match(positioner, /element\.getBoundingClientRect\(\)/);
+  assert.match(positioner, /rect\.left \+ organizerAnchor\.menuOffsetX/);
+  assert.match(positioner, /rect\.top \+ organizerAnchor\.menuOffsetY/);
+  assert.match(positioner, /positionBookOrganizer\(initialPlacement = false\)/);
+  assert.match(positioner, /organizerAnchorIsVisible/);
+  assert.match(positioner, /closeBookOrganizer\(\)/);
+  assert.match(source, /contentEl\.addEventListener\("scroll", scheduleBookOrganizerPosition, \{ passive: true \}\)/);
+  assert.match(source, /global\.addEventListener\("resize", scheduleBookOrganizerResize\)/);
+  assert.match(source, /positionBookOrganizer\(true\)/);
+  assert.match(source, /function closeBookOrganizer\(\)[\s\S]*?organizerAnchor = null/);
 });
 
 test("startup shelf can receive keyboard paging focus without stealing it on refresh", () => {

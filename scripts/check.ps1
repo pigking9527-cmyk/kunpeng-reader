@@ -198,6 +198,26 @@ try {
   }
   Write-Host "version: $cargoVersion"
 
+  Write-Host '== Linux package metadata =='
+  $linuxConfigPath = Join-Path $repo 'tauri.linux.conf.json'
+  if (-not (Test-Path -LiteralPath $linuxConfigPath)) { throw 'tauri.linux.conf.json missing.' }
+  $linuxConfig = [System.IO.File]::ReadAllText($linuxConfigPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+  $linuxPackageName = [string]$linuxConfig.productName
+  if ($linuxPackageName -cnotmatch '^[a-z0-9][a-z0-9+.-]+$') {
+    throw "Invalid Debian package name derived from Linux productName: $linuxPackageName"
+  }
+  if ($linuxPackageName -cne 'kunpeng-reader') {
+    throw "Unexpected Linux package name: $linuxPackageName"
+  }
+  $desktopTemplate = [string]$linuxConfig.bundle.linux.deb.desktopTemplate
+  if (-not $desktopTemplate -or -not (Test-Path -LiteralPath (Join-Path $repo $desktopTemplate))) {
+    throw "Linux desktop template missing: $desktopTemplate"
+  }
+  $desktopTemplateText = [System.IO.File]::ReadAllText((Join-Path $repo $desktopTemplate), [System.Text.Encoding]::UTF8)
+  if ($desktopTemplateText -notmatch '(?m)^Name=鲲鹏阅读器$') {
+    throw 'Linux desktop entry must preserve the Chinese display name.'
+  }
+
   Write-Host '== icon resources =='
   $icons = @($tauri.bundle.icon)
   if (-not $icons.Count) { throw 'tauri.conf.json bundle.icon is empty.' }

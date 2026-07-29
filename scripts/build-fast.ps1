@@ -12,7 +12,7 @@ function Stop-ReaderProcesses {
   $targets = @($fastExe, $desktopExe)
   Get-Process | ForEach-Object {
     try { $path = $_.Path } catch { $path = $null }
-    if (($path -and ($targets -contains $path)) -or $_.ProcessName -eq "ebook-reader-tauri") {
+    if (($path -and ($targets -contains $path)) -or $_.ProcessName -in @("ebook-reader-tauri", $productName)) {
       Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
   }
