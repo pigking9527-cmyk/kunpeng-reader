@@ -10,6 +10,7 @@ function reportReaderPaintPerf(name,started,detail){
 var turnFxTimer=null,turnFxSheet=null;
 function reducedMotion(){return !!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);}
 function turnFxName(){
+  if(typeof readerAnimationSettingOn==='function'&&!readerAnimationSettingOn('pageTurn'))return 'off';
   var fx=S.pageTurnEffect||'horizontal';
   return /^(off|horizontal)$/.test(fx)?fx:'horizontal';
 }

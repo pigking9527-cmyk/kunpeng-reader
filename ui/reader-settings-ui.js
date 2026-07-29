@@ -269,7 +269,7 @@ function initSettingsUI() {
     turnFx.value = settings.pageTurnEffect || DEFAULTS.pageTurnEffect;
     turnFx.addEventListener("change", () => {
       settings.pageTurnEffect = turnFx.value;
-      window.ReaderAnimationSettings?.set?.("pageTurn", turnFx.value !== "off");
+      window.ReaderAnimationSettings?.setPageTurnFromReader?.(turnFx.value !== "off");
       onChange();
     });
   }

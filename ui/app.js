@@ -284,63 +284,11 @@ if (dirsAddBtn) {
 }
 // 工具栏齿轮 → 打开“常用设置”弹窗
 const fpSettingsModal = document.getElementById("fp-settings-modal");
-const animationSettingsModal = document.getElementById("animation-settings-modal");
-const animationSettingsClose = document.getElementById("animation-settings-close");
-const animationSettingsInputs = [...document.querySelectorAll("[data-animation-setting]")];
-const animationSettingsLabel = document.getElementById("animation-settings-label");
 const recoveryBackupStatus = document.getElementById("recovery-backup-status");
 const recoveryBackupButton = document.getElementById("settings-create-backup");
 const recoveryBackupActions = document.getElementById("recovery-backup-actions");
 const recoveryBackupSelect = document.getElementById("settings-restore-backup");
 const restoreRecoveryBackupButton = document.getElementById("settings-restore-backup-button");
-function applyMainAnimationSettings() {
-  window.ReaderAnimationSettings?.applyMain(document);
-  const settings = window.ReaderAnimationSettings?.read?.() || {};
-  const keys = Object.keys(window.ReaderAnimationSettings?.DEFAULTS || {});
-  if (animationSettingsLabel) {
-    animationSettingsLabel.textContent = keys.length && keys.every((key) => settings[key] === false)
-      ? "讨厌动画"
-      : "动画";
-  }
-}
-function renderAnimationSettings() {
-  const settings = window.ReaderAnimationSettings?.read?.() || {};
-  animationSettingsInputs.forEach((input) => {
-    input.checked = settings[input.dataset.animationSetting] !== false;
-  });
-  applyMainAnimationSettings();
-}
-function openAnimationSettings() {
-  renderAnimationSettings();
-  fpSettingsModal.classList.remove("show");
-  animationSettingsModal?.classList.add("show");
-}
-function closeAnimationSettings(returnToCommon = true) {
-  animationSettingsModal?.classList.remove("show");
-  if (returnToCommon) fpSettingsModal.classList.add("show");
-}
-document.getElementById("animation-gear")?.addEventListener("click", (event) => {
-  event.preventDefault();
-  event.stopPropagation();
-  openAnimationSettings();
-});
-animationSettingsClose?.addEventListener("click", () => closeAnimationSettings(true));
-animationSettingsModal?.addEventListener("click", (event) => {
-  if (event.target === animationSettingsModal) closeAnimationSettings(true);
-});
-animationSettingsInputs.forEach((input) => {
-  input.addEventListener("change", () => {
-    window.ReaderAnimationSettings?.set?.(input.dataset.animationSetting, input.checked);
-    applyMainAnimationSettings();
-  });
-});
-window.addEventListener("reader-animation-settings-changed", applyMainAnimationSettings);
-window.addEventListener("storage", (event) => {
-  if (event.key === window.ReaderAnimationSettings?.STORAGE_KEY) {
-    renderAnimationSettings();
-  }
-});
-applyMainAnimationSettings();
 function backupBytes(value) {
   const bytes = Number(value) || 0;
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
@@ -1307,6 +1255,11 @@ window.addEventListener("DOMContentLoaded", () => {
       if (!debugSettingOn("bg_cover_preload")) return;
       runWhenNoReader("shelf-books-backfill", () => invoke("shelf_books").then((list) => shelfUI.render(list)));
     }, 10000);
+    // 首次全书架搜索不再承担索引冷启动：首屏稳定后在后台补齐缺失的全文索引。
+    // build_shelf_index 自身有全局互斥，且 runWhenNoReader 会避免与阅读页争抢资源。
+    setTimeout(() => {
+      runWhenNoReader("keyword-index-startup", () => invoke("build_shelf_index"));
+    }, 8000);
     // 读取自动导入配置并反映到设置面板。真正扫描延后，避免和首屏封面加载抢资源。
     setTimeout(() => {
       // 账号状态始终从 SQLite 恢复；后台开关只控制联网同步，不能让已登录账号看起来丢失。
