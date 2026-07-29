@@ -252,6 +252,7 @@ test("reader injection is composed from responsibility-focused modules", () => {
     "reader-page-pagination.js",
     "reader-page-measurement.js",
     "reader-page-annotations.js",
+    "reader-page-mode-switch.js",
     "reader-page-runtime.js",
     "reader-page-transition.js",
   ];
@@ -284,6 +285,8 @@ test("shelf semantic settings are isolated behind explicit browser APIs", () => 
   assert.match(cache, /global\.ReaderSemanticStatusCache = Object\.freeze/);
   assert.ok(html.indexOf("semantic-status-cache.js") < html.indexOf("semantic-ui.js"));
   assert.ok(html.indexOf("semantic-ui.js") < html.indexOf("app.js"));
+  assert.match(read("ui", "animation-settings-ui.js"), /ReaderAnimationSettingsUI/);
+  assert.ok(html.indexOf("animation-settings-ui.js") < html.indexOf("app.js"));
 });
 
 test("sync and statistics panels expose explicit dependency-injected APIs", () => {
