@@ -65,6 +65,7 @@ struct ProcessedChapterHtml {
 #[derive(Serialize)]
 pub(crate) struct BookInfo {
     id: String,
+    content_id: String,
     title: String,
     format: String,
     url: String,
@@ -655,6 +656,7 @@ pub(crate) async fn book_info(
         bookmarks,
         highlights,
         path,
+        content_id,
     ) = {
         let library = state.library.lock().unwrap();
         let book = library.get(id_num).ok_or("找不到这本书")?;
@@ -669,6 +671,7 @@ pub(crate) async fn book_info(
             book.bookmarks.clone(),
             book.highlights.clone(),
             book.path.clone(),
+            book.content_id.clone(),
         )
     };
 
@@ -701,6 +704,7 @@ pub(crate) async fn book_info(
         };
         return Ok(BookInfo {
             id: id_num.to_string(),
+            content_id,
             title,
             format,
             url,
@@ -753,6 +757,7 @@ pub(crate) async fn book_info(
     ));
     Ok(BookInfo {
         id: id_num.to_string(),
+        content_id,
         title,
         format,
         url: format!("{RES_BASE}/book/{id_num}"),

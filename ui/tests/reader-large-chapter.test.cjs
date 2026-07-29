@@ -9,6 +9,7 @@ const source = [
   "reader-page-pagination.js",
   "reader-page-measurement.js",
   "reader-page-annotations.js",
+  "reader-page-mode-switch.js",
   "reader-page-runtime.js",
   "reader-page-transition.js",
 ].map((name) => fs.readFileSync(path.join(__dirname, "..", name), "utf8")).join("");
@@ -129,16 +130,16 @@ test("mode switches restore anchors inside the already inset scroll viewport", (
 test("single and dual page switches keep the viewport first line on the left page", () => {
   assert.doesNotMatch(source, /function pageModeAnchor\(\)/);
   assert.match(source, /var anchor=topAnchor\(\);/);
-  assert.match(source, /function forceModeSwitchAnchorColumn\(offset\)/);
+  assert.match(source, /function forceModeSwitchAnchorColumn\(offset,preserveLeadMedia\)/);
   assert.match(source, /function sourceAnchorRangeForOffset\(offset\)/);
   assert.match(source, /if\(at>=rec\.end&&i<recs\.length-1\)continue/);
   assert.match(source, /break-before:column !important/);
-  assert.match(source, /forceAnchorColumn:pageModeChanged&&!isScrollMode\(\)/);
+  assert.match(source, /forceAnchorColumn:incomingModeChange&&!isScrollMode\(\)/);
   assert.match(source, /var root,[\s\S]*?dualStartColumn=0/);
   assert.match(source, /function alignDualAnchorToLeftPage\(a\)/);
   assert.match(source, /dualStartColumn=physical%2/);
   assert.match(source, /viewOffset=pageInCh\*pageStep\+\(isDualPage\(\)\?dualStartColumn\*pageLayout\(\)\.colPitch:0\)/);
-  assert.match(source, /alignDualAnchor:pageModeChanged&&isDualPage\(\)/);
+  assert.match(source, /alignDualAnchor:incomingModeChange&&isDualPage\(\)/);
   assert.match(source, /pageInCh\*2\+dualStartColumn/);
   assert.match(source, /dualStartColumn>0&&pageInCh===0/);
 });

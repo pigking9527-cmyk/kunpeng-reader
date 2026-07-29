@@ -17,6 +17,7 @@ function eventFor(data, overrides = {}) {
 test("accepts a bounded allowlisted message from the current frame", () => {
   const { event, frame } = eventFor({ webSearch: "safe term" });
   assert.equal(guard.validateEvent(event, frame, { href: "http://tauri.localhost/reader.html" }), true);
+  assert.equal(guard.validateData({ readerNavigated: 1 }), true);
 });
 
 test("web search accepts only the supported local engine choices", () => {

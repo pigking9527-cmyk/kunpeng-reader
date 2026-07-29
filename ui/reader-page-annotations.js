@@ -3,7 +3,9 @@ var HL=[]; // 全书高亮 [{chapter,start,end,text,note}]，数组下标即后�
 var hlOverlay=null,sourceTextCache=null,highlightRenderTimer=null;
 function generatedTextNode(node){
   var el=node&&node.nodeType===3?node.parentElement:(node&&node.nodeType===1?node:null);
-  return !!(el&&el.closest&&el.closest('.rr-note-num,.rr-mode-switch-anchor,#hl-overlay,#virtual-page,#scroll-preview,#turn-fx-sheet,#page-mask'));
+  // rr-mode-switch-anchor 承载的是从原段落拆出的真实正文，不是生成文字；
+  // 必须参与原文偏移、高亮和搜索，否则切换模式后所有后续偏移都会错位。
+  return !!(el&&el.closest&&el.closest('.rr-note-num,#hl-overlay,#virtual-page,#scroll-preview,#turn-fx-sheet,#page-mask'));
 }
 function sourceTextRecords(){
   if(sourceTextCache)return sourceTextCache;
@@ -387,8 +389,8 @@ function init(){
     // 拖动选字（或存在选中文字）时不翻页，让 web 搜索菜单稳定停在高亮处
     if(didDrag||tapHasSelection()){return;}
     var tapStarted=performance.now();
-    if(x>window.innerWidth*0.6){nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
-    else if(x<window.innerWidth*0.4){prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
+    if(x>window.innerWidth*0.6){parent.postMessage({readerNavigated:1},'*');nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
+    else if(x<window.innerWidth*0.4){parent.postMessage({readerNavigated:1},'*');prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
     else parent.postMessage({centerTap:1},'*');
   }
   // macOS 的 WKWebView 在部分点击序列中较晚派发 click。只对正文空白/文字区
@@ -1366,11 +1368,15 @@ function setupFn(){
 // ---- 离线词典：选中文字/已高亮 → 就地弹释义（释义由外壳查后端再回传）----
 var dictPop=null,dictRect=null,dictContext='';
 var DICT_HN_CFG=[
+  {key:'plain',label:'词义提示'},
+  {key:'sense',label:'可能义项'},
+  {key:'context',label:'上下文提示'},
+  {key:'hypernyms',label:'上位词'},
   {key:'synonyms',label:'近义'},
   {key:'antonyms',label:'反义'}
 ];
 function dictHnSettings(){
-  var defaults={synonyms:true,antonyms:true};
+  var defaults={plain:true,sense:true,context:true,hypernyms:true,synonyms:true,antonyms:true};
   try{
     var raw=localStorage.getItem('dictHownetSettings');
     if(raw){
@@ -1513,6 +1519,10 @@ function appendDictTags(parent,title,items){
 function appendHowNetBlocks(def,r){
   var h=r&&r.hownet;if(!h)return;
   var st=dictHnSettings(),box=document.createElement('div');box.className='dc-hn';
+  if(st.plain!==false)appendDictTextBlock(box,'词义提示',h.plain);
+  if(st.sense!==false)appendDictTextBlock(box,'可能义项',h.sense);
+  if(st.context!==false)appendDictTextBlock(box,'结合当前句子',h.example_note);
+  if(st.hypernyms!==false)appendDictTags(box,'上位词',h.hypernyms);
   if(st.synonyms!==false)appendDictTags(box,'近义',h.synonyms);
   if(st.antonyms!==false)appendDictTags(box,'反义',h.antonyms);
   if(box.childNodes.length)def.appendChild(box);
