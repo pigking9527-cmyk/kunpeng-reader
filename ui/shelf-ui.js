@@ -461,7 +461,7 @@ function bookCard(b, index = 0) {
     e.stopPropagation();
     // 书卡会为避免封面闪烁而复用；右键整理必须拿到书架中的最新数据，
     // 不能使用创建卡片时闭包保存的旧标签/收藏夹快照。
-    openBookOrganizer(getBook(b.id) || b, e);
+    openBookOrganizer(getBook(b.id) || b, e, card);
   });
 
   return card;
@@ -899,6 +899,8 @@ batchOrganizationModal?.addEventListener("click", (event) => {
 });
 
 let organizerBookId = null;
+let organizerAnchor = null;
+let organizerPositionScheduled = false;
 function booklistBook(id) {
   return books.find((book) => String(book.id) === String(id));
 }
@@ -1109,6 +1111,7 @@ booklistModal?.addEventListener("click", (event) => {
 });
 function closeBookOrganizer() {
   organizerBookId = null;
+  organizerAnchor = null;
   organizerMenu?.classList?.remove("show");
 }
 function menuButton(text, className = "org-action") {
@@ -1118,15 +1121,72 @@ function menuButton(text, className = "org-action") {
   button.textContent = text;
   return button;
 }
-function positionBookOrganizer(event) {
-  if (!organizerMenu) return;
+function createBookOrganizerAnchor(element, event) {
+  if (!element?.getBoundingClientRect) return null;
+  const rect = element.getBoundingClientRect();
+  const width = Number.isFinite(rect.width) ? rect.width : Math.max(0, (rect.right || 0) - (rect.left || 0));
+  const height = Number.isFinite(rect.height) ? rect.height : Math.max(0, (rect.bottom || 0) - (rect.top || 0));
+  const pointerX = Number.isFinite(event?.clientX) ? event.clientX : rect.left + width / 2;
+  const pointerY = Number.isFinite(event?.clientY) ? event.clientY : rect.top + height / 2;
+  return {
+    element,
+    offsetX: Math.max(0, Math.min(width, pointerX - rect.left)),
+    offsetY: Math.max(0, Math.min(height, pointerY - rect.top)),
+    menuOffsetX: null,
+    menuOffsetY: null,
+  };
+}
+function organizerAnchorIsVisible(rect, viewportWidth, viewportHeight) {
+  const contentRect = contentEl?.getBoundingClientRect?.();
+  const left = Math.max(0, Number.isFinite(contentRect?.left) ? contentRect.left : 0);
+  const top = Math.max(0, Number.isFinite(contentRect?.top) ? contentRect.top : 0);
+  const right = Math.min(viewportWidth, Number.isFinite(contentRect?.right) ? contentRect.right : viewportWidth);
+  const bottom = Math.min(viewportHeight, Number.isFinite(contentRect?.bottom) ? contentRect.bottom : viewportHeight);
+  return rect.right > left && rect.left < right && rect.bottom > top && rect.top < bottom;
+}
+function positionBookOrganizer(initialPlacement = false) {
+  if (!organizerMenu || !organizerAnchor?.element?.getBoundingClientRect) return;
+  if (organizerAnchor.element.isConnected === false) {
+    closeBookOrganizer();
+    return;
+  }
   const margin = 8;
   const width = organizerMenu.offsetWidth || 300;
   const height = organizerMenu.offsetHeight || 360;
   const viewportWidth = global.innerWidth || 1280;
   const viewportHeight = global.innerHeight || 800;
-  organizerMenu.style.left = Math.max(margin, Math.min(event.clientX || margin, viewportWidth - width - margin)) + "px";
-  organizerMenu.style.top = Math.max(margin, Math.min(event.clientY || margin, viewportHeight - height - margin)) + "px";
+  const rect = organizerAnchor.element.getBoundingClientRect();
+  if (!organizerAnchorIsVisible(rect, viewportWidth, viewportHeight)) {
+    closeBookOrganizer();
+    return;
+  }
+  const anchorX = rect.left + organizerAnchor.offsetX;
+  const anchorY = rect.top + organizerAnchor.offsetY;
+  if (initialPlacement || !Number.isFinite(organizerAnchor.menuOffsetX) || !Number.isFinite(organizerAnchor.menuOffsetY)) {
+    const left = Math.max(margin, Math.min(anchorX, viewportWidth - width - margin));
+    const top = Math.max(margin, Math.min(anchorY, viewportHeight - height - margin));
+    organizerAnchor.menuOffsetX = left - rect.left;
+    organizerAnchor.menuOffsetY = top - rect.top;
+  }
+  // 打开时只做一次视口内定位；之后保持相对书卡的固定偏移，避免滚动到
+  // 窗口边缘时弹层被钳在原处、再次与封面脱节。
+  organizerMenu.style.left = rect.left + organizerAnchor.menuOffsetX + "px";
+  organizerMenu.style.top = rect.top + organizerAnchor.menuOffsetY + "px";
+}
+function scheduleBookOrganizerPosition() {
+  if (organizerPositionScheduled || !organizerAnchor || !organizerMenu?.classList?.contains("show")) return;
+  organizerPositionScheduled = true;
+  requestFrame(() => {
+    organizerPositionScheduled = false;
+    positionBookOrganizer();
+  });
+}
+function scheduleBookOrganizerResize() {
+  if (organizerAnchor) {
+    organizerAnchor.menuOffsetX = null;
+    organizerAnchor.menuOffsetY = null;
+  }
+  scheduleBookOrganizerPosition();
 }
 function applyOrganizationChoice(book, field, entry, checked) {
   const values = new Map((book[field] || []).map((value) => [organizationKey(value), organizationName(value)]));
@@ -1218,6 +1278,7 @@ function renderBookOrganizer(book) {
   organizerMenu.appendChild(head);
   appendOrganizationSection(organizerMenu, book, "tags", "标签", "新建标签");
   appendOrganizationSection(organizerMenu, book, "collections", "收藏夹", "新建收藏夹");
+  scheduleBookOrganizerPosition();
 }
 function renderOrganizationManager(field, heading) {
   if (!organizerMenu) return;
@@ -1275,12 +1336,14 @@ function renderOrganizationManager(field, heading) {
     }
     organizerMenu.appendChild(row);
   });
+  scheduleBookOrganizerPosition();
 }
-function openBookOrganizer(book, event) {
+function openBookOrganizer(book, event, anchorElement) {
   if (!organizerMenu) return;
+  organizerAnchor = createBookOrganizerAnchor(anchorElement, event);
   renderBookOrganizer(book);
   organizerMenu.classList.add("show");
-  positionBookOrganizer(event);
+  positionBookOrganizer(true);
 }
 if (organizerMenu) organizerMenu.addEventListener("click", (event) => event.stopPropagation());
 if (typeof document.addEventListener === "function") {
@@ -1381,7 +1444,9 @@ function initShelfScrollbar() {
   let dragStartScrollTop = 0;
 
   contentEl.addEventListener("scroll", scheduleShelfScrollbarUpdate, { passive: true });
+  contentEl.addEventListener("scroll", scheduleBookOrganizerPosition, { passive: true });
   global.addEventListener("resize", scheduleShelfScrollbarUpdate);
+  global.addEventListener("resize", scheduleBookOrganizerResize);
 
   shelfScrollbar.addEventListener("pointerdown", (e) => {
     if (!shelfScrollbar.classList.contains("show")) return;

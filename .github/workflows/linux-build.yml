@@ -11,8 +11,11 @@ on:
       - "Cargo.lock"
       - "build.rs"
       - "tauri.conf.json"
+      - "tauri.linux.conf.json"
       - "icons/**"
+      - "packaging/linux/**"
       - "reader-core/**"
+      - "scripts/check.ps1"
       - "src/**"
       - "ui/**"
       - "vendor/**"
@@ -143,6 +146,11 @@ jobs:
 
           file "$out_dir/$appimage_name" "$out_dir/$deb_name"
           dpkg-deb --info "$out_dir/$deb_name"
+          package_name="$(dpkg-deb --field "$out_dir/$deb_name" Package)"
+          test "$package_name" = "kunpeng-reader"
+          [[ "$package_name" =~ ^[a-z0-9][a-z0-9+.-]+$ ]]
+          sudo apt-get install -y "$PWD/$out_dir/$deb_name"
+          dpkg-query -W -f='${Status}\n' "$package_name" | grep -Fx 'install ok installed'
           (cd "$out_dir" && sha256sum "$appimage_name" "$deb_name" > SHA256SUMS-Linux.txt)
 
           {
