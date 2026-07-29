@@ -85,6 +85,7 @@ def load_update_manifest():
             continue
         cleaned[version] = {
             "version": version,
+            "android_version": _clean_update_text(item.get("android_version"), 64).lstrip("vV"),
             "release_notes": _clean_update_text(item.get("release_notes")),
             "url": _clean_update_text(item.get("url"), 2048),
             "published_at": _clean_update_text(item.get("published_at"), 64),

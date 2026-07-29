@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "latest": "1.9.5",
+  "latest": "1.10.0",
   "releases": {
+    "1.10.0": {
+      "android_version": "0.2.0",
+      "release_notes": "- 新增端到端加密的私密配置同步与账号恢复。\n- 修复滚动/整页、单页/双页模式切换后的阅读位置漂移与首行缩进。\n- 底部全书进度条与顶部阅读工具栏统一同现同隐。\n- 新增 Linux x86_64 AppImage/deb 构建及启动烟测。\n- Android v0.2.0 增加离线词典、生词本、智读、账号安全、加密密钥同步和相邻章节预热。\n- 发布 Windows、macOS、Linux 与 Android 构建及独立 SHA-256 校验清单。",
+      "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.10.0",
+      "published_at": "2026-07-29"
+    },
     "1.9.5": {
       "release_notes": "- 书架多选增加“标签”和“加入收藏书单”，已有关系会明确提示。\n- 修复页末高亮菜单切换横排/九宫格后的定位。\n- 修复 macOS Apple Silicon 分页边界并拆分测量模块。\n- Android 首版完成书架、导入、阅读、高亮、批注、书签、词典、翻译与 Web 搜索基础能力。\n- 建立跨端 contracts、兼容样本、ADR 与协作状态文档。\n- 发布 Windows、macOS Apple Silicon、Android 构建及 SHA-256 校验清单。",
       "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.9.5",

@@ -1,9 +1,9 @@
 # 鲲鹏阅读器（Kunpeng Reader）
 
-一个面向 Windows、macOS 与 Android 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
+一个面向 Windows、macOS、Linux 与 Android 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
-> 最新版本：**v1.9.5** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP；Android APK）。
+> 最新桌面版本：**v1.10.0** · Android 版本：**v0.2.0** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP；Linux AppImage / deb；Android Profile APK）。
 
 ## 特性
 
@@ -23,10 +23,12 @@
 - **跨书搜索**：阅读页划词菜单可直接跨全书架（包含当前书）搜索选中文字或句子，按书分组展示结果，支持折叠、分批展开和跳回来源书页
 - **划词翻译**：阅读页划词菜单支持翻译大段文字，预留并接入 DeepL / Google / 百度 / 腾讯翻译配置，用户可自行填写 API 凭据
 
-**Android v1.9.5 首版**
+**Android v0.2.0**
 - **书架与导入**：账号、搜索、统计、筛选与布局、设置、更多六个一级入口；支持系统文件选择导入 EPUB / TXT、Download 自动导入、批量导入及封面墙阅读进度显示
 - **阅读与 EPUB 兼容**：后台解析与缓存改善大书打开；兼容 EPUB 封面/正文图片、章节头图与脚注；支持滚动、整页左右翻页、点击翻页和长按自定义划词菜单
-- **划词工具**：高亮、批注、书签、词典、翻译与 Web 搜索；菜单会随选区空间显示在上方或下方，并支持多彩高亮
+- **划词工具与词典**：高亮、批注、书摘、书签、离线中英文词典、翻译、Web / 跨书 / 相似语义搜索与智读；查词可进入生词本并按熟悉度复习
+- **账号与私密同步**：新增邮箱绑定/换绑、修改/找回密码；智读与翻译设置可同步，API Key 使用独立同步密码加密后才可跨设备恢复
+- **性能与稳定性**：EPUB 在后台 isolate 安全解析并按章缓存；书架延后加载大段标注数据，进入章节后预热相邻章节；滚动手势降低惯性并限制跨章边界
 
 **检索**
 - **书架全文检索**：压缩逐章文本索引 + Bloom 预筛选 + 有界 LRU 缓存 + 多线程字节级 `memmem`；保留精确扫描兜底，兼顾速度与结果完整性
@@ -42,7 +44,7 @@
 - **高频词语音包**：可在本机生成前 10,000 高频英文词语音缓存，支持暂停、继续、进度显示和删除
 - **「我的书架」显示设置**：封面是否显示阅读进度 / 评分 / 书名，各自开关；网格视图可只显示封面，筛选面板可保持默认自适应或指定封面列数
 - **新版提示**：启动后台优先检查 GitHub 最新发行版，连接失败时走服务器更新清单兜底；「关于」里可手动检查更新、看本版更新内容
-- **稳定发布流程**：GitHub Actions CI 与本地固定检查脚本共用 `scripts/check.ps1`，覆盖测试、UTF-8、版本一致、图标、安全基线和 CSS；release 构建脚本自动校验图标并刷新 Windows 图标缓存；GitHub Release 同时发布 Windows 单文件绿色版/安装包、macOS Apple Silicon DMG/App ZIP、Android APK 与各平台 SHA-256 校验清单
+- **稳定发布流程**：GitHub Actions CI 与本地固定检查脚本共用 `scripts/check.ps1`，覆盖测试、UTF-8、版本一致、图标、安全基线和 CSS；release 构建脚本自动校验图标并刷新 Windows 图标缓存；GitHub Release 同时发布 Windows 单文件绿色版/安装包、macOS Apple Silicon DMG/App ZIP、Linux AppImage/deb、Android APK 与各平台 SHA-256 校验清单
 - 划词 web 搜索、独立窗口（EPUB 与 PDF 各自记忆几何）、关于页
 
 > 智读采用用户自备 API Key。接口配置经系统能力保护后仅保存在本机，不进入同步实体；发送内容限制为当前书已经读到的相关章节和用户明确选择的文字。
@@ -84,9 +86,9 @@ cargo tauri build
 - 单文件绿色版：`target/release/ebook-reader-tauri.exe` 或桌面 `鲲鹏阅读器.exe`
 - 安装包：`target/release/bundle/nsis/`
 
-### Linux 测试构建
+### Linux x86_64
 
-GitHub Actions 的 `Linux x86_64 build` 工作流使用 Ubuntu 24.04 构建并验证以下测试产物：
+GitHub Actions 的 `Linux x86_64 build` 工作流使用 Ubuntu 24.04 构建并验证以下产物：
 
 - `Kunpeng-Reader-v<版本>-Linux-x86_64.AppImage`
 - `Kunpeng-Reader-v<版本>-Linux-x86_64.deb`
@@ -105,8 +107,8 @@ Ubuntu / Debian 也可以安装 deb：
 sudo apt install ./Kunpeng-Reader-v*-Linux-x86_64.deb
 ```
 
-当前语义搜索运行库要求 glibc 2.38 或更高版本，因此首轮测试基线是 Ubuntu 24.04。Linux 产物当前用于兼容性测试，尚未作为正式签名发布版本。
+当前语义搜索运行库要求 glibc 2.38 或更高版本，因此 Linux 首发兼容基线是 Ubuntu 24.04 x86_64。Linux 产物已通过链接检查和虚拟显示环境启动烟测，但尚未签名；Ubuntu 22.04、Debian 12 及其他发行版仍需单独验收。
 
 ## 技术栈
 
-桌面：Rust · Tauri 2 · WebView2 / WKWebView · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`；v1.9.5 发布书架、导入、阅读和划词工具首版）。
+桌面：Rust · Tauri 2 · WebView2 / WKWebView / WebKitGTK · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`；当前版本 v0.2.0）。

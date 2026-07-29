@@ -15,10 +15,10 @@
 
 | 平台 | 状态 | 当前重点 |
 | --- | --- | --- |
-| Windows | 已有正式桌面端 | 保持稳定、持续修复和发布。 |
-| macOS | 已有桌面构建链路 | 签名、公证与实际发布完善。 |
-| Linux | 已有 x86_64 测试构建链路 | Ubuntu 24.04 CI 生成 AppImage/deb 和 SHA-256；当前 ORT 要求 glibc 2.38+，等待真实环境验收。 |
-| Android | 已有第一版构建 | 本地阅读、导入、账号与基础同步；继续按 contracts 校验兼容性。 |
+| Windows | v1.10.0 发布候选 | 保持稳定、持续修复和发布。 |
+| macOS | v1.10.0 Apple Silicon 发布候选 | 当前临时签名；后续补 Developer ID 签名与公证。 |
+| Linux | v1.10.0 x86_64 发布候选 | Ubuntu 24.04 CI 生成 AppImage/deb 和 SHA-256；当前 ORT 要求 glibc 2.38+，继续真实环境验收。 |
+| Android | v0.2.0 发布候选 | 本地阅读、导入、词典/生词本、智读、账号安全与加密私密同步；继续按 contracts 校验兼容性。 |
 | iPhone / iPad | 启动阶段 | SwiftUI 书架、阅读页和 iPad 侧栏体验。 |
 
 ## 当前跨端工作项
