@@ -14,6 +14,13 @@ const summaryEl = document.getElementById("summary");
 const resultsEl = document.getElementById("results");
 const qhistEl = document.getElementById("qhistory");
 
+// 搜索窗口打开即预热模型；不加载全局向量图，也不等待结果，因此不影响关键词输入。
+// 这样用户切换到语义模式时，模型加载通常已经完成。
+function warmSemanticModelForShelfSearch() {
+  window.setTimeout(() => invoke("warm_semantic_model").catch(() => {}), 120);
+}
+warmSemanticModelForShelfSearch();
+
 // ---- 搜索历史 ----
 let qhist = [];
 let qcommon = {};
