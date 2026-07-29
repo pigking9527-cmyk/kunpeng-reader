@@ -197,6 +197,7 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
                     "latest": "1.9.5",
                     "releases": {
                         "1.9.5": {
+                            "android_version": "0.1.0",
                             "release_notes": "服务器更新说明",
                             "url": "https://example.com/v1.9.5",
                             "published_at": "2026-07-27",
@@ -341,8 +342,10 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         latest = self.request_public_json("/updates/latest")
         notes = self.request_public_json("/updates/notes?tag=v1.9.5")
         self.assertEqual(latest["version"], "1.9.5")
+        self.assertEqual(latest["android_version"], "0.1.0")
         self.assertEqual(latest["release_notes"], "服务器更新说明")
         self.assertEqual(notes["version"], "1.9.5")
+        self.assertEqual(notes["android_version"], "0.1.0")
         self.assertEqual(notes["url"], "https://example.com/v1.9.5")
 
     def test_rebinding_email_requires_old_then_new_mailbox_proof(self):
