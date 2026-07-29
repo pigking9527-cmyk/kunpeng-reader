@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | Windows | 已有正式桌面端 | 保持稳定、持续修复和发布。 |
 | macOS | 已有桌面构建链路 | 签名、公证与实际发布完善。 |
-| Linux | 已有 x86_64 测试构建链路 | GitHub Actions 生成 AppImage/deb 和 SHA-256；等待真实 Linux 环境验收后再转为正式发布。 |
+| Linux | 已有 x86_64 测试构建链路 | Ubuntu 24.04 CI 生成 AppImage/deb 和 SHA-256；当前 ORT 要求 glibc 2.38+，等待真实环境验收。 |
 | Android | 已有第一版构建 | 本地阅读、导入、账号与基础同步；继续按 contracts 校验兼容性。 |
 | iPhone / iPad | 启动阶段 | SwiftUI 书架、阅读页和 iPad 侧栏体验。 |
 

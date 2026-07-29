@@ -86,7 +86,7 @@ cargo tauri build
 
 ### Linux 测试构建
 
-GitHub Actions 的 `Linux x86_64 build` 工作流使用 Ubuntu 22.04 构建并验证以下测试产物：
+GitHub Actions 的 `Linux x86_64 build` 工作流使用 Ubuntu 24.04 构建并验证以下测试产物：
 
 - `Kunpeng-Reader-v<版本>-Linux-x86_64.AppImage`
 - `Kunpeng-Reader-v<版本>-Linux-x86_64.deb`
@@ -105,7 +105,7 @@ Ubuntu / Debian 也可以安装 deb：
 sudo apt install ./Kunpeng-Reader-v*-Linux-x86_64.deb
 ```
 
-Linux 产物当前用于兼容性测试，尚未作为正式签名发布版本。
+当前语义搜索运行库要求 glibc 2.38 或更高版本，因此首轮测试基线是 Ubuntu 24.04。Linux 产物当前用于兼容性测试，尚未作为正式签名发布版本。
 
 ## 技术栈
 
