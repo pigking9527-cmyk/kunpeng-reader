@@ -15,10 +15,10 @@
 
 | 平台 | 状态 | 当前重点 |
 | --- | --- | --- |
-| Windows | v1.11.0 发布候选 | 书库问答、模型分类、同步历史与资讯功能完成；后续补 Authenticode 签名。 |
-| macOS | v1.11.0 Apple Silicon 发布候选 | 当前临时签名；后续补 Developer ID 签名与公证。 |
-| Linux | v1.11.0 x86_64 发布候选 | Ubuntu 24.04 CI 生成 AppImage/deb 和 SHA-256；当前 ORT 要求 glibc 2.38+，继续真实环境验收。 |
-| Android | v0.3.0 Profile 测试包发布候选 | 新增全文与语义检索；当前为 Android Debug/Profile 签名，后续配置生产 keystore，并继续按 contracts 校验兼容性。 |
+| Windows | v1.11.0 已发布 | 书库问答、模型分类、同步历史与资讯功能已发布；后续补 Authenticode 签名。 |
+| macOS | v1.11.0 Apple Silicon 已发布 | 当前临时签名；后续补 Developer ID 签名与公证。 |
+| Linux | v1.11.0 x86_64 已发布 | Ubuntu 24.04 CI 已生成 AppImage/deb 和 SHA-256；当前 ORT 要求 glibc 2.38+，继续真实环境验收。 |
+| Android | v0.3.0 Profile 测试包已发布 | 新增全文与语义检索；当前为 Android Debug/Profile 签名，后续配置生产 keystore，并继续按 contracts 校验兼容性。 |
 | iPhone / iPad | 启动阶段 | SwiftUI 书架、阅读页和 iPad 侧栏体验。 |
 
 ## 当前跨端工作项
