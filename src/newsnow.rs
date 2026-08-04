@@ -113,6 +113,139 @@ const CURATED_SOURCES: &[NewsSource] = &[
         color: "#c0392b",
         default_enabled: false,
     },
+    NewsSource {
+        id: "36kr-quick",
+        name: "36氪快讯",
+        category: "科技",
+        color: "#3671c9",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "coolapk",
+        name: "酷安热榜",
+        category: "科技",
+        color: "#36a46c",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "aihot",
+        name: "AIHOT",
+        category: "科技",
+        color: "#4385f5",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "juejin",
+        name: "稀土掘金",
+        category: "科技",
+        color: "#3f7ad9",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "producthunt",
+        name: "Product Hunt",
+        category: "科技",
+        color: "#dc4b32",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "bilibili-hot-search",
+        name: "哔哩哔哩热搜",
+        category: "热点",
+        color: "#1687bc",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "douban",
+        name: "豆瓣热门",
+        category: "文化",
+        color: "#15866b",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "hupu",
+        name: "虎扑热帖",
+        category: "体育",
+        color: "#ce4d4d",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "dongqiudi",
+        name: "懂球帝",
+        category: "体育",
+        color: "#349767",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "xueqiu-hotstock",
+        name: "雪球热门股票",
+        category: "财经",
+        color: "#4584d9",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "jin10",
+        name: "金十数据",
+        category: "财经",
+        color: "#3473d2",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "mktnews-flash",
+        name: "MKTNews 快讯",
+        category: "财经",
+        color: "#4b59a7",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "gelonghui",
+        name: "格隆汇",
+        category: "财经",
+        color: "#3d78c5",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "kaopu",
+        name: "靠谱新闻",
+        category: "国际",
+        color: "#64748b",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "steam",
+        name: "Steam 在线人数",
+        category: "游戏",
+        color: "#315a88",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "freebuf",
+        name: "FreeBuf 网络安全",
+        category: "科技",
+        color: "#2e9a69",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "v2ex-share",
+        name: "V2EX 最新分享",
+        category: "科技",
+        color: "#596579",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "tieba",
+        name: "百度贴吧热议",
+        category: "热点",
+        color: "#3c78c8",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "toutiao",
+        name: "今日头条热榜",
+        category: "热点",
+        color: "#d4473f",
+        default_enabled: false,
+    },
 ];
 
 #[derive(Clone, Copy)]
@@ -566,6 +699,15 @@ mod tests {
         assert_eq!(selected.len(), MAX_SELECTED_SOURCES);
         assert_eq!(selected[0].id, "weibo");
         assert!(!selected.iter().any(|source| source.id == "unknown"));
+    }
+
+    #[test]
+    fn source_catalog_has_a_broad_but_bounded_selection() {
+        assert!(CURATED_SOURCES.len() >= 30);
+        assert!(CURATED_SOURCES.len() <= 48);
+        assert!(CURATED_SOURCES
+            .iter()
+            .all(|source| !source.id.is_empty() && !source.name.is_empty()));
     }
 
     #[test]

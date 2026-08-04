@@ -84,6 +84,7 @@
     const refresh = root.getElementById("newsnow-refresh");
     const sourceToggle = root.getElementById("newsnow-source-toggle");
     const sourcePicker = root.getElementById("newsnow-source-picker");
+    const sourceSearch = root.getElementById("newsnow-source-search");
     const sourceOptions = root.getElementById("newsnow-source-options");
     const sourceClose = root.getElementById("newsnow-source-close");
     const sourceApply = root.getElementById("newsnow-source-apply");
@@ -94,7 +95,7 @@
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !status || !feed || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !status || !feed || !categories || !updated || !shell) return null;
 
     let catalog = [];
     let sourceIds = [];
@@ -103,6 +104,7 @@
     let selectedCategory = "全部";
     let loading = false;
     let catalogueLoading = null;
+    let sourceQuery = "";
 
     function newsEnabled() {
       return global.ReaderExperimentalFeatures?.enabled?.("newsnow") === true;
@@ -151,12 +153,23 @@
 
     function renderSourcePicker() {
       const byCategory = new Map();
-      catalog.forEach((source) => {
+      const query = sourceQuery.trim().toLocaleLowerCase();
+      catalog.filter((source) => {
+        if (!query) return true;
+        return [source.id, source.name, source.category].some((value) => text(value).toLocaleLowerCase().includes(query));
+      }).forEach((source) => {
         const category = sourceCategory(source);
         if (!byCategory.has(category)) byCategory.set(category, []);
         byCategory.get(category).push(source);
       });
       const selected = new Set(pendingSourceIds);
+      if (!byCategory.size) {
+        const empty = root.createElement("p");
+        empty.className = "newsnow-source-empty";
+        empty.textContent = "没有找到匹配的内置来源。";
+        sourceOptions.replaceChildren(empty);
+        return;
+      }
       sourceOptions.replaceChildren(...[...byCategory.entries()].map(([category, sources]) => {
         const group = root.createElement("section");
         group.className = "newsnow-source-group";
@@ -198,10 +211,12 @@
 
     function openSourcePicker() {
       pendingSourceIds = sourceIds.slice();
+      sourceQuery = "";
+      sourceSearch.value = "";
       renderSourcePicker();
       sourcePicker.hidden = false;
       sourceToggle.setAttribute("aria-expanded", "true");
-      sourceClose.focus({ preventScroll: true });
+      sourceSearch.focus({ preventScroll: true });
     }
 
     function closeSourcePicker({ focus = false } = {}) {
@@ -373,6 +388,10 @@
       }
     });
     sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true }));
+    sourceSearch.addEventListener("input", () => {
+      sourceQuery = sourceSearch.value;
+      renderSourcePicker();
+    });
     sourceReset.addEventListener("click", () => { pendingSourceIds = defaultSourceIds(catalog); renderSourcePicker(); });
     sourceApply.addEventListener("click", () => {
       const selected = allowedSourceIds(pendingSourceIds, catalog);

@@ -802,12 +802,13 @@
         </div>
         <div class="newsnow-actions">
           <span id="newsnow-updated" class="newsnow-updated" aria-live="polite"></span>
-          <button id="newsnow-source-toggle" class="btn-plain newsnow-source-toggle" type="button" aria-expanded="false">管理来源</button>
+          <button id="newsnow-source-toggle" class="btn-plain newsnow-source-toggle" type="button" aria-expanded="false">添加来源</button>
           <button id="newsnow-refresh" class="btn-plain newsnow-refresh" type="button">刷新</button>
         </div>
       </header>
       <section id="newsnow-source-picker" class="newsnow-source-picker" hidden aria-label="资讯来源设置">
-        <div class="newsnow-source-picker-head"><div><strong>选择关注来源</strong><p>保存在此设备；最多同时加载 12 个来源。</p></div><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="关闭来源设置">×</button></div>
+        <div class="newsnow-source-picker-head"><div><strong>添加并管理来源</strong><p>从内置目录选择；保存在此设备，最多同时加载 12 个来源。</p></div><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="关闭来源设置">×</button></div>
+        <input id="newsnow-source-search" class="newsnow-source-search" type="search" placeholder="搜索来源，例如：科技、财经、GitHub" aria-label="搜索资讯来源" />
         <div id="newsnow-source-options" class="newsnow-source-options"></div>
         <div class="newsnow-source-picker-actions"><button id="newsnow-source-reset" class="btn-plain" type="button">恢复推荐</button><button id="newsnow-source-apply" class="btn-primary" type="button">应用并刷新</button></div>
       </section>
