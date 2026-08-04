@@ -5,6 +5,7 @@
 
   const LOAD_TIMEOUT_MS = 18000;
   const SOURCE_STORAGE_KEY = "kunpeng.reader.news.sources.v2";
+  const LAYOUT_STORAGE_KEY = "kunpeng.reader.news.layout.v1";
   const MAX_SOURCES = 12;
 
   function text(value) {
@@ -77,6 +78,14 @@
     try { global.localStorage.setItem(SOURCE_STORAGE_KEY, JSON.stringify(ids)); } catch (_) { /* preferences are optional */ }
   }
 
+  function loadLayout() {
+    try {
+      return global.localStorage.getItem(LAYOUT_STORAGE_KEY) === "grid" ? "grid" : "list";
+    } catch (_) {
+      return "list";
+    }
+  }
+
   function init({ root = document, invoke = global.__TAURI__?.core?.invoke } = {}) {
     const button = root.getElementById("newsnow-toolbar-btn");
     const page = root.getElementById("newsnow-page");
@@ -90,12 +99,14 @@
     const sourceApply = root.getElementById("newsnow-source-apply");
     const sourceReset = root.getElementById("newsnow-source-reset");
     const sourceSummary = root.getElementById("newsnow-source-summary");
+    const listLayout = root.getElementById("newsnow-layout-list");
+    const gridLayout = root.getElementById("newsnow-layout-grid");
     const status = root.getElementById("newsnow-status");
     const feed = root.getElementById("newsnow-feed");
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !status || !feed || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !categories || !updated || !shell) return null;
 
     let catalog = [];
     let sourceIds = [];
@@ -105,6 +116,7 @@
     let loading = false;
     let catalogueLoading = null;
     let sourceQuery = "";
+    let layout = loadLayout();
 
     function newsEnabled() {
       return global.ReaderExperimentalFeatures?.enabled?.("newsnow") === true;
@@ -119,6 +131,19 @@
     function setStatus(message, kind = "") {
       status.textContent = text(message);
       status.className = "newsnow-status" + (kind ? " " + kind : "");
+    }
+
+    function applyLayout() {
+      const grid = layout === "grid";
+      feed.classList.toggle("newsnow-feed-grid", grid);
+      listLayout.setAttribute("aria-pressed", String(!grid));
+      gridLayout.setAttribute("aria-pressed", String(grid));
+    }
+
+    function setLayout(nextLayout) {
+      layout = nextLayout === "grid" ? "grid" : "list";
+      try { global.localStorage.setItem(LAYOUT_STORAGE_KEY, layout); } catch (_) { /* optional local preference */ }
+      applyLayout();
     }
 
     function sourceForId(id) {
@@ -380,6 +405,8 @@
     button.addEventListener("click", toggle);
     back.addEventListener("click", close);
     refresh.addEventListener("click", () => load(true));
+    listLayout.addEventListener("click", () => setLayout("list"));
+    gridLayout.addEventListener("click", () => setLayout("grid"));
     sourceToggle.addEventListener("click", () => {
       if (sourcePicker.hidden) {
         loadSources().then(openSourcePicker);
@@ -415,10 +442,12 @@
       if (event.detail?.key === "newsnow") applyExperimentalAvailability();
     });
     applyExperimentalAvailability();
+    applyLayout();
     return {
       open, close, toggle, refresh: () => load(true),
       render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); },
       sources: () => catalog.slice(),
+      layout: () => layout,
     };
   }
 
