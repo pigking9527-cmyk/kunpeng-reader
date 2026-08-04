@@ -109,11 +109,11 @@
     const readerSource = root.getElementById("newsnow-reader-source");
     const readerTitle = root.getElementById("newsnow-reader-title");
     const readerStatus = root.getElementById("newsnow-reader-status");
-    const readerContent = root.getElementById("newsnow-reader-content");
+    const readerFrame = root.getElementById("newsnow-reader-frame");
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !reader || !readerBack || !readerExternal || !readerSource || !readerTitle || !readerStatus || !readerContent || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !reader || !readerBack || !readerExternal || !readerSource || !readerTitle || !readerStatus || !readerFrame || !categories || !updated || !shell) return null;
 
     let catalog = [];
     let sourceIds = [];
@@ -266,24 +266,15 @@
 
     function setReaderVisible(visible) {
       reader.hidden = !visible;
-      feed.hidden = visible;
-      status.hidden = visible;
       sourcePicker.hidden = true;
       sourceToggle.setAttribute("aria-expanded", "false");
       page.classList.toggle("newsnow-reading", visible);
     }
 
-    function renderArticleText(value) {
-      const paragraphs = text(value).split(/\n+/).map((line) => line.trim()).filter(Boolean);
-      readerContent.replaceChildren(...paragraphs.map((line) => {
-        const paragraph = root.createElement("p");
-        paragraph.textContent = line;
-        return paragraph;
-      }));
-    }
-
     function closeArticle({ focus = false } = {}) {
       articleUrl = "";
+      readerFrame.src = "about:blank";
+      readerStatus.textContent = "";
       setReaderVisible(false);
       if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true });
     }
@@ -294,25 +285,11 @@
       articleUrl = url;
       readerSource.textContent = [text(item.source || item.source_name || "资讯"), itemDate(item)].filter(Boolean).join(" · ");
       readerTitle.textContent = text(item.title || item.name || "未命名新闻");
-      readerStatus.textContent = "正在提取正文…";
-      readerContent.replaceChildren();
+      readerStatus.textContent = "正在使用浏览器内核加载原网页…";
       readerExternal.hidden = false;
       setReaderVisible(true);
-      try {
-        const result = await withTimeout(invoke("newsnow_read_article", { url }), 22000);
-        if (articleUrl !== url) return;
-        const body = text(result && result.text).trim();
-        readerStatus.textContent = text(result && result.message).trim();
-        if (body) {
-          renderArticleText(body);
-        } else {
-          readerContent.textContent = "无法在应用内提取这篇文章。你可以在浏览器中打开原文继续阅读。";
-        }
-      } catch (_) {
-        if (articleUrl !== url) return;
-        readerStatus.textContent = "原文加载超时或失败。";
-        readerContent.textContent = "你可以在浏览器中打开原文继续阅读。";
-      }
+      readerFrame.src = url;
+      reader.scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
     function makeCard(item) {
@@ -465,6 +442,12 @@
     back.addEventListener("click", close);
     readerBack.addEventListener("click", () => closeArticle({ focus: true }));
     readerExternal.addEventListener("click", () => { if (articleUrl) openExternal(articleUrl); });
+    readerFrame.addEventListener("load", () => {
+      if (articleUrl) readerStatus.textContent = "原网页已加载；可在下方直接浏览。";
+    });
+    readerFrame.addEventListener("error", () => {
+      if (articleUrl) readerStatus.textContent = "原网页加载失败，请使用右上角“浏览器打开原文”。";
+    });
     refresh.addEventListener("click", () => load(true));
     listLayout.addEventListener("click", () => setLayout("list"));
     gridLayout.addEventListener("click", () => setLayout("grid"));

@@ -27,7 +27,7 @@ test("NewsNow is gated behind the local experimental switch", () => {
   assert.match(script, /if \(!enabled && !page\.hidden\) close\(\{ focus: false \}\)/);
 });
 
-test("NewsNow feed keeps news loading separate from startup and reads safe original links in-app", () => {
+test("NewsNow feed keeps news loading separate from startup and embeds safe original links below the feed", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
   assert.match(script, /"newsnow_sources"/);
@@ -35,12 +35,14 @@ test("NewsNow feed keeps news loading separate from startup and reads safe origi
   assert.match(script, /"newsnow_refresh"/);
   assert.match(script, /function withTimeout/);
   assert.match(script, /资讯请求超时/);
-  assert.match(script, /invoke\("newsnow_read_article", \{ url \}\)/);
   assert.match(html, /id="newsnow-reader"/);
+  assert.match(html, /id="newsnow-reader-frame"/);
+  assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"/);
   assert.match(html, /id="newsnow-reader-external"/);
-  assert.match(script, /function renderArticleText/);
-  assert.match(script, /paragraph\.textContent = line/);
   assert.match(script, /function openExternal/);
+  assert.match(script, /readerFrame\.src = url/);
+  assert.match(script, /reader\.scrollIntoView\(\{ behavior: "smooth", block: "start" \}\)/);
+  assert.doesNotMatch(script, /newsnow_read_article/);
   assert.match(script, /shell\.hidden = true/);
   assert.match(script, /page\.hidden = false/);
   assert.match(script, /ReaderLibraryAiEntry\?\.close\(\)/);
@@ -84,5 +86,6 @@ test("NewsNow presents a chronological reading feed and stays usable on narrow w
   assert.match(styles, /\.newsnow-source-picker\s*\{/);
   assert.match(styles, /\.newsnow-card:hover, \.newsnow-card:focus-visible/);
   assert.match(styles, /\.newsnow-reader\s*\{/);
+  assert.match(styles, /\.newsnow-browser-shell\s*\{/);
   assert.match(styles, /@media \(max-width: 620px\)/);
 });

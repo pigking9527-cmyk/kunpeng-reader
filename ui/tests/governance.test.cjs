@@ -384,6 +384,13 @@ test("release assets include a sha256 manifest", () => {
   assert.match(release, /release upload[^\n]+\$assets\[2\]/);
 });
 
+test("news webpages may only be framed from HTTPS sources", () => {
+  const config = read("tauri.conf.json");
+  const news = read("ui", "news-ui.js");
+  assert.match(config, /frame-src[^;]*https:/);
+  assert.match(news, /url\.protocol === "https:" \? url\.href : ""/);
+});
+
 test("search index and memory caches have explicit budgets", () => {
   const cache = read("src", "search_cache.rs");
   const memory = read("src", "memory_budget.rs");
