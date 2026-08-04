@@ -826,12 +826,9 @@
       <div id="newsnow-status" class="newsnow-status" aria-live="polite"></div>
       <main id="newsnow-feed" class="newsnow-feed" aria-live="polite"></main>
       <article id="newsnow-reader" class="newsnow-reader" hidden aria-label="网页原文">
-        <header class="newsnow-reader-head"><button id="newsnow-reader-back" class="btn-plain" type="button">← 返回资讯</button><button id="newsnow-reader-external" class="btn-plain" type="button">浏览器打开原文</button></header>
-        <p id="newsnow-reader-source" class="newsnow-reader-source"></p>
-        <h2 id="newsnow-reader-title" class="newsnow-reader-title"></h2>
         <p id="newsnow-reader-status" class="newsnow-reader-status" aria-live="polite"></p>
-        <div class="newsnow-browser-shell"><iframe id="newsnow-reader-frame" class="newsnow-reader-frame" title="资讯原网页" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"></iframe></div>
-        <p class="newsnow-reader-help">此处使用浏览器内核加载原网页。若页面显示为空白或提示拒绝嵌入，请使用右上角“浏览器打开原文”。</p>
+        <iframe id="newsnow-reader-frame" class="newsnow-reader-frame" title="资讯原网页" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"></iframe>
+        <footer class="newsnow-reader-footer"><button id="newsnow-reader-external" class="btn-plain" type="button">浏览器打开原文</button><button id="newsnow-reader-back" class="btn-primary" type="button">← 返回资讯页</button></footer>
       </article>
     </section>
     <script src="startup-perf.js"></script>
