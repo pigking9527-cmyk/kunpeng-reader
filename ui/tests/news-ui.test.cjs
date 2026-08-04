@@ -45,10 +45,13 @@ test("NewsNow feed keeps news loading separate from startup and only opens safe 
 
 test("NewsNow stores a local, bounded source selection and sends only source IDs", () => {
   assert.match(html, /id="newsnow-source-picker"/);
+  assert.match(html, /id="newsnow-source-search"/);
   assert.match(html, /id="newsnow-source-apply"/);
   assert.match(script, /const SOURCE_STORAGE_KEY = "kunpeng\.reader\.news\.sources\.v2"/);
   assert.match(script, /const MAX_SOURCES = 12/);
   assert.match(script, /function allowedSourceIds/);
+  assert.match(script, /let sourceQuery = ""/);
+  assert.match(script, /sourceSearch\.addEventListener\("input"/);
   assert.match(script, /const request = \{ sourceIds \}/);
   assert.match(script, /最多选择 \$\{MAX_SOURCES\} 个来源/);
 });

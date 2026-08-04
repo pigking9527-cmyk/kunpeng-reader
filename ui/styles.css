@@ -1499,7 +1499,10 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .newsnow-source-picker-head strong { color: #263448; }
 .newsnow-source-picker-head p { margin: 5px 0 0; color: #788496; font-size: 12px; }
 .newsnow-picker-close { width: 29px; height: 29px; border: 0; border-radius: 8px; background: #f0f4f9; color: #5b6b81; font-size: 20px; line-height: 1; cursor: pointer; }
+.newsnow-source-search { box-sizing: border-box; width: 100%; margin-top: 14px; padding: 8px 10px; border: 1px solid #d7e0ec; border-radius: 8px; color: #29384d; font: 13px inherit; outline: none; }
+.newsnow-source-search:focus { border-color: #7fa8e0; box-shadow: 0 0 0 3px rgba(72, 133, 211, .12); }
 .newsnow-source-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px 22px; margin: 16px 0; }
+.newsnow-source-empty { grid-column: 1 / -1; margin: 3px 0; color: #7c8797; font-size: 13px; }
 .newsnow-source-group h2 { margin: 0 0 7px; color: #65748a; font-size: 12px; font-weight: 720; }
 .newsnow-source-choices { display: grid; gap: 5px; }
 .newsnow-source-choice { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 4px; color: #34445a; font-size: 13px; cursor: pointer; }
