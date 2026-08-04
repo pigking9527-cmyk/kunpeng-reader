@@ -105,13 +105,12 @@
     const feed = root.getElementById("newsnow-feed");
     const reader = root.getElementById("newsnow-reader");
     const readerBack = root.getElementById("newsnow-reader-back");
-    const readerExternal = root.getElementById("newsnow-reader-external");
     const readerStatus = root.getElementById("newsnow-reader-status");
     const readerFrame = root.getElementById("newsnow-reader-frame");
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !reader || !readerBack || !readerExternal || !readerStatus || !readerFrame || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !reader || !readerBack || !readerStatus || !readerFrame || !categories || !updated || !shell) return null;
 
     let catalog = [];
     let sourceIds = [];
@@ -257,12 +256,6 @@
       if (focus) sourceToggle.focus({ preventScroll: true });
     }
 
-    function openExternal(url) {
-      Promise.resolve(invoke && invoke("newsnow_open", { url }))
-        .catch(() => invoke && invoke("open_url", { url }))
-        .catch(() => setStatus("无法打开新闻原文。", "error"));
-    }
-
     function setReaderVisible(visible) {
       reader.hidden = !visible;
       sourcePicker.hidden = true;
@@ -286,7 +279,6 @@
       page.scrollTop = 0;
       articleUrl = url;
       readerStatus.textContent = "正在使用浏览器内核加载原网页…";
-      readerExternal.hidden = false;
       setReaderVisible(true);
       readerFrame.src = url;
     }
@@ -440,7 +432,6 @@
     button.addEventListener("click", toggle);
     back.addEventListener("click", close);
     readerBack.addEventListener("click", () => closeArticle({ focus: true }));
-    readerExternal.addEventListener("click", () => { if (articleUrl) openExternal(articleUrl); });
     readerFrame.addEventListener("load", () => {
       if (articleUrl) readerStatus.textContent = "原网页已加载；可在下方直接浏览。";
     });
