@@ -62,8 +62,8 @@
               <span>阅读统计</span>
               <span>大模型书籍分类标签</span>
               <span>大模型与翻译 API 配置（不含密钥）</span>
-              <span class="account-sync-optional">智读与书库问答记录（可选）</span>
-              <span class="account-sync-optional">加密 API Key 与翻译密钥（可选）</span>
+              <span id="account-sync-history" class="account-sync-optional">智读与书库问答记录（可选）</span>
+              <span id="account-sync-secrets" class="account-sync-optional">加密 API Key 与翻译密钥（可选）</span>
             </div>
             <div class="private-sync-row">
               <div>
@@ -825,6 +825,13 @@
       </div>
       <div id="newsnow-status" class="newsnow-status" aria-live="polite"></div>
       <main id="newsnow-feed" class="newsnow-feed" aria-live="polite"></main>
+      <article id="newsnow-reader" class="newsnow-reader" hidden aria-label="资讯正文">
+        <header class="newsnow-reader-head"><button id="newsnow-reader-back" class="btn-plain" type="button">← 返回资讯</button><button id="newsnow-reader-external" class="btn-plain" type="button">浏览器打开原文</button></header>
+        <p id="newsnow-reader-source" class="newsnow-reader-source"></p>
+        <h2 id="newsnow-reader-title" class="newsnow-reader-title"></h2>
+        <p id="newsnow-reader-status" class="newsnow-reader-status" aria-live="polite"></p>
+        <div id="newsnow-reader-content" class="newsnow-reader-content"></div>
+      </article>
     </section>
     <script src="startup-perf.js"></script>
     <script src="titlebar.js"></script>

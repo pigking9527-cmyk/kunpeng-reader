@@ -80,6 +80,8 @@ const privateSyncCloseBtn = document.getElementById("private-sync-close");
 const privateSyncConfigsEl = document.getElementById("private-sync-configs");
 const privateSyncHistoryEl = document.getElementById("private-sync-history");
 const privateSyncSecretsEl = document.getElementById("private-sync-secrets");
+const accountSyncHistoryEl = document.getElementById("account-sync-history");
+const accountSyncSecretsEl = document.getElementById("account-sync-secrets");
 const privateSyncPasswordEl = document.getElementById("private-sync-password");
 const privateSyncSavePasswordBtn = document.getElementById("private-sync-save-password");
 const privateSyncUnlockBtn = document.getElementById("private-sync-unlock");
@@ -257,10 +259,15 @@ function setPrivateSyncStatus(text = "", type = "") {
   privateSyncStatusEl.textContent = text;
   privateSyncStatusEl.className = "private-sync-status" + (type ? " " + type : "");
 }
+function applyPrivateSyncOverview(status = {}) {
+  accountSyncHistoryEl.classList.toggle("account-sync-enabled", !!status.syncAiHistory);
+  accountSyncSecretsEl.classList.toggle("account-sync-enabled", !!status.syncSecrets);
+}
 function applyPrivateSyncStatus(status = {}) {
   privateSyncConfigsEl.checked = status.syncConfigs !== false;
   privateSyncHistoryEl.checked = !!status.syncAiHistory;
   privateSyncSecretsEl.checked = !!status.syncSecrets;
+  applyPrivateSyncOverview(status);
   const secretText = status.cloudSecretAvailable
     ? "云端已有加密密钥包；需要同步密码才能在本机解锁。"
     : "API Key 和翻译密钥默认仅保留在本机。";
