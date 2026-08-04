@@ -106,7 +106,6 @@ impl AppState {
             return;
         }
         let governor = memory_budget::governor();
-
         let search_text = Arc::clone(&self.search_text_cache);
         handles.push(governor.register_reclaimer(
             memory_budget::MemoryClass::SearchText,
@@ -364,6 +363,7 @@ fn main() {
             newsnow::newsnow_sources,
             newsnow::newsnow_list,
             newsnow::newsnow_refresh,
+            newsnow::newsnow_read_article,
             newsnow::newsnow_open,
             ai_reader::ai_reader_status,
             ai_reader::ai_reader_profiles,

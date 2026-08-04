@@ -26,6 +26,10 @@ test("同步内容总览列出新增的模型标签、配置和可选历史同�
   assert.match(indexSource, /大模型与翻译 API 配置（不含密钥）/);
   assert.match(indexSource, /智读与书库问答记录（可选）/);
   assert.match(indexSource, /加密 API Key 与翻译密钥（可选）/);
+  assert.match(indexSource, /id="account-sync-history"/);
+  assert.match(indexSource, /id="account-sync-secrets"/);
+  assert.match(syncSource, /function applyPrivateSyncOverview/);
+  assert.match(syncSource, /account-sync-enabled/);
 });
 
 test("persisted account is restored and automatically synced on startup", () => {
@@ -84,6 +88,7 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "account-password-recover-code", "account-password-recover-new", "account-password-recover-start",
     "account-password-recover-confirm",
     "private-sync-close", "private-sync-configs", "private-sync-history", "private-sync-secrets",
+    "account-sync-history", "account-sync-secrets",
     "private-sync-password", "private-sync-save-password", "private-sync-unlock",
     "private-sync-forget", "private-sync-status",
   ];

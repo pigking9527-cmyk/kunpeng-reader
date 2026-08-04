@@ -103,10 +103,17 @@
     const gridLayout = root.getElementById("newsnow-layout-grid");
     const status = root.getElementById("newsnow-status");
     const feed = root.getElementById("newsnow-feed");
+    const reader = root.getElementById("newsnow-reader");
+    const readerBack = root.getElementById("newsnow-reader-back");
+    const readerExternal = root.getElementById("newsnow-reader-external");
+    const readerSource = root.getElementById("newsnow-reader-source");
+    const readerTitle = root.getElementById("newsnow-reader-title");
+    const readerStatus = root.getElementById("newsnow-reader-status");
+    const readerContent = root.getElementById("newsnow-reader-content");
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !reader || !readerBack || !readerExternal || !readerSource || !readerTitle || !readerStatus || !readerContent || !categories || !updated || !shell) return null;
 
     let catalog = [];
     let sourceIds = [];
@@ -117,6 +124,7 @@
     let catalogueLoading = null;
     let sourceQuery = "";
     let layout = loadLayout();
+    let articleUrl = "";
 
     function newsEnabled() {
       return global.ReaderExperimentalFeatures?.enabled?.("newsnow") === true;
@@ -250,12 +258,61 @@
       if (focus) sourceToggle.focus({ preventScroll: true });
     }
 
-    function openArticle(item) {
-      const url = safeHttpUrl(item.url || item.link || item.href);
-      if (!url) return;
+    function openExternal(url) {
       Promise.resolve(invoke && invoke("newsnow_open", { url }))
         .catch(() => invoke && invoke("open_url", { url }))
         .catch(() => setStatus("无法打开新闻原文。", "error"));
+    }
+
+    function setReaderVisible(visible) {
+      reader.hidden = !visible;
+      feed.hidden = visible;
+      status.hidden = visible;
+      sourcePicker.hidden = true;
+      sourceToggle.setAttribute("aria-expanded", "false");
+      page.classList.toggle("newsnow-reading", visible);
+    }
+
+    function renderArticleText(value) {
+      const paragraphs = text(value).split(/\n+/).map((line) => line.trim()).filter(Boolean);
+      readerContent.replaceChildren(...paragraphs.map((line) => {
+        const paragraph = root.createElement("p");
+        paragraph.textContent = line;
+        return paragraph;
+      }));
+    }
+
+    function closeArticle({ focus = false } = {}) {
+      articleUrl = "";
+      setReaderVisible(false);
+      if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true });
+    }
+
+    async function openArticle(item) {
+      const url = safeHttpUrl(item.url || item.link || item.href);
+      if (!url) return;
+      articleUrl = url;
+      readerSource.textContent = [text(item.source || item.source_name || "资讯"), itemDate(item)].filter(Boolean).join(" · ");
+      readerTitle.textContent = text(item.title || item.name || "未命名新闻");
+      readerStatus.textContent = "正在提取正文…";
+      readerContent.replaceChildren();
+      readerExternal.hidden = false;
+      setReaderVisible(true);
+      try {
+        const result = await withTimeout(invoke("newsnow_read_article", { url }), 22000);
+        if (articleUrl !== url) return;
+        const body = text(result && result.text).trim();
+        readerStatus.textContent = text(result && result.message).trim();
+        if (body) {
+          renderArticleText(body);
+        } else {
+          readerContent.textContent = "无法在应用内提取这篇文章。你可以在浏览器中打开原文继续阅读。";
+        }
+      } catch (_) {
+        if (articleUrl !== url) return;
+        readerStatus.textContent = "原文加载超时或失败。";
+        readerContent.textContent = "你可以在浏览器中打开原文继续阅读。";
+      }
     }
 
     function makeCard(item) {
@@ -312,7 +369,7 @@
       if (!filtered.length) {
         const empty = root.createElement("div");
         empty.className = "newsnow-empty";
-        empty.textContent = allItems.length ? "这个分类暂时没有资讯。" : "暂无资讯。请刷新，或在“管理来源”中调整关注内容。";
+        empty.textContent = allItems.length ? "这个分类暂时没有资讯。" : "暂无资讯。请刷新，或在“添加来源”中调整关注内容。";
         feed.replaceChildren(empty);
         return;
       }
@@ -380,6 +437,7 @@
       if (!root.getElementById("library-ai-page")?.hidden) global.ReaderLibraryAiEntry?.close();
       shell.hidden = true;
       page.hidden = false;
+      closeArticle();
       global.document.body.classList.add("newsnow-active");
       button.setAttribute("aria-pressed", "true");
       load(false);
@@ -387,6 +445,7 @@
 
     function close({ focus = true } = {}) {
       closeSourcePicker();
+      closeArticle();
       page.hidden = true;
       shell.hidden = false;
       global.document.body.classList.remove("newsnow-active");
@@ -404,6 +463,8 @@
 
     button.addEventListener("click", toggle);
     back.addEventListener("click", close);
+    readerBack.addEventListener("click", () => closeArticle({ focus: true }));
+    readerExternal.addEventListener("click", () => { if (articleUrl) openExternal(articleUrl); });
     refresh.addEventListener("click", () => load(true));
     listLayout.addEventListener("click", () => setLayout("list"));
     gridLayout.addEventListener("click", () => setLayout("grid"));
@@ -436,7 +497,7 @@
     });
     global.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || page.hidden) return;
-      if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close();
+      if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close();
     });
     global.addEventListener("reader-experimental-features-changed", (event) => {
       if (event.detail?.key === "newsnow") applyExperimentalAvailability();
