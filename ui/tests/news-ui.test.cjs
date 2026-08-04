@@ -27,12 +27,12 @@ test("NewsNow is gated behind the local experimental switch", () => {
   assert.match(script, /if \(!enabled && !page\.hidden\) close\(\{ focus: false \}\)/);
 });
 
-test("NewsNow feed keeps news loading separate from startup and overlays safe original links in-app", () => {
+test("NewsNow opens its webpage directly from the toolbar and overlays safe original links in-app", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
-  assert.match(script, /"newsnow_sources"/);
-  assert.match(script, /"newsnow_list"/);
-  assert.match(script, /"newsnow_refresh"/);
+  assert.match(script, /const NEWSNOW_HOME_URL = "https:\/\/newsnow\.busiyi\.world\/"/);
+  assert.match(script, /function openNewsHome\(\)/);
+  assert.match(script, /openNewsHome\(\);/);
   assert.match(script, /function withTimeout/);
   assert.match(script, /资讯请求超时/);
   assert.match(html, /id="newsnow-reader"/);
@@ -40,6 +40,7 @@ test("NewsNow feed keeps news loading separate from startup and overlays safe or
   assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"/);
   assert.match(html, /返回资讯页/);
   assert.match(script, /readerFrame\.src = url/);
+  assert.match(script, /openWebPage\(NEWSNOW_HOME_URL, "正在打开资讯网页…"\)/);
   assert.match(script, /articleScrollTop = page\.scrollTop/);
   assert.match(script, /page\.scrollTop = articleScrollTop/);
   assert.doesNotMatch(script, /newsnow_read_article/);

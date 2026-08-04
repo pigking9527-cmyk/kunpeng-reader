@@ -4,6 +4,7 @@
   "use strict";
 
   const LOAD_TIMEOUT_MS = 18000;
+  const NEWSNOW_HOME_URL = "https://newsnow.busiyi.world/";
   const SOURCE_STORAGE_KEY = "kunpeng.reader.news.sources.v2";
   const LAYOUT_STORAGE_KEY = "kunpeng.reader.news.layout.v1";
   const MAX_SOURCES = 12;
@@ -272,15 +273,23 @@
       if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true });
     }
 
-    async function openArticle(item) {
-      const url = safeHttpUrl(item.url || item.link || item.href);
-      if (!url) return;
+    function openWebPage(url, loadingMessage) {
       articleScrollTop = page.scrollTop;
       page.scrollTop = 0;
       articleUrl = url;
-      readerStatus.textContent = "正在使用浏览器内核加载原网页…";
+      readerStatus.textContent = loadingMessage;
       setReaderVisible(true);
       readerFrame.src = url;
+    }
+
+    function openArticle(item) {
+      const url = safeHttpUrl(item.url || item.link || item.href);
+      if (!url) return;
+      openWebPage(url, "正在使用浏览器内核加载原网页…");
+    }
+
+    function openNewsHome() {
+      openWebPage(NEWSNOW_HOME_URL, "正在打开资讯网页…");
     }
 
     function makeCard(item) {
@@ -408,7 +417,7 @@
       closeArticle({ restoreScroll: false });
       global.document.body.classList.add("newsnow-active");
       button.setAttribute("aria-pressed", "true");
-      load(false);
+      openNewsHome();
     }
 
     function close({ focus = true } = {}) {
@@ -431,12 +440,12 @@
 
     button.addEventListener("click", toggle);
     back.addEventListener("click", close);
-    readerBack.addEventListener("click", () => closeArticle({ focus: true }));
+    readerBack.addEventListener("click", () => close({ focus: true }));
     readerFrame.addEventListener("load", () => {
-      if (articleUrl) readerStatus.textContent = "原网页已加载；可在下方直接浏览。";
+      if (articleUrl) readerStatus.textContent = "资讯网页已加载。";
     });
     readerFrame.addEventListener("error", () => {
-      if (articleUrl) readerStatus.textContent = "原网页加载失败，请使用右上角“浏览器打开原文”。";
+      if (articleUrl) readerStatus.textContent = "资讯网页加载失败，请稍后重试。";
     });
     refresh.addEventListener("click", () => load(true));
     listLayout.addEventListener("click", () => setLayout("list"));
@@ -470,7 +479,7 @@
     });
     global.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || page.hidden) return;
-      if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close();
+      if (!reader.hidden) close({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close();
     });
     global.addEventListener("reader-experimental-features-changed", (event) => {
       if (event.detail?.key === "newsnow") applyExperimentalAvailability();
