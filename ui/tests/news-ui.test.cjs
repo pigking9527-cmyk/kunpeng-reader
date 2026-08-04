@@ -19,6 +19,7 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
 test("NewsNow feed keeps news loading separate from startup and only opens safe original links", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
+  assert.match(script, /"newsnow_sources"/);
   assert.match(script, /"newsnow_list"/);
   assert.match(script, /"newsnow_refresh"/);
   assert.match(script, /function withTimeout/);
@@ -31,14 +32,26 @@ test("NewsNow feed keeps news loading separate from startup and only opens safe 
   assert.match(script, /page\.hidden = true/);
 });
 
+test("NewsNow stores a local, bounded source selection and sends only source IDs", () => {
+  assert.match(html, /id="newsnow-source-picker"/);
+  assert.match(html, /id="newsnow-source-apply"/);
+  assert.match(script, /const SOURCE_STORAGE_KEY = "kunpeng\.reader\.news\.sources\.v2"/);
+  assert.match(script, /const MAX_SOURCES = 12/);
+  assert.match(script, /function allowedSourceIds/);
+  assert.match(script, /const request = \{ sourceIds \}/);
+  assert.match(script, /最多选择 \$\{MAX_SOURCES\} 个来源/);
+});
+
 test("NewsNow toolbar toggles back to the shelf when it is already open", () => {
   assert.match(script, /function toggle\(\) \{\s*if \(page\.hidden\) \{\s*open\(\);\s*\} else \{\s*close\(\);/s);
   assert.match(script, /button\.addEventListener\("click", toggle\)/);
 });
 
-test("NewsNow uses the existing desktop visual language and stays usable on narrow windows", () => {
+test("NewsNow presents a chronological reading feed and stays usable on narrow windows", () => {
   assert.match(styles, /\.newsnow-page\s*\{/);
   assert.match(styles, /\.newsnow-feed\s*\{[^}]*grid-template-columns/s);
+  assert.match(styles, /\.newsnow-card-rail\s*\{/);
+  assert.match(styles, /\.newsnow-source-picker\s*\{/);
   assert.match(styles, /\.newsnow-card:hover, \.newsnow-card:focus-visible/);
   assert.match(styles, /@media \(max-width: 620px\)/);
 });

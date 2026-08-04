@@ -320,7 +320,6 @@ fn main() {
             }
             Ok(())
         })
-        // 异步协议：在后台线程处理，绝不阻塞 UI 主线程（避免空白/卡死）
         .register_asynchronous_uri_scheme_protocol("reader", epub_runtime::handle_protocol_request)
         .invoke_handler(tauri::generate_handler![
             window_commands::main_window_minimize,
@@ -362,6 +361,7 @@ fn main() {
             app_commands::translate_text,
             feedback::submit_feedback,
             newsnow::newsnow_status,
+            newsnow::newsnow_sources,
             newsnow::newsnow_list,
             newsnow::newsnow_refresh,
             newsnow::newsnow_open,
