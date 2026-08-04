@@ -28,6 +28,7 @@ pub(crate) struct BookDto {
     path: String,  // 文件完整路径（用于"按存储目录"排序）
     rating: f32,   // 用户评分 0~5（0.5 刻度，用于书架按评分过滤）
     tags: Vec<String>,
+    model_tags: Vec<String>,
     collections: Vec<String>,
     initial: String, // 书名拼音首字母（A~Z / #），用于"按书名"分组
 }
@@ -232,6 +233,7 @@ fn to_dto(b: &book::Book) -> BookDto {
         path: b.path.to_string_lossy().into_owned(),
         rating: b.rating,
         tags: b.tags.clone(),
+        model_tags: b.model_tags.clone(),
         collections: b.collections.clone(),
         initial: title_initial(&b.title).to_string(),
     }

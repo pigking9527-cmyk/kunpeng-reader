@@ -128,6 +128,10 @@ pub enum BackgroundTaskKind {
     PageCount,
     /// Cover extraction or thumbnail regeneration.
     CoverGeneration,
+    /// Local, opt-in AI classification for library question-answering. The
+    /// generated profiles stay in local metadata and are only retrieval/model
+    /// hints; they never become normal shelf tags.
+    LibraryClassification,
     Import,
     Sync,
 }
@@ -142,12 +146,17 @@ impl BackgroundTaskKind {
             Self::FullTextIndex => "full_text_index",
             Self::PageCount => "page_count",
             Self::CoverGeneration => "cover_generation",
+            Self::LibraryClassification => "library_classification",
             Self::Import => "import",
             Self::Sync => "sync",
         }
     }
 
     fn supports_resume(self) -> bool {
+        // Library classification checkpoints each completed book in SQLite and
+        // in this registry.  It is safe to reconstruct its remaining work
+        // after an application restart; treating it as unresumable caused the
+        // next click to look like a fresh 0/total pass.
         !matches!(self, Self::Import)
     }
 }
@@ -2165,6 +2174,38 @@ mod tests {
         assert_eq!(snapshot.state, BackgroundTaskState::Failed);
         assert!(!snapshot.pause_requested);
         assert!(snapshot.error.unwrap().contains("不支持跨重启续建"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interrupted_library_classification_is_paused_and_reuses_its_task() {
+        let dir = std::env::temp_dir().join(format!(
+            "kunpeng-background-task-library-classification-{}-{}",
+            std::process::id(),
+            timestamp_ms()
+        ));
+        let path = dir.join("tasks.json");
+        let task_id;
+        {
+            let registry = BackgroundTaskRegistry::with_persistence(path.clone()).unwrap();
+            let handle = registry.enqueue(BackgroundTaskKind::LibraryClassification, "书籍分类");
+            task_id = handle.id().to_string();
+            registry.start(&task_id).unwrap();
+        }
+
+        let restored = BackgroundTaskRegistry::with_persistence(path.clone()).unwrap();
+        assert_eq!(
+            restored.snapshot(&task_id).unwrap().state,
+            BackgroundTaskState::Paused
+        );
+        let resumed =
+            restored.enqueue_or_resume(BackgroundTaskKind::LibraryClassification, "续建书籍分类");
+        assert_eq!(resumed.id(), task_id);
+        assert_eq!(
+            resumed.snapshot().unwrap().state,
+            BackgroundTaskState::Queued
+        );
 
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -17,9 +17,12 @@ use tauri::Manager;
 
 const OPTIONS_KEY: &str = "private_sync_options_v1";
 const HISTORY_PREFIX: &str = "private_sync_ai_history_v1:";
+const LIBRARY_HISTORY_KEY: &str = "private_sync_library_ai_history_v1";
 const AI_CONFIG_KIND: &str = "ai_reader_config_v1";
 const TRANSLATE_CONFIG_KIND: &str = "translation_config_v1";
 const HISTORY_KIND: &str = "ai_reader_history_v1";
+/// A stable account-level record, intentionally not a local book id or path.
+const LIBRARY_HISTORY_ID: &str = "library-v1";
 const SECRET_KIND: &str = "secret_bundle_v1";
 const DEFAULT_ID: &str = "default";
 const KDF_ITERATIONS: u32 = 210_000;
@@ -55,6 +58,19 @@ impl Default for PrivateSyncOptions {
 pub(crate) struct HistoryMergeRequest {
     pub content_id: String,
     pub entries: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryHistoryMergeRequest {
+    pub entries: Vec<Value>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryHistorySnapshot {
+    pub entries: Vec<Value>,
+    pub sync_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -130,6 +146,87 @@ fn normalized_entries(mut entries: Vec<Value>) -> Vec<Value> {
     unique
 }
 
+fn clipped_text(value: &str, max_bytes: usize) -> String {
+    let mut value = value.trim().to_string();
+    while value.len() > max_bytes {
+        value.pop();
+    }
+    value
+}
+
+/// Library answers are saved as user-owned notes.  The source list deliberately
+/// excludes `excerpt` and the machine-local `bookId`: a sync entity may carry
+/// citations, but never book-body passages or local paths/ids.
+fn normalized_library_entries(entries: Vec<Value>) -> Vec<Value> {
+    let mut sanitized = Vec::new();
+    for entry in entries {
+        let question = entry
+            .get("question")
+            .and_then(Value::as_str)
+            .map(|value| clipped_text(value, 4_000))
+            .filter(|value| !value.is_empty());
+        let content = entry
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|value| clipped_text(value, 20_000))
+            .filter(|value| !value.is_empty());
+        let at = entry
+            .get("at")
+            .and_then(Value::as_str)
+            .map(|value| clipped_text(value, 64))
+            .filter(|value| !value.is_empty());
+        let (Some(question), Some(content), Some(at)) = (question, content, at) else {
+            continue;
+        };
+        let task = entry
+            .get("task")
+            .and_then(Value::as_str)
+            .map(|value| clipped_text(value, 32))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "question".to_string());
+        let sources = entry
+            .get("sources")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|source| {
+                        let title = source
+                            .get("bookTitle")
+                            .or_else(|| source.get("book_title"))
+                            .and_then(Value::as_str)
+                            .map(|value| clipped_text(value, 800))
+                            .filter(|value| !value.is_empty())?;
+                        let chapter = source.get("chapter").and_then(Value::as_u64).unwrap_or(0);
+                        let source_kind = source
+                            .get("sourceKind")
+                            .or_else(|| source.get("source_kind"))
+                            .and_then(Value::as_str)
+                            .map(|value| clipped_text(value, 120))
+                            .unwrap_or_default();
+                        Some(serde_json::json!({
+                            "bookTitle": title,
+                            "chapter": chapter,
+                            "sourceKind": source_kind,
+                        }))
+                    })
+                    .take(20)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        sanitized.push(serde_json::json!({
+            "version": 1,
+            "scope": "library",
+            "task": task,
+            "question": question,
+            "content": content,
+            "sources": sources,
+            "at": at,
+        }));
+    }
+    normalized_entries(sanitized)
+}
+
 fn read_history(db: &AppDb, content_id: &str) -> Vec<Value> {
     db.metadata(&history_key(content_id))
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -145,6 +242,26 @@ fn write_history(db: &AppDb, content_id: &str, entries: Vec<Value>) -> Result<()
             "version": 1,
             "contentId": content_id,
             "entries": normalized_entries(entries),
+        }))
+        .map_err(|e| e.to_string())?,
+    )
+}
+
+fn read_library_history(db: &AppDb) -> Vec<Value> {
+    db.metadata(LIBRARY_HISTORY_KEY)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
+        .map(normalized_library_entries)
+        .unwrap_or_default()
+}
+
+fn write_library_history(db: &AppDb, entries: Vec<Value>) -> Result<(), String> {
+    db.set_metadata(
+        LIBRARY_HISTORY_KEY,
+        &serde_json::to_string(&serde_json::json!({
+            "version": 1,
+            "scope": "library",
+            "entries": normalized_library_entries(entries),
         }))
         .map_err(|e| e.to_string())?,
     )
@@ -273,6 +390,21 @@ fn materialize(db: &mut AppDb) -> Result<(), String> {
             db.soft_delete(HISTORY_KIND, content_id)?;
         }
     }
+    if options.sync_ai_history {
+        if db.metadata(LIBRARY_HISTORY_KEY).is_some() {
+            db.upsert_json_batch(&[(
+                HISTORY_KIND.to_string(),
+                LIBRARY_HISTORY_ID.to_string(),
+                serde_json::json!({
+                    "version": 1,
+                    "scope": "library",
+                    "entries": read_library_history(db),
+                }),
+            )])?;
+        }
+    } else {
+        db.soft_delete(HISTORY_KIND, LIBRARY_HISTORY_ID)?;
+    }
     if !options.sync_secrets {
         db.soft_delete(SECRET_KIND, DEFAULT_ID)?;
     }
@@ -301,6 +433,17 @@ pub(crate) fn apply_downloaded_entities(
                     merged.extend(remote.iter().cloned());
                 }
                 write_history(db, &item.id, merged)?;
+            }
+            HISTORY_KIND
+                if options.sync_ai_history
+                    && item.id == LIBRARY_HISTORY_ID
+                    && item.json.get("scope").and_then(Value::as_str) == Some("library") =>
+            {
+                let mut merged = read_library_history(db);
+                if let Some(remote) = item.json.get("entries").and_then(Value::as_array) {
+                    merged.extend(remote.iter().cloned());
+                }
+                write_library_history(db, merged)?;
             }
             _ => {}
         }
@@ -365,6 +508,37 @@ pub(crate) fn private_sync_history_merge(
     merged.extend(request.entries);
     write_history(db, &request.content_id, merged)?;
     materialize(db)
+}
+
+#[tauri::command]
+pub(crate) fn private_sync_library_history_list(
+    state: tauri::State<AppState>,
+) -> Result<LibraryHistorySnapshot, String> {
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    let options = options_from_db(db);
+    Ok(LibraryHistorySnapshot {
+        entries: read_library_history(db),
+        sync_enabled: options.sync_ai_history,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn private_sync_library_history_merge(
+    state: tauri::State<AppState>,
+    request: LibraryHistoryMergeRequest,
+) -> Result<LibraryHistorySnapshot, String> {
+    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    let mut merged = read_library_history(db);
+    merged.extend(request.entries);
+    write_library_history(db, merged)?;
+    materialize(db)?;
+    let options = options_from_db(db);
+    Ok(LibraryHistorySnapshot {
+        entries: read_library_history(db),
+        sync_enabled: options.sync_ai_history,
+    })
 }
 
 #[tauri::command]
@@ -479,5 +653,46 @@ mod tests {
         let normalized = normalized_entries(entries);
         assert_eq!(normalized.len(), 40);
         assert!(valid_content_id(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn library_history_keeps_answer_and_reference_but_never_book_text_or_local_id() {
+        let entries = normalized_library_entries(vec![serde_json::json!({
+            "question": "《南明史》说了什么？",
+            "content": "保存的回答。",
+            "task": "question",
+            "at": "2026-08-05T00:00:00Z",
+            "sources": [{
+                "bookId": "machine-local-book-id",
+                "bookTitle": "南明史",
+                "chapter": 7,
+                "sourceKind": "正文检索",
+                "excerpt": "这段书籍正文绝不能进入同步实体"
+            }]
+        })]);
+        assert_eq!(entries.len(), 1);
+        let source = &entries[0]["sources"][0];
+        assert_eq!(source["bookTitle"], "南明史");
+        assert_eq!(source["chapter"], 7);
+        assert!(source.get("bookId").is_none());
+        assert!(source.get("excerpt").is_none());
+        assert_eq!(entries[0]["scope"], "library");
+    }
+
+    #[test]
+    fn library_history_is_bounded_and_deduplicated() {
+        let entries = (0..45)
+            .map(|index| {
+                serde_json::json!({
+                    "question": format!("q-{index}"),
+                    "content": "answer",
+                    "at": format!("2026-08-05T00:{index:02}:00Z"),
+                    "sources": []
+                })
+            })
+            .collect::<Vec<_>>();
+        let normalized = normalized_library_entries(entries);
+        assert_eq!(normalized.len(), 40);
+        assert_eq!(normalized[0]["question"], "q-44");
     }
 }

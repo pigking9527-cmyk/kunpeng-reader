@@ -36,7 +36,7 @@ TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000
 MAX_CONCURRENT_REQUESTS = 32
 MAX_IGNORED_DETAILS = 100
 SUPPORTED_ENTITY_KINDS = frozenset((
-    "book_state_v2", "vocab", "reading_bucket_v2",
+    "book_state_v2", "model_book_tags_v1", "vocab", "reading_bucket_v2",
     "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1",
 ))
 FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "pigking9527@gmail.com").strip()
@@ -479,7 +479,7 @@ def inventory_rows(conn, user_id):
         """
         SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at
         FROM entities
-        WHERE user_id=? AND kind IN ('book_state_v2','vocab','reading_bucket_v2')
+        WHERE user_id=? AND kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2')
         ORDER BY kind,id
         """,
         (user_id,),

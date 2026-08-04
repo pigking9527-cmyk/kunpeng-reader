@@ -434,7 +434,16 @@ privateSyncSavePasswordBtn.addEventListener("click", async () => {
     const status = await invoke("private_sync_set_password", { password });
     privateSyncPasswordEl.value = "";
     applyPrivateSyncStatus(status);
-    setPrivateSyncStatus("密钥已在本机加密并加入下次同步；服务器无法读取明文。", "ok");
+    const report = await invoke("sync_now");
+    setSyncButtonState("ok", "同步成功", report.message);
+    updateSyncSummary({
+      last_sync_at: report.server_time,
+      last_sync_pushed: report.pushed,
+      last_sync_pulled: report.pulled,
+      last_sync_accepted: report.accepted,
+      last_sync_ignored: report.ignored,
+    });
+    setPrivateSyncStatus("密钥已加密并同步；其他设备输入同一同步密码即可恢复，无需再次填写 API Key。", "ok");
   } catch (error) { setPrivateSyncStatus("无法同步密钥：" + error, "error"); }
 });
 privateSyncUnlockBtn.addEventListener("click", async () => {

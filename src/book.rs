@@ -68,6 +68,10 @@ pub struct Book {
     pub rating: f32, // 用户评分 0~5，0.5 为刻度（0=未评分）
     #[serde(default)]
     pub tags: Vec<String>, // 多个标签；用于书架多维筛选
+    /// 由大模型生成的独立书目标签。它绝不覆盖 `tags` 中的用户手工标签，
+    /// 可以作为可选同步实体在多端复用。
+    #[serde(default)]
+    pub model_tags: Vec<String>,
     #[serde(default)]
     pub collections: Vec<String>, // 多个收藏夹；不会改变图书在“全部书架”中的位置
 }
@@ -171,6 +175,7 @@ impl Book {
             cover_ver: 0,
             rating: 0.0,
             tags: Vec::new(),
+            model_tags: Vec::new(),
             collections: Vec::new(),
         }
     }
@@ -398,6 +403,20 @@ impl Library {
             self.reconcile_booklists();
         }
         changed
+    }
+
+    /// Save model-generated catalogue labels separately from the reader's own
+    /// organization. `false` means the incoming normalized labels were
+    /// identical and therefore do not need a sync write.
+    pub fn set_model_tags(&mut self, id: u64, tags: Vec<String>) -> bool {
+        let tags = normalize_organization_names(tags);
+        if let Some(book) = self.books.iter_mut().find(|book| book.id == id) {
+            if book.model_tags != tags {
+                book.model_tags = tags;
+                return true;
+            }
+        }
+        false
     }
 
     /// 为多本图书追加标签或收藏夹。此操作只增加成员关系，不会覆盖已有分类，
@@ -1079,6 +1098,7 @@ fn prepare_epub(path: &Path) -> Option<Book> {
         cover_ver: 0,
         rating: 0.0,
         tags: Vec::new(),
+        model_tags: Vec::new(),
         collections: Vec::new(),
     })
 }
@@ -1116,6 +1136,7 @@ fn prepare_mobi(path: &Path) -> Option<Book> {
         cover_ver: 0,
         rating: 0.0,
         tags: Vec::new(),
+        model_tags: Vec::new(),
         collections: Vec::new(),
     })
 }

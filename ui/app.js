@@ -289,6 +289,7 @@ const recoveryBackupButton = document.getElementById("settings-create-backup");
 const recoveryBackupActions = document.getElementById("recovery-backup-actions");
 const recoveryBackupSelect = document.getElementById("settings-restore-backup");
 const restoreRecoveryBackupButton = document.getElementById("settings-restore-backup-button");
+const useModelTagsCheckbox = document.getElementById("set-use-model-tags");
 function backupBytes(value) {
   const bytes = Number(value) || 0;
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
@@ -318,12 +319,18 @@ function renderRecoveryBackupStatus(status) {
 async function refreshRecoveryBackupStatus() {
   renderRecoveryBackupStatus(await invoke("recovery_backup_status"));
 }
+async function refreshModelTagsSetting() {
+  if (!useModelTagsCheckbox) return;
+  const settings = await invoke("library_model_tags_settings");
+  useModelTagsCheckbox.checked = settings?.enabled !== false;
+}
 function openCommonSettings() {
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
   syncUI.close();
   closeSearch(true);
   fpSettingsModal.classList.add("show");
+  refreshModelTagsSetting().catch(() => {});
   refreshRecoveryBackupStatus().catch((e) => {
     if (recoveryBackupStatus) recoveryBackupStatus.textContent = "恢复点状态读取失败：" + e;
   });
@@ -331,6 +338,20 @@ function openCommonSettings() {
 document.getElementById("settings-toolbar-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   openCommonSettings();
+});
+useModelTagsCheckbox?.addEventListener("change", async () => {
+  const enabled = useModelTagsCheckbox.checked;
+  useModelTagsCheckbox.disabled = true;
+  try {
+    const settings = await invoke("set_library_model_tags_enabled", { enabled });
+    useModelTagsCheckbox.checked = settings?.enabled !== false;
+    window.dispatchEvent(new CustomEvent("library-model-tags-setting-changed", { detail: { enabled: useModelTagsCheckbox.checked } }));
+  } catch (error) {
+    useModelTagsCheckbox.checked = !enabled;
+    alert("保存大模型标签设置失败：" + error);
+  } finally {
+    useModelTagsCheckbox.disabled = false;
+  }
 });
 recoveryBackupButton?.addEventListener("click", async () => {
   recoveryBackupButton.disabled = true;
@@ -1090,6 +1111,31 @@ function renderInfoChips(element, values) {
     element.appendChild(chip);
   });
 }
+function renderBookInfoTags(element, manualTags, modelTags) {
+  element.replaceChildren();
+  const append = (values, model) => (Array.isArray(values) ? values : []).filter(Boolean).forEach((value) => {
+    const chip = document.createElement("span");
+    chip.className = "info-chip" + (model ? " model-tag" : "");
+    if (model) {
+      const origin = document.createElement("span");
+      origin.className = "info-chip-origin";
+      origin.textContent = "AI";
+      chip.append(origin, document.createTextNode(value));
+      chip.title = "大模型分类标签";
+    } else {
+      chip.textContent = value;
+    }
+    element.appendChild(chip);
+  });
+  append(manualTags, false);
+  append(modelTags, true);
+  if (!element.childElementCount) {
+    const empty = document.createElement("span");
+    empty.className = "info-chip empty";
+    empty.textContent = "未添加";
+    element.appendChild(empty);
+  }
+}
 async function openSelectedBookInfo() {
   const selectedIds = shelfUI.getSelectedIds();
   if (selectedIds.length !== 1) return;
@@ -1103,7 +1149,9 @@ async function openSelectedBookInfo() {
     document.getElementById("book-info-format").textContent = (m.format || "").toUpperCase();
     document.getElementById("book-info-words").textContent = fmtWords(m.word_count);
     document.getElementById("book-info-size").textContent = fmtSize(m.size);
-    renderInfoChips(document.getElementById("book-info-tags"), m.tags);
+    // Tauri 的 BookMeta 维持既有 snake_case 序列化；兼容曾短暂使用过的
+    // camelCase 前端载荷，避免已分类的暗标签在图书信息里被当成空数组。
+    renderBookInfoTags(document.getElementById("book-info-tags"), m.tags, m.model_tags || m.modelTags);
     renderInfoChips(document.getElementById("book-info-collections"), m.collections);
     bookInfoDesc.textContent = m.description || "";
     bookInfoStars.setVal(m.rating || 0);

@@ -61,17 +61,20 @@ fn get_sem_data(state: &AppState, id: u64) -> Option<Arc<SemData>> {
 
 #[derive(Clone, Serialize)]
 pub(crate) struct SemHit {
-    pub(super) chapter: u32,
-    pub(super) snippet: String,
-    pub(super) score: f32,
+    // The local reading assistant turns these already-local semantic hits into
+    // cited RAG sources. They intentionally remain crate-private: neither raw
+    // vector data nor internal ranking details become a public IPC contract.
+    pub(crate) chapter: u32,
+    pub(crate) snippet: String,
+    pub(crate) score: f32,
 }
 #[derive(Clone, Serialize)]
 pub(crate) struct SemBookHits {
-    pub(super) book_id: String,
-    pub(super) title: String,
-    pub(super) author: String,
-    pub(super) score: f32,
-    pub(super) hits: Vec<SemHit>,
+    pub(crate) book_id: String,
+    pub(crate) title: String,
+    pub(crate) author: String,
+    pub(crate) score: f32,
+    pub(crate) hits: Vec<SemHit>,
 }
 
 fn compact_lexical_phrase(query: &str) -> Option<String> {

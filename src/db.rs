@@ -39,6 +39,7 @@ fn log_db_operation(operation: &str, started: Instant, rows: usize) {
 
 pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &[
     "book_state_v2",
+    "model_book_tags_v1",
     "vocab",
     "reading_bucket_v2",
     "ai_reader_config_v1",
@@ -669,7 +670,7 @@ impl AppDb {
                  ) \
                  SELECT ?1,kind,id,device_id,sync_version,updated_at,deleted_at \
                  FROM entities \
-                 WHERE dirty=0 AND kind IN ('book_state_v2','vocab','reading_bucket_v2') \
+                 WHERE dirty=0 AND kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2') \
                  ON CONFLICT(scope,kind,id) DO UPDATE SET \
                     device_id=excluded.device_id, \
                     sync_version=excluded.sync_version, \
@@ -753,7 +754,7 @@ impl AppDb {
         let count = self
             .conn
             .execute(
-                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','vocab','reading_bucket_v2')",
+                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2')",
                 [],
             )
             .map(|count| count as u32)
@@ -812,7 +813,7 @@ impl AppDb {
         let started = Instant::now();
         let mut stmt = self
             .conn
-            .prepare("SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities WHERE kind IN ('book_state_v2','vocab','reading_bucket_v2') ORDER BY kind,id")
+            .prepare("SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities WHERE kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2') ORDER BY kind,id")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -964,7 +965,9 @@ impl AppDb {
         Ok(count)
     }
     pub fn all_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
-        self.sync_entities_where("kind IN ('book_state_v2','vocab','reading_bucket_v2')")
+        self.sync_entities_where(
+            "kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2')",
+        )
     }
 
     fn upsert_sync_acknowledgements(
@@ -1016,7 +1019,7 @@ impl AppDb {
                  LEFT JOIN sync_acknowledgements a \
                    ON a.scope=?1 AND a.kind=e.kind AND a.id=e.id \
                  WHERE e.kind IN (\
-                       'book_state_v2','vocab','reading_bucket_v2',\
+                       'book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2',\
                        'ai_reader_config_v1','translation_config_v1',\
                        'ai_reader_history_v1','secret_bundle_v1'\
                    ) \
@@ -1054,7 +1057,7 @@ impl AppDb {
     #[cfg(test)]
     pub fn dirty_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
         self.sync_entities_where(
-            "dirty=1 AND kind IN ('book_state_v2','vocab','reading_bucket_v2')",
+            "dirty=1 AND kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2')",
         )
     }
 

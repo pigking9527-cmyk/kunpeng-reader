@@ -1016,6 +1016,31 @@ function renderInfoChips(element, values) {
     element.appendChild(chip);
   });
 }
+function renderBookInfoTags(element, manualTags, modelTags) {
+  element.replaceChildren();
+  const append = (values, model) => (Array.isArray(values) ? values : []).filter(Boolean).forEach((value) => {
+    const chip = document.createElement("span");
+    chip.className = "info-chip" + (model ? " model-tag" : "");
+    if (model) {
+      const origin = document.createElement("span");
+      origin.className = "info-chip-origin";
+      origin.textContent = "AI";
+      chip.append(origin, document.createTextNode(value));
+      chip.title = "大模型分类标签";
+    } else {
+      chip.textContent = value;
+    }
+    element.appendChild(chip);
+  });
+  append(manualTags, false);
+  append(modelTags, true);
+  if (!element.childElementCount) {
+    const empty = document.createElement("span");
+    empty.className = "info-chip empty";
+    empty.textContent = "未添加";
+    element.appendChild(empty);
+  }
+}
 // ---- 评分（五颗星，支持半星 0.5 刻度；点左半=半星、右半=整星，再点同一处清除）----
 // 通用半星组件：在 container 里建 5 颗叠层星，鼠标悬停预览、点击回调 onPick(value)。
 function makeStars(container, onPick) {
@@ -1075,7 +1100,7 @@ document.getElementById("info-btn")?.addEventListener("click", async () => {
     document.getElementById("info-format").textContent = (m.format || "").toUpperCase();
     document.getElementById("info-words").textContent = fmtWords(m.word_count);
     document.getElementById("info-size").textContent = fmtSize(m.size);
-    renderInfoChips(document.getElementById("info-tags"), m.tags);
+  renderBookInfoTags(document.getElementById("info-tags"), m.tags, m.model_tags || m.modelTags);
     renderInfoChips(document.getElementById("info-collections"), m.collections);
     document.getElementById("info-desc").textContent = m.description || "";
     infoStars.setVal(m.rating || 0);

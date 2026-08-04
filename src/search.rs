@@ -651,7 +651,13 @@ pub(crate) fn get_book_chapters(state: &AppState, book: &book::Book) -> Option<A
 
 /// Load only an already-published index. This is the interactive counterpart
 /// to `get_book_chapters`: it never reads raw book content or writes an index.
-fn get_indexed_book_chapters(state: &AppState, book: &book::Book) -> Option<Arc<Vec<String>>> {
+///
+/// The library RAG uses this to sample a selected book's directory and chapter
+/// openings before it asks the semantic index for detailed passages.
+pub(crate) fn get_indexed_book_chapters(
+    state: &AppState,
+    book: &book::Book,
+) -> Option<Arc<Vec<String>>> {
     let id = book.id;
     let source =
         search_index::source_fingerprint_from_content_id(Path::new(&book.path), &book.content_id)

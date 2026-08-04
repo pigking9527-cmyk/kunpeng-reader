@@ -27,6 +27,40 @@
       "device_id": "fixture-android",
       "sync_version": 1,
       "payload": { "name": "历史", "description": "fixture only", "cover_book_id": "book-a" }
+    },
+    {
+      "id": "book-a",
+      "kind": "model_book_tags_v1",
+      "updated_at": "2026-08-04T00:03:00Z",
+      "deleted_at": null,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": {
+        "schema_version": 1,
+        "content_id": "book-a",
+        "tags": ["类别：小说", "时代：明清", "体裁：章回体", "篇幅：长篇"]
+      }
+    },
+    {
+      "id": "library-v1",
+      "kind": "ai_reader_history_v1",
+      "updated_at": "2026-08-05T00:05:00Z",
+      "deleted_at": null,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": {
+        "version": 1,
+        "scope": "library",
+        "entries": [{
+          "version": 1,
+          "scope": "library",
+          "task": "question",
+          "question": "这本书的核心论点是什么？",
+          "content": "已保存的示例回答。",
+          "sources": [{ "bookTitle": "示例图书", "chapter": 0, "sourceKind": "正文检索" }],
+          "at": "2026-08-05T00:05:00Z"
+        }]
+      }
     }
   ]
 }

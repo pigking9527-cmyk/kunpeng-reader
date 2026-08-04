@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub(crate) const BOOK_STATE_KIND_V2: &str = "book_state_v2";
+pub(crate) const MODEL_BOOK_TAGS_KIND_V1: &str = "model_book_tags_v1";
 const ENTITY_MODEL_VERSION_KEY: &str = "entity_model_version";
 const ENTITY_MODEL_VERSION: &str = "2";
 
@@ -67,6 +68,38 @@ struct PortableReadBucketV2 {
     content_id: String,
     secs: u32,
     words: u32,
+}
+
+/// Sync model-derived labels in an independent entity. This keeps old clients
+/// from rewriting an entire book state without fields they do not yet know,
+/// and never conflates the reader's own `tags` with automatic classification.
+#[derive(Clone, Serialize, Deserialize)]
+struct ModelBookTagsV1 {
+    #[serde(default = "model_book_tags_schema_version")]
+    schema_version: u32,
+    content_id: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+fn model_book_tags_schema_version() -> u32 {
+    1
+}
+
+impl ModelBookTagsV1 {
+    fn from_book(book: &book::Book) -> Self {
+        Self {
+            schema_version: 1,
+            content_id: book.content_id.clone(),
+            tags: book.model_tags.clone(),
+        }
+    }
+
+    fn apply_to_book(&self, target: &mut book::Book) {
+        if self.content_id == target.content_id {
+            target.model_tags = self.tags.clone();
+        }
+    }
 }
 
 impl BookSyncStateV2 {
@@ -202,7 +235,12 @@ pub(crate) fn merge_pulled_book_states(
         .filter(|item| item.kind == BOOK_STATE_KIND_V2 && item.deleted_at == 0)
         .filter_map(|item| serde_json::from_value::<BookSyncStateV2>(item.json.clone()).ok())
         .collect::<Vec<_>>();
-    if remote.is_empty() {
+    let model_tags = items
+        .iter()
+        .filter(|item| item.kind == MODEL_BOOK_TAGS_KIND_V1 && item.deleted_at == 0)
+        .filter_map(|item| serde_json::from_value::<ModelBookTagsV1>(item.json.clone()).ok())
+        .collect::<Vec<_>>();
+    if remote.is_empty() && model_tags.is_empty() {
         return Ok(());
     }
     let mut lib = state
@@ -216,6 +254,15 @@ pub(crate) fn merge_pulled_book_states(
             .find(|book| book.content_id == remote.content_id)
         {
             remote.merge_into_book(local);
+        }
+    }
+    for remote in model_tags {
+        if let Some(local) = lib
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.apply_to_book(local);
         }
     }
     lib.save()
@@ -298,6 +345,14 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
                 serde_json::to_value(state).map_err(|e| e.to_string())?,
             ));
         }
+        if !book.content_id.is_empty() && !book.model_tags.is_empty() {
+            batch.push((
+                MODEL_BOOK_TAGS_KIND_V1.to_string(),
+                book.content_id.clone(),
+                serde_json::to_value(ModelBookTagsV1::from_book(book))
+                    .map_err(|e| e.to_string())?,
+            ));
+        }
     }
     for entry in &vocab_snapshot {
         let value = serde_json::to_value(entry).map_err(|e| e.to_string())?;
@@ -340,16 +395,26 @@ pub(crate) fn apply_pending_book_state(
     if target.content_id.is_empty() {
         return Ok(false);
     }
-    let value = {
+    let (book_state, model_tags) = {
         let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        db.entity_json(BOOK_STATE_KIND_V2, &target.content_id)?
+        (
+            db.entity_json(BOOK_STATE_KIND_V2, &target.content_id)?,
+            db.entity_json(MODEL_BOOK_TAGS_KIND_V1, &target.content_id)?,
+        )
     };
-    let Some(value) = value else {
+    if book_state.is_none() && model_tags.is_none() {
         return Ok(false);
-    };
-    let synced: BookSyncStateV2 = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    synced.apply_to_book(target);
+    }
+    if let Some(value) = book_state {
+        let synced: BookSyncStateV2 = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        synced.apply_to_book(target);
+    }
+    if let Some(value) = model_tags {
+        if let Ok(tags) = serde_json::from_value::<ModelBookTagsV1>(value) {
+            tags.apply_to_book(target);
+        }
+    }
     Ok(true)
 }
 
@@ -360,6 +425,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
         db.all_sync_entities()?
     };
     let mut remote_books: Vec<BookSyncStateV2> = Vec::new();
+    let mut model_tags: Vec<ModelBookTagsV1> = Vec::new();
     let mut vocab: Vec<vocab::VocabEntry> = Vec::new();
     let mut buckets: Vec<PortableReadBucketV2> = Vec::new();
     for item in &items {
@@ -370,6 +436,11 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             BOOK_STATE_KIND_V2 => {
                 if let Ok(book) = serde_json::from_value::<BookSyncStateV2>(item.json.clone()) {
                     remote_books.push(book);
+                }
+            }
+            MODEL_BOOK_TAGS_KIND_V1 => {
+                if let Ok(tags) = serde_json::from_value::<ModelBookTagsV1>(item.json.clone()) {
+                    model_tags.push(tags);
                 }
             }
             "vocab" => {
@@ -386,7 +457,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             _ => {}
         }
     }
-    if !remote_books.is_empty() {
+    if !remote_books.is_empty() || !model_tags.is_empty() {
         let mut lib = state
             .library
             .lock()
@@ -398,6 +469,15 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
                 .find(|book| book.content_id == remote.content_id)
             {
                 remote.merge_into_book(local);
+            }
+        }
+        for remote in &model_tags {
+            if let Some(local) = lib
+                .books
+                .iter_mut()
+                .find(|book| book.content_id == remote.content_id)
+            {
+                remote.apply_to_book(local);
             }
         }
         // Unmatched states are intentionally left in SQLite as pending; do not
@@ -494,6 +574,19 @@ mod tests {
         state.apply_to_book(&mut local);
         assert_eq!(local.tags, vec!["史料", "明史"]);
         assert_eq!(local.collections, vec!["待读"]);
+    }
+
+    #[test]
+    fn model_tags_are_a_separate_portable_entity() {
+        let mut source = sample_book("remote.epub");
+        source.tags = vec!["手工：史料".into()];
+        source.model_tags = vec!["时代：明清".into(), "类别：小说".into()];
+        let state = ModelBookTagsV1::from_book(&source);
+        let mut local = sample_book("local.epub");
+        local.tags = vec!["用户：待读".into()];
+        state.apply_to_book(&mut local);
+        assert_eq!(local.tags, vec!["用户：待读"]);
+        assert_eq!(local.model_tags, vec!["时代：明清", "类别：小说"]);
     }
 
     #[test]

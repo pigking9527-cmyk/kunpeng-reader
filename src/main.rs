@@ -24,6 +24,7 @@ mod import;
 mod import_core;
 mod library_commands;
 mod memory_budget;
+mod newsnow;
 mod pdf_support;
 mod private_sync;
 mod reader_commands;
@@ -39,6 +40,8 @@ mod secret_store;
 mod semantic;
 mod semantic_core;
 mod semantic_tasks;
+#[cfg(test)]
+mod smoke_tests;
 mod startup;
 mod stats;
 #[cfg(test)]
@@ -55,20 +58,16 @@ mod url_open;
 mod vocab;
 mod window_commands;
 
-#[cfg(test)]
-mod smoke_tests;
-
 use book::Library;
+pub(crate) use runtime_support::{
+    emit_startup_perf, interactive_search_workers, log, now_ms, report_save_error,
+    set_thread_background, with_thread_background_priority, DEFAULT_SYNC_URL, RES_BASE,
+};
 use stats::StatsStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
-
-pub(crate) use runtime_support::{
-    emit_startup_perf, interactive_search_workers, log, now_ms, report_save_error,
-    set_thread_background, with_thread_background_priority, DEFAULT_SYNC_URL, RES_BASE,
-};
 
 /// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
@@ -368,13 +367,25 @@ fn main() {
             app_commands::save_translation_credential,
             app_commands::translate_text,
             feedback::submit_feedback,
+            newsnow::newsnow_status,
+            newsnow::newsnow_list,
+            newsnow::newsnow_refresh,
+            newsnow::newsnow_open,
             ai_reader::ai_reader_status,
             ai_reader::save_ai_reader_config,
             ai_reader::ask_reading_assistant,
+            ai_reader::ask_library_assistant,
+            ai_reader::library_profile_status,
+            ai_reader::library_profile_coverage_status,
+            ai_reader::library_model_tags_settings,
+            ai_reader::set_library_model_tags_enabled,
+            ai_reader::start_library_auto_classification,
             private_sync::private_sync_get_settings,
             private_sync::private_sync_set_options,
             private_sync::private_sync_history_list,
             private_sync::private_sync_history_merge,
+            private_sync::private_sync_library_history_list,
+            private_sync::private_sync_library_history_merge,
             private_sync::private_sync_set_password,
             private_sync::private_sync_unlock_secrets,
             private_sync::private_sync_forget_password,

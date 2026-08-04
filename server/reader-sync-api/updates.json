@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "latest": "1.10.0",
+  "latest": "1.11.0",
   "releases": {
+    "1.11.0": {
+      "android_version": "0.3.0",
+      "release_notes": "- 新增书库问答：全书库前 20 本、每本 1 段可追溯证据，并支持标签、书单与人工范围限定。\n- 单书问题改用目录/正文优先的分层检索、同书多段召回和引用自检。\n- 新增可续建的大模型书籍分类；模型标签与用户标签分离、始终同步，并可参与本机问答与筛选。\n- 书库问答历史自动本地保存，可按现有开关同步脱敏来源索引。\n- Android v0.3.0 新增本机全文索引、搜索结果页和语义索引构建。\n- 发布 Windows、macOS、Linux 与 Android 构建及独立 SHA-256 校验清单。",
+      "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.11.0",
+      "published_at": "2026-08-05"
+    },
     "1.10.0": {
       "android_version": "0.2.0",
       "release_notes": "- 新增端到端加密的私密配置同步与账号恢复。\n- 修复滚动/整页、单页/双页模式切换后的阅读位置漂移与首行缩进。\n- 底部全书进度条与顶部阅读工具栏统一同现同隐。\n- 新增 Linux x86_64 AppImage/deb 构建及启动烟测。\n- Android v0.2.0 增加离线词典、生词本、智读、账号安全、加密密钥同步和相邻章节预热。\n- 发布 Windows、macOS、Linux 与 Android 构建及独立 SHA-256 校验清单。",
