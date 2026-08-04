@@ -666,11 +666,6 @@ pub(crate) async fn newsnow_refresh(request: Option<NewsNowRequest>) -> NewsNowL
         })
 }
 
-#[tauri::command]
-pub(crate) fn newsnow_open(url: String) -> Result<(), String> {
-    url_open::open_https_url(&url)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,9 +38,7 @@ test("NewsNow feed keeps news loading separate from startup and overlays safe or
   assert.match(html, /id="newsnow-reader"/);
   assert.match(html, /id="newsnow-reader-frame"/);
   assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"/);
-  assert.match(html, /id="newsnow-reader-external"/);
   assert.match(html, /返回资讯页/);
-  assert.match(script, /function openExternal/);
   assert.match(script, /readerFrame\.src = url/);
   assert.match(script, /articleScrollTop = page\.scrollTop/);
   assert.match(script, /page\.scrollTop = articleScrollTop/);
@@ -89,6 +87,6 @@ test("NewsNow presents a chronological reading feed and stays usable on narrow w
   assert.match(styles, /\.newsnow-card:hover, \.newsnow-card:focus-visible/);
   assert.match(styles, /\.newsnow-reader\s*\{/);
   assert.match(styles, /\.newsnow-page\.newsnow-reading\s*\{/);
-  assert.match(styles, /\.newsnow-reader-footer\s*\{/);
+  assert.match(styles, /\.newsnow-reader-back\s*\{/);
   assert.match(styles, /@media \(max-width: 620px\)/);
 });
