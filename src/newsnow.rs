@@ -20,10 +20,7 @@ const MAX_SELECTED_SOURCES: usize = 12;
 const MAX_ITEMS_PER_SOURCE: usize = 16;
 const MAX_TOTAL_ITEMS: usize = 90;
 const MAX_TEXT_CHARS: usize = 500;
-const MAX_ARTICLE_BYTES: u64 = 1_500_000;
-const MAX_ARTICLE_TEXT_CHARS: usize = 80_000;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
-const ARTICLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(18);
 const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
 
@@ -323,17 +320,6 @@ pub(crate) struct NewsNowStatus {
     pub message: String,
 }
 
-/// A deliberately plain-text view of an external news page.  The app does not
-/// embed the remote document, so its scripts, frames, cookies and navigation
-/// cannot run inside the reader WebView.
-#[derive(Debug, Clone, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct NewsNowArticle {
-    pub url: String,
-    pub text: String,
-    pub message: String,
-}
-
 #[derive(Default)]
 struct NewsCache {
     source_ids: Vec<String>,
@@ -390,16 +376,6 @@ fn http_agent() -> ureq::Agent {
         .timeout_connect(Some(Duration::from_secs(6)))
         .timeout_recv_response(Some(Duration::from_secs(12)))
         .timeout_recv_body(Some(Duration::from_secs(12)))
-        .build()
-        .into()
-}
-
-fn article_http_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(ARTICLE_REQUEST_TIMEOUT))
-        .timeout_connect(Some(Duration::from_secs(8)))
-        .timeout_recv_response(Some(Duration::from_secs(14)))
-        .timeout_recv_body(Some(Duration::from_secs(16)))
         .build()
         .into()
 }
@@ -539,38 +515,6 @@ fn fetch_source(
         .read_json::<Value>()
         .map_err(|_| source.name.to_string())?;
     Ok(parse_source_response(source, response))
-}
-
-fn article_text_from_html(html: &str) -> String {
-    trim_chars(
-        &crate::html_sanitize::html_to_plain_text(html),
-        MAX_ARTICLE_TEXT_CHARS,
-    )
-}
-
-fn fetch_article(url: String) -> Result<NewsNowArticle, String> {
-    let url = url_open::validate_https_url(&url)?.to_string();
-    let mut response = article_http_agent()
-        .get(&url)
-        .header("User-Agent", NEWSNOW_USER_AGENT)
-        .header("Accept", "text/html,application/xhtml+xml")
-        .call()
-        .map_err(|_| "无法连接原文站点。".to_string())?;
-    let html = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_ARTICLE_BYTES)
-        .read_to_string()
-        .map_err(|_| "原文过大、格式不受支持或读取失败。".to_string())?;
-    let text = article_text_from_html(&html);
-    if text.chars().count() < 80 {
-        return Err("该页面没有可供阅读的正文，请在浏览器打开原文。".to_string());
-    }
-    Ok(NewsNowArticle {
-        url,
-        text,
-        message: "已提取纯文本正文；图片、脚本和站点交互不会在应用内加载。".to_string(),
-    })
 }
 
 fn sort_and_deduplicate(items: &mut Vec<NewsNowItem>) {
@@ -723,17 +667,6 @@ pub(crate) async fn newsnow_refresh(request: Option<NewsNowRequest>) -> NewsNowL
 }
 
 #[tauri::command]
-pub(crate) async fn newsnow_read_article(url: String) -> NewsNowArticle {
-    tokio::task::spawn_blocking(move || fetch_article(url))
-        .await
-        .unwrap_or_else(|error| Err(format!("原文加载任务失败：{error}")))
-        .unwrap_or_else(|message| NewsNowArticle {
-            message,
-            ..Default::default()
-        })
-}
-
-#[tauri::command]
 pub(crate) fn newsnow_open(url: String) -> Result<(), String> {
     url_open::open_https_url(&url)
 }
@@ -821,18 +754,5 @@ mod tests {
         sort_and_deduplicate(&mut items);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].title, "new");
-    }
-
-    #[test]
-    fn article_reader_strips_active_content_and_bounds_text() {
-        let html = format!(
-            "<article><h1>标题</h1><p>{}</p><script>steal()</script><iframe src=\"https://bad.example\"></iframe></article>",
-            "正文内容 ".repeat(MAX_ARTICLE_TEXT_CHARS)
-        );
-        let text = article_text_from_html(&html);
-        assert!(text.contains("标题"));
-        assert!(!text.contains("steal"));
-        assert!(!text.contains("bad.example"));
-        assert!(text.chars().count() <= MAX_ARTICLE_TEXT_CHARS + 1);
     }
 }
