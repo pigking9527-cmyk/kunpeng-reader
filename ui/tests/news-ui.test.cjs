@@ -56,6 +56,17 @@ test("NewsNow stores a local, bounded source selection and sends only source IDs
   assert.match(script, /最多选择 \$\{MAX_SOURCES\} 个来源/);
 });
 
+test("NewsNow has a persisted horizontal and grid layout switch", () => {
+  assert.match(html, /id="newsnow-layout-list"/);
+  assert.match(html, /id="newsnow-layout-grid"/);
+  assert.match(script, /const LAYOUT_STORAGE_KEY = "kunpeng\.reader\.news\.layout\.v1"/);
+  assert.match(script, /function setLayout\(nextLayout\)/);
+  assert.match(script, /feed\.classList\.toggle\("newsnow-feed-grid", grid\)/);
+  assert.match(script, /gridLayout\.addEventListener\("click", \(\) => setLayout\("grid"\)\)/);
+  assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
+  assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
+});
+
 test("NewsNow toolbar toggles back to the shelf when it is already open", () => {
   assert.match(script, /function toggle\(\) \{\s*if \(page\.hidden\) \{\s*open\(\);\s*\} else \{\s*close\(\);/s);
   assert.match(script, /button\.addEventListener\("click", toggle\)/);

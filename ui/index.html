@@ -812,7 +812,17 @@
         <div id="newsnow-source-options" class="newsnow-source-options"></div>
         <div class="newsnow-source-picker-actions"><button id="newsnow-source-reset" class="btn-plain" type="button">恢复推荐</button><button id="newsnow-source-apply" class="btn-primary" type="button">应用并刷新</button></div>
       </section>
-      <div class="newsnow-toolbar"><div id="newsnow-categories" class="newsnow-categories" aria-label="资讯分类"></div><span id="newsnow-source-summary" class="newsnow-source-summary"></span></div>
+      <div class="newsnow-toolbar">
+        <div id="newsnow-categories" class="newsnow-categories" aria-label="资讯分类"></div>
+        <div class="newsnow-toolbar-actions">
+          <span id="newsnow-source-summary" class="newsnow-source-summary"></span>
+          <div class="newsnow-layout-control" role="group" aria-label="资讯布局">
+            <span>布局</span>
+            <button id="newsnow-layout-list" class="newsnow-layout-button" type="button" title="横排布局" aria-label="横排布局" aria-pressed="true"><i class="newsnow-layout-list-icon" aria-hidden="true"></i></button>
+            <button id="newsnow-layout-grid" class="newsnow-layout-button" type="button" title="方格布局" aria-label="方格布局" aria-pressed="false"><i class="newsnow-layout-grid-icon" aria-hidden="true"></i></button>
+          </div>
+        </div>
+      </div>
       <div id="newsnow-status" class="newsnow-status" aria-live="polite"></div>
       <main id="newsnow-feed" class="newsnow-feed" aria-live="polite"></main>
     </section>
