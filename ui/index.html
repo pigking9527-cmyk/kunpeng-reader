@@ -788,17 +788,24 @@
         <div class="newsnow-title-row">
           <button id="newsnow-back" class="newsnow-back" type="button" aria-label="返回书架">←</button>
           <div>
-            <h1>资讯</h1>
-            <p>NewsNow · 聚合浏览新闻原文</p>
+            <p class="newsnow-eyebrow">READING BRIEF</p>
+            <h1>今日资讯</h1>
+            <p>按时间归并的轻量资讯流，只在你打开时加载。</p>
           </div>
         </div>
         <div class="newsnow-actions">
           <span id="newsnow-updated" class="newsnow-updated" aria-live="polite"></span>
+          <button id="newsnow-source-toggle" class="btn-plain newsnow-source-toggle" type="button" aria-expanded="false">管理来源</button>
           <button id="newsnow-refresh" class="btn-plain newsnow-refresh" type="button">刷新</button>
         </div>
       </header>
+      <section id="newsnow-source-picker" class="newsnow-source-picker" hidden aria-label="资讯来源设置">
+        <div class="newsnow-source-picker-head"><div><strong>选择关注来源</strong><p>保存在此设备；最多同时加载 12 个来源。</p></div><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="关闭来源设置">×</button></div>
+        <div id="newsnow-source-options" class="newsnow-source-options"></div>
+        <div class="newsnow-source-picker-actions"><button id="newsnow-source-reset" class="btn-plain" type="button">恢复推荐</button><button id="newsnow-source-apply" class="btn-primary" type="button">应用并刷新</button></div>
+      </section>
+      <div class="newsnow-toolbar"><div id="newsnow-categories" class="newsnow-categories" aria-label="资讯分类"></div><span id="newsnow-source-summary" class="newsnow-source-summary"></span></div>
       <div id="newsnow-status" class="newsnow-status" aria-live="polite"></div>
-      <div id="newsnow-categories" class="newsnow-categories" aria-label="新闻分类"></div>
       <main id="newsnow-feed" class="newsnow-feed" aria-live="polite"></main>
     </section>
     <script src="startup-perf.js"></script>

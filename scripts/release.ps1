@@ -50,7 +50,11 @@ function Get-ChangelogNotes {
   if (-not $path -or -not (Test-Path -LiteralPath $path)) { return "v$Ver" }
   $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
   $escaped = [regex]::Escape($Ver)
-  $m = [regex]::Match($text, "(?ms)^##\s+v$escaped\s*\r?\n(?<body>.*?)(?=^##\s+v|\z)")
+  # Changelog headings may include a human-readable release date, for example
+  # `## v1.11.1 - 2026-08-05`.  Accept that suffix while still stopping at the
+  # next version heading so GitHub Release notes never silently fall back to a
+  # bare version number.
+  $m = [regex]::Match($text, "(?ms)^##\s+v$escaped(?:\s+-[^\r\n]*)?\s*\r?\n(?<body>.*?)(?=^##\s+v|\z)")
   if ($m.Success) { return $m.Groups["body"].Value.Trim() }
   return "v$Ver"
 }
