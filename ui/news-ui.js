@@ -104,6 +104,16 @@
     let loading = false;
     let catalogueLoading = null;
 
+    function newsEnabled() {
+      return global.ReaderExperimentalFeatures?.enabled?.("newsnow") === true;
+    }
+
+    function applyExperimentalAvailability() {
+      const enabled = newsEnabled();
+      button.hidden = !enabled;
+      if (!enabled && !page.hidden) close({ focus: false });
+    }
+
     function setStatus(message, kind = "") {
       status.textContent = text(message);
       status.className = "newsnow-status" + (kind ? " " + kind : "");
@@ -323,6 +333,7 @@
     }
 
     function open() {
+      if (!newsEnabled()) return;
       root.getElementById("menu")?.classList.remove("show");
       root.getElementById("filter-panel")?.classList.remove("show");
       root.getElementById("account-panel")?.classList.remove("show");
@@ -334,13 +345,13 @@
       load(false);
     }
 
-    function close() {
+    function close({ focus = true } = {}) {
       closeSourcePicker();
       page.hidden = true;
       shell.hidden = false;
       global.document.body.classList.remove("newsnow-active");
       button.setAttribute("aria-pressed", "false");
-      button.focus({ preventScroll: true });
+      if (focus && !button.hidden) button.focus({ preventScroll: true });
     }
 
     function toggle() {
@@ -381,6 +392,10 @@
       if (event.key !== "Escape" || page.hidden) return;
       if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close();
     });
+    global.addEventListener("reader-experimental-features-changed", (event) => {
+      if (event.detail?.key === "newsnow") applyExperimentalAvailability();
+    });
+    applyExperimentalAvailability();
     return {
       open, close, toggle, refresh: () => load(true),
       render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); },

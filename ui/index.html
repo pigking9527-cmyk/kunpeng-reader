@@ -187,7 +187,7 @@
           <path d="M17.3 17.5h2.4M18.5 16.3v2.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
         </svg>
       </button>
-      <button id="newsnow-toolbar-btn" class="icon-btn newsnow-toolbar-btn" type="button" title="资讯（NewsNow）" aria-label="打开资讯">
+      <button id="newsnow-toolbar-btn" class="icon-btn newsnow-toolbar-btn" type="button" title="资讯（NewsNow）" aria-label="打开资讯" hidden>
         <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
           <path d="M4 5.5h16v13H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
           <path d="M7 9h4v5H7zM13.5 9H17M13.5 11.6H17M7 16h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
@@ -401,6 +401,13 @@
             <button id="dict-gear" class="fp-row-gear" title="管理外置词典">⚙</button>
           </span>
         </div>
+        <section class="experimental-settings" aria-label="实验室">
+          <div class="fp-title">实验室</div>
+          <div class="fp-set-row">
+            <span>资讯</span>
+            <label class="switch"><input id="experimental-newsnow" type="checkbox" /><span class="slider"></span></label>
+          </div>
+        </section>
         <section class="default-apps-setting" aria-label="默认打开方式">
           <div>
             <div class="fp-title">默认打开方式</div>
@@ -820,6 +827,7 @@
     <script src="shelf-ui.js"></script>
     <script src="library-ai.js"></script>
     <script src="library-ai-entry.js"></script>
+    <script src="experimental-features.js"></script>
     <script src="news-ui.js"></script>
     <script src="api-settings-ui.js"></script>
     <script src="app.js"></script>

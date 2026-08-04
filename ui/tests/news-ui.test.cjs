@@ -9,11 +9,22 @@ const script = fs.readFileSync(path.join(ui, "news-ui.js"), "utf8");
 const styles = fs.readFileSync(path.join(ui, "styles.css"), "utf8");
 
 test("NewsNow has a shelf toolbar entry and an independently mounted news page", () => {
-  assert.match(html, /id="newsnow-toolbar-btn"/);
+  assert.match(html, /id="newsnow-toolbar-btn"[^>]*hidden/);
   assert.match(html, /id="newsnow-page"/);
   assert.match(html, /id="newsnow-back"/);
   assert.match(html, /id="newsnow-feed"/);
   assert.match(html, /<script src="news-ui\.js"><\/script>/);
+});
+
+test("NewsNow is gated behind the local experimental switch", () => {
+  const experiments = fs.readFileSync(path.join(ui, "experimental-features.js"), "utf8");
+  assert.match(html, /id="experimental-newsnow"/);
+  assert.match(html, /<div class="fp-title">实验室<\/div>/);
+  assert.match(experiments, /const DEFAULTS = Object\.freeze\(\{ newsnow: false \}\)/);
+  assert.match(experiments, /"kunpeng\.reader\.experimental-features\.v1"/);
+  assert.match(script, /ReaderExperimentalFeatures\?\.enabled\?\.\("newsnow"\) === true/);
+  assert.match(script, /reader-experimental-features-changed/);
+  assert.match(script, /if \(!enabled && !page\.hidden\) close\(\{ focus: false \}\)/);
 });
 
 test("NewsNow feed keeps news loading separate from startup and only opens safe original links", () => {
@@ -28,7 +39,7 @@ test("NewsNow feed keeps news loading separate from startup and only opens safe 
   assert.match(script, /shell\.hidden = true/);
   assert.match(script, /page\.hidden = false/);
   assert.match(script, /ReaderLibraryAiEntry\?\.close\(\)/);
-  assert.match(script, /function close\(\)/);
+  assert.match(script, /function close\(\{ focus = true \} = \{\}\)/);
   assert.match(script, /page\.hidden = true/);
 });
 
