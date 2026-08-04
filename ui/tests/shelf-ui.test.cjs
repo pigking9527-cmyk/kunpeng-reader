@@ -25,7 +25,10 @@ test("book card clicks explicitly close main-window floaters", () => {
   assert.match(card, /addEventListener\("dblclick",[\s\S]*?closeShelfCardFloaters\(\)/);
   assert.match(card, /if \(selected\.size > 0\)[\s\S]*?toggleSelect\(b\.id, card\)/);
   assert.match(card, /openTimer = setTimeout\([\s\S]*?if \(!selected\.size\) openBook\(\)/);
-  assert.match(card, /addEventListener\("dblclick",[\s\S]*?if \(!selected\.size\) toggleSelect\(b\.id, card\)/);
+  assert.match(card, /let selectionTimer = null/);
+  assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?selectionTimer = setTimeout\([\s\S]*?toggleSelect\(b\.id, card\)/);
+  assert.match(card, /selectionTimer = setTimeout\([\s\S]*?\}, 180\)/);
+  assert.match(card, /clearTimeout\(selectionTimer\)[\s\S]*?restoreDeferredSelection\(\)[\s\S]*?openBook\(\)/);
   assert.match(card, /addEventListener\("contextmenu"/);
   assert.match(card, /openBookOrganizer\(getBook\(b\.id\) \|\| b, e, card\)/);
 });

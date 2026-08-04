@@ -888,7 +888,7 @@ function setupTranslate(){
   trPop.addEventListener('mousedown',function(e){e.stopPropagation();});
   trPop.addEventListener('click',function(e){e.stopPropagation();});
   ['.tr-source','.tr-target'].forEach(function(sel){trPop.querySelector(sel).addEventListener('change',function(){saveTranslatePrefs();requestTranslate();});});
-  trPop.querySelector('.tr-api').addEventListener('change',function(){try{localStorage.setItem('translateProvider',trPop.querySelector('.tr-api').value);}catch(_){} updateTranslateApiFields();requestTranslate();});
+  trPop.querySelector('.tr-api').addEventListener('change',function(){try{localStorage.setItem('translateProvider',trPop.querySelector('.tr-api').value);}catch(_){} parent.postMessage({setTranslationActiveProvider:trPop.querySelector('.tr-api').value},'*');updateTranslateApiFields();requestTranslate();});
   ['.tr-api-id','.tr-api-key'].forEach(function(sel){trPop.querySelector(sel).addEventListener('input',function(){trCredentialDirty=true;});trPop.querySelector(sel).addEventListener('change',function(){requestTranslate();});});
   document.addEventListener('mousedown',function(e){if(trPop&&trPop.style.display==='block'&&!trPop.contains(e.target))hideTranslate();});
   document.addEventListener('wheel',function(){hideTranslate();},{passive:true});
@@ -904,6 +904,17 @@ function translateApiLabel(provider){
   if(provider==='deepl')return {id:'DeepL API Key',key:'DeepL 预留密钥（可空）'};
   if(provider==='google')return {id:'Google API Key',key:'Google 预留密钥（可空）'};
   return {id:'AppID / API Key',key:'密钥'};
+}
+function applyTranslationProfiles(status){
+  if(!trPop||!status)return;
+  var select=trPop.querySelector('.tr-api'),profiles=Array.isArray(status.profiles)?status.profiles.filter(function(p){return p&&p.configured;}):[];
+  if(!profiles.length)return;
+  var current=status.activeProvider||status.active_provider||select.value;
+  select.innerHTML='';
+  profiles.forEach(function(profile){var opt=document.createElement('option');opt.value=profile.provider;opt.textContent=translateApiLabel(profile.provider).id.replace(/ AppID| SecretId| API Key/,'');select.appendChild(opt);trCredentialStatus[profile.provider]=profile;});
+  select.value=profiles.some(function(profile){return profile.provider===current;})?current:profiles[0].provider;
+  try{localStorage.setItem('translateProvider',select.value);}catch(_){}
+  updateTranslateApiFields();
 }
 function saveTranslatePrefs(){
   try{
@@ -952,7 +963,7 @@ function openTranslate(text,rect){
   trPop.querySelector('.tr-src').textContent=t;
   trPop.querySelector('.tr-dst').textContent='加载中...';
   trPop.querySelector('.tr-dst').className='tr-text tr-dst tr-muted';
-  placeTranslate();requestTranslate();
+  placeTranslate();requestTranslate();parent.postMessage({getTranslationProfiles:1},'*');
 }
 function requestTranslate(){
   if(!trPop||trPop.style.display==='none')return;

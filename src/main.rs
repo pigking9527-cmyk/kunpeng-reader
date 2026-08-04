@@ -57,7 +57,6 @@ mod update;
 mod url_open;
 mod vocab;
 mod window_commands;
-
 use book::Library;
 pub(crate) use runtime_support::{
     emit_startup_perf, interactive_search_workers, log, now_ms, report_save_error,
@@ -68,10 +67,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
-
 /// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
-
 pub(crate) struct AppState {
     pub(crate) background_tasks: background_tasks::BackgroundTaskRegistry,
     /// Guards for work whose actual chunks run in a reader webview.  Keeping
@@ -99,7 +96,6 @@ pub(crate) struct AppState {
     pub(crate) sync_running: AtomicBool,   // 防止启动、手动和退出同步并发上传同一批实体
     memory_reclaimers: Mutex<Vec<memory_budget::ReclaimerHandle>>,
 }
-
 impl AppState {
     fn install_memory_reclaimers(&self) {
         let mut handles = self
@@ -176,10 +172,6 @@ impl AppState {
         self.backfilled.store(false, Ordering::Relaxed);
     }
 }
-
-// ---------------------------------------------------------------------------
-//  入口
-// ---------------------------------------------------------------------------
 
 fn main() {
     if std::env::args().any(|a| a == "--sem-probe") {
@@ -364,6 +356,8 @@ fn main() {
             app_commands::external_dict_set_enabled,
             app_commands::external_dict_move_priority,
             app_commands::translation_credential_status,
+            app_commands::translation_credentials_status,
+            app_commands::set_translation_active_provider,
             app_commands::save_translation_credential,
             app_commands::translate_text,
             feedback::submit_feedback,
@@ -372,9 +366,13 @@ fn main() {
             newsnow::newsnow_refresh,
             newsnow::newsnow_open,
             ai_reader::ai_reader_status,
+            ai_reader::ai_reader_profiles,
+            ai_reader::select_ai_reader_profile,
+            ai_reader::save_ai_reader_profile,
             ai_reader::save_ai_reader_config,
             ai_reader::ask_reading_assistant,
             ai_reader::ask_library_assistant,
+            ai_reader::library_history_source_preview,
             ai_reader::library_profile_status,
             ai_reader::library_profile_coverage_status,
             ai_reader::library_model_tags_settings,
@@ -384,8 +382,10 @@ fn main() {
             private_sync::private_sync_set_options,
             private_sync::private_sync_history_list,
             private_sync::private_sync_history_merge,
+            private_sync::private_sync_history_delete,
             private_sync::private_sync_library_history_list,
             private_sync::private_sync_library_history_merge,
+            private_sync::private_sync_library_history_delete,
             private_sync::private_sync_set_password,
             private_sync::private_sync_unlock_secrets,
             private_sync::private_sync_forget_password,

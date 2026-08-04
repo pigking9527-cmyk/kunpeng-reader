@@ -96,39 +96,72 @@ test("an open in-book search pins the immersive toolbar during IME pointer trans
   assert.match(shell, /current\.overlay === OVERLAY\.SEARCH && isImmersiveState\(current\.toolbar\)[\s\S]*?TOOLBAR\.IMMERSIVE_PINNED/);
 });
 
-test("智读提交携带实时已读位置、选区，并用 Enter 发起提问", () => {
+test("智读提交携带实时已读位置、选区、锚点和本机会话记忆，并用 Enter 发起提问", () => {
   assert.match(reader, /currentChapter:\s*curChapter/);
   assert.match(reader, /currentFraction:\s*curChFrac/);
   assert.match(reader, /selectedText:\s*aiReaderSelectedText/);
+  assert.match(reader, /selectedStart:\s*aiReaderSelectedAnchor\?\.start/);
+  assert.match(reader, /selectedEnd:\s*aiReaderSelectedAnchor\?\.end/);
+  assert.match(reader, /sessionMemory:\s*aiReaderSessionMemory\(\)/);
+  assert.match(reader, /function aiReaderSessionMemoryKey\(\)/);
+  assert.match(reader, /localStorage\.setItem\(aiReaderSessionMemoryKey\(\)/);
+  const sessionMemoryBlock = reader.match(/function aiReaderRememberSession\(entry\) \{([\s\S]*?)\n\}/)?.[1] || "";
+  assert.doesNotMatch(sessionMemoryBlock, /private_sync_history_merge/);
   assert.match(reader, /event\.key === "Enter" && !event\.shiftKey && !event\.isComposing && event\.keyCode !== 229/);
   assert.match(reader, /event\.stopPropagation\(\);\s*runAiReader\("question"\)/s);
   assert.match(html, /id="ai-reader-enter-submit"[^>]*>↵ 回车提问<\/button>/);
   assert.match(reader, /getElementById\("ai-reader-enter-submit"\)\?\.addEventListener\("click", \(\) => runAiReader\("question"\)\)/);
 });
 
-test("智读配置提供 DeepSeek、GPT 与 Claude，并区分 Claude 的原生协议", () => {
-  assert.match(html, /id="ai-reader-provider"[\s\S]*?value="deepseek"[\s\S]*?value="openai"[\s\S]*?value="anthropic"/);
-  assert.match(html, /id="ai-reader-model"/);
-  assert.match(reader, /deepseek-v4-flash[\s\S]*?deepseek-v4-pro/);
-  assert.match(reader, /gpt-5\.6-luna[\s\S]*?gpt-5\.6-terra[\s\S]*?gpt-5\.6-sol/);
-  assert.match(reader, /claude-haiku-4-5[\s\S]*?claude-sonnet-5[\s\S]*?claude-opus-5/);
-  assert.match(reader, /provider:\s*aiReaderProviderInput\?\.value \|\| "compatible"/);
+test("智读历史可以删除，并将条目墓碑同步到其他设备", () => {
+  assert.match(reader, /function aiReaderHistoryEntryId\(entry\)/);
+  assert.match(reader, /private_sync_history_delete/);
+  assert.match(reader, /删除这条智读记录/);
+  assert.match(reader, /deletedAt/);
+  assert.match(html, /\.ai-reader-history-delete\s*\{/);
 });
 
-test("开关智读后按当前视口正文偏移恢复，而不是把高亮文字当分页锚点", () => {
-  assert.match(reader, /aiReaderSideRequestId/);
+test("智读显示检索阶段、证据材料类型与引用自检结果", () => {
+  assert.match(reader, /function aiReaderStartProgress\(task\)/);
+  assert.match(reader, /定位当前选句和邻近正文/);
+  assert.match(reader, /混合检索已读内容/);
+  assert.match(reader, /筛选并重排证据/);
+  assert.match(reader, /生成回答并核对引用/);
+  assert.match(reader, /source\?\.sourceKind/);
+  assert.match(reader, /function aiReaderRenderMarkdown\(content, sources\)/);
+  assert.match(reader, /function aiReaderAppendInline\(parent, value, sources\)/);
+  assert.match(reader, /className = "ai-reader-citation"/);
+  assert.match(reader, /function aiReaderJumpToSource\(source\)/);
+  assert.doesNotMatch(reader, /citation\.title/);
+  assert.match(reader, /answer\.retrievalStages/);
+  assert.match(reader, /answer\.citationChecked/);
+  assert.match(html, /id="ai-reader-audit"/);
+  assert.doesNotMatch(html, /id="ai-reader-source-preview"/);
+  assert.match(html, /\.ai-reader-answer h3 \{[^}]*font-size: 20px/s);
+});
+
+test("智读只切换书架中已配置的大模型，不在阅读页编辑密钥", () => {
+  assert.match(html, /id="ai-reader-profile"/);
+  assert.match(reader, /invoke\("ai_reader_profiles"\)/);
+  assert.match(reader, /invoke\("select_ai_reader_profile", \{ id \}\)/);
+  assert.doesNotMatch(html, /id="ai-reader-provider"|id="ai-reader-base-url"|id="ai-reader-api-key"/);
+  assert.doesNotMatch(reader, /save_ai_reader_config/);
+});
+
+test("从选中文本打开智读时不再向问题框插入固定提问句", () => {
+  assert.doesNotMatch(reader, /请结合已读内容解释这段文字/);
+  assert.match(reader, /aiReaderQuestion\.value = String\(prefill\)\.trim\(\)\.slice\(0, 900\)/);
+});
+
+test("开关智读以覆盖层呈现，不压缩正文列宽或改变阅读位置", () => {
+  assert.match(reader, /智读为覆盖层：不改变正文 iframe 宽度/);
+  assert.doesNotMatch(reader, /preserveAnchor: 1/);
   assert.match(reader, /openAiReader\(request\.text \|\| "", \{[\s\S]*?start: request\.anchorStart/);
   assert.match(annotations, /aiReader:\{text:t,anchorStart:o&&o\.start,anchorEnd:o&&o\.end\}/);
   assert.match(annotations, /aiReader:\{text:highlightDisplayText\(h\),anchorStart:h\.start,anchorEnd:h\.end\}/);
-  assert.match(runtime, /sideAnchor=topAnchor\(\)[\s\S]*?sideOffset=anchorTextOffset\(sideAnchor\)[\s\S]*?__readerSideViewportTxn/);
-  assert.match(reader, /aiReaderSideCommit: requestId[\s\S]*?aiReaderSideExpectedWidth: width/);
-  assert.match(annotations, /scheduleReaderSideViewportRestore[\s\S]*?finishReaderSideViewportRestore/);
-  assert.match(runtime, /viewportOffset:sideViewportOffset/);
-  assert.match(annotations, /exactScroll:isScrollMode\(\),scrollOffset:tx\.viewportOffset/);
-  assert.match(annotations, /renderSideAnchorVirtualPage\(tx\.offset\)/);
-  assert.match(layout, /renderSideAnchorFallbackPage\(offset,source/);
-  assert.match(layout, /ai_side_virtual/);
-  assert.match(layout, /function consumeSideAnchorVirtualPage\(\)[\s\S]*?function nextPage\(\)/);
+  assert.doesNotMatch(html, /body\.ai-reader-open #frame\s*\{\s*width:/);
+  assert.doesNotMatch(html, /body\.ai-reader-open #vbar\s*\{\s*right:/);
+  assert.doesNotMatch(html, /body\.ai-reader-open \.book-progress\s*\{\s*right:/);
 });
 
 test("高亮菜单按真实高度避让页末：横排和九宫格都完整可见", () => {

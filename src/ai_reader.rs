@@ -13,9 +13,12 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use tauri::Manager;
 
 const CONFIG_KEY: &str = "ai_reader_config_protected";
+const CONFIG_PROFILES_KEY: &str = "ai_reader_config_profiles_protected:v1";
 const MAX_CONTEXT_CHARS: usize = 14_000;
 const MAX_CHAPTER_CHARS: usize = 4_500;
 const MAX_SELECTED_TEXT_CHARS: usize = 2_400;
+const MAX_READING_SESSION_MEMORY_CHARS: usize = 2_800;
+const MAX_READING_EVIDENCE_SOURCES: usize = 8;
 const MAX_LIBRARY_QUESTION_CHARS: usize = 2_000;
 const MAX_LIBRARY_COMPARE_BOOKS: usize = 8;
 const MAX_LIBRARY_QUESTION_SOURCES: usize = 20;
@@ -23,8 +26,18 @@ const MAX_LIBRARY_DEEP_SOURCES: usize = 10;
 const MAX_LIBRARY_SINGLE_BOOK_SOURCES: usize = 12;
 const MAX_LIBRARY_SINGLE_BOOK_STRUCTURE_SOURCES: usize = 4;
 const MAX_LIBRARY_SINGLE_BOOK_CANDIDATE_HITS: usize = 36;
+const HISTORY_SOURCE_PREVIEW_CHARS: usize = 1_200;
 const MAX_LIBRARY_COMPARE_SOURCES: usize = 8;
 const MAX_LIBRARY_COMPARE_SOURCES_PER_BOOK: usize = 2;
+// 书库问答会先筛选证据、再生成回答、最后做引用自检。公共模型在高峰期
+// 仅排队到首字节就可能超过 45 秒，因此要给每个独立阶段足够的响应窗口。
+const READING_PROVIDER_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const READING_PROVIDER_MAX_TOKENS: u16 = 1_600;
+// The first pass may include several kinds of evidence. When a compatible
+// provider accepts the request but returns an empty completion, retry once
+// with only the strongest compact evidence instead of making the reader lose
+// an otherwise answerable question.
+const MAX_READING_RETRY_CONTEXT_CHARS: usize = 4_800;
 const LIBRARY_PROFILE_PREFIX: &str = "library_ai_profile:v2:";
 const LIBRARY_MODEL_TAGS_ENABLED_KEY: &str = "library_ai_use_model_tags:v1";
 const MAX_LIBRARY_PROFILE_TAGS: usize = 12;
@@ -43,6 +56,40 @@ struct StoredConfig {
     base_url: String,
     model: String,
     api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredAiReaderProfile {
+    id: String,
+    name: String,
+    #[serde(flatten)]
+    config: StoredConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StoredAiReaderProfiles {
+    #[serde(default)]
+    active_id: String,
+    #[serde(default)]
+    profiles: Vec<StoredAiReaderProfile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiReaderProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub base_url: String,
+    pub model: String,
+    pub configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiReaderProfilesStatus {
+    pub active_id: String,
+    pub profiles: Vec<AiReaderProfileSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +113,21 @@ pub(crate) struct SaveAiReaderConfigRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SaveAiReaderProfileRequest {
+    #[serde(default)]
+    id: String,
+    name: String,
+    #[serde(default)]
+    provider: String,
+    base_url: String,
+    model: String,
+    /// Leaving this blank while updating an existing profile keeps its key.
+    #[serde(default)]
+    api_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AiReaderAskRequest {
     /// question | summary | mindmap
     task: String,
@@ -78,6 +140,17 @@ pub(crate) struct AiReaderAskRequest {
     /// 用户在当前阅读页明确选中的文字，属于已阅读内容而非整书内容。
     #[serde(default)]
     selected_text: Option<String>,
+    /// The character offsets are supplied by the reader page together with the
+    /// explicit selection. They let us retrieve nearby prose rather than
+    /// treating a selected sentence as an isolated search query.
+    #[serde(default)]
+    selected_start: Option<usize>,
+    #[serde(default)]
+    selected_end: Option<usize>,
+    /// A short, local-only recap of this reader session. It is intentionally
+    /// not persisted in or restored from sync history.
+    #[serde(default)]
+    session_memory: String,
 }
 
 /// Local-library RAG request used by the main-window assistant.
@@ -95,6 +168,22 @@ pub(crate) struct LibraryAiReaderAskRequest {
     question: String,
     #[serde(default)]
     selected_book_ids: Vec<String>,
+}
+
+/// A local-only fallback for older library-Q&A history.  Earlier history
+/// versions intentionally synchronized only a title/chapter reference, not
+/// book text.  If such a record is opened on the same shelf again, this reads
+/// the referenced local chapter so the citation remains usable without ever
+/// putting its text into sync storage.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryHistorySourcePreviewRequest {
+    book_id: String,
+    #[serde(default)]
+    book_title: String,
+    chapter: u32,
+    #[serde(default)]
+    source_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +217,13 @@ pub(crate) struct AiReaderAnswer {
     sources: Vec<AiReaderSource>,
     #[serde(default)]
     single_book: bool,
+    /// The stages actually used for this answer. The reader surface renders
+    /// this as provenance rather than pretending every answer used the same
+    /// opaque one-shot prompt.
+    #[serde(default)]
+    retrieval_stages: Vec<String>,
+    #[serde(default)]
+    citation_checked: bool,
     error: String,
 }
 
@@ -546,13 +642,107 @@ fn provider_error_summary(status: u16, body: &str) -> String {
     }
 }
 
-fn load_config(db: &crate::db::AppDb) -> Result<StoredConfig, String> {
+fn load_legacy_config(db: &crate::db::AppDb) -> Result<StoredConfig, String> {
     let protected = db.metadata(CONFIG_KEY).unwrap_or_default();
     if protected.is_empty() {
         return Ok(StoredConfig::default());
     }
     let json = secret_store::unprotect_secret(&protected)?;
     serde_json::from_str(&json).map_err(|error| format!("阅读助手配置损坏：{error}"))
+}
+
+fn default_profile_name(config: &StoredConfig) -> String {
+    let provider = match known_provider(&config.provider) {
+        "deepseek" => "DeepSeek",
+        "openai" => "OpenAI",
+        "anthropic" => "Anthropic",
+        _ => "兼容接口",
+    };
+    if config.model.trim().is_empty() {
+        provider.to_string()
+    } else {
+        format!("{provider} · {}", trim_to_chars(config.model.trim(), 48))
+    }
+}
+
+fn load_profiles(db: &crate::db::AppDb) -> Result<StoredAiReaderProfiles, String> {
+    let protected = db.metadata(CONFIG_PROFILES_KEY).unwrap_or_default();
+    if !protected.is_empty() {
+        let json = secret_store::unprotect_secret(&protected)?;
+        let mut store: StoredAiReaderProfiles = serde_json::from_str(&json)
+            .map_err(|error| format!("阅读助手配置列表损坏：{error}"))?;
+        store
+            .profiles
+            .retain(|profile| !profile.id.trim().is_empty());
+        if store.active_id.is_empty()
+            || !store
+                .profiles
+                .iter()
+                .any(|profile| profile.id == store.active_id)
+        {
+            store.active_id = store
+                .profiles
+                .first()
+                .map(|profile| profile.id.clone())
+                .unwrap_or_default();
+        }
+        return Ok(store);
+    }
+    let legacy = load_legacy_config(db)?;
+    if legacy.provider.is_empty()
+        && legacy.base_url.is_empty()
+        && legacy.model.is_empty()
+        && legacy.api_key.is_empty()
+    {
+        return Ok(StoredAiReaderProfiles::default());
+    }
+    Ok(StoredAiReaderProfiles {
+        active_id: "default".to_string(),
+        profiles: vec![StoredAiReaderProfile {
+            id: "default".to_string(),
+            name: default_profile_name(&legacy),
+            config: legacy,
+        }],
+    })
+}
+
+fn active_profile(store: &StoredAiReaderProfiles) -> Option<&StoredAiReaderProfile> {
+    store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == store.active_id)
+}
+
+fn persist_profiles(db: &crate::db::AppDb, store: &StoredAiReaderProfiles) -> Result<(), String> {
+    let json = serde_json::to_string(store).map_err(|error| error.to_string())?;
+    db.set_metadata(CONFIG_PROFILES_KEY, &secret_store::protect_secret(&json)?)?;
+    // Keep the active profile mirrored at the legacy key so older private-sync
+    // payloads and clients retain their existing single-config semantics.
+    if let Some(profile) = active_profile(store) {
+        let json = serde_json::to_string(&profile.config).map_err(|error| error.to_string())?;
+        db.set_metadata(CONFIG_KEY, &secret_store::protect_secret(&json)?)?;
+    }
+    Ok(())
+}
+
+fn load_config(db: &crate::db::AppDb) -> Result<StoredConfig, String> {
+    Ok(active_profile(&load_profiles(db)?)
+        .map(|profile| profile.config.clone())
+        .unwrap_or_default())
+}
+
+fn profile_summary(profile: &StoredAiReaderProfile) -> AiReaderProfileSummary {
+    let config = canonicalize_deepseek_config(profile.config.clone());
+    AiReaderProfileSummary {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        configured: !config.base_url.is_empty()
+            && !config.model.is_empty()
+            && !config.api_key.is_empty(),
+        provider: config.provider,
+        base_url: config.base_url,
+        model: config.model,
+    }
 }
 
 /// Portable configuration deliberately omits the credential. It is safe to
@@ -591,13 +781,35 @@ pub(crate) fn import_public_config(
     if base_url.is_empty() || model.is_empty() {
         return Ok(());
     }
-    let mut current = load_config(db)?;
-    current.provider = known_provider(provider).to_string();
-    current.base_url = normalize_base_url(base_url)?;
-    current.model = model.trim().to_string();
-    let current = canonicalize_deepseek_config(current);
-    let json = serde_json::to_string(&current).map_err(|e| e.to_string())?;
-    db.set_metadata(CONFIG_KEY, &secret_store::protect_secret(&json)?)
+    let mut profiles = load_profiles(db)?;
+    let active_id = profiles.active_id.clone();
+    if let Some(current) = profiles
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == active_id)
+    {
+        current.config.provider = known_provider(provider).to_string();
+        current.config.base_url = normalize_base_url(base_url)?;
+        current.config.model = model.trim().to_string();
+        current.config = canonicalize_deepseek_config(current.config.clone());
+        if current.name.trim().is_empty() {
+            current.name = default_profile_name(&current.config);
+        }
+    } else {
+        let config = canonicalize_deepseek_config(StoredConfig {
+            provider: provider.to_string(),
+            base_url: normalize_base_url(base_url)?,
+            model: model.trim().to_string(),
+            api_key: String::new(),
+        });
+        profiles.active_id = "default".to_string();
+        profiles.profiles.push(StoredAiReaderProfile {
+            id: "default".to_string(),
+            name: default_profile_name(&config),
+            config,
+        });
+    }
+    persist_profiles(db, &profiles)
 }
 
 pub(crate) fn export_secret_config(
@@ -667,8 +879,26 @@ pub(crate) fn import_secret_config(
     let Some(config) = config_from_secret_bundle(&current, value)? else {
         return Ok(());
     };
-    let json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
-    db.set_metadata(CONFIG_KEY, &secret_store::protect_secret(&json)?)
+    let mut profiles = load_profiles(db)?;
+    let active_id = profiles.active_id.clone();
+    if let Some(current) = profiles
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == active_id)
+    {
+        current.config = config;
+        if current.name.trim().is_empty() {
+            current.name = default_profile_name(&current.config);
+        }
+    } else {
+        profiles.active_id = "default".to_string();
+        profiles.profiles.push(StoredAiReaderProfile {
+            id: "default".to_string(),
+            name: default_profile_name(&config),
+            config,
+        });
+    }
+    persist_profiles(db, &profiles)
 }
 
 fn status(config: &StoredConfig) -> AiReaderStatus {
@@ -692,6 +922,97 @@ pub(crate) fn ai_reader_status(
 }
 
 #[tauri::command]
+pub(crate) fn ai_reader_profiles(
+    state: tauri::State<'_, AppState>,
+) -> Result<AiReaderProfilesStatus, String> {
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    let profiles = load_profiles(db)?;
+    Ok(AiReaderProfilesStatus {
+        active_id: profiles.active_id,
+        profiles: profiles.profiles.iter().map(profile_summary).collect(),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn select_ai_reader_profile(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<AiReaderStatus, String> {
+    let id = id.trim();
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    let mut profiles = load_profiles(db)?;
+    let profile = profiles
+        .profiles
+        .iter()
+        .find(|profile| profile.id == id)
+        .ok_or("找不到所选大模型配置")?;
+    let selected_id = profile.id.clone();
+    let config = canonicalize_deepseek_config(profile.config.clone());
+    profiles.active_id = selected_id;
+    persist_profiles(db, &profiles)?;
+    Ok(status(&config))
+}
+
+#[tauri::command]
+pub(crate) fn save_ai_reader_profile(
+    state: tauri::State<'_, AppState>,
+    request: SaveAiReaderProfileRequest,
+) -> Result<AiReaderProfilesStatus, String> {
+    let name = trim_to_chars(request.name.trim(), 80);
+    if name.is_empty() {
+        return Err("请填写配置名称".into());
+    }
+    let mut config = canonicalize_deepseek_config(StoredConfig {
+        provider: request.provider,
+        base_url: normalize_base_url(&request.base_url)?,
+        model: request.model.trim().to_string(),
+        api_key: request.api_key.trim().to_string(),
+    });
+    if config.model.is_empty() {
+        return Err("请填写模型名".into());
+    }
+    if config.model.len() > 200 || config.api_key.len() > 2_000 {
+        return Err("模型名或 API Key 过长".into());
+    }
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    let mut profiles = load_profiles(db)?;
+    let id = if request.id.trim().is_empty() {
+        format!("profile-{}", crate::runtime_support::now_ms())
+    } else {
+        request.id.trim().to_string()
+    };
+    if let Some(existing) = profiles
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == id)
+    {
+        if config.api_key.is_empty() {
+            config.api_key = existing.config.api_key.clone();
+        }
+        existing.name = name;
+        existing.config = config;
+    } else {
+        if config.api_key.is_empty() {
+            return Err("请填写 API Key".into());
+        }
+        profiles.profiles.push(StoredAiReaderProfile {
+            id: id.clone(),
+            name,
+            config,
+        });
+    }
+    profiles.active_id = id;
+    persist_profiles(db, &profiles)?;
+    Ok(AiReaderProfilesStatus {
+        active_id: profiles.active_id,
+        profiles: profiles.profiles.iter().map(profile_summary).collect(),
+    })
+}
+
+#[tauri::command]
 pub(crate) fn save_ai_reader_config(
     state: tauri::State<'_, AppState>,
     request: SaveAiReaderConfigRequest,
@@ -708,11 +1029,28 @@ pub(crate) fn save_ai_reader_config(
     if config.model.len() > 200 || config.api_key.len() > 2_000 {
         return Err("模型名或 API Key 过长".into());
     }
-    let json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
-    let protected = secret_store::protect_secret(&json)?;
     let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    db.set_metadata(CONFIG_KEY, &protected)?;
+    let mut profiles = load_profiles(db)?;
+    let active_id = profiles.active_id.clone();
+    if let Some(profile) = profiles
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == active_id)
+    {
+        profile.config = config.clone();
+        if profile.name.trim().is_empty() {
+            profile.name = default_profile_name(&config);
+        }
+    } else {
+        profiles.active_id = "default".to_string();
+        profiles.profiles.push(StoredAiReaderProfile {
+            id: "default".to_string(),
+            name: default_profile_name(&config),
+            config: config.clone(),
+        });
+    }
+    persist_profiles(db, &profiles)?;
     Ok(status(&config))
 }
 
@@ -759,12 +1097,137 @@ fn select_context(
             book_id: book_id.to_string(),
             book_title: book_title.to_string(),
             chapter: index as u32,
-            excerpt: trim_to_chars(&excerpt, 180),
-            source_kind: "当前章节".into(),
+            // Keep the actual candidate passage here. The later evidence
+            // filter and citation audit must inspect the same text that the
+            // answer cites; the UI trims it only for display.
+            excerpt,
+            source_kind: "已读正文检索".into(),
             tags: Vec::new(),
         });
     }
     (context, sources)
+}
+
+fn chars_window(value: &str, start: usize, end: usize, padding: usize) -> String {
+    let len = value.chars().count();
+    if len == 0 {
+        return String::new();
+    }
+    let start = start.min(len);
+    let end = end.max(start).min(len);
+    let from = start.saturating_sub(padding);
+    let to = end.saturating_add(padding).min(len);
+    value
+        .chars()
+        .skip(from)
+        .take(to.saturating_sub(from))
+        .collect()
+}
+
+fn reading_anchor_source(
+    chapter: &str,
+    start: Option<usize>,
+    end: Option<usize>,
+    book_id: &str,
+    book_title: &str,
+    chapter_index: usize,
+) -> Option<AiReaderSource> {
+    let (start, end) = (start?, end?);
+    let excerpt = chars_window(chapter, start, end, 900);
+    (!excerpt.trim().is_empty()).then(|| AiReaderSource {
+        book_id: book_id.to_string(),
+        book_title: book_title.to_string(),
+        chapter: chapter_index as u32,
+        excerpt,
+        source_kind: "选句邻近正文".into(),
+        tags: Vec::new(),
+    })
+}
+
+fn reading_chapter_opening_source(
+    chapter: &str,
+    book_id: &str,
+    book_title: &str,
+    chapter_index: usize,
+) -> Option<AiReaderSource> {
+    let excerpt = trim_to_chars(chapter.trim(), 700);
+    (!excerpt.trim().is_empty()).then(|| AiReaderSource {
+        book_id: book_id.to_string(),
+        book_title: book_title.to_string(),
+        chapter: chapter_index as u32,
+        excerpt,
+        source_kind: "本章开篇（范围提示）".into(),
+        tags: Vec::new(),
+    })
+}
+
+/// Build a spoiler-safe mixed candidate set. Position (the explicit selected
+/// passage and its neighbouring prose), structure (the current chapter
+/// opening), and lexical relevance (the already-read chapter candidates) are
+/// deliberately kept distinct so the evidence filter can remove a weak signal
+/// instead of blending it into an untraceable prompt.
+struct ReadingEvidenceInput<'a> {
+    readable: &'a [String],
+    current: usize,
+    question: &'a str,
+    selected_text: &'a str,
+    selected_start: Option<usize>,
+    selected_end: Option<usize>,
+    book_id: &'a str,
+    book_title: &'a str,
+}
+
+fn build_reading_evidence_sources(input: ReadingEvidenceInput<'_>) -> Vec<AiReaderSource> {
+    let ReadingEvidenceInput {
+        readable,
+        current,
+        question,
+        selected_text,
+        selected_start,
+        selected_end,
+        book_id,
+        book_title,
+    } = input;
+    let mut sources = Vec::new();
+    if !selected_text.is_empty() {
+        sources.push(AiReaderSource {
+            book_id: book_id.to_string(),
+            book_title: book_title.to_string(),
+            chapter: current as u32,
+            excerpt: selected_text.to_string(),
+            source_kind: "当前已选文字".into(),
+            tags: Vec::new(),
+        });
+    }
+    if let Some(chapter) = readable.get(current) {
+        if let Some(source) = reading_anchor_source(
+            chapter,
+            selected_start,
+            selected_end,
+            book_id,
+            book_title,
+            current,
+        ) {
+            sources.push(source);
+        }
+        if let Some(source) = reading_chapter_opening_source(chapter, book_id, book_title, current)
+        {
+            sources.push(source);
+        }
+    }
+    let (_, lexical_sources) = select_context(
+        readable,
+        current.min(readable.len().saturating_sub(1)),
+        question,
+        MAX_CONTEXT_CHARS.saturating_sub(MAX_SELECTED_TEXT_CHARS + 2_600),
+        book_id,
+        book_title,
+    );
+    sources.extend(lexical_sources);
+    let mut seen = HashSet::new();
+    sources.retain(|source| seen.insert(source_key(source)) && !source.excerpt.trim().is_empty());
+    sources.truncate(MAX_READING_EVIDENCE_SOURCES);
+    sources
 }
 
 fn normalize_selected_book_ids(
@@ -1321,6 +1784,38 @@ fn library_context_for_source_ids(sources: &[AiReaderSource], source_ids: &[usiz
     }))
 }
 
+fn compact_reading_context_for_source_ids(
+    sources: &[AiReaderSource],
+    source_ids: &[usize],
+) -> String {
+    let mut context = String::new();
+    let mut remaining = MAX_READING_RETRY_CONTEXT_CHARS;
+    for source_id in source_ids.iter().copied().take(3) {
+        let Some(source) = sources.get(source_id.saturating_sub(1)) else {
+            continue;
+        };
+        let header = format!(
+            "[来源 {}｜第 {} 章｜材料：{}]\n",
+            source_id,
+            source.chapter + 1,
+            source.source_kind
+        );
+        let header_chars = header.chars().count();
+        if header_chars >= remaining {
+            break;
+        }
+        let excerpt = trim_to_chars(&source.excerpt, (remaining - header_chars).min(1_600));
+        if excerpt.trim().is_empty() {
+            continue;
+        }
+        context.push_str(&header);
+        context.push_str(&excerpt);
+        context.push_str("\n\n");
+        remaining = remaining.saturating_sub(header_chars + excerpt.chars().count() + 2);
+    }
+    context
+}
+
 fn parse_deep_source_ids(response: &str, source_count: usize) -> Vec<usize> {
     let response = response.trim().trim_matches('`').trim();
     let json = serde_json::from_str::<serde_json::Value>(response).or_else(|_| {
@@ -1362,6 +1857,18 @@ fn system_prompt(task: &str) -> &'static str {
         "mindmap" => {
             "你是严谨的阅读助手。只依据提供的章节内容，输出一个合法 JSON 对象，格式固定为 {\"title\":\"主题\",\"children\":[{\"title\":\"分支\",\"children\":[]}]}; 不要使用 Markdown 代码块，不要补充原文不存在的内容。"
         }
+        "reading_evidence_filter" => {
+            "你是阅读中的证据筛选器。候选材料全部来自读者已经读到的同一本书，来源 N 标有材料类型：当前已选文字、选句邻近正文、本章开篇或已读正文检索。先看用户问题；若有选句，优先保留它和真正解释它的邻文；再保留不同位置、能补足人物、事件、概念或论证的正文。不要因为词语相同就选择无关段落，也不要把本章开篇当作具体事实的唯一证据。不要回答问题，不要解释。只输出 JSON 对象，格式严格为 {\"sourceIds\":[1,3,5]}，选择 2—6 条，按证据强度排序。"
+        }
+        "reading_question" => {
+            "你是贴着正在阅读的文本工作的深度阅读助手。只能依据带 [来源 N] 的已读材料回答，绝不使用后文或书外事实。必须使用以下结构：\n\n## 直接解释\n先直接回答用户的问题或解释选句，2—4 句；若用户选了句子，第一句必须回应该句在当前语境中的意思。\n\n## 文本依据\n列出 2—4 条，不复述大段原文。每条说明“这段文字说了什么、为什么支撑回答”，并在句末标 [来源 N]。\n\n## 放回本章\n用一小段说明这段话与本章已读部分的关系；这是解读时要明确用“可以理解为”等措辞，不能伪装成原文事实。\n\n仅在已读材料确实不足时写 `## 未能确认`，具体说明缺少的是哪一段或哪一项信息。输出前逐条检查：每个事实性判断都必须有 [来源 N]，不得引用不存在的来源。"
+        }
+        "reading_summary" => {
+            "你是严谨的阅读助手。只根据带 [来源 N] 的已读材料总结，不得补充未读内容。输出 `## 已读摘要`（3—5 条有重点的进展）和 `## 人物与线索`（人物、概念、因果或待验证问题）；每一条事实性内容都在末尾标 [来源 N]。不要把章节开篇或选句本身误写成全书结论。"
+        }
+        "reading_question_verify" | "reading_summary_verify" => {
+            "你是阅读助手的引用审校人。根据用户问题、候选来源和回答草稿，直接输出修订后的完整回答，不要写审核过程。删除任何不由 [来源 N] 直接支持的事实性结论；每个保留的来源编号必须真实存在且支撑其所在句。若草稿把选句、章节开篇或局部材料说成全书结论，改成与当前已读范围相称的表述。保留原有 Markdown 标题和清晰的直接回答。"
+        }
         "library_evidence_filter" => {
             "你是本地书库的证据审稿器。候选段落会编号为来源 N，并标注其材料类型。只选择能直接支撑用户问题的段落，优先正文、具体人物关系、情节、观点或可靠评论；剔除只因词语相近而命中的序言、泛泛创作谈、无关文体或题材材料。对于“X 说了什么”“X 有什么特点”这类宽问题，优先选同时覆盖核心对象、关键论点和不同材料类型的段落，避免只挑同一段话的重复表述。不要回答问题，不要解释。只输出 JSON 对象，格式严格为 {\"sourceIds\":[1,4,7]}；最多 10 个，按证据强度排序。"
         }
@@ -1398,6 +1905,40 @@ fn system_prompt(task: &str) -> &'static str {
     }
 }
 
+fn json_text_content(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        }
+        serde_json::Value::Array(values) => {
+            let joined = values
+                .iter()
+                .filter_map(json_text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let joined = joined.trim();
+            (!joined.is_empty()).then(|| joined.to_string())
+        }
+        serde_json::Value::Object(_) => value
+            .get("text")
+            .or_else(|| value.get("value"))
+            .or_else(|| value.get("content"))
+            .and_then(json_text_content),
+        _ => None,
+    }
+}
+
+fn openai_compatible_content(value: &serde_json::Value) -> Option<String> {
+    value
+        .pointer("/choices/0/message/content")
+        .and_then(json_text_content)
+        .or_else(|| value.pointer("/choices/0/text").and_then(json_text_content))
+        // A few OpenAI-compatible gateways forward the Responses API body.
+        .or_else(|| value.get("output_text").and_then(json_text_content))
+        .or_else(|| value.get("output").and_then(json_text_content))
+}
+
 fn call_openai_compatible(
     config: StoredConfig,
     task: String,
@@ -1408,6 +1949,7 @@ fn call_openai_compatible(
     let payload = serde_json::json!({
         "model": config.model,
         "stream": false,
+        "max_tokens": READING_PROVIDER_MAX_TOKENS,
         "messages": [
             {"role":"system", "content": system_prompt(&task)},
             {"role":"user", "content": format!("阅读内容：{}\n\n任务：{}\n问题：{}", context, task, question)}
@@ -1419,8 +1961,8 @@ fn call_openai_compatible(
         // malformed request, etc.); the default ureq behavior loses it.
         .http_status_as_error(false)
         .timeout_connect(Some(std::time::Duration::from_secs(8)))
-        .timeout_recv_response(Some(std::time::Duration::from_secs(45)))
-        .timeout_recv_body(Some(std::time::Duration::from_secs(45)))
+        .timeout_recv_response(Some(READING_PROVIDER_RESPONSE_TIMEOUT))
+        .timeout_recv_body(Some(READING_PROVIDER_RESPONSE_TIMEOUT))
         .build()
         .into();
     let response = agent
@@ -1442,13 +1984,7 @@ fn call_openai_compatible(
     }
     let value: serde_json::Value =
         serde_json::from_str(&body).map_err(|error| format!("阅读助手响应解析失败：{error}"))?;
-    value
-        .pointer("/choices/0/message/content")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|content| !content.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "接口没有返回可用回答".to_string())
+    openai_compatible_content(&value).ok_or_else(|| "接口没有返回可用回答".to_string())
 }
 
 fn call_anthropic_messages(
@@ -1460,7 +1996,7 @@ fn call_anthropic_messages(
     let endpoint = endpoint_for(&config.base_url, "/v1/messages");
     let payload = serde_json::json!({
         "model": config.model,
-        "max_tokens": 2400,
+        "max_tokens": READING_PROVIDER_MAX_TOKENS,
         "temperature": 0.2,
         "system": system_prompt(&task),
         "messages": [{
@@ -1471,8 +2007,8 @@ fn call_anthropic_messages(
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(std::time::Duration::from_secs(8)))
-        .timeout_recv_response(Some(std::time::Duration::from_secs(45)))
-        .timeout_recv_body(Some(std::time::Duration::from_secs(45)))
+        .timeout_recv_response(Some(READING_PROVIDER_RESPONSE_TIMEOUT))
+        .timeout_recv_body(Some(READING_PROVIDER_RESPONSE_TIMEOUT))
         .build()
         .into();
     let response = agent
@@ -2073,6 +2609,112 @@ async fn verify_library_answer(
     }
 }
 
+/// Reading-mode verification has the same fail-safe behaviour as library
+/// verification: an unavailable provider must not discard a useful draft, but
+/// whenever it is available the final text is checked against the exact local
+/// passages that were selected for this request.
+async fn verify_reading_answer(
+    config: StoredConfig,
+    task: &str,
+    question: &str,
+    draft: String,
+    context: String,
+) -> String {
+    let verify_question = format!("用户问题：{question}\n\n待审草稿：\n{draft}");
+    let task = task.to_string();
+    match tokio::task::spawn_blocking(move || {
+        call_reading_provider(config, task, verify_question, context)
+    })
+    .await
+    {
+        Ok(Ok(verified)) if !verified.trim().is_empty() => verified,
+        _ => draft,
+    }
+}
+
+#[tauri::command]
+pub(crate) fn library_history_source_preview(
+    state: tauri::State<'_, AppState>,
+    request: LibraryHistorySourcePreviewRequest,
+) -> Result<AiReaderSource, String> {
+    let book = {
+        let library = state
+            .library
+            .lock()
+            .map_err(|_| "书架锁定失败，暂时无法读取引用正文".to_string())?;
+        library
+            .books
+            .iter()
+            .find(|book| {
+                let expected = normalize_history_book_title(&request.book_title);
+                !expected.is_empty() && normalize_history_book_title(&book.title) == expected
+            })
+            .or_else(|| {
+                // A title-less legacy reference may only fall back to a local
+                // id. Imported shelves can assign that id to a different
+                // book, so never use it when the history has a title.
+                if normalize_history_book_title(&request.book_title).is_empty() {
+                    library
+                        .books
+                        .iter()
+                        .find(|book| book.id.to_string() == request.book_id)
+                } else {
+                    None
+                }
+            })
+            .cloned()
+            .ok_or_else(|| "原书未加入本机书架或已被移除，无法显示引用正文".to_string())?
+    };
+    let chapters = search::get_book_chapters(state.inner(), &book)
+        .ok_or_else(|| "无法读取本机书籍的章节正文".to_string())?;
+    let chapter_index = request.chapter as usize;
+    let chapter = chapters
+        .get(chapter_index)
+        .ok_or_else(|| format!("《{}》没有第 {} 章", book.title, chapter_index + 1))?;
+    let excerpt = trim_to_chars(chapter.trim(), HISTORY_SOURCE_PREVIEW_CHARS);
+    if excerpt.is_empty() {
+        return Err("该章节没有可显示的正文".to_string());
+    }
+    let original_kind = request.source_kind.trim();
+    Ok(AiReaderSource {
+        book_id: book.id.to_string(),
+        book_title: book.title,
+        chapter: request.chapter,
+        excerpt,
+        source_kind: if original_kind.is_empty() {
+            "旧记录恢复的章节正文".to_string()
+        } else {
+            format!("{original_kind}（旧记录恢复的章节正文）")
+        },
+        tags: Vec::new(),
+    })
+}
+
+fn normalize_history_book_title(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            !character.is_whitespace()
+                && !matches!(
+                    character,
+                    '《' | '》'
+                        | '〈'
+                        | '〉'
+                        | '“'
+                        | '”'
+                        | '‘'
+                        | '’'
+                        | '「'
+                        | '」'
+                        | '『'
+                        | '』'
+                        | '"'
+                )
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// Answer a question from the locally indexed library (one selected book, the
 /// whole library, or a selected cross-book comparison). The retrieval phase
 /// only reads existing local vector/index files; it does not build an index,
@@ -2242,6 +2884,8 @@ pub(crate) async fn ask_library_assistant(
         content,
         sources,
         single_book,
+        retrieval_stages: vec!["语义检索".into(), "证据筛选".into(), "引用自检".into()],
+        citation_checked: true,
         error: String::new(),
     })
 }
@@ -2297,34 +2941,20 @@ pub(crate) async fn ask_reading_assistant(
         .filter(|text| !text.is_empty())
         .map(|text| trim_to_chars(text, MAX_SELECTED_TEXT_CHARS))
         .unwrap_or_default();
-    let selected_len = selected_text.chars().count();
-    let (read_context, mut sources) = select_context(
-        &readable,
-        readable_end.min(readable.len().saturating_sub(1)),
-        &request.question,
-        MAX_CONTEXT_CHARS.saturating_sub(selected_len),
-        &book.id.to_string(),
-        &book.title,
-    );
-    // 选区来自用户当前可见、已阅读的页面。它可弥补翻页模式下 800ms 的进度写盘节流，
-    // 也避免模型只拿到章节开头而找不到用户刚刚划出的段落。
-    let context = if selected_text.is_empty() {
-        read_context
-    } else {
-        sources.insert(
-            0,
-            AiReaderSource {
-                book_id: book.id.to_string(),
-                book_title: book.title.clone(),
-                chapter: readable_end as u32,
-                excerpt: trim_to_chars(&selected_text, 180),
-                source_kind: "当前已选文字".into(),
-                tags: Vec::new(),
-            },
-        );
-        format!("[当前已选文字]\n{selected_text}\n\n{read_context}")
-    };
-    if context.is_empty() {
+    let readable_current = readable.len().saturating_sub(1);
+    let book_id = book.id.to_string();
+    let mut sources = build_reading_evidence_sources(ReadingEvidenceInput {
+        readable: &readable,
+        current: readable_current,
+        question: &request.question,
+        selected_text: &selected_text,
+        selected_start: request.selected_start,
+        selected_end: request.selected_end,
+        book_id: &book_id,
+        book_title: &book.title,
+    });
+    let candidate_context = library_context(&sources);
+    if candidate_context.is_empty() {
         return Err("当前图书没有可发送的正文内容".into());
     }
     let config = {
@@ -2334,18 +2964,123 @@ pub(crate) async fn ask_reading_assistant(
     if !status(&config).configured {
         return Err("请先在阅读助手中配置接口、模型和 API Key".into());
     }
-    let title = book.title;
     let question = request.question.trim().to_string();
-    let content = tokio::task::spawn_blocking(move || {
-        call_reading_provider(config, task, format!("《{title}》：{question}"), context)
+    let session_memory = trim_to_chars(
+        request.session_memory.trim(),
+        MAX_READING_SESSION_MEMORY_CHARS,
+    );
+    let filter_question = if session_memory.is_empty() {
+        question.clone()
+    } else {
+        format!("{question}\n\n[本机阅读会话记忆，仅作连贯性提示]\n{session_memory}")
+    };
+    let evidence_config = config.clone();
+    let evidence_question = filter_question.clone();
+    let evidence_context = candidate_context.clone();
+    let filtered = tokio::task::spawn_blocking(move || {
+        call_reading_provider(
+            evidence_config,
+            "reading_evidence_filter".to_string(),
+            evidence_question,
+            evidence_context,
+        )
     })
     .await
-    .map_err(|error| format!("阅读助手任务失败：{error}"))??;
+    .map_err(|error| format!("智读证据筛选任务失败：{error}"))?;
+    let source_ids = filtered
+        .ok()
+        .map(|response| parse_deep_source_ids(&response, sources.len()))
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or_else(|| fallback_deep_source_ids(sources.len()));
+    let context = library_context_for_source_ids(&sources, &source_ids);
+    if context.is_empty() {
+        return Err("当前已读内容中没有可用的智读依据".into());
+    }
+    let answer_task = match task.as_str() {
+        "summary" => "reading_summary",
+        "mindmap" => "mindmap",
+        _ => "reading_question",
+    }
+    .to_string();
+    let answer_prompt = format!("《{}》：{}", book.title, filter_question);
+    let answer_config = config.clone();
+    let answer_context = context.clone();
+    let answer_task_for_primary = answer_task.clone();
+    let answer_prompt_for_primary = answer_prompt.clone();
+    let primary = tokio::task::spawn_blocking(move || {
+        call_reading_provider(
+            answer_config,
+            answer_task_for_primary,
+            answer_prompt_for_primary,
+            answer_context,
+        )
+    })
+    .await
+    .map_err(|error| format!("阅读助手任务失败：{error}"))?;
+    let draft = match primary {
+        Ok(answer) => answer,
+        Err(primary_error) => {
+            // Some OpenAI-compatible endpoints occasionally acknowledge a
+            // long structured prompt but emit an empty `content`. Retry once
+            // with the same task and source numbering, constrained to the
+            // strongest few passages. This keeps citations usable and avoids
+            // turning a transient empty completion into a visible failure.
+            let retry_context = compact_reading_context_for_source_ids(&sources, &source_ids);
+            let retry_context = if retry_context.is_empty() {
+                context.clone()
+            } else {
+                retry_context
+            };
+            let retry_config = config.clone();
+            let retry_task = answer_task;
+            let retry_prompt = answer_prompt;
+            tokio::task::spawn_blocking(move || {
+                call_reading_provider(retry_config, retry_task, retry_prompt, retry_context)
+            })
+            .await
+            .map_err(|error| format!("智读精简重试任务失败：{error}"))?
+            .map_err(|retry_error| {
+                format!("智读未能生成回答：{primary_error}；精简证据重试也失败：{retry_error}")
+            })?
+        }
+    };
+    let citation_checked = task != "mindmap";
+    let content = if citation_checked {
+        let verify_task = if task == "summary" {
+            "reading_summary_verify"
+        } else {
+            "reading_question_verify"
+        };
+        verify_reading_answer(config, verify_task, &question, draft, context).await
+    } else {
+        draft
+    };
+    // Retain the candidate order so [来源 N] in the answer always maps to the
+    // visible source list. The evidence filter decides which numbers the model
+    // may cite; the list keeps surrounding provenance inspectable.
+    if !source_ids.is_empty() {
+        for source in &mut sources {
+            if source.source_kind == "已读正文检索" {
+                source.source_kind = "已读正文混合检索".into();
+            }
+        }
+    }
     Ok(AiReaderAnswer {
         ok: true,
         content,
         sources,
         single_book: false,
+        retrieval_stages: vec![
+            "选句与邻近正文".into(),
+            "已读范围混合检索".into(),
+            "证据筛选与重排".into(),
+            if citation_checked {
+                "引用自检".into()
+            } else {
+                "脑图依据核对".into()
+            },
+        ],
+        citation_checked,
         error: String::new(),
     })
 }
@@ -2368,6 +3103,24 @@ mod tests {
         assert!(error.contains("Model Not Exist"));
         assert!(error.contains("模型名"));
         assert!(!error.contains("Bearer"));
+    }
+
+    #[test]
+    fn profile_summary_never_exposes_the_api_key() {
+        let profile = StoredAiReaderProfile {
+            id: "primary".into(),
+            name: "主模型".into(),
+            config: StoredConfig {
+                provider: "compatible".into(),
+                base_url: "https://example.test/v1".into(),
+                model: "example-model".into(),
+                api_key: "secret-must-not-reach-ui".into(),
+            },
+        };
+        let summary = profile_summary(&profile);
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(summary.configured);
+        assert!(!json.contains("secret-must-not-reach-ui"));
     }
 
     #[test]
@@ -2449,6 +3202,69 @@ mod tests {
         assert_eq!(sources[0].book_id, "42");
         assert_eq!(sources[0].book_title, "测试书");
         assert!(context.chars().count() <= MAX_CONTEXT_CHARS + 100);
+    }
+
+    #[test]
+    fn reading_evidence_keeps_selection_neighbours_structure_and_lexical_candidates() {
+        let chapters = vec![
+            "第一章开篇说明人物甲与城中局势。随后甲离开故乡，决定入城。".repeat(30),
+            "第二章开篇。乙说局势危险，甲却坚持前行。后来两人在城门相见并商议退路。".repeat(30),
+        ];
+        let sources = build_reading_evidence_sources(ReadingEvidenceInput {
+            readable: &chapters,
+            current: 1,
+            question: "局势为什么危险",
+            selected_text: "局势危险，甲却坚持前行",
+            selected_start: Some(5),
+            selected_end: Some(16),
+            book_id: "42",
+            book_title: "测试书",
+        });
+        assert!(sources
+            .iter()
+            .any(|source| source.source_kind == "当前已选文字"));
+        assert!(sources
+            .iter()
+            .any(|source| source.source_kind == "选句邻近正文"));
+        assert!(sources
+            .iter()
+            .any(|source| source.source_kind == "本章开篇（范围提示）"));
+        assert!(sources
+            .iter()
+            .any(|source| source.source_kind == "已读正文检索"));
+        let context = library_context(&sources);
+        assert!(context.contains("[来源 1"));
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
+    }
+
+    #[test]
+    fn reading_prompts_require_evidence_selection_and_citation_audit() {
+        assert!(system_prompt("reading_evidence_filter").contains("sourceIds"));
+        assert!(system_prompt("reading_question").contains("## 直接解释"));
+        assert!(system_prompt("reading_question").contains("[来源 N]"));
+        assert!(system_prompt("reading_question_verify").contains("引用审校人"));
+        assert!(system_prompt("reading_summary").contains("## 已读摘要"));
+    }
+
+    #[test]
+    fn openai_compatible_responses_accept_text_blocks_as_well_as_strings() {
+        let string_response = serde_json::json!({
+            "choices": [{"message": {"content": "  直接回答  "}}]
+        });
+        assert_eq!(
+            openai_compatible_content(&string_response).as_deref(),
+            Some("直接回答")
+        );
+        let block_response = serde_json::json!({
+            "choices": [{"message": {"content": [
+                {"type": "text", "text": "第一段"},
+                {"type": "text", "text": "第二段"}
+            ]}}]
+        });
+        assert_eq!(
+            openai_compatible_content(&block_response).as_deref(),
+            Some("第一段\n第二段")
+        );
     }
 
     fn sem_book(id: &str, title: &str, chapters: &[(u32, &str)]) -> semantic::SemBookHits {

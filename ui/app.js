@@ -290,6 +290,7 @@ const recoveryBackupActions = document.getElementById("recovery-backup-actions")
 const recoveryBackupSelect = document.getElementById("settings-restore-backup");
 const restoreRecoveryBackupButton = document.getElementById("settings-restore-backup-button");
 const useModelTagsCheckbox = document.getElementById("set-use-model-tags");
+window.ReaderApiSettingsUI?.init({ invoke });
 function backupBytes(value) {
   const bytes = Number(value) || 0;
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";

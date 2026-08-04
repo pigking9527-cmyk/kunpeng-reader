@@ -32,6 +32,18 @@ test("library assistant opens lazily in the main window and can return to the sh
   assert.match(controller, /initialized lazily/);
 });
 
+test("library assistant gives multi-stage RAG calls enough time without allowing unbounded answers", () => {
+  assert.match(backend, /READING_PROVIDER_RESPONSE_TIMEOUT[^\n]*from_secs\(120\)/);
+  assert.match(backend, /READING_PROVIDER_MAX_TOKENS: u16 = 1_600/);
+  assert.match(backend, /"max_tokens": READING_PROVIDER_MAX_TOKENS/);
+  assert.doesNotMatch(backend, /timeout_recv_response\(Some\(std::time::Duration::from_secs\(45\)\)\)/);
+});
+
+test("library assistant toolbar toggles back to the shelf when it is already open", () => {
+  assert.match(entry, /function toggle\(\) \{\s*if \(page\.hidden\) \{\s*void open\(\);\s*\} else \{\s*close\(\);/s);
+  assert.match(entry, /button\.addEventListener\("click", toggle\)/);
+});
+
 test("library assistant keeps whole-library as the unselected default and offers scoped selection tools", () => {
   assert.match(html, /id="scope-summary"[^>]*>当前范围：全部书库/);
   assert.match(html, /id="clear-selection"[^>]*>取消限定/);
@@ -58,12 +70,51 @@ test("library assistant supports tag and collection quick filters", () => {
   assert.match(controller, /显示 \$\{visibleBooks\.length\} \/ 共 \$\{books\.length\} 本/);
 });
 
+test("library assistant can choose one of the locally configured large models", () => {
+  const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
+  const apiSettings = fs.readFileSync(path.join(ui, "api-settings-ui.js"), "utf8");
+  const reader = fs.readFileSync(path.join(ui, "reader.js"), "utf8");
+  const readerHtml = fs.readFileSync(path.join(ui, "reader.html"), "utf8");
+  const annotations = fs.readFileSync(path.join(ui, "reader-page-annotations.js"), "utf8");
+  const translate = fs.readFileSync(path.join(ui, "..", "src", "translate.rs"), "utf8");
+  const commands = fs.readFileSync(path.join(ui, "..", "src", "app_commands.rs"), "utf8");
+  assert.match(html, /id="api-settings-open"/);
+  assert.match(html, /id="api-settings-modal"/);
+  assert.match(html, /id="api-ai-profile"/);
+  assert.match(html, /id="api-ai-preset"[\s\S]*?DeepSeek[\s\S]*?OpenAI（GPT）[\s\S]*?Anthropic（Claude）[\s\S]*?OpenAI 兼容接口/);
+  assert.match(html, /id="api-translation-provider"/);
+  assert.match(html, /id="library-ai-model-profile"/);
+  assert.match(html, /<script src="api-settings-ui\.js"><\/script>/);
+  assert.match(app, /ReaderApiSettingsUI\?\.init\(\{ invoke \}\)/);
+  assert.match(apiSettings, /invoke\("ai_reader_profiles"\)/);
+  assert.match(apiSettings, /invoke\("save_ai_reader_profile"/);
+  assert.match(apiSettings, /invoke\("translation_credentials_status"\)/);
+  assert.match(apiSettings, /notifyProfilesChanged/);
+  assert.doesNotMatch(apiSettings, /api-ai-new/);
+  assert.match(controller, /function renderModelProfiles/);
+  assert.match(controller, /select_ai_reader_profile/);
+  assert.match(html, /library-ai-head-actions[\s\S]*?id="library-ai-model-profile"/);
+  assert.match(readerHtml, /id="ai-reader-profile"/);
+  assert.match(reader, /renderAiReaderProfiles/);
+  assert.match(annotations, /getTranslationProfiles/);
+  assert.match(annotations, /function applyTranslationProfiles/);
+  assert.match(backend, /CONFIG_PROFILES_KEY/);
+  assert.match(backend, /fn persist_profiles/);
+  assert.match(backend, /profile_summary_never_exposes_the_api_key/);
+  assert.match(translate, /TRANSLATION_ACTIVE_PROVIDER_KEY/);
+  assert.match(translate, /fn translation_credentials_status/);
+  assert.match(commands, /translation_credentials_status/);
+});
+
 test("library assistant classifies model tags with progress and can use them independently from manual tags", () => {
   assert.match(html, /id="library-ai-classify"[^>]*>书籍分类/);
-  assert.match(html, /百度和豆瓣读书/);
+  assert.match(html, /id="library-ai-classify-status"[^>]*hidden/);
+  assert.doesNotMatch(html, /本地资料不足时，会检索百度和豆瓣读书/);
   assert.match(controller, /start_library_auto_classification/);
   assert.match(controller, /library_profile_status/);
   assert.match(controller, /library_profile_coverage_status/);
+  assert.match(controller, /完成：\$\{total\} 本图书的分类/);
+  assert.match(controller, /button\.title = label/);
   assert.match(controller, /未覆盖完整八维/);
   assert.match(backend, /LibraryClassification/);
   assert.match(backend, /library_book_classify/);
@@ -165,6 +216,16 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.match(html, /同步智读历史[\s\S]*包括单书与书库问答/);
   assert.match(controller, /private_sync_library_history_list/);
   assert.match(controller, /private_sync_library_history_merge/);
+  assert.match(controller, /private_sync_library_history_delete/);
+  assert.match(controller, /删除书库问答记录/);
+  assert.match(controller, /HISTORY_SOURCES_KEY/);
+  assert.match(controller, /writeLocalHistorySources/);
+  assert.match(controller, /historySourcesForDisplay/);
+  assert.match(controller, /recoverLegacyHistorySources/);
+  assert.match(controller, /library_history_source_preview/);
+  assert.match(controller, /contentId \|\| book\.content_id/);
+  assert.match(controller, /replace\(\/\[《》〈〉“”‘’「」『』"'\]\//);
+  assert.match(controller, /原书未加入本机书架或已从本机书架移除/);
   assert.match(controller, /function portableSourceReference\(source\)/);
   assert.match(controller, /bookTitle/);
   assert.match(controller, /sourceKind/);
@@ -173,9 +234,21 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.match(controller, /问答已保存到本机/);
   assert.match(controller, /下次同步时上传/);
   assert.match(styles, /\.library-ai-history-list\s*\{/);
+  assert.match(styles, /\.library-ai-history-delete\s*\{/);
 });
 
 test("library assistant no longer creates a separate WebView", () => {
   assert.doesNotMatch(backend, /open_library_ai_window/);
   assert.doesNotMatch(backend, /library-ai\.html/);
+});
+
+test("library answer font size is adjusted in place and remembered locally", () => {
+  assert.match(html, /id="library-ai-font-decrease"/);
+  assert.match(html, /id="library-ai-font-size"/);
+  assert.match(html, /id="library-ai-font-increase"/);
+  assert.match(controller, /ANSWER_FONT_SIZE_KEY = "libraryAiAnswerFontSizeV1"/);
+  assert.match(controller, /function applyAnswerFontSize\(save = false\)/);
+  assert.match(controller, /localStorage\?\.setItem\(ANSWER_FONT_SIZE_KEY/);
+  assert.match(styles, /--library-ai-answer-font-size/);
+  assert.match(styles, /\.library-ai-font-controls\s*\{/);
 });

@@ -205,13 +205,21 @@
       button.focus({ preventScroll: true });
     }
 
-    button.addEventListener("click", open);
+    function toggle() {
+      if (page.hidden) {
+        open();
+      } else {
+        close();
+      }
+    }
+
+    button.addEventListener("click", toggle);
     back.addEventListener("click", close);
     refresh.addEventListener("click", () => load(true));
     global.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !page.hidden) close();
     });
-    return { open, close, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); } };
+    return { open, close, toggle, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); } };
   }
 
   global.ReaderNewsUI = { init, resultItems, safeHttpUrl, withTimeout };

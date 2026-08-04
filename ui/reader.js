@@ -102,122 +102,111 @@ const aiReaderSources = document.getElementById("ai-reader-sources");
 const aiReaderQuestion = document.getElementById("ai-reader-question");
 const aiReaderHistory = document.getElementById("ai-reader-history");
 let aiReaderSelectedText = "";
+let aiReaderSelectedAnchor = null;
 let aiReaderRequestRunning = false;
-let aiReaderSidePending = null;
-let aiReaderSideTimer = null;
-let aiReaderSideRequestId = 0;
-function applyAiReaderSide(open, requestId = 0) {
-  aiReaderSidePending = null;
-  if (aiReaderSideTimer) { clearTimeout(aiReaderSideTimer); aiReaderSideTimer = null; }
+let aiReaderProgressTimer = 0;
+function applyAiReaderSide(open) {
   if (!aiReaderSide) return;
   document.body.classList.toggle("ai-reader-open", !!open);
-  // 强制读取最终 iframe 宽度后再通知正文页。正文页会等到这个宽度连续两帧稳定，
-  // 才按准备阶段记录的字符偏移重新分页，避免 WebView2 的 resize 时序竞争。
-  if (requestId && frameReady && !isPdf) {
-    requestAnimationFrame(() => {
-      const width = Math.round(frame.getBoundingClientRect().width || 0);
-      sendToPage({ aiReaderSideCommit: requestId, aiReaderSideExpectedWidth: width });
-    });
-  }
 }
-function setAiReaderSide(open, focusAnchor = null) {
-  const next = !!open;
-  if (!frameReady || isPdf) { applyAiReaderSide(next); return; }
-  const requestId = ++aiReaderSideRequestId;
-  aiReaderSidePending = { open: next, requestId };
-  // 侧栏会改变正文宽度。这里不再用刚被高亮的文字作为分页锚点：它可能位于
-  // 视口中部，窄屏重排后会被分到另一页。正文 iframe 会保存当前视口顶部的
-  // 源文本偏移，并在 resize 后以该偏移恢复页面。
-  sendToPage({
-    preserveAnchor: 1,
-    aiReaderSideRequestId: requestId,
-    pageCountViewportWidth: Math.round(document.documentElement.clientWidth || window.innerWidth || 1),
-  });
-  if (aiReaderSideTimer) clearTimeout(aiReaderSideTimer);
-  // 页面尚未就绪或消息丢失时仍能打开；正常路径会在锚点确认后更快执行。
-  aiReaderSideTimer = setTimeout(() => {
-    if (aiReaderSidePending?.requestId === requestId) applyAiReaderSide(next, requestId);
-  }, 420);
+function setAiReaderSide(open) {
+  // 智读为覆盖层：不改变正文 iframe 宽度，因此不需要在重排后猜测或恢复锚点。
+  applyAiReaderSide(!!open);
 }
 function aiReaderSetStatus(value) { if (aiReaderStatus) aiReaderStatus.textContent = value || ""; }
-const aiReaderProviderInput = document.getElementById("ai-reader-provider");
-const aiReaderBaseUrlInput = document.getElementById("ai-reader-base-url");
-const aiReaderModelInput = document.getElementById("ai-reader-model");
-const aiReaderCustomModelInput = document.getElementById("ai-reader-custom-model");
-const aiReaderModelTip = document.getElementById("ai-reader-model-tip");
-const AI_READER_PROVIDERS = {
-  deepseek: {
-    baseUrl: "https://api.deepseek.com",
-    models: [["deepseek-v4-flash", "DeepSeek V4 Flash（推荐，较快）"], ["deepseek-v4-pro", "DeepSeek V4 Pro（更强）"]],
-    tip: "DeepSeek 使用 OpenAI 兼容接口；旧 deepseek-chat 已停止支持。",
-  },
-  openai: {
-    baseUrl: "https://api.openai.com/v1",
-    models: [["gpt-5.6-luna", "GPT-5.6 Luna（经济）"], ["gpt-5.6-terra", "GPT-5.6 Terra（平衡）"], ["gpt-5.6-sol", "GPT-5.6 Sol（高能力）"]],
-    tip: "OpenAI 使用 Chat Completions API；建议阅读问答从 Luna 或 Terra 开始。",
-  },
-  anthropic: {
-    baseUrl: "https://api.anthropic.com",
-    models: [["claude-haiku-4-5", "Claude Haiku 4.5（较快）"], ["claude-sonnet-5", "Claude Sonnet 5（平衡）"], ["claude-opus-5", "Claude Opus 5（高能力）"]],
-    tip: "Anthropic 使用原生 Messages API，程序会使用 x-api-key，不会套用 OpenAI 协议。",
-  },
-  compatible: {
-    baseUrl: "",
-    models: [],
-    tip: "适用于 OpenAI 兼容接口；填写服务商提供的基础地址和模型名。",
-  },
-};
-function normalizeAiReaderProvider(provider) {
-  return Object.prototype.hasOwnProperty.call(AI_READER_PROVIDERS, provider) ? provider : "compatible";
-}
-function aiReaderSelectedModel() {
-  return aiReaderProviderInput?.value === "compatible"
-    ? (aiReaderCustomModelInput?.value || "").trim()
-    : (aiReaderModelInput?.value || "").trim();
-}
-function configureAiReaderProvider(provider, selectedModel = "", resetBase = false) {
-  const key = normalizeAiReaderProvider(provider);
-  const preset = AI_READER_PROVIDERS[key];
-  if (aiReaderProviderInput) aiReaderProviderInput.value = key;
-  if (resetBase && aiReaderBaseUrlInput) aiReaderBaseUrlInput.value = preset.baseUrl;
-  if (aiReaderModelTip) aiReaderModelTip.textContent = preset.tip;
-  if (!aiReaderModelInput || !aiReaderCustomModelInput) return;
-  const isCustom = key === "compatible";
-  aiReaderModelInput.hidden = isCustom;
-  aiReaderCustomModelInput.hidden = !isCustom;
-  if (isCustom) {
-    aiReaderCustomModelInput.value = selectedModel || aiReaderCustomModelInput.value || "";
-    return;
+const aiReaderProfileInput = document.getElementById("ai-reader-profile");
+function renderAiReaderProfiles(status) {
+  if (!aiReaderProfileInput) return;
+  const profiles = Array.isArray(status?.profiles) ? status.profiles.filter((profile) => profile.configured) : [];
+  aiReaderProfileInput.replaceChildren();
+  if (!profiles.length) {
+    const option = document.createElement("option"); option.value = ""; option.textContent = "请先在书架设置中配置大模型";
+    aiReaderProfileInput.appendChild(option); aiReaderProfileInput.disabled = true; return;
   }
-  aiReaderModelInput.replaceChildren();
-  preset.models.forEach(([value, label]) => {
-    const option = document.createElement("option"); option.value = value; option.textContent = label; aiReaderModelInput.appendChild(option);
+  profiles.forEach((profile) => {
+    const option = document.createElement("option"); option.value = profile.id; option.textContent = profile.name || profile.model || "已配置大模型";
+    aiReaderProfileInput.appendChild(option);
   });
-  const known = preset.models.some(([value]) => value === selectedModel);
-  aiReaderModelInput.value = known ? selectedModel : preset.models[0][0];
+  aiReaderProfileInput.value = profiles.some((profile) => profile.id === status?.activeId) ? status.activeId : profiles[0].id;
+  aiReaderProfileInput.disabled = false;
 }
-aiReaderProviderInput?.addEventListener("change", () => configureAiReaderProvider(aiReaderProviderInput.value, "", true));
-configureAiReaderProvider(aiReaderProviderInput?.value || "deepseek", "deepseek-v4-flash", false);
+aiReaderProfileInput?.addEventListener("change", async () => {
+  const id = aiReaderProfileInput.value;
+  if (!id) return;
+  aiReaderProfileInput.disabled = true;
+  try {
+    const status = await invoke("select_ai_reader_profile", { id });
+    aiReaderSetStatus(status.configured ? "已切换大模型" : "所选大模型配置不完整");
+  } catch (error) { aiReaderSetStatus("切换大模型失败：" + error); }
+  finally { aiReaderProfileInput.disabled = false; }
+});
 function aiReaderHistoryIdentity() { return String(window.currentBookContentId || currentBookContentId || window.currentBookId || currentBookId || "unknown"); }
 function aiReaderHistoryKey() { return "aiReaderHistoryV1:" + aiReaderHistoryIdentity(); }
+function aiReaderSessionMemoryKey() { return "aiReaderSessionMemoryV1:" + aiReaderHistoryIdentity(); }
 function aiReaderTaskLabel(task) { return task === "summary" ? "总结已读内容" : task === "mindmap" ? "生成脑图" : "提问"; }
+function aiReaderHistoryEntryId(entry) { return String(entry?.id || `legacy:${entry?.at || "unknown"}`); }
+function aiReaderHistoryDeleted(entry) { return Boolean(entry?.deletedAt || entry?.deleted_at); }
+function aiReaderNewHistoryId() {
+  const suffix = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `reader:${new Date().toISOString()}:${suffix}`;
+}
+function aiReaderMergeHistoryEntries(...groups) {
+  const byId = new Map();
+  groups.flat().filter(Boolean).forEach((entry) => {
+    const normalized = { ...entry, id: aiReaderHistoryEntryId(entry) };
+    const known = byId.get(normalized.id);
+    if (aiReaderHistoryDeleted(normalized) || !known || !aiReaderHistoryDeleted(known)) byId.set(normalized.id, normalized);
+  });
+  const entries = Array.from(byId.values());
+  const live = entries.filter((entry) => !aiReaderHistoryDeleted(entry))
+    .sort((left, right) => String(right.at || "").localeCompare(String(left.at || ""))).slice(0, 40);
+  const tombstones = entries.filter(aiReaderHistoryDeleted)
+    .sort((left, right) => String(right.deletedAt || right.deleted_at || "").localeCompare(String(left.deletedAt || left.deleted_at || ""))).slice(0, 80);
+  return [...live, ...tombstones];
+}
 function aiReaderReadHistory() {
   try {
     const entries = JSON.parse(localStorage.getItem(aiReaderHistoryKey()) || "[]");
-    return Array.isArray(entries) ? entries.slice(0, 40) : [];
+    return Array.isArray(entries) ? aiReaderMergeHistoryEntries(entries) : [];
   } catch (_) { return []; }
 }
 function aiReaderSaveHistory(entry) {
+  const savedEntry = { ...entry, id: entry?.id || aiReaderNewHistoryId() };
   try {
     const entries = aiReaderReadHistory();
-    entries.unshift(entry);
-    localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(entries.slice(0, 40)));
+    localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(aiReaderMergeHistoryEntries([savedEntry], entries)));
   } catch (_) { /* 历史不可用不影响本次问答。 */ }
   if (currentBookContentId) {
-    invoke("private_sync_history_merge", { request: { contentId: currentBookContentId, entries: [entry] } }).catch(() => {
+    invoke("private_sync_history_merge", { request: { contentId: currentBookContentId, entries: [savedEntry] } }).catch(() => {
       // 未开启历史同步、旧数据库或离线均不影响本地智读。
     });
   }
+}
+function aiReaderReadSessionMemory() {
+  try {
+    const entries = JSON.parse(localStorage.getItem(aiReaderSessionMemoryKey()) || "[]");
+    return Array.isArray(entries) ? entries.slice(0, 8) : [];
+  } catch (_) { return []; }
+}
+function aiReaderRememberSession(entry) {
+  // This is deliberately separate from history sync: it only keeps a short
+  // local continuity recap for the book currently being read.
+  try {
+    const entries = aiReaderReadSessionMemory();
+    entries.unshift({
+      task: entry.task || "question",
+      question: String(entry.question || "").slice(0, 220),
+      content: String(entry.content || "").slice(0, 760),
+      at: entry.at || new Date().toISOString(),
+    });
+    localStorage.setItem(aiReaderSessionMemoryKey(), JSON.stringify(entries.slice(0, 6)));
+  } catch (_) { /* 本机会话记忆不可用不影响本次智读。 */ }
+}
+function aiReaderSessionMemory() {
+  return aiReaderReadSessionMemory().slice(0, 4).map((entry, index) => {
+    const task = aiReaderTaskLabel(entry.task);
+    return `会话 ${index + 1}（${task}）：${String(entry.content || "").slice(0, 620)}`;
+  }).join("\n\n").slice(0, 2800);
 }
 async function aiReaderMergeSyncedHistory() {
   if (!currentBookContentId) return;
@@ -225,19 +214,117 @@ async function aiReaderMergeSyncedHistory() {
     const remote = await invoke("private_sync_history_list", { contentId: currentBookContentId });
     if (!Array.isArray(remote) || !remote.length) return;
     const known = aiReaderReadHistory();
-    const merged = [...remote, ...known].filter((entry, index, all) => entry && all.findIndex((candidate) =>
-      candidate && candidate.at === entry.at && candidate.question === entry.question && candidate.content === entry.content
-    ) === index).slice(0, 40);
+    const merged = aiReaderMergeHistoryEntries(remote, known);
     localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(merged));
   } catch (_) { /* 同步历史不可用时继续使用本机历史。 */ }
+}
+function aiReaderSourceLabel(source, index) {
+  const kind = String(source?.sourceKind || "已读正文");
+  return `来源 ${index + 1}｜${kind}｜第 ${Number(source?.chapter || 0) + 1} 章`;
+}
+function aiReaderJumpToSource(source) {
+  const chapter = Number(source?.chapter);
+  if (Number.isFinite(chapter) && chapter >= 0 && !isPdf) {
+    sendToPage({ gotoChapter: Math.floor(chapter) });
+    aiReaderSetStatus(`已跳转至第 ${Math.floor(chapter) + 1} 章`);
+  }
+}
+function aiReaderAppendInline(parent, value, sources) {
+  const text = String(value || "");
+  const token = /(\[来源\s*(\d+)\])|(\*\*([^*\n]+)\*\*)|(`([^`\n]+)`)/g;
+  let cursor = 0; let match;
+  while ((match = token.exec(text))) {
+    parent.append(document.createTextNode(text.slice(cursor, match.index)));
+    if (match[2] !== undefined) {
+      const index = Number(match[2]) - 1;
+      const source = sources[index];
+      if (!source) parent.append(document.createTextNode(match[1]));
+      else {
+        const citation = document.createElement("button");
+        citation.type = "button";
+        citation.className = "ai-reader-citation";
+        citation.textContent = `[来源 ${index + 1}]`;
+        citation.setAttribute("aria-label", `查看并跳转${aiReaderSourceLabel(source, index)}`);
+        citation.addEventListener("click", () => aiReaderJumpToSource(source));
+        parent.append(citation);
+      }
+    } else if (match[4] !== undefined) {
+      const strong = document.createElement("strong");
+      aiReaderAppendInline(strong, match[4], sources);
+      parent.append(strong);
+    } else {
+      const code = document.createElement("code");
+      code.textContent = match[6];
+      parent.append(code);
+    }
+    cursor = token.lastIndex;
+  }
+  parent.append(document.createTextNode(text.slice(cursor)));
+}
+function aiReaderRenderMarkdown(content, sources) {
+  const fragment = document.createDocumentFragment();
+  const lines = String(content || "没有得到可显示的回答。").replace(/\r/g, "").split("\n");
+  let paragraph = [], list = null, listKind = "", codeLines = null;
+  const closeList = () => { list = null; listKind = ""; };
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const element = document.createElement("p");
+    aiReaderAppendInline(element, paragraph.join(" "), sources);
+    fragment.append(element); paragraph = [];
+  };
+  const appendList = (kind, text) => {
+    flushParagraph();
+    if (!list || listKind !== kind) {
+      list = document.createElement(kind); listKind = kind; fragment.append(list);
+    }
+    const item = document.createElement("li");
+    aiReaderAppendInline(item, text, sources); list.append(item);
+  };
+  lines.forEach((raw) => {
+    const line = raw.trim();
+    if (/^```/.test(line)) {
+      if (codeLines) {
+        const block = document.createElement("pre"); const code = document.createElement("code");
+        code.textContent = codeLines.join("\n"); block.append(code); fragment.append(block); codeLines = null;
+      } else { flushParagraph(); closeList(); codeLines = []; }
+      return;
+    }
+    if (codeLines) { codeLines.push(raw); return; }
+    if (!line) { flushParagraph(); closeList(); return; }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph(); closeList();
+      const element = document.createElement(heading[1].length === 1 ? "h3" : "h4");
+      aiReaderAppendInline(element, heading[2], sources); fragment.append(element); return;
+    }
+    const bullet = line.match(/^[-*+]\s+(.+)$/);
+    if (bullet) { appendList("ul", bullet[1]); return; }
+    const numbered = line.match(/^\d+[.)]\s+(.+)$/);
+    if (numbered) { appendList("ol", numbered[1]); return; }
+    const quote = line.match(/^>\s?(.+)$/);
+    if (quote) {
+      flushParagraph(); closeList(); const block = document.createElement("blockquote");
+      aiReaderAppendInline(block, quote[1], sources); fragment.append(block); return;
+    }
+    closeList(); paragraph.push(line);
+  });
+  if (codeLines) {
+    const block = document.createElement("pre"); const code = document.createElement("code");
+    code.textContent = codeLines.join("\n"); block.append(code); fragment.append(block);
+  }
+  flushParagraph();
+  return fragment;
 }
 function aiReaderRenderSources(sources) {
   if (!aiReaderSources) return;
   const list = aiReaderSources.querySelector("ul");
   if (!sources || !sources.length) { aiReaderSources.hidden = true; return; }
-  list.replaceChildren(...sources.map((source) => {
+  list.replaceChildren(...sources.map((source, index) => {
     const item = document.createElement("li");
-    item.textContent = "第 " + (Number(source.chapter || 0) + 1) + " 章：" + String(source.excerpt || "");
+    const excerpt = String(source.excerpt || "").replace(/\s+/g, " ").slice(0, 260);
+    item.textContent = `[${aiReaderSourceLabel(source, index)}] ${excerpt}`;
+    item.title = String(source.excerpt || "");
+    item.addEventListener("click", () => aiReaderJumpToSource(source));
     return item;
   }));
   aiReaderSources.hidden = false;
@@ -302,26 +389,34 @@ function aiReaderRenderAnswer(answer, task) {
     const tree = aiReaderParseMindmap(content);
     if (tree) aiReaderAnswer.replaceChildren(aiReaderRenderMindmap(tree));
     else aiReaderAnswer.textContent = content || "模型没有返回可绘制的脑图，请重试。";
-  } else {
-    aiReaderAnswer.textContent = content || "没有得到可显示的回答。";
-  }
+  } else aiReaderAnswer.replaceChildren(aiReaderRenderMarkdown(content, Array.isArray(answer.sources) ? answer.sources : []));
   aiReaderAnswer.hidden = false;
   aiReaderHistory?.classList.remove("show");
   aiReaderAnswer.classList.remove("empty");
   aiReaderRenderSources(answer.sources);
+  const audit = document.getElementById("ai-reader-audit");
+  if (audit) {
+    const stages = Array.isArray(answer.retrievalStages) ? answer.retrievalStages.filter(Boolean) : [];
+    audit.textContent = stages.length
+      ? `本次流程：${stages.join(" · ")}${answer.citationChecked ? " · 已完成引用自检" : ""}`
+      : "本次依据来自当前已读内容。";
+    audit.hidden = false;
+  }
 }
-function aiReaderShowHistory() {
+function aiReaderShowHistory(forceOpen = false) {
   if (!aiReaderHistory) return;
-  const showing = aiReaderHistory.classList.toggle("show");
+  const showing = forceOpen ? true : aiReaderHistory.classList.toggle("show");
+  if (forceOpen) aiReaderHistory.classList.add("show");
   if (!showing) { aiReaderAnswer.hidden = false; return; }
   aiReaderAnswer.hidden = true;
   aiReaderSources.hidden = true;
-  const entries = aiReaderReadHistory();
+  const entries = aiReaderReadHistory().filter((entry) => !aiReaderHistoryDeleted(entry));
   aiReaderHistory.replaceChildren();
   if (!entries.length) {
     const empty = document.createElement("div"); empty.className = "ai-reader-history-empty"; empty.textContent = "这本书还没有智读记录。"; aiReaderHistory.appendChild(empty); return;
   }
   entries.forEach((entry) => {
+    const row = document.createElement("div"); row.className = "ai-reader-history-row";
     const item = document.createElement("button"); item.type = "button"; item.className = "ai-reader-history-item";
     const question = document.createElement("span"); question.className = "ai-reader-history-question";
     question.textContent = entry.question || aiReaderTaskLabel(entry.task);
@@ -329,7 +424,27 @@ function aiReaderShowHistory() {
     meta.textContent = `${aiReaderTaskLabel(entry.task)} · ${entry.at ? new Date(entry.at).toLocaleString() : "历史记录"}`;
     item.append(question, meta);
     item.addEventListener("click", () => aiReaderRenderAnswer(entry, entry.task || "question"));
-    aiReaderHistory.appendChild(item);
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "ai-reader-history-delete"; remove.textContent = "删除";
+    remove.setAttribute("aria-label", `删除智读记录：${question.textContent}`);
+    remove.addEventListener("click", async (event) => {
+      event.preventDefault(); event.stopPropagation();
+      if (window.confirm && !window.confirm("删除这条智读记录？删除后会同步到其他设备。")) return;
+      const tombstone = { id: aiReaderHistoryEntryId(entry), deletedAt: new Date().toISOString() };
+      try {
+        const local = aiReaderMergeHistoryEntries(aiReaderReadHistory(), [tombstone]);
+        localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(local));
+        if (currentBookContentId) {
+          const snapshot = await invoke("private_sync_history_delete", { request: { contentId: currentBookContentId, id: tombstone.id } });
+          if (Array.isArray(snapshot)) localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(aiReaderMergeHistoryEntries(snapshot, local)));
+        }
+        aiReaderShowHistory(true);
+        aiReaderSetStatus("已删除智读记录；删除会在下次同步时传到其他设备。");
+      } catch (error) {
+        aiReaderSetStatus("删除智读记录失败：" + error);
+      }
+    });
+    row.append(item, remove);
+    aiReaderHistory.appendChild(row);
   });
 }
 async function openAiReader(prefill = "", focusAnchor = null) {
@@ -337,29 +452,49 @@ async function openAiReader(prefill = "", focusAnchor = null) {
   if (typeof closeSettings === "function") closeSettings();
   aiReaderMergeSyncedHistory();
   aiReaderSelectedText = String(prefill || "").trim().slice(0, 2400);
+  aiReaderSelectedAnchor = focusAnchor && Number.isFinite(Number(focusAnchor.start)) && Number.isFinite(Number(focusAnchor.end))
+    ? { start: Math.max(0, Number(focusAnchor.start)), end: Math.max(0, Number(focusAnchor.end)) }
+    : null;
   if (prefill && aiReaderQuestion) {
-    aiReaderQuestion.value = `请结合已读内容解释这段文字：\n${String(prefill).trim().slice(0, 900)}`;
+    // 选中的原文已随请求一并传给智读；输入框只保留用户真正要问的内容。
+    aiReaderQuestion.value = String(prefill).trim().slice(0, 900);
     setTimeout(() => aiReaderQuestion.focus(), 0);
   }
   try {
-    const status = await invoke("ai_reader_status");
-    configureAiReaderProvider(status.provider || "deepseek", status.model || "deepseek-v4-flash", false);
-    aiReaderBaseUrlInput.value = status.baseUrl || AI_READER_PROVIDERS[normalizeAiReaderProvider(status.provider)].baseUrl;
-    aiReaderSetStatus(status.configured ? "已配置本机 API" : "请先保存 API 配置");
-    document.getElementById("ai-reader-config").open = !status.configured;
+    const [status, profiles] = await Promise.all([invoke("ai_reader_status"), invoke("ai_reader_profiles")]);
+    renderAiReaderProfiles(profiles);
+    aiReaderSetStatus(status.configured ? "已选择本机大模型" : "请先在书架设置中配置大模型");
   } catch (error) { aiReaderSetStatus("读取配置失败：" + error); }
+}
+function aiReaderStartProgress(task) {
+  const stages = task === "mindmap"
+    ? ["定位当前选句和已读范围", "检索相关已读正文", "筛选脑图依据", "整理脑图"]
+    : ["定位当前选句和邻近正文", "混合检索已读内容", "筛选并重排证据", "生成回答并核对引用"];
+  let index = 0;
+  const show = () => aiReaderSetStatus(`正在 ${index + 1}/${stages.length}：${stages[index]}…`);
+  show();
+  window.clearInterval(aiReaderProgressTimer);
+  aiReaderProgressTimer = window.setInterval(() => {
+    index = Math.min(index + 1, stages.length - 1);
+    show();
+  }, 1900);
+}
+function aiReaderStopProgress() {
+  window.clearInterval(aiReaderProgressTimer);
+  aiReaderProgressTimer = 0;
 }
 async function runAiReader(task) {
   if (aiReaderRequestRunning) return;
   const question = aiReaderQuestion?.value?.trim() || (task === "summary" ? "总结目前已读的内容" : task === "mindmap" ? "梳理目前已读内容的脑图" : "");
   if (task === "question" && !question) { aiReaderSetStatus("请输入问题"); aiReaderQuestion?.focus(); return; }
   aiReaderRequestRunning = true;
-  aiReaderSetStatus("智读正在整理已读内容…");
+  aiReaderStartProgress(task);
   aiReaderHistory?.classList.remove("show");
   aiReaderAnswer.hidden = false;
   aiReaderAnswer.textContent = "正在请求模型…";
   aiReaderAnswer.classList.add("empty");
   aiReaderSources.hidden = true;
+  document.getElementById("ai-reader-audit")?.setAttribute("hidden", "");
   try {
     const answer = await invoke("ask_reading_assistant", { request: {
       task,
@@ -367,15 +502,21 @@ async function runAiReader(task) {
       currentChapter: curChapter,
       currentFraction: curChFrac,
       selectedText: aiReaderSelectedText,
+      selectedStart: aiReaderSelectedAnchor?.start,
+      selectedEnd: aiReaderSelectedAnchor?.end,
+      sessionMemory: aiReaderSessionMemory(),
     } });
     aiReaderRenderAnswer(answer, task);
-    aiReaderSaveHistory({ task, question, content: answer.content || "", sources: answer.sources || [], at: new Date().toISOString() });
-    aiReaderSetStatus("完成");
+    const entry = { task, question, content: answer.content || "", sources: answer.sources || [], at: new Date().toISOString() };
+    aiReaderSaveHistory(entry);
+    aiReaderRememberSession(entry);
+    const stages = Array.isArray(answer.retrievalStages) ? answer.retrievalStages.join(" · ") : "";
+    aiReaderSetStatus(stages ? `完成：${stages}` : "完成");
   } catch (error) {
     aiReaderAnswer.textContent = "智读失败：" + String(error);
     aiReaderAnswer.classList.remove("empty");
     aiReaderSetStatus("失败");
-  } finally { aiReaderRequestRunning = false; }
+  } finally { aiReaderStopProgress(); aiReaderRequestRunning = false; }
 }
 document.getElementById("ai-reader-btn")?.addEventListener("click", (event) => { event.stopPropagation(); openAiReader(); });
 document.getElementById("ai-reader-close")?.addEventListener("click", () => setAiReaderSide(false));
@@ -388,22 +529,6 @@ aiReaderQuestion?.addEventListener("keydown", (event) => {
     event.stopPropagation();
     runAiReader("question");
   }
-});
-document.getElementById("ai-reader-save-config")?.addEventListener("click", async () => {
-  const button = document.getElementById("ai-reader-save-config");
-  button.disabled = true;
-  try {
-    const status = await invoke("save_ai_reader_config", { request: {
-      provider: aiReaderProviderInput?.value || "compatible",
-      baseUrl: aiReaderBaseUrlInput?.value || "",
-      model: aiReaderSelectedModel(),
-      apiKey: document.getElementById("ai-reader-api-key").value,
-    }});
-    document.getElementById("ai-reader-api-key").value = "";
-    aiReaderSetStatus(status.configured ? "已安全保存到本机" : "配置不完整");
-    if (status.configured) document.getElementById("ai-reader-config").open = false;
-  } catch (error) { aiReaderSetStatus("保存失败：" + error); }
-  finally { button.disabled = false; }
 });
 document.getElementById("ai-reader-ask")?.addEventListener("click", () => runAiReader("question"));
 document.getElementById("ai-reader-summary")?.addEventListener("click", () => runAiReader("summary"));
@@ -1417,6 +1542,16 @@ window.addEventListener("message", (e) => {
     invoke("translation_credential_status", { provider })
       .then((status) => sendToPage({ translationCredentialStatus: status }))
       .catch((err) => sendToPage({ translationCredentialStatus: { provider, configured: false, error: String(err) } }));
+  }
+  if (e.data.getTranslationProfiles) {
+    invoke("translation_credentials_status")
+      .then((status) => sendToPage({ translationProfiles: status }))
+      .catch((err) => sendToPage({ translationProfiles: { profiles: [], error: String(err) } }));
+  }
+  if (e.data.setTranslationActiveProvider) {
+    invoke("set_translation_active_provider", { provider: String(e.data.setTranslationActiveProvider || "") })
+      .then((status) => sendToPage({ translationProfiles: status }))
+      .catch((err) => sendToPage({ translationProfiles: { profiles: [], error: String(err) } }));
   }
   if (e.data.saveTranslationCredential) {
     const credential = e.data.saveTranslationCredential;

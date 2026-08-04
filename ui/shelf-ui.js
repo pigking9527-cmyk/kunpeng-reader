@@ -433,9 +433,18 @@ function bookCard(b, index = 0) {
   card.appendChild(title);
   card.appendChild(prog);
 
-  // 浏览器先派发两次 click、才派发 dblclick。单击打开模式要短暂等待，
-  // 这样双击才能稳定进入选择模式，而不会先把书打开。
+  // 浏览器先派发两次 click、才派发 dblclick。两种打开模式都要短暂等待：
+  // 单击打开模式避免双击先打开；双击打开模式避免第一下先把书选中。
   let openTimer = null;
+  let selectionTimer = null;
+  let selectionBeforeClick = false;
+  let selectionApplied = false;
+  const restoreDeferredSelection = () => {
+    if (selectionApplied && selected.has(b.id) !== selectionBeforeClick) {
+      toggleSelect(b.id, card);
+    }
+    selectionApplied = false;
+  };
   const openBook = () => {
     if (b.missing) {
       relocateBook(b);
@@ -452,8 +461,16 @@ function bookCard(b, index = 0) {
     e.stopPropagation();
     closeShelfCardFloaters();
     if (!singleClickOpensBook) {
-      // 双击打开模式：单击只负责选中；双击的第二个 click 不重复切换。
-      if (e.detail === 1) toggleSelect(b.id, card);
+      // 双击打开模式：先等一个很短的判定窗口。快速双击会在 dblclick
+      // 中取消这个延迟选择，因而不会出现“第一下先选中”的闪动。
+      if (e.detail !== 1) return;
+      selectionBeforeClick = selected.has(b.id);
+      selectionApplied = false;
+      selectionTimer = setTimeout(() => {
+        selectionTimer = null;
+        toggleSelect(b.id, card);
+        selectionApplied = true;
+      }, 180);
       return;
     }
     // 已有任意选中项时，单击直接加入/移出多选；第二个 click 是双击的一部分，
@@ -476,6 +493,13 @@ function bookCard(b, index = 0) {
       openTimer = null;
     }
     if (!singleClickOpensBook) {
+      if (selectionTimer) {
+        clearTimeout(selectionTimer);
+        selectionTimer = null;
+      }
+      // 若用户的双击间隔较长，延迟选择可能已执行；还原到双击前状态，
+      // 确保最终结果仍是“直接打开、不改变选中”。
+      restoreDeferredSelection();
       openBook();
       return;
     }
