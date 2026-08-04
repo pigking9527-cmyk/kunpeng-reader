@@ -8,7 +8,7 @@
     "id": { "type": "string", "minLength": 1 },
     "kind": {
       "type": "string",
-      "enum": ["reading_progress", "bookmark", "highlight", "annotation", "rating", "tag", "booklist", "booklist_item", "vocabulary", "reading_stat", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1"]
+      "enum": ["reading_progress", "bookmark", "highlight", "annotation", "rating", "tag", "booklist", "booklist_item", "vocabulary", "reading_stat", "model_book_tags_v1", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1"]
     },
     "updated_at": { "type": "string", "format": "date-time" },
     "deleted_at": { "type": ["string", "null"], "format": "date-time" },

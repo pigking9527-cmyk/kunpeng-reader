@@ -1285,6 +1285,7 @@ fn sync_now_inner_with_limits_impl(
 
     let prepare_started = Instant::now();
     data_migration::ensure_content_ids_for_sync(state)?;
+    let _ = crate::ai_reader::materialize_library_profiles_into_model_tags(state)?;
     // Snapshot local JSON first so unsynced edits are represented in SQLite.
     data_migration::migrate_json_to_sqlite(state)?;
     log_sync_stage("prepare_local", prepare_started, "status=ok");

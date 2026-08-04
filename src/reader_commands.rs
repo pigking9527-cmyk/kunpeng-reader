@@ -252,11 +252,12 @@ pub(crate) struct BookMeta {
     size: u64,   // 文件字节数
     rating: f32, // 用户评分 0~5（0.5 刻度）
     tags: Vec<String>,
+    model_tags: Vec<String>,
     collections: Vec<String>,
 }
 
 async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String> {
-    let (title, mut author, description, format, rating, tags, collections) = {
+    let (title, mut author, description, format, rating, tags, model_tags, collections) = {
         let lib = state.library.lock().unwrap();
         let b = lib.get(id).ok_or("找不到这本书")?;
         (
@@ -266,6 +267,7 @@ async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String>
             b.format.clone(),
             b.rating,
             b.tags.clone(),
+            b.model_tags.clone(),
             b.collections.clone(),
         )
     };
@@ -318,6 +320,7 @@ async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String>
         size,
         rating,
         tags,
+        model_tags,
         collections,
     })
 }

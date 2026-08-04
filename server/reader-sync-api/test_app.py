@@ -62,7 +62,7 @@ class ReaderSyncApiTests(unittest.TestCase):
     def test_supported_entity_kinds_are_portable_v2_only(self):
         self.assertEqual(
             app.SUPPORTED_ENTITY_KINDS,
-            {"book_state_v2", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1"},
+            {"book_state_v2", "model_book_tags_v1", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1"},
         )
         self.assertNotIn("book", app.SUPPORTED_ENTITY_KINDS)
         self.assertNotIn("reading_bucket", app.SUPPORTED_ENTITY_KINDS)

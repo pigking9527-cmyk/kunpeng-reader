@@ -30,15 +30,31 @@ test("book card clicks explicitly close main-window floaters", () => {
   assert.match(card, /openBookOrganizer\(getBook\(b\.id\) \|\| b, e, card\)/);
 });
 
-test("book organizer stays anchored to its cover while the shelf scrolls", () => {
+test("shelf opening preference switches between single-click opening and double-click opening", () => {
+  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
+  assert.match(html, /id="set-single-click-open"/);
+  assert.match(html, /id="set-open-book-label"[^>]*>单击打开图书/);
+  assert.match(source, /shelfSingleClickOpen/);
+  assert.match(source, /function setSingleClickOpenPreference\(value\)/);
+  assert.match(card, /if \(!singleClickOpensBook\)[\s\S]*?toggleSelect\(b\.id, card\)/);
+  assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?openBook\(\);[\s\S]*?return;/);
+  assert.match(source, /reflectOpenBookPreference/);
+  assert.match(source, /setSingleClickOpenPreference\(setSingleClickOpen\.checked\)/);
+  assert.match(source, /"单击打开图书" : "双击打开图书"/);
+});
+
+test("book organizer stays within the shelf content and closes when the shelf scrolls", () => {
   const positioner = source.slice(source.indexOf("function createBookOrganizerAnchor"), source.indexOf("function applyOrganizationChoice"));
   assert.match(positioner, /element\.getBoundingClientRect\(\)/);
   assert.match(positioner, /rect\.left \+ organizerAnchor\.menuOffsetX/);
   assert.match(positioner, /rect\.top \+ organizerAnchor\.menuOffsetY/);
   assert.match(positioner, /positionBookOrganizer\(initialPlacement = false\)/);
   assert.match(positioner, /organizerAnchorIsVisible/);
+  assert.match(positioner, /contentTop/);
+  assert.match(positioner, /contentBottom/);
+  assert.match(positioner, /maxTop/);
   assert.match(positioner, /closeBookOrganizer\(\)/);
-  assert.match(source, /contentEl\.addEventListener\("scroll", scheduleBookOrganizerPosition, \{ passive: true \}\)/);
+  assert.match(source, /contentEl\.addEventListener\("scroll", closeBookOrganizer, \{ passive: true \}\)/);
   assert.match(source, /global\.addEventListener\("resize", scheduleBookOrganizerResize\)/);
   assert.match(source, /positionBookOrganizer\(true\)/);
   assert.match(source, /function closeBookOrganizer\(\)[\s\S]*?organizerAnchor = null/);
@@ -54,6 +70,11 @@ test("startup shelf can receive keyboard paging focus without stealing it on ref
 
 test("account sync description includes book tags and collections", () => {
   assert.match(html, /书签、高亮、批注、评分、标签与收藏夹/);
+});
+
+test("book information displays persisted model tags with the backend field name", () => {
+  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  assert.match(app, /renderBookInfoTags\(document\.getElementById\("book-info-tags"\), m\.tags, m\.model_tags \|\| m\.modelTags\)/);
 });
 
 test("funnel keeps sorting in two columns and reading filters on the right", () => {

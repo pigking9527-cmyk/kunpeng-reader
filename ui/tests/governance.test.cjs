@@ -238,7 +238,7 @@ test("complex Tauri commands keep business fields behind one camelCase request D
 test("portable entity model is identical on client and sync server", () => {
   const db = read("src", "db.rs");
   const server = read("server", "reader-sync-api", "app.py");
-  for (const kind of ["book_state_v2", "vocab", "reading_bucket_v2"]) {
+  for (const kind of ["book_state_v2", "model_book_tags_v1", "vocab", "reading_bucket_v2"]) {
     assert.match(db, new RegExp(`SUPPORTED_ENTITY_KINDS[\\s\\S]*${kind}`));
     assert.match(server, new RegExp(`SUPPORTED_ENTITY_KINDS[\\s\\S]*${kind}`));
   }

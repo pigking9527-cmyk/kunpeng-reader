@@ -105,6 +105,12 @@ let shelfLoaded = false;
 let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0";
 let showCoverRating = localStorage.getItem("showCoverRating") !== "0";
 let showCoverTitle = localStorage.getItem("showCoverTitle") === "1";
+let singleClickOpensBook = localStorage.getItem("shelfSingleClickOpen") !== "0";
+
+function setSingleClickOpenPreference(value) {
+  singleClickOpensBook = value !== false;
+  localStorage.setItem("shelfSingleClickOpen", singleClickOpensBook ? "1" : "0");
+}
 
 // 通用半星组件：左半=半星、右半=整星。
 function makeStars(container, onPick) {
@@ -219,6 +225,13 @@ document.getElementById("reading-filter-all")?.addEventListener("click", () => {
 const setCoverProgress = document.getElementById("set-cover-prog");
 const setCoverRating = document.getElementById("set-cover-rating");
 const setCoverTitle = document.getElementById("set-cover-title");
+const setSingleClickOpen = document.getElementById("set-single-click-open");
+const openBookLabel = document.getElementById("set-open-book-label");
+function reflectOpenBookPreference() {
+  if (!setSingleClickOpen || !openBookLabel) return;
+  setSingleClickOpen.checked = singleClickOpensBook;
+  openBookLabel.textContent = singleClickOpensBook ? "单击打开图书" : "双击打开图书";
+}
 setCoverProgress.checked = showCoverProgress;
 setCoverProgress.addEventListener("change", () => {
   showCoverProgress = setCoverProgress.checked;
@@ -236,6 +249,11 @@ setCoverTitle.addEventListener("change", () => {
   showCoverTitle = setCoverTitle.checked;
   localStorage.setItem("showCoverTitle", showCoverTitle ? "1" : "0");
   applyView();
+});
+reflectOpenBookPreference();
+setSingleClickOpen?.addEventListener("change", () => {
+  setSingleClickOpenPreference(setSingleClickOpen.checked);
+  reflectOpenBookPreference();
 });
 
 function updateLayoutButtons() {
@@ -415,8 +433,8 @@ function bookCard(b, index = 0) {
   card.appendChild(title);
   card.appendChild(prog);
 
-  // 默认单击打开。由于浏览器先派发两次 click、才派发 dblclick，单击要短暂
-  // 等待；这样双击才能稳定进入选择模式，而不会先把书打开。
+  // 浏览器先派发两次 click、才派发 dblclick。单击打开模式要短暂等待，
+  // 这样双击才能稳定进入选择模式，而不会先把书打开。
   let openTimer = null;
   const openBook = () => {
     if (b.missing) {
@@ -433,6 +451,11 @@ function bookCard(b, index = 0) {
   card.addEventListener("click", (e) => {
     e.stopPropagation();
     closeShelfCardFloaters();
+    if (!singleClickOpensBook) {
+      // 双击打开模式：单击只负责选中；双击的第二个 click 不重复切换。
+      if (e.detail === 1) toggleSelect(b.id, card);
+      return;
+    }
     // 已有任意选中项时，单击直接加入/移出多选；第二个 click 是双击的一部分，
     // 不重复切换，随后 dblclick 也不再改变已有选择。
     if (selected.size > 0) {
@@ -452,8 +475,12 @@ function bookCard(b, index = 0) {
       clearTimeout(openTimer);
       openTimer = null;
     }
-    // 仅在尚未进入多选时，双击把当前书加入选择。已经在多选模式时，前一个
-    // 单击已完成一次切换，双击不应再反向切换一次。
+    if (!singleClickOpensBook) {
+      openBook();
+      return;
+    }
+    // 单击打开模式中，双击把当前书加入选择。已经在多选模式时，前一个单击
+    // 已完成一次切换，双击不应再反向切换一次。
     if (!selected.size) toggleSelect(b.id, card);
   });
   card.addEventListener("contextmenu", (e) => {
@@ -1162,14 +1189,20 @@ function positionBookOrganizer(initialPlacement = false) {
   }
   const anchorX = rect.left + organizerAnchor.offsetX;
   const anchorY = rect.top + organizerAnchor.offsetY;
+  // 整理菜单属于书架内容区，不能盖住固定的窗口工具栏。右键首排封面时尤其
+  // 需要用内容区而非整个 viewport 作为纵向边界。
+  const contentRect = contentEl?.getBoundingClientRect?.();
+  const contentTop = Math.max(margin, Number.isFinite(contentRect?.top) ? contentRect.top + margin : margin);
+  const contentBottom = Math.min(viewportHeight - margin, Number.isFinite(contentRect?.bottom) ? contentRect.bottom - margin : viewportHeight - margin);
+  const maxTop = Math.max(contentTop, contentBottom - height);
   if (initialPlacement || !Number.isFinite(organizerAnchor.menuOffsetX) || !Number.isFinite(organizerAnchor.menuOffsetY)) {
     const left = Math.max(margin, Math.min(anchorX, viewportWidth - width - margin));
-    const top = Math.max(margin, Math.min(anchorY, viewportHeight - height - margin));
+    const top = Math.max(contentTop, Math.min(anchorY, maxTop));
     organizerAnchor.menuOffsetX = left - rect.left;
     organizerAnchor.menuOffsetY = top - rect.top;
   }
-  // 打开时只做一次视口内定位；之后保持相对书卡的固定偏移，避免滚动到
-  // 窗口边缘时弹层被钳在原处、再次与封面脱节。
+  // 打开时只做一次内容区内定位；书架发生滚动时会直接收起菜单，避免弹层
+  // 脱离原封面并遮住窗口菜单栏。
   organizerMenu.style.left = rect.left + organizerAnchor.menuOffsetX + "px";
   organizerMenu.style.top = rect.top + organizerAnchor.menuOffsetY + "px";
 }
@@ -1444,7 +1477,7 @@ function initShelfScrollbar() {
   let dragStartScrollTop = 0;
 
   contentEl.addEventListener("scroll", scheduleShelfScrollbarUpdate, { passive: true });
-  contentEl.addEventListener("scroll", scheduleBookOrganizerPosition, { passive: true });
+  contentEl.addEventListener("scroll", closeBookOrganizer, { passive: true });
   global.addEventListener("resize", scheduleShelfScrollbarUpdate);
   global.addEventListener("resize", scheduleBookOrganizerResize);
 

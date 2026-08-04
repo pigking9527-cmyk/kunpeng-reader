@@ -3,7 +3,7 @@
 一个面向 Windows、macOS、Linux 与 Android 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
-> 最新桌面版本：**v1.10.0** · Android 版本：**v0.2.0** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP；Linux AppImage / deb；Android Profile APK）。
+> 最新桌面版本：**v1.11.0** · Android 版本：**v0.3.0** · 下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP；Linux AppImage / deb；Android Profile APK）。
 
 ## 特性
 
@@ -23,12 +23,13 @@
 - **跨书搜索**：阅读页划词菜单可直接跨全书架（包含当前书）搜索选中文字或句子，按书分组展示结果，支持折叠、分批展开和跳回来源书页
 - **划词翻译**：阅读页划词菜单支持翻译大段文字，预留并接入 DeepL / Google / 百度 / 腾讯翻译配置，用户可自行填写 API 凭据
 
-**Android v0.2.0**
+**Android v0.3.0**
 - **书架与导入**：账号、搜索、统计、筛选与布局、设置、更多六个一级入口；支持系统文件选择导入 EPUB / TXT、Download 自动导入、批量导入及封面墙阅读进度显示
 - **阅读与 EPUB 兼容**：后台解析与缓存改善大书打开；兼容 EPUB 封面/正文图片、章节头图与脚注；支持滚动、整页左右翻页、点击翻页和长按自定义划词菜单
 - **划词工具与词典**：高亮、批注、书摘、书签、离线中英文词典、翻译、Web / 跨书 / 相似语义搜索与智读；查词可进入生词本并按熟悉度复习
 - **账号与私密同步**：新增邮箱绑定/换绑、修改/找回密码；智读与翻译设置可同步，API Key 使用独立同步密码加密后才可跨设备恢复
 - **性能与稳定性**：EPUB 在后台 isolate 安全解析并按章缓存；书架延后加载大段标注数据，进入章节后预热相邻章节；滚动手势降低惯性并限制跨章边界
+- **全文与语义检索**：新增本机全文索引、搜索结果页及 Android 端语义索引构建；索引仅保留在设备本地，不上传书籍正文或向量。
 
 **检索**
 - **书架全文检索**：压缩逐章文本索引 + Bloom 预筛选 + 有界 LRU 缓存 + 多线程字节级 `memmem`；保留精确扫描兜底，兼顾速度与结果完整性
@@ -111,4 +112,4 @@ sudo apt install ./Kunpeng-Reader-v*-Linux-x86_64.deb
 
 ## 技术栈
 
-桌面：Rust · Tauri 2 · WebView2 / WKWebView / WebKitGTK · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`；当前版本 v0.2.0）。
+桌面：Rust · Tauri 2 · WebView2 / WKWebView / WebKitGTK · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`；当前版本 v0.3.0）。
