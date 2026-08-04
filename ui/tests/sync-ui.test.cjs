@@ -21,6 +21,13 @@ test("manual sync button has a click handler", () => {
   assert.match(syncSource, /syncNowBtn\.addEventListener\("click",\s*async\s*\(\)\s*=>/);
 });
 
+test("同步内容总览列出新增的模型标签、配置和可选历史同步", () => {
+  assert.match(indexSource, /大模型书籍分类标签/);
+  assert.match(indexSource, /大模型与翻译 API 配置（不含密钥）/);
+  assert.match(indexSource, /智读与书库问答记录（可选）/);
+  assert.match(indexSource, /加密 API Key 与翻译密钥（可选）/);
+});
+
 test("persisted account is restored and automatically synced on startup", () => {
   const appSource = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
   assert.match(syncSource, /async function syncOnStartup\(\)/);

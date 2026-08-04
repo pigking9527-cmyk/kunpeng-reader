@@ -21,6 +21,15 @@ struct TranslationCredential {
     api_key: String,
 }
 
+const TRANSLATION_ACTIVE_PROVIDER_KEY: &str = "translation_active_provider:v1";
+const TRANSLATION_PROVIDERS: [&str; 4] = ["baidu", "tencent", "deepl", "google"];
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TranslationCredentialsStatus {
+    pub active_provider: String,
+    pub profiles: Vec<TranslationCredentialStatus>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct TranslationCredentialStatus {
     pub config_id: String,
@@ -74,7 +83,7 @@ fn load_translation_credential(
 }
 
 pub(crate) fn export_public_config(db: &AppDb) -> Result<serde_json::Value, String> {
-    let providers = ["baidu", "tencent", "deepl", "google"]
+    let providers = TRANSLATION_PROVIDERS
         .into_iter()
         .filter(|provider| {
             translation_credential_status(db, provider)
@@ -86,7 +95,7 @@ pub(crate) fn export_public_config(db: &AppDb) -> Result<serde_json::Value, Stri
 }
 
 pub(crate) fn export_secret_configs(db: &AppDb) -> Result<Vec<serde_json::Value>, String> {
-    let values = ["baidu", "tencent", "deepl", "google"]
+    let values = TRANSLATION_PROVIDERS
         .into_iter()
         .filter_map(|provider| {
             let config_id = credential_config_id(provider);
@@ -127,6 +136,40 @@ pub(crate) fn translation_credential_status(
         provider,
         configured,
     })
+}
+
+pub(crate) fn translation_credentials_status(
+    db: &AppDb,
+) -> Result<TranslationCredentialsStatus, String> {
+    let profiles = TRANSLATION_PROVIDERS
+        .into_iter()
+        .map(|provider| translation_credential_status(db, provider))
+        .collect::<Result<Vec<_>, _>>()?;
+    let saved = db
+        .metadata(TRANSLATION_ACTIVE_PROVIDER_KEY)
+        .unwrap_or_default();
+    let active_provider = profiles
+        .iter()
+        .find(|profile| profile.provider == saved && profile.configured)
+        .or_else(|| profiles.iter().find(|profile| profile.configured))
+        .map(|profile| profile.provider.clone())
+        .unwrap_or_else(|| "baidu".to_string());
+    Ok(TranslationCredentialsStatus {
+        active_provider,
+        profiles,
+    })
+}
+
+pub(crate) fn set_translation_active_provider(
+    db: &AppDb,
+    provider: &str,
+) -> Result<TranslationCredentialsStatus, String> {
+    let provider = normalize_provider(provider)?;
+    if !translation_credential_status(db, provider)?.configured {
+        return Err("请先在“大模型与翻译 API”中保存该翻译服务的凭据".into());
+    }
+    db.set_metadata(TRANSLATION_ACTIVE_PROVIDER_KEY, provider)?;
+    translation_credentials_status(db)
 }
 
 pub(crate) fn save_translation_credential(

@@ -213,6 +213,25 @@ pub(crate) fn translation_credential_status(
     translate::translation_credential_status(db, &provider)
 }
 
+#[tauri::command]
+pub(crate) fn translation_credentials_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<translate::TranslationCredentialsStatus, String> {
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    translate::translation_credentials_status(db)
+}
+
+#[tauri::command]
+pub(crate) fn set_translation_active_provider(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+) -> Result<translate::TranslationCredentialsStatus, String> {
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    translate::set_translation_active_provider(db, &provider)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SaveTranslationCredentialRequest {

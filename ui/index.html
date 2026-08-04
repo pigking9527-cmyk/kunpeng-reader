@@ -60,11 +60,15 @@
               <span>书签、高亮、批注、评分、标签与收藏夹</span>
               <span>生词本</span>
               <span>阅读统计</span>
+              <span>大模型书籍分类标签</span>
+              <span>大模型与翻译 API 配置（不含密钥）</span>
+              <span class="account-sync-optional">智读与书库问答记录（可选）</span>
+              <span class="account-sync-optional">加密 API Key 与翻译密钥（可选）</span>
             </div>
             <div class="private-sync-row">
               <div>
-                <strong>智读与翻译</strong>
-                <small>配置默认同步；历史和密钥由你决定。</small>
+                <strong>智读、书库问答与翻译</strong>
+                <small>分类标签和配置默认同步；问答记录与加密密钥可在同步设置中开启。</small>
               </div>
               <button id="private-sync-open" class="btn-plain" type="button">同步设置</button>
             </div>
@@ -271,7 +275,12 @@
         </div>
       </div>
       <div class="menu-wrap">
-        <button id="settings-toolbar-btn" class="icon-btn settings-toolbar-btn" title="常用设置" aria-label="常用设置">⚙</button>
+        <button id="settings-toolbar-btn" class="icon-btn settings-toolbar-btn" title="常用设置" aria-label="常用设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M9.4 3.4 10 2h4l.6 1.4 1.55.64 1.5-.58 2.83 2.83-.58 1.5L20.6 9.4l1.4.6v4l-1.4.6-.64 1.55.58 1.5-2.83 2.83-1.5-.58-1.55.64L14 22h-4l-.6-1.4-1.55-.64-1.5.58-2.83-2.83.58-1.5-.64-1.55L2 14v-4l1.4-.6.64-1.55-.58-1.5L6.29 3.5l1.5.58L9.4 3.4Z" />
+            <circle cx="12" cy="12" r="3.15" />
+          </svg>
+        </button>
         <button id="menu-btn" class="icon-btn" title="菜单">⋮</button>
         <div id="menu" class="menu">
           <div class="menu-item" id="mi-random">随机打开一本书</div>
@@ -379,6 +388,10 @@
           <label class="switch"><input type="checkbox" id="set-use-model-tags" checked /><span class="slider"></span></label>
         </div>
         <div class="fp-set-row">
+          <span>大模型与翻译 API</span>
+          <span class="fp-set-tail"><button id="api-settings-open" class="fp-row-gear" title="管理本机大模型与翻译 API">⚙</button></span>
+        </div>
+        <div class="fp-set-row">
           <span id="set-open-book-label" title="单击打开时，双击用于选中；双击打开时，单击用于选中">单击打开图书</span>
           <label class="switch"><input type="checkbox" id="set-single-click-open" checked /><span class="slider"></span></label>
         </div>
@@ -410,6 +423,32 @@
           <button id="settings-export-data" class="btn-plain" type="button">⬆ 导出数据包</button>
           <button id="settings-import-data" class="btn-plain" type="button">⬇ 导入数据包</button>
         </div>
+      </div>
+    </div>
+    <div id="api-settings-modal" class="modal">
+      <div class="modal-card api-settings-card">
+        <div class="modal-head"><span>大模型与翻译 API</span><button id="api-settings-close" class="btn-plain" type="button">✕</button></div>
+        <p class="api-settings-note">密钥仅保存在本机安全存储中。现有的单一智读配置会自动成为第一条大模型配置。</p>
+        <section class="api-settings-section" aria-label="大模型配置">
+          <div class="fp-title">大模型</div>
+          <label>已保存的 API<select id="api-ai-profile"></select></label>
+          <div class="api-settings-actions"><button id="api-ai-use" class="btn-plain" type="button">设为智读与问答当前模型</button></div>
+          <label>添加常用大模型<select id="api-ai-preset"><option value="">选择服务商…</option><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible">OpenAI 兼容接口</option></select></label>
+          <label>名称<input id="api-ai-name" type="text" maxlength="80" placeholder="例如：DeepSeek 快速问答" /></label>
+          <label>服务商<select id="api-ai-provider"><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible">OpenAI 兼容接口</option></select></label>
+          <label>接口地址<input id="api-ai-base-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" /></label>
+          <label>模型名<input id="api-ai-model" type="text" placeholder="例如：deepseek-v4-flash" autocomplete="off" /></label>
+          <label>API Key<input id="api-ai-key" type="password" placeholder="新建时必填；编辑留空则保留原密钥" autocomplete="off" /></label>
+          <div class="api-settings-actions"><button id="api-ai-save" class="btn-plain" type="button">保存并使用</button><span id="api-ai-status" class="api-settings-status"></span></div>
+        </section>
+        <section class="api-settings-section" aria-label="翻译 API">
+          <div class="fp-title">翻译</div>
+          <label>当前翻译 API<select id="api-translation-provider"><option value="baidu">百度翻译</option><option value="tencent">腾讯翻译</option><option value="deepl">DeepL</option><option value="google">Google 翻译</option></select></label>
+          <p id="api-translation-summary" class="api-settings-note"></p>
+          <label>App ID / API Key<input id="api-translation-id" type="text" autocomplete="off" /></label>
+          <label>密钥（百度、腾讯必填）<input id="api-translation-key" type="password" autocomplete="off" /></label>
+          <div class="api-settings-actions"><button id="api-translation-save" class="btn-plain" type="button">保存并设为当前翻译</button><span id="api-translation-status" class="api-settings-status"></span></div>
+        </section>
       </div>
     </div>
     <div id="animation-settings-modal" class="modal">
@@ -711,9 +750,10 @@
             </div>
           </div>
           <div class="library-ai-head-actions">
-            <span id="library-ai-classify-status" class="library-ai-classify-status" aria-live="polite"></span>
-            <button id="library-ai-classify" class="library-ai-classify" type="button" title="本地资料不足时，会检索百度和豆瓣读书的公开书目信息，再生成仅供问答使用的暗标签">书籍分类</button>
+            <span id="library-ai-classify-status" class="library-ai-classify-status" aria-live="polite" hidden></span>
+            <button id="library-ai-classify" class="library-ai-classify" type="button" title="正在读取书籍分类状态…">书籍分类</button>
             <button id="library-ai-history" class="library-ai-history" type="button" title="查看已保存的书库问答">问答记录</button>
+            <select id="library-ai-model-profile" class="library-ai-model-profile" aria-label="书库问答使用的大模型"></select>
             <span class="library-ai-pill">本地检索 · 可追溯引文</span>
           </div>
         </header>
@@ -735,7 +775,7 @@
           <section class="library-ai-card library-ai-workspace">
             <label for="question">你的问题</label>
             <textarea id="question" placeholder="例如：这些书如何解释清末财政困境？&#10;跨书对比时：比较选中作品对同一主题的观点与依据。"></textarea>
-            <div class="library-ai-actions"><span id="state" class="library-ai-state">打开书库问答后载入书架与智读配置。</span><button id="run" class="library-ai-run" type="button">开始问答</button></div>
+            <div class="library-ai-actions"><div class="library-ai-font-controls" aria-label="书库问答字号"><span>字号</span><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号">A+</button></div><span id="state" class="library-ai-state">打开书库问答后载入书架与智读配置。</span><button id="run" class="library-ai-run" type="button">开始问答</button></div>
             <div id="answer" class="library-ai-answer empty">选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。</div>
             <section id="source-preview" class="library-ai-source-preview" hidden aria-live="polite" aria-label="脚注原文预览"><div class="library-ai-source-preview-head"><strong id="source-preview-title"></strong><button id="source-preview-close" type="button" aria-label="关闭脚注预览">×</button></div><p id="source-preview-excerpt"></p><button id="source-preview-open" class="library-ai-source-preview-open" type="button">打开原文</button></section>
             <section id="sources" class="library-ai-sources" hidden><h3 id="source-title">脚注来源</h3><div id="source-list"></div></section>
@@ -774,6 +814,7 @@
     <script src="library-ai.js"></script>
     <script src="library-ai-entry.js"></script>
     <script src="news-ui.js"></script>
+    <script src="api-settings-ui.js"></script>
     <script src="app.js"></script>
     <script src="search-ui.js"></script>
     <script src="debug-ui.js"></script>

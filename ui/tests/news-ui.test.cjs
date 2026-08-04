@@ -31,6 +31,11 @@ test("NewsNow feed keeps news loading separate from startup and only opens safe 
   assert.match(script, /page\.hidden = true/);
 });
 
+test("NewsNow toolbar toggles back to the shelf when it is already open", () => {
+  assert.match(script, /function toggle\(\) \{\s*if \(page\.hidden\) \{\s*open\(\);\s*\} else \{\s*close\(\);/s);
+  assert.match(script, /button\.addEventListener\("click", toggle\)/);
+});
+
 test("NewsNow uses the existing desktop visual language and stays usable on narrow windows", () => {
   assert.match(styles, /\.newsnow-page\s*\{/);
   assert.match(styles, /\.newsnow-feed\s*\{[^}]*grid-template-columns/s);

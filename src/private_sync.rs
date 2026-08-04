@@ -62,8 +62,21 @@ pub(crate) struct HistoryMergeRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct HistoryDeleteRequest {
+    pub content_id: String,
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct LibraryHistoryMergeRequest {
     pub entries: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryHistoryDeleteRequest {
+    pub id: String,
 }
 
 #[derive(Serialize)]
@@ -116,34 +129,94 @@ fn valid_content_id(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn normalized_entries(mut entries: Vec<Value>) -> Vec<Value> {
-    entries.retain(|entry| {
-        entry.is_object()
-            && serde_json::to_string(entry)
-                .map(|v| v.len() <= 32_000)
+fn history_entry_id(entry: &Value) -> Option<String> {
+    entry
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|value| clipped_text(value, 160))
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            entry
+                .get("at")
+                .and_then(Value::as_str)
+                .map(|at| format!("legacy:{at}"))
+        })
+}
+
+fn is_history_tombstone(entry: &Value) -> bool {
+    entry
+        .get("deletedAt")
+        .or_else(|| entry.get("deleted_at"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Keep live entries and per-entry tombstones together. Tombstones prevent an
+/// older local history cache on another device from recreating a deleted item
+/// after the next sync. They contain no answer text or source excerpt.
+fn normalized_entries(entries: Vec<Value>) -> Vec<Value> {
+    let mut by_id = std::collections::BTreeMap::<String, Value>::new();
+    for mut entry in entries {
+        if !entry.is_object()
+            || !serde_json::to_string(&entry)
+                .map(|value| value.len() <= 32_000)
                 .unwrap_or(false)
-    });
-    entries.sort_by(|left, right| {
+        {
+            continue;
+        }
+        let Some(id) = history_entry_id(&entry) else {
+            continue;
+        };
+        if is_history_tombstone(&entry) {
+            let deleted_at = entry
+                .get("deletedAt")
+                .or_else(|| entry.get("deleted_at"))
+                .and_then(Value::as_str)
+                .map(|value| clipped_text(value, 64))
+                .filter(|value| !value.is_empty());
+            let Some(deleted_at) = deleted_at else {
+                continue;
+            };
+            by_id.insert(
+                id.clone(),
+                serde_json::json!({ "id": id, "deletedAt": deleted_at }),
+            );
+            continue;
+        }
+        entry["id"] = Value::String(id.clone());
+        match by_id.get(&id) {
+            Some(existing) if is_history_tombstone(existing) => {}
+            _ => {
+                by_id.insert(id, entry);
+            }
+        }
+    }
+    let mut live = by_id
+        .values()
+        .filter(|entry| !is_history_tombstone(entry))
+        .cloned()
+        .collect::<Vec<_>>();
+    live.sort_by(|left, right| {
         right
             .get("at")
             .and_then(Value::as_str)
             .cmp(&left.get("at").and_then(Value::as_str))
     });
-    let mut unique = Vec::new();
-    for entry in entries {
-        let duplicate = unique.iter().any(|known: &Value| {
-            known.get("at") == entry.get("at")
-                && known.get("question") == entry.get("question")
-                && known.get("content") == entry.get("content")
-        });
-        if !duplicate {
-            unique.push(entry);
-        }
-        if unique.len() == 40 {
-            break;
-        }
-    }
-    unique
+    live.truncate(40);
+    let mut tombstones = by_id
+        .values()
+        .filter(|entry| is_history_tombstone(entry))
+        .cloned()
+        .collect::<Vec<_>>();
+    tombstones.sort_by(|left, right| {
+        right
+            .get("deletedAt")
+            .and_then(Value::as_str)
+            .cmp(&left.get("deletedAt").and_then(Value::as_str))
+    });
+    tombstones.truncate(80);
+    live.extend(tombstones);
+    live
 }
 
 fn clipped_text(value: &str, max_bytes: usize) -> String {
@@ -160,6 +233,20 @@ fn clipped_text(value: &str, max_bytes: usize) -> String {
 fn normalized_library_entries(entries: Vec<Value>) -> Vec<Value> {
     let mut sanitized = Vec::new();
     for entry in entries {
+        if is_history_tombstone(&entry) {
+            if let Some(id) = history_entry_id(&entry) {
+                if let Some(deleted_at) = entry
+                    .get("deletedAt")
+                    .or_else(|| entry.get("deleted_at"))
+                    .and_then(Value::as_str)
+                    .map(|value| clipped_text(value, 64))
+                    .filter(|value| !value.is_empty())
+                {
+                    sanitized.push(serde_json::json!({ "id": id, "deletedAt": deleted_at }));
+                }
+            }
+            continue;
+        }
         let question = entry
             .get("question")
             .and_then(Value::as_str)
@@ -214,7 +301,9 @@ fn normalized_library_entries(entries: Vec<Value>) -> Vec<Value> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let id = history_entry_id(&entry).unwrap_or_else(|| format!("legacy:{at}"));
         sanitized.push(serde_json::json!({
+            "id": id,
             "version": 1,
             "scope": "library",
             "task": task,
@@ -511,6 +600,26 @@ pub(crate) fn private_sync_history_merge(
 }
 
 #[tauri::command]
+pub(crate) fn private_sync_history_delete(
+    state: tauri::State<AppState>,
+    request: HistoryDeleteRequest,
+) -> Result<Vec<Value>, String> {
+    if !valid_content_id(&request.content_id) || request.id.trim().is_empty() {
+        return Err("智读历史记录身份无效".into());
+    }
+    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    let mut merged = read_history(db, &request.content_id);
+    merged.push(serde_json::json!({
+        "id": clipped_text(&request.id, 160),
+        "deletedAt": chrono::Utc::now().to_rfc3339(),
+    }));
+    write_history(db, &request.content_id, merged)?;
+    materialize(db)?;
+    Ok(read_history(db, &request.content_id))
+}
+
+#[tauri::command]
 pub(crate) fn private_sync_library_history_list(
     state: tauri::State<AppState>,
 ) -> Result<LibraryHistorySnapshot, String> {
@@ -532,6 +641,30 @@ pub(crate) fn private_sync_library_history_merge(
     let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
     let mut merged = read_library_history(db);
     merged.extend(request.entries);
+    write_library_history(db, merged)?;
+    materialize(db)?;
+    let options = options_from_db(db);
+    Ok(LibraryHistorySnapshot {
+        entries: read_library_history(db),
+        sync_enabled: options.sync_ai_history,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn private_sync_library_history_delete(
+    state: tauri::State<AppState>,
+    request: LibraryHistoryDeleteRequest,
+) -> Result<LibraryHistorySnapshot, String> {
+    if request.id.trim().is_empty() {
+        return Err("书库问答记录身份无效".into());
+    }
+    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    let mut merged = read_library_history(db);
+    merged.push(serde_json::json!({
+        "id": clipped_text(&request.id, 160),
+        "deletedAt": chrono::Utc::now().to_rfc3339(),
+    }));
     write_library_history(db, merged)?;
     materialize(db)?;
     let options = options_from_db(db);
@@ -656,6 +789,26 @@ mod tests {
     }
 
     #[test]
+    fn history_tombstone_wins_over_a_live_entry_with_the_same_id() {
+        let normalized = normalized_entries(vec![
+            serde_json::json!({
+                "id": "reader:one",
+                "at": "2026-08-05T00:00:00Z",
+                "question": "旧问题",
+                "content": "旧回答"
+            }),
+            serde_json::json!({
+                "id": "reader:one",
+                "deletedAt": "2026-08-05T01:00:00Z"
+            }),
+        ]);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0]["id"], "reader:one");
+        assert_eq!(normalized[0]["deletedAt"], "2026-08-05T01:00:00Z");
+        assert!(normalized[0].get("content").is_none());
+    }
+
+    #[test]
     fn library_history_keeps_answer_and_reference_but_never_book_text_or_local_id() {
         let entries = normalized_library_entries(vec![serde_json::json!({
             "question": "《南明史》说了什么？",
@@ -676,6 +829,7 @@ mod tests {
         assert_eq!(source["chapter"], 7);
         assert!(source.get("bookId").is_none());
         assert!(source.get("excerpt").is_none());
+        assert_eq!(entries[0]["id"], "legacy:2026-08-05T00:00:00Z");
         assert_eq!(entries[0]["scope"], "library");
     }
 

@@ -1057,34 +1057,9 @@ function renderSideAnchorVirtualPage(offset){
   if(offset==null||!root||!pager){readerSideVirtualDiag(offset,'missing_context',{root:!!root,pager:!!pager});return false;}
   var source=sourceRangeForOffsets(offset,offset+1);
   if(!source){readerSideVirtualDiag(offset,'missing_source');return false;}
-  var cut=document.createRange();
-  try{
-    cut.selectNodeContents(root);
-    cut.setStart(source.startContainer,source.startOffset);
-  }catch(err){
-    return renderSideAnchorFallbackPage(offset,source,'range:'+(err&&err.name||'unknown'));
-  }
-  var vp=ensureVirtualPage();
-  if(!vp){readerSideVirtualDiag(offset,'missing_layer');return false;}
-  vp.innerHTML='';
-  var clone=root.cloneNode(false);
-  clone.removeAttribute('id');
-  clone.style.cssText=root.style.cssText;
-  clone.style.position='absolute';clone.style.left='0';clone.style.top='0';
-  clone.style.transform='none';clone.style.pointerEvents='none';clone.style.margin='0';
-  try{clone.appendChild(cut.cloneContents());}
-  catch(err){return renderSideAnchorFallbackPage(offset,source,'clone:'+(err&&err.name||'unknown'));}
-  if(!clone.textContent&& !clone.querySelector('img,svg,canvas,video')){
-    return renderSideAnchorFallbackPage(offset,source,'empty_clone');
-  }
-  vp.appendChild(clone);
-  vp.style.display='block';
-  // 临时页只用于保持阅读位置；正文交互仍交给其下的真实分页层，下一次导航会清除它。
-  vp.style.pointerEvents='none';
-  sideAnchorVirtualOffset=offset;
-  refreshHighlights();
-  readerSideVirtualDiag(offset,'clone_shown',{chars:(clone.textContent||'').length});
-  return true;
+  // Range 截断会丢失首个段落的 DOM 上下文，导致首句和段距错位。
+  // 完整 clone 再将稳定锚点对齐，才不会破坏当前页的排版。
+  return renderSideAnchorFallbackPage(offset,source,'preserve_full_layout');
 }
 function consumeSideAnchorVirtualPage(){
   if(sideAnchorVirtualOffset==null)return false;
@@ -2544,6 +2519,30 @@ function topAnchor(){
   while(el&&el!==root&&el.nodeType===1){ if(anchorNodeInReader(el)&&(el.textContent||'').trim()) return {el:el}; el=el.parentNode; }
   var media=topVisibleOriginalMedia();
   if(media)return {el:media,media:true};
+  return null;
+}
+// 取得视口内真正最靠上的一行正文。多栏分页下，固定的左上角可能是留白或
+// 相邻栏的溢出节点，不能用它作为开关侧栏后的阅读锚点。
+function visibleTopTextAnchor(){
+  if(!root||!pager)return null;
+  var pr=viewRect(),best=null;
+  var walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null),node;
+  while((node=walker.nextNode())){
+    if(generatedTextNode(node)||closestInlineNoteElement(node)||!(node.nodeValue||'').trim())continue;
+    var range=document.createRange();
+    try{range.selectNodeContents(node);}catch(_){continue;}
+    var rects=[];try{rects=[].slice.call(range.getClientRects());}catch(_){rects=[];}
+    for(var i=0;i<rects.length;i++){
+      var rect=rects[i];
+      if(!rect||rect.width<1||rect.height<2||rect.bottom<=pr.top+1||rect.top>=pr.bottom-1)continue;
+      if(!best||rect.top<best.rect.top-1||(Math.abs(rect.top-best.rect.top)<=1&&rect.left<best.rect.left))best={rect:rect};
+    }
+  }
+  if(!best)return null;
+  var x=Math.max(pr.left+1,Math.min(pr.right-1,best.rect.left+2));
+  var y=Math.max(pr.top+1,Math.min(pr.bottom-1,best.rect.top+Math.min(4,best.rect.height/2)));
+  var rangeAtTop=caretRangeInReader(x,y);
+  if(rangeAtTop&&anchorNodeInReader(rangeAtTop.startContainer))return {range:rangeAtTop};
   return null;
 }
 function topVisibleOriginalMedia(){

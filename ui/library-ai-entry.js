@@ -36,10 +36,18 @@
     button.focus({ preventScroll: true });
   }
 
-  button.addEventListener("click", () => { void open(); });
+  function toggle() {
+    if (page.hidden) {
+      void open();
+    } else {
+      close();
+    }
+  }
+
+  button.addEventListener("click", toggle);
   back.addEventListener("click", close);
   global.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !page.hidden) close();
   });
-  global.ReaderLibraryAiEntry = { open, close, assistant };
+  global.ReaderLibraryAiEntry = { open, close, toggle, assistant };
 })(window);

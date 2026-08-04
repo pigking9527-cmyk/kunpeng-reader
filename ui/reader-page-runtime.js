@@ -130,7 +130,9 @@ window.addEventListener('message',function(e){
     // 此时必须继续使用临时页的起点，不能重新采样被遮住的 root。
     var sideOffset=sideAnchorVirtualOffset!=null?sideAnchorVirtualOffset:null;
     if(sideOffset==null){
-      sideAnchor=topAnchor();
+      // 固定坐标取 caret 在多栏重排、段首留白或图片旁排版时可能落到下一行。
+      // 优先取当前视口里实际最靠上的正文行，保证开关智读前后的第一行一致。
+      sideAnchor=visibleTopTextAnchor()||topAnchor();
       if(!anchorValid(sideAnchor)&&anchorValid(curTopAnchor))sideAnchor=curTopAnchor;
       sideOffset=anchorTextOffset(sideAnchor);
       if(anchorValid(sideAnchor)){
@@ -263,6 +265,7 @@ window.addEventListener('message',function(e){
     var saved=e.data.translationCredentialSaved,sp=saved&&saved.provider;
     if(sp){trCredentialStatus[sp]=saved;if(trPop&&trPop.querySelector('.tr-api').value===sp){if(saved.configured){trCredentialDirty=false;trPop.querySelector('.tr-api-id').value='';trPop.querySelector('.tr-api-key').value='';var sl=translateApiLabel(sp);trPop.querySelector('.tr-api-id').placeholder=sl.id+'（已安全保存，留空沿用）';trPop.querySelector('.tr-api-key').placeholder=sl.key+'（已安全保存，留空沿用）';if(trText&&trPop.style.display!=='none')requestTranslate();}else{var sd=trPop.querySelector('.tr-dst');sd.textContent=saved.error||'保存翻译凭据失败';sd.className='tr-text tr-dst tr-error';placeTranslate();}}}
   }
+  if(e.data.translationProfiles!==undefined){applyTranslationProfiles(e.data.translationProfiles);}
   if(e.data.translateResult!==undefined){showTranslateResult(e.data.translateResult);}
   if(e.data.gotoHighlight!==undefined){var hi=e.data.gotoHighlight,h=HL[hi];if(h){showChapter(h.chapter,'start').then(function(){var r=highlightRange(hi),rect=null;if(r){try{rect=r.getBoundingClientRect();}catch(_){rect=null;}}if(rect)gotoPage(pageOf({getBoundingClientRect:function(){return rect;}}));});}}
   if(e.data.resolveToc){

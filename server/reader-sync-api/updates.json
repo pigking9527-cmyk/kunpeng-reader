@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "latest": "1.11.0",
+  "latest": "1.11.1",
   "releases": {
+    "1.11.1": {
+      "android_version": "0.3.0",
+      "release_notes": "- Windows-only 补丁发布：提供 Windows 便携版、安装包和 SHA-256 清单；macOS/Linux 保持 v1.11.0，Android 保持 v0.3.0。\n- 智读升级为选句、已读范围检索、证据筛选与引用自检的多阶段流程，回答支持 Markdown 和可点击来源。\n- 新增大模型与翻译 API 统一设置，可保存多套模型并在书库问答/智读中切换。\n- 问答历史支持稳定 ID、删除墓碑同步和本机引用正文恢复；修复智读切换时的阅读位置漂移与书架交互问题。",
+      "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.11.1",
+      "published_at": "2026-08-05"
+    },
     "1.11.0": {
       "android_version": "0.3.0",
       "release_notes": "- 新增书库问答：全书库前 20 本、每本 1 段可追溯证据，并支持标签、书单与人工范围限定。\n- 单书问题改用目录/正文优先的分层检索、同书多段召回和引用自检。\n- 新增可续建的大模型书籍分类；模型标签与用户标签分离、始终同步，并可参与本机问答与筛选。\n- 书库问答历史自动本地保存，可按现有开关同步脱敏来源索引。\n- Android v0.3.0 新增本机全文索引、搜索结果页和语义索引构建。\n- 发布 Windows、macOS、Linux 与 Android 构建及独立 SHA-256 校验清单。",
