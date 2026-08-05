@@ -10,14 +10,15 @@ $releaseOrt = Join-Path $repo "target\release\onnxruntime.dll"
 $repoExe = Join-Path $repo "鲲鹏阅读器.exe"
 $repoOrt = Join-Path $repo "onnxruntime.dll"
 $desktop = [Environment]::GetFolderPath("Desktop")
-$desktopExe = Join-Path $desktop "鲲鹏阅读器.exe"
-$desktopOrt = Join-Path $desktop "onnxruntime.dll"
+$desktopShortcut = Join-Path $desktop "鲲鹏阅读器.lnk"
+$legacyDesktopExe = Join-Path $desktop "鲲鹏阅读器.exe"
+$legacyDesktopOrt = Join-Path $desktop "onnxruntime.dll"
 
 function Stop-ReaderProcesses {
-  # 只关闭明确指向桌面交付版的进程，绝不按同名进程猜测。
-  $targetPath = [IO.Path]::GetFullPath($desktopExe)
+  # 只关闭本脚本明确交付路径中的进程，绝不按同名进程猜测。
+  $targets = @($repoExe, $legacyDesktopExe) | ForEach-Object { [IO.Path]::GetFullPath($_) }
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.ExecutablePath -and [string]::Equals($_.ExecutablePath, $targetPath, [StringComparison]::OrdinalIgnoreCase)
+    $_.ExecutablePath -and ($targets -contains [IO.Path]::GetFullPath($_.ExecutablePath))
   } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
   }
@@ -29,6 +30,16 @@ function Copy-DesktopArtifact([string]$Source, [string]$Destination) {
     Start-Sleep -Seconds 2
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
   }
+}
+
+function Write-DesktopShortcut {
+  $shell = New-Object -ComObject WScript.Shell
+  $shortcut = $shell.CreateShortcut($desktopShortcut)
+  $shortcut.TargetPath = $repoExe
+  $shortcut.WorkingDirectory = $repo
+  $shortcut.IconLocation = "$repoExe,0"
+  $shortcut.Description = "鲲鹏阅读器"
+  $shortcut.Save()
 }
 
 function Assert-NewIconEmbedded {
@@ -86,10 +97,10 @@ try {
   Stop-ReaderProcesses
   Copy-Item -LiteralPath $release -Destination $repoExe -Force
   Copy-Item -LiteralPath $releaseOrt -Destination $repoOrt -Force
-  Copy-DesktopArtifact $release $desktopExe
-  Copy-DesktopArtifact $releaseOrt $desktopOrt
+  Write-DesktopShortcut
+  Remove-Item -LiteralPath $legacyDesktopExe, $legacyDesktopOrt -Force -ErrorAction SilentlyContinue
   if (-not $SkipIconCacheRefresh) { Clear-ExplorerIconCache }
-  Get-Item -LiteralPath $repoExe, $repoOrt, $desktopExe, $desktopOrt | Select-Object FullName, Length, LastWriteTime
+  Get-Item -LiteralPath $repoExe, $repoOrt, $desktopShortcut | Select-Object FullName, Length, LastWriteTime
 } finally {
   Pop-Location
 }
