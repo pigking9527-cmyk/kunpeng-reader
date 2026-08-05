@@ -29,19 +29,30 @@
   function init({ root = global.document } = {}) {
     const news = root?.getElementById("experimental-newsnow");
     const gear = root?.getElementById("experimental-newsnow-gear");
-    const settings = root?.getElementById("experimental-newsnow-settings");
+    const commonSettingsModal = root?.getElementById("fp-settings-modal");
+    const settingsModal = root?.getElementById("newsnow-settings-modal");
+    const closeSettings = root?.getElementById("newsnow-settings-close");
     const prefetch = root?.getElementById("experimental-newsnow-prefetch");
-    if (!news || !gear || !settings || !prefetch) return null;
+    if (!news || !gear || !settingsModal || !closeSettings || !prefetch) return null;
     const refresh = () => {
       news.checked = enabled("newsnow");
       prefetch.checked = enabled("newsnowPrefetch");
     };
     news.addEventListener("change", () => set("newsnow", news.checked));
     prefetch.addEventListener("change", () => set("newsnowPrefetch", prefetch.checked));
-    gear.addEventListener("click", () => {
-      settings.hidden = !settings.hidden;
-      gear.setAttribute("aria-expanded", String(!settings.hidden));
+    const close = (returnToCommon = true) => {
+      settingsModal.classList.remove("show");
+      if (returnToCommon) commonSettingsModal?.classList.add("show");
+    };
+    gear.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      refresh();
+      commonSettingsModal?.classList.remove("show");
+      settingsModal.classList.add("show");
     });
+    closeSettings.addEventListener("click", () => close(true));
+    settingsModal.addEventListener("click", (event) => { if (event.target === settingsModal) close(true); });
     refresh();
     return { refresh };
   }

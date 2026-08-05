@@ -405,13 +405,9 @@
           <div class="fp-set-row">
             <span>资讯</span>
             <span class="fp-set-tail">
-              <button id="experimental-newsnow-gear" class="fp-row-gear" type="button" title="设置资讯" aria-label="设置资讯" aria-expanded="false">⚙</button>
+              <button id="experimental-newsnow-gear" class="fp-row-gear" type="button" title="设置资讯" aria-label="设置资讯">⚙</button>
               <label class="switch"><input id="experimental-newsnow" type="checkbox" /><span class="slider"></span></label>
             </span>
-          </div>
-          <div id="experimental-newsnow-settings" class="newsnow-prefetch-settings" hidden>
-            <div class="fp-set-row"><span>后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
-            <p>应用空闲后每 5 分钟更新已启用来源；图片仍在进入视野时才加载。</p>
           </div>
         </section>
         <section class="default-apps-setting" aria-label="默认打开方式">
@@ -436,6 +432,13 @@
           <button id="settings-export-data" class="btn-plain" type="button">⬆ 导出数据包</button>
           <button id="settings-import-data" class="btn-plain" type="button">⬇ 导入数据包</button>
         </div>
+      </div>
+    </div>
+    <div id="newsnow-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="newsnow-settings-title">
+      <div class="modal-card newsnow-settings-card">
+        <div class="modal-head"><span id="newsnow-settings-title">资讯设置</span><button id="newsnow-settings-close" class="btn-plain" type="button" aria-label="关闭资讯设置">✕</button></div>
+        <div class="fp-set-row"><span>后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
+        <p class="newsnow-settings-note">应用空闲后每 5 分钟更新已启用来源。图片仍在卡片进入视野时才加载。</p>
       </div>
     </div>
     <div id="api-settings-modal" class="modal">

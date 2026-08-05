@@ -22,12 +22,16 @@ test("NewsNow is gated behind the local experimental switch", () => {
   const experiments = fs.readFileSync(path.join(ui, "experimental-features.js"), "utf8");
   assert.match(html, /id="experimental-newsnow"/);
   assert.match(html, /id="experimental-newsnow-gear"/);
-  assert.match(html, /id="experimental-newsnow-settings"/);
+  assert.match(html, /id="newsnow-settings-modal" class="modal"/);
+  assert.match(html, /id="newsnow-settings-close"/);
   assert.match(html, /id="experimental-newsnow-prefetch"/);
   assert.match(html, /<section class="experimental-settings" aria-label="资讯">/);
   assert.doesNotMatch(html, /<div class="fp-title">实验室<\/div>/);
   assert.match(experiments, /const DEFAULTS = Object\.freeze\(\{ newsnow: false, newsnowPrefetch: true \}\)/);
   assert.match(experiments, /set\("newsnowPrefetch", prefetch\.checked\)/);
+  assert.match(experiments, /commonSettingsModal\?\.classList\.remove\("show"\)/);
+  assert.match(experiments, /settingsModal\.classList\.add\("show"\)/);
+  assert.match(experiments, /settingsModal\.classList\.remove\("show"\)/);
   assert.match(experiments, /"kunpeng\.reader\.experimental-features\.v1"/);
   assert.match(script, /ReaderExperimentalFeatures\?\.enabled\?\.\("newsnow"\) === true/);
   assert.match(script, /reader-experimental-features-changed/);

@@ -618,10 +618,10 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .experimental-settings { margin: 0; padding: 6px 0 4px; border: 0; }
 .experimental-settings .fp-title { color: #65748a; font-size: 13px; font-weight: 650; }
 .experimental-settings .fp-set-row { padding-bottom: 2px; }
-.newsnow-prefetch-settings { margin: 4px 0 6px; padding: 8px 11px 9px; border-radius: 8px; background: #f6f9fd; }
-.newsnow-prefetch-settings .fp-set-row { padding: 1px 0; }
-.newsnow-prefetch-settings p { margin: 5px 0 0; color: #718097; font-size: 12px; line-height: 1.5; white-space: normal; }
 .experimental-settings + .default-apps-setting { margin-top: 0; border-top: 0; }
+.newsnow-settings-card { width: min(420px, calc(100vw - 48px)); }
+.newsnow-settings-note { margin: 7px 0 0; color: #718097; font-size: 13px; line-height: 1.55; }
+#newsnow-settings-modal { z-index: 55; }
 .sync-settings { border-top: 1px solid #eef0f4; border-bottom: 1px solid #eef0f4; padding: 10px 0 12px; margin: 8px 0 10px; }
 .sync-field { display: grid; grid-template-columns: 64px 1fr; align-items: center; gap: 10px; margin-top: 8px; font-size: 13px; color: #666; }
 .sync-field input { min-width: 0; padding: 6px 8px; border: 1px solid #d8dce4; border-radius: 6px; font: inherit; }
