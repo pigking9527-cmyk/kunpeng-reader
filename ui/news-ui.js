@@ -89,8 +89,6 @@
 
   function init({ root = document, invoke = global.__TAURI__?.core?.invoke } = {}) {
     const button = root.getElementById("newsnow-toolbar-btn");
-    const mainNav = root.getElementById("newsnow-main-nav");
-    const mainBack = root.getElementById("newsnow-main-back");
     const page = root.getElementById("newsnow-page");
     const back = root.getElementById("newsnow-back");
     const refresh = root.getElementById("newsnow-refresh");
@@ -113,7 +111,7 @@
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !mainNav || !mainBack || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !reader || !readerBack || !readerStatus || !readerFrame || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !status || !feed || !reader || !readerBack || !readerStatus || !readerFrame || !categories || !updated || !shell) return null;
 
     let catalog = [];
     let sourceIds = [];
@@ -414,40 +412,29 @@
       root.getElementById("filter-panel")?.classList.remove("show");
       root.getElementById("account-panel")?.classList.remove("show");
       if (!root.getElementById("library-ai-page")?.hidden) global.ReaderLibraryAiEntry?.close();
-      shell.hidden = true;
-      page.hidden = true;
-      mainNav.hidden = false;
-      global.document.body.classList.add("newsnow-browser-active");
       button.disabled = true;
       try {
         await invoke("newsnow_open_browser");
       } catch (error) {
-        mainNav.hidden = true;
-        shell.hidden = false;
-        global.document.body.classList.remove("newsnow-browser-active");
         global.alert("无法打开资讯网页，请检查网络后重试。");
       } finally {
         button.disabled = false;
       }
     }
 
-    async function close({ focus = true } = {}) {
+    function close({ focus = true } = {}) {
       closeSourcePicker();
       closeArticle({ restoreScroll: false });
-      await invoke?.("newsnow_close_browser").catch(() => {});
       page.hidden = true;
       shell.hidden = false;
-      mainNav.hidden = true;
       global.document.body.classList.remove("newsnow-active");
-      global.document.body.classList.remove("newsnow-browser-active");
       button.setAttribute("aria-pressed", "false");
       if (focus && !button.hidden) button.focus({ preventScroll: true });
     }
 
     button.addEventListener("click", () => { void open(); });
-    mainBack.addEventListener("click", () => { void close({ focus: true }); });
-    back.addEventListener("click", () => { void close(); });
-    readerBack.addEventListener("click", () => { void close({ focus: true }); });
+    back.addEventListener("click", close);
+    readerBack.addEventListener("click", () => close({ focus: true }));
     readerFrame.addEventListener("load", () => {
       if (articleUrl) readerStatus.textContent = "资讯网页已加载。";
     });

@@ -17,8 +17,7 @@ use tauri::Manager;
 
 const DEFAULT_BASE_URL: &str = "https://newsnow.busiyi.world";
 const NEWSNOW_HOME_URL: &str = "https://newsnow.busiyi.world/";
-const NEWSNOW_WEBVIEW_LABEL: &str = "newsnow-browser";
-const NEWSNOW_TOOLBAR_HEIGHT: u32 = 48;
+const NEWSNOW_BROWSER_LABEL: &str = "newsnow-browser";
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_SELECTED_SOURCES: usize = 12;
 const MAX_ITEMS_PER_SOURCE: usize = 16;
@@ -690,78 +689,37 @@ pub(crate) fn newsnow_status() -> NewsNowStatus {
 
 #[tauri::command]
 pub(crate) async fn newsnow_open_browser(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| "主窗口不可用".to_string())?;
-    let size = window
-        .inner_size()
-        .map_err(|error| format!("无法读取主窗口尺寸：{error}"))?;
-    let content_height = size.height.saturating_sub(NEWSNOW_TOOLBAR_HEIGHT).max(1);
-    let position = tauri::PhysicalPosition::new(0, NEWSNOW_TOOLBAR_HEIGHT as i32);
-    let content_size = tauri::PhysicalSize::new(size.width.max(1), content_height);
-
-    if let Some(webview) = app.get_webview(NEWSNOW_WEBVIEW_LABEL) {
-        webview
+    if let Some(window) = app.get_webview_window(NEWSNOW_BROWSER_LABEL) {
+        window
             .navigate(
                 NEWSNOW_HOME_URL
                     .parse()
                     .map_err(|error| format!("资讯首页地址无效：{error}"))?,
             )
             .map_err(|error| format!("无法返回资讯首页：{error}"))?;
-        webview
-            .set_position(position)
-            .map_err(|error| format!("无法调整资讯页面位置：{error}"))?;
-        webview
-            .set_size(content_size)
-            .map_err(|error| format!("无法调整资讯页面尺寸：{error}"))?;
-        webview
-            .show()
-            .map_err(|error| format!("无法显示资讯页面：{error}"))?;
-        webview
+        window
             .set_focus()
-            .map_err(|error| format!("无法聚焦资讯页面：{error}"))?;
+            .map_err(|error| format!("无法聚焦资讯窗口：{error}"))?;
         return Ok(());
     }
 
     let home = NEWSNOW_HOME_URL
         .parse()
         .map_err(|error| format!("资讯首页地址无效：{error}"))?;
-    let webview = window
-        .add_child(
-            tauri::WebviewBuilder::new(NEWSNOW_WEBVIEW_LABEL, tauri::WebviewUrl::External(home))
-                .initialization_script(NEWSNOW_HOME_BUTTON_SCRIPT),
-            position,
-            content_size,
-        )
-        .map_err(|error| format!("无法打开资讯网页：{error}"))?;
-    let resize_app = app.clone();
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::Resized(size) = event {
-            if let Some(webview) = resize_app.get_webview(NEWSNOW_WEBVIEW_LABEL) {
-                let _ = webview.set_position(tauri::PhysicalPosition::new(
-                    0,
-                    NEWSNOW_TOOLBAR_HEIGHT as i32,
-                ));
-                let _ = webview.set_size(tauri::PhysicalSize::new(
-                    size.width.max(1),
-                    size.height.saturating_sub(NEWSNOW_TOOLBAR_HEIGHT).max(1),
-                ));
-            }
-        }
-    });
-    webview
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        NEWSNOW_BROWSER_LABEL,
+        tauri::WebviewUrl::External(home),
+    )
+    .title("资讯")
+    .inner_size(1160.0, 820.0)
+    .min_inner_size(640.0, 480.0)
+    .initialization_script(NEWSNOW_HOME_BUTTON_SCRIPT)
+    .build()
+    .map_err(|error| format!("无法打开资讯网页：{error}"))?;
+    window
         .set_focus()
-        .map_err(|error| format!("无法聚焦资讯页面：{error}"))?;
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn newsnow_close_browser(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(webview) = app.get_webview(NEWSNOW_WEBVIEW_LABEL) {
-        webview
-            .hide()
-            .map_err(|error| format!("无法关闭资讯页面：{error}"))?;
-    }
+        .map_err(|error| format!("无法聚焦资讯窗口：{error}"))?;
     Ok(())
 }
 
