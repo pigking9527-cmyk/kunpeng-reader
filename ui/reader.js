@@ -684,11 +684,23 @@ function sendProgressNow() {
       frac: curChFrac,
       anchor: curReadingAnchor,
     },
-  }).catch(() => {});
+  }).catch((error) => {
+    // 位置保存不能静默失败，否则重开图书只会回到首页而没有任何线索。
+    // 统计诊断开关只影响统计，绝不能影响续读位置。
+    console.warn("保存阅读位置失败", error);
+    invoke("reader_perf_log", { event: `progress_save_failed ${String(error).slice(0, 160)}` }).catch(() => {});
+  });
 }
 function reportProgress(immediate = false) {
-  if (DIAG_DISABLE_READER_REPORTS) return;
-  if (isWindowDragging()) return;
+  // 续读位置是核心状态，不属于可关闭的阅读统计。此前复用
+  // reader_stats_report 开关，会让关闭统计的用户永远不保存位置。
+  // 原生拖窗期间也不丢弃位置，松手后再保存；关闭窗口时则立即保存。
+  if (isWindowDragging() && !immediate) {
+    if (progTimer) clearTimeout(progTimer);
+    const wait = Math.max(550, windowDraggingUntil - Date.now() + 80);
+    progTimer = setTimeout(() => reportProgress(), wait);
+    return;
+  }
   if (progTimer) clearTimeout(progTimer);
   // 一本书由大量短章节组成时，连续翻页会不断触发位置消息。若每次都重置
   // 节流定时器，用户在关闭窗口前可能从未等到一次写盘，重开就又回到首页。
@@ -698,8 +710,8 @@ function reportProgress(immediate = false) {
     return;
   }
   progTimer = setTimeout(() => {
-    if (isWindowDragging()) return;
-    sendProgressNow();
+    progTimer = null;
+    reportProgress();
   }, 800);
 }
 window.addEventListener("pagehide", () => reportProgress(true));

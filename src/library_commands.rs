@@ -599,25 +599,33 @@ pub(crate) async fn set_progress(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     request: SetProgressRequest,
-) -> Result<(), ()> {
+) -> Result<(), String> {
     let SetProgressRequest {
         progress,
         chapter,
         frac,
         anchor,
     } = request;
-    if let Some(id) = window_commands::reader_window_id(&window) {
-        let mut lib = state.library.lock().unwrap();
-        let mut changed = lib.set_position_with_anchor(id, progress, chapter, frac, anchor);
-        if let Some(book) = lib.books.iter_mut().find(|b| b.id == id) {
-            if book.format == "epub" && book.chapter_index_version != epub_runtime::CACHE_VERSION {
-                book.chapter_index_version = epub_runtime::CACHE_VERSION;
-                changed = true;
-            }
+    let id = window_commands::reader_window_id(&window).ok_or_else(|| {
+        let label = window.label();
+        crate::runtime_support::log(&format!(
+            "set_progress rejected: invalid reader window label={label}"
+        ));
+        "无法识别当前阅读窗口".to_string()
+    })?;
+    let mut lib = state.library.lock().unwrap();
+    let mut changed = lib.set_position_with_anchor(id, progress, chapter, frac, anchor);
+    if let Some(book) = lib.books.iter_mut().find(|b| b.id == id) {
+        if book.format == "epub" && book.chapter_index_version != epub_runtime::CACHE_VERSION {
+            book.chapter_index_version = epub_runtime::CACHE_VERSION;
+            changed = true;
         }
-        if changed {
-            report_save_error("书架", lib.save());
-        }
+    }
+    if changed {
+        lib.save().map_err(|error| {
+            crate::runtime_support::log(&format!("set_progress save failed id={id}: {error}"));
+            format!("保存阅读位置失败：{error}")
+        })?;
     }
     Ok(())
 }
