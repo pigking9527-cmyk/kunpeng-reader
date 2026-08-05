@@ -574,11 +574,15 @@ fn process_virtual_chapter(
 
     ensure_epub_loaded(state, id).ok()?;
     let virtual_chapter = meta.virtuals.get(index)?;
-    let mut epubs = state.epub_runtime.epubs.lock().unwrap();
-    let doc = epubs.get_mut(&id)?;
-    let html = doc
-        .get_resource_str_by_path(&virtual_chapter.path)
-        .unwrap_or_default();
+    // EpubDoc is stateful, so archive access needs a lock.  Keep it only for
+    // the actual ZIP read: sanitising HTML and writing the disk cache can take
+    // much longer and used to block every other chapter/resource request.
+    let html = {
+        let mut epubs = state.epub_runtime.epubs.lock().unwrap();
+        let doc = epubs.get_mut(&id)?;
+        doc.get_resource_str_by_path(&virtual_chapter.path)
+            .unwrap_or_default()
+    };
     let head_source = extract_head_asset_source(&html);
     let rewritten_head = rewrite_css_url(
         &rewrite_attrs(
@@ -788,11 +792,13 @@ pub(crate) async fn search_book(
     if ensure_epub_loaded(&state, id).is_err() {
         return Ok(Vec::new());
     }
-    let mut epubs = state.epub_runtime.epubs.lock().unwrap();
-    let Some(doc) = epubs.get_mut(&id) else {
-        return Ok(Vec::new());
+    let spine: Vec<String> = {
+        let mut epubs = state.epub_runtime.epubs.lock().unwrap();
+        let Some(doc) = epubs.get_mut(&id) else {
+            return Ok(Vec::new());
+        };
+        doc.spine.iter().map(|entry| entry.idref.clone()).collect()
     };
-    let spine: Vec<String> = doc.spine.iter().map(|entry| entry.idref.clone()).collect();
     let query: Vec<char> = term
         .chars()
         .map(|character| character.to_ascii_lowercase())
@@ -801,7 +807,17 @@ pub(crate) async fn search_book(
     let mut hits = Vec::new();
 
     for (chapter_index, idref) in spine.iter().enumerate() {
-        let Some((html, _)) = doc.get_resource_str(idref) else {
+        // Search can scan an entire book.  Do not keep the EPUB mutex while
+        // normalising every chapter, otherwise a reader's next-page fetch has
+        // to wait for the full search to finish.
+        let html = {
+            let mut epubs = state.epub_runtime.epubs.lock().unwrap();
+            let Some(doc) = epubs.get_mut(&id) else {
+                return Ok(hits);
+            };
+            doc.get_resource_str(idref).map(|(html, _)| html)
+        };
+        let Some(html) = html else {
             continue;
         };
         let text = strip_tags(&html);
