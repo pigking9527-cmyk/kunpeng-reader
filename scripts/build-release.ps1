@@ -6,17 +6,28 @@
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $release = Join-Path $repo "target\release\ebook-reader-tauri.exe"
+$releaseOrt = Join-Path $repo "target\release\onnxruntime.dll"
 $repoExe = Join-Path $repo "鲲鹏阅读器.exe"
+$repoOrt = Join-Path $repo "onnxruntime.dll"
 $desktop = [Environment]::GetFolderPath("Desktop")
 $desktopExe = Join-Path $desktop "鲲鹏阅读器.exe"
+$desktopOrt = Join-Path $desktop "onnxruntime.dll"
 
 function Stop-ReaderProcesses {
-  $targets = @($release, $repoExe, $desktopExe)
-  Get-Process | ForEach-Object {
-    try { $path = $_.Path } catch { $path = $null }
-    if (($path -and ($targets -contains $path)) -or $_.ProcessName -in @("ebook-reader-tauri", "鲲鹏阅读器")) {
-      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    }
+  # 只关闭明确指向桌面交付版的进程，绝不按同名进程猜测。
+  $targetPath = [IO.Path]::GetFullPath($desktopExe)
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ExecutablePath -and [string]::Equals($_.ExecutablePath, $targetPath, [StringComparison]::OrdinalIgnoreCase)
+  } | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Copy-DesktopArtifact([string]$Source, [string]$Destination) {
+  try { Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+  catch {
+    Start-Sleep -Seconds 2
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
   }
 }
 
@@ -70,12 +81,15 @@ try {
     cargo build --release
   }
   if (-not (Test-Path -LiteralPath $release)) { throw "release exe 不存在：$release" }
+  if (-not (Test-Path -LiteralPath $releaseOrt)) { throw "release ONNX Runtime DLL 不存在：$releaseOrt" }
   Assert-NewIconEmbedded
   Stop-ReaderProcesses
   Copy-Item -LiteralPath $release -Destination $repoExe -Force
-  Copy-Item -LiteralPath $release -Destination $desktopExe -Force
+  Copy-Item -LiteralPath $releaseOrt -Destination $repoOrt -Force
+  Copy-DesktopArtifact $release $desktopExe
+  Copy-DesktopArtifact $releaseOrt $desktopOrt
   if (-not $SkipIconCacheRefresh) { Clear-ExplorerIconCache }
-  Get-Item -LiteralPath $repoExe, $desktopExe | Select-Object FullName, Length, LastWriteTime
+  Get-Item -LiteralPath $repoExe, $repoOrt, $desktopExe, $desktopOrt | Select-Object FullName, Length, LastWriteTime
 } finally {
   Pop-Location
 }
