@@ -1,7 +1,10 @@
 // 书架页逻辑
 const invoke = window.__TAURI__.core.invoke;
 const dialog = window.__TAURI__.dialog;
-window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
+window.addEventListener("contextmenu", (e) => {
+  // 编辑控件保留系统菜单，保证书库问答等文本输入可复制、粘贴、剪切和全选。
+  if (!e.target?.closest?.('input, textarea, [contenteditable="true"]')) e.preventDefault();
+});
 
 // 禁用浏览器自带查找（Ctrl+F / F3）
 window.addEventListener("keydown", (e) => {
