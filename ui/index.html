@@ -404,7 +404,14 @@
         <section class="experimental-settings" aria-label="资讯">
           <div class="fp-set-row">
             <span>资讯</span>
-            <label class="switch"><input id="experimental-newsnow" type="checkbox" /><span class="slider"></span></label>
+            <span class="fp-set-tail">
+              <button id="experimental-newsnow-gear" class="fp-row-gear" type="button" title="设置资讯" aria-label="设置资讯" aria-expanded="false">⚙</button>
+              <label class="switch"><input id="experimental-newsnow" type="checkbox" /><span class="slider"></span></label>
+            </span>
+          </div>
+          <div id="experimental-newsnow-settings" class="newsnow-prefetch-settings" hidden>
+            <div class="fp-set-row"><span>后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
+            <p>应用空闲后每 5 分钟更新已启用来源；图片仍在进入视野时才加载。</p>
           </div>
         </section>
         <section class="default-apps-setting" aria-label="默认打开方式">

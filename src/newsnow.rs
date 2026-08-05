@@ -11,15 +11,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     io::Read,
+    path::PathBuf,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Emitter, Manager, WebviewBuilder, WebviewUrl};
 
 const DEFAULT_BASE_URL: &str = "https://newsnow.busiyi.world";
-const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_SELECTED_SOURCES: usize = 24;
+const MAX_REFRESH_CONCURRENCY: usize = 6;
 const MAX_ITEMS_PER_SOURCE: usize = 16;
 const MAX_TOTAL_ITEMS: usize = 90;
 const MIN_ITEMS_PER_SOURCE: usize = 3;
@@ -336,7 +339,7 @@ pub(crate) struct NewsNowRequest {
     pub source_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NewsNowItem {
     pub id: String,
@@ -401,6 +404,16 @@ struct NewsCache {
     fetched_at: i64,
     fetched_instant: Option<Instant>,
     items: Vec<NewsNowItem>,
+    disk_loaded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct DiskNewsCache {
+    version: u8,
+    source_ids: Vec<String>,
+    fetched_at: i64,
+    items: Vec<NewsNowItem>,
 }
 
 #[derive(Default)]
@@ -412,6 +425,56 @@ struct SourceImageCache {
 fn cache() -> &'static Mutex<NewsCache> {
     static CACHE: OnceLock<Mutex<NewsCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(NewsCache::default()))
+}
+
+fn disk_cache_path() -> Option<PathBuf> {
+    let mut directory = dirs::cache_dir()?;
+    directory.push("ebook-reader");
+    Some(directory.join("newsnow-feed-v1.json"))
+}
+
+fn load_disk_cache() -> Option<DiskNewsCache> {
+    let path = disk_cache_path()?;
+    let bytes = fs::read(path).ok()?;
+    let mut saved = serde_json::from_slice::<DiskNewsCache>(&bytes).ok()?;
+    if saved.version != 1
+        || saved.source_ids.is_empty()
+        || saved.source_ids.len() > MAX_SELECTED_SOURCES
+        || saved.items.is_empty()
+    {
+        return None;
+    }
+    saved.items.truncate(MAX_TOTAL_ITEMS);
+    Some(saved)
+}
+
+fn ensure_disk_cache_loaded() {
+    let Ok(mut cached) = cache().lock() else {
+        return;
+    };
+    if cached.disk_loaded {
+        return;
+    }
+    cached.disk_loaded = true;
+    let Some(saved) = load_disk_cache() else {
+        return;
+    };
+    cached.source_ids = saved.source_ids;
+    cached.fetched_at = saved.fetched_at;
+    cached.items = saved.items;
+}
+
+fn save_disk_cache(source_ids: &[String], fetched_at: i64, items: &[NewsNowItem]) {
+    let Some(path) = disk_cache_path() else {
+        return;
+    };
+    let saved = DiskNewsCache {
+        version: 1,
+        source_ids: source_ids.to_vec(),
+        fetched_at,
+        items: items.to_vec(),
+    };
+    let _ = crate::atomic_file::write_json(&path, &saved, false);
 }
 
 fn source_image_cache(source_id: &'static str) -> &'static Mutex<SourceImageCache> {
@@ -939,6 +1002,33 @@ fn selected_ids(sources: &[NewsSource]) -> Vec<String> {
     sources.iter().map(|source| source.id.to_string()).collect()
 }
 
+fn cached_news(sources: &[NewsSource], include_stale: bool) -> Option<NewsNowList> {
+    ensure_disk_cache_loaded();
+    let source_ids = selected_ids(sources);
+    let cached = cache().lock().ok()?;
+    if cached.source_ids != source_ids || cached.items.is_empty() {
+        return None;
+    }
+    let stale = cached
+        .fetched_instant
+        .map_or(true, |fetched| fetched.elapsed() >= CACHE_TTL);
+    if stale && !include_stale {
+        return None;
+    }
+    Some(NewsNowList {
+        items: cached.items.clone(),
+        fetched_at: cached.fetched_at,
+        source_count: sources.len(),
+        stale,
+        message: if stale {
+            "正在显示本地缓存，后台正在更新。".to_string()
+        } else {
+            String::new()
+        },
+        ..Default::default()
+    })
+}
+
 fn value_to_text(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(value)) => value.trim().to_string(),
@@ -1325,20 +1415,10 @@ fn sort_and_deduplicate(items: &mut Vec<NewsNowItem>) {
 fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowList {
     let sources = selected_sources(request);
     let source_ids = selected_ids(&sources);
+    ensure_disk_cache_loaded();
     if !force_refresh {
-        if let Ok(cache) = cache().lock() {
-            if cache.source_ids == source_ids
-                && cache
-                    .fetched_instant
-                    .is_some_and(|fetched| fetched.elapsed() < CACHE_TTL)
-            {
-                return NewsNowList {
-                    items: cache.items.clone(),
-                    fetched_at: cache.fetched_at,
-                    source_count: sources.len(),
-                    ..Default::default()
-                };
-            }
+        if let Some(cached) = cached_news(&sources, false) {
+            return cached;
         }
     }
 
@@ -1352,22 +1432,26 @@ fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowLi
             }
         }
     };
-    let mut threads = Vec::new();
-    for source in &sources {
-        let base = base.clone();
-        let source = *source;
-        threads.push(std::thread::spawn(move || {
-            fetch_source(&http_agent(), &base, source, force_refresh)
-        }));
-    }
-
     let mut items = Vec::new();
     let mut failed_sources = Vec::new();
-    for thread in threads {
-        match thread.join() {
-            Ok(Ok(mut source_items)) => items.append(&mut source_items),
-            Ok(Err(source)) => failed_sources.push(source),
-            Err(_) => failed_sources.push("一个资讯来源".to_string()),
+    // 刷新最多保留六路网络请求。来源可多选，但不会在一个客户端上同时打满 24 个上游。
+    for batch in sources.chunks(MAX_REFRESH_CONCURRENCY) {
+        let threads = batch
+            .iter()
+            .map(|source| {
+                let base = base.clone();
+                let source = *source;
+                std::thread::spawn(move || {
+                    fetch_source(&http_agent(), &base, source, force_refresh)
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            match thread.join() {
+                Ok(Ok(mut source_items)) => items.append(&mut source_items),
+                Ok(Err(source)) => failed_sources.push(source),
+                Err(_) => failed_sources.push("一个资讯来源".to_string()),
+            }
         }
     }
     sort_and_deduplicate(&mut items);
@@ -1397,11 +1481,12 @@ fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowLi
     };
     if !items.is_empty() {
         if let Ok(mut cache) = cache().lock() {
-            cache.source_ids = source_ids;
+            cache.source_ids = source_ids.clone();
             cache.fetched_at = fetched_at;
             cache.fetched_instant = Some(Instant::now());
             cache.items = items.clone();
         }
+        save_disk_cache(&source_ids, fetched_at, &items);
     }
     NewsNowList {
         items,
@@ -1440,10 +1525,24 @@ pub(crate) fn newsnow_sources() -> Vec<NewsNowSource> {
 
 #[tauri::command]
 pub(crate) async fn newsnow_list(request: Option<NewsNowRequest>) -> NewsNowList {
+    let sources = selected_sources(request.clone());
+    if let Some(cached) = cached_news(&sources, true) {
+        return cached;
+    }
     tokio::task::spawn_blocking(move || fetch_news(request, false))
         .await
         .unwrap_or_else(|error| NewsNowList {
             message: format!("资讯任务失败：{error}"),
+            ..Default::default()
+        })
+}
+
+#[tauri::command]
+pub(crate) async fn newsnow_prefetch(request: Option<NewsNowRequest>) -> NewsNowList {
+    tokio::task::spawn_blocking(move || fetch_news(request, false))
+        .await
+        .unwrap_or_else(|error| NewsNowList {
+            message: format!("资讯后台刷新失败：{error}"),
             ..Default::default()
         })
 }
@@ -1550,6 +1649,29 @@ mod tests {
         assert_eq!(selected.len(), MAX_SELECTED_SOURCES);
         assert_eq!(selected[0].id, "weibo");
         assert!(!selected.iter().any(|source| source.id == "unknown"));
+    }
+
+    #[test]
+    fn disk_cache_snapshot_keeps_only_bounded_news_items() {
+        let saved = DiskNewsCache {
+            version: 1,
+            source_ids: vec!["weibo".to_string()],
+            fetched_at: 42,
+            items: (0..(MAX_TOTAL_ITEMS + 4))
+                .map(|index| NewsNowItem {
+                    title: format!("item-{index}"),
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        let mut parsed = serde_json::from_slice::<DiskNewsCache>(
+            &serde_json::to_vec(&saved).expect("serialize disk cache"),
+        )
+        .expect("parse disk cache");
+        parsed.items.truncate(MAX_TOTAL_ITEMS);
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.items.len(), MAX_TOTAL_ITEMS);
+        assert_eq!(MAX_REFRESH_CONCURRENCY, 6);
     }
 
     #[test]
