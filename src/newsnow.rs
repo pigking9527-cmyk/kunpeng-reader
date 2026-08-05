@@ -255,6 +255,20 @@ const CURATED_SOURCES: &[NewsSource] = &[
         default_enabled: false,
     },
     NewsSource {
+        id: "3dm-news",
+        name: "3DM 游戏新闻",
+        category: "游戏",
+        color: "#d86632",
+        default_enabled: false,
+    },
+    NewsSource {
+        id: "gamersky-news",
+        name: "游民星空新闻",
+        category: "游戏",
+        color: "#3979ba",
+        default_enabled: false,
+    },
+    NewsSource {
         id: "freebuf",
         name: "FreeBuf 网络安全",
         category: "科技",
@@ -1020,12 +1034,246 @@ impl EmptyStringFallback for String {
     }
 }
 
+fn class_contains(tag: &str, expected: &str) -> bool {
+    html_attribute(tag, "class").is_some_and(|classes| {
+        classes
+            .split_ascii_whitespace()
+            .any(|class| class.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn html_text(value: &str) -> String {
+    let mut text = String::with_capacity(value.len());
+    let mut in_tag = false;
+    for character in value.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn tag_end(html: &str, start: usize) -> Option<usize> {
+    html[start..].find('>').map(|offset| start + offset + 1)
+}
+
+fn tag_start(lower: &str, tag: &str, cursor: usize) -> Option<usize> {
+    let needle = format!("<{tag}");
+    let mut cursor = cursor;
+    while let Some(found) = lower[cursor..].find(&needle) {
+        let start = cursor + found;
+        if lower
+            .as_bytes()
+            .get(start + needle.len())
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'>' || *byte == b'/')
+        {
+            return Some(start);
+        }
+        cursor = start + needle.len();
+    }
+    None
+}
+
+fn element_with_class<'a>(html: &'a str, tag: &str, class: &str) -> Option<(&'a str, &'a str)> {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(start) = tag_start(&lower, tag, cursor) {
+        let end = tag_end(html, start)?;
+        let opening = &html[start..end];
+        if class.is_empty() || class_contains(opening, class) {
+            let close = format!("</{tag}>");
+            let content_end = lower[end..].find(&close).map(|offset| end + offset)?;
+            return Some((opening, &html[end..content_end]));
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn tag_with_class<'a>(html: &'a str, tag: &str, class: &str) -> Option<&'a str> {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(start) = tag_start(&lower, tag, cursor) {
+        let end = tag_end(html, start)?;
+        let opening = &html[start..end];
+        if class.is_empty() || class_contains(opening, class) {
+            return Some(opening);
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn list_item_blocks(html: &str) -> Vec<&str> {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut blocks = Vec::new();
+    while let Some(start) = tag_start(&lower, "li", cursor) {
+        let Some(end) = lower[start..]
+            .find("</li>")
+            .map(|offset| start + offset + 5)
+        else {
+            break;
+        };
+        blocks.push(&html[start..end]);
+        cursor = end;
+    }
+    blocks
+}
+
+fn section_from_marker<'a>(html: &'a str, marker: &str, before_marker: bool) -> Option<&'a str> {
+    let lower = html.to_ascii_lowercase();
+    let marker = marker.to_ascii_lowercase();
+    let marker_start = lower.find(&marker)?;
+    let list_start = if before_marker {
+        lower[..marker_start].rfind("<ul")?
+    } else {
+        marker_start + lower[marker_start..].find("<ul")?
+    };
+    let list_end = lower[list_start..]
+        .find("</ul>")
+        .map(|offset| list_start + offset + 5)?;
+    Some(&html[list_start..list_end])
+}
+
+fn game_news_item(
+    source: NewsSource,
+    title: String,
+    url: String,
+    image_url: String,
+    published_at: String,
+) -> Option<NewsNowItem> {
+    let title = trim_chars(&title, MAX_TEXT_CHARS);
+    let url = absolute_image_url(&url, &url);
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some(NewsNowItem {
+        id: format!("{}:{url}", source.id),
+        title,
+        url,
+        source: source.name.to_string(),
+        source_id: source.id.to_string(),
+        source_color: source.color.to_string(),
+        summary: String::new(),
+        published_at,
+        image_url,
+        category: source.category.to_string(),
+    })
+}
+
+fn parse_3dm_news_html(source: NewsSource, html: &str) -> Vec<NewsNowItem> {
+    let Some(section) = section_from_marker(html, "revision_list", false) else {
+        return Vec::new();
+    };
+    list_item_blocks(section)
+        .into_iter()
+        .filter(|item| tag_with_class(item, "li", "selectpost").is_some())
+        .filter_map(|item| {
+            let image_link = tag_with_class(item, "a", "img")?;
+            let title_link = element_with_class(item, "a", "bt")?;
+            let image_tag = tag_with_class(item, "img", "")?;
+            let time = element_with_class(item, "span", "time")?;
+            let url = absolute_image_url(
+                "https://www.3dmgame.com/news/",
+                &html_attribute(image_link, "href")?,
+            );
+            let image_url = absolute_image_url(
+                "https://www.3dmgame.com/news/",
+                &html_attribute(image_tag, "data-original")?,
+            );
+            game_news_item(
+                source,
+                html_text(title_link.1),
+                url,
+                image_url,
+                html_text(time.1),
+            )
+        })
+        .take(MAX_ITEMS_PER_SOURCE)
+        .collect()
+}
+
+fn parse_gamersky_news_html(source: NewsSource, html: &str) -> Vec<NewsNowItem> {
+    let Some(section) = section_from_marker(html, "data-nodeid=\"129\"", true) else {
+        return Vec::new();
+    };
+    list_item_blocks(section)
+        .into_iter()
+        .filter_map(|item| {
+            let title_link = element_with_class(item, "a", "tt")?;
+            let image_tag = tag_with_class(item, "img", "pe_u_thumb")?;
+            let time = element_with_class(item, "div", "time")?;
+            let url = absolute_image_url(
+                "https://www.gamersky.com/news/",
+                &html_attribute(title_link.0, "href")?,
+            );
+            let image_url = absolute_image_url(
+                "https://www.gamersky.com/news/",
+                &html_attribute(image_tag, "src")?,
+            );
+            game_news_item(
+                source,
+                html_text(title_link.1),
+                url,
+                image_url,
+                html_text(time.1),
+            )
+        })
+        .take(MAX_ITEMS_PER_SOURCE)
+        .collect()
+}
+
+fn fetch_game_news_source(
+    agent: &ureq::Agent,
+    source: NewsSource,
+) -> Result<Vec<NewsNowItem>, String> {
+    let (url, parser): (&str, fn(NewsSource, &str) -> Vec<NewsNowItem>) = match source.id {
+        "3dm-news" => ("https://www.3dmgame.com/news/", parse_3dm_news_html),
+        "gamersky-news" => ("https://www.gamersky.com/news/", parse_gamersky_news_html),
+        _ => return Err(source.name.to_string()),
+    };
+    let mut response = agent
+        .get(url)
+        .header("User-Agent", NEWSNOW_USER_AGENT)
+        .header("Accept", "text/html,application/xhtml+xml")
+        .call()
+        .map_err(|_| source.name.to_string())?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(PREVIEW_MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|_| source.name.to_string())?;
+    let items = parser(source, &String::from_utf8_lossy(&bytes));
+    if items.is_empty() {
+        Err(source.name.to_string())
+    } else {
+        Ok(items)
+    }
+}
+
 fn fetch_source(
     agent: &ureq::Agent,
     base: &str,
     source: NewsSource,
     latest: bool,
 ) -> Result<Vec<NewsNowItem>, String> {
+    if matches!(source.id, "3dm-news" | "gamersky-news") {
+        return fetch_game_news_source(agent, source);
+    }
     let suffix = if latest { "&latest=true" } else { "" };
     let endpoint = format!("{base}/api/s?id={}{}", source.id, suffix);
     let mut response = agent
@@ -1311,6 +1559,12 @@ mod tests {
         assert!(CURATED_SOURCES
             .iter()
             .all(|source| !source.id.is_empty() && !source.name.is_empty()));
+        assert!(CURATED_SOURCES
+            .iter()
+            .any(|source| source.id == "3dm-news" && source.category == "游戏"));
+        assert!(CURATED_SOURCES
+            .iter()
+            .any(|source| source.id == "gamersky-news" && source.category == "游戏"));
     }
 
     #[test]
@@ -1362,6 +1616,48 @@ mod tests {
         assert!(parse_source_response(CURATED_SOURCES[0], response)[0]
             .image_url
             .is_empty());
+    }
+
+    #[test]
+    fn game_site_adapters_extract_only_their_current_news_sections() {
+        let source_3dm = *CURATED_SOURCES
+            .iter()
+            .find(|source| source.id == "3dm-news")
+            .expect("3DM 来源应在目录中");
+        let html_3dm = r#"
+          <div class="Revision_list"><ul>
+            <li class="selectpost"><a class="img" href="/news/202608/3949968.html"><img data-original="https://img.3dmgame.com/cover.jpg"></a><div class="text"><a class="bt">最新 3DM 新闻</a></div><span class="time">2026-08-05 20:24:30</span></li>
+          </ul></div>
+        "#;
+        let parsed_3dm = parse_3dm_news_html(source_3dm, html_3dm);
+        assert_eq!(parsed_3dm.len(), 1);
+        assert_eq!(parsed_3dm[0].title, "最新 3DM 新闻");
+        assert_eq!(
+            parsed_3dm[0].url,
+            "https://www.3dmgame.com/news/202608/3949968.html"
+        );
+        assert_eq!(parsed_3dm[0].image_url, "https://img.3dmgame.com/cover.jpg");
+
+        let source_gamersky = *CURATED_SOURCES
+            .iter()
+            .find(|source| source.id == "gamersky-news")
+            .expect("游民来源应在目录中");
+        let html_gamersky = r#"
+          <ul class="pictxt contentpaging" data-nodeid="129">
+            <li><div class="img"><img class="pe_u_thumb" src="https://imgs.gamersky.com/cover.jpg"></div><div class="tit"><a class="tt" href="/news/202608/2183920.shtml">游民星空新闻</a></div><div class="con"><div class="tem"><div class="time">2026-08-05 20:44</div></div></div></li>
+          </ul>
+        "#;
+        let parsed_gamersky = parse_gamersky_news_html(source_gamersky, html_gamersky);
+        assert_eq!(parsed_gamersky.len(), 1);
+        assert_eq!(parsed_gamersky[0].title, "游民星空新闻");
+        assert_eq!(
+            parsed_gamersky[0].url,
+            "https://www.gamersky.com/news/202608/2183920.shtml"
+        );
+        assert_eq!(
+            parsed_gamersky[0].image_url,
+            "https://imgs.gamersky.com/cover.jpg"
+        );
     }
 
     #[test]
