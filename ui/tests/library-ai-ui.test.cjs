@@ -44,6 +44,12 @@ test("library question Enter submits while Shift+Enter keeps a newline", () => {
   assert.match(controller, /event\.preventDefault\(\);\s*void run\(\);/);
 });
 
+test("library question input keeps the native right-click editing menu", () => {
+  const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
+  assert.match(app, /input, textarea, \[contenteditable="true"\]/);
+  assert.match(app, /if \(!e\.target\?\.closest\?\./);
+});
+
 test("library assistant toolbar toggles back to the shelf when it is already open", () => {
   assert.match(entry, /function toggle\(\) \{\s*if \(page\.hidden\) \{\s*void open\(\);\s*\} else \{\s*close\(\);/s);
   assert.match(entry, /button\.addEventListener\("click", toggle\)/);
