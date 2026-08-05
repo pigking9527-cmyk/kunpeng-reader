@@ -92,8 +92,7 @@ pub(crate) struct AppState {
     pub(crate) stats: Mutex<StatsStore>,   // 详细阅读统计的小时桶
     pub(crate) vocab: Mutex<vocab::VocabStore>, // 生词本：查过的词
     word_pack: Mutex<tts::WordPackState>,  // 高频词语音包后台生成状态
-    main_close_sync_started: AtomicBool,   // 主窗口首次关闭先短暂同步；再次关闭立即退出
-    pub(crate) sync_running: AtomicBool,   // 防止启动、手动和退出同步并发上传同一批实体
+    pub(crate) sync_running: AtomicBool,   // 防止启动与手动同步并发上传同一批实体
     memory_reclaimers: Mutex<Vec<memory_budget::ReclaimerHandle>>,
 }
 impl AppState {
@@ -226,7 +225,6 @@ fn main() {
             stats: Mutex::new(StatsStore::load()),
             vocab: Mutex::new(vocab::VocabStore::load()),
             word_pack: Mutex::new(tts::WordPackState::default()),
-            main_close_sync_started: AtomicBool::new(false),
             sync_running: AtomicBool::new(false),
             memory_reclaimers: Mutex::new(Vec::new()),
         })
@@ -267,52 +265,31 @@ fn main() {
                 window_commands::apply_geom_safe(&win, &geom);
                 let app_ev = app.handle().clone();
                 win.on_window_event(move |ev| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
+                    if let tauri::WindowEvent::CloseRequested { .. } = ev {
                         if let Some(w) = app_ev.get_webview_window("main") {
                             let st = app_ev.state::<AppState>();
-                            // 先用非阻塞方式取得旧几何信息，再采集一次当前窗口状态。
-                            // 即使后台任务暂时持有书库锁，也不能推迟窗口隐藏。
+                            // 退出必须始终即时：后台任务持锁或网络不可用时，不能让
+                            // 窗口停留在“点不掉”的状态。未能即时落盘的数据会保留到
+                            // 下次启动/手动同步处理，不能用退出流程去等待它们。
                             let previous_geom = st
                                 .library
                                 .try_lock()
                                 .ok()
                                 .and_then(|lib| lib.main_geom.clone());
                             let closing_geom = window_commands::capture_geom(previous_geom, &w);
-                            let _ = w.hide();
-
-                            let mut lib = st.library.lock().unwrap();
-                            lib.main_geom = Some(closing_geom);
-                            // Make closing feel immediate. Durable local saves and the bounded
-                            // exit sync may continue briefly after the window has disappeared.
-                            // If the sync cannot finish, its dirty entities remain queued for
-                            // the next startup.
-                            report_save_error("书架", lib.save());
-                            report_save_error("统计", st.stats.lock().unwrap().save());
-                            drop(lib);
-
-                            if sync::sync_account_configured(st.inner())
-                                && st
-                                    .main_close_sync_started
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                    )
-                                    .is_ok()
-                            {
-                                api.prevent_close();
-                                let close_app = app_ev.clone();
-                                if let Err(error) = sync::spawn_sync_before_exit(close_app.clone())
-                                {
-                                    log(&format!(
-                                        "[sync] exit automatic sync could not be scheduled: {error}"
-                                    ));
-                                    if let Some(main) = close_app.get_webview_window("main") {
-                                        let _ = main.close();
-                                    }
-                                }
+                            if let Ok(mut lib) = st.library.try_lock() {
+                                lib.main_geom = Some(closing_geom);
+                                report_save_error("书架", lib.save());
+                            } else {
+                                log("[close] shelf save deferred because the library is busy");
                             }
+                            if let Ok(mut stats) = st.stats.try_lock() {
+                                report_save_error("统计", stats.save());
+                            } else {
+                                log("[close] stats save deferred because the statistics store is busy");
+                            };
+                            // Do not call prevent_close: exit sync is deliberately skipped here
+                            // so a close request never waits on network I/O or another task.
                         }
                     }
                 });

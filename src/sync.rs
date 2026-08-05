@@ -15,11 +15,8 @@ const MAX_SYNC_PULL_PAGES: usize = 1_000;
 const SYNC_PUSH_BATCH_ENTITIES: usize = 400;
 const SYNC_PUSH_BATCH_BYTES: usize = 2 * 1024 * 1024;
 const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const EXIT_SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
-const EXIT_SYNC_MAX_PULL_PAGES: usize = 4;
 const SYNC_REQUEST_ATTEMPTS: usize = 3;
 const SYNC_RETRY_DELAYS_MS: &[u64] = &[250, 500];
-const EXIT_SYNC_RETRY_DELAYS_MS: &[u64] = &[];
 const SYNC_PAUSED: &str = "__sync_paused__";
 const SYNC_CANCELLED: &str = "__sync_cancelled__";
 struct SyncRunGuard<'a>(&'a AtomicBool);
@@ -1634,24 +1631,6 @@ fn sync_now_inner(state: &AppState, task: Option<&TaskRunGuard>) -> Result<SyncR
     )
 }
 
-/// Whether this device has a complete saved login. The token stays in Rust and
-/// is only decrypted long enough to decide whether an automatic sync is useful.
-pub(crate) fn sync_account_configured(state: &AppState) -> bool {
-    let Ok(db_guard) = state.db.lock() else {
-        return false;
-    };
-    let Some(db) = db_guard.as_ref() else {
-        return false;
-    };
-    let settings = sync_settings_from_db(db);
-    !settings.username.trim().is_empty()
-        && !settings.token.trim().is_empty()
-        && normalize_sync_base(&settings.url).is_ok()
-}
-
-/// Closing must remain responsive when the network is unavailable. Limit both
-/// each request and the number of pull pages; an unfinished sync resumes on the
-/// next startup without discarding local dirty entities.
 fn settle_sync_task(task: TaskRunGuard, result: &Result<SyncReport, String>) {
     match result {
         Ok(_) => {
@@ -1667,39 +1646,6 @@ fn settle_sync_task(task: TaskRunGuard, result: &Result<SyncReport, String>) {
             let _ = task.fail(error.clone());
         }
     }
-}
-
-/// Schedule the bounded exit sync through the shared task executor, then close
-/// the main window regardless of network outcome. The window lifecycle no
-/// longer creates its own unmanaged thread.
-pub(crate) fn spawn_sync_before_exit(app: tauri::AppHandle) -> Result<(), String> {
-    let task_handle = app
-        .state::<AppState>()
-        .background_tasks
-        .enqueue(BackgroundTaskKind::Sync, "退出前同步");
-    task_handle.spawn_detached("reader-sync-before-exit", move |task| {
-        crate::log("[sync] exit automatic sync start");
-        let result = {
-            let state = app.state::<AppState>();
-            sync_now_inner_with_limits(
-                state.inner(),
-                EXIT_SYNC_REQUEST_TIMEOUT,
-                EXIT_SYNC_MAX_PULL_PAGES,
-                EXIT_SYNC_RETRY_DELAYS_MS,
-                Some(&task),
-            )
-        };
-        settle_sync_task(task, &result);
-        match result {
-            Ok(_) => crate::log("[sync] exit automatic sync ok"),
-            Err(error) => crate::log(&format!(
-                "[sync] exit automatic sync skipped/failed: {error}"
-            )),
-        }
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.close();
-        }
-    })
 }
 
 #[tauri::command]
@@ -2006,25 +1952,6 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.contains("401"));
-        assert_eq!(attempts, 1);
-    }
-
-    #[test]
-    fn exit_sync_uses_one_short_network_attempt() {
-        assert_eq!(EXIT_SYNC_REQUEST_TIMEOUT, Duration::from_secs(1));
-        assert!(EXIT_SYNC_RETRY_DELAYS_MS.is_empty());
-        let mut attempts = 0usize;
-        let error = sync_request_with_retry_delays::<()>(
-            "exit-test",
-            None,
-            EXIT_SYNC_RETRY_DELAYS_MS,
-            || {
-                attempts += 1;
-                Err(ureq::Error::HostNotFound)
-            },
-        )
-        .unwrap_err();
-        assert!(error.contains("exit-test"));
         assert_eq!(attempts, 1);
     }
 
