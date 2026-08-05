@@ -104,9 +104,14 @@ pub(crate) fn clear_semantic_aux_memory_caches() {
     profile::clear_caches();
 }
 
-/// 启动后低成本预载合并画像。13 MB 左右的单文件换来首查不再打开上千个小文件。
+/// 画像预热会读取整份书库语义快照；默认不在启动时运行，避免与刚打开的阅读页
+/// 抢占 CPU/磁盘。性能诊断可显式开启，正常使用仍在第一次真实语义查询时惰性加载。
 pub(crate) fn spawn_semantic_profile_warmup(app: tauri::AppHandle) {
-    profile::spawn_warmup(app);
+    if std::env::var_os("KUNPENG_SEMANTIC_PROFILE_WARM_ON_START").is_some() {
+        profile::spawn_warmup(app);
+    } else {
+        crate::log("semantic_profile_bundle startup warmup skipped; lazy on first semantic query");
+    }
 }
 
 fn sem_index_done_for_book(book: &book::Book) -> bool {

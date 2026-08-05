@@ -5,7 +5,7 @@ use crate::{
     background_tasks::{BackgroundTaskKind, TaskControlSignal},
     book, emit_startup_perf, interactive_search_workers,
     reader_protocol::strip_tags,
-    set_thread_background, url_open, with_thread_background_priority, AppState,
+    set_thread_background, url_open, window_commands, with_thread_background_priority, AppState,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -501,6 +501,11 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
         let mut indexed = 0usize;
         let mut content_ids_changed = false;
         for (index, mut b) in books.into_iter().enumerate().skip(resume_from) {
+            // 关键词维护会逐本读取源文件；让阅读窗口优先，避免在章节切换时抢磁盘。
+            while window_commands::any_reader_window_open(&app) {
+                emit_startup_perf(&app, "keyword-index", "paused", "reader window open");
+                std::thread::sleep(std::time::Duration::from_secs(15));
+            }
             match task.control_signal() {
                 TaskControlSignal::Continue => {}
                 TaskControlSignal::Pause => {
