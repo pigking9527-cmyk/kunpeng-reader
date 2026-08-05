@@ -13,6 +13,7 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
   assert.match(html, /id="newsnow-page"/);
   assert.match(html, /id="newsnow-back"/);
   assert.match(html, /id="newsnow-feed"/);
+  assert.match(html, /<\/section>\s*<section id="newsnow-reader"/);
   assert.match(html, /<script src="news-ui\.js"><\/script>/);
 });
 
@@ -28,18 +29,18 @@ test("NewsNow is gated behind the local experimental switch", () => {
   assert.match(script, /if \(!enabled && !page\.hidden\) close\(\{ focus: false \}\)/);
 });
 
-test("NewsNow is rendered in the main browser page and asks Rust for sanitized articles", () => {
+test("NewsNow opens a full source webpage in the main browser page", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
   assert.match(script, /page\.hidden = false; shell\.hidden = true/);
-  assert.match(script, /invoke\("newsnow_read_article", \{ request \}\)/);
+  assert.match(script, /readerFrame\.src = url/);
   assert.match(script, /function withTimeout/);
   assert.match(script, /资讯请求超时/);
-  assert.match(script, /contentHtml is parsed and sanitized by the Rust command/);
+  assert.match(script, /readerFrame\.src = "about:blank"/);
+  assert.match(script, /reader\.hidden = !visible; page\.hidden = visible/);
   assert.match(script, /ReaderLibraryAiEntry\?\.close\(\)/);
-  assert.doesNotMatch(html, /newsnow-reader-frame/);
-  assert.match(html, /id="newsnow-article-body"/);
-  assert.match(html, /id="newsnow-article-original"/);
+  assert.match(html, /id="newsnow-reader-frame"/);
+  assert.doesNotMatch(script, /newsnow_read_article/);
 });
 
 test("NewsNow stores a local, bounded source selection and sends only source IDs", () => {
@@ -87,8 +88,8 @@ test("NewsNow presents a chronological reading feed and stays usable on narrow w
   assert.match(styles, /\.newsnow-source-picker\s*\{/);
   assert.match(styles, /\.newsnow-card:hover, \.newsnow-card:focus-visible/);
   assert.match(styles, /\.newsnow-reader\s*\{/);
-  assert.match(styles, /\.newsnow-page\.newsnow-reading\s*\{/);
+  assert.match(styles, /\.newsnow-reader\s*\{[^}]*flex: 1 1 auto/s);
   assert.match(styles, /\.newsnow-reader-back\s*\{/);
-  assert.match(styles, /\.newsnow-article-body\s*\{/);
+  assert.match(styles, /\.newsnow-reader-frame\s*\{/);
   assert.match(styles, /@media \(max-width: 620px\)/);
 });

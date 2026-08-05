@@ -5,12 +5,11 @@
 //! the local source catalogue, while the Rust side fetches and validates HTTPS
 //! article URLs before handing them back to the UI.
 
-use crate::{html_sanitize, url_open};
+use crate::url_open;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    io::Read,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -22,7 +21,6 @@ const MAX_ITEMS_PER_SOURCE: usize = 16;
 const MAX_TOTAL_ITEMS: usize = 90;
 const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
-const ARTICLE_MAX_BYTES: u64 = 3 * 1024 * 1024;
 const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
 
@@ -322,28 +320,6 @@ pub(crate) struct NewsNowStatus {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct NewsNowArticleRequest {
-    pub url: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub source: String,
-    #[serde(default)]
-    pub published_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct NewsNowArticle {
-    pub url: String,
-    pub title: String,
-    pub source: String,
-    pub published_at: String,
-    pub content_html: String,
-}
-
 #[derive(Default)]
 struct NewsCache {
     source_ids: Vec<String>,
@@ -402,281 +378,6 @@ fn http_agent() -> ureq::Agent {
         .timeout_recv_body(Some(Duration::from_secs(12)))
         .build()
         .into()
-}
-
-fn tag_block(html: &str, tag: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let open = format!("<{tag}");
-    let close = format!("</{tag}");
-    let start = lower.find(&open)?;
-    let after_open = start + lower[start..].find('>')? + 1;
-    let end = after_open + lower[after_open..].find(&close)?;
-    Some(html[after_open..end].to_string())
-}
-
-fn semantic_div_block(html: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let mut offset = 0;
-    while let Some(found) = lower[offset..].find("<div") {
-        let start = offset + found;
-        let open_end = start + lower[start..].find('>')? + 1;
-        let opening = &lower[start..open_end];
-        if [
-            "article",
-            "post-content",
-            "article-content",
-            "entry-content",
-            "news-content",
-            "detail-content",
-        ]
-        .iter()
-        .any(|marker| opening.contains(marker))
-        {
-            if let Some(close) = lower[open_end..].find("</div") {
-                return Some(html[open_end..open_end + close].to_string());
-            }
-        }
-        offset = open_end;
-    }
-    None
-}
-
-fn strip_tag_blocks(mut html: String) -> String {
-    for tag in [
-        "script", "style", "noscript", "header", "nav", "footer", "aside", "form", "dialog",
-    ] {
-        loop {
-            let lower = html.to_ascii_lowercase();
-            let open = format!("<{tag}");
-            let close = format!("</{tag}");
-            let Some(start) = lower.find(&open) else {
-                break;
-            };
-            let Some(after_open) = lower[start..].find('>').map(|end| start + end + 1) else {
-                break;
-            };
-            let Some(end) = lower[after_open..].find(&close).map(|end| after_open + end) else {
-                break;
-            };
-            let Some(close_end) = lower[end..].find('>').map(|offset| end + offset + 1) else {
-                break;
-            };
-            html.replace_range(start..close_end, "");
-        }
-    }
-    html
-}
-
-fn matching_tag_end(lower: &str, tag: &str, mut cursor: usize) -> Option<usize> {
-    let open = format!("<{tag}");
-    let close = format!("</{tag}");
-    let mut depth = 1usize;
-    while cursor < lower.len() {
-        let next_open = lower[cursor..].find(&open).map(|offset| cursor + offset);
-        let next_close = lower[cursor..].find(&close).map(|offset| cursor + offset);
-        let next = match (next_open, next_close) {
-            (Some(open), Some(close)) if close < open => (close, false),
-            (Some(open), _) => (open, true),
-            (None, Some(close)) => (close, false),
-            (None, None) => return None,
-        };
-        let end = next.0 + lower[next.0..].find('>')? + 1;
-        if next.1 {
-            if !lower[next.0..end].trim_end().ends_with("/>") {
-                depth += 1;
-            }
-        } else {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(end);
-            }
-        }
-        cursor = end;
-    }
-    None
-}
-
-fn strip_decorative_blocks(mut html: String) -> String {
-    const MARKERS: &[&str] = &[
-        "comment",
-        "recommend",
-        "related",
-        "advert",
-        "advertisement",
-        "sponsor",
-        "login",
-        "signin",
-        "subscribe",
-        "share",
-        "toolbar",
-        "cookie",
-    ];
-    for tag in ["div", "section", "ul", "ol"] {
-        loop {
-            let lower = html.to_ascii_lowercase();
-            let open = format!("<{tag}");
-            let mut cursor = 0;
-            let mut target = None;
-            while let Some(found) = lower[cursor..].find(&open) {
-                let start = cursor + found;
-                let Some(end) = lower[start..].find('>').map(|offset| start + offset + 1) else {
-                    break;
-                };
-                if MARKERS
-                    .iter()
-                    .any(|marker| lower[start..end].contains(marker))
-                {
-                    target = Some((start, end));
-                    break;
-                }
-                cursor = end;
-            }
-            let Some((start, after_open)) = target else {
-                break;
-            };
-            let Some(end) = matching_tag_end(&lower, tag, after_open) else {
-                break;
-            };
-            html.replace_range(start..end, "");
-        }
-    }
-    html
-}
-
-fn article_candidate(html: &str) -> String {
-    tag_block(html, "article")
-        .or_else(|| tag_block(html, "main"))
-        .or_else(|| semantic_div_block(html))
-        .or_else(|| tag_block(html, "body"))
-        .unwrap_or_else(|| html.to_string())
-}
-
-fn article_absolute_url(page_url: &str, value: &str) -> String {
-    let value = value.trim();
-    if value.is_empty()
-        || value.starts_with('#')
-        || value.starts_with("data:")
-        || value.starts_with("mailto:")
-        || value.starts_with("tel:")
-        || value.contains(':')
-    {
-        return value.to_string();
-    }
-    let Some(rest) = page_url.strip_prefix("https://") else {
-        return value.to_string();
-    };
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let origin = format!("https://{}", &rest[..authority_end]);
-    if let Some(path) = value.strip_prefix("//") {
-        return format!("https://{path}");
-    }
-    if value.starts_with('/') {
-        return format!("{origin}{value}");
-    }
-    let page_path = rest[authority_end..]
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("/");
-    let directory = page_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-    format!("{origin}{directory}/{value}")
-}
-
-fn rewrite_url_attribute(html: &str, attribute: &str, page_url: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let lower = html.to_ascii_lowercase();
-    let needle = format!("{attribute}=");
-    let mut cursor = 0;
-    while let Some(found) = lower[cursor..].find(&needle) {
-        let start = cursor + found;
-        let value_start = start + needle.len();
-        let bytes = html.as_bytes();
-        if value_start >= bytes.len() {
-            break;
-        }
-        let quote = bytes[value_start];
-        let (content_start, content_end, attribute_end) = if quote == b'\'' || quote == b'"' {
-            let content_start = value_start + 1;
-            let Some(relative_end) = html[content_start..].find(quote as char) else {
-                break;
-            };
-            let content_end = content_start + relative_end;
-            (content_start, content_end, content_end + 1)
-        } else {
-            let relative_end = html[value_start..]
-                .find(|ch: char| ch.is_whitespace() || ch == '>')
-                .unwrap_or(html.len() - value_start);
-            (
-                value_start,
-                value_start + relative_end,
-                value_start + relative_end,
-            )
-        };
-        out.push_str(&html[cursor..content_start]);
-        out.push_str(&article_absolute_url(
-            page_url,
-            &html[content_start..content_end],
-        ));
-        out.push_str(&html[content_end..attribute_end]);
-        cursor = attribute_end;
-    }
-    out.push_str(&html[cursor..]);
-    out
-}
-
-fn extract_article_html(html: &str, page_url: &str) -> String {
-    let candidate = strip_tag_blocks(article_candidate(html));
-    let candidate = strip_decorative_blocks(candidate);
-    let candidate = rewrite_url_attribute(&candidate, "src", page_url);
-    let candidate = rewrite_url_attribute(&candidate, "href", page_url);
-    html_sanitize::sanitize_web_article_html(&candidate)
-}
-
-fn fetch_article(request: NewsNowArticleRequest) -> Result<NewsNowArticle, String> {
-    let url = url_open::validate_https_url(request.url.trim())?.to_string();
-    if url.len() > 2_000 {
-        return Err("资讯原文地址过长".to_string());
-    }
-    let mut response = http_agent()
-        .get(&url)
-        .header("User-Agent", NEWSNOW_USER_AGENT)
-        .header("Accept", "text/html,application/xhtml+xml")
-        .call()
-        .map_err(|_| "无法请求资讯原文".to_string())?;
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !content_type.is_empty() && !content_type.contains("html") {
-        return Err("该链接不是可阅读的网页".to_string());
-    }
-    let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(ARTICLE_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "无法读取资讯原文".to_string())?;
-    if bytes.len() as u64 > ARTICLE_MAX_BYTES {
-        return Err("资讯原文过大，已停止加载".to_string());
-    }
-    let raw = String::from_utf8_lossy(&bytes);
-    let content_html = extract_article_html(&raw, &url);
-    if html_sanitize::html_to_plain_text(&content_html)
-        .chars()
-        .count()
-        < 40
-    {
-        return Err("未能从该网页提取足够正文，可打开原网页阅读".to_string());
-    }
-    Ok(NewsNowArticle {
-        url,
-        title: trim_chars(request.title.trim(), MAX_TEXT_CHARS),
-        source: trim_chars(request.source.trim(), 120),
-        published_at: trim_chars(request.published_at.trim(), 120),
-        content_html,
-    })
 }
 
 fn selected_sources(request: Option<NewsNowRequest>) -> Vec<NewsSource> {
@@ -965,15 +666,6 @@ pub(crate) async fn newsnow_refresh(request: Option<NewsNowRequest>) -> NewsNowL
         })
 }
 
-#[tauri::command]
-pub(crate) async fn newsnow_read_article(
-    request: NewsNowArticleRequest,
-) -> Result<NewsNowArticle, String> {
-    tokio::task::spawn_blocking(move || fetch_article(request))
-        .await
-        .map_err(|error| format!("资讯正文任务失败：{error}"))?
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1030,28 +722,6 @@ mod tests {
         assert_eq!(items[0].source_id, "weibo");
         assert_eq!(items[0].summary, "摘要");
         assert_eq!(items[1].url, "https://m.example.com/c");
-    }
-
-    #[test]
-    fn article_extraction_keeps_body_and_drops_publisher_chrome() {
-        let raw = r#"<html><body><nav>站点顶栏</nav><article class="publisher-theme"><header>文章头</header><p>这是足够长的正文内容，用于确认资讯页面只保留正文而不带网站导航。</p><section class="article-recommend">推荐内容</section><div id="comments">用户评论</div><img src="https://img.example/a.jpg"><script>bad()</script></article><footer>页脚</footer></body></html>"#;
-        let extracted = extract_article_html(raw, "https://news.example/path/story.html");
-        assert!(extracted.contains("足够长的正文内容"));
-        assert!(extracted.contains("https://img.example/a.jpg"));
-        assert!(!extracted.contains("站点顶栏"));
-        assert!(!extracted.contains("文章头"));
-        assert!(!extracted.contains("推荐内容"));
-        assert!(!extracted.contains("用户评论"));
-        assert!(!extracted.contains("publisher-theme"));
-        assert!(!extracted.contains("script"));
-    }
-
-    #[test]
-    fn article_extraction_resolves_relative_images_and_links() {
-        let raw = r#"<article><p>这是足够长的正文内容，用于确认相对资源会在阅读器中保持可访问。</p><img src="images/a.jpg"><a href="/next">后续报道</a></article>"#;
-        let extracted = extract_article_html(raw, "https://news.example/path/story.html");
-        assert!(extracted.contains(r#"src="https://news.example/path/images/a.jpg""#));
-        assert!(extracted.contains(r#"href="https://news.example/next""#));
     }
 
     #[test]
