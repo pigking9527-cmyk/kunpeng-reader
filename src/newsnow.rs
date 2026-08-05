@@ -722,8 +722,14 @@ fn parse_source_response(source: NewsSource, response: Value) -> Vec<NewsNowItem
         .take(MAX_ITEMS_PER_SOURCE)
         .filter_map(|item| {
             let title = trim_chars(&value_to_text(item.get("title")), MAX_TEXT_CHARS);
-            let url =
-                https_text(item.get("mobileUrl")).or_else_if_empty(|| https_text(item.get("url")));
+            // 财联社的 mobileUrl 指向带版本号的 App 分享页；该页面会随
+            // 分享协议过期而显示“版本过低”。其 canonical detail URL 则是
+            // 正常的公开文章页。其他来源仍优先使用各自的移动端链接。
+            let url = if source.id == "cls-telegraph" {
+                https_text(item.get("url")).or_else_if_empty(|| https_text(item.get("mobileUrl")))
+            } else {
+                https_text(item.get("mobileUrl")).or_else_if_empty(|| https_text(item.get("url")))
+            };
             if title.is_empty() || url.is_empty() {
                 return None;
             }
@@ -1106,6 +1112,24 @@ mod tests {
         assert!(parse_source_response(CURATED_SOURCES[0], response)[0]
             .image_url
             .is_empty());
+    }
+
+    #[test]
+    fn parser_uses_canonical_cls_article_instead_of_expiring_share_page() {
+        let source = *CURATED_SOURCES
+            .iter()
+            .find(|source| source.id == "cls-telegraph")
+            .expect("财联社来源应在目录中");
+        let response = json!({
+            "items": [{
+                "id": 7,
+                "title": "财联社电报",
+                "url": "https://www.cls.cn/detail/123456",
+                "mobileUrl": "https://api3.cls.cn/share/article/123456?os=web&sv=7.7.5&app="
+            }]
+        });
+        let items = parse_source_response(source, response);
+        assert_eq!(items[0].url, "https://www.cls.cn/detail/123456");
     }
 
     #[test]
