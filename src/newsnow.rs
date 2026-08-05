@@ -35,6 +35,7 @@ const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
 const ARTICLE_WEBVIEW_LABEL: &str = "newsnow-article";
 const ARTICLE_RETURN_URL: &str = "https://reader.localhost/__kunpeng_news_return__";
+type NewsSourceParser = fn(NewsSource, &str) -> Vec<NewsNowItem>;
 const ARTICLE_RETURN_SCRIPT: &str = r##"
 (() => {
   if (window.top !== window) return;
@@ -1012,7 +1013,7 @@ fn cached_news(sources: &[NewsSource], include_stale: bool) -> Option<NewsNowLis
     }
     let stale = cached
         .fetched_instant
-        .map_or(true, |fetched| fetched.elapsed() >= CACHE_TTL);
+        .is_none_or(|fetched| fetched.elapsed() >= CACHE_TTL);
     if stale && !include_stale {
         return None;
     }
@@ -1330,7 +1331,7 @@ fn fetch_game_news_source(
     agent: &ureq::Agent,
     source: NewsSource,
 ) -> Result<Vec<NewsNowItem>, String> {
-    let (url, parser): (&str, fn(NewsSource, &str) -> Vec<NewsNowItem>) = match source.id {
+    let (url, parser): (&str, NewsSourceParser) = match source.id {
         "3dm-news" => ("https://www.3dmgame.com/news/", parse_3dm_news_html),
         "gamersky-news" => ("https://www.gamersky.com/news/", parse_gamersky_news_html),
         _ => return Err(source.name.to_string()),

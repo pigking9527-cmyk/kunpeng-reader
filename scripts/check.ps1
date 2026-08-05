@@ -327,11 +327,20 @@ try {
     $releaseExe = Join-Path $repo 'target\release\ebook-reader-tauri.exe'
     $productExe = [string]$tauri.productName + '.exe'
     $repoExe = Join-Path $repo $productExe
-    $desktopExe = Join-Path ([Environment]::GetFolderPath('Desktop')) $productExe
-    foreach ($file in @($releaseExe, $repoExe, $desktopExe)) {
+    $repoOrt = Join-Path $repo 'onnxruntime.dll'
+    $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) ([string]$tauri.productName + '.lnk')
+    foreach ($file in @($releaseExe, $repoExe, $repoOrt)) {
       if (-not (Test-Path -LiteralPath $file)) { throw "Release artifact missing: $file" }
       $item = Get-Item -LiteralPath $file
-      if ($item.Length -lt 10MB) { throw "Release artifact looks too small: $file ($($item.Length) bytes)" }
+      $minimumSize = if ($file -eq $repoOrt) { 1MB } else { 10MB }
+      if ($item.Length -lt $minimumSize) { throw "Release artifact looks too small: $file ($($item.Length) bytes)" }
+    }
+    if (-not (Test-Path -LiteralPath $desktopShortcut)) {
+      throw "Desktop shortcut missing: $desktopShortcut"
+    }
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($desktopShortcut)
+    if ([IO.Path]::GetFullPath($shortcut.TargetPath) -ne [IO.Path]::GetFullPath($repoExe)) {
+      throw "Desktop shortcut target is not the project executable: $($shortcut.TargetPath)"
     }
     $installer = Get-ChildItem -LiteralPath (Join-Path $repo 'target\release\bundle') -Recurse -File -Include '*.exe','*.msi' -ErrorAction SilentlyContinue |
       Sort-Object LastWriteTime -Descending |

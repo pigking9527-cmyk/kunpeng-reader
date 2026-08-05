@@ -3,7 +3,7 @@
 一个面向 Windows、macOS、Linux 与 Android 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
-> 最新版本：Windows **v1.11.1** · macOS / Linux **v1.11.0** · Android **v0.3.0**。下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP；Linux AppImage / deb；Android Profile APK）。
+> 最新版本：Windows **v1.11.2** · macOS / Linux **v1.11.0** · Android **v0.3.0**。下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP；Linux AppImage / deb；Android Profile APK）。
 
 ## 特性
 
@@ -31,6 +31,12 @@
 - **模型辅助分类**：可为图书生成独立于手工标签的大模型分类标签，用于改善书库检索、范围筛选和回答排序
 - **历史与隐私**：问答记录默认保存在本机；只有用户主动开启“同步智读历史”才同步问题、回答和脱敏来源索引，不上传书籍正文、原文件、本机路径、语义索引或明文 API Key
 - **多模型配置**：支持 DeepSeek、OpenAI、Claude 与 OpenAI 兼容接口，可保存多套模型配置，并在书库问答与阅读页智读中切换
+
+**资讯（Windows）**
+
+- **本机资讯流**：在主窗口浏览器内渲染资讯流，可按类别选择并管理最多 24 个来源，支持横排 / 方格、混合 / 按来源排列，并新增 3DM、游民星空新闻
+- **干净正文**：点击资讯后在阅读器内打开提取后的标题、正文、图片、来源与发布时间，丢弃站点导航、广告、评论和登录浮层；右侧保留单一返回资讯流按钮
+- **本地缓存与预取**：可在资讯设置中启用后台预取；应用空闲后每 5 分钟刷新已启用来源，最多 6 路并发，打开时优先显示本地缓存，封面仍按卡片进入视野时懒加载
 
 **Android v0.3.0**
 - **书架与导入**：账号、搜索、统计、筛选与布局、设置、更多六个一级入口；支持系统文件选择导入 EPUB / TXT、Download 自动导入、批量导入及封面墙阅读进度显示
@@ -74,7 +80,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 
 GitHub Actions 会在 `main` 的 push / pull request 上自动运行同一套检查。
 
-发布构建（生成 release exe、复制单个可执行文件到桌面、校验图标并刷新 Windows 图标缓存）：
+发布构建（生成 release exe、将运行文件更新到项目根目录、在桌面创建快捷方式、校验图标并刷新 Windows 图标缓存）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1
@@ -93,7 +99,7 @@ cargo tauri build
 # 安装包输出：target/release/bundle/nsis/
 ```
 
-- 单文件绿色版：`target/release/ebook-reader-tauri.exe` 或桌面 `鲲鹏阅读器.exe`
+- 单文件绿色版：`target/release/ebook-reader-tauri.exe`；本机运行文件为项目根目录的 `鲲鹏阅读器.exe` 与 `onnxruntime.dll`，桌面仅创建 `鲲鹏阅读器.lnk` 快捷方式
 - 安装包：`target/release/bundle/nsis/`
 
 ### Linux x86_64
