@@ -72,9 +72,13 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon::before\s*\{[^}]*width: 9px[^}]*height: 9px[^}]*box-shadow: 11px 0 currentColor, 0 11px currentColor, 11px 11px currentColor/s);
-  assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*column-width: 210px/s);
-  assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid > \.newsnow-card\s*\{[^}]*break-inside: avoid/s);
-  assert.match(styles, /\.newsnow-feed-grid\.newsnow-feed-by-source \.newsnow-source-cards\s*\{[^}]*column-width: 210px/s);
+  assert.match(script, /function masonryColumnCount\(\)/);
+  assert.match(script, /className = "newsnow-masonry-column"/);
+  assert.match(script, /items\.forEach\(\(item, index\) => columns\[index % columns\.length\]/);
+  assert.match(script, /global\.addEventListener\("resize"/);
+  assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*repeat\(var\(--newsnow-grid-columns, 1\)/s);
+  assert.match(styles, /\.newsnow-masonry-column\s*\{[^}]*flex-direction: column/s);
+  assert.doesNotMatch(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*column-width/s);
   assert.match(styles, /\.newsnow-card-image\s*\{/);
   assert.match(styles, /\.newsnow-card-image\[hidden\]\s*\{\s*display: none/);
   assert.doesNotMatch(styles, /\.newsnow-feed\.newsnow-feed-grid \.newsnow-card\s*\{[^}]*height: 222px/s);
