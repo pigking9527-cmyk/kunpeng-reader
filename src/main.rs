@@ -340,6 +340,7 @@ fn main() {
             newsnow::newsnow_sources,
             newsnow::newsnow_list,
             newsnow::newsnow_refresh,
+            newsnow::newsnow_preview_image,
             ai_reader::ai_reader_status,
             ai_reader::ai_reader_profiles,
             ai_reader::select_ai_reader_profile,

@@ -63,11 +63,15 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(script, /function setLayout\(next\)/);
   assert.match(script, /feed\.classList\.toggle\("newsnow-feed-grid", grid\)/);
   assert.match(script, /newsnow-card-image/);
+  assert.match(script, /newsnow_preview_image/);
+  assert.match(script, /IntersectionObserver/);
   assert.match(script, /gridLayout\.addEventListener\("click", \(\) => setLayout\("grid"\)\)/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*minmax\(210px, 1fr\)/s);
   assert.match(styles, /\.newsnow-card-image\s*\{/);
+  assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid \.newsnow-card\s*\{[^}]*height: 222px/s);
+  assert.match(styles, /\.newsnow-card h2\s*\{[^}]*-webkit-line-clamp: 4/s);
 });
 
 test("NewsNow persists mixed or source-grouped ordering", () => {
