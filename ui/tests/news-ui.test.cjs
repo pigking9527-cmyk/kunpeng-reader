@@ -62,9 +62,12 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(script, /const LAYOUT_STORAGE_KEY = "kunpeng\.reader\.news\.layout\.v1"/);
   assert.match(script, /function setLayout\(next\)/);
   assert.match(script, /feed\.classList\.toggle\("newsnow-feed-grid", grid\)/);
+  assert.match(script, /newsnow-card-image/);
   assert.match(script, /gridLayout\.addEventListener\("click", \(\) => setLayout\("grid"\)\)/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
+  assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*minmax\(210px, 1fr\)/s);
+  assert.match(styles, /\.newsnow-card-image\s*\{/);
 });
 
 test("NewsNow persists mixed or source-grouped ordering", () => {
