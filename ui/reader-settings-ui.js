@@ -14,7 +14,7 @@ const DEFAULTS = {
   theme: "light",
   fontFamily: "",
   styleMode: "local",
-  textConversion: "original",
+  textConversion: "t2s",
   fontSize: 18,
   noteFontSize: 14,
   lineHeight: 1.7,
@@ -74,7 +74,11 @@ function normalizeModeSettings() {
     settings.pageTurnEffect = DEFAULTS.pageTurnEffect;
     changed = true;
   }
-  if (!["original", "t2s", "s2t"].includes(settings.textConversion)) {
+  // v1.11.2 的“原文”选项迁移为简体，新的开关始终在简/繁之间切换。
+  if (settings.textConversion === "original") {
+    settings.textConversion = "t2s";
+    changed = true;
+  } else if (!["t2s", "s2t"].includes(settings.textConversion)) {
     settings.textConversion = DEFAULTS.textConversion;
     changed = true;
   }
@@ -259,11 +263,11 @@ function initSettingsUI() {
       onChange();
     });
   }
-  const textConversion = document.getElementById("set-text-conversion");
-  if (textConversion) {
-    textConversion.value = settings.textConversion;
-    textConversion.addEventListener("change", () => {
-      settings.textConversion = textConversion.value;
+  const textConversionSimple = document.getElementById("set-text-conversion-simple");
+  if (textConversionSimple) {
+    textConversionSimple.checked = settings.textConversion !== "s2t";
+    textConversionSimple.addEventListener("change", () => {
+      settings.textConversion = textConversionSimple.checked ? "t2s" : "s2t";
       onChange();
     });
   }

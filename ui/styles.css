@@ -19,12 +19,14 @@ body {
   box-shadow: 0 10px 40px rgba(0,0,0,0.3); padding: 16px 18px;
 }
 #fp-settings-modal .modal-card {
-  width: min(600px, calc(100vw - 48px));
-  height: min(720px, calc(100vh - 64px));
+  width: min(480px, calc(100vw - 48px));
+  height: min(760px, calc(100vh - 64px));
   max-width: calc(100vw - 48px);
   max-height: calc(100vh - 64px);
   overflow-y: auto;
 }
+#fp-settings-modal .modal-head { font-size: 20px; margin-bottom: 14px; }
+#fp-settings-modal .fp-row-gear { font-size: 20px; }
 .api-settings-card { width: min(620px, calc(100vw - 48px)); max-height: min(760px, calc(100vh - 56px)); overflow-y: auto; }
 .api-settings-note { margin: 0 0 10px; color: #718097; font-size: 12px; line-height: 1.55; }
 .api-settings-section { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 8px 12px; padding: 14px 0; border-top: 1px solid #e9edf3; }
@@ -605,9 +607,9 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .fp-choice-empty { color: #9aa0aa; font-size: 13px; padding: 5px 0; }
 /* “我的书架”设置行：左文字右控件 */
 .fp-set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  font-size: 14px; color: #333; padding: 6px 0; white-space: nowrap; }
+  font-size: 16px; color: #333; padding: 8px 0; white-space: nowrap; }
 .fp-set-tail { display: inline-flex; align-items: center; gap: 10px; }
-.app-language-select { min-width: 156px; max-width: 54%; padding: 5px 8px; border: 1px solid #cfd7e6; border-radius: 7px; background: #fff; color: #344154; font: inherit; font-size: 13px; }
+.app-language-select { min-width: 156px; max-width: 54%; padding: 6px 8px; border: 1px solid #cfd7e6; border-radius: 7px; background: #fff; color: #344154; font: inherit; font-size: 15px; }
 .fp-row-gear { border: none; background: transparent; cursor: pointer; font-size: 17px;
   color: #888; line-height: 1; padding: 2px; }
 .fp-row-gear:hover { color: #2b6cff; }
