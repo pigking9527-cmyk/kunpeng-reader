@@ -67,6 +67,7 @@
     const sourceClose = root.getElementById("newsnow-source-close");
     const sourceApply = root.getElementById("newsnow-source-apply");
     const sourceReset = root.getElementById("newsnow-source-reset");
+    const sourceSelection = root.getElementById("newsnow-source-selection");
     const sourceSummary = root.getElementById("newsnow-source-summary");
     const listLayout = root.getElementById("newsnow-layout-list");
     const gridLayout = root.getElementById("newsnow-layout-grid");
@@ -80,7 +81,7 @@
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerBack || !readerStatus || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSelection || !sourceSummary || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerBack || !readerStatus || !categories || !updated || !shell) return null;
 
     let catalog = [], sourceIds = [], pendingSourceIds = [], allItems = [];
     let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
@@ -99,6 +100,7 @@
     function setStatus(message, kind = "") { status.textContent = text(message); status.className = "newsnow-status" + (kind ? " " + kind : ""); }
     function sourceForId(id) { return catalog.find((source) => text(source.id) === text(id)); }
     function renderSourceSummary() { sourceSummary.textContent = sourceIds.length ? `显示 ${sourceIds.length} 个来源` : "使用推荐来源"; }
+    function renderSourceSelection() { sourceSelection.textContent = `已选 ${pendingSourceIds.length} / ${MAX_SOURCES}`; }
     function categoriesForSelection() { return [...new Set(sourceIds.map(sourceForId).filter(Boolean).map(sourceCategory))]; }
     function applyDisplayOptions() {
       const grid = layout === "grid";
@@ -123,6 +125,7 @@
     }
     function renderSourcePicker() {
       const groups = new Map(), query = sourceQuery.trim().toLocaleLowerCase(), selected = new Set(pendingSourceIds);
+      renderSourceSelection();
       catalog.filter((source) => !query || [source.id, source.name, source.category].some((value) => text(value).toLocaleLowerCase().includes(query))).forEach((source) => {
         const category = sourceCategory(source); if (!groups.has(category)) groups.set(category, []); groups.get(category).push(source);
       });
@@ -132,10 +135,11 @@
         group.className = "newsnow-source-group"; title.textContent = category; choices.className = "newsnow-source-choices";
         sources.forEach((source) => {
           const label = root.createElement("label"), checkbox = root.createElement("input"), swatch = root.createElement("i"), name = root.createElement("span"), id = text(source.id);
-          label.className = "newsnow-source-choice"; checkbox.type = "checkbox"; checkbox.checked = selected.has(id); swatch.style.background = text(source.color || "#718097"); name.textContent = text(source.name);
+          checkbox.type = "checkbox"; checkbox.checked = selected.has(id); label.className = "newsnow-source-choice" + (checkbox.checked ? " selected" : ""); swatch.style.background = text(source.color || "#718097"); name.textContent = text(source.name);
           checkbox.addEventListener("change", () => {
             if (checkbox.checked) { if (pendingSourceIds.length >= MAX_SOURCES) { checkbox.checked = false; setStatus(`最多选择 ${MAX_SOURCES} 个来源。`, "warning"); return; } pendingSourceIds = [...pendingSourceIds, id]; }
             else pendingSourceIds = pendingSourceIds.filter((value) => value !== id);
+            label.classList.toggle("selected", checkbox.checked); renderSourceSelection();
           });
           label.append(checkbox, swatch, name); choices.appendChild(label);
         });
@@ -217,7 +221,7 @@
     }
     function renderFeed() {
       const items = filteredItems(); applyDisplayOptions();
-      if (!items.length) { const empty = root.createElement("div"); empty.className = "newsnow-empty"; empty.textContent = allItems.length ? "这个分类暂时没有资讯。" : "暂无资讯。请刷新，或在“添加来源”中调整显示内容。"; feed.replaceChildren(empty); return; }
+      if (!items.length) { const empty = root.createElement("div"); empty.className = "newsnow-empty"; empty.textContent = allItems.length ? "这个分类暂时没有资讯。" : "暂无资讯。请刷新，或在“管理来源”中调整显示内容。"; feed.replaceChildren(empty); return; }
       if (order === "mixed") { renderCards(feed, items); return; }
       const groups = new Map(); items.forEach((item) => { const id = sourceId(item); if (!groups.has(id)) groups.set(id, []); groups.get(id).push(item); });
       const orderedIds = [...sourceIds, ...groups.keys()].filter((id, index, list) => groups.has(id) && list.indexOf(id) === index);
