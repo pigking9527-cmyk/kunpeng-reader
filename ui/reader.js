@@ -962,11 +962,17 @@ let bookProgressLastFrac = 0;
 let bookProgressLastSent = 0;
 
 function showBookProgress() {
+  document.body.classList.remove("book-progress-hidden");
   ReaderShell.dispatch({ type: "SHOW_TOOLBAR" });
   updateBookProgress();
 }
 function hideBookProgress() {
   ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
+}
+function hideBookProgressAfterReadingAction() {
+  // 关闭沉浸模式后顶部菜单常驻，但底部横向整书进度不应遮挡正文。
+  // 沉浸模式继续完全跟随工具栏，不在这里改变其既有显隐行为。
+  if (!ReaderShell.isImmersive()) document.body.classList.add("book-progress-hidden");
 }
 function updateThumb() {
   const h = vbar.clientHeight;
@@ -1431,10 +1437,15 @@ window.addEventListener("message", (e) => {
     // 不在这里关设置面板——设置途中（滑块/数字框调节）可能触发翻页类事件，会误关；
     // 设置面板只在“点设置页之外”时关闭（见 uiClick 与下方 document 点击处理）。
     if (ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH) && !isSearchInputEditActive()) toggleSearch(false);
+    hideBookProgressAfterReadingAction();
     ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
   }
-  if (e.data.readerNavigated) hideBookProgress();
+  if (e.data.readerNavigated) {
+    hideBookProgressAfterReadingAction();
+    hideBookProgress();
+  }
   if (e.data.centerTap) {
+    hideBookProgressAfterReadingAction();
     toggleReaderToolbar();
   }
   if (e.data.ready) {
@@ -1711,6 +1722,7 @@ window.addEventListener("keydown", (e) => {
       ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH) ||
       ReaderShell.isOverlay(ReaderShell.OVERLAY.SETTINGS)
     ) ReaderShell.closeOverlay();
+    hideBookProgressAfterReadingAction();
     ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
     if (frame.contentWindow) frame.contentWindow.postMessage({ pageTurn: dir }, "*");
   }

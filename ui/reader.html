@@ -205,9 +205,10 @@
         border-radius: 4px; background: rgba(0,0,0,0.3); cursor: pointer;
       }
       .vthumb:hover { background: rgba(0,0,0,0.5); }
-      /* 底部整本书进度与顶部阅读工具栏共用 reader-controls-visible。 */
+      /* 普通模式的顶部菜单常驻；底部整本书进度则在翻页/滚动/中部点击后单独收起。 */
       .book-progress { position: absolute; left: 20px; right: 20px; bottom: 10px; z-index: 10; height: 30px; display: none; align-items: center; gap: 9px; padding: 0 11px; border-radius: 999px; box-sizing: border-box; background: rgba(232,235,241,.94); box-shadow: 0 4px 16px rgba(30,45,70,.15); pointer-events: none; }
       body.reader-controls-visible .book-progress { display: flex; pointer-events: auto; }
+      body:not(.immersive).book-progress-hidden .book-progress { display: none; pointer-events: none; }
       .book-progress-track { position: relative; flex: 1 1 auto; height: 4px; min-width: 32px; border-radius: 999px; background: rgba(120,130,148,.34); cursor: pointer; transition: height .14s ease, background .14s ease; }
       .book-progress:hover .book-progress-track, body.reader-controls-visible .book-progress-track { height: 6px; background: rgba(120,130,148,.44); }
       .book-progress-fill { position: absolute; inset: 0 auto 0 0; width: 0%; border-radius: inherit; background: #438cff; pointer-events: none; }

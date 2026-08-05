@@ -211,20 +211,21 @@ test("阅读设置提供三款按需下载并校验的开源中文字体", () =>
   assert.match(layout, /reader:\/\/localhost\/font\/3\/ZhuqueFangsong-Regular\.ttf/);
 });
 
-test("center taps toggle the whole toolbar even while an overlay is closing", () => {
-  assert.match(reader, /if \(e\.data\.centerTap\) \{\s*toggleReaderToolbar\(\);\s*\}/);
-  assert.doesNotMatch(reader, /function toggleBookProgress\(/);
+test("center taps reach the reader shell and hide the separate bottom progress", () => {
+  assert.match(reader, /if \(e\.data\.centerTap\) \{\s*hideBookProgressAfterReadingAction\(\);\s*toggleReaderToolbar\(\);\s*\}/);
   assert.match(notes, /window\.toggleReaderToolbar\?\.\(\)/);
   assert.match(annotations, /if\(overlayOpen\)[\s\S]*parent\.postMessage\(\{centerTap:1\}/);
 });
 
-test("bottom progress and the reading toolbar share one visibility state", () => {
+test("bottom progress hides independently after reading actions outside immersive mode", () => {
   assert.match(shell, /classList\.toggle\("reader-controls-visible", controlsVisible\)/);
   assert.match(html, /\.book-progress\s*\{[^}]*display:\s*none;[^}]*pointer-events:\s*none;/s);
   assert.match(html, /body\.reader-controls-visible \.book-progress\s*\{[^}]*display:\s*flex;[^}]*pointer-events:\s*auto;/s);
-  assert.match(html, /body\.reader-controls-visible \.book-progress-thumb\s*\{[^}]*opacity:\s*1;[^}]*pointer-events:\s*auto;/s);
-  assert.doesNotMatch(html, /\.book-progress\.active/);
-  assert.doesNotMatch(settingsUi, /hideBookProgress/);
+  assert.match(html, /body:not\(\.immersive\)\.book-progress-hidden \.book-progress\s*\{[^}]*display:\s*none;[^}]*pointer-events:\s*none;/s);
+  assert.match(reader, /function hideBookProgressAfterReadingAction\(\)/);
+  assert.match(reader, /if \(e\.data\.userNav\) \{[\s\S]*hideBookProgressAfterReadingAction\(\);/);
+  assert.match(reader, /if \(e\.data\.centerTap\) \{\s*hideBookProgressAfterReadingAction\(\);\s*toggleReaderToolbar\(\);/);
+  assert.match(reader, /hideBookProgressAfterReadingAction\(\);\s*ReaderShell\.dispatch\(\{ type: "HIDE_TOOLBAR" \}\);/);
 });
 
 test("immersive mode hides controls but keeps reading and page-count status visible", () => {
