@@ -1430,9 +1430,6 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .library-ai-history-question { display:block; color:#234d86; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .library-ai-history-meta { display:block; margin-top:5px; color:#8090a8; font-size:12px; }
 .library-ai-history-note { margin:0 0 12px; color:#687a93; font-size:13px; }
-.library-ai-history-question-detail { margin:0 0 18px; padding:12px 14px; border:1px solid #d4e1f2; border-radius:9px; background:#f4f8ff; color:#31445f; }
-.library-ai-history-question-detail strong { display:block; margin-bottom:5px; color:#346eaf; font-size:12px; }
-.library-ai-history-question-detail p { margin:0; white-space:pre-wrap; font-size:.94em; line-height:1.65; }
 .library-ai-answer h3 { margin:4px 0 12px; color:#253a5b; font-size:1.15em; line-height:1.4; }
 .library-ai-answer h4 { margin:20px 0 8px; color:#405574; font-size:.96em; line-height:1.45; }
 .library-ai-answer p { margin:0 0 14px; }

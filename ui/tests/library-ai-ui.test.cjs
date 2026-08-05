@@ -206,7 +206,7 @@ test("question keeps twenty diverse sources while comparison remains bounded", (
 test("answer citations render as hoverable, clickable source footnotes", () => {
   assert.match(html, /id="source-preview"/);
   assert.match(html, /id="source-preview-open"/);
-  assert.match(controller, /function renderAnswer\(content, sources\)/);
+  assert.match(controller, /function renderAnswer\(content, sources, \{ hideDirectAnswerHeading = false \} = \{\}\)/);
   assert.match(controller, /const token = \/\\\[来源\\s\*\(\\d\+\)\\\]\|\\\*\\\*\(\[\^\*\\n\]\+\)\\\*\\\*\/g/);
   assert.match(controller, /footnote\.addEventListener\("pointerenter"/);
   assert.match(controller, /showSourcePreview\(source, index, true,/);
@@ -256,12 +256,13 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.doesNotMatch(controller.match(/function portableSourceReference\(source\)[\s\S]*?\n    }/)[0], /bookId/);
   assert.match(controller, /问答已保存到本机/);
   assert.match(controller, /下次同步时上传/);
-  assert.match(controller, /function renderLibraryHistoryAnswer\(entry, sources\)/);
-  assert.match(controller, /label\.textContent = "问题"/);
-  assert.match(controller, /renderLibraryHistoryAnswer\(entry, sources\)/);
+  assert.match(controller, /function renderAnswer\(content, sources, \{ hideDirectAnswerHeading = false \} = \{\}\)/);
+  assert.match(controller, /hideDirectAnswerHeading && heading\[2\]\.trim\(\) === "直接回答"/);
+  assert.match(controller, /renderAnswer\(entry\.content, sources, \{ hideDirectAnswerHeading: true \}\)/);
+  assert.doesNotMatch(controller, /renderLibraryHistoryAnswer/);
   assert.match(styles, /\.library-ai-history-list\s*\{/);
   assert.match(styles, /\.library-ai-history-delete\s*\{/);
-  assert.match(styles, /\.library-ai-history-question-detail\s*\{/);
+  assert.doesNotMatch(styles, /\.library-ai-history-question-detail\s*\{/);
 });
 
 test("library assistant no longer creates a separate WebView", () => {
