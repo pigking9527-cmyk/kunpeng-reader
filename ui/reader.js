@@ -974,6 +974,14 @@ function hideBookProgressAfterReadingAction() {
   // 沉浸模式继续完全跟随工具栏，不在这里改变其既有显隐行为。
   if (!ReaderShell.isImmersive()) document.body.classList.add("book-progress-hidden");
 }
+function toggleBookProgressFromCenterTap() {
+  if (ReaderShell.isImmersive()) return;
+  if (document.body.classList.contains("book-progress-hidden")) {
+    showBookProgress();
+  } else {
+    hideBookProgressAfterReadingAction();
+  }
+}
 function updateThumb() {
   const h = vbar.clientHeight;
   if (h > 0) {
@@ -1445,9 +1453,9 @@ window.addEventListener("message", (e) => {
     hideBookProgress();
   }
   if (e.data.centerTap) {
-    // 普通模式的中部点击用于唤出底部整书进度；顶部菜单本来就常驻。
+    // 普通模式的中部点击切换底部整书进度；顶部菜单本来就常驻。
     // 沉浸模式则只保留既有的工具栏切换行为。
-    if (!ReaderShell.isImmersive()) showBookProgress();
+    toggleBookProgressFromCenterTap();
     toggleReaderToolbar();
   }
   if (e.data.ready) {
