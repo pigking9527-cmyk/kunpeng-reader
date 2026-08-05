@@ -810,6 +810,11 @@ pub(crate) fn spawn_fingerprint_fill(app: tauri::AppHandle) {
         };
         let mut changed = false;
         for (id, path, need_fingerprint, need_content_id) in pending {
+            // 指纹计算会读取整本文件。阅读期间宁可延后，也不能和章节加载争抢磁盘。
+            while window_commands::any_reader_window_open(&app) {
+                crate::log("fingerprint-fill paused: reader window open");
+                std::thread::sleep(std::time::Duration::from_secs(15));
+            }
             if need_fingerprint {
                 let fp = book::compute_fingerprint(&path);
                 if fp != 0 {

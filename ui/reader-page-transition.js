@@ -7,7 +7,7 @@ function reportReaderPaintPerf(name,started,detail){
     parent.postMessage({readerPerf:name+' elapsed_ms='+elapsed.toFixed(1)+(detail?' '+detail:'')},'*');
   });});
 }
-var turnFxTimer=null,turnFxSheet=null;
+var turnFxTimer=null,turnFxSheet=null,chapterTurnPending=false;
 function reducedMotion(){return !!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);}
 function turnFxName(){
   if(typeof readerAnimationSettingOn==='function'&&!readerAnimationSettingOn('pageTurn'))return 'off';
@@ -82,8 +82,13 @@ function beginTurnFx(dir,move){
   turnFxTimer=setTimeout(clearTurnFx,ms+40);
 }
 function beginChapterTurnFx(dir,chapter,where){
+  // 跨章要异步读取和排版。加载未完成时再次点翻页过去会并发请求同一章，
+  // 在磁盘繁忙时把一次等待放大成多次排队；保留第一次意图即可。
+  if(chapterTurnPending)return Promise.resolve();
+  chapterTurnPending=true;
+  function done(){chapterTurnPending=false;}
   var fx=turnFxName();
-  if(!dir||!pager||!root||fx==='off'||reducedMotion())return showChapter(chapter,where);
+  if(!dir||!pager||!root||fx==='off'||reducedMotion())return showChapter(chapter,where).finally(done);
   clearTurnFx();
   // showChapter 会异步 fetch + 两帧排版。不能像同章翻页那样立即复制“新页”，
   // 否则复制到的仍是旧章节，并会在动画结束时闪回旧内容。
@@ -97,7 +102,7 @@ function beginChapterTurnFx(dir,chapter,where){
     pager.classList.add('turn-fx-'+fx,dir>0?'turn-fx-next':'turn-fx-prev');
     root.offsetWidth;
     turnFxTimer=setTimeout(clearTurnFx,ms+40);
-  });
+  }).finally(done);
 }
 var scrollCaptureTimer=null;
 // WKWebView 对逐字 Range.getClientRects() 的成本远高于 Chromium；普通中文章节
