@@ -1403,6 +1403,10 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .library-ai-workspace > label { display:block; color:#53627b; font-size:13px; margin-bottom:7px; }
 .library-ai-workspace textarea { width:100%; min-height:104px; resize:vertical; border:1px solid #cbd7e8; border-radius:10px; padding:11px; font:15px/1.65 "Microsoft YaHei", system-ui, sans-serif; outline:none; color:#263147; background:#fff; }
 .library-ai-workspace textarea:focus { border-color:#5b91dd; box-shadow:0 0 0 3px #e9f2ff; }
+.library-ai-question-menu { position:fixed; z-index:10080; display:grid; width:136px; padding:5px; border:1px solid #c9d7ea; border-radius:9px; background:#fff; box-shadow:0 10px 26px rgba(39,62,94,.2); }
+.library-ai-question-menu button { min-height:34px; border:0; border-radius:6px; background:transparent; color:#31445f; cursor:pointer; text-align:left; padding:0 10px; font:14px "Microsoft YaHei", system-ui, sans-serif; }
+.library-ai-question-menu button:hover:not(:disabled) { background:#edf5ff; color:#2467bf; }
+.library-ai-question-menu button:disabled { color:#a5afbc; cursor:default; }
 .library-ai-actions { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:12px 0; }
 .library-ai-font-controls { display:inline-flex; align-items:center; flex:none; gap:5px; color:#64738a; font-size:12px; }
 .library-ai-font-controls button { min-width:29px; height:27px; padding:0 6px; border:1px solid #ccd7e9; border-radius:7px; background:#fff; color:#41536f; cursor:pointer; font:600 12px/1 system-ui, sans-serif; }

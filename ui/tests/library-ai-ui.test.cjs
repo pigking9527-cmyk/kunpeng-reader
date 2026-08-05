@@ -44,10 +44,14 @@ test("library question Enter submits while Shift+Enter keeps a newline", () => {
   assert.match(controller, /event\.preventDefault\(\);\s*void run\(\);/);
 });
 
-test("library question input keeps the native right-click editing menu", () => {
+test("library question input has a copy-and-paste-only right-click menu", () => {
   const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
-  assert.match(app, /input, textarea, \[contenteditable="true"\]/);
-  assert.match(app, /if \(!e\.target\?\.closest\?\./);
+  assert.match(app, /contextmenu", \(e\) => e\.preventDefault\(\)/);
+  assert.match(controller, /function showQuestionContextMenu/);
+  assert.match(controller, /addAction\("复制"/);
+  assert.match(controller, /addAction\("粘贴"/);
+  assert.match(controller, /navigator\?\.clipboard\?\.readText/);
+  assert.match(styles, /\.library-ai-question-menu\s*\{/);
 });
 
 test("library assistant toolbar toggles back to the shelf when it is already open", () => {
