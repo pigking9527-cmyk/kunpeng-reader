@@ -71,6 +71,7 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(script, /gridLayout\.addEventListener\("click", \(\) => setLayout\("grid"\)\)/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
+  assert.match(styles, /\.newsnow-layout-grid-icon::before\s*\{[^}]*width: 9px[^}]*height: 9px[^}]*box-shadow: 11px 0 currentColor, 0 11px currentColor, 11px 11px currentColor/s);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*column-width: 210px/s);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid > \.newsnow-card\s*\{[^}]*break-inside: avoid/s);
   assert.match(styles, /\.newsnow-feed-grid\.newsnow-feed-by-source \.newsnow-source-cards\s*\{[^}]*column-width: 210px/s);

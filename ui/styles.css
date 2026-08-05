@@ -1487,8 +1487,8 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .newsnow-order-button:hover { color: #2c6dcc; background: #f4f8ff; }
 .newsnow-order-button[aria-pressed="true"] { color: #236acf; background: #eaf2ff; }
 .newsnow-layout-list-icon { width: 15px; height: 3px; border-radius: 2px; background: currentColor; box-shadow: 0 5px currentColor, 0 -5px currentColor; }
-.newsnow-layout-grid-icon { display: grid; width: 15px; height: 15px; grid-template-columns: repeat(2, 1fr); gap: 2px; }
-.newsnow-layout-grid-icon::before, .newsnow-layout-grid-icon::after { content: ""; background: currentColor; box-shadow: 0 8px currentColor, 8px 0 currentColor, 8px 8px currentColor; }
+.newsnow-layout-grid-icon { position: relative; display: block; width: 20px; height: 20px; }
+.newsnow-layout-grid-icon::before { content: ""; position: absolute; top: 0; left: 0; width: 9px; height: 9px; background: currentColor; box-shadow: 11px 0 currentColor, 0 11px currentColor, 11px 11px currentColor; }
 .newsnow-status { min-height: 0; margin-bottom: 8px; color: #718097; font-size: 13px; line-height: 1.55; }
 .newsnow-status:empty { display: none; }
 .newsnow-status.error { color: #a44940; }
