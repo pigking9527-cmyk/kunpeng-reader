@@ -22,6 +22,7 @@ const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_SELECTED_SOURCES: usize = 24;
 const MAX_ITEMS_PER_SOURCE: usize = 16;
 const MAX_TOTAL_ITEMS: usize = 90;
+const MIN_ITEMS_PER_SOURCE: usize = 3;
 const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
@@ -500,6 +501,14 @@ fn absolute_image_url(page_url: &str, value: &str) -> String {
         .unwrap_or_default()
 }
 
+fn is_site_chrome_image(tag: &str, value: &str) -> bool {
+    let tag = tag.to_ascii_lowercase();
+    let value = value.to_ascii_lowercase();
+    ["logo", "favicon", "avatar", "qrcode", "qr-code"]
+        .iter()
+        .any(|marker| tag.contains(marker) || value.contains(marker))
+}
+
 fn preview_image_from_html(html: &str, page_url: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut cursor = 0;
@@ -528,25 +537,6 @@ fn preview_image_from_html(html: &str, page_url: &str) -> String {
         cursor = end;
     }
     let mut cursor = 0;
-    while let Some(found) = lower[cursor..].find("<link") {
-        let start = cursor + found;
-        let Some(end) = html[start..].find('>').map(|offset| start + offset + 1) else {
-            break;
-        };
-        let tag = &html[start..end];
-        if html_attribute(tag, "rel")
-            .is_some_and(|rel| matches!(rel.to_ascii_lowercase().as_str(), "image_src" | "image"))
-        {
-            if let Some(href) = html_attribute(tag, "href") {
-                let image = absolute_image_url(page_url, &href);
-                if !image.is_empty() {
-                    return image;
-                }
-            }
-        }
-        cursor = end;
-    }
-    let mut cursor = 0;
     while let Some(found) = lower[cursor..].find("<img") {
         let start = cursor + found;
         let Some(end) = html[start..].find('>').map(|offset| start + offset + 1) else {
@@ -555,6 +545,9 @@ fn preview_image_from_html(html: &str, page_url: &str) -> String {
         let tag = &html[start..end];
         for attribute in ["data-src", "data-original", "data-lazy-src", "src"] {
             if let Some(value) = html_attribute(tag, attribute) {
+                if is_site_chrome_image(tag, &value) {
+                    continue;
+                }
                 let image = absolute_image_url(page_url, &value);
                 if !image.is_empty() {
                     return image;
@@ -697,7 +690,7 @@ fn https_text(value: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
-fn image_url(source: NewsSource, item: &Value) -> String {
+fn image_url(item: &Value) -> String {
     for pointer in [
         "/extra/image",
         "/extra/cover",
@@ -715,11 +708,6 @@ fn image_url(source: NewsSource, item: &Value) -> String {
         if !url.is_empty() {
             return url;
         }
-    }
-    // 今日头条的热榜 API 把逐条的专题图放在 icon 中；其他来源的 icon
-    // 往往只是站点标识，不应伪装成文章缩略图。
-    if source.id == "toutiao" {
-        return https_text(item.pointer("/extra/icon"));
     }
     String::new()
 }
@@ -755,7 +743,7 @@ fn parse_source_response(source: NewsSource, response: Value) -> Vec<NewsNowItem
                 source_color: source.color.to_string(),
                 summary,
                 published_at,
-                image_url: image_url(source, item),
+                image_url: image_url(item),
                 category: source.category.to_string(),
             })
         })
@@ -807,7 +795,27 @@ fn sort_and_deduplicate(items: &mut Vec<NewsNowItem>) {
             .then_with(|| left.source.cmp(&right.source))
             .then_with(|| left.title.cmp(&right.title))
     });
-    items.truncate(MAX_TOTAL_ITEMS);
+    if items.len() <= MAX_TOTAL_ITEMS {
+        return;
+    }
+    // 热榜类来源没有发布时间。若只按时间截断，它们会在多来源刷新时被
+    // 全部挤掉；先为每个成功来源保留少量条目，再用最新内容填满余量。
+    let mut per_source = std::collections::HashMap::<&str, usize>::new();
+    let mut retained_urls = HashSet::new();
+    for item in items.iter() {
+        let count = per_source.entry(&item.source_id).or_default();
+        if *count < MIN_ITEMS_PER_SOURCE {
+            retained_urls.insert(item.url.clone());
+            *count += 1;
+        }
+    }
+    for item in items.iter() {
+        if retained_urls.len() >= MAX_TOTAL_ITEMS {
+            break;
+        }
+        retained_urls.insert(item.url.clone());
+    }
+    items.retain(|item| retained_urls.contains(&item.url));
 }
 
 fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowList {
@@ -1101,30 +1109,6 @@ mod tests {
     }
 
     #[test]
-    fn parser_uses_toutiao_topic_icon_but_not_other_source_icons() {
-        let response = json!({
-            "items": [{
-                "id": 7,
-                "title": "头条热榜",
-                "url": "https://www.toutiao.com/trending/7/",
-                "extra": {"icon": "https://p3-sign.toutiaoimg.com/topic.png"}
-            }]
-        });
-        let toutiao = CURATED_SOURCES
-            .iter()
-            .copied()
-            .find(|source| source.id == "toutiao")
-            .unwrap();
-        assert_eq!(
-            parse_source_response(toutiao, response.clone())[0].image_url,
-            "https://p3-sign.toutiaoimg.com/topic.png"
-        );
-        assert!(parse_source_response(CURATED_SOURCES[0], response)[0]
-            .image_url
-            .is_empty());
-    }
-
-    #[test]
     fn preview_image_reads_open_graph_metadata_and_resolves_root_path() {
         let html = r#"<meta property="og:image" content="/cover.jpg"><meta name="twitter:image" content="https://example.com/other.jpg">"#;
         assert_eq!(
@@ -1134,18 +1118,18 @@ mod tests {
     }
 
     #[test]
-    fn preview_image_falls_back_to_common_article_image_markup() {
-        let html = r#"<meta itemprop="image" content="/meta.jpg"><link rel="image_src" href="/link.jpg"><img data-src="/body.jpg">"#;
+    fn preview_image_falls_back_to_article_image_and_skips_site_chrome() {
+        let html = r#"<meta itemprop="image" content="/meta.jpg"><img class="site-logo" src="/logo.png"><img data-src="/body.jpg">"#;
         assert_eq!(
             preview_image_from_html(html, "https://news.example/path/story"),
             "https://news.example/meta.jpg"
         );
         assert_eq!(
             preview_image_from_html(
-                r#"<link rel="image_src" href="/link.jpg"><img data-src="/body.jpg">"#,
+                r#"<img class="site-logo" src="/logo.png"><img data-src="/body.jpg">"#,
                 "https://news.example/path/story"
             ),
-            "https://news.example/link.jpg"
+            "https://news.example/body.jpg"
         );
         assert_eq!(
             preview_image_from_html(
@@ -1181,5 +1165,39 @@ mod tests {
         sort_and_deduplicate(&mut items);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].title, "new");
+    }
+
+    #[test]
+    fn sort_and_deduplicate_keeps_undated_hot_sources_under_total_limit() {
+        let mut items = (0..88)
+            .map(|index| NewsNowItem {
+                title: format!("dated-{index}"),
+                url: format!("https://dated.example/{index}"),
+                source_id: "dated".to_string(),
+                published_at: format!("2026-08-05 12:{index:02}"),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        for source_id in ["weibo", "zhihu"] {
+            for index in 0..3 {
+                items.push(NewsNowItem {
+                    title: format!("{source_id}-{index}"),
+                    url: format!("https://{source_id}.example/{index}"),
+                    source_id: source_id.to_string(),
+                    ..Default::default()
+                });
+            }
+        }
+        sort_and_deduplicate(&mut items);
+        assert_eq!(items.len(), MAX_TOTAL_ITEMS);
+        for source_id in ["weibo", "zhihu"] {
+            assert_eq!(
+                items
+                    .iter()
+                    .filter(|item| item.source_id == source_id)
+                    .count(),
+                MIN_ITEMS_PER_SOURCE
+            );
+        }
     }
 }
