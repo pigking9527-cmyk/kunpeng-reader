@@ -467,6 +467,82 @@ fn strip_tag_blocks(mut html: String) -> String {
     html
 }
 
+fn matching_tag_end(lower: &str, tag: &str, mut cursor: usize) -> Option<usize> {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}");
+    let mut depth = 1usize;
+    while cursor < lower.len() {
+        let next_open = lower[cursor..].find(&open).map(|offset| cursor + offset);
+        let next_close = lower[cursor..].find(&close).map(|offset| cursor + offset);
+        let next = match (next_open, next_close) {
+            (Some(open), Some(close)) if close < open => (close, false),
+            (Some(open), _) => (open, true),
+            (None, Some(close)) => (close, false),
+            (None, None) => return None,
+        };
+        let end = next.0 + lower[next.0..].find('>')? + 1;
+        if next.1 {
+            if !lower[next.0..end].trim_end().ends_with("/>") {
+                depth += 1;
+            }
+        } else {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(end);
+            }
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn strip_decorative_blocks(mut html: String) -> String {
+    const MARKERS: &[&str] = &[
+        "comment",
+        "recommend",
+        "related",
+        "advert",
+        "advertisement",
+        "sponsor",
+        "login",
+        "signin",
+        "subscribe",
+        "share",
+        "toolbar",
+        "cookie",
+    ];
+    for tag in ["div", "section", "ul", "ol"] {
+        loop {
+            let lower = html.to_ascii_lowercase();
+            let open = format!("<{tag}");
+            let mut cursor = 0;
+            let mut target = None;
+            while let Some(found) = lower[cursor..].find(&open) {
+                let start = cursor + found;
+                let Some(end) = lower[start..].find('>').map(|offset| start + offset + 1) else {
+                    break;
+                };
+                if MARKERS
+                    .iter()
+                    .any(|marker| lower[start..end].contains(marker))
+                {
+                    target = Some((start, end));
+                    break;
+                }
+                cursor = end;
+            }
+            let Some((start, after_open)) = target else {
+                break;
+            };
+            let Some(end) = matching_tag_end(&lower, tag, after_open) else {
+                break;
+            };
+            html.replace_range(start..end, "");
+        }
+    }
+    html
+}
+
 fn article_candidate(html: &str) -> String {
     tag_block(html, "article")
         .or_else(|| tag_block(html, "main"))
@@ -549,6 +625,7 @@ fn rewrite_url_attribute(html: &str, attribute: &str, page_url: &str) -> String 
 
 fn extract_article_html(html: &str, page_url: &str) -> String {
     let candidate = strip_tag_blocks(article_candidate(html));
+    let candidate = strip_decorative_blocks(candidate);
     let candidate = rewrite_url_attribute(&candidate, "src", page_url);
     let candidate = rewrite_url_attribute(&candidate, "href", page_url);
     html_sanitize::sanitize_web_article_html(&candidate)
@@ -957,12 +1034,14 @@ mod tests {
 
     #[test]
     fn article_extraction_keeps_body_and_drops_publisher_chrome() {
-        let raw = r#"<html><body><nav>站点顶栏</nav><article class="publisher-theme"><header>文章头</header><p>这是足够长的正文内容，用于确认资讯页面只保留正文而不带网站导航。</p><img src="https://img.example/a.jpg"><script>bad()</script></article><footer>页脚</footer></body></html>"#;
+        let raw = r#"<html><body><nav>站点顶栏</nav><article class="publisher-theme"><header>文章头</header><p>这是足够长的正文内容，用于确认资讯页面只保留正文而不带网站导航。</p><section class="article-recommend">推荐内容</section><div id="comments">用户评论</div><img src="https://img.example/a.jpg"><script>bad()</script></article><footer>页脚</footer></body></html>"#;
         let extracted = extract_article_html(raw, "https://news.example/path/story.html");
         assert!(extracted.contains("足够长的正文内容"));
         assert!(extracted.contains("https://img.example/a.jpg"));
         assert!(!extracted.contains("站点顶栏"));
         assert!(!extracted.contains("文章头"));
+        assert!(!extracted.contains("推荐内容"));
+        assert!(!extracted.contains("用户评论"));
         assert!(!extracted.contains("publisher-theme"));
         assert!(!extracted.contains("script"));
     }
