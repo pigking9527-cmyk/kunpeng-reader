@@ -48,9 +48,9 @@ test("library question input has a copy-cut-paste-only right-click menu", () => 
   const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
   assert.match(app, /contextmenu", \(e\) => e\.preventDefault\(\)/);
   assert.match(controller, /function showQuestionContextMenu/);
-  assert.match(controller, /addAction\("复制"/);
-  assert.match(controller, /addAction\("剪切"/);
-  assert.match(controller, /addAction\("粘贴"/);
+  assert.match(controller, /addAction\(i18n\("copy", "复制"\)/);
+  assert.match(controller, /addAction\(i18n\("cut", "剪切"\)/);
+  assert.match(controller, /addAction\(i18n\("paste", "粘贴"\)/);
   assert.match(controller, /question\.setRangeText\("", start, end, "start"\)/);
   assert.match(controller, /navigator\?\.clipboard\?\.readText/);
   assert.match(styles, /\.library-ai-question-menu\s*\{/);

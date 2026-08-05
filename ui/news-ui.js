@@ -12,6 +12,8 @@
   const BACKGROUND_PREFETCH_INTERVAL_MS = 5 * 60 * 1000;
 
   const text = (value) => String(value == null ? "" : value);
+  const i18n = (key, fallback) => global.ReaderAppI18n?.t?.(key) || fallback;
+  const format = (key, fallback, values) => i18n(key, fallback).replace(/\{(\w+)\}/g, (_, name) => values?.[name] ?? "");
   function safeHttpUrl(value) {
     try {
       const url = new URL(text(value));
@@ -102,8 +104,8 @@
     }
     function setStatus(message, kind = "") { status.textContent = text(message); status.className = "newsnow-status" + (kind ? " " + kind : ""); }
     function sourceForId(id) { return catalog.find((source) => text(source.id) === text(id)); }
-    function renderSourceSummary() { sourceSummary.textContent = sourceIds.length ? `显示 ${sourceIds.length} 个来源` : "使用推荐来源"; }
-    function renderSourceSelection() { sourceSelection.textContent = `已选 ${pendingSourceIds.length} / ${MAX_SOURCES}`; }
+    function renderSourceSummary() { sourceSummary.textContent = sourceIds.length ? format("newsSourceSummary", "显示 {count} 个来源", { count: sourceIds.length }) : i18n("newsRecommendedSources", "使用推荐来源"); }
+    function renderSourceSelection() { sourceSelection.textContent = format("newsSelectedSources", "已选 {count} / {max}", { count: pendingSourceIds.length, max: MAX_SOURCES }); }
     function categoriesForSelection() { return [...new Set(sourceIds.map(sourceForId).filter(Boolean).map(sourceCategory))]; }
     function applyDisplayOptions() {
       const grid = layout === "grid";
@@ -117,11 +119,11 @@
     function setLayout(next) { layout = next === "grid" ? "grid" : "list"; storageSet(LAYOUT_STORAGE_KEY, layout); applyDisplayOptions(); renderFeed(); }
     function setOrder(next) { order = next === "source" ? "source" : "mixed"; storageSet(ORDER_STORAGE_KEY, order); applyDisplayOptions(); renderFeed(); }
     function renderCategories() {
-      const list = ["全部", ...categoriesForSelection()];
-      if (!list.includes(selectedCategory)) selectedCategory = "全部";
+      const all = "全部", list = [all, ...categoriesForSelection()];
+      if (!list.includes(selectedCategory)) selectedCategory = all;
       categories.replaceChildren(...list.map((name) => {
         const tag = root.createElement("button");
-        tag.type = "button"; tag.className = "newsnow-category" + (name === selectedCategory ? " active" : ""); tag.textContent = name;
+        tag.type = "button"; tag.className = "newsnow-category" + (name === selectedCategory ? " active" : ""); tag.textContent = name === all ? i18n("newsCategoryAll", "全部") : name;
         tag.addEventListener("click", () => { selectedCategory = name; renderCategories(); renderFeed(); });
         return tag;
       }));
@@ -132,7 +134,7 @@
       catalog.filter((source) => !query || [source.id, source.name, source.category].some((value) => text(value).toLocaleLowerCase().includes(query))).forEach((source) => {
         const category = sourceCategory(source); if (!groups.has(category)) groups.set(category, []); groups.get(category).push(source);
       });
-      if (!groups.size) { const empty = root.createElement("p"); empty.className = "newsnow-source-empty"; empty.textContent = "没有找到匹配的内置来源。"; sourceOptions.replaceChildren(empty); return; }
+      if (!groups.size) { const empty = root.createElement("p"); empty.className = "newsnow-source-empty"; empty.textContent = i18n("noMatchingSources", "没有找到匹配的内置来源。"); sourceOptions.replaceChildren(empty); return; }
       sourceOptions.replaceChildren(...[...groups.entries()].map(([category, sources]) => {
         const group = root.createElement("section"), title = root.createElement("h2"), choices = root.createElement("div");
         group.className = "newsnow-source-group"; title.textContent = category; choices.className = "newsnow-source-choices";
@@ -140,7 +142,7 @@
           const label = root.createElement("label"), checkbox = root.createElement("input"), swatch = root.createElement("i"), name = root.createElement("span"), id = text(source.id);
           checkbox.type = "checkbox"; checkbox.checked = selected.has(id); label.className = "newsnow-source-choice" + (checkbox.checked ? " selected" : ""); swatch.style.background = text(source.color || "#718097"); name.textContent = text(source.name);
           checkbox.addEventListener("change", () => {
-            if (checkbox.checked) { if (pendingSourceIds.length >= MAX_SOURCES) { checkbox.checked = false; setStatus(`最多选择 ${MAX_SOURCES} 个来源。`, "warning"); return; } pendingSourceIds = [...pendingSourceIds, id]; }
+            if (checkbox.checked) { if (pendingSourceIds.length >= MAX_SOURCES) { checkbox.checked = false; setStatus(format("maxSources", "最多选择 {max} 个来源。", { max: MAX_SOURCES }), "warning"); return; } pendingSourceIds = [...pendingSourceIds, id]; }
             else pendingSourceIds = pendingSourceIds.filter((value) => value !== id);
             label.classList.toggle("selected", checkbox.checked); renderSourceSelection();
           });
@@ -155,7 +157,7 @@
     function closeArticle({ focus = false, restoreScroll = true } = {}) { if (articleOpen && invoke) void Promise.resolve(invoke("newsnow_close_article")).catch(() => {}); articleOpen = false; readerStatus.textContent = ""; setReaderVisible(false); if (restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; }); if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true }); }
     async function openArticle(item) {
       const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
-      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; readerStatus.textContent = "正在加载原网页…"; setReaderVisible(true);
+      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true);
       try { await invoke("newsnow_open_article", { request: { url } }); }
       catch (_) { articleOpen = false; setReaderVisible(false); setStatus("网页无法在阅读器中打开，请稍后重试。", "error"); }
     }
@@ -205,7 +207,7 @@
       if (url) schedulePreviewImage(url, imageUrl, sourceId(item), text(item.id), image, article);
       content.append(meta, title);
       const description = text(item.summary || item.description || item.content || item.excerpt).trim(); if (description) { const summary = root.createElement("p"); summary.className = "newsnow-summary"; summary.textContent = description; content.appendChild(summary); }
-      if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = "打开网页 →"; content.appendChild(open); article.addEventListener("click", () => openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArticle(item); } }); }
+      if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = i18n("openWebPage", "打开网页 →"); content.appendChild(open); article.addEventListener("click", () => openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArticle(item); } }); }
       article.append(rail, content); return article;
     }
     function filteredItems() { return selectedCategory === "全部" ? allItems : allItems.filter((item) => sourceCategory(sourceForId(sourceId(item))) === selectedCategory); }
@@ -224,7 +226,7 @@
     }
     function renderFeed() {
       const items = filteredItems(); applyDisplayOptions();
-      if (!items.length) { const empty = root.createElement("div"); empty.className = "newsnow-empty"; empty.textContent = allItems.length ? "这个分类暂时没有资讯。" : "暂无资讯。请刷新，或在“管理来源”中调整显示内容。"; feed.replaceChildren(empty); return; }
+      if (!items.length) { const empty = root.createElement("div"); empty.className = "newsnow-empty"; empty.textContent = allItems.length ? i18n("noNewsInCategory", "这个分类暂时没有资讯。") : i18n("noNews", "暂无资讯。请刷新，或在“管理来源”中调整显示内容。"); feed.replaceChildren(empty); return; }
       if (order === "mixed") { renderCards(feed, items); return; }
       const groups = new Map(); items.forEach((item) => { const id = sourceId(item); if (!groups.has(id)) groups.set(id, []); groups.get(id).push(item); });
       const orderedIds = [...sourceIds, ...groups.keys()].filter((id, index, list) => groups.has(id) && list.indexOf(id) === index);
@@ -238,7 +240,7 @@
     function applyNewsResult(result, { announce = false } = {}) {
       allItems = resultItems(result); renderCategories(); renderFeed();
       const stamp = result?.fetched_at || result?.fetchedAt;
-      updated.textContent = stamp ? "更新于 " + itemDate({ published_at: stamp }) : "";
+      updated.textContent = stamp ? format("newsUpdatedAt", "更新于 {time}", { time: itemDate({ published_at: stamp }) }) : "";
       if (!announce || page.hidden) return;
       const message = text(result?.message).trim();
       setStatus(message || (allItems.length ? `已更新 ${allItems.length} 条资讯。` : "没有获取到资讯。"), result?.stale ? "warning" : (message && !allItems.length ? "error" : "muted"));
@@ -272,10 +274,10 @@
       }, BACKGROUND_PREFETCH_DELAY_MS);
     }
     async function load(force = false) {
-      if (loading || !invoke) return; loading = true; refresh.disabled = true; refresh.textContent = force ? "刷新中…" : "加载中…"; setStatus(force ? "正在更新资讯流…" : "正在载入资讯流…", "muted");
+      if (loading || !invoke) return; loading = true; refresh.disabled = true; refresh.textContent = force ? i18n("refreshingNews", "刷新中…") : i18n("loadingNews", "加载中…"); setStatus(force ? i18n("refreshingNews", "刷新中…") : i18n("loadingNews", "加载中…"), "muted");
       try { await loadSources(); const result = await withTimeout(invoke(force ? "newsnow_refresh" : "newsnow_list", { request: { sourceIds } })); applyNewsResult(result, { announce: true }); if (!force && result?.stale) void refreshInBackground({ announce: true }); }
       catch (error) { renderFeed(); setStatus(error?.message === "资讯请求超时" ? "资讯请求超时，正在保留当前内容。" : "资讯加载失败，请检查网络后重试。", "error"); }
-      finally { loading = false; refresh.disabled = false; refresh.textContent = "刷新"; }
+      finally { loading = false; refresh.disabled = false; refresh.textContent = i18n("refresh", "刷新"); }
     }
     async function open() {
       if (!newsEnabled() || !invoke) return; root.getElementById("menu")?.classList.remove("show"); root.getElementById("filter-panel")?.classList.remove("show"); root.getElementById("account-panel")?.classList.remove("show"); if (!root.getElementById("library-ai-page")?.hidden) global.ReaderLibraryAiEntry?.close();
@@ -284,10 +286,11 @@
     function close({ focus = true } = {}) { closeSourcePicker(); closeArticle({ restoreScroll: false }); page.hidden = true; shell.hidden = false; global.document.body.classList.remove("newsnow-active"); button.setAttribute("aria-pressed", "false"); if (focus && !button.hidden) button.focus({ preventScroll: true }); }
     button.addEventListener("click", () => { if (!page.hidden || !reader.hidden) close({ focus: false }); else void open(); }); back.addEventListener("click", () => close()); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
     sourceToggle.addEventListener("click", () => { if (sourcePicker.hidden) void loadSources().then(openSourcePicker); else closeSourcePicker({ focus: true }); }); sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true })); sourceSearch.addEventListener("input", () => { sourceQuery = sourceSearch.value; renderSourcePicker(); }); sourceReset.addEventListener("click", () => { pendingSourceIds = defaultSourceIds(catalog); renderSourcePicker(); });
-    sourceApply.addEventListener("click", () => { const selected = allowedSourceIds(pendingSourceIds, catalog); if (!selected.length) { setStatus("至少选择一个来源，或使用“恢复推荐”。", "warning"); return; } sourceIds = selected; storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); selectedCategory = "全部"; renderSourceSummary(); renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
+    sourceApply.addEventListener("click", () => { const selected = allowedSourceIds(pendingSourceIds, catalog); if (!selected.length) { setStatus(i18n("chooseSource", "至少选择一个来源，或使用“恢复推荐”。"), "warning"); return; } sourceIds = selected; storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); selectedCategory = "全部"; renderSourceSummary(); renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
     global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
     ["pointerdown", "keydown", "wheel", "touchstart"].forEach((eventName) => global.addEventListener(eventName, () => { lastUserActivityAt = Date.now(); }, { passive: true }));
     global.addEventListener("resize", () => { if (layout !== "grid" || page.hidden || !feed.clientWidth) return; global.clearTimeout(masonryResizeTimer); masonryResizeTimer = global.setTimeout(renderFeed, 120); });
+    global.addEventListener("app-language-changed", () => { renderSourceSummary(); renderSourceSelection(); renderCategories(); renderSourcePicker(); renderFeed(); });
     global.__TAURI__?.event?.listen?.("newsnow-return-to-feed", () => closeArticle({ focus: true }));
     global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); if (event.detail?.key === "newsnow" || event.detail?.key === "newsnowPrefetch") scheduleBackgroundPrefetch(); }); applyExperimentalAvailability(); applyDisplayOptions(); scheduleBackgroundPrefetch();
     return { open, close, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: () => layout, order: () => order };

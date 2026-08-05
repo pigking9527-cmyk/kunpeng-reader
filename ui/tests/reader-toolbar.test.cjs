@@ -58,6 +58,9 @@ test("reader settings dropdown has no pointer gap below the toolbar", () => {
 test("reader settings provide a display-only simplified/traditional conversion switch", () => {
   assert.match(html, /id="set-text-conversion-simple"/);
   assert.match(html, /<span>改为简<\/span>/);
+  assert.match(html, /text-conversion-simple-label">简<\/span>/);
+  assert.match(html, /text-conversion-traditional-label">繁<\/span>/);
+  assert.match(html, /text-conversion-toggle[\s\S]*?set-dual-mode/);
   assert.match(html, /class="settings-switch"/);
   assert.match(settingsUi, /textConversion: "t2s"/);
   assert.match(settingsUi, /settings\.textConversion === "original"/);
