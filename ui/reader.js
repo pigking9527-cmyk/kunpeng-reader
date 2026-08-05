@@ -1445,7 +1445,9 @@ window.addEventListener("message", (e) => {
     hideBookProgress();
   }
   if (e.data.centerTap) {
-    hideBookProgressAfterReadingAction();
+    // 普通模式的中部点击用于唤出底部整书进度；顶部菜单本来就常驻。
+    // 沉浸模式则只保留既有的工具栏切换行为。
+    if (!ReaderShell.isImmersive()) showBookProgress();
     toggleReaderToolbar();
   }
   if (e.data.ready) {
