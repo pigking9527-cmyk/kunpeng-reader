@@ -73,14 +73,11 @@
     const reader = root.getElementById("newsnow-reader");
     const readerBack = root.getElementById("newsnow-reader-back");
     const readerStatus = root.getElementById("newsnow-reader-status");
-    const articleTitle = root.getElementById("newsnow-article-title");
-    const articleMeta = root.getElementById("newsnow-article-meta");
-    const articleBody = root.getElementById("newsnow-article-body");
-    const articleOriginal = root.getElementById("newsnow-article-original");
+    const readerFrame = root.getElementById("newsnow-reader-frame");
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerBack || !readerStatus || !articleTitle || !articleMeta || !articleBody || !articleOriginal || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerBack || !readerStatus || !readerFrame || !categories || !updated || !shell) return null;
 
     let catalog = [], sourceIds = [], pendingSourceIds = [], allItems = [];
     let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
@@ -142,23 +139,11 @@
     }
     function openSourcePicker() { pendingSourceIds = sourceIds.slice(); sourceQuery = ""; sourceSearch.value = ""; renderSourcePicker(); sourcePicker.hidden = false; sourceToggle.setAttribute("aria-expanded", "true"); sourceSearch.focus({ preventScroll: true }); }
     function closeSourcePicker({ focus = false } = {}) { sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); if (focus) sourceToggle.focus({ preventScroll: true }); }
-    function setReaderVisible(visible) { reader.hidden = !visible; sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); page.classList.toggle("newsnow-reading", visible); }
-    function clearArticle() { readerStatus.textContent = ""; articleTitle.textContent = ""; articleMeta.textContent = ""; articleBody.replaceChildren(); articleOriginal.removeAttribute("href"); articleOriginal.hidden = true; }
-    function closeArticle({ focus = false, restoreScroll = true } = {}) { clearArticle(); setReaderVisible(false); if (restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; }); if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true }); }
-    function articleRequest(item) { return { url: safeHttpUrl(item.url || item.link || item.href), title: text(item.title || item.name), source: sourceName(item), publishedAt: text(item.published_at || item.publishedAt || item.published || item.time) }; }
-    async function openArticle(item) {
-      const request = articleRequest(item); if (!request.url) return;
-      articleScrollTop = page.scrollTop; page.scrollTop = 0; clearArticle(); setReaderVisible(true);
-      readerStatus.textContent = "正在提取原文…"; articleTitle.textContent = request.title; articleMeta.textContent = [request.source, itemDate(item)].filter(Boolean).join(" · "); articleOriginal.href = request.url; articleOriginal.hidden = false;
-      try {
-        const article = await withTimeout(invoke("newsnow_read_article", { request }));
-        articleTitle.textContent = text(article.title || request.title); articleMeta.textContent = [text(article.source || request.source), itemDate(article)].filter(Boolean).join(" · "); articleOriginal.href = safeHttpUrl(article.url) || request.url;
-        // contentHtml is parsed and sanitized by the Rust command before it reaches this WebView.
-        articleBody.innerHTML = text(article.contentHtml || article.content_html);
-        readerStatus.textContent = "";
-      } catch (error) {
-        const fallback = root.createElement("p"); fallback.className = "newsnow-article-error"; fallback.textContent = text(error) || "原文提取失败，可打开原网页阅读。"; articleBody.replaceChildren(fallback); readerStatus.textContent = "";
-      }
+    function setReaderVisible(visible) { reader.hidden = !visible; page.hidden = visible; sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); }
+    function closeArticle({ focus = false, restoreScroll = true } = {}) { readerFrame.src = "about:blank"; readerStatus.textContent = ""; setReaderVisible(false); if (restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; }); if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true }); }
+    function openArticle(item) {
+      const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
+      articleScrollTop = page.scrollTop; page.scrollTop = 0; readerStatus.textContent = "正在加载原网页…"; setReaderVisible(true); readerFrame.src = url;
     }
     function makeCard(item) {
       const article = root.createElement("article"), url = safeHttpUrl(item.url || item.link || item.href), rail = root.createElement("div"), content = root.createElement("div"), meta = root.createElement("div"), source = root.createElement("span"), title = root.createElement("h2");
@@ -166,7 +151,7 @@
       const time = itemDate(item); if (time) { const timeEl = root.createElement("time"); timeEl.textContent = time; meta.appendChild(timeEl); }
       content.append(meta, title);
       const description = text(item.summary || item.description || item.content || item.excerpt).trim(); if (description) { const summary = root.createElement("p"); summary.className = "newsnow-summary"; summary.textContent = description; content.appendChild(summary); }
-      if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = "阅读正文 →"; content.appendChild(open); article.addEventListener("click", () => void openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openArticle(item); } }); }
+      if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = "打开网页 →"; content.appendChild(open); article.addEventListener("click", () => openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArticle(item); } }); }
       article.append(rail, content); return article;
     }
     function filteredItems() { return selectedCategory === "全部" ? allItems : allItems.filter((item) => sourceCategory(sourceForId(sourceId(item))) === selectedCategory); }
@@ -194,10 +179,10 @@
       page.hidden = false; shell.hidden = true; global.document.body.classList.add("newsnow-active"); button.setAttribute("aria-pressed", "true"); await load(false);
     }
     function close({ focus = true } = {}) { closeSourcePicker(); closeArticle({ restoreScroll: false }); page.hidden = true; shell.hidden = false; global.document.body.classList.remove("newsnow-active"); button.setAttribute("aria-pressed", "false"); if (focus && !button.hidden) button.focus({ preventScroll: true }); }
-    button.addEventListener("click", () => { void open(); }); back.addEventListener("click", () => close()); readerBack.addEventListener("click", () => closeArticle({ focus: true })); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
+    button.addEventListener("click", () => { void open(); }); back.addEventListener("click", () => close()); readerBack.addEventListener("click", () => closeArticle({ focus: true })); readerFrame.addEventListener("load", () => { if (!reader.hidden) readerStatus.textContent = ""; }); readerFrame.addEventListener("error", () => { if (!reader.hidden) readerStatus.textContent = "网页加载失败，请返回资讯页后重试。"; }); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
     sourceToggle.addEventListener("click", () => { if (sourcePicker.hidden) void loadSources().then(openSourcePicker); else closeSourcePicker({ focus: true }); }); sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true })); sourceSearch.addEventListener("input", () => { sourceQuery = sourceSearch.value; renderSourcePicker(); }); sourceReset.addEventListener("click", () => { pendingSourceIds = defaultSourceIds(catalog); renderSourcePicker(); });
     sourceApply.addEventListener("click", () => { const selected = allowedSourceIds(pendingSourceIds, catalog); if (!selected.length) { setStatus("至少选择一个来源，或使用“恢复推荐”。", "warning"); return; } sourceIds = selected; storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); selectedCategory = "全部"; renderSourceSummary(); renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
-    global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || page.hidden) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
+    global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
     global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); }); applyExperimentalAvailability(); applyDisplayOptions();
     return { open, close, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: () => layout, order: () => order };
   }
