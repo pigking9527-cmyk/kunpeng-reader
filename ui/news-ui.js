@@ -86,7 +86,7 @@
     let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
     let layout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
-    let articleScrollTop = 0, articleOpen = false;
+    let articleScrollTop = 0, articleOpen = false, masonryResizeTimer = 0;
     const previewImageCache = new Map(), previewImageWaiters = new Map(), previewImageQueue = [];
     let previewImageActive = 0;
 
@@ -202,13 +202,26 @@
       article.append(rail, content); return article;
     }
     function filteredItems() { return selectedCategory === "全部" ? allItems : allItems.filter((item) => sourceCategory(sourceForId(sourceId(item))) === selectedCategory); }
+    function masonryColumnCount() {
+      const minimumCardWidth = 210, gap = 13, width = feed.clientWidth || page.clientWidth || minimumCardWidth;
+      return Math.max(1, Math.floor((width + gap) / (minimumCardWidth + gap)));
+    }
+    function renderCards(container, items) {
+      if (layout !== "grid") { container.replaceChildren(...items.map(makeCard)); return; }
+      const columnCount = masonryColumnCount(); container.style.setProperty("--newsnow-grid-columns", String(columnCount));
+      const columns = Array.from({ length: columnCount }, () => {
+        const column = root.createElement("div"); column.className = "newsnow-masonry-column"; return column;
+      });
+      items.forEach((item, index) => columns[index % columns.length].appendChild(makeCard(item)));
+      container.replaceChildren(...columns);
+    }
     function renderFeed() {
       const items = filteredItems(); applyDisplayOptions();
       if (!items.length) { const empty = root.createElement("div"); empty.className = "newsnow-empty"; empty.textContent = allItems.length ? "这个分类暂时没有资讯。" : "暂无资讯。请刷新，或在“添加来源”中调整显示内容。"; feed.replaceChildren(empty); return; }
-      if (order === "mixed") { feed.replaceChildren(...items.map(makeCard)); return; }
+      if (order === "mixed") { renderCards(feed, items); return; }
       const groups = new Map(); items.forEach((item) => { const id = sourceId(item); if (!groups.has(id)) groups.set(id, []); groups.get(id).push(item); });
       const orderedIds = [...sourceIds, ...groups.keys()].filter((id, index, list) => groups.has(id) && list.indexOf(id) === index);
-      feed.replaceChildren(...orderedIds.map((id) => { const section = root.createElement("section"), heading = root.createElement("h2"), cards = root.createElement("div"), source = sourceForId(id); section.className = "newsnow-source-section"; heading.textContent = text(source?.name || groups.get(id)[0] && sourceName(groups.get(id)[0]) || "资讯"); cards.className = "newsnow-source-cards"; cards.replaceChildren(...groups.get(id).map(makeCard)); section.append(heading, cards); return section; }));
+      feed.replaceChildren(...orderedIds.map((id) => { const section = root.createElement("section"), heading = root.createElement("h2"), cards = root.createElement("div"), source = sourceForId(id); section.className = "newsnow-source-section"; heading.textContent = text(source?.name || groups.get(id)[0] && sourceName(groups.get(id)[0]) || "资讯"); cards.className = "newsnow-source-cards"; renderCards(cards, groups.get(id)); section.append(heading, cards); return section; }));
     }
     async function loadSources() {
       if (catalog.length) return catalog; if (catalogueLoading) return catalogueLoading;
@@ -230,6 +243,7 @@
     sourceToggle.addEventListener("click", () => { if (sourcePicker.hidden) void loadSources().then(openSourcePicker); else closeSourcePicker({ focus: true }); }); sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true })); sourceSearch.addEventListener("input", () => { sourceQuery = sourceSearch.value; renderSourcePicker(); }); sourceReset.addEventListener("click", () => { pendingSourceIds = defaultSourceIds(catalog); renderSourcePicker(); });
     sourceApply.addEventListener("click", () => { const selected = allowedSourceIds(pendingSourceIds, catalog); if (!selected.length) { setStatus("至少选择一个来源，或使用“恢复推荐”。", "warning"); return; } sourceIds = selected; storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); selectedCategory = "全部"; renderSourceSummary(); renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
     global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
+    global.addEventListener("resize", () => { if (layout !== "grid" || page.hidden || !feed.clientWidth) return; global.clearTimeout(masonryResizeTimer); masonryResizeTimer = global.setTimeout(renderFeed, 120); });
     global.__TAURI__?.event?.listen?.("newsnow-return-to-feed", () => closeArticle({ focus: true }));
     global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); }); applyExperimentalAvailability(); applyDisplayOptions();
     return { open, close, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: () => layout, order: () => order };
