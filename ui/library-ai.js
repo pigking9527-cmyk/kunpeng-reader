@@ -536,6 +536,20 @@
       });
     }
 
+    function renderLibraryHistoryAnswer(entry, sources) {
+      renderAnswer(entry.content, sources);
+      const question = String(entry?.question || "").trim();
+      if (!question) return;
+      const section = root.createElement("section");
+      section.className = "library-ai-history-question-detail";
+      const label = root.createElement("strong");
+      label.textContent = "问题";
+      const text = root.createElement("p");
+      text.textContent = question;
+      section.append(label, text);
+      answerEl.prepend(section);
+    }
+
     function renderSources(sources) {
       sourceList.replaceChildren();
       hideSourcePreview(true);
@@ -789,7 +803,7 @@
       $("library-ai-history").textContent = "问答记录";
       answerEl.className = "library-ai-answer";
       let sources = historySourcesForDisplay(entry);
-      renderAnswer(entry.content, sources);
+      renderLibraryHistoryAnswer(entry, sources);
       renderSources(sources);
       const needsRecovery = sources.some((source) => source?.recoveryNeeded);
       state(needsRecovery
@@ -797,7 +811,7 @@
         : `已打开保存的${libraryHistoryTaskLabel(entry.task)}记录。`, false);
       if (!needsRecovery) return;
       sources = await recoverLegacyHistorySources(entry, sources);
-      renderAnswer(entry.content, sources);
+      renderLibraryHistoryAnswer(entry, sources);
       renderSources(sources);
       state("已从本机书架恢复旧记录的章节正文；原记录未保存的精确片段不会进入同步。", false);
     }
