@@ -5,16 +5,26 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $fastExe = Join-Path $repo "target\fast\ebook-reader-tauri.exe"
+$fastOrt = Join-Path $repo "target\fast\onnxruntime.dll"
 $productName = -join @([char]0x9cb2, [char]0x9e4f, [char]0x9605, [char]0x8bfb, [char]0x5668)
 $desktopExe = Join-Path ([Environment]::GetFolderPath("Desktop")) ($productName + ".exe")
+$desktopOrt = Join-Path ([Environment]::GetFolderPath("Desktop")) "onnxruntime.dll"
 
 function Stop-ReaderProcesses {
-  $targets = @($fastExe, $desktopExe)
-  Get-Process | ForEach-Object {
-    try { $path = $_.Path } catch { $path = $null }
-    if (($path -and ($targets -contains $path)) -or $_.ProcessName -in @("ebook-reader-tauri", $productName)) {
-      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    }
+  # 只关闭明确指向桌面交付版的进程，绝不按同名进程猜测。
+  $targetPath = [IO.Path]::GetFullPath($desktopExe)
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ExecutablePath -and [string]::Equals($_.ExecutablePath, $targetPath, [StringComparison]::OrdinalIgnoreCase)
+  } | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Copy-DesktopArtifact([string]$Source, [string]$Destination) {
+  try { Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+  catch {
+    Start-Sleep -Seconds 2
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
   }
 }
 
@@ -43,11 +53,15 @@ try {
   if (-not (Test-Path -LiteralPath $fastExe)) {
     throw "Fast exe not found: $fastExe"
   }
+  if (-not (Test-Path -LiteralPath $fastOrt)) {
+    throw "ONNX Runtime DLL not found: $fastOrt"
+  }
 
   Stop-ReaderProcesses
-  Copy-Item -LiteralPath $fastExe -Destination $desktopExe -Force
-  Get-Item -LiteralPath $desktopExe | Select-Object FullName, Length, LastWriteTime
-  Write-Host "Fast GUI exe copied to desktop. Use scripts/build-release.ps1 for official releases."
+  Copy-DesktopArtifact $fastExe $desktopExe
+  Copy-DesktopArtifact $fastOrt $desktopOrt
+  Get-Item -LiteralPath $desktopExe, $desktopOrt | Select-Object FullName, Length, LastWriteTime
+  Write-Host "Fast GUI executable and ONNX Runtime copied to desktop. Use scripts/build-release.ps1 for official releases."
 } finally {
   Pop-Location
 }
