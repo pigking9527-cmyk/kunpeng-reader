@@ -98,7 +98,13 @@ test("sidebar, modal and toolbar rendering all come from shell state", () => {
   assert.equal(elements["cross-modal"].classList.contains("show"), true);
   assert.equal(elements.backdrop.classList.contains("show"), false);
 
+  // 普通模式下点正文中部不能收起常驻菜单，也不能误开沉浸模式。
   shell.dispatch({ type: "TOGGLE_TOOLBAR" });
+  assert.equal(shell.getState().toolbar, shell.TOOLBAR.NORMAL);
+  assert.equal(body.classList.contains("immersive"), false);
+  assert.equal(body.classList.contains("reader-controls-visible"), true);
+
+  shell.dispatch({ type: "SET_IMMERSIVE", on: true });
   assert.equal(shell.getState().toolbar, shell.TOOLBAR.IMMERSIVE_HIDDEN);
   assert.equal(body.classList.contains("immersive"), true);
   assert.equal(body.classList.contains("reader-controls-visible"), false);
