@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashSet,
+    io::Read,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -21,6 +22,7 @@ const MAX_ITEMS_PER_SOURCE: usize = 16;
 const MAX_TOTAL_ITEMS: usize = 90;
 const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
 const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
 
@@ -320,6 +322,18 @@ pub(crate) struct NewsNowStatus {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NewsNowPreviewRequest {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NewsNowPreview {
+    pub image_url: String,
+}
+
 #[derive(Default)]
 struct NewsCache {
     source_ids: Vec<String>,
@@ -378,6 +392,122 @@ fn http_agent() -> ureq::Agent {
         .timeout_recv_body(Some(Duration::from_secs(12)))
         .build()
         .into()
+}
+
+fn html_attribute(tag: &str, attribute: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(found) = lower[cursor..].find(attribute) {
+        let start = cursor + found;
+        let before = lower.as_bytes().get(start.wrapping_sub(1)).copied();
+        let after = lower.as_bytes().get(start + attribute.len()).copied();
+        if before.is_none_or(|ch| ch.is_ascii_whitespace() || ch == b'<')
+            && after.is_some_and(|ch| ch.is_ascii_whitespace() || ch == b'=')
+        {
+            let mut value_start = start + attribute.len();
+            while lower
+                .as_bytes()
+                .get(value_start)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                value_start += 1;
+            }
+            if lower.as_bytes().get(value_start) != Some(&b'=') {
+                cursor = value_start;
+                continue;
+            }
+            value_start += 1;
+            while lower
+                .as_bytes()
+                .get(value_start)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                value_start += 1;
+            }
+            let quote = *tag.as_bytes().get(value_start)?;
+            if quote != b'\'' && quote != b'"' {
+                return None;
+            }
+            let value_start = value_start + 1;
+            let end = tag[value_start..].find(quote as char)? + value_start;
+            return Some(tag[value_start..end].trim().to_string());
+        }
+        cursor = start + attribute.len();
+    }
+    None
+}
+
+fn absolute_image_url(page_url: &str, value: &str) -> String {
+    let value = value.trim();
+    if let Ok(url) = url_open::validate_https_url(value) {
+        return url.to_string();
+    }
+    let Some(rest) = page_url.strip_prefix("https://") else {
+        return String::new();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let origin = format!("https://{}", &rest[..authority_end]);
+    let candidate = if let Some(value) = value.strip_prefix("//") {
+        format!("https://{value}")
+    } else if value.starts_with('/') {
+        format!("{origin}{value}")
+    } else {
+        return String::new();
+    };
+    url_open::validate_https_url(&candidate)
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+fn preview_image_from_html(html: &str, page_url: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(found) = lower[cursor..].find("<meta") {
+        let start = cursor + found;
+        let Some(end) = html[start..].find('>').map(|offset| start + offset + 1) else {
+            break;
+        };
+        let tag = &html[start..end];
+        let kind = html_attribute(tag, "property").or_else(|| html_attribute(tag, "name"));
+        if kind.is_some_and(|kind| {
+            matches!(
+                kind.to_ascii_lowercase().as_str(),
+                "og:image" | "twitter:image" | "twitter:image:src"
+            )
+        }) {
+            if let Some(content) = html_attribute(tag, "content") {
+                let image = absolute_image_url(page_url, &content);
+                if !image.is_empty() {
+                    return image;
+                }
+            }
+        }
+        cursor = end;
+    }
+    String::new()
+}
+
+fn fetch_preview_image(request: NewsNowPreviewRequest) -> Result<NewsNowPreview, String> {
+    let url = url_open::validate_https_url(request.url.trim())?.to_string();
+    if url.len() > 2_000 {
+        return Err("资讯原文地址过长".to_string());
+    }
+    let mut response = http_agent()
+        .get(&url)
+        .header("User-Agent", NEWSNOW_USER_AGENT)
+        .header("Accept", "text/html,application/xhtml+xml")
+        .call()
+        .map_err(|_| "无法请求资讯原文".to_string())?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(PREVIEW_MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "无法读取资讯原文".to_string())?;
+    Ok(NewsNowPreview {
+        image_url: preview_image_from_html(&String::from_utf8_lossy(&bytes), &url),
+    })
 }
 
 fn selected_sources(request: Option<NewsNowRequest>) -> Vec<NewsSource> {
@@ -443,7 +573,6 @@ fn image_url(item: &Value) -> String {
         "/image",
         "/imageUrl",
         "/thumbnail",
-        "/extra/icon",
     ] {
         let value = item.pointer(pointer);
         let url = match value {
@@ -680,6 +809,15 @@ pub(crate) async fn newsnow_refresh(request: Option<NewsNowRequest>) -> NewsNowL
         })
 }
 
+#[tauri::command]
+pub(crate) async fn newsnow_preview_image(
+    request: NewsNowPreviewRequest,
+) -> Result<NewsNowPreview, String> {
+    tokio::task::spawn_blocking(move || fetch_preview_image(request))
+        .await
+        .map_err(|error| format!("资讯缩略图任务失败：{error}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +891,30 @@ mod tests {
         });
         let items = parse_source_response(CURATED_SOURCES[0], response);
         assert_eq!(items[0].image_url, "https://example.com/cover.jpg");
+    }
+
+    #[test]
+    fn parser_does_not_use_a_source_icon_as_an_article_thumbnail() {
+        let response = json!({
+            "items": [{
+                "id": 7,
+                "title": "无缩略图的资讯",
+                "url": "https://example.com/a",
+                "extra": {"icon": {"url": "https://example.com/icon.png"}}
+            }]
+        });
+        assert!(parse_source_response(CURATED_SOURCES[0], response)[0]
+            .image_url
+            .is_empty());
+    }
+
+    #[test]
+    fn preview_image_reads_open_graph_metadata_and_resolves_root_path() {
+        let html = r#"<meta property="og:image" content="/cover.jpg"><meta name="twitter:image" content="https://example.com/other.jpg">"#;
+        assert_eq!(
+            preview_image_from_html(html, "https://news.example/path/story"),
+            "https://news.example/cover.jpg"
+        );
     }
 
     #[test]

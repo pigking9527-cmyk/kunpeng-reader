@@ -84,6 +84,8 @@
     let layout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
     let articleScrollTop = 0;
+    const previewImageCache = new Map(), previewImageWaiters = new Map(), previewImageQueue = [];
+    let previewImageActive = 0;
 
     const newsEnabled = () => global.ReaderExperimentalFeatures?.enabled?.("newsnow") === true;
     function applyExperimentalAvailability() {
@@ -145,12 +147,49 @@
       const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
       articleScrollTop = page.scrollTop; page.scrollTop = 0; readerStatus.textContent = "正在加载原网页…"; setReaderVisible(true); readerFrame.src = url;
     }
+    function applyCardImage(image, card, url) {
+      if (!url) return;
+      image.src = url; image.hidden = false; card.classList.add("has-image");
+    }
+    function drainPreviewImageQueue() {
+      while (previewImageActive < 3 && previewImageQueue.length) {
+        const url = previewImageQueue.shift(); previewImageActive += 1;
+        Promise.resolve(invoke("newsnow_preview_image", { request: { url } }))
+          .then((result) => safeHttpUrl(result?.imageUrl || result?.image_url))
+          .catch(() => "")
+          .then((imageUrl) => {
+            previewImageCache.set(url, imageUrl);
+            (previewImageWaiters.get(url) || []).forEach(({ image, card }) => applyCardImage(image, card, imageUrl));
+          })
+          .finally(() => { previewImageWaiters.delete(url); previewImageActive -= 1; drainPreviewImageQueue(); });
+      }
+    }
+    function requestPreviewImage(url, image, card) {
+      if (previewImageCache.has(url)) { applyCardImage(image, card, previewImageCache.get(url)); return; }
+      const waiters = previewImageWaiters.get(url);
+      if (waiters) { waiters.push({ image, card }); return; }
+      previewImageWaiters.set(url, [{ image, card }]); previewImageQueue.push(url); drainPreviewImageQueue();
+    }
+    const previewImageObserver = typeof global.IntersectionObserver === "function"
+      ? new global.IntersectionObserver((entries) => entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        previewImageObserver.unobserve(entry.target);
+        const preview = entry.target.__newsPreview;
+        if (preview) requestPreviewImage(preview.url, preview.image, entry.target);
+      }), { root: page, rootMargin: "420px 0px" })
+      : null;
+    function schedulePreviewImage(url, image, card) {
+      if (previewImageObserver) { card.__newsPreview = { url, image }; previewImageObserver.observe(card); }
+      else requestPreviewImage(url, image, card);
+    }
     function makeCard(item) {
       const article = root.createElement("article"), url = safeHttpUrl(item.url || item.link || item.href), rail = root.createElement("div"), content = root.createElement("div"), meta = root.createElement("div"), source = root.createElement("span"), title = root.createElement("h2");
       article.className = "newsnow-card"; article.tabIndex = url ? 0 : -1; rail.className = "newsnow-card-rail"; rail.style.background = text(item.sourceColor || item.source_color || "#718097"); content.className = "newsnow-card-content"; meta.className = "newsnow-meta"; source.className = "newsnow-source-name"; source.textContent = sourceName(item); title.textContent = text(item.title || item.name || "未命名新闻"); meta.appendChild(source);
       const time = itemDate(item); if (time) { const timeEl = root.createElement("time"); timeEl.textContent = time; meta.appendChild(timeEl); }
       const imageUrl = safeHttpUrl(item.imageUrl || item.image_url || item.cover || item.thumbnail);
-      if (imageUrl) { const image = root.createElement("img"); image.className = "newsnow-card-image"; image.src = imageUrl; image.alt = ""; image.loading = "lazy"; content.appendChild(image); }
+      const image = root.createElement("img"); image.className = "newsnow-card-image"; image.alt = ""; image.loading = "lazy"; image.hidden = true;
+      image.addEventListener("error", () => { image.hidden = true; article.classList.remove("has-image"); }); content.appendChild(image);
+      if (imageUrl) applyCardImage(image, article, imageUrl); else if (url) schedulePreviewImage(url, image, article);
       content.append(meta, title);
       const description = text(item.summary || item.description || item.content || item.excerpt).trim(); if (description) { const summary = root.createElement("p"); summary.className = "newsnow-summary"; summary.textContent = description; content.appendChild(summary); }
       if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = "打开网页 →"; content.appendChild(open); article.addEventListener("click", () => openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArticle(item); } }); }
