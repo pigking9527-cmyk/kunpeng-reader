@@ -192,7 +192,10 @@ pub(super) fn available(state: &AppState) -> bool {
 
 /// 懒加载语义模型（首次会下载到 %LOCALAPPDATA%/ebook-reader/models）。
 pub(super) fn embedder(state: &AppState) -> Result<Arc<Mutex<fastembed::TextEmbedding>>, String> {
-    let mut slot = state.embedder.lock().unwrap();
+    let mut slot = state.embedder.lock().unwrap_or_else(|poisoned| {
+        crate::log("semantic_model recovered poisoned embedder lock");
+        poisoned.into_inner()
+    });
     if let Some(model) = slot.as_ref() {
         return Ok(model.clone());
     }

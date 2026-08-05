@@ -14,6 +14,7 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tauri::{Emitter, Manager, WebviewBuilder, WebviewUrl};
 
 const DEFAULT_BASE_URL: &str = "https://newsnow.busiyi.world";
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
@@ -25,6 +26,35 @@ const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
 const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
+const ARTICLE_WEBVIEW_LABEL: &str = "newsnow-article";
+const ARTICLE_RETURN_URL: &str = "https://reader.localhost/__kunpeng_news_return__";
+const ARTICLE_RETURN_SCRIPT: &str = r##"
+(() => {
+  const returnUrl = "https://reader.localhost/__kunpeng_news_return__";
+  const install = () => {
+    if (document.getElementById("kunpeng-news-return")) return;
+    const button = document.createElement("button");
+    button.id = "kunpeng-news-return";
+    button.type = "button";
+    button.title = "返回资讯页";
+    button.setAttribute("aria-label", "返回资讯页");
+    button.textContent = "←";
+    button.style.cssText = "position:fixed;z-index:2147483647;top:50%;right:18px;width:44px;height:44px;transform:translateY(-50%);border:1px solid #9ab9e6;border-radius:50%;color:#1e64c4;background:rgba(255,255,255,.96);box-shadow:0 4px 16px rgba(44,92,158,.24);font:25px/1 system-ui;cursor:pointer;";
+    button.addEventListener("mouseenter", () => { button.style.background = "#f2f7ff"; });
+    button.addEventListener("mouseleave", () => { button.style.background = "rgba(255,255,255,.96)"; });
+    button.addEventListener("click", () => { window.location.assign(returnUrl); });
+    document.body.appendChild(button);
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install, { once: true });
+  else install();
+  addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    window.location.assign(returnUrl);
+  }, true);
+})();
+"##;
 
 /// This intentionally small catalogue is the product default, rather than an
 /// unfiltered dump of every NewsNow source.  It is also the allowlist for
@@ -328,6 +358,12 @@ pub(crate) struct NewsNowPreviewRequest {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NewsNowOpenRequest {
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NewsNowPreview {
@@ -468,15 +504,53 @@ fn preview_image_from_html(html: &str, page_url: &str) -> String {
             break;
         };
         let tag = &html[start..end];
-        let kind = html_attribute(tag, "property").or_else(|| html_attribute(tag, "name"));
+        let kind = html_attribute(tag, "property")
+            .or_else(|| html_attribute(tag, "name"))
+            .or_else(|| html_attribute(tag, "itemprop"));
         if kind.is_some_and(|kind| {
             matches!(
                 kind.to_ascii_lowercase().as_str(),
-                "og:image" | "twitter:image" | "twitter:image:src"
+                "og:image" | "twitter:image" | "twitter:image:src" | "image"
             )
         }) {
             if let Some(content) = html_attribute(tag, "content") {
                 let image = absolute_image_url(page_url, &content);
+                if !image.is_empty() {
+                    return image;
+                }
+            }
+        }
+        cursor = end;
+    }
+    let mut cursor = 0;
+    while let Some(found) = lower[cursor..].find("<link") {
+        let start = cursor + found;
+        let Some(end) = html[start..].find('>').map(|offset| start + offset + 1) else {
+            break;
+        };
+        let tag = &html[start..end];
+        if html_attribute(tag, "rel")
+            .is_some_and(|rel| matches!(rel.to_ascii_lowercase().as_str(), "image_src" | "image"))
+        {
+            if let Some(href) = html_attribute(tag, "href") {
+                let image = absolute_image_url(page_url, &href);
+                if !image.is_empty() {
+                    return image;
+                }
+            }
+        }
+        cursor = end;
+    }
+    let mut cursor = 0;
+    while let Some(found) = lower[cursor..].find("<img") {
+        let start = cursor + found;
+        let Some(end) = html[start..].find('>').map(|offset| start + offset + 1) else {
+            break;
+        };
+        let tag = &html[start..end];
+        for attribute in ["data-src", "data-original", "data-lazy-src", "src"] {
+            if let Some(value) = html_attribute(tag, attribute) {
+                let image = absolute_image_url(page_url, &value);
                 if !image.is_empty() {
                     return image;
                 }
@@ -818,6 +892,61 @@ pub(crate) async fn newsnow_preview_image(
         .map_err(|error| format!("资讯缩略图任务失败：{error}"))?
 }
 
+#[tauri::command]
+pub(crate) async fn newsnow_open_article(
+    app: tauri::AppHandle,
+    request: NewsNowOpenRequest,
+) -> Result<(), String> {
+    let url = url_open::validate_https_url(request.url.trim())?.to_string();
+    if url.len() > 2_000 {
+        return Err("资讯原文地址过长".to_string());
+    }
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "找不到主窗口".to_string())?;
+    let parent = main.as_ref().window();
+    if let Some(existing) = app.get_webview(ARTICLE_WEBVIEW_LABEL) {
+        let _ = existing.close();
+    }
+    let article_url = url.parse().map_err(|_| "资讯原文地址无效".to_string())?;
+    let navigation_app = app.clone();
+    parent
+        .add_child(
+            WebviewBuilder::new(ARTICLE_WEBVIEW_LABEL, WebviewUrl::External(article_url))
+                .auto_resize()
+                .initialization_script(ARTICLE_RETURN_SCRIPT)
+                .on_navigation(move |target| {
+                    if target.as_str() != ARTICLE_RETURN_URL {
+                        return true;
+                    }
+                    let app = navigation_app.clone();
+                    std::thread::spawn(move || {
+                        if let Some(webview) = app.get_webview(ARTICLE_WEBVIEW_LABEL) {
+                            let _ = webview.close();
+                        }
+                        let _ = app.emit("newsnow-return-to-feed", ());
+                    });
+                    false
+                }),
+            tauri::LogicalPosition::new(0, 0),
+            parent
+                .inner_size()
+                .map_err(|error| format!("无法读取主窗口大小：{error}"))?,
+        )
+        .map_err(|error| format!("无法在主窗口打开资讯原文：{error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn newsnow_close_article(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(ARTICLE_WEBVIEW_LABEL) {
+        webview
+            .close()
+            .map_err(|error| format!("无法关闭资讯原文：{error}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,6 +1043,29 @@ mod tests {
         assert_eq!(
             preview_image_from_html(html, "https://news.example/path/story"),
             "https://news.example/cover.jpg"
+        );
+    }
+
+    #[test]
+    fn preview_image_falls_back_to_common_article_image_markup() {
+        let html = r#"<meta itemprop="image" content="/meta.jpg"><link rel="image_src" href="/link.jpg"><img data-src="/body.jpg">"#;
+        assert_eq!(
+            preview_image_from_html(html, "https://news.example/path/story"),
+            "https://news.example/meta.jpg"
+        );
+        assert_eq!(
+            preview_image_from_html(
+                r#"<link rel="image_src" href="/link.jpg"><img data-src="/body.jpg">"#,
+                "https://news.example/path/story"
+            ),
+            "https://news.example/link.jpg"
+        );
+        assert_eq!(
+            preview_image_from_html(
+                r#"<img data-lazy-src="/body.jpg">"#,
+                "https://news.example/path/story"
+            ),
+            "https://news.example/body.jpg"
         );
     }
 

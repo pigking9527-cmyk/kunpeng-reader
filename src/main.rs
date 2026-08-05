@@ -341,6 +341,8 @@ fn main() {
             newsnow::newsnow_list,
             newsnow::newsnow_refresh,
             newsnow::newsnow_preview_image,
+            newsnow::newsnow_open_article,
+            newsnow::newsnow_close_article,
             ai_reader::ai_reader_status,
             ai_reader::ai_reader_profiles,
             ai_reader::select_ai_reader_profile,
