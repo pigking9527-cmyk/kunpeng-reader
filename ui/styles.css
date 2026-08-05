@@ -1499,6 +1499,7 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .newsnow-category:hover, .newsnow-category.active { border-color: #82aceb; color: #2864be; background: #eaf2ff; }
 .newsnow-feed { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; width: 100%; }
 .newsnow-reader { position: relative; z-index: 8; display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; margin: 0; padding: 0; background: #fff; }
+.newsnow-reader[hidden] { display: none; }
 .newsnow-reader-status { position: absolute; z-index: 3; top: 12px; left: 16px; margin: 0; padding: 5px 8px; border-radius: 6px; color: #657187; background: rgba(255,255,255,.9); font-size: 12px; line-height: 1.4; pointer-events: none; }
 .newsnow-reader-status:empty { display: none; }
 .newsnow-reader-back { position: absolute; z-index: 2; top: 50%; right: 18px; width: 44px; height: 44px; transform: translateY(-50%); border: 1px solid #9ab9e6; border-radius: 50%; color: #1e64c4; background: rgba(255,255,255,.94); box-shadow: 0 4px 16px rgba(44, 92, 158, .2); font: 25px/1 system-ui; cursor: pointer; }

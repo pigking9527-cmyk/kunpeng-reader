@@ -12,6 +12,7 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
   assert.match(html, /id="newsnow-toolbar-btn"[^>]*hidden/);
   assert.match(html, /id="newsnow-page"/);
   assert.match(html, /id="newsnow-back"/);
+  assert.match(html, /<div class="newsnow-actions">\s*<button id="newsnow-back"/);
   assert.match(html, /id="newsnow-feed"/);
   assert.match(html, /<\/section>\s*<section id="newsnow-reader"/);
   assert.match(html, /<script src="news-ui\.js"><\/script>/);
@@ -95,6 +96,7 @@ test("NewsNow presents a chronological reading feed and stays usable on narrow w
   assert.match(styles, /\.newsnow-source-picker\s*\{/);
   assert.match(styles, /\.newsnow-card:hover, \.newsnow-card:focus-visible/);
   assert.match(styles, /\.newsnow-reader\s*\{/);
+  assert.match(styles, /\.newsnow-reader\[hidden\]\s*\{\s*display: none/);
   assert.match(styles, /\.newsnow-reader\s*\{[^}]*flex: 1 1 auto/s);
   assert.match(styles, /\.newsnow-reader-back\s*\{/);
   assert.match(styles, /@media \(max-width: 620px\)/);
