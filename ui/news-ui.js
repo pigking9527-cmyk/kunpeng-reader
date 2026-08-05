@@ -159,7 +159,7 @@
     function drainPreviewImageQueue() {
       while (previewImageActive < 3 && previewImageQueue.length) {
         const request = previewImageQueue.shift(); previewImageActive += 1;
-        Promise.resolve(invoke("newsnow_preview_image", { request: { url: request.pageUrl, imageUrl: request.imageUrl } }))
+        Promise.resolve(invoke("newsnow_preview_image", { request: { url: request.pageUrl, imageUrl: request.imageUrl, sourceId: request.sourceId, itemId: request.itemId } }))
           .then((result) => safeImageDataUrl(result?.imageDataUrl || result?.image_data_url))
           .catch(() => "")
           .then((dataUrl) => {
@@ -169,24 +169,24 @@
           .finally(() => { previewImageWaiters.delete(request.key); previewImageActive -= 1; drainPreviewImageQueue(); });
       }
     }
-    function requestPreviewImage(pageUrl, imageUrl, image, card) {
-      const key = pageUrl + "\n" + imageUrl;
+    function requestPreviewImage(pageUrl, imageUrl, sourceId, itemId, image, card) {
+      const key = pageUrl + "\n" + imageUrl + "\n" + sourceId + "\n" + itemId;
       if (previewImageCache.has(key)) { applyCardImage(image, card, previewImageCache.get(key)); return; }
       const waiters = previewImageWaiters.get(key);
       if (waiters) { waiters.push({ image, card }); return; }
-      previewImageWaiters.set(key, [{ image, card }]); previewImageQueue.push({ key, pageUrl, imageUrl }); drainPreviewImageQueue();
+      previewImageWaiters.set(key, [{ image, card }]); previewImageQueue.push({ key, pageUrl, imageUrl, sourceId, itemId }); drainPreviewImageQueue();
     }
     const previewImageObserver = typeof global.IntersectionObserver === "function"
       ? new global.IntersectionObserver((entries) => entries.forEach((entry) => {
         if (!entry.isIntersecting) return;
         previewImageObserver.unobserve(entry.target);
         const preview = entry.target.__newsPreview;
-        if (preview) requestPreviewImage(preview.pageUrl, preview.imageUrl, preview.image, entry.target);
+        if (preview) requestPreviewImage(preview.pageUrl, preview.imageUrl, preview.sourceId, preview.itemId, preview.image, entry.target);
       }), { root: page, rootMargin: "420px 0px" })
       : null;
-    function schedulePreviewImage(pageUrl, imageUrl, image, card) {
-      if (previewImageObserver) { card.__newsPreview = { pageUrl, imageUrl, image }; previewImageObserver.observe(card); }
-      else requestPreviewImage(pageUrl, imageUrl, image, card);
+    function schedulePreviewImage(pageUrl, imageUrl, sourceId, itemId, image, card) {
+      if (previewImageObserver) { card.__newsPreview = { pageUrl, imageUrl, sourceId, itemId, image }; previewImageObserver.observe(card); }
+      else requestPreviewImage(pageUrl, imageUrl, sourceId, itemId, image, card);
     }
     function makeCard(item) {
       const article = root.createElement("article"), url = safeHttpUrl(item.url || item.link || item.href), rail = root.createElement("div"), content = root.createElement("div"), meta = root.createElement("div"), source = root.createElement("span"), title = root.createElement("h2");
@@ -195,7 +195,7 @@
       const imageUrl = safeHttpUrl(item.imageUrl || item.image_url || item.cover || item.thumbnail);
       const image = root.createElement("img"); image.className = "newsnow-card-image"; image.alt = ""; image.loading = "lazy"; image.hidden = true;
       image.addEventListener("error", () => { image.hidden = true; article.classList.remove("has-image"); }); content.appendChild(image);
-      if (url) schedulePreviewImage(url, imageUrl, image, article);
+      if (url) schedulePreviewImage(url, imageUrl, sourceId(item), text(item.id), image, article);
       content.append(meta, title);
       const description = text(item.summary || item.description || item.content || item.excerpt).trim(); if (description) { const summary = root.createElement("p"); summary.className = "newsnow-summary"; summary.textContent = description; content.appendChild(summary); }
       if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = "打开网页 →"; content.appendChild(open); article.addEventListener("click", () => openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArticle(item); } }); }

@@ -10,7 +10,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::Read,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -27,6 +27,7 @@ const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
 const PREVIEW_IMAGE_MAX_BYTES: u64 = 1_500_000;
+const SOURCE_IMAGE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
 const ARTICLE_WEBVIEW_LABEL: &str = "newsnow-article";
@@ -361,6 +362,10 @@ pub(crate) struct NewsNowPreviewRequest {
     pub url: String,
     #[serde(default)]
     pub image_url: String,
+    #[serde(default)]
+    pub source_id: String,
+    #[serde(default)]
+    pub item_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -384,9 +389,25 @@ struct NewsCache {
     items: Vec<NewsNowItem>,
 }
 
+#[derive(Default)]
+struct SourceImageCache {
+    fetched_instant: Option<Instant>,
+    images: HashMap<String, String>,
+}
+
 fn cache() -> &'static Mutex<NewsCache> {
     static CACHE: OnceLock<Mutex<NewsCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(NewsCache::default()))
+}
+
+fn source_image_cache(source_id: &'static str) -> &'static Mutex<SourceImageCache> {
+    static ZHIHU: OnceLock<Mutex<SourceImageCache>> = OnceLock::new();
+    static TOUTIAO: OnceLock<Mutex<SourceImageCache>> = OnceLock::new();
+    match source_id {
+        "zhihu" => ZHIHU.get_or_init(|| Mutex::new(SourceImageCache::default())),
+        "toutiao" => TOUTIAO.get_or_init(|| Mutex::new(SourceImageCache::default())),
+        _ => unreachable!("only cached image sources may request an image cache"),
+    }
 }
 
 fn now_millis() -> i64 {
@@ -509,7 +530,79 @@ fn is_site_chrome_image(tag: &str, value: &str) -> bool {
         .any(|marker| tag.contains(marker) || value.contains(marker))
 }
 
+fn image_from_tag_with_class(html: &str, page_url: &str, class: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let class = class.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(found) = lower[cursor..].find("<img") {
+        let start = cursor + found;
+        let Some(end) = html[start..].find('>').map(|offset| start + offset + 1) else {
+            break;
+        };
+        let tag = &html[start..end];
+        if html_attribute(tag, "class")
+            .is_some_and(|value| value.to_ascii_lowercase().contains(&class))
+        {
+            for attribute in ["data-src", "data-original", "data-lazy-src", "src"] {
+                if let Some(value) = html_attribute(tag, attribute) {
+                    let image = absolute_image_url(page_url, &value);
+                    if !image.is_empty() {
+                        return image;
+                    }
+                }
+            }
+        }
+        cursor = end;
+    }
+    String::new()
+}
+
+fn json_script_by_id(html: &str, id: &str) -> Option<Value> {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(found) = lower[cursor..].find("<script") {
+        let start = cursor + found;
+        let tag_end = html[start..].find('>').map(|offset| start + offset + 1)?;
+        let tag = &html[start..tag_end];
+        if html_attribute(tag, "id").is_some_and(|value| value.eq_ignore_ascii_case(id)) {
+            let content_end = lower[tag_end..]
+                .find("</script>")
+                .map(|offset| tag_end + offset)?;
+            return serde_json::from_str(&html[tag_end..content_end]).ok();
+        }
+        cursor = tag_end;
+    }
+    None
+}
+
+fn thepaper_preview_image_from_html(html: &str, page_url: &str) -> String {
+    let from_data = json_script_by_id(html, "__NEXT_DATA__")
+        .and_then(|data| {
+            [
+                "/props/pageProps/detailData/contentDetail/sharePic",
+                "/props/pageProps/detailData/contentDetail/pic",
+                "/props/pageProps/detailData/contentDetail/voiceInfo/imgSrc",
+            ]
+            .into_iter()
+            .map(|pointer| https_text(data.pointer(pointer)))
+            .find(|image| !image.is_empty())
+        })
+        .unwrap_or_default();
+    if !from_data.is_empty() {
+        return from_data;
+    }
+    image_from_tag_with_class(html, page_url, "img_default")
+}
+
 fn preview_image_from_html(html: &str, page_url: &str) -> String {
+    // 这些站点的通用首图经常是导航 Logo。仅使用它们已确认的正文结构；
+    // 找不到真实正文图就明确无图，不再猜测。
+    if page_url.contains("thepaper.cn/") {
+        return thepaper_preview_image_from_html(html, page_url);
+    }
+    if page_url.contains("coolapk.com/") {
+        return image_from_tag_with_class(html, page_url, "message-image");
+    }
     let lower = html.to_ascii_lowercase();
     let mut cursor = 0;
     while let Some(found) = lower[cursor..].find("<meta") {
@@ -573,6 +666,159 @@ fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+// 少数派的 OG 图经常是原始 PNG，单张可超过数 MB。资讯流只需要卡片缩略图，
+// rssfile 支持在同一资源上请求受控尺寸的 WebP；这样既保留真实封面，也不会
+// 为了个别原图而放宽全局内存上限。
+fn compact_preview_image_url(image_url: &str) -> String {
+    let Some(path) = image_url.strip_prefix("https://rssfile.sspai.com/") else {
+        return image_url.to_string();
+    };
+    let Some((path, _)) = path.split_once('?') else {
+        return image_url.to_string();
+    };
+    format!("https://rssfile.sspai.com/{path}?imageView2/2/w/800/h/450/format/webp/q/85")
+}
+
+fn source_item_id(source_id: &str, item_id: &str) -> String {
+    item_id
+        .strip_prefix(&format!("{source_id}:"))
+        .unwrap_or(item_id)
+        .trim()
+        .to_string()
+}
+
+fn safe_remote_item_id(source_id: &str, item_id: &str) -> String {
+    let id = source_item_id(source_id, item_id);
+    if id.is_empty() || id.len() > 32 || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        String::new()
+    } else {
+        id
+    }
+}
+
+fn fetch_douban_cover(agent: &ureq::Agent, item_id: &str) -> String {
+    let item_id = safe_remote_item_id("douban", item_id);
+    if item_id.is_empty() {
+        return String::new();
+    }
+    let endpoint = format!("https://m.douban.com/rexxar/api/v2/subject/{item_id}");
+    let Ok(mut response) = agent
+        .get(&endpoint)
+        .header("User-Agent", NEWSNOW_USER_AGENT)
+        .header("Referer", "https://m.douban.com/")
+        .header("Accept", "application/json,text/plain,*/*")
+        .call()
+    else {
+        return String::new();
+    };
+    let Ok(data) = response.body_mut().read_json::<Value>() else {
+        return String::new();
+    };
+    for pointer in ["/pic/normal", "/pic/large", "/cover_url"] {
+        let image = https_text(data.pointer(pointer));
+        if !image.is_empty() {
+            return image;
+        }
+    }
+    String::new()
+}
+
+fn fetch_source_image_map(agent: &ureq::Agent, source_id: &'static str) -> HashMap<String, String> {
+    let endpoint = match source_id {
+        "zhihu" => "https://api.zhihu.com/topstory/hot-lists/total?limit=50&desktop=true",
+        "toutiao" => "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc",
+        _ => return HashMap::new(),
+    };
+    let referer = match source_id {
+        "zhihu" => "https://www.zhihu.com/",
+        "toutiao" => "https://www.toutiao.com/",
+        _ => return HashMap::new(),
+    };
+    let Ok(mut response) = agent
+        .get(endpoint)
+        .header("User-Agent", NEWSNOW_USER_AGENT)
+        .header("Referer", referer)
+        .header("Accept", "application/json,text/plain,*/*")
+        .call()
+    else {
+        return HashMap::new();
+    };
+    let Ok(data) = response.body_mut().read_json::<Value>() else {
+        return HashMap::new();
+    };
+    source_image_map_from_json(source_id, &data)
+}
+
+fn source_image_map_from_json(source_id: &str, data: &Value) -> HashMap<String, String> {
+    let entries = data
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    let mut images = HashMap::new();
+    for entry in entries {
+        let (id, image) = match source_id {
+            "zhihu" => (
+                value_to_text(entry.pointer("/target/id")),
+                https_text(entry.pointer("/children/0/thumbnail"))
+                    .or_else_if_empty(|| https_text(entry.pointer("/target/image_area/url"))),
+            ),
+            "toutiao" => (
+                value_to_text(entry.pointer("/ClusterIdStr"))
+                    .or_else_if_empty(|| value_to_text(entry.pointer("/ClusterId"))),
+                https_text(entry.pointer("/Image/url")),
+            ),
+            _ => unreachable!(),
+        };
+        if !id.is_empty() && !image.is_empty() {
+            images.insert(id, image);
+        }
+    }
+    images
+}
+
+fn cached_source_image_map(
+    agent: &ureq::Agent,
+    source_id: &'static str,
+) -> HashMap<String, String> {
+    let cache = source_image_cache(source_id);
+    if let Ok(cache) = cache.lock() {
+        if cache
+            .fetched_instant
+            .is_some_and(|fetched| fetched.elapsed() < SOURCE_IMAGE_CACHE_TTL)
+        {
+            return cache.images.clone();
+        }
+    }
+    let images = fetch_source_image_map(agent, source_id);
+    if let Ok(mut cache) = cache.lock() {
+        cache.fetched_instant = Some(Instant::now());
+        cache.images = images.clone();
+    }
+    images
+}
+
+fn source_preview_image(agent: &ureq::Agent, source_id: &str, item_id: &str) -> String {
+    match source_id {
+        "douban" => fetch_douban_cover(agent, item_id),
+        "zhihu" | "toutiao" => {
+            let id = safe_remote_item_id(source_id, item_id);
+            if id.is_empty() {
+                return String::new();
+            }
+            let cache_source = if source_id == "zhihu" {
+                "zhihu"
+            } else {
+                "toutiao"
+            };
+            cached_source_image_map(agent, cache_source)
+                .remove(&id)
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    }
+}
+
 fn fetch_image_data_url(page_url: &str, image_url: &str) -> Result<String, String> {
     let mut response = http_agent()
         .get(image_url)
@@ -606,7 +852,12 @@ fn fetch_preview_image(request: NewsNowPreviewRequest) -> Result<NewsNowPreview,
     if url.len() > 2_000 {
         return Err("资讯原文地址过长".to_string());
     }
-    let image_url = if request.image_url.trim().is_empty() {
+    let source_image = source_preview_image(&http_agent(), &request.source_id, &request.item_id);
+    let image_url = if !request.image_url.trim().is_empty() {
+        url_open::validate_https_url(request.image_url.trim())?.to_string()
+    } else if !source_image.is_empty() {
+        source_image
+    } else {
         let mut response = http_agent()
             .get(&url)
             .header("User-Agent", NEWSNOW_USER_AGENT)
@@ -621,9 +872,8 @@ fn fetch_preview_image(request: NewsNowPreviewRequest) -> Result<NewsNowPreview,
             .read_to_end(&mut bytes)
             .map_err(|_| "无法读取资讯原文".to_string())?;
         preview_image_from_html(&String::from_utf8_lossy(&bytes), &url)
-    } else {
-        url_open::validate_https_url(request.image_url.trim())?.to_string()
     };
+    let image_url = compact_preview_image_url(&image_url);
     let image_data_url = if image_url.is_empty() {
         String::new()
     } else {
@@ -1161,6 +1411,82 @@ mod tests {
                 "https://news.example/path/story"
             ),
             "https://news.example/body.jpg"
+        );
+    }
+
+    #[test]
+    fn sspai_preview_uses_a_compact_real_cover_variant() {
+        assert_eq!(
+            compact_preview_image_url(
+                "https://rssfile.sspai.com/2026/07/25/cover.png?imageMogr2/auto-orient"
+            ),
+            "https://rssfile.sspai.com/2026/07/25/cover.png?imageView2/2/w/800/h/450/format/webp/q/85"
+        );
+        assert_eq!(
+            compact_preview_image_url("https://images.example/cover.png?width=1600"),
+            "https://images.example/cover.png?width=1600"
+        );
+    }
+
+    #[test]
+    fn source_specific_preview_extractors_only_accept_real_article_images() {
+        let thepaper = r#"
+            <img class="site-logo" src="/logo.png">
+            <script id="__NEXT_DATA__" type="application/json">
+              {"props":{"pageProps":{"detailData":{"contentDetail":{"sharePic":"https://imgpai.thepaper.cn/cover.jpg"}}}}}
+            </script>
+        "#;
+        assert_eq!(
+            preview_image_from_html(thepaper, "https://www.thepaper.cn/newsDetail_forward_123"),
+            "https://imgpai.thepaper.cn/cover.jpg"
+        );
+        let coolapk = r#"
+            <img class="header-art" src="/header.jpg">
+            <img class="message-image" src="//image.coolapk.com/feed/real.jpg.m.jpg">
+        "#;
+        assert_eq!(
+            preview_image_from_html(coolapk, "https://www.coolapk.com/feed/123"),
+            "https://image.coolapk.com/feed/real.jpg.m.jpg"
+        );
+        assert!(preview_image_from_html(
+            r#"<img class="header-art" src="/header.jpg">"#,
+            "https://www.coolapk.com/feed/123"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn remote_cover_lookup_only_accepts_numeric_source_item_ids() {
+        assert_eq!(source_item_id("zhihu", "zhihu:123"), "123");
+        assert_eq!(safe_remote_item_id("zhihu", "zhihu:123"), "123");
+        assert!(safe_remote_item_id("zhihu", "zhihu:123/evil").is_empty());
+        assert!(safe_remote_item_id("douban", "douban:cover").is_empty());
+    }
+
+    #[test]
+    fn source_cover_maps_use_article_level_fields_not_icons() {
+        let zhihu = source_image_map_from_json(
+            "zhihu",
+            &json!({"data": [{
+                "target": {"id": 123, "image_area": {"url": "https://images.example/fallback.jpg"}},
+                "children": [{"thumbnail": "https://images.example/answer.jpg"}]
+            }]}),
+        );
+        assert_eq!(
+            zhihu.get("123"),
+            Some(&"https://images.example/answer.jpg".to_string())
+        );
+        let toutiao = source_image_map_from_json(
+            "toutiao",
+            &json!({"data": [{
+                "ClusterIdStr": "456",
+                "Image": {"url": "https://images.example/topic.jpg"},
+                "LabelUri": "https://images.example/label.png"
+            }]}),
+        );
+        assert_eq!(
+            toutiao.get("456"),
+            Some(&"https://images.example/topic.jpg".to_string())
         );
     }
 
