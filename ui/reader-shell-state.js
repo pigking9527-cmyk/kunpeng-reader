@@ -89,8 +89,10 @@
           toolbar: action.on ? TOOLBAR.IMMERSIVE_HIDDEN : TOOLBAR.NORMAL,
         });
       case "TOGGLE_TOOLBAR":
+        // 正常阅读模式的工具栏必须常驻。正文中部点击只负责唤出或
+        // 收起已开启的沉浸模式，绝不能把普通模式意外切进沉浸模式。
         if (current.toolbar === TOOLBAR.NORMAL) {
-          return Object.freeze({ ...current, toolbar: TOOLBAR.IMMERSIVE_HIDDEN });
+          return current;
         }
         return Object.freeze({
           ...current,
