@@ -55,13 +55,14 @@ test("reader settings dropdown has no pointer gap below the toolbar", () => {
   assert.doesNotMatch(html, /\.settings\s*\{[^}]*top:\s*calc\(100%\s*\+\s*8px\);/s);
 });
 
-test("reader settings provide a display-only simplified/traditional conversion", () => {
-  assert.match(html, /id="set-text-conversion"/);
-  assert.match(html, /option value="t2s">转为简体<\/option>/);
-  assert.match(html, /option value="s2t">转为繁体<\/option>/);
-  assert.match(settingsUi, /textConversion: "original"/);
-  assert.match(settingsUi, /\["original", "t2s", "s2t"\]\.includes\(settings\.textConversion\)/);
-  assert.match(settingsUi, /getElementById\("set-text-conversion"\)/);
+test("reader settings provide a display-only simplified/traditional conversion switch", () => {
+  assert.match(html, /id="set-text-conversion-simple"/);
+  assert.match(html, /<span>改为简<\/span>/);
+  assert.match(html, /class="settings-switch"/);
+  assert.match(settingsUi, /textConversion: "t2s"/);
+  assert.match(settingsUi, /settings\.textConversion === "original"/);
+  assert.match(settingsUi, /getElementById\("set-text-conversion-simple"\)/);
+  assert.match(settingsUi, /textConversionSimple\.checked \? "t2s" : "s2t"/);
   assert.match(layout, /var conversion=\['t2s','s2t'\]\.indexOf\(S\.textConversion\)>=0\?S\.textConversion:'original';/);
   assert.match(runtime, /if\(textConversionChanged\)\{\s*showChapter\(curCh,pageInCh\);\s*return;/);
 });

@@ -8,8 +8,9 @@ const source = fs.readFileSync(path.join(__dirname, "..", "shelf-ui.js"), "utf8"
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 
-test("common settings dialog stays compact on desktop", () => {
-  assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*width:\s*min\(600px,\s*calc\(100vw - 48px\)\);/s);
+test("common settings dialog stays narrow and readable on desktop", () => {
+  assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*width:\s*min\(480px,\s*calc\(100vw - 48px\)\);/s);
+  assert.match(styles, /\.fp-set-row \{[^}]*font-size:\s*16px;/s);
 });
 
 test("book card clicks explicitly close main-window floaters", () => {

@@ -41,10 +41,11 @@ test("recovery points can be selected and restored with a current-state safeguar
   assert.match(main, /data_commands::restore_recovery_backup/);
   assert.match(commands, /fn restore_recovery_backup/);
   assert.match(commands, /webview_windows/);
-  const stagedRecovery = backup.indexOf("let plans = stage_restore_files");
+  const stagedRecovery = backup.indexOf("let mut plans = stage_restore_files");
   const currentStateSafeguard = backup.indexOf("create_locked_with_data(&mut data, true)");
   assert.ok(stagedRecovery >= 0);
   assert.ok(currentStateSafeguard > stagedRecovery);
+  assert.ok(backup.indexOf("refresh_restore_plan_originals(&mut plans)") > currentStateSafeguard);
   assert.match(backup, /reset_runtime_caches_after_restore/);
   assert.match(html, /settings-restore-backup/);
   assert.match(app, /invoke\("restore_recovery_backup", \{ backupId \}\)/);

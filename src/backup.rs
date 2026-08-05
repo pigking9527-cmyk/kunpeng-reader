@@ -1244,6 +1244,28 @@ fn restore_plans_still_match_original(plans: &[RestoreFilePlan]) -> Result<(), S
     Ok(())
 }
 
+/// A restore always creates one last recovery point before replacing the live
+/// files. That snapshot deliberately updates `reader.db` metadata, so plans
+/// staged immediately before it must adopt this known-good post-snapshot
+/// state. Later changes are still rejected by `restore_plans_still_match_original`.
+fn refresh_restore_plan_originals(plans: &mut [RestoreFilePlan]) -> Result<(), String> {
+    for plan in plans {
+        let destination_exists = try_exists(&plan.destination, "检查恢复目标失败")?;
+        if plan.had_previous != destination_exists {
+            return Err(format!(
+                "创建恢复保护点后恢复目标状态异常：{}",
+                plan.destination.display()
+            ));
+        }
+        if destination_exists {
+            let (bytes, sha256) = file_sha256(&plan.destination)?;
+            plan.original_bytes = Some(bytes);
+            plan.original_sha256 = Some(sha256);
+        }
+    }
+    Ok(())
+}
+
 fn finalize_restore_plans(plans: &[RestoreFilePlan]) -> Result<(), String> {
     let mut failures = Vec::new();
     for plan in plans {
@@ -1450,13 +1472,17 @@ pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String
     // creating the mandatory recovery-before-restore snapshot. When seven
     // backups already exist, rotation is allowed to remove the selected oldest
     // directory; these same-directory staged copies remain valid.
-    let plans = stage_restore_files(&replacements)?;
+    let mut plans = stage_restore_files(&replacements)?;
 
     let mut data = lock_core_data(state)?;
     // Never overwrite the current state without a fresh, independently
     // verified recovery point that the user can return to. Keep all core
     // state locks from this snapshot through runtime reload.
     if let Err(error) = create_locked_with_data(&mut data, true) {
+        cleanup_restore_plans(&plans);
+        return Err(error);
+    }
+    if let Err(error) = refresh_restore_plan_originals(&mut plans) {
         cleanup_restore_plans(&plans);
         return Err(error);
     }
@@ -1632,6 +1658,33 @@ mod tests {
             std::fs::read(destination.join("library.json")).unwrap(),
             b"new-json"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn protection_snapshot_refreshes_restore_baseline_but_later_writes_still_fail() {
+        let dir = temp_test_dir("restore-baseline");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(source.join("reader.db"), b"selected-recovery").unwrap();
+        let live = destination.join("reader.db");
+        std::fs::write(&live, b"before-protection-snapshot").unwrap();
+        let mut plans = stage_restore_files(&[(source.join("reader.db"), live.clone())]).unwrap();
+
+        // `create_locked_with_data` writes backup metadata as part of the
+        // mandatory protection snapshot; that known write must not block us.
+        std::fs::write(&live, b"after-protection-snapshot").unwrap();
+        assert!(restore_plans_still_match_original(&plans).is_err());
+        refresh_restore_plan_originals(&mut plans).unwrap();
+        assert!(restore_plans_still_match_original(&plans).is_ok());
+
+        std::fs::write(&live, b"unexpected-concurrent-write").unwrap();
+        assert!(restore_plans_still_match_original(&plans)
+            .unwrap_err()
+            .contains("已被其他任务修改"));
+        cleanup_restore_plans(&plans);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
