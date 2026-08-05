@@ -13,8 +13,11 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tauri::Manager;
 
 const DEFAULT_BASE_URL: &str = "https://newsnow.busiyi.world";
+const NEWSNOW_HOME_URL: &str = "https://newsnow.busiyi.world/";
+const NEWSNOW_BROWSER_LABEL: &str = "newsnow-browser";
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_SELECTED_SOURCES: usize = 12;
 const MAX_ITEMS_PER_SOURCE: usize = 16;
@@ -23,6 +26,53 @@ const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
+
+// The remote website sends X-Frame-Options: SAMEORIGIN, so it must be loaded
+// as a top-level WebView rather than inside the reader's iframe.  This script
+// is deliberately self-contained: it has no Tauri IPC access and only returns
+// an external article back to the NewsNow homepage.
+const NEWSNOW_HOME_BUTTON_SCRIPT: &str = r#"
+(() => {
+  const home = "https://newsnow.busiyi.world/";
+  const buttonId = "__kunpeng-newsnow-home";
+  const goHome = () => {
+    if (location.href !== home) location.assign(home);
+  };
+  const mount = () => {
+    if (document.getElementById(buttonId)) return;
+    const button = document.createElement("button");
+    button.id = buttonId;
+    button.type = "button";
+    button.title = "返回资讯首页";
+    button.setAttribute("aria-label", "返回资讯首页");
+    button.textContent = "←";
+    button.style.cssText = [
+      "position:fixed", "z-index:2147483647", "right:18px", "top:50%",
+      "transform:translateY(-50%)", "width:46px", "height:46px", "border:0",
+      "border-radius:50%", "background:#2563eb", "color:#fff", "font:700 28px/42px system-ui,sans-serif",
+      "box-shadow:0 8px 24px rgba(15,23,42,.28)", "cursor:pointer", "opacity:.96"
+    ].join(";") + ";";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      goHome();
+    }, true);
+    (document.body || document.documentElement).appendChild(button);
+  };
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      goHome();
+    }
+  }, true);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mount, { once: true });
+  } else {
+    mount();
+  }
+})();
+"#;
 
 /// This intentionally small catalogue is the product default, rather than an
 /// unfiltered dump of every NewsNow source.  It is also the allowlist for
@@ -635,6 +685,42 @@ pub(crate) fn newsnow_status() -> NewsNowStatus {
             message: error,
         },
     }
+}
+
+#[tauri::command]
+pub(crate) async fn newsnow_open_browser(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(NEWSNOW_BROWSER_LABEL) {
+        window
+            .navigate(
+                NEWSNOW_HOME_URL
+                    .parse()
+                    .map_err(|error| format!("资讯首页地址无效：{error}"))?,
+            )
+            .map_err(|error| format!("无法返回资讯首页：{error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("无法聚焦资讯窗口：{error}"))?;
+        return Ok(());
+    }
+
+    let home = NEWSNOW_HOME_URL
+        .parse()
+        .map_err(|error| format!("资讯首页地址无效：{error}"))?;
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        NEWSNOW_BROWSER_LABEL,
+        tauri::WebviewUrl::External(home),
+    )
+    .title("资讯")
+    .inner_size(1160.0, 820.0)
+    .min_inner_size(640.0, 480.0)
+    .initialization_script(NEWSNOW_HOME_BUTTON_SCRIPT)
+    .build()
+    .map_err(|error| format!("无法打开资讯网页：{error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("无法聚焦资讯窗口：{error}"))?;
+    Ok(())
 }
 
 #[tauri::command]

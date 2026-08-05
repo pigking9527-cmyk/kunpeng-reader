@@ -27,28 +27,15 @@ test("NewsNow is gated behind the local experimental switch", () => {
   assert.match(script, /if \(!enabled && !page\.hidden\) close\(\{ focus: false \}\)/);
 });
 
-test("NewsNow opens its webpage directly from the toolbar and overlays safe original links in-app", () => {
+test("NewsNow opens in a top-level browser window instead of an iframe", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
-  assert.match(script, /const NEWSNOW_HOME_URL = "https:\/\/newsnow\.busiyi\.world\/"/);
-  assert.match(script, /function openNewsHome\(\)/);
-  assert.match(script, /openNewsHome\(\);/);
+  assert.match(script, /await invoke\("newsnow_open_browser"\)/);
   assert.match(script, /function withTimeout/);
   assert.match(script, /资讯请求超时/);
-  assert.match(html, /id="newsnow-reader"/);
-  assert.match(html, /id="newsnow-reader-frame"/);
-  assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"/);
-  assert.match(html, /返回资讯页/);
-  assert.match(script, /readerFrame\.src = url/);
-  assert.match(script, /openWebPage\(NEWSNOW_HOME_URL, "正在打开资讯网页…"\)/);
-  assert.match(script, /articleScrollTop = page\.scrollTop/);
-  assert.match(script, /page\.scrollTop = articleScrollTop/);
   assert.doesNotMatch(script, /newsnow_read_article/);
-  assert.match(script, /shell\.hidden = true/);
-  assert.match(script, /page\.hidden = false/);
   assert.match(script, /ReaderLibraryAiEntry\?\.close\(\)/);
-  assert.match(script, /function close\(\{ focus = true \} = \{\}\)/);
-  assert.match(script, /page\.hidden = true/);
+  assert.match(script, /global\.alert\("无法打开资讯网页，请检查网络后重试。"\)/);
 });
 
 test("NewsNow stores a local, bounded source selection and sends only source IDs", () => {
@@ -75,9 +62,8 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
 });
 
-test("NewsNow toolbar toggles back to the shelf when it is already open", () => {
-  assert.match(script, /function toggle\(\) \{\s*if \(page\.hidden\) \{\s*open\(\);\s*\} else \{\s*close\(\);/s);
-  assert.match(script, /button\.addEventListener\("click", toggle\)/);
+test("NewsNow toolbar opens or refocuses the native news window", () => {
+  assert.match(script, /button\.addEventListener\("click", \(\) => \{ void open\(\); \}\)/);
 });
 
 test("NewsNow presents a chronological reading feed and stays usable on narrow windows", () => {
