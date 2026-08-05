@@ -19,7 +19,8 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
 test("NewsNow is gated behind the local experimental switch", () => {
   const experiments = fs.readFileSync(path.join(ui, "experimental-features.js"), "utf8");
   assert.match(html, /id="experimental-newsnow"/);
-  assert.match(html, /<div class="fp-title">实验室<\/div>/);
+  assert.match(html, /<section class="experimental-settings" aria-label="资讯">/);
+  assert.doesNotMatch(html, /<div class="fp-title">实验室<\/div>/);
   assert.match(experiments, /const DEFAULTS = Object\.freeze\(\{ newsnow: false \}\)/);
   assert.match(experiments, /"kunpeng\.reader\.experimental-features\.v1"/);
   assert.match(script, /ReaderExperimentalFeatures\?\.enabled\?\.\("newsnow"\) === true/);
