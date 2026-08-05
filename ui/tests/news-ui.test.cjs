@@ -10,6 +10,8 @@ const styles = fs.readFileSync(path.join(ui, "styles.css"), "utf8");
 
 test("NewsNow has a shelf toolbar entry and an independently mounted news page", () => {
   assert.match(html, /id="newsnow-toolbar-btn"[^>]*hidden/);
+  assert.match(html, /id="newsnow-main-nav"/);
+  assert.match(html, /id="newsnow-main-back"/);
   assert.match(html, /id="newsnow-page"/);
   assert.match(html, /id="newsnow-back"/);
   assert.match(html, /id="newsnow-feed"/);
@@ -28,10 +30,13 @@ test("NewsNow is gated behind the local experimental switch", () => {
   assert.match(script, /if \(!enabled && !page\.hidden\) close\(\{ focus: false \}\)/);
 });
 
-test("NewsNow opens in a top-level browser window instead of an iframe", () => {
+test("NewsNow opens as a browser page inside the main window instead of an iframe", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
   assert.match(script, /await invoke\("newsnow_open_browser"\)/);
+  assert.match(script, /invoke\?\.\("newsnow_close_browser"\)/);
+  assert.match(script, /mainNav\.hidden = false/);
+  assert.match(script, /newsnow-browser-active/);
   assert.match(script, /function withTimeout/);
   assert.match(script, /资讯请求超时/);
   assert.doesNotMatch(script, /newsnow_read_article/);
@@ -63,7 +68,7 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
 });
 
-test("NewsNow toolbar opens or refocuses the native news window", () => {
+test("NewsNow toolbar opens or refocuses the embedded main-window page", () => {
   assert.match(script, /button\.addEventListener\("click", \(\) => \{ void open\(\); \}\)/);
 });
 
