@@ -1,5 +1,5 @@
 
-var S={fontFamily:"",styleMode:"local",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1};
+var S={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1};
 var READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
 var readerAnimationGroupByKey={annotationAdd:'readerPage',readingMode:'readerPage',pageTurn:'readerPage',highlightSettings:'readerPage'};
 var readerAnimationSettingsOverride=null;
@@ -2406,7 +2406,8 @@ function scheduleNoteNumberDisplayRefresh(){
 function showChapter(i,where,frag){
   i=Math.max(0,Math.min(CH-1,i));
   var showStarted=performance.now(),fetchDone=showStarted;
-  return fetch(location.origin+'/chapter/'+ID+'/'+i).then(function(r){return r.json();}).then(function(d){
+  var conversion=['t2s','s2t'].indexOf(S.textConversion)>=0?S.textConversion:'original';
+  return fetch(location.origin+'/chapter/'+ID+'/'+i+'/'+conversion).then(function(r){return r.json();}).then(function(d){
     fetchDone=performance.now();
     var body=d.body||'';fastChapterLayout=largeChapterFastLayout(body);
     curCh=i;pageInCh=0;dualStartColumn=0;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;if(scrollPort())scrollPort().scrollTop=0;if(d.head)injectHead(d.head,headSeen);root.innerHTML=body+'<div class="rr-end"></div>';normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();

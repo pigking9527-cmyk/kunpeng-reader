@@ -55,6 +55,17 @@ test("reader settings dropdown has no pointer gap below the toolbar", () => {
   assert.doesNotMatch(html, /\.settings\s*\{[^}]*top:\s*calc\(100%\s*\+\s*8px\);/s);
 });
 
+test("reader settings provide a display-only simplified/traditional conversion", () => {
+  assert.match(html, /id="set-text-conversion"/);
+  assert.match(html, /option value="t2s">转为简体<\/option>/);
+  assert.match(html, /option value="s2t">转为繁体<\/option>/);
+  assert.match(settingsUi, /textConversion: "original"/);
+  assert.match(settingsUi, /\["original", "t2s", "s2t"\]\.includes\(settings\.textConversion\)/);
+  assert.match(settingsUi, /getElementById\("set-text-conversion"\)/);
+  assert.match(layout, /var conversion=\['t2s','s2t'\]\.indexOf\(S\.textConversion\)>=0\?S\.textConversion:'original';/);
+  assert.match(runtime, /if\(textConversionChanged\)\{\s*showChapter\(curCh,pageInCh\);\s*return;/);
+});
+
 test("整页翻页仅保留水平滑动动画，并迁移旧动画设置", () => {
   assert.match(html, /option value="horizontal">水平翻页（整页左移）<\/option>/);
   assert.doesNotMatch(html, /纸张效果（Google）|仿真翻页/);

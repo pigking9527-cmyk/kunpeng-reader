@@ -290,6 +290,9 @@ const recoveryBackupActions = document.getElementById("recovery-backup-actions")
 const recoveryBackupSelect = document.getElementById("settings-restore-backup");
 const restoreRecoveryBackupButton = document.getElementById("settings-restore-backup-button");
 const useModelTagsCheckbox = document.getElementById("set-use-model-tags");
+const appLanguageSelect = document.getElementById("set-app-language");
+window.ReaderAppI18n?.populate(appLanguageSelect);
+appLanguageSelect?.addEventListener("change", () => window.ReaderAppI18n?.setLanguage(appLanguageSelect.value));
 window.ReaderApiSettingsUI?.init({ invoke });
 function backupBytes(value) {
   const bytes = Number(value) || 0;

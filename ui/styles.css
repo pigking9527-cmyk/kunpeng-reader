@@ -607,6 +607,7 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .fp-set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px;
   font-size: 14px; color: #333; padding: 6px 0; white-space: nowrap; }
 .fp-set-tail { display: inline-flex; align-items: center; gap: 10px; }
+.app-language-select { min-width: 156px; max-width: 54%; padding: 5px 8px; border: 1px solid #cfd7e6; border-radius: 7px; background: #fff; color: #344154; font: inherit; font-size: 13px; }
 .fp-row-gear { border: none; background: transparent; cursor: pointer; font-size: 17px;
   color: #888; line-height: 1; padding: 2px; }
 .fp-row-gear:hover { color: #2b6cff; }

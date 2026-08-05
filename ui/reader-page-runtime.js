@@ -163,7 +163,7 @@ window.addEventListener('message',function(e){
     }
   }
   if(e.data.settings){
-    var prevFlow=S.flowMode,prevPageMode=S.pageMode,prevFontFamily=S.fontFamily;
+    var prevFlow=S.flowMode,prevPageMode=S.pageMode,prevFontFamily=S.fontFamily,prevTextConversion=S.textConversion;
     var nextFlow=e.data.settings.flowMode||prevFlow,nextPageMode=e.data.settings.pageMode||prevPageMode;
     var incomingModeChange=prevFlow!==nextFlow||prevPageMode!==nextPageMode;
     var prevPageCountSig=pageCountSig();
@@ -205,6 +205,13 @@ window.addEventListener('message',function(e){
       if(scroller){scroller.style.clipPath='none';scroller.style.webkitClipPath='none';}
     }
     S=Object.assign(S,e.data.settings);
+    var textConversionChanged=prevTextConversion!==S.textConversion;
+    // 转换始终从原始章节 HTML 重新取一份显示文本，不修改图书文件、索引或同步内容。
+    // 保留当前章内页号作为近似位置；字符宽度变化后再用旧的精确文本锚点反而会失效。
+    if(textConversionChanged){
+      showChapter(curCh,pageInCh);
+      return;
+    }
     var flowChanged=prevFlow!==S.flowMode;
     var pageModeChanged=prevPageMode!==S.pageMode;
     if(flowChanged||pageModeChanged)cancelPagedImagePreview();
