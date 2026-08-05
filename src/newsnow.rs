@@ -6,6 +6,7 @@
 //! article URLs before handing them back to the UI.
 
 use crate::url_open;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -18,12 +19,13 @@ use tauri::{Emitter, Manager, WebviewBuilder, WebviewUrl};
 
 const DEFAULT_BASE_URL: &str = "https://newsnow.busiyi.world";
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
-const MAX_SELECTED_SOURCES: usize = 12;
+const MAX_SELECTED_SOURCES: usize = 24;
 const MAX_ITEMS_PER_SOURCE: usize = 16;
 const MAX_TOTAL_ITEMS: usize = 90;
 const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
+const PREVIEW_IMAGE_MAX_BYTES: u64 = 1_500_000;
 const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
 const ARTICLE_WEBVIEW_LABEL: &str = "newsnow-article";
@@ -356,6 +358,8 @@ pub(crate) struct NewsNowStatus {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NewsNowPreviewRequest {
     pub url: String,
+    #[serde(default)]
+    pub image_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -368,6 +372,7 @@ pub(crate) struct NewsNowOpenRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NewsNowPreview {
     pub image_url: String,
+    pub image_data_url: String,
 }
 
 #[derive(Default)]
@@ -561,26 +566,79 @@ fn preview_image_from_html(html: &str, page_url: &str) -> String {
     String::new()
 }
 
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn fetch_image_data_url(page_url: &str, image_url: &str) -> Result<String, String> {
+    let mut response = http_agent()
+        .get(image_url)
+        .header("User-Agent", NEWSNOW_USER_AGENT)
+        .header("Referer", page_url)
+        .header(
+            "Accept",
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        )
+        .call()
+        .map_err(|_| "无法请求资讯图片".to_string())?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(PREVIEW_IMAGE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "无法读取资讯图片".to_string())?;
+    if bytes.len() as u64 > PREVIEW_IMAGE_MAX_BYTES {
+        return Err("资讯图片过大".to_string());
+    }
+    let mime = image_mime(&bytes).ok_or_else(|| "资讯图片格式不受支持".to_string())?;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
 fn fetch_preview_image(request: NewsNowPreviewRequest) -> Result<NewsNowPreview, String> {
     let url = url_open::validate_https_url(request.url.trim())?.to_string();
     if url.len() > 2_000 {
         return Err("资讯原文地址过长".to_string());
     }
-    let mut response = http_agent()
-        .get(&url)
-        .header("User-Agent", NEWSNOW_USER_AGENT)
-        .header("Accept", "text/html,application/xhtml+xml")
-        .call()
-        .map_err(|_| "无法请求资讯原文".to_string())?;
-    let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(PREVIEW_MAX_BYTES)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "无法读取资讯原文".to_string())?;
+    let image_url = if request.image_url.trim().is_empty() {
+        let mut response = http_agent()
+            .get(&url)
+            .header("User-Agent", NEWSNOW_USER_AGENT)
+            .header("Accept", "text/html,application/xhtml+xml")
+            .call()
+            .map_err(|_| "无法请求资讯原文".to_string())?;
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .take(PREVIEW_MAX_BYTES)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "无法读取资讯原文".to_string())?;
+        preview_image_from_html(&String::from_utf8_lossy(&bytes), &url)
+    } else {
+        url_open::validate_https_url(request.image_url.trim())?.to_string()
+    };
+    let image_data_url = if image_url.is_empty() {
+        String::new()
+    } else {
+        fetch_image_data_url(&url, &image_url).unwrap_or_default()
+    };
     Ok(NewsNowPreview {
-        image_url: preview_image_from_html(&String::from_utf8_lossy(&bytes), &url),
+        image_url,
+        image_data_url,
     })
 }
 

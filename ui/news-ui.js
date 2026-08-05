@@ -7,7 +7,7 @@
   const SOURCE_STORAGE_KEY = "kunpeng.reader.news.sources.v2";
   const LAYOUT_STORAGE_KEY = "kunpeng.reader.news.layout.v1";
   const ORDER_STORAGE_KEY = "kunpeng.reader.news.order.v1";
-  const MAX_SOURCES = 12;
+  const MAX_SOURCES = 24;
 
   const text = (value) => String(value == null ? "" : value);
   function safeHttpUrl(value) {
@@ -15,6 +15,10 @@
       const url = new URL(text(value));
       return url.protocol === "https:" ? url.href : "";
     } catch (_) { return ""; }
+  }
+  function safeImageDataUrl(value) {
+    const image = text(value).trim();
+    return /^data:image\/(?:jpeg|png|gif|webp);base64,[a-z0-9+/=]+$/i.test(image) ? image : "";
   }
   function resultItems(result) {
     if (Array.isArray(result)) return result;
@@ -154,34 +158,35 @@
     }
     function drainPreviewImageQueue() {
       while (previewImageActive < 3 && previewImageQueue.length) {
-        const url = previewImageQueue.shift(); previewImageActive += 1;
-        Promise.resolve(invoke("newsnow_preview_image", { request: { url } }))
-          .then((result) => safeHttpUrl(result?.imageUrl || result?.image_url))
+        const request = previewImageQueue.shift(); previewImageActive += 1;
+        Promise.resolve(invoke("newsnow_preview_image", { request: { url: request.pageUrl, imageUrl: request.imageUrl } }))
+          .then((result) => safeImageDataUrl(result?.imageDataUrl || result?.image_data_url))
           .catch(() => "")
-          .then((imageUrl) => {
-            previewImageCache.set(url, imageUrl);
-            (previewImageWaiters.get(url) || []).forEach(({ image, card }) => applyCardImage(image, card, imageUrl));
+          .then((dataUrl) => {
+            previewImageCache.set(request.key, dataUrl);
+            (previewImageWaiters.get(request.key) || []).forEach(({ image, card }) => applyCardImage(image, card, dataUrl));
           })
-          .finally(() => { previewImageWaiters.delete(url); previewImageActive -= 1; drainPreviewImageQueue(); });
+          .finally(() => { previewImageWaiters.delete(request.key); previewImageActive -= 1; drainPreviewImageQueue(); });
       }
     }
-    function requestPreviewImage(url, image, card) {
-      if (previewImageCache.has(url)) { applyCardImage(image, card, previewImageCache.get(url)); return; }
-      const waiters = previewImageWaiters.get(url);
+    function requestPreviewImage(pageUrl, imageUrl, image, card) {
+      const key = pageUrl + "\n" + imageUrl;
+      if (previewImageCache.has(key)) { applyCardImage(image, card, previewImageCache.get(key)); return; }
+      const waiters = previewImageWaiters.get(key);
       if (waiters) { waiters.push({ image, card }); return; }
-      previewImageWaiters.set(url, [{ image, card }]); previewImageQueue.push(url); drainPreviewImageQueue();
+      previewImageWaiters.set(key, [{ image, card }]); previewImageQueue.push({ key, pageUrl, imageUrl }); drainPreviewImageQueue();
     }
     const previewImageObserver = typeof global.IntersectionObserver === "function"
       ? new global.IntersectionObserver((entries) => entries.forEach((entry) => {
         if (!entry.isIntersecting) return;
         previewImageObserver.unobserve(entry.target);
         const preview = entry.target.__newsPreview;
-        if (preview) requestPreviewImage(preview.url, preview.image, entry.target);
+        if (preview) requestPreviewImage(preview.pageUrl, preview.imageUrl, preview.image, entry.target);
       }), { root: page, rootMargin: "420px 0px" })
       : null;
-    function schedulePreviewImage(url, image, card) {
-      if (previewImageObserver) { card.__newsPreview = { url, image }; previewImageObserver.observe(card); }
-      else requestPreviewImage(url, image, card);
+    function schedulePreviewImage(pageUrl, imageUrl, image, card) {
+      if (previewImageObserver) { card.__newsPreview = { pageUrl, imageUrl, image }; previewImageObserver.observe(card); }
+      else requestPreviewImage(pageUrl, imageUrl, image, card);
     }
     function makeCard(item) {
       const article = root.createElement("article"), url = safeHttpUrl(item.url || item.link || item.href), rail = root.createElement("div"), content = root.createElement("div"), meta = root.createElement("div"), source = root.createElement("span"), title = root.createElement("h2");
@@ -190,7 +195,7 @@
       const imageUrl = safeHttpUrl(item.imageUrl || item.image_url || item.cover || item.thumbnail);
       const image = root.createElement("img"); image.className = "newsnow-card-image"; image.alt = ""; image.loading = "lazy"; image.hidden = true;
       image.addEventListener("error", () => { image.hidden = true; article.classList.remove("has-image"); }); content.appendChild(image);
-      if (imageUrl) applyCardImage(image, article, imageUrl); else if (url) schedulePreviewImage(url, image, article);
+      if (url) schedulePreviewImage(url, imageUrl, image, article);
       content.append(meta, title);
       const description = text(item.summary || item.description || item.content || item.excerpt).trim(); if (description) { const summary = root.createElement("p"); summary.className = "newsnow-summary"; summary.textContent = description; content.appendChild(summary); }
       if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = "打开网页 →"; content.appendChild(open); article.addEventListener("click", () => openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArticle(item); } }); }
