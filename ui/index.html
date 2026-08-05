@@ -820,13 +820,24 @@
             <button id="newsnow-layout-list" class="newsnow-layout-button" type="button" title="横排布局" aria-label="横排布局" aria-pressed="true"><i class="newsnow-layout-list-icon" aria-hidden="true"></i></button>
             <button id="newsnow-layout-grid" class="newsnow-layout-button" type="button" title="方格布局" aria-label="方格布局" aria-pressed="false"><i class="newsnow-layout-grid-icon" aria-hidden="true"></i></button>
           </div>
+          <div class="newsnow-order-control" role="group" aria-label="资讯排列">
+            <button id="newsnow-order-mixed" class="newsnow-order-button" type="button" aria-pressed="true">混合</button>
+            <button id="newsnow-order-source" class="newsnow-order-button" type="button" aria-pressed="false">按来源</button>
+          </div>
         </div>
       </div>
       <div id="newsnow-status" class="newsnow-status" aria-live="polite"></div>
       <main id="newsnow-feed" class="newsnow-feed" aria-live="polite"></main>
-      <article id="newsnow-reader" class="newsnow-reader" hidden aria-label="网页原文">
+      <article id="newsnow-reader" class="newsnow-reader" hidden aria-label="资讯正文">
         <p id="newsnow-reader-status" class="newsnow-reader-status" aria-live="polite"></p>
-        <iframe id="newsnow-reader-frame" class="newsnow-reader-frame" title="资讯原网页" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"></iframe>
+        <div class="newsnow-reader-scroll">
+          <header class="newsnow-article-head">
+            <p id="newsnow-article-meta" class="newsnow-article-meta"></p>
+            <h1 id="newsnow-article-title"></h1>
+            <a id="newsnow-article-original" class="newsnow-article-original" target="_blank" rel="noopener noreferrer">打开原网页 ↗</a>
+          </header>
+          <div id="newsnow-article-body" class="newsnow-article-body"></div>
+        </div>
         <button id="newsnow-reader-back" class="newsnow-reader-back" type="button" title="返回资讯页" aria-label="返回资讯页">←</button>
       </article>
     </section>

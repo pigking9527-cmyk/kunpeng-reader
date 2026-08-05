@@ -28,15 +28,18 @@ test("NewsNow is gated behind the local experimental switch", () => {
   assert.match(script, /if \(!enabled && !page\.hidden\) close\(\{ focus: false \}\)/);
 });
 
-test("NewsNow opens in a top-level browser window instead of an iframe", () => {
+test("NewsNow is rendered in the main browser page and asks Rust for sanitized articles", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
-  assert.match(script, /await invoke\("newsnow_open_browser"\)/);
+  assert.match(script, /page\.hidden = false; shell\.hidden = true/);
+  assert.match(script, /invoke\("newsnow_read_article", \{ request \}\)/);
   assert.match(script, /function withTimeout/);
   assert.match(script, /资讯请求超时/);
-  assert.doesNotMatch(script, /newsnow_read_article/);
+  assert.match(script, /contentHtml is parsed and sanitized by the Rust command/);
   assert.match(script, /ReaderLibraryAiEntry\?\.close\(\)/);
-  assert.match(script, /global\.alert\("无法打开资讯网页，请检查网络后重试。"\)/);
+  assert.doesNotMatch(html, /newsnow-reader-frame/);
+  assert.match(html, /id="newsnow-article-body"/);
+  assert.match(html, /id="newsnow-article-original"/);
 });
 
 test("NewsNow stores a local, bounded source selection and sends only source IDs", () => {
@@ -46,9 +49,9 @@ test("NewsNow stores a local, bounded source selection and sends only source IDs
   assert.match(script, /const SOURCE_STORAGE_KEY = "kunpeng\.reader\.news\.sources\.v2"/);
   assert.match(script, /const MAX_SOURCES = 12/);
   assert.match(script, /function allowedSourceIds/);
-  assert.match(script, /let sourceQuery = ""/);
+  assert.match(script, /sourceQuery = ""/);
   assert.match(script, /sourceSearch\.addEventListener\("input"/);
-  assert.match(script, /const request = \{ sourceIds \}/);
+  assert.match(script, /request: \{ sourceIds \}/);
   assert.match(script, /最多选择 \$\{MAX_SOURCES\} 个来源/);
 });
 
@@ -56,15 +59,25 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(html, /id="newsnow-layout-list"/);
   assert.match(html, /id="newsnow-layout-grid"/);
   assert.match(script, /const LAYOUT_STORAGE_KEY = "kunpeng\.reader\.news\.layout\.v1"/);
-  assert.match(script, /function setLayout\(nextLayout\)/);
+  assert.match(script, /function setLayout\(next\)/);
   assert.match(script, /feed\.classList\.toggle\("newsnow-feed-grid", grid\)/);
   assert.match(script, /gridLayout\.addEventListener\("click", \(\) => setLayout\("grid"\)\)/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
 });
 
-test("NewsNow toolbar opens or refocuses the native news window", () => {
+test("NewsNow persists mixed or source-grouped ordering", () => {
+  assert.match(html, /id="newsnow-order-mixed"/);
+  assert.match(html, /id="newsnow-order-source"/);
+  assert.match(script, /const ORDER_STORAGE_KEY = "kunpeng\.reader\.news\.order\.v1"/);
+  assert.match(script, /function setOrder\(next\)/);
+  assert.match(script, /newsnow-feed-by-source/);
+  assert.match(styles, /\.newsnow-source-section\s*\{/);
+});
+
+test("NewsNow toolbar opens the main-window news page", () => {
   assert.match(script, /button\.addEventListener\("click", \(\) => \{ void open\(\); \}\)/);
+  assert.match(script, /page\.hidden = false; shell\.hidden = true/);
 });
 
 test("NewsNow presents a chronological reading feed and stays usable on narrow windows", () => {
@@ -76,5 +89,6 @@ test("NewsNow presents a chronological reading feed and stays usable on narrow w
   assert.match(styles, /\.newsnow-reader\s*\{/);
   assert.match(styles, /\.newsnow-page\.newsnow-reading\s*\{/);
   assert.match(styles, /\.newsnow-reader-back\s*\{/);
+  assert.match(styles, /\.newsnow-article-body\s*\{/);
   assert.match(styles, /@media \(max-width: 620px\)/);
 });

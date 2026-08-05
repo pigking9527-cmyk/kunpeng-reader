@@ -113,16 +113,20 @@ fn safe_url_attribute(element: &str, attribute: &str, value: &str) -> bool {
         && !normalized.starts_with("//")
 }
 
-fn content_builder() -> Builder<'static> {
+fn content_builder(preserve_presentation: bool) -> Builder<'static> {
     let tags = CONTENT_TAGS.iter().copied().collect::<HashSet<_>>();
     let clean_content_tags = DROP_WITH_CONTENT
         .iter()
         .copied()
         .chain(["style"])
         .collect::<HashSet<_>>();
-    let generic_attributes = ["class", "id", "lang", "title", "dir", "style"]
-        .into_iter()
-        .collect::<HashSet<_>>();
+    let generic_attributes = if preserve_presentation {
+        ["class", "id", "lang", "title", "dir", "style"]
+            .into_iter()
+            .collect::<HashSet<_>>()
+    } else {
+        ["lang", "title", "dir"].into_iter().collect::<HashSet<_>>()
+    };
     let style_properties = [
         "color",
         "background-color",
@@ -221,7 +225,14 @@ fn content_builder() -> Builder<'static> {
 
 /// Sanitize any untrusted book body using an HTML5 parser and an explicit allowlist.
 pub fn sanitize_book_html(html: &str) -> String {
-    content_builder().clean(html).to_string()
+    content_builder(true).clean(html).to_string()
+}
+
+/// Sanitize an extracted web article for the news view.  Source-specific
+/// classes, ids and inline styles are deliberately discarded so a publisher's
+/// layout cannot leak into the reader's own page.
+pub fn sanitize_web_article_html(html: &str) -> String {
+    content_builder(false).clean(html).to_string()
 }
 
 /// Sanitize the small set of EPUB head assets that the reader supports.
