@@ -8,6 +8,8 @@
   const LAYOUT_STORAGE_KEY = "kunpeng.reader.news.layout.v1";
   const ORDER_STORAGE_KEY = "kunpeng.reader.news.order.v1";
   const MAX_SOURCES = 24;
+  const BACKGROUND_PREFETCH_DELAY_MS = 30 * 1000;
+  const BACKGROUND_PREFETCH_INTERVAL_MS = 5 * 60 * 1000;
 
   const text = (value) => String(value == null ? "" : value);
   function safeHttpUrl(value) {
@@ -88,10 +90,12 @@
     let layout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
     let articleScrollTop = 0, articleOpen = false, masonryResizeTimer = 0;
+    let backgroundRefreshRunning = false, prefetchDelayTimer = 0, prefetchIntervalTimer = 0, lastUserActivityAt = Date.now();
     const previewImageCache = new Map(), previewImageWaiters = new Map(), previewImageQueue = [];
     let previewImageActive = 0;
 
     const newsEnabled = () => global.ReaderExperimentalFeatures?.enabled?.("newsnow") === true;
+    const backgroundPrefetchEnabled = () => global.ReaderExperimentalFeatures?.enabled?.("newsnowPrefetch") === true;
     function applyExperimentalAvailability() {
       const enabled = newsEnabled();
       button.hidden = !enabled;
@@ -232,9 +236,45 @@
       catalogueLoading = Promise.resolve(invoke && invoke("newsnow_sources")).then((sources) => Array.isArray(sources) ? sources : []).then((sources) => { catalog = sources; sourceIds = loadStoredSourceIds(catalog); renderSourceSummary(); renderCategories(); return catalog; }).catch(() => { catalog = []; sourceIds = []; renderSourceSummary(); return catalog; }).finally(() => { catalogueLoading = null; });
       return catalogueLoading;
     }
+    function applyNewsResult(result, { announce = false } = {}) {
+      allItems = resultItems(result); renderCategories(); renderFeed();
+      const stamp = result?.fetched_at || result?.fetchedAt;
+      updated.textContent = stamp ? "更新于 " + itemDate({ published_at: stamp }) : "";
+      if (!announce || page.hidden) return;
+      const message = text(result?.message).trim();
+      setStatus(message || (allItems.length ? `已更新 ${allItems.length} 条资讯。` : "没有获取到资讯。"), result?.stale ? "warning" : (message && !allItems.length ? "error" : "muted"));
+    }
+    async function refreshInBackground({ announce = false } = {}) {
+      if (backgroundRefreshRunning || !newsEnabled() || !invoke) return;
+      backgroundRefreshRunning = true;
+      try {
+        await loadSources();
+        const result = await withTimeout(invoke("newsnow_prefetch", { request: { sourceIds } }), 60000);
+        applyNewsResult(result, { announce });
+      } catch (_) {
+        if (announce && !page.hidden) setStatus("资讯后台更新失败，正在保留已显示内容。", "warning");
+      } finally { backgroundRefreshRunning = false; }
+    }
+    function stopBackgroundPrefetch() {
+      if (prefetchDelayTimer) global.clearTimeout(prefetchDelayTimer);
+      if (prefetchIntervalTimer) global.clearInterval(prefetchIntervalTimer);
+      prefetchDelayTimer = 0; prefetchIntervalTimer = 0;
+    }
+    function refreshIfIdle() {
+      if (Date.now() - lastUserActivityAt < BACKGROUND_PREFETCH_DELAY_MS) return;
+      void refreshInBackground();
+    }
+    function scheduleBackgroundPrefetch() {
+      stopBackgroundPrefetch();
+      if (!newsEnabled() || !backgroundPrefetchEnabled() || !invoke) return;
+      prefetchDelayTimer = global.setTimeout(() => {
+        refreshIfIdle();
+        prefetchIntervalTimer = global.setInterval(refreshIfIdle, BACKGROUND_PREFETCH_INTERVAL_MS);
+      }, BACKGROUND_PREFETCH_DELAY_MS);
+    }
     async function load(force = false) {
       if (loading || !invoke) return; loading = true; refresh.disabled = true; refresh.textContent = force ? "刷新中…" : "加载中…"; setStatus(force ? "正在更新资讯流…" : "正在载入资讯流…", "muted");
-      try { await loadSources(); const result = await withTimeout(invoke(force ? "newsnow_refresh" : "newsnow_list", { request: { sourceIds } })); allItems = resultItems(result); renderCategories(); renderFeed(); const stamp = result?.fetched_at || result?.fetchedAt; updated.textContent = stamp ? "更新于 " + itemDate({ published_at: stamp }) : ""; const message = text(result?.message).trim(); setStatus(message || (allItems.length ? `已加载 ${allItems.length} 条资讯。` : "没有获取到资讯。"), result?.stale ? "warning" : (message && !allItems.length ? "error" : "muted")); }
+      try { await loadSources(); const result = await withTimeout(invoke(force ? "newsnow_refresh" : "newsnow_list", { request: { sourceIds } })); applyNewsResult(result, { announce: true }); if (!force && result?.stale) void refreshInBackground({ announce: true }); }
       catch (error) { renderFeed(); setStatus(error?.message === "资讯请求超时" ? "资讯请求超时，正在保留当前内容。" : "资讯加载失败，请检查网络后重试。", "error"); }
       finally { loading = false; refresh.disabled = false; refresh.textContent = "刷新"; }
     }
@@ -247,9 +287,10 @@
     sourceToggle.addEventListener("click", () => { if (sourcePicker.hidden) void loadSources().then(openSourcePicker); else closeSourcePicker({ focus: true }); }); sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true })); sourceSearch.addEventListener("input", () => { sourceQuery = sourceSearch.value; renderSourcePicker(); }); sourceReset.addEventListener("click", () => { pendingSourceIds = defaultSourceIds(catalog); renderSourcePicker(); });
     sourceApply.addEventListener("click", () => { const selected = allowedSourceIds(pendingSourceIds, catalog); if (!selected.length) { setStatus("至少选择一个来源，或使用“恢复推荐”。", "warning"); return; } sourceIds = selected; storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); selectedCategory = "全部"; renderSourceSummary(); renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
     global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
+    ["pointerdown", "keydown", "wheel", "touchstart"].forEach((eventName) => global.addEventListener(eventName, () => { lastUserActivityAt = Date.now(); }, { passive: true }));
     global.addEventListener("resize", () => { if (layout !== "grid" || page.hidden || !feed.clientWidth) return; global.clearTimeout(masonryResizeTimer); masonryResizeTimer = global.setTimeout(renderFeed, 120); });
     global.__TAURI__?.event?.listen?.("newsnow-return-to-feed", () => closeArticle({ focus: true }));
-    global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); }); applyExperimentalAvailability(); applyDisplayOptions();
+    global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); if (event.detail?.key === "newsnow" || event.detail?.key === "newsnowPrefetch") scheduleBackgroundPrefetch(); }); applyExperimentalAvailability(); applyDisplayOptions(); scheduleBackgroundPrefetch();
     return { open, close, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: () => layout, order: () => order };
   }
   global.ReaderNewsUI = { init, resultItems, safeHttpUrl, withTimeout, allowedSourceIds };

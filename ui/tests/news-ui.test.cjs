@@ -21,9 +21,13 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
 test("NewsNow is gated behind the local experimental switch", () => {
   const experiments = fs.readFileSync(path.join(ui, "experimental-features.js"), "utf8");
   assert.match(html, /id="experimental-newsnow"/);
+  assert.match(html, /id="experimental-newsnow-gear"/);
+  assert.match(html, /id="experimental-newsnow-settings"/);
+  assert.match(html, /id="experimental-newsnow-prefetch"/);
   assert.match(html, /<section class="experimental-settings" aria-label="资讯">/);
   assert.doesNotMatch(html, /<div class="fp-title">实验室<\/div>/);
-  assert.match(experiments, /const DEFAULTS = Object\.freeze\(\{ newsnow: false \}\)/);
+  assert.match(experiments, /const DEFAULTS = Object\.freeze\(\{ newsnow: false, newsnowPrefetch: true \}\)/);
+  assert.match(experiments, /set\("newsnowPrefetch", prefetch\.checked\)/);
   assert.match(experiments, /"kunpeng\.reader\.experimental-features\.v1"/);
   assert.match(script, /ReaderExperimentalFeatures\?\.enabled\?\.\("newsnow"\) === true/);
   assert.match(script, /reader-experimental-features-changed/);
@@ -83,6 +87,19 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(styles, /\.newsnow-card-image\[hidden\]\s*\{\s*display: none/);
   assert.doesNotMatch(styles, /\.newsnow-feed\.newsnow-feed-grid \.newsnow-card\s*\{[^}]*height: 222px/s);
   assert.match(styles, /\.newsnow-card h2\s*\{[^}]*-webkit-line-clamp: 4/s);
+});
+
+test("NewsNow prefetches enabled sources in the background without eager image downloads", () => {
+  assert.match(script, /const BACKGROUND_PREFETCH_DELAY_MS = 30 \* 1000/);
+  assert.match(script, /const BACKGROUND_PREFETCH_INTERVAL_MS = 5 \* 60 \* 1000/);
+  assert.match(script, /function scheduleBackgroundPrefetch\(\)/);
+  assert.match(script, /function refreshIfIdle\(\)/);
+  assert.match(script, /Date\.now\(\) - lastUserActivityAt < BACKGROUND_PREFETCH_DELAY_MS/);
+  assert.match(script, /invoke\("newsnow_prefetch", \{ request: \{ sourceIds \} \}\)/);
+  assert.match(script, /if \(!force && result\?\.stale\) void refreshInBackground\(\{ announce: true \}\)/);
+  assert.match(script, /IntersectionObserver/);
+  assert.match(styles, /\.experimental-settings\s*\{[^}]*border: 0/s);
+  assert.match(styles, /\.experimental-settings \+ \.default-apps-setting\s*\{[^}]*border-top: 0/s);
 });
 
 test("NewsNow persists mixed or source-grouped ordering", () => {

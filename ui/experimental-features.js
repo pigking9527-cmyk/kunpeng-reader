@@ -3,7 +3,7 @@
   "use strict";
 
   const STORAGE_KEY = "kunpeng.reader.experimental-features.v1";
-  const DEFAULTS = Object.freeze({ newsnow: false });
+  const DEFAULTS = Object.freeze({ newsnow: false, newsnowPrefetch: true });
 
   function read() {
     try {
@@ -28,10 +28,22 @@
 
   function init({ root = global.document } = {}) {
     const news = root?.getElementById("experimental-newsnow");
-    if (!news) return null;
-    news.checked = enabled("newsnow");
+    const gear = root?.getElementById("experimental-newsnow-gear");
+    const settings = root?.getElementById("experimental-newsnow-settings");
+    const prefetch = root?.getElementById("experimental-newsnow-prefetch");
+    if (!news || !gear || !settings || !prefetch) return null;
+    const refresh = () => {
+      news.checked = enabled("newsnow");
+      prefetch.checked = enabled("newsnowPrefetch");
+    };
     news.addEventListener("change", () => set("newsnow", news.checked));
-    return { refresh: () => { news.checked = enabled("newsnow"); } };
+    prefetch.addEventListener("change", () => set("newsnowPrefetch", prefetch.checked));
+    gear.addEventListener("click", () => {
+      settings.hidden = !settings.hidden;
+      gear.setAttribute("aria-expanded", String(!settings.hidden));
+    });
+    refresh();
+    return { refresh };
   }
 
   const api = { STORAGE_KEY, enabled, set, init, instance: null };

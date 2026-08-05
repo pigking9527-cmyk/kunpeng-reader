@@ -339,6 +339,7 @@ fn main() {
             newsnow::newsnow_status,
             newsnow::newsnow_sources,
             newsnow::newsnow_list,
+            newsnow::newsnow_prefetch,
             newsnow::newsnow_refresh,
             newsnow::newsnow_preview_image,
             newsnow::newsnow_open_article,
