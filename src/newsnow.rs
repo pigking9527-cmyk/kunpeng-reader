@@ -697,7 +697,7 @@ fn https_text(value: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
-fn image_url(item: &Value) -> String {
+fn image_url(source: NewsSource, item: &Value) -> String {
     for pointer in [
         "/extra/image",
         "/extra/cover",
@@ -715,6 +715,11 @@ fn image_url(item: &Value) -> String {
         if !url.is_empty() {
             return url;
         }
+    }
+    // 今日头条的热榜 API 把逐条的专题图放在 icon 中；其他来源的 icon
+    // 往往只是站点标识，不应伪装成文章缩略图。
+    if source.id == "toutiao" {
+        return https_text(item.pointer("/extra/icon"));
     }
     String::new()
 }
@@ -750,7 +755,7 @@ fn parse_source_response(source: NewsSource, response: Value) -> Vec<NewsNowItem
                 source_color: source.color.to_string(),
                 summary,
                 published_at,
-                image_url: image_url(item),
+                image_url: image_url(source, item),
                 category: source.category.to_string(),
             })
         })
@@ -1090,6 +1095,30 @@ mod tests {
                 "extra": {"icon": {"url": "https://example.com/icon.png"}}
             }]
         });
+        assert!(parse_source_response(CURATED_SOURCES[0], response)[0]
+            .image_url
+            .is_empty());
+    }
+
+    #[test]
+    fn parser_uses_toutiao_topic_icon_but_not_other_source_icons() {
+        let response = json!({
+            "items": [{
+                "id": 7,
+                "title": "头条热榜",
+                "url": "https://www.toutiao.com/trending/7/",
+                "extra": {"icon": "https://p3-sign.toutiaoimg.com/topic.png"}
+            }]
+        });
+        let toutiao = CURATED_SOURCES
+            .iter()
+            .copied()
+            .find(|source| source.id == "toutiao")
+            .unwrap();
+        assert_eq!(
+            parse_source_response(toutiao, response.clone())[0].image_url,
+            "https://p3-sign.toutiaoimg.com/topic.png"
+        );
         assert!(parse_source_response(CURATED_SOURCES[0], response)[0]
             .image_url
             .is_empty());
