@@ -360,6 +360,7 @@ fn main() {
             app_commands::translate_text,
             feedback::submit_feedback,
             newsnow::newsnow_status,
+            newsnow::newsnow_open_browser,
             newsnow::newsnow_sources,
             newsnow::newsnow_list,
             newsnow::newsnow_refresh,

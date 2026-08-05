@@ -406,18 +406,20 @@
       }
     }
 
-    function open() {
-      if (!newsEnabled()) return;
+    async function open() {
+      if (!newsEnabled() || !invoke) return;
       root.getElementById("menu")?.classList.remove("show");
       root.getElementById("filter-panel")?.classList.remove("show");
       root.getElementById("account-panel")?.classList.remove("show");
       if (!root.getElementById("library-ai-page")?.hidden) global.ReaderLibraryAiEntry?.close();
-      shell.hidden = true;
-      page.hidden = false;
-      closeArticle({ restoreScroll: false });
-      global.document.body.classList.add("newsnow-active");
-      button.setAttribute("aria-pressed", "true");
-      openNewsHome();
+      button.disabled = true;
+      try {
+        await invoke("newsnow_open_browser");
+      } catch (error) {
+        global.alert("无法打开资讯网页，请检查网络后重试。");
+      } finally {
+        button.disabled = false;
+      }
     }
 
     function close({ focus = true } = {}) {
@@ -430,15 +432,7 @@
       if (focus && !button.hidden) button.focus({ preventScroll: true });
     }
 
-    function toggle() {
-      if (page.hidden) {
-        open();
-      } else {
-        close();
-      }
-    }
-
-    button.addEventListener("click", toggle);
+    button.addEventListener("click", () => { void open(); });
     back.addEventListener("click", close);
     readerBack.addEventListener("click", () => close({ focus: true }));
     readerFrame.addEventListener("load", () => {
