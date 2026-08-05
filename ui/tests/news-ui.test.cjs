@@ -29,9 +29,9 @@ test("NewsNow is gated behind the local experimental switch", () => {
   assert.doesNotMatch(html, /<div class="fp-title">实验室<\/div>/);
   assert.match(experiments, /const DEFAULTS = Object\.freeze\(\{ newsnow: false, newsnowPrefetch: true \}\)/);
   assert.match(experiments, /set\("newsnowPrefetch", prefetch\.checked\)/);
-  assert.match(experiments, /commonSettingsModal\?\.classList\.remove\("show"\)/);
   assert.match(experiments, /settingsModal\.classList\.add\("show"\)/);
   assert.match(experiments, /settingsModal\.classList\.remove\("show"\)/);
+  assert.doesNotMatch(experiments, /fp-settings-modal/);
   assert.match(experiments, /"kunpeng\.reader\.experimental-features\.v1"/);
   assert.match(script, /ReaderExperimentalFeatures\?\.enabled\?\.\("newsnow"\) === true/);
   assert.match(script, /reader-experimental-features-changed/);
@@ -129,6 +129,7 @@ test("NewsNow presents a chronological reading feed and stays usable on narrow w
   assert.match(styles, /\.newsnow-reader\s*\{/);
   assert.match(styles, /\.newsnow-reader\[hidden\]\s*\{\s*display: none/);
   assert.match(styles, /\.newsnow-reader\s*\{[^}]*flex: 1 1 auto/s);
-  assert.match(styles, /\.newsnow-reader-back\s*\{/);
+  assert.doesNotMatch(html, /id="newsnow-reader-back"/);
+  assert.doesNotMatch(styles, /\.newsnow-reader-back\s*\{/);
   assert.match(styles, /@media \(max-width: 620px\)/);
 });

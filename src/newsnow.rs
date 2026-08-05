@@ -37,6 +37,7 @@ const ARTICLE_WEBVIEW_LABEL: &str = "newsnow-article";
 const ARTICLE_RETURN_URL: &str = "https://reader.localhost/__kunpeng_news_return__";
 const ARTICLE_RETURN_SCRIPT: &str = r##"
 (() => {
+  if (window.top !== window) return;
   const returnUrl = "https://reader.localhost/__kunpeng_news_return__";
   const install = () => {
     if (document.getElementById("kunpeng-news-return")) return;
@@ -1635,6 +1636,12 @@ mod tests {
         assert!(validate_base_url(concat!("http", "://news.example")).is_err());
         assert!(validate_base_url("https://user@news.example").is_err());
         assert!(validate_base_url("https://news.example/\nnext").is_err());
+    }
+
+    #[test]
+    fn article_return_control_is_only_injected_into_the_top_page() {
+        assert!(ARTICLE_RETURN_SCRIPT.contains("if (window.top !== window) return;"));
+        assert!(ARTICLE_RETURN_SCRIPT.contains("kunpeng-news-return"));
     }
 
     #[test]
