@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "latest": "1.11.1",
+  "latest": "1.11.2",
   "releases": {
+    "1.11.2": {
+      "android_version": "0.3.0",
+      "release_notes": "- Windows-only 体验更新：重做主窗口资讯，支持最多 24 个来源、横排/方格和混合/按来源排列，新增 3DM、游民星空新闻。\n- 资讯卡片修复多来源封面、防盗链与无图补位；正文在阅读器浏览器内打开，并加入本地缓存和可选后台预取。\n- 书库问答支持 Enter 提问、Shift+Enter 换行，以及复制、剪切、粘贴右键菜单；修复部分语义检索/API 兼容问题。\n- 修复退出延迟与非沉浸阅读模式工具栏、底部进度条交互。",
+      "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.11.2",
+      "published_at": "2026-08-05"
+    },
     "1.11.1": {
       "android_version": "0.3.0",
       "release_notes": "- Windows-only 补丁发布：提供 Windows 便携版、安装包和 SHA-256 清单；macOS/Linux 保持 v1.11.0，Android 保持 v0.3.0。\n- 智读升级为选句、已读范围检索、证据筛选与引用自检的多阶段流程，回答支持 Markdown 和可点击来源。\n- 新增大模型与翻译 API 统一设置，可保存多套模型并在书库问答/智读中切换。\n- 问答历史支持稳定 ID、删除墓碑同步和本机引用正文恢复；修复智读切换时的阅读位置漂移与书架交互问题。",
