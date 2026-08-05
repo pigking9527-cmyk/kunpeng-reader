@@ -66,11 +66,14 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(script, /newsnow_preview_image/);
   assert.match(script, /safeImageDataUrl/);
   assert.match(script, /IntersectionObserver/);
+  assert.match(script, /sourceId: request\.sourceId, itemId: request\.itemId/);
+  assert.match(script, /schedulePreviewImage\(url, imageUrl, sourceId\(item\), text\(item\.id\)/);
   assert.match(script, /gridLayout\.addEventListener\("click", \(\) => setLayout\("grid"\)\)/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*minmax\(210px, 1fr\)/s);
   assert.match(styles, /\.newsnow-card-image\s*\{/);
+  assert.match(styles, /\.newsnow-card-image\[hidden\]\s*\{\s*display: none/);
   assert.doesNotMatch(styles, /\.newsnow-feed\.newsnow-feed-grid \.newsnow-card\s*\{[^}]*height: 222px/s);
   assert.match(styles, /\.newsnow-card h2\s*\{[^}]*-webkit-line-clamp: 4/s);
 });
