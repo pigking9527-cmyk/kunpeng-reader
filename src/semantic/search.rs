@@ -497,7 +497,10 @@ fn semantic_search_inner(
     let graph_started = Instant::now();
     if let Some(index) = loaded_index {
         let titles: HashMap<u64, (String, String)> = {
-            let lib = state.library.lock().unwrap();
+            let lib = state.library.lock().unwrap_or_else(|poisoned| {
+                crate::log("semantic_search recovered poisoned library lock");
+                poisoned.into_inner()
+            });
             lib.books
                 .iter()
                 .map(|book| (book.id, (book.title.clone(), book.author.clone())))
@@ -515,7 +518,10 @@ fn semantic_search_inner(
     let graph_ms = graph_started.elapsed().as_millis();
 
     let all_targets: Vec<book::Book> = {
-        let lib = state.library.lock().unwrap();
+        let lib = state.library.lock().unwrap_or_else(|poisoned| {
+            crate::log("semantic_search recovered poisoned library lock");
+            poisoned.into_inner()
+        });
         lib.books
             .iter()
             .filter(|book| book.format != "pdf")

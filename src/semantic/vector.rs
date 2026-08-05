@@ -456,7 +456,10 @@ pub(super) fn index_source_signature_fast(book: &book::Book) -> Option<IndexSour
 }
 
 pub(super) fn index_source_snapshot(state: &AppState) -> Vec<IndexSourceSignature> {
-    let library = state.library.lock().unwrap();
+    let library = state.library.lock().unwrap_or_else(|poisoned| {
+        crate::log("semantic_vector recovered poisoned library lock");
+        poisoned.into_inner()
+    });
     let mut snapshot: Vec<_> = library
         .books
         .iter()
@@ -585,7 +588,10 @@ pub(super) fn metadata_exists(id: u64) -> bool {
 /// 取一本书的向量数据：命中 LRU 时只更新顺序，否则校验元数据、尺寸和哈希后载入。
 pub(super) fn load(state: &AppState, id: u64) -> Option<Arc<SemData>> {
     let cached = {
-        let cache = state.sem_cache.lock().unwrap();
+        let cache = state.sem_cache.lock().unwrap_or_else(|poisoned| {
+            crate::log("semantic_vector recovered poisoned cache lock");
+            poisoned.into_inner()
+        });
         cache.get(&id).cloned()
     };
     if let Some(data) = cached {
@@ -651,8 +657,14 @@ pub(super) fn load(state: &AppState, id: u64) -> Option<Arc<SemData>> {
     let size = data.vector_bytes();
     let budget = crate::memory_budget::plan().semantic_vector_bytes as usize;
     if size <= budget {
-        let mut cache = state.sem_cache.lock().unwrap();
-        let mut order = state.sem_cache_order.lock().unwrap();
+        let mut cache = state.sem_cache.lock().unwrap_or_else(|poisoned| {
+            crate::log("semantic_vector recovered poisoned cache lock");
+            poisoned.into_inner()
+        });
+        let mut order = state.sem_cache_order.lock().unwrap_or_else(|poisoned| {
+            crate::log("semantic_vector recovered poisoned cache-order lock");
+            poisoned.into_inner()
+        });
         if let Some(existing) = cache.get(&id) {
             return Some(existing.clone());
         }

@@ -26,20 +26,19 @@ test("NewsNow is gated behind the local experimental switch", () => {
   assert.match(experiments, /"kunpeng\.reader\.experimental-features\.v1"/);
   assert.match(script, /ReaderExperimentalFeatures\?\.enabled\?\.\("newsnow"\) === true/);
   assert.match(script, /reader-experimental-features-changed/);
-  assert.match(script, /if \(!enabled && !page\.hidden\) close\(\{ focus: false \}\)/);
+  assert.match(script, /if \(!enabled && \(!page\.hidden \|\| !reader\.hidden\)\) close\(\{ focus: false \}\)/);
 });
 
-test("NewsNow opens a full source webpage in the main browser page", () => {
+test("NewsNow opens a full source webpage in a main-window child browser", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
   assert.match(script, /page\.hidden = false; shell\.hidden = true/);
-  assert.match(script, /readerFrame\.src = url/);
+  assert.match(script, /newsnow_open_article/);
   assert.match(script, /function withTimeout/);
   assert.match(script, /资讯请求超时/);
-  assert.match(script, /readerFrame\.src = "about:blank"/);
   assert.match(script, /reader\.hidden = !visible; page\.hidden = visible/);
   assert.match(script, /ReaderLibraryAiEntry\?\.close\(\)/);
-  assert.match(html, /id="newsnow-reader-frame"/);
+  assert.doesNotMatch(html, /id="newsnow-reader-frame"/);
   assert.doesNotMatch(script, /newsnow_read_article/);
 });
 
@@ -70,7 +69,7 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*minmax\(210px, 1fr\)/s);
   assert.match(styles, /\.newsnow-card-image\s*\{/);
-  assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid \.newsnow-card\s*\{[^}]*height: 222px/s);
+  assert.doesNotMatch(styles, /\.newsnow-feed\.newsnow-feed-grid \.newsnow-card\s*\{[^}]*height: 222px/s);
   assert.match(styles, /\.newsnow-card h2\s*\{[^}]*-webkit-line-clamp: 4/s);
 });
 
@@ -83,8 +82,8 @@ test("NewsNow persists mixed or source-grouped ordering", () => {
   assert.match(styles, /\.newsnow-source-section\s*\{/);
 });
 
-test("NewsNow toolbar opens the main-window news page", () => {
-  assert.match(script, /button\.addEventListener\("click", \(\) => \{ void open\(\); \}\)/);
+test("NewsNow toolbar toggles the main-window news page", () => {
+  assert.match(script, /button\.addEventListener\("click", \(\) => \{ if \(!page\.hidden \|\| !reader\.hidden\) close/);
   assert.match(script, /page\.hidden = false; shell\.hidden = true/);
 });
 
@@ -97,6 +96,5 @@ test("NewsNow presents a chronological reading feed and stays usable on narrow w
   assert.match(styles, /\.newsnow-reader\s*\{/);
   assert.match(styles, /\.newsnow-reader\s*\{[^}]*flex: 1 1 auto/s);
   assert.match(styles, /\.newsnow-reader-back\s*\{/);
-  assert.match(styles, /\.newsnow-reader-frame\s*\{/);
   assert.match(styles, /@media \(max-width: 620px\)/);
 });

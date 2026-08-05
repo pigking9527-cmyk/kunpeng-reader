@@ -1,5 +1,5 @@
-/* A browser-rendered, reader-owned news page.  Network access is kept in Rust:
-   the WebView only receives source IDs and sanitized article HTML. */
+/* A browser-rendered, reader-owned news page. The Rust side fetches the feed;
+   a selected source article opens in a main-window child WebView. */
 (function (global) {
   "use strict";
 
@@ -73,17 +73,16 @@
     const reader = root.getElementById("newsnow-reader");
     const readerBack = root.getElementById("newsnow-reader-back");
     const readerStatus = root.getElementById("newsnow-reader-status");
-    const readerFrame = root.getElementById("newsnow-reader-frame");
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerBack || !readerStatus || !readerFrame || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSummary || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerBack || !readerStatus || !categories || !updated || !shell) return null;
 
     let catalog = [], sourceIds = [], pendingSourceIds = [], allItems = [];
     let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
     let layout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
-    let articleScrollTop = 0;
+    let articleScrollTop = 0, articleOpen = false;
     const previewImageCache = new Map(), previewImageWaiters = new Map(), previewImageQueue = [];
     let previewImageActive = 0;
 
@@ -91,7 +90,7 @@
     function applyExperimentalAvailability() {
       const enabled = newsEnabled();
       button.hidden = !enabled;
-      if (!enabled && !page.hidden) close({ focus: false });
+      if (!enabled && (!page.hidden || !reader.hidden)) close({ focus: false });
     }
     function setStatus(message, kind = "") { status.textContent = text(message); status.className = "newsnow-status" + (kind ? " " + kind : ""); }
     function sourceForId(id) { return catalog.find((source) => text(source.id) === text(id)); }
@@ -142,10 +141,12 @@
     function openSourcePicker() { pendingSourceIds = sourceIds.slice(); sourceQuery = ""; sourceSearch.value = ""; renderSourcePicker(); sourcePicker.hidden = false; sourceToggle.setAttribute("aria-expanded", "true"); sourceSearch.focus({ preventScroll: true }); }
     function closeSourcePicker({ focus = false } = {}) { sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); if (focus) sourceToggle.focus({ preventScroll: true }); }
     function setReaderVisible(visible) { reader.hidden = !visible; page.hidden = visible; sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); }
-    function closeArticle({ focus = false, restoreScroll = true } = {}) { readerFrame.src = "about:blank"; readerStatus.textContent = ""; setReaderVisible(false); if (restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; }); if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true }); }
-    function openArticle(item) {
+    function closeArticle({ focus = false, restoreScroll = true } = {}) { if (articleOpen && invoke) void Promise.resolve(invoke("newsnow_close_article")).catch(() => {}); articleOpen = false; readerStatus.textContent = ""; setReaderVisible(false); if (restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; }); if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true }); }
+    async function openArticle(item) {
       const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
-      articleScrollTop = page.scrollTop; page.scrollTop = 0; readerStatus.textContent = "正在加载原网页…"; setReaderVisible(true); readerFrame.src = url;
+      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; readerStatus.textContent = "正在加载原网页…"; setReaderVisible(true);
+      try { await invoke("newsnow_open_article", { request: { url } }); }
+      catch (_) { articleOpen = false; setReaderVisible(false); setStatus("网页无法在阅读器中打开，请稍后重试。", "error"); }
     }
     function applyCardImage(image, card, url) {
       if (!url) return;
@@ -220,10 +221,11 @@
       page.hidden = false; shell.hidden = true; global.document.body.classList.add("newsnow-active"); button.setAttribute("aria-pressed", "true"); await load(false);
     }
     function close({ focus = true } = {}) { closeSourcePicker(); closeArticle({ restoreScroll: false }); page.hidden = true; shell.hidden = false; global.document.body.classList.remove("newsnow-active"); button.setAttribute("aria-pressed", "false"); if (focus && !button.hidden) button.focus({ preventScroll: true }); }
-    button.addEventListener("click", () => { void open(); }); back.addEventListener("click", () => close()); readerBack.addEventListener("click", () => closeArticle({ focus: true })); readerFrame.addEventListener("load", () => { if (!reader.hidden) readerStatus.textContent = ""; }); readerFrame.addEventListener("error", () => { if (!reader.hidden) readerStatus.textContent = "网页加载失败，请返回资讯页后重试。"; }); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
+    button.addEventListener("click", () => { if (!page.hidden || !reader.hidden) close({ focus: false }); else void open(); }); back.addEventListener("click", () => close()); readerBack.addEventListener("click", () => closeArticle({ focus: true })); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
     sourceToggle.addEventListener("click", () => { if (sourcePicker.hidden) void loadSources().then(openSourcePicker); else closeSourcePicker({ focus: true }); }); sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true })); sourceSearch.addEventListener("input", () => { sourceQuery = sourceSearch.value; renderSourcePicker(); }); sourceReset.addEventListener("click", () => { pendingSourceIds = defaultSourceIds(catalog); renderSourcePicker(); });
     sourceApply.addEventListener("click", () => { const selected = allowedSourceIds(pendingSourceIds, catalog); if (!selected.length) { setStatus("至少选择一个来源，或使用“恢复推荐”。", "warning"); return; } sourceIds = selected; storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); selectedCategory = "全部"; renderSourceSummary(); renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
     global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
+    global.__TAURI__?.event?.listen?.("newsnow-return-to-feed", () => closeArticle({ focus: true }));
     global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); }); applyExperimentalAvailability(); applyDisplayOptions();
     return { open, close, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: () => layout, order: () => order };
   }
