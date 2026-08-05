@@ -924,9 +924,9 @@
     sourcePreview.addEventListener("pointerleave", scheduleSourcePreviewHide);
     $("run").addEventListener("click", run);
     $("question").addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
         event.preventDefault();
-        run();
+        void run();
       }
     });
     global.addEventListener("library-model-tags-setting-changed", (event) => {
