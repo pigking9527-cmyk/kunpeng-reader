@@ -24,6 +24,7 @@
     let libraryHistory = [], historySyncEnabled = false, showingHistory = false, latestAnswer = null;
     let classificationPoll = null;
     let answerFontSize = DEFAULT_ANSWER_FONT_SIZE;
+    let questionContextMenu = null;
     const organizationName = (value) => String(value || "").trim();
     const organizationKey = (value) => organizationName(value).toLocaleLowerCase("zh-CN");
     const tagsForBook = (book) => {
@@ -48,6 +49,74 @@
       if (decrease) decrease.disabled = answerFontSize <= MIN_ANSWER_FONT_SIZE;
       if (increase) increase.disabled = answerFontSize >= MAX_ANSWER_FONT_SIZE;
       if (save) try { global.localStorage?.setItem(ANSWER_FONT_SIZE_KEY, String(answerFontSize)); } catch (_) {}
+    }
+
+    function closeQuestionContextMenu() {
+      questionContextMenu?.remove();
+      questionContextMenu = null;
+    }
+
+    async function copyQuestionText(value) {
+      if (!value) return false;
+      if (global.navigator?.clipboard?.writeText) {
+        try { await global.navigator.clipboard.writeText(value); return true; } catch (_) {}
+      }
+      const fallback = root.createElement("textarea");
+      fallback.value = value;
+      fallback.setAttribute("aria-hidden", "true");
+      fallback.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+      root.body.appendChild(fallback);
+      fallback.select();
+      const copied = Boolean(root.execCommand?.("copy"));
+      fallback.remove();
+      return copied;
+    }
+
+    function insertQuestionText(value) {
+      const question = $("question");
+      if (!question || !value) return;
+      const start = Number(question.selectionStart || 0), end = Number(question.selectionEnd || start);
+      question.setRangeText(value, start, end, "end");
+      question.dispatchEvent(new Event("input", { bubbles: true }));
+      question.focus({ preventScroll: true });
+    }
+
+    function showQuestionContextMenu(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeQuestionContextMenu();
+      const question = $("question");
+      const selectedText = question.value.slice(question.selectionStart || 0, question.selectionEnd || 0);
+      const menu = root.createElement("div");
+      menu.className = "library-ai-question-menu";
+      menu.setAttribute("role", "menu");
+      const addAction = (label, action, disabled = false) => {
+        const button = root.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.disabled = disabled;
+        button.addEventListener("pointerdown", (pointerEvent) => pointerEvent.preventDefault());
+        button.addEventListener("click", async () => {
+          closeQuestionContextMenu();
+          await action();
+        });
+        menu.appendChild(button);
+      };
+      addAction("复制", async () => {
+        if (!(await copyQuestionText(selectedText))) state("无法复制所选文字。", true);
+      }, !selectedText);
+      addAction("粘贴", async () => {
+        try {
+          if (!global.navigator?.clipboard?.readText) throw new Error("clipboard unavailable");
+          insertQuestionText(await global.navigator.clipboard.readText());
+        }
+        catch (_) { state("无法读取剪贴板，请确认系统已允许阅读器访问剪贴板。", true); }
+      });
+      const width = 136, height = 86;
+      menu.style.left = `${Math.max(8, Math.min(event.clientX, (global.innerWidth || width) - width - 8))}px`;
+      menu.style.top = `${Math.max(8, Math.min(event.clientY, (global.innerHeight || height) - height - 8))}px`;
+      root.body.appendChild(menu);
+      questionContextMenu = menu;
     }
 
     function stopClassificationPoll() {
@@ -923,6 +992,7 @@
     sourcePreview.addEventListener("pointerenter", () => clearTimeout(previewHideTimer));
     sourcePreview.addEventListener("pointerleave", scheduleSourcePreviewHide);
     $("run").addEventListener("click", run);
+    $("question").addEventListener("contextmenu", showQuestionContextMenu);
     $("question").addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
         event.preventDefault();
@@ -936,6 +1006,12 @@
     });
     global.addEventListener("ai-reader-profiles-changed", () => {
       invoke("ai_reader_profiles").then(renderModelProfiles).catch(() => {});
+    });
+    global.addEventListener("pointerdown", (event) => {
+      if (questionContextMenu && !questionContextMenu.contains(event.target)) closeQuestionContextMenu();
+    }, true);
+    global.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeQuestionContextMenu();
     });
     return { load, run, setMode, renderBooks };
   }
