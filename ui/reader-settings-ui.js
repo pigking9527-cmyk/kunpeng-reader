@@ -14,6 +14,7 @@ const DEFAULTS = {
   theme: "light",
   fontFamily: "",
   styleMode: "local",
+  textConversion: "original",
   fontSize: 18,
   noteFontSize: 14,
   lineHeight: 1.7,
@@ -71,6 +72,10 @@ function normalizeModeSettings() {
     changed = true;
   } else if (!["off", "horizontal"].includes(settings.pageTurnEffect)) {
     settings.pageTurnEffect = DEFAULTS.pageTurnEffect;
+    changed = true;
+  }
+  if (!["original", "t2s", "s2t"].includes(settings.textConversion)) {
+    settings.textConversion = DEFAULTS.textConversion;
     changed = true;
   }
   const speed = parseFloat(settings.pageTurnSpeed);
@@ -251,6 +256,14 @@ function initSettingsUI() {
     styleMode.value = settings.styleMode;
     styleMode.addEventListener("change", () => {
       settings.styleMode = styleMode.value === "book" ? "book" : "local";
+      onChange();
+    });
+  }
+  const textConversion = document.getElementById("set-text-conversion");
+  if (textConversion) {
+    textConversion.value = settings.textConversion;
+    textConversion.addEventListener("change", () => {
+      settings.textConversion = textConversion.value;
       onChange();
     });
   }

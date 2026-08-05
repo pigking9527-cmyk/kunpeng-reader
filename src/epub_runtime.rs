@@ -7,11 +7,12 @@ use crate::reader_protocol::{
     md_to_html, percent_decode, rewrite_attrs, rewrite_css_url, strip_tags, txt_body, txt_html,
 };
 use crate::{book, log, reader_page, AppState, RES_BASE};
+use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tauri::Manager;
 
@@ -25,6 +26,96 @@ pub(crate) const CACHE_VERSION: u32 = 3;
 const CACHE_COMPAT_VERSIONS: &[u32] = &[2, 3];
 
 static READER_RESOURCE_REQUEST_LOGGED: AtomicBool = AtomicBool::new(false);
+static SIMPLIFIED_TO_TRADITIONAL: OnceLock<Option<OpenCC>> = OnceLock::new();
+static TRADITIONAL_TO_SIMPLIFIED: OnceLock<Option<OpenCC>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReaderTextConversion {
+    Original,
+    ToSimplified,
+    ToTraditional,
+}
+
+impl ReaderTextConversion {
+    fn parse(value: &str) -> Self {
+        match value {
+            "t2s" => Self::ToSimplified,
+            "s2t" => Self::ToTraditional,
+            _ => Self::Original,
+        }
+    }
+}
+
+fn reader_text_converter(mode: ReaderTextConversion) -> Option<&'static OpenCC> {
+    match mode {
+        ReaderTextConversion::Original => None,
+        ReaderTextConversion::ToTraditional => SIMPLIFIED_TO_TRADITIONAL
+            .get_or_init(|| OpenCC::from_config(BuiltinConfig::S2t).ok())
+            .as_ref(),
+        ReaderTextConversion::ToSimplified => TRADITIONAL_TO_SIMPLIFIED
+            .get_or_init(|| OpenCC::from_config(BuiltinConfig::T2s).ok())
+            .as_ref(),
+    }
+}
+
+/// Converts only visible HTML text, deliberately leaving markup and resource URLs intact.
+/// Reader chapter HTML is sanitised before this runs, but we still avoid changing the
+/// contents of style/script blocks should a book retain one.
+fn convert_reader_html_text(html: &str, mode: ReaderTextConversion) -> String {
+    let Some(converter) = reader_text_converter(mode) else {
+        return html.to_owned();
+    };
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0usize;
+    let mut raw_text_tag: Option<&str> = None;
+    while let Some(relative_start) = html[cursor..].find('<') {
+        let start = cursor + relative_start;
+        if raw_text_tag.is_none() {
+            out.push_str(&converter.convert(&html[cursor..start]));
+        } else {
+            out.push_str(&html[cursor..start]);
+        }
+        let Some(relative_end) = html[start..].find('>') else {
+            if raw_text_tag.is_none() {
+                out.push_str(&converter.convert(&html[start..]));
+            } else {
+                out.push_str(&html[start..]);
+            }
+            return out;
+        };
+        let end = start + relative_end + 1;
+        let tag = &html[start..end];
+        let tag_name = tag
+            .trim_start_matches('<')
+            .trim_start_matches('/')
+            .trim_start()
+            .split(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
+            .next()
+            .unwrap_or("");
+        let closes_tag = tag.trim_start_matches('<').trim_start().starts_with('/');
+        if let Some(raw) = raw_text_tag {
+            if closes_tag && tag_name.eq_ignore_ascii_case(raw) {
+                raw_text_tag = None;
+            }
+        } else if !closes_tag
+            && (tag_name.eq_ignore_ascii_case("style") || tag_name.eq_ignore_ascii_case("script"))
+        {
+            raw_text_tag = Some(if tag_name.eq_ignore_ascii_case("style") {
+                "style"
+            } else {
+                "script"
+            });
+        }
+        out.push_str(tag);
+        cursor = end;
+    }
+    if raw_text_tag.is_none() {
+        out.push_str(&converter.convert(&html[cursor..]));
+    } else {
+        out.push_str(&html[cursor..]);
+    }
+    out
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct EpubVirtualChapter {
@@ -918,7 +1009,9 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
             Some((shell.into_bytes(), "text/html".to_string()))
         }
         "chapter" => {
-            let index: usize = rest.parse().ok()?;
+            let (index_text, conversion_text) = rest.split_once('/').unwrap_or((&rest, "original"));
+            let index: usize = index_text.parse().ok()?;
+            let conversion = ReaderTextConversion::parse(conversion_text);
             let format = state
                 .library
                 .lock()
@@ -945,12 +1038,14 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
                 } else {
                     txt_body(&raw)
                 };
+                let body = convert_reader_html_text(&body, conversion);
                 let json = serde_json::json!({"head": "", "body": body}).to_string();
                 return Some((json.into_bytes(), "application/json".to_string()));
             }
             let meta = ensure_epub_meta(state, id).ok()?;
             let chapter = process_virtual_chapter(state, id, index, &meta)?;
-            let json = serde_json::json!({"head": chapter.head, "body": chapter.body}).to_string();
+            let body = convert_reader_html_text(&chapter.body, conversion);
+            let json = serde_json::json!({"head": chapter.head, "body": body}).to_string();
             Some((json.into_bytes(), "application/json".to_string()))
         }
         "pdf" => {
@@ -1058,5 +1153,15 @@ mod tests {
     fn cache_versions_remain_backward_compatible() {
         assert_eq!(CACHE_VERSION, 3);
         assert_eq!(CACHE_COMPAT_VERSIONS, &[2, 3]);
+    }
+
+    #[test]
+    fn reader_conversion_changes_text_without_touching_markup() {
+        let source = r#"<p title="开放">开放中文 <a href="/资源/开放">阅读</a></p>"#;
+        let converted = convert_reader_html_text(source, ReaderTextConversion::ToTraditional);
+        assert!(converted.contains(r#"title="开放""#));
+        assert!(converted.contains(r#"href="/资源/开放""#));
+        assert!(converted.contains("開放中文"));
+        assert!(converted.contains("閱讀"));
     }
 }

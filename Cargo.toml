@@ -44,6 +44,7 @@ zip = { version = "8.6", default-features = false, features = ["deflate-flate2-z
 ammonia = "4.1"
 libc = "0.2"
 ring = "0.17"
+ferrous-opencc = "0.3.1"
 
 # 正式发布档：保留优化，同时加快日常 release 构建。
 [profile.release]
