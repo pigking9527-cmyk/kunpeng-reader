@@ -256,8 +256,12 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.doesNotMatch(controller.match(/function portableSourceReference\(source\)[\s\S]*?\n    }/)[0], /bookId/);
   assert.match(controller, /问答已保存到本机/);
   assert.match(controller, /下次同步时上传/);
+  assert.match(controller, /function renderLibraryHistoryAnswer\(entry, sources\)/);
+  assert.match(controller, /label\.textContent = "问题"/);
+  assert.match(controller, /renderLibraryHistoryAnswer\(entry, sources\)/);
   assert.match(styles, /\.library-ai-history-list\s*\{/);
   assert.match(styles, /\.library-ai-history-delete\s*\{/);
+  assert.match(styles, /\.library-ai-history-question-detail\s*\{/);
 });
 
 test("library assistant no longer creates a separate WebView", () => {
