@@ -436,12 +436,26 @@ fn https_text(value: Option<&Value>) -> String {
 }
 
 fn image_url(item: &Value) -> String {
-    let icon = item.pointer("/extra/icon");
-    match icon {
-        Some(Value::String(_)) => https_text(icon),
-        Some(Value::Object(icon)) => https_text(icon.get("url")),
-        _ => String::new(),
+    for pointer in [
+        "/extra/image",
+        "/extra/cover",
+        "/extra/thumbnail",
+        "/image",
+        "/imageUrl",
+        "/thumbnail",
+        "/extra/icon",
+    ] {
+        let value = item.pointer(pointer);
+        let url = match value {
+            Some(Value::String(_)) => https_text(value),
+            Some(Value::Object(object)) => https_text(object.get("url")),
+            _ => String::new(),
+        };
+        if !url.is_empty() {
+            return url;
+        }
     }
+    String::new()
 }
 
 fn parse_source_response(source: NewsSource, response: Value) -> Vec<NewsNowItem> {
@@ -722,6 +736,23 @@ mod tests {
         assert_eq!(items[0].source_id, "weibo");
         assert_eq!(items[0].summary, "摘要");
         assert_eq!(items[1].url, "https://m.example.com/c");
+    }
+
+    #[test]
+    fn parser_prefers_an_article_image_over_the_source_icon() {
+        let response = json!({
+            "items": [{
+                "id": 7,
+                "title": "带图片的资讯",
+                "url": "https://example.com/a",
+                "extra": {
+                    "image": {"url": "https://example.com/cover.jpg"},
+                    "icon": {"url": "https://example.com/icon.png"}
+                }
+            }]
+        });
+        let items = parse_source_response(CURATED_SOURCES[0], response);
+        assert_eq!(items[0].image_url, "https://example.com/cover.jpg");
     }
 
     #[test]
