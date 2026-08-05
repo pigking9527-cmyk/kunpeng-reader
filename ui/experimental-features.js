@@ -29,7 +29,6 @@
   function init({ root = global.document } = {}) {
     const news = root?.getElementById("experimental-newsnow");
     const gear = root?.getElementById("experimental-newsnow-gear");
-    const commonSettingsModal = root?.getElementById("fp-settings-modal");
     const settingsModal = root?.getElementById("newsnow-settings-modal");
     const closeSettings = root?.getElementById("newsnow-settings-close");
     const prefetch = root?.getElementById("experimental-newsnow-prefetch");
@@ -40,19 +39,17 @@
     };
     news.addEventListener("change", () => set("newsnow", news.checked));
     prefetch.addEventListener("change", () => set("newsnowPrefetch", prefetch.checked));
-    const close = (returnToCommon = true) => {
+    const close = () => {
       settingsModal.classList.remove("show");
-      if (returnToCommon) commonSettingsModal?.classList.add("show");
     };
     gear.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       refresh();
-      commonSettingsModal?.classList.remove("show");
       settingsModal.classList.add("show");
     });
-    closeSettings.addEventListener("click", () => close(true));
-    settingsModal.addEventListener("click", (event) => { if (event.target === settingsModal) close(true); });
+    closeSettings.addEventListener("click", close);
+    settingsModal.addEventListener("click", (event) => { if (event.target === settingsModal) close(); });
     refresh();
     return { refresh };
   }
