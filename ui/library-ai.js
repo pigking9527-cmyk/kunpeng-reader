@@ -105,6 +105,13 @@
       addAction("复制", async () => {
         if (!(await copyQuestionText(selectedText))) state("无法复制所选文字。", true);
       }, !selectedText);
+      addAction("剪切", async () => {
+        if (!(await copyQuestionText(selectedText))) { state("无法剪切所选文字。", true); return; }
+        const start = Number(question.selectionStart || 0), end = Number(question.selectionEnd || start);
+        question.setRangeText("", start, end, "start");
+        question.dispatchEvent(new Event("input", { bubbles: true }));
+        question.focus({ preventScroll: true });
+      }, !selectedText);
       addAction("粘贴", async () => {
         try {
           if (!global.navigator?.clipboard?.readText) throw new Error("clipboard unavailable");
@@ -112,7 +119,7 @@
         }
         catch (_) { state("无法读取剪贴板，请确认系统已允许阅读器访问剪贴板。", true); }
       });
-      const width = 136, height = 86;
+      const width = 136, height = 126;
       menu.style.left = `${Math.max(8, Math.min(event.clientX, (global.innerWidth || width) - width - 8))}px`;
       menu.style.top = `${Math.max(8, Math.min(event.clientY, (global.innerHeight || height) - height - 8))}px`;
       root.body.appendChild(menu);
