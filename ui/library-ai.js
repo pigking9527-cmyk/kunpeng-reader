@@ -12,6 +12,7 @@
   const DEFAULT_ANSWER_FONT_SIZE = 16;
   const MIN_ANSWER_FONT_SIZE = 14;
   const MAX_ANSWER_FONT_SIZE = 22;
+  const i18n = (key, fallback) => global.ReaderAppI18n?.t?.(key) || fallback;
 
   function init({ root = global.document, invoke = global.__TAURI__?.core?.invoke } = {}) {
     const $ = (id) => root?.getElementById(id);
@@ -102,17 +103,17 @@
         });
         menu.appendChild(button);
       };
-      addAction("复制", async () => {
+      addAction(i18n("copy", "复制"), async () => {
         if (!(await copyQuestionText(selectedText))) state("无法复制所选文字。", true);
       }, !selectedText);
-      addAction("剪切", async () => {
+      addAction(i18n("cut", "剪切"), async () => {
         if (!(await copyQuestionText(selectedText))) { state("无法剪切所选文字。", true); return; }
         const start = Number(question.selectionStart || 0), end = Number(question.selectionEnd || start);
         question.setRangeText("", start, end, "start");
         question.dispatchEvent(new Event("input", { bubbles: true }));
         question.focus({ preventScroll: true });
       }, !selectedText);
-      addAction("粘贴", async () => {
+      addAction(i18n("paste", "粘贴"), async () => {
         try {
           if (!global.navigator?.clipboard?.readText) throw new Error("clipboard unavailable");
           insertQuestionText(await global.navigator.clipboard.readText());
@@ -277,13 +278,13 @@
         $("scope-summary").textContent = selected
           ? `当前范围：仅检索已选 ${selected} 本${visibleSelected < selected ? `（当前显示 ${visibleSelected} 本）` : ""}`
           : `当前范围：全部书库（未勾选即全库检索，前 ${MAX_QUESTION_SOURCES} 本命中）`;
-        $("clear-selection").textContent = "取消限定";
+        $("clear-selection").textContent = i18n("cancelLimit", "取消限定");
         $("selection-tools").hidden = false;
         $("select-visible").disabled = !visibleBooks.length || visibleSelected === visibleBooks.length;
         $("invert-visible").disabled = !visibleBooks.length;
       } else {
         $("scope-summary").textContent = `对比范围：已选 ${selected}/${MAX_COMPARE_BOOKS} 本${visibleSelected < selected ? `（当前显示 ${visibleSelected} 本）` : ""}`;
-        $("clear-selection").textContent = "清空选择";
+        $("clear-selection").textContent = i18n("clearSelection", "清空选择");
         $("selection-tools").hidden = true;
       }
       $("clear-selection").disabled = selected === 0;
@@ -309,12 +310,12 @@
       $("clear-filters").disabled = !$("tag-filter").value && !$("collection-filter").value;
       booksEl.replaceChildren();
       if (!books.length) {
-        booksEl.innerHTML = '<div class="library-ai-empty-books">书架中还没有图书。</div>';
+        booksEl.innerHTML = '<div class="library-ai-empty-books">' + i18n("noBooks", "书架中还没有图书。") + "</div>";
         updateScopeStatus(visibleBooks);
         return;
       }
       if (!visibleBooks.length) {
-        booksEl.innerHTML = '<div class="library-ai-empty-books">没有符合当前标签和收藏夹的图书。</div>';
+        booksEl.innerHTML = '<div class="library-ai-empty-books">' + i18n("noFilteredBooks", "没有符合当前标签和收藏夹的图书。") + "</div>";
         updateScopeStatus(visibleBooks);
         return;
       }
@@ -729,7 +730,7 @@
       showingHistory = true;
       latestAnswer = latestAnswer || null;
       $("library-ai-history").classList.add("active");
-      $("library-ai-history").textContent = "返回本次回答";
+      $("library-ai-history").textContent = i18n("returnToAnswer", "返回本次回答");
       answerEl.className = "library-ai-answer";
       answerEl.replaceChildren();
       const note = root.createElement("p");
@@ -748,7 +749,7 @@
         button.className = "library-ai-history-item";
         const question = root.createElement("span");
         question.className = "library-ai-history-question";
-        question.textContent = entry.question || "未命名问答";
+        question.textContent = entry.question || i18n("unnamedQuestion", "未命名问答");
         const meta = root.createElement("span");
         meta.className = "library-ai-history-meta";
         const at = entry.at ? new Date(entry.at).toLocaleString() : "历史记录";
@@ -759,7 +760,7 @@
         const remove = root.createElement("button");
         remove.type = "button";
         remove.className = "library-ai-history-delete";
-        remove.textContent = "删除";
+        remove.textContent = i18n("delete", "删除");
         remove.setAttribute("aria-label", `删除书库问答记录：${question.textContent}`);
         remove.addEventListener("click", async (event) => {
           event.preventDefault();
@@ -782,7 +783,7 @@
       if (!libraryHistory.length) {
         const empty = root.createElement("p");
         empty.className = "library-ai-history-note";
-        empty.textContent = "还没有保存的书库问答。完成一次问答后会自动保存到这里。";
+        empty.textContent = i18n("noQuestionHistory", "还没有保存的书库问答。完成一次问答后会自动保存到这里。");
         answerEl.append(empty);
       } else {
         answerEl.append(list);
@@ -794,7 +795,7 @@
     async function showLibraryHistoryEntry(entry) {
       showingHistory = false;
       $("library-ai-history").classList.remove("active");
-      $("library-ai-history").textContent = "问答记录";
+      $("library-ai-history").textContent = i18n("libraryHistory", "问答记录");
       answerEl.className = "library-ai-answer";
       let sources = historySourcesForDisplay(entry);
       renderAnswer(entry.content, sources, { hideDirectAnswerHeading: true });
@@ -838,7 +839,7 @@
       if (showingHistory) {
         showingHistory = false;
         $("library-ai-history").classList.remove("active");
-        $("library-ai-history").textContent = "问答记录";
+        $("library-ai-history").textContent = i18n("libraryHistory", "问答记录");
         if (latestAnswer) {
           answerEl.className = "library-ai-answer";
           renderAnswer(latestAnswer.content, latestAnswer.sources);
@@ -846,7 +847,7 @@
           state("已返回本次回答。", false);
         } else {
           answerEl.className = "library-ai-answer empty";
-          answerEl.textContent = "选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。";
+          answerEl.textContent = i18n("answerPlaceholder", "选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。");
           renderSources([]);
         }
         return;
@@ -863,7 +864,7 @@
       if (running) return;
       const question = $("question").value.trim(), selectedBookIdsForRequest = selectedIds();
       if (!question) {
-        state("请输入问题。", true);
+        state(i18n("enterQuestion", "请输入问题。"), true);
         $("question").focus();
         return;
       }
@@ -873,7 +874,7 @@
       }
       running = true;
       $("run").disabled = true;
-      $("run").textContent = "检索并问答中…";
+      $("run").textContent = i18n("askInProgress", "检索并问答中…");
       const explicitBookTitle = /《[^》]+》/.test(question);
       state(mode === "question" && !selectedBookIdsForRequest.length
         ? (explicitBookTitle
@@ -889,7 +890,7 @@
         const answer = await invoke("ask_library_assistant", { request: { task: mode, question, selectedBookIds: selectedBookIdsForRequest } });
         showingHistory = false;
         $("library-ai-history").classList.remove("active");
-        $("library-ai-history").textContent = "问答记录";
+        $("library-ai-history").textContent = i18n("libraryHistory", "问答记录");
         latestAnswer = answer;
         answerEl.className = "library-ai-answer";
         renderAnswer(answer.content, answer.sources);
@@ -907,19 +908,19 @@
           : `完成。回答仅依据下方列出的本地检索片段；${saveNote}`);
       } catch (error) {
         answerEl.className = "library-ai-answer empty";
-        answerEl.textContent = "书库问答失败。";
+        answerEl.textContent = i18n("libraryQuestionFailed", "书库问答失败。");
         state(String(error), true);
       } finally {
         running = false;
         $("run").disabled = false;
-        $("run").textContent = "开始问答";
+        $("run").textContent = i18n("startQuestion", "开始问答");
       }
     }
 
     async function load() {
       if (loading) return;
       loading = true;
-      state("正在读取书架与智读配置…");
+      state(i18n("loadingLibrary", "正在读取书架与智读配置…"));
       try {
         const [status, profiles, list, modelTagSettings, history] = await Promise.all([
           invoke("ai_reader_status"),
@@ -935,8 +936,8 @@
         books = Array.isArray(list) ? list.filter((book) => !book.missing) : [];
         const knownIds = new Set(books.map((book) => String(book.id)));
         Array.from(selectedBookIds).forEach((id) => { if (!knownIds.has(id)) selectedBookIds.delete(id); });
-        renderFilterOptions($("tag-filter"), "tags", "全部标签");
-        renderFilterOptions($("collection-filter"), "collections", "全部收藏夹");
+      renderFilterOptions($("tag-filter"), "tags", i18n("allTags", "全部标签"));
+      renderFilterOptions($("collection-filter"), "collections", i18n("allCollections", "全部收藏夹"));
         renderBooks();
         state(status?.configured ? "智读已配置。建立语义索引后即可检索。" : "请先在任意阅读页的“智读”中配置 API、模型和密钥。", !status?.configured);
         refreshClassificationStatus();
@@ -1009,11 +1010,18 @@
     });
     global.addEventListener("library-model-tags-setting-changed", (event) => {
       useModelTags = event?.detail?.enabled !== false;
-      renderFilterOptions($("tag-filter"), "tags", "全部标签");
+      renderFilterOptions($("tag-filter"), "tags", i18n("allTags", "全部标签"));
       renderBooks();
     });
     global.addEventListener("ai-reader-profiles-changed", () => {
       invoke("ai_reader_profiles").then(renderModelProfiles).catch(() => {});
+    });
+    global.addEventListener("app-language-changed", () => {
+      renderFilterOptions($("tag-filter"), "tags", i18n("allTags", "全部标签"));
+      renderFilterOptions($("collection-filter"), "collections", i18n("allCollections", "全部收藏夹"));
+      renderBooks();
+      if (showingHistory) renderLibraryHistory();
+      else if (!latestAnswer && !running) answerEl.textContent = i18n("answerPlaceholder", "选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。");
     });
     global.addEventListener("pointerdown", (event) => {
       if (questionContextMenu && !questionContextMenu.contains(event.target)) closeQuestionContextMenu();

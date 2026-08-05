@@ -61,7 +61,8 @@ test("NewsNow stores a local, bounded source selection and sends only source IDs
   assert.match(script, /sourceQuery = ""/);
   assert.match(script, /sourceSearch\.addEventListener\("input"/);
   assert.match(script, /request: \{ sourceIds \}/);
-  assert.match(script, /最多选择 \$\{MAX_SOURCES\} 个来源/);
+  assert.match(script, /format\("maxSources", "最多选择 \{max\} 个来源。", \{ max: MAX_SOURCES \}\)/);
+  assert.match(script, /app-language-changed/);
 });
 
 test("NewsNow has a persisted horizontal and grid layout switch", () => {

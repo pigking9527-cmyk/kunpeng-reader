@@ -765,38 +765,38 @@
           <div class="library-ai-title-row">
             <button id="library-ai-back" class="library-ai-back" type="button" aria-label="返回书架">←</button>
             <div>
-              <h1>书库问答</h1>
-              <p>先在本机语义索引中检索，再只把命中的少量段落发送到你已配置的智读服务。每条回答都可跳回原书章节。</p>
+              <h1 data-i18n="libraryQa">书库问答</h1>
+              <p data-i18n="libraryDescription">先在本机语义索引中检索，再只把命中的少量段落发送到你已配置的智读服务。每条回答都可跳回原书章节。</p>
             </div>
           </div>
           <div class="library-ai-head-actions">
             <span id="library-ai-classify-status" class="library-ai-classify-status" aria-live="polite" hidden></span>
-            <button id="library-ai-classify" class="library-ai-classify" type="button" title="正在读取书籍分类状态…">书籍分类</button>
-            <button id="library-ai-history" class="library-ai-history" type="button" title="查看已保存的书库问答">问答记录</button>
+            <button id="library-ai-classify" class="library-ai-classify" type="button" title="正在读取书籍分类状态…" data-i18n="bookClassification">书籍分类</button>
+            <button id="library-ai-history" class="library-ai-history" type="button" title="查看已保存的书库问答" data-i18n="questionHistory">问答记录</button>
             <select id="library-ai-model-profile" class="library-ai-model-profile" aria-label="书库问答使用的大模型"></select>
-            <span class="library-ai-pill">本地检索 · 可追溯引文</span>
+            <span class="library-ai-pill" data-i18n="localSearchCitations">本地检索 · 可追溯引文</span>
           </div>
         </header>
         <div class="library-ai-grid">
           <aside class="library-ai-card library-ai-scope">
-            <h2>检索范围</h2>
+            <h2 data-i18n="searchScope">检索范围</h2>
             <p class="library-ai-tip">书库问答会精确检索全部已建立语义索引的图书，展示最相关的前 20 本（每本 1 段）。勾选图书后才限定范围；跨书对比请选择 2–8 本。</p>
-            <div class="library-ai-mode"><button id="mode-question" class="active" type="button">书库问答</button><button id="mode-compare" type="button">跨书对比</button></div>
+            <div class="library-ai-mode"><button id="mode-question" class="active" type="button" data-i18n="libraryQuestion">书库问答</button><button id="mode-compare" type="button" data-i18n="crossBookCompare">跨书对比</button></div>
             <div class="library-ai-quick-filters" aria-label="快速筛选图书">
-              <label>标签<select id="tag-filter"><option value="">全部标签</option></select></label>
-              <label>收藏夹<select id="collection-filter"><option value="">全部收藏夹</option></select></label>
-              <button id="clear-filters" class="library-ai-clear-filters" type="button" disabled>清除筛选</button>
+              <label>标签<select id="tag-filter"><option value="" data-i18n="allTags">全部标签</option></select></label>
+              <label>收藏夹<select id="collection-filter"><option value="" data-i18n="allCollections">全部收藏夹</option></select></label>
+              <button id="clear-filters" class="library-ai-clear-filters" type="button" disabled data-i18n="clearFilters">清除筛选</button>
             </div>
             <p class="library-ai-filter-tip">未勾选不代表未参与：书库问答默认检索全部已建立语义索引的图书；勾选才会切换为手动限定范围。</p>
-            <div class="library-ai-scope-status"><span id="scope-summary">当前范围：全部书库</span><button id="clear-selection" class="library-ai-clear-selection" type="button" title="取消所有勾选，恢复全部书库" disabled>取消限定</button></div>
-            <div class="library-ai-book-tools"><span id="book-count">打开后载入书架…</span><span id="selection-tools" class="library-ai-selection-tools"><button id="select-visible" type="button">全选当前列表</button><button id="invert-visible" type="button">反选当前列表</button></span></div>
+            <div class="library-ai-scope-status"><span id="scope-summary">当前范围：全部书库</span><button id="clear-selection" class="library-ai-clear-selection" type="button" title="取消所有勾选，恢复全部书库" disabled data-i18n="cancelLimit">取消限定</button></div>
+            <div class="library-ai-book-tools"><span id="book-count">打开后载入书架…</span><span id="selection-tools" class="library-ai-selection-tools"><button id="select-visible" type="button" data-i18n="selectVisible">全选当前列表</button><button id="invert-visible" type="button" data-i18n="invertVisible">反选当前列表</button></span></div>
             <div id="books" class="library-ai-books"></div>
           </aside>
           <section class="library-ai-card library-ai-workspace">
-            <label for="question">你的问题</label>
-            <textarea id="question" placeholder="例如：这些书如何解释清末财政困境？&#10;跨书对比时：比较选中作品对同一主题的观点与依据。"></textarea>
-            <div class="library-ai-actions"><div class="library-ai-font-controls" aria-label="书库问答字号"><span>字号</span><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号">A+</button></div><span id="state" class="library-ai-state">打开书库问答后载入书架与智读配置。</span><button id="run" class="library-ai-run" type="button">开始问答</button></div>
-            <div id="answer" class="library-ai-answer empty">选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。</div>
+            <label for="question" data-i18n="yourQuestion">你的问题</label>
+            <textarea id="question" placeholder="例如：这些书如何解释清末财政困境？&#10;跨书对比时：比较选中作品对同一主题的观点与依据。" data-i18n-placeholder="questionPlaceholder"></textarea>
+            <div class="library-ai-actions"><div class="library-ai-font-controls" aria-label="书库问答字号"><span>字号</span><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号">A+</button></div><span id="state" class="library-ai-state">打开书库问答后载入书架与智读配置。</span><button id="run" class="library-ai-run" type="button" data-i18n="startQuestion">开始问答</button></div>
+            <div id="answer" class="library-ai-answer empty" data-i18n="answerPlaceholder">选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。</div>
             <section id="source-preview" class="library-ai-source-preview" hidden aria-live="polite" aria-label="脚注原文预览"><div class="library-ai-source-preview-head"><strong id="source-preview-title"></strong><button id="source-preview-close" type="button" aria-label="关闭脚注预览">×</button></div><p id="source-preview-excerpt"></p><button id="source-preview-open" class="library-ai-source-preview-open" type="button">打开原文</button></section>
             <section id="sources" class="library-ai-sources" hidden><h3 id="source-title">脚注来源</h3><div id="source-list"></div></section>
           </section>
@@ -808,35 +808,35 @@
         <div class="newsnow-title-row">
           <div>
             <p class="newsnow-eyebrow">READING BRIEF</p>
-            <h1>今日资讯</h1>
-            <p>按时间归并的轻量资讯流，只在你打开时加载。</p>
+            <h1 data-i18n="newsTitle">今日资讯</h1>
+            <p data-i18n="newsDescription">按时间归并的轻量资讯流，只在你打开时加载。</p>
           </div>
         </div>
         <div class="newsnow-actions">
-          <button id="newsnow-back" class="newsnow-back" type="button" title="返回书架" aria-label="返回书架">←</button>
+          <button id="newsnow-back" class="newsnow-back" type="button" title="返回书架" aria-label="返回书架" data-i18n-title="backToShelf" data-i18n-aria="backToShelf">←</button>
           <span id="newsnow-updated" class="newsnow-updated" aria-live="polite"></span>
-          <button id="newsnow-source-toggle" class="btn-plain newsnow-source-toggle" type="button" aria-expanded="false">管理来源</button>
-          <button id="newsnow-refresh" class="btn-plain newsnow-refresh" type="button">刷新</button>
+          <button id="newsnow-source-toggle" class="btn-plain newsnow-source-toggle" type="button" aria-expanded="false" data-i18n="manageSources">管理来源</button>
+          <button id="newsnow-refresh" class="btn-plain newsnow-refresh" type="button" data-i18n="refresh">刷新</button>
         </div>
       </header>
-      <section id="newsnow-source-picker" class="newsnow-source-picker" hidden aria-label="资讯来源设置">
-        <div class="newsnow-source-picker-head"><div class="newsnow-source-picker-title"><strong>管理来源</strong><p>勾选想看的来源；设置只保存在此设备。</p></div><span id="newsnow-source-selection" class="newsnow-source-selection">已选 0 / 24</span><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="关闭来源设置">×</button></div>
-        <input id="newsnow-source-search" class="newsnow-source-search" type="search" placeholder="搜索来源、分类或关键词" aria-label="搜索资讯来源" />
+      <section id="newsnow-source-picker" class="newsnow-source-picker" hidden aria-label="资讯来源设置" data-i18n-aria="sourceSettings">
+        <div class="newsnow-source-picker-head"><div class="newsnow-source-picker-title"><strong data-i18n="manageSources">管理来源</strong><p data-i18n="sourceSettingsHint">勾选想看的来源；设置只保存在此设备。</p></div><span id="newsnow-source-selection" class="newsnow-source-selection">已选 0 / 24</span><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="关闭来源设置">×</button></div>
+        <input id="newsnow-source-search" class="newsnow-source-search" type="search" placeholder="搜索来源、分类或关键词" aria-label="搜索资讯来源" data-i18n-placeholder="sourceSearch" data-i18n-aria="sourceSearch" />
         <div id="newsnow-source-options" class="newsnow-source-options"></div>
-        <div class="newsnow-source-picker-actions"><button id="newsnow-source-reset" class="btn-plain" type="button">恢复推荐</button><button id="newsnow-source-apply" class="btn-primary" type="button">完成并刷新</button></div>
+        <div class="newsnow-source-picker-actions"><button id="newsnow-source-reset" class="btn-plain" type="button" data-i18n="restoreRecommended">恢复推荐</button><button id="newsnow-source-apply" class="btn-primary" type="button" data-i18n="doneAndRefresh">完成并刷新</button></div>
       </section>
       <div class="newsnow-toolbar">
         <div id="newsnow-categories" class="newsnow-categories" aria-label="资讯分类"></div>
         <div class="newsnow-toolbar-actions">
           <span id="newsnow-source-summary" class="newsnow-source-summary"></span>
           <div class="newsnow-layout-control" role="group" aria-label="资讯布局">
-            <span>布局</span>
-            <button id="newsnow-layout-list" class="newsnow-layout-button" type="button" title="横排布局" aria-label="横排布局" aria-pressed="true"><i class="newsnow-layout-list-icon" aria-hidden="true"></i></button>
-            <button id="newsnow-layout-grid" class="newsnow-layout-button" type="button" title="方格布局" aria-label="方格布局" aria-pressed="false"><i class="newsnow-layout-grid-icon" aria-hidden="true"></i></button>
+            <span data-i18n="layout">布局</span>
+            <button id="newsnow-layout-list" class="newsnow-layout-button" type="button" title="横排布局" aria-label="横排布局" aria-pressed="true" data-i18n-title="listLayout" data-i18n-aria="listLayout"><i class="newsnow-layout-list-icon" aria-hidden="true"></i></button>
+            <button id="newsnow-layout-grid" class="newsnow-layout-button" type="button" title="方格布局" aria-label="方格布局" aria-pressed="false" data-i18n-title="gridLayout" data-i18n-aria="gridLayout"><i class="newsnow-layout-grid-icon" aria-hidden="true"></i></button>
           </div>
           <div class="newsnow-order-control" role="group" aria-label="资讯排列">
-            <button id="newsnow-order-mixed" class="newsnow-order-button" type="button" aria-pressed="true">混合</button>
-            <button id="newsnow-order-source" class="newsnow-order-button" type="button" aria-pressed="false">按来源</button>
+            <button id="newsnow-order-mixed" class="newsnow-order-button" type="button" aria-pressed="true" data-i18n="mixedOrder">混合</button>
+            <button id="newsnow-order-source" class="newsnow-order-button" type="button" aria-pressed="false" data-i18n="bySourceOrder">按来源</button>
           </div>
         </div>
       </div>

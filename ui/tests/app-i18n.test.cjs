@@ -18,4 +18,10 @@ test("main settings expose a persistent software language selector", () => {
   }
   assert.match(app, /ReaderAppI18n\?\.populate\(appLanguageSelect\)/);
   assert.match(app, /ReaderAppI18n\?\.setLanguage\(appLanguageSelect\.value\)/);
+  assert.match(i18n, /data-i18n-placeholder/);
+  assert.match(i18n, /function t\(key\).*COPY\.en\[key\]/);
+  assert.match(html, /id="newsnow-page"[\s\S]*?data-i18n="newsTitle"/);
+  assert.match(html, /id="library-ai-page"[\s\S]*?data-i18n="libraryDescription"/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "news-ui.js"), "utf8"), /app-language-changed/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "library-ai.js"), "utf8"), /app-language-changed/);
 });
