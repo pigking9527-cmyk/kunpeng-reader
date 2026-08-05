@@ -670,22 +670,40 @@ window.addEventListener("reader-shell-statechange", (e) => {
 
 // 把阅读位置回传后端（节流，避免频繁写盘）
 let progTimer = null;
-function reportProgress() {
+let lastProgressReportChapter = null;
+function sendProgressNow() {
+  if (progTimer) {
+    clearTimeout(progTimer);
+    progTimer = null;
+  }
+  lastProgressReportChapter = curChapter;
+  invoke("set_progress", {
+    request: {
+      progress: curProgress,
+      chapter: curChapter,
+      frac: curChFrac,
+      anchor: curReadingAnchor,
+    },
+  }).catch(() => {});
+}
+function reportProgress(immediate = false) {
   if (DIAG_DISABLE_READER_REPORTS) return;
   if (isWindowDragging()) return;
   if (progTimer) clearTimeout(progTimer);
+  // 一本书由大量短章节组成时，连续翻页会不断触发位置消息。若每次都重置
+  // 节流定时器，用户在关闭窗口前可能从未等到一次写盘，重开就又回到首页。
+  // 跨章节是稀疏且有意义的续读边界，立即保存；同一章内的滚动仍保持节流。
+  if (immediate || lastProgressReportChapter !== curChapter) {
+    sendProgressNow();
+    return;
+  }
   progTimer = setTimeout(() => {
     if (isWindowDragging()) return;
-    invoke("set_progress", {
-      request: {
-        progress: curProgress,
-        chapter: curChapter,
-        frac: curChFrac,
-        anchor: curReadingAnchor,
-      },
-    }).catch(() => {});
+    sendProgressNow();
   }, 800);
 }
+window.addEventListener("pagehide", () => reportProgress(true));
+window.addEventListener("beforeunload", () => reportProgress(true));
 
 // ---- 已读字数统计：按可见字数、停留时间、短页和快速翻页折算，避免大窗口短停虚高 ----
 const READ_TRACK = {
