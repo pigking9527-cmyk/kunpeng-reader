@@ -1930,13 +1930,100 @@ fn json_text_content(value: &serde_json::Value) -> Option<String> {
 }
 
 fn openai_compatible_content(value: &serde_json::Value) -> Option<String> {
-    value
+    let first_choice = value
         .pointer("/choices/0/message/content")
         .and_then(json_text_content)
         .or_else(|| value.pointer("/choices/0/text").and_then(json_text_content))
+        .or_else(|| {
+            value
+                .pointer("/choices/0/delta/content")
+                .and_then(json_text_content)
+        })
+        .or_else(|| {
+            value
+                .pointer("/choices/0/content")
+                .and_then(json_text_content)
+        })
+        // Some reasoning-capable compatible gateways omit `content` when the
+        // normal completion is exhausted, but retain their usable answer in a
+        // reasoning field. Prefer normal content above; this is a last resort
+        // so a successful request is not presented as an empty response.
+        .or_else(|| {
+            value
+                .pointer("/choices/0/message/reasoning_content")
+                .and_then(json_text_content)
+        })
+        .or_else(|| {
+            value
+                .pointer("/choices/0/message/reasoning")
+                .and_then(json_text_content)
+        });
+    first_choice
+        .or_else(|| {
+            value
+                .pointer("/data/choices/0/message/content")
+                .and_then(json_text_content)
+        })
+        .or_else(|| {
+            value
+                .pointer("/response/choices/0/message/content")
+                .and_then(json_text_content)
+        })
+        // A small number of OpenAI-compatible services retain the Tencent
+        // response envelope and capitalise the JSON field names.
+        .or_else(|| {
+            value
+                .pointer("/Response/Choices/0/Message/Content")
+                .and_then(json_text_content)
+        })
         // A few OpenAI-compatible gateways forward the Responses API body.
         .or_else(|| value.get("output_text").and_then(json_text_content))
         .or_else(|| value.get("output").and_then(json_text_content))
+}
+
+/// Retry one answer generation with a compact, bounded context when a
+/// compatible provider accepts the initial request but returns no normal text.
+/// Source markers are preserved because the compact form is a prefix of the
+/// same numbered context used for final citation verification.
+async fn call_library_answer_with_retry(
+    config: StoredConfig,
+    task: String,
+    question: String,
+    context: String,
+) -> Result<String, String> {
+    let primary_config = config.clone();
+    let primary_task = task.clone();
+    let primary_question = question.clone();
+    let primary_context = context.clone();
+    let primary = tokio::task::spawn_blocking(move || {
+        call_reading_provider(
+            primary_config,
+            primary_task,
+            primary_question,
+            primary_context,
+        )
+    })
+    .await
+    .map_err(|error| format!("书库问答任务失败：{error}"))?;
+    match primary {
+        Ok(answer) => Ok(answer),
+        Err(primary_error) => {
+            let retry_context = trim_to_chars(&context, MAX_READING_RETRY_CONTEXT_CHARS);
+            let retry_context = if retry_context.trim().is_empty() {
+                context
+            } else {
+                retry_context
+            };
+            let retry = tokio::task::spawn_blocking(move || {
+                call_reading_provider(config, task, question, retry_context)
+            })
+            .await
+            .map_err(|error| format!("书库精简重试任务失败：{error}"))?;
+            retry.map_err(|retry_error| {
+                format!("接口没有返回可用回答：首次请求为 {primary_error}；精简证据重试为 {retry_error}")
+            })
+        }
+    }
 }
 
 fn call_openai_compatible(
@@ -2809,19 +2896,13 @@ pub(crate) async fn ask_library_assistant(
         if context.is_empty() {
             return Err("没有可发送的检索片段".into());
         }
-        let answer_config = config.clone();
-        let answer_question = question.clone();
-        let answer_context = context.clone();
-        let draft = tokio::task::spawn_blocking(move || {
-            call_reading_provider(
-                answer_config,
-                "library_compare".to_string(),
-                answer_question,
-                answer_context,
-            )
-        })
-        .await
-        .map_err(|error| format!("书库问答任务失败：{error}"))??;
+        let draft = call_library_answer_with_retry(
+            config.clone(),
+            "library_compare".to_string(),
+            question.clone(),
+            context.clone(),
+        )
+        .await?;
         verify_library_answer(config, "library_compare_verify", &question, draft, context).await
     } else {
         let candidate_context = library_context(&sources);
@@ -2859,19 +2940,13 @@ pub(crate) async fn ask_library_assistant(
         } else {
             "library_question"
         };
-        let answer_config = config.clone();
-        let answer_question = question.clone();
-        let answer_context = context.clone();
-        let draft = tokio::task::spawn_blocking(move || {
-            call_reading_provider(
-                answer_config,
-                answer_task.to_string(),
-                answer_question,
-                answer_context,
-            )
-        })
-        .await
-        .map_err(|error| format!("书库深度解读任务失败：{error}"))??;
+        let draft = call_library_answer_with_retry(
+            config.clone(),
+            answer_task.to_string(),
+            question.clone(),
+            context.clone(),
+        )
+        .await?;
         let verify_task = if single_book {
             "library_single_book_verify"
         } else {
@@ -3264,6 +3339,27 @@ mod tests {
         assert_eq!(
             openai_compatible_content(&block_response).as_deref(),
             Some("第一段\n第二段")
+        );
+        let wrapped_response = serde_json::json!({
+            "data": {"choices": [{"message": {"content": "包装后的回答"}}]}
+        });
+        assert_eq!(
+            openai_compatible_content(&wrapped_response).as_deref(),
+            Some("包装后的回答")
+        );
+        let reasoning_only_response = serde_json::json!({
+            "choices": [{"message": {"content": "", "reasoning_content": "兼容接口保留的回答"}}]
+        });
+        assert_eq!(
+            openai_compatible_content(&reasoning_only_response).as_deref(),
+            Some("兼容接口保留的回答")
+        );
+        let capitalized_response = serde_json::json!({
+            "Response": {"Choices": [{"Message": {"Content": "大写包装回答"}}]}
+        });
+        assert_eq!(
+            openai_compatible_content(&capitalized_response).as_deref(),
+            Some("大写包装回答")
         );
     }
 

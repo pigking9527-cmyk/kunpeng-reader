@@ -39,6 +39,11 @@ test("library assistant gives multi-stage RAG calls enough time without allowing
   assert.doesNotMatch(backend, /timeout_recv_response\(Some\(std::time::Duration::from_secs\(45\)\)\)/);
 });
 
+test("library question Enter submits while Shift+Enter keeps a newline", () => {
+  assert.match(controller, /event\.key === "Enter" && !event\.shiftKey && !event\.isComposing && event\.keyCode !== 229/);
+  assert.match(controller, /event\.preventDefault\(\);\s*void run\(\);/);
+});
+
 test("library assistant toolbar toggles back to the shelf when it is already open", () => {
   assert.match(entry, /function toggle\(\) \{\s*if \(page\.hidden\) \{\s*void open\(\);\s*\} else \{\s*close\(\);/s);
   assert.match(entry, /button\.addEventListener\("click", toggle\)/);
@@ -209,6 +214,14 @@ test("library answers render a safe subset of Markdown instead of exposing raw m
   assert.match(styles, /\.library-ai-answer h3/);
   assert.match(styles, /\.library-ai-answer-list/);
   assert.doesNotMatch(controller, /answerEl\.innerHTML/);
+});
+
+test("library answer provider accepts compatible response envelopes and retries an empty completion", () => {
+  assert.match(backend, /choices\/0\/message\/reasoning_content/);
+  assert.match(backend, /data\/choices\/0\/message\/content/);
+  assert.match(backend, /Response\/Choices\/0\/Message\/Content/);
+  assert.match(backend, /async fn call_library_answer_with_retry/);
+  assert.match(backend, /MAX_READING_RETRY_CONTEXT_CHARS/);
 });
 
 test("library answers save locally and can sync a de-identified history", () => {
