@@ -51,7 +51,7 @@ test("NewsNow opens a full source webpage in a main-window child browser", () =>
   assert.doesNotMatch(script, /newsnow_read_article/);
 });
 
-test("NewsNow stores a local, bounded source selection and sends only source IDs", () => {
+test("NewsNow stores a local, bounded source selection and optional local Tieba bar names", () => {
   assert.match(html, /id="newsnow-source-picker"/);
   assert.match(html, /id="newsnow-source-search"/);
   assert.match(html, /id="newsnow-source-apply"/);
@@ -60,7 +60,14 @@ test("NewsNow stores a local, bounded source selection and sends only source IDs
   assert.match(script, /function allowedSourceIds/);
   assert.match(script, /sourceQuery = ""/);
   assert.match(script, /sourceSearch\.addEventListener\("input"/);
-  assert.match(script, /request: \{ sourceIds \}/);
+  assert.match(html, /id="newsnow-tieba-bar-form"/);
+  assert.match(html, /id="newsnow-tieba-bar-input"/);
+  assert.match(html, /id="newsnow-tieba-bar-list"/);
+  assert.match(script, /const TIEBA_BARS_STORAGE_KEY = "kunpeng\.reader\.news\.tieba-bars\.v1"/);
+  assert.match(script, /const MAX_TIEBA_BARS = 8/);
+  assert.match(script, /function normalizeTiebaBars/);
+  assert.match(script, /function newsRequest\(\) \{ return \{ sourceIds, tiebaBars:/);
+  assert.match(script, /tiebaBarForm\.addEventListener\("submit"/);
   assert.match(script, /format\("maxSources", "最多选择 \{max\} 个来源。", \{ max: MAX_SOURCES \}\)/);
   assert.match(script, /app-language-changed/);
 });
@@ -100,7 +107,7 @@ test("NewsNow prefetches enabled sources in the background without eager image d
   assert.match(script, /function scheduleBackgroundPrefetch\(\)/);
   assert.match(script, /function refreshIfIdle\(\)/);
   assert.match(script, /Date\.now\(\) - lastUserActivityAt < BACKGROUND_PREFETCH_DELAY_MS/);
-  assert.match(script, /invoke\("newsnow_prefetch", \{ request: \{ sourceIds \} \}\)/);
+  assert.match(script, /invoke\("newsnow_prefetch", \{ request: newsRequest\(\) \}\)/);
   assert.match(script, /if \(!force && result\?\.stale\) void refreshInBackground\(\{ announce: true \}\)/);
   assert.match(script, /IntersectionObserver/);
   assert.match(styles, /\.experimental-settings\s*\{[^}]*border: 0/s);

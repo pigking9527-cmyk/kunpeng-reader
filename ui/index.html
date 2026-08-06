@@ -823,6 +823,12 @@
         <div class="newsnow-source-picker-head"><div class="newsnow-source-picker-title"><strong data-i18n="manageSources">管理来源</strong><p data-i18n="sourceSettingsHint">勾选想看的来源；设置只保存在此设备。</p></div><span id="newsnow-source-selection" class="newsnow-source-selection">已选 0 / 24</span><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="关闭来源设置">×</button></div>
         <input id="newsnow-source-search" class="newsnow-source-search" type="search" placeholder="搜索来源、分类或关键词" aria-label="搜索资讯来源" data-i18n-placeholder="sourceSearch" data-i18n-aria="sourceSearch" />
         <div id="newsnow-source-options" class="newsnow-source-options"></div>
+        <section id="newsnow-tieba-bars" class="newsnow-tieba-bars" aria-label="百度贴吧自定义吧名">
+          <div class="newsnow-tieba-bars-head"><strong>百度贴吧</strong><span id="newsnow-tieba-bar-count"></span></div>
+          <p>添加想看的吧名；选中“百度贴吧”来源后，会把各吧最新帖子并入资讯流。</p>
+          <form id="newsnow-tieba-bar-form" class="newsnow-tieba-bar-form"><input id="newsnow-tieba-bar-input" type="text" maxlength="48" autocomplete="off" placeholder="输入吧名，例如：原神" aria-label="添加百度贴吧吧名" /><button class="btn-plain" type="submit">添加</button></form>
+          <div id="newsnow-tieba-bar-list" class="newsnow-tieba-bar-list"></div>
+        </section>
         <div class="newsnow-source-picker-actions"><button id="newsnow-source-reset" class="btn-plain" type="button" data-i18n="restoreRecommended">恢复推荐</button><button id="newsnow-source-apply" class="btn-primary" type="button" data-i18n="doneAndRefresh">完成并刷新</button></div>
       </section>
       <div class="newsnow-toolbar">

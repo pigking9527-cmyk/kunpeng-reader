@@ -5,9 +5,11 @@
 
   const LOAD_TIMEOUT_MS = 18000;
   const SOURCE_STORAGE_KEY = "kunpeng.reader.news.sources.v2";
+  const TIEBA_BARS_STORAGE_KEY = "kunpeng.reader.news.tieba-bars.v1";
   const LAYOUT_STORAGE_KEY = "kunpeng.reader.news.layout.v1";
   const ORDER_STORAGE_KEY = "kunpeng.reader.news.order.v1";
   const MAX_SOURCES = 24;
+  const MAX_TIEBA_BARS = 8;
   const BACKGROUND_PREFETCH_DELAY_MS = 30 * 1000;
   const BACKGROUND_PREFETCH_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -56,6 +58,11 @@
     const selected = allowedSourceIds(readJson(SOURCE_STORAGE_KEY), catalog);
     return selected.length ? selected : defaultSourceIds(catalog);
   }
+  function normalizeTiebaBars(values) {
+    const seen = new Set();
+    return (Array.isArray(values) ? values : []).map((value) => text(value).trim().replace(/吧$/, "").trim()).filter((name) => name && name.length <= 48 && !/[\u0000-\u001f\u007f]/.test(name) && !seen.has(name) && (seen.add(name), true)).slice(0, MAX_TIEBA_BARS);
+  }
+  function loadStoredTiebaBars() { return normalizeTiebaBars(readJson(TIEBA_BARS_STORAGE_KEY)); }
   function storageGet(key, fallback) { try { return global.localStorage.getItem(key) || fallback; } catch (_) { return fallback; } }
   function storageSet(key, value) { try { global.localStorage.setItem(key, value); } catch (_) { /* preferences are optional */ } }
 
@@ -71,6 +78,11 @@
     const sourceClose = root.getElementById("newsnow-source-close");
     const sourceApply = root.getElementById("newsnow-source-apply");
     const sourceReset = root.getElementById("newsnow-source-reset");
+    const tiebaBars = root.getElementById("newsnow-tieba-bars");
+    const tiebaBarForm = root.getElementById("newsnow-tieba-bar-form");
+    const tiebaBarInput = root.getElementById("newsnow-tieba-bar-input");
+    const tiebaBarList = root.getElementById("newsnow-tieba-bar-list");
+    const tiebaBarCount = root.getElementById("newsnow-tieba-bar-count");
     const sourceSelection = root.getElementById("newsnow-source-selection");
     const sourceSummary = root.getElementById("newsnow-source-summary");
     const listLayout = root.getElementById("newsnow-layout-list");
@@ -84,9 +96,9 @@
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !sourceSelection || !sourceSummary || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerStatus || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !tiebaBars || !tiebaBarForm || !tiebaBarInput || !tiebaBarList || !tiebaBarCount || !sourceSelection || !sourceSummary || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerStatus || !categories || !updated || !shell) return null;
 
-    let catalog = [], sourceIds = [], pendingSourceIds = [], allItems = [];
+    let catalog = [], sourceIds = [], pendingSourceIds = [], tiebaBarNames = loadStoredTiebaBars(), pendingTiebaBarNames = [], allItems = [];
     let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
     let layout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
@@ -104,8 +116,14 @@
     }
     function setStatus(message, kind = "") { status.textContent = text(message); status.className = "newsnow-status" + (kind ? " " + kind : ""); }
     function sourceForId(id) { return catalog.find((source) => text(source.id) === text(id)); }
-    function renderSourceSummary() { sourceSummary.textContent = sourceIds.length ? format("newsSourceSummary", "显示 {count} 个来源", { count: sourceIds.length }) : i18n("newsRecommendedSources", "使用推荐来源"); }
+    function renderSourceSummary() { const tiebaCount = sourceIds.includes("tieba") ? tiebaBarNames.length : 0; sourceSummary.textContent = sourceIds.length ? format("newsSourceSummary", "显示 {count} 个来源", { count: sourceIds.length }) + (tiebaCount ? ` · ${tiebaCount} 个贴吧` : "") : i18n("newsRecommendedSources", "使用推荐来源"); }
     function renderSourceSelection() { sourceSelection.textContent = format("newsSelectedSources", "已选 {count} / {max}", { count: pendingSourceIds.length, max: MAX_SOURCES }); }
+    function renderTiebaBars() {
+      tiebaBarCount.textContent = `已添加 ${pendingTiebaBarNames.length} / ${MAX_TIEBA_BARS} 个吧`;
+      if (!pendingTiebaBarNames.length) { const empty = root.createElement("p"); empty.className = "newsnow-tieba-bar-empty"; empty.textContent = "还没有添加吧名。"; tiebaBarList.replaceChildren(empty); return; }
+      tiebaBarList.replaceChildren(...pendingTiebaBarNames.map((bar) => { const chip = root.createElement("span"), name = root.createElement("span"), remove = root.createElement("button"); chip.className = "newsnow-tieba-bar-chip"; name.textContent = `${bar}吧`; remove.type = "button"; remove.title = `删除 ${bar}吧`; remove.setAttribute("aria-label", remove.title); remove.textContent = "×"; remove.addEventListener("click", () => { pendingTiebaBarNames = pendingTiebaBarNames.filter((name) => name !== bar); renderTiebaBars(); }); chip.append(name, remove); return chip; }));
+    }
+    function newsRequest() { return { sourceIds, tiebaBars: sourceIds.includes("tieba") ? tiebaBarNames : [] }; }
     function categoriesForSelection() { return [...new Set(sourceIds.map(sourceForId).filter(Boolean).map(sourceCategory))]; }
     function applyDisplayOptions() {
       const grid = layout === "grid";
@@ -134,6 +152,7 @@
       catalog.filter((source) => !query || [source.id, source.name, source.category].some((value) => text(value).toLocaleLowerCase().includes(query))).forEach((source) => {
         const category = sourceCategory(source); if (!groups.has(category)) groups.set(category, []); groups.get(category).push(source);
       });
+      renderTiebaBars();
       if (!groups.size) { const empty = root.createElement("p"); empty.className = "newsnow-source-empty"; empty.textContent = i18n("noMatchingSources", "没有找到匹配的内置来源。"); sourceOptions.replaceChildren(empty); return; }
       sourceOptions.replaceChildren(...[...groups.entries()].map(([category, sources]) => {
         const group = root.createElement("section"), title = root.createElement("h2"), choices = root.createElement("div");
@@ -151,7 +170,7 @@
         group.append(title, choices); return group;
       }));
     }
-    function openSourcePicker() { pendingSourceIds = sourceIds.slice(); sourceQuery = ""; sourceSearch.value = ""; renderSourcePicker(); sourcePicker.hidden = false; sourceToggle.setAttribute("aria-expanded", "true"); sourceSearch.focus({ preventScroll: true }); }
+    function openSourcePicker() { pendingSourceIds = sourceIds.slice(); pendingTiebaBarNames = tiebaBarNames.slice(); sourceQuery = ""; sourceSearch.value = ""; renderSourcePicker(); sourcePicker.hidden = false; sourceToggle.setAttribute("aria-expanded", "true"); sourceSearch.focus({ preventScroll: true }); }
     function closeSourcePicker({ focus = false } = {}) { sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); if (focus) sourceToggle.focus({ preventScroll: true }); }
     function setReaderVisible(visible) { reader.hidden = !visible; page.hidden = visible; sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); }
     function closeArticle({ focus = false, restoreScroll = true } = {}) { if (articleOpen && invoke) void Promise.resolve(invoke("newsnow_close_article")).catch(() => {}); articleOpen = false; readerStatus.textContent = ""; setReaderVisible(false); if (restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; }); if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true }); }
@@ -250,7 +269,7 @@
       backgroundRefreshRunning = true;
       try {
         await loadSources();
-        const result = await withTimeout(invoke("newsnow_prefetch", { request: { sourceIds } }), 60000);
+        const result = await withTimeout(invoke("newsnow_prefetch", { request: newsRequest() }), 60000);
         applyNewsResult(result, { announce });
       } catch (_) {
         if (announce && !page.hidden) setStatus("资讯后台更新失败，正在保留已显示内容。", "warning");
@@ -275,7 +294,7 @@
     }
     async function load(force = false) {
       if (loading || !invoke) return; loading = true; refresh.disabled = true; refresh.textContent = force ? i18n("refreshingNews", "刷新中…") : i18n("loadingNews", "加载中…"); setStatus(force ? i18n("refreshingNews", "刷新中…") : i18n("loadingNews", "加载中…"), "muted");
-      try { await loadSources(); const result = await withTimeout(invoke(force ? "newsnow_refresh" : "newsnow_list", { request: { sourceIds } })); applyNewsResult(result, { announce: true }); if (!force && result?.stale) void refreshInBackground({ announce: true }); }
+      try { await loadSources(); const result = await withTimeout(invoke(force ? "newsnow_refresh" : "newsnow_list", { request: newsRequest() })); applyNewsResult(result, { announce: true }); if (!force && result?.stale) void refreshInBackground({ announce: true }); }
       catch (error) { renderFeed(); setStatus(error?.message === "资讯请求超时" ? "资讯请求超时，正在保留当前内容。" : "资讯加载失败，请检查网络后重试。", "error"); }
       finally { loading = false; refresh.disabled = false; refresh.textContent = i18n("refresh", "刷新"); }
     }
@@ -286,7 +305,8 @@
     function close({ focus = true } = {}) { closeSourcePicker(); closeArticle({ restoreScroll: false }); page.hidden = true; shell.hidden = false; global.document.body.classList.remove("newsnow-active"); button.setAttribute("aria-pressed", "false"); if (focus && !button.hidden) button.focus({ preventScroll: true }); }
     button.addEventListener("click", () => { if (!page.hidden || !reader.hidden) close({ focus: false }); else void open(); }); back.addEventListener("click", () => close()); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
     sourceToggle.addEventListener("click", () => { if (sourcePicker.hidden) void loadSources().then(openSourcePicker); else closeSourcePicker({ focus: true }); }); sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true })); sourceSearch.addEventListener("input", () => { sourceQuery = sourceSearch.value; renderSourcePicker(); }); sourceReset.addEventListener("click", () => { pendingSourceIds = defaultSourceIds(catalog); renderSourcePicker(); });
-    sourceApply.addEventListener("click", () => { const selected = allowedSourceIds(pendingSourceIds, catalog); if (!selected.length) { setStatus(i18n("chooseSource", "至少选择一个来源，或使用“恢复推荐”。"), "warning"); return; } sourceIds = selected; storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); selectedCategory = "全部"; renderSourceSummary(); renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
+    tiebaBarForm.addEventListener("submit", (event) => { event.preventDefault(); const name = normalizeTiebaBars([tiebaBarInput.value])[0]; if (!name) { tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.includes(name)) { tiebaBarInput.value = ""; tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.length >= MAX_TIEBA_BARS) { setStatus(`最多添加 ${MAX_TIEBA_BARS} 个贴吧。`, "warning"); return; } pendingTiebaBarNames = [...pendingTiebaBarNames, name]; if (!pendingSourceIds.includes("tieba") && pendingSourceIds.length < MAX_SOURCES) pendingSourceIds = [...pendingSourceIds, "tieba"]; tiebaBarInput.value = ""; renderSourcePicker(); tiebaBarInput.focus(); });
+    sourceApply.addEventListener("click", () => { const selected = allowedSourceIds(pendingSourceIds, catalog); if (!selected.length) { setStatus(i18n("chooseSource", "至少选择一个来源，或使用“恢复推荐”。"), "warning"); return; } if (selected.includes("tieba") && !pendingTiebaBarNames.length) { setStatus("请先添加至少一个贴吧吧名，或取消选择百度贴吧。", "warning"); return; } sourceIds = selected; tiebaBarNames = normalizeTiebaBars(pendingTiebaBarNames); storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); storageSet(TIEBA_BARS_STORAGE_KEY, JSON.stringify(tiebaBarNames)); selectedCategory = "全部"; renderSourceSummary(); renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
     global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
     ["pointerdown", "keydown", "wheel", "touchstart"].forEach((eventName) => global.addEventListener(eventName, () => { lastUserActivityAt = Date.now(); }, { passive: true }));
     global.addEventListener("resize", () => { if (layout !== "grid" || page.hidden || !feed.clientWidth) return; global.clearTimeout(masonryResizeTimer); masonryResizeTimer = global.setTimeout(renderFeed, 120); });
