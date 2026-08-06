@@ -79,12 +79,16 @@ test("library assistant keeps whole-library as the unselected default and offers
 test("library assistant supports tag and collection quick filters", () => {
   assert.match(html, /id="tag-filter"/);
   assert.match(html, /id="collection-filter"/);
+  assert.match(html, /id="library-ai-book-search"[^>]*data-i18n-placeholder="bookSelectorPlaceholder"/);
   assert.match(html, /未勾选不代表未参与：书库问答默认检索全部已建立语义索引的图书/);
   assert.match(controller, /tagsForBook/);
   assert.match(controller, /book\.tags/);
   assert.match(controller, /book\.modelTags/);
   assert.match(controller, /book\.collections/);
-  assert.match(controller, /显示 \$\{visibleBooks\.length\} \/ 共 \$\{books\.length\} 本/);
+  assert.match(controller, /book\.description, book\.summary, \.\.\.tagsForBook\(book\)/);
+  assert.match(controller, /library-ai-book-search"\)\.addEventListener\("input", renderBooks\)/);
+  assert.match(controller, /bookCountFiltered/);
+  assert.match(styles, /\.library-ai-book-search\s*\{/);
 });
 
 test("library assistant can choose one of the locally configured large models", () => {
