@@ -622,8 +622,8 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .default-apps-setting { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; margin-top: 8px; padding: 12px 0; border-top: 1px solid #eef0f4; }
 .default-apps-setting > div { flex: 1 1 0; min-width: 0; }
 .default-apps-setting p { margin: 4px 0 0; color: #777; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.default-apps-setting .btn-plain { flex: 0 1 48%; max-width: 48%; white-space: normal; overflow-wrap: anywhere; font-size: 13px; padding: 5px 10px; }
-.recovery-backup-actions .btn-plain { flex: 0 1 auto; max-width: 100%; }
+.default-apps-setting > .btn-plain { flex: 0 1 auto; width: fit-content; min-width: 0; max-width: 48%; white-space: normal; overflow-wrap: anywhere; font-size: 13px; padding: 5px 10px; }
+.recovery-backup-actions .btn-plain { flex: 0 1 auto; width: auto; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 13px; padding: 5px 10px; }
 .fp-set-actions { display: flex; min-width: 0; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .fp-set-actions .btn-plain { max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 13px; padding: 5px 10px; }
 .experimental-settings { margin: 0; padding: 6px 0 4px; border: 0; }
