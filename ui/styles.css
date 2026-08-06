@@ -1565,6 +1565,19 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .newsnow-source-choice input { width: 16px; height: 16px; margin: 0; accent-color: #3675cf; }
 .newsnow-source-choice i { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; }
 .newsnow-source-choice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.newsnow-tieba-bars { margin: 0 2px 16px; padding: 14px; border: 1px solid #dce8f7; border-radius: 12px; background: linear-gradient(145deg, #fbfdff, #f2f7ff); }
+.newsnow-tieba-bars-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.newsnow-tieba-bars-head strong { color: #365d90; font-size: 15px; }
+.newsnow-tieba-bars-head span { color: #7b8ba0; font-size: 12px; }
+.newsnow-tieba-bars p { margin: 6px 0 10px; color: #718096; font-size: 12px; line-height: 1.5; }
+.newsnow-tieba-bar-form { display: flex; gap: 8px; }
+.newsnow-tieba-bar-form input { min-width: 0; flex: 1 1 auto; padding: 8px 10px; border: 1px solid #cbd9ea; border-radius: 8px; color: #34435c; background: #fff; font: 13px "Microsoft YaHei", system-ui, sans-serif; outline: none; }
+.newsnow-tieba-bar-form input:focus { border-color: #5b91dd; box-shadow: 0 0 0 2px #e9f2ff; }
+.newsnow-tieba-bar-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.newsnow-tieba-bar-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px 5px 9px; border: 1px solid #bad4f6; border-radius: 999px; color: #2866b6; background: #eaf3ff; font-size: 12px; }
+.newsnow-tieba-bar-chip button { width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; color: #4e78ad; background: transparent; font: 17px/16px system-ui; cursor: pointer; }
+.newsnow-tieba-bar-chip button:hover { color: #fff; background: #4e83c9; }
+.newsnow-tieba-bar-empty { margin: 0; color: #8a96a7; font-size: 12px; }
 .newsnow-source-picker-actions { position: sticky; bottom: 0; display: flex; justify-content: space-between; gap: 9px; margin: 0 -24px; padding: 13px 24px 16px; border-top: 1px solid #e7edf5; background: linear-gradient(180deg, rgba(255,255,255,.88), #fff 38%); }
 .newsnow-source-picker-actions .btn-primary { min-width: 112px; }
 @media (max-width: 1100px) {

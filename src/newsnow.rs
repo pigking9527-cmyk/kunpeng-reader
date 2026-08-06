@@ -22,6 +22,8 @@ use tauri::{Emitter, Manager, WebviewBuilder, WebviewUrl};
 const DEFAULT_BASE_URL: &str = "https://newsnow.busiyi.world";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_SELECTED_SOURCES: usize = 24;
+const MAX_TIEBA_BARS: usize = 8;
+const MAX_TIEBA_BAR_CHARS: usize = 48;
 const MAX_REFRESH_CONCURRENCY: usize = 6;
 const MAX_ITEMS_PER_SOURCE: usize = 16;
 const MAX_TOTAL_ITEMS: usize = 90;
@@ -289,7 +291,7 @@ const CURATED_SOURCES: &[NewsSource] = &[
     },
     NewsSource {
         id: "tieba",
-        name: "百度贴吧热议",
+        name: "百度贴吧",
         category: "热点",
         color: "#3c78c8",
         default_enabled: false,
@@ -339,6 +341,8 @@ impl From<NewsSource> for NewsNowSource {
 pub(crate) struct NewsNowRequest {
     #[serde(default)]
     pub source_ids: Vec<String>,
+    #[serde(default)]
+    pub tieba_bars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1000,13 +1004,42 @@ fn selected_sources(request: Option<NewsNowRequest>) -> Vec<NewsSource> {
     }
 }
 
-fn selected_ids(sources: &[NewsSource]) -> Vec<String> {
-    sources.iter().map(|source| source.id.to_string()).collect()
+fn normalized_tieba_bars(request: Option<&NewsNowRequest>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    request
+        .map(|request| request.tieba_bars.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|name| name.trim().trim_end_matches('吧').trim())
+        .filter(|name| {
+            !name.is_empty()
+                && name.chars().count() <= MAX_TIEBA_BAR_CHARS
+                && !name.chars().any(|character| character.is_control())
+        })
+        .filter(|name| seen.insert(name.to_string()))
+        .take(MAX_TIEBA_BARS)
+        .map(str::to_string)
+        .collect()
 }
 
-fn cached_news(sources: &[NewsSource], include_stale: bool) -> Option<NewsNowList> {
+fn selected_ids(sources: &[NewsSource], tieba_bars: &[String]) -> Vec<String> {
+    let mut ids = sources
+        .iter()
+        .map(|source| source.id.to_string())
+        .collect::<Vec<_>>();
+    if sources.iter().any(|source| source.id == "tieba") {
+        ids.extend(tieba_bars.iter().map(|bar| format!("tieba:{bar}")));
+    }
+    ids
+}
+
+fn cached_news(
+    sources: &[NewsSource],
+    tieba_bars: &[String],
+    include_stale: bool,
+) -> Option<NewsNowList> {
     ensure_disk_cache_loaded();
-    let source_ids = selected_ids(sources);
+    let source_ids = selected_ids(sources, tieba_bars);
     let cached = cache().lock().ok()?;
     if cached.source_ids != source_ids || cached.items.is_empty() {
         return None;
@@ -1154,6 +1187,161 @@ fn html_text(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn percent_encode_path_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn xml_element_text(xml: &str, tag: &str) -> String {
+    let lower = xml.to_ascii_lowercase();
+    let needle = format!("<{tag}");
+    let Some(start) = lower.find(&needle) else {
+        return String::new();
+    };
+    let Some(open_end) = xml[start..].find('>').map(|offset| start + offset + 1) else {
+        return String::new();
+    };
+    let close = format!("</{tag}>");
+    let Some(close_start) = lower[open_end..]
+        .find(&close)
+        .map(|offset| open_end + offset)
+    else {
+        return String::new();
+    };
+    html_text(
+        xml[open_end..close_start]
+            .trim()
+            .trim_start_matches("<![CDATA[")
+            .trim_end_matches("]]>")
+            .trim(),
+    )
+}
+
+fn xml_first_url(xml: &str, tags: &[&str]) -> String {
+    let lower = xml.to_ascii_lowercase();
+    for tag in tags {
+        let needle = format!("<{tag}");
+        let mut cursor = 0;
+        while let Some(found) = lower[cursor..].find(&needle) {
+            let start = cursor + found;
+            let Some(end) = tag_end(xml, start) else {
+                break;
+            };
+            if let Some(url) = html_attribute(&xml[start..end], "url") {
+                let url = url_open::validate_https_url(&url)
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                if !url.is_empty() {
+                    return url;
+                }
+            }
+            cursor = end;
+        }
+    }
+    String::new()
+}
+
+fn xml_item_blocks(xml: &str) -> Vec<&str> {
+    let lower = xml.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut blocks = Vec::new();
+    while let Some(start) = lower[cursor..].find("<item") {
+        let start = cursor + start;
+        let Some(end) = lower[start..]
+            .find("</item>")
+            .map(|offset| start + offset + 7)
+        else {
+            break;
+        };
+        blocks.push(&xml[start..end]);
+        cursor = end;
+    }
+    blocks
+}
+
+fn parse_tieba_rss(source: NewsSource, bar: &str, xml: &str) -> Vec<NewsNowItem> {
+    xml_item_blocks(xml)
+        .into_iter()
+        .filter_map(|item| {
+            let title = trim_chars(&xml_element_text(item, "title"), MAX_TEXT_CHARS);
+            let url = url_open::validate_https_url(&xml_element_text(item, "link"))
+                .map(str::to_string)
+                .unwrap_or_default();
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+            let summary = trim_chars(&xml_element_text(item, "description"), MAX_TEXT_CHARS);
+            let published_at = xml_element_text(item, "pubdate");
+            let image_url = xml_first_url(item, &["enclosure", "media:content", "media:thumbnail"]);
+            Some(NewsNowItem {
+                id: format!("tieba:{bar}:{url}"),
+                title,
+                url,
+                source: format!("{bar}吧"),
+                source_id: source.id.to_string(),
+                source_color: source.color.to_string(),
+                summary,
+                published_at,
+                image_url,
+                category: source.category.to_string(),
+            })
+        })
+        .take(MAX_ITEMS_PER_SOURCE)
+        .collect()
+}
+
+fn fetch_tieba_source(
+    agent: &ureq::Agent,
+    source: NewsSource,
+    bars: &[String],
+) -> Result<Vec<NewsNowItem>, String> {
+    if bars.is_empty() {
+        return Err("百度贴吧（请先添加吧名）".to_string());
+    }
+    let mut per_bar_items = Vec::new();
+    for bar in bars {
+        let endpoint = format!(
+            "https://rsshub.app/baidu/tieba/forum/{}",
+            percent_encode_path_component(bar)
+        );
+        let result = agent
+            .get(&endpoint)
+            .header("User-Agent", NEWSNOW_USER_AGENT)
+            .header("Accept", "application/rss+xml,application/xml,text/xml")
+            .call()
+            .ok()
+            .and_then(|mut response| response.body_mut().read_to_string().ok())
+            .map(|xml| parse_tieba_rss(source, bar, &xml))
+            .filter(|items| !items.is_empty());
+        if let Some(items) = result {
+            per_bar_items.push(items);
+        }
+    }
+    let mut items = Vec::new();
+    for index in 0..MAX_ITEMS_PER_SOURCE {
+        for bar_items in &per_bar_items {
+            if let Some(item) = bar_items.get(index) {
+                items.push(item.clone());
+                if items.len() >= MAX_ITEMS_PER_SOURCE {
+                    return Ok(items);
+                }
+            }
+        }
+    }
+    if items.is_empty() {
+        Err("百度贴吧".to_string())
+    } else {
+        Ok(items)
+    }
 }
 
 fn tag_end(html: &str, start: usize) -> Option<usize> {
@@ -1362,9 +1550,13 @@ fn fetch_source(
     base: &str,
     source: NewsSource,
     latest: bool,
+    tieba_bars: &[String],
 ) -> Result<Vec<NewsNowItem>, String> {
     if matches!(source.id, "3dm-news" | "gamersky-news") {
         return fetch_game_news_source(agent, source);
+    }
+    if source.id == "tieba" {
+        return fetch_tieba_source(agent, source, tieba_bars);
     }
     let suffix = if latest { "&latest=true" } else { "" };
     let endpoint = format!("{base}/api/s?id={}{}", source.id, suffix);
@@ -1415,11 +1607,12 @@ fn sort_and_deduplicate(items: &mut Vec<NewsNowItem>) {
 }
 
 fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowList {
+    let tieba_bars = normalized_tieba_bars(request.as_ref());
     let sources = selected_sources(request);
-    let source_ids = selected_ids(&sources);
+    let source_ids = selected_ids(&sources, &tieba_bars);
     ensure_disk_cache_loaded();
     if !force_refresh {
-        if let Some(cached) = cached_news(&sources, false) {
+        if let Some(cached) = cached_news(&sources, &tieba_bars, false) {
             return cached;
         }
     }
@@ -1443,8 +1636,9 @@ fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowLi
             .map(|source| {
                 let base = base.clone();
                 let source = *source;
+                let tieba_bars = tieba_bars.clone();
                 std::thread::spawn(move || {
-                    fetch_source(&http_agent(), &base, source, force_refresh)
+                    fetch_source(&http_agent(), &base, source, force_refresh, &tieba_bars)
                 })
             })
             .collect::<Vec<_>>();
@@ -1528,7 +1722,8 @@ pub(crate) fn newsnow_sources() -> Vec<NewsNowSource> {
 #[tauri::command]
 pub(crate) async fn newsnow_list(request: Option<NewsNowRequest>) -> NewsNowList {
     let sources = selected_sources(request.clone());
-    if let Some(cached) = cached_news(&sources, true) {
+    let tieba_bars = normalized_tieba_bars(request.as_ref());
+    if let Some(cached) = cached_news(&sources, &tieba_bars, true) {
         return cached;
     }
     tokio::task::spawn_blocking(move || fetch_news(request, false))
@@ -1653,7 +1848,10 @@ mod tests {
             .chain(std::iter::once("unknown".to_string()))
             .chain(std::iter::once("weibo".to_string()))
             .collect();
-        let selected = selected_sources(Some(NewsNowRequest { source_ids: ids }));
+        let selected = selected_sources(Some(NewsNowRequest {
+            source_ids: ids,
+            ..Default::default()
+        }));
         assert_eq!(selected.len(), MAX_SELECTED_SOURCES);
         assert_eq!(selected[0].id, "weibo");
         assert!(!selected.iter().any(|source| source.id == "unknown"));
@@ -1695,6 +1893,36 @@ mod tests {
         assert!(CURATED_SOURCES
             .iter()
             .any(|source| source.id == "gamersky-news" && source.category == "游戏"));
+        assert!(CURATED_SOURCES
+            .iter()
+            .any(|source| source.id == "tieba" && source.name == "百度贴吧"));
+    }
+
+    #[test]
+    fn tieba_bars_are_local_request_data_and_stay_bounded() {
+        let bars = normalized_tieba_bars(Some(&NewsNowRequest {
+            source_ids: vec!["tieba".to_string()],
+            tieba_bars: vec![
+                "原神吧".to_string(),
+                " 原神 ".to_string(),
+                "崩坏：星穹铁道".to_string(),
+                "\n".to_string(),
+            ],
+        }));
+        assert_eq!(bars, vec!["原神", "崩坏：星穹铁道"]);
+        let source = *CURATED_SOURCES
+            .iter()
+            .find(|source| source.id == "tieba")
+            .unwrap();
+        let items = parse_tieba_rss(
+            source,
+            "原神",
+            r#"<rss><channel><item><title><![CDATA[一条帖子]]></title><link>https://tieba.baidu.com/p/123</link><description><![CDATA[帖子摘要]]></description><pubDate>2026-08-06</pubDate><enclosure url="https://img.example/cover.jpg" /></item></channel></rss>"#,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source, "原神吧");
+        assert_eq!(items[0].source_id, "tieba");
+        assert_eq!(items[0].image_url, "https://img.example/cover.jpg");
     }
 
     #[test]
