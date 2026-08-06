@@ -294,17 +294,17 @@ const appLanguageSelect = document.getElementById("set-app-language");
 window.ReaderAppI18n?.populate(appLanguageSelect);
 appLanguageSelect?.addEventListener("change", () => window.ReaderAppI18n?.setLanguage(appLanguageSelect.value));
 window.ReaderApiSettingsUI?.init({ invoke });
+const appText = (key, fallback, values) => (window.ReaderAppI18n?.t?.(key) || fallback).replace(/\{(\w+)\}/g, (_, name) => values?.[name] ?? ""); let lastRecoveryBackupStatus = null;
 function backupBytes(value) {
   const bytes = Number(value) || 0;
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
-  return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+  return bytes < 1024 * 1024 ? (bytes / 1024).toFixed(1) + " KiB" : (bytes / (1024 * 1024)).toFixed(1) + " MiB";
 }
 function renderRecoveryBackupStatus(status) {
   if (!recoveryBackupStatus) return;
+  lastRecoveryBackupStatus = status;
   recoveryBackupStatus.textContent = status.count
-    ? ("已保留 " + status.count + " 个恢复点，共 " + backupBytes(status.total_bytes) +
-       "；最近一次 " + status.latest + "。每日自动创建，最多保留 7 个。")
-    : "尚无恢复点；软件会每日自动创建，最多保留 7 个。";
+    ? appText("recoveryStatus", "已保留 {count} 个恢复点，共 {size}；最近一次 {latest}。每日自动创建，最多保留 7 个。", { count: status.count, size: backupBytes(status.total_bytes), latest: status.latest })
+    : appText("recoveryEmpty", "尚无恢复点；软件会每日自动创建，最多保留 7 个。");
   recoveryBackupStatus.title = status.directory || "";
   const backups = Array.isArray(status.backups) ? status.backups : [];
   if (recoveryBackupActions) recoveryBackupActions.hidden = backups.length === 0;
@@ -313,7 +313,7 @@ function renderRecoveryBackupStatus(status) {
     recoveryBackupSelect.replaceChildren(...backups.map((backup) => {
       const option = document.createElement("option");
       option.value = backup.id;
-      option.textContent = "恢复点 " + (backup.created_at || backup.id) + "（" + backupBytes(backup.total_bytes) + "）";
+      option.textContent = appText("recoveryOption", "恢复点 {created}（{size}）", { created: backup.created_at || backup.id, size: backupBytes(backup.total_bytes) });
       return option;
     }));
     if (backups.some((backup) => backup.id === selected)) recoveryBackupSelect.value = selected;
@@ -336,7 +336,7 @@ function openCommonSettings() {
   fpSettingsModal.classList.add("show");
   refreshModelTagsSetting().catch(() => {});
   refreshRecoveryBackupStatus().catch((e) => {
-    if (recoveryBackupStatus) recoveryBackupStatus.textContent = "恢复点状态读取失败：" + e;
+    if (recoveryBackupStatus) recoveryBackupStatus.textContent = appText("recoveryReadFailed", "恢复点状态读取失败：{error}", { error: e });
   });
 }
 document.getElementById("settings-toolbar-btn").addEventListener("click", (e) => {
@@ -359,7 +359,7 @@ useModelTagsCheckbox?.addEventListener("change", async () => {
 });
 recoveryBackupButton?.addEventListener("click", async () => {
   recoveryBackupButton.disabled = true;
-  recoveryBackupButton.textContent = "正在创建…";
+  recoveryBackupButton.textContent = appText("recoveryCreating", "正在创建…");
   try {
     const status = await invoke("create_recovery_backup");
     renderRecoveryBackupStatus(status);
@@ -367,7 +367,7 @@ recoveryBackupButton?.addEventListener("click", async () => {
     alert("创建恢复点失败：" + e);
   } finally {
     recoveryBackupButton.disabled = false;
-    recoveryBackupButton.textContent = "立即创建";
+    recoveryBackupButton.textContent = appText("recoveryCreate", "立即创建");
   }
 });
 restoreRecoveryBackupButton?.addEventListener("click", async () => {
@@ -376,7 +376,7 @@ restoreRecoveryBackupButton?.addEventListener("click", async () => {
   const choice = recoveryBackupSelect.options[recoveryBackupSelect.selectedIndex]?.textContent || backupId;
   if (!confirm("恢复到“" + choice + "”吗？\n\n软件会先自动创建一个当前数据的保护恢复点，然后覆盖书架、统计、生词本和同步数据。请先关闭所有阅读窗口。")) return;
   restoreRecoveryBackupButton.disabled = true;
-  restoreRecoveryBackupButton.textContent = "正在恢复…";
+  restoreRecoveryBackupButton.textContent = appText("recoveryRestoring", "正在恢复…");
   try {
     const status = await invoke("restore_recovery_backup", { backupId });
     renderRecoveryBackupStatus(status);
@@ -387,9 +387,10 @@ restoreRecoveryBackupButton?.addEventListener("click", async () => {
     alert("恢复数据失败：" + e);
   } finally {
     restoreRecoveryBackupButton.disabled = false;
-    restoreRecoveryBackupButton.textContent = "恢复选中恢复点";
+    restoreRecoveryBackupButton.textContent = appText("recoverySelected", "恢复选中恢复点");
   }
 });
+window.addEventListener("app-language-changed", () => { if (lastRecoveryBackupStatus) renderRecoveryBackupStatus(lastRecoveryBackupStatus); });
 document.getElementById("open-default-apps-settings")?.addEventListener("click", async () => {
   try {
     await invoke("open_default_apps_settings");

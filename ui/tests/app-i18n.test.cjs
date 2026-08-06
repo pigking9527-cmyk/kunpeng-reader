@@ -24,4 +24,11 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(html, /id="library-ai-page"[\s\S]*?data-i18n="libraryDescription"/);
   assert.match(fs.readFileSync(path.join(uiRoot, "news-ui.js"), "utf8"), /app-language-changed/);
   assert.match(fs.readFileSync(path.join(uiRoot, "library-ai.js"), "utf8"), /app-language-changed/);
+  assert.match(html, /id="open-default-apps-settings"[^>]*data-i18n="defaultOpenButton"/);
+  assert.match(html, /id="recovery-backup-status"[^>]*data-i18n="recoveryLoading"/);
+  assert.match(html, /id="settings-export-data"[^>]*data-i18n="dataExport"/);
+  assert.match(i18n, /const SETTINGS_COPY/);
+  assert.match(app, /function renderRecoveryBackupStatus/);
+  assert.match(app, /appText\("recoveryStatus"/);
+  assert.match(app, /app-language-changed[\s\S]*?renderRecoveryBackupStatus\(lastRecoveryBackupStatus\)/);
 });
