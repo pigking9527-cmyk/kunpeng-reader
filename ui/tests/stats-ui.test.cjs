@@ -32,6 +32,7 @@ test("stats UI uses an injected command boundary and keeps range payloads", asyn
       this.scrollTop = 0;
       this.checked = false;
       this.textContent = "";
+      this.innerHTML = "";
     }
     addEventListener(name, handler) { this.handlers.set(name, handler); }
     contains() { return false; }
@@ -98,4 +99,12 @@ test("read books render as one clipped cover row ordered by reading duration", (
   assert.match(statsSource, /class="stats-book-strip"/);
   assert.match(statsSource, /class="stats-book-cover"/);
   assert.match(statsSource, /高亮 \$\{book\.highlights\} · 批注 \$\{book\.notes\}/);
+});
+
+test("stats show a loading state immediately instead of a blank panel", () => {
+  assert.match(statsSource, /class="stats-loading" role="status" aria-live="polite"/);
+  assert.match(statsSource, /正在加载阅读统计…/);
+  assert.match(statsSource, /statsRequestSerial/);
+  assert.match(statsSource, /阅读统计加载失败，请稍后重试。/);
+  assert.match(indexSource, /id="stats-body" class="stats-body"/);
 });

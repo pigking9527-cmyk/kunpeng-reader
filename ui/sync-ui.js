@@ -74,6 +74,16 @@ const accountPasswordRecoverCodeEl = document.getElementById("account-password-r
 const accountPasswordRecoverNewEl = document.getElementById("account-password-recover-new");
 const accountPasswordRecoverStartBtn = document.getElementById("account-password-recover-start");
 const accountPasswordRecoverConfirmBtn = document.getElementById("account-password-recover-confirm");
+const accountDataOpenBtn = document.getElementById("account-data-open");
+const accountDataPanel = document.getElementById("account-data-panel");
+const accountDataCloseBtn = document.getElementById("account-data-close");
+const accountClearLocalBtn = document.getElementById("account-clear-local");
+const accountClearCloudPasswordEl = document.getElementById("account-clear-cloud-password");
+const accountClearCloudBtn = document.getElementById("account-clear-cloud");
+const accountDeletePasswordEl = document.getElementById("account-delete-password");
+const accountDeleteUsernameEl = document.getElementById("account-delete-username");
+const accountDeleteBtn = document.getElementById("account-delete");
+const accountDataStatusEl = document.getElementById("account-data-status");
 const privateSyncOpenBtn = document.getElementById("private-sync-open");
 const privateSyncPanel = document.getElementById("private-sync-panel");
 const privateSyncCloseBtn = document.getElementById("private-sync-close");
@@ -181,6 +191,7 @@ function closeAccountPanel() {
   accountPanel.classList.remove("show");
   privateSyncPanel.hidden = true;
   accountSecurityPanel.hidden = true;
+  accountDataPanel.hidden = true;
   setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
   setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
   setAccountSecurityDisclosure(accountPasswordRecoverToggleBtn, accountPasswordRecoverFormEl, false);
@@ -191,6 +202,27 @@ function closeAccountPanel() {
 function setAccountSecurityStatus(text = "", type = "") {
   accountSecurityStatusEl.textContent = text;
   accountSecurityStatusEl.className = "private-sync-status" + (type ? " " + type : "");
+}
+function setAccountDataStatus(text = "", type = "") {
+  accountDataStatusEl.textContent = text;
+  accountDataStatusEl.className = "private-sync-status" + (type ? " " + type : "");
+}
+function clearBrowserStateAndReload() {
+  try {
+    if (typeof localStorage.clear === "function") localStorage.clear();
+    else {
+      localStorage.removeItem(SAVED_ACCOUNTS_KEY);
+      localStorage.removeItem(SYNC_ACCOUNT_CACHE_KEY);
+    }
+  } catch (error) {}
+  try { global.sessionStorage?.clear?.(); } catch (error) {}
+  global.location?.reload?.();
+}
+function setDataActionBusy(busy) {
+  const loggedIn = !!syncUsernameEl.value.trim();
+  accountClearLocalBtn.disabled = busy;
+  accountClearCloudBtn.disabled = busy || !loggedIn;
+  accountDeleteBtn.disabled = busy || !loggedIn;
 }
 function setAccountSecurityDisclosure(toggle, form, open) {
   form.hidden = !open;
@@ -430,6 +462,7 @@ accountPanel.addEventListener("click", (e) => {
 privateSyncOpenBtn.addEventListener("click", async () => {
   privateSyncPanel.hidden = false;
   accountSecurityPanel.hidden = true;
+  accountDataPanel.hidden = true;
   await loadPrivateSyncStatus();
 });
 privateSyncCloseBtn.addEventListener("click", () => { privateSyncPanel.hidden = true; });
@@ -508,6 +541,7 @@ syncResetConfirmBtn.addEventListener("click", async () => {
 accountSecurityOpenBtn.addEventListener("click", async () => {
   accountSecurityPanel.hidden = false;
   privateSyncPanel.hidden = true;
+  accountDataPanel.hidden = true;
   setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
   setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
   setAccountSecurityStatus("");
@@ -515,6 +549,71 @@ accountSecurityOpenBtn.addEventListener("click", async () => {
 });
 accountSecurityCloseBtn.addEventListener("click", () => { accountSecurityPanel.hidden = true; });
 accountSecurityPanel.addEventListener("click", (e) => e.stopPropagation());
+accountDataOpenBtn.addEventListener("click", () => {
+  const username = syncUsernameEl.value.trim();
+  accountDataPanel.hidden = false;
+  accountSecurityPanel.hidden = true;
+  privateSyncPanel.hidden = true;
+  accountClearCloudPasswordEl.value = "";
+  accountDeletePasswordEl.value = "";
+  accountDeleteUsernameEl.value = "";
+  accountDeleteUsernameEl.placeholder = username || "登录后输入完整账号名";
+  accountClearCloudPasswordEl.disabled = !username;
+  accountDeletePasswordEl.disabled = !username;
+  accountDeleteUsernameEl.disabled = !username;
+  accountClearCloudBtn.disabled = !username;
+  accountDeleteBtn.disabled = !username;
+  setAccountDataStatus(username ? "" : "当前未登录；仍可清除此设备数据。只有登录后才能清除云端或删除账号。");
+});
+accountDataCloseBtn.addEventListener("click", () => { accountDataPanel.hidden = true; });
+accountDataPanel.addEventListener("click", (e) => e.stopPropagation());
+accountClearLocalBtn.addEventListener("click", async () => {
+  if (!global.confirm("确定清除此设备上的全部阅读器数据吗？\n\n书架记录、进度、批注、缓存、索引、模型、字体、账号和 API 配置会被清除；原始图书文件不会删除。")) return;
+  setDataActionBusy(true);
+  setAccountDataStatus("正在清除此设备数据…");
+  try {
+    await invoke("clear_local_app_data");
+    clearBrowserStateAndReload();
+  } catch (error) {
+    setAccountDataStatus("清除失败：" + error, "error");
+    setDataActionBusy(false);
+  }
+});
+accountClearCloudBtn.addEventListener("click", async () => {
+  const password = accountClearCloudPasswordEl.value;
+  if (!password) { setAccountDataStatus("请输入当前账号的登录密码。", "error"); return; }
+  if (!global.confirm("确定清除此设备和云端的全部阅读数据吗？\n\n所有设备会退出登录，账号仍然保留；原始图书文件不会删除。")) return;
+  setDataActionBusy(true);
+  setAccountDataStatus("正在清除云端数据并退出所有设备…");
+  try {
+    await invoke("sync_reset_cloud_data", { request: { password } });
+    await invoke("clear_local_app_data");
+    clearBrowserStateAndReload();
+  } catch (error) {
+    setAccountDataStatus("清除失败：" + error, "error");
+    setDataActionBusy(false);
+  }
+});
+accountDeleteBtn.addEventListener("click", async () => {
+  const username = syncUsernameEl.value.trim();
+  const confirmation = accountDeleteUsernameEl.value.trim();
+  const password = accountDeletePasswordEl.value;
+  if (!password || confirmation !== username) {
+    setAccountDataStatus("请输入登录密码，并逐字输入当前完整账号名确认。", "error");
+    return;
+  }
+  if (!global.confirm(`永久删除账号“${username}”及全部云端和本机数据？\n\n此操作不可恢复；原始图书文件不会删除。`)) return;
+  setDataActionBusy(true);
+  setAccountDataStatus("正在永久删除账号…");
+  try {
+    await invoke("auth_delete_account", { request: { password, username: confirmation } });
+    await invoke("clear_local_app_data");
+    clearBrowserStateAndReload();
+  } catch (error) {
+    setAccountDataStatus("删除失败：" + error, "error");
+    setDataActionBusy(false);
+  }
+});
 accountEmailToggleBtn.addEventListener("click", () => {
   const open = accountEmailFormEl.hidden;
   setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, open);

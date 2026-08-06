@@ -50,6 +50,7 @@ const DEFAULT_STAT_VISIBLE = {
 };
 let statVisible = readStatVisible();
 let statChartMetric = localStorage.getItem(STAT_CHART_METRIC_KEY) === "words" ? "words" : "time";
+let statsRequestSerial = 0;
 function readStatVisible() {
   try {
     return Object.assign({}, DEFAULT_STAT_VISIBLE, JSON.parse(localStorage.getItem(STAT_VISIBLE_KEY) || "{}"));
@@ -264,8 +265,20 @@ function overviewStats(allData) {
 }
 async function renderStats() {
   const bodyEl = document.getElementById("stats-body");
+  const requestSerial = ++statsRequestSerial;
   const prevScrollTop = bodyEl ? bodyEl.scrollTop : 0;
   const prevHeight = bodyEl ? Math.max(bodyEl.clientHeight, bodyEl.scrollHeight) : 0;
+  if (bodyEl) {
+    bodyEl.dataset.loading = "1";
+    if (!String(bodyEl.innerHTML || "").trim()) {
+      bodyEl.innerHTML = (
+        '<div class="stats-loading" role="status" aria-live="polite">' +
+          '<span class="stats-loading-spinner" aria-hidden="true"></span>' +
+          '<span>正在加载阅读统计…</span>' +
+        "</div>"
+      );
+    }
+  }
   if (bodyEl && prevHeight > 0) {
     bodyEl.style.setProperty("--stats-refresh-height", `${prevHeight}px`);
     bodyEl.classList.add("refreshing");
@@ -282,9 +295,15 @@ async function renderStats() {
       invoke("reading_stats_range", { from: 0, to: 99999999 }),
     ]);
   } catch (e) {
-    if (bodyEl) bodyEl.classList.remove("refreshing");
+    if (requestSerial !== statsRequestSerial) return;
+    if (bodyEl) {
+      bodyEl.innerHTML = '<div class="stats-empty stats-load-error">阅读统计加载失败，请稍后重试。</div>';
+      bodyEl.classList.remove("refreshing");
+      delete bodyEl.dataset.loading;
+    }
     return;
   }
+  if (requestSerial !== statsRequestSerial) return;
   const unit = { day: "天", month: "月", year: "年", total: "段时间" }[statScope];
   const statItems = [
     ["duration", "阅读时长", fmtTime(data.total_seconds)],
@@ -314,9 +333,11 @@ async function renderStats() {
   if (!bodyEl) return;
   bodyEl.innerHTML = overviewStats(allData) + '<div class="stat-sec-title">近一年每日阅读热力图</div>' + contributionGraph(allData) + cards + qualityNote + chart + books;
   scheduleFrame(() => {
+    if (requestSerial !== statsRequestSerial) return;
     const maxScrollTop = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
     bodyEl.scrollTop = Math.min(prevScrollTop, maxScrollTop);
     bodyEl.classList.remove("refreshing");
+    delete bodyEl.dataset.loading;
   });
 }
 function openStats() {

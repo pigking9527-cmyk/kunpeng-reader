@@ -1291,15 +1291,18 @@ document.getElementById("info-desc").addEventListener("blur", () => {
 
 const readerEndModal = document.getElementById("reader-end-modal");
 const readerEndList = document.getElementById("reader-end-list");
+const readerEndRecommendations = window.ReaderRecommendationSettings?.createPrefetcher({ invoke });
 function closeReaderEnd() {
-  readerEndModal?.classList.remove("show");
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.END_RECOMMENDATIONS, false);
 }
 async function openReaderEnd() {
   if (!readerEndModal || !readerEndList || !currentBookId) return;
-  readerEndModal.classList.add("show");
-  readerEndList.innerHTML = '<div class="reader-end-empty">正在寻找相似图书…</div>';
   try {
-    const list = await invoke("similar_books", { id: String(currentBookId) });
+    const list = readerEndRecommendations
+      ? await readerEndRecommendations.loadAtEnd()
+      : await invoke("similar_books", { id: String(currentBookId) });
+    if (list === null) return;
+    ReaderShell.setOverlay(ReaderShell.OVERLAY.END_RECOMMENDATIONS, true);
     readerEndList.replaceChildren();
     if (!Array.isArray(list) || !list.length) {
       const empty = document.createElement("div");
@@ -1323,27 +1326,29 @@ async function openReaderEnd() {
         cover.textContent = book.title || "未命名";
       }
       const body = document.createElement("div");
+      body.className = "reader-end-body";
       const title = document.createElement("div");
       title.className = "reader-end-title";
       title.textContent = book.title || "未命名";
-      const meta = document.createElement("div");
-      meta.className = "reader-end-meta";
+      const author = document.createElement("div");
+      author.className = "reader-end-author";
+      author.textContent = book.author || "未知作者";
+      const scoreRow = document.createElement("div");
+      scoreRow.className = "reader-end-score";
       const score = Math.round(Math.max(0, Math.min(1, Number(book.score) || 0)) * 100);
-      meta.textContent = (book.author ? book.author + " · " : "") + "相关性 " + score + "%";
-      body.append(title, meta);
-      if (book.description) {
-        const description = document.createElement("div");
-        description.className = "reader-end-desc";
-        description.textContent = book.description;
-        body.appendChild(description);
-      }
+      const scoreLabel = document.createElement("span");
+      scoreLabel.textContent = "相关度";
+      const scoreValue = document.createElement("strong");
+      scoreValue.textContent = score + "%";
+      scoreRow.append(scoreLabel, scoreValue);
+      body.append(title, author, scoreRow);
       item.append(cover, body);
       item.addEventListener("click", () => {
         closeReaderEnd();
         invoke("open_book_at", {
           request: { id: String(book.id), chapter: 0, term: "" },
         }).catch((error) => {
-          readerEndModal.classList.add("show");
+          ReaderShell.setOverlay(ReaderShell.OVERLAY.END_RECOMMENDATIONS, true);
           readerEndList.innerHTML = "";
           const empty = document.createElement("div");
           empty.className = "reader-end-empty";
@@ -1354,6 +1359,7 @@ async function openReaderEnd() {
       readerEndList.appendChild(item);
     });
   } catch (error) {
+    ReaderShell.setOverlay(ReaderShell.OVERLAY.END_RECOMMENDATIONS, true);
     readerEndList.innerHTML = "";
     const empty = document.createElement("div");
     empty.className = "reader-end-empty";
@@ -1372,7 +1378,7 @@ readerEndModal?.addEventListener("click", (event) => {
 window.addEventListener("message", (e) => {
   if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
   if (e.data.bookEnd) {
-    openReaderEnd();
+    if (window.ReaderRecommendationSettings?.isEnabled()) openReaderEnd();
     return;
   }
   if (e.data.readerAnchorReady) {
@@ -1413,6 +1419,7 @@ window.addEventListener("message", (e) => {
         showProgressLoading();
       }
     }
+    if (!isPdf) readerEndRecommendations?.observe(e.data);
     reportProgress();
     trackReadWords(e.data); // 累计真正读过的字数
     if (!vdragging && !isPdf) updateThumb();
@@ -1789,6 +1796,7 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
     const info = await invoke("book_info");
     currentBookId = info.id || "";
     window.currentBookId = currentBookId;
+    readerEndRecommendations?.reset(currentBookId, { wordCount: info.word_count });
     currentBookContentId = info.content_id || "";
     window.currentBookContentId = currentBookContentId;
     aiReaderMergeSyncedHistory();

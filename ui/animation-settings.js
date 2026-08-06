@@ -3,6 +3,7 @@
 
   const STORAGE_KEY = "readerAnimationSettingsV1";
   const DEFAULTS = Object.freeze({
+    allAnimations: true,
     mainWindow: true,
     readerPage: true,
     searchPopup: true,
@@ -26,7 +27,7 @@
 
   function isEnabled(values, key) {
     const group = GROUP_BY_KEY[key];
-    return values[key] !== false && (!group || values[group] !== false);
+    return values[key] !== false && (key === "allAnimations" || values.allAnimations !== false) && (!group || values[group] !== false);
   }
 
   // 总开关是该分类当前是否还有可用效果的汇总。关闭总开关时一并关闭
@@ -111,7 +112,7 @@
     if (GROUP_BY_KEY[key]) syncGroupForChild(next, key);
     else normalizeEmptyGroups(next);
     global.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    if (key === "pageTurn" || key === "readerPage") syncPageTurnEffect(isEnabled(next, "pageTurn"));
+    if (key === "pageTurn" || key === "readerPage" || key === "allAnimations") syncPageTurnEffect(isEnabled(next, "pageTurn"));
     global.dispatchEvent(new CustomEvent("reader-animation-settings-changed", { detail: next }));
     return next;
   }
@@ -120,6 +121,7 @@
     const body = root?.body;
     if (!body) return;
     syncPageTurnEffect(enabled("pageTurn"));
+    body.classList.toggle("animations-all-off", !enabled("allAnimations"));
     body.classList.toggle("anim-search-popup-off", !enabled("searchPopup"));
     body.classList.toggle("anim-shelf-search-toggle-off", !enabled("shelfSearchToggle"));
     body.classList.toggle("anim-common-settings-switch-off", !enabled("commonSettingsSwitch"));
@@ -131,6 +133,7 @@
     const body = root?.body;
     if (!body) return;
     syncPageTurnEffect(enabled("pageTurn"));
+    body.classList.toggle("animations-all-off", !enabled("allAnimations"));
     body.classList.toggle("anim-annotation-add-off", !enabled("annotationAdd"));
     body.classList.toggle("anim-reading-mode-off", !enabled("readingMode"));
   }

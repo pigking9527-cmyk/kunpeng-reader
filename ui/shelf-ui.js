@@ -510,9 +510,7 @@ function bookCard(b, index = 0) {
   card.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    // 书卡会为避免封面闪烁而复用；右键整理必须拿到书架中的最新数据，
-    // 不能使用创建卡片时闭包保存的旧标签/收藏夹快照。
-    openBookOrganizer(getBook(b.id) || b, e, card);
+    closeShelfCardFloaters();
   });
 
   return card;
@@ -1438,9 +1436,10 @@ function clearSelection() {
   updateSelectionUi();
 }
 function selectAll() {
-  const visibleBooks = currentList();
+  // 菜单入口承诺的是“全选”，应覆盖完整书库；搜索和筛选只影响展示，
+  // 不能让批量删除悄悄漏掉当前未显示的图书。
   closeSearch(true);
-  selected = new Set(visibleBooks.map((book) => book.id));
+  selected = new Set(books.map((book) => book.id));
   applyView();
   updateSelectionUi();
 }
@@ -1461,7 +1460,7 @@ document.getElementById("mi-selectall").addEventListener("click", () => {
 document.getElementById("mi-random").addEventListener("click", () => {
   menuEl.classList.remove("show");
   if (!books.length) {
-    alertAction("书架还是空的，先导入书籍吧～");
+    alertAction("书架还是空的", { variant: "text", duration: 1500 });
     return;
   }
   const book = books[Math.floor(Math.random() * books.length)];
@@ -1703,6 +1702,7 @@ global.addEventListener("focus", () => {
     getVisibleBooks: () => currentList().slice(),
     focusShelf,
     makeStars,
+    openBooklist,
     render,
     selectAll,
     setSearchQuery,

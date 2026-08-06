@@ -11,7 +11,7 @@
 
   const assistant = global.ReaderLibraryAiUI.init({ root });
   if (!assistant) return;
-  let loaded = false;
+  let initialLoad = null;
 
   async function open() {
     root.getElementById("menu")?.classList.remove("show");
@@ -22,9 +22,12 @@
     page.hidden = false;
     root.body.classList.add("library-ai-active");
     button.setAttribute("aria-pressed", "true");
-    if (!loaded) {
-      loaded = true;
-      await assistant.load();
+    if (!initialLoad) {
+      initialLoad = assistant.load();
+      await initialLoad;
+    } else {
+      await initialLoad;
+      await assistant.refreshBooks();
     }
   }
 

@@ -75,6 +75,9 @@
             <div id="sync-last-time" class="sync-last-time" data-i18n="lastSyncNever">尚未同步</div>
             <div id="sync-last-counts" class="sync-last-counts" data-i18n="syncFilesNote">登录后可跨设备同步；图书文件本身不会上传</div>
           </section>
+          <div class="account-data-entry">
+            <button id="account-data-open" class="btn-plain" type="button">数据与隐私</button>
+          </div>
           <div id="sync-status" class="sync-status">尚未同步</div>
         </div>
 
@@ -129,6 +132,30 @@
             <div id="account-security-status" class="private-sync-status"></div>
         </section>
 
+        <section id="account-data-panel" class="account-subpage account-data-panel" hidden aria-label="数据与隐私" aria-modal="true">
+          <div class="private-sync-header"><strong>数据与隐私</strong><button id="account-data-close" class="icon-btn" type="button" aria-label="关闭">×</button></div>
+          <p class="private-sync-note">以下操作不会删除电脑中的原始 EPUB、PDF、TXT、MOBI 或 AZW 图书文件。</p>
+
+          <div class="account-data-card">
+            <div><strong>清除此设备数据</strong><small>清除书架记录、阅读进度、批注、生词、统计、缓存、索引、模型、已下载字体、账号登录和 API 配置。</small></div>
+            <button id="account-clear-local" class="btn-plain account-danger-button" type="button">清除此设备</button>
+          </div>
+
+          <div class="account-data-card">
+            <div><strong>清除此设备及云端数据</strong><small>清空当前账号的全部同步数据，并让所有设备退出登录；账号本身保留。</small></div>
+            <label class="account-data-confirm"><span>登录密码</span><input id="account-clear-cloud-password" type="password" autocomplete="current-password" /></label>
+            <button id="account-clear-cloud" class="btn-plain account-danger-button" type="button">清除本机及云端</button>
+          </div>
+
+          <div class="account-data-card account-data-delete">
+            <div><strong>永久删除账号</strong><small>删除账号及全部云端数据，同时清除此设备数据。此操作不可恢复。</small></div>
+            <label class="account-data-confirm"><span>登录密码</span><input id="account-delete-password" type="password" autocomplete="current-password" /></label>
+            <label class="account-data-confirm"><span>输入完整账号名</span><input id="account-delete-username" type="text" autocomplete="off" spellcheck="false" /></label>
+            <button id="account-delete" class="btn-plain account-danger-button account-delete-button" type="button">永久删除账号</button>
+          </div>
+          <div id="account-data-status" class="private-sync-status"></div>
+        </section>
+
         <section id="private-sync-panel" class="account-subpage private-sync-panel" hidden aria-label="智读与翻译同步设置" aria-modal="true">
             <div class="private-sync-header">
               <strong>智读与翻译同步</strong>
@@ -150,8 +177,6 @@
 
       <div id="del-group" class="del-group">
         <button id="book-info-btn" class="btn-plain">图书信息</button>
-        <button id="batch-tag-btn" class="btn-plain">标签</button>
-        <button id="batch-collection-btn" class="btn-plain">加入收藏书单</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
         <button id="del-cancel" class="btn-plain">取消</button>
       </div>
@@ -372,6 +397,7 @@
           <span data-i18n="animation">动画</span>
           <span class="fp-set-tail">
             <button id="animation-gear" class="fp-row-gear" title="设置界面动画">⚙</button>
+            <label class="switch"><input type="checkbox" id="set-animation-master" checked aria-label="启用全部动画" /><span class="slider"></span></label>
           </span>
         </div>
         <div class="fp-set-row">
@@ -394,6 +420,13 @@
         <div class="fp-set-row">
           <span data-i18n="modelAndTranslation">大模型与翻译 API</span>
           <span class="fp-set-tail"><button id="api-settings-open" class="fp-row-gear" title="管理本机大模型与翻译 API">⚙</button></span>
+        </div>
+        <div class="fp-set-row">
+          <span data-i18n="endRecommendations">读后推荐</span>
+          <span class="fp-set-tail">
+            <button id="end-recommendations-gear" class="fp-row-gear" type="button" title="设置读后推荐" aria-label="设置读后推荐">⚙</button>
+            <label class="switch"><input type="checkbox" id="set-end-recommendations" checked /><span class="slider"></span></label>
+          </span>
         </div>
         <div class="fp-set-row">
           <span id="set-open-book-label" data-i18n="singleClickOpen" title="单击打开时，双击用于选中；双击打开时，单击用于选中">单击打开图书</span>
@@ -443,6 +476,13 @@
         <div class="modal-head"><span id="newsnow-settings-title">资讯设置</span><button id="newsnow-settings-close" class="btn-plain" type="button" aria-label="关闭资讯设置">✕</button></div>
         <div class="fp-set-row"><span>后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
         <p class="newsnow-settings-note">应用空闲后每 5 分钟更新已启用来源。图片仍在卡片进入视野时才加载。</p>
+      </div>
+    </div>
+    <div id="reader-recommendation-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="reader-recommendation-settings-title">
+      <div class="modal-card reader-recommendation-settings-card">
+        <div class="modal-head"><span id="reader-recommendation-settings-title">读后推荐设置</span><button id="reader-recommendation-settings-close" class="btn-plain" type="button" aria-label="关闭读后推荐设置">✕</button></div>
+        <label class="reader-recommendation-threshold">不超过 <input id="reader-recommendation-min-words" type="number" min="0" max="100" step="0.5" inputmode="decimal" aria-label="不推荐的最大字数，单位为万字" /> 万字不推荐</label>
+        <p class="reader-recommendation-settings-note">阅读进度达到约 90% 时会在后台预取相似图书。设置为 0 表示不按字数过滤。</p>
       </div>
     </div>
     <div id="api-settings-modal" class="modal">
@@ -616,7 +656,7 @@
     </div>
     <div id="about-modal" class="modal">
       <div class="modal-card">
-        <div class="modal-head"><span>ℹ️ 关于</span><button id="about-close" class="btn-plain">✕</button></div>
+        <div class="modal-head"><span>关于</span><button id="about-close" class="btn-plain">✕</button></div>
         <div class="info-row"><span class="info-k">软件</span><span class="info-v">鲲鹏阅读器 · Kunpeng Reader</span></div>
         <div class="info-row"><span class="info-k">版本</span><span class="info-v" id="about-ver">v1.8.0</span><button id="about-update" class="btn-plain about-update-btn">检查更新</button></div>
         <div class="info-row col"><span class="info-k">本版更新内容</span><div id="about-notes" class="about-notes">加载中…</div></div>
@@ -650,8 +690,17 @@
         <div class="info-row"><span class="info-k">字数</span><span id="book-info-words" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">大小</span><span id="book-info-size" class="info-v"></span></div>
         <div class="info-row"><span class="info-k">评分</span><span id="book-info-stars" class="info-stars" title="点击打分，再点同一颗清除"></span></div>
-        <div class="info-row"><span class="info-k">标签</span><span id="book-info-tags" class="info-v info-chips"></span></div>
-        <div class="info-row"><span class="info-k">书单</span><span id="book-info-collections" class="info-v info-chips"></span></div>
+        <div class="info-row book-info-organization-entry">
+          <span class="info-k">标签</span>
+          <span id="book-info-tag-summary" class="info-v book-info-organization-summary">未添加</span>
+          <button id="book-info-tags-manage" class="book-info-organization-link" type="button">管理 ›</button>
+        </div>
+        <div class="info-row book-info-organization-entry">
+          <span class="info-k">收藏书单</span>
+          <span id="book-info-collection-summary" class="info-v book-info-organization-summary">未添加</span>
+          <button id="book-info-collections-manage" class="book-info-organization-link" type="button">管理 ›</button>
+        </div>
+        <div class="info-row"><span class="info-k">AI 分类标签</span><span id="book-info-model-tags" class="info-v info-chips"></span></div>
         <div class="info-row book-info-actions">
           <span class="info-k">操作</span>
           <div class="info-action-buttons">
@@ -661,6 +710,23 @@
           </div>
         </div>
         <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="book-info-desc" class="info-desc" contenteditable="true"></div></div>
+      </div>
+    </div>
+    <div id="book-organization-modal" class="modal">
+      <div class="modal-card book-organization-card">
+        <div class="modal-head"><span>标签与收藏书单</span><button id="book-organization-close" class="btn-plain">✕</button></div>
+        <div class="book-organization-tabs" role="tablist" aria-label="管理类型">
+          <button id="book-organization-tags-tab" class="book-organization-tab active" type="button" role="tab" aria-selected="true">标签</button>
+          <button id="book-organization-collections-tab" class="book-organization-tab" type="button" role="tab" aria-selected="false">收藏书单</button>
+        </div>
+        <section id="book-organization-tags-panel" class="book-organization-panel" role="tabpanel" aria-labelledby="book-organization-tags-tab">
+          <div class="book-organization-panel-head"><strong>标签</strong><span>勾选加入；也可新建、改名或删除</span></div>
+          <div id="book-info-tags" class="book-info-organization-editor"></div>
+        </section>
+        <section id="book-organization-collections-panel" class="book-organization-panel" role="tabpanel" aria-labelledby="book-organization-collections-tab" hidden>
+          <div class="book-organization-panel-head"><strong>收藏书单</strong><span>勾选加入；也可新建、打开或管理</span></div>
+          <div id="book-info-collections" class="book-info-organization-editor"></div>
+        </section>
       </div>
     </div>
     <div id="similar-books-modal" class="modal">
@@ -732,24 +798,7 @@
         </div>
       </div>
     </div>
-    <div id="batch-organization-modal" class="modal">
-      <div class="modal-card batch-organization-card">
-        <div class="modal-head"><span id="batch-organization-title">为已选图书添加标签</span><button id="batch-organization-close" class="btn-plain">✕</button></div>
-        <p id="batch-organization-note" class="organization-filter-note">可多选；确认后会加入全部已选图书，不会移除它们原有的标签或书单。</p>
-        <div id="batch-organization-options" class="organization-filter-options"></div>
-        <div class="org-create batch-organization-create">
-          <input id="batch-organization-new" type="text" maxlength="32" placeholder="新建标签" />
-          <button id="batch-organization-add" class="org-add" type="button">新建并加入</button>
-        </div>
-        <div class="organization-filter-actions">
-          <span></span><span></span>
-          <button id="batch-organization-cancel" class="btn-plain" type="button">取消</button>
-          <button id="batch-organization-apply" class="btn-plain" type="button">加入</button>
-        </div>
-      </div>
-    </div>
     <div id="drop-hint" class="drop-hint">松开即可导入书籍</div>
-    <div id="book-organizer-menu" class="book-organizer-menu" role="menu" aria-label="图书标签与收藏夹"></div>
     <div class="content-shell">
       <div class="content" tabindex="-1">
         <main id="shelf" class="shelf"></main>
@@ -766,17 +815,34 @@
             <button id="library-ai-back" class="library-ai-back" type="button" aria-label="返回书架">←</button>
             <div>
               <h1 data-i18n="libraryQa">书库问答</h1>
-              <p data-i18n="libraryDescription">先在本机语义索引中检索，再只把命中的少量段落发送到你已配置的智读服务。每条回答都可跳回原书章节。</p>
             </div>
           </div>
           <div class="library-ai-head-actions">
             <span id="library-ai-classify-status" class="library-ai-classify-status" aria-live="polite" hidden></span>
             <button id="library-ai-classify" class="library-ai-classify" type="button" title="正在读取书籍分类状态…" data-i18n="bookClassification">书籍分类</button>
             <button id="library-ai-history" class="library-ai-history" type="button" title="查看已保存的书库问答" data-i18n="questionHistory">问答记录</button>
+            <button id="library-ai-answer-settings" class="library-ai-history" type="button" aria-expanded="false" aria-controls="library-ai-answer-settings-overlay">设置</button>
             <select id="library-ai-model-profile" class="library-ai-model-profile" aria-label="书库问答使用的大模型"></select>
             <span class="library-ai-pill" data-i18n="localSearchCitations">本地检索 · 可追溯引文</span>
           </div>
         </header>
+        <div id="library-ai-answer-settings-overlay" class="library-ai-answer-settings-overlay" hidden>
+          <section id="library-ai-answer-settings-panel" class="library-ai-answer-settings-panel" role="dialog" aria-modal="true" aria-labelledby="library-ai-answer-settings-title">
+            <div class="library-ai-answer-settings-head"><h2 id="library-ai-answer-settings-title">设置</h2><button id="library-ai-answer-settings-close" type="button" aria-label="关闭设置">×</button></div>
+            <div class="library-ai-answer-setting-group">
+              <div class="library-ai-answer-setting-label"><strong>作答长度</strong><span>长度越长，检索与生成时间越长。</span></div>
+              <div class="library-ai-answer-length-options" role="radiogroup" aria-label="书库问答长度">
+                <button type="button" data-answer-length="short" role="radio" aria-checked="true"><strong>短</strong><span>当前示例：聚焦结论与 4—6 条依据</span></button>
+                <button type="button" data-answer-length="medium" role="radio" aria-checked="false"><strong>中</strong><span>更多来源、依据与延展观点</span></button>
+                <button type="button" data-answer-length="long" role="radio" aria-checked="false"><strong>长</strong><span>最广证据、深入解读与边界讨论</span></button>
+              </div>
+            </div>
+            <div class="library-ai-answer-font-row">
+              <div class="library-ai-answer-setting-label"><strong>回答字号</strong><span>调整回答、历史记录和引用内容的显示大小。</span></div>
+              <div class="library-ai-font-controls" aria-label="书库问答字号"><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号">A+</button></div>
+            </div>
+          </section>
+        </div>
         <div class="library-ai-grid">
           <aside class="library-ai-card library-ai-scope">
             <h2 data-i18n="searchScope">检索范围</h2>
@@ -795,7 +861,7 @@
           <section class="library-ai-card library-ai-workspace">
             <label for="question" data-i18n="yourQuestion">你的问题</label>
             <textarea id="question" placeholder="例如：这些书如何解释清末财政困境？&#10;跨书对比时：比较选中作品对同一主题的观点与依据。" data-i18n-placeholder="questionPlaceholder"></textarea>
-            <div class="library-ai-actions"><div class="library-ai-font-controls" aria-label="书库问答字号"><span>字号</span><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号">A+</button></div><span id="state" class="library-ai-state">打开书库问答后载入书架与智读配置。</span><button id="run" class="library-ai-run" type="button" data-i18n="startQuestion">开始问答</button></div>
+            <div class="library-ai-actions"><span id="state" class="library-ai-state"></span><button id="run" class="library-ai-run" type="button" data-i18n="startQuestion">开始问答</button></div>
             <div id="answer" class="library-ai-answer empty" data-i18n="answerPlaceholder">选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。</div>
             <section id="source-preview" class="library-ai-source-preview" hidden aria-live="polite" aria-label="脚注原文预览"><div class="library-ai-source-preview-head"><strong id="source-preview-title"></strong><button id="source-preview-close" type="button" aria-label="关闭脚注预览">×</button></div><p id="source-preview-excerpt"></p><button id="source-preview-open" class="library-ai-source-preview-open" type="button">打开原文</button></section>
             <section id="sources" class="library-ai-sources" hidden><h3 id="source-title">脚注来源</h3><div id="source-list"></div></section>
@@ -804,29 +870,15 @@
       </main>
     </section>
     <section id="newsnow-page" class="newsnow-page" hidden aria-label="资讯">
-      <header class="newsnow-head">
-        <div class="newsnow-title-row">
-          <div>
-            <p class="newsnow-eyebrow">READING BRIEF</p>
-            <h1 data-i18n="newsTitle">今日资讯</h1>
-            <p data-i18n="newsDescription">按时间归并的轻量资讯流，只在你打开时加载。</p>
-          </div>
-        </div>
-        <div class="newsnow-actions">
-          <button id="newsnow-back" class="newsnow-back" type="button" title="返回书架" aria-label="返回书架" data-i18n-title="backToShelf" data-i18n-aria="backToShelf">←</button>
-          <span id="newsnow-updated" class="newsnow-updated" aria-live="polite"></span>
-          <button id="newsnow-source-toggle" class="btn-plain newsnow-source-toggle" type="button" aria-expanded="false" data-i18n="manageSources">管理来源</button>
-          <button id="newsnow-refresh" class="btn-plain newsnow-refresh" type="button" data-i18n="refresh">刷新</button>
-        </div>
-      </header>
       <section id="newsnow-source-picker" class="newsnow-source-picker" hidden aria-label="资讯来源设置" data-i18n-aria="sourceSettings">
         <div class="newsnow-source-picker-head"><div class="newsnow-source-picker-title"><strong data-i18n="manageSources">管理来源</strong><p data-i18n="sourceSettingsHint">勾选想看的来源；设置只保存在此设备。</p></div><span id="newsnow-source-selection" class="newsnow-source-selection">已选 0 / 24</span><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="关闭来源设置">×</button></div>
         <input id="newsnow-source-search" class="newsnow-source-search" type="search" placeholder="搜索来源、分类或关键词" aria-label="搜索资讯来源" data-i18n-placeholder="sourceSearch" data-i18n-aria="sourceSearch" />
         <div id="newsnow-source-options" class="newsnow-source-options"></div>
-        <section id="newsnow-tieba-bars" class="newsnow-tieba-bars" aria-label="百度贴吧自定义吧名">
-          <div class="newsnow-tieba-bars-head"><strong>百度贴吧</strong><span id="newsnow-tieba-bar-count"></span></div>
-          <p>添加想看的吧名；选中“百度贴吧”来源后，会把各吧最新帖子并入资讯流。</p>
-          <form id="newsnow-tieba-bar-form" class="newsnow-tieba-bar-form"><input id="newsnow-tieba-bar-input" type="text" maxlength="48" autocomplete="off" placeholder="输入吧名，例如：原神" aria-label="添加百度贴吧吧名" /><button class="btn-plain" type="submit">添加</button></form>
+        <section id="newsnow-tieba-bars" class="newsnow-tieba-bars" aria-label="自定义贴吧">
+          <div class="newsnow-tieba-bars-head"><div><strong>自定义贴吧</strong><span id="newsnow-tieba-bar-count"></span></div></div>
+          <p>这里不是内置资讯来源。勾选下方吧名后，才会把它的最新帖子并入资讯流。</p>
+          <button id="newsnow-tieba-add-toggle" class="btn-plain newsnow-tieba-add-toggle" type="button">＋ 添加吧</button>
+          <form id="newsnow-tieba-bar-form" class="newsnow-tieba-bar-form" hidden><input id="newsnow-tieba-bar-input" type="text" maxlength="48" autocomplete="off" placeholder="输入吧名，例如：原神" aria-label="添加百度贴吧吧名" /><button class="btn-primary" type="submit">确认</button><button id="newsnow-tieba-bar-cancel" class="btn-plain" type="button">取消</button></form>
           <div id="newsnow-tieba-bar-list" class="newsnow-tieba-bar-list"></div>
         </section>
         <div class="newsnow-source-picker-actions"><button id="newsnow-source-reset" class="btn-plain" type="button" data-i18n="restoreRecommended">恢复推荐</button><button id="newsnow-source-apply" class="btn-primary" type="button" data-i18n="doneAndRefresh">完成并刷新</button></div>
@@ -834,9 +886,12 @@
       <div class="newsnow-toolbar">
         <div id="newsnow-categories" class="newsnow-categories" aria-label="资讯分类"></div>
         <div class="newsnow-toolbar-actions">
-          <span id="newsnow-source-summary" class="newsnow-source-summary"></span>
+          <div class="newsnow-actions">
+            <span id="newsnow-updated" class="newsnow-updated" aria-live="polite"></span>
+            <button id="newsnow-source-toggle" class="btn-plain newsnow-source-toggle" type="button" aria-expanded="false" data-i18n="manageSources">管理来源</button>
+            <button id="newsnow-refresh" class="btn-plain newsnow-refresh" type="button" data-i18n="refresh">刷新</button>
+          </div>
           <div class="newsnow-layout-control" role="group" aria-label="资讯布局">
-            <span data-i18n="layout">布局</span>
             <button id="newsnow-layout-list" class="newsnow-layout-button" type="button" title="横排布局" aria-label="横排布局" aria-pressed="true" data-i18n-title="listLayout" data-i18n-aria="listLayout"><i class="newsnow-layout-list-icon" aria-hidden="true"></i></button>
             <button id="newsnow-layout-grid" class="newsnow-layout-button" type="button" title="方格布局" aria-label="方格布局" aria-pressed="false" data-i18n-title="gridLayout" data-i18n-aria="gridLayout"><i class="newsnow-layout-grid-icon" aria-hidden="true"></i></button>
           </div>
@@ -844,13 +899,20 @@
             <button id="newsnow-order-mixed" class="newsnow-order-button" type="button" aria-pressed="true" data-i18n="mixedOrder">混合</button>
             <button id="newsnow-order-source" class="newsnow-order-button" type="button" aria-pressed="false" data-i18n="bySourceOrder">按来源</button>
           </div>
+          <button id="newsnow-back" class="newsnow-back" type="button" title="返回书架" aria-label="返回书架" data-i18n-title="backToShelf" data-i18n-aria="backToShelf">←</button>
         </div>
       </div>
       <div id="newsnow-status" class="newsnow-status" aria-live="polite"></div>
       <main id="newsnow-feed" class="newsnow-feed" aria-live="polite"></main>
     </section>
-    <section id="newsnow-reader" class="newsnow-reader" hidden aria-label="资讯原网页">
+    <section id="newsnow-reader" class="newsnow-reader" hidden aria-label="资讯正文">
+      <header class="newsnow-reader-head">
+        <button id="newsnow-reader-back" class="newsnow-reader-back" type="button" aria-label="返回资讯流" title="返回资讯流">←</button>
+        <div class="newsnow-reader-heading"><div id="newsnow-reader-meta" class="newsnow-reader-meta"></div><h1 id="newsnow-reader-title"></h1></div>
+        <button id="newsnow-reader-original" class="btn-plain newsnow-reader-original" type="button">浏览器打开原文</button>
+      </header>
       <p id="newsnow-reader-status" class="newsnow-reader-status" aria-live="polite"></p>
+      <article id="newsnow-reader-content" class="newsnow-reader-content"></article>
     </section>
     <script src="startup-perf.js"></script>
     <script src="app-i18n.js"></script>
@@ -863,11 +925,15 @@
     <script src="feedback-ui.js"></script>
     <script src="stats-ui.js"></script>
     <script src="shelf-ui.js"></script>
+    <script src="book-info-organization.js"></script>
+    <script src="notice-ui.js"></script>
     <script src="library-ai.js"></script>
     <script src="library-ai-entry.js"></script>
     <script src="experimental-features.js"></script>
     <script src="news-ui.js"></script>
     <script src="api-settings-ui.js"></script>
+    <script src="auto-import-ui.js"></script>
+    <script src="reader-recommendation-settings.js"></script>
     <script src="app.js"></script>
     <script src="search-ui.js"></script>
     <script src="debug-ui.js"></script>

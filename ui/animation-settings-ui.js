@@ -5,6 +5,7 @@
     const commonSettingsModal = document.getElementById("fp-settings-modal");
     const modal = document.getElementById("animation-settings-modal");
     const closeButton = document.getElementById("animation-settings-close");
+    const masterInput = document.getElementById("set-animation-master");
     const settingInputs = [...document.querySelectorAll("[data-animation-setting]")];
     const groupInputs = [...document.querySelectorAll("[data-animation-group]")];
 
@@ -14,13 +15,19 @@
 
     function render() {
       const settings = global.ReaderAnimationSettings?.read?.() || {};
+      const masterEnabled = settings.allAnimations !== false;
+      if (masterInput) masterInput.checked = masterEnabled;
       groupInputs.forEach((input) => {
         input.checked = settings[input.dataset.animationGroup] !== false;
+        input.disabled = !masterEnabled;
       });
       settingInputs.forEach((input) => {
         input.checked = settings[input.dataset.animationSetting] !== false;
-        // 子项始终可操作：从关闭状态单独开启某一项时，会自动开启对应总开关。
-        input.disabled = false;
+        // 全局开关只暂时停用效果，不改写任何子项记录。
+        input.disabled = !masterEnabled;
+      });
+      document.querySelectorAll("[data-animation-group-section]").forEach((section) => {
+        section.classList.toggle("animation-master-disabled", !masterEnabled);
       });
       apply();
     }
@@ -36,6 +43,10 @@
       render();
       commonSettingsModal?.classList.remove("show");
       modal?.classList.add("show");
+    });
+    masterInput?.addEventListener("change", () => {
+      global.ReaderAnimationSettings?.set?.("allAnimations", masterInput.checked);
+      render();
     });
     closeButton?.addEventListener("click", () => close(true));
     modal?.addEventListener("click", (event) => {

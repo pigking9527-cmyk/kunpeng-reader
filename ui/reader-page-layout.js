@@ -1,9 +1,8 @@
-
 var S={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1};
 var READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
 var readerAnimationGroupByKey={annotationAdd:'readerPage',readingMode:'readerPage',pageTurn:'readerPage',highlightSettings:'readerPage'};
 var readerAnimationSettingsOverride=null;
-function readerAnimationSettingOn(key){var values=readerAnimationSettingsOverride||null;try{if(!values)values=JSON.parse(localStorage.getItem(READER_ANIMATION_SETTINGS_KEY)||'{}');}catch(_){values={};}var group=readerAnimationGroupByKey[key];return (!values||values[key]!==false)&&(!group||values[group]!==false);}
+function readerAnimationSettingOn(key){var values=readerAnimationSettingsOverride||null;try{if(!values)values=JSON.parse(localStorage.getItem(READER_ANIMATION_SETTINGS_KEY)||'{}');}catch(_){values={};}var group=readerAnimationGroupByKey[key];return (!values||values.allAnimations!==false)&&(!values||values[key]!==false)&&(!group||values[group]!==false);}
 var IS_MAC_WEBKIT=/Macintosh|Mac OS X/.test(navigator.userAgent||'')&&/AppleWebKit/.test(navigator.userAgent||'')&&!/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent||'');
 var root,pager,scroller,pageMask,virtualPage,scrollPreview,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,dualStartColumn=0,headSeen={},chapChars=0,scrollBreaks=[0],scrollPages=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget=null,scrollActiveSlice=null,scrollPagedView=true,sideAnchorVirtualOffset=null,macPageRenderDiagSig='',macVirtualPageCacheKey='',macVirtualPageCache=null;
 var downX=null,downY=null,didDrag=false;
@@ -11,7 +10,6 @@ var overlayOpen=false; // 外壳里搜索框/设置面板是否打开（打开�
 var ttsOn=false,ttsMap=[],ttsText='',ttsSents=[],ttsVoice=null,ttsRate=1,ttsSi=0,ttsGen=0,ttsAudioEl=null,ttsCache={},ttsWaiting=-1,ttsPlayedAny=false; // 朗读状态
 var CH=window.__CH__||0, ID=window.__ID__||0;
 var VC=null; // 虚拟章节列表 [{ch:spine序号, frag:锚点}]（按目录顺序），用于在大文件内细分逻辑章节
-// 算出“当前在第几个逻辑章节（0 基）”：取目录顺序中位置 <= 当前阅读位置的最后一条
 function computeLogical(){
   if(!VC||!VC.length)return {lc:curCh,lt:CH};
   var idx=0;
@@ -1999,7 +1997,7 @@ function gotoPage(p,dir){
     if(usesLineBreakPaging()){
       syncScrollPageFromTop();
     }
-    report();captureAnchor();scheduleNoteNumberDisplayRefresh();
+    report();notifyReaderEndIfReached(dir);captureAnchor();scheduleNoteNumberDisplayRefresh();
   });
 }
 function filterTextLines(lines){
@@ -2123,6 +2121,7 @@ function scrollPageBy(dir){
   if(!target){
     if(dir>0&&curCh<CH-1){beginChapterTurnFx(dir,curCh+1,'start');return true;}
     if(dir<0&&curCh>0){beginChapterTurnFx(dir,curCh-1,'end');return true;}
+    notifyReaderEndIfReached(dir);
     return true;
   }
   var next=Math.max(0,Math.min(scrollMaxTop(),Math.round(target.top||0)));
@@ -2139,7 +2138,7 @@ function scrollPageBy(dir){
     scrollActiveSlice=target;
     scrollProgrammaticTarget=next;
     applyScrollPageMask();
-    report();captureAnchor();
+    report();notifyReaderEndIfReached(dir);captureAnchor();
     return true;
   }
   beginTurnFx(dir,function(){
@@ -2149,6 +2148,7 @@ function scrollPageBy(dir){
     scrollProgrammaticTarget=next;
     sp.scrollTop=next;
     updateScrollPageAfterProgrammatic();
+    notifyReaderEndIfReached(dir);
   });
   return true;
 }
@@ -2421,7 +2421,7 @@ function showChapter(i,where,frag){
         pageInCh=0;
         if(where==='end')pageInCh=pagesInCh-1;else if(typeof where==='number')pageInCh=Math.max(0,Math.min(pagesInCh-1,where));
         if(frag){var el=document.getElementById(frag);if(el)pageInCh=pageOf(el);}
-        setViewOffset();refreshHighlights();report();captureAnchor();scheduleNoteNumberDisplayRefresh();
+        setViewOffset();refreshHighlights();report();notifyReaderEndIfReached(0);captureAnchor();scheduleNoteNumberDisplayRefresh();
         var rrBox=root.getBoundingClientRect(),pagerBox=pager.getBoundingClientRect(),rrStyle=getComputedStyle(root);
         reportReaderPaintPerf(
           'chapter_ready',
@@ -2677,7 +2677,7 @@ function relayout(opts){
 function nextPage(){
   consumeSideAnchorVirtualPage();
   if(usesLineBreakPaging()&&scrollPageBy(1))return;
-  if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1,1);else if(curCh<CH-1)beginChapterTurnFx(1,curCh+1,'start');else parent.postMessage({bookEnd:true},'*');
+  if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1,1);else if(curCh<CH-1)beginChapterTurnFx(1,curCh+1,'start');else notifyReaderEndIfReached(1);
 }
 function prevPage(){
   consumeSideAnchorVirtualPage();
