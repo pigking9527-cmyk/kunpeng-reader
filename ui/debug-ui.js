@@ -5,7 +5,6 @@
 
   const KEY = "debugSettingsV1";
   const DEFAULTS = {
-    bg_auto_import: true,
     bg_cover_preload: true,
     bg_fulltext_index: true,
     bg_semantic_index: true,
@@ -21,7 +20,6 @@
     reader_footnotes: true,
   };
   const BG = [
-    ["bg_auto_import", "自动导入"],
     ["bg_cover_preload", "封面预加载"],
     ["bg_fulltext_index", "全文索引"],
     ["bg_semantic_index", "语义索引"],

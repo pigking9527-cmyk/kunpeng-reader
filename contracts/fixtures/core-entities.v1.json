@@ -29,6 +29,15 @@
       "payload": { "name": "历史", "description": "fixture only", "cover_book_id": "book-a" }
     },
     {
+      "id": "20260806:10:book-a",
+      "kind": "reading_bucket_v2",
+      "updated_at": "2026-08-06T10:30:00Z",
+      "deleted_at": null,
+      "device_id": "fixture-desktop",
+      "sync_version": 2,
+      "payload": { "day": 20260806, "hour": 10, "content_id": "book-a", "secs": 120, "words": 1800 }
+    },
+    {
       "id": "book-a",
       "kind": "model_book_tags_v1",
       "updated_at": "2026-08-04T00:03:00Z",

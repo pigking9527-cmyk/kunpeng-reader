@@ -4,16 +4,9 @@
 
 当前最小实体范围：
 
-- `reading_progress`
-- `bookmark`
-- `highlight`
-- `annotation`
-- `rating`
-- `tag`
-- `booklist`
-- `booklist_item`
-- `vocabulary`
-- `reading_stat`
+- `book_state_v2`：按图书内容 ID 保存阅读位置、书签、高亮、批注、评分、用户标签和书单等轻量状态。
+- `vocab`：生词本。
+- `reading_bucket_v2`：按本地日期、小时和图书内容 ID 聚合阅读时长（`secs`）与有效阅读字数（`words`）。`words` 是累计阅读量，不是去重后的图书字数；满足平台停留与反刷量门槛的重读必须再次累加，因此它可以大于图书总字数。
 - `model_book_tags_v1`：按图书内容 SHA-256 保存的大模型书目维度标签；与用户手工 `tag` 独立。即使某设备关闭“使用大模型分类的标签”，该实体仍上传、下载和保留；书库问答始终采用它，开关只控制本机问答范围筛选是否显示、采用它。
 
 可选私密扩展（旧客户端必须忽略而不能删除）：

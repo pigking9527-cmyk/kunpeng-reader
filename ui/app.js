@@ -947,12 +947,10 @@ aboutModal.addEventListener("click", (e) => {
 const dropHint = document.getElementById("drop-hint");
 const SUPPORTED = /\.(epub|pdf|txt|md|markdown|mobi|azw3|azw)$/i;
 const tauriEvent = window.__TAURI__.event;
+autoImportUI.bindEvents(tauriEvent);
 tauriEvent.listen("startup-perf", (e) => {
   const p = (e && e.payload) || {};
   startupPerfLog("rust:" + (p.name || "unknown"), p.phase || "mark", p.detail || "");
-});
-tauriEvent.listen("auto-import-progress", (e) => {
-  autoImportUI.handleProgress((e && e.payload) || {});
 });
 tauriEvent.listen("book-import-progress", (e) => {
   const p = (e && e.payload) || {};
@@ -1318,10 +1316,9 @@ window.addEventListener("DOMContentLoaded", () => {
       .then((c) => { autoImport = c || autoImport; reflectAutoImport(); })
       .catch(() => {});
     setTimeout(() => {
-      if (!debugSettingOn("bg_auto_import")) return;
       if (!autoImport.enabled || !autoImport.dirs || !autoImport.dirs.length) return;
-      runWhenNoReader("auto-import-scan", () => startAutoImportScan("正在自动扫描导入目录…"));
-    }, 20000);
+      startAutoImportScan("正在自动扫描导入目录…");
+    }, 8000);
     // 字数统计是锦上添花，延后到启动稳定之后。
     setTimeout(() => {
       if (!debugSettingOn("reader_words_detect")) return;
