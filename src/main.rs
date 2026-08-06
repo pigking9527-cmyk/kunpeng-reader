@@ -167,6 +167,11 @@ impl AppState {
             .ok();
         self.sem_cache_bytes.store(0, Ordering::Relaxed);
         self.global_index.lock().map(|mut index| *index = None).ok();
+        self.embedder
+            .lock()
+            .map(|mut embedder| *embedder = None)
+            .ok();
+        semantic::clear_semantic_aux_memory_caches();
         self.backfilled.store(false, Ordering::Relaxed);
     }
 }
@@ -355,6 +360,8 @@ fn main() {
             ai_reader::library_profile_status,
             ai_reader::library_profile_coverage_status,
             ai_reader::library_model_tags_settings,
+            ai_reader::library_answer_settings,
+            ai_reader::set_library_answer_length,
             ai_reader::set_library_model_tags_enabled,
             ai_reader::start_library_auto_classification,
             private_sync::private_sync_get_settings,
@@ -386,6 +393,8 @@ fn main() {
             sync::auth_rebind_email_new_start,
             sync::auth_rebind_email_new_confirm,
             sync::auth_change_password,
+            sync::sync_reset_cloud_data,
+            sync::auth_delete_account,
             sync::auth_request_password_reset,
             sync::auth_confirm_password_reset,
             sync::auth_logout,
@@ -396,6 +405,7 @@ fn main() {
             data_commands::migrate_data_to_sqlite,
             data_commands::export_data_package,
             data_commands::import_data_package,
+            data_commands::clear_local_app_data,
             update::check_update,
             update::release_notes,
             library_commands::shelf_books,

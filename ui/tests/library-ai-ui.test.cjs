@@ -6,6 +6,10 @@ const path = require("node:path");
 const ui = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(ui, "index.html"), "utf8");
 const styles = fs.readFileSync(path.join(ui, "styles.css"), "utf8");
+
+test("library AI settings header has no device-only subtitle", () => {
+  assert.doesNotMatch(html, /只保存在这台设备。/);
+});
 const controller = fs.readFileSync(path.join(ui, "library-ai.js"), "utf8");
 const entry = fs.readFileSync(path.join(ui, "library-ai-entry.js"), "utf8");
 const backend = fs.readFileSync(path.join(ui, "..", "src", "ai_reader.rs"), "utf8");
@@ -20,10 +24,49 @@ test("library assistant is mounted inside the main window content area", () => {
   assert.match(styles, /@media \(max-width: 760px\)/);
 });
 
+test("library answer length is local while the fixed shell keeps scrolling inside each column", () => {
+  assert.match(html, /id="library-ai-answer-settings"/);
+  assert.match(html, /id="library-ai-answer-settings-overlay"/);
+  assert.match(html, /id="library-ai-answer-settings-panel"/);
+  assert.match(html, /id="library-ai-answer-settings"[^>]*>设置<\/button>/);
+  const answerSettingsPanel = html.match(/id="library-ai-answer-settings-panel"[\s\S]*?<\/section>/)?.[0] || "";
+  assert.match(answerSettingsPanel, /id="library-ai-font-decrease"/);
+  assert.match(answerSettingsPanel, /id="library-ai-font-size"/);
+  assert.match(answerSettingsPanel, /id="library-ai-font-increase"/);
+  const libraryActions = html.match(/<div class="library-ai-actions">[\s\S]*?<\/div>/)?.[0] || "";
+  assert.doesNotMatch(libraryActions, /library-ai-font-controls/);
+  assert.match(html, /data-answer-length="short"/);
+  assert.match(html, /data-answer-length="medium"/);
+  assert.match(html, /data-answer-length="long"/);
+  assert.doesNotMatch(html, /data-i18n="libraryDescription"/);
+  assert.match(controller, /invoke\("library_answer_settings"\)/);
+  assert.match(controller, /invoke\("set_library_answer_length"/);
+  assert.match(controller, /function renderAnswerLengthSettings/);
+  assert.match(controller, /library-ai-answer-settings-overlay/);
+  assert.match(backend, /LIBRARY_ANSWER_LENGTH_KEY/);
+  assert.match(backend, /LibraryAnswerLength/);
+  assert.match(backend, /library_answer_settings/);
+  assert.match(backend, /set_library_answer_length/);
+  assert.match(styles, /\.library-ai-page\s*\{[^}]*overflow:\s*hidden/s);
+  assert.match(styles, /\.library-ai-page\[hidden\]\s*\{[^}]*display:none/s);
+  assert.match(styles, /\.library-ai-page-inner\s*\{[^}]*flex-direction:column/s);
+  assert.match(styles, /\.library-ai-grid\s*\{[^}]*min-height:0/s);
+  assert.match(styles, /\.library-ai-scope\s*\{[^}]*overflow:hidden/s);
+  assert.match(styles, /\.library-ai-books\s*\{[^}]*flex:1 1 auto[^}]*overflow:auto/s);
+  assert.match(styles, /\.library-ai-workspace\s*\{[^}]*overflow-y:auto/s);
+  assert.match(styles, /\.library-ai-answer\s*\{[^}]*flex:0 0 auto[^}]*overflow:visible/s);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.library-ai-page\s*\{[^}]*overflow-y:auto/s);
+  assert.match(styles, /\.library-ai-answer-settings-overlay\s*\{[^}]*position:fixed/s);
+});
+
 test("library assistant opens lazily in the main window and can return to the shelf", () => {
   assert.match(entry, /shell\.hidden = true/);
   assert.match(entry, /page\.hidden = false/);
-  assert.match(entry, /await assistant\.load\(\)/);
+  assert.match(entry, /initialLoad = assistant\.load\(\)/);
+  assert.match(entry, /await initialLoad/);
+  assert.match(entry, /await assistant\.refreshBooks\(\)/);
+  assert.match(controller, /async function refreshBooks\(\)[\s\S]*?invoke\("list_books"\)/);
+  assert.match(controller, /return \{ load, refreshBooks,/);
   assert.match(entry, /page\.hidden = true/);
   assert.match(entry, /shell\.hidden = false/);
   assert.match(entry, /event\.key === "Escape"/);
@@ -35,7 +78,9 @@ test("library assistant opens lazily in the main window and can return to the sh
 test("library assistant gives multi-stage RAG calls enough time without allowing unbounded answers", () => {
   assert.match(backend, /READING_PROVIDER_RESPONSE_TIMEOUT[^\n]*from_secs\(120\)/);
   assert.match(backend, /READING_PROVIDER_MAX_TOKENS: u16 = 1_600/);
-  assert.match(backend, /"max_tokens": READING_PROVIDER_MAX_TOKENS/);
+  assert.match(backend, /LIBRARY_SYNTHESIS_PROVIDER_MAX_TOKENS: u16 = 4_096/);
+  assert.match(backend, /"max_tokens": provider_max_tokens\(&task\)/);
+  assert.match(backend, /fn provider_max_tokens\(task: &str\)/);
   assert.doesNotMatch(backend, /timeout_recv_response\(Some\(std::time::Duration::from_secs\(45\)\)\)/);
 });
 
@@ -127,6 +172,16 @@ test("library assistant can choose one of the locally configured large models", 
   assert.match(commands, /translation_credentials_status/);
 });
 
+test("library assistant readiness stays quiet when API and local indexes are available", () => {
+  assert.match(controller, /function readinessMessage\(aiStatus, semanticStatus\)/);
+  assert.match(controller, /invoke\("semantic_status"\)/);
+  assert.match(controller, /semanticStatus\?\.semantic_done/);
+  assert.match(controller, /if \(apiReady && indexReady\) return ""/);
+  assert.match(controller, /配置大模型 API、模型和密钥/);
+  assert.match(controller, /为本地图书建立语义索引/);
+  assert.doesNotMatch(controller, /智读已配置。建立语义索引后即可检索。/);
+});
+
 test("library assistant classifies model tags with progress and can use them independently from manual tags", () => {
   assert.match(html, /id="library-ai-classify"[^>]*>书籍分类/);
   assert.match(html, /id="library-ai-classify-status"[^>]*hidden/);
@@ -175,10 +230,11 @@ test("common settings can opt into model classification tags without changing th
   assert.match(backend, /大模型标签始终参与问答/);
 });
 
-test("book information shows manual and model tags together with an explicit source marker", () => {
+test("book information manages manual tags and shows model tags with an explicit source marker", () => {
   const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
   const reader = fs.readFileSync(path.join(ui, "reader.js"), "utf8");
-  assert.match(app, /renderBookInfoTags\(document\.getElementById\("book-info-tags"\), m\.tags, m\.model_tags \|\| m\.modelTags\)/);
+  assert.match(app, /bookOrganizationUI\.open\(currentInfoBookId, m\)/);
+  assert.match(app, /renderBookInfoTags\(document\.getElementById\("book-info-model-tags"\), \[\], m\.model_tags \|\| m\.modelTags\)/);
   assert.match(reader, /renderBookInfoTags\(document\.getElementById\("info-tags"\), m\.tags, m\.model_tags \|\| m\.modelTags\)/);
   assert.match(app, /info-chip-origin/);
   assert.match(styles, /\.info-chip\.model-tag/);
@@ -233,11 +289,13 @@ test("library answers render a safe subset of Markdown instead of exposing raw m
 });
 
 test("library answer provider accepts compatible response envelopes and retries an empty completion", () => {
-  assert.match(backend, /choices\/0\/message\/reasoning_content/);
+  assert.doesNotMatch(backend, /pointer\("\/choices\/0\/message\/reasoning_content"\)/);
   assert.match(backend, /data\/choices\/0\/message\/content/);
   assert.match(backend, /Response\/Choices\/0\/Message\/Content/);
   assert.match(backend, /async fn call_library_answer_with_retry/);
   assert.match(backend, /MAX_READING_RETRY_CONTEXT_CHARS/);
+  assert.match(backend, /fn is_final_library_verification/);
+  assert.match(backend, /internal-review language/);
 });
 
 test("library answers save locally and can sync a de-identified history", () => {
@@ -262,11 +320,28 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.doesNotMatch(controller.match(/function portableSourceReference\(source\)[\s\S]*?\n    }/)[0], /bookId/);
   assert.match(controller, /问答已保存到本机/);
   assert.match(controller, /下次同步时上传/);
+  assert.match(controller, /HISTORY_LAYOUT_KEY/);
+  assert.match(controller, /function applyHistoryLayout\(list, button, save = false\)/);
+  assert.match(controller, /historyLayout === "grid" \? "list" : "grid"/);
+  assert.match(controller, /icon\.className = grid \? "library-ai-history-grid-icon" : "library-ai-history-list-icon"/);
+  assert.match(controller, /当前为方格显示，点击切换为横排显示/);
+  assert.match(controller, /当前为横排显示，点击切换为方格显示/);
+  assert.match(controller, /localStorage\?\.setItem\(HISTORY_LAYOUT_KEY, historyLayout\)/);
+  assert.match(controller, /function historyAnswerSummary\(entry\)/);
+  assert.match(controller, /summary\.textContent = historyAnswerSummary\(entry\)/);
+  assert.doesNotMatch(controller, /const sourceCount = Array\.isArray\(entry\.sources\)/);
+  assert.doesNotMatch(controller, /const at = entry\.at \? new Date\(entry\.at\)/);
+  assert.doesNotMatch(controller, /已将书库问答设为/);
   assert.match(controller, /function renderAnswer\(content, sources, \{ hideDirectAnswerHeading = false \} = \{\}\)/);
   assert.match(controller, /hideDirectAnswerHeading && heading\[2\]\.trim\(\) === "直接回答"/);
   assert.match(controller, /renderAnswer\(entry\.content, sources, \{ hideDirectAnswerHeading: true \}\)/);
   assert.doesNotMatch(controller, /renderLibraryHistoryAnswer/);
   assert.match(styles, /\.library-ai-history-list\s*\{/);
+  assert.match(styles, /\.library-ai-history-toolbar\s*\{/);
+  assert.match(styles, /\.library-ai-history-grid-icon::before\s*\{/);
+  assert.match(styles, /\.library-ai-history-list-icon\s*\{/);
+  assert.match(styles, /\.library-ai-history-list\.grid\s*\{[^}]*grid-template-columns/s);
+  assert.match(styles, /\.library-ai-history-summary\s*\{/);
   assert.match(styles, /\.library-ai-history-delete\s*\{/);
   assert.doesNotMatch(styles, /\.library-ai-history-question-detail\s*\{/);
 });

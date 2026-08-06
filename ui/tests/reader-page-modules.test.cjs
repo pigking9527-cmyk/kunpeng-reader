@@ -13,6 +13,7 @@ const modeSwitch = fs.readFileSync(path.join(uiRoot, "reader-page-mode-switch.js
 test("reader page modules parse in their compiled injection order", () => {
   const source = [
     "reader-page-layout.js",
+    "reader-page-end.js",
     "reader-page-pagination.js",
     "reader-page-measurement.js",
     "reader-page-annotations.js",

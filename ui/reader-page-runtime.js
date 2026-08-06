@@ -103,6 +103,7 @@ window.addEventListener('message',function(e){
   if(!e.data)return;
   if(e.data.animationSettings){
     readerAnimationSettingsOverride=Object.assign({},e.data.animationSettings);
+    document.documentElement.classList.toggle('animations-all-off',readerAnimationSettingsOverride.allAnimations===false);
     document.documentElement.classList.toggle('anim-highlight-settings-off',!readerAnimationSettingOn('highlightSettings'));
     if(!readerAnimationSettingOn('highlightSettings')&&typeof hlSettingsPop!=='undefined'&&hlSettingsPop)hlSettingsPop.classList.remove('hs-opening');
   }

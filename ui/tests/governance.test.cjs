@@ -252,6 +252,7 @@ test("reader injection is composed from responsibility-focused modules", () => {
   const modules = [
     "reader-page-style.html",
     "reader-page-layout.js",
+    "reader-page-end.js",
     "reader-page-pagination.js",
     "reader-page-measurement.js",
     "reader-page-annotations.js",

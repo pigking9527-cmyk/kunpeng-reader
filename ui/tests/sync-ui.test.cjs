@@ -87,6 +87,9 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "account-password-recover-toggle", "account-password-recover-form", "account-password-recover-email",
     "account-password-recover-code", "account-password-recover-new", "account-password-recover-start",
     "account-password-recover-confirm",
+    "account-data-open", "account-data-panel", "account-data-close", "account-clear-local",
+    "account-clear-cloud-password", "account-clear-cloud", "account-delete-password",
+    "account-delete-username", "account-delete", "account-data-status",
     "private-sync-close", "private-sync-configs", "private-sync-history", "private-sync-secrets",
     "account-sync-history", "account-sync-secrets",
     "private-sync-password", "private-sync-save-password", "private-sync-unlock",
@@ -131,4 +134,14 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
   );
   assert.equal(calls[1].command, "sync_now");
   assert.equal(calls[2].command, "shelf_books");
+});
+
+test("数据与隐私提供本机、云端和账号三级清理并明确保留原始图书", () => {
+  assert.match(indexSource, /id="account-clear-local"/);
+  assert.match(indexSource, /id="account-clear-cloud"/);
+  assert.match(indexSource, /id="account-delete"/);
+  assert.match(indexSource, /不会删除电脑中的原始 EPUB、PDF、TXT、MOBI 或 AZW 图书文件/);
+  assert.match(syncSource, /invoke\("clear_local_app_data"\)/);
+  assert.match(syncSource, /invoke\("sync_reset_cloud_data"/);
+  assert.match(syncSource, /invoke\("auth_delete_account"/);
 });

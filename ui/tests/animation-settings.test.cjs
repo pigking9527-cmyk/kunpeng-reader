@@ -28,8 +28,9 @@ test("visible-book count shares the layout and column row", () => {
   assert.match(styles, /\.fp-result-summary\s*\{[^}]*margin:\s*0 0 5px auto;/s);
 });
 
-test("common settings separates main-window and reader-page master animation controls", () => {
+test("common settings has a non-destructive global animation switch and separate category controls", () => {
   assert.match(html, /id="animation-gear"/);
+  assert.match(html, /id="set-animation-master"[^>]*checked/);
   assert.match(html, /id="animation-settings-modal"/);
   for (const group of ["mainWindow", "readerPage"]) {
     assert.match(html, new RegExp(`data-animation-group="${group}"`));
@@ -40,11 +41,15 @@ test("common settings separates main-window and reader-page master animation con
     assert.match(settings, new RegExp(`${key}: true`));
   }
   assert.match(settings, /readerAnimationSettingsV1/);
+  assert.match(settings, /allAnimations: true/);
+  assert.match(settings, /key === "allAnimations" \|\| values\.allAnimations !== false/);
   assert.match(settings, /GROUP_BY_KEY/);
   assert.match(settings, /function isEnabled/);
   assert.match(settings, /syncPageTurnEffect/);
   assert.match(settings, /localStorage\.setItem\("readerSettings"/);
   assert.match(settingsUi, /ReaderAnimationSettings\?\.set/);
+  assert.match(settingsUi, /set\?\.\("allAnimations", masterInput\.checked\)/);
+  assert.match(settingsUi, /input\.disabled = !masterEnabled/);
   assert.doesNotMatch(settingsUi, /讨厌动画/);
   assert.match(settingsUi, /ReaderAnimationSettingsUI/);
   assert.match(html, /主窗口动画/);
@@ -55,6 +60,46 @@ test("common settings separates main-window and reader-page master animation con
   assert.match(styles, /anim-filter-button-off/);
   assert.match(styles, /anim-booklist-sort-off/);
   assert.ok(html.indexOf("animation-settings-ui.js") < html.indexOf("app.js"));
+});
+
+test("global animation switch preserves every category and child setting", () => {
+  const stored = new Map();
+  const fakeWindow = {
+    localStorage: {
+      getItem(key) { return stored.get(key) ?? null; },
+      setItem(key, value) { stored.set(key, String(value)); },
+    },
+    dispatchEvent() {},
+  };
+  vm.runInNewContext(settings, {
+    window: fakeWindow,
+    CustomEvent: class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
+  });
+  const api = fakeWindow.ReaderAnimationSettings;
+  api.set("searchPopup", false);
+  api.set("annotationAdd", false);
+  const before = api.read();
+
+  api.set("allAnimations", false);
+  const disabled = api.read();
+  for (const key of Object.keys(before).filter((key) => key !== "allAnimations")) {
+    assert.equal(disabled[key], before[key], `${key} should be preserved`);
+  }
+  assert.equal(api.enabled("filterButton"), false);
+  assert.equal(api.enabled("pageTurn"), false);
+  assert.equal(JSON.parse(stored.get("readerSettings")).pageTurnEffect, "off");
+
+  api.set("allAnimations", true);
+  const restored = api.read();
+  assert.equal(restored.searchPopup, false);
+  assert.equal(restored.annotationAdd, false);
+  assert.equal(api.enabled("filterButton"), true);
+  assert.equal(api.enabled("pageTurn"), true);
+  assert.equal(JSON.parse(stored.get("readerSettings")).pageTurnEffect, "horizontal");
+  assert.match(styles, /body\.animations-all-off \*/);
+  assert.match(readerHtml, /body\.animations-all-off \*/);
+  assert.match(pageStyle, /html\.animations-all-off \*/);
+  assert.match(runtime, /classList\.toggle\('animations-all-off'/);
 });
 
 test("animation category switches clear their children and child switches restore the category", () => {

@@ -26,6 +26,12 @@ test("main menu keeps labels but removes decorative icons", () => {
 });
 
 test("about exposes shared bug and feature feedback editor", () => {
+  const about = html.slice(
+    html.indexOf('id="about-modal"'),
+    html.indexOf('id="book-info-modal"'),
+  );
+  assert.match(about, /class="modal-head"><span>关于<\/span>/);
+  assert.doesNotMatch(about, /ℹ️/u);
   assert.match(html, /id="about-feedback-bug"[^>]*>提交 Bug</);
   assert.match(html, /id="about-feedback-feature"[^>]*>功能提议</);
   assert.match(html, /id="feedback-editor"[^>]*contenteditable="true"/);
