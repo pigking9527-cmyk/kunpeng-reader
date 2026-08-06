@@ -182,6 +182,7 @@ class ReaderSyncApiTests(unittest.TestCase):
 class ReaderSyncHttpIntegrationTests(unittest.TestCase):
     USER_ID = "integration-user"
     TOKEN = "integration-test-token"
+    PASSWORD = "integration-password"
 
     @classmethod
     def setUpClass(cls):
@@ -208,11 +209,12 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         app.RATE_LIMITER = app.RateLimiter()
+        cls.PASSWORD_HASH = app.hash_password(cls.PASSWORD)
         conn = app.connect()
         with conn:
             conn.execute(
                 "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
-                (cls.USER_ID, cls.USER_ID, "not-used", app.now_ms()),
+                (cls.USER_ID, cls.USER_ID, cls.PASSWORD_HASH, app.now_ms()),
             )
             conn.execute(
                 "INSERT INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
@@ -252,8 +254,21 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         app.RATE_LIMITER = app.RateLimiter()
         conn = app.connect()
         with conn:
+            conn.execute(
+                "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash",
+                (self.USER_ID, self.USER_ID, self.PASSWORD_HASH, app.now_ms()),
+            )
+            conn.execute("DELETE FROM tokens WHERE user_id=?", (self.USER_ID,))
+            conn.execute(
+                "INSERT INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
+                (self.TOKEN, self.USER_ID, app.now_ms(), app.now_ms()),
+            )
             conn.execute("DELETE FROM entities WHERE user_id=?", (self.USER_ID,))
             conn.execute("DELETE FROM secret_bundle_epochs WHERE user_id=?", (self.USER_ID,))
+            conn.execute("DELETE FROM account_data_generations WHERE user_id=?", (self.USER_ID,))
+            conn.execute("DELETE FROM account_codes WHERE user_id=?", (self.USER_ID,))
+            conn.execute("DELETE FROM account_emails WHERE user_id=?", (self.USER_ID,))
             conn.execute("UPDATE sync_clock SET value=0 WHERE id=1")
         conn.close()
 
@@ -337,6 +352,101 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertTrue(health["ok"])
         self.assertEqual(health["schema_version"], 2)
         self.assertEqual(health["api_version"], "0.8")
+
+    def test_sync_data_reset_revokes_tokens_and_rejects_stale_generation(self):
+        self.push([self.entity("zh:将被清除")])
+        conn = app.connect()
+        with conn:
+            app.secret_bundle_epoch(conn, self.USER_ID)
+        conn.close()
+        reset = self.request_json(
+            "POST", "/sync/data/reset", {"password": self.PASSWORD}
+        )
+        self.assertEqual(reset["data_generation"], 2)
+        self.assertTrue(reset["tokens_revoked"])
+
+        conn = app.connect()
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM entities WHERE user_id=?", (self.USER_ID,)
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM tokens WHERE user_id=?", (self.USER_ID,)
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM secret_bundle_epochs WHERE user_id=?",
+                (self.USER_ID,),
+            ).fetchone()[0],
+            0,
+        )
+        with conn:
+            conn.execute(
+                "INSERT INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
+                (self.TOKEN, self.USER_ID, app.now_ms(), app.now_ms()),
+            )
+        conn.close()
+
+        stale_body = {
+            "schema_version": 2,
+            "device_id": "old-device",
+            "data_generation": 1,
+            "entities": [self.entity("zh:不应复活", "old-device")],
+        }
+        code, payload = self.request_error_json("POST", "/sync/push", stale_body)
+        self.assertEqual(code, 409)
+        self.assertEqual(payload["error"], "DATA_GENERATION_MISMATCH")
+
+        stale_body["data_generation"] = 2
+        current = self.request_json("POST", "/sync/push", stale_body)
+        self.assertEqual(current["accepted_count"], 1)
+        self.assertEqual(current["data_generation"], 2)
+
+    def test_account_delete_removes_account_and_all_dependents(self):
+        self.push([self.entity("zh:删除账号")])
+        conn = app.connect()
+        with conn:
+            conn.execute(
+                "INSERT INTO account_emails(user_id,email,verified_at) VALUES(?,?,?)",
+                (self.USER_ID, "delete-fixture@example.com", app.now_ms()),
+            )
+            app.secret_bundle_epoch(conn, self.USER_ID)
+            conn.execute(
+                "INSERT INTO account_data_generations(user_id,generation,updated_at) VALUES(?,?,?)",
+                (self.USER_ID, 3, app.now_ms()),
+            )
+        conn.close()
+        result = self.request_json(
+            "POST",
+            "/auth/account/delete",
+            {"password": self.PASSWORD, "username": self.USER_ID},
+        )
+        self.assertTrue(result["account_deleted"])
+
+        conn = app.connect()
+        for table in (
+            "users",
+            "tokens",
+            "entities",
+            "account_emails",
+            "account_codes",
+            "secret_bundle_epochs",
+            "account_data_generations",
+        ):
+            self.assertEqual(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE "
+                    + ("id=?" if table == "users" else "user_id=?"),
+                    (self.USER_ID,),
+                ).fetchone()[0],
+                0,
+            )
+        conn.close()
 
     def test_public_update_manifest_exposes_latest_and_versioned_notes(self):
         latest = self.request_public_json("/updates/latest")

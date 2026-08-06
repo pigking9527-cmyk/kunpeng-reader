@@ -11,6 +11,10 @@ const styles = fs.readFileSync(path.join(uiRoot, "styles.css"), "utf8");
 
 test("main settings expose a persistent software language selector", () => {
   assert.match(html, /id="set-app-language"/);
+  assert.match(html, /id="set-end-recommendations"[^>]*checked/);
+  assert.match(html, /data-i18n="endRecommendations"/);
+  assert.match(html, /src="reader-recommendation-settings\.js"/);
+  assert.match(i18n, /COPY\[locale\]\.endRecommendations = label/);
   assert.match(html, /src="app-i18n\.js"/);
   assert.match(i18n, /const STORAGE_KEY = "appLanguageV1"/);
   assert.match(i18n, /\["system", "跟随系统"\]/);
@@ -21,8 +25,9 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(app, /ReaderAppI18n\?\.setLanguage\(appLanguageSelect\.value\)/);
   assert.match(i18n, /data-i18n-placeholder/);
   assert.match(i18n, /function t\(key\).*COPY\.en\[key\]/);
-  assert.match(html, /id="newsnow-page"[\s\S]*?data-i18n="newsTitle"/);
-  assert.match(html, /id="library-ai-page"[\s\S]*?data-i18n="libraryDescription"/);
+  assert.match(html, /id="newsnow-page"[\s\S]*?data-i18n="manageSources"/);
+  assert.match(html, /id="library-ai-page"[\s\S]*?data-i18n="libraryQuestion"/);
+  assert.doesNotMatch(html, /data-i18n="libraryDescription"/);
   assert.match(fs.readFileSync(path.join(uiRoot, "news-ui.js"), "utf8"), /app-language-changed/);
   assert.match(fs.readFileSync(path.join(uiRoot, "library-ai.js"), "utf8"), /app-language-changed/);
   assert.match(html, /id="open-default-apps-settings"[^>]*data-i18n="defaultOpenButton"/);

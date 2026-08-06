@@ -259,6 +259,7 @@ fn run_auto_import_with_progress(
     let mut changed = false;
     let mut processed = 0usize;
     let mut added = 0usize;
+    let mut save_after = 0usize;
     for p in candidates {
         import_control(task)?;
         processed += 1;
@@ -276,7 +277,14 @@ fn run_auto_import_with_progress(
             if lib.add_prepared(prepared) {
                 changed = true;
                 added += 1;
+                save_after += 1;
             }
+        }
+        // 大批量自动导入也分段落盘。即使用户在扫描结束前关闭应用，
+        // 已完成的整批图书仍能在下次启动时恢复。
+        if save_after >= 50 {
+            crate::report_save_error("书架", state.library.lock().unwrap().save());
+            save_after = 0;
         }
         if processed == total || processed.is_multiple_of(5) {
             emit_auto_import_progress(

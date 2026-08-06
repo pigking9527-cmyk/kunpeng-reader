@@ -1,180 +1,165 @@
-# 鲲鹏阅读器 Android 客户端交接文档
+# 鲲鹏阅读器 Android 工作交接
 
-> **先读跨端规则**：开始任何 Android 工作前，先阅读仓库根目录 `AGENTS.md`、`docs/coordination/CURRENT.md`、`docs/architecture/跨平台协作规则.md` 和 `contracts/README.md`。涉及同步实体或 API 时，`contracts/` 是唯一事实来源；不得以桌面 SQLite 表结构推断协议。
+> 更新：2026-08-06。本文是下一位 Android 开发者的起点，不是发布说明。先读仓库根目录 `AGENTS.md`、`docs/coordination/CURRENT.md`、`docs/architecture/跨平台协作规则.md` 和 `contracts/README.md`；涉及同步、账号或删除语义时，以 `contracts/`、服务端实现和 fixture 为准。
 
-## 给新会话的任务
+## 1. 当前工程与版本
 
-你负责为**鲲鹏阅读器**启动 Android 客户端。目标不是把现有桌面程序强行搬到手机上，而是做一个能与现有账号、同步服务和数据模型稳定互通的移动阅读器，并为将来的 iOS 共用尽可能多的移动端代码。
+Android 是独立 Flutter 工程，**不在本仓库目录内**：
 
-请先完成代码与协议考古、给出分期实现计划，再开始修改。不要在未确认兼容性的情况下重写服务端、修改既有同步语义或把密钥写进代码库。
+```text
+C:\Users\pigki\Documents\Codex\2026-07-21\claude-projects\kunpeng-reader-mobile
+```
 
-## 当前项目与边界
+不要继续修改历史快照 `kunpeng-reader-mobile-release-v1.9.5`。本次核对时有效工程状态如下：
 
-- 桌面端仓库：`ebook-reader-tauri`，当前公开版本为 **v1.9.4**。
-- 桌面端技术：Tauri 2 + Rust + 原生 HTML/CSS/JavaScript；它是功能最完整的参考实现，不是 Android 直接移植目标。
-- 同步服务：Python 标准库 HTTP 服务 + SQLite。应用目录为 `/srv/apps/reader-sync-api`，数据为 `/srv/data/reader-sync/entities.db`。
-- 服务端公开地址曾使用 `http://117.72.220.69`。Android 正式发布必须使用已经验证的 **HTTPS** 地址；不要为了调通而在生产版本放开明文 HTTP。
-- 图书文件、封面原图、语义模型与本地语义索引均不上传同步服务；同步的是用户产生的轻量数据。
+| 项目 | 当前值 |
+| --- | --- |
+| Git 分支 / HEAD | `main` / `760488792d92885d3d1b297b718571413a7117d2` |
+| 工作区 | 干净（核对时无未提交修改） |
+| Android 客户端版本 | `0.3.0+3`，来自 `pubspec.yaml` |
+| Android applicationId | `com.pigking.kunpeng_reader_mobile` |
+| 产品 Release 关联号 | 默认 `1.11.0`，仅用于读取同一 GitHub 产品 Release 元数据；不可与 Android 版本混用 |
+| 正式同步默认地址 | `https://117.72.220.69` |
+| 当前发布性质 | v0.3.0 Profile 测试包；尚未配置生产签名 keystore |
 
-## 主窗口的六个一级按键（自然语言说明）
+桌面端是 Rust + Tauri；Android 是 Flutter/Dart + Material UI + Android WebView。两端共享的是产品语义、同步协议与测试样本，**不共享桌面 UI 或 SQLite 表结构**。
 
-桌面主窗口顶部是一条工具栏。除 Windows 的最小化、最大化、关闭按钮外，面向用户的六个一级入口从左到右如下。Android 不需要机械复制横向位置，但应保留清晰的信息层级：账号入口相对独立；书架操作集中在右上角；复杂操作放入二级页面或底部弹层。
+## 2. 已实现范围（代码已存在，仍需持续真机验收）
 
-1. **最左侧：账号与同步。** 圆形头像图标。未登录时打开注册、登录和已保存账号；登录后显示当前账号、立即同步、退出登录、最近同步时间和同步结果。它还会说明同步范围：同步进度、书签/高亮/批注/评分/标签/书单、生词本与阅读统计，但不上传图书文件本身。
-2. **右侧工具区第一个：搜索。** 放大镜图标。点击后展开书架搜索输入框，默认搜索书名、作者和简介；输入框旁的“全书架正文检索”开关打开后，搜索范围扩展到图书正文。搜索历史、清空输入和结果列表都从这个入口展开。
-3. **搜索右侧：阅读统计。** 三根竖条图标。打开日、月、年、总四个维度的阅读统计，包括阅读时长、阅读字数、平均速度、读过图书、热力图、时间段柱状图，以及当天读过书的横向卡片（封面、时长、字数、高亮/批注数）。
-4. **阅读统计右侧：筛选与布局。** 漏斗图标。打开书架筛选面板：按书名/作者/导入时间/目录/最近阅读/阅读时间/大小/阅读进度排序；按未读、正在阅读、已读和评分过滤；选择标签、书单，并切换“匹配任一/匹配全部”；还可设置列表或网格布局与网格列数。面板右下角显示当前结果，例如 `36/798`。存在有效筛选时，漏斗会有蓝色呼吸效果并提示“已启用筛选”。
-5. **筛选右侧：常用设置。** 齿轮图标。打开常用设置，例如显示阅读进度、评分、书名、自动导入目录、语义索引、词典以及动画设置。动画设置是全局偏好；阅读页仍可单独开启翻页动画。移动端应避免把所有桌面细项原样堆进首屏，可分类放入“阅读”“书架”“外观”“高级”。
-6. **最右侧、窗口控制按钮左边：更多菜单。** 三点图标。是低频工具集合，当前包含：随机打开一本书、导入书籍、书库体检、笔记汇总、全选以批量删除，以及“关于”（其中可提交 Bug 或功能提议）。Android 可把这些放入右上角溢出菜单或底部操作表；导入、反馈和批量管理的行为需保持可发现。
+### 书架、导入与本地数据
 
-窗口最右边的最小化、最大化和关闭属于桌面壳层控制，**不属于上述六个阅读器功能按键**，Android 不需要实现。
+- EPUB/TXT 解析、导入、封面提取、书架网格/列表、筛选、排序、长按多选和批量操作。
+- SAF 多选导入后把文件复制到应用私有目录，原始来源 URI 不作为长期阅读依赖。
+- 本地 SQLite 保存书目、阅读状态、用户数据、全文索引和同步状态；启动快照、最近阅读缓存、封面/索引维护被放到首屏之后执行。
+- 全书架正文检索、按书分组的结果页、命中片段和点击回到阅读位置。
+- 语义索引页与“关键词 / 语义”切换：BGE Small 中文 v1.5 模型、正文切块和向量索引只保留本机。
+- 自动导入支持多个目录；入口在常用设置的“启用自动导入”开关和齿轮页。手动导入始终可用。
 
-## 产品目标
+### 阅读器
 
-Android 第一阶段应成为“可长期使用的同步阅读器”，核心体验优先级如下：
+- EPUB/TXT 竖屏阅读、目录、章节跳转、章节预热、阅读位置恢复、进度横条跳转和恢复跳转前位置。
+- 点击中部显示/隐藏阅读工具栏与底部进度条；点击/滑动翻页、滚动阅读与章节边界处理均已有实现。
+- EPUB 图片、章节页头、脚注标记和脚注弹层；脚注二次点击应收起。
+- 文本选择、高亮、批注、书签、高亮颜色、横排/九宫格高亮菜单与菜单设置页。
+- 内置词典、生词本、中文/英文释义切换、翻译、Web 搜索和智读入口。
 
-1. 账号登录、注册、退出与可靠同步。
-2. 通过 Android 系统文件选择器导入本地书籍，离线可读。
-3. 阅读 EPUB/TXT（PDF 需单独评估合适的原生渲染方案后加入）。
-4. 阅读位置稳定恢复；先做好滚动阅读，再做分页、双页等复杂排版。
-5. 书签、高亮、批注、生词本、阅读统计。
-6. 标签、书单（桌面端原“收藏夹”已升级为书单）和书架筛选。
-7. 两台设备之间的进度、笔记、书单和统计可以稳定收敛。
+### 账号、同步与密钥
 
-以下项目不应阻塞第一阶段：
+- 注册、登录、保存账户、退出登录、账户安全（邮箱绑定/换绑、修改密码、找回密码）及验证码倒计时。
+- 同步进度、书签、高亮、批注、评分、标签、书单、生词本和阅读统计；不上传图书文件、正文、封面原图、路径、模型或语义索引。
+- 私密配置同步：普通智读/翻译配置可选同步；API Key 仅在 `flutter_secure_storage` 中保存。跨设备传输密钥时使用用户设置的独立同步密码，经 PBKDF2 + AES-256-GCM 端侧加密，服务端只保存密文。
+- 支持从云端下载密钥包、服务器的密钥包世代撤销提示，以及本机重新加密上传。
 
-- 全书语义索引、BGE/ONNX、本地大模型或 GPU 加速。
-- 桌面端所有动画、双页视觉效果和复杂高亮菜单的逐像素复刻。
-- 智读的完整脑图体验。后续可做 BYOK，但 API Key 必须仅保存在设备安全存储中。
-- 将 EPUB/PDF 文件本体上传到服务器，或让服务端代理用户的 AI 请求。
+### 其他
 
-## 推荐技术路线
+- 阅读统计日/月/年/总视图、热力图和柱状图提示。
+- 关于页：GitHub Release 为主、公共服务器更新元数据为回退；Android 版本与产品 Release 标签独立比较。
+- 当前未纳入：PDF 阅读、双页阅读、iOS 发布、生产签名、把图书文件上传到同步服务器。
 
-建议采用 **Flutter** 建立独立移动客户端：Android 首发，后续 iOS 复用移动 UI、状态管理和同步层。不要尝试直接把 Tauri 桌面 UI 打包成 Android 应用。
+上表是“代码存在”的范围，不代表每个交互都已在不同尺寸真机上完成验收。用户目前主要在模拟器逐项验收，真机启动比模拟器快，但冷启动和大书打开仍应量化。
 
-- 本地库：SQLite（推荐 Drift 或成熟的 sqflite 封装），保存书目、导入副本、阅读状态、同步队列和映射信息。
-- 凭据：使用 Android Keystore（例如 `flutter_secure_storage`），绝不将 token 放在普通 SharedPreferences、日志或导出文件中。
-- 导入：使用 Storage Access Framework；拿到 `content://` URI 后复制进应用私有目录，避免长期依赖临时 URI 或申请宽泛存储权限。
-- 阅读引擎：先为 EPUB/TXT 做一轮技术验证。可评估 Readium、受控 WebView/HTML 渲染或成熟 Flutter 阅读组件；分页、选区、高亮锚点和 CJK 排版必须做真实样书验证后再定型。
-- PDF：不要用网页截图式方案冒充 PDF 阅读。若纳入首发，选择支持文本选择、搜索与位置恢复的真实 PDF 渲染器。
-- Rust 复用：可在后续把格式解析或通用规则抽成 Rust FFI；第一阶段不应因跨端 FFI 阻塞移动端可用版本。
+## 3. 关键代码地图
 
-原则是：**共享数据契约、同步协议、测试样本和产品语义；不强求共享桌面 UI 与排版实现。**
+| 主题 | 主要文件 |
+| --- | --- |
+| 启动、延后维护、全文索引调度 | `lib/main.dart` |
+| 书架状态、搜索、同步入口 | `lib/app/app_controller.dart`、`lib/ui/library_shell.dart` |
+| 导入与启动缓存 | `lib/app/book_import_service.dart`、`lib/app/shelf_startup_cache.dart` |
+| EPUB/TXT、阅读 HTML、缓存与进度 | `lib/reader/epub_parser.dart`、`txt_parser.dart`、`reader_html.dart`、`parsed_book_cache.dart`、`reader_screen.dart` |
+| 本地库与全文索引 | `lib/data/app_database.dart`、`library_repository.dart`、`full_text_index_store.dart` |
+| 语义检索 | `lib/semantic/semantic_index_service.dart`、`lib/ui/semantic_index_page.dart` |
+| 词典/生词本 | `lib/dictionary/`、`lib/vocabulary/` |
+| 智读与翻译 | `lib/ai/ai_reader_service.dart`、`ai_reader_sheet.dart`、`lib/ui/ai_translation_sync_page.dart` |
+| 高亮菜单与选区 | `lib/reader/highlight_menu.dart`、`reader_screen.dart` |
+| 账号 | `lib/auth/auth_service.dart`、`lib/ui/login_sheet.dart`、`account_security_page.dart` |
+| 公共同步 | `lib/sync/engine.dart`、`http_sync_api.dart`、`sync_service.dart`、`sqflite_sync_store.dart` |
+| 加密密钥包 | `lib/sync/private_sync_service.dart` |
+| 自动导入原生桥 | `lib/platform/storage_bridge.dart`、`android/app/src/main/...`、`android/STORAGE_BRIDGE.md` |
+| 更新检查 | `lib/update/update_service.dart` |
 
-## 服务端同步契约（必须兼容）
+进入某个问题前先用 `rg` 找真实调用链；不要只改页面文案而绕过 `AppController`、Repository 或同步队列。
 
-服务端代码入口：`server/reader-sync-api/app.py`。
+## 4. 存储权限与发行 Flavor
 
-目前对外能力包括：
+| Flavor | 存储能力 | 适用场景 |
+| --- | --- | --- |
+| `full` | 声明 `MANAGE_EXTERNAL_STORAGE`，用户授权后可递归扫描 Download 与配置的自动导入目录 | 侧载 / 用户明确需要完整文件访问 |
+| `play` | 显式移除该权限，仅 SAF 系统文件选择器导入 | Google Play 审核路径 |
 
-- 健康检查：`GET /health`
-- 身份：`POST /auth/register`、`POST /auth/login`、`POST /auth/logout`、`POST /auth/revoke`、`GET /auth/me`
-- 同步：`GET /sync/pull`、`GET /sync/inventory`、`POST /sync/push`、`POST /sync/reconcile`
-- 用户反馈：`POST /feedback`
+Android 11+ 的 SAF 不能可靠授权内部存储根目录或 Download 根目录；不要把 SAF 当成全盘扫描能力。`full` 模式应检查授权是否被撤销，权限缺失时提示用户而不是持续重试。自动扫描是启动/恢复/手动触发加 WorkManager 的尽力任务，不承诺实时监听；WorkManager 周期任务最短约 15 分钟。
 
-同步请求使用 Bearer Token。当前支持的可移植实体类别是：
+原生桥会流式复制到应用私有目录并计算 SHA-256，再原子提交；文件字节不跨 MethodChannel。详细规则在 Android 工程的 `android/STORAGE_BRIDGE.md`。
 
-- `book_state_v2`：图书状态及其关联的轻量用户数据，例如阅读进度/恢复锚点、书签、高亮、批注、评分、标签、书单归属与书单元数据。
+## 5. 跨端协议与安全边界
+
+`contracts/` 是唯一事实来源，当前 `syncProtocolVersion` 为 1。核心可移植实体包括：
+
+- `book_state_v2`：阅读位置、书签、高亮、批注、评分、标签、书单等轻量状态。
 - `vocab`：生词本。
-- `reading_bucket_v2`：按时间桶汇总的阅读统计。
+- `reading_bucket_v2`：阅读统计时间桶。
+- `model_book_tags_v1`：模型书目标签；与手工标签分离。
+- `ai_reader_config_v1`、`translation_config_v1`、可选的 `ai_reader_history_v1`：普通配置/历史。
+- `secret_bundle_v1`：仅端侧加密后的密钥包；不得上传明文 API Key 或同步密码。
 
-关键规则：
+同步必须处理 `pull → push → inventory → reconcile`、分页、幂等、`updated_at`、`deleted_at`、`sync_version` 和 `device_id`。不可把“本地没有待上传”当作同步成功，也不可因服务器未返回实体就推断删除。图书正文与书文件始终不参与同步。
 
-- 同步只传实体，不传书籍二进制文件。两端需各自拥有同一本书，才能用同步的状态恢复阅读。
-- 以 `updated_at`、`sync_version`、`device_id` 做确定性冲突处理；客户端不可自行发明另一套“最后写入者”规则。
-- 现有协议有 `inventory` 与 `reconcile`，用于发现服务器丢失或落后的实体。Android 必须实现该校验流程，不能只凭“本地没有待上传”就认为同步完成。
-- 同步需要分页、可重试、幂等、断网恢复；不要把全部实体在 UI 线程一次性序列化或上传。
-- 服务端有实体、请求体和用户总量上限。客户端应在本地分批处理，并将超限错误显示为可理解的提示。
+认证与同步正式地址必须使用 HTTPS。`AppConfig` 仅允许 localhost 或 debug 显式开关使用 HTTP。更新信息的服务器回退目前使用公开 `/updates/*` 元数据；它只用于版本和更新说明，APK 下载仍应走 GitHub Release。
 
-不要改动服务端数据库或生产服务，除非先用测试验证协议缺口，并向用户明确说明变更、迁移与回滚方案。
+## 6. 构建、测试与产物
 
-## 必读代码入口
+环境基线：Flutter 3.44.8、JDK 17、Android SDK 36（以 Android 工程 README 为准）。在 Android 工程根目录运行：
 
-先阅读这些文件，再设计 Android 的数据层与同步层：
+```powershell
+flutter pub get
+flutter analyze
+flutter test
 
-- `server/reader-sync-api/app.py`：真实 API、鉴权、冲突处理、反馈与服务端限制。
-- `server/reader-sync-api/test_app.py`：服务端协议测试样例。
-- `src/sync.rs`：桌面同步队列、推拉与校验逻辑。
-- `src/db.rs`、`src/data_migration.rs`：本地持久化和迁移约定。
-- `src/book.rs`、`src/stats.rs`、`src/vocab.rs`：书目、阅读统计、生词本的数据语义。
-- `reader-core/src/domain.rs`、`reader-core/src/sync.rs`、`reader-core/src/import.rs`、`reader-core/src/text.rs`：可复用领域定义与导入/文本逻辑。
-- `ui/reader.js` 及相关阅读页布局代码：用于理解桌面端用户体验与锚点语义，不要直接照搬。
+# 侧载测试包：带完整文件访问功能，Profile 仍是测试签名，不可标为正式 Release
+flutter build apk --profile --flavor full
 
-若文件名或模块已经移动，以 `rg --files` 和真实调用链为准；不要按本文猜测修改。
+# Play 权限边界验证
+flutter build apk --debug --flavor play
+```
 
-## 分期实施建议
+当前观测到的最后一个 full Profile 产物是：
 
-### M0：协议与项目骨架
+```text
+C:\Users\pigki\Documents\Codex\2026-07-21\claude-projects\kunpeng-reader-mobile\build\app\outputs\flutter-apk\app-full-profile.apk
+```
 
-- 建立 Android/Flutter 工程、CI、格式化、单元测试和最小真机运行。
-- 读取服务端代码与测试，产出“Android 实体映射表”：每一类实体、主键、版本、删除语义、冲突字段、分页字段。
-- 用测试账号走通注册、登录、`/auth/me`、拉取、推送、inventory/reconcile；不得使用真实用户密钥或个人数据作为 fixture。
-- 确认 Android 生产 HTTPS、证书、超时、重试与网络错误展示方案。
+它只是测试产物，不能直接作为正式包交付。正式 Release 前必须配置生产 keystore、生成 SHA-256、在真机安装，并清晰标注 `full` 或 `play` flavor。Android 工程当前有 29 个 unit test 文件和 1 个 integration test 文件；本文未重新运行整套 Flutter 测试，接手时应先运行上面的命令。
 
-### M1：本地书架与基础同步
+编译时可覆写服务地址，但发布包不得写入 HTTP：
 
-- SAF 导入 EPUB/TXT，复制到私有目录，记录源文件名、指纹与导入时间。
-- 书架、搜索、最近阅读、基础标签/书单选择。
-- 本地可离线保存和恢复阅读位置。
-- 实现同步 outbox、拉取合并和 reconcile；完成两个模拟设备的收敛测试。
+```powershell
+flutter build apk --release --flavor full `
+  --dart-define=KUNPENG_API_BASE=https://your-server.example
+```
 
-### M2：阅读器可用性
+## 7. 当前优先风险与验收清单
 
-- 先实现滚动阅读、目录、章节跳转、字号/主题、搜索。
-- 支持书签、高亮、批注及其稳定锚点；章节内容变化或重新导入时需有失效降级方案。
-- 将阅读时长、字数和高亮/批注计入 `reading_bucket_v2` 兼容数据。
-- 所有耗时解析、索引、导入必须离开主线程，保证翻页、输入和滚动不中断。
+按优先级处理，不要为了新增页面跳过这些基础项：
 
-### M3：书单与高级同步
+1. **真机性能基线**：冷启动、首次打开大 EPUB、再次打开同书、书架 20/100 本封面加载；记录设备型号、书大小、P50/P95。启动快照、延后维护和章节缓存已经存在，先测量再继续调参。
+2. **阅读手势与选区**：验证点击翻页不出现页底残字；滚动跨章不会一甩多页；长按拖动能选择多字；打开智读/设置/返回书架时高亮菜单和系统选区手柄不会残留在错误页面。
+3. **密钥包跨端闭环**：在桌面和 Android 使用同一同步密码，完成“原设备加密上传 → 新设备下载 → 直接可用智读/翻译”。如果提示“已撤销”，不要绕过世代保护；需在原设备重新加密同步。不要把密钥或同步密码写入日志/测试。
+4. **搜索可靠性**：全文搜索应先进入结果页，再异步建立/读取索引；结果命中高亮、定位到具体章节、按书折叠和“更多 20 条”都要用大书验收。语义索引必须续建而非无故从 0 开始。
+5. **自动导入**：验证多个 SAF 目录、权限撤销、重复文件、Download 扫描和 `play` flavor 降级提示；不要把 `MANAGE_EXTERNAL_STORAGE` 误带进 Play 包。
+6. **同步一致性**：至少两台设备对同一本书做进度、高亮、批注、书签、词汇、标签/书单和统计操作，再做离线补传与 reconcile；确认不上传书文件。
+7. **版本与更新**：保持 Android 版本（如 `0.3.x`）与产品 Release 标签分离。GitHub 缺少 `android_version` 时，客户端应读取服务器最新清单补全可比较的 Android 版本，但下载仍为 GitHub Release。
 
-- 书单简介、封面、手动排序；与桌面端可互相看到并保持相同顺序。
-- 图书信息中展示所属标签和书单。
-- 同步冲突可解释：在本地保留必要的版本/设备/时间诊断信息，不能静默覆盖用户数据。
+## 8. 接手工作方式
 
-### M4：再评估高级功能
+1. 在 Android 工程执行 `git status --short`、`git log -1 --oneline`、`flutter analyze` 和 `flutter test`，记录真实结果。
+2. 先在模拟器复现用户当前问题，再用真机确认；截图不是完成证据。
+3. 本端 UI 改动可直接在 Flutter 工程实施。改变同步实体、认证 API、密钥包格式、删除语义或阅读位置语义前，先更新桌面仓库的 ADR、`contracts/`、fixture 和兼容测试。
+4. 不覆盖未知未提交修改；不要把 `build/`、密钥、token、真实图书或用户数据提交到 Git。
+5. 每轮交付须写明：文件、行为、测试命令与结果、APK 绝对路径/大小/SHA-256、签名状态、尚未验证项。
 
-- PDF、分页/双页、跨书检索、词典/翻译、智读 BYOK、语义检索分别立项。
-- 智读仅发送已阅读或用户明确选择的相关文本；不默认上传整本书。
+## 9. 不要做的事
 
-## 安全、隐私与发布要求
-
-- 不在源码、文档、截图、测试数据或日志中写入 API Key、SMTP 密码、真实 token、用户书籍内容。
-- Android 只接受 HTTPS API；开发环境若必须使用 HTTP，限定在 debug build 与本机/测试环境，不能成为发布版默认行为。
-- 网络日志脱敏 Authorization、密码、反馈附件与正文。
-- 导入图书留在本地；同步页面清楚说明同步的是哪些元数据。
-- AI 供应商 Key 仅本机安全保存，直接由用户设备请求供应商，不经过阅读器同步服务。
-- 发布前提供 APK/AAB 的签名、版本号、SHA-256 和最小可复现构建说明。
-
-## 验收用例
-
-至少验证以下情形，并记录实际结果：
-
-1. 同一本书在两台设备分别阅读、添加高亮/批注、加入书单，然后同步到收敛。
-2. 设备离线时导入、阅读、创建笔记；恢复网络后可补传且不阻塞 UI。
-3. 服务器缺失部分已确认实体时，inventory/reconcile 能重新发现并补齐，而不是显示“待上传 0 条”。
-4. 旋转屏幕、切后台、被系统回收后，阅读位置和未完成同步工作可恢复。
-5. 至少用 EPUB、TXT、长章节、含图片章节和中文/英文混排样书测试导入、阅读与选区。
-6. 书单排序、标签、阅读统计和生词本在桌面与 Android 之间均能同步。
-7. UI 主线程不因解析、同步、搜索或大章节渲染卡住。
-
-## 交付与沟通方式
-
-每个里程碑请给出：
-
-- 修改的真实文件与运行方式。
-- 已验证的协议请求/响应或自动化测试证据。
-- 未解决风险、暂不支持的格式/功能，以及下一步建议。
-- 可安装产物的绝对路径、版本号、大小和 SHA-256（构建产物不得覆盖用户现有安装包，除非先获得明确授权）。
-
-遇到服务端协议不明确、需要修改生产服务器、需要新的第三方 SDK 许可、或需要用户提供账号/密钥时，先说明原因和最小权限范围；不要猜测或索取私钥、真实 token、密码。
-
-## 第一轮应输出什么
-
-新会话的第一轮不应直接大改。请先输出：
-
-1. 已阅读的实际代码入口与当前同步实体映射。
-2. Flutter/阅读引擎候选方案及选型依据。
-3. M0-M2 的具体任务、测试计划和预估风险。
-4. 需要用户确认的少量关键产品选择（例如首发是否必须含 PDF、是否只做 Android Phone 竖屏）。
-
-确认后再开始实现。
+- 不把桌面 SQLite 结构当作 Android 或服务端协议。
+- 不上传 EPUB/TXT/PDF、封面原图、正文索引、语义模型、向量或本机路径。
+- 不把 API Key、登录密码、同步密码、Token 写入源码、`dart-define` 默认值、测试、截图或日志。
+- 不为了让 root/Download 自动扫描“看起来可用”而把宽泛存储权限放进 `play` flavor。
+- 不把 Profile/debug 签名 APK 说成正式 Android 发布包。

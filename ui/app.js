@@ -35,8 +35,16 @@ const shelfUI = window.ReaderShelfUI.init({
   clearCrossReturnMemory: () => clearCrossReturnMemory(),
   startPerformance: (name, detail) => startupPerfStart(name, detail),
   confirmAction: (message) => window.confirm(message),
-  alertAction: (message) => window.alert(message),
+  alertAction: (message, options) => window.AppNotice.show(message, options),
   requestAnimationFrame: (callback) => window.requestAnimationFrame(callback),
+});
+const bookOrganizationUI = window.ReaderBookOrganizationUI.init({
+  root: document,
+  invoke,
+  getBooks: () => shelfUI.getBooks(),
+  onBooksChanged: (list) => shelfUI.render(list),
+  openBooklist: (name) => shelfUI.openBooklist(name),
+  alertAction: (message) => window.AppNotice.show(message),
 });
 window.ReaderStatsUI.init({
   root: document,
@@ -111,7 +119,6 @@ const dirsStatusEl = document.getElementById("dirs-status");
 const dirsGearBtn = document.getElementById("dirs-gear");
 const importDirsCloseBtn = document.getElementById("import-dirs-close");
 const dirsAddBtn = document.getElementById("dirs-add");
-let autoImportScanSeq = 0;
 let autoImportToggleBusy = false;
 function setDirsStatus(text = "", kind = "") {
   if (!dirsStatusEl) return;
@@ -152,31 +159,23 @@ function reflectAutoImport() {
   if (importDirsEnabledChk) importDirsEnabledChk.checked = !!autoImport.enabled;
   renderDirsList();
 }
-async function startAutoImportScan(reason = "正在扫描并导入目录…") {
-  if (!autoImport.enabled || !autoImport.dirs.length) return;
-  const finishAutoImport = startupPerfStart("auto-import-scan", "background dirs=" + autoImport.dirs.length);
-  const seq = ++autoImportScanSeq;
-  const before = shelfUI.count();
-  setDirsStatus(reason, "busy");
-  try {
-    const list = await invoke("auto_import_scan");
-    if (seq !== autoImportScanSeq) return;
-    const added = Math.max(0, (list || []).length - before);
-    shelfUI.render(list || []);
-    if (added > 0) {
-      setDirsStatus("导入完成，新增 " + added + " 本书", "ok");
-      finishAutoImport("added=" + added);
-      if (debugSettingOn("bg_fulltext_index")) {
-        setTimeout(() => runWhenNoReader("keyword-index-after-import", () => invoke("build_shelf_index")), 1500);
-      }
-    } else {
-      setDirsStatus("扫描完成，没有新书", "ok");
-      finishAutoImport("added=0");
+const autoImportUI = ReaderAutoImportUI.create({
+  invoke,
+  isEnabled: () => autoImport.enabled,
+  getDirs: () => autoImport.dirs,
+  countShelf: () => shelfUI.count(),
+  renderShelf: (list) => shelfUI.render(list),
+  setStatus: setDirsStatus,
+  startPerformance: startupPerfStart,
+  logPerformance: startupPerfLog,
+  afterAdded: () => {
+    if (debugSettingOn("bg_fulltext_index")) {
+      setTimeout(() => runWhenNoReader("keyword-index-after-import", () => invoke("build_shelf_index")), 1500);
     }
-  } catch (e) {
-    startupPerfLog("auto-import-scan", "error", e && e.message ? e.message : String(e));
-    if (seq === autoImportScanSeq) setDirsStatus("扫描失败：" + e, "error");
-  }
+  },
+});
+function startAutoImportScan(reason = "正在扫描并导入目录…") {
+  return autoImportUI.start(reason);
 }
 // 自动导入开关
 async function setAutoImportEnabled(enabled, opts = {}) {
@@ -953,15 +952,7 @@ tauriEvent.listen("startup-perf", (e) => {
   startupPerfLog("rust:" + (p.name || "unknown"), p.phase || "mark", p.detail || "");
 });
 tauriEvent.listen("auto-import-progress", (e) => {
-  const p = (e && e.payload) || {};
-  if (!p.phase) return;
-  if (p.phase === "scan") {
-    setDirsStatus("正在扫描目录…已发现 " + (p.found || 0) + " 个文件", "busy");
-  } else if (p.phase === "import") {
-    setDirsStatus("正在导入 " + (p.processed || 0) + "/" + (p.total || 0) + "，已新增 " + (p.added || 0) + " 本" + (p.current ? "：" + p.current : ""), "busy");
-  } else if (p.phase === "done") {
-    setDirsStatus("扫描完成，新增 " + (p.added || 0) + " 本书", "ok");
-  }
+  autoImportUI.handleProgress((e && e.payload) || {});
 });
 tauriEvent.listen("book-import-progress", (e) => {
   const p = (e && e.payload) || {};
@@ -1147,6 +1138,8 @@ async function openSelectedBookInfo() {
   currentInfoBookId = String(selectedIds[0]);
   bookInfoModal.classList.add("show");
   document.getElementById("book-info-words").textContent = "统计中…";
+  bookOrganizationUI.open(currentInfoBookId, shelfUI.getBook(currentInfoBookId));
+  renderBookInfoTags(document.getElementById("book-info-model-tags"), [], []);
   try {
     const m = await invoke("book_meta_by_id", { id: currentInfoBookId });
     bookInfoTitle.value = m.title || "";
@@ -1156,8 +1149,8 @@ async function openSelectedBookInfo() {
     document.getElementById("book-info-size").textContent = fmtSize(m.size);
     // Tauri 的 BookMeta 维持既有 snake_case 序列化；兼容曾短暂使用过的
     // camelCase 前端载荷，避免已分类的暗标签在图书信息里被当成空数组。
-    renderBookInfoTags(document.getElementById("book-info-tags"), m.tags, m.model_tags || m.modelTags);
-    renderInfoChips(document.getElementById("book-info-collections"), m.collections);
+    bookOrganizationUI.open(currentInfoBookId, m);
+    renderBookInfoTags(document.getElementById("book-info-model-tags"), [], m.model_tags || m.modelTags);
     bookInfoDesc.textContent = m.description || "";
     bookInfoStars.setVal(m.rating || 0);
   } catch (e) {

@@ -23,7 +23,7 @@ function classList() {
 function boot(immersive = false) {
   const ids = [
     "settings", "rsearch", "toc", "vocab", "info-modal", "anno-modal",
-    "cross-modal", "backdrop", "vocab-settings",
+    "cross-modal", "reader-end-modal", "backdrop", "vocab-settings",
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, { classList: classList() }]));
   const body = { classList: classList() };
@@ -97,6 +97,10 @@ test("sidebar, modal and toolbar rendering all come from shell state", () => {
   assert.equal(elements.vocab.classList.contains("show"), false);
   assert.equal(elements["cross-modal"].classList.contains("show"), true);
   assert.equal(elements.backdrop.classList.contains("show"), false);
+
+  shell.setOverlay(shell.OVERLAY.END_RECOMMENDATIONS, true);
+  assert.equal(elements["cross-modal"].classList.contains("show"), false);
+  assert.equal(elements["reader-end-modal"].classList.contains("show"), true);
 
   // 普通模式下点正文中部不能收起常驻菜单，也不能误开沉浸模式。
   shell.dispatch({ type: "TOGGLE_TOOLBAR" });

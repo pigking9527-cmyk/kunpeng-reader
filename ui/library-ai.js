@@ -5,6 +5,7 @@
   const MAX_COMPARE_BOOKS = 8;
   const MAX_QUESTION_SOURCES = 20;
   const ANSWER_FONT_SIZE_KEY = "libraryAiAnswerFontSizeV1";
+  const HISTORY_LAYOUT_KEY = "libraryAiHistoryLayoutV1";
   const HISTORY_SOURCES_KEY = "libraryAiHistorySourcesV1";
   const HISTORY_SOURCE_MAX_CHARS = 2400;
   const HISTORY_SOURCE_CARD_CHARS = 520;
@@ -23,9 +24,11 @@
 
     const selectedBookIds = new Set();
     let books = [], useModelTags = true, mode = "question", running = false, loading = false, activeSource = null, previewPinned = false, previewHideTimer = null;
+    let booksRefreshVersion = 0;
     let libraryHistory = [], historySyncEnabled = false, showingHistory = false, latestAnswer = null;
+    let historyLayout = "list";
     let classificationPoll = null;
-    let answerFontSize = DEFAULT_ANSWER_FONT_SIZE;
+    let answerFontSize = DEFAULT_ANSWER_FONT_SIZE, answerLength = "short";
     let questionContextMenu = null;
     const organizationName = (value) => String(value || "").trim();
     const organizationKey = (value) => organizationName(value).toLocaleLowerCase("zh-CN");
@@ -51,6 +54,65 @@
       if (decrease) decrease.disabled = answerFontSize <= MIN_ANSWER_FONT_SIZE;
       if (increase) increase.disabled = answerFontSize >= MAX_ANSWER_FONT_SIZE;
       if (save) try { global.localStorage?.setItem(ANSWER_FONT_SIZE_KEY, String(answerFontSize)); } catch (_) {}
+    }
+
+    function readHistoryLayout() {
+      try { return global.localStorage?.getItem(HISTORY_LAYOUT_KEY) === "grid" ? "grid" : "list"; }
+      catch (_) { return "list"; }
+    }
+
+    function applyHistoryLayout(list, button, save = false) {
+      const grid = historyLayout === "grid";
+      list.classList.toggle("grid", grid);
+      const label = grid
+        ? "当前为方格显示，点击切换为横排显示"
+        : "当前为横排显示，点击切换为方格显示";
+      button.title = label;
+      button.setAttribute("aria-label", label);
+      button.setAttribute("aria-pressed", String(grid));
+      const icon = button.querySelector("i");
+      if (icon) icon.className = grid ? "library-ai-history-grid-icon" : "library-ai-history-list-icon";
+      if (save) try { global.localStorage?.setItem(HISTORY_LAYOUT_KEY, historyLayout); } catch (_) {}
+    }
+
+    function renderAnswerLengthSettings() {
+      const overlay = $("library-ai-answer-settings-overlay");
+      const trigger = $("library-ai-answer-settings");
+      root.querySelectorAll?.("[data-answer-length]").forEach((button) => {
+        const selected = button.dataset.answerLength === answerLength;
+        button.setAttribute("aria-checked", String(selected));
+      });
+      if (trigger) trigger.textContent = "设置";
+      if (overlay?.hidden && trigger) trigger.setAttribute("aria-expanded", "false");
+    }
+
+    function closeAnswerLengthSettings() {
+      const overlay = $("library-ai-answer-settings-overlay");
+      if (overlay) overlay.hidden = true;
+      $("library-ai-answer-settings")?.setAttribute("aria-expanded", "false");
+    }
+
+    function toggleAnswerLengthSettings() {
+      const overlay = $("library-ai-answer-settings-overlay");
+      if (!overlay) return;
+      overlay.hidden = !overlay.hidden;
+      $("library-ai-answer-settings")?.setAttribute("aria-expanded", String(!overlay.hidden));
+      if (!overlay.hidden) $("library-ai-answer-settings-close")?.focus();
+    }
+
+    async function saveAnswerLength(length, button) {
+      if (!["short", "medium", "long"].includes(length)) return;
+      button.disabled = true;
+      try {
+        const settings = await invoke("set_library_answer_length", { request: { answerLength: length } });
+        answerLength = settings?.answerLength || length;
+        renderAnswerLengthSettings();
+        state("", false);
+      } catch (error) {
+        state("保存作答长度失败：" + String(error), true);
+      } finally {
+        button.disabled = false;
+      }
     }
 
     function closeQuestionContextMenu() {
@@ -212,6 +274,15 @@
       stateEl.className = "library-ai-state" + (error ? " error" : "");
     }
 
+    function readinessMessage(aiStatus, semanticStatus) {
+      const apiReady = Boolean(aiStatus?.configured);
+      const indexReady = Number(semanticStatus?.semantic_done || 0) > 0;
+      if (apiReady && indexReady) return "";
+      if (!apiReady && !indexReady) return "请先在设置中配置大模型 API、模型和密钥，并为本地图书建立语义索引。";
+      if (!apiReady) return "请先在设置中配置大模型 API、模型和密钥。";
+      return "请先在设置中为本地图书建立语义索引。";
+    }
+
     function renderModelProfiles(status) {
       const select = $("library-ai-model-profile");
       if (!select) return;
@@ -359,6 +430,29 @@
         booksEl.append(label);
       });
       syncBookSelectionControls(visibleBooks);
+    }
+
+    function applyBooks(list) {
+      books = Array.isArray(list) ? list.filter((book) => !book.missing) : [];
+      const knownIds = new Set(books.map((book) => String(book.id)));
+      Array.from(selectedBookIds).forEach((id) => { if (!knownIds.has(id)) selectedBookIds.delete(id); });
+      renderFilterOptions($("tag-filter"), "tags", i18n("allTags", "全部标签"));
+      renderFilterOptions($("collection-filter"), "collections", i18n("allCollections", "全部收藏夹"));
+      renderBooks();
+    }
+
+    async function refreshBooks() {
+      const refreshVersion = ++booksRefreshVersion;
+      $("book-count").textContent = i18n("loadingLibrary", "正在刷新书架…");
+      try {
+        const list = await invoke("list_books");
+        if (refreshVersion !== booksRefreshVersion) return;
+        applyBooks(list);
+      } catch (error) {
+        if (refreshVersion !== booksRefreshVersion) return;
+        renderBooks();
+        state("无法更新书架：" + String(error), true);
+      }
     }
 
     function selectVisibleBooks() {
@@ -585,6 +679,29 @@
       return task === "compare" ? "跨书对比" : "书库问答";
     }
 
+    function historyAnswerSummary(entry) {
+      const lines = String(entry?.content || "").replace(/\r/g, "").split("\n");
+      for (const rawLine of lines) {
+        let line = rawLine.trim();
+        if (!line || /^#{1,6}(?:\s|$)/.test(line) || /^[-*_]{3,}$/.test(line)) continue;
+        line = line
+          .replace(/^>\s*/, "")
+          .replace(/^(?:[-*+]|\d+[.)])\s+/, "")
+          .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+          .replace(/\[(?:来源\s*)?\d+\]/g, "")
+          .replace(/[*_~`]/g, "")
+          .replace(/^(?:直接回答|核心结论|结论)\s*[：:]\s*/, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!line) continue;
+        const sentence = line.match(/^(.{1,180}?[。！？!?])/)?.[1] || line;
+        const characters = Array.from(sentence);
+        return characters.length > 120 ? `${characters.slice(0, 120).join("").trimEnd()}…` : sentence;
+      }
+      return "暂无回答摘要";
+    }
+
     function portableSourceReference(source) {
       return {
         bookTitle: String(source?.bookTitle || "未命名图书").slice(0, 800),
@@ -739,14 +856,28 @@
       $("library-ai-history").textContent = i18n("returnToAnswer", "返回本次回答");
       answerEl.className = "library-ai-answer";
       answerEl.replaceChildren();
+      const historyToolbar = root.createElement("div");
+      historyToolbar.className = "library-ai-history-toolbar";
       const note = root.createElement("p");
       note.className = "library-ai-history-note";
       note.textContent = historySyncEnabled
         ? "本机历史保留引用正文；记录会在下次同步时上传。为保护书籍内容，跨设备仅同步来源书名、章节与材料类型。"
         : "记录已保存在本机。开启设置中的“同步智读历史”后，会在下次同步时上传。";
-      answerEl.append(note);
+      const layoutButton = root.createElement("button");
+      layoutButton.type = "button";
+      layoutButton.className = "library-ai-history-layout";
+      const layoutIcon = root.createElement("i");
+      layoutIcon.setAttribute("aria-hidden", "true");
+      layoutButton.append(layoutIcon);
+      historyToolbar.append(note, layoutButton);
+      answerEl.append(historyToolbar);
       const list = root.createElement("div");
       list.className = "library-ai-history-list";
+      applyHistoryLayout(list, layoutButton);
+      layoutButton.addEventListener("click", () => {
+        historyLayout = historyLayout === "grid" ? "list" : "grid";
+        applyHistoryLayout(list, layoutButton, true);
+      });
       libraryHistory.forEach((entry) => {
         const row = root.createElement("div");
         row.className = "library-ai-history-row";
@@ -756,12 +887,10 @@
         const question = root.createElement("span");
         question.className = "library-ai-history-question";
         question.textContent = entry.question || i18n("unnamedQuestion", "未命名问答");
-        const meta = root.createElement("span");
-        meta.className = "library-ai-history-meta";
-        const at = entry.at ? new Date(entry.at).toLocaleString() : "历史记录";
-        const sourceCount = Array.isArray(entry.sources) ? entry.sources.length : 0;
-        meta.textContent = `${libraryHistoryTaskLabel(entry.task)} · ${at} · ${sourceCount} 条来源索引`;
-        button.append(question, meta);
+        const summary = root.createElement("span");
+        summary.className = "library-ai-history-summary";
+        summary.textContent = historyAnswerSummary(entry);
+        button.append(question, summary);
         button.addEventListener("click", () => showLibraryHistoryEntry(entry));
         const remove = root.createElement("button");
         remove.type = "button";
@@ -928,24 +1057,25 @@
       loading = true;
       state(i18n("loadingLibrary", "正在读取书架与智读配置…"));
       try {
-        const [status, profiles, list, modelTagSettings, history] = await Promise.all([
+        const [status, profiles, semanticStatus, list, modelTagSettings, answerSettings, history] = await Promise.all([
           invoke("ai_reader_status"),
           invoke("ai_reader_profiles"),
+          invoke("semantic_status"),
           invoke("list_books"),
           invoke("library_model_tags_settings"),
+          invoke("library_answer_settings"),
           invoke("private_sync_library_history_list"),
         ]);
+        historyLayout = readHistoryLayout();
         libraryHistory = hydrateLibraryHistory(history?.entries);
         historySyncEnabled = Boolean(history?.syncEnabled);
         renderModelProfiles(profiles);
         useModelTags = modelTagSettings?.enabled !== false;
-        books = Array.isArray(list) ? list.filter((book) => !book.missing) : [];
-        const knownIds = new Set(books.map((book) => String(book.id)));
-        Array.from(selectedBookIds).forEach((id) => { if (!knownIds.has(id)) selectedBookIds.delete(id); });
-      renderFilterOptions($("tag-filter"), "tags", i18n("allTags", "全部标签"));
-      renderFilterOptions($("collection-filter"), "collections", i18n("allCollections", "全部收藏夹"));
-        renderBooks();
-        state(status?.configured ? "智读已配置。建立语义索引后即可检索。" : "请先在任意阅读页的“智读”中配置 API、模型和密钥。", !status?.configured);
+        answerLength = answerSettings?.answerLength || "short";
+        renderAnswerLengthSettings();
+        applyBooks(list);
+        const readiness = readinessMessage(status, semanticStatus);
+        state(readiness, !status?.configured);
         refreshClassificationStatus();
       } catch (error) {
         state("无法读取书架或智读配置：" + String(error), true);
@@ -982,6 +1112,14 @@
       }
     });
     $("library-ai-history").addEventListener("click", toggleLibraryHistory);
+    $("library-ai-answer-settings")?.addEventListener("click", toggleAnswerLengthSettings);
+    $("library-ai-answer-settings-close")?.addEventListener("click", closeAnswerLengthSettings);
+    $("library-ai-answer-settings-overlay")?.addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) closeAnswerLengthSettings();
+    });
+    root.querySelectorAll?.("[data-answer-length]").forEach((button) => {
+      button.addEventListener("click", () => { void saveAnswerLength(button.dataset.answerLength, button); });
+    });
     answerFontSize = readAnswerFontSize();
     applyAnswerFontSize();
     $("library-ai-font-decrease")?.addEventListener("click", () => {
@@ -1034,9 +1172,12 @@
       if (questionContextMenu && !questionContextMenu.contains(event.target)) closeQuestionContextMenu();
     }, true);
     global.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeQuestionContextMenu();
+      if (event.key === "Escape") {
+        closeQuestionContextMenu();
+        closeAnswerLengthSettings();
+      }
     });
-    return { load, run, setMode, renderBooks };
+    return { load, refreshBooks, run, setMode, renderBooks };
   }
 
   global.ReaderLibraryAiUI = { init, MAX_QUESTION_SOURCES, MAX_COMPARE_BOOKS };
