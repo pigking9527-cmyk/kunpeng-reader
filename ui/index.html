@@ -414,27 +414,27 @@
             </span>
           </div>
         </section>
-        <section class="default-apps-setting" aria-label="默认打开方式">
+        <section class="default-apps-setting" aria-label="默认打开方式" data-i18n-aria="defaultOpenTitle">
           <div>
-            <div class="fp-title">默认打开方式</div>
-            <p>安装版支持将 EPUB 和 PDF 设为由鲲鹏阅读器打开；请在系统的“按文件类型选择默认值”中分别设置。</p>
+            <div class="fp-title" data-i18n="defaultOpenTitle">默认打开方式</div>
+            <p data-i18n="defaultOpenDescription">安装版支持将 EPUB 和 PDF 设为由鲲鹏阅读器打开；请在系统的“按文件类型选择默认值”中分别设置。</p>
           </div>
-          <button id="open-default-apps-settings" class="btn-plain" type="button">设置 EPUB / PDF 默认应用</button>
+          <button id="open-default-apps-settings" class="btn-plain" type="button" data-i18n="defaultOpenButton">设置 EPUB / PDF 默认应用</button>
         </section>
-        <section class="default-apps-setting" aria-label="数据恢复点">
+        <section class="default-apps-setting" aria-label="数据恢复点" data-i18n-aria="recoveryTitle">
           <div>
-            <div class="fp-title">数据恢复点</div>
-            <p id="recovery-backup-status">正在读取恢复点状态…</p>
+            <div class="fp-title" data-i18n="recoveryTitle">数据恢复点</div>
+            <p id="recovery-backup-status" data-i18n="recoveryLoading">正在读取恢复点状态…</p>
             <div id="recovery-backup-actions" class="recovery-backup-actions" hidden>
               <select id="settings-restore-backup" aria-label="选择数据恢复点"></select>
-              <button id="settings-restore-backup-button" class="btn-plain" type="button">恢复选中恢复点</button>
+              <button id="settings-restore-backup-button" class="btn-plain" type="button" data-i18n="recoverySelected">恢复选中恢复点</button>
             </div>
           </div>
-          <button id="settings-create-backup" class="btn-plain" type="button">立即创建</button>
+          <button id="settings-create-backup" class="btn-plain" type="button" data-i18n="recoveryCreate">立即创建</button>
         </section>
         <div class="fp-set-actions">
-          <button id="settings-export-data" class="btn-plain" type="button">⬆ 导出数据包</button>
-          <button id="settings-import-data" class="btn-plain" type="button">⬇ 导入数据包</button>
+          <button id="settings-export-data" class="btn-plain" type="button" data-i18n="dataExport">⬆ 导出数据包</button>
+          <button id="settings-import-data" class="btn-plain" type="button" data-i18n="dataImport">⬇ 导入数据包</button>
         </div>
       </div>
     </div>
