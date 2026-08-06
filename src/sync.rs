@@ -154,6 +154,8 @@ pub(crate) struct SyncSettings {
     username: String,
     #[serde(default)]
     user_id: String,
+    #[serde(default = "default_data_generation")]
+    data_generation: i64,
     #[serde(default)]
     last_sync_at: i64,
     #[serde(default)]
@@ -179,6 +181,20 @@ pub(crate) struct AuthResponse {
     #[serde(skip_serializing)]
     token: String,
     user: AuthUser,
+    #[serde(default = "default_data_generation")]
+    data_generation: i64,
+}
+
+fn default_data_generation() -> i64 {
+    1
+}
+
+fn ensure_data_generation(expected: i64, actual: i64) -> Result<(), String> {
+    if expected.max(1) == actual.max(1) {
+        Ok(())
+    } else {
+        Err("云端数据版本已经变化；请在“数据与隐私”中清除此设备数据后重新登录".into())
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -189,10 +205,12 @@ struct AuthMeResponse {
     username: String,
     #[serde(default)]
     user: AuthUser,
+    #[serde(default = "default_data_generation")]
+    data_generation: i64,
 }
 
 impl AuthMeResponse {
-    fn into_verified_user(self) -> Result<AuthUser, String> {
+    fn into_verified_identity(self) -> Result<(AuthUser, i64), String> {
         let user = if self.user.id.trim().is_empty() {
             AuthUser {
                 id: self.id,
@@ -204,7 +222,7 @@ impl AuthMeResponse {
         if user.id.trim().is_empty() {
             return Err("服务器没有返回账户 ID".into());
         }
-        Ok(user)
+        Ok((user, self.data_generation.max(1)))
     }
 }
 
@@ -222,6 +240,8 @@ pub(crate) struct SyncReport {
 #[derive(Deserialize)]
 struct SyncPushResponse {
     server_time: i64,
+    #[serde(default = "default_data_generation")]
+    data_generation: i64,
     #[serde(default)]
     entities: Vec<db::SyncEntity>,
     #[serde(default)]
@@ -329,6 +349,8 @@ fn legacy_sync_count(value: Option<&serde_json::Value>) -> u32 {
 #[derive(Deserialize)]
 struct SyncPullResponse {
     server_time: i64,
+    #[serde(default = "default_data_generation")]
+    data_generation: i64,
     #[serde(default)]
     entities: Vec<db::SyncEntity>,
     #[serde(default)]
@@ -340,6 +362,8 @@ struct SyncPullResponse {
 #[derive(Deserialize)]
 struct SyncInventoryResponse {
     server_time: i64,
+    #[serde(default = "default_data_generation")]
+    data_generation: i64,
     entity_count: usize,
     inventory_digest: String,
     #[serde(default)]
@@ -378,6 +402,8 @@ struct SyncEntityKey {
 #[derive(Deserialize)]
 struct SyncReconcileResponse {
     server_time: i64,
+    #[serde(default = "default_data_generation")]
+    data_generation: i64,
     #[serde(default)]
     upload: Vec<SyncEntityKey>,
     #[serde(default)]
@@ -437,6 +463,10 @@ pub(crate) fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
         token: read_sync_token(db).unwrap_or_default(),
         username: db.metadata("sync_username").unwrap_or_default(),
         user_id,
+        data_generation: scoped("data_generation")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(1)
+            .max(1),
         last_sync_at: scoped("last_sync_at")
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0),
@@ -522,7 +552,7 @@ fn account_sync_scope(base: &str, user_id: &str) -> Result<String, String> {
     Ok(sync_scope_id(base, user_id))
 }
 
-fn fetch_auth_user(base: &str, token: &str, timeout: Duration) -> Result<AuthUser, String> {
+fn fetch_auth_user(base: &str, token: &str, timeout: Duration) -> Result<(AuthUser, i64), String> {
     if token.trim().is_empty() {
         return Err("同步 token 为空".into());
     }
@@ -538,7 +568,7 @@ fn fetch_auth_user(base: &str, token: &str, timeout: Duration) -> Result<AuthUse
         .body_mut()
         .read_json()
         .map_err(|e| format!("账户身份返回解析失败：{e}"))?;
-    response.into_verified_user()
+    response.into_verified_identity()
 }
 
 fn save_sync_account(
@@ -546,10 +576,25 @@ fn save_sync_account(
     base: &str,
     token: &str,
     user: &AuthUser,
+    data_generation: i64,
 ) -> Result<String, String> {
     let scope = account_sync_scope(base, &user.id)?;
     if token.trim().is_empty() {
         return Err("服务器没有返回登录 token".into());
+    }
+    let data_generation = data_generation.max(1);
+    let previous_generation = db
+        .sync_scope_metadata(&scope, "data_generation")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    if data_generation > 1
+        && previous_generation != data_generation
+        && !db.all_sync_entities()?.is_empty()
+    {
+        return Err(
+            "云端数据已经清除；为防止旧数据复活，请先在“数据与隐私”中清除此设备数据，再重新登录"
+                .into(),
+        );
     }
     let protected = protect_sync_token(token)?;
     db.set_metadata_batch(&[
@@ -561,6 +606,7 @@ fn save_sync_account(
         ("sync_user_id", user.id.trim()),
         (db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY, &scope),
     ])?;
+    db.set_sync_scope_metadata(&scope, "data_generation", &data_generation.to_string())?;
     db.migrate_legacy_sync_state(&scope)?;
     Ok(scope)
 }
@@ -610,10 +656,13 @@ fn prepare_saved_account_for_switch(state: &AppState) -> Result<(), String> {
         .as_deref()
         .and_then(|base| account_sync_scope(base, &saved.user_id).ok());
     let resolved_user = match (base.as_deref(), stored_scope.as_deref()) {
-        (Some(_), Some(scope)) if scope == verified_scope => Some(AuthUser {
-            id: saved.user_id.trim().to_string(),
-            username: saved.username.clone(),
-        }),
+        (Some(_), Some(scope)) if scope == verified_scope => Some((
+            AuthUser {
+                id: saved.user_id.trim().to_string(),
+                username: saved.username.clone(),
+            },
+            saved.data_generation,
+        )),
         (Some(base), _) if !saved.token.trim().is_empty() => {
             match fetch_auth_user(base, &saved.token, SYNC_REQUEST_TIMEOUT) {
                 Ok(user) => Some(user),
@@ -634,12 +683,12 @@ fn prepare_saved_account_for_switch(state: &AppState) -> Result<(), String> {
         return Err("同步账户设置已变化，请重试".into());
     }
     match (base.as_deref(), resolved_user) {
-        (Some(base), Some(user)) => {
+        (Some(base), Some((user, data_generation))) => {
             if saved.token.trim().is_empty() {
                 let scope = account_sync_scope(base, &user.id)?;
                 db.migrate_legacy_sync_state(&scope)?;
             } else {
-                save_sync_account(db, base, &saved.token, &user)?;
+                save_sync_account(db, base, &saved.token, &user, data_generation)?;
             }
         }
         _ => {
@@ -693,6 +742,7 @@ fn push_sync_entities(
     token: &str,
     device_id: &str,
     scope: &str,
+    data_generation: i64,
     entities: &[db::SyncEntity],
     progress_base: usize,
 ) -> Result<PushTotals, String> {
@@ -702,6 +752,7 @@ fn push_sync_entities(
         let push_body = serde_json::json!({
             "schema_version": 2,
             "device_id": device_id,
+            "data_generation": data_generation,
             "capabilities": ["push_dispositions_v1"],
             "entities": batch,
         });
@@ -716,6 +767,7 @@ fn push_sync_entities(
                     .body_mut()
                     .read_json()
             })?;
+        ensure_data_generation(data_generation, push.data_generation)?;
         totals.pushed += batch.len();
         totals.accepted += push.accepted_total() as usize;
         totals.ignored += push.ignored_total() as usize;
@@ -773,7 +825,7 @@ fn cursor_strictly_advances(current: &str, candidate: &str) -> bool {
 }
 
 fn save_auth_response(db: &mut db::AppDb, base: &str, res: &AuthResponse) -> Result<(), String> {
-    save_sync_account(db, base, &res.token, &res.user).map(|_| ())
+    save_sync_account(db, base, &res.token, &res.user, res.data_generation).map(|_| ())
 }
 
 fn auth_request_inner(
@@ -845,8 +897,8 @@ pub(crate) async fn sync_set_settings(
         prepare_saved_account_for_switch(state.inner())?;
         let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        if let Some(user) = user {
-            save_sync_account(db, &base, &token, &user)?;
+        if let Some((user, data_generation)) = user {
+            save_sync_account(db, &base, &token, &user, data_generation)?;
         } else {
             let protected = protect_sync_token("")?;
             db.set_metadata_batch(&[
@@ -1006,6 +1058,26 @@ pub(crate) struct PasswordResetConfirmRequest {
     pub username: String,
     pub code: String,
     pub new_password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DataResetRequest {
+    pub password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountDeleteRequest {
+    pub password: String,
+    pub username: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DataResetResponse {
+    ok: bool,
+    data_generation: i64,
+    tokens_revoked: bool,
 }
 
 #[derive(Deserialize)]
@@ -1199,6 +1271,58 @@ pub(crate) async fn auth_change_password(
 }
 
 #[tauri::command]
+pub(crate) async fn sync_reset_cloud_data(
+    app: tauri::AppHandle,
+    request: DataResetRequest,
+) -> Result<DataResetResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.password.is_empty() {
+            return Err("请输入登录密码".into());
+        }
+        let state = app.state::<AppState>();
+        let _account_change = acquire_account_change(state.inner())?;
+        let response: DataResetResponse = authenticated_endpoint(
+            state.inner(),
+            "/sync/data/reset",
+            Some(serde_json::json!({"password": request.password})),
+        )?;
+        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        clear_sync_account(db)?;
+        Ok(response)
+    })
+    .await
+    .map_err(|e| format!("清除云端数据任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_delete_account(
+    app: tauri::AppHandle,
+    request: AccountDeleteRequest,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.password.is_empty() || request.username.trim().is_empty() {
+            return Err("请输入登录密码和完整账号名".into());
+        }
+        let state = app.state::<AppState>();
+        let _account_change = acquire_account_change(state.inner())?;
+        let _: serde_json::Value = authenticated_endpoint(
+            state.inner(),
+            "/auth/account/delete",
+            Some(serde_json::json!({
+                "password": request.password,
+                "username": request.username.trim(),
+            })),
+        )?;
+        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        clear_sync_account(db)
+    })
+    .await
+    .map_err(|e| format!("删除账号任务失败：{e}"))?
+}
+
+#[tauri::command]
 pub(crate) async fn auth_request_password_reset(
     app: tauri::AppHandle,
     request: PasswordResetRequest,
@@ -1318,8 +1442,8 @@ fn sync_now_inner_with_limits_impl(
         if !saved_account_unchanged(db, &initial_settings, &initial_verified_scope)? {
             return Err("同步账户设置已变化，请重试".into());
         }
-        let scope = if let Some(user) = resolved_user {
-            save_sync_account(db, &base, &initial_settings.token, &user)?
+        let scope = if let Some((user, data_generation)) = resolved_user {
+            save_sync_account(db, &base, &initial_settings.token, &user, data_generation)?
         } else {
             if base != initial_settings.url {
                 db.set_metadata("sync_url", &base)?;
@@ -1362,6 +1486,7 @@ fn sync_now_inner_with_limits_impl(
                     .body_mut()
                     .read_json()
             })?;
+        ensure_data_generation(settings.data_generation, pull.data_generation)?;
         pull_server_time = pull_server_time.max(pull.server_time);
         let next_cursor = pull.next_cursor.trim();
         if pull.has_more && !cursor_strictly_advances(&pull_cursor, next_cursor) {
@@ -1433,6 +1558,7 @@ fn sync_now_inner_with_limits_impl(
         &settings.token,
         &device_id,
         &scope,
+        settings.data_generation,
         &entities,
         pulled as usize,
     )?;
@@ -1458,6 +1584,7 @@ fn sync_now_inner_with_limits_impl(
                     .body_mut()
                     .read_json()
             })?;
+        ensure_data_generation(settings.data_generation, inventory.data_generation)?;
         push_server_time = push_server_time.max(inventory.server_time);
         let local = {
             let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
@@ -1490,6 +1617,7 @@ fn sync_now_inner_with_limits_impl(
             .collect::<Vec<_>>();
         let reconcile_body = serde_json::json!({
             "schema_version": 2,
+            "data_generation": settings.data_generation,
             "manifest": manifest,
         });
         let reconcile: SyncReconcileResponse =
@@ -1502,6 +1630,7 @@ fn sync_now_inner_with_limits_impl(
                     .body_mut()
                     .read_json()
             })?;
+        ensure_data_generation(settings.data_generation, reconcile.data_generation)?;
         push_server_time = push_server_time.max(reconcile.server_time);
 
         if !reconcile.entities.is_empty() {
@@ -1550,6 +1679,7 @@ fn sync_now_inner_with_limits_impl(
                 &settings.token,
                 &device_id,
                 &scope,
+                settings.data_generation,
                 &repair_entities,
                 pulled as usize + pushed,
             )?;
@@ -1690,6 +1820,7 @@ mod tests {
             token: "secret-token".to_string(),
             username: "alice".to_string(),
             user_id: "u1".to_string(),
+            data_generation: 1,
             last_sync_at: 123,
             last_sync_pushed: 2,
             last_sync_pulled: 3,
@@ -1703,6 +1834,7 @@ mod tests {
                 id: "u1".to_string(),
                 username: "alice".to_string(),
             },
+            data_generation: 1,
         };
 
         let settings_json = serde_json::to_value(settings).unwrap();
@@ -1723,10 +1855,12 @@ mod tests {
             (r#"{"id":"u2","username":"bob"}"#, "u2"),
         ] {
             let response: AuthMeResponse = serde_json::from_str(json).unwrap();
-            assert_eq!(response.into_verified_user().unwrap().id, expected_id);
+            let (user, generation) = response.into_verified_identity().unwrap();
+            assert_eq!(user.id, expected_id);
+            assert_eq!(generation, 1);
         }
         let response: AuthMeResponse = serde_json::from_str("{}").unwrap();
-        assert!(response.into_verified_user().is_err());
+        assert!(response.into_verified_identity().is_err());
     }
 
     #[test]
@@ -1774,6 +1908,7 @@ mod tests {
         );
         let inventory = SyncInventoryResponse {
             server_time: 0,
+            data_generation: 1,
             entity_count: 2,
             inventory_digest: "5b47a5b8875ddb2d9cf9fc65c7698eaa3de450ccb547b84a11f2f688fa41c267"
                 .into(),

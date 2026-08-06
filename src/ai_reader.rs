@@ -23,6 +23,11 @@ const MAX_LIBRARY_QUESTION_CHARS: usize = 2_000;
 const MAX_LIBRARY_COMPARE_BOOKS: usize = 8;
 const MAX_LIBRARY_QUESTION_SOURCES: usize = 20;
 const MAX_LIBRARY_DEEP_SOURCES: usize = 10;
+// Whole-library questions should synthesize evidence, rather than turn one
+// highly-ranked paragraph into a conclusion about an entire genre.
+const MIN_LIBRARY_SYNTHESIS_SOURCES: usize = 4;
+const MIN_LIBRARY_SYNTHESIS_BOOKS: usize = 3;
+const TARGET_LIBRARY_SYNTHESIS_SOURCES: usize = 6;
 const MAX_LIBRARY_SINGLE_BOOK_SOURCES: usize = 12;
 const MAX_LIBRARY_SINGLE_BOOK_STRUCTURE_SOURCES: usize = 4;
 const MAX_LIBRARY_SINGLE_BOOK_CANDIDATE_HITS: usize = 36;
@@ -33,6 +38,11 @@ const MAX_LIBRARY_COMPARE_SOURCES_PER_BOOK: usize = 2;
 // 仅排队到首字节就可能超过 45 秒，因此要给每个独立阶段足够的响应窗口。
 const READING_PROVIDER_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const READING_PROVIDER_MAX_TOKENS: u16 = 1_600;
+// Deep reasoning models may consume most of a small completion allowance
+// before emitting `content`. Whole-library synthesis needs room for both that
+// hidden reasoning and a cited final answer; ordinary reading tasks remain at
+// the smaller budget.
+const LIBRARY_SYNTHESIS_PROVIDER_MAX_TOKENS: u16 = 4_096;
 // The first pass may include several kinds of evidence. When a compatible
 // provider accepts the request but returns an empty completion, retry once
 // with only the strongest compact evidence instead of making the reader lose
@@ -40,6 +50,7 @@ const READING_PROVIDER_MAX_TOKENS: u16 = 1_600;
 const MAX_READING_RETRY_CONTEXT_CHARS: usize = 4_800;
 const LIBRARY_PROFILE_PREFIX: &str = "library_ai_profile:v2:";
 const LIBRARY_MODEL_TAGS_ENABLED_KEY: &str = "library_ai_use_model_tags:v1";
+const LIBRARY_ANSWER_LENGTH_KEY: &str = "library_ai_answer_length:v1";
 const MAX_LIBRARY_PROFILE_TAGS: usize = 12;
 const MAX_LIBRARY_PROFILE_TAG_CHARS: usize = 32;
 const MAX_LIBRARY_WEB_PAGE_CHARS: usize = 2_400;
@@ -168,6 +179,80 @@ pub(crate) struct LibraryAiReaderAskRequest {
     question: String,
     #[serde(default)]
     selected_book_ids: Vec<String>,
+}
+
+/// Whole-library answer length is a local preference, deliberately separate
+/// from synced AI service configuration and saved question history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum LibraryAnswerLength {
+    #[default]
+    Short,
+    Medium,
+    Long,
+}
+
+impl LibraryAnswerLength {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "short" => Some(Self::Short),
+            "medium" => Some(Self::Medium),
+            "long" => Some(Self::Long),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Short => "short",
+            Self::Medium => "medium",
+            Self::Long => "long",
+        }
+    }
+
+    fn source_limit(self) -> usize {
+        match self {
+            Self::Short => TARGET_LIBRARY_SYNTHESIS_SOURCES,
+            Self::Medium => 7,
+            Self::Long => MAX_LIBRARY_DEEP_SOURCES,
+        }
+    }
+
+    fn required_books(self) -> usize {
+        match self {
+            Self::Short => MIN_LIBRARY_SYNTHESIS_BOOKS,
+            Self::Medium => 4,
+            Self::Long => 5,
+        }
+    }
+
+    fn required_sources(self) -> usize {
+        match self {
+            Self::Short => MIN_LIBRARY_SYNTHESIS_SOURCES,
+            Self::Medium => 6,
+            Self::Long => 8,
+        }
+    }
+
+    fn prompt_specification(self) -> &'static str {
+        match self {
+            Self::Short => "以 700 个汉字以内为目标；关键依据 4—6 条。材料足够时，至少使用 3 部作品、4 个不同来源；解读 2—3 句。",
+            Self::Medium => "以 1,300 个汉字以内为目标；关键依据 6—8 条。材料足够时，至少使用 4 部作品、6 个不同来源；解读扩展为 3—4 句，并新增 ## 延展观点，以 2—3 条讨论作品之间的异同、张力或限制。",
+            Self::Long => "以 2,100 个汉字以内为目标；关键依据 8—10 条。材料足够时，至少使用 5 部作品、8 个不同来源；解读扩展为 4—6 句，并新增 ## 延展观点（3—5 条）和 ## 边界与反例（1—2 条），分别讨论更丰富的联系与证据边界。",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryAnswerSettings {
+    pub answer_length: LibraryAnswerLength,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetLibraryAnswerLengthRequest {
+    answer_length: String,
 }
 
 /// A local-only fallback for older library-Q&A history.  Earlier history
@@ -1362,6 +1447,115 @@ fn push_library_source(
     push_ai_source(sources, seen, source, max_sources);
 }
 
+fn library_theme_terms(question: &str) -> Option<&'static [&'static str]> {
+    let question = question.trim();
+    if ["情爱", "爱情", "恋爱", "爱恋", "感情", "情感", "相思"]
+        .iter()
+        .any(|term| question.contains(term))
+    {
+        Some(&[
+            "情爱",
+            "爱情",
+            "爱恋",
+            "恋爱",
+            "相思",
+            "钟情",
+            "倾心",
+            "爱慕",
+            "相爱",
+            "恋人",
+            "夫妻",
+            "夫妇",
+            "婚姻",
+            "婚嫁",
+            "妻子",
+            "丈夫",
+            "未婚妻",
+            "情人",
+            "相守",
+            "离别",
+        ])
+    } else {
+        None
+    }
+}
+
+fn hit_matches_library_theme(hit: &semantic::SemHit, terms: &[&str]) -> bool {
+    terms.iter().any(|term| hit.snippet.contains(term))
+}
+
+fn library_semantic_hit_key(book_id: &str, hit: &semantic::SemHit) -> String {
+    format!("{book_id}\u{1f}{}\u{1f}{}", hit.chapter, hit.snippet)
+}
+
+struct MergedLibrarySearchResults {
+    results: Vec<semantic::SemBookHits>,
+    // The dedicated thematic query may find a genuine relationship scene that
+    // does not literally say \"爱情\" (for example, a character choosing to
+    // give up everything for \"她\"). Keep that local retrieval signal until
+    // the evidence-filter stage instead of discarding it with a word match.
+    thematic_hit_keys: HashSet<String>,
+}
+
+fn library_retrieval_queries(question: &str) -> Vec<String> {
+    let mut queries = vec![question.trim().to_string()];
+    if library_theme_terms(question).is_some() {
+        queries.push("武侠小说中的情爱、爱情、爱恋、相思、夫妻、婚姻与人物关系描写".to_string());
+    }
+    let mut seen = HashSet::new();
+    queries
+        .into_iter()
+        .filter(|query| !query.is_empty())
+        .filter(|query| seen.insert(query.clone()))
+        .collect()
+}
+
+fn merge_library_search_results(
+    batches: Vec<(Vec<semantic::SemBookHits>, bool)>,
+) -> MergedLibrarySearchResults {
+    let mut merged = HashMap::<String, semantic::SemBookHits>::new();
+    let mut thematic_hit_keys = HashSet::new();
+    for (batch, is_thematic_query) in batches {
+        for mut book in batch {
+            if is_thematic_query {
+                for hit in &book.hits {
+                    thematic_hit_keys.insert(library_semantic_hit_key(&book.book_id, hit));
+                }
+            }
+            if let Some(existing) = merged.get_mut(&book.book_id) {
+                existing.score = existing.score.max(book.score);
+                existing.hits.append(&mut book.hits);
+                existing.hits.sort_by(|left, right| {
+                    right
+                        .score
+                        .partial_cmp(&left.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mut seen = HashSet::new();
+                existing
+                    .hits
+                    .retain(|hit| seen.insert((hit.chapter, hit.snippet.clone())));
+                existing
+                    .hits
+                    .truncate(MAX_LIBRARY_SINGLE_BOOK_CANDIDATE_HITS);
+            } else {
+                merged.insert(book.book_id.clone(), book);
+            }
+        }
+    }
+    let mut results = merged.into_values().collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    MergedLibrarySearchResults {
+        results,
+        thematic_hit_keys,
+    }
+}
+
 /// A library question reports the top twenty ranked books, one excerpt each.
 /// A comparison instead reserves one excerpt for every selected book, so a
 /// high-scoring volume cannot crowd the other side out of the model context.
@@ -1369,6 +1563,8 @@ fn select_library_sources(
     results: &[semantic::SemBookHits],
     selected_ids: Option<&[String]>,
     compare: bool,
+    question: &str,
+    thematic_hit_keys: Option<&HashSet<String>>,
 ) -> Result<Vec<AiReaderSource>, String> {
     let mut sources = Vec::new();
     let mut seen = HashSet::new();
@@ -1407,6 +1603,54 @@ fn select_library_sources(
                     hit,
                     MAX_LIBRARY_COMPARE_SOURCES,
                 );
+            }
+        }
+    } else if let Some(terms) = library_theme_terms(question) {
+        // For a themed literature question, an unrelated martial-arts scene is
+        // worse than a smaller evidence set. Reserve one relevant passage per
+        // book first, then add a second relevant location only after the first
+        // pass has covered the available works.
+        let mut relevant_books = HashSet::new();
+        for book in results {
+            if !relevant_books.insert(book.book_id.clone()) {
+                continue;
+            }
+            if let Some(hit) = book.hits.iter().find(|hit| {
+                hit_matches_library_theme(hit, terms)
+                    || thematic_hit_keys.is_some_and(|keys| {
+                        keys.contains(&library_semantic_hit_key(&book.book_id, hit))
+                    })
+            }) {
+                push_library_source(
+                    &mut sources,
+                    &mut seen,
+                    book,
+                    hit,
+                    MAX_LIBRARY_QUESTION_SOURCES,
+                );
+            }
+        }
+        if !sources.is_empty() {
+            for book in results {
+                for hit in book
+                    .hits
+                    .iter()
+                    .filter(|hit| {
+                        hit_matches_library_theme(hit, terms)
+                            || thematic_hit_keys.is_some_and(|keys| {
+                                keys.contains(&library_semantic_hit_key(&book.book_id, hit))
+                            })
+                    })
+                    .skip(1)
+                {
+                    push_library_source(
+                        &mut sources,
+                        &mut seen,
+                        book,
+                        hit,
+                        MAX_LIBRARY_QUESTION_SOURCES,
+                    );
+                }
             }
         }
     } else {
@@ -1849,6 +2093,117 @@ fn fallback_deep_source_ids(source_count: usize) -> Vec<usize> {
     (1..=source_count.min(MAX_LIBRARY_DEEP_SOURCES)).collect()
 }
 
+/// The evidence model is useful for ranking relevance, but it occasionally
+/// returns a single very strong-looking paragraph for a deliberately broad
+/// library question. Keep that paragraph, then add the best available
+/// independent books so the answer model can make a real synthesis. This is
+/// deliberately a no-op when the local result set itself cannot support that
+/// breadth (for example, a narrowly indexed collection).
+fn ensure_library_synthesis_source_ids(
+    sources: &[AiReaderSource],
+    source_ids: Vec<usize>,
+    question: &str,
+    answer_length: LibraryAnswerLength,
+) -> Vec<usize> {
+    let mut ids = source_ids
+        .into_iter()
+        .filter(|id| (1..=sources.len()).contains(id))
+        .collect::<Vec<_>>();
+    let mut seen_ids = HashSet::new();
+    ids.retain(|id| seen_ids.insert(*id));
+
+    let available_books = sources
+        .iter()
+        .map(|source| source.book_id.as_str())
+        .collect::<HashSet<_>>();
+    if sources.len() < answer_length.required_sources()
+        || available_books.len() < answer_length.required_books()
+    {
+        ids.truncate(answer_length.source_limit());
+        return ids;
+    }
+    if library_theme_terms(question).is_none() {
+        return ids;
+    }
+    let mut covered_books = ids
+        .iter()
+        .filter_map(|id| sources.get(id.saturating_sub(1)))
+        .map(|source| source.book_id.as_str())
+        .collect::<HashSet<_>>();
+    for (index, source) in sources.iter().enumerate() {
+        if covered_books.len() >= answer_length.required_books() {
+            break;
+        }
+        let id = index + 1;
+        if seen_ids.insert(id) && covered_books.insert(source.book_id.as_str()) {
+            ids.push(id);
+        }
+    }
+    for (index, _) in sources.iter().enumerate() {
+        if ids.len() >= answer_length.source_limit() {
+            break;
+        }
+        let id = index + 1;
+        if seen_ids.insert(id) {
+            ids.push(id);
+        }
+    }
+    ids.truncate(answer_length.source_limit());
+    ids
+}
+
+fn cited_library_source_ids(answer: &str, source_count: usize) -> Vec<usize> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for (start, _) in answer.match_indices("[来源 ") {
+        let after_marker = &answer[start + "[来源 ".len()..];
+        let Some(end) = after_marker.find(']') else {
+            continue;
+        };
+        let Ok(id) = after_marker[..end].trim().parse::<usize>() else {
+            continue;
+        };
+        if (1..=source_count).contains(&id) && seen.insert(id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+fn library_answer_has_sufficient_synthesis(
+    answer: &str,
+    sources: &[AiReaderSource],
+    answer_length: LibraryAnswerLength,
+) -> bool {
+    let available_books = sources
+        .iter()
+        .map(|source| source.book_id.as_str())
+        .collect::<HashSet<_>>();
+    if sources.len() < answer_length.required_sources()
+        || available_books.len() < answer_length.required_books()
+    {
+        return true;
+    }
+    let cited = cited_library_source_ids(answer, sources.len());
+    if cited.len() < answer_length.required_sources() {
+        return false;
+    }
+    cited
+        .iter()
+        .filter_map(|id| sources.get(id.saturating_sub(1)))
+        .map(|source| source.book_id.as_str())
+        .collect::<HashSet<_>>()
+        .len()
+        >= answer_length.required_books()
+}
+
+fn library_question_with_length(question: &str, answer_length: LibraryAnswerLength) -> String {
+    format!(
+        "{question}\n\n【作答规格】{} 这条规格覆盖提示词中任何冲突的篇幅、依据条数和来源数量要求。",
+        answer_length.prompt_specification()
+    )
+}
+
 fn system_prompt(task: &str) -> &'static str {
     match task {
         "summary" => {
@@ -1870,13 +2225,16 @@ fn system_prompt(task: &str) -> &'static str {
             "你是阅读助手的引用审校人。根据用户问题、候选来源和回答草稿，直接输出修订后的完整回答，不要写审核过程。删除任何不由 [来源 N] 直接支持的事实性结论；每个保留的来源编号必须真实存在且支撑其所在句。若草稿把选句、章节开篇或局部材料说成全书结论，改成与当前已读范围相称的表述。保留原有 Markdown 标题和清晰的直接回答。"
         }
         "library_evidence_filter" => {
-            "你是本地书库的证据审稿器。候选段落会编号为来源 N，并标注其材料类型。只选择能直接支撑用户问题的段落，优先正文、具体人物关系、情节、观点或可靠评论；剔除只因词语相近而命中的序言、泛泛创作谈、无关文体或题材材料。对于“X 说了什么”“X 有什么特点”这类宽问题，优先选同时覆盖核心对象、关键论点和不同材料类型的段落，避免只挑同一段话的重复表述。不要回答问题，不要解释。只输出 JSON 对象，格式严格为 {\"sourceIds\":[1,4,7]}；最多 10 个，按证据强度排序。"
+            "你是本地书库的证据审稿器。候选段落会编号为来源 N，并标注书名、章节和材料类型。只选择能直接支撑用户问题的段落，优先正文、具体人物关系、情节、观点或可靠评论；剔除只因词语相近而命中的序言、泛泛创作谈、无关文体或题材材料。对于“X 有什么特点”“某类作品如何表现”这类宽问题，若候选中有足够材料，必须优先选来自至少两部不同作品的 3—6 条正文证据；作者自述、前言或评论只能补充，不能单独支撑对一类作品的结论。避免只挑同一段话的重复表述；若只有一部作品确实相关，保留最强正文证据即可，后续回答会说明范围。不要回答问题，不要解释。只输出 JSON 对象，格式严格为 {\"sourceIds\":[1,4,7]}；最多 10 个，按证据强度排序。"
         }
         "library_single_book_evidence_filter" => {
             "你是单本书深度解读的证据审稿器。候选段落全部来自同一本书，来源 N 标有“目录、正文开篇、正文检索”等材料类型。用户问“这本书写了什么”或任何单书问题时，先用目录或章节开篇确定全书范围，再优先选择能说明核心人物/事件/论点、结构或结论的正文检索片段；目录不能单独替代正文证据，前言、后记、作者闲谈只有用户明确询问时才选。选择 4—10 条彼此覆盖不同章节的证据；若材料确实没有全书概述，选择最能拼出主题和重点的正文。不要回答问题，不要解释。只输出 JSON 对象，格式严格为 {\"sourceIds\":[1,4,7]}，按覆盖全书的重要性排序。"
         }
         "library_question" => {
-            "你是兼顾证据与洞见的本地书库深度解读助手。必须使用以下 Markdown 结构，不能添加开场套话或重复同一结论：\n\n## 直接回答\n先用 2—3 句正面回答问题，给出清晰主张；如果问题宽泛，先说明本次材料实际覆盖的对象与范围。\n\n## 关键依据\n列出 2—4 条彼此不同、能推进回答的论点。每条先写短小的论点，再说明材料事实，并在句末标注 [来源 N]。不要逐条复述检索片段；同一来源只在确有新证据时重复使用。\n\n## 解读\n只写一段，把前述证据连接成有解释力的理解；可以结合常识和文学/历史分析，但必须用“这意味着”“可以理解为”等措辞明确它是分析，不能伪装成书库原文事实。\n\n仅当证据确实不足时，附加 `## 保留意见`，具体说明缺少什么材料；不得以“未找到专门论述”代替回答。每个来源标题可能带有“标签”：它是目录信号，可用于组织时代、类别、体裁和篇幅的比较框架，却绝不能当作正文引文或具体情节证据。不得杜撰未提供的具体情节、人物、引文或书中观点。输出前逐条核对：每个 [来源 N] 必须真实支撑其所在结论；证据不足就删掉引用。"
+            "你是本地书库问答助手。直接给读者答案，不得展示思考、检索、核对、审校或草稿过程。全篇力求 700 个汉字以内，信息密度优先，不能用重复结论凑篇幅。必须使用以下 Markdown 结构：\n\n## 直接回答\n用 2—4 句直接回答问题，先给清晰结论；宽泛问题要明确“以下依据本次命中的作品片段”。\n\n## 关键依据\n列出 4—6 条彼此不同的短条目。每一条必须严格采用“`- **一句重点。** 随后的证据说明`”这一形式：先用不超过 18 个汉字的完整重点句概括一个特点，句号放在加粗内；再紧接着写《书名》中的具体人物、情节、观点或叙述如何证明这句重点，并在句末标注 [来源 N]。重点句不能只写书名或“特点如下”，也不能与后文证据脱节。对“某类作品有什么特点”等宽问题，只要上下文有至少三部作品，必须使用至少三部不同作品、四条不同来源；不要把同一段话拆成多条，也不要以作者自述、前言或评论替代相关作品本身的证据。\n\n## 解读\n用 2—3 句把前述不同作品的证据连接成解释；用“这意味着”或“可以理解为”明确这是分析，并指出哪些结论只适用于本次命中的片段。\n\n仅当证据确实不足时，附加“## 保留意见”并具体说明材料范围；不得以“未找到专门论述”代替回答。来源标题中的标签只能辅助组织，绝不能当作正文引文或具体情节证据。不得杜撰未提供的具体情节、人物、引文或书中观点。不得用“某人、某部作品、某来源、材料中”代替书名、作者、人物名或情节；若片段没有名字，就明确说“该片段未提供姓名”，不要编故事。严禁输出“草稿、核对、审核、审校、终审、让我、我需要、来源 N：包含”等过程性文字。输出前逐条核对：每个 [来源 N] 必须真实支撑其所在结论；证据不足就删掉引用。"
+        }
+        "library_question_repair" => {
+            "只输出最终给读者看的书库问答，第一行必须是 `## 直接回答`。不要写任何推理、核对、审校、草稿、来源逐条验真或自我对话。严格使用 `## 直接回答`、`## 关键依据`、`## 解读` 三段；若作答规格要求，还必须保留 `## 延展观点` 或 `## 边界与反例`。关键依据的每一条必须写成 `- **一句重点。** 紧接着的证据说明 [来源 N]`：重点句不超过 18 个汉字、加粗且有句号，后半句必须以《书名》、人物、情节或观点证明这句重点。上下文有至少三部作品时，关键依据必须使用至少三部不同作品和四个不同 [来源 N]，不可重复解释同一段。不能写“某人、某部作品、某来源、材料中”。证据不够时只在最后写简短的 `## 保留意见`，不要猜测。"
         }
         "library_single_book_question" => {
             "你是单本书深度解读助手。用户明确只问一本书，首要任务是回答这本书实际写了什么，不能围绕边缘材料兜圈子。必须使用以下 Markdown 结构：\n\n## 直接回答\n开头先用 2—4 句说明全书对象、范围、主线和最重要的内容；不要先讲检索限制或材料过程。\n\n## 这本书具体写了什么\n列出 3—5 点，尽量覆盖不同章节中的人物、事件、论证、叙述阶段或结论；每点必须带 [来源 N]。\n\n## 解读\n用一段解释这些内容如何共同构成这本书的重点；分析必须和“书写了什么”相连，不能用无关背景代替内容。\n\n仅当现有段落确实无法确定某项时才写 `## 保留意见`。不得杜撰书外知识、具体情节或章节；来源标题中的标签只能辅助组织，不能当正文证据。输出前逐条检查：删掉不直接说明本书内容的材料和无证据结论。"
@@ -1885,7 +2243,7 @@ fn system_prompt(task: &str) -> &'static str {
             "你是单本书问答的终审编辑。给出的上下文全部来自同一本书，用户问题和一份回答草稿会一起提供。请直接输出修订后的完整 Markdown 回答，不要写审核过程。第一段必须正面说明这本书写了什么；删除围绕边缘材料、检索过程或泛泛背景的内容。每个事实性要点必须由 [来源 N] 支撑，且不得引入上下文外事实。保留结构 `## 直接回答`、`## 这本书具体写了什么`、`## 解读`；只有确有必要才保留 `## 保留意见`。"
         }
         "library_question_verify" => {
-            "你是本地书库问答的终审编辑。给出的上下文与回答草稿会一起提供。请直接输出修订后的完整 Markdown 回答，不要写审核过程。逐条核对所有事实性结论：每一项都必须由同编号 [来源 N] 的原文直接支撑；不能支撑就删除、改成明确的分析性表述，或写入 `## 保留意见`。不得引用不存在的来源，不得把目录标签当正文事实。保留 `## 直接回答`、`## 关键依据`、`## 解读` 的结构。"
+            "你只输出给读者看的最终书库问答，不是审核报告。给出的上下文与回答草稿会一起提供：直接改写成完整 Markdown 答案，绝不解释你的核对过程，绝不出现“草稿、核对、审核、审校、终审、来源 N：包含、让我、我需要”等词。保留 ## 直接回答、## 关键依据、## 解读 三个结构；若作答规格要求，还必须保留 ## 延展观点 或 ## 边界与反例。直接回答 2—4 句；关键依据每条必须先写 `**一句重点。**`（不超过 18 个汉字，加粗内含句号），后接《书名》中的人物、情节或观点作为论据，并在句末标 [来源 N]。若草稿没有这个“重点在前、论据在后”的形式，必须改写成该形式。上下文有至少三部作品时，必须使用多个相关作品和不同来源，不能用同一段反复凑条目；具体数量以作答规格为准。删除任何不由同编号 [来源 N] 直接支撑的事实性结论；分析要明确写成“这意味着”或“可以理解为”。不得引用不存在的来源，也不得把目录标签、作者自述或泛泛评论当作某类作品的唯一证据。"
         }
         "library_compare" => {
             "你是严谨的跨书对比助手。只依据给出的本地检索片段，用中文归纳各书的共同点、差异与证据不足之处；每个关键结论后标注 [来源 N]。来源标题中的本地自动“标签”可用于建立时代、类别、体裁和篇幅的比较框架，但不能替代正文证据或被说成原文事实。不得用片段外知识补全观点，也不得把未出现的书说成参与了对比。"
@@ -1930,6 +2288,9 @@ fn json_text_content(value: &serde_json::Value) -> Option<String> {
 }
 
 fn openai_compatible_content(value: &serde_json::Value) -> Option<String> {
+    // Provider reasoning fields are internal traces, never reader-facing
+    // answers. A reasoning-only envelope is treated as an empty completion so
+    // the bounded retry path requests normal content.
     let first_choice = value
         .pointer("/choices/0/message/content")
         .and_then(json_text_content)
@@ -1942,20 +2303,6 @@ fn openai_compatible_content(value: &serde_json::Value) -> Option<String> {
         .or_else(|| {
             value
                 .pointer("/choices/0/content")
-                .and_then(json_text_content)
-        })
-        // Some reasoning-capable compatible gateways omit `content` when the
-        // normal completion is exhausted, but retain their usable answer in a
-        // reasoning field. Prefer normal content above; this is a last resort
-        // so a successful request is not presented as an empty response.
-        .or_else(|| {
-            value
-                .pointer("/choices/0/message/reasoning_content")
-                .and_then(json_text_content)
-        })
-        .or_else(|| {
-            value
-                .pointer("/choices/0/message/reasoning")
                 .and_then(json_text_content)
         });
     first_choice
@@ -1979,6 +2326,21 @@ fn openai_compatible_content(value: &serde_json::Value) -> Option<String> {
         // A few OpenAI-compatible gateways forward the Responses API body.
         .or_else(|| value.get("output_text").and_then(json_text_content))
         .or_else(|| value.get("output").and_then(json_text_content))
+}
+
+fn provider_max_tokens(task: &str) -> u16 {
+    matches!(
+        task,
+        "library_question"
+            | "library_question_verify"
+            | "library_question_repair"
+            | "library_single_book_question"
+            | "library_single_book_verify"
+            | "library_compare"
+            | "library_compare_verify"
+    )
+    .then_some(LIBRARY_SYNTHESIS_PROVIDER_MAX_TOKENS)
+    .unwrap_or(READING_PROVIDER_MAX_TOKENS)
 }
 
 /// Retry one answer generation with a compact, bounded context when a
@@ -2036,7 +2398,7 @@ fn call_openai_compatible(
     let payload = serde_json::json!({
         "model": config.model,
         "stream": false,
-        "max_tokens": READING_PROVIDER_MAX_TOKENS,
+        "max_tokens": provider_max_tokens(&task),
         "messages": [
             {"role":"system", "content": system_prompt(&task)},
             {"role":"user", "content": format!("阅读内容：{}\n\n任务：{}\n问题：{}", context, task, question)}
@@ -2083,7 +2445,7 @@ fn call_anthropic_messages(
     let endpoint = endpoint_for(&config.base_url, "/v1/messages");
     let payload = serde_json::json!({
         "model": config.model,
-        "max_tokens": READING_PROVIDER_MAX_TOKENS,
+        "max_tokens": provider_max_tokens(&task),
         "temperature": 0.2,
         "system": system_prompt(&task),
         "messages": [{
@@ -2629,6 +2991,37 @@ pub(crate) fn library_model_tags_settings(
     })
 }
 
+fn library_answer_length(db: &crate::db::AppDb) -> LibraryAnswerLength {
+    db.metadata(LIBRARY_ANSWER_LENGTH_KEY)
+        .as_deref()
+        .and_then(LibraryAnswerLength::parse)
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub(crate) fn library_answer_settings(
+    state: tauri::State<AppState>,
+) -> Result<LibraryAnswerSettings, String> {
+    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    Ok(LibraryAnswerSettings {
+        answer_length: library_answer_length(db.as_ref().ok_or("SQLite 数据库不可用")?),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn set_library_answer_length(
+    state: tauri::State<AppState>,
+    request: SetLibraryAnswerLengthRequest,
+) -> Result<LibraryAnswerSettings, String> {
+    let answer_length = LibraryAnswerLength::parse(&request.answer_length)
+        .ok_or("作答长度只支持 short、medium 或 long")?;
+    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    db.as_ref()
+        .ok_or("SQLite 数据库不可用")?
+        .set_metadata(LIBRARY_ANSWER_LENGTH_KEY, answer_length.as_str())?;
+    Ok(LibraryAnswerSettings { answer_length })
+}
+
 #[tauri::command]
 pub(crate) fn set_library_model_tags_enabled(
     state: tauri::State<AppState>,
@@ -2683,16 +3076,121 @@ async fn verify_library_answer(
     question: &str,
     draft: String,
     context: String,
+    evidence_sources: Option<&[AiReaderSource]>,
+    answer_length: LibraryAnswerLength,
 ) -> String {
-    let verify_question = format!("用户问题：{question}\n\n待审草稿：\n{draft}");
-    let task = task.to_string();
-    match tokio::task::spawn_blocking(move || {
-        call_reading_provider(config, task, verify_question, context)
+    let is_readable_final = |answer: &str| is_final_library_verification(task, answer);
+    let accepts = |answer: &str| {
+        is_readable_final(answer)
+            && evidence_sources.is_none_or(|sources| {
+                task != "library_question_verify"
+                    || library_answer_has_sufficient_synthesis(answer, sources, answer_length)
+            })
+    };
+    let verify_question = format!(
+        "用户问题：{question}\n\n作答规格：{}\n\n待审草稿：\n{draft}",
+        answer_length.prompt_specification()
+    );
+    let verify_task = task.to_string();
+    let provider_task = verify_task.clone();
+    let verify_config = config.clone();
+    let verify_context = context.clone();
+    let verified = tokio::task::spawn_blocking(move || {
+        call_reading_provider(
+            verify_config,
+            provider_task,
+            verify_question,
+            verify_context,
+        )
     })
     .await
+    .ok()
+    .and_then(Result::ok);
+    if let Some(answer) = verified.as_deref().filter(|answer| accepts(answer)) {
+        return answer.to_string();
+    }
+    if accepts(&draft) {
+        return draft;
+    }
+
+    let repair_task =
+        (verify_task == "library_question_verify").then_some("library_question_repair");
+    let repaired = if let Some(repair_task) = repair_task {
+        let repair_question = format!(
+            "用户问题：{question}\n\n作答规格：{}\n\n请只输出最终答案，并严格遵守该作答规格。",
+            answer_length.prompt_specification()
+        );
+        tokio::task::spawn_blocking(move || {
+            call_reading_provider(config, repair_task.to_string(), repair_question, context)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+    } else {
+        None
+    };
+    if let Some(answer) = repaired.as_deref().filter(|answer| accepts(answer)) {
+        return answer.to_string();
+    }
+
+    // Evidence breadth is an improvement target, not a reason to erase a
+    // reader-facing answer. If every rewrite misses the enhanced threshold,
+    // retain the best structurally safe answer; audit transcripts and malformed
+    // output still remain blocked by `is_readable_final`.
+    for answer in [
+        repaired.as_deref(),
+        verified.as_deref(),
+        Some(draft.as_str()),
+    ]
+    .into_iter()
+    .flatten()
     {
-        Ok(Ok(verified)) if !verified.trim().is_empty() => verified,
-        _ => draft,
+        if is_readable_final(answer) {
+            return answer.to_string();
+        }
+    }
+    "本次回答未通过格式与引用校验，请重新提问。".to_string()
+}
+
+/// Do not replace a usable draft with a model audit transcript. This check
+/// validates fixed answer shapes; compare answers have no fixed headings but
+/// still reject known internal-review language.
+fn is_final_library_verification(task: &str, answer: &str) -> bool {
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return false;
+    }
+    let internal_markers = [
+        "草稿声称",
+        "现在核对",
+        "让我仔细核对",
+        "作为终审编辑",
+        "我需要决定",
+        "审核过程",
+        "来源 1：包含",
+        "用户的问题是",
+        "原始文本",
+        "依据 1 和 2",
+        "因此，我",
+        "需要修正",
+        "某来源",
+        "某部作品",
+        "某人",
+    ];
+    if internal_markers
+        .iter()
+        .any(|marker| answer.contains(marker))
+    {
+        return false;
+    }
+    match task {
+        "library_question_verify" => ["## 直接回答", "## 关键依据", "## 解读"]
+            .iter()
+            .all(|heading| answer.contains(heading)),
+        "library_single_book_verify" => ["## 直接回答", "## 这本书具体写了什么", "## 解读"]
+            .iter()
+            .all(|heading| answer.contains(heading)),
+        _ => true,
     }
 }
 
@@ -2846,15 +3344,19 @@ pub(crate) async fn ask_library_assistant(
     } else {
         Some(full_library_semantic_scope(state.inner())?)
     };
-    let config = {
+    let (config, answer_length) = {
         let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        canonicalize_deepseek_config(load_config(guard.as_ref().ok_or("SQLite 数据库不可用")?)?)
+        let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        (
+            canonicalize_deepseek_config(load_config(db)?),
+            library_answer_length(db),
+        )
     };
     if !status(&config).configured {
         return Err("请先在阅读助手中配置接口、模型和 API Key".into());
     }
 
-    let (mut results, structure_sources) = if single_book {
+    let (mut results, structure_sources, thematic_hit_keys) = if single_book {
         let depth = single_book_depth_search(
             app.clone(),
             &question,
@@ -2864,12 +3366,17 @@ pub(crate) async fn ask_library_assistant(
                 .ok_or("单书深度检索缺少图书 ID")?,
         )
         .await?;
-        (depth.semantic_results, depth.structure_sources)
+        (depth.semantic_results, depth.structure_sources, None)
     } else {
-        (
-            semantic::semantic_search(app, question.clone(), search_scope).await?,
-            Vec::new(),
-        )
+        let mut batches = Vec::new();
+        for (index, query) in library_retrieval_queries(&question).into_iter().enumerate() {
+            batches.push((
+                semantic::semantic_search(app.clone(), query, search_scope.clone()).await?,
+                index > 0,
+            ));
+        }
+        let merged = merge_library_search_results(batches);
+        (merged.results, Vec::new(), Some(merged.thematic_hit_keys))
     };
     // 大模型标签始终参与问答的检索和提示词；设置开关只影响用户在左侧
     // 范围筛选时是否看见、选择这些分类标签。
@@ -2886,7 +3393,13 @@ pub(crate) async fn ask_library_assistant(
             structure_sources,
         )?
     } else {
-        select_library_sources(&results, selected_ids.as_deref(), compare)?
+        select_library_sources(
+            &results,
+            selected_ids.as_deref(),
+            compare,
+            &question,
+            thematic_hit_keys.as_ref(),
+        )?
     };
     for source in &mut sources {
         source.tags = model_tags.get(&source.book_id).cloned().unwrap_or_default();
@@ -2899,11 +3412,20 @@ pub(crate) async fn ask_library_assistant(
         let draft = call_library_answer_with_retry(
             config.clone(),
             "library_compare".to_string(),
-            question.clone(),
+            library_question_with_length(&question, answer_length),
             context.clone(),
         )
         .await?;
-        verify_library_answer(config, "library_compare_verify", &question, draft, context).await
+        verify_library_answer(
+            config,
+            "library_compare_verify",
+            &question,
+            draft,
+            context,
+            None,
+            answer_length,
+        )
+        .await
     } else {
         let candidate_context = library_context(&sources);
         if candidate_context.is_empty() {
@@ -2926,11 +3448,17 @@ pub(crate) async fn ask_library_assistant(
         })
         .await
         .map_err(|error| format!("书库证据筛选任务失败：{error}"))?;
-        let source_ids = filtered
+        let mut source_ids = filtered
             .ok()
             .map(|response| parse_deep_source_ids(&response, sources.len()))
             .filter(|ids| !ids.is_empty())
             .unwrap_or_else(|| fallback_deep_source_ids(sources.len()));
+        source_ids.truncate(answer_length.source_limit());
+        let source_ids = if single_book {
+            source_ids
+        } else {
+            ensure_library_synthesis_source_ids(&sources, source_ids, &question, answer_length)
+        };
         let context = library_context_for_source_ids(&sources, &source_ids);
         if context.is_empty() {
             return Err("没有可发送的深度解读证据".into());
@@ -2943,7 +3471,7 @@ pub(crate) async fn ask_library_assistant(
         let draft = call_library_answer_with_retry(
             config.clone(),
             answer_task.to_string(),
-            question.clone(),
+            library_question_with_length(&question, answer_length),
             context.clone(),
         )
         .await?;
@@ -2952,7 +3480,16 @@ pub(crate) async fn ask_library_assistant(
         } else {
             "library_question_verify"
         };
-        verify_library_answer(config, verify_task, &question, draft, context).await
+        verify_library_answer(
+            config,
+            verify_task,
+            &question,
+            draft,
+            context,
+            (!single_book).then_some(sources.as_slice()),
+            answer_length,
+        )
+        .await
     };
     Ok(AiReaderAnswer {
         ok: true,
@@ -3348,18 +3885,35 @@ mod tests {
             Some("包装后的回答")
         );
         let reasoning_only_response = serde_json::json!({
-            "choices": [{"message": {"content": "", "reasoning_content": "兼容接口保留的回答"}}]
+            "choices": [{"message": {"content": "", "reasoning_content": "内部推理，不应展示"}}]
         });
-        assert_eq!(
-            openai_compatible_content(&reasoning_only_response).as_deref(),
-            Some("兼容接口保留的回答")
-        );
+        assert_eq!(openai_compatible_content(&reasoning_only_response), None);
         let capitalized_response = serde_json::json!({
             "Response": {"Choices": [{"Message": {"Content": "大写包装回答"}}]}
         });
         assert_eq!(
             openai_compatible_content(&capitalized_response).as_deref(),
             Some("大写包装回答")
+        );
+    }
+
+    #[test]
+    fn library_synthesis_has_room_for_reasoning_and_a_final_answer() {
+        assert_eq!(
+            provider_max_tokens("library_question"),
+            LIBRARY_SYNTHESIS_PROVIDER_MAX_TOKENS
+        );
+        assert_eq!(
+            provider_max_tokens("library_question_verify"),
+            LIBRARY_SYNTHESIS_PROVIDER_MAX_TOKENS
+        );
+        assert_eq!(
+            provider_max_tokens("library_evidence_filter"),
+            READING_PROVIDER_MAX_TOKENS
+        );
+        assert_eq!(
+            provider_max_tokens("reading_question"),
+            READING_PROVIDER_MAX_TOKENS
         );
     }
 
@@ -3386,7 +3940,7 @@ mod tests {
             sem_book("7", "甲书", &[(2, "甲书的证据"), (3, "甲书的第二段")]),
             sem_book("8", "乙书", &[(4, "乙书的证据")]),
         ];
-        let sources = select_library_sources(&results, None, false).unwrap();
+        let sources = select_library_sources(&results, None, false, "关键问题", None).unwrap();
         assert_eq!(sources[0].book_id, "7");
         assert_eq!(sources[0].book_title, "甲书");
         assert_eq!(sources[0].chapter, 2);
@@ -3400,7 +3954,7 @@ mod tests {
         let results = (1..=25)
             .map(|id| sem_book(&id.to_string(), &format!("第{id}本"), &[(0, "证据")]))
             .collect::<Vec<_>>();
-        let sources = select_library_sources(&results, None, false).unwrap();
+        let sources = select_library_sources(&results, None, false, "关键问题", None).unwrap();
         assert_eq!(sources.len(), MAX_LIBRARY_QUESTION_SOURCES);
         assert_eq!(sources[0].book_id, "1");
         assert_eq!(sources[19].book_id, "20");
@@ -3421,10 +3975,47 @@ mod tests {
             sem_book("7", "甲书", &[(1, "甲书的重复候选")]),
             sem_book("8", "乙书", &[(0, "乙书的第一段")]),
         ];
-        let sources = select_library_sources(&results, None, false).unwrap();
+        let sources = select_library_sources(&results, None, false, "关键问题", None).unwrap();
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0].book_id, "7");
         assert_eq!(sources[1].book_id, "8");
+    }
+
+    #[test]
+    fn themed_library_search_keeps_semantically_matched_love_passages_without_word_match() {
+        let results = vec![
+            sem_book(
+                "1",
+                "英雄志",
+                &[(0, "他从此不做官，也不做侠，人生只剩下她。")],
+            ),
+            sem_book("2", "兵器谱", &[(0, "众人争夺灵道石色，武功决定胜负。")]),
+            sem_book("3", "江湖旧事", &[(0, "夫妻在乱世中离别后仍相守。")]),
+        ];
+        let thematic_hit_keys = [library_semantic_hit_key("1", &results[0].hits[0])]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let sources = select_library_sources(
+            &results,
+            None,
+            false,
+            "武侠小说中的情爱有什么特点",
+            Some(&thematic_hit_keys),
+        )
+        .unwrap();
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.book_title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["英雄志", "江湖旧事"]
+        );
+        assert!(!sources.iter().any(|source| source.book_title == "兵器谱"));
+        assert_eq!(
+            library_retrieval_queries("武侠小说中的情爱有什么特点").len(),
+            2
+        );
+        assert_eq!(library_retrieval_queries("武侠小说的叙事特点").len(), 1);
     }
 
     #[test]
@@ -3486,6 +4077,110 @@ mod tests {
         );
         assert!(parse_deep_source_ids("无法确定", 20).is_empty());
         assert_eq!(fallback_deep_source_ids(3), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn broad_library_questions_fill_a_single_selected_example_with_diverse_evidence() {
+        let sources = vec![
+            AiReaderSource {
+                book_id: "1".into(),
+                book_title: "甲书".into(),
+                chapter: 0,
+                excerpt: "甲书写人物相思与相守。".into(),
+                source_kind: "正文检索".into(),
+                tags: Vec::new(),
+            },
+            AiReaderSource {
+                book_id: "2".into(),
+                book_title: "乙书".into(),
+                chapter: 1,
+                excerpt: "乙书写夫妻在乱世中离别。".into(),
+                source_kind: "正文检索".into(),
+                tags: Vec::new(),
+            },
+            AiReaderSource {
+                book_id: "3".into(),
+                book_title: "丙书".into(),
+                chapter: 2,
+                excerpt: "丙书写恋人因恩怨相爱。".into(),
+                source_kind: "正文检索".into(),
+                tags: Vec::new(),
+            },
+            AiReaderSource {
+                book_id: "4".into(),
+                book_title: "丁书".into(),
+                chapter: 3,
+                excerpt: "丁书写婚姻与江湖选择。".into(),
+                source_kind: "正文检索".into(),
+                tags: Vec::new(),
+            },
+        ];
+        let ids = ensure_library_synthesis_source_ids(
+            &sources,
+            vec![1],
+            "武侠小说中的情爱有什么特点",
+            LibraryAnswerLength::Short,
+        );
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        assert!(library_answer_has_sufficient_synthesis(
+            "## 直接回答\n结论。[来源 1]\n\n## 关键依据\n- 《甲书》。[来源 1]\n- 《乙书》。[来源 2]\n- 《丙书》。[来源 3]\n- 《丁书》。[来源 4]\n\n## 解读\n这意味着。",
+            &sources,
+            LibraryAnswerLength::Short,
+        ));
+        assert!(!library_answer_has_sufficient_synthesis(
+            "## 直接回答\n结论。[来源 1]\n\n## 关键依据\n- 《甲书》。[来源 1]\n\n## 解读\n这意味着。",
+            &sources,
+            LibraryAnswerLength::Short,
+        ));
+    }
+
+    #[test]
+    fn small_library_does_not_require_unavailable_cross_book_evidence() {
+        let sources = vec![AiReaderSource {
+            book_id: "1".into(),
+            book_title: "甲书".into(),
+            chapter: 0,
+            excerpt: "甲书片段".into(),
+            source_kind: "正文检索".into(),
+            tags: Vec::new(),
+        }];
+        assert_eq!(
+            ensure_library_synthesis_source_ids(
+                &sources,
+                vec![1],
+                "武侠小说中的情爱有什么特点",
+                LibraryAnswerLength::Short,
+            ),
+            vec![1]
+        );
+        assert!(library_answer_has_sufficient_synthesis(
+            "简答 [来源 1]",
+            &sources,
+            LibraryAnswerLength::Short,
+        ));
+    }
+
+    #[test]
+    fn library_answer_lengths_scale_sources_and_prompt_requirements() {
+        assert_eq!(LibraryAnswerLength::default(), LibraryAnswerLength::Short);
+        assert_eq!(
+            LibraryAnswerLength::parse("medium"),
+            Some(LibraryAnswerLength::Medium)
+        );
+        assert_eq!(
+            LibraryAnswerLength::Long.source_limit(),
+            MAX_LIBRARY_DEEP_SOURCES
+        );
+        assert!(LibraryAnswerLength::Medium
+            .prompt_specification()
+            .contains("1,300"));
+        assert!(LibraryAnswerLength::Long
+            .prompt_specification()
+            .contains("8—10"));
+        let question =
+            library_question_with_length("武侠小说中的情爱有什么特点", LibraryAnswerLength::Long);
+        assert!(question.contains("【作答规格】"));
+        assert!(question.contains("2,100"));
     }
 
     #[test]
@@ -3591,14 +4286,49 @@ mod tests {
         assert!(prompt.contains("## 直接回答"));
         assert!(prompt.contains("## 关键依据"));
         assert!(prompt.contains("## 解读"));
+        assert!(prompt.contains("700 个汉字以内"));
+        assert!(prompt.contains("不得用“某人、某部作品、某来源、材料中”"));
+        assert!(prompt.contains("至少三部不同作品、四条不同来源"));
+        assert!(prompt.contains("一句重点。"));
+        assert!(prompt.contains("不超过 18 个汉字"));
         assert!(prompt.contains("逐条核对"));
         let evidence_filter = system_prompt("library_evidence_filter");
         assert!(evidence_filter.contains("sourceIds"));
-        assert!(evidence_filter.contains("重复表述"));
+        assert!(evidence_filter.contains("至少两部不同作品"));
         assert!(system_prompt("library_single_book_question").contains("这本书具体写了什么"));
         assert!(system_prompt("library_single_book_verify").contains("终审编辑"));
-        assert!(system_prompt("library_question_verify").contains("逐条核对"));
+        assert!(system_prompt("library_question_verify").contains("最终书库问答"));
+        assert!(system_prompt("library_question_verify").contains("重点在前、论据在后"));
         assert!(system_prompt("library_compare_verify").contains("两边证据"));
+    }
+
+    #[test]
+    fn library_verifier_rejects_audit_transcripts_and_requires_final_headings() {
+        let audit = "那么，让我仔细核对这些事实与原文。草稿声称：来源 1：包含……";
+        assert!(!is_final_library_verification(
+            "library_question_verify",
+            audit
+        ));
+        let missing_heading = "## 直接回答\n简答\n\n## 关键依据\n- 依据 [来源 1]";
+        assert!(!is_final_library_verification(
+            "library_question_verify",
+            missing_heading
+        ));
+        let placeholder = "## 直接回答\n某人如何如何。\n\n## 关键依据\n- 某来源提到某部作品。 [来源 1]\n\n## 解读\n这意味着……";
+        assert!(!is_final_library_verification(
+            "library_question_verify",
+            placeholder
+        ));
+        let final_answer = "## 直接回答\n简答。\n\n## 关键依据\n- 《甲书》的情节。 [来源 1]\n\n## 解读\n这意味着……";
+        assert!(is_final_library_verification(
+            "library_question_verify",
+            final_answer
+        ));
+        let scope_note = "## 直接回答\n本次仅根据材料中命中的片段作答。\n\n## 关键依据\n- 《甲书》的情节。 [来源 1]\n\n## 解读\n这意味着……";
+        assert!(is_final_library_verification(
+            "library_question_verify",
+            scope_note
+        ));
     }
 
     #[test]
@@ -3610,7 +4340,8 @@ mod tests {
             .rev()
             .map(|id| id.to_string())
             .collect::<Vec<_>>();
-        let sources = select_library_sources(&results, Some(&selected), true).unwrap();
+        let sources =
+            select_library_sources(&results, Some(&selected), true, "跨书对比", None).unwrap();
         assert_eq!(sources.len(), MAX_LIBRARY_COMPARE_BOOKS);
         assert_eq!(sources[0].book_id, "8");
         assert_eq!(sources[7].book_id, "1");
@@ -3620,7 +4351,8 @@ mod tests {
     fn comparison_rejects_when_only_one_indexed_book_is_available() {
         let results = vec![sem_book("7", "甲书", &[(0, "甲书第一段")])];
         let selected = vec!["7".to_string(), "8".to_string()];
-        let error = select_library_sources(&results, Some(&selected), true).unwrap_err();
+        let error =
+            select_library_sources(&results, Some(&selected), true, "跨书对比", None).unwrap_err();
         assert!(error.contains("至少两本"));
     }
 

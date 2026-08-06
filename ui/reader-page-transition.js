@@ -88,13 +88,14 @@ function beginChapterTurnFx(dir,chapter,where){
   chapterTurnPending=true;
   function done(){chapterTurnPending=false;}
   var fx=turnFxName();
-  if(!dir||!pager||!root||fx==='off'||reducedMotion())return showChapter(chapter,where).finally(done);
+  if(!dir||!pager||!root||fx==='off'||reducedMotion())return showChapter(chapter,where).then(function(){notifyReaderEndIfReached(dir);}).finally(done);
   clearTurnFx();
   // showChapter 会异步 fetch + 两帧排版。不能像同章翻页那样立即复制“新页”，
   // 否则复制到的仍是旧章节，并会在动画结束时闪回旧内容。
   captureTurnFxPage('turn-fx-outgoing');
   pager.classList.add('turn-fx');
   return showChapter(chapter,where).then(function(){
+    notifyReaderEndIfReached(dir);
     if(curCh!==chapter){clearTurnFx();return;}
     captureTurnFxPage('turn-fx-incoming');
     var ms=turnFxDuration(360),sheet=ensureTurnFxSheet();

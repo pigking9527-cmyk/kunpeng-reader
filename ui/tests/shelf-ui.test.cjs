@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "..", "shelf-ui.js"), "utf8");
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+const organizationEditor = fs.readFileSync(path.join(__dirname, "..", "book-info-organization.js"), "utf8");
 
 test("common settings dialog uses the requested 560px desktop width", () => {
   assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*width:\s*min\(560px,\s*calc\(100vw - 48px\)\);/s);
@@ -31,7 +32,8 @@ test("book card clicks explicitly close main-window floaters", () => {
   assert.match(card, /selectionTimer = setTimeout\([\s\S]*?\}, 180\)/);
   assert.match(card, /clearTimeout\(selectionTimer\)[\s\S]*?restoreDeferredSelection\(\)[\s\S]*?openBook\(\)/);
   assert.match(card, /addEventListener\("contextmenu"/);
-  assert.match(card, /openBookOrganizer\(getBook\(b\.id\) \|\| b, e, card\)/);
+  assert.match(card, /addEventListener\("contextmenu",[\s\S]*?e\.preventDefault\(\)[\s\S]*?closeShelfCardFloaters\(\)/);
+  assert.doesNotMatch(card, /openBookOrganizer/);
 });
 
 test("shelf opening preference switches between single-click opening and double-click opening", () => {
@@ -47,21 +49,28 @@ test("shelf opening preference switches between single-click opening and double-
   assert.match(source, /"单击打开图书" : "双击打开图书"/);
 });
 
-test("book organizer stays within the shelf content and closes when the shelf scrolls", () => {
-  const positioner = source.slice(source.indexOf("function createBookOrganizerAnchor"), source.indexOf("function applyOrganizationChoice"));
-  assert.match(positioner, /element\.getBoundingClientRect\(\)/);
-  assert.match(positioner, /rect\.left \+ organizerAnchor\.menuOffsetX/);
-  assert.match(positioner, /rect\.top \+ organizerAnchor\.menuOffsetY/);
-  assert.match(positioner, /positionBookOrganizer\(initialPlacement = false\)/);
-  assert.match(positioner, /organizerAnchorIsVisible/);
-  assert.match(positioner, /contentTop/);
-  assert.match(positioner, /contentBottom/);
-  assert.match(positioner, /maxTop/);
-  assert.match(positioner, /closeBookOrganizer\(\)/);
-  assert.match(source, /contentEl\.addEventListener\("scroll", closeBookOrganizer, \{ passive: true \}\)/);
-  assert.match(source, /global\.addEventListener\("resize", scheduleBookOrganizerResize\)/);
-  assert.match(source, /positionBookOrganizer\(true\)/);
-  assert.match(source, /function closeBookOrganizer\(\)[\s\S]*?organizerAnchor = null/);
+test("book information opens organization management on demand and right click opens no organizer", () => {
+  const info = html.slice(html.indexOf('id="book-info-modal"'), html.indexOf('id="book-organization-modal"'));
+  const manager = html.slice(html.indexOf('id="book-organization-modal"'), html.indexOf('id="similar-books-modal"'));
+  assert.match(info, /id="book-info-tags-manage"/);
+  assert.match(info, /id="book-info-collections-manage"/);
+  assert.doesNotMatch(info, /id="book-info-tags"|id="book-info-collections"/);
+  assert.match(manager, /id="book-info-tags" class="book-info-organization-editor"/);
+  assert.match(manager, /id="book-info-collections" class="book-info-organization-editor"/);
+  assert.match(manager, /role="tablist"/);
+  assert.match(html, /src="book-info-organization\.js"/);
+  assert.doesNotMatch(html, /id="batch-tag-btn"|id="batch-collection-btn"|id="batch-organization-modal"|id="book-organizer-menu"/);
+  assert.match(organizationEditor, /invoke\("set_book_organization"/);
+  assert.match(organizationEditor, /invoke\("rename_book_organization"/);
+  assert.match(organizationEditor, /invoke\("delete_book_organization"/);
+  assert.match(organizationEditor, /openBooklist\?\.\(entry\.name\)/);
+  assert.match(organizationEditor, /function showInlineRename/);
+  assert.match(organizationEditor, /remove\.textContent = "确认删除"/);
+  assert.match(organizationEditor, /function openManager\(field\)/);
+  assert.match(organizationEditor, /infoModal\?\.classList\.remove\("show"\)/);
+  assert.match(organizationEditor, /function closeManager\(\)[\s\S]*?infoModal\?\.classList\.add\("show"\)/);
+  assert.match(organizationEditor, /renderSummary\(tagSummary, book\?\.tags\)/);
+  assert.doesNotMatch(organizationEditor, /global\.prompt|global\.confirm/);
 });
 
 test("startup shelf can receive keyboard paging focus without stealing it on refresh", () => {
@@ -78,7 +87,8 @@ test("account sync description includes book tags and collections", () => {
 
 test("book information displays persisted model tags with the backend field name", () => {
   const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
-  assert.match(app, /renderBookInfoTags\(document\.getElementById\("book-info-tags"\), m\.tags, m\.model_tags \|\| m\.modelTags\)/);
+  assert.match(app, /bookOrganizationUI\.open\(currentInfoBookId, m\)/);
+  assert.match(app, /renderBookInfoTags\(document\.getElementById\("book-info-model-tags"\), \[\], m\.model_tags \|\| m\.modelTags\)/);
 });
 
 test("funnel keeps sorting in two columns and reading filters on the right", () => {
@@ -117,12 +127,12 @@ test("new shelf sorting uses reading duration, real file size and progress", () 
   assert.match(source, /invoke\("book_file_sizes"\)/);
 });
 
-test("book organization uses right-click controls and the existing funnel filters", () => {
+test("book organization uses book information controls and the existing funnel filters", () => {
   assert.match(source, /tag-filter-list/);
   assert.match(source, /collection-filter-list/);
-  assert.match(source, /set_book_organization/);
-  assert.match(source, /rename_book_organization/);
-  assert.match(source, /delete_book_organization/);
+  assert.match(organizationEditor, /set_book_organization/);
+  assert.match(organizationEditor, /rename_book_organization/);
+  assert.match(organizationEditor, /delete_book_organization/);
   assert.match(source, /matchesOrganizationFilters/);
   assert.match(source, /mode === "all"[\s\S]*?selectedTags\)\.every[\s\S]*?selectedCollections\)\.every/);
   assert.match(source, /selectedTags\)\.some[\s\S]*?selectedCollections\)\.some/);
@@ -145,7 +155,7 @@ test("book organization uses right-click controls and the existing funnel filter
   assert.ok(closer, "organization picker closer must exist");
   assert.match(closer[1], /requestFrame\(\(\) =>/);
   assert.match(closer[1], /filterPanel\.classList\.add\("show"\)/);
-  assert.match(styles, /\.book-organizer-menu/);
+  assert.match(styles, /\.book-info-organization-editor/);
   assert.match(styles, /\.organization-filter-card/);
   assert.match(styles, /\.fp-org-row/);
 });
@@ -172,7 +182,7 @@ test("organization match mode applies to every selected tag and collection", () 
   ), true);
 });
 
-test("shelf state, filtered selection and batch removal stay inside the injected API", async () => {
+test("shelf select-all ignores the current search filter and batch-removes the whole library", async () => {
   class FakeClassList {
     constructor() { this.values = new Set(); }
     add(...names) { names.forEach((name) => this.values.add(name)); }
@@ -253,6 +263,7 @@ test("shelf state, filtered selection and batch removal stay inside the injected
   };
   const calls = [];
   let searchClosed = false;
+  let notice = null;
   const context = {
     addEventListener() {},
     clearTimeout,
@@ -272,10 +283,10 @@ test("shelf state, filtered selection and batch removal stay inside the injected
     startPerformance: () => () => {},
     requestAnimationFrame: (callback) => { callback(); return 1; },
     confirmAction: () => true,
-    alertAction() {},
+    alertAction: (message, options) => { notice = { message, options }; },
     invoke: async (command, payload) => {
       calls.push({ command, payload });
-      if (command === "remove_books") return [{ id: "b", title: "Beta", progress: 0 }];
+      if (command === "remove_books") return [];
       return [];
     },
   });
@@ -285,12 +296,17 @@ test("shelf state, filtered selection and batch removal stay inside the injected
   ]);
   shelf.setSearchQuery("alpha");
   await elements.get("mi-selectall").emit("click", { stopPropagation() {} });
-  assert.deepEqual(Array.from(shelf.getSelectedIds()), ["a"]);
+  assert.deepEqual(Array.from(shelf.getSelectedIds()), ["a", "b"]);
   assert.equal(searchClosed, true);
   await elements.get("del-btn").emit("click");
   assert.equal(calls[0].command, "remove_books");
-  assert.equal(calls[0].payload.ids.length, 1);
+  assert.equal(calls[0].payload.ids.length, 2);
   assert.equal(calls[0].payload.ids[0], "a");
-  assert.equal(shelf.count(), 1);
+  assert.equal(calls[0].payload.ids[1], "b");
+  assert.equal(shelf.count(), 0);
   assert.deepEqual(Array.from(shelf.getSelectedIds()), []);
+  await elements.get("mi-random").emit("click");
+  assert.equal(notice.message, "书架还是空的");
+  assert.equal(notice.options.variant, "text");
+  assert.equal(notice.options.duration, 1500);
 });

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "account": {
+    "id": "user-fixture-delete-1",
+    "username": "fixture-reader"
+  },
+  "before": {
+    "data_generation": 1,
+    "entity_count": 3,
+    "active_token_count": 2
+  },
+  "reset": {
+    "request": { "password": "fixture-password-not-a-real-secret" },
+    "expected": {
+      "data_generation": 2,
+      "entity_count": 0,
+      "active_token_count": 0,
+      "stale_generation_push_error": "DATA_GENERATION_MISMATCH"
+    }
+  },
+  "delete_account": {
+    "request": {
+      "password": "fixture-password-not-a-real-secret",
+      "username": "fixture-reader"
+    },
+    "expected": {
+      "account_exists": false,
+      "dependent_row_count": 0
+    }
+  }
+}

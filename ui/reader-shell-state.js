@@ -12,6 +12,7 @@
     INFO: "info",
     ANNOTATIONS: "annotations",
     CROSS_SEARCH: "cross-search",
+    END_RECOMMENDATIONS: "end-recommendations",
   });
   const TOOLBAR = Object.freeze({
     NORMAL: "normal",
@@ -29,6 +30,7 @@
     [OVERLAY.INFO, document.getElementById("info-modal")],
     [OVERLAY.ANNOTATIONS, document.getElementById("anno-modal")],
     [OVERLAY.CROSS_SEARCH, document.getElementById("cross-modal")],
+    [OVERLAY.END_RECOMMENDATIONS, document.getElementById("reader-end-modal")],
   ]);
   const backdrop = document.getElementById("backdrop");
   const vocabSettings = document.getElementById("vocab-settings");

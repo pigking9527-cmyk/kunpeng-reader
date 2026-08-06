@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 const GITHUB_REPO: &str = "pigking9527-cmyk/kunpeng-reader";
+const BUNDLED_CHANGELOG: &str = include_str!("../CHANGELOG.md");
 // GitHub is the source of truth; the sync server mirrors only public release metadata
 // so version checks and current-version notes remain available when GitHub is blocked.
 // Public source must not embed deployment addresses. Release builders may inject an
@@ -79,6 +80,44 @@ fn rel_notes(v: &serde_json::Value) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+fn normalized_version(value: &str) -> &str {
+    value.trim().trim_start_matches(['v', 'V'])
+}
+
+/// Some GitHub releases use the tag itself as a placeholder body.  It is not
+/// useful as "what changed", so keep looking for the real release notes.
+fn placeholder_release_notes(notes: &str, tag: &str) -> bool {
+    let notes = notes.trim().trim_matches('#').trim();
+    !notes.is_empty() && normalized_version(notes) == normalized_version(tag)
+}
+
+/// The current application's changelog is compiled into the binary.  This
+/// keeps the About dialog useful offline and prevents a sparse GitHub release
+/// body from reducing a full update to just "v1.11.2".
+fn bundled_release_notes(tag: &str) -> String {
+    let wanted = normalized_version(tag);
+    let mut in_section = false;
+    let mut lines = Vec::new();
+    for line in BUNDLED_CHANGELOG.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            let version = heading
+                .split_whitespace()
+                .next()
+                .map(normalized_version)
+                .unwrap_or_default();
+            if in_section {
+                break;
+            }
+            in_section = version == wanted;
+            continue;
+        }
+        if in_section {
+            lines.push(line);
+        }
+    }
+    lines.join("\n").trim().to_string()
 }
 
 fn rel_url(v: &serde_json::Value, fallback: &str) -> String {
@@ -177,7 +216,7 @@ fn release_notes_blocking(tag: &str) -> String {
         let got = rel_tag(&v);
         if got.is_empty() || got.trim_start_matches(['v', 'V']) == want {
             let notes = rel_notes(&v);
-            if !notes.is_empty() {
+            if !notes.is_empty() && !placeholder_release_notes(&notes, tag) {
                 return notes;
             }
         }
@@ -190,11 +229,14 @@ fn release_notes_blocking(tag: &str) -> String {
         if let Some(v) = fetch_json(&agent, &server_url) {
             let got = rel_tag(&v);
             if got.is_empty() || got.trim_start_matches(['v', 'V']) == want {
-                return rel_notes(&v);
+                let notes = rel_notes(&v);
+                if !notes.is_empty() && !placeholder_release_notes(&notes, tag) {
+                    return notes;
+                }
             }
         }
     }
-    String::new()
+    bundled_release_notes(tag)
 }
 
 #[cfg(test)]
@@ -231,6 +273,15 @@ mod tests {
     fn release_tag_query_only_keeps_safe_characters() {
         assert_eq!(safe_release_tag("v1.9.5"), "v1.9.5");
         assert_eq!(safe_release_tag("v1.9.5?bad=<x>"), "v1.9.5badx");
+    }
+
+    #[test]
+    fn bundled_notes_replace_a_tag_only_release_body() {
+        assert!(placeholder_release_notes("v1.11.2", "1.11.2"));
+        assert!(!placeholder_release_notes("- 修复阅读位置", "v1.11.2"));
+        let notes = bundled_release_notes("v1.11.2");
+        assert!(notes.contains("Windows-only 体验更新"));
+        assert!(notes.contains("书库问答"));
     }
 
     #[test]

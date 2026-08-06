@@ -401,6 +401,17 @@ def migrate(conn):
             """
         )
         record_migration(conn, 8)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_data_generations (
+                user_id TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        record_migration(conn, 9)
 
 
 def next_server_stamp(conn):
@@ -666,6 +677,34 @@ def reset_secret_bundle_epoch(conn, user_id):
              "server-secret-reset", version, stamp),
         )
     return next_epoch
+
+
+def account_data_generation(conn, user_id):
+    row = conn.execute(
+        "SELECT generation FROM account_data_generations WHERE user_id=?", (user_id,)
+    ).fetchone()
+    return max(1, safe_int(row["generation"] if row else 1, 1))
+
+
+def request_data_generation(body):
+    if not isinstance(body, dict):
+        return 1
+    value = body.get("data_generation", body.get("dataGeneration", 1))
+    return max(1, safe_int(value, 1))
+
+
+def reset_account_sync_data(conn, user_id):
+    generation = account_data_generation(conn, user_id) + 1
+    with conn:
+        conn.execute("DELETE FROM entities WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM secret_bundle_epochs WHERE user_id=?", (user_id,))
+        conn.execute(
+            "INSERT INTO account_data_generations(user_id,generation,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET generation=excluded.generation,updated_at=excluded.updated_at",
+            (user_id, generation, now_ms()),
+        )
+        conn.execute("DELETE FROM tokens WHERE user_id=?", (user_id,))
+    return generation
 
 
 def decode_feedback_image(item):
@@ -935,6 +974,7 @@ class Handler(BaseHTTPRequestHandler):
                         "id": user["id"],
                         "username": user["username"],
                         "user": row_to_user(user),
+                        "data_generation": account_data_generation(conn, user["id"]),
                     },
                 )
                 conn.close()
@@ -990,6 +1030,7 @@ class Handler(BaseHTTPRequestHandler):
                 "next_cursor": str(next_cursor),
                 "has_more": has_more,
                 "entities": [row_to_entity(row) for row in rows],
+                "data_generation": account_data_generation(conn, user["id"]),
             },
         )
         conn.close()
@@ -1008,6 +1049,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "schema_version": 2,
                 "server_time": now_ms(),
+                "data_generation": account_data_generation(conn, user["id"]),
                 **inventory_summary(rows),
             },
         )
@@ -1042,12 +1084,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_password_reset_confirm()
             elif parsed.path in ("/auth/logout", "/auth/revoke"):
                 self.handle_logout()
+            elif parsed.path == "/auth/account/delete":
+                self.handle_account_delete()
             elif parsed.path == "/sync/push":
                 self.handle_push()
             elif parsed.path == "/sync/reconcile":
                 self.handle_reconcile()
             elif parsed.path == "/sync/secret-state/reset":
                 self.handle_secret_state_reset()
+            elif parsed.path == "/sync/data/reset":
+                self.handle_sync_data_reset()
             elif parsed.path == "/feedback":
                 self.handle_feedback()
             else:
@@ -1142,6 +1188,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error_code(400, "INVALID_JSON")
             conn.close()
             return
+        generation = account_data_generation(conn, user["id"])
+        if generation > 1 and request_data_generation(body) != generation:
+            self.send_error_code(
+                409,
+                "DATA_GENERATION_MISMATCH",
+                "云端数据已清除；请先清除此设备数据并重新登录",
+            )
+            conn.close()
+            return
         manifest = body.get("manifest")
         if not isinstance(manifest, list):
             self.send_error_code(400, "MANIFEST_MUST_BE_ARRAY")
@@ -1207,6 +1262,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "schema_version": 2,
                 "server_time": now_ms(),
+                "data_generation": generation,
                 **inventory_summary(rows),
                 "upload": upload,
                 "entities": authoritative,
@@ -1255,7 +1311,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error_code(409, "USERNAME_EXISTS")
             conn.close()
             return
-        self.send_json(200, {"ok": True, "token": token, "user": {"id": user_id, "username": username}})
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "token": token,
+                "user": {"id": user_id, "username": username},
+                "data_generation": 1,
+            },
+        )
         conn.close()
 
     def handle_login(self):
@@ -1280,7 +1344,12 @@ class Handler(BaseHTTPRequestHandler):
             token = issue_token(conn, user["id"])
         self.send_json(
             200,
-            {"ok": True, "token": token, "user": {"id": user["id"], "username": user["username"]}},
+            {
+                "ok": True,
+                "token": token,
+                "user": {"id": user["id"], "username": user["username"]},
+                "data_generation": account_data_generation(conn, user["id"]),
+            },
         )
         conn.close()
 
@@ -1293,6 +1362,75 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("DELETE FROM tokens WHERE token=?", (token,))
         conn.close()
         self.send_json(200, {"ok": True})
+
+    def handle_sync_data_reset(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("sync_data_reset_user", user["id"], 3, 3600):
+            conn.close()
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        password = str(body.get("password", "") or "")
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE id=?", (user["id"],)
+        ).fetchone()
+        if not row or not verify_password(password, row["password_hash"]):
+            self.send_error_code(401, "INVALID_CREDENTIALS", "登录密码不正确")
+            conn.close()
+            return
+        generation = reset_account_sync_data(conn, user["id"])
+        conn.close()
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "data_generation": generation,
+                "tokens_revoked": True,
+            },
+        )
+
+    def handle_account_delete(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        if not self.allow_rate("account_delete_user", user["id"], 3, 3600):
+            conn.close()
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        password = str(body.get("password", "") or "")
+        confirmation = str(body.get("username", "") or "").strip()
+        row = conn.execute(
+            "SELECT username,password_hash FROM users WHERE id=?", (user["id"],)
+        ).fetchone()
+        if not row or not verify_password(password, row["password_hash"]):
+            self.send_error_code(401, "INVALID_CREDENTIALS", "登录密码不正确")
+            conn.close()
+            return
+        if confirmation != row["username"]:
+            self.send_error_code(
+                400,
+                "ACCOUNT_CONFIRMATION_MISMATCH",
+                "请输入完整账号名确认删除",
+            )
+            conn.close()
+            return
+        with conn:
+            conn.execute("DELETE FROM entities WHERE user_id=?", (user["id"],))
+            conn.execute("DELETE FROM tokens WHERE user_id=?", (user["id"],))
+            conn.execute("DELETE FROM account_codes WHERE user_id=?", (user["id"],))
+            conn.execute("DELETE FROM account_emails WHERE user_id=?", (user["id"],))
+            conn.execute("DELETE FROM secret_bundle_epochs WHERE user_id=?", (user["id"],))
+            conn.execute("DELETE FROM account_data_generations WHERE user_id=?", (user["id"],))
+            conn.execute("DELETE FROM users WHERE id=?", (user["id"],))
+        conn.close()
+        self.send_json(200, {"ok": True, "account_deleted": True})
 
     def handle_auth_security(self):
         conn, user = self.require_user()
@@ -1677,6 +1815,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error_code(400, "INVALID_JSON")
             conn.close()
             return
+        generation = account_data_generation(conn, user["id"])
+        if generation > 1 and request_data_generation(body) != generation:
+            self.send_error_code(
+                409,
+                "DATA_GENERATION_MISMATCH",
+                "云端数据已清除；请先清除此设备数据并重新登录",
+            )
+            conn.close()
+            return
         schema_version = safe_int(body.get("schema_version"), 1)
         if schema_version > 2:
             self.send_error_code(409, "SCHEMA_UNSUPPORTED")
@@ -1846,6 +1993,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "schema_version": 2,
                 "server_time": now_ms(),
+                "data_generation": generation,
                 "next_cursor": str(response_cursor),
                 # Conflict rows are returned immediately so the client can
                 # acknowledge its exact losing version and install the
