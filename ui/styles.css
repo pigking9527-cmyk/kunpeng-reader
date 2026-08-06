@@ -1394,7 +1394,6 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .library-ai-quick-filters select:focus { border-color:#5b91dd; box-shadow:0 0 0 2px #e9f2ff; }
 .library-ai-clear-filters { grid-column:1 / -1; justify-self:start; padding:0; border:0; background:transparent; color:#3974c6; cursor:pointer; font-size:11px; }
 .library-ai-clear-filters:disabled { color:#a3adbb; cursor:default; }
-.library-ai-filter-tip { margin:6px 0 10px; color:#8a95a6; font-size:10px; line-height:1.45; }
 .library-ai-book-search { box-sizing:border-box; width:100%; margin:0 0 9px; padding:8px 10px; border:1px solid #cfdced; border-radius:8px; color:#34435c; background:#fff; font:12px "Microsoft YaHei", system-ui, sans-serif; outline:none; }
 .library-ai-book-search:focus { border-color:#5b91dd; box-shadow:0 0 0 2px #e9f2ff; }
 .library-ai-scope-status { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 9px; border-radius:8px; background:#f1f6ff; }
