@@ -26,12 +26,38 @@ test("last-page recommendations show five horizontal cover cards with relevance"
   assert.match(reader, /invoke\("open_book_at"/);
 });
 
-test("entering the final page notifies once and rearms after leaving", () => {
-  assert.match(end, /function notifyReaderEndIfReached\(dir\)/);
+test("the final page stays readable until another forward turn crosses the end", () => {
+  assert.match(end, /function notifyReaderEndIfReached\(dir,boundaryAttempt\)/);
   assert.match(end, /if\(!atEnd\)\{readerEndNotified=false;return false;\}/);
+  assert.match(end, /dir>0&&boundaryAttempt===true&&!readerEndNotified/);
   assert.match(layout, /report\(\);notifyReaderEndIfReached\(dir\);captureAnchor\(\)/);
   assert.match(layout, /updateScrollPageAfterProgrammatic\(\);\s*notifyReaderEndIfReached\(dir\)/);
   assert.match(transition, /showChapter\(chapter,where\)[\s\S]*?notifyReaderEndIfReached\(dir\)/);
+  assert.match(layout, /else notifyReaderEndIfReached\(1,true\);/);
+  assert.match(layout, /if\(!target\)[\s\S]*?notifyReaderEndIfReached\(dir,dir>0\);/);
+
+  const messages = [];
+  const state = {
+    curCh: 0,
+    CH: 1,
+    pageInCh: 0,
+    pagesInCh: 1,
+    parent: { postMessage(message) { messages.push(message); } },
+  };
+  vm.runInNewContext(end, state);
+
+  assert.equal(state.notifyReaderEndIfReached(1), false, "entering the last page must not open recommendations");
+  assert.equal(messages.length, 0);
+  assert.equal(state.notifyReaderEndIfReached(1, true), true, "one more forward turn opens recommendations");
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].bookEnd, true);
+  assert.equal(state.notifyReaderEndIfReached(1, true), false, "the same boundary does not reopen repeatedly");
+
+  state.pagesInCh = 2;
+  state.pageInCh = 0;
+  state.notifyReaderEndIfReached(-1);
+  state.pageInCh = 1;
+  assert.equal(state.notifyReaderEndIfReached(1, true), true, "leaving the end rearms the recommendation boundary");
 });
 
 test("recommendations participate in exclusive reader overlays", () => {

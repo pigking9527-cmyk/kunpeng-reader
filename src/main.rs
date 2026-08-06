@@ -6,6 +6,7 @@
 mod ai_reader;
 mod app_commands;
 mod atomic_file;
+mod auto_import_watch;
 pub mod background_tasks;
 mod backup;
 mod book;
@@ -256,6 +257,7 @@ fn main() {
             backup::spawn_daily(app.handle().clone());
             semantic::spawn_semantic_profile_warmup(app.handle().clone());
             startup::spawn_associated_book_watcher(app.handle().clone());
+            auto_import_watch::spawn(app.handle().clone());
             startup::spawn_maintenance(app.handle().clone()); // 延后低抢占维护任务，避免刚打开窗口拖动卡顿
             if let Some(win) = app.get_webview_window("main") {
                 let geom = {

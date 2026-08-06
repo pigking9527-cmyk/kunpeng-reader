@@ -2121,7 +2121,7 @@ function scrollPageBy(dir){
   if(!target){
     if(dir>0&&curCh<CH-1){beginChapterTurnFx(dir,curCh+1,'start');return true;}
     if(dir<0&&curCh>0){beginChapterTurnFx(dir,curCh-1,'end');return true;}
-    notifyReaderEndIfReached(dir);
+    notifyReaderEndIfReached(dir,dir>0);
     return true;
   }
   var next=Math.max(0,Math.min(scrollMaxTop(),Math.round(target.top||0)));
@@ -2677,7 +2677,7 @@ function relayout(opts){
 function nextPage(){
   consumeSideAnchorVirtualPage();
   if(usesLineBreakPaging()&&scrollPageBy(1))return;
-  if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1,1);else if(curCh<CH-1)beginChapterTurnFx(1,curCh+1,'start');else notifyReaderEndIfReached(1);
+  if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1,1);else if(curCh<CH-1)beginChapterTurnFx(1,curCh+1,'start');else notifyReaderEndIfReached(1,true);
 }
 function prevPage(){
   consumeSideAnchorVirtualPage();

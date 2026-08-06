@@ -9,6 +9,8 @@ const app = fs.readFileSync(path.join(root, "ui", "app.js"), "utf8");
 const html = fs.readFileSync(path.join(root, "ui", "index.html"), "utf8");
 const controller = fs.readFileSync(path.join(root, "ui", "auto-import-ui.js"), "utf8");
 const backend = fs.readFileSync(path.join(root, "src", "import.rs"), "utf8");
+const watcher = fs.readFileSync(path.join(root, "src", "auto_import_watch.rs"), "utf8");
+const cargo = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
 
 test("automatic directory imports serialize scans and refresh the shelf while importing", () => {
   assert.ok(html.indexOf("auto-import-ui.js") < html.indexOf("app.js"));
@@ -75,4 +77,25 @@ test("large automatic imports checkpoint completed batches without opening a boo
   );
   assert.match(autoImport, /if save_after >= 50[\s\S]*?state\.library\.lock\(\)\.unwrap\(\)\.save\(\)/);
   assert.doesNotMatch(autoImport, /open_book|ensure_reader_window/);
+});
+
+test("automatic imports use native recursive watching with debounce and fallback scans", () => {
+  assert.match(cargo, /^notify = "8\.2"$/m);
+  assert.match(watcher, /notify::recommended_watcher/);
+  assert.match(watcher, /RecursiveMode::Recursive/);
+  assert.match(watcher, /CHANGE_DEBOUNCE:[^=]*= Duration::from_secs\(3\)/);
+  assert.match(watcher, /FALLBACK_SCAN_INTERVAL:[^=]*= Duration::from_secs\(5 \* 60\)/);
+  assert.match(watcher, /"auto-import-change"/);
+  assert.match(controller, /eventApi\.listen\("auto-import-change"/);
+  assert.match(app, /autoImportUI\.bindEvents\(tauriEvent\)/);
+  assert.doesNotMatch(app, /debugSettingOn\("bg_auto_import"\)/);
+});
+
+test("copying files wait until stable and inaccessible directories return visible errors", () => {
+  assert.match(backend, /AUTO_IMPORT_FILE_STABLE_AGE[^=]*= std::time::Duration::from_secs\(3\)/);
+  assert.match(backend, /phase: String,[\s\S]*deferred: usize/);
+  assert.match(backend, /无法读取自动导入目录/);
+  assert.match(controller, /progress\.phase === "waiting"/);
+  assert.match(controller, /仍在复制的文件/);
+  assert.match(controller, /start\("正在重新检查尚未复制完成的文件…"\)/);
 });

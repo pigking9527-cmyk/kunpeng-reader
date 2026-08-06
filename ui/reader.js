@@ -730,7 +730,6 @@ const READ_TRACK = {
   fastTurnCredit: 0.25,
   idleCapMs: 2 * 60 * 1000,
   minDwellMs: 500,
-  maxCreditedPages: 3000,
   periodicCreditMs: 10000,
   backtrackCooldownMs: 2500,
   readingTimeTickMs: 15000,
@@ -740,51 +739,13 @@ let rwSegment = null,
   rwAccum = 0,
   rwTimer = null,
   rwFastStreak = 0;
-const rwCreditedByPage = new Map();
-let rwCreditStorageKey = "",
-  rwCreditSaveTimer = null,
-  rwLastPosition = 0,
+let rwLastPosition = 0,
   rwLastPageData = null,
   rwBacktrackBlockedUntil = 0,
   rwBacktrackResumeTimer = null,
   rtLastActiveAt = Date.now();
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
-}
-function readCreditKey() {
-  return currentBookId ? "readWordsCredit:v1:" + currentBookId : "";
-}
-function ensureReadCreditCache() {
-  const key = readCreditKey();
-  if (!key || key === rwCreditStorageKey) return;
-  rwCreditStorageKey = key;
-  rwCreditedByPage.clear();
-  try {
-    const entries = JSON.parse(localStorage.getItem(key) || "[]");
-    if (Array.isArray(entries)) {
-      entries.forEach((entry) => {
-        if (!Array.isArray(entry) || entry.length < 2) return;
-        const pageKey = String(entry[0] || "");
-        const credited = Math.max(0, Math.floor(Number(entry[1]) || 0));
-        if (pageKey && credited > 0) rwCreditedByPage.set(pageKey, credited);
-      });
-    }
-  } catch (e) {}
-  pruneCreditedPages();
-}
-function saveReadCreditCache(immediate = false) {
-  if (!rwCreditStorageKey) return;
-  if (rwCreditSaveTimer) {
-    clearTimeout(rwCreditSaveTimer);
-    rwCreditSaveTimer = null;
-  }
-  const save = () => {
-    try {
-      localStorage.setItem(rwCreditStorageKey, JSON.stringify([...rwCreditedByPage.entries()]));
-    } catch (e) {}
-  };
-  if (immediate) save();
-  else rwCreditSaveTimer = setTimeout(save, 1000);
 }
 function flushReadWords(immediate = false) {
   if (DIAG_DISABLE_READER_REPORTS) return;
@@ -837,18 +798,11 @@ function requiredReadMs(chars) {
   }
   return (chars / READ_TRACK.normalCpmLimit) * 60000;
 }
-function pruneCreditedPages() {
-  while (rwCreditedByPage.size > READ_TRACK.maxCreditedPages) {
-    const first = rwCreditedByPage.keys().next().value;
-    rwCreditedByPage.delete(first);
-  }
-}
 function creditReadSegment(reason, options = {}) {
   if (!rwSegment) return;
   const seg = rwSegment;
   if (!options.keep) rwSegment = null;
   if (options.discard) return;
-  ensureReadCreditCache();
   const rawDwell = Math.max(0, Date.now() - seg.startedAt);
   const chars = Math.max(0, seg.chars || 0);
   if (chars <= 0 || rawDwell < READ_TRACK.minDwellMs) return;
@@ -861,12 +815,12 @@ function creditReadSegment(reason, options = {}) {
   else rwFastStreak = 0;
   const creditRatio = rwFastStreak >= READ_TRACK.fastTurnStreak ? ratio * READ_TRACK.fastTurnCredit : ratio;
   const totalCreditForPage = Math.floor(chars * creditRatio);
-  const alreadyCredited = rwCreditedByPage.get(seg.key) || 0;
+  // 同一次停留会周期性结算，只补本次停留尚未计入的部分；重新进入该页则
+  // 创建新的 segment，让用户实际重读的内容再次进入阅读统计。
+  const alreadyCredited = seg.credited || 0;
   const delta = Math.max(0, totalCreditForPage - alreadyCredited);
   if (delta <= 0) return;
-  rwCreditedByPage.set(seg.key, alreadyCredited + delta);
-  pruneCreditedPages();
-  saveReadCreditCache();
+  seg.credited = alreadyCredited + delta;
   rwAccum += delta;
   if (window.__kunpengReadDebug) {
     console.debug("read-track", {
@@ -909,7 +863,6 @@ function trackReadWords(d) {
   const key = readPageKey(d);
   const chars = Math.max(0, d.pageChars || 0);
   if (!key || chars <= 0) return;
-  ensureReadCreditCache();
   const pos = readPagePosition(d);
   if (pos > 0 && rwLastPosition > 0 && pos < rwLastPosition) {
     rwBacktrackBlockedUntil = Date.now() + READ_TRACK.backtrackCooldownMs;
@@ -931,7 +884,7 @@ function trackReadWords(d) {
     return;
   }
   creditReadSegment("page_change");
-  rwSegment = { key, chars, startedAt: Date.now() };
+  rwSegment = { key, chars, startedAt: Date.now(), credited: 0 };
 }
 function creditCurrentReadPage() {
   if (!readerDebugSettingOn("reader_words_detect")) return;
@@ -973,7 +926,6 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("beforeunload", () => {
   pauseReadTracking("beforeunload");
   flushReadWords(true);
-  saveReadCreditCache(true);
 });
 window.pauseReadTracking = pauseReadTracking;
 window.discardReadTracking = discardReadTracking;
@@ -1800,7 +1752,6 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
     currentBookContentId = info.content_id || "";
     window.currentBookContentId = currentBookContentId;
     aiReaderMergeSyncedHistory();
-    ensureReadCreditCache();
     window.updateCrossReturnButton?.();
     window.consumePendingCrossSearch?.();
     currentBookTitle = info.title || currentBookTitle || "";

@@ -18,6 +18,7 @@ struct BookImportProgress {
 
 const IMPORT_PAUSED: &str = "__import_paused__";
 const IMPORT_CANCELLED: &str = "__import_cancelled__";
+const AUTO_IMPORT_FILE_STABLE_AGE: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn import_control(task: &TaskRunGuard) -> Result<(), String> {
     match task.control_signal() {
@@ -170,13 +171,46 @@ fn scan_dir_books(
     if depth > 8 {
         return Ok(());
     }
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Ok(());
+    let rd = match std::fs::read_dir(dir) {
+        Ok(value) => value,
+        Err(error) if depth == 0 => {
+            return Err(format!("无法读取自动导入目录 {}：{error}", dir.display()));
+        }
+        Err(error) => {
+            crate::log(&format!(
+                "auto_import_scan skipped unreadable subdirectory path={} error={error}",
+                dir.display()
+            ));
+            return Ok(());
+        }
     };
-    for ent in rd.flatten() {
+    for entry in rd {
         import_control(task)?;
+        let ent = match entry {
+            Ok(value) => value,
+            Err(error) => {
+                crate::log(&format!(
+                    "auto_import_scan skipped unreadable entry dir={} error={error}",
+                    dir.display()
+                ));
+                continue;
+            }
+        };
         let p = ent.path();
-        if p.is_dir() {
+        let file_type = match ent.file_type() {
+            Ok(value) => value,
+            Err(error) => {
+                crate::log(&format!(
+                    "auto_import_scan skipped unknown entry path={} error={error}",
+                    p.display()
+                ));
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             scan_dir_books(&p, out, depth + 1, task)?;
         } else if is_supported_book_path(&p) {
             out.push(p);
@@ -192,31 +226,48 @@ struct AutoImportProgress {
     processed: usize,
     added: usize,
     total: usize,
+    deferred: usize,
     current: String,
 }
 
-fn emit_auto_import_progress(
-    app: Option<&tauri::AppHandle>,
+fn auto_import_progress(
     phase: &str,
     found: usize,
     processed: usize,
     added: usize,
     total: usize,
+    deferred: usize,
     current: &str,
-) {
-    if let Some(app) = app {
-        let _ = app.emit(
-            "auto-import-progress",
-            AutoImportProgress {
-                phase: phase.to_string(),
-                found,
-                processed,
-                added,
-                total,
-                current: current.to_string(),
-            },
-        );
+) -> AutoImportProgress {
+    AutoImportProgress {
+        phase: phase.to_string(),
+        found,
+        processed,
+        added,
+        total,
+        deferred,
+        current: current.to_string(),
     }
+}
+
+fn emit_auto_import_progress(app: Option<&tauri::AppHandle>, progress: AutoImportProgress) {
+    if let Some(app) = app {
+        let _ = app.emit("auto-import-progress", progress);
+    }
+}
+
+fn auto_import_file_is_stable_at(path: &std::path::Path, now: std::time::SystemTime) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_none_or(|age| age >= AUTO_IMPORT_FILE_STABLE_AGE)
 }
 
 /// 把自动导入目录里的新书加入书架（已存在的由 lib.add 去重）。返回是否有新增。
@@ -246,13 +297,33 @@ fn run_auto_import_with_progress(
     let mut found = Vec::new();
     for d in &dirs {
         scan_dir_books(std::path::Path::new(d), &mut found, 0, task)?;
-        emit_auto_import_progress(app, "scan", found.len(), 0, 0, 0, d);
+        emit_auto_import_progress(
+            app,
+            auto_import_progress("scan", found.len(), 0, 0, 0, 0, d),
+        );
     }
     // 3) 锁外过滤掉路径已在书架里的（稳态：没有新文件 → 候选为空，下面整段都不取写锁）
-    let candidates = filter_new_book_paths(found.iter().cloned(), &known);
+    let all_candidates = filter_new_book_paths(found.iter().cloned(), &known);
+    let now = std::time::SystemTime::now();
+    let candidates = all_candidates
+        .iter()
+        .filter(|path| auto_import_file_is_stable_at(path, now))
+        .cloned()
+        .collect::<Vec<_>>();
+    let deferred = all_candidates.len().saturating_sub(candidates.len());
     let total = candidates.len();
     if total == 0 {
-        emit_auto_import_progress(app, "done", found.len(), 0, 0, 0, "");
+        if deferred > 0 {
+            emit_auto_import_progress(
+                app,
+                auto_import_progress("waiting", found.len(), 0, 0, 0, deferred, ""),
+            );
+        } else {
+            emit_auto_import_progress(
+                app,
+                auto_import_progress("done", found.len(), 0, 0, 0, 0, ""),
+            );
+        }
         return Ok(false);
     }
     // 4) 只为真正的新书逐本短暂持锁，给封面等请求留出穿插的间隙
@@ -289,12 +360,15 @@ fn run_auto_import_with_progress(
         if processed == total || processed.is_multiple_of(5) {
             emit_auto_import_progress(
                 app,
-                "import",
-                found.len(),
-                processed,
-                added,
-                total,
-                &current,
+                auto_import_progress(
+                    "import",
+                    found.len(),
+                    processed,
+                    added,
+                    total,
+                    deferred,
+                    &current,
+                ),
             );
         }
         checkpoint_import(task, processed, total, &current)?;
@@ -302,7 +376,25 @@ fn run_auto_import_with_progress(
     if changed {
         crate::report_save_error("书架", state.library.lock().unwrap().save());
     }
-    emit_auto_import_progress(app, "done", found.len(), processed, added, total, "");
+    if deferred > 0 {
+        emit_auto_import_progress(
+            app,
+            auto_import_progress(
+                "waiting",
+                found.len(),
+                processed,
+                added,
+                total,
+                deferred,
+                "",
+            ),
+        );
+    } else {
+        emit_auto_import_progress(
+            app,
+            auto_import_progress("done", found.len(), processed, added, total, 0, ""),
+        );
+    }
     Ok(changed)
 }
 
@@ -336,9 +428,9 @@ pub(crate) async fn set_auto_import(
     };
     Ok(cfg)
 }
-/// 启动/回到书架时调用：若开启自动导入则扫描目录，返回最新书单。
+/// 启动、目录变化或定时补漏时调用：若开启自动导入则扫描目录，返回最新书单。
 #[tauri::command]
-pub(crate) async fn auto_import_scan(app: tauri::AppHandle) -> Result<Vec<BookDto>, ()> {
+pub(crate) async fn auto_import_scan(app: tauri::AppHandle) -> Result<Vec<BookDto>, String> {
     let task_handle = app
         .state::<AppState>()
         .background_tasks
@@ -368,5 +460,48 @@ pub(crate) async fn auto_import_scan(app: tauri::AppHandle) -> Result<Vec<BookDt
             }
         })
         .await
-        .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod auto_import_tests {
+    use super::*;
+
+    #[test]
+    fn newly_written_files_wait_for_the_stability_window() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-auto-import-stable-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("copying.epub");
+        std::fs::write(&path, b"still-copying").unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(!auto_import_file_is_stable_at(
+            &path,
+            modified + std::time::Duration::from_secs(2)
+        ));
+        assert!(auto_import_file_is_stable_at(
+            &path,
+            modified + std::time::Duration::from_secs(3)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn empty_files_are_never_imported_as_stable_books() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-auto-import-empty-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("empty.epub");
+        std::fs::write(&path, []).unwrap();
+        assert!(!auto_import_file_is_stable_at(
+            &path,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(10)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
