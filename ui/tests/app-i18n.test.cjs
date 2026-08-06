@@ -29,6 +29,8 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(html, /id="recovery-backup-status"[^>]*data-i18n="recoveryLoading"/);
   assert.match(html, /id="settings-export-data"[^>]*data-i18n="dataExport"/);
   assert.match(html, /id="settings-restore-backup"[^>]*data-i18n-aria="recoverySelect"/);
+  assert.match(html, /id="sync-now"[^>]*data-i18n="syncNow"/);
+  assert.match(html, /id="search-input"[^>]*data-i18n-placeholder="searchPlaceholder"/);
   assert.match(i18n, /const SETTINGS_COPY/);
   const settingsCopy = i18n.slice(i18n.indexOf("const SETTINGS_COPY"), i18n.indexOf("Object.entries(SETTINGS_COPY)"));
   for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
@@ -38,6 +40,15 @@ test("main settings expose a persistent software language selector", () => {
     const localeCopy = settingsCopy.slice(localeStart, localeEnd < 0 ? undefined : localeEnd);
     assert.notEqual(localeStart, -1, `missing settings copy for ${locale}`);
     for (const key of ["defaultOpenTitle", "recoveryTitle", "recoverySelect", "recoveryStatus", "dataImport"]) assert.match(localeCopy, new RegExp(`${key}:`));
+  }
+  const accountCopy = i18n.slice(i18n.indexOf("const ACCOUNT_SEARCH_COPY"), i18n.indexOf("const SYNC_COUNTS_COPY"));
+  for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
+    const marker = ["zh-CN", "zh-TW", "pt-BR"].includes(locale) ? `"${locale}": {` : `${locale}: {`;
+    const start = accountCopy.indexOf(marker);
+    const end = accountCopy.indexOf("\n    ", start + marker.length);
+    const copy = accountCopy.slice(start, end < 0 ? undefined : end);
+    assert.notEqual(start, -1, `missing account/search copy for ${locale}`);
+    for (const key of ["syncContent", "lastSync", "searchPlaceholder", "shelfSearchPlaceholder"]) assert.match(copy, new RegExp(`${key}:`));
   }
   assert.match(app, /function renderRecoveryBackupStatus/);
   assert.match(app, /appText\("recoveryStatus"/);

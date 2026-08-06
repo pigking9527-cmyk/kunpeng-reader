@@ -2,6 +2,7 @@
 // 书架过滤状态通过 ReaderShelfUI API 读写。
 // ---- 搜索 + 历史记录 ----
 const historyEl = document.getElementById("search-history");
+const searchText = (key) => window.ReaderAppI18n?.t?.(key) || key;
 let history = [];
 try {
   history = JSON.parse(localStorage.getItem("searchHistory") || "[]");
@@ -24,7 +25,7 @@ function renderHistory() {
   if (!history.length) {
     const e = document.createElement("div");
     e.className = "sh-empty";
-    e.textContent = "暂无搜索记录";
+    e.textContent = searchText("noSearchHistory");
     historyEl.appendChild(e);
     return;
   }
@@ -162,7 +163,7 @@ try {
   shelfChk.checked = localStorage.getItem("shelfSearchEnabled") === "1";
 } catch (e) {}
 function updateShelfSearchMode() {
-  searchInput.placeholder = shelfChk.checked ? "全书架正文检索，回车搜索…" : "搜索 书名 / 作者 / 简介";
+  searchInput.placeholder = searchText(shelfChk.checked ? "shelfSearchPlaceholder" : "searchPlaceholder");
 }
 updateShelfSearchMode();
 syncSearchTabStops();
@@ -210,6 +211,10 @@ function closeShelfSearchModal() {
 shelfSearchClose.addEventListener("click", closeShelfSearchModal);
 shelfSearchModal.addEventListener("click", (e) => {
   if (e.target === shelfSearchModal) closeShelfSearchModal();
+});
+window.addEventListener("app-language-changed", () => {
+  updateShelfSearchMode();
+  if (historyEl.classList.contains("show")) renderHistory();
 });
 
 searchInput.addEventListener("click", (e) => e.stopPropagation());

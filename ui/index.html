@@ -9,7 +9,7 @@
   <body>
     <header class="toolbar">
       <div class="account-wrap">
-        <button id="account-btn" class="avatar-btn" title="账号与同步" aria-label="账号与同步">
+        <button id="account-btn" class="avatar-btn" title="账号与同步" aria-label="账号与同步" data-i18n-title="syncTitle" data-i18n-aria="syncTitle">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
             <circle cx="12" cy="8" r="4" fill="currentColor" />
             <path d="M4.5 20c1.2-4 4-6 7.5-6s6.3 2 7.5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
@@ -17,63 +17,63 @@
         </button>
         <div id="account-panel" class="account-panel">
           <div id="sync-form" class="sync-form">
-            <div class="fp-title">同步</div>
+            <div class="fp-title" data-i18n="syncTitle">同步</div>
             <label class="sync-field">
-              <span>账号</span>
+              <span data-i18n="accountLabel">账号</span>
               <span class="account-input-wrap">
                 <input id="sync-username" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" />
                 <div id="saved-accounts" class="saved-accounts"></div>
               </span>
             </label>
             <label class="sync-field">
-              <span>密码</span>
+              <span data-i18n="password">密码</span>
               <input id="sync-password" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" />
             </label>
             <div class="fp-set-actions">
-              <button id="sync-register" class="btn-plain" type="button">注册</button>
-              <button id="sync-login" class="btn-plain" type="button">登录</button>
-              <button id="sync-password-reset-open" class="btn-plain" type="button">找回密码</button>
+              <button id="sync-register" class="btn-plain" type="button" data-i18n="register">注册</button>
+              <button id="sync-login" class="btn-plain" type="button" data-i18n="login">登录</button>
+              <button id="sync-password-reset-open" class="btn-plain" type="button" data-i18n="recoverPassword">找回密码</button>
             </div>
             <section id="sync-password-reset" class="account-security-panel" hidden>
-              <strong>找回登录密码</strong>
+              <strong data-i18n="recoverPassword">找回密码</strong>
               <small>仅已绑定并验证邮箱的账户可找回；重置后其他设备会退出登录。</small>
-              <input id="sync-reset-email" type="email" autocomplete="email" placeholder="已绑定的邮箱" />
+              <input id="sync-reset-email" type="email" autocomplete="email" placeholder="已绑定的邮箱" data-i18n-placeholder="boundEmail" />
               <div class="account-security-actions"><button id="sync-reset-request" class="btn-plain" type="button">发送验证码</button></div>
-              <input id="sync-reset-code" inputmode="numeric" autocomplete="one-time-code" placeholder="邮箱验证码" />
-              <input id="sync-reset-new-password" type="password" autocomplete="new-password" placeholder="新登录密码（至少 8 个字符）" />
-              <div class="account-security-actions"><button id="sync-reset-confirm" class="btn-plain" type="button">确认重置并登录</button></div>
+              <input id="sync-reset-code" inputmode="numeric" autocomplete="one-time-code" placeholder="邮箱验证码" data-i18n-placeholder="emailCode" />
+              <input id="sync-reset-new-password" type="password" autocomplete="new-password" placeholder="新登录密码（至少 8 个字符）" data-i18n-placeholder="newLoginPassword" />
+              <div class="account-security-actions"><button id="sync-reset-confirm" class="btn-plain" type="button" data-i18n="resetAndLogin">确认重置并登录</button></div>
               <div id="sync-reset-status" class="private-sync-status"></div>
             </section>
           </div>
           <div id="sync-account" class="sync-account">
-            <span id="sync-account-name">账号：</span>
+            <span id="sync-account-name" data-i18n="accountPrefix">账号：</span>
             <span class="sync-account-actions">
-              <button id="sync-now" class="sync-now-btn" type="button">同步</button>
-              <button id="account-security-open" class="btn-plain" type="button">账户安全</button>
-              <button id="sync-logout" class="sync-logout-btn" type="button">退出登录</button>
+              <button id="sync-now" class="sync-now-btn" type="button" data-i18n="syncNow">同步</button>
+              <button id="account-security-open" class="btn-plain" type="button" data-i18n="accountSecurity">账户安全</button>
+              <button id="sync-logout" class="sync-logout-btn" type="button" data-i18n="logout">退出登录</button>
             </span>
           </div>
-          <section class="account-sync-overview" aria-label="同步内容">
-            <div class="account-sync-title">同步内容</div>
+          <section class="account-sync-overview" aria-label="同步内容" data-i18n-aria="syncContent">
+            <div class="account-sync-title" data-i18n="syncContent">同步内容</div>
             <div class="account-sync-grid">
-              <span>阅读进度与续读位置</span>
-              <span>书签、高亮、批注、评分、标签与收藏夹</span>
-              <span>生词本</span>
-              <span>阅读统计</span>
-              <span>大模型书籍分类标签</span>
-              <span>大模型与翻译 API 配置（不含密钥）</span>
-              <span id="account-sync-history" class="account-sync-optional">智读与书库问答记录（可选）</span>
-              <span id="account-sync-secrets" class="account-sync-optional">加密 API Key 与翻译密钥（可选）</span>
+              <span data-i18n="syncProgress">阅读进度与续读位置</span>
+              <span data-i18n="syncReadingData">书签、高亮、批注、评分、标签与收藏夹</span>
+              <span data-i18n="syncVocabulary">生词本</span>
+              <span data-i18n="syncStatistics">阅读统计</span>
+              <span data-i18n="syncTags">大模型书籍分类标签</span>
+              <span data-i18n="syncApi">大模型与翻译 API 配置（不含密钥）</span>
+              <span id="account-sync-history" class="account-sync-optional" data-i18n="syncHistory">智读与书库问答记录（可选）</span>
+              <span id="account-sync-secrets" class="account-sync-optional" data-i18n="syncSecrets">加密 API Key 与翻译密钥（可选）</span>
             </div>
             <div class="private-sync-row">
               <div>
-                <strong>智读、书库问答与翻译</strong>
-                <small>分类标签和配置默认同步；问答记录与加密密钥可在同步设置中开启。</small>
+                <strong data-i18n="smartReading">智读、书库问答与翻译</strong>
+                <small data-i18n="smartReadingHelp">分类标签和配置默认同步；问答记录与加密密钥可在同步设置中开启。</small>
               </div>
-              <button id="private-sync-open" class="btn-plain" type="button">同步设置</button>
+              <button id="private-sync-open" class="btn-plain" type="button" data-i18n="syncSettings">同步设置</button>
             </div>
-            <div id="sync-last-time" class="sync-last-time">最近同步：尚未同步</div>
-            <div id="sync-last-counts" class="sync-last-counts">登录后可跨设备同步；图书文件本身不会上传</div>
+            <div id="sync-last-time" class="sync-last-time" data-i18n="lastSyncNever">尚未同步</div>
+            <div id="sync-last-counts" class="sync-last-counts" data-i18n="syncFilesNote">登录后可跨设备同步；图书文件本身不会上传</div>
           </section>
           <div id="sync-status" class="sync-status">尚未同步</div>
         </div>
@@ -157,18 +157,18 @@
       </div>
       <div id="title-drag-space" class="title-drag-space" data-tauri-drag-region></div>
       <div class="search-wrap" id="search-wrap">
-        <button id="search-btn" class="icon-btn" title="搜索书籍">
+        <button id="search-btn" class="icon-btn" title="搜索书籍" data-i18n-title="searchBooks">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
             <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
             <line x1="16" y1="16" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
           </svg>
         </button>
-        <label class="shelf-toggle" id="shelf-toggle" title="全书架正文检索">
+        <label class="shelf-toggle" id="shelf-toggle" title="全书架正文检索" data-i18n-title="shelfSearch">
           <input type="checkbox" id="shelf-search-chk" tabindex="-1" />
         </label>
         <div class="sbox">
-          <input id="search-input" class="search-input" type="text" autocomplete="off" tabindex="-1" placeholder="搜索 书名 / 作者 / 简介" />
-          <button id="search-clear" class="search-clear" type="button" tabindex="-1" title="清空搜索" aria-label="清空搜索">×</button>
+          <input id="search-input" class="search-input" type="text" autocomplete="off" tabindex="-1" placeholder="搜索 书名 / 作者 / 简介" data-i18n-placeholder="searchPlaceholder" />
+          <button id="search-clear" class="search-clear" type="button" tabindex="-1" title="清空搜索" aria-label="清空搜索" data-i18n-title="clearSearch" data-i18n-aria="clearSearch">×</button>
           <div id="search-history" class="search-history"></div>
         </div>
       </div>

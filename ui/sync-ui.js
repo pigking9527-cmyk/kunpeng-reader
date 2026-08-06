@@ -94,11 +94,17 @@ let accountEmailRebindGrant = "";
 let accountEmailBound = false;
 let accountPasswordRecoverCooldownUntil = 0;
 let accountPasswordRecoverCooldownTimer = 0;
+let lastSyncSettings = {};
+function syncText(key, values = {}) {
+  let text = global.ReaderAppI18n?.t?.(key) || key;
+  for (const [name, value] of Object.entries(values)) text = text.replaceAll(`{${name}}`, String(value));
+  return text;
+}
 function formatSyncTime(v) {
   const n = Number(v) || 0;
-  if (!n) return "尚未同步";
+  if (!n) return syncText("lastSyncNever");
   const ms = n > 100000000000 ? n : n * 1000;
-  return new Date(ms).toLocaleString();
+  return new Date(ms).toLocaleString(global.ReaderAppI18n?.resolvedLanguage?.());
 }
 function readCachedSyncAccount() {
   try {
@@ -124,12 +130,13 @@ function applyCachedSyncAccount() {
 function setSyncButtonState(state, text, title = "") {
   syncNowBtn.classList.remove("syncing", "ok", "fail");
   if (state) syncNowBtn.classList.add(state);
-  syncNowBtn.textContent = text || "同步";
+  syncNowBtn.textContent = text || syncText("syncNow");
   syncNowBtn.title = title;
 }
 function updateSyncSummary(settings = {}) {
+  lastSyncSettings = { ...lastSyncSettings, ...settings };
   if (Object.prototype.hasOwnProperty.call(settings, "last_sync_at")) {
-    syncLastTimeEl.textContent = "最近同步：" + formatSyncTime(settings.last_sync_at);
+    syncLastTimeEl.textContent = syncText("lastSync", { time: formatSyncTime(settings.last_sync_at) });
   }
   const hasCounts = Object.prototype.hasOwnProperty.call(settings, "last_sync_pushed")
     || Object.prototype.hasOwnProperty.call(settings, "last_sync_pulled")
@@ -140,7 +147,7 @@ function updateSyncSummary(settings = {}) {
     const pulled = Number(settings.last_sync_pulled) || 0;
     const accepted = Number(settings.last_sync_accepted) || 0;
     const ignored = Number(settings.last_sync_ignored) || 0;
-    syncLastCountsEl.textContent = `上次尝试上传 ${pushed} 项，新增 ${accepted} 项，重复/冲突 ${ignored} 项，接收 ${pulled} 项；图书文件本身不会上传`;
+    syncLastCountsEl.textContent = syncText("syncCounts", { pushed, accepted, ignored, pulled });
   }
 }
 function readSavedAccounts() {
@@ -338,15 +345,15 @@ function updateAccountView(settings = {}) {
     syncFormEl.classList.add("hidden");
     syncAccountEl.classList.add("show");
     syncStatusEl.classList.add("hidden");
-    syncAccountNameEl.textContent = "账号：" + username;
-    setSyncButtonState("", "同步");
+    syncAccountNameEl.textContent = syncText("accountPrefix") + username;
+    setSyncButtonState("", syncText("syncNow"));
   } else {
     writeCachedSyncAccount("");
     syncFormEl.classList.remove("hidden");
     syncAccountEl.classList.remove("show");
     syncStatusEl.classList.remove("hidden");
-    syncStatusEl.textContent = "尚未登录";
-    setSyncButtonState("", "同步");
+    syncStatusEl.textContent = syncText("notLoggedIn");
+    setSyncButtonState("", syncText("syncNow"));
   }
 }
 async function loadSyncSettings() {
@@ -749,6 +756,11 @@ syncNowBtn.addEventListener("click", async () => {
   } finally {
     syncNowBtn.disabled = false;
   }
+});
+
+if (typeof global.addEventListener === "function") global.addEventListener("app-language-changed", () => {
+  updateAccountView({ username: syncUsernameEl.value.trim() });
+  updateSyncSummary(lastSyncSettings);
 });
 
   activeController = Object.freeze({
