@@ -27,7 +27,17 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(html, /id="open-default-apps-settings"[^>]*data-i18n="defaultOpenButton"/);
   assert.match(html, /id="recovery-backup-status"[^>]*data-i18n="recoveryLoading"/);
   assert.match(html, /id="settings-export-data"[^>]*data-i18n="dataExport"/);
+  assert.match(html, /id="settings-restore-backup"[^>]*data-i18n-aria="recoverySelect"/);
   assert.match(i18n, /const SETTINGS_COPY/);
+  const settingsCopy = i18n.slice(i18n.indexOf("const SETTINGS_COPY"), i18n.indexOf("Object.entries(SETTINGS_COPY)"));
+  for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
+    const localeMarker = ["zh-CN", "zh-TW", "pt-BR"].includes(locale) ? `"${locale}": {` : `${locale}: {`;
+    const localeStart = settingsCopy.indexOf(localeMarker);
+    const localeEnd = settingsCopy.indexOf("\n    ", localeStart + localeMarker.length);
+    const localeCopy = settingsCopy.slice(localeStart, localeEnd < 0 ? undefined : localeEnd);
+    assert.notEqual(localeStart, -1, `missing settings copy for ${locale}`);
+    for (const key of ["defaultOpenTitle", "recoveryTitle", "recoverySelect", "recoveryStatus", "dataImport"]) assert.match(localeCopy, new RegExp(`${key}:`));
+  }
   assert.match(app, /function renderRecoveryBackupStatus/);
   assert.match(app, /appText\("recoveryStatus"/);
   assert.match(app, /app-language-changed[\s\S]*?renderRecoveryBackupStatus\(lastRecoveryBackupStatus\)/);
