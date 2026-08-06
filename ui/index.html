@@ -780,16 +780,17 @@
         <div class="library-ai-grid">
           <aside class="library-ai-card library-ai-scope">
             <h2 data-i18n="searchScope">检索范围</h2>
-            <p class="library-ai-tip">书库问答会精确检索全部已建立语义索引的图书，展示最相关的前 20 本（每本 1 段）。勾选图书后才限定范围；跨书对比请选择 2–8 本。</p>
+            <p class="library-ai-tip" data-i18n="libraryScopeTip">书库问答会精确检索全部已建立语义索引的图书，展示最相关的前 20 本（每本 1 段）。勾选图书后才限定范围；跨书对比请选择 2–8 本。</p>
             <div class="library-ai-mode"><button id="mode-question" class="active" type="button" data-i18n="libraryQuestion">书库问答</button><button id="mode-compare" type="button" data-i18n="crossBookCompare">跨书对比</button></div>
-            <div class="library-ai-quick-filters" aria-label="快速筛选图书">
-              <label>标签<select id="tag-filter"><option value="" data-i18n="allTags">全部标签</option></select></label>
-              <label>收藏夹<select id="collection-filter"><option value="" data-i18n="allCollections">全部收藏夹</option></select></label>
+            <div class="library-ai-quick-filters" aria-label="快速筛选图书" data-i18n-aria="libraryFilters">
+              <label><span data-i18n="tagLabel">标签</span><select id="tag-filter"><option value="" data-i18n="allTags">全部标签</option></select></label>
+              <label><span data-i18n="collectionLabel">收藏夹</span><select id="collection-filter"><option value="" data-i18n="allCollections">全部收藏夹</option></select></label>
               <button id="clear-filters" class="library-ai-clear-filters" type="button" disabled data-i18n="clearFilters">清除筛选</button>
             </div>
-            <p class="library-ai-filter-tip">未勾选不代表未参与：书库问答默认检索全部已建立语义索引的图书；勾选才会切换为手动限定范围。</p>
-            <div class="library-ai-scope-status"><span id="scope-summary">当前范围：全部书库</span><button id="clear-selection" class="library-ai-clear-selection" type="button" title="取消所有勾选，恢复全部书库" disabled data-i18n="cancelLimit">取消限定</button></div>
-            <div class="library-ai-book-tools"><span id="book-count">打开后载入书架…</span><span id="selection-tools" class="library-ai-selection-tools"><button id="select-visible" type="button" data-i18n="selectVisible">全选当前列表</button><button id="invert-visible" type="button" data-i18n="invertVisible">反选当前列表</button></span></div>
+            <p class="library-ai-filter-tip" data-i18n="libraryFilterTip">未勾选不代表未参与：书库问答默认检索全部已建立语义索引的图书；勾选才会切换为手动限定范围。</p>
+            <input id="library-ai-book-search" class="library-ai-book-search" type="search" autocomplete="off" placeholder="搜索书名、作者、简介或标签" data-i18n-placeholder="bookSelectorPlaceholder" />
+            <div class="library-ai-scope-status"><span id="scope-summary" data-i18n="scopeAllBooks">当前范围：全部书库</span><button id="clear-selection" class="library-ai-clear-selection" type="button" title="取消所有勾选，恢复全部书库" disabled data-i18n="cancelLimit">取消限定</button></div>
+            <div class="library-ai-book-tools"><span id="book-count" data-i18n="loadingLibrary">打开后载入书架…</span><span id="selection-tools" class="library-ai-selection-tools"><button id="select-visible" type="button" data-i18n="selectVisible">全选当前列表</button><button id="invert-visible" type="button" data-i18n="invertVisible">反选当前列表</button></span></div>
             <div id="books" class="library-ai-books"></div>
           </aside>
           <section class="library-ai-card library-ai-workspace">

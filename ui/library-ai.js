@@ -13,6 +13,7 @@
   const MIN_ANSWER_FONT_SIZE = 14;
   const MAX_ANSWER_FONT_SIZE = 22;
   const i18n = (key, fallback) => global.ReaderAppI18n?.t?.(key) || fallback;
+  const i18nFormat = (key, fallback, values = {}) => Object.entries(values).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, String(value)), i18n(key, fallback));
 
   function init({ root = global.document, invoke = global.__TAURI__?.core?.invoke } = {}) {
     const $ = (id) => root?.getElementById(id);
@@ -264,10 +265,12 @@
 
     function currentBooks() {
       const tag = $("tag-filter").value, collection = $("collection-filter").value;
+      const query = String($("library-ai-book-search")?.value || "").trim().toLocaleLowerCase();
       return books.filter((book) => {
         const tags = new Set(tagsForBook(book).map(organizationKey));
         const collections = new Set((book.collections || []).map(organizationKey));
-        return (!tag || tags.has(tag)) && (!collection || collections.has(collection));
+        const searchText = [book.title, book.author, book.description, book.summary, ...tagsForBook(book)].filter(Boolean).join(" ").toLocaleLowerCase();
+        return (!tag || tags.has(tag)) && (!collection || collections.has(collection)) && (!query || searchText.includes(query));
       });
     }
 
@@ -275,15 +278,17 @@
       const selected = selectedBookIds.size;
       const visibleSelected = visibleBooks.filter((book) => selectedBookIds.has(String(book.id))).length;
       if (mode === "question") {
+        const visible = visibleSelected < selected ? i18nFormat("scopeVisible", " ({count} currently shown)", { count: visibleSelected }) : "";
         $("scope-summary").textContent = selected
-          ? `当前范围：仅检索已选 ${selected} 本${visibleSelected < selected ? `（当前显示 ${visibleSelected} 本）` : ""}`
-          : `当前范围：全部书库（未勾选即全库检索，前 ${MAX_QUESTION_SOURCES} 本命中）`;
+          ? i18nFormat("questionScopeSelected", "Current scope: {selected} selected book(s){visible}", { selected, visible })
+          : i18nFormat("questionScopeAll", "Current scope: Entire library (all indexed books; top {limit} matches)", { limit: MAX_QUESTION_SOURCES });
         $("clear-selection").textContent = i18n("cancelLimit", "取消限定");
         $("selection-tools").hidden = false;
         $("select-visible").disabled = !visibleBooks.length || visibleSelected === visibleBooks.length;
         $("invert-visible").disabled = !visibleBooks.length;
       } else {
-        $("scope-summary").textContent = `对比范围：已选 ${selected}/${MAX_COMPARE_BOOKS} 本${visibleSelected < selected ? `（当前显示 ${visibleSelected} 本）` : ""}`;
+        const visible = visibleSelected < selected ? i18nFormat("scopeVisible", " ({count} currently shown)", { count: visibleSelected }) : "";
+        $("scope-summary").textContent = i18nFormat("compareScope", "Comparison scope: {selected}/{limit} book(s){visible}", { selected, limit: MAX_COMPARE_BOOKS, visible });
         $("clear-selection").textContent = i18n("clearSelection", "清空选择");
         $("selection-tools").hidden = true;
       }
@@ -305,8 +310,8 @@
     function renderBooks() {
       const visibleBooks = currentBooks();
       $("book-count").textContent = visibleBooks.length === books.length
-        ? `书架共 ${books.length} 本`
-        : `显示 ${visibleBooks.length} / 共 ${books.length} 本`;
+        ? i18nFormat("bookCountAll", "{count} books on shelf", { count: books.length })
+        : i18nFormat("bookCountFiltered", "Showing {visible} of {total} books", { visible: visibleBooks.length, total: books.length });
       $("clear-filters").disabled = !$("tag-filter").value && !$("collection-filter").value;
       booksEl.replaceChildren();
       if (!books.length) {
@@ -315,7 +320,8 @@
         return;
       }
       if (!visibleBooks.length) {
-        booksEl.innerHTML = '<div class="library-ai-empty-books">' + i18n("noFilteredBooks", "没有符合当前标签和收藏夹的图书。") + "</div>";
+        const query = String($("library-ai-book-search")?.value || "").trim();
+        booksEl.innerHTML = '<div class="library-ai-empty-books">' + (query ? i18n("noBookSearchMatches", "No books match the title, author, description, or tags.") : i18n("noFilteredBooks", "No books match the current tags and collections.")) + "</div>";
         updateScopeStatus(visibleBooks);
         return;
       }
@@ -332,7 +338,7 @@
             const limit = selectionLimit();
             if (Number.isFinite(limit) && selectedBookIds.size >= limit) {
               box.checked = false;
-              state(`${mode === "compare" ? "跨书对比" : "书库问答"}最多选择 ${selectionLimit()} 本图书。`, true);
+              state(i18nFormat("selectionLimitMessage", "{mode} supports up to {limit} books.", { mode: i18n(mode === "compare" ? "crossBookCompare" : "libraryQuestion", mode), limit: selectionLimit() }), true);
               return;
             }
             selectedBookIds.add(id);
@@ -344,10 +350,10 @@
         const text = root.createElement("span");
         const title = root.createElement("span");
         title.className = "library-ai-book-name";
-        title.textContent = book.title || "未命名图书";
+        title.textContent = book.title || i18n("unnamedBook", "Untitled book");
         const author = root.createElement("span");
         author.className = "library-ai-book-author";
-        author.textContent = book.author || "未知作者";
+        author.textContent = book.author || i18n("unknownAuthor", "Unknown author");
         text.append(title, author);
         label.append(box, text);
         booksEl.append(label);
@@ -952,6 +958,7 @@
     $("mode-compare").addEventListener("click", () => setMode("compare"));
     $("tag-filter").addEventListener("change", renderBooks);
     $("collection-filter").addEventListener("change", renderBooks);
+    $("library-ai-book-search").addEventListener("input", renderBooks);
     $("clear-filters").addEventListener("click", () => {
       $("tag-filter").value = "";
       $("collection-filter").value = "";
