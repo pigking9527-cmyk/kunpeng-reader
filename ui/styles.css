@@ -20,9 +20,12 @@ body {
 }
 #fp-settings-modal .modal-card {
   width: min(560px, calc(100vw - 48px));
+  min-width: 0;
+  flex: 0 1 min(560px, calc(100vw - 48px));
   height: min(760px, calc(100vh - 64px));
   max-width: calc(100vw - 48px);
   max-height: calc(100vh - 64px);
+  overflow-x: hidden;
   overflow-y: auto;
 }
 #fp-settings-modal .modal-head { font-size: 20px; margin-bottom: 14px; }
@@ -49,8 +52,8 @@ body {
 .animation-setting-group.animation-group-disabled .animation-group-help,
 .animation-setting-group.animation-group-disabled .animation-group-options { opacity: .5; }
 .animation-setting-group input:disabled + .slider { cursor: not-allowed; }
-.recovery-backup-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
-.recovery-backup-actions select { min-width: 0; flex: 1; }
+.recovery-backup-actions { display: flex; min-width: 0; gap: 8px; align-items: center; margin-top: 8px; }
+.recovery-backup-actions select { min-width: 0; flex: 1 1 0; }
 .modal-head { display: flex; align-items: center; justify-content: space-between;
   font-size: 16px; font-weight: 600; margin-bottom: 10px; }
 .info-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f0f2; font-size: 14px; }
@@ -609,15 +612,20 @@ body.anim-filter-button-off #filter-btn.filters-active {
 .fp-set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px;
   font-size: 16px; color: #333; padding: 8px 0; white-space: nowrap; }
 .fp-set-tail { display: inline-flex; align-items: center; gap: 10px; }
+#fp-settings-modal .fp-set-row { min-width: 0; white-space: normal; }
+#fp-settings-modal .fp-set-row > :first-child { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; }
+#fp-settings-modal .fp-set-tail { flex: 0 0 auto; }
 .app-language-select { min-width: 156px; max-width: 54%; padding: 6px 8px; border: 1px solid #cfd7e6; border-radius: 7px; background: #fff; color: #344154; font: inherit; font-size: 15px; }
 .fp-row-gear { border: none; background: transparent; cursor: pointer; font-size: 17px;
   color: #888; line-height: 1; padding: 2px; }
 .fp-row-gear:hover { color: #2b6cff; }
-.default-apps-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 8px; padding: 12px 0; border-top: 1px solid #eef0f4; }
-.default-apps-setting p { margin: 4px 0 0; color: #777; font-size: 12px; line-height: 1.45; }
-.default-apps-setting .btn-plain { flex: 0 0 auto; font-size: 13px; padding: 5px 10px; }
-.fp-set-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 12px; }
-.fp-set-actions .btn-plain { font-size: 13px; padding: 5px 10px; }
+.default-apps-setting { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; margin-top: 8px; padding: 12px 0; border-top: 1px solid #eef0f4; }
+.default-apps-setting > div { flex: 1 1 0; min-width: 0; }
+.default-apps-setting p { margin: 4px 0 0; color: #777; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.default-apps-setting .btn-plain { flex: 0 1 48%; max-width: 48%; white-space: normal; overflow-wrap: anywhere; font-size: 13px; padding: 5px 10px; }
+.recovery-backup-actions .btn-plain { flex: 0 1 auto; max-width: 100%; }
+.fp-set-actions { display: flex; min-width: 0; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.fp-set-actions .btn-plain { max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 13px; padding: 5px 10px; }
 .experimental-settings { margin: 0; padding: 6px 0 4px; border: 0; }
 .experimental-settings .fp-title { color: #65748a; font-size: 13px; font-weight: 650; }
 .experimental-settings .fp-set-row { padding-bottom: 2px; }

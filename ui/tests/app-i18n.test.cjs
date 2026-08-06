@@ -7,6 +7,7 @@ const uiRoot = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(uiRoot, "index.html"), "utf8");
 const i18n = fs.readFileSync(path.join(uiRoot, "app-i18n.js"), "utf8");
 const app = fs.readFileSync(path.join(uiRoot, "app.js"), "utf8");
+const styles = fs.readFileSync(path.join(uiRoot, "styles.css"), "utf8");
 
 test("main settings expose a persistent software language selector", () => {
   assert.match(html, /id="set-app-language"/);
@@ -41,4 +42,7 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(app, /function renderRecoveryBackupStatus/);
   assert.match(app, /appText\("recoveryStatus"/);
   assert.match(app, /app-language-changed[\s\S]*?renderRecoveryBackupStatus\(lastRecoveryBackupStatus\)/);
+  assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*min-width:\s*0;[^}]*overflow-x:\s*hidden;/s);
+  assert.match(styles, /#fp-settings-modal \.fp-set-row > :first-child\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
+  assert.match(styles, /\.default-apps-setting \.btn-plain\s*\{[^}]*max-width:\s*48%;[^}]*white-space:\s*normal;/s);
 });
