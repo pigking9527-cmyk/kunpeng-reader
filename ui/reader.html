@@ -430,18 +430,20 @@
       .theme-btn:disabled { opacity: 0.62; cursor: default; }
       .theme-btn:disabled:hover { background: #fff; }
       .theme-btn.active:disabled { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
-      .reading-mode-row { justify-content: space-between; gap: 6px; }
-      .mode-toggle-group { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; }
+      .reading-mode-row { justify-content: flex-start; gap: 0; }
+      .mode-toggle-group { display: flex; align-items: center; justify-content: flex-start; gap: 10px; width: 100%; }
       .mode-toggle-item {
         display: flex; align-items: center; justify-content: space-between; gap: 6px;
         min-width: 0; color: #444; white-space: nowrap;
       }
       .settings .mode-toggle-item { width: auto; }
-      .settings .text-conversion-row > .text-conversion-toggle { width: auto; }
-      .text-conversion-choice { display: inline-flex; align-items: center; gap: 4px; color: #8a8f9b; font-size: 12px; }
+      .text-conversion-choice { display: inline-flex; align-items: center; gap: 6px; color: #8a8f9b; font-size: 12px; }
       .text-conversion-label { line-height: 20px; }
+      .text-conversion-traditional-label { display: none; }
       .text-conversion-toggle:has(input:checked) .text-conversion-simple-label,
       .text-conversion-toggle:has(input:not(:checked)) .text-conversion-traditional-label { color: #246ed4; font-weight: 700; }
+      .text-conversion-toggle:has(input:not(:checked)) .text-conversion-simple-label { display: none; }
+      .text-conversion-toggle:has(input:not(:checked)) .text-conversion-traditional-label { display: inline; }
       .settings-switch { position: relative; display: inline-block; width: 38px; height: 20px; flex: 0 0 auto; }
       .settings-switch input { opacity: 0; width: 0; height: 0; }
       .settings-slider {
@@ -764,14 +766,11 @@
       <div class="row"><label>行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
       <div class="row"><label>段间距</label><input type="range" id="set-para" min="0" max="2" step="0.1" /><span class="val" id="v-para"></span></div>
       <div class="row"><label>字间距</label><input type="range" id="set-letter" min="0" max="5" step="0.5" /><span class="val" id="v-letter"></span></div>
-      <div class="row text-conversion-row">
-        <label class="mode-toggle-item text-conversion-toggle" for="set-text-conversion-simple">
-          <span>改为简</span>
-          <span class="text-conversion-choice"><span class="text-conversion-label text-conversion-simple-label">简</span><span class="settings-switch"><input id="set-text-conversion-simple" type="checkbox" /><span class="settings-slider"></span></span><span class="text-conversion-label text-conversion-traditional-label">繁</span></span>
-        </label>
-      </div>
       <div class="row reading-mode-row">
         <div class="mode-toggle-group">
+          <label class="mode-toggle-item text-conversion-toggle" for="set-text-conversion-simple">
+            <span class="text-conversion-choice"><span class="text-conversion-label text-conversion-simple-label">简</span><span class="text-conversion-label text-conversion-traditional-label">繁</span><span class="settings-switch"><input id="set-text-conversion-simple" type="checkbox" /><span class="settings-slider"></span></span></span>
+          </label>
           <label class="mode-toggle-item" for="set-dual-mode">
             <span>双页</span>
             <span class="settings-switch">
