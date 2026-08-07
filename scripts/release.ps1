@@ -107,7 +107,9 @@ try {
   }
 
   if (-not $SkipInstaller) {
-    Invoke-Step "installer build" { cargo tauri build }
+    Invoke-Step "installer build" {
+      cargo tauri build --config (Join-Path $repoRoot "packaging\windows\tauri.release.conf.json")
+    }
   }
 
   $assets = Invoke-Step "prepare assets" { Copy-ReleaseAssets -Ver $Version }
