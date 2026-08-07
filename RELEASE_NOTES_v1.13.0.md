@@ -13,7 +13,7 @@
 
 ## 桌面发布包
 
-- Windows x64：便携版、NSIS 安装包、`SHA256SUMS.txt`
+- Windows x64：便携压缩包、NSIS 安装包、可选 CUDA Provider 组件与 `SHA256SUMS.txt`
 - macOS Apple Silicon：DMG、App ZIP、`SHA256SUMS-macOS.txt`
 - Linux x86_64：AppImage、deb、`SHA256SUMS-Linux.txt`
 
