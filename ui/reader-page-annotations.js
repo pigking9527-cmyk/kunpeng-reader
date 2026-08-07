@@ -1488,7 +1488,14 @@ function dictHnSettings(){
     var raw=localStorage.getItem('dictHownetSettings');
     if(raw){
       var v=JSON.parse(raw)||{};
-      return {synonyms:v.synonyms!==false,antonyms:v.antonyms!==false};
+      return {
+        plain:v.plain!==false,
+        sense:v.sense!==false,
+        context:v.context!==false,
+        hypernyms:v.hypernyms!==false,
+        synonyms:v.synonyms!==false,
+        antonyms:v.antonyms!==false
+      };
     }
   }catch(_){}
   return defaults;

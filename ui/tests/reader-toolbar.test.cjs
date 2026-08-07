@@ -63,6 +63,13 @@ test("reader settings dropdown has no pointer gap below the toolbar", () => {
   assert.doesNotMatch(html, /\.settings\s*\{[^}]*top:\s*calc\(100%\s*\+\s*8px\);/s);
 });
 
+test("dictionary enhancement switches restore every persisted option", () => {
+  for (const key of ["plain", "sense", "context", "hypernyms", "synonyms", "antonyms"]) {
+    assert.match(annotations, new RegExp(`${key}:v\\.${key}!==false`));
+    assert.match(annotations, new RegExp(`st\\.${key}!==false`));
+  }
+});
+
 test("reader settings provide a display-only simplified/traditional conversion switch", () => {
   assert.match(html, /id="set-text-conversion-simple"/);
   assert.match(html, /text-conversion-simple-label">简<\/span>/);
