@@ -4,6 +4,7 @@
 pub(crate) const READER_PAGE_HEAD: &str = concat!(
     include_str!("../ui/reader-page-style.html"),
     "<script>",
+    include_str!("../ui/reader-page-bug-trace.js"),
     include_str!("../ui/reader-page-layout.js"),
     include_str!("../ui/reader-page-end.js"),
     include_str!("../ui/reader-page-pagination.js"),

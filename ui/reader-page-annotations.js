@@ -1,4 +1,15 @@
 // ---- 高亮/批注 ----
+// This file runs inside the chapter iframe, isolated from reader-i18n.js.  It
+// receives S.uiLanguage from the reader shell and keeps every transient menu
+// in the same language as the surrounding reader.
+var READER_PAGE_COPY={
+  'zh-CN':{yellow:'黄色',green:'绿色',blue:'蓝色',pink:'粉色',web:'网页搜索',dict:'词典',translate:'翻译',copy:'复制',highlight:'高亮',correct:'改错',excerpt:'书摘',cross:'跨书搜索',semantic:'相似语义',aiReader:'智读',note:'批注',bookmark:'书签',removeHighlight:'取消高亮',display:'显示',both:'图文',text:'文字',icon:'图标',colorful:'多彩高亮',layout:'布局',row:'横排',grid:'九宫格',size:'大小',small:'小',medium:'中',large:'大',dragSort:'拖动排序',searchEngineGoogle:'谷歌',searchEngineBaidu:'百度',original:'原文',cancel:'取消',save:'保存',downloadImage:'下载图片',generatingImage:'正在生成图片…',downloadStarted:'已开始下载',source:'原文',translation:'译文',loading:'加载中…',autoDetect:'自动检测',chinese:'中文',english:'英文',japanese:'日文',korean:'韩文',systemLanguage:'系统语言',translationFailed:'翻译失败',fillCredential:'请填写',checkCredential:'正在检查凭据配置…',savingCredential:'正在安全保存凭据…',dictionarySettings:'词典增强设置',lookingUp:'查词中…',meaningHint:'词义提示',possibleSenses:'可能义项',contextHint:'结合当前句子',hypernyms:'上位词',synonyms:'近义',antonyms:'反义',notFoundDefinition:'（未找到该词的释义）',noDefinition:'（无释义）',pronunciation:'发音',externalDictionary:'外置词典',footnoteLoading:'加载中…',footnoteNotFound:'（未找到注释内容）',footnoteFailed:'（注释加载失败）'},
+  'zh-TW':{yellow:'黃色',green:'綠色',blue:'藍色',pink:'粉色',web:'網頁搜尋',dict:'詞典',translate:'翻譯',copy:'複製',highlight:'螢光標記',correct:'校正',excerpt:'書摘',cross:'跨書搜尋',semantic:'相似語義',aiReader:'智讀',note:'批註',bookmark:'書籤',removeHighlight:'取消標記',display:'顯示',both:'圖文',text:'文字',icon:'圖示',colorful:'多彩標記',layout:'版面',row:'橫排',grid:'九宮格',size:'大小',small:'小',medium:'中',large:'大',dragSort:'拖曳排序',searchEngineGoogle:'Google',searchEngineBaidu:'百度',original:'原文',cancel:'取消',save:'儲存',downloadImage:'下載圖片',generatingImage:'正在產生圖片…',downloadStarted:'已開始下載',source:'原文',translation:'譯文',loading:'載入中…',autoDetect:'自動偵測',chinese:'中文',english:'英文',japanese:'日文',korean:'韓文',systemLanguage:'系統語言',translationFailed:'翻譯失敗',fillCredential:'請填寫',checkCredential:'正在檢查憑據設定…',savingCredential:'正在安全儲存憑據…',dictionarySettings:'詞典增強設定',lookingUp:'查詞中…',meaningHint:'詞義提示',possibleSenses:'可能義項',contextHint:'結合目前句子',hypernyms:'上位詞',synonyms:'近義詞',antonyms:'反義詞',notFoundDefinition:'（找不到該詞釋義）',noDefinition:'（無釋義）',pronunciation:'發音',externalDictionary:'外部詞典',footnoteLoading:'載入中…',footnoteNotFound:'（找不到註釋內容）',footnoteFailed:'（註釋載入失敗）'},
+  en:{yellow:'Yellow',green:'Green',blue:'Blue',pink:'Pink',web:'Web search',dict:'Dictionary',translate:'Translate',copy:'Copy',highlight:'Highlight',correct:'Correct',excerpt:'Excerpt',cross:'Search library',semantic:'Similar meaning',aiReader:'AI Reader',note:'Note',bookmark:'Bookmark',removeHighlight:'Remove highlight',display:'Display',both:'Icon + text',text:'Text',icon:'Icon',colorful:'Highlight colors',layout:'Layout',row:'Row',grid:'Grid',size:'Size',small:'Small',medium:'Medium',large:'Large',dragSort:'Drag to reorder',searchEngineGoogle:'Google',searchEngineBaidu:'Baidu',original:'Original',cancel:'Cancel',save:'Save',downloadImage:'Download image',generatingImage:'Creating image…',downloadStarted:'Download started',source:'Source',translation:'Translation',loading:'Loading…',autoDetect:'Detect automatically',chinese:'Chinese',english:'English',japanese:'Japanese',korean:'Korean',systemLanguage:'System language',translationFailed:'Translation failed',fillCredential:'Enter',checkCredential:'Checking credential setup…',savingCredential:'Saving credentials securely…',dictionarySettings:'Dictionary options',lookingUp:'Looking up…',meaningHint:'Meaning hint',possibleSenses:'Possible senses',contextHint:'In this context',hypernyms:'Broader terms',synonyms:'Synonyms',antonyms:'Antonyms',notFoundDefinition:'(No definition found)',noDefinition:'(No definition)',pronunciation:'Pronunciation',externalDictionary:'External dictionary',footnoteLoading:'Loading…',footnoteNotFound:'(Footnote not found)',footnoteFailed:'(Could not load footnote)'},
+  ja:{yellow:'黄色',green:'緑色',blue:'青色',pink:'ピンク',web:'ウェブ検索',dict:'辞書',translate:'翻訳',copy:'コピー',highlight:'ハイライト',correct:'修正',excerpt:'抜粋',cross:'本棚を検索',semantic:'類似した意味',aiReader:'AI 読解',note:'注釈',bookmark:'しおり',removeHighlight:'ハイライトを削除',display:'表示',both:'アイコンと文字',text:'文字',icon:'アイコン',colorful:'色付きハイライト',layout:'レイアウト',row:'横並び',grid:'グリッド',size:'サイズ',small:'小',medium:'中',large:'大',dragSort:'ドラッグして並べ替え',searchEngineGoogle:'Google',searchEngineBaidu:'Baidu',original:'原文',cancel:'キャンセル',save:'保存',downloadImage:'画像をダウンロード',generatingImage:'画像を作成中…',downloadStarted:'ダウンロードを開始しました',source:'原文',translation:'翻訳',loading:'読み込み中…',autoDetect:'自動検出',chinese:'中国語',english:'英語',japanese:'日本語',korean:'韓国語',systemLanguage:'システム言語',translationFailed:'翻訳に失敗しました',fillCredential:'入力してください:',checkCredential:'認証情報を確認中…',savingCredential:'認証情報を安全に保存中…',dictionarySettings:'辞書の設定',lookingUp:'検索中…',meaningHint:'語義のヒント',possibleSenses:'候補の語義',contextHint:'文脈での意味',hypernyms:'上位語',synonyms:'類義語',antonyms:'対義語',notFoundDefinition:'（定義が見つかりません）',noDefinition:'（定義がありません）',pronunciation:'発音',externalDictionary:'外部辞書',footnoteLoading:'読み込み中…',footnoteNotFound:'（注釈が見つかりません）',footnoteFailed:'（注釈を読み込めません）'}
+};
+function readerPageLanguage(){var raw=(S&&S.uiLanguage)||document.documentElement.lang||'zh-CN';if(READER_PAGE_COPY[raw])return raw;var base=String(raw).split('-')[0];return base==='zh'?'zh-CN':(READER_PAGE_COPY[base]?base:'en');}
+function readerPageText(key){var lang=readerPageLanguage(),copy=READER_PAGE_COPY[lang]||READER_PAGE_COPY.en;return copy[key]||READER_PAGE_COPY.en[key]||key;}
 var HL=[]; // 全书高亮 [{chapter,start,end,text,note}]，数组下标即后端 index
 var hlOverlay=null,sourceTextCache=null,highlightRenderTimer=null;
 function generatedTextNode(node){
@@ -365,17 +376,20 @@ function init(){
   function handleReaderTap(e){
     parent.postMessage({uiClick:1},'*');
     var x=e.clientX;
+    if(chapterPending>0){readerBugTrace('click','chapter_pending',e);return;}
     if(overlayOpen){
+      readerBugTrace('click','overlay',e);
       // 关闭浮层的同一次中间点击也切换工具栏，不要求用户再点一次。
       if(x>=window.innerWidth*0.4&&x<=window.innerWidth*0.6)parent.postMessage({centerTap:1},'*');
       return;
     }
     // 点到已高亮的文字 → 出高亮菜单，不翻页
     var hm=e.target.closest?e.target.closest('.hl-rect[data-hi],mark.hl'):null;
-    if(hm){e.stopPropagation();showHlMenu(parseInt(hm.getAttribute('data-hi'),10),true,hm,e);return;}
-    if(e.target.closest&&e.target.closest('#fn-pop'))return; // 注释弹窗内点击：不翻页
+    if(hm){readerBugTrace('click','highlight',e);e.stopPropagation();showHlMenu(parseInt(hm.getAttribute('data-hi'),10),true,hm,e);return;}
+    if(e.target.closest&&e.target.closest('#fn-pop')){readerBugTrace('click','footnote',e);return;} // 注释弹窗内点击：不翻页
     var a=e.target.closest?e.target.closest('a'):null;
     if(a){var href=a.getAttribute('href')||'';
+      readerBugTrace('click','link',e);
       if(href.charAt(0)==='#'){e.preventDefault();
         var m=/^#c(\d+)(?:~(.+))?$/.exec(href);
         var frag=m?m[2]:href.slice(1), ciT=m?parseInt(m[1],10):curCh;
@@ -387,11 +401,12 @@ function init(){
     }
     hideFn(); // 点别处 → 收起注释弹窗
     // 拖动选字（或存在选中文字）时不翻页，让 web 搜索菜单稳定停在高亮处
-    if(didDrag||tapHasSelection()){return;}
+    if(didDrag){readerBugTrace('click','drag',e);return;}
+    if(tapHasSelection()){readerBugTrace('click','selection',e);return;}
     var tapStarted=performance.now();
-    if(x>window.innerWidth*0.6){parent.postMessage({readerNavigated:1},'*');nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
-    else if(x<window.innerWidth*0.4){parent.postMessage({readerNavigated:1},'*');prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
-    else parent.postMessage({centerTap:1},'*');
+    if(x>window.innerWidth*0.6){readerBugTrace('click','page_next',e);parent.postMessage({readerNavigated:1},'*');nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
+    else if(x<window.innerWidth*0.4){readerBugTrace('click','page_prev',e);parent.postMessage({readerNavigated:1},'*');prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
+    else{readerBugTrace('click','center',e);parent.postMessage({centerTap:1},'*');}
   }
   // macOS 的 WKWebView 在部分点击序列中较晚派发 click。只对正文空白/文字区
   // 使用更早的 pointerup 翻页，并吞掉紧随其后的 click，避免 Windows 行为变化。
@@ -403,7 +418,7 @@ function init(){
   });
   document.addEventListener('click',function(e){
     if(macFastTap&&Date.now()-macFastTap.at<700&&macFastTap.target===e.target&&Math.abs(macFastTap.x-e.clientX)<5&&Math.abs(macFastTap.y-e.clientY)<5){
-      macFastTap=null;e.preventDefault();e.stopPropagation();return;
+      readerBugTrace('click','mac_duplicate',e);macFastTap=null;e.preventDefault();e.stopPropagation();return;
     }
     macFastTap=null;
     handleReaderTap(e);
@@ -411,8 +426,8 @@ function init(){
   document.addEventListener('keydown',function(e){if(((e.ctrlKey||e.metaKey)&&(e.key==='f'||e.key==='F'))||e.key==='F3')e.preventDefault();},true); // 禁用浏览器自带查找
   document.addEventListener('keydown',function(e){
     if(e.isComposing||e.key==='Process'||e.keyCode===229)return;
-    if(e.key==='PageDown'||e.key==='ArrowRight'||e.key==='ArrowDown'||(e.key===' '&&!e.shiftKey)){e.preventDefault();userNav();nextPage();}
-    else if(e.key==='PageUp'||e.key==='ArrowLeft'||e.key==='ArrowUp'||(e.key===' '&&e.shiftKey)){e.preventDefault();userNav();prevPage();}
+    if(e.key==='PageDown'||e.key==='ArrowRight'||e.key==='ArrowDown'||(e.key===' '&&!e.shiftKey)){readerBugTrace('key','page_next',null,{direction:'forward',key:e.key===' '?'space':e.key});e.preventDefault();userNav();nextPage();}
+    else if(e.key==='PageUp'||e.key==='ArrowLeft'||e.key==='ArrowUp'||(e.key===' '&&e.shiftKey)){readerBugTrace('key','page_prev',null,{direction:'backward',key:e.key===' '?'space':e.key});e.preventDefault();userNav();prevPage();}
   });
   var wheelLock=false,scrollChapterLock=false;
   document.addEventListener('wheel',function(e){
@@ -487,28 +502,21 @@ var HL_WEB_ENGINE_KEY='highlightWebSearchEngineV1';
 var HL_MENU_COLOR_KEY='highlightMenuMultiColorV1';
 var HL_SELECTED_COLOR_KEY='highlightMenuColorV1';
 var HL_COLORS=[
-  {key:'y',label:'黄色',value:'rgba(255,218,92,.42)'},
-  {key:'g',label:'绿色',value:'rgba(135,220,151,.42)'},
-  {key:'b',label:'蓝色',value:'rgba(119,185,255,.42)'},
-  {key:'p',label:'粉色',value:'rgba(255,143,184,.42)'}
+  {key:'y',labelKey:'yellow',value:'rgba(255,218,92,.42)'},
+  {key:'g',labelKey:'green',value:'rgba(135,220,151,.42)'},
+  {key:'b',labelKey:'blue',value:'rgba(119,185,255,.42)'},
+  {key:'p',labelKey:'pink',value:'rgba(255,143,184,.42)'}
 ];
 var HL_MENU_ACTIONS=[
-  {key:'web',label:'web搜索',icon:'🔍'},
-  {key:'dict',label:'词典',icon:'📖'},
-  {key:'translate',label:'翻译',icon:'译'},
-  {key:'copy',label:'复制',icon:'📋'},
-  {key:'highlight',label:'高亮',icon:'🖍'},
-  {key:'correct',label:'改错',icon:'✎'},
-  {key:'excerpt',label:'书摘',icon:'▣'},
-  {key:'cross',label:'跨书搜索',icon:'📚'},
-  {key:'semantic',label:'相似语义',icon:'≈'},
-  {key:'aiReader',label:'智读',icon:'✨'},
-  {key:'note',label:'批注',icon:'📝'},
-  {key:'bookmark',label:'书签',icon:'🔖'}
+  {key:'web',icon:'🔍'}, {key:'dict',icon:'📖'}, {key:'translate',icon:'译'},
+  {key:'copy',icon:'📋'}, {key:'highlight',icon:'🖍'}, {key:'correct',icon:'✎'},
+  {key:'excerpt',icon:'▣'}, {key:'cross',icon:'📚'}, {key:'semantic',icon:'≈'},
+  {key:'aiReader',icon:'✨'}, {key:'note',icon:'📝'}, {key:'bookmark',icon:'🔖'}
 ];
 function defaultHlMenuConfig(){return HL_MENU_ACTIONS.map(function(a){return {key:a.key,show:true};});}
-function hlActionLabel(key){for(var i=0;i<HL_MENU_ACTIONS.length;i++){if(HL_MENU_ACTIONS[i].key===key)return HL_MENU_ACTIONS[i].label;}return key;}
+function hlActionLabel(key){return readerPageText(key);}
 function hlActionIcon(key){for(var i=0;i<HL_MENU_ACTIONS.length;i++){if(HL_MENU_ACTIONS[i].key===key)return HL_MENU_ACTIONS[i].icon||'';}return '';}
+function hlColorLabel(color){return readerPageText((color&&color.labelKey)||'yellow');}
 function readHlMenuMode(){var m='';try{m=localStorage.getItem(HL_MENU_MODE_KEY)||'';}catch(_){}return (m==='text'||m==='icon'||m==='both')?m:'both';}
 function saveHlMenuMode(mode){localStorage.setItem(HL_MENU_MODE_KEY,mode);}
 function readHlMenuSize(){var s='';try{s=localStorage.getItem(HL_MENU_SIZE_KEY)||'';}catch(_){}return (s==='medium'||s==='large'||s==='small')?s:'small';}
@@ -530,7 +538,7 @@ function updateMenuSizeClass(container){
 }
 function updateActionButton(it){
   if(!it||!it.button)return;
-  var mode=readHlMenuMode(),label=it.label||hlActionLabel(it.key),icon=it.icon||hlActionIcon(it.key);
+  var mode=readHlMenuMode(),label=it.labelKey?readerPageText(it.labelKey):(it.label||hlActionLabel(it.key)),icon=it.icon||hlActionIcon(it.key);
   it.button.title=label;it.button.setAttribute('aria-label',label);
   if(mode==='icon')it.button.textContent=icon||label;
   else if(mode==='text')it.button.textContent=label;
@@ -607,7 +615,7 @@ function applyConfiguredMenu(container,items,setBtn){
     colorHost.innerHTML='';
     var selected=readHlColor();
     HL_COLORS.forEach(function(c){
-      var b=document.createElement('button');b.type='button';b.className='hm-color-button'+(c.key===selected?' selected':'');b.title='用'+c.label+'高亮';b.setAttribute('aria-label',b.title);b.style.setProperty('--hm-color',c.value);
+      var b=document.createElement('button');b.type='button';b.className='hm-color-button'+(c.key===selected?' selected':'');b.title=readerPageText('highlight')+' · '+hlColorLabel(c);b.setAttribute('aria-label',b.title);b.style.setProperty('--hm-color',c.value);
       b.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();});
       b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();saveHlColor(c.key);if(typeof container._onColorPick==='function')container._onColorPick(c.key);refreshConfiguredMenus();});
       colorHost.appendChild(b);
@@ -619,7 +627,7 @@ function applyConfiguredMenu(container,items,setBtn){
 function renderHlSettings(){
   if(!hlSettingsPop)return;
   var cfg=readHlMenuConfig();
-  hlSettingsPop.innerHTML='<div class="hs-mode hs-appearance"><span class="hs-mode-label">显示</span><span class="hs-mode-buttons hs-display-buttons"><button type="button" data-mode="both">图文</button><button type="button" data-mode="text">文字</button><button type="button" data-mode="icon">图标</button></span><span class="hs-mode-label hs-color-label">多彩高亮</span><label class="hs-switch"><input class="hs-color-enabled" type="checkbox"><span class="hs-slider"></span></label></div><div class="hs-mode hs-layout-size"><span class="hs-mode-label">布局</span><span class="hs-mode-buttons hs-layout-buttons"><button type="button" data-layout="row">横排</button><button type="button" data-layout="grid">九宫格</button></span><span class="hs-mode-label">大小</span><span class="hs-mode-buttons hs-size-buttons"><button type="button" data-size="small">小</button><button type="button" data-size="medium">中</button><button type="button" data-size="large">大</button></span></div><div class="hs-list"></div>';
+  hlSettingsPop.innerHTML='<div class="hs-mode hs-appearance"><span class="hs-mode-label">'+readerPageText('display')+'</span><span class="hs-mode-buttons hs-display-buttons"><button type="button" data-mode="both">'+readerPageText('both')+'</button><button type="button" data-mode="text">'+readerPageText('text')+'</button><button type="button" data-mode="icon">'+readerPageText('icon')+'</button></span><span class="hs-mode-label hs-color-label">'+readerPageText('colorful')+'</span><label class="hs-switch"><input class="hs-color-enabled" type="checkbox"><span class="hs-slider"></span></label></div><div class="hs-mode hs-layout-size"><span class="hs-mode-label">'+readerPageText('layout')+'</span><span class="hs-mode-buttons hs-layout-buttons"><button type="button" data-layout="row">'+readerPageText('row')+'</button><button type="button" data-layout="grid">'+readerPageText('grid')+'</button></span><span class="hs-mode-label">'+readerPageText('size')+'</span><span class="hs-mode-buttons hs-size-buttons"><button type="button" data-size="small">'+readerPageText('small')+'</button><button type="button" data-size="medium">'+readerPageText('medium')+'</button><button type="button" data-size="large">'+readerPageText('large')+'</button></span></div><div class="hs-list"></div>';
   var mode=readHlMenuMode();
   [].slice.call(hlSettingsPop.querySelectorAll('.hs-display-buttons button')).forEach(function(b){
     b.className=b.dataset.mode===mode?'on':'';
@@ -689,12 +697,12 @@ function renderHlSettings(){
     var sw=document.createElement('label');sw.className='hs-switch';
     var input=document.createElement('input');input.type='checkbox';input.checked=c.show!==false;
     var slider=document.createElement('span');slider.className='hs-slider';sw.append(input,slider);
-    var grip=document.createElement('button');grip.type='button';grip.className='hs-grip';grip.title='拖动排序';
+    var grip=document.createElement('button');grip.type='button';grip.className='hs-grip';grip.title=readerPageText('dragSort');
     if(c.key==='web'){
       row.classList.add('hs-web-row');
       var engines=document.createElement('span');engines.className='hs-mode-buttons hs-engine-buttons';
       ['baidu','google'].forEach(function(engine){
-        var b=document.createElement('button');b.type='button';b.dataset.engine=engine;b.textContent=engine==='google'?'谷歌':'百度';
+        var b=document.createElement('button');b.type='button';b.dataset.engine=engine;b.textContent=engine==='google'?readerPageText('searchEngineGoogle'):readerPageText('searchEngineBaidu');
         b.className=readHlWebEngine()===engine?'on':'';
         b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();saveHlWebEngine(engine);renderHlSettings();});
         engines.appendChild(b);
@@ -741,7 +749,7 @@ function hideHlTextPop(){if(hlTextPop)hlTextPop.style.display='none';}
 function ensureHighlightTextPop(){
   if(!hlTextPop){
     hlTextPop=document.createElement('div');hlTextPop.id='hl-text-pop';
-    hlTextPop.innerHTML='<button class="ht-close" type="button">×</button><div class="ht-title">改错</div><div class="ht-original"></div><textarea></textarea><div class="ht-row"><button class="act cancel" type="button">取消</button><button class="act save" type="button">保存</button></div>';
+    hlTextPop.innerHTML='<button class="ht-close" type="button">×</button><div class="ht-title">'+readerPageText('correct')+'</div><div class="ht-original"></div><textarea></textarea><div class="ht-row"><button class="act cancel" type="button">'+readerPageText('cancel')+'</button><button class="act save" type="button">'+readerPageText('save')+'</button></div>';
     document.body.appendChild(hlTextPop);
     ['mousedown','mouseup','click','wheel'].forEach(function(t){hlTextPop.addEventListener(t,function(e){e.stopPropagation();});});
     hlTextPop.querySelector('.ht-close').addEventListener('click',hideHlTextPop);
@@ -773,7 +781,7 @@ function showHighlightTextEditor(idx){
   ensureHighlightTextPop();
   correctDraft=null;
   activeHi=idx;
-  hlTextPop.querySelector('.ht-original').textContent='原文：'+(h.text||'');
+  hlTextPop.querySelector('.ht-original').textContent=readerPageText('original')+'：'+(h.text||'');
   hlTextPop.querySelector('textarea').value=highlightDisplayText(h);
   var el=markEl(idx),r=el?el.getBoundingClientRect():{left:window.innerWidth/2,top:window.innerHeight/2,bottom:window.innerHeight/2,width:0};
   placeHighlightTextPop(r);
@@ -783,7 +791,7 @@ function showCorrectionDraft(o,rect){
   ensureHighlightTextPop();
   correctDraft=o;
   activeHi=-1;
-  hlTextPop.querySelector('.ht-original').textContent='原文：'+(o.text||'');
+  hlTextPop.querySelector('.ht-original').textContent=readerPageText('original')+'：'+(o.text||'');
   hlTextPop.querySelector('textarea').value=o.text||'';
   placeHighlightTextPop(rect);
 }
@@ -793,7 +801,7 @@ function showExcerptPage(text){
   excerptText=t;
   if(!excerptPage){
     excerptPage=document.createElement('div');excerptPage.id='excerpt-page';
-    excerptPage.innerHTML='<div class="ex-card"><div class="ex-head"><div class="ex-title">书摘</div><button class="ex-close" type="button">×</button></div><div class="ex-body"><div class="ex-quote"></div></div><div class="ex-foot"><span class="ex-status"></span><button class="ex-download" type="button">下载图片</button></div></div>';
+    excerptPage.innerHTML='<div class="ex-card"><div class="ex-head"><div class="ex-title">'+readerPageText('excerpt')+'</div><button class="ex-close" type="button">×</button></div><div class="ex-body"><div class="ex-quote"></div></div><div class="ex-foot"><span class="ex-status"></span><button class="ex-download" type="button">'+readerPageText('downloadImage')+'</button></div></div>';
     document.body.appendChild(excerptPage);
     excerptPage.querySelector('.ex-close').addEventListener('click',hideExcerptPage);
     excerptPage.querySelector('.ex-download').addEventListener('click',downloadExcerptImage);
@@ -821,7 +829,7 @@ function canvasWrappedLines(ctx,text,maxW){
 function downloadExcerptImage(){
   var text=excerptText||'';if(!text.trim())return;
   var st=excerptPage&&excerptPage.querySelector?excerptPage.querySelector('.ex-status'):null;
-  if(st)st.textContent='正在生成图片...';
+  if(st)st.textContent=readerPageText('generatingImage');
   var scale=Math.max(2,Math.min(3,window.devicePixelRatio||2));
   var cssW=900,pad=72,font=34,lineH=62;
   var canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');
@@ -834,16 +842,16 @@ function downloadExcerptImage(){
   var g=ctx.createLinearGradient(0,0,cssW,cssH);g.addColorStop(0,'rgba(255,255,255,.55)');g.addColorStop(1,'rgba(210,185,135,.2)');ctx.fillStyle=g;ctx.fillRect(0,0,cssW,cssH);
   ctx.fillStyle='#2b2419';ctx.font=font+'px "Microsoft YaHei", system-ui, sans-serif';ctx.textBaseline='top';
   for(var i=0;i<lines.length;i++)ctx.fillText(lines[i],pad,pad+i*lineH);
-  ctx.fillStyle='rgba(75,58,37,.54)';ctx.font='22px "Microsoft YaHei", system-ui, sans-serif';ctx.fillText('书摘',pad,cssH-pad+18);
+  ctx.fillStyle='rgba(75,58,37,.54)';ctx.font='22px "Microsoft YaHei", system-ui, sans-serif';ctx.fillText(readerPageText('excerpt'),pad,cssH-pad+18);
   var dataUrl=canvas.toDataURL('image/png');
   try{
     if(parent&&parent!==window){
-      parent.postMessage({downloadImage:{name:'书摘.png',dataUrl:dataUrl}},'*');
+      parent.postMessage({downloadImage:{name:readerPageText('excerpt')+'.png',dataUrl:dataUrl}},'*');
       return;
     }
   }catch(_){}
-  var a=document.createElement('a');a.download='书摘.png';a.href=dataUrl;document.body.appendChild(a);a.click();a.remove();
-  if(st)st.textContent='已开始下载';
+  var a=document.createElement('a');a.download=readerPageText('excerpt')+'.png';a.href=dataUrl;document.body.appendChild(a);a.click();a.remove();
+  if(st)st.textContent=readerPageText('downloadStarted');
 }
 function copyTextToClipboard(text){
   var t=(text||'').trim();if(!t)return;
@@ -878,7 +886,7 @@ var trPop=null,trRect=null,trText='',trCredentialDirty=false,trCredentialStatus=
 function hideTranslate(){if(trPop)trPop.style.display='none';}
 function setupTranslate(){
   trPop=document.createElement('div');trPop.id='tr-pop';
-  trPop.innerHTML='<div class="tr-row"><div><div class="tr-title">原文</div><div class="tr-text tr-src"></div></div><select class="tr-select tr-source"><option value="auto">自动检测</option><option value="zh-CN">中文</option><option value="en">英文</option><option value="ja">日文</option><option value="ko">韩文</option></select></div><div class="tr-sep"></div><div class="tr-row"><div><div class="tr-title">译文</div><div class="tr-text tr-dst tr-muted">加载中...</div></div><select class="tr-select tr-target"><option value="system">系统语言</option><option value="zh-CN">中文</option><option value="en">英文</option><option value="ja">日文</option><option value="ko">韩文</option></select></div><div class="tr-provider"><select class="tr-select tr-api"><option value="baidu">百度</option><option value="tencent">腾讯</option><option value="deepl">DeepL</option><option value="google">Google</option></select></div><div class="tr-api-fields"><input class="tr-input tr-api-id"><input class="tr-input tr-api-key" type="password"></div>';
+  trPop.innerHTML='<div class="tr-row"><div><div class="tr-title">'+readerPageText('source')+'</div><div class="tr-text tr-src"></div></div><select class="tr-select tr-source"><option value="auto">'+readerPageText('autoDetect')+'</option><option value="zh-CN">'+readerPageText('chinese')+'</option><option value="en">'+readerPageText('english')+'</option><option value="ja">'+readerPageText('japanese')+'</option><option value="ko">'+readerPageText('korean')+'</option></select></div><div class="tr-sep"></div><div class="tr-row"><div><div class="tr-title">'+readerPageText('translation')+'</div><div class="tr-text tr-dst tr-muted">'+readerPageText('loading')+'</div></div><select class="tr-select tr-target"><option value="system">'+readerPageText('systemLanguage')+'</option><option value="zh-CN">'+readerPageText('chinese')+'</option><option value="en">'+readerPageText('english')+'</option><option value="ja">'+readerPageText('japanese')+'</option><option value="ko">'+readerPageText('korean')+'</option></select></div><div class="tr-provider"><select class="tr-select tr-api"><option value="baidu">Baidu</option><option value="tencent">Tencent</option><option value="deepl">DeepL</option><option value="google">Google</option></select></div><div class="tr-api-fields"><input class="tr-input tr-api-id"><input class="tr-input tr-api-key" type="password"></div>';
   document.body.appendChild(trPop);
   try{
     trPop.querySelector('.tr-api').value=localStorage.getItem('translateProvider')||'baidu';
@@ -899,11 +907,11 @@ function translateApiStorageKey(provider,field){
   return 'translate_'+provider+'_'+field;
 }
 function translateApiLabel(provider){
-  if(provider==='baidu')return {id:'百度 AppID',key:'百度密钥'};
-  if(provider==='tencent')return {id:'腾讯 SecretId',key:'腾讯 SecretKey'};
-  if(provider==='deepl')return {id:'DeepL API Key',key:'DeepL 预留密钥（可空）'};
-  if(provider==='google')return {id:'Google API Key',key:'Google 预留密钥（可空）'};
-  return {id:'AppID / API Key',key:'密钥'};
+  if(provider==='baidu')return {id:'Baidu AppID',key:'Baidu API key'};
+  if(provider==='tencent')return {id:'Tencent SecretId',key:'Tencent SecretKey'};
+  if(provider==='deepl')return {id:'DeepL API key',key:'DeepL API key (optional)'};
+  if(provider==='google')return {id:'Google API key',key:'Google API key (optional)'};
+  return {id:'AppID / API key',key:'API key'};
 }
 function applyTranslationProfiles(status){
   if(!trPop||!status)return;
@@ -961,7 +969,7 @@ function openTranslate(text,rect){
   if(!trPop)setupTranslate();
   trText=t;trRect=rect||null;
   trPop.querySelector('.tr-src').textContent=t;
-  trPop.querySelector('.tr-dst').textContent='加载中...';
+  trPop.querySelector('.tr-dst').textContent=readerPageText('loading');
   trPop.querySelector('.tr-dst').className='tr-text tr-dst tr-muted';
   placeTranslate();requestTranslate();parent.postMessage({getTranslationProfiles:1},'*');
 }
@@ -974,29 +982,47 @@ function requestTranslate(){
   if(trCredentialDirty){
     if(!apiId||(api==='baidu'||api==='tencent')&&!apiKey){
       var dirtyLabel=translateApiLabel(api);
-      dst.textContent=(api==='deepl'||api==='google')?'请填写'+dirtyLabel.id+'。':'请填写'+dirtyLabel.id+' 和 '+dirtyLabel.key+'。';
+      dst.textContent=readerPageText('fillCredential')+' '+dirtyLabel.id+(api==='deepl'||api==='google'?'。':' + '+dirtyLabel.key+'。');
       dst.className='tr-text tr-dst tr-error';placeTranslate();return;
     }
-    dst.textContent='正在安全保存凭据...';dst.className='tr-text tr-dst tr-muted';placeTranslate();
+    dst.textContent=readerPageText('savingCredential');dst.className='tr-text tr-dst tr-muted';placeTranslate();
     parent.postMessage({saveTranslationCredential:{provider:api,apiId:apiId,apiKey:apiKey}},'*');return;
   }
   var status=trCredentialStatus[api];
-  if(!status){dst.textContent='正在检查凭据配置...';dst.className='tr-text tr-dst tr-muted';parent.postMessage({getTranslationCredentialStatus:api},'*');placeTranslate();return;}
+  if(!status){dst.textContent=readerPageText('checkCredential');dst.className='tr-text tr-dst tr-muted';parent.postMessage({getTranslationCredentialStatus:api},'*');placeTranslate();return;}
   if(!status.configured){
     var label=translateApiLabel(api);
-    dst.textContent=(api==='deepl'||api==='google')?'请先填写'+label.id+'。':'请先填写'+label.id+' 和 '+label.key+'。';
+    dst.textContent=readerPageText('fillCredential')+' '+label.id+(api==='deepl'||api==='google'?'。':' + '+label.key+'。');
     dst.className='tr-text tr-dst tr-error';
     placeTranslate();return;
   }
-  dst.textContent='加载中...';dst.className='tr-text tr-dst tr-muted';placeTranslate();
+  dst.textContent=readerPageText('loading');dst.className='tr-text tr-dst tr-muted';placeTranslate();
   parent.postMessage({translateText:{text:trText,source:trPop.querySelector('.tr-source').value,target:trPop.querySelector('.tr-target').value,provider:api,credentialConfigId:status.config_id||('translate:'+api)}},'*');
 }
 function showTranslateResult(r){
   if(!trPop)return;
   var dst=trPop.querySelector('.tr-dst');
   if(r&&r.ok){dst.textContent=r.translated||'';dst.className='tr-text tr-dst';}
-  else{dst.textContent=(r&&r.error)||'翻译失败';dst.className='tr-text tr-dst tr-error';}
+  else{dst.textContent=(r&&r.error)||readerPageText('translationFailed');dst.className='tr-text tr-dst tr-error';}
   placeTranslate();
+}
+// Called after the shell posts a new S.uiLanguage.  The iframe has no access
+// to the parent window's i18n module, so visible transient controls must be
+// rebuilt here rather than waiting for the next selection.
+function refreshReaderPageLanguage(){
+  if(selMenu)applyConfiguredMenu(selMenu,selMenuItems,selMenu._setBtn);
+  if(hlMenu)applyConfiguredMenu(hlMenu,hlMenuItems,hlMenu._setBtn);
+  if(hlSettingsPop&&hlSettingsPop.style.display!=='none')renderHlSettings();
+  if(hlTextPop){
+    var title=hlTextPop.querySelector('.ht-title'),cancel=hlTextPop.querySelector('.cancel'),save=hlTextPop.querySelector('.save');
+    if(title)title.textContent=readerPageText('correct');if(cancel)cancel.textContent=readerPageText('cancel');if(save)save.textContent=readerPageText('save');
+    var original=hlTextPop.querySelector('.ht-original');if(original)original.textContent=readerPageText('original')+'：'+original.textContent.replace(/^[^：:]+[：:]/,'');
+  }
+  if(excerptPage){var exTitle=excerptPage.querySelector('.ex-title'),exDownload=excerptPage.querySelector('.ex-download');if(exTitle)exTitle.textContent=readerPageText('excerpt');if(exDownload)exDownload.textContent=readerPageText('downloadImage');}
+  if(dictPop){var gear=dictPop.querySelector('.dc-gear');if(gear)gear.title=readerPageText('dictionarySettings');if(lastDict)renderDict();}
+  // Translation labels are part of generated select markup.  Recreate only
+  // an open panel; hidden panels can be rebuilt lazily without a visual jump.
+  if(trPop){var open=trPop.style.display==='block',text=trText,rect=trRect;trPop.remove();trPop=null;if(open&&text)openTranslate(text,rect);}
 }
 function setupSelMenu(){
   selMenu=document.createElement('div');selMenu.id='sel-menu';
@@ -1006,18 +1032,18 @@ function setupSelMenu(){
     if(window.getSelection)window.getSelection().removeAllRanges();
     hideSelMenu();
   };
-  var btn=document.createElement('button');btn.type='button';btn.textContent='🔍 web搜索';
-  var btnDict=document.createElement('button');btnDict.type='button';btnDict.textContent='📖 词典';
-  var btnTr=document.createElement('button');btnTr.type='button';btnTr.textContent='译 翻译';
-  var btnCopy=document.createElement('button');btnCopy.type='button';btnCopy.textContent='复制';
-  var btnHL=document.createElement('button');btnHL.type='button';btnHL.textContent='🖍 高亮';
-  var btnCorrect=document.createElement('button');btnCorrect.type='button';btnCorrect.textContent='✎ 改错';
-  var btnExcerpt=document.createElement('button');btnExcerpt.type='button';btnExcerpt.textContent='▣ 书摘';
-  var btnCross=document.createElement('button');btnCross.type='button';btnCross.textContent='跨书搜索';
-  var btnSemantic=document.createElement('button');btnSemantic.type='button';btnSemantic.textContent='≈ 相似语义';
-  var btnAiReader=document.createElement('button');btnAiReader.type='button';btnAiReader.textContent='✨ 智读';
-  var btnNote=document.createElement('button');btnNote.type='button';btnNote.textContent='📝 批注';
-  var btnBm=document.createElement('button');btnBm.type='button';btnBm.textContent='🔖 书签';
+  var btn=document.createElement('button');btn.type='button';
+  var btnDict=document.createElement('button');btnDict.type='button';
+  var btnTr=document.createElement('button');btnTr.type='button';
+  var btnCopy=document.createElement('button');btnCopy.type='button';
+  var btnHL=document.createElement('button');btnHL.type='button';
+  var btnCorrect=document.createElement('button');btnCorrect.type='button';
+  var btnExcerpt=document.createElement('button');btnExcerpt.type='button';
+  var btnCross=document.createElement('button');btnCross.type='button';
+  var btnSemantic=document.createElement('button');btnSemantic.type='button';
+  var btnAiReader=document.createElement('button');btnAiReader.type='button';
+  var btnNote=document.createElement('button');btnNote.type='button';
+  var btnBm=document.createElement('button');btnBm.type='button';
   var btnSet=document.createElement('button');btnSet.type='button';btnSet.textContent='⚙';
   selMenuItems=[
     {key:'web',button:btn},
@@ -1290,13 +1316,13 @@ function showHlMenu(idx,force,anchor,evt){
 function setupHlUi(){
   hlMenu=document.createElement('div');hlMenu.id='hl-menu';
   hlMenu._onColorPick=function(color){if(activeHi>=0)parent.postMessage({setHighlightColor:{index:activeHi,color:color}},'*');};
-  var mWeb=mkBtn('🔍 web搜索'),mDict=mkBtn('📖 词典'),mTr=mkBtn('译 翻译'),mCopy=mkBtn('复制'),mDel=mkBtn('🗑 取消高亮'),mCorrect=mkBtn('✎ 改错'),mExcerpt=mkBtn('▣ 书摘'),mCross=mkBtn('跨书搜索'),mSemantic=mkBtn('≈ 相似语义'),mAiReader=mkBtn('✨ 智读'),mNote=mkBtn('📝 批注'),mSet=mkBtn('⚙');
+  var mWeb=mkBtn(''),mDict=mkBtn(''),mTr=mkBtn(''),mCopy=mkBtn(''),mDel=mkBtn(''),mCorrect=mkBtn(''),mExcerpt=mkBtn(''),mCross=mkBtn(''),mSemantic=mkBtn(''),mAiReader=mkBtn(''),mNote=mkBtn(''),mSet=mkBtn('⚙');
   hlMenuItems=[
     {key:'web',button:mWeb},
     {key:'dict',button:mDict},
     {key:'translate',button:mTr},
     {key:'copy',button:mCopy},
-    {key:'highlight',button:mDel,label:'取消高亮',icon:'🗑'},
+    {key:'highlight',button:mDel,labelKey:'removeHighlight',icon:'🗑'},
     {key:'correct',button:mCorrect},
     {key:'excerpt',button:mExcerpt},
     {key:'cross',button:mCross},
@@ -1379,12 +1405,9 @@ function setupFn(){
 // ---- 离线词典：选中文字/已高亮 → 就地弹释义（释义由外壳查后端再回传）----
 var dictPop=null,dictRect=null,dictContext='';
 var DICT_HN_CFG=[
-  {key:'plain',label:'词义提示'},
-  {key:'sense',label:'可能义项'},
-  {key:'context',label:'上下文提示'},
-  {key:'hypernyms',label:'上位词'},
-  {key:'synonyms',label:'近义'},
-  {key:'antonyms',label:'反义'}
+  {key:'plain',labelKey:'meaningHint'}, {key:'sense',labelKey:'possibleSenses'},
+  {key:'context',labelKey:'contextHint'}, {key:'hypernyms',labelKey:'hypernyms'},
+  {key:'synonyms',labelKey:'synonyms'}, {key:'antonyms',labelKey:'antonyms'}
 ];
 function dictHnSettings(){
   var defaults={plain:true,sense:true,context:true,hypernyms:true,synonyms:true,antonyms:true};
@@ -1413,7 +1436,7 @@ function ensureDictControls(){
     gear=document.createElement('button');
     gear.className='dc-gear';
     gear.type='button';
-    gear.title='词典增强设置';
+    gear.title=readerPageText('dictionarySettings');
     gear.textContent='⚙';
     dictPop.insertBefore(gear,dictPop.firstChild);
   }
@@ -1424,7 +1447,7 @@ function ensureDictControls(){
 }
 function setupDict(){
   dictPop=document.createElement('div');dictPop.id='dict-pop';
-  dictPop.innerHTML='<button class="dc-gear" type="button" title="词典增强设置">⚙</button><div class="dc-settings"></div><div class="dc-head"></div><div class="dc-def"></div>';
+  dictPop.innerHTML='<button class="dc-gear" type="button" title="'+readerPageText('dictionarySettings')+'">⚙</button><div class="dc-settings"></div><div class="dc-head"></div><div class="dc-def"></div>';
   document.body.appendChild(dictPop);
   ensureDictControls();
   dictPop.addEventListener('mousedown',function(e){e.stopPropagation();});
@@ -1466,7 +1489,7 @@ function renderDictSettings(pop){
   pop.innerHTML='';
   DICT_HN_CFG.forEach(function(cfg){
     var row=document.createElement('label');row.className='dc-set-row';
-    var name=document.createElement('span');name.textContent=cfg.label;row.appendChild(name);
+    var name=document.createElement('span');name.textContent=readerPageText(cfg.labelKey);row.appendChild(name);
     var sw=document.createElement('span');sw.className='dc-switch';
     var input=document.createElement('input');input.type='checkbox';input.checked=st[cfg.key]!==false;
     var slider=document.createElement('span');slider.className='dc-slider';
@@ -1497,7 +1520,7 @@ function openDict(term,context){
   try{var s=window.getSelection();dictRect=(s&&s.rangeCount)?s.getRangeAt(0).getBoundingClientRect():null;}catch(_){dictRect=null;}
   dictContext=(context||'').replace(/\s+/g,' ').trim();
   if(!dictContext)dictContext=getSelContext();
-  dictPop.querySelector('.dc-head').textContent='查词中…';
+  dictPop.querySelector('.dc-head').textContent=readerPageText('lookingUp');
   dictPop.querySelector('.dc-def').textContent='';dictPop.querySelector('.dc-def').className='dc-def';
   placeDict();
   parent.postMessage({dict:term,dictContext:dictContext},'*');
@@ -1530,12 +1553,12 @@ function appendDictTags(parent,title,items){
 function appendHowNetBlocks(def,r){
   var h=r&&r.hownet;if(!h)return;
   var st=dictHnSettings(),box=document.createElement('div');box.className='dc-hn';
-  if(st.plain!==false)appendDictTextBlock(box,'词义提示',h.plain);
-  if(st.sense!==false)appendDictTextBlock(box,'可能义项',h.sense);
-  if(st.context!==false)appendDictTextBlock(box,'结合当前句子',h.example_note);
-  if(st.hypernyms!==false)appendDictTags(box,'上位词',h.hypernyms);
-  if(st.synonyms!==false)appendDictTags(box,'近义',h.synonyms);
-  if(st.antonyms!==false)appendDictTags(box,'反义',h.antonyms);
+  if(st.plain!==false)appendDictTextBlock(box,readerPageText('meaningHint'),h.plain);
+  if(st.sense!==false)appendDictTextBlock(box,readerPageText('possibleSenses'),h.sense);
+  if(st.context!==false)appendDictTextBlock(box,readerPageText('contextHint'),h.example_note);
+  if(st.hypernyms!==false)appendDictTags(box,readerPageText('hypernyms'),h.hypernyms);
+  if(st.synonyms!==false)appendDictTags(box,readerPageText('synonyms'),h.synonyms);
+  if(st.antonyms!==false)appendDictTags(box,readerPageText('antonyms'),h.antonyms);
   if(box.childNodes.length)def.appendChild(box);
 }
 function renderDict(){
@@ -1544,25 +1567,25 @@ function renderDict(){
   var r=lastDict,head=dictPop.querySelector('.dc-head'),def=dictPop.querySelector('.dc-def');
   head.innerHTML='';def.innerHTML='';
   var w=document.createElement('span');w.className='dc-word';w.textContent=r.word||'';head.appendChild(w);
-  if(!r.found){def.textContent='（未找到该词的释义）';def.className='dc-def dc-miss';return;}
+  if(!r.found){def.textContent=readerPageText('notFoundDefinition');def.className='dc-def dc-miss';return;}
   if(r.phonetic){var ph=document.createElement('span');ph.className='dc-phon';ph.textContent=(r.lang==='en')?('['+r.phonetic+']'):r.phonetic;head.appendChild(ph);}
   if(r.lang==='en'){
     parent.postMessage({dictPrefetch:r.word},'*');
-    var spk=document.createElement('span');spk.className='dc-spk';spk.textContent='🔊';spk.title='发音';
+    var spk=document.createElement('span');spk.className='dc-spk';spk.textContent='🔊';spk.title=readerPageText('pronunciation');
     spk.addEventListener('click',function(e){e.stopPropagation();speakWord(r.word);});head.appendChild(spk);
   }
   if(r.sources&&r.sources.length){
     r.sources.forEach(function(src,idx){
       var det=document.createElement('details');det.className='dc-source';if(idx===0)det.open=true;
       var sum=document.createElement('summary');
-      var label=src.source_name||'外置词典';
+      var label=src.source_name||readerPageText('externalDictionary');
       var sw=src.word&&src.word!==r.word?(' · '+src.word):'';
       var ph=src.phonetic?(' · '+src.phonetic):'';
       sum.textContent=label+sw+ph;
       var body=document.createElement('div');body.className='dc-source-body';
-      if(src.def){var blk=document.createElement('div');blk.className='dc-defblk';var lb=document.createElement('span');lb.className='dc-lb';lb.textContent=(src.lang==='en')?'中':'中';blk.appendChild(lb);var tx=document.createElement('span');tx.textContent=src.def;blk.appendChild(tx);body.appendChild(blk);}
-      if(src.def_en){var blk2=document.createElement('div');blk2.className='dc-defblk';var lb2=document.createElement('span');lb2.className='dc-lb';lb2.textContent='英';blk2.appendChild(lb2);var tx2=document.createElement('span');tx2.textContent=src.def_en;blk2.appendChild(tx2);body.appendChild(blk2);}
-      if(!body.childNodes.length){body.textContent='（无释义）';}
+      if(src.def){var blk=document.createElement('div');blk.className='dc-defblk';var lb=document.createElement('span');lb.className='dc-lb';lb.textContent=readerPageText('chinese');blk.appendChild(lb);var tx=document.createElement('span');tx.textContent=src.def;blk.appendChild(tx);body.appendChild(blk);}
+      if(src.def_en){var blk2=document.createElement('div');blk2.className='dc-defblk';var lb2=document.createElement('span');lb2.className='dc-lb';lb2.textContent=readerPageText('english');blk2.appendChild(lb2);var tx2=document.createElement('span');tx2.textContent=src.def_en;blk2.appendChild(tx2);body.appendChild(blk2);}
+      if(!body.childNodes.length){body.textContent=readerPageText('noDefinition');}
       det.append(sum,body);def.appendChild(det);
     });
     appendHowNetBlocks(def,r);
@@ -1572,9 +1595,9 @@ function renderDict(){
     var srcBadge=document.createElement('div');srcBadge.className='dc-src';srcBadge.textContent=r.source_name;def.appendChild(srcBadge);
   }
   var sources=[];
-  if(r.def)sources.push({k:'c',label:'中',text:r.def});
-  if(r.def_en)sources.push({k:'e',label:'英',text:r.def_en});
-  if(!sources.length){def.textContent='（无释义）';def.className='dc-def dc-miss';return;}
+  if(r.def)sources.push({k:'c',label:readerPageText('chinese'),text:r.def});
+  if(r.def_en)sources.push({k:'e',label:readerPageText('english'),text:r.def_en});
+  if(!sources.length){def.textContent=readerPageText('noDefinition');def.className='dc-def dc-miss';return;}
   var avail=sources.map(function(s){return s.k;});
   var sel=dictSel(r.lang)||[sources[0].k];
   sel=sel.filter(function(k){return avail.indexOf(k)>=0;});
@@ -1612,14 +1635,15 @@ function showDictResult(r){
   if(r&&r.found)parent.postMessage({vocabAdd:{word:r.word,lang:r.lang,def:r.def||'',def_en:r.def_en||'',phonetic:r.phonetic||'',example:dictContext||''}},'*'); // 记入生词本
   placeDict();
 }
-// 是否是"注释角标"链接：epub:type/role/class 含 note，或链接文字形如 [23] / (3) / 23
+// 是否是"注释角标"链接：epub:type/role/class 含 note，或链接文字形如
+// [23] / (3) / 23 / 注1。最后一种常见于中文书的跨章节注文。
 function isNoteLink(a){
   var cls=String(a&&a.className||'');
   if(a&&(a.getAttribute('data-rr-note-ref')==='1'||/\brr-note-ref\b/.test(cls)))return true;
   var ty=((a.getAttribute('epub:type')||'')+' '+(a.getAttribute('role')||'')+' '+cls).toLowerCase();
   if(/note|footnote|endnote|annoref/.test(ty))return true;
   var t=(a.textContent||'').trim();
-  return /^[\[【（(]?\s*\d{1,4}\s*[\]】）)]?$/.test(t);
+  return /^[\[【（(]?\s*(?:(?:注|註)\s*)?\d{1,4}\s*[\]】）)]?$/.test(t);
 }
 function fnSelector(frag){return '[id="'+String(frag).replace(/"/g,'\\"')+'"]';}
 function popFootnote(a,html,key){
@@ -1704,10 +1728,10 @@ function showFootnote(a,ci,frag){
   if(fnPop&&fnPop.style.display==='block'&&fnPopKey===key){hideFn();return;}
   var el=document.querySelector(fnSelector(frag));
   if(el){popFootnote(a,noteHtml(el),key);return;}
-  popFootnote(a,'加载中…',key);
+  popFootnote(a,readerPageText('footnoteLoading'),key);
   findFootnoteHtmlAcrossChapters(footnoteSearchOrder(ci),frag).then(function(html){
-    if(fnPopKey===key)popFootnote(a,html||'（未找到注释内容）',key);
-  }).catch(function(){if(fnPopKey===key)popFootnote(a,'（注释加载失败）',key);});
+    if(fnPopKey===key)popFootnote(a,html||readerPageText('footnoteNotFound'),key);
+  }).catch(function(){if(fnPopKey===key)popFootnote(a,readerPageText('footnoteFailed'),key);});
 }
 var sMarks=[],sIdx=-1;
 function clearSearch(){

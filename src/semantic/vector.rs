@@ -5,7 +5,7 @@
 //! 访问器使用已经验证的数据。
 
 use super::model;
-use crate::semantic_core::{SEM_CHUNK_PIPELINE_REVISION, SEM_VERSION};
+use crate::semantic_core::{is_current_chunk_revision, SEM_CHUNK_PIPELINE_REVISION, SEM_VERSION};
 use crate::{book, search, AppState};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -50,6 +50,37 @@ struct Metadata {
     model_revision: String,
     #[serde(default)]
     chunk_revision: u32,
+}
+
+#[derive(Deserialize)]
+struct StatusMetadataHeader {
+    v: u32,
+    model: String,
+    mtime: u64,
+    dim: usize,
+}
+
+#[derive(Default, Deserialize)]
+struct StatusMetadataTail {
+    #[serde(default)]
+    vector_bytes: u64,
+    #[serde(default)]
+    vector_sha256: String,
+    #[serde(default)]
+    source_id: String,
+    #[serde(default)]
+    source_bytes: u64,
+    #[serde(default)]
+    model_revision: String,
+    #[serde(default)]
+    chunk_revision: u32,
+}
+
+struct StatusMetadata {
+    header: StatusMetadataHeader,
+    tail: StatusMetadataTail,
+    chunks_empty: bool,
+    metadata_bytes: u64,
 }
 
 /// 下游派生索引绑定的唯一来源签名。
@@ -106,7 +137,7 @@ impl Publication {
             dim: 0,
             chunks: Vec::new(),
             vector_bytes: 0,
-            vector_sha256: super::sha256_hex(&[]),
+            vector_sha256: super::storage::sha256_hex(&[]),
         }
     }
 
@@ -177,6 +208,71 @@ impl SemData {
             })
     }
 
+    /// 从命中的短块向同章节两侧扩展，得到连续的“精读窗口”。基础索引仍以小块
+    /// 保存；这里只在查询时临时拼接，避免为每本书持久化重复的大段正文。
+    pub(super) fn context_around(
+        &self,
+        chapter: u32,
+        snippet: &str,
+        max_chars: usize,
+    ) -> Option<String> {
+        let center = self.chunks.iter().position(|chunk| {
+            chunk.c == chapter
+                && (chunk.t == snippet
+                    || chunk.t.contains(snippet)
+                    || snippet.contains(chunk.t.as_str()))
+        })?;
+        let mut selected = vec![center];
+        let mut chars = self.chunks[center].t.chars().count();
+        let mut left = center.checked_sub(1);
+        let mut right = center + 1;
+        // 左右交替扩展，使命中段落尽量处于上下文中间，而不是总落在窗口开头。
+        while chars < max_chars && (left.is_some() || right < self.chunks.len()) {
+            let mut advanced = false;
+            if let Some(index) = left {
+                let chunk = &self.chunks[index];
+                if chunk.c == chapter {
+                    let next = chunk.t.chars().count();
+                    if chars + next <= max_chars {
+                        selected.insert(0, index);
+                        chars += next;
+                    }
+                    advanced = true;
+                    left = index.checked_sub(1);
+                } else {
+                    left = None;
+                }
+            }
+            if chars >= max_chars {
+                break;
+            }
+            if right < self.chunks.len() {
+                let chunk = &self.chunks[right];
+                if chunk.c == chapter {
+                    let next = chunk.t.chars().count();
+                    if chars + next <= max_chars {
+                        selected.push(right);
+                        chars += next;
+                    }
+                    advanced = true;
+                    right += 1;
+                } else {
+                    right = self.chunks.len();
+                }
+            }
+            if !advanced {
+                break;
+            }
+        }
+        Some(
+            selected
+                .into_iter()
+                .filter_map(|index| self.chunks.get(index).map(|chunk| chunk.t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
     fn vector_bytes(&self) -> usize {
         self.vecs.len().saturating_mul(4)
     }
@@ -210,6 +306,211 @@ fn read_metadata(id: u64) -> Option<Metadata> {
     serde_json::from_str(&std::fs::read_to_string(metadata_path(id)?).ok()?).ok()
 }
 
+const STATUS_METADATA_WINDOW_BYTES: usize = 8 * 1024;
+
+fn find_bytes(buffer: &[u8], needle: &[u8]) -> Option<usize> {
+    buffer
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn rfind_bytes(buffer: &[u8], needle: &[u8]) -> Option<usize> {
+    buffer
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+fn parse_status_metadata_windows(
+    head: &[u8],
+    tail_window: &[u8],
+    metadata_bytes: u64,
+) -> Option<StatusMetadata> {
+    const CHUNKS_MARKER: &[u8] = b",\"chunks\":";
+    const TAIL_MARKER: &[u8] = b"],\"vector_bytes\":";
+
+    let chunks_at = find_bytes(head, CHUNKS_MARKER)?;
+    let mut header_json = head[..chunks_at].to_vec();
+    header_json.push(b'}');
+    let header: StatusMetadataHeader = serde_json::from_slice(&header_json).ok()?;
+
+    let chunks_value = &head[chunks_at + CHUNKS_MARKER.len()..];
+    let open_at = chunks_value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    if chunks_value.get(open_at) != Some(&b'[') {
+        return None;
+    }
+    let chunks_empty = chunks_value[open_at + 1..]
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        == Some(&b']');
+
+    let tail = if let Some(marker_at) = rfind_bytes(tail_window, TAIL_MARKER) {
+        let mut tail_json = Vec::with_capacity(tail_window.len() - marker_at);
+        tail_json.push(b'{');
+        tail_json.extend_from_slice(&tail_window[marker_at + 2..]);
+        serde_json::from_slice(&tail_json).ok()?
+    } else {
+        StatusMetadataTail::default()
+    };
+    Some(StatusMetadata {
+        header,
+        tail,
+        chunks_empty,
+        metadata_bytes,
+    })
+}
+
+/// 管理窗口只需要元数据中的标量承诺，不需要载入 `chunks[].t` 正文。旧书库的
+/// 逐书 JSON 可能达到几十 MB、全库合计数 GB；只读头尾各 8 KiB 可把状态核对
+/// 从完整反序列化降为有界 I/O，同时仍要求当前管线修订和已发布向量尺寸匹配。
+fn read_status_metadata(id: u64) -> Option<StatusMetadata> {
+    let path = metadata_path(id)?;
+    let mut file = std::fs::File::open(path).ok()?;
+    let metadata_bytes = file.metadata().ok()?.len();
+    let head_len = usize::try_from(metadata_bytes)
+        .unwrap_or(usize::MAX)
+        .min(STATUS_METADATA_WINDOW_BYTES);
+    let mut head = vec![0_u8; head_len];
+    file.read_exact(&mut head).ok()?;
+
+    let tail_len = usize::try_from(metadata_bytes)
+        .unwrap_or(usize::MAX)
+        .min(STATUS_METADATA_WINDOW_BYTES);
+    file.seek(SeekFrom::End(-(tail_len as i64))).ok()?;
+    let mut tail_window = vec![0_u8; tail_len];
+    file.read_exact(&mut tail_window).ok()?;
+    parse_status_metadata_windows(&head, &tail_window, metadata_bytes)
+}
+
+fn status_metadata_is_fresh(metadata: &StatusMetadata, book: &book::Book) -> bool {
+    if metadata.header.v != SEM_VERSION
+        || metadata.header.model != model::active_id()
+        || (!metadata.tail.model_revision.is_empty()
+            && metadata.tail.model_revision != model::active().revision())
+        || !is_current_chunk_revision(metadata.tail.chunk_revision)
+    {
+        return false;
+    }
+    let mtime = search::file_mtime(&book.path);
+    if metadata.header.mtime == mtime {
+        return true;
+    }
+    let bytes = source_bytes(book);
+    if bytes == 0 || book.content_id.is_empty() {
+        return false;
+    }
+    metadata.tail.source_id.is_empty()
+        || (metadata.tail.source_id == book.content_id && metadata.tail.source_bytes == bytes)
+}
+
+fn status_vector_shape(metadata: &StatusMetadata, id: u64) -> Option<(u64, usize)> {
+    if metadata.chunks_empty {
+        return Some((0, 0));
+    }
+    let stride = (metadata.header.dim as u64).checked_mul(4)?;
+    let expected = metadata.tail.vector_bytes;
+    if stride == 0 || expected == 0 || !expected.is_multiple_of(stride) {
+        return None;
+    }
+    let file_bytes = std::fs::metadata(vector_path(id)?).ok()?.len();
+    if file_bytes != expected {
+        return None;
+    }
+    Some((file_bytes, usize::try_from(expected / stride).ok()?))
+}
+
+/// 返回管理页的一次性快照：当前模型已完成本数、书架总数、有效索引实际字节数
+/// 和可供派生索引核对的来源签名。每本书的巨大正文元数据只读取头尾小窗口。
+pub(super) fn management_status_snapshot_fast(
+    state: &AppState,
+) -> (u32, u32, u64, Vec<IndexSourceSignature>) {
+    let books = {
+        let library = state.library.lock().unwrap_or_else(|poisoned| {
+            crate::log("semantic_vector recovered poisoned library lock");
+            poisoned.into_inner()
+        });
+        library
+            .books
+            .iter()
+            .filter(|book| book.format != "pdf")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let total = books.len() as u32;
+    let mut done = 0_u32;
+    let mut bytes = 0_u64;
+    let mut signatures = Vec::new();
+
+    for book in &books {
+        let Some(metadata) = read_status_metadata(book.id) else {
+            continue;
+        };
+        if !status_metadata_is_fresh(&metadata, book) {
+            continue;
+        }
+        let Some((vector_bytes, chunks)) = status_vector_shape(&metadata, book.id) else {
+            continue;
+        };
+        done = done.saturating_add(1);
+        bytes = bytes
+            .saturating_add(metadata.metadata_bytes)
+            .saturating_add(vector_bytes);
+
+        if chunks == 0 || book.content_id.is_empty() {
+            continue;
+        }
+        let strong = metadata.tail.model_revision == model::active().revision()
+            && metadata.tail.chunk_revision == SEM_CHUNK_PIPELINE_REVISION
+            && !metadata.tail.source_id.is_empty()
+            && metadata.tail.source_id == book.content_id
+            && metadata.tail.source_bytes == source_bytes(book)
+            && integrity_sha256_is_valid(&metadata.tail.vector_sha256);
+        let vector_sha256 = if strong {
+            metadata.tail.vector_sha256.clone()
+        } else {
+            super::storage::sha256_hex(
+                format!(
+                    "legacy-sem-v2:{}:{}:{}:{}:{}",
+                    book.content_id,
+                    metadata.header.mtime,
+                    vector_bytes,
+                    metadata.header.dim,
+                    chunks
+                )
+                .as_bytes(),
+            )
+        };
+        signatures.push(IndexSourceSignature {
+            book_id: book.id,
+            mtime: metadata.header.mtime,
+            content_id: if metadata.tail.source_id.is_empty() {
+                book.content_id.clone()
+            } else {
+                metadata.tail.source_id.clone()
+            },
+            source_bytes: if metadata.tail.source_bytes == 0 {
+                source_bytes(book)
+            } else {
+                metadata.tail.source_bytes
+            },
+            vector_bytes,
+            vector_sha256,
+            dim: metadata.header.dim,
+            chunks,
+            model_id: metadata.header.model,
+            model_revision: if metadata.tail.model_revision.is_empty() {
+                model::active().revision().into()
+            } else {
+                metadata.tail.model_revision
+            },
+            chunk_revision: metadata.tail.chunk_revision,
+        });
+    }
+    signatures.sort_unstable_by_key(|signature| signature.book_id);
+    (done, total, bytes, signatures)
+}
+
 pub(super) fn source_bytes(book: &book::Book) -> u64 {
     std::fs::metadata(&book.path)
         .map(|metadata| metadata.len())
@@ -217,13 +518,16 @@ pub(super) fn source_bytes(book: &book::Book) -> u64 {
 }
 
 fn metadata_is_fresh(metadata: &Metadata, book: &book::Book) -> bool {
+    if metadata.v != SEM_VERSION
+        || metadata.model != model::active_id()
+        || (!metadata.model_revision.is_empty()
+            && metadata.model_revision != model::active().revision())
+        || !is_current_chunk_revision(metadata.chunk_revision)
+    {
+        return false;
+    }
     let mtime = search::file_mtime(&book.path);
-    metadata.v == SEM_VERSION
-        && metadata.model == model::active_id()
-        && source_is_current(metadata, book, mtime)
-        && (metadata.model_revision.is_empty()
-            || metadata.model_revision == model::active().revision())
-        && (metadata.chunk_revision == 0 || metadata.chunk_revision == SEM_CHUNK_PIPELINE_REVISION)
+    source_is_current(metadata, book, mtime)
         && (metadata.source_id.is_empty()
             || (!book.content_id.is_empty() && metadata.source_id == book.content_id))
         && (metadata.source_bytes == 0 || metadata.source_bytes == source_bytes(book))
@@ -301,7 +605,7 @@ fn source_signature(metadata: &Metadata, book: &book::Book) -> IndexSourceSignat
         // 旧文件没有真 SHA-256 时，绑定当前书架内容身份、向量形状和模型版本
         // 生成稳定兼容值。它不是文件哈希，实际载入仍进行向量尺寸校验。
         vector_sha256: if legacy {
-            super::sha256_hex(
+            super::storage::sha256_hex(
                 format!(
                     "legacy-sem-v2:{}:{}:{}:{}:{}",
                     book.content_id,
@@ -323,11 +627,7 @@ fn source_signature(metadata: &Metadata, book: &book::Book) -> IndexSourceSignat
         } else {
             metadata.model_revision.clone()
         },
-        chunk_revision: if metadata.chunk_revision == 0 {
-            SEM_CHUNK_PIPELINE_REVISION
-        } else {
-            metadata.chunk_revision
-        },
+        chunk_revision: metadata.chunk_revision,
     }
 }
 
@@ -441,8 +741,7 @@ pub(super) fn index_source_signature(book: &book::Book) -> Option<IndexSourceSig
 }
 
 /// 查询候选阶段只比较已发布元数据，不流式重哈希可能达到数十 GB 的向量文件。
-/// 真正载入候选书向量时 `load` 仍会做尺寸与 SHA-256 完整校验，因此这里不会
-/// 把损坏向量交给最终检索。
+/// 真正载入候选书向量时 `load` 仍会做尺寸与 SHA-256 完整校验。
 pub(super) fn index_source_signature_fast(book: &book::Book) -> Option<IndexSourceSignature> {
     let metadata = read_metadata(book.id)?;
     if !metadata_is_compatible_source(&metadata, book) {
@@ -456,16 +755,21 @@ pub(super) fn index_source_signature_fast(book: &book::Book) -> Option<IndexSour
 }
 
 pub(super) fn index_source_snapshot(state: &AppState) -> Vec<IndexSourceSignature> {
-    let library = state.library.lock().unwrap_or_else(|poisoned| {
-        crate::log("semantic_vector recovered poisoned library lock");
-        poisoned.into_inner()
-    });
-    let mut snapshot: Vec<_> = library
-        .books
-        .iter()
-        .filter(|book| book.format != "pdf")
-        .filter_map(index_source_signature)
-        .collect();
+    let books = {
+        let library = state.library.lock().unwrap_or_else(|poisoned| {
+            crate::log("semantic_vector recovered poisoned library lock");
+            poisoned.into_inner()
+        });
+        library
+            .books
+            .iter()
+            .filter(|book| book.format != "pdf")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    // 完整性校验可能顺序读取数 GB 向量。绝不能在这段磁盘 I/O 期间持有书架锁，
+    // 否则后台状态刷新也会阻塞封面、筛选和窗口交互。
+    let mut snapshot: Vec<_> = books.iter().filter_map(index_source_signature).collect();
     snapshot.sort_unstable_by_key(|signature| signature.book_id);
     snapshot
 }
@@ -475,7 +779,7 @@ fn decode_vector_bytes(metadata: &Metadata, bytes: &[u8]) -> Option<Vec<f32>> {
     if bytes.len() as u64 != expected
         || (metadata.vector_bytes != 0 && metadata.vector_bytes != expected)
         || (!metadata.vector_sha256.is_empty()
-            && super::sha256_hex(bytes) != metadata.vector_sha256)
+            && super::storage::sha256_hex(bytes) != metadata.vector_sha256)
     {
         return None;
     }
@@ -773,7 +1077,7 @@ mod tests {
     #[test]
     fn vector_hash_rejects_a_same_length_bit_flip() {
         let bytes = [0_u8; 16];
-        let metadata = metadata(2, super::super::sha256_hex(&bytes));
+        let metadata = metadata(2, super::super::storage::sha256_hex(&bytes));
         assert!(decode_vector_bytes(&metadata, &bytes).is_some());
         let mut changed = bytes;
         changed[7] ^= 0x01;
@@ -794,6 +1098,39 @@ mod tests {
     }
 
     #[test]
+    fn status_metadata_reads_only_scalar_head_and_tail_windows() {
+        let head = format!(
+            r#"{{"v":{SEM_VERSION},"model":"{}","mtime":123,"dim":512,"chunks":[{{"c":0,"t":"正文不应被反序列化"}}"#,
+            model::active_id()
+        );
+        let tail = format!(
+            r#""}}],"vector_bytes":2048,"vector_sha256":"{}","source_id":"book-sha","source_bytes":99,"model_revision":"{}","chunk_revision":{SEM_CHUNK_PIPELINE_REVISION}}}"#,
+            "A".repeat(64),
+            model::active().revision()
+        );
+        let status = parse_status_metadata_windows(head.as_bytes(), tail.as_bytes(), 65_000_000)
+            .expect("bounded metadata windows must parse");
+        assert_eq!(status.header.model, model::active_id());
+        assert_eq!(status.header.dim, 512);
+        assert!(!status.chunks_empty);
+        assert_eq!(status.tail.vector_bytes, 2048);
+        assert_eq!(status.tail.chunk_revision, SEM_CHUNK_PIPELINE_REVISION);
+        assert_eq!(status.metadata_bytes, 65_000_000);
+
+        let source = include_str!("vector.rs");
+        let start = source
+            .find("fn read_status_metadata")
+            .expect("bounded reader must exist");
+        let end = start
+            + source[start..]
+                .find("fn status_metadata_is_fresh")
+                .expect("freshness check must follow bounded reader");
+        let implementation = &source[start..end];
+        assert!(implementation.contains("STATUS_METADATA_WINDOW_BYTES"));
+        assert!(!implementation.contains("read_to_string"));
+    }
+
+    #[test]
     fn vector_completion_does_not_depend_on_auxiliary_profiles() {
         let source = include_str!("vector.rs");
         let start = source
@@ -810,6 +1147,26 @@ mod tests {
             !completion.contains("profile::"),
             "auxiliary profiles must not reduce the semantic vector completion count"
         );
+    }
+
+    #[test]
+    fn strong_snapshot_releases_the_library_before_disk_integrity_checks() {
+        let source = include_str!("vector.rs");
+        let start = source
+            .find("pub(super) fn index_source_snapshot")
+            .expect("snapshot must exist");
+        let end = start
+            + source[start..]
+                .find("fn decode_vector_bytes")
+                .expect("vector decoder must follow the strong snapshot");
+        let implementation = &source[start..end];
+        let clone_finished = implementation
+            .find("collect::<Vec<_>>()")
+            .expect("books must be cloned out of the library lock");
+        let integrity_scan = implementation
+            .find("filter_map(index_source_signature)")
+            .expect("strong snapshot must still validate vector integrity");
+        assert!(clone_finished < integrity_scan);
     }
 
     #[test]

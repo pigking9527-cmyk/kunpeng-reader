@@ -275,7 +275,7 @@ pub struct BookList {
 }
 
 /// 整个书架，序列化成 JSON 持久化。
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Library {
     pub books: Vec<Book>,
     #[serde(default)]

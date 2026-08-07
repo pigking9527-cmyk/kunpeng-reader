@@ -60,7 +60,7 @@ pub(crate) fn reading_stats(state: tauri::State<AppState>) -> StatsSummary {
     summarize_books(&inputs)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct StatsStore {
     pub(crate) map: HashMap<(u32, u8, u64), (u32, u32)>, // (day,hour,book) -> (secs,words)
     pub(crate) dirty: bool,

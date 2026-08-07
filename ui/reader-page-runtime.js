@@ -1,9 +1,13 @@
-// ---- 朗读：Web Speech API + 当前词高亮(CSS Highlight) + 自动翻页/跳章 ----
-function ttsPickVoice(){
-  var vs=(window.speechSynthesis&&speechSynthesis.getVoices())||[];
-  var zh=null;for(var i=0;i<vs.length;i++){if(/zh|chinese|中文|普通话/i.test((vs[i].lang||'')+(vs[i].name||''))){zh=vs[i];break;}}
-  ttsVoice=zh||vs[0]||null;return {count:vs.length,zh:!!zh};
-}
+// ---- 朗读：按正文语言自动选微软/系统声音，并高亮当前词、自动翻页/跳章 ----
+var TTS_AUTO_VOICES={"zh-CN":"zh-CN-XiaoxiaoNeural","zh-TW":"zh-TW-HsiaoChenNeural","en":"en-US-JennyNeural",ja:"ja-JP-NanamiNeural",ko:"ko-KR-SunHiNeural",fr:"fr-FR-DeniseNeural",de:"de-DE-KatjaNeural",es:"es-ES-ElviraNeural",ru:"ru-RU-SvetlanaNeural","pt-BR":"pt-BR-FranciscaNeural"};
+function ttsUiLanguage(){var l=String(S.uiLanguage||document.documentElement.lang||'zh-CN');return TTS_AUTO_VOICES[l]?l:(l.indexOf('zh-TW')===0?'zh-TW':(l.indexOf('pt')===0?'pt-BR':(l.indexOf('zh')===0?'zh-CN':(TTS_AUTO_VOICES[l.slice(0,2)]?l.slice(0,2):'en'))));}
+function ttsLatinLanguage(text){var t=(' '+String(text||'').toLowerCase().replace(/[^a-zà-ÿßœ]+/g,' ')+' ');var scores={en:0,fr:0,de:0,es:0,'pt-BR':0};
+  [['fr',/\b(le|la|les|des|une|est|avec|pour|dans|que|qui|bonjour|merci|vous|nous)\b/g],['de',/\b(der|die|das|und|ist|nicht|mit|eine|für|auf|den|hallo|ich|sie|wir)\b/g],['es',/\b(el|los|las|del|que|con|para|por|una|está|hola|gracias|como|usted)\b/g],['pt-BR',/\b(os|as|que|com|para|por|uma|não|dos|das|olá|obrigado|você)\b/g],['en',/\b(the|and|that|with|for|from|this|have|are|was|you|hello|thanks)\b/g]].forEach(function(rule){scores[rule[0]]=(t.match(rule[1])||[]).length;});
+  if(/[äöüß]/.test(t))scores.de+=3;if(/[ñ¿¡]/.test(t))scores.es+=3;if(/[ãõ]/.test(t))scores['pt-BR']+=3;if(/[àâçèéêëîïôûùüÿœ]/.test(t))scores.fr+=2;
+  var best='en',score=0;Object.keys(scores).forEach(function(key){if(scores[key]>score){best=key;score=scores[key];}});return score?best:'en';}
+function ttsLanguageForText(text){var t=String(text||'');if(/[\uac00-\ud7af]/.test(t))return 'ko';if(/[\u3040-\u30ff]/.test(t))return 'ja';if(/[\u0400-\u052f]/.test(t))return 'ru';if(/[\u3400-\u9fff]/.test(t)){if(/[體臺萬與為國書讀這個們後裡發現]/.test(t)||ttsUiLanguage()==='zh-TW')return 'zh-TW';return 'zh-CN';}if(/[A-Za-zÀ-ÿ]/.test(t))return ttsLatinLanguage(t);return ttsUiLanguage();}
+function ttsVoiceForText(text){return TTS_AUTO_VOICES[ttsLanguageForText(text)]||TTS_AUTO_VOICES['en'];}
+function ttsPickVoice(text){var lang=ttsLanguageForText(text),vs=(window.speechSynthesis&&speechSynthesis.getVoices())||[],wanted=lang==='en'?'en-us':lang.toLowerCase(),found=null;for(var i=0;i<vs.length;i++){if(String(vs[i].lang||'').toLowerCase().indexOf(wanted)===0){found=vs[i];break;}}ttsVoice=found||vs[0]||null;return {count:vs.length,matched:!!found,language:lang};}
 function ttsBuildChapter(){
   var w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode:function(n){
     var p=n.parentNode?n.parentNode.nodeName:'';if(p==='SCRIPT'||p==='STYLE')return NodeFilter.FILTER_REJECT;
@@ -44,7 +48,7 @@ function ttsSpeakFrom(i){ // 系统语音
   if(!ttsOn)return;
   if(i>=ttsSents.length){ttsAdvance(false);return;}
   ttsSi=i;var s=ttsSents[i],u=new SpeechSynthesisUtterance(s.text);
-  if(ttsVoice)u.voice=ttsVoice;u.lang='zh-CN';u.rate=ttsRate;
+  var pv=ttsPickVoice(s.text);if(ttsVoice)u.voice=ttsVoice;u.lang=pv.language==='en'?'en-US':pv.language;u.rate=ttsRate;
   u.onboundary=function(e){if(e.charIndex!=null)ttsHighlight(s.base+e.charIndex);};
   u.onend=function(){if(ttsOn)ttsSpeakFrom(i+1);};
   speechSynthesis.speak(u);
@@ -55,7 +59,7 @@ function ttsReq(i){
   if(ttsCache[i]!==undefined)return; // null=请求中，对象=已到
   ttsCache[i]=null;
   var rate=Math.round(((S.ttsRate||1)-1)*100);
-  parent.postMessage({ttsSynth:{seq:ttsGen,idx:i,text:ttsSents[i].text,voice:S.ttsVoice||'',rate:rate}},'*');
+  parent.postMessage({ttsSynth:{seq:ttsGen,idx:i,text:ttsSents[i].text,voice:ttsVoiceForText(ttsSents[i].text),rate:rate}},'*');
 }
 function ttsPlayIndex(i){
   if(!ttsOn)return;
@@ -87,9 +91,9 @@ function ttsStart(){
   ttsOn=true;ttsBuildChapter();
   if(ttsIsEdge()){ttsBegin();return;} // 在线音源不需要本地语音
   if(!window.speechSynthesis){parent.postMessage({ttsErr:1},'*');ttsOn=false;return;}
-  var pv=ttsPickVoice();
-  if(pv.count===0){speechSynthesis.onvoiceschanged=function(){if(ttsOn){var p2=ttsPickVoice();if(!p2.zh)parent.postMessage({ttsNoZh:1},'*');ttsBegin();speechSynthesis.onvoiceschanged=null;}};return;}
-  if(!pv.zh)parent.postMessage({ttsNoZh:1},'*');
+  var pv=ttsPickVoice(ttsSents[0]&&ttsSents[0].text);
+  if(pv.count===0){speechSynthesis.onvoiceschanged=function(){if(ttsOn){var p2=ttsPickVoice(ttsSents[0]&&ttsSents[0].text);if(!p2.matched)parent.postMessage({ttsNoSystemVoice:p2.language},'*');ttsBegin();speechSynthesis.onvoiceschanged=null;}};return;}
+  if(!pv.matched)parent.postMessage({ttsNoSystemVoice:pv.language},'*');
   ttsBegin();
 }
 function ttsStop(){
@@ -205,7 +209,9 @@ window.addEventListener('message',function(e){
       clearVirtualPage();clearScrollPreview();
       if(scroller){scroller.style.clipPath='none';scroller.style.webkitClipPath='none';}
     }
+    var previousUiLanguage=S.uiLanguage;
     S=Object.assign(S,e.data.settings);
+    if(previousUiLanguage!==S.uiLanguage&&typeof refreshReaderPageLanguage==='function')refreshReaderPageLanguage();
     var textConversionChanged=prevTextConversion!==S.textConversion;
     // 转换始终从原始章节 HTML 重新取一份显示文本，不修改图书文件、索引或同步内容。
     // 保留当前章内页号作为近似位置；字符宽度变化后再用旧的精确文本锚点反而会失效。

@@ -23,17 +23,23 @@ function init(options = {}) {
   if (typeof scheduleFrame !== "function") throw new Error("ReaderStatsUI.init 缺少 requestAnimationFrame");
 
 const statsModal = document.getElementById("stats-modal");
+const statsText = (key, fallback, values = {}) => Object.entries(values).reduce(
+  (message, [name, value]) => message.replaceAll(`{${name}}`, String(value)),
+  global.ReaderAppI18n?.t?.(key) || fallback,
+);
 function fmtTime(sec) {
   sec = sec || 0;
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return h + " 小时 " + m + " 分钟";
-  if (m > 0) return m + " 分钟";
-  return sec + " 秒";
+  if (h > 0) return statsText("statsHourMinute", "{hours} h {minutes} min", { hours: h, minutes: m });
+  if (m > 0) return statsText("statsMinutes", "{minutes} min", { minutes: m });
+  return statsText("statsSeconds", "{seconds} sec", { seconds: sec });
 }
 function fmtWords(n) {
   n = n || 0;
-  return n >= 10000 ? (n / 10000).toFixed(2) + " 万字" : n + " 字";
+  return n >= 10000
+    ? statsText("statsTenThousandWords", "{words} ×10k words", { words: (n / 10000).toFixed(2) })
+    : statsText("statsWords", "{words} words", { words: n });
 }
 let statScope = "day";
 let statAnchor = new Date(); // 当前查看的日/月/年
@@ -96,25 +102,25 @@ function statsBookCard(book) {
     : `<span class="stats-book-fallback" style="--stats-cover-hue:${statsCoverHue(book.title)}">${title}</span>`;
   return (
     `<article class="stats-book-card" title="${statsEscapeAttr(book.title)}">` +
-      `<div class="stats-book-cover">${cover}${book.finished ? '<span class="stats-book-finished">读完</span>' : ""}</div>` +
+      `<div class="stats-book-cover">${cover}${book.finished ? `<span class="stats-book-finished">${statsText("finishedBook", "Finished")}</span>` : ""}</div>` +
       `<div class="stats-book-title">${title}</div>` +
       `<div class="stats-book-reading">${fmtTime(book.seconds)} · ${fmtWords(book.words)}</div>` +
-      `<div class="stats-book-notes">高亮 ${book.highlights} · 批注 ${book.notes}</div>` +
+      `<div class="stats-book-notes">${statsText("statsBookNotes", "Highlights {highlights} · Notes {notes}", { highlights: book.highlights, notes: book.notes })}</div>` +
     "</article>"
   );
 }
 function fmtReadingSpeed(words, seconds) {
   if (!words || !seconds) return "—";
-  return Math.round(words / Math.max(1, seconds / 60)) + " 字/分钟";
+  return statsText("wordsPerMinute", "{words} words/min", { words: Math.round(words / Math.max(1, seconds / 60)) });
 }
 function statsQualityNote(data) {
   const seconds = data.total_seconds || 0;
   const words = data.total_words || 0;
   if (seconds < 60 || words <= 0) return "";
   const speed = words / Math.max(1, seconds / 60);
-  if (seconds >= 1800 && words < 100) return "这段统计可能包含停留时间：阅读时长较长，但计入字数很少。";
-  if (speed > 3000) return "这段统计的平均速度偏高，可能包含快速翻页或重复计字。";
-  if (speed < 20 && seconds >= 600) return "这段统计的平均速度偏低，可能包含停留时间或扫描版 PDF。";
+  if (seconds >= 1800 && words < 100) return statsText("statsQualityDwell", "This period may include idle time: reading time is long but few words were counted.");
+  if (speed > 3000) return statsText("statsQualityFast", "The average reading speed is high and may include rapid page turns or repeated counting.");
+  if (speed < 20 && seconds >= 600) return statsText("statsQualitySlow", "The average reading speed is low and may include idle time or scanned PDFs.");
   return "";
 }
 function statRange() {
@@ -127,9 +133,9 @@ function statRange() {
 function statPeriodLabel() {
   const d = statAnchor, y = d.getFullYear(), m = d.getMonth() + 1;
   if (statScope === "day") return y + "-" + pad2(m) + "-" + pad2(d.getDate());
-  if (statScope === "month") return y + " 年 " + m + " 月";
-  if (statScope === "year") return y + " 年";
-  return "全部";
+  if (statScope === "month") return new Intl.DateTimeFormat(global.ReaderAppI18n?.resolvedLanguage?.() || undefined, { year: "numeric", month: "long" }).format(d);
+  if (statScope === "year") return new Intl.DateTimeFormat(global.ReaderAppI18n?.resolvedLanguage?.() || undefined, { year: "numeric" }).format(d);
+  return statsText("statsAll", "All");
 }
 function statStep(dir) {
   const d = statAnchor;
@@ -141,10 +147,10 @@ function statStep(dir) {
 }
 function fmtAxisTime(sec) {
   sec = Math.round(sec || 0);
-  if (sec < 60) return sec + "秒";
-  if (sec < 3600) return Math.round(sec / 60) + "分";
+  if (sec < 60) return statsText("statsSeconds", "{seconds} sec", { seconds: sec });
+  if (sec < 3600) return statsText("statsMinutes", "{minutes} min", { minutes: Math.round(sec / 60) });
   const h = sec / 3600;
-  return (Math.round(h * 10) / 10).toFixed(1).replace(/\.0$/, "") + "小时";
+  return statsText("statsHourMinute", "{hours} h {minutes} min", { hours: (Math.round(h * 10) / 10).toFixed(1).replace(/\.0$/, ""), minutes: 0 });
 }
 function fmtAxisValue(v, metric) {
   return metric === "words" ? fmtWords(v || 0) : fmtAxisTime(v || 0);
@@ -187,7 +193,7 @@ function statBars(data) {
   if (statScope === "year") {
     const mo = new Array(12).fill(0);
     data.days.forEach((d) => (mo[(Math.floor(d.day / 100) % 100) - 1] += metric === "words" ? (d.words || 0) : d.seconds));
-    return mo.map((v, i) => ({ label: i + 1 + "月", value: v }));
+    return mo.map((v, i) => ({ label: statsText("statsMonth", "{month} mo", { month: i + 1 }), value: v }));
   }
   const yr = {};
   data.days.forEach((d) => { const yy = Math.floor(d.day / 10000); yr[yy] = (yr[yy] || 0) + (metric === "words" ? (d.words || 0) : d.seconds); });
@@ -225,7 +231,7 @@ function monthLabelsForContribution(start) {
     const diff = Math.floor((cursor - start) / 86400000);
     const week = Math.max(0, Math.min(52, Math.floor(diff / 7)));
     const cls = week >= 51 ? "edge" : week <= 0 ? "first" : "";
-    labels.push(`<span class="mw${week} ${cls}">${cursor.getMonth() + 1}月</span>`);
+    labels.push(`<span class="mw${week} ${cls}">${statsText("statsMonth", "{month} mo", { month: cursor.getMonth() + 1 })}</span>`);
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
   }
   return labels.join("");
@@ -256,10 +262,10 @@ function overviewStats(allData) {
   const peak = allData.days.reduce((m, d) => Math.max(m, d.seconds || 0), 0);
   return (
     '<div class="stat-overview">' +
-    `<div><b>${fmtTime(allData.total_seconds)}</b><span>累计阅读时长</span></div>` +
-    `<div><b>${fmtTime(peak)}</b><span>单日峰值</span></div>` +
-    `<div><b>${streak.current} 天</b><span>当前连续阅读</span></div>` +
-    `<div><b>${streak.longest} 天</b><span>最长连续阅读</span></div>` +
+    `<div><b>${fmtTime(allData.total_seconds)}</b><span>${statsText("totalReadingTime", "Total reading time")}</span></div>` +
+    `<div><b>${fmtTime(peak)}</b><span>${statsText("dailyPeak", "Daily peak")}</span></div>` +
+    `<div><b>${statsText("days", "{count} days", { count: streak.current })}</b><span>${statsText("currentStreak", "Current streak")}</span></div>` +
+    `<div><b>${statsText("days", "{count} days", { count: streak.longest })}</b><span>${statsText("longestStreak", "Longest streak")}</span></div>` +
     "</div>"
   );
 }
@@ -274,7 +280,7 @@ async function renderStats() {
       bodyEl.innerHTML = (
         '<div class="stats-loading" role="status" aria-live="polite">' +
           '<span class="stats-loading-spinner" aria-hidden="true"></span>' +
-          '<span>正在加载阅读统计…</span>' +
+          `<span>${statsText("statsLoading", "Loading reading statistics…")}</span>` +
         "</div>"
       );
     }
@@ -297,22 +303,22 @@ async function renderStats() {
   } catch (e) {
     if (requestSerial !== statsRequestSerial) return;
     if (bodyEl) {
-      bodyEl.innerHTML = '<div class="stats-empty stats-load-error">阅读统计加载失败，请稍后重试。</div>';
+      bodyEl.innerHTML = `<div class="stats-empty stats-load-error">${statsText("statsLoadFailed", "Could not load reading statistics. Please try again.")}</div>`;
       bodyEl.classList.remove("refreshing");
       delete bodyEl.dataset.loading;
     }
     return;
   }
   if (requestSerial !== statsRequestSerial) return;
-  const unit = { day: "天", month: "月", year: "年", total: "段时间" }[statScope];
+  const unit = { day: statsText("day", "Day"), month: statsText("month", "Month"), year: statsText("year", "Year"), total: statsText("statsPeriodUnit", "period") }[statScope];
   const statItems = [
-    ["duration", "阅读时长", fmtTime(data.total_seconds)],
-    ["words", "阅读字数", fmtWords(data.total_words)],
-    ["speed", "平均速度", fmtReadingSpeed(data.total_words, data.total_seconds)],
-    ["books", "读过", data.book_count + " 本"],
-    ["finished", "读完", data.finished_count + " 本"],
-    ["highlights", "高亮", data.total_highlights],
-    ["notes", "批注", data.total_notes],
+    ["duration", statsText("readingDuration", "Reading time"), fmtTime(data.total_seconds)],
+    ["words", statsText("readingWords", "Words read"), fmtWords(data.total_words)],
+    ["speed", statsText("averageSpeed", "Average speed"), fmtReadingSpeed(data.total_words, data.total_seconds)],
+    ["books", statsText("booksRead", "Books read"), data.book_count],
+    ["finished", statsText("finishedBooks", "Finished"), data.finished_count],
+    ["highlights", statsText("highlights", "Highlights"), data.total_highlights],
+    ["notes", statsText("annotations", "Notes"), data.total_notes],
   ].filter((item) => statVisible[item[0]] !== false);
   const cards = statItems.length
     ? '<div class="stat-cards">' + statItems.map((item) => `<div class="stat-cell"><div class="k">${item[1]}</div><div class="v">${item[2]}</div></div>`).join("") + "</div>"
@@ -322,16 +328,16 @@ async function renderStats() {
   const chart = `<div class="stat-chart">${barChart(statBars(data), "#5aa0ff", statChartMetric)}</div>`;
   let books;
   if (data.books.length) {
-    books = `<div class="stat-sec-title">这一${unit}读过的书</div>`;
+    books = `<div class="stat-sec-title">${statsText("currentPeriodBooks", "Books read this {unit}", { unit })}</div>`;
     const orderedBooks = data.books.slice().sort((a, b) => (
       (b.seconds || 0) - (a.seconds || 0) || String(a.title || "").localeCompare(String(b.title || ""), "zh-CN")
     ));
     books += `<div class="stats-book-strip">${orderedBooks.map(statsBookCard).join("")}</div>`;
   } else {
-    books = '<div class="stats-empty">这段时间还没有阅读记录</div>';
+    books = `<div class="stats-empty">${statsText("noReadingRecords", "No reading records in this period")}</div>`;
   }
   if (!bodyEl) return;
-  bodyEl.innerHTML = overviewStats(allData) + '<div class="stat-sec-title">近一年每日阅读热力图</div>' + contributionGraph(allData) + cards + qualityNote + chart + books;
+  bodyEl.innerHTML = overviewStats(allData) + `<div class="stat-sec-title">${statsText("yearlyHeatmap", "Daily reading heatmap for the past year")}</div>` + contributionGraph(allData) + cards + qualityNote + chart + books;
   scheduleFrame(() => {
     if (requestSerial !== statsRequestSerial) return;
     const maxScrollTop = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
@@ -372,7 +378,7 @@ const statsChartMode = document.getElementById("stats-chart-mode");
 function syncStatsChartMetricControl() {
   if (!statsChartMetric || !statsChartMode) return;
   statsChartMetric.checked = statChartMetric === "words";
-  statsChartMode.textContent = statChartMetric === "words" ? "字数" : "时间";
+  statsChartMode.textContent = statChartMetric === "words" ? statsText("readingWords", "Words read") : statsText("time", "Time");
 }
 syncStatVisibleControls();
 syncStatsChartMetricControl();
@@ -402,6 +408,10 @@ statsModal.addEventListener("click", (e) => {
   if (!statsSettings.contains(e.target) && e.target !== statsSettingsBtn) {
     statsSettings.classList.remove("show");
   }
+});
+if (typeof global.addEventListener === "function") global.addEventListener("app-language-changed", () => {
+  syncStatsChartMetricControl();
+  if (statsModal.classList.contains("show")) renderStats();
 });
 
   activeController = Object.freeze({

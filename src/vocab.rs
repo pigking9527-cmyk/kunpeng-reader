@@ -28,7 +28,7 @@ pub(crate) struct VocabEntry {
     pub(crate) book_title: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct VocabStore {
     pub(crate) list: Vec<VocabEntry>,
 }

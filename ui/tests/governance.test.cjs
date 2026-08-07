@@ -156,6 +156,7 @@ test("runtime helpers and utility commands stay outside app assembly", () => {
     "background_task_status",
     "app_version",
     "save_download_image",
+    "save_problem_trace_to_desktop",
     "dict_lookup",
     "translate_text",
     "reader_perf_log",

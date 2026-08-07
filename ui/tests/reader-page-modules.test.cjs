@@ -12,6 +12,7 @@ const modeSwitch = fs.readFileSync(path.join(uiRoot, "reader-page-mode-switch.js
 
 test("reader page modules parse in their compiled injection order", () => {
   const source = [
+    "reader-page-bug-trace.js",
     "reader-page-layout.js",
     "reader-page-end.js",
     "reader-page-pagination.js",
@@ -21,6 +22,18 @@ test("reader page modules parse in their compiled injection order", () => {
     "reader-page-runtime.js",
   ].map((name) => fs.readFileSync(path.join(uiRoot, name), "utf8")).join("");
   assert.doesNotThrow(() => new vm.Script(source));
+});
+
+test("chapter iframe receives the reader language and rebuilds transient controls", () => {
+  const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
+  const runtime = fs.readFileSync(path.join(uiRoot, "reader-page-runtime.js"), "utf8");
+  const settings = fs.readFileSync(path.join(uiRoot, "reader-settings-ui.js"), "utf8");
+  assert.match(settings, /uiLanguage: window\.ReaderI18n\?\.resolvedLanguage\?\.\(\) \|\| "zh-CN"/);
+  assert.match(runtime, /previousUiLanguage!==S\.uiLanguage&&typeof refreshReaderPageLanguage==='function'/);
+  assert.match(annotations, /var READER_PAGE_COPY=/);
+  assert.match(annotations, /function refreshReaderPageLanguage\(\)/);
+  assert.match(annotations, /function hlActionLabel\(key\)\{return readerPageText\(key\);\}/);
+  assert.match(annotations, /readerPageText\('dictionarySettings'\)/);
 });
 
 test("paged height calibration never creates more than one line of extra bottom whitespace", () => {

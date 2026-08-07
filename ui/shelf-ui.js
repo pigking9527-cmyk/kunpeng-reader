@@ -85,6 +85,7 @@ try {
 let minRating = +(localStorage.getItem("minRating") || 0);
 let searchQuery = "";
 let selected = new Set();
+const shelfText = (key, fallback) => global.ReaderAppI18n?.t?.(key) || fallback;
 function organizationName(value) { return String(value || "").trim(); }
 function organizationKey(value) { return organizationName(value).toLocaleLowerCase("zh-CN"); }
 function loadOrganizationFilter(key) {
@@ -105,12 +106,96 @@ let shelfLoaded = false;
 let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0";
 let showCoverRating = localStorage.getItem("showCoverRating") !== "0";
 let showCoverTitle = localStorage.getItem("showCoverTitle") === "1";
+let coverOnDemand = localStorage.getItem("shelfCoverOnDemand") !== "0";
 let singleClickOpensBook = localStorage.getItem("shelfSingleClickOpen") !== "0";
+// WebView2 对动态插入的 img[loading=lazy] 并不总会延迟请求；书架必须在
+// 封面真的接近可视区域后才写入 src，避免启动期解码整套书库。
+const DEFAULT_FIRST_SCREEN_COVER_COUNT = 12;
+const MAX_FIRST_SCREEN_COVER_COUNT = 160;
+const COVER_PRELOAD_MARGIN = "520px 0px";
+function storedFirstScreenCoverCount() {
+  const saved = Number.parseInt(localStorage.getItem("shelfFirstScreenCoverCount") || "", 10);
+  return Number.isFinite(saved) && saved >= 1 ? Math.min(MAX_FIRST_SCREEN_COVER_COUNT, saved) : null;
+}
+let firstScreenCoverCount = storedFirstScreenCoverCount() || DEFAULT_FIRST_SCREEN_COVER_COUNT;
+let hasRememberedFirstScreenCoverCount = storedFirstScreenCoverCount() !== null;
+let coverObserver = null;
+
+// 书架是应用控件，不是网页正文。禁止浏览器把拖过的封面图片、书名和进度
+// 当成可拖对象或文本选区；多选只通过阅读器自己的选中态完成。
+shelfEl.addEventListener("dragstart", (event) => event.preventDefault());
+shelfEl.addEventListener("selectstart", (event) => event.preventDefault());
 
 function setSingleClickOpenPreference(value) {
   singleClickOpensBook = value !== false;
   localStorage.setItem("shelfSingleClickOpen", singleClickOpensBook ? "1" : "0");
 }
+
+function loadDeferredCover(img) {
+  const source = img?.dataset?.coverSrc;
+  if (!source || img.dataset.coverLoaded === "1") return;
+  img.dataset.coverLoaded = "1";
+  img.src = source;
+  try { coverObserver?.unobserve(img); } catch (_) {}
+}
+
+function observeDeferredCover(img) {
+  if (!img?.dataset?.coverSrc || img.dataset.coverLoaded === "1") return;
+  if (typeof global.IntersectionObserver !== "function") {
+    // 很旧的 WebView 没有观察器时保持原有可用性，而不是留下空白封面。
+    loadDeferredCover(img);
+    return;
+  }
+  if (!coverObserver) {
+    coverObserver = new global.IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting || entry.intersectionRatio > 0) loadDeferredCover(entry.target);
+      });
+    }, { root: contentEl, rootMargin: COVER_PRELOAD_MARGIN });
+  }
+  coverObserver.observe(img);
+}
+
+function activateDeferredCovers() {
+  if (!coverOnDemand) return;
+  shelfEl.querySelectorAll?.("img[data-cover-src]").forEach(observeDeferredCover);
+}
+
+function estimateFirstScreenCoverCount() {
+  const width = Number(contentEl?.clientWidth || 0);
+  const height = Number(contentEl?.clientHeight || 0);
+  if (width <= 0 || height <= 0) return 0;
+  if (layout === "list") return Math.max(1, Math.ceil(height / 108));
+  const columns = shelfGridColumns > 0
+    ? shelfGridColumns
+    : Math.max(1, Math.floor((Math.max(0, width - 40) + 18) / 158));
+  // 网格封面 190px，高度间距 18px；标题隐藏时仍保留卡片的最小行高。
+  const rows = Math.max(1, Math.ceil(Math.max(0, height - 40) / 208));
+  return Math.min(MAX_FIRST_SCREEN_COVER_COUNT, columns * rows);
+}
+
+function rememberFirstScreenCoverCount() {
+  if (typeof contentEl?.getBoundingClientRect !== "function") return;
+  const viewport = contentEl.getBoundingClientRect();
+  if (!viewport || viewport.width <= 0 || viewport.height <= 0) return;
+  let count = 0;
+  shelfEl.querySelectorAll?.(".book").forEach((card) => {
+    const rect = card.getBoundingClientRect?.();
+    if (rect && rect.bottom > viewport.top && rect.top < viewport.bottom) count += 1;
+  });
+  if (!count) return;
+  firstScreenCoverCount = Math.min(MAX_FIRST_SCREEN_COVER_COUNT, count);
+  hasRememberedFirstScreenCoverCount = true;
+  localStorage.setItem("shelfFirstScreenCoverCount", String(firstScreenCoverCount));
+}
+
+let firstScreenCoverCountTimer = null;
+function scheduleFirstScreenCoverCountSave() {
+  global.clearTimeout(firstScreenCoverCountTimer);
+  firstScreenCoverCountTimer = global.setTimeout(() => requestFrame(rememberFirstScreenCoverCount), 120);
+}
+global.addEventListener("resize", scheduleFirstScreenCoverCountSave);
+global.addEventListener("pagehide", rememberFirstScreenCoverCount);
 
 // 通用半星组件：左半=半星、右半=整星。
 function makeStars(container, onPick) {
@@ -225,6 +310,7 @@ document.getElementById("reading-filter-all")?.addEventListener("click", () => {
 const setCoverProgress = document.getElementById("set-cover-prog");
 const setCoverRating = document.getElementById("set-cover-rating");
 const setCoverTitle = document.getElementById("set-cover-title");
+const setCoverOnDemand = document.getElementById("set-cover-on-demand");
 const setSingleClickOpen = document.getElementById("set-single-click-open");
 const openBookLabel = document.getElementById("set-open-book-label");
 function reflectOpenBookPreference() {
@@ -250,6 +336,14 @@ setCoverTitle.addEventListener("change", () => {
   localStorage.setItem("showCoverTitle", showCoverTitle ? "1" : "0");
   applyView();
 });
+if (setCoverOnDemand) {
+  setCoverOnDemand.checked = coverOnDemand;
+  setCoverOnDemand.addEventListener("change", () => {
+    coverOnDemand = setCoverOnDemand.checked;
+    localStorage.setItem("shelfCoverOnDemand", coverOnDemand ? "1" : "0");
+    applyView();
+  });
+}
 reflectOpenBookPreference();
 setSingleClickOpen?.addEventListener("change", () => {
   setSingleClickOpenPreference(setSingleClickOpen.checked);
@@ -363,6 +457,7 @@ function bookRenderKey(b) {
     b.missing ? 1 : 0,
     showCoverProgress ? 1 : 0,
     showCoverRating ? 1 : 0,
+    coverOnDemand ? 1 : 0,
   ].join("\u001f");
 }
 function closeShelfCardFloaters() {
@@ -382,14 +477,19 @@ function bookCard(b, index = 0) {
   cover.className = "cover";
 
   if (b.cover) {
-    // EPUB 真实封面。封面带 Cache-Control，命中缓存时同帧直接画出，无任何过渡。
-    // 真实封面加载前只用中性底色，避免用户看到“纯色封面”再跳成图片。
+    // 首屏少量封面立即加载；其余进入可视区域附近才设置 src。
     cover.classList.add("has-img");
     const img = document.createElement("img");
     img.alt = b.title;
-    img.loading = index < 24 ? "eager" : "lazy";
-    img.decoding = index < 24 ? "sync" : "async";
-    img.src = b.cover;
+    img.draggable = false;
+    img.loading = coverOnDemand && index >= firstScreenCoverCount ? "lazy" : "eager";
+    img.decoding = "async";
+    if (!coverOnDemand || index < firstScreenCoverCount) {
+      img.fetchPriority = "high";
+      img.src = b.cover;
+    } else {
+      img.dataset.coverSrc = b.cover;
+    }
     cover.appendChild(img);
   } else {
     // 生成的占位封面：书名 + 配色
@@ -595,7 +695,7 @@ function hasActiveShelfFilters() {
 function updateShelfFilterStatus(visibleCount) {
   const active = hasActiveShelfFilters();
   filterButton.classList.toggle("filters-active", active);
-  filterButton.title = active ? "已启用筛选" : "排序与布局";
+  filterButton.title = active ? shelfText("activeFilters", "Filters active") : shelfText("sortAndLayout", "Sort & layout");
   if (filterResultSummary) {
     filterResultSummary.textContent = visibleCount + "/" + books.length;
   }
@@ -619,10 +719,10 @@ function matchesOrganizationFilters(book) {
 function renderOrganizationMatchMode() {
   if (!organizationMatchModeButton) return;
   const matchAll = organizationMatchMode === "all";
-  organizationMatchModeButton.textContent = matchAll ? "匹配全部" : "匹配任一";
+  organizationMatchModeButton.textContent = matchAll ? shelfText("matchAll", "Match all") : shelfText("matchAny", "Match any");
   organizationMatchModeButton.title = matchAll
-    ? "标签与收藏夹必须同时匹配，点击改为匹配任一"
-    : "标签与收藏夹命中任一即可，点击改为匹配全部";
+    ? shelfText("matchAllHint", "Tags and collections must all match; click to match any")
+    : shelfText("matchAnyHint", "Any tag or collection may match; click to match all");
   organizationMatchModeButton.setAttribute("aria-pressed", matchAll ? "true" : "false");
 }
 organizationMatchModeButton?.addEventListener("click", (event) => {
@@ -799,8 +899,8 @@ function openOrganizationFilter(field, anchor) {
   const config = organizationFilterConfig(field);
   organizationFilterDraft = { field, keys: new Set(config.selected) };
   organizationFilterReturnToPanel = filterPanel.classList.contains("show");
-  organizationFilterTitle.textContent = "选择" + config.title;
-  organizationFilterNote.textContent = "可多选；不选择则不过滤。";
+  organizationFilterTitle.textContent = shelfText("selectItems", "Select {title}").replace("{title}", config.title);
+  organizationFilterNote.textContent = shelfText("multiSelectNoFilter", "You may select multiple items; select none to disable filtering.");
   renderOrganizationFilterOptions();
   // 必须在隐藏漏斗面板前取坐标；隐藏后的按钮 rect 会退化为 (0,0)，导致弹窗跑到左上角。
   positionOrganizationFilter(anchor);
@@ -1548,11 +1648,16 @@ initShelfScrollbar();
 let viewRenderToken = 0;
 function applyView(options = {}) {
   const token = ++viewRenderToken;
+  coverObserver?.disconnect();
+  coverObserver = null;
   const preserveScroll = options.preserveScroll !== false && shelfLoaded;
   const savedScrollTop = preserveScroll && contentEl ? contentEl.scrollTop : 0;
   shelfEl.classList.toggle("list", layout === "list");
   shelfEl.classList.toggle("show-titles", showCoverTitle); // 网格视图是否显示书名
   applyShelfGridColumns();
+  if (!hasRememberedFirstScreenCoverCount) {
+    firstScreenCoverCount = estimateFirstScreenCoverCount() || DEFAULT_FIRST_SCREEN_COVER_COUNT;
+  }
   shelfRendering = true;
   const list = currentList();
   updateShelfFilterStatus(list.length);
@@ -1579,6 +1684,10 @@ function applyView(options = {}) {
   function finishRender() {
     restoreShelfScroll();
     shelfRendering = false;
+    // 书卡分批挂入 DOM 后再开始观察，确保浏览器只请求视口附近的封面。
+    activateDeferredCovers();
+    // 下次启动优先请求上一次窗口实际容纳的数量；调整窗口或列数时也会更新。
+    requestFrame(rememberFirstScreenCoverCount);
     finishCoverRender("chunks=" + chunks);
     scheduleShelfScrollbarUpdate();
   }
@@ -1687,6 +1796,10 @@ global.addEventListener("focus", () => {
   if (now - lastFocusRefreshAt < 1500) return;
   lastFocusRefreshAt = now;
   invoke("list_books").then(render).catch(() => {});
+});
+global.addEventListener("app-language-changed", () => {
+  updateShelfFilterStatus(currentList().length);
+  renderOrganizationMatchMode();
 });
 
   activeController = Object.freeze({

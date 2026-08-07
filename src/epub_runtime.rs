@@ -1071,13 +1071,14 @@ pub(crate) fn handle_protocol_request<R: tauri::Runtime>(
     responder: tauri::UriSchemeResponder,
 ) {
     let app = context.app_handle().clone();
-    let uri = request.uri().to_string();
     let path = request.uri().path().to_string();
-    if path.starts_with("/cover/")
-        || path.starts_with("/book/")
+    // 封面是一批高频本地请求；逐张写磁盘日志会反过来拖慢首屏。保留文档和
+    // 首个正文资源的诊断信息，封面失败仍由 HTTP 404 表达。
+    if path.starts_with("/book/")
         || (path.starts_with("/res/")
             && !READER_RESOURCE_REQUEST_LOGGED.swap(true, Ordering::Relaxed))
     {
+        let uri = request.uri().to_string();
         log(&format!("reader_protocol uri={uri} path={path}"));
     }
     std::thread::spawn(move || {

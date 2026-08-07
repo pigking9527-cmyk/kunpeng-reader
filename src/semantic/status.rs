@@ -3,14 +3,15 @@
 //! 状态扫描可能打开数百个索引元数据文件，因此通过短期快照缓存与实时运行态
 //! 合并，避免 UI 轮询阻塞模型下载、向量构建或阅读窗口。
 
-use super::{model, profile};
+use super::{m3, model, profile, retrieval};
 use crate::semantic_tasks::SemProgress;
-use crate::{book, now_ms, set_thread_background, AppState};
+use crate::{now_ms, set_thread_background, AppState};
 use serde::Serialize;
 use std::sync::{Mutex, OnceLock};
 use tauri::Manager;
 
-const STATUS_CACHE_TTL_MS: u64 = 60_000;
+const STATUS_CACHE_TTL_MS: u64 = 5 * 60_000;
+const STATUS_REFRESH_TIMEOUT_MS: u64 = 15_000;
 const SWITCH_STATUS_CHECKING: &str = "正在检查本地模型和语义索引…";
 
 #[derive(Clone, Serialize)]
@@ -47,6 +48,7 @@ pub(crate) struct SemanticTaskCenter {
 pub(crate) struct SemanticProgressDto {
     building: bool,
     model_downloading: bool,
+    reranker_loading: bool,
     vector_pause_requested: bool,
     vector_paused: bool,
     status_refreshing: bool,
@@ -73,6 +75,14 @@ pub(crate) struct SemanticProgressDto {
     multi_profile_total: u32,
     multi_profile_ready: bool,
     multi_profile_bytes: u64,
+    retrieval_mode: String,
+    retrieval_mode_label: String,
+    reranker_ready: bool,
+    reranker_downloaded: bool,
+    m3_long_context_enabled: bool,
+    m3_index_done: u32,
+    m3_index_total: u32,
+    m3_index_ready: bool,
     current: String,
     error: String,
 }
@@ -82,6 +92,7 @@ impl From<&SemProgress> for SemanticProgressDto {
         Self {
             building: progress.building,
             model_downloading: progress.model_downloading,
+            reranker_loading: progress.reranker_loading,
             vector_pause_requested: progress.vector_pause_requested,
             vector_paused: progress.vector_paused,
             status_refreshing: progress.status_refreshing,
@@ -108,6 +119,22 @@ impl From<&SemProgress> for SemanticProgressDto {
             multi_profile_total: progress.multi_profile_total,
             multi_profile_ready: progress.multi_profile_ready,
             multi_profile_bytes: progress.multi_profile_bytes,
+            retrieval_mode: retrieval::active_mode().id().into(),
+            retrieval_mode_label: retrieval::active_mode().label().into(),
+            reranker_ready: progress.reranker_ready,
+            reranker_downloaded: retrieval::reranker_available_disk(),
+            m3_long_context_enabled: retrieval::long_context_enabled(),
+            m3_index_done: if progress.m3_index_done > 0 {
+                progress.m3_index_done
+            } else {
+                m3::indexed_books()
+            },
+            m3_index_total: if progress.m3_index_total > 0 {
+                progress.m3_index_total
+            } else {
+                m3::indexed_books()
+            },
+            m3_index_ready: progress.m3_index_ready || m3::is_ready(),
             current: progress.current.clone(),
             error: progress.error.clone(),
         }
@@ -118,6 +145,9 @@ impl From<&SemProgress> for SemanticProgressDto {
 struct StatusCache {
     snapshot: Option<SemProgress>,
     refreshing: bool,
+    refresh_id: u64,
+    refresh_started_at: u64,
+    last_attempt_at: u64,
     updated_at: u64,
 }
 
@@ -127,27 +157,53 @@ fn cache() -> &'static Mutex<StatusCache> {
     STATUS_CACHE.get_or_init(|| Mutex::new(StatusCache::default()))
 }
 
-fn semantic_book_progress(state: &AppState) -> (u32, u32) {
-    let books: Vec<book::Book> = {
-        let library = state.library.lock().unwrap();
-        library
-            .books
-            .iter()
-            .filter(|book| book.format != "pdf")
-            .cloned()
-            .collect()
-    };
-    let total = books.len() as u32;
-    let done = books
+/// 首屏只能安全地知道书架中有多少本书可建立索引。元数据文件名不代表索引
+/// 仍然有效：模型切换、图书移动、旧版格式或损坏文件都可能留下同名文件。
+/// 因此后台精确核对完成前绝不预判任何一本已经建立。
+fn provisional_semantic_book_total(state: &AppState) -> u32 {
+    state
+        .library
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .books
         .iter()
-        .filter(|book| super::sem_index_done_for_book(book))
-        .count() as u32;
-    (done, total)
+        .filter(|book| book.format != "pdf")
+        .count() as u32
+}
+
+fn provisional_snapshot(state: &AppState, mut progress: SemProgress) -> SemProgress {
+    let selected = model::active();
+    progress.model_id = selected.id().to_string();
+    progress.model_label = selected.label().to_string();
+    progress.model_supported = selected.locally_supported();
+    progress.model_ready = model::available(state);
+    progress.model_path = model::model_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let total = provisional_semantic_book_total(state);
+    progress.semantic_done = 0;
+    progress.semantic_total = total;
+    progress.semantic_ready = false;
+    progress.semantic_bytes = 0;
+    progress.accelerator_done = 0;
+    progress.accelerator_total = 0;
+    progress.accelerator_ready = false;
+    progress.accelerator_resumable = false;
+    progress.accelerator_bytes = 0;
+    progress.multi_profile_done = 0;
+    progress.multi_profile_total = 0;
+    progress.multi_profile_ready = false;
+    progress.multi_profile_bytes = 0;
+    if progress.current.contains(SWITCH_STATUS_CHECKING) {
+        progress.current = format!("已切换至 {}；正在后台核对索引状态", selected.label());
+    }
+    progress
 }
 
 fn switch_ready_message(label: &str, model_ready: bool, done: u32, total: u32) -> String {
     if !model_ready {
-        format!("已切换至 {label}；请下载模型")
+        format!("已切换至 {label}")
     } else if total == 0 {
         format!("已切换至 {label}；模型已就绪，书架暂无可建立语义索引的图书")
     } else if done == total {
@@ -171,16 +227,20 @@ fn settle_switch_status(progress: &mut SemProgress) {
     );
 }
 
-fn accelerator_progress(state: &AppState) -> (u32, u32, bool, bool) {
-    let (ids, source_sig) = super::accelerator::indexed_book_snapshot_cached(state);
+fn accelerator_progress(
+    ids: &[u64],
+    source_sig: &[super::vector::IndexSourceSignature],
+) -> (u32, u32, bool, bool) {
     if ids.is_empty() {
         return (0, 0, false, false);
     }
-    let total = super::accelerator::estimate_global_shard_total(&ids);
-    if super::accelerator::global_index_fresh(state) {
+    let total = super::accelerator::estimate_global_shard_total(ids);
+    if super::accelerator::global_index_fresh_for_status(ids, source_sig) {
         return (total.max(1), total.max(1), true, false);
     }
-    if let Some((done, processed_books)) = super::accelerator::build_progress(&ids, &source_sig) {
+    if let Some((done, processed_books)) =
+        super::accelerator::build_progress_for_status(ids, source_sig)
+    {
         let total = total.max(done);
         return (done, total, false, done > 0 || processed_books > 0);
     }
@@ -230,10 +290,9 @@ fn enrich(state: &AppState, mut progress: SemProgress) -> SemProgress {
     progress.model_label = selected.label().to_string();
     progress.model_supported = selected.locally_supported();
     let model_path = model::model_dir();
-    progress.model_bytes = model_path
-        .as_ref()
-        .map(|path| model::directory_size(path))
-        .unwrap_or(0);
+    // 模型缓存目录可能混有历史模型，递归容量既拖慢状态页，也不能准确归属到
+    // 当前模型。界面不再展示该歧义数字，状态刷新也不再遍历整个模型缓存。
+    progress.model_bytes = 0;
     progress.model_path = model_path
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned())
@@ -243,14 +302,19 @@ fn enrich(state: &AppState, mut progress: SemProgress) -> SemProgress {
     // 才算可用，部分下载不能误报为就绪。
     progress.model_ready = model::available(state);
 
-    let (semantic_done, semantic_total) = semantic_book_progress(state);
+    let (semantic_done, semantic_total, semantic_bytes, indexed_signatures) =
+        super::vector::management_status_snapshot_fast(state);
     progress.semantic_done = semantic_done;
     progress.semantic_total = semantic_total;
     progress.semantic_ready = semantic_total > 0 && semantic_done == semantic_total;
-    progress.semantic_bytes = semantic_index_bytes();
+    progress.semantic_bytes = semantic_bytes;
 
+    let indexed_ids = indexed_signatures
+        .iter()
+        .map(|signature| signature.book_id)
+        .collect::<Vec<_>>();
     let (accelerator_done, accelerator_total, accelerator_ready, accelerator_resumable) =
-        accelerator_progress(state);
+        accelerator_progress(&indexed_ids, &indexed_signatures);
     progress.accelerator_done = if progress.building && progress.shard_total > 0 {
         progress.shard_done
     } else {
@@ -265,7 +329,8 @@ fn enrich(state: &AppState, mut progress: SemProgress) -> SemProgress {
     progress.accelerator_resumable = accelerator_resumable;
     progress.accelerator_bytes = accelerator_index_bytes();
 
-    let (multi_done, multi_total, multi_ready) = profile::progress(state);
+    let (multi_done, multi_total, multi_ready) =
+        profile::progress_for_signatures(&indexed_signatures);
     progress.multi_profile_done = multi_done;
     progress.multi_profile_total = multi_total;
     progress.multi_profile_ready = multi_ready;
@@ -367,20 +432,15 @@ pub(super) fn task_center(progress: SemProgress) -> SemanticTaskCenter {
         "正在下载/加载模型…".into()
     } else if progress.model_ready {
         "已就绪".into()
-    } else if refreshing {
-        "正在读取模型状态…".into()
     } else {
-        format!(
-            "未下载。首次下载约 {} MB。",
-            model::active().estimated_download_bytes() / 1024 / 1024
-        )
+        "未下载".into()
     };
     let vector_detail = if progress.vector_pause_requested {
         format!("{vector_done}/{vector_total} 本，正在取消当前书的未完成索引…")
     } else if progress.vector_paused {
         format!("{vector_done}/{vector_total} 本，已暂停，可续建")
-    } else if refreshing && vector_total == 0 {
-        "正在读取语义索引状态…".into()
+    } else if refreshing {
+        format!("{vector_done}/{vector_total} 本，后台核对中")
     } else if vector_total > 0 {
         format!(
             "{}/{} 本{}",
@@ -395,8 +455,8 @@ pub(super) fn task_center(progress: SemProgress) -> SemanticTaskCenter {
     } else {
         "书架中暂无可建立语义索引的图书".into()
     };
-    let accelerator_detail = if refreshing && accelerator_total == 0 {
-        "正在读取加速索引状态…".into()
+    let accelerator_detail = if refreshing {
+        "后台核对中".into()
     } else if accelerator_total > 0 {
         format!(
             "{}/{} 片{}",
@@ -413,8 +473,8 @@ pub(super) fn task_center(progress: SemProgress) -> SemanticTaskCenter {
     } else {
         "建立语义索引后可建立加速索引".into()
     };
-    let multi_profile_detail = if refreshing && multi_profile_total == 0 {
-        "正在读取多中心画像状态…".into()
+    let multi_profile_detail = if refreshing {
+        "后台核对中".into()
     } else if multi_profile_total > 0 {
         format!(
             "{}/{} 本{}",
@@ -449,7 +509,7 @@ pub(super) fn task_center(progress: SemProgress) -> SemanticTaskCenter {
                 running: progress.model_downloading,
                 ready: progress.model_ready,
                 resumable: false,
-                can_start: progress.model_supported && !busy && !refreshing,
+                can_start: progress.model_supported && !busy && !progress.model_ready,
                 can_delete: !busy && progress.model_ready,
                 primary_label: "下载模型".into(),
                 delete_label: "删除模型".into(),
@@ -469,7 +529,7 @@ pub(super) fn task_center(progress: SemProgress) -> SemanticTaskCenter {
                 running: vector_live,
                 ready: progress.semantic_ready,
                 resumable: vector_done > 0 && !progress.semantic_ready,
-                can_start: !busy && !refreshing && progress.model_ready && vector_total > 0,
+                can_start: !busy && progress.model_ready && vector_total > 0,
                 can_delete: !busy && vector_done > 0,
                 primary_label: if vector_done > 0 && !progress.semantic_ready {
                     "续建语义索引".into()
@@ -493,7 +553,7 @@ pub(super) fn task_center(progress: SemProgress) -> SemanticTaskCenter {
                 running: accelerator_live,
                 ready: progress.accelerator_ready,
                 resumable: progress.accelerator_resumable,
-                can_start: !busy && !refreshing && progress.model_ready && vector_done > 0,
+                can_start: !busy && progress.model_ready && vector_done > 0,
                 can_delete: !busy && (progress.accelerator_ready || accelerator_done > 0),
                 primary_label: if progress.accelerator_resumable {
                     "续建加速索引".into()
@@ -517,7 +577,7 @@ pub(super) fn task_center(progress: SemProgress) -> SemanticTaskCenter {
                 running: multi_profile_live,
                 ready: progress.multi_profile_ready,
                 resumable: multi_profile_done > 0 && !progress.multi_profile_ready,
-                can_start: !busy && !refreshing && vector_done > 0,
+                can_start: !busy && vector_done > 0,
                 can_delete: !busy && progress.multi_profile_bytes > 0,
                 primary_label: if multi_profile_done > 0 && !progress.multi_profile_ready {
                     "更新多中心画像".into()
@@ -532,12 +592,15 @@ pub(super) fn task_center(progress: SemProgress) -> SemanticTaskCenter {
 }
 
 pub(super) fn public_snapshot(app: &tauri::AppHandle, state: &AppState) -> SemanticProgressDto {
-    SemanticProgressDto::from(&snapshot(app, state))
+    SemanticProgressDto::from(&snapshot(app, state, false))
 }
 
 pub(super) fn clear() {
     if let Ok(mut cache) = cache().lock() {
-        cache.snapshot = None;
+        cache.refresh_id = cache.refresh_id.wrapping_add(1);
+        cache.refreshing = false;
+        cache.refresh_started_at = 0;
+        cache.last_attempt_at = 0;
         cache.updated_at = 0;
     }
 }
@@ -560,29 +623,41 @@ pub(super) fn update_multi_profile(done: u32, total: Option<u32>, ready: bool) -
     true
 }
 
-pub(super) fn snapshot(app: &tauri::AppHandle, state: &AppState) -> SemProgress {
+/// 轻量快照绝不扫描逐书索引文件。只有用户明确要求核对状态时才启动低优先级扫描，
+/// 避免打开设置页与阅读、关闭窗口等前台交互抢占资源。
+pub(super) fn snapshot(app: &tauri::AppHandle, state: &AppState, reconcile: bool) -> SemProgress {
     let mut live = state.sem_progress.lock().unwrap().clone();
     let selected = model::active();
     live.model_id = selected.id().to_string();
     live.model_label = selected.label().to_string();
     live.model_supported = selected.locally_supported();
     let now = now_ms();
-    let mut should_refresh = false;
+    let mut refresh_id = None;
     let cached_snapshot = {
         let mut status_cache = cache().lock().unwrap();
+        if status_cache.refreshing
+            && now.saturating_sub(status_cache.refresh_started_at) > STATUS_REFRESH_TIMEOUT_MS
+        {
+            status_cache.refreshing = false;
+            crate::log("semantic_status refresh timed out; keeping the last non-blocking snapshot");
+        }
         let snapshot = status_cache.snapshot.clone();
-        if status_cache
+        let snapshot_expired = status_cache
             .snapshot
             .as_ref()
-            .is_none_or(|_| now.saturating_sub(status_cache.updated_at) > STATUS_CACHE_TTL_MS)
-            && !status_cache.refreshing
-        {
+            .is_none_or(|_| now.saturating_sub(status_cache.updated_at) > STATUS_CACHE_TTL_MS);
+        let retry_due = status_cache.last_attempt_at == 0
+            || now.saturating_sub(status_cache.last_attempt_at) > STATUS_CACHE_TTL_MS;
+        if reconcile && snapshot_expired && !status_cache.refreshing && retry_due {
             status_cache.refreshing = true;
-            should_refresh = true;
+            status_cache.refresh_started_at = now;
+            status_cache.last_attempt_at = now;
+            status_cache.refresh_id = status_cache.refresh_id.wrapping_add(1);
+            refresh_id = Some(status_cache.refresh_id);
         }
         snapshot
     };
-    if should_refresh {
+    if let Some(refresh_id) = refresh_id {
         let app_for_refresh = app.clone();
         std::thread::spawn(move || {
             // 首次打开任务中心可能需要读取数百份逐书元数据。它不能与前台 WebView
@@ -590,11 +665,20 @@ pub(super) fn snapshot(app: &tauri::AppHandle, state: &AppState) -> SemProgress 
             set_thread_background(true);
             let state = app_for_refresh.state::<AppState>();
             let live = state.sem_progress.lock().unwrap().clone();
-            let snapshot = enrich(state.inner(), live);
+            let refreshed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                enrich(state.inner(), live)
+            }));
             if let Ok(mut status_cache) = cache().lock() {
-                status_cache.snapshot = Some(snapshot);
-                status_cache.updated_at = now_ms();
-                status_cache.refreshing = false;
+                if status_cache.refresh_id == refresh_id {
+                    if let Ok(snapshot) = refreshed {
+                        status_cache.snapshot = Some(snapshot);
+                        status_cache.updated_at = now_ms();
+                    } else {
+                        crate::log("semantic_status refresh panicked; previous snapshot preserved");
+                    }
+                    status_cache.refreshing = false;
+                    status_cache.refresh_started_at = 0;
+                }
             }
             set_thread_background(false);
         });
@@ -605,6 +689,7 @@ pub(super) fn snapshot(app: &tauri::AppHandle, state: &AppState) -> SemProgress 
     {
         live = merge(live, cached);
     } else {
+        live = provisional_snapshot(state, live);
         live.status_refreshing = true;
     }
     live
@@ -630,7 +715,7 @@ mod tests {
         );
         assert_eq!(
             switch_ready_message("BGE Large 中文（高精度）", false, 0, 781),
-            "已切换至 BGE Large 中文（高精度）；请下载模型"
+            "已切换至 BGE Large 中文（高精度）"
         );
         assert_eq!(
             switch_ready_message("BGE Large 中文（高精度）", true, 94, 781),
@@ -717,6 +802,74 @@ mod tests {
         assert!(accelerator_asset("global_0.hnsw"));
         assert!(accelerator_asset("global.build.json"));
         assert!(!accelerator_asset("multi_profiles.bin"));
+    }
+
+    #[test]
+    fn management_status_never_runs_full_vector_hashing() {
+        let source = include_str!("status.rs");
+        let implementation = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("status implementation");
+        assert!(implementation.contains("management_status_snapshot_fast"));
+        assert!(implementation.contains("global_index_fresh_for_status"));
+        assert!(implementation.contains("build_progress_for_status"));
+        assert!(implementation.contains("STATUS_REFRESH_TIMEOUT_MS"));
+        assert!(implementation.contains("catch_unwind"));
+        assert!(
+            !implementation.contains("accelerator::indexed_book_snapshot_cached"),
+            "the management dialog must not trigger the strong whole-library hash path"
+        );
+    }
+
+    #[test]
+    fn provisional_management_status_never_guesses_from_index_files() {
+        let source = include_str!("status.rs");
+        let start = source
+            .find("fn provisional_semantic_book_total")
+            .expect("provisional status must exist");
+        let end = start
+            + source[start..]
+                .find("fn provisional_snapshot")
+                .expect("provisional snapshot must follow progress");
+        let implementation = &source[start..end];
+        assert!(!implementation.contains("std::fs::read_dir"));
+        assert!(!implementation.contains("read_metadata"));
+        assert!(!implementation.contains("sem_index_done_for_book"));
+        assert!(!implementation.contains("strip_prefix(\"sem_\")"));
+    }
+
+    #[test]
+    fn provisional_snapshot_never_reports_a_completed_index() {
+        let source = include_str!("status.rs");
+        let start = source
+            .find("fn provisional_snapshot")
+            .expect("provisional snapshot must exist");
+        let end = start
+            + source[start..]
+                .find("fn switch_ready_message")
+                .expect("switch message must follow provisional snapshot");
+        let implementation = &source[start..end];
+        assert!(implementation.contains("progress.semantic_done = 0"));
+        assert!(implementation.contains("progress.semantic_ready = false"));
+        assert!(implementation.contains("progress.accelerator_total = 0"));
+        assert!(implementation.contains("progress.multi_profile_total = 0"));
+    }
+
+    #[test]
+    fn background_verification_does_not_disable_management_actions() {
+        let source = include_str!("status.rs");
+        let start = source
+            .find("pub(super) fn task_center")
+            .expect("task center");
+        let end = start
+            + source[start..]
+                .find("pub(super) fn public_snapshot")
+                .expect("task center end");
+        let implementation = &source[start..end];
+        assert!(!implementation.contains("!refreshing"));
+        assert!(!implementation.contains("正在读取模型状态"));
+        assert!(!implementation.contains("正在读取语义索引状态"));
     }
 
     #[test]

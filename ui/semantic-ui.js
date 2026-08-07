@@ -30,6 +30,19 @@
     const vectorMeta = el("sem-vector-meta");
     const acceleratorMeta = el("sem-accel-meta");
     const multiProfileMeta = el("sem-multi-meta");
+    const retrievalSection = el("sem-retrieval-section");
+    const retrievalMeta = el("sem-retrieval-meta");
+    const retrievalMode = el("sem-retrieval-mode");
+    const retrievalM3Option = el("sem-retrieval-m3-option");
+    const gpuMeta = el("sem-gpu-meta");
+    const gpuRefreshButton = el("sem-gpu-refresh");
+    const rerankerMeta = el("sem-reranker-meta");
+    const rerankerDownloadButton = el("sem-reranker-download");
+    const rerankerDeleteButton = el("sem-reranker-delete");
+    const m3Meta = el("sem-m3-meta");
+    const m3BuildButton = el("sem-m3-build");
+    const m3DeleteButton = el("sem-m3-delete");
+    const m3Bar = el("sem-m3-bar");
     const statusElement = el("sem-status");
     const vectorBar = el("sem-vector-bar");
     const acceleratorBar = el("sem-accel-bar");
@@ -43,24 +56,22 @@
     const acceleratorDeleteButton = el("sem-accel-delete");
     const multiProfileBuildButton = el("sem-multi-build");
     const multiProfileDeleteButton = el("sem-multi-delete");
+    const semText = (key, fallback, values = {}) => {
+      let value = global.ReaderAppI18n?.t?.(key);
+      if (!value || /^⟦.+⟧$/.test(value)) value = fallback;
+      return String(value).replace(/\{(\w+)\}/g, (_, name) => values[name] ?? "");
+    };
 
     let pollTimer = null;
     let statusInFlight = false;
     let visible = false;
+    let gpuStatus = null;
     const listeners = [];
 
     function on(element, eventName, handler) {
       if (!element) return;
       element.addEventListener(eventName, handler);
       listeners.push(() => element.removeEventListener(eventName, handler));
-    }
-
-    function formatBytes(value) {
-      const bytes = Number(value || 0);
-      if (bytes >= 1024 * 1024 * 1024) return (bytes / 1024 / 1024 / 1024).toFixed(1) + " GB";
-      if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
-      if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
-      return bytes ? bytes + " B" : "0 B";
     }
 
     function setProgressBar(bar, done, total, ready) {
@@ -89,7 +100,7 @@
 
     function updatePolling(shouldPoll) {
       if (visible && shouldPoll && !pollTimer) {
-        pollTimer = global.setInterval(refresh, 1500);
+        pollTimer = global.setInterval(() => { void refresh(false); }, 1500);
       } else if ((!visible || !shouldPoll) && pollTimer) {
         global.clearInterval(pollTimer);
         pollTimer = null;
@@ -100,10 +111,10 @@
       const center = Array.isArray(payload?.tasks) ? payload : null;
       let progress = center ? center.progress || {} : payload;
       progress = cache.merge(progress);
-      const busy = !!(progress.building || progress.model_downloading);
+      const busy = !!(progress.building || progress.model_downloading || progress.reranker_loading);
       const refreshing = !!progress.status_refreshing;
-      // 后端正在后台校验时，任务 detail 只是“正在读取…”。优先展示上次可靠快照，
-      // 避免四张卡片一起闪回加载态；按钮仍保持禁用直到校验完成。
+      // 后端正在后台校验时优先展示同一模型上次确认过的快照；没有可靠快照时
+      // 展示保守的 0/总数，绝不根据元数据文件名猜测为全部完成。
       const taskSource = refreshing && cache.get() ? null : center;
       const modelTask = task(taskSource, "semantic_model");
       const vectorTask = task(taskSource, "semantic_vectors");
@@ -121,22 +132,37 @@
       const acceleratorTotal = progress.accelerator_total || 0;
       const multiProfileDone = progress.multi_profile_done || 0;
       const multiProfileTotal = progress.multi_profile_total || 0;
-      const vectorSize = progress.semantic_bytes ? "，占用 " + formatBytes(progress.semantic_bytes) : "";
-      const acceleratorSize = progress.accelerator_bytes ? "，占用 " + formatBytes(progress.accelerator_bytes) : "";
-      const multiProfileSize = progress.multi_profile_bytes ? "，占用 " + formatBytes(progress.multi_profile_bytes) : "";
       const legacyAccelerator = legacyCompleted(acceleratorTask, acceleratorTotal, progress.accelerator_bytes);
       const legacyMultiProfile = legacyCompleted(multiProfileTask, multiProfileTotal, progress.multi_profile_bytes);
       const activeModel = progress.model_id || modelSelect?.value || "bge-small-zh-v1.5";
       const modelPresentation = {
         "bge-small-zh-v1.5": {
-          title: "轻量语义检索 · BGE Small 中文",
-          copy: "默认的轻量中文语义模型，适合大多数书库；下载、建索引和查询都更快，占用也更小。"
+          title: semText("semSmallTitle", "Light semantic search · BGE Small Chinese"),
+          copy: semText("semSmallCopy", "The default lightweight Chinese semantic model."),
+          downloadEstimate: "95 MB"
         },
         "bge-large-zh-v1.5": {
-          title: "高精度语义检索 · BGE Large 中文",
-          copy: "适合更看重中文语义区分度的书库。精度更高，但模型下载、建索引和查询开销也更大。"
+          title: semText("semLargeTitle", "High-precision semantic search · BGE Large Chinese"),
+          copy: semText("semLargeCopy", "A higher-precision Chinese semantic model."),
+          downloadEstimate: "1.3 GB"
+        },
+        "bge-m3": {
+          title: semText("semM3Title", "BGE-M3 · Multilingual hybrid retrieval"),
+          copy: semText("semM3Copy", "Supports dense, sparse, and ColBERT representations."),
+          downloadEstimate: "620 MB"
+        },
+        "multilingual-e5-small": {
+          title: semText("semE5Title", "Multilingual-E5-Small · Lightweight multilingual retrieval"),
+          copy: semText("semE5Copy", "A lightweight multilingual semantic model."),
+          downloadEstimate: "450 MB"
         }
       }[activeModel];
+      const supportsM3Hybrid = activeModel === "bge-m3";
+      const retrievalPresentation = {
+        standard: semText("semRetrievalStandardCopy", "Faster: combines keyword and semantic results."),
+        high_precision: semText("semRetrievalHighCopy", "More accurate: fuses results and reranks the best content."),
+        m3_hybrid: semText("semRetrievalM3Copy", "Broader coverage for keywords, meaning, and multilingual terms.")
+      };
 
       if (modelSetupTitle && modelPresentation) modelSetupTitle.textContent = modelPresentation.title;
       if (modelSetupCopy && modelPresentation) modelSetupCopy.textContent = modelPresentation.copy;
@@ -145,98 +171,135 @@
 
       const modelLabel = progress.model_label ? progress.model_label + " · " : "";
       if (modelMeta) {
-        modelMeta.textContent = modelTask?.detail
-          ? modelLabel + modelTask.detail + (modelTask.bytes ? "，缓存大小 " + formatBytes(modelTask.bytes) : "")
-          : !progress.model_supported
-          ? modelLabel + "官方尚未提供可用于本地端的 ONNX 权重。"
+        modelMeta.textContent = !progress.model_supported
+          ? modelLabel + semText("semModelUnsupported", "ONNX weights are not available for local use.")
           : progress.model_downloading
-          ? modelLabel + "正在下载/加载模型…"
+          ? modelLabel + semText("semModelDownloading", "Downloading/loading model…")
           : progress.model_ready
-          ? modelLabel + "已就绪" + (progress.model_bytes ? "，缓存大小 " + formatBytes(progress.model_bytes) : "")
-          : refreshing
-          ? modelLabel + "正在读取模型状态…"
-          : modelLabel + "未下载。";
+          ? modelLabel + semText("semModelReady", "Ready")
+          : modelLabel + semText("semModelNotDownloaded", "Not downloaded; first download is about {size}.", { size: modelPresentation?.downloadEstimate || "—" });
       }
       if (vectorMeta) {
-        vectorMeta.textContent = vectorTask?.detail
-          ? vectorTask.detail + (vectorTask.bytes ? "，占用 " + formatBytes(vectorTask.bytes) : "")
-          : refreshing && !vectorTotal
-          ? "正在读取语义索引状态…"
-          : vectorTotal
-          ? vectorDone + "/" + vectorTotal + " 本" + (progress.semantic_ready ? "，已完成" : "") + vectorSize
-          : "书架中暂无可建立语义索引的图书";
+        vectorMeta.textContent = vectorTotal
+          ? semText("semProgressBooks", "{done}/{total} books", { done: vectorDone, total: vectorTotal }) + (progress.semantic_ready ? `, ${semText("semCompleted", "completed")}` : "")
+          : semText("semNoBooks", "There are no books available for semantic indexing.");
       }
       if (acceleratorMeta) {
         acceleratorMeta.textContent = legacyAccelerator
-          ? "已建立（旧版索引，更新后可用于当前算法）" + acceleratorSize
-          : acceleratorTask?.detail
-          ? acceleratorTask.detail + (acceleratorTask.bytes ? "，占用 " + formatBytes(acceleratorTask.bytes) : "")
-          : refreshing && !acceleratorTotal
-          ? "正在读取加速索引状态…"
+          ? semText("semLegacyIndex", "Built with an older index; update it to use the current algorithm.")
           : acceleratorTotal
-          ? acceleratorDone + "/" + acceleratorTotal + " 片" + (progress.accelerator_ready ? "，已完成" : (progress.accelerator_resumable ? "，可续建" : "")) + acceleratorSize
-          : "建立语义索引后可建立加速索引";
+          ? semText("semProgressParts", "{done}/{total} parts", { done: acceleratorDone, total: acceleratorTotal }) + (progress.accelerator_ready ? `, ${semText("semCompleted", "completed")}` : (progress.accelerator_resumable ? `, ${semText("semCanResume", "can resume")}` : ""))
+          : semText("semAcceleratorDescription", "Returns results faster for large libraries with a semantic index.");
       }
       if (multiProfileMeta) {
         multiProfileMeta.textContent = legacyMultiProfile
-          ? "已建立（旧版画像，更新后可用于当前算法）" + multiProfileSize
-          : multiProfileTask?.detail
-          ? multiProfileTask.detail + (multiProfileTask.bytes ? "，占用 " + formatBytes(multiProfileTask.bytes) : "")
-          : refreshing && !multiProfileTotal
-          ? "正在读取多中心画像状态…"
+          ? semText("semLegacyIndex", "Built with an older index; update it to use the current algorithm.")
           : multiProfileTotal
-          ? multiProfileDone + "/" + multiProfileTotal + " 本" + (progress.multi_profile_ready ? "，已完成" : (multiProfileDone ? "，需要更新" : "")) + multiProfileSize
-          : "建立语义索引后可生成多中心画像";
+          ? semText("semProgressBooks", "{done}/{total} books", { done: multiProfileDone, total: multiProfileTotal }) + (progress.multi_profile_ready ? `, ${semText("semCompleted", "completed")}` : (multiProfileDone ? `, ${semText("semUpdateNeeded", "needs update")}` : ""))
+          : semText("semMultiProfileDescription", "Classifies topics in a book for better cross-topic results.");
       }
+      if (gpuMeta) {
+        const hardwareMessage = gpuStatus?.message || semText("semGpuInitial", "Select Recheck to read the local GPU status.");
+        gpuMeta.textContent = hardwareMessage;
+      }
+      if (retrievalSection) retrievalSection.hidden = false;
+      if (retrievalM3Option) {
+        retrievalM3Option.hidden = !supportsM3Hybrid;
+        retrievalM3Option.disabled = !supportsM3Hybrid;
+      }
+      if (retrievalMode && progress.retrieval_mode) {
+        retrievalMode.value = supportsM3Hybrid || progress.retrieval_mode !== "m3_hybrid"
+          ? progress.retrieval_mode
+          : "standard";
+      }
+      const selectedRetrievalMode = retrievalMode?.value || progress.retrieval_mode || "standard";
+      if (retrievalMeta) retrievalMeta.textContent = retrievalPresentation[selectedRetrievalMode] || retrievalPresentation.standard;
+      if (rerankerMeta) rerankerMeta.textContent = progress.reranker_loading
+        ? semText("semRerankerLoading", "Loading the reranker. It will show Ready when complete.")
+        : progress.reranker_ready
+        ? semText("semRerankerReady", "Ready. It places the best-matching content first.")
+        : progress.reranker_downloaded
+        ? "已下载，尚未加载；点击“加载重排模型”后才会启用。"
+        : semText("semRerankerNotReady", "Places the best-matching content first; first download is about 1.6 GB.");
+      if (m3Meta) m3Meta.textContent = supportsM3Hybrid
+        ? (progress.m3_index_ready ? semText("semM3Ready", "Ready. Complex questions are easier to find.") : semText("semM3BuildHint", "Build it to balance keywords and meaning."))
+        : semText("semM3Only", "Available only when BGE-M3 is selected.");
+      const m3Section = el("sem-m3-index-section");
+      if (m3Section) m3Section.hidden = !supportsM3Hybrid;
+      setProgressBar(m3Bar, progress.m3_index_done || 0, progress.m3_index_total || 0, progress.m3_index_ready);
 
       setProgressBar(vectorBar, vectorTask?.done ?? vectorDone, vectorTask?.total ?? vectorTotal, vectorTask?.ready ?? progress.semantic_ready);
       setProgressBar(acceleratorBar, legacyAccelerator ? 1 : (acceleratorTask?.done ?? acceleratorDone), legacyAccelerator ? 1 : (acceleratorTask?.total ?? acceleratorTotal), legacyAccelerator || (acceleratorTask?.ready ?? progress.accelerator_ready));
       setProgressBar(multiProfileBar, legacyMultiProfile ? 1 : (multiProfileTask?.done ?? multiProfileDone), legacyMultiProfile ? 1 : (multiProfileTask?.total ?? multiProfileTotal), legacyMultiProfile || (multiProfileTask?.ready ?? progress.multi_profile_ready));
 
-      if (modelSelect) modelSelect.disabled = busy || refreshing;
-      if (modelDownloadButton) modelDownloadButton.disabled = !progress.model_supported || (modelTask ? !modelTask.can_start : (busy || refreshing));
+      if (modelSelect) modelSelect.disabled = busy;
+      if (modelDownloadButton) modelDownloadButton.disabled = !!progress.model_ready || !progress.model_supported || (modelTask ? !modelTask.can_start : (busy || refreshing));
       if (modelDeleteButton) modelDeleteButton.disabled = !progress.model_supported || (modelTask ? !modelTask.can_delete : (busy || !progress.model_ready));
-      if (vectorBuildButton) vectorBuildButton.disabled = vectorTask ? !vectorTask.can_start : (busy || refreshing || !progress.model_ready || !vectorTotal);
+      if (vectorBuildButton) vectorBuildButton.disabled = vectorTask ? !vectorTask.can_start : (busy || !progress.model_ready || !vectorTotal);
       const vectorPauseAvailable = progress.building && activeTask === "semantic_vectors";
       if (vectorPauseButton) {
         vectorPauseButton.hidden = !vectorPauseAvailable;
-        vectorPauseButton.disabled = !vectorPauseAvailable || !!progress.vector_pause_requested || refreshing;
+        vectorPauseButton.disabled = !vectorPauseAvailable || !!progress.vector_pause_requested;
       }
       if (vectorDeleteButton) vectorDeleteButton.disabled = vectorTask ? !vectorTask.can_delete : (busy || vectorDone <= 0);
-      if (acceleratorBuildButton) acceleratorBuildButton.disabled = acceleratorTask ? !acceleratorTask.can_start : (busy || refreshing || !progress.model_ready || vectorDone <= 0);
+      if (acceleratorBuildButton) acceleratorBuildButton.disabled = acceleratorTask ? !acceleratorTask.can_start : (busy || !progress.model_ready || vectorDone <= 0);
       if (acceleratorDeleteButton) acceleratorDeleteButton.disabled = acceleratorTask ? !acceleratorTask.can_delete : (busy || (!progress.accelerator_ready && acceleratorDone <= 0));
-      if (multiProfileBuildButton) multiProfileBuildButton.disabled = multiProfileTask ? !multiProfileTask.can_start : (busy || refreshing || vectorDone <= 0);
+      if (multiProfileBuildButton) multiProfileBuildButton.disabled = multiProfileTask ? !multiProfileTask.can_start : (busy || vectorDone <= 0);
       if (multiProfileDeleteButton) multiProfileDeleteButton.disabled = multiProfileTask ? !multiProfileTask.can_delete : (busy || !progress.multi_profile_bytes);
-      if (modelDownloadButton) modelDownloadButton.textContent = modelTask?.primary_label || "下载模型";
-      if (modelDeleteButton) modelDeleteButton.textContent = modelTask?.delete_label || "删除模型";
-      if (vectorBuildButton) vectorBuildButton.textContent = vectorTask?.primary_label || (vectorDone > 0 && !progress.semantic_ready ? "续建语义索引" : "建立语义索引");
-      if (vectorPauseButton) vectorPauseButton.textContent = progress.vector_pause_requested ? "正在暂停…" : "暂停";
-      if (vectorDeleteButton) vectorDeleteButton.textContent = vectorTask?.delete_label || "删除";
-      if (acceleratorBuildButton) acceleratorBuildButton.textContent = legacyAccelerator ? "更新加速索引" : (acceleratorTask?.primary_label || (progress.accelerator_resumable ? "续建加速索引" : "建立加速索引"));
-      if (acceleratorDeleteButton) acceleratorDeleteButton.textContent = acceleratorTask?.delete_label || "删除";
-      if (multiProfileBuildButton) multiProfileBuildButton.textContent = legacyMultiProfile ? "更新多中心画像" : (multiProfileTask?.primary_label || (multiProfileDone > 0 && !progress.multi_profile_ready ? "更新多中心画像" : "建立多中心画像"));
-      if (multiProfileDeleteButton) multiProfileDeleteButton.textContent = multiProfileTask?.delete_label || "删除";
+      if (retrievalMode) retrievalMode.disabled = busy;
+      if (rerankerDownloadButton) {
+        rerankerDownloadButton.disabled = busy || !!progress.reranker_ready;
+        rerankerDownloadButton.textContent = progress.reranker_downloaded ? semText("semLoadReranker", "Load reranker") : semText("semDownloadReranker", "Download reranker");
+      }
+      if (rerankerDeleteButton) rerankerDeleteButton.disabled = busy || !progress.reranker_downloaded;
+      if (m3BuildButton) m3BuildButton.disabled = busy || !supportsM3Hybrid || !progress.model_ready;
+      if (m3DeleteButton) m3DeleteButton.disabled = busy || !progress.m3_index_done;
+      if (modelDownloadButton) modelDownloadButton.textContent = semText("semDownloadModel", "Download model");
+      if (modelDeleteButton) modelDeleteButton.textContent = semText("semDelete", "Delete");
+      if (vectorBuildButton) vectorBuildButton.textContent = vectorDone > 0 && !progress.semantic_ready ? semText("semResumeIndex", "Resume semantic index") : semText("semBuildIndex", "Build semantic index");
+      if (vectorPauseButton) vectorPauseButton.textContent = semText("semPause", "Pause");
+      if (vectorDeleteButton) vectorDeleteButton.textContent = semText("semDelete", "Delete");
+      if (acceleratorBuildButton) acceleratorBuildButton.textContent = legacyAccelerator ? semText("semUpdateAccelerator", "Update accelerator index") : semText("semBuildAccelerator", "Build accelerator index");
+      if (acceleratorDeleteButton) acceleratorDeleteButton.textContent = semText("semDelete", "Delete");
+      if (multiProfileBuildButton) multiProfileBuildButton.textContent = semText("semBuildMulti", "Build multi-profile index");
+      if (multiProfileDeleteButton) multiProfileDeleteButton.textContent = semText("semDelete", "Delete");
 
       if (progress.error) setStatus(progress.error, "error");
-      else if (progress.model_downloading || progress.building) setStatus(progress.current || "任务正在后台运行…", "busy");
-      else if (refreshing) setStatus("正在后台读取索引状态…", "busy");
+      else if (progress.model_downloading || progress.building || progress.reranker_loading) setStatus(progress.current || semText("semTaskRunning", "Task is running in the background…"), "busy");
       else setStatus(progress.current || "", progress.current ? "ok" : "");
 
-      updatePolling(!!(progress.model_downloading || progress.building || refreshing));
-      if (!refreshing || progress.model_ready || vectorTotal || acceleratorTotal || multiProfileTotal || progress.building || progress.model_downloading) {
+      updatePolling(!!(progress.model_downloading || progress.building || progress.reranker_loading || refreshing));
+      // provisional 状态只用于立即渲染，不能成为下一次打开时的“可靠快照”。
+      if (!refreshing) {
         cache.save(progress);
       }
     }
 
-    async function refresh() {
+    async function refresh(reconcile = false) {
       if (statusInFlight) return;
       statusInFlight = true;
       try {
-        render(await invoke("semantic_tasks"));
+        if (reconcile) setStatus(semText("semReadingStatus", "Checking index status in the background…"), "busy");
+        render(await invoke("semantic_tasks", { reconcile }));
       } catch (error) {
-        setStatus("读取语义索引状态失败：" + error, "error");
+        setStatus(semText("semReadStatusFailed", "Could not read semantic-index status: {error}", { error }), "error");
       } finally {
         statusInFlight = false;
+      }
+    }
+
+    async function refreshGpuStatus() {
+      if (!gpuMeta) return;
+      gpuMeta.textContent = semText("semCheckingGpu", "Detecting local GPU…");
+      if (gpuRefreshButton) gpuRefreshButton.disabled = true;
+      try {
+        gpuStatus = await invoke("semantic_gpu_status");
+        render(cache.get() || {});
+      } catch (error) {
+        gpuStatus = { message: semText("semGpuFailed", "Could not detect GPU: {error}", { error }) };
+        render(cache.get() || {});
+      } finally {
+        if (gpuRefreshButton) gpuRefreshButton.disabled = false;
       }
     }
 
@@ -246,7 +309,9 @@
       visible = true;
       const cached = cache.get();
       if (cached) render(cached);
-      global.setTimeout(refresh, 30);
+      else render({});
+      // 打开设置只读前台轻量快照；逐书元数据扫描和 GPU 探测均须由用户明确触发。
+      global.setTimeout(() => { void refresh(false); }, 30);
     }
 
     function close() {
@@ -290,12 +355,14 @@
         modelSelect.value = current;
         return;
       }
+      const cachedNext = cache.use(next);
+      if (cachedNext) render(cachedNext);
       modelSelect.disabled = true;
       setStatus("正在切换语义模型…", "busy");
       try {
         await invoke("select_semantic_model", { modelId: next });
-        cache.clear();
-        await refresh();
+        // 切换模型后自动后台核对该模型的索引；打开设置本身不触发这项扫描。
+        await refresh(true);
       } catch (error) {
         modelSelect.value = current;
         setStatus("切换模型失败：" + error, "error");
@@ -303,6 +370,7 @@
         modelSelect.disabled = false;
       }
     });
+    on(gpuRefreshButton, "click", refreshGpuStatus);
     on(vectorBuildButton, "click", () => run("build_semantic_vectors", "正在启动语义索引任务…", "启动语义索引失败："));
     on(vectorPauseButton, "click", () => run("pause_semantic_vectors", "正在取消当前图书的未完成索引…", "暂停语义索引失败："));
     on(acceleratorBuildButton, "click", () => run("build_semantic_accelerator", "正在启动加速索引任务…", "启动加速索引失败："));
@@ -333,6 +401,21 @@
         setStatus("删除多中心画像失败：" + error, "error");
       }
     });
+    on(retrievalMode, "change", async () => {
+      await run("select_semantic_retrieval_mode", "正在保存检索策略…", "保存检索策略失败：", null, { mode: retrievalMode.value });
+    });
+    on(rerankerDownloadButton, "click", () => run("download_semantic_reranker", "正在下载重排模型…", "下载重排模型失败："));
+    on(rerankerDeleteButton, "click", () => run("delete_semantic_reranker", "正在删除重排模型…", "删除重排模型失败："));
+    on(m3BuildButton, "click", () => run("build_semantic_m3_index", "正在建立 BGE-M3 稀疏与 ColBERT 索引…", "建立 M3 索引失败："));
+    on(m3DeleteButton, "click", () => run("delete_semantic_m3_index", "正在删除 BGE-M3 索引…", "删除 M3 索引失败："));
+    const onLanguageChanged = () => {
+      // The modal is populated after the main page, so reapply static labels
+      // and rerender its generated state whenever the app language changes.
+      global.ReaderAppI18n?.apply?.(modal);
+      render(cache.get() || {});
+    };
+    global.addEventListener("app-language-changed", onLanguageChanged);
+    listeners.push(() => global.removeEventListener("app-language-changed", onLanguageChanged));
 
     function destroy() {
       visible = false;

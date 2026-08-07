@@ -28,11 +28,15 @@ test("library answer length is local while the fixed shell keeps scrolling insid
   assert.match(html, /id="library-ai-answer-settings"/);
   assert.match(html, /id="library-ai-answer-settings-overlay"/);
   assert.match(html, /id="library-ai-answer-settings-panel"/);
-  assert.match(html, /id="library-ai-answer-settings"[^>]*>设置<\/button>/);
+  assert.match(html, /id="library-ai-answer-settings"[^>]*data-i18n="answerSettings"/);
   const answerSettingsPanel = html.match(/id="library-ai-answer-settings-panel"[\s\S]*?<\/section>/)?.[0] || "";
   assert.match(answerSettingsPanel, /id="library-ai-font-decrease"/);
   assert.match(answerSettingsPanel, /id="library-ai-font-size"/);
   assert.match(answerSettingsPanel, /id="library-ai-font-increase"/);
+  assert.match(answerSettingsPanel, /id="library-ai-long-context"/);
+  assert.match(answerSettingsPanel, /复杂问题长文精读（BGE-M3）/);
+  assert.match(answerSettingsPanel, /role="switch"/);
+  assert.doesNotMatch(answerSettingsPanel, /回答、历史记录和引用内容的显示大小/);
   const libraryActions = html.match(/<div class="library-ai-actions">[\s\S]*?<\/div>/)?.[0] || "";
   assert.doesNotMatch(libraryActions, /library-ai-font-controls/);
   assert.match(html, /data-answer-length="short"/);
@@ -41,6 +45,11 @@ test("library answer length is local while the fixed shell keeps scrolling insid
   assert.doesNotMatch(html, /data-i18n="libraryDescription"/);
   assert.match(controller, /invoke\("library_answer_settings"\)/);
   assert.match(controller, /invoke\("set_library_answer_length"/);
+  assert.match(controller, /function saveLongContext/);
+  assert.match(controller, /invoke\("set_semantic_m3_long_context"/);
+  assert.match(controller, /function longContextSetupPath/);
+  assert.match(controller, /longContextSetupPath/);
+  assert.match(controller, /function showLongContextHelp/);
   assert.match(controller, /function renderAnswerLengthSettings/);
   assert.match(controller, /library-ai-answer-settings-overlay/);
   assert.match(backend, /LIBRARY_ANSWER_LENGTH_KEY/);
@@ -57,6 +66,7 @@ test("library answer length is local while the fixed shell keeps scrolling insid
   assert.match(styles, /\.library-ai-answer\s*\{[^}]*flex:0 0 auto[^}]*overflow:visible/s);
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.library-ai-page\s*\{[^}]*overflow-y:auto/s);
   assert.match(styles, /\.library-ai-answer-settings-overlay\s*\{[^}]*position:fixed/s);
+  assert.match(styles, /\.library-ai-answer-toggle\s*\{[^}]*border-radius:999px/s);
 });
 
 test("library assistant opens lazily in the main window and can return to the shelf", () => {
@@ -111,7 +121,7 @@ test("library assistant keeps whole-library as the unselected default and offers
   assert.match(html, /id="clear-selection"[^>]*>取消限定/);
   assert.match(html, /id="select-visible"[^>]*>全选当前列表/);
   assert.match(html, /id="invert-visible"[^>]*>反选当前列表/);
-  assert.match(html, /展示最相关的前 20 本（每本 1 段）/);
+  assert.doesNotMatch(html, />检索范围<|展示最相关的前 20 本（每本 1 段）/);
   assert.match(controller, /const selectedBookIds = new Set\(\)/);
   assert.match(controller, /const MAX_QUESTION_SOURCES = 20/);
   assert.match(controller, /function selectVisibleBooks\(\)/);
@@ -324,8 +334,8 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.match(controller, /function applyHistoryLayout\(list, button, save = false\)/);
   assert.match(controller, /historyLayout === "grid" \? "list" : "grid"/);
   assert.match(controller, /icon\.className = grid \? "library-ai-history-grid-icon" : "library-ai-history-list-icon"/);
-  assert.match(controller, /当前为方格显示，点击切换为横排显示/);
-  assert.match(controller, /当前为横排显示，点击切换为方格显示/);
+  assert.match(controller, /i18n\("historyGridToList"/);
+  assert.match(controller, /i18n\("historyListToGrid"/);
   assert.match(controller, /localStorage\?\.setItem\(HISTORY_LAYOUT_KEY, historyLayout\)/);
   assert.match(controller, /function historyAnswerSummary\(entry\)/);
   assert.match(controller, /summary\.textContent = historyAnswerSummary\(entry\)/);

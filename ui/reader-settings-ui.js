@@ -1,6 +1,8 @@
 // 阅读设置状态与设置面板绑定
 // 先于 reader.js 加载：提供 settings/applyShellTheme/initSettingsUI 给阅读页启动逻辑使用。
 
+const readerSettingsT = (key, fallback, values) => window.ReaderI18n?.t?.(key, values) || fallback;
+
 function applyReaderAnimationSettings() {
   window.ReaderAnimationSettings?.applyReader(document);
 }
@@ -29,7 +31,6 @@ const DEFAULTS = {
   pageTurnEffect: "horizontal",
   pageTurnSpeed: 1,
   ttsSource: "edge",
-  ttsVoice: "zh-CN-XiaoxiaoNeural",
   ttsRate: 1,
 };
 
@@ -106,8 +107,15 @@ function saveSettings() {
 }
 // 把设置发给合并页（实时注入样式）
 function pushSettings() {
-  if (frame.contentWindow) frame.contentWindow.postMessage({ settings }, "*");
+  // UI language is window state, not a persisted reading preference.  Pass it
+  // through with every layout update so the injected chapter iframe never
+  // keeps stale Chinese controls after the user changes language.
+  const pageSettings = Object.assign({}, settings, {
+    uiLanguage: window.ReaderI18n?.resolvedLanguage?.() || "zh-CN",
+  });
+  if (frame.contentWindow) frame.contentWindow.postMessage({ settings: pageSettings }, "*");
 }
+window.addEventListener("reader-language-changed", pushSettings);
 function onChange() {
   saveSettings();
   pushSettings();
@@ -132,7 +140,7 @@ function ensureNoteSizeControl() {
   if (!sizeRow || !sizeRow.parentNode) return;
   const row = document.createElement("div");
   row.className = "row";
-  row.innerHTML = '<label>注释字号</label><input type="range" id="set-note-size" min="10" max="22" step="1" /><span class="val" id="v-note-size"></span>';
+  row.innerHTML = '<label data-reader-i18n="noteFontSize">' + readerSettingsT("noteFontSize", "注释字号") + '</label><input type="range" id="set-note-size" min="10" max="22" step="1" /><span class="val" id="v-note-size"></span>';
   sizeRow.parentNode.insertBefore(row, sizeRow.nextSibling);
 }
 function bindNum(id, key) {
@@ -189,8 +197,8 @@ function initSettingsUI() {
       const state = readerFontState.get(option.dataset.readerFontId);
       const label = option.dataset.readerFontLabel || option.textContent;
       option.textContent = state?.installed
-        ? label + "（已安装）"
-        : label + "（需下载" + (state?.download_bytes ? " " + fontSizeText(state.download_bytes) : "") + "）";
+        ? label + " (" + readerSettingsT("installed", "已安装") + ")"
+        : label + " (" + readerSettingsT("downloadRequired", "需下载") + (state?.download_bytes ? " " + fontSizeText(state.download_bytes) : "") + ")";
     });
     const option = selectedOptionalFont();
     if (!option) {
@@ -201,17 +209,18 @@ function initSettingsUI() {
     if (fontDownloadRow) fontDownloadRow.hidden = false;
     if (fontDownloadStatus) {
       fontDownloadStatus.textContent = fontDownloadBusy
-        ? "正在下载并校验字体…"
+        ? readerSettingsT("fontDownloading", "正在下载并校验字体…")
         : state?.installed
-          ? "已安装到本机，断网也可使用。"
-          : "首次使用需下载 " + fontSizeText(state?.download_bytes) + "，下载后自动应用。";
+          ? readerSettingsT("fontInstalledOffline", "已安装到本机，断网也可使用。")
+          : readerSettingsT("fontDownloadRequired", "首次使用需下载 {size}，下载后自动应用。", { size: fontSizeText(state?.download_bytes) });
     }
     if (fontDownloadAction) {
       fontDownloadAction.hidden = !!state?.installed;
       fontDownloadAction.disabled = fontDownloadBusy;
-      fontDownloadAction.textContent = fontDownloadBusy ? "下载中…" : "下载";
+      fontDownloadAction.textContent = fontDownloadBusy ? readerSettingsT("downloading", "下载中…") : readerSettingsT("download", "下载");
     }
   }
+  window.addEventListener("reader-language-changed", refreshOptionalFontUI);
   async function loadReaderFontStatus() {
     try {
       const states = await invoke("reader_font_status");
@@ -236,7 +245,7 @@ function initSettingsUI() {
       settings.fontFamily = font.value;
       onChange();
     } catch (error) {
-      if (fontDownloadStatus) fontDownloadStatus.textContent = "字体下载失败：" + String(error);
+      if (fontDownloadStatus) fontDownloadStatus.textContent = readerSettingsT("fontDownloadFailed", "字体下载失败：{error}", { error: String(error) });
     } finally {
       fontDownloadBusy = false;
       refreshOptionalFontUI();
@@ -305,11 +314,11 @@ function initSettingsUI() {
       dualModeToggle.checked = settings.flowMode !== "scroll" && settings.pageMode === "dual";
       // auto-off 用 fill-mode 保持关闭终态；重新开启双页时才解除它。
       if (dualModeToggle.checked) dualModeToggle.closest(".settings-switch")?.classList.remove("auto-off");
-      dualModeToggle.title = "开启双页";
+      dualModeToggle.title = readerSettingsT("enableTwoPages", "开启双页");
     }
     if (scrollModeToggle) {
       scrollModeToggle.checked = settings.flowMode === "scroll";
-      scrollModeToggle.title = "开启滚动模式";
+      scrollModeToggle.title = readerSettingsT("enableScrollMode", "开启滚动模式");
     }
   }
   if (dualModeToggle) {
@@ -351,6 +360,5 @@ function initSettingsUI() {
     el.addEventListener("change", () => { settings[key] = el.value; onChange(); });
   };
   bindSel("set-ttssrc", "ttsSource");
-  bindSel("set-ttsvoice", "ttsVoice");
   bindRange("set-ttsrate", "v-ttsrate", "ttsRate", (v) => v.toFixed(1) + "×");
 }

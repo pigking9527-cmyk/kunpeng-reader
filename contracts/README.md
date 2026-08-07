@@ -5,6 +5,8 @@
 ```text
 contracts/
 ├─ sync/             实体、请求与响应的 schema/说明
+├─ migration/         离线核心同步状态迁移包的 schema/说明
+├─ feedback/         用户主动提交反馈的请求/响应约束
 ├─ fixtures/         稳定的测试数据样本
 └─ compatibility/    各端必须通过的兼容性断言
 ```
@@ -15,3 +17,4 @@ contracts/
 2. 不兼容变更必须升级 `syncProtocolVersion`，同时提供迁移与回滚说明。
 3. fixture 中只能使用虚构账号、虚构设备、虚构书籍与脱敏文本；不得放 Token、真实邮箱、路径、真实阅读内容或 API Key。
 4. 当前文件是“抽取阶段”骨架；在其成为 CI 强制门之前，必须与 `server/reader-sync-api` 和桌面现有行为逐项核对。
+5. 迁移包不是恢复点或 SQLite 导出；其格式、限制和明确排除项见 `migration/` 与 ADR-0010。

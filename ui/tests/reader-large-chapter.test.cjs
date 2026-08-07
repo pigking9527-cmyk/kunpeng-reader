@@ -168,7 +168,7 @@ test("scroll paging reuses cached geometry and skips duplicate mask renders", ()
 test("highlight menus support a persisted three-column layout below the selection", () => {
   const style = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
   assert.match(source, /var HL_MENU_LAYOUT_KEY='highlightMenuLayoutV1'/);
-  assert.match(source, /data-layout="row">横排<\/button><button type="button" data-layout="grid">九宫格/);
+  assert.match(source, /data-layout="row">'\+readerPageText\('row'\)\+'<\/button><button type="button" data-layout="grid">'\+readerPageText\('grid'\)/);
   assert.match(source, /function placeHighlightMenuVertically\(menu,rect,preferAbove\)/);
   assert.match(source, /var mh=Math\.min\(Math\.max\(Number\(menu&&menu\.offsetHeight\)\|\|34,1\)/);
   assert.match(source, /function repositionVisibleHighlightMenu\(menu\)/);
@@ -181,7 +181,7 @@ test("highlight web search keeps a local Baidu or Google choice", () => {
   assert.match(source, /var HL_WEB_ENGINE_KEY='highlightWebSearchEngineV1'/);
   assert.match(source, /engines\.className='hs-mode-buttons hs-engine-buttons'/);
   assert.match(source, /\['baidu','google'\]\.forEach/);
-  assert.match(source, /b\.textContent=engine==='google'\?'谷歌':'百度'/);
+  assert.match(source, /b\.textContent=engine==='google'\?readerPageText\('searchEngineGoogle'\):readerPageText\('searchEngineBaidu'\)/);
   assert.match(source, /webSearch:\{term:t,engine:readHlWebEngine\(\)\}/);
   assert.match(source, /webSearch:\{term:highlightDisplayText\(h\),engine:readHlWebEngine\(\)\}/);
 });

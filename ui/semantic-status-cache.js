@@ -3,13 +3,17 @@
 (function exposeSemanticStatusCache(global) {
   "use strict";
 
-  const STORAGE_KEY = "semanticIndexStatusV1";
-  let lastStatus = load();
+  // V3 intentionally does not import V1/V2 snapshots. Earlier versions could cache a
+  // provisional "all files exist" result as completed before metadata verification.
+  const STORAGE_KEY = "semanticIndexStatusByModelV3";
+  const ACTIVE_KEY = "semanticIndexStatusActiveModelV3";
+  let activeModelId = global.localStorage.getItem(ACTIVE_KEY) || "bge-small-zh-v1.5";
+  let statuses = load();
 
   function snapshot(p = {}) {
     return {
       model_ready: !!p.model_ready,
-      model_id: p.model_id || "bge-small-zh-v1.5",
+      model_id: p.model_id || activeModelId || "bge-small-zh-v1.5",
       model_label: p.model_label || "BGE Small 中文（默认）",
       model_supported: p.model_supported !== false,
       model_bytes: Number(p.model_bytes || 0),
@@ -33,41 +37,56 @@
   function load() {
     try {
       const value = JSON.parse(global.localStorage.getItem(STORAGE_KEY) || "null");
-      return value && typeof value === "object" ? value : null;
+      if (value && typeof value === "object" && !Array.isArray(value)) return value;
+      return {};
     } catch (e) {
-      return null;
+      return {};
     }
+  }
+
+  function persist() {
+    try {
+      global.localStorage.setItem(STORAGE_KEY, JSON.stringify(statuses));
+      global.localStorage.setItem(ACTIVE_KEY, activeModelId);
+    } catch (e) {}
+  }
+
+  function use(modelId) {
+    if (modelId) activeModelId = modelId;
+    persist();
+    return get();
+  }
+
+  function get(modelId = activeModelId) {
+    return statuses[modelId] || null;
   }
 
   function save(p = {}) {
     const next = snapshot(p);
     if (!next.model_ready && !next.semantic_total && !next.accelerator_total && !next.multi_profile_total) return;
-    lastStatus = next;
-    try {
-      global.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch (e) {}
+    activeModelId = next.model_id;
+    statuses[next.model_id] = next;
+    persist();
   }
 
-  function clear() {
-    lastStatus = null;
-    try {
-      global.localStorage.removeItem(STORAGE_KEY);
-    } catch (e) {}
+  function clear(modelId = activeModelId) {
+    delete statuses[modelId];
+    persist();
   }
 
   function update(patch = {}) {
-    const base = lastStatus || snapshot({});
-    lastStatus = Object.assign({}, base, patch, { saved_at: Date.now() });
-    try {
-      global.localStorage.setItem(STORAGE_KEY, JSON.stringify(lastStatus));
-    } catch (e) {}
+    const modelId = patch.model_id || activeModelId;
+    const base = get(modelId) || snapshot({ model_id: modelId });
+    statuses[modelId] = Object.assign({}, base, patch, { model_id: modelId, saved_at: Date.now() });
+    activeModelId = modelId;
+    persist();
   }
 
   // 只有后端明确表示“刷新中”时才使用旧快照。正常返回的 0 是有效值，不能用
   // `a || b` 回填，否则删除索引后会把旧进度重新显示出来。
   function merge(p = {}) {
+    const lastStatus = get(p.model_id || activeModelId);
     if (!p.status_refreshing || !lastStatus) return p;
-    if (p.model_id && lastStatus.model_id && p.model_id !== lastStatus.model_id) return p;
     const fallback = (key) => p[key] == null ? lastStatus[key] : p[key];
     return Object.assign({}, lastStatus, p, {
       model_ready: fallback("model_ready"),
@@ -93,10 +112,11 @@
 
   global.ReaderSemanticStatusCache = Object.freeze({
     clear,
-    get: () => lastStatus,
+    get,
     merge,
     save,
     snapshot,
     update,
+    use,
   });
 })(typeof window !== "undefined" ? window : globalThis);

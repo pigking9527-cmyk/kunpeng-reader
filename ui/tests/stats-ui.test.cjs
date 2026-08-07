@@ -98,13 +98,13 @@ test("read books render as one clipped cover row ordered by reading duration", (
   assert.match(statsSource, /\(b\.seconds \|\| 0\) - \(a\.seconds \|\| 0\)/);
   assert.match(statsSource, /class="stats-book-strip"/);
   assert.match(statsSource, /class="stats-book-cover"/);
-  assert.match(statsSource, /高亮 \$\{book\.highlights\} · 批注 \$\{book\.notes\}/);
+  assert.match(statsSource, /statsText\("statsBookNotes"/);
 });
 
 test("stats show a loading state immediately instead of a blank panel", () => {
   assert.match(statsSource, /class="stats-loading" role="status" aria-live="polite"/);
-  assert.match(statsSource, /正在加载阅读统计…/);
+  assert.match(statsSource, /statsText\("statsLoading"/);
   assert.match(statsSource, /statsRequestSerial/);
-  assert.match(statsSource, /阅读统计加载失败，请稍后重试。/);
+  assert.match(statsSource, /statsText\("statsLoadFailed"/);
   assert.match(indexSource, /id="stats-body" class="stats-body"/);
 });

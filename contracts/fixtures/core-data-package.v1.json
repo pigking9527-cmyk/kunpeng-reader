@@ -1,0 +1,66 @@
+{
+  "format": "kunpeng-reader-core-data-package",
+  "version": 1,
+  "exported_at": 1786128000000,
+  "source_device_id": "fixture-desktop-a",
+  "entities": [
+    {
+      "kind": "book_state_v2",
+      "id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "data": {
+        "schema_version": 4,
+        "content_id": "1111111111111111111111111111111111111111111111111111111111111111",
+        "progress": 38.5,
+        "resume_chapter": 6,
+        "resume_frac": 0.25,
+        "progress_history": [
+          { "at": 1786127000, "progress": 38.5, "chapter": 6, "frac": 0.25 }
+        ],
+        "future_client_field": { "preserved": true }
+      },
+      "updated_at": 1786128000000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop-a",
+      "sync_version": 4
+    },
+    {
+      "kind": "model_book_tags_v1",
+      "id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "data": {
+        "labels": ["题材：历史", "语言：中文"],
+        "future_client_field": "must survive migration"
+      },
+      "updated_at": 1786128001000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop-a",
+      "sync_version": 2
+    },
+    {
+      "kind": "vocab",
+      "id": "zh:迁移示例",
+      "data": { "word": "迁移示例", "definition": "虚构的脱敏测试词条" },
+      "updated_at": 1786128002000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop-a",
+      "sync_version": 1
+    },
+    {
+      "kind": "reading_bucket_v2",
+      "id": "2026-08-07:09:1111111111111111111111111111111111111111111111111111111111111111",
+      "data": { "date": "2026-08-07", "hour": 9, "secs": 420, "words": 860 },
+      "updated_at": 1786128003000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop-a",
+      "sync_version": 3
+    },
+    {
+      "kind": "vocab",
+      "id": "zh:已删除示例",
+      "data": {},
+      "updated_at": 1786128004000,
+      "deleted_at": 1786128004000,
+      "device_id": "fixture-desktop-a",
+      "sync_version": 2
+    }
+  ]
+}

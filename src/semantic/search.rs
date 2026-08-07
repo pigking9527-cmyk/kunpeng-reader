@@ -128,6 +128,32 @@ fn hybrid_score(semantic: f32, lexical: f32, compact_phrase: bool) -> f32 {
     (semantic.clamp(-1.0, 1.0) * semantic_weight + lexical * lexical_weight).clamp(-1.0, 1.0)
 }
 
+/// 融合来自不同检索器的排序，不能直接比较它们的原始分数。RRF 只使用名次，
+/// 因此对余弦相似度、全文命中数和后续稀疏检索都稳定；常数 60 是常用的
+/// 平滑项，避免一条偶然词面命中压过明显更相关的语义结果。
+fn apply_rrf(books: &mut [SemBookHits], lexical_ranks: &HashMap<u64, usize>) {
+    let dense_ranks: HashMap<u64, usize> = books
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, book)| book.book_id.parse::<u64>().ok().map(|id| (id, rank + 1)))
+        .collect();
+    for book in books {
+        let Ok(id) = book.book_id.parse::<u64>() else {
+            continue;
+        };
+        let dense = dense_ranks
+            .get(&id)
+            .map(|rank| 1.0 / (60.0 + *rank as f32))
+            .unwrap_or(0.0);
+        let lexical = lexical_ranks
+            .get(&id)
+            .map(|rank| 1.0 / (60.0 + *rank as f32))
+            .unwrap_or(0.0);
+        // 保留少量原始段落分数用于同名次稳定排序；主信号为可比较的排名融合。
+        book.score = dense + lexical + book.score.max(0.0) * 0.0001;
+    }
+}
+
 /// 在一本书里做语义检索。短专名使用“向量相似度 + 完整短语/相邻字词面”
 /// 混合排序，确保精确事件名不会被只共享地名的长段落压过。
 fn sem_search_book(
@@ -348,10 +374,7 @@ pub(super) fn prepare(app: tauri::AppHandle) -> Result<bool, String> {
                 let _ = embedder
                     .lock()
                     .map_err(|_| "语义模型锁定失败".to_string())?
-                    .embed(
-                        vec![semantic_query_input("阅读")],
-                        None,
-                    )
+                    .embed_dense(vec![semantic_query_input("阅读")])
                     .map_err(|e| e.to_string())?;
             }
             let warm_ms = warm_started.elapsed().as_millis();
@@ -421,7 +444,7 @@ pub(super) fn warm_model(app: tauri::AppHandle) -> Result<bool, String> {
                 let _ = embedder
                     .lock()
                     .map_err(|_| "语义模型锁定失败".to_string())?
-                    .embed(vec![semantic_query_input("阅读")], None)
+                    .embed_dense(vec![semantic_query_input("阅读")])
                     .map_err(|error| error.to_string())?;
             }
             Ok(())
@@ -471,7 +494,7 @@ fn semantic_search_inner(
         embedder
             .lock()
             .map_err(|_| "语义模型锁定失败".to_string())?
-            .embed(vec![semantic_query_input(&query)], None)
+            .embed_dense(vec![semantic_query_input(&query)])
             .map_err(|e| e.to_string())?
             .remove(0)
     };
@@ -555,6 +578,11 @@ fn semantic_search_inner(
         })
         .unwrap_or_default();
     let lexical_books = lexical_candidates.len();
+    let lexical_ranks: HashMap<u64, usize> = lexical_candidates
+        .iter()
+        .enumerate()
+        .map(|(rank, book)| (book.id, rank + 1))
+        .collect();
     if want.is_none() {
         let profile_limit = if lexical_books >= 4 {
             SEM_COMPACT_PROFILE_CANDIDATE_LIMIT
@@ -569,6 +597,19 @@ fn semantic_search_inner(
     for book in lexical_candidates {
         if selected_ids.insert(book.id) {
             targets.push(book);
+        }
+    }
+    // BGE-M3 的稀疏倒排提供“语义向量没召回但罕见词命中”的额外候选。
+    // 只有用户选择实验性 M3 模式且索引存在时才读取它。
+    if super::retrieval::active_mode() == super::retrieval::RetrievalMode::M3Hybrid {
+        let sparse_ids =
+            super::m3::sparse_candidate_books(state, &query, SEM_LEXICAL_CANDIDATE_LIMIT);
+        for id in sparse_ids {
+            if selected_ids.insert(id) {
+                if let Some(book) = all_targets.iter().find(|book| book.id == id) {
+                    targets.push(book.clone());
+                }
+            }
         }
     }
     let profile_ms = profile_started.elapsed().as_millis();
@@ -588,7 +629,27 @@ fn semantic_search_inner(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    apply_rrf(&mut results, &lexical_ranks);
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(60);
+    // 默认已在候选阶段融入全文词面信号；高精度模式再对前 30 个段落做本地
+    // 交叉编码重排。模型未下载时安全退回标准融合，不触发隐式网络下载。
+    super::retrieval::rerank_hits(state, &query, &mut results);
+    if super::retrieval::active_mode() == super::retrieval::RetrievalMode::M3Hybrid {
+        super::m3::colbert_rerank(state, &query, &mut results);
+    }
+    // 长文精读是 BGE-M3 的独立第二阶段：即使用户保留“标准”检索策略，也可以
+    // 用它处理少量已召回的连续正文；不依赖 M3 稀疏索引。
+    super::retrieval::rerank_long_context_hits(state, &query, &mut results);
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     put_sem_query_cache(cache_key, cache_stamp, &results);
     crate::log(&format!(
         "semantic_search cache_hit=false query_chars={query_chars} model_ms={model_ms} encode_ms={encode_ms} index_ms={index_ms} graph_ms={graph_ms} profile_ms={profile_ms} brute_ms={brute_ms} shards={loaded_shards} covered={} fallback_books={fallback_books} candidates={candidate_books} lexical_books={lexical_books} multi_profile_books={multi_profile_books} vector_cache_mb={} results={} total_ms={}",

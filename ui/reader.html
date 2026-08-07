@@ -708,45 +708,49 @@
       body.theme-dark .anno-note { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
       body.theme-dark .anno-item { border-color: #3a3a3d; }
       body.theme-dark .anno-item.target { background: #3a3520; }
+      body.theme-dark .bug-trace-meta-row { background: #25272c; }
+      body.theme-dark .bug-trace-events { background: #202226; border-color: #444850; }
+      body.theme-dark .bug-trace-event { border-color: #35383f; }
+      body.theme-dark .bug-trace-event code { color: #bac6da; }
     </style>
   </head>
   <body>
     <div class="toolbar">
-      <button id="toc-btn" class="tbtn">☰ 目录</button>
-      <button id="prev-btn" class="tbtn" title="上一章">◀</button>
-      <button id="next-btn" class="tbtn" title="下一章">▶</button>
+      <button id="toc-btn" class="tbtn" data-reader-i18n="toc">☰ 目录</button>
+      <button id="prev-btn" class="tbtn" title="上一章" data-reader-i18n-title="previousChapter" data-reader-i18n-aria="previousChapter">◀</button>
+      <button id="next-btn" class="tbtn" title="下一章" data-reader-i18n-title="nextChapter" data-reader-i18n-aria="nextChapter">▶</button>
       <div class="search-wrap">
-        <button id="rsearch-btn" class="tbtn" title="搜索书中文字">🔍</button>
+        <button id="rsearch-btn" class="tbtn" title="搜索书中文字" data-reader-i18n-title="searchBook" data-reader-i18n-aria="searchBook">🔍</button>
         <div id="rsearch" class="rsearch">
           <div class="rsearch-row">
             <input id="rsearch-input" type="text" autocomplete="off" />
             <span id="rsearch-count" class="rcount"></span>
-            <button id="rsearch-close" class="tbtn" title="关闭">✕</button>
+            <button id="rsearch-close" class="tbtn" title="关闭" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
           </div>
           <div id="rsearch-results" class="rsearch-results"></div>
         </div>
       </div>
-      <button id="tts-btn" class="tbtn epub-only" title="朗读（从当前页开始，自动翻页）">🔊</button>
-      <button id="hl-btn" class="tbtn" title="批注 / 高亮">🖍</button>
-      <button id="zoom-out" class="tbtn pdf-only" title="缩小">－</button>
-      <button id="zoom-in" class="tbtn pdf-only" title="放大">＋</button>
-      <button id="pdf-dual" class="tbtn pdf-only" title="单页 / 双页">▥</button>
-      <button id="immersive-btn" class="tbtn" title="沉浸模式（隐藏工具栏，点屏幕中间唤出）">⛶</button>
+      <button id="tts-btn" class="tbtn epub-only" title="朗读（从当前页开始，自动翻页）" data-reader-i18n-title="readAloud" data-reader-i18n-aria="readAloud">🔊</button>
+      <button id="hl-btn" class="tbtn" title="批注 / 高亮" data-reader-i18n-title="annotations" data-reader-i18n-aria="annotations">🖍</button>
+      <button id="zoom-out" class="tbtn pdf-only" title="缩小" data-reader-i18n-title="zoomOut" data-reader-i18n-aria="zoomOut">－</button>
+      <button id="zoom-in" class="tbtn pdf-only" title="放大" data-reader-i18n-title="zoomIn" data-reader-i18n-aria="zoomIn">＋</button>
+      <button id="pdf-dual" class="tbtn pdf-only" title="单页 / 双页" data-reader-i18n-title="pdfDual" data-reader-i18n-aria="pdfDual">▥</button>
+      <button id="immersive-btn" class="tbtn" title="沉浸模式（隐藏工具栏，点屏幕中间唤出）" data-reader-i18n-title="immersive" data-reader-i18n-aria="immersive">⛶</button>
       <div class="gear-wrap">
-        <button id="gear-btn" class="tbtn">⚙ 设置</button>
+        <button id="gear-btn" class="tbtn" data-reader-i18n="settings">⚙ 设置</button>
         <div id="settings" class="settings">
       <div class="row">
-        <label>主题</label>
+        <label data-reader-i18n="theme">主题</label>
         <div class="theme-row">
-          <button class="theme-btn" data-theme="light">浅色</button>
-          <button class="theme-btn" data-theme="dark">深色</button>
-          <button class="theme-btn" data-theme="sepia">护眼</button>
+          <button class="theme-btn" data-theme="light" data-reader-i18n="light">浅色</button>
+          <button class="theme-btn" data-theme="dark" data-reader-i18n="dark">深色</button>
+          <button class="theme-btn" data-theme="sepia" data-reader-i18n="sepia">护眼</button>
         </div>
       </div>
       <div class="row">
-        <label>字体</label>
+        <label data-reader-i18n="font">字体</label>
         <select id="set-font">
-          <option value="">书籍默认</option>
+          <option value="" data-reader-i18n="bookDefaultFont">书籍默认</option>
           <option value="'Microsoft YaHei',sans-serif">微软雅黑</option>
           <option value="'SimSun',serif">宋体</option>
           <option value="'SimHei',sans-serif">黑体</option>
@@ -754,41 +758,41 @@
           <option value="'Kunpeng LXGW WenKai Lite','Microsoft YaHei',sans-serif" data-reader-font-id="lxgw-wenkai-lite" data-reader-font-label="霞鹜文楷 Lite">霞鹜文楷 Lite（需下载）</option>
           <option value="'Kunpeng Source Han Serif SC','SimSun',serif" data-reader-font-id="source-han-serif-sc" data-reader-font-label="思源宋体">思源宋体（需下载）</option>
           <option value="'Kunpeng Zhuque Fangsong','FangSong','SimSun',serif" data-reader-font-id="zhuque-fangsong" data-reader-font-label="朱雀仿宋">朱雀仿宋（需下载）</option>
-          <option value="serif">衬线</option>
-          <option value="sans-serif">无衬线</option>
+          <option value="serif" data-reader-i18n="serif">衬线</option>
+          <option value="sans-serif" data-reader-i18n="sansSerif">无衬线</option>
         </select>
       </div>
       <div class="row reader-font-download-row" id="reader-font-download-row" hidden>
         <label></label>
         <span class="reader-font-download-status" id="reader-font-download-status"></span>
-        <button class="reader-font-download-action" id="reader-font-download-action" type="button">下载</button>
+        <button class="reader-font-download-action" id="reader-font-download-action" type="button" data-reader-i18n="download">下载</button>
       </div>
       <div class="row">
-        <label>样式</label>
+        <label data-reader-i18n="style">样式</label>
         <select id="set-style-mode">
-          <option value="local">本地样式（推荐）</option>
-          <option value="book">图书样式（使用原书字号）</option>
+          <option value="local" data-reader-i18n="localStyle">本地样式（推荐）</option>
+          <option value="book" data-reader-i18n="bookStyle">图书样式（使用原书字号）</option>
         </select>
       </div>
-      <div class="row"><label>字号</label><input type="range" id="set-size" min="12" max="40" step="1" /><span class="val" id="v-size"></span></div>
-      <div class="row"><label>注释字号</label><input type="range" id="set-note-size" min="10" max="22" step="1" /><span class="val" id="v-note-size"></span></div>
-      <div class="row"><label>行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
-      <div class="row"><label>段间距</label><input type="range" id="set-para" min="0" max="2" step="0.1" /><span class="val" id="v-para"></span></div>
-      <div class="row"><label>字间距</label><input type="range" id="set-letter" min="0" max="5" step="0.5" /><span class="val" id="v-letter"></span></div>
+      <div class="row"><label data-reader-i18n="fontSize">字号</label><input type="range" id="set-size" min="12" max="40" step="1" /><span class="val" id="v-size"></span></div>
+      <div class="row"><label data-reader-i18n="noteFontSize">注释字号</label><input type="range" id="set-note-size" min="10" max="22" step="1" /><span class="val" id="v-note-size"></span></div>
+      <div class="row"><label data-reader-i18n="lineSpacing">行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
+      <div class="row"><label data-reader-i18n="paragraphSpacing">段间距</label><input type="range" id="set-para" min="0" max="2" step="0.1" /><span class="val" id="v-para"></span></div>
+      <div class="row"><label data-reader-i18n="letterSpacing">字间距</label><input type="range" id="set-letter" min="0" max="5" step="0.5" /><span class="val" id="v-letter"></span></div>
       <div class="row reading-mode-row">
         <div class="mode-toggle-group">
           <label class="mode-toggle-item text-conversion-toggle" for="set-text-conversion-simple">
             <span class="text-conversion-choice"><span class="text-conversion-label text-conversion-simple-label">简</span><span class="text-conversion-label text-conversion-traditional-label">繁</span><span class="settings-switch"><input id="set-text-conversion-simple" type="checkbox" /><span class="settings-slider"></span></span></span>
           </label>
           <label class="mode-toggle-item" for="set-dual-mode">
-            <span>双页</span>
+            <span data-reader-i18n="twoPages">双页</span>
             <span class="settings-switch">
               <input id="set-dual-mode" type="checkbox" />
               <span class="settings-slider"></span>
             </span>
           </label>
           <label class="mode-toggle-item" for="set-scroll-mode">
-            <span>滚动模式</span>
+            <span data-reader-i18n="scrollMode">滚动模式</span>
             <span class="settings-switch">
               <input id="set-scroll-mode" type="checkbox" />
               <span class="settings-slider"></span>
@@ -797,180 +801,173 @@
         </div>
       </div>
       <div class="row">
-        <label>动画</label>
+        <label data-reader-i18n="animation">动画</label>
         <select id="set-turnfx">
-          <option value="off">关闭</option>
-          <option value="horizontal">水平翻页（整页左移）</option>
+          <option value="off" data-reader-i18n="animationOff">关闭</option>
+          <option value="horizontal" data-reader-i18n="horizontalTurn">水平翻页（整页左移）</option>
         </select>
       </div>
-      <div class="row"><label>速度</label><input type="range" id="set-turnspeed" min="0.5" max="2" step="0.1" /><span class="val" id="v-turnspeed"></span></div>
-      <h4>页边距（像素）</h4>
+      <div class="row"><label data-reader-i18n="speed">速度</label><input type="range" id="set-turnspeed" min="0.5" max="2" step="0.1" /><span class="val" id="v-turnspeed"></span></div>
+      <h4 data-reader-i18n="pageMargins">页边距（像素）</h4>
       <div class="margins">
-        <label>上 <input type="number" id="set-mt" min="0" max="160" /></label>
-        <label>下 <input type="number" id="set-mb" min="0" max="160" /></label>
-        <label>左 <input type="number" id="set-ml" min="0" max="240" /></label>
-        <label>右 <input type="number" id="set-mr" min="0" max="240" /></label>
+        <label><span data-reader-i18n="top">上</span> <input type="number" id="set-mt" min="0" max="160" /></label>
+        <label><span data-reader-i18n="bottom">下</span> <input type="number" id="set-mb" min="0" max="160" /></label>
+        <label><span data-reader-i18n="left">左</span> <input type="number" id="set-ml" min="0" max="240" /></label>
+        <label><span data-reader-i18n="right">右</span> <input type="number" id="set-mr" min="0" max="240" /></label>
       </div>
-      <h4>朗读 🔊</h4>
-      <div class="row"><label>音源</label><select id="set-ttssrc">
-        <option value="edge">在线 · 微软神经（中文好）</option>
-        <option value="system">系统语音（离线）</option>
+      <h4 data-reader-i18n="speech">朗读 🔊</h4>
+      <div class="row"><label data-reader-i18n="speechSource">音源</label><select id="set-ttssrc">
+        <option value="edge" data-reader-i18n="ttsMicrosoftAuto">在线 · 微软神经</option>
+        <option value="system" data-reader-i18n="ttsSystemOffline">系统语音</option>
       </select></div>
-      <div class="row"><label>音色</label><select id="set-ttsvoice">
-        <option value="zh-CN-XiaoxiaoNeural">晓晓（女）</option>
-        <option value="zh-CN-YunxiNeural">云希（男）</option>
-        <option value="zh-CN-YunyangNeural">云扬（男·播音）</option>
-        <option value="zh-CN-XiaoyiNeural">晓伊（女）</option>
-        <option value="zh-CN-liaoning-XiaobeiNeural">小北（东北话）</option>
-      </select></div>
-      <div class="row"><label>语速</label><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.1" /><span class="val" id="v-ttsrate"></span></div>
+      <div class="row"><label data-reader-i18n="speechRate">语速</label><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.1" /><span class="val" id="v-ttsrate"></span></div>
         </div>
       </div>
-      <button id="vocab-btn" class="tbtn" title="生词本（查过的词）">📒 生词本</button>
+      <button id="vocab-btn" class="tbtn" title="生词本（查过的词）" data-reader-i18n="vocabulary" data-reader-i18n-title="vocabulary">📒 生词本</button>
       <div class="reader-drag-space" data-tauri-drag-region></div>
       <div id="reader-progress-group" data-tauri-drag-region>
-        <span id="chapter-progress" class="title epub-only" title="阅读进度">正在定位阅读进度…</span>
-        <span id="progress" class="title page-count-loading" title="全书页数统计中" aria-label="全书页数统计中"><span class="mini-spinner"></span></span>
+        <span id="chapter-progress" class="title epub-only" title="阅读进度" data-reader-i18n-title="readingProgress">正在定位阅读进度…</span>
+        <span id="progress" class="title page-count-loading" title="全书页数统计中" aria-label="全书页数统计中" data-reader-i18n-title="measuringPages" data-reader-i18n-aria="measuringPages"><span class="mini-spinner"></span></span>
       </div>
-      <div class="window-controls" aria-label="窗口控制">
-        <button id="win-min" class="win-btn" type="button" title="最小化" aria-label="最小化">−</button>
-        <button id="win-max" class="win-btn" type="button" title="最大化" aria-label="最大化">□</button>
-        <button id="win-close" class="win-btn close" type="button" title="关闭" aria-label="关闭">×</button>
+      <div class="window-controls" aria-label="窗口控制" data-reader-i18n-aria="windowControls">
+        <button id="win-min" class="win-btn" type="button" title="最小化" aria-label="最小化" data-reader-i18n-title="minimize" data-reader-i18n-aria="minimize">−</button>
+        <button id="win-max" class="win-btn" type="button" title="最大化" aria-label="最大化" data-reader-i18n-title="maximize" data-reader-i18n-aria="maximize">□</button>
+        <button id="win-close" class="win-btn close" type="button" title="关闭" aria-label="关闭" data-reader-i18n-title="close" data-reader-i18n-aria="close">×</button>
       </div>
     </div>
 
     <div class="body">
       <!-- reader:// 内容位于独立 reader.localhost 源；allow-same-origin 仅用于章内容 fetch，仍与宿主源隔离。 -->
       <iframe id="frame" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin"></iframe>
-      <aside id="ai-reader-side" class="ai-reader-side" aria-label="智读">
+      <aside id="ai-reader-side" class="ai-reader-side" aria-label="智读" data-reader-i18n-aria="aiReading">
         <div class="ai-reader-side-head">
-          <span class="ai-reader-side-title">✨ 智读</span>
-          <button id="ai-reader-close" class="tbtn" type="button" title="关闭智读">✕</button>
+          <span class="ai-reader-side-title" data-reader-i18n="aiReading">✨ 智读</span>
+          <button id="ai-reader-close" class="tbtn" type="button" title="关闭智读" data-reader-i18n-title="closeAiReading" data-reader-i18n-aria="closeAiReading">✕</button>
         </div>
-        <p class="ai-reader-help">只会发送当前书中已经读到的相关文字，不会自动上传整本书。</p>
+        <p class="ai-reader-help" data-reader-i18n="aiReadingHelp">只会发送当前书中已经读到的相关文字，不会自动上传整本书。</p>
         <div class="ai-reader-actions">
-          <button id="ai-reader-ask" class="tbtn" type="button">提问</button>
-          <button id="ai-reader-summary" class="tbtn" type="button">总结</button>
-          <button id="ai-reader-mindmap" class="tbtn" type="button">生成脑图</button>
-          <button id="ai-reader-history-btn" class="tbtn" type="button">历史</button>
+          <button id="ai-reader-ask" class="tbtn" type="button" data-reader-i18n="ask">提问</button>
+          <button id="ai-reader-summary" class="tbtn" type="button" data-reader-i18n="summary">总结</button>
+          <button id="ai-reader-mindmap" class="tbtn" type="button" data-reader-i18n="mindMap">生成脑图</button>
+          <button id="ai-reader-history-btn" class="tbtn" type="button" data-reader-i18n="history">历史</button>
           <span id="ai-reader-status" class="cross-status"></span>
         </div>
-        <label class="ai-reader-profile-label">大模型<select id="ai-reader-profile" class="ai-reader-profile" aria-label="智读使用的大模型"></select></label>
-        <textarea id="ai-reader-question" class="ai-reader-question" placeholder="输入问题，按 Enter 自动提问；Shift + Enter 换行"></textarea>
-        <div class="ai-reader-submit"><button id="ai-reader-enter-submit" class="tbtn" type="button" title="与键盘 Enter 相同，向 API 发起提问">↵ 回车提问</button></div>
-        <div id="ai-reader-answer" class="ai-reader-answer empty">配置 API 后即可开始智读。</div>
+        <label class="ai-reader-profile-label"><span data-reader-i18n="model">大模型</span><select id="ai-reader-profile" class="ai-reader-profile" aria-label="智读使用的大模型" data-reader-i18n-aria="aiModelLabel"></select></label>
+        <textarea id="ai-reader-question" class="ai-reader-question" placeholder="输入问题，按 Enter 自动提问；Shift + Enter 换行" data-reader-i18n-placeholder="aiQuestionPlaceholder"></textarea>
+        <div class="ai-reader-submit"><button id="ai-reader-enter-submit" class="tbtn" type="button" title="与键盘 Enter 相同，向 API 发起提问" data-reader-i18n="submitQuestion" data-reader-i18n-title="submitQuestion">↵ 回车提问</button></div>
+        <div id="ai-reader-answer" class="ai-reader-answer empty" data-reader-i18n="aiReady">配置 API 后即可开始智读。</div>
         <div id="ai-reader-history" class="ai-reader-history"></div>
         <div id="ai-reader-audit" class="ai-reader-audit" hidden></div>
-        <details id="ai-reader-sources" class="ai-reader-sources" hidden><summary>本次依据</summary><ul></ul></details>
+        <details id="ai-reader-sources" class="ai-reader-sources" hidden><summary data-reader-i18n="sources">本次依据</summary><ul></ul></details>
       </aside>
-      <div id="loading" class="loading"><div class="spinner"></div><div>加载中…</div></div>
+      <div id="loading" class="loading"><div class="spinner"></div><div data-reader-i18n="loading">加载中…</div></div>
       <div id="backdrop" class="backdrop"></div>
       <aside id="toc" class="toc">
         <div class="toc-tabs">
-          <button id="tab-toc" class="toc-tab active" type="button">目录</button>
-          <button id="tab-bm" class="toc-tab" type="button">书签</button>
+          <button id="tab-toc" class="toc-tab active" type="button" data-reader-i18n="toc">目录</button>
+          <button id="tab-bm" class="toc-tab" type="button" data-reader-i18n="bookmarks">书签</button>
         </div>
         <div id="toc-pane" class="toc-pane"></div>
         <div id="bm-pane" class="toc-pane" hidden>
-          <button id="bm-add2" class="bm-add">➕ 在当前页加书签</button>
+          <button id="bm-add2" class="bm-add" data-reader-i18n="addBookmark">➕ 在当前页加书签</button>
           <div id="bm-list2" class="bm-list"></div>
         </div>
       </aside>
       <aside id="vocab" class="toc vocab">
         <div class="toc-tabs">
-          <button id="vtab-zh" class="toc-tab active" type="button">中文</button>
-          <button id="vtab-en" class="toc-tab" type="button">英文</button>
-          <button id="vocab-gear" class="vc-gear" type="button" title="生词本设置">⚙</button>
+          <button id="vtab-zh" class="toc-tab active" type="button" data-reader-i18n="chinese">中文</button>
+          <button id="vtab-en" class="toc-tab" type="button" data-reader-i18n="english">英文</button>
+          <button id="vocab-gear" class="vc-gear" type="button" title="生词本设置" data-reader-i18n-title="vocabularySettings" data-reader-i18n-aria="vocabularySettings">⚙</button>
         </div>
         <div id="vocab-settings" class="vc-settings">
           <div class="vc-set-row">
-            <span>排序</span>
+            <span data-reader-i18n="sort">排序</span>
             <span class="vc-seg">
-              <button id="vsort-time" class="vc-sort active" type="button">查询时间</button>
-              <button id="vsort-count" class="vc-sort" type="button">查询次数</button>
+              <button id="vsort-time" class="vc-sort active" type="button" data-reader-i18n="queriedAt">查询时间</button>
+              <button id="vsort-count" class="vc-sort" type="button" data-reader-i18n="queryCount">查询次数</button>
             </span>
           </div>
           <label class="vc-set-row">
-            <span>查询记录</span>
+            <span data-reader-i18n="queryHistory">查询记录</span>
             <span class="vc-switch">
               <input id="vocab-count-toggle" type="checkbox" />
               <span class="vc-slider"></span>
             </span>
           </label>
           <label class="vc-set-row">
-            <span>英文自动发音</span>
+            <span data-reader-i18n="autoSpeakEnglish">英文自动发音</span>
             <span class="vc-switch">
               <input id="dict-auto-speak-toggle" type="checkbox" />
               <span class="vc-slider"></span>
             </span>
           </label>
           <label class="vc-set-row">
-            <span>缓存英文语音</span>
+            <span data-reader-i18n="cacheEnglishAudio">缓存英文语音</span>
             <span class="vc-switch">
               <input id="word-audio-cache-toggle" type="checkbox" />
               <span class="vc-slider"></span>
             </span>
           </label>
           <div id="word-audio-cache-info" class="vc-set-row vc-cache-info" hidden>
-            <span id="word-audio-cache-size">缓存：0 B</span>
-            <button id="word-audio-cache-delete" class="vc-cache-del" type="button">删除缓存</button>
+            <span id="word-audio-cache-size" data-reader-i18n="cached">缓存：0 B</span>
+            <button id="word-audio-cache-delete" class="vc-cache-del" type="button" data-reader-i18n="deleteCache">删除缓存</button>
           </div>
           <div id="word-audio-pack" class="vc-pack" hidden>
             <div class="vc-pack-head">
-              <span>高频词语音包</span>
+              <span data-reader-i18n="frequentWordAudio">高频词语音包</span>
               <span id="word-pack-count">0 / 10000</span>
             </div>
             <progress id="word-pack-progress" class="vc-pack-progress" max="10000" value="0"></progress>
-            <div id="word-pack-meta" class="vc-pack-meta">尚未生成</div>
+            <div id="word-pack-meta" class="vc-pack-meta" data-reader-i18n="notGenerated">尚未生成</div>
             <div class="vc-pack-actions">
-              <button id="word-pack-delete" class="vc-pack-btn" type="button">删除语音包</button>
-              <button id="word-pack-toggle" class="vc-pack-btn primary" type="button">开始生成</button>
+              <button id="word-pack-delete" class="vc-pack-btn" type="button" data-reader-i18n="deleteAudioPack">删除语音包</button>
+              <button id="word-pack-toggle" class="vc-pack-btn primary" type="button" data-reader-i18n="createAudioPack">开始生成</button>
             </div>
           </div>
         </div>
         <div id="vocab-pane" class="toc-pane vc-pane"></div>
       </aside>
       <div id="vbar" class="vbar"><div id="vthumb" class="vthumb"></div></div>
-      <div id="book-progress" class="book-progress" aria-label="整本书阅读进度">
-        <div id="book-progress-track" class="book-progress-track" role="slider" tabindex="0" aria-label="调整整本书阅读进度" aria-valuemin="1" aria-valuemax="100" aria-valuenow="1">
+      <div id="book-progress" class="book-progress" aria-label="整本书阅读进度" data-reader-i18n-aria="bookProgress">
+        <div id="book-progress-track" class="book-progress-track" role="slider" tabindex="0" aria-label="调整整本书阅读进度" data-reader-i18n-aria="adjustBookProgress" aria-valuemin="1" aria-valuemax="100" aria-valuenow="1">
           <div id="book-progress-fill" class="book-progress-fill"></div>
           <div id="book-progress-thumb" class="book-progress-thumb"></div>
         </div>
-        <button id="book-progress-restore" class="book-progress-restore" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置">↶</button>
+        <button id="book-progress-restore" class="book-progress-restore" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置" data-reader-i18n-title="restorePosition" data-reader-i18n-aria="restorePosition">↶</button>
       </div>
     </div>
     <div id="info-modal" class="modal">
       <div class="modal-card">
         <div class="modal-head">
-          <span>书籍信息</span>
-          <button id="info-close" class="tbtn">✕</button>
+          <span data-reader-i18n="bookInformation">书籍信息</span>
+          <button id="info-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
         </div>
-        <div class="info-row"><span class="info-k">书名</span><span id="info-title" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">作者</span><span id="info-author" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">格式</span><span id="info-format" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">字数</span><span id="info-words" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">大小</span><span id="info-size" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">评分</span><span id="info-stars" class="stars" title="点击打分，再点同一颗清除"></span></div>
-        <div class="info-row"><span class="info-k">标签</span><span id="info-tags" class="info-v info-chips"></span></div>
-        <div class="info-row"><span class="info-k">书单</span><span id="info-collections" class="info-v info-chips"></span></div>
-        <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="info-desc" class="info-desc" contenteditable="true"></div></div>
+        <div class="info-row"><span class="info-k" data-reader-i18n="title">书名</span><span id="info-title" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k" data-reader-i18n="author">作者</span><span id="info-author" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k" data-reader-i18n="format">格式</span><span id="info-format" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k" data-reader-i18n="wordCount">字数</span><span id="info-words" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k" data-reader-i18n="size">大小</span><span id="info-size" class="info-v"></span></div>
+        <div class="info-row"><span class="info-k" data-reader-i18n="rating">评分</span><span id="info-stars" class="stars" title="点击打分，再点同一颗清除" data-reader-i18n-title="ratingHint"></span></div>
+        <div class="info-row"><span class="info-k" data-reader-i18n="tags">标签</span><span id="info-tags" class="info-v info-chips"></span></div>
+        <div class="info-row"><span class="info-k" data-reader-i18n="collections">书单</span><span id="info-collections" class="info-v info-chips"></span></div>
+        <div class="info-row col"><span class="info-k" data-reader-i18n="description">简介（可编辑，失焦保存）</span><div id="info-desc" class="info-desc" contenteditable="true"></div></div>
       </div>
     </div>
     <div id="reader-end-modal" class="modal">
       <div class="modal-card reader-end-card">
         <div class="modal-head">
-          <span>相关推荐</span>
-          <button id="reader-end-close" class="tbtn">✕</button>
+          <span data-reader-i18n="recommendations">相关推荐</span>
+          <button id="reader-end-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
         </div>
-        <p class="reader-end-intro">根据正文语义，为你挑选 5 本内容相关的图书。</p>
+        <p class="reader-end-intro" data-reader-i18n="recommendationHelp">根据正文语义，为你挑选 5 本内容相关的图书。</p>
         <div id="reader-end-list" class="reader-end-list"></div>
       </div>
     </div>
     <div id="anno-modal" class="modal">
       <div class="modal-card anno-card">
         <div class="modal-head">
-          <span>批注 / 高亮</span>
-          <button id="anno-close" class="tbtn">✕</button>
+          <span data-reader-i18n="annotations">批注 / 高亮</span>
+          <button id="anno-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
         </div>
         <div id="anno-list"></div>
       </div>
@@ -978,20 +975,22 @@
     <div id="cross-modal" class="modal">
       <div class="modal-card cross-card">
         <div class="modal-head">
-          <span id="cross-title">跨书搜索</span>
-          <button id="cross-close" class="tbtn">✕</button>
+          <span id="cross-title" data-reader-i18n="crossBookSearch">跨书搜索</span>
+          <button id="cross-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
         </div>
         <div class="cross-row">
           <input id="cross-input" type="text" autocomplete="off" />
-          <button id="cross-run" class="tbtn" type="button">搜索</button>
+          <button id="cross-run" class="tbtn" type="button" data-reader-i18n="search">搜索</button>
           <span id="cross-status" class="cross-status"></span>
         </div>
         <div id="cross-results" class="cross-results"></div>
       </div>
     </div>
-    <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果">←</button>
+    <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果" data-reader-i18n-title="returnToPreviousBook" data-reader-i18n-aria="returnToPreviousBook">←</button>
+    <script src="reader-i18n.js"></script>
     <script src="reader-message.js"></script>
     <script src="reader-shell-state.js"></script>
+    <script src="reader-bug-trace.js"></script>
     <script src="reader-search-ui.js"></script>
     <script src="animation-settings.js"></script>
     <script src="reader-settings-ui.js"></script>
