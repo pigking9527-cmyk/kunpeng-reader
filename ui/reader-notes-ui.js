@@ -93,30 +93,83 @@ document.getElementById("next-btn").addEventListener("click", () => {
   } else if (curChapter < curTotalCh - 1) sendToPage({ gotoChapter: curChapter + 1 });
 });
 
+let tocBuildVersion = 0;
+function createTocItem(entry) {
+  const item = document.createElement("div");
+  item.className = "toc-item";
+  item.style.paddingLeft = 8 + entry.level * 14 + "px";
+  item.textContent = entry.label;
+  item.title = entry.label;
+  item.dataset.chapter = entry.chapter;
+  item.dataset.frag = entry.frag || "";
+  item.addEventListener("click", () => {
+    sendToPage({ gotoChapter: entry.chapter, frag: entry.frag || undefined });
+    setToc(false);
+  });
+  return item;
+}
+function renderEmptyToc() {
+  const hint = document.createElement("div");
+  hint.className = "toc-item";
+  hint.style.color = "#999";
+  hint.textContent = readerNotesText("noToc", "（无目录）");
+  tocPane.appendChild(hint);
+}
 function buildToc(toc) {
+  tocBuildVersion += 1;
   tocPane.innerHTML = "";
   if (!toc.length) {
-    const hint = document.createElement("div");
-    hint.className = "toc-item";
-    hint.style.color = "#999";
-    hint.textContent = readerNotesText("noToc", "（无目录）");
-    tocPane.appendChild(hint);
+    renderEmptyToc();
     return;
   }
   for (const entry of toc) {
-    const item = document.createElement("div");
-    item.className = "toc-item";
-    item.style.paddingLeft = 8 + entry.level * 14 + "px";
-    item.textContent = entry.label;
-    item.title = entry.label;
-    item.dataset.chapter = entry.chapter;
-    item.dataset.frag = entry.frag || "";
-    item.addEventListener("click", () => {
-      sendToPage({ gotoChapter: entry.chapter, frag: entry.frag || undefined });
-      setToc(false);
-    });
-    tocPane.appendChild(item);
+    tocPane.appendChild(createTocItem(entry));
   }
+}
+
+// 大型 EPUB 可能包含几千条目录项。目录并不是首屏依赖，不能在设置正文
+// iframe 地址之前同步创建几千个 DOM 节点；把它切成短批次交给空闲时间处理。
+function scheduleTocBuild(toc) {
+  const entries = Array.isArray(toc) ? toc : [];
+  const version = ++tocBuildVersion;
+  tocPane.innerHTML = "";
+  if (!entries.length) {
+    renderEmptyToc();
+    return;
+  }
+  const loading = document.createElement("div");
+  loading.className = "toc-item";
+  loading.style.color = "#999";
+  loading.textContent = readerNotesText("loading", "加载中…");
+  tocPane.appendChild(loading);
+  let index = 0;
+  const schedule = (callback) => {
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(callback, { timeout: 500 });
+    } else {
+      setTimeout(() => callback(null), 16);
+    }
+  };
+  const appendBatch = (deadline) => {
+    if (version !== tocBuildVersion) return;
+    const fragment = document.createDocumentFragment();
+    const started = performance.now();
+    let added = 0;
+    while (index < entries.length && added < 120) {
+      if (added >= 20 && performance.now() - started >= 6) break;
+      if (added >= 20 && deadline?.timeRemaining && deadline.timeRemaining() < 2) break;
+      fragment.appendChild(createTocItem(entries[index++]));
+      added += 1;
+    }
+    if (loading.isConnected) loading.remove();
+    tocPane.appendChild(fragment);
+    if (index < entries.length) {
+      schedule(appendBatch);
+    } else if (ReaderShell.isOverlay(ReaderShell.OVERLAY.TOC)) {
+      highlightCurrentToc();
+    }
+  };
+  schedule(appendBatch);
 }
 
 // ---------- 启动 ----------

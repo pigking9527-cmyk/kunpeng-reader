@@ -1803,7 +1803,7 @@ function syncScrollPageFromTop(){
   pageInCh=pageIndexForScrollTop(top);
   if(old!==pageInCh)report();
   if(scrollCaptureTimer)clearTimeout(scrollCaptureTimer);
-  scrollCaptureTimer=setTimeout(function(){captureAnchor();report();},160);
+  scrollCaptureTimer=setTimeout(function(){captureAnchor();report(true);},160);
 }
 function scrollTopForLine(line,topPad){
   return Math.max(0,Math.min(scrollMaxTop(),Math.round((line?line.top:0)-topPad)));
@@ -1894,8 +1894,8 @@ function updateScrollPageAfterProgrammatic(){
   buildScrollBreaks(true);
   scrollProgrammaticTarget=pager?Math.round(scrollPort().scrollTop||0):scrollProgrammaticTarget;
   pageInCh=pageIndexForScrollTop(pager?scrollPort().scrollTop||0:0);
-  report();
   captureAnchor();
+  report(true);
   scheduleNoteNumberDisplayRefresh();
 }
 function firstLineAfter(lines,y){
@@ -1933,7 +1933,8 @@ function livePrevScrollTop(){
   }
   return null;
 }
-function report(){
+function report(commitPosition,restoredPosition,positionSnapshotRequestId){
+  if(initialResumePending)return;
   var useScrollPagesForReport=false;
   if(isScrollMode()&&pager){
     buildScrollBreaks(true);
@@ -1961,7 +1962,7 @@ function report(){
   else prog=CH>0?((curCh+chFrac)/CH)*100:0;
   var L=computeLogical();
   var pageChars=pagesInCh>0?Math.round(chapChars/pagesInCh):chapChars; // 当前页约略字数（按本章字数/页数均摊）
-  parent.postMessage({chapter:curCh,chFrac:chFrac,page:pageInCh+1,total:pagesInCh,totalCh:CH,progress:prog,gPage:gP,gTotal:gT,logicalCh:L.lc,logicalTotal:L.lt,pageChars:pageChars,anchor:persistentReadingAnchor()},'*');
+  parent.postMessage({chapter:curCh,chFrac:chFrac,page:pageInCh+1,total:pagesInCh,totalCh:CH,progress:prog,gPage:gP,gTotal:gT,logicalCh:L.lc,logicalTotal:L.lt,pageChars:pageChars,anchor:persistentReadingAnchor(),positionCommit:commitPosition?1:0,positionRestored:restoredPosition?1:0,positionSnapshotRequestId:positionSnapshotRequestId||0},'*');
   // 注意：不在这里记录锚点。report() 也会被 relayout() 调到；若每次都重取锚点，
   // 拖动字号滑块时会把“重排后已偏移的顶部”当成新锚点，逐步累积漂移→整页跑掉。
   // 锚点只在用户“导航”（翻页/跳章/跳搜索命中）时更新，见 captureAnchor()。
@@ -1969,6 +1970,12 @@ function report(){
 // 记录当前页顶部锚点（精确到字符）。仅在用户主动导航后调用，供之后的重排锁定位置。
 function captureAnchor(){
   var anchor=topAnchor();
+  var rect=anchorRect(anchor),view=viewRect();
+  var leadingRight=view?(isDualPage()?view.left+view.width/2:view.right):0;
+  var visible=!!(rect&&view&&rect.bottom>view.top+1&&rect.top<view.bottom-1&&rect.right>view.left+1&&rect.left<leadingRight-1);
+  // caretRangeFromPoint 落在题图或大块留白附近时，WebView2 偶尔返回屏幕外
+  // 分栏中的最近文本。只接受当前左页内的锚点，否则从真实可见行重新采样。
+  if(!visible)anchor=visibleTopTextAnchor()||anchor;
   if(anchorValid(anchor))curTopAnchor=anchor;
   modeSwitchRecoveryOffset=null;
   return curTopAnchor;
@@ -1996,7 +2003,7 @@ function gotoPage(p,dir){
     if(usesLineBreakPaging()){
       syncScrollPageFromTop();
     }
-    report();notifyReaderEndIfReached(dir);captureAnchor();scheduleNoteNumberDisplayRefresh();
+    captureAnchor();report(true);notifyReaderEndIfReached(dir);scheduleNoteNumberDisplayRefresh();
   });
 }
 function filterTextLines(lines){
@@ -2137,7 +2144,7 @@ function scrollPageBy(dir){
     scrollActiveSlice=target;
     scrollProgrammaticTarget=next;
     applyScrollPageMask();
-    report();notifyReaderEndIfReached(dir);captureAnchor();
+    captureAnchor();report(true);notifyReaderEndIfReached(dir);
     return true;
   }
   beginTurnFx(dir,function(){
@@ -2409,30 +2416,36 @@ function showChapter(i,where,frag){
   return fetch(location.origin+'/chapter/'+ID+'/'+i+'/'+conversion).then(function(r){return r.json();}).then(function(d){
     fetchDone=performance.now();
     var body=d.body||'';fastChapterLayout=largeChapterFastLayout(body);
-    curCh=i;pageInCh=0;dualStartColumn=0;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;if(scrollPort())scrollPort().scrollTop=0;if(d.head)injectHead(d.head,headSeen);root.innerHTML=body+'<div class="rr-end"></div>';normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();
-    return new Promise(function(resolve){
-      requestAnimationFrame(function(){requestAnimationFrame(function(){
-        if(fastChapterLayout){
-          if(!isScrollMode())pagesInCh=fastPagedPageCount(root);
-        }else{
-          scrollBreakSig='';invalidateScrollItemsCache();applyCols();
-        }
-        pageInCh=0;
-        if(where==='end')pageInCh=pagesInCh-1;else if(typeof where==='number')pageInCh=Math.max(0,Math.min(pagesInCh-1,where));
-        if(frag){var el=document.getElementById(frag);if(el)pageInCh=pageOf(el);}
-        setViewOffset();refreshHighlights();report();notifyReaderEndIfReached(0);captureAnchor();scheduleNoteNumberDisplayRefresh();
-        var rrBox=root.getBoundingClientRect(),pagerBox=pager.getBoundingClientRect(),rrStyle=getComputedStyle(root);
-        reportReaderPaintPerf(
-          'chapter_ready',
-          showStarted,
-          'chapter='+i+' bytes='+body.length+' fetch_ms='+(fetchDone-showStarted).toFixed(1)
-            +' mac_webkit='+(IS_MAC_WEBKIT?1:0)+' font_px='+parseFloat(rrStyle.fontSize).toFixed(1)
-            +' line_px='+parseFloat(rrStyle.lineHeight).toFixed(1)+' viewport_h='+viewportHeight()
-            +' pager_h='+pagerBox.height.toFixed(1)+' root_h='+rrBox.height.toFixed(1)
-        );resolve();
-      });});
+    // EPUB 章节样式通过 reader:// link 异步加载。必须等样式成功、失败或超时后
+    // 再计算分栏；否则同一章可能先按无样式正文算 36 页，随后变成 12 页，
+    // 保存的章内比例在重开时就会落到相邻页甚至相邻章节。
+    var headReady=d.head?injectHead(d.head,headSeen):Promise.resolve();
+    return headReady.then(function(){
+      curCh=i;pageInCh=0;dualStartColumn=0;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;if(scrollPort())scrollPort().scrollTop=0;/* 最终页位移确定前不绘制新章节，避免跨章时短暂露出错误页。 */root.style.visibility='hidden';root.innerHTML=body+'<div class="rr-end"></div>';normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();
+      return new Promise(function(resolve){
+        requestAnimationFrame(function(){requestAnimationFrame(function(){
+          if(fastChapterLayout){
+            if(!isScrollMode())pagesInCh=fastPagedPageCount(root);
+          }else{
+            scrollBreakSig='';invalidateScrollItemsCache();applyCols();
+          }
+          pageInCh=0;
+          if(where==='end')pageInCh=pagesInCh-1;else if(typeof where==='number')pageInCh=Math.max(0,Math.min(pagesInCh-1,where));
+          if(frag){var el=document.getElementById(frag);if(el)pageInCh=pageOf(el);}
+          setViewOffset();root.style.visibility='';refreshHighlights();captureAnchor();report(true);notifyReaderEndIfReached(0);scheduleNoteNumberDisplayRefresh();
+          var rrBox=root.getBoundingClientRect(),pagerBox=pager.getBoundingClientRect(),rrStyle=getComputedStyle(root);
+          reportReaderPaintPerf(
+            'chapter_ready',
+            showStarted,
+            'chapter='+i+' bytes='+body.length+' fetch_ms='+(fetchDone-showStarted).toFixed(1)
+              +' mac_webkit='+(IS_MAC_WEBKIT?1:0)+' font_px='+parseFloat(rrStyle.fontSize).toFixed(1)
+              +' line_px='+parseFloat(rrStyle.lineHeight).toFixed(1)+' viewport_h='+viewportHeight()
+              +' pager_h='+pagerBox.height.toFixed(1)+' root_h='+rrBox.height.toFixed(1)
+          );resolve();
+        });});
+      });
     });
-  }).then(function(value){finishChapterBugTrace(bugTraceToken,true,pageInCh);return value;},function(){finishChapterBugTrace(bugTraceToken,false,0);});
+  }).then(function(value){finishChapterBugTrace(bugTraceToken,true,pageInCh);return value;},function(){root.style.visibility='';finishChapterBugTrace(bugTraceToken,false,0);});
 }
 var curTopAnchor=null; // 实时记录的当前页顶部锚点（精确到字符）
 // 一次模式重排若没有把目标字符放在可见首行，就保留切换前的源偏移。
@@ -2523,28 +2536,6 @@ function topAnchor(){
 }
 // 取得视口内真正最靠上的一行正文。多栏分页下，固定的左上角可能是留白或
 // 相邻栏的溢出节点，不能用它作为开关侧栏后的阅读锚点。
-function visibleTopTextAnchor(){
-  if(!root||!pager)return null;
-  var pr=viewRect(),best=null;
-  var walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null),node;
-  while((node=walker.nextNode())){
-    if(generatedTextNode(node)||closestInlineNoteElement(node)||!(node.nodeValue||'').trim())continue;
-    var range=document.createRange();
-    try{range.selectNodeContents(node);}catch(_){continue;}
-    var rects=[];try{rects=[].slice.call(range.getClientRects());}catch(_){rects=[];}
-    for(var i=0;i<rects.length;i++){
-      var rect=rects[i];
-      if(!rect||rect.width<1||rect.height<2||rect.bottom<=pr.top+1||rect.top>=pr.bottom-1)continue;
-      if(!best||rect.top<best.rect.top-1||(Math.abs(rect.top-best.rect.top)<=1&&rect.left<best.rect.left))best={rect:rect};
-    }
-  }
-  if(!best)return null;
-  var x=Math.max(pr.left+1,Math.min(pr.right-1,best.rect.left+2));
-  var y=Math.max(pr.top+1,Math.min(pr.bottom-1,best.rect.top+Math.min(4,best.rect.height/2)));
-  var rangeAtTop=caretRangeInReader(x,y);
-  if(rangeAtTop&&anchorNodeInReader(rangeAtTop.startContainer))return {range:rangeAtTop};
-  return null;
-}
 function topVisibleOriginalMedia(){
   if(!root||!pager)return null;
   var pr=viewRect(),topBand=pr.top+Math.max(48,lineHeightPx()*2.2);
@@ -2567,7 +2558,6 @@ function anchorValid(a){
 }
 function anchorTextOffset(a){
   if(!anchorValid(a))return null;
-  if(a.media)return null;
   if(a.range)return sourceBoundaryOffset(a.range.startContainer,a.range.startOffset);
   var node=a.el;
   if(!node)return null;
@@ -2661,7 +2651,6 @@ function relayout(opts){
     else if(pageInCh>pagesInCh-1){ pageInCh=pagesInCh-1; }
     setViewOffset();
   }
-  report();
   var modeSwitchVerified=true;
   if(opts.modeSwitch&&anchorOffset!=null){
     modeSwitchVerified=modeSwitchAnchorAtVisibleTop(anchorOffset);
@@ -2670,24 +2659,31 @@ function relayout(opts){
   }
   // 模式切换只沿用切换前的字符锚点，避免两套坐标的取整误差累积成跳页。
   if(!opts.modeSwitch)captureAnchor();
+  report();
   scheduleNoteNumberDisplayRefresh();
   return {modeSwitchVerified:modeSwitchVerified,anchorOffset:anchorOffset};
 }
+function schedulePageTurnBugTrace(trace){setTimeout(function(){finishPageTurnBugTrace(trace);},520);}
 function nextPage(){
+  var trace=beginPageTurnBugTrace('forward');
   consumeSideAnchorVirtualPage();
-  if(usesLineBreakPaging()&&scrollPageBy(1))return;
+  if(usesLineBreakPaging()&&scrollPageBy(1)){schedulePageTurnBugTrace(trace);return;}
   if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1,1);else if(curCh<CH-1)beginChapterTurnFx(1,curCh+1,'start');else notifyReaderEndIfReached(1,true);
+  schedulePageTurnBugTrace(trace);
 }
 function prevPage(){
+  var trace=beginPageTurnBugTrace('backward');
   consumeSideAnchorVirtualPage();
-  if(usesLineBreakPaging()&&scrollPageBy(-1))return;
+  if(usesLineBreakPaging()&&scrollPageBy(-1)){schedulePageTurnBugTrace(trace);return;}
   if(isDualPage()&&dualStartColumn>0&&pageInCh===0){
     dualStartColumn=0;
     pagesInCh=fastChapterLayout?fastPagedPageCount(root):pagedPageCountFromContent(root);
     gotoPage(0,-1);
+    schedulePageTurnBugTrace(trace);
     return;
   }
   if(pageInCh>0)gotoPage(pageInCh-1,-1);else if(curCh>0)beginChapterTurnFx(-1,curCh-1,'end');
+  schedulePageTurnBugTrace(trace);
 }
 function wheelDeltaPx(e){
   var d=Math.abs(e.deltaY)>=Math.abs(e.deltaX)?e.deltaY:e.deltaX;

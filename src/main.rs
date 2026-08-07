@@ -58,16 +58,15 @@ mod update;
 mod url_open;
 mod vocab;
 mod window_commands;
-use book::Library;
 pub(crate) use runtime_support::{
     emit_startup_perf, interactive_search_workers, log, now_ms, report_save_error,
     set_thread_background, with_thread_background_priority, DEFAULT_SYNC_URL, RES_BASE,
 };
-use stats::StatsStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
+use {book::Library, stats::StatsStore};
 /// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
 pub(crate) struct AppState {
@@ -119,7 +118,6 @@ impl AppState {
                 search::clear_filter_memory_cache()
             }),
         );
-
         let sem_cache = Arc::clone(&self.sem_cache);
         let sem_order = Arc::clone(&self.sem_cache_order);
         let sem_bytes = Arc::clone(&self.sem_cache_bytes);
@@ -176,8 +174,8 @@ impl AppState {
         self.backfilled.store(false, Ordering::Relaxed);
     }
 }
-
 fn main() {
+    runtime_support::mark_process_started();
     if std::env::args().any(|a| a == "--sem-probe") {
         semantic::sem_probe();
         return;
@@ -327,11 +325,13 @@ fn main() {
             app_commands::background_task_cancel,
             app_commands::background_task_pause,
             app_commands::app_version,
+            app_commands::startup_elapsed_ms,
             app_commands::runtime_diagnostics,
             app_commands::clear_runtime_diagnostics,
             app_commands::open_default_apps_settings,
             startup::take_startup_book_paths,
             app_commands::save_download_image,
+            app_commands::problem_trace_checkpoint,
             app_commands::save_problem_trace_to_desktop,
             app_commands::dict_lookup,
             app_commands::external_dict_list,

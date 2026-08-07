@@ -20,3 +20,15 @@ __pycache__/
 # Build output generated when the vendored EPUB crate is tested directly
 /vendor/*/target/
 /vendor/*/Cargo.lock
+
+# Private operations material must live outside the repository.
+*.pem
+*.p12
+*.pfx
+*.key
+.env
+.env.*
+id_rsa
+id_ed25519
+*交接*.md
+*handover*.md

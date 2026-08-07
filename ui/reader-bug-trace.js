@@ -11,14 +11,21 @@
   const MAX_EVENTS = 320;
   const SAFE_EVENT_KEYS = new Set([
     "source", "outcome", "zone", "target", "direction", "key", "overlay",
-    "chapter", "page", "progress", "chapter_frac", "total_chapters", "x_pct",
+    "chapter", "page", "progress", "chapter_frac", "anchor_offset", "sequence", "total_chapters", "x_pct",
     "y_pct", "duration_ms", "format", "reason", "open", "ready", "is_pdf",
-    "frame_ready", "immersive", "loading",
+    "frame_ready", "immersive", "loading", "pages", "turn_id", "input",
+    "before_chapter", "before_page", "after_chapter", "after_page",
+    "chapter_pending", "chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "flow_mode", "page_mode",
   ]);
-  const BLOCKERS = new Set(["selection", "drag", "link", "overlay", "chapter_pending"]);
+  const BLOCKERS = new Set(["selection", "drag", "link", "overlay", "chapter_pending", "turn_busy"]);
   const events = [];
   let contextProvider = () => ({});
   let frozenSnapshot = null;
+  let checkpointTimer = null;
+  let checkpointInFlight = false;
+  let checkpointPending = false;
+  let cachedVersion = "";
+  let cachedRuntimeDiagnostics = null;
   function traceText(key, fallback, values) {
     const value = root.ReaderI18n?.t?.(key, values);
     return value && value !== key ? value : fallback;
@@ -43,7 +50,9 @@
       const item = value[key];
       if (typeof item === "boolean") result[key] = item;
       else if (typeof item === "number") {
-        const number = safeNumber(item, -1_000_000, 1_000_000);
+        const number = key === "anchor_offset"
+          ? safeNumber(item, 0, 1_000_000_000)
+          : safeNumber(item, -1_000_000, 1_000_000);
         if (number !== undefined) result[key] = number;
       } else if (typeof item === "string") result[key] = safeLabel(item);
     });
@@ -58,9 +67,11 @@
 
   function record(type, detail) {
     const now = Date.now();
+    const cleanType = safeLabel(type);
     prune(now);
-    events.push({ at_ms: now, type: safeLabel(type), detail: cleanEventDetail(detail) });
+    events.push({ at_ms: now, type: cleanType, detail: cleanEventDetail(detail) });
     prune(now);
+    if (cleanType !== "capture") checkpoint();
   }
 
   function cleanBook(value) {
@@ -120,13 +131,14 @@
     prune(capturedAt);
     let context = {};
     try { context = contextProvider() || {}; } catch (_) { context = {}; }
-    let version = "";
-    let runtimeDiagnostics = null;
+    let version = cachedVersion;
+    let runtimeDiagnostics = cachedRuntimeDiagnostics;
     const invoke = root.__TAURI__?.core?.invoke;
-    if (typeof invoke === "function") {
-      try { version = String(await invoke("app_version")); } catch (_) {}
-      try { runtimeDiagnostics = await invoke("runtime_diagnostics"); } catch (_) {
-        runtimeDiagnostics = { unavailable: true };
+    const refreshRuntime = source !== "checkpoint" || (!cachedVersion && cachedRuntimeDiagnostics === null);
+    if (typeof invoke === "function" && refreshRuntime) {
+      try { version = cachedVersion = String(await invoke("app_version")); } catch (_) {}
+      try { runtimeDiagnostics = cachedRuntimeDiagnostics = await invoke("runtime_diagnostics"); } catch (_) {
+        runtimeDiagnostics = cachedRuntimeDiagnostics = { unavailable: true };
       }
     }
     const recent = events.map((event) => ({
@@ -149,6 +161,38 @@
       events: recent,
     };
     return frozenSnapshot;
+  }
+
+  // 阅读窗口关闭后其内存会消失，因此在操作停止片刻后把最近快照交给
+  // 主窗口暂存。只传现有的脱敏结构，不包含正文、路径或表单内容。
+  function checkpoint(delayMs = 350) {
+    const eventApi = root.__TAURI__?.event;
+    const invoke = root.__TAURI__?.core?.invoke;
+    if ((!eventApi?.emit && typeof invoke !== "function") || typeof root.setTimeout !== "function") return;
+    if (checkpointTimer) root.clearTimeout(checkpointTimer);
+    checkpointTimer = root.setTimeout(async () => {
+      checkpointTimer = null;
+      if (checkpointInFlight) {
+        checkpointPending = true;
+        return;
+      }
+      checkpointInFlight = true;
+      try {
+        const snapshot = await capture("checkpoint");
+        const writes = [];
+        if (eventApi?.emit) writes.push(eventApi.emit("reader-bug-trace-checkpoint", { snapshot }));
+        if (typeof invoke === "function") writes.push(invoke("problem_trace_checkpoint", { snapshot }));
+        await Promise.allSettled(writes);
+      } catch (_) {
+        // 问题记录不能影响阅读；反馈页仍可通过即时请求获取。
+      } finally {
+        checkpointInFlight = false;
+        if (checkpointPending) {
+          checkpointPending = false;
+          checkpoint(100);
+        }
+      }
+    }, Math.max(0, Number(delayMs) || 0));
   }
 
   function ingestPageEvent(payload) {
@@ -293,6 +337,7 @@
     record,
     ingestPageEvent,
     capture,
+    checkpoint,
     reset,
     setContextProvider,
     _snapshotForTests: snapshotForTests,

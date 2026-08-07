@@ -26,11 +26,11 @@ test("book card clicks explicitly close main-window floaters", () => {
   assert.match(card, /addEventListener\("click",[\s\S]*?closeShelfCardFloaters\(\)/);
   assert.match(card, /addEventListener\("dblclick",[\s\S]*?closeShelfCardFloaters\(\)/);
   assert.match(card, /if \(selected\.size > 0\)[\s\S]*?toggleSelect\(b\.id, card\)/);
-  assert.match(card, /openTimer = setTimeout\([\s\S]*?if \(!selected\.size\) openBook\(\)/);
+  assert.match(card, /openTimer = setTimeout\([\s\S]*?if \(!selected\.size\) openBook\("single"\)/);
   assert.match(card, /let selectionTimer = null/);
   assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?selectionTimer = setTimeout\([\s\S]*?toggleSelect\(b\.id, card\)/);
   assert.match(card, /selectionTimer = setTimeout\([\s\S]*?\}, 180\)/);
-  assert.match(card, /clearTimeout\(selectionTimer\)[\s\S]*?restoreDeferredSelection\(\)[\s\S]*?openBook\(\)/);
+  assert.match(card, /clearTimeout\(selectionTimer\)[\s\S]*?restoreDeferredSelection\(\)[\s\S]*?openBook\("double"\)/);
   assert.match(card, /addEventListener\("contextmenu"/);
   assert.match(card, /addEventListener\("contextmenu",[\s\S]*?e\.preventDefault\(\)[\s\S]*?closeShelfCardFloaters\(\)/);
   assert.doesNotMatch(card, /openBookOrganizer/);
@@ -45,31 +45,21 @@ test("shelf covers cannot trigger native browser drag selection", () => {
   assert.match(styles, /\.shelf img\s*\{[^}]*-webkit-user-drag:\s*none;/s);
 });
 
-test("shelf fetches only first-screen covers immediately and observes the rest", () => {
+test("shelf assigns every cover URL and lets only non-first-screen images use native lazy loading", () => {
   const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
-  assert.match(source, /const DEFAULT_FIRST_SCREEN_COVER_COUNT = 12/);
-  assert.match(source, /localStorage\.getItem\("shelfFirstScreenCoverCount"\)/);
-  assert.match(source, /localStorage\.setItem\("shelfFirstScreenCoverCount"/);
-  assert.match(source, /function estimateFirstScreenCoverCount\(\)/);
-  assert.match(source, /if \(!hasRememberedFirstScreenCoverCount\)[\s\S]*?estimateFirstScreenCoverCount\(\)/);
-  assert.match(source, /function rememberFirstScreenCoverCount\(\)/);
-  assert.match(source, /global\.addEventListener\("pagehide", rememberFirstScreenCoverCount\)/);
-  assert.match(source, /new global\.IntersectionObserver/);
-  assert.match(source, /rootMargin: COVER_PRELOAD_MARGIN/);
-  assert.match(source, /function activateDeferredCovers\(\)/);
-  assert.match(card, /img\.decoding = "async"/);
-  assert.match(card, /if \(!coverOnDemand \|\| index < firstScreenCoverCount\)[\s\S]*?img\.src = b\.cover[\s\S]*?else \{[\s\S]*?img\.dataset\.coverSrc = b\.cover/);
-  assert.match(source, /coverObserver\?\.disconnect\(\)/);
-});
-
-test("cover loading mode is a persisted general setting", () => {
-  assert.match(html, /id="set-cover-on-demand"/);
-  assert.match(source, /localStorage\.getItem\("shelfCoverOnDemand"\) !== "0"/);
-  assert.match(source, /localStorage\.setItem\("shelfCoverOnDemand", coverOnDemand \? "1" : "0"\)/);
-  assert.match(source, /!coverOnDemand \|\| index < firstScreenCoverCount/);
   const i18n = fs.readFileSync(path.join(__dirname, "..", "app-i18n.js"), "utf8");
-  assert.match(i18n, /COVER_ON_DEMAND_COPY/);
-  assert.match(i18n, /coverOnDemand = label/);
+  assert.match(source, /const DEFAULT_FIRST_SCREEN_COVER_COUNT = 24/);
+  assert.match(source, /function estimateFirstScreenCoverCount\(\)/);
+  assert.match(source, /firstScreenCoverCount = Math\.max\(DEFAULT_FIRST_SCREEN_COVER_COUNT, estimateFirstScreenCoverCount\(\)\)/);
+  assert.match(card, /const eagerCoverLoad = index < firstScreenCoverCount/);
+  assert.match(card, /img\.loading = eagerCoverLoad \? "eager" : "lazy"/);
+  assert.match(card, /img\.decoding = eagerCoverLoad \? "sync" : "async"/);
+  assert.match(card, /img\.fetchPriority = eagerCoverLoad \? "high" : "auto"/);
+  assert.match(card, /img\.src = b\.cover/);
+  assert.doesNotMatch(card, /dataset\.coverSrc/);
+  assert.doesNotMatch(source, /shelfCoverOnDemand|coverOnDemand|coverObserver|activateDeferredCovers|IntersectionObserver/);
+  assert.doesNotMatch(html, /id="set-cover-on-demand"/);
+  assert.doesNotMatch(i18n, /COVER_ON_DEMAND_COPY|coverOnDemand/);
 });
 
 test("shelf opening preference switches between single-click opening and double-click opening", () => {
@@ -79,7 +69,7 @@ test("shelf opening preference switches between single-click opening and double-
   assert.match(source, /shelfSingleClickOpen/);
   assert.match(source, /function setSingleClickOpenPreference\(value\)/);
   assert.match(card, /if \(!singleClickOpensBook\)[\s\S]*?toggleSelect\(b\.id, card\)/);
-  assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?openBook\(\);[\s\S]*?return;/);
+  assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?openBook\("double"\);[\s\S]*?return;/);
   assert.match(source, /reflectOpenBookPreference/);
   assert.match(source, /setSingleClickOpenPreference\(setSingleClickOpen\.checked\)/);
   assert.match(source, /"单击打开图书" : "双击打开图书"/);
@@ -115,6 +105,31 @@ test("startup shelf can receive keyboard paging focus without stealing it on ref
   assert.match(html, /<div class="content" tabindex="-1">/);
   const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
   assert.match(app, /shelfUI\.render\(list\);[\s\S]*?requestAnimationFrame\(\(\) => shelfUI\.focusShelf\(\)\)/);
+});
+
+test("opening a book immediately updates recent-reading order without waiting for window focus", () => {
+  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  const windows = fs.readFileSync(path.join(__dirname, "..", "..", "src", "window_commands.rs"), "utf8");
+  assert.match(windows, /main\.emit\(\s*"shelf-book-read"/s);
+  assert.match(windows, /"lastReadAt": last_read_at/);
+  assert.match(app, /tauriEvent\.listen\("shelf-book-read"/);
+  assert.match(app, /shelfUI\.updateBook\(String\(e\?\.payload\?\.id \|\| ""\), \{ last_read_at: Number\(e\?\.payload\?\.lastReadAt \|\| 0\) \}\)/);
+});
+
+test("reader close keeps its transition marked until the old window unregisters", () => {
+  const windows = fs.readFileSync(path.join(__dirname, "..", "..", "src", "window_commands.rs"), "utf8");
+  assert.match(windows, /CLOSING_READER_WINDOWS/);
+  assert.match(windows, /WindowEvent::CloseRequested[\s\S]*?set_reader_window_closing\(&event_label, true\)/);
+  assert.match(windows, /WindowEvent::Destroyed[\s\S]*?不在后台按标签轮询并清 closing/);
+  assert.match(windows, /else if reader_window_is_closing\(&label\)[\s\S]*?already_unregistered/);
+  assert.doesNotMatch(windows, /fn clear_reader_closing_after_unregister/);
+  assert.match(windows, /open_wait[\s\S]*?while app\.get_webview_window\(&label\)\.is_some\(\)[\s\S]*?open_build/);
+  const closeCommand = windows.slice(windows.indexOf("pub(crate) fn main_window_close"), windows.indexOf("pub(crate) fn main_window_start_dragging"));
+  assert.match(closeCommand, /set_reader_window_closing\(window\.label\(\), true\)[\s\S]*?window\.close\(\)/);
+  assert.doesNotMatch(windows, /force_windows_foreground|focus_main_window|finish_reader_window_close|prevent_close|Duration::from_millis\(80\)|Duration::from_millis\(1200\)/);
+  assert.match(windows, /reader-window-trace/);
+  assert.match(windows, /READER_CLOSE_STARTED/);
+  assert.match(windows, /WindowEvent::Destroyed[\s\S]*?take_reader_close_elapsed\(&event_label\)/);
 });
 
 test("account sync description includes book tags and collections", () => {

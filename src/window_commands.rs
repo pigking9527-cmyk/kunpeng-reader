@@ -2,8 +2,65 @@ use crate::{
     book::{Library, WinGeom},
     log, now_ms, report_save_error, AppState,
 };
-use std::sync::atomic::Ordering;
-use tauri::Manager;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{atomic::Ordering, LazyLock, Mutex},
+    time::{Duration, Instant},
+};
+use tauri::{Emitter, Manager};
+
+static CLOSING_READER_WINDOWS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static READER_CLOSE_STARTED: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn mark_reader_close_started(label: &str) {
+    READER_CLOSE_STARTED
+        .lock()
+        .unwrap()
+        .entry(label.to_string())
+        .or_insert_with(Instant::now);
+}
+
+fn take_reader_close_elapsed(label: &str) -> Duration {
+    READER_CLOSE_STARTED
+        .lock()
+        .unwrap()
+        .remove(label)
+        .map(|started| started.elapsed())
+        .unwrap_or(Duration::ZERO)
+}
+
+fn set_reader_window_closing(label: &str, closing: bool) {
+    let mut labels = CLOSING_READER_WINDOWS.lock().unwrap();
+    if closing {
+        labels.insert(label.to_string());
+    } else {
+        labels.remove(label);
+    }
+}
+
+fn reader_window_is_closing(label: &str) -> bool {
+    CLOSING_READER_WINDOWS.lock().unwrap().contains(label)
+}
+
+fn emit_reader_window_trace(
+    app: &tauri::AppHandle,
+    phase: &str,
+    outcome: &str,
+    duration: Duration,
+) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.emit(
+            "reader-window-trace",
+            serde_json::json!({
+                "phase": phase,
+                "outcome": outcome,
+                "durationMs": duration.as_millis().min(u128::from(u32::MAX)) as u32,
+            }),
+        );
+    }
+}
 
 #[tauri::command]
 pub(crate) fn main_window_minimize(window: tauri::WebviewWindow) -> Result<(), String> {
@@ -20,6 +77,33 @@ pub(crate) fn main_window_toggle_maximize(window: tauri::WebviewWindow) -> Resul
 
 #[tauri::command]
 pub(crate) fn main_window_close(window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label().starts_with("reader-") {
+        if reader_window_is_closing(window.label()) {
+            return Ok(());
+        }
+        mark_reader_close_started(window.label());
+        set_reader_window_closing(window.label(), true);
+        emit_reader_window_trace(
+            window.app_handle(),
+            "close_command",
+            "requested",
+            Duration::ZERO,
+        );
+        // 网页关闭按钮已经等待精确阅读位置写盘，直接沿用早期稳定版的正常
+        // 销毁流程。不要在销毁后再次抢焦点，避免打断用户紧接着的书卡点击。
+        if let Err(error) = window.close() {
+            set_reader_window_closing(window.label(), false);
+            let _ = take_reader_close_elapsed(window.label());
+            emit_reader_window_trace(
+                window.app_handle(),
+                "close_command",
+                "failed",
+                Duration::ZERO,
+            );
+            return Err(error.to_string());
+        }
+        return Ok(());
+    }
     window.close().map_err(|e| e.to_string())
 }
 
@@ -54,10 +138,47 @@ pub(crate) fn ensure_reader_window(
     state: &AppState,
     id_num: u64,
 ) -> Result<tauri::WebviewWindow, String> {
+    let open_started = Instant::now();
     let label = format!("reader-{id_num}");
     if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.set_focus();
-        return Ok(window);
+        if !reader_window_is_closing(&label) {
+            let result = window.set_focus().map_err(|error| error.to_string());
+            emit_reader_window_trace(
+                app,
+                "open_existing",
+                if result.is_ok() { "focused" } else { "failed" },
+                open_started.elapsed(),
+            );
+            return result.map(|_| window);
+        }
+        // CloseRequested 到 Destroyed 之间，同名窗口仍会短暂留在 Tauri 注册表中。
+        // 必须一直保留 closing 标记到注册项真正消失；Destroyed 事件早于注销，
+        // 若在那里清标记，第一次点击会误聚焦已销毁的旧 WebView 并返回成功。
+        emit_reader_window_trace(app, "open_wait", "started", open_started.elapsed());
+        log(&format!(
+            "open_book waiting for closing window label={label}"
+        ));
+        let deadline = Instant::now() + Duration::from_millis(2500);
+        while app.get_webview_window(&label).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if app.get_webview_window(&label).is_some() {
+            emit_reader_window_trace(app, "open_wait", "timeout", open_started.elapsed());
+            return Err("阅读窗口仍在关闭，请稍候再试。".to_string());
+        }
+        set_reader_window_closing(&label, false);
+        emit_reader_window_trace(app, "open_wait", "unregistered", open_started.elapsed());
+    } else if reader_window_is_closing(&label) {
+        // Destroyed 早于 Tauri 注销；若此时已经查不到同名注册项，说明旧窗口
+        // 已完整退出。由本次打开原子地清标记并继续创建，不启动会误碰新窗口
+        // 的后台清理线程。
+        set_reader_window_closing(&label, false);
+        emit_reader_window_trace(
+            app,
+            "open_wait",
+            "already_unregistered",
+            open_started.elapsed(),
+        );
     }
     // 禁止多开：打开新书前，关掉其它已打开的阅读窗口（始终只保留一个阅读窗口）
     for (other_label, window) in app.webview_windows() {
@@ -124,6 +245,12 @@ pub(crate) fn ensure_reader_window(
     }
     let result = builder.build();
     log(&format!("open_book built ok={}", result.is_ok()));
+    emit_reader_window_trace(
+        app,
+        "open_build",
+        if result.is_ok() { "ok" } else { "failed" },
+        open_started.elapsed(),
+    );
     let window = result.map_err(|error| error.to_string())?;
     if !on_screen {
         let _ = window.center(); // 上次坐标已不在任何屏幕内 → 回到屏幕中央
@@ -138,6 +265,9 @@ pub(crate) fn ensure_reader_window(
     let event_label = label.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { .. } = event {
+            mark_reader_close_started(&event_label);
+            set_reader_window_closing(&event_label, true);
+            emit_reader_window_trace(&event_app, "close_requested", "saving", Duration::ZERO);
             if let Some(closing) = event_app.get_webview_window(&event_label) {
                 let state = event_app.state::<AppState>();
                 // 页数测量的实际工作在这个 WebView 中。关闭时把已经落盘的
@@ -150,12 +280,39 @@ pub(crate) fn ensure_reader_window(
                 report_save_error("书架", library.save());
                 report_save_error("统计", state.stats.lock().unwrap().save());
             }
+        } else if let tauri::WindowEvent::Destroyed = event {
+            emit_reader_window_trace(
+                &event_app,
+                "destroyed",
+                "closed",
+                take_reader_close_elapsed(&event_label),
+            );
+            // 不在后台按标签轮询并清 closing：同名新窗口可能已经创建。
+            // 下一次 ensure_reader_window 会在确认旧注册项消失后原子地清理。
         }
     });
 
     // 先只更新内存里的“最近阅读”。旧实现此处持有书架锁同步写盘，恰好会
     // 挡住新 WebView 紧接着发出的 book_info，导致窗口出现后仍长时间空白。
-    state.library.lock().unwrap().mark_read(id_num);
+    let last_read_at = {
+        let mut library = state.library.lock().unwrap();
+        library.mark_read(id_num);
+        library
+            .get(id_num)
+            .map(|book| book.last_read_at)
+            .unwrap_or(0)
+    };
+    // 主窗口不必等重新获得焦点后再请求整份书架；打开成功时立即把这一项
+    // 的最近阅读时间推过去，使“按最近阅读”在阅读窗口出现前就已重排。
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.emit(
+            "shelf-book-read",
+            serde_json::json!({
+                "id": id_num.to_string(),
+                "lastReadAt": last_read_at,
+            }),
+        );
+    }
     let save_app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));

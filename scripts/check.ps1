@@ -21,6 +21,10 @@ function Invoke-NativeCheck {
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
+  Write-Host '== repository safety =='
+  & (Join-Path $repo 'scripts\check-repository-safety.ps1') -AllTracked
+  if ($LASTEXITCODE -ne 0) { throw 'Repository safety check failed.' }
+
   Write-Host '== cargo fmt --check =='
   Invoke-NativeCheck 'cargo fmt --check' { cargo fmt -- --check }
 

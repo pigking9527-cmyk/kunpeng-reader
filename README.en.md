@@ -6,7 +6,7 @@ A high-performance local ebook reader for Windows, macOS, Linux, and Android. Th
 
 > **License notice:** this repository is **source-available**. The code is public only for learning, evaluation, and communication. Copying, modifying, distributing, commercial use, or publishing derivative versions requires the author's written permission. See [LICENSE](LICENSE).
 
-> Latest release: Windows / macOS / Linux **v1.13.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases): Windows installer and portable executable, Apple Silicon DMG/App ZIP, Linux AppImage/deb, and Android Profile APK.
+> Latest release: Windows **v1.13.1** · macOS / Linux **v1.13.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases). v1.13.1 updates only the Windows x64 installer; other platforms remain on their existing releases.
 
 ## Features
 
@@ -68,6 +68,8 @@ powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 ```
 
 GitHub Actions runs the same checks on pushes and pull requests to `main`.
+
+Repository safety rules and the explicit release staging workflow are documented in [Repository safety](docs/security/repository-safety.md). Install the commit hook after cloning and never use stage-all for releases.
 
 Release build (produces the release executable, updates the project-root runtime, validates the icon and refreshes the Windows icon cache):
 

@@ -29,15 +29,6 @@
   Object.entries(END_RECOMMENDATION_COPY).forEach(([locale, label]) => {
     COPY[locale].endRecommendations = label;
   });
-  const COVER_ON_DEMAND_COPY = {
-    "zh-CN": "封面按需加载", "zh-TW": "封面按需載入", en: "Load covers on demand",
-    ja: "表紙を必要時に読み込む", ko: "표지 필요 시 불러오기", fr: "Charger les couvertures à la demande",
-    de: "Cover bei Bedarf laden", es: "Cargar portadas según se necesiten", ru: "Загружать обложки по мере необходимости",
-    "pt-BR": "Carregar capas sob demanda",
-  };
-  Object.entries(COVER_ON_DEMAND_COPY).forEach(([locale, label]) => {
-    COPY[locale].coverOnDemand = label;
-  });
   Object.assign(COPY["zh-CN"], {
     newsTitle: "今日资讯", newsDescription: "按时间归并的轻量资讯流，只在你打开时加载。", backToShelf: "返回书架", manageSources: "管理来源", refresh: "刷新", sourceSettings: "资讯来源设置", sourceSettingsHint: "勾选想看的来源；设置只保存在此设备。", sourceSearch: "搜索来源、分类或关键词", restoreRecommended: "恢复推荐", doneAndRefresh: "完成并刷新", layout: "布局", listLayout: "横排布局", gridLayout: "方格布局", mixedOrder: "混合", bySourceOrder: "按来源", newsCategoryAll: "全部", newsSourceSummary: "显示 {count} 个来源", newsRecommendedSources: "使用推荐来源", newsSelectedSources: "已选 {count} / {max}", noMatchingSources: "没有找到匹配的内置来源。", maxSources: "最多选择 {max} 个来源。", chooseSource: "至少选择一个来源，或使用“恢复推荐”。", openWebPage: "打开网页 →", noNewsInCategory: "这个分类暂时没有资讯。", noNews: "暂无资讯。请刷新，或在“管理来源”中调整显示内容。", loadingNews: "加载中…", refreshingNews: "刷新中…", newsUpdatedAt: "更新于 {time}", libraryDescription: "先在本机语义索引中检索，再只把命中的少量段落发送到你已配置的智读服务。每条回答都可跳回原书章节。", bookClassification: "书籍分类", questionHistory: "问答记录", localSearchCitations: "本地检索 · 可追溯引文", searchScope: "检索范围", libraryQuestion: "书库问答", crossBookCompare: "跨书对比", yourQuestion: "你的问题", startQuestion: "开始问答", answerPlaceholder: "选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。", questionPlaceholder: "例如：这些书如何解释清末财政困境？\n跨书对比时：比较选中作品对同一主题的观点与依据。", allTags: "全部标签", allCollections: "全部收藏夹", clearFilters: "清除筛选", cancelLimit: "取消限定", clearSelection: "清空选择", selectVisible: "全选当前列表", invertVisible: "反选当前列表", noBooks: "书架中还没有图书。", noFilteredBooks: "没有符合当前标签和收藏夹的图书。", unnamedQuestion: "未命名问答", noQuestionHistory: "还没有保存的书库问答。完成一次问答后会自动保存到这里。", loadingLibrary: "正在读取书架与智读配置…", askInProgress: "检索并问答中…", enterQuestion: "请输入问题。", libraryQuestionFailed: "书库问答失败。", libraryHistory: "问答记录", returnToAnswer: "返回本次回答", delete: "删除", copy: "复制", cut: "剪切", paste: "粘贴"
   });
@@ -224,6 +215,21 @@
     activeFilters: "필터 적용 중", matchAll: "모두 일치", matchAllHint: "태그와 컬렉션이 모두 일치해야 합니다. 누르면 하나라도 일치로 바뀝니다.", matchAnyHint: "태그 또는 컬렉션 중 하나가 일치하면 됩니다. 누르면 모두 일치로 바뀝니다.", selectItems: "{title} 선택", multiSelectNoFilter: "여러 항목을 선택할 수 있으며, 선택하지 않으면 필터링하지 않습니다.", statsHourMinute: "{hours}시간 {minutes}분", statsMinutes: "{minutes}분", statsSeconds: "{seconds}초", statsWords: "{words}단어", statsTenThousandWords: "{words}만 단어", wordsPerMinute: "분당 {words}단어", statsMonth: "{month}개월", statsAll: "전체", statsLoading: "독서 통계를 불러오는 중…", statsLoadFailed: "독서 통계를 불러오지 못했습니다. 나중에 다시 시도하세요.", statsPeriodUnit: "기간", currentPeriodBooks: "이번 {unit}에 읽은 책", noReadingRecords: "이 기간에는 읽기 기록이 없습니다.", yearlyHeatmap: "지난 1년간의 일별 읽기 히트맵", totalReadingTime: "누적 읽기 시간", dailyPeak: "일일 최고", currentStreak: "현재 연속 읽기", longestStreak: "최장 연속 읽기", days: "{count}일", finishedBook: "완독", statsQualityDwell: "이 기간에는 유휴 시간이 포함될 수 있습니다. 읽기 시간은 길지만 집계된 단어 수가 적습니다.", statsQualityFast: "평균 읽기 속도가 높습니다. 빠른 페이지 넘김이나 중복 집계가 포함되었을 수 있습니다.", statsQualitySlow: "평균 읽기 속도가 낮습니다. 유휴 시간 또는 스캔한 PDF가 포함되었을 수 있습니다.", gestureNeedPath: "먼저 돌아가기 제스처 경로를 그리고 저장하세요.", gesturePrecisionSaved: "돌아가기 제스처 정밀도를 {precision}(으)로 설정했습니다.", gesturePathTooShort: "경로가 너무 짧아 저장하지 않았습니다.", gestureSaved: "돌아가기 제스처를 저장하고 사용하도록 설정했습니다.", gestureCleared: "돌아가기 제스처를 지우고 사용하지 않도록 설정했습니다.", longContextUnavailable: "아직 사용할 수 없습니다. 눌러 설정 방법을 확인하세요.", longContextEnabled: "복잡한 질문 장문 정독을 켰습니다.", longContextDisabled: "복잡한 질문 장문 정독을 껐습니다.", longContextSaveFailed: "장문 정독 설정에 실패했습니다: {error}", longContextSetupPath: "설정 방법: 설정 → 의미 색인 → BGE-M3 선택 → 모델 다운로드 → 의미 색인 만들기. 그다음 라이브러리 Q&A → 설정에서 켜세요.", answerLengthSaveFailed: "답변 길이를 저장하지 못했습니다: {error}", statsBookNotes: "하이라이트 {highlights} · 메모 {notes}",
 
     accountSecurityBoundEmail: "연결된 확인 이메일: {email}. 로그인 비밀번호를 복구하는 데 사용할 수 있습니다.", accountSecurityEmailUnbound: "확인된 이메일이 연결되지 않았습니다. 비밀번호를 복구하려면 이메일을 연결하세요.", accountSecurityMailUnavailable: "계정 보안 이메일이 설정되지 않아 이메일 연결 및 비밀번호 복구를 사용할 수 없습니다.", accountSecurityLoadFailed: "계정 보안 상태를 불러오지 못했습니다: {error}", cloudSecretAvailable: "암호화된 키 패키지가 클라우드에 있습니다. 이 기기에서 잠금을 해제하려면 동기화 비밀번호를 입력하세요.", localSecretsOnly: "API 키와 번역 키는 기본적으로 이 기기에만 보관됩니다.", privateSyncLoadFailed: "비공개 동기화 설정을 불러오지 못했습니다: {error}"
+  });
+  const HISTORY_RETENTION_COPY = {
+    "zh-CN": "包括单书与书库问答；云端各保留 100 条，不上传书籍原文",
+    "zh-TW": "包括單書與書庫問答；雲端各保留 100 條，不上傳書籍原文",
+    en: "Cloud history keeps 100 AI-reading records and 100 Library Q&A records; book text is never uploaded",
+    ja: "クラウドにはAI読書100件とライブラリQ&A 100件を保存し、本文はアップロードしません。",
+    ko: "클라우드에 AI 읽기 100개와 라이브러리 Q&A 100개를 보관하며 책 본문은 업로드하지 않습니다.",
+    fr: "Le cloud conserve 100 historiques de lecture IA et 100 questions-réponses de bibliothèque, sans importer le texte des livres.",
+    de: "Die Cloud speichert 100 KI-Leseverläufe und 100 Bibliotheksfragen; Buchtexte werden nicht hochgeladen.",
+    es: "La nube conserva 100 historiales de lectura con IA y 100 consultas de biblioteca; no se sube el texto de los libros.",
+    ru: "В облаке хранится 100 записей ИИ-чтения и 100 вопросов к библиотеке; текст книг не загружается.",
+    "pt-BR": "A nuvem mantém 100 históricos de leitura com IA e 100 perguntas da biblioteca; o texto dos livros não é enviado.",
+  };
+  Object.entries(HISTORY_RETENTION_COPY).forEach(([locale, text]) => {
+    COPY[locale].syncAiHistoryHint = text;
   });
   function selectedLanguage() { return localStorage.getItem(STORAGE_KEY) || "system"; }
   function resolvedLanguage() {

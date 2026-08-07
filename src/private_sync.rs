@@ -23,6 +23,8 @@ const TRANSLATE_CONFIG_KIND: &str = "translation_config_v1";
 const HISTORY_KIND: &str = "ai_reader_history_v1";
 /// A stable account-level record, intentionally not a local book id or path.
 const LIBRARY_HISTORY_ID: &str = "library-v1";
+const HISTORY_LIVE_LIMIT: usize = 100;
+const HISTORY_TOMBSTONE_LIMIT: usize = 200;
 const SECRET_KIND: &str = "secret_bundle_v1";
 const DEFAULT_ID: &str = "default";
 const KDF_ITERATIONS: u32 = 210_000;
@@ -202,7 +204,7 @@ fn normalized_entries(entries: Vec<Value>) -> Vec<Value> {
             .and_then(Value::as_str)
             .cmp(&left.get("at").and_then(Value::as_str))
     });
-    live.truncate(40);
+    live.truncate(HISTORY_LIVE_LIMIT);
     let mut tombstones = by_id
         .values()
         .filter(|entry| is_history_tombstone(entry))
@@ -214,7 +216,7 @@ fn normalized_entries(entries: Vec<Value>) -> Vec<Value> {
             .and_then(Value::as_str)
             .cmp(&left.get("deletedAt").and_then(Value::as_str))
     });
-    tombstones.truncate(80);
+    tombstones.truncate(HISTORY_TOMBSTONE_LIMIT);
     live.extend(tombstones);
     live
 }
@@ -225,6 +227,45 @@ fn clipped_text(value: &str, max_bytes: usize) -> String {
         value.pop();
     }
     value
+}
+
+/// Select the account-wide cloud subset for per-book AI-reading history.
+/// Local per-book history remains available; only the latest records across
+/// all books are materialized as sync entities.
+fn account_history_payloads(
+    histories: Vec<(String, Vec<Value>)>,
+) -> std::collections::BTreeMap<String, Vec<Value>> {
+    let mut live = Vec::<(String, Value)>::new();
+    let mut tombstones = Vec::<(String, Value)>::new();
+    for (content_id, entries) in histories {
+        for entry in normalized_entries(entries) {
+            if is_history_tombstone(&entry) {
+                tombstones.push((content_id.clone(), entry));
+            } else {
+                live.push((content_id.clone(), entry));
+            }
+        }
+    }
+    live.sort_by(|(_, left), (_, right)| {
+        right
+            .get("at")
+            .and_then(Value::as_str)
+            .cmp(&left.get("at").and_then(Value::as_str))
+    });
+    live.truncate(HISTORY_LIVE_LIMIT);
+    tombstones.sort_by(|(_, left), (_, right)| {
+        right
+            .get("deletedAt")
+            .and_then(Value::as_str)
+            .cmp(&left.get("deletedAt").and_then(Value::as_str))
+    });
+    tombstones.truncate(HISTORY_TOMBSTONE_LIMIT);
+
+    let mut grouped = std::collections::BTreeMap::<String, Vec<Value>>::new();
+    for (content_id, entry) in live.into_iter().chain(tombstones) {
+        grouped.entry(content_id).or_default().push(entry);
+    }
+    grouped
 }
 
 /// Library answers are saved as user-owned notes.  The source list deliberately
@@ -467,16 +508,44 @@ fn materialize(db: &mut AppDb) -> Result<(), String> {
         db.soft_delete(AI_CONFIG_KIND, DEFAULT_ID)?;
         db.soft_delete(TRANSLATE_CONFIG_KIND, DEFAULT_ID)?;
     }
-    for (key, text) in db.metadata_with_prefix(HISTORY_PREFIX)? {
+    let stored_histories = db.metadata_with_prefix(HISTORY_PREFIX)?;
+    let mut history_ids = Vec::new();
+    let mut histories = Vec::new();
+    for (key, text) in stored_histories {
         let Some(content_id) = key.strip_prefix(HISTORY_PREFIX) else {
             continue;
         };
-        if options.sync_ai_history {
-            if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                db.upsert_json_batch(&[(HISTORY_KIND.to_string(), content_id.to_string(), value)])?;
+        if !valid_content_id(content_id) {
+            continue;
+        }
+        history_ids.push(content_id.to_string());
+        let entries = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        histories.push((content_id.to_string(), entries));
+    }
+    if options.sync_ai_history {
+        let mut payloads = account_history_payloads(histories);
+        for content_id in history_ids {
+            match payloads.remove(&content_id) {
+                Some(entries) if !entries.is_empty() => {
+                    db.upsert_json_batch(&[(
+                        HISTORY_KIND.to_string(),
+                        content_id.clone(),
+                        serde_json::json!({
+                            "version": 1,
+                            "contentId": content_id,
+                            "entries": entries,
+                        }),
+                    )])?;
+                }
+                _ => db.soft_delete(HISTORY_KIND, &content_id)?,
             }
-        } else {
-            db.soft_delete(HISTORY_KIND, content_id)?;
+        }
+    } else {
+        for content_id in history_ids {
+            db.soft_delete(HISTORY_KIND, &content_id)?;
         }
     }
     if options.sync_ai_history {
@@ -779,13 +848,46 @@ mod tests {
     }
 
     #[test]
-    fn history_deduplicates_and_caps_at_forty_entries() {
-        let entries = (0..45)
-            .map(|i| serde_json::json!({"at": format!("2026-07-29T00:{i:02}:00Z"), "question": "q", "content": i}))
+    fn history_deduplicates_and_caps_at_one_hundred_entries() {
+        let entries = (0..105)
+            .map(|i| serde_json::json!({"at": format!("2026-07-29T{i:03}:00:00Z"), "question": "q", "content": i}))
             .collect::<Vec<_>>();
         let normalized = normalized_entries(entries);
-        assert_eq!(normalized.len(), 40);
+        assert_eq!(normalized.len(), HISTORY_LIVE_LIMIT);
         assert!(valid_content_id(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn reader_cloud_history_is_bounded_across_books() {
+        let histories = (0..3)
+            .map(|book| {
+                let entries = (0..45)
+                    .map(|index| {
+                        let rank = book * 45 + index;
+                        serde_json::json!({
+                            "id": format!("reader:{book}:{index}"),
+                            "at": format!("2026-08-{rank:03}T00:00:00Z"),
+                            "question": "q",
+                            "content": "answer"
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (format!("{book:064x}"), entries)
+            })
+            .collect::<Vec<_>>();
+        let payloads = account_history_payloads(histories);
+        assert_eq!(
+            payloads.values().map(Vec::len).sum::<usize>(),
+            HISTORY_LIVE_LIMIT
+        );
+        assert!(payloads
+            .values()
+            .flatten()
+            .any(|entry| entry["id"] == "reader:2:44"));
+        assert!(!payloads
+            .values()
+            .flatten()
+            .any(|entry| entry["id"] == "reader:0:0"));
     }
 
     #[test]
@@ -835,18 +937,38 @@ mod tests {
 
     #[test]
     fn library_history_is_bounded_and_deduplicated() {
-        let entries = (0..45)
+        let entries = (0..105)
             .map(|index| {
                 serde_json::json!({
                     "question": format!("q-{index}"),
                     "content": "answer",
-                    "at": format!("2026-08-05T00:{index:02}:00Z"),
+                    "at": format!("2026-08-{index:03}T00:00:00Z"),
                     "sources": []
                 })
             })
             .collect::<Vec<_>>();
         let normalized = normalized_library_entries(entries);
-        assert_eq!(normalized.len(), 40);
-        assert_eq!(normalized[0]["question"], "q-44");
+        assert_eq!(normalized.len(), HISTORY_LIVE_LIMIT);
+        assert_eq!(normalized[0]["question"], "q-104");
+    }
+
+    #[test]
+    fn history_retention_contract_matches_runtime_constants() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../contracts/fixtures/ai-reader-history-retention.v1.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            fixture["policy"]["aiReaderLivePerAccount"],
+            HISTORY_LIVE_LIMIT
+        );
+        assert_eq!(
+            fixture["policy"]["libraryLivePerAccount"],
+            HISTORY_LIVE_LIMIT
+        );
+        assert_eq!(
+            fixture["policy"]["tombstonesPerCategory"],
+            HISTORY_TOMBSTONE_LIMIT
+        );
     }
 }

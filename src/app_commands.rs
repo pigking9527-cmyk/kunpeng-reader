@@ -41,6 +41,12 @@ pub(crate) fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// 从 Rust 进程进入 main 开始计算的启动耗时，供书架记录跨 WebView 的完整启动阶段。
+#[tauri::command]
+pub(crate) fn startup_elapsed_ms() -> u64 {
+    crate::runtime_support::process_start_elapsed_ms()
+}
+
 #[tauri::command]
 pub(crate) fn runtime_diagnostics() -> diagnostics::RuntimeDiagnostics {
     diagnostics::snapshot()
@@ -90,6 +96,56 @@ pub(crate) fn save_download_image(name: String, data_url: String) -> Result<Stri
     Ok(dir.to_string_lossy().into_owned())
 }
 
+const PROBLEM_TRACE_WINDOW_MS: u64 = 2 * 60 * 1000;
+const PROBLEM_TRACE_MAX_BYTES: usize = 256 * 1024;
+
+fn validate_problem_trace_checkpoint(snapshot: &serde_json::Value) -> Result<(), String> {
+    let object = snapshot
+        .as_object()
+        .ok_or_else(|| "问题记录数据格式不正确".to_string())?;
+    if object
+        .get("captured_at")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+        || !object.get("events").is_none_or(serde_json::Value::is_array)
+    {
+        return Err("问题记录数据格式不正确".to_string());
+    }
+    let bytes = serde_json::to_vec(snapshot).map_err(|_| "问题记录数据格式不正确".to_string())?;
+    if bytes.is_empty() || bytes.len() > PROBLEM_TRACE_MAX_BYTES {
+        return Err("问题记录超过 256 KB，无法缓存".to_string());
+    }
+    Ok(())
+}
+
+static PROBLEM_TRACE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<Option<(u64, serde_json::Value)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Keep the latest redacted reader snapshot in the Rust process so closing the
+/// reader WebView does not destroy the only copy before the Bug dialog opens.
+#[tauri::command]
+pub(crate) fn problem_trace_checkpoint(
+    snapshot: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let mut cached = PROBLEM_TRACE_CACHE
+        .lock()
+        .map_err(|_| "问题记录缓存暂时不可用".to_string())?;
+    if let Some(snapshot) = snapshot {
+        validate_problem_trace_checkpoint(&snapshot)?;
+        *cached = Some((now_ms(), snapshot));
+        return Ok(None);
+    }
+    let Some((stored_at, snapshot)) = cached.as_ref() else {
+        return Ok(None);
+    };
+    if now_ms().saturating_sub(*stored_at) <= PROBLEM_TRACE_WINDOW_MS {
+        return Ok(Some(snapshot.clone()));
+    }
+    *cached = None;
+    Ok(None)
+}
+
 /// Saves the user-requested, redacted problem-trace attachment directly to the desktop.
 /// The UI already enforces the same limit before an attachment can be submitted; validate
 /// again here so the command cannot be used to write arbitrary large/non-JSON data.
@@ -97,14 +153,13 @@ pub(crate) fn save_download_image(name: String, data_url: String) -> Result<Stri
 pub(crate) fn save_problem_trace_to_desktop(name: String, data: String) -> Result<String, String> {
     use base64::Engine;
 
-    const MAX_JSON_BYTES: usize = 256 * 1024;
-    if data.len() > MAX_JSON_BYTES.saturating_mul(2) {
+    if data.len() > PROBLEM_TRACE_MAX_BYTES.saturating_mul(2) {
         return Err("问题记录超过 256 KB，无法保存".to_string());
     }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .map_err(|_| "问题记录数据格式不正确".to_string())?;
-    if bytes.is_empty() || bytes.len() > MAX_JSON_BYTES {
+    if bytes.is_empty() || bytes.len() > PROBLEM_TRACE_MAX_BYTES {
         return Err("问题记录超过 256 KB，无法保存".to_string());
     }
     serde_json::from_slice::<serde_json::Value>(&bytes)

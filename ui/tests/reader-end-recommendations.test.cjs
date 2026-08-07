@@ -30,7 +30,7 @@ test("the final page stays readable until another forward turn crosses the end",
   assert.match(end, /function notifyReaderEndIfReached\(dir,boundaryAttempt\)/);
   assert.match(end, /if\(!atEnd\)\{readerEndNotified=false;return false;\}/);
   assert.match(end, /dir>0&&boundaryAttempt===true&&!readerEndNotified/);
-  assert.match(layout, /report\(\);notifyReaderEndIfReached\(dir\);captureAnchor\(\)/);
+  assert.match(layout, /captureAnchor\(\);report\(true\);notifyReaderEndIfReached\(dir\)/);
   assert.match(layout, /updateScrollPageAfterProgrammatic\(\);\s*notifyReaderEndIfReached\(dir\)/);
   assert.match(transition, /showChapter\(chapter,where\)[\s\S]*?notifyReaderEndIfReached\(dir\)/);
   assert.match(layout, /else notifyReaderEndIfReached\(1,true\);/);

@@ -5,7 +5,7 @@
 一个面向 Windows、macOS、Linux 与 Android 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
-> 最新版本：Windows / macOS / Linux **v1.13.0** · Android **v0.3.0**。下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)（Windows 安装包 / 单文件绿色版；macOS Apple Silicon DMG / App ZIP；Linux AppImage / deb；Android Profile APK）。
+> 最新版本：Windows **v1.13.1** · macOS / Linux **v1.13.0** · Android **v0.3.0**。下载见 [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)。v1.13.1 仅更新 Windows x64 安装包；其他平台继续使用各自现有版本。
 
 ## 特性
 
@@ -83,6 +83,8 @@ powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 ```
 
 GitHub Actions 会在 `main` 的 push / pull request 上自动运行同一套检查。
+
+提交与发布前的资料安全流程见 [仓库资料安全流程](docs/security/repository-safety.md)。首次克隆请安装提交钩子；发布时必须用 `scripts/stage-release.ps1` 暂存明确的发布文件，禁止“暂存全部”。
 
 发布构建（生成 release exe、将运行文件更新到项目根目录、在桌面创建快捷方式、校验图标并刷新 Windows 图标缓存）：
 

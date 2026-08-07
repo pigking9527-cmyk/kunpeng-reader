@@ -510,6 +510,12 @@
       .ai-reader-answer code { padding: 1px 4px; border-radius: 4px; background: #eef3fa; font-family: Consolas, monospace; font-size: .92em; }
       .ai-reader-citation { display: inline; border: 0; padding: 0 2px; background: transparent; color: #276dce; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
       .ai-reader-citation:hover, .ai-reader-citation:focus-visible { color: #124e9d; outline: none; }
+      .ai-reader-source-preview { position: absolute; z-index: 3; width: min(320px, calc(100% - 24px)); max-height: min(280px, 44vh); overflow: auto; box-sizing: border-box; padding: 11px 12px; border: 1px solid #a9bee1; border-radius: 9px; background: #fff; color: #2d3a51; box-shadow: 0 10px 28px rgba(25,39,70,.22); }
+      .ai-reader-source-preview[hidden] { display: none; }
+      .ai-reader-source-preview-label { color: #45658f; font-size: 12px; font-weight: 600; line-height: 1.4; }
+      .ai-reader-source-preview-excerpt { margin-top: 7px; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+      .ai-reader-source-preview-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+      .ai-reader-source-preview-jump { border: 0; padding: 3px 0; background: transparent; color: #276dce; cursor: pointer; font: inherit; font-size: 12px; }
       .ai-reader-mindmap { height: 100%; overflow: auto; border-radius: 6px; background: linear-gradient(135deg, #fafcff, #f4f7fd); }
       .ai-reader-mindmap svg { display: block; min-width: 100%; }
       .ai-reader-mindmap path { fill: none; stroke: #8eb1ef; stroke-width: 2; }
@@ -536,6 +542,9 @@
       body.theme-dark .ai-reader-answer h4 { color: #a9c6fb; }
       body.theme-dark .ai-reader-answer code { background: #303746; }
       body.theme-dark .ai-reader-citation { color: #8cbaff; }
+      body.theme-dark .ai-reader-source-preview { border-color: #526788; background: #2e3036; color: #e3e8f2; box-shadow: 0 10px 28px rgba(0,0,0,.42); }
+      body.theme-dark .ai-reader-source-preview-label { color: #a9c6fb; }
+      body.theme-dark .ai-reader-source-preview-jump { color: #8cbaff; }
       body.theme-dark .ai-reader-question, body.theme-dark .ai-reader-profile { background: #2e2e30; color: #eee; border-color: #555; }
       body.theme-dark .ai-reader-side { background: #242529; border-color: #414248; }
       body.theme-dark .ai-reader-mindmap { background: linear-gradient(135deg, #262a32, #202226); }
@@ -854,9 +863,10 @@
         </div>
         <label class="ai-reader-profile-label"><span data-reader-i18n="model">大模型</span><select id="ai-reader-profile" class="ai-reader-profile" aria-label="智读使用的大模型" data-reader-i18n-aria="aiModelLabel"></select></label>
         <textarea id="ai-reader-question" class="ai-reader-question" placeholder="输入问题，按 Enter 自动提问；Shift + Enter 换行" data-reader-i18n-placeholder="aiQuestionPlaceholder"></textarea>
-        <div class="ai-reader-submit"><button id="ai-reader-enter-submit" class="tbtn" type="button" title="与键盘 Enter 相同，向 API 发起提问" data-reader-i18n="submitQuestion" data-reader-i18n-title="submitQuestion">↵ 回车提问</button></div>
+        <div class="ai-reader-submit"><button id="ai-reader-enter-submit" class="tbtn" type="button" title="Enter" data-reader-i18n="submitQuestion" data-reader-i18n-title="submitQuestion">Enter</button></div>
         <div id="ai-reader-answer" class="ai-reader-answer empty" data-reader-i18n="aiReady">配置 API 后即可开始智读。</div>
         <div id="ai-reader-history" class="ai-reader-history"></div>
+        <div id="ai-reader-source-preview" class="ai-reader-source-preview" role="dialog" aria-live="polite" hidden></div>
         <div id="ai-reader-audit" class="ai-reader-audit" hidden></div>
         <details id="ai-reader-sources" class="ai-reader-sources" hidden><summary data-reader-i18n="sources">本次依据</summary><ul></ul></details>
       </aside>

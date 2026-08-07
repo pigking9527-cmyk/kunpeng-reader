@@ -52,11 +52,16 @@
   }
 
   function freezeProblemTrace() {
-    if (!global.ReaderProblemTraceUI?.capture) return null;
-    return global.ReaderProblemTraceUI.capture().then((snapshot) => {
+    if (!global.ReaderProblemTraceUI?.capture) return Promise.resolve(null);
+    const request = global.ReaderProblemTraceUI.capture().then((snapshot) => {
       frozenProblemTrace = snapshot;
       return snapshot;
     }).catch(() => null);
+    problemTraceCapture = request;
+    request.finally(() => {
+      if (problemTraceCapture === request) problemTraceCapture = null;
+    });
+    return request;
   }
 
   function hide() {
@@ -100,11 +105,12 @@
 
   async function captureProblemTraceAttachment() {
     if (!global.ReaderProblemTraceUI?.capture) {
-      setStatus("问题记录不可用；请先打开一本书并复现问题。", "error");
+      setStatus("问题记录暂时不可用。", "error");
       return null;
     }
-    const snapshot = frozenProblemTrace || await (problemTraceCapture || freezeProblemTrace());
-    if (!snapshot) throw new Error("未收到阅读器状态；请先打开一本书并复现问题。");
+    let snapshot = frozenProblemTrace || await (problemTraceCapture || freezeProblemTrace());
+    if (!snapshot) snapshot = await freezeProblemTrace();
+    if (!snapshot) throw new Error("问题记录暂时不可用。");
     return attachProblemTrace(snapshot);
   }
 

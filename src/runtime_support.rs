@@ -1,5 +1,21 @@
 use serde::Serialize;
+use std::sync::OnceLock;
+use std::time::Instant;
 use tauri::Emitter;
+
+static PROCESS_STARTED_AT: OnceLock<Instant> = OnceLock::new();
+
+pub(crate) fn mark_process_started() {
+    let _ = PROCESS_STARTED_AT.set(Instant::now());
+}
+
+pub(crate) fn process_start_elapsed_ms() -> u64 {
+    PROCESS_STARTED_AT
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
 
 /// 自定义协议的基地址。
 /// Windows WebView2 把它映射到 `http://<scheme>.localhost`，而 Apple WebKit
@@ -153,6 +169,14 @@ mod tests {
         assert_eq!(RES_BASE, "reader://localhost");
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         assert_eq!(RES_BASE, "http://reader.localhost");
+    }
+
+    #[test]
+    fn process_start_timer_is_monotonic() {
+        mark_process_started();
+        let first = process_start_elapsed_ms();
+        let second = process_start_elapsed_ms();
+        assert!(second >= first);
     }
 
     #[test]
