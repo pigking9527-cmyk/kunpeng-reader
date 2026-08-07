@@ -21,6 +21,10 @@ test("manual sync button has a click handler", () => {
   assert.match(syncSource, /syncNowBtn\.addEventListener\("click",\s*async\s*\(\)\s*=>/);
 });
 
+test("private sync explains the 100 plus 100 cloud history policy", () => {
+  assert.match(indexSource, /包括单书与书库问答；云端各保留 100 条/);
+});
+
 test("同步内容总览列出新增的模型标签、配置和可选历史同步", () => {
   assert.match(indexSource, /大模型书籍分类标签/);
   assert.match(indexSource, /大模型与翻译 API 配置（不含密钥）/);
@@ -77,6 +81,7 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "sync-password-reset-open", "sync-password-reset", "sync-reset-email", "sync-reset-code",
     "sync-reset-new-password", "sync-reset-request", "sync-reset-confirm", "sync-reset-status",
     "account-security-open", "account-security-panel", "account-security-close",
+    "account-subpage-backdrop",
     "account-security-summary", "account-security-status", "account-email-toggle", "account-email-form",
     "account-email", "account-email-code", "account-email-start", "account-email-confirm",
     "account-email-bind-flow", "account-email-rebind-flow", "account-email-old-start",
@@ -134,6 +139,28 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
   );
   assert.equal(calls[1].command, "sync_now");
   assert.equal(calls[2].command, "shelf_books");
+
+  elements.get("account-security-panel").hidden = true;
+  elements.get("account-data-panel").hidden = true;
+  elements.get("private-sync-panel").hidden = true;
+  elements.get("account-subpage-backdrop").hidden = true;
+  await elements.get("account-security-open").emit("click");
+  assert.equal(elements.get("account-security-panel").hidden, false);
+  assert.equal(elements.get("account-subpage-backdrop").hidden, false);
+  let backdropClickStopped = false;
+  elements.get("account-subpage-backdrop").emit("click", { stopPropagation() { backdropClickStopped = true; } });
+  assert.equal(backdropClickStopped, true);
+  assert.equal(elements.get("account-security-panel").hidden, true);
+  assert.equal(elements.get("account-subpage-backdrop").hidden, true);
+});
+
+test("账户安全和同步设置点击外部区域后关闭且不穿透到底层账户操作", () => {
+  assert.match(indexSource, /id="account-subpage-backdrop" class="account-subpage-backdrop" hidden/);
+  assert.match(syncSource, /function closeAccountSubpages\(\)/);
+  assert.match(syncSource, /accountSubpageBackdrop\.hidden = accountSecurityPanel\.hidden && accountDataPanel\.hidden && privateSyncPanel\.hidden/);
+  assert.match(syncSource, /accountSubpageBackdrop\.addEventListener\("click", \(e\) => \{\s*e\.stopPropagation\(\);\s*closeAccountSubpages\(\);/s);
+  assert.match(syncSource, /privateSyncOpenBtn\.addEventListener[\s\S]*?syncAccountSubpageBackdrop\(\)/);
+  assert.match(syncSource, /accountSecurityOpenBtn\.addEventListener[\s\S]*?syncAccountSubpageBackdrop\(\)/);
 });
 
 test("数据与隐私提供本机、云端和账号三级清理并明确保留原始图书", () => {

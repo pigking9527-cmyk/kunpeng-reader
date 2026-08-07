@@ -28,6 +28,7 @@ DEFAULT_USERNAME = "default"
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_ENTITIES = 5000
 MAX_ENTITY_JSON_BYTES = 1024 * 1024
+MAX_AI_HISTORY_JSON_BYTES = 4 * 1024 * 1024
 MAX_USER_ENTITIES = 50_000
 MAX_USER_JSON_BYTES = 100 * 1024 * 1024
 MAX_USERS = 10_000
@@ -1961,7 +1962,12 @@ class Handler(BaseHTTPRequestHandler):
                 payload = entity.get("json", entity.get("data", {}))
                 payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                 payload_bytes = len(payload_text.encode("utf-8"))
-                if payload_bytes > MAX_ENTITY_JSON_BYTES:
+                payload_limit = (
+                    MAX_AI_HISTORY_JSON_BYTES
+                    if kind == "ai_reader_history_v1"
+                    else MAX_ENTITY_JSON_BYTES
+                )
+                if payload_bytes > payload_limit:
                     ignored_count += 1
                     rejected_count += 1
                     record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "PAYLOAD_TOO_LARGE"})

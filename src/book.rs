@@ -760,6 +760,19 @@ impl Library {
                 fraction: frac,
             }
             .normalized();
+            // 分页测量会在同一源码锚点上得到不同的页数/百分比。源码位置没有
+            // 变化时，后一次只是派生值重算，绝不能覆盖已保存的续读位置。
+            let same_source_anchor = b
+                .resume_position
+                .as_ref()
+                .and_then(|saved| saved.anchor.as_ref())
+                .zip(position.anchor.as_ref())
+                .is_some_and(|(saved, incoming)| {
+                    saved.chapter == incoming.chapter && saved.text_offset == incoming.text_offset
+                });
+            if same_source_anchor {
+                return false;
+            }
             let anchor_changed =
                 position.anchor.is_some() && b.resume_position.as_ref() != Some(&position);
             let changed = (b.progress - progress).abs() >= 0.05
@@ -1348,6 +1361,35 @@ mod tests {
         assert_eq!(saved.authoritative_chapter(), 4);
         assert_eq!(saved.anchor.as_ref().unwrap().text_offset, 1024);
         assert!((lib.books[0].resume_frac - 0.31).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn anchored_position_ignores_later_relayout_progress_for_the_same_source_text() {
+        let dir = TempDir::new("anchored-position-relayout");
+        let path = dir.file("book.txt", "正文");
+        let mut lib = Library::default();
+        assert!(lib.add_prepared(Book::prepare(path)));
+        let id = lib.books[0].id;
+        let anchor = ReadingAnchor {
+            chapter: 40,
+            dom_path: "p:8/span:1".into(),
+            text_offset: 2414,
+            context_before: "前文".into(),
+            context_after: "后文".into(),
+            viewport_offset: 18.0,
+        };
+
+        assert!(lib.set_position_with_anchor(id, 87.267, 40, 0.143, Some(anchor.clone())));
+        assert!(!lib.set_position_with_anchor(id, 83.026, 40, 0.143, Some(anchor)));
+        assert!((lib.books[0].progress - 87.267).abs() < f32::EPSILON);
+        assert_eq!(
+            lib.books[0]
+                .resume_position
+                .as_ref()
+                .and_then(|position| position.anchor.as_ref())
+                .map(|saved| saved.text_offset),
+            Some(2414)
+        );
     }
 
     #[test]

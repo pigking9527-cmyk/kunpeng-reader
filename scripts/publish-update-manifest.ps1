@@ -1,8 +1,8 @@
 param(
   [string]$Version = "",
-  [string]$Server = "deploy@117.72.220.69",
-  [string]$IdentityFile = "$env:USERPROFILE\.ssh\id_ed25519",
-  [string]$RemotePath = "/srv/apps/reader-sync-api/updates.json"
+  [string]$Server = $env:KUNPENG_RELEASE_SERVER,
+  [string]$IdentityFile = $env:KUNPENG_RELEASE_IDENTITY_FILE,
+  [string]$RemotePath = $env:KUNPENG_RELEASE_REMOTE_PATH
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +18,15 @@ function Get-CargoVersion {
 
 if (-not $Version) { $Version = Get-CargoVersion }
 if (-not (Test-Path -LiteralPath $manifestPath)) { throw "Missing update manifest: $manifestPath" }
+if ([string]::IsNullOrWhiteSpace($Server)) {
+  throw "Release server is required. Pass -Server or set KUNPENG_RELEASE_SERVER outside the repository."
+}
+if ([string]::IsNullOrWhiteSpace($IdentityFile)) {
+  throw "SSH identity file is required. Pass -IdentityFile or set KUNPENG_RELEASE_IDENTITY_FILE outside the repository."
+}
+if ([string]::IsNullOrWhiteSpace($RemotePath)) {
+  throw "Remote manifest path is required. Pass -RemotePath or set KUNPENG_RELEASE_REMOTE_PATH outside the repository."
+}
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
 if ([string]$manifest.latest -ne $Version) {

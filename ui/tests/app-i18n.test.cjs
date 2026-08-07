@@ -46,7 +46,8 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(i18n, /const ACCOUNT_SUBPAGE_COPY/);
   assert.match(i18n, /const PANEL_COPY/);
   assert.match(i18n, /const ACCOUNT_RUNTIME_COPY/);
-  assert.match(html, /id="search-input"[^>]*data-i18n-placeholder="searchPlaceholder"/);
+  assert.doesNotMatch(html, /id="search-input"[^>]*data-i18n-placeholder/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "search-ui.js"), "utf8"), /updateShelfSearchMode\(\)[\s\S]*?shelfSearchPlaceholder/);
   assert.match(i18n, /const SETTINGS_COPY/);
   const settingsCopy = i18n.slice(i18n.indexOf("const SETTINGS_COPY"), i18n.indexOf("Object.entries(SETTINGS_COPY)"));
   for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {

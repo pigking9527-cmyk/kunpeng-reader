@@ -49,6 +49,9 @@
 ## 5. 测试与发布
 
 - 改动桌面端后按风险运行 `scripts/check.ps1`；发布前运行 `scripts/check.ps1 -Release`。
+- 私密运维资料不得进入仓库、PR、Issue、Release Notes 或日志。真实服务器地址、账户、SSH 身份文件位置、远端路径、密码、Token 和交接资料一律存放在仓库外；详细流程见 `docs/security/repository-safety.md`。
+- 提交前必须安装 `.githooks/pre-commit`（执行 `scripts/install-git-hooks.ps1`）；发布暂存只能通过 `scripts/stage-release.ps1 -Path ...` 的明确白名单完成，禁止 `git add -A`、`git commit -a` 和“暂存全部”。
+- 发布服务器参数只能通过命令行或 `KUNPENG_RELEASE_*` 环境变量提供；不得将真实值提交到脚本默认参数。
 - 改动 `contracts/` 时，至少验证 JSON schema、fixtures 和服务端请求/响应兼容；未来每个平台都必须运行同一套兼容性测试。
 - 单个平台构建失败不能阻塞其他端的日常开发，但不能把失败产物标记为正式 Release。
 - 用户可见版本、各端构建版本与同步协议版本分开管理；不要因为某端补丁而无故升级所有端版本。

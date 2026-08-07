@@ -958,6 +958,7 @@ tauriEvent.listen("startup-perf", (e) => {
   const p = (e && e.payload) || {};
   startupPerfLog("rust:" + (p.name || "unknown"), p.phase || "mark", p.detail || "");
 });
+tauriEvent.listen("shelf-book-read", (e) => shelfUI.updateBook(String(e?.payload?.id || ""), { last_read_at: Number(e?.payload?.lastReadAt || 0) }));
 tauriEvent.listen("book-import-progress", (e) => {
   const p = (e && e.payload) || {};
   if (!p.phase) return;
@@ -1291,6 +1292,7 @@ window.addEventListener("DOMContentLoaded", () => {
       .then((list) => {
         startupPerfLog("shelf-list-books", "data", "books=" + ((list && list.length) || 0));
         shelfUI.render(list);
+        requestAnimationFrame(() => requestAnimationFrame(() => recordNativeStartupMilestone("shelf_painted")));
         // 首屏渲染完成后只聚焦一次书架滚动容器，让 PgUp/PgDn 开箱即用。
         // 后续后台刷新不重复聚焦，避免抢走搜索框或弹窗里的输入焦点。
         requestAnimationFrame(() => shelfUI.focusShelf());

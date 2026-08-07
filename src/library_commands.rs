@@ -592,6 +592,8 @@ pub(crate) struct SetProgressRequest {
     frac: f32,
     #[serde(default)]
     anchor: Option<reader_core::ReadingAnchor>,
+    #[serde(default)]
+    sequence: u64,
 }
 
 #[tauri::command]
@@ -605,6 +607,7 @@ pub(crate) async fn set_progress(
         chapter,
         frac,
         anchor,
+        sequence,
     } = request;
     let id = window_commands::reader_window_id(&window).ok_or_else(|| {
         let label = window.label();
@@ -613,6 +616,7 @@ pub(crate) async fn set_progress(
         ));
         "无法识别当前阅读窗口".to_string()
     })?;
+    let anchor_offset = anchor.as_ref().map(|value| value.text_offset);
     let mut lib = state.library.lock().unwrap();
     let mut changed = lib.set_position_with_anchor(id, progress, chapter, frac, anchor);
     if let Some(book) = lib.books.iter_mut().find(|b| b.id == id) {
@@ -623,10 +627,21 @@ pub(crate) async fn set_progress(
     }
     if changed {
         lib.save().map_err(|error| {
-            crate::runtime_support::log(&format!("set_progress save failed id={id}: {error}"));
+            crate::runtime_support::log(&format!(
+                "set_progress save failed id={id} seq={sequence} chapter={chapter} frac={frac:.6} progress={progress:.4} anchor_offset={}: {error}",
+                anchor_offset
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ));
             format!("保存阅读位置失败：{error}")
         })?;
     }
+    crate::runtime_support::log(&format!(
+        "set_progress ok id={id} seq={sequence} chapter={chapter} frac={frac:.6} progress={progress:.4} anchor_offset={} changed={changed}",
+        anchor_offset
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
     Ok(())
 }
 
@@ -890,6 +905,7 @@ mod tests {
         .unwrap();
         assert_eq!(progress.chapter, 6);
         assert_eq!(progress.frac, 0.25);
+        assert_eq!(progress.sequence, 0);
 
         let jump: OpenBookAtRequest = serde_json::from_value(serde_json::json!({
             "id": "123",

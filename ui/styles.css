@@ -518,6 +518,7 @@ body.anim-booklist-sort-off .booklist-row { transition: none; }
   max-height: calc(100vh - 48px); overflow-y: auto;
   box-shadow: 0 16px 48px rgba(0,0,0,0.24);
 }
+.account-subpage-backdrop { position: fixed; inset: 0; z-index: 81; background: transparent; }
 .private-sync-panel { margin-top: 14px; padding: 14px; border: 1px solid #bed1ff; border-radius: 10px; background: #f8fbff; }
 .account-subpage.private-sync-panel { margin-top: 0; padding: 18px; }
 .private-sync-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #202938; }

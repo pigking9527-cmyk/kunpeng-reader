@@ -761,6 +761,21 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(response["dispositions"][0]["status"], "rejected")
         self.assertEqual(response["dispositions"][0]["error"], "PAYLOAD_TOO_LARGE")
 
+    def test_ai_history_has_a_larger_but_still_bounded_payload_limit(self):
+        history = self.entity("a" * 64)
+        history["kind"] = "ai_reader_history_v1"
+        history["json"] = {"value": "x" * (app.MAX_ENTITY_JSON_BYTES + 1)}
+
+        accepted = self.push([history])
+
+        self.assertEqual(accepted["accepted_count"], 1)
+        oversized = self.entity("b" * 64)
+        oversized["kind"] = "ai_reader_history_v1"
+        oversized["json"] = {"value": "x" * (app.MAX_AI_HISTORY_JSON_BYTES + 1)}
+        rejected = self.push([oversized])
+        self.assertEqual(rejected["accepted_count"], 0)
+        self.assertEqual(rejected["dispositions"][0]["error"], "PAYLOAD_TOO_LARGE")
+
     def test_legacy_client_gets_non_success_for_unidentifiable_reject(self):
         oversized = self.entity("zh:旧客户端过大")
         oversized["json"] = {"value": "x" * (app.MAX_ENTITY_JSON_BYTES + 1)}

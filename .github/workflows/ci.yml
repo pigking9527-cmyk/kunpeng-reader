@@ -30,6 +30,10 @@ jobs:
         shell: pwsh
         run: cargo install cargo-audit --locked
 
+      - name: Repository safety check
+        shell: pwsh
+        run: ./scripts/check-repository-safety.ps1 -AllTracked
+
       - name: Run project checks
         shell: pwsh
         run: ./scripts/check.ps1

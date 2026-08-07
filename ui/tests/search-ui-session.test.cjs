@@ -7,6 +7,12 @@ const source = fs.readFileSync(path.join(__dirname, "..", "search-ui.js"), "utf8
 const shelfSearchSource = fs.readFileSync(path.join(__dirname, "..", "search.js"), "utf8");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
 
+test("startup restores the full-text toggle and its matching placeholder together", () => {
+  assert.match(source, /shelfChk\.checked = localStorage\.getItem\("shelfSearchEnabled"\) === "1"/);
+  assert.match(source, /function updateShelfSearchMode\(\)[\s\S]*?shelfChk\.checked \? "shelfSearchPlaceholder" : "searchPlaceholder"/);
+  assert.match(source, /updateShelfSearchMode\(\);[\s\S]*?shelfChk\.addEventListener\("change"/);
+});
+
 test("shelf full-text search releases the main search session", () => {
   const run = source.match(/function runShelfSearch\(term\) \{([\s\S]*?)\n\}/);
   const close = source.match(/function closeShelfSearchModal\(\) \{([\s\S]*?)\n\}/);

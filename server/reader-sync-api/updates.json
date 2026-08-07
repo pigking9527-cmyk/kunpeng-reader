@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "latest": "1.13.0",
+  "latest": "1.13.1",
   "releases": {
+    "1.13.1": {
+      "android_version": "0.3.0",
+      "release_notes": "- Windows-only 稳定性更新：修复关闭阅读页后首次点击图书可能无响应，以及 EPUB 关闭重开、单双页恢复和跨章翻页时的阅读位置偏移。\n- 移除封面按需写入 URL 的策略，首屏封面优先加载；修复全书架正文检索开关与启动提示不同步，大型目录改为分批创建。\n- 问题记录新增软件启动、阅读窗口创建、图书信息、首屏正文和关闭销毁耗时统计；恢复 AI 历史来源预览和点击跳转。\n- 仅发布 Windows x64 NSIS 安装包和 SHA-256 清单；macOS/Linux 继续 v1.13.0，Android 继续 v0.3.0。",
+      "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.13.1",
+      "published_at": "2026-08-07"
+    },
     "1.13.0": {
       "android_version": "0.3.0",
       "release_notes": "- Windows、macOS 与 Linux 同步升级：新增 BGE-M3、Multilingual-E5-Small、全文与语义融合、可选重排和 BGE-M3 长文精读；模型与索引状态读取不再阻塞主窗口，续建必须由用户显式开始。\n- 设置、书库问答、资讯、统计、排序过滤、账户与阅读页菜单完成十种语言覆盖；Microsoft TTS 会按文本语言自动选择声音。\n- Bug 反馈可附上最近两分钟的脱敏操作记录，支持插入反馈框或保存到桌面；资讯来源管理独立成页，新增可绘制且可调精度的右键返回手势。\n- 书架封面首屏加载可选择固定数量或记住上次可见数量；新增自动目录导入监控、阅读字数桶及反馈/迁移兼容契约。",

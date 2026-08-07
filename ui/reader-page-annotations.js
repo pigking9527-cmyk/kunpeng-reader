@@ -10,6 +10,8 @@ var READER_PAGE_COPY={
 };
 function readerPageLanguage(){var raw=(S&&S.uiLanguage)||document.documentElement.lang||'zh-CN';if(READER_PAGE_COPY[raw])return raw;var base=String(raw).split('-')[0];return base==='zh'?'zh-CN':(READER_PAGE_COPY[base]?base:'en');}
 function readerPageText(key){var lang=readerPageLanguage(),copy=READER_PAGE_COPY[lang]||READER_PAGE_COPY.en;return copy[key]||READER_PAGE_COPY.en[key]||key;}
+// 初次排版本章首页后才能恢复锚点；恢复完成前禁止持久化这个临时位置。
+var initialResumePending=true;
 var HL=[]; // 全书高亮 [{chapter,start,end,text,note}]，数组下标即后端 index
 var hlOverlay=null,sourceTextCache=null,highlightRenderTimer=null;
 function generatedTextNode(node){
@@ -302,7 +304,23 @@ function sourceOffsetAnchor(offset){
 function injectHead(htmlStr,seen){
   var tmp=document.createElement('div');tmp.innerHTML=htmlStr;
   var nodes=tmp.querySelectorAll('link,style');
-  for(var i=0;i<nodes.length;i++){var key=nodes[i].outerHTML;if(seen[key])continue;seen[key]=1;document.head.appendChild(nodes[i]);}
+  var waits=[];
+  for(var i=0;i<nodes.length;i++){
+    var node=nodes[i],key=node.outerHTML;
+    if(seen[key]){waits.push(seen[key]);continue;}
+    if((node.tagName||'').toLowerCase()==='link'&&String(node.rel||node.getAttribute('rel')||'').toLowerCase()==='stylesheet'){
+      seen[key]=new Promise(function(resolve){
+        var settled=false,timer=null;
+        function done(){if(settled)return;settled=true;if(timer)clearTimeout(timer);resolve();}
+        node.addEventListener('load',done,{once:true});node.addEventListener('error',done,{once:true});
+        timer=setTimeout(done,2000);document.head.appendChild(node);
+      });
+    }else{
+      document.head.appendChild(node);seen[key]=Promise.resolve();
+    }
+    waits.push(seen[key]);
+  }
+  return Promise.all(waits);
 }
 function restoreStoredReadingAnchor(anchor){
   if(!anchor||typeof sourceRangeForOffsets!=='function')return false;
@@ -315,7 +333,7 @@ function restoreStoredReadingAnchor(anchor){
     var probe=after||before;
     if(probe){
       var whole=sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0);
-      var found=whole.indexOf(probe);
+      var found=nearestTextOccurrence(whole,probe,after?offset:Math.max(0,offset-probe.length));
       if(found>=0)offset=after?found:found+probe.length;
     }
   }
@@ -329,10 +347,26 @@ function restoreStoredReadingAnchor(anchor){
     scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=top;sp.scrollTop=top;
     pageInCh=pageIndexForScrollTop(top);
   }else{
-    gotoPage(pageOf({getBoundingClientRect:function(){return rect;}}));
+    var pageAnchor={range:range};
+    if(isDualPage()&&typeof alignDualAnchorToLeftPage==='function'&&alignDualAnchorToLeftPage(pageAnchor))setViewOffset();
+    else gotoPage(pageOf({getBoundingClientRect:function(){return rect;}}));
   }
   curTopAnchor={range:range};
   return true;
+}
+function nearestTextOccurrence(whole,probe,expected){
+  if(!whole||!probe)return -1;
+  expected=Math.max(0,parseInt(expected,10)||0);
+  var best=-1,bestDistance=Number.POSITIVE_INFINITY,from=0;
+  while(from<=whole.length){
+    var found=whole.indexOf(probe,from);
+    if(found<0)break;
+    var distance=Math.abs(found-expected);
+    if(distance<bestDistance){best=found;bestDistance=distance;}
+    if(distance===0)break;
+    from=found+1;
+  }
+  return best;
 }
 function loadInit(){
   var p=new URLSearchParams(location.search);
@@ -341,13 +375,30 @@ function loadInit(){
   var rc=parseInt(p.get('rc')||'0',10)||0, rf=parseFloat(p.get('rf')||'0')||0;
   if(storedPosition&&storedPosition.anchor&&Number.isFinite(storedPosition.chapter))rc=storedPosition.chapter;
   showChapter(rc,'start').then(function(){
-    var restored=storedPosition&&storedPosition.anchor&&restoreStoredReadingAnchor(storedPosition.anchor);
     var resumePage=Math.round(rf*(pagesInCh-1));
+    var restored=storedPosition&&storedPosition.anchor&&restoreStoredReadingAnchor(storedPosition.anchor);
+    // 双页续读以保存时的 spread 为准。字符锚点只负责找到同一段文字，不能
+    // 在重开时把右栏改成新的左栏；那会引入 dualStartColumn=1，并让页数
+    // 恰好漂移一页。恢复后统一回到标准偶数列起始，再按保存比例定位 spread。
+    if(restored&&isDualPage()){
+      dualStartColumn=0;
+      pagesInCh=fastChapterLayout?fastPagedPageCount(root):pagedPageCountFromContent(root);
+      resumePage=Math.round(rf*(pagesInCh-1));
+      pageInCh=Math.max(0,Math.min(pagesInCh-1,resumePage));
+      setViewOffset();
+    }else if(restored&&resumePage>0&&Math.abs(pageInCh-resumePage)>0){
+      pageInCh=Math.max(0,Math.min(pagesInCh-1,resumePage));
+      setViewOffset();
+    }
     if(!restored){
       if(resumePage>0)gotoPage(resumePage);
       else if(isScrollMode()&&scrollPort()){pageInCh=0;scrollPort().scrollTop=0;scrollProgrammaticTarget=0;}
     }
-    report();
+    // 第一次上报只更新页码显示，不得立即覆盖已保存位置；用户真正翻页或
+    // 关闭窗口时，reader shell 才会提交恢复后的稳定锚点。
+    initialResumePending=false;
+    captureAnchor();
+    report(false,true);
     reveal();parent.postMessage({ready:1},'*');
     scheduleMeasure(500);
   });
@@ -367,6 +418,7 @@ function init(){
   // 记录是否发生了拖动（用于区分“单击翻页”与“拖动选字”）
   document.addEventListener('mousedown',function(e){downX=e.clientX;downY=e.clientY;didDrag=false;if(e.detail>1)e.preventDefault();}); // e.detail>1：双击/三击 → 阻止浏览器选词/选段（连点翻页常被当双击而误选）
   document.addEventListener('mousemove',function(e){if(downX!==null&&(Math.abs(e.clientX-downX)>4||Math.abs(e.clientY-downY)>4))didDrag=true;});
+  document.addEventListener('mouseup',function(){downX=null;downY=null;});
   var macFastTap=null;
   var isMacWebKit=IS_MAC_WEBKIT;
   function tapHasSelection(){
@@ -402,16 +454,21 @@ function init(){
     hideFn(); // 点别处 → 收起注释弹窗
     // 拖动选字（或存在选中文字）时不翻页，让 web 搜索菜单稳定停在高亮处
     if(didDrag){readerBugTrace('click','drag',e);return;}
-    if(tapHasSelection()){readerBugTrace('click','selection',e);return;}
+    // mouseup 后清理短暂选区的定时器晚于 click。若本次没有真实拖动，
+    // 直接清掉浏览器偶发产生的残留选区并继续翻页，避免第一次点击被吞。
+    if(tapHasSelection()){
+      if(window.getSelection)window.getSelection().removeAllRanges();
+      hideSelMenu();
+    }
     var tapStarted=performance.now();
-    if(x>window.innerWidth*0.6){readerBugTrace('click','page_next',e);parent.postMessage({readerNavigated:1},'*');nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
-    else if(x<window.innerWidth*0.4){readerBugTrace('click','page_prev',e);parent.postMessage({readerNavigated:1},'*');prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
+    if(x>window.innerWidth*0.6){readerBugTrace('click','page_next',e);parent.postMessage({readerNavigated:1},'*');markPageTurnInput('tap');nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
+    else if(x<window.innerWidth*0.4){readerBugTrace('click','page_prev',e);parent.postMessage({readerNavigated:1},'*');markPageTurnInput('tap');prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
     else{readerBugTrace('click','center',e);parent.postMessage({centerTap:1},'*');}
   }
   // macOS 的 WKWebView 在部分点击序列中较晚派发 click。只对正文空白/文字区
   // 使用更早的 pointerup 翻页，并吞掉紧随其后的 click，避免 Windows 行为变化。
   if(isMacWebKit)document.addEventListener('pointerup',function(e){
-    if(e.button!==0||e.isPrimary===false||didDrag||tapHasSelection())return;
+    if(e.button!==0||e.isPrimary===false||didDrag)return;
     if(e.target.closest&&e.target.closest('a,button,input,select,textarea,#fn-pop,.hl-rect[data-hi],mark.hl'))return;
     macFastTap={at:Date.now(),x:e.clientX,y:e.clientY,target:e.target};
     handleReaderTap(e);
@@ -426,8 +483,8 @@ function init(){
   document.addEventListener('keydown',function(e){if(((e.ctrlKey||e.metaKey)&&(e.key==='f'||e.key==='F'))||e.key==='F3')e.preventDefault();},true); // 禁用浏览器自带查找
   document.addEventListener('keydown',function(e){
     if(e.isComposing||e.key==='Process'||e.keyCode===229)return;
-    if(e.key==='PageDown'||e.key==='ArrowRight'||e.key==='ArrowDown'||(e.key===' '&&!e.shiftKey)){readerBugTrace('key','page_next',null,{direction:'forward',key:e.key===' '?'space':e.key});e.preventDefault();userNav();nextPage();}
-    else if(e.key==='PageUp'||e.key==='ArrowLeft'||e.key==='ArrowUp'||(e.key===' '&&e.shiftKey)){readerBugTrace('key','page_prev',null,{direction:'backward',key:e.key===' '?'space':e.key});e.preventDefault();userNav();prevPage();}
+    if(e.key==='PageDown'||e.key==='ArrowRight'||e.key==='ArrowDown'||(e.key===' '&&!e.shiftKey)){readerBugTrace('key','page_next',null,{direction:'forward',key:e.key===' '?'space':e.key});e.preventDefault();userNav();markPageTurnInput('keyboard');nextPage();}
+    else if(e.key==='PageUp'||e.key==='ArrowLeft'||e.key==='ArrowUp'||(e.key===' '&&e.shiftKey)){readerBugTrace('key','page_prev',null,{direction:'backward',key:e.key===' '?'space':e.key});e.preventDefault();userNav();markPageTurnInput('keyboard');prevPage();}
   });
   var wheelLock=false,scrollChapterLock=false;
   document.addEventListener('wheel',function(e){
@@ -468,7 +525,7 @@ function init(){
       }
       return;
     }
-    e.preventDefault();if(wheelLock)return;if(Math.abs(e.deltaY)<4&&Math.abs(e.deltaX)<4)return;userNav();if(e.deltaY>0||e.deltaX>0)nextPage();else prevPage();wheelLock=true;setTimeout(function(){wheelLock=false;},220);
+    e.preventDefault();if(wheelLock)return;if(Math.abs(e.deltaY)<4&&Math.abs(e.deltaX)<4)return;userNav();markPageTurnInput('wheel');if(e.deltaY>0||e.deltaX>0)nextPage();else prevPage();wheelLock=true;setTimeout(function(){wheelLock=false;},220);
   },{passive:false});
   window.addEventListener('resize',function(){
     var sideTxn=window.__readerSideViewportTxn;

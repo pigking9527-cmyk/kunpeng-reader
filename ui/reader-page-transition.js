@@ -63,8 +63,9 @@ function captureTurnFxPage(role){
 function clearTurnFx(){
   if(turnFxTimer){clearTimeout(turnFxTimer);turnFxTimer=null;}
   if(turnFxSheet)turnFxSheet.innerHTML='';
-  if(pager)pager.classList.remove('turn-fx','turn-fx-next','turn-fx-prev','turn-fx-horizontal');
+  if(pager)pager.classList.remove('turn-fx','turn-fx-hold','turn-fx-next','turn-fx-prev','turn-fx-horizontal');
 }
+function waitForChapterPaint(){return new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve);});});}
 function beginTurnFx(dir,move){
   var fx=turnFxName();
   if(!dir||!pager||!root||fx==='off'||reducedMotion()){clearTurnFx();move();return;}
@@ -88,7 +89,18 @@ function beginChapterTurnFx(dir,chapter,where){
   chapterTurnPending=true;
   function done(){chapterTurnPending=false;}
   var fx=turnFxName();
-  if(!dir||!pager||!root||fx==='off'||reducedMotion())return showChapter(chapter,where).then(function(){notifyReaderEndIfReached(dir);}).finally(done);
+  if(!dir||!pager||!root)return showChapter(chapter,where).then(function(){notifyReaderEndIfReached(dir);}).finally(done);
+  if(fx==='off'||reducedMotion()){
+    clearTurnFx();
+    // 即使关闭翻页动画，跨章仍需保留旧页，直到新章完成排版并真正绘制。
+    // 否则 showChapter 清空正文到 WebView2 提交新帧之间会露出空白，双页模式尤为明显。
+    var held=captureTurnFxPage('turn-fx-outgoing');
+    if(held)pager.classList.add('turn-fx','turn-fx-hold');
+    return showChapter(chapter,where).then(function(){
+      notifyReaderEndIfReached(dir);
+      return held?waitForChapterPaint():undefined;
+    }).finally(function(){clearTurnFx();done();});
+  }
   clearTurnFx();
   // showChapter 会异步 fetch + 两帧排版。不能像同章翻页那样立即复制“新页”，
   // 否则复制到的仍是旧章节，并会在动画结束时闪回旧内容。

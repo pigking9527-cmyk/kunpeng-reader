@@ -1,10 +1,24 @@
 // 阅读窗口逻辑（整本合并为一页，连续滚动）
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
+const emit = window.__TAURI__.event.emit;
+const readerShellStartedAt = performance.now();
 const readerText = (key, fallback, values) => {
   const value = window.ReaderI18n?.t?.(key, values);
   return value && value !== key ? value : fallback;
 };
+function recordReaderPerformance(stage, durationMs = performance.now() - readerShellStartedAt) {
+  const elapsed = Math.max(0, Math.min(30000, Number(durationMs) || 0));
+  window.ReaderBugTrace?.record("open_stage", {
+    source: "reader_shell",
+    outcome: stage,
+    duration_ms: Number(elapsed.toFixed(1)),
+  });
+  emit("reader-performance-trace", {
+    stage,
+    durationMs: Number(elapsed.toFixed(1)),
+  }).catch(() => {});
+}
 let currentBookTitle = "";
 let currentBookId = "";
 let currentBookContentId = "";
@@ -77,7 +91,7 @@ function initWindowControls() {
   });
   document.getElementById("win-close")?.addEventListener("click", (e) => {
     e.stopPropagation();
-    invoke("main_window_close").catch(() => {});
+    closeReaderWindow();
   });
   window.addEventListener("pointerup", endWindowDraggingSoon);
   window.addEventListener("mouseup", endWindowDraggingSoon);
@@ -107,16 +121,20 @@ const aiReaderAnswer = document.getElementById("ai-reader-answer");
 const aiReaderSources = document.getElementById("ai-reader-sources");
 const aiReaderQuestion = document.getElementById("ai-reader-question");
 const aiReaderHistory = document.getElementById("ai-reader-history");
+const aiReaderSourcePreview = document.getElementById("ai-reader-source-preview");
 let aiReaderSelectedText = "";
 let aiReaderSelectedAnchor = null;
+let aiReaderPreviewCitation = null;
 let aiReaderRequestRunning = false;
 let aiReaderProgressTimer = 0;
+let readerFirstReadyLogged = false;
 function applyAiReaderSide(open) {
   if (!aiReaderSide) return;
   document.body.classList.toggle("ai-reader-open", !!open);
 }
 function setAiReaderSide(open) {
   // 智读为覆盖层：不改变正文 iframe 宽度，因此不需要在重排后猜测或恢复锚点。
+  if (!open) aiReaderHideSourcePreview();
   applyAiReaderSide(!!open);
 }
 function aiReaderSetStatus(value) { if (aiReaderStatus) aiReaderStatus.textContent = value || ""; }
@@ -152,6 +170,8 @@ function aiReaderSessionMemoryKey() { return "aiReaderSessionMemoryV1:" + aiRead
 function aiReaderTaskLabel(task) { return task === "summary" ? readerText("summaryTask", "总结已读内容") : task === "mindmap" ? readerText("mindMapTask", "生成脑图") : readerText("askTask", "提问"); }
 function aiReaderHistoryEntryId(entry) { return String(entry?.id || `legacy:${entry?.at || "unknown"}`); }
 function aiReaderHistoryDeleted(entry) { return Boolean(entry?.deletedAt || entry?.deleted_at); }
+const AI_READER_LOCAL_HISTORY_LIMIT = 100;
+const AI_READER_HISTORY_TOMBSTONE_LIMIT = 200;
 function aiReaderNewHistoryId() {
   const suffix = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return `reader:${new Date().toISOString()}:${suffix}`;
@@ -165,9 +185,9 @@ function aiReaderMergeHistoryEntries(...groups) {
   });
   const entries = Array.from(byId.values());
   const live = entries.filter((entry) => !aiReaderHistoryDeleted(entry))
-    .sort((left, right) => String(right.at || "").localeCompare(String(left.at || ""))).slice(0, 40);
+    .sort((left, right) => String(right.at || "").localeCompare(String(left.at || ""))).slice(0, AI_READER_LOCAL_HISTORY_LIMIT);
   const tombstones = entries.filter(aiReaderHistoryDeleted)
-    .sort((left, right) => String(right.deletedAt || right.deleted_at || "").localeCompare(String(left.deletedAt || left.deleted_at || ""))).slice(0, 80);
+    .sort((left, right) => String(right.deletedAt || right.deleted_at || "").localeCompare(String(left.deletedAt || left.deleted_at || ""))).slice(0, AI_READER_HISTORY_TOMBSTONE_LIMIT);
   return [...live, ...tombstones];
 }
 function aiReaderReadHistory() {
@@ -235,6 +255,56 @@ function aiReaderJumpToSource(source) {
     aiReaderSetStatus(`已跳转至第 ${Math.floor(chapter) + 1} 章`);
   }
 }
+function aiReaderHideSourcePreview() {
+  if (!aiReaderSourcePreview) return;
+  aiReaderSourcePreview.hidden = true;
+  aiReaderSourcePreview.replaceChildren();
+  aiReaderPreviewCitation?.setAttribute("aria-expanded", "false");
+  aiReaderPreviewCitation = null;
+}
+function aiReaderShowSourcePreview(source, index, citation) {
+  if (!aiReaderSourcePreview || !citation) return;
+  if (aiReaderPreviewCitation === citation && !aiReaderSourcePreview.hidden) {
+    aiReaderHideSourcePreview();
+    return;
+  }
+  aiReaderHideSourcePreview();
+  const label = document.createElement("div");
+  label.className = "ai-reader-source-preview-label";
+  label.textContent = aiReaderSourceLabel(source, index);
+  const excerpt = document.createElement("div");
+  excerpt.className = "ai-reader-source-preview-excerpt";
+  excerpt.textContent = String(source?.excerpt || "").trim() || readerText("sourcePreviewMissing", "这条历史记录没有保存引用文字。");
+  aiReaderSourcePreview.append(label, excerpt);
+  const chapter = Number(source?.chapter);
+  if (!isPdf && Number.isFinite(chapter) && chapter >= 0) {
+    const actions = document.createElement("div");
+    actions.className = "ai-reader-source-preview-actions";
+    const jump = document.createElement("button");
+    jump.type = "button";
+    jump.className = "ai-reader-source-preview-jump";
+    jump.textContent = readerText("jumpToSource", "跳转原文");
+    jump.addEventListener("click", () => {
+      aiReaderHideSourcePreview();
+      aiReaderJumpToSource(source);
+    });
+    actions.appendChild(jump);
+    aiReaderSourcePreview.appendChild(actions);
+  }
+  aiReaderSourcePreview.hidden = false;
+  aiReaderPreviewCitation = citation;
+  citation.setAttribute("aria-expanded", "true");
+  const sideRect = aiReaderSide.getBoundingClientRect();
+  const citationRect = citation.getBoundingClientRect();
+  const previewWidth = aiReaderSourcePreview.offsetWidth;
+  const previewHeight = aiReaderSourcePreview.offsetHeight;
+  const left = Math.max(12, Math.min(sideRect.width - previewWidth - 12, citationRect.left - sideRect.left));
+  const below = citationRect.bottom - sideRect.top + 7;
+  const above = citationRect.top - sideRect.top - previewHeight - 7;
+  const top = below + previewHeight <= sideRect.height - 12 ? below : Math.max(12, above);
+  aiReaderSourcePreview.style.left = `${left}px`;
+  aiReaderSourcePreview.style.top = `${top}px`;
+}
 function aiReaderAppendInline(parent, value, sources) {
   const text = String(value || "");
   const token = /(\[来源\s*(\d+)\])|(\*\*([^*\n]+)\*\*)|(`([^`\n]+)`)/g;
@@ -251,7 +321,12 @@ function aiReaderAppendInline(parent, value, sources) {
         citation.className = "ai-reader-citation";
         citation.textContent = `[来源 ${index + 1}]`;
         citation.setAttribute("aria-label", `查看并跳转${aiReaderSourceLabel(source, index)}`);
-        citation.addEventListener("click", () => aiReaderJumpToSource(source));
+        citation.setAttribute("aria-controls", "ai-reader-source-preview");
+        citation.setAttribute("aria-expanded", "false");
+        citation.addEventListener("click", () => {
+          aiReaderShowSourcePreview(source, index, citation);
+          aiReaderJumpToSource(source);
+        });
         parent.append(citation);
       }
     } else if (match[4] !== undefined) {
@@ -390,6 +465,7 @@ function aiReaderRenderMindmap(tree) {
 }
 function aiReaderRenderAnswer(answer, task) {
   if (!aiReaderAnswer) return;
+  aiReaderHideSourcePreview();
   let content = String(answer.content || "");
   if (task === "mindmap") {
     const tree = aiReaderParseMindmap(content);
@@ -411,6 +487,7 @@ function aiReaderRenderAnswer(answer, task) {
 }
 function aiReaderShowHistory(forceOpen = false) {
   if (!aiReaderHistory) return;
+  aiReaderHideSourcePreview();
   const showing = forceOpen ? true : aiReaderHistory.classList.toggle("show");
   if (forceOpen) aiReaderHistory.classList.add("show");
   if (!showing) { aiReaderAnswer.hidden = false; return; }
@@ -525,7 +602,7 @@ async function runAiReader(task) {
   } finally { aiReaderStopProgress(); aiReaderRequestRunning = false; }
 }
 document.getElementById("ai-reader-btn")?.addEventListener("click", (event) => { event.stopPropagation(); openAiReader(); });
-document.getElementById("ai-reader-close")?.addEventListener("click", () => setAiReaderSide(false));
+document.getElementById("ai-reader-close")?.addEventListener("click", () => { aiReaderHideSourcePreview(); setAiReaderSide(false); });
 document.getElementById("ai-reader-history-btn")?.addEventListener("click", aiReaderShowHistory);
 document.getElementById("ai-reader-enter-submit")?.addEventListener("click", () => runAiReader("question"));
 aiReaderQuestion?.addEventListener("keydown", (event) => {
@@ -536,6 +613,14 @@ aiReaderQuestion?.addEventListener("keydown", (event) => {
     runAiReader("question");
   }
 });
+document.addEventListener("click", (event) => {
+  if (aiReaderSourcePreview?.hidden || aiReaderSourcePreview?.contains(event.target) || event.target?.closest?.(".ai-reader-citation")) return;
+  aiReaderHideSourcePreview();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && aiReaderSourcePreview && !aiReaderSourcePreview.hidden) aiReaderHideSourcePreview();
+});
+aiReaderAnswer?.addEventListener("scroll", aiReaderHideSourcePreview);
 document.getElementById("ai-reader-ask")?.addEventListener("click", () => runAiReader("question"));
 document.getElementById("ai-reader-summary")?.addEventListener("click", () => runAiReader("summary"));
 document.getElementById("ai-reader-mindmap")?.addEventListener("click", () => runAiReader("mindmap"));
@@ -587,12 +672,13 @@ function doJump(j) {
   }
 }
 listen("shelf-jump", (e) => doJump(e.payload));
-listen("reader-bug-trace-request", async (event) => {
+const bugTraceRequestReady = listen("reader-bug-trace-request", async (event) => {
   const requestId = String(event?.payload?.request_id || "").slice(0, 96);
   if (!requestId || !window.ReaderBugTrace?.capture) return;
   const snapshot = await window.ReaderBugTrace.capture("main_menu");
   await window.__TAURI__.event.emit("reader-bug-trace-response", { request_id: requestId, snapshot });
 });
+Promise.resolve(bugTraceRequestReady).then(() => window.ReaderBugTrace?.checkpoint?.(0)).catch(() => {});
 listen("reader-bug-trace-reset", () => window.ReaderBugTrace?.reset?.());
 
 const frame = document.getElementById("frame");
@@ -714,24 +800,83 @@ window.addEventListener("reader-shell-statechange", (e) => {
 // 把阅读位置回传后端（节流，避免频繁写盘）
 let progTimer = null;
 let lastProgressReportChapter = null;
+let readerWindowClosePending = false;
+let progressSaveSequence = 0;
+let positionSnapshotSequence = 0;
+let pendingPositionSnapshot = null;
+function requestPagePositionSnapshot() {
+  if (isPdf || !frameReady || typeof sendToPage !== "function") return Promise.resolve(false);
+  const requestId = ++positionSnapshotSequence;
+  if (pendingPositionSnapshot) {
+    clearTimeout(pendingPositionSnapshot.timer);
+    pendingPositionSnapshot.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingPositionSnapshot?.requestId === requestId) pendingPositionSnapshot = null;
+      resolve(false);
+    }, 2600);
+    pendingPositionSnapshot = { requestId, resolve, timer };
+    sendToPage({ positionSnapshotRequest: requestId });
+  });
+}
+function progressSaveDetail(sequence, request, outcome) {
+  const anchorOffset = Number(request.anchor?.text_offset);
+  const chapterFrac = Number(request.frac);
+  const progress = Number(request.progress);
+  return {
+    source: "reader_shell",
+    sequence,
+    chapter: request.chapter,
+    chapter_frac: Number.isFinite(chapterFrac) ? Number(chapterFrac.toFixed(6)) : 0,
+    progress: Number.isFinite(progress) ? Number(progress.toFixed(4)) : 0,
+    anchor_offset: Number.isFinite(anchorOffset) ? Math.max(0, Math.round(anchorOffset)) : null,
+    outcome,
+  };
+}
 function sendProgressNow() {
   if (progTimer) {
     clearTimeout(progTimer);
     progTimer = null;
   }
   lastProgressReportChapter = curChapter;
-  invoke("set_progress", {
-    request: {
-      progress: curProgress,
-      chapter: curChapter,
-      frac: curChFrac,
-      anchor: curReadingAnchor,
-    },
+  const sequence = ++progressSaveSequence;
+  const request = {
+    progress: curProgress,
+    chapter: curChapter,
+    frac: curChFrac,
+    anchor: curReadingAnchor,
+    sequence,
+  };
+  const requested = progressSaveDetail(sequence, request, "requested");
+  const fields = `seq=${sequence} chapter=${requested.chapter} frac=${requested.chapter_frac} progress=${requested.progress} anchor_offset=${requested.anchor_offset ?? "none"}`;
+  window.ReaderBugTrace?.record("progress_save", requested);
+  return invoke("set_progress", {
+    request: request,
+  }).then(() => {
+    window.ReaderBugTrace?.record("progress_save", progressSaveDetail(sequence, request, "ok"));
+    return true;
   }).catch((error) => {
     // 位置保存不能静默失败，否则重开图书只会回到首页而没有任何线索。
     // 统计诊断开关只影响统计，绝不能影响续读位置。
     console.warn("保存阅读位置失败", error);
-    invoke("reader_perf_log", { event: `progress_save_failed ${String(error).slice(0, 160)}` }).catch(() => {});
+    window.ReaderBugTrace?.record("progress_save", progressSaveDetail(sequence, request, "failed"));
+    invoke("reader_perf_log", { event: `progress_save_failed ${fields} error=${String(error).slice(0, 160)}` }).catch(() => {});
+    return false;
+  });
+}
+async function closeReaderWindow() {
+  if (readerWindowClosePending) return;
+  readerWindowClosePending = true;
+  // 跨章翻页可能仍在等待章节样式和最终分栏。先让正文页完成这次排版并
+  // 回传稳定锚点，再保存；否则外壳可能把上一章或临时页的位置写入数据库。
+  await requestPagePositionSnapshot();
+  // beforeunload 中发起的异步 IPC 可能随 WebView 一起被销毁。关闭按钮必须先等
+  // 当前页位置确实写入，再让原生窗口进入隐藏/销毁流程。
+  await sendProgressNow();
+  invoke("main_window_close").catch((error) => {
+    readerWindowClosePending = false;
+    console.warn("关闭阅读窗口失败", error);
   });
 }
 function reportProgress(immediate = false) {
@@ -754,7 +899,7 @@ function reportProgress(immediate = false) {
   }
   progTimer = setTimeout(() => {
     progTimer = null;
-    reportProgress();
+    sendProgressNow();
   }, 800);
 }
 window.addEventListener("pagehide", () => reportProgress(true));
@@ -1401,6 +1546,12 @@ window.addEventListener("message", (e) => {
     curChFrac = e.data.chFrac || 0;
     curReadingAnchor = e.data.anchor || null;
     curTotalCh = e.data.totalCh || 1;
+    if (pendingPositionSnapshot && Number(e.data.positionSnapshotRequestId) === pendingPositionSnapshot.requestId) {
+      const pending = pendingPositionSnapshot;
+      pendingPositionSnapshot = null;
+      clearTimeout(pending.timer);
+      pending.resolve(true);
+    }
     if (typeof e.data.logicalCh === "number") curVchap = e.data.logicalCh;
     if (e.data.logicalTotal) vchapTotal = e.data.logicalTotal;
     if (isPdf) {
@@ -1420,7 +1571,9 @@ window.addEventListener("message", (e) => {
       }
     }
     if (!isPdf) readerEndRecommendations?.observe(e.data);
-    reportProgress();
+    // 初次恢复消息只用于刷新页码。若在这里自动保存，浏览器尚未稳定的
+    // 首帧采样会反向覆盖关闭前的准确位置。
+    if (e.data.positionRestored !== 1) reportProgress(e.data.positionCommit === 1);
     trackReadWords(e.data); // 累计真正读过的字数
     if (!vdragging && !isPdf) updateThumb();
     else updateBookProgress();
@@ -1461,7 +1614,7 @@ window.addEventListener("message", (e) => {
     ttsNoSystemVoiceWarned = true;
     alert(readerText("ttsNoSystemVoice", "No system voice matches the text language."));
   }
-  if (e.data.outline) buildToc(e.data.outline); // PDF 内置目录
+  if (e.data.outline) scheduleTocBuild(e.data.outline); // PDF 内置目录也避免同步创建大量节点
   if (e.data.pdfState) {
     // PDF 缩放/双页变化 → 记住（节流写盘），并同步双页按钮高亮
     const st = e.data.pdfState;
@@ -1498,6 +1651,12 @@ window.addEventListener("message", (e) => {
   if (e.data.ready) {
     hideLoading();
     frameReady = true;
+    if (!readerFirstReadyLogged) {
+      readerFirstReadyLogged = true;
+      const readyElapsedMs = performance.now() - readerShellStartedAt;
+      invoke("reader_perf_log", { event: `shell_ready elapsed_ms=${readyElapsedMs.toFixed(1)}` }).catch(() => {});
+      recordReaderPerformance("frame_ready", readyElapsedMs);
+    }
     window.ReaderBugTrace?.record("frame_ready", {
       source: "reader_page",
       ready: true,
@@ -1810,6 +1969,9 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
   applyShellTheme(settings.theme);
   try {
     const info = await invoke("book_info");
+    const infoElapsedMs = performance.now() - readerShellStartedAt;
+    invoke("reader_perf_log", { event: `shell_info elapsed_ms=${infoElapsedMs.toFixed(1)}` }).catch(() => {});
+    recordReaderPerformance("book_info", infoElapsedMs);
     currentBookId = info.id || "";
     window.currentBookId = currentBookId;
     readerEndRecommendations?.reset(currentBookId, { wordCount: info.word_count });
@@ -1852,7 +2014,10 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
     }
     resumeChapter = info.resume_chapter || 0;
     resumeFrac = info.resume_frac || 0;
-    buildToc(info.toc || []);
+    curChapter = resumeChapter;
+    curChFrac = resumeFrac;
+    curProgress = Number(info.progress || 0);
+    curReadingAnchor = info.resume_position?.anchor || null;
     // 逻辑章节 = 目录条目按"所在文件(spine)"去重，每个文件取第一条：
     // 金庸全集每"回"是独立文件 → 保留到回级；Python Cookbook 上千个"#锚点小节"同属十几个章节文件 → 合并回章级。
     const toc = info.toc || [];
@@ -1872,6 +2037,8 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
       "&ra=" + encodeURIComponent(JSON.stringify(info.resume_position || null)) +
       "&s=" + encodeURIComponent(JSON.stringify(settings));
     frame.src = info.url + q;
+    // 正文导航已经开始后再分批构建目录；超大目录不再阻塞首屏。
+    scheduleTocBuild(toc);
     // 若本次是从书架检索点开的，取走待跳转位置，合并页就绪后跳过去
     invoke("take_pending_jump").then((j) => { if (j) doJump(j); }).catch(() => {});
   } catch (e) {

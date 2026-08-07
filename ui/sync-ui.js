@@ -42,6 +42,7 @@ const syncResetRequestBtn = document.getElementById("sync-reset-request");
 const syncResetConfirmBtn = document.getElementById("sync-reset-confirm");
 const syncResetStatusEl = document.getElementById("sync-reset-status");
 const accountSecurityOpenBtn = document.getElementById("account-security-open");
+const accountSubpageBackdrop = document.getElementById("account-subpage-backdrop");
 const accountSecurityPanel = document.getElementById("account-security-panel");
 const accountSecurityCloseBtn = document.getElementById("account-security-close");
 const accountSecuritySummaryEl = document.getElementById("account-security-summary");
@@ -189,14 +190,21 @@ function saveAccountInfo(username) {
 function hideSavedAccounts() {
   savedAccountsEl.classList.remove("show");
 }
-function closeAccountPanel() {
-  accountPanel.classList.remove("show");
+function syncAccountSubpageBackdrop() {
+  accountSubpageBackdrop.hidden = accountSecurityPanel.hidden && accountDataPanel.hidden && privateSyncPanel.hidden;
+}
+function closeAccountSubpages() {
   privateSyncPanel.hidden = true;
   accountSecurityPanel.hidden = true;
   accountDataPanel.hidden = true;
   setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
   setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
   setAccountSecurityDisclosure(accountPasswordRecoverToggleBtn, accountPasswordRecoverFormEl, false);
+  syncAccountSubpageBackdrop();
+}
+function closeAccountPanel() {
+  accountPanel.classList.remove("show");
+  closeAccountSubpages();
   syncPasswordResetEl.hidden = true;
   accountBtn.classList.remove("active");
   hideSavedAccounts();
@@ -467,9 +475,10 @@ privateSyncOpenBtn.addEventListener("click", async () => {
   privateSyncPanel.hidden = false;
   accountSecurityPanel.hidden = true;
   accountDataPanel.hidden = true;
+  syncAccountSubpageBackdrop();
   await loadPrivateSyncStatus();
 });
-privateSyncCloseBtn.addEventListener("click", () => { privateSyncPanel.hidden = true; });
+privateSyncCloseBtn.addEventListener("click", closeAccountSubpages);
 privateSyncPanel.addEventListener("click", (e) => e.stopPropagation());
 privateSyncConfigsEl.addEventListener("change", savePrivateSyncOptions);
 privateSyncHistoryEl.addEventListener("change", savePrivateSyncOptions);
@@ -546,18 +555,20 @@ accountSecurityOpenBtn.addEventListener("click", async () => {
   accountSecurityPanel.hidden = false;
   privateSyncPanel.hidden = true;
   accountDataPanel.hidden = true;
+  syncAccountSubpageBackdrop();
   setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
   setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
   setAccountSecurityStatus("");
   await loadAccountSecurityStatus();
 });
-accountSecurityCloseBtn.addEventListener("click", () => { accountSecurityPanel.hidden = true; });
+accountSecurityCloseBtn.addEventListener("click", closeAccountSubpages);
 accountSecurityPanel.addEventListener("click", (e) => e.stopPropagation());
 accountDataOpenBtn.addEventListener("click", () => {
   const username = syncUsernameEl.value.trim();
   accountDataPanel.hidden = false;
   accountSecurityPanel.hidden = true;
   privateSyncPanel.hidden = true;
+  syncAccountSubpageBackdrop();
   accountClearCloudPasswordEl.value = "";
   accountDeletePasswordEl.value = "";
   accountDeleteUsernameEl.value = "";
@@ -569,8 +580,12 @@ accountDataOpenBtn.addEventListener("click", () => {
   accountDeleteBtn.disabled = !username;
   setAccountDataStatus(username ? "" : "当前未登录；仍可清除此设备数据。只有登录后才能清除云端或删除账号。");
 });
-accountDataCloseBtn.addEventListener("click", () => { accountDataPanel.hidden = true; });
+accountDataCloseBtn.addEventListener("click", closeAccountSubpages);
 accountDataPanel.addEventListener("click", (e) => e.stopPropagation());
+accountSubpageBackdrop.addEventListener("click", (e) => {
+  e.stopPropagation();
+  closeAccountSubpages();
+});
 accountClearLocalBtn.addEventListener("click", async () => {
   if (!global.confirm("确定清除此设备上的全部阅读器数据吗？\n\n书架记录、进度、批注、缓存、索引、模型、字体、账号和 API 配置会被清除；原始图书文件不会删除。")) return;
   setDataActionBusy(true);

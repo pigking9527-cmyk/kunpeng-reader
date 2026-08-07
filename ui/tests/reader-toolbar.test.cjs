@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const html = fs.readFileSync(path.join(__dirname, "..", "reader.html"), "utf8");
 const reader = fs.readFileSync(path.join(__dirname, "..", "reader.js"), "utf8");
+const i18n = fs.readFileSync(path.join(__dirname, "..", "reader-i18n.js"), "utf8");
 const shell = fs.readFileSync(path.join(__dirname, "..", "reader-shell-state.js"), "utf8");
 const notes = fs.readFileSync(path.join(__dirname, "..", "reader-notes-ui.js"), "utf8");
 const annotations = fs.readFileSync(path.join(__dirname, "..", "reader-page-annotations.js"), "utf8");
@@ -14,6 +15,13 @@ const transition = fs.readFileSync(path.join(__dirname, "..", "reader-page-trans
 const pageStyle = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
 const settingsUi = fs.readFileSync(path.join(__dirname, "..", "reader-settings-ui.js"), "utf8");
 const searchUi = fs.readFileSync(path.join(__dirname, "..", "reader-search-ui.js"), "utf8");
+const libraryCommands = fs.readFileSync(path.join(__dirname, "..", "..", "src", "library_commands.rs"), "utf8");
+
+test("AI reader local history keeps one hundred records and bounded tombstones", () => {
+  assert.match(reader, /const AI_READER_LOCAL_HISTORY_LIMIT = 100;/);
+  assert.match(reader, /const AI_READER_HISTORY_TOMBSTONE_LIMIT = 200;/);
+  assert.match(reader, /slice\(0, AI_READER_LOCAL_HISTORY_LIMIT\)/);
+});
 
 test("reader toolbar buttons stay horizontal and do not flex-shrink", () => {
   assert.match(html, /\.tbtn\s*\{[^}]*white-space:\s*nowrap;/s);
@@ -82,6 +90,8 @@ test("整页翻页仅保留水平滑动动画，并迁移旧动画设置", () =>
   assert.match(transition, /turnFxDuration\(360\)/);
   assert.match(transition, /captureTurnFxPage\('turn-fx-outgoing'\)[\s\S]*?move\(\);[\s\S]*?captureTurnFxPage\('turn-fx-incoming'\)/);
   assert.match(transition, /function beginChapterTurnFx[\s\S]*?captureTurnFxPage\('turn-fx-outgoing'\)[\s\S]*?return showChapter\(chapter,where\)\.then[\s\S]*?captureTurnFxPage\('turn-fx-incoming'\)/);
+  assert.match(transition, /fx==='off'\|\|reducedMotion\(\)[\s\S]*?captureTurnFxPage\('turn-fx-outgoing'\)[\s\S]*?turn-fx-hold[\s\S]*?waitForChapterPaint/);
+  assert.match(pageStyle, /#pager\.turn-fx-hold #turn-fx-sheet\{[^}]*opacity:1 !important/);
   assert.match(layout, /beginChapterTurnFx\(1,curCh\+1,'start'\)/);
   assert.match(layout, /beginChapterTurnFx\(-1,curCh-1,'end'\)/);
   assert.match(pageStyle, /#pager\.turn-fx-horizontal\.turn-fx-next[\s\S]*?turnFxHorizontalOutNext/);
@@ -89,6 +99,66 @@ test("整页翻页仅保留水平滑动动画，并迁移旧动画设置", () =>
   assert.match(pageStyle, /@keyframes turnFxHorizontalInNext[\s\S]*?translate3d\(100%,0,0\)[\s\S]*?translate3d\(0,0,0\)/);
   assert.match(pageStyle, /@keyframes turnFxHorizontalOutPrev[\s\S]*?translate3d\(100%,0,0\)/);
   assert.doesNotMatch(pageStyle, /turn-fx-google-paper|turn-fx-curl|turn-fx-fold|turnFxGoogle|turnFxCurl/);
+});
+
+test("跨章加载在末页定位完成前隐藏新正文", () => {
+  assert.match(layout, /root\.style\.visibility='hidden';\s*root\.innerHTML=/);
+  assert.match(layout, /setViewOffset\(\);[\s\S]{0,300}?root\.style\.visibility='';/);
+  assert.match(layout, /function\(\)\{root\.style\.visibility='';finishChapterBugTrace\(bugTraceToken,false,0\);\}/);
+});
+
+test("章节分页等待 EPUB 样式加载，避免双页续读总页数漂移", () => {
+  assert.match(annotations, /function injectHead\(htmlStr,seen\)[\s\S]*?addEventListener\('load',done/);
+  assert.match(annotations, /addEventListener\('error',done/);
+  assert.match(annotations, /timer=setTimeout\(done,2000\)/);
+  assert.match(annotations, /return Promise\.all\(waits\)/);
+  const showChapter = layout.slice(layout.indexOf("function showChapter("), layout.indexOf("var curTopAnchor="));
+  assert.match(showChapter, /var headReady=d\.head\?injectHead\(d\.head,headSeen\):Promise\.resolve\(\);/);
+  assert.match(showChapter, /return headReady\.then\(function\(\)\{[\s\S]*?applyCols\(\)/);
+  assert.ok(showChapter.indexOf("headReady.then") < showChapter.indexOf("curCh=i"));
+});
+test("双页续读先采集本页锚点并把锚点恢复到左页", () => {
+  const gotoPage = layout.slice(layout.indexOf("function gotoPage("), layout.indexOf("function filterTextLines("));
+  const showChapter = layout.slice(layout.indexOf("function showChapter("), layout.indexOf("var curTopAnchor="));
+  assert.match(gotoPage, /setViewOffset\(\);[\s\S]*?captureAnchor\(\);report\(true\)/);
+  assert.doesNotMatch(gotoPage, /report\(\);[^}]*captureAnchor\(\)/);
+  assert.match(showChapter, /setViewOffset\(\);root\.style\.visibility='';refreshHighlights\(\);captureAnchor\(\);report\(true\)/);
+  assert.match(annotations, /restoreStoredReadingAnchor[\s\S]*?alignDualAnchorToLeftPage\(pageAnchor\)[\s\S]*?setViewOffset\(\)/);
+  assert.match(annotations, /if\(restored&&isDualPage\(\)\)\{\s*dualStartColumn=0;[\s\S]*?resumePage=Math\.round\(rf\*\(pagesInCh-1\)\);[\s\S]*?pageInCh=Math\.max\(0,Math\.min\(pagesInCh-1,resumePage\)\);/);
+  assert.doesNotMatch(annotations, /Math\.abs\(pageInCh-resumePage\)>1/);
+});
+
+test("续读恢复完成前不保存章节首页，真实翻页立即提交位置", () => {
+  assert.match(annotations, /var initialResumePending=true/);
+  assert.match(layout, /function report\(commitPosition,restoredPosition,positionSnapshotRequestId\)\{\s*if\(initialResumePending\)return;/);
+  assert.match(layout, /positionCommit:commitPosition\?1:0/);
+  assert.match(annotations, /initialResumePending=false;\s*captureAnchor\(\);\s*report\(false,true\)/);
+  assert.match(reader, /if \(e\.data\.positionRestored !== 1\) reportProgress\(e\.data\.positionCommit === 1\)/);
+  assert.match(annotations, /nearestTextOccurrence\(whole,probe,[^)]+\)/);
+  assert.match(runtime, /if\(e\.data\.positionSnapshotRequest!==undefined\)/);
+  assert.match(runtime, /if\(chapterTurnPending&&Date\.now\(\)-snapshotStarted<2400\)/);
+  assert.match(runtime, /captureAnchor\(\);report\(false,false,snapshotId\)/);
+  assert.match(reader, /Number\(e\.data\.positionSnapshotRequestId\) === pendingPositionSnapshot\.requestId/);
+  assert.equal((layout.match(/function visibleTopTextAnchor\(\)/g) || []).length, 1);
+  assert.match(layout, /r\.right<=pr\.left\+1\|\|r\.left>=pr\.right-1/);
+  assert.match(layout, /if\(!visible\)anchor=visibleTopTextAnchor\(\)\|\|anchor/);
+  assert.match(reader, /async function closeReaderWindow\(\)[\s\S]*?await requestPagePositionSnapshot\(\);[\s\S]*?await sendProgressNow\(\);[\s\S]*?invoke\("main_window_close"\)/);
+  const delayedSave = reader.slice(reader.indexOf("progTimer = setTimeout(() => {", reader.indexOf("function reportProgress")), reader.indexOf("window.addEventListener(\"pagehide\""));
+  assert.match(delayedSave, /sendProgressNow\(\)/);
+  assert.doesNotMatch(delayedSave, /reportProgress\(\)/);
+});
+
+test("进度问题记录包含章内偏移和前后端保存结果但不包含原文", () => {
+  const saveProgress = reader.slice(reader.indexOf("function progressSaveDetail"), reader.indexOf("async function closeReaderWindow"));
+  assert.match(saveProgress, /sequence/);
+  assert.match(saveProgress, /chapter_frac/);
+  assert.match(saveProgress, /anchor_offset/);
+  assert.match(saveProgress, /ReaderBugTrace\?\.record\("progress_save"/);
+  assert.match(saveProgress, /progressSaveDetail\(sequence, request, "requested"\)/);
+  assert.match(saveProgress, /progressSaveDetail\(sequence, request, "ok"\)/);
+  assert.doesNotMatch(saveProgress, /context_before|context_after|dom_path|text_content/);
+  assert.match(libraryCommands, /sequence:\s*u64/);
+  assert.match(libraryCommands, /set_progress ok id=\{id\} seq=\{sequence\} chapter=\{chapter\} frac=\{frac:\.6\} progress=\{progress:\.4\} anchor_offset=/);
 });
 
 test("in-book search dropdown has no pointer gap below the toolbar", () => {
@@ -127,7 +197,8 @@ test("智读提交携带实时已读位置、选区、锚点和本机会话记�
   assert.doesNotMatch(sessionMemoryBlock, /private_sync_history_merge/);
   assert.match(reader, /event\.key === "Enter" && !event\.shiftKey && !event\.isComposing && event\.keyCode !== 229/);
   assert.match(reader, /event\.stopPropagation\(\);\s*runAiReader\("question"\)/s);
-  assert.match(html, /id="ai-reader-enter-submit"[^>]*>↵ 回车提问<\/button>/);
+  assert.match(html, /id="ai-reader-enter-submit"[^>]*>Enter<\/button>/);
+  assert.match(i18n, /submitQuestion: "Enter"/);
   assert.match(reader, /getElementById\("ai-reader-enter-submit"\)\?\.addEventListener\("click", \(\) => runAiReader\("question"\)\)/);
 });
 
@@ -150,11 +221,15 @@ test("智读显示检索阶段、证据材料类型与引用自检结果", () =>
   assert.match(reader, /function aiReaderAppendInline\(parent, value, sources\)/);
   assert.match(reader, /className = "ai-reader-citation"/);
   assert.match(reader, /function aiReaderJumpToSource\(source\)/);
+  assert.match(reader, /function aiReaderShowSourcePreview\(source, index, citation\)/);
+  assert.match(reader, /excerpt\.textContent = String\(source\?\.excerpt/);
+  assert.match(reader, /citation\.addEventListener\("click", \(\) => \{\s*aiReaderShowSourcePreview\(source, index, citation\);\s*aiReaderJumpToSource\(source\);\s*\}\)/s);
   assert.doesNotMatch(reader, /citation\.title/);
   assert.match(reader, /answer\.retrievalStages/);
   assert.match(reader, /answer\.citationChecked/);
   assert.match(html, /id="ai-reader-audit"/);
-  assert.doesNotMatch(html, /id="ai-reader-source-preview"/);
+  assert.match(html, /id="ai-reader-source-preview"[^>]*role="dialog"/);
+  assert.match(html, /\.ai-reader-source-preview\s*\{/);
   assert.match(html, /\.ai-reader-answer h3 \{[^}]*font-size: 20px/s);
 });
 
@@ -164,6 +239,15 @@ test("智读只切换书架中已配置的大模型，不在阅读页编辑密�
   assert.match(reader, /invoke\("select_ai_reader_profile", \{ id \}\)/);
   assert.doesNotMatch(html, /id="ai-reader-provider"|id="ai-reader-base-url"|id="ai-reader-api-key"/);
   assert.doesNotMatch(reader, /save_ai_reader_config/);
+});
+
+test("阅读正文先开始导航，大目录随后按空闲时间分批构建", () => {
+  assert.match(notes, /function scheduleTocBuild\(toc\)/);
+  assert.match(notes, /requestIdleCallback\(callback, \{ timeout: 500 \}\)/);
+  assert.match(notes, /while \(index < entries\.length && added < 120\)/);
+  assert.match(reader, /frame\.src = info\.url \+ q;\s*\/\/ 正文导航已经开始后再分批构建目录[^\n]*\s*scheduleTocBuild\(toc\);/s);
+  assert.match(reader, /shell_info elapsed_ms=/);
+  assert.match(reader, /shell_ready elapsed_ms=/);
 });
 
 test("从选中文本打开智读时不再向问题框插入固定提问句", () => {

@@ -94,6 +94,14 @@ try {
   $tag = "v$Version"
   Write-Host "Release: $tag"
 
+  if (-not $SkipServerUpdateManifest) {
+    foreach ($name in @('KUNPENG_RELEASE_SERVER', 'KUNPENG_RELEASE_IDENTITY_FILE', 'KUNPENG_RELEASE_REMOTE_PATH')) {
+      if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+        throw "Missing $name. Set private release deployment settings outside the repository, or pass -SkipServerUpdateManifest."
+      }
+    }
+  }
+
   Invoke-Step "worktree" { Assert-CleanWorktree }
 
   if (-not $SkipChecks) {
