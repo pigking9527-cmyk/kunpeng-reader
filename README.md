@@ -1,5 +1,7 @@
 # 鲲鹏阅读器（Kunpeng Reader）
 
+**中文** | [English](README.en.md)
+
 一个面向 Windows、macOS、Linux 与 Android 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 
