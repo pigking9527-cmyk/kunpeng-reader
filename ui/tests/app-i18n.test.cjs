@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const uiRoot = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(uiRoot, "index.html"), "utf8");
@@ -24,7 +25,7 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(app, /ReaderAppI18n\?\.populate\(appLanguageSelect\)/);
   assert.match(app, /ReaderAppI18n\?\.setLanguage\(appLanguageSelect\.value\)/);
   assert.match(i18n, /data-i18n-placeholder/);
-  assert.match(i18n, /function t\(key\).*COPY\.en\[key\]/);
+  assert.match(i18n, /function t\(key\)[\s\S]*?language === "ja"/);
   assert.match(html, /id="newsnow-page"[\s\S]*?data-i18n="manageSources"/);
   assert.match(html, /id="library-ai-page"[\s\S]*?data-i18n="libraryQuestion"/);
   assert.doesNotMatch(html, /data-i18n="libraryDescription"/);
@@ -35,6 +36,16 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(html, /id="settings-export-data"[^>]*data-i18n="dataExport"/);
   assert.match(html, /id="settings-restore-backup"[^>]*data-i18n-aria="recoverySelect"/);
   assert.match(html, /id="sync-now"[^>]*data-i18n="syncNow"/);
+  assert.match(html, /id="account-security-panel"[^>]*data-i18n-aria="accountSecurity"/);
+  assert.match(html, /id="account-data-panel"[^>]*data-i18n-aria="accountDataPrivacy"/);
+  assert.match(html, /id="private-sync-panel"[^>]*data-i18n-aria="privateSyncTitle"/);
+  assert.match(html, /id="library-ai-answer-settings-title"[^>]*data-i18n="answerSettings"/);
+  assert.match(html, /id="newsnow-settings-title"[^>]*data-i18n="newsSettings"/);
+  assert.match(html, /id="filter-btn"[^>]*data-i18n-title="sortAndLayout"/);
+  assert.match(html, /id="stats-chart-mode"[^>]*data-i18n="time"/);
+  assert.match(i18n, /const ACCOUNT_SUBPAGE_COPY/);
+  assert.match(i18n, /const PANEL_COPY/);
+  assert.match(i18n, /const ACCOUNT_RUNTIME_COPY/);
   assert.match(html, /id="search-input"[^>]*data-i18n-placeholder="searchPlaceholder"/);
   assert.match(i18n, /const SETTINGS_COPY/);
   const settingsCopy = i18n.slice(i18n.indexOf("const SETTINGS_COPY"), i18n.indexOf("Object.entries(SETTINGS_COPY)"));
@@ -58,8 +69,72 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(app, /function renderRecoveryBackupStatus/);
   assert.match(app, /appText\("recoveryStatus"/);
   assert.match(app, /app-language-changed[\s\S]*?renderRecoveryBackupStatus\(lastRecoveryBackupStatus\)/);
+  assert.match(i18n, /const DEFAULT_APPS_NOTICE_COPY/);
+  assert.match(app, /AppNotice\?\.show\([\s\S]*?defaultOpenToast[\s\S]*?variant:\s*"text"[\s\S]*?duration:\s*1500/s);
+  assert.match(app, /defaultOpenFailed/);
+  assert.doesNotMatch(app, /alert\("已打开 Windows 默认应用设置/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "sync-ui.js"), "utf8"), /app-language-changed[\s\S]*?applyAccountSecurityStatus\(lastAccountSecurity\)/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "stats-ui.js"), "utf8"), /app-language-changed[\s\S]*?renderStats\(\)/);
   assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*min-width:\s*0;[^}]*overflow-x:\s*hidden;/s);
   assert.match(styles, /#fp-settings-modal \.fp-set-row > :first-child\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
   assert.match(styles, /\.default-apps-setting > \.btn-plain\s*\{[^}]*width:\s*fit-content;[^}]*max-width:\s*48%;/s);
   assert.match(styles, /\.recovery-backup-actions \.btn-plain\s*\{[^}]*width:\s*auto;[^}]*max-width:\s*100%;/s);
+});
+
+function loadAppI18n(language) {
+  const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
+  const localStorage = { getItem() { return language; }, setItem() {} };
+  const window = { document, localStorage, navigator: { language: language === "ja" ? "ja-JP" : language }, addEventListener() {}, dispatchEvent() {} };
+  vm.runInNewContext(i18n, { window, document, localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+  return window.ReaderAppI18n;
+}
+
+test("Japanese main-window catalog is complete and never uses English fallback", () => {
+  const japanese = loadAppI18n("ja");
+  const english = loadAppI18n("en");
+  assert.deepEqual([...japanese.missingKeys("ja")], [], "every English UI message must have Japanese copy");
+  for (const key of [
+    "newsTitle", "manageSources", "libraryQuestion", "questionHistory", "accountDataPrivacy",
+    "clearThisDeviceData", "sortAndLayout", "newsSettings", "gestureBack", "answerSettings",
+    "statsLoading", "accountSecurityBoundEmail",
+  ]) {
+    assert.notEqual(japanese.t(key), english.t(key), `Japanese main-window key must not fall back to English: ${key}`);
+    assert.doesNotMatch(japanese.t(key), /^⟦.+⟧$/, `Japanese main-window key must not be an unresolved token: ${key}`);
+  }
+  assert.match(i18n, /locale !== "ja" && locale !== "ko"/);
+  assert.match(i18n, /language === "ja" \|\| language === "ko"/);
+});
+
+test("Korean secondary panels have a complete catalog and never inherit English", () => {
+  const korean = loadAppI18n("ko");
+  const english = loadAppI18n("en");
+  assert.deepEqual([...korean.missingKeys("ko")], [], "every English UI message must have Korean copy");
+  for (const key of [
+    "accountDataPrivacy", "privateSyncTitle", "clearThisDeviceData", "sortAndLayout",
+    "newsSettings", "gestureBack", "libraryQuestion", "questionHistory",
+    "libraryScopeTip", "libraryFilterTip", "statsLoading", "accountSecurityBoundEmail",
+  ]) {
+    assert.notEqual(korean.t(key), english.t(key), `Korean key must not inherit English: ${key}`);
+    assert.doesNotMatch(korean.t(key), /^⟦.+⟧$/, `Korean key must not be an unresolved token: ${key}`);
+  }
+});
+
+test("all ten languages localize the five settings child pages", () => {
+  const chinese = loadAppI18n("zh-CN");
+  const keys = [
+    "recommendationSettings", "apiSettingsTitle", "animationSettings",
+    "importDirectoriesTitle", "externalDictionaryTitle", "apiSettingsNote",
+    "animationMainHelp", "importDirectoriesNote", "externalDictionaryNote",
+  ];
+  assert.match(i18n, /const SETTINGS_SUBPAGE_COPY/);
+  for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
+    const localized = loadAppI18n(locale);
+    for (const key of keys) {
+      assert.doesNotMatch(localized.t(key), /^⟦.+⟧$/, `${locale} must define ${key}`);
+      if (locale !== "zh-CN") assert.notEqual(localized.t(key), chinese.t(key), `${locale} must not retain Chinese ${key}`);
+    }
+  }
+  for (const id of ["reader-recommendation-settings-modal", "api-settings-modal", "animation-settings-modal", "import-dirs-modal", "external-dict-modal"]) {
+    assert.match(html, new RegExp(`id="${id}"[\\s\\S]*?data-i18n`), `${id} must use catalog keys`);
+  }
 });

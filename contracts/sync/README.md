@@ -2,18 +2,17 @@
 
 所有同步实体应具备稳定 ID、实体种类、更新时间、删除墓碑、来源设备和版本/冲突信息。实体内容按 `kind` 区分，客户端应忽略自己不认识的可选字段。
 
+## 实体时钟
+
+`updated_at` 与 `deleted_at` 的规范单位均为 Unix epoch **毫秒**；活跃实体的 `deleted_at` 为 `0`，墓碑使用删除时的毫秒值。LWW 依次比较 `updated_at`、`sync_version`、`device_id`。`server_updated_at`、pull cursor 与 `data_generation` 是独立服务端字段，不能被客户端当作实体时钟或做单位转换。
+
+为兼容现实旧 Android，服务端仅在 `/sync/push` 与 `/sync/reconcile` 接受落在 2000-01-01 至 2100-01-01 合理 epoch 范围内的旧秒级 `updated_at`/非零 `deleted_at`，并在比较、存储和响应前规范化为毫秒；客户端不得继续产生秒级新值。合成测试时间戳（例如 `100`）不属于兼容范围，按原数值处理。完整迁移与回滚边界见 ADR-0011。
+
 当前最小实体范围：
 
-- `reading_progress`
-- `bookmark`
-- `highlight`
-- `annotation`
-- `rating`
-- `tag`
-- `booklist`
-- `booklist_item`
-- `vocabulary`
-- `reading_stat`
+- `book_state_v2`：按图书内容 ID 保存阅读位置、书签、高亮、批注、评分、用户标签和书单等轻量状态。其可选 `progress_history` 是单本书的每日最后阅读位置摘要；条目字段为 Unix 秒 `at`、百分比 `progress`、章节 `chapter`、章节内比例 `frac` 和可选续读锚点 `position`。拉取或合并时，同一**本地日历日**仅保留 `at` 最大的条目，按日期升序保留最近至多 3650 日。缺失字段等同空历史；客户端写回完整书籍状态时必须保留已经收到的历史和未知 payload 字段，不能以空数组覆盖。
+- `vocab`：生词本。
+- `reading_bucket_v2`：按本地日期、小时和图书内容 ID 聚合阅读时长（`secs`）与有效阅读字数（`words`）。`words` 是累计阅读量，不是去重后的图书字数；满足平台停留与反刷量门槛的重读必须再次累加，因此它可以大于图书总字数。
 - `model_book_tags_v1`：按图书内容 SHA-256 保存的大模型书目维度标签；与用户手工 `tag` 独立。即使某设备关闭“使用大模型分类的标签”，该实体仍上传、下载和保留；书库问答始终采用它，开关只控制本机问答范围筛选是否显示、采用它。
 
 可选私密扩展（旧客户端必须忽略而不能删除）：

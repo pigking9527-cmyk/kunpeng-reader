@@ -19,6 +19,10 @@ const wordPackProgress = document.getElementById("word-pack-progress");
 const wordPackMeta = document.getElementById("word-pack-meta");
 const wordPackToggle = document.getElementById("word-pack-toggle");
 const wordPackDelete = document.getElementById("word-pack-delete");
+const readerVocabText = (key, fallback, values) => {
+  const value = window.ReaderI18n?.t?.(key, values);
+  return value && value !== key ? value : fallback;
+};
 let vocabLang = "zh";
 let vocabShowCount = localStorage.getItem("vocabShowCount") !== "0";
 let vocabSort = localStorage.getItem("vocabSort") || "time";
@@ -37,10 +41,10 @@ function refreshWordAudioCacheSize() {
   if (!wordAudioDiskCache) return;
   invoke("word_tts_cache_size")
     .then((bytes) => {
-      wordAudioCacheSize.textContent = "缓存：" + formatCacheSize(Number(bytes) || 0);
+      wordAudioCacheSize.textContent = readerVocabText("cached", "缓存：{size}", { size: formatCacheSize(Number(bytes) || 0) });
     })
     .catch(() => {
-      wordAudioCacheSize.textContent = "缓存：无法读取";
+      wordAudioCacheSize.textContent = readerVocabText("cacheUnavailable", "缓存：无法读取");
     });
 }
 function renderWordPackState(message) {
@@ -53,15 +57,15 @@ function renderWordPackState(message) {
   if (message) {
     wordPackMeta.textContent = message;
   } else if (wordPackState.running) {
-    wordPackMeta.textContent = (wordPackState.message || ("生成中：" + (wordPackState.current || ""))) + " · " + percent + "%";
+    wordPackMeta.textContent = (wordPackState.message || readerVocabText("creating", "生成中：{current}", { current: wordPackState.current || "" })) + " · " + percent + "%";
   } else if (cached >= total) {
-    wordPackMeta.textContent = "已完成 · " + formatCacheSize(Number(wordPackState.bytes) || 0);
+    wordPackMeta.textContent = readerVocabText("generated", "已完成") + " · " + formatCacheSize(Number(wordPackState.bytes) || 0);
   } else if (cached > 0) {
-    wordPackMeta.textContent = "已暂停 · " + percent + "% · " + formatCacheSize(Number(wordPackState.bytes) || 0);
+    wordPackMeta.textContent = readerVocabText("paused", "已暂停") + " · " + percent + "% · " + formatCacheSize(Number(wordPackState.bytes) || 0);
   } else {
     wordPackMeta.textContent = "尚未生成";
   }
-  wordPackToggle.textContent = wordPackState.running ? "暂停" : cached > 0 ? "继续生成" : "开始生成";
+  wordPackToggle.textContent = wordPackState.running ? readerVocabText("pause", "暂停") : cached > 0 ? readerVocabText("resumeCreate", "继续生成") : readerVocabText("createAudioPack", "开始生成");
   wordPackToggle.disabled = !wordAudioDiskCache || cached >= total;
   wordPackDelete.disabled = cached === 0 && !wordPackState.running;
 }
@@ -74,7 +78,7 @@ function refreshWordPackStatus() {
       return status;
     })
     .catch(() => {
-      renderWordPackState("无法读取语音包进度");
+      renderWordPackState(readerVocabText("cacheReadFailed", "无法读取语音包进度"));
       return wordPackState;
     });
 }
@@ -192,7 +196,7 @@ function renderVocab() {
       if (!list.length) {
         const e = document.createElement("div");
         e.className = "vc-empty";
-        e.textContent = "还没有查过的" + (vocabLang === "zh" ? "中文" : "英文") + "词";
+        e.textContent = readerVocabText("vocabEmpty", "还没有查过的{language}词", { language: vocabLang === "zh" ? readerVocabText("chinese", "中文") : readerVocabText("english", "英文") });
         vocabPane.appendChild(e);
         return;
       }
@@ -206,7 +210,7 @@ function renderVocab() {
         row.className = "vc-item";
         if (it.lang === "en") {
           row.classList.add("vc-speak");
-          row.title = "点击播放读音";
+          row.title = readerVocabText("clickToPronounce", "点击播放读音");
           row.addEventListener("click", (e) => {
             if (e.target.closest(".vc-del") || e.target.closest(".vc-level")) return;
             speakVocabWord(it.word);
@@ -236,9 +240,9 @@ function renderVocab() {
         const levels = document.createElement("div");
         levels.className = "vc-level";
         [
-          ["陌生", 0],
-          ["认识", 1],
-          ["掌握", 2],
+          [readerVocabText("unfamiliar", "陌生"), 0],
+          [readerVocabText("familiar", "认识"), 1],
+          [readerVocabText("mastered", "掌握"), 2],
         ].forEach(([label, value]) => {
           const b = document.createElement("button");
           b.type = "button";
@@ -254,7 +258,7 @@ function renderVocab() {
         const del = document.createElement("button");
         del.className = "vc-del";
         del.textContent = "✕";
-        del.title = "从生词本删除";
+        del.title = readerVocabText("removeFromVocabulary", "从生词本删除");
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           invoke("vocab_remove", { word: it.word, lang: it.lang }).then(() => renderVocab()).catch(() => {});
@@ -300,7 +304,7 @@ wordAudioCacheToggle.addEventListener("change", () => {
   applyVocabSettings();
 });
 wordAudioCacheDelete.addEventListener("click", async () => {
-  if (!confirm("删除全部英文单词语音缓存？")) return;
+  if (!confirm(readerVocabText("removeAllAudioCache", "删除全部英文单词语音缓存？"))) return;
   await invoke("pause_word_tts_pack").catch(() => {});
   try {
     await invoke("clear_word_tts_cache");
@@ -308,23 +312,23 @@ wordAudioCacheDelete.addEventListener("click", async () => {
     await refreshWordPackStatus();
     refreshWordAudioCacheSize();
   } catch (err) {
-    alert("删除语音缓存失败：" + err);
+    alert(readerVocabText("deleteCacheFailed", "删除语音缓存失败：{error}", { error: err }));
   }
 });
 wordPackToggle.addEventListener("click", () => {
   if (wordPackState.running) {
     invoke("pause_word_tts_pack").catch(() => {});
-    renderWordPackState("正在暂停，当前请求完成后停止…");
+    renderWordPackState(readerVocabText("pausing", "正在暂停，当前请求完成后停止…"));
     return;
   }
   if (!wordAudioDiskCache) return;
   ensureWordPackPolling();
   invoke("start_word_tts_pack")
     .then(() => refreshWordPackStatus())
-    .catch((err) => alert("启动高频词语音包失败：" + err));
+    .catch((err) => alert(readerVocabText("audioPackFailed", "启动高频词语音包失败：{error}", { error: err })));
 });
 wordPackDelete.addEventListener("click", async () => {
-  if (!confirm("删除已生成的高频词语音包？其他查词缓存会保留。")) return;
+  if (!confirm(readerVocabText("removeAudioPack", "删除已生成的高频词语音包？其他查词缓存会保留。"))) return;
   await invoke("pause_word_tts_pack").catch(() => {});
   try {
     await invoke("clear_word_tts_pack");
@@ -332,7 +336,7 @@ wordPackDelete.addEventListener("click", async () => {
     await refreshWordPackStatus();
     refreshWordAudioCacheSize();
   } catch (err) {
-    alert("删除高频词语音包失败：" + err);
+    alert(readerVocabText("deleteAudioPackFailed", "删除高频词语音包失败：{error}", { error: err }));
   }
 });
 function setVocabSort(sort) {
@@ -346,4 +350,8 @@ vocabSortCount.addEventListener("click", () => setVocabSort("count"));
 applyVocabSettings();
 document.getElementById("vocab-btn").addEventListener("click", () => {
   setVocab(!ReaderShell.isOverlay(ReaderShell.OVERLAY.VOCAB));
+});
+window.addEventListener("reader-language-changed", () => {
+  applyVocabSettings();
+  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.VOCAB)) renderVocab();
 });

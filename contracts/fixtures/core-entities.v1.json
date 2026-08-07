@@ -4,8 +4,8 @@
     {
       "id": "progress-book-a",
       "kind": "reading_progress",
-      "updated_at": "2026-07-27T00:00:00Z",
-      "deleted_at": null,
+      "updated_at": 1785110400000,
+      "deleted_at": 0,
       "device_id": "fixture-desktop",
       "sync_version": 1,
       "payload": { "book_id": "book-a", "chapter": 3, "offset": 1200, "progress": 0.25 }
@@ -13,8 +13,8 @@
     {
       "id": "highlight-book-a-1",
       "kind": "highlight",
-      "updated_at": "2026-07-27T00:01:00Z",
-      "deleted_at": null,
+      "updated_at": 1785110460000,
+      "deleted_at": 0,
       "device_id": "fixture-ios",
       "sync_version": 1,
       "payload": { "book_id": "book-a", "chapter": 3, "start": 1180, "end": 1220, "color": "yellow" }
@@ -22,17 +22,47 @@
     {
       "id": "booklist-history",
       "kind": "booklist",
-      "updated_at": "2026-07-27T00:02:00Z",
-      "deleted_at": null,
+      "updated_at": 1785110520000,
+      "deleted_at": 0,
       "device_id": "fixture-android",
       "sync_version": 1,
       "payload": { "name": "历史", "description": "fixture only", "cover_book_id": "book-a" }
     },
     {
+      "id": "20260806:10:book-a",
+      "kind": "reading_bucket_v2",
+      "updated_at": 1786012200000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop",
+      "sync_version": 2,
+      "payload": { "day": 20260806, "hour": 10, "content_id": "book-a", "secs": 120, "words": 1800 }
+    },
+    {
+      "id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "kind": "book_state_v2",
+      "updated_at": 1785673800000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop",
+      "sync_version": 4,
+      "payload": {
+        "schema_version": 4,
+        "content_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "title": "仅同步状态的示例书籍",
+        "progress": 42,
+        "resume_chapter": 6,
+        "resume_frac": 0.25,
+        "progress_history": [
+          { "at": 1785589200, "progress": 20, "chapter": 3, "frac": 0.5, "position": null },
+          { "at": 1785672000, "progress": 42, "chapter": 6, "frac": 0.25, "position": null }
+        ],
+        "future_reader_extension": { "preserve": true }
+      }
+    },
+    {
       "id": "book-a",
       "kind": "model_book_tags_v1",
-      "updated_at": "2026-08-04T00:03:00Z",
-      "deleted_at": null,
+      "updated_at": 1785801780000,
+      "deleted_at": 0,
       "device_id": "fixture-desktop",
       "sync_version": 1,
       "payload": {
@@ -44,8 +74,8 @@
     {
       "id": "library-v1",
       "kind": "ai_reader_history_v1",
-      "updated_at": "2026-08-05T00:05:00Z",
-      "deleted_at": null,
+      "updated_at": 1785888300000,
+      "deleted_at": 0,
       "device_id": "fixture-desktop",
       "sync_version": 1,
       "payload": {

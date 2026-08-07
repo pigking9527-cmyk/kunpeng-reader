@@ -48,6 +48,28 @@ pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &[
     "secret_bundle_v1",
 ];
 
+/// The portable migration package is intentionally narrower than live sync.
+/// It contains only state that can safely move between local installations;
+/// credentials, cursors, acknowledgements, library files and local paths are
+/// never package entities.
+const CORE_PACKAGE_ENTITY_KINDS: &[&str] = &[
+    "book_state_v2",
+    "model_book_tags_v1",
+    "vocab",
+    "reading_bucket_v2",
+];
+const CORE_PACKAGE_FORMAT: &str = "kunpeng-reader-core-data-package";
+const CORE_PACKAGE_VERSION: u64 = 1;
+pub(crate) const MAX_CORE_PACKAGE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CORE_PACKAGE_ENTITIES: usize = 50_000;
+const MAX_CORE_PACKAGE_ENTITY_BYTES: usize = 256 * 1024;
+const MAX_CORE_PACKAGE_ID_BYTES: usize = 512;
+const MAX_CORE_PACKAGE_DEVICE_ID_BYTES: usize = 256;
+const MAX_CORE_PACKAGE_JSON_DEPTH: usize = 64;
+const MAX_CORE_PACKAGE_OBJECT_FIELDS: usize = 512;
+const MAX_CORE_PACKAGE_ARRAY_ITEMS: usize = 10_000;
+const MAX_CORE_PACKAGE_STRING_BYTES: usize = 64 * 1024;
+
 pub(crate) fn is_supported_entity_kind(kind: &str) -> bool {
     SUPPORTED_ENTITY_KINDS.contains(&kind)
 }
@@ -94,6 +116,220 @@ struct IncomingEntity<'a> {
     deleted_at: i64,
     device_id: &'a str,
     sync_version: i64,
+}
+
+struct ValidatedPackageEntity {
+    kind: String,
+    id: String,
+    json_text: String,
+    updated_at: i64,
+    deleted_at: i64,
+    device_id: String,
+    sync_version: i64,
+}
+
+fn validate_core_package(value: &Value) -> Result<Vec<ValidatedPackageEntity>, String> {
+    let package_bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    if package_bytes.len() as u64 > MAX_CORE_PACKAGE_BYTES {
+        return Err(format!(
+            "核心数据包超过 {} MiB 未压缩 JSON 上限",
+            MAX_CORE_PACKAGE_BYTES / 1024 / 1024
+        ));
+    }
+    let root = value
+        .as_object()
+        .ok_or_else(|| "核心数据包顶层必须是对象".to_string())?;
+    let format = required_package_str(root, "format", 128)?;
+    let version = root
+        .get("version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "核心数据包 version 必须是正整数".to_string())?;
+    if format != CORE_PACKAGE_FORMAT || version != CORE_PACKAGE_VERSION {
+        return Err(format!("不支持的数据包格式或版本：{format} v{version}"));
+    }
+    reject_unknown_fields(
+        root,
+        &[
+            "format",
+            "version",
+            "exported_at",
+            "source_device_id",
+            "entities",
+        ],
+        "核心数据包顶层",
+    )?;
+    if root.get("exported_at").and_then(Value::as_u64).is_none() {
+        return Err("核心数据包 exported_at 必须是非负整数时间戳".into());
+    }
+    required_package_str(root, "source_device_id", MAX_CORE_PACKAGE_DEVICE_ID_BYTES)?;
+    let entities = root
+        .get("entities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "核心数据包缺少 entities 数组".to_string())?;
+    if entities.len() > MAX_CORE_PACKAGE_ENTITIES {
+        return Err(format!(
+            "核心数据包实体超过 {MAX_CORE_PACKAGE_ENTITIES} 条上限"
+        ));
+    }
+    let mut validated = Vec::with_capacity(entities.len());
+    for (index, entity) in entities.iter().enumerate() {
+        let object = entity
+            .as_object()
+            .ok_or_else(|| format!("entities[{index}] 必须是对象"))?;
+        reject_unknown_fields(
+            object,
+            &[
+                "kind",
+                "id",
+                "data",
+                "updated_at",
+                "deleted_at",
+                "device_id",
+                "sync_version",
+            ],
+            &format!("entities[{index}]"),
+        )?;
+        let kind = required_package_str(object, "kind", 64)?;
+        if !CORE_PACKAGE_ENTITY_KINDS.contains(&kind.as_str()) {
+            return Err(format!("entities[{index}] 含非核心或不支持的 kind：{kind}"));
+        }
+        let id = required_package_str(object, "id", MAX_CORE_PACKAGE_ID_BYTES)?;
+        let device_id =
+            required_package_str(object, "device_id", MAX_CORE_PACKAGE_DEVICE_ID_BYTES)?;
+        let updated_at = required_package_i64(object, "updated_at")?;
+        let deleted_at = required_package_i64(object, "deleted_at")?;
+        let sync_version = required_package_i64(object, "sync_version")?;
+        if updated_at < 0 || deleted_at < 0 || sync_version < 1 {
+            return Err(format!("entities[{index}] 的 LWW 元数据无效"));
+        }
+        let payload_key = "data";
+        let payload = object
+            .get(payload_key)
+            .ok_or_else(|| format!("entities[{index}] 缺少 data"))?;
+        if !payload.is_object() {
+            return Err(format!("entities[{index}] 的 {payload_key} 必须是对象"));
+        }
+        validate_portable_payload(payload, 0, &format!("entities[{index}].{payload_key}"))?;
+        let serialized_entity = serde_json::to_vec(entity).map_err(|e| e.to_string())?;
+        if serialized_entity.len() > MAX_CORE_PACKAGE_ENTITY_BYTES {
+            return Err(format!(
+                "entities[{index}] 超过 {} KiB 序列化上限",
+                MAX_CORE_PACKAGE_ENTITY_BYTES / 1024
+            ));
+        }
+        let json_text = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+        validated.push(ValidatedPackageEntity {
+            kind,
+            id,
+            json_text,
+            updated_at,
+            deleted_at,
+            device_id,
+            sync_version,
+        });
+    }
+    Ok(validated)
+}
+
+fn required_package_str(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("数据包字段 {field} 必须是字符串"))?;
+    if value.trim().is_empty() || value.len() > max_bytes {
+        return Err(format!("数据包字段 {field} 为空或超过长度上限"));
+    }
+    Ok(value.to_string())
+}
+
+fn required_package_i64(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<i64, String> {
+    object
+        .get(field)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("数据包字段 {field} 必须是整数"))
+}
+
+fn reject_unknown_fields(
+    object: &serde_json::Map<String, Value>,
+    allowed: &[&str],
+    location: &str,
+) -> Result<(), String> {
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(format!("{location} 含不允许的字段：{field}"));
+    }
+    Ok(())
+}
+
+fn validate_portable_payload(value: &Value, depth: usize, location: &str) -> Result<(), String> {
+    if depth > MAX_CORE_PACKAGE_JSON_DEPTH {
+        return Err(format!(
+            "{location} 的 JSON 嵌套超过 {MAX_CORE_PACKAGE_JSON_DEPTH} 层"
+        ));
+    }
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+        Value::String(text) => {
+            if text.len() > MAX_CORE_PACKAGE_STRING_BYTES {
+                Err(format!("{location} 的字符串超过长度上限"))
+            } else {
+                Ok(())
+            }
+        }
+        Value::Array(values) => {
+            if values.len() > MAX_CORE_PACKAGE_ARRAY_ITEMS {
+                return Err(format!("{location} 的数组超过项目上限"));
+            }
+            for (index, child) in values.iter().enumerate() {
+                validate_portable_payload(child, depth + 1, &format!("{location}[{index}]"))?;
+            }
+            Ok(())
+        }
+        Value::Object(object) => {
+            if object.len() > MAX_CORE_PACKAGE_OBJECT_FIELDS {
+                return Err(format!("{location} 的对象字段超过上限"));
+            }
+            for (key, child) in object {
+                if key.len() > MAX_CORE_PACKAGE_ID_BYTES {
+                    return Err(format!("{location} 含过长字段名"));
+                }
+                let normalized = key.to_ascii_lowercase().replace('-', "_");
+                if matches!(
+                    normalized.as_str(),
+                    "path"
+                        | "file_path"
+                        | "source_path"
+                        | "book_path"
+                        | "secret"
+                        | "secrets"
+                        | "token"
+                        | "access_token"
+                        | "refresh_token"
+                        | "password"
+                        | "api_key"
+                        | "apikey"
+                        | "cursor"
+                        | "ack"
+                        | "acknowledgement"
+                        | "acknowledgements"
+                        | "data_generation"
+                ) {
+                    return Err(format!("{location} 含不允许导出的本机或敏感字段：{key}"));
+                }
+                validate_portable_payload(child, depth + 1, &format!("{location}.{key}"))?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn now_secs() -> u64 {
@@ -836,12 +1072,23 @@ impl AppDb {
         }
         let entity_count = entities.len();
         let package = json!({
-            "format": "kunpeng-reader-data-package",
-            "version": 2,
-            "exported_at": now_secs(),
-            "device_id": self.device_id,
+            "format": CORE_PACKAGE_FORMAT,
+            "version": CORE_PACKAGE_VERSION,
+            "exported_at": now_millis(),
+            "source_device_id": self.device_id,
             "entities": entities,
         });
+        // Do not turn an old malformed local row into a portable data leak.
+        // Validation also makes the exported representation self-consistent
+        // with the import boundary below.
+        let bytes = serde_json::to_vec(&package).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > MAX_CORE_PACKAGE_BYTES {
+            return Err(format!(
+                "核心数据包超过 {} MiB 上限",
+                MAX_CORE_PACKAGE_BYTES / 1024 / 1024
+            ));
+        }
+        validate_core_package(&package)?;
         log_db_operation("export_package", started, entity_count);
         Ok(package)
     }
@@ -872,6 +1119,7 @@ impl AppDb {
     fn upsert_incoming_entity(
         conn: &Connection,
         item: &IncomingEntity<'_>,
+        dirty: i64,
     ) -> Result<bool, String> {
         let incoming = SyncMeta {
             updated_at: item.updated_at,
@@ -890,14 +1138,14 @@ impl AppDb {
         conn.execute(
             r#"
                 INSERT INTO entities(kind,id,json,updated_at,deleted_at,device_id,sync_version,dirty)
-                VALUES(?,?,?,?,?,?,?,0)
+                VALUES(?,?,?,?,?,?,?,?)
                 ON CONFLICT(kind,id) DO UPDATE SET
                     json=excluded.json,
                     updated_at=excluded.updated_at,
                     deleted_at=excluded.deleted_at,
                     device_id=excluded.device_id,
                     sync_version=excluded.sync_version,
-                    dirty=0
+                    dirty=excluded.dirty
                 "#,
             params![
                 item.kind,
@@ -906,7 +1154,8 @@ impl AppDb {
                 item.updated_at,
                 item.deleted_at,
                 item.device_id,
-                item.sync_version
+                item.sync_version,
+                dirty
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -915,47 +1164,22 @@ impl AppDb {
 
     pub fn import_package(&mut self, value: &Value) -> Result<u32, String> {
         let started = Instant::now();
-        let Some(items) = value.get("entities").and_then(|v| v.as_array()) else {
-            return Err("数据包缺少 entities".into());
-        };
+        let items = validate_core_package(value)?;
         let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
         let mut count = 0u32;
-        for item in items {
-            let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            if !is_supported_entity_kind(kind) || id.is_empty() {
-                continue;
-            }
-            let data = item
-                .get("data")
-                .or_else(|| item.get("json"))
-                .cloned()
-                .unwrap_or(Value::Null);
-            let updated_at = item
-                .get("updated_at")
-                .and_then(|v| v.as_i64())
-                .unwrap_or_else(now_millis);
-            let deleted_at = item.get("deleted_at").and_then(|v| v.as_i64()).unwrap_or(0);
-            let device_id = item
-                .get("device_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&self.device_id);
-            let sync_version = item
-                .get("sync_version")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(1);
-            let txt = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        for item in &items {
             if Self::upsert_incoming_entity(
                 &transaction,
                 &IncomingEntity {
-                    kind,
-                    id,
-                    json_text: &txt,
-                    updated_at,
-                    deleted_at,
-                    device_id,
-                    sync_version,
+                    kind: &item.kind,
+                    id: &item.id,
+                    json_text: &item.json_text,
+                    updated_at: item.updated_at,
+                    deleted_at: item.deleted_at,
+                    device_id: &item.device_id,
+                    sync_version: item.sync_version,
                 },
+                1,
             )? {
                 count += 1;
             }
@@ -1246,6 +1470,7 @@ impl AppDb {
                     device_id: &item.device_id,
                     sync_version: item.sync_version,
                 },
+                0,
             )? {
                 count += 1;
             }
@@ -1338,15 +1563,41 @@ mod tests {
     }
 
     #[test]
-    fn package_and_sync_import_ignore_legacy_entity_kinds() {
+    fn core_package_is_strict_and_transactional() {
         let mut db = memory_db();
-        let package = json!({"entities": [
-            {"kind":"book","id":"old","data":{"path":"C:/private.epub"}},
-            {"kind":"vocab","id":"zh:词","data":{"word":"词"}}
-        ]});
-        assert_eq!(db.import_package(&package).unwrap(), 1);
-        assert!(db.entity_json("book", "old").unwrap().is_none());
-        assert!(db.entity_json("vocab", "zh:词").unwrap().is_some());
+        let legacy_package =
+            json!({"format":"kunpeng-reader-data-package","version":2,"entities":[]});
+        assert!(db.import_package(&legacy_package).is_err());
+
+        let strict_package = json!({
+            "format": CORE_PACKAGE_FORMAT,
+            "version": CORE_PACKAGE_VERSION,
+            "exported_at": 2,
+            "source_device_id": "new-device",
+            "entities": [
+                {
+                    "kind":"vocab", "id":"zh:新", "data":{"word":"新"},
+                    "updated_at": 20, "deleted_at": 0, "device_id":"new-device", "sync_version":1
+                },
+                {
+                    "kind":"vocab", "id":"zh:bad", "data":{"source_path":"C:/private.epub"},
+                    "updated_at": 21, "deleted_at": 0, "device_id":"new-device", "sync_version":1
+                }
+            ]
+        });
+        assert!(db.import_package(&strict_package).is_err());
+        // The valid first entity must not commit when a later entity fails.
+        assert!(db.entity_json("vocab", "zh:新").unwrap().is_none());
+
+        let exported = db.export_package().unwrap();
+        assert_eq!(exported["format"], CORE_PACKAGE_FORMAT);
+        assert_eq!(exported["version"], CORE_PACKAGE_VERSION);
+        assert!(exported["source_device_id"].is_string());
+        assert!(exported["entities"].as_array().unwrap().iter().all(|item| {
+            CORE_PACKAGE_ENTITY_KINDS.contains(&item["kind"].as_str().unwrap())
+                && item.get("data").is_some()
+                && item.get("payload").is_none()
+        }));
 
         let legacy = SyncEntity {
             kind: "reading_bucket".into(),
@@ -1358,6 +1609,67 @@ mod tests {
             sync_version: 1,
         };
         assert_eq!(db.import_sync_entities(&[legacy]).unwrap(), 0);
+    }
+
+    #[test]
+    fn core_package_fixture_preserves_unknown_payload_and_tombstones() {
+        let mut db = memory_db();
+        db.set_metadata("data_generation", "7").unwrap();
+        db.set_metadata("sync_cursor", "keep-this-cursor").unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../contracts/fixtures/core-data-package.v1.json"
+        ))
+        .unwrap();
+        assert_eq!(db.import_package(&fixture).unwrap(), 5);
+        let imported_dirty: i64 = db
+            .conn
+            .query_row(
+                "SELECT dirty FROM entities WHERE kind='vocab' AND id='zh:迁移示例'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(imported_dirty, 1);
+        let state = db
+            .entity_json(
+                "book_state_v2",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(state["future_client_field"]["preserved"], true);
+        assert_eq!(db.metadata("data_generation").as_deref(), Some("7"));
+        assert_eq!(
+            db.metadata("sync_cursor").as_deref(),
+            Some("keep-this-cursor")
+        );
+
+        let forbidden = json!({
+            "format": CORE_PACKAGE_FORMAT,
+            "version": CORE_PACKAGE_VERSION,
+            "exported_at": 3,
+            "source_device_id": "migration-device",
+            "entities": [{
+                "kind": "vocab", "id": "zh:forbidden", "data": {"data_generation": 9},
+                "updated_at": 30, "deleted_at": 0, "device_id": "migration-device", "sync_version": 1
+            }]
+        });
+        assert!(db.import_package(&forbidden).is_err());
+        assert!(db.entity_json("vocab", "zh:forbidden").unwrap().is_none());
+
+        let tombstone = json!({
+            "format": CORE_PACKAGE_FORMAT,
+            "version": CORE_PACKAGE_VERSION,
+            "exported_at": 4,
+            "source_device_id": "migration-device",
+            "entities": [{
+                "kind": "vocab", "id": "zh:迁移示例", "data": {},
+                "updated_at": 1786129000000i64, "deleted_at": 1786129000000i64,
+                "device_id": "migration-device", "sync_version": 2
+            }]
+        });
+        assert_eq!(db.import_package(&tombstone).unwrap(), 1);
+        assert!(db.entity_json("vocab", "zh:迁移示例").unwrap().is_none());
     }
 
     #[test]

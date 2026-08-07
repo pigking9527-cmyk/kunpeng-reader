@@ -8,13 +8,57 @@
     "id": { "type": "string", "minLength": 1 },
     "kind": {
       "type": "string",
-      "enum": ["reading_progress", "bookmark", "highlight", "annotation", "rating", "tag", "booklist", "booklist_item", "vocabulary", "reading_stat", "model_book_tags_v1", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1"]
+      "enum": ["reading_progress", "bookmark", "highlight", "annotation", "rating", "tag", "booklist", "booklist_item", "vocabulary", "reading_stat", "book_state_v2", "model_book_tags_v1", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1"]
     },
-    "updated_at": { "type": "string", "format": "date-time" },
-    "deleted_at": { "type": ["string", "null"], "format": "date-time" },
+    "updated_at": {
+      "description": "Canonical Unix epoch milliseconds. The service temporarily normalizes only reasonable legacy epoch-seconds API input before returning this field.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "deleted_at": {
+      "description": "0 for an active entity; otherwise the canonical Unix epoch milliseconds of its tombstone.",
+      "type": "integer",
+      "minimum": 0
+    },
     "device_id": { "type": "string", "minLength": 1 },
     "sync_version": { "type": "integer", "minimum": 1 },
     "payload": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "book_state_v2" } } },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/bookStateV2Payload" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "bookStateV2Payload": {
+      "description": "Portable per-book state. All fields remain optional so clients from before a field was introduced remain readable.",
+      "type": "object",
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "content_id": { "type": "string", "minLength": 1 },
+        "progress_history": {
+          "description": "Daily reading-position summaries. Receiving clients merge same-local-day entries by greatest at, retain at most 3650 days, and preserve other payload fields.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "at": { "type": "integer", "minimum": 0 },
+              "progress": { "type": "number", "minimum": 0, "maximum": 100 },
+              "chapter": { "type": "integer", "minimum": 0 },
+              "frac": { "type": "number", "minimum": 0, "maximum": 1 },
+              "position": { "type": ["object", "null"] }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": true
 }

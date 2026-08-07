@@ -59,8 +59,14 @@ ACCOUNT_CODE_ATTEMPTS = 8
 MAX_FEEDBACK_TEXT_CHARS = 20_000
 MAX_FEEDBACK_IMAGES = 3
 MAX_FEEDBACK_IMAGE_BYTES = 1024 * 1024
+MAX_FEEDBACK_ATTACHMENTS = 1
+MAX_FEEDBACK_JSON_BYTES = 256 * 1024
 MAX_FEEDBACK_ROWS = 2_000
 MAX_UPDATE_NOTES_CHARS = 40_000
+# Only these values are recognized as legacy Android Unix epoch seconds.
+# Keep test/protocol sentinel values such as 100 unchanged rather than guessing.
+LEGACY_ENTITY_EPOCH_SECONDS_MIN = 946_684_800  # 2000-01-01T00:00:00Z
+LEGACY_ENTITY_EPOCH_SECONDS_MAX = 4_102_444_800  # 2100-01-01T00:00:00Z
 
 
 def _clean_update_text(value, limit=MAX_UPDATE_NOTES_CHARS):
@@ -412,6 +418,14 @@ def migrate(conn):
             """
         )
         record_migration(conn, 9)
+        feedback_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(feedback)").fetchall()
+        }
+        if "attachments_json" not in feedback_columns:
+            conn.execute(
+                "ALTER TABLE feedback ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        record_migration(conn, 10)
 
 
 def next_server_stamp(conn):
@@ -477,8 +491,10 @@ def row_to_entity(row):
         "kind": row["kind"],
         "id": row["id"],
         "json": payload,
-        "updated_at": row["updated_at"],
-        "deleted_at": row["deleted_at"],
+        # Existing server databases are deliberately not rewritten in this
+        # rollout.  Normalize legacy rows at the API boundary instead.
+        "updated_at": normalize_entity_epoch_ms(row["updated_at"]),
+        "deleted_at": normalize_entity_epoch_ms(row["deleted_at"]),
         "device_id": row["device_id"],
         "sync_version": row["sync_version"],
         "server_updated_at": row["server_updated_at"],
@@ -512,8 +528,11 @@ def inventory_summary(rows):
             raw = str(row[field] or "").encode("utf-8")
             digest.update(len(raw).to_bytes(4, "big"))
             digest.update(raw)
-        for field in ("sync_version", "updated_at", "deleted_at"):
-            digest.update(int(row[field]).to_bytes(8, "big", signed=True))
+        digest.update(int(row["sync_version"]).to_bytes(8, "big", signed=True))
+        for field in ("updated_at", "deleted_at"):
+            digest.update(
+                normalize_entity_epoch_ms(row[field]).to_bytes(8, "big", signed=True)
+            )
         revision = max(revision, safe_int(row["server_updated_at"]))
     return {
         "entity_count": len(rows),
@@ -523,11 +542,13 @@ def inventory_summary(rows):
 
 
 def manifest_meta_equal(left, right):
-    return all(
-        str(left[field] or "") == str(right[field] or "")
-        if field == "device_id"
-        else safe_int(left[field]) == safe_int(right[field])
-        for field in ("device_id", "sync_version", "updated_at", "deleted_at")
+    return (
+        str(left["device_id"] or "") == str(right["device_id"] or "")
+        and safe_int(left["sync_version"]) == safe_int(right["sync_version"])
+        and normalize_entity_epoch_ms(left["updated_at"])
+        == normalize_entity_epoch_ms(right["updated_at"])
+        and normalize_entity_epoch_ms(left["deleted_at"])
+        == normalize_entity_epoch_ms(right["deleted_at"])
     )
 
 
@@ -538,14 +559,23 @@ def safe_int(value, default=0):
         return default
 
 
+def normalize_entity_epoch_ms(value):
+    """Normalize only realistic legacy epoch-seconds entity metadata to ms."""
+    stamp = safe_int(value)
+    if LEGACY_ENTITY_EPOCH_SECONDS_MIN <= stamp <= LEGACY_ENTITY_EPOCH_SECONDS_MAX:
+        return stamp * 1000
+    return stamp
+
+
 def is_newer(incoming, existing):
     if existing is None:
         return True
-    incoming_updated = safe_int(incoming.get("updated_at"))
+    incoming_updated = normalize_entity_epoch_ms(incoming.get("updated_at"))
     incoming_version = safe_int(incoming.get("sync_version"))
-    if incoming_updated > int(existing["updated_at"]):
+    existing_updated = normalize_entity_epoch_ms(existing["updated_at"])
+    if incoming_updated > existing_updated:
         return True
-    if incoming_updated == int(existing["updated_at"]):
+    if incoming_updated == existing_updated:
         existing_version = int(existing["sync_version"])
         if incoming_version != existing_version:
             return incoming_version > existing_version
@@ -730,6 +760,26 @@ def decode_feedback_image(item):
     return {"name": name, "mime": mime, "data": str(item.get("data", "") or "")}, raw
 
 
+def decode_feedback_attachment(item):
+    if not isinstance(item, dict):
+        raise ValueError("INVALID_FEEDBACK_ATTACHMENT")
+    name = str(item.get("name", "") or "feedback.json")[:160]
+    mime = str(item.get("mime", "") or "")
+    if mime != "application/json" or not name.lower().endswith(".json"):
+        raise ValueError("INVALID_FEEDBACK_ATTACHMENT_TYPE")
+    try:
+        raw = base64.b64decode(str(item.get("data", "") or ""), validate=True)
+    except (ValueError, TypeError):
+        raise ValueError("INVALID_FEEDBACK_ATTACHMENT_DATA") from None
+    if not raw or len(raw) > MAX_FEEDBACK_JSON_BYTES:
+        raise ValueError("FEEDBACK_ATTACHMENT_TOO_LARGE")
+    try:
+        json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("INVALID_FEEDBACK_ATTACHMENT_DATA") from None
+    return {"name": name, "mime": mime, "data": str(item.get("data", "") or "")}, raw
+
+
 def normalize_feedback(body):
     if not isinstance(body, dict):
         raise ValueError("INVALID_FEEDBACK")
@@ -738,9 +788,14 @@ def normalize_feedback(body):
         raise ValueError("INVALID_FEEDBACK_KIND")
     text = str(body.get("text", "") or "").strip()
     images = body.get("images", [])
+    attachments = body.get("attachments", [])
     if not isinstance(images, list) or len(images) > MAX_FEEDBACK_IMAGES:
         raise ValueError("TOO_MANY_FEEDBACK_IMAGES")
-    if not text and not images:
+    if not isinstance(attachments, list) or len(attachments) > MAX_FEEDBACK_ATTACHMENTS:
+        raise ValueError("TOO_MANY_FEEDBACK_ATTACHMENTS")
+    if kind != "bug" and attachments:
+        raise ValueError("FEEDBACK_ATTACHMENTS_REQUIRE_BUG")
+    if not text and not images and not attachments:
         raise ValueError("EMPTY_FEEDBACK")
     if len(text) > MAX_FEEDBACK_TEXT_CHARS:
         raise ValueError("FEEDBACK_TEXT_TOO_LONG")
@@ -748,10 +803,15 @@ def normalize_feedback(body):
     for item in images:
         normalized, _ = decode_feedback_image(item)
         normalized_images.append(normalized)
+    normalized_attachments = []
+    for item in attachments:
+        normalized, _ = decode_feedback_attachment(item)
+        normalized_attachments.append(normalized)
     return {
         "kind": kind,
         "text": text,
         "images": normalized_images,
+        "attachments": normalized_attachments,
         "app_version": str(body.get("appVersion", "") or "")[:64],
         "platform": str(body.get("platform", "") or "")[:1000],
     }
@@ -774,7 +834,7 @@ def send_feedback_email(feedback):
                 f"客户端：{feedback.get('platform', '') or '未知'}",
                 f"提交时间：{feedback.get('created_at', 0)}",
                 "",
-                feedback.get("text", "") or "（仅提交了图片）",
+                feedback.get("text", "") or "（仅提交了附件）",
             )
         )
     )
@@ -782,6 +842,9 @@ def send_feedback_email(feedback):
         _, raw = decode_feedback_image(item)
         subtype = item["mime"].split("/", 1)[1]
         message.add_attachment(raw, maintype="image", subtype=subtype, filename=item["name"])
+    for item in feedback.get("attachments", []):
+        _, raw = decode_feedback_attachment(item)
+        message.add_attachment(raw, maintype="application", subtype="json", filename=item["name"])
     smtp_cls = smtplib.SMTP_SSL if FEEDBACK_SMTP_SSL else smtplib.SMTP
     with smtp_cls(FEEDBACK_SMTP_HOST, FEEDBACK_SMTP_PORT, timeout=20) as smtp:
         if not FEEDBACK_SMTP_SSL and FEEDBACK_SMTP_STARTTLS:
@@ -797,6 +860,7 @@ def deliver_feedback_row(conn, row):
         "kind": row["kind"],
         "text": row["text"],
         "images": json.loads(row["images_json"]),
+        "attachments": json.loads(row["attachments_json"]),
         "app_version": row["app_version"],
         "platform": row["platform"],
         "created_at": row["created_at"],
@@ -1140,14 +1204,15 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute(
                 """
                 INSERT INTO feedback(
-                    id,kind,text,images_json,app_version,platform,client_ip,created_at
-                ) VALUES(?,?,?,?,?,?,?,?)
+                    id,kind,text,images_json,attachments_json,app_version,platform,client_ip,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     feedback_id,
                     feedback["kind"],
                     feedback["text"],
                     json.dumps(feedback["images"], ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(feedback["attachments"], ensure_ascii=False, separators=(",", ":")),
                     feedback["app_version"],
                     feedback["platform"],
                     client_ip,
@@ -1163,6 +1228,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "id": feedback_id,
                 "emailed": emailed,
+                "acceptedAttachments": len(feedback["attachments"]),
                 "message": (
                     "反馈已提交并发送，谢谢。"
                     if emailed
@@ -1232,8 +1298,8 @@ class Handler(BaseHTTPRequestHandler):
             local_by_key[key] = {
                 "kind": kind,
                 "id": entity_id,
-                "updated_at": safe_int(item.get("updated_at")),
-                "deleted_at": safe_int(item.get("deleted_at")),
+                "updated_at": normalize_entity_epoch_ms(item.get("updated_at")),
+                "deleted_at": normalize_entity_epoch_ms(item.get("deleted_at")),
                 "device_id": str(item.get("device_id", "") or "")[:128],
                 "sync_version": safe_int(item.get("sync_version")),
             }
@@ -1907,8 +1973,8 @@ class Handler(BaseHTTPRequestHandler):
                     "kind": kind,
                     "id": entity_id,
                     "json": payload,
-                    "updated_at": safe_int(entity.get("updated_at")),
-                    "deleted_at": safe_int(entity.get("deleted_at")),
+                    "updated_at": normalize_entity_epoch_ms(entity.get("updated_at")),
+                    "deleted_at": normalize_entity_epoch_ms(entity.get("deleted_at")),
                     "device_id": str(entity.get("device_id", default_device_id) or "")[:128],
                     "sync_version": safe_int(entity.get("sync_version")),
                 }

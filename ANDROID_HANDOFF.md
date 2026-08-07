@@ -1,6 +1,6 @@
 # 鲲鹏阅读器 Android 工作交接
 
-> 更新：2026-08-06。本文是下一位 Android 开发者的起点，不是发布说明。先读仓库根目录 `AGENTS.md`、`docs/coordination/CURRENT.md`、`docs/architecture/跨平台协作规则.md` 和 `contracts/README.md`；涉及同步、账号或删除语义时，以 `contracts/`、服务端实现和 fixture 为准。
+> 更新：2026-08-07。本文是下一位 Android 开发者的起点，不是发布说明。先读仓库根目录 `AGENTS.md`、`docs/coordination/CURRENT.md`、`docs/architecture/跨平台协作规则.md` 和 `contracts/README.md`；涉及同步、账号或删除语义时，以 `contracts/`、服务端实现和 fixture 为准。
 
 ## 1. 当前工程与版本
 
@@ -15,7 +15,7 @@ C:\Users\pigki\Documents\Codex\2026-07-21\claude-projects\kunpeng-reader-mobile
 | 项目 | 当前值 |
 | --- | --- |
 | Git 分支 / HEAD | `main` / `760488792d92885d3d1b297b718571413a7117d2` |
-| 工作区 | 干净（核对时无未提交修改） |
+| 工作区 | 有本轮 Android 迁移的未提交改动；先核对 `git status --short`，不要覆盖或混入桌面端已有改动 |
 | Android 客户端版本 | `0.3.0+3`，来自 `pubspec.yaml` |
 | Android applicationId | `com.pigking.kunpeng_reader_mobile` |
 | 产品 Release 关联号 | 默认 `1.11.0`，仅用于读取同一 GitHub 产品 Release 元数据；不可与 Android 版本混用 |
@@ -28,33 +28,64 @@ C:\Users\pigki\Documents\Codex\2026-07-21\claude-projects\kunpeng-reader-mobile
 
 ### 书架、导入与本地数据
 
-- EPUB/TXT 解析、导入、封面提取、书架网格/列表、筛选、排序、长按多选和批量操作。
-- SAF 多选导入后把文件复制到应用私有目录，原始来源 URI 不作为长期阅读依赖。
+- EPUB/TXT/Markdown 解析、导入、封面提取、书架网格/列表、筛选、排序、长按多选和批量操作；多选时可批量删除、加入书单和添加已有/新标签。Markdown 使用 UTF-8，`#` / `##` 生成目录与稳定章节键；原始 HTML、链接目标和图片来源不进入 WebView，防止本地 Markdown 取得脚本或网络执行能力。
+- 图书信息页可从 SAF 更换本机自定义封面，也可还原 EPUB 内嵌封面。仅接受 PNG/JPEG/GIF/WebP，最大 8 MB；Android 复核文件魔数、任一边不超过 10,000 像素且总像素不超过 40 MP，然后将原图和 320px 缩略图原子写入 `noBackup/books` 私有目录。来源 URI 立即释放，封面路径、原图和缩略图均不进入同步；非 EPUB 还原后仅移除本机自定义封面。
+- SAF 多选导入后把文件复制到应用私有目录，原始来源 URI 不作为长期阅读依赖。Android 文件管理器/第三方 App 的“打开方式”同样可接收受限的 `content://` EPUB、PDF、TXT、Markdown、MOBI/AZW 及受限 AZW3：冷启动和前台 intent 都先复制为私有对象、经既有 SHA-256 去重和解析链导入，原始 URI 不会进入持久队列或同步；未知类型、无临时读权限和非 `content://` 均拒绝。
 - 本地 SQLite 保存书目、阅读状态、用户数据、全文索引和同步状态；启动快照、最近阅读缓存、封面/索引维护被放到首屏之后执行。
+- 设置 > 高级 > “清除此设备数据”在二次确认后关闭数据库、词典和语义模型，清理应用私有书籍副本、缓存、自动导入设置及安全凭据，然后退出应用；它不删除 Download/SAF 的原文件，也不改动云端实体或账户。
+- 设置 > 高级 > “本机恢复点”可创建、列出并恢复仅存于本设备的恢复点；快照包含 SQLite（当前含 v5 迁移）与私有图书副本，清单版本、数据库和图书树在替换前做 SHA-256 校验，失败时尝试回滚。恢复需二次确认，成功后退出应用避免旧内存状态回写；它不含登录凭据、不动 Download/SAF 原书也不上传。启动后的安全空闲窗口会每天自动创建最多一次“自动恢复点”，所有手动/自动恢复点合计最多保留 7 份；阅读、导入、索引或恢复中会跳过，避免互相覆盖。
+- 设置 > 高级 > “迁移核心同步状态”已实现 Android SAF 导出/导入 `kunpeng-reader-core-data-package` v1 的严格解析、恢复点和失败回滚边界：只含 `book_state_v2`、`model_book_tags_v1`、`vocab`、`reading_bucket_v2` 及 LWW/墓碑元数据，文件最大 16 MiB；不含图书、正文、封面、路径、索引、AI/翻译配置或历史、密钥、认证、`data_generation`、cursor/ack。首次启动会先创建“同步时钟毫秒升级前”本机恢复点，然后在单 SQLite 事务中仅将 `sync_entities`/`sync_acks` 的 `updated_at`、`deleted_at` 中 2000–2100 的真实 epoch 秒升级为毫秒并写幂等标记；图书、cursor、`data_generation`、认证、密钥和 payload 均不触碰。恢复点或事务失败时应用仍可用、原库不改、入口关闭且可在设置中重试；成功后核心迁移才开放。旧桌面 v2 数据包会明确拒绝，不能作为普通 JSON 猜测导入。
 - 全书架正文检索、按书分组的结果页、命中片段和点击回到阅读位置。
-- 语义索引页与“关键词 / 语义”切换：BGE Small 中文 v1.5 模型、正文切块和向量索引只保留本机。
+- 语义索引页与“关键词 / 语义”切换：BGE Small 中文 v1.5 模型、正文切块和向量索引只保留本机。书籍详情的“相似图书”仅在至少两本完整索引的非 PDF 图书间，按正文顺序确定性分桶得到每书 1–8 个局部主题中心，并取两书任意中心的最高余弦相似度显示最多 5 本；旧单中心缓存会从本机 chunk 向量惰性升级，向量缺失时安全回退旧中心。大书架查询（超过 24 本且超过 8,000 个 chunk）先以这些完整本机画像选出最多 24 本候选，再对候选原始段落向量精确重排；任一画像缺失、损坏或旧版无法升级时无条件回退全书架精确扫描，不能以加速为由漏结果。模型缺失、索引未完成或无结果会明确提示，不上传正文/向量或创建同步实体。
+- 有效阅读字数与 ADR-0007 对齐：字数按每次可见页访问累计而非永久去重，满足可见/停留和反刷量门槛的重读会再次计入；短页门槛以精确毫秒计算，快速连续翻页冷却后会从当前快照恢复结算。Android 的真实可见 UTF-16 文本与桌面按章节均摊分页不同，但不改变“有效重读累计字数”语义。
+- 整本字数与桌面同口径：统计可见正文的非空白字符数（不是按中英文词分词；标点和数字计入）。图书详情页按需计算并显示结果：EPUB、TXT、Markdown、MOBI/AZW/受限 AZW3 按解析章节累计，PDF 按页抽取文本累计；结果以 `contentId` 作为键缓存在本机 metadata。缓存、正文和抽取文本均不进入同步实体；内容 ID 变化时必须失效后重算。
+- EPUB/TXT/Markdown/MOBI/AZW/受限 AZW3 的全书页数可从阅读页“阅读工具 > 统计全书页数”显式启动：复用当前有真实尺寸的 Android WebView，按章节等待字体/图片稳定后按实际行框、图片和视口高度测量；显示可取消的进度，取消或中断保留已测章节，完成/退出后恢复原章节和精确续读位置。结果以 `contentId + 版式签名`（视口、实际字体/字号/行距/边距、阅读模式、单页/双页分栏参数和算法版本）缓存到本机 metadata，版式变化自动作废，不进入 `book_state_v2`、同步实体或迁移包。完成后底部进度栏显示全书页/本章页；PDF 仍使用其原生物理页数。此流程故意不后台自动运行，也不以字符数近似页数。
 - 自动导入支持多个目录；入口在常用设置的“启用自动导入”开关和齿轮页。手动导入始终可用。
+- 应用已建立首批界面语言基础层：常用设置顶部可选择“跟随系统 / 简体中文 / 繁體中文 / English”，选择即时重建应用并保存到仅本机 `ui.app_locale.v1` metadata；非法、过长或未来版本值安全回退跟随系统，绝不进入同步实体。已翻译应用标题、设置页标题和语言选择器、书架高频工具/筛选/空态、标签管理、书单、阅读统计、生词本、本机诊断、笔记汇总、账户安全、智读/翻译密钥同步、资讯和反馈的高频框架，以及文本阅读器和 PDF 阅读器的目录、常用工具、阅读设置、页码与搜索基础状态，库 AI 页面和高亮菜单的固定操作文案；书名、正文、用户笔记/高亮编辑、模型提示、原始错误、URL、账号/Token 和其余独立工具页文案仍在按页面迁移或保持原样，不能误报为完整多语言界面。繁体资源已具备完整键集，但服务页本批尚待逐句繁化校对。
+- 单本“图书信息”页可编辑书名、作者、简介、0–5 分评分、标签和书单；标签/书单支持逗号批量新增、删除、复用书架已有项，保存时去空白、去重、保留顺序，并沿用既有 `book_state_v2` 同步字段。书架“更多工具 > 标签管理”提供桌面同等的用户标签用量统计、全书架改名和删除：改名始终遍历完整书库（不受当前筛选影响）、合并大小写等价标签并去重；删除须二次确认，且只移除该标签，绝不删除图书、文件或 AI 分类标签。
+- `model_book_tags_v1` 会在书架“详情”以只读 AI 分类标签展示：仅接受 `schema_version=1` 且 payload `content_id` 与实体 ID 一致的数据，并与用户手工标签分离。书架“更多工具 > 书库问答与 AI 分类”既支持单书“分类”，也支持用户显式开始、暂停和继续的本机批量分类；两者都只向已配置 BYOK 发送受限书目信息（书名/作者/格式/简介/已读字数/手工标签），严格归一化为类别、时代、体裁、篇幅、主题、地域、语言、用途八维标签。批量队列仅在本机 metadata 保存版本、内容 ID SHA-256、游标和状态，不能含标题、路径、提示词、模型回答或服务商错误，也不进入同步/核心迁移包；异常退出的 `running` 队列打开后安全显示为暂停，单书分类成功写入并校验后才推进游标，BYOK/解析失败保留原书等待用户修复后继续。结果只写独立 dirty `model_book_tags_v1` 实体、保留未知 payload 字段，不覆盖 `BookRecord.tags`。模型提示资料不足时只保存“待确认”，Android 不联网补全。
+- 智读支持最多 8 套本机命名 BYOK 配置，旧单一安全存储配置首次读取时幂等迁移为默认配置；阅读器配置区和书库 AI 可选择当前配置，新增、编辑和删除均在安全存储内完成。问答、分类以及已有的私密密钥包只使用当前启用配置；公开配置与加密包绝不包含其它本机配置的名称、地址、模型或 API Key，删除当前配置时确定性回退剩余第一项。
+- 书架工具栏的“书单”入口提供书单详情、成员添加/移出、改名、简介、封面书和手动拖拽排序。成员仍是既有同步 `collections`；简介、封面书和排序仅保存在本机 `ui.booklists.v1` metadata，并会在书籍/成员删除后清理失效引用。
+- 设置 > 阅读 > “外置词典”可从 SAF 导入 UTF-8 TSV、CSV、JSON、单个 StarDict ZIP、未加密 MDict 2.x `.mdx`，或经明确多选的分散同名 `.ifo + .idx + (.dict 或 .dict.dz)` 三件套到应用私有目录；单文件限 24 MB、10 万词条，支持启用、删除和优先级调整。分散组件必须来自同一 DocumentsProvider 目录、同 basename 且恰好唯一完整组，复制到私有 UUID 目录后立即释放 URI；ZIP/分散包共用同一资源上限和解析链。MDX 只接受 UTF-8/UTF-16、raw/zlib 块，最多 4096 块、总解压最多 64 MB、词条最多 2 KiB；明确拒绝 MDict 1.x、加密、LZO/未知压缩、非 UTF 文本、截断/额外数据与非法偏移。`.mdd` 是 MDX 关联的图片、音频等资源容器，非可独立查词的文本词典；桌面 `entries_from_records` 对 MDD 固定返回空词条，随后导入层因空集合拒绝，因此 Android 同样明确拒绝（包括伪装成文本的 MDD）。StarDict/ZIP 拒绝目录穿越、重复/未知文件、多词典包、64 位 idx、非纯文本类型、越界索引、异常压缩比和超限解压；ZIP 还拒绝加密，最多 16 项、总解压最多 64 MB。`.dict.dz` 使用带输出限额的流式解压。查词先走启用的外置词典，再回退内置词典；词典源 URI 与词条都不参与同步。
+- 设置 > 高级 > “书库健康检查”会检查应用私有书文件缺失、空文件、尺寸变化以及孤儿/不完整全文索引。问题书可逐本“重新选择原文件”：SAF 单选后先复制到私有 staging，只有 SHA-256 恰等于原 `contentId` 且格式匹配才原子恢复私有对象并仅更新本机 `books.source_path`/`file_size`；取消、错书或错格式均清理 staging 且不改书目、阅读状态、标签、书签、高亮或同步实体。清理全文索引和移除缺失书目均需确认：前者仅清理可重建缓存，后者仅移除本机书架目录；两者都不删除 Download/SAF 原文件、同步实体或云端数据。
+- 设置 > 高级 > “后台任务”是会话内、最多 24 条的脱敏任务中心：显示全文/语义索引、Download/外部打开导入、创建/恢复恢复点的固定类型、阶段、状态、受限进度和粗粒度错误类别，不记录书名、正文、路径、URI 或 Token。全文和语义索引可在安全检查点真实取消；语义取消会清理当前书半成品向量和完成标记、保留已完成书，下一次继续建索引。Download、外部打开导入和恢复点不提供虚假取消，只显示不可安全中断说明；所有任务状态均不持久化、不同步、不联网。
+- MOBI/AZW/AZW3 现有实验性、受限原生解析路径：仅私有副本、文件最大 128 MiB，Rust MIT `mobi` 解析器运行于 `:mobi_parser` 独立进程，DRM/加密明确拒绝且不做绕过，解析总输出最大 20 MiB、最多 500 章、单章最大 512 KiB。AZW3 仅接受无 DRM、单一 KF8、MOBI v8 且无 EXTH 121 双 MOBI 边界的容器，最多 10,000 记录；非 v8、双容器或异常边界均拒绝。原始 MOBI/AZW3 HTML 一律剥离为纯文本后才交给既有 TXT 阅读文档，绝不允许脚本、样式、图片、URL 或其它资源进入 WebView；当前仅完成 Rust host/ARM64 smoke、四 ABI 打包和 Dart 拒绝/安全化测试，**尚无可信无 DRM MOBI/AZW/AZW3 fixture 或真机端到端阅读证据，不能宣传为兼容所有 Kindle 容器**。
+- 更多工具 > “资讯”是设备本机缓存功能：固定 8 个来源，默认选择 5 个，打开页面只读缓存；仅用户点击刷新才访问 `https://newsnow.busiyi.world`。请求为 HTTPS、12 秒超时、每次响应最多 384 KiB、单源最多 40 条/总最多 180 条，条目字段受限并去重排序；全量刷新失败保留旧缓存并标记可能过期。用户点开某个条目后，才可在应用内读取其公开正文：逐跳限制标准 HTTPS 443、拒绝 localhost/私网/IP 字面量和不安全 DNS 解析、最多 3 次重定向、12 秒总超时、仅 HTML/XHTML、流式上限 1 MiB。远端 HTML 不会进入 WebView，脚本/样式/表单/iframe/对象等内容剥离后只显示受限纯文本段落；正文、图片、文章 URL 访问历史和缩略图都不缓存、不同步、不迁移。内读失败时才提供用户明确点击的系统浏览器外链。来源选择和缓存均不进同步实体或迁移包。
+- 更多工具 > “反馈”：未通过 `--dart-define=KUNPENG_FEEDBACK_URL=https://...` 注入 HTTPS 服务地址时，上传入口禁用而 Issue 模板复制仍可用。用户主动提交时不携带同步 Token 或 `Authorization`；仅 Bug 可手动选取一份 1–256 KiB、UTF-8 且有效 JSON 的本地附件，未自动采集日志、图书、路径或凭据。设置中的“本机诊断”仅在内存中保留最多 96 条固定同步阶段/重试结果和受限数值，无书籍、路径、URI、账号、Token、URL 或错误原文；用户只能查看、复制、清空，或在 Bug 反馈中手动附加当前快照。响应的 `acceptedAttachments` 未明确确认时草稿和附件保留。桌面契约/服务端代码仍未部署，未配置地址的正式包不得伪称可上传。
 
 ### 阅读器
 
 - EPUB/TXT 竖屏阅读、目录、章节跳转、章节预热、阅读位置恢复、进度横条跳转和恢复跳转前位置。
+- 阅读工具栏提供本机“书内搜索”：按需读取缓存章节，显示命中总数、当前命中与上/下一处跳转；查询长度、章节数、正文读取和结果数均有限额，关闭时仅移除独立搜索高亮，不改变选区、朗读或阅读位置。PDF 明确提示不支持此功能。
+- EPUB/TXT/Markdown/MOBI/AZW/受限 AZW3 阅读设置提供本机“滚动 / 分页”模式；分页可选“单页 / 双页”。双页是 Android WebView 的真实 CSS 横向分栏：只在横屏且实际阅读区宽度至少 900 CSS px 时启用，窄屏、竖屏和分屏安全回退单页但保留偏好；页码按物理栏计数、翻页每次跨两栏、末尾奇数栏自然保留空白右页。运行时仍保留同一连续 DOM 与原始 UTF-16 文本定位，恢复、TTS 跳转、选区/高亮和书签不需要换算成页码；旋转/尺寸变化按当前位置重新布局。另有默认关闭的本机翻页动效（淡入/滑动）：仅同章节离散翻页后的无交互 WebView 遮罩，系统“减少动画”、选区、系统朗读、加载与跨章节时始终退化为无动效；即时翻页先完成，动效 API 不可用或中断也不影响阅读位置。PDF 不使用此设置，真机仍需确认 WebView 动画观感和 TalkBack 焦点。
+- 划词/高亮菜单的“相似语义”会复用本机 BGE 索引打开结果页，结果显示相似度并可跳到命中章节；未下载模型或索引未完成时显示真实错误/设置路径，不自动下载或建索引，也不把错误伪装成无结果。
+- 阅读设置会保留在本机：主题、字号、衬线/无衬线、原书样式/本机样式、简体/繁体显示、行距、段距、左右边距、上下边距、字间距（0–5px）、脚注弹层字号（10–22px）、滚动/分页及分页单页/双页、“翻页时完整行对齐”、翻页动效与速度（0.5–2.0x）、沉浸模式偏好重开应用后继续生效。沉浸模式默认关闭，普通模式保持工具栏可见；开启后工具栏不再改变阅读区高度，点正文中部可唤出或收起。选区、批注、书内搜索或朗读活跃时强制显示工具栏，避免操作中控件消失；该偏好只写本机 metadata，不进入同步或迁移。原书样式只移除本机排版的强制覆盖，仍使用已清洗的 EPUB CSS、主题和安全限制；它进入全书页数版式签名，切换后不会误用旧页数缓存。简繁显示使用离线 OpenCC 标准 `t2s`/`s2t`，只转换 EPUB/TXT/Markdown/MOBI/AZW/受限 AZW3 的 WebView 正文文本节点，不触及标签、属性、链接、图片资源、CSS、脚本、原书、全文索引或同步实体；PDF 暂不支持。转换失败安全回退原始清洗文档；切换时按当前章节的相对位置重新排版，不能把转换后 DOM 的 UTF-16 偏移写回为原文锚点。全书页数缓存签名包含转换模式。当前 `flutter_open_chinese_convert` 仍自行应用 Kotlin Gradle Plugin：Flutter 3.44 可构建，但未来切换 Built-in Kotlin 前必须验证上游升级或改为仓库维护的原生桥接。上下边距采用安卓单项控件而不是桌面四个窄输入框，范围 0–80px；它进入 WebView 实际 CSS 与全书页数版式签名，改变后不会误用旧页数缓存。旧偏好缺少样式模式/脚注字号/翻页速度/字间距/上下边距/简繁模式/分页版式/动效时分别回退为本机/14/1.0x/0/18/简体/单页/关闭，非法值会被限制在有效范围。另有三种按需下载字体（霞鹜文楷 Lite、思源宋体、朱雀仿宋）：仅用户点击时从桌面同一固定 HTTPS 来源下载，最多 5 次 HTTPS 重定向，下载包与安装字体均做固定长度和 SHA-256 校验，保存于应用私有目录；选择、删除和损坏回退均只影响本机，WebView 只注入经校验的 `data:` 字体。这些仅改变 WebView 显示，不改变跨端同步的文本锚点、高亮或批注位置。
+- 书架网格列数支持“自动”或手动 1–6 列：自动模式按实际可用宽度和最小可读封面宽度计算，适合横屏/平板；旧 2–4 列偏好保持为手动值，异常值安全限制为 0–6。它是本机书架布局 metadata，不改变书目、标签、书单或同步实体。
+- “读后推荐相似图书”默认开启且本机阈值为 90%：达阈值后仅非阻塞预取已完成语义索引的相似书，到最后一章读完或继续前翻时才显示最多 5 本。模型/索引/数据库不可用时静默不展示，不上传正文、路径或向量，也不创建同步实体。
+- PDF 导入与阅读：私有副本校验 `%PDF` 文件头后交给 PDFium 阅读器，支持缩放、系统文本选择、页码跳转、页级阅读位置恢复、页书签、公开 PDF 大纲 API 的层级目录与原生目标跳转，以及本地逐页正文搜索、命中跳转和临时高亮。搜索结果可显示最多 200 条页码和截断摘要、点击跳转；查询历史每书最多 12 条，只存本机 metadata，可清除且不保存正文。每本书的缩放（保存范围 0.1–12，恢复时按当前视口夹取）与双页请求保存在本机 metadata；窄屏/竖屏会临时单页但保留偏好，回到宽横屏自动恢复。横屏且宽度至少 760dp 时可切换双页布局；竖屏/窄屏不显示该入口，布局切换保持页码、选区和坐标语义。单页原生选区可从系统菜单创建带可选批注的 PDF 坐标高亮：`rects` 以桌面兼容的顶左归一化坐标保存，重开可渲染；标注列表可逐条页内定位、四色改色、编辑或清空批注、删除，操作只替换该条 `highlights` 记录，保留几何、锚点、原文、上下文和创建时间。跨页选择明确拒绝，不伪造 EPUB 文本锚点。PDF 的页码位置和高亮继续复用 `book_state_v2`，但 PDF 搜索历史/视图偏好、整本字数缓存和抽取文本均仅留在本机；PDF 不进入 EPUB/TXT 的全文索引、语义索引或系统朗读链路。
 - 点击中部显示/隐藏阅读工具栏与底部进度条；点击/滑动翻页、滚动阅读与章节边界处理均已有实现。
+- 阅读工具 > “阅读问题记录”是独立的进程内闭合轨迹：仅最近 60 秒、最多 320 条固定的就绪/点击/翻页边界/章节跳转/选区菜单事件及受限数值/枚举。WebView bridge 对未知字段整条拒绝；不含正文、选区、书名、content ID、章节键、路径、URI、链接、账号、Token、凭据或异常原文。用户可查看、重新冻结、清空、复制或经 SAF 手动导出 `kunpeng-reader-android-reader-problem-trace` v1 JSON（256 KiB 上限）；它不写 SQLite/metadata/恢复点/日志、不进入同步或核心迁移包、更不会自动成为反馈附件或上传。详情见桌面仓库 `docs/adr/0015-android-reader-problem-trace.md`。
 - EPUB 图片、章节页头、脚注标记和脚注弹层；脚注二次点击应收起。
-- 文本选择、高亮、批注、书签、高亮颜色、横排/九宫格高亮菜单与菜单设置页。
-- 内置词典、生词本、中文/英文释义切换、翻译、Web 搜索和智读入口。
+- 文本选择、高亮、批注、书签、高亮颜色、横排/九宫格高亮菜单与菜单设置页；书签列表支持定位和二次确认删除，删除只更新既有 `book_state_v2.bookmarks`，越界索引不会误删其他书签。划词“书摘”保留复制，并可在本机预览和生成 PNG：图片只使用截断至 1,200 UTF-16 单元的选文（不截断 emoji 代理对），物理像素最多 2MP、编码 PNG 最多 2 MiB；仅用户点“保存图片”才经 Android 系统 `ACTION_CREATE_DOCUMENT` 选择保存位置，通道只接受净化文件名和带 PNG 签名的受限字节，不传路径、data URL 或网页内容。取消和失败不保留文件，不申请广泛存储权限；图片和书摘内容不联网、不同步、迁移或记录日志。目录面板的“标注”页按创建时间列出高亮/批注，支持锚点安全定位、逐条更改四色高亮颜色、编辑批注文本（可清空）和二次确认删除；操作仅替换指定 `highlights` 元素并走原同步链，保留文本锚点、坐标、上下文、笔记与创建时间。
+- 内置词典、生词本、中文/英文释义切换、翻译、Web 搜索和智读入口。阅读页划词翻译已提供真实 BYOK：仅用户主动点击才向已配置的百度、腾讯、DeepL 或 Google 发出最多 5,000 字的 HTTPS 请求（30 秒/512 KiB 响应上限），结果在本机底部弹层显示，可显式改用浏览器外跳。API Key 默认仅存本机 `flutter_secure_storage`，公开 `translation_config_v1` 只含服务商和语言等非敏感配置；用户明确设置独立同步密码并开启密钥同步后，完整的智读/翻译凭据才会作为 `secret_bundle_v1/default` 由端侧 PBKDF2-HMAC-SHA256（210,000 次）+ AES-256-GCM 加密上传，服务器只能看到密文，密码和明文不会写入 metadata、日志、公开实体或迁移包。解锁时先完整校验包再写入安全存储；旧桌面 v1 信封仅在服务端密钥世代为 1 时可恢复，重置后必须使用带当前 `epoch` 的 v2 信封重新加密。书架“更多工具 > 书库问答与 AI 分类”打开时完全离线；用户点击“向已配置 BYOK 提问”后才把最多 20 个、总计最多 14,000 字符的本机关键词/语义命中片段发送到已配置模型，缺少命中时退化为受限书目上下文。回答先本机保存；来源仅保存/同步书名、章节和材料类型，绝不含正文、内容 ID、路径或向量。书库历史页可查看、删除为墓碑；只有用户在现有私密同步设置中开启“同步智读历史”时，`ai_reader_history_v1/library-v1` 才按 ADR-0005 合并并上传，关闭时发送实体墓碑。
+- 笔记汇总页面与 Markdown 导出共用同一聚合规则：按书显示高亮、批注和按规范化书名关联的生词，展示文本/上下文/笔记、单词/次数/释义；无内容书跳过，仅有批注或上下文的记录保留。导出会转义内容且不含本机路径，经 Android 系统文件创建器由用户选择保存位置，不申请外部存储权限。
+- 系统朗读：从当前位置按句朗读，滚动跟随并自动跨章节；按句内容选择中文/英文系统音源，阅读设置可分别保存中文/英文离线系统音色与 `0.5x–2.0x` 速度。音色列表只枚举设备声明为无需网络的 voice，voice ID 只保存在本机 metadata，不进入同步。已保存音色因卸载、禁用或语言不匹配而失效时，原生层会回退该语言另一可用离线音色、清除对应本机偏好并提示；若该语言没有任何离线音色则拒绝朗读并提示到系统安装，绝不改用未知默认/联网音色。原生 TTS 支持 `onRangeStart` 时会以 UTF-16 范围高亮当前朗读片段，仅接受当前阅读会话事件并在停止、后台、跳章和离开时清除；范围离开视区才跟随滚动。生词本设置新增默认关闭的“离线英文词条音频缓存”：使用桌面同一 `wordfreq` 3.1.1 归属频表生成 10,000 词的 Android 私有 WAV 缓存；开始/暂停/续跑/清理只暴露聚合进度和大小，词、路径、音色 ID、音频都不进入同步或日志。原生层仅选择已安装且声明无需网络的英文系统 voice；无音色、空间不足、零字节/损坏/超限文件都会清晰拒绝或忽略，绝不下载或使用 Edge。单词点击优先播放已验证缓存，未命中时仍严格回退离线系统 TTS。阅读设置另有默认关闭的“Edge 在线句级朗读”开关与隐私提示：用户开启后才会将**当前句**（最多 300 UTF-16 单元）经固定 TLS `wss://speech.platform.bing.com` 发送给 Microsoft Edge TTS；12 秒超时、音频最多 1.5 MiB。返回音频只写 Android 私有临时文件并在结束、停止或失败时删除，不缓存、不同步、不记录正文；网络/协议/大小/播放失败一律回退严格离线系统音色，远程音色不进入离线音色列表。打开目录、设置、词典/生词本/智读、离开阅读器或转入后台会停止朗读。当前仍不支持后台媒体播放；离线高频词包和 Edge 联网体验须在真机验证设备是否安装所需语言音源。
 
 ### 账号、同步与密钥
 
 - 注册、登录、保存账户、退出登录、账户安全（邮箱绑定/换绑、修改密码、找回密码）及验证码倒计时。
-- 同步进度、书签、高亮、批注、评分、标签、书单、生词本和阅读统计；不上传图书文件、正文、封面原图、路径、模型或语义索引。
+- 账户安全 > 数据与隐私：输入当前密码并二次确认后，可“清除此设备及云端数据”（保留账号）或“永久删除账号”；服务端成功后客户端清除本机数据并退出。两项都不可恢复，且不删除 Download/SAF 中的原始图书。
+- 同步进度、书签、高亮、批注、评分、标签、书单、生词本、阅读统计及单书每日位置摘要 `book_state_v2.progress_history`；不上传图书文件、正文、封面原图、路径、模型或语义索引。Android 拉取后按本地日仅保留时间较晚的位置、最多 3650 日，随后写回时保留已收历史和未知 payload 字段，不得以空数组覆盖桌面时间线。
+- 同步响应按账号/服务器 scope 保存 `data_generation`，`push` 和 `reconcile` 会携带该值；若云端已重置而本机仍有旧实体，客户端会拒绝导入或上传，要求先清除此设备数据，避免离线旧设备复活已删除数据。
+- 离线核心状态迁移遵循 ADR-0010 与 `contracts/migration/core-data-package.schema.json`：导入前/后均检查 v1 格式、16 MiB、50,000 实体、深度/字段/单实体上限与四种允许 kind，整包失败不部分写入；迁移包不替代账户同步、更不能越过 `data_generation` 保护。ADR-0011 规定实体 `updated_at`/`deleted_at` 的规范单位为 Unix 毫秒；Android 已实现受恢复点、事务和幂等标记保护的本机秒→毫秒升级，服务端仍兼容合理旧秒级输入，且尚无线上部署变更证据。
 - 私密配置同步：普通智读/翻译配置可选同步；API Key 仅在 `flutter_secure_storage` 中保存。跨设备传输密钥时使用用户设置的独立同步密码，经 PBKDF2 + AES-256-GCM 端侧加密，服务端只保存密文。
 - 支持从云端下载密钥包、服务器的密钥包世代撤销提示，以及本机重新加密上传。
 
 ### 其他
 
-- 阅读统计日/月/年/总视图、热力图和柱状图提示。
+- 阅读统计支持日/月/年/总视图、桌面同样的前后时间锚点、本期书籍、日/月/年趋势、零阅读日及热力图/柱状图提示；贡献热力图为桌面同义的过去 365 天：周日为每列起点、固定 53×7 格，365 个日期格与跨年对齐空格分开，横向滚动、强度分级和点击详情均只由已有 `reading_bucket_v2` 本机派生，未来/非法/范围外桶被忽略，不新增同步字段。图书详情另有最近 28 个阅读日的单书时长/字数时间线，以及“每天最后读到哪里”：从既有 `book_state_v2.progress_history` 取本地日内 `at` 最大条目，倒序展示日期时间、章节和进度，异常时间安全忽略。阅读时长仅在实际位置快照激活后按 15 秒有效前台 tick 结算、单次最多 20 秒；后台、浮层、搜索、章节加载与回退冷却不会计入。
 - 关于页：GitHub Release 为主、公共服务器更新元数据为回退；Android 版本与产品 Release 标签独立比较。
-- 当前未纳入：PDF 阅读、双页阅读、iOS 发布、生产签名、把图书文件上传到同步服务器。
+- 当前未纳入：跨页 PDF 选区/标注、iOS 发布、生产签名、把图书文件上传到同步服务器。
 
 上表是“代码存在”的范围，不代表每个交互都已在不同尺寸真机上完成验收。用户目前主要在模拟器逐项验收，真机启动比模拟器快，但冷启动和大书打开仍应量化。
 
@@ -64,17 +95,23 @@ C:\Users\pigki\Documents\Codex\2026-07-21\claude-projects\kunpeng-reader-mobile
 | --- | --- |
 | 启动、延后维护、全文索引调度 | `lib/main.dart` |
 | 书架状态、搜索、同步入口 | `lib/app/app_controller.dart`、`lib/ui/library_shell.dart` |
-| 导入与启动缓存 | `lib/app/book_import_service.dart`、`lib/app/shelf_startup_cache.dart` |
-| EPUB/TXT、阅读 HTML、缓存与进度 | `lib/reader/epub_parser.dart`、`txt_parser.dart`、`reader_html.dart`、`parsed_book_cache.dart`、`reader_screen.dart` |
-| 本地库与全文索引 | `lib/data/app_database.dart`、`library_repository.dart`、`full_text_index_store.dart` |
-| 语义检索 | `lib/semantic/semantic_index_service.dart`、`lib/ui/semantic_index_page.dart` |
+| 导入、封面与启动缓存 | `lib/app/book_import_service.dart`、`lib/platform/storage_bridge.dart`、`android/app/src/main/.../StorageBridgeHandler.kt`、`lib/app/shelf_startup_cache.dart` |
+| EPUB/TXT/Markdown、PDF、受限 MOBI/AZW/AZW3、阅读 HTML、排版偏好/翻页动效、书内搜索、PDF 坐标标注/搜索结果/视图偏好、读后推荐、有效字数/时长、缓存、进度与系统朗读 | `lib/reader/epub_parser.dart`、`txt_parser.dart`、`markdown_parser.dart`、`mobi_parser.dart`、`book_parse_exception.dart`、`book_parser.dart`、`pdf_reader_screen.dart`、`pdf_highlight_geometry.dart`、`pdf_search_results.dart`、`pdf_search_history.dart`、`pdf_view_preferences.dart`、`page_turn_animation_preferences.dart`、`page_turn_animation_setting.dart`、`highlight_management.dart`、`post_read_recommendations.dart`、`reader_html.dart`、`reader_inline_search.dart`、`reader_presentation.dart`、`reading_word_credit.dart`、`reading_time_credit.dart`、`reader_tts_cursor.dart`、`reader_screen.dart`、`parsed_book_cache.dart`、`android/app/src/main/.../MobiParserService.kt`、`MobiParserBridge.kt`、`android/mobi_parser_rust/` |
+| 本地库、书单本机元数据、全文索引、书库健康检查、AI 分类标签、单书阅读时间线、同步历史兼容、本机数据清除与恢复点 | `lib/data/app_database.dart`、`library_repository.dart`、`booklist_metadata.dart`、`full_text_index_store.dart`、`local_data_reset_service.dart`、`local_recovery_point_service.dart`、`automatic_recovery_point_service.dart`、`android/app/src/main/.../LocalRecoveryPointStore.kt` |
+| 外置词典 | `lib/dictionary/external_dictionary_models.dart`、`external_dictionary_repository.dart`、`mdx_dictionary_parser.dart`、`external_dictionary_page.dart`、`dictionary_service.dart`、`lib/platform/storage_bridge.dart`、`android/app/src/main/.../StorageBridgeHandler.kt` |
+| 语义检索与本机相似书 | `lib/semantic/semantic_index_service.dart`、`lib/ui/semantic_index_page.dart`、`lib/ui/similar_books_page.dart` |
+| 阅读统计与本地趋势聚合 | `lib/domain/reading_stats_trends.dart`、`lib/ui/reading_stats_page.dart` |
 | 词典/生词本 | `lib/dictionary/`、`lib/vocabulary/` |
-| 智读与翻译 | `lib/ai/ai_reader_service.dart`、`ai_reader_sheet.dart`、`lib/ui/ai_translation_sync_page.dart` |
+| 智读、书库问答/模型分类、BYOK 翻译与本机书库问答历史 | `lib/ai/ai_reader_service.dart`、`ai_reader_sheet.dart`、`library_ai_core.dart`、`library_ai_page.dart`、`library_ai_history.dart`、`library_ai_history_page.dart`、`lib/translation/translation_service.dart`、`translation_settings_page.dart`、`translation_sheet.dart`、`lib/ui/ai_translation_sync_page.dart` |
+| 按需阅读字体 | `lib/reader/reader_fonts.dart`、`reader_font_settings.dart`、`reader_screen.dart`、`reader_html.dart` |
+| 阅读问题记录 | `lib/reader/reader_problem_trace.dart`、`reader_problem_trace_page.dart`、`reader_screen.dart`、`reader_html.dart` |
 | 高亮菜单与选区 | `lib/reader/highlight_menu.dart`、`reader_screen.dart` |
-| 账号 | `lib/auth/auth_service.dart`、`lib/ui/login_sheet.dart`、`account_security_page.dart` |
-| 公共同步 | `lib/sync/engine.dart`、`http_sync_api.dart`、`sync_service.dart`、`sqflite_sync_store.dart` |
+| 账号与数据生命周期 | `lib/auth/auth_service.dart`、`lib/ui/login_sheet.dart`、`account_security_page.dart`、`lib/data/local_data_reset_service.dart` |
+| 公共同步、数据世代保护、离线核心状态迁移与本机时钟升级 | `lib/sync/engine.dart`、`data_generation.dart`、`state_migration_package.dart`、`entity_clock_migration.dart`、`http_sync_api.dart`、`sync_service.dart`、`sqflite_sync_store.dart`、`lib/platform/storage_bridge.dart`、`android/app/src/main/.../StorageBridgeHandler.kt` |
+| 资讯、反馈与本机诊断 | `lib/news/news_feed_service.dart`、`news_article_service.dart`、`news_article_page.dart`、`news_page.dart`、`lib/feedback/feedback_service.dart`、`lib/diagnostics/local_diagnostics.dart`、`local_diagnostics_page.dart`、`lib/ui/library_shell.dart`、`lib/platform/external_bridge.dart`、`android/app/src/main/.../MainActivity.kt`、`StorageBridgeHandler.kt` |
+| 本机后台任务中心 | `lib/tasks/task_center.dart`、`task_center_page.dart`、`lib/main.dart`、`lib/semantic/semantic_index_service.dart`、`docs/TASK_CENTER.md` |
 | 加密密钥包 | `lib/sync/private_sync_service.dart` |
-| 自动导入原生桥 | `lib/platform/storage_bridge.dart`、`android/app/src/main/...`、`android/STORAGE_BRIDGE.md` |
+| 自动导入/文件导出/本机数据清除、系统朗读原生桥 | `lib/platform/storage_bridge.dart`、`speech_bridge.dart`、`android/app/src/main/...`、`android/STORAGE_BRIDGE.md` |
 | 更新检查 | `lib/update/update_service.dart` |
 
 进入某个问题前先用 `rg` 找真实调用链；不要只改页面文案而绕过 `AppController`、Repository 或同步队列。
@@ -103,7 +140,7 @@ Android 11+ 的 SAF 不能可靠授权内部存储根目录或 Download 根目�
 
 同步必须处理 `pull → push → inventory → reconcile`、分页、幂等、`updated_at`、`deleted_at`、`sync_version` 和 `device_id`。不可把“本地没有待上传”当作同步成功，也不可因服务器未返回实体就推断删除。图书正文与书文件始终不参与同步。
 
-认证与同步正式地址必须使用 HTTPS。`AppConfig` 仅允许 localhost 或 debug 显式开关使用 HTTP。更新信息的服务器回退目前使用公开 `/updates/*` 元数据；它只用于版本和更新说明，APK 下载仍应走 GitHub Release。
+认证与同步正式地址必须使用 HTTPS。`AppConfig` 仅允许 localhost 或 debug 显式开关使用 HTTP。更新信息的服务器回退仅在发布构建以 `KUNPENG_UPDATE_BASE=https://.../updates` 显式注入时启用；非 HTTPS、空值或未注入时必须禁用回退。它只用于版本和更新说明，APK 下载仍应走 GitHub Release。
 
 ## 6. 构建、测试与产物
 
@@ -127,13 +164,24 @@ flutter build apk --debug --flavor play
 C:\Users\pigki\Documents\Codex\2026-07-21\claude-projects\kunpeng-reader-mobile\build\app\outputs\flutter-apk\app-full-profile.apk
 ```
 
-它只是测试产物，不能直接作为正式包交付。正式 Release 前必须配置生产 keystore、生成 SHA-256、在真机安装，并清晰标注 `full` 或 `play` flavor。Android 工程当前有 29 个 unit test 文件和 1 个 integration test 文件；本文未重新运行整套 Flutter 测试，接手时应先运行上面的命令。
+它只是测试产物，不能直接作为正式包交付。正式 Release 前必须配置生产 keystore、生成 SHA-256、在真机安装，并清晰标注 `full` 或 `play` flavor。Android 工程当前有 63 个 unit test 文件和 1 个 integration test 文件；本文每次交接前仍应先运行整套 Flutter 测试。
+
+2026-08-07 已在 Windows 构建未签名的 Play Debug 包，供本轮模拟器/真机手工验收：
+
+```text
+C:\Users\pigki\Documents\Codex\2026-07-21\claude-projects\kunpeng-reader-mobile\build\app\outputs\flutter-apk\app-play-debug.apk
+334,883,690 bytes
+SHA-256: D8B29D950B9C7BDECD0AAD9B75EA20B40D03993309DCDC8F2427DB98E54672CC
+```
+
+它是 Debug 签名，不是发布候选，也尚未完成真机安装验证；包含本轮分散 StarDict 与受限 MDX 导入、PDF 搜索结果/标注编辑/每书视图偏好、外部 App “打开方式”导入、受限单一 KF8 AZW3 解析、本机时钟升级、受配置约束的反馈上传、缓存优先资讯与用户点击后的安全纯文本内读、本机诊断、后台任务中心、文本翻页动效及速度、真实 BYOK 划词翻译、最多八套本机智读配置、三种按需字体、书库问答/八维模型分类及可恢复的用户启动批量分类、单书每日续读位置、全书架标签管理、按需整本字数统计、连续阅读概览与桌面同义的 53 周年度贡献图、阅读问题记录、桌面同义的书摘 PNG 本机生成与 SAF 保存、真实 WebView 全书页数统计、阅读上下边距与自适应书架网格、原书/本机样式和脚注字号、离线 OpenCC 简繁正文显示、横屏平板条件下的文本真双页 CSS 分栏、桌面同义的本机沉浸模式、最多八个局部中心的本机多主题相似书和大书架候选精排、桌面章节索引锚点字段保真、首批简中/繁中/英文语言框架、书架/标签管理/书单/阅读统计及 Reader/PDF、阅读上下文工具、库 AI 与高亮菜单的高频三语文案、SHA-256 严格匹配的私有书原文件修复、默认关闭的离线英文 10,000 词 WAV 缓存、默认关闭的 Edge 在线句级朗读与离线回退，以及端到端加密的翻译凭据恢复。APK 已打入 OpenCC 的 31 份离线字典和 `arm64-v8a`/`armeabi-v7a`/`x86_64` 原生库；反馈服务端尚未部署且无 `KUNPENG_FEEDBACK_URL` 时上传禁用；资讯只在用户点击刷新或点开某篇文章时联网，内读正文仅在内存中的受限纯文本页显示且不保存；书摘 PNG 仅由用户保存时写出，经系统文件创建器确定位置，不含路径/data URL；诊断、任务中心的展示和阅读问题记录均不持久化、不自动附件/上传，唯一例外是批量分类为续跑而保存的无内容游标 metadata；翻页动效默认关闭且受减弱动效/选区/朗读保护；翻译、书库 AI、字体下载和全书页数统计均需用户主动操作。翻译 API Key 默认仅在本机安全存储；只有用户设置独立同步密码并明确开启密钥同步时，才以端侧 PBKDF2-HMAC-SHA256（210,000 次）+ AES-256-GCM 密文上传并在另一设备完整校验后恢复。离线高频词包只使用设备离线英文 voice，缓存、词、路径和 voice ID 都不出站、不同步；Edge 朗读默认关闭，启用后才发送当前句给固定 TLS Edge 主机，返回音频只作私有临时播放、不缓存不同步；失败仍回退离线系统音色。本轮在 Windows 已执行 `flutter analyze`（无问题）、`flutter test -r compact`（460 项通过；此前 JSON 全量报告也无失败事件）、`android\\gradlew.bat :app:compilePlayDebugKotlin :app:compileFullDebugKotlin`（成功）和 `flutter build apk --debug --flavor play --no-pub`（成功）。Kotlin 构建仍有 Android/Flutter 依赖的未来弃用警告及 `getWebView` 弃用提示，未发现编译错误；当时 `adb devices` 未发现已连接设备。
 
 编译时可覆写服务地址，但发布包不得写入 HTTP：
 
 ```powershell
 flutter build apk --release --flavor full `
-  --dart-define=KUNPENG_API_BASE=https://your-server.example
+  --dart-define=KUNPENG_API_BASE=https://your-server.example `
+  --dart-define=KUNPENG_UPDATE_BASE=https://your-server.example/updates
 ```
 
 ## 7. 当前优先风险与验收清单
@@ -147,6 +195,51 @@ flutter build apk --release --flavor full `
 5. **自动导入**：验证多个 SAF 目录、权限撤销、重复文件、Download 扫描和 `play` flavor 降级提示；不要把 `MANAGE_EXTERNAL_STORAGE` 误带进 Play 包。
 6. **同步一致性**：至少两台设备对同一本书做进度、高亮、批注、书签、词汇、标签/书单和统计操作，再做离线补传与 reconcile；确认不上传书文件。
 7. **版本与更新**：保持 Android 版本（如 `0.3.x`）与产品 Release 标签分离。GitHub 缺少 `android_version` 时，客户端应读取服务器最新清单补全可比较的 Android 版本，但下载仍为 GitHub Release。
+8. **系统朗读**：真机验证中文、英文、混合文本、超长句、跨章、后台、打开词典/设置和返回书架；缺少对应系统音源时应明确提示或先到系统设置安装，不能把 debug APK 当作音源覆盖率证明。
+9. **PDF**：真机分别验证文本 PDF、扫描 PDF、损坏/加密 PDF、大 PDF、旋转、缩放、系统文本选择、书签、含/不含目录的 PDF 大纲、页内搜索和冷启动页码恢复；扫描件或无文本层 PDF 应明确显示无匹配，无目标/越界目录项不得跳到错误位置。M1 只保存页级位置和书签，不能把 PDF 原生选区或搜索高亮伪装成 EPUB 文本高亮、批注或上传 PDF 文件。
+10. **本机数据清除**：在包含 EPUB/TXT/PDF、自动导入目录、登录和 AI 密钥的真机上，确认二次确认前没有写操作；确认后应用退出，重启时为干净本机状态；Download/SAF 原文件和云端数据仍保留。不要把这个入口描述成“清除云端数据”或“注销账户”。
+11. **云端重置与账号删除**：用两台设备分别准备离线同步实体；一台执行云端清除后，另一台必须因 `data_generation` 不匹配拒绝上传，不能复活旧数据。重新登录并清除本机数据后应能从空云端开始；永久删除账号后旧 Token 必须无效，且同名重新注册不应关联旧数据。该验收必须在隔离测试账号上执行。
+12. **排版偏好**：对 EPUB/TXT 分别检查每项排版设置在重开书籍与重启应用后仍保留；调整字体族、行距、段距、边距、字间距和翻页完整行对齐后，验证选区、高亮、书签、脚注、跨章翻页与恢复位置不漂移。PDF 使用原生 PDF 阅读器，不复用这些文本排版设置。
+13. **Markdown 与图书信息**：用含多级标题、引用、代码块、链接、图片和原始 HTML 的 Markdown 检查目录、章节恢复和安全降级；编辑书名/作者/简介/评分/标签/书单后重开书架并跨端同步，确认规范化后的字段与桌面 `book_state_v2` 一致。
+14. **本机恢复点**：用含 EPUB/TXT/Markdown/PDF、阅读位置、标注与书架元数据的设备创建恢复点，修改书架后恢复；确认 SQLite 和私有书副本一致、旧状态不会在重开前回写、校验失败不破坏当前数据，并确认登录凭据、Download/SAF 原书和云端均未被包含。覆盖自动恢复点的同日去重、启动安全空闲窗口、与阅读/导入/索引/手动恢复的互斥、所有恢复点总数不超过 7。当前没有连接 ADB 设备，此项尚未完成运行时验收。
+15. **书内搜索、相似语义与书单**：对大 EPUB/TXT/Markdown 验证书内搜索的命中上限、跨章节跳转、关闭后选区/朗读/原位置不受影响；在模型缺失、索引未完成和可用三种状态验证相似语义按钮与结果跳转；分别在两台设备编辑同一书单成员，确认成员同步而本机简介、封面与排序不会互相覆盖。
+16. **外置词典与书库健康检查**：导入合法/超限/损坏的 TSV、CSV、JSON、MDX，验证词典优先级、停用、删除与内置回退；检查源文件 URI 不写入同步。故意删除/截断应用私有副本或制造不完整全文索引：对每本问题书分别选取消、同格式同 SHA-256 原文件、同名不同内容文件和错误格式文件；只有前者以外的精确同内容文件能恢复并使报告消失，且原 `contentId`、进度、书签、高亮、标签和同步状态不变。再确认移除书目或清理索引仍须确认且不触碰 Download/SAF 原文件、同步数据或云端。
+17. **统计趋势与年度热力图**：用跨月、跨年和零阅读日的桶数据验证日/月/年/总范围、前后时间导航、本期书籍及字数/时长切换；确认年度图固定 53×7、365 个日期格且其余为周日对齐空格，未来/畸形/范围外桶不显示，强度、提示和点击详情只来自已有 bucket。再与桌面在同一账号同步后核对两端由同一 `reading_bucket_v2` 得到的总数，确认 Android 只做展示派生、不额外上传统计实体。
+18. **书签管理**：创建多个处于不同章节与相近位置的书签，分别验证位置提示、定位与二次确认删除；对已失效的章节索引验证删除不会误伤其他书签，并与桌面同步后核对仍只使用 `book_state_v2.bookmarks`。
+19. **标注管理**：创建含/不含批注、跨章节和旧格式锚点的高亮，验证倒序列表、定位、四色逐条改色、批注编辑（含清空）与二次确认删除；检查编辑/删除只影响指定 `highlights` 条目、同步后不改变其 `rangeAnchor`、上下文、坐标、笔记或创建时间，章节键缺失时只能安全回退而不能跳到无关文本。
+20. **反馈接口发布前置条件**：Android 已实现用户主动、无认证头的 HTTPS 提交及单个 Bug JSON 附件回执校验；但桌面 ADR-0008、`contracts/feedback/` 和服务端 `acceptedAttachments` 实现尚未进入 Git HEAD，且尚无线上部署证据。因此 Release 不注入 `KUNPENG_FEEDBACK_URL` 前，必须保持上传禁用并只提供 Issue 模板；部署后用隔离账号验证缺失/不足 `acceptedAttachments` 时草稿不被清空。
+21. **有效阅读统计**：用短页临界值、前翻重复、重读、快速连续翻页后不再滚动、搜索打开/关闭、后台与长时间停留分别验证有效字数；确认同一次可见访问只补差额、符合门槛的再次访问再次计数，且不会因为短页毫秒取整或冷却后缺少第二次滚动而少记。时长须在实际位置激活后按有效前台 tick 计入，并验证后台、浮层、搜索、章节加载和回退冷却均暂停；移动端以 Android lifecycle 取代桌面窗口焦点，保守少计优于把非阅读时间算入。
+22. **书库问答、模型分类与历史同步授权**：在隔离 BYOK 凭据下验证打开页面不联网、提问/单书分类必须经用户点击才出站、关键词/语义命中最多 20 个且总片段最多 14,000 字符、无命中仅发受限书目、错误不保存虚构回答。检查问答历史最多 40 条活跃记录和有限墓碑，来源只含书名/章节/材料类型；关闭“同步智读历史”时 `library-v1` 发送实体墓碑，开启后两设备合并而不上传正文、内容 ID、路径或向量。分类必须是八个固定维度、与手工标签完全分离，模型要求网页检索时 Android 仍不得联网补全；两端同步后验证 `model_book_tags_v1` 的 LWW/未知 payload 保留。
+23. **PDF 坐标标注**：用包含可选文本层的真实 PDF 长按创建单页高亮与批注，重开文件检查坐标渲染、列表页内定位、四色改色、编辑/清空批注和删除；逐项检查仅修改目标 `highlights` 条目，且保留 rects、锚点、原文、上下文与创建时间。用跨页选区、旋转/缩放、扫描件、损坏/加密 PDF 验证安全拒绝或错误提示，不能把跨页坐标错映射或伪装为 EPUB 文本锚点。
+24. **PDF 双页与视图偏好**：在横屏、宽度至少 760dp 的设备上切换单页/双页，并调整缩放、重开书籍和旋转屏幕；验证不同尺寸页面的居中、阅读位置保持、目录/搜索/链接、文本选择以及坐标标注不漂移。确认缩放按当前视口安全夹取，窄屏/竖屏仅临时单页而不丢失双页请求，回到宽横屏可自动恢复；这些偏好不得进入 `book_state_v2` 或同步实体。竖屏及窄屏入口应隐藏，不能以压缩双页破坏可读性。
+25. **滚动/分页模式**：对 EPUB/TXT/Markdown 在两种模式间切换，验证 UTF-16 续读位置、高亮、批注、书签、全文搜索与跨章节跳转不漂移；分页模式应阻止纵向半页滚动但保留离散滑动/边缘翻页，TalkBack 焦点和系统选区须在真机检查。
+26. **外置词典格式边界**：继续验证文本 TSV/CSV/JSON、单个 StarDict ZIP、明确多选的同目录同 basename 分散三件套及未加密 MDict 2.x MDX 的 UTF-8、UTF-16、raw/zlib、大小、词条数、优先级与私有副本行为；对 ZIP 覆盖目录穿越、重复/多词典、加密、异常压缩比、损坏 `.idx` 和 `.dict.dz`，对 MDX 覆盖 1.x、加密、LZO、非法偏移、截断/额外字节、超块数和超解压，对分散件覆盖 URI 释放、不完整/多组/异目录/异 basename 拒绝。对 MDD 覆盖普通资源容器和伪装为文本的有效 MDict 容器：两者都必须拒绝，不能导入空词典或误报为已支持；这是与桌面 `entries_from_records` 固定空集合及导入层空集合拒绝一致的行为。
+27. **笔记与关联生词**：用同名书、不同名书、仅高亮、仅批注、仅上下文和仅生词数据验证屏幕摘要与 Markdown 导出分组一致；确认内容被正确 Markdown 转义，且不导出本机路径或词典源文件。
+28. **单书时间线与同步兼容**：以两端同一本书的同日不同位置、跨日位置和未知扩展字段做 pull → 本机保存 → push；确认同日保留较晚记录、最多 3650 日，Android 不会清空桌面 `progress_history` 或删除未知 payload。旧 payload 缺该字段时必须按空历史兼容。
+29. **TTS 范围高亮、离线高频词包与 Edge 句级朗读**：真机验证支持/不支持 `onRangeStart` 的系统离线音源、中文英文混合、跨章节、滚动跟随、停止、后台、跳章与离开阅读器；事件只应高亮当前会话，不能把过期会话或其他书的 UTF-16 范围映射到正文。进入生词本设置后开启离线英文词条缓存，检查默认关闭、没有离线英文 voice 时明确拒绝、10,000 词进度、暂停/重开后续跑、清理、空间门槛、零字节/伪造 WAV/超限文件忽略，以及缓存命中播放与未命中离线 TTS 回退；飞行模式抓包确认整个流程不出站，词、路径、voice ID 与音频不出现于同步 payload、日志、导出包或反馈。默认关闭 Edge 开关时断网/联网都不得发送正文；明确开启后抓包确认仅当前句、固定 TLS 主机、长度/响应/超时上限，且停止、完成与播放错误都会删除私有临时 MP3、不留下缓存或同步数据。网络、协议、大小或播放失败必须回退离线系统音色，远程音色不得出现在离线音色列表。
+30. **本机相似书与恢复点**：用至少三本已完整索引的 EPUB/TXT/Markdown 验证相似度排序、本书/PDF 排除、模型缺失/索引未完成/索引不足状态，以及点击打开图书；创建含数据库 v5 的恢复点并恢复，确认版本上限不再误拒绝且原有 SHA-256/回滚保护仍生效。
+31. **自定义封面**：在真机从 SAF 分别选择合法 PNG/JPEG/GIF/WebP、伪造扩展名、超过 8 MB、超大像素和损坏图片；确认合法文件更换后重启仍显示且不要求原 URI，非法输入不会覆盖旧封面。再还原 EPUB 内嵌封面、删除图书并检查私有原图/缩略图随之清理；同步前后均不得出现封面路径、URI 或图片数据。
+32. **读后推荐**：用至少三本完整索引的非 PDF 图书，分别验证默认 90%（及设置中的改动）后只预取不弹窗，最后一章读完或继续前翻才显示最多 5 本；关闭开关、索引/模型缺失、无相似书、切书和重启都不能展示陈旧推荐或网络错误。确认不产生同步实体或内容外发。
+33. **受限 MOBI/AZW/AZW3**：在 ARM64 真机用具备合法来源的无 DRM 经典 MOBI、无 DRM AZW、无 DRM 单一 KF8 v8 AZW3、DRM/加密文件、双 MOBI AZW3、非 v8 AZW3、损坏文件、恶意 HTML、超 128 MiB 文件分别验证。前三类只有在正确文本、章节与阅读位置均通过时才提升相应支持声明；其它输入必须在独立解析进程中被安全拒绝，不能让外部资源进入 WebView。测试样本和原书不得提交仓库。
+34. **核心状态迁移包**：先从桌面导出新 `kunpeng-reader-core-data-package` v1，再由 Android SAF 导入，并反向导出到桌面；验证四种实体、LWW 冲突、墓碑、`progress_history` 与未知 payload 字段均保留。分别用旧桌面 v2、未知顶层/kind、敏感字段、超 16 MiB/超实体数/超深度、取消 SAF、恢复点创建失败测试整个导入拒绝且本机数据库、`data_generation`、cursor/ack、认证状态完全不变；成功后书架刷新但不上传书文件或密钥。
+35. **外部打开导入**：在实体设备的文件管理器、聊天附件和浏览器下载记录中，分别对 EPUB/PDF/TXT/Markdown/MOBI/AZW/受限 AZW3 使用系统“打开方式”；验证冷启动与前台 `onNewIntent`、同一对象重复打开去重、无读权限/未知 MIME/伪造扩展/非 `content://` 安全拒绝，以及复制完成后原始 URI 不出现在本机队列、数据库、日志或同步数据。确认解析失败会本地提示且队列只在处理后确认。
+36. **本机时钟升级、资讯、反馈与诊断**：以一份含合理 epoch 秒、合成小值和既有毫秒的 Android SQLite 数据验证恢复点、四个允许列转换、原子标记、失败回滚/重试、图书与 cursor/`data_generation`/认证/密钥/payload 未变；再从设置导入/导出核心状态包。资讯页冷启动不得发网络，点击刷新才应请求 HTTPS 固定服务；覆盖超时、超过上限、来源局部失败、全失败保留旧缓存、非 HTTPS 外链拒绝。反馈分别验证未配置端点禁用、非 HTTPS 拒绝、功能建议无附件、Bug JSON 边界和 `acceptedAttachments` 不足时草稿保留；真实接口仅在服务端部署后于隔离环境验证。诊断覆盖固定字段白名单、96 条环形上限、256 KiB JSON 导出上限、无敏感内容/持久化/自动附件，并确认仅手动选择时成为 Bug 附件。
+37. **阅读问题记录**：在 EPUB/TXT/Markdown 阅读器实际复现点击、章节边界翻页与目录跳转，确认工具菜单可冻结最近一分钟且最多 320 条；向 bridge 注入未知字段、正文、选区、书名/content ID、路径/URI、账号/Token/异常文本时必须整条拒绝，导出的 JSON 不得含这些值。验证清空和退出后无残留，复制/SAF 导出不联网、不自动附加 Bug；若另行选择为反馈附件，仍须通过 ADR-0008 单文件确认流程。PDF 原生阅读器当前不产生 WebView 轨迹。
+38. **后台任务与翻页动效**：用大书触发全文和语义索引，分别在章节/批次检查点取消；确认全文不会发布未完成缓存，语义不会保留当前书半成品 vectors/marker，已完成书可续用；Download、外部打开导入和恢复点只显示不可安全中断。分页阅读分别验证关闭/淡入/滑动、系统减少动画、长按选区、TTS、章节边界、快速连续翻页和动效中断；所有情况的 UTF-16 位置、高亮、书签和 TalkBack 焦点不得漂移，PDF 不应显示或应用文本动效。
+39. **BYOK 翻译、端到端密钥包与按需字体**：在隔离测试凭据下分别验证百度、腾讯、DeepL、Google 的服务商选择、未配置/超 5,000 字/超时/超响应/错误响应、结果弹层重试和显式浏览器外跳；确认不点击不联网，日志、公开配置、导出包与普通同步实体都没有 API Key 或选中文字。再用同一独立同步密码完成 Android→桌面及桌面→Android 的 translation-only 与智读+翻译混合密钥包上传/下载/恢复，确认服务端仅见 AES-GCM 密文、错误密码/损坏包/错误世代不会覆盖本机任何凭据，桌面 v1 仅 epoch=1 可读；未开启密钥同步时换机必须重新填 key。对三种字体覆盖首次下载、HTTPS 重定向、离线/校验失败/中断下载、已下载后启用、删除当前字体、损坏私有文件和重开书籍；确认失败不覆盖旧字体，WebView 不暴露私有路径，切换字体不会改变 UTF-16 续读位置、选区、标注或书签。当前无真实凭据和 ADB 设备，这两类运行时验收尚未完成。
+40. **全书页数实测**：在至少包含图片、长段落、空章节和多章节的大 EPUB/TXT/Markdown/MOBI/AZW 上，从阅读工具显式启动统计；确认进度按已测章节增长、可取消并重开后从未测章节续算，完成后显示“全书当前页/总页数”和“本章当前页/总页数”。分别旋转屏幕、改变字号/字体/行距/边距/阅读模式，确认旧缓存不复用；测量期间位置、有效字数、阅读时长、推荐和完成状态均不得变化，结束或取消后必须回到原章节的同一 locator。断网、图片解码失败、章节装载失败和超大章节应可安全中止或给出本地提示，不能卡死 WebView；页数缓存、正文、字体信息和本机路径不得同步或导出到核心迁移包。当前没有 ADB 设备，因此尚未做运行时验收。
+41. **上下边距与自适应书架**：在 EPUB/TXT/Markdown/MOBI/AZW 上把上下边距调至 0、默认值、最大值，重开应用后确认保留；同时验证页尾留白、选区/高亮、脚注、跨章翻页与 UTF-16 续读不漂移，已有全书页数缓存必须失效并在再次统计时重新测量。分别用窄竖屏、宽横屏和平板验证网格“自动”列数不让封面低于最小可读宽度；再选手动 1–6 列、旋转、重启和从旧 2–4 列 metadata 升级，确认显示和偏好符合预期且不改变书架筛选、书目或同步数据。当前无 ADB 设备，运行时验收未完成。
+42. **离线 OpenCC 简繁显示**：在 API 24、ARM64 和 Android 15 16 KiB 页设备上，分别用 EPUB/TXT/Markdown/MOBI/AZW 的 `滑鼠裡面`、`鼠标里面` 及短语词典样例测试简体/繁体模式，确认只改变正文可见文本，不改中文资源 URL、`alt`/属性、CSS、脚本、书名、目录、原书、全文/语义索引或同步 payload。切换时确认同章节相对位置恢复、旧全书页数缓存失效并按当前模式重测；随后新建/编辑高亮、书签、脚注、朗读、书内搜索、翻页和退出重开，确认不会把转换后的 UTF-16 偏移写入原文位置。断言 OpenCC 原生初始化失败时仍能打开原始正文，并记录失败提示；大章节切换验证耗时、内存和取消/返回路径。当前无 ADB 设备，运行时验收未完成。
+43. **原书样式、脚注字号与动效速度**：在带内联/外链 CSS、内联字号、段落边距、图片、表格和脚注的 EPUB 上反复切换“本机样式/原书样式”，确认后者只恢复已清洗的出版物排版、主题和 CSP/资源限制仍有效；字体/行距/段距/边距切换本机样式后立即重新生效。两种样式、旋转和字体切换后确认全书页数缓存均重新测量，UTF-16 续读、高亮、书签、选区、脚注和跨章翻页不漂移。脚注弹层逐一验证 10/14/22px、暗色主题、窄屏和关闭操作；翻页动效在 0.5/1.0/2.0x 下验证淡入和滑动的实际时长，且系统减少动画、选区、朗读、加载和跨章边界仍强制无动效。当前无 ADB 设备，运行时验收未完成。
+44. **文本真双页**：在至少 900 CSS px 的横屏平板/模拟器上，对 EPUB/TXT/Markdown/MOBI/AZW 选择“分页 > 双页”，确认同屏为两个真实连续 CSS 物理栏、页码/全书页数按栏计数、向前/向后各跨两个栏、奇数末栏右页为空。分别用长段、图片、脚注、表格、搜索高亮、TTS 跳转、书签/批注定位和跨章续读验证 UTF-16 锚点与可见字数不漂移；旋转、分屏或宽度降至阈值以下必须回退单页并保留双页请求，回到足够宽横屏后恢复。再切换原书/本机样式、字体、行距和边距，确认全书页数缓存不复用旧版式。当前无 ADB 设备，运行时验收未完成。
+45. **离线系统音色**：在至少各安装一个中文和英文离线 Android TTS voice 的真机上，阅读设置分别选择中文/英文音色与语速，重开书籍/应用后确认各自保持；用中文、英文、混合文本、逐词范围高亮、跨章、停止、后台和打开设置/词典覆盖原朗读回归。卸载或禁用已选 voice 后再次朗读，必须提示并回退相应语言另一可用离线音色，且只清除该语言的本机 voice ID；若没有任何离线音色则必须拒绝朗读并提示安装，不能退回系统未知默认音色。确认选择器不展示 `isNetworkConnectionRequired=true` 的 voice，离线飞行模式下朗读不请求网络，voice ID 不进入同步 payload、导出包、日志或问题轨迹。当前无 ADB 设备，运行时验收未完成。
+46. **界面语言第一阶段**：在 Android 设备语言分别为简体中文、繁体中文（含 `zh-Hant`、香港/澳门地区）和英文时，验证“跟随系统”解析为简中/繁中/英文；再在设置中手动选择三种语言、切后台/重启应用，确认应用标题、设置标题、语言选择器、书架高频工具/筛选/空态立即更新并保留。写入畸形、超长或未知 `ui.app_locale.v1` 后必须安全回退跟随系统，且该 metadata 不出现在 sync payload、核心迁移包、日志或问题轨迹。当前无 ADB 设备，运行时验收未完成。
+47. **Reader/PDF 高频界面语言**：分别在简中、繁中和英文下打开 EPUB/TXT/Markdown/MOBI 与 PDF，覆盖 Reader 阅读设置、目录三标签及空态、书内搜索、工具栏提示，以及 PDF 目录/跳页/搜索/页码和工具栏；确认参数化的页码与搜索进度不残留中文，切换语言不会改变阅读位置、正文、书名、批注或高亮。错误 SnackBar、编辑对话框和独立低频组件尚未完成翻译，验收时应如实记录，不得将本阶段称作全界面多语言。当前无 ADB 设备，运行时验收未完成。
+48. **工具页高频界面语言**：分别在简中、繁中和英文下验证标签管理的用量/改名/删除确认、书单总览和详情/成员选择、阅读统计的概览与连续阅读卡片，以及生词本、本机诊断和笔记汇总的高频操作；再覆盖阅读上下文的 AI 问答、词典、外部词典、翻译结果和翻译设置，确认问题/释义/章节/语言/错误等动态值已参数化。用户的书名、词条、标签名、书单名、简介、笔记和阅读数据不被翻译或修改。AI/资讯、书库体检、账户同步和反馈等独立页仍未完整翻译，当前无 ADB 设备，运行时验收未完成。
+49. **书库 AI 批量分类**：在至少三本未分类、一本已有自动标签及一本无效/移除的本机书目的书架，确认只有用户点击开始或继续才逐书请求 BYOK；队列跳过已有自动标签、只保存内容 ID SHA-256/游标/状态，不含标题、正文、路径、提示词、模型回答或错误，且 metadata、任务中心、同步 payload 与核心迁移包均不泄露这些内容。正在请求时点暂停，确认当前书成功写入后才暂停；重开进程后原 running 必须显示暂停并从同一安全游标继续。错误密码、限流、超时或非八维 JSON 时停在该书，不能跳过、不能写半成品或覆盖手工标签；继续成功后只写 `model_book_tags_v1` 并按既有同步管道上传。当前无真实凭据和 ADB 设备，运行时验收未完成。
+50. **沉浸模式**：在 EPUB/TXT/Markdown/MOBI/AZW 进入阅读设置，确认默认关闭、普通模式工具栏可见；开启后阅读区高度和阅读位置不改变，点正文中部应在显示/隐藏工具栏间切换，重开应用仍保持。分别在选区、高亮/批注弹层、书内搜索、离线朗读、Edge 朗读、跨章节和横竖屏下验证控件始终不会在交互中隐藏；退出沉浸模式须立即恢复工具栏。检查 `reader.immersive_mode.v1` 不进入同步 payload、核心迁移包、导出、日志或问题轨迹。当前无 ADB 设备，运行时验收未完成。
+51. **资讯安全内读**：打开资讯页与返回列表不得发文章请求；只有点某条 HTTPS 条目后才开始获取。用公开正常文章、HTTP/localhost/IP 字面量、DNS 私网解析、HTTP 或私网重定向、超过 3 次重定向、非 HTML、超过 1 MiB、超时、恶意或未闭合 script/style/iframe/form HTML 覆盖：前者只显示纯文本标题与段落，后者必须无脚本执行、无 WebView、无正文缓存并安全显示失败页。失败时外链按钮必须是用户再次点击后才打开系统浏览器；验证文章正文、图片、访问 URL、来源和标题均不进入新闻缓存、同步 payload、核心迁移包、日志或问题轨迹。当前无 ADB 设备，运行时验收未完成。
+52. **书摘 PNG 保存**：分别选中文、英文、emoji、含代理对和超过 1,200 UTF-16 单元的文本，确认预览卡片与复制文字正确，超长仅在图片中截断且提示；保存前不得出现 SAF 或文件。点击保存后验证系统创建文档器 MIME 为 `image/png`、文件名安全且长度受限、取消不创建文件；接受的 PNG 必须带签名且小于等于 2 MiB，2MP 物理像素上限在高 DPI/旋转下仍有效。用无可写 provider、写入异常、伪造 PNG/超大字节覆盖，确认失败不暴露路径、data URL、正文或残留部分文件；检查同步、迁移、导出、日志和问题轨迹都不出现书摘图片或内容。当前无 ADB 设备，运行时验收未完成。
 
 ## 8. 接手工作方式
 

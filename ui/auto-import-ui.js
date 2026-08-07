@@ -18,6 +18,7 @@ function create(options) {
   let refreshTimer = 0;
   let refreshRunning = false;
   let refreshPending = false;
+  let stabilityRetryTimer = 0;
 
   async function refreshShelf() {
     if (refreshRunning) {
@@ -100,13 +101,36 @@ function create(options) {
     } else if (progress.phase === "import") {
       setStatus("正在导入 " + (progress.processed || 0) + "/" + (progress.total || 0) + "，已新增 " + (progress.added || 0) + " 本" + (progress.current ? "：" + progress.current : ""), "busy");
       scheduleRefresh();
+    } else if (progress.phase === "waiting") {
+      const deferred = progress.deferred || 0;
+      setStatus("检测到 " + deferred + " 个仍在复制的文件，复制完成后自动导入", "busy");
+      clearTimeout(stabilityRetryTimer);
+      stabilityRetryTimer = setTimeout(() => {
+        stabilityRetryTimer = 0;
+        start("正在重新检查尚未复制完成的文件…");
+      }, 5000);
     } else if (progress.phase === "done") {
       setStatus("扫描完成，新增 " + (progress.added || 0) + " 本书", "ok");
       scheduleRefresh(0);
     }
   }
 
-  return Object.freeze({ handleProgress, start });
+  function bindEvents(eventApi) {
+    eventApi.listen("auto-import-progress", (event) => {
+      handleProgress((event && event.payload) || {});
+    });
+    eventApi.listen("auto-import-change", (event) => {
+      const payload = (event && event.payload) || {};
+      start(payload.reason || "检测到自动导入目录变化，正在检查新书…");
+    });
+    eventApi.listen("auto-import-watch-status", (event) => {
+      const payload = (event && event.payload) || {};
+      if (!payload.message) return;
+      setStatus(payload.message, payload.state === "error" ? "error" : "ok");
+    });
+  }
+
+  return Object.freeze({ bindEvents, handleProgress, start });
 }
 
 global.ReaderAutoImportUI = Object.freeze({ create });

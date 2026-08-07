@@ -36,6 +36,42 @@ test("book card clicks explicitly close main-window floaters", () => {
   assert.doesNotMatch(card, /openBookOrganizer/);
 });
 
+test("shelf covers cannot trigger native browser drag selection", () => {
+  assert.match(source, /shelfEl\.addEventListener\("dragstart", \(event\) => event\.preventDefault\(\)\)/);
+  assert.match(source, /shelfEl\.addEventListener\("selectstart", \(event\) => event\.preventDefault\(\)\)/);
+  assert.match(source, /img\.draggable = false/);
+  assert.match(styles, /\.shelf\s*\{[^}]*user-select:\s*none;[^}]*-webkit-user-select:\s*none;/s);
+  assert.match(styles, /\.shelf \*\s*\{[^}]*user-select:\s*none;[^}]*-webkit-user-select:\s*none;/s);
+  assert.match(styles, /\.shelf img\s*\{[^}]*-webkit-user-drag:\s*none;/s);
+});
+
+test("shelf fetches only first-screen covers immediately and observes the rest", () => {
+  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
+  assert.match(source, /const DEFAULT_FIRST_SCREEN_COVER_COUNT = 12/);
+  assert.match(source, /localStorage\.getItem\("shelfFirstScreenCoverCount"\)/);
+  assert.match(source, /localStorage\.setItem\("shelfFirstScreenCoverCount"/);
+  assert.match(source, /function estimateFirstScreenCoverCount\(\)/);
+  assert.match(source, /if \(!hasRememberedFirstScreenCoverCount\)[\s\S]*?estimateFirstScreenCoverCount\(\)/);
+  assert.match(source, /function rememberFirstScreenCoverCount\(\)/);
+  assert.match(source, /global\.addEventListener\("pagehide", rememberFirstScreenCoverCount\)/);
+  assert.match(source, /new global\.IntersectionObserver/);
+  assert.match(source, /rootMargin: COVER_PRELOAD_MARGIN/);
+  assert.match(source, /function activateDeferredCovers\(\)/);
+  assert.match(card, /img\.decoding = "async"/);
+  assert.match(card, /if \(!coverOnDemand \|\| index < firstScreenCoverCount\)[\s\S]*?img\.src = b\.cover[\s\S]*?else \{[\s\S]*?img\.dataset\.coverSrc = b\.cover/);
+  assert.match(source, /coverObserver\?\.disconnect\(\)/);
+});
+
+test("cover loading mode is a persisted general setting", () => {
+  assert.match(html, /id="set-cover-on-demand"/);
+  assert.match(source, /localStorage\.getItem\("shelfCoverOnDemand"\) !== "0"/);
+  assert.match(source, /localStorage\.setItem\("shelfCoverOnDemand", coverOnDemand \? "1" : "0"\)/);
+  assert.match(source, /!coverOnDemand \|\| index < firstScreenCoverCount/);
+  const i18n = fs.readFileSync(path.join(__dirname, "..", "app-i18n.js"), "utf8");
+  assert.match(i18n, /COVER_ON_DEMAND_COPY/);
+  assert.match(i18n, /coverOnDemand = label/);
+});
+
 test("shelf opening preference switches between single-click opening and double-click opening", () => {
   const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
   assert.match(html, /id="set-single-click-open"/);
@@ -112,7 +148,7 @@ test("funnel keeps sorting in two columns and reading filters on the right", () 
 test("active shelf filters pulse blue, explain their state and show the visible book count", () => {
   assert.match(source, /function updateShelfFilterStatus\(visibleCount\)/);
   assert.match(source, /filterButton\.classList\.toggle\("filters-active", active\)/);
-  assert.match(source, /filterButton\.title = active \? "已启用筛选" : "排序与布局"/);
+  assert.match(source, /filterButton\.title = active \? shelfText\("activeFilters"/);
   assert.match(source, /filterResultSummary\.textContent = visibleCount \+ "\/" \+ books\.length/);
   assert.match(styles, /#filter-btn\.filters-active\s*\{[^}]*animation:\s*shelf-filter-pulse/s);
   assert.match(styles, /@keyframes shelf-filter-pulse/);
@@ -137,8 +173,8 @@ test("book organization uses book information controls and the existing funnel f
   assert.match(source, /mode === "all"[\s\S]*?selectedTags\)\.every[\s\S]*?selectedCollections\)\.every/);
   assert.match(source, /selectedTags\)\.some[\s\S]*?selectedCollections\)\.some/);
   assert.match(source, /shelfOrganizationMatchMode/);
-  assert.match(source, /"匹配全部" : "匹配任一"/);
-  assert.match(html, /id="organization-match-mode"[^>]*>匹配任一/);
+  assert.match(source, /shelfText\("matchAll"[\s\S]*?shelfText\("matchAny"/);
+  assert.match(html, /id="organization-match-mode"[^>]*data-i18n="matchAny"/);
   assert.match(styles, /\.fp-org-col\s*\{[^}]*flex:\s*1 1 0;[^}]*max-width:\s*none;/s);
   assert.match(styles, /\.fp-org-title-row\s*\{[^}]*width:\s*100%;/s);
   assert.match(styles, /\.fp-match-mode\s*\{[^}]*margin-left:\s*auto;[^}]*margin-right:\s*8px;/s);

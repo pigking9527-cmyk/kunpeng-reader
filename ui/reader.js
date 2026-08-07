@@ -1,6 +1,10 @@
 // 阅读窗口逻辑（整本合并为一页，连续滚动）
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
+const readerText = (key, fallback, values) => {
+  const value = window.ReaderI18n?.t?.(key, values);
+  return value && value !== key ? value : fallback;
+};
 let currentBookTitle = "";
 let currentBookId = "";
 let currentBookContentId = "";
@@ -39,6 +43,7 @@ function markWindowDragging() {
   // Tauri 的原生拖窗过程不总能把 move/up 事件稳定回传给 WebView。
   // 给一个较长保护窗，松手事件回来时再缩短，避免拖动数秒后后台写盘插入造成卡顿。
   windowDraggingUntil = Date.now() + 20000;
+  window.ReaderBugTrace?.record("window_drag", { source: "title_bar", outcome: "start" });
   if (typeof sendToPage === "function") sendToPage({ windowDragging: 1 });
   if (windowDragReleaseTimer) clearTimeout(windowDragReleaseTimer);
   windowDragReleaseTimer = setTimeout(() => {
@@ -50,6 +55,7 @@ function isWindowDragging() {
 }
 function endWindowDraggingSoon() {
   windowDraggingUntil = Date.now() + 500;
+  window.ReaderBugTrace?.record("window_drag", { source: "title_bar", outcome: "release" });
   if (windowDragReleaseTimer) clearTimeout(windowDragReleaseTimer);
   windowDragReleaseTimer = setTimeout(() => {
     if (!isWindowDragging() && typeof sendToPage === "function") sendToPage({ windowDragging: 0 });
@@ -120,11 +126,11 @@ function renderAiReaderProfiles(status) {
   const profiles = Array.isArray(status?.profiles) ? status.profiles.filter((profile) => profile.configured) : [];
   aiReaderProfileInput.replaceChildren();
   if (!profiles.length) {
-    const option = document.createElement("option"); option.value = ""; option.textContent = "请先在书架设置中配置大模型";
+    const option = document.createElement("option"); option.value = ""; option.textContent = readerText("noConfiguredModel", "请先在书架设置中配置大模型");
     aiReaderProfileInput.appendChild(option); aiReaderProfileInput.disabled = true; return;
   }
   profiles.forEach((profile) => {
-    const option = document.createElement("option"); option.value = profile.id; option.textContent = profile.name || profile.model || "已配置大模型";
+    const option = document.createElement("option"); option.value = profile.id; option.textContent = profile.name || profile.model || readerText("configuredModel", "已配置大模型");
     aiReaderProfileInput.appendChild(option);
   });
   aiReaderProfileInput.value = profiles.some((profile) => profile.id === status?.activeId) ? status.activeId : profiles[0].id;
@@ -136,14 +142,14 @@ aiReaderProfileInput?.addEventListener("change", async () => {
   aiReaderProfileInput.disabled = true;
   try {
     const status = await invoke("select_ai_reader_profile", { id });
-    aiReaderSetStatus(status.configured ? "已切换大模型" : "所选大模型配置不完整");
-  } catch (error) { aiReaderSetStatus("切换大模型失败：" + error); }
+    aiReaderSetStatus(status.configured ? readerText("modelSwitched", "已切换大模型") : readerText("modelIncomplete", "所选大模型配置不完整"));
+  } catch (error) { aiReaderSetStatus(readerText("modelSwitchFailed", "切换大模型失败：{error}", { error })); }
   finally { aiReaderProfileInput.disabled = false; }
 });
 function aiReaderHistoryIdentity() { return String(window.currentBookContentId || currentBookContentId || window.currentBookId || currentBookId || "unknown"); }
 function aiReaderHistoryKey() { return "aiReaderHistoryV1:" + aiReaderHistoryIdentity(); }
 function aiReaderSessionMemoryKey() { return "aiReaderSessionMemoryV1:" + aiReaderHistoryIdentity(); }
-function aiReaderTaskLabel(task) { return task === "summary" ? "总结已读内容" : task === "mindmap" ? "生成脑图" : "提问"; }
+function aiReaderTaskLabel(task) { return task === "summary" ? readerText("summaryTask", "总结已读内容") : task === "mindmap" ? readerText("mindMapTask", "生成脑图") : readerText("askTask", "提问"); }
 function aiReaderHistoryEntryId(entry) { return String(entry?.id || `legacy:${entry?.at || "unknown"}`); }
 function aiReaderHistoryDeleted(entry) { return Boolean(entry?.deletedAt || entry?.deleted_at); }
 function aiReaderNewHistoryId() {
@@ -388,7 +394,7 @@ function aiReaderRenderAnswer(answer, task) {
   if (task === "mindmap") {
     const tree = aiReaderParseMindmap(content);
     if (tree) aiReaderAnswer.replaceChildren(aiReaderRenderMindmap(tree));
-    else aiReaderAnswer.textContent = content || "模型没有返回可绘制的脑图，请重试。";
+    else aiReaderAnswer.textContent = content || readerText("noMindMap", "模型没有返回可绘制的脑图，请重试。");
   } else aiReaderAnswer.replaceChildren(aiReaderRenderMarkdown(content, Array.isArray(answer.sources) ? answer.sources : []));
   aiReaderAnswer.hidden = false;
   aiReaderHistory?.classList.remove("show");
@@ -399,7 +405,7 @@ function aiReaderRenderAnswer(answer, task) {
     const stages = Array.isArray(answer.retrievalStages) ? answer.retrievalStages.filter(Boolean) : [];
     audit.textContent = stages.length
       ? `本次流程：${stages.join(" · ")}${answer.citationChecked ? " · 已完成引用自检" : ""}`
-      : "本次依据来自当前已读内容。";
+      : readerText("currentEvidence", "本次依据来自当前已读内容。");
     audit.hidden = false;
   }
 }
@@ -413,7 +419,7 @@ function aiReaderShowHistory(forceOpen = false) {
   const entries = aiReaderReadHistory().filter((entry) => !aiReaderHistoryDeleted(entry));
   aiReaderHistory.replaceChildren();
   if (!entries.length) {
-    const empty = document.createElement("div"); empty.className = "ai-reader-history-empty"; empty.textContent = "这本书还没有智读记录。"; aiReaderHistory.appendChild(empty); return;
+    const empty = document.createElement("div"); empty.className = "ai-reader-history-empty"; empty.textContent = readerText("aiHistoryEmpty", "这本书还没有智读记录。"); aiReaderHistory.appendChild(empty); return;
   }
   entries.forEach((entry) => {
     const row = document.createElement("div"); row.className = "ai-reader-history-row";
@@ -421,14 +427,14 @@ function aiReaderShowHistory(forceOpen = false) {
     const question = document.createElement("span"); question.className = "ai-reader-history-question";
     question.textContent = entry.question || aiReaderTaskLabel(entry.task);
     const meta = document.createElement("span"); meta.className = "ai-reader-history-meta";
-    meta.textContent = `${aiReaderTaskLabel(entry.task)} · ${entry.at ? new Date(entry.at).toLocaleString() : "历史记录"}`;
+    meta.textContent = `${aiReaderTaskLabel(entry.task)} · ${entry.at ? new Date(entry.at).toLocaleString() : readerText("historyRecord", "历史记录")}`;
     item.append(question, meta);
     item.addEventListener("click", () => aiReaderRenderAnswer(entry, entry.task || "question"));
-    const remove = document.createElement("button"); remove.type = "button"; remove.className = "ai-reader-history-delete"; remove.textContent = "删除";
-    remove.setAttribute("aria-label", `删除智读记录：${question.textContent}`);
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "ai-reader-history-delete"; remove.textContent = readerText("delete", "删除");
+    remove.setAttribute("aria-label", readerText("delete", "删除") + ": " + question.textContent);
     remove.addEventListener("click", async (event) => {
       event.preventDefault(); event.stopPropagation();
-      if (window.confirm && !window.confirm("删除这条智读记录？删除后会同步到其他设备。")) return;
+      if (window.confirm && !window.confirm(readerText("deleteAiHistory", "删除这条智读记录？删除后会同步到其他设备。"))) return;
       const tombstone = { id: aiReaderHistoryEntryId(entry), deletedAt: new Date().toISOString() };
       try {
         const local = aiReaderMergeHistoryEntries(aiReaderReadHistory(), [tombstone]);
@@ -438,9 +444,9 @@ function aiReaderShowHistory(forceOpen = false) {
           if (Array.isArray(snapshot)) localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(aiReaderMergeHistoryEntries(snapshot, local)));
         }
         aiReaderShowHistory(true);
-        aiReaderSetStatus("已删除智读记录；删除会在下次同步时传到其他设备。");
+        aiReaderSetStatus(readerText("historyDeleted", "已删除智读记录；删除会在下次同步时传到其他设备。"));
       } catch (error) {
-        aiReaderSetStatus("删除智读记录失败：" + error);
+        aiReaderSetStatus(readerText("historyDeleteFailed", "删除智读记录失败：{error}", { error }));
       }
     });
     row.append(item, remove);
@@ -463,15 +469,15 @@ async function openAiReader(prefill = "", focusAnchor = null) {
   try {
     const [status, profiles] = await Promise.all([invoke("ai_reader_status"), invoke("ai_reader_profiles")]);
     renderAiReaderProfiles(profiles);
-    aiReaderSetStatus(status.configured ? "已选择本机大模型" : "请先在书架设置中配置大模型");
-  } catch (error) { aiReaderSetStatus("读取配置失败：" + error); }
+    aiReaderSetStatus(status.configured ? readerText("modelSelected", "已选择本机大模型") : readerText("noConfiguredModel", "请先在书架设置中配置大模型"));
+  } catch (error) { aiReaderSetStatus(readerText("readConfigFailed", "读取配置失败：{error}", { error })); }
 }
 function aiReaderStartProgress(task) {
   const stages = task === "mindmap"
     ? ["定位当前选句和已读范围", "检索相关已读正文", "筛选脑图依据", "整理脑图"]
     : ["定位当前选句和邻近正文", "混合检索已读内容", "筛选并重排证据", "生成回答并核对引用"];
   let index = 0;
-  const show = () => aiReaderSetStatus(`正在 ${index + 1}/${stages.length}：${stages[index]}…`);
+  const show = () => aiReaderSetStatus(readerText("processing", "正在 {current}/{total}：{stage}…", { current: index + 1, total: stages.length, stage: stages[index] }));
   show();
   window.clearInterval(aiReaderProgressTimer);
   aiReaderProgressTimer = window.setInterval(() => {
@@ -485,13 +491,13 @@ function aiReaderStopProgress() {
 }
 async function runAiReader(task) {
   if (aiReaderRequestRunning) return;
-  const question = aiReaderQuestion?.value?.trim() || (task === "summary" ? "总结目前已读的内容" : task === "mindmap" ? "梳理目前已读内容的脑图" : "");
-  if (task === "question" && !question) { aiReaderSetStatus("请输入问题"); aiReaderQuestion?.focus(); return; }
+  const question = aiReaderQuestion?.value?.trim() || (task === "summary" ? readerText("summaryTask", "总结已读内容") : task === "mindmap" ? readerText("mindMapTask", "生成脑图") : "");
+  if (task === "question" && !question) { aiReaderSetStatus(readerText("enterQuestion", "请输入问题")); aiReaderQuestion?.focus(); return; }
   aiReaderRequestRunning = true;
   aiReaderStartProgress(task);
   aiReaderHistory?.classList.remove("show");
   aiReaderAnswer.hidden = false;
-  aiReaderAnswer.textContent = "正在请求模型…";
+  aiReaderAnswer.textContent = readerText("aiRequesting", "正在请求模型…");
   aiReaderAnswer.classList.add("empty");
   aiReaderSources.hidden = true;
   document.getElementById("ai-reader-audit")?.setAttribute("hidden", "");
@@ -511,11 +517,11 @@ async function runAiReader(task) {
     aiReaderSaveHistory(entry);
     aiReaderRememberSession(entry);
     const stages = Array.isArray(answer.retrievalStages) ? answer.retrievalStages.join(" · ") : "";
-    aiReaderSetStatus(stages ? `完成：${stages}` : "完成");
+    aiReaderSetStatus(stages ? readerText("completeWithStages", "完成：{stages}", { stages }) : readerText("complete", "完成"));
   } catch (error) {
-    aiReaderAnswer.textContent = "智读失败：" + String(error);
+    aiReaderAnswer.textContent = readerText("aiFailed", "智读失败：{error}", { error: String(error) });
     aiReaderAnswer.classList.remove("empty");
-    aiReaderSetStatus("失败");
+    aiReaderSetStatus(readerText("failed", "失败"));
   } finally { aiReaderStopProgress(); aiReaderRequestRunning = false; }
 }
 document.getElementById("ai-reader-btn")?.addEventListener("click", (event) => { event.stopPropagation(); openAiReader(); });
@@ -557,7 +563,7 @@ document.getElementById("pdf-dual").addEventListener("click", (e) => {
 });
 // 朗读
 let ttsPlaying = false,
-  ttsNoZhWarned = false;
+  ttsNoSystemVoiceWarned = false;
 const ttsBtn = document.getElementById("tts-btn");
 ttsBtn.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -581,6 +587,13 @@ function doJump(j) {
   }
 }
 listen("shelf-jump", (e) => doJump(e.payload));
+listen("reader-bug-trace-request", async (event) => {
+  const requestId = String(event?.payload?.request_id || "").slice(0, 96);
+  if (!requestId || !window.ReaderBugTrace?.capture) return;
+  const snapshot = await window.ReaderBugTrace.capture("main_menu");
+  await window.__TAURI__.event.emit("reader-bug-trace-response", { request_id: requestId, snapshot });
+});
+listen("reader-bug-trace-reset", () => window.ReaderBugTrace?.reset?.());
 
 const frame = document.getElementById("frame");
 const tocEl = document.getElementById("toc");
@@ -599,30 +612,30 @@ const progressEl = document.getElementById("progress");
 let pageCountMeasuring = true;
 function showProgressLoading() {
   if (isPdf) {
-    progressEl.innerHTML = '<span class="mini-spinner" aria-label="加载中"></span>';
+    progressEl.innerHTML = '<span class="mini-spinner" aria-label="' + readerText("loading", "加载中…") + '"></span>';
     return;
   }
   pageCountMeasuring = true;
   progressEl.classList.remove("page-count-total");
   progressEl.classList.add("page-count-loading");
-  progressEl.title = "全书页数统计中";
-  progressEl.setAttribute("aria-label", "全书页数统计中");
-  progressEl.innerHTML = '<span class="mini-spinner" aria-label="全书页数统计中"></span>';
+  progressEl.title = readerText("measuringPages", "全书页数统计中");
+  progressEl.setAttribute("aria-label", readerText("measuringPages", "全书页数统计中"));
+  progressEl.innerHTML = '<span class="mini-spinner" aria-label="' + readerText("measuringPages", "全书页数统计中") + '"></span>';
 }
 function showWholeBookPages(page, total) {
   pageCountMeasuring = false;
   progressEl.classList.remove("page-count-loading");
   progressEl.classList.add("page-count-total");
-  const text = page + "/" + total + "页";
+  const text = readerText("wholeBookPages", "{page}/{total}页", { page, total });
   progressEl.title = text;
   progressEl.setAttribute("aria-label", text);
   progressEl.textContent = text;
 }
 function showChapterProgress(page, total, progress) {
   if (!chapterProgressEl) return;
-  const text =
-    "第" + (curVchap + 1) + "/" + vchapTotal + "章 · 本章 " +
-    (page || 1) + "/" + (total || 1) + "页 · " + progress.toFixed(1) + "%";
+  const text = readerText("chapterProgress", "第{chapter}/{chapters}章 · 本章 {page}/{total}页 · {progress}%", {
+    chapter: curVchap + 1, chapters: vchapTotal, page: page || 1, total: total || 1, progress: progress.toFixed(1),
+  });
   chapterProgressEl.title = text;
   chapterProgressEl.setAttribute("aria-label", text);
   chapterProgressEl.textContent = text;
@@ -648,6 +661,31 @@ let vchaps = [];
 let curVchap = 0;
 let vchapTotal = 1;
 showProgressLoading();
+window.ReaderBugTrace?.setContextProvider(() => {
+  const shell = ReaderShell.getState();
+  return {
+    book: {
+      title: currentBookTitle,
+      format: isPdf ? "pdf" : "epub",
+    },
+    state: {
+      chapter: curChapter,
+      progress: curProgress,
+      chapter_frac: curChFrac,
+      total_chapters: curTotalCh,
+      overlay: shell.overlay,
+      toolbar: shell.toolbar,
+      frame_ready: frameReady,
+      loading: !loadingHidden,
+      is_pdf: isPdf,
+      immersive: ReaderShell.isImmersive(),
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      },
+    },
+  };
+});
 
 function setSettingsOpen(open) {
   ReaderShell.setOverlay(ReaderShell.OVERLAY.SETTINGS, !!open);
@@ -665,6 +703,11 @@ function syncOverlay() {
   sendToPage({ overlayOpen: open ? 1 : 0 });
 }
 window.addEventListener("reader-shell-statechange", (e) => {
+  window.ReaderBugTrace?.record("shell_state", {
+    source: "reader_shell",
+    overlay: e.detail?.next?.overlay || "none",
+    outcome: e.detail?.next?.toolbar || "normal",
+  });
   if (e.detail?.previous?.overlay !== e.detail?.next?.overlay) syncOverlay();
 });
 
@@ -730,7 +773,6 @@ const READ_TRACK = {
   fastTurnCredit: 0.25,
   idleCapMs: 2 * 60 * 1000,
   minDwellMs: 500,
-  maxCreditedPages: 3000,
   periodicCreditMs: 10000,
   backtrackCooldownMs: 2500,
   readingTimeTickMs: 15000,
@@ -740,51 +782,13 @@ let rwSegment = null,
   rwAccum = 0,
   rwTimer = null,
   rwFastStreak = 0;
-const rwCreditedByPage = new Map();
-let rwCreditStorageKey = "",
-  rwCreditSaveTimer = null,
-  rwLastPosition = 0,
+let rwLastPosition = 0,
   rwLastPageData = null,
   rwBacktrackBlockedUntil = 0,
   rwBacktrackResumeTimer = null,
   rtLastActiveAt = Date.now();
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
-}
-function readCreditKey() {
-  return currentBookId ? "readWordsCredit:v1:" + currentBookId : "";
-}
-function ensureReadCreditCache() {
-  const key = readCreditKey();
-  if (!key || key === rwCreditStorageKey) return;
-  rwCreditStorageKey = key;
-  rwCreditedByPage.clear();
-  try {
-    const entries = JSON.parse(localStorage.getItem(key) || "[]");
-    if (Array.isArray(entries)) {
-      entries.forEach((entry) => {
-        if (!Array.isArray(entry) || entry.length < 2) return;
-        const pageKey = String(entry[0] || "");
-        const credited = Math.max(0, Math.floor(Number(entry[1]) || 0));
-        if (pageKey && credited > 0) rwCreditedByPage.set(pageKey, credited);
-      });
-    }
-  } catch (e) {}
-  pruneCreditedPages();
-}
-function saveReadCreditCache(immediate = false) {
-  if (!rwCreditStorageKey) return;
-  if (rwCreditSaveTimer) {
-    clearTimeout(rwCreditSaveTimer);
-    rwCreditSaveTimer = null;
-  }
-  const save = () => {
-    try {
-      localStorage.setItem(rwCreditStorageKey, JSON.stringify([...rwCreditedByPage.entries()]));
-    } catch (e) {}
-  };
-  if (immediate) save();
-  else rwCreditSaveTimer = setTimeout(save, 1000);
 }
 function flushReadWords(immediate = false) {
   if (DIAG_DISABLE_READER_REPORTS) return;
@@ -837,18 +841,11 @@ function requiredReadMs(chars) {
   }
   return (chars / READ_TRACK.normalCpmLimit) * 60000;
 }
-function pruneCreditedPages() {
-  while (rwCreditedByPage.size > READ_TRACK.maxCreditedPages) {
-    const first = rwCreditedByPage.keys().next().value;
-    rwCreditedByPage.delete(first);
-  }
-}
 function creditReadSegment(reason, options = {}) {
   if (!rwSegment) return;
   const seg = rwSegment;
   if (!options.keep) rwSegment = null;
   if (options.discard) return;
-  ensureReadCreditCache();
   const rawDwell = Math.max(0, Date.now() - seg.startedAt);
   const chars = Math.max(0, seg.chars || 0);
   if (chars <= 0 || rawDwell < READ_TRACK.minDwellMs) return;
@@ -861,12 +858,12 @@ function creditReadSegment(reason, options = {}) {
   else rwFastStreak = 0;
   const creditRatio = rwFastStreak >= READ_TRACK.fastTurnStreak ? ratio * READ_TRACK.fastTurnCredit : ratio;
   const totalCreditForPage = Math.floor(chars * creditRatio);
-  const alreadyCredited = rwCreditedByPage.get(seg.key) || 0;
+  // 同一次停留会周期性结算，只补本次停留尚未计入的部分；重新进入该页则
+  // 创建新的 segment，让用户实际重读的内容再次进入阅读统计。
+  const alreadyCredited = seg.credited || 0;
   const delta = Math.max(0, totalCreditForPage - alreadyCredited);
   if (delta <= 0) return;
-  rwCreditedByPage.set(seg.key, alreadyCredited + delta);
-  pruneCreditedPages();
-  saveReadCreditCache();
+  seg.credited = alreadyCredited + delta;
   rwAccum += delta;
   if (window.__kunpengReadDebug) {
     console.debug("read-track", {
@@ -909,7 +906,6 @@ function trackReadWords(d) {
   const key = readPageKey(d);
   const chars = Math.max(0, d.pageChars || 0);
   if (!key || chars <= 0) return;
-  ensureReadCreditCache();
   const pos = readPagePosition(d);
   if (pos > 0 && rwLastPosition > 0 && pos < rwLastPosition) {
     rwBacktrackBlockedUntil = Date.now() + READ_TRACK.backtrackCooldownMs;
@@ -931,7 +927,7 @@ function trackReadWords(d) {
     return;
   }
   creditReadSegment("page_change");
-  rwSegment = { key, chars, startedAt: Date.now() };
+  rwSegment = { key, chars, startedAt: Date.now(), credited: 0 };
 }
 function creditCurrentReadPage() {
   if (!readerDebugSettingOn("reader_words_detect")) return;
@@ -973,7 +969,6 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("beforeunload", () => {
   pauseReadTracking("beforeunload");
   flushReadWords(true);
-  saveReadCreditCache(true);
 });
 window.pauseReadTracking = pauseReadTracking;
 window.discardReadTracking = discardReadTracking;
@@ -1377,6 +1372,10 @@ readerEndModal?.addEventListener("click", (event) => {
 // 接收合并页上报：阅读进度 / 正文被点击 / 搜索结果数
 window.addEventListener("message", (e) => {
   if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
+  if (e.data.bugTrace) {
+    window.ReaderBugTrace?.ingestPageEvent(e.data.bugTrace);
+    return;
+  }
   if (e.data.bookEnd) {
     if (window.ReaderRecommendationSettings?.isEnabled()) openReaderEnd();
     return;
@@ -1405,8 +1404,9 @@ window.addEventListener("message", (e) => {
     if (typeof e.data.logicalCh === "number") curVchap = e.data.logicalCh;
     if (e.data.logicalTotal) vchapTotal = e.data.logicalTotal;
     if (isPdf) {
-      progressEl.textContent =
-        "第 " + (e.data.page || 1) + "/" + (e.data.total || 1) + " 页 · " + curProgress.toFixed(1) + "%";
+      progressEl.textContent = readerText("pdfProgress", "第 {page}/{total} 页 · {progress}%", {
+        page: e.data.page || 1, total: e.data.total || 1, progress: curProgress.toFixed(1),
+      });
     } else {
       // 全书页数是补充信息，不能覆盖原有的章节、本章页数和百分比。
       showChapterProgress(e.data.page, e.data.total, curProgress);
@@ -1453,13 +1453,13 @@ window.addEventListener("message", (e) => {
   if (e.data.ttsErr) {
     const m = e.data.ttsErr;
     alert(typeof m === "string"
-      ? "在线朗读失败：" + m + "\n（可在设置→朗读 把音源切到“系统语音”。）"
-      : m === 1 ? "当前环境不支持朗读（Web Speech API 不可用）。"
-      : "在线朗读取音失败。可切换为系统语音。");
+      ? readerText("ttsOnlineFailed", "Online speech failed: {error}", { error: m })
+      : m === 1 ? readerText("ttsUnsupported", "Speech is unavailable in this environment.")
+      : readerText("ttsReadFailed", "Online speech could not read this text."));
   }
-  if (e.data.ttsNoZh && !ttsNoZhWarned) {
-    ttsNoZhWarned = true;
-    alert("没找到中文朗读语音，会用默认语音（中文可能读不准）。\n建议：Windows 设置 → 时间和语言 → 语音 → 添加“中文（中国）”自然语音，然后重开本书。");
+  if (e.data.ttsNoSystemVoice && !ttsNoSystemVoiceWarned) {
+    ttsNoSystemVoiceWarned = true;
+    alert(readerText("ttsNoSystemVoice", "No system voice matches the text language."));
   }
   if (e.data.outline) buildToc(e.data.outline); // PDF 内置目录
   if (e.data.pdfState) {
@@ -1498,6 +1498,12 @@ window.addEventListener("message", (e) => {
   if (e.data.ready) {
     hideLoading();
     frameReady = true;
+    window.ReaderBugTrace?.record("frame_ready", {
+      source: "reader_page",
+      ready: true,
+      is_pdf: isPdf,
+      chapter: curChapter,
+    });
     syncAnimationSettingsToPage();
     if (vchaps.length) sendToPage({ vchaps }); // 把逻辑章节表交给合并页
     sendToPage({ highlights }); // 把高亮交给合并页渲染
@@ -1561,14 +1567,14 @@ window.addEventListener("message", (e) => {
     const dataUrl = String(img.dataUrl || "");
     if (dataUrl.startsWith("data:image/")) {
       invoke("save_download_image", {
-        name: String(img.name || "书摘.png"),
+        name: String(img.name || readerText("excerptImageName", "excerpt.png")),
         dataUrl,
       })
         .then((path) => sendToPage({ excerptSaved: path || "" }))
         .catch((err) => {
-          sendToPage({ excerptSaveError: String(err || "保存图片失败") });
+          sendToPage({ excerptSaveError: String(err || readerText("saveImageFailed", "Could not save image")) });
           const a = document.createElement("a");
-          a.download = String(img.name || "书摘.png").replace(/[\\/:*?"<>|]/g, "_");
+          a.download = String(img.name || readerText("excerptImageName", "excerpt.png")).replace(/[\\/:*?"<>|]/g, "_");
           a.href = dataUrl;
           document.body.appendChild(a);
           a.click();
@@ -1644,7 +1650,7 @@ window.addEventListener("message", (e) => {
             target_lang: req.target || "system",
             original: req.text || "",
             translated: "",
-            error: String(err || "翻译失败"),
+            error: String(err || readerText("translationFailed", "Translation failed")),
           },
         }),
       );
@@ -1719,7 +1725,11 @@ window.addEventListener("message", (e) => {
     const o = e.data.addBookmark;
     // 统一标签：第 N 页/章 · 百分比 ·（选中的文字片段，若有）
     const pageNo = (o.chapter || 0) + 1;
-    let label = "第 " + pageNo + " " + (isPdf ? "页" : "章") + " · " + curProgress.toFixed(1) + "%";
+    let label = readerText("bookmarkLabel", "{kind} {number} · {progress}%", {
+      kind: isPdf ? readerText("bookmarkPage", "Page") : readerText("bookmarkChapter", "Chapter"),
+      number: pageNo,
+      progress: curProgress.toFixed(1),
+    });
     if (o.text) label += " · " + o.text;
     invoke("add_bookmark", {
       chapter: o.chapter || 0,
@@ -1763,6 +1773,12 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "PageDown" || e.key === "ArrowRight" || e.key === "ArrowDown" || (e.key === " " && !e.shiftKey)) dir = 1;
   else if (e.key === "PageUp" || e.key === "ArrowLeft" || e.key === "ArrowUp" || (e.key === " " && e.shiftKey)) dir = -1;
   if (dir !== 0) {
+    window.ReaderBugTrace?.record("shell_key", {
+      source: "reader_shell",
+      outcome: dir > 0 ? "page_next" : "page_prev",
+      direction: dir > 0 ? "forward" : "backward",
+      key: e.key === " " ? "space" : e.key,
+    });
     e.preventDefault();
     // 翻页同时收起浮层与沉浸工具栏
     if (
@@ -1800,10 +1816,14 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
     currentBookContentId = info.content_id || "";
     window.currentBookContentId = currentBookContentId;
     aiReaderMergeSyncedHistory();
-    ensureReadCreditCache();
     window.updateCrossReturnButton?.();
     window.consumePendingCrossSearch?.();
     currentBookTitle = info.title || currentBookTitle || "";
+    window.ReaderBugTrace?.record("book_opened", {
+      source: "reader_shell",
+      format: String(info.format || "unknown"),
+      chapter: Number(info.resume_chapter || 0),
+    });
     bookmarks = info.bookmarks || [];
     renderBookmarks();
     highlights = info.highlights || [];
@@ -1856,6 +1876,6 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
     invoke("take_pending_jump").then((j) => { if (j) doJump(j); }).catch(() => {});
   } catch (e) {
     document.body.innerHTML =
-      "<p style='padding:20px;color:#b00'>打开失败：" + e + "</p>";
+      "<p style='padding:20px;color:#b00'>" + readerText("openBookFailed", "Could not open book: {error}", { error: e }) + "</p>";
   }
 })();

@@ -275,7 +275,7 @@ pub struct BookList {
 }
 
 /// 整个书架，序列化成 JSON 持久化。
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Library {
     pub books: Vec<Book>,
     #[serde(default)]
@@ -289,7 +289,7 @@ pub struct Library {
     #[serde(default)]
     pub auto_import_dir: Option<String>, // 旧：单个自动导入目录（已迁移到 auto_import_dirs）
     #[serde(default)]
-    pub auto_import_dirs: Vec<String>, // 自动导入目录列表（启动时扫描其中的电子书加入书架）
+    pub auto_import_dirs: Vec<String>, // 自动导入目录列表（持续监测并把其中的电子书加入书架）
     #[serde(default)]
     pub auto_import_enabled: bool, // 是否开启自动导入
 }

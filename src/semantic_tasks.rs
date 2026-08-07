@@ -14,6 +14,9 @@ use serde::Serialize;
 pub(crate) struct SemProgress {
     pub(crate) building: bool,
     pub(crate) model_downloading: bool,
+    /// 重排模型与主语义模型是两个独立的 ONNX 会话。不能把它误标成主模型
+    /// 下载中，否则 UI 会把“文件已下载”错误显示为“重排已就绪”。
+    pub(crate) reranker_loading: bool,
     pub(crate) vector_pause_requested: bool,
     pub(crate) vector_paused: bool,
     pub(crate) status_refreshing: bool,
@@ -42,6 +45,11 @@ pub(crate) struct SemProgress {
     pub(crate) multi_profile_total: u32,
     pub(crate) multi_profile_ready: bool,
     pub(crate) multi_profile_bytes: u64,
+    pub(crate) retrieval_mode: String,
+    pub(crate) reranker_ready: bool,
+    pub(crate) m3_index_done: u32,
+    pub(crate) m3_index_total: u32,
+    pub(crate) m3_index_ready: bool,
     pub(crate) current: String,
     pub(crate) error: String,
 }
@@ -57,9 +65,10 @@ pub(crate) fn begin_semantic_task(
         .sem_progress
         .lock()
         .map_err(|_| "语义任务状态锁定失败")?;
-    if progress.building || progress.model_downloading {
+    if progress.building || progress.model_downloading || progress.reranker_loading {
         return Err("索引或模型任务正在运行，请稍候".into());
     }
+    let reranker_loading = task_id == "semantic_reranker";
     let kind = match task_id {
         "semantic_model" => BackgroundTaskKind::SemanticModel,
         "semantic_accelerator" => BackgroundTaskKind::Accelerator,
@@ -68,8 +77,9 @@ pub(crate) fn begin_semantic_task(
     };
     let task = state.background_tasks.enqueue_or_resume(kind, current);
     *progress = SemProgress {
-        building: !model_download,
-        model_downloading: model_download,
+        building: !model_download && !reranker_loading,
+        model_downloading: model_download && !reranker_loading,
+        reranker_loading,
         active_task: task_id.into(),
         background_task_id: task.id().into(),
         current: current.into(),
@@ -96,6 +106,7 @@ pub(crate) fn finish_semantic_task(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     progress.building = false;
     progress.model_downloading = false;
+    progress.reranker_loading = false;
     progress.active_task.clear();
     progress.background_task_id.clear();
     progress.current = current;

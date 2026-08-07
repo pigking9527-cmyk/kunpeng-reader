@@ -59,6 +59,31 @@ class ReaderSyncApiTests(unittest.TestCase):
         self.assertIn(6, {row[0] for row in conn.execute("SELECT version FROM schema_migrations")})
         conn.close()
 
+    def test_legacy_seconds_are_normalized_on_read_without_storage_rewrite(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        app.migrate(conn)
+        with conn:
+            conn.execute(
+                "INSERT INTO entities(user_id,kind,id,json,updated_at,deleted_at,device_id,"
+                "sync_version,server_updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    "default", "vocab", "legacy-seconds", "{}", 1_785_673_800,
+                    1_785_673_801, "legacy-android", 1, 77,
+                ),
+            )
+        legacy = conn.execute(
+            "SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at "
+            "FROM entities WHERE id='legacy-seconds'"
+        ).fetchone()
+        response = app.row_to_entity(legacy)
+        self.assertEqual(response["updated_at"], 1_785_673_800_000)
+        self.assertEqual(response["deleted_at"], 1_785_673_801_000)
+        self.assertEqual(response["server_updated_at"], 77)
+        self.assertEqual(legacy["updated_at"], 1_785_673_800)
+        self.assertEqual(legacy["deleted_at"], 1_785_673_801)
+        conn.close()
+
     def test_supported_entity_kinds_are_portable_v2_only(self):
         self.assertEqual(
             app.SUPPORTED_ENTITY_KINDS,
@@ -98,6 +123,11 @@ class ReaderSyncApiTests(unittest.TestCase):
         }
         self.assertIn("feedback", tables)
         self.assertIn(7, versions)
+        self.assertIn(10, versions)
+        feedback_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(feedback)")
+        }
+        self.assertIn("attachments_json", feedback_columns)
         normalized = app.normalize_feedback(
             {
                 "kind": "feature",
@@ -109,6 +139,7 @@ class ReaderSyncApiTests(unittest.TestCase):
         )
         self.assertEqual(normalized["kind"], "feature")
         self.assertEqual(normalized["text"], "希望增加阅读计划")
+        self.assertEqual(normalized["attachments"], [])
         conn.close()
 
     def test_feedback_rejects_oversized_or_fake_images(self):
@@ -130,6 +161,41 @@ class ReaderSyncApiTests(unittest.TestCase):
                     "kind": "bug",
                     "text": "图片异常",
                     "images": [{"name": "x.jpg", "mime": "image/jpeg", "data": oversized}],
+                }
+            )
+
+    def test_feedback_accepts_one_bounded_json_attachment(self):
+        attachment = base64.b64encode(b'{"events":[]}').decode("ascii")
+        normalized = app.normalize_feedback(
+            {
+                "kind": "bug",
+                "text": "翻页异常",
+                "images": [],
+                "attachments": [
+                    {"name": "bug-state.json", "mime": "application/json", "data": attachment}
+                ],
+            }
+        )
+        self.assertEqual(normalized["attachments"][0]["name"], "bug-state.json")
+        with self.assertRaisesRegex(ValueError, "FEEDBACK_ATTACHMENTS_REQUIRE_BUG"):
+            app.normalize_feedback(
+                {
+                    "kind": "feature",
+                    "text": "功能建议",
+                    "attachments": [
+                        {"name": "bug-state.json", "mime": "application/json", "data": attachment}
+                    ],
+                }
+            )
+        oversized = base64.b64encode(b"{" + b" " * app.MAX_FEEDBACK_JSON_BYTES).decode("ascii")
+        with self.assertRaisesRegex(ValueError, "FEEDBACK_ATTACHMENT_TOO_LARGE"):
+            app.normalize_feedback(
+                {
+                    "kind": "bug",
+                    "text": "翻页异常",
+                    "attachments": [
+                        {"name": "large.json", "mime": "application/json", "data": oversized}
+                    ],
                 }
             )
 
@@ -177,6 +243,24 @@ class ReaderSyncApiTests(unittest.TestCase):
             "device_id": "device-a",
         }
         self.assertFalse(app.is_newer(dict(entity), entity))
+
+    def test_entity_clock_normalizer_preserves_synthetic_timestamps(self):
+        self.assertEqual(app.normalize_entity_epoch_ms(100), 100)
+        self.assertEqual(app.normalize_entity_epoch_ms(1_785_673_800), 1_785_673_800_000)
+        self.assertEqual(app.normalize_entity_epoch_ms(1_785_673_800_000), 1_785_673_800_000)
+        legacy_existing = {
+            "updated_at": 1_785_673_800,
+            "sync_version": 2,
+            "device_id": "legacy-android",
+        }
+        same_canonical = {
+            "updated_at": 1_785_673_800_000,
+            "sync_version": 2,
+            "device_id": "legacy-android",
+        }
+        newer_canonical = {**same_canonical, "updated_at": 1_785_673_801_000}
+        self.assertFalse(app.is_newer(same_canonical, legacy_existing))
+        self.assertTrue(app.is_newer(newer_canonical, legacy_existing))
 
 
 class ReaderSyncHttpIntegrationTests(unittest.TestCase):
@@ -346,6 +430,45 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(duplicate["entities"][0]["id"], "zh:幂等")
         self.assertEqual([item["id"] for item in pulled["entities"]], ["zh:幂等"])
         self.assertEqual(pulled["entities"][0]["json"], {"value": "value"})
+
+    def test_push_normalizes_legacy_epoch_seconds_and_preserves_milliseconds(self):
+        legacy = self.entity(
+            "clock-legacy-seconds", value="legacy", updated_at=1_785_673_800, version=2
+        )
+        legacy["deleted_at"] = 1_785_673_801
+        canonical = self.entity(
+            "clock-canonical-milliseconds", value="canonical", updated_at=1_785_673_802_345, version=3
+        )
+
+        response = self.push([legacy, canonical])
+        self.assertEqual(response["accepted_count"], 2)
+        self.assertEqual(response["entities"], [])
+
+        pulled = self.request_json("GET", "/sync/pull?cursor=0&limit=100")
+        entities = {item["id"]: item for item in pulled["entities"]}
+        self.assertEqual(entities["clock-legacy-seconds"]["updated_at"], 1_785_673_800_000)
+        self.assertEqual(entities["clock-legacy-seconds"]["deleted_at"], 1_785_673_801_000)
+        self.assertEqual(entities["clock-canonical-milliseconds"]["updated_at"], 1_785_673_802_345)
+
+    def test_reconcile_normalizes_legacy_epoch_seconds_manifest(self):
+        canonical = self.entity(
+            "clock-manifest-seconds", value="server", updated_at=1_785_673_800_000, version=2
+        )
+        self.push([canonical])
+        legacy_manifest = [{
+            "kind": canonical["kind"],
+            "id": canonical["id"],
+            "updated_at": 1_785_673_800,
+            "deleted_at": 0,
+            "device_id": canonical["device_id"],
+            "sync_version": canonical["sync_version"],
+        }]
+
+        response = self.request_json(
+            "POST", "/sync/reconcile", {"schema_version": 2, "manifest": legacy_manifest}
+        )
+        self.assertEqual(response["upload"], [])
+        self.assertEqual(response["entities"], [])
 
     def test_health_exposes_deployable_api_version(self):
         health = self.request_json("GET", "/health")

@@ -28,7 +28,8 @@
     let libraryHistory = [], historySyncEnabled = false, showingHistory = false, latestAnswer = null;
     let historyLayout = "list";
     let classificationPoll = null;
-    let answerFontSize = DEFAULT_ANSWER_FONT_SIZE, answerLength = "short";
+    let answerFontSize = DEFAULT_ANSWER_FONT_SIZE, answerLength = "short", semanticStatus = null;
+    let longContextHelpTimer = null;
     let questionContextMenu = null;
     const organizationName = (value) => String(value || "").trim();
     const organizationKey = (value) => organizationName(value).toLocaleLowerCase("zh-CN");
@@ -65,8 +66,8 @@
       const grid = historyLayout === "grid";
       list.classList.toggle("grid", grid);
       const label = grid
-        ? "当前为方格显示，点击切换为横排显示"
-        : "当前为横排显示，点击切换为方格显示";
+        ? i18n("historyGridToList", "Grid view is active. Select to switch to list view.")
+        : i18n("historyListToGrid", "List view is active. Select to switch to grid view.");
       button.title = label;
       button.setAttribute("aria-label", label);
       button.setAttribute("aria-pressed", String(grid));
@@ -82,8 +83,22 @@
         const selected = button.dataset.answerLength === answerLength;
         button.setAttribute("aria-checked", String(selected));
       });
-      if (trigger) trigger.textContent = "设置";
+      if (trigger) trigger.textContent = i18n("answerSettings", "Settings");
       if (overlay?.hidden && trigger) trigger.setAttribute("aria-expanded", "false");
+      const longContext = $("library-ai-long-context");
+      const m3Active = semanticStatus?.model_id === "bge-m3";
+      const modelReady = Boolean(semanticStatus?.model_ready);
+      const indexReady = Number(semanticStatus?.semantic_done || 0) > 0;
+      const available = m3Active && modelReady && indexReady;
+      if (longContext) {
+        const enabled = Boolean(semanticStatus?.m3_long_context_enabled);
+        longContext.setAttribute("aria-checked", String(enabled));
+        longContext.classList.toggle("is-unavailable", !available);
+        longContext.setAttribute("aria-disabled", String(!available));
+        longContext.title = available
+          ? i18n("toggleLongContextReading", "Toggle long-context reading")
+          : i18n("longContextUnavailable", "This cannot be enabled yet. Click for setup instructions.");
+      }
     }
 
     function closeAnswerLengthSettings() {
@@ -109,10 +124,41 @@
         renderAnswerLengthSettings();
         state("", false);
       } catch (error) {
-        state("保存作答长度失败：" + String(error), true);
+        state(i18nFormat("answerLengthSaveFailed", "Could not save answer length: {error}", { error: String(error) }), true);
       } finally {
         button.disabled = false;
       }
+    }
+
+    async function saveLongContext(enabled, checkbox) {
+      checkbox.disabled = true;
+      try {
+        await invoke("set_semantic_m3_long_context", { enabled });
+        semanticStatus = await invoke("semantic_status");
+        renderAnswerLengthSettings();
+        state(enabled
+          ? i18n("longContextEnabled", "Long-context reading is enabled.")
+          : i18n("longContextDisabled", "Long-context reading is disabled."), false);
+      } catch (error) {
+        showLongContextHelp(longContextSetupPath());
+        state(i18nFormat("longContextSaveFailed", "Could not set long-context reading: {error}", { error: String(error) }), true);
+      } finally {
+        checkbox.disabled = false;
+        renderAnswerLengthSettings();
+      }
+    }
+
+    function longContextSetupPath() {
+      return i18n("longContextSetupPath", "Setup: Settings → Semantic index → choose BGE-M3 → download the model → build a semantic index; then return to Library Q&A → Settings to enable it.");
+    }
+
+    function showLongContextHelp(message) {
+      const help = $("library-ai-long-context-help");
+      if (!help) return;
+      if (longContextHelpTimer) global.clearTimeout(longContextHelpTimer);
+      help.textContent = message;
+      help.hidden = false;
+      longContextHelpTimer = global.setTimeout(() => { help.hidden = true; }, 8_000);
     }
 
     function closeQuestionContextMenu() {
@@ -1057,7 +1103,7 @@
       loading = true;
       state(i18n("loadingLibrary", "正在读取书架与智读配置…"));
       try {
-        const [status, profiles, semanticStatus, list, modelTagSettings, answerSettings, history] = await Promise.all([
+        const [status, profiles, loadedSemanticStatus, list, modelTagSettings, answerSettings, history] = await Promise.all([
           invoke("ai_reader_status"),
           invoke("ai_reader_profiles"),
           invoke("semantic_status"),
@@ -1070,6 +1116,7 @@
         libraryHistory = hydrateLibraryHistory(history?.entries);
         historySyncEnabled = Boolean(history?.syncEnabled);
         renderModelProfiles(profiles);
+        semanticStatus = loadedSemanticStatus;
         useModelTags = modelTagSettings?.enabled !== false;
         answerLength = answerSettings?.answerLength || "short";
         renderAnswerLengthSettings();
@@ -1120,6 +1167,16 @@
     root.querySelectorAll?.("[data-answer-length]").forEach((button) => {
       button.addEventListener("click", () => { void saveAnswerLength(button.dataset.answerLength, button); });
     });
+    $("library-ai-long-context")?.addEventListener("click", (event) => {
+      const toggle = event.currentTarget;
+      const enabled = toggle.getAttribute("aria-checked") === "true";
+      const available = toggle.getAttribute("aria-disabled") !== "true";
+      if (!available) {
+        showLongContextHelp(longContextSetupPath());
+        return;
+      }
+      void saveLongContext(!enabled, toggle);
+    });
     answerFontSize = readAnswerFontSize();
     applyAnswerFontSize();
     $("library-ai-font-decrease")?.addEventListener("click", () => {
@@ -1162,6 +1219,7 @@
       invoke("ai_reader_profiles").then(renderModelProfiles).catch(() => {});
     });
     global.addEventListener("app-language-changed", () => {
+      renderAnswerLengthSettings();
       renderFilterOptions($("tag-filter"), "tags", i18n("allTags", "全部标签"));
       renderFilterOptions($("collection-filter"), "collections", i18n("allCollections", "全部收藏夹"));
       renderBooks();

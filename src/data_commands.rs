@@ -90,15 +90,43 @@ pub(crate) fn import_data_package(
     state: tauri::State<AppState>,
     path: String,
 ) -> Result<u32, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let package_path = std::path::Path::new(&path);
+    let metadata = std::fs::metadata(package_path).map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
+        return Err("数据包路径不是普通文件".into());
+    }
+    if metadata.len() > db::MAX_CORE_PACKAGE_BYTES {
+        return Err(format!(
+            "数据包超过 {} MiB 未压缩 JSON 上限",
+            db::MAX_CORE_PACKAGE_BYTES / 1024 / 1024
+        ));
+    }
+    let text = std::fs::read_to_string(package_path).map_err(|e| e.to_string())?;
+    if text.len() as u64 > db::MAX_CORE_PACKAGE_BYTES {
+        return Err("数据包超过未压缩 JSON 上限".into());
+    }
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    backup::create(state.inner(), true)?;
+    // A recovery point is the outer installation boundary: it contains the
+    // actual SQLite database and every runtime projection. If validation or
+    // materialization fails later, restore this exact pre-import installation
+    // rather than trying to reconstruct only selected database rows.
+    let recovery = backup::create(state.inner(), true)?;
+    let recovery_id = recovery.latest_id()?.to_string();
     let imported = {
         let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
         db.import_package(&value)?
     };
-    data_migration::apply_sqlite_to_runtime(state.inner())?;
+    if let Err(error) = data_migration::apply_sqlite_to_runtime(state.inner()) {
+        if let Err(rollback_error) = backup::restore(state.inner(), &recovery_id) {
+            return Err(format!(
+                "导入后的本机状态物化失败：{error}；恢复 SQLite 与全部运行时投影也失败：{rollback_error}。请使用刚创建的恢复点 {recovery_id}"
+            ));
+        }
+        return Err(format!(
+            "导入后的本机状态物化失败，已从恢复点完整还原 SQLite、library.json、stats.json 与 vocab.json：{error}"
+        ));
+    }
     Ok(imported)
 }
 

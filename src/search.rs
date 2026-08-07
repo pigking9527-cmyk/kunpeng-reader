@@ -3,7 +3,7 @@ use crate::search_index::{self, BookIndex, SourceFingerprint, INDEX_VERSION};
 use crate::{
     atomic_file,
     background_tasks::{BackgroundTaskKind, TaskControlSignal},
-    book, emit_startup_perf, interactive_search_workers,
+    book, emit_startup_perf, html_sanitize, interactive_search_workers,
     reader_protocol::strip_tags,
     set_thread_background, url_open, window_commands, with_thread_background_priority, AppState,
 };
@@ -652,6 +652,29 @@ pub(crate) fn get_book_chapters(state: &AppState, book: &book::Book) -> Option<A
         .unwrap()
         .insert_text(id, source.sha256, arc.clone());
     Some(arc)
+}
+
+/// 语义切块需要自然段边界。旧全文索引为了关键词扫描把 EPUB 的连续空白压成
+/// 单个空格，因此这里只在建立语义向量时重新抽取 EPUB，并保留块级标签换行；
+/// TXT/Markdown 等格式继续复用全文索引中的逐章文本。
+pub(crate) fn get_semantic_book_chapters(
+    state: &AppState,
+    book: &book::Book,
+) -> Option<Arc<Vec<String>>> {
+    if book.format != "epub" {
+        return get_book_chapters(state, book);
+    }
+    let mut doc = EpubDoc::new(&book.path).ok()?;
+    let spine: Vec<String> = doc.spine.iter().map(|item| item.idref.clone()).collect();
+    let chapters = spine
+        .iter()
+        .map(|idref| {
+            doc.get_resource_str(idref)
+                .map(|(html, _)| html_sanitize::html_to_plain_text(&html))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    (!chapters.is_empty()).then(|| Arc::new(chapters))
 }
 
 /// Load only an already-published index. This is the interactive counterpart

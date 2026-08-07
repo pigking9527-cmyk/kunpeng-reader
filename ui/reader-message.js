@@ -8,7 +8,7 @@
   const ACTIONS = new Set([
     "layoutBusy", "progress", "ttsState", "ttsSynth", "dictPrefetch", "dictSpeak",
     "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav", "readerNavigated",
-    "centerTap", "readerPerf", "ready", "readerAnchorReady", "measured", "pageCache", "downloadImage", "webSearch", "crossSearch",
+    "centerTap", "readerPerf", "bugTrace", "ready", "readerAnchorReady", "measured", "pageCache", "downloadImage", "webSearch", "crossSearch",
     "semanticSearch", "aiReader", "translateText", "dict", "vocabAdd", "addHighlight",
     "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations",
     "removeHighlight", "setHighlightNote", "setHighlightText", "setHighlightColor", "addBookmark", "tocResolved",
@@ -39,6 +39,27 @@
 
   function validActionPayload(action, data) {
     if (action === "readerPerf") return textWithin(data[action], 1000);
+    if (action === "bugTrace") {
+      const trace = data.bugTrace;
+      const allowed = new Set([
+        "kind", "source", "outcome", "zone", "target", "direction", "key",
+        "chapter", "page", "x_pct", "y_pct", "duration_ms",
+      ]);
+      return isRecord(trace)
+        && Object.keys(trace).length > 0
+        && Object.keys(trace).length <= 12
+        && Object.keys(trace).every((key) => allowed.has(key))
+        && textWithin(trace.kind, 32)
+        && textWithin(trace.source, 32)
+        && textWithin(trace.outcome, 32)
+        && textWithin(trace.zone, 16)
+        && textWithin(trace.target, 32)
+        && textWithin(trace.direction, 16)
+        && textWithin(trace.key, 24)
+        && ["chapter", "page", "x_pct", "y_pct", "duration_ms"].every((key) =>
+          trace[key] === undefined || (typeof trace[key] === "number" && Number.isFinite(trace[key]))
+        );
+    }
     if (action === "webSearch") {
       const request = data.webSearch;
       return textWithin(request, MAX_TEXT_CHARS)

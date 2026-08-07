@@ -20,7 +20,7 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::{Emitter, Manager, WebviewBuilder, WebviewUrl};
+use tauri::{webview::NewWindowResponse, Emitter, Manager, WebviewBuilder, WebviewUrl};
 
 const DEFAULT_BASE_URL: &str = "https://newsnow.busiyi.world";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -42,7 +42,9 @@ const NEWS_CACHE_VERSION: u8 = 9;
 const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
-const PREVIEW_IMAGE_MAX_BYTES: u64 = 1_500_000;
+// 原始封面随后会缩到 640px；输入上限适当高于常见手机照片，避免真实
+// 封面因原图超过旧的 1.5MB 门槛被误判为“无图”，并发内存仍保持有界。
+const PREVIEW_IMAGE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const ARTICLE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const SOURCE_IMAGE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const NEWSNOW_USER_AGENT: &str =
@@ -54,6 +56,14 @@ const ARTICLE_RETURN_SCRIPT: &str = r##"
 (() => {
   if (window.top !== window) return;
   const returnUrl = "https://reader.localhost/__kunpeng_news_return__";
+  const navigateHere = (value) => {
+    try {
+      const target = new URL(String(value || ""), window.location.href);
+      if (target.protocol !== "https:") return false;
+      window.location.assign(target.href);
+      return true;
+    } catch (_) { return false; }
+  };
   const install = () => {
     if (document.getElementById("kunpeng-news-return")) return;
     const button = document.createElement("button");
@@ -68,6 +78,15 @@ const ARTICLE_RETURN_SCRIPT: &str = r##"
     button.addEventListener("click", () => { window.location.assign(returnUrl); });
     document.body.appendChild(button);
   };
+  // 今日头条等站点会用 target=_blank/window.open 打开正文卡片，而嵌入式
+  // 子 WebView 不创建第二层弹窗；统一改为在当前资讯子页继续导航。
+  document.addEventListener("click", (event) => {
+    const link = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+    if (!link || !navigateHere(link.href)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  window.open = (value) => { navigateHere(value); return window; };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install, { once: true });
   else install();
   addEventListener("keydown", (event) => {
@@ -78,6 +97,87 @@ const ARTICLE_RETURN_SCRIPT: &str = r##"
   }, true);
 })();
 "##;
+const ARTICLE_GESTURE_SCRIPT: &str = r##"
+(() => {
+  if (window.top !== window) return;
+  const reference = __KUNPENG_GESTURE_POINTS__;
+  if (!Array.isArray(reference) || reference.length < 16) return;
+  const returnUrl = "https://reader.localhost/__kunpeng_news_return__";
+  const clean = (points) => points.map((point) => ({ x: Number(point.x), y: Number(point.y) })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y)).slice(0, 320);
+  const length = (points) => points.slice(1).reduce((sum, point, index) => sum + Math.hypot(point.x - points[index].x, point.y - points[index].y), 0);
+  const normalize = (points) => {
+    const list = clean(points), total = length(list), count = reference.length;
+    if (list.length < 2 || total < 64) return [];
+    const interval = total / (count - 1), sampled = [{ ...list[0] }];
+    let traversed = 0, previous = { ...list[0] };
+    for (let index = 1; index < list.length && sampled.length < count; index += 1) {
+      const current = list[index]; let segment = Math.hypot(current.x - previous.x, current.y - previous.y);
+      if (!segment) continue;
+      while (traversed + segment >= interval && sampled.length < count) {
+        const ratio = (interval - traversed) / segment;
+        previous = { x: previous.x + (current.x - previous.x) * ratio, y: previous.y + (current.y - previous.y) * ratio };
+        sampled.push({ ...previous }); segment = Math.hypot(current.x - previous.x, current.y - previous.y); traversed = 0;
+      }
+      traversed += segment; previous = { ...current };
+    }
+    while (sampled.length < count) sampled.push({ ...list[list.length - 1] });
+    const xs = sampled.map((point) => point.x), ys = sampled.map((point) => point.y), scale = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    if (!Number.isFinite(scale) || scale < 1) return [];
+    const centerX = xs.reduce((sum, value) => sum + value, 0) / count, centerY = ys.reduce((sum, value) => sum + value, 0) / count;
+    return sampled.map((point) => ({ x: (point.x - centerX) / scale, y: (point.y - centerY) / scale }));
+  };
+  const score = (points) => {
+    const current = normalize(points); if (!current.length) return 0;
+    const distance = (list) => list.reduce((sum, point, index) => sum + Math.hypot(point.x - reference[index][0], point.y - reference[index][1]), 0) / list.length;
+    return Math.max(0, Math.min(1, 1 - Math.min(distance(current), distance(current.slice().reverse())) / 0.72));
+  };
+  const canvas = document.createElement("canvas");
+  canvas.style.cssText = "display:none;position:fixed;z-index:2147483646;inset:0;width:100vw;height:100vh;pointer-events:none";
+  const mountCanvas = () => { if (!canvas.isConnected) (document.documentElement || document.body)?.appendChild(canvas); };
+  mountCanvas();
+  if (!canvas.isConnected) document.addEventListener("DOMContentLoaded", mountCanvas, { once: true });
+  let active = null, suppressUntil = 0;
+  const draw = () => {
+    mountCanvas();
+    const ratio = Math.max(1, window.devicePixelRatio || 1), width = window.innerWidth, height = window.innerHeight;
+    canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio); canvas.style.display = "block";
+    const context = canvas.getContext("2d"); context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, width, height);
+    if (!active || active.length < 2) return;
+    context.beginPath(); active.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
+    context.strokeStyle = "#3478d4"; context.lineWidth = 5; context.lineCap = "round"; context.lineJoin = "round"; context.shadowColor = "rgba(19,67,131,.28)"; context.shadowBlur = 5; context.stroke();
+  };
+  const finish = (cancelled) => {
+    if (!active) return; const points = active; active = null; canvas.style.display = "none";
+    const matched = !cancelled && score(points) >= 0.78; if (points.length > 1) suppressUntil = Date.now() + 450;
+    if (matched) window.location.assign(returnUrl);
+  };
+  window.addEventListener("mousedown", (event) => { if (event.button !== 2) return; event.preventDefault(); active = [{ x: event.clientX, y: event.clientY }]; draw(); }, true);
+  window.addEventListener("mousemove", (event) => { if (!active) return; event.preventDefault(); const previous = active[active.length - 1]; if (Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 4) return; active.push({ x: event.clientX, y: event.clientY }); draw(); }, true);
+  window.addEventListener("mouseup", (event) => { if (event.button === 2) finish(false); }, true);
+  window.addEventListener("blur", () => finish(true));
+  window.addEventListener("contextmenu", (event) => { if (active || Date.now() < suppressUntil) event.preventDefault(); }, true);
+})();
+"##;
+
+fn article_initialization_script(request: &NewsNowOpenRequest) -> String {
+    let points = if request.gesture_enabled
+        && (16..=96).contains(&request.gesture_points.len())
+        && request
+            .gesture_points
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite() && value.abs() <= 1.5)
+    {
+        request.gesture_points.as_slice()
+    } else {
+        &[]
+    };
+    let json = serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        "{ARTICLE_RETURN_SCRIPT}\n{}",
+        ARTICLE_GESTURE_SCRIPT.replace("__KUNPENG_GESTURE_POINTS__", &json)
+    )
+}
 
 /// This intentionally small catalogue is the product default, rather than an
 /// unfiltered dump of every NewsNow source.  It is also the allowlist for
@@ -407,7 +507,7 @@ pub(crate) struct NewsNowPreviewRequest {
     pub item_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NewsNowOpenRequest {
     pub url: String,
@@ -417,6 +517,10 @@ pub(crate) struct NewsNowOpenRequest {
     pub summary: String,
     #[serde(default)]
     pub published_at: String,
+    #[serde(default)]
+    pub gesture_enabled: bool,
+    #[serde(default)]
+    pub gesture_points: Vec<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -873,20 +977,6 @@ fn preview_image_from_html(html: &str, page_url: &str) -> String {
     first_non_chrome_image(html, page_url)
 }
 
-fn image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
 // 少数派的 OG 图经常是原始 PNG，单张可超过数 MB。资讯流只需要卡片缩略图，
 // rssfile 支持在同一资源上请求受控尺寸的 WebP；这样既保留真实封面，也不会
 // 为了个别原图而放宽全局内存上限。
@@ -1112,34 +1202,6 @@ fn source_preview_image(agent: &ureq::Agent, source_id: &str, item_id: &str) -> 
     }
 }
 
-fn fetch_image_data_url(page_url: &str, image_url: &str) -> Result<String, String> {
-    let mut response = http_agent()
-        .get(image_url)
-        .header("User-Agent", NEWSNOW_USER_AGENT)
-        .header("Referer", page_url)
-        .header(
-            "Accept",
-            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        )
-        .call()
-        .map_err(|_| "无法请求资讯图片".to_string())?;
-    let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(PREVIEW_IMAGE_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "无法读取资讯图片".to_string())?;
-    if bytes.len() as u64 > PREVIEW_IMAGE_MAX_BYTES {
-        return Err("资讯图片过大".to_string());
-    }
-    let mime = image_mime(&bytes).ok_or_else(|| "资讯图片格式不受支持".to_string())?;
-    Ok(format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    ))
-}
-
 fn resolve_preview_image_url(request: &NewsNowPreviewRequest) -> Result<(String, String), String> {
     let url = url_open::validate_https_url(request.url.trim())?.to_string();
     if url.len() > 2_000 {
@@ -1224,12 +1286,26 @@ fn fetch_preview_image(request: NewsNowPreviewRequest) -> Result<NewsNowPreview,
     let image_data_url = if image_url.is_empty() {
         String::new()
     } else {
-        fetch_image_data_url(&url, &image_url).unwrap_or_default()
+        fetch_prefetched_image_data_url(&url, &image_url).unwrap_or_default()
     };
     Ok(NewsNowPreview {
         image_url,
         image_data_url,
     })
+}
+
+fn remember_preview_attempt(url: &str, image_data_url: &str) {
+    ensure_disk_cache_loaded();
+    let Ok(mut cached) = cache().lock() else {
+        return;
+    };
+    let Some(item) = cached.items.iter_mut().find(|item| item.url == url) else {
+        return;
+    };
+    item.preview_attempted = true;
+    if !image_data_url.is_empty() {
+        item.preview_data_url = image_data_url.to_string();
+    }
 }
 
 fn selected_sources(request: Option<NewsNowRequest>) -> Vec<NewsSource> {
@@ -2397,9 +2473,20 @@ pub(crate) async fn newsnow_refresh(request: Option<NewsNowRequest>) -> NewsNowL
 pub(crate) async fn newsnow_preview_image(
     request: NewsNowPreviewRequest,
 ) -> Result<NewsNowPreview, String> {
-    tokio::task::spawn_blocking(move || fetch_preview_image(request))
-        .await
-        .map_err(|error| format!("资讯缩略图任务失败：{error}"))?
+    tokio::task::spawn_blocking(move || {
+        let url = request.url.clone();
+        let result = fetch_preview_image(request);
+        remember_preview_attempt(
+            &url,
+            result
+                .as_ref()
+                .map(|preview| preview.image_data_url.as_str())
+                .unwrap_or_default(),
+        );
+        result
+    })
+    .await
+    .map_err(|error| format!("资讯缩略图任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -2427,15 +2514,17 @@ pub(crate) async fn newsnow_open_article(
         let _ = existing.close();
     }
     let article_url = url.parse().map_err(|_| "资讯原文地址无效".to_string())?;
+    let initialization_script = article_initialization_script(&request);
     let navigation_app = app.clone();
     parent
         .add_child(
             WebviewBuilder::new(ARTICLE_WEBVIEW_LABEL, WebviewUrl::External(article_url))
                 .auto_resize()
-                .initialization_script(ARTICLE_RETURN_SCRIPT)
+                .initialization_script(initialization_script)
+                .on_new_window(|_, _| NewWindowResponse::Deny)
                 .on_navigation(move |target| {
                     if target.as_str() != ARTICLE_RETURN_URL {
-                        return true;
+                        return target.scheme() == "https";
                     }
                     let app = navigation_app.clone();
                     std::thread::spawn(move || {
@@ -2488,6 +2577,21 @@ mod tests {
     fn article_return_control_is_only_injected_into_the_top_page() {
         assert!(ARTICLE_RETURN_SCRIPT.contains("if (window.top !== window) return;"));
         assert!(ARTICLE_RETURN_SCRIPT.contains("kunpeng-news-return"));
+        assert!(ARTICLE_RETURN_SCRIPT.contains("event.target.closest"));
+        assert!(ARTICLE_RETURN_SCRIPT.contains("window.open ="));
+
+        let disabled = article_initialization_script(&NewsNowOpenRequest::default());
+        assert!(disabled.contains("const reference = [];"));
+        let enabled = article_initialization_script(&NewsNowOpenRequest {
+            gesture_enabled: true,
+            gesture_points: (0..48)
+                .map(|index| [index as f64 / 96.0 - 0.25, index as f64 / 192.0 - 0.125])
+                .collect(),
+            ..Default::default()
+        });
+        assert!(enabled.contains("const reference = [["));
+        assert!(enabled.contains("event.button !== 2"));
+        assert!(enabled.contains("canvas.style.display = \"none\""));
     }
 
     #[test]
@@ -2531,6 +2635,7 @@ mod tests {
                 title: String::new(),
                 summary: "摘要<script>bad()</script>".to_string(),
                 published_at: "2026-08-06".to_string(),
+                ..Default::default()
             },
             "https://s.weibo.com/weibo?q=%23%E6%B5%8B%E8%AF%95%E8%AF%9D%E9%A2%98%23",
         )
@@ -2548,6 +2653,7 @@ mod tests {
                 title: "酷安动态".to_string(),
                 summary: String::new(),
                 published_at: String::new(),
+                ..Default::default()
             },
             "https://www.coolapk.com/feed/123",
         )
@@ -2562,6 +2668,7 @@ mod tests {
                 title: String::new(),
                 summary: String::new(),
                 published_at: String::new(),
+                ..Default::default()
             },
             "https://coolapk.com.evil.test/feed/123",
         )
@@ -2628,6 +2735,34 @@ mod tests {
         assert_eq!(second.last().map(|(index, _)| *index), Some(71));
         assert!(items[..72].iter().all(|item| item.preview_attempted));
         assert!(items[72..].iter().all(|item| !item.preview_attempted));
+    }
+
+    #[test]
+    fn preview_scheduler_stays_bounded_under_ten_thousand_items() {
+        let mut items = (0..10_000)
+            .map(|index| NewsNowItem {
+                id: format!("stress-{index}"),
+                source_id: format!("source-{}", index % 24),
+                url: format!("https://stress.example/{index}"),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        let mut rounds = 0;
+        loop {
+            let batch = take_preview_requests(&mut items);
+            assert!(batch.len() <= MAX_PREFETCH_PREVIEW_IMAGES);
+            if batch.is_empty() {
+                break;
+            }
+            rounds += 1;
+            for (_, request) in batch {
+                assert!(seen.insert(request.item_id));
+            }
+        }
+        assert_eq!(seen.len(), 10_000);
+        assert_eq!(rounds, 10_000_usize.div_ceil(MAX_PREFETCH_PREVIEW_IMAGES));
+        assert!(items.iter().all(|item| item.preview_attempted));
     }
 
     #[test]

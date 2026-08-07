@@ -28,7 +28,7 @@ test("reader progress names the whole-book page total once it is measured", () =
   assert.match(html, /#progress\.page-count-total\s*\{[^}]*width:\s*auto;[^}]*flex:\s*0\s+0\s+auto;/s);
   assert.match(html, /#progress\.page-count-loading/);
   assert.match(reader, /function showWholeBookPages\(page, total\)/);
-  assert.match(reader, /const text = page \+ "\/" \+ total \+ "页";/);
+  assert.match(reader, /const text = readerText\("wholeBookPages", "\{page\}\/\{total\}页", \{ page, total \}\);/);
   assert.match(reader, /function showChapterProgress\(page, total, progress\)/);
   assert.match(reader, /showChapterProgress\(e\.data\.page, e\.data\.total, curProgress\)/);
   assert.match(reader, /else if \(pageCountMeasuring\)[\s\S]*?showProgressLoading\(\)/);
@@ -74,7 +74,7 @@ test("reader settings provide a display-only simplified/traditional conversion s
 });
 
 test("整页翻页仅保留水平滑动动画，并迁移旧动画设置", () => {
-  assert.match(html, /option value="horizontal">水平翻页（整页左移）<\/option>/);
+  assert.match(html, /option value="horizontal" data-reader-i18n="horizontalTurn">水平翻页（整页左移）<\/option>/);
   assert.doesNotMatch(html, /纸张效果（Google）|仿真翻页/);
   assert.match(settingsUi, /pageTurnEffect: "horizontal"/);
   assert.match(settingsUi, /\["google-paper", "curl"\]\.includes\(settings\.pageTurnEffect\)/);
