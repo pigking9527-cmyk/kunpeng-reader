@@ -383,6 +383,13 @@
           <select id="set-app-language" class="app-language-select" aria-label="软件语言"></select>
         </div>
         <div class="fp-set-row">
+          <span data-i18n="startupEnhancement">启动增强</span>
+          <span class="fp-set-tail">
+            <button id="startup-enhancement-gear" class="fp-row-gear" type="button" title="启动增强设置" aria-label="启动增强设置" data-i18n-title="startupEnhancementSettings" data-i18n-aria="startupEnhancementSettings">⚙</button>
+            <label class="switch"><input type="checkbox" id="set-startup-enhancement" /><span class="slider"></span></label>
+          </span>
+        </div>
+        <div class="fp-set-row">
           <span data-i18n="displayProgress">显示阅读进度</span>
           <label class="switch"><input type="checkbox" id="set-cover-prog" /><span class="slider"></span></label>
         </div>
@@ -520,6 +527,21 @@
           <label><span data-i18n="apiTranslationSecret">密钥（百度、腾讯必填）</span><input id="api-translation-key" type="password" autocomplete="off" /></label>
           <div class="api-settings-actions"><button id="api-translation-save" class="btn-plain" type="button" data-i18n="apiTranslationSave">保存并设为当前翻译</button><span id="api-translation-status" class="api-settings-status"></span></div>
         </section>
+      </div>
+    </div>
+    <div id="startup-enhancement-modal" class="modal">
+      <div class="modal-card startup-enhancement-card">
+        <div class="modal-head"><span data-i18n="startupEnhancementSettings">启动增强设置</span><button id="startup-enhancement-close" class="btn-plain" type="button" data-i18n-aria="close">✕</button></div>
+        <p class="startup-enhancement-note" data-i18n="startupEnhancementNote">开启后，关闭窗口会隐藏软件并保留进程，以便下次快速打开；关闭此项时会立即彻底退出。</p>
+        <div class="fp-set-row">
+          <span data-i18n="continueProcessAfterClose">关闭后继续运行进程</span>
+          <label class="switch"><input type="checkbox" id="startup-enhancement-process" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
+          <span data-i18n="continueHighCostAfterClose">关闭后继续进行语义索引等高消耗任务</span>
+          <label class="switch"><input type="checkbox" id="startup-enhancement-high-cost" /><span class="slider"></span></label>
+        </div>
+        <p class="startup-enhancement-note" data-i18n="startupEnhancementHighCostNote">关闭高消耗任务后，语义索引、全文索引和书籍分类等任务会在隐藏窗口时保存检查点并暂停，不会自动续建。</p>
       </div>
     </div>
     <div id="animation-settings-modal" class="modal">
@@ -720,43 +742,43 @@
     </div>
     <div id="about-modal" class="modal">
       <div class="modal-card">
-        <div class="modal-head"><span>关于</span><button id="about-close" class="btn-plain">✕</button></div>
-        <div class="info-row"><span class="info-k">软件</span><span class="info-v">鲲鹏阅读器 · Kunpeng Reader</span></div>
-        <div class="info-row"><span class="info-k">版本</span><span class="info-v" id="about-ver">v1.8.0</span><button id="about-update" class="btn-plain about-update-btn">检查更新</button></div>
-        <div class="info-row col"><span class="info-k">本版更新内容</span><div id="about-notes" class="about-notes">加载中…</div></div>
+        <div class="modal-head"><span data-i18n="about">关于</span><button id="about-close" class="btn-plain" data-i18n-aria-label="close" aria-label="关闭">✕</button></div>
+        <div class="info-row"><span class="info-k" data-i18n="aboutSoftware">软件</span><span class="info-v">鲲鹏阅读器 · Kunpeng Reader</span></div>
+        <div class="info-row"><span class="info-k" data-i18n="aboutVersion">版本</span><span class="info-v" id="about-ver">v1.8.0</span><button id="about-update" class="btn-plain about-update-btn" data-i18n="checkUpdates">检查更新</button></div>
+        <div class="info-row col"><span class="info-k" data-i18n="aboutReleaseNotes">本版更新内容</span><div id="about-notes" class="about-notes" data-i18n="releaseNotesLoading">加载中…</div></div>
         <div class="info-row"><span class="info-k">GitHub</span><span class="info-v"><a id="about-github" href="https://github.com/pigking9527-cmyk/kunpeng-reader" style="color:#2b6cff;text-decoration:none;cursor:pointer;">github.com/pigking9527-cmyk/kunpeng-reader</a></span></div>
         <div class="about-feedback-actions">
-          <button id="about-feedback-bug" class="btn-plain" type="button">提交 Bug</button>
-          <button id="about-feedback-feature" class="btn-plain" type="button">功能提议</button>
+          <button id="about-feedback-bug" class="btn-plain" type="button" data-i18n="submitBug">提交 Bug</button>
+          <button id="about-feedback-feature" class="btn-plain" type="button" data-i18n="suggestFeature">功能建议</button>
         </div>
       </div>
     </div>
     <div id="feedback-modal" class="modal">
       <div class="modal-card feedback-card">
-        <div class="modal-head"><span id="feedback-title">提交 Bug</span><button id="feedback-close" class="btn-plain">✕</button></div>
+        <div class="modal-head"><span id="feedback-title">提交 Bug</span><button id="feedback-close" class="btn-plain" data-i18n-aria-label="close" aria-label="关闭">✕</button></div>
         <p class="feedback-note">可输入文字，也可粘贴、拖入或选择图片；每张图片会自动压缩到 1 MB 以内。打开本窗口时会冻结最近两分钟的脱敏问题记录，之后可随 Bug 反馈附上。</p>
         <div id="feedback-editor" class="feedback-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="请写下 Bug 出现的步骤、操作、实际结果和期望结果…"></div>
         <input id="feedback-image-input" type="file" accept="image/*" multiple hidden />
         <section id="feedback-problem-trace-note" class="feedback-problem-trace-section">
-          <div class="feedback-section-heading"><strong>问题记录（可选）</strong><span>复现问题后，选择一种方式保留最近两分钟的操作记录。</span></div>
+          <div class="feedback-section-heading"><strong data-i18n="problemTraceOptional">问题记录（可选）</strong><span data-i18n="problemTraceHelp">复现问题后，选择一种方式保留最近两分钟的操作记录。</span></div>
           <div id="feedback-json-row" class="feedback-json-row">
             <div class="feedback-problem-trace-action feedback-problem-trace-control recommended">
-              <button id="feedback-attach-problem-trace" class="btn-plain" type="button">附到本次反馈（推荐）</button>
-              <span>作为“问题记录.json”随下方反馈一起提交</span>
+              <button id="feedback-attach-problem-trace" class="btn-plain" type="button" data-i18n="attachTrace">附到本次反馈（推荐）</button>
+              <span data-i18n="attachTraceHint">作为“问题记录.json”随下方反馈一起提交</span>
             </div>
             <div class="feedback-problem-trace-action feedback-problem-trace-control">
-              <button id="feedback-save-problem-trace" class="btn-plain" type="button">保存问题记录到桌面</button>
-              <span>导出 JSON，便于自行查看或发给开发者</span>
+              <button id="feedback-save-problem-trace" class="btn-plain" type="button" data-i18n="saveTraceDesktop">保存问题记录到桌面</button>
+              <span data-i18n="saveTraceHint">导出 JSON，便于自行查看或发给开发者</span>
             </div>
           </div>
           <div id="feedback-trace-status" class="feedback-attachment-status">
-            <span class="feedback-status-label">问题记录：</span><span id="feedback-json-status" class="feedback-json-status">未附加</span>
-            <button id="feedback-clear-json" class="btn-plain" type="button" hidden>移除</button>
+            <span class="feedback-status-label" data-i18n="traceLabel">问题记录：</span><span id="feedback-json-status" class="feedback-json-status">未附加</span>
+            <button id="feedback-clear-json" class="btn-plain" type="button" hidden data-i18n="removeAttachment">移除</button>
           </div>
         </section>
         <section class="feedback-supplement-section">
-          <div class="feedback-section-heading"><strong>补充材料（可选）</strong><span>可添加截图，帮助说明问题。</span></div>
-          <div class="feedback-image-row"><button id="feedback-insert-image" class="btn-plain" type="button">添加截图</button><span class="feedback-status-label">截图：</span><span id="feedback-image-status" class="feedback-image-status">0/3 张</span></div>
+          <div class="feedback-section-heading"><strong data-i18n="supplementOptional">补充材料（可选）</strong><span data-i18n="supplementHelp">可添加截图，帮助说明问题。</span></div>
+          <div class="feedback-image-row"><button id="feedback-insert-image" class="btn-plain" type="button" data-i18n="addScreenshot">添加截图</button><span class="feedback-status-label" data-i18n="screenshotLabel">截图：</span><span id="feedback-image-status" class="feedback-image-status">0/3 张</span></div>
         </section>
         <div class="feedback-actions">
           <button id="feedback-submit" class="btn-plain primary" type="button">提交</button>
@@ -1006,12 +1028,14 @@
     <canvas id="newsnow-gesture-trail" class="newsnow-gesture-trail" hidden aria-hidden="true"></canvas>
     <script src="startup-perf.js"></script>
     <script src="app-i18n.js"></script>
+    <script src="startup-enhancement-ui.js"></script>
     <script src="titlebar.js"></script>
     <script src="animation-settings.js"></script>
     <script src="animation-settings-ui.js"></script>
     <script src="semantic-status-cache.js"></script>
     <script src="semantic-ui.js"></script>
     <script src="sync-ui.js"></script>
+    <script src="about-ui.js"></script>
     <script src="feedback-ui.js"></script>
     <script src="stats-ui.js"></script>
     <script src="shelf-ui.js"></script>

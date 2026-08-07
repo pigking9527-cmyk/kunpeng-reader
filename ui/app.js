@@ -23,6 +23,13 @@ const syncUI = window.ReaderSyncUI.init({
   storage: window.localStorage,
   renderShelf: (list) => window.ReaderShelfUI.render(list),
 });
+const aboutUI = window.ReaderAboutUI.init({
+  root: document,
+  invoke,
+  storage: window.localStorage,
+  menuElement: menuEl,
+  alertAction: (message) => window.alert(message),
+});
 const shelfUI = window.ReaderShelfUI.init({
   root: document,
   invoke,
@@ -95,6 +102,7 @@ toolbarEl?.addEventListener("pointerdown", (e) => {
 }, true);
 
 function runWhenNoReader(name, work, retryMs = 30000) {
+  if (!window.ReaderStartupEnhancement?.backgroundWorkAllowed?.()) return;
   invoke("reader_window_open")
     .then((open) => {
       if (open) {
@@ -857,98 +865,6 @@ notesModal.addEventListener("click", (e) => {
   if (e.target === notesModal) notesModal.classList.remove("show");
 });
 
-// ---- 检查更新（后端多源：Gitee 优先、GitHub 兜底）----
-const updateBar = document.getElementById("update-bar");
-let pendingRelease = null;
-// 比较两个版本号：a>b 返回 1，a<b 返回 -1，相等 0
-function cmpVer(a, b) {
-  const pa = String(a).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
-  const pb = String(b).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
-    if (d) return d > 0 ? 1 : -1;
-  }
-  return 0;
-}
-function showUpdateBanner(ver, url) {
-  pendingRelease = { ver, url: url || "" };
-  document.getElementById("ub-ver").textContent = "v" + String(ver).replace(/^v/i, "");
-  updateBar.classList.add("show");
-}
-// 每次启动都查一次（不再节流）；force=true 为手动检查，结果都给提示、并忽略“已忽略版本”
-async function checkUpdate(force) {
-  let info;
-  try {
-    info = await invoke("check_update");
-  } catch (e) {
-    if (force) alert("检查更新失败：" + e);
-    return;
-  }
-  if (!info || !info.ok) {
-    if (force) alert("检查更新失败：无法连接更新服务器，请检查网络后重试。");
-    return;
-  }
-  if (!info.has_update) {
-    if (force) {
-      const btn = document.getElementById("about-update");
-      if (btn) btn.textContent = "最新版本";
-    }
-    return;
-  }
-  if (!force) {
-    const ignored = localStorage.getItem("ignoredUpdate");
-    if (ignored && cmpVer(info.latest, ignored) <= 0) return; // 忽略过这个（或更早）版本
-  }
-  showUpdateBanner(info.latest, info.url);
-}
-document.getElementById("ub-view").addEventListener("click", () => {
-  if (pendingRelease && pendingRelease.url) invoke("open_url", { url: pendingRelease.url }).catch(() => {});
-});
-document.getElementById("ub-ignore").addEventListener("click", () => {
-  if (pendingRelease) localStorage.setItem("ignoredUpdate", pendingRelease.ver);
-  updateBar.classList.remove("show");
-});
-document.getElementById("ub-close").addEventListener("click", () => updateBar.classList.remove("show"));
-document.getElementById("about-update").addEventListener("click", () => {
-  const btn = document.getElementById("about-update");
-  if (btn) btn.textContent = "检查中…";
-  checkUpdate(true);
-});
-// 关于弹窗里展示“本版更新内容”（取当前版本对应的 GitHub 发行说明，带本地缓存以便离线显示）
-async function loadCurrentNotes() {
-  const el = document.getElementById("about-notes");
-  let ver = "";
-  try {
-    ver = await invoke("app_version");
-  } catch (e) {}
-  const v = "v" + String(ver || "").replace(/^v/i, "");
-  const cached = localStorage.getItem("notes_" + v);
-  el.textContent = cached || "加载中…";
-  let notes = "";
-  try {
-    notes = await invoke("release_notes", { tag: v });
-  } catch (e) {}
-  notes = (notes || "").trim();
-  if (notes) {
-    localStorage.setItem("notes_" + v, notes);
-    el.textContent = notes;
-  } else if (!cached) {
-    el.textContent = "（暂时无法获取更新说明：可能是网络问题，或该版本尚未发布说明）";
-  }
-}
-
-// ---- 关于（从 ⋮ 菜单打开）----
-const aboutModal = document.getElementById("about-modal");
-document.getElementById("mi-about").addEventListener("click", () => {
-  menuEl.classList.remove("show");
-  aboutModal.classList.add("show");
-  loadCurrentNotes();
-});
-document.getElementById("about-close").addEventListener("click", () => aboutModal.classList.remove("show"));
-aboutModal.addEventListener("click", (e) => {
-  if (e.target === aboutModal) aboutModal.classList.remove("show");
-});
-
 // ---- 拖拽导入 ----
 const dropHint = document.getElementById("drop-hint");
 const SUPPORTED = /\.(epub|pdf|txt|md|markdown|mobi|azw3|azw)$/i;
@@ -1324,7 +1240,7 @@ window.addEventListener("DOMContentLoaded", () => {
       .then((c) => { autoImport = c || autoImport; reflectAutoImport(); })
       .catch(() => {});
     setTimeout(() => {
-      if (!autoImport.enabled || !autoImport.dirs || !autoImport.dirs.length) return;
+      if (!window.ReaderStartupEnhancement?.backgroundWorkAllowed?.() || !autoImport.enabled || !autoImport.dirs || !autoImport.dirs.length) return;
       startAutoImportScan("正在自动扫描导入目录…");
     }, 8000);
     // 字数统计是锦上添花，延后到启动稳定之后。
@@ -1337,7 +1253,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // 继续推迟，表现为“启动不提示、手动检查才提示”。首屏稳定后直接异步检查一次。
     setTimeout(() => {
       if (!debugSettingOn("bg_update_check")) return;
-      startupTimed("update-check", () => checkUpdate(false), "background").catch(() => {});
+      startupTimed("update-check", () => aboutUI.checkUpdate(false), "background").catch(() => {});
     }, 2000);
     // “关于”里的版本号取自后端，保持单一来源
     startupTimed("app-version", () => invoke("app_version"), "background")

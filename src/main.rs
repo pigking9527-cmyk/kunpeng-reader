@@ -1,4 +1,3 @@
-// 防止 Windows release 构建弹出控制台窗口
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
@@ -44,6 +43,7 @@ mod semantic_tasks;
 #[cfg(test)]
 mod smoke_tests;
 mod startup;
+mod startup_enhancement;
 mod stats;
 #[cfg(test)]
 mod stats_core;
@@ -209,6 +209,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(startup::StartupBookPaths::new(startup_book_paths))
+        .manage(startup_enhancement::StartupEnhancementState::load())
         .manage(AppState {
             background_tasks: background_tasks::BackgroundTaskRegistry::new_persistent_default(),
             page_count_tasks: Mutex::new(HashMap::new()),
@@ -233,9 +234,6 @@ fn main() {
             sync_running: AtomicBool::new(false),
             memory_reclaimers: Mutex::new(Vec::new()),
         })
-        // 主窗口（书架）：恢复上次的大小/位置，并在关闭时记忆。
-        // Windows 拖窗会高频发送 Moved/Resized；事件回调里同步查询窗口状态并锁书库，
-        // 会逐渐堵住 UI 事件队列，因此不能在拖动过程中采集几何信息。
         .setup(|app| {
             semantic::initialize_semantic_model_selection();
             {
@@ -267,35 +265,16 @@ fn main() {
                         .main_geom
                         .clone()
                 };
-                // 先在隐藏状态下摆好位置/大小再显示（避免闪动）；位置越界则回到屏幕中央
                 window_commands::apply_geom_safe(&win, &geom);
                 let app_ev = app.handle().clone();
                 win.on_window_event(move |ev| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = ev {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
                         if let Some(w) = app_ev.get_webview_window("main") {
-                            let st = app_ev.state::<AppState>();
-                            // 退出必须始终即时：后台任务持锁或网络不可用时，不能让
-                            // 窗口停留在“点不掉”的状态。未能即时落盘的数据会保留到
-                            // 下次启动/手动同步处理，不能用退出流程去等待它们。
-                            let previous_geom = st
-                                .library
-                                .try_lock()
-                                .ok()
-                                .and_then(|lib| lib.main_geom.clone());
-                            let closing_geom = window_commands::capture_geom(previous_geom, &w);
-                            if let Ok(mut lib) = st.library.try_lock() {
-                                lib.main_geom = Some(closing_geom);
-                                report_save_error("书架", lib.save());
-                            } else {
-                                log("[close] shelf save deferred because the library is busy");
+                            window_commands::persist_main_window_state(&app_ev, &w);
+                            if startup_enhancement::should_keep_running(&app_ev) {
+                                api.prevent_close();
+                                startup_enhancement::background_main(&app_ev);
                             }
-                            if let Ok(mut stats) = st.stats.try_lock() {
-                                report_save_error("统计", stats.save());
-                            } else {
-                                log("[close] stats save deferred because the statistics store is busy");
-                            };
-                            // Do not call prevent_close: exit sync is deliberately skipped here
-                            // so a close request never waits on network I/O or another task.
                         }
                     }
                 });
@@ -330,6 +309,8 @@ fn main() {
             app_commands::clear_runtime_diagnostics,
             app_commands::open_default_apps_settings,
             startup::take_startup_book_paths,
+            startup_enhancement::startup_enhancement_config,
+            startup_enhancement::set_startup_enhancement_config,
             app_commands::save_download_image,
             app_commands::problem_trace_checkpoint,
             app_commands::save_problem_trace_to_desktop,

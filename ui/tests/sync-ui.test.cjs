@@ -19,6 +19,11 @@ test("sync UI only binds elements that exist in the main page", () => {
 
 test("manual sync button has a click handler", () => {
   assert.match(syncSource, /syncNowBtn\.addEventListener\("click",\s*async\s*\(\)\s*=>/);
+  assert.match(syncSource, /setSyncButtonState\("syncing", "syncInProgress"\)/);
+  assert.match(syncSource, /setSyncButtonState\("ok", "syncSuccess"/);
+  assert.match(syncSource, /setSyncButtonState\("fail", "syncFailed"/);
+  assert.match(syncSource, /syncStatusEl\.textContent = syncText\("syncFailedDetail"/);
+  assert.doesNotMatch(syncSource, /setSyncButtonState\("fail", "同步失败"/);
 });
 
 test("private sync explains the 100 plus 100 cloud history policy", () => {
@@ -41,6 +46,7 @@ test("persisted account is restored and automatically synced on startup", () => 
   assert.match(syncSource, /async function syncOnStartup\(\)/);
   assert.match(syncSource, /await loadSyncSettingsOnce\(\)/);
   assert.match(syncSource, /await invoke\("sync_now"\)/);
+  assert.match(syncSource, /setSyncButtonState\("fail", "autoSyncFailed", String\(e\)\);\s*syncStatusEl\.classList\.remove\("hidden"\);\s*syncStatusEl\.textContent = syncText\("syncFailedDetail", \{ error: e \}\);/s);
   assert.match(appSource, /await syncUI\.loadSettingsOnce\(\);[\s\S]*await syncUI\.syncOnStartup\(\)/);
 });
 

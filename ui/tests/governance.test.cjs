@@ -78,9 +78,9 @@ test("window lifecycle and geometry are isolated behind window commands", () => 
   assert.match(main, /window_commands::reader_window_open/);
   assert.match(library, /window_commands::ensure_reader_window/);
   assert.match(main, /window_commands::apply_geom_safe/);
-  assert.match(main, /window_commands::capture_geom/);
+  assert.match(main, /window_commands::persist_main_window_state/);
   assert.doesNotMatch(main, /WindowEvent::(?:Moved|Resized)/);
-  assert.match(main, /library\s*\.try_lock\(\)/);
+  assert.match(windows, /library\s*\.try_lock\(\)/);
   assert.doesNotMatch(main, /fn ensure_reader_window/);
   assert.doesNotMatch(main, /fn capture_geom/);
   assert.match(windows, /fn reader_window_id/);

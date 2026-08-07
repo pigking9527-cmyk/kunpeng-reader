@@ -119,11 +119,15 @@
       }
     });
     const values = (stage) => [...sessions.values()].map((session) => session[stage]);
+    const hotActivations = logs
+      .filter((entry) => entry?.name === "rust:startup-enhancement" && entry?.phase === "activated")
+      .map((entry) => startupDuration(entry.detail));
     return {
       sessions: sessions.size,
       process_to_webview_script: summarizeDurations(values("webview_script")),
       process_to_dom_ready: summarizeDurations(values("dom_ready")),
       process_to_shelf_painted: summarizeDurations(values("shelf_painted")),
+      hot_activation: summarizeDurations(hotActivations),
     };
   }
 

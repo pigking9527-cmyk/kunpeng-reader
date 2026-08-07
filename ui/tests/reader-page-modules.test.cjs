@@ -36,6 +36,36 @@ test("chapter iframe receives the reader language and rebuilds transient control
   assert.match(annotations, /readerPageText\('dictionarySettings'\)/);
 });
 
+test("highlight menu and settings provide native copy for all ten reader languages", () => {
+  const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
+  const copyStart = annotations.indexOf("var READER_PAGE_COPY=");
+  const copyEnd = annotations.indexOf("function readerPageLanguage", copyStart);
+  assert.ok(copyStart >= 0 && copyEnd > copyStart, "highlight copy catalog must remain extractable");
+  const context = {};
+  vm.runInNewContext(annotations.slice(copyStart, copyEnd), context);
+
+  const locales = ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"];
+  const keys = [
+    "yellow", "green", "blue", "pink", "web", "dict", "translate", "copy",
+    "highlight", "correct", "excerpt", "cross", "semantic", "aiReader", "note",
+    "bookmark", "removeHighlight", "highlightMenuSettings", "display", "both", "text",
+    "icon", "colorful", "layout", "row", "grid", "size", "small", "medium", "large",
+    "dragSort", "searchEngineGoogle", "searchEngineBaidu",
+  ];
+  for (const locale of locales) {
+    assert.ok(context.READER_PAGE_COPY[locale], `missing highlight locale ${locale}`);
+    for (const key of keys) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(context.READER_PAGE_COPY[locale], key),
+        true,
+        `${locale} must translate highlight key ${key}`
+      );
+    }
+  }
+  assert.match(annotations, /setBtn\.title=settingsLabel/);
+  assert.match(annotations, /hlSettingsPop\.setAttribute\('aria-label',readerPageText\('highlightMenuSettings'\)\)/);
+});
+
 test("paged height calibration never creates more than one line of extra bottom whitespace", () => {
   assert.match(layout, /function packedPagedBoxHeight\(baseH\)/);
   assert.match(layout, /var allowedTrim=Math\.max\(0,Math\.floor\(lineHeightPx\(\)\)-mg\(S\.marginBottom\)\);/);

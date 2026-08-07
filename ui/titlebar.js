@@ -20,6 +20,7 @@
       invoke("main_window_toggle_maximize").catch(() => {});
     });
     closeBtn?.addEventListener("click", (e) => {
+      e.preventDefault();
       e.stopPropagation();
       invoke("main_window_close").catch(() => {});
     });

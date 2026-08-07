@@ -139,3 +139,33 @@ test("all ten languages localize the five settings child pages", () => {
     assert.match(html, new RegExp(`id="${id}"[\\s\\S]*?data-i18n`), `${id} must use catalog keys`);
   }
 });
+
+test("all ten languages localize About, feedback, and sync runtime states", () => {
+  const chinese = loadAppI18n("zh-CN");
+  const keys = [
+    "aboutSoftware", "aboutReleaseNotes", "submitBug", "suggestFeature",
+    "feedbackBugNote", "feedbackFeaturePlaceholder", "problemTraceOptional",
+    "feedbackSubmitting", "feedbackSubmitFailed", "syncInProgress",
+    "syncSuccess", "syncFailed", "syncConnecting", "syncFailedDetail",
+  ];
+  for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
+    const localized = loadAppI18n(locale);
+    for (const key of keys) {
+      assert.doesNotMatch(localized.t(key), /^⟦.+⟧$/, `${locale} must define ${key}`);
+    }
+    if (locale !== "zh-CN") {
+      for (const key of ["feedbackBugNote", "suggestFeature", "syncConnecting"]) {
+        assert.notEqual(localized.t(key), chinese.t(key), `${locale} must not retain Chinese ${key}`);
+      }
+    }
+  }
+  for (const key of ["aboutSoftware", "aboutVersion", "aboutReleaseNotes", "submitBug", "suggestFeature", "problemTraceOptional", "addScreenshot"]) {
+    assert.match(html, new RegExp(`data-i18n="${key}"`), `About/feedback HTML must bind ${key}`);
+  }
+  const feedback = fs.readFileSync(path.join(uiRoot, "feedback-ui.js"), "utf8");
+  const sync = fs.readFileSync(path.join(uiRoot, "sync-ui.js"), "utf8");
+  assert.match(feedback, /app-language-changed/);
+  assert.match(feedback, /feedbackTextFor\("feedbackSubmitting"\)/);
+  assert.match(sync, /setSyncButtonState\("fail", "syncFailed"/);
+  assert.match(sync, /syncText\("syncFailedDetail"/);
+});

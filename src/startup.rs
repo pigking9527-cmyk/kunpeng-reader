@@ -2,7 +2,7 @@
 
 use crate::{
     atomic_file, emit_startup_perf, import_core, library_commands, log, search,
-    set_thread_background, window_commands,
+    set_thread_background, startup_enhancement, window_commands,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -21,6 +21,8 @@ impl StartupBookPaths {
 #[derive(Serialize, Deserialize)]
 struct AssociatedBookRequest {
     id: u64,
+    #[serde(default)]
+    activate: bool,
     paths: Vec<String>,
 }
 
@@ -80,15 +82,13 @@ fn next_associated_request_id() -> u64 {
 }
 
 fn forward_associated_book_paths(paths: Vec<String>) {
-    if paths.is_empty() {
-        return;
-    }
     let Some(path) = associated_book_request_path() else {
         log("转发关联文件失败：无法确定缓存目录");
         return;
     };
     let request = AssociatedBookRequest {
         id: next_associated_request_id(),
+        activate: true,
         paths,
     };
     if let Err(error) = atomic_file::write_json(&path, &request, false) {
@@ -117,7 +117,13 @@ pub(crate) fn spawn_associated_book_watcher(app: tauri::AppHandle) {
             };
             if request.id >= request_floor && request.id > seen_id {
                 seen_id = request.id;
-                let _ = app.emit("associated-book-open", request.paths);
+                if request.activate {
+                    log("[startup-enhancement] activation request received");
+                    startup_enhancement::activate_main(&app, request.id);
+                }
+                if !request.paths.is_empty() {
+                    let _ = app.emit("associated-book-open", request.paths);
+                }
             }
         }
     });
@@ -141,7 +147,6 @@ pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
         fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
         fn SetForegroundWindow(hwnd: Handle) -> i32;
         fn ShowWindow(hwnd: Handle, cmd: i32) -> i32;
-        fn IsIconic(hwnd: Handle) -> i32;
     }
     fn wide(s: &str) -> Vec<u16> {
         std::ffi::OsStr::new(s)
@@ -167,9 +172,10 @@ pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
             let title = wide("鲲鹏阅读器");
             let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
             if !hwnd.is_null() {
-                if IsIconic(hwnd) != 0 {
-                    ShowWindow(hwnd, SW_RESTORE);
-                }
+                // Startup enhancement hides a normal (not minimized) window.
+                // Always restore it here so shortcut activation cannot depend
+                // solely on the file watcher running in the primary process.
+                ShowWindow(hwnd, SW_RESTORE);
                 SetForegroundWindow(hwnd);
             }
             return false;
@@ -283,15 +289,29 @@ pub(crate) fn spawn_maintenance(app: tauri::AppHandle) {
         );
         // 让首屏渲染、封面加载、窗口拖动和账号状态先稳定下来。
         std::thread::sleep(std::time::Duration::from_secs(45));
-        while window_commands::any_reader_window_open(&app) {
-            emit_startup_perf(&app, "startup-maintenance", "paused", "reader window open");
+        while window_commands::any_reader_window_open(&app)
+            || !startup_enhancement::background_work_allowed(&app)
+        {
+            emit_startup_perf(
+                &app,
+                "startup-maintenance",
+                "paused",
+                "reader open or app backgrounded",
+            );
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         emit_startup_perf(&app, "fingerprint-fill", "start", "background");
         library_commands::spawn_fingerprint_fill(app.clone());
         std::thread::sleep(std::time::Duration::from_secs(15));
-        while window_commands::any_reader_window_open(&app) {
-            emit_startup_perf(&app, "keyword-index", "paused", "reader window open");
+        while window_commands::any_reader_window_open(&app)
+            || !startup_enhancement::background_work_allowed(&app)
+        {
+            emit_startup_perf(
+                &app,
+                "keyword-index",
+                "paused",
+                "reader open or app backgrounded",
+            );
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         search::spawn_build_index(app.clone());
@@ -345,6 +365,17 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn activation_request_is_valid_without_a_book_path() {
+        let request = AssociatedBookRequest {
+            id: 42,
+            activate: true,
+            paths: Vec::new(),
+        };
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["activate"], true);
+        assert_eq!(json["paths"], serde_json::json!([]));
+    }
     #[test]
     fn associated_request_ids_are_strictly_monotonic() {
         assert!(next_associated_request_id() < next_associated_request_id());

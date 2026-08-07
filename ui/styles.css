@@ -115,6 +115,10 @@ body {
 .api-settings-section > label > input, .api-settings-section > label > select { margin: 0; }
 .api-settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .api-settings-status { color: #667892; font-size: 12px; overflow-wrap: anywhere; }
+.startup-enhancement-card { width: min(500px, calc(100vw - 48px)); }
+.startup-enhancement-card .fp-set-row { min-height: 46px; }
+.startup-enhancement-note { margin: 2px 0 12px; color: #718097; font-size: 12px; line-height: 1.6; }
+.startup-enhancement-card input:disabled + .slider { cursor: not-allowed; opacity: .52; }
 .animation-settings-card {
   width: min(460px, calc(100vw - 48px));
 }

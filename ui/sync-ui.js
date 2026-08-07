@@ -108,6 +108,7 @@ let accountPasswordRecoverCooldownTimer = 0;
 let lastSyncSettings = {};
 let lastAccountSecurity = null;
 let lastPrivateSync = null;
+let lastSyncButtonState = { state: "", key: "syncNow", title: "", values: {} };
 function syncText(key, values = {}) {
   let text = global.ReaderAppI18n?.t?.(key) || key;
   for (const [name, value] of Object.entries(values)) text = text.replaceAll(`{${name}}`, String(value));
@@ -140,10 +141,11 @@ function applyCachedSyncAccount() {
   updateAccountView({ username: cached.username });
   return true;
 }
-function setSyncButtonState(state, text, title = "") {
+function setSyncButtonState(state, key = "syncNow", title = "", values = {}) {
+  lastSyncButtonState = { state, key, title, values };
   syncNowBtn.classList.remove("syncing", "ok", "fail");
   if (state) syncNowBtn.classList.add(state);
-  syncNowBtn.textContent = text || syncText("syncNow");
+  syncNowBtn.textContent = syncText(key || "syncNow", values);
   syncNowBtn.title = title;
 }
 function updateSyncSummary(settings = {}) {
@@ -390,14 +392,14 @@ function updateAccountView(settings = {}) {
     syncAccountEl.classList.add("show");
     syncStatusEl.classList.add("hidden");
     syncAccountNameEl.textContent = syncText("accountPrefix") + username;
-    setSyncButtonState("", syncText("syncNow"));
+    setSyncButtonState("", "syncNow");
   } else {
     writeCachedSyncAccount("");
     syncFormEl.classList.remove("hidden");
     syncAccountEl.classList.remove("show");
     syncStatusEl.classList.remove("hidden");
     syncStatusEl.textContent = syncText("notLoggedIn");
-    setSyncButtonState("", syncText("syncNow"));
+    setSyncButtonState("", "syncNow");
   }
 }
 async function loadSyncSettings() {
@@ -409,7 +411,7 @@ async function loadSyncSettings() {
     return s;
   } catch (e) {
     syncStatusEl.classList.remove("hidden");
-    syncStatusEl.textContent = "读取同步设置失败：" + e;
+    syncStatusEl.textContent = syncText("readSyncSettingsFailed", { error: e });
     return null;
   }
 }
@@ -437,10 +439,10 @@ async function syncOnStartup() {
   if (startupAutoSyncStarted || !syncUsernameEl.value.trim()) return;
   startupAutoSyncStarted = true;
   syncNowBtn.disabled = true;
-  setSyncButtonState("syncing", "自动同步中");
+  setSyncButtonState("syncing", "autoSyncInProgress");
   try {
     const report = await invoke("sync_now");
-    setSyncButtonState("ok", "同步成功", report.message);
+    setSyncButtonState("ok", "syncSuccess", report.message);
     updateSyncSummary({
       last_sync_at: report.server_time,
       last_sync_pushed: report.pushed,
@@ -451,7 +453,9 @@ async function syncOnStartup() {
     renderShelf(await invoke("shelf_books"));
   } catch (e) {
     // Keep the persisted login. Offline startup should not turn into logout.
-    setSyncButtonState("fail", "自动同步失败", String(e));
+    setSyncButtonState("fail", "autoSyncFailed", String(e));
+    syncStatusEl.classList.remove("hidden");
+    syncStatusEl.textContent = syncText("syncFailedDetail", { error: e });
   } finally {
     syncNowBtn.disabled = false;
   }
@@ -495,7 +499,7 @@ privateSyncSavePasswordBtn.addEventListener("click", async () => {
     privateSyncPasswordEl.value = "";
     applyPrivateSyncStatus(status);
     const report = await invoke("sync_now");
-    setSyncButtonState("ok", "同步成功", report.message);
+    setSyncButtonState("ok", "syncSuccess", report.message);
     updateSyncSummary({
       last_sync_at: report.server_time,
       last_sync_pushed: report.pushed,
@@ -547,7 +551,7 @@ syncResetConfirmBtn.addEventListener("click", async () => {
     syncSettingsLoaded = true;
     updateAccountView({ username: res.user?.username || syncUsernameEl.value });
     saveAccountInfo(res.user?.username || syncUsernameEl.value);
-    setSyncButtonState("ok", "同步", "登录密码已重置");
+    setSyncButtonState("ok", "syncNow", "登录密码已重置");
     syncStatusEl.textContent = "密码已重置并登录；其他设备已退出登录。";
   } catch (error) { setResetStatus("重置失败：" + error, "error"); }
 });
@@ -787,10 +791,10 @@ async function syncAuth(action) {
     hideSavedAccounts();
     syncSettingsLoaded = true;
     updateAccountView({ username: syncUsernameEl.value });
-    setSyncButtonState("syncing", "首次同步中");
+    setSyncButtonState("syncing", "firstSyncInProgress");
     try {
       const report = await invoke("sync_now");
-      setSyncButtonState("ok", "同步成功", report.message);
+      setSyncButtonState("ok", "syncSuccess", report.message);
       updateSyncSummary({
         last_sync_at: report.server_time,
         last_sync_pushed: report.pushed,
@@ -802,7 +806,7 @@ async function syncAuth(action) {
     } catch (syncError) {
       // Authentication succeeded. Keep the account signed in and let the user
       // retry synchronization without re-entering the password.
-      setSyncButtonState("fail", "同步失败", String(syncError));
+      setSyncButtonState("fail", "syncFailed", String(syncError));
     }
   } catch (e) {
     openAccountPanel();
@@ -853,12 +857,15 @@ syncLogoutBtn.addEventListener("click", async () => {
 syncNowBtn.addEventListener("click", async () => {
   if (syncNowBtn.disabled) return;
   syncNowBtn.disabled = true;
-  setSyncButtonState("syncing", "同步中");
+  setSyncButtonState("syncing", "syncInProgress");
   syncStatusEl.classList.remove("hidden");
-  syncStatusEl.textContent = "正在连接同步服务器…";
+  syncStatusEl.textContent = syncText("syncConnecting");
   try {
     const report = await invoke("sync_now");
-    setSyncButtonState("ok", "同步成功", report.message + "；服务器时间：" + formatSyncTime(report.server_time));
+    setSyncButtonState("ok", "syncSuccess", syncText("syncServerTime", {
+      message: report.message,
+      time: formatSyncTime(report.server_time),
+    }));
     syncStatusEl.textContent = report.message;
     updateSyncSummary({
       last_sync_at: report.server_time,
@@ -869,16 +876,18 @@ syncNowBtn.addEventListener("click", async () => {
     });
     renderShelf(await invoke("shelf_books"));
   } catch (e) {
-    setSyncButtonState("fail", "同步失败", String(e));
-    syncStatusEl.textContent = "同步失败：" + e;
+    setSyncButtonState("fail", "syncFailed", String(e));
+    syncStatusEl.textContent = syncText("syncFailedDetail", { error: e });
   } finally {
     syncNowBtn.disabled = false;
   }
 });
 
 if (typeof global.addEventListener === "function") global.addEventListener("app-language-changed", () => {
+  const buttonState = { ...lastSyncButtonState };
   updateAccountView({ username: syncUsernameEl.value.trim() });
   updateSyncSummary(lastSyncSettings);
+  setSyncButtonState(buttonState.state, buttonState.key, buttonState.title, buttonState.values);
   if (lastAccountSecurity) applyAccountSecurityStatus(lastAccountSecurity);
   if (lastPrivateSync) applyPrivateSyncStatus(lastPrivateSync);
 });

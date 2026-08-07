@@ -152,6 +152,19 @@ impl BackgroundTaskKind {
         }
     }
 
+    pub(crate) fn is_high_cost(self) -> bool {
+        matches!(
+            self,
+            Self::SemanticModel
+                | Self::SemanticVectors
+                | Self::Accelerator
+                | Self::MultiProfile
+                | Self::FullTextIndex
+                | Self::PageCount
+                | Self::CoverGeneration
+                | Self::LibraryClassification
+        )
+    }
     fn supports_resume(self) -> bool {
         // Library classification checkpoints each completed book in SQLite and
         // in this registry.  It is safe to reconstruct its remaining work
@@ -805,6 +818,17 @@ impl BackgroundTaskRegistry {
             .map(TaskRecord::snapshot)
     }
 
+    pub(crate) fn request_pause_high_cost(&self) -> usize {
+        let ids = self
+            .active_snapshots()
+            .into_iter()
+            .filter(|snapshot| snapshot.kind.is_high_cost())
+            .map(|snapshot| snapshot.id)
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter(|id| self.request_pause(id).is_ok())
+            .count()
+    }
     pub fn request_cancel(&self, id: &str) -> Result<(), String> {
         let mut inner = self.lock_inner();
         let record = find_record_mut(&mut inner, id)?;
@@ -1575,6 +1599,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_enhancement_pauses_only_high_cost_resumable_tasks() {
+        let registry = BackgroundTaskRegistry::new();
+        let semantic = registry.enqueue(BackgroundTaskKind::SemanticVectors, "语义索引");
+        let sync = registry.enqueue(BackgroundTaskKind::Sync, "同步");
+        let _semantic_guard = semantic.clone().start().unwrap();
+        let _sync_guard = sync.clone().start().unwrap();
+
+        assert_eq!(registry.request_pause_high_cost(), 1);
+        assert_eq!(
+            semantic.snapshot().unwrap().state,
+            BackgroundTaskState::Pausing
+        );
+        assert_eq!(sync.snapshot().unwrap().state, BackgroundTaskState::Running);
+    }
     #[test]
     fn all_required_task_kinds_can_be_registered() {
         let registry = BackgroundTaskRegistry::new();

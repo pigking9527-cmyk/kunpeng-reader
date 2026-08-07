@@ -62,6 +62,27 @@ fn emit_reader_window_trace(
     }
 }
 
+pub(crate) fn persist_main_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let state = app.state::<AppState>();
+    let previous_geom = state
+        .library
+        .try_lock()
+        .ok()
+        .and_then(|library| library.main_geom.clone());
+    let closing_geom = capture_geom(previous_geom, window);
+    if let Ok(mut library) = state.library.try_lock() {
+        library.main_geom = Some(closing_geom);
+        report_save_error("书架", library.save());
+    } else {
+        log("[close] shelf save deferred because the library is busy");
+    }
+    if let Ok(mut stats) = state.stats.try_lock() {
+        report_save_error("统计", stats.save());
+    } else {
+        log("[close] stats save deferred because the statistics store is busy");
+    };
+}
+
 #[tauri::command]
 pub(crate) fn main_window_minimize(window: tauri::WebviewWindow) -> Result<(), String> {
     window.minimize().map_err(|e| e.to_string())
@@ -102,6 +123,12 @@ pub(crate) fn main_window_close(window: tauri::WebviewWindow) -> Result<(), Stri
             );
             return Err(error.to_string());
         }
+        return Ok(());
+    }
+    let app = window.app_handle().clone();
+    if crate::startup_enhancement::should_keep_running(&app) {
+        persist_main_window_state(&app, &window);
+        crate::startup_enhancement::background_main(&app);
         return Ok(());
     }
     window.close().map_err(|e| e.to_string())
@@ -231,6 +258,7 @@ pub(crate) fn ensure_reader_window(
         tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("reader.html".into()))
             .title(title)
             .decorations(false)
+            .resizable(true)
             .min_inner_size(420.0, 320.0);
     match &geom {
         Some(saved) if saved.w >= 300.0 && saved.h >= 300.0 => {

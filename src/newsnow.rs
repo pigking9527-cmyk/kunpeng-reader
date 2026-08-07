@@ -38,7 +38,7 @@ const PREFETCH_IMAGE_MAX_DIMENSION: u32 = 640;
 // 新帖时仅留少量兜底，避免历史帖反复占据信息流。
 const TIEBA_RECENT_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 const TIEBA_OLD_FALLBACK_PER_BAR: usize = 2;
-const NEWS_CACHE_VERSION: u8 = 9;
+const NEWS_CACHE_VERSION: u8 = 10;
 const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
@@ -929,6 +929,15 @@ fn juejin_preview_image_from_html(html: &str, page_url: &str) -> String {
         .unwrap_or_default()
 }
 
+fn hupu_preview_image_from_html(html: &str, page_url: &str) -> String {
+    // 虎扑热帖接口只给帖子地址，未附封面。页面顶端则包含站点 Logo、
+    // 用户头像和广告图；若使用通用首图扫描，很容易把头像当成卡片封面。
+    // 只从楼主正文容器取图，找不到正文图时明确保持无图。
+    element_with_class(html, "div", "thread-content-detail")
+        .map(|(_, content)| first_non_chrome_image(content, page_url))
+        .unwrap_or_default()
+}
+
 fn is_juejin_article_url(url: &str) -> bool {
     tauri::Url::parse(url).ok().is_some_and(|url| {
         matches!(url.host_str(), Some("juejin.cn" | "www.juejin.cn"))
@@ -947,6 +956,9 @@ fn preview_image_from_html(html: &str, page_url: &str) -> String {
     }
     if is_juejin_article_url(page_url) {
         return juejin_preview_image_from_html(html, page_url);
+    }
+    if page_url.contains("bbs.hupu.com/") {
+        return hupu_preview_image_from_html(html, page_url);
     }
     let lower = html.to_ascii_lowercase();
     let mut cursor = 0;
@@ -3062,6 +3074,20 @@ mod tests {
         assert!(preview_image_from_html(
             r#"<img class="header-art" src="/header.jpg">"#,
             "https://www.coolapk.com/feed/123"
+        )
+        .is_empty());
+
+        let hupu = r#"
+            <img class="post-user-avatar" src="https://i1.hoopchina.com.cn/user/avatar.jpg">
+            <div class="thread-content-detail"><p><img data-origin="https://i3.hoopchina.com.cn/original.jpg" src="https://i3.hoopchina.com.cn/post.jpg"></p></div>
+        "#;
+        assert_eq!(
+            preview_image_from_html(hupu, "https://bbs.hupu.com/123.html"),
+            "https://i3.hoopchina.com.cn/post.jpg"
+        );
+        assert!(preview_image_from_html(
+            r#"<img class="post-user-avatar" src="https://i1.hoopchina.com.cn/user/avatar.jpg"><div class="thread-content-detail"><p>纯文字主帖</p></div>"#,
+            "https://bbs.hupu.com/456.html"
         )
         .is_empty());
 

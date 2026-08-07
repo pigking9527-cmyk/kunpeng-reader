@@ -7,6 +7,7 @@
   if (!invoke || !modal || !editor) return;
 
   const title = document.getElementById("feedback-title");
+  const note = modal.querySelector(".feedback-note");
   const close = document.getElementById("feedback-close");
   const imageInput = document.getElementById("feedback-image-input");
   const insertImage = document.getElementById("feedback-insert-image");
@@ -30,6 +31,22 @@
   let frozenProblemTrace = null;
   let problemTraceCapture = null;
 
+  function feedbackTextFor(key, values = {}) {
+    let text = global.ReaderAppI18n?.t?.(key) || key;
+    for (const [name, value] of Object.entries(values)) text = text.replaceAll(`{${name}}`, String(value));
+    return text;
+  }
+
+  function renderLanguage() {
+    global.ReaderAppI18n?.apply?.(modal);
+    title.textContent = feedbackTextFor(kind === "bug" ? "feedbackBugTitle" : "feedbackFeatureTitle");
+    note.textContent = feedbackTextFor(kind === "bug" ? "feedbackBugNote" : "feedbackFeatureNote");
+    editor.dataset.placeholder = feedbackTextFor(kind === "bug" ? "feedbackBugPlaceholder" : "feedbackFeaturePlaceholder");
+    submit.textContent = feedbackTextFor(kind === "bug" ? "submitProblem" : "submitSuggestion");
+    updateImageStatus();
+    updateJsonStatus();
+  }
+
   function setStatus(message, tone = "") {
     status.textContent = message || "";
     status.className = "ai-status" + (tone ? " " + tone : "");
@@ -37,8 +54,7 @@
 
   function open(nextKind) {
     kind = nextKind === "feature" ? "feature" : "bug";
-    title.textContent = kind === "bug" ? "提交 Bug" : "功能提议";
-    submit.textContent = kind === "bug" ? "提交问题" : "提交建议";
+    renderLanguage();
     problemTraceNote.hidden = kind !== "bug";
     problemTraceStatus.hidden = kind !== "bug";
     problemTraceControls.forEach((control) => { control.hidden = kind !== "bug"; });
@@ -69,12 +85,14 @@
   }
 
   function updateImageStatus() {
-    imageStatus.textContent = images.length + "/" + MAX_IMAGES + " 张";
+    imageStatus.textContent = feedbackTextFor("imageCount", { count: images.length, max: MAX_IMAGES });
     insertImage.disabled = images.length >= MAX_IMAGES;
   }
 
   function updateJsonStatus() {
-    jsonStatus.textContent = jsonAttachment ? "已附加 · " + jsonAttachment.name + " · " + Math.ceil(jsonAttachment.bytes / 1024) + " KB" : "未附加";
+    jsonStatus.textContent = jsonAttachment
+      ? "✓ " + jsonAttachment.name + " · " + Math.ceil(jsonAttachment.bytes / 1024) + " KB"
+      : feedbackTextFor("traceNotAttached");
     clearJson.hidden = !jsonAttachment;
   }
 
@@ -94,7 +112,7 @@
   function attachProblemTrace(snapshot) {
     const contents = JSON.stringify(snapshot, null, 2);
     const bytes = new TextEncoder().encode(contents);
-    if (!bytes.length || bytes.length > MAX_JSON_BYTES) throw new Error("问题记录超过 256 KB，无法附加。");
+    if (!bytes.length || bytes.length > MAX_JSON_BYTES) throw new Error(feedbackTextFor("traceAttachmentTooLarge"));
     return {
       name: "kunpeng-reader-problem-trace-" + String(snapshot?.captured_at || new Date().toISOString()).replace(/[:.]/g, "-") + ".json",
       mime: "application/json",
@@ -105,25 +123,25 @@
 
   async function captureProblemTraceAttachment() {
     if (!global.ReaderProblemTraceUI?.capture) {
-      setStatus("问题记录暂时不可用。", "error");
+      setStatus(feedbackTextFor("traceUnavailable"), "error");
       return null;
     }
     let snapshot = frozenProblemTrace || await (problemTraceCapture || freezeProblemTrace());
     if (!snapshot) snapshot = await freezeProblemTrace();
-    if (!snapshot) throw new Error("问题记录暂时不可用。");
+    if (!snapshot) throw new Error(feedbackTextFor("traceUnavailable"));
     return attachProblemTrace(snapshot);
   }
 
   async function attachProblemTraceToFeedback() {
     attachProblemTraceButton.disabled = true;
-    setStatus("正在读取最近两分钟的问题记录…");
+    setStatus(feedbackTextFor("traceReading"));
     try {
       jsonAttachment = await captureProblemTraceAttachment();
       if (!jsonAttachment) return;
       updateJsonStatus();
-      setStatus("问题记录已附加，将随本次 Bug 反馈提交。", "success");
+      setStatus(feedbackTextFor("traceAttached"), "success");
     } catch (error) {
-      setStatus(error?.message || String(error || "读取问题记录失败。"), "error");
+      setStatus(error?.message || String(error || feedbackTextFor("traceReadFailed")), "error");
     } finally {
       attachProblemTraceButton.disabled = false;
     }
@@ -131,7 +149,7 @@
 
   async function saveProblemTraceToDesktop() {
     saveProblemTraceButton.disabled = true;
-    setStatus("正在保存问题记录到桌面…");
+    setStatus(feedbackTextFor("traceSaving"));
     try {
       const attachment = await captureProblemTraceAttachment();
       if (!attachment) return;
@@ -139,9 +157,9 @@
         name: attachment.name,
         data: attachment.data,
       });
-      setStatus("问题记录已保存到桌面：" + path, "success");
+      setStatus(feedbackTextFor("traceSaved", { path }), "success");
     } catch (error) {
-      setStatus("保存失败：" + (error?.message || error), "error");
+      setStatus(feedbackTextFor("feedbackOperationFailed", { error: error?.message || error }), "error");
     } finally {
       saveProblemTraceButton.disabled = false;
     }
@@ -151,7 +169,7 @@
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result || ""));
-      reader.onerror = () => reject(new Error("读取图片失败"));
+      reader.onerror = () => reject(new Error(feedbackTextFor("readImageFailed")));
       reader.readAsDataURL(blob);
     });
   }
@@ -167,7 +185,7 @@
       };
       image.onerror = () => {
         URL.revokeObjectURL(url);
-        reject(new Error("无法解析图片"));
+        reject(new Error(feedbackTextFor("parseImageFailed")));
       };
       image.src = url;
     });
@@ -175,12 +193,12 @@
 
   function canvasBlob(canvas, quality) {
     return new Promise((resolve, reject) => {
-      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("图片压缩失败")), "image/jpeg", quality);
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error(feedbackTextFor("compressImageFailed"))), "image/jpeg", quality);
     });
   }
 
   async function compressImage(file) {
-    if (!String(file.type || "").startsWith("image/")) throw new Error("只能插入图片文件");
+    if (!String(file.type || "").startsWith("image/")) throw new Error(feedbackTextFor("imageOnly"));
     const source = await loadImage(file);
     const sourceWidth = Number(source.width || source.naturalWidth || 1);
     const sourceHeight = Number(source.height || source.naturalHeight || 1);
@@ -203,7 +221,7 @@
       else scale *= 0.78;
     }
     if (typeof source.close === "function") source.close();
-    throw new Error("图片过大，无法压缩到 1 MB 以内");
+    throw new Error(feedbackTextFor("imageTooLarge"));
   }
 
   function removeImage(id) {
@@ -223,7 +241,7 @@
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "×";
-    remove.title = "删除图片";
+    remove.title = feedbackTextFor("removeImage");
     remove.addEventListener("click", () => removeImage(item.id));
     figure.append(image, remove);
     editor.append(figure, document.createElement("br"));
@@ -234,10 +252,10 @@
     if (!candidates.length) return;
     const available = Math.max(0, MAX_IMAGES - images.length);
     if (!available) {
-      setStatus("最多只能插入 " + MAX_IMAGES + " 张图片。", "error");
+      setStatus(feedbackTextFor("maxImages", { max: MAX_IMAGES }), "error");
       return;
     }
-    setStatus("正在压缩图片…");
+    setStatus(feedbackTextFor("compressingImages"));
     for (const file of candidates.slice(0, available)) {
       try {
         const blob = await compressImage(file);
@@ -256,7 +274,7 @@
       }
     }
     updateImageStatus();
-    if (!status.classList.contains("error")) setStatus("图片已压缩并插入。", "success");
+    if (!status.classList.contains("error")) setStatus(feedbackTextFor("imageInserted"), "success");
   }
 
   function feedbackText() {
@@ -268,14 +286,14 @@
   async function submitFeedback() {
     const text = feedbackText();
     if (!text && !images.length && !jsonAttachment) {
-      setStatus("请输入反馈内容，或至少添加一张图片/一个 JSON。", "error");
+      setStatus(feedbackTextFor("feedbackRequired"), "error");
       return;
     }
     submit.disabled = true;
     insertImage.disabled = true;
     if (attachProblemTraceButton) attachProblemTraceButton.disabled = true;
     if (saveProblemTraceButton) saveProblemTraceButton.disabled = true;
-    setStatus("正在提交…");
+    setStatus(feedbackTextFor("feedbackSubmitting"));
     try {
       const appVersion = await invoke("app_version").catch(() => "");
       const result = await invoke("submit_feedback", {
@@ -296,13 +314,13 @@
           }] : [],
         },
       });
-      setStatus(result?.message || "反馈已提交，谢谢。", "success");
+      setStatus(feedbackTextFor("feedbackSubmitted"), "success");
       editor.replaceChildren();
       images = [];
       clearJsonAttachment();
       updateImageStatus();
     } catch (error) {
-      setStatus("提交失败：" + (error?.message || error), "error");
+      setStatus(feedbackTextFor("feedbackSubmitFailed", { error: error?.message || error }), "error");
     } finally {
       submit.disabled = false;
       if (attachProblemTraceButton) attachProblemTraceButton.disabled = false;
@@ -339,6 +357,7 @@
     addFiles(files);
   });
   submit?.addEventListener("click", submitFeedback);
+  global.addEventListener?.("app-language-changed", renderLanguage);
   updateImageStatus();
   updateJsonStatus();
 })(window);

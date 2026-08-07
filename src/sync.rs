@@ -405,9 +405,21 @@ struct SyncReconcileResponse {
     #[serde(default = "default_data_generation")]
     data_generation: i64,
     #[serde(default)]
+    entity_count: usize,
+    #[serde(default)]
+    inventory_digest: String,
+    #[serde(default)]
+    revision: String,
+    #[serde(default)]
     upload: Vec<SyncEntityKey>,
     #[serde(default)]
     entities: Vec<db::SyncEntity>,
+}
+
+fn reconcile_proves_inventory(local_count: usize, response: &SyncReconcileResponse) -> bool {
+    response.entity_count == local_count
+        && response.upload.is_empty()
+        && response.entities.is_empty()
 }
 
 fn update_inventory_text(hasher: &mut Sha256, value: &str) {
@@ -1633,6 +1645,23 @@ fn sync_now_inner_with_limits_impl(
         ensure_data_generation(settings.data_generation, reconcile.data_generation)?;
         push_server_time = push_server_time.max(reconcile.server_time);
 
+        // Older deployed servers can calculate the compact inventory digest
+        // from legacy second-based timestamps while reconcile normalizes those
+        // timestamps before comparing every row. A no-op reconcile with an
+        // equal count is therefore stronger compatibility evidence than a
+        // version-sensitive digest: the server inspected the complete union
+        // and found nothing to upload or download.
+        if reconcile_proves_inventory(local.len(), &reconcile) {
+            inventory_verified = true;
+            crate::log(&format!(
+                "[sync] inventory=reconcile_verified entities={} revision={} digest={}",
+                local.len(),
+                reconcile.revision,
+                reconcile.inventory_digest
+            ));
+            break;
+        }
+
         if !reconcile.entities.is_empty() {
             data_migration::merge_pulled_book_states(state, &reconcile.entities)?;
             pulled =
@@ -1915,6 +1944,51 @@ mod tests {
             revision: "10".into(),
         };
         assert!(inventory_matches(&entities, &inventory));
+    }
+
+    #[test]
+    fn empty_reconcile_with_equal_count_proves_inventory_despite_digest_drift() {
+        let response = SyncReconcileResponse {
+            server_time: 1,
+            data_generation: 1,
+            entity_count: 2,
+            inventory_digest: "legacy-digest".into(),
+            revision: "10".into(),
+            upload: vec![],
+            entities: vec![],
+        };
+        assert!(reconcile_proves_inventory(2, &response));
+        assert!(!reconcile_proves_inventory(1, &response));
+    }
+
+    #[test]
+    fn reconcile_actions_never_prove_inventory() {
+        let upload = SyncReconcileResponse {
+            server_time: 1,
+            data_generation: 1,
+            entity_count: 2,
+            inventory_digest: String::new(),
+            revision: String::new(),
+            upload: vec![SyncEntityKey {
+                kind: "vocab".into(),
+                id: "word".into(),
+            }],
+            entities: vec![],
+        };
+        assert!(!reconcile_proves_inventory(2, &upload));
+
+        let mut download = upload;
+        download.upload.clear();
+        download.entities.push(db::SyncEntity {
+            kind: "vocab".into(),
+            id: "word".into(),
+            json: serde_json::json!({}),
+            updated_at: 1,
+            deleted_at: 0,
+            device_id: "device-a".into(),
+            sync_version: 1,
+        });
+        assert!(!reconcile_proves_inventory(2, &download));
     }
 
     #[test]

@@ -37,11 +37,13 @@ test("problem trace summarizes startup speed across application restarts", () =>
     { session: "two", name: "startup", phase: "webview_script", detail: "100ms" },
     { session: "two", name: "startup", phase: "dom_ready", detail: "170ms" },
     { session: "two", name: "startup", phase: "shelf_painted", detail: "380ms" },
+    { session: "two", name: "rust:startup-enhancement", phase: "activated", detail: "145ms hot activation" },
   ]);
   assert.equal(summary.sessions, 2);
   assert.deepEqual(summary.process_to_webview_script, { count: 2, min_ms: 100, avg_ms: 110, max_ms: 120, latest_ms: 100 });
   assert.equal(summary.process_to_dom_ready.avg_ms, 175);
   assert.equal(summary.process_to_shelf_painted.avg_ms, 400);
+  assert.equal(summary.hot_activation.latest_ms, 145);
 });
 
 test("progress trace keeps numeric chapter offset metadata without book text", () => {
@@ -73,8 +75,8 @@ test("Bug feedback requests the reader problem-state snapshot as an attachment",
   assert.doesNotMatch(html, /id="bug-trace-modal"/);
   assert.doesNotMatch(mainHtml, /id="mi-problem-trace"/);
   assert.doesNotMatch(mainHtml, /id="problem-trace-modal"/);
-  assert.match(mainHtml, /id="feedback-attach-problem-trace"[^>]*>附到本次反馈（推荐）<\/button>/);
-  assert.match(mainHtml, /id="feedback-save-problem-trace"[^>]*>保存问题记录到桌面<\/button>/);
+  assert.match(mainHtml, /id="feedback-attach-problem-trace"[^>]*data-i18n="attachTrace"[^>]*>附到本次反馈（推荐）<\/button>/);
+  assert.match(mainHtml, /id="feedback-save-problem-trace"[^>]*data-i18n="saveTraceDesktop"[^>]*>保存问题记录到桌面<\/button>/);
   assert.match(mainHtml, /<script src="problem-trace-ui\.js"><\/script>/);
   assert.match(html, /reader-bug-trace\.js/);
   assert.match(reader, /ReaderBugTrace\?\.setContextProvider/);
