@@ -25,8 +25,14 @@ pub fn xml_escape(s: &str) -> String {
 pub fn build_edge_ssml(text: &str, voice: &str, rate: i32) -> String {
     let safe_voice = xml_escape(voice);
     let safe_text = xml_escape(text);
+    let locale = [
+        "zh-CN", "zh-TW", "en-US", "ja-JP", "ko-KR", "fr-FR", "de-DE", "es-ES", "ru-RU", "pt-BR",
+    ]
+    .into_iter()
+    .find(|locale| voice.starts_with(locale))
+    .unwrap_or("zh-CN");
     format!(
-        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='{safe_voice}'><prosody pitch='+0Hz' rate='{rate:+}%' volume='+0%'>{safe_text}</prosody></voice></speak>"
+        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{locale}'><voice name='{safe_voice}'><prosody pitch='+0Hz' rate='{rate:+}%' volume='+0%'>{safe_text}</prosody></voice></speak>"
     )
 }
 
@@ -74,9 +80,28 @@ mod tests {
     fn edge_ssml_escapes_voice_and_text() {
         let ssml = build_edge_ssml("a < b & c", "en-US-'Bad'\"Voice\"", -12);
         assert!(ssml.contains("rate='-12%'"));
+        assert!(ssml.contains("xml:lang='en-US'"));
         assert!(ssml.contains("en-US-&apos;Bad&apos;&quot;Voice&quot;"));
         assert!(ssml.contains("a &lt; b &amp; c"));
         assert!(!ssml.contains("a < b & c"));
+    }
+
+    #[test]
+    fn edge_ssml_uses_the_selected_voice_locale() {
+        for (voice, locale) in [
+            ("zh-CN-XiaoxiaoNeural", "zh-CN"),
+            ("zh-TW-HsiaoChenNeural", "zh-TW"),
+            ("en-US-JennyNeural", "en-US"),
+            ("ja-JP-NanamiNeural", "ja-JP"),
+            ("ko-KR-SunHiNeural", "ko-KR"),
+            ("fr-FR-DeniseNeural", "fr-FR"),
+            ("de-DE-KatjaNeural", "de-DE"),
+            ("es-ES-ElviraNeural", "es-ES"),
+            ("ru-RU-SvetlanaNeural", "ru-RU"),
+            ("pt-BR-FranciscaNeural", "pt-BR"),
+        ] {
+            assert!(build_edge_ssml("test", voice, 0).contains(&format!("xml:lang='{locale}'")));
+        }
     }
 
     #[test]

@@ -419,6 +419,10 @@ pub(crate) fn apply_pending_book_state(
 }
 
 pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
+    // Acquire the installation gate before any in-memory core lock. Backup and
+    // restore take the same gate before their locks, so this cannot deadlock
+    // with a recovery operation while we hold the complete projection boundary.
+    let _installation = crate::backup::core_installation_lock()?;
     let items = {
         let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
@@ -457,62 +461,94 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             _ => {}
         }
     }
-    if !remote_books.is_empty() || !model_tags.is_empty() {
-        let mut lib = state
-            .library
-            .lock()
-            .map_err(|_| "书架锁定失败".to_string())?;
-        for remote in &remote_books {
-            if let Some(local) = lib
-                .books
-                .iter_mut()
-                .find(|book| book.content_id == remote.content_id)
-            {
-                remote.merge_into_book(local);
-            }
-        }
-        for remote in &model_tags {
-            if let Some(local) = lib
-                .books
-                .iter_mut()
-                .find(|book| book.content_id == remote.content_id)
-            {
-                remote.apply_to_book(local);
-            }
-        }
-        // Unmatched states are intentionally left in SQLite as pending; do not
-        // create broken shelf entries with another computer's file path.
-        lib.save()?;
-    }
+
+    // This can only affect private-sync entity kinds, which a core migration
+    // package rejects. Keep it before the file installation anyway: a future
+    // error here therefore cannot leave a newly written runtime projection.
+    crate::private_sync::apply_downloaded_entities(state, &items)?;
+
+    // Work on copies while holding every runtime store in the same fixed order
+    // as backup/restore. Only replace live memory after the files have passed
+    // the durable three-file installation transaction below.
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    let mut stats = state.stats.lock().map_err(|_| "统计锁定失败".to_string())?;
     let mut vocab_store = state
         .vocab
         .lock()
         .map_err(|_| "生词本锁定失败".to_string())?;
-    vocab_store.list = vocab;
-    vocab_store.save()?;
-    drop(vocab_store);
-    let local_ids_by_content: HashMap<String, u64> = state
-        .library
-        .lock()
-        .map_err(|_| "书架锁定失败".to_string())?
+    let mut next_library = library.clone();
+    let mut next_stats = stats.clone();
+    let mut next_vocab = vocab_store.clone();
+
+    for remote in &remote_books {
+        if let Some(local) = next_library
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.merge_into_book(local);
+        }
+    }
+    for remote in &model_tags {
+        if let Some(local) = next_library
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.apply_to_book(local);
+        }
+    }
+    // Unmatched states are intentionally left in SQLite as pending; do not
+    // create broken shelf entries with another computer's file path.
+    next_vocab.list = vocab;
+    let local_ids_by_content: HashMap<String, u64> = next_library
         .books
         .iter()
         .filter(|book| !book.content_id.is_empty())
         .map(|book| (book.content_id.clone(), book.id))
         .collect();
-    let mut stats = state.stats.lock().map_err(|_| "统计锁定失败".to_string())?;
-    stats.map.clear();
+    next_stats.map.clear();
     for bucket in buckets {
         if let Some(local_id) = local_ids_by_content.get(&bucket.content_id) {
-            stats.map.insert(
+            next_stats.map.insert(
                 (bucket.day, bucket.hour, *local_id),
                 (bucket.secs, bucket.words),
             );
         }
     }
-    stats.dirty = true;
-    stats.save()?;
-    crate::private_sync::apply_downloaded_entities(state, &items)?;
+    let persisted_stats: Vec<ReadBucket> = next_stats
+        .map
+        .iter()
+        .map(|(&(day, hour, book), &(secs, words))| ReadBucket {
+            day,
+            hour,
+            book,
+            secs,
+            words,
+        })
+        .collect();
+    let projections = vec![
+        (
+            "library.json",
+            serde_json::to_vec_pretty(&next_library).map_err(|error| error.to_string())?,
+        ),
+        (
+            "stats.json",
+            serde_json::to_vec(&persisted_stats).map_err(|error| error.to_string())?,
+        ),
+        (
+            "vocab.json",
+            serde_json::to_vec(&next_vocab.list).map_err(|error| error.to_string())?,
+        ),
+    ];
+    crate::backup::install_runtime_projections_locked(&projections)?;
+    next_stats.dirty = false;
+    *library = next_library;
+    *stats = next_stats;
+    *vocab_store = next_vocab;
     Ok(())
 }
 

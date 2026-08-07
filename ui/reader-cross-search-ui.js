@@ -7,6 +7,10 @@ const crossResults = document.getElementById("cross-results");
 const crossClose = document.getElementById("cross-close");
 const crossRun = document.getElementById("cross-run");
 const crossReturn = document.getElementById("cross-return");
+const readerCrossText = (key, fallback, values) => {
+  const value = window.ReaderI18n?.t?.(key, values);
+  return value && value !== key ? value : fallback;
+};
 let crossSeq = 0;
 let crossTerm = "";
 let crossMode = "keyword";
@@ -50,9 +54,9 @@ function crossHitCount(book) {
   return Number(book.count || ((book.hits || []).length) || 0);
 }
 function updateCrossModeUi() {
-  if (crossTitle) crossTitle.textContent = crossMode === "semantic" ? "相似语义" : "跨书搜索";
-  if (crossRun) crossRun.textContent = crossMode === "semantic" ? "查找" : "搜索";
-  if (crossInput) crossInput.placeholder = crossMode === "semantic" ? "输入字、词、句、段，查找全书架相似文本" : "";
+  if (crossTitle) crossTitle.textContent = crossMode === "semantic" ? readerCrossText("crossSemanticTitle", "相似语义") : readerCrossText("crossKeywordTitle", "跨书搜索");
+  if (crossRun) crossRun.textContent = crossMode === "semantic" ? readerCrossText("find", "查找") : readerCrossText("search", "搜索");
+  if (crossInput) crossInput.placeholder = crossMode === "semantic" ? readerCrossText("crossSemanticPlaceholder", "输入字、词、句、段，查找全书架相似文本") : "";
 }
 function crossStoreReturnTarget(bookId, chapter) {
   const currentBookId = crossCurrentBookId();
@@ -130,14 +134,14 @@ function renderCrossSearch(results) {
   const list = crossLastResults;
   if (!list.length) {
     const hint = crossMode === "semantic"
-      ? "语义索引里没有找到与「" + crossEscapeHtml(crossTerm) + "」相似的文本。若很多书未建语义索引，请先建立索引。"
-      : "全书架没有找到「" + crossEscapeHtml(crossTerm) + "」";
+      ? readerCrossText("crossSemanticEmpty", "语义索引里没有找到与「{term}」相似的文本。若很多书未建语义索引，请先建立索引。", { term: crossTerm })
+      : readerCrossText("crossKeywordEmpty", "全书架没有找到「{term}」", { term: crossTerm });
     crossResults.innerHTML = '<div class="cross-empty">' + hint + "</div>";
-    crossStatus.textContent = "未找到";
+    crossStatus.textContent = readerCrossText("crossNotFound", "未找到");
     return;
   }
   const total = list.reduce((sum, book) => sum + crossHitCount(book), 0);
-  crossStatus.textContent = list.length + " 本 · " + total + " 处";
+  crossStatus.textContent = readerCrossText("crossSummary", "{books} 本 · {hits} 处", { books: list.length, hits: total });
   const frag = document.createDocumentFragment();
   list.slice(0, 30).forEach((book) => {
     const bookId = String(book.book_id || "");
@@ -150,9 +154,9 @@ function renderCrossSearch(results) {
     head.className = "cross-head";
     head.innerHTML =
       '<span class="cross-toggle">' + (collapsed ? "▸" : "▾") + "</span>" +
-      '<span class="cross-title">' + crossEscapeHtml(book.title || "未命名") + "</span>" +
+      '<span class="cross-title">' + crossEscapeHtml(book.title || readerCrossText("crossUntitled", "未命名")) + "</span>" +
       (book.author ? '<span class="cross-author">' + crossEscapeHtml(book.author) + "</span>" : "") +
-      '<span class="cross-count">' + crossHitCount(book) + " 处</span>";
+      '<span class="cross-count">' + readerCrossText("crossHitCount", "{count} 处", { count: crossHitCount(book) }) + "</span>";
     head.addEventListener("click", () => {
       if (crossCollapsed.has(bookId)) crossCollapsed.delete(bookId);
       else crossCollapsed.add(bookId);
@@ -164,9 +168,9 @@ function renderCrossSearch(results) {
       item.className = "cross-hit";
       const score = Number(hit.score || 0);
       const scoreHtml = crossMode === "semantic" && score
-        ? '<span class="cross-score">相似 ' + Math.max(0, Math.min(1, score)).toFixed(2) + "</span>"
+        ? '<span class="cross-score">' + readerCrossText("crossSimilarity", "相似 {score}", { score: Math.max(0, Math.min(1, score)).toFixed(2) }) + "</span>"
         : "";
-      item.innerHTML = '<div class="cross-hit-line"><span class="cross-ch">第' + ((hit.chapter || 0) + 1) + "章</span>" + scoreHtml + crossHighlight(hit.snippet || "", crossTerm) + "</div>";
+      item.innerHTML = '<div class="cross-hit-line"><span class="cross-ch">' + readerCrossText("crossChapter", "第{chapter}章", { chapter: (hit.chapter || 0) + 1 }) + "</span>" + scoreHtml + crossHighlight(hit.snippet || "", crossTerm) + "</div>";
       item.addEventListener("click", () => {
         crossStoreReturnTarget(bookId, hit.chapter || 0);
         invoke("open_book_at", {
@@ -186,7 +190,7 @@ function renderCrossSearch(results) {
       const canExpand = limit < hits.length;
       more.innerHTML =
         '<span class="cross-more-ico">' + (canExpand ? "+25" : "…") + "</span>" +
-        "另有 " + rest + (canExpand ? " 处未显示" : " 处未载入");
+        readerCrossText("crossMore", "另有 {count} 处{state}", { count: rest, state: canExpand ? readerCrossText("crossNotShown", "未显示") : readerCrossText("crossNotLoaded", "未载入") });
       more.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -207,11 +211,11 @@ async function runCrossSearch(term) {
   updateCrossModeUi();
   if (!crossTerm) {
     crossStatus.textContent = "";
-    crossResults.innerHTML = '<div class="cross-empty">输入文字后搜索</div>';
+    crossResults.innerHTML = '<div class="cross-empty">' + readerCrossText("crossEnterText", "输入文字后搜索") + "</div>";
     return;
   }
-  crossStatus.textContent = "检索中…";
-  crossResults.innerHTML = '<div class="cross-empty">检索中…</div>';
+  crossStatus.textContent = readerCrossText("crossSearching", "检索中…");
+  crossResults.innerHTML = '<div class="cross-empty">' + readerCrossText("crossSearching", "检索中…") + "</div>";
   try {
     // 无模型时由后端立即返回明确提示；不要吞掉错误后再次发起语义检索，
     // 否则会重复触发耗时的模型初始化并让界面看起来一直在加载。
@@ -223,13 +227,13 @@ async function runCrossSearch(term) {
       renderCrossSearch(results);
       const pendingBooks = Array.isArray(response) ? 0 : Math.max(0, Number(response?.pendingBooks || 0));
       if (crossMode === "keyword" && pendingBooks) {
-        crossStatus.textContent += "；" + pendingBooks + " 本正在后台建立全文索引";
+        crossStatus.textContent += readerCrossText("crossIndexing", "；{count} 本正在后台建立全文索引", { count: pendingBooks });
       }
     }
   } catch (e) {
     if (seq !== crossSeq) return;
-    crossStatus.textContent = "检索失败";
-    crossResults.innerHTML = '<div class="cross-empty">检索失败：' + crossEscapeHtml(String(e || "")) + "</div>";
+    crossStatus.textContent = readerCrossText("crossFailed", "检索失败");
+    crossResults.innerHTML = '<div class="cross-empty">' + readerCrossText("crossFailed", "检索失败") + "：" + crossEscapeHtml(String(e || "")) + "</div>";
   }
 }
 function openCrossSearch(term) {
@@ -294,5 +298,9 @@ if (crossReturn) {
   });
   setTimeout(updateCrossReturnButton, 400);
   setTimeout(consumePendingCrossSearch, 900);
-  scheduleCrossReturnRefresh();
+scheduleCrossReturnRefresh();
 }
+window.addEventListener("reader-language-changed", () => {
+  updateCrossModeUi();
+  if (crossLastResults.length) renderCrossSearch(crossLastResults);
+});

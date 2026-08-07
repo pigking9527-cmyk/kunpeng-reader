@@ -20,6 +20,27 @@ test("accepts a bounded allowlisted message from the current frame", () => {
   assert.equal(guard.validateData({ readerNavigated: 1 }), true);
 });
 
+test("bug traces accept only bounded metadata and never raw text or links", () => {
+  assert.equal(guard.validateData({
+    bugTrace: {
+      kind: "click",
+      source: "reader_page",
+      outcome: "selection",
+      zone: "right",
+      target: "p",
+      chapter: 3,
+      page: 8,
+      x_pct: 82.4,
+    },
+  }), true);
+  assert.equal(guard.validateData({
+    bugTrace: { kind: "click", outcome: "link", href: "https://secret.invalid" },
+  }), false);
+  assert.equal(guard.validateData({
+    bugTrace: { kind: "click", outcome: "selection", text: "选中的正文" },
+  }), false);
+});
+
 test("web search accepts only the supported local engine choices", () => {
   assert.equal(guard.validateData({ webSearch: { term: "南明史", engine: "baidu" } }), true);
   assert.equal(guard.validateData({ webSearch: { term: "南明史", engine: "google" } }), true);

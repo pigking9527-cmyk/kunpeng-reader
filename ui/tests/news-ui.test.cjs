@@ -8,6 +8,7 @@ const html = fs.readFileSync(path.join(ui, "index.html"), "utf8");
 const script = fs.readFileSync(path.join(ui, "news-ui.js"), "utf8");
 const styles = fs.readFileSync(path.join(ui, "styles.css"), "utf8");
 const backend = fs.readFileSync(path.join(ui, "..", "src", "newsnow.rs"), "utf8");
+const gestures = require("../news-gesture.js");
 
 test("NewsNow has a shelf toolbar entry and an independently mounted news page", () => {
   assert.match(html, /id="newsnow-toolbar-btn"[^>]*hidden/);
@@ -52,7 +53,7 @@ test("NewsNow is gated behind the local experimental switch", () => {
 test("NewsNow opens source pages and renders extracted local articles with a stable return control", () => {
   assert.match(script, /function safeHttpUrl/);
   assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
-  assert.match(script, /page\.hidden = false; shell\.hidden = true/);
+  assert.match(script, /page\.hidden = false; feedView\.hidden = false; sourcePicker\.hidden = true;[\s\S]*?shell\.hidden = true/);
   assert.match(script, /newsnow_open_article/);
   assert.match(script, /title: text\(item\.title \|\| item\.name\)/);
   assert.match(script, /summary: text\(item\.summary \|\| item\.description/);
@@ -73,7 +74,8 @@ test("NewsNow opens source pages and renders extracted local articles with a sta
 test("NewsNow stores a local, bounded source selection and optional local Tieba bar names", () => {
   assert.match(html, /id="newsnow-source-picker"/);
   assert.match(html, /id="newsnow-source-search"/);
-  assert.match(html, /id="newsnow-source-apply"/);
+  assert.doesNotMatch(html, /id="newsnow-source-apply"/);
+  assert.doesNotMatch(html, /id="newsnow-source-reset"/);
   assert.match(script, /const SOURCE_STORAGE_KEY = "kunpeng\.reader\.news\.sources\.v2"/);
   assert.match(script, /const MAX_SOURCES = 24/);
   assert.match(script, /function allowedSourceIds/);
@@ -92,6 +94,9 @@ test("NewsNow stores a local, bounded source selection and optional local Tieba 
   assert.match(script, /function setTiebaAddOpen/);
   assert.match(script, /text\(source\.id\) !== "tieba"/);
   assert.match(script, /function syncPendingTiebaSource/);
+  assert.match(script, /function persistSourceChanges/);
+  assert.match(script, /function scheduleSourceRefresh/);
+  assert.match(script, /setTimeout\(\(\) => \{[\s\S]*?void load\(true\);[\s\S]*?\}, 450\)/);
   assert.match(script, /enabled\.type = "checkbox"/);
   assert.match(script, /pendingTiebaEnabledBarNames/);
   assert.match(script, /function newsRequest\(\) \{ return \{ sourceIds, tiebaBars:/);
@@ -99,6 +104,76 @@ test("NewsNow stores a local, bounded source selection and optional local Tieba 
   assert.match(script, /tiebaBarForm\.addEventListener\("submit"/);
   assert.match(script, /format\("maxSources", "最多选择 \{max\} 个来源。", \{ max: MAX_SOURCES \}\)/);
   assert.match(script, /app-language-changed/);
+});
+
+test("source management is an independent page that hides and restores the news feed", () => {
+  assert.match(html, /id="newsnow-feed-view" class="newsnow-feed-view"/);
+  assert.match(html, /id="newsnow-source-status"/);
+  assert.match(html, /id="newsnow-source-close"[^>]*>←<\/button>/);
+  assert.match(script, /sourcePageScrollTop = page\.scrollTop/);
+  assert.match(script, /feedView\.hidden = true; sourcePicker\.hidden = false/);
+  assert.match(script, /sourcePicker\.hidden = true; feedView\.hidden = false/);
+  assert.match(script, /page\.classList\.add\("newsnow-source-page-active"\)/);
+  assert.match(script, /page\.classList\.remove\("newsnow-source-page-active"\)/);
+  assert.match(script, /page\.scrollTop = sourcePageScrollTop/);
+  assert.match(styles, /\.newsnow-feed-view\[hidden\], \.newsnow-source-picker\[hidden\]\s*\{\s*display: none/);
+  assert.match(styles, /\.newsnow-source-picker\s*\{[^}]*width: 100%;[^}]*border: 0;[^}]*box-shadow: none/s);
+  assert.doesNotMatch(html, /newsnow-source-picker-actions/);
+  assert.doesNotMatch(styles, /\.newsnow-source-picker-actions/);
+});
+
+test("NewsNow learns a user-drawn right-mouse gesture and shows its live trail", () => {
+  const experiments = fs.readFileSync(path.join(ui, "experimental-features.js"), "utf8");
+  assert.match(html, /id="newsnow-gesture-label"[^>]*data-i18n="gestureBack"/);
+  assert.match(html, /id="newsnow-gesture-pad"[^>]*data-i18n-aria="drawGesturePath"/);
+  assert.match(html, /id="newsnow-gesture-save"[^>]*data-i18n="savePath"/);
+  assert.match(html, /id="newsnow-gesture-clear"/);
+  assert.match(html, /id="newsnow-gesture-enabled" type="checkbox"/);
+  assert.match(html, /id="newsnow-gesture-precision"/);
+  assert.match(html, /<option value="low" data-i18n="precisionLow">低<\/option>[\s\S]*?<option value="medium" data-i18n="precisionMedium">中<\/option>[\s\S]*?<option value="high" data-i18n="precisionHigh">高<\/option>/);
+  assert.match(html, /id="newsnow-gesture-editor-toggle"[^>]*aria-expanded="false"/);
+  assert.match(html, /newsnow-gesture-heading-tail[\s\S]*?newsnow-gesture-editor-toggle[\s\S]*?newsnow-gesture-enabled/);
+  assert.doesNotMatch(html, /id="newsnow-gesture-saved"/);
+  assert.match(script, /i18n\("gestureSaved"/);
+  assert.match(html, /id="newsnow-gesture-editor"[^>]*hidden/);
+  assert.match(html, /id="newsnow-gesture-settings"[^>]*data-i18n="answerSettings"/);
+  assert.match(html, /<canvas id="newsnow-gesture-trail"[^>]*hidden/);
+  assert.match(html, /<script src="news-gesture\.js"><\/script>[\s\S]*?<script src="news-ui\.js"><\/script>/);
+  assert.match(script, /event\.button !== 2/);
+  assert.match(script, /gestureApi\.similarity\(savedGesture, gesture\.points\)/);
+  assert.match(script, /score >= gestureApi\.matchThreshold\(gesturePrecision\)/);
+  assert.match(script, /paintGestureTrail\(activeGesture\.points\)/);
+  assert.match(script, /clearGestureTrail\(\);/);
+  assert.doesNotMatch(script, /matched \? 190 : 320/);
+  assert.match(script, /publishedAt:[\s\S]*?gestureEnabled,[\s\S]*?gesturePoints:/);
+  assert.match(script, /gesturePoints: savedGesture\.map/);
+  assert.match(script, /gestureApi\.saveEnabled/);
+  assert.match(script, /global\.addEventListener\("mousemove", moveBackGesture/);
+  assert.match(script, /if \(!reader\.hidden\) closeArticle\(\{ focus: false \}\)/);
+  assert.match(script, /else if \(!sourcePicker\.hidden\) closeSourcePicker\(\{ focus: false \}\)/);
+  assert.match(script, /else close\(\{ focus: false \}\)/);
+  assert.match(script, /global\.addEventListener\("contextmenu"/);
+  assert.match(styles, /\.newsnow-gesture-trail\s*\{[^}]*position: fixed;[^}]*pointer-events: none/s);
+  assert.match(styles, /\.newsnow-gesture-pad\s*\{[^}]*touch-action: none/s);
+  assert.match(experiments, /return \{ refresh, openSettings, closeSettings: close \}/);
+
+  const reference = [{ x: 0, y: 0 }, { x: 70, y: 10 }, { x: 30, y: 60 }, { x: 100, y: 100 }];
+  const translatedAndScaled = reference.map((point) => ({ x: point.x * 2 + 30, y: point.y * 2 - 10 }));
+  const different = [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: 100, y: 100 }];
+  assert.equal(gestures.normalize(reference).length, gestures.SAMPLE_COUNT);
+  assert.ok(gestures.similarity(reference, translatedAndScaled) >= gestures.MATCH_THRESHOLD);
+  assert.ok(gestures.similarity(reference, different) < gestures.MATCH_THRESHOLD);
+  assert.deepEqual(gestures.normalize([{ x: 0, y: 0 }, { x: 5, y: 5 }]), []);
+  const storage = new Map();
+  const local = { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) };
+  assert.equal(gestures.loadEnabled(local), false);
+  assert.equal(gestures.saveEnabled(true, local), true);
+  assert.equal(gestures.loadEnabled(local), true);
+  assert.equal(gestures.loadPrecision(local), "medium");
+  assert.equal(gestures.savePrecision("high", local), "high");
+  assert.equal(gestures.loadPrecision(local), "high");
+  assert.ok(gestures.matchThreshold("low") < gestures.matchThreshold("medium"));
+  assert.ok(gestures.matchThreshold("high") > gestures.matchThreshold("medium"));
 });
 
 test("NewsNow has a persisted horizontal and grid layout switch", () => {
@@ -110,7 +185,11 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(script, /newsnow-card-image/);
   assert.match(script, /safeImageDataUrl/);
   assert.match(script, /item\.previewDataUrl \|\| item\.preview_data_url/);
-  assert.doesNotMatch(script, /newsnow_preview_image/);
+  assert.match(script, /const VISIBLE_IMAGE_CONCURRENCY = 4/);
+  assert.match(script, /new global\.IntersectionObserver/);
+  assert.match(script, /invoke\("newsnow_preview_image"/);
+  assert.match(script, /rootMargin: "500px 0px"/);
+  assert.match(styles, /\.newsnow-card-image\.loading/);
   assert.match(script, /gridLayout\.addEventListener\("click", \(\) => setLayout\("grid"\)\)/);
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
@@ -120,7 +199,7 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(script, /function estimatedCardHeight\(item, columnCount\)/);
   assert.match(script, /const columnHeights = Array\.from/);
   assert.match(script, /renderedMasonryColumnCount = columnCount/);
-  assert.match(script, /if \(page\.hidden\) \{ feedRenderPending = true; return; \}/);
+  assert.match(script, /if \(page\.hidden \|\| feedView\.hidden\) \{ feedRenderPending = true; return; \}/);
   assert.match(script, /if \(feedRenderPending \|\| layout === "grid"\) renderFeed\(\)/);
   assert.match(script, /renderedMasonryColumnCount \|\| 1/);
   assert.match(script, /global\.addEventListener\("resize"/);
@@ -133,7 +212,7 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(styles, /\.newsnow-card h2\s*\{[^}]*-webkit-line-clamp: 4/s);
 });
 
-test("NewsNow prefetches enabled sources in the background and renders cached images without reflow", () => {
+test("NewsNow prefetches enabled sources and bounds visible image requests", () => {
   assert.match(script, /const BACKGROUND_PREFETCH_DELAY_MS = 30 \* 1000/);
   assert.match(script, /const BACKGROUND_PREFETCH_INTERVAL_MS = 5 \* 60 \* 1000/);
   assert.match(script, /const BACKGROUND_PREFETCH_BATCHES = 4/);
@@ -145,6 +224,9 @@ test("NewsNow prefetches enabled sources in the background and renders cached im
   assert.match(script, /function hasPendingPreviews\(result\)/);
   assert.match(script, /batch < BACKGROUND_PREFETCH_BATCHES/);
   assert.match(script, /const needsPreviewCache = hasPendingPreviews\(result\)/);
+  assert.match(script, /visibleImageRunning < VISIBLE_IMAGE_CONCURRENCY/);
+  assert.match(backend, /const PREVIEW_IMAGE_MAX_BYTES: u64 = 4 \* 1024 \* 1024/);
+  assert.match(backend, /remember_preview_attempt/);
   assert.match(script, /if \(result\?\.stale \|\| needsPreviewCache\) void refreshInBackground\(\{ announce: true \}\)/);
   assert.match(script, /masonryColumnCount\(\) === renderedMasonryColumnCount/);
   assert.match(styles, /\.experimental-settings\s*\{[^}]*padding: 0;[^}]*border: 0/s);
@@ -163,7 +245,7 @@ test("NewsNow persists mixed or source-grouped ordering", () => {
 
 test("NewsNow toolbar toggles the main-window news page", () => {
   assert.match(script, /button\.addEventListener\("click", \(\) => \{ if \(!page\.hidden \|\| !reader\.hidden\) close/);
-  assert.match(script, /page\.hidden = false; shell\.hidden = true/);
+  assert.match(script, /page\.hidden = false; feedView\.hidden = false; sourcePicker\.hidden = true;[\s\S]*?shell\.hidden = true/);
 });
 
 test("NewsNow presents a chronological reading feed and stays usable on narrow windows", () => {

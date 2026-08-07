@@ -1,89 +1,34 @@
 mod accelerator;
 mod batch;
 mod build;
+pub(crate) mod gpu;
 mod index_runtime;
-mod model;
+mod m3;
+pub(crate) mod model;
 mod profile;
+mod retrieval;
 mod search;
 mod status;
+mod storage;
 mod vector;
 
 pub(crate) use accelerator::LoadedShards;
 pub(crate) use search::{SemBookHits, SemHit};
 pub(crate) use vector::SemData;
 
-use crate::{book, AppState};
-use serde::Serialize;
-use sha2::{Digest, Sha256};
-use std::io::Write;
+use crate::AppState;
 // ===========================================================================
 //  语义检索（向量嵌入）：把段落转成向量，按余弦相似度排序，找“意思相近”的文本
 // ===========================================================================
 
 pub(crate) fn initialize_semantic_model_selection() {
     model::initialize_selection();
+    retrieval::initialize();
 }
 
 /// 画像模块只需要向量维度、段落数量和连续向量，不接触段落文本或缓存许可。
 fn sem_data_vector_parts(data: &SemData) -> (usize, usize, &[f32]) {
     data.vector_parts()
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect()
-}
-
-struct IntegrityWriter<W> {
-    inner: W,
-    hasher: Sha256,
-    bytes: u64,
-}
-
-impl<W> IntegrityWriter<W> {
-    fn new(inner: W) -> Self {
-        Self {
-            inner,
-            hasher: Sha256::new(),
-            bytes: 0,
-        }
-    }
-
-    fn finish(self) -> (u64, String) {
-        let hash = self
-            .hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02X}"))
-            .collect();
-        (self.bytes, hash)
-    }
-}
-
-impl<W: Write> Write for IntegrityWriter<W> {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        let written = self.inner.write(buffer)?;
-        if written > 0 {
-            self.hasher.update(&buffer[..written]);
-            self.bytes = self.bytes.saturating_add(written as u64);
-        }
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-/// 当前可进入全库加速分片的书与源文件签名。一次遍历同时产生两份数据，
-/// 避免状态检查、建图和首查重复读取数百个逐书元数据文件。
-fn indexed_book_snapshot_cached(state: &AppState) -> (Vec<u64>, Vec<vector::IndexSourceSignature>) {
-    accelerator::indexed_book_snapshot_cached(state)
 }
 
 fn sem_dir() -> Option<std::path::PathBuf> {
@@ -112,10 +57,6 @@ pub(crate) fn spawn_semantic_profile_warmup(app: tauri::AppHandle) {
     } else {
         crate::log("semantic_profile_bundle startup warmup skipped; lazy on first semantic query");
     }
-}
-
-fn sem_index_done_for_book(book: &book::Book) -> bool {
-    vector::is_complete(book)
 }
 
 fn get_sem_data(state: &AppState, id: u64) -> Option<std::sync::Arc<SemData>> {
@@ -170,6 +111,42 @@ pub(crate) fn select_semantic_model(
 }
 
 #[tauri::command]
+pub(crate) fn select_semantic_retrieval_mode(
+    state: tauri::State<AppState>,
+    mode: String,
+) -> Result<(), String> {
+    retrieval::select_mode(state, &mode)
+}
+
+#[tauri::command]
+pub(crate) async fn download_semantic_reranker(app: tauri::AppHandle) -> Result<(), String> {
+    retrieval::download_reranker(app).await
+}
+
+#[tauri::command]
+pub(crate) fn set_semantic_m3_long_context(
+    state: tauri::State<AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    retrieval::set_long_context_enabled(state, enabled)
+}
+
+#[tauri::command]
+pub(crate) fn delete_semantic_reranker(state: tauri::State<AppState>) -> Result<(), String> {
+    retrieval::delete_reranker(state)
+}
+
+#[tauri::command]
+pub(crate) async fn build_semantic_m3_index(app: tauri::AppHandle) -> Result<(), String> {
+    m3::build(app).await
+}
+
+#[tauri::command]
+pub(crate) fn delete_semantic_m3_index(state: tauri::State<AppState>) -> Result<(), String> {
+    m3::delete(state)
+}
+
+#[tauri::command]
 pub(crate) fn delete_semantic_index(
     state: tauri::State<AppState>,
     kind: String,
@@ -183,6 +160,7 @@ pub(crate) fn delete_semantic_index(
     let kind = kind.trim();
     if kind == "semantic" {
         vector::delete_index_files();
+        let _ = m3::delete_files();
         profile::delete_all_files();
         accelerator::delete_index(state.inner());
         vector::clear_memory_cache(state.inner());
@@ -239,22 +217,6 @@ pub(crate) async fn build_semantic_multi_profile(app: tauri::AppHandle) -> Resul
     profile::build(app).await
 }
 
-fn write_rmp_hashed<T: Serialize + ?Sized>(
-    path: &std::path::Path,
-    value: &T,
-) -> Result<(u64, String), String> {
-    crate::atomic_file::write_with(path, |file| {
-        let buffered = std::io::BufWriter::new(file);
-        let mut writer = IntegrityWriter::new(buffered);
-        rmp_serde::encode::write(&mut writer, value)
-            .map_err(|error| format!("序列化索引失败：{error}"))?;
-        writer
-            .flush()
-            .map_err(|error| format!("刷新索引失败：{error}"))?;
-        Ok(writer.finish())
-    })
-}
-
 /// 查询建立语义索引的进度。
 #[tauri::command]
 pub(crate) fn semantic_status(
@@ -268,8 +230,13 @@ pub(crate) fn semantic_status(
 pub(crate) fn semantic_tasks(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
+    reconcile: Option<bool>,
 ) -> status::SemanticTaskCenter {
-    status::task_center(status::snapshot(&app, state.inner()))
+    status::task_center(status::snapshot(
+        &app,
+        state.inner(),
+        reconcile.unwrap_or(false),
+    ))
 }
 
 /// 用户进入语义检索界面时提前初始化模型、跑一次编码 warmup，并按当前内存预算载入加速分片。
@@ -324,10 +291,10 @@ mod tests {
         ));
         let path = dir.join("global.map");
         let entries = vec![(7_u64, 3_u32, "第一个片段"), (8, 4, "第二个片段")];
-        let (bytes, hash) = write_rmp_hashed(&path, entries.as_slice()).unwrap();
+        let (bytes, hash) = storage::write_rmp_hashed(&path, entries.as_slice()).unwrap();
         let published = std::fs::read(&path).unwrap();
         assert_eq!(bytes, published.len() as u64);
-        assert_eq!(hash, sha256_hex(&published));
+        assert_eq!(hash, storage::sha256_hex(&published));
         let decoded: Vec<(u64, u32, String)> = rmp_serde::from_slice(&published).unwrap();
         assert_eq!(decoded.len(), 2);
         std::fs::remove_dir_all(dir).unwrap();

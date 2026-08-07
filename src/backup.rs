@@ -14,6 +14,15 @@ const RESTORE_TRANSACTION_FILE: &str = ".restore-transaction.json";
 const RESTORE_TRANSACTION_VERSION: u32 = 2;
 static BACKUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serializes a core-data installation with backup and restore. Callers that
+/// also need the in-memory core locks must acquire this first, then take the
+/// locks in `lock_core_data` order; that prevents backup/install lock inversions.
+pub(crate) fn core_installation_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    BACKUP_LOCK
+        .lock()
+        .map_err(|_| "核心数据安装锁定失败".to_string())
+}
+
 #[derive(Clone, Default, Serialize)]
 pub(crate) struct BackupStatus {
     directory: String,
@@ -369,11 +378,19 @@ fn create_locked(state: &AppState, force: bool) -> Result<BackupStatus, String> 
 }
 
 pub(crate) fn create(state: &AppState, force: bool) -> Result<BackupStatus, String> {
-    let _operation = BACKUP_LOCK
-        .lock()
-        .map_err(|_| "恢复点任务锁定失败".to_string())?;
+    let _operation = core_installation_lock().map_err(|_| "恢复点任务锁定失败".to_string())?;
     let _external_dict = crate::external_dict::maintenance_lock();
     create_locked(state, force)
+}
+
+impl BackupStatus {
+    pub(crate) fn latest_id(&self) -> Result<&str, String> {
+        if self.latest.is_empty() {
+            Err("刚创建的恢复点没有有效标识".to_string())
+        } else {
+            Ok(&self.latest)
+        }
+    }
 }
 
 fn safe_backup_id(id: &str) -> bool {
@@ -1063,6 +1080,81 @@ fn stage_restore_files(pairs: &[(PathBuf, PathBuf)]) -> Result<Vec<RestoreFilePl
     Ok(plans)
 }
 
+/// Prepare one generated runtime projection for the same durable installation
+/// protocol used by recovery-point restore. The bytes are fully serialized and
+/// synced before any live file is moved aside.
+fn stage_runtime_projection(destination: &Path, bytes: &[u8]) -> Result<RestoreFilePlan, String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("无法确定运行时投影目录：{}", destination.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("创建运行时投影目录失败 {}：{error}", parent.display()))?;
+    let staged = staging_path(destination, "restore-new")?;
+    let previous = staging_path(destination, "restore-previous")?;
+    remove_file_if_present(&staged, "清理旧运行时投影暂存文件失败")?;
+    if try_exists(&previous, "检查旧运行时投影回滚副本失败")? {
+        if try_exists(destination, "检查运行时投影目标失败")? {
+            return Err(format!(
+                "检测到未完成安装的原文件副本，请保留并检查：{}",
+                previous.display()
+            ));
+        }
+        std::fs::rename(&previous, destination).map_err(|error| {
+            format!(
+                "恢复上次未完成安装的原文件失败 {}：{error}",
+                destination.display()
+            )
+        })?;
+    }
+    atomic_file::write(&staged, bytes)
+        .map_err(|error| format!("暂存运行时投影失败 {}：{error}", staged.display()))?;
+    let expected = file_sha256(&staged)?;
+    let had_previous = try_exists(destination, "检查运行时投影目标失败")?;
+    let original = if had_previous {
+        Some(file_sha256(destination)?)
+    } else {
+        None
+    };
+    Ok(RestoreFilePlan {
+        destination: destination.to_path_buf(),
+        staged,
+        previous,
+        had_previous,
+        expected_bytes: expected.0,
+        expected_sha256: expected.1,
+        original_bytes: original.as_ref().map(|integrity| integrity.0),
+        original_sha256: original.map(|integrity| integrity.1),
+    })
+}
+
+fn stage_runtime_projections(
+    directory: &Path,
+    files: &[(&str, Vec<u8>)],
+) -> Result<Vec<RestoreFilePlan>, String> {
+    if files.len() != PORTABLE_FILES.len()
+        || files.iter().any(|(name, _)| !PORTABLE_FILES.contains(name))
+        || files
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != files.len()
+    {
+        return Err("运行时投影必须且只能包含 library.json、stats.json、vocab.json".to_string());
+    }
+    let mut plans = Vec::with_capacity(files.len());
+    for (name, bytes) in files {
+        match stage_runtime_projection(&directory.join(name), bytes) {
+            Ok(plan) => plans.push(plan),
+            Err(error) => {
+                cleanup_restore_plans(&plans);
+                return Err(error);
+            }
+        }
+    }
+    Ok(plans)
+}
+
 /// Publish all staged files but retain every `.restore-previous-*` file until
 /// the caller has reopened and validated the restored database.
 #[cfg(test)]
@@ -1434,6 +1526,32 @@ where
     }
 }
 
+fn install_runtime_projections_in_directory_with<C>(
+    directory: &Path,
+    files: &[(&str, Vec<u8>)],
+    commit_file: C,
+) -> Result<(), String>
+where
+    C: FnMut(usize, &RestoreFilePlan) -> Result<(), String>,
+{
+    let plans = stage_runtime_projections(directory, files)?;
+    install_restore_plans_with_validation(&plans, &[], commit_file, || Ok(()))
+}
+
+/// Atomically publish the complete runtime projection generated from SQLite.
+///
+/// The caller must hold `core_installation_lock` before taking the library,
+/// stats and vocabulary mutexes, and must retain those mutexes until this
+/// function returns. This is a durable multi-file transaction: failures during
+/// a later replacement restore every earlier projection from its same-directory
+/// rollback copy; interrupted installations are recovered at next startup.
+pub(crate) fn install_runtime_projections_locked(files: &[(&str, Vec<u8>)]) -> Result<(), String> {
+    let directory = config_dir()?;
+    install_runtime_projections_in_directory_with(&directory, files, |_index, plan| {
+        atomic_file::commit_temp_file(&plan.staged, &plan.destination)
+    })
+}
+
 /// Restore a recovery point after first capturing the current state. The
 /// database connection is deliberately reopened before returning so the UI can
 /// immediately reload the recovered shelf without asking users to restart.
@@ -1759,13 +1877,21 @@ mod tests {
         std::fs::create_dir_all(&destination).unwrap();
         let database = destination.join("reader.db");
         let library = destination.join("library.json");
+        let stats = destination.join("stats.json");
+        let vocab = destination.join("vocab.json");
         std::fs::write(source.join("reader.db"), b"new-db").unwrap();
         std::fs::write(source.join("library.json"), b"new-json").unwrap();
+        std::fs::write(source.join("stats.json"), b"new-stats").unwrap();
+        std::fs::write(source.join("vocab.json"), b"new-vocab").unwrap();
         std::fs::write(&database, b"old-db").unwrap();
         std::fs::write(&library, b"old-json").unwrap();
+        std::fs::write(&stats, b"old-stats").unwrap();
+        std::fs::write(&vocab, b"old-vocab").unwrap();
         let plans = stage_restore_files(&[
             (source.join("reader.db"), database.clone()),
             (source.join("library.json"), library.clone()),
+            (source.join("stats.json"), stats.clone()),
+            (source.join("vocab.json"), vocab.clone()),
         ])
         .unwrap();
         let mut wal = database.as_os_str().to_os_string();
@@ -1779,6 +1905,8 @@ mod tests {
             || {
                 assert_eq!(std::fs::read(&database).unwrap(), b"new-db");
                 assert_eq!(std::fs::read(&library).unwrap(), b"new-json");
+                assert_eq!(std::fs::read(&stats).unwrap(), b"new-stats");
+                assert_eq!(std::fs::read(&vocab).unwrap(), b"new-vocab");
                 assert!(plans.iter().all(|plan| plan.previous.exists()));
                 std::fs::write(&wal, b"new-database-wal").unwrap();
                 Err::<(), _>("injected AppDb::open failure".to_string())
@@ -1788,6 +1916,8 @@ mod tests {
         assert!(result.unwrap_err().contains("已还原恢复前文件"));
         assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
         assert_eq!(std::fs::read(&library).unwrap(), b"old-json");
+        assert_eq!(std::fs::read(&stats).unwrap(), b"old-stats");
+        assert_eq!(std::fs::read(&vocab).unwrap(), b"old-vocab");
         assert!(!wal.exists());
         assert_no_restore_artifacts(&destination);
         std::fs::remove_dir_all(dir).unwrap();
@@ -1862,6 +1992,47 @@ mod tests {
         assert_eq!(std::fs::read(&first).unwrap(), b"old-db");
         assert_eq!(std::fs::read(&second).unwrap(), b"old-json");
         assert_no_restore_artifacts(&destination);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runtime_projection_install_failure_restores_sqlite_and_every_projection() {
+        let dir = temp_test_dir("migration-projection-rollback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        let library = dir.join("library.json");
+        let stats = dir.join("stats.json");
+        let vocab = dir.join("vocab.json");
+        std::fs::write(&database, b"old-db").unwrap();
+        std::fs::write(&library, b"old-library").unwrap();
+        std::fs::write(&stats, b"old-stats").unwrap();
+        std::fs::write(&vocab, b"old-vocab").unwrap();
+        let projections = vec![
+            ("library.json", b"new-library".to_vec()),
+            ("stats.json", b"new-stats".to_vec()),
+            ("vocab.json", b"new-vocab".to_vec()),
+        ];
+
+        let result =
+            install_runtime_projections_in_directory_with(&dir, &projections, |index, plan| {
+                if index == 2 {
+                    assert_eq!(std::fs::read(&library).unwrap(), b"new-library");
+                    assert_eq!(std::fs::read(&stats).unwrap(), b"new-stats");
+                    return Err("injected final projection commit failure".into());
+                }
+                atomic_file::commit_temp_file(&plan.staged, &plan.destination)
+            });
+
+        assert!(result.is_err());
+        // The SQLite byte image stands in for the import transaction's DB
+        // state. The projection installer never mutates it, and the complete
+        // pre-install image remains intact while every partly committed JSON
+        // projection has been restored by the same durable transaction.
+        assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
+        assert_eq!(std::fs::read(&library).unwrap(), b"old-library");
+        assert_eq!(std::fs::read(&stats).unwrap(), b"old-stats");
+        assert_eq!(std::fs::read(&vocab).unwrap(), b"old-vocab");
+        assert_no_restore_artifacts(&dir);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

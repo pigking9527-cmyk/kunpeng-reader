@@ -90,6 +90,48 @@ pub(crate) fn save_download_image(name: String, data_url: String) -> Result<Stri
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// Saves the user-requested, redacted problem-trace attachment directly to the desktop.
+/// The UI already enforces the same limit before an attachment can be submitted; validate
+/// again here so the command cannot be used to write arbitrary large/non-JSON data.
+#[tauri::command]
+pub(crate) fn save_problem_trace_to_desktop(name: String, data: String) -> Result<String, String> {
+    use base64::Engine;
+
+    const MAX_JSON_BYTES: usize = 256 * 1024;
+    if data.len() > MAX_JSON_BYTES.saturating_mul(2) {
+        return Err("问题记录超过 256 KB，无法保存".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| "问题记录数据格式不正确".to_string())?;
+    if bytes.is_empty() || bytes.len() > MAX_JSON_BYTES {
+        return Err("问题记录超过 256 KB，无法保存".to_string());
+    }
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "问题记录不是有效的 JSON".to_string())?;
+
+    let mut safe_name = name
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if safe_name.is_empty() {
+        safe_name = format!("kunpeng-reader-problem-trace-{}.json", now_ms());
+    }
+    if !safe_name.to_ascii_lowercase().ends_with(".json") {
+        safe_name.push_str(".json");
+    }
+    let mut path = dirs::desktop_dir().ok_or_else(|| "找不到桌面目录".to_string())?;
+    path.push(&safe_name);
+    if path.exists() {
+        let base = safe_name.trim_end_matches(".json");
+        path.set_file_name(format!("{base}-{}.json", now_ms()));
+    }
+    std::fs::write(&path, bytes).map_err(|error| format!("保存问题记录失败：{error}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// 离线词典查词（按中/英自动选库）。
 #[tauri::command]
 pub(crate) fn dict_lookup(term: String, context: Option<String>) -> dict::DictResult {

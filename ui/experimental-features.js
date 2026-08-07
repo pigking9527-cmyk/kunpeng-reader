@@ -42,16 +42,19 @@
     const close = () => {
       settingsModal.classList.remove("show");
     };
+    const openSettings = () => {
+      refresh();
+      settingsModal.classList.add("show");
+    };
     gear.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      refresh();
-      settingsModal.classList.add("show");
+      openSettings();
     });
     closeSettings.addEventListener("click", close);
     settingsModal.addEventListener("click", (event) => { if (event.target === settingsModal) close(); });
     refresh();
-    return { refresh };
+    return { refresh, openSettings, closeSettings: close };
   }
 
   const api = { STORAGE_KEY, enabled, set, init, instance: null };

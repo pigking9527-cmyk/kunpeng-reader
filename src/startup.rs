@@ -295,6 +295,15 @@ pub(crate) fn spawn_maintenance(app: tauri::AppHandle) {
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         search::spawn_build_index(app.clone());
+        // 语义索引的续建只能由用户在“语义索引”面板显式点击触发。升级后
+        // 自动迁移旧切块会恰好与打开设置页重合，造成“刚进入就自动续建”的
+        // 观感，还会抢占前台交互。因此这里只记录待更新状态，不后台启动任务。
+        emit_startup_perf(
+            &app,
+            "semantic-chunk-v2",
+            "deferred",
+            "manual semantic-index rebuild only",
+        );
         emit_startup_perf(
             &app,
             "startup-maintenance",

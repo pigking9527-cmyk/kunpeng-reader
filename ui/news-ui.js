@@ -14,6 +14,7 @@
   const BACKGROUND_PREFETCH_DELAY_MS = 30 * 1000;
   const BACKGROUND_PREFETCH_INTERVAL_MS = 5 * 60 * 1000;
   const BACKGROUND_PREFETCH_BATCHES = 4;
+  const VISIBLE_IMAGE_CONCURRENCY = 4;
 
   const text = (value) => String(value == null ? "" : value);
   const i18n = (key, fallback) => global.ReaderAppI18n?.t?.(key) || fallback;
@@ -81,13 +82,22 @@
     const page = root.getElementById("newsnow-page");
     const back = root.getElementById("newsnow-back");
     const refresh = root.getElementById("newsnow-refresh");
+    const gestureSettings = root.getElementById("newsnow-gesture-settings");
+    const gestureEnabledInput = root.getElementById("newsnow-gesture-enabled");
+    const gesturePrecisionSelect = root.getElementById("newsnow-gesture-precision");
+    const gestureEditorToggle = root.getElementById("newsnow-gesture-editor-toggle");
+    const gestureEditor = root.getElementById("newsnow-gesture-editor");
+    const gesturePad = root.getElementById("newsnow-gesture-pad");
+    const gestureSave = root.getElementById("newsnow-gesture-save");
+    const gestureClear = root.getElementById("newsnow-gesture-clear");
+    const gestureStatus = root.getElementById("newsnow-gesture-status");
+    const gestureTrail = root.getElementById("newsnow-gesture-trail");
     const sourceToggle = root.getElementById("newsnow-source-toggle");
     const sourcePicker = root.getElementById("newsnow-source-picker");
     const sourceSearch = root.getElementById("newsnow-source-search");
     const sourceOptions = root.getElementById("newsnow-source-options");
+    const sourceStatus = root.getElementById("newsnow-source-status");
     const sourceClose = root.getElementById("newsnow-source-close");
-    const sourceApply = root.getElementById("newsnow-source-apply");
-    const sourceReset = root.getElementById("newsnow-source-reset");
     const tiebaBars = root.getElementById("newsnow-tieba-bars");
     const tiebaAddToggle = root.getElementById("newsnow-tieba-add-toggle");
     const tiebaBarForm = root.getElementById("newsnow-tieba-bar-form");
@@ -102,6 +112,7 @@
     const sourceOrder = root.getElementById("newsnow-order-source");
     const status = root.getElementById("newsnow-status");
     const feed = root.getElementById("newsnow-feed");
+    const feedView = root.getElementById("newsnow-feed-view");
     const reader = root.getElementById("newsnow-reader");
     const readerStatus = root.getElementById("newsnow-reader-status");
     const readerBack = root.getElementById("newsnow-reader-back");
@@ -112,14 +123,19 @@
     const categories = root.getElementById("newsnow-categories");
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
-    if (!button || !page || !back || !refresh || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceClose || !sourceApply || !sourceReset || !tiebaBars || !tiebaAddToggle || !tiebaBarForm || !tiebaBarInput || !tiebaBarCancel || !tiebaBarList || !tiebaBarCount || !sourceSelection || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !reader || !readerStatus || !readerBack || !readerMeta || !readerTitle || !readerOriginal || !readerContent || !categories || !updated || !shell) return null;
+    const gestureApi = global.ReaderNewsGesture;
+    if (!button || !page || !back || !refresh || !gestureSettings || !gestureEnabledInput || !gesturePrecisionSelect || !gestureEditorToggle || !gestureEditor || !gesturePad || !gestureSave || !gestureClear || !gestureStatus || !gestureTrail || !gestureApi || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceStatus || !sourceClose || !tiebaBars || !tiebaAddToggle || !tiebaBarForm || !tiebaBarInput || !tiebaBarCancel || !tiebaBarList || !tiebaBarCount || !sourceSelection || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !feedView || !reader || !readerStatus || !readerBack || !readerMeta || !readerTitle || !readerOriginal || !readerContent || !categories || !updated || !shell) return null;
 
     let catalog = [], sourceIds = [], pendingSourceIds = [], tiebaBarNames = loadStoredTiebaBars(), tiebaEnabledBarNames = loadStoredEnabledTiebaBars(tiebaBarNames), pendingTiebaBarNames = [], pendingTiebaEnabledBarNames = [], allItems = [];
     let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
     let layout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
-    let articleScrollTop = 0, articleOpen = false, currentArticleUrl = "", masonryResizeTimer = 0, renderedMasonryColumnCount = 0, feedRenderPending = false;
-    let backgroundRefreshRunning = false, prefetchDelayTimer = 0, prefetchIntervalTimer = 0, lastUserActivityAt = Date.now();
+    let articleScrollTop = 0, sourcePageScrollTop = 0, articleOpen = false, currentArticleUrl = "", masonryResizeTimer = 0, renderedMasonryColumnCount = 0, feedRenderPending = false;
+    let backgroundRefreshRunning = false, prefetchDelayTimer = 0, prefetchIntervalTimer = 0, lastUserActivityAt = Date.now(), sourceRefreshTimer = 0;
+    let savedGesture = gestureApi.load(global.localStorage), gestureEnabled = gestureApi.loadEnabled(global.localStorage), gesturePrecision = gestureApi.loadPrecision(global.localStorage), trainingPoints = [], trainingPointerId = null;
+    let activeGesture = null, suppressContextMenuUntil = 0;
+    let visibleImageRunning = 0;
+    const visibleImageQueue = [];
 
     const newsEnabled = () => global.ReaderExperimentalFeatures?.enabled?.("newsnow") === true;
     const backgroundPrefetchEnabled = () => global.ReaderExperimentalFeatures?.enabled?.("newsnowPrefetch") === true;
@@ -129,6 +145,7 @@
       if (!enabled && (!page.hidden || !reader.hidden)) close({ focus: false });
     }
     function setStatus(message, kind = "") { status.textContent = text(message); status.className = "newsnow-status" + (kind ? " " + kind : ""); }
+    function setSourceStatus(message, kind = "") { sourceStatus.textContent = text(message); sourceStatus.className = "newsnow-source-status" + (kind ? " " + kind : ""); }
     function sourceForId(id) { return catalog.find((source) => text(source.id) === text(id)); }
     function renderSourceSelection() { sourceSelection.textContent = format("newsSelectedSources", "已选 {count} / {max}", { count: pendingSourceIds.length, max: MAX_SOURCES }); }
     function syncPendingTiebaSource() {
@@ -137,6 +154,33 @@
       if (pendingSourceIds.includes("tieba")) return true;
       if (pendingSourceIds.length >= MAX_SOURCES) return false;
       pendingSourceIds = [...pendingSourceIds, "tieba"];
+      return true;
+    }
+    function scheduleSourceRefresh() {
+      global.clearTimeout(sourceRefreshTimer);
+      sourceRefreshTimer = global.setTimeout(() => {
+        if (loading) { scheduleSourceRefresh(); return; }
+        void load(true);
+      }, 450);
+    }
+    function persistSourceChanges() {
+      const activeTiebaBars = enabledTiebaBars(pendingTiebaEnabledBarNames, pendingTiebaBarNames);
+      const selected = allowedSourceIds(pendingSourceIds.filter((id) => id !== "tieba"), catalog);
+      if (activeTiebaBars.length) {
+        if (selected.length >= MAX_SOURCES) { setSourceStatus(format("maxSources", "最多选择 {max} 个来源。", { max: MAX_SOURCES }), "warning"); return false; }
+        selected.push("tieba");
+      }
+      if (!selected.length) { setSourceStatus(i18n("newsSourceRequired", "Keep at least one news source."), "warning"); return false; }
+      sourceIds = selected;
+      tiebaBarNames = normalizeTiebaBars(pendingTiebaBarNames);
+      tiebaEnabledBarNames = activeTiebaBars;
+      storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds));
+      storageSet(TIEBA_BARS_STORAGE_KEY, JSON.stringify(tiebaBarNames));
+      storageSet(TIEBA_ENABLED_BARS_STORAGE_KEY, JSON.stringify(tiebaEnabledBarNames));
+      selectedCategory = "全部";
+      renderCategories();
+      setSourceStatus(i18n("newsSourcesSaved", "Saved. Refreshing news automatically…"), "muted");
+      scheduleSourceRefresh();
       return true;
     }
     function renderTiebaBars() {
@@ -149,14 +193,16 @@
         enabled.type = "checkbox"; enabled.checked = pendingTiebaEnabledBarNames.includes(bar); enabled.title = `启用 ${bar}吧`; enabled.setAttribute("aria-label", enabled.title);
         name.textContent = `${bar}吧`;
         enabled.addEventListener("change", () => {
+          const previousEnabled = pendingTiebaEnabledBarNames.slice(), previousSources = pendingSourceIds.slice();
           if (enabled.checked) {
             if (!pendingTiebaEnabledBarNames.includes(bar)) pendingTiebaEnabledBarNames = [...pendingTiebaEnabledBarNames, bar];
-            if (!syncPendingTiebaSource()) { pendingTiebaEnabledBarNames = pendingTiebaEnabledBarNames.filter((name) => name !== bar); enabled.checked = false; setStatus(format("maxSources", "最多选择 {max} 个来源。", { max: MAX_SOURCES }), "warning"); }
+            if (!syncPendingTiebaSource()) { pendingTiebaEnabledBarNames = pendingTiebaEnabledBarNames.filter((name) => name !== bar); enabled.checked = false; setSourceStatus(format("maxSources", "最多选择 {max} 个来源。", { max: MAX_SOURCES }), "warning"); }
           } else { pendingTiebaEnabledBarNames = pendingTiebaEnabledBarNames.filter((name) => name !== bar); syncPendingTiebaSource(); }
+          if (!persistSourceChanges()) { pendingTiebaEnabledBarNames = previousEnabled; pendingSourceIds = previousSources; enabled.checked = previousEnabled.includes(bar); }
           renderTiebaBars(); renderSourceSelection();
         });
         remove.type = "button"; remove.title = `删除 ${bar}吧`; remove.setAttribute("aria-label", remove.title); remove.textContent = "×";
-        remove.addEventListener("click", () => { pendingTiebaBarNames = pendingTiebaBarNames.filter((name) => name !== bar); pendingTiebaEnabledBarNames = pendingTiebaEnabledBarNames.filter((name) => name !== bar); syncPendingTiebaSource(); renderTiebaBars(); renderSourceSelection(); });
+        remove.addEventListener("click", () => { const previousBars = pendingTiebaBarNames.slice(), previousEnabled = pendingTiebaEnabledBarNames.slice(), previousSources = pendingSourceIds.slice(); pendingTiebaBarNames = pendingTiebaBarNames.filter((name) => name !== bar); pendingTiebaEnabledBarNames = pendingTiebaEnabledBarNames.filter((name) => name !== bar); syncPendingTiebaSource(); if (!persistSourceChanges()) { pendingTiebaBarNames = previousBars; pendingTiebaEnabledBarNames = previousEnabled; pendingSourceIds = previousSources; } renderTiebaBars(); renderSourceSelection(); });
         chip.append(enabled, name, remove); return chip;
       }));
     }
@@ -205,8 +251,10 @@
           const label = root.createElement("label"), checkbox = root.createElement("input"), swatch = root.createElement("i"), name = root.createElement("span"), id = text(source.id);
           checkbox.type = "checkbox"; checkbox.checked = selected.has(id); label.className = "newsnow-source-choice" + (checkbox.checked ? " selected" : ""); swatch.style.background = text(source.color || "#718097"); name.textContent = text(source.name);
           checkbox.addEventListener("change", () => {
-            if (checkbox.checked) { if (pendingSourceIds.length >= MAX_SOURCES) { checkbox.checked = false; setStatus(format("maxSources", "最多选择 {max} 个来源。", { max: MAX_SOURCES }), "warning"); return; } pendingSourceIds = [...pendingSourceIds, id]; }
+            const previousSources = pendingSourceIds.slice();
+            if (checkbox.checked) { if (pendingSourceIds.length >= MAX_SOURCES) { checkbox.checked = false; setSourceStatus(format("maxSources", "最多选择 {max} 个来源。", { max: MAX_SOURCES }), "warning"); return; } pendingSourceIds = [...pendingSourceIds, id]; }
             else pendingSourceIds = pendingSourceIds.filter((value) => value !== id);
+            if (!persistSourceChanges()) { pendingSourceIds = previousSources; checkbox.checked = previousSources.includes(id); }
             label.classList.toggle("selected", checkbox.checked); renderSourceSelection();
           });
           label.append(checkbox, swatch, name); choices.appendChild(label);
@@ -214,9 +262,9 @@
         group.append(title, choices); return group;
       }));
     }
-    function openSourcePicker() { pendingSourceIds = sourceIds.slice(); pendingTiebaBarNames = tiebaBarNames.slice(); pendingTiebaEnabledBarNames = tiebaEnabledBarNames.slice(); syncPendingTiebaSource(); sourceQuery = ""; sourceSearch.value = ""; setTiebaAddOpen(false); renderSourcePicker(); sourcePicker.hidden = false; sourceToggle.setAttribute("aria-expanded", "true"); sourceSearch.focus({ preventScroll: true }); }
-    function closeSourcePicker({ focus = false } = {}) { setTiebaAddOpen(false); sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); if (focus) sourceToggle.focus({ preventScroll: true }); }
-    function setReaderVisible(visible) { reader.hidden = !visible; page.hidden = visible; sourcePicker.hidden = true; sourceToggle.setAttribute("aria-expanded", "false"); }
+    function openSourcePicker() { pendingSourceIds = sourceIds.slice(); pendingTiebaBarNames = tiebaBarNames.slice(); pendingTiebaEnabledBarNames = tiebaEnabledBarNames.slice(); syncPendingTiebaSource(); sourceQuery = ""; sourceSearch.value = ""; sourceStatus.textContent = ""; setTiebaAddOpen(false); renderSourcePicker(); sourcePageScrollTop = page.scrollTop; feedView.hidden = true; sourcePicker.hidden = false; page.classList.add("newsnow-source-page-active"); page.scrollTop = 0; sourceToggle.setAttribute("aria-expanded", "true"); sourceSearch.focus({ preventScroll: true }); }
+    function closeSourcePicker({ focus = false, restoreScroll = true } = {}) { const wasOpen = !sourcePicker.hidden; setTiebaAddOpen(false); sourcePicker.hidden = true; feedView.hidden = false; page.classList.remove("newsnow-source-page-active"); sourceToggle.setAttribute("aria-expanded", "false"); if (wasOpen && restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = sourcePageScrollTop; if (feedRenderPending || layout === "grid") renderFeed(); }); if (focus) sourceToggle.focus({ preventScroll: true }); }
+    function setReaderVisible(visible) { reader.hidden = !visible; page.hidden = visible; closeSourcePicker({ restoreScroll: false }); }
     function renderLocalArticle(article) {
       readerMeta.textContent = [text(article?.source).trim(), text(article?.publishedAt || article?.published_at).trim()].filter(Boolean).join(" · ");
       readerTitle.textContent = text(article?.title).trim() || "资讯正文";
@@ -233,6 +281,78 @@
       if (restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; });
       if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true });
     }
+    function activeGestureSurface() { return gestureEnabled ? (!reader.hidden ? reader : (!page.hidden ? page : null)) : null; }
+    function paintGestureTrail(points) {
+      gestureTrail.hidden = false;
+      gestureApi.draw(gestureTrail, points, { color: "#3478d4", lineWidth: 5 });
+    }
+    function clearGestureTrail() {
+      gestureTrail.hidden = true;
+      gestureApi.draw(gestureTrail, []);
+      gestureTrail.classList.remove("matched", "rejected");
+    }
+    function beginBackGesture(event) {
+      if (event.button !== 2 || event.target?.closest?.(".modal")) return;
+      const surface = activeGestureSurface();
+      if (!surface || !surface.contains(event.target)) return;
+      event.preventDefault();
+      activeGesture = { points: [{ x: event.clientX, y: event.clientY }] };
+      paintGestureTrail(activeGesture.points);
+    }
+    function moveBackGesture(event) {
+      if (!activeGesture) return;
+      event.preventDefault();
+      const previous = activeGesture.points[activeGesture.points.length - 1];
+      if (Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 4) return;
+      activeGesture.points.push({ x: event.clientX, y: event.clientY });
+      if (activeGesture.points.length > 160) activeGesture.points.splice(1, 1);
+      paintGestureTrail(activeGesture.points);
+    }
+    function finishBackGesture(event, { cancelled = false } = {}) {
+      if (!activeGesture) return;
+      const gesture = activeGesture; activeGesture = null;
+      const score = cancelled || !savedGesture.length ? 0 : gestureApi.similarity(savedGesture, gesture.points);
+      const matched = score >= gestureApi.matchThreshold(gesturePrecision);
+      if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
+      // 松开右键便结束绘制，不保留灰色或绿色结果轨迹。
+      clearGestureTrail();
+      if (!matched) return;
+      if (!reader.hidden) closeArticle({ focus: false });
+      else if (!sourcePicker.hidden) closeSourcePicker({ focus: false });
+      else close({ focus: false });
+    }
+    function gesturePadPoint(event) {
+      const rect = gesturePad.getBoundingClientRect();
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    }
+    function renderSavedGesture() {
+      gestureEnabledInput.checked = gestureEnabled;
+      gesturePrecisionSelect.value = gesturePrecision;
+      if (!trainingPoints.length) gestureApi.draw(gesturePad, savedGesture, { normalized: true, color: savedGesture.length ? "#3478d4" : "#a4afbd", lineWidth: 5 });
+    }
+    function beginGestureTraining(event) {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      trainingPointerId = event.pointerId;
+      trainingPoints = [gesturePadPoint(event)];
+      try { gesturePad.setPointerCapture(event.pointerId); } catch (_) { /* best effort */ }
+      gestureStatus.textContent = "正在记录轨迹…";
+      gestureApi.draw(gesturePad, trainingPoints, { color: "#3478d4", lineWidth: 5 });
+    }
+    function moveGestureTraining(event) {
+      if (trainingPointerId !== event.pointerId) return;
+      event.preventDefault();
+      const point = gesturePadPoint(event), previous = trainingPoints[trainingPoints.length - 1];
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) < 3) return;
+      trainingPoints.push(point);
+      gestureApi.draw(gesturePad, trainingPoints, { color: "#3478d4", lineWidth: 5 });
+    }
+    function finishGestureTraining(event) {
+      if (trainingPointerId !== event.pointerId) return;
+      trainingPointerId = null;
+      try { gesturePad.releasePointerCapture(event.pointerId); } catch (_) { /* best effort */ }
+      gestureStatus.textContent = gestureApi.pathLength(trainingPoints) >= gestureApi.MIN_PATH_LENGTH ? "轨迹已画好，点击“保存轨迹”生效。" : "轨迹太短，请重新画。";
+    }
     async function openArticle(item) {
       const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
       articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; currentArticleUrl = url; readerMeta.textContent = sourceName(item); readerTitle.textContent = text(item.title || item.name || "资讯正文"); readerContent.replaceChildren(); readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true);
@@ -242,6 +362,8 @@
           title: text(item.title || item.name),
           summary: text(item.summary || item.description || item.content || item.excerpt),
           publishedAt: text(item.publishedAt || item.published_at || item.pubDate || item.date),
+          gestureEnabled,
+          gesturePoints: savedGesture.map((point) => [point.x, point.y]),
         } });
         if (article?.local) renderLocalArticle(article);
         else readerStatus.textContent = "";
@@ -250,7 +372,54 @@
     }
     function applyCardImage(image, card, url) {
       if (!url) return;
-      image.src = url; image.hidden = false; card.classList.add("has-image");
+      image.classList.remove("loading"); image.src = url; image.hidden = false; card.classList.add("has-image");
+    }
+    function runVisibleImageQueue() {
+      while (visibleImageRunning < VISIBLE_IMAGE_CONCURRENCY && visibleImageQueue.length) {
+        const job = visibleImageQueue.shift();
+        if (!job?.image?.isConnected || job.image.dataset.previewLoaded === "true") continue;
+        visibleImageRunning += 1;
+        job.item.previewAttempted = true;
+        Promise.resolve(invoke("newsnow_preview_image", { request: {
+          url: job.url,
+          imageUrl: text(job.item.imageUrl || job.item.image_url || job.item.image || job.item.cover),
+          sourceId: sourceId(job.item),
+          itemId: text(job.item.id || job.item.itemId || job.item.item_id),
+        } })).then((preview) => {
+          const value = safeImageDataUrl(preview?.imageDataUrl || preview?.image_data_url);
+          if (value && job.image.isConnected) {
+            job.item.previewDataUrl = value;
+            job.image.dataset.previewLoaded = "true";
+            applyCardImage(job.image, job.card, value);
+          } else if (job.image.isConnected) {
+            job.image.classList.remove("loading"); job.image.hidden = true;
+          }
+        }).catch(() => {
+          if (job.image.isConnected) { job.image.classList.remove("loading"); job.image.hidden = true; }
+        }).finally(() => { visibleImageRunning -= 1; runVisibleImageQueue(); });
+      }
+    }
+    const visibleImageObserver = typeof global.IntersectionObserver === "function" ? new global.IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        visibleImageObserver.unobserve(entry.target);
+        const job = entry.target.__newsPreviewJob;
+        if (job) { entry.target.__newsPreviewJob = null; visibleImageQueue.push(job); runVisibleImageQueue(); }
+      });
+    }, { root: page, rootMargin: "500px 0px" }) : null;
+    function resetVisibleImageQueue() {
+      visibleImageQueue.length = 0;
+      if (!visibleImageObserver) return;
+      feed.querySelectorAll(".newsnow-card-image").forEach((image) => {
+        visibleImageObserver.unobserve(image); image.__newsPreviewJob = null;
+      });
+    }
+    function scheduleVisibleImage(item, image, card, url) {
+      if (!invoke || !url || previewAttempted(item)) return;
+      image.hidden = false; image.classList.add("loading");
+      const job = { item, image, card, url };
+      if (visibleImageObserver) { image.__newsPreviewJob = job; visibleImageObserver.observe(image); }
+      else global.setTimeout(() => { visibleImageQueue.push(job); runVisibleImageQueue(); }, 0);
     }
     function makeCard(item) {
       const article = root.createElement("article"), url = safeHttpUrl(item.url || item.link || item.href), rail = root.createElement("div"), content = root.createElement("div"), meta = root.createElement("div"), source = root.createElement("span"), title = root.createElement("h2");
@@ -258,10 +427,11 @@
       const time = itemDate(item); if (time) { const timeEl = root.createElement("time"); timeEl.textContent = time; meta.appendChild(timeEl); }
       const prefetchedImage = safeImageDataUrl(item.previewDataUrl || item.preview_data_url);
       const image = root.createElement("img"); image.className = "newsnow-card-image"; image.alt = ""; image.loading = "lazy"; image.hidden = true;
-      image.addEventListener("error", () => { image.hidden = true; article.classList.remove("has-image"); }); content.appendChild(image);
-      // 图片只使用后台预取并写入磁盘缓存的数据。这样卡片创建后不会再因
-      // 图片异步插入而改高、跳列；下次后台刷新拿到新缓存时再整体替换。
+      image.addEventListener("error", () => { image.classList.remove("loading"); image.hidden = true; article.classList.remove("has-image"); }); content.appendChild(image);
+      // 后台缓存负责大批量填充；尚未尝试过的可见卡片再走一个至多 4 路的
+      // 按需队列，避免首屏等待所有来源，也避免滚动时瞬间发出数百个请求。
       if (prefetchedImage) applyCardImage(image, article, prefetchedImage);
+      else scheduleVisibleImage(item, image, article, url);
       content.append(meta, title);
       const description = text(item.summary || item.description || item.content || item.excerpt).trim(); if (description) { const summary = root.createElement("p"); summary.className = "newsnow-summary"; summary.textContent = description; content.appendChild(summary); }
       if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = i18n("openWebPage", "打开网页 →"); content.appendChild(open); article.addEventListener("click", () => openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArticle(item); } }); }
@@ -303,8 +473,9 @@
       applyDisplayOptions();
       // hidden 会令 clientWidth 变成 0。此时保留最新数据，等资讯页重新可见
       // 后再渲染，避免方格布局被错误固化成单列。
-      if (page.hidden) { feedRenderPending = true; return; }
+      if (page.hidden || feedView.hidden) { feedRenderPending = true; return; }
       feedRenderPending = false;
+      resetVisibleImageQueue();
       const items = filteredItems();
       if (!items.length) { const empty = root.createElement("div"); empty.className = "newsnow-empty"; empty.textContent = allItems.length ? i18n("noNewsInCategory", "这个分类暂时没有资讯。") : i18n("noNews", "暂无资讯。请刷新，或在“管理来源”中调整显示内容。"); feed.replaceChildren(empty); return; }
       if (order === "mixed") { renderCards(feed, items); return; }
@@ -386,13 +557,39 @@
     }
     async function open() {
       if (!newsEnabled() || !invoke) return; root.getElementById("menu")?.classList.remove("show"); root.getElementById("filter-panel")?.classList.remove("show"); root.getElementById("account-panel")?.classList.remove("show"); if (!root.getElementById("library-ai-page")?.hidden) global.ReaderLibraryAiEntry?.close();
-      page.hidden = false; shell.hidden = true; global.document.body.classList.add("newsnow-active"); button.setAttribute("aria-pressed", "true");
+      page.hidden = false; feedView.hidden = false; sourcePicker.hidden = true; page.classList.remove("newsnow-source-page-active"); shell.hidden = true; global.document.body.classList.add("newsnow-active"); button.setAttribute("aria-pressed", "true");
       // 页面关闭期间完成的后台补图先应用到现有缓存，无需再点开一篇正文
       // 才能看到图片；随后正常加载最新列表。
       if (feedRenderPending) renderFeed();
       await load(false);
     }
-    function close({ focus = true } = {}) { closeSourcePicker(); closeArticle({ restoreScroll: false }); page.hidden = true; shell.hidden = false; global.document.body.classList.remove("newsnow-active"); button.setAttribute("aria-pressed", "false"); if (focus && !button.hidden) button.focus({ preventScroll: true }); }
+    function close({ focus = true } = {}) { closeSourcePicker({ restoreScroll: false }); closeArticle({ restoreScroll: false }); page.hidden = true; shell.hidden = false; global.document.body.classList.remove("newsnow-active"); button.setAttribute("aria-pressed", "false"); if (focus && !button.hidden) button.focus({ preventScroll: true }); }
+    gestureSettings.addEventListener("click", () => {
+      trainingPoints = []; gestureStatus.textContent = ""; gestureEditor.hidden = true; gestureEditorToggle.setAttribute("aria-expanded", "false");
+      global.ReaderExperimentalFeatures?.instance?.openSettings?.(); global.requestAnimationFrame(renderSavedGesture);
+    });
+    gestureEnabledInput.addEventListener("change", () => {
+      gestureEnabled = gestureApi.saveEnabled(gestureEnabledInput.checked, global.localStorage);
+      if (!gestureEnabled) { activeGesture = null; clearGestureTrail(); }
+      gestureStatus.textContent = gestureEnabled && !savedGesture.length ? i18n("gestureNeedPath", "Draw and save a gesture-back path first.") : "";
+    });
+    gesturePrecisionSelect.addEventListener("change", () => {
+      gesturePrecision = gestureApi.savePrecision(gesturePrecisionSelect.value, global.localStorage);
+      gesturePrecisionSelect.value = gesturePrecision;
+      const precisionKey = gesturePrecision === "low" ? "precisionLow" : gesturePrecision === "high" ? "precisionHigh" : "precisionMedium";
+      gestureStatus.textContent = format("gesturePrecisionSaved", "Gesture-back precision is set to {precision}.", { precision: i18n(precisionKey, gesturePrecision) });
+    });
+    gestureEditorToggle.addEventListener("click", () => {
+      const open = gestureEditor.hidden;
+      gestureEditor.hidden = !open; gestureEditorToggle.setAttribute("aria-expanded", String(open));
+      if (open) global.requestAnimationFrame(renderSavedGesture);
+    });
+    gesturePad.addEventListener("pointerdown", beginGestureTraining);
+    gesturePad.addEventListener("pointermove", moveGestureTraining);
+    gesturePad.addEventListener("pointerup", finishGestureTraining);
+    gesturePad.addEventListener("pointercancel", finishGestureTraining);
+    gestureSave.addEventListener("click", () => { const saved = gestureApi.save(trainingPoints, global.localStorage); if (!saved.length) { gestureStatus.textContent = i18n("gesturePathTooShort", "The path is too short to save."); return; } savedGesture = saved; gestureEnabled = gestureApi.saveEnabled(true, global.localStorage); trainingPoints = []; gestureStatus.textContent = i18n("gestureSaved", "Gesture back is saved and enabled."); renderSavedGesture(); });
+    gestureClear.addEventListener("click", () => { gestureApi.clear(global.localStorage); gestureEnabled = gestureApi.saveEnabled(false, global.localStorage); savedGesture = []; trainingPoints = []; activeGesture = null; clearGestureTrail(); gestureStatus.textContent = i18n("gestureCleared", "Gesture back is cleared and disabled."); renderSavedGesture(); });
     button.addEventListener("click", () => { if (!page.hidden || !reader.hidden) close({ focus: false }); else void open(); }); back.addEventListener("click", () => close()); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
     readerBack.addEventListener("click", () => closeArticle({ focus: true }));
     readerOriginal.addEventListener("click", () => { if (currentArticleUrl) void Promise.resolve(invoke("open_url", { url: currentArticleUrl })).catch(() => {}); });
@@ -402,15 +599,19 @@
       let url = ""; try { url = safeHttpUrl(new URL(link.getAttribute("href") || "", currentArticleUrl).href); } catch (_) { url = ""; }
       if (url) void Promise.resolve(invoke("open_url", { url })).catch(() => {});
     });
-    sourceToggle.addEventListener("click", () => { if (sourcePicker.hidden) void loadSources().then(openSourcePicker); else closeSourcePicker({ focus: true }); }); sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true })); sourceSearch.addEventListener("input", () => { sourceQuery = sourceSearch.value; renderSourcePicker(); }); sourceReset.addEventListener("click", () => { pendingSourceIds = defaultSourceIds(catalog).filter((id) => id !== "tieba"); pendingTiebaEnabledBarNames = []; renderSourcePicker(); });
+    sourceToggle.addEventListener("click", () => { if (sourcePicker.hidden) void loadSources().then(openSourcePicker); else closeSourcePicker({ focus: true }); }); sourceClose.addEventListener("click", () => closeSourcePicker({ focus: true })); sourceSearch.addEventListener("input", () => { sourceQuery = sourceSearch.value; renderSourcePicker(); });
     tiebaAddToggle.addEventListener("click", () => setTiebaAddOpen(true, { focus: true }));
     tiebaBarCancel.addEventListener("click", () => setTiebaAddOpen(false, { focus: true }));
-    tiebaBarForm.addEventListener("submit", (event) => { event.preventDefault(); const name = normalizeTiebaBars([tiebaBarInput.value])[0]; if (!name) { tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.includes(name)) { tiebaBarInput.value = ""; tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.length >= MAX_TIEBA_BARS) { setStatus(`最多添加 ${MAX_TIEBA_BARS} 个贴吧。`, "warning"); return; } pendingTiebaBarNames = [...pendingTiebaBarNames, name]; pendingTiebaEnabledBarNames = [...pendingTiebaEnabledBarNames, name]; if (!syncPendingTiebaSource()) { pendingTiebaEnabledBarNames = pendingTiebaEnabledBarNames.filter((bar) => bar !== name); setStatus(`已添加 ${name}吧；释放一个资讯来源后可启用。`, "warning"); } renderSourcePicker(); setTiebaAddOpen(false, { focus: true }); });
-    sourceApply.addEventListener("click", () => { const activeTiebaBars = enabledTiebaBars(pendingTiebaEnabledBarNames, pendingTiebaBarNames); const selected = allowedSourceIds(pendingSourceIds.filter((id) => id !== "tieba"), catalog); if (activeTiebaBars.length) { if (selected.length >= MAX_SOURCES) { setStatus(format("maxSources", "最多选择 {max} 个来源。", { max: MAX_SOURCES }), "warning"); return; } selected.push("tieba"); } if (!selected.length) { setStatus(i18n("chooseSource", "至少选择一个来源，或使用“恢复推荐”。"), "warning"); return; } sourceIds = selected; tiebaBarNames = normalizeTiebaBars(pendingTiebaBarNames); tiebaEnabledBarNames = activeTiebaBars; storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds)); storageSet(TIEBA_BARS_STORAGE_KEY, JSON.stringify(tiebaBarNames)); storageSet(TIEBA_ENABLED_BARS_STORAGE_KEY, JSON.stringify(tiebaEnabledBarNames)); selectedCategory = "全部"; renderCategories(); closeSourcePicker({ focus: true }); void load(true); });
+    tiebaBarForm.addEventListener("submit", (event) => { event.preventDefault(); const name = normalizeTiebaBars([tiebaBarInput.value])[0]; if (!name) { tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.includes(name)) { tiebaBarInput.value = ""; tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.length >= MAX_TIEBA_BARS) { setSourceStatus(format("newsTiebaLimit", "You can add up to {max} forums.", { max: MAX_TIEBA_BARS }), "warning"); return; } const previousBars = pendingTiebaBarNames.slice(), previousEnabled = pendingTiebaEnabledBarNames.slice(), previousSources = pendingSourceIds.slice(); pendingTiebaBarNames = [...pendingTiebaBarNames, name]; pendingTiebaEnabledBarNames = [...pendingTiebaEnabledBarNames, name]; if (!syncPendingTiebaSource() || !persistSourceChanges()) { pendingTiebaBarNames = previousBars; pendingTiebaEnabledBarNames = previousEnabled; pendingSourceIds = previousSources; setSourceStatus(format("newsSourceLimit", "The source limit is reached, so {name} cannot be enabled yet.", { name }), "warning"); } renderSourcePicker(); setTiebaAddOpen(false, { focus: true }); });
+    global.addEventListener("mousedown", beginBackGesture, true);
+    global.addEventListener("mousemove", moveBackGesture, { capture: true, passive: false });
+    global.addEventListener("mouseup", (event) => finishBackGesture(event), true);
+    global.addEventListener("blur", () => finishBackGesture(null, { cancelled: true }));
+    global.addEventListener("contextmenu", (event) => { const surface = activeGestureSurface(); if ((activeGesture || Date.now() < suppressContextMenuUntil) && surface?.contains(event.target)) event.preventDefault(); }, true);
     global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
     ["pointerdown", "keydown", "wheel", "touchstart"].forEach((eventName) => global.addEventListener(eventName, () => { lastUserActivityAt = Date.now(); }, { passive: true }));
     global.addEventListener("resize", () => {
-      if (layout !== "grid" || page.hidden || !feed.clientWidth) return;
+      if (layout !== "grid" || page.hidden || feedView.hidden || !feed.clientWidth) return;
       // 拖动窗口时宽度会持续变化，但列数未变无需重建全部卡片；否则图片
       // 和文章节点反复销毁/创建，会造成肉眼可见的闪烁。
       if (masonryColumnCount() === renderedMasonryColumnCount) return;

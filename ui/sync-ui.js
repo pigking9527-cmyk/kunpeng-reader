@@ -105,6 +105,8 @@ let accountEmailBound = false;
 let accountPasswordRecoverCooldownUntil = 0;
 let accountPasswordRecoverCooldownTimer = 0;
 let lastSyncSettings = {};
+let lastAccountSecurity = null;
+let lastPrivateSync = null;
 function syncText(key, values = {}) {
   let text = global.ReaderAppI18n?.t?.(key) || key;
   for (const [name, value] of Object.entries(values)) text = text.replaceAll(`{${name}}`, String(value));
@@ -276,13 +278,14 @@ function setResetStatus(text = "", type = "") {
   syncResetStatusEl.className = "private-sync-status" + (type ? " " + type : "");
 }
 function applyAccountSecurityStatus(status = {}) {
+  lastAccountSecurity = status;
   const email = status.email || "";
   accountEmailBound = !!status.emailBound;
   accountSecuritySummaryEl.textContent = status.emailBound
-    ? `已绑定验证邮箱：${email}。可用于找回登录密码。`
-    : (status.mailConfigured ? "尚未绑定验证邮箱。绑定后才能找回登录密码。" : "账户安全邮件暂未配置；暂时不能绑定或找回登录密码。");
+    ? syncText("accountSecurityBoundEmail", { email })
+    : (status.mailConfigured ? syncText("accountSecurityEmailUnbound") : syncText("accountSecurityMailUnavailable"));
   accountEmailEl.value = "";
-  accountEmailToggleBtn.textContent = accountEmailBound ? "更换绑定邮箱" : "绑定邮箱";
+  accountEmailToggleBtn.textContent = accountEmailBound ? syncText("changeBoundEmail") : syncText("bindEmail");
   accountEmailBindFlowEl.hidden = accountEmailBound;
   accountEmailRebindFlowEl.hidden = !accountEmailBound;
   if (!accountEmailBound) {
@@ -292,7 +295,7 @@ function applyAccountSecurityStatus(status = {}) {
 }
 async function loadAccountSecurityStatus() {
   try { applyAccountSecurityStatus(await invoke("auth_security_status")); }
-  catch (error) { setAccountSecurityStatus("读取账户安全状态失败：" + error, "error"); }
+  catch (error) { setAccountSecurityStatus(syncText("accountSecurityLoadFailed", { error }), "error"); }
 }
 function setPrivateSyncStatus(text = "", type = "") {
   privateSyncStatusEl.textContent = text;
@@ -303,18 +306,19 @@ function applyPrivateSyncOverview(status = {}) {
   accountSyncSecretsEl.classList.toggle("account-sync-enabled", !!status.syncSecrets);
 }
 function applyPrivateSyncStatus(status = {}) {
+  lastPrivateSync = status;
   privateSyncConfigsEl.checked = status.syncConfigs !== false;
   privateSyncHistoryEl.checked = !!status.syncAiHistory;
   privateSyncSecretsEl.checked = !!status.syncSecrets;
   applyPrivateSyncOverview(status);
   const secretText = status.cloudSecretAvailable
-    ? "云端已有加密密钥包；需要同步密码才能在本机解锁。"
-    : "API Key 和翻译密钥默认仅保留在本机。";
+    ? syncText("cloudSecretAvailable")
+    : syncText("localSecretsOnly");
   setPrivateSyncStatus(secretText);
 }
 async function loadPrivateSyncStatus() {
   try { applyPrivateSyncStatus(await invoke("private_sync_get_settings")); }
-  catch (error) { setPrivateSyncStatus("读取私密同步设置失败：" + error, "error"); }
+  catch (error) { setPrivateSyncStatus(syncText("privateSyncLoadFailed", { error }), "error"); }
 }
 async function savePrivateSyncOptions() {
   const options = {
@@ -860,6 +864,8 @@ syncNowBtn.addEventListener("click", async () => {
 if (typeof global.addEventListener === "function") global.addEventListener("app-language-changed", () => {
   updateAccountView({ username: syncUsernameEl.value.trim() });
   updateSyncSummary(lastSyncSettings);
+  if (lastAccountSecurity) applyAccountSecurityStatus(lastAccountSecurity);
+  if (lastPrivateSync) applyPrivateSyncStatus(lastPrivateSync);
 });
 
   activeController = Object.freeze({

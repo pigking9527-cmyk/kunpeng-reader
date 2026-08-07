@@ -2,7 +2,7 @@
 
 > 只记录正在进行且会影响多个端的事实；不要把日常开发日志堆在这里。
 
-**更新时间：2026-08-06**
+**更新时间：2026-08-07**
 
 ## 协议基线
 
@@ -15,9 +15,9 @@
 
 | 平台 | 状态 | 当前重点 |
 | --- | --- | --- |
-| Windows | v1.12.0 x64 发布 | 书库问答与资讯体验、账号数据清除/注销和阅读页稳定性更新；后续补 Authenticode 签名。 |
-| macOS | v1.12.0 Apple Silicon 发布 | 与 Windows 使用同一桌面代码基线；当前临时签名，后续补 Developer ID 签名与公证。 |
-| Linux | v1.12.0 x86_64 发布 | Ubuntu 24.04 CI 生成 AppImage/deb 和 SHA-256；当前 ORT 要求 glibc 2.38+，继续真实环境验收。 |
+| Windows | v1.13.0 x64 发布候选 | 语义检索、国际化、问题记录和书架/资讯体验更新；后续补 Authenticode 签名。 |
+| macOS | v1.13.0 Apple Silicon 发布候选 | 与 Windows 使用同一桌面代码基线；当前临时签名，后续补 Developer ID 签名与公证。 |
+| Linux | v1.13.0 x86_64 发布候选 | Ubuntu 24.04 CI 生成 AppImage/deb 和 SHA-256；当前 ORT 要求 glibc 2.38+，继续真实环境验收。 |
 | Android | v0.3.0 Profile 测试包已发布 | 新增全文与语义检索；当前为 Android Debug/Profile 签名，后续配置生产 keystore，并继续按 contracts 校验兼容性。 |
 | iPhone / iPad | 启动阶段 | SwiftUI 书架、阅读页和 iPad 侧栏体验。 |
 
@@ -31,6 +31,9 @@
 6. `ai_reader_history_v1/library-v1` 由 ADR-0005 定义：书库问答本机自动保存；只有用户开启“同步智读历史”才上传问题、回答和脱敏的来源索引。单条删除以不含正文的条目墓碑同步，避免旧设备复活已删历史。
 7. ADR-0006 定义三层破坏性操作：清除此设备、清除此设备及云端、永久删除账号。云端清除递增账户 `data_generation` 并撤销全部令牌；世代大于 1 后旧客户端不得写入，避免离线旧数据复活。
 8. ADR-0007 定义 `reading_bucket_v2.words` 为有效阅读的累计字数，而非全书去重字数；满足停留和反刷量门槛的重读应再次计入。Android/iOS 后续需对齐该语义。
+9. ADR-0008 定义反馈接口的可选 JSON 附件：仅 Bug 反馈可由用户主动选择 1 个 UTF-8 JSON，原始内容上限 256 KB；服务端必须通过 `acceptedAttachments` 明确确认接收，旧服务不得被客户端当作附件提交成功。
+10. ADR-0009 记录既有 `book_state_v2.progress_history`：它是每日最后阅读位置摘要。各端应在本地日历日内取 `at` 最新条目、最多保留 3650 日；旧 payload 缺失该字段按空数组处理，写回时必须保留已拉取的历史与未知字段。
+11. ADR-0010 定义离线核心状态迁移包 `kunpeng-reader-core-data-package` v1：仅迁移四种核心同步实体及其 LWW/墓碑元数据；不包含文件、路径、索引、密钥、AI 历史、`data_generation`、cursor 或 ack。各端实现前必须执行 schema 与资源上限校验，并在导入前创建本机恢复点。
 
 ## 开工提醒
 

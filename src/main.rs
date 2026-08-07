@@ -72,9 +72,7 @@ use tauri::Manager;
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
 pub(crate) struct AppState {
     pub(crate) background_tasks: background_tasks::BackgroundTaskRegistry,
-    /// Guards for work whose actual chunks run in a reader webview.  Keeping
-    /// the guard here gives page measurement the same durable lifecycle as
-    /// native background work without moving browser layout work to Rust.
+    /// Reader WebView work uses the same durable lifecycle as native background work.
     pub(crate) page_count_tasks: Mutex<HashMap<u64, background_tasks::TaskRunGuard>>,
     pub(crate) library: Mutex<Library>,
     pub(crate) db: Mutex<Option<db::AppDb>>,
@@ -83,7 +81,8 @@ pub(crate) struct AppState {
     pending_jump: Mutex<HashMap<u64, (u32, String)>>, // 书架检索点击 → 阅读窗口待跳转位置
     pub(crate) search_text_cache: Arc<Mutex<search_cache::SearchTextCache>>, // 全文检索原文/小写副本共享 LRU 预算
     pub(crate) txt_chapters: TextChaptersCache, // txt 阅读用：切分好的章节 (标题, 正文)
-    pub(crate) embedder: Mutex<Option<Arc<Mutex<fastembed::TextEmbedding>>>>, // 语义模型（懒加载，首次会下载）
+    pub(crate) embedder: Mutex<Option<Arc<Mutex<semantic::model::SemanticEmbedder>>>>, // 语义模型（懒加载，首次会下载）
+    pub(crate) reranker: Mutex<Option<Arc<Mutex<fastembed::TextRerank>>>>, // 可选交叉编码器，只重排少量候选
     pub(crate) sem_cache: Arc<Mutex<HashMap<u64, Arc<semantic::SemData>>>>, // 语义检索：内存缓存的向量
     pub(crate) sem_cache_order: Arc<Mutex<VecDeque<u64>>>, // 逐书向量 LRU：换词时淘汰旧书，避免缓存被首批结果永久占满
     pub(crate) sem_cache_bytes: Arc<AtomicUsize>,
@@ -172,6 +171,7 @@ impl AppState {
             .lock()
             .map(|mut embedder| *embedder = None)
             .ok();
+        self.reranker.lock().map(|mut model| *model = None).ok();
         semantic::clear_semantic_aux_memory_caches();
         self.backfilled.store(false, Ordering::Relaxed);
     }
@@ -222,6 +222,7 @@ fn main() {
             search_text_cache: Arc::new(Mutex::new(search_cache::SearchTextCache::default())),
             txt_chapters: Mutex::new(HashMap::new()),
             embedder: Mutex::new(None),
+            reranker: Mutex::new(None),
             sem_cache: Arc::new(Mutex::new(HashMap::new())),
             sem_cache_order: Arc::new(Mutex::new(VecDeque::new())),
             sem_cache_bytes: Arc::new(AtomicUsize::new(0)),
@@ -331,6 +332,7 @@ fn main() {
             app_commands::open_default_apps_settings,
             startup::take_startup_book_paths,
             app_commands::save_download_image,
+            app_commands::save_problem_trace_to_desktop,
             app_commands::dict_lookup,
             app_commands::external_dict_list,
             app_commands::external_dict_import,
@@ -466,12 +468,19 @@ fn main() {
             semantic::download_semantic_model,
             semantic::delete_semantic_model,
             semantic::select_semantic_model,
+            semantic::select_semantic_retrieval_mode,
+            semantic::set_semantic_m3_long_context,
+            semantic::download_semantic_reranker,
+            semantic::delete_semantic_reranker,
+            semantic::build_semantic_m3_index,
+            semantic::delete_semantic_m3_index,
             semantic::delete_semantic_index,
             semantic::build_semantic_vectors,
             semantic::pause_semantic_vectors,
             semantic::build_semantic_accelerator,
             semantic::build_semantic_multi_profile,
             semantic::semantic_index_done,
+            semantic::gpu::semantic_gpu_status,
             semantic::semantic_status,
             semantic::semantic_tasks,
             semantic::prepare_semantic_search,

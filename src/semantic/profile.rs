@@ -5,7 +5,9 @@
 //! 只通过 `(维度, 段落数, 向量切片)` 读取上层向量数据。
 
 use super::{model, vector};
-use crate::semantic_core::{dot, normalize, SEM_CHUNK_PIPELINE_REVISION, SEM_VERSION};
+use crate::semantic_core::{
+    dot, is_current_chunk_revision, normalize, SEM_CHUNK_PIPELINE_REVISION, SEM_VERSION,
+};
 use crate::semantic_tasks::{begin_semantic_task, finish_semantic_task};
 use crate::{book, search, set_thread_background, AppState, RES_BASE};
 use serde::{Deserialize, Serialize};
@@ -129,6 +131,27 @@ pub(super) fn clear_caches() {
     clear_multi_cache();
 }
 
+/// 模型切换只要求旧画像立即从共享缓存中不可见；真正释放大向量交给后台，
+/// 避免析构数百本画像时阻塞模型下拉框的 Tauri 命令。
+pub(super) fn detach_caches_in_background() {
+    let old_single = single_cache()
+        .lock()
+        .map(|mut cache| std::mem::take(&mut *cache))
+        .unwrap_or_default();
+    let old_multi = multi_cache()
+        .lock()
+        .map(|mut cache| cache.take())
+        .unwrap_or_default();
+    if old_single.is_empty() && old_multi.is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        set_thread_background(true);
+        drop((old_single, old_multi));
+        set_thread_background(false);
+    });
+}
+
 pub(super) fn discard_single(id: u64) {
     if let Some(path) = single_vector_path(id) {
         let _ = std::fs::remove_file(path);
@@ -228,7 +251,7 @@ pub(super) fn write_single(
         dim,
         chunks,
         vector_bytes: bytes.len() as u64,
-        vector_sha256: super::sha256_hex(&bytes),
+        vector_sha256: super::storage::sha256_hex(&bytes),
         model_revision: model::active().revision().into(),
         chunk_revision: SEM_CHUNK_PIPELINE_REVISION,
     };
@@ -256,14 +279,15 @@ pub(super) fn read_single(id: u64, mtime: u64) -> Option<(Vec<f32>, usize)> {
         || meta.mtime != mtime
         || meta.dim == 0
         || (!meta.model_revision.is_empty() && meta.model_revision != model::active().revision())
-        || (meta.chunk_revision != 0 && meta.chunk_revision != SEM_CHUNK_PIPELINE_REVISION)
+        || !is_current_chunk_revision(meta.chunk_revision)
     {
         return None;
     }
     let bytes = std::fs::read(single_vector_path(id)?).ok()?;
     if bytes.len() != meta.dim.checked_mul(4)?
         || (meta.vector_bytes != 0 && meta.vector_bytes != bytes.len() as u64)
-        || (!meta.vector_sha256.is_empty() && super::sha256_hex(&bytes) != meta.vector_sha256)
+        || (!meta.vector_sha256.is_empty()
+            && super::storage::sha256_hex(&bytes) != meta.vector_sha256)
     {
         return None;
     }
@@ -677,8 +701,9 @@ pub(super) async fn build(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn progress(state: &AppState) -> (u32, u32, bool) {
-    let (_, current_sig) = super::indexed_book_snapshot_cached(state);
+pub(super) fn progress_for_signatures(
+    current_sig: &[vector::IndexSourceSignature],
+) -> (u32, u32, bool) {
     let total = current_sig.len() as u32;
     let Some(index) = load_multi_index() else {
         return (0, total, false);

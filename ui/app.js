@@ -393,9 +393,15 @@ window.addEventListener("app-language-changed", () => { if (lastRecoveryBackupSt
 document.getElementById("open-default-apps-settings")?.addEventListener("click", async () => {
   try {
     await invoke("open_default_apps_settings");
-    alert("已打开 Windows 默认应用设置。请在“按文件类型选择默认值”中，分别将 .epub 和 .pdf 设为由“鲲鹏阅读器”打开。");
+    window.AppNotice?.show(
+      appText("defaultOpenToast", "已打开 Windows 默认应用设置。请在“按文件类型选择默认值”中，分别将 .epub 和 .pdf 设为由“鲲鹏阅读器”打开。"),
+      { variant: "text", duration: 1500 },
+    );
   } catch (e) {
-    alert("打开默认应用设置失败：" + (e && e.message ? e.message : e));
+    window.AppNotice?.show(
+      appText("defaultOpenFailed", "打开 Windows 默认应用设置失败：{error}", { error: e && e.message ? e.message : e }),
+      { variant: "text", duration: 1500 },
+    );
   }
 });
 document.getElementById("fp-settings-close").addEventListener("click", () => fpSettingsModal.classList.remove("show"));
@@ -1324,11 +1330,13 @@ window.addEventListener("DOMContentLoaded", () => {
       if (!debugSettingOn("reader_words_detect")) return;
       runWhenNoReader("word-counts", () => invoke("compute_word_counts"));
     }, 25000);
-    // 启动后台检查更新（不阻塞启动，每次启动查一次）
+    // 更新检查只是轻量网络请求，不应像索引任务一样等待阅读窗口关闭。
+    // 旧逻辑延迟 15 秒后再等待阅读窗口关闭；用户若先打开图书，检查会每 30 秒
+    // 继续推迟，表现为“启动不提示、手动检查才提示”。首屏稳定后直接异步检查一次。
     setTimeout(() => {
       if (!debugSettingOn("bg_update_check")) return;
-      runWhenNoReader("update-check", () => checkUpdate(false));
-    }, 15000);
+      startupTimed("update-check", () => checkUpdate(false), "background").catch(() => {});
+    }, 2000);
     // “关于”里的版本号取自后端，保持单一来源
     startupTimed("app-version", () => invoke("app_version"), "background")
       .then((v) => {

@@ -1,5 +1,9 @@
 // 阅读页目录、书签与批注/高亮 UI
 // 先于 reader.js 加载：提供 buildToc/renderBookmarks/renderHighlights/addHighlight/openAnnotations 等阅读页辅助函数。
+const readerNotesText = (key, fallback, values) => {
+  const value = window.ReaderI18n?.t?.(key, values);
+  return value && value !== key ? value : fallback;
+};
 
 // ---------- 目录 / 导航 ----------
 const tocPane = document.getElementById("toc-pane");
@@ -95,7 +99,7 @@ function buildToc(toc) {
     const hint = document.createElement("div");
     hint.className = "toc-item";
     hint.style.color = "#999";
-    hint.textContent = "（无目录）";
+    hint.textContent = readerNotesText("noToc", "（无目录）");
     tocPane.appendChild(hint);
     return;
   }
@@ -124,7 +128,7 @@ function renderBookmarks() {
   if (!bookmarks.length) {
     const e = document.createElement("div");
     e.className = "bm-empty";
-    e.textContent = "暂无书签";
+    e.textContent = readerNotesText("noBookmarks", "暂无书签");
     bmList.appendChild(e);
     return;
   }
@@ -133,8 +137,8 @@ function renderBookmarks() {
     item.className = "bm-item";
     const t = document.createElement("span");
     t.className = "bm-text";
-    let txt = bm.label || "第 " + ((bm.chapter || 0) + 1) + " " + (isPdf ? "页" : "章");
-    if (isPdf) txt = txt.replace(/^(第\s*\d+\s*)章/, "$1页"); // 旧书签把"页"错标成"章"，显示时纠正
+    let txt = bm.label || readerNotesText("bookmarkLocation", "第 {chapter} {part}", { chapter: (bm.chapter || 0) + 1, part: isPdf ? readerNotesText("page", "页") : readerNotesText("chapter", "章") });
+    if (isPdf) txt = txt.replace(/^(第\s*\d+\s*)章/, "$1" + readerNotesText("page", "页")); // 旧书签把"页"错标成"章"，显示时纠正
     t.textContent = txt;
     const del = document.createElement("span");
     del.className = "bm-del";
@@ -153,7 +157,7 @@ function renderBookmarks() {
   });
 }
 document.getElementById("bm-add2").addEventListener("click", async () => {
-  const label = "第 " + (curChapter + 1) + " " + (isPdf ? "页" : "章") + " · " + curProgress.toFixed(1) + "%";
+  const label = readerNotesText("bookmarkProgress", "第 {chapter} {part} · {progress}%", { chapter: curChapter + 1, part: isPdf ? readerNotesText("page", "页") : readerNotesText("chapter", "章"), progress: curProgress.toFixed(1) });
   bookmarks = await invoke("add_bookmark", {
     chapter: curChapter,
     frac: curChFrac,
@@ -220,7 +224,7 @@ function ctxHtml(h) {
 function renderAnnotations(targetIdx, animateTarget) {
   annoList.innerHTML = "";
   if (!highlights.length) {
-    annoList.innerHTML = '<div class="anno-empty">还没有批注 / 高亮。<br>在正文里选中文字 → 点「高亮」或「批注」即可添加。</div>';
+    annoList.innerHTML = '<div class="anno-empty">' + readerNotesText("noAnnotations", "还没有批注 / 高亮。<br>在正文里选中文字 → 点「高亮」或「批注」即可添加。") + "</div>";
     return;
   }
   highlights.forEach((h, i) => {
@@ -233,17 +237,17 @@ function renderAnnotations(targetIdx, animateTarget) {
     meta.className = "anno-meta";
     const ch = document.createElement("span");
     ch.className = "anno-ch";
-    ch.textContent = "第 " + ((h.chapter || 0) + 1) + " 章 · 跳转";
+    ch.textContent = readerNotesText("annotationChapter", "第 {chapter} 章 · 跳转", { chapter: (h.chapter || 0) + 1 });
     ch.addEventListener("click", () => {
       sendToPage({ gotoHighlight: i });
       ReaderShell.setOverlay(ReaderShell.OVERLAY.ANNOTATIONS, false);
     });
     const editBtn = document.createElement("span");
     editBtn.className = "anno-edit-btn";
-    editBtn.textContent = h.note ? "✏ 编辑批注" : "✏ 添加批注";
+    editBtn.textContent = h.note ? "✏ " + readerNotesText("editAnnotation", "编辑批注") : "✏ " + readerNotesText("addAnnotation", "添加批注");
     const del = document.createElement("span");
     del.className = "anno-del";
-    del.textContent = "🗑 删除";
+    del.textContent = "🗑 " + readerNotesText("delete", "删除");
     del.addEventListener("click", async () => {
       highlights = await invoke("remove_highlight", { index: i });
       sendToPage({ highlights });
@@ -253,7 +257,7 @@ function renderAnnotations(targetIdx, animateTarget) {
 
     const ctx = document.createElement("div");
     ctx.className = "anno-ctx";
-    ctx.title = "高亮文字";
+    ctx.title = readerNotesText("highlightedText", "高亮文字");
     ctx.innerHTML = ctxHtml(h);
 
     // 批注只读展示（有批注才显示，不白占空间）
@@ -271,10 +275,10 @@ function renderAnnotations(targetIdx, animateTarget) {
     const acts = document.createElement("div");
     acts.className = "anno-edit-actions";
     const cancel = document.createElement("button");
-    cancel.textContent = "取消";
+    cancel.textContent = readerNotesText("cancel", "取消");
     cancel.className = "cancel";
     const save = document.createElement("button");
-    save.textContent = "保存";
+    save.textContent = readerNotesText("save", "保存");
     save.className = "save";
     acts.append(cancel, save);
     edit.append(ta, acts);
@@ -294,7 +298,7 @@ function renderAnnotations(targetIdx, animateTarget) {
       h.note = ta.value;
       noteView.textContent = ta.value;
       noteView.style.display = ta.value ? "" : "none";
-      editBtn.textContent = ta.value ? "✏ 编辑批注" : "✏ 添加批注";
+      editBtn.textContent = ta.value ? "✏ " + readerNotesText("editAnnotation", "编辑批注") : "✏ " + readerNotesText("addAnnotation", "添加批注");
       edit.classList.remove("open");
     });
 

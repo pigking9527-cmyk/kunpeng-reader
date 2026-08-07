@@ -1,4 +1,4 @@
-var S={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1};
+var S={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1,uiLanguage:"zh-CN"};
 var READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
 var readerAnimationGroupByKey={annotationAdd:'readerPage',readingMode:'readerPage',pageTurn:'readerPage',highlightSettings:'readerPage'};
 var readerAnimationSettingsOverride=null;
@@ -1169,9 +1169,7 @@ function noteFontSizePx(){
   if(!isFinite(n))n=14;
   return Math.max(10,Math.min(22,n));
 }
-function noteBadgeSizePx(){
-  return 14;
-}
+function noteBadgeSizePx(){return 14;}
 function inlineNoteAnchor(a){
   if(!a||!a.tagName||a.tagName.toLowerCase()!=='a')return false;
   var href=a.getAttribute('href')||'',id=a.getAttribute('id')||'';
@@ -1180,10 +1178,11 @@ function inlineNoteAnchor(a){
   if(a.getAttribute('data-rr-note-ref')==='1'||/\brr-note-ref\b/.test(cls))return true;
   if(/noteref|annoref/.test(meta))return true;
   if(/^noteBack[_-]?\d*$/i.test(id))return true;
+  if(/^[\[【（(]?\s*(?:注|註)\s*\d{1,5}\s*[\]】）)]?$/.test((a.textContent||'').trim()))return true;
   var frag=href&&href.indexOf('#')>=0?href.split('#').pop():'';
-  if(!frag)return false;
-  if(/back/i.test(frag))return false;
-  return /^(note|footnote|endnote|fn|n)[_\-]?\d{1,5}$/i.test(decodeURIComponent(frag));
+  if(!frag||/back/i.test(frag))return false;
+  try{frag=decodeURIComponent(frag);}catch(_){} if(/^zww\d{1,5}$/i.test(id)&&/^zw\d{1,5}$/i.test(frag.replace(/^c\d+~/i,'')))return true;
+  return /^(note|footnote|endnote|fn|n)[_\-]?\d{1,5}$/i.test(frag);
 }
 function ensureNoteBadgeForAnchor(a){
   if(!a||!inlineNoteAnchor(a))return null;
@@ -2405,7 +2404,7 @@ function scheduleNoteNumberDisplayRefresh(){
 }
 function showChapter(i,where,frag){
   i=Math.max(0,Math.min(CH-1,i));
-  var showStarted=performance.now(),fetchDone=showStarted;
+  var showStarted=performance.now(),fetchDone=showStarted,bugTraceToken=beginChapterBugTrace(i,where);
   var conversion=['t2s','s2t'].indexOf(S.textConversion)>=0?S.textConversion:'original';
   return fetch(location.origin+'/chapter/'+ID+'/'+i+'/'+conversion).then(function(r){return r.json();}).then(function(d){
     fetchDone=performance.now();
@@ -2433,7 +2432,7 @@ function showChapter(i,where,frag){
         );resolve();
       });});
     });
-  }).catch(function(){});
+  }).then(function(value){finishChapterBugTrace(bugTraceToken,true,pageInCh);return value;},function(){finishChapterBugTrace(bugTraceToken,false,0);});
 }
 var curTopAnchor=null; // 实时记录的当前页顶部锚点（精确到字符）
 // 一次模式重排若没有把目标字符放在可见首行，就保留切换前的源偏移。

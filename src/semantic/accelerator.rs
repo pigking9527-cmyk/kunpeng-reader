@@ -340,6 +340,34 @@ pub(super) fn global_index_fresh(state: &AppState) -> bool {
     }
 }
 
+pub(super) fn global_index_fresh_for_status(
+    book_ids: &[u64],
+    source_sig: &[vector::IndexSourceSignature],
+) -> bool {
+    let Some(path) = global_meta_path() else {
+        return false;
+    };
+    let Ok(serialized) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<GlobalMeta>(&serialized)
+        .map(|metadata| {
+            metadata.v == GLOBAL_CACHE_VERSION
+                && metadata.model == model::active_id()
+                && metadata.model_revision == model::active().revision()
+                && metadata.chunk_revision == crate::semantic_core::SEM_CHUNK_PIPELINE_REVISION
+                && metadata.book_ids == book_ids
+                && metadata.source_sig == source_sig
+                && !metadata.shards.is_empty()
+                && metadata
+                    .shards
+                    .iter()
+                    .enumerate()
+                    .all(|(index, shard)| global_shard_shape_valid(metadata.v, index, shard))
+        })
+        .unwrap_or(false)
+}
+
 fn global_build_meta_compatible(
     m: &GlobalBuildMeta,
     ids: &[u64],
@@ -438,12 +466,25 @@ fn read_global_build_meta(
     }
 }
 
-pub(super) fn build_progress(
+pub(super) fn build_progress_for_status(
     ids: &[u64],
     source_sig: &[vector::IndexSourceSignature],
 ) -> Option<(u32, usize)> {
-    let metadata = read_global_build_meta(ids, source_sig)?;
-    Some((metadata.shards.len() as u32, metadata.processed_books))
+    let metadata: GlobalBuildMeta =
+        serde_json::from_str(&std::fs::read_to_string(global_build_meta_path()?).ok()?).ok()?;
+    (metadata.v == GLOBAL_CACHE_VERSION
+        && metadata.model == model::active_id()
+        && metadata.model_revision == model::active().revision()
+        && metadata.chunk_revision == crate::semantic_core::SEM_CHUNK_PIPELINE_REVISION
+        && metadata.book_ids == ids
+        && metadata.source_sig == source_sig
+        && metadata.processed_books <= ids.len()
+        && metadata
+            .shards
+            .iter()
+            .enumerate()
+            .all(|(index, shard)| global_shard_shape_valid(metadata.v, index, shard)))
+    .then_some((metadata.shards.len() as u32, metadata.processed_books))
 }
 
 fn write_global_build_meta(meta: &GlobalBuildMeta) -> Result<(), String> {
@@ -572,8 +613,8 @@ fn write_shard(
     // 直接流式序列化到同目录临时文件，同时计算长度与哈希；不再额外持有两份
     // 数 GB Vec。只有两个文件都提交成功，调用方才发布 build checkpoint。
     let serialize_started = Instant::now();
-    let (graph_len, graph_sha256) = super::write_rmp_hashed(&hp, &map)?;
-    let (map_len, map_sha256) = super::write_rmp_hashed(&mp, mapping)?;
+    let (graph_len, graph_sha256) = super::storage::write_rmp_hashed(&hp, &map)?;
+    let (map_len, map_sha256) = super::storage::write_rmp_hashed(&mp, mapping)?;
     crate::log(&format!(
         "semantic_accelerator stage=serialize shard={k} graph_bytes={graph_len} map_bytes={map_len} elapsed_ms={}",
         serialize_started.elapsed().as_millis()
@@ -1679,7 +1720,7 @@ mod tests {
             t: "测试片段".into(),
         }];
         let mut bytes = rmp_serde::to_vec(&entries).unwrap();
-        let expected_hash = super::super::sha256_hex(&bytes);
+        let expected_hash = super::super::storage::sha256_hex(&bytes);
         std::fs::write(&path, &bytes).unwrap();
         assert!(file_integrity_valid(
             &path,
@@ -1785,8 +1826,9 @@ mod tests {
         }
         assert!(parent.contains("pub(crate) use accelerator::LoadedShards"));
         assert!(build.contains("accelerator::build_global_index"));
-        assert!(parent.contains("struct IntegrityWriter"));
-        assert!(parent.contains("fn write_rmp_hashed"));
+        assert!(std::fs::read_to_string("src/semantic/storage.rs")
+            .expect("semantic storage helper")
+            .contains("fn write_rmp_hashed"));
         assert!(accelerator.contains("MemoryClass::SemanticGraph"));
         assert!(accelerator.contains("MemoryUsageKind::Transient"));
     }

@@ -38,7 +38,7 @@
               <strong data-i18n="recoverPassword">找回密码</strong>
               <small>仅已绑定并验证邮箱的账户可找回；重置后其他设备会退出登录。</small>
               <input id="sync-reset-email" type="email" autocomplete="email" placeholder="已绑定的邮箱" data-i18n-placeholder="boundEmail" />
-              <div class="account-security-actions"><button id="sync-reset-request" class="btn-plain" type="button">发送验证码</button></div>
+              <div class="account-security-actions"><button id="sync-reset-request" class="btn-plain" type="button" data-i18n="sendCode">发送验证码</button></div>
               <input id="sync-reset-code" inputmode="numeric" autocomplete="one-time-code" placeholder="邮箱验证码" data-i18n-placeholder="emailCode" />
               <input id="sync-reset-new-password" type="password" autocomplete="new-password" placeholder="新登录密码（至少 8 个字符）" data-i18n-placeholder="newLoginPassword" />
               <div class="account-security-actions"><button id="sync-reset-confirm" class="btn-plain" type="button" data-i18n="resetAndLogin">确认重置并登录</button></div>
@@ -76,101 +76,101 @@
             <div id="sync-last-counts" class="sync-last-counts" data-i18n="syncFilesNote">登录后可跨设备同步；图书文件本身不会上传</div>
           </section>
           <div class="account-data-entry">
-            <button id="account-data-open" class="btn-plain" type="button">数据与隐私</button>
+            <button id="account-data-open" class="btn-plain" type="button" data-i18n="accountDataPrivacy">数据与隐私</button>
           </div>
           <div id="sync-status" class="sync-status">尚未同步</div>
         </div>
 
-        <section id="account-security-panel" class="account-subpage account-security-panel" hidden aria-label="账户安全" aria-modal="true">
-            <div class="private-sync-header"><strong>账户安全</strong><button id="account-security-close" class="icon-btn" type="button" aria-label="关闭">×</button></div>
-            <p id="account-security-summary" class="private-sync-note">读取账户安全状态中…</p>
+        <section id="account-security-panel" class="account-subpage account-security-panel" hidden aria-label="账户安全" data-i18n-aria="accountSecurity" aria-modal="true">
+            <div class="private-sync-header"><strong data-i18n="accountSecurity">账户安全</strong><button id="account-security-close" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria="close">×</button></div>
+            <p id="account-security-summary" class="private-sync-note" data-i18n="accountSecurityLoading">读取账户安全状态中…</p>
             <div class="account-security-disclosure">
-              <button id="account-email-toggle" class="account-security-toggle" type="button" aria-expanded="false">绑定邮箱</button>
+              <button id="account-email-toggle" class="account-security-toggle" type="button" aria-expanded="false" data-i18n="bindEmail">绑定邮箱</button>
               <div id="account-email-form" class="account-security-form" hidden>
                 <div id="account-email-bind-flow">
-                  <label class="account-security-field"><span>邮箱</span><input id="account-email" type="email" autocomplete="email" placeholder="用于找回登录密码" /></label>
-                  <div class="account-security-actions"><button id="account-email-start" class="btn-plain" type="button">发送验证码</button></div>
-                  <label class="account-security-field"><span>验证码</span><input id="account-email-code" inputmode="numeric" autocomplete="one-time-code" /></label>
-                  <div class="account-security-actions"><button id="account-email-confirm" class="btn-plain" type="button">确认绑定</button></div>
+                  <label class="account-security-field"><span data-i18n="email">邮箱</span><input id="account-email" type="email" autocomplete="email" placeholder="用于找回登录密码" data-i18n-placeholder="emailForRecovery" /></label>
+                  <div class="account-security-actions"><button id="account-email-start" class="btn-plain" type="button" data-i18n="sendCode">发送验证码</button></div>
+                  <label class="account-security-field"><span data-i18n="verificationCode">验证码</span><input id="account-email-code" inputmode="numeric" autocomplete="one-time-code" /></label>
+                  <div class="account-security-actions"><button id="account-email-confirm" class="btn-plain" type="button" data-i18n="confirmBinding">确认绑定</button></div>
                 </div>
                 <div id="account-email-rebind-flow" hidden>
-                  <p id="account-email-rebind-note" class="account-security-help">为保护账号，先向当前绑定邮箱发送验证码。</p>
+                  <p id="account-email-rebind-note" class="account-security-help" data-i18n="rebindEmailHint">为保护账号，先向当前绑定邮箱发送验证码。</p>
                   <div id="account-email-old-step">
-                    <div class="account-security-actions"><button id="account-email-old-start" class="btn-plain" type="button">发送旧邮箱验证码</button></div>
-                    <label class="account-security-field account-security-code-field"><span>旧邮箱验证码</span><input id="account-email-old-code" inputmode="numeric" autocomplete="one-time-code" /></label>
-                    <div class="account-security-actions"><button id="account-email-old-confirm" class="btn-plain" type="button">验证旧邮箱</button></div>
+                    <div class="account-security-actions"><button id="account-email-old-start" class="btn-plain" type="button" data-i18n="sendOldEmailCode">发送旧邮箱验证码</button></div>
+                    <label class="account-security-field account-security-code-field"><span data-i18n="oldEmailCode">旧邮箱验证码</span><input id="account-email-old-code" inputmode="numeric" autocomplete="one-time-code" /></label>
+                    <div class="account-security-actions"><button id="account-email-old-confirm" class="btn-plain" type="button" data-i18n="verifyOldEmail">验证旧邮箱</button></div>
                   </div>
                   <div id="account-email-new-step" hidden>
-                    <p class="account-security-help">旧邮箱已验证。现在验证新的绑定邮箱。</p>
-                    <label class="account-security-field"><span>新邮箱</span><input id="account-email-new" type="email" autocomplete="email" placeholder="新的验证邮箱" /></label>
-                    <div class="account-security-actions"><button id="account-email-new-start" class="btn-plain" type="button">发送新邮箱验证码</button></div>
-                    <label class="account-security-field account-security-code-field"><span>新邮箱验证码</span><input id="account-email-new-code" inputmode="numeric" autocomplete="one-time-code" /></label>
-                    <div class="account-security-actions"><button id="account-email-new-confirm" class="btn-plain" type="button">确认更换</button></div>
+                    <p class="account-security-help" data-i18n="oldEmailVerified">旧邮箱已验证。现在验证新的绑定邮箱。</p>
+                    <label class="account-security-field"><span data-i18n="newEmail">新邮箱</span><input id="account-email-new" type="email" autocomplete="email" placeholder="新的验证邮箱" data-i18n-placeholder="newVerifiedEmail" /></label>
+                    <div class="account-security-actions"><button id="account-email-new-start" class="btn-plain" type="button" data-i18n="sendNewEmailCode">发送新邮箱验证码</button></div>
+                    <label class="account-security-field account-security-code-field"><span data-i18n="newEmailCode">新邮箱验证码</span><input id="account-email-new-code" inputmode="numeric" autocomplete="one-time-code" /></label>
+                    <div class="account-security-actions"><button id="account-email-new-confirm" class="btn-plain" type="button" data-i18n="confirmEmailChange">确认更换</button></div>
                   </div>
                 </div>
               </div>
             </div>
             <div class="account-security-disclosure">
-              <button id="account-password-toggle" class="account-security-toggle" type="button" aria-expanded="false">修改登录密码</button>
+              <button id="account-password-toggle" class="account-security-toggle" type="button" aria-expanded="false" data-i18n="changeLoginPassword">修改登录密码</button>
               <div id="account-password-form" class="account-security-form" hidden>
-                <label class="account-security-field"><span>当前登录密码</span><input id="account-current-password" type="password" autocomplete="current-password" /></label>
-                <label class="account-security-field"><span>新登录密码</span><input id="account-new-password" type="password" autocomplete="new-password" placeholder="至少 8 个字符" /></label>
-                <div class="account-security-actions"><button id="account-password-change" class="btn-plain" type="button">确认修改</button></div>
+                <label class="account-security-field"><span data-i18n="currentLoginPassword">当前登录密码</span><input id="account-current-password" type="password" autocomplete="current-password" /></label>
+                <label class="account-security-field"><span data-i18n="newLoginPasswordLabel">新登录密码</span><input id="account-new-password" type="password" autocomplete="new-password" placeholder="至少 8 个字符" data-i18n-placeholder="atLeastEightChars" /></label>
+                <div class="account-security-actions"><button id="account-password-change" class="btn-plain" type="button" data-i18n="confirmChange">确认修改</button></div>
               </div>
             </div>
             <div class="account-security-disclosure">
-              <button id="account-password-recover-toggle" class="account-security-toggle" type="button" aria-expanded="false">找回登录密码</button>
+              <button id="account-password-recover-toggle" class="account-security-toggle" type="button" aria-expanded="false" data-i18n="recoverPassword">找回登录密码</button>
               <div id="account-password-recover-form" class="account-security-form" hidden>
-                <p class="account-security-help">向已绑定邮箱发送验证码后，可直接设置新密码；重置后其他设备会退出登录。</p>
-                <label class="account-security-field"><span>绑定邮箱</span><input id="account-password-recover-email" type="email" autocomplete="email" placeholder="已绑定的邮箱" /></label>
-                <div class="account-security-actions"><button id="account-password-recover-start" class="btn-plain" type="button">发送验证码</button></div>
-                <label class="account-security-field account-security-code-field"><span>验证码</span><input id="account-password-recover-code" inputmode="numeric" autocomplete="one-time-code" /></label>
-                <label class="account-security-field"><span>新登录密码</span><input id="account-password-recover-new" type="password" autocomplete="new-password" placeholder="至少 8 个字符" /></label>
-                <div class="account-security-actions"><button id="account-password-recover-confirm" class="btn-plain" type="button">确认重置</button></div>
+                <p class="account-security-help" data-i18n="passwordRecoveryHint">向已绑定邮箱发送验证码后，可直接设置新密码；重置后其他设备会退出登录。</p>
+                <label class="account-security-field"><span data-i18n="boundEmail">绑定邮箱</span><input id="account-password-recover-email" type="email" autocomplete="email" placeholder="已绑定的邮箱" data-i18n-placeholder="boundEmail" /></label>
+                <div class="account-security-actions"><button id="account-password-recover-start" class="btn-plain" type="button" data-i18n="sendCode">发送验证码</button></div>
+                <label class="account-security-field account-security-code-field"><span data-i18n="verificationCode">验证码</span><input id="account-password-recover-code" inputmode="numeric" autocomplete="one-time-code" /></label>
+                <label class="account-security-field"><span data-i18n="newLoginPasswordLabel">新登录密码</span><input id="account-password-recover-new" type="password" autocomplete="new-password" placeholder="至少 8 个字符" data-i18n-placeholder="atLeastEightChars" /></label>
+                <div class="account-security-actions"><button id="account-password-recover-confirm" class="btn-plain" type="button" data-i18n="confirmReset">确认重置</button></div>
               </div>
             </div>
             <div id="account-security-status" class="private-sync-status"></div>
         </section>
 
-        <section id="account-data-panel" class="account-subpage account-data-panel" hidden aria-label="数据与隐私" aria-modal="true">
-          <div class="private-sync-header"><strong>数据与隐私</strong><button id="account-data-close" class="icon-btn" type="button" aria-label="关闭">×</button></div>
-          <p class="private-sync-note">以下操作不会删除电脑中的原始 EPUB、PDF、TXT、MOBI 或 AZW 图书文件。</p>
+        <section id="account-data-panel" class="account-subpage account-data-panel" hidden aria-label="数据与隐私" data-i18n-aria="accountDataPrivacy" aria-modal="true">
+          <div class="private-sync-header"><strong data-i18n="accountDataPrivacy">数据与隐私</strong><button id="account-data-close" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria="close">×</button></div>
+          <p class="private-sync-note" data-i18n="accountFilesKept">以下操作不会删除电脑中的原始 EPUB、PDF、TXT、MOBI 或 AZW 图书文件。</p>
 
           <div class="account-data-card">
-            <div><strong>清除此设备数据</strong><small>清除书架记录、阅读进度、批注、生词、统计、缓存、索引、模型、已下载字体、账号登录和 API 配置。</small></div>
-            <button id="account-clear-local" class="btn-plain account-danger-button" type="button">清除此设备</button>
+            <div><strong data-i18n="clearThisDeviceData">清除此设备数据</strong><small data-i18n="clearThisDeviceDescription">清除书架记录、阅读进度、批注、生词、统计、缓存、索引、模型、已下载字体、账号登录和 API 配置。</small></div>
+            <button id="account-clear-local" class="btn-plain account-danger-button" type="button" data-i18n="clearThisDevice">清除此设备</button>
           </div>
 
           <div class="account-data-card">
-            <div><strong>清除此设备及云端数据</strong><small>清空当前账号的全部同步数据，并让所有设备退出登录；账号本身保留。</small></div>
-            <label class="account-data-confirm"><span>登录密码</span><input id="account-clear-cloud-password" type="password" autocomplete="current-password" /></label>
-            <button id="account-clear-cloud" class="btn-plain account-danger-button" type="button">清除本机及云端</button>
+            <div><strong data-i18n="clearDeviceAndCloudData">清除此设备及云端数据</strong><small data-i18n="clearDeviceAndCloudDescription">清空当前账号的全部同步数据，并让所有设备退出登录；账号本身保留。</small></div>
+            <label class="account-data-confirm"><span data-i18n="loginPassword">登录密码</span><input id="account-clear-cloud-password" type="password" autocomplete="current-password" /></label>
+            <button id="account-clear-cloud" class="btn-plain account-danger-button" type="button" data-i18n="clearDeviceAndCloud">清除本机及云端</button>
           </div>
 
           <div class="account-data-card account-data-delete">
-            <div><strong>永久删除账号</strong><small>删除账号及全部云端数据，同时清除此设备数据。此操作不可恢复。</small></div>
-            <label class="account-data-confirm"><span>登录密码</span><input id="account-delete-password" type="password" autocomplete="current-password" /></label>
-            <label class="account-data-confirm"><span>输入完整账号名</span><input id="account-delete-username" type="text" autocomplete="off" spellcheck="false" /></label>
-            <button id="account-delete" class="btn-plain account-danger-button account-delete-button" type="button">永久删除账号</button>
+            <div><strong data-i18n="deleteAccountPermanently">永久删除账号</strong><small data-i18n="deleteAccountDescription">删除账号及全部云端数据，同时清除此设备数据。此操作不可恢复。</small></div>
+            <label class="account-data-confirm"><span data-i18n="loginPassword">登录密码</span><input id="account-delete-password" type="password" autocomplete="current-password" /></label>
+            <label class="account-data-confirm"><span data-i18n="enterFullAccountName">输入完整账号名</span><input id="account-delete-username" type="text" autocomplete="off" spellcheck="false" /></label>
+            <button id="account-delete" class="btn-plain account-danger-button account-delete-button" type="button" data-i18n="deleteAccountPermanently">永久删除账号</button>
           </div>
           <div id="account-data-status" class="private-sync-status"></div>
         </section>
 
-        <section id="private-sync-panel" class="account-subpage private-sync-panel" hidden aria-label="智读与翻译同步设置" aria-modal="true">
+        <section id="private-sync-panel" class="account-subpage private-sync-panel" hidden aria-label="智读与翻译同步设置" data-i18n-aria="privateSyncTitle" aria-modal="true">
             <div class="private-sync-header">
-              <strong>智读与翻译同步</strong>
-              <button id="private-sync-close" class="icon-btn" type="button" aria-label="关闭">×</button>
+              <strong data-i18n="privateSyncTitle">智读与翻译同步</strong>
+              <button id="private-sync-close" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria="close">×</button>
             </div>
-            <p class="private-sync-note">普通配置不含 API Key，会跟随账户同步。历史与密钥默认只留在本机。</p>
-            <label class="private-sync-option"><span><b>同步服务配置</b><small>智读服务商、接口地址、模型名和翻译服务偏好</small></span><input id="private-sync-configs" type="checkbox" /></label>
-            <label class="private-sync-option"><span><b>同步智读历史</b><small>包括单书与书库问答；最多保留 40 条，书库记录不上传书籍原文</small></span><input id="private-sync-history" type="checkbox" /></label>
-            <label class="private-sync-option"><span><b>同步 API Key 与翻译密钥</b><small>须设置同步密码，服务器仅保存加密密文</small></span><input id="private-sync-secrets" type="checkbox" /></label>
+            <p class="private-sync-note" data-i18n="privateSyncNote">普通配置不含 API Key，会跟随账户同步。历史与密钥默认只留在本机。</p>
+            <label class="private-sync-option"><span><b data-i18n="syncServiceConfiguration">同步服务配置</b><small data-i18n="syncServiceConfigurationHint">智读服务商、接口地址、模型名和翻译服务偏好</small></span><input id="private-sync-configs" type="checkbox" /></label>
+            <label class="private-sync-option"><span><b data-i18n="syncAiHistory">同步智读历史</b><small data-i18n="syncAiHistoryHint">包括单书与书库问答；最多保留 40 条，书库记录不上传书籍原文</small></span><input id="private-sync-history" type="checkbox" /></label>
+            <label class="private-sync-option"><span><b data-i18n="syncSecrets">同步 API Key 与翻译密钥</b><small data-i18n="syncSecretsHint">须设置同步密码，服务器仅保存加密密文</small></span><input id="private-sync-secrets" type="checkbox" /></label>
             <div class="private-sync-password">
-              <input id="private-sync-password" type="password" autocomplete="new-password" placeholder="设置或输入同步密码（至少 10 个字）" />
-              <button id="private-sync-save-password" class="btn-plain" type="button">加密并立即同步密钥</button>
-              <button id="private-sync-unlock" class="btn-plain" type="button">解锁云端密钥</button>
+              <input id="private-sync-password" type="password" autocomplete="new-password" placeholder="设置或输入同步密码（至少 10 个字）" data-i18n-placeholder="privateSyncPasswordPlaceholder" />
+              <button id="private-sync-save-password" class="btn-plain" type="button" data-i18n="encryptAndSyncSecrets">加密并立即同步密钥</button>
+              <button id="private-sync-unlock" class="btn-plain" type="button" data-i18n="unlockCloudSecrets">解锁云端密钥</button>
             </div>
-            <div class="private-sync-danger"><button id="private-sync-forget" class="btn-plain" type="button">遗忘同步密码并撤销云端密钥</button><small>同步密码无法找回；本机 API Key 不会被删除，可用新密码重新加密。</small></div>
+            <div class="private-sync-danger"><button id="private-sync-forget" class="btn-plain" type="button" data-i18n="forgetSyncPassword">遗忘同步密码并撤销云端密钥</button><small data-i18n="forgetSyncPasswordHint">同步密码无法找回；本机 API Key 不会被删除，可用新密码重新加密。</small></div>
             <div id="private-sync-status" class="private-sync-status"></div>
         </section>
       </div>
@@ -219,7 +219,7 @@
         </svg>
       </button>
       <div class="filter-wrap">
-        <button id="filter-btn" class="icon-btn" title="排序与布局">
+        <button id="filter-btn" class="icon-btn" title="排序与布局" data-i18n-title="sortAndLayout">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
             <path d="M3 5h18l-7 8v6l-4-2v-4z" fill="currentColor" />
           </svg>
@@ -227,37 +227,37 @@
         <div id="filter-panel" class="filter-panel">
           <div class="fp-row">
             <div class="fp-col fp-sort-primary">
-              <div class="fp-title">排序</div>
-              <label><input type="radio" name="sort" value="title" /> 书名</label>
-              <label><input type="radio" name="sort" value="author" /> 作者</label>
-              <label><input type="radio" name="sort" value="added" /> 导入时间</label>
-              <label><input type="radio" name="sort" value="dir" /> 存储目录</label>
+              <div class="fp-title" data-i18n="sort">排序</div>
+              <label><input type="radio" name="sort" value="title" /> <span data-i18n="sortTitle">书名</span></label>
+              <label><input type="radio" name="sort" value="author" /> <span data-i18n="sortAuthor">作者</span></label>
+              <label><input type="radio" name="sort" value="added" /> <span data-i18n="sortImported">导入时间</span></label>
+              <label><input type="radio" name="sort" value="dir" /> <span data-i18n="sortFolder">存储目录</span></label>
             </div>
             <div class="fp-col fp-sort-secondary">
-              <button id="reading-filter-all" type="button" class="fp-all-books">全部图书</button>
-              <label><input type="radio" name="sort" value="read" /> 最近阅读</label>
-              <label><input type="radio" name="sort" value="reading-time" /> 阅读时间</label>
-              <label><input type="radio" name="sort" value="size" /> 大小</label>
-              <label><input type="radio" name="sort" value="progress" /> 阅读进度</label>
+              <button id="reading-filter-all" type="button" class="fp-all-books" data-i18n="allBooks">全部图书</button>
+              <label><input type="radio" name="sort" value="read" /> <span data-i18n="sortRecent">最近阅读</span></label>
+              <label><input type="radio" name="sort" value="reading-time" /> <span data-i18n="sortReadingTime">阅读时间</span></label>
+              <label><input type="radio" name="sort" value="size" /> <span data-i18n="sortFileSize">大小</span></label>
+              <label><input type="radio" name="sort" value="progress" /> <span data-i18n="sortProgress">阅读进度</span></label>
             </div>
             <div class="fp-col fp-reading-filter-col">
-              <div class="fp-title">阅读过滤</div>
-              <label><input type="checkbox" class="rfilter" value="unread" /> 未读</label>
-              <label><input type="checkbox" class="rfilter" value="reading" /> 正在阅读</label>
-              <label><input type="checkbox" class="rfilter" value="done" /> 已读</label>
-              <div id="filter-stars" class="fp-stars" title="按评分过滤：点星=只看该评分及以上，再点同一处取消"></div>
+              <div class="fp-title" data-i18n="readingFilters">阅读过滤</div>
+              <label><input type="checkbox" class="rfilter" value="unread" /> <span data-i18n="unread">未读</span></label>
+              <label><input type="checkbox" class="rfilter" value="reading" /> <span data-i18n="reading">正在阅读</span></label>
+              <label><input type="checkbox" class="rfilter" value="done" /> <span data-i18n="finished">已读</span></label>
+              <div id="filter-stars" class="fp-stars" title="按评分过滤：点星=只看该评分及以上，再点同一处取消" data-i18n-title="ratingFilterTip"></div>
             </div>
           </div>
           <div class="fp-sep-h"></div>
           <div class="fp-org-row">
             <div class="fp-org-col">
-              <div class="fp-title">标签</div>
+              <div class="fp-title" data-i18n="tags">标签</div>
               <div id="tag-filter-list" class="fp-choice-list"></div>
             </div>
             <div class="fp-org-col">
               <div class="fp-title fp-org-title-row">
-                <span>收藏夹</span>
-                <button id="organization-match-mode" class="fp-match-mode" type="button">匹配任一</button>
+                <span data-i18n="collections">收藏夹</span>
+                <button id="organization-match-mode" class="fp-match-mode" type="button" data-i18n="matchAny">匹配任一</button>
               </div>
               <div id="collection-filter-list" class="fp-choice-list"></div>
             </div>
@@ -266,16 +266,16 @@
           <div class="fp-col">
             <div class="layout-config-row">
               <div class="layout-setting">
-                <div class="fp-title">布局</div>
+                <div class="fp-title" data-i18n="layout">布局</div>
                 <div class="layout-row">
-                  <button class="layout-btn" data-layout="list" title="横向列表">
+                  <button class="layout-btn" data-layout="list" title="横向列表" data-i18n-title="listLayout">
                     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
                       <rect x="3" y="5" width="18" height="2.4" fill="currentColor" />
                       <rect x="3" y="10.8" width="18" height="2.4" fill="currentColor" />
                       <rect x="3" y="16.6" width="18" height="2.4" fill="currentColor" />
                     </svg>
                   </button>
-                  <button class="layout-btn" data-layout="grid" title="网格">
+                  <button class="layout-btn" data-layout="grid" title="网格" data-i18n-title="gridLayout">
                     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
                       <rect x="3" y="3" width="8" height="8" fill="currentColor" />
                       <rect x="13" y="3" width="8" height="8" fill="currentColor" />
@@ -286,12 +286,12 @@
                 </div>
               </div>
               <div class="grid-cols-setting">
-                <div class="fp-title">列数</div>
+                <div class="fp-title" data-i18n="columns">列数</div>
                 <div class="grid-cols-row">
-                  <button id="grid-cols-default" class="grid-cols-default" type="button">默认</button>
+                  <button id="grid-cols-default" class="grid-cols-default" type="button" data-i18n="default">默认</button>
                   <span id="grid-cols-value" class="grid-cols-value">3</span>
-                  <button id="grid-cols-dec" class="grid-cols-step" type="button" title="减少列数">-</button>
-                  <button id="grid-cols-inc" class="grid-cols-step" type="button" title="增加列数">+</button>
+                  <button id="grid-cols-dec" class="grid-cols-step" type="button" title="减少列数" data-i18n-title="decreaseColumns">-</button>
+                  <button id="grid-cols-inc" class="grid-cols-step" type="button" title="增加列数" data-i18n-title="increaseColumns">+</button>
                 </div>
               </div>
               <div id="filter-result-summary" class="fp-result-summary" aria-live="polite">0/0</div>
@@ -331,28 +331,28 @@
     <div id="stats-modal" class="modal">
       <div class="modal-card stats-card">
         <div class="modal-head stats-head">
-          <span>阅读统计</span>
-          <button id="stats-settings-btn" class="btn-plain stats-settings-btn" title="阅读统计设置">⚙</button>
+          <span data-i18n="readingStats">阅读统计</span>
+          <button id="stats-settings-btn" class="btn-plain stats-settings-btn" title="阅读统计设置" data-i18n-title="readingStatsSettings">⚙</button>
         </div>
         <div id="stats-settings" class="stats-settings">
-          <label><input type="checkbox" data-stat-item="duration" checked /> 阅读时长</label>
-          <label><input type="checkbox" data-stat-item="words" checked /> 阅读字数</label>
-          <label><input type="checkbox" data-stat-item="speed" checked /> 平均速度</label>
-          <label><input type="checkbox" data-stat-item="books" checked /> 读过</label>
-          <label><input type="checkbox" data-stat-item="finished" checked /> 读完</label>
-          <label><input type="checkbox" data-stat-item="highlights" checked /> 高亮</label>
-          <label><input type="checkbox" data-stat-item="notes" checked /> 批注</label>
+          <label><input type="checkbox" data-stat-item="duration" checked /> <span data-i18n="readingDuration">阅读时长</span></label>
+          <label><input type="checkbox" data-stat-item="words" checked /> <span data-i18n="readingWords">阅读字数</span></label>
+          <label><input type="checkbox" data-stat-item="speed" checked /> <span data-i18n="averageSpeed">平均速度</span></label>
+          <label><input type="checkbox" data-stat-item="books" checked /> <span data-i18n="booksRead">读过</span></label>
+          <label><input type="checkbox" data-stat-item="finished" checked /> <span data-i18n="finishedBooks">读完</span></label>
+          <label><input type="checkbox" data-stat-item="highlights" checked /> <span data-i18n="highlights">高亮</span></label>
+          <label><input type="checkbox" data-stat-item="notes" checked /> <span data-i18n="annotations">批注</span></label>
           <label class="stats-chart-switch">
-            <span>柱状图切换</span>
-            <span id="stats-chart-mode">时间</span>
-            <input type="checkbox" id="stats-chart-metric" title="切换柱状图时间 / 字数" />
+            <span data-i18n="chartSwitch">柱状图切换</span>
+            <span id="stats-chart-mode" data-i18n="time">时间</span>
+            <input type="checkbox" id="stats-chart-metric" title="切换柱状图时间 / 字数" data-i18n-title="chartMetricTip" />
           </label>
         </div>
         <div class="stats-tabs">
-          <button class="stats-tab active" data-scope="day">日</button>
-          <button class="stats-tab" data-scope="month">月</button>
-          <button class="stats-tab" data-scope="year">年</button>
-          <button class="stats-tab" data-scope="total">总</button>
+          <button class="stats-tab active" data-scope="day" data-i18n="day">日</button>
+          <button class="stats-tab" data-scope="month" data-i18n="month">月</button>
+          <button class="stats-tab" data-scope="year" data-i18n="year">年</button>
+          <button class="stats-tab" data-scope="total" data-i18n="total">总</button>
         </div>
         <div class="stats-nav">
           <button id="stats-prev" class="btn-plain">◀</button>
@@ -394,16 +394,20 @@
           <label class="switch"><input type="checkbox" id="set-cover-title" /><span class="slider"></span></label>
         </div>
         <div class="fp-set-row">
+          <span data-i18n="coverOnDemand">封面按需加载</span>
+          <label class="switch"><input type="checkbox" id="set-cover-on-demand" /><span class="slider"></span></label>
+        </div>
+        <div class="fp-set-row">
           <span data-i18n="animation">动画</span>
           <span class="fp-set-tail">
-            <button id="animation-gear" class="fp-row-gear" title="设置界面动画">⚙</button>
-            <label class="switch"><input type="checkbox" id="set-animation-master" checked aria-label="启用全部动画" /><span class="slider"></span></label>
+            <button id="animation-gear" class="fp-row-gear" title="设置界面动画" data-i18n-title="animationSettings">⚙</button>
+            <label class="switch"><input type="checkbox" id="set-animation-master" checked aria-label="启用全部动画" data-i18n-aria="animationSettings" /><span class="slider"></span></label>
           </span>
         </div>
         <div class="fp-set-row">
           <span data-i18n="autoImport">自动导入目录</span>
           <span class="fp-set-tail">
-            <button id="dirs-gear" class="fp-row-gear" title="设置自动导入目录">⚙</button>
+            <button id="dirs-gear" class="fp-row-gear" title="设置自动导入目录" data-i18n-title="importDirectoriesTitle">⚙</button>
             <label class="switch"><input type="checkbox" id="set-auto-import" /><span class="slider"></span></label>
           </span>
         </div>
@@ -419,12 +423,12 @@
         </div>
         <div class="fp-set-row">
           <span data-i18n="modelAndTranslation">大模型与翻译 API</span>
-          <span class="fp-set-tail"><button id="api-settings-open" class="fp-row-gear" title="管理本机大模型与翻译 API">⚙</button></span>
+          <span class="fp-set-tail"><button id="api-settings-open" class="fp-row-gear" title="管理本机大模型与翻译 API" data-i18n-title="apiSettingsTitle">⚙</button></span>
         </div>
         <div class="fp-set-row">
           <span data-i18n="endRecommendations">读后推荐</span>
           <span class="fp-set-tail">
-            <button id="end-recommendations-gear" class="fp-row-gear" type="button" title="设置读后推荐" aria-label="设置读后推荐">⚙</button>
+            <button id="end-recommendations-gear" class="fp-row-gear" type="button" title="设置读后推荐" aria-label="设置读后推荐" data-i18n-title="recommendationSettings" data-i18n-aria="recommendationSettings">⚙</button>
             <label class="switch"><input type="checkbox" id="set-end-recommendations" checked /><span class="slider"></span></label>
           </span>
         </div>
@@ -435,7 +439,7 @@
         <div class="fp-set-row">
           <span data-i18n="dictionary">词典</span>
           <span class="fp-set-tail">
-            <button id="dict-gear" class="fp-row-gear" title="管理外置词典">⚙</button>
+            <button id="dict-gear" class="fp-row-gear" title="管理外置词典" data-i18n-title="externalDictionaryTitle">⚙</button>
           </span>
         </div>
         <section class="experimental-settings" aria-label="资讯">
@@ -473,88 +477,98 @@
     </div>
     <div id="newsnow-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="newsnow-settings-title">
       <div class="modal-card newsnow-settings-card">
-        <div class="modal-head"><span id="newsnow-settings-title">资讯设置</span><button id="newsnow-settings-close" class="btn-plain" type="button" aria-label="关闭资讯设置">✕</button></div>
-        <div class="fp-set-row"><span>后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
-        <p class="newsnow-settings-note">应用空闲后每 5 分钟更新已启用来源。图片仍在卡片进入视野时才加载。</p>
+        <div class="modal-head"><span id="newsnow-settings-title" data-i18n="newsSettings">资讯设置</span><button id="newsnow-settings-close" class="btn-plain" type="button" aria-label="关闭资讯设置" data-i18n-aria="closeNewsSettings">✕</button></div>
+        <div class="fp-set-row"><span data-i18n="backgroundPrefetch">后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
+        <p class="newsnow-settings-note" data-i18n="backgroundPrefetchNote">应用空闲后每 5 分钟更新已启用来源。图片仍在卡片进入视野时才加载。</p>
+        <section class="newsnow-gesture-setting" aria-labelledby="newsnow-gesture-label">
+          <div class="newsnow-gesture-heading"><span id="newsnow-gesture-label" data-i18n="gestureBack">手势返回</span><span class="newsnow-gesture-heading-tail"><button id="newsnow-gesture-editor-toggle" class="btn-plain newsnow-gesture-editor-toggle" type="button" aria-expanded="false" data-i18n="drawEditGesture">绘制 / 修改手势</button><label class="switch" title="启用手势返回" data-i18n-title="enableGestureBack"><input id="newsnow-gesture-enabled" type="checkbox" /><span class="slider"></span></label></span></div>
+          <div class="fp-set-row newsnow-gesture-precision-row"><label for="newsnow-gesture-precision" data-i18n="gestureMatchPrecision">匹配精度</label><select id="newsnow-gesture-precision" title="精度越高，只有更相似的手势才会触发" data-i18n-title="gesturePrecisionHint"><option value="low" data-i18n="precisionLow">低</option><option value="medium" data-i18n="precisionMedium">中</option><option value="high" data-i18n="precisionHigh">高</option></select></div>
+          <div id="newsnow-gesture-editor" class="newsnow-gesture-editor" hidden>
+            <p class="newsnow-settings-note" data-i18n="gestureEditorHint">按住左键画出轨迹并保存。使用时在资讯页或打开的资讯子页按住鼠标右键画出相近轨迹。</p>
+            <canvas id="newsnow-gesture-pad" class="newsnow-gesture-pad" aria-label="绘制手势返回轨迹" data-i18n-aria="drawGesturePath"></canvas>
+            <div class="newsnow-gesture-actions"><button id="newsnow-gesture-clear" class="btn-plain" type="button" data-i18n="clear">清除</button><button id="newsnow-gesture-save" class="btn-primary" type="button" data-i18n="savePath">保存轨迹</button></div>
+            <p id="newsnow-gesture-status" class="newsnow-gesture-status" aria-live="polite"></p>
+          </div>
+        </section>
       </div>
     </div>
     <div id="reader-recommendation-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="reader-recommendation-settings-title">
       <div class="modal-card reader-recommendation-settings-card">
-        <div class="modal-head"><span id="reader-recommendation-settings-title">读后推荐设置</span><button id="reader-recommendation-settings-close" class="btn-plain" type="button" aria-label="关闭读后推荐设置">✕</button></div>
-        <label class="reader-recommendation-threshold">不超过 <input id="reader-recommendation-min-words" type="number" min="0" max="100" step="0.5" inputmode="decimal" aria-label="不推荐的最大字数，单位为万字" /> 万字不推荐</label>
-        <p class="reader-recommendation-settings-note">阅读进度达到约 90% 时会在后台预取相似图书。设置为 0 表示不按字数过滤。</p>
+        <div class="modal-head"><span id="reader-recommendation-settings-title" data-i18n="recommendationSettings">读后推荐设置</span><button id="reader-recommendation-settings-close" class="btn-plain" type="button" data-i18n-aria="close">✕</button></div>
+        <label class="reader-recommendation-threshold"><span data-i18n="recommendationThresholdBefore">不超过</span> <input id="reader-recommendation-min-words" type="number" min="0" max="100" step="0.5" inputmode="decimal" data-i18n-aria="recommendationThresholdAria" /> <span data-i18n="recommendationThresholdAfter">万字不推荐</span></label>
+        <p class="reader-recommendation-settings-note" data-i18n="recommendationSettingsNote">阅读进度达到约 90% 时会在后台预取相似图书。设置为 0 表示不按字数过滤。</p>
       </div>
     </div>
     <div id="api-settings-modal" class="modal">
       <div class="modal-card api-settings-card">
-        <div class="modal-head"><span>大模型与翻译 API</span><button id="api-settings-close" class="btn-plain" type="button">✕</button></div>
-        <p class="api-settings-note">密钥仅保存在本机安全存储中。现有的单一智读配置会自动成为第一条大模型配置。</p>
-        <section class="api-settings-section" aria-label="大模型配置">
-          <div class="fp-title">大模型</div>
-          <label>已保存的 API<select id="api-ai-profile"></select></label>
-          <div class="api-settings-actions"><button id="api-ai-use" class="btn-plain" type="button">设为智读与问答当前模型</button></div>
-          <label>添加常用大模型<select id="api-ai-preset"><option value="">选择服务商…</option><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible">OpenAI 兼容接口</option></select></label>
-          <label>名称<input id="api-ai-name" type="text" maxlength="80" placeholder="例如：DeepSeek 快速问答" /></label>
-          <label>服务商<select id="api-ai-provider"><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible">OpenAI 兼容接口</option></select></label>
-          <label>接口地址<input id="api-ai-base-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" /></label>
-          <label>模型名<input id="api-ai-model" type="text" placeholder="例如：deepseek-v4-flash" autocomplete="off" /></label>
-          <label>API Key<input id="api-ai-key" type="password" placeholder="新建时必填；编辑留空则保留原密钥" autocomplete="off" /></label>
-          <div class="api-settings-actions"><button id="api-ai-save" class="btn-plain" type="button">保存并使用</button><span id="api-ai-status" class="api-settings-status"></span></div>
+        <div class="modal-head"><span data-i18n="apiSettingsTitle">大模型与翻译 API</span><button id="api-settings-close" class="btn-plain" type="button" data-i18n-aria="close">✕</button></div>
+        <p class="api-settings-note" data-i18n="apiSettingsNote">密钥仅保存在本机安全存储中。现有的单一智读配置会自动成为第一条大模型配置。</p>
+        <section class="api-settings-section" data-i18n-aria="apiAiConfiguration">
+          <div class="fp-title" data-i18n="apiAi">大模型</div>
+          <label><span data-i18n="apiSavedProfiles">已保存的 API</span><select id="api-ai-profile"></select></label>
+          <div class="api-settings-actions"><button id="api-ai-use" class="btn-plain" type="button" data-i18n="apiUseCurrent">设为智读与问答当前模型</button></div>
+          <label><span data-i18n="apiAddPreset">添加常用大模型</span><select id="api-ai-preset"><option value="" data-i18n="apiChooseProvider">选择服务商…</option><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible" data-i18n="apiCompatible">OpenAI 兼容接口</option></select></label>
+          <label><span data-i18n="apiName">名称</span><input id="api-ai-name" type="text" maxlength="80" data-i18n-placeholder="apiNamePlaceholder" /></label>
+          <label><span data-i18n="apiProvider">服务商</span><select id="api-ai-provider"><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible" data-i18n="apiCompatible">OpenAI 兼容接口</option></select></label>
+          <label><span data-i18n="apiEndpoint">接口地址</span><input id="api-ai-base-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" /></label>
+          <label><span data-i18n="apiModelName">模型名</span><input id="api-ai-model" type="text" data-i18n-placeholder="apiModelPlaceholder" autocomplete="off" /></label>
+          <label><span data-i18n="apiKeyField">API Key</span><input id="api-ai-key" type="password" data-i18n-placeholder="apiNewKeyPlaceholder" autocomplete="off" /></label>
+          <div class="api-settings-actions"><button id="api-ai-save" class="btn-plain" type="button" data-i18n="apiSaveUse">保存并使用</button><span id="api-ai-status" class="api-settings-status"></span></div>
         </section>
-        <section class="api-settings-section" aria-label="翻译 API">
-          <div class="fp-title">翻译</div>
-          <label>当前翻译 API<select id="api-translation-provider"><option value="baidu">百度翻译</option><option value="tencent">腾讯翻译</option><option value="deepl">DeepL</option><option value="google">Google 翻译</option></select></label>
+        <section class="api-settings-section" data-i18n-aria="apiTranslationConfiguration">
+          <div class="fp-title" data-i18n="apiTranslation">翻译</div>
+          <label><span data-i18n="apiCurrentTranslation">当前翻译 API</span><select id="api-translation-provider"><option value="baidu" data-i18n="translationBaidu">百度翻译</option><option value="tencent" data-i18n="translationTencent">腾讯翻译</option><option value="deepl">DeepL</option><option value="google" data-i18n="translationGoogle">Google 翻译</option></select></label>
           <p id="api-translation-summary" class="api-settings-note"></p>
-          <label>App ID / API Key<input id="api-translation-id" type="text" autocomplete="off" /></label>
-          <label>密钥（百度、腾讯必填）<input id="api-translation-key" type="password" autocomplete="off" /></label>
-          <div class="api-settings-actions"><button id="api-translation-save" class="btn-plain" type="button">保存并设为当前翻译</button><span id="api-translation-status" class="api-settings-status"></span></div>
+          <label><span data-i18n="apiTranslationId">App ID / API Key</span><input id="api-translation-id" type="text" autocomplete="off" /></label>
+          <label><span data-i18n="apiTranslationSecret">密钥（百度、腾讯必填）</span><input id="api-translation-key" type="password" autocomplete="off" /></label>
+          <div class="api-settings-actions"><button id="api-translation-save" class="btn-plain" type="button" data-i18n="apiTranslationSave">保存并设为当前翻译</button><span id="api-translation-status" class="api-settings-status"></span></div>
         </section>
       </div>
     </div>
     <div id="animation-settings-modal" class="modal">
       <div class="modal-card animation-settings-card">
-        <div class="modal-head"><span>动画设置</span><button id="animation-settings-close" class="btn-plain">✕</button></div>
+        <div class="modal-head"><span data-i18n="animationSettings">动画设置</span><button id="animation-settings-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
         <section class="animation-setting-group" data-animation-group-section="mainWindow">
           <div class="fp-set-row animation-group-head">
-            <span>主窗口动画</span>
-            <label class="switch"><input type="checkbox" data-animation-group="mainWindow" aria-label="启用主窗口动画" /><span class="slider"></span></label>
+            <span data-i18n="animationMainWindow">主窗口动画</span>
+            <label class="switch"><input type="checkbox" data-animation-group="mainWindow" data-i18n-aria="animationEnableMain" /><span class="slider"></span></label>
           </div>
-          <p class="animation-group-help">关闭后会关闭主窗口全部动效；单独开启任意一项会自动启用本组。</p>
+          <p class="animation-group-help" data-i18n="animationMainHelp">关闭后会关闭主窗口全部动效；单独开启任意一项会自动启用本组。</p>
           <div class="animation-group-options">
-            <div class="fp-set-row"><span>搜索框弹出动画</span><label class="switch"><input type="checkbox" data-animation-setting="searchPopup" /><span class="slider"></span></label></div>
-            <div class="fp-set-row"><span>全书架搜索按键动画</span><label class="switch"><input type="checkbox" data-animation-setting="shelfSearchToggle" /><span class="slider"></span></label></div>
-            <div class="fp-set-row"><span>常用设置开关动画</span><label class="switch"><input type="checkbox" data-animation-setting="commonSettingsSwitch" /><span class="slider"></span></label></div>
-            <div class="fp-set-row"><span>漏斗筛选按键动画</span><label class="switch"><input type="checkbox" data-animation-setting="filterButton" /><span class="slider"></span></label></div>
-            <div class="fp-set-row"><span>收藏／书单拖拽排序动画</span><label class="switch"><input type="checkbox" data-animation-setting="booklistSort" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationSearchPopup">搜索框弹出动画</span><label class="switch"><input type="checkbox" data-animation-setting="searchPopup" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationShelfSearch">全书架搜索按键动画</span><label class="switch"><input type="checkbox" data-animation-setting="shelfSearchToggle" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationSettingsSwitch">常用设置开关动画</span><label class="switch"><input type="checkbox" data-animation-setting="commonSettingsSwitch" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationFilter">漏斗筛选按键动画</span><label class="switch"><input type="checkbox" data-animation-setting="filterButton" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationBooklistSort">收藏／书单拖拽排序动画</span><label class="switch"><input type="checkbox" data-animation-setting="booklistSort" /><span class="slider"></span></label></div>
           </div>
         </section>
         <section class="animation-setting-group" data-animation-group-section="readerPage">
           <div class="fp-set-row animation-group-head">
-            <span>书页动画</span>
-            <label class="switch"><input type="checkbox" data-animation-group="readerPage" aria-label="启用书页动画" /><span class="slider"></span></label>
+            <span data-i18n="animationReaderPage">书页动画</span>
+            <label class="switch"><input type="checkbox" data-animation-group="readerPage" data-i18n-aria="animationEnableReader" /><span class="slider"></span></label>
           </div>
-          <p class="animation-group-help">关闭后会关闭阅读页全部动效；单独开启任意一项会自动启用本组。</p>
+          <p class="animation-group-help" data-i18n="animationReaderHelp">关闭后会关闭阅读页全部动效；单独开启任意一项会自动启用本组。</p>
           <div class="animation-group-options">
-            <div class="fp-set-row"><span>添加批注动画</span><label class="switch"><input type="checkbox" data-animation-setting="annotationAdd" /><span class="slider"></span></label></div>
-            <div class="fp-set-row"><span>阅读页设置项动画（双页、滚动模式）</span><label class="switch"><input type="checkbox" data-animation-setting="readingMode" /><span class="slider"></span></label></div>
-            <div class="fp-set-row"><span>翻页动画</span><label class="switch"><input type="checkbox" data-animation-setting="pageTurn" /><span class="slider"></span></label></div>
-            <div class="fp-set-row"><span>高亮菜单设置页动画</span><label class="switch"><input type="checkbox" data-animation-setting="highlightSettings" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationAnnotation">添加批注动画</span><label class="switch"><input type="checkbox" data-animation-setting="annotationAdd" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationReadingMode">阅读页设置项动画（双页、滚动模式）</span><label class="switch"><input type="checkbox" data-animation-setting="readingMode" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationPageTurn">翻页动画</span><label class="switch"><input type="checkbox" data-animation-setting="pageTurn" /><span class="slider"></span></label></div>
+            <div class="fp-set-row"><span data-i18n="animationHighlightMenu">高亮菜单设置页动画</span><label class="switch"><input type="checkbox" data-animation-setting="highlightSettings" /><span class="slider"></span></label></div>
           </div>
         </section>
       </div>
     </div>
     <div id="import-dirs-modal" class="modal">
       <div class="modal-card">
-        <div class="modal-head"><span>📁 自动导入目录</span><button id="import-dirs-close" class="btn-plain">✕</button></div>
+        <div class="modal-head"><span data-i18n="importDirectoriesTitle">📁 自动导入目录</span><button id="import-dirs-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
         <div class="ai-toggle-row" id="import-dirs-enabled-row">
-          <span>启用自动导入</span>
+          <span data-i18n="importDirectoriesEnable">启用自动导入</span>
           <label class="switch" id="import-dirs-enabled-switch"><input type="checkbox" id="import-dirs-enabled" /><span class="slider"></span></label>
         </div>
-        <p class="ai-note">下列目录（含子目录）里的电子书会在每次启动时自动加入书架。可添加多个目录。</p>
+        <p class="ai-note" data-i18n="importDirectoriesNote">下列目录（含子目录）里的电子书会在每次启动时自动加入书架。可添加多个目录。</p>
         <div id="dirs-list" class="dirs-list"></div>
         <div id="dirs-status" class="ai-status" aria-live="polite"></div>
         <div class="ai-actions">
-          <button id="dirs-add" class="btn-plain">＋ 添加目录…</button>
+          <button id="dirs-add" class="btn-plain" data-i18n="importDirectoriesAdd">＋ 添加目录…</button>
         </div>
       </div>
     </div>
@@ -572,56 +586,109 @@
     </div>
     <div id="semantic-index-modal" class="modal">
       <div class="modal-card semantic-card">
-        <div class="modal-head"><span>语义索引</span><button id="semantic-index-close" class="btn-plain">✕</button></div>
-        <p class="ai-note">语义检索在本机离线运行。首次建立索引会较久，但可以暂停、续建；关闭本窗口后，正在运行的任务会继续在后台执行。</p>
+        <div class="modal-head"><span data-i18n="semTitle">语义索引</span><button id="semantic-index-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
+        <p class="ai-note" data-i18n="semDescription">语义检索在本机离线运行。首次建立索引会较久，但可以暂停、续建；关闭本窗口后，正在运行的任务会继续在后台执行。</p>
         <section class="sem-section">
           <div id="sem-model-setup-title" class="sem-title">轻量语义检索 · BGE Small 中文</div>
           <div id="sem-model-setup-copy" class="sem-model-copy">默认的轻量中文语义模型，适合大多数书库；下载、建索引和查询都更快，占用也更小。</div>
           <div class="sem-model-controls">
-            <label for="sem-model-select">切换语义模型</label>
-            <select id="sem-model-select" class="sem-model-select" aria-label="切换语义模型">
-              <option value="bge-small-zh-v1.5">BGE Small 中文（默认，轻量）</option>
-              <option value="bge-large-zh-v1.5">BGE Large 中文（高精度）</option>
+            <label for="sem-model-select" data-i18n="semSelectModel">切换语义模型</label>
+            <select id="sem-model-select" class="sem-model-select" aria-label="切换语义模型" data-i18n-aria="semSelectModel">
+              <option value="bge-small-zh-v1.5" data-i18n="semModelSmall">BGE Small 中文（默认，轻量）</option>
+              <option value="bge-large-zh-v1.5" data-i18n="semModelLarge">BGE Large 中文（高精度）</option>
+              <option value="bge-m3" data-i18n="semModelM3">BGE-M3（多语言、混合检索）</option>
+              <option value="multilingual-e5-small" data-i18n="semModelE5">Multilingual-E5-Small（多语言，轻量）</option>
             </select>
           </div>
         </section>
         <section class="sem-section">
             <div class="sem-section-head">
               <div>
-              <div class="sem-title">当前模型状态</div>
+              <div class="sem-title" data-i18n="semCurrentModel">当前模型状态</div>
               <div id="sem-model-meta" class="sem-meta">正在读取状态…</div>
             </div>
             <div class="sem-actions">
-              <button id="sem-model-download" class="btn-plain" type="button">下载模型</button>
-              <button id="sem-model-delete" class="btn-plain danger-lite" type="button">删除模型</button>
+              <button id="sem-model-download" class="btn-plain" type="button" data-i18n="download">下载模型</button>
+              <button id="sem-model-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete">删除模型</button>
+            </div>
+          </div>
+        </section>
+        <section class="sem-section" id="sem-gpu-section">
+          <div class="sem-section-head">
+            <div>
+              <div class="sem-title" data-i18n="semGpu">GPU 加速</div>
+              <div id="sem-gpu-meta" class="sem-meta" data-i18n="semGpuInitial">点击“重新检测”读取本机 GPU 状态。</div>
+            </div>
+            <div class="sem-actions">
+              <button id="sem-gpu-refresh" class="btn-plain" type="button" data-i18n="semRefreshGpu">重新检测</button>
             </div>
           </div>
         </section>
         <section class="sem-section">
           <div class="sem-section-head">
             <div>
-              <div class="sem-title">语义索引</div>
-              <div id="sem-vector-meta" class="sem-meta">尚未建立</div>
+              <div class="sem-title" data-i18n="semIndexTitle">语义索引</div>
+              <div id="sem-vector-meta" class="sem-meta" data-i18n="semNotBuilt">尚未建立</div>
             </div>
             <div class="sem-actions">
-              <button id="sem-vector-build" class="btn-plain" type="button">建立语义索引</button>
-              <button id="sem-vector-pause" class="btn-plain" type="button" hidden>暂停</button>
-              <button id="sem-vector-delete" class="btn-plain danger-lite" type="button">删除</button>
+              <button id="sem-vector-build" class="btn-plain" type="button" data-i18n="semBuildIndex">建立语义索引</button>
+              <button id="sem-vector-pause" class="btn-plain" type="button" hidden data-i18n="semPause">暂停</button>
+              <button id="sem-vector-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete">删除</button>
             </div>
           </div>
           <div class="sem-progressbar"><span id="sem-vector-bar"></span></div>
         </section>
         <details class="sem-advanced-tools">
-          <summary>高级管理：加速索引、画像索引与单项删除</summary>
+          <summary data-i18n="semAdvanced">高级管理：检索增强、加速索引、画像索引与单项删除</summary>
+          <section class="sem-section" id="sem-retrieval-section">
+            <div class="sem-section-head">
+              <div>
+                <div class="sem-title" data-i18n="semRetrievalStrategy">检索策略</div>
+                <div id="sem-retrieval-meta" class="sem-meta">标准：全文与语义结果自动融合</div>
+              </div>
+              <div class="sem-actions">
+                <select id="sem-retrieval-mode" class="sem-model-select" aria-label="检索策略" data-i18n-aria="semRetrievalStrategy">
+                  <option value="standard" data-i18n="semRetrievalStandard">标准：全文＋语义融合</option>
+                  <option value="high_precision" data-i18n="semRetrievalHigh">高精度：融合＋重排</option>
+                  <option id="sem-retrieval-m3-option" value="m3_hybrid" data-i18n="semRetrievalM3">实验性：M3 稀疏＋ColBERT</option>
+                </select>
+              </div>
+            </div>
+          </section>
           <section class="sem-section">
             <div class="sem-section-head">
               <div>
-                <div class="sem-title">加速索引</div>
-                <div id="sem-accel-meta" class="sem-meta">尚未建立</div>
+                <div class="sem-title" data-i18n="semReranker">重排模型</div>
+                <div id="sem-reranker-meta" class="sem-meta" data-i18n="semRerankerDescription">让最符合问题的内容排在前面，回答引用更准确。</div>
               </div>
               <div class="sem-actions">
-                <button id="sem-accel-build" class="btn-plain" type="button">建立加速索引</button>
-                <button id="sem-accel-delete" class="btn-plain danger-lite" type="button">删除</button>
+                <button id="sem-reranker-download" class="btn-plain" type="button" data-i18n="semDownloadReranker">下载重排模型</button>
+                <button id="sem-reranker-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete">删除</button>
+              </div>
+            </div>
+          </section>
+          <section class="sem-section" id="sem-m3-index-section">
+            <div class="sem-section-head">
+              <div>
+                <div class="sem-title" data-i18n="semM3Index">BGE-M3 稀疏索引与 ColBERT 重排</div>
+                <div id="sem-m3-meta" class="sem-meta" data-i18n="semM3Description">建立后能更好兼顾关键词和语义，复杂问题更容易找到。</div>
+              </div>
+              <div class="sem-actions">
+                <button id="sem-m3-build" class="btn-plain" type="button" data-i18n="semBuildM3">建立 M3 索引</button>
+                <button id="sem-m3-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete">删除</button>
+              </div>
+            </div>
+            <div class="sem-progressbar"><span id="sem-m3-bar"></span></div>
+          </section>
+          <section class="sem-section">
+            <div class="sem-section-head">
+              <div>
+                <div class="sem-title" data-i18n="semAccelerator">加速索引</div>
+                <div id="sem-accel-meta" class="sem-meta" data-i18n="semAcceleratorDescription">让已建立语义索引的大书库更快返回检索结果。</div>
+              </div>
+              <div class="sem-actions">
+                <button id="sem-accel-build" class="btn-plain" type="button" data-i18n="semBuildAccelerator">建立加速索引</button>
+                <button id="sem-accel-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete">删除</button>
               </div>
             </div>
             <div class="sem-progressbar"><span id="sem-accel-bar"></span></div>
@@ -629,12 +696,12 @@
           <section class="sem-section">
             <div class="sem-section-head">
               <div>
-                <div class="sem-title">多中心画像索引</div>
-                <div id="sem-multi-meta" class="sem-meta">尚未建立</div>
+                <div class="sem-title" data-i18n="semMultiProfile">多中心画像索引</div>
+                <div id="sem-multi-meta" class="sem-meta" data-i18n="semMultiProfileDescription">把一本书的不同主题分别归类，跨主题提问时更容易找到对应内容。</div>
               </div>
               <div class="sem-actions">
-                <button id="sem-multi-build" class="btn-plain" type="button">建立多中心画像</button>
-                <button id="sem-multi-delete" class="btn-plain danger-lite" type="button">删除</button>
+                <button id="sem-multi-build" class="btn-plain" type="button" data-i18n="semBuildMulti">建立多中心画像</button>
+                <button id="sem-multi-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete">删除</button>
               </div>
             </div>
             <div class="sem-progressbar"><span id="sem-multi-bar"></span></div>
@@ -645,12 +712,12 @@
     </div>
     <div id="external-dict-modal" class="modal">
       <div class="modal-card dict-card">
-        <div class="modal-head"><span>词典</span><button id="external-dict-close" class="btn-plain">✕</button></div>
-        <p class="ai-note">外置词典会优先于内置词典查询。支持 TSV / CSV / JSON、StarDict（.ifo/.idx/.dict/.dict.dz）和常见未加密 MDX；使用 LZO 压缩或加密的 MDX/MDD 会提示转换后再导入。</p>
+        <div class="modal-head"><span data-i18n="externalDictionaryTitle">词典</span><button id="external-dict-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
+        <p class="ai-note" data-i18n="externalDictionaryNote">外置词典会优先于内置词典查询。支持 TSV / CSV / JSON、StarDict（.ifo/.idx/.dict/.dict.dz）和常见未加密 MDX；使用 LZO 压缩或加密的 MDX/MDD 会提示转换后再导入。</p>
         <div id="external-dict-list" class="dict-list"></div>
         <div id="external-dict-status" class="ai-status" aria-live="polite"></div>
         <div class="ai-actions">
-          <button id="external-dict-add" class="btn-plain" type="button">＋ 添加词典…</button>
+          <button id="external-dict-add" class="btn-plain" type="button" data-i18n="externalDictionaryAdd">＋ 添加词典…</button>
         </div>
       </div>
     </div>
@@ -670,12 +737,31 @@
     <div id="feedback-modal" class="modal">
       <div class="modal-card feedback-card">
         <div class="modal-head"><span id="feedback-title">提交 Bug</span><button id="feedback-close" class="btn-plain">✕</button></div>
-        <p class="feedback-note">可输入文字，也可粘贴、拖入或选择图片；每张图片会自动压缩到 1 MB 以内。</p>
-        <div id="feedback-editor" class="feedback-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="请描述发生了什么、期望结果，或希望增加的功能…"></div>
+        <p class="feedback-note">可输入文字，也可粘贴、拖入或选择图片；每张图片会自动压缩到 1 MB 以内。打开本窗口时会冻结最近两分钟的脱敏问题记录，之后可随 Bug 反馈附上。</p>
+        <div id="feedback-editor" class="feedback-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="请写下 Bug 出现的步骤、操作、实际结果和期望结果…"></div>
         <input id="feedback-image-input" type="file" accept="image/*" multiple hidden />
+        <section id="feedback-problem-trace-note" class="feedback-problem-trace-section">
+          <div class="feedback-section-heading"><strong>问题记录（可选）</strong><span>复现问题后，选择一种方式保留最近两分钟的操作记录。</span></div>
+          <div id="feedback-json-row" class="feedback-json-row">
+            <div class="feedback-problem-trace-action feedback-problem-trace-control recommended">
+              <button id="feedback-attach-problem-trace" class="btn-plain" type="button">附到本次反馈（推荐）</button>
+              <span>作为“问题记录.json”随下方反馈一起提交</span>
+            </div>
+            <div class="feedback-problem-trace-action feedback-problem-trace-control">
+              <button id="feedback-save-problem-trace" class="btn-plain" type="button">保存问题记录到桌面</button>
+              <span>导出 JSON，便于自行查看或发给开发者</span>
+            </div>
+          </div>
+          <div id="feedback-trace-status" class="feedback-attachment-status">
+            <span class="feedback-status-label">问题记录：</span><span id="feedback-json-status" class="feedback-json-status">未附加</span>
+            <button id="feedback-clear-json" class="btn-plain" type="button" hidden>移除</button>
+          </div>
+        </section>
+        <section class="feedback-supplement-section">
+          <div class="feedback-section-heading"><strong>补充材料（可选）</strong><span>可添加截图，帮助说明问题。</span></div>
+          <div class="feedback-image-row"><button id="feedback-insert-image" class="btn-plain" type="button">添加截图</button><span class="feedback-status-label">截图：</span><span id="feedback-image-status" class="feedback-image-status">0/3 张</span></div>
+        </section>
         <div class="feedback-actions">
-          <button id="feedback-insert-image" class="btn-plain" type="button">插入图片</button>
-          <span id="feedback-image-status" class="feedback-image-status">最多 3 张</span>
           <button id="feedback-submit" class="btn-plain primary" type="button">提交</button>
         </div>
         <div id="feedback-status" class="ai-status" aria-live="polite"></div>
@@ -821,32 +907,35 @@
             <span id="library-ai-classify-status" class="library-ai-classify-status" aria-live="polite" hidden></span>
             <button id="library-ai-classify" class="library-ai-classify" type="button" title="正在读取书籍分类状态…" data-i18n="bookClassification">书籍分类</button>
             <button id="library-ai-history" class="library-ai-history" type="button" title="查看已保存的书库问答" data-i18n="questionHistory">问答记录</button>
-            <button id="library-ai-answer-settings" class="library-ai-history" type="button" aria-expanded="false" aria-controls="library-ai-answer-settings-overlay">设置</button>
+            <button id="library-ai-answer-settings" class="library-ai-history" type="button" aria-expanded="false" aria-controls="library-ai-answer-settings-overlay" data-i18n="answerSettings">设置</button>
             <select id="library-ai-model-profile" class="library-ai-model-profile" aria-label="书库问答使用的大模型"></select>
             <span class="library-ai-pill" data-i18n="localSearchCitations">本地检索 · 可追溯引文</span>
           </div>
         </header>
         <div id="library-ai-answer-settings-overlay" class="library-ai-answer-settings-overlay" hidden>
           <section id="library-ai-answer-settings-panel" class="library-ai-answer-settings-panel" role="dialog" aria-modal="true" aria-labelledby="library-ai-answer-settings-title">
-            <div class="library-ai-answer-settings-head"><h2 id="library-ai-answer-settings-title">设置</h2><button id="library-ai-answer-settings-close" type="button" aria-label="关闭设置">×</button></div>
+            <div class="library-ai-answer-settings-head"><h2 id="library-ai-answer-settings-title" data-i18n="answerSettings">设置</h2><button id="library-ai-answer-settings-close" type="button" aria-label="关闭设置" data-i18n-aria="closeSettings">×</button></div>
             <div class="library-ai-answer-setting-group">
-              <div class="library-ai-answer-setting-label"><strong>作答长度</strong><span>长度越长，检索与生成时间越长。</span></div>
+              <div class="library-ai-answer-setting-label"><strong data-i18n="answerLength">作答长度</strong><span data-i18n="answerLengthHint">长度越长，检索与生成时间越长。</span></div>
               <div class="library-ai-answer-length-options" role="radiogroup" aria-label="书库问答长度">
-                <button type="button" data-answer-length="short" role="radio" aria-checked="true"><strong>短</strong><span>当前示例：聚焦结论与 4—6 条依据</span></button>
-                <button type="button" data-answer-length="medium" role="radio" aria-checked="false"><strong>中</strong><span>更多来源、依据与延展观点</span></button>
-                <button type="button" data-answer-length="long" role="radio" aria-checked="false"><strong>长</strong><span>最广证据、深入解读与边界讨论</span></button>
+                <button type="button" data-answer-length="short" role="radio" aria-checked="true"><strong data-i18n="answerShort">短</strong><span data-i18n="answerShortHint">当前示例：聚焦结论与 4—6 条依据</span></button>
+                <button type="button" data-answer-length="medium" role="radio" aria-checked="false"><strong data-i18n="answerMedium">中</strong><span data-i18n="answerMediumHint">更多来源、依据与延展观点</span></button>
+                <button type="button" data-answer-length="long" role="radio" aria-checked="false"><strong data-i18n="answerLong">长</strong><span data-i18n="answerLongHint">最广证据、深入解读与边界讨论</span></button>
               </div>
             </div>
             <div class="library-ai-answer-font-row">
-              <div class="library-ai-answer-setting-label"><strong>回答字号</strong><span>调整回答、历史记录和引用内容的显示大小。</span></div>
-              <div class="library-ai-font-controls" aria-label="书库问答字号"><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号">A+</button></div>
+              <div class="library-ai-answer-setting-label"><strong data-i18n="answerFontSize">字号</strong></div>
+              <div class="library-ai-font-controls" aria-label="书库问答字号" data-i18n-aria="libraryAnswerFontSize"><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号" data-i18n-title="decreaseAnswerFont" data-i18n-aria="decreaseAnswerFont">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号" data-i18n-title="increaseAnswerFont" data-i18n-aria="increaseAnswerFont">A+</button></div>
             </div>
+            <div class="library-ai-answer-long-context-row">
+              <div class="library-ai-answer-setting-label"><strong data-i18n="longContextReading">复杂问题长文精读（BGE-M3）</strong></div>
+              <button id="library-ai-long-context" class="library-ai-answer-toggle" type="button" role="switch" aria-checked="false" aria-describedby="library-ai-long-context-help" title="切换复杂问题长文精读" data-i18n-title="toggleLongContextReading"><span aria-hidden="true"></span></button>
+            </div>
+            <div id="library-ai-long-context-help" class="library-ai-long-context-help" role="status" hidden></div>
           </section>
         </div>
         <div class="library-ai-grid">
           <aside class="library-ai-card library-ai-scope">
-            <h2 data-i18n="searchScope">检索范围</h2>
-            <p class="library-ai-tip" data-i18n="libraryScopeTip">书库问答会精确检索全部已建立语义索引的图书，展示最相关的前 20 本（每本 1 段）。勾选图书后才限定范围；跨书对比请选择 2–8 本。</p>
             <div class="library-ai-mode"><button id="mode-question" class="active" type="button" data-i18n="libraryQuestion">书库问答</button><button id="mode-compare" type="button" data-i18n="crossBookCompare">跨书对比</button></div>
             <div class="library-ai-quick-filters" aria-label="快速筛选图书" data-i18n-aria="libraryFilters">
               <label><span data-i18n="tagLabel">标签</span><select id="tag-filter"><option value="" data-i18n="allTags">全部标签</option></select></label>
@@ -871,7 +960,7 @@
     </section>
     <section id="newsnow-page" class="newsnow-page" hidden aria-label="资讯">
       <section id="newsnow-source-picker" class="newsnow-source-picker" hidden aria-label="资讯来源设置" data-i18n-aria="sourceSettings">
-        <div class="newsnow-source-picker-head"><div class="newsnow-source-picker-title"><strong data-i18n="manageSources">管理来源</strong><p data-i18n="sourceSettingsHint">勾选想看的来源；设置只保存在此设备。</p></div><span id="newsnow-source-selection" class="newsnow-source-selection">已选 0 / 24</span><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="关闭来源设置">×</button></div>
+        <div class="newsnow-source-picker-head"><div class="newsnow-source-picker-title"><strong data-i18n="manageSources">管理来源</strong><p data-i18n="sourceSettingsHint">勾选想看的来源；设置只保存在此设备。</p></div><span id="newsnow-source-selection" class="newsnow-source-selection">已选 0 / 24</span><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="返回资讯流" title="返回资讯流">←</button></div>
         <input id="newsnow-source-search" class="newsnow-source-search" type="search" placeholder="搜索来源、分类或关键词" aria-label="搜索资讯来源" data-i18n-placeholder="sourceSearch" data-i18n-aria="sourceSearch" />
         <div id="newsnow-source-options" class="newsnow-source-options"></div>
         <section id="newsnow-tieba-bars" class="newsnow-tieba-bars" aria-label="自定义贴吧">
@@ -881,8 +970,9 @@
           <form id="newsnow-tieba-bar-form" class="newsnow-tieba-bar-form" hidden><input id="newsnow-tieba-bar-input" type="text" maxlength="48" autocomplete="off" placeholder="输入吧名，例如：原神" aria-label="添加百度贴吧吧名" /><button class="btn-primary" type="submit">确认</button><button id="newsnow-tieba-bar-cancel" class="btn-plain" type="button">取消</button></form>
           <div id="newsnow-tieba-bar-list" class="newsnow-tieba-bar-list"></div>
         </section>
-        <div class="newsnow-source-picker-actions"><button id="newsnow-source-reset" class="btn-plain" type="button" data-i18n="restoreRecommended">恢复推荐</button><button id="newsnow-source-apply" class="btn-primary" type="button" data-i18n="doneAndRefresh">完成并刷新</button></div>
+        <div id="newsnow-source-status" class="newsnow-source-status" aria-live="polite"></div>
       </section>
+      <div id="newsnow-feed-view" class="newsnow-feed-view">
       <div class="newsnow-toolbar">
         <div id="newsnow-categories" class="newsnow-categories" aria-label="资讯分类"></div>
         <div class="newsnow-toolbar-actions">
@@ -890,6 +980,7 @@
             <span id="newsnow-updated" class="newsnow-updated" aria-live="polite"></span>
             <button id="newsnow-source-toggle" class="btn-plain newsnow-source-toggle" type="button" aria-expanded="false" data-i18n="manageSources">管理来源</button>
             <button id="newsnow-refresh" class="btn-plain newsnow-refresh" type="button" data-i18n="refresh">刷新</button>
+            <button id="newsnow-gesture-settings" class="btn-plain newsnow-gesture-settings" type="button" title="资讯设置" aria-label="资讯设置" data-i18n="answerSettings" data-i18n-title="newsSettings" data-i18n-aria="newsSettings">设置</button>
           </div>
           <div class="newsnow-layout-control" role="group" aria-label="资讯布局">
             <button id="newsnow-layout-list" class="newsnow-layout-button" type="button" title="横排布局" aria-label="横排布局" aria-pressed="true" data-i18n-title="listLayout" data-i18n-aria="listLayout"><i class="newsnow-layout-list-icon" aria-hidden="true"></i></button>
@@ -904,6 +995,7 @@
       </div>
       <div id="newsnow-status" class="newsnow-status" aria-live="polite"></div>
       <main id="newsnow-feed" class="newsnow-feed" aria-live="polite"></main>
+      </div>
     </section>
     <section id="newsnow-reader" class="newsnow-reader" hidden aria-label="资讯正文">
       <header class="newsnow-reader-head">
@@ -914,6 +1006,7 @@
       <p id="newsnow-reader-status" class="newsnow-reader-status" aria-live="polite"></p>
       <article id="newsnow-reader-content" class="newsnow-reader-content"></article>
     </section>
+    <canvas id="newsnow-gesture-trail" class="newsnow-gesture-trail" hidden aria-hidden="true"></canvas>
     <script src="startup-perf.js"></script>
     <script src="app-i18n.js"></script>
     <script src="titlebar.js"></script>
@@ -929,11 +1022,13 @@
     <script src="notice-ui.js"></script>
     <script src="library-ai.js"></script>
     <script src="library-ai-entry.js"></script>
+    <script src="news-gesture.js"></script>
     <script src="experimental-features.js"></script>
     <script src="news-ui.js"></script>
     <script src="api-settings-ui.js"></script>
     <script src="auto-import-ui.js"></script>
     <script src="reader-recommendation-settings.js"></script>
+    <script src="problem-trace-ui.js"></script>
     <script src="app.js"></script>
     <script src="search-ui.js"></script>
     <script src="debug-ui.js"></script>

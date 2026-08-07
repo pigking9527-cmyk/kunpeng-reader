@@ -1,4 +1,6 @@
-use super::model::{active as active_semantic_model, embedder as get_embedder};
+use super::model::{
+    active as active_semantic_model, document_input, embedder as get_embedder, SemanticEmbedder,
+};
 use super::{
     accelerator, batch, clear_sem_profile_cache, clear_sem_query_cache, clear_sem_status_cache,
     profile, status, vector,
@@ -78,7 +80,7 @@ struct SemBuildBookInput<'a> {
 }
 
 fn sem_build_book(
-    embedder: &Mutex<fastembed::TextEmbedding>,
+    embedder: &Mutex<SemanticEmbedder>,
     input: SemBuildBookInput<'_>,
     resume_at: &AtomicU64,
     pause_requested: &AtomicBool,
@@ -148,11 +150,11 @@ fn sem_build_book(
             std::thread::sleep(std::time::Duration::from_millis((r - now).min(200)));
         }
         // bge 段落不加前缀，直接用原文
-        let inputs: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+        let inputs: Vec<String> = batch.iter().map(|(_, t)| document_input(t)).collect();
         let embs = match embedder
             .lock()
             .map_err(|_| "语义模型锁定失败".to_string())?
-            .embed(inputs, None)
+            .embed_dense(inputs)
         {
             Ok(embeddings) => embeddings,
             Err(err) => {
@@ -162,7 +164,7 @@ fn sem_build_book(
                         "semantic_embed retry=true book={id} offset={offset} batch={} next_batch={} backend={} error={error}",
                         batch_len,
                         batch_size.current(),
-                                "CPU"
+                        "CPU"
                     ));
                     if let Some(task) = task {
                         let _ = task.log(
@@ -280,6 +282,9 @@ fn sem_build_book(
             vector_sha256,
         ),
     )?;
+    if active_semantic_model().id() == "bge-m3" {
+        super::m3::invalidate_book(id);
+    }
     Ok(())
 }
 
@@ -402,7 +407,7 @@ pub(super) async fn build_semantic_index(
                 }
                 continue;
             }
-            match search::get_book_chapters(state.inner(), b) {
+            match search::get_semantic_book_chapters(state.inner(), b) {
                 Some(ch) => {
                     if let Err(err) = sem_build_book(
                         &embedder,
@@ -499,11 +504,12 @@ pub(super) async fn build_semantic_index(
 }
 
 fn finish_vector_pause(state: &AppState, done: u32, total: u32) {
+    let (semantic_done, semantic_total) = semantic_book_counts(state);
     let mut p = state.sem_progress.lock().unwrap();
     p.done = done;
     p.total = total;
-    p.semantic_done = done;
-    p.semantic_total = total;
+    p.semantic_done = semantic_done;
+    p.semantic_total = semantic_total;
     p.semantic_bytes = status::semantic_index_bytes();
     p.building = false;
     p.active_task.clear();
@@ -512,6 +518,20 @@ fn finish_vector_pause(state: &AppState, done: u32, total: u32) {
     p.vector_paused = true;
     p.current = "语义索引已暂停；可从未完成图书继续建立".into();
     p.error.clear();
+}
+
+fn semantic_book_counts(state: &AppState) -> (u32, u32) {
+    let library = state.library.lock().unwrap();
+    let eligible = library.books.iter().filter(|book| book.format != "pdf");
+    let total = eligible.clone().count() as u32;
+    let done = eligible
+        .filter(|book| sem_index_done_for_book(book))
+        .count() as u32;
+    (done, total)
+}
+
+fn vector_rebuild_in_scope(id: u64, ids: Option<&std::collections::HashSet<u64>>) -> bool {
+    ids.map(|ids| ids.contains(&id)).unwrap_or(true)
 }
 
 fn update_vector_book_progress(state: &AppState, done: u32, total: u32, current: String) {
@@ -527,6 +547,13 @@ fn update_vector_book_progress(state: &AppState, done: u32, total: u32, current:
 }
 
 pub(super) async fn build_semantic_vectors(app: tauri::AppHandle) -> Result<(), String> {
+    build_semantic_vectors_scoped(app, None).await
+}
+
+async fn build_semantic_vectors_scoped(
+    app: tauri::AppHandle,
+    ids: Option<std::collections::HashSet<u64>>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     let task_handle = begin_semantic_task(state.inner(), "semantic_vectors", "加载模型…", false)?;
     // 只有新任务真正开始时才清空旧暂停标记，避免无效的重复“建立”请求
@@ -551,6 +578,7 @@ pub(super) async fn build_semantic_vectors(app: tauri::AppHandle) -> Result<(), 
                 .books
                 .iter()
                 .filter(|b| b.format != "pdf")
+                .filter(|b| vector_rebuild_in_scope(b.id, ids.as_ref()))
                 .cloned()
                 .collect()
         };
@@ -608,7 +636,7 @@ pub(super) async fn build_semantic_vectors(app: tauri::AppHandle) -> Result<(), 
                 update_vector_book_progress(state.inner(), completed, total, b.title.clone());
                 continue;
             }
-            match search::get_book_chapters(state.inner(), b) {
+            match search::get_semantic_book_chapters(state.inner(), b) {
                 Some(ch) => {
                     match sem_build_book(
                         &embedder,
@@ -652,11 +680,12 @@ pub(super) async fn build_semantic_vectors(app: tauri::AppHandle) -> Result<(), 
             }
             update_vector_book_progress(state.inner(), completed, total, b.title.clone());
         }
+        let (semantic_done, semantic_total) = semantic_book_counts(state.inner());
         let mut p = state.sem_progress.lock().unwrap();
         p.done = completed;
-        p.semantic_done = completed;
-        p.semantic_total = total;
-        p.semantic_ready = total > 0 && completed == total;
+        p.semantic_done = semantic_done;
+        p.semantic_total = semantic_total;
+        p.semantic_ready = semantic_total > 0 && semantic_done == semantic_total;
         p.semantic_bytes = status::semantic_index_bytes();
         p.building = false;
         p.active_task.clear();
@@ -788,6 +817,15 @@ mod tests {
             sem_build_control(&pause_requested, None),
             Err(SEM_BUILD_PAUSED)
         );
+    }
+
+    #[test]
+    fn automatic_chunk_migration_only_rebuilds_existing_old_ids() {
+        let ids = [7_u64, 11_u64].into_iter().collect();
+        assert!(vector_rebuild_in_scope(7, Some(&ids)));
+        assert!(vector_rebuild_in_scope(11, Some(&ids)));
+        assert!(!vector_rebuild_in_scope(12, Some(&ids)));
+        assert!(vector_rebuild_in_scope(12, None));
     }
 
     #[test]

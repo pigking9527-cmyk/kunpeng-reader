@@ -6,6 +6,10 @@ const rsearch = document.getElementById("rsearch");
 const rsearchInput = document.getElementById("rsearch-input");
 const rsearchCount = document.getElementById("rsearch-count");
 const rsearchResults = document.getElementById("rsearch-results");
+const readerSearchText = (key, fallback, values) => {
+  const value = window.ReaderI18n?.t?.(key, values);
+  return value && value !== key ? value : fallback;
+};
 let searchTimer = null;
 let rsearchEditingUntil = 0;
 let rsearchComposing = false;
@@ -31,14 +35,14 @@ function escapeHtml(s) {
 }
 function renderResults(term, hits) {
   rsearchResults.innerHTML = "";
-  rsearchCount.textContent = hits.length ? "约 " + hits.length + " 处" : "未找到";
+  rsearchCount.textContent = hits.length ? readerSearchText("searchHits", "约 {count} 处", { count: hits.length }) : readerSearchText("searchNotFound", "未找到");
   const low = term.toLowerCase();
   hits.forEach((h) => {
     const item = document.createElement("div");
     item.className = "rs-item";
     const ch = document.createElement("span");
     ch.className = "rs-ch";
-    ch.textContent = "第" + (h.chapter + 1) + (isPdf ? "页" : "章");
+    ch.textContent = readerSearchText("searchLocation", "第{number}{unit}", { number: h.chapter + 1, unit: isPdf ? readerSearchText("page", "页") : readerSearchText("chapter", "章") });
     // 高亮片段里的搜索词
     let html = "",
       snip = h.snippet,
@@ -89,7 +93,7 @@ function renderRHistory() {
   if (!rhistory.length) {
     const e = document.createElement("div");
     e.className = "rs-empty";
-    e.textContent = "暂无搜索记录";
+    e.textContent = readerSearchText("searchHistoryEmpty", "暂无搜索记录");
     rsearchResults.appendChild(e);
     return;
   }
@@ -126,7 +130,7 @@ function runSearch(q) {
     renderRHistory();
     return;
   }
-  rsearchCount.textContent = "搜索中…";
+  rsearchCount.textContent = readerSearchText("searching", "搜索中…");
   if (isPdf) {
     sendToPage({ search: q }); // PDF：交给 pdfview 搜索，结果通过 searchResults 回传
     return;
@@ -190,4 +194,7 @@ rsearchInput.addEventListener("keydown", (e) => {
   keepRsearchEditing();
   if (e.key === "Escape") toggleSearch(false);
   else if (e.key === "Enter") addRHistory(rsearchInput.value);
+});
+window.addEventListener("reader-language-changed", () => {
+  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH)) runSearch(rsearchTerm || rsearchInput.value);
 });

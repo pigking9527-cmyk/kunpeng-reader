@@ -1,0 +1,30 @@
+{
+  "syncProtocolVersion": 1,
+  "legacy_seconds_input": {
+    "kind": "vocab",
+    "id": "fixture:legacy-seconds",
+    "updated_at": 1785673800,
+    "deleted_at": 1785673801,
+    "device_id": "fixture-android-legacy",
+    "sync_version": 7,
+    "json": { "word": "示例" }
+  },
+  "canonical_milliseconds_result": {
+    "updated_at": 1785673800000,
+    "deleted_at": 1785673801000
+  },
+  "canonical_milliseconds_input": {
+    "kind": "vocab",
+    "id": "fixture:milliseconds",
+    "updated_at": 1785673802000,
+    "deleted_at": 0,
+    "device_id": "fixture-desktop",
+    "sync_version": 8,
+    "json": { "word": "毫秒" }
+  },
+  "non_entity_sync_state": {
+    "cursor": "1785673802005",
+    "server_updated_at": 1785673802005,
+    "data_generation": 3
+  }
+}

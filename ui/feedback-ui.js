@@ -11,12 +11,24 @@
   const imageInput = document.getElementById("feedback-image-input");
   const insertImage = document.getElementById("feedback-insert-image");
   const imageStatus = document.getElementById("feedback-image-status");
+  const jsonRow = document.getElementById("feedback-json-row");
+  const problemTraceNote = document.getElementById("feedback-problem-trace-note");
+  const problemTraceStatus = document.getElementById("feedback-trace-status");
+  const problemTraceControls = document.querySelectorAll(".feedback-problem-trace-control");
+  const attachProblemTraceButton = document.getElementById("feedback-attach-problem-trace");
+  const saveProblemTraceButton = document.getElementById("feedback-save-problem-trace");
+  const clearJson = document.getElementById("feedback-clear-json");
+  const jsonStatus = document.getElementById("feedback-json-status");
   const submit = document.getElementById("feedback-submit");
   const status = document.getElementById("feedback-status");
   const MAX_IMAGES = 3;
   const MAX_IMAGE_BYTES = 1024 * 1024;
+  const MAX_JSON_BYTES = 256 * 1024;
   let kind = "bug";
   let images = [];
+  let jsonAttachment = null;
+  let frozenProblemTrace = null;
+  let problemTraceCapture = null;
 
   function setStatus(message, tone = "") {
     status.textContent = message || "";
@@ -27,9 +39,24 @@
     kind = nextKind === "feature" ? "feature" : "bug";
     title.textContent = kind === "bug" ? "提交 Bug" : "功能提议";
     submit.textContent = kind === "bug" ? "提交问题" : "提交建议";
+    problemTraceNote.hidden = kind !== "bug";
+    problemTraceStatus.hidden = kind !== "bug";
+    problemTraceControls.forEach((control) => { control.hidden = kind !== "bug"; });
+    jsonRow.hidden = false;
+    if (kind !== "bug") clearJsonAttachment();
+    frozenProblemTrace = null;
+    problemTraceCapture = kind === "bug" ? freezeProblemTrace() : null;
     setStatus("");
     modal.classList.add("show");
     requestAnimationFrame(() => editor.focus());
+  }
+
+  function freezeProblemTrace() {
+    if (!global.ReaderProblemTraceUI?.capture) return null;
+    return global.ReaderProblemTraceUI.capture().then((snapshot) => {
+      frozenProblemTrace = snapshot;
+      return snapshot;
+    }).catch(() => null);
   }
 
   function hide() {
@@ -39,6 +66,79 @@
   function updateImageStatus() {
     imageStatus.textContent = images.length + "/" + MAX_IMAGES + " 张";
     insertImage.disabled = images.length >= MAX_IMAGES;
+  }
+
+  function updateJsonStatus() {
+    jsonStatus.textContent = jsonAttachment ? "已附加 · " + jsonAttachment.name + " · " + Math.ceil(jsonAttachment.bytes / 1024) + " KB" : "未附加";
+    clearJson.hidden = !jsonAttachment;
+  }
+
+  function clearJsonAttachment() {
+    jsonAttachment = null;
+    updateJsonStatus();
+  }
+
+  function bytesToBase64(bytes) {
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+  }
+
+  function attachProblemTrace(snapshot) {
+    const contents = JSON.stringify(snapshot, null, 2);
+    const bytes = new TextEncoder().encode(contents);
+    if (!bytes.length || bytes.length > MAX_JSON_BYTES) throw new Error("问题记录超过 256 KB，无法附加。");
+    return {
+      name: "kunpeng-reader-problem-trace-" + String(snapshot?.captured_at || new Date().toISOString()).replace(/[:.]/g, "-") + ".json",
+      mime: "application/json",
+      bytes: bytes.length,
+      data: bytesToBase64(bytes),
+    };
+  }
+
+  async function captureProblemTraceAttachment() {
+    if (!global.ReaderProblemTraceUI?.capture) {
+      setStatus("问题记录不可用；请先打开一本书并复现问题。", "error");
+      return null;
+    }
+    const snapshot = frozenProblemTrace || await (problemTraceCapture || freezeProblemTrace());
+    if (!snapshot) throw new Error("未收到阅读器状态；请先打开一本书并复现问题。");
+    return attachProblemTrace(snapshot);
+  }
+
+  async function attachProblemTraceToFeedback() {
+    attachProblemTraceButton.disabled = true;
+    setStatus("正在读取最近两分钟的问题记录…");
+    try {
+      jsonAttachment = await captureProblemTraceAttachment();
+      if (!jsonAttachment) return;
+      updateJsonStatus();
+      setStatus("问题记录已附加，将随本次 Bug 反馈提交。", "success");
+    } catch (error) {
+      setStatus(error?.message || String(error || "读取问题记录失败。"), "error");
+    } finally {
+      attachProblemTraceButton.disabled = false;
+    }
+  }
+
+  async function saveProblemTraceToDesktop() {
+    saveProblemTraceButton.disabled = true;
+    setStatus("正在保存问题记录到桌面…");
+    try {
+      const attachment = await captureProblemTraceAttachment();
+      if (!attachment) return;
+      const path = await invoke("save_problem_trace_to_desktop", {
+        name: attachment.name,
+        data: attachment.data,
+      });
+      setStatus("问题记录已保存到桌面：" + path, "success");
+    } catch (error) {
+      setStatus("保存失败：" + (error?.message || error), "error");
+    } finally {
+      saveProblemTraceButton.disabled = false;
+    }
   }
 
   function blobToDataUrl(blob) {
@@ -161,12 +261,14 @@
 
   async function submitFeedback() {
     const text = feedbackText();
-    if (!text && !images.length) {
-      setStatus("请输入反馈内容，或至少插入一张图片。", "error");
+    if (!text && !images.length && !jsonAttachment) {
+      setStatus("请输入反馈内容，或至少添加一张图片/一个 JSON。", "error");
       return;
     }
     submit.disabled = true;
     insertImage.disabled = true;
+    if (attachProblemTraceButton) attachProblemTraceButton.disabled = true;
+    if (saveProblemTraceButton) saveProblemTraceButton.disabled = true;
     setStatus("正在提交…");
     try {
       const appVersion = await invoke("app_version").catch(() => "");
@@ -181,16 +283,24 @@
             mime: item.mime,
             data: item.dataUrl.slice(item.dataUrl.indexOf(",") + 1),
           })),
+          attachments: jsonAttachment ? [{
+            name: jsonAttachment.name,
+            mime: jsonAttachment.mime,
+            data: jsonAttachment.data,
+          }] : [],
         },
       });
       setStatus(result?.message || "反馈已提交，谢谢。", "success");
       editor.replaceChildren();
       images = [];
+      clearJsonAttachment();
       updateImageStatus();
     } catch (error) {
       setStatus("提交失败：" + (error?.message || error), "error");
     } finally {
       submit.disabled = false;
+      if (attachProblemTraceButton) attachProblemTraceButton.disabled = false;
+      if (saveProblemTraceButton) saveProblemTraceButton.disabled = false;
       updateImageStatus();
     }
   }
@@ -202,6 +312,9 @@
     if (event.target === modal) hide();
   });
   insertImage?.addEventListener("click", () => imageInput?.click());
+  attachProblemTraceButton?.addEventListener("click", attachProblemTraceToFeedback);
+  saveProblemTraceButton?.addEventListener("click", saveProblemTraceToDesktop);
+  clearJson?.addEventListener("click", clearJsonAttachment);
   imageInput?.addEventListener("change", async () => {
     await addFiles(imageInput.files);
     imageInput.value = "";
@@ -221,4 +334,5 @@
   });
   submit?.addEventListener("click", submitFeedback);
   updateImageStatus();
+  updateJsonStatus();
 })(window);
