@@ -194,8 +194,8 @@ jobs:
           file "$out_dir/$appimage_name" "$out_dir/$deb_name"
           dpkg-deb --info "$out_dir/$deb_name"
           dpkg-deb --contents "$out_dir/$deb_name" | tee target/linux-deb-contents.txt
-          grep -Fq './usr/bin/libonnxruntime_providers_cuda.so' target/linux-deb-contents.txt
-          grep -Fq './usr/bin/libonnxruntime_providers_shared.so' target/linux-deb-contents.txt
+          grep -Fq 'usr/bin/libonnxruntime_providers_cuda.so' target/linux-deb-contents.txt
+          grep -Fq 'usr/bin/libonnxruntime_providers_shared.so' target/linux-deb-contents.txt
           package_name="$(dpkg-deb --field "$out_dir/$deb_name" Package)"
           test "$package_name" = "kunpeng-reader"
           [[ "$package_name" =~ ^[a-z0-9][a-z0-9+.-]+$ ]]
