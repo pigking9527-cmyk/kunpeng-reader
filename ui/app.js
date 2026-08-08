@@ -102,7 +102,11 @@ toolbarEl?.addEventListener("pointerdown", (e) => {
 }, true);
 
 function runWhenNoReader(name, work, retryMs = 30000) {
-  if (!window.ReaderStartupEnhancement?.backgroundWorkAllowed?.()) return;
+  if (!window.ReaderStartupEnhancement?.backgroundWorkAllowed?.()) {
+    const delay = window.ReaderStartupEnhancement?.highCostRetryDelay?.() || 0;
+    if (delay > 0) setTimeout(() => runWhenNoReader(name, work, retryMs), delay);
+    return;
+  }
   invoke("reader_window_open")
     .then((open) => {
       if (open) {

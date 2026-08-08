@@ -27,6 +27,9 @@ struct AssociatedBookRequest {
 }
 
 static NEXT_ASSOCIATED_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+/// Keeps legacy title-based window discovery scoped to an older reader window
+/// when a newer version is running alongside it. U+2063 is visually empty.
+pub(crate) const VERSIONED_MAIN_WINDOW_TITLE: &str = "鲲鹏阅读器\u{2063}";
 static PRIMARY_INSTANCE_STARTED_AT: AtomicU64 = AtomicU64::new(0);
 
 fn unix_time_ms() -> u64 {
@@ -36,6 +39,11 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn instance_scope_key() -> String {
+    // A version-scoped key lets one old and one new reader run side by side,
+    // while preserving the single-instance rule within each version.
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
 fn associated_book_paths(args: &[String], cwd: &Path) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     args.iter()
@@ -63,7 +71,10 @@ pub(crate) fn startup_book_paths() -> Vec<String> {
 fn associated_book_request_path() -> Option<PathBuf> {
     let mut dir = dirs::cache_dir()?;
     dir.push("ebook-reader");
-    dir.push("associated-book-request.json");
+    dir.push(format!(
+        "associated-book-request-{}.json",
+        instance_scope_key()
+    ));
     Some(dir)
 }
 
@@ -129,7 +140,7 @@ pub(crate) fn spawn_associated_book_watcher(app: tauri::AppHandle) {
     });
 }
 
-/// 主窗口单实例（Windows 原生，命名互斥量）：已有实例在运行时，把关联文件路径交给它并聚焦。
+/// Windows 同版本单实例：不同版本使用各自的锁与文件转发通道。
 #[cfg(windows)]
 pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
     use std::os::windows::ffi::OsStrExt;
@@ -142,12 +153,6 @@ pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
         fn CreateMutexW(attr: *const core::ffi::c_void, owner: i32, name: *const u16) -> Handle;
         fn GetLastError() -> u32;
     }
-    #[link(name = "user32")]
-    extern "system" {
-        fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
-        fn SetForegroundWindow(hwnd: Handle) -> i32;
-        fn ShowWindow(hwnd: Handle, cmd: i32) -> i32;
-    }
     fn wide(s: &str) -> Vec<u16> {
         std::ffi::OsStr::new(s)
             .encode_wide()
@@ -155,10 +160,12 @@ pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
             .collect()
     }
     const ERROR_ALREADY_EXISTS: u32 = 183;
-    const SW_RESTORE: i32 = 9;
     let instance_started_at = unix_time_ms();
     unsafe {
-        let name = wide("KunpengReader_SingleInstance_Mutex");
+        let name = wide(&format!(
+            "KunpengReader_{}_SingleInstance_Mutex",
+            instance_scope_key()
+        ));
         let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
         if h.is_null() {
             log(&format!(
@@ -169,15 +176,6 @@ pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
             forward_associated_book_paths(startup_book_paths);
-            let title = wide("鲲鹏阅读器");
-            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
-            if !hwnd.is_null() {
-                // Startup enhancement hides a normal (not minimized) window.
-                // Always restore it here so shortcut activation cannot depend
-                // solely on the file watcher running in the primary process.
-                ShowWindow(hwnd, SW_RESTORE);
-                SetForegroundWindow(hwnd);
-            }
             return false;
         }
         PRIMARY_INSTANCE_STARTED_AT.store(instance_started_at, Ordering::Relaxed);

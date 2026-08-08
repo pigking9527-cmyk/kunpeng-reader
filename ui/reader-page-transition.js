@@ -8,7 +8,6 @@ function reportReaderPaintPerf(name,started,detail){
   });});
 }
 var turnFxTimer=null,turnFxSheet=null,chapterTurnPending=false;
-function reducedMotion(){return !!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);}
 function turnFxName(){
   if(typeof readerAnimationSettingOn==='function'&&!readerAnimationSettingOn('pageTurn'))return 'off';
   var fx=S.pageTurnEffect||'horizontal';
@@ -68,7 +67,9 @@ function clearTurnFx(){
 function waitForChapterPaint(){return new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve);});});}
 function beginTurnFx(dir,move){
   var fx=turnFxName();
-  if(!dir||!pager||!root||fx==='off'||reducedMotion()){clearTurnFx();move();return;}
+  // 阅读器已经提供独立、明确的动画开关。这里以应用内设置为准，避免
+  // WebView2 继承系统减少动态效果后，把用户刚刚打开的翻页动画再次静默关闭。
+  if(!dir||!pager||!root||fx==='off'){clearTurnFx();move();return;}
   clearTurnFx();
   // 动画层同时保留切换前、后的两个页面。先前只画旧页，而动画层背景又是不透明的：
   // 旧页滑出后，新页虽已切换却被背景盖住，用户看到的就是一段空白。
@@ -90,7 +91,7 @@ function beginChapterTurnFx(dir,chapter,where){
   function done(){chapterTurnPending=false;}
   var fx=turnFxName();
   if(!dir||!pager||!root)return showChapter(chapter,where).then(function(){notifyReaderEndIfReached(dir);}).finally(done);
-  if(fx==='off'||reducedMotion()){
+  if(fx==='off'){
     clearTurnFx();
     // 即使关闭翻页动画，跨章仍需保留旧页，直到新章完成排版并真正绘制。
     // 否则 showChapter 清空正文到 WebView2 提交新帧之间会露出空白，双页模式尤为明显。

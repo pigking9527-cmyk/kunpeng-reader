@@ -11,6 +11,8 @@ import sqlite3
 import threading
 import time
 import uuid
+
+import recovery
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "entities.db"
 DB_PATH = os.environ.get("SYNC_DB_PATH", str(DEFAULT_DB_PATH))
+ASSET_DIR = Path(os.environ.get("SYNC_ASSET_DIR", str(Path(DB_PATH).parent / "assets")))
 DEFAULT_UPDATE_MANIFEST_PATH = Path(__file__).resolve().parent / "updates.json"
 UPDATE_MANIFEST_PATH = Path(os.environ.get("UPDATE_MANIFEST_PATH", str(DEFAULT_UPDATE_MANIFEST_PATH)))
 LEGACY_TOKEN = os.environ.get("SYNC_TOKEN", "")
@@ -25,20 +28,37 @@ HOST = os.environ.get("SYNC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SYNC_PORT", "8787"))
 DEFAULT_USER_ID = "default"
 DEFAULT_USERNAME = "default"
-MAX_BODY_BYTES = 5 * 1024 * 1024
+MAX_BODY_BYTES = 16 * 1024 * 1024
 MAX_ENTITIES = 5000
 MAX_ENTITY_JSON_BYTES = 1024 * 1024
+MAX_READER_PALETTE_JSON_BYTES = 15 * 1024 * 1024
+MAX_READER_PALETTE_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_READER_PALETTES = 10
+MAX_READER_BACKGROUND_ASSET_BYTES = 10 * 1024 * 1024
+MAX_READER_BACKGROUND_ASSETS = 10
+ASSET_CHUNK_BYTES = 1024 * 1024
+ASSET_MIME_TYPES = frozenset(("image/png", "image/jpeg", "image/webp", "image/gif"))
 MAX_AI_HISTORY_JSON_BYTES = 4 * 1024 * 1024
+MAX_AI_HISTORY_LIVE_ENTRIES = 100
+MAX_AI_HISTORY_TOMBSTONES = 200
 MAX_USER_ENTITIES = 50_000
-MAX_USER_JSON_BYTES = 100 * 1024 * 1024
+MAX_USER_JSON_BYTES = 150 * 1024 * 1024
 MAX_USERS = 10_000
 MAX_TOKENS_PER_USER = 5
 TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000
 MAX_CONCURRENT_REQUESTS = 32
 MAX_IGNORED_DETAILS = 100
+DEFAULT_ACCOUNT_STORAGE_LIMIT_BYTES = 25 * 1024 * 1024
+LEGACY_ACCOUNT_STORAGE_LIMIT_BYTES = 100 * 1024 * 1024
+MAX_ACCOUNT_DAILY_WRITE_BYTES = 10 * 1024 * 1024
+MAX_ACCOUNT_DAILY_ENTITY_WRITES = 3_000
+RATE_LIMIT_HMAC_KEY = os.environ.get("RATE_LIMIT_HMAC_KEY", "").encode("utf-8")
+SECURITY_ALERT_TO = os.environ.get("SECURITY_ALERT_TO", "").strip()
+SECURITY_ALERT_WINDOW_MS = 15 * 60 * 1000
 SUPPORTED_ENTITY_KINDS = frozenset((
-    "book_state_v2", "model_book_tags_v1", "vocab", "reading_bucket_v2",
+    "book_state_v2", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "vocab", "reading_bucket_v2",
     "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1",
+    "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1",
 ))
 FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "pigking9527@gmail.com").strip()
 FEEDBACK_SMTP_HOST = os.environ.get("FEEDBACK_SMTP_HOST", "").strip()
@@ -112,15 +132,24 @@ def public_update_entry(version):
 
 
 class RateLimiter:
-    """Small bounded in-memory token bucket limiter for one API process."""
+    """Token buckets backed by SQLite in production and memory in unit tests.
 
-    def __init__(self, max_buckets=8192, stale_after=3600):
+    SQLite's BEGIN IMMEDIATE makes each refill-and-consume operation atomic for
+    every API worker using this database.  A deployment with several hosts must
+    point every worker at the same central database (or replace this adapter
+    with Redis); separate SQLite files cannot coordinate across hosts.
+    """
+
+    def __init__(self, max_buckets=8192, stale_after=3600, persistent=False):
         self.max_buckets = max_buckets
         self.stale_after = stale_after
+        self.persistent = persistent
         self.buckets = {}
         self.lock = threading.Lock()
 
     def allow(self, scope, key, capacity, period_seconds):
+        if self.persistent:
+            return self._allow_persistent(scope, key, capacity, period_seconds)
         now = time.monotonic()
         bucket_key = (scope, key)
         with self.lock:
@@ -139,8 +168,50 @@ class RateLimiter:
                 }
             return True, 0
 
+    def _bucket_key(self, scope, key):
+        # The database is an audit/rate-control store, not a raw IP log.
+        secret = RATE_LIMIT_HMAC_KEY or b"reader-sync-rate-limit-v1"
+        text = f"{scope}\0{key}".encode("utf-8", "replace")
+        return hmac.new(secret, text, hashlib.sha256).hexdigest()
 
-RATE_LIMITER = RateLimiter()
+    def _allow_persistent(self, scope, key, capacity, period_seconds):
+        now = now_ms()
+        bucket_key = self._bucket_key(scope, key)
+        conn = connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT tokens,last_seen_at FROM rate_limit_buckets WHERE scope=? AND bucket_key=?",
+                (scope, bucket_key),
+            ).fetchone()
+            tokens = float(row["tokens"]) if row else float(capacity)
+            last_seen = int(row["last_seen_at"]) if row else now
+            refill = max(0, now - last_seen) * (float(capacity) / (period_seconds * 1000.0))
+            tokens = min(float(capacity), tokens + refill)
+            allowed = tokens >= 1.0
+            retry_after = 0
+            if allowed:
+                tokens -= 1.0
+            else:
+                retry_after = max(1, int((1.0 - tokens) / (float(capacity) / period_seconds)) + 1)
+            conn.execute(
+                "INSERT INTO rate_limit_buckets(scope,bucket_key,tokens,last_seen_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(scope,bucket_key) DO UPDATE SET tokens=excluded.tokens,last_seen_at=excluded.last_seen_at",
+                (scope, bucket_key, tokens, now),
+            )
+            if secrets.randbelow(256) == 0:
+                conn.execute("DELETE FROM rate_limit_buckets WHERE last_seen_at<?", (now - self.stale_after * 1000,))
+            conn.commit()
+            return allowed, retry_after
+        except sqlite3.Error:
+            conn.rollback()
+            # Fail closed when the shared limiter is unavailable.
+            return False, 5
+        finally:
+            conn.close()
+
+
+RATE_LIMITER = RateLimiter(persistent=True)
 REQUEST_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 
 
@@ -427,6 +498,34 @@ def migrate(conn):
                 "ALTER TABLE feedback ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'"
             )
         record_migration(conn, 10)
+        recovery_pending = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version=11"
+        ).fetchone() is None
+        recovery.initialize(conn, seed_existing=recovery_pending, recorded_at=now_ms())
+        record_migration(conn, 11)
+        user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "sync_verified_at" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN sync_verified_at INTEGER NOT NULL DEFAULT 0")
+            conn.execute("UPDATE users SET sync_verified_at=created_at WHERE sync_verified_at=0")
+        if "disabled_at" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN disabled_at INTEGER NOT NULL DEFAULT 0")
+        if "disabled_reason" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN disabled_reason TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE TABLE IF NOT EXISTS account_usage (user_id TEXT PRIMARY KEY, storage_limit_bytes INTEGER NOT NULL, daily_window_at INTEGER NOT NULL DEFAULT 0, daily_written_bytes INTEGER NOT NULL DEFAULT 0, daily_entity_writes INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id))")
+        conn.execute("INSERT OR IGNORE INTO account_usage(user_id,storage_limit_bytes,updated_at) SELECT id,?,? FROM users", (LEGACY_ACCOUNT_STORAGE_LIMIT_BYTES, now_ms()))
+        conn.execute("CREATE TABLE IF NOT EXISTS rate_limit_buckets (scope TEXT NOT NULL, bucket_key TEXT NOT NULL, tokens REAL NOT NULL, last_seen_at INTEGER NOT NULL, PRIMARY KEY(scope,bucket_key))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_seen ON rate_limit_buckets(last_seen_at)")
+        conn.execute("CREATE TABLE IF NOT EXISTS security_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, event TEXT NOT NULL, severity TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL DEFAULT '', detail_json TEXT NOT NULL DEFAULT '{}')")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_security_audit_time ON security_audit(occurred_at DESC)")
+        conn.execute("CREATE TABLE IF NOT EXISTS security_alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, event TEXT NOT NULL, severity TEXT NOT NULL, subject TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, notified_at INTEGER NOT NULL DEFAULT 0, detail_json TEXT NOT NULL DEFAULT '{}')")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_security_alerts_pending ON security_alerts(notified_at,occurred_at)")
+        record_migration(conn, 12)
+        # Binary reader backgrounds are account assets. They never travel in
+        # entity JSON, pull responses, reader URLs, or injected CSS.
+        conn.execute("CREATE TABLE IF NOT EXISTS reader_assets (user_id TEXT NOT NULL, asset_id TEXT NOT NULL, sha256 TEXT NOT NULL, mime TEXT NOT NULL, byte_size INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(user_id,asset_id), FOREIGN KEY(user_id) REFERENCES users(id))")
+        conn.execute("CREATE TABLE IF NOT EXISTS reader_asset_uploads (user_id TEXT NOT NULL, asset_id TEXT NOT NULL, sha256 TEXT NOT NULL, mime TEXT NOT NULL, total_bytes INTEGER NOT NULL, received_bytes INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(user_id,asset_id), FOREIGN KEY(user_id) REFERENCES users(id))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_reader_assets_user_created ON reader_assets(user_id,created_at)")
+        record_migration(conn, 13)
 
 
 def next_server_stamp(conn):
@@ -439,7 +538,7 @@ def next_server_stamp(conn):
 
 
 def row_to_user(row):
-    return {"id": row["id"], "username": row["username"]}
+    return {"id": row["id"], "username": row["username"], "sync_enabled": bool(row["sync_verified_at"]) and not bool(row["disabled_at"])}
 
 
 def user_by_token(conn, token):
@@ -449,7 +548,7 @@ def user_by_token(conn, token):
     conn.execute("DELETE FROM tokens WHERE created_at<?", (cutoff,))
     row = conn.execute(
         """
-        SELECT users.id,users.username FROM tokens
+        SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,users.disabled_reason FROM tokens
         JOIN users ON users.id=tokens.user_id
         WHERE tokens.token=? AND tokens.created_at>=?
         """,
@@ -507,12 +606,136 @@ def inventory_rows(conn, user_id):
         """
         SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at
         FROM entities
-        WHERE user_id=? AND kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2')
+        WHERE user_id=? AND kind IN ('book_state_v2','model_book_tags_v1','user_book_tags_v1','book_collections_v1','vocab','reading_bucket_v2')
         ORDER BY kind,id
         """,
         (user_id,),
     ).fetchall()
 
+
+def utc_day_window(now=None):
+    current = int(now or now_ms())
+    return current - (current % (24 * 60 * 60 * 1000))
+
+
+def ensure_account_usage(conn, user_id, legacy=False):
+    limit = LEGACY_ACCOUNT_STORAGE_LIMIT_BYTES if legacy else DEFAULT_ACCOUNT_STORAGE_LIMIT_BYTES
+    conn.execute(
+        "INSERT OR IGNORE INTO account_usage(user_id,storage_limit_bytes,updated_at) VALUES(?,?,?)",
+        (user_id, limit, now_ms()),
+    )
+    return conn.execute("SELECT * FROM account_usage WHERE user_id=?", (user_id,)).fetchone()
+
+
+def account_storage_bytes(conn, user_id):
+    active = conn.execute(
+        "SELECT COALESCE(SUM(LENGTH(json)),0) FROM entities WHERE user_id=?", (user_id,)
+    ).fetchone()[0]
+    history = conn.execute(
+        "SELECT COALESCE(SUM(LENGTH(payload_zlib)),0) FROM entity_history WHERE user_id=?", (user_id,)
+    ).fetchone()[0]
+    assets = conn.execute(
+        "SELECT COALESCE(SUM(byte_size),0) FROM reader_assets WHERE user_id=?", (user_id,)
+    ).fetchone()[0] if table_exists(conn, "reader_assets") else 0
+    return int(active or 0) + int(history or 0) + int(assets or 0)
+
+
+def asset_file(user_id, asset_id, partial=False):
+    suffix = ".part" if partial else ""
+    return ASSET_DIR / user_id / f"{asset_id}{suffix}"
+
+
+def valid_asset_id(value):
+    return isinstance(value, str) and len(value) == 64 and all(ch in "0123456789abcdef" for ch in value.lower())
+
+
+def remove_user_assets(conn, user_id):
+    rows = conn.execute("SELECT asset_id FROM reader_assets WHERE user_id=?", (user_id,)).fetchall()
+    uploads = conn.execute("SELECT asset_id FROM reader_asset_uploads WHERE user_id=?", (user_id,)).fetchall()
+    for row in [*rows, *uploads]:
+        for partial in (False, True):
+            try:
+                asset_file(user_id, row["asset_id"], partial).unlink(missing_ok=True)
+            except OSError:
+                pass
+    conn.execute("DELETE FROM reader_assets WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM reader_asset_uploads WHERE user_id=?", (user_id,))
+
+
+def garbage_collect_unreferenced_assets(conn, user_id):
+    """Remove binary assets no current palette or retained recovery revision references."""
+    referenced = set()
+    rows = conn.execute(
+        "SELECT json FROM entities WHERE user_id=? AND kind=?",
+        (user_id, "reader_palette_v1"),
+    ).fetchall()
+    history_rows = conn.execute(
+        "SELECT payload_zlib,payload_bytes,payload_sha256 FROM entity_history WHERE user_id=? AND kind=?",
+        (user_id, "reader_palette_v1"),
+    ).fetchall()
+    for row in [*rows, *history_rows]:
+        try:
+            text = row["json"] if "json" in row.keys() else recovery.decode_payload(row)
+            payload = json.loads(text)
+            asset_id = str(payload.get("backgroundAssetId", "") or "").lower()
+            if valid_asset_id(asset_id):
+                referenced.add(asset_id)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, zlib.error):
+            # A corrupt retained revision is handled by recovery; never use it
+            # as a reason to delete a potentially still-needed asset.
+            return []
+    candidates = conn.execute(
+        "SELECT asset_id FROM reader_assets WHERE user_id=?",
+        (user_id,),
+    ).fetchall()
+    removed = [str(row["asset_id"]) for row in candidates if str(row["asset_id"]) not in referenced]
+    if removed:
+        conn.executemany(
+            "DELETE FROM reader_assets WHERE user_id=? AND asset_id=?",
+            [(user_id, asset_id) for asset_id in removed],
+        )
+    return removed
+
+
+def delete_asset_files(user_id, asset_ids):
+    for asset_id in asset_ids:
+        for partial in (False, True):
+            try:
+                asset_file(user_id, asset_id, partial).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def refresh_daily_usage(conn, user_id, current_at=None):
+    current_at = int(current_at or now_ms())
+    usage = ensure_account_usage(conn, user_id)
+    window = utc_day_window(current_at)
+    if int(usage["daily_window_at"]) != window:
+        conn.execute(
+            "UPDATE account_usage SET daily_window_at=?,daily_written_bytes=0,daily_entity_writes=0,updated_at=? WHERE user_id=?",
+            (window, current_at, user_id),
+        )
+        usage = conn.execute("SELECT * FROM account_usage WHERE user_id=?", (user_id,)).fetchone()
+    return usage
+
+
+def security_subject(value):
+    secret = RATE_LIMIT_HMAC_KEY or b"reader-sync-audit-v1"
+    return hmac.new(secret, str(value).encode("utf-8", "replace"), hashlib.sha256).hexdigest()[:24]
+
+
+def audit_security(conn, event, severity="info", user_id="", subject="", detail=None):
+    occurred_at = now_ms()
+    detail_json = json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":"))[:2048]
+    conn.execute(
+        "INSERT INTO security_audit(occurred_at,event,severity,user_id,subject,detail_json) VALUES(?,?,?,?,?,?)",
+        (occurred_at, str(event)[:96], str(severity)[:16], str(user_id)[:64], str(subject)[:96], detail_json),
+    )
+    if severity in ("warning", "critical"):
+        conn.execute(
+            "INSERT INTO security_alerts(occurred_at,event,severity,subject,detail_json) VALUES(?,?,?,?,?)",
+            (occurred_at, str(event)[:96], str(severity)[:16], str(subject)[:96], detail_json),
+        )
 
 def inventory_summary(rows):
     """Hash the exact portable entity versions held by one account.
@@ -587,6 +810,69 @@ def is_newer(incoming, existing):
         existing_device = str(existing["device_id"] or "")
         return incoming_device > existing_device
     return False
+
+
+def ai_history_retention_is_valid(payload):
+    if not isinstance(payload, dict): return False
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list): return False
+    live = sum(1 for entry in entries if isinstance(entry, dict) and not (entry.get("deletedAt") or entry.get("deleted_at")))
+    tombstones = sum(1 for entry in entries if isinstance(entry, dict) and (entry.get("deletedAt") or entry.get("deleted_at")))
+    return len(entries) == live + tombstones and live <= MAX_AI_HISTORY_LIVE_ENTRIES and tombstones <= MAX_AI_HISTORY_TOMBSTONES
+def reader_palette_payload_is_valid(kind, payload):
+    if not isinstance(payload, dict):
+        return False
+    if kind == "reader_palette_order_v1":
+        order = payload.get("order", [])
+        return (payload.get("version") == 1 and isinstance(order, list)
+                and len(order) <= 13 and all(isinstance(item, str) and 0 < len(item) <= 80 for item in order)
+                and len(set(order)) == len(order))
+    required = ("id", "name", "background", "text", "link", "selection", "footnote", "border", "theme")
+    if payload.get("version") != 1 or any(not isinstance(payload.get(key), str) or not payload.get(key) for key in required):
+        return False
+    if not str(payload["id"]).startswith("custom-") or len(str(payload["id"])) > 80 or len(str(payload["name"])) > 96:
+        return False
+    if payload["theme"] not in ("light", "dark", "sepia"):
+        return False
+    colors = ("background", "text", "link", "selection", "footnote", "border")
+    if any(len(payload[key]) not in (4, 7) or not payload[key].startswith("#") or any(ch not in "0123456789abcdefABCDEF" for ch in payload[key][1:]) for key in colors):
+        return False
+    # v1 compatibility: legacy clients may still send a data URL. New clients
+    # write only the immutable binary asset reference below.
+    image = payload.get("backgroundImage", "")
+    if not isinstance(image, str) or len(image) > MAX_READER_PALETTE_JSON_BYTES:
+        return False
+    if image:
+        header, separator, encoded = image.partition(",")
+        if not separator or header not in ("data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64", "data:image/gif;base64"):
+            return False
+        try:
+            if len(base64.b64decode(encoded, validate=True)) > MAX_READER_PALETTE_IMAGE_BYTES:
+                return False
+        except (ValueError, TypeError):
+            return False
+    asset_id = payload.get("backgroundAssetId", "")
+    if not asset_id:
+        return True
+    return (valid_asset_id(asset_id)
+            and payload.get("backgroundAssetSha256") == asset_id
+            and payload.get("backgroundAssetMime") in ASSET_MIME_TYPES
+            and isinstance(payload.get("backgroundAssetBytes"), int)
+            and 0 < payload["backgroundAssetBytes"] <= MAX_READER_BACKGROUND_ASSET_BYTES)
+
+def app_settings_payload_is_valid(payload):
+    if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload.get("version") != 1:
+        return False
+    if not isinstance(payload.get("showReaderJumpBack"), bool):
+        return False
+    if payload.get("readerJumpBackDismissMode") not in ("pages", "time"):
+        return False
+    limits = (
+        ("readerJumpBackDismissSeconds", 1, 600),
+        ("readerJumpBackDismissPages", 1, 100),
+        ("readerJumpBackSizeLevel", 1, 10),
+    )
+    return all(type(payload.get(key)) is int and low <= payload[key] <= high for key, low, high in limits)
 
 
 def record_ignored(details, detail):
@@ -727,8 +1013,13 @@ def request_data_generation(body):
 def reset_account_sync_data(conn, user_id):
     generation = account_data_generation(conn, user_id) + 1
     with conn:
+        conn.execute("DELETE FROM entity_history WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM recovery_accounts WHERE user_id=?", (user_id,))
         conn.execute("DELETE FROM entities WHERE user_id=?", (user_id,))
+        remove_user_assets(conn, user_id)
         conn.execute("DELETE FROM secret_bundle_epochs WHERE user_id=?", (user_id,))
+        conn.execute("UPDATE account_usage SET daily_written_bytes=0,daily_entity_writes=0,updated_at=? WHERE user_id=?", (now_ms(), user_id))
+        audit_security(conn, "sync_data_reset", "info", user_id)
         conn.execute(
             "INSERT INTO account_data_generations(user_id,generation,updated_at) VALUES(?,?,?) "
             "ON CONFLICT(user_id) DO UPDATE SET generation=excluded.generation,updated_at=excluded.updated_at",
@@ -901,7 +1192,7 @@ class PayloadTooLarge(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ReaderSyncAPI/0.8"
+    server_version = "ReaderSyncAPI/0.9"
 
     def begin_push_transaction(self, conn):
         # `with conn` only commits/rolls back an already-open transaction; it
@@ -983,10 +1274,193 @@ class Handler(BaseHTTPRequestHandler):
     def require_user(self):
         conn, user = self.current_user()
         if user:
+            if bool(user["disabled_at"]):
+                with conn:
+                    audit_security(conn, "disabled_account_access", "warning", user["id"], security_subject(self.client_ip()))
+                conn.close()
+                self.send_error_code(403, "ACCOUNT_DISABLED", "账号已被限制，请联系支持")
+                return None, None
             return conn, user
         conn.close()
         self.send_error_code(401, "UNAUTHORIZED")
         return None, None
+
+    def require_sync_user(self):
+        conn, user = self.require_user()
+        if not user:
+            return None, None
+        if not bool(user["sync_verified_at"]):
+            with conn:
+                audit_security(conn, "sync_before_email_verification", "info", user["id"], security_subject(self.client_ip()))
+            conn.close()
+            self.send_error_code(403, "EMAIL_VERIFICATION_REQUIRED", "请先在账户安全中绑定并验证邮箱后再同步")
+            return None, None
+        return conn, user
+
+    def send_bytes(self, status, payload, mime, extra_headers=None):
+        self.send_response(status)
+        self.send_header("Content-Type", mime)
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(len(payload)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, str(value))
+        self.end_headers()
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def read_binary(self, maximum):
+        length = safe_int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > maximum:
+            raise PayloadTooLarge()
+        return self.rfile.read(length)
+
+    def asset_generation_is_current(self, conn, user_id):
+        requested = max(1, safe_int(self.headers.get("X-Data-Generation", "1"), 1))
+        return requested == account_data_generation(conn, user_id)
+
+    def handle_asset_get(self, asset_id):
+        conn, user = self.require_sync_user()
+        if not user:
+            return
+        if not self.allow_rate("asset_download_user", user["id"], 60, 60):
+            conn.close()
+            return
+        row = conn.execute("SELECT mime,byte_size FROM reader_assets WHERE user_id=? AND asset_id=?", (user["id"], asset_id)).fetchone()
+        path = asset_file(user["id"], asset_id)
+        if not row or not path.is_file():
+            conn.close()
+            self.send_error_code(404, "ASSET_NOT_FOUND")
+            return
+        total = int(row["byte_size"])
+        start, end = 0, total - 1
+        raw_range = self.headers.get("Range", "")
+        if raw_range.startswith("bytes="):
+            try:
+                left, right = raw_range[6:].split("-", 1)
+                start = int(left) if left else max(0, total - int(right))
+                end = int(right) if right else total - 1
+                if start < 0 or start >= total or end < start:
+                    raise ValueError()
+                end = min(end, total - 1)
+            except ValueError:
+                conn.close()
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{total}")
+                self.end_headers()
+                return
+        with path.open("rb") as handle:
+            handle.seek(start)
+            payload = handle.read(end - start + 1)
+        conn.close()
+        headers = {"Content-Range": f"bytes {start}-{end}/{total}"} if raw_range else None
+        self.send_bytes(206 if raw_range else 200, payload, row["mime"], headers)
+
+    def handle_asset_init(self):
+        conn, user = self.require_sync_user()
+        if not user:
+            return
+        if not self.allow_rate("asset_upload_user", user["id"], 30, 60):
+            conn.close()
+            return
+        try:
+            body = self.read_json()
+        except (PayloadTooLarge, json.JSONDecodeError, UnicodeDecodeError):
+            conn.close()
+            self.send_error_code(400, "INVALID_ASSET_INIT")
+            return
+        asset_id = str(body.get("asset_id", body.get("assetId", ""))).lower()
+        sha256 = str(body.get("sha256", "")).lower()
+        mime = str(body.get("mime", ""))
+        size = safe_int(body.get("byte_size", body.get("byteSize", 0)))
+        if not valid_asset_id(asset_id) or asset_id != sha256 or mime not in ASSET_MIME_TYPES or size <= 0 or size > MAX_READER_BACKGROUND_ASSET_BYTES:
+            conn.close()
+            self.send_error_code(400, "INVALID_ASSET_METADATA")
+            return
+        if request_data_generation(body) != account_data_generation(conn, user["id"]):
+            conn.close()
+            self.send_error_code(409, "DATA_GENERATION_MISMATCH")
+            return
+        existing = conn.execute("SELECT byte_size,mime FROM reader_assets WHERE user_id=? AND asset_id=?", (user["id"], asset_id)).fetchone()
+        if existing:
+            conn.close()
+            self.send_json(200, {"ok": True, "complete": True, "assetId": asset_id, "byteSize": int(existing["byte_size"]), "mime": existing["mime"]})
+            return
+        usage = refresh_daily_usage(conn, user["id"])
+        asset_count = conn.execute("SELECT COUNT(*) FROM reader_assets WHERE user_id=?", (user["id"],)).fetchone()[0]
+        if asset_count >= MAX_READER_BACKGROUND_ASSETS or account_storage_bytes(conn, user["id"]) + size > int(usage["storage_limit_bytes"]) or int(usage["daily_written_bytes"]) + size > MAX_ACCOUNT_DAILY_WRITE_BYTES:
+            conn.close()
+            self.send_error_code(409, "QUOTA_EXCEEDED")
+            return
+        upload = conn.execute("SELECT received_bytes,total_bytes,mime,sha256 FROM reader_asset_uploads WHERE user_id=? AND asset_id=?", (user["id"], asset_id)).fetchone()
+        if not upload or int(upload["total_bytes"]) != size or upload["mime"] != mime or upload["sha256"] != sha256:
+            asset_file(user["id"], asset_id, True).unlink(missing_ok=True)
+            with conn:
+                conn.execute("INSERT INTO reader_asset_uploads(user_id,asset_id,sha256,mime,total_bytes,received_bytes,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,asset_id) DO UPDATE SET sha256=excluded.sha256,mime=excluded.mime,total_bytes=excluded.total_bytes,received_bytes=0,updated_at=excluded.updated_at", (user["id"], asset_id, sha256, mime, size, 0, now_ms()))
+            received = 0
+        else:
+            received = int(upload["received_bytes"])
+        conn.close()
+        self.send_json(200, {"ok": True, "complete": False, "assetId": asset_id, "receivedBytes": received, "chunkBytes": ASSET_CHUNK_BYTES})
+
+    def handle_asset_put(self, asset_id):
+        conn, user = self.require_sync_user()
+        if not user:
+            return
+        if not self.allow_rate("asset_upload_user", user["id"], 30, 60):
+            conn.close()
+            return
+        upload = conn.execute("SELECT * FROM reader_asset_uploads WHERE user_id=? AND asset_id=?", (user["id"], asset_id)).fetchone()
+        if not upload or not self.asset_generation_is_current(conn, user["id"]):
+            conn.close()
+            self.send_error_code(409, "ASSET_UPLOAD_NOT_INITIALIZED")
+            return
+        try:
+            content_range = self.headers.get("Content-Range", "")
+            prefix, total_text = content_range.split("/", 1)
+            _, positions = prefix.split(" ", 1)
+            start_text, end_text = positions.split("-", 1)
+            start, end, total = int(start_text), int(end_text), int(total_text)
+            chunk = self.read_binary(ASSET_CHUNK_BYTES)
+        except (ValueError, PayloadTooLarge):
+            conn.close()
+            self.send_error_code(400, "INVALID_CONTENT_RANGE")
+            return
+        expected = int(upload["received_bytes"])
+        if total != int(upload["total_bytes"]) or start != expected or end != start + len(chunk) - 1 or end >= total:
+            conn.close()
+            self.send_error_code(409, "ASSET_OFFSET_MISMATCH", retry_after=1)
+            return
+        partial = asset_file(user["id"], asset_id, True)
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        with partial.open("ab") as handle:
+            handle.write(chunk)
+        received = end + 1
+        if received < total:
+            with conn:
+                conn.execute("UPDATE reader_asset_uploads SET received_bytes=?,updated_at=? WHERE user_id=? AND asset_id=?", (received, now_ms(), user["id"], asset_id))
+            conn.close()
+            self.send_json(200, {"ok": True, "complete": False, "receivedBytes": received})
+            return
+        digest = hashlib.sha256(partial.read_bytes()).hexdigest()
+        if digest != upload["sha256"]:
+            partial.unlink(missing_ok=True)
+            with conn:
+                conn.execute("DELETE FROM reader_asset_uploads WHERE user_id=? AND asset_id=?", (user["id"], asset_id))
+            conn.close()
+            self.send_error_code(400, "ASSET_HASH_MISMATCH")
+            return
+        final = asset_file(user["id"], asset_id)
+        final.parent.mkdir(parents=True, exist_ok=True)
+        partial.replace(final)
+        with conn:
+            conn.execute("INSERT INTO reader_assets(user_id,asset_id,sha256,mime,byte_size,created_at) VALUES(?,?,?,?,?,?)", (user["id"], asset_id, digest, upload["mime"], total, now_ms()))
+            conn.execute("DELETE FROM reader_asset_uploads WHERE user_id=? AND asset_id=?", (user["id"], asset_id))
+            conn.execute("UPDATE account_usage SET daily_written_bytes=daily_written_bytes+?,updated_at=? WHERE user_id=?", (total, now_ms(), user["id"]))
+        conn.close()
+        self.send_json(200, {"ok": True, "complete": True, "assetId": asset_id, "sha256": digest, "byteSize": total})
 
     def do_GET(self):
         if not self.begin_request():
@@ -1001,7 +1475,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "schema_version": 2,
-                        "api_version": "0.8",
+                        "api_version": "0.9",
                         "server_time": now_ms(),
                         "service": "reader-sync",
                     },
@@ -1056,12 +1530,20 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/sync/secret-state":
                 self.handle_secret_state()
                 return
+            if parsed.path == "/sync/recovery/status":
+                self.handle_recovery_status()
+                return
+            if parsed.path.startswith("/sync/assets/"):
+                asset_id = parsed.path.rsplit("/", 1)[-1].lower()
+                if valid_asset_id(asset_id):
+                    self.handle_asset_get(asset_id)
+                    return
             self.send_error_code(404, "NOT_FOUND")
         finally:
             REQUEST_SLOTS.release()
 
     def handle_pull(self, parsed):
-        conn, user = self.require_user()
+        conn, user = self.require_sync_user()
         if not user:
             return
         if not self.allow_rate("sync_user", user["id"], 30, 60):
@@ -1101,7 +1583,7 @@ class Handler(BaseHTTPRequestHandler):
         conn.close()
 
     def handle_inventory(self):
-        conn, user = self.require_user()
+        conn, user = self.require_sync_user()
         if not user:
             return
         if not self.allow_rate("sync_user", user["id"], 30, 60):
@@ -1159,10 +1641,28 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_secret_state_reset()
             elif parsed.path == "/sync/data/reset":
                 self.handle_sync_data_reset()
+            elif parsed.path == "/sync/recovery/restore":
+                self.handle_recovery_restore()
+            elif parsed.path == "/sync/assets/init":
+                self.handle_asset_init()
             elif parsed.path == "/feedback":
                 self.handle_feedback()
             else:
                 self.send_error_code(404, "NOT_FOUND")
+        finally:
+            REQUEST_SLOTS.release()
+
+    def do_PUT(self):
+        if not self.begin_request():
+            return
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path.startswith("/sync/assets/"):
+                asset_id = parsed.path.rsplit("/", 1)[-1].lower()
+                if valid_asset_id(asset_id):
+                    self.handle_asset_put(asset_id)
+                    return
+            self.send_error_code(404, "NOT_FOUND")
         finally:
             REQUEST_SLOTS.release()
 
@@ -1239,7 +1739,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def handle_reconcile(self):
-        conn, user = self.require_user()
+        conn, user = self.require_sync_user()
         if not user:
             return
         if not self.allow_rate("sync_user", user["id"], 30, 60):
@@ -1373,6 +1873,8 @@ class Handler(BaseHTTPRequestHandler):
                     "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
                     (user_id, username, hash_password(password), now_ms()),
                 )
+                ensure_account_usage(conn, user_id)
+                audit_security(conn, "account_registered", "info", user_id, security_subject(self.client_ip()))
                 token = issue_token(conn, user_id)
         except sqlite3.IntegrityError:
             self.send_error_code(409, "USERNAME_EXISTS")
@@ -1383,7 +1885,8 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "token": token,
-                "user": {"id": user_id, "username": username},
+                "user": {"id": user_id, "username": username, "sync_enabled": False},
+                "sync_enabled": False,
                 "data_generation": 1,
             },
         )
@@ -1401,10 +1904,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         conn = connect()
         user = conn.execute(
-            "SELECT id,username,password_hash FROM users WHERE username=?", (username,)
+            "SELECT id,username,password_hash,disabled_at,disabled_reason,sync_verified_at FROM users WHERE username=?", (username,)
         ).fetchone()
         if not user or not verify_password(password, user["password_hash"]):
             self.send_error_code(401, "INVALID_CREDENTIALS")
+            conn.close()
+            return
+        if bool(user["disabled_at"]):
+            with conn:
+                audit_security(conn, "disabled_account_login", "warning", user["id"], security_subject(self.client_ip()))
+            self.send_error_code(403, "ACCOUNT_DISABLED", "账号已被限制，请联系支持")
             conn.close()
             return
         with conn:
@@ -1414,7 +1923,8 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "token": token,
-                "user": {"id": user["id"], "username": user["username"]},
+                "user": {"id": user["id"], "username": user["username"], "sync_enabled": bool(user["sync_verified_at"])},
+                "sync_enabled": bool(user["sync_verified_at"]),
                 "data_generation": account_data_generation(conn, user["id"]),
             },
         )
@@ -1431,7 +1941,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True})
 
     def handle_sync_data_reset(self):
-        conn, user = self.require_user()
+        conn, user = self.require_sync_user()
         if not user:
             return
         if not self.allow_rate("sync_data_reset_user", user["id"], 3, 3600):
@@ -1459,6 +1969,86 @@ class Handler(BaseHTTPRequestHandler):
                 "tokens_revoked": True,
             },
         )
+
+    def handle_recovery_status(self):
+        conn, user = self.require_sync_user()
+        if not user:
+            return
+        if not self.allow_rate("sync_recovery_user", user["id"], 12, 60):
+            conn.close()
+            return
+        current_at = now_ms()
+        with conn:
+            recovery.prune_history(conn, user["id"], current_at)
+        payload = recovery.status(conn, user["id"], current_at)
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "server_time": current_at,
+                "data_generation": account_data_generation(conn, user["id"]),
+                **payload,
+            },
+        )
+        conn.close()
+
+    def handle_recovery_restore(self):
+        conn, user = self.require_sync_user()
+        if not user:
+            return
+        if not self.allow_rate("sync_recovery_restore_user", user["id"], 3, 3600):
+            conn.close()
+            return
+        body = self.read_auth_body()
+        if body is None:
+            conn.close()
+            return
+        if body.get("confirm") is not True:
+            self.send_error_code(400, "RECOVERY_CONFIRMATION_REQUIRED")
+            conn.close()
+            return
+        generation = account_data_generation(conn, user["id"])
+        if request_data_generation(body) != generation:
+            self.send_error_code(409, "DATA_GENERATION_MISMATCH")
+            conn.close()
+            return
+        password = str(body.get("password", "") or "")
+        password_row = conn.execute(
+            "SELECT password_hash FROM users WHERE id=?", (user["id"],)
+        ).fetchone()
+        if not password_row or not verify_password(password, password_row["password_hash"]):
+            self.send_error_code(401, "INVALID_CREDENTIALS", "登录密码不正确")
+            conn.close()
+            return
+        target_at = safe_int(body.get("target_at", body.get("targetAt")))
+        try:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                result = recovery.restore_account(conn, user["id"], target_at, now_ms())
+                generation += 1
+                conn.execute(
+                    "INSERT INTO account_data_generations(user_id,generation,updated_at) "
+                    "VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET "
+                    "generation=excluded.generation,updated_at=excluded.updated_at",
+                    (user["id"], generation, result["restored_at"]),
+                )
+                conn.execute("DELETE FROM tokens WHERE user_id=?", (user["id"],))
+        except ValueError as error:
+            code = str(error)
+            status_code = 404 if code == "RECOVERY_UNAVAILABLE" else 409
+            self.send_error_code(status_code, code)
+            conn.close()
+            return
+        self.send_json(
+            200,
+            {
+                "ok": True,
+                "data_generation": generation,
+                "tokens_revoked": True,
+                **result,
+            },
+        )
+        conn.close()
 
     def handle_account_delete(self):
         conn, user = self.require_user()
@@ -1489,12 +2079,17 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return
         with conn:
+            conn.execute("DELETE FROM entity_history WHERE user_id=?", (user["id"],))
+            conn.execute("DELETE FROM recovery_accounts WHERE user_id=?", (user["id"],))
             conn.execute("DELETE FROM entities WHERE user_id=?", (user["id"],))
+            remove_user_assets(conn, user["id"])
             conn.execute("DELETE FROM tokens WHERE user_id=?", (user["id"],))
             conn.execute("DELETE FROM account_codes WHERE user_id=?", (user["id"],))
             conn.execute("DELETE FROM account_emails WHERE user_id=?", (user["id"],))
             conn.execute("DELETE FROM secret_bundle_epochs WHERE user_id=?", (user["id"],))
             conn.execute("DELETE FROM account_data_generations WHERE user_id=?", (user["id"],))
+            conn.execute("DELETE FROM account_usage WHERE user_id=?", (user["id"],))
+            audit_security(conn, "account_deleted", "info", user["id"])
             conn.execute("DELETE FROM users WHERE id=?", (user["id"],))
         conn.close()
         self.send_json(200, {"ok": True, "account_deleted": True})
@@ -1514,6 +2109,7 @@ class Handler(BaseHTTPRequestHandler):
                 "email": mask_email(row["email"]) if row else "",
                 "recoveryAvailable": bool(row) and account_mail_configured(),
                 "mailConfigured": account_mail_configured(),
+                "syncEnabled": bool(user["sync_verified_at"]),
             },
         )
         conn.close()
@@ -1602,6 +2198,8 @@ class Handler(BaseHTTPRequestHandler):
                     "ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,verified_at=excluded.verified_at",
                     (user["id"], email, now_ms()),
                 )
+                conn.execute("UPDATE users SET sync_verified_at=? WHERE id=?", (now_ms(), user["id"]))
+                audit_security(conn, "email_verified_for_sync", "info", user["id"], security_subject(email))
         except sqlite3.IntegrityError:
             self.send_error_code(409, "EMAIL_ALREADY_BOUND")
             conn.close()
@@ -1848,14 +2446,14 @@ class Handler(BaseHTTPRequestHandler):
         conn.close()
 
     def handle_secret_state(self):
-        conn, user = self.require_user()
+        conn, user = self.require_sync_user()
         if not user:
             return
         self.send_json(200, {"ok": True, "secretBundleEpoch": secret_bundle_epoch(conn, user["id"])})
         conn.close()
 
     def handle_secret_state_reset(self):
-        conn, user = self.require_user()
+        conn, user = self.require_sync_user()
         if not user:
             return
         if not self.allow_rate("secret_reset_user", user["id"], 4, 3600):
@@ -1866,7 +2464,7 @@ class Handler(BaseHTTPRequestHandler):
         conn.close()
 
     def handle_push(self):
-        conn, user = self.require_user()
+        conn, user = self.require_sync_user()
         if not user:
             return
         if not self.allow_rate("sync_user", user["id"], 30, 60):
@@ -1913,8 +2511,15 @@ class Handler(BaseHTTPRequestHandler):
         authoritative_entities = []
         ignored_count = 0
         rejected_count = 0
+        stale_assets = []
         with conn:
             self.begin_push_transaction(conn)
+            recovery.prune_history(conn, user["id"], now_ms())
+            account_usage = refresh_daily_usage(conn, user["id"])
+            account_storage = account_storage_bytes(conn, user["id"])
+            daily_write_delta = 0
+            daily_entity_delta = 0
+            quota_rejected = False
             usage = conn.execute(
                 "SELECT COUNT(*) AS entity_count, COALESCE(SUM(LENGTH(json)),0) AS json_bytes "
                 "FROM entities WHERE user_id=?",
@@ -1963,8 +2568,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                 payload_bytes = len(payload_text.encode("utf-8"))
                 payload_limit = (
-                    MAX_AI_HISTORY_JSON_BYTES
-                    if kind == "ai_reader_history_v1"
+                    MAX_AI_HISTORY_JSON_BYTES if kind == "ai_reader_history_v1"
+                    else MAX_READER_PALETTE_JSON_BYTES if kind in ("reader_palette_v1", "reader_palette_order_v1")
                     else MAX_ENTITY_JSON_BYTES
                 )
                 if payload_bytes > payload_limit:
@@ -1974,6 +2579,24 @@ class Handler(BaseHTTPRequestHandler):
                     dispositions.append(
                         {**input_identity, "status": "rejected", "error": "PAYLOAD_TOO_LARGE"}
                     )
+                    continue
+                if kind in ("reader_palette_v1", "reader_palette_order_v1") and not reader_palette_payload_is_valid(kind, payload):
+                    ignored_count += 1
+                    rejected_count += 1
+                    record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "INVALID_PALETTE"})
+                    dispositions.append({**input_identity, "status": "rejected", "error": "INVALID_PALETTE"})
+                    continue
+                if kind == "app_settings_v1" and (entity_id != "default" or not app_settings_payload_is_valid(payload)):
+                    ignored_count += 1
+                    rejected_count += 1
+                    record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "INVALID_APP_SETTINGS"})
+                    dispositions.append({**input_identity, "status": "rejected", "error": "INVALID_APP_SETTINGS"})
+                    continue
+                if kind == "ai_reader_history_v1" and not ai_history_retention_is_valid(payload):
+                    ignored_count += 1
+                    rejected_count += 1
+                    record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "HISTORY_RETENTION_LIMIT"})
+                    dispositions.append({**input_identity, "status": "rejected", "error": "HISTORY_RETENTION_LIMIT"})
                     continue
                 normalized = {
                     "kind": kind,
@@ -1990,6 +2613,17 @@ class Handler(BaseHTTPRequestHandler):
                     "FROM entities WHERE user_id=? AND kind=? AND id=?",
                     (user["id"], kind, entity_id),
                 ).fetchone()
+                if kind == "reader_palette_v1" and not normalized["deleted_at"] and (existing is None or existing["deleted_at"]):
+                    palette_count = conn.execute(
+                        "SELECT COUNT(*) FROM entities WHERE user_id=? AND kind=? AND deleted_at=0",
+                        (user["id"], "reader_palette_v1"),
+                    ).fetchone()[0]
+                    if palette_count >= MAX_READER_PALETTES:
+                        ignored_count += 1
+                        rejected_count += 1
+                        record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "PALETTE_LIMIT"})
+                        dispositions.append({**input_identity, "status": "rejected", "error": "PALETTE_LIMIT"})
+                        continue
                 if kind == "secret_bundle_v1" and not normalized["deleted_at"]:
                     # Version 1 secret envelopes had no epoch. Treat them as the
                     # initial epoch so existing encrypted bundles keep working
@@ -2016,9 +2650,16 @@ class Handler(BaseHTTPRequestHandler):
                 existing_bytes = int(existing["json_bytes"]) if existing else 0
                 entity_delta = 0 if existing else 1
                 byte_delta = payload_bytes - existing_bytes
+                history_bytes = 0 if kind in recovery.NON_RECOVERABLE_KINDS else len(recovery._encode_payload(payload_text)[0])
+                usage_over_limit = (
+                    account_storage + byte_delta + history_bytes > int(account_usage["storage_limit_bytes"])
+                    or int(account_usage["daily_written_bytes"]) + daily_write_delta + payload_bytes + history_bytes > MAX_ACCOUNT_DAILY_WRITE_BYTES
+                    or int(account_usage["daily_entity_writes"]) + daily_entity_delta + 1 > MAX_ACCOUNT_DAILY_ENTITY_WRITES
+                )
                 if (
                     user_entity_count + entity_delta > MAX_USER_ENTITIES
                     or user_json_bytes + byte_delta > MAX_USER_JSON_BYTES
+                    or usage_over_limit
                 ):
                     ignored_count += 1
                     rejected_count += 1
@@ -2026,6 +2667,7 @@ class Handler(BaseHTTPRequestHandler):
                     dispositions.append(
                         {**input_identity, "status": "rejected", "error": "QUOTA_EXCEEDED"}
                     )
+                    quota_rejected = True
                     continue
                 normalized["server_updated_at"] = next_server_stamp(conn)
                 conn.execute(
@@ -2044,10 +2686,37 @@ class Handler(BaseHTTPRequestHandler):
                         normalized["sync_version"], normalized["server_updated_at"],
                     ),
                 )
+                recovery.record_entity(
+                    conn,
+                    user["id"],
+                    kind,
+                    entity_id,
+                    payload_text,
+                    normalized["updated_at"],
+                    normalized["deleted_at"],
+                    normalized["device_id"],
+                    normalized["sync_version"],
+                    normalized["server_updated_at"],
+                    "sync",
+                )
                 user_entity_count += entity_delta
                 user_json_bytes += byte_delta
+                account_storage += byte_delta + history_bytes
+                daily_write_delta += payload_bytes + history_bytes
+                daily_entity_delta += 1
                 accepted.append(normalized)
                 dispositions.append({**input_identity, "status": "accepted"})
+            if accepted:
+                recovery.prune_history(conn, user["id"], now_ms())
+                conn.execute(
+                    "UPDATE account_usage SET daily_written_bytes=daily_written_bytes+?,daily_entity_writes=daily_entity_writes+?,updated_at=? WHERE user_id=?",
+                    (daily_write_delta, daily_entity_delta, now_ms(), user["id"]),
+                )
+            if accepted:
+                stale_assets = garbage_collect_unreferenced_assets(conn, user["id"])
+            if quota_rejected:
+                audit_security(conn, "account_quota_exceeded", "warning", user["id"], security_subject(self.client_ip()), {"accepted": len(accepted)})
+        delete_asset_files(user["id"], stale_assets)
         response_cursor = max(
             [safe_int(item.get("server_updated_at")) for item in accepted] or [0]
         )

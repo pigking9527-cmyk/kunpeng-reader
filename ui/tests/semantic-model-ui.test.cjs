@@ -8,13 +8,49 @@ const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const semanticUi = fs.readFileSync(path.join(root, "semantic-ui.js"), "utf8");
 const semanticCache = fs.readFileSync(path.join(root, "semantic-status-cache.js"), "utf8");
 const i18n = fs.readFileSync(path.join(root, "app-i18n.js"), "utf8");
+const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
+const repoRoot = path.resolve(root, "..");
+const cargoToml = fs.readFileSync(path.join(repoRoot, "Cargo.toml"), "utf8");
+const gpuRust = fs.readFileSync(path.join(repoRoot, "src", "semantic", "gpu.rs"), "utf8");
+const gpuRuntimeRust = fs.readFileSync(path.join(repoRoot, "src", "semantic", "gpu_runtime.rs"), "utf8");
+const modelRust = fs.readFileSync(path.join(repoRoot, "src", "semantic", "model.rs"), "utf8");
+const windowsBundle = fs.readFileSync(path.join(repoRoot, "packaging", "windows", "tauri.release.conf.json"), "utf8");
+const linuxBundle = fs.readFileSync(path.join(repoRoot, "tauri.linux.conf.json"), "utf8");
 
 test("semantic model picker offers Chinese and multilingual local models", () => {
   assert.match(html, /value="bge-small-zh-v1\.5" data-i18n="semModelSmall"/);
   assert.match(html, /value="bge-large-zh-v1\.5" data-i18n="semModelLarge"/);
   assert.match(html, /value="bge-m3" data-i18n="semModelM3"/);
   assert.match(html, /value="multilingual-e5-small" data-i18n="semModelE5"/);
-  assert.doesNotMatch(html, /完整语义检索|GPU 加速组件|一键启用/);
+  assert.doesNotMatch(html, /完整语义检索|一键启用/);
+});
+
+test("Windows and Linux bundles ship the CUDA provider used by FastEmbed", () => {
+  assert.match(cargoToml, /target_os = "windows".*target_os = "linux"/);
+  assert.match(cargoToml, /ort = \{ version = "=2\.0\.0-rc\.12", features = \["cuda"\] \}/);
+  assert.match(gpuRust, /provider_component_present\(\)/);
+  assert.match(modelRust, /with_execution_providers\(execution_providers/);
+  for (const bundle of [windowsBundle, linuxBundle]) {
+    assert.match(bundle, /onnxruntime_providers_cuda/);
+    assert.match(bundle, /onnxruntime_providers_shared/);
+  }
+});
+test("missing Windows CUDA dependencies can be installed on demand with pinned hashes", () => {
+  assert.match(html, /id="sem-gpu-install"/);
+  assert.match(semanticUi, /semantic-gpu-runtime-progress/);
+  assert.match(semanticUi, /runtime_install_available/);
+  assert.match(gpuRuntimeRust, /cuda-runtime-windows-v1/);
+  assert.match(gpuRuntimeRust, /1_494_396_282/);
+  assert.match(gpuRuntimeRust, /sha256/i);
+  assert.match(gpuRuntimeRust, /header\("Range"/);
+  assert.match(gpuRust, /spawn_blocking\(semantic_gpu_status_blocking\)/);
+  assert.match(gpuRust, /runtime_downloaded_bytes/);
+  assert.match(gpuRust, /"缺少 CUDA 组件"/);
+  assert.match(gpuRust, /creation_flags\(0x0800_0000\)/);
+  assert.match(styles, /#sem-gpu-meta \{ height: 1\.45em; overflow: hidden;/);
+  assert.match(styles, /#sem-gpu-section \.sem-actions \{ min-width: 230px;/);
+  assert.match(windowsBundle, /cudart64_12\.dll/);
+  assert.match(windowsBundle, /cudnn64_9\.dll/);
 });
 
 test("model picker explains local model choices and reads the normal task status", () => {
@@ -33,7 +69,7 @@ test("model picker explains local model choices and reads the normal task status
   assert.match(i18n, /const SEMANTIC_SETTINGS_COPY/);
   assert.match(semanticUi, /invoke\("semantic_gpu_status"\)/);
   assert.match(semanticUi, /invoke\("semantic_tasks", \{ reconcile \}\)/);
-  assert.doesNotMatch(semanticUi, /GPU 加速组件/);
+  assert.match(semanticUi, /install_semantic_gpu_runtime/);
 });
 
 test("Chinese and E5 models hide M3-only controls but keep general reranking", () => {
@@ -66,7 +102,11 @@ test("semantic management opens with a cached lightweight snapshot and reconcile
   const open = semanticUi.slice(openStart, openEnd);
   assert.doesNotMatch(html, /id="sem-status-refresh"/);
   assert.ok(open.indexOf("cache.get()") < open.indexOf("setTimeout(() => { void refresh(false); }"));
-  assert.doesNotMatch(open, /refreshGpuStatus\(\)/);
+  assert.match(open, /refreshGpuStatus\(\)/);
+  assert.match(semanticUi, /gpuRefreshInFlight/);
+  assert.match(semanticUi, /runtime_downloaded_bytes/);
+  assert.doesNotMatch(semanticUi, /semGpuDownloadSaved/);
+  assert.match(semanticUi, /semResumeGpuRuntime/);
   assert.match(semanticUi, /invoke\("semantic_tasks", \{ reconcile \}\)/);
   assert.match(semanticUi, /select_semantic_model[\s\S]*?await refresh\(true\);/);
   assert.match(semanticUi, /if \(statusInFlight\) return/);

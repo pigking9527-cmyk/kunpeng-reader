@@ -16,4 +16,8 @@
 12. 对迁移包必须在解析前/后执行 ADR-0010 的 16 MiB、50,000 实体、深度、单实体和字段资源限制；超限时整个导入失败且不部分写入。
 13. 同步实体响应中的 `updated_at` 与 `deleted_at` 必须是 Unix epoch 毫秒，活跃实体的 `deleted_at` 为 `0`；服务端须兼容合理 epoch 范围内旧 Android 发来的秒级值并规范化后参与 LWW，且不得转换 `cursor`、`server_updated_at` 或 `data_generation`。
 
+14. 独立 `user_book_tags_v1` / `book_collections_v1` 存在时，旧 `book_state_v2` 空数组不能覆盖它们。
+15. 服务端只为实际接受的实体变化记录压缩完整版本；90 天清理保留每实体窗口前锚点，恢复后递增 `data_generation`、撤销令牌，并把目标时间之后创建的实体写成墓碑。
+16. 旧客户端忽略 `app_settings_v1/default`；认识该实体的桌面客户端写回已知设置时保留未知字段。账户无该实体时以本机当前值建种，不用默认值覆盖本机偏好。
+
 待真实服务端字段完成逐项对齐后，这里会补每个端可直接运行的断言脚本。

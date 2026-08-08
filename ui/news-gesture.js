@@ -12,7 +12,8 @@
   const SAMPLE_COUNT = 48;
   const MIN_PATH_LENGTH = 64;
   const MATCH_THRESHOLD = 0.78;
-  const MATCH_THRESHOLDS = Object.freeze({ low: 0.70, medium: MATCH_THRESHOLD, high: 0.86 });
+  const PRECISION_THRESHOLDS = Object.freeze([0.62, 0.66, 0.70, 0.74, MATCH_THRESHOLD, 0.82, 0.86, 0.89, 0.92, 0.95]);
+  const MATCH_THRESHOLDS = Object.freeze({ low: PRECISION_THRESHOLDS[2], medium: MATCH_THRESHOLD, high: PRECISION_THRESHOLDS[6] });
 
   function cleanPoints(points) {
     return (Array.isArray(points) ? points : []).map((point) => ({ x: Number(point?.x), y: Number(point?.y) }))
@@ -121,11 +122,13 @@
   }
 
   function normalizePrecision(value) {
-    return Object.prototype.hasOwnProperty.call(MATCH_THRESHOLDS, value) ? value : "medium";
+    const legacy = { low: "3", medium: "5", high: "7" }[value];
+    const parsed = Number(legacy || value);
+    return Number.isInteger(parsed) && parsed >= 1 && parsed <= 10 ? String(parsed) : "5";
   }
 
   function loadPrecision(storage = root.localStorage) {
-    try { return normalizePrecision(storage?.getItem?.(PRECISION_KEY)); } catch (_) { return "medium"; }
+    try { return normalizePrecision(storage?.getItem?.(PRECISION_KEY)); } catch (_) { return "5"; }
   }
 
   function savePrecision(precision, storage = root.localStorage) {
@@ -135,7 +138,7 @@
   }
 
   function matchThreshold(precision) {
-    return MATCH_THRESHOLDS[normalizePrecision(precision)];
+    return PRECISION_THRESHOLDS[Number(normalizePrecision(precision)) - 1];
   }
 
   function clear(storage = root.localStorage) {
@@ -175,5 +178,5 @@
     context.stroke();
   }
 
-  return { STORAGE_KEY, ENABLED_KEY, PRECISION_KEY, SAMPLE_COUNT, MIN_PATH_LENGTH, MATCH_THRESHOLD, MATCH_THRESHOLDS, cleanPoints, pathLength, normalize, similarity, parseStored, load, save, loadEnabled, saveEnabled, normalizePrecision, loadPrecision, savePrecision, matchThreshold, clear, draw };
+  return { STORAGE_KEY, ENABLED_KEY, PRECISION_KEY, SAMPLE_COUNT, MIN_PATH_LENGTH, MATCH_THRESHOLD, MATCH_THRESHOLDS, PRECISION_THRESHOLDS, cleanPoints, pathLength, normalize, similarity, parseStored, load, save, loadEnabled, saveEnabled, normalizePrecision, loadPrecision, savePrecision, matchThreshold, clear, draw };
 });

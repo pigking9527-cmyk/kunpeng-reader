@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const uiDir = path.resolve(__dirname, "..");
 const syncSource = fs.readFileSync(path.join(uiDir, "sync-ui.js"), "utf8");
 const indexSource = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
+const i18nSource = fs.readFileSync(path.join(uiDir, "app-i18n.js"), "utf8");
 
 test("sync UI only binds elements that exist in the main page", () => {
   const referencedIds = [...syncSource.matchAll(/getElementById\("([^"]+)"\)/g)]
@@ -27,16 +28,18 @@ test("manual sync button has a click handler", () => {
 });
 
 test("private sync explains the 100 plus 100 cloud history policy", () => {
-  assert.match(indexSource, /包括单书与书库问答；云端各保留 100 条/);
+  assert.match(i18nSource, /包括单书与书库问答；云端各保留 100 条/);
 });
 
 test("同步内容总览列出新增的模型标签、配置和可选历史同步", () => {
   assert.match(indexSource, /大模型书籍分类标签/);
+  assert.match(indexSource, /data-i18n="syncSoftwareSettings">软件设置/);
   assert.match(indexSource, /大模型与翻译 API 配置（不含密钥）/);
   assert.match(indexSource, /智读与书库问答记录（可选）/);
   assert.match(indexSource, /加密 API Key 与翻译密钥（可选）/);
   assert.match(indexSource, /id="account-sync-history"/);
   assert.match(indexSource, /id="account-sync-secrets"/);
+  assert.match(i18nSource, /syncSoftwareSettings = label/);
   assert.match(syncSource, /function applyPrivateSyncOverview/);
   assert.match(syncSource, /account-sync-enabled/);
 });

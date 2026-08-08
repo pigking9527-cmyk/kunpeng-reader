@@ -103,6 +103,7 @@ function createTocItem(entry) {
   item.dataset.chapter = entry.chapter;
   item.dataset.frag = entry.frag || "";
   item.addEventListener("click", () => {
+    window.rememberReaderJumpPosition?.("toc");
     sendToPage({ gotoChapter: entry.chapter, frag: entry.frag || undefined });
     setToc(false);
   });

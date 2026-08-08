@@ -1,0 +1,38 @@
+/* Linux 的无边框窗口没有系统边缘命中区；这些透明区域只由 window-resize.js
+   在 Linux 桌面端创建。边缘避开角落，让八个方向不会互相抢事件。 */
+.window-resize-handle {
+  position: fixed;
+  z-index: 2147483647;
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  touch-action: none;
+  user-select: none;
+}
+
+.window-resize-handle[data-resize-direction="north"] {
+  top: 0; left: 10px; right: 10px; height: 6px; cursor: n-resize;
+}
+.window-resize-handle[data-resize-direction="north-east"] {
+  top: 0; right: 0; width: 10px; height: 10px; cursor: ne-resize;
+}
+.window-resize-handle[data-resize-direction="east"] {
+  top: 10px; right: 0; bottom: 10px; width: 6px; cursor: e-resize;
+}
+.window-resize-handle[data-resize-direction="south-east"] {
+  right: 0; bottom: 0; width: 10px; height: 10px; cursor: se-resize;
+}
+.window-resize-handle[data-resize-direction="south"] {
+  right: 10px; bottom: 0; left: 10px; height: 6px; cursor: s-resize;
+}
+.window-resize-handle[data-resize-direction="south-west"] {
+  bottom: 0; left: 0; width: 10px; height: 10px; cursor: sw-resize;
+}
+.window-resize-handle[data-resize-direction="west"] {
+  top: 10px; bottom: 10px; left: 0; width: 6px; cursor: w-resize;
+}
+.window-resize-handle[data-resize-direction="north-west"] {
+  top: 0; left: 0; width: 10px; height: 10px; cursor: nw-resize;
+}

@@ -1,4 +1,4 @@
-var S={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1,uiLanguage:"zh-CN"};
+var S={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1,backgroundPreset:"light",customBackgroundColor:"#fffdf8",customBackgroundImage:"",customPaletteId:"",textColor:"",linkColor:"",selectionColor:"",footnoteBackground:"",footnoteBorder:"",imagePagination:"next-page",uiLanguage:"zh-CN"};
 var READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
 var readerAnimationGroupByKey={annotationAdd:'readerPage',readingMode:'readerPage',pageTurn:'readerPage',highlightSettings:'readerPage'};
 var readerAnimationSettingsOverride=null;
@@ -53,6 +53,7 @@ function applyStyle(){
   }
   c+='.rr hr.rr-note-sep{display:none !important;}';
   c+='.rr *{break-before:auto !important;break-after:auto !important;break-inside:auto !important;page-break-before:auto !important;page-break-after:auto !important;page-break-inside:auto !important;-webkit-column-break-before:auto !important;-webkit-column-break-after:auto !important;-webkit-column-break-inside:auto !important;}';
+  c+='body:not(.scroll-mode):not(.line-paged-mode) .rr-end{break-before:column !important;page-break-before:always !important;-webkit-column-break-before:always !important;width:1px !important;height:1px !important;font-size:0 !important;line-height:0 !important;}';
   // 单页/双页切换时，把切换前首行所在段落从该字符处分成两个真实块，并让后半块
   // 强制从新栏开始。不能使用零宽零高空节点：Chromium 只保证空节点在栏首，并不保证
   // 紧随其后的文字也在栏首，长段落因此会落到新栏中部。
@@ -62,23 +63,24 @@ function applyStyle(){
   if(mg(S.marginBottom)===0)c+='.rr>:last-child,.rr body>:last-child{margin-bottom:0 !important;padding-bottom:0 !important;}';
   if(mg(S.marginLeft)===0)c+='.rr,.rr>*,.rr body{margin-left:0 !important;padding-left:0 !important;}';
   if(mg(S.marginRight)===0)c+='.rr,.rr>*,.rr body{margin-right:0 !important;padding-right:0 !important;}';
-  // 本地样式覆盖书籍 CSS（包括类名和内联字号），避免某些 EPUB 把正文压得过小。
   if(useLocalStyle&&S.fontSize){
     c+='.rr *{font-size:inherit !important;}';
     c+='.rr h1{font-size:1.7em !important;} .rr h2{font-size:1.4em !important;} .rr h3{font-size:1.2em !important;} .rr h4{font-size:1.1em !important;}';
     c+='.rr sup,.rr sub{font-size:.75em !important;}'; // 上下标（注释角标）仍保持小一号
   }
-  var bg='#fff',fg='#222';
-  if(S.theme==='dark'){bg='#1c1c1e';fg='#d2d2d2';}
-  else if(S.theme==='sepia'){bg='#f4ecd8';fg='#5b4636';}
-  c+='html,body{background:'+bg+' !important;}#page-mask{background:'+bg+' !important;}#virtual-page{--reader-bg:'+bg+';}';
-  c+='#fn-pop{font-size:'+noteFontSizePx()+'px !important;}';
-  if(S.theme&&S.theme!=='light'){c+='.rr,.rr *{color:'+fg+' !important;}';}
+  var presets={light:['#fff','#222','#246ed4','#f7dc82','#eef7ef','#6f8f7d'],dark:['#1c1c1e','#d2d2d2','#8ab4ff','#536f9b','#273626','#82aa8c'],sepia:['#f4ecd8','#5b4636','#8a4a2f','#e7c77f','#efe0c5','#a57c4c'],paper:['#f8f1df','#443a2d','#7b4c26','#e8d290','#f2e7c9','#a48453'],blue:['#eaf2fa','#26394d','#2369a8','#b9d8f4','#dcecf9','#6d9cc7'],custom:['#fffdf8','#222','#246ed4','#f7dc82','#eef7ef','#6f8f7d']};
+  var preset=presets[S.backgroundPreset]||presets.light,validColor=function(v,f){return /^#[0-9a-f]{3,8}$/i.test(String(v||''))?String(v):f;},backgroundImageValue=String(S.customBackgroundImage||'');var bg=S.backgroundPreset==='custom'?validColor(S.customBackgroundColor,preset[0]):preset[0],fg=validColor(S.textColor,preset[1]),link=validColor(S.linkColor,preset[2]),selection=validColor(S.selectionColor,preset[3]),noteBg=validColor(S.footnoteBackground,preset[4]),noteBorder=validColor(S.footnoteBorder,preset[5]),bgImage=/^(?:reader:\/\/localhost|http:\/\/reader\.localhost)\/background\/[0-9a-f]{64}\.(?:png|jpg|webp|gif)$/i.test(backgroundImageValue)?backgroundImageValue:'';
+  var bgImageRule=bgImage?'background-image:url("'+bgImage+'") !important;background-size:cover !important;background-position:center !important;background-attachment:fixed !important;':'';
+  c+='html,body{background:'+bg+' !important;'+bgImageRule+'}#page-mask{background:'+bg+' !important;'+bgImageRule+'}#virtual-page{--reader-bg:'+bg+';'+bgImageRule+'}';
+  c+='html,body,#page-mask,#virtual-page,.rr,.rr *{transition:none !important;}';
+  c+='#fn-pop{font-size:'+noteFontSizePx()+'px !important;background:'+noteBg+' !important;border-color:'+noteBorder+' !important;}';
+  c+='.rr,.rr *{color:'+fg+' !important;}.rr a{color:'+link+' !important;}.rr ::selection{background:'+selection+' !important;}';
   c+='.rr .rr-note-wrap{font-size:inherit !important;line-height:1 !important;vertical-align:baseline !important;text-decoration:none !important;}';
-  c+='.rr .rr-note-ref,#virtual-page .rr-note-ref{display:inline-flex !important;align-items:center !important;justify-content:center !important;width:14px !important;height:14px !important;box-sizing:border-box !important;border-radius:50% !important;background:#eef7ef !important;border:1px solid #6f8f7d !important;color:#5f7f6d !important;font-size:9px !important;font-family:system-ui,"Microsoft YaHei",sans-serif !important;font-weight:700 !important;line-height:1 !important;text-decoration:none !important;vertical-align:middle !important;overflow:hidden !important;padding:0 !important;margin:0 .08em !important;}';
+  c+='.rr .rr-note-ref,#virtual-page .rr-note-ref{display:inline-flex !important;align-items:center !important;justify-content:center !important;width:14px !important;height:14px !important;box-sizing:border-box !important;border-radius:50% !important;background:'+noteBg+' !important;border:1px solid '+noteBorder+' !important;color:'+link+' !important;font-size:9px !important;font-family:system-ui,"Microsoft YaHei",sans-serif !important;font-weight:700 !important;line-height:1 !important;text-decoration:none !important;vertical-align:middle !important;overflow:hidden !important;padding:0 !important;margin:0 .08em !important;}';
   c+='#virtual-page .rr-note-ref{margin:0 !important;}';
   c+='.rr .rr-note-ref::before,.rr .rr-note-ref::after,#virtual-page .rr-note-ref::before,#virtual-page .rr-note-ref::after{content:none !important;}';
-  c+='.rr .rr-note-badge,#virtual-page .rr-note-badge{display:inline-flex !important;align-items:center !important;justify-content:center !important;width:100% !important;height:100% !important;box-sizing:border-box !important;color:#5f7f6d !important;background:transparent !important;border:0 !important;border-radius:50% !important;font:700 9px/1 system-ui,"Microsoft YaHei",sans-serif !important;text-decoration:none !important;letter-spacing:0 !important;}';
+  c+='.rr .rr-note-badge,#virtual-page .rr-note-badge{display:inline-flex !important;align-items:center !important;justify-content:center !important;width:100% !important;height:100% !important;box-sizing:border-box !important;color:'+link+' !important;background:transparent !important;border:0 !important;border-radius:50% !important;font:700 9px/1 system-ui,"Microsoft YaHei",sans-serif !important;text-decoration:none !important;letter-spacing:0 !important;}';
+  if(S.imagePagination!=='continuous')c+='.rr img,.rr figure,.rr svg{break-inside:avoid !important;page-break-inside:avoid !important;-webkit-column-break-inside:avoid !important;max-height:calc(100vh - '+(mg(S.marginTop)+mg(S.marginBottom)+8)+'px) !important;max-width:100% !important;object-fit:contain !important;}';
   // 强制横排：有些书自带 -epub-writing-mode:vertical-rl（竖排），覆盖成横排左→右
   c+='html,body,.rr,.rr *{writing-mode:horizontal-tb !important;-webkit-writing-mode:horizontal-tb !important;-epub-writing-mode:horizontal-tb !important;text-orientation:mixed !important;}.rr{direction:ltr !important;orphans:1 !important;widows:1 !important;-webkit-line-box-contain:block glyphs replaced !important;}.rr p,.rr div,.rr li,.rr blockquote{orphans:1 !important;widows:1 !important;}';
   c+='html,body,#pager,#scroller,.rr{overflow-anchor:none;}';
@@ -2409,7 +2411,8 @@ function scheduleNoteNumberDisplayRefresh(){
     });
   });
 }
-function showChapter(i,where,frag){
+function chapterHasVisibleContent(){if(!root)return false;var walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null),node,parent;while((node=walker.nextNode())){parent=node.parentElement;if(parent&&parent.closest&&parent.closest('script,style,template,.rr-end'))continue;if((node.nodeValue||'').replace(/[\s\u00a0\u200b\ufeff]/g,''))return true;}return !!root.querySelector('img,svg,canvas,video,object,embed,iframe,table');}
+function showChapter(i,where,frag,skippedBlankChapters){
   i=Math.max(0,Math.min(CH-1,i));
   var showStarted=performance.now(),fetchDone=showStarted,bugTraceToken=beginChapterBugTrace(i,where);
   var conversion=['t2s','s2t'].indexOf(S.textConversion)>=0?S.textConversion:'original';
@@ -2421,7 +2424,9 @@ function showChapter(i,where,frag){
     // 保存的章内比例在重开时就会落到相邻页甚至相邻章节。
     var headReady=d.head?injectHead(d.head,headSeen):Promise.resolve();
     return headReady.then(function(){
-      curCh=i;pageInCh=0;dualStartColumn=0;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;if(scrollPort())scrollPort().scrollTop=0;/* 最终页位移确定前不绘制新章节，避免跨章时短暂露出错误页。 */root.style.visibility='hidden';root.innerHTML=body+'<div class="rr-end"></div>';normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();
+      curCh=i;pageInCh=0;dualStartColumn=0;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;if(scrollPort())scrollPort().scrollTop=0;/* 最终页位移确定前不绘制新章节，避免跨章时短暂露出错误页。 */root.style.visibility='hidden';root.innerHTML=body+'<div class="rr-end"></div>';normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();
+      if(!chapterHasVisibleContent()&&(skippedBlankChapters||0)<16){var nextBlankChapter=where==='end'?i-1:i+1;if(nextBlankChapter>=0&&nextBlankChapter<CH)return showChapter(nextBlankChapter,where==='end'?'end':'start',null,(skippedBlankChapters||0)+1);}
+      chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();
       return new Promise(function(resolve){
         requestAnimationFrame(function(){requestAnimationFrame(function(){
           if(fastChapterLayout){

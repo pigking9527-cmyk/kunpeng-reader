@@ -954,6 +954,10 @@ fn parse_request_path(path: &str) -> Option<(String, u64, String)> {
 }
 
 fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
+    let decoded = percent_decode(path);
+    if let Some(name) = decoded.strip_prefix("/background/") {
+        return crate::reader_backgrounds::read_cached_background(name);
+    }
     let (kind, id, rest) = parse_request_path(path)?;
 
     match kind.as_str() {

@@ -47,6 +47,10 @@ test("whole-book page counts are enabled and resume from incremental cache", () 
 });
 
 test("large chapters use batched geometry and skip repeated exact layout", () => {
+  assert.match(
+    source,
+    /\.rr \*\{break-before:auto !important[\s\S]*?body:not\(\.scroll-mode\):not\(\.line-paged-mode\) \.rr-end\{break-before:column !important/
+  );
   assert.match(source, /function fastPagedPageCount\(el\)/);
   assert.match(source, /columnCountFromWidth\(el\.scrollWidth\|\|0,hasEnd\)/);
   assert.match(source, /function fastDocumentTextLineRects\(\)/);

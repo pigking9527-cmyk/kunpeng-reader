@@ -791,6 +791,14 @@ async function syncAuth(action) {
     hideSavedAccounts();
     syncSettingsLoaded = true;
     updateAccountView({ username: syncUsernameEl.value });
+    if (res.sync_enabled === false) {
+      openAccountPanel();
+      await loadAccountSecurityStatus();
+      syncStatusEl.classList.remove("hidden");
+      syncStatusEl.textContent = "账号已创建，请在账户安全中绑定并验证邮箱后再同步。";
+      setSyncButtonState("fail", "syncFailed", syncStatusEl.textContent);
+      return;
+    }
     setSyncButtonState("syncing", "firstSyncInProgress");
     try {
       const report = await invoke("sync_now");

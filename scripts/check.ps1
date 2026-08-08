@@ -59,7 +59,7 @@ try {
   $env:PYTHONDONTWRITEBYTECODE = '1'
   Push-Location (Join-Path $repo 'server\reader-sync-api')
   try {
-    Invoke-NativeCheck 'sync server tests' { python -m unittest -v test_app.py }
+    Invoke-NativeCheck 'sync server tests' { python -m unittest -v test_app.py test_backup_recovery.py }
   } finally {
     Pop-Location
     $env:PYTHONDONTWRITEBYTECODE = $previousNoBytecode

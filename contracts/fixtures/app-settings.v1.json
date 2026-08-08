@@ -1,0 +1,22 @@
+{
+  "syncProtocolVersion": 1,
+  "entities": [
+    {
+      "id": "default",
+      "kind": "app_settings_v1",
+      "updated_at": 1786172400000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": {
+        "version": 1,
+        "showReaderJumpBack": true,
+        "readerJumpBackDismissMode": "pages",
+        "readerJumpBackDismissSeconds": 30,
+        "readerJumpBackDismissPages": 3,
+        "readerJumpBackSizeLevel": 6,
+        "futureDesktopSetting": "preserve-me"
+      }
+    }
+  ]
+}

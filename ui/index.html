@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>鲲鹏阅读器</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="window-resize.css" />
   </head>
   <body>
     <header class="toolbar">
@@ -60,6 +61,7 @@
               <span data-i18n="syncReadingData">书签、高亮、批注、评分、标签与收藏夹</span>
               <span data-i18n="syncVocabulary">生词本</span>
               <span data-i18n="syncStatistics">阅读统计</span>
+              <span data-i18n="syncSoftwareSettings">软件设置</span>
               <span data-i18n="syncTags">大模型书籍分类标签</span>
               <span data-i18n="syncApi">大模型与翻译 API 配置（不含密钥）</span>
               <span id="account-sync-history" class="account-sync-optional" data-i18n="syncHistory">智读与书库问答记录（可选）</span>
@@ -164,7 +166,7 @@
             </div>
             <p class="private-sync-note" data-i18n="privateSyncNote">普通配置不含 API Key，会跟随账户同步。历史与密钥默认只留在本机。</p>
             <label class="private-sync-option"><span><b data-i18n="syncServiceConfiguration">同步服务配置</b><small data-i18n="syncServiceConfigurationHint">智读服务商、接口地址、模型名和翻译服务偏好</small></span><input id="private-sync-configs" type="checkbox" /></label>
-            <label class="private-sync-option"><span><b data-i18n="syncAiHistory">同步智读历史</b><small data-i18n="syncAiHistoryHint">包括单书与书库问答；云端各保留 100 条，不上传书籍原文</small></span><input id="private-sync-history" type="checkbox" /></label>
+            <label class="private-sync-option"><span><b data-i18n="syncAiHistory">同步单书智读历史</b><small data-i18n="syncAiHistoryHint">仅单书智读；书库问答请在其设置中选择同步方式</small></span><input id="private-sync-history" type="checkbox" /></label>
             <label class="private-sync-option"><span><b data-i18n="syncSecrets">同步 API Key 与翻译密钥</b><small data-i18n="syncSecretsHint">须设置同步密码，服务器仅保存加密密文</small></span><input id="private-sync-secrets" type="checkbox" /></label>
             <div class="private-sync-password">
               <input id="private-sync-password" type="password" autocomplete="new-password" placeholder="设置或输入同步密码（至少 10 个字）" data-i18n-placeholder="privateSyncPasswordPlaceholder" />
@@ -409,6 +411,12 @@
           </span>
         </div>
         <div class="fp-set-row">
+          <span>手势</span>
+          <span class="fp-set-tail">
+            <button id="gesture-gear" class="fp-row-gear" type="button" title="设置手势" aria-label="设置手势">⚙</button>
+            <label class="switch" title="启用手势"><input id="set-gesture-enabled" type="checkbox" /><span class="slider"></span></label>
+          </span>
+        </div>        <div class="fp-set-row">
           <span data-i18n="autoImport">自动导入目录</span>
           <span class="fp-set-tail">
             <button id="dirs-gear" class="fp-row-gear" title="设置自动导入目录" data-i18n-title="importDirectoriesTitle">⚙</button>
@@ -479,27 +487,33 @@
         </div>
       </div>
     </div>
-    <div id="newsnow-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="newsnow-settings-title">
+    <div id="gesture-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="gesture-settings-title">
+      <div class="modal-card gesture-settings-card">
+        <div class="modal-head"><span id="gesture-settings-title">手势</span><button id="gesture-settings-close" class="btn-plain" type="button" aria-label="关闭手势设置">✕</button></div>
+        <section class="gesture-setting" aria-labelledby="gesture-settings-title">
+          <div class="gesture-setting-heading"><span>手势</span><label class="switch" title="启用手势"><input id="gesture-settings-enabled" type="checkbox" /><span class="slider"></span></label></div>
+          <div class="gesture-precision-control">
+            <div class="gesture-precision-label"><label for="gesture-precision">匹配精度</label><output id="gesture-precision-value" for="gesture-precision">5</output></div>
+            <input id="gesture-precision" type="range" min="1" max="10" step="1" aria-label="手势匹配精度，共 10 档" />
+            <div class="gesture-precision-levels" aria-hidden="true"><span>低</span><span>高</span></div>
+          </div>
+          <p class="gesture-settings-note">按住左键画出轨迹并保存；在资讯、书库问答或阅读页按住鼠标右键滑动即可执行返回或关闭。</p>
+          <canvas id="gesture-pad" class="gesture-pad" aria-label="绘制手势轨迹"></canvas>
+          <div class="gesture-actions"><button id="gesture-clear" class="btn-plain" type="button">清除</button><button id="gesture-save" class="btn-primary" type="button">保存轨迹</button></div>
+          <p id="gesture-status" class="gesture-status" aria-live="polite"></p>
+        </section>
+      </div>
+    </div>    <div id="newsnow-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="newsnow-settings-title">
       <div class="modal-card newsnow-settings-card">
         <div class="modal-head"><span id="newsnow-settings-title" data-i18n="newsSettings">资讯设置</span><button id="newsnow-settings-close" class="btn-plain" type="button" aria-label="关闭资讯设置" data-i18n-aria="closeNewsSettings">✕</button></div>
         <div class="fp-set-row"><span data-i18n="backgroundPrefetch">后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
         <p class="newsnow-settings-note" data-i18n="backgroundPrefetchNote">应用空闲后每 5 分钟更新已启用来源。图片仍在卡片进入视野时才加载。</p>
-        <section class="newsnow-gesture-setting" aria-labelledby="newsnow-gesture-label">
-          <div class="newsnow-gesture-heading"><span id="newsnow-gesture-label" data-i18n="gestureBack">手势返回</span><span class="newsnow-gesture-heading-tail"><button id="newsnow-gesture-editor-toggle" class="btn-plain newsnow-gesture-editor-toggle" type="button" aria-expanded="false" data-i18n="drawEditGesture">绘制 / 修改手势</button><label class="switch" title="启用手势返回" data-i18n-title="enableGestureBack"><input id="newsnow-gesture-enabled" type="checkbox" /><span class="slider"></span></label></span></div>
-          <div class="fp-set-row newsnow-gesture-precision-row"><label for="newsnow-gesture-precision" data-i18n="gestureMatchPrecision">匹配精度</label><select id="newsnow-gesture-precision" title="精度越高，只有更相似的手势才会触发" data-i18n-title="gesturePrecisionHint"><option value="low" data-i18n="precisionLow">低</option><option value="medium" data-i18n="precisionMedium">中</option><option value="high" data-i18n="precisionHigh">高</option></select></div>
-          <div id="newsnow-gesture-editor" class="newsnow-gesture-editor" hidden>
-            <p class="newsnow-settings-note" data-i18n="gestureEditorHint">按住左键画出轨迹并保存。使用时在资讯页或打开的资讯子页按住鼠标右键画出相近轨迹。</p>
-            <canvas id="newsnow-gesture-pad" class="newsnow-gesture-pad" aria-label="绘制手势返回轨迹" data-i18n-aria="drawGesturePath"></canvas>
-            <div class="newsnow-gesture-actions"><button id="newsnow-gesture-clear" class="btn-plain" type="button" data-i18n="clear">清除</button><button id="newsnow-gesture-save" class="btn-primary" type="button" data-i18n="savePath">保存轨迹</button></div>
-            <p id="newsnow-gesture-status" class="newsnow-gesture-status" aria-live="polite"></p>
-          </div>
-        </section>
       </div>
     </div>
     <div id="reader-recommendation-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="reader-recommendation-settings-title">
       <div class="modal-card reader-recommendation-settings-card">
         <div class="modal-head"><span id="reader-recommendation-settings-title" data-i18n="recommendationSettings">读后推荐设置</span><button id="reader-recommendation-settings-close" class="btn-plain" type="button" data-i18n-aria="close">✕</button></div>
-        <label class="reader-recommendation-threshold"><span data-i18n="recommendationThresholdBefore">不超过</span> <input id="reader-recommendation-min-words" type="number" min="0" max="100" step="0.5" inputmode="decimal" data-i18n-aria="recommendationThresholdAria" /> <span data-i18n="recommendationThresholdAfter">万字不推荐</span></label>
+        <label class="reader-recommendation-threshold"><span data-i18n="recommendationThresholdBefore">低于</span> <input id="reader-recommendation-min-words" type="number" min="0" max="100" step="0.5" inputmode="decimal" data-i18n-aria="recommendationThresholdAria" /> <span data-i18n="recommendationThresholdAfter">万字不推荐</span></label>
         <p class="reader-recommendation-settings-note" data-i18n="recommendationSettingsNote">阅读进度达到约 90% 时会在后台预取相似图书。设置为 0 表示不按字数过滤。</p>
       </div>
     </div>
@@ -533,6 +547,10 @@
       <div class="modal-card startup-enhancement-card">
         <div class="modal-head"><span data-i18n="startupEnhancementSettings">启动增强设置</span><button id="startup-enhancement-close" class="btn-plain" type="button" data-i18n-aria="close">✕</button></div>
         <p class="startup-enhancement-note" data-i18n="startupEnhancementNote">开启后，关闭窗口会隐藏软件并保留进程，以便下次快速打开；关闭此项时会立即彻底退出。</p>
+        <div id="startup-enhancement-autostart-row" class="fp-set-row">
+          <span data-i18n="launchAtLogin">开机自启</span>
+          <label class="switch"><input type="checkbox" id="startup-enhancement-autostart" /><span class="slider"></span></label>
+        </div>
         <div class="fp-set-row">
           <span data-i18n="continueProcessAfterClose">关闭后继续运行进程</span>
           <label class="switch"><input type="checkbox" id="startup-enhancement-process" /><span class="slider"></span></label>
@@ -639,6 +657,7 @@
               <div id="sem-gpu-meta" class="sem-meta" data-i18n="semGpuInitial">点击“重新检测”读取本机 GPU 状态。</div>
             </div>
             <div class="sem-actions">
+              <button id="sem-gpu-install" class="btn-plain" type="button" hidden data-i18n="semInstallGpuRuntime">安装 GPU 组件</button>
               <button id="sem-gpu-refresh" class="btn-plain" type="button" data-i18n="semRefreshGpu">重新检测</button>
             </div>
           </div>
@@ -942,6 +961,14 @@
                 <button type="button" data-answer-length="long" role="radio" aria-checked="false"><strong data-i18n="answerLong">长</strong><span data-i18n="answerLongHint">最广证据、深入解读与边界讨论</span></button>
               </div>
             </div>
+            <div class="library-ai-answer-setting-group">
+              <div class="library-ai-answer-setting-label"><strong>回答同步</strong><span>本机记录不限数量；云端最多保留 100 条，不上传书籍原文。</span></div>
+              <div class="library-ai-answer-length-options library-ai-history-sync-options" role="radiogroup" aria-label="书库问答回答同步">
+                <button type="button" data-library-history-sync="off" role="radio" aria-checked="true"><strong>不同步</strong><span>仅保存在这台设备</span></button>
+                <button type="button" data-library-history-sync="recent" role="radio" aria-checked="false"><strong>最近同步</strong><span>自动同步最近的 100 条回答</span></button>
+                <button type="button" data-library-history-sync="manual" role="radio" aria-checked="false"><strong>手动同步</strong><span>在问答记录中点“云端”选择保存</span></button>
+              </div>
+            </div>
             <div class="library-ai-answer-font-row">
               <div class="library-ai-answer-setting-label"><strong data-i18n="answerFontSize">字号</strong></div>
               <div class="library-ai-font-controls" aria-label="书库问答字号" data-i18n-aria="libraryAnswerFontSize"><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号" data-i18n-title="decreaseAnswerFont" data-i18n-aria="decreaseAnswerFont">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号" data-i18n-title="increaseAnswerFont" data-i18n-aria="increaseAnswerFont">A+</button></div>
@@ -1029,6 +1056,7 @@
     <script src="startup-perf.js"></script>
     <script src="app-i18n.js"></script>
     <script src="startup-enhancement-ui.js"></script>
+    <script src="window-resize.js"></script>
     <script src="titlebar.js"></script>
     <script src="animation-settings.js"></script>
     <script src="animation-settings-ui.js"></script>
@@ -1046,6 +1074,7 @@
     <script src="news-gesture.js"></script>
     <script src="experimental-features.js"></script>
     <script src="news-ui.js"></script>
+    <script src="gesture-ui.js"></script>
     <script src="api-settings-ui.js"></script>
     <script src="auto-import-ui.js"></script>
     <script src="reader-recommendation-settings.js"></script>

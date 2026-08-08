@@ -18,6 +18,10 @@ test("accepts a bounded allowlisted message from the current frame", () => {
   const { event, frame } = eventFor({ webSearch: "safe term" });
   assert.equal(guard.validateEvent(event, frame, { href: "http://tauri.localhost/reader.html" }), true);
   assert.equal(guard.validateData({ readerNavigated: 1 }), true);
+  assert.equal(guard.validateData({ readerJump: { kind: "link", chapter: 4, chFrac: 0.25 } }), true);
+  assert.equal(guard.validateData({ readerJump: { kind: "footnote", chapter: 4, chFrac: 0.25 } }), true);
+  assert.equal(guard.validateData({ readerJump: { kind: "external", chapter: 4, chFrac: 0.25 } }), false);
+  assert.equal(guard.validateData({ readerJump: { kind: "link", chapter: 4, chFrac: 1.5 } }), false);
 });
 
 test("bug traces accept only bounded metadata and never raw text or links", () => {
@@ -105,4 +109,11 @@ test("page-count caches are allowlisted with bounded numeric contents", () => {
   assert.equal(guard.validateData({
     pageCache: { sig: "x", pages: [1, -1], complete: false },
   }), false);
+});
+
+test("reader gesture messages contain only a bounded phase and coordinates", () => {
+  assert.equal(guard.validateData({ readerGesture: { phase: "start", x: 16, y: 32 } }), true);
+  assert.equal(guard.validateData({ readerGesture: { phase: "move", x: 1e9, y: 0 } }), false);
+  assert.equal(guard.validateData({ readerGesture: { phase: "run", x: 16, y: 32 } }), false);
+  assert.equal(guard.validateData({ readerGesture: { phase: "end", x: "16", y: 32 } }), false);
 });

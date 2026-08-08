@@ -6,6 +6,7 @@
   const OVERLAY = Object.freeze({
     NONE: "none",
     SETTINGS: "settings",
+    PREFERENCES: "preferences",
     SEARCH: "search",
     TOC: "toc",
     VOCAB: "vocab",
@@ -24,6 +25,7 @@
   const hooks = new Map();
   const overlayElements = new Map([
     [OVERLAY.SETTINGS, document.getElementById("settings")],
+    [OVERLAY.PREFERENCES, document.getElementById("reader-preferences-modal")],
     [OVERLAY.SEARCH, document.getElementById("rsearch")],
     [OVERLAY.TOC, document.getElementById("toc")],
     [OVERLAY.VOCAB, document.getElementById("vocab")],

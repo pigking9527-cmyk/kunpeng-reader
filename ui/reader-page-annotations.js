@@ -431,7 +431,10 @@ function init(){
   loadInit();
   setTimeout(function(){reveal();parent.postMessage({ready:1},'*');},8000); // 兜底
   // 记录是否发生了拖动（用于区分“单击翻页”与“拖动选字”）
-  document.addEventListener('mousedown',function(e){downX=e.clientX;downY=e.clientY;didDrag=false;if(e.detail>1)e.preventDefault();}); // e.detail>1：双击/三击 → 阻止浏览器选词/选段（连点翻页常被当双击而误选）
+  var readerGestureDrawing=false;
+  document.addEventListener('mousedown',function(e){if(e.button!==2)return;readerGestureDrawing=true;parent.postMessage({readerGesture:{phase:'start',x:e.clientX,y:e.clientY}},'*');e.preventDefault();},true);
+  document.addEventListener('mousemove',function(e){if(!readerGestureDrawing)return;parent.postMessage({readerGesture:{phase:'move',x:e.clientX,y:e.clientY}},'*');e.preventDefault();},true);
+  document.addEventListener('mouseup',function(e){if(!readerGestureDrawing)return;readerGestureDrawing=false;parent.postMessage({readerGesture:{phase:'end',x:e.clientX,y:e.clientY}},'*');e.preventDefault();},true);  document.addEventListener('mousedown',function(e){downX=e.clientX;downY=e.clientY;didDrag=false;if(e.detail>1)e.preventDefault();}); // e.detail>1：双击/三击 → 阻止浏览器选词/选段（连点翻页常被当双击而误选）
   document.addEventListener('mousemove',function(e){if(downX!==null&&(Math.abs(e.clientX-downX)>4||Math.abs(e.clientY-downY)>4))didDrag=true;});
   document.addEventListener('mouseup',function(){downX=null;downY=null;});
   var macFastTap=null;
@@ -439,6 +442,10 @@ function init(){
   function tapHasSelection(){
     var sel=window.getSelection?window.getSelection():null;
     return !!(sel&&!sel.isCollapsed&&sel.toString().trim());
+  }
+  function rememberReaderJump(kind){
+    var frac=pagesInCh>1?pageInCh/(pagesInCh-1):0;
+    parent.postMessage({readerJump:{kind:kind==='footnote'?'footnote':'link',chapter:Math.max(0,curCh||0),chFrac:Math.max(0,Math.min(1,frac))}},'*');
   }
   function handleReaderTap(e){
     parent.postMessage({uiClick:1},'*');
@@ -453,16 +460,25 @@ function init(){
     // 点到已高亮的文字 → 出高亮菜单，不翻页
     var hm=e.target.closest?e.target.closest('.hl-rect[data-hi],mark.hl'):null;
     if(hm){readerBugTrace('click','highlight',e);e.stopPropagation();showHlMenu(parseInt(hm.getAttribute('data-hi'),10),true,hm,e);return;}
-    if(e.target.closest&&e.target.closest('#fn-pop')){readerBugTrace('click','footnote',e);return;} // 注释弹窗内点击：不翻页
+    var inFootnote=!!(e.target.closest&&e.target.closest('#fn-pop'));
     var a=e.target.closest?e.target.closest('a'):null;
+    if(inFootnote&&!a){readerBugTrace('click','footnote',e);return;} // 注释弹窗正文：不翻页
     if(a){var href=a.getAttribute('href')||'';
-      readerBugTrace('click','link',e);
-      if(href.charAt(0)==='#'){e.preventDefault();
+      readerBugTrace('click',inFootnote?'footnote':'link',e);
+      if(href.charAt(0)==='#'){e.preventDefault();e.stopPropagation();
         var m=/^#c(\d+)(?:~(.+))?$/.exec(href);
         var frag=m?m[2]:href.slice(1), ciT=m?parseInt(m[1],10):curCh;
-        if(pageDebugSettingOn('reader_footnotes')&&isNoteLink(a)&&frag){showFootnote(a,ciT,frag);return;} // 注释角标 → 弹注释正文
-        if(m){var ci=ciT,fr=frag;if(ci===curCh){if(fr){var el=document.getElementById(fr);if(el)gotoPage(pageOf(el));}}else showChapter(ci,'start',fr);}
-        else{var el2=document.getElementById(href.slice(1));if(el2)gotoPage(pageOf(el2));}
+        var footnoteJump=inFootnote||isNoteLink(a);
+        if(!inFootnote&&pageDebugSettingOn('reader_footnotes')&&footnoteJump&&frag){showFootnote(a,ciT,frag);return;} // 正文注释角标 → 弹注释正文
+        if(m){
+          var ci=ciT,fr=frag;
+          if(ci===curCh){
+            if(fr){var el=document.getElementById(fr);if(el){rememberReaderJump(footnoteJump?'footnote':'link');hideFn();gotoPage(pageOf(el));}}
+          }else{rememberReaderJump(footnoteJump?'footnote':'link');hideFn();showChapter(ci,'start',fr);}
+        }else{
+          var el2=document.getElementById(href.slice(1));
+          if(el2){rememberReaderJump(footnoteJump?'footnote':'link');hideFn();gotoPage(pageOf(el2));}
+        }
       }
       return;
     }
@@ -501,7 +517,25 @@ function init(){
     if(e.key==='PageDown'||e.key==='ArrowRight'||e.key==='ArrowDown'||(e.key===' '&&!e.shiftKey)){readerBugTrace('key','page_next',null,{direction:'forward',key:e.key===' '?'space':e.key});e.preventDefault();userNav();markPageTurnInput('keyboard');nextPage();}
     else if(e.key==='PageUp'||e.key==='ArrowLeft'||e.key==='ArrowUp'||(e.key===' '&&e.shiftKey)){readerBugTrace('key','page_prev',null,{direction:'backward',key:e.key===' '?'space':e.key});e.preventDefault();userNav();markPageTurnInput('keyboard');prevPage();}
   });
-  var wheelLock=false,scrollChapterLock=false;
+  // 触控板一次滑动会持续派发带惯性的 wheel 事件。整页模式只在事件流
+  // 真正静止后才结束当前手势；没有固定冷却时长，因此下一次滑动不必点击。
+  var pageWheelGesture=null,pageWheelGestureTimer=null,pageWheelTraceEvents=0,scrollChapterLock=false;
+  function armPageWheelGestureQuietTimer(gesture){
+    if(pageWheelGestureTimer)clearTimeout(pageWheelGestureTimer);
+    pageWheelGestureTimer=setTimeout(function(){
+      if(pageWheelGesture===gesture)pageWheelGesture=null;
+      pageWheelGestureTimer=null;
+    },80);
+  }
+  // 仅记录本次阅读页前 48 个分页 wheel 事件，供定位 Windows 触控板的
+  // 惯性分组；不记录书籍正文、坐标或任何用户内容。
+  function tracePageWheel(phase,e,gesture){
+    if(pageWheelTraceEvents++>=48)return;
+    parent.postMessage({readerPerf:'page_wheel '+JSON.stringify({
+      n:pageWheelTraceEvents,phase:phase,dx:Math.round(e.deltaX||0),dy:Math.round(e.deltaY||0),
+      mode:e.deltaMode||0,cancelable:!!e.cancelable,gesture:!!gesture,ts:Math.round(e.timeStamp||0)
+    })},'*');
+  }
   document.addEventListener('wheel',function(e){
     if(isScrollMode()){
       userNav();
@@ -540,7 +574,22 @@ function init(){
       }
       return;
     }
-    e.preventDefault();if(wheelLock)return;if(Math.abs(e.deltaY)<4&&Math.abs(e.deltaX)<4)return;userNav();markPageTurnInput('wheel');if(e.deltaY>0||e.deltaX>0)nextPage();else prevPage();wheelLock=true;setTimeout(function(){wheelLock=false;},220);
+    e.preventDefault();
+    var delta=wheelDeltaPx(e),magnitude=Math.abs(delta);
+    if(magnitude<4)return;
+    var direction=delta>0?1:-1,gesture=pageWheelGesture;
+    if(gesture){
+      tracePageWheel('ignored',e,gesture);
+      // 所有连续 wheel 都属于同一触控板手势，惯性强弱与方向抖动都不另翻页。
+      armPageWheelGestureQuietTimer(gesture);
+      return;
+    }
+    tracePageWheel('turn',e,null);
+    gesture={direction:direction};
+    pageWheelGesture=gesture;
+    userNav();markPageTurnInput('wheel');
+    if(direction>0)nextPage();else prevPage();
+    armPageWheelGestureQuietTimer(gesture);
   },{passive:false});
   window.addEventListener('resize',function(){
     var sideTxn=window.__readerSideViewportTxn;

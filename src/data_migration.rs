@@ -1,12 +1,14 @@
 use crate::{book, vocab, AppState};
 use reader_core::stats::ReadBucket;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) const BOOK_STATE_KIND_V2: &str = "book_state_v2";
 pub(crate) const MODEL_BOOK_TAGS_KIND_V1: &str = "model_book_tags_v1";
+pub(crate) const USER_BOOK_TAGS_KIND_V1: &str = "user_book_tags_v1";
+pub(crate) const BOOK_COLLECTIONS_KIND_V1: &str = "book_collections_v1";
 const ENTITY_MODEL_VERSION_KEY: &str = "entity_model_version";
-const ENTITY_MODEL_VERSION: &str = "2";
+const ENTITY_MODEL_VERSION: &str = "3";
 
 /// Cross-device state for one book. Machine-local paths and cover-cache paths
 /// never leave the device; the full file hash is the stable identity.
@@ -86,6 +88,60 @@ fn model_book_tags_schema_version() -> u32 {
     1
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct UserBookTagsV1 {
+    #[serde(default = "organization_schema_version")]
+    schema_version: u32,
+    content_id: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct BookCollectionsV1 {
+    #[serde(default = "organization_schema_version")]
+    schema_version: u32,
+    content_id: String,
+    #[serde(default)]
+    collections: Vec<String>,
+}
+
+fn organization_schema_version() -> u32 {
+    1
+}
+
+impl UserBookTagsV1 {
+    fn from_book(book: &book::Book) -> Self {
+        Self {
+            schema_version: 1,
+            content_id: book.content_id.clone(),
+            tags: book.tags.clone(),
+        }
+    }
+
+    fn apply_to_book(&self, target: &mut book::Book) {
+        if self.content_id == target.content_id {
+            target.tags = book::normalize_organization_names(self.tags.clone());
+        }
+    }
+}
+
+impl BookCollectionsV1 {
+    fn from_book(book: &book::Book) -> Self {
+        Self {
+            schema_version: 1,
+            content_id: book.content_id.clone(),
+            collections: book.collections.clone(),
+        }
+    }
+
+    fn apply_to_book(&self, target: &mut book::Book) {
+        if self.content_id == target.content_id {
+            target.collections = book::normalize_organization_names(self.collections.clone());
+        }
+    }
+}
+
 impl ModelBookTagsV1 {
     fn from_book(book: &book::Book) -> Self {
         Self {
@@ -157,9 +213,21 @@ impl BookSyncStateV2 {
         target.words_read = self.words_read;
         target.finished_at = self.finished_at;
         target.rating = self.rating.clamp(0.0, 5.0);
-        target.tags = self.tags.clone();
-        target.collections = self.collections.clone();
         book::merge_daily_progress_history(&mut target.progress_history, &self.progress_history);
+    }
+
+    fn apply_legacy_organization_to_book(
+        &self,
+        target: &mut book::Book,
+        apply_tags: bool,
+        apply_collections: bool,
+    ) {
+        if apply_tags {
+            target.tags = book::normalize_organization_names(self.tags.clone());
+        }
+        if apply_collections {
+            target.collections = book::normalize_organization_names(self.collections.clone());
+        }
     }
 
     fn merge_into_book(&self, target: &mut book::Book) {
@@ -336,6 +404,7 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
         .map(|book| (book.id, book.content_id.clone()))
         .collect();
     let mut batch = Vec::new();
+    let mut organization_seeds = Vec::new();
     for book in &books {
         if !book.content_id.is_empty() {
             let state = BookSyncStateV2::from_book(book);
@@ -350,6 +419,21 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
                 MODEL_BOOK_TAGS_KIND_V1.to_string(),
                 book.content_id.clone(),
                 serde_json::to_value(ModelBookTagsV1::from_book(book))
+                    .map_err(|e| e.to_string())?,
+            ));
+        }
+        if !book.content_id.is_empty() && !book.tags.is_empty() {
+            organization_seeds.push((
+                USER_BOOK_TAGS_KIND_V1.to_string(),
+                book.content_id.clone(),
+                serde_json::to_value(UserBookTagsV1::from_book(book)).map_err(|e| e.to_string())?,
+            ));
+        }
+        if !book.content_id.is_empty() && !book.collections.is_empty() {
+            organization_seeds.push((
+                BOOK_COLLECTIONS_KIND_V1.to_string(),
+                book.content_id.clone(),
+                serde_json::to_value(BookCollectionsV1::from_book(book))
                     .map_err(|e| e.to_string())?,
             ));
         }
@@ -383,7 +467,122 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
     let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
     db.upsert_json_batch(&batch)?;
+    // Seed split organization entities only once from legacy state. A startup
+    // projection is not proof of an intentional edit and cannot clear them.
+    let organization_seeds = organization_seeds
+        .into_iter()
+        .filter_map(|item| match db.entity_json(&item.0, &item.1) {
+            Ok(None) => Some(Ok(item)),
+            Ok(Some(_)) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    db.upsert_json_batch(&organization_seeds)?;
     crate::private_sync::append_sync_entities(db)
+}
+
+/// Persist an explicit user organization edit. Unlike startup migration, this
+/// writes an empty array as an intentional clear.
+pub(crate) fn persist_book_organization_entities(
+    state: &AppState,
+    ids: &HashSet<u64>,
+    persist_tags: bool,
+    persist_collections: bool,
+) -> Result<(), String> {
+    if ids.is_empty() || (!persist_tags && !persist_collections) {
+        return Ok(());
+    }
+    let books = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?
+        .books
+        .iter()
+        .filter(|book| ids.contains(&book.id) && !book.content_id.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut batch = Vec::new();
+    for book in &books {
+        if persist_tags {
+            batch.push((
+                USER_BOOK_TAGS_KIND_V1.to_string(),
+                book.content_id.clone(),
+                serde_json::to_value(UserBookTagsV1::from_book(book))
+                    .map_err(|error| error.to_string())?,
+            ));
+        }
+        if persist_collections {
+            batch.push((
+                BOOK_COLLECTIONS_KIND_V1.to_string(),
+                book.content_id.clone(),
+                serde_json::to_value(BookCollectionsV1::from_book(book))
+                    .map_err(|error| error.to_string())?,
+            ));
+        }
+    }
+    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    db.upsert_json_batch(&batch)
+}
+
+/// Rehydrate organization fields before any startup projection can publish a
+/// library file previously saved by an old or incomplete executable.
+pub(crate) fn apply_local_organization_entities(state: &AppState) -> Result<(), String> {
+    let items = {
+        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        db.all_sync_entities()?
+    };
+    let user_tags = items
+        .iter()
+        .filter(|item| item.kind == USER_BOOK_TAGS_KIND_V1 && item.deleted_at == 0)
+        .filter_map(|item| serde_json::from_value::<UserBookTagsV1>(item.json.clone()).ok())
+        .collect::<Vec<_>>();
+    let collections = items
+        .iter()
+        .filter(|item| item.kind == BOOK_COLLECTIONS_KIND_V1 && item.deleted_at == 0)
+        .filter_map(|item| serde_json::from_value::<BookCollectionsV1>(item.json.clone()).ok())
+        .collect::<Vec<_>>();
+    if user_tags.is_empty() && collections.is_empty() {
+        return Ok(());
+    }
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    let before = library
+        .books
+        .iter()
+        .map(|book| (book.id, (book.tags.clone(), book.collections.clone())))
+        .collect::<HashMap<_, _>>();
+    for remote in &user_tags {
+        if let Some(local) = library
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.apply_to_book(local);
+        }
+    }
+    for remote in &collections {
+        if let Some(local) = library
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.apply_to_book(local);
+        }
+    }
+    let changed = library.books.iter().any(|book| {
+        before.get(&book.id).is_some_and(|(tags, collections)| {
+            *tags != book.tags || *collections != book.collections
+        })
+    });
+    if changed {
+        library.reconcile_booklists();
+        library.save()?;
+    }
+    Ok(())
 }
 
 /// Apply a state that was downloaded before the corresponding local file was
@@ -395,24 +594,42 @@ pub(crate) fn apply_pending_book_state(
     if target.content_id.is_empty() {
         return Ok(false);
     }
-    let (book_state, model_tags) = {
+    let (book_state, model_tags, user_tags, collections) = {
         let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
         (
             db.entity_json(BOOK_STATE_KIND_V2, &target.content_id)?,
             db.entity_json(MODEL_BOOK_TAGS_KIND_V1, &target.content_id)?,
+            db.entity_json(USER_BOOK_TAGS_KIND_V1, &target.content_id)?,
+            db.entity_json(BOOK_COLLECTIONS_KIND_V1, &target.content_id)?,
         )
     };
-    if book_state.is_none() && model_tags.is_none() {
+    if book_state.is_none() && model_tags.is_none() && user_tags.is_none() && collections.is_none()
+    {
         return Ok(false);
     }
     if let Some(value) = book_state {
         let synced: BookSyncStateV2 = serde_json::from_value(value).map_err(|e| e.to_string())?;
         synced.apply_to_book(target);
+        synced.apply_legacy_organization_to_book(
+            target,
+            user_tags.is_none(),
+            collections.is_none(),
+        );
     }
     if let Some(value) = model_tags {
         if let Ok(tags) = serde_json::from_value::<ModelBookTagsV1>(value) {
             tags.apply_to_book(target);
+        }
+    }
+    if let Some(value) = user_tags {
+        if let Ok(tags) = serde_json::from_value::<UserBookTagsV1>(value) {
+            tags.apply_to_book(target);
+        }
+    }
+    if let Some(value) = collections {
+        if let Ok(collections) = serde_json::from_value::<BookCollectionsV1>(value) {
+            collections.apply_to_book(target);
         }
     }
     Ok(true)
@@ -430,6 +647,8 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     };
     let mut remote_books: Vec<BookSyncStateV2> = Vec::new();
     let mut model_tags: Vec<ModelBookTagsV1> = Vec::new();
+    let mut user_tags: Vec<UserBookTagsV1> = Vec::new();
+    let mut collections: Vec<BookCollectionsV1> = Vec::new();
     let mut vocab: Vec<vocab::VocabEntry> = Vec::new();
     let mut buckets: Vec<PortableReadBucketV2> = Vec::new();
     for item in &items {
@@ -445,6 +664,16 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             MODEL_BOOK_TAGS_KIND_V1 => {
                 if let Ok(tags) = serde_json::from_value::<ModelBookTagsV1>(item.json.clone()) {
                     model_tags.push(tags);
+                }
+            }
+            USER_BOOK_TAGS_KIND_V1 => {
+                if let Ok(tags) = serde_json::from_value::<UserBookTagsV1>(item.json.clone()) {
+                    user_tags.push(tags);
+                }
+            }
+            BOOK_COLLECTIONS_KIND_V1 => {
+                if let Ok(value) = serde_json::from_value::<BookCollectionsV1>(item.json.clone()) {
+                    collections.push(value);
                 }
             }
             "vocab" => {
@@ -493,6 +722,24 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
         }
     }
     for remote in &model_tags {
+        if let Some(local) = next_library
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.apply_to_book(local);
+        }
+    }
+    for remote in &user_tags {
+        if let Some(local) = next_library
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.apply_to_book(local);
+        }
+    }
+    for remote in &collections {
         if let Some(local) = next_library
             .books
             .iter_mut()
@@ -601,15 +848,46 @@ mod tests {
     }
 
     #[test]
-    fn v3_state_carries_tags_and_collections_between_devices() {
+    fn legacy_state_can_seed_organization_when_independent_entities_are_absent() {
         let mut source = sample_book("remote.epub");
         source.tags = vec!["史料".into(), "明史".into()];
         source.collections = vec!["待读".into()];
         let state = BookSyncStateV2::from_book(&source);
         let mut local = sample_book("local.epub");
         state.apply_to_book(&mut local);
+        state.apply_legacy_organization_to_book(&mut local, true, true);
         assert_eq!(local.tags, vec!["史料", "明史"]);
         assert_eq!(local.collections, vec!["待读"]);
+    }
+
+    #[test]
+    fn independent_organization_entities_override_legacy_and_support_clear() {
+        let mut legacy_source = sample_book("remote.epub");
+        legacy_source.tags = vec!["旧标签".into()];
+        legacy_source.collections = vec!["旧书单".into()];
+        let legacy = BookSyncStateV2::from_book(&legacy_source);
+        let mut local = sample_book("local.epub");
+        local.tags = vec!["保留标签".into()];
+        local.collections = vec!["保留书单".into()];
+
+        legacy.apply_to_book(&mut local);
+        assert_eq!(local.tags, vec!["保留标签"]);
+        assert_eq!(local.collections, vec!["保留书单"]);
+
+        UserBookTagsV1 {
+            schema_version: 1,
+            content_id: local.content_id.clone(),
+            tags: Vec::new(),
+        }
+        .apply_to_book(&mut local);
+        BookCollectionsV1 {
+            schema_version: 1,
+            content_id: local.content_id.clone(),
+            collections: vec!["权威书单".into()],
+        }
+        .apply_to_book(&mut local);
+        assert!(local.tags.is_empty());
+        assert_eq!(local.collections, vec!["权威书单"]);
     }
 
     #[test]

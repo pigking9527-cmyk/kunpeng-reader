@@ -4,7 +4,7 @@
 //! 精度的 Large。这样模型下载、索引格式与发布包保持单一路径，不依赖自定义
 //! ONNX 转换包或 GPU 运行时。
 
-use super::{accelerator, clear_sem_query_cache, clear_sem_status_cache, profile, retrieval};
+use super::{accelerator, clear_sem_query_cache, clear_sem_status_cache, gpu, profile, retrieval};
 use crate::semantic_core::cosine;
 use crate::semantic_tasks::{begin_semantic_task, finish_semantic_task};
 use crate::AppState;
@@ -269,10 +269,12 @@ pub(super) fn embedder(state: &AppState) -> Result<Arc<Mutex<SemanticEmbedder>>,
         SemanticModel::BgeM3 => EmbeddingModel::BGEM3,
         SemanticModel::MultilingualE5Small => EmbeddingModel::MultilingualE5Small,
     };
+    let execution_providers = gpu::cuda_execution_providers();
     let model = if selected == SemanticModel::BgeM3 {
         let mut options = Bgem3InitOptions::new(Bgem3Model::BGEM3Q)
             .with_max_length(M3_MAX_INPUT_TOKENS)
-            .with_show_download_progress(false);
+            .with_show_download_progress(false)
+            .with_execution_providers(execution_providers.clone());
         if let Some(dir) = model_dir() {
             let _ = std::fs::create_dir_all(&dir);
             options = options.with_cache_dir(dir);
@@ -282,7 +284,9 @@ pub(super) fn embedder(state: &AppState) -> Result<Arc<Mutex<SemanticEmbedder>>,
                 .map_err(|error| format!("加载 BGE-M3 模型失败：{error}"))?,
         )
     } else {
-        let mut options = InitOptions::new(model_kind).with_show_download_progress(false);
+        let mut options = InitOptions::new(model_kind)
+            .with_show_download_progress(false)
+            .with_execution_providers(execution_providers);
         if let Some(dir) = model_dir() {
             let _ = std::fs::create_dir_all(&dir);
             options = options.with_cache_dir(dir);
@@ -465,9 +469,15 @@ pub(super) fn probe() {
     let _ = std::fs::remove_file(probe_file());
     std::panic::set_hook(Box::new(|info| probe_write(&format!("PANIC: {info}"))));
     let run = std::panic::catch_unwind(|| {
-        probe_write("starting...");
-        let mut options =
-            InitOptions::new(EmbeddingModel::BGESmallZHV15).with_show_download_progress(false);
+        let execution_providers = gpu::strict_cuda_execution_providers();
+        probe_write(if execution_providers.is_empty() {
+            "starting with CPU..."
+        } else {
+            "starting with CUDA preference..."
+        });
+        let mut options = InitOptions::new(EmbeddingModel::BGESmallZHV15)
+            .with_show_download_progress(false)
+            .with_execution_providers(execution_providers);
         if let Some(dir) = model_dir_for(SemanticModel::BgeSmallZhV15) {
             let _ = std::fs::create_dir_all(&dir);
             options = options.with_cache_dir(dir);

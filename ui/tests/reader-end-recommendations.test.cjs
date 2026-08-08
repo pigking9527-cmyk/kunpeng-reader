@@ -72,8 +72,10 @@ test("the persistent recommendation setting has a gear, word threshold, and shor
   assert.match(mainHtml, /id="end-recommendations-gear"[\s\S]*?id="set-end-recommendations"/);
   assert.match(mainHtml, /id="reader-recommendation-settings-modal"/);
   assert.match(mainHtml, /id="reader-recommendation-min-words"[^>]*step="0\.5"/);
-  assert.match(mainHtml, /不超过[\s\S]*万字不推荐/);
+  assert.match(mainHtml, /低于[\s\S]*万字不推荐/);
   assert.match(appI18n, /"zh-CN": "读后推荐"/);
+  assert.match(appI18n, /en: \{ recommendationSettings: "Post-reading recommendations", recommendationThresholdBefore: "Do not recommend books below"/);
+  assert.match(appI18n, /"zh-TW": \{ recommendationSettings: "讀後推薦設定", recommendationThresholdBefore: "不推薦低於"/);
   assert.match(settings, /const STORAGE_KEY = "readerEndRecommendationsV1"/);
   assert.match(settings, /const MIN_WORDS_STORAGE_KEY = "readerRecommendationMinWordsV1"/);
   assert.match(settings, /const DEFAULT_MIN_RECOMMENDATION_WORDS = 10000/);

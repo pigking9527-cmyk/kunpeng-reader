@@ -2,6 +2,7 @@ mod accelerator;
 mod batch;
 mod build;
 pub(crate) mod gpu;
+pub(crate) mod gpu_runtime;
 mod index_runtime;
 mod m3;
 pub(crate) mod model;

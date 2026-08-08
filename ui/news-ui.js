@@ -83,15 +83,6 @@
     const back = root.getElementById("newsnow-back");
     const refresh = root.getElementById("newsnow-refresh");
     const gestureSettings = root.getElementById("newsnow-gesture-settings");
-    const gestureEnabledInput = root.getElementById("newsnow-gesture-enabled");
-    const gesturePrecisionSelect = root.getElementById("newsnow-gesture-precision");
-    const gestureEditorToggle = root.getElementById("newsnow-gesture-editor-toggle");
-    const gestureEditor = root.getElementById("newsnow-gesture-editor");
-    const gesturePad = root.getElementById("newsnow-gesture-pad");
-    const gestureSave = root.getElementById("newsnow-gesture-save");
-    const gestureClear = root.getElementById("newsnow-gesture-clear");
-    const gestureStatus = root.getElementById("newsnow-gesture-status");
-    const gestureTrail = root.getElementById("newsnow-gesture-trail");
     const sourceToggle = root.getElementById("newsnow-source-toggle");
     const sourcePicker = root.getElementById("newsnow-source-picker");
     const sourceSearch = root.getElementById("newsnow-source-search");
@@ -124,7 +115,7 @@
     const updated = root.getElementById("newsnow-updated");
     const shell = root.querySelector(".content-shell");
     const gestureApi = global.ReaderNewsGesture;
-    if (!button || !page || !back || !refresh || !gestureSettings || !gestureEnabledInput || !gesturePrecisionSelect || !gestureEditorToggle || !gestureEditor || !gesturePad || !gestureSave || !gestureClear || !gestureStatus || !gestureTrail || !gestureApi || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceStatus || !sourceClose || !tiebaBars || !tiebaAddToggle || !tiebaBarForm || !tiebaBarInput || !tiebaBarCancel || !tiebaBarList || !tiebaBarCount || !sourceSelection || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !feedView || !reader || !readerStatus || !readerBack || !readerMeta || !readerTitle || !readerOriginal || !readerContent || !categories || !updated || !shell) return null;
+    if (!button || !page || !back || !refresh || !gestureSettings || !gestureApi || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceStatus || !sourceClose || !tiebaBars || !tiebaAddToggle || !tiebaBarForm || !tiebaBarInput || !tiebaBarCancel || !tiebaBarList || !tiebaBarCount || !sourceSelection || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !feedView || !reader || !readerStatus || !readerBack || !readerMeta || !readerTitle || !readerOriginal || !readerContent || !categories || !updated || !shell) return null;
 
     let catalog = [], sourceIds = [], pendingSourceIds = [], tiebaBarNames = loadStoredTiebaBars(), tiebaEnabledBarNames = loadStoredEnabledTiebaBars(tiebaBarNames), pendingTiebaBarNames = [], pendingTiebaEnabledBarNames = [], allItems = [];
     let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
@@ -132,8 +123,6 @@
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
     let articleScrollTop = 0, sourcePageScrollTop = 0, articleOpen = false, currentArticleUrl = "", masonryResizeTimer = 0, renderedMasonryColumnCount = 0, feedRenderPending = false;
     let backgroundRefreshRunning = false, prefetchDelayTimer = 0, prefetchIntervalTimer = 0, lastUserActivityAt = Date.now(), sourceRefreshTimer = 0;
-    let savedGesture = gestureApi.load(global.localStorage), gestureEnabled = gestureApi.loadEnabled(global.localStorage), gesturePrecision = gestureApi.loadPrecision(global.localStorage), trainingPoints = [], trainingPointerId = null;
-    let activeGesture = null, suppressContextMenuUntil = 0;
     let visibleImageRunning = 0;
     const visibleImageQueue = [];
 
@@ -281,78 +270,6 @@
       if (restoreScroll) global.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; });
       if (focus) feed.querySelector(".newsnow-card")?.focus({ preventScroll: true });
     }
-    function activeGestureSurface() { return gestureEnabled ? (!reader.hidden ? reader : (!page.hidden ? page : null)) : null; }
-    function paintGestureTrail(points) {
-      gestureTrail.hidden = false;
-      gestureApi.draw(gestureTrail, points, { color: "#3478d4", lineWidth: 5 });
-    }
-    function clearGestureTrail() {
-      gestureTrail.hidden = true;
-      gestureApi.draw(gestureTrail, []);
-      gestureTrail.classList.remove("matched", "rejected");
-    }
-    function beginBackGesture(event) {
-      if (event.button !== 2 || event.target?.closest?.(".modal")) return;
-      const surface = activeGestureSurface();
-      if (!surface || !surface.contains(event.target)) return;
-      event.preventDefault();
-      activeGesture = { points: [{ x: event.clientX, y: event.clientY }] };
-      paintGestureTrail(activeGesture.points);
-    }
-    function moveBackGesture(event) {
-      if (!activeGesture) return;
-      event.preventDefault();
-      const previous = activeGesture.points[activeGesture.points.length - 1];
-      if (Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 4) return;
-      activeGesture.points.push({ x: event.clientX, y: event.clientY });
-      if (activeGesture.points.length > 160) activeGesture.points.splice(1, 1);
-      paintGestureTrail(activeGesture.points);
-    }
-    function finishBackGesture(event, { cancelled = false } = {}) {
-      if (!activeGesture) return;
-      const gesture = activeGesture; activeGesture = null;
-      const score = cancelled || !savedGesture.length ? 0 : gestureApi.similarity(savedGesture, gesture.points);
-      const matched = score >= gestureApi.matchThreshold(gesturePrecision);
-      if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
-      // 松开右键便结束绘制，不保留灰色或绿色结果轨迹。
-      clearGestureTrail();
-      if (!matched) return;
-      if (!reader.hidden) closeArticle({ focus: false });
-      else if (!sourcePicker.hidden) closeSourcePicker({ focus: false });
-      else close({ focus: false });
-    }
-    function gesturePadPoint(event) {
-      const rect = gesturePad.getBoundingClientRect();
-      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
-    }
-    function renderSavedGesture() {
-      gestureEnabledInput.checked = gestureEnabled;
-      gesturePrecisionSelect.value = gesturePrecision;
-      if (!trainingPoints.length) gestureApi.draw(gesturePad, savedGesture, { normalized: true, color: savedGesture.length ? "#3478d4" : "#a4afbd", lineWidth: 5 });
-    }
-    function beginGestureTraining(event) {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      trainingPointerId = event.pointerId;
-      trainingPoints = [gesturePadPoint(event)];
-      try { gesturePad.setPointerCapture(event.pointerId); } catch (_) { /* best effort */ }
-      gestureStatus.textContent = "正在记录轨迹…";
-      gestureApi.draw(gesturePad, trainingPoints, { color: "#3478d4", lineWidth: 5 });
-    }
-    function moveGestureTraining(event) {
-      if (trainingPointerId !== event.pointerId) return;
-      event.preventDefault();
-      const point = gesturePadPoint(event), previous = trainingPoints[trainingPoints.length - 1];
-      if (Math.hypot(point.x - previous.x, point.y - previous.y) < 3) return;
-      trainingPoints.push(point);
-      gestureApi.draw(gesturePad, trainingPoints, { color: "#3478d4", lineWidth: 5 });
-    }
-    function finishGestureTraining(event) {
-      if (trainingPointerId !== event.pointerId) return;
-      trainingPointerId = null;
-      try { gesturePad.releasePointerCapture(event.pointerId); } catch (_) { /* best effort */ }
-      gestureStatus.textContent = gestureApi.pathLength(trainingPoints) >= gestureApi.MIN_PATH_LENGTH ? "轨迹已画好，点击“保存轨迹”生效。" : "轨迹太短，请重新画。";
-    }
     async function openArticle(item) {
       const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
       articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; currentArticleUrl = url; readerMeta.textContent = sourceName(item); readerTitle.textContent = text(item.title || item.name || "资讯正文"); readerContent.replaceChildren(); readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true);
@@ -362,8 +279,8 @@
           title: text(item.title || item.name),
           summary: text(item.summary || item.description || item.content || item.excerpt),
           publishedAt: text(item.publishedAt || item.published_at || item.pubDate || item.date),
-          gestureEnabled,
-          gesturePoints: savedGesture.map((point) => [point.x, point.y]),
+          gestureEnabled: gestureApi.loadEnabled(global.localStorage),
+          gesturePoints: gestureApi.load(global.localStorage).map((point) => [point.x, point.y]),
         } });
         if (article?.local) renderLocalArticle(article);
         else readerStatus.textContent = "";
@@ -564,32 +481,7 @@
       await load(false);
     }
     function close({ focus = true } = {}) { closeSourcePicker({ restoreScroll: false }); closeArticle({ restoreScroll: false }); page.hidden = true; shell.hidden = false; global.document.body.classList.remove("newsnow-active"); button.setAttribute("aria-pressed", "false"); if (focus && !button.hidden) button.focus({ preventScroll: true }); }
-    gestureSettings.addEventListener("click", () => {
-      trainingPoints = []; gestureStatus.textContent = ""; gestureEditor.hidden = true; gestureEditorToggle.setAttribute("aria-expanded", "false");
-      global.ReaderExperimentalFeatures?.instance?.openSettings?.(); global.requestAnimationFrame(renderSavedGesture);
-    });
-    gestureEnabledInput.addEventListener("change", () => {
-      gestureEnabled = gestureApi.saveEnabled(gestureEnabledInput.checked, global.localStorage);
-      if (!gestureEnabled) { activeGesture = null; clearGestureTrail(); }
-      gestureStatus.textContent = gestureEnabled && !savedGesture.length ? i18n("gestureNeedPath", "Draw and save a gesture-back path first.") : "";
-    });
-    gesturePrecisionSelect.addEventListener("change", () => {
-      gesturePrecision = gestureApi.savePrecision(gesturePrecisionSelect.value, global.localStorage);
-      gesturePrecisionSelect.value = gesturePrecision;
-      const precisionKey = gesturePrecision === "low" ? "precisionLow" : gesturePrecision === "high" ? "precisionHigh" : "precisionMedium";
-      gestureStatus.textContent = format("gesturePrecisionSaved", "Gesture-back precision is set to {precision}.", { precision: i18n(precisionKey, gesturePrecision) });
-    });
-    gestureEditorToggle.addEventListener("click", () => {
-      const open = gestureEditor.hidden;
-      gestureEditor.hidden = !open; gestureEditorToggle.setAttribute("aria-expanded", String(open));
-      if (open) global.requestAnimationFrame(renderSavedGesture);
-    });
-    gesturePad.addEventListener("pointerdown", beginGestureTraining);
-    gesturePad.addEventListener("pointermove", moveGestureTraining);
-    gesturePad.addEventListener("pointerup", finishGestureTraining);
-    gesturePad.addEventListener("pointercancel", finishGestureTraining);
-    gestureSave.addEventListener("click", () => { const saved = gestureApi.save(trainingPoints, global.localStorage); if (!saved.length) { gestureStatus.textContent = i18n("gesturePathTooShort", "The path is too short to save."); return; } savedGesture = saved; gestureEnabled = gestureApi.saveEnabled(true, global.localStorage); trainingPoints = []; gestureStatus.textContent = i18n("gestureSaved", "Gesture back is saved and enabled."); renderSavedGesture(); });
-    gestureClear.addEventListener("click", () => { gestureApi.clear(global.localStorage); gestureEnabled = gestureApi.saveEnabled(false, global.localStorage); savedGesture = []; trainingPoints = []; activeGesture = null; clearGestureTrail(); gestureStatus.textContent = i18n("gestureCleared", "Gesture back is cleared and disabled."); renderSavedGesture(); });
+    gestureSettings.addEventListener("click", () => global.ReaderExperimentalFeatures?.instance?.openSettings?.());
     button.addEventListener("click", () => { if (!page.hidden || !reader.hidden) close({ focus: false }); else void open(); }); back.addEventListener("click", () => close()); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
     readerBack.addEventListener("click", () => closeArticle({ focus: true }));
     readerOriginal.addEventListener("click", () => { if (currentArticleUrl) void Promise.resolve(invoke("open_url", { url: currentArticleUrl })).catch(() => {}); });
@@ -603,11 +495,6 @@
     tiebaAddToggle.addEventListener("click", () => setTiebaAddOpen(true, { focus: true }));
     tiebaBarCancel.addEventListener("click", () => setTiebaAddOpen(false, { focus: true }));
     tiebaBarForm.addEventListener("submit", (event) => { event.preventDefault(); const name = normalizeTiebaBars([tiebaBarInput.value])[0]; if (!name) { tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.includes(name)) { tiebaBarInput.value = ""; tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.length >= MAX_TIEBA_BARS) { setSourceStatus(format("newsTiebaLimit", "You can add up to {max} forums.", { max: MAX_TIEBA_BARS }), "warning"); return; } const previousBars = pendingTiebaBarNames.slice(), previousEnabled = pendingTiebaEnabledBarNames.slice(), previousSources = pendingSourceIds.slice(); pendingTiebaBarNames = [...pendingTiebaBarNames, name]; pendingTiebaEnabledBarNames = [...pendingTiebaEnabledBarNames, name]; if (!syncPendingTiebaSource() || !persistSourceChanges()) { pendingTiebaBarNames = previousBars; pendingTiebaEnabledBarNames = previousEnabled; pendingSourceIds = previousSources; setSourceStatus(format("newsSourceLimit", "The source limit is reached, so {name} cannot be enabled yet.", { name }), "warning"); } renderSourcePicker(); setTiebaAddOpen(false, { focus: true }); });
-    global.addEventListener("mousedown", beginBackGesture, true);
-    global.addEventListener("mousemove", moveBackGesture, { capture: true, passive: false });
-    global.addEventListener("mouseup", (event) => finishBackGesture(event), true);
-    global.addEventListener("blur", () => finishBackGesture(null, { cancelled: true }));
-    global.addEventListener("contextmenu", (event) => { const surface = activeGestureSurface(); if ((activeGesture || Date.now() < suppressContextMenuUntil) && surface?.contains(event.target)) event.preventDefault(); }, true);
     global.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
     ["pointerdown", "keydown", "wheel", "touchstart"].forEach((eventName) => global.addEventListener(eventName, () => { lastUserActivityAt = Date.now(); }, { passive: true }));
     global.addEventListener("resize", () => {
@@ -623,7 +510,7 @@
     global.addEventListener("app-language-changed", () => { renderSourceSelection(); renderCategories(); renderSourcePicker(); renderFeed(); });
     global.__TAURI__?.event?.listen?.("newsnow-return-to-feed", () => closeArticle({ focus: true }));
     global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); if (event.detail?.key === "newsnow" || event.detail?.key === "newsnowPrefetch") scheduleBackgroundPrefetch(); }); applyExperimentalAvailability(); applyDisplayOptions(); scheduleBackgroundPrefetch();
-    return { open, close, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: () => layout, order: () => order };
+    return { open, close, gestureSurface: () => (!reader.hidden ? reader : (!page.hidden ? page : null)), gestureBack: () => { if (!reader.hidden) closeArticle({ focus: false }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: false }); else if (!page.hidden) close({ focus: false }); }, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: () => layout, order: () => order };
   }
   global.ReaderNewsUI = { init, resultItems, safeHttpUrl, withTimeout, allowedSourceIds };
   if (global.document) global.ReaderNewsUI.instance = init();

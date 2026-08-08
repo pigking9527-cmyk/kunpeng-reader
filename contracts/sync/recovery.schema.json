@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pigking9527-cmyk/kunpeng-reader/contracts/sync/recovery.schema.json",
+  "title": "Kunpeng Reader sync recovery API objects",
+  "oneOf": [
+    { "$ref": "#/$defs/statusResponse" },
+    { "$ref": "#/$defs/restoreRequest" },
+    { "$ref": "#/$defs/restoreResponse" }
+  ],
+  "$defs": {
+    "statusResponse": {
+      "type": "object",
+      "required": ["ok", "schema_version", "server_time", "data_generation", "retention_days", "available", "enabled_at", "restorable_from", "latest_version_at", "version_count", "compressed_bytes", "uncompressed_bytes", "last_pruned_at"],
+      "properties": {
+        "ok": { "const": true },
+        "schema_version": { "const": 1 },
+        "server_time": { "type": "integer", "minimum": 0 },
+        "data_generation": { "type": "integer", "minimum": 1 },
+        "retention_days": { "const": 90 },
+        "available": { "type": "boolean" },
+        "enabled_at": { "type": "integer", "minimum": 0 },
+        "restorable_from": { "type": "integer", "minimum": 0 },
+        "latest_version_at": { "type": "integer", "minimum": 0 },
+        "version_count": { "type": "integer", "minimum": 0 },
+        "compressed_bytes": { "type": "integer", "minimum": 0 },
+        "uncompressed_bytes": { "type": "integer", "minimum": 0 },
+        "last_pruned_at": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "restoreRequest": {
+      "type": "object",
+      "required": ["password", "confirm", "target_at", "data_generation"],
+      "properties": {
+        "password": { "type": "string", "minLength": 1 },
+        "confirm": { "const": true },
+        "target_at": { "type": "integer", "minimum": 0 },
+        "data_generation": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "restoreResponse": {
+      "type": "object",
+      "required": ["ok", "target_at", "restored_at", "restored_entities", "tombstoned_entities", "data_generation", "tokens_revoked"],
+      "properties": {
+        "ok": { "const": true },
+        "target_at": { "type": "integer", "minimum": 0 },
+        "restored_at": { "type": "integer", "minimum": 0 },
+        "restored_entities": { "type": "integer", "minimum": 0 },
+        "tombstoned_entities": { "type": "integer", "minimum": 0 },
+        "data_generation": { "type": "integer", "minimum": 2 },
+        "tokens_revoked": { "const": true }
+      },
+      "additionalProperties": true
+    }
+  }
+}

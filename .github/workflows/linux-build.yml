@@ -98,6 +98,19 @@ jobs:
           # still run explicitly.
           cargo test -p epub --lib --locked
 
+      - name: Prepare bundled CUDA Provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --target x86_64-unknown-linux-gnu --locked
+          runtime_dir="packaging/linux/runtime"
+          build_dir="target/x86_64-unknown-linux-gnu/release"
+          mkdir -p "$runtime_dir"
+          cp "$build_dir/libonnxruntime_providers_cuda.so" "$runtime_dir/"
+          cp "$build_dir/libonnxruntime_providers_shared.so" "$runtime_dir/"
+          test -s "$runtime_dir/libonnxruntime_providers_cuda.so"
+          test -s "$runtime_dir/libonnxruntime_providers_shared.so"
+
       - name: Build AppImage and Debian package
         run: cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --verbose
 
@@ -152,6 +165,9 @@ jobs:
 
           file "$out_dir/$appimage_name" "$out_dir/$deb_name"
           dpkg-deb --info "$out_dir/$deb_name"
+          dpkg-deb --contents "$out_dir/$deb_name" | tee target/linux-deb-contents.txt
+          grep -Fq './usr/bin/libonnxruntime_providers_cuda.so' target/linux-deb-contents.txt
+          grep -Fq './usr/bin/libonnxruntime_providers_shared.so' target/linux-deb-contents.txt
           package_name="$(dpkg-deb --field "$out_dir/$deb_name" Package)"
           test "$package_name" = "kunpeng-reader"
           [[ "$package_name" =~ ^[a-z0-9][a-z0-9+.-]+$ ]]

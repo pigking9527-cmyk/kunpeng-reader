@@ -31,12 +31,12 @@
     }
   }
 
-  function close() {
+  function close({ focus = true } = {}) {
     page.hidden = true;
     shell.hidden = false;
     root.body.classList.remove("library-ai-active");
     button.setAttribute("aria-pressed", "false");
-    button.focus({ preventScroll: true });
+    if (focus) button.focus({ preventScroll: true });
   }
 
   function toggle() {

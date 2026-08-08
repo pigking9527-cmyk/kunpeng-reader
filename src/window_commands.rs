@@ -8,6 +8,42 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager};
+#[cfg(target_os = "windows")]
+mod windows_activation {
+    use std::ffi::c_void;
+
+    type Hwnd = *mut c_void;
+
+    #[link(name = "user32")]
+    extern "system" {
+        #[link_name = "BringWindowToTop"]
+        fn bring_window_to_top(window: Hwnd) -> i32;
+        #[link_name = "GetForegroundWindow"]
+        fn get_foreground_window() -> Hwnd;
+        #[link_name = "SetActiveWindow"]
+        fn set_active_window(window: Hwnd) -> Hwnd;
+        #[link_name = "SetFocus"]
+        fn set_focus(window: Hwnd) -> Hwnd;
+        #[link_name = "SetForegroundWindow"]
+        fn set_foreground_window(window: Hwnd) -> i32;
+        #[link_name = "ShowWindowAsync"]
+        fn show_window_async(window: Hwnd, command: i32) -> i32;
+    }
+
+    pub(super) fn activate(window: Hwnd) -> bool {
+        const SW_RESTORE: i32 = 9;
+        // SAFETY: Tauri supplied this HWND for a live WebviewWindow owned by
+        // this process. All calls are synchronous and do not retain it.
+        unsafe {
+            let _ = show_window_async(window, SW_RESTORE);
+            let _ = bring_window_to_top(window);
+            let _ = set_active_window(window);
+            let _ = set_focus(window);
+            let _ = set_foreground_window(window);
+            get_foreground_window() == window
+        }
+    }
+}
 
 static CLOSING_READER_WINDOWS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -62,6 +98,74 @@ fn emit_reader_window_trace(
     }
 }
 
+fn activate_shelf_after_reader_close(app: &tauri::AppHandle) {
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    if !main.is_visible().unwrap_or(false) {
+        emit_reader_window_trace(app, "focus_restore", "skipped_hidden", Duration::ZERO);
+        return;
+    }
+    let _ = main.unminimize();
+    let window_focus_requested = main.set_focus().is_ok();
+    #[cfg(target_os = "windows")]
+    let focus_confirmed = main
+        .hwnd()
+        .ok()
+        .map(|window| windows_activation::activate(window.0))
+        .unwrap_or(false);
+    #[cfg(not(target_os = "windows"))]
+    let focus_confirmed = false;
+    // WebviewWindow::set_focus only focuses the native top-level window. The
+    // embedded WebView has its own focus dispatcher (WebView2 MoveFocus on
+    // Windows); without this call the first shelf click is consumed merely to
+    // reactivate the document and never reaches the book-card handler.
+    let webview_focus_requested = main.as_ref().set_focus().is_ok();
+    let outcome = if focus_confirmed && webview_focus_requested {
+        "focused"
+    } else if window_focus_requested || webview_focus_requested {
+        "requested"
+    } else {
+        "failed"
+    };
+    emit_reader_window_trace(app, "focus_restore", outcome, Duration::ZERO);
+}
+fn schedule_shelf_activation_after_reader_close(app: &tauri::AppHandle, label: &str) {
+    let app = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while app.get_webview_window(&label).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if app.get_webview_window(&label).is_some() {
+            emit_reader_window_trace(&app, "focus_restore", "unregister_timeout", Duration::ZERO);
+            return;
+        }
+        if any_reader_window_open(&app) {
+            emit_reader_window_trace(&app, "focus_restore", "skipped_reader_open", Duration::ZERO);
+            return;
+        }
+        let focus_app = app.clone();
+        if app
+            .run_on_main_thread(move || {
+                if any_reader_window_open(&focus_app) {
+                    emit_reader_window_trace(
+                        &focus_app,
+                        "focus_restore",
+                        "skipped_reader_open",
+                        Duration::ZERO,
+                    );
+                } else {
+                    activate_shelf_after_reader_close(&focus_app);
+                }
+            })
+            .is_err()
+        {
+            emit_reader_window_trace(&app, "focus_restore", "dispatch_failed", Duration::ZERO);
+        }
+    });
+}
 pub(crate) fn persist_main_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
     let state = app.state::<AppState>();
     let previous_geom = state
@@ -110,8 +214,8 @@ pub(crate) fn main_window_close(window: tauri::WebviewWindow) -> Result<(), Stri
             "requested",
             Duration::ZERO,
         );
-        // 网页关闭按钮已经等待精确阅读位置写盘，直接沿用早期稳定版的正常
-        // 销毁流程。不要在销毁后再次抢焦点，避免打断用户紧接着的书卡点击。
+        // 网页关闭按钮已经等待精确阅读位置写盘，直接沿用正常销毁流程。
+        // Destroyed 后等待旧窗口从注册表移除，再恢复书架焦点。
         if let Err(error) = window.close() {
             set_reader_window_closing(window.label(), false);
             let _ = take_reader_close_elapsed(window.label());
@@ -137,6 +241,38 @@ pub(crate) fn main_window_close(window: tauri::WebviewWindow) -> Result<(), Stri
 #[tauri::command]
 pub(crate) fn main_window_start_dragging(window: tauri::WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(|e| e.to_string())
+}
+
+fn parse_resize_direction(direction: &str) -> Option<tauri_runtime::ResizeDirection> {
+    use tauri_runtime::ResizeDirection;
+
+    match direction {
+        "north" => Some(ResizeDirection::North),
+        "north-east" => Some(ResizeDirection::NorthEast),
+        "east" => Some(ResizeDirection::East),
+        "south-east" => Some(ResizeDirection::SouthEast),
+        "south" => Some(ResizeDirection::South),
+        "south-west" => Some(ResizeDirection::SouthWest),
+        "west" => Some(ResizeDirection::West),
+        "north-west" => Some(ResizeDirection::NorthWest),
+        _ => None,
+    }
+}
+
+/// 无边框窗口没有由 Linux 窗口管理器提供的可拖动边框。前端的八方向
+/// 命中区在按下鼠标时调用此命令，把后续拖动交还给系统窗口管理器处理。
+#[tauri::command]
+pub(crate) fn main_window_start_resize_dragging(
+    window: tauri::WebviewWindow,
+    direction: String,
+) -> Result<(), String> {
+    let direction = parse_resize_direction(&direction)
+        .ok_or_else(|| format!("invalid resize direction: {direction}"))?;
+    window
+        .as_ref()
+        .window()
+        .start_resize_dragging(direction)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn any_reader_window_open(app: &tauri::AppHandle) -> bool {
@@ -185,9 +321,23 @@ pub(crate) fn ensure_reader_window(
         log(&format!(
             "open_book waiting for closing window label={label}"
         ));
-        let deadline = Instant::now() + Duration::from_millis(2500);
-        while app.get_webview_window(&label).is_some() && Instant::now() < deadline {
+        // WebView2 偶发会在 CloseRequested 后迟迟不从 Tauri 注册表注销。用户
+        // 已明确关闭窗口，因此短暂等待后可以销毁这个旧句柄；否则第一次书架点击
+        // 会只等到超时，必须再点一次才会真正创建新窗口。
+        let graceful_deadline = Instant::now() + Duration::from_millis(700);
+        while app.get_webview_window(&label).is_some() && Instant::now() < graceful_deadline {
             std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(stale_window) = app.get_webview_window(&label) {
+            emit_reader_window_trace(app, "open_wait", "force_destroy", open_started.elapsed());
+            log(&format!(
+                "open_book force destroying stale closing window label={label}"
+            ));
+            let _ = stale_window.destroy();
+            let destroy_deadline = Instant::now() + Duration::from_millis(1800);
+            while app.get_webview_window(&label).is_some() && Instant::now() < destroy_deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
         if app.get_webview_window(&label).is_some() {
             emit_reader_window_trace(app, "open_wait", "timeout", open_started.elapsed());
@@ -308,6 +458,9 @@ pub(crate) fn ensure_reader_window(
                 report_save_error("书架", library.save());
                 report_save_error("统计", state.stats.lock().unwrap().save());
             }
+            // 此时阅读窗口仍持有 Windows 前台资格，先把输入焦点交还书架；
+            // 等到 Destroyed 后再请求往往已经太晚，API 会成功但实际焦点不变。
+            activate_shelf_after_reader_close(&event_app);
         } else if let tauri::WindowEvent::Destroyed = event {
             emit_reader_window_trace(
                 &event_app,
@@ -315,6 +468,7 @@ pub(crate) fn ensure_reader_window(
                 "closed",
                 take_reader_close_elapsed(&event_label),
             );
+            schedule_shelf_activation_after_reader_close(&event_app, &event_label);
             // 不在后台按标签轮询并清 closing：同名新窗口可能已经创建。
             // 下一次 ensure_reader_window 会在确认旧注册项消失后原子地清理。
         }
@@ -519,5 +673,25 @@ mod tests {
             (-400.0, -300.0, 200.0, 200.0),
             monitor
         ));
+    }
+
+    #[test]
+    fn resize_directions_accept_only_the_eight_window_edges() {
+        use tauri_runtime::ResizeDirection;
+
+        assert_eq!(
+            parse_resize_direction("north"),
+            Some(ResizeDirection::North)
+        );
+        assert_eq!(
+            parse_resize_direction("south-east"),
+            Some(ResizeDirection::SouthEast)
+        );
+        assert_eq!(
+            parse_resize_direction("north-west"),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(parse_resize_direction("center"), None);
+        assert_eq!(parse_resize_direction(""), None);
     }
 }
