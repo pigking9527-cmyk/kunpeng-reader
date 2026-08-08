@@ -41,12 +41,7 @@ function Assert-CleanWorktree {
 
 function Get-ChangelogNotes {
   param([string]$Ver)
-  $path = Get-ChildItem -LiteralPath $repoRoot -Filter "*.md" -File |
-    Where-Object {
-      $first = Get-Content -LiteralPath $_.FullName -First 1 -Encoding UTF8
-      $first -match "CHANGELOG"
-    } |
-    Select-Object -ExpandProperty FullName -First 1
+  $path = Join-Path $repoRoot "CHANGELOG.md"
   if (-not $path -or -not (Test-Path -LiteralPath $path)) { return "v$Ver" }
   $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
   $escaped = [regex]::Escape($Ver)

@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "latest": "1.13.1",
+  "latest": "1.14.0",
   "releases": {
+    "1.14.0": {
+      "android_version": "0.3.0",
+      "release_notes": "- Windows、macOS 与 Linux 同步升级：新增完整阅读偏好、工具栏显示控制、书内跳转回退和底部进度多级回退。\n- 新增启动增强、Windows 开机自启、智读三档宽度、脑图收起，以及智读历史最近 100 条/手动云端同步。\n- 自定义主题和背景图支持桌面端同步；Windows GPU 组件支持非阻塞检测和按需安装，Linux 支持八方向窗口拉伸。\n- 修复词典开关、阅读偏好滚动、进度条拖动、空 EPUB、阅读窗口首次重开和续读位置等问题。\n- 标签与收藏夹拆分为独立实体；服务端增加压缩恢复历史、分层快照、邮箱验证、资源配额和安全审计。\n- 发布 Windows x64、macOS Apple Silicon、Linux x86_64 安装资产及各平台 SHA-256 清单；Android 继续 v0.3.0。",
+      "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.14.0",
+      "published_at": "2026-08-08"
+    },
     "1.13.1": {
       "android_version": "0.3.0",
       "release_notes": "- Windows-only 稳定性更新：修复关闭阅读页后首次点击图书可能无响应，以及 EPUB 关闭重开、单双页恢复和跨章翻页时的阅读位置偏移。\n- 移除封面按需写入 URL 的策略，首屏封面优先加载；修复全书架正文检索开关与启动提示不同步，大型目录改为分批创建。\n- 问题记录新增软件启动、阅读窗口创建、图书信息、首屏正文和关闭销毁耗时统计；恢复 AI 历史来源预览和点击跳转。\n- 仅发布 Windows x64 NSIS 安装包和 SHA-256 清单；macOS/Linux 继续 v1.13.0，Android 继续 v0.3.0。",

@@ -36,6 +36,13 @@ test("book card clicks explicitly close main-window floaters", () => {
   assert.doesNotMatch(card, /openBookOrganizer/);
 });
 
+test("first shelf click retries a reader window that is still closing", () => {
+  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
+  assert.match(card, /let openingBook = false/);
+  assert.match(card, /message\.includes\("阅读窗口仍在关闭"\) && retry < 3/);
+  assert.match(card, /setTimeout\(\(\) => attemptOpen\(retry \+ 1\), 180\)/);
+  assert.match(card, /openingBook = false;[\s\S]*?alertAction\("打开失败：" \+ message\)/);
+});
 test("shelf covers cannot trigger native browser drag selection", () => {
   assert.match(source, /shelfEl\.addEventListener\("dragstart", \(event\) => event\.preventDefault\(\)\)/);
   assert.match(source, /shelfEl\.addEventListener\("selectstart", \(event\) => event\.preventDefault\(\)\)/);
@@ -124,8 +131,17 @@ test("reader close keeps its transition marked until the old window unregisters"
   assert.match(windows, /else if reader_window_is_closing\(&label\)[\s\S]*?already_unregistered/);
   assert.doesNotMatch(windows, /fn clear_reader_closing_after_unregister/);
   assert.match(windows, /open_wait[\s\S]*?while app\.get_webview_window\(&label\)\.is_some\(\)[\s\S]*?open_build/);
+  assert.match(windows, /force_destroy[\s\S]*?stale_window\.destroy\(\)/);
   const closeCommand = windows.slice(windows.indexOf("pub(crate) fn main_window_close"), windows.indexOf("pub(crate) fn main_window_start_dragging"));
   assert.match(closeCommand, /set_reader_window_closing\(window\.label\(\), true\)[\s\S]*?window\.close\(\)/);
+  assert.match(windows, /fn activate_shelf_after_reader_close[\s\S]*?is_visible[\s\S]*?unminimize[\s\S]*?set_focus/);
+  assert.match(windows, /main\.as_ref\(\)\.set_focus\(\)/);
+  assert.match(windows, /fn schedule_shelf_activation_after_reader_close[\s\S]*?get_webview_window\(&label\)[\s\S]*?run_on_main_thread/);
+  assert.match(windows, /WindowEvent::CloseRequested[\s\S]*?activate_shelf_after_reader_close\(&event_app\)[\s\S]*?WindowEvent::Destroyed/);
+  assert.match(windows, /WindowEvent::Destroyed[\s\S]*?schedule_shelf_activation_after_reader_close\(&event_app, &event_label\)/);
+  assert.match(windows, /mod windows_activation[\s\S]*?GetForegroundWindow[\s\S]*?SetForegroundWindow/);
+  assert.match(windows, /focus_confirmed[\s\S]*?"focused"[\s\S]*?focus_requested[\s\S]*?"requested"/);
+  assert.match(windows, /"focus_restore"/);
   assert.doesNotMatch(windows, /force_windows_foreground|focus_main_window|finish_reader_window_close|prevent_close|Duration::from_millis\(80\)|Duration::from_millis\(1200\)/);
   assert.match(windows, /reader-window-trace/);
   assert.match(windows, /READER_CLOSE_STARTED/);

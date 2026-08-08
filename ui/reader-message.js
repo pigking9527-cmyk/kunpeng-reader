@@ -7,12 +7,12 @@
 
   const ACTIONS = new Set([
     "layoutBusy", "progress", "ttsState", "ttsSynth", "dictPrefetch", "dictSpeak",
-    "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav", "readerNavigated",
+    "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav", "readerNavigated", "readerJump",
     "centerTap", "readerPerf", "bugTrace", "ready", "readerAnchorReady", "measured", "pageCache", "downloadImage", "webSearch", "crossSearch",
     "semanticSearch", "aiReader", "translateText", "dict", "vocabAdd", "addHighlight",
     "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations",
     "removeHighlight", "setHighlightNote", "setHighlightText", "setHighlightColor", "addBookmark", "tocResolved",
-    "getTranslationCredentialStatus", "saveTranslationCredential", "bookEnd",
+    "getTranslationCredentialStatus", "saveTranslationCredential", "bookEnd", "readerGesture",
   ]);
   const MAX_MESSAGE_CHARS = 12 * 1024 * 1024;
   const MAX_TEXT_CHARS = 20_000;
@@ -38,6 +38,14 @@
   }
 
   function validActionPayload(action, data) {
+    if (action === "readerJump") {
+      const jump = data.readerJump;
+      return isRecord(jump)
+        && (jump.kind === "link" || jump.kind === "footnote")
+        && Number.isInteger(jump.chapter) && jump.chapter >= 0 && jump.chapter <= 100000
+        && typeof jump.chFrac === "number" && Number.isFinite(jump.chFrac) && jump.chFrac >= 0 && jump.chFrac <= 1;
+    }
+    if (action === "readerGesture") { const gesture = data.readerGesture; return isRecord(gesture) && ["start", "move", "end", "cancel"].includes(gesture.phase) && Number.isFinite(gesture.x) && Number.isFinite(gesture.y) && Math.abs(gesture.x) <= 100000 && Math.abs(gesture.y) <= 100000; }
     if (action === "readerPerf") return textWithin(data[action], 1000);
     if (action === "bugTrace") {
       const trace = data.bugTrace;

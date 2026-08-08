@@ -21,6 +21,19 @@ class ReaderSyncApiTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertGreaterEqual(retry_after, 1)
 
+    def test_persistent_rate_limiter_is_shared_by_workers(self):
+        old_db_path = app.DB_PATH
+        with tempfile.TemporaryDirectory(prefix="reader-sync-rate-") as temp_dir:
+            app.DB_PATH = f"{temp_dir}/entities.db"
+            try:
+                left = app.RateLimiter(persistent=True)
+                right = app.RateLimiter(persistent=True)
+                self.assertEqual(left.allow("shared", "same-ip", 1, 60), (True, 0))
+                allowed, retry_after = right.allow("shared", "same-ip", 1, 60)
+                self.assertFalse(allowed)
+                self.assertGreaterEqual(retry_after, 1)
+            finally:
+                app.DB_PATH = old_db_path
     def test_token_issue_is_capped_per_user(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -87,10 +100,45 @@ class ReaderSyncApiTests(unittest.TestCase):
     def test_supported_entity_kinds_are_portable_v2_only(self):
         self.assertEqual(
             app.SUPPORTED_ENTITY_KINDS,
-            {"book_state_v2", "model_book_tags_v1", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1"},
+            {"book_state_v2", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1"},
         )
         self.assertNotIn("book", app.SUPPORTED_ENTITY_KINDS)
         self.assertNotIn("reading_bucket", app.SUPPORTED_ENTITY_KINDS)
+
+    def test_reader_palette_validation_limits_images_and_order(self):
+        palette = {
+            "version": 1, "id": "custom-one", "name": "同步主题",
+            "background": "#ffffff", "text": "#111111", "link": "#246ed4",
+            "selection": "#f7dc82", "footnote": "#eef7ef", "border": "#6f8f7d",
+            "theme": "light", "backgroundImage": "data:image/png;base64,aGVsbG8=",
+        }
+        self.assertTrue(app.reader_palette_payload_is_valid("reader_palette_v1", palette))
+        palette["backgroundImage"] = "data:text/plain;base64,aGVsbG8="
+        self.assertFalse(app.reader_palette_payload_is_valid("reader_palette_v1", palette))
+        self.assertTrue(app.reader_palette_payload_is_valid("reader_palette_order_v1", {"version": 1, "order": ["light", "custom-one"]}))
+        self.assertFalse(app.reader_palette_payload_is_valid("reader_palette_order_v1", {"version": 1, "order": ["custom-one", "custom-one"]}))
+    def test_app_settings_validation_accepts_known_bounds_and_unknown_fields(self):
+        settings = {
+            "version": 1,
+            "showReaderJumpBack": True,
+            "readerJumpBackDismissMode": "pages",
+            "readerJumpBackDismissSeconds": 30,
+            "readerJumpBackDismissPages": 3,
+            "readerJumpBackSizeLevel": 10,
+            "futureDesktopSetting": "preserve-me",
+        }
+        self.assertTrue(app.app_settings_payload_is_valid(settings))
+        for key, bad_value in (
+            ("readerJumpBackDismissMode", "never"),
+            ("readerJumpBackDismissSeconds", 0),
+            ("readerJumpBackDismissPages", 101),
+            ("readerJumpBackSizeLevel", 11),
+            ("showReaderJumpBack", 1),
+        ):
+            invalid = dict(settings)
+            invalid[key] = bad_value
+            self.assertFalse(app.app_settings_payload_is_valid(invalid), key)
+
 
     def test_secret_epoch_reset_invalidates_old_bundle_generation(self):
         conn = sqlite3.connect(":memory:")
@@ -108,6 +156,105 @@ class ReaderSyncApiTests(unittest.TestCase):
             ("epoch-user", "secret_bundle_v1", "default"),
         ).fetchone()
         self.assertGreater(tombstone["deleted_at"], 0)
+        conn.close()
+
+    def test_recovery_history_is_compressed_complete_json_and_keeps_one_anchor(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        app.migrate(conn)
+        with conn:
+            conn.execute(
+                "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
+                ("history-user", "history-user", "not-used", app.now_ms()),
+            )
+            payload = json.dumps(
+                {"notes": "重复内容" * 2000}, ensure_ascii=False, separators=(",", ":")
+            )
+            base = app.now_ms() - app.recovery.HISTORY_RETENTION_MS - 10_000
+            for offset in (0, 1_000):
+                app.recovery.record_entity(
+                    conn,
+                    "history-user",
+                    "vocab",
+                    "zh:历史",
+                    payload,
+                    base + offset,
+                    0,
+                    "device-a",
+                    offset + 1,
+                    base + offset,
+                )
+            recent = app.now_ms()
+            app.recovery.record_entity(
+                conn,
+                "history-user",
+                "vocab",
+                "zh:历史",
+                payload,
+                recent,
+                0,
+                "device-a",
+                3,
+                recent,
+            )
+            app.recovery.prune_history(conn, "history-user", recent)
+        rows = conn.execute(
+            "SELECT * FROM entity_history WHERE user_id=? ORDER BY recorded_at",
+            ("history-user",),
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertLess(rows[0]["payload_zlib"].__len__(), rows[0]["payload_bytes"])
+        self.assertEqual(app.recovery.decode_payload(rows[0]), payload)
+        self.assertEqual(
+            app.recovery.record_entity(
+                conn,
+                "history-user",
+                "secret_bundle_v1",
+                "default",
+                "{}",
+                recent,
+                0,
+                "device-a",
+                1,
+                recent,
+            ),
+            0,
+        )
+        conn.close()
+
+    def test_recovery_migration_seeds_existing_entities_once(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        app.migrate(conn)
+        with conn:
+            conn.execute(
+                "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
+                ("seed-user", "seed-user", "not-used", app.now_ms()),
+            )
+            conn.execute(
+                "INSERT INTO entities(user_id,kind,id,json,updated_at,deleted_at,device_id,"
+                "sync_version,server_updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("seed-user", "vocab", "zh:种子", '{"value":"种子"}', 10, 0, "old", 1, 10),
+            )
+            conn.execute("DELETE FROM schema_migrations WHERE version=11")
+            conn.execute("DROP TABLE entity_history")
+            conn.execute("DROP TABLE recovery_accounts")
+        app.migrate(conn)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM entity_history WHERE user_id=?",
+                ("seed-user",),
+            ).fetchone()[0],
+            1,
+        )
+        app.migrate(conn)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM entity_history WHERE user_id=?",
+                ("seed-user",),
+            ).fetchone()[0],
+            1,
+        )
         conn.close()
 
     def test_feedback_migration_and_text_payload(self):
@@ -272,9 +419,11 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.original_db_path = app.DB_PATH
         cls.original_update_manifest_path = app.UPDATE_MANIFEST_PATH
+        cls.original_asset_dir = app.ASSET_DIR
         cls.temp_dir = tempfile.TemporaryDirectory(prefix="reader-sync-http-")
         app.DB_PATH = f"{cls.temp_dir.name}/entities.db"
         app.UPDATE_MANIFEST_PATH = app.Path(cls.temp_dir.name) / "updates.json"
+        app.ASSET_DIR = app.Path(cls.temp_dir.name) / "assets"
         app.UPDATE_MANIFEST_PATH.write_text(
             json.dumps(
                 {
@@ -304,6 +453,7 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
                 "INSERT INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
                 (cls.TOKEN, cls.USER_ID, app.now_ms(), app.now_ms()),
             )
+        conn.execute("UPDATE users SET sync_verified_at=created_at WHERE id=?", (cls.USER_ID,))
         conn.close()
 
         class QuietHandler(app.Handler):
@@ -332,6 +482,7 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         cls.server_thread.join(timeout=3)
         app.DB_PATH = cls.original_db_path
         app.UPDATE_MANIFEST_PATH = cls.original_update_manifest_path
+        app.ASSET_DIR = cls.original_asset_dir
         cls.temp_dir.cleanup()
 
     def setUp(self):
@@ -348,11 +499,16 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
                 "INSERT INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
                 (self.TOKEN, self.USER_ID, app.now_ms(), app.now_ms()),
             )
+            conn.execute("DELETE FROM entity_history WHERE user_id=?", (self.USER_ID,))
+            conn.execute("DELETE FROM recovery_accounts WHERE user_id=?", (self.USER_ID,))
             conn.execute("DELETE FROM entities WHERE user_id=?", (self.USER_ID,))
+            app.remove_user_assets(conn, self.USER_ID)
             conn.execute("DELETE FROM secret_bundle_epochs WHERE user_id=?", (self.USER_ID,))
             conn.execute("DELETE FROM account_data_generations WHERE user_id=?", (self.USER_ID,))
             conn.execute("DELETE FROM account_codes WHERE user_id=?", (self.USER_ID,))
             conn.execute("DELETE FROM account_emails WHERE user_id=?", (self.USER_ID,))
+            conn.execute("UPDATE users SET sync_verified_at=created_at,disabled_at=0,disabled_reason='' WHERE id=?", (self.USER_ID,))
+            conn.execute("DELETE FROM account_usage WHERE user_id=?", (self.USER_ID,))
             conn.execute("UPDATE sync_clock SET value=0 WHERE id=1")
         conn.close()
 
@@ -386,6 +542,16 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             self.opener.open(request, timeout=3)
         return raised.exception.code, json.loads(raised.exception.read().decode("utf-8"))
 
+    def request_bytes(self, method, path, data=None, headers=None):
+        request = urllib.request.Request(
+            self.base_url + path, data=data, method=method,
+            headers={"Authorization": f"Bearer {self.TOKEN}"},
+        )
+        for name, value in (headers or {}).items():
+            request.add_header(name, value)
+        with self.opener.open(request, timeout=3) as response:
+            return response.status, dict(response.headers), response.read()
+
     def request_public_json(self, path):
         request = urllib.request.Request(self.base_url + path, method="GET")
         with self.opener.open(request, timeout=3) as response:
@@ -416,6 +582,55 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             "sync_version": version,
         }
 
+    def test_sync_requires_verified_email_for_new_account(self):
+        conn = app.connect()
+        with conn:
+            conn.execute("UPDATE users SET sync_verified_at=0 WHERE id=?", (self.USER_ID,))
+        conn.close()
+        status, payload = self.request_error_json("POST", "/sync/push", {
+            "schema_version": 2, "device_id": "test", "entities": []
+        })
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error"], "EMAIL_VERIFICATION_REQUIRED")
+
+    def test_reader_background_asset_is_resumable_hash_checked_and_range_downloadable(self):
+        raw = b"reader-background-asset" * 70000
+        digest = app.hashlib.sha256(raw).hexdigest()
+        init = self.request_json("POST", "/sync/assets/init", {
+            "assetId": digest, "sha256": digest, "mime": "image/png", "byteSize": len(raw), "data_generation": 1,
+        })
+        self.assertFalse(init["complete"])
+        midpoint = 1024 * 1024
+        first = raw[:midpoint]
+        status, _, body = self.request_bytes("PUT", f"/sync/assets/{digest}", first, {
+            "Content-Type": "image/png", "X-Data-Generation": "1", "Content-Range": f"bytes 0-{len(first)-1}/{len(raw)}",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["receivedBytes"], len(first))
+        rest = raw[midpoint:]
+        status, _, body = self.request_bytes("PUT", f"/sync/assets/{digest}", rest, {
+            "Content-Type": "image/png", "X-Data-Generation": "1", "Content-Range": f"bytes {midpoint}-{len(raw)-1}/{len(raw)}",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["complete"])
+        status, headers, downloaded = self.request_bytes("GET", f"/sync/assets/{digest}", headers={"Range": "bytes=7-23"})
+        self.assertEqual(status, 206)
+        self.assertEqual(headers["Content-Range"], f"bytes 7-23/{len(raw)}")
+        self.assertEqual(downloaded, raw[7:24])
+
+    def test_storage_and_daily_write_quota_include_recovery_history(self):
+        conn = app.connect()
+        with conn:
+            app.ensure_account_usage(conn, self.USER_ID)
+            conn.execute("UPDATE account_usage SET storage_limit_bytes=1,daily_written_bytes=0,daily_entity_writes=0 WHERE user_id=?", (self.USER_ID,))
+        conn.close()
+        response = self.push([self.entity("quota", value="payload" * 100)])
+        self.assertEqual(response["accepted_count"], 0)
+        self.assertEqual(response["dispositions"][0]["error"], "QUOTA_EXCEEDED")
+        conn = app.connect()
+        alert = conn.execute("SELECT event FROM security_audit WHERE user_id=? ORDER BY id DESC LIMIT 1", (self.USER_ID,)).fetchone()
+        conn.close()
+        self.assertEqual(alert["event"], "account_quota_exceeded")
     def test_push_pull_and_duplicate_delivery_are_idempotent(self):
         entity = self.entity("zh:幂等")
         first = self.push([entity])
@@ -470,11 +685,77 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(response["upload"], [])
         self.assertEqual(response["entities"], [])
 
+    def test_recovery_records_only_accepted_changes_and_restores_a_timepoint(self):
+        first = self.entity("zh:可恢复", value="第一版", updated_at=100, version=1)
+        second = self.entity("zh:可恢复", value="错误覆盖", updated_at=200, version=2)
+        later = self.entity("zh:稍后创建", value="稍后", updated_at=300, version=1)
+        self.push([first])
+        conn = app.connect()
+        target_at = conn.execute(
+            "SELECT recorded_at FROM entity_history WHERE user_id=? AND entity_id=?",
+            (self.USER_ID, first["id"]),
+        ).fetchone()[0]
+        conn.close()
+        self.push([second])
+        self.push([second])
+        self.push([later])
+
+        recovery_status = self.request_json("GET", "/sync/recovery/status")
+        self.assertTrue(recovery_status["available"])
+        self.assertEqual(recovery_status["retention_days"], 90)
+        self.assertEqual(recovery_status["version_count"], 3)
+        self.assertLess(
+            recovery_status["compressed_bytes"], recovery_status["uncompressed_bytes"] + 256
+        )
+
+        restored = self.request_json(
+            "POST",
+            "/sync/recovery/restore",
+            {
+                "password": self.PASSWORD,
+                "confirm": True,
+                "target_at": target_at,
+                "data_generation": 1,
+            },
+        )
+        self.assertTrue(restored["tokens_revoked"])
+        self.assertEqual(restored["data_generation"], 2)
+        self.assertEqual(restored["restored_entities"], 1)
+        self.assertEqual(restored["tombstoned_entities"], 1)
+
+        conn = app.connect()
+        recovered = conn.execute(
+            "SELECT json,deleted_at,device_id FROM entities WHERE user_id=? AND kind=? AND id=?",
+            (self.USER_ID, first["kind"], first["id"]),
+        ).fetchone()
+        created_later = conn.execute(
+            "SELECT deleted_at FROM entities WHERE user_id=? AND kind=? AND id=?",
+            (self.USER_ID, later["kind"], later["id"]),
+        ).fetchone()
+        self.assertEqual(json.loads(recovered["json"])["value"], "第一版")
+        self.assertEqual(recovered["deleted_at"], 0)
+        self.assertEqual(recovered["device_id"], "server-recovery")
+        self.assertGreater(created_later["deleted_at"], 0)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM tokens WHERE user_id=?", (self.USER_ID,)
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM entity_history WHERE user_id=? AND source='restore'",
+                (self.USER_ID,),
+            ).fetchone()[0],
+            2,
+        )
+        conn.close()
+
     def test_health_exposes_deployable_api_version(self):
         health = self.request_json("GET", "/health")
         self.assertTrue(health["ok"])
         self.assertEqual(health["schema_version"], 2)
-        self.assertEqual(health["api_version"], "0.8")
+        self.assertEqual(health["api_version"], "0.9")
 
     def test_sync_data_reset_revokes_tokens_and_rejects_stale_generation(self):
         self.push([self.entity("zh:将被清除")])
@@ -505,6 +786,12 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             conn.execute(
                 "SELECT COUNT(*) FROM secret_bundle_epochs WHERE user_id=?",
                 (self.USER_ID,),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM entity_history WHERE user_id=?", (self.USER_ID,)
             ).fetchone()[0],
             0,
         )
@@ -556,6 +843,8 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             "users",
             "tokens",
             "entities",
+            "entity_history",
+            "recovery_accounts",
             "account_emails",
             "account_codes",
             "secret_bundle_epochs",
@@ -776,6 +1065,19 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(rejected["accepted_count"], 0)
         self.assertEqual(rejected["dispositions"][0]["error"], "PAYLOAD_TOO_LARGE")
 
+    def test_ai_history_rejects_more_than_one_hundred_live_entries(self):
+        history = self.entity("library-v1")
+        history["kind"] = "ai_reader_history_v1"
+        history["json"] = {
+            "version": 1,
+            "scope": "library",
+            "entries": [{"id": f"history:{index}", "at": f"2026-08-{index:03}T00:00:00Z"} for index in range(app.MAX_AI_HISTORY_LIVE_ENTRIES + 1)],
+        }
+
+        rejected = self.push([history])
+
+        self.assertEqual(rejected["accepted_count"], 0)
+        self.assertEqual(rejected["dispositions"][0]["error"], "HISTORY_RETENTION_LIMIT")
     def test_legacy_client_gets_non_success_for_unidentifiable_reject(self):
         oversized = self.entity("zh:旧客户端过大")
         oversized["json"] = {"value": "x" * (app.MAX_ENTITY_JSON_BYTES + 1)}

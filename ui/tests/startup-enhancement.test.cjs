@@ -23,6 +23,7 @@ const problemTrace = read("ui", "problem-trace-ui.js");
 test("common settings expose startup boost with a gear and master switch", () => {
   assert.match(html, /data-i18n="startupEnhancement"[\s\S]*?id="startup-enhancement-gear"[\s\S]*?id="set-startup-enhancement"/);
   assert.match(html, /id="startup-enhancement-modal"[\s\S]*?data-i18n="continueProcessAfterClose"/);
+  assert.match(html, /id="startup-enhancement-autostart-row"[\s\S]*?data-i18n="launchAtLogin"[\s\S]*?id="startup-enhancement-autostart"/);
   assert.match(html, /id="startup-enhancement-high-cost"/);
   assert.doesNotMatch(html, /立即完全退出/);
   assert.doesNotMatch(html, /tray|托盘/i);
@@ -37,7 +38,7 @@ test("startup boost settings are localized in all ten catalogs", () => {
     const end = section.indexOf("\n    ", start + marker.length);
     const copy = section.slice(start, end < 0 ? undefined : end);
     assert.notEqual(start, -1, `missing startup boost copy for ${locale}`);
-    for (const key of ["startupEnhancement", "startupEnhancementSettings", "continueProcessAfterClose", "continueHighCostAfterClose", "startupEnhancementNote", "startupEnhancementHighCostNote"]) {
+    for (const key of ["startupEnhancement", "startupEnhancementSettings", "launchAtLogin", "continueProcessAfterClose", "continueHighCostAfterClose", "startupEnhancementNote", "startupEnhancementHighCostNote"]) {
       assert.match(copy, new RegExp(`${key}:`), `${locale} must define ${key}`);
     }
   }
@@ -51,6 +52,7 @@ test("master off means full exit while master on hides without a tray", () => {
   assert.match(enhancement, /set_skip_taskbar\(false\)[\s\S]*?\.show\(\)[\s\S]*?\.set_focus\(\)/);
   assert.doesNotMatch(enhancement, /TrayIconBuilder|tray::|plugin.*tray/i);
   assert.match(main, /manage\(startup_enhancement::StartupEnhancementState::load\(\)\)/);
+  assert.doesNotMatch(enhancement, /should_exit_after_update|disabled; exiting|app\.exit\(0\)/);
   assert.match(titlebar, /closeBtn\?\.addEventListener\("click"[\s\S]*?invoke\("main_window_close"\)/);
   assert.doesNotMatch(titlebar, /syncBackend|Promise\.resolve/);
   assert.match(windowCommands, /should_keep_running\(&app\)[\s\S]*?persist_main_window_state\(&app, &window\)[\s\S]*?background_main\(&app\)[\s\S]*?return Ok\(\(\)\)/);
@@ -81,25 +83,43 @@ test("a shortcut activation reaches a hidden instance even without a book path",
   assert.match(startup, /struct AssociatedBookRequest[\s\S]*?activate: bool/);
   assert.match(startup, /AssociatedBookRequest \{[\s\S]*?activate: true,[\s\S]*?paths/);
   assert.match(startup, /startup_enhancement::activate_main\(&app, request\.id\)/);
-  assert.match(startup, /FindWindowW[\s\S]*?ShowWindow\(hwnd, SW_RESTORE\)[\s\S]*?SetForegroundWindow\(hwnd\)/);
-  assert.doesNotMatch(startup, /IsIconic/);
-  assert.match(startup, /FindWindowW[\s\S]*?ShowWindow\(hwnd, SW_RESTORE\)[\s\S]*?SetForegroundWindow\(hwnd\)/);
-  assert.doesNotMatch(startup, /IsIconic/);
+  assert.match(startup, /fn instance_scope_key\(\)[\s\S]*?CARGO_PKG_VERSION/);
+  assert.match(startup, /KunpengReader_\{\}_SingleInstance_Mutex/);
+  assert.match(main, /set_title\(startup::VERSIONED_MAIN_WINDOW_TITLE\)/);
+  assert.match(startup, /associated-book-request-\{\}\.json/);
   assert.match(enhancement, /"startup-enhancement"[\s\S]*?"activated"[\s\S]*?hot activation/);
 });
 
 test("closing pauses high-cost work by default and can explicitly allow it", () => {
   assert.match(startupUi, /continueHighCost: false/);
-  assert.match(startupUi, /backgroundWorkAllowed: \(\) => !backgrounded \|\| config\.continueHighCost/);
+  assert.match(startupUi, /highCostResumeAtMs/);
+  assert.match(startupUi, /backgroundWorkAllowed:[\s\S]*?Date\.now\(\) >= highCostResumeAtMs/);
+  assert.match(startupUi, /highCostRetryDelay:[\s\S]*?highCostResumeAtMs - Date\.now\(\)/);
   assert.match(enhancement, /if !config\.continue_high_cost[\s\S]*?request_pause_high_cost\(\)/);
+  assert.match(enhancement, /HOT_ACTIVATION_HIGH_COST_GRACE_MS: u64 = 15_000/);
+  assert.match(enhancement, /high-cost work delayed 15s/);
   for (const kind of ["SemanticModel", "SemanticVectors", "Accelerator", "MultiProfile", "FullTextIndex", "PageCount", "CoverGeneration", "LibraryClassification"]) {
     assert.match(tasks, new RegExp(`Self::${kind}`));
   }
   assert.match(app, /runWhenNoReader[\s\S]*?ReaderStartupEnhancement\?\.backgroundWorkAllowed/);
+  assert.match(app, /highCostRetryDelay[\s\S]*?setTimeout\(\(\) => runWhenNoReader/);
   assert.match(app, /backgroundWorkAllowed\?\.\(\) \|\| !autoImport\.enabled/);
 });
 
 test("problem records summarize warm activation latency", () => {
   assert.match(problemTrace, /rust:startup-enhancement/);
   assert.match(problemTrace, /hot_activation: summarizeDurations\(hotActivations\)/);
+});
+
+test("launch at login persists a user-level Windows Run entry and keeps unsupported platforms hidden", () => {
+  assert.match(enhancement, /launch_at_login: bool/);
+  assert.match(enhancement, /launch_at_login_available: cfg!\(windows\)/);
+  assert.match(enhancement, /HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run/);
+  assert.match(enhancement, /windows_registry_command\(\)[\s\S]*?"add"/);
+  assert.match(enhancement, /windows_registry_command\(\)[\s\S]*?"delete"/);
+  assert.match(enhancement, /CommandExt[\s\S]*?creation_flags\(CREATE_NO_WINDOW\)/);
+  assert.match(enhancement, /std::env::current_exe\(\)/);
+  assert.match(startupUi, /launchAtLoginAvailable/);
+  assert.match(startupUi, /launchAtLoginRow\.hidden = !config\.launchAtLoginAvailable/);
+  assert.match(startupUi, /set_startup_enhancement_config[\s\S]*?\.then\(\(saved\)/);
 });

@@ -207,10 +207,30 @@
     })).catch(() => {});
   }
 
+  function restoreShelfDocumentFocus(payload, doc = root.document) {
+    if (payload?.phase !== "focus_restore" || !["focused", "requested"].includes(payload?.outcome)) return;
+    try { root.focus?.(); } catch (_) {}
+    let attempts = 0;
+    const verifyFocus = () => {
+      try { root.focus?.(); } catch (_) {}
+      try { doc?.querySelector?.(".content")?.focus?.({ preventScroll: true }); } catch (_) {}
+      attempts += 1;
+      if (!doc?.hasFocus?.() && attempts < 6) {
+        root.setTimeout?.(verifyFocus, 20);
+        return;
+      }
+      pushShellEvent("main_focus", {
+        source: "main_window",
+        outcome: doc?.hasFocus?.() ? "focused" : "not_focused",
+      });
+    };
+    root.requestAnimationFrame?.(verifyFocus);
+  }
   function wireReaderWindowLifecycle(eventApi = root.__TAURI__?.event) {
     if (!eventApi?.listen) return;
     Promise.resolve(eventApi.listen("reader-window-trace", (event) => {
       const payload = event?.payload || {};
+      restoreShelfDocumentFocus(payload);
       pushShellEvent("reader_window", {
         source: "window_backend",
         phase: safeLabel(payload.phase),

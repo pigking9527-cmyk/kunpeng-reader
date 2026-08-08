@@ -310,7 +310,7 @@ test("library answer provider accepts compatible response envelopes and retries 
 
 test("library answers save locally and can sync a de-identified history", () => {
   assert.match(html, /id="library-ai-history"[^>]*>问答记录/);
-  assert.match(html, /同步智读历史[\s\S]*包括单书与书库问答/);
+  assert.match(html, /同步单书智读历史[\s\S]*书库问答请在其设置中选择同步方式/);
   assert.match(controller, /private_sync_library_history_list/);
   assert.match(controller, /private_sync_library_history_merge/);
   assert.match(controller, /private_sync_library_history_delete/);
@@ -356,6 +356,18 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.doesNotMatch(styles, /\.library-ai-history-question-detail\s*\{/);
 });
 
+test("library answer history exposes its own optional cloud sync modes", () => {
+  assert.match(html, /data-library-history-sync="off"/);
+  assert.match(html, /data-library-history-sync="recent"/);
+  assert.match(html, /data-library-history-sync="manual"/);
+  assert.match(controller, /private_sync_set_library_history_mode/);
+  assert.match(controller, /private_sync_set_library_history_cloud_saved/);
+  assert.match(controller, /cloud\.textContent = "云端"/);
+  assert.match(controller, /historySyncMode === "manual"/);
+  assert.match(styles, /\.library-ai-history-cloud\s*\{/);
+  assert.match(styles, /\.library-ai-history-sync-status\.is-synced/);
+  assert.match(styles, /\.library-ai-history-sync-status\.is-local/);
+});
 test("library assistant no longer creates a separate WebView", () => {
   assert.doesNotMatch(backend, /open_library_ai_window/);
   assert.doesNotMatch(backend, /library-ai\.html/);

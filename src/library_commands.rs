@@ -1,10 +1,10 @@
 use crate::{
-    book, epub_runtime, html_sanitize, log, report_save_error, search, search_index,
-    window_commands, AppState, RES_BASE,
+    book, data_migration, epub_runtime, html_sanitize, log, report_save_error, search,
+    search_index, window_commands, AppState, RES_BASE,
 };
 use book::Library;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tauri::{Emitter, Manager};
 
@@ -286,17 +286,29 @@ pub(crate) fn set_book_organization(
     collections: Vec<String>,
 ) -> Result<Vec<BookDto>, String> {
     let id = id.parse::<u64>().map_err(|_| "无效的图书 ID".to_string())?;
-    let mut lib = state
-        .library
-        .lock()
-        .map_err(|_| "书架锁定失败".to_string())?;
-    if lib.get(id).is_none() {
-        return Err("找不到这本书".to_string());
+    let (changed, result) = {
+        let mut lib = state
+            .library
+            .lock()
+            .map_err(|_| "书架锁定失败".to_string())?;
+        if lib.get(id).is_none() {
+            return Err("找不到这本书".to_string());
+        }
+        let changed = lib.set_organization(id, tags, collections);
+        if changed {
+            lib.save()?;
+        }
+        (changed, snapshot(&lib))
+    };
+    if changed {
+        data_migration::persist_book_organization_entities(
+            state.inner(),
+            &HashSet::from([id]),
+            true,
+            true,
+        )?;
     }
-    if lib.set_organization(id, tags, collections) {
-        lib.save()?;
-    }
-    Ok(snapshot(&lib))
+    Ok(result)
 }
 
 /// 批量追加标签或收藏夹。与 set_book_organization 不同，它不会覆盖每本书原有的分类。
@@ -321,14 +333,26 @@ pub(crate) fn add_books_organization(
     if ids.is_empty() {
         return Err("请先选择图书".to_string());
     }
-    let mut lib = state
-        .library
-        .lock()
-        .map_err(|_| "书架锁定失败".to_string())?;
-    if lib.add_organization_to_books(&ids, &field, names) {
-        lib.save()?;
+    let (changed, result) = {
+        let mut lib = state
+            .library
+            .lock()
+            .map_err(|_| "书架锁定失败".to_string())?;
+        let changed = lib.add_organization_to_books(&ids, &field, names);
+        if changed {
+            lib.save()?;
+        }
+        (changed, snapshot(&lib))
+    };
+    if changed {
+        data_migration::persist_book_organization_entities(
+            state.inner(),
+            &ids,
+            field == "tag",
+            field == "collection",
+        )?;
     }
-    Ok(snapshot(&lib))
+    Ok(result)
 }
 
 /// 重命名全书架范围内的一个标签或收藏夹。
@@ -342,14 +366,38 @@ pub(crate) fn rename_book_organization(
     if !matches!(kind.as_str(), "tag" | "collection") {
         return Err("无效的分类类型".to_string());
     }
-    let mut lib = state
-        .library
-        .lock()
-        .map_err(|_| "书架锁定失败".to_string())?;
-    if lib.rename_organization(&kind, &name, new_name) {
-        lib.save()?;
-    }
-    Ok(snapshot(&lib))
+    let (changed_ids, result) = {
+        let mut lib = state
+            .library
+            .lock()
+            .map_err(|_| "书架锁定失败".to_string())?;
+        let before = lib
+            .books
+            .iter()
+            .map(|book| (book.id, (book.tags.clone(), book.collections.clone())))
+            .collect::<HashMap<_, _>>();
+        if lib.rename_organization(&kind, &name, new_name) {
+            lib.save()?;
+        }
+        let changed_ids = lib
+            .books
+            .iter()
+            .filter(|book| {
+                before.get(&book.id).is_some_and(|(tags, collections)| {
+                    *tags != book.tags || *collections != book.collections
+                })
+            })
+            .map(|book| book.id)
+            .collect::<HashSet<_>>();
+        (changed_ids, snapshot(&lib))
+    };
+    data_migration::persist_book_organization_entities(
+        state.inner(),
+        &changed_ids,
+        kind == "tag",
+        kind == "collection",
+    )?;
+    Ok(result)
 }
 
 /// 删除全书架范围内的一个标签或收藏夹；仅移除关联，不会删除图书。
@@ -362,14 +410,38 @@ pub(crate) fn delete_book_organization(
     if !matches!(kind.as_str(), "tag" | "collection") {
         return Err("无效的分类类型".to_string());
     }
-    let mut lib = state
-        .library
-        .lock()
-        .map_err(|_| "书架锁定失败".to_string())?;
-    if lib.delete_organization(&kind, &name) {
-        lib.save()?;
-    }
-    Ok(snapshot(&lib))
+    let (changed_ids, result) = {
+        let mut lib = state
+            .library
+            .lock()
+            .map_err(|_| "书架锁定失败".to_string())?;
+        let before = lib
+            .books
+            .iter()
+            .map(|book| (book.id, (book.tags.clone(), book.collections.clone())))
+            .collect::<HashMap<_, _>>();
+        if lib.delete_organization(&kind, &name) {
+            lib.save()?;
+        }
+        let changed_ids = lib
+            .books
+            .iter()
+            .filter(|book| {
+                before.get(&book.id).is_some_and(|(tags, collections)| {
+                    *tags != book.tags || *collections != book.collections
+                })
+            })
+            .map(|book| book.id)
+            .collect::<HashSet<_>>();
+        (changed_ids, snapshot(&lib))
+    };
+    data_migration::persist_book_organization_entities(
+        state.inner(),
+        &changed_ids,
+        kind == "tag",
+        kind == "collection",
+    )?;
+    Ok(result)
 }
 
 /// 独立书单页面所需的简介、封面和手动顺序。

@@ -40,12 +40,17 @@ fn log_db_operation(operation: &str, started: Instant, rows: usize) {
 pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &[
     "book_state_v2",
     "model_book_tags_v1",
+    "user_book_tags_v1",
+    "book_collections_v1",
     "vocab",
     "reading_bucket_v2",
     "ai_reader_config_v1",
     "translation_config_v1",
     "ai_reader_history_v1",
     "secret_bundle_v1",
+    "reader_palette_v1",
+    "reader_palette_order_v1",
+    "app_settings_v1",
 ];
 
 /// The portable migration package is intentionally narrower than live sync.
@@ -990,7 +995,7 @@ impl AppDb {
         let count = self
             .conn
             .execute(
-                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2')",
+                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','model_book_tags_v1','user_book_tags_v1','book_collections_v1','vocab','reading_bucket_v2','ai_reader_config_v1','translation_config_v1','ai_reader_history_v1','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
                 [],
             )
             .map(|count| count as u32)
@@ -1190,10 +1195,31 @@ impl AppDb {
     }
     pub fn all_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
         self.sync_entities_where(
-            "kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2')",
+            "kind IN ('book_state_v2','model_book_tags_v1','user_book_tags_v1','book_collections_v1','vocab','reading_bucket_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
         )
     }
 
+    pub fn sync_entities_by_kind(&self, kind: &str) -> Result<Vec<SyncEntity>, String> {
+        let mut statement = self.conn.prepare(
+            "SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities WHERE kind=? ORDER BY id",
+        ).map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map(params![kind], |row| {
+                let text: String = row.get(2)?;
+                Ok(SyncEntity {
+                    kind: row.get(0)?,
+                    id: row.get(1)?,
+                    json: serde_json::from_str(&text).unwrap_or(Value::Null),
+                    updated_at: row.get(3)?,
+                    deleted_at: row.get(4)?,
+                    device_id: row.get(5)?,
+                    sync_version: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
     fn upsert_sync_acknowledgements(
         connection: &Connection,
         scope: &str,
@@ -1243,9 +1269,10 @@ impl AppDb {
                  LEFT JOIN sync_acknowledgements a \
                    ON a.scope=?1 AND a.kind=e.kind AND a.id=e.id \
                  WHERE e.kind IN (\
-                       'book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2',\
+                       'book_state_v2','model_book_tags_v1','user_book_tags_v1',\
+                       'book_collections_v1','vocab','reading_bucket_v2',\
                        'ai_reader_config_v1','translation_config_v1',\
-                       'ai_reader_history_v1','secret_bundle_v1'\
+                       'ai_reader_history_v1','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1'\
                    ) \
                    AND (a.kind IS NULL \
                      OR a.device_id<>e.device_id \
@@ -1281,7 +1308,7 @@ impl AppDb {
     #[cfg(test)]
     pub fn dirty_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
         self.sync_entities_where(
-            "dirty=1 AND kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2')",
+            "dirty=1 AND kind IN ('book_state_v2','model_book_tags_v1','user_book_tags_v1','book_collections_v1','vocab','reading_bucket_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
         )
     }
 
@@ -1992,6 +2019,21 @@ mod tests {
         db.upsert_json_batch(&[
             ("book".into(), "old".into(), json!({"path":"local"})),
             ("book_state_v2".into(), "sha".into(), json!({"progress":42})),
+            (
+                "user_book_tags_v1".into(),
+                "sha".into(),
+                json!({"tags":["历史"]}),
+            ),
+            (
+                "book_collections_v1".into(),
+                "sha".into(),
+                json!({"collections":["待读"]}),
+            ),
+            (
+                "ai_reader_config_v1".into(),
+                "settings".into(),
+                json!({"provider":"compatible"}),
+            ),
         ])
         .unwrap();
         assert_eq!(db.purge_legacy_entities().unwrap(), 1);
@@ -2008,7 +2050,7 @@ mod tests {
             copy.query_row("SELECT COUNT(*) FROM entities", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            1
+            4
         );
         copy.close().unwrap();
         std::fs::remove_file(path).unwrap();

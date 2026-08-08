@@ -6,7 +6,12 @@
     "libraryLivePerAccount": 100,
     "tombstonesPerCategory": 200,
     "aiReaderGrouping": "book-content-sha256",
-    "libraryEntityId": "library-v1"
+    "libraryEntityId": "library-v1",
+    "localLiveEntries": "unbounded",
+    "librarySyncModes": ["off", "recent", "manual"],
+    "aiReaderSyncModes": ["off", "recent", "manual"],
+    "aiReaderTasksShareLiveLimit": ["question", "summary", "mindmap"],
+    "manualCloudSelectionMax": 100
   },
   "compatibility": {
     "syncProtocolVersion": 1,

@@ -473,22 +473,36 @@ function bookCard(b, index = 0) {
     }
     selectionApplied = false;
   };
+  let openingBook = false;
   const openBook = (input) => {
     if (b.missing) {
       window.ReaderProblemTraceUI?.recordShelfBookOpen?.("missing", input);
       relocateBook(b);
       return;
     }
+    // 关闭阅读窗口到 Tauri 注销同名 WebView 之间有极短过渡期。以前这里
+    // 直接把“仍在关闭”显示为失败，用户只好手动再点一次；首次点击应当
+    // 自己排队重试，其他错误仍立即、明确地交给用户处理。
+    if (openingBook) return;
+    openingBook = true;
     clearCrossReturnMemory();
     window.ReaderProblemTraceUI?.recordShelfBookOpen?.("requested", input);
-    invoke("open_book", { id: b.id }).then(() => {
+    const attemptOpen = (retry) => invoke("open_book", { id: b.id }).then(() => {
       window.ReaderProblemTraceUI?.recordShelfBookOpen?.("ok", input);
+      openingBook = false;
     }).catch((err) => {
+      const message = String(err);
+      if (message.includes("阅读窗口仍在关闭") && retry < 3) {
+        window.ReaderProblemTraceUI?.recordShelfBookOpen?.("retry", input);
+        setTimeout(() => attemptOpen(retry + 1), 180);
+        return;
+      }
+      openingBook = false;
       window.ReaderProblemTraceUI?.recordShelfBookOpen?.("failed", input);
-      const s = String(err);
-      if (s.includes("丢失") || s.includes("定位")) relocateBook(b);
-      else alertAction("打开失败：" + s);
+      if (message.includes("丢失") || message.includes("定位")) relocateBook(b);
+      else alertAction("打开失败：" + message);
     });
+    void attemptOpen(0);
   };
   card.addEventListener("click", (e) => {
     e.stopPropagation();

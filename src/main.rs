@@ -4,6 +4,7 @@
 )]
 mod ai_reader;
 mod app_commands;
+mod app_settings;
 mod atomic_file;
 mod auto_import_watch;
 pub mod background_tasks;
@@ -27,9 +28,11 @@ mod memory_budget;
 mod newsnow;
 mod pdf_support;
 mod private_sync;
+mod reader_backgrounds;
 mod reader_commands;
 mod reader_fonts;
 mod reader_page;
+mod reader_palettes;
 mod reader_protocol;
 mod runtime_support;
 mod search;
@@ -239,7 +242,14 @@ fn main() {
             {
                 let state = app.state::<AppState>();
                 state.install_memory_reclaimers();
-                if let Err(error) = data_migration::migrate_json_to_sqlite(state.inner()) {
+                if let Err(error) = data_migration::apply_local_organization_entities(state.inner())
+                {
+                    // Do not project an old library file when the authoritative
+                    // organization entities could not be read.
+                    log(&format!(
+                        "独立标签/收藏夹恢复失败，已阻止 SQLite 投影：{error}"
+                    ));
+                } else if let Err(error) = data_migration::migrate_json_to_sqlite(state.inner()) {
                     log(&format!("SQLite 迁移失败：{error}"));
                 } else {
                     match data_migration::converge_entity_model(state.inner()) {
@@ -257,6 +267,7 @@ fn main() {
             auto_import_watch::spawn(app.handle().clone());
             startup::spawn_maintenance(app.handle().clone()); // 延后低抢占维护任务，避免刚打开窗口拖动卡顿
             if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_title(startup::VERSIONED_MAIN_WINDOW_TITLE);
                 let geom = {
                     app.state::<AppState>()
                         .library
@@ -287,6 +298,7 @@ fn main() {
             window_commands::main_window_toggle_maximize,
             window_commands::main_window_close,
             window_commands::main_window_start_dragging,
+            window_commands::main_window_start_resize_dragging,
             library_commands::list_books,
             library_commands::book_file_sizes,
             library_commands::set_book_organization,
@@ -312,6 +324,8 @@ fn main() {
             startup_enhancement::startup_enhancement_config,
             startup_enhancement::set_startup_enhancement_config,
             app_commands::save_download_image,
+            reader_backgrounds::cache_reader_background_image,
+            reader_backgrounds::reader_background_local_url,
             app_commands::problem_trace_checkpoint,
             app_commands::save_problem_trace_to_desktop,
             app_commands::dict_lookup,
@@ -350,12 +364,21 @@ fn main() {
             ai_reader::set_library_model_tags_enabled,
             ai_reader::start_library_auto_classification,
             private_sync::private_sync_get_settings,
+            app_settings::app_settings_sync_get,
+            app_settings::app_settings_sync_save,
+            reader_palettes::reader_palette_sync_get,
+            reader_palettes::reader_palette_sync_save,
             private_sync::private_sync_set_options,
             private_sync::private_sync_history_list,
             private_sync::private_sync_history_merge,
             private_sync::private_sync_history_delete,
+            private_sync::private_sync_reader_history_snapshot,
+            private_sync::private_sync_set_reader_history_mode,
+            private_sync::private_sync_set_reader_history_cloud_saved,
             private_sync::private_sync_library_history_list,
+            private_sync::private_sync_set_library_history_mode,
             private_sync::private_sync_library_history_merge,
+            private_sync::private_sync_set_library_history_cloud_saved,
             private_sync::private_sync_library_history_delete,
             private_sync::private_sync_set_password,
             private_sync::private_sync_unlock_secrets,
@@ -462,6 +485,7 @@ fn main() {
             semantic::build_semantic_multi_profile,
             semantic::semantic_index_done,
             semantic::gpu::semantic_gpu_status,
+            semantic::gpu_runtime::install_semantic_gpu_runtime,
             semantic::semantic_status,
             semantic::semantic_tasks,
             semantic::prepare_semantic_search,

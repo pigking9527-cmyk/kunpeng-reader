@@ -84,7 +84,7 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn normalize_organization_names(values: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_organization_names(values: Vec<String>) -> Vec<String> {
     reader_core::domain::normalize_names(values)
 }
 

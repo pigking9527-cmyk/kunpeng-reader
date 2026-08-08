@@ -31,6 +31,24 @@ test("reader uses an independent localization entry point before reader behavior
   assert.match(source, /reader-language-changed/);
 });
 
+test("reading preferences localize static controls and dynamic palette copy", () => {
+  const markupKeys = [
+    "readerPreferences", "preferenceOverall", "preferenceBook", "preferenceAppearance", "preferencePagination", "preferenceToolbar", "preferenceAdvanced",
+    "textColor", "customBackground", "imagePagination", "showToc", "showChapterButtons",
+  ];
+  const keys = [...markupKeys, "paletteLight", "paletteDark", "palettePaper"];
+  for (const key of markupKeys) assert.match(html, new RegExp(`data-reader-i18n(?:-\\w+)?="${key}"|data-reader-i18n-aria="${key}"`), `reader preference markup must use ${key}`);
+  assert.match(source, /const PREFERENCE_COPY =/);
+  assert.match(source, /Object\.assign\(COPY\.ja, PREFERENCE_COPY\.ja\)/);
+  for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
+    const i18n = loadReaderI18n(locale).i18n;
+    for (const key of keys) assert.notEqual(i18n.t(key), key, `missing reader preference key ${key} for ${locale}`);
+  }
+  const preferences = fs.readFileSync(path.join(uiRoot, "reader-preferences-ui.js"), "utf8");
+  assert.match(preferences, /const readerPreferenceT =/);
+  assert.match(preferences, /function paletteLabel\(palette\)/);
+  assert.match(preferences, /readerPreferenceT\("backgroundImageInvalid"/);
+});
 test("Japanese reader strings do not silently fall back to English", () => {
   const keys = [
     "pageTitle", "toc", "previousChapter", "nextChapter", "searchBook", "readAloud", "annotations", "immersive", "settings",

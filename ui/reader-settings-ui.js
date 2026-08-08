@@ -1,7 +1,26 @@
 // 阅读设置状态与设置面板绑定
 // 先于 reader.js 加载：提供 settings/applyShellTheme/initSettingsUI 给阅读页启动逻辑使用。
 
-const readerSettingsT = (key, fallback, values) => window.ReaderI18n?.t?.(key, values) || fallback;
+const readerSettingsT = (key, fallback, values) => window.ReaderI18n?.t?.(key, fallback, values) || fallback;
+
+// 阅读页设置会经 postMessage 传给章节 iframe，再动态拼入 CSS。将原始 10 MB
+// 图片直接作为 data URL 传递会让 WebView2 的消息和样式文本膨胀到十余 MB，甚至
+// 使阅读器无法打开。导入端会先压缩；这里仍保留迁移保护，用于清理旧版本留下的值。
+const MAX_INLINE_BACKGROUND_IMAGE_CHARS = 160000;
+const BACKGROUND_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=]+$/i;
+
+function safeBackgroundImage(value) {
+  const image = String(value || "");
+  return image.length <= MAX_INLINE_BACKGROUND_IMAGE_CHARS && BACKGROUND_IMAGE_DATA_URL.test(image) ? image : "";
+}
+
+function sanitizeBackgroundImage(settingsValue) {
+  if (!settingsValue || typeof settingsValue !== "object") return false;
+  const safe = safeBackgroundImage(settingsValue.customBackgroundImage);
+  if (safe === String(settingsValue.customBackgroundImage || "")) return false;
+  settingsValue.customBackgroundImage = safe;
+  return true;
+}
 
 function applyReaderAnimationSettings() {
   window.ReaderAnimationSettings?.applyReader(document);
@@ -32,6 +51,28 @@ const DEFAULTS = {
   pageTurnSpeed: 1,
   ttsSource: "edge",
   ttsRate: 1,
+  backgroundPreset: "light",
+  customBackgroundColor: "#fffdf8",
+  customBackgroundImage: "",
+  customPaletteId: "",
+  textColor: "",
+  linkColor: "",
+  selectionColor: "",
+  footnoteBackground: "",
+  footnoteBorder: "",
+  imagePagination: "next-page",
+  showTextConversion: true,
+  showTocButton: true,
+  showChapterButtons: true,
+  showVocabularyButton: true,
+  showTtsButton: true,
+  showAnnotationButton: true,
+  showPageInfo: true,
+  showReaderJumpBack: true,
+  readerJumpBackDismissMode: "pages",
+  readerJumpBackDismissSeconds: 30,
+  readerJumpBackDismissPages: 3,
+  readerJumpBackSizeLevel: 1,
 };
 
 // Windows WebView2 的原生 switch transition 正常；仅 macOS WKWebView 需要补偿动画。
@@ -41,17 +82,44 @@ const READER_SHELL_IS_MAC_WEBKIT = /Macintosh|Mac OS X/.test(navigator.userAgent
 
 // 外壳（工具栏/目录/设置）的深色应用
 function applyShellTheme(theme) {
-  document.body.classList.toggle("theme-dark", theme === "dark");
+  const body = document.body;
+  body.classList.add("reader-theme-instant");
+  body.classList.toggle("theme-dark", theme === "dark");
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    body.classList.remove("reader-theme-instant");
+  }));
 }
 
 function loadSettings() {
   try {
-    return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem("readerSettings") || "{}"));
+    const stored = JSON.parse(localStorage.getItem("readerSettings") || "{}");
+    const merged = Object.assign({}, DEFAULTS, stored);
+    // Older settings stored the three original backgrounds in theme only.
+    if (!stored.backgroundPreset && ["light", "dark", "sepia"].includes(stored.theme)) merged.backgroundPreset = stored.theme;
+    if (sanitizeBackgroundImage(merged)) localStorage.setItem("readerSettings", JSON.stringify(merged));
+    if (sanitizeBackgroundImage(merged)) localStorage.setItem("readerSettings", JSON.stringify(merged));
+    return merged;
   } catch (e) {
     return Object.assign({}, DEFAULTS);
   }
 }
 let settings = loadSettings();
+const READER_APPEARANCE_KEYS = new Set(["backgroundPreset", "customBackgroundColor", "customBackgroundImage", "customPaletteId", "textColor", "linkColor", "selectionColor", "footnoteBackground", "footnoteBorder", "theme"]);
+const READER_BOOK_APPEARANCE_KEY = "readerBookAppearanceV1";
+let defaultAppearanceSettings = Object.assign({}, settings);
+let activeReaderBookId = "";
+let bookAppearanceSettings = (() => {
+  try {
+    const stored = JSON.parse(localStorage.getItem(READER_BOOK_APPEARANCE_KEY) || "{}");
+    if (!stored || typeof stored !== "object") return {};
+    let changed = false;
+    Object.values(stored).forEach((appearance) => { changed = sanitizeBackgroundImage(appearance) || changed; });
+    if (changed) localStorage.setItem(READER_BOOK_APPEARANCE_KEY, JSON.stringify(stored));
+    return stored;
+  } catch (_) {
+    return {};
+  }
+})();
 window.addEventListener("storage", (event) => {
   if (event.key !== "readerSettings") return;
   settings = loadSettings();
@@ -103,7 +171,8 @@ function normalizeModeSettings() {
 
 function saveSettings() {
   normalizeModeSettings();
-  localStorage.setItem("readerSettings", JSON.stringify(settings));
+  sanitizeBackgroundImage(defaultAppearanceSettings);
+  localStorage.setItem("readerSettings", JSON.stringify(defaultAppearanceSettings));
 }
 // 把设置发给合并页（实时注入样式）
 function pushSettings() {
@@ -117,8 +186,164 @@ function pushSettings() {
 }
 window.addEventListener("reader-language-changed", pushSettings);
 function onChange() {
+  Object.keys(settings).forEach((key) => { if (!READER_APPEARANCE_KEYS.has(key)) defaultAppearanceSettings[key] = settings[key]; });
   saveSettings();
   pushSettings();
+  window.dispatchEvent(new CustomEvent("reader-settings-changed", { detail: Object.assign({}, settings) }));
+}
+
+function setReaderSettings(patch) {
+  Object.assign(settings, patch || {});
+  Object.assign(defaultAppearanceSettings, patch || {});
+  sanitizeBackgroundImage(settings);
+  sanitizeBackgroundImage(defaultAppearanceSettings);
+  sanitizeBackgroundImage(settings);
+  sanitizeBackgroundImage(defaultAppearanceSettings);
+  if (patch && Object.prototype.hasOwnProperty.call(patch, "backgroundPreset")) {
+    settings.theme = patch.theme || settings.backgroundPreset;
+    defaultAppearanceSettings.theme = settings.theme;
+  }
+  normalizeModeSettings();
+  applyShellTheme(settings.theme);
+  onChange();
+}
+
+function applyAppearanceSettings(next) {
+  Object.assign(settings, next || {});
+  sanitizeBackgroundImage(settings);
+  sanitizeBackgroundImage(settings);
+  normalizeModeSettings();
+  applyShellTheme(settings.theme);
+  pushSettings();
+  window.dispatchEvent(new CustomEvent("reader-settings-changed", { detail: Object.assign({}, settings) }));
+}
+
+function appearanceForScope(scope) {
+  if (scope === "book" && activeReaderBookId) {
+    // 早期阅读偏好把工具栏开关也误写进了单本外观。单本覆盖只允许
+    // 外观字段，避免旧值继续压过总体工具栏设置。
+    const bookAppearance = bookAppearanceSettings[activeReaderBookId] || {};
+    const appearanceOverrides = Object.fromEntries(
+      Object.entries(bookAppearance).filter(([key]) => READER_APPEARANCE_KEYS.has(key)),
+    );
+    return Object.assign({}, defaultAppearanceSettings, appearanceOverrides);
+  }
+  return Object.assign({}, defaultAppearanceSettings);
+}
+
+function updateAppearance(patch, scope) {
+  const targetScope = scope === "book" && activeReaderBookId ? "book" : "default";
+  if (targetScope === "book") {
+    const current = bookAppearanceSettings[activeReaderBookId] || {};
+    const appearancePatch = Object.fromEntries(
+      Object.entries(patch || {}).filter(([key]) => READER_APPEARANCE_KEYS.has(key)),
+    );
+    bookAppearanceSettings[activeReaderBookId] = Object.assign({}, current, appearancePatch);
+    sanitizeBackgroundImage(bookAppearanceSettings[activeReaderBookId]);
+    sanitizeBackgroundImage(bookAppearanceSettings[activeReaderBookId]);
+    localStorage.setItem(READER_BOOK_APPEARANCE_KEY, JSON.stringify(bookAppearanceSettings));
+    applyAppearanceSettings(appearanceForScope("book"));
+    return;
+  }
+  Object.assign(defaultAppearanceSettings, patch || {});
+  sanitizeBackgroundImage(defaultAppearanceSettings);
+  if (patch && Object.prototype.hasOwnProperty.call(patch, "backgroundPreset") && !Object.prototype.hasOwnProperty.call(patch, "theme")) defaultAppearanceSettings.theme = defaultAppearanceSettings.backgroundPreset;
+  saveSettings();
+  applyAppearanceSettings(activeReaderBookId ? appearanceForScope("book") : appearanceForScope("default"));
+}
+
+window.ReaderSettings = Object.freeze({
+  get() { return Object.assign({}, settings); },
+  update: setReaderSettings,
+  getAppearance(scope) { return appearanceForScope(scope); },
+  updateAppearance,
+  setBookContext(bookId) {
+    activeReaderBookId = String(bookId || "");
+    if (activeReaderBookId && bookAppearanceSettings[activeReaderBookId]) applyAppearanceSettings(appearanceForScope("book"));
+  },
+  hasBookAppearance() { return !!(activeReaderBookId && bookAppearanceSettings[activeReaderBookId]); },
+  clearBookAppearance() {
+    if (!activeReaderBookId || !bookAppearanceSettings[activeReaderBookId]) return;
+    delete bookAppearanceSettings[activeReaderBookId];
+    localStorage.setItem(READER_BOOK_APPEARANCE_KEY, JSON.stringify(bookAppearanceSettings));
+    applyAppearanceSettings(appearanceForScope("default"));
+  },
+  applyToolbarVisibility() {
+    document.querySelector(".text-conversion-toggle")?.toggleAttribute("hidden", settings.showTextConversion === false);
+    const hideChapterButtons = settings.showChapterButtons === false;
+    document.getElementById("prev-btn")?.toggleAttribute("hidden", hideChapterButtons);
+    document.getElementById("next-btn")?.toggleAttribute("hidden", hideChapterButtons);
+    document.getElementById("vocab-btn")?.toggleAttribute("hidden", settings.showVocabularyButton === false);
+  },
+});
+
+const readerSettingsInvoke = window.__TAURI__?.core?.invoke;
+const readerSettingsEventApi = window.__TAURI__?.event;
+let appSettingsSyncReady = false;
+let appSettingsSyncTimer = 0;
+let lastAppSettingsSyncPayload = "";
+
+function normalizedAppSettingsSyncPayload() {
+  return {
+    showReaderJumpBack: settings.showReaderJumpBack !== false,
+    readerJumpBackDismissMode: settings.readerJumpBackDismissMode === "time" ? "time" : "pages",
+    readerJumpBackDismissSeconds: Math.max(1, Math.min(600, Number(settings.readerJumpBackDismissSeconds) || 30)),
+    readerJumpBackDismissPages: Math.max(1, Math.min(100, Number(settings.readerJumpBackDismissPages) || 3)),
+    readerJumpBackSizeLevel: Math.max(1, Math.min(10, Number(settings.readerJumpBackSizeLevel) || 1)),
+  };
+}
+
+function queueAppSettingsSyncSave() {
+  if (!appSettingsSyncReady || typeof readerSettingsInvoke !== "function") return;
+  const request = normalizedAppSettingsSyncPayload();
+  const serialized = JSON.stringify(request);
+  if (serialized === lastAppSettingsSyncPayload) return;
+  if (appSettingsSyncTimer) clearTimeout(appSettingsSyncTimer);
+  appSettingsSyncTimer = window.setTimeout(async () => {
+    appSettingsSyncTimer = 0;
+    try {
+      await readerSettingsInvoke("app_settings_sync_save", { request });
+      lastAppSettingsSyncPayload = serialized;
+    } catch (_) {
+      // 离线或数据库暂不可用时保留本机设置；下次修改或打开阅读页会重试。
+    }
+  }, 180);
+}
+
+async function hydrateAppSettingsSync() {
+  if (typeof readerSettingsInvoke !== "function") {
+    appSettingsSyncReady = true;
+    return;
+  }
+  try {
+    const remote = await readerSettingsInvoke("app_settings_sync_get");
+    if (remote?.exists) {
+      appSettingsSyncReady = false;
+      setReaderSettings({
+        showReaderJumpBack: remote.showReaderJumpBack !== false,
+        readerJumpBackDismissMode: remote.readerJumpBackDismissMode === "time" ? "time" : "pages",
+        readerJumpBackDismissSeconds: Math.max(1, Math.min(600, Number(remote.readerJumpBackDismissSeconds) || 30)),
+        readerJumpBackDismissPages: Math.max(1, Math.min(100, Number(remote.readerJumpBackDismissPages) || 3)),
+        readerJumpBackSizeLevel: Math.max(1, Math.min(10, Number(remote.readerJumpBackSizeLevel) || 1)),
+      });
+      lastAppSettingsSyncPayload = JSON.stringify(normalizedAppSettingsSyncPayload());
+      appSettingsSyncReady = true;
+      return;
+    }
+    appSettingsSyncReady = true;
+    lastAppSettingsSyncPayload = "";
+    queueAppSettingsSyncSave();
+  } catch (_) {
+    appSettingsSyncReady = true;
+  }
+}
+
+window.addEventListener("reader-settings-changed", queueAppSettingsSyncSave);
+Promise.resolve(readerSettingsEventApi?.listen?.("app-settings-synced", hydrateAppSettingsSync)).catch(() => {});
+hydrateAppSettingsSync();
+
+function applyReaderSettingsVisibility() {
+  window.ReaderSettings.applyToolbarVisibility();
 }
 
 function bindRange(id, vid, key, fmt) {
@@ -171,6 +396,7 @@ function initSettingsUI() {
   document.querySelectorAll(".theme-btn").forEach((b) => {
     b.addEventListener("click", () => {
       settings.theme = b.dataset.theme;
+      settings.backgroundPreset = settings.theme;
       refreshThemeBtns();
       applyShellTheme(settings.theme);
       onChange();
@@ -272,11 +498,18 @@ function initSettingsUI() {
       onChange();
     });
   }
-  const textConversionSimple = document.getElementById("set-text-conversion-simple");
-  if (textConversionSimple) {
-    textConversionSimple.checked = settings.textConversion !== "s2t";
-    textConversionSimple.addEventListener("change", () => {
-      settings.textConversion = textConversionSimple.checked ? "t2s" : "s2t";
+  const textConversionToggle = document.getElementById("set-text-conversion-simple");
+  const textConversionLabel = document.getElementById("text-conversion-state-label");
+  if (textConversionToggle) {
+    const renderTextConversionState = () => {
+      const traditional = settings.textConversion === "s2t";
+      textConversionToggle.checked = traditional;
+      if (textConversionLabel) textConversionLabel.textContent = traditional ? "繁" : "简";
+    };
+    renderTextConversionState();
+    textConversionToggle.addEventListener("change", () => {
+      settings.textConversion = textConversionToggle.checked ? "s2t" : "t2s";
+      renderTextConversionState();
       onChange();
     });
   }
@@ -301,6 +534,8 @@ function initSettingsUI() {
   }
   const dualModeToggle = document.getElementById("set-dual-mode");
   const scrollModeToggle = document.getElementById("set-scroll-mode");
+  const dualModeLabel = document.getElementById("set-dual-mode-label");
+  const scrollModeLabel = document.getElementById("set-scroll-mode-label");
   function animateToggleOff(input) {
     const shell = input?.closest?.(".settings-switch");
     if (!shell) return;
@@ -320,6 +555,13 @@ function initSettingsUI() {
       scrollModeToggle.checked = settings.flowMode === "scroll";
       scrollModeToggle.title = readerSettingsT("enableScrollMode", "开启滚动模式");
     }
+    // 这里的文字描述“按一下将切换到什么”，与简/繁开关保持同一交互语义。
+    if (dualModeLabel) dualModeLabel.textContent = dualModeToggle?.checked
+      ? readerSettingsT("singlePage", "单页")
+      : readerSettingsT("twoPages", "双页");
+    if (scrollModeLabel) scrollModeLabel.textContent = scrollModeToggle?.checked
+      ? readerSettingsT("pagedMode", "整屏")
+      : readerSettingsT("scrollMode", "滚动");
   }
   if (dualModeToggle) {
     dualModeToggle.addEventListener("change", () => {
@@ -352,6 +594,7 @@ function initSettingsUI() {
     });
   }
   refreshReadingModeToggles();
+  window.addEventListener("reader-language-changed", refreshReadingModeToggles);
   // 朗读设置
   const bindSel = (id, key) => {
     const el = document.getElementById(id);
@@ -361,4 +604,5 @@ function initSettingsUI() {
   };
   bindSel("set-ttssrc", "ttsSource");
   bindRange("set-ttsrate", "v-ttsrate", "ttsRate", (v) => v.toFixed(1) + "×");
+  applyReaderSettingsVisibility();
 }

@@ -2113,7 +2113,7 @@ fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowLi
                 message: error,
                 source_count: sources.len(),
                 ..Default::default()
-            }
+            };
         }
     };
     let mut items = Vec::new();

@@ -66,6 +66,18 @@ test("highlight menu and settings provide native copy for all ten reader languag
   assert.match(annotations, /hlSettingsPop\.setAttribute\('aria-label',readerPageText\('highlightMenuSettings'\)\)/);
 });
 
+test("paged touchpad gestures end on actual wheel quiet instead of a fixed cooldown", () => {
+  const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
+  const wheelHandler = annotations.slice(annotations.indexOf("var pageWheelGesture=null"), annotations.indexOf("window.addEventListener('resize'"));
+  assert.match(wheelHandler, /var pageWheelGesture=null,pageWheelGestureTimer=null,pageWheelTraceEvents=0,scrollChapterLock=false/);
+  assert.match(wheelHandler, /function tracePageWheel\(phase,e,gesture\)/);
+  assert.match(wheelHandler, /if\(pageWheelTraceEvents\+\+>=48\)return;/);
+  assert.match(wheelHandler, /if\(pageWheelGesture===gesture\)pageWheelGesture=null;[\s\S]*?\},80\)/);
+  assert.match(wheelHandler, /if\(gesture\)\{[\s\S]*?armPageWheelGestureQuietTimer\(gesture\);[\s\S]*?return;/);
+  assert.match(wheelHandler, /if\(direction>0\)nextPage\(\);else prevPage\(\);/);
+  assert.doesNotMatch(wheelHandler, /quietFor|strongNewInput|>=700/);
+});
+
 test("paged height calibration never creates more than one line of extra bottom whitespace", () => {
   assert.match(layout, /function packedPagedBoxHeight\(baseH\)/);
   assert.match(layout, /var allowedTrim=Math\.max\(0,Math\.floor\(lineHeightPx\(\)\)-mg\(S\.marginBottom\)\);/);

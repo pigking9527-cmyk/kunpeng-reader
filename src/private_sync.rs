@@ -17,7 +17,9 @@ use tauri::Manager;
 
 const OPTIONS_KEY: &str = "private_sync_options_v1";
 const HISTORY_PREFIX: &str = "private_sync_ai_history_v1:";
+const READER_HISTORY_SYNC_MODE_KEY: &str = "private_sync_ai_history_sync_mode_v1";
 const LIBRARY_HISTORY_KEY: &str = "private_sync_library_ai_history_v1";
+const LIBRARY_HISTORY_SYNC_MODE_KEY: &str = "private_sync_library_ai_history_sync_mode_v1";
 const AI_CONFIG_KIND: &str = "ai_reader_config_v1";
 const TRANSLATE_CONFIG_KIND: &str = "translation_config_v1";
 const HISTORY_KIND: &str = "ai_reader_history_v1";
@@ -71,6 +73,29 @@ pub(crate) struct HistoryDeleteRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ReaderHistorySyncModeRequest {
+    pub content_id: String,
+    pub sync_mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReaderHistoryCloudRequest {
+    pub content_id: String,
+    pub id: String,
+    pub cloud_saved: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReaderHistorySnapshot {
+    pub entries: Vec<Value>,
+    pub sync_enabled: bool,
+    pub sync_mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct LibraryHistoryMergeRequest {
     pub entries: Vec<Value>,
 }
@@ -80,12 +105,25 @@ pub(crate) struct LibraryHistoryMergeRequest {
 pub(crate) struct LibraryHistoryDeleteRequest {
     pub id: String,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryHistorySyncModeRequest {
+    pub sync_mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryHistoryCloudRequest {
+    pub id: String,
+    pub cloud_saved: bool,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LibraryHistorySnapshot {
     pub entries: Vec<Value>,
     pub sync_enabled: bool,
+    pub sync_mode: String,
 }
 
 #[derive(Serialize)]
@@ -121,6 +159,84 @@ fn options_from_db(db: &AppDb) -> PrivateSyncOptions {
     db.metadata(OPTIONS_KEY)
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+/// Per-book AI-reading history shares one account-wide cloud budget. The
+/// legacy master checkbox remains the opt-out; an installation without a mode
+/// key retains the former automatic-recent behaviour.
+fn reader_history_sync_mode(db: &AppDb) -> String {
+    if !options_from_db(db).sync_ai_history {
+        return "off".into();
+    }
+    match db.metadata(READER_HISTORY_SYNC_MODE_KEY).as_deref() {
+        Some("manual") => "manual".into(),
+        _ => "recent".into(),
+    }
+}
+
+fn reader_history_snapshot(db: &AppDb, content_id: &str) -> ReaderHistorySnapshot {
+    let sync_mode = reader_history_sync_mode(db);
+    let mut entries = read_history(db, content_id);
+    if sync_mode != "off" {
+        let histories = db
+            .metadata_with_prefix(HISTORY_PREFIX)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, text)| {
+                let content_id = key.strip_prefix(HISTORY_PREFIX)?;
+                valid_content_id(content_id).then_some((
+                    content_id.to_string(),
+                    serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
+                        .unwrap_or_default(),
+                ))
+            })
+            .collect();
+        let cloud_ids = account_history_payloads(histories, &sync_mode)
+            .remove(content_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| !is_history_tombstone(entry))
+            .filter_map(|entry| history_entry_id(&entry))
+            .collect::<std::collections::BTreeSet<_>>();
+        entries = entries
+            .into_iter()
+            .map(|mut entry| {
+                if !is_history_tombstone(&entry) {
+                    entry["cloudSaved"] = Value::Bool(
+                        history_entry_id(&entry).is_some_and(|id| cloud_ids.contains(&id)),
+                    );
+                }
+                entry
+            })
+            .collect();
+    }
+    ReaderHistorySnapshot {
+        entries,
+        sync_enabled: sync_mode != "off",
+        sync_mode,
+    }
+}
+/// The library-answer preference is independent from the per-book AI-reading
+/// switch. Old installations did not have this key, so retain their former
+/// behaviour until the user chooses a mode in the library-answer settings.
+fn library_history_sync_mode(db: &AppDb) -> String {
+    match db.metadata(LIBRARY_HISTORY_SYNC_MODE_KEY).as_deref() {
+        Some("recent") => "recent".into(),
+        Some("manual") => "manual".into(),
+        Some("off") => "off".into(),
+        _ if options_from_db(db).sync_ai_history => "recent".into(),
+        _ => "off".into(),
+    }
+}
+
+fn library_history_snapshot(db: &AppDb) -> LibraryHistorySnapshot {
+    let sync_mode = library_history_sync_mode(db);
+    LibraryHistorySnapshot {
+        entries: read_library_history(db),
+        sync_enabled: sync_mode != "off",
+        sync_mode,
+    }
 }
 
 fn history_key(content_id: &str) -> String {
@@ -204,7 +320,6 @@ fn normalized_entries(entries: Vec<Value>) -> Vec<Value> {
             .and_then(Value::as_str)
             .cmp(&left.get("at").and_then(Value::as_str))
     });
-    live.truncate(HISTORY_LIVE_LIMIT);
     let mut tombstones = by_id
         .values()
         .filter(|entry| is_history_tombstone(entry))
@@ -234,6 +349,7 @@ fn clipped_text(value: &str, max_bytes: usize) -> String {
 /// all books are materialized as sync entities.
 fn account_history_payloads(
     histories: Vec<(String, Vec<Value>)>,
+    sync_mode: &str,
 ) -> std::collections::BTreeMap<String, Vec<Value>> {
     let mut live = Vec::<(String, Value)>::new();
     let mut tombstones = Vec::<(String, Value)>::new();
@@ -241,7 +357,9 @@ fn account_history_payloads(
         for entry in normalized_entries(entries) {
             if is_history_tombstone(&entry) {
                 tombstones.push((content_id.clone(), entry));
-            } else {
+            } else if sync_mode == "recent"
+                || entry.get("cloudSaved").and_then(Value::as_bool) == Some(true)
+            {
                 live.push((content_id.clone(), entry));
             }
         }
@@ -343,7 +461,7 @@ fn normalized_library_entries(entries: Vec<Value>) -> Vec<Value> {
             })
             .unwrap_or_default();
         let id = history_entry_id(&entry).unwrap_or_else(|| format!("legacy:{at}"));
-        sanitized.push(serde_json::json!({
+        let mut normalized = serde_json::json!({
             "id": id,
             "version": 1,
             "scope": "library",
@@ -352,7 +470,11 @@ fn normalized_library_entries(entries: Vec<Value>) -> Vec<Value> {
             "content": content,
             "sources": sources,
             "at": at,
-        }));
+        });
+        if entry.get("cloudSaved").and_then(Value::as_bool) == Some(true) {
+            normalized["cloudSaved"] = Value::Bool(true);
+        }
+        sanitized.push(normalized);
     }
     normalized_entries(sanitized)
 }
@@ -395,6 +517,41 @@ fn write_library_history(db: &AppDb, entries: Vec<Value>) -> Result<(), String> 
         }))
         .map_err(|e| e.to_string())?,
     )
+}
+/// A local library history may grow without a live-entry cap. Only this
+/// compact projection is sent to the cloud, where it remains bounded to 100
+/// answers (plus deletion tombstones). In manual mode an answer joins the
+/// projection only after the user explicitly selects "云端".
+fn cloud_library_history_entries(entries: Vec<Value>, sync_mode: &str) -> Vec<Value> {
+    let normalized = normalized_library_entries(entries);
+    let mut live = normalized
+        .iter()
+        .filter(|entry| !is_history_tombstone(entry))
+        .filter(|entry| {
+            sync_mode == "recent" || entry.get("cloudSaved").and_then(Value::as_bool) == Some(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    live.sort_by(|left, right| {
+        right
+            .get("at")
+            .and_then(Value::as_str)
+            .cmp(&left.get("at").and_then(Value::as_str))
+    });
+    live.truncate(HISTORY_LIVE_LIMIT);
+    let mut tombstones = normalized
+        .into_iter()
+        .filter(is_history_tombstone)
+        .collect::<Vec<_>>();
+    tombstones.sort_by(|left, right| {
+        right
+            .get("deletedAt")
+            .and_then(Value::as_str)
+            .cmp(&left.get("deletedAt").and_then(Value::as_str))
+    });
+    tombstones.truncate(HISTORY_TOMBSTONE_LIMIT);
+    live.extend(tombstones);
+    live
 }
 
 fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
@@ -525,8 +682,9 @@ fn materialize(db: &mut AppDb) -> Result<(), String> {
             .unwrap_or_default();
         histories.push((content_id.to_string(), entries));
     }
-    if options.sync_ai_history {
-        let mut payloads = account_history_payloads(histories);
+    let reader_history_sync_mode = reader_history_sync_mode(db);
+    if reader_history_sync_mode != "off" {
+        let mut payloads = account_history_payloads(histories, &reader_history_sync_mode);
         for content_id in history_ids {
             match payloads.remove(&content_id) {
                 Some(entries) if !entries.is_empty() => {
@@ -548,15 +706,18 @@ fn materialize(db: &mut AppDb) -> Result<(), String> {
             db.soft_delete(HISTORY_KIND, &content_id)?;
         }
     }
-    if options.sync_ai_history {
+    let library_sync_mode = library_history_sync_mode(db);
+    if library_sync_mode != "off" {
         if db.metadata(LIBRARY_HISTORY_KEY).is_some() {
+            let entries =
+                cloud_library_history_entries(read_library_history(db), &library_sync_mode);
             db.upsert_json_batch(&[(
                 HISTORY_KIND.to_string(),
                 LIBRARY_HISTORY_ID.to_string(),
                 serde_json::json!({
                     "version": 1,
                     "scope": "library",
-                    "entries": read_library_history(db),
+                    "entries": entries,
                 }),
             )])?;
         }
@@ -585,21 +746,53 @@ pub(crate) fn apply_downloaded_entities(
             AI_CONFIG_KIND if options.sync_configs => {
                 ai_reader::import_public_config(db, &item.json)?
             }
-            HISTORY_KIND if options.sync_ai_history && valid_content_id(&item.id) => {
+            HISTORY_KIND if reader_history_sync_mode(db) != "off" && valid_content_id(&item.id) => {
                 let mut merged = read_history(db, &item.id);
+                let mut cloud_ids = std::collections::BTreeSet::new();
                 if let Some(remote) = item.json.get("entries").and_then(Value::as_array) {
+                    cloud_ids.extend(remote.iter().filter_map(history_entry_id));
                     merged.extend(remote.iter().cloned());
+                }
+                if reader_history_sync_mode(db) == "manual" {
+                    merged = normalized_entries(merged)
+                        .into_iter()
+                        .map(|mut entry| {
+                            if !is_history_tombstone(&entry) {
+                                entry["cloudSaved"] = Value::Bool(
+                                    history_entry_id(&entry)
+                                        .is_some_and(|id| cloud_ids.contains(&id)),
+                                );
+                            }
+                            entry
+                        })
+                        .collect();
                 }
                 write_history(db, &item.id, merged)?;
             }
             HISTORY_KIND
-                if options.sync_ai_history
+                if library_history_sync_mode(db) != "off"
                     && item.id == LIBRARY_HISTORY_ID
                     && item.json.get("scope").and_then(Value::as_str) == Some("library") =>
             {
                 let mut merged = read_library_history(db);
+                let mut cloud_ids = std::collections::BTreeSet::new();
                 if let Some(remote) = item.json.get("entries").and_then(Value::as_array) {
+                    cloud_ids.extend(remote.iter().filter_map(history_entry_id));
                     merged.extend(remote.iter().cloned());
+                }
+                if library_history_sync_mode(db) == "manual" {
+                    merged = normalized_library_entries(merged)
+                        .into_iter()
+                        .map(|mut entry| {
+                            if !is_history_tombstone(&entry) {
+                                entry["cloudSaved"] = Value::Bool(
+                                    history_entry_id(&entry)
+                                        .is_some_and(|id| cloud_ids.contains(&id)),
+                                );
+                            }
+                            entry
+                        })
+                        .collect();
                 }
                 write_library_history(db, merged)?;
             }
@@ -689,16 +882,111 @@ pub(crate) fn private_sync_history_delete(
 }
 
 #[tauri::command]
+pub(crate) fn private_sync_reader_history_snapshot(
+    state: tauri::State<AppState>,
+    content_id: String,
+) -> Result<ReaderHistorySnapshot, String> {
+    if !valid_content_id(&content_id) {
+        return Err("图书同步身份无效；请重新导入原书后再同步智读历史".into());
+    }
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    Ok(reader_history_snapshot(db, &content_id))
+}
+
+#[tauri::command]
+pub(crate) fn private_sync_set_reader_history_mode(
+    state: tauri::State<AppState>,
+    request: ReaderHistorySyncModeRequest,
+) -> Result<ReaderHistorySnapshot, String> {
+    if !valid_content_id(&request.content_id)
+        || !matches!(request.sync_mode.as_str(), "recent" | "manual")
+    {
+        return Err("智读历史同步方式无效".into());
+    }
+    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    let mut options = options_from_db(db);
+    options.sync_ai_history = true;
+    db.set_metadata(
+        OPTIONS_KEY,
+        &serde_json::to_string(&options).map_err(|error| error.to_string())?,
+    )?;
+    db.set_metadata(READER_HISTORY_SYNC_MODE_KEY, &request.sync_mode)?;
+    materialize(db)?;
+    Ok(reader_history_snapshot(db, &request.content_id))
+}
+
+#[tauri::command]
+pub(crate) fn private_sync_set_reader_history_cloud_saved(
+    state: tauri::State<AppState>,
+    request: ReaderHistoryCloudRequest,
+) -> Result<ReaderHistorySnapshot, String> {
+    if !valid_content_id(&request.content_id) || request.id.trim().is_empty() {
+        return Err("智读历史记录身份无效".into());
+    }
+    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    if reader_history_sync_mode(db) != "manual" {
+        return Err("请先在智读历史设置中选择手动同步".into());
+    }
+    let id = clipped_text(&request.id, 160);
+    if request.cloud_saved {
+        let selected = db
+            .metadata_with_prefix(HISTORY_PREFIX)?
+            .into_iter()
+            .flat_map(|(_, text)| {
+                serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
+                    .unwrap_or_default()
+            })
+            .filter(|entry| !is_history_tombstone(entry))
+            .filter(|entry| entry.get("cloudSaved").and_then(Value::as_bool) == Some(true))
+            .filter(|entry| history_entry_id(entry).as_deref() != Some(id.as_str()))
+            .count();
+        if selected >= HISTORY_LIVE_LIMIT {
+            return Err("智读与脑图云端共用最多 100 条记录；请先取消一条".into());
+        }
+    }
+    let mut entries = read_history(db, &request.content_id);
+    let mut found = false;
+    for entry in &mut entries {
+        if !is_history_tombstone(entry) && history_entry_id(entry).as_deref() == Some(id.as_str()) {
+            entry["cloudSaved"] = Value::Bool(request.cloud_saved);
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err("找不到这条智读记录".into());
+    }
+    write_history(db, &request.content_id, entries)?;
+    materialize(db)?;
+    Ok(reader_history_snapshot(db, &request.content_id))
+}
+
+#[tauri::command]
 pub(crate) fn private_sync_library_history_list(
     state: tauri::State<AppState>,
 ) -> Result<LibraryHistorySnapshot, String> {
     let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    let options = options_from_db(db);
-    Ok(LibraryHistorySnapshot {
-        entries: read_library_history(db),
-        sync_enabled: options.sync_ai_history,
-    })
+    Ok(library_history_snapshot(db))
+}
+#[tauri::command]
+pub(crate) fn private_sync_set_library_history_mode(
+    state: tauri::State<AppState>,
+    request: LibraryHistorySyncModeRequest,
+) -> Result<LibraryHistorySnapshot, String> {
+    if !matches!(request.sync_mode.as_str(), "off" | "recent" | "manual") {
+        return Err("书库问答同步方式无效".into());
+    }
+    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    db.set_metadata(LIBRARY_HISTORY_SYNC_MODE_KEY, &request.sync_mode)?;
+    materialize(db)?;
+    Ok(library_history_snapshot(db))
 }
 
 #[tauri::command]
@@ -712,11 +1000,48 @@ pub(crate) fn private_sync_library_history_merge(
     merged.extend(request.entries);
     write_library_history(db, merged)?;
     materialize(db)?;
-    let options = options_from_db(db);
-    Ok(LibraryHistorySnapshot {
-        entries: read_library_history(db),
-        sync_enabled: options.sync_ai_history,
-    })
+    Ok(library_history_snapshot(db))
+}
+#[tauri::command]
+pub(crate) fn private_sync_set_library_history_cloud_saved(
+    state: tauri::State<AppState>,
+    request: LibraryHistoryCloudRequest,
+) -> Result<LibraryHistorySnapshot, String> {
+    if request.id.trim().is_empty() {
+        return Err("书库问答记录身份无效".into());
+    }
+    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+    if library_history_sync_mode(db) != "manual" {
+        return Err("请先在书库问答设置中选择手动同步".into());
+    }
+    let id = clipped_text(&request.id, 160);
+    let mut entries = read_library_history(db);
+    if request.cloud_saved {
+        let selected = entries
+            .iter()
+            .filter(|entry| !is_history_tombstone(entry))
+            .filter(|entry| entry.get("cloudSaved").and_then(Value::as_bool) == Some(true))
+            .filter(|entry| history_entry_id(entry).as_deref() != Some(id.as_str()))
+            .count();
+        if selected >= HISTORY_LIVE_LIMIT {
+            return Err("云端最多保留 100 条问答；请先取消一条云端记录".into());
+        }
+    }
+    let mut found = false;
+    for entry in &mut entries {
+        if !is_history_tombstone(entry) && history_entry_id(entry).as_deref() == Some(id.as_str()) {
+            entry["cloudSaved"] = Value::Bool(request.cloud_saved);
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err("找不到这条书库问答记录".into());
+    }
+    write_library_history(db, entries)?;
+    materialize(db)?;
+    Ok(library_history_snapshot(db))
 }
 
 #[tauri::command]
@@ -736,11 +1061,7 @@ pub(crate) fn private_sync_library_history_delete(
     }));
     write_library_history(db, merged)?;
     materialize(db)?;
-    let options = options_from_db(db);
-    Ok(LibraryHistorySnapshot {
-        entries: read_library_history(db),
-        sync_enabled: options.sync_ai_history,
-    })
+    Ok(library_history_snapshot(db))
 }
 
 #[tauri::command]
@@ -848,12 +1169,12 @@ mod tests {
     }
 
     #[test]
-    fn history_deduplicates_and_caps_at_one_hundred_entries() {
+    fn local_history_deduplicates_without_a_live_entry_cap() {
         let entries = (0..105)
             .map(|i| serde_json::json!({"at": format!("2026-07-29T{i:03}:00:00Z"), "question": "q", "content": i}))
             .collect::<Vec<_>>();
         let normalized = normalized_entries(entries);
-        assert_eq!(normalized.len(), HISTORY_LIVE_LIMIT);
+        assert_eq!(normalized.len(), 105);
         assert!(valid_content_id(&"a".repeat(64)));
     }
 
@@ -875,7 +1196,7 @@ mod tests {
                 (format!("{book:064x}"), entries)
             })
             .collect::<Vec<_>>();
-        let payloads = account_history_payloads(histories);
+        let payloads = account_history_payloads(histories, "recent");
         assert_eq!(
             payloads.values().map(Vec::len).sum::<usize>(),
             HISTORY_LIVE_LIMIT
@@ -888,6 +1209,40 @@ mod tests {
             .values()
             .flatten()
             .any(|entry| entry["id"] == "reader:0:0"));
+    }
+
+    #[test]
+    fn reader_manual_cloud_history_is_bounded_across_tasks_and_books() {
+        let histories = vec![
+            (
+                "a".repeat(64),
+                vec![
+                    serde_json::json!({"id":"question", "at":"2026-08-01T00:00:00Z", "question":"q", "content":"a", "task":"question", "cloudSaved":true}),
+                    serde_json::json!({"id":"summary", "at":"2026-08-02T00:00:00Z", "question":"s", "content":"a", "task":"summary", "cloudSaved":true}),
+                ],
+            ),
+            (
+                "b".repeat(64),
+                vec![
+                    serde_json::json!({"id":"mindmap", "at":"2026-08-03T00:00:00Z", "question":"m", "content":"a", "task":"mindmap", "cloudSaved":true}),
+                    serde_json::json!({"id":"local", "at":"2026-08-04T00:00:00Z", "question":"l", "content":"a", "task":"question"}),
+                ],
+            ),
+        ];
+        let payloads = account_history_payloads(histories, "manual");
+        let ids = payloads
+            .values()
+            .flatten()
+            .filter_map(history_entry_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ids,
+            std::collections::BTreeSet::from([
+                "mindmap".to_string(),
+                "question".to_string(),
+                "summary".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -936,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn library_history_is_bounded_and_deduplicated() {
+    fn library_history_stays_local_without_a_live_entry_cap() {
         let entries = (0..105)
             .map(|index| {
                 serde_json::json!({
@@ -948,10 +1303,32 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let normalized = normalized_library_entries(entries);
-        assert_eq!(normalized.len(), HISTORY_LIVE_LIMIT);
+        assert_eq!(normalized.len(), 105);
         assert_eq!(normalized[0]["question"], "q-104");
     }
 
+    #[test]
+    fn library_cloud_projection_is_bounded_but_local_history_is_not() {
+        let entries = (0..105)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("library:{index}"),
+                    "question": format!("q-{index}"),
+                    "content": "answer",
+                    "at": format!("2026-08-{index:03}T00:00:00Z"),
+                    "cloudSaved": index % 2 == 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(normalized_library_entries(entries.clone()).len(), 105);
+        assert_eq!(
+            cloud_library_history_entries(entries.clone(), "recent").len(),
+            HISTORY_LIVE_LIMIT
+        );
+        let manual = cloud_library_history_entries(entries, "manual");
+        assert_eq!(manual.len(), 53);
+        assert!(manual.iter().all(|entry| entry["cloudSaved"] == true));
+    }
     #[test]
     fn history_retention_contract_matches_runtime_constants() {
         let fixture: Value = serde_json::from_str(include_str!(
@@ -969,6 +1346,11 @@ mod tests {
         assert_eq!(
             fixture["policy"]["tombstonesPerCategory"],
             HISTORY_TOMBSTONE_LIMIT
+        );
+        assert_eq!(fixture["policy"]["localLiveEntries"], "unbounded");
+        assert_eq!(
+            fixture["policy"]["manualCloudSelectionMax"],
+            HISTORY_LIVE_LIMIT
         );
     }
 }

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "retentionDays": 90,
+  "history": {
+    "storage": "complete_changed_entity",
+    "compression": "zlib-6",
+    "integrity": ["payload_bytes", "sha256"],
+    "fieldDeltaChain": false,
+    "keepPreWindowAnchorPerEntity": true,
+    "excludedKinds": ["secret_bundle_v1"]
+  },
+  "status": {
+    "method": "GET",
+    "path": "/sync/recovery/status",
+    "returnsPayload": false
+  },
+  "restore": {
+    "method": "POST",
+    "path": "/sync/recovery/restore",
+    "request": {
+      "confirm": true,
+      "target_at": 1786155000000,
+      "data_generation": 1
+    },
+    "expected": {
+      "data_generation": 2,
+      "tokens_revoked": true,
+      "entitiesCreatedAfterTargetBecomeTombstones": true
+    }
+  },
+  "permanentDeletionPurgesHistory": true,
+  "databaseSnapshots": {
+    "format": "sqlite.db.gz",
+    "quickCheckRequired": true,
+    "sha256Required": true,
+    "keepDaily": 7,
+    "keepWeekly": 4,
+    "keepMonthly": 12,
+    "independentFailureDomainRequired": true
+  }
+}

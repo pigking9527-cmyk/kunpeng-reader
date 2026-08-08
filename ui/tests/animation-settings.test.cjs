@@ -176,6 +176,8 @@ test("reader animation controls reach each requested interaction", () => {
   assert.match(notes, /openAnnotations\(highlights\.length - 1, true\)/);
   assert.match(layout, /readerAnimationSettingOn/);
   assert.match(transition, /readerAnimationSettingOn\('pageTurn'\)/);
+  assert.doesNotMatch(transition, /prefers-reduced-motion/);
+  assert.doesNotMatch(pageStyle, /prefers-reduced-motion/);
   assert.match(readerSettings, /event\.key !== "readerSettings"/);
   assert.match(readerSettings, /ReaderAnimationSettings\?\.setPageTurnFromReader\?\.\(turnFx\.value !== "off"\)/);
   assert.match(annotations, /readerAnimationSettingOn\('highlightSettings'\)/);

@@ -99,6 +99,11 @@ test("Bug feedback requests the reader problem-state snapshot as an attachment",
   assert.match(mainTrace, /function wireShellOperations/);
   assert.match(mainTrace, /\[data-problem-target\]/);
   assert.match(mainTrace, /reader-window-trace/);
+  assert.match(mainTrace, /function restoreShelfDocumentFocus/);
+  assert.match(mainTrace, /root\.focus\?\.\(\)/);
+  assert.match(mainTrace, /querySelector\?\.\("\.content"\)\?\.focus/);
+  assert.match(mainTrace, /attempts < 6/);
+  assert.match(mainTrace, /pushShellEvent\("main_focus"/);
   assert.match(mainTrace, /reader-performance-trace/);
   assert.match(mainTrace, /function summarizeReaderPerformance/);
   assert.match(mainTrace, /reader_performance: summarizeReaderPerformance\(recentShell\)/);
@@ -179,7 +184,8 @@ test("Chinese 注1 cross-chapter references are treated as in-place notes", () =
   assert.match(layout, /\(\?:注\|註\)\\s\*\\d\{1,5\}/);
   assert.match(layout, /\^zww\\d\{1,5\}\$/);
   assert.match(annotations, /\(\?:\(\?:注\|註\)\\s\*\)\?\\d\{1,4\}/);
-  assert.match(annotations, /isNoteLink\(a\)&&frag\)\{showFootnote\(a,ciT,frag\);return;\}/);
+  assert.match(annotations, /var footnoteJump=inFootnote\|\|isNoteLink\(a\)/);
+  assert.match(annotations, /footnoteJump&&frag\)\{showFootnote\(a,ciT,frag\);return;\}/);
 });
 
 test("reader page reports why a click did not turn the page", () => {
@@ -198,9 +204,10 @@ test("reader page reports why a click did not turn the page", () => {
   assert.match(runtime, /markPageTurnInput\('shell'\)/);
   assert.match(layout, /beginChapterBugTrace\(i,where\)/);
   assert.match(layout, /finishChapterBugTrace\(bugTraceToken,true,pageInCh\)/);
-  ["chapter_pending", "overlay", "link", "drag"].forEach((outcome) => {
+  ["chapter_pending", "overlay", "drag"].forEach((outcome) => {
     assert.match(annotations, new RegExp("readerBugTrace\\('click','" + outcome + "'"));
   });
+  assert.match(annotations, /readerBugTrace\('click',inFootnote\?'footnote':'link',e\)/);
   assert.match(annotations, /readerBugTrace\('click','page_next'/);
   assert.match(annotations, /readerBugTrace\('click','page_prev'/);
 });

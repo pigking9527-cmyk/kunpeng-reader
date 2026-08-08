@@ -8,13 +8,13 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const SYNC_PULL_PAGE_SIZE: usize = 1_000;
 const MAX_SYNC_PULL_PAGES: usize = 1_000;
 const SYNC_PUSH_BATCH_ENTITIES: usize = 400;
 const SYNC_PUSH_BATCH_BYTES: usize = 2 * 1024 * 1024;
-const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const SYNC_REQUEST_ATTEMPTS: usize = 3;
 const SYNC_RETRY_DELAYS_MS: &[u64] = &[250, 500];
 const SYNC_PAUSED: &str = "__sync_paused__";
@@ -183,6 +183,8 @@ pub(crate) struct AuthResponse {
     user: AuthUser,
     #[serde(default = "default_data_generation")]
     data_generation: i64,
+    #[serde(default)]
+    sync_enabled: bool,
 }
 
 fn default_data_generation() -> i64 {
@@ -1014,6 +1016,7 @@ pub(crate) struct AuthSecurityStatus {
     pub email: String,
     pub recovery_available: bool,
     pub mail_configured: bool,
+    pub sync_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -1553,6 +1556,19 @@ fn sync_now_inner_with_limits_impl(
     if !pull_completed {
         return Err("pull 分页数量超过安全上限，稍后可继续同步".into());
     }
+    // Palette entities carry only asset metadata. Download their binary files
+    // before runtime settings consume the references, never through WebView IPC.
+    let downloaded_assets = {
+        let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        db.sync_entities_by_kind(crate::reader_palettes::READER_PALETTE_KIND)?
+    };
+    crate::reader_backgrounds::sync_download_referenced_assets(
+        &agent,
+        &base,
+        &settings.token,
+        &downloaded_assets,
+    )?;
     data_migration::apply_sqlite_to_runtime(state)?;
     // Persist the field-wise book merge; unchanged JSON does not become dirty.
     data_migration::migrate_json_to_sqlite(state)?;
@@ -1561,6 +1577,15 @@ fn sync_now_inner_with_limits_impl(
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
         db.pending_sync_entities(&scope)?
     };
+    // Ensure every referenced image has reached the authenticated binary store
+    // before the tiny palette entity can make that reference visible remotely.
+    crate::reader_backgrounds::sync_upload_referenced_assets(
+        &agent,
+        &base,
+        &settings.token,
+        settings.data_generation,
+        &entities,
+    )?;
     let initial_push = push_sync_entities(
         state,
         task,
@@ -1818,6 +1843,9 @@ pub(crate) async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String
             let state = app.state::<AppState>();
             let result = sync_now_inner(state.inner(), Some(&task));
             settle_sync_task(task, &result);
+            if result.is_ok() {
+                let _ = app.emit("app-settings-synced", ());
+            }
             result
         })
         .await
@@ -1864,6 +1892,7 @@ mod tests {
                 username: "alice".to_string(),
             },
             data_generation: 1,
+            sync_enabled: true,
         };
 
         let settings_json = serde_json::to_value(settings).unwrap();

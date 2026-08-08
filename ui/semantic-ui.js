@@ -36,6 +36,7 @@
     const retrievalM3Option = el("sem-retrieval-m3-option");
     const gpuMeta = el("sem-gpu-meta");
     const gpuRefreshButton = el("sem-gpu-refresh");
+    const gpuInstallButton = el("sem-gpu-install");
     const rerankerMeta = el("sem-reranker-meta");
     const rerankerDownloadButton = el("sem-reranker-download");
     const rerankerDeleteButton = el("sem-reranker-delete");
@@ -66,6 +67,9 @@
     let statusInFlight = false;
     let visible = false;
     let gpuStatus = null;
+    let gpuInstallRunning = false;
+    let gpuRefreshInFlight = false;
+    let gpuProgressUnlisten = null;
     const listeners = [];
 
     function on(element, eventName, handler) {
@@ -198,9 +202,23 @@
           ? semText("semProgressBooks", "{done}/{total} books", { done: multiProfileDone, total: multiProfileTotal }) + (progress.multi_profile_ready ? `, ${semText("semCompleted", "completed")}` : (multiProfileDone ? `, ${semText("semUpdateNeeded", "needs update")}` : ""))
           : semText("semMultiProfileDescription", "Classifies topics in a book for better cross-topic results.");
       }
-      if (gpuMeta) {
+      const gpuDownloadTotal = Math.max(0, Number(gpuStatus?.runtime_download_bytes || 0));
+      const gpuDownloaded = Math.max(0, Math.min(gpuDownloadTotal, Number(gpuStatus?.runtime_downloaded_bytes || 0)));
+      const gpuDownloadPercent = gpuDownloadTotal ? Math.round(gpuDownloaded * 100 / gpuDownloadTotal) : 0;
+      const hasSavedGpuDownload = gpuDownloaded > 0 && !gpuStatus?.runtime_ready;
+      if (gpuMeta && !gpuInstallRunning) {
         const hardwareMessage = gpuStatus?.message || semText("semGpuInitial", "Select Recheck to read the local GPU status.");
         gpuMeta.textContent = hardwareMessage;
+        gpuMeta.title = hardwareMessage;
+      }
+      if (gpuInstallButton) {
+        gpuInstallButton.hidden = !gpuStatus?.runtime_install_available || !!gpuStatus?.runtime_ready;
+        gpuInstallButton.disabled = gpuInstallRunning;
+        gpuInstallButton.textContent = gpuInstallRunning
+          ? semText("semInstallingGpuRuntime", "Installing GPU component…")
+          : hasSavedGpuDownload
+          ? semText("semResumeGpuRuntime", "Resume GPU component installation ({percent}%)", { percent: gpuDownloadPercent })
+          : semText("semInstallGpuRuntime", "Install GPU component");
       }
       if (retrievalSection) retrievalSection.hidden = false;
       if (retrievalM3Option) {
@@ -289,7 +307,8 @@
     }
 
     async function refreshGpuStatus() {
-      if (!gpuMeta) return;
+      if (!gpuMeta || gpuRefreshInFlight || gpuInstallRunning) return;
+      gpuRefreshInFlight = true;
       gpuMeta.textContent = semText("semCheckingGpu", "Detecting local GPU…");
       if (gpuRefreshButton) gpuRefreshButton.disabled = true;
       try {
@@ -299,10 +318,34 @@
         gpuStatus = { message: semText("semGpuFailed", "Could not detect GPU: {error}", { error }) };
         render(cache.get() || {});
       } finally {
+        gpuRefreshInFlight = false;
         if (gpuRefreshButton) gpuRefreshButton.disabled = false;
       }
     }
 
+    async function installGpuRuntime() {
+      if (!gpuStatus?.runtime_install_available || gpuInstallRunning) return;
+      const total = Math.max(0, Number(gpuStatus.runtime_download_bytes || 0));
+      const downloaded = Math.max(0, Math.min(total, Number(gpuStatus.runtime_downloaded_bytes || 0)));
+      const gib = Math.max(0.1, (total - downloaded) / (1024 ** 3)).toFixed(1);
+      if (!confirmAction(semText("semGpuInstallConfirm", "Download and install about {size} GiB of remaining NVIDIA GPU runtime files? The CPU fallback remains available.", { size: gib }))) return;
+      gpuInstallRunning = true;
+      render(cache.get() || {});
+      const initialPercent = total ? Math.round(downloaded * 100 / total) : 0;
+      if (gpuMeta) gpuMeta.textContent = semText("semGpuDownloading", "Downloading GPU component: {percent}%…", { percent: initialPercent });
+      try {
+        await invoke("install_semantic_gpu_runtime");
+        await refreshGpuStatus();
+      } catch (error) {
+        gpuStatus = {
+          ...(gpuStatus || {}),
+          message: semText("semGpuInstallFailed", "GPU component installation failed: {error}", { error }),
+        };
+      } finally {
+        gpuInstallRunning = false;
+        render(cache.get() || {});
+      }
+    }
     function open() {
       settingsModal?.classList.remove("show");
       modal?.classList.add("show");
@@ -310,8 +353,9 @@
       const cached = cache.get();
       if (cached) render(cached);
       else render({});
-      // 打开设置只读前台轻量快照；逐书元数据扫描和 GPU 探测均须由用户明确触发。
+      // 索引快照与 GPU 探测都异步刷新；GPU 探测在 Rust 阻塞线程执行，不占用页面线程。
       global.setTimeout(() => { void refresh(false); }, 30);
+      global.setTimeout(() => { void refreshGpuStatus(); }, 60);
     }
 
     function close() {
@@ -371,6 +415,7 @@
       }
     });
     on(gpuRefreshButton, "click", refreshGpuStatus);
+    on(gpuInstallButton, "click", installGpuRuntime);
     on(vectorBuildButton, "click", () => run("build_semantic_vectors", "正在启动语义索引任务…", "启动语义索引失败："));
     on(vectorPauseButton, "click", () => run("pause_semantic_vectors", "正在取消当前图书的未完成索引…", "暂停语义索引失败："));
     on(acceleratorBuildButton, "click", () => run("build_semantic_accelerator", "正在启动加速索引任务…", "启动加速索引失败："));
@@ -408,6 +453,15 @@
     on(rerankerDeleteButton, "click", () => run("delete_semantic_reranker", "正在删除重排模型…", "删除重排模型失败："));
     on(m3BuildButton, "click", () => run("build_semantic_m3_index", "正在建立 BGE-M3 稀疏与 ColBERT 索引…", "建立 M3 索引失败："));
     on(m3DeleteButton, "click", () => run("delete_semantic_m3_index", "正在删除 BGE-M3 索引…", "删除 M3 索引失败："));
+    global.__TAURI__?.event?.listen?.("semantic-gpu-runtime-progress", (event) => {
+      if (!gpuInstallRunning || !gpuMeta) return;
+      const payload = event?.payload || {};
+      const total = Math.max(1, Number(payload.total_bytes || 0));
+      const done = Math.max(0, Number(payload.downloaded_bytes || 0));
+      const percent = Math.max(0, Math.min(100, Math.round(done * 100 / total)));
+      gpuStatus = { ...(gpuStatus || {}), runtime_download_bytes: total, runtime_downloaded_bytes: done };
+      gpuMeta.textContent = semText("semGpuDownloading", "Downloading GPU component: {percent}%…", { percent });
+    }).then((unlisten) => { gpuProgressUnlisten = unlisten; }).catch(() => {});
     const onLanguageChanged = () => {
       // The modal is populated after the main page, so reapply static labels
       // and rerender its generated state whenever the app language changes.
@@ -421,6 +475,8 @@
       visible = false;
       updatePolling(false);
       for (const remove of listeners.splice(0)) remove();
+      gpuProgressUnlisten?.();
+      gpuProgressUnlisten = null;
       activeController = null;
     }
 

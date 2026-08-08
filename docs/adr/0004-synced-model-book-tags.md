@@ -13,7 +13,7 @@
 新增可选实体 `model_book_tags_v1/<content_id>`，payload 为 `schema_version`、`content_id` 和规范化的 `tags` 数组。它与 `book_state_v2`、用户手工 `tags` 分离：
 
 - 分类任务始终写入并同步 `model_book_tags_v1`；书库问答始终读取这些标签，设置开关只控制本机书库问答范围筛选是否显示、使用这些标签。
-- 用户手工标签继续保存在既有 `book_state_v2.tags`，自动标签绝不回写到该字段。
+- 用户手工标签自 ADR-0016 起以 `user_book_tags_v1` 为权威；`book_state_v2.tags` 只保留兼容镜像，自动标签绝不写入二者。
 - 标签实体以图书内容 SHA-256 为稳定 ID；不含书籍正文、本机路径、封面、模型输入、联网搜索原文、API Key 或模型凭据。
 - 冲突仍使用现有实体级 LWW 规则。关闭开关的客户端必须下载并保留未知或未启用的标签实体，不能上传空数组覆盖它。
 

@@ -121,13 +121,31 @@ const aiReaderAnswer = document.getElementById("ai-reader-answer");
 const aiReaderSources = document.getElementById("ai-reader-sources");
 const aiReaderQuestion = document.getElementById("ai-reader-question");
 const aiReaderHistory = document.getElementById("ai-reader-history");
+const aiReaderHistoryMenu = document.getElementById("ai-reader-history-menu");
+const aiReaderHistorySettingsButton = document.getElementById("ai-reader-history-settings-btn");
 const aiReaderSourcePreview = document.getElementById("ai-reader-source-preview");
 let aiReaderSelectedText = "";
 let aiReaderSelectedAnchor = null;
 let aiReaderPreviewCitation = null;
 let aiReaderRequestRunning = false;
 let aiReaderProgressTimer = 0;
+let aiReaderHistorySync = { syncEnabled: false, syncMode: "off", cloudIds: new Set() };
 let readerFirstReadyLogged = false;
+const AI_READER_WIDTH_KEY = "aiReaderSideWidthV1";
+function setAiReaderSideWidth(mode) {
+  const selected = ["current", "half", "full"].includes(mode) ? mode : "current";
+  if (aiReaderSide) {
+    if (selected === "current") aiReaderSide.style.removeProperty("--ai-reader-width");
+    else aiReaderSide.style.setProperty("--ai-reader-width", selected === "half" ? "50%" : "100%");
+  }
+  document.querySelectorAll("[data-ai-reader-width]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.aiReaderWidth === selected);
+  });
+  try { localStorage.setItem(AI_READER_WIDTH_KEY, selected); } catch (_) { /* local settings are optional */ }
+}
+function restoreAiReaderSideWidth() {
+  try { setAiReaderSideWidth(localStorage.getItem(AI_READER_WIDTH_KEY) || "current"); } catch (_) { setAiReaderSideWidth("current"); }
+}
 function applyAiReaderSide(open) {
   if (!aiReaderSide) return;
   document.body.classList.toggle("ai-reader-open", !!open);
@@ -170,7 +188,7 @@ function aiReaderSessionMemoryKey() { return "aiReaderSessionMemoryV1:" + aiRead
 function aiReaderTaskLabel(task) { return task === "summary" ? readerText("summaryTask", "总结已读内容") : task === "mindmap" ? readerText("mindMapTask", "生成脑图") : readerText("askTask", "提问"); }
 function aiReaderHistoryEntryId(entry) { return String(entry?.id || `legacy:${entry?.at || "unknown"}`); }
 function aiReaderHistoryDeleted(entry) { return Boolean(entry?.deletedAt || entry?.deleted_at); }
-const AI_READER_LOCAL_HISTORY_LIMIT = 100;
+
 const AI_READER_HISTORY_TOMBSTONE_LIMIT = 200;
 function aiReaderNewHistoryId() {
   const suffix = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -185,7 +203,7 @@ function aiReaderMergeHistoryEntries(...groups) {
   });
   const entries = Array.from(byId.values());
   const live = entries.filter((entry) => !aiReaderHistoryDeleted(entry))
-    .sort((left, right) => String(right.at || "").localeCompare(String(left.at || ""))).slice(0, AI_READER_LOCAL_HISTORY_LIMIT);
+    .sort((left, right) => String(right.at || "").localeCompare(String(left.at || "")));
   const tombstones = entries.filter(aiReaderHistoryDeleted)
     .sort((left, right) => String(right.deletedAt || right.deleted_at || "").localeCompare(String(left.deletedAt || left.deleted_at || ""))).slice(0, AI_READER_HISTORY_TOMBSTONE_LIMIT);
   return [...live, ...tombstones];
@@ -234,15 +252,63 @@ function aiReaderSessionMemory() {
     return `会话 ${index + 1}（${task}）：${String(entry.content || "").slice(0, 620)}`;
   }).join("\n\n").slice(0, 2800);
 }
+function aiReaderApplyHistorySnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.entries)) return;
+  aiReaderHistorySync = {
+    syncEnabled: snapshot.syncEnabled === true,
+    syncMode: String(snapshot.syncMode || "off"),
+    cloudIds: new Set(snapshot.entries
+      .filter((entry) => !aiReaderHistoryDeleted(entry) && entry.cloudSaved === true)
+      .map(aiReaderHistoryEntryId)),
+  };
+  const known = aiReaderReadHistory();
+  // Recent mode derives the blue Cloud label from the account-wide projection;
+  // it must not turn that display-only result into a saved manual selection.
+  const remoteEntries = aiReaderHistorySync.syncMode === "recent"
+    ? snapshot.entries.map((entry) => { const copy = { ...entry }; delete copy.cloudSaved; return copy; })
+    : snapshot.entries;
+  const merged = aiReaderMergeHistoryEntries(known, remoteEntries);
+  localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(merged));
+  document.querySelectorAll("[data-ai-reader-sync-mode]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.aiReaderSyncMode === aiReaderHistorySync.syncMode);
+  });
+}
 async function aiReaderMergeSyncedHistory() {
   if (!currentBookContentId) return;
   try {
-    const remote = await invoke("private_sync_history_list", { contentId: currentBookContentId });
-    if (!Array.isArray(remote) || !remote.length) return;
-    const known = aiReaderReadHistory();
-    const merged = aiReaderMergeHistoryEntries(remote, known);
-    localStorage.setItem(aiReaderHistoryKey(), JSON.stringify(merged));
-  } catch (_) { /* 同步历史不可用时继续使用本机历史。 */ }
+    const snapshot = await invoke("private_sync_reader_history_snapshot", { contentId: currentBookContentId });
+    aiReaderApplyHistorySnapshot(snapshot);
+    if (aiReaderHistory?.classList.contains("show")) aiReaderShowHistory(true);
+  } catch (_) { /* 同步 history unavailable: keep local records. */ }
+}
+async function aiReaderSetHistorySyncMode(syncMode) {
+  if (!currentBookContentId) return;
+  try {
+    const snapshot = await invoke("private_sync_set_reader_history_mode", { request: { contentId: currentBookContentId, syncMode } });
+    aiReaderApplyHistorySnapshot(snapshot);
+    aiReaderHistoryMenu.hidden = true;
+    aiReaderShowHistory(true);
+    aiReaderSetStatus(syncMode === "manual"
+      ? readerText("aiHistoryManualEnabled", "已切换为手动同步；点击每条记录旁的“云端”选择。")
+      : readerText("aiHistoryRecentEnabled", "已同步最近 100 条智读与脑图记录。"));
+  } catch (error) { aiReaderSetStatus(readerText("aiHistorySyncFailed", "更新智读历史同步设置失败：{error}", { error })); }
+}
+async function aiReaderToggleHistoryCloud(entry) {
+  if (!currentBookContentId) return;
+  try {
+    if (aiReaderHistorySync.syncMode !== "manual") {
+      await aiReaderSetHistorySyncMode("manual");
+    }
+    const snapshot = await invoke("private_sync_set_reader_history_cloud_saved", {
+      request: {
+        contentId: currentBookContentId,
+        id: aiReaderHistoryEntryId(entry),
+        cloudSaved: !entry.cloudSaved,
+      },
+    });
+    aiReaderApplyHistorySnapshot(snapshot);
+    aiReaderShowHistory(true);
+  } catch (error) { aiReaderSetStatus(readerText("aiHistoryCloudFailed", "更新云端记录失败：{error}", { error })); }
 }
 function aiReaderSourceLabel(source, index) {
   const kind = String(source?.sourceKind || "已读正文");
@@ -469,8 +535,14 @@ function aiReaderRenderAnswer(answer, task) {
   let content = String(answer.content || "");
   if (task === "mindmap") {
     const tree = aiReaderParseMindmap(content);
-    if (tree) aiReaderAnswer.replaceChildren(aiReaderRenderMindmap(tree));
-    else aiReaderAnswer.textContent = content || readerText("noMindMap", "模型没有返回可绘制的脑图，请重试。");
+    if (tree) {
+      const wrap = document.createElement("div"); wrap.className = "ai-reader-mindmap-wrap";
+      const collapse = document.createElement("button"); collapse.type = "button"; collapse.className = "ai-reader-mindmap-collapse";
+      collapse.textContent = readerText("collapseMindMap", "收起脑图");
+      collapse.addEventListener("click", () => aiReaderShowHistory(true));
+      wrap.append(collapse, aiReaderRenderMindmap(tree));
+      aiReaderAnswer.replaceChildren(wrap);
+    } else aiReaderAnswer.textContent = content || readerText("noMindMap", "模型没有返回可绘制的脑图，请重试。");
   } else aiReaderAnswer.replaceChildren(aiReaderRenderMarkdown(content, Array.isArray(answer.sources) ? answer.sources : []));
   aiReaderAnswer.hidden = false;
   aiReaderHistory?.classList.remove("show");
@@ -507,6 +579,20 @@ function aiReaderShowHistory(forceOpen = false) {
     meta.textContent = `${aiReaderTaskLabel(entry.task)} · ${entry.at ? new Date(entry.at).toLocaleString() : readerText("historyRecord", "历史记录")}`;
     item.append(question, meta);
     item.addEventListener("click", () => aiReaderRenderAnswer(entry, entry.task || "question"));
+    const cloud = document.createElement("button"); cloud.type = "button"; cloud.className = "ai-reader-history-cloud";
+    const cloudSaved = aiReaderHistorySync.syncEnabled && (
+      aiReaderHistorySync.syncMode === "recent"
+        ? aiReaderHistorySync.cloudIds.has(aiReaderHistoryEntryId(entry))
+        : entry.cloudSaved === true
+    );
+    cloud.classList.toggle("is-synced", cloudSaved);
+    cloud.textContent = readerText("cloud", "云端");
+    cloud.title = cloudSaved ? readerText("cloudSynced", "已同步到云端") : readerText("cloudNotSynced", "未同步到云端");
+    cloud.setAttribute("aria-label", cloud.title + ": " + question.textContent);
+    cloud.addEventListener("click", async (event) => {
+      event.preventDefault(); event.stopPropagation();
+      await aiReaderToggleHistoryCloud(entry);
+    });
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "ai-reader-history-delete"; remove.textContent = readerText("delete", "删除");
     remove.setAttribute("aria-label", readerText("delete", "删除") + ": " + question.textContent);
     remove.addEventListener("click", async (event) => {
@@ -526,7 +612,7 @@ function aiReaderShowHistory(forceOpen = false) {
         aiReaderSetStatus(readerText("historyDeleteFailed", "删除智读记录失败：{error}", { error }));
       }
     });
-    row.append(item, remove);
+    row.append(item, cloud, remove);
     aiReaderHistory.appendChild(row);
   });
 }
@@ -604,6 +690,13 @@ async function runAiReader(task) {
 document.getElementById("ai-reader-btn")?.addEventListener("click", (event) => { event.stopPropagation(); openAiReader(); });
 document.getElementById("ai-reader-close")?.addEventListener("click", () => { aiReaderHideSourcePreview(); setAiReaderSide(false); });
 document.getElementById("ai-reader-history-btn")?.addEventListener("click", aiReaderShowHistory);
+aiReaderHistorySettingsButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  aiReaderHistoryMenu.hidden = !aiReaderHistoryMenu.hidden;
+});
+document.querySelectorAll("[data-ai-reader-sync-mode]").forEach((button) => button.addEventListener("click", () => aiReaderSetHistorySyncMode(button.dataset.aiReaderSyncMode)));
+document.querySelectorAll("[data-ai-reader-width]").forEach((button) => button.addEventListener("click", () => setAiReaderSideWidth(button.dataset.aiReaderWidth)));
+restoreAiReaderSideWidth();
 document.getElementById("ai-reader-enter-submit")?.addEventListener("click", () => runAiReader("question"));
 aiReaderQuestion?.addEventListener("keydown", (event) => {
   // Enter 提问，Shift + Enter 换行；候选词确认的 Enter 不得提前请求 API。
@@ -614,6 +707,7 @@ aiReaderQuestion?.addEventListener("keydown", (event) => {
   }
 });
 document.addEventListener("click", (event) => {
+  if (aiReaderHistoryMenu && !aiReaderHistoryMenu.hidden && !event.target?.closest?.(".ai-reader-history-controls")) aiReaderHistoryMenu.hidden = true;
   if (aiReaderSourcePreview?.hidden || aiReaderSourcePreview?.contains(event.target) || event.target?.closest?.(".ai-reader-citation")) return;
   aiReaderHideSourcePreview();
 });
@@ -625,9 +719,11 @@ document.getElementById("ai-reader-ask")?.addEventListener("click", () => runAiR
 document.getElementById("ai-reader-summary")?.addEventListener("click", () => runAiReader("summary"));
 document.getElementById("ai-reader-mindmap")?.addEventListener("click", () => runAiReader("mindmap"));
 readerToolbar?.addEventListener("pointerenter", () => {
+  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.PREFERENCES)) return;
   ReaderShell.dispatch({ type: "TOOLBAR_POINTER_ENTER" });
 });
 readerToolbar?.addEventListener("pointerleave", () => {
+  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.PREFERENCES)) return;
   ReaderShell.dispatch({ type: "TOOLBAR_POINTER_LEAVE" });
 });
 document.getElementById("immersive-btn").addEventListener("click", (e) => {
@@ -1125,21 +1221,113 @@ const bookProgressTrack = document.getElementById("book-progress-track");
 const bookProgressFill = document.getElementById("book-progress-fill");
 const bookProgressThumb = document.getElementById("book-progress-thumb");
 const bookProgressRestore = document.getElementById("book-progress-restore");
+const readerJumpBack = document.getElementById("reader-jump-back");
 let vdragging = false;
 let bookProgressDragging = false;
-let bookProgressRestorePoint = null;
+let bookProgressPinned = false;
+const bookProgressJumpHistory = [];
+const readerNavigationHistory = [];
+let readerNavigationBackVisible = false;
+let readerNavigationDismissTimer = 0;
+let readerNavigationAwaitingLanding = false;
+let readerNavigationLastPageSignature = "";
+let readerNavigationPagesMoved = 0;
+let readerJumpBackSettingsSignature = "";
 let bookProgressLastFrac = 0;
 let bookProgressLastSent = 0;
-
+let bookProgressPreviewFrac = null;
+let bookProgressPreviewTimer = 0;
+function readerJumpBackConfig() {
+  const current = window.ReaderSettings?.get?.() || {};
+  return {
+    enabled: current.showReaderJumpBack !== false,
+    mode: current.readerJumpBackDismissMode === "time" ? "time" : "pages",
+    seconds: Math.max(1, Math.min(600, Number(current.readerJumpBackDismissSeconds) || 30)),
+    pages: Math.max(1, Math.min(100, Number(current.readerJumpBackDismissPages) || 3)),
+    sizeLevel: Math.max(1, Math.min(10, Number(current.readerJumpBackSizeLevel) || 1)),
+  };
+}
+function applyReaderJumpBackSize(sizeLevel) {
+  if (!readerJumpBack) return;
+  const normalized = Math.max(1, Math.min(10, Number(sizeLevel) || 1));
+  const iconSize = Math.round(32 * (1 + ((normalized - 1) * 4 / 9)));
+  readerJumpBack.style.setProperty("--reader-jump-back-icon-size", `${iconSize}px`);
+  readerJumpBack.style.setProperty("--reader-jump-back-hit-size", `${Math.max(44, iconSize + 12)}px`);
+}
+function clearReaderNavigationDismissTimer() {
+  if (readerNavigationDismissTimer) clearTimeout(readerNavigationDismissTimer);
+  readerNavigationDismissTimer = 0;
+}
+function dismissReaderNavigationBack(clearHistory = false) {
+  clearReaderNavigationDismissTimer();
+  readerNavigationBackVisible = false;
+  readerNavigationAwaitingLanding = false;
+  readerNavigationLastPageSignature = "";
+  readerNavigationPagesMoved = 0;
+  if (clearHistory) readerNavigationHistory.length = 0;
+  updateBookProgress();
+}
+function armReaderNavigationBackVisibility() {
+  clearReaderNavigationDismissTimer();
+  const config = readerJumpBackConfig();
+  if (!config.enabled || readerNavigationHistory.length === 0) {
+    readerNavigationBackVisible = false;
+    updateBookProgress();
+    return;
+  }
+  readerNavigationBackVisible = true;
+  readerNavigationAwaitingLanding = true;
+  readerNavigationLastPageSignature = "";
+  readerNavigationPagesMoved = 0;
+  if (config.mode === "time") {
+    readerNavigationDismissTimer = setTimeout(() => dismissReaderNavigationBack(false), config.seconds * 1000);
+  }
+  updateBookProgress();
+}
+function trackReaderNavigationBackProgress(data) {
+  const config = readerJumpBackConfig();
+  if (!readerNavigationBackVisible || config.mode !== "pages") return;
+  const signature = `${Number(data?.gPage) || 0}_${Number(data?.page) || 0}_${Number(data?.chapter) || 0}`;
+  if (readerNavigationAwaitingLanding) {
+    readerNavigationAwaitingLanding = false;
+    readerNavigationLastPageSignature = signature;
+    return;
+  }
+  if (readerNavigationLastPageSignature && signature !== readerNavigationLastPageSignature) {
+    readerNavigationPagesMoved += 1;
+    if (readerNavigationPagesMoved >= config.pages) {
+      dismissReaderNavigationBack(false);
+      return;
+    }
+  }
+  readerNavigationLastPageSignature = signature;
+}
+function syncReaderJumpBackSettings() {
+  const config = readerJumpBackConfig();
+  const signature = `${config.enabled}_${config.mode}_${config.seconds}_${config.pages}_${config.sizeLevel}`;
+  if (signature === readerJumpBackSettingsSignature) return;
+  readerJumpBackSettingsSignature = signature;
+  applyReaderJumpBackSize(config.sizeLevel);
+  if (!config.enabled) dismissReaderNavigationBack(true);
+  else if (readerNavigationHistory.length) armReaderNavigationBackVisibility();
+  else updateBookProgress();
+}
 function showBookProgress() {
   document.body.classList.remove("book-progress-hidden");
   ReaderShell.dispatch({ type: "SHOW_TOOLBAR" });
   updateBookProgress();
 }
+function pinBookProgress() {
+  bookProgressPinned = true;
+  showBookProgress();
+}
 function hideBookProgress() {
+  bookProgressPinned = false;
+  if (!ReaderShell.isImmersive()) document.body.classList.add("book-progress-hidden");
   ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
 }
 function hideBookProgressAfterReadingAction() {
+  bookProgressPinned = false;
   // 关闭沉浸模式后顶部菜单常驻，但底部横向整书进度不应遮挡正文。
   // 沉浸模式继续完全跟随工具栏，不在这里改变其既有显隐行为。
   if (!ReaderShell.isImmersive()) document.body.classList.add("book-progress-hidden");
@@ -1165,8 +1353,37 @@ function updateThumb() {
 }
 function updateBookProgress() {
   if (!bookProgressTrack) return;
-  paintBookProgress(Math.max(0, Math.min(100, Number(curProgress) || 0)));
-  bookProgressEl.classList.toggle("can-restore", !!bookProgressRestorePoint);
+  const percent = bookProgressPreviewFrac === null
+    ? Math.max(0, Math.min(100, Number(curProgress) || 0))
+    : bookProgressPreviewFrac * 100;
+  paintBookProgress(percent);
+  const canRestoreProgress = bookProgressJumpHistory.length > 0;
+  bookProgressEl.classList.toggle("can-restore", canRestoreProgress);
+  if (readerJumpBack) readerJumpBack.hidden = !readerJumpBackConfig().enabled || !readerNavigationBackVisible || readerNavigationHistory.length === 0;
+}
+function clearBookProgressPreviewTimer() {
+  if (bookProgressPreviewTimer) clearTimeout(bookProgressPreviewTimer);
+  bookProgressPreviewTimer = 0;
+}
+function setBookProgressPreview(frac) {
+  bookProgressPreviewFrac = Math.max(0.01, Math.min(1, Number(frac) || 0.01));
+  paintBookProgress(bookProgressPreviewFrac * 100);
+}
+function scheduleBookProgressPreviewSettle() {
+  clearBookProgressPreviewTimer();
+  bookProgressPreviewTimer = setTimeout(() => {
+    bookProgressPreviewTimer = 0;
+    if (bookProgressDragging) return;
+    bookProgressPreviewFrac = null;
+    updateBookProgress();
+  }, 900);
+}
+function settleBookProgressPreview() {
+  if (bookProgressDragging || bookProgressPreviewFrac === null) return;
+  const actual = Math.max(0, Math.min(1, (Number(curProgress) || 0) / 100));
+  if (Math.abs(actual - bookProgressPreviewFrac) > 0.015) return;
+  clearBookProgressPreviewTimer();
+  bookProgressPreviewFrac = null;
 }
 function paintBookProgress(percent) {
   if (!bookProgressTrack) return;
@@ -1174,35 +1391,62 @@ function paintBookProgress(percent) {
   bookProgressThumb.style.left = percent + "%";
   bookProgressTrack.setAttribute("aria-valuenow", String(Math.max(1, Math.round(percent))));
 }
-function rememberBookProgressRestorePoint() {
-  if (bookProgressRestorePoint) return;
-  bookProgressRestorePoint = {
-    chapter: Math.max(0, Number(curChapter) || 0),
-    chFrac: Math.max(0, Math.min(1, Number(curChFrac) || 0)),
-    progress: Math.max(0, Math.min(100, Number(curProgress) || 0)),
+function normalizedBookProgressPoint(point) {
+  const source = point && typeof point === "object" ? point : {};
+  return {
+    chapter: Math.max(0, Number(source.chapter ?? curChapter) || 0),
+    chFrac: Math.max(0, Math.min(1, Number(source.chFrac ?? curChFrac) || 0)),
+    progress: Math.max(0, Math.min(100, Number(source.progress ?? curProgress) || 0)),
   };
+}
+function sameBookProgressPoint(left, right) {
+  return !!left && !!right && left.chapter === right.chapter && Math.abs(left.chFrac - right.chFrac) < 0.0001;
+}
+function rememberBookProgressRestorePoint(point) {
+  const next = normalizedBookProgressPoint(point);
+  const previous = bookProgressJumpHistory[bookProgressJumpHistory.length - 1];
+  if (!sameBookProgressPoint(previous, next)) bookProgressJumpHistory.push(next);
   updateBookProgress();
 }
+function rememberReaderNavigationPoint(point) {
+  if (!readerJumpBackConfig().enabled) {
+    dismissReaderNavigationBack(true);
+    return;
+  }
+  const next = normalizedBookProgressPoint(point);
+  const previous = readerNavigationHistory[readerNavigationHistory.length - 1];
+  if (!sameBookProgressPoint(previous, next)) readerNavigationHistory.push(next);
+  armReaderNavigationBackVisibility();
+}
+window.rememberReaderJumpPosition = function () {
+  rememberReaderNavigationPoint();
+};
 function bookProgressFracFromX(clientX) {
   const rect = bookProgressTrack.getBoundingClientRect();
   if (!rect.width) return 0.01;
   return Math.max(0.01, Math.min(1, (clientX - rect.left) / rect.width));
 }
-function jumpByBookProgress(frac) {
+function jumpByBookProgress(frac, remember = true) {
   if (isPdf) return;
-  rememberBookProgressRestorePoint();
+  if (remember) rememberBookProgressRestorePoint();
   const target = Math.max(0.01, Math.min(1, frac));
-  paintBookProgress(target * 100);
+  setBookProgressPreview(target);
   sendToPage({ gotoFrac: target });
+  // 进度条是本次导航的发起控件，跳转后持续保留，直到用户回到正文翻页。
+  pinBookProgress();
+  requestAnimationFrame(pinBookProgress);
+  if (!bookProgressDragging) scheduleBookProgressPreviewSettle();
 }
 bookProgressThumb?.addEventListener("mousedown", (e) => {
   if (isPdf) return;
   e.preventDefault();
   e.stopPropagation();
-  showBookProgress();
+  pinBookProgress();
   rememberBookProgressRestorePoint();
   bookProgressDragging = true;
   bookProgressLastFrac = Math.max(0.01, Math.min(1, (Number(curProgress) || 0) / 100));
+  clearBookProgressPreviewTimer();
+  setBookProgressPreview(bookProgressLastFrac);
   bookProgressLastSent = 0;
   document.body.style.userSelect = "none";
   frame.style.pointerEvents = "none";
@@ -1210,16 +1454,32 @@ bookProgressThumb?.addEventListener("mousedown", (e) => {
 bookProgressTrack?.addEventListener("mousedown", (e) => {
   if (isPdf || e.target === bookProgressThumb) return;
   e.preventDefault();
+  e.stopPropagation();
   showBookProgress();
   jumpByBookProgress(bookProgressFracFromX(e.clientX));
 });
-bookProgressRestore?.addEventListener("click", () => {
-  const point = bookProgressRestorePoint;
+function restorePreviousBookProgress(e) {
+  e?.preventDefault?.();
+  e?.stopPropagation?.();
+  const point = bookProgressJumpHistory.pop();
   if (!point || isPdf) return;
-  bookProgressRestorePoint = null;
   updateBookProgress();
   sendToPage({ gotoChapter: point.chapter, chFrac: point.chFrac });
-});
+  pinBookProgress();
+}
+function restorePreviousReaderNavigation(e) {
+  e?.preventDefault?.();
+  e?.stopPropagation?.();
+  const point = readerNavigationHistory.pop();
+  if (!point || isPdf) return;
+  if (readerNavigationHistory.length) armReaderNavigationBackVisibility();
+  else dismissReaderNavigationBack(false);
+  sendToPage({ gotoChapter: point.chapter, chFrac: point.chFrac });
+}
+bookProgressRestore?.addEventListener("click", restorePreviousBookProgress);
+readerJumpBack?.addEventListener("click", restorePreviousReaderNavigation);
+window.addEventListener("reader-settings-changed", syncReaderJumpBackSettings);
+syncReaderJumpBackSettings();
 function fracFromY(clientY) {
   const rect = vbar.getBoundingClientRect();
   const th = vthumb.offsetHeight;
@@ -1247,11 +1507,11 @@ let vLastSent = 0;
 document.addEventListener("mousemove", (e) => {
   if (bookProgressDragging) {
     bookProgressLastFrac = bookProgressFracFromX(e.clientX);
-    paintBookProgress(bookProgressLastFrac * 100); // 拖动时先本地跟手，正文跳转节流处理
+    setBookProgressPreview(bookProgressLastFrac); // 拖动时只跟随本地预览，正文跳转节流处理
     const now = Date.now();
     if (now - bookProgressLastSent >= 40) {
       bookProgressLastSent = now;
-      jumpByBookProgress(bookProgressLastFrac);
+      jumpByBookProgress(bookProgressLastFrac, false);
     }
     return;
   }
@@ -1265,10 +1525,11 @@ document.addEventListener("mousemove", (e) => {
 });
 document.addEventListener("mouseup", () => {
   if (bookProgressDragging) {
+    jumpByBookProgress(bookProgressLastFrac, false); // 松手时确保精确落到最后位置
     bookProgressDragging = false;
     document.body.style.userSelect = "";
     frame.style.pointerEvents = "";
-    jumpByBookProgress(bookProgressLastFrac); // 松手时确保精确落到最后位置
+    scheduleBookProgressPreviewSettle();
     return;
   }
   if (vdragging) {
@@ -1517,6 +1778,7 @@ readerEndModal?.addEventListener("click", (event) => {
 // 接收合并页上报：阅读进度 / 正文被点击 / 搜索结果数
 window.addEventListener("message", (e) => {
   if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
+  if (e.data.readerGesture) { window.ReaderGestureClose?.fromFrame?.(e.data.readerGesture); return; }
   if (e.data.bugTrace) {
     window.ReaderBugTrace?.ingestPageEvent(e.data.bugTrace);
     return;
@@ -1540,8 +1802,12 @@ window.addEventListener("message", (e) => {
     if (!isPdf) showProgressLoading();
     return;
   }
+  if (e.data.readerJump) {
+    rememberReaderNavigationPoint(e.data.readerJump);
+  }
   if (typeof e.data.progress === "number") {
     curProgress = e.data.progress;
+    settleBookProgressPreview();
     curChapter = e.data.chapter || 0;
     curChFrac = e.data.chFrac || 0;
     curReadingAnchor = e.data.anchor || null;
@@ -1575,6 +1841,7 @@ window.addEventListener("message", (e) => {
     // 首帧采样会反向覆盖关闭前的准确位置。
     if (e.data.positionRestored !== 1) reportProgress(e.data.positionCommit === 1);
     trackReadWords(e.data); // 累计真正读过的字数
+    trackReaderNavigationBackProgress(e.data);
     if (!vdragging && !isPdf) updateThumb();
     else updateBookProgress();
     hideLoading(); // 当前章/页排版完成
@@ -1584,7 +1851,7 @@ window.addEventListener("message", (e) => {
     const sig = (e.data.gPage || 0) + "_" + (e.data.page || 0) + "_" + (e.data.chapter || 0);
     const panelOpen = ReaderShell.hasOverlay();
     const toolbarPinned = ReaderShell.getState().toolbar === ReaderShell.TOOLBAR.IMMERSIVE_PINNED;
-    if (lastPosSig && sig !== lastPosSig && immersive && toolbarPinned && !panelOpen && Date.now() > keepImmersiveBarUntil) {
+    if (lastPosSig && sig !== lastPosSig && immersive && toolbarPinned && !panelOpen && !bookProgressPinned && Date.now() > keepImmersiveBarUntil) {
       ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
     }
     lastPosSig = sig;
@@ -1942,7 +2209,8 @@ window.addEventListener("keydown", (e) => {
     // 翻页同时收起浮层与沉浸工具栏
     if (
       ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH) ||
-      ReaderShell.isOverlay(ReaderShell.OVERLAY.SETTINGS)
+      ReaderShell.isOverlay(ReaderShell.OVERLAY.SETTINGS) ||
+      ReaderShell.isOverlay(ReaderShell.OVERLAY.PREFERENCES)
     ) ReaderShell.closeOverlay();
     hideBookProgressAfterReadingAction();
     ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });
@@ -1974,6 +2242,7 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
     recordReaderPerformance("book_info", infoElapsedMs);
     currentBookId = info.id || "";
     window.currentBookId = currentBookId;
+    window.ReaderSettings?.setBookContext?.(currentBookId);
     readerEndRecommendations?.reset(currentBookId, { wordCount: info.word_count });
     currentBookContentId = info.content_id || "";
     window.currentBookContentId = currentBookContentId;

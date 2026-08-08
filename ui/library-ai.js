@@ -25,7 +25,7 @@
     const selectedBookIds = new Set();
     let books = [], useModelTags = true, mode = "question", running = false, loading = false, activeSource = null, previewPinned = false, previewHideTimer = null;
     let booksRefreshVersion = 0;
-    let libraryHistory = [], historySyncEnabled = false, showingHistory = false, latestAnswer = null;
+    let libraryHistory = [], historySyncEnabled = false, historySyncMode = "off", showingHistory = false, latestAnswer = null;
     let historyLayout = "list";
     let classificationPoll = null;
     let answerFontSize = DEFAULT_ANSWER_FONT_SIZE, answerLength = "short", semanticStatus = null;
@@ -83,7 +83,9 @@
         const selected = button.dataset.answerLength === answerLength;
         button.setAttribute("aria-checked", String(selected));
       });
-      if (trigger) trigger.textContent = i18n("answerSettings", "Settings");
+      root.querySelectorAll?.("[data-library-history-sync]").forEach((button) => {
+        button.setAttribute("aria-checked", String(button.dataset.libraryHistorySync === historySyncMode));
+      });      if (trigger) trigger.textContent = i18n("answerSettings", "Settings");
       if (overlay?.hidden && trigger) trigger.setAttribute("aria-expanded", "false");
       const longContext = $("library-ai-long-context");
       const m3Active = semanticStatus?.model_id === "bge-m3";
@@ -130,6 +132,27 @@
       }
     }
 
+    function applyLibraryHistorySnapshot(snapshot) {
+      libraryHistory = hydrateLibraryHistory(snapshot?.entries || libraryHistory);
+      historySyncEnabled = Boolean(snapshot?.syncEnabled);
+      historySyncMode = ["off", "recent", "manual"].includes(snapshot?.syncMode) ? snapshot.syncMode : "off";
+    }
+
+    async function saveLibraryHistorySyncMode(syncMode, button) {
+      if (!["off", "recent", "manual"].includes(syncMode)) return;
+      button.disabled = true;
+      try {
+        const snapshot = await invoke("private_sync_set_library_history_mode", { request: { syncMode } });
+        applyLibraryHistorySnapshot(snapshot);
+        renderAnswerLengthSettings();
+        if (showingHistory) renderLibraryHistory();
+        state(syncMode === "recent" ? "已开启最近回答同步；云端最多保留 100 条。" : syncMode === "manual" ? "已开启手动同步；可在问答记录中点“云端”保存。" : "书库问答将只保存在本机。", false);
+      } catch (error) {
+        state("保存回答同步设置失败：" + String(error), true);
+      } finally {
+        button.disabled = false;
+      }
+    }
     async function saveLongContext(enabled, checkbox) {
       checkbox.disabled = true;
       try {
@@ -906,9 +929,11 @@
       historyToolbar.className = "library-ai-history-toolbar";
       const note = root.createElement("p");
       note.className = "library-ai-history-note";
-      note.textContent = historySyncEnabled
-        ? "本机历史保留引用正文；记录会在下次同步时上传。为保护书籍内容，跨设备仅同步来源书名、章节与材料类型。"
-        : "记录已保存在本机。开启设置中的“同步智读历史”后，会在下次同步时上传。";
+      note.textContent = historySyncMode === "recent"
+        ? "本机历史不限数量；最近 100 条回答会同步到云端。跨设备仅同步来源书名、章节与材料类型。"
+        : historySyncMode === "manual"
+          ? "本机历史不限数量；点每条记录左侧的“云端”后才会保存到云端（最多 100 条）。"
+          : "本机历史不限数量；当前回答不同步到云端。";
       const layoutButton = root.createElement("button");
       layoutButton.type = "button";
       layoutButton.className = "library-ai-history-layout";
@@ -936,8 +961,34 @@
         const summary = root.createElement("span");
         summary.className = "library-ai-history-summary";
         summary.textContent = historyAnswerSummary(entry);
-        button.append(question, summary);
+        const syncStatus = root.createElement("span");
+        const cloudSaved = historySyncMode === "recent" || (historySyncMode === "manual" && entry.cloudSaved === true);
+        syncStatus.className = `library-ai-history-sync-status ${cloudSaved ? "is-synced" : "is-local"}`;
+        syncStatus.textContent = cloudSaved ? "已同步" : "不同步";
+        button.append(question, summary, syncStatus);
         button.addEventListener("click", () => showLibraryHistoryEntry(entry));
+        if (historySyncMode === "manual") {
+          const cloud = root.createElement("button");
+          cloud.type = "button";
+          cloud.className = `library-ai-history-cloud ${cloudSaved ? "is-synced" : ""}`;
+          cloud.textContent = "云端";
+          cloud.setAttribute("aria-label", cloudSaved ? `取消云端保存：${question.textContent}` : `保存到云端：${question.textContent}`);
+          cloud.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            cloud.disabled = true;
+            try {
+              const snapshot = await invoke("private_sync_set_library_history_cloud_saved", { request: { id: historyEntryId(entry), cloudSaved: !cloudSaved } });
+              applyLibraryHistorySnapshot(snapshot);
+              renderLibraryHistory();
+              state(cloudSaved ? "已取消这条问答的云端保存。" : "已保存到云端；它会保留到你取消云端保存或删除为止。", false);
+            } catch (error) {
+              state("更新云端保存状态失败：" + String(error), true);
+              cloud.disabled = false;
+            }
+          });
+          row.append(cloud);
+        }
         const remove = root.createElement("button");
         remove.type = "button";
         remove.className = "library-ai-history-delete";
@@ -950,8 +1001,7 @@
           try {
             const snapshot = await invoke("private_sync_library_history_delete", { request: { id: historyEntryId(entry) } });
             deleteLocalHistorySources(entry);
-            libraryHistory = hydrateLibraryHistory(snapshot?.entries);
-            historySyncEnabled = Boolean(snapshot?.syncEnabled);
+            applyLibraryHistorySnapshot(snapshot);
             renderLibraryHistory();
             state("已删除书库问答记录；删除会在下次同步时传到其他设备。", false);
           } catch (error) {
@@ -994,8 +1044,7 @@
 
     async function refreshLibraryHistory() {
       const snapshot = await invoke("private_sync_library_history_list");
-      libraryHistory = hydrateLibraryHistory(snapshot?.entries);
-      historySyncEnabled = Boolean(snapshot?.syncEnabled);
+      applyLibraryHistorySnapshot(snapshot);
       return libraryHistory;
     }
 
@@ -1012,8 +1061,7 @@
       };
       writeLocalHistorySources(entry, Array.isArray(answer.sources) ? answer.sources : []);
       const snapshot = await invoke("private_sync_library_history_merge", { request: { entries: [entry] } });
-      libraryHistory = hydrateLibraryHistory(snapshot?.entries || libraryHistory);
-      historySyncEnabled = Boolean(snapshot?.syncEnabled);
+      applyLibraryHistorySnapshot(snapshot);
     }
 
     async function toggleLibraryHistory() {
@@ -1080,7 +1128,11 @@
         let saveNote = "问答已保存到本机。";
         try {
           await saveLibraryHistory(question, answer);
-          saveNote = historySyncEnabled ? "问答已保存；将在下次同步时上传。" : "问答已保存到本机；开启“同步智读历史”后会同步。";
+          saveNote = historySyncMode === "recent"
+            ? "问答已保存；最近记录会在下次同步时上传。"
+            : historySyncMode === "manual"
+              ? "问答已保存到本机；可在问答记录中点“云端”保存。"
+              : "问答已保存到本机。";
         } catch (_) {
           saveNote = "回答完成，但问答记录保存失败。";
         }
@@ -1113,8 +1165,7 @@
           invoke("private_sync_library_history_list"),
         ]);
         historyLayout = readHistoryLayout();
-        libraryHistory = hydrateLibraryHistory(history?.entries);
-        historySyncEnabled = Boolean(history?.syncEnabled);
+        applyLibraryHistorySnapshot(history);
         renderModelProfiles(profiles);
         semanticStatus = loadedSemanticStatus;
         useModelTags = modelTagSettings?.enabled !== false;
@@ -1167,7 +1218,9 @@
     root.querySelectorAll?.("[data-answer-length]").forEach((button) => {
       button.addEventListener("click", () => { void saveAnswerLength(button.dataset.answerLength, button); });
     });
-    $("library-ai-long-context")?.addEventListener("click", (event) => {
+    root.querySelectorAll?.("[data-library-history-sync]").forEach((button) => {
+      button.addEventListener("click", () => { void saveLibraryHistorySyncMode(button.dataset.libraryHistorySync, button); });
+    });    $("library-ai-long-context")?.addEventListener("click", (event) => {
       const toggle = event.currentTarget;
       const enabled = toggle.getAttribute("aria-checked") === "true";
       const available = toggle.getAttribute("aria-disabled") !== "true";

@@ -6,7 +6,7 @@ A high-performance local ebook reader for Windows, macOS, Linux, and Android. Th
 
 > **License notice:** this repository is **source-available**. The code is public only for learning, evaluation, and communication. Copying, modifying, distributing, commercial use, or publishing derivative versions requires the author's written permission. See [LICENSE](LICENSE).
 
-> Latest release: Windows **v1.13.1** · macOS / Linux **v1.13.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases). v1.13.1 updates only the Windows x64 installer; other platforms remain on their existing releases.
+> Latest release: Windows, macOS and Linux **v1.14.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases). All three desktop platforms are updated together; Android remains on its current release.
 
 ## Features
 

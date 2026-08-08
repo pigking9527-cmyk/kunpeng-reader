@@ -1,6 +1,6 @@
 [package]
 name = "ebook-reader-tauri"
-version = "1.13.1"
+version = "1.14.0"
 edition = "2021"
 
 [workspace]
@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 reader-core = { path = "reader-core" }
 tauri = { version = "2", features = ["unstable"] }
+tauri-runtime = "2.11"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -46,6 +47,12 @@ libc = "0.2"
 ring = "0.17"
 ferrous-opencc = "0.3.1"
 notify = "8.2"
+
+# Windows/Linux 发布包同时携带 ONNX Runtime CUDA Provider。Provider 只在
+# 检测到受支持的 NVIDIA 驱动时注册；缺少 CUDA/cuDNN 依赖时自动回退 CPU，
+# 因此同一安装包仍可在没有 NVIDIA 显卡的设备上运行。
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+ort = { version = "=2.0.0-rc.12", features = ["cuda"] }
 
 # 正式发布档：保留优化，同时加快日常 release 构建。
 [profile.release]
