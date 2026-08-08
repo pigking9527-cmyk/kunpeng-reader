@@ -4,12 +4,6 @@
   "bundle": {
     "targets": ["appimage", "deb"],
     "linux": {
-      "appimage": {
-        "files": {
-          "/usr/bin/libonnxruntime_providers_cuda.so": "packaging/linux/runtime/libonnxruntime_providers_cuda.so",
-          "/usr/bin/libonnxruntime_providers_shared.so": "packaging/linux/runtime/libonnxruntime_providers_shared.so"
-        }
-      },
       "deb": {
         "desktopTemplate": "packaging/linux/kunpeng-reader.desktop",
         "files": {
