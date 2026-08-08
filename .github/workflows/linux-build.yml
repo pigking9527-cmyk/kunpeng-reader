@@ -114,6 +114,34 @@ jobs:
       - name: Build AppImage and Debian package
         run: cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --verbose
 
+      - name: Inject CUDA Provider into AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="target/x86_64-unknown-linux-gnu/release/bundle/appimage"
+          appimage="$(find "$bundle_dir" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          repack_dir="target/appimage-repack"
+          rm -rf "$repack_dir"
+          mkdir -p "$repack_dir"
+          (
+            cd "$repack_dir"
+            "$GITHUB_WORKSPACE/$appimage" --appimage-extract
+          )
+          cp packaging/linux/runtime/libonnxruntime_providers_cuda.so "$repack_dir/squashfs-root/usr/bin/"
+          cp packaging/linux/runtime/libonnxruntime_providers_shared.so "$repack_dir/squashfs-root/usr/bin/"
+          test -s "$repack_dir/squashfs-root/usr/bin/libonnxruntime_providers_cuda.so"
+          test -s "$repack_dir/squashfs-root/usr/bin/libonnxruntime_providers_shared.so"
+          tool="target/appimagetool-x86_64.AppImage"
+          curl --fail --location --retry 3 \
+            --output "$tool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$tool"
+          repacked="$appimage.repacked"
+          ARCH=x86_64 "$tool" --appimage-extract-and-run "$repack_dir/squashfs-root" "$repacked"
+          chmod +x "$repacked"
+          mv "$repacked" "$appimage"
+
       - name: Check native binary linkage
         shell: bash
         run: |
