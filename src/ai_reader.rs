@@ -22,6 +22,12 @@ const MAX_READING_EVIDENCE_SOURCES: usize = 8;
 const MAX_LIBRARY_QUESTION_CHARS: usize = 2_000;
 const MAX_LIBRARY_COMPARE_BOOKS: usize = 8;
 const MAX_LIBRARY_QUESTION_SOURCES: usize = 20;
+const DEFAULT_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT: usize = 20;
+const MIN_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT: usize = 5;
+const MAX_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT: usize = 100;
+const DEFAULT_LIBRARY_RECOMMENDATION_RESULT_LIMIT: usize = 12;
+const MIN_LIBRARY_RECOMMENDATION_RESULT_LIMIT: usize = 5;
+const MAX_LIBRARY_RECOMMENDATION_RESULT_LIMIT: usize = 30;
 const MAX_LIBRARY_DEEP_SOURCES: usize = 10;
 /// The three existing answer lengths also control how much surrounding prose
 /// the final answer may read. Short keeps its compact citation unchanged.
@@ -56,6 +62,9 @@ const MAX_READING_RETRY_CONTEXT_CHARS: usize = 4_800;
 const LIBRARY_PROFILE_PREFIX: &str = "library_ai_profile:v2:";
 const LIBRARY_MODEL_TAGS_ENABLED_KEY: &str = "library_ai_use_model_tags:v1";
 const LIBRARY_ANSWER_LENGTH_KEY: &str = "library_ai_answer_length:v1";
+const LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT_KEY: &str =
+    "library_ai_recommendation_candidate_limit:v1";
+const LIBRARY_RECOMMENDATION_RESULT_LIMIT_KEY: &str = "library_ai_recommendation_result_limit:v1";
 const MAX_LIBRARY_PROFILE_TAGS: usize = 12;
 const MAX_LIBRARY_PROFILE_TAG_CHARS: usize = 32;
 const MAX_LIBRARY_WEB_PAGE_CHARS: usize = 2_400;
@@ -87,7 +96,23 @@ struct StoredAiReaderProfiles {
     #[serde(default)]
     active_id: String,
     #[serde(default)]
+    assignments: AiReaderProfileAssignments,
+    #[serde(default)]
     profiles: Vec<StoredAiReaderProfile>,
+}
+
+/// The legacy active profile remains the reading-assistant profile.  Keeping
+/// that mirror lets existing private-sync payloads and older clients keep
+/// their single-profile behaviour while new installs can choose per feature.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiReaderProfileAssignments {
+    #[serde(default)]
+    pub reading_id: String,
+    #[serde(default)]
+    pub library_id: String,
+    #[serde(default)]
+    pub other_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +130,7 @@ pub(crate) struct AiReaderProfileSummary {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiReaderProfilesStatus {
     pub active_id: String,
+    pub assignments: AiReaderProfileAssignments,
     pub profiles: Vec<AiReaderProfileSummary>,
 }
 
@@ -140,6 +166,14 @@ pub(crate) struct SaveAiReaderProfileRequest {
     /// Leaving this blank while updating an existing profile keeps its key.
     #[serde(default)]
     api_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssignAiReaderProfileRequest {
+    /// reading | library | other
+    purpose: String,
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,12 +292,26 @@ impl LibraryAnswerLength {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LibraryAnswerSettings {
     pub answer_length: LibraryAnswerLength,
+    pub recommendation_candidate_limit: usize,
+    pub recommendation_result_limit: usize,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SetLibraryAnswerLengthRequest {
     answer_length: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetLibraryRecommendationCandidateLimitRequest {
+    candidate_limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetLibraryRecommendationResultLimitRequest {
+    result_limit: usize,
 }
 
 /// A local-only fallback for older library-Q&A history.  Earlier history
@@ -320,7 +368,24 @@ pub(crate) struct AiReaderAnswer {
     retrieval_stages: Vec<String>,
     #[serde(default)]
     citation_checked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recommendation: Option<LibraryBooklistRecommendation>,
     error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryBooklistRecommendationItem {
+    book_id: String,
+    title: String,
+    review: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryBooklistRecommendation {
+    summary: String,
+    items: Vec<LibraryBooklistRecommendationItem>,
 }
 
 /// Local classification scheduling/provenance.  The canonical labels are also
@@ -782,6 +847,7 @@ fn load_profiles(db: &crate::db::AppDb) -> Result<StoredAiReaderProfiles, String
                 .map(|profile| profile.id.clone())
                 .unwrap_or_default();
         }
+        normalize_profile_assignments(&mut store);
         return Ok(store);
     }
     let legacy = load_legacy_config(db)?;
@@ -794,6 +860,11 @@ fn load_profiles(db: &crate::db::AppDb) -> Result<StoredAiReaderProfiles, String
     }
     Ok(StoredAiReaderProfiles {
         active_id: "default".to_string(),
+        assignments: AiReaderProfileAssignments {
+            reading_id: "default".to_string(),
+            library_id: "default".to_string(),
+            other_id: "default".to_string(),
+        },
         profiles: vec![StoredAiReaderProfile {
             id: "default".to_string(),
             name: default_profile_name(&legacy),
@@ -802,11 +873,58 @@ fn load_profiles(db: &crate::db::AppDb) -> Result<StoredAiReaderProfiles, String
     })
 }
 
+fn has_profile(store: &StoredAiReaderProfiles, id: &str) -> bool {
+    !id.trim().is_empty() && store.profiles.iter().any(|profile| profile.id == id)
+}
+
+fn normalize_profile_assignments(store: &mut StoredAiReaderProfiles) {
+    if !has_profile(store, &store.active_id) {
+        store.active_id = store
+            .profiles
+            .first()
+            .map(|profile| profile.id.clone())
+            .unwrap_or_default();
+    }
+    let fallback = store.active_id.clone();
+    // Each capability always needs a model. Empty or stale bindings repair to
+    // the legacy active model, including users who briefly tried the old
+    // click-again-to-cancel interaction.
+    if !has_profile(store, &store.assignments.reading_id) {
+        store.assignments.reading_id = fallback.clone();
+    }
+    if !has_profile(store, &store.assignments.library_id) {
+        store.assignments.library_id = fallback.clone();
+    }
+    if !has_profile(store, &store.assignments.other_id) {
+        store.assignments.other_id = fallback.clone();
+    }
+    // `active_id` is deliberately the old one-model representation of
+    // reading, so importing an old client remains predictable.
+    store.active_id = store.assignments.reading_id.clone();
+}
+
 fn active_profile(store: &StoredAiReaderProfiles) -> Option<&StoredAiReaderProfile> {
     store
         .profiles
         .iter()
         .find(|profile| profile.id == store.active_id)
+}
+
+fn profile_for_purpose<'a>(
+    store: &'a StoredAiReaderProfiles,
+    purpose: &str,
+) -> Option<&'a StoredAiReaderProfile> {
+    let id = match purpose {
+        "reading" => &store.assignments.reading_id,
+        "library" => &store.assignments.library_id,
+        "other" => &store.assignments.other_id,
+        _ => &store.active_id,
+    };
+    store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == *id)
+        .or_else(|| active_profile(store))
 }
 
 fn persist_profiles(db: &crate::db::AppDb, store: &StoredAiReaderProfiles) -> Result<(), String> {
@@ -822,7 +940,11 @@ fn persist_profiles(db: &crate::db::AppDb, store: &StoredAiReaderProfiles) -> Re
 }
 
 fn load_config(db: &crate::db::AppDb) -> Result<StoredConfig, String> {
-    Ok(active_profile(&load_profiles(db)?)
+    load_config_for_purpose(db, "reading")
+}
+
+fn load_config_for_purpose(db: &crate::db::AppDb, purpose: &str) -> Result<StoredConfig, String> {
+    Ok(profile_for_purpose(&load_profiles(db)?, purpose)
         .map(|profile| profile.config.clone())
         .unwrap_or_default())
 }
@@ -905,6 +1027,7 @@ pub(crate) fn import_public_config(
             config,
         });
     }
+    normalize_profile_assignments(&mut profiles);
     persist_profiles(db, &profiles)
 }
 
@@ -994,6 +1117,7 @@ pub(crate) fn import_secret_config(
             config,
         });
     }
+    normalize_profile_assignments(&mut profiles);
     persist_profiles(db, &profiles)
 }
 
@@ -1026,6 +1150,7 @@ pub(crate) fn ai_reader_profiles(
     let profiles = load_profiles(db)?;
     Ok(AiReaderProfilesStatus {
         active_id: profiles.active_id,
+        assignments: profiles.assignments,
         profiles: profiles.profiles.iter().map(profile_summary).collect(),
     })
 }
@@ -1046,9 +1171,42 @@ pub(crate) fn select_ai_reader_profile(
         .ok_or("找不到所选大模型配置")?;
     let selected_id = profile.id.clone();
     let config = canonicalize_deepseek_config(profile.config.clone());
-    profiles.active_id = selected_id;
+    profiles.active_id = selected_id.clone();
+    profiles.assignments.reading_id = selected_id;
+    normalize_profile_assignments(&mut profiles);
     persist_profiles(db, &profiles)?;
     Ok(status(&config))
+}
+
+#[tauri::command]
+pub(crate) fn assign_ai_reader_profile(
+    state: tauri::State<'_, AppState>,
+    request: AssignAiReaderProfileRequest,
+) -> Result<AiReaderProfilesStatus, String> {
+    let purpose = request.purpose.trim();
+    if !matches!(purpose, "reading" | "library" | "other") {
+        return Err("不支持的大模型用途".into());
+    }
+    let id = request.id.trim();
+    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+    let mut profiles = load_profiles(db)?;
+    if !has_profile(&profiles, id) {
+        return Err("找不到所选大模型配置".into());
+    }
+    match purpose {
+        "reading" => profiles.assignments.reading_id = id.to_string(),
+        "library" => profiles.assignments.library_id = id.to_string(),
+        "other" => profiles.assignments.other_id = id.to_string(),
+        _ => unreachable!(),
+    }
+    normalize_profile_assignments(&mut profiles);
+    persist_profiles(db, &profiles)?;
+    Ok(AiReaderProfilesStatus {
+        active_id: profiles.active_id,
+        assignments: profiles.assignments,
+        profiles: profiles.profiles.iter().map(profile_summary).collect(),
+    })
 }
 
 #[tauri::command]
@@ -1100,10 +1258,13 @@ pub(crate) fn save_ai_reader_profile(
             config,
         });
     }
-    profiles.active_id = id;
+    profiles.active_id = id.clone();
+    profiles.assignments.reading_id = id;
+    normalize_profile_assignments(&mut profiles);
     persist_profiles(db, &profiles)?;
     Ok(AiReaderProfilesStatus {
         active_id: profiles.active_id,
+        assignments: profiles.assignments,
         profiles: profiles.profiles.iter().map(profile_summary).collect(),
     })
 }
@@ -1146,6 +1307,7 @@ pub(crate) fn save_ai_reader_config(
             config: config.clone(),
         });
     }
+    normalize_profile_assignments(&mut profiles);
     persist_profiles(db, &profiles)?;
     Ok(status(&config))
 }
@@ -1614,12 +1776,13 @@ fn merge_library_search_results(
 /// A library question reports the top twenty ranked books, one excerpt each.
 /// A comparison instead reserves one excerpt for every selected book, so a
 /// high-scoring volume cannot crowd the other side out of the model context.
-fn select_library_sources(
+fn select_library_sources_with_limit(
     results: &[semantic::SemBookHits],
     selected_ids: Option<&[String]>,
     compare: bool,
     question: &str,
     thematic_hit_keys: Option<&HashSet<String>>,
+    question_source_limit: usize,
 ) -> Result<Vec<AiReaderSource>, String> {
     let mut sources = Vec::new();
     let mut seen = HashSet::new();
@@ -1676,13 +1839,7 @@ fn select_library_sources(
                         keys.contains(&library_semantic_hit_key(&book.book_id, hit))
                     })
             }) {
-                push_library_source(
-                    &mut sources,
-                    &mut seen,
-                    book,
-                    hit,
-                    MAX_LIBRARY_QUESTION_SOURCES,
-                );
+                push_library_source(&mut sources, &mut seen, book, hit, question_source_limit);
             }
         }
         if !sources.is_empty() {
@@ -1698,13 +1855,7 @@ fn select_library_sources(
                     })
                     .skip(1)
                 {
-                    push_library_source(
-                        &mut sources,
-                        &mut seen,
-                        book,
-                        hit,
-                        MAX_LIBRARY_QUESTION_SOURCES,
-                    );
+                    push_library_source(&mut sources, &mut seen, book, hit, question_source_limit);
                 }
             }
         }
@@ -1718,13 +1869,7 @@ fn select_library_sources(
                 continue;
             }
             if let Some(hit) = book.hits.first() {
-                push_library_source(
-                    &mut sources,
-                    &mut seen,
-                    book,
-                    hit,
-                    MAX_LIBRARY_QUESTION_SOURCES,
-                );
+                push_library_source(&mut sources, &mut seen, book, hit, question_source_limit);
             }
         }
     }
@@ -1732,6 +1877,23 @@ fn select_library_sources(
         return Err("没有找到可用的本地语义索引内容；请先为图书建立语义索引".into());
     }
     Ok(sources)
+}
+
+fn select_library_sources(
+    results: &[semantic::SemBookHits],
+    selected_ids: Option<&[String]>,
+    compare: bool,
+    question: &str,
+    thematic_hit_keys: Option<&HashSet<String>>,
+) -> Result<Vec<AiReaderSource>, String> {
+    select_library_sources_with_limit(
+        results,
+        selected_ids,
+        compare,
+        question,
+        thematic_hit_keys,
+        MAX_LIBRARY_QUESTION_SOURCES,
+    )
 }
 
 /// A question scoped to one selected book has a different goal from a
@@ -2075,6 +2237,63 @@ fn library_context(sources: &[AiReaderSource]) -> String {
     )
 }
 
+/// Recommendation can expose up to one hundred locally ranked books.  The
+/// ordinary evidence context deliberately gives a few sources long excerpts,
+/// which would silently omit the tail of such a candidate pool.  This compact
+/// one-line form budgets space per book so every selected candidate, including
+/// the last one, reaches the model within the same privacy-safe context cap.
+fn library_booklist_candidate_context(sources: &[AiReaderSource]) -> String {
+    if sources.is_empty() {
+        return String::new();
+    }
+    let per_source_budget = (MAX_CONTEXT_CHARS / sources.len()).max(72);
+    let mut context = String::new();
+    for (index, source) in sources.iter().enumerate() {
+        let title = trim_to_chars(&source.book_title, 32);
+        let tags = trim_to_chars(
+            &source
+                .tags
+                .iter()
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、"),
+            28,
+        );
+        let prefix = format!(
+            "[候选{}｜本地书籍 ID {}｜《{}》{}] ",
+            index + 1,
+            source.book_id,
+            title,
+            if tags.is_empty() {
+                String::new()
+            } else {
+                format!("｜标签：{tags}")
+            }
+        );
+        let excerpt_budget = per_source_budget
+            .saturating_sub(prefix.chars().count() + 1)
+            .max(12);
+        let line = format!(
+            "{}{}\n",
+            prefix,
+            trim_to_chars(&source.excerpt, excerpt_budget)
+        );
+        if context.chars().count() + line.chars().count() > MAX_CONTEXT_CHARS {
+            // The fixed title/ID prefix is intentionally retained for every
+            // candidate; if unusually long IDs consume the final budget, use
+            // a final tightly bounded line rather than dropping the book.
+            let remaining = MAX_CONTEXT_CHARS.saturating_sub(context.chars().count());
+            if remaining > 0 {
+                context.push_str(&trim_to_chars(&line, remaining));
+            }
+            break;
+        }
+        context.push_str(&line);
+    }
+    context
+}
+
 fn library_context_for_source_ids(sources: &[AiReaderSource], source_ids: &[usize]) -> String {
     library_context_entries(source_ids.iter().filter_map(|source_id| {
         sources
@@ -2146,6 +2365,82 @@ fn parse_deep_source_ids(response: &str, source_count: usize) -> Vec<usize> {
 
 fn fallback_deep_source_ids(source_count: usize) -> Vec<usize> {
     (1..=source_count.min(MAX_LIBRARY_DEEP_SOURCES)).collect()
+}
+
+fn parse_library_booklist_recommendation(
+    response: &str,
+    candidates: &[AiReaderSource],
+    result_limit: usize,
+) -> Result<LibraryBooklistRecommendation, String> {
+    let response = response.trim().trim_matches('`').trim();
+    let value = serde_json::from_str::<serde_json::Value>(response)
+        .or_else(|_| {
+            let start = response.find('{').ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::other("missing JSON object"))
+            })?;
+            let end = response.rfind('}').ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::other("missing JSON object"))
+            })?;
+            serde_json::from_str(&response[start..=end])
+        })
+        .map_err(|_| "推荐模型没有返回可用 JSON，请重试".to_string())?;
+    let candidate_by_id = candidates
+        .iter()
+        .map(|candidate| (candidate.book_id.as_str(), candidate))
+        .collect::<HashMap<_, _>>();
+    let items = value
+        .get("items")
+        .or_else(|| value.get("books"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or("推荐模型没有返回 items 数组，请重试")?;
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for item in items {
+        let Some(book_id) = item
+            .get("bookId")
+            .or_else(|| item.get("book_id"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let Some(candidate) = candidate_by_id.get(book_id) else {
+            continue;
+        };
+        if !seen.insert(book_id) {
+            continue;
+        }
+        let review = item
+            .get("review")
+            .or_else(|| item.get("comment"))
+            .or_else(|| item.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .map(|value| trim_to_chars(value.trim(), 1000))
+            .unwrap_or_default();
+        if review.is_empty() {
+            continue;
+        }
+        normalized.push(LibraryBooklistRecommendationItem {
+            book_id: candidate.book_id.clone(),
+            title: candidate.book_title.clone(),
+            review,
+        });
+        if normalized.len() >= result_limit.min(candidates.len()) {
+            break;
+        }
+    }
+    if normalized.is_empty() {
+        return Err("推荐模型没有从本地候选中选出带评语的图书，请重试".to_string());
+    }
+    let summary = value
+        .get("summary")
+        .or_else(|| value.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .map(|value| trim_to_chars(value.trim(), 1000))
+        .unwrap_or_default();
+    Ok(LibraryBooklistRecommendation {
+        summary,
+        items: normalized,
+    })
 }
 
 /// The evidence model is useful for ranking relevance, but it occasionally
@@ -2282,6 +2577,9 @@ fn system_prompt(task: &str) -> &'static str {
         "library_evidence_filter" => {
             "你是本地书库的证据审稿器。候选段落会编号为来源 N，并标注书名、章节和材料类型。只选择能直接支撑用户问题的段落，优先正文、具体人物关系、情节、观点或可靠评论；剔除只因词语相近而命中的序言、泛泛创作谈、无关文体或题材材料。对于“X 有什么特点”“某类作品如何表现”这类宽问题，若候选中有足够材料，必须优先选来自至少两部不同作品的 3—6 条正文证据；作者自述、前言或评论只能补充，不能单独支撑对一类作品的结论。避免只挑同一段话的重复表述；若只有一部作品确实相关，保留最强正文证据即可，后续回答会说明范围。不要回答问题，不要解释。只输出 JSON 对象，格式严格为 {\"sourceIds\":[1,4,7]}；最多 10 个，按证据强度排序。"
         }
+        "library_booklist_recommend" => {
+            "你是本地书库的书单编辑。候选材料全部来自本地检索，标题中含“本地书籍 ID”。根据用户问题和【推荐数量】要求，从候选中精选指定数量的最相关、互补图书；绝不能推荐候选之外的书，不能改写或猜测 ID。候选不足 5 本时仍按实际候选数量继续，不得以数量不足为由拒绝。每本书写一段 45—160 字的中文评语，必须直接回答它为什么适合这个问题，并只依据该书附带的命中片段和标签，不能编造书外情节或知识。只输出一个 JSON 对象，不要 Markdown 或解释，格式固定为 {\"summary\":\"这份书单怎样回应问题\",\"items\":[{\"bookId\":\"7\",\"review\":\"与问题相关的短评\"}]}。"
+        }
         "library_single_book_evidence_filter" => {
             "你是单本书深度解读的证据审稿器。候选段落全部来自同一本书，来源 N 标有“目录、正文开篇、正文检索”等材料类型。用户问“这本书写了什么”或任何单书问题时，先用目录或章节开篇确定全书范围，再优先选择能说明核心人物/事件/论点、结构或结论的正文检索片段；目录不能单独替代正文证据，前言、后记、作者闲谈只有用户明确询问时才选。选择 4—10 条彼此覆盖不同章节的证据；若材料确实没有全书概述，选择最能拼出主题和重点的正文。不要回答问题，不要解释。只输出 JSON 对象，格式严格为 {\"sourceIds\":[1,4,7]}，按覆盖全书的重要性排序。"
         }
@@ -2393,6 +2691,7 @@ fn provider_max_tokens(task: &str) -> u16 {
             | "library_single_book_verify"
             | "library_compare"
             | "library_compare_verify"
+            | "library_booklist_recommend"
     )
     .then_some(LIBRARY_SYNTHESIS_PROVIDER_MAX_TOKENS)
     .unwrap_or(READING_PROVIDER_MAX_TOKENS)
@@ -3055,14 +3354,48 @@ fn library_answer_length(db: &crate::db::AppDb) -> LibraryAnswerLength {
         .unwrap_or_default()
 }
 
+fn library_recommendation_candidate_limit(db: &crate::db::AppDb) -> usize {
+    db.metadata(LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT_KEY)
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| {
+            value.clamp(
+                MIN_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT,
+                MAX_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT,
+            )
+        })
+        .unwrap_or(DEFAULT_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT)
+}
+
+fn library_recommendation_result_limit(db: &crate::db::AppDb) -> usize {
+    db.metadata(LIBRARY_RECOMMENDATION_RESULT_LIMIT_KEY)
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| {
+            value.clamp(
+                MIN_LIBRARY_RECOMMENDATION_RESULT_LIMIT,
+                MAX_LIBRARY_RECOMMENDATION_RESULT_LIMIT,
+            )
+        })
+        .unwrap_or(DEFAULT_LIBRARY_RECOMMENDATION_RESULT_LIMIT)
+}
+
+fn library_answer_settings_from_db(db: &crate::db::AppDb) -> LibraryAnswerSettings {
+    LibraryAnswerSettings {
+        answer_length: library_answer_length(db),
+        recommendation_candidate_limit: library_recommendation_candidate_limit(db),
+        recommendation_result_limit: library_recommendation_result_limit(db),
+    }
+}
+
 #[tauri::command]
 pub(crate) fn library_answer_settings(
     state: tauri::State<AppState>,
 ) -> Result<LibraryAnswerSettings, String> {
     let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    Ok(LibraryAnswerSettings {
-        answer_length: library_answer_length(db.as_ref().ok_or("SQLite 数据库不可用")?),
-    })
+    Ok(library_answer_settings_from_db(
+        db.as_ref().ok_or("SQLite 数据库不可用")?,
+    ))
 }
 
 #[tauri::command]
@@ -3073,10 +3406,51 @@ pub(crate) fn set_library_answer_length(
     let answer_length = LibraryAnswerLength::parse(&request.answer_length)
         .ok_or("作答长度只支持 short、medium 或 long")?;
     let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    db.as_ref()
-        .ok_or("SQLite 数据库不可用")?
-        .set_metadata(LIBRARY_ANSWER_LENGTH_KEY, answer_length.as_str())?;
-    Ok(LibraryAnswerSettings { answer_length })
+    let db = db.as_ref().ok_or("SQLite 数据库不可用")?;
+    db.set_metadata(LIBRARY_ANSWER_LENGTH_KEY, answer_length.as_str())?;
+    Ok(library_answer_settings_from_db(db))
+}
+
+#[tauri::command]
+pub(crate) fn set_library_recommendation_candidate_limit(
+    state: tauri::State<AppState>,
+    request: SetLibraryRecommendationCandidateLimitRequest,
+) -> Result<LibraryAnswerSettings, String> {
+    if !(MIN_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT..=MAX_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT)
+        .contains(&request.candidate_limit)
+    {
+        return Err(format!(
+            "推荐书单粗选数量只支持 {MIN_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT}–{MAX_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT} 本"
+        ));
+    }
+    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db.as_ref().ok_or("SQLite 数据库不可用")?;
+    db.set_metadata(
+        LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT_KEY,
+        &request.candidate_limit.to_string(),
+    )?;
+    Ok(library_answer_settings_from_db(db))
+}
+
+#[tauri::command]
+pub(crate) fn set_library_recommendation_result_limit(
+    state: tauri::State<AppState>,
+    request: SetLibraryRecommendationResultLimitRequest,
+) -> Result<LibraryAnswerSettings, String> {
+    if !(MIN_LIBRARY_RECOMMENDATION_RESULT_LIMIT..=MAX_LIBRARY_RECOMMENDATION_RESULT_LIMIT)
+        .contains(&request.result_limit)
+    {
+        return Err(format!(
+            "大模型精选数量只支持 {MIN_LIBRARY_RECOMMENDATION_RESULT_LIMIT}–{MAX_LIBRARY_RECOMMENDATION_RESULT_LIMIT} 本"
+        ));
+    }
+    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let db = db.as_ref().ok_or("SQLite 数据库不可用")?;
+    db.set_metadata(
+        LIBRARY_RECOMMENDATION_RESULT_LIMIT_KEY,
+        &request.result_limit.to_string(),
+    )?;
+    Ok(library_answer_settings_from_db(db))
 }
 
 #[tauri::command]
@@ -3099,7 +3473,10 @@ pub(crate) fn start_library_auto_classification(
 ) -> Result<BackgroundTaskSnapshot, String> {
     let config = {
         let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        canonicalize_deepseek_config(load_config(db.as_ref().ok_or("SQLite 数据库不可用")?)?)
+        canonicalize_deepseek_config(load_config_for_purpose(
+            db.as_ref().ok_or("SQLite 数据库不可用")?,
+            "other",
+        )?)
     };
     if !status(&config).configured {
         return Err("请先在任意阅读页的“智读”中配置接口、模型和 API Key".into());
@@ -3368,8 +3745,8 @@ pub(crate) async fn ask_library_assistant(
     request: LibraryAiReaderAskRequest,
 ) -> Result<AiReaderAnswer, String> {
     let task = request.task.trim().to_ascii_lowercase();
-    if !matches!(task.as_str(), "question" | "compare") {
-        return Err("书库问答只支持 question 或 compare 任务".into());
+    if !matches!(task.as_str(), "question" | "compare" | "recommend") {
+        return Err("书库问答只支持 question、compare 或 recommend 任务".into());
     }
     let question = request.question.trim().to_string();
     if question.is_empty() {
@@ -3379,6 +3756,7 @@ pub(crate) async fn ask_library_assistant(
         return Err(format!("问题不能超过 {MAX_LIBRARY_QUESTION_CHARS} 个字符"));
     }
     let compare = task == "compare";
+    let recommend = task == "recommend";
     let mut selected_ids = normalize_selected_book_ids(
         request.selected_book_ids,
         if compare {
@@ -3390,23 +3768,26 @@ pub(crate) async fn ask_library_assistant(
     if compare && selected_ids.as_ref().is_none_or(|ids| ids.len() < 2) {
         return Err("跨书对比至少需要选择两本图书".into());
     }
-    if !compare && selected_ids.is_none() {
+    if !compare && !recommend && selected_ids.is_none() {
         if let Some(book_id) = implicit_single_book_id(state.inner(), &question)? {
             selected_ids = Some(vec![book_id]);
         }
     }
-    let single_book = !compare && selected_ids.as_ref().is_some_and(|ids| ids.len() == 1);
+    let single_book =
+        !compare && !recommend && selected_ids.as_ref().is_some_and(|ids| ids.len() == 1);
     let search_scope = if compare || selected_ids.is_some() {
         selected_ids.clone()
     } else {
         Some(full_library_semantic_scope(state.inner())?)
     };
-    let (config, answer_length) = {
+    let (config, answer_length, recommendation_candidate_limit, recommendation_result_limit) = {
         let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
         (
-            canonicalize_deepseek_config(load_config(db)?),
+            canonicalize_deepseek_config(load_config_for_purpose(db, "library")?),
             library_answer_length(db),
+            library_recommendation_candidate_limit(db),
+            library_recommendation_result_limit(db),
         )
     };
     if !status(&config).configured {
@@ -3450,16 +3831,57 @@ pub(crate) async fn ask_library_assistant(
             structure_sources,
         )?
     } else {
-        select_library_sources(
-            &results,
-            selected_ids.as_deref(),
-            compare,
-            &question,
-            thematic_hit_keys.as_ref(),
-        )?
+        if recommend {
+            select_library_sources_with_limit(
+                &results,
+                selected_ids.as_deref(),
+                false,
+                &question,
+                thematic_hit_keys.as_ref(),
+                recommendation_candidate_limit,
+            )?
+        } else {
+            select_library_sources(
+                &results,
+                selected_ids.as_deref(),
+                compare,
+                &question,
+                thematic_hit_keys.as_ref(),
+            )?
+        }
     };
     for source in &mut sources {
         source.tags = model_tags.get(&source.book_id).cloned().unwrap_or_default();
+    }
+    if recommend {
+        let context = library_booklist_candidate_context(&sources);
+        if context.is_empty() {
+            return Err("没有可发送的本地候选片段".into());
+        }
+        let effective_result_limit = recommendation_result_limit.min(sources.len());
+        let recommendation_question = format!(
+            "{question}\n\n【推荐数量】当前有 {} 本本地候选，请精选 {effective_result_limit} 本；若候选少于 5 本，这个数字就是实际候选数，继续推荐且不要拒绝。",
+            sources.len()
+        );
+        let generated = call_library_answer_with_retry(
+            config,
+            "library_booklist_recommend".to_string(),
+            recommendation_question,
+            context,
+        )
+        .await?;
+        let recommendation =
+            parse_library_booklist_recommendation(&generated, &sources, effective_result_limit)?;
+        return Ok(AiReaderAnswer {
+            ok: true,
+            content: recommendation.summary.clone(),
+            sources,
+            single_book: false,
+            retrieval_stages: vec!["本地语义粗选".into(), "大模型精选与评语".into()],
+            citation_checked: false,
+            recommendation: Some(recommendation),
+            error: String::new(),
+        });
     }
     let content = if compare {
         let context = library_context(&sources);
@@ -3556,6 +3978,7 @@ pub(crate) async fn ask_library_assistant(
         single_book,
         retrieval_stages: vec!["语义检索".into(), "证据筛选".into(), "引用自检".into()],
         citation_checked: true,
+        recommendation: None,
         error: String::new(),
     })
 }
@@ -3629,7 +4052,10 @@ pub(crate) async fn ask_reading_assistant(
     }
     let config = {
         let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        canonicalize_deepseek_config(load_config(guard.as_ref().ok_or("SQLite 数据库不可用")?)?)
+        canonicalize_deepseek_config(load_config_for_purpose(
+            guard.as_ref().ok_or("SQLite 数据库不可用")?,
+            "reading",
+        )?)
     };
     if !status(&config).configured {
         return Err("请先在阅读助手中配置接口、模型和 API Key".into());
@@ -3751,6 +4177,7 @@ pub(crate) async fn ask_reading_assistant(
             },
         ],
         citation_checked,
+        recommendation: None,
         error: String::new(),
     })
 }
@@ -3807,6 +4234,56 @@ mod tests {
         let json = serde_json::to_string(&summary).unwrap();
         assert!(summary.configured);
         assert!(!json.contains("secret-must-not-reach-ui"));
+    }
+
+    #[test]
+    fn model_assignments_are_independent_and_keep_reading_as_legacy_active() {
+        let profile = |id: &str, model: &str| StoredAiReaderProfile {
+            id: id.into(),
+            name: id.into(),
+            config: StoredConfig {
+                provider: "compatible".into(),
+                base_url: "https://example.test/v1".into(),
+                model: model.into(),
+                api_key: "key".into(),
+            },
+        };
+        let mut profiles = StoredAiReaderProfiles {
+            active_id: "read".into(),
+            assignments: AiReaderProfileAssignments {
+                reading_id: "read".into(),
+                library_id: "library".into(),
+                other_id: "other".into(),
+            },
+            profiles: vec![
+                profile("read", "reading-model"),
+                profile("library", "library-model"),
+                profile("other", "tag-model"),
+            ],
+        };
+        normalize_profile_assignments(&mut profiles);
+        assert_eq!(profiles.active_id, "read");
+        assert_eq!(
+            profile_for_purpose(&profiles, "reading")
+                .unwrap()
+                .config
+                .model,
+            "reading-model"
+        );
+        assert_eq!(
+            profile_for_purpose(&profiles, "library")
+                .unwrap()
+                .config
+                .model,
+            "library-model"
+        );
+        assert_eq!(
+            profile_for_purpose(&profiles, "other")
+                .unwrap()
+                .config
+                .model,
+            "tag-model"
+        );
     }
 
     #[test]
@@ -4043,6 +4520,17 @@ mod tests {
     }
 
     #[test]
+    fn library_recommendation_respects_the_configured_candidate_limit() {
+        let results = (1..=12)
+            .map(|id| sem_book(&id.to_string(), &format!("第{id}本"), &[(0, "证据")]))
+            .collect::<Vec<_>>();
+        let sources =
+            select_library_sources_with_limit(&results, None, false, "关键问题", None, 7).unwrap();
+        assert_eq!(sources.len(), 7);
+        assert_eq!(sources[6].book_id, "7");
+    }
+
+    #[test]
     fn library_question_never_repeats_a_book_when_results_are_duplicated() {
         let results = vec![
             sem_book("7", "甲书", &[(0, "甲书的第一段")]),
@@ -4151,6 +4639,86 @@ mod tests {
         );
         assert!(parse_deep_source_ids("无法确定", 20).is_empty());
         assert_eq!(fallback_deep_source_ids(3), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn booklist_recommendation_only_accepts_local_candidates_with_reviews() {
+        let candidates = vec![
+            AiReaderSource {
+                book_id: "7".into(),
+                book_title: "甲书".into(),
+                chapter: 0,
+                excerpt: "甲书的本地命中片段".into(),
+                source_kind: "正文检索".into(),
+                tags: Vec::new(),
+            },
+            AiReaderSource {
+                book_id: "8".into(),
+                book_title: "乙书".into(),
+                chapter: 0,
+                excerpt: "乙书的本地命中片段".into(),
+                source_kind: "正文检索".into(),
+                tags: Vec::new(),
+            },
+        ];
+        let recommendation = parse_library_booklist_recommendation(
+            r#"```json
+            {"summary":"围绕问题的读法","items":[
+              {"bookId":"999","review":"候选外图书"},
+              {"bookId":"7","review":"直接回应问题。"},
+              {"bookId":"7","review":"重复项"},
+              {"bookId":"8","review":"补足另一侧材料。"}
+            ]}
+            ```"#,
+            &candidates,
+            12,
+        )
+        .unwrap();
+        assert_eq!(recommendation.items.len(), 2);
+        assert_eq!(recommendation.items[0].title, "甲书");
+        assert_eq!(recommendation.items[1].book_id, "8");
+    }
+
+    #[test]
+    fn library_booklist_recommendation_keeps_fewer_than_five_candidates() {
+        let candidates = (1..=3)
+            .map(|id| AiReaderSource {
+                book_id: id.to_string(),
+                book_title: format!("第{id}本"),
+                chapter: 0,
+                excerpt: format!("第{id}本的本地命中片段"),
+                source_kind: "正文检索".into(),
+                tags: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let recommendation = parse_library_booklist_recommendation(
+            r#"{"items":[
+              {"bookId":"1","review":"第一本适合。"},
+              {"bookId":"2","review":"第二本适合。"},
+              {"bookId":"3","review":"第三本适合。"}
+            ]}"#,
+            &candidates,
+            candidates.len(),
+        )
+        .unwrap();
+        assert_eq!(recommendation.items.len(), 3);
+    }
+
+    #[test]
+    fn compact_booklist_context_keeps_all_one_hundred_candidates() {
+        let candidates = (1..=100)
+            .map(|id| AiReaderSource {
+                book_id: id.to_string(),
+                book_title: format!("第{id}本候选图书"),
+                chapter: 0,
+                excerpt: "用于推荐判断的本地命中片段，内容会按候选数量自动压缩。".repeat(4),
+                source_kind: "正文检索".into(),
+                tags: vec!["主题：测试".into()],
+            })
+            .collect::<Vec<_>>();
+        let context = library_booklist_candidate_context(&candidates);
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
+        assert!(context.contains("[候选100｜本地书籍 ID 100"));
     }
 
     #[test]

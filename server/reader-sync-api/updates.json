@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "latest": "1.14.0",
+  "latest": "1.15.0",
   "releases": {
+    "1.15.0": {
+      "android_version": "0.3.0",
+      "release_notes": "- 全新桌面 UI：重做工具栏、设置、账户、图书信息、书架筛选、阅读偏好和 API 配置。\n- 新增书单推荐：本机语义候选结合用户配置的大模型精选，不上传整座书库正文。\n- 同步升级为按项选择和逐条 AI 历史/独立书单元数据，减少重复上传；账户页显示存储与每日同步额度。\n- 阅读页新增多套正文点击区域方案、跳转位置连续恢复和更清晰的手势提示。\n- 发布 Windows x64、macOS Apple Silicon、Linux x86_64 安装资产及各平台 SHA-256 清单；Android 继续 v0.3.0。",
+      "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.15.0",
+      "published_at": "2026-08-10"
+    },
     "1.14.0": {
       "android_version": "0.3.0",
       "release_notes": "- Windows、macOS 与 Linux 同步升级：新增完整阅读偏好、工具栏显示控制、书内跳转回退和底部进度多级回退。\n- 新增启动增强、Windows 开机自启、智读三档宽度、脑图收起，以及智读历史最近 100 条/手动云端同步。\n- 自定义主题和背景图支持桌面端同步；Windows GPU 组件支持非阻塞检测和按需安装，Linux 支持八方向窗口拉伸。\n- 修复词典开关、阅读偏好滚动、进度条拖动、空 EPUB、阅读窗口首次重开和续读位置等问题。\n- 标签与收藏夹拆分为独立实体；服务端增加压缩恢复历史、分层快照、邮箱验证、资源配额和安全审计。\n- 发布 Windows x64、macOS Apple Silicon、Linux x86_64 安装资产及各平台 SHA-256 清单；Android 继续 v0.3.0。",

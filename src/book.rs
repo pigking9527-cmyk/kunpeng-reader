@@ -4,7 +4,8 @@
 
 use reader_core::{ReadingAnchor, ReadingPosition};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 pub use reader_core::{Bookmark, Highlight, ProgressTimelineEntry};
@@ -262,9 +263,12 @@ impl Default for WinGeom {
     }
 }
 
-/// 收藏夹的展示元数据。成员关系仍存放在 Book.collections 中，以保持现有同步协议兼容。
+/// 收藏夹/书单的展示元数据。成员关系仍存放在 Book.collections；`id`、排序和评语
+/// 可通过独立书单实体跨设备同步，因此绝不使用本机书籍 ID 作为同步身份。
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct BookList {
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -272,6 +276,17 @@ pub struct BookList {
     pub cover_book_id: u64,
     #[serde(default)]
     pub book_order: Vec<u64>,
+    #[serde(default)]
+    pub reviews: BTreeMap<u64, String>,
+    /// 用户从“快捷书单”明确保存的空书单不会被成员关系的自动整理删掉。
+    #[serde(default)]
+    pub saved: bool,
+}
+
+fn legacy_booklist_id(name: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    organization_name_key(name).hash(&mut hasher);
+    format!("booklist-{:016x}", hasher.finish())
 }
 
 /// 整个书架，序列化成 JSON 持久化。
@@ -330,6 +345,7 @@ impl Library {
         self.books.retain(|b| b.id != id);
         for list in &mut self.booklists {
             list.book_order.retain(|book_id| *book_id != id);
+            list.reviews.remove(&id);
             if list.cover_book_id == id {
                 list.cover_book_id = list.book_order.first().copied().unwrap_or(0);
             }
@@ -548,9 +564,10 @@ impl Library {
             }
         }
         self.booklists.retain(|list| {
-            names
-                .iter()
-                .any(|name| organization_name_key(name) == organization_name_key(&list.name))
+            list.saved
+                || names
+                    .iter()
+                    .any(|name| organization_name_key(name) == organization_name_key(&list.name))
         });
         for name in names {
             let key = organization_name_key(&name);
@@ -579,8 +596,12 @@ impl Library {
                 .iter_mut()
                 .find(|list| organization_name_key(&list.name) == key)
             {
+                if list.id.trim().is_empty() {
+                    list.id = legacy_booklist_id(&list.name);
+                }
                 list.name = name;
                 list.book_order.retain(|id| members.contains(id));
+                list.reviews.retain(|id, _| members.contains(id));
                 for id in members {
                     if !list.book_order.contains(&id) {
                         list.book_order.push(id);
@@ -591,6 +612,16 @@ impl Library {
                 }
             }
         }
+        for list in &mut self.booklists {
+            if list.id.trim().is_empty() {
+                list.id = legacy_booklist_id(&list.name);
+            }
+            let order = list.book_order.iter().copied().collect::<HashSet<_>>();
+            list.reviews.retain(|id, _| order.contains(id));
+            if !list.book_order.contains(&list.cover_book_id) {
+                list.cover_book_id = list.book_order.first().copied().unwrap_or(0);
+            }
+        }
     }
 
     pub fn update_booklist(
@@ -599,6 +630,7 @@ impl Library {
         description: String,
         cover_book_id: u64,
         book_order: Vec<u64>,
+        reviews: Option<BTreeMap<u64, String>>,
     ) -> bool {
         self.reconcile_booklists();
         let key = organization_name_key(name);
@@ -635,13 +667,76 @@ impl Library {
         } else {
             order.first().copied().unwrap_or(0)
         };
+        let reviews = reviews.map(|reviews| {
+            reviews
+                .into_iter()
+                .filter(|(id, _)| members.contains(id))
+                .filter_map(|(id, review)| {
+                    let review = crate::html_sanitize::html_to_plain_text(&review);
+                    let review = review.trim().chars().take(1000).collect::<String>();
+                    (!review.is_empty()).then_some((id, review))
+                })
+                .collect::<BTreeMap<_, _>>()
+        });
         let changed = list.description != description
             || list.cover_book_id != cover_book_id
-            || list.book_order != order;
+            || list.book_order != order
+            || reviews
+                .as_ref()
+                .is_some_and(|reviews| list.reviews != *reviews);
         list.description = description;
         list.cover_book_id = cover_book_id;
         list.book_order = order;
+        if let Some(reviews) = reviews {
+            list.reviews = reviews;
+        }
         changed
+    }
+
+    /// 保存一个可为空的快捷书单。图书项目由后续加入收藏夹/书单或推荐保存时填充。
+    pub fn create_booklist(&mut self, name: String) -> Option<String> {
+        let name = normalize_organization_names(vec![name])
+            .into_iter()
+            .next()?;
+        let key = organization_name_key(&name);
+        if let Some(existing) = self
+            .booklists
+            .iter_mut()
+            .find(|list| organization_name_key(&list.name) == key)
+        {
+            existing.saved = true;
+            if existing.id.trim().is_empty() {
+                existing.id = legacy_booklist_id(&existing.name);
+            }
+            return Some(existing.id.clone());
+        }
+        let id = legacy_booklist_id(&name);
+        self.booklists.push(BookList {
+            id: id.clone(),
+            name,
+            saved: true,
+            ..BookList::default()
+        });
+        Some(id)
+    }
+
+    /// 删除一份书单，并从所有成员的收藏夹关系中移除同名条目。
+    /// 返回受影响的本机书籍 ID，供调用方写入独立成员关系实体。
+    pub fn delete_booklist(&mut self, list_id: &str) -> Option<(String, Vec<u64>)> {
+        let index = self.booklists.iter().position(|list| list.id == list_id)?;
+        let name = self.booklists[index].name.clone();
+        let key = organization_name_key(&name);
+        let mut changed_ids = Vec::new();
+        for book in &mut self.books {
+            let before = book.collections.len();
+            book.collections
+                .retain(|collection| organization_name_key(collection) != key);
+            if before != book.collections.len() {
+                changed_ids.push(book.id);
+            }
+        }
+        self.booklists.remove(index);
+        Some((name, changed_ids))
     }
 
     pub fn set_word_count(&mut self, id: u64, wc: u64) {
@@ -1513,7 +1608,13 @@ mod tests {
         assert_eq!(lib.booklists.len(), 1);
         assert_eq!(lib.booklists[0].book_order, vec![101, 202]);
 
-        assert!(lib.update_booklist("明清", "<b>按时代阅读</b>".into(), 202, vec![202, 101],));
+        assert!(lib.update_booklist(
+            "明清",
+            "<b>按时代阅读</b>".into(),
+            202,
+            vec![202, 101],
+            None
+        ));
         assert_eq!(lib.booklists[0].description, "按时代阅读");
         assert_eq!(lib.booklists[0].cover_book_id, 202);
         assert_eq!(lib.booklists[0].book_order, vec![202, 101]);

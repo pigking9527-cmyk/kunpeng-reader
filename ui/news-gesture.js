@@ -114,8 +114,7 @@
     return directions.slice(0, 16);
   }
 
-  function directionSimilarity(reference, candidate) {
-    const saved = directionSequence(reference), current = directionSequence(candidate);
+  function directionSequenceSimilarity(saved, current) {
     if (!saved.length || !current.length) return 0;
     const rows = Array.from({ length: saved.length + 1 }, () => Array(current.length + 1).fill(0));
     for (let left = 0; left <= saved.length; left += 1) rows[left][0] = left;
@@ -127,6 +126,19 @@
       }
     }
     return Math.max(0, Math.min(1, 1 - rows[saved.length][current.length] / Math.max(saved.length, current.length)));
+  }
+
+  function directionSimilarity(reference, candidate) {
+    return directionSequenceSimilarity(directionSequence(reference), directionSequence(candidate));
+  }
+
+  // Live preview compares the route already drawn with the same-length prefix
+  // of a saved route. It avoids treating an unfinished "right, then down" as a
+  // compressed version of an unrelated complete gesture.
+  function prefixSimilarity(reference, candidate) {
+    const saved = directionSequence(reference), current = directionSequence(candidate);
+    if (!saved.length || !current.length) return 0;
+    return directionSequenceSimilarity(saved.slice(0, Math.min(saved.length, current.length)), current);
   }
 
   function similarity(reference, candidate) {
@@ -230,5 +242,5 @@
     context.stroke();
   }
 
-  return { STORAGE_KEY, ENABLED_KEY, PRECISION_KEY, SAMPLE_COUNT, MIN_PATH_LENGTH, MATCH_THRESHOLD, MATCH_THRESHOLDS, PRECISION_THRESHOLDS, cleanPoints, pathLength, normalize, directionSequence, directionSimilarity, similarity, parseStored, load, save, loadEnabled, saveEnabled, normalizePrecision, loadPrecision, savePrecision, matchThreshold, clear, draw };
+  return { STORAGE_KEY, ENABLED_KEY, PRECISION_KEY, SAMPLE_COUNT, MIN_PATH_LENGTH, MATCH_THRESHOLD, MATCH_THRESHOLDS, PRECISION_THRESHOLDS, cleanPoints, pathLength, normalize, directionSequence, directionSimilarity, prefixSimilarity, similarity, parseStored, load, save, loadEnabled, saveEnabled, normalizePrecision, loadPrecision, savePrecision, matchThreshold, clear, draw };
 });

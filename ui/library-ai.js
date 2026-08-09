@@ -4,6 +4,8 @@
   "use strict";
   const MAX_COMPARE_BOOKS = 8;
   const MAX_QUESTION_SOURCES = 20;
+  const DEFAULT_RECOMMENDATION_CANDIDATE_LIMIT = 20;
+  const DEFAULT_RECOMMENDATION_RESULT_LIMIT = 12;
   const ANSWER_FONT_SIZE_KEY = "libraryAiAnswerFontSizeV1";
   const HISTORY_LAYOUT_KEY = "libraryAiHistoryLayoutV1";
   const HISTORY_SOURCES_KEY = "libraryAiHistorySourcesV1";
@@ -25,10 +27,9 @@
     const selectedBookIds = new Set();
     let books = [], useModelTags = true, mode = "question", running = false, loading = false, activeSource = null, previewPinned = false, previewHideTimer = null;
     let booksRefreshVersion = 0;
-    let libraryHistory = [], historySyncEnabled = false, historySyncMode = "off", showingHistory = false, latestAnswer = null;
+    let libraryHistory = [], historySyncEnabled = false, historySyncMode = "off", showingHistory = false, latestAnswer = null, latestRecommendation = null;
     let historyLayout = "list";
-    let classificationPoll = null;
-    let answerFontSize = DEFAULT_ANSWER_FONT_SIZE, answerLength = "short", semanticStatus = null;
+    let answerFontSize = DEFAULT_ANSWER_FONT_SIZE, answerLength = "short", recommendationCandidateLimit = DEFAULT_RECOMMENDATION_CANDIDATE_LIMIT, recommendationResultLimit = DEFAULT_RECOMMENDATION_RESULT_LIMIT, semanticStatus = null;
     let appSettingsSyncReady = false, appSettingsSyncTimer = 0;
     let longContextHelpTimer = null;
     let questionContextMenu = null;
@@ -144,6 +145,10 @@
       root.querySelectorAll?.("[data-library-history-sync]").forEach((button) => {
         button.setAttribute("aria-checked", String(button.dataset.libraryHistorySync === historySyncMode));
       });      if (trigger) trigger.textContent = i18n("answerSettings", "Settings");
+      const candidateLimit = $("library-ai-recommendation-candidate-limit");
+      if (candidateLimit && root.activeElement !== candidateLimit) candidateLimit.value = String(recommendationCandidateLimit);
+      const resultLimit = $("library-ai-recommendation-result-limit");
+      if (resultLimit && root.activeElement !== resultLimit) resultLimit.value = String(recommendationResultLimit);
       if (overlay?.hidden && trigger) trigger.setAttribute("aria-expanded", "false");
       const longContext = $("library-ai-long-context");
       const m3Active = semanticStatus?.model_id === "bge-m3";
@@ -320,85 +325,6 @@
       questionContextMenu = menu;
     }
 
-    function stopClassificationPoll() {
-      if (classificationPoll) global.clearInterval(classificationPoll);
-      classificationPoll = null;
-    }
-
-    async function classificationCoverageHint() {
-      const coverage = await invoke("library_profile_coverage_status");
-      const total = Number(coverage?.totalBooks || 0);
-      const incomplete = Number(coverage?.incompleteBooks || 0);
-      const webPending = Number(coverage?.webPendingBooks || 0);
-      const missing = Array.isArray(coverage?.missingDimensions) ? coverage.missingDimensions.slice(0, 4).join("、") : "";
-      const hints = [];
-      if (incomplete) hints.push(`检测到 ${incomplete}/${total} 本图书的暗标签未覆盖完整八维${missing ? `（缺少：${missing}${coverage.missingDimensions.length > 4 ? "等" : ""}）` : ""}，点击“书籍分类”可重新分类`);
-      if (webPending) hints.push(`${webPending} 本尚待联网补全，点击“书籍分类”会继续处理`);
-      return hints.join("；");
-    }
-
-    async function showClassificationSummary(label = "") {
-      const status = $("library-ai-classify-status");
-      const button = $("library-ai-classify");
-      try {
-        const coverage = await invoke("library_profile_coverage_status");
-        const total = Number(coverage?.totalBooks || 0);
-        const summary = total ? `完成：${total} 本图书的分类` : "尚未发现可分类的图书";
-        const hint = await classificationCoverageHint();
-        const text = [label || summary, hint].filter(Boolean).join("；");
-        status.textContent = text;
-        if (text) status.title = text;
-        else status.removeAttribute("title");
-        if (button) button.title = text || summary;
-      } catch (_) {
-        status.textContent = label;
-        if (label) status.title = label;
-        else status.removeAttribute("title");
-        if (button) button.title = label || "书籍分类状态读取失败";
-      }
-    }
-
-    async function refreshClassificationStatus() {
-      try {
-        const task = await invoke("library_profile_status");
-        const active = task && ["queued", "running", "pausing"].includes(task.state);
-        const button = $("library-ai-classify"), status = $("library-ai-classify-status");
-        button.disabled = Boolean(active);
-        if (active) {
-          const progress = task.progress || {};
-          // `current` already includes the canonical completed/total count
-          // from the worker. Do not append the registry progress again.
-          const label = task.current || `正在分类（${Number(progress.done || 0)}/${Number(progress.total || 0)}）`;
-          status.textContent = label;
-          status.title = label;
-          button.title = label;
-          if (!classificationPoll) classificationPoll = global.setInterval(refreshClassificationStatus, 900);
-          return;
-        }
-        if (task?.state === "paused") {
-          const label = task.current || "书籍分类已中断";
-          const resumeLabel = `${label}；点击“书籍分类”从已保存的位置继续`;
-          status.textContent = resumeLabel;
-          status.title = resumeLabel;
-          button.title = resumeLabel;
-          stopClassificationPoll();
-          return;
-        }
-        if (task?.state === "completed" || task?.state === "failed" || task?.state === "cancelled") {
-          const label = task.current || task.error || (task.state === "completed" ? "书籍分类完成" : "书籍分类已停止");
-          await showClassificationSummary(label);
-          stopClassificationPoll();
-        } else {
-          await showClassificationSummary();
-        }
-      } catch (error) {
-        $("library-ai-classify-status").textContent = "分类状态读取失败";
-        const button = $("library-ai-classify");
-        if (button) button.title = "分类状态读取失败";
-        stopClassificationPoll();
-      }
-    }
-
     function state(message, error) {
       stateEl.textContent = message;
       stateEl.className = "library-ai-state" + (error ? " error" : "");
@@ -406,11 +332,73 @@
 
     function readinessMessage(aiStatus, semanticStatus) {
       const apiReady = Boolean(aiStatus?.configured);
-      const indexReady = Number(semanticStatus?.semantic_done || 0) > 0;
+      const indexReady = Boolean(semanticStatus?.semantic_ready) || Number(semanticStatus?.semantic_done || 0) > 0;
       if (apiReady && indexReady) return "";
+      if (semanticStatus?.status_refreshing) return apiReady ? "" : "请先在设置中配置大模型 API、模型和密钥。";
       if (!apiReady && !indexReady) return "请先在设置中配置大模型 API、模型和密钥，并为本地图书建立语义索引。";
       if (!apiReady) return "请先在设置中配置大模型 API、模型和密钥。";
       return "请先在设置中为本地图书建立语义索引。";
+    }
+
+    async function saveRecommendationCandidateLimit(input) {
+      const candidateLimit = Math.round(Number(input.value));
+      if (!Number.isFinite(candidateLimit) || candidateLimit < 5 || candidateLimit > 100) {
+        input.value = String(recommendationCandidateLimit);
+        state("推荐书单粗选数量请输入 5–100 本。", true);
+        return;
+      }
+      input.disabled = true;
+      try {
+        const settings = await invoke("set_library_recommendation_candidate_limit", { request: { candidateLimit } });
+        recommendationCandidateLimit = Number(settings?.recommendationCandidateLimit || candidateLimit);
+        input.value = String(recommendationCandidateLimit);
+        renderBooks();
+        state(`推荐书单将先从本地粗选 ${recommendationCandidateLimit} 本。`, false);
+      } catch (error) {
+        input.value = String(recommendationCandidateLimit);
+        state("保存推荐书单粗选数量失败：" + String(error), true);
+      } finally {
+        input.disabled = false;
+      }
+    }
+
+    async function saveRecommendationResultLimit(input) {
+      const resultLimit = Math.round(Number(input.value));
+      if (!Number.isFinite(resultLimit) || resultLimit < 5 || resultLimit > 30) {
+        input.value = String(recommendationResultLimit);
+        state("大模型精选数量请输入 5–30 本。", true);
+        return;
+      }
+      input.disabled = true;
+      try {
+        const settings = await invoke("set_library_recommendation_result_limit", { request: { resultLimit } });
+        recommendationResultLimit = Number(settings?.recommendationResultLimit || resultLimit);
+        input.value = String(recommendationResultLimit);
+        renderBooks();
+        state(`大模型将从本地候选中精选 ${recommendationResultLimit} 本；候选不足时按实际本数。`, false);
+      } catch (error) {
+        input.value = String(recommendationResultLimit);
+        state("保存大模型精选数量失败：" + String(error), true);
+      } finally {
+        input.disabled = false;
+      }
+    }
+
+    const mergeSemanticStatus = (status) => global.ReaderSemanticStatusCache?.merge?.(status) || status || {};
+
+    async function reconcileSemanticReadiness(aiStatus, initialStatus) {
+      let status = mergeSemanticStatus(initialStatus);
+      try {
+        for (let attempt = 0; status?.status_refreshing && attempt < 20; attempt += 1) {
+          await new Promise((resolve) => global.setTimeout(resolve, 500));
+          status = mergeSemanticStatus(await invoke("semantic_status"));
+        }
+      } catch (_) {
+        return;
+      }
+      semanticStatus = status;
+      renderAnswerLengthSettings();
+      if (!running && !showingHistory) state(readinessMessage(aiStatus, semanticStatus), !aiStatus?.configured);
     }
 
     function renderModelProfiles(status) {
@@ -432,7 +420,8 @@
         option.textContent = profile.name || profile.model || "已配置大模型";
         select.appendChild(option);
       });
-      select.value = profiles.some((profile) => profile.id === status?.activeId) ? status.activeId : profiles[0].id;
+      const libraryId = status?.assignments?.libraryId || status?.activeId;
+      select.value = profiles.some((profile) => profile.id === libraryId) ? libraryId : profiles[0].id;
       select.disabled = false;
     }
 
@@ -478,11 +467,13 @@
     function updateScopeStatus(visibleBooks) {
       const selected = selectedBookIds.size;
       const visibleSelected = visibleBooks.filter((book) => selectedBookIds.has(String(book.id))).length;
-      if (mode === "question") {
+      if (mode === "question" || mode === "recommend") {
         const visible = visibleSelected < selected ? i18nFormat("scopeVisible", " ({count} currently shown)", { count: visibleSelected }) : "";
         $("scope-summary").textContent = selected
           ? i18nFormat("questionScopeSelected", "Current scope: {selected} selected book(s){visible}", { selected, visible })
-          : i18nFormat("questionScopeAll", "Current scope: Entire library (all indexed books; top {limit} matches)", { limit: MAX_QUESTION_SOURCES });
+          : mode === "recommend"
+            ? `推荐范围：全部书库（本地粗选 ${recommendationCandidateLimit} 本，大模型精选 ${recommendationResultLimit} 本）`
+            : i18n("scopeAllBooks", "当前范围：全部书库");
         $("clear-selection").textContent = i18n("cancelLimit", "取消限定");
         $("selection-tools").hidden = false;
         $("select-visible").disabled = !visibleBooks.length || visibleSelected === visibleBooks.length;
@@ -586,13 +577,13 @@
     }
 
     function selectVisibleBooks() {
-      if (mode !== "question") return;
+      if (mode === "compare") return;
       currentBooks().forEach((book) => selectedBookIds.add(String(book.id)));
       renderBooks();
     }
 
     function invertVisibleBooks() {
-      if (mode !== "question") return;
+      if (mode === "compare") return;
       currentBooks().forEach((book) => {
         const id = String(book.id);
         if (selectedBookIds.has(id)) selectedBookIds.delete(id);
@@ -611,9 +602,15 @@
       }
       $("mode-question").classList.toggle("active", mode === "question");
       $("mode-compare").classList.toggle("active", mode === "compare");
+      $("mode-recommend")?.classList.toggle("active", mode === "recommend");
       $("question").placeholder = mode === "compare"
         ? "比较选中作品对同一主题的观点、分歧与依据。"
-        : "例如：这些书如何解释清末财政困境？";
+        : mode === "recommend"
+          ? "例如：我想理解晚明财政困境，该先读哪些书？"
+          : "例如：这些书如何解释清末财政困境？";
+      $("run").textContent = mode === "recommend" ? "生成推荐书单" : i18n("startQuestion", "开始问答");
+      $("library-ai-booklist-save").hidden = mode !== "recommend";
+      latestRecommendation = null;
       renderBooks();
     }
 
@@ -775,6 +772,35 @@
       });
     }
 
+    function renderBooklistRecommendation(recommendation) {
+      answerEl.replaceChildren();
+      const summary = root.createElement("p");
+      summary.className = "library-ai-booklist-summary";
+      summary.textContent = recommendation.summary || "模型已从本地检索候选中精选以下图书。";
+      answerEl.append(summary);
+      const list = root.createElement("div");
+      list.className = "library-ai-booklist-recommendations";
+      recommendation.items.forEach((item, index) => {
+        const row = root.createElement("article");
+        row.className = "library-ai-booklist-recommendation";
+        const rank = root.createElement("span");
+        rank.className = "library-ai-booklist-rank";
+        rank.textContent = String(index + 1);
+        const body = root.createElement("div");
+        const title = root.createElement("strong");
+        title.textContent = item.title || "未命名图书";
+        const review = root.createElement("p");
+        review.textContent = item.review || "与问题相关。";
+        body.append(title, review);
+        row.append(rank, body);
+        list.append(row);
+      });
+      answerEl.append(list);
+      $("library-ai-booklist-save").hidden = false;
+      const name = $("library-ai-booklist-name");
+      if (name && !name.value.trim()) name.value = "问题推荐书单";
+    }
+
     function renderSources(sources) {
       sourceList.replaceChildren();
       hideSourcePreview(true);
@@ -783,7 +809,9 @@
         return;
       }
       const oneBook = mode === "question" && new Set(sources.map((source) => String(source.bookId))).size === 1;
-      $("source-title").textContent = mode === "question"
+      $("source-title").textContent = mode === "recommend"
+        ? `本地粗选候选（${sources.length} 本；模型仅可从中精选）`
+        : mode === "question"
         ? (oneBook
           ? `单书深度依据（${sources.length} 段；回答仅引用经筛选的脚注）`
           : `检索候选（前 ${sources.length} 本 · 每本 1 段；回答仅引用经筛选的脚注）`)
@@ -1164,9 +1192,11 @@
       }
       running = true;
       $("run").disabled = true;
-      $("run").textContent = i18n("askInProgress", "检索并问答中…");
+      $("run").textContent = mode === "recommend" ? "本地粗选与模型精选中…" : i18n("askInProgress", "检索并问答中…");
       const explicitBookTitle = /《[^》]+》/.test(question);
-      state(mode === "question" && !selectedBookIdsForRequest.length
+      state(mode === "recommend"
+        ? "正在本地检索问题相关图书，再请大模型从候选中精选并写评语…"
+        : mode === "question" && !selectedBookIdsForRequest.length
         ? (explicitBookTitle
           ? "正在识别题中书名；唯一匹配时将使用单书深度问答…"
           : "正在检索全部书库，并筛选可支撑回答的文本证据…")
@@ -1174,7 +1204,8 @@
           ? "正在对所选图书进行书内多轮检索、证据筛选与自检…"
           : "正在检索所选图书的本地语义索引…");
       answerEl.className = "library-ai-answer empty";
-      answerEl.textContent = "正在整理引用片段并向你的智读服务提问…";
+      answerEl.textContent = mode === "recommend" ? "正在整理本地候选书目并生成书单评语…" : "正在整理引用片段并向你的智读服务提问…";
+      $("library-ai-booklist-save").hidden = mode !== "recommend";
       renderSources([]);
       try {
         const answer = await invoke("ask_library_assistant", { request: { task: mode, question, selectedBookIds: selectedBookIdsForRequest } });
@@ -1183,6 +1214,13 @@
         $("library-ai-history").textContent = i18n("libraryHistory", "问答记录");
         latestAnswer = answer;
         answerEl.className = "library-ai-answer";
+        if (mode === "recommend" && answer.recommendation) {
+          latestRecommendation = answer.recommendation;
+          renderBooklistRecommendation(answer.recommendation);
+          renderSources(answer.sources);
+          state(`完成。已先从本地检索得到 ${answer.sources?.length || 0} 本候选，再由大模型精选 ${answer.recommendation.items?.length || 0} 本；确认名称后可保存为书单。`);
+          return;
+        }
         renderAnswer(answer.content, answer.sources);
         renderSources(answer.sources);
         const singleBookTitle = answer.sources?.[0]?.bookTitle;
@@ -1207,7 +1245,7 @@
       } finally {
         running = false;
         $("run").disabled = false;
-        $("run").textContent = i18n("startQuestion", "开始问答");
+        $("run").textContent = mode === "recommend" ? "生成推荐书单" : i18n("startQuestion", "开始问答");
       }
     }
 
@@ -1216,10 +1254,10 @@
       loading = true;
       state(i18n("loadingLibrary", "正在读取书架与智读配置…"));
       try {
-        const [status, profiles, loadedSemanticStatus, list, modelTagSettings, answerSettings, history] = await Promise.all([
+        const [status, profiles, semanticTaskCenter, list, modelTagSettings, answerSettings, history] = await Promise.all([
           invoke("ai_reader_status"),
           invoke("ai_reader_profiles"),
-          invoke("semantic_status"),
+          invoke("semantic_tasks", { reconcile: true }),
           invoke("list_books"),
           invoke("library_model_tags_settings"),
           invoke("library_answer_settings"),
@@ -1228,15 +1266,17 @@
         historyLayout = readHistoryLayout();
         applyLibraryHistorySnapshot(history);
         renderModelProfiles(profiles);
-        semanticStatus = loadedSemanticStatus;
+        semanticStatus = mergeSemanticStatus(semanticTaskCenter?.progress);
         useModelTags = modelTagSettings?.enabled !== false;
         answerLength = answerSettings?.answerLength || "short";
+        recommendationCandidateLimit = Number(answerSettings?.recommendationCandidateLimit || DEFAULT_RECOMMENDATION_CANDIDATE_LIMIT);
+        recommendationResultLimit = Number(answerSettings?.recommendationResultLimit || DEFAULT_RECOMMENDATION_RESULT_LIMIT);
         renderAnswerLengthSettings();
         await hydrateLibraryAnswerSettings();
         applyBooks(list);
         const readiness = readinessMessage(status, semanticStatus);
         state(readiness, !status?.configured);
-        refreshClassificationStatus();
+        if (semanticStatus?.status_refreshing) void reconcileSemanticReadiness(status, semanticStatus);
       } catch (error) {
         state("无法读取书架或智读配置：" + String(error), true);
       } finally {
@@ -1246,6 +1286,7 @@
 
     $("mode-question").addEventListener("click", () => setMode("question"));
     $("mode-compare").addEventListener("click", () => setMode("compare"));
+    $("mode-recommend")?.addEventListener("click", () => setMode("recommend"));
     $("tag-filter").addEventListener("change", renderBooks);
     $("collection-filter").addEventListener("change", renderBooks);
     $("library-ai-book-search").addEventListener("input", renderBooks);
@@ -1260,16 +1301,8 @@
     });
     $("select-visible").addEventListener("click", selectVisibleBooks);
     $("invert-visible").addEventListener("click", invertVisibleBooks);
-    $("library-ai-classify").addEventListener("click", async () => {
-      try {
-        $("library-ai-classify").disabled = true;
-        $("library-ai-classify-status").textContent = "正在建立分类任务…";
-        await invoke("start_library_auto_classification");
-        await refreshClassificationStatus();
-      } catch (error) {
-        $("library-ai-classify").disabled = false;
-        $("library-ai-classify-status").textContent = String(error);
-      }
+    $("library-ai-classify")?.addEventListener("click", () => {
+      window.ReaderBookClassificationSettingsUI?.open?.();
     });
     $("library-ai-history").addEventListener("click", toggleLibraryHistory);
     $("library-ai-answer-settings")?.addEventListener("click", toggleAnswerLengthSettings);
@@ -1282,7 +1315,14 @@
     });
     root.querySelectorAll?.("[data-library-history-sync]").forEach((button) => {
       button.addEventListener("click", () => { void saveLibraryHistorySyncMode(button.dataset.libraryHistorySync, button); });
-    });    $("library-ai-long-context")?.addEventListener("click", (event) => {
+    });
+    $("library-ai-recommendation-candidate-limit")?.addEventListener("change", (event) => {
+      void saveRecommendationCandidateLimit(event.currentTarget);
+    });
+    $("library-ai-recommendation-result-limit")?.addEventListener("change", (event) => {
+      void saveRecommendationResultLimit(event.currentTarget);
+    });
+    $("library-ai-long-context")?.addEventListener("click", (event) => {
       const toggle = event.currentTarget;
       const enabled = toggle.getAttribute("aria-checked") === "true";
       const available = toggle.getAttribute("aria-disabled") !== "true";
@@ -1309,8 +1349,10 @@
       if (!id) return;
       event.currentTarget.disabled = true;
       try {
-        const status = await invoke("select_ai_reader_profile", { id });
-        state(status?.configured ? "已切换本次问答使用的大模型。" : "所选大模型配置不完整。", !status?.configured);
+        const profiles = await invoke("assign_ai_reader_profile", { request: { purpose: "library", id } });
+        renderModelProfiles(profiles);
+        const selected = profiles?.profiles?.find((profile) => profile.id === id);
+        state(selected?.configured ? "已切换书库问答使用的大模型。" : "所选大模型配置不完整。", !selected?.configured);
       } catch (error) {
         state("切换大模型失败：" + String(error), true);
       } finally { event.currentTarget.disabled = false; }
@@ -1320,6 +1362,29 @@
     sourcePreview.addEventListener("pointerenter", () => clearTimeout(previewHideTimer));
     sourcePreview.addEventListener("pointerleave", scheduleSourcePreviewHide);
     $("run").addEventListener("click", run);
+    $("library-ai-booklist-save")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const recommendation = latestRecommendation;
+      const name = String($("library-ai-booklist-name")?.value || "").trim();
+      if (!recommendation?.items?.length) return;
+      if (!name) { $("library-ai-booklist-name")?.focus(); return; }
+      const submit = event.currentTarget.querySelector("button[type=submit]");
+      submit.disabled = true;
+      try {
+        const reviews = Object.fromEntries(recommendation.items.map((item) => [String(item.bookId), String(item.review || "")]));
+        await invoke("save_recommended_booklist", {
+          name,
+          description: String(recommendation.summary || ""),
+          bookIds: recommendation.items.map((item) => String(item.bookId)),
+          reviews,
+        });
+        event.currentTarget.hidden = true;
+        state(`已保存“${name}”。书单内容和逐书评语可在设置 → 快捷书单或书架书单中继续编辑。`);
+        await refreshBooks();
+      } catch (error) {
+        state("保存推荐书单失败：" + String(error), true);
+      } finally { submit.disabled = false; }
+    });
     $("question").addEventListener("contextmenu", showQuestionContextMenu);
     $("question").addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {

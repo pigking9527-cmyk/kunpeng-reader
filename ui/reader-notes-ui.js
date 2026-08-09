@@ -65,7 +65,7 @@ document.getElementById("toc-btn").addEventListener("click", () => {
 backdropEl.addEventListener("click", (e) => {
   ReaderShell.closeOverlay();
   // 目录遮罩盖住 iframe 时，中间点击仍应切换整条工具栏。
-  if (e.clientX >= window.innerWidth * 0.4 && e.clientX <= window.innerWidth * 0.6) {
+  if (window.ReaderSettings?.clickActionAt?.(e.clientX, e.clientY, window.innerWidth, window.innerHeight) === "center") {
     window.toggleReaderToolbar?.();
   }
 });
@@ -204,6 +204,7 @@ function renderBookmarks() {
         renderBookmarks();
         return;
       }
+      window.rememberReaderJumpPosition?.({ kind: "bookmark" });
       sendToPage({ gotoChapter: bm.chapter || 0, chFrac: bm.frac || 0 });
       // 不关书签页：允许连续点多个书签跳转；点正文（侧栏外的遮罩）才关闭
     });
@@ -298,10 +299,10 @@ function renderAnnotations(targetIdx, animateTarget) {
     });
     const editBtn = document.createElement("span");
     editBtn.className = "anno-edit-btn";
-    editBtn.textContent = h.note ? "✏ " + readerNotesText("editAnnotation", "编辑批注") : "✏ " + readerNotesText("addAnnotation", "添加批注");
+    editBtn.textContent = h.note ? readerNotesText("editAnnotation", "编辑批注") : readerNotesText("addAnnotation", "添加批注");
     const del = document.createElement("span");
     del.className = "anno-del";
-    del.textContent = "🗑 " + readerNotesText("delete", "删除");
+    del.textContent = readerNotesText("delete", "删除");
     del.addEventListener("click", async () => {
       highlights = await invoke("remove_highlight", { index: i });
       sendToPage({ highlights });
@@ -352,7 +353,7 @@ function renderAnnotations(targetIdx, animateTarget) {
       h.note = ta.value;
       noteView.textContent = ta.value;
       noteView.style.display = ta.value ? "" : "none";
-      editBtn.textContent = ta.value ? "✏ " + readerNotesText("editAnnotation", "编辑批注") : "✏ " + readerNotesText("addAnnotation", "添加批注");
+      editBtn.textContent = ta.value ? readerNotesText("editAnnotation", "编辑批注") : readerNotesText("addAnnotation", "添加批注");
       edit.classList.remove("open");
     });
 

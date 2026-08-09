@@ -1,0 +1,35 @@
+{
+  "syncProtocolVersion": 3,
+  "kind": "ai_reader_history_entry_v2",
+  "policy": {
+    "readerLivePerAccount": 100,
+    "libraryLivePerAccount": 100,
+    "tombstonesPerScope": 200,
+    "readerEntityId": "reader:<content-id>:<entry-id>",
+    "libraryEntityId": "library:<entry-id>",
+    "localLiveEntries": "unbounded"
+  },
+  "migration": {
+    "readLegacyKind": "ai_reader_history_v1",
+    "legacyUploadFromProtocol3": false,
+    "legacyArrayEntry": { "id": "history-42", "question": "示例问题", "answer": "示例回答" },
+    "projectedEntity": {
+      "id": "reader:0123456789abcdef:history-42",
+      "payload": {
+        "version": 2,
+        "scope": "reader",
+        "contentId": "0123456789abcdef",
+        "entry": { "id": "history-42", "question": "示例问题", "answer": "示例回答" }
+      }
+    }
+  },
+  "privacy": {
+    "forbiddenSourceFields": ["excerpt", "bookId", "book_id", "path", "filePath", "text", "content"],
+    "allowedSourceFields": ["title", "chapter", "sourceKind", "kind", "tags"]
+  },
+  "tombstone": {
+    "id": "reader:0123456789abcdef:history-42",
+    "deleted_at": 1760000000000,
+    "payloadMayRetainPriorSanitizedEntry": true
+  }
+}

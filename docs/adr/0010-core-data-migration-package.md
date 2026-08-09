@@ -12,11 +12,20 @@
 
 ## 决定
 
-定义新的 JSON 格式 `kunpeng-reader-core-data-package`，格式版本为 **1**，schema 位于 `contracts/migration/core-data-package.schema.json`。不得复用或放宽旧桌面 `kunpeng-reader-data-package` 的隐式 v2 解析规则。
+定义新的 JSON 格式 `kunpeng-reader-core-data-package`。格式版本 **1** 为既有 `book_state_v2` 迁移包；当前导出格式为 **2**，schema 位于 `contracts/migration/core-data-package.schema.json`。不得复用或放宽旧桌面 `kunpeng-reader-data-package` 的隐式 v2 解析规则。
 
-迁移包只允许以下四种实体：
+v1 迁移包只允许以下四种实体：
 
 - `book_state_v2`；
+- `model_book_tags_v1`；
+- `vocab`；
+- `reading_bucket_v2`。
+
+v2 迁移包将原先的 `book_state_v2` 拆为：
+
+- `reading_progress_v1`；
+- `reading_data_v1`；
+- `reading_statistics_v1`；
 - `model_book_tags_v1`；
 - `vocab`；
 - `reading_bucket_v2`。
@@ -45,7 +54,7 @@
 
 导入前必须创建本机恢复点。所有实体的校验、LWW 合并与本机物化必须处在可回滚的事务/安装边界内；任一步失败时保持导入前状态，并保留恢复点供用户显式恢复。导入后的实体按“来自外部迁移包、尚未得到当前账号服务端确认”处理，不能伪造 cursor/ack 或绕过下一次正常 pull-before-push。
 
-格式版本 1 是 `syncProtocolVersion: 1` 的可选离线迁移格式，不改变服务端 API 或同步协议版本。旧客户端应拒绝未知 package format/version，而非按普通 JSON 猜测解析。未来版本以新 `version` 和新 schema 发布；客户端只接受显式支持的版本。若导入实现出错，恢复到导入前恢复点即可回滚，不修改云端数据。
+格式版本 1 是 `syncProtocolVersion: 1` 的可选离线迁移格式；格式版本 2 对齐拆分后的桌面同步实体。两者都不改变服务端 API；客户端必须只接受显式支持的版本，而不是按普通 JSON 猜测解析。若导入实现出错，恢复到导入前恢复点即可回滚，不修改云端数据。
 
 ## 验证
 

@@ -7,11 +7,73 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "..", "shelf-ui.js"), "utf8");
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+const settingsLayout = fs.readFileSync(path.join(__dirname, "..", "settings-layout-ui.js"), "utf8");
+const appShell = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const appI18n = fs.readFileSync(path.join(__dirname, "..", "app-i18n.js"), "utf8");
+const animationSettings = fs.readFileSync(path.join(__dirname, "..", "animation-settings-ui.js"), "utf8");
+const semanticSettings = fs.readFileSync(path.join(__dirname, "..", "semantic-ui.js"), "utf8");
 const organizationEditor = fs.readFileSync(path.join(__dirname, "..", "book-info-organization.js"), "utf8");
 
-test("common settings dialog uses the requested 560px desktop width", () => {
-  assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*width:\s*min\(560px,\s*calc\(100vw - 48px\)\);/s);
+test("common settings use a categorized wide layout with a live shelf preview", () => {
+  assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*width:\s*min\(920px,\s*calc\(100vw - 48px\)\);/s);
   assert.match(styles, /\.fp-set-row \{[^}]*font-size:\s*16px;/s);
+  assert.match(html, /data-settings-section="basic"[\s\S]*data-settings-section="toolbar"[\s\S]*data-settings-section="shelf"[\s\S]*data-settings-section="reading"[\s\S]*data-settings-section="smart"[\s\S]*data-settings-section="data"/);
+  assert.match(html, /data-settings-panel="basic"[\s\S]*data-settings-panel="toolbar"[^>]*hidden[\s\S]*data-settings-panel="shelf"[^>]*hidden[\s\S]*data-settings-panel="data"[^>]*hidden/);
+  assert.match(html, /id="fp-shelf-preview-title"[\s\S]*id="fp-shelf-preview-progress"[\s\S]*id="fp-shelf-preview-rating"/);
+  assert.match(html, /src="settings-layout-ui\.js"/);
+  assert.match(settingsLayout, /const STORAGE_KEY = "commonSettingsSectionV1"/);
+  assert.match(settingsLayout, /function activateSection\(id, persist = true\)/);
+  assert.match(settingsLayout, /function syncShelfPreview\(\)/);
+  assert.doesNotMatch(html, /id="fp-settings-close"/);
+  assert.doesNotMatch(html, /class="modal-head fp-settings-head"/);
+  assert.match(styles, /\.fp-settings-content\s*\{[^}]*overflow-y:\s*auto/);
+  assert.match(styles, /@media \(max-width: 720px\)[\s\S]*\.fp-settings-nav\s*\{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/);
+});
+
+test("common settings navigation can collapse to icons with the reader-preferences behavior", () => {
+  assert.match(html, /id="fp-settings-nav-toggle"/);
+  assert.match(html, /class="fp-settings-nav-icon"/);
+  assert.match(html, /class="fp-settings-nav-label"/);
+  assert.match(settingsLayout, /const NAV_COLLAPSED_KEY = "commonSettingsNavCollapsedV1"/);
+  assert.match(settingsLayout, /function applyNavState\(\)/);
+  assert.match(settingsLayout, /navToggle\?\.addEventListener\("click"/);
+  assert.match(styles, /\.fp-settings-card\.nav-collapsed \.fp-settings-layout\s*\{[^}]*grid-template-columns:\s*62px/s);
+  assert.match(styles, /\.fp-settings-card\.nav-collapsed \.fp-settings-nav-label\s*\{[^}]*clip-path:\s*inset\(50%\)/s);
+  assert.match(styles, /\.fp-settings-card\.nav-collapsed \.fp-settings-nav-toggle\s*\{[^}]*left:\s*62px/s);
+  assert.match(styles, /\.fp-settings-card:not\(\.nav-collapsed\) \.fp-settings-nav-icon\s*\{\s*display:\s*none;/);
+  assert.match(appI18n, /settingsCollapseNavigation: "收起分类"/);
+  assert.match(appI18n, /settingsExpandNavigation: "展开分类"/);
+});
+
+test("every common-settings child page leaves the common settings visible", () => {
+  assert.doesNotMatch(settingsLayout, /modal\.classList\.remove\("show"\)/);
+  assert.doesNotMatch(animationSettings, /commonSettingsModal\?\.classList\.remove\("show"\)/);
+  assert.doesNotMatch(semanticSettings, /settingsModal\?\.classList\.remove\("show"\)/);
+  const dictionaryOpen = appShell.slice(appShell.indexOf("function openExternalDictSettings"), appShell.indexOf("function closeExternalDictSettings"));
+  assert.doesNotMatch(dictionaryOpen, /fpSettingsModal\.classList\.remove\("show"\)/);
+});
+
+test("all common-settings child pages share the compact detail design system", () => {
+  const childIds = [
+    "startup-enhancement-modal",
+    "animation-settings-modal",
+    "import-dirs-modal",
+    "gesture-settings-modal",
+    "reader-recommendation-settings-modal",
+    "external-dict-modal",
+    "newsnow-settings-modal",
+    "semantic-index-modal",
+    "api-settings-modal",
+  ];
+  for (const id of childIds) {
+    assert.match(html, new RegExp(`id="${id}" class="modal settings-detail-modal"[\\s\\S]*?<div class="modal-card settings-detail-card`));
+  }
+  assert.match(styles, /\.settings-detail-modal\s*\{[^}]*backdrop-filter:\s*blur\(4px\)[^}]*\}/s);
+  assert.match(styles, /\.settings-detail-card\s*\{[^}]*border-radius:\s*18px;[^}]*box-shadow:/s);
+  assert.match(styles, /\.settings-detail-card > \.modal-head\s*\{[^}]*position:\s*sticky;[^}]*backdrop-filter:\s*blur\(12px\)/s);
+  assert.match(styles, /\.api-settings-section\s*\{[^}]*border-radius:\s*13px;[^}]*background:\s*#f8fafd;/s);
+  assert.match(styles, /\.semantic-card \.sem-section\s*\{[^}]*border-radius:\s*12px;/s);
+  assert.match(styles, /@media \(max-width: 720px\)[\s\S]*?\.settings-detail-card\s*\{[^}]*max-width:\s*calc\(100vw - 24px\)/s);
 });
 
 test("book card clicks explicitly close main-window floaters", () => {
@@ -106,6 +168,29 @@ test("book information opens organization management on demand and right click o
   assert.doesNotMatch(organizationEditor, /global\.prompt|global\.confirm/);
 });
 
+test("book information uses a compact identity, facts, organization and description layout", () => {
+  const info = html.slice(html.indexOf('id="book-info-modal"'), html.indexOf('id="book-organization-modal"'));
+  assert.doesNotMatch(info, /book-info-eyebrow|>图书信息<|id="book-info-close"/);
+  assert.match(info, /id="book-info-cover" class="book-info-cover"/);
+  assert.match(info, /class="book-info-cover-stack"[\s\S]*?id="cover-btn"/);
+  assert.match(info, /class="book-info-hero"/);
+  assert.match(info, /class="book-info-primary"/);
+  assert.match(info, /class="book-info-facts"/);
+  assert.match(info, /class="book-info-organization-grid"/);
+  assert.match(info, /class="[^"]*book-info-description"/);
+  assert.match(styles, /\.book-info-facts\s*\{[^}]*grid-template-columns:\s*repeat\(4,/s);
+  assert.match(styles, /\.book-info-organization-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,/s);
+});
+
+test("book information keeps its cover current and remains behind the reading timeline", () => {
+  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  const timeline = app.slice(app.indexOf("async function openReadingTimeline"), app.indexOf("function fmtWords"));
+  assert.doesNotMatch(timeline, /bookInfoModal\.classList\.remove\("show"\)/);
+  assert.match(app, /function renderBookInfoCover\(book\)/);
+  assert.match(app, /await shelfUI\.changeCoverById\(currentInfoBookId\);[\s\S]*?renderBookInfoCover\(shelfUI\.getBook\(currentInfoBookId\)\)/);
+  assert.match(styles, /#reading-timeline-modal\s*\{\s*z-index:\s*55;/);
+});
+
 test("startup shelf can receive keyboard paging focus without stealing it on refresh", () => {
   assert.match(source, /function focusShelf\(\)[\s\S]*?contentEl\.focus\(\{ preventScroll: true \}\)/);
   assert.match(source, /focusShelf,/);
@@ -148,8 +233,8 @@ test("reader close keeps its transition marked until the old window unregisters"
   assert.match(windows, /WindowEvent::Destroyed[\s\S]*?take_reader_close_elapsed\(&event_label\)/);
 });
 
-test("account sync description includes book tags and collections", () => {
-  assert.match(html, /书签、高亮、批注、评分、标签与收藏夹/);
+test("account overview makes clear that book source files stay local", () => {
+  assert.match(html, /图书正文、原文件和本机路径不会上传/);
 });
 
 test("book information displays persisted model tags with the backend field name", () => {
@@ -158,28 +243,30 @@ test("book information displays persisted model tags with the backend field name
   assert.match(app, /renderBookInfoTags\(document\.getElementById\("book-info-model-tags"\), \[\], m\.model_tags \|\| m\.modelTags\)/);
 });
 
-test("funnel keeps sorting in two columns and reading filters on the right", () => {
-  const panel = html.slice(html.indexOf('<div id="filter-panel"'), html.indexOf('<div class="menu-wrap">'));
+test("funnel groups sorting, reading status and display controls by purpose", () => {
+  const panel = html.slice(html.indexOf('<div id="filter-panel"'), html.indexOf('<div class="toolbar-action menu-wrap"'));
   assert.match(panel, /id="filter-result-summary"[^>]*>0\/0/);
   assert.ok(panel.indexOf('id="filter-result-summary"') > panel.indexOf('class="layout-config-row"'));
-  const primary = panel.indexOf("fp-sort-primary");
-  const secondary = panel.indexOf("fp-sort-secondary");
+  const top = panel.indexOf("fp-top-grid");
+  const sorting = panel.indexOf("fp-sort-grid");
   const reading = panel.indexOf("fp-reading-filter-col");
-  assert.ok(primary >= 0 && primary < secondary && secondary < reading);
-  for (const value of ["read", "reading-time", "size", "progress"]) {
+  const organization = panel.indexOf("fp-org-row");
+  const layout = panel.indexOf("fp-layout-bar");
+  assert.ok(top >= 0 && top < sorting && sorting < reading && reading < organization && organization < layout);
+  for (const value of ["read", "title", "author", "added", "reading-time", "progress", "size", "dir"]) {
     assert.match(panel, new RegExp(`name="sort" value="${value}"`));
   }
-  assert.ok(panel.indexOf('id="reading-filter-all"') > secondary);
-  assert.ok(panel.indexOf('id="reading-filter-all"') < reading);
-  assert.ok(panel.indexOf('id="reading-filter-all"') < panel.indexOf('name="sort" value="read"'));
+  assert.match(panel, /id="reading-filter-all"[^>]*hidden[^>]*data-i18n="clearFilters"/);
   assert.ok(panel.indexOf('id="filter-stars"') > reading);
-  assert.match(styles, /\.fp-row\s*\{[^}]*grid-template-columns:\s*max-content max-content max-content/s);
+  assert.match(styles, /\.fp-top-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 148px/s);
+  assert.match(styles, /\.layout-config-row\s*\{[^}]*grid-template-columns:\s*auto auto minmax\(76px, 1fr\)/s);
 });
 
 test("active shelf filters pulse blue, explain their state and show the visible book count", () => {
   assert.match(source, /function updateShelfFilterStatus\(visibleCount\)/);
   assert.match(source, /filterButton\.classList\.toggle\("filters-active", active\)/);
   assert.match(source, /filterButton\.title = active \? shelfText\("activeFilters"/);
+  assert.match(source, /readingFilterAllButton\.hidden = !active/);
   assert.match(source, /filterResultSummary\.textContent = visibleCount \+ "\/" \+ books\.length/);
   assert.match(styles, /#filter-btn\.filters-active\s*\{[^}]*animation:\s*shelf-filter-pulse/s);
   assert.match(styles, /@keyframes shelf-filter-pulse/);
@@ -206,7 +293,7 @@ test("book organization uses book information controls and the existing funnel f
   assert.match(source, /shelfOrganizationMatchMode/);
   assert.match(source, /shelfText\("matchAll"[\s\S]*?shelfText\("matchAny"/);
   assert.match(html, /id="organization-match-mode"[^>]*data-i18n="matchAny"/);
-  assert.match(styles, /\.fp-org-col\s*\{[^}]*flex:\s*1 1 0;[^}]*max-width:\s*none;/s);
+  assert.match(styles, /\.fp-org-row\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
   assert.match(styles, /\.fp-org-title-row\s*\{[^}]*width:\s*100%;/s);
   assert.match(styles, /\.fp-match-mode\s*\{[^}]*margin-left:\s*auto;[^}]*margin-right:\s*8px;/s);
   assert.match(source, /openOrganizationFilter/);

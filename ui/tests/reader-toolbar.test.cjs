@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const html = fs.readFileSync(path.join(__dirname, "..", "reader.html"), "utf8");
+const appHtml = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 const reader = fs.readFileSync(path.join(__dirname, "..", "reader.js"), "utf8");
 const i18n = fs.readFileSync(path.join(__dirname, "..", "reader-i18n.js"), "utf8");
 const shell = fs.readFileSync(path.join(__dirname, "..", "reader-shell-state.js"), "utf8");
@@ -16,6 +17,8 @@ const pageStyle = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.
 const settingsUi = fs.readFileSync(path.join(__dirname, "..", "reader-settings-ui.js"), "utf8");
 const searchUi = fs.readFileSync(path.join(__dirname, "..", "reader-search-ui.js"), "utf8");
 const libraryCommands = fs.readFileSync(path.join(__dirname, "..", "..", "src", "library_commands.rs"), "utf8");
+const readerGestures = fs.readFileSync(path.join(__dirname, "..", "reader-gesture.js"), "utf8");
+const gestureManager = fs.readFileSync(path.join(__dirname, "..", "gesture-ui.js"), "utf8");
 
 test("AI reader local history is unlimited while deletion tombstones stay bounded", () => {
   assert.doesNotMatch(reader, /AI_READER_LOCAL_HISTORY_LIMIT/);
@@ -44,6 +47,57 @@ test("reader progress names the whole-book page total once it is measured", () =
   assert.match(reader, /complete: !!pc\.complete/);
   assert.match(reader, /pageCountViewportWidth:\s*Math\.round\(document\.documentElement\.clientWidth/);
   assert.match(annotations, /if\(!sideTxn\)[\s\S]*?pageSig!==pageCountSig\(\)/);
+});
+
+test("all explicit reader jumps share one restorable history and a dedicated gesture", () => {
+  assert.doesNotMatch(reader, /bookProgressJumpHistory/);
+  assert.match(reader, /const readerNavigationHistory = \[\];/);
+  assert.match(reader, /function rememberReaderNavigationPoint\(point\)[\s\S]*?readerNavigationHistory\.push\(next\)/);
+  assert.match(reader, /function rememberBookProgressRestorePoint\(point\)[\s\S]*?rememberReaderNavigationPoint\(point\)/);
+  assert.match(reader, /const canRestoreProgress = readerNavigationHistory\.length > 0;/);
+  assert.match(reader, /window\.restoreReaderJumpPosition = restorePreviousReaderNavigation;/);
+  assert.match(reader, /window\.hasReaderJumpHistory = \(\) => readerNavigationHistory\.length > 0;/);
+  assert.match(reader, /vthumb\.addEventListener\("mousedown"[\s\S]*?rememberReaderNavigationPoint\(\)/);
+  assert.match(reader, /vbar\.addEventListener\("mousedown"[\s\S]*?rememberReaderNavigationPoint\(\)/);
+  assert.match(notes, /window\.rememberReaderJumpPosition\?\.\("toc"\)/);
+  assert.match(notes, /window\.rememberReaderJumpPosition\?\.\(\{ kind: "bookmark" \}\)/);
+  assert.match(annotations, /parent\.postMessage\(\{readerJump:/);
+  assert.match(appHtml, /data-gesture-action="restore_jump"/);
+  assert.match(gestureManager, /source\.action === "restore_jump"/);
+  assert.match(readerGestures, /restore_jump: "恢复跳转前位置"/);
+  assert.match(readerGestures, /action === "restore_jump" && global\.hasReaderJumpHistory\?\.\(\) === true/);
+  assert.match(readerGestures, /global\.restoreReaderJumpPosition\?\.\(\)/);
+});
+
+test("gesture previews use the drawn route prefix and reopening tracks normal closes", () => {
+  assert.match(gestureManager, /function previewProfile\(surface, points\)/);
+  assert.match(gestureManager, /api\.prefixSimilarity\(profile\.points, points\)/);
+  const mainFinish = gestureManager.slice(gestureManager.indexOf("function finish(event, cancelled = false)"), gestureManager.indexOf("function cancelGestureKeepHint"));
+  assert.doesNotMatch(mainFinish, /showHint\(/);
+  assert.match(gestureManager, /function listenForClosedMainSurfaces\(\)/);
+  assert.match(gestureManager, /root\.querySelectorAll\("\.modal\.show"\)/);
+  assert.match(gestureManager, /"newsnow-reader"/);
+  assert.match(readerGestures, /function previewMatchFor\(gesture\)/);
+  assert.match(readerGestures, /api\.prefixSimilarity\(profile\.points, gesture\.points\)/);
+  const readerFinish = readerGestures.slice(readerGestures.indexOf("function finish(cancelled = false)"), readerGestures.indexOf("function cancelKeepHint"));
+  assert.doesNotMatch(readerFinish, /showHint\(/);
+  assert.match(readerGestures, /reader-shell-statechange/);
+  assert.match(reader, /reader-surface-closed/);
+});
+
+test("gesture profiles can be automatic or explicitly scoped to the main or reader window", () => {
+  assert.match(appHtml, /id="gesture-scope"/);
+  assert.match(appHtml, /value="auto">自动适用（推荐）/);
+  assert.match(appHtml, /value="main">仅主窗口/);
+  assert.match(appHtml, /value="reader">仅阅读页/);
+  assert.match(gestureManager, /function actionSupportedScopes\(action\) \{ return action === "restore_jump" \? \["reader"\] : \["main", "reader"\]; \}/);
+  assert.match(gestureManager, /scope: normalizeScope\(action, source\.scope\)/);
+  assert.match(gestureManager, /scopeInput\.disabled = scopes\.length === 1;/);
+  assert.match(gestureManager, /此操作目前只支持阅读页，不能设为主窗口。/);
+  assert.match(gestureManager, /profile\.scope !== "reader"/);
+  assert.match(gestureManager, /function scopesOverlap\(first, second\)/);
+  assert.match(readerGestures, /function normalizeScope\(action, value\) \{\s*if \(action === "restore_jump"\) return "reader";/);
+  assert.match(readerGestures, /profile\.scope !== "main"/);
 });
 
 test("reader toolbar supports narrow windows and macOS system fonts", () => {
@@ -84,8 +138,8 @@ test("reader settings show one state character and map off to simplified, on to 
   assert.match(html, /class="settings-switch"/);
   assert.match(settingsUi, /const dualModeLabel = document\.getElementById\("set-dual-mode-label"\);/);
   assert.match(settingsUi, /const scrollModeLabel = document\.getElementById\("set-scroll-mode-label"\);/);
-  assert.match(settingsUi, /dualModeLabel\.textContent = dualModeToggle\?\.checked[\s\S]*?readerSettingsT\("singlePage", "单页"\)[\s\S]*?readerSettingsT\("twoPages", "双页"\)/);
-  assert.match(settingsUi, /scrollModeLabel\.textContent = scrollModeToggle\?\.checked[\s\S]*?readerSettingsT\("pagedMode", "整屏"\)[\s\S]*?readerSettingsT\("scrollMode", "滚动"\)/);
+  assert.match(settingsUi, /dualModeLabel\.textContent = dualModeToggle\?\.checked[\s\S]*?readerSettingsT\("twoPages", "双页"\)[\s\S]*?readerSettingsT\("singlePage", "单页"\)/);
+  assert.match(settingsUi, /scrollModeLabel\.textContent = scrollModeToggle\?\.checked[\s\S]*?readerSettingsT\("scrollMode", "滚动"\)[\s\S]*?readerSettingsT\("pagedMode", "整屏"\)/);
   assert.match(settingsUi, /window\.addEventListener\("reader-language-changed", refreshReadingModeToggles\)/);
   assert.match(i18n, /singlePage: "Single page"/);
   assert.match(i18n, /pagedMode: "Full-page view"/);
@@ -282,7 +336,7 @@ test("智读显示检索阶段、证据材料类型与引用自检结果", () =>
 test("智读只切换书架中已配置的大模型，不在阅读页编辑密钥", () => {
   assert.match(html, /id="ai-reader-profile"/);
   assert.match(reader, /invoke\("ai_reader_profiles"\)/);
-  assert.match(reader, /invoke\("select_ai_reader_profile", \{ id \}\)/);
+  assert.match(reader, /invoke\("assign_ai_reader_profile", \{ request: \{ purpose: "reading", id \} \}\)/);
   assert.doesNotMatch(html, /id="ai-reader-provider"|id="ai-reader-base-url"|id="ai-reader-api-key"/);
   assert.doesNotMatch(reader, /save_ai_reader_config/);
 });
@@ -381,13 +435,12 @@ test("bottom progress keeps a local preview while dragging so stale iframe progr
   assert.match(reader, /jumpByBookProgress\(bookProgressLastFrac, false\);[\s\S]*?bookProgressDragging = false;[\s\S]*?scheduleBookProgressPreviewSettle\(\)/);
   assert.match(reader, /curProgress = e\.data\.progress;[\s\S]*?settleBookProgressPreview\(\);/);
 });
-test("bottom progress history stays separate from TOC and internal-link navigation history", () => {
-  assert.match(reader, /const bookProgressJumpHistory = \[\]/);
+test("bottom progress history shares TOC and internal-link navigation history", () => {
+  assert.doesNotMatch(reader, /bookProgressJumpHistory/);
   assert.match(reader, /const readerNavigationHistory = \[\]/);
   assert.match(reader, /let bookProgressPinned = false/);
-  assert.match(reader, /bookProgressJumpHistory\.push\(next\)/);
+  assert.match(reader, /function rememberBookProgressRestorePoint\(point\)[\s\S]*?rememberReaderNavigationPoint\(point\)/);
   assert.match(reader, /readerNavigationHistory\.push\(next\)/);
-  assert.match(reader, /bookProgressJumpHistory\.pop\(\)/);
   assert.match(reader, /readerNavigationHistory\.pop\(\)/);
   assert.doesNotMatch(reader, /if \(bookProgressRestorePoint\) return/);
   assert.match(reader, /function pinBookProgress\(\) \{\s*bookProgressPinned = true;\s*showBookProgress\(\);\s*\}/);

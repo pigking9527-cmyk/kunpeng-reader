@@ -7,6 +7,7 @@ const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
 const about = fs.readFileSync(path.join(__dirname, "..", "about-ui.js"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
+const gestures = fs.readFileSync(path.join(__dirname, "..", "gesture-ui.js"), "utf8");
 
 test("startup update check runs promptly without waiting for the reader window", () => {
   const marker = "// 更新检查不阻塞首屏";
@@ -21,7 +22,8 @@ test("startup update check runs promptly without waiting for the reader window",
 });
 
 test("automatic checks respect an ignored release while manual checks bypass it", () => {
-  assert.match(about, /if \(!force\) \{[\s\S]*?storage\.getItem\("ignoredUpdate"\)/);
+  assert.match(about, /function isIgnored\(info\) \{[\s\S]*?storage\.getItem\("ignoredUpdate"\)/);
+  assert.match(about, /if \(!force\) \{[\s\S]*?isIgnored\(info\)/);
   assert.match(about, /updateButton\.addEventListener\("click"[^]*?checkUpdate\(true\)/);
 });
 
@@ -43,4 +45,18 @@ test("update card is centered, icon-free, and shows readable release notes", () 
   assert.match(about, /info\.current/);
   assert.match(about, /info\.latest/);
   assert.match(about, /info\.notes/);
+});
+
+test("closing an update card is restorable and never turns its gesture into an app close", () => {
+  assert.match(about, /const pendingUpdateKey = "pendingUpdateV1"/);
+  assert.match(about, /function restorePendingUpdate\(\)/);
+  assert.match(about, /function discardStalePendingUpdate\(info\)/);
+  assert.match(about, /info\?\.source !== "server" \|\| info\?\.has_update/);
+  assert.match(about, /function hideUpdateCard\(\)/);
+  assert.match(about, /function reopenUpdateCard\(\)/);
+  assert.match(about, /cachePendingUpdate\(info\)/);
+  assert.match(gestures, /const updateCard = root\.getElementById\("update-bar"\)/);
+  assert.match(gestures, /runCloseOrReopen\(action, "更新说明"/);
+  assert.match(gestures, /ReaderAboutUI\?\.hideUpdateCard/);
+  assert.match(gestures, /ReaderAboutUI\?\.reopenUpdateCard/);
 });

@@ -6,7 +6,7 @@ A high-performance local ebook reader for Windows, macOS, Linux, and Android. Th
 
 > **License notice:** this repository is **source-available**. The code is public only for learning, evaluation, and communication. Copying, modifying, distributing, commercial use, or publishing derivative versions requires the author's written permission. See [LICENSE](LICENSE).
 
-> Latest release: Windows **v1.14.1** · macOS and Linux **v1.14.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases). v1.14.1 is a Windows-only release.
+> Latest release: Windows, macOS, and Linux **v1.15.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases). v1.15.0 is the desktop app's full UI redesign release.
 
 ## Features
 
@@ -47,7 +47,7 @@ A high-performance local ebook reader for Windows, macOS, Linux, and Android. Th
 
 - Shelf full-text search uses compressed chapter text, Bloom prefiltering, bounded LRU cache, threaded byte-level `memmem`, and exact-scan fallback.
 - Offline semantic search uses `bge-small-zh-v1.5` / ONNX with multi-centroid profiles and sharded HNSW indexes, including safe migration of legacy data.
-- Detailed day/month/year/all-time reading statistics, SQLite light-data storage with WAL management, daily restore points, verified restore/data-package imports, and a single-instance runtime.
+- Redesigned day/month/year/all-time reading statistics with a contribution heatmap and SVG charts; retain display preferences and switch time/words, bar/line charts, and heatmap color. SQLite light-data storage uses WAL management, daily restore points, verified restore/data-package imports, and a single-instance runtime.
 - Account sync covers light data such as progress, highlights, annotations, vocabulary, statistics and settings. Book files, semantic models, indexes, local paths and plaintext API keys are not synced.
 - Settings can clear local data, clear local and cloud data, or permanently delete an account. None of these actions delete user-imported original book files.
 - Release workflow includes GitHub Actions, shared local checks, Windows portable/NSIS builds, macOS Apple Silicon DMG/App ZIP, Linux AppImage/deb, Android APKs and SHA-256 manifests.

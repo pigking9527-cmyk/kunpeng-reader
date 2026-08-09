@@ -19,6 +19,8 @@
     // 图片分页只保存布局数值和模式，不保存正文、图片地址或本机文件路径。
     "image_mode", "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
     "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text", "image_near_top", "image_text_before", "image_probed",
+    // 分页空白诊断：只保存像素几何，绝不保存文字、DOM 路径或 URL。
+    "layout_fast", "layout_view_height", "layout_root_height", "layout_root_style_height", "layout_padding_bottom", "layout_line_height", "layout_step", "layout_current_line_count", "layout_last_top", "layout_last_bottom", "layout_last_height", "layout_next_top", "layout_next_bottom", "layout_next_height", "layout_visible_free", "layout_content_free", "layout_tail_cross", "layout_tail_fit", "layout_tail_tightened",
   ]);
   const BLOCKERS = new Set(["selection", "drag", "link", "overlay", "chapter_pending", "turn_busy"]);
   const events = [];

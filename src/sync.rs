@@ -270,6 +270,8 @@ struct SyncPushDisposition {
     sync_version: i64,
     #[serde(default)]
     status: String,
+    #[serde(default)]
+    error: String,
 }
 
 impl SyncPushResponse {
@@ -281,6 +283,19 @@ impl SyncPushResponse {
     fn ignored_total(&self) -> u32 {
         self.ignored_count
             .unwrap_or_else(|| legacy_sync_count(self.ignored.as_ref()))
+    }
+
+    fn quota_rejected(&self) -> bool {
+        self.dispositions
+            .iter()
+            .any(|item| item.status == "rejected" && item.error == "QUOTA_EXCEEDED")
+    }
+
+    fn rejected_total(&self) -> usize {
+        self.dispositions
+            .iter()
+            .filter(|item| item.status == "rejected")
+            .count()
     }
 
     /// Return only exact local versions which the server explicitly settled.
@@ -717,7 +732,18 @@ fn sync_push_batches(entities: &[db::SyncEntity]) -> Result<Vec<Vec<db::SyncEnti
     let mut batch = Vec::new();
     let mut batch_bytes = 0usize;
 
-    for entity in entities {
+    // Per-entry history retention can replace an old live entity with a
+    // tombstone in the same sync. Send retirements first so the server can
+    // enforce the account limit without rejecting the following replacement.
+    let mut ordered = entities.to_vec();
+    ordered.sort_by_key(|entity| {
+        (
+            entity.deleted_at == 0,
+            entity.kind.clone(),
+            entity.id.clone(),
+        )
+    });
+    for entity in &ordered {
         let entity_bytes = serde_json::to_vec(entity)
             .map_err(|e| format!("同步实体序列化失败：{e}"))?
             .len();
@@ -743,6 +769,8 @@ struct PushTotals {
     pushed: usize,
     accepted: usize,
     ignored: usize,
+    rejected: usize,
+    quota_rejected: bool,
     server_time: i64,
 }
 
@@ -764,7 +792,7 @@ fn push_sync_entities(
     for (batch_index, batch) in sync_push_batches(entities)?.into_iter().enumerate() {
         check_sync_control(task)?;
         let push_body = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "device_id": device_id,
             "data_generation": data_generation,
             "capabilities": ["push_dispositions_v1"],
@@ -785,6 +813,8 @@ fn push_sync_entities(
         totals.pushed += batch.len();
         totals.accepted += push.accepted_total() as usize;
         totals.ignored += push.ignored_total() as usize;
+        totals.rejected += push.rejected_total();
+        totals.quota_rejected |= push.quota_rejected();
         totals.server_time = totals.server_time.max(push.server_time);
         let commit_started = Instant::now();
         let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
@@ -808,6 +838,12 @@ fn push_sync_entities(
                     totals.pushed
                 ),
             )?;
+        }
+        // A quota response cannot be fixed by uploading the following batches.
+        // Stop here: rejected rows stay dirty and will retry after capacity is
+        // available, without resending the whole pending queue in one run.
+        if totals.quota_rejected {
+            break;
         }
     }
     Ok(totals)
@@ -1019,6 +1055,21 @@ pub(crate) struct AuthSecurityStatus {
     pub sync_enabled: bool,
 }
 
+/// Aggregate account usage only. Entity payloads and account identifiers never
+/// cross this command boundary, so the account overview cannot expose sync data.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountUsageStatus {
+    pub storage_bytes: u64,
+    pub storage_limit_bytes: u64,
+    pub daily_written_bytes: u64,
+    pub daily_write_limit_bytes: u64,
+    pub daily_entity_writes: u64,
+    pub daily_entity_write_limit: u64,
+    pub daily_window_at: i64,
+    pub daily_reset_at: i64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EmailBindRequest {
@@ -1161,6 +1212,15 @@ pub(crate) async fn auth_security_status(
     })
     .await
     .map_err(|e| format!("账户安全任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_usage_status(app: tauri::AppHandle) -> Result<AccountUsageStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        authenticated_endpoint(app.state::<AppState>().inner(), "/auth/usage", None)
+    })
+    .await
+    .map_err(|e| format!("账户额度任务失败：{e}"))?
 }
 
 #[tauri::command]
@@ -1468,6 +1528,15 @@ fn sync_now_inner_with_limits_impl(
             scope
         };
         let settings = sync_settings_from_db(db);
+        if db
+            .metadata(crate::private_sync::SYNC_FILTERS_CHANGED_KEY)
+            .as_deref()
+            == Some("1")
+        {
+            // A previously disabled category may have been skipped while the
+            // cursor advanced. Start from the beginning once it is enabled.
+            db.set_sync_scope_metadata(&scope, "cursor", "")?;
+        }
         let cursor = db.sync_scope_metadata(&scope, "cursor").unwrap_or_default();
         (settings, db.device_id(), scope, cursor)
     };
@@ -1523,11 +1592,20 @@ fn sync_now_inner_with_limits_impl(
             let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
             db.ensure_active_sync_scope(&scope)?;
         }
-        data_migration::merge_pulled_book_states(state, &pull.entities)?;
+        let enabled_entities = {
+            let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+            let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+            pull.entities
+                .iter()
+                .filter(|entity| crate::private_sync::is_entity_enabled(db, &entity.kind))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        data_migration::merge_pulled_book_states(state, &enabled_entities)?;
         pulled += {
             let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
             let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-            db.import_sync_page(&scope, &pull.entities, &page_checkpoint)?
+            db.import_sync_page(&scope, &enabled_entities, &page_checkpoint)?
         };
         log_sync_stage(
             "pull_commit",
@@ -1576,6 +1654,9 @@ fn sync_now_inner_with_limits_impl(
         let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
         db.pending_sync_entities(&scope)?
+            .into_iter()
+            .filter(|entity| crate::private_sync::is_entity_enabled(db, &entity.kind))
+            .collect::<Vec<_>>()
     };
     // Ensure every referenced image has reached the authenticated binary store
     // before the tiny palette entity can make that reference visible remotely.
@@ -1603,144 +1684,163 @@ fn sync_now_inner_with_limits_impl(
     let mut accepted = initial_push.accepted;
     let mut ignored = initial_push.ignored;
     let mut push_server_time = initial_push.server_time;
+    if initial_push.quota_rejected {
+        return Err(format!(
+            "同步未完成：服务器今日写入额度已满，{} 条待同步数据已保留，额度恢复后会自动重试",
+            initial_push.rejected.max(1)
+        ));
+    }
+    if initial_push.rejected > 0 {
+        return Err(format!(
+            "同步未完成：服务端拒绝了 {} 条数据，未确认的数据已保留在本机",
+            initial_push.rejected
+        ));
+    }
 
     // A local acknowledgement is only a cache of a previous server response;
     // it is not proof that a restored or repaired server still owns that row.
     // Verify the actual account inventory after every incremental sync. A
     // matching digest costs one tiny request. On mismatch, exchange only
     // version metadata and transfer just the missing/winning entities.
-    let mut inventory_verified = false;
-    for reconcile_pass in 0..=3 {
-        check_sync_control(task)?;
-        let inventory: SyncInventoryResponse =
-            sync_request_with_retry_delays("inventory", task, retry_delays_ms, || {
-                agent
-                    .get(&format!("{base}/sync/inventory"))
-                    .header("Authorization", &format!("Bearer {}", settings.token))
-                    .call()?
-                    .body_mut()
-                    .read_json()
-            })?;
-        ensure_data_generation(settings.data_generation, inventory.data_generation)?;
-        push_server_time = push_server_time.max(inventory.server_time);
-        let local = {
-            let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-            let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-            db.all_sync_entities()?
-        };
-        if inventory_matches(&local, &inventory) {
-            inventory_verified = true;
-            crate::log(&format!(
-                "[sync] inventory=verified entities={} revision={}",
-                local.len(),
-                inventory.revision
-            ));
-            break;
-        }
-
-        crate::log(&format!(
-            "[sync] inventory=mismatch pass={} local_count={} server_count={} revision={}",
-            reconcile_pass + 1,
-            local.len(),
-            inventory.entity_count,
-            inventory.revision
-        ));
-        if reconcile_pass == 3 {
-            break;
-        }
-        let manifest = local
-            .iter()
-            .map(SyncManifestEntry::from)
-            .collect::<Vec<_>>();
-        let reconcile_body = serde_json::json!({
-            "schema_version": 2,
-            "data_generation": settings.data_generation,
-            "manifest": manifest,
-        });
-        let reconcile: SyncReconcileResponse =
-            sync_request_with_retry_delays("reconcile", task, retry_delays_ms, || {
-                agent
-                    .post(&format!("{base}/sync/reconcile"))
-                    .header("Authorization", &format!("Bearer {}", settings.token))
-                    .header("Content-Type", "application/json")
-                    .send_json(reconcile_body.clone())?
-                    .body_mut()
-                    .read_json()
-            })?;
-        ensure_data_generation(settings.data_generation, reconcile.data_generation)?;
-        push_server_time = push_server_time.max(reconcile.server_time);
-
-        // Older deployed servers can calculate the compact inventory digest
-        // from legacy second-based timestamps while reconcile normalizes those
-        // timestamps before comparing every row. A no-op reconcile with an
-        // equal count is therefore stronger compatibility evidence than a
-        // version-sensitive digest: the server inspected the complete union
-        // and found nothing to upload or download.
-        if reconcile_proves_inventory(local.len(), &reconcile) {
-            inventory_verified = true;
-            crate::log(&format!(
-                "[sync] inventory=reconcile_verified entities={} revision={} digest={}",
-                local.len(),
-                reconcile.revision,
-                reconcile.inventory_digest
-            ));
-            break;
-        }
-
-        if !reconcile.entities.is_empty() {
-            data_migration::merge_pulled_book_states(state, &reconcile.entities)?;
-            pulled =
-                pulled.saturating_add(u32::try_from(reconcile.entities.len()).unwrap_or(u32::MAX));
-            let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-            let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-            let _ = db.import_reconciled_sync_entities(&scope, &reconcile.entities)?;
-            drop(db_guard);
-            data_migration::apply_sqlite_to_runtime(state)?;
-            data_migration::migrate_json_to_sqlite(state)?;
-        }
-
-        let upload_keys = reconcile
-            .upload
-            .into_iter()
-            .map(|item| (item.kind, item.id))
-            .collect::<HashSet<_>>();
-        if !upload_keys.is_empty() {
-            let local_by_key = {
+    // The server inventory is account-wide, while the user can independently
+    // pause any category on this device. Comparing the two would falsely
+    // report a mismatch and then reconcile disabled entities. Incremental
+    // pull/push remains authoritative for the enabled categories.
+    let sync_filters_active = true;
+    let mut inventory_verified = sync_filters_active;
+    if !sync_filters_active {
+        for reconcile_pass in 0..=3 {
+            check_sync_control(task)?;
+            let inventory: SyncInventoryResponse =
+                sync_request_with_retry_delays("inventory", task, retry_delays_ms, || {
+                    agent
+                        .get(&format!("{base}/sync/inventory"))
+                        .header("Authorization", &format!("Bearer {}", settings.token))
+                        .call()?
+                        .body_mut()
+                        .read_json()
+                })?;
+            ensure_data_generation(settings.data_generation, inventory.data_generation)?;
+            push_server_time = push_server_time.max(inventory.server_time);
+            let local = {
                 let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
                 let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
                 db.all_sync_entities()?
-                    .into_iter()
-                    .map(|entity| ((entity.kind.clone(), entity.id.clone()), entity))
-                    .collect::<HashMap<_, _>>()
             };
-            let missing_local = upload_keys
-                .iter()
-                .filter(|key| !local_by_key.contains_key(*key))
-                .collect::<Vec<_>>();
-            if !missing_local.is_empty() {
-                return Err("服务器请求补传的实体已不在本地，请重新同步".into());
+            if inventory_matches(&local, &inventory) {
+                inventory_verified = true;
+                crate::log(&format!(
+                    "[sync] inventory=verified entities={} revision={}",
+                    local.len(),
+                    inventory.revision
+                ));
+                break;
             }
-            let repair_entities = upload_keys
+
+            crate::log(&format!(
+                "[sync] inventory=mismatch pass={} local_count={} server_count={} revision={}",
+                reconcile_pass + 1,
+                local.len(),
+                inventory.entity_count,
+                inventory.revision
+            ));
+            if reconcile_pass == 3 {
+                break;
+            }
+            let manifest = local
                 .iter()
-                .filter_map(|key| local_by_key.get(key).cloned())
+                .map(SyncManifestEntry::from)
                 .collect::<Vec<_>>();
-            let repair = push_sync_entities(
-                state,
-                task,
-                retry_delays_ms,
-                &agent,
-                &base,
-                &settings.token,
-                &device_id,
-                &scope,
-                settings.data_generation,
-                &repair_entities,
-                pulled as usize + pushed,
-            )?;
-            pushed += repair.pushed;
-            accepted += repair.accepted;
-            ignored += repair.ignored;
-            push_server_time = push_server_time.max(repair.server_time);
+            let reconcile_body = serde_json::json!({
+                "schema_version": 3,
+                "data_generation": settings.data_generation,
+                "manifest": manifest,
+            });
+            let reconcile: SyncReconcileResponse =
+                sync_request_with_retry_delays("reconcile", task, retry_delays_ms, || {
+                    agent
+                        .post(&format!("{base}/sync/reconcile"))
+                        .header("Authorization", &format!("Bearer {}", settings.token))
+                        .header("Content-Type", "application/json")
+                        .send_json(reconcile_body.clone())?
+                        .body_mut()
+                        .read_json()
+                })?;
+            ensure_data_generation(settings.data_generation, reconcile.data_generation)?;
+            push_server_time = push_server_time.max(reconcile.server_time);
+
+            // Older deployed servers can calculate the compact inventory digest
+            // from legacy second-based timestamps while reconcile normalizes those
+            // timestamps before comparing every row. A no-op reconcile with an
+            // equal count is therefore stronger compatibility evidence than a
+            // version-sensitive digest: the server inspected the complete union
+            // and found nothing to upload or download.
+            if reconcile_proves_inventory(local.len(), &reconcile) {
+                inventory_verified = true;
+                crate::log(&format!(
+                    "[sync] inventory=reconcile_verified entities={} revision={} digest={}",
+                    local.len(),
+                    reconcile.revision,
+                    reconcile.inventory_digest
+                ));
+                break;
+            }
+
+            if !reconcile.entities.is_empty() {
+                data_migration::merge_pulled_book_states(state, &reconcile.entities)?;
+                pulled = pulled
+                    .saturating_add(u32::try_from(reconcile.entities.len()).unwrap_or(u32::MAX));
+                let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+                let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+                let _ = db.import_reconciled_sync_entities(&scope, &reconcile.entities)?;
+                drop(db_guard);
+                data_migration::apply_sqlite_to_runtime(state)?;
+                data_migration::migrate_json_to_sqlite(state)?;
+            }
+
+            let upload_keys = reconcile
+                .upload
+                .into_iter()
+                .map(|item| (item.kind, item.id))
+                .collect::<HashSet<_>>();
+            if !upload_keys.is_empty() {
+                let local_by_key = {
+                    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+                    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+                    db.all_sync_entities()?
+                        .into_iter()
+                        .map(|entity| ((entity.kind.clone(), entity.id.clone()), entity))
+                        .collect::<HashMap<_, _>>()
+                };
+                let missing_local = upload_keys
+                    .iter()
+                    .filter(|key| !local_by_key.contains_key(*key))
+                    .collect::<Vec<_>>();
+                if !missing_local.is_empty() {
+                    return Err("服务器请求补传的实体已不在本地，请重新同步".into());
+                }
+                let repair_entities = upload_keys
+                    .iter()
+                    .filter_map(|key| local_by_key.get(key).cloned())
+                    .collect::<Vec<_>>();
+                let repair = push_sync_entities(
+                    state,
+                    task,
+                    retry_delays_ms,
+                    &agent,
+                    &base,
+                    &settings.token,
+                    &device_id,
+                    &scope,
+                    settings.data_generation,
+                    &repair_entities,
+                    pulled as usize + pushed,
+                )?;
+                pushed += repair.pushed;
+                accepted += repair.accepted;
+                ignored += repair.ignored;
+                push_server_time = push_server_time.max(repair.server_time);
+            }
         }
     }
     if !inventory_verified {
@@ -1759,6 +1859,7 @@ fn sync_now_inner_with_limits_impl(
         db.set_sync_scope_metadata(&scope, "last_pulled", &pulled.to_string())?;
         db.set_sync_scope_metadata(&scope, "last_accepted", &accepted.to_string())?;
         db.set_sync_scope_metadata(&scope, "last_ignored", &ignored.to_string())?;
+        db.set_metadata(crate::private_sync::SYNC_FILTERS_CHANGED_KEY, "0")?;
         server_time
     };
     data_migration::apply_sqlite_to_runtime(state)?;

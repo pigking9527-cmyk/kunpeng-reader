@@ -99,17 +99,30 @@ test("paged touchpad gestures end on actual wheel quiet instead of a fixed coold
   assert.doesNotMatch(wheelHandler, /quietFor|strongNewInput|>=700/);
 });
 
-test("paged height calibration never creates more than one line of extra bottom whitespace", () => {
+test("only macOS WebKit applies the defensive paged-height calibration", () => {
   assert.match(layout, /function packedPagedBoxHeight\(baseH\)/);
+  assert.match(layout, /var bottom=rr\.top\+h;/);
+  assert.match(layout, /if\(lines\[bad\]\.bottom-bottom<=1\)break;/);
   assert.match(layout, /var allowedTrim=Math\.max\(0,Math\.floor\(lineHeightPx\(\)\)-mg\(S\.marginBottom\)\);/);
   assert.match(layout, /return Math\.max\(raw-allowedTrim,calibrated\);/);
-  assert.match(layout, /pageH=packedPagedBoxHeight\(pageH\)/);
-  assert.doesNotMatch(layout, /normalizeChapterLeadDecoration/);
-  assert.doesNotMatch(layout, /rr-chapter-logo/);
+  assert.match(layout, /if\(!fastLargeChapter&&IS_MAC_WEBKIT\)pageH=packedPagedBoxHeight\(pageH\);/);
 });
 
-test("local reading style keeps chapter logos in normal flow but caps heading whitespace", () => {
+test("paged paragraphs compact only the boundary gap that would otherwise push a whole line away", () => {
+  assert.match(layout, /function tightenPagedParagraphTails\(\)/);
+  assert.match(layout, /\.rr p\.rr-page-tail-tight\{margin-bottom:var\(--rr-page-tail-gap,0px\) !important;\}/);
+  assert.match(layout, /lineBoxTail=Math\.max\(0,Math\.ceil\(\(line-before\.last\.height\)\/2\)\)/);
+  assert.match(layout, /var stats=\{cross:0,fit:0,tightened:0\};/);
+  assert.doesNotMatch(layout, /previous\.nextElementSibling!==next/);
+  assert.match(layout, /if\(free\+1>=line&&allowed\+1<configured\)/);
+  assert.match(layout, /previous\.style\.setProperty\('--rr-page-tail-gap',allowed\+'px'\)/);
+  assert.match(layout, /tightenPagedParagraphTails\(\);/);
+});
+
+test("local reading style lets a leading logo decoration float instead of reserving a blank row", () => {
   assert.match(layout, /\.rr h1,\.rr h2,\.rr h3,\.rr h4,\.rr h5,\.rr h6\{margin-top:\.55em !important;margin-bottom:\.55em !important/);
+  assert.match(layout, /\.rr>div:first-child:has\(>img\[alt="logo"\]\)\{float:right !important/);
+  assert.match(layout, /\.rr>div:first-child:has\(>img\[alt="logo"\]\)>img\{display:block !important/);
   assert.doesNotMatch(layout, /position:absolute !important;top:.*rr-chapter-logo/);
 });
 

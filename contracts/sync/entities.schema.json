@@ -8,7 +8,7 @@
     "id": { "type": "string", "minLength": 1 },
     "kind": {
       "type": "string",
-      "enum": ["reading_progress", "bookmark", "highlight", "annotation", "rating", "tag", "booklist", "booklist_item", "vocabulary", "reading_stat", "book_state_v2", "user_book_tags_v1", "book_collections_v1", "model_book_tags_v1", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1"]
+      "enum": ["reading_progress", "bookmark", "highlight", "annotation", "rating", "tag", "booklist", "booklist_item", "vocabulary", "reading_stat", "book_state_v2", "reading_progress_v1", "reading_data_v1", "reading_statistics_v1", "user_book_tags_v1", "book_collections_v1", "booklist_v1", "model_book_tags_v1", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "ai_reader_history_entry_v2", "secret_bundle_v1", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1"]
     },
     "updated_at": {
       "description": "Canonical Unix epoch milliseconds. The service temporarily normalizes only reasonable legacy epoch-seconds API input before returning this field.",
@@ -50,6 +50,10 @@
       }
     },
     {
+      "if": { "properties": { "kind": { "const": "booklist_v1" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/booklistV1Payload" } } }
+    },
+    {
       "if": { "properties": { "kind": { "const": "reader_palette_v1" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/readerPaletteV1Payload" } } }
     },
@@ -60,9 +64,25 @@
     {
       "if": { "properties": { "kind": { "const": "app_settings_v1" } } },
       "then": { "properties": { "payload": { "$ref": "#/$defs/appSettingsV1Payload" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "ai_reader_history_entry_v2" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/aiReaderHistoryEntryV2Payload" } } }
     }
   ],
   "$defs": {
+    "aiReaderHistoryEntryV2Payload": {
+      "description": "One sanitized AI-reader or library-answer history entry. The envelope ID is reader:<content-id>:<entry-id> or library:<entry-id>; deletion uses the envelope tombstone.",
+      "type": "object",
+      "required": ["version", "scope", "entry"],
+      "properties": {
+        "version": { "const": 2 },
+        "scope": { "enum": ["reader", "library"] },
+        "contentId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "entry": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 160 } }, "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
     "readerPaletteV1Payload": {
       "description": "One user-defined reading palette. New clients use a content-addressed background asset reference; legacy backgroundImage data URLs remain readable only during migration. An asset is PNG/JPG/WebP/GIF and at most 10 MiB; an account may have at most 10 active custom palettes.",
       "type": "object",
@@ -102,7 +122,93 @@
         "libraryAnswerLength": { "enum": ["short", "medium", "long"] },
         "libraryHistorySyncMode": { "enum": ["off", "recent", "manual"] },
         "libraryAnswerFontSize": { "type": "integer", "minimum": 14, "maximum": 22 },
-        "libraryLongContextEnabled": { "type": "boolean" }
+        "libraryLongContextEnabled": { "type": "boolean" },
+        "toolbarIconSizePx": { "description": "Top-level main-window action button square size in pixels.", "type": "integer", "minimum": 28, "maximum": 52 },
+        "toolbarItemOrder": { "description": "Complete ordered set of main-window toolbar action IDs. Settings remains present even when other actions are hidden.", "type": "array", "minItems": 8, "maxItems": 8, "uniqueItems": true, "items": { "enum": ["account", "search", "stats", "library", "news", "filter", "settings", "menu"] } },
+        "toolbarHiddenItems": { "description": "User-hidden main-window toolbar action IDs; settings cannot be included.", "type": "array", "maxItems": 7, "uniqueItems": true, "items": { "enum": ["account", "search", "stats", "library", "news", "filter", "menu"] } },
+        "toolbarContentOrder": { "description": "Complete order of icon and text inside each main-window toolbar action.", "type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["icon", "text"] } },
+        "toolbarContentVisible": { "description": "Visible toolbar action content. At least one of icon or text must remain visible.", "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["icon", "text"] } },
+        "gestureSettings": { "$ref": "#/$defs/gestureSettingsV1" },
+        "readerLayoutSettings": { "$ref": "#/$defs/readerLayoutSettingsV1" }
+      },
+      "additionalProperties": true
+    },
+    "gestureSettingsV1": {
+      "description": "Account-level custom mouse gesture configuration. Profiles contain normalized paths only, never page content or local paths.",
+      "type": "object",
+      "required": ["version", "enabled", "globalPrecision", "profiles", "hintSettings"],
+      "properties": {
+        "version": { "const": 1 },
+        "enabled": { "type": "boolean" },
+        "globalPrecision": { "enum": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] },
+        "profiles": { "type": "array", "maxItems": 24, "items": { "$ref": "#/$defs/gestureProfileV1" } },
+        "hintSettings": { "$ref": "#/$defs/gestureHintSettingsV1" }
+      },
+      "additionalProperties": true
+    },
+    "gestureProfileV1": {
+      "type": "object",
+      "required": ["id", "name", "scope", "action", "input", "enabled", "points", "precisionMode", "precision"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "scope": { "enum": ["auto", "main", "reader"] },
+        "action": { "enum": ["back", "book_info", "reopen_last", "restore_jump"] },
+        "input": { "const": "mouse-right" },
+        "enabled": { "type": "boolean" },
+        "points": { "type": "array", "minItems": 48, "maxItems": 48, "items": { "$ref": "#/$defs/gesturePointV1" } },
+        "precisionMode": { "enum": ["global", "independent"] },
+        "precision": { "enum": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] }
+      },
+      "additionalProperties": true
+    },
+    "gesturePointV1": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number", "minimum": -1.5, "maximum": 1.5 },
+        "y": { "type": "number", "minimum": -1.5, "maximum": 1.5 }
+      },
+      "additionalProperties": false
+    },
+    "gestureHintSettingsV1": {
+      "type": "object",
+      "required": ["enabled", "fontSize", "backgroundEnabled", "background", "opacity", "positionX", "positionY"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "fontSize": { "type": "integer", "minimum": 12, "maximum": 28 },
+        "backgroundEnabled": { "type": "boolean" },
+        "background": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "opacity": { "type": "integer", "minimum": 20, "maximum": 100 },
+        "positionX": { "type": "number", "minimum": 0, "maximum": 1 },
+        "positionY": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "readerLayoutSettingsV1": {
+      "description": "Global reader typography and pagination preferences. Per-book appearance overrides and font files stay local.",
+      "type": "object",
+      "required": ["version", "fontFamily", "styleMode", "textConversion", "fontSize", "noteFontSize", "lineHeight", "paraSpacing", "letterSpacing", "marginTop", "marginBottom", "marginLeft", "marginRight", "dualPageGap", "pageMode", "flowMode", "pageTurnEffect", "pageTurnSpeed", "imagePagination"],
+      "properties": {
+        "version": { "const": 1 },
+        "fontFamily": { "enum": ["", "'Microsoft YaHei',sans-serif", "'SimSun',serif", "'SimHei',sans-serif", "'KaiTi',serif", "'Kunpeng LXGW WenKai Lite','Microsoft YaHei',sans-serif", "'Kunpeng Source Han Serif SC','SimSun',serif", "'Kunpeng Zhuque Fangsong','FangSong','SimSun',serif", "serif", "sans-serif"] },
+        "styleMode": { "enum": ["local", "book"] },
+        "textConversion": { "enum": ["t2s", "s2t"] },
+        "fontSize": { "type": "integer", "minimum": 12, "maximum": 40 },
+        "noteFontSize": { "type": "integer", "minimum": 10, "maximum": 22 },
+        "lineHeight": { "type": "number", "minimum": 1, "maximum": 2.6 },
+        "paraSpacing": { "type": "number", "minimum": 0, "maximum": 2 },
+        "letterSpacing": { "type": "number", "minimum": 0, "maximum": 5 },
+        "marginTop": { "type": "integer", "minimum": 0, "maximum": 160 },
+        "marginBottom": { "type": "integer", "minimum": 0, "maximum": 160 },
+        "marginLeft": { "type": "integer", "minimum": 0, "maximum": 240 },
+        "marginRight": { "type": "integer", "minimum": 0, "maximum": 240 },
+        "dualPageGap": { "type": "integer", "minimum": 0, "maximum": 120 },
+        "pageMode": { "enum": ["single", "dual"] },
+        "flowMode": { "enum": ["paged", "scroll"] },
+        "pageTurnEffect": { "enum": ["off", "horizontal"] },
+        "pageTurnSpeed": { "type": "number", "minimum": 0.5, "maximum": 2 },
+        "imagePagination": { "enum": ["next-page", "continuous"] }
       },
       "additionalProperties": true
     },
@@ -126,6 +232,29 @@
         "schema_version": { "const": 1 },
         "content_id": { "type": "string", "minLength": 1 },
         "collections": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      },
+      "additionalProperties": true
+    },
+    "booklistV1Payload": {
+      "description": "One synced booklist's presentation metadata. Membership remains authoritative in book_collections_v1; item reviews are tied to portable content IDs.",
+      "type": "object",
+      "required": ["version", "id", "name", "description", "items"],
+      "properties": {
+        "version": { "const": 1 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "coverContentId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "items": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/booklistV1Item" } }
+      },
+      "additionalProperties": true
+    },
+    "booklistV1Item": {
+      "type": "object",
+      "required": ["contentId"],
+      "properties": {
+        "contentId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "review": { "type": "string", "maxLength": 1000 }
       },
       "additionalProperties": true
     },

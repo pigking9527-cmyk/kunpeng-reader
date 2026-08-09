@@ -244,6 +244,10 @@ test("Chinese 注1 cross-chapter references are treated as in-place notes", () =
 test("reader page reports why a click did not turn the page", () => {
   assert.match(pageTrace, /var chapterPending=0/);
   assert.match(pageTrace, /function readerBugTrace\(kind,outcome,e,extra\)/);
+  assert.match(pageTrace, /function pagedLayoutSnapshot\(\)/);
+  assert.match(pageTrace, /layout_visible_free/);
+  assert.match(pageTrace, /layout_content_free/);
+  assert.match(pageTrace, /layout_tail_tightened/);
   assert.match(pageTrace, /readerBugTrace\('chapter','chapter_start'/);
   assert.match(pageTrace, /ready\?'chapter_ready':'chapter_error'/);
   assert.match(pageTrace, /function beginPageTurnBugTrace\(direction\)/);
@@ -261,6 +265,7 @@ test("reader page reports why a click did not turn the page", () => {
   assert.match(runtime, /tracePagedImageLayout\('fits_full'/);
   assert.match(runtime, /tracePagedImageLayout\('scheduled'/);
   assert.match(pageTrace, /image_candidate_page/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "reader-message.js"), "utf8"), /layout_tail_fit/);
   assert.match(fs.readFileSync(path.join(uiRoot, "reader-message.js"), "utf8"), /image_preview_height/);
   assert.match(layout, /beginChapterBugTrace\(i,where\)/);
   assert.match(layout, /finishChapterBugTrace\(bugTraceToken,true,pageInCh\)/);
@@ -270,6 +275,8 @@ test("reader page reports why a click did not turn the page", () => {
   assert.match(annotations, /readerBugTrace\('click',inFootnote\?'footnote':'link',e\)/);
   assert.match(annotations, /readerBugTrace\('click','page_next'/);
   assert.match(annotations, /readerBugTrace\('click','page_prev'/);
+  assert.match(annotations, /readerBugTrace\('click','none'/);
+  assert.match(annotations, /function tapActionAt\(x,y\)/);
 });
 
 test("a transient selection no longer swallows the first page-turn click", () => {

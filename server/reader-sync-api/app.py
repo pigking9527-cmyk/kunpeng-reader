@@ -56,15 +56,17 @@ RATE_LIMIT_HMAC_KEY = os.environ.get("RATE_LIMIT_HMAC_KEY", "").encode("utf-8")
 SECURITY_ALERT_TO = os.environ.get("SECURITY_ALERT_TO", "").strip()
 SECURITY_ALERT_WINDOW_MS = 15 * 60 * 1000
 SUPPORTED_ENTITY_KINDS = frozenset((
-    "book_state_v2", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "vocab", "reading_bucket_v2",
-    "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1",
+    "book_state_v2", "reading_progress_v1", "reading_data_v1", "reading_statistics_v1",
+    "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "booklist_v1", "vocab", "reading_bucket_v2",
+    "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "ai_reader_history_entry_v2", "secret_bundle_v1",
     "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1",
 ))
 # Inventory intentionally excludes private configuration/history entities, but
 # must cover every entity type included by the desktop client's all_sync_entities.
 INVENTORY_ENTITY_KINDS = frozenset((
-    "book_state_v2", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "vocab", "reading_bucket_v2",
-    "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1",
+    "reading_progress_v1", "reading_data_v1", "reading_statistics_v1",
+    "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "booklist_v1", "vocab", "reading_bucket_v2",
+    "ai_reader_history_entry_v2", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1",
 ))
 FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "pigking9527@gmail.com").strip()
 FEEDBACK_SMTP_HOST = os.environ.get("FEEDBACK_SMTP_HOST", "").strip()
@@ -726,6 +728,27 @@ def refresh_daily_usage(conn, user_id, current_at=None):
     return usage
 
 
+def account_usage_summary(conn, user_id):
+    """Return only the caller's aggregate quota counters, never entity details."""
+    usage = refresh_daily_usage(conn, user_id)
+    storage_bytes = account_storage_bytes(conn, user_id)
+    daily_written_bytes = int(usage["daily_written_bytes"])
+    daily_entity_writes = int(usage["daily_entity_writes"])
+    daily_window_at = int(usage["daily_window_at"])
+    return {
+        "ok": True,
+        "schema_version": 3,
+        "storageBytes": storage_bytes,
+        "storageLimitBytes": int(usage["storage_limit_bytes"]),
+        "dailyWrittenBytes": daily_written_bytes,
+        "dailyWriteLimitBytes": MAX_ACCOUNT_DAILY_WRITE_BYTES,
+        "dailyEntityWrites": daily_entity_writes,
+        "dailyEntityWriteLimit": MAX_ACCOUNT_DAILY_ENTITY_WRITES,
+        "dailyWindowAt": daily_window_at,
+        "dailyResetAt": daily_window_at + 24 * 60 * 60 * 1000,
+    }
+
+
 def security_subject(value):
     secret = RATE_LIMIT_HMAC_KEY or b"reader-sync-audit-v1"
     return hmac.new(secret, str(value).encode("utf-8", "replace"), hashlib.sha256).hexdigest()[:24]
@@ -826,6 +849,58 @@ def ai_history_retention_is_valid(payload):
     live = sum(1 for entry in entries if isinstance(entry, dict) and not (entry.get("deletedAt") or entry.get("deleted_at")))
     tombstones = sum(1 for entry in entries if isinstance(entry, dict) and (entry.get("deletedAt") or entry.get("deleted_at")))
     return len(entries) == live + tombstones and live <= MAX_AI_HISTORY_LIVE_ENTRIES and tombstones <= MAX_AI_HISTORY_TOMBSTONES
+
+def ai_history_entry_scope(entity_id, payload):
+    if not isinstance(payload, dict) or payload.get("version") != 2:
+        return None
+    scope = payload.get("scope")
+    entry = payload.get("entry")
+    if scope not in ("reader", "library") or not isinstance(entry, dict):
+        return None
+    entry_id = entry.get("id")
+    if not isinstance(entry_id, str) or not entry_id or len(entry_id) > 160:
+        return None
+    if scope == "reader":
+        content_id = payload.get("contentId")
+        if not isinstance(content_id, str) or len(content_id) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in content_id):
+            return None
+        if entity_id != f"reader:{content_id}:{entry_id}":
+            return None
+    elif entity_id != f"library:{entry_id}":
+        return None
+    # These payloads are sync projections. Never let a client smuggle book
+    # excerpts, machine-local IDs or paths through an otherwise valid entry.
+    forbidden_entry_fields = {"bookId", "book_id", "path", "filePath", "excerpt"}
+    if forbidden_entry_fields.intersection(entry):
+        return None
+    sources = entry.get("sources", [])
+    if not isinstance(sources, list) or len(sources) > 20:
+        return None
+    forbidden_source_fields = {"excerpt", "bookId", "book_id", "path", "filePath", "text", "content"}
+    if any(not isinstance(source, dict) or forbidden_source_fields.intersection(source) for source in sources):
+        return None
+    return scope
+
+def history_entry_live_count(conn, user_id, scope, excluding_id=None):
+    prefix = "reader:%" if scope == "reader" else "library:%"
+    sql = "SELECT COUNT(*) FROM entities WHERE user_id=? AND kind='ai_reader_history_entry_v2' AND deleted_at=0 AND id LIKE ?"
+    values = [user_id, prefix]
+    if excluding_id:
+        sql += " AND id<>?"
+        values.append(excluding_id)
+    return int(conn.execute(sql, values).fetchone()[0])
+
+def prune_history_entry_tombstones(conn, user_id, scope, keep):
+    prefix = "reader:%" if scope == "reader" else "library:%"
+    rows = conn.execute(
+        "SELECT id FROM entities WHERE user_id=? AND kind='ai_reader_history_entry_v2' AND deleted_at<>0 AND id LIKE ? ORDER BY deleted_at DESC, server_updated_at DESC",
+        (user_id, prefix),
+    ).fetchall()
+    for row in rows[keep:]:
+        conn.execute(
+            "DELETE FROM entities WHERE user_id=? AND kind='ai_reader_history_entry_v2' AND id=?",
+            (user_id, row["id"]),
+        )
 def reader_palette_payload_is_valid(kind, payload):
     if not isinstance(payload, dict):
         return False
@@ -915,6 +990,25 @@ def app_settings_payload_is_valid(payload):
         return False
     if "libraryLongContextEnabled" in payload and type(payload["libraryLongContextEnabled"]) is not bool:
         return False
+    toolbar_item_ids = {"account", "search", "stats", "library", "news", "filter", "settings", "menu"}
+    legacy_toolbar_item_ids = toolbar_item_ids - {"account"}
+    if "toolbarIconSizePx" in payload and (
+        type(payload["toolbarIconSizePx"]) is not int or not 28 <= payload["toolbarIconSizePx"] <= 52
+    ):
+        return False
+    if "toolbarItemOrder" in payload:
+        order = payload["toolbarItemOrder"]
+        if not (isinstance(order, list) and len(order) in (len(legacy_toolbar_item_ids), len(toolbar_item_ids))
+                and all(isinstance(item, str) for item in order)
+                and len(set(order)) == len(order) and set(order) in (legacy_toolbar_item_ids, toolbar_item_ids)):
+            return False
+    if "toolbarHiddenItems" in payload:
+        hidden = payload["toolbarHiddenItems"]
+        if not (isinstance(hidden, list) and len(hidden) < len(toolbar_item_ids)
+                and all(isinstance(item, str) for item in hidden)
+                and len(set(hidden)) == len(hidden)
+                and set(hidden).issubset(toolbar_item_ids - {"settings"})):
+            return False
     return True
 
 
@@ -1564,6 +1658,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/auth/security":
                 self.handle_auth_security()
                 return
+            if parsed.path == "/auth/usage":
+                self.handle_auth_usage()
+                return
             if parsed.path == "/sync/pull":
                 self.handle_pull(parsed)
                 return
@@ -2157,6 +2254,15 @@ class Handler(BaseHTTPRequestHandler):
         )
         conn.close()
 
+    def handle_auth_usage(self):
+        conn, user = self.require_user()
+        if not user:
+            return
+        with conn:
+            response = account_usage_summary(conn, user["id"])
+        conn.close()
+        self.send_json(200, response)
+
     def handle_email_start(self):
         conn, user = self.require_user()
         if not user:
@@ -2533,7 +2639,7 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return
         schema_version = safe_int(body.get("schema_version"), 1)
-        if schema_version > 2:
+        if schema_version > 3:
             self.send_error_code(409, "SCHEMA_UNSUPPORTED")
             conn.close()
             return
@@ -2607,11 +2713,19 @@ class Handler(BaseHTTPRequestHandler):
                         {**input_identity, "status": "rejected", "error": "UNSUPPORTED_KIND"}
                     )
                     continue
+                if schema_version >= 3 and kind in ("book_state_v2", "ai_reader_history_v1"):
+                    ignored_count += 1
+                    rejected_count += 1
+                    record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "LEGACY_ENTITY_DISALLOWED"})
+                    dispositions.append(
+                        {**input_identity, "status": "rejected", "error": "LEGACY_ENTITY_DISALLOWED"}
+                    )
+                    continue
                 payload = entity.get("json", entity.get("data", {}))
                 payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                 payload_bytes = len(payload_text.encode("utf-8"))
                 payload_limit = (
-                    MAX_AI_HISTORY_JSON_BYTES if kind == "ai_reader_history_v1"
+                    MAX_AI_HISTORY_JSON_BYTES if kind in ("ai_reader_history_v1", "ai_reader_history_entry_v2")
                     else MAX_READER_PALETTE_JSON_BYTES if kind in ("reader_palette_v1", "reader_palette_order_v1")
                     else MAX_ENTITY_JSON_BYTES
                 )
@@ -2641,6 +2755,15 @@ class Handler(BaseHTTPRequestHandler):
                     record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "HISTORY_RETENTION_LIMIT"})
                     dispositions.append({**input_identity, "status": "rejected", "error": "HISTORY_RETENTION_LIMIT"})
                     continue
+                history_scope = None
+                if kind == "ai_reader_history_entry_v2":
+                    history_scope = ai_history_entry_scope(entity_id, payload)
+                    if history_scope is None:
+                        ignored_count += 1
+                        rejected_count += 1
+                        record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "INVALID_HISTORY_ENTRY"})
+                        dispositions.append({**input_identity, "status": "rejected", "error": "INVALID_HISTORY_ENTRY"})
+                        continue
                 normalized = {
                     "kind": kind,
                     "id": entity_id,
@@ -2690,6 +2813,23 @@ class Handler(BaseHTTPRequestHandler):
                     dispositions.append({**input_identity, "status": "conflict"})
                     authoritative_entities.append(row_to_entity(existing))
                     continue
+                if kind == "ai_reader_history_entry_v2":
+                    existing_is_live = existing is not None and not int(existing["deleted_at"])
+                    if not normalized["deleted_at"] and not existing_is_live:
+                        if history_entry_live_count(conn, user["id"], history_scope) >= MAX_AI_HISTORY_LIVE_ENTRIES:
+                            ignored_count += 1
+                            rejected_count += 1
+                            record_ignored(ignored, {"kind": kind, "id": entity_id, "error": "HISTORY_RETENTION_LIMIT"})
+                            dispositions.append({**input_identity, "status": "rejected", "error": "HISTORY_RETENTION_LIMIT"})
+                            continue
+                    elif normalized["deleted_at"] and existing_is_live:
+                        # Keep the live manifest bounded. The oldest tombstone
+                        # is intentionally allowed to expire once it has been
+                        # retained to the documented limit.
+                        prune_history_entry_tombstones(
+                            conn, user["id"], history_scope,
+                            MAX_AI_HISTORY_TOMBSTONES - 1,
+                        )
                 existing_bytes = int(existing["json_bytes"]) if existing else 0
                 entity_delta = 0 if existing else 1
                 byte_delta = payload_bytes - existing_bytes
@@ -2775,7 +2915,7 @@ class Handler(BaseHTTPRequestHandler):
             200,
             {
                 "ok": True,
-                "schema_version": 2,
+                "schema_version": 3,
                 "server_time": now_ms(),
                 "data_generation": generation,
                 "next_cursor": str(response_cursor),

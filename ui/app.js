@@ -74,6 +74,15 @@ window.clearCrossReturnMemory = clearCrossReturnMemory;
 // 应用重新启动进入书架时，跨书搜索的回跳记忆不应继续保留。
 clearCrossReturnMemory();
 
+let mainWindowRevealed = false;
+function revealMainWindowAfterFirstPaint() {
+  if (mainWindowRevealed) return;
+  mainWindowRevealed = true;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    invoke("main_window_show").catch(() => {});
+  }));
+}
+
 function debugSettingOn(key) {
   try {
     const settings = JSON.parse(localStorage.getItem("debugSettingsV1") || "{}");
@@ -300,11 +309,13 @@ const recoveryBackupButton = document.getElementById("settings-create-backup");
 const recoveryBackupActions = document.getElementById("recovery-backup-actions");
 const recoveryBackupSelect = document.getElementById("settings-restore-backup");
 const restoreRecoveryBackupButton = document.getElementById("settings-restore-backup-button");
-const useModelTagsCheckbox = document.getElementById("set-use-model-tags");
 const appLanguageSelect = document.getElementById("set-app-language");
 window.ReaderAppI18n?.populate(appLanguageSelect);
 appLanguageSelect?.addEventListener("change", () => window.ReaderAppI18n?.setLanguage(appLanguageSelect.value));
 window.ReaderApiSettingsUI?.init({ invoke });
+window.ReaderToolbarSettingsUI?.init({ invoke });
+window.ReaderBookClassificationSettingsUI?.init({ invoke });
+window.ReaderBooklistSettingsUI?.init({ invoke });
 const appText = (key, fallback, values) => (window.ReaderAppI18n?.t?.(key) || fallback).replace(/\{(\w+)\}/g, (_, name) => values?.[name] ?? ""); let lastRecoveryBackupStatus = null;
 function backupBytes(value) {
   const bytes = Number(value) || 0;
@@ -334,18 +345,12 @@ function renderRecoveryBackupStatus(status) {
 async function refreshRecoveryBackupStatus() {
   renderRecoveryBackupStatus(await invoke("recovery_backup_status"));
 }
-async function refreshModelTagsSetting() {
-  if (!useModelTagsCheckbox) return;
-  const settings = await invoke("library_model_tags_settings");
-  useModelTagsCheckbox.checked = settings?.enabled !== false;
-}
 function openCommonSettings() {
   menuEl.classList.remove("show");
   filterPanel.classList.remove("show");
   syncUI.close();
   closeSearch(true);
   fpSettingsModal.classList.add("show");
-  refreshModelTagsSetting().catch(() => {});
   refreshRecoveryBackupStatus().catch((e) => {
     if (recoveryBackupStatus) recoveryBackupStatus.textContent = appText("recoveryReadFailed", "恢复点状态读取失败：{error}", { error: e });
   });
@@ -353,20 +358,6 @@ function openCommonSettings() {
 document.getElementById("settings-toolbar-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   openCommonSettings();
-});
-useModelTagsCheckbox?.addEventListener("change", async () => {
-  const enabled = useModelTagsCheckbox.checked;
-  useModelTagsCheckbox.disabled = true;
-  try {
-    const settings = await invoke("set_library_model_tags_enabled", { enabled });
-    useModelTagsCheckbox.checked = settings?.enabled !== false;
-    window.dispatchEvent(new CustomEvent("library-model-tags-setting-changed", { detail: { enabled: useModelTagsCheckbox.checked } }));
-  } catch (error) {
-    useModelTagsCheckbox.checked = !enabled;
-    alert("保存大模型标签设置失败：" + error);
-  } finally {
-    useModelTagsCheckbox.disabled = false;
-  }
 });
 recoveryBackupButton?.addEventListener("click", async () => {
   recoveryBackupButton.disabled = true;
@@ -376,27 +367,48 @@ recoveryBackupButton?.addEventListener("click", async () => {
     const status = await invoke("create_recovery_backup");
     renderRecoveryBackupStatus(status);
   } catch (e) {
-    alert("创建恢复点失败：" + e);
+    await window.AppDialog?.alert?.(e && e.message ? e.message : String(e), {
+      title: appText("recoveryCreateFailedTitle", "创建恢复点失败"),
+      confirmLabel: appText("close", "关闭"),
+      tone: "error",
+    });
   } finally {
     recoveryBackupButton.disabled = false;
-    recoveryBackupButton.textContent = appText("recoveryCreate", "立即创建");
+    recoveryBackupButton.textContent = appText("recoveryCreateShort", "创建");
   }
 });
 restoreRecoveryBackupButton?.addEventListener("click", async () => {
   const backupId = recoveryBackupSelect?.value;
   if (!backupId) return;
   const choice = recoveryBackupSelect.options[recoveryBackupSelect.selectedIndex]?.textContent || backupId;
-  if (!confirm("恢复到“" + choice + "”吗？\n\n软件会先自动创建一个当前数据的保护恢复点，然后恢复书架、阅读数据、软件设置、手势和阅读背景图。请先关闭所有阅读窗口。")) return;
+  const confirmed = await window.AppDialog?.confirm?.(
+    choice + "\n\n" + appText("recoveryConfirmMessage", "软件会先自动创建当前数据的保护恢复点，再恢复书架、阅读数据、软件设置、手势和阅读背景图。请先关闭所有阅读窗口。"),
+    {
+      title: appText("recoveryConfirmTitle", "恢复这个恢复点？"),
+      confirmLabel: appText("recoveryConfirmAction", "恢复"),
+      cancelLabel: appText("recoveryDialogCancel", "取消"),
+      tone: "warning",
+    },
+  );
+  if (!confirmed) return;
   restoreRecoveryBackupButton.disabled = true;
   restoreRecoveryBackupButton.textContent = appText("recoveryRestoring", "正在恢复…");
   try {
     const status = await invoke("restore_recovery_backup", { backupId });
     renderRecoveryBackupStatus(status);
     await refreshRecoveryBackupStatus();
-    alert("数据已恢复。书架将重新加载以显示恢复后的内容。");
+    await window.AppDialog?.alert?.(appText("recoverySucceededMessage", "数据已恢复，书架将重新加载。"), {
+      title: appText("recoverySucceededTitle", "恢复完成"),
+      confirmLabel: appText("confirm", "确定"),
+      tone: "success",
+    });
     window.location.reload();
   } catch (e) {
-    alert("恢复数据失败：" + e);
+    await window.AppDialog?.alert?.(e && e.message ? e.message : String(e), {
+      title: appText("recoveryFailedTitle", "恢复失败"),
+      confirmLabel: appText("close", "关闭"),
+      tone: "error",
+    });
   } finally {
     restoreRecoveryBackupButton.disabled = false;
     restoreRecoveryBackupButton.textContent = appText("recoverySelected", "恢复选中恢复点");
@@ -417,7 +429,6 @@ document.getElementById("open-default-apps-settings")?.addEventListener("click",
     );
   }
 });
-document.getElementById("fp-settings-close").addEventListener("click", () => fpSettingsModal.classList.remove("show"));
 fpSettingsModal.addEventListener("click", (e) => {
   if (e.target === fpSettingsModal) fpSettingsModal.classList.remove("show");
 });
@@ -550,7 +561,6 @@ async function refreshExternalDicts() {
 }
 
 function openExternalDictSettings() {
-  fpSettingsModal.classList.remove("show");
   externalDictModal.classList.add("show");
   setExternalDictStatus("");
   refreshExternalDicts();
@@ -714,19 +724,22 @@ function renderNotes(data) {
     return;
   }
   notesBody.innerHTML = data.map((book) => {
-    const highlights = (book.highlights || []).map((h) => (
+    const highlightItems = book.highlights || [];
+    const vocabItems = book.vocab || [];
+    const highlights = highlightItems.map((h) => (
       '<div class="note-item">' +
       '<div class="note-text">' + escapeHtml(h.text || "") + "</div>" +
       (h.context ? '<div class="note-context">' + escapeHtml(h.context) + "</div>" : "") +
       (h.note ? '<div class="note-note">' + escapeHtml(h.note) + "</div>" : "") +
       "</div>"
     )).join("");
-    const words = (book.vocab || []).map((v) => (
+    const words = vocabItems.map((v) => (
       '<span class="note-word">' + escapeHtml(v.word || "") + (v.count ? " ×" + v.count : "") + "</span>"
     )).join("");
+    const totalItems = highlightItems.length + vocabItems.length;
     return (
       '<section class="note-book">' +
-      "<h3>" + escapeHtml(book.title || "未命名书籍") + "</h3>" +
+      '<div class="note-book-head"><h3>' + escapeHtml(book.title || "未命名书籍") + '</h3><span class="note-book-count">' + totalItems + " 条</span></div>" +
       (highlights ? '<div class="note-sec"><h4>高亮 / 批注</h4>' + highlights + "</div>" : "") +
       (words ? '<div class="note-sec"><h4>查词</h4><div class="note-vocab">' + words + "</div></div>" : "") +
       "</section>"
@@ -781,9 +794,10 @@ function libraryHealthBytes(value) {
 }function renderLibraryHealth(report) {
   const missing = report.missing || [];
   const duplicates = report.duplicates || [];
+  const healthStat = (label, value) => `<span class="health-stat"><small>${label}</small><strong>${value}</strong></span>`;
   let html = '<div class="health-summary">' +
-    `<span>书籍 ${report.total || 0} 本</span><span>文件正常 ${report.healthy || 0} 本</span>` +
-    `<span>失效路径 ${missing.length} 本</span><span>重复组 ${duplicates.length} 组</span></div>`;
+    healthStat("书籍", `${report.total || 0} 本`) + healthStat("文件正常", `${report.healthy || 0} 本`) +
+    healthStat("失效路径", `${missing.length} 本`) + healthStat("重复组", `${duplicates.length} 组`) + "</div>";
   html += '<section class="health-section"><h4>失效路径</h4>';
   html += missing.length ? missing.map((book) =>
     `<div class="health-row"><div class="health-book"><strong>${libraryHealthEscape(book.title)}</strong><small>${libraryHealthEscape(book.path)}</small></div>` +
@@ -798,9 +812,9 @@ function libraryHealthBytes(value) {
   ).join("") : '<div class="stats-empty">没有发现重复内容</div>';
   const index = report.search_index || {};
   html += '</section><section class="health-section"><h4>全文索引与缓存</h4>' +
-    '<div class="health-summary">' +
-    `<span>压缩索引 ${index.binary_files || 0}</span><span>旧 JSON ${index.legacy_files || 0}</span>` +
-    `<span>孤儿文件 ${index.orphan_files || 0}</span><span>磁盘 ${libraryHealthBytes(index.disk_bytes)}</span></div>` +
+    '<div class="health-summary health-index-summary">' +
+    healthStat("压缩索引", index.binary_files || 0) + healthStat("旧 JSON", index.legacy_files || 0) +
+    healthStat("孤儿文件", index.orphan_files || 0) + healthStat("磁盘占用", libraryHealthBytes(index.disk_bytes)) + "</div>" +
     `<div class="health-group-title">内存 LRU：${libraryHealthBytes(index.memory_bytes)} / ${libraryHealthBytes(index.memory_limit_bytes)}，${index.memory_entries || 0} 个缓存条目；磁盘上限 ${libraryHealthBytes(index.disk_limit_bytes)}。</div>` +
     '<button class="btn-plain health-index-clean" type="button">清理孤儿索引并执行配额治理</button></section>';
   libraryHealthBody.innerHTML = html;
@@ -911,6 +925,7 @@ const bookInfoBtn = document.getElementById("book-info-btn");
 const similarBooksBtn = document.getElementById("similar-books-btn");
 const readingTimelineBtn = document.getElementById("reading-timeline-btn");
 const bookInfoModal = document.getElementById("book-info-modal");
+const bookInfoCover = document.getElementById("book-info-cover");
 const bookInfoTitle = document.getElementById("book-info-title");
 const bookInfoDesc = document.getElementById("book-info-desc");
 const bookInfoStars = document.getElementById("book-info-stars");
@@ -986,7 +1001,6 @@ async function openReadingTimeline() {
   if (!currentInfoBookId) return;
   const modal = document.getElementById("reading-timeline-modal");
   const body = document.getElementById("reading-timeline-body");
-  bookInfoModal.classList.remove("show");
   modal.classList.add("show");
   body.innerHTML = '<div class="stats-empty">正在整理阅读记录…</div>';
   try {
@@ -1062,12 +1076,14 @@ async function openBookInfoById(id) {
   if (!id) return;
   currentInfoBookId = String(id);
   bookInfoModal.classList.add("show");
+  renderBookInfoCover(shelfUI.getBook(currentInfoBookId));
   document.getElementById("book-info-words").textContent = "统计中…";
   bookOrganizationUI.open(currentInfoBookId, shelfUI.getBook(currentInfoBookId));
   renderBookInfoTags(document.getElementById("book-info-model-tags"), [], []);
   try {
     const m = await invoke("book_meta_by_id", { id: currentInfoBookId });
     bookInfoTitle.value = m.title || "";
+    renderBookInfoCover(Object.assign({}, shelfUI.getBook(currentInfoBookId) || {}, { title: m.title || "" }));
     document.getElementById("book-info-author").textContent = m.author || "未知";
     document.getElementById("book-info-format").textContent = (m.format || "").toUpperCase();
     document.getElementById("book-info-words").textContent = fmtWords(m.word_count);
@@ -1102,7 +1118,6 @@ tauriEvent.listen("reader-gesture-action", (event) => {
   if (payload.action !== "book_info" || !payload.bookId) return;
   window.setTimeout(() => { void openBookInfoById(payload.bookId); }, 80);
 });bookInfoBtn.addEventListener("click", openSelectedBookInfo);
-document.getElementById("book-info-close").addEventListener("click", () => bookInfoModal.classList.remove("show"));
 bookInfoModal.addEventListener("click", (e) => {
   if (e.target === bookInfoModal) bookInfoModal.classList.remove("show");
 });
@@ -1117,6 +1132,7 @@ bookInfoTitle.addEventListener("blur", async () => {
   try {
     await invoke("set_book_title", { id: currentInfoBookId, title });
     shelfUI.updateBook(currentInfoBookId, { title });
+    renderBookInfoCover(shelfUI.getBook(currentInfoBookId));
   } catch (e) {
     alert("保存书名失败：" + e);
   }
@@ -1212,9 +1228,32 @@ similarBooksModal.addEventListener("click", (e) => {
 });
 
 // 图书信息里的单本操作。
-coverBtn.addEventListener("click", () => {
+function renderBookInfoCover(book) {
+  if (!bookInfoCover) return;
+  const title = String(book?.title || bookInfoTitle?.value || "未命名");
+  const renderFallback = () => {
+    const fallback = document.createElement("span");
+    fallback.className = "book-info-cover-fallback";
+    fallback.textContent = title;
+    fallback.style.background = shelfUI.coverColor(title);
+    bookInfoCover.replaceChildren(fallback);
+  };
+  if (!book?.cover) {
+    renderFallback();
+    return;
+  }
+  const image = document.createElement("img");
+  image.alt = title;
+  image.draggable = false;
+  image.decoding = "async";
+  image.src = book.cover;
+  image.addEventListener("error", renderFallback, { once: true });
+  bookInfoCover.replaceChildren(image);
+}
+coverBtn.addEventListener("click", async () => {
   if (!currentInfoBookId) return;
-  shelfUI.changeCoverById(currentInfoBookId);
+  await shelfUI.changeCoverById(currentInfoBookId);
+  renderBookInfoCover(shelfUI.getBook(currentInfoBookId));
 });
 
 // 书架选择、批量删除与焦点刷新由 ReaderShelfUI 管理。
@@ -1226,13 +1265,14 @@ window.addEventListener("DOMContentLoaded", () => {
         startupPerfLog("shelf-list-books", "data", "books=" + ((list && list.length) || 0));
         shelfUI.render(list);
         requestAnimationFrame(() => requestAnimationFrame(() => recordNativeStartupMilestone("shelf_painted")));
+        revealMainWindowAfterFirstPaint();
         // 首屏渲染完成后只聚焦一次书架滚动容器，让 PgUp/PgDn 开箱即用。
         // 后续后台刷新不重复聚焦，避免抢走搜索框或弹窗里的输入焦点。
         requestAnimationFrame(() => shelfUI.focusShelf());
         return invoke("take_startup_book_paths");
       })
       .then((paths) => enqueueAssociatedBookOpen(paths))
-      .catch(() => {})
+      .catch(() => revealMainWindowAfterFirstPaint())
       .finally(() => {
         startupPerfLog("startup", "interactive", "main toolbar should be responsive");
       });

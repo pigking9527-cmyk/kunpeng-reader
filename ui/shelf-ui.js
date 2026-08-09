@@ -33,6 +33,7 @@ const shelfScrollbar = document.getElementById("shelf-scrollbar");
 const shelfScrollbarThumb = document.getElementById("shelf-scrollbar-thumb");
 const filterButton = document.getElementById("filter-btn");
 const filterResultSummary = document.getElementById("filter-result-summary");
+const readingFilterAllButton = document.getElementById("reading-filter-all");
 const tagFilterList = document.getElementById("tag-filter-list");
 const collectionFilterList = document.getElementById("collection-filter-list");
 const organizationMatchModeButton = document.getElementById("organization-match-mode");
@@ -232,7 +233,7 @@ makeStars(filterStarsEl, (value) => {
 });
 filterStarsEl.setVal(minRating);
 
-document.getElementById("reading-filter-all")?.addEventListener("click", () => {
+readingFilterAllButton?.addEventListener("click", () => {
   readingFilter = { unread: true, reading: true, done: true };
   localStorage.setItem("readingFilter", JSON.stringify(readingFilter));
   document.querySelectorAll(".rfilter").forEach((checkbox) => { checkbox.checked = true; });
@@ -643,6 +644,7 @@ function updateShelfFilterStatus(visibleCount) {
   const active = hasActiveShelfFilters();
   filterButton.classList.toggle("filters-active", active);
   filterButton.title = active ? shelfText("activeFilters", "Filters active") : shelfText("sortAndLayout", "Sort & layout");
+  if (readingFilterAllButton) readingFilterAllButton.hidden = !active;
   if (filterResultSummary) {
     filterResultSummary.textContent = visibleCount + "/" + books.length;
   }
@@ -1020,6 +1022,7 @@ async function saveActiveBooklist() {
     description: booklistDescription?.value || "",
     coverBookId: String(activeBooklist.cover_book_id || ""),
     bookIds: activeBooklist.book_ids || [],
+    reviews: activeBooklist.reviews || {},
   });
   activeBooklist = (lists || []).find((list) => organizationKey(list.name) === organizationKey(activeBooklist.name)) || activeBooklist;
 }
@@ -1057,11 +1060,15 @@ function animateBooklistInsert(beforeNode) {
 function moveBooklistDrag(clientY) {
   const state = booklistDragState;
   if (!state) return;
-  state.row.style.top = clientY - state.offsetY + "px";
+  const bounds = booklistBooks.getBoundingClientRect();
+  const maxTop = Math.max(bounds.top, bounds.bottom - state.row.offsetHeight);
+  const top = Math.max(bounds.top, Math.min(maxTop, clientY - state.offsetY));
+  const probeY = Math.max(bounds.top, Math.min(bounds.bottom, clientY));
+  state.row.style.top = top + "px";
   const rows = Array.from(booklistBooks.querySelectorAll(".booklist-row")).filter((row) => row !== state.row);
   for (const row of rows) {
     const box = row.getBoundingClientRect();
-    if (clientY < box.top + box.height / 2) {
+    if (probeY < box.top + box.height / 2) {
       animateBooklistInsert(row);
       return;
     }
@@ -1120,6 +1127,7 @@ function attachBooklistDrag(row, grip) {
 }
 function renderBooklist(list) {
   activeBooklist = list;
+  activeBooklist.reviews = activeBooklist.reviews && typeof activeBooklist.reviews === "object" ? activeBooklist.reviews : {};
   booklistTitle.textContent = "书单 · " + list.name;
   booklistDescription.value = list.description || "";
   setBooklistCover(list);
@@ -1158,7 +1166,21 @@ function renderBooklist(list) {
     const meta = document.createElement("div");
     meta.className = "booklist-book-meta";
     meta.textContent = book.author || "未知作者";
-    info.append(title, meta);
+    const review = document.createElement("textarea");
+    review.className = "booklist-book-review";
+    review.maxLength = 1000;
+    review.placeholder = "写下这本书为什么适合这份书单…";
+    review.value = activeBooklist.reviews?.[String(book.id)] || "";
+    review.addEventListener("pointerdown", (event) => event.stopPropagation());
+    review.addEventListener("blur", () => {
+      if (!activeBooklist) return;
+      activeBooklist.reviews = activeBooklist.reviews || {};
+      const value = review.value.trim();
+      if (value) activeBooklist.reviews[String(book.id)] = value;
+      else delete activeBooklist.reviews[String(book.id)];
+      saveActiveBooklist().catch((error) => alertAction("保存书单评语失败：" + error));
+    });
+    info.append(title, meta, review);
     info.addEventListener("dblclick", () => invoke("open_book", { id: String(book.id) }).catch((error) => alertAction("打开失败：" + error)));
     const actions = document.createElement("div");
     actions.className = "booklist-row-actions";
@@ -1774,6 +1796,7 @@ global.ReaderShelfUI = Object.freeze({
   getSelectedIds: () => controller().getSelectedIds(),
   init,
   focusShelf: () => controller().focusShelf(),
+  openBooklist: (name) => controller().openBooklist(name),
   refresh: () => controller().applyView(),
   render: (list) => controller().render(list),
   setSearchQuery: (value) => controller().setSearchQuery(value),

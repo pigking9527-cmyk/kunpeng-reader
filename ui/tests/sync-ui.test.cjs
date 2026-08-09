@@ -8,6 +8,7 @@ const uiDir = path.resolve(__dirname, "..");
 const syncSource = fs.readFileSync(path.join(uiDir, "sync-ui.js"), "utf8");
 const indexSource = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
 const i18nSource = fs.readFileSync(path.join(uiDir, "app-i18n.js"), "utf8");
+const stylesSource = fs.readFileSync(path.join(uiDir, "styles.css"), "utf8");
 
 test("sync UI only binds elements that exist in the main page", () => {
   const referencedIds = [...syncSource.matchAll(/getElementById\("([^"]+)"\)/g)]
@@ -31,17 +32,55 @@ test("private sync explains the 100 plus 100 cloud history policy", () => {
   assert.match(i18nSource, /包括单书与书库问答；云端各保留 100 条/);
 });
 
-test("同步内容总览列出新增的模型标签、配置和可选历史同步", () => {
-  assert.match(indexSource, /大模型书籍分类标签/);
-  assert.match(indexSource, /data-i18n="syncSoftwareSettings">软件设置/);
-  assert.match(indexSource, /大模型与翻译 API 配置（不含密钥）/);
-  assert.match(indexSource, /智读与书库问答记录（可选）/);
-  assert.match(indexSource, /加密 API Key 与翻译密钥（可选）/);
-  assert.match(indexSource, /id="account-sync-history"/);
-  assert.match(indexSource, /id="account-sync-secrets"/);
-  assert.match(i18nSource, /syncSoftwareSettings = label/);
+test("账户概览保留同步执行和额度；同步管理仍在独立页面", () => {
+  assert.match(indexSource, /id="sync-now"/);
+  assert.match(indexSource, /id="account-storage-value"/);
+  assert.match(indexSource, /id="account-daily-value"/);
+  assert.match(indexSource, /class="account-center-nav"/);
+  assert.match(indexSource, /id="account-tab-sync"/);
+  assert.match(indexSource, /id="private-sync-panel"/);
+  assert.doesNotMatch(indexSource, /id="private-sync-open"/);
   assert.match(syncSource, /function applyPrivateSyncOverview/);
-  assert.match(syncSource, /account-sync-enabled/);
+});
+
+test("同步内容逐项说明真实实体范围并包含书单元数据", () => {
+  assert.match(indexSource, /id="account-sync-progress"[\s\S]*?阅读进度、续读位置与阅读时间线/);
+  assert.match(indexSource, /id="account-sync-reading-data"[\s\S]*?标签、收藏夹与书单/);
+  assert.match(indexSource, /id="account-sync-statistics"[\s\S]*?时长、字数与完成时间/);
+  assert.match(indexSource, /id="account-sync-palettes"[\s\S]*?data-i18n="syncPalettes"/);
+  assert.match(i18nSource, /syncReadingData:\s*"书签、高亮、批注、评分、标签、收藏夹与书单"/);
+  assert.match(i18nSource, /syncPalettes:\s*"自定义阅读主题与背景"/);
+});
+
+test("账户概览展示服务端权威的总存储与每日同步额度", () => {
+  const overview = indexSource.match(/<section id="account-overview-panel"[\s\S]*?<\/section>/)?.[0] || "";
+  assert.match(overview, /id="sync-account-name"/);
+  assert.match(overview, /id="sync-now"/);
+  assert.match(overview, /id="sync-logout"/);
+  assert.match(indexSource, /id="account-storage-value"/);
+  assert.match(indexSource, /id="account-daily-value"/);
+  assert.match(syncSource, /invoke\("auth_usage_status"\)/);
+  assert.match(syncSource, /function applyAccountUsage/);
+  assert.match(syncSource, /dailyResetAt/);
+});
+
+test("账户概览区分立即同步操作与同步服务连通状态", () => {
+  assert.match(indexSource, /id="account-overview-sync-state"[^>]*class="account-sync-state checking"[^>]*role="status"/);
+  assert.match(indexSource, /id="account-overview-sync-label"[^>]*>检测中<\/span>/);
+  assert.match(indexSource, /id="sync-now"[^>]*>立即同步<\/button>/);
+  assert.match(syncSource, /function setConnectionState\(state = "unknown", key = "serviceUnchecked"/);
+  assert.doesNotMatch(syncSource, /accountOverviewSyncStateEl\.textContent = syncText\(key \|\| "syncNow"/);
+  assert.match(syncSource, /invoke\("auth_usage_status"\)[\s\S]*setConnectionState\("online", "serviceOnline"\)/);
+  assert.match(syncSource, /setConnectionState\("offline", "serviceOffline", String\(error\)\)/);
+  assert.match(stylesSource, /\.account-sync-state\.online[^{]*\{[^}]*color:\s*#1c7c49/);
+  assert.match(stylesSource, /\.account-sync-state\.offline[^{]*\{[^}]*color:\s*#c34545/);
+  assert.match(stylesSource, /\.account-overview-commands\s*\{[^}]*--account-command-height:\s*34px/);
+  assert.match(stylesSource, /\.account-overview-commands \.sync-now-btn, \.account-overview-commands \.sync-logout-btn\s*\{[^}]*height:\s*var\(--account-command-height\)/);
+  assert.match(stylesSource, /\.account-sync-state\s*\{[^}]*width:\s*var\(--account-command-height\)[^}]*height:\s*var\(--account-command-height\)[^}]*overflow:\s*hidden/);
+  assert.match(stylesSource, /\.account-sync-state:is\(:hover, :focus-visible\)[^{]*\{[^}]*width:\s*auto/);
+  assert.match(i18nSource, /syncNow:\s*"立即同步"/);
+  assert.match(i18nSource, /serviceOnline:\s*"服务畅通"/);
+  assert.match(i18nSource, /serviceOffline:\s*"连接异常"/);
 });
 
 test("persisted account is restored and automatically synced on startup", () => {
@@ -72,6 +111,7 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
       };
       this.handlers = new Map();
       this.style = {};
+      this.dataset = {};
       this.value = "";
       this.disabled = false;
       this.textContent = "";
@@ -89,25 +129,23 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "sync-last-counts", "sync-now", "sync-logout", "sync-register", "sync-login",
     "sync-password-reset-open", "sync-password-reset", "sync-reset-email", "sync-reset-code",
     "sync-reset-new-password", "sync-reset-request", "sync-reset-confirm", "sync-reset-status",
-    "account-security-open", "account-security-panel", "account-security-close",
-    "account-subpage-backdrop",
+    "account-security-open", "account-security-panel", "account-overview-panel", "account-overview-sync-state", "account-overview-sync-label",
+    "account-storage-value", "account-storage-bar", "account-storage-note", "account-daily-value", "account-daily-bar", "account-daily-note",
+    "account-tab-overview", "account-tab-sync",
     "account-security-summary", "account-security-status", "account-email-toggle", "account-email-form",
     "account-email", "account-email-code", "account-email-start", "account-email-confirm",
     "account-email-bind-flow", "account-email-rebind-flow", "account-email-old-start",
     "account-email-old-code", "account-email-old-confirm", "account-email-new-step",
     "account-email-new", "account-email-new-start", "account-email-new-code", "account-email-new-confirm",
     "account-password-toggle", "account-password-form", "account-current-password",
-    "account-new-password", "account-password-change", "private-sync-open", "private-sync-panel",
-    "account-password-recover-toggle", "account-password-recover-form", "account-password-recover-email",
-    "account-password-recover-code", "account-password-recover-new", "account-password-recover-start",
-    "account-password-recover-confirm",
-    "account-data-open", "account-data-panel", "account-data-close", "account-clear-local",
+    "account-new-password", "account-password-change", "private-sync-panel",
+    "account-data-open", "account-data-panel", "account-clear-local",
     "account-clear-cloud-password", "account-clear-cloud", "account-delete-password",
     "account-delete-username", "account-delete", "account-data-status",
-    "private-sync-close", "private-sync-configs", "private-sync-history", "private-sync-secrets",
-    "account-sync-history", "account-sync-secrets",
-    "private-sync-password", "private-sync-save-password", "private-sync-unlock",
-    "private-sync-forget", "private-sync-status",
+    "account-sync-progress", "account-sync-reading-data", "account-sync-vocabulary", "account-sync-statistics",
+    "account-sync-software-settings", "account-sync-model-tags", "account-sync-palettes", "account-sync-configs",
+    "account-sync-history", "account-sync-secrets", "private-sync-password", "private-sync-save-password",
+    "private-sync-unlock", "private-sync-forget", "private-sync-status",
   ];
   const elements = new Map(ids.map((id) => [id, new FakeElement()]));
   const root = {
@@ -152,24 +190,40 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
   elements.get("account-security-panel").hidden = true;
   elements.get("account-data-panel").hidden = true;
   elements.get("private-sync-panel").hidden = true;
-  elements.get("account-subpage-backdrop").hidden = true;
+  elements.get("account-overview-panel").hidden = false;
   await elements.get("account-security-open").emit("click");
   assert.equal(elements.get("account-security-panel").hidden, false);
-  assert.equal(elements.get("account-subpage-backdrop").hidden, false);
-  let backdropClickStopped = false;
-  elements.get("account-subpage-backdrop").emit("click", { stopPropagation() { backdropClickStopped = true; } });
-  assert.equal(backdropClickStopped, true);
-  assert.equal(elements.get("account-security-panel").hidden, true);
-  assert.equal(elements.get("account-subpage-backdrop").hidden, true);
+  assert.equal(elements.get("account-overview-panel").hidden, true);
+  assert.equal(elements.get("account-panel").dataset.accountTab, "security");
 });
 
-test("账户安全和同步设置点击外部区域后关闭且不穿透到底层账户操作", () => {
-  assert.match(indexSource, /id="account-subpage-backdrop" class="account-subpage-backdrop" hidden/);
-  assert.match(syncSource, /function closeAccountSubpages\(\)/);
-  assert.match(syncSource, /accountSubpageBackdrop\.hidden = accountSecurityPanel\.hidden && accountDataPanel\.hidden && privateSyncPanel\.hidden/);
-  assert.match(syncSource, /accountSubpageBackdrop\.addEventListener\("click", \(e\) => \{\s*e\.stopPropagation\(\);\s*closeAccountSubpages\(\);/s);
-  assert.match(syncSource, /privateSyncOpenBtn\.addEventListener[\s\S]*?syncAccountSubpageBackdrop\(\)/);
-  assert.match(syncSource, /accountSecurityOpenBtn\.addEventListener[\s\S]*?syncAccountSubpageBackdrop\(\)/);
+test("账户中心在同一窗口切换概览、同步、安全和数据页面", () => {
+  assert.match(indexSource, /id="account-tab-overview"/);
+  assert.match(indexSource, /id="account-tab-sync"/);
+  assert.match(syncSource, /accountSyncTabBtn\.addEventListener\("click", \(\) => selectAccountTab\("sync"\)\)/);
+  assert.match(syncSource, /accountSecurityOpenBtn\.addEventListener\("click", \(\) => selectAccountTab\("security"\)\)/);
+  assert.match(syncSource, /accountDataOpenBtn\.addEventListener\("click", \(\) => selectAccountTab\("data"\)\)/);
+});
+
+test("账户中心仅在非概览页使用统一的扩展高度", () => {
+  assert.match(syncSource, /accountPanel\.dataset\.accountTab = tab/);
+  assert.match(stylesSource, /\.account-panel\[data-account-tab="sync"\],[\s\S]*?height:\s*min\(720px, calc\(100vh - 48px\)\)/);
+  assert.match(stylesSource, /\.account-panel\[data-account-tab="security"\],[\s\S]*?\.account-panel\[data-account-tab="data"\]/);
+  assert.doesNotMatch(stylesSource, /\.account-panel\[data-account-tab="overview"\][\s\S]{0,180}height:/);
+  assert.match(stylesSource, /\.account-panel\[data-account-tab="sync"\] \.account-center-pages[\s\S]*?overflow-y:\s*auto/);
+});
+
+test("账户中心安全与数据入口使用统一图标导航和轻量焦点状态", () => {
+  assert.match(indexSource, /id="account-tab-overview"[\s\S]*?class="account-tab-icon"/);
+  assert.match(indexSource, /id="account-tab-sync"[\s\S]*?class="account-tab-icon"/);
+  assert.doesNotMatch(indexSource, /账户中心<\/strong>/);
+  assert.match(indexSource, /id="account-security-open" class="account-tab-button account-tab-secondary"[\s\S]*?data-i18n="accountSecurity"/);
+  assert.match(indexSource, /id="account-data-open" class="account-tab-button"[\s\S]*?data-i18n="accountDataPrivacy"/);
+  assert.match(stylesSource, /\.account-tab-button\.active::after\s*\{[^}]*width:\s*3px;[^}]*background:\s*#3d82d8;/s);
+  assert.match(stylesSource, /\.account-tab-button:focus-visible\s*\{[^}]*rgba\(68,137,226,\.22\)/s);
+  assert.match(stylesSource, /\.account-tab-secondary::before/);
+  assert.match(stylesSource, /\.account-security-disclosure\s*\{[^}]*border-radius:\s*12px;[^}]*background:\s*#fff;/s);
+  assert.match(stylesSource, /\.account-data-card::before/);
 });
 
 test("数据与隐私提供本机、云端和账号三级清理并明确保留原始图书", () => {

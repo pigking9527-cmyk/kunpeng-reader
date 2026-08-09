@@ -24,6 +24,7 @@ static SEM_MODEL_WARMING: AtomicBool = AtomicBool::new(false);
 const SEM_PROFILE_CANDIDATE_LIMIT: usize = 24;
 const SEM_COMPACT_PROFILE_CANDIDATE_LIMIT: usize = 8;
 const SEM_LEXICAL_CANDIDATE_LIMIT: usize = 16;
+const MAX_SEMANTIC_BOOK_RESULTS: usize = 100;
 
 #[derive(Default)]
 struct SemQueryCache {
@@ -648,7 +649,7 @@ fn semantic_search_inner(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    results.truncate(60);
+    results.truncate(MAX_SEMANTIC_BOOK_RESULTS);
     // 默认已在候选阶段融入全文词面信号；高精度模式再对前 30 个段落做本地
     // 交叉编码重排。模型未下载时安全退回标准融合，不触发隐式网络下载。
     super::retrieval::rerank_hits(state, &query, &mut results);

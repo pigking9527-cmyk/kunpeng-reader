@@ -212,6 +212,8 @@ test("highlight menu keeps appearance compact and supports persisted four-color 
   assert.match(source, /setHighlightColor:\{index:activeHi,color:color\}/);
   assert.match(style, /\.hs-appearance\{grid-template-columns:auto auto 1fr 38px/);
   assert.match(style, /\.hs-layout-size\{grid-template-columns:auto auto auto auto/);
+  assert.match(source, /function hlActionIconMarkup\(key\)/);
+  assert.match(source, /web:'<svg viewBox=/);
   assert.match(style, /\.hm-color-host .hm-color-button/);
   assert.match(style, /var\(--hl-color,rgba\(126,136,148,.34\)\)/);
 });

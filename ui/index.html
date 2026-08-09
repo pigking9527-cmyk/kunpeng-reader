@@ -9,7 +9,8 @@
   </head>
   <body>
     <header class="toolbar">
-      <div class="account-wrap">
+      <div id="toolbar-leading-action" class="toolbar-leading-action" aria-label="菜单栏首项"></div>
+      <div class="toolbar-action account-wrap" data-toolbar-item="account">
         <button id="account-btn" class="avatar-btn" title="账号与同步" aria-label="账号与同步" data-i18n-title="syncTitle" data-i18n-aria="syncTitle">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
             <circle cx="12" cy="8" r="4" fill="currentColor" />
@@ -46,47 +47,62 @@
               <div id="sync-reset-status" class="private-sync-status"></div>
             </section>
           </div>
-          <div id="sync-account" class="sync-account">
-            <span id="sync-account-name" data-i18n="accountPrefix">账号：</span>
-            <span class="sync-account-actions">
-              <button id="sync-now" class="sync-now-btn" type="button" data-i18n="syncNow">同步</button>
-              <button id="account-security-open" class="btn-plain" type="button" data-i18n="accountSecurity">账户安全</button>
-              <button id="sync-logout" class="sync-logout-btn" type="button" data-i18n="logout">退出登录</button>
-            </span>
-          </div>
-          <section class="account-sync-overview" aria-label="同步内容" data-i18n-aria="syncContent">
-            <div class="account-sync-title" data-i18n="syncContent">同步内容</div>
-            <div class="account-sync-grid">
-              <span data-i18n="syncProgress">阅读进度与续读位置</span>
-              <span data-i18n="syncReadingData">书签、高亮、批注、评分、标签与收藏夹</span>
-              <span data-i18n="syncVocabulary">生词本</span>
-              <span data-i18n="syncStatistics">阅读统计</span>
-              <span data-i18n="syncSoftwareSettings">软件设置</span>
-              <span data-i18n="syncTags">大模型书籍分类标签</span>
-              <span data-i18n="syncApi">大模型与翻译 API 配置（不含密钥）</span>
-              <span id="account-sync-history" class="account-sync-optional" data-i18n="syncHistory">智读与书库问答记录（可选）</span>
-              <span id="account-sync-secrets" class="account-sync-optional" data-i18n="syncSecrets">加密 API Key 与翻译密钥（可选）</span>
-            </div>
-            <div class="private-sync-row">
-              <div>
-                <strong data-i18n="smartReading">智读、书库问答与翻译</strong>
-                <small data-i18n="smartReadingHelp">分类标签和配置默认同步；问答记录与加密密钥可在同步设置中开启。</small>
-              </div>
-              <button id="private-sync-open" class="btn-plain" type="button" data-i18n="syncSettings">同步设置</button>
-            </div>
-            <div id="sync-last-time" class="sync-last-time" data-i18n="lastSyncNever">尚未同步</div>
-            <div id="sync-last-counts" class="sync-last-counts" data-i18n="syncFilesNote">登录后可跨设备同步；图书文件本身不会上传</div>
-          </section>
-          <div class="account-data-entry">
-            <button id="account-data-open" class="btn-plain" type="button" data-i18n="accountDataPrivacy">数据与隐私</button>
-          </div>
-          <div id="sync-status" class="sync-status">尚未同步</div>
-        </div>
+          <div id="sync-account" class="sync-account account-center">
+            <div class="account-center-layout">
+              <nav class="account-center-nav" aria-label="账户选项">
+                <button id="account-tab-overview" class="account-tab-button active" type="button" data-account-tab="overview"><span class="account-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.25"/><path d="M5.5 19c.7-4 3-6 6.5-6s5.8 2 6.5 6"/></svg></span><span class="account-tab-label">概览</span></button>
+                <button id="account-tab-sync" class="account-tab-button" type="button" data-account-tab="sync"><span class="account-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M19 8a7.5 7.5 0 0 0-12.7-2L4 8.3M5 16a7.5 7.5 0 0 0 12.7 2l2.3-2.3"/><path d="M4 4v4.3h4.3M20 20v-4.3h-4.3"/></svg></span><span class="account-tab-label">同步</span></button>
+                <button id="account-security-open" class="account-tab-button account-tab-secondary" type="button" data-account-tab="security"><span class="account-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.2c0 4.2-2.4 7.4-7 9.3-4.6-1.9-7-5.1-7-9.3V6l7-2.5Z"/><path d="m9.3 12 1.7 1.7 3.8-4"/></svg></span><span class="account-tab-label" data-i18n="accountSecurity">账户安全</span></button>
+                <button id="account-data-open" class="account-tab-button" type="button" data-account-tab="data"><span class="account-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4.5h12v15H6z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></span><span class="account-tab-label" data-i18n="accountDataPrivacy">数据与隐私</span></button>
+              </nav>
+              <main class="account-center-pages">
+                <section id="account-overview-panel" class="account-tab-page">
+                  <div class="account-page-heading account-overview-heading"><div><h2 id="sync-account-name" data-i18n="accountPrefix">账号：</h2><p id="account-center-summary">图书正文、原文件和本机路径不会上传。</p></div><div class="account-overview-commands"><strong id="account-overview-sync-state" class="account-sync-state checking" role="status" aria-live="polite" aria-label="检测中" tabindex="0"><span id="account-overview-sync-label" class="account-sync-state-label" data-i18n="serviceChecking">检测中</span></strong><span class="sync-account-actions"><button id="sync-now" class="sync-now-btn" type="button" data-i18n="syncNow">立即同步</button><button id="sync-logout" class="sync-logout-btn" type="button" data-i18n="logout">退出登录</button></span></div></div>
+                  <div class="account-quota-grid" aria-label="账户额度">
+                    <section class="account-quota-card">
+                      <div class="account-quota-label"><span>总存储</span><strong id="account-storage-value">读取中</strong></div>
+                      <div class="account-quota-track"><span id="account-storage-bar"></span></div>
+                      <small id="account-storage-note">同步实体和恢复版本会计入此额度</small>
+                    </section>
+                    <section class="account-quota-card">
+                      <div class="account-quota-label"><span>每日同步</span><strong id="account-daily-value">读取中</strong></div>
+                      <div class="account-quota-track"><span id="account-daily-bar"></span></div>
+                      <small id="account-daily-note">正在读取今日额度</small>
+                    </section>
+                  </div>
+                  <div class="account-last-sync"><div id="sync-last-time" class="sync-last-time" data-i18n="lastSyncNever">尚未同步</div><div id="sync-last-counts" class="sync-last-counts" data-i18n="syncFilesNote">登录后可跨设备同步；图书文件本身不会上传</div></div>
+                </section>
 
-        <div id="account-subpage-backdrop" class="account-subpage-backdrop" hidden></div>
-        <section id="account-security-panel" class="account-subpage account-security-panel" hidden aria-label="账户安全" data-i18n-aria="accountSecurity" aria-modal="true">
-            <div class="private-sync-header"><strong data-i18n="accountSecurity">账户安全</strong><button id="account-security-close" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria="close">×</button></div>
-            <p id="account-security-summary" class="private-sync-note" data-i18n="accountSecurityLoading">读取账户安全状态中…</p>
+                <section id="private-sync-panel" class="account-tab-page" hidden aria-label="同步内容" data-i18n-aria="syncContent">
+                  <div class="account-page-heading"><div><h2 data-i18n="syncContent">同步内容</h2><p>选择这台设备需要交换的数据；取消不会删除任何已有副本，重新开启会重新拉取。</p></div></div>
+                  <h3>阅读</h3>
+                  <div class="account-sync-grid">
+                    <label class="account-sync-choice"><input id="account-sync-progress" type="checkbox" /><span data-i18n="syncProgress">阅读进度、续读位置与阅读时间线</span></label>
+                    <label class="account-sync-choice"><input id="account-sync-reading-data" type="checkbox" /><span data-i18n="syncReadingData">书签、高亮、批注、评分、标签、收藏夹与书单</span></label>
+                    <label class="account-sync-choice"><input id="account-sync-vocabulary" type="checkbox" /><span data-i18n="syncVocabulary">生词本</span></label>
+                    <label class="account-sync-choice"><input id="account-sync-statistics" type="checkbox" /><span data-i18n="syncStatistics">阅读统计（时长、字数与完成时间）</span></label>
+                  </div>
+                  <h3>个性化</h3>
+                  <div class="account-sync-grid">
+                    <label class="account-sync-choice"><input id="account-sync-software-settings" type="checkbox" /><span data-i18n="syncSoftwareSettings">软件设置（排版、工具栏、手势等）</span></label>
+                    <label class="account-sync-choice"><input id="account-sync-palettes" type="checkbox" /><span data-i18n="syncPalettes">自定义阅读主题与背景</span></label>
+                  </div>
+                  <h3>智读与翻译</h3>
+                  <div class="account-sync-grid">
+                    <label class="account-sync-choice"><input id="account-sync-model-tags" type="checkbox" /><span data-i18n="syncTags">大模型书籍分类标签</span></label>
+                    <label class="account-sync-choice"><input id="account-sync-configs" type="checkbox" /><span data-i18n="syncApi">大模型与翻译 API 配置（不含密钥）</span></label>
+                    <label class="account-sync-choice"><input id="account-sync-history" type="checkbox" /><span data-i18n="syncHistory">智读与书库问答记录（可选）</span></label>
+                  </div>
+                  <section class="sync-secrets-card">
+                    <label class="account-sync-choice"><input id="account-sync-secrets" type="checkbox" /><span><b data-i18n="syncSecrets">同步 API Key 与翻译密钥</b><small>使用同步密码加密；服务器只保存密文。</small></span></label>
+                    <div class="private-sync-password"><input id="private-sync-password" type="password" autocomplete="new-password" placeholder="设置或输入同步密码（至少 10 个字）" data-i18n-placeholder="privateSyncPasswordPlaceholder" /><button id="private-sync-save-password" class="btn-plain" type="button" data-i18n="encryptAndSyncSecrets">加密并立即同步密钥</button><button id="private-sync-unlock" class="btn-plain" type="button" data-i18n="unlockCloudSecrets">解锁云端密钥</button></div>
+                    <div class="private-sync-danger"><button id="private-sync-forget" class="btn-plain" type="button" data-i18n="forgetSyncPassword">遗忘同步密码并撤销云端密钥</button><small data-i18n="forgetSyncPasswordHint">同步密码无法找回；本机 API Key 不会删除，可用新密码重新加密。</small></div>
+                    <div id="private-sync-status" class="private-sync-status"></div>
+                  </section>
+                </section>
+
+                <section id="account-security-panel" class="account-tab-page account-security-panel" hidden aria-label="账户安全" data-i18n-aria="accountSecurity">
+            <div class="account-page-heading"><div><h2 data-i18n="accountSecurity">账户安全</h2><p id="account-security-summary" class="private-sync-note" data-i18n="accountSecurityLoading">读取账户安全状态中…</p></div></div>
             <div class="account-security-disclosure">
               <button id="account-email-toggle" class="account-security-toggle" type="button" aria-expanded="false" data-i18n="bindEmail">绑定邮箱</button>
               <div id="account-email-form" class="account-security-form" hidden>
@@ -121,23 +137,11 @@
                 <div class="account-security-actions"><button id="account-password-change" class="btn-plain" type="button" data-i18n="confirmChange">确认修改</button></div>
               </div>
             </div>
-            <div class="account-security-disclosure">
-              <button id="account-password-recover-toggle" class="account-security-toggle" type="button" aria-expanded="false" data-i18n="recoverPassword">找回登录密码</button>
-              <div id="account-password-recover-form" class="account-security-form" hidden>
-                <p class="account-security-help" data-i18n="passwordRecoveryHint">向已绑定邮箱发送验证码后，可直接设置新密码；重置后其他设备会退出登录。</p>
-                <label class="account-security-field"><span data-i18n="boundEmail">绑定邮箱</span><input id="account-password-recover-email" type="email" autocomplete="email" placeholder="已绑定的邮箱" data-i18n-placeholder="boundEmail" /></label>
-                <div class="account-security-actions"><button id="account-password-recover-start" class="btn-plain" type="button" data-i18n="sendCode">发送验证码</button></div>
-                <label class="account-security-field account-security-code-field"><span data-i18n="verificationCode">验证码</span><input id="account-password-recover-code" inputmode="numeric" autocomplete="one-time-code" /></label>
-                <label class="account-security-field"><span data-i18n="newLoginPasswordLabel">新登录密码</span><input id="account-password-recover-new" type="password" autocomplete="new-password" placeholder="至少 8 个字符" data-i18n-placeholder="atLeastEightChars" /></label>
-                <div class="account-security-actions"><button id="account-password-recover-confirm" class="btn-plain" type="button" data-i18n="confirmReset">确认重置</button></div>
-              </div>
-            </div>
             <div id="account-security-status" class="private-sync-status"></div>
         </section>
 
-        <section id="account-data-panel" class="account-subpage account-data-panel" hidden aria-label="数据与隐私" data-i18n-aria="accountDataPrivacy" aria-modal="true">
-          <div class="private-sync-header"><strong data-i18n="accountDataPrivacy">数据与隐私</strong><button id="account-data-close" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria="close">×</button></div>
-          <p class="private-sync-note" data-i18n="accountFilesKept">以下操作不会删除电脑中的原始 EPUB、PDF、TXT、MOBI 或 AZW 图书文件。</p>
+        <section id="account-data-panel" class="account-tab-page account-data-panel" hidden aria-label="数据与隐私" data-i18n-aria="accountDataPrivacy">
+          <div class="account-page-heading"><div><h2 data-i18n="accountDataPrivacy">数据与隐私</h2><p class="private-sync-note" data-i18n="accountFilesKept">以下操作不会删除电脑中的原始 EPUB、PDF、TXT、MOBI 或 AZW 图书文件。</p></div></div>
 
           <div class="account-data-card">
             <div><strong data-i18n="clearThisDeviceData">清除此设备数据</strong><small data-i18n="clearThisDeviceDescription">清除书架记录、阅读进度、批注、生词、统计、缓存、索引、模型、已下载字体、账号登录和 API 配置。</small></div>
@@ -158,24 +162,11 @@
           </div>
           <div id="account-data-status" class="private-sync-status"></div>
         </section>
-
-        <section id="private-sync-panel" class="account-subpage private-sync-panel" hidden aria-label="智读与翻译同步设置" data-i18n-aria="privateSyncTitle" aria-modal="true">
-            <div class="private-sync-header">
-              <strong data-i18n="privateSyncTitle">智读与翻译同步</strong>
-              <button id="private-sync-close" class="icon-btn" type="button" aria-label="关闭" data-i18n-aria="close">×</button>
+              </main>
             </div>
-            <p class="private-sync-note" data-i18n="privateSyncNote">普通配置不含 API Key，会跟随账户同步。历史与密钥默认只留在本机。</p>
-            <label class="private-sync-option"><span><b data-i18n="syncServiceConfiguration">同步服务配置</b><small data-i18n="syncServiceConfigurationHint">智读服务商、接口地址、模型名和翻译服务偏好</small></span><input id="private-sync-configs" type="checkbox" /></label>
-            <label class="private-sync-option"><span><b data-i18n="syncAiHistory">同步单书智读历史</b><small data-i18n="syncAiHistoryHint">仅单书智读；书库问答请在其设置中选择同步方式</small></span><input id="private-sync-history" type="checkbox" /></label>
-            <label class="private-sync-option"><span><b data-i18n="syncSecrets">同步 API Key 与翻译密钥</b><small data-i18n="syncSecretsHint">须设置同步密码，服务器仅保存加密密文</small></span><input id="private-sync-secrets" type="checkbox" /></label>
-            <div class="private-sync-password">
-              <input id="private-sync-password" type="password" autocomplete="new-password" placeholder="设置或输入同步密码（至少 10 个字）" data-i18n-placeholder="privateSyncPasswordPlaceholder" />
-              <button id="private-sync-save-password" class="btn-plain" type="button" data-i18n="encryptAndSyncSecrets">加密并立即同步密钥</button>
-              <button id="private-sync-unlock" class="btn-plain" type="button" data-i18n="unlockCloudSecrets">解锁云端密钥</button>
-            </div>
-            <div class="private-sync-danger"><button id="private-sync-forget" class="btn-plain" type="button" data-i18n="forgetSyncPassword">遗忘同步密码并撤销云端密钥</button><small data-i18n="forgetSyncPasswordHint">同步密码无法找回；本机 API Key 不会被删除，可用新密码重新加密。</small></div>
-            <div id="private-sync-status" class="private-sync-status"></div>
-        </section>
+          </div>
+          <div id="sync-status" class="sync-status">尚未同步</div>
+        </div>
       </div>
 
       <div id="del-group" class="del-group">
@@ -184,6 +175,8 @@
         <button id="del-cancel" class="btn-plain">取消</button>
       </div>
       <div id="title-drag-space" class="title-drag-space" data-tauri-drag-region></div>
+      <div id="toolbar-actions" class="toolbar-actions" aria-label="主窗口功能菜单">
+      <div class="toolbar-action" data-toolbar-item="search">
       <div class="search-wrap" id="search-wrap">
         <button id="search-btn" class="icon-btn" title="搜索书籍" data-i18n-title="searchBooks">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
@@ -200,56 +193,58 @@
           <div id="search-history" class="search-history"></div>
         </div>
       </div>
-      <button id="stats-toolbar-btn" class="icon-btn" title="阅读统计" aria-label="阅读统计" data-i18n-title="readingStats" data-i18n-aria="readingStats">
+      </div>
+      <div class="toolbar-action" data-toolbar-item="stats"><button id="stats-toolbar-btn" class="icon-btn" title="阅读统计" aria-label="阅读统计" data-i18n-title="readingStats" data-i18n-aria="readingStats">
         <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
           <path d="M5 20V10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
           <path d="M12 20V5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
           <path d="M19 20v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
         </svg>
-      </button>
-      <button id="library-ai-toolbar-btn" class="icon-btn" type="button" title="书库问答" aria-label="打开书库问答" data-i18n-title="libraryQa" data-i18n-aria="libraryQa">
+      </button></div>
+      <div class="toolbar-action" data-toolbar-item="library"><button id="library-ai-toolbar-btn" class="icon-btn" type="button" title="书库问答" aria-label="打开书库问答" data-i18n-title="libraryQa" data-i18n-aria="libraryQa">
         <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
-          <path d="M5 4.5h10.5A2.5 2.5 0 0 1 18 7v12.5H7.5A2.5 2.5 0 0 1 5 17V4.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
-          <path d="M8.5 9h6M8.5 12h6M8.5 15h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-          <circle cx="18.5" cy="17.5" r="3.25" fill="#fff" stroke="currentColor" stroke-width="1.5" />
-          <path d="M17.3 17.5h2.4M18.5 16.3v2.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          <path d="M4.5 5.5c2.3-1.2 4.8-1.2 7.5.1v12.4c-2.7-1.3-5.2-1.3-7.5-.1V5.5Zm15 0c-2.3-1.2-4.8-1.2-7.5.1v12.4c2.7-1.3 5.2-1.3 7.5-.1V5.5Z" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round" />
+          <path d="M15.2 9.2a1.9 1.9 0 1 1 2.9 1.6c-.75.48-1.1.86-1.1 1.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" />
+          <path d="M17 15.15h.01" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" />
         </svg>
-      </button>
-      <button id="newsnow-toolbar-btn" class="icon-btn newsnow-toolbar-btn" type="button" title="资讯（NewsNow）" aria-label="打开资讯" hidden>
+      </button></div>
+      <div class="toolbar-action" data-toolbar-item="news"><button id="newsnow-toolbar-btn" class="icon-btn newsnow-toolbar-btn" type="button" title="资讯（NewsNow）" aria-label="打开资讯" hidden>
         <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
-          <path d="M4 5.5h16v13H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
-          <path d="M7 9h4v5H7zM13.5 9H17M13.5 11.6H17M7 16h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          <rect x="4.5" y="5" width="15" height="14" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.7" />
+          <rect x="7" y="8" width="3.6" height="3.8" fill="none" stroke="currentColor" stroke-width="1.45" />
+          <path d="M13 8h3.5M13 10.4h3.5M7 14.5h9.5M7 16.7h6.3" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" />
         </svg>
-      </button>
-      <div class="filter-wrap">
+      </button></div>
+      <div class="toolbar-action" data-toolbar-item="filter"><div class="filter-wrap">
         <button id="filter-btn" class="icon-btn" title="排序与布局" data-i18n-title="sortAndLayout">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
             <path d="M3 5h18l-7 8v6l-4-2v-4z" fill="currentColor" />
           </svg>
         </button>
         <div id="filter-panel" class="filter-panel">
-          <div class="fp-row">
-            <div class="fp-col fp-sort-primary">
-              <div class="fp-title" data-i18n="sort">排序</div>
-              <label><input type="radio" name="sort" value="title" /> <span data-i18n="sortTitle">书名</span></label>
-              <label><input type="radio" name="sort" value="author" /> <span data-i18n="sortAuthor">作者</span></label>
-              <label><input type="radio" name="sort" value="added" /> <span data-i18n="sortImported">导入时间</span></label>
-              <label><input type="radio" name="sort" value="dir" /> <span data-i18n="sortFolder">存储目录</span></label>
-            </div>
-            <div class="fp-col fp-sort-secondary">
-              <button id="reading-filter-all" type="button" class="fp-all-books" data-i18n="allBooks">全部图书</button>
-              <label><input type="radio" name="sort" value="read" /> <span data-i18n="sortRecent">最近阅读</span></label>
-              <label><input type="radio" name="sort" value="reading-time" /> <span data-i18n="sortReadingTime">阅读时间</span></label>
-              <label><input type="radio" name="sort" value="size" /> <span data-i18n="sortFileSize">大小</span></label>
-              <label><input type="radio" name="sort" value="progress" /> <span data-i18n="sortProgress">阅读进度</span></label>
-            </div>
-            <div class="fp-col fp-reading-filter-col">
-              <div class="fp-title" data-i18n="readingFilters">阅读过滤</div>
-              <label><input type="checkbox" class="rfilter" value="unread" /> <span data-i18n="unread">未读</span></label>
-              <label><input type="checkbox" class="rfilter" value="reading" /> <span data-i18n="reading">正在阅读</span></label>
-              <label><input type="checkbox" class="rfilter" value="done" /> <span data-i18n="finished">已读</span></label>
-              <div id="filter-stars" class="fp-stars" title="按评分过滤：点星=只看该评分及以上，再点同一处取消" data-i18n-title="ratingFilterTip"></div>
-            </div>
+          <div class="fp-top-grid">
+            <section class="fp-sort-section" aria-label="排序方式">
+              <div class="fp-section-heading"><div class="fp-title" data-i18n="sort">排序方式</div></div>
+              <div class="fp-sort-grid">
+                <label><input type="radio" name="sort" value="read" /> <span data-i18n="sortRecent">最近阅读</span></label>
+                <label><input type="radio" name="sort" value="title" /> <span data-i18n="sortTitle">书名</span></label>
+                <label><input type="radio" name="sort" value="author" /> <span data-i18n="sortAuthor">作者</span></label>
+                <label><input type="radio" name="sort" value="added" /> <span data-i18n="sortImported">导入时间</span></label>
+                <label><input type="radio" name="sort" value="reading-time" /> <span data-i18n="sortReadingTime">阅读时间</span></label>
+                <label><input type="radio" name="sort" value="progress" /> <span data-i18n="sortProgress">阅读进度</span></label>
+                <label><input type="radio" name="sort" value="size" /> <span data-i18n="sortFileSize">大小</span></label>
+                <label><input type="radio" name="sort" value="dir" /> <span data-i18n="sortFolder">存储目录</span></label>
+              </div>
+            </section>
+            <section class="fp-reading-filter-col" aria-label="阅读状态">
+              <div class="fp-section-heading"><div class="fp-title" data-i18n="readingFilters">阅读状态</div><button id="reading-filter-all" type="button" class="fp-all-books" hidden data-i18n="clearFilters">清除筛选</button></div>
+              <div class="fp-reading-filter-options">
+                <label><input type="checkbox" class="rfilter" value="unread" /> <span data-i18n="unread">未读</span></label>
+                <label><input type="checkbox" class="rfilter" value="reading" /> <span data-i18n="reading">正在阅读</span></label>
+                <label><input type="checkbox" class="rfilter" value="done" /> <span data-i18n="finished">已读</span></label>
+                <div class="fp-rating-row"><span>评分</span><div id="filter-stars" class="fp-stars" title="按评分过滤：点星=只看该评分及以上，再点同一处取消" data-i18n-title="ratingFilterTip"></div></div>
+              </div>
+            </section>
           </div>
           <div class="fp-sep-h"></div>
           <div class="fp-org-row">
@@ -266,7 +261,7 @@
             </div>
           </div>
           <div class="fp-sep-h"></div>
-          <div class="fp-col">
+          <div class="fp-layout-bar">
             <div class="layout-config-row">
               <div class="layout-setting">
                 <div class="fp-title" data-i18n="layout">布局</div>
@@ -301,14 +296,16 @@
             </div>
           </div>
         </div>
-      </div>
-      <div class="menu-wrap">
+      </div></div>
+      <div class="toolbar-action" data-toolbar-item="settings">
         <button id="settings-toolbar-btn" class="icon-btn settings-toolbar-btn" title="常用设置" aria-label="常用设置" data-i18n-title="settings" data-i18n-aria="settings">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M9.4 3.4 10 2h4l.6 1.4 1.55.64 1.5-.58 2.83 2.83-.58 1.5L20.6 9.4l1.4.6v4l-1.4.6-.64 1.55.58 1.5-2.83 2.83-1.5-.58-1.55.64L14 22h-4l-.6-1.4-1.55-.64-1.5.58-2.83-2.83.58-1.5-.64-1.55L2 14v-4l1.4-.6.64-1.55-.58-1.5L6.29 3.5l1.5.58L9.4 3.4Z" />
             <circle cx="12" cy="12" r="3.15" />
           </svg>
         </button>
+      </div>
+      <div class="toolbar-action menu-wrap" data-toolbar-item="menu">
         <button id="menu-btn" class="icon-btn" title="菜单" data-i18n-title="menu">⋮</button>
         <div id="menu" class="menu">
           <div class="menu-item" id="mi-random" data-i18n="randomBook">随机打开一本书</div>
@@ -318,6 +315,7 @@
           <div class="menu-item" id="mi-selectall" data-i18n="selectAll">全选（批量删除）</div>
           <div class="menu-item" id="mi-about" data-i18n="about">关于</div>
         </div>
+      </div>
       </div>
       <div class="window-controls" aria-label="窗口控制">
         <button id="win-min" class="win-btn" type="button" title="最小化" aria-label="最小化">−</button>
@@ -338,31 +336,40 @@
       <button id="ub-close" class="ub-x" title="关闭" aria-label="关闭">✕</button>
     </section>
     </div>
-    <div id="stats-modal" class="modal">
+    <div id="stats-modal" class="modal" data-heatmap-theme="green" data-gesture-info-title="阅读统计" data-gesture-info="这里按日、月、年和总计查看阅读时长、字数及阅读贡献。总计右侧的齿轮可选择显示内容、图表指标与配色。">
       <div class="modal-card stats-card">
-        <div class="modal-head stats-head">
-          <span data-i18n="readingStats">阅读统计</span>
-          <button id="stats-settings-btn" class="btn-plain stats-settings-btn" title="阅读统计设置" data-i18n-title="readingStatsSettings">⚙</button>
-        </div>
-        <div id="stats-settings" class="stats-settings">
-          <label><input type="checkbox" data-stat-item="duration" checked /> <span data-i18n="readingDuration">阅读时长</span></label>
-          <label><input type="checkbox" data-stat-item="words" checked /> <span data-i18n="readingWords">阅读字数</span></label>
-          <label><input type="checkbox" data-stat-item="speed" checked /> <span data-i18n="averageSpeed">平均速度</span></label>
-          <label><input type="checkbox" data-stat-item="books" checked /> <span data-i18n="booksRead">读过</span></label>
-          <label><input type="checkbox" data-stat-item="finished" checked /> <span data-i18n="finishedBooks">读完</span></label>
-          <label><input type="checkbox" data-stat-item="highlights" checked /> <span data-i18n="highlights">高亮</span></label>
-          <label><input type="checkbox" data-stat-item="notes" checked /> <span data-i18n="annotations">批注</span></label>
-          <label class="stats-chart-switch">
-            <span data-i18n="chartSwitch">柱状图切换</span>
-            <span id="stats-chart-mode" data-i18n="time">时间</span>
-            <input type="checkbox" id="stats-chart-metric" title="切换柱状图时间 / 字数" data-i18n-title="chartMetricTip" />
-          </label>
-        </div>
         <div class="stats-tabs">
           <button class="stats-tab active" data-scope="day" data-i18n="day">日</button>
           <button class="stats-tab" data-scope="month" data-i18n="month">月</button>
           <button class="stats-tab" data-scope="year" data-i18n="year">年</button>
           <button class="stats-tab" data-scope="total" data-i18n="total">总</button>
+          <button id="stats-settings-btn" class="stats-settings-btn" type="button" title="阅读统计设置" aria-label="阅读统计设置" aria-expanded="false" data-i18n-title="readingStatsSettings" data-i18n-aria="readingStatsSettings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.1"/><path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></button>
+        </div>
+        <div id="stats-settings" class="stats-settings">
+          <section class="stats-settings-section"><div class="stats-visible-grid">
+            <label><input type="checkbox" data-stat-item="duration" checked /> <span data-i18n="readingDuration">阅读时长</span></label>
+            <label><input type="checkbox" data-stat-item="words" checked /> <span data-i18n="readingWords">阅读字数</span></label>
+            <label><input type="checkbox" data-stat-item="speed" checked /> <span data-i18n="averageSpeed">平均速度</span></label>
+            <label><input type="checkbox" data-stat-item="books" checked /> <span data-i18n="booksRead">读过</span></label>
+            <label><input type="checkbox" data-stat-item="finished" checked /> <span data-i18n="finishedBooks">读完</span></label>
+            <label><input type="checkbox" data-stat-item="highlights" checked /> <span data-i18n="highlights">高亮</span></label>
+            <label><input type="checkbox" data-stat-item="notes" checked /> <span data-i18n="annotations">批注</span></label>
+          </div></section>
+          <section class="stats-chart-settings" aria-label="图表设置" data-i18n-aria="chartSettings">
+            <div class="stats-chart-control"><span class="stats-chart-control-label" data-i18n="chartStyle">图形</span><div class="stats-chart-segment" role="group" aria-label="图形" data-i18n-aria="chartStyle">
+              <button class="active" type="button" data-chart-style-option="bar" aria-pressed="true" data-i18n="barChart">柱状</button>
+              <button type="button" data-chart-style-option="line" aria-pressed="false" data-i18n="lineChart">折线</button>
+            </div></div>
+            <div id="stats-chart-metric" class="stats-chart-control"><span class="stats-chart-control-label" data-i18n="chartData">数据</span><div class="stats-chart-segment" role="group" aria-label="数据" data-i18n-aria="chartData">
+              <button class="active" type="button" data-chart-metric-option="time" aria-pressed="true" data-i18n="time">时间</button>
+              <button type="button" data-chart-metric-option="words" aria-pressed="false" data-i18n="chartWords">字数</button>
+            </div></div>
+          </section>
+          <section class="stats-settings-section stats-heatmap-settings"><div class="stats-heatmap-options" role="group" aria-label="热力图颜色" data-i18n-aria="heatmapColor">
+            <button class="active" type="button" data-heatmap-option="green" aria-pressed="true"><span class="stats-heatmap-preview green" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span data-i18n="heatmapGreen">青绿</span></button>
+            <button type="button" data-heatmap-option="blue" aria-pressed="false"><span class="stats-heatmap-preview blue" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span data-i18n="heatmapBlue">湖蓝</span></button>
+            <button type="button" data-heatmap-option="orange" aria-pressed="false"><span class="stats-heatmap-preview orange" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span data-i18n="heatmapOrange">暖橙</span></button>
+          </div></section>
         </div>
         <div class="stats-nav">
           <button id="stats-prev" class="btn-plain">◀</button>
@@ -372,10 +379,10 @@
         <div id="stats-body" class="stats-body"></div>
       </div>
     </div>
-    <div id="notes-modal" class="modal">
+    <div id="notes-modal" class="modal" data-gesture-info-title="笔记汇总" data-gesture-info="这里汇总各本图书的高亮、批注和查词记录；右上角可将当前汇总导出为 Markdown。">
       <div class="modal-card notes-card">
-        <div class="modal-head">
-          <span>📝 笔记汇总</span>
+        <div class="modal-head notes-head">
+          <span class="modal-title-stack"><strong>笔记汇总</strong><small>高亮、批注与查词记录</small></span>
           <span class="modal-actions">
             <button id="notes-export" class="btn-plain">导出 Markdown</button>
             <button id="notes-close" class="btn-plain">✕</button>
@@ -384,118 +391,103 @@
         <div id="notes-body" class="notes-body"></div>
       </div>
     </div>
-    <div id="fp-settings-modal" class="modal">
-      <div class="modal-card">
-        <div class="modal-head"><span>⚙ <span data-i18n="commonSettings">常用设置</span></span><button id="fp-settings-close" class="btn-plain">✕</button></div>
-        <div class="fp-set-row">
-          <label for="set-app-language" data-i18n="language">语言</label>
-          <select id="set-app-language" class="app-language-select" aria-label="软件语言"></select>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="startupEnhancement">启动增强</span>
-          <span class="fp-set-tail">
-            <button id="startup-enhancement-gear" class="fp-row-gear" type="button" title="启动增强设置" aria-label="启动增强设置" data-i18n-title="startupEnhancementSettings" data-i18n-aria="startupEnhancementSettings">⚙</button>
-            <label class="switch"><input type="checkbox" id="set-startup-enhancement" /><span class="slider"></span></label>
-          </span>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="displayProgress">显示阅读进度</span>
-          <label class="switch"><input type="checkbox" id="set-cover-prog" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="displayRating">显示评分</span>
-          <label class="switch"><input type="checkbox" id="set-cover-rating" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="displayTitle">显示书名</span>
-          <label class="switch"><input type="checkbox" id="set-cover-title" /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="animation">动画</span>
-          <span class="fp-set-tail">
-            <button id="animation-gear" class="fp-row-gear" title="设置界面动画" data-i18n-title="animationSettings">⚙</button>
-            <label class="switch"><input type="checkbox" id="set-animation-master" checked aria-label="启用全部动画" data-i18n-aria="animationSettings" /><span class="slider"></span></label>
-          </span>
-        </div>
-        <div class="fp-set-row">
-          <span>手势</span>
-          <span class="fp-set-tail">
-            <button id="gesture-gear" class="fp-row-gear" type="button" title="设置手势" aria-label="设置手势">⚙</button>
-            <label class="switch" title="启用手势"><input id="set-gesture-enabled" type="checkbox" /><span class="slider"></span></label>
-          </span>
-        </div>        <div class="fp-set-row">
-          <span data-i18n="autoImport">自动导入目录</span>
-          <span class="fp-set-tail">
-            <button id="dirs-gear" class="fp-row-gear" title="设置自动导入目录" data-i18n-title="importDirectoriesTitle">⚙</button>
-            <label class="switch"><input type="checkbox" id="set-auto-import" /><span class="slider"></span></label>
-          </span>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="semanticIndex">语义索引</span>
-          <span class="fp-set-tail">
-            <button id="semantic-gear" class="fp-row-gear" title="管理语义索引">⚙</button>
-          </span>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="modelTags" title="启用后，书库问答的范围筛选会显示并使用大模型分类标签；标签始终与手工标签分开保存并同步，书库问答始终会结合它们">使用大模型分类的标签</span>
-          <label class="switch"><input type="checkbox" id="set-use-model-tags" checked /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="modelAndTranslation">大模型与翻译 API</span>
-          <span class="fp-set-tail"><button id="api-settings-open" class="fp-row-gear" title="管理本机大模型与翻译 API" data-i18n-title="apiSettingsTitle">⚙</button></span>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="endRecommendations">读后推荐</span>
-          <span class="fp-set-tail">
-            <button id="end-recommendations-gear" class="fp-row-gear" type="button" title="设置读后推荐" aria-label="设置读后推荐" data-i18n-title="recommendationSettings" data-i18n-aria="recommendationSettings">⚙</button>
-            <label class="switch"><input type="checkbox" id="set-end-recommendations" checked /><span class="slider"></span></label>
-          </span>
-        </div>
-        <div class="fp-set-row">
-          <span id="set-open-book-label" data-i18n="singleClickOpen" title="单击打开时，双击用于选中；双击打开时，单击用于选中">单击打开图书</span>
-          <label class="switch"><input type="checkbox" id="set-single-click-open" checked /><span class="slider"></span></label>
-        </div>
-        <div class="fp-set-row">
-          <span data-i18n="dictionary">词典</span>
-          <span class="fp-set-tail">
-            <button id="dict-gear" class="fp-row-gear" title="管理外置词典" data-i18n-title="externalDictionaryTitle">⚙</button>
-          </span>
-        </div>
-        <section class="experimental-settings" aria-label="资讯">
-          <div class="fp-set-row">
-            <span data-i18n="news">资讯</span>
-            <span class="fp-set-tail">
-              <button id="experimental-newsnow-gear" class="fp-row-gear" type="button" title="设置资讯" aria-label="设置资讯">⚙</button>
-              <label class="switch"><input id="experimental-newsnow" type="checkbox" /><span class="slider"></span></label>
-            </span>
+    <div id="fp-settings-modal" class="modal" data-gesture-info-title="常用设置" data-gesture-info="设置按基础、书架与导入、阅读与交互、智能功能、数据与系统分类；每次只显示一类。">
+      <div class="modal-card fp-settings-card">
+        <div class="fp-settings-layout">
+          <nav class="fp-settings-nav" aria-label="设置分类" data-i18n-aria="settingsCategories">
+            <button type="button" data-settings-section="basic" aria-selected="true"><span class="fp-settings-nav-icon" aria-hidden="true">☷</span><span class="fp-settings-nav-label" data-i18n="settingsBasic">基础</span></button>
+            <button type="button" data-settings-section="toolbar"><span class="fp-settings-nav-icon" aria-hidden="true">↔</span><span class="fp-settings-nav-label">菜单栏</span></button>
+            <button type="button" data-settings-section="shelf"><span class="fp-settings-nav-icon" aria-hidden="true">▦</span><span class="fp-settings-nav-label" data-i18n="settingsShelfImport">书架与导入</span></button>
+            <button type="button" data-settings-section="reading"><span class="fp-settings-nav-icon" aria-hidden="true">⌁</span><span class="fp-settings-nav-label" data-i18n="settingsReadingInteraction">阅读与交互</span></button>
+            <button type="button" data-settings-section="smart"><span class="fp-settings-nav-icon" aria-hidden="true">✦</span><span class="fp-settings-nav-label" data-i18n="settingsSmart">智能功能</span></button>
+            <button type="button" data-settings-section="data"><span class="fp-settings-nav-icon" aria-hidden="true">▤</span><span class="fp-settings-nav-label" data-i18n="settingsDataSystem">数据与系统</span></button>
+          </nav>
+          <button id="fp-settings-nav-toggle" class="fp-settings-nav-toggle" type="button" aria-expanded="true" aria-label="收起分类" title="收起分类"><span class="fp-settings-nav-toggle-collapse" aria-hidden="true">‹</span><span class="fp-settings-nav-toggle-expand" aria-hidden="true">›</span></button>
+          <div class="fp-settings-content">
+            <section class="fp-settings-panel" data-settings-panel="basic">
+              <div class="fp-settings-group">
+                <div class="fp-set-row"><label for="set-app-language" data-i18n="language">语言</label><select id="set-app-language" class="app-language-select" aria-label="软件语言"></select></div>
+                <div class="fp-set-row"><span data-i18n="startupEnhancement">启动增强</span><span class="fp-set-tail"><button id="startup-enhancement-gear" class="fp-row-gear fp-settings-detail" type="button" title="启动增强设置" aria-label="启动增强设置" data-i18n-title="startupEnhancementSettings" data-i18n-aria="startupEnhancementSettings"><span data-i18n="settingsDetail">详细设置</span><span aria-hidden="true">›</span></button><label class="switch"><input type="checkbox" id="set-startup-enhancement" /><span class="slider"></span></label></span></div>
+                <div class="fp-set-row"><span data-i18n="animation">动画</span><span class="fp-set-tail"><button id="animation-gear" class="fp-row-gear fp-settings-detail" type="button" title="设置界面动画" data-i18n-title="animationSettings"><span data-i18n="settingsDetail">详细设置</span><span aria-hidden="true">›</span></button><label class="switch"><input type="checkbox" id="set-animation-master" checked aria-label="启用全部动画" data-i18n-aria="animationSettings" /><span class="slider"></span></label></span></div>
+                <section class="default-apps-setting" aria-label="默认打开方式" data-i18n-aria="defaultOpenTitle"><div><div class="fp-title" data-i18n="defaultOpenTitle">默认打开方式</div><p data-i18n="defaultOpenDescription">安装版支持将 EPUB 和 PDF 设为由鲲鹏阅读器打开；请在系统的“按文件类型选择默认值”中分别设置。</p></div><button id="open-default-apps-settings" class="btn-plain" type="button" data-i18n="defaultOpenButton">设置 EPUB / PDF 默认应用</button></section>
+              </div>
+            </section>
+
+            <section class="fp-settings-panel" data-settings-panel="toolbar" hidden>
+              <section class="toolbar-settings-card" aria-label="菜单栏设置">
+                <label class="toolbar-size-control" for="toolbar-icon-size"><span><strong>菜单栏大小</strong><small>只影响顶部功能按钮，不影响窗口控制。</small></span><output id="toolbar-icon-size-value">36 px</output></label>
+                <input id="toolbar-icon-size" type="range" min="28" max="52" step="1" value="36" aria-label="菜单栏按钮大小" />
+                <div class="toolbar-settings-divider"></div>
+                <div class="toolbar-content-settings">
+                  <div class="toolbar-content-head"><span><strong>显示内容</strong><small>图标、文字可单独或同时显示；拖动可调整按钮内的前后顺序。</small></span></div>
+                  <div id="toolbar-content-list" class="toolbar-content-list" role="list" aria-label="菜单栏按钮显示内容与顺序"></div>
+                </div>
+                <div class="toolbar-settings-divider"></div>
+                <div class="toolbar-settings-list-head"><span>显示与顺序</span><small>向前拖动，按钮会更靠前显示</small></div>
+                <div id="toolbar-settings-list" class="toolbar-settings-list" role="list" aria-label="主窗口菜单栏排序"></div>
+                <div class="toolbar-settings-actions"><button id="toolbar-reset-layout" class="btn-plain" type="button">恢复默认</button><span id="toolbar-settings-status" aria-live="polite"></span></div>
+              </section>
+            </section>
+
+            <section class="fp-settings-panel" data-settings-panel="shelf" hidden>
+              <div class="fp-settings-preview-layout">
+                <div class="fp-shelf-settings-preview" aria-label="书架卡片预览" data-i18n-aria="settingsShelfPreview">
+                  <div class="fp-shelf-preview-cover"><span>鲲鹏<br />阅读器</span></div>
+                  <strong id="fp-shelf-preview-title" data-i18n="settingsPreviewBook">图书标题</strong>
+                  <div class="fp-shelf-preview-meta"><span id="fp-shelf-preview-progress">63%</span><span id="fp-shelf-preview-rating">★ 4.6</span></div>
+                  <div id="fp-shelf-preview-progress-bar" class="fp-shelf-preview-progress"><span></span></div>
+                </div>
+                <div class="fp-settings-group">
+                  <div class="fp-set-row"><span data-i18n="displayTitle">显示书名</span><label class="switch"><input type="checkbox" id="set-cover-title" /><span class="slider"></span></label></div>
+                  <div class="fp-set-row"><span data-i18n="displayProgress">显示阅读进度</span><label class="switch"><input type="checkbox" id="set-cover-prog" /><span class="slider"></span></label></div>
+                  <div class="fp-set-row"><span data-i18n="displayRating">显示评分</span><label class="switch"><input type="checkbox" id="set-cover-rating" /><span class="slider"></span></label></div>
+                </div>
+              </div>
+              <div class="fp-settings-group fp-settings-lower-group">
+                <div class="fp-set-row"><span id="set-open-book-label" data-i18n="singleClickOpen" title="单击打开时，双击用于选中；双击打开时，单击用于选中">单击打开图书</span><label class="switch"><input type="checkbox" id="set-single-click-open" checked /><span class="slider"></span></label></div>
+                <div class="fp-set-row"><span data-i18n="autoImport">自动导入目录</span><span class="fp-set-tail"><button id="dirs-gear" class="fp-row-gear fp-settings-detail" type="button" title="设置自动导入目录" data-i18n-title="importDirectoriesTitle"><span data-i18n="settingsManageFolders">管理目录</span><span aria-hidden="true">›</span></button><label class="switch"><input type="checkbox" id="set-auto-import" /><span class="slider"></span></label></span></div>
+              </div>
+            </section>
+
+            <section class="fp-settings-panel" data-settings-panel="reading" hidden>
+              <div class="fp-settings-group">
+                <div class="fp-set-row"><span data-i18n="gesture">手势</span><span class="fp-set-tail"><button id="gesture-gear" class="fp-row-gear fp-settings-detail" type="button" title="设置手势" aria-label="设置手势"><span data-i18n="settingsManage">管理</span><span aria-hidden="true">›</span></button><label class="switch" title="启用手势"><input id="set-gesture-enabled" type="checkbox" /><span class="slider"></span></label></span></div>
+                <div class="fp-set-row"><span data-i18n="dictionary">词典</span><span class="fp-set-tail"><button id="dict-gear" class="fp-row-gear fp-settings-detail" type="button" title="管理外置词典" data-i18n-title="externalDictionaryTitle"><span data-i18n="settingsConfigure">配置</span><span aria-hidden="true">›</span></button></span></div>
+                <section class="experimental-settings" aria-label="资讯"><div class="fp-set-row"><span data-i18n="news">资讯</span><span class="fp-set-tail"><button id="experimental-newsnow-gear" class="fp-row-gear fp-settings-detail" type="button" title="设置资讯" aria-label="设置资讯"><span data-i18n="settingsDetail">详细设置</span><span aria-hidden="true">›</span></button></span></div></section>
+              </div>
+            </section>
+
+            <section class="fp-settings-panel" data-settings-panel="smart" hidden>
+              <div class="fp-settings-group">
+                <div class="fp-set-row"><span data-i18n="modelAndTranslation">大模型与翻译 API</span><span class="fp-set-tail"><button id="api-settings-open" class="fp-row-gear fp-settings-detail" type="button" title="管理本机大模型与翻译 API" data-i18n-title="apiSettingsTitle"><span data-i18n="settingsManageServices">管理服务</span><span aria-hidden="true">›</span></button></span></div>
+                <div class="fp-set-row"><span data-i18n="semanticIndex">语义索引</span><span class="fp-set-tail"><button id="semantic-gear" class="fp-row-gear fp-settings-detail" type="button" title="管理语义索引"><span data-i18n="settingsManageIndex">管理索引</span><span aria-hidden="true">›</span></button></span></div>
+                <div class="fp-set-row"><span data-i18n="bookClassification">书籍分类</span><span class="fp-set-tail"><button id="book-classification-settings-open" class="fp-row-gear fp-settings-detail" type="button" title="管理书籍分类"><span>管理分类</span><span aria-hidden="true">›</span></button></span></div>
+                <div class="fp-set-row"><span>快捷书单</span><span class="fp-set-tail"><button id="booklist-shortcuts-open" class="fp-row-gear fp-settings-detail" type="button" title="管理快捷书单"><span>管理书单</span><span aria-hidden="true">›</span></button></span></div>
+                <div class="fp-set-row"><span data-i18n="endRecommendations">读后推荐</span><span class="fp-set-tail"><button id="end-recommendations-gear" class="fp-row-gear fp-settings-detail" type="button" title="设置读后推荐" aria-label="设置读后推荐" data-i18n-title="recommendationSettings" data-i18n-aria="recommendationSettings"><span data-i18n="settingsFilter">筛选条件</span><span aria-hidden="true">›</span></button><label class="switch"><input type="checkbox" id="set-end-recommendations" checked /><span class="slider"></span></label></span></div>
+              </div>
+            </section>
+
+            <section class="fp-settings-panel" data-settings-panel="data" hidden>
+              <div class="fp-settings-group fp-settings-data-card">
+                <section class="default-apps-setting recovery-backup-setting" aria-label="数据恢复点" data-i18n-aria="recoveryTitle">
+                  <header class="recovery-backup-header">
+                    <span class="recovery-backup-mark" aria-hidden="true">↶</span>
+                    <div><div class="fp-title" data-i18n="recoveryTitle">数据恢复点</div><p id="recovery-backup-status" data-i18n="recoveryLoading">正在读取恢复点状态…</p></div>
+                  </header>
+                  <div class="recovery-backup-controls">
+                    <div id="recovery-backup-actions" class="recovery-backup-actions" hidden><select id="settings-restore-backup" aria-label="选择数据恢复点" data-i18n-aria="recoverySelect"></select><button id="settings-restore-backup-button" class="btn-plain" type="button" data-i18n="recoverySelected">恢复选中恢复点</button></div>
+                    <button id="settings-create-backup" class="btn-plain" type="button" data-i18n="recoveryCreateShort">创建</button>
+                  </div>
+                  <footer class="data-package-actions"><button id="settings-export-data" class="btn-plain" type="button" data-i18n="dataExport">导出数据包</button><button id="settings-import-data" class="btn-plain" type="button" data-i18n="dataImport">导入数据包</button></footer>
+                </section>
+              </div>
+            </section>
           </div>
-        </section>
-        <section class="default-apps-setting" aria-label="默认打开方式" data-i18n-aria="defaultOpenTitle">
-          <div>
-            <div class="fp-title" data-i18n="defaultOpenTitle">默认打开方式</div>
-            <p data-i18n="defaultOpenDescription">安装版支持将 EPUB 和 PDF 设为由鲲鹏阅读器打开；请在系统的“按文件类型选择默认值”中分别设置。</p>
-          </div>
-          <button id="open-default-apps-settings" class="btn-plain" type="button" data-i18n="defaultOpenButton">设置 EPUB / PDF 默认应用</button>
-        </section>
-        <section class="default-apps-setting" aria-label="数据恢复点" data-i18n-aria="recoveryTitle">
-          <div>
-            <div class="fp-title" data-i18n="recoveryTitle">数据恢复点</div>
-            <p id="recovery-backup-status" data-i18n="recoveryLoading">正在读取恢复点状态…</p>
-            <div id="recovery-backup-actions" class="recovery-backup-actions" hidden>
-              <select id="settings-restore-backup" aria-label="选择数据恢复点" data-i18n-aria="recoverySelect"></select>
-              <button id="settings-restore-backup-button" class="btn-plain" type="button" data-i18n="recoverySelected">恢复选中恢复点</button>
-            </div>
-          </div>
-          <button id="settings-create-backup" class="btn-plain" type="button" data-i18n="recoveryCreate">立即创建</button>
-        </section>
-        <div class="fp-set-actions">
-          <button id="settings-export-data" class="btn-plain" type="button" data-i18n="dataExport">⬆ 导出数据包</button>
-          <button id="settings-import-data" class="btn-plain" type="button" data-i18n="dataImport">⬇ 导入数据包</button>
         </div>
       </div>
     </div>
-    <div id="gesture-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="gesture-settings-title">
-      <div class="modal-card gesture-settings-card gesture-manager-card">
+    <div id="gesture-settings-modal" class="modal settings-detail-modal" role="dialog" aria-modal="true" aria-labelledby="gesture-settings-title" data-gesture-info-title="鼠标手势" data-gesture-info="左键在画板录制轨迹，实际使用时按住右键绘制并松开执行。精度越低越宽松；相似手势会提示冲突，可为单条手势设置独立精度。">
+      <div class="modal-card settings-detail-card gesture-settings-card gesture-manager-card">
         <section class="gesture-setting" aria-labelledby="gesture-settings-title">
           <div class="gesture-settings-head">
             <button id="gesture-settings-toggle" class="gesture-settings-toggle" type="button" aria-controls="gesture-settings-content" aria-expanded="false"><span id="gesture-settings-title">手势设置</span><span class="gesture-disclosure-chevron" aria-hidden="true">⌄</span></button>
@@ -531,18 +523,19 @@
             <section class="gesture-manager-list-pane" aria-label="已配置手势">
               <section id="gesture-action-choice" class="gesture-choice-section" hidden aria-labelledby="gesture-action-label">
                 <div class="gesture-choice-heading"><strong id="gesture-action-label">执行操作</strong><span>选择手势命中后要做什么</span></div>
-                <input id="gesture-action-search" class="gesture-action-search" type="search" placeholder="例如：返回、图书信息、重新打开" autocomplete="off" />
+                <input id="gesture-action-search" class="gesture-action-search" type="search" placeholder="例如：返回、信息说明、重新打开" autocomplete="off" />
                 <div id="gesture-action-options" class="gesture-action-options" role="radiogroup" aria-label="执行操作">
                   <button class="gesture-choice-tile" type="button" data-gesture-action="back" role="radio"><strong>← 返回／关闭当前页</strong><span>在支持的页面关闭当前页或返回上一级</span></button>
-                  <button class="gesture-choice-tile" type="button" data-gesture-action="book_info" role="radio"><strong>ⓘ 打开当前图书信息</strong><span>书架选中一册图书，或在阅读页时执行</span></button>
-                  <button class="gesture-choice-tile" type="button" data-gesture-action="reopen_last" role="radio"><strong>↗ 重新打开上一个页面</strong><span>恢复刚才由返回手势关闭的页面</span></button>
+                  <button class="gesture-choice-tile" type="button" data-gesture-action="book_info" role="radio"><strong>ⓘ 信息提取／说明</strong><span>书架和阅读页打开图书信息；其它位置显示已配置的说明或使用技巧</span></button>
+                  <button class="gesture-choice-tile" type="button" data-gesture-action="reopen_last" role="radio"><strong>↗ 重新打开上一个页面</strong><span>恢复最近关闭的页面，不限关闭方式</span></button>
+                  <button class="gesture-choice-tile" type="button" data-gesture-action="restore_jump" role="radio"><strong>↶ 恢复跳转前位置</strong><span>仅阅读页：连续恢复目录、链接、脚注或进度条跳转前的位置</span></button>
                 </div>
                 <p id="gesture-action-empty" class="gesture-action-empty" hidden>没有找到匹配的操作。</p>
                 <p id="gesture-action-hint" class="gesture-auto-scope-note">手势会自动在所有页面参与匹配；不支持该操作的页面不会执行。</p>
                 <input id="gesture-action" type="hidden" value="back" />
               </section>
               <label class="gesture-search-label" for="gesture-search">搜索手势或操作</label>
-              <input id="gesture-search" class="gesture-search" type="search" placeholder="例如：返回、图书信息" autocomplete="off" />
+              <input id="gesture-search" class="gesture-search" type="search" placeholder="例如：返回、信息说明" autocomplete="off" />
               <button id="gesture-new" class="gesture-create-button" type="button">创建手势</button>
               <div id="gesture-list" class="gesture-list" aria-live="polite"></div>
             </section>
@@ -550,6 +543,8 @@
               <section id="gesture-editor-options" class="gesture-editor-options" hidden aria-label="手势名称和匹配设置">
                 <label class="gesture-field"><span>名称（可选）</span><input id="gesture-name" type="text" maxlength="24" placeholder="例如：书架返回" /></label>
                 <label class="gesture-field"><span>触发方式</span><select id="gesture-input"><option value="mouse-right">鼠标右键拖动</option></select></label>
+                <label class="gesture-field"><span>适用范围</span><select id="gesture-scope"><option value="auto">自动适用（推荐）</option><option value="main">仅主窗口</option><option value="reader">仅阅读页</option></select></label>
+                <p id="gesture-scope-hint" class="gesture-auto-scope-note">自动适用会按当前页面和操作决定是否执行；不支持该操作的页面不会触发。</p>
                 <div class="gesture-precision-control">
                   <div class="gesture-precision-label"><label for="gesture-precision">匹配精度</label><output id="gesture-precision-value" for="gesture-precision">5</output></div>
                   <div class="gesture-precision-mode" role="radiogroup" aria-label="匹配精度来源">
@@ -569,8 +564,15 @@
           </div>
         </section>
       </div>
-    </div>    <div id="newsnow-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="newsnow-settings-title">
-      <div class="modal-card newsnow-settings-card">
+    </div>
+    <div id="gesture-info-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="gesture-info-title">
+      <div class="modal-card gesture-info-card">
+        <div class="modal-head"><span id="gesture-info-title">信息／说明</span><button id="gesture-info-close" class="btn-plain" type="button" aria-label="关闭信息说明">✕</button></div>
+        <div id="gesture-info-body" class="gesture-info-body"></div>
+      </div>
+    </div>
+    <div id="newsnow-settings-modal" class="modal settings-detail-modal" role="dialog" aria-modal="true" aria-labelledby="newsnow-settings-title" data-gesture-info-title="资讯设置" data-gesture-info="后台预取只在应用空闲时刷新已启用来源；图片仍在卡片进入视野时加载。关闭返回图标后，可使用返回手势离开资讯正文。">
+      <div class="modal-card settings-detail-card newsnow-settings-card">
         <div class="modal-head"><span id="newsnow-settings-title" data-i18n="newsSettings">资讯设置</span><button id="newsnow-settings-close" class="btn-plain" type="button" aria-label="关闭资讯设置" data-i18n-aria="closeNewsSettings">✕</button></div>
         <div class="fp-set-row"><span data-i18n="backgroundPrefetch">后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
         <p class="newsnow-settings-note" data-i18n="backgroundPrefetchNote">应用空闲后每 5 分钟更新已启用来源。图片仍在卡片进入视野时才加载。</p>
@@ -578,21 +580,35 @@
         <p class="newsnow-settings-note" data-i18n="newsHideReturnIconNote">默认关闭，返回图标会显示。开启后隐藏资讯原文右侧的返回图标；可用手势直接关闭页面。</p>
       </div>
     </div>
-    <div id="reader-recommendation-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="reader-recommendation-settings-title">
-      <div class="modal-card reader-recommendation-settings-card">
+    <div id="reader-recommendation-settings-modal" class="modal settings-detail-modal" role="dialog" aria-modal="true" aria-labelledby="reader-recommendation-settings-title">
+      <div class="modal-card settings-detail-card reader-recommendation-settings-card">
         <div class="modal-head"><span id="reader-recommendation-settings-title" data-i18n="recommendationSettings">读后推荐设置</span><button id="reader-recommendation-settings-close" class="btn-plain" type="button" data-i18n-aria="close">✕</button></div>
         <label class="reader-recommendation-threshold"><span data-i18n="recommendationThresholdBefore">低于</span> <input id="reader-recommendation-min-words" type="number" min="0" max="100" step="0.5" inputmode="decimal" data-i18n-aria="recommendationThresholdAria" /> <span data-i18n="recommendationThresholdAfter">万字不推荐</span></label>
         <p class="reader-recommendation-settings-note" data-i18n="recommendationSettingsNote">阅读进度达到约 90% 时会在后台预取相似图书。设置为 0 表示不按字数过滤。</p>
       </div>
     </div>
-    <div id="api-settings-modal" class="modal">
-      <div class="modal-card api-settings-card">
+    <div id="book-classification-settings-modal" class="modal settings-detail-modal" role="dialog" aria-modal="true" aria-labelledby="book-classification-settings-title">
+      <div class="modal-card settings-detail-card book-classification-settings-card">
+        <div class="modal-head"><span id="book-classification-settings-title" data-i18n="bookClassification">书籍分类</span><button id="book-classification-settings-close" class="btn-plain" type="button" aria-label="关闭书籍分类">✕</button></div>
+        <section class="book-classification-run-card">
+          <span id="book-classification-settings-status" class="book-classification-settings-status" aria-live="polite">正在读取分类状态…</span>
+          <button id="book-classification-settings-run" class="btn-primary" type="button">开始分类</button>
+        </section>
+        <div class="fp-set-row book-classification-model-tags-row"><span data-i18n="modelTags">使用大模型分类的标签</span><label class="switch"><input type="checkbox" id="set-use-model-tags" checked /><span class="slider"></span></label></div>
+      </div>
+    </div>
+    <div id="api-settings-modal" class="modal settings-detail-modal">
+      <div class="modal-card settings-detail-card api-settings-card">
         <div class="modal-head"><span data-i18n="apiSettingsTitle">大模型与翻译 API</span><button id="api-settings-close" class="btn-plain" type="button" data-i18n-aria="close">✕</button></div>
-        <p class="api-settings-note" data-i18n="apiSettingsNote">密钥仅保存在本机安全存储中。现有的单一智读配置会自动成为第一条大模型配置。</p>
-        <section class="api-settings-section" data-i18n-aria="apiAiConfiguration">
-          <div class="fp-title" data-i18n="apiAi">大模型</div>
+        <section class="api-settings-section api-ai-saved-section" data-i18n-aria="apiAiConfiguration">
           <label><span data-i18n="apiSavedProfiles">已保存的 API</span><select id="api-ai-profile"></select></label>
-          <div class="api-settings-actions"><button id="api-ai-use" class="btn-plain" type="button" data-i18n="apiUseCurrent">设为智读与问答当前模型</button></div>
+          <div id="api-ai-purpose-picker" class="api-ai-purpose-picker" role="group" aria-label="分配模型用途">
+            <button type="button" data-ai-purpose="reading">智读</button>
+            <button type="button" data-ai-purpose="library">书库问答</button>
+            <button type="button" data-ai-purpose="other">其它</button>
+          </div>
+        </section>
+        <section class="api-settings-section api-ai-editor-section" data-i18n-aria="apiAiConfiguration">
           <label><span data-i18n="apiAddPreset">添加常用大模型</span><select id="api-ai-preset"><option value="" data-i18n="apiChooseProvider">选择服务商…</option><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible" data-i18n="apiCompatible">OpenAI 兼容接口</option></select></label>
           <label><span data-i18n="apiName">名称</span><input id="api-ai-name" type="text" maxlength="80" data-i18n-placeholder="apiNamePlaceholder" /></label>
           <label><span data-i18n="apiProvider">服务商</span><select id="api-ai-provider"><option value="deepseek">DeepSeek</option><option value="openai">OpenAI（GPT）</option><option value="anthropic">Anthropic（Claude）</option><option value="compatible" data-i18n="apiCompatible">OpenAI 兼容接口</option></select></label>
@@ -611,8 +627,8 @@
         </section>
       </div>
     </div>
-    <div id="startup-enhancement-modal" class="modal">
-      <div class="modal-card startup-enhancement-card">
+    <div id="startup-enhancement-modal" class="modal settings-detail-modal">
+      <div class="modal-card settings-detail-card startup-enhancement-card">
         <div class="modal-head"><span data-i18n="startupEnhancementSettings">启动增强设置</span><button id="startup-enhancement-close" class="btn-plain" type="button" data-i18n-aria="close">✕</button></div>
         <p class="startup-enhancement-note" data-i18n="startupEnhancementNote">开启后，关闭窗口会隐藏软件并保留进程，以便下次快速打开；关闭此项时会立即彻底退出。</p>
         <div id="startup-enhancement-autostart-row" class="fp-set-row">
@@ -630,8 +646,8 @@
         <p class="startup-enhancement-note" data-i18n="startupEnhancementHighCostNote">关闭高消耗任务后，语义索引、全文索引和书籍分类等任务会在隐藏窗口时保存检查点并暂停，不会自动续建。</p>
       </div>
     </div>
-    <div id="animation-settings-modal" class="modal">
-      <div class="modal-card animation-settings-card">
+    <div id="animation-settings-modal" class="modal settings-detail-modal">
+      <div class="modal-card settings-detail-card animation-settings-card">
         <div class="modal-head"><span data-i18n="animationSettings">动画设置</span><button id="animation-settings-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
         <section class="animation-setting-group" data-animation-group-section="mainWindow">
           <div class="fp-set-row animation-group-head">
@@ -662,9 +678,9 @@
         </section>
       </div>
     </div>
-    <div id="import-dirs-modal" class="modal">
-      <div class="modal-card">
-        <div class="modal-head"><span data-i18n="importDirectoriesTitle">📁 自动导入目录</span><button id="import-dirs-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
+    <div id="import-dirs-modal" class="modal settings-detail-modal">
+      <div class="modal-card settings-detail-card import-dirs-card">
+        <div class="modal-head"><span data-i18n="importDirectoriesTitle">自动导入目录</span><button id="import-dirs-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
         <div class="ai-toggle-row" id="import-dirs-enabled-row">
           <span data-i18n="importDirectoriesEnable">启用自动导入</span>
           <label class="switch" id="import-dirs-enabled-switch"><input type="checkbox" id="import-dirs-enabled" /><span class="slider"></span></label>
@@ -679,7 +695,7 @@
     </div>
     <div id="library-health-modal" class="modal">
       <div class="modal-card library-health-card">
-        <div class="modal-head"><span>🩺 书库体检</span><button id="library-health-close" class="btn-plain">✕</button></div>
+        <div class="modal-head health-head"><span class="modal-title-stack"><strong>书库体检</strong><small>检查文件、重复内容和搜索索引</small></span><button id="library-health-close" class="btn-plain">✕</button></div>
         <div id="library-health-body" class="library-health-body"></div>
       </div>
     </div>
@@ -689,8 +705,8 @@
         <div id="reading-timeline-body" class="timeline-body"></div>
       </div>
     </div>
-    <div id="semantic-index-modal" class="modal">
-      <div class="modal-card semantic-card">
+    <div id="semantic-index-modal" class="modal settings-detail-modal" data-gesture-info-title="语义索引" data-gesture-info="语义索引只保存在本机，用于相似搜索、相关推荐和书库问答。切换模型后需要为对应模型建立索引；删除索引不会删除图书。">
+      <div class="modal-card settings-detail-card semantic-card">
         <div class="modal-head"><span data-i18n="semTitle">语义索引</span><button id="semantic-index-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
         <p class="ai-note" data-i18n="semDescription">语义检索在本机离线运行。首次建立索引会较久，但可以暂停、续建；关闭本窗口后，正在运行的任务会继续在后台执行。</p>
         <section class="sem-section">
@@ -817,8 +833,8 @@
         <div id="sem-status" class="ai-status" aria-live="polite"></div>
       </div>
     </div>
-    <div id="external-dict-modal" class="modal">
-      <div class="modal-card dict-card">
+    <div id="external-dict-modal" class="modal settings-detail-modal">
+      <div class="modal-card settings-detail-card dict-card">
         <div class="modal-head"><span data-i18n="externalDictionaryTitle">词典</span><button id="external-dict-close" class="btn-plain" data-i18n-aria="close">✕</button></div>
         <p class="ai-note" data-i18n="externalDictionaryNote">外置词典会优先于内置词典查询。支持 TSV / CSV / JSON、StarDict（.ifo/.idx/.dict/.dict.dz）和常见未加密 MDX；使用 LZO 压缩或加密的 MDX/MDD 会提示转换后再导入。</p>
         <div id="external-dict-list" class="dict-list"></div>
@@ -829,12 +845,18 @@
       </div>
     </div>
     <div id="about-modal" class="modal">
-      <div class="modal-card">
+      <div class="modal-card about-card">
         <div class="modal-head"><span data-i18n="about">关于</span><button id="about-close" class="btn-plain" data-i18n-aria-label="close" aria-label="关闭">✕</button></div>
-        <div class="info-row"><span class="info-k" data-i18n="aboutSoftware">软件</span><span class="info-v">鲲鹏阅读器 · Kunpeng Reader</span></div>
-        <div class="info-row"><span class="info-k" data-i18n="aboutVersion">版本</span><span class="info-v" id="about-ver">v1.8.0</span><button id="about-update" class="btn-plain about-update-btn" data-i18n="checkUpdates">检查更新</button></div>
-        <div class="info-row col"><span class="info-k" data-i18n="aboutReleaseNotes">本版更新内容</span><div id="about-notes" class="about-notes" data-i18n="releaseNotesLoading">加载中…</div></div>
-        <div class="info-row"><span class="info-k">GitHub</span><span class="info-v"><a id="about-github" href="https://github.com/pigking9527-cmyk/kunpeng-reader" style="color:#2b6cff;text-decoration:none;cursor:pointer;">github.com/pigking9527-cmyk/kunpeng-reader</a></span></div>
+        <section class="about-hero">
+          <div class="about-mark" aria-hidden="true">鲲</div>
+          <div class="about-product"><h2>鲲鹏阅读器</h2><p>Kunpeng Reader · 为长时间阅读而设计</p></div>
+        </section>
+        <section class="about-version-card">
+          <div><span class="about-eyebrow" data-i18n="aboutVersion">版本</span><strong id="about-ver">v1.8.0</strong></div>
+          <button id="about-update" class="btn-plain about-update-btn" data-i18n="checkUpdates">检查更新</button>
+        </section>
+        <section class="about-release-card"><span class="about-eyebrow" data-i18n="aboutReleaseNotes">本版更新内容</span><div id="about-notes" class="about-notes" data-i18n="releaseNotesLoading">加载中…</div></section>
+        <a id="about-github" class="about-github-card" href="https://github.com/pigking9527-cmyk/kunpeng-reader">GitHub<span>github.com/pigking9527-cmyk/kunpeng-reader</span><b aria-hidden="true">↗</b></a>
         <div class="about-feedback-actions">
           <button id="about-feedback-bug" class="btn-plain" type="button" data-i18n="submitBug">提交 Bug</button>
           <button id="about-feedback-feature" class="btn-plain" type="button" data-i18n="suggestFeature">功能建议</button>
@@ -876,33 +898,17 @@
     </div>
     <div id="book-info-modal" class="modal">
       <div class="modal-card book-info-card">
-        <div class="modal-head"><span>图书信息</span><button id="book-info-close" class="btn-plain">✕</button></div>
-        <div class="info-row"><span class="info-k">书名</span><input id="book-info-title" class="info-input" type="text" autocomplete="off" /></div>
-        <div class="info-row"><span class="info-k">作者</span><span id="book-info-author" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">格式</span><span id="book-info-format" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">字数</span><span id="book-info-words" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">大小</span><span id="book-info-size" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k">评分</span><span id="book-info-stars" class="info-stars" title="点击打分，再点同一颗清除"></span></div>
-        <div class="info-row book-info-organization-entry">
-          <span class="info-k">标签</span>
-          <span id="book-info-tag-summary" class="info-v book-info-organization-summary">未添加</span>
-          <button id="book-info-tags-manage" class="book-info-organization-link" type="button">管理 ›</button>
-        </div>
-        <div class="info-row book-info-organization-entry">
-          <span class="info-k">收藏书单</span>
-          <span id="book-info-collection-summary" class="info-v book-info-organization-summary">未添加</span>
-          <button id="book-info-collections-manage" class="book-info-organization-link" type="button">管理 ›</button>
-        </div>
-        <div class="info-row"><span class="info-k">AI 分类标签</span><span id="book-info-model-tags" class="info-v info-chips"></span></div>
-        <div class="info-row book-info-actions">
-          <span class="info-k">操作</span>
-          <div class="info-action-buttons">
+        <section class="book-info-hero">
+          <div class="book-info-cover-stack"><div id="book-info-cover" class="book-info-cover" aria-label="图书封面"></div><button id="cover-btn" class="book-info-cover-change" type="button" title="选择图片更换封面"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h4l1.5-2h5l1.5 2h4v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg><span>更换封面</span></button></div>
+          <div class="book-info-identity"><section class="book-info-primary"><label class="book-info-title-field"><span>书名</span><input id="book-info-title" class="info-input" type="text" autocomplete="off" /></label><p id="book-info-author" class="book-info-author"></p></section><section class="book-info-facts" aria-label="图书属性"><div><span>格式</span><strong id="book-info-format"></strong></div><div><span>字数</span><strong id="book-info-words"></strong></div><div><span>大小</span><strong id="book-info-size"></strong></div><div><span>我的评分</span><span id="book-info-stars" class="info-stars" title="点击打分，再点同一颗清除"></span></div></section></div>
+        </section>
+        <section class="book-info-section"><div class="book-info-section-head"><h3>整理</h3><span>标签与书单</span></div><div class="book-info-organization-grid"><div class="book-info-organization-entry"><span class="info-k">标签</span><span id="book-info-tag-summary" class="info-v book-info-organization-summary">未添加</span><button id="book-info-tags-manage" class="book-info-organization-link" type="button">管理</button></div><div class="book-info-organization-entry"><span class="info-k">收藏书单</span><span id="book-info-collection-summary" class="info-v book-info-organization-summary">未添加</span><button id="book-info-collections-manage" class="book-info-organization-link" type="button">管理</button></div></div></section>
+        <section class="book-info-section"><div class="book-info-section-head"><h3>AI 分类</h3><span>自动识别</span></div><div id="book-info-model-tags" class="info-v info-chips book-info-model-tags"></div></section>
+        <section class="book-info-section book-info-tools"><div class="book-info-section-head"><h3>操作</h3></div><div class="info-action-buttons">
             <button id="similar-books-btn" class="btn-plain">相似图书</button>
             <button id="reading-timeline-btn" class="btn-plain">阅读时间线</button>
-            <button id="cover-btn" class="btn-plain">更换封面</button>
-          </div>
-        </div>
-        <div class="info-row col"><span class="info-k">简介（可编辑，失焦保存）</span><div id="book-info-desc" class="info-desc" contenteditable="true"></div></div>
+          </div></section>
+        <section class="book-info-section book-info-description"><div class="book-info-section-head"><h3>简介</h3><span>失焦后自动保存</span></div><div id="book-info-desc" class="info-desc" contenteditable="true"></div></section>
       </div>
     </div>
     <div id="book-organization-modal" class="modal">
@@ -941,6 +947,15 @@
           </div>
         </div>
         <div id="booklist-books" class="booklist-books"></div>
+      </div>
+    </div>
+    <div id="booklist-shortcuts-modal" class="modal settings-detail-modal" role="dialog" aria-modal="true" aria-labelledby="booklist-shortcuts-title">
+      <div class="modal-card settings-detail-card booklist-shortcuts-card">
+        <div class="modal-head"><span id="booklist-shortcuts-title">快捷书单</span><button id="booklist-shortcuts-close" class="btn-plain" type="button" aria-label="关闭">×</button></div>
+        <p class="booklist-shortcuts-note">保存常用书单；书库问答生成的推荐书单也会出现在这里。书单内容、顺序和评语会随“阅读数据”同步。</p>
+        <form id="booklist-shortcuts-create" class="booklist-shortcuts-create"><input id="booklist-shortcuts-name" type="text" maxlength="96" autocomplete="off" placeholder="新建书单名称" /><button class="btn-primary" type="submit">新建</button></form>
+        <div id="booklist-shortcuts-status" class="booklist-shortcuts-status" aria-live="polite"></div>
+        <div id="booklist-shortcuts-list" class="booklist-shortcuts-list"></div>
       </div>
     </div>
     <div id="debug-modal" class="modal">
@@ -1001,7 +1016,7 @@
         <div id="shelf-scrollbar-thumb" class="shelf-scrollbar-thumb"></div>
       </div>
     </div>
-    <section id="library-ai-page" class="library-ai-page" hidden aria-label="书库问答">
+    <section id="library-ai-page" class="library-ai-page" hidden aria-label="书库问答" data-gesture-info-title="书库问答" data-gesture-info="先限定图书范围并输入问题，再从本机索引检索依据。回答脚注可预览并跳回原文；复杂问题可在设置中启用 BGE-M3 长文精读。">
       <main class="library-ai-page-inner">
         <header class="library-ai-head">
           <div class="library-ai-title-row">
@@ -1011,8 +1026,7 @@
             </div>
           </div>
           <div class="library-ai-head-actions">
-            <span id="library-ai-classify-status" class="library-ai-classify-status" aria-live="polite" hidden></span>
-            <button id="library-ai-classify" class="library-ai-classify" type="button" title="正在读取书籍分类状态…" data-i18n="bookClassification">书籍分类</button>
+            <button id="library-ai-classify" class="library-ai-classify" type="button" data-i18n="bookClassification">书籍分类</button>
             <button id="library-ai-history" class="library-ai-history" type="button" title="查看已保存的书库问答" data-i18n="questionHistory">问答记录</button>
             <button id="library-ai-answer-settings" class="library-ai-history" type="button" aria-expanded="false" aria-controls="library-ai-answer-settings-overlay" data-i18n="answerSettings">设置</button>
             <select id="library-ai-model-profile" class="library-ai-model-profile" aria-label="书库问答使用的大模型"></select>
@@ -1042,6 +1056,14 @@
               <div class="library-ai-answer-setting-label"><strong data-i18n="answerFontSize">字号</strong></div>
               <div class="library-ai-font-controls" aria-label="书库问答字号" data-i18n-aria="libraryAnswerFontSize"><button id="library-ai-font-decrease" type="button" title="减小问答字号" aria-label="减小问答字号" data-i18n-title="decreaseAnswerFont" data-i18n-aria="decreaseAnswerFont">A−</button><output id="library-ai-font-size" aria-live="polite">16px</output><button id="library-ai-font-increase" type="button" title="增大问答字号" aria-label="增大问答字号" data-i18n-title="increaseAnswerFont" data-i18n-aria="increaseAnswerFont">A+</button></div>
             </div>
+            <div class="library-ai-answer-number-row">
+              <div class="library-ai-answer-setting-label"><strong>推荐书单粗选数量</strong><span>先从本地语义索引选出候选；不足 5 本时按实际本数继续。</span></div>
+              <label class="library-ai-answer-number"><input id="library-ai-recommendation-candidate-limit" type="number" min="5" max="100" step="1" value="20" inputmode="numeric" aria-label="推荐书单粗选数量" /><span>本</span></label>
+            </div>
+            <div class="library-ai-answer-number-row">
+              <div class="library-ai-answer-setting-label"><strong>大模型精选数量</strong><span>从本地候选中精选；候选较少时按实际本数推荐。</span></div>
+              <label class="library-ai-answer-number"><input id="library-ai-recommendation-result-limit" type="number" min="5" max="30" step="1" value="12" inputmode="numeric" aria-label="大模型精选数量" /><span>本</span></label>
+            </div>
             <div class="library-ai-answer-long-context-row">
               <div class="library-ai-answer-setting-label"><strong data-i18n="longContextReading">复杂问题长文精读（BGE-M3）</strong></div>
               <button id="library-ai-long-context" class="library-ai-answer-toggle" type="button" role="switch" aria-checked="false" aria-describedby="library-ai-long-context-help" title="切换复杂问题长文精读" data-i18n-title="toggleLongContextReading"><span aria-hidden="true"></span></button>
@@ -1051,7 +1073,7 @@
         </div>
         <div class="library-ai-grid">
           <aside class="library-ai-card library-ai-scope">
-            <div class="library-ai-mode"><button id="mode-question" class="active" type="button" data-i18n="libraryQuestion">书库问答</button><button id="mode-compare" type="button" data-i18n="crossBookCompare">跨书对比</button></div>
+            <div class="library-ai-mode"><button id="mode-question" class="active" type="button" data-i18n="libraryQuestion">书库问答</button><button id="mode-compare" type="button" data-i18n="crossBookCompare">跨书对比</button><button id="mode-recommend" type="button">推荐书单</button></div>
             <div class="library-ai-quick-filters" aria-label="快速筛选图书" data-i18n-aria="libraryFilters">
               <label><span data-i18n="tagLabel">标签</span><select id="tag-filter"><option value="" data-i18n="allTags">全部标签</option></select></label>
               <label><span data-i18n="collectionLabel">收藏夹</span><select id="collection-filter"><option value="" data-i18n="allCollections">全部收藏夹</option></select></label>
@@ -1067,13 +1089,14 @@
             <textarea id="question" placeholder="例如：这些书如何解释清末财政困境？&#10;跨书对比时：比较选中作品对同一主题的观点与依据。" data-i18n-placeholder="questionPlaceholder"></textarea>
             <div class="library-ai-actions"><span id="state" class="library-ai-state"></span><button id="run" class="library-ai-run" type="button" data-i18n="startQuestion">开始问答</button></div>
             <div id="answer" class="library-ai-answer empty" data-i18n="answerPlaceholder">选择范围并输入问题后开始。若没有结果，请先在主窗口的设置中建立语义索引。</div>
+            <form id="library-ai-booklist-save" class="library-ai-booklist-save" hidden><label>保存为书单 <input id="library-ai-booklist-name" type="text" maxlength="96" autocomplete="off" placeholder="例如：理解晚明财政" /></label><button class="btn-primary" type="submit">保存书单</button></form>
             <section id="source-preview" class="library-ai-source-preview" hidden aria-live="polite" aria-label="脚注原文预览"><div class="library-ai-source-preview-head"><strong id="source-preview-title"></strong><button id="source-preview-close" type="button" aria-label="关闭脚注预览">×</button></div><p id="source-preview-excerpt"></p><button id="source-preview-open" class="library-ai-source-preview-open" type="button">打开原文</button></section>
             <section id="sources" class="library-ai-sources" hidden><h3 id="source-title">脚注来源</h3><div id="source-list"></div></section>
           </section>
         </div>
       </main>
     </section>
-    <section id="newsnow-page" class="newsnow-page" hidden aria-label="资讯">
+    <section id="newsnow-page" class="newsnow-page" hidden aria-label="资讯" data-gesture-info-title="资讯" data-gesture-info="可按类别和来源浏览资讯，支持横排或方格、混合或按来源排列。管理来源用于选择内容源，刷新按钮会立即更新当前资讯流。">
       <section id="newsnow-source-picker" class="newsnow-source-picker" hidden aria-label="资讯来源设置" data-i18n-aria="sourceSettings">
         <div class="newsnow-source-picker-head"><div class="newsnow-source-picker-title"><strong data-i18n="manageSources">管理来源</strong><p data-i18n="sourceSettingsHint">勾选想看的来源；设置只保存在此设备。</p></div><span id="newsnow-source-selection" class="newsnow-source-selection">已选 0 / 24</span><button id="newsnow-source-close" class="newsnow-picker-close" type="button" aria-label="返回资讯流" title="返回资讯流">←</button></div>
         <input id="newsnow-source-search" class="newsnow-source-search" type="search" placeholder="搜索来源、分类或关键词" aria-label="搜索资讯来源" data-i18n-placeholder="sourceSearch" data-i18n-aria="sourceSearch" />
@@ -1112,7 +1135,7 @@
       <main id="newsnow-feed" class="newsnow-feed" aria-live="polite"></main>
       </div>
     </section>
-    <section id="newsnow-reader" class="newsnow-reader" hidden aria-label="资讯正文">
+    <section id="newsnow-reader" class="newsnow-reader" hidden aria-label="资讯正文" data-gesture-info-title="资讯正文" data-gesture-info="这里显示经过清理的资讯正文；左上角返回资讯流，右上角可在系统浏览器打开原始页面。">
       <header class="newsnow-reader-head">
         <button id="newsnow-reader-back" class="newsnow-reader-back" type="button" aria-label="返回资讯流" title="返回资讯流">←</button>
         <div class="newsnow-reader-heading"><div id="newsnow-reader-meta" class="newsnow-reader-meta"></div><h1 id="newsnow-reader-title"></h1></div>
@@ -1137,8 +1160,12 @@
     <script src="feedback-ui.js"></script>
     <script src="stats-ui.js"></script>
     <script src="shelf-ui.js"></script>
+    <script src="booklist-settings-ui.js"></script>
+    <script src="settings-layout-ui.js"></script>
+    <script src="toolbar-settings-ui.js"></script>
     <script src="book-info-organization.js"></script>
     <script src="notice-ui.js"></script>
+    <script src="dialog-ui.js"></script>
     <script src="library-ai.js"></script>
     <script src="library-ai-entry.js"></script>
     <script src="news-gesture.js"></script>
@@ -1148,6 +1175,7 @@
     <script src="api-settings-ui.js"></script>
     <script src="auto-import-ui.js"></script>
     <script src="reader-recommendation-settings.js"></script>
+    <script src="book-classification-settings-ui.js"></script>
     <script src="problem-trace-ui.js"></script>
     <script src="browser-native-guard.js"></script>
     <script src="app.js"></script>

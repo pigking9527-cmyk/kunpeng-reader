@@ -156,8 +156,12 @@ function setAiReaderSide(open) {
   applyAiReaderSide(!!open);
 }
 function closeAiReaderSide() {
+  if (!document.body.classList.contains("ai-reader-open")) return;
   aiReaderHideSourcePreview();
   setAiReaderSide(false);
+  window.dispatchEvent(new CustomEvent("reader-surface-closed", {
+    detail: { name: "智读", reopen: () => setAiReaderSide(true) },
+  }));
 }
 window.closeAiReaderSide = closeAiReaderSide;
 function aiReaderSetStatus(value) { if (aiReaderStatus) aiReaderStatus.textContent = value || ""; }
@@ -174,7 +178,8 @@ function renderAiReaderProfiles(status) {
     const option = document.createElement("option"); option.value = profile.id; option.textContent = profile.name || profile.model || readerText("configuredModel", "已配置大模型");
     aiReaderProfileInput.appendChild(option);
   });
-  aiReaderProfileInput.value = profiles.some((profile) => profile.id === status?.activeId) ? status.activeId : profiles[0].id;
+  const readingId = status?.assignments?.readingId || status?.activeId;
+  aiReaderProfileInput.value = profiles.some((profile) => profile.id === readingId) ? readingId : profiles[0].id;
   aiReaderProfileInput.disabled = false;
 }
 aiReaderProfileInput?.addEventListener("change", async () => {
@@ -182,8 +187,10 @@ aiReaderProfileInput?.addEventListener("change", async () => {
   if (!id) return;
   aiReaderProfileInput.disabled = true;
   try {
-    const status = await invoke("select_ai_reader_profile", { id });
-    aiReaderSetStatus(status.configured ? readerText("modelSwitched", "已切换大模型") : readerText("modelIncomplete", "所选大模型配置不完整"));
+    const profiles = await invoke("assign_ai_reader_profile", { request: { purpose: "reading", id } });
+    renderAiReaderProfiles(profiles);
+    const selected = profiles?.profiles?.find((profile) => profile.id === id);
+    aiReaderSetStatus(selected?.configured ? readerText("modelSwitched", "已切换大模型") : readerText("modelIncomplete", "所选大模型配置不完整"));
   } catch (error) { aiReaderSetStatus(readerText("modelSwitchFailed", "切换大模型失败：{error}", { error })); }
   finally { aiReaderProfileInput.disabled = false; }
 });
@@ -1230,7 +1237,9 @@ const readerJumpBack = document.getElementById("reader-jump-back");
 let vdragging = false;
 let bookProgressDragging = false;
 let bookProgressPinned = false;
-const bookProgressJumpHistory = [];
+// A single in-session stack owns every explicit reading jump.  Keeping a
+// second stack for the bottom progress bar made the visible restore buttons
+// disagree with link/TOC/footnote navigation.
 const readerNavigationHistory = [];
 let readerNavigationBackVisible = false;
 let readerNavigationDismissTimer = 0;
@@ -1350,7 +1359,9 @@ function syncReaderJumpBackSettings() {
   if (signature === readerJumpBackSettingsSignature) return;
   readerJumpBackSettingsSignature = signature;
   applyReaderJumpBackPlacement(config.iconSizePx, config.positionX, config.positionY);
-  if (!config.enabled) dismissReaderNavigationBack(true);
+  // Hiding the floating arrow is visual preference only.  The same history is
+  // still available from the progress control and the restore-jump gesture.
+  if (!config.enabled) dismissReaderNavigationBack(false);
   else if (readerNavigationHistory.length) armReaderNavigationBackVisibility();
   else updateBookProgress();
 }
@@ -1399,7 +1410,7 @@ function updateBookProgress() {
     ? Math.max(0, Math.min(100, Number(curProgress) || 0))
     : bookProgressPreviewFrac * 100;
   paintBookProgress(percent);
-  const canRestoreProgress = bookProgressJumpHistory.length > 0;
+  const canRestoreProgress = readerNavigationHistory.length > 0;
   bookProgressEl.classList.toggle("can-restore", canRestoreProgress);
   if (readerJumpBack) readerJumpBack.hidden = !readerJumpBackConfig().enabled || !readerNavigationBackVisible || readerNavigationHistory.length === 0;
 }
@@ -1444,24 +1455,21 @@ function normalizedBookProgressPoint(point) {
 function sameBookProgressPoint(left, right) {
   return !!left && !!right && left.chapter === right.chapter && Math.abs(left.chFrac - right.chFrac) < 0.0001;
 }
-function rememberBookProgressRestorePoint(point) {
-  const next = normalizedBookProgressPoint(point);
-  const previous = bookProgressJumpHistory[bookProgressJumpHistory.length - 1];
-  if (!sameBookProgressPoint(previous, next)) bookProgressJumpHistory.push(next);
-  updateBookProgress();
-}
 function rememberReaderNavigationPoint(point) {
-  if (!readerJumpBackConfig().enabled) {
-    dismissReaderNavigationBack(true);
-    return;
-  }
   const next = normalizedBookProgressPoint(point);
   const previous = readerNavigationHistory[readerNavigationHistory.length - 1];
   if (!sameBookProgressPoint(previous, next)) readerNavigationHistory.push(next);
-  armReaderNavigationBackVisibility();
+  if (readerNavigationHistory.length > 100) readerNavigationHistory.splice(0, readerNavigationHistory.length - 100);
+  if (readerJumpBackConfig().enabled) armReaderNavigationBackVisibility();
+  else updateBookProgress();
 }
-window.rememberReaderJumpPosition = function () {
-  rememberReaderNavigationPoint();
+function rememberBookProgressRestorePoint(point) {
+  // Compatibility name for the bottom progress control; it now feeds the
+  // exact same history used by TOC, links and footnotes.
+  rememberReaderNavigationPoint(point);
+}
+window.rememberReaderJumpPosition = function (point) {
+  rememberReaderNavigationPoint(point);
 };
 function bookProgressFracFromX(clientX) {
   const rect = bookProgressTrack.getBoundingClientRect();
@@ -1501,25 +1509,23 @@ bookProgressTrack?.addEventListener("mousedown", (e) => {
   jumpByBookProgress(bookProgressFracFromX(e.clientX));
 });
 function restorePreviousBookProgress(e) {
-  e?.preventDefault?.();
-  e?.stopPropagation?.();
-  const point = bookProgressJumpHistory.pop();
-  if (!point || isPdf) return;
-  updateBookProgress();
-  sendToPage({ gotoChapter: point.chapter, chFrac: point.chFrac });
-  pinBookProgress();
+  return restorePreviousReaderNavigation(e);
 }
 function restorePreviousReaderNavigation(e) {
   e?.preventDefault?.();
   e?.stopPropagation?.();
   const point = readerNavigationHistory.pop();
-  if (!point || isPdf) return;
-  if (readerNavigationHistory.length) armReaderNavigationBackVisibility();
+  if (!point || isPdf) return false;
+  if (readerNavigationHistory.length && readerJumpBackConfig().enabled) armReaderNavigationBackVisibility();
   else dismissReaderNavigationBack(false);
   sendToPage({ gotoChapter: point.chapter, chFrac: point.chFrac });
+  pinBookProgress();
+  return true;
 }
 bookProgressRestore?.addEventListener("click", restorePreviousBookProgress);
 readerJumpBack?.addEventListener("click", restorePreviousReaderNavigation);
+window.restoreReaderJumpPosition = restorePreviousReaderNavigation;
+window.hasReaderJumpHistory = () => readerNavigationHistory.length > 0;
 window.addEventListener("reader-settings-changed", syncReaderJumpBackSettings);
 window.addEventListener("resize", () => {
   const config = readerJumpBackConfig();
@@ -1539,6 +1545,7 @@ vthumb.addEventListener("mousedown", (e) => {
   e.preventDefault();
   e.stopPropagation();
   hideBookProgress();
+  if (!isPdf) rememberReaderNavigationPoint();
   vdragging = true;
   document.body.style.userSelect = "none";
   frame.style.pointerEvents = "none";
@@ -1546,6 +1553,7 @@ vthumb.addEventListener("mousedown", (e) => {
 vbar.addEventListener("mousedown", (e) => {
   if (e.target === vthumb) return;
   hideBookProgress();
+  if (!isPdf) rememberReaderNavigationPoint();
   sendToPage({ gotoFrac: fracFromY(e.clientY) });
 });
 let vLastFrac = 0;

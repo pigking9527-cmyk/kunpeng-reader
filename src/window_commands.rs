@@ -238,6 +238,15 @@ pub(crate) fn main_window_close(window: tauri::WebviewWindow) -> Result<(), Stri
     window.close().map_err(|e| e.to_string())
 }
 
+/// 主窗口以隐藏状态创建，等待书架完成首帧绘制后再由前端调用。
+/// 这能避免 WebView2 在默认左上位置短暂显示白色空窗口。
+#[tauri::command]
+pub(crate) fn main_window_show(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.show().map_err(|e| e.to_string())?;
+    window.unminimize().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub(crate) fn main_window_start_dragging(window: tauri::WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(|e| e.to_string())
@@ -648,10 +657,8 @@ pub(crate) fn apply_geom_safe(window: &tauri::WebviewWindow, geom: &Option<WinGe
             let _ = window.maximize();
         }
     }
-    // 确保可见、未最小化、并取得焦点
-    let _ = window.show();
+    // 首帧绘制之前保持隐藏；前端在书架渲染完后调用 main_window_show。
     let _ = window.unminimize();
-    let _ = window.set_focus();
 }
 
 #[cfg(test)]

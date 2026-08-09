@@ -25,6 +25,47 @@
         "libraryHistorySyncMode": "manual",
         "libraryAnswerFontSize": 18,
         "libraryLongContextEnabled": true,
+        "toolbarIconSizePx": 36,
+        "toolbarItemOrder": ["account", "search", "stats", "library", "news", "filter", "settings", "menu"],
+        "toolbarHiddenItems": ["news"],
+        "toolbarContentOrder": ["text", "icon"],
+        "toolbarContentVisible": ["icon", "text"],
+        "gestureSettings": {
+          "version": 1,
+          "enabled": true,
+          "globalPrecision": "5",
+          "profiles": [],
+          "hintSettings": {
+            "enabled": true,
+            "fontSize": 16,
+            "backgroundEnabled": true,
+            "background": "#173b6b",
+            "opacity": 88,
+            "positionX": 1,
+            "positionY": 0
+          }
+        },
+        "readerLayoutSettings": {
+          "version": 1,
+          "fontFamily": "'SimSun',serif",
+          "styleMode": "local",
+          "textConversion": "t2s",
+          "fontSize": 20,
+          "noteFontSize": 15,
+          "lineHeight": 1.8,
+          "paraSpacing": 0.7,
+          "letterSpacing": 0.5,
+          "marginTop": 20,
+          "marginBottom": 24,
+          "marginLeft": 30,
+          "marginRight": 30,
+          "dualPageGap": 40,
+          "pageMode": "dual",
+          "flowMode": "paged",
+          "pageTurnEffect": "horizontal",
+          "pageTurnSpeed": 1,
+          "imagePagination": "next-page"
+        },
         "futureDesktopSetting": "preserve-me"
       }
     }

@@ -42,9 +42,19 @@ const syncResetRequestBtn = document.getElementById("sync-reset-request");
 const syncResetConfirmBtn = document.getElementById("sync-reset-confirm");
 const syncResetStatusEl = document.getElementById("sync-reset-status");
 const accountSecurityOpenBtn = document.getElementById("account-security-open");
-const accountSubpageBackdrop = document.getElementById("account-subpage-backdrop");
 const accountSecurityPanel = document.getElementById("account-security-panel");
-const accountSecurityCloseBtn = document.getElementById("account-security-close");
+const accountOverviewPanel = document.getElementById("account-overview-panel");
+const accountOverviewSyncStateEl = document.getElementById("account-overview-sync-state");
+const accountOverviewSyncLabelEl = document.getElementById("account-overview-sync-label");
+const accountStorageValueEl = document.getElementById("account-storage-value");
+const accountStorageBarEl = document.getElementById("account-storage-bar");
+const accountStorageNoteEl = document.getElementById("account-storage-note");
+const accountDailyValueEl = document.getElementById("account-daily-value");
+const accountDailyBarEl = document.getElementById("account-daily-bar");
+const accountDailyNoteEl = document.getElementById("account-daily-note");
+const accountOverviewTabBtn = document.getElementById("account-tab-overview");
+const accountSyncTabBtn = document.getElementById("account-tab-sync");
+const accountDataTabBtn = document.getElementById("account-data-open");
 const accountSecuritySummaryEl = document.getElementById("account-security-summary");
 const accountSecurityStatusEl = document.getElementById("account-security-status");
 const accountEmailToggleBtn = document.getElementById("account-email-toggle");
@@ -68,16 +78,8 @@ const accountPasswordFormEl = document.getElementById("account-password-form");
 const accountCurrentPasswordEl = document.getElementById("account-current-password");
 const accountNewPasswordEl = document.getElementById("account-new-password");
 const accountPasswordChangeBtn = document.getElementById("account-password-change");
-const accountPasswordRecoverToggleBtn = document.getElementById("account-password-recover-toggle");
-const accountPasswordRecoverFormEl = document.getElementById("account-password-recover-form");
-const accountPasswordRecoverEmailEl = document.getElementById("account-password-recover-email");
-const accountPasswordRecoverCodeEl = document.getElementById("account-password-recover-code");
-const accountPasswordRecoverNewEl = document.getElementById("account-password-recover-new");
-const accountPasswordRecoverStartBtn = document.getElementById("account-password-recover-start");
-const accountPasswordRecoverConfirmBtn = document.getElementById("account-password-recover-confirm");
 const accountDataOpenBtn = document.getElementById("account-data-open");
 const accountDataPanel = document.getElementById("account-data-panel");
-const accountDataCloseBtn = document.getElementById("account-data-close");
 const accountClearLocalBtn = document.getElementById("account-clear-local");
 const accountClearCloudPasswordEl = document.getElementById("account-clear-cloud-password");
 const accountClearCloudBtn = document.getElementById("account-clear-cloud");
@@ -85,12 +87,15 @@ const accountDeletePasswordEl = document.getElementById("account-delete-password
 const accountDeleteUsernameEl = document.getElementById("account-delete-username");
 const accountDeleteBtn = document.getElementById("account-delete");
 const accountDataStatusEl = document.getElementById("account-data-status");
-const privateSyncOpenBtn = document.getElementById("private-sync-open");
 const privateSyncPanel = document.getElementById("private-sync-panel");
-const privateSyncCloseBtn = document.getElementById("private-sync-close");
-const privateSyncConfigsEl = document.getElementById("private-sync-configs");
-const privateSyncHistoryEl = document.getElementById("private-sync-history");
-const privateSyncSecretsEl = document.getElementById("private-sync-secrets");
+const accountSyncProgressEl = document.getElementById("account-sync-progress");
+const accountSyncReadingDataEl = document.getElementById("account-sync-reading-data");
+const accountSyncVocabularyEl = document.getElementById("account-sync-vocabulary");
+const accountSyncStatisticsEl = document.getElementById("account-sync-statistics");
+const accountSyncSoftwareSettingsEl = document.getElementById("account-sync-software-settings");
+const accountSyncModelTagsEl = document.getElementById("account-sync-model-tags");
+const accountSyncPalettesEl = document.getElementById("account-sync-palettes");
+const accountSyncConfigsEl = document.getElementById("account-sync-configs");
 const accountSyncHistoryEl = document.getElementById("account-sync-history");
 const accountSyncSecretsEl = document.getElementById("account-sync-secrets");
 const privateSyncPasswordEl = document.getElementById("private-sync-password");
@@ -103,12 +108,12 @@ let accountEmailCooldownUntil = 0;
 let accountEmailCooldownTimer = 0;
 let accountEmailRebindGrant = "";
 let accountEmailBound = false;
-let accountPasswordRecoverCooldownUntil = 0;
-let accountPasswordRecoverCooldownTimer = 0;
 let lastSyncSettings = {};
 let lastAccountSecurity = null;
 let lastPrivateSync = null;
+let lastAccountUsage = null;
 let lastSyncButtonState = { state: "", key: "syncNow", title: "", values: {} };
+let lastConnectionState = { state: "unknown", key: "serviceUnchecked", title: "", values: {} };
 function syncText(key, values = {}) {
   let text = global.ReaderAppI18n?.t?.(key) || key;
   for (const [name, value] of Object.entries(values)) text = text.replaceAll(`{${name}}`, String(value));
@@ -147,6 +152,62 @@ function setSyncButtonState(state, key = "syncNow", title = "", values = {}) {
   if (state) syncNowBtn.classList.add(state);
   syncNowBtn.textContent = syncText(key || "syncNow", values);
   syncNowBtn.title = title;
+  if (state === "syncing") setConnectionState("checking", "serviceCommunicating");
+  else if (state === "ok") setConnectionState("online", "serviceOnline");
+}
+function setConnectionState(state = "unknown", key = "serviceUnchecked", title = "", values = {}) {
+  lastConnectionState = { state, key, title, values };
+  if (!accountOverviewSyncStateEl) return;
+  accountOverviewSyncStateEl.classList.remove("unknown", "checking", "online", "offline");
+  accountOverviewSyncStateEl.classList.add(state);
+  const label = syncText(key, values);
+  if (accountOverviewSyncLabelEl) accountOverviewSyncLabelEl.textContent = label;
+  accountOverviewSyncStateEl.setAttribute("aria-label", label);
+  accountOverviewSyncStateEl.title = title;
+}
+function formatQuotaBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 1 : 2)} MiB`;
+  if (bytes >= 1024) return `${Math.ceil(bytes / 1024)} KiB`;
+  return `${bytes} B`;
+}
+function setQuotaBar(element, used, limit) {
+  if (!element?.style) return;
+  const ratio = limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0;
+  element.style.width = `${ratio}%`;
+  element.classList?.toggle("near-limit", ratio >= 85);
+}
+function applyAccountUsage(status = {}) {
+  lastAccountUsage = status;
+  const storage = Math.max(0, Number(status.storageBytes) || 0);
+  const storageLimit = Math.max(0, Number(status.storageLimitBytes) || 0);
+  const daily = Math.max(0, Number(status.dailyWrittenBytes) || 0);
+  const dailyLimit = Math.max(0, Number(status.dailyWriteLimitBytes) || 0);
+  if (accountStorageValueEl) accountStorageValueEl.textContent = `${formatQuotaBytes(storage)} / ${formatQuotaBytes(storageLimit)}`;
+  if (accountStorageNoteEl) accountStorageNoteEl.textContent = "同步实体和恢复版本会计入此额度";
+  if (accountDailyValueEl) accountDailyValueEl.textContent = `${formatQuotaBytes(daily)} / ${formatQuotaBytes(dailyLimit)}`;
+  if (accountDailyNoteEl) {
+    const reset = Number(status.dailyResetAt) || 0;
+    accountDailyNoteEl.textContent = reset
+      ? `下次重置：${formatSyncTime(reset)}`
+      : "每日额度按服务器时间重置";
+  }
+  setQuotaBar(accountStorageBarEl, storage, storageLimit);
+  setQuotaBar(accountDailyBarEl, daily, dailyLimit);
+}
+async function loadAccountUsage() {
+  if (!syncUsernameEl.value.trim()) return;
+  setConnectionState("checking", "serviceChecking");
+  try {
+    applyAccountUsage(await invoke("auth_usage_status"));
+    setConnectionState("online", "serviceOnline");
+  }
+  catch (error) {
+    setConnectionState("offline", "serviceOffline", String(error));
+    if (accountStorageValueEl) accountStorageValueEl.textContent = "暂不可用";
+    if (accountDailyValueEl) accountDailyValueEl.textContent = "暂不可用";
+    if (accountDailyNoteEl) accountDailyNoteEl.textContent = "连接同步服务后显示今日额度";
+  }
 }
 function updateSyncSummary(settings = {}) {
   lastSyncSettings = { ...lastSyncSettings, ...settings };
@@ -192,17 +253,40 @@ function saveAccountInfo(username) {
 function hideSavedAccounts() {
   savedAccountsEl.classList.remove("show");
 }
-function syncAccountSubpageBackdrop() {
-  accountSubpageBackdrop.hidden = accountSecurityPanel.hidden && accountDataPanel.hidden && privateSyncPanel.hidden;
+function selectAccountTab(tab) {
+  const pages = {
+    overview: accountOverviewPanel,
+    sync: privateSyncPanel,
+    security: accountSecurityPanel,
+    data: accountDataPanel,
+  };
+  const buttons = {
+    overview: accountOverviewTabBtn,
+    sync: accountSyncTabBtn,
+    security: accountSecurityOpenBtn,
+    data: accountDataTabBtn,
+  };
+  if (!Object.prototype.hasOwnProperty.call(pages, tab)) tab = "overview";
+  accountPanel.dataset.accountTab = tab;
+  for (const [name, page] of Object.entries(pages)) if (page) page.hidden = name !== tab;
+  for (const [name, button] of Object.entries(buttons)) {
+    if (!button) continue;
+    button.classList.toggle("active", name === tab);
+    button.setAttribute("aria-current", name === tab ? "page" : "false");
+  }
+  if (tab === "security") {
+    setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
+    setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
+    setAccountSecurityStatus("");
+    loadAccountSecurityStatus();
+  }
+  if (tab === "data") prepareAccountDataPanel();
+  if (tab === "sync") loadPrivateSyncStatus();
 }
 function closeAccountSubpages() {
-  privateSyncPanel.hidden = true;
-  accountSecurityPanel.hidden = true;
-  accountDataPanel.hidden = true;
   setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
   setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
-  setAccountSecurityDisclosure(accountPasswordRecoverToggleBtn, accountPasswordRecoverFormEl, false);
-  syncAccountSubpageBackdrop();
+  selectAccountTab("overview");
 }
 function closeAccountPanel() {
   accountPanel.classList.remove("show");
@@ -262,27 +346,6 @@ function beginAccountEmailCooldown() {
     accountEmailCooldownTimer = global.setInterval(updateAccountEmailCooldown, 1000);
   }
 }
-function updateAccountPasswordRecoverCooldown() {
-  const remaining = Math.max(0, Math.ceil((accountPasswordRecoverCooldownUntil - Date.now()) / 1000));
-  if (!remaining) {
-    accountPasswordRecoverStartBtn.disabled = false;
-    accountPasswordRecoverStartBtn.textContent = "发送验证码";
-    if (accountPasswordRecoverCooldownTimer) {
-      global.clearInterval(accountPasswordRecoverCooldownTimer);
-      accountPasswordRecoverCooldownTimer = 0;
-    }
-    return;
-  }
-  accountPasswordRecoverStartBtn.disabled = true;
-  accountPasswordRecoverStartBtn.textContent = `已发送（${remaining} 秒）`;
-}
-function beginAccountPasswordRecoverCooldown() {
-  accountPasswordRecoverCooldownUntil = Date.now() + 60 * 1000;
-  updateAccountPasswordRecoverCooldown();
-  if (!accountPasswordRecoverCooldownTimer) {
-    accountPasswordRecoverCooldownTimer = global.setInterval(updateAccountPasswordRecoverCooldown, 1000);
-  }
-}
 function setResetStatus(text = "", type = "") {
   syncResetStatusEl.textContent = text;
   syncResetStatusEl.className = "private-sync-status" + (type ? " " + type : "");
@@ -312,18 +375,21 @@ function setPrivateSyncStatus(text = "", type = "") {
   privateSyncStatusEl.className = "private-sync-status" + (type ? " " + type : "");
 }
 function applyPrivateSyncOverview(status = {}) {
-  accountSyncHistoryEl.classList.toggle("account-sync-enabled", !!status.syncAiHistory);
-  accountSyncSecretsEl.classList.toggle("account-sync-enabled", !!status.syncSecrets);
+  accountSyncProgressEl.checked = status.syncProgress !== false;
+  accountSyncReadingDataEl.checked = status.syncReadingData !== false;
+  accountSyncVocabularyEl.checked = status.syncVocabulary !== false;
+  accountSyncStatisticsEl.checked = status.syncStatistics !== false;
+  accountSyncSoftwareSettingsEl.checked = status.syncSoftwareSettings !== false;
+  accountSyncModelTagsEl.checked = status.syncModelTags !== false;
+  accountSyncPalettesEl.checked = status.syncReaderPalettes !== false;
+  accountSyncConfigsEl.checked = status.syncConfigs !== false;
+  accountSyncHistoryEl.checked = !!status.syncAiHistory;
+  accountSyncSecretsEl.checked = !!status.syncSecrets;
 }
 function applyPrivateSyncStatus(status = {}) {
   lastPrivateSync = status;
-  privateSyncConfigsEl.checked = status.syncConfigs !== false;
-  privateSyncHistoryEl.checked = !!status.syncAiHistory;
-  privateSyncSecretsEl.checked = !!status.syncSecrets;
   applyPrivateSyncOverview(status);
-  const secretText = status.cloudSecretAvailable
-    ? syncText("cloudSecretAvailable")
-    : syncText("localSecretsOnly");
+  const secretText = status.cloudSecretAvailable ? syncText("cloudSecretAvailable") : syncText("localSecretsOnly");
   setPrivateSyncStatus(secretText);
 }
 async function loadPrivateSyncStatus() {
@@ -332,9 +398,16 @@ async function loadPrivateSyncStatus() {
 }
 async function savePrivateSyncOptions() {
   const options = {
-    syncConfigs: !!privateSyncConfigsEl.checked,
-    syncAiHistory: !!privateSyncHistoryEl.checked,
-    syncSecrets: !!privateSyncSecretsEl.checked,
+    syncProgress: !!accountSyncProgressEl.checked,
+    syncReadingData: !!accountSyncReadingDataEl.checked,
+    syncVocabulary: !!accountSyncVocabularyEl.checked,
+    syncStatistics: !!accountSyncStatisticsEl.checked,
+    syncSoftwareSettings: !!accountSyncSoftwareSettingsEl.checked,
+    syncModelTags: !!accountSyncModelTagsEl.checked,
+    syncReaderPalettes: !!accountSyncPalettesEl.checked,
+    syncConfigs: !!accountSyncConfigsEl.checked,
+    syncAiHistory: !!accountSyncHistoryEl.checked,
+    syncSecrets: !!accountSyncSecretsEl.checked,
   };
   try {
     const status = await invoke("private_sync_set_options", { options });
@@ -348,6 +421,8 @@ async function savePrivateSyncOptions() {
 function openAccountPanel() {
   accountPanel.classList.add("show");
   accountBtn.classList.add("active");
+  selectAccountTab("overview");
+  void loadAccountUsage();
 }
 function renderSavedAccounts() {
   const list = readSavedAccounts();
@@ -450,12 +525,14 @@ async function syncOnStartup() {
       last_sync_accepted: report.accepted,
       last_sync_ignored: report.ignored,
     });
+    void loadAccountUsage();
     renderShelf(await invoke("shelf_books"));
   } catch (e) {
     // Keep the persisted login. Offline startup should not turn into logout.
     setSyncButtonState("fail", "autoSyncFailed", String(e));
     syncStatusEl.classList.remove("hidden");
     syncStatusEl.textContent = syncText("syncFailedDetail", { error: e });
+    void loadAccountUsage();
   } finally {
     syncNowBtn.disabled = false;
   }
@@ -473,22 +550,23 @@ accountBtn.addEventListener("click", (e) => {
 });
 accountPanel.addEventListener("click", (e) => {
   e.stopPropagation();
+  const tabButton = e.target?.closest?.("[data-account-tab]");
+  if (tabButton && accountPanel.contains(tabButton)) {
+    selectAccountTab(tabButton.dataset.accountTab);
+    return;
+  }
   if (!e.target.closest(".account-input-wrap")) hideSavedAccounts();
 });
-privateSyncOpenBtn.addEventListener("click", async () => {
-  privateSyncPanel.hidden = false;
-  accountSecurityPanel.hidden = true;
-  accountDataPanel.hidden = true;
-  syncAccountSubpageBackdrop();
-  await loadPrivateSyncStatus();
-});
-privateSyncCloseBtn.addEventListener("click", closeAccountSubpages);
-privateSyncPanel.addEventListener("click", (e) => e.stopPropagation());
-privateSyncConfigsEl.addEventListener("change", savePrivateSyncOptions);
-privateSyncHistoryEl.addEventListener("change", savePrivateSyncOptions);
-privateSyncSecretsEl.addEventListener("change", async () => {
-  if (!privateSyncSecretsEl.checked) { await savePrivateSyncOptions(); return; }
-  privateSyncSecretsEl.checked = false;
+accountOverviewTabBtn.addEventListener("click", () => selectAccountTab("overview"));
+accountSyncTabBtn.addEventListener("click", () => selectAccountTab("sync"));
+for (const choice of [
+  accountSyncProgressEl, accountSyncReadingDataEl, accountSyncVocabularyEl,
+  accountSyncStatisticsEl, accountSyncSoftwareSettingsEl, accountSyncModelTagsEl,
+  accountSyncPalettesEl, accountSyncConfigsEl, accountSyncHistoryEl,
+]) choice.addEventListener("change", savePrivateSyncOptions);
+accountSyncSecretsEl.addEventListener("change", async () => {
+  if (!accountSyncSecretsEl.checked) { await savePrivateSyncOptions(); return; }
+  accountSyncSecretsEl.checked = false;
   privateSyncPasswordEl.focus();
   setPrivateSyncStatus("密钥同步需要先输入同步密码并点击“加密并同步密钥”。");
 });
@@ -500,13 +578,7 @@ privateSyncSavePasswordBtn.addEventListener("click", async () => {
     applyPrivateSyncStatus(status);
     const report = await invoke("sync_now");
     setSyncButtonState("ok", "syncSuccess", report.message);
-    updateSyncSummary({
-      last_sync_at: report.server_time,
-      last_sync_pushed: report.pushed,
-      last_sync_pulled: report.pulled,
-      last_sync_accepted: report.accepted,
-      last_sync_ignored: report.ignored,
-    });
+    updateSyncSummary({ last_sync_at: report.server_time, last_sync_pushed: report.pushed, last_sync_pulled: report.pulled, last_sync_accepted: report.accepted, last_sync_ignored: report.ignored });
     setPrivateSyncStatus("密钥已加密并同步；其他设备输入同一同步密码即可恢复，无需再次填写 API Key。", "ok");
   } catch (error) { setPrivateSyncStatus("无法同步密钥：" + error, "error"); }
 });
@@ -555,24 +627,9 @@ syncResetConfirmBtn.addEventListener("click", async () => {
     syncStatusEl.textContent = "密码已重置并登录；其他设备已退出登录。";
   } catch (error) { setResetStatus("重置失败：" + error, "error"); }
 });
-accountSecurityOpenBtn.addEventListener("click", async () => {
-  accountSecurityPanel.hidden = false;
-  privateSyncPanel.hidden = true;
-  accountDataPanel.hidden = true;
-  syncAccountSubpageBackdrop();
-  setAccountSecurityDisclosure(accountEmailToggleBtn, accountEmailFormEl, false);
-  setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, false);
-  setAccountSecurityStatus("");
-  await loadAccountSecurityStatus();
-});
-accountSecurityCloseBtn.addEventListener("click", closeAccountSubpages);
-accountSecurityPanel.addEventListener("click", (e) => e.stopPropagation());
-accountDataOpenBtn.addEventListener("click", () => {
+accountSecurityOpenBtn.addEventListener("click", () => selectAccountTab("security"));
+function prepareAccountDataPanel() {
   const username = syncUsernameEl.value.trim();
-  accountDataPanel.hidden = false;
-  accountSecurityPanel.hidden = true;
-  privateSyncPanel.hidden = true;
-  syncAccountSubpageBackdrop();
   accountClearCloudPasswordEl.value = "";
   accountDeletePasswordEl.value = "";
   accountDeleteUsernameEl.value = "";
@@ -583,13 +640,8 @@ accountDataOpenBtn.addEventListener("click", () => {
   accountClearCloudBtn.disabled = !username;
   accountDeleteBtn.disabled = !username;
   setAccountDataStatus(username ? "" : "当前未登录；仍可清除此设备数据。只有登录后才能清除云端或删除账号。");
-});
-accountDataCloseBtn.addEventListener("click", closeAccountSubpages);
-accountDataPanel.addEventListener("click", (e) => e.stopPropagation());
-accountSubpageBackdrop.addEventListener("click", (e) => {
-  e.stopPropagation();
-  closeAccountSubpages();
-});
+}
+accountDataOpenBtn.addEventListener("click", () => selectAccountTab("data"));
 accountClearLocalBtn.addEventListener("click", async () => {
   if (!global.confirm("确定清除此设备上的全部阅读器数据吗？\n\n书架记录、进度、批注、缓存、索引、模型、字体、账号和 API 配置会被清除；原始图书文件不会删除。")) return;
   setDataActionBusy(true);
@@ -657,11 +709,6 @@ accountPasswordToggleBtn.addEventListener("click", () => {
   const open = accountPasswordFormEl.hidden;
   setAccountSecurityDisclosure(accountPasswordToggleBtn, accountPasswordFormEl, open);
   if (open) accountCurrentPasswordEl.focus();
-});
-accountPasswordRecoverToggleBtn.addEventListener("click", () => {
-  const open = accountPasswordRecoverFormEl.hidden;
-  setAccountSecurityDisclosure(accountPasswordRecoverToggleBtn, accountPasswordRecoverFormEl, open);
-  if (open) accountPasswordRecoverEmailEl.focus();
 });
 accountEmailStartBtn.addEventListener("click", async () => {
   try {
@@ -742,29 +789,6 @@ accountPasswordChangeBtn.addEventListener("click", async () => {
     accountNewPasswordEl.value = "";
     setAccountSecurityStatus("登录密码已修改，其他设备已退出登录。", "ok");
   } catch (error) { setAccountSecurityStatus("修改失败：" + error, "error"); }
-});
-accountPasswordRecoverStartBtn.addEventListener("click", async () => {
-  try {
-    await invoke("auth_request_password_reset", { request: {
-      url: "", username: syncUsernameEl.value.trim(), email: accountPasswordRecoverEmailEl.value.trim(),
-    }});
-    beginAccountPasswordRecoverCooldown();
-    setAccountSecurityStatus("若账号已绑定该邮箱，验证码将发送至邮箱。", "ok");
-    accountPasswordRecoverCodeEl.focus();
-  } catch (error) { setAccountSecurityStatus("发送验证码失败：" + error, "error"); }
-});
-accountPasswordRecoverConfirmBtn.addEventListener("click", async () => {
-  try {
-    const res = await invoke("auth_confirm_password_reset", { request: {
-      url: "", username: syncUsernameEl.value.trim(), email: accountPasswordRecoverEmailEl.value.trim(),
-      code: accountPasswordRecoverCodeEl.value.trim(), newPassword: accountPasswordRecoverNewEl.value,
-    }});
-    accountPasswordRecoverCodeEl.value = "";
-    accountPasswordRecoverNewEl.value = "";
-    applyAccountSecurityStatus(await invoke("auth_security_status"));
-    updateAccountView({ username: res.user?.username || syncUsernameEl.value });
-    setAccountSecurityStatus("登录密码已重置，其他设备已退出登录。", "ok");
-  } catch (error) { setAccountSecurityStatus("重置失败：" + error, "error"); }
 });
 async function syncAuth(action) {
   const isRegister = action === "register";
@@ -882,10 +906,12 @@ syncNowBtn.addEventListener("click", async () => {
       last_sync_accepted: report.accepted,
       last_sync_ignored: report.ignored,
     });
+    void loadAccountUsage();
     renderShelf(await invoke("shelf_books"));
   } catch (e) {
     setSyncButtonState("fail", "syncFailed", String(e));
     syncStatusEl.textContent = syncText("syncFailedDetail", { error: e });
+    void loadAccountUsage();
   } finally {
     syncNowBtn.disabled = false;
   }
@@ -893,11 +919,14 @@ syncNowBtn.addEventListener("click", async () => {
 
 if (typeof global.addEventListener === "function") global.addEventListener("app-language-changed", () => {
   const buttonState = { ...lastSyncButtonState };
+  const connectionState = { ...lastConnectionState };
   updateAccountView({ username: syncUsernameEl.value.trim() });
   updateSyncSummary(lastSyncSettings);
   setSyncButtonState(buttonState.state, buttonState.key, buttonState.title, buttonState.values);
+  setConnectionState(connectionState.state, connectionState.key, connectionState.title, connectionState.values);
   if (lastAccountSecurity) applyAccountSecurityStatus(lastAccountSecurity);
   if (lastPrivateSync) applyPrivateSyncStatus(lastPrivateSync);
+  if (lastAccountUsage) applyAccountUsage(lastAccountUsage);
 });
 
   activeController = Object.freeze({

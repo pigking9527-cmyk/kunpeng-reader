@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) const BOOK_STATE_KIND_V2: &str = "book_state_v2";
+/// Protocol v2 splits the former monolithic book_state_v2 so each user-facing
+/// category can be selected independently in sync settings.
+pub(crate) const READING_PROGRESS_KIND_V1: &str = "reading_progress_v1";
+pub(crate) const READING_DATA_KIND_V1: &str = "reading_data_v1";
+pub(crate) const READING_STATISTICS_KIND_V1: &str = "reading_statistics_v1";
 pub(crate) const MODEL_BOOK_TAGS_KIND_V1: &str = "model_book_tags_v1";
 pub(crate) const USER_BOOK_TAGS_KIND_V1: &str = "user_book_tags_v1";
 pub(crate) const BOOK_COLLECTIONS_KIND_V1: &str = "book_collections_v1";
@@ -70,6 +75,53 @@ struct PortableReadBucketV2 {
     content_id: String,
     secs: u32,
     words: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ReadingProgressV1 {
+    #[serde(default = "organization_schema_version")]
+    schema_version: u32,
+    content_id: String,
+    #[serde(default)]
+    last_read_at: u64,
+    #[serde(default)]
+    progress: f32,
+    #[serde(default)]
+    resume_chapter: u32,
+    #[serde(default)]
+    resume_frac: f32,
+    #[serde(default)]
+    resume_position: Option<reader_core::ReadingPosition>,
+    #[serde(default)]
+    chapter_index_version: u32,
+    #[serde(default)]
+    progress_history: Vec<book::ProgressTimelineEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ReadingDataV1 {
+    #[serde(default = "organization_schema_version")]
+    schema_version: u32,
+    content_id: String,
+    #[serde(default)]
+    bookmarks: Vec<book::Bookmark>,
+    #[serde(default)]
+    highlights: Vec<book::Highlight>,
+    #[serde(default)]
+    rating: f32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ReadingStatisticsV1 {
+    #[serde(default = "organization_schema_version")]
+    schema_version: u32,
+    content_id: String,
+    #[serde(default)]
+    reading_seconds: u64,
+    #[serde(default)]
+    words_read: u64,
+    #[serde(default)]
+    finished_at: u64,
 }
 
 /// Sync model-derived labels in an independent entity. This keeps old clients
@@ -158,6 +210,7 @@ impl ModelBookTagsV1 {
     }
 }
 
+#[allow(dead_code)] // v2 rows remain readable only as an upgrade fallback.
 impl BookSyncStateV2 {
     fn from_book(book: &book::Book) -> Self {
         Self {
@@ -275,6 +328,102 @@ impl BookSyncStateV2 {
     }
 }
 
+impl ReadingProgressV1 {
+    fn from_book(book: &book::Book) -> Self {
+        Self {
+            schema_version: 1,
+            content_id: book.content_id.clone(),
+            last_read_at: book.last_read_at,
+            progress: book.progress,
+            resume_chapter: book.resume_chapter,
+            resume_frac: book.resume_frac,
+            resume_position: book.resume_position.clone(),
+            chapter_index_version: book.chapter_index_version,
+            progress_history: book.progress_history.clone(),
+        }
+    }
+
+    fn apply_to_book(&self, target: &mut book::Book) {
+        target.last_read_at = self.last_read_at;
+        target.progress = self.progress.clamp(0.0, 100.0);
+        target.resume_chapter = self.resume_chapter;
+        target.resume_frac = self.resume_frac.clamp(0.0, 1.0);
+        target.resume_position = self
+            .resume_position
+            .clone()
+            .map(reader_core::ReadingPosition::normalized);
+        target.chapter_index_version = self.chapter_index_version;
+        book::merge_daily_progress_history(&mut target.progress_history, &self.progress_history);
+    }
+
+    fn merge_into_book(&self, target: &mut book::Book) {
+        if self.last_read_at > target.last_read_at
+            || (self.last_read_at == target.last_read_at && self.progress > target.progress)
+        {
+            self.apply_to_book(target);
+        } else {
+            book::merge_daily_progress_history(
+                &mut target.progress_history,
+                &self.progress_history,
+            );
+        }
+    }
+}
+
+impl ReadingDataV1 {
+    fn from_book(book: &book::Book) -> Self {
+        Self {
+            schema_version: 1,
+            content_id: book.content_id.clone(),
+            bookmarks: book.bookmarks.clone(),
+            highlights: book.highlights.clone(),
+            rating: book.rating,
+        }
+    }
+
+    fn apply_to_book(&self, target: &mut book::Book) {
+        target.bookmarks = self.bookmarks.clone();
+        target.highlights = self.highlights.clone();
+        target.rating = self.rating.clamp(0.0, 5.0);
+    }
+
+    fn merge_into_book(&self, target: &mut book::Book) {
+        merge_unique_json(&mut target.bookmarks, &self.bookmarks);
+        merge_unique_json(&mut target.highlights, &self.highlights);
+        if target.rating == 0.0 && self.rating > 0.0 {
+            target.rating = self.rating.clamp(0.0, 5.0);
+        }
+    }
+}
+
+impl ReadingStatisticsV1 {
+    fn from_book(book: &book::Book) -> Self {
+        Self {
+            schema_version: 1,
+            content_id: book.content_id.clone(),
+            reading_seconds: book.reading_seconds,
+            words_read: book.words_read,
+            finished_at: book.finished_at,
+        }
+    }
+
+    fn apply_to_book(&self, target: &mut book::Book) {
+        target.reading_seconds = self.reading_seconds;
+        target.words_read = self.words_read;
+        target.finished_at = self.finished_at;
+    }
+
+    fn merge_into_book(&self, target: &mut book::Book) {
+        target.reading_seconds = target.reading_seconds.max(self.reading_seconds);
+        target.words_read = target.words_read.max(self.words_read);
+        target.finished_at = match (target.finished_at, self.finished_at) {
+            (0, remote) => remote,
+            (local, 0) => local,
+            (local, remote) => local.min(remote),
+        };
+    }
+}
+
 fn merge_unique_json<T>(target: &mut Vec<T>, incoming: &[T])
 where
     T: Clone + Serialize,
@@ -298,24 +447,56 @@ pub(crate) fn merge_pulled_book_states(
     state: &AppState,
     items: &[crate::db::SyncEntity],
 ) -> Result<(), String> {
-    let remote = items
+    let progress = items
         .iter()
-        .filter(|item| item.kind == BOOK_STATE_KIND_V2 && item.deleted_at == 0)
-        .filter_map(|item| serde_json::from_value::<BookSyncStateV2>(item.json.clone()).ok())
+        .filter(|item| item.kind == READING_PROGRESS_KIND_V1 && item.deleted_at == 0)
+        .filter_map(|item| serde_json::from_value::<ReadingProgressV1>(item.json.clone()).ok())
+        .collect::<Vec<_>>();
+    let reading_data = items
+        .iter()
+        .filter(|item| item.kind == READING_DATA_KIND_V1 && item.deleted_at == 0)
+        .filter_map(|item| serde_json::from_value::<ReadingDataV1>(item.json.clone()).ok())
+        .collect::<Vec<_>>();
+    let statistics = items
+        .iter()
+        .filter(|item| item.kind == READING_STATISTICS_KIND_V1 && item.deleted_at == 0)
+        .filter_map(|item| serde_json::from_value::<ReadingStatisticsV1>(item.json.clone()).ok())
         .collect::<Vec<_>>();
     let model_tags = items
         .iter()
         .filter(|item| item.kind == MODEL_BOOK_TAGS_KIND_V1 && item.deleted_at == 0)
         .filter_map(|item| serde_json::from_value::<ModelBookTagsV1>(item.json.clone()).ok())
         .collect::<Vec<_>>();
-    if remote.is_empty() && model_tags.is_empty() {
+    if progress.is_empty()
+        && reading_data.is_empty()
+        && statistics.is_empty()
+        && model_tags.is_empty()
+    {
         return Ok(());
     }
     let mut lib = state
         .library
         .lock()
         .map_err(|_| "书架锁定失败".to_string())?;
-    for remote in remote {
+    for remote in progress {
+        if let Some(local) = lib
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.merge_into_book(local);
+        }
+    }
+    for remote in reading_data {
+        if let Some(local) = lib
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.merge_into_book(local);
+        }
+    }
+    for remote in statistics {
         if let Some(local) = lib
             .books
             .iter_mut()
@@ -407,11 +588,22 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
     let mut organization_seeds = Vec::new();
     for book in &books {
         if !book.content_id.is_empty() {
-            let state = BookSyncStateV2::from_book(book);
             batch.push((
-                BOOK_STATE_KIND_V2.to_string(),
+                READING_PROGRESS_KIND_V1.to_string(),
                 book.content_id.clone(),
-                serde_json::to_value(state).map_err(|e| e.to_string())?,
+                serde_json::to_value(ReadingProgressV1::from_book(book))
+                    .map_err(|e| e.to_string())?,
+            ));
+            batch.push((
+                READING_DATA_KIND_V1.to_string(),
+                book.content_id.clone(),
+                serde_json::to_value(ReadingDataV1::from_book(book)).map_err(|e| e.to_string())?,
+            ));
+            batch.push((
+                READING_STATISTICS_KIND_V1.to_string(),
+                book.content_id.clone(),
+                serde_json::to_value(ReadingStatisticsV1::from_book(book))
+                    .map_err(|e| e.to_string())?,
             ));
         }
         if !book.content_id.is_empty() && !book.model_tags.is_empty() {
@@ -478,7 +670,9 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     db.upsert_json_batch(&organization_seeds)?;
-    crate::private_sync::append_sync_entities(db)
+    crate::private_sync::append_sync_entities(db)?;
+    drop(db_guard);
+    crate::booklist_sync::seed_local_booklists(state)
 }
 
 /// Persist an explicit user organization edit. Unlike startup migration, this
@@ -522,7 +716,12 @@ pub(crate) fn persist_book_organization_entities(
     }
     let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    db.upsert_json_batch(&batch)
+    db.upsert_json_batch(&batch)?;
+    drop(db_guard);
+    if persist_collections {
+        crate::booklist_sync::persist_all_booklists(state)?;
+    }
+    Ok(())
 }
 
 /// Rehydrate organization fields before any startup projection can publish a
@@ -543,7 +742,10 @@ pub(crate) fn apply_local_organization_entities(state: &AppState) -> Result<(), 
         .filter(|item| item.kind == BOOK_COLLECTIONS_KIND_V1 && item.deleted_at == 0)
         .filter_map(|item| serde_json::from_value::<BookCollectionsV1>(item.json.clone()).ok())
         .collect::<Vec<_>>();
-    if user_tags.is_empty() && collections.is_empty() {
+    let has_booklist_entity = items
+        .iter()
+        .any(|item| item.kind == crate::booklist_sync::BOOKLIST_KIND_V1);
+    if user_tags.is_empty() && collections.is_empty() && !has_booklist_entity {
         return Ok(());
     }
     let mut library = state
@@ -573,13 +775,14 @@ pub(crate) fn apply_local_organization_entities(state: &AppState) -> Result<(), 
             remote.apply_to_book(local);
         }
     }
-    let changed = library.books.iter().any(|book| {
+    let mut changed = library.books.iter().any(|book| {
         before.get(&book.id).is_some_and(|(tags, collections)| {
             *tags != book.tags || *collections != book.collections
         })
     });
+    library.reconcile_booklists();
+    changed |= crate::booklist_sync::apply_downloaded_booklists(&mut library, &items);
     if changed {
-        library.reconcile_booklists();
         library.save()?;
     }
     Ok(())
@@ -594,28 +797,54 @@ pub(crate) fn apply_pending_book_state(
     if target.content_id.is_empty() {
         return Ok(false);
     }
-    let (book_state, model_tags, user_tags, collections) = {
+    let (progress, reading_data, statistics, book_state, model_tags, user_tags, collections) = {
         let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
         (
+            db.entity_json(READING_PROGRESS_KIND_V1, &target.content_id)?,
+            db.entity_json(READING_DATA_KIND_V1, &target.content_id)?,
+            db.entity_json(READING_STATISTICS_KIND_V1, &target.content_id)?,
             db.entity_json(BOOK_STATE_KIND_V2, &target.content_id)?,
             db.entity_json(MODEL_BOOK_TAGS_KIND_V1, &target.content_id)?,
             db.entity_json(USER_BOOK_TAGS_KIND_V1, &target.content_id)?,
             db.entity_json(BOOK_COLLECTIONS_KIND_V1, &target.content_id)?,
         )
     };
-    if book_state.is_none() && model_tags.is_none() && user_tags.is_none() && collections.is_none()
+    let has_split_state = progress.is_some() || reading_data.is_some() || statistics.is_some();
+    if !has_split_state
+        && book_state.is_none()
+        && model_tags.is_none()
+        && user_tags.is_none()
+        && collections.is_none()
     {
         return Ok(false);
     }
-    if let Some(value) = book_state {
-        let synced: BookSyncStateV2 = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    if let Some(value) = progress {
+        let synced: ReadingProgressV1 = serde_json::from_value(value).map_err(|e| e.to_string())?;
         synced.apply_to_book(target);
-        synced.apply_legacy_organization_to_book(
-            target,
-            user_tags.is_none(),
-            collections.is_none(),
-        );
+    }
+    if let Some(value) = reading_data {
+        let synced: ReadingDataV1 = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        synced.apply_to_book(target);
+    }
+    if let Some(value) = statistics {
+        let synced: ReadingStatisticsV1 =
+            serde_json::from_value(value).map_err(|e| e.to_string())?;
+        synced.apply_to_book(target);
+    }
+    // Local installations created before protocol v2 may still have this row.
+    // It is never uploaded by v2, and is only a one-time seed fallback.
+    if !has_split_state {
+        if let Some(value) = book_state {
+            let synced: BookSyncStateV2 =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            synced.apply_to_book(target);
+            synced.apply_legacy_organization_to_book(
+                target,
+                user_tags.is_none(),
+                collections.is_none(),
+            );
+        }
     }
     if let Some(value) = model_tags {
         if let Ok(tags) = serde_json::from_value::<ModelBookTagsV1>(value) {
@@ -645,7 +874,9 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
         let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
         db.all_sync_entities()?
     };
-    let mut remote_books: Vec<BookSyncStateV2> = Vec::new();
+    let mut progress: Vec<ReadingProgressV1> = Vec::new();
+    let mut reading_data: Vec<ReadingDataV1> = Vec::new();
+    let mut statistics: Vec<ReadingStatisticsV1> = Vec::new();
     let mut model_tags: Vec<ModelBookTagsV1> = Vec::new();
     let mut user_tags: Vec<UserBookTagsV1> = Vec::new();
     let mut collections: Vec<BookCollectionsV1> = Vec::new();
@@ -656,9 +887,20 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             continue;
         }
         match item.kind.as_str() {
-            BOOK_STATE_KIND_V2 => {
-                if let Ok(book) = serde_json::from_value::<BookSyncStateV2>(item.json.clone()) {
-                    remote_books.push(book);
+            READING_PROGRESS_KIND_V1 => {
+                if let Ok(value) = serde_json::from_value::<ReadingProgressV1>(item.json.clone()) {
+                    progress.push(value);
+                }
+            }
+            READING_DATA_KIND_V1 => {
+                if let Ok(value) = serde_json::from_value::<ReadingDataV1>(item.json.clone()) {
+                    reading_data.push(value);
+                }
+            }
+            READING_STATISTICS_KIND_V1 => {
+                if let Ok(value) = serde_json::from_value::<ReadingStatisticsV1>(item.json.clone())
+                {
+                    statistics.push(value);
                 }
             }
             MODEL_BOOK_TAGS_KIND_V1 => {
@@ -712,7 +954,25 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     let mut next_stats = stats.clone();
     let mut next_vocab = vocab_store.clone();
 
-    for remote in &remote_books {
+    for remote in &progress {
+        if let Some(local) = next_library
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.merge_into_book(local);
+        }
+    }
+    for remote in &reading_data {
+        if let Some(local) = next_library
+            .books
+            .iter_mut()
+            .find(|book| book.content_id == remote.content_id)
+        {
+            remote.merge_into_book(local);
+        }
+    }
+    for remote in &statistics {
         if let Some(local) = next_library
             .books
             .iter_mut()
@@ -748,6 +1008,8 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             remote.apply_to_book(local);
         }
     }
+    next_library.reconcile_booklists();
+    crate::booklist_sync::apply_downloaded_booklists(&mut next_library, &items);
     // Unmatched states are intentionally left in SQLite as pending; do not
     // create broken shelf entries with another computer's file path.
     next_vocab.list = vocab;

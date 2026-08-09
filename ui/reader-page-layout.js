@@ -45,10 +45,18 @@ function applyStyle(){
   if(useLocalStyle){
     c+='.rr body,.rr section,.rr article,.rr main,.rr header,.rr footer,.rr nav{margin-top:0 !important;margin-bottom:0 !important;padding-top:0 !important;padding-bottom:0 !important;}';
     c+='.rr p,.rr li,.rr blockquote{margin-top:0 !important;margin-bottom:'+S.paraSpacing+'em !important;padding-top:0 !important;padding-bottom:0 !important;}';
+    // 分页末尾如果只差段间距就能再放一整行，布局阶段会为该段写入一个
+    // 更小的变量值；普通段落和普通页面仍使用用户设置的 paraSpacing。
+    c+='.rr p.rr-page-tail-tight{margin-bottom:var(--rr-page-tail-gap,0px) !important;}';
     c+='.rr div{margin-top:0 !important;margin-bottom:0 !important;padding-top:0 !important;padding-bottom:0 !important;}';
-    // 保留章节首 logo 所在 div 的正常高度，但不要让 EPUB 自带的 h3{margin:2em 0}
-    // 在标题前后再各塞进数行空白。标题上下间距保持在一行以内。
+    // 不让 EPUB 自带的 h3{margin:2em 0} 在标题前后再塞进数行空白。
+    // 标题上下间距保持在一行以内。
     c+='.rr h1,.rr h2,.rr h3,.rr h4,.rr h5,.rr h6{margin-top:.55em !important;margin-bottom:.55em !important;padding-top:0 !important;padding-bottom:0 !important;}';
+    // 部分 EPUB（如《南明史》）把章节首的右上角小印章放在独占一行的 div 里。
+    // 该 div 只有一张 logo 图，却会占用整张图的高度，造成标题和正文之间看似
+    // “丢失”的大片空白。仅对首个、显式标记为 logo 的小装饰图改为右浮动：
+    // 它仍然可见，正文可以环绕；普通插图和没有 alt="logo" 的图片完全不受影响。
+    c+='.rr>div:first-child:has(>img[alt="logo"]){float:right !important;width:auto !important;height:auto !important;line-height:0 !important;margin:0 0 .35em .8em !important;padding:0 !important;}.rr>div:first-child:has(>img[alt="logo"])>img{display:block !important;margin:0 !important;padding:0 !important;}';
   }
   c+='.rr hr.rr-note-sep{display:none !important;}';
   c+='.rr *{break-before:auto !important;break-after:auto !important;break-inside:auto !important;page-break-before:auto !important;page-break-after:auto !important;page-break-inside:auto !important;-webkit-column-break-before:auto !important;-webkit-column-break-after:auto !important;-webkit-column-break-inside:auto !important;}';
@@ -132,7 +140,10 @@ function calibratePagedBoxHeight(baseH){
   for(var pass=0;pass<4;pass++){
     root.style.height=h+'px';
     var rr=root.getBoundingClientRect();
-    var bottom=rr.top+h-2;
+    // 根元素本身并不裁剪内容。此前这里额外预留 2px，再把哪怕仍在可视
+    // 范围内的末行判成“越界”，随后整行提前换栏，视觉上就留下了能放下一行
+    // 字的大空白。只按真实页面底边判断；最多容忍 1px 的小数像素误差。
+    var bottom=rr.top+h;
     var lines=firstColumnLineRectsForHeight();
     if(!lines.length)break;
     var bad=-1;
@@ -140,6 +151,7 @@ function calibratePagedBoxHeight(baseH){
       if(lines[i].bottom>bottom){bad=i;break;}
     }
     if(bad<0)break;
+    if(lines[bad].bottom-bottom<=1)break;
     if(bad===0){h=Math.max(minH,Math.floor(h-lineHeightPx()));break;}
     var next=Math.floor(lines[bad-1].bottom-rr.top+mg(S.marginBottom)+2);
     next=Math.max(minH,Math.min(h-1,next));
@@ -156,6 +168,47 @@ function packedPagedBoxHeight(baseH){
   var calibrated=calibratePagedBoxHeight(raw);
   var allowedTrim=Math.max(0,Math.floor(lineHeightPx())-mg(S.marginBottom));
   return Math.max(raw-allowedTrim,calibrated);
+}
+// 分栏的软换页会把“上一段的段后间距 + 下一段完整行”一起计入可用高度。
+// 这会造成页面明明还看得出一行空间，却因为默认的 .6em 段间距把下一段整体
+// 推走。仅压缩正好跨栏的一处段后间距，保留至少能放入完整下一行的空间；
+// 正文中部、滚动模式、标题和脚注的间距一律不动。
+function tightenPagedParagraphTails(){
+  if(!root||isScrollMode()||fastChapterLayout)return;
+  var stats={cross:0,fit:0,tightened:0};
+  root.__rrPageTailTightStats=stats;
+  var all=root.querySelectorAll('p.rr-page-tail-tight');
+  for(var clear=0;clear<all.length;clear++){all[clear].classList.remove('rr-page-tail-tight');all[clear].style.removeProperty('--rr-page-tail-gap');}
+  var paragraphs=[].slice.call(root.querySelectorAll('p')).filter(function(p){return !p.closest('li,blockquote,table,.rr-note-list,.duokan-footnote-content');});
+  if(paragraphs.length<2)return;
+  var rootBox=root.getBoundingClientRect(),height=Math.max(1,rootBox.height),step=Math.max(1,pageLayout().pageStep),line=Math.max(1,lineHeightPx()),range=document.createRange();
+  function bounds(p){
+    var first=null,last=null;
+    try{range.selectNodeContents(p);}catch(_){return null;}
+    var rects=range.getClientRects();
+    for(var rIndex=0;rIndex<rects.length;rIndex++){
+      var r=rects[rIndex];if(r.width<1||r.height<3)continue;
+      var page=Math.floor((r.left-rootBox.left+1)/step),item={page:page,top:r.top-rootBox.top,bottom:r.bottom-rootBox.top,height:r.height};
+      if(!first||item.page<first.page||(item.page===first.page&&item.top<first.top))first=item;
+      if(!last||item.page>last.page||(item.page===last.page&&item.bottom>last.bottom))last=item;
+    }
+    return first&&last?{first:first,last:last}:null;
+  }
+  for(var i=0;i<paragraphs.length-1;i++){
+    var previous=paragraphs[i],next=paragraphs[i+1];
+    var before=bounds(previous),after=bounds(next);
+    if(!before||!after||after.first.page!==before.last.page+1)continue;
+    stats.cross++;
+    // Range 的 rect 是字形墨迹框（本书为 27px），不是完整的 38px 行盒。
+    // 只用 visibleFree-line 会把字形下方那半截 leading 当作可用段间距，
+    // 本例会保留 6px，恰好仍让下一整行越出页底。将末行之后的半个
+    // leading 也预留出来；只要可视空间确实达到一行，便允许把这一处
+    // 段后距收紧到 0，而不会影响普通段落的用户间距。
+    var free=height-before.last.bottom,lineBoxTail=Math.max(0,Math.ceil((line-before.last.height)/2)),allowed=Math.max(0,Math.floor(free-line-lineBoxTail));
+    var fontSize=parseFloat(getComputedStyle(root).fontSize)||0;
+    var configured=Math.max(parseFloat(getComputedStyle(previous).marginBottom)||0,Math.max(0,Number(S.paraSpacing)||0)*fontSize);
+    if(free+1>=line&&allowed+1<configured){stats.fit++;previous.classList.add('rr-page-tail-tight');previous.style.setProperty('--rr-page-tail-gap',allowed+'px');stats.tightened++;}
+  }
 }
 function applyCols(){
   var vw=window.innerWidth, vh=viewportHeight(), pageH=pagedBoxHeight(), pl=pageLayout();
@@ -246,9 +299,12 @@ if(scroller){scroller.style.top='0';scroller.style.bottom='0';scroller.style.lef
     root.style.columnCount='auto';
     root.style.columnGap=pl.gap+'px';
   }
-  // 大章节首屏避免遍历全部文本节点；小章节继续执行精确行边界校准。
-  if(!fastLargeChapter)pageH=packedPagedBoxHeight(pageH);
+  // WebView2 的多栏排版会自行把完整行移到下一栏，额外缩短根容器反而会
+  // 无谓挤掉一整行（底部空白看起来还能容纳文字）。只有 macOS WebKit 仍需
+  // 这套校准来规避它会把末行字形裁成半截的已知问题。
+  if(!fastLargeChapter&&IS_MAC_WEBKIT)pageH=packedPagedBoxHeight(pageH);
   root.style.height=pageH+'px';
+  tightenPagedParagraphTails();
   // 末尾有一个强制分栏的占位空栏（rr-end），让滚动条能到达真正的最后一页；页数要减掉它
   pageStep=pl.pageStep;
   pagesInCh=fastLargeChapter?fastPagedPageCount(root):pagedPageCountFromContent(root);

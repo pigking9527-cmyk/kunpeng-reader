@@ -30,17 +30,18 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
   assert.doesNotMatch(html, /<div class="newsnow-layout-control"[^>]*>\s*<span[^>]*>布局<\/span>/);
 });
 
-test("NewsNow is gated behind the local experimental switch", () => {
+test("NewsNow is always available while its detailed local options remain configurable", () => {
   const experiments = fs.readFileSync(path.join(ui, "experimental-features.js"), "utf8");
-  assert.match(html, /id="experimental-newsnow"/);
+  assert.doesNotMatch(html, /id="experimental-newsnow"(?![-\w])/);
   assert.match(html, /id="experimental-newsnow-gear"/);
-  assert.match(html, /id="newsnow-settings-modal" class="modal"/);
+  assert.match(html, /id="newsnow-settings-modal" class="modal settings-detail-modal"/);
   assert.match(html, /id="newsnow-settings-close"/);
   assert.match(html, /id="experimental-newsnow-prefetch"/);
   assert.match(html, /id="experimental-newsnow-hide-return-icon"/);
   assert.match(html, /<section class="experimental-settings" aria-label="资讯">/);
   assert.doesNotMatch(html, /<div class="fp-title">实验室<\/div>/);
-  assert.match(experiments, /const DEFAULTS = Object\.freeze\(\{ newsnow: false, newsnowPrefetch: true, newsnowHideReturnIcon: false \}\)/);
+  assert.match(experiments, /const DEFAULTS = Object\.freeze\(\{ newsnowPrefetch: true, newsnowHideReturnIcon: false \}\)/);
+  assert.match(experiments, /if \(key === "newsnow"\) return true;/);
   assert.match(experiments, /set\("newsnowPrefetch", prefetch\.checked\)/);
   assert.match(experiments, /set\("newsnowHideReturnIcon", hideReturnIcon\.checked\)/);
   assert.match(experiments, /settingsModal\.classList\.add\("show"\)/);
@@ -149,7 +150,7 @@ test("Gesture settings live in common settings and return from news, library, an
   const readerHtml = fs.readFileSync(path.join(ui, "reader.html"), "utf8");
   const readerPage = fs.readFileSync(path.join(ui, "reader-page-annotations.js"), "utf8");
   const readerMessage = fs.readFileSync(path.join(ui, "reader-message.js"), "utf8");
-  assert.match(html, /id="gesture-gear"[^>]*>⚙<\/button>/);
+  assert.match(html, /id="gesture-gear"[^>]*fp-settings-detail[\s\S]*?data-i18n="settingsManage"[\s\S]*?<\/button>/);
   assert.match(html, /id="gesture-settings-modal"/);
   assert.doesNotMatch(html, /id="gesture-settings-close"/);
   assert.match(html, /id="set-gesture-enabled" type="checkbox"/);
@@ -166,6 +167,8 @@ test("Gesture settings live in common settings and return from news, library, an
   assert.match(html, /id="gesture-new" class="gesture-create-button"[^>]*>创建手势<\/button>/);
   assert.match(html, /id="gesture-global-precision-settings"[\s\S]*?id="gesture-hint-enabled"/);
   assert.match(styles, /\.gesture-settings-toggle \{[^}]*background: transparent;[^}]*font-size: 22px/);
+  assert.match(styles, /\.fp-settings-content::\-webkit-scrollbar-button,[\s\S]*?\.gesture-settings-card::\-webkit-scrollbar-button \{[^}]*display: none !important;[^}]*width: 0 !important;[^}]*height: 0 !important/);
+  assert.match(styles, /\.fp-settings-content::\-webkit-scrollbar-thumb,[\s\S]*?\.gesture-settings-card::\-webkit-scrollbar-thumb \{/);
   assert.match(styles, /\.gesture-settings-content \{[^}]*border-left: 2px solid/);
   assert.match(styles, /\.gesture-disclosure-toggle \{[^}]*font-size: 16px;[^}]*font-weight: 650/);
   assert.match(styles, /\.gesture-hint-settings-entry \{[^}]*font-size: 16px;[^}]*font-weight: 650/);
@@ -196,6 +199,12 @@ test("Gesture settings live in common settings and return from news, library, an
   assert.match(gestureUi, /kunpeng\.reader\.gesture-manager\.v1/);
   assert.match(gestureUi, /syncLegacyGesture/);
   assert.match(gestureUi, /kunpeng\.reader\.gesture-manager\.enabled\.v1/);
+  assert.match(gestureUi, /gestureSettings: normalizedGestureSettingsSyncPayload\(\)/);
+  assert.match(gestureUi, /app_settings_sync_get/);
+  assert.match(gestureUi, /app_settings_sync_save/);
+  assert.match(gestureUi, /hasGestureSettings/);
+  assert.match(gestureUi, /app-settings-synced/);
+  assert.match(gestureUi, /profile\.points\.length === api\.SAMPLE_COUNT/);
   assert.match(gestureUi, /return false;/);
   assert.match(gestureUi, /precisionMode: source\.precisionMode === "global"/);
   assert.match(gestureUi, /global\.ReaderNewsUI\?\.instance/);
@@ -249,12 +258,20 @@ test("Gesture settings live in common settings and return from news, library, an
   assert.ok(gestures.matchThreshold("1") < gestures.matchThreshold("5"));
   assert.ok(gestures.matchThreshold("10") > gestures.matchThreshold("5"));
 });
-test("Gesture feedback, reopen, and book-info actions are integrated across the shell and reader", () => {
+test("Gesture feedback, reopen, and contextual information are integrated across the shell and reader", () => {
   const gestureUi = fs.readFileSync(path.join(ui, "gesture-ui.js"), "utf8");
   const readerGesture = fs.readFileSync(path.join(ui, "reader-gesture.js"), "utf8");
   const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
   assert.match(html, /data-gesture-action="book_info"/);
+  assert.match(html, /data-gesture-action="book_info"[^>]*>[\s\S]*?信息提取／说明/);
   assert.match(html, /data-gesture-action="reopen_last"/);
+  assert.match(html, /id="gesture-info-modal"[^>]*role="dialog"/);
+  assert.match(html, /id="gesture-info-title"/);
+  assert.match(html, /id="gesture-info-body"/);
+  assert.match(html, /id="gesture-info-close"/);
+  assert.match(html, /id="stats-modal"[^>]*data-gesture-info-title="阅读统计"[^>]*data-gesture-info=/);
+  assert.match(html, /id="library-ai-page"[^>]*data-gesture-info-title="书库问答"[^>]*data-gesture-info=/);
+  assert.match(html, /id="newsnow-page"[^>]*data-gesture-info-title="资讯"[^>]*data-gesture-info=/);
   assert.match(html, /id="gesture-hint-font-size"/);
   assert.match(html, /id="gesture-hint-background-enabled"/);
   assert.match(html, /gesture-hint-background-control"><span>背景<\/span><input id="gesture-hint-background-enabled"[\s\S]*?id="gesture-hint-background"/);
@@ -282,6 +299,15 @@ test("Gesture feedback, reopen, and book-info actions are integrated across the 
   assert.match(gestureUi, /editorClose\.addEventListener\("click", \(\) => \{\s*if \(editor\.hidden\) closeSettings\(\);\s*else closeEditor\(\);/);
   assert.match(gestureUi, /globalPrecisionToggle\.addEventListener\("click"/);
   assert.match(gestureUi, /function showHint\(name\)/);
+  assert.match(gestureUi, /function gestureInfoForTarget\(target\)/);
+  assert.match(gestureUi, /target\?\.closest\?\.\("\[data-gesture-info\]"\)/);
+  assert.match(gestureUi, /if \(!body\) return null/);
+  assert.match(gestureUi, /function openGestureInfo\(info\)/);
+  assert.match(gestureUi, /function withGestureInfo\(target, surface\)/);
+  assert.match(gestureUi, /surface\.allowedActions\.concat\("book_info"\)/);
+  assert.match(gestureUi, /if \(action === "book_info"\) \{ openGestureInfo\(info\); return; \}/);
+  assert.match(gestureUi, /return withGestureInfo\(target, baseSurface\(target\)\)/);
+  assert.match(gestureUi, /没有说明时不会执行/);
   assert.match(gestureUi, /function previewMatch\(gesture\)/);
   assert.match(gestureUi, /paintTrail\(active\.points\);\s*previewMatch\(active\);/);
   assert.match(readerGesture, /paint\(active\.points\);\s*previewMatch\(active\);/);
@@ -293,12 +319,14 @@ test("Gesture feedback, reopen, and book-info actions are integrated across the 
   assert.match(styles, /\.gesture-hint-preview \{[^}]*min-height: 180px/);
   assert.match(styles, /\.gesture-hint-preview span \{[^}]*cursor: grab/);
   assert.match(styles, /\.gesture-hint-preview span, \.reader-gesture-hint \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap/);
+  assert.match(styles, /\.gesture-info-card \{[^}]*width: min\(560px/);
+  assert.match(styles, /\.gesture-info-body \{[^}]*white-space: pre-line/);
   assert.match(gestureUi, /function placeHintPreview\(\)/);
   assert.match(gestureUi, /function updateHintPreviewPosition\(event\)/);
   assert.match(readerGesture, /function placeHint\(settings\)/);
   assert.match(readerGesture, /if \(!settings\.enabled\) return;/);
   assert.match(gestureUi, /function cancelGestureKeepHint\(\)/);
-  assert.match(gestureUi, /scope: "global"/);
+  assert.match(gestureUi, /scope: normalizeScope\(action, source\.scope\)/);
   assert.match(gestureUi, /手势会在所有页面参与匹配/);
   assert.match(gestureUi, /function fallbackSurface\(target\)/);
   assert.match(gestureUi, /const gestureSettings = root\.getElementById\("gesture-settings-modal"\)/);
@@ -310,7 +338,7 @@ test("Gesture feedback, reopen, and book-info actions are integrated across the 
   assert.match(gestureUi, /matched && canApplyAction\(gesture\.surface, matched\.profile\.action\)/);
   assert.match(gestureUi, /onMatch\(matched\.profile\.action\)/);
   assert.match(gestureUi, /getElementById\("book-info-modal"\)/);
-  assert.match(gestureUi, /getElementById\("book-info-close"\)\?\.click\(\)/);
+  assert.match(gestureUi, /bookInfo\.classList\.remove\("show"\)/);
   assert.match(gestureUi, /getElementById\("book-organization-modal"\)/);
   assert.match(gestureUi, /getElementById\("book-organization-close"\)\?\.click\(\)/);
   assert.match(gestureUi, /getElementById\("booklist-modal"\)/);
@@ -345,6 +373,7 @@ test("Gesture feedback, reopen, and book-info actions are integrated across the 
   assert.doesNotMatch(readerGesture, /event\.target\?\.closest\?\.\("\.modal"\)/);
   assert.match(readerGesture, /function reopenReaderSurface\(\)/);
   assert.match(readerGesture, /global\.openReaderBookInfo/);
+  assert.match(readerGesture, /book_info: "信息提取／说明"/);
   assert.match(readerGesture, /action === "book_info" && typeof global\.openReaderBookInfo === "function"/);
   assert.match(readerGesture, /connectSharedSettings\(\)/);
   assert.match(readerGesture, /reader-gesture-settings-request/);

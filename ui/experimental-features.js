@@ -1,9 +1,9 @@
-/* Local-only opt-in switches for unfinished desktop capabilities. */
+/* Local-only options for desktop features that remain configurable. */
 (function exposeExperimentalFeatures(global) {
   "use strict";
 
   const STORAGE_KEY = "kunpeng.reader.experimental-features.v1";
-  const DEFAULTS = Object.freeze({ newsnow: false, newsnowPrefetch: true, newsnowHideReturnIcon: false });
+  const DEFAULTS = Object.freeze({ newsnowPrefetch: true, newsnowHideReturnIcon: false });
 
   function read() {
     try {
@@ -15,6 +15,9 @@
   }
 
   function enabled(key) {
+    // 资讯已是正式入口；菜单栏可见性由菜单栏设置独立控制，不再有第二个
+    // 容易让用户误以为功能被删除的总开关。
+    if (key === "newsnow") return true;
     return read()[key] === true;
   }
 
@@ -27,19 +30,16 @@
   }
 
   function init({ root = global.document } = {}) {
-    const news = root?.getElementById("experimental-newsnow");
     const gear = root?.getElementById("experimental-newsnow-gear");
     const settingsModal = root?.getElementById("newsnow-settings-modal");
     const closeSettings = root?.getElementById("newsnow-settings-close");
     const prefetch = root?.getElementById("experimental-newsnow-prefetch");
     const hideReturnIcon = root?.getElementById("experimental-newsnow-hide-return-icon");
-    if (!news || !gear || !settingsModal || !closeSettings || !prefetch || !hideReturnIcon) return null;
+    if (!gear || !settingsModal || !closeSettings || !prefetch || !hideReturnIcon) return null;
     const refresh = () => {
-      news.checked = enabled("newsnow");
       prefetch.checked = enabled("newsnowPrefetch");
       hideReturnIcon.checked = enabled("newsnowHideReturnIcon");
     };
-    news.addEventListener("change", () => set("newsnow", news.checked));
     prefetch.addEventListener("change", () => set("newsnowPrefetch", prefetch.checked));
     hideReturnIcon.addEventListener("change", () => set("newsnowHideReturnIcon", hideReturnIcon.checked));
     const close = () => {

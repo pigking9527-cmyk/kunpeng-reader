@@ -467,18 +467,41 @@ function init(){
     var sel=window.getSelection?window.getSelection():null;
     return !!(sel&&!sel.isCollapsed&&sel.toString().trim());
   }
+  function normalizedTapZones(){
+    var defaults=[{id:'zone-1',action:'prev',x:0,y:0,width:400,height:1000},{id:'zone-2',action:'center',x:400,y:0,width:200,height:1000},{id:'zone-3',action:'next',x:600,y:0,width:400,height:1000}];
+    var supplied=Array.isArray(S.clickZones)?S.clickZones.filter(function(item){return item&&typeof item==='object';}):[];
+    var source=(supplied.length?supplied:defaults).slice(0,12);
+    function overlaps(a,b){return a.x<b.x+b.width&&a.x+a.width>b.x&&a.y<b.y+b.height&&a.y+a.height>b.y;}
+    function trim(zone,blocker){
+      if(!overlaps(zone,blocker))return zone;
+      var l=Math.max(zone.x,blocker.x),t=Math.max(zone.y,blocker.y),r=Math.min(zone.x+zone.width,blocker.x+blocker.width),b=Math.min(zone.y+zone.height,blocker.y+blocker.height);
+      var parts=[Object.assign({},zone,{width:l-zone.x}),Object.assign({},zone,{x:r,width:zone.x+zone.width-r}),Object.assign({},zone,{height:t-zone.y}),Object.assign({},zone,{y:b,height:zone.y+zone.height-b})].filter(function(part){return part.width>=20&&part.height>=20;});
+      parts.sort(function(a,b){return b.width*b.height-a.width*a.height;});return parts[0]||null;
+    }
+    var normalized=source.map(function(raw,index){
+      var fallback=defaults[index]||{id:'zone-'+(index+1),action:'none',x:350,y:350,width:300,height:300};
+      var x=Math.max(0,Math.min(980,Math.round(Number(raw.x)||0))),y=Math.max(0,Math.min(980,Math.round(Number(raw.y)||0)));
+      return{id:typeof raw.id==='string'?raw.id:fallback.id,action:['prev','center','next','none'].indexOf(raw.action)>=0?raw.action:fallback.action,x:x,y:y,width:Math.max(20,Math.min(1000-x,Math.round(Number(raw.width)||fallback.width))),height:Math.max(20,Math.min(1000-y,Math.round(Number(raw.height)||fallback.height)))};
+    });
+    var accepted=[];normalized.forEach(function(zone){var candidate=zone;accepted.forEach(function(blocker){if(candidate)candidate=trim(candidate,blocker);});if(candidate)accepted.push(candidate);});return accepted;
+  }
+  function tapActionAt(x,y){
+    var nx=Math.max(0,Math.min(1000,Number(x)/Math.max(1,window.innerWidth)*1000)),ny=Math.max(0,Math.min(1000,Number(y)/Math.max(1,window.innerHeight)*1000));
+    var match=normalizedTapZones().find(function(zone){return nx>=zone.x&&nx<=zone.x+zone.width&&ny>=zone.y&&ny<=zone.y+zone.height;});
+    return match?match.action:'none';
+  }
   function rememberReaderJump(kind){
     var frac=pagesInCh>1?pageInCh/(pagesInCh-1):0;
     parent.postMessage({readerJump:{kind:kind==='footnote'?'footnote':'link',chapter:Math.max(0,curCh||0),chFrac:Math.max(0,Math.min(1,frac))}},'*');
   }
   function handleReaderTap(e){
     parent.postMessage({uiClick:1},'*');
-    var x=e.clientX;
+    var tapAction=tapActionAt(e.clientX,e.clientY);
     if(chapterPending>0){readerBugTrace('click','chapter_pending',e);return;}
     if(overlayOpen){
       readerBugTrace('click','overlay',e);
       // 关闭浮层的同一次中间点击也切换工具栏，不要求用户再点一次。
-      if(x>=window.innerWidth*0.4&&x<=window.innerWidth*0.6)parent.postMessage({centerTap:1},'*');
+      if(tapAction==='center')parent.postMessage({centerTap:1},'*');
       return;
     }
     // 点到已高亮的文字 → 出高亮菜单，不翻页
@@ -516,9 +539,10 @@ function init(){
       hideSelMenu();
     }
     var tapStarted=performance.now();
-    if(x>window.innerWidth*0.6){readerBugTrace('click','page_next',e);parent.postMessage({readerNavigated:1},'*');markPageTurnInput('tap');nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
-    else if(x<window.innerWidth*0.4){readerBugTrace('click','page_prev',e);parent.postMessage({readerNavigated:1},'*');markPageTurnInput('tap');prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
-    else{readerBugTrace('click','center',e);parent.postMessage({centerTap:1},'*');}
+    if(tapAction==='next'){readerBugTrace('click','page_next',e);parent.postMessage({readerNavigated:1},'*');markPageTurnInput('tap');nextPage();reportReaderPaintPerf('tap_next',tapStarted,'chapter='+curCh);}
+    else if(tapAction==='prev'){readerBugTrace('click','page_prev',e);parent.postMessage({readerNavigated:1},'*');markPageTurnInput('tap');prevPage();reportReaderPaintPerf('tap_prev',tapStarted,'chapter='+curCh);}
+    else if(tapAction==='center'){readerBugTrace('click','center',e);parent.postMessage({centerTap:1},'*');}
+    else readerBugTrace('click','none',e);
   }
   // macOS 的 WKWebView 在部分点击序列中较晚派发 click。只对正文空白/文字区
   // 使用更早的 pointerup 翻页，并吞掉紧随其后的 click，避免 Windows 行为变化。
@@ -653,14 +677,32 @@ var HL_COLORS=[
   {key:'p',labelKey:'pink',value:'rgba(255,143,184,.42)'}
 ];
 var HL_MENU_ACTIONS=[
-  {key:'web',icon:'🔍'}, {key:'dict',icon:'📖'}, {key:'translate',icon:'译'},
-  {key:'copy',icon:'📋'}, {key:'highlight',icon:'🖍'}, {key:'correct',icon:'✎'},
-  {key:'excerpt',icon:'▣'}, {key:'cross',icon:'📚'}, {key:'semantic',icon:'≈'},
-  {key:'aiReader',icon:'✨'}, {key:'note',icon:'📝'}, {key:'bookmark',icon:'🔖'}
+  {key:'web',icon:'web'}, {key:'dict',icon:'dict'}, {key:'translate',icon:'translate'},
+  {key:'copy',icon:'copy'}, {key:'highlight',icon:'highlight'}, {key:'correct',icon:'correct'},
+  {key:'excerpt',icon:'excerpt'}, {key:'cross',icon:'cross'}, {key:'semantic',icon:'semantic'},
+  {key:'aiReader',icon:'aiReader'}, {key:'note',icon:'note'}, {key:'bookmark',icon:'bookmark'}
 ];
 function defaultHlMenuConfig(){return HL_MENU_ACTIONS.map(function(a){return {key:a.key,show:true};});}
 function hlActionLabel(key){return readerPageText(key);}
 function hlActionIcon(key){for(var i=0;i<HL_MENU_ACTIONS.length;i++){if(HL_MENU_ACTIONS[i].key===key)return HL_MENU_ACTIONS[i].icon||'';}return '';}
+function hlActionIconMarkup(key){
+  var icons={
+    web:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="5.7"/><path d="m15.1 15.1 4.2 4.2"/></svg>',
+    dict:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5.3c3.1-1.2 5.5-.7 7.5 1.1v12c-2-1.8-4.4-2.3-7.5-1.1zM19.5 5.3c-3.1-1.2-5.5-.7-7.5 1.1v12c2-1.8 4.4-2.3 7.5-1.1z"/></svg>',
+    translate:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 6.5h8M8.5 4.5c0 5.1-1.9 8.5-4.5 10.5M5.7 11.5c1.4 1.4 3.1 2.5 5.3 3.1M15.2 7.5l4.3 10M16.7 14h5.1"/></svg>',
+    copy:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="7" width="10" height="12" rx="1.8"/><path d="M15.5 7V5.8A1.8 1.8 0 0 0 13.7 4H6.8A1.8 1.8 0 0 0 5 5.8v8.7a1.8 1.8 0 0 0 1.8 1.8H8"/></svg>',
+    highlight:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5.3 15.8 8.9-8.9 3.4 3.4-8.9 8.9-4.2.8zM13.3 7.8l1.4-1.4a1.7 1.7 0 0 1 2.4 0l1.2 1.2a1.7 1.7 0 0 1 0 2.4l-1.4 1.4M4 21h16"/></svg>',
+    remove:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 7.5h13M9 7.5V5.7h6v1.8M7.5 7.5l.8 11h7.4l.8-11M10.2 11v4.2M13.8 11v4.2"/></svg>',
+    correct:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="m8.3 12.1 2.3 2.4 5.1-5.2"/></svg>',
+    excerpt:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 9.1H5.8A1.8 1.8 0 0 0 4 10.9v3.3A1.8 1.8 0 0 0 5.8 16h1.7v-3.2H5.8M15.5 9.1h1.7a1.8 1.8 0 0 1 1.8 1.8v3.3a1.8 1.8 0 0 1-1.8 1.8h-1.7v-3.2h1.7"/></svg>',
+    cross:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h8v13H5zM13 8h6v10h-6zM7.5 9h3M7.5 12h3M15.2 11h1.8M15.2 14h1.8"/></svg>',
+    semantic:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6.2" cy="12" r="1.7"/><circle cx="17.8" cy="6.5" r="1.7"/><circle cx="17.8" cy="17.5" r="1.7"/><path d="m7.7 11.3 8.5-4M7.7 12.7l8.5 4"/></svg>',
+    aiReader:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.5 5.2L18.5 10l-5 1.7L12 17l-1.5-5.3L5.5 10l5-1.8zM18.4 15.1l.7 2.4 2.4.7-2.4.7-.7 2.4-.7-2.4-2.4-.7 2.4-.7z"/></svg>',
+    note:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 5.5h13v10.2h-7l-4.2 3v-3H5.5zM8.5 9h7M8.5 12h4.8"/></svg>',
+    bookmark:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10v15l-5-3.3-5 3.3z"/></svg>'
+  };
+  return icons[key]||'';
+}
 function hlColorLabel(color){return readerPageText((color&&color.labelKey)||'yellow');}
 function readHlMenuMode(){var m='';try{m=localStorage.getItem(HL_MENU_MODE_KEY)||'';}catch(_){}return (m==='text'||m==='icon'||m==='both')?m:'both';}
 function saveHlMenuMode(mode){localStorage.setItem(HL_MENU_MODE_KEY,mode);}
@@ -685,9 +727,10 @@ function updateActionButton(it){
   if(!it||!it.button)return;
   var mode=readHlMenuMode(),label=it.labelKey?readerPageText(it.labelKey):(it.label||hlActionLabel(it.key)),icon=it.icon||hlActionIcon(it.key);
   it.button.title=label;it.button.setAttribute('aria-label',label);
-  if(mode==='icon')it.button.textContent=icon||label;
+  var iconMarkup=hlActionIconMarkup(icon);
+  if(mode==='icon')it.button.innerHTML=iconMarkup||label;
   else if(mode==='text')it.button.textContent=label;
-  else it.button.textContent=(icon?icon+' ':'')+label;
+  else it.button.innerHTML=(iconMarkup?'<span class="hm-icon">'+iconMarkup+'</span>':'')+'<span class="hm-label">'+label+'</span>';
 }
 function refreshConfiguredMenus(){
   applyConfiguredMenu(selMenu,selMenuItems,selMenu&&selMenu._setBtn);
@@ -829,11 +872,15 @@ function renderHlSettings(){
   function moveDraggedRow(clientY){
     if(!dragState)return;
     var row=dragState.row;
-    row.style.top=(clientY-dragState.offsetY)+'px';
+    var bounds=list.getBoundingClientRect();
+    var maxTop=Math.max(bounds.top,bounds.bottom-row.offsetHeight);
+    var top=Math.max(bounds.top,Math.min(maxTop,clientY-dragState.offsetY));
+    var probeY=Math.max(bounds.top,Math.min(bounds.bottom,clientY));
+    row.style.top=top+'px';
     var rows=[].slice.call(list.querySelectorAll('.hs-row')).filter(function(r){return r!==row;});
     for(var i=0;i<rows.length;i++){
       var box=rows[i].getBoundingClientRect();
-      if(clientY<box.top+box.height/2){animateRowsAroundInsert(rows[i]);return;}
+      if(probeY<box.top+box.height/2){animateRowsAroundInsert(rows[i]);return;}
     }
     animateRowsAroundInsert(null);
   }
@@ -1473,7 +1520,7 @@ function setupHlUi(){
     {key:'dict',button:mDict},
     {key:'translate',button:mTr},
     {key:'copy',button:mCopy},
-    {key:'highlight',button:mDel,labelKey:'removeHighlight',icon:'🗑'},
+    {key:'highlight',button:mDel,labelKey:'removeHighlight',icon:'remove'},
     {key:'correct',button:mCorrect},
     {key:'excerpt',button:mExcerpt},
     {key:'cross',button:mCross},

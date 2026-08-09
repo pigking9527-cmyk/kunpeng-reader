@@ -45,6 +45,120 @@ window.addEventListener("storage", (event) => {
 });
 applyReaderAnimationSettings();
 
+const READER_TOOLBAR_ITEM_IDS = Object.freeze(["toc", "chapters", "tts", "annotations", "vocabulary", "settings"]);
+const READER_CLICK_ZONE_ACTIONS = Object.freeze(["prev", "center", "next", "none"]);
+const READER_LAYOUT_FONT_FAMILIES = Object.freeze([
+  "",
+  "'Microsoft YaHei',sans-serif",
+  "'SimSun',serif",
+  "'SimHei',sans-serif",
+  "'KaiTi',serif",
+  "'Kunpeng LXGW WenKai Lite','Microsoft YaHei',sans-serif",
+  "'Kunpeng Source Han Serif SC','SimSun',serif",
+  "'Kunpeng Zhuque Fangsong','FangSong','SimSun',serif",
+  "serif",
+  "sans-serif",
+]);
+const MAX_READER_CLICK_ZONES = 12;
+const DEFAULT_READER_CLICK_ZONES = Object.freeze([
+  Object.freeze({ id: "zone-1", action: "prev", x: 0, y: 0, width: 400, height: 1000 }),
+  Object.freeze({ id: "zone-2", action: "center", x: 400, y: 0, width: 200, height: 1000 }),
+  Object.freeze({ id: "zone-3", action: "next", x: 600, y: 0, width: 400, height: 1000 }),
+]);
+
+function normalizedReaderToolbarOrder(value) {
+  const source = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  const order = [];
+  source.forEach((id) => {
+    if (READER_TOOLBAR_ITEM_IDS.includes(id) && !seen.has(id)) { seen.add(id); order.push(id); }
+  });
+  READER_TOOLBAR_ITEM_IDS.forEach((id) => { if (!seen.has(id)) order.push(id); });
+  return order;
+}
+
+function readerZonesOverlap(a, b) {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+function trimReaderZoneAgainst(zone, blocker) {
+  if (!readerZonesOverlap(zone, blocker)) return zone;
+  const overlapLeft = Math.max(zone.x, blocker.x);
+  const overlapTop = Math.max(zone.y, blocker.y);
+  const overlapRight = Math.min(zone.x + zone.width, blocker.x + blocker.width);
+  const overlapBottom = Math.min(zone.y + zone.height, blocker.y + blocker.height);
+  const candidates = [
+    Object.assign({}, zone, { width: overlapLeft - zone.x }),
+    Object.assign({}, zone, { x: overlapRight, width: zone.x + zone.width - overlapRight }),
+    Object.assign({}, zone, { height: overlapTop - zone.y }),
+    Object.assign({}, zone, { y: overlapBottom, height: zone.y + zone.height - overlapBottom }),
+  ].filter((candidate) => candidate.width >= 20 && candidate.height >= 20);
+  candidates.sort((a, b) => b.width * b.height - a.width * a.height);
+  return candidates[0] || null;
+}
+
+function removeReaderZoneOverlaps(source) {
+  const accepted = [];
+  source.forEach((zone) => {
+    let candidate = zone;
+    accepted.forEach((blocker) => { if (candidate) candidate = trimReaderZoneAgainst(candidate, blocker); });
+    if (candidate) accepted.push(candidate);
+  });
+  return accepted;
+}
+
+function normalizedReaderClickZones(value) {
+  const supplied = Array.isArray(value) ? value.filter((item) => item && typeof item === "object") : [];
+  const source = (supplied.length ? supplied : DEFAULT_READER_CLICK_ZONES).slice(0, MAX_READER_CLICK_ZONES);
+  const usedIds = new Set();
+  const normalized = source.map((raw, index) => {
+    const fallback = DEFAULT_READER_CLICK_ZONES[index] || { id: `zone-${index + 1}`, action: "none", x: 350, y: 350, width: 300, height: 300 };
+    const x = Math.max(0, Math.min(980, Math.round(Number(raw.x) || 0)));
+    const y = Math.max(0, Math.min(980, Math.round(Number(raw.y) || 0)));
+    const width = Math.max(20, Math.min(1000 - x, Math.round(Number(raw.width) || fallback.width)));
+    const height = Math.max(20, Math.min(1000 - y, Math.round(Number(raw.height) || fallback.height)));
+    let id = typeof raw.id === "string" && /^[a-z0-9-]{1,40}$/i.test(raw.id) ? raw.id : fallback.id;
+    const baseId = id;
+    let suffix = 2;
+    while (usedIds.has(id)) { id = `${baseId}-${suffix}`; suffix += 1; }
+    usedIds.add(id);
+    return {
+      id,
+      action: READER_CLICK_ZONE_ACTIONS.includes(raw.action) ? raw.action : fallback.action,
+      x, y, width, height,
+    };
+  });
+  return removeReaderZoneOverlaps(normalized);
+}
+
+function readerClickActionAt(clientX, clientY, width, height) {
+  const viewportWidth = Math.max(1, Number(width) || 1);
+  const viewportHeight = Math.max(1, Number(height) || 1);
+  const x = Math.max(0, Math.min(1000, Number(clientX) / viewportWidth * 1000));
+  const y = Math.max(0, Math.min(1000, Number(clientY) / viewportHeight * 1000));
+  const match = normalizedReaderClickZones(settings.clickZones).find((zone) => (
+    x >= zone.x && x <= zone.x + zone.width && y >= zone.y && y <= zone.y + zone.height
+  ));
+  return match?.action || "none";
+}
+
+function applyReaderToolbarOrder(value) {
+  const toolbar = document.querySelector(".toolbar");
+  const anchor = toolbar?.querySelector(".search-wrap");
+  if (!toolbar || !anchor) return;
+  const elements = {
+    toc: [document.getElementById("toc-btn")],
+    chapters: [document.getElementById("prev-btn"), document.getElementById("next-btn")],
+    tts: [document.getElementById("tts-btn")],
+    annotations: [document.getElementById("hl-btn")],
+    vocabulary: [document.getElementById("vocab-btn")],
+    settings: [document.getElementById("reader-settings-toolbar-item")],
+  };
+  normalizedReaderToolbarOrder(value).forEach((id) => {
+    elements[id].filter(Boolean).forEach((element) => toolbar.insertBefore(element, anchor));
+  });
+}
+
 const DEFAULTS = {
   theme: "light",
   fontFamily: "",
@@ -82,6 +196,8 @@ const DEFAULTS = {
   showVocabularyButton: true,
   showTtsButton: true,
   showAnnotationButton: true,
+  toolbarOrder: READER_TOOLBAR_ITEM_IDS.slice(),
+  clickZones: DEFAULT_READER_CLICK_ZONES.map((zone) => Object.assign({}, zone)),
   showPageInfo: true,
   showReaderJumpBack: true,
   readerJumpBackDismissMode: "pages",
@@ -156,6 +272,16 @@ window.addEventListener("storage", (event) => {
 
 function normalizeModeSettings() {
   let changed = false;
+  const toolbarOrder = normalizedReaderToolbarOrder(settings.toolbarOrder);
+  if (!Array.isArray(settings.toolbarOrder) || toolbarOrder.some((id, index) => settings.toolbarOrder[index] !== id) || settings.toolbarOrder.length !== toolbarOrder.length) {
+    settings.toolbarOrder = toolbarOrder;
+    changed = true;
+  }
+  const clickZones = normalizedReaderClickZones(settings.clickZones);
+  if (!Array.isArray(settings.clickZones) || JSON.stringify(clickZones) !== JSON.stringify(settings.clickZones)) {
+    settings.clickZones = clickZones;
+    changed = true;
+  }
   if (!["local", "book"].includes(settings.styleMode)) {
     settings.styleMode = DEFAULTS.styleMode;
     changed = true;
@@ -304,7 +430,9 @@ window.ReaderSettings = Object.freeze({
     localStorage.setItem(READER_BOOK_APPEARANCE_KEY, JSON.stringify(bookAppearanceSettings));
     applyAppearanceSettings(appearanceForScope("default"));
   },
+  clickActionAt(clientX, clientY, width, height) { return readerClickActionAt(clientX, clientY, width, height); },
   applyToolbarVisibility() {
+    applyReaderToolbarOrder(settings.toolbarOrder);
     document.querySelector(".text-conversion-toggle")?.toggleAttribute("hidden", settings.showTextConversion === false);
     const hideChapterButtons = settings.showChapterButtons === false;
     document.getElementById("prev-btn")?.toggleAttribute("hidden", hideChapterButtons);
@@ -324,6 +452,39 @@ function normalizedJumpBackPosition(value, fallback) {
   return Math.max(0, Math.min(1000, Math.round(Number.isFinite(number) ? number : fallback)));
 }
 
+function normalizedReaderLayoutNumber(value, fallback, minimum, maximum, step = 1) {
+  const number = Number(value);
+  const bounded = Math.max(minimum, Math.min(maximum, Number.isFinite(number) ? number : fallback));
+  return Math.round((Math.round(bounded / step) * step) * 10) / 10;
+}
+
+function normalizedReaderLayoutSettings(value) {
+  if (!value || typeof value !== "object") return null;
+  const fontFamily = READER_LAYOUT_FONT_FAMILIES.includes(value.fontFamily) ? value.fontFamily : "";
+  const flowMode = value.flowMode === "scroll" ? "scroll" : "paged";
+  return {
+    version: 1,
+    fontFamily,
+    styleMode: value.styleMode === "book" ? "book" : "local",
+    textConversion: value.textConversion === "s2t" ? "s2t" : "t2s",
+    fontSize: normalizedReaderLayoutNumber(value.fontSize, DEFAULTS.fontSize, 12, 40),
+    noteFontSize: normalizedReaderLayoutNumber(value.noteFontSize, DEFAULTS.noteFontSize, 10, 22),
+    lineHeight: normalizedReaderLayoutNumber(value.lineHeight, DEFAULTS.lineHeight, 1, 2.6, 0.1),
+    paraSpacing: normalizedReaderLayoutNumber(value.paraSpacing, DEFAULTS.paraSpacing, 0, 2, 0.1),
+    letterSpacing: normalizedReaderLayoutNumber(value.letterSpacing, DEFAULTS.letterSpacing, 0, 5, 0.5),
+    marginTop: normalizedReaderLayoutNumber(value.marginTop, DEFAULTS.marginTop, 0, 160),
+    marginBottom: normalizedReaderLayoutNumber(value.marginBottom, DEFAULTS.marginBottom, 0, 160),
+    marginLeft: normalizedReaderLayoutNumber(value.marginLeft, DEFAULTS.marginLeft, 0, 240),
+    marginRight: normalizedReaderLayoutNumber(value.marginRight, DEFAULTS.marginRight, 0, 240),
+    dualPageGap: normalizedReaderLayoutNumber(value.dualPageGap, DEFAULTS.dualPageGap, 0, 120),
+    pageMode: flowMode === "scroll" ? "single" : (value.pageMode === "dual" ? "dual" : "single"),
+    flowMode,
+    pageTurnEffect: value.pageTurnEffect === "off" ? "off" : "horizontal",
+    pageTurnSpeed: normalizedReaderLayoutNumber(value.pageTurnSpeed, DEFAULTS.pageTurnSpeed, 0.5, 2, 0.1),
+    imagePagination: value.imagePagination === "continuous" ? "continuous" : "next-page",
+  };
+}
+
 function normalizedAppSettingsSyncPayload() {
   return {
     showReaderJumpBack: settings.showReaderJumpBack !== false,
@@ -335,6 +496,7 @@ function normalizedAppSettingsSyncPayload() {
     readerJumpBackIconSizePx: normalizeReaderJumpBackIconSizePx(settings.readerJumpBackIconSizePx),
     readerJumpBackPositionX: normalizedJumpBackPosition(settings.readerJumpBackPositionX, 950),
     readerJumpBackPositionY: normalizedJumpBackPosition(settings.readerJumpBackPositionY, 500),
+    readerLayoutSettings: normalizedReaderLayoutSettings(settings),
   };
 }
 
@@ -364,6 +526,9 @@ async function hydrateAppSettingsSync() {
     const remote = await readerSettingsInvoke("app_settings_sync_get");
     if (remote?.exists) {
       appSettingsSyncReady = false;
+      const remoteLayout = remote?.hasReaderLayoutSettings
+        ? normalizedReaderLayoutSettings(remote.readerLayoutSettings)
+        : null;
       setReaderSettings({
         showReaderJumpBack: remote.showReaderJumpBack !== false,
         readerJumpBackDismissMode: remote.readerJumpBackDismissMode === "time" ? "time" : "pages",
@@ -375,9 +540,11 @@ async function hydrateAppSettingsSync() {
           : readerJumpBackIconSizePxFromLegacyLevel(remote.readerJumpBackSizeLevel),
         readerJumpBackPositionX: normalizedJumpBackPosition(remote.readerJumpBackPositionX, 950),
         readerJumpBackPositionY: normalizedJumpBackPosition(remote.readerJumpBackPositionY, 500),
+        ...(remoteLayout || {}),
       });
-      lastAppSettingsSyncPayload = JSON.stringify(normalizedAppSettingsSyncPayload());
+      lastAppSettingsSyncPayload = remoteLayout ? JSON.stringify(normalizedAppSettingsSyncPayload()) : "";
       appSettingsSyncReady = true;
+      if (!remoteLayout) queueAppSettingsSyncSave();
       return;
     }
     appSettingsSyncReady = true;
@@ -605,13 +772,14 @@ function initSettingsUI() {
       scrollModeToggle.checked = settings.flowMode === "scroll";
       scrollModeToggle.title = readerSettingsT("enableScrollMode", "开启滚动模式");
     }
-    // 这里的文字描述“按一下将切换到什么”，与简/繁开关保持同一交互语义。
+    // 开关左侧始终描述正在生效的阅读模式，避免“开关关闭但文字仍写双页”
+    // 这类把操作目标误当成当前状态的歧义。
     if (dualModeLabel) dualModeLabel.textContent = dualModeToggle?.checked
-      ? readerSettingsT("singlePage", "单页")
-      : readerSettingsT("twoPages", "双页");
+      ? readerSettingsT("twoPages", "双页")
+      : readerSettingsT("singlePage", "单页");
     if (scrollModeLabel) scrollModeLabel.textContent = scrollModeToggle?.checked
-      ? readerSettingsT("pagedMode", "整屏")
-      : readerSettingsT("scrollMode", "滚动");
+      ? readerSettingsT("scrollMode", "滚动")
+      : readerSettingsT("pagedMode", "整屏");
   }
   if (dualModeToggle) {
     dualModeToggle.addEventListener("change", () => {
@@ -654,5 +822,146 @@ function initSettingsUI() {
   };
   bindSel("set-ttssrc", "ttsSource");
   bindRange("set-ttsrate", "v-ttsrate", "ttsRate", (v) => v.toFixed(1) + "×");
+
+  // 精简与经典界面共用同一份真实控件和设置状态。经典面板里的控件只是
+  // 可视镜像，所有输入都转发到阅读偏好中的主控件，避免两套数值分叉。
+  const quickSettingsPanel = document.getElementById("settings");
+  const quickSettingsModeKey = "readerQuickSettingsUiMode";
+  const quickMirrorSync = [];
+  function connectQuickMirror(proxyId, sourceId, proxyOutputId, sourceOutputId) {
+    const proxy = document.getElementById(proxyId);
+    const source = document.getElementById(sourceId);
+    const proxyOutput = proxyOutputId ? document.getElementById(proxyOutputId) : null;
+    const sourceOutput = sourceOutputId ? document.getElementById(sourceOutputId) : null;
+    if (!proxy || !source) return;
+    const sync = () => {
+      proxy.value = source.value;
+      if (proxyOutput && sourceOutput) proxyOutput.textContent = sourceOutput.textContent;
+    };
+    const forward = (event) => {
+      source.value = proxy.value;
+      source.dispatchEvent(new Event(event.type, { bubbles: true }));
+      sync();
+    };
+    proxy.addEventListener("input", forward);
+    proxy.addEventListener("change", forward);
+    source.addEventListener("input", sync);
+    source.addEventListener("change", sync);
+    quickMirrorSync.push(sync);
+    sync();
+  }
+  connectQuickMirror("quick-set-ttsrate", "set-ttsrate", "quick-v-ttsrate", "v-ttsrate");
+  connectQuickMirror("quick-set-style-mode", "set-style-mode");
+  connectQuickMirror("quick-set-note-size", "set-note-size", "quick-v-note-size", "v-note-size");
+  connectQuickMirror("quick-set-para", "set-para", "quick-v-para", "v-para");
+  connectQuickMirror("quick-set-letter", "set-letter", "quick-v-letter", "v-letter");
+  connectQuickMirror("quick-set-turnfx", "set-turnfx");
+  connectQuickMirror("quick-set-turnspeed", "set-turnspeed", "quick-v-turnspeed", "v-turnspeed");
+  connectQuickMirror("quick-set-mt", "set-mt");
+  connectQuickMirror("quick-set-mb", "set-mb");
+  connectQuickMirror("quick-set-ml", "set-ml");
+  connectQuickMirror("quick-set-mr", "set-mr");
+  const syncQuickMirrors = () => quickMirrorSync.forEach((sync) => sync());
+  const quickSettingsPreview = document.getElementById("reader-quick-layout-preview");
+  const QUICK_SETTINGS_PREVIEW_DURATION_MS = 1500;
+  const QUICK_SETTINGS_PREVIEW_EXTENSION_MS = 1000;
+  const QUICK_SETTINGS_PREVIEW_FADE_MS = 160;
+  let quickSettingsPreviewDeadline = 0;
+  let quickSettingsPreviewFadeTimer = 0;
+  let quickSettingsPreviewHideTimer = 0;
+  function hideQuickSettingsModePreview() {
+    if (quickSettingsPreviewDeadline > Date.now()) return scheduleQuickSettingsModePreviewFade();
+    quickSettingsPreview.hidden = true;
+    quickSettingsPreview.replaceChildren();
+    quickSettingsPreview.classList.remove("is-fading", "is-resetting");
+    quickSettingsPreviewDeadline = 0;
+    quickSettingsPreviewHideTimer = 0;
+  }
+  function scheduleQuickSettingsModePreviewFade() {
+    globalThis.clearTimeout(quickSettingsPreviewFadeTimer);
+    globalThis.clearTimeout(quickSettingsPreviewHideTimer);
+    const remaining = Math.max(0, quickSettingsPreviewDeadline - Date.now());
+    const fadeDelay = Math.max(0, remaining - QUICK_SETTINGS_PREVIEW_FADE_MS);
+    quickSettingsPreviewFadeTimer = globalThis.setTimeout(() => {
+      if (quickSettingsPreviewDeadline > Date.now() + QUICK_SETTINGS_PREVIEW_FADE_MS) return scheduleQuickSettingsModePreviewFade();
+      quickSettingsPreview.classList.add("is-fading");
+    }, fadeDelay);
+    quickSettingsPreviewHideTimer = globalThis.setTimeout(hideQuickSettingsModePreview, remaining);
+  }
+  function extendQuickSettingsModePreview() {
+    const now = Date.now();
+    if (quickSettingsPreview.hidden || quickSettingsPreviewDeadline <= now) return false;
+    quickSettingsPreviewDeadline += QUICK_SETTINGS_PREVIEW_EXTENSION_MS;
+    quickSettingsPreview.classList.add("is-resetting");
+    quickSettingsPreview.classList.remove("is-fading");
+    void quickSettingsPreview.offsetWidth;
+    quickSettingsPreview.classList.remove("is-resetting");
+    scheduleQuickSettingsModePreviewFade();
+    return true;
+  }
+  function showQuickSettingsModePreview() {
+    if (!quickSettingsPreview || !quickSettingsPanel) return;
+    const previewPanel = quickSettingsPanel.cloneNode(true);
+    previewPanel.removeAttribute("id");
+    previewPanel.setAttribute("aria-hidden", "true");
+    previewPanel.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
+    previewPanel.querySelectorAll("[for]").forEach((element) => element.removeAttribute("for"));
+    previewPanel.querySelectorAll("input, select, button, textarea").forEach((element) => {
+      element.disabled = true;
+      element.tabIndex = -1;
+    });
+    quickSettingsPreview.replaceChildren(previewPanel);
+    const now = Date.now();
+    const alreadyVisible = !quickSettingsPreview.hidden && quickSettingsPreviewDeadline > now;
+    quickSettingsPreviewDeadline = alreadyVisible
+      ? quickSettingsPreviewDeadline + QUICK_SETTINGS_PREVIEW_EXTENSION_MS
+      : now + QUICK_SETTINGS_PREVIEW_DURATION_MS;
+    quickSettingsPreview.hidden = false;
+    quickSettingsPreview.classList.add("is-resetting");
+    quickSettingsPreview.classList.remove("is-fading");
+    void quickSettingsPreview.offsetWidth;
+    quickSettingsPreview.classList.remove("is-resetting");
+    scheduleQuickSettingsModePreviewFade();
+  }
+  function setQuickSettingsMode(value, persist = true) {
+    const mode = value === "classic" ? "classic" : "compact";
+    if (quickSettingsPanel) quickSettingsPanel.dataset.quickUiMode = mode;
+    document.querySelectorAll("[data-quick-ui-mode-option]").forEach((button) => {
+      const active = button.dataset.quickUiModeOption === mode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    syncQuickMirrors();
+    if (persist) {
+      try { localStorage.setItem(quickSettingsModeKey, mode); } catch (_) {}
+    }
+  }
+  let quickSettingsPreviewLastPointerButton = null;
+  let quickSettingsPreviewLastPointerAt = 0;
+  function triggerQuickSettingsModePreview(event) {
+    const button = event.target?.closest?.("[data-quick-ui-mode-option]");
+    if (!button) return;
+    const now = Date.now();
+    if (event.type === "click" && button === quickSettingsPreviewLastPointerButton && now - quickSettingsPreviewLastPointerAt < 700) return;
+    if (event.type === "pointerdown") {
+      quickSettingsPreviewLastPointerButton = button;
+      quickSettingsPreviewLastPointerAt = now;
+    }
+    setQuickSettingsMode(button.dataset.quickUiModeOption);
+    showQuickSettingsModePreview();
+  }
+  // 预览本身位于偏好窗口之上。捕获阶段在按下时续时，避免等待 click 的抬起
+  // 事件，也让连续点击不会被预览层的重绘打断；click 仍保留给键盘操作。
+  document.addEventListener("pointerdown", triggerQuickSettingsModePreview, true);
+  document.addEventListener("click", triggerQuickSettingsModePreview, true);
+  quickSettingsPreview?.addEventListener("pointerdown", (event) => {
+    if (!extendQuickSettingsModePreview()) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+  let initialQuickSettingsMode = "compact";
+  try { initialQuickSettingsMode = localStorage.getItem(quickSettingsModeKey) || "compact"; } catch (_) {}
+  setQuickSettingsMode(initialQuickSettingsMode, false);
+  window.addEventListener("reader-settings-changed", syncQuickMirrors);
   applyReaderSettingsVisibility();
 }

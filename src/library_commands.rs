@@ -4,7 +4,7 @@ use crate::{
 };
 use book::Library;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 use tauri::{Emitter, Manager};
 
@@ -80,11 +80,14 @@ pub(crate) struct BookReadingTimeline {
 
 #[derive(Serialize)]
 pub(crate) struct BookListDto {
+    id: String,
     name: String,
     description: String,
     cover_book_id: String,
     cover: Option<String>,
     book_ids: Vec<String>,
+    reviews: HashMap<String, String>,
+    saved: bool,
 }
 
 fn booklist_snapshot(lib: &Library) -> Vec<BookListDto> {
@@ -93,6 +96,7 @@ fn booklist_snapshot(lib: &Library) -> Vec<BookListDto> {
         .map(|list| {
             let cover_book = lib.get(list.cover_book_id);
             BookListDto {
+                id: list.id.clone(),
                 name: list.name.clone(),
                 description: list.description.clone(),
                 cover_book_id: list.cover_book_id.to_string(),
@@ -102,6 +106,12 @@ fn booklist_snapshot(lib: &Library) -> Vec<BookListDto> {
                         .map(|_| format!("{RES_BASE}/cover/{}?v={}", book.id, book.cover_ver))
                 }),
                 book_ids: list.book_order.iter().map(u64::to_string).collect(),
+                reviews: list
+                    .reviews
+                    .iter()
+                    .map(|(id, review)| (id.to_string(), review.clone()))
+                    .collect(),
+                saved: list.saved,
             }
         })
         .collect()
@@ -410,6 +420,19 @@ pub(crate) fn delete_book_organization(
     if !matches!(kind.as_str(), "tag" | "collection") {
         return Err("无效的分类类型".to_string());
     }
+    let deleted_booklist_id = if kind == "collection" {
+        let mut lib = state
+            .library
+            .lock()
+            .map_err(|_| "书架锁定失败".to_string())?;
+        lib.reconcile_booklists();
+        lib.booklists
+            .iter()
+            .find(|list| list.name == name)
+            .map(|list| list.id.clone())
+    } else {
+        None
+    };
     let (changed_ids, result) = {
         let mut lib = state
             .library
@@ -441,6 +464,9 @@ pub(crate) fn delete_book_organization(
         kind == "tag",
         kind == "collection",
     )?;
+    if let Some(id) = deleted_booklist_id {
+        crate::booklist_sync::tombstone_booklist(state.inner(), &id)?;
+    }
     Ok(result)
 }
 
@@ -462,12 +488,19 @@ pub(crate) fn update_booklist(
     description: String,
     cover_book_id: String,
     book_ids: Vec<String>,
+    reviews: Option<HashMap<String, String>>,
 ) -> Result<Vec<BookListDto>, String> {
     let cover_book_id = cover_book_id.parse::<u64>().unwrap_or(0);
     let book_order = book_ids
         .into_iter()
         .filter_map(|id| id.parse::<u64>().ok())
         .collect::<Vec<_>>();
+    let reviews = reviews.map(|reviews| {
+        reviews
+            .into_iter()
+            .filter_map(|(id, review)| id.parse::<u64>().ok().map(|id| (id, review)))
+            .collect()
+    });
     let mut lib = state
         .library
         .lock()
@@ -487,10 +520,130 @@ pub(crate) fn update_booklist(
     {
         return Err("找不到这个书单".to_string());
     }
-    if lib.update_booklist(&name, description, cover_book_id, book_order) {
+    let list_id = lib
+        .booklists
+        .iter()
+        .find(|list| list.name.eq_ignore_ascii_case(name.trim()))
+        .map(|list| list.id.clone())
+        .ok_or("找不到书单")?;
+    if lib.update_booklist(&name, description, cover_book_id, book_order, reviews) {
         lib.save()?;
     }
-    Ok(booklist_snapshot(&lib))
+    let snapshot = booklist_snapshot(&lib);
+    drop(lib);
+    crate::booklist_sync::persist_booklist(state.inner(), &list_id)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub(crate) fn create_booklist(
+    state: tauri::State<AppState>,
+    name: String,
+) -> Result<Vec<BookListDto>, String> {
+    let mut lib = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    let list_id = lib.create_booklist(name).ok_or("书单名称不能为空")?;
+    lib.save()?;
+    let snapshot = booklist_snapshot(&lib);
+    drop(lib);
+    crate::booklist_sync::persist_booklist(state.inner(), &list_id)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub(crate) fn delete_booklist(
+    state: tauri::State<AppState>,
+    id: String,
+) -> Result<Vec<BookListDto>, String> {
+    let (changed_ids, snapshot) = {
+        let mut lib = state
+            .library
+            .lock()
+            .map_err(|_| "书架锁定失败".to_string())?;
+        let (_name, changed_ids) = lib.delete_booklist(id.trim()).ok_or("找不到书单")?;
+        lib.save()?;
+        (
+            changed_ids.into_iter().collect::<HashSet<_>>(),
+            booklist_snapshot(&lib),
+        )
+    };
+    if !changed_ids.is_empty() {
+        data_migration::persist_book_organization_entities(
+            state.inner(),
+            &changed_ids,
+            false,
+            true,
+        )?;
+    }
+    crate::booklist_sync::tombstone_booklist(state.inner(), id.trim())?;
+    Ok(snapshot)
+}
+
+/// Save a model-selected list into the same collection/booklist model as
+/// manually created lists. The model is never trusted with a title outside the
+/// locally retrieved candidate IDs because the UI only submits validated IDs.
+#[tauri::command]
+pub(crate) fn save_recommended_booklist(
+    state: tauri::State<AppState>,
+    name: String,
+    description: String,
+    book_ids: Vec<String>,
+    reviews: HashMap<String, String>,
+) -> Result<Vec<BookListDto>, String> {
+    let mut seen = HashSet::new();
+    let order = book_ids
+        .into_iter()
+        .filter_map(|id| id.parse::<u64>().ok())
+        .filter(|id| seen.insert(*id))
+        .collect::<Vec<_>>();
+    let selected = order.iter().copied().collect::<HashSet<_>>();
+    if selected.is_empty() {
+        return Err("请至少保留一本推荐图书".to_string());
+    }
+    let (changed_ids, list_id, snapshot) = {
+        let mut lib = state
+            .library
+            .lock()
+            .map_err(|_| "书架锁定失败".to_string())?;
+        let list_id = lib
+            .create_booklist(name.clone())
+            .ok_or("书单名称不能为空")?;
+        let list_name = lib
+            .booklists
+            .iter()
+            .find(|list| list.id == list_id)
+            .map(|list| list.name.clone())
+            .ok_or("找不到新建书单")?;
+        let before = lib
+            .books
+            .iter()
+            .filter(|book| selected.contains(&book.id))
+            .map(|book| (book.id, book.collections.clone()))
+            .collect::<HashMap<_, _>>();
+        lib.add_organization_to_books(&selected, "collection", vec![list_name.clone()]);
+        let normalized_reviews = reviews
+            .into_iter()
+            .filter_map(|(id, review)| id.parse::<u64>().ok().map(|id| (id, review)))
+            .collect::<BTreeMap<_, _>>();
+        lib.update_booklist(&list_name, description, 0, order, Some(normalized_reviews));
+        lib.save()?;
+        let changed_ids = lib
+            .books
+            .iter()
+            .filter(|book| {
+                before
+                    .get(&book.id)
+                    .is_some_and(|old| *old != book.collections)
+            })
+            .map(|book| book.id)
+            .collect::<HashSet<_>>();
+        (changed_ids, list_id, booklist_snapshot(&lib))
+    };
+    data_migration::persist_book_organization_entities(state.inner(), &changed_ids, false, true)?;
+    crate::booklist_sync::persist_booklist(state.inner(), &list_id)?;
+    Ok(snapshot)
 }
 
 #[tauri::command]

@@ -10,9 +10,20 @@
   const MAX_CUSTOM_PALETTES = 10;
   const MAX_BACKGROUND_IMAGE_BYTES = 10 * 1024 * 1024;
   const MAX_INLINE_BACKGROUND_IMAGE_CHARS = 160000; // legacy migration only
+  const TOOLBAR_ITEM_IDS = Object.freeze(["toc", "chapters", "tts", "annotations", "vocabulary", "settings"]);
   const invoke = global.__TAURI__?.core?.invoke;
-  const readerPreferenceT = (key, fallback, values) => global.ReaderI18n?.t?.(key, values) || fallback;
+  // 语言文件比偏好页晚更新或被旧缓存复用时，ReaderI18n 会回显键名。
+  // 偏好页不能把内部键名当作可见文案，因此此处稳定退回到内置文案。
+  const readerPreferenceT = (key, fallback, values) => {
+    const translated = global.ReaderI18n?.t?.(key, values);
+    return translated && translated !== key ? translated : fallback;
+  };
   const preferencesContent = modal.querySelector(".reader-preferences-content");
+  const preferencesCard = modal.querySelector(".reader-preferences-card");
+  const preferencesNavToggle = modal.querySelector("#reader-preferences-nav-toggle");
+  const PREFERENCE_NAV_COLLAPSED_KEY = "readerPreferencesNavCollapsed";
+  let preferenceNavCollapsed = false;
+  try { preferenceNavCollapsed = localStorage.getItem(PREFERENCE_NAV_COLLAPSED_KEY) === "1"; } catch (_) {}
 
   const preferencesScrollbar = modal.querySelector("#reader-preferences-scrollbar");
   const preferencesScrollThumb = modal.querySelector("#reader-preferences-scroll-thumb");
@@ -29,6 +40,19 @@
   let suppressPaletteClickUntil = 0;
   let preferencesScrollDrag = null;
   let jumpBackPreviewDrag = null;
+  let toolbarPointerDrag = null;
+
+  function applyPreferenceNavState() {
+    preferencesCard?.classList.toggle("nav-collapsed", preferenceNavCollapsed);
+    if (!preferencesNavToggle) return;
+    const expanded = !preferenceNavCollapsed;
+    const label = readerPreferenceT(expanded ? "collapsePreferenceNavigation" : "expandPreferenceNavigation", expanded ? "收起分类" : "展开分类");
+    preferencesNavToggle.setAttribute("aria-expanded", String(expanded));
+    preferencesNavToggle.setAttribute("aria-label", label);
+    preferencesNavToggle.title = label;
+    preferencesNavToggle.classList.toggle("is-expanded", expanded);
+    requestAnimationFrame(updatePreferencesScrollbar);
+  }
 
   function jumpBackIconPixels(iconSizePx) {
     const size = Number(iconSizePx);
@@ -230,6 +254,138 @@
     document.getElementById("reader-progress-group")?.toggleAttribute("hidden", settings.showPageInfo === false);
   }
 
+  function normalizedToolbarOrder(value) {
+    const source = Array.isArray(value) ? value : [];
+    const known = new Set(TOOLBAR_ITEM_IDS);
+    const seen = new Set();
+    const order = [];
+    source.forEach((id) => {
+      if (known.has(id) && !seen.has(id)) { seen.add(id); order.push(id); }
+    });
+    TOOLBAR_ITEM_IDS.forEach((id) => { if (!seen.has(id)) order.push(id); });
+    return order;
+  }
+
+  function toolbarOrderFromList(list) {
+    return [...list.querySelectorAll(":scope > [data-toolbar-item]")].map((item) => item.dataset.toolbarItem);
+  }
+
+  function renderToolbarOrder(settings) {
+    const list = document.getElementById("reader-toolbar-order-list");
+    if (!list || toolbarPointerDrag) return;
+    const items = new Map([...list.querySelectorAll("[data-toolbar-item]")].map((item) => [item.dataset.toolbarItem, item]));
+    const order = normalizedToolbarOrder(settings.toolbarOrder);
+    order.forEach((id, index) => {
+      const item = items.get(id);
+      if (!item) return;
+      item.setAttribute("aria-posinset", String(index + 1));
+      item.setAttribute("aria-setsize", String(order.length));
+      const handle = item.querySelector(".reader-toolbar-drag-handle");
+      const name = item.querySelector("strong")?.textContent?.trim() || id;
+      if (handle) handle.setAttribute("aria-label", `${name}，按住并上下拖动调整顺序`);
+      list.append(item);
+    });
+    const required = list.querySelector("[data-toolbar-required]");
+    if (required) { required.checked = true; required.disabled = true; }
+  }
+
+  function animateToolbarPlaceholder(state, beforeNode) {
+    const list = state.placeholder.parentElement;
+    if (!list || beforeNode === state.placeholder) return;
+    if (beforeNode === state.item) beforeNode = state.item.nextElementSibling;
+    const before = new Map();
+    [...list.children].forEach((item) => {
+      if (item !== state.item && item !== state.placeholder) before.set(item, item.getBoundingClientRect());
+    });
+    list.insertBefore(state.placeholder, beforeNode || null);
+    [...list.children].forEach((item) => {
+      if (item === state.item || item === state.placeholder) return;
+      const first = before.get(item);
+      if (!first) return;
+      const last = item.getBoundingClientRect();
+      const dy = first.top - last.top;
+      if (!dy) return;
+      item.style.transition = "none";
+      item.style.transform = `translateY(${dy}px)`;
+      item.getBoundingClientRect();
+      requestAnimationFrame(() => {
+        item.style.transition = "transform .2s cubic-bezier(.2,.8,.2,1), border-color .16s ease, box-shadow .16s ease, background .16s ease";
+        item.style.transform = "";
+      });
+    });
+  }
+
+  function moveToolbarDrag(event) {
+    const state = toolbarPointerDrag;
+    if (!state || state.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const list = state.placeholder.parentElement;
+    const bounds = list?.getBoundingClientRect();
+    const maxTop = bounds ? Math.max(bounds.top, bounds.bottom - state.item.offsetHeight) : event.clientY;
+    const top = bounds ? Math.max(bounds.top, Math.min(maxTop, event.clientY - state.offsetY)) : event.clientY - state.offsetY;
+    const probeY = bounds ? Math.max(bounds.top, Math.min(bounds.bottom, event.clientY)) : event.clientY;
+    state.item.style.top = `${top}px`;
+    if (Math.abs(probeY - state.startY) > 4) state.moved = true;
+    const target = document.elementFromPoint(event.clientX, probeY)?.closest?.("[data-toolbar-item]");
+    if (target && target !== state.item && target.parentElement === list) {
+      const box = target.getBoundingClientRect();
+      animateToolbarPlaceholder(state, probeY < box.top + box.height / 2 ? target : target.nextElementSibling);
+    } else {
+      if (bounds && probeY > bounds.bottom - 4) animateToolbarPlaceholder(state, null);
+    }
+    const viewport = preferencesContent?.getBoundingClientRect();
+    if (viewport && event.clientY < viewport.top + 28) preferencesContent.scrollTop -= 12;
+    else if (viewport && event.clientY > viewport.bottom - 28) preferencesContent.scrollTop += 12;
+  }
+
+  function finishToolbarDrag(event) {
+    const state = toolbarPointerDrag;
+    if (!state || state.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    toolbarPointerDrag = null;
+    try { state.capture.releasePointerCapture(event.pointerId); } catch (_) {}
+    state.placeholder.parentElement?.insertBefore(state.item, state.placeholder);
+    state.placeholder.remove();
+    state.item.classList.remove("dragging");
+    state.item.removeAttribute("aria-grabbed");
+    state.item.style.position = "";
+    state.item.style.left = "";
+    state.item.style.top = "";
+    state.item.style.width = "";
+    state.item.style.height = "";
+    const list = document.getElementById("reader-toolbar-order-list");
+    if (list) global.ReaderSettings.update({ toolbarOrder: toolbarOrderFromList(list) });
+  }
+
+  function beginToolbarDrag(event, item, handle) {
+    if (event.button !== 0 || toolbarPointerDrag) return;
+    event.preventDefault();
+    const box = item.getBoundingClientRect();
+    const placeholder = document.createElement("div");
+    placeholder.className = "reader-toolbar-order-placeholder";
+    placeholder.style.height = `${box.height}px`;
+    item.parentElement.insertBefore(placeholder, item.nextSibling);
+    item.classList.add("dragging");
+    item.setAttribute("aria-grabbed", "true");
+    item.style.position = "fixed";
+    item.style.left = `${box.left}px`;
+    item.style.top = `${box.top}px`;
+    item.style.width = `${box.width}px`;
+    item.style.height = `${box.height}px`;
+    toolbarPointerDrag = { item, placeholder, capture: handle, pointerId: event.pointerId, offsetY: event.clientY - box.top, startY: event.clientY, moved: false };
+    try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+  }
+
+  function moveToolbarItemByKeyboard(item, direction) {
+    const list = item.parentElement;
+    const sibling = direction < 0 ? item.previousElementSibling : item.nextElementSibling;
+    if (!list || !sibling) return;
+    if (direction < 0) list.insertBefore(item, sibling);
+    else list.insertBefore(sibling, item);
+    global.ReaderSettings.update({ toolbarOrder: toolbarOrderFromList(list) });
+    item.querySelector(".reader-toolbar-drag-handle")?.focus();
+  }
+
   function palettePatch(palette) {
     if (builtinPalettes.some((item) => item.id === palette.id)) {
       return { backgroundPreset: palette.id, customPaletteId: "", customBackgroundImage: "", theme: palette.theme, textColor: "", linkColor: "", selectionColor: "", footnoteBackground: "", footnoteBorder: "" };
@@ -288,19 +444,25 @@
   function movePaletteDrag(clientX, clientY) {
     const state = pointerDrag;
     if (!state) return;
-    state.tile.style.left = `${clientX - state.offsetX}px`;
-    state.tile.style.top = `${clientY - state.offsetY}px`;
-    const target = document.elementFromPoint(clientX, clientY)?.closest?.("[data-palette-id]");
+    const grid = state.placeholder.parentElement;
+    const bounds = grid?.getBoundingClientRect();
+    const maxLeft = bounds ? Math.max(bounds.left, bounds.right - state.tile.offsetWidth) : clientX;
+    const maxTop = bounds ? Math.max(bounds.top, bounds.bottom - state.tile.offsetHeight) : clientY;
+    const left = bounds ? Math.max(bounds.left, Math.min(maxLeft, clientX - state.offsetX)) : clientX - state.offsetX;
+    const top = bounds ? Math.max(bounds.top, Math.min(maxTop, clientY - state.offsetY)) : clientY - state.offsetY;
+    const probeX = bounds ? Math.max(bounds.left, Math.min(bounds.right, clientX)) : clientX;
+    const probeY = bounds ? Math.max(bounds.top, Math.min(bounds.bottom, clientY)) : clientY;
+    state.tile.style.left = `${left}px`;
+    state.tile.style.top = `${top}px`;
+    const target = document.elementFromPoint(probeX, probeY)?.closest?.("[data-palette-id]");
     if (target && target !== state.tile) {
       const box = target.getBoundingClientRect();
-      const before = clientY < box.top + box.height / 2 || (clientY <= box.bottom && clientX < box.left + box.width / 2) ? target : target.nextElementSibling;
+      const before = probeY < box.top + box.height / 2 || (probeY <= box.bottom && probeX < box.left + box.width / 2) ? target : target.nextElementSibling;
       animatePaletteInsert(state, before === state.tile ? state.tile.nextElementSibling : before);
       state.moved = true;
       return;
     }
-    const grid = state.placeholder.parentElement;
-    const box = grid?.getBoundingClientRect();
-    if (box && clientY > box.bottom - 4) {
+    if (bounds && probeY > bounds.bottom - 4) {
       animatePaletteInsert(state, null);
       state.moved = true;
     }
@@ -471,14 +633,19 @@
     if (imageName) imageName.textContent = settings.customBackgroundImage ? readerPreferenceT("backgroundImported", "已导入图片背景") : "";
     const clearBook = modal.querySelector("#pref-clear-book-appearance");
     if (clearBook) clearBook.hidden = scope !== "book" || !global.ReaderSettings.hasBookAppearance?.();
-    const image = document.getElementById("pref-image-pagination");
-    if (image) image.value = settings.imagePagination === "continuous" ? "continuous" : "next-page";
+    const imagePagination = settings.imagePagination === "continuous" ? "continuous" : "next-page";
+    modal.querySelectorAll("[data-image-pagination]").forEach((button) => {
+      const selected = button.dataset.imagePagination === imagePagination;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-checked", String(selected));
+    });
     const dualPageGap = dualPageGapPixels(jumpBackSettings.dualPageGap);
     const dualPageGapInput = document.getElementById("pref-dual-page-gap");
     if (dualPageGapInput) dualPageGapInput.value = String(dualPageGap);
     const dualPageGapValue = document.getElementById("pref-dual-page-gap-value");
     if (dualPageGapValue) dualPageGapValue.textContent = `${dualPageGap} px`;
     modal.querySelectorAll("[data-pref-bool]").forEach((input) => { input.checked = settings[input.dataset.prefBool] !== false; });
+    renderToolbarOrder(global.ReaderSettings.get());
     const jumpBackMode = jumpBackSettings.readerJumpBackDismissMode === "time" ? "time" : "pages";
     const jumpBackModeSelect = document.getElementById("pref-reader-jump-back-dismiss-mode");
     if (jumpBackModeSelect) jumpBackModeSelect.value = jumpBackMode;
@@ -512,6 +679,11 @@
   }
 
   openButton.addEventListener("click", (event) => { event.stopPropagation(); global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, true); render(); });
+  preferencesNavToggle?.addEventListener("click", () => {
+    preferenceNavCollapsed = !preferenceNavCollapsed;
+    try { localStorage.setItem(PREFERENCE_NAV_COLLAPSED_KEY, preferenceNavCollapsed ? "1" : "0"); } catch (_) {}
+    applyPreferenceNavState();
+  });
   closeButton?.addEventListener("click", () => global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, false));
   modal.addEventListener("click", (event) => { if (event.target === modal) global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, false); });
   global.addEventListener("keydown", (event) => { if (event.key === "Escape" && global.ReaderShell?.isOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES)) global.ReaderShell.closeOverlay(); });
@@ -535,6 +707,7 @@
   preferencesScrollThumb?.addEventListener("pointerup", finishPreferencesScrollDrag);
   preferencesScrollThumb?.addEventListener("pointercancel", finishPreferencesScrollDrag);
   global.addEventListener("resize", updatePreferencesScrollbar);
+  global.addEventListener("reader-language-changed", applyPreferenceNavState);
   if (typeof ResizeObserver === "function" && preferencesContent) new ResizeObserver(updatePreferencesScrollbar).observe(preferencesContent);
   modal.querySelectorAll("[data-pref-section]").forEach((button) => button.addEventListener("click", () => setSection(button.dataset.prefSection)));
   modal.querySelectorAll("[data-pref-scope]").forEach((button) => button.addEventListener("click", () => { if (!button.disabled) { scope = button.dataset.prefScope; render(); } }));
@@ -559,7 +732,9 @@ reader.onload = async () => {
   });
   document.getElementById("pref-clear-background-image")?.addEventListener("click", () => updateAppearance({ customBackgroundImage: "", customBackgroundAssetId: "", customBackgroundAssetSha256: "", customBackgroundAssetMime: "", customBackgroundAssetBytes: 0 }));
   document.getElementById("pref-add-palette")?.addEventListener("click", addCurrentPalette);
-  document.getElementById("pref-image-pagination")?.addEventListener("change", (event) => global.ReaderSettings.update({ imagePagination: event.target.value === "continuous" ? "continuous" : "next-page" }));
+  modal.querySelectorAll("[data-image-pagination]").forEach((button) => button.addEventListener("click", () => {
+    global.ReaderSettings.update({ imagePagination: button.dataset.imagePagination === "continuous" ? "continuous" : "next-page" });
+  }));
   document.getElementById("pref-dual-page-gap")?.addEventListener("input", (event) => {
     const value = dualPageGapPixels(event.target.value);
     const output = document.getElementById("pref-dual-page-gap-value");
@@ -645,6 +820,18 @@ reader.onload = async () => {
     global.ReaderSettings.update(patch);
   });
   modal.querySelectorAll("[data-pref-bool]").forEach((input) => input.addEventListener("change", () => global.ReaderSettings.update({ [input.dataset.prefBool]: input.checked })));
+  document.querySelectorAll("#reader-toolbar-order-list [data-toolbar-item]").forEach((item) => {
+    const handle = item.querySelector(".reader-toolbar-drag-handle");
+    handle?.addEventListener("pointerdown", (event) => beginToolbarDrag(event, item, handle));
+    handle?.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      moveToolbarItemByKeyboard(item, event.key === "ArrowUp" ? -1 : 1);
+    });
+  });
+  global.addEventListener("pointermove", moveToolbarDrag, true);
+  global.addEventListener("pointerup", finishToolbarDrag, true);
+  global.addEventListener("pointercancel", finishToolbarDrag, true);
   document.getElementById("pref-reset-colors")?.addEventListener("click", () => updateAppearance({
     // 正文颜色保留；其余颜色和自定义背景恢复软件默认值。
     backgroundPreset: "light", customPaletteId: "", customBackgroundColor: "#fffdf8", customBackgroundImage: "",
@@ -677,6 +864,7 @@ reader.onload = async () => {
     paletteSyncReady = true;
     render();
   }
+  applyPreferenceNavState();
   render();
   hydrateSyncedPalettes();
 })(window);

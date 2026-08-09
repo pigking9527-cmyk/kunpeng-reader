@@ -77,6 +77,54 @@
     "pt-BR": { defaultOpenTitle: "Aplicativos padrão", defaultOpenDescription: "A versão instalada pode abrir arquivos EPUB e PDF. Defina-a nos Aplicativos padrão do Windows por tipo de arquivo.", defaultOpenButton: "Definir padrões EPUB / PDF", recoveryTitle: "Pontos de recuperação", recoveryLoading: "Carregando o estado dos pontos de recuperação…", recoveryCreate: "Criar agora", recoveryCreating: "Criando…", recoverySelected: "Restaurar ponto selecionado", recoveryRestoring: "Restaurando…", recoveryStatus: "{count} pontos de recuperação mantidos ({size}); mais recente: {latest}. Um é criado diariamente, com até 7 mantidos.", recoveryEmpty: "Ainda não há pontos de recuperação. O aplicativo cria um por dia e mantém até 7.", recoveryOption: "Ponto de recuperação {created} ({size})", recoverySelect: "Escolher ponto de recuperação", dataExport: "⬆ Exportar pacote de dados", dataImport: "⬇ Importar pacote de dados", recoveryReadFailed: "Não foi possível ler o estado dos pontos de recuperação: {error}" }
   };
   Object.entries(SETTINGS_COPY).forEach(([locale, copy]) => Object.assign(COPY[locale], copy));
+  const SETTINGS_LAYOUT_COPY = {
+    en: { settingsLayoutIntro: "Grouped by use case; one category is shown at a time", settingsCategories: "Settings categories", settingsBasic: "Basic", settingsBasicHint: "Language, startup, and global visual behavior", settingsShelfImport: "Shelf & import", settingsShelfImportHint: "Shelf information density, opening behavior, and automatic import", settingsReadingInteraction: "Reading & interaction", settingsReadingInteractionHint: "Input methods, reading aids, and content extensions", settingsSmart: "Smart features", settingsSmartHint: "Models, indexes, and AI classification", settingsDataSystem: "Data & system", settingsDataSystemHint: "Recovery points, migration, and low-frequency system actions", settingsDetail: "Details", settingsManageFolders: "Manage folders", settingsManage: "Manage", settingsFilter: "Filters", settingsConfigure: "Configure", settingsManageIndex: "Manage index", settingsManageServices: "Manage services", settingsShelfPreview: "Shelf card preview", settingsPreviewBook: "Book title", gesture: "Mouse gestures" },
+    "zh-CN": { settingsLayoutIntro: "按使用场景分类，每次只显示一类设置", settingsCategories: "设置分类", settingsBasic: "基础", settingsBasicHint: "软件语言、启动和全局视觉体验", settingsShelfImport: "书架与导入", settingsShelfImportHint: "控制书架信息密度、打开方式和自动收书", settingsReadingInteraction: "阅读与交互", settingsReadingInteractionHint: "输入方式、阅读辅助和内容扩展", settingsSmart: "智能功能", settingsSmartHint: "模型、索引和智能分类集中管理", settingsDataSystem: "数据与系统", settingsDataSystemHint: "恢复点、迁移和低频系统操作", settingsDetail: "详细设置", settingsManageFolders: "管理目录", settingsManage: "管理", settingsFilter: "筛选条件", settingsConfigure: "配置", settingsManageIndex: "管理索引", settingsManageServices: "管理服务", settingsShelfPreview: "书架卡片预览", settingsPreviewBook: "图书标题", gesture: "鼠标手势" },
+    "zh-TW": { settingsLayoutIntro: "依使用情境分類，每次只顯示一類設定", settingsCategories: "設定分類", settingsBasic: "基礎", settingsBasicHint: "軟體語言、啟動與全域視覺體驗", settingsShelfImport: "書架與匯入", settingsShelfImportHint: "控制書架資訊密度、開啟方式與自動匯入", settingsReadingInteraction: "閱讀與互動", settingsReadingInteractionHint: "輸入方式、閱讀輔助與內容擴充", settingsSmart: "智慧功能", settingsSmartHint: "集中管理模型、索引與 AI 分類", settingsDataSystem: "資料與系統", settingsDataSystemHint: "恢復點、遷移與低頻系統操作", settingsDetail: "詳細設定", settingsManageFolders: "管理目錄", settingsManage: "管理", settingsFilter: "篩選條件", settingsConfigure: "設定", settingsManageIndex: "管理索引", settingsManageServices: "管理服務", settingsShelfPreview: "書架卡片預覽", settingsPreviewBook: "圖書標題", gesture: "滑鼠手勢" },
+    ja: { settingsLayoutIntro: "用途別に分類し、1つのカテゴリだけを表示します", settingsCategories: "設定カテゴリ", settingsBasic: "基本", settingsBasicHint: "言語、起動、全体の表示動作", settingsShelfImport: "本棚と取り込み", settingsShelfImportHint: "本棚の情報量、開き方、自動取り込み", settingsReadingInteraction: "読書と操作", settingsReadingInteractionHint: "入力方法、読書補助、コンテンツ拡張", settingsSmart: "スマート機能", settingsSmartHint: "モデル、索引、AI分類をまとめて管理", settingsDataSystem: "データとシステム", settingsDataSystemHint: "復元ポイント、移行、低頻度のシステム操作", settingsDetail: "詳細設定", settingsManageFolders: "フォルダー管理", settingsManage: "管理", settingsFilter: "絞り込み", settingsConfigure: "設定", settingsManageIndex: "索引を管理", settingsManageServices: "サービス管理", settingsShelfPreview: "本棚カードのプレビュー", settingsPreviewBook: "書名", gesture: "マウスジェスチャー" },
+    ko: { settingsLayoutIntro: "사용 목적별로 분류해 한 번에 한 범주만 표시합니다", settingsCategories: "설정 범주", settingsBasic: "기본", settingsBasicHint: "언어, 시작 및 전체 시각 동작", settingsShelfImport: "책장 및 가져오기", settingsShelfImportHint: "책장 정보 밀도, 열기 방식 및 자동 가져오기", settingsReadingInteraction: "읽기 및 상호작용", settingsReadingInteractionHint: "입력 방식, 읽기 보조 및 콘텐츠 확장", settingsSmart: "스마트 기능", settingsSmartHint: "모델, 색인 및 AI 분류 통합 관리", settingsDataSystem: "데이터 및 시스템", settingsDataSystemHint: "복구 지점, 마이그레이션 및 낮은 빈도의 시스템 작업", settingsDetail: "세부 설정", settingsManageFolders: "폴더 관리", settingsManage: "관리", settingsFilter: "필터 조건", settingsConfigure: "설정", settingsManageIndex: "색인 관리", settingsManageServices: "서비스 관리", settingsShelfPreview: "책장 카드 미리보기", settingsPreviewBook: "책 제목", gesture: "마우스 제스처" },
+  };
+  Object.keys(COPY).forEach((locale) => Object.assign(COPY[locale], SETTINGS_LAYOUT_COPY.en, SETTINGS_LAYOUT_COPY[locale] || {}));
+  const SETTINGS_NAVIGATION_COPY = {
+    "zh-CN": { settingsCollapseNavigation: "收起分类", settingsExpandNavigation: "展开分类" },
+    "zh-TW": { settingsCollapseNavigation: "收起分類", settingsExpandNavigation: "展開分類" },
+    en: { settingsCollapseNavigation: "Collapse categories", settingsExpandNavigation: "Expand categories" },
+    ja: { settingsCollapseNavigation: "カテゴリを折りたたむ", settingsExpandNavigation: "カテゴリを展開" },
+    ko: { settingsCollapseNavigation: "범주 접기", settingsExpandNavigation: "범주 펼치기" },
+    fr: { settingsCollapseNavigation: "Réduire les catégories", settingsExpandNavigation: "Développer les catégories" },
+    de: { settingsCollapseNavigation: "Kategorien einklappen", settingsExpandNavigation: "Kategorien ausklappen" },
+    es: { settingsCollapseNavigation: "Contraer categorías", settingsExpandNavigation: "Expandir categorías" },
+    ru: { settingsCollapseNavigation: "Свернуть категории", settingsExpandNavigation: "Развернуть категории" },
+    "pt-BR": { settingsCollapseNavigation: "Recolher categorias", settingsExpandNavigation: "Expandir categorias" },
+  };
+  Object.entries(SETTINGS_NAVIGATION_COPY).forEach(([locale, copy]) => Object.assign(COPY[locale], copy));
+  const RECOVERY_CREATE_SHORT_COPY = {
+    "zh-CN": "创建", "zh-TW": "建立", en: "Create", ja: "作成", ko: "만들기",
+    fr: "Créer", de: "Erstellen", es: "Crear", ru: "Создать", "pt-BR": "Criar",
+  };
+  Object.entries(RECOVERY_CREATE_SHORT_COPY).forEach(([locale, label]) => { COPY[locale].recoveryCreateShort = label; });
+  const DATA_PACKAGE_COMPACT_COPY = {
+    "zh-CN": ["导出数据包", "导入数据包"], "zh-TW": ["匯出資料包", "匯入資料包"],
+    en: ["Export data", "Import data"], ja: ["データを書き出す", "データを読み込む"], ko: ["데이터 내보내기", "데이터 가져오기"],
+    fr: ["Exporter", "Importer"], de: ["Exportieren", "Importieren"], es: ["Exportar", "Importar"],
+    ru: ["Экспорт", "Импорт"], "pt-BR": ["Exportar", "Importar"],
+  };
+  Object.entries(DATA_PACKAGE_COMPACT_COPY).forEach(([locale, labels]) => { [COPY[locale].dataExport, COPY[locale].dataImport] = labels; });
+  const RECOVERY_DIALOG_COPY = {
+    "zh-CN": ["恢复这个恢复点？", "软件会先自动创建当前数据的保护恢复点，再恢复书架、阅读数据、软件设置、手势和阅读背景图。请先关闭所有阅读窗口。", "恢复", "取消", "恢复失败", "创建恢复点失败", "恢复完成", "数据已恢复，书架将重新加载。"],
+    "zh-TW": ["恢復這個恢復點？", "軟體會先自動建立目前資料的保護恢復點，再恢復書架、閱讀資料、軟體設定、手勢和閱讀背景圖。請先關閉所有閱讀視窗。", "恢復", "取消", "恢復失敗", "建立恢復點失敗", "恢復完成", "資料已恢復，書架將重新載入。"],
+    en: ["Restore this recovery point?", "The app will first protect the current data, then restore the shelf, reading data, settings, gestures, and reading backgrounds. Close all reader windows first.", "Restore", "Cancel", "Restore failed", "Could not create recovery point", "Restore complete", "Your data has been restored. The shelf will now reload."],
+    ja: ["この復元ポイントに戻しますか？", "現在のデータを保護してから、本棚、読書データ、設定、ジェスチャー、背景を復元します。先にすべての読書ウィンドウを閉じてください。", "復元", "キャンセル", "復元に失敗しました", "復元ポイントを作成できませんでした", "復元完了", "データを復元しました。本棚を再読み込みします。"],
+    ko: ["이 복구 지점으로 복원할까요?", "현재 데이터를 먼저 보호한 뒤 책장, 읽기 데이터, 설정, 제스처와 읽기 배경을 복원합니다. 모든 읽기 창을 먼저 닫으세요.", "복원", "취소", "복원 실패", "복구 지점 생성 실패", "복원 완료", "데이터를 복원했습니다. 책장을 다시 불러옵니다."],
+    fr: ["Restaurer ce point ?", "L’application protégera d’abord les données actuelles, puis restaurera la bibliothèque, les données de lecture, les réglages, les gestes et les arrière-plans. Fermez d’abord toutes les fenêtres de lecture.", "Restaurer", "Annuler", "Échec de la restauration", "Échec de la création du point", "Restauration terminée", "Les données ont été restaurées. La bibliothèque va être rechargée."],
+    de: ["Diesen Punkt wiederherstellen?", "Die App schützt zuerst die aktuellen Daten und stellt dann Bibliothek, Lesedaten, Einstellungen, Gesten und Hintergründe wieder her. Schließen Sie zuerst alle Lesefenster.", "Wiederherstellen", "Abbrechen", "Wiederherstellung fehlgeschlagen", "Punkt konnte nicht erstellt werden", "Wiederherstellung abgeschlossen", "Die Daten wurden wiederhergestellt. Die Bibliothek wird neu geladen."],
+    es: ["¿Restaurar este punto?", "La aplicación protegerá primero los datos actuales y después restaurará la biblioteca, los datos de lectura, los ajustes, los gestos y los fondos. Cierra antes todas las ventanas de lectura.", "Restaurar", "Cancelar", "Error al restaurar", "No se pudo crear el punto", "Restauración completada", "Los datos se han restaurado. La biblioteca se volverá a cargar."],
+    ru: ["Восстановить эту точку?", "Приложение сначала защитит текущие данные, затем восстановит библиотеку, данные чтения, настройки, жесты и фон. Сначала закройте все окна чтения.", "Восстановить", "Отмена", "Ошибка восстановления", "Не удалось создать точку", "Восстановление завершено", "Данные восстановлены. Библиотека будет перезагружена."],
+    "pt-BR": ["Restaurar este ponto?", "O aplicativo primeiro protegerá os dados atuais e depois restaurará a biblioteca, os dados de leitura, as configurações, os gestos e os fundos. Feche antes todas as janelas de leitura.", "Restaurar", "Cancelar", "Falha na restauração", "Falha ao criar o ponto", "Restauração concluída", "Os dados foram restaurados. A biblioteca será recarregada."],
+  };
+  Object.entries(RECOVERY_DIALOG_COPY).forEach(([locale, values]) => {
+    [COPY[locale].recoveryConfirmTitle, COPY[locale].recoveryConfirmMessage, COPY[locale].recoveryConfirmAction, COPY[locale].recoveryDialogCancel, COPY[locale].recoveryFailedTitle, COPY[locale].recoveryCreateFailedTitle, COPY[locale].recoverySucceededTitle, COPY[locale].recoverySucceededMessage] = values;
+  });
   // 打开 Windows 默认应用设置后，使用轻提示而非阻塞式系统对话框。
   // 这里独立于设置面板文案，确保十种应用语言均有可读提示。
   const DEFAULT_APPS_NOTICE_COPY = {
@@ -105,19 +153,32 @@
     "pt-BR": { syncTitle: "Sincronização", accountLabel: "Conta", password: "Senha", register: "Criar conta", login: "Entrar", recoverPassword: "Recuperar senha", boundEmail: "E-mail vinculado", emailCode: "Código por e-mail", newLoginPassword: "Nova senha (ao menos 8 caracteres)", resetAndLogin: "Redefinir e entrar", accountPrefix: "Conta: ", syncNow: "Sincronizar", accountSecurity: "Segurança da conta", logout: "Sair", syncContent: "Conteúdo sincronizado", syncProgress: "Progresso de leitura e posição de retomada", syncReadingData: "Marcadores, destaques, notas, avaliações, etiquetas e coleções", syncVocabulary: "Vocabulário", syncStatistics: "Estatísticas de leitura", syncTags: "Etiquetas de classificação por IA", syncApi: "Configurações de API de IA e tradução (sem segredos)", syncHistory: "Histórico de IA e perguntas da biblioteca (opcional)", syncSecrets: "Chaves de API e tradução criptografadas (opcional)", smartReading: "Leitura por IA, perguntas da biblioteca e tradução", smartReadingHelp: "Etiquetas de classificação e configurações são sincronizadas por padrão. Ative o histórico e as chaves nas configurações de sincronização.", syncSettings: "Configurações de sincronização", lastSync: "Última sincronização: {time}", lastSyncNever: "Nunca sincronizado", syncFilesNote: "Entre para sincronizar dispositivos; os arquivos dos livros nunca são enviados.", notLoggedIn: "Não conectado", searchBooks: "Pesquisar livros", shelfSearch: "Pesquisa de texto em toda a biblioteca", searchPlaceholder: "Pesquisar título / autor / descrição", shelfSearchPlaceholder: "Pesquisar toda a biblioteca; pressione Enter…", clearSearch: "Limpar pesquisa", noSearchHistory: "Sem histórico de pesquisa" }
   };
   Object.entries(ACCOUNT_SEARCH_COPY).forEach(([locale, copy]) => Object.assign(COPY[locale], copy));
-  const SOFTWARE_SETTINGS_SYNC_COPY = {
-    "zh-CN": "软件设置",
-    "zh-TW": "軟體設定",
-    en: "Software settings",
-    ja: "ソフトウェア設定",
-    ko: "소프트웨어 설정",
-    fr: "Réglages du logiciel",
-    de: "Softwareeinstellungen",
-    es: "Ajustes del software",
-    ru: "Настройки программы",
-    "pt-BR": "Configurações do software",
+  const SYNC_CONNECTIVITY_COPY = {
+    "zh-CN": { syncNow: "立即同步", serviceUnchecked: "未检测", serviceChecking: "检测中", serviceCommunicating: "通信中", serviceOnline: "服务畅通", serviceOffline: "连接异常" },
+    "zh-TW": { syncNow: "立即同步", serviceUnchecked: "未檢測", serviceChecking: "檢測中", serviceCommunicating: "通訊中", serviceOnline: "服務暢通", serviceOffline: "連線異常" },
+    en: { syncNow: "Sync now", serviceUnchecked: "Not checked", serviceChecking: "Checking", serviceCommunicating: "Connecting", serviceOnline: "Service online", serviceOffline: "Connection issue" },
+    ja: { syncNow: "今すぐ同期", serviceUnchecked: "未確認", serviceChecking: "確認中", serviceCommunicating: "通信中", serviceOnline: "接続良好", serviceOffline: "接続異常" },
+    ko: { syncNow: "지금 동기화", serviceUnchecked: "확인 안 됨", serviceChecking: "확인 중", serviceCommunicating: "통신 중", serviceOnline: "서비스 정상", serviceOffline: "연결 이상" },
+    fr: { syncNow: "Synchroniser", serviceUnchecked: "Non vérifié", serviceChecking: "Vérification", serviceCommunicating: "Connexion", serviceOnline: "Service disponible", serviceOffline: "Problème de connexion" },
+    de: { syncNow: "Jetzt synchronisieren", serviceUnchecked: "Nicht geprüft", serviceChecking: "Wird geprüft", serviceCommunicating: "Verbindung", serviceOnline: "Dienst erreichbar", serviceOffline: "Verbindungsproblem" },
+    es: { syncNow: "Sincronizar ahora", serviceUnchecked: "Sin comprobar", serviceChecking: "Comprobando", serviceCommunicating: "Conectando", serviceOnline: "Servicio disponible", serviceOffline: "Problema de conexión" },
+    ru: { syncNow: "Синхронизировать сейчас", serviceUnchecked: "Не проверено", serviceChecking: "Проверка", serviceCommunicating: "Подключение", serviceOnline: "Сервис доступен", serviceOffline: "Ошибка подключения" },
+    "pt-BR": { syncNow: "Sincronizar agora", serviceUnchecked: "Não verificado", serviceChecking: "Verificando", serviceCommunicating: "Conectando", serviceOnline: "Serviço disponível", serviceOffline: "Problema de conexão" },
   };
-  Object.entries(SOFTWARE_SETTINGS_SYNC_COPY).forEach(([locale, label]) => { COPY[locale].syncSoftwareSettings = label; });
+  Object.entries(SYNC_CONNECTIVITY_COPY).forEach(([locale, copy]) => Object.assign(COPY[locale], copy));
+  const SYNC_CONTENT_SCOPE_COPY = {
+    "zh-CN": { syncProgress: "阅读进度、续读位置与阅读时间线", syncReadingData: "书签、高亮、批注、评分、标签、收藏夹与书单", syncStatistics: "阅读统计（时长、字数与完成时间）", syncSoftwareSettings: "软件设置（排版、工具栏、手势等）", syncPalettes: "自定义阅读主题与背景" },
+    "zh-TW": { syncProgress: "閱讀進度、續讀位置與閱讀時間軸", syncReadingData: "書籤、標示、批註、評分、標籤、收藏夾與書單", syncStatistics: "閱讀統計（時間、字數與完成時間）", syncSoftwareSettings: "軟體設定（排版、工具列、手勢等）", syncPalettes: "自訂閱讀主題與背景" },
+    en: { syncProgress: "Progress, resume position and reading timeline", syncReadingData: "Bookmarks, highlights, notes, ratings, tags, collections and booklists", syncStatistics: "Reading statistics (time, words and completion)", syncSoftwareSettings: "Software settings (layout, toolbar, gestures and more)", syncPalettes: "Custom reading themes and backgrounds" },
+    ja: { syncProgress: "進捗、再開位置、読書タイムライン", syncReadingData: "しおり、ハイライト、注釈、評価、タグ、コレクション、読書リスト", syncStatistics: "読書統計（時間、文字数、完読）", syncSoftwareSettings: "ソフトウェア設定（レイアウト、ツールバー、ジェスチャーなど）", syncPalettes: "カスタム読書テーマと背景" },
+    ko: { syncProgress: "진행률, 이어 읽기 위치 및 읽기 타임라인", syncReadingData: "책갈피, 하이라이트, 메모, 평점, 태그, 컬렉션 및 독서 목록", syncStatistics: "독서 통계(시간, 글자 수 및 완독)", syncSoftwareSettings: "소프트웨어 설정(레이아웃, 도구 모음, 제스처 등)", syncPalettes: "사용자 읽기 테마 및 배경" },
+    fr: { syncProgress: "Progression, reprise et chronologie de lecture", syncReadingData: "Signets, surlignages, notes, évaluations, étiquettes, collections et listes", syncStatistics: "Statistiques (durée, mots et achèvement)", syncSoftwareSettings: "Réglages (mise en page, barre d’outils, gestes, etc.)", syncPalettes: "Thèmes et arrière-plans personnalisés" },
+    de: { syncProgress: "Fortschritt, Leseposition und Zeitleiste", syncReadingData: "Lesezeichen, Markierungen, Notizen, Bewertungen, Tags, Sammlungen und Leselisten", syncStatistics: "Lesestatistik (Zeit, Wörter und Abschluss)", syncSoftwareSettings: "Einstellungen (Layout, Symbolleiste, Gesten usw.)", syncPalettes: "Eigene Lesethemen und Hintergründe" },
+    es: { syncProgress: "Progreso, posición y cronología de lectura", syncReadingData: "Marcadores, resaltados, notas, valoraciones, etiquetas, colecciones y listas", syncStatistics: "Estadísticas (tiempo, palabras y finalización)", syncSoftwareSettings: "Ajustes (diseño, barra, gestos y más)", syncPalettes: "Temas y fondos de lectura personalizados" },
+    ru: { syncProgress: "Прогресс, позиция и хронология чтения", syncReadingData: "Закладки, выделения, заметки, оценки, теги, коллекции и списки", syncStatistics: "Статистика (время, слова и завершение)", syncSoftwareSettings: "Настройки (макет, панель, жесты и другое)", syncPalettes: "Пользовательские темы и фоны" },
+    "pt-BR": { syncProgress: "Progresso, posição e linha do tempo", syncReadingData: "Marcadores, destaques, notas, avaliações, etiquetas, coleções e listas", syncStatistics: "Estatísticas (tempo, palavras e conclusão)", syncSoftwareSettings: "Configurações (layout, barra, gestos e mais)", syncPalettes: "Temas e fundos de leitura personalizados" },
+  };
+  Object.entries(SYNC_CONTENT_SCOPE_COPY).forEach(([locale, copy]) => Object.assign(COPY[locale], copy));
   const SYNC_RUNTIME_COPY = {
     "zh-CN": { syncInProgress: "同步中", autoSyncInProgress: "自动同步中", firstSyncInProgress: "首次同步中", syncSuccess: "同步成功", syncFailed: "同步失败", autoSyncFailed: "自动同步失败", syncConnecting: "正在连接同步服务器…", syncFailedDetail: "同步失败：{error}", syncServerTime: "{message}；服务器时间：{time}", readSyncSettingsFailed: "读取同步设置失败：{error}" },
     "zh-TW": { syncInProgress: "同步中", autoSyncInProgress: "自動同步中", firstSyncInProgress: "首次同步中", syncSuccess: "同步成功", syncFailed: "同步失敗", autoSyncFailed: "自動同步失敗", syncConnecting: "正在連線同步伺服器…", syncFailedDetail: "同步失敗：{error}", syncServerTime: "{message}；伺服器時間：{time}", readSyncSettingsFailed: "讀取同步設定失敗：{error}" },
@@ -158,6 +219,14 @@
     }
   };
   Object.keys(COPY).filter((locale) => locale !== "ja" && locale !== "ko").forEach((locale) => Object.assign(COPY[locale], PANEL_COPY.en, PANEL_COPY[locale] || {}));
+  const STATS_CHART_COPY = {
+    "zh-CN": { lineChartData: "折线图显示数据", lineChartDataTip: "以折线图显示，并标注数据点数值", chartSettings: "图表设置", chartStyle: "图形", barChart: "柱状", lineChart: "折线", chartData: "数据", chartWords: "字数" },
+    "zh-TW": { lineChartData: "折線圖顯示資料", lineChartDataTip: "以折線圖顯示，並標註資料點數值", chartSettings: "圖表設定", chartStyle: "圖形", barChart: "柱狀", lineChart: "折線", chartData: "資料", chartWords: "字數" },
+    en: { lineChartData: "Show data as a line chart", lineChartDataTip: "Use a line chart with values labelled at each data point", chartSettings: "Chart settings", chartStyle: "Style", barChart: "Bars", lineChart: "Line", chartData: "Data", chartWords: "Words" },
+    ja: { lineChartData: "折れ線グラフで表示", lineChartDataTip: "折れ線グラフに切り替え、各データ点の値を表示します", chartSettings: "グラフ設定", chartStyle: "形式", barChart: "棒", lineChart: "折れ線", chartData: "データ", chartWords: "文字数" },
+    ko: { lineChartData: "꺾은선 그래프로 표시", lineChartDataTip: "꺾은선 그래프로 전환하고 각 데이터 지점의 값을 표시합니다", chartSettings: "차트 설정", chartStyle: "형식", barChart: "막대", lineChart: "꺾은선", chartData: "데이터", chartWords: "글자 수" },
+  };
+  Object.keys(COPY).forEach((locale) => Object.assign(COPY[locale], STATS_CHART_COPY.en, STATS_CHART_COPY[locale] || {}));
   const DYNAMIC_PANEL_COPY = {
     "zh-CN": { activeFilters: "已启用筛选", matchAll: "匹配全部", matchAllHint: "标签与收藏夹必须同时匹配，点击改为匹配任一", matchAnyHint: "标签与收藏夹命中任一即可，点击改为匹配全部", selectItems: "选择{title}", multiSelectNoFilter: "可多选；不选择则不过滤。", statsHourMinute: "{hours} 小时 {minutes} 分钟", statsMinutes: "{minutes} 分钟", statsSeconds: "{seconds} 秒", statsWords: "{words} 字", statsTenThousandWords: "{words} 万字", wordsPerMinute: "{words} 字/分钟", statsMonth: "{month} 月", statsAll: "全部", statsLoading: "正在加载阅读统计…", statsLoadFailed: "阅读统计加载失败，请稍后重试。", statsPeriodUnit: "段时间", currentPeriodBooks: "这一{unit}读过的书", noReadingRecords: "这段时间还没有阅读记录", yearlyHeatmap: "近一年每日阅读热力图", totalReadingTime: "累计阅读时长", dailyPeak: "单日峰值", currentStreak: "当前连续阅读", longestStreak: "最长连续阅读", days: "{count} 天", finishedBook: "读完", gestureNeedPath: "请先绘制并保存手势返回轨迹。", gesturePrecisionSaved: "已将手势返回精度设为{precision}。", gesturePathTooShort: "轨迹太短，暂未保存。", gestureSaved: "手势返回已保存并启用。", gestureCleared: "已清除并关闭手势返回。", longContextUnavailable: "当前无法启用，点击查看开启方式", longContextEnabled: "已启用复杂问题长文精读。", longContextDisabled: "已关闭复杂问题长文精读。", longContextSaveFailed: "设置长文精读失败：{error}", longContextSetupPath: "开启方式：设置 → 语义索引 → 切换语义模型为 BGE-M3 → 下载模型 → 建立语义索引，然后回到书库问答 → 设置开启。", answerLengthSaveFailed: "保存作答长度失败：{error}" },
     "zh-TW": { activeFilters: "已啟用篩選", matchAll: "符合全部", matchAllHint: "標籤與收藏夾必須同時符合，點擊改為符合任一", matchAnyHint: "標籤與收藏夾符合任一即可，點擊改為符合全部", selectItems: "選擇{title}", multiSelectNoFilter: "可多選；不選擇則不篩選。", statsHourMinute: "{hours} 小時 {minutes} 分鐘", statsMinutes: "{minutes} 分鐘", statsSeconds: "{seconds} 秒", statsWords: "{words} 字", statsTenThousandWords: "{words} 萬字", wordsPerMinute: "{words} 字/分鐘", statsMonth: "{month} 月", statsAll: "全部", statsLoading: "正在載入閱讀統計…", statsLoadFailed: "閱讀統計載入失敗，請稍後再試。", statsPeriodUnit: "段時間", currentPeriodBooks: "這一{unit}讀過的圖書", noReadingRecords: "這段時間還沒有閱讀記錄", yearlyHeatmap: "近一年每日閱讀熱力圖", totalReadingTime: "累計閱讀時長", dailyPeak: "單日峰值", currentStreak: "目前連續閱讀", longestStreak: "最長連續閱讀", days: "{count} 天", finishedBook: "讀完", gestureNeedPath: "請先繪製並儲存手勢返回軌跡。", gesturePrecisionSaved: "已將手勢返回精度設為{precision}。", gesturePathTooShort: "軌跡太短，暫未儲存。", gestureSaved: "手勢返回已儲存並啟用。", gestureCleared: "已清除並關閉手勢返回。", longContextUnavailable: "目前無法啟用，點擊查看開啟方式", longContextEnabled: "已啟用複雜問題長文精讀。", longContextDisabled: "已關閉複雜問題長文精讀。", longContextSaveFailed: "設定長文精讀失敗：{error}", longContextSetupPath: "開啟方式：設定 → 語意索引 → 切換語意模型為 BGE-M3 → 下載模型 → 建立語意索引，然後回到書庫問答 → 設定開啟。", answerLengthSaveFailed: "儲存作答長度失敗：{error}" },
@@ -170,6 +239,14 @@
     en: { statsBookNotes: "Highlights {highlights} · Notes {notes}" },
   };
   Object.keys(COPY).filter((locale) => locale !== "ja" && locale !== "ko").forEach((locale) => Object.assign(COPY[locale], STATS_DETAIL_COPY.en, STATS_DETAIL_COPY[locale] || {}));
+  const STATS_HEATMAP_COPY = {
+    "zh-CN": { heatmapColor: "热力图颜色", heatmapGreen: "青绿", heatmapBlue: "湖蓝", heatmapOrange: "暖橙" },
+    "zh-TW": { heatmapColor: "熱力圖顏色", heatmapGreen: "青綠", heatmapBlue: "湖藍", heatmapOrange: "暖橙" },
+    en: { heatmapColor: "Heatmap color", heatmapGreen: "Green", heatmapBlue: "Blue", heatmapOrange: "Orange" },
+    ja: { heatmapColor: "ヒートマップの色", heatmapGreen: "グリーン", heatmapBlue: "ブルー", heatmapOrange: "オレンジ" },
+    ko: { heatmapColor: "히트맵 색상", heatmapGreen: "초록", heatmapBlue: "파랑", heatmapOrange: "주황" },
+  };
+  Object.keys(COPY).forEach((locale) => Object.assign(COPY[locale], STATS_HEATMAP_COPY.en, STATS_HEATMAP_COPY[locale] || {}));
   const ACCOUNT_RUNTIME_COPY = {
     "zh-CN": { accountSecurityBoundEmail: "已绑定验证邮箱：{email}。可用于找回登录密码。", accountSecurityEmailUnbound: "尚未绑定验证邮箱。绑定后才能找回登录密码。", accountSecurityMailUnavailable: "账户安全邮件暂未配置；暂时不能绑定或找回登录密码。", accountSecurityLoadFailed: "读取账户安全状态失败：{error}", cloudSecretAvailable: "云端已有加密密钥包；需要同步密码才能在本机解锁。", localSecretsOnly: "API Key 和翻译密钥默认仅保留在本机。", privateSyncLoadFailed: "读取私密同步设置失败：{error}" },
     "zh-TW": { accountSecurityBoundEmail: "已綁定驗證電子郵件：{email}。可用於找回登入密碼。", accountSecurityEmailUnbound: "尚未綁定驗證電子郵件。綁定後才能找回登入密碼。", accountSecurityMailUnavailable: "帳戶安全郵件尚未設定；暫時無法綁定或找回登入密碼。", accountSecurityLoadFailed: "讀取帳戶安全狀態失敗：{error}", cloudSecretAvailable: "雲端已有加密金鑰包；需要同步密碼才能在本機解鎖。", localSecretsOnly: "API Key 和翻譯金鑰預設僅保留在本機。", privateSyncLoadFailed: "讀取私密同步設定失敗：{error}" },

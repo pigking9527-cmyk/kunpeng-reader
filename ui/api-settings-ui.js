@@ -10,6 +10,7 @@ window.ReaderApiSettingsUI = {
     const aiModel = document.getElementById("api-ai-model");
     const aiKey = document.getElementById("api-ai-key");
     const aiStatus = document.getElementById("api-ai-status");
+    const aiPurposePicker = document.getElementById("api-ai-purpose-picker");
     const translationProvider = document.getElementById("api-translation-provider");
     const translationId = document.getElementById("api-translation-id");
     const translationKey = document.getElementById("api-translation-key");
@@ -22,6 +23,7 @@ window.ReaderApiSettingsUI = {
       compatible: "",
     };
     let aiProfiles = [];
+    let aiAssignments = { readingId: "", libraryId: "", otherId: "" };
 
     function setStatus(element, message, error = false) {
       if (!element) return;
@@ -48,18 +50,34 @@ window.ReaderApiSettingsUI = {
       if (aiModel) aiModel.value = profile.model || "";
       if (aiKey) { aiKey.value = ""; aiKey.placeholder = "已安全保存；留空则保留原密钥"; }
     }
+    function renderPurposeAssignments() {
+      const selectedId = aiProfile?.value || "";
+      aiPurposePicker?.querySelectorAll("[data-ai-purpose]").forEach((button) => {
+        const purpose = button.dataset.aiPurpose;
+        const assigned = aiAssignments[purpose + "Id"] || "";
+        const selected = !!selectedId && assigned === selectedId;
+        button.classList.toggle("is-selected", selected);
+        button.setAttribute("aria-pressed", String(selected));
+        button.disabled = !selectedId;
+      });
+    }
     function renderAiProfiles(status) {
       aiProfiles = Array.isArray(status?.profiles) ? status.profiles : [];
       if (!aiProfile) return;
-      const activeId = status?.activeId || "";
+      aiAssignments = { readingId: "", libraryId: "", otherId: "", ...(status?.assignments || {}) };
+      const selectedId = aiProfile.value;
+      const readingId = aiAssignments.readingId || status?.activeId || "";
       aiProfile.replaceChildren();
       aiProfiles.forEach((profile) => {
         const option = document.createElement("option");
         option.value = profile.id;
-        option.textContent = (profile.name || profile.model || "未命名配置") + (profile.id === activeId ? "（当前）" : "");
+        option.textContent = profile.name || profile.model || "未命名配置";
         aiProfile.appendChild(option);
       });
-      fillProfile(aiProfiles.find((profile) => profile.id === activeId) || aiProfiles[0] || null);
+      fillProfile(aiProfiles.find((profile) => profile.id === selectedId)
+        || aiProfiles.find((profile) => profile.id === readingId)
+        || aiProfiles[0] || null);
+      renderPurposeAssignments();
     }
     function renderTranslationProfiles(status) {
       if (!translationProvider) return;
@@ -97,7 +115,10 @@ window.ReaderApiSettingsUI = {
     document.getElementById("api-settings-open")?.addEventListener("click", open);
     document.getElementById("api-settings-close")?.addEventListener("click", () => modal?.classList.remove("show"));
     modal?.addEventListener("click", (event) => { if (event.target === modal) modal.classList.remove("show"); });
-    aiProfile?.addEventListener("change", () => fillProfile(selectedProfile()));
+    aiProfile?.addEventListener("change", () => {
+      fillProfile(selectedProfile());
+      renderPurposeAssignments();
+    });
     aiPreset?.addEventListener("change", () => {
       const provider = aiPreset.value;
       if (!provider) return;
@@ -111,15 +132,21 @@ window.ReaderApiSettingsUI = {
       if (aiProfile?.value) return;
       if (aiBaseUrl) aiBaseUrl.value = defaults[aiProvider.value] || "";
     });
-    document.getElementById("api-ai-use")?.addEventListener("click", async () => {
+    aiPurposePicker?.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-ai-purpose]");
       const id = aiProfile?.value;
-      if (!id) return setStatus(aiStatus, "请先保存新配置。", true);
+      if (!button || !id) return;
+      const purpose = button.dataset.aiPurpose;
+      button.disabled = true;
       try {
-        await invoke("select_ai_reader_profile", { id });
-        await refresh();
+        const result = await invoke("assign_ai_reader_profile", {
+          request: { purpose, id },
+        });
+        renderAiProfiles(result);
         notifyProfilesChanged();
-        setStatus(aiStatus, "已设为智读与书库问答当前模型。");
-      } catch (error) { setStatus(aiStatus, "切换失败：" + error, true); }
+        setStatus(aiStatus, "已分配模型用途。");
+      } catch (error) { setStatus(aiStatus, "分配失败：" + error, true); }
+      finally { button.disabled = false; }
     });
     document.getElementById("api-ai-save")?.addEventListener("click", async () => {
       const button = document.getElementById("api-ai-save");
@@ -131,7 +158,7 @@ window.ReaderApiSettingsUI = {
         }});
         renderAiProfiles(result);
         notifyProfilesChanged();
-        setStatus(aiStatus, "已保存，并设为智读与书库问答当前模型。");
+        setStatus(aiStatus, "已保存，并设为智读模型。");
       } catch (error) { setStatus(aiStatus, "保存失败：" + error, true); }
       finally { button.disabled = false; }
     });

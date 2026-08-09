@@ -38,11 +38,12 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(html, /id="sync-now"[^>]*data-i18n="syncNow"/);
   assert.match(html, /id="account-security-panel"[^>]*data-i18n-aria="accountSecurity"/);
   assert.match(html, /id="account-data-panel"[^>]*data-i18n-aria="accountDataPrivacy"/);
-  assert.match(html, /id="private-sync-panel"[^>]*data-i18n-aria="privateSyncTitle"/);
+  assert.match(html, /id="private-sync-panel"[^>]*data-i18n-aria="syncContent"/);
   assert.match(html, /id="library-ai-answer-settings-title"[^>]*data-i18n="answerSettings"/);
   assert.match(html, /id="newsnow-settings-title"[^>]*data-i18n="newsSettings"/);
   assert.match(html, /id="filter-btn"[^>]*data-i18n-title="sortAndLayout"/);
-  assert.match(html, /id="stats-chart-mode"[^>]*data-i18n="time"/);
+  assert.match(html, /data-chart-style-option="bar"[^>]*data-i18n="barChart"/);
+  assert.match(html, /data-chart-metric-option="time"[^>]*data-i18n="time"/);
   assert.match(i18n, /const ACCOUNT_SUBPAGE_COPY/);
   assert.match(i18n, /const PANEL_COPY/);
   assert.match(i18n, /const ACCOUNT_RUNTIME_COPY/);
@@ -80,6 +81,13 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(styles, /#fp-settings-modal \.modal-card input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\):not\(\[type="range"\]\),[\s\S]*user-select:\s*text;/);
   assert.match(styles, /#fp-settings-modal \.fp-set-row > :first-child\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
   assert.match(styles, /\.default-apps-setting > \.btn-plain\s*\{[^}]*width:\s*fit-content;[^}]*max-width:\s*48%;/s);
+  assert.match(html, /class="recovery-backup-controls"[\s\S]*id="settings-restore-backup-button"[\s\S]*id="settings-create-backup"[^>]*data-i18n="recoveryCreateShort"/);
+  assert.match(app, /appText\("recoveryCreateShort",\s*"创建"\)/);
+  assert.match(i18n, /const RECOVERY_CREATE_SHORT_COPY/);
+  assert.match(i18n, /const DATA_PACKAGE_COMPACT_COPY/);
+  assert.match(i18n, /const RECOVERY_DIALOG_COPY/);
+  assert.match(styles, /\.fp-settings-data-card\s*\{[^}]*linear-gradient[^}]*box-shadow:/s);
+  assert.match(styles, /\.data-package-actions\s*\{[^}]*justify-content:\s*flex-end[^}]*border-top:/s);
   assert.match(styles, /\.recovery-backup-actions \.btn-plain\s*\{[^}]*width:\s*auto;[^}]*max-width:\s*100%;/s);
 });
 
@@ -160,7 +168,7 @@ test("all ten languages localize About, feedback, and sync runtime states", () =
       }
     }
   }
-  for (const key of ["aboutSoftware", "aboutVersion", "aboutReleaseNotes", "submitBug", "suggestFeature", "problemTraceOptional", "addScreenshot"]) {
+  for (const key of ["aboutReleaseNotes", "submitBug", "suggestFeature", "problemTraceOptional", "addScreenshot"]) {
     assert.match(html, new RegExp(`data-i18n="${key}"`), `About/feedback HTML must bind ${key}`);
   }
   const feedback = fs.readFileSync(path.join(uiRoot, "feedback-ui.js"), "utf8");

@@ -97,16 +97,16 @@ class ReaderSyncApiTests(unittest.TestCase):
         self.assertEqual(legacy["deleted_at"], 1_785_673_801)
         conn.close()
 
-    def test_supported_entity_kinds_are_portable_v2_only(self):
+    def test_supported_entity_kinds_include_protocol_three_history_entries(self):
         self.assertEqual(
             app.SUPPORTED_ENTITY_KINDS,
-            {"book_state_v2", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1"},
+            {"book_state_v2", "reading_progress_v1", "reading_data_v1", "reading_statistics_v1", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "booklist_v1", "vocab", "reading_bucket_v2", "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "ai_reader_history_entry_v2", "secret_bundle_v1", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1"},
         )
         self.assertNotIn("book", app.SUPPORTED_ENTITY_KINDS)
         self.assertNotIn("reading_bucket", app.SUPPORTED_ENTITY_KINDS)
         self.assertEqual(
             app.INVENTORY_ENTITY_KINDS,
-            {"book_state_v2", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "vocab", "reading_bucket_v2", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1"},
+            {"reading_progress_v1", "reading_data_v1", "reading_statistics_v1", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "booklist_v1", "vocab", "reading_bucket_v2", "ai_reader_history_entry_v2", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1"},
         )
 
     def test_reader_palette_validation_limits_images_and_order(self):
@@ -137,9 +137,15 @@ class ReaderSyncApiTests(unittest.TestCase):
             "libraryHistorySyncMode": "manual",
             "libraryAnswerFontSize": 18,
             "libraryLongContextEnabled": True,
+            "toolbarIconSizePx": 36,
+            "toolbarItemOrder": ["account", "search", "stats", "library", "news", "filter", "settings", "menu"],
+            "toolbarHiddenItems": ["news"],
             "futureDesktopSetting": "preserve-me",
         }
         self.assertTrue(app.app_settings_payload_is_valid(settings))
+        legacy_toolbar = dict(settings)
+        legacy_toolbar["toolbarItemOrder"] = ["search", "stats", "library", "news", "filter", "settings", "menu"]
+        self.assertTrue(app.app_settings_payload_is_valid(legacy_toolbar))
         legacy = dict(settings)
         legacy.pop("readerJumpBackIconSizePx")
         self.assertTrue(app.app_settings_payload_is_valid(legacy))
@@ -155,6 +161,10 @@ class ReaderSyncApiTests(unittest.TestCase):
             ("libraryHistorySyncMode", "always"),
             ("libraryAnswerFontSize", 23),
             ("libraryLongContextEnabled", 1),
+            ("toolbarIconSizePx", 53),
+            ("toolbarItemOrder", ["search", "stats"]),
+            ("toolbarItemOrder", [["search"]]),
+            ("toolbarHiddenItems", ["settings"]),
         ):
             invalid = dict(settings)
             invalid[key] = bad_value
@@ -652,6 +662,24 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         alert = conn.execute("SELECT event FROM security_audit WHERE user_id=? ORDER BY id DESC LIMIT 1", (self.USER_ID,)).fetchone()
         conn.close()
         self.assertEqual(alert["event"], "account_quota_exceeded")
+
+    def test_authenticated_account_usage_exposes_aggregate_quotas_only(self):
+        conn = app.connect()
+        with conn:
+            conn.execute(
+                "UPDATE account_usage SET storage_limit_bytes=?,daily_written_bytes=?,daily_entity_writes=?,daily_window_at=? WHERE user_id=?",
+                (1234, 456, 7, app.utc_day_window(), self.USER_ID),
+            )
+        conn.close()
+        response = self.request_json("GET", "/auth/usage")
+        self.assertEqual(response["storageLimitBytes"], 1234)
+        self.assertEqual(response["dailyWrittenBytes"], 456)
+        self.assertEqual(response["dailyEntityWrites"], 7)
+        self.assertEqual(response["dailyWriteLimitBytes"], app.MAX_ACCOUNT_DAILY_WRITE_BYTES)
+        self.assertEqual(response["dailyEntityWriteLimit"], app.MAX_ACCOUNT_DAILY_ENTITY_WRITES)
+        self.assertGreater(response["dailyResetAt"], response["dailyWindowAt"])
+        self.assertNotIn("entities", response)
+
     def test_push_pull_and_duplicate_delivery_are_idempotent(self):
         entity = self.entity("zh:幂等")
         first = self.push([entity])
@@ -1127,6 +1155,53 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
 
         self.assertEqual(rejected["accepted_count"], 0)
         self.assertEqual(rejected["dispositions"][0]["error"], "HISTORY_RETENTION_LIMIT")
+
+    def test_protocol_three_syncs_history_entries_individually_and_rejects_legacy_writes(self):
+        content_id = "a" * 64
+        history = {
+            "kind": "ai_reader_history_entry_v2",
+            "id": f"reader:{content_id}:entry-1",
+            "json": {
+                "version": 2, "scope": "reader", "contentId": content_id,
+                "entry": {"id": "entry-1", "content": "回答", "sources": [{"bookTitle": "测试书", "chapter": 2, "sourceKind": "正文"}]},
+            },
+            "updated_at": 100, "deleted_at": 0, "device_id": "device-a", "sync_version": 1,
+        }
+        pushed = self.request_json("POST", "/sync/push", {
+            "schema_version": 3, "device_id": "device-a", "capabilities": ["push_dispositions_v1"], "entities": [history],
+        })
+        self.assertEqual(pushed["accepted_count"], 1)
+        self.assertEqual(pushed["schema_version"], 3)
+        legacy = self.entity("b" * 64)
+        legacy["kind"] = "ai_reader_history_v1"
+        rejected = self.request_json("POST", "/sync/push", {
+            "schema_version": 3, "device_id": "device-a", "capabilities": ["push_dispositions_v1"], "entities": [legacy],
+        })
+        self.assertEqual(rejected["dispositions"][0]["error"], "LEGACY_ENTITY_DISALLOWED")
+
+    def test_protocol_three_history_entry_rejects_source_excerpt_and_enforces_account_limit(self):
+        content_id = "b" * 64
+        entries = []
+        for index in range(app.MAX_AI_HISTORY_LIVE_ENTRIES + 1):
+            entry_id = f"entry-{index}"
+            entries.append({
+                "kind": "ai_reader_history_entry_v2", "id": f"reader:{content_id}:{entry_id}",
+                "json": {"version": 2, "scope": "reader", "contentId": content_id, "entry": {"id": entry_id, "content": "回答", "sources": []}},
+                "updated_at": index + 1, "deleted_at": 0, "device_id": "device-a", "sync_version": 1,
+            })
+        result = self.request_json("POST", "/sync/push", {
+            "schema_version": 3, "device_id": "device-a", "capabilities": ["push_dispositions_v1"], "entities": entries,
+        })
+        self.assertEqual(result["accepted_count"], app.MAX_AI_HISTORY_LIVE_ENTRIES)
+        self.assertEqual(result["dispositions"][-1]["error"], "HISTORY_RETENTION_LIMIT")
+        leaking = entries[0].copy()
+        leaking["id"] = f"reader:{content_id}:leak"
+        leaking["json"] = {"version": 2, "scope": "reader", "contentId": content_id, "entry": {"id": "leak", "content": "回答", "sources": [{"bookTitle": "测试书", "excerpt": "正文"}]}}
+        leaking["updated_at"] = 999
+        rejected = self.request_json("POST", "/sync/push", {
+            "schema_version": 3, "device_id": "device-a", "capabilities": ["push_dispositions_v1"], "entities": [leaking],
+        })
+        self.assertEqual(rejected["dispositions"][0]["error"], "INVALID_HISTORY_ENTRY")
     def test_legacy_client_gets_non_success_for_unidentifiable_reject(self):
         oversized = self.entity("zh:旧客户端过大")
         oversized["json"] = {"value": "x" * (app.MAX_ENTITY_JSON_BYTES + 1)}

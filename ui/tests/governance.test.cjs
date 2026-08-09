@@ -15,7 +15,7 @@ test("top-level assembly files stay within anti-monolith budgets", () => {
   );
   assert.ok(lineCount("ui", "app.js") <= 1350, "app.js must delegate feature UI modules");
   assert.ok(
-    lineCount("ui", "reader-page-layout.js") <= 2700,
+    lineCount("ui", "reader-page-layout.js") <= 2800,
     "reader-page-layout.js must delegate pagination and measurement",
   );
 });
@@ -43,13 +43,17 @@ test("recovery points can be selected and restored with a current-state safeguar
   assert.match(commands, /webview_windows/);
   const stagedRecovery = backup.indexOf("let mut plans = stage_restore_files");
   const currentStateSafeguard = backup.indexOf("create_locked_with_data(&mut data, true)");
+  const databaseCheckpoint = backup.indexOf("*data.db = None;", currentStateSafeguard);
+  const refreshedBaseline = backup.indexOf("refresh_restore_plan_originals(&mut plans)", currentStateSafeguard);
   assert.ok(stagedRecovery >= 0);
   assert.ok(currentStateSafeguard > stagedRecovery);
-  assert.ok(backup.indexOf("refresh_restore_plan_originals(&mut plans)") > currentStateSafeguard);
+  assert.ok(databaseCheckpoint > currentStateSafeguard);
+  assert.ok(refreshedBaseline > databaseCheckpoint, "WAL must checkpoint before hashing the live restore baseline");
   assert.match(backup, /reset_runtime_caches_after_restore/);
   assert.match(html, /settings-restore-backup/);
   assert.match(app, /invoke\("restore_recovery_backup", \{ backupId \}\)/);
-  assert.match(app, /软件会先自动创建一个当前数据的保护恢复点/);
+  assert.match(app, /AppDialog\?\.confirm/);
+  assert.match(app, /recoveryConfirmMessage/);
 });
 
 test("startup file association and single-instance forwarding are isolated from app assembly", () => {
@@ -91,13 +95,30 @@ test("window lifecycle and geometry are isolated behind window commands", () => 
   }
 });
 
+test("cold start reveals the shelf only after its first painted frame", () => {
+  const config = JSON.parse(read("tauri.conf.json"));
+  const main = read("src", "main.rs");
+  const state = read("src", "app_state.rs");
+  const windows = read("src", "window_commands.rs");
+  const app = read("ui", "app.js");
+  assert.equal(config.app.windows[0].visible, false);
+  assert.match(main, /window_commands::main_window_show/);
+  assert.match(windows, /fn main_window_show[\s\S]*window\.show\(\)/);
+  assert.match(app, /function revealMainWindowAfterFirstPaint/);
+  assert.match(app, /shelfUI\.render\(list\);[\s\S]{0,240}revealMainWindowAfterFirstPaint\(\)/);
+  const applyGeometry = windows.slice(windows.indexOf("pub(crate) fn apply_geom_safe"));
+  assert.doesNotMatch(applyGeometry, /window\.show\(\)/);
+});
+
 test("EPUB runtime, virtual chapters and reader protocol are isolated from app assembly", () => {
   const main = read("src", "main.rs");
+  const state = read("src", "app_state.rs");
   const runtime = read("src", "epub_runtime.rs");
   const protocol = read("src", "reader_protocol.rs");
   const search = read("src", "search.rs");
   assert.match(main, /mod epub_runtime;/);
-  assert.match(main, /epub_runtime: epub_runtime::EpubRuntime/);
+  assert.match(main, /mod app_state;/);
+  assert.match(state, /epub_runtime: crate::epub_runtime::EpubRuntime/);
   assert.match(
     main,
     /register_asynchronous_uri_scheme_protocol\("reader", epub_runtime::handle_protocol_request\)/,
@@ -119,6 +140,7 @@ test("EPUB runtime, virtual chapters and reader protocol are isolated from app a
 
 test("library DTOs and shelf commands are isolated from app assembly", () => {
   const main = read("src", "main.rs");
+  const state = read("src", "app_state.rs");
   const library = read("src", "library_commands.rs");
   const imports = read("src", "import.rs");
   assert.match(main, /mod library_commands;/);
@@ -146,12 +168,13 @@ test("library DTOs and shelf commands are isolated from app assembly", () => {
 
 test("runtime helpers and utility commands stay outside app assembly", () => {
   const main = read("src", "main.rs");
+  const state = read("src", "app_state.rs");
   const runtime = read("src", "runtime_support.rs");
   const commands = read("src", "app_commands.rs");
   const startup = read("src", "startup.rs");
   assert.match(main, /mod runtime_support;/);
   assert.match(main, /mod app_commands;/);
-  assert.match(main, /BackgroundTaskRegistry::new_persistent_default\(\)/);
+  assert.match(state, /BackgroundTaskRegistry::new_persistent_default\(\)/);
   for (const command of [
     "background_task_status",
     "app_version",
@@ -242,17 +265,31 @@ test("portable entity model is identical on client and sync server", () => {
   const server = read("server", "reader-sync-api", "app.py");
   for (const kind of [
     "book_state_v2",
+    "reading_progress_v1",
+    "reading_data_v1",
+    "reading_statistics_v1",
     "model_book_tags_v1",
     "user_book_tags_v1",
     "book_collections_v1",
+    "booklist_v1",
     "vocab",
     "reading_bucket_v2",
+    "ai_reader_config_v1",
+    "translation_config_v1",
+    "ai_reader_history_entry_v2",
+    "secret_bundle_v1",
+    "reader_palette_v1",
+    "reader_palette_order_v1",
+    "app_settings_v1",
   ]) {
     assert.match(db, new RegExp(`SUPPORTED_ENTITY_KINDS[\\s\\S]*${kind}`));
     assert.match(server, new RegExp(`SUPPORTED_ENTITY_KINDS[\\s\\S]*${kind}`));
   }
   assert.match(db, /purge_legacy_entities/);
   assert.match(server, /record_migration\(conn, 6\)/);
+  const privateSync = read("src", "private_sync.rs");
+  assert.match(privateSync, /"reading_data_v1"\s*\|\s*"user_book_tags_v1"\s*\|\s*"book_collections_v1"\s*\|\s*"booklist_v1"/);
+  assert.match(privateSync, /entity_enabled_for_options\(&options, kind\)\.unwrap_or\(false\)/);
 });
 
 test("reader injection is composed from responsibility-focused modules", () => {

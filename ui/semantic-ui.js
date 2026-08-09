@@ -483,7 +483,6 @@
       }
     }
     function open() {
-      settingsModal?.classList.remove("show");
       modal?.classList.add("show");
       visible = true;
       const cached = cache.get();

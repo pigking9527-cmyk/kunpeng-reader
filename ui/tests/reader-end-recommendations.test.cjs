@@ -82,6 +82,10 @@ test("the persistent recommendation setting has a gear, word threshold, and shor
   assert.match(settings, /setItem\(STORAGE_KEY, checkbox\.checked \? "1" : "0"\)/);
   assert.match(reader, /ReaderRecommendationSettings\?\.isEnabled\(\)\) openReaderEnd\(\)/);
   assert.match(reader, /if \(list === null\) return/);
+  const readingPanel = mainHtml.slice(mainHtml.indexOf('data-settings-panel="reading"'), mainHtml.indexOf('data-settings-panel="smart"'));
+  const smartPanel = mainHtml.slice(mainHtml.indexOf('data-settings-panel="smart"'), mainHtml.indexOf('data-settings-panel="data"'));
+  assert.doesNotMatch(readingPanel, /id="end-recommendations-gear"/);
+  assert.match(smartPanel, /id="end-recommendations-gear"/);
 });
 
 test("opening recommendation details keeps the common settings page visible", () => {

@@ -39,14 +39,19 @@ fn log_db_operation(operation: &str, started: Instant, rows: usize) {
 
 pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &[
     "book_state_v2",
+    "reading_progress_v1",
+    "reading_data_v1",
+    "reading_statistics_v1",
     "model_book_tags_v1",
     "user_book_tags_v1",
     "book_collections_v1",
+    "booklist_v1",
     "vocab",
     "reading_bucket_v2",
     "ai_reader_config_v1",
     "translation_config_v1",
     "ai_reader_history_v1",
+    "ai_reader_history_entry_v2",
     "secret_bundle_v1",
     "reader_palette_v1",
     "reader_palette_order_v1",
@@ -58,13 +63,22 @@ pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &[
 /// credentials, cursors, acknowledgements, library files and local paths are
 /// never package entities.
 const CORE_PACKAGE_ENTITY_KINDS: &[&str] = &[
+    "reading_progress_v1",
+    "reading_data_v1",
+    "reading_statistics_v1",
+    "model_book_tags_v1",
+    "vocab",
+    "reading_bucket_v2",
+];
+const LEGACY_CORE_PACKAGE_ENTITY_KINDS: &[&str] = &[
     "book_state_v2",
     "model_book_tags_v1",
     "vocab",
     "reading_bucket_v2",
 ];
 const CORE_PACKAGE_FORMAT: &str = "kunpeng-reader-core-data-package";
-const CORE_PACKAGE_VERSION: u64 = 1;
+const CORE_PACKAGE_VERSION: u64 = 2;
+const LEGACY_CORE_PACKAGE_VERSION: u64 = 1;
 pub(crate) const MAX_CORE_PACKAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CORE_PACKAGE_ENTITIES: usize = 50_000;
 const MAX_CORE_PACKAGE_ENTITY_BYTES: usize = 256 * 1024;
@@ -149,9 +163,14 @@ fn validate_core_package(value: &Value) -> Result<Vec<ValidatedPackageEntity>, S
         .get("version")
         .and_then(Value::as_u64)
         .ok_or_else(|| "核心数据包 version 必须是正整数".to_string())?;
-    if format != CORE_PACKAGE_FORMAT || version != CORE_PACKAGE_VERSION {
+    if format != CORE_PACKAGE_FORMAT {
         return Err(format!("不支持的数据包格式或版本：{format} v{version}"));
     }
+    let allowed_kinds = match version {
+        LEGACY_CORE_PACKAGE_VERSION => LEGACY_CORE_PACKAGE_ENTITY_KINDS,
+        CORE_PACKAGE_VERSION => CORE_PACKAGE_ENTITY_KINDS,
+        _ => return Err(format!("不支持的数据包格式或版本：{format} v{version}")),
+    };
     reject_unknown_fields(
         root,
         &[
@@ -195,7 +214,7 @@ fn validate_core_package(value: &Value) -> Result<Vec<ValidatedPackageEntity>, S
             &format!("entities[{index}]"),
         )?;
         let kind = required_package_str(object, "kind", 64)?;
-        if !CORE_PACKAGE_ENTITY_KINDS.contains(&kind.as_str()) {
+        if !allowed_kinds.contains(&kind.as_str()) {
             return Err(format!("entities[{index}] 含非核心或不支持的 kind：{kind}"));
         }
         let id = required_package_str(object, "id", MAX_CORE_PACKAGE_ID_BYTES)?;
@@ -911,7 +930,7 @@ impl AppDb {
                  ) \
                  SELECT ?1,kind,id,device_id,sync_version,updated_at,deleted_at \
                  FROM entities \
-                 WHERE dirty=0 AND kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2') \
+                 WHERE dirty=0 AND kind IN ('reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','vocab','reading_bucket_v2') \
                  ON CONFLICT(scope,kind,id) DO UPDATE SET \
                     device_id=excluded.device_id, \
                     sync_version=excluded.sync_version, \
@@ -995,7 +1014,7 @@ impl AppDb {
         let count = self
             .conn
             .execute(
-                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','model_book_tags_v1','user_book_tags_v1','book_collections_v1','vocab','reading_bucket_v2','ai_reader_config_v1','translation_config_v1','ai_reader_history_v1','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
+                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_config_v1','translation_config_v1','ai_reader_history_v1','ai_reader_history_entry_v2','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
                 [],
             )
             .map(|count| count as u32)
@@ -1054,7 +1073,7 @@ impl AppDb {
         let started = Instant::now();
         let mut stmt = self
             .conn
-            .prepare("SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities WHERE kind IN ('book_state_v2','model_book_tags_v1','vocab','reading_bucket_v2') ORDER BY kind,id")
+            .prepare("SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities WHERE kind IN ('reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','vocab','reading_bucket_v2') ORDER BY kind,id")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -1195,7 +1214,7 @@ impl AppDb {
     }
     pub fn all_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
         self.sync_entities_where(
-            "kind IN ('book_state_v2','model_book_tags_v1','user_book_tags_v1','book_collections_v1','vocab','reading_bucket_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
+            "kind IN ('reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_history_entry_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
         )
     }
 
@@ -1269,10 +1288,10 @@ impl AppDb {
                  LEFT JOIN sync_acknowledgements a \
                    ON a.scope=?1 AND a.kind=e.kind AND a.id=e.id \
                  WHERE e.kind IN (\
-                       'book_state_v2','model_book_tags_v1','user_book_tags_v1',\
-                       'book_collections_v1','vocab','reading_bucket_v2',\
+                       'reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1',\
+                       'book_collections_v1','booklist_v1','vocab','reading_bucket_v2',\
                        'ai_reader_config_v1','translation_config_v1',\
-                       'ai_reader_history_v1','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1'\
+                       'ai_reader_history_entry_v2','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1'\
                    ) \
                    AND (a.kind IS NULL \
                      OR a.device_id<>e.device_id \
@@ -1308,7 +1327,7 @@ impl AppDb {
     #[cfg(test)]
     pub fn dirty_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
         self.sync_entities_where(
-            "dirty=1 AND kind IN ('book_state_v2','model_book_tags_v1','user_book_tags_v1','book_collections_v1','vocab','reading_bucket_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
+            "dirty=1 AND kind IN ('reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_history_entry_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
         )
     }
 
@@ -1577,7 +1596,7 @@ mod tests {
     fn unchanged_json_does_not_create_another_sync_version() {
         let mut db = memory_db();
         let row = vec![(
-            "book_state_v2".to_string(),
+            "reading_progress_v1".to_string(),
             "sha".to_string(),
             json!({"progress": 12}),
         )];
@@ -1697,6 +1716,32 @@ mod tests {
         });
         assert_eq!(db.import_package(&tombstone).unwrap(), 1);
         assert!(db.entity_json("vocab", "zh:迁移示例").unwrap().is_none());
+    }
+
+    #[test]
+    fn core_package_v2_fixture_preserves_split_reading_entities() {
+        let mut db = memory_db();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../contracts/fixtures/core-data-package.v2.json"
+        ))
+        .unwrap();
+
+        assert_eq!(db.import_package(&fixture).unwrap(), 5);
+        let content_id = "2222222222222222222222222222222222222222222222222222222222222222";
+        let progress = db
+            .entity_json("reading_progress_v1", content_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress["future_client_field"]["preserved"], true);
+        assert!(db
+            .entity_json("reading_data_v1", content_id)
+            .unwrap()
+            .is_some());
+        assert!(db
+            .entity_json("reading_statistics_v1", content_id)
+            .unwrap()
+            .is_some());
+        assert!(db.entity_json("vocab", "zh:已删除示例").unwrap().is_none());
     }
 
     #[test]

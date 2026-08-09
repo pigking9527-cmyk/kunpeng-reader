@@ -1624,14 +1624,23 @@ pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String
         cleanup_restore_plans(&plans);
         return Err(error);
     }
+    // The protection snapshot writes its date through SQLite's WAL. Dropping
+    // the sole AppDb connection checkpoints that WAL into reader.db. Capture
+    // the restore baseline only after this checkpoint; hashing first would
+    // mistake SQLite's own close-time write for an external concurrent edit.
+    *data.db = None;
     if let Err(error) = refresh_restore_plan_originals(&mut plans) {
         cleanup_restore_plans(&plans);
-        return Err(error);
+        return match db::AppDb::open_existing() {
+            Ok(database) => {
+                *data.db = Some(database);
+                Err(error)
+            }
+            Err(reopen_error) => Err(format!("{error}；恢复前数据库无法重新打开：{reopen_error}")),
+        };
     }
-    // AppDb owns the application's only reader.db connection. Dropping it while
-    // retaining the mutex checkpoints WAL and prevents any command from opening
-    // a second connection during installation.
-    *data.db = None;
+    // Retaining the database mutex while its value is None prevents any command
+    // from opening a second connection during installation.
     let mut sqlite_paths = vec![database_path.clone()];
     if manifest_contains(&manifest, "external-dicts.db") {
         sqlite_paths.push(config.join("external-dicts.db"));

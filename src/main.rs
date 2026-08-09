@@ -5,11 +5,13 @@
 mod ai_reader;
 mod app_commands;
 mod app_settings;
+mod app_state;
 mod atomic_file;
 mod auto_import_watch;
 pub mod background_tasks;
 mod backup;
 mod book;
+mod booklist_sync;
 mod data_commands;
 mod data_migration;
 mod db;
@@ -63,119 +65,12 @@ mod update;
 mod url_open;
 mod vocab;
 mod window_commands;
+pub(crate) use app_state::AppState;
 pub(crate) use runtime_support::{
     emit_startup_perf, interactive_search_workers, log, now_ms, report_save_error,
     set_thread_background, with_thread_background_priority, DEFAULT_SYNC_URL, RES_BASE,
 };
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use tauri::Manager;
-use {book::Library, stats::StatsStore};
-type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
-pub(crate) struct AppState {
-    pub(crate) background_tasks: background_tasks::BackgroundTaskRegistry,
-    /// Reader WebView work uses the same durable lifecycle as native background work.
-    pub(crate) page_count_tasks: Mutex<HashMap<u64, background_tasks::TaskRunGuard>>,
-    pub(crate) library: Mutex<Library>,
-    pub(crate) db: Mutex<Option<db::AppDb>>,
-    epub_runtime: epub_runtime::EpubRuntime,
-    backfilled: std::sync::atomic::AtomicBool, // 是否已回填旧书的作者/导入时间
-    pending_jump: Mutex<HashMap<u64, (u32, String)>>, // 书架检索点击 → 阅读窗口待跳转位置
-    pub(crate) search_text_cache: Arc<Mutex<search_cache::SearchTextCache>>, // 全文检索原文/小写副本共享 LRU 预算
-    pub(crate) txt_chapters: TextChaptersCache, // txt 阅读用：切分好的章节 (标题, 正文)
-    pub(crate) embedder: Mutex<Option<Arc<Mutex<semantic::model::SemanticEmbedder>>>>, // 语义模型（懒加载，首次会下载）
-    pub(crate) reranker: Mutex<Option<Arc<Mutex<fastembed::TextRerank>>>>, // 可选交叉编码器，只重排少量候选
-    pub(crate) sem_cache: Arc<Mutex<HashMap<u64, Arc<semantic::SemData>>>>, // 语义检索：内存缓存的向量
-    pub(crate) sem_cache_order: Arc<Mutex<VecDeque<u64>>>, // 逐书向量 LRU：换词时淘汰旧书，避免缓存被首批结果永久占满
-    pub(crate) sem_cache_bytes: Arc<AtomicUsize>,
-    pub(crate) sem_progress: Mutex<semantic_tasks::SemProgress>, // 建立语义索引的进度
-    pub(crate) global_index: Arc<Mutex<Option<Arc<semantic::LoadedShards>>>>, // 全库近邻索引：已载入内存的分片集合
-    pub(crate) index_resume_at: AtomicU64, // 语义索引“让路”截止时刻(ms,0=不暂停)：打开阅读窗口时临时暂停建索引，让窗口秒开
-    pub(crate) stats: Mutex<StatsStore>,   // 详细阅读统计的小时桶
-    pub(crate) vocab: Mutex<vocab::VocabStore>, // 生词本：查过的词
-    word_pack: Mutex<tts::WordPackState>,  // 高频词语音包后台生成状态
-    pub(crate) sync_running: AtomicBool,   // 防止启动与手动同步并发上传同一批实体
-    memory_reclaimers: Mutex<Vec<memory_budget::ReclaimerHandle>>,
-}
-impl AppState {
-    fn install_memory_reclaimers(&self) {
-        let mut handles = self
-            .memory_reclaimers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !handles.is_empty() {
-            return;
-        }
-        let governor = memory_budget::governor();
-        let search_text = Arc::clone(&self.search_text_cache);
-        handles.push(governor.register_reclaimer(
-            memory_budget::MemoryClass::SearchText,
-            move |_| {
-                if let Ok(mut cache) = search_text.try_lock() {
-                    cache.clear();
-                }
-            },
-        ));
-        handles.push(
-            governor.register_reclaimer(memory_budget::MemoryClass::SearchFilter, move |_| {
-                search::clear_filter_memory_cache()
-            }),
-        );
-        let sem_cache = Arc::clone(&self.sem_cache);
-        let sem_order = Arc::clone(&self.sem_cache_order);
-        let sem_bytes = Arc::clone(&self.sem_cache_bytes);
-        handles.push(governor.register_reclaimer(
-            memory_budget::MemoryClass::SemanticVector,
-            move |_| {
-                if let Ok(mut cache) = sem_cache.try_lock() {
-                    cache.clear();
-                    sem_bytes.store(0, Ordering::Relaxed);
-                }
-                if let Ok(mut order) = sem_order.try_lock() {
-                    order.clear();
-                }
-            },
-        ));
-        let global_index = Arc::clone(&self.global_index);
-        handles.push(governor.register_reclaimer(
-            memory_budget::MemoryClass::SemanticGraph,
-            move |_| {
-                if let Ok(mut index) = global_index.try_lock() {
-                    *index = None;
-                }
-            },
-        ));
-        handles.push(
-            governor.register_reclaimer(memory_budget::MemoryClass::SemanticAux, move |_| {
-                semantic::clear_semantic_aux_memory_caches()
-            }),
-        );
-    }
-    pub(crate) fn reset_runtime_caches_after_restore(&self) {
-        self.epub_runtime.clear();
-        self.pending_jump.lock().map(|mut cache| cache.clear()).ok();
-        self.search_text_cache
-            .lock()
-            .map(|mut cache| *cache = search_cache::SearchTextCache::default())
-            .ok();
-        self.txt_chapters.lock().map(|mut cache| cache.clear()).ok();
-        self.sem_cache.lock().map(|mut cache| cache.clear()).ok();
-        self.sem_cache_order
-            .lock()
-            .map(|mut order| order.clear())
-            .ok();
-        self.sem_cache_bytes.store(0, Ordering::Relaxed);
-        self.global_index.lock().map(|mut index| *index = None).ok();
-        self.embedder
-            .lock()
-            .map(|mut embedder| *embedder = None)
-            .ok();
-        self.reranker.lock().map(|mut model| *model = None).ok();
-        semantic::clear_semantic_aux_memory_caches();
-        self.backfilled.store(false, Ordering::Relaxed);
-    }
-}
 fn main() {
     runtime_support::mark_process_started();
     if std::env::args().any(|a| a == "--sem-probe") {
@@ -210,30 +105,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(startup::StartupBookPaths::new(startup_book_paths))
         .manage(startup_enhancement::StartupEnhancementState::load())
-        .manage(AppState {
-            background_tasks: background_tasks::BackgroundTaskRegistry::new_persistent_default(),
-            page_count_tasks: Mutex::new(HashMap::new()),
-            library: Mutex::new(Library::load()),
-            db: Mutex::new(startup_database),
-            epub_runtime: epub_runtime::EpubRuntime::default(),
-            backfilled: std::sync::atomic::AtomicBool::new(false),
-            pending_jump: Mutex::new(HashMap::new()),
-            search_text_cache: Arc::new(Mutex::new(search_cache::SearchTextCache::default())),
-            txt_chapters: Mutex::new(HashMap::new()),
-            embedder: Mutex::new(None),
-            reranker: Mutex::new(None),
-            sem_cache: Arc::new(Mutex::new(HashMap::new())),
-            sem_cache_order: Arc::new(Mutex::new(VecDeque::new())),
-            sem_cache_bytes: Arc::new(AtomicUsize::new(0)),
-            sem_progress: Mutex::new(semantic_tasks::SemProgress::default()),
-            global_index: Arc::new(Mutex::new(None)),
-            index_resume_at: AtomicU64::new(0),
-            stats: Mutex::new(StatsStore::load()),
-            vocab: Mutex::new(vocab::VocabStore::load()),
-            word_pack: Mutex::new(tts::WordPackState::default()),
-            sync_running: AtomicBool::new(false),
-            memory_reclaimers: Mutex::new(Vec::new()),
-        })
+        .manage(AppState::new(startup_database))
         .setup(|app| {
             semantic::initialize_semantic_model_selection();
             {
@@ -293,6 +165,7 @@ fn main() {
             window_commands::main_window_minimize,
             window_commands::main_window_toggle_maximize,
             window_commands::main_window_close,
+            window_commands::main_window_show,
             window_commands::main_window_start_dragging,
             window_commands::main_window_start_resize_dragging,
             library_commands::list_books,
@@ -303,6 +176,9 @@ fn main() {
             library_commands::delete_book_organization,
             library_commands::list_booklists,
             library_commands::update_booklist,
+            library_commands::create_booklist,
+            library_commands::delete_booklist,
+            library_commands::save_recommended_booklist,
             library_commands::library_health,
             library_commands::maintain_search_index,
             library_commands::merge_duplicate_books,
@@ -347,6 +223,7 @@ fn main() {
             ai_reader::ai_reader_status,
             ai_reader::ai_reader_profiles,
             ai_reader::select_ai_reader_profile,
+            ai_reader::assign_ai_reader_profile,
             ai_reader::save_ai_reader_profile,
             ai_reader::save_ai_reader_config,
             ai_reader::ask_reading_assistant,
@@ -357,6 +234,8 @@ fn main() {
             ai_reader::library_model_tags_settings,
             ai_reader::library_answer_settings,
             ai_reader::set_library_answer_length,
+            ai_reader::set_library_recommendation_candidate_limit,
+            ai_reader::set_library_recommendation_result_limit,
             ai_reader::set_library_model_tags_enabled,
             ai_reader::start_library_auto_classification,
             private_sync::private_sync_get_settings,
@@ -390,6 +269,7 @@ fn main() {
             sync::auth_register,
             sync::auth_login,
             sync::auth_security_status,
+            sync::auth_usage_status,
             sync::auth_bind_email_start,
             sync::auth_bind_email_confirm,
             sync::auth_rebind_email_old_start,

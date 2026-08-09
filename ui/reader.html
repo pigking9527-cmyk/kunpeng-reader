@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>阅读</title>
     <link rel="stylesheet" href="reader-preferences.css" />
+    <link rel="stylesheet" href="reader-click-zones.css" />
     <link rel="stylesheet" href="window-resize.css" />
     <style>.reader-appearance-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}.reader-appearance-actions .reader-preferences-reset{margin-top:0}.reader-appearance-actions .reader-preferences-reset.danger{margin-left:0}</style>
     <style>
@@ -247,29 +248,29 @@
 
       /* 目录抽屉：浮在正文之上，不挤占 */
       .toc {
-        position: absolute; left: 0; top: 0; bottom: 0; width: 260px;
-        background: #fafafa; border-right: 1px solid #ddd;
-        box-shadow: 2px 0 10px rgba(0,0,0,0.2);
+        position: absolute; left: 0; top: 0; bottom: 0; width: 292px;
+        background: #fcfcfd; border-right: 1px solid #e3e8f0;
+        box-shadow: 12px 0 32px rgba(32, 52, 82, .16);
         z-index: 6; display: flex; flex-direction: column;
         transform: translateX(-100%); transition: transform 0.15s ease;
       }
       .toc.show { transform: translateX(0); }
-      .toc-tabs { display: flex; flex: 0 0 auto; border-bottom: 1px solid #ddd; }
-      .toc-tab { flex: 1; padding: 10px 0; border: none; background: transparent; cursor: pointer;
-        font: inherit; font-size: 14px; color: #666; }
-      .toc-tab.active { color: #1c4fb0; font-weight: 600; box-shadow: inset 0 -2px 0 #2b6cff; }
-      .toc-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 6px; }
+      .toc-tabs { display: flex; flex: 0 0 auto; gap: 4px; margin: 12px 14px 8px; padding: 4px; border: 1px solid #e5eaf2; border-radius: 10px; background: #f2f5f9; }
+      .toc-tab { flex: 1; padding: 8px 0; border: none; border-radius: 7px; background: transparent; cursor: pointer;
+        font: inherit; font-size: 14px; color: #758195; transition: color .15s ease, background .15s ease, box-shadow .15s ease; }
+      .toc-tab.active { color: #225fb8; font-weight: 700; background: #fff; box-shadow: 0 1px 4px rgba(44, 69, 106, .13); }
+      .toc-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 10px 16px; }
       .toc-pane[hidden] { display: none; }
       body.theme-dark .toc-tab { color: #aaa; }
       body.theme-dark .toc-tab.active { color: #8ab4ff; }
       body.theme-dark .toc-tabs { border-color: #3a3a3d; }
       .toc .toc-item {
-        padding: 6px 8px; border-radius: 5px; cursor: pointer; font-size: 14px;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        position: relative; padding: 9px 10px; border-radius: 8px; cursor: pointer; font-size: 14px; color: #4f5d70;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background .15s ease, color .15s ease;
       }
-      .toc .toc-item:hover { background: #e6e6ea; }
-      .toc .toc-item.toc-current { color: #1c4fb0; font-weight: 600; }
-      .toc .toc-item.toc-current::before { content: "✓ "; color: #2a9; }
+      .toc .toc-item:hover { background: #eef4ff; color: #225fb8; }
+      .toc .toc-item.toc-current { color: #1e5dae; font-weight: 700; background: #e9f1ff; }
+      .toc .toc-item.toc-current::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 3px; background: #3477dc; }
       body.theme-dark .toc .toc-item.toc-current { color: #8ab4ff; }
       /* 生词本：独立居中浮层，覆盖目录抽屉的左侧布局 */
       .toc.vocab {
@@ -421,19 +422,20 @@
       /* 设置面板：锚定在齿轮按钮正下方 */
       .gear-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
       .settings {
-        position: absolute; top: 100%; left: 0; width: 280px;
-        background: #fff; border: 1px solid #ccc; border-radius: 8px;
-        box-shadow: 0 6px 20px rgba(0,0,0,0.2); padding: 12px 14px; z-index: 30;
+        position: absolute; top: 100%; left: 0; width: 336px; max-width: calc(100vw - 16px);
+        max-height: calc(100vh - 52px); overflow-y: auto;
+        background: #fff; border: 1px solid #dbe3ee; border-radius: 16px;
+        box-shadow: 0 16px 44px rgba(35,50,75,0.18); padding: 10px; z-index: 30;
         display: none; font-size: 13px;
       }
       .settings.show { display: block; }
-      .settings .row { display: flex; align-items: center; margin: 9px 0; gap: 8px; min-width: 0; }
-      .settings .row > label:first-child { width: 72px; min-width: 0; color: #444; flex: 0 0 auto; white-space: normal; overflow-wrap: anywhere; line-height: 1.2; }
+      .settings .row { display: flex; align-items: center; margin: 0; gap: 10px; min-width: 0; }
+      .settings .row > label:first-child { width: 58px; min-width: 0; color: #5a6779; flex: 0 0 auto; white-space: normal; overflow-wrap: anywhere; line-height: 1.2; }
       .settings input[type="range"] { flex: 1; }
       .settings .val { width: 42px; text-align: right; color: #666; }
       /* WKWebView 会按最长选项保留 select 的固有宽度；width:0 让它真正按
          剩余空间收缩，Windows WebView2 中的尺寸保持不变。 */
-      .settings select { flex: 1 1 0; width: 0; min-width: 0; max-width: 100%; font: inherit; padding: 2px; }
+      .settings select { flex: 1 1 0; width: 0; min-width: 0; max-width: 100%; min-height: 34px; font: inherit; padding: 5px 9px; border: 1px solid #ccd6e4; border-radius: 9px; background: #fff; color: #344256; }
       .settings .reader-font-download-row { margin-top: -4px; align-items: flex-start; }
       .reader-font-download-row[hidden] { display: none; }
       .reader-font-download-status { flex: 1 1 auto; min-width: 0; color: #777; font-size: 12px; line-height: 1.45; }
@@ -442,6 +444,13 @@
       .settings .margins label { display: flex; align-items: center; gap: 4px; }
       .settings .margins input { width: 56px; font: inherit; }
       .settings h4 { margin: 4px 0 2px; font-size: 12px; color: #888; font-weight: normal; }
+      .reader-quick-section { display: grid; gap: 11px; margin-top: 8px; padding: 12px; border: 1px solid #e3e9f1; border-radius: 12px; background: #f9fbfd; }
+      .reader-quick-section .reader-quick-palette-row { display: grid; gap: 8px; }
+      .reader-quick-section .reader-quick-palette-row > label:first-child { width: auto; color: #35445a; font-weight: 650; }
+      .reader-quick-slider-row input[type="range"] { min-width: 0; accent-color: #3c82d8; }
+      .reader-quick-mode-row { padding-top: 10px; border-top: 1px solid #e5ebf2; }
+      .reader-quick-mode-row .mode-toggle-group { justify-content: space-between; }
+      .reader-quick-speech-row { padding-top: 10px; border-top: 1px solid #e5ebf2; }
       .theme-row { display: flex; gap: 6px; flex: 1; }
       .theme-btn {
         flex: 1; font: inherit; padding: 5px 0; border: 1px solid #c9c9cf;
@@ -622,6 +631,10 @@
       body.theme-dark .toc .toc-item:hover { background: #3a3a3d; }
       body.theme-dark .settings,
       body.theme-dark .modal-card { background: #2a2a2c; color: #ddd; border-color: #444; }
+      body.theme-dark .reader-quick-section { background: #292d33; border-color: #444b56; }
+      body.theme-dark .reader-quick-section .reader-quick-palette-row > label:first-child { color: #e0e6ef; }
+      body.theme-dark .reader-quick-mode-row,
+      body.theme-dark .reader-quick-speech-row { border-color: #414750; }
       body.theme-dark .text-conversion-choice { color: #ddd; }
             body.theme-dark .settings select,
       body.theme-dark .rsearch input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
@@ -653,20 +666,20 @@
       }
       .bm-panel.show { display: block; }
       .bm-add {
-        width: 100%; font: inherit; padding: 7px; border: 1px solid #c9c9cf;
-        border-radius: 6px; background: #fff; cursor: pointer; margin-bottom: 6px;
+        width: 100%; font: inherit; padding: 10px 12px; border: 1px solid #3e7ee0;
+        border-radius: 8px; background: #f5f9ff; color: #2360b6; cursor: pointer; margin: 4px 0 10px; font-weight: 650;
       }
-      .bm-add:hover { background: #eef2ff; }
-      .bm-list { max-height: 50vh; overflow-y: auto; }
+      .bm-add:hover { background: #e8f1ff; }
+      .bm-list { max-height: 50vh; overflow-y: auto; display: grid; gap: 4px; }
       .bm-item {
         display: flex; align-items: center; gap: 8px;
-        padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 13px;
+        padding: 10px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; font-size: 13px; color: #4b596c;
       }
-      .bm-item:hover { background: #eef2ff; }
+      .bm-item:hover { background: #f0f5ff; border-color: #d7e4f9; }
       .bm-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .bm-del { color: #bbb; flex: 0 0 auto; padding: 0 4px; }
+      .bm-del { color: #a3adbb; flex: 0 0 auto; padding: 2px 4px; border-radius: 4px; }
       .bm-del:hover { color: #e85c50; }
-      .bm-empty { padding: 8px; color: #aaa; font-size: 13px; }
+      .bm-empty { padding: 28px 8px; color: #98a4b4; font-size: 13px; text-align: center; }
       body.theme-dark .bm-panel { background: #2a2a2c; border-color: #444; }
       body.theme-dark .bm-add { background: #2e2e30; color: #ddd; border-color: #4a4a4d; }
       body.theme-dark .bm-item { color: #ddd; }
@@ -717,22 +730,28 @@
       body.theme-dark.immersive.bar-show .toolbar,
       body.theme-dark.immersive.bar-hover .toolbar { background: #262628; border-bottom-color: #3a3a3d; }
       /* 批注页（大） */
-      .anno-card { width: 680px; max-width: 92vw; max-height: 84vh; display: flex; flex-direction: column; }
-      #anno-list { overflow-y: auto; }
-      .anno-empty { padding: 28px; text-align: center; color: #aaa; }
-      .anno-item { border-top: 1px solid #eee; padding: 14px 2px; }
-      .anno-item:first-child { border-top: none; }
-      .anno-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-      .anno-ch { color: #2b6cff; font-size: 13px; cursor: pointer; }
+      .anno-card { width: min(760px, 92vw); max-height: 84vh; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+      .anno-card .modal-head { padding: 18px 22px 12px; border-bottom: 1px solid #edf0f5; }
+      .anno-title { display: flex; flex-direction: column; gap: 3px; }
+      .anno-title strong { font-size: 18px; letter-spacing: .01em; }
+      .anno-title small { color: #8792a3; font-size: 12px; font-weight: 400; }
+      #anno-list { overflow-y: auto; padding: 12px 18px 18px; background: #fafbfd; }
+      .anno-empty { margin: 44px 12px; padding: 32px; text-align: center; color: #8c98a8; border: 1px dashed #cfdaea; border-radius: 12px; background: #fff; line-height: 1.8; }
+      .anno-item { padding: 14px; border: 1px solid #e3e9f2; border-radius: 12px; background: #fff; box-shadow: 0 2px 8px rgba(26, 54, 93, .035); }
+      .anno-item + .anno-item { margin-top: 10px; }
+      .anno-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+      .anno-ch { color: #2c67bd; font-size: 12px; cursor: pointer; font-weight: 650; }
       .anno-ch:hover { text-decoration: underline; }
-      .anno-del { margin-left: auto; color: #c0392b; cursor: pointer; font-size: 13px; }
-      .anno-edit-btn { color: #2b6cff; cursor: pointer; font-size: 13px; }
-      .anno-edit-btn:hover, .anno-ch:hover, .anno-del:hover { text-decoration: underline; }
-      .anno-ctx { font-size: 15px; line-height: 1.85; color: #444; background: #fbf5e3;
+      .anno-del { margin-left: auto; color: #a36a69; cursor: pointer; font-size: 12px; padding: 4px 6px; border-radius: 5px; }
+      .anno-del:hover { color: #b43d3b; background: #fff3f2; }
+      .anno-edit-btn { color: #516175; cursor: pointer; font-size: 12px; padding: 4px 6px; border-radius: 5px; }
+      .anno-edit-btn:hover, .anno-ch:hover { text-decoration: none; }
+      .anno-edit-btn:hover { color: #245eaf; background: #edf4ff; }
+      .anno-ctx { font-size: 15px; line-height: 1.85; color: #303844; background: #f7f8fa;
         border-radius: 8px; padding: 10px 12px; max-height: 180px; overflow: auto; }
-      .anno-ctx mark { background: #ffd95a; color: inherit; padding: 0 1px; border-radius: 2px; }
-      .anno-note-view { margin-top: 8px; font-size: 15px; line-height: 1.6; color: #2f63c8;
-        background: #eef3ff; border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
+      .anno-ctx mark { background: #dfe6ea; color: inherit; padding: 0 2px; border-radius: 3px; }
+      .anno-note-view { margin-top: 9px; font-size: 14px; line-height: 1.65; color: #285caa;
+        border-left: 3px solid #93b8ea; background: #f3f7ff; border-radius: 0 8px 8px 0; padding: 9px 12px; white-space: pre-wrap; }
       /* 编辑区：默认收起，点"编辑"才滑开 */
       .anno-edit { max-height: 0; overflow: hidden; transition: max-height 0.25s ease; }
       .anno-edit.open { max-height: 280px; margin-top: 8px; }
@@ -744,7 +763,7 @@
       .anno-edit-actions button { font: 14px/1 inherit; padding: 7px 16px; border-radius: 8px;
         border: 1px solid #ccc; background: #fff; cursor: pointer; }
       .anno-edit-actions .save { background: #2b6cff; color: #fff; border-color: #2b6cff; }
-      .anno-item.target { background: #fff7d6; border-radius: 8px; padding-left: 8px; padding-right: 8px; }
+      .anno-item.target { background: #fff; border-color: #8eb5ed; box-shadow: 0 0 0 3px rgba(65, 122, 216, .12); }
       @keyframes annotation-item-added {
         from { opacity: 0.25; transform: translateY(12px) scale(0.985); }
         to { opacity: 1; transform: translateY(0) scale(1); }
@@ -755,7 +774,10 @@
       body.anim-annotation-add-off .anno-item.target.annotation-added {
         animation: none;
       }
-      body.theme-dark .anno-ctx { background: #34301f; color: #ddd; }
+      body.theme-dark .anno-card .modal-head { border-color: #3a3f49; }
+      body.theme-dark #anno-list { background: #22252a; }
+      body.theme-dark .anno-item { border-color: #3d434e; background: #292c31; box-shadow: none; }
+      body.theme-dark .anno-ctx { background: #202328; color: #ddd; }
       body.theme-dark .anno-note-view { background: #23304a; color: #cfe0ff; }
       body.theme-dark .anno-note { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
       body.theme-dark .anno-item { border-color: #3a3a3d; }
@@ -788,90 +810,64 @@
       <button id="zoom-in" class="tbtn pdf-only" title="放大" data-reader-i18n-title="zoomIn" data-reader-i18n-aria="zoomIn">＋</button>
       <button id="pdf-dual" class="tbtn pdf-only" title="单页 / 双页" data-reader-i18n-title="pdfDual" data-reader-i18n-aria="pdfDual">▥</button>
       <button id="immersive-btn" class="tbtn" title="沉浸模式（隐藏工具栏，点屏幕中间唤出）" data-reader-i18n-title="immersive" data-reader-i18n-aria="immersive">⛶</button>
-      <div class="gear-wrap">
+      <div id="reader-settings-toolbar-item" class="gear-wrap">
         <button id="gear-btn" class="tbtn" data-reader-i18n="settings">⚙ 设置</button>
-        <div id="settings" class="settings">
+        <div id="settings" class="settings" data-quick-ui-mode="compact">
       <button id="reader-preferences-btn" class="reader-preferences-launch" type="button"><span data-reader-i18n="readerPreferences">阅读偏好</span> <span aria-hidden="true">⚙</span></button>
-      <div class="row reader-quick-palette-row">
-        <label data-reader-i18n="theme">主题</label>
-        <div id="reader-quick-palette" class="theme-row" aria-label="快捷主题"></div>
-      </div>
-      <div class="row">
-        <label data-reader-i18n="font">字体</label>
-        <select id="set-font">
-          <option value="" data-reader-i18n="bookDefaultFont">书籍默认</option>
-          <option value="'Microsoft YaHei',sans-serif">微软雅黑</option>
-          <option value="'SimSun',serif">宋体</option>
-          <option value="'SimHei',sans-serif">黑体</option>
-          <option value="'KaiTi',serif">楷体</option>
-          <option value="'Kunpeng LXGW WenKai Lite','Microsoft YaHei',sans-serif" data-reader-font-id="lxgw-wenkai-lite" data-reader-font-label="霞鹜文楷 Lite">霞鹜文楷 Lite（需下载）</option>
-          <option value="'Kunpeng Source Han Serif SC','SimSun',serif" data-reader-font-id="source-han-serif-sc" data-reader-font-label="思源宋体">思源宋体（需下载）</option>
-          <option value="'Kunpeng Zhuque Fangsong','FangSong','SimSun',serif" data-reader-font-id="zhuque-fangsong" data-reader-font-label="朱雀仿宋">朱雀仿宋（需下载）</option>
-          <option value="serif" data-reader-i18n="serif">衬线</option>
-          <option value="sans-serif" data-reader-i18n="sansSerif">无衬线</option>
-        </select>
-      </div>
-      <div class="row reader-font-download-row" id="reader-font-download-row" hidden>
-        <label></label>
-        <span class="reader-font-download-status" id="reader-font-download-status"></span>
-        <button class="reader-font-download-action" id="reader-font-download-action" type="button" data-reader-i18n="download">下载</button>
-      </div>
-      <div class="row">
-        <label data-reader-i18n="style">样式</label>
-        <select id="set-style-mode">
-          <option value="local" data-reader-i18n="localStyle">本地样式（推荐）</option>
-          <option value="book" data-reader-i18n="bookStyle">图书样式（使用原书字号）</option>
-        </select>
-      </div>
-      <div class="row"><label data-reader-i18n="fontSize">字号</label><input type="range" id="set-size" min="12" max="40" step="1" /><span class="val" id="v-size"></span></div>
-      <div class="row"><label data-reader-i18n="noteFontSize">注释字号</label><input type="range" id="set-note-size" min="10" max="22" step="1" /><span class="val" id="v-note-size"></span></div>
-      <div class="row"><label data-reader-i18n="lineSpacing">行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
-      <div class="row"><label data-reader-i18n="paragraphSpacing">段间距</label><input type="range" id="set-para" min="0" max="2" step="0.1" /><span class="val" id="v-para"></span></div>
-      <div class="row"><label data-reader-i18n="letterSpacing">字间距</label><input type="range" id="set-letter" min="0" max="5" step="0.5" /><span class="val" id="v-letter"></span></div>
-      <div class="row reading-mode-row">
-        <div class="mode-toggle-group">
-          <label class="mode-toggle-item text-conversion-toggle" for="set-text-conversion-simple">
-            <span class="text-conversion-choice"><span id="text-conversion-state-label" class="text-conversion-label">简</span><span class="settings-switch"><input id="set-text-conversion-simple" type="checkbox" /><span class="settings-slider"></span></span></span>
-          </label>
-          <label class="mode-toggle-item" for="set-dual-mode">
-            <span id="set-dual-mode-label" data-reader-i18n="twoPages">双页</span>
-            <span class="settings-switch">
-              <input id="set-dual-mode" type="checkbox" />
-              <span class="settings-slider"></span>
-            </span>
-          </label>
-          <label class="mode-toggle-item" for="set-scroll-mode">
-            <span id="set-scroll-mode-label" data-reader-i18n="scrollMode">滚动</span>
-            <span class="settings-switch">
-              <input id="set-scroll-mode" type="checkbox" />
-              <span class="settings-slider"></span>
-            </span>
-          </label>
+      <div class="reader-quick-section">
+        <div class="row reader-quick-palette-row">
+          <label data-reader-i18n="theme">主题</label>
+          <div id="reader-quick-palette" class="theme-row" aria-label="快捷主题"></div>
+        </div>
+        <div class="row">
+          <label data-reader-i18n="font">字体</label>
+          <select id="set-font">
+            <option value="" data-reader-i18n="bookDefaultFont">书籍默认</option>
+            <option value="'Microsoft YaHei',sans-serif">微软雅黑</option>
+            <option value="'SimSun',serif">宋体</option>
+            <option value="'SimHei',sans-serif">黑体</option>
+            <option value="'KaiTi',serif">楷体</option>
+            <option value="'Kunpeng LXGW WenKai Lite','Microsoft YaHei',sans-serif" data-reader-font-id="lxgw-wenkai-lite" data-reader-font-label="霞鹜文楷 Lite">霞鹜文楷 Lite（需下载）</option>
+            <option value="'Kunpeng Source Han Serif SC','SimSun',serif" data-reader-font-id="source-han-serif-sc" data-reader-font-label="思源宋体">思源宋体（需下载）</option>
+            <option value="'Kunpeng Zhuque Fangsong','FangSong','SimSun',serif" data-reader-font-id="zhuque-fangsong" data-reader-font-label="朱雀仿宋">朱雀仿宋（需下载）</option>
+            <option value="serif" data-reader-i18n="serif">衬线</option>
+            <option value="sans-serif" data-reader-i18n="sansSerif">无衬线</option>
+          </select>
+        </div>
+        <div class="row reader-font-download-row" id="reader-font-download-row" hidden>
+          <label></label>
+          <span class="reader-font-download-status" id="reader-font-download-status"></span>
+          <button class="reader-font-download-action" id="reader-font-download-action" type="button" data-reader-i18n="download">下载</button>
+        </div>
+        <div class="row reader-quick-slider-row"><label data-reader-i18n="fontSize">字号</label><input type="range" id="set-size" min="12" max="40" step="1" /><span class="val" id="v-size"></span></div>
+        <div class="row reader-quick-slider-row"><label data-reader-i18n="lineSpacing">行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
+        <div class="row reading-mode-row reader-quick-mode-row">
+          <div class="mode-toggle-group">
+            <label class="mode-toggle-item text-conversion-toggle" for="set-text-conversion-simple">
+              <span class="text-conversion-choice"><span id="text-conversion-state-label" class="text-conversion-label">简</span><span class="settings-switch"><input id="set-text-conversion-simple" type="checkbox" /><span class="settings-slider"></span></span></span>
+            </label>
+            <label class="mode-toggle-item" for="set-dual-mode">
+              <span id="set-dual-mode-label" data-reader-i18n="twoPages">双页</span><span class="settings-switch"><input id="set-dual-mode" type="checkbox" /><span class="settings-slider"></span></span>
+            </label>
+            <label class="mode-toggle-item" for="set-scroll-mode">
+              <span id="set-scroll-mode-label" data-reader-i18n="scrollMode">滚动</span><span class="settings-switch"><input id="set-scroll-mode" type="checkbox" /><span class="settings-slider"></span></span>
+            </label>
+          </div>
+        </div>
+        <div class="row reader-quick-slider-row reader-quick-speech-row reader-quick-current-only"><label data-reader-i18n="speechRate">朗读语速</label><input type="range" id="quick-set-ttsrate" min="0.5" max="2" step="0.1" /><span class="val" id="quick-v-ttsrate"></span></div>
+        <div class="reader-quick-classic-only">
+          <div class="row"><label data-reader-i18n="style">样式</label><select id="quick-set-style-mode"><option value="local" data-reader-i18n="localStyle">本地样式（推荐）</option><option value="book" data-reader-i18n="bookStyle">图书样式（使用原书字号）</option></select></div>
+          <div class="row reader-quick-slider-row"><label data-reader-i18n="noteFontSize">注释字号</label><input type="range" id="quick-set-note-size" min="10" max="22" step="1" /><span class="val" id="quick-v-note-size"></span></div>
+          <div class="row reader-quick-slider-row"><label data-reader-i18n="paragraphSpacing">段间距</label><input type="range" id="quick-set-para" min="0" max="2" step="0.1" /><span class="val" id="quick-v-para"></span></div>
+          <div class="row reader-quick-slider-row"><label data-reader-i18n="letterSpacing">字间距</label><input type="range" id="quick-set-letter" min="0" max="5" step="0.5" /><span class="val" id="quick-v-letter"></span></div>
+          <div class="row"><label data-reader-i18n="animation">动画</label><select id="quick-set-turnfx"><option value="off" data-reader-i18n="animationOff">关闭</option><option value="horizontal" data-reader-i18n="horizontalTurn">水平翻页（整页左移）</option></select></div>
+          <div class="row reader-quick-slider-row"><label data-reader-i18n="speed">速度</label><input type="range" id="quick-set-turnspeed" min="0.5" max="2" step="0.1" /><span class="val" id="quick-v-turnspeed"></span></div>
+          <div class="reader-quick-margin-block"><h4 data-reader-i18n="pageMargins">页边距</h4><div class="margins"><label><span data-reader-i18n="top">上</span><input type="number" id="quick-set-mt" min="0" max="160" /></label><label><span data-reader-i18n="bottom">下</span><input type="number" id="quick-set-mb" min="0" max="160" /></label><label><span data-reader-i18n="left">左</span><input type="number" id="quick-set-ml" min="0" max="240" /></label><label><span data-reader-i18n="right">右</span><input type="number" id="quick-set-mr" min="0" max="240" /></label></div></div>
         </div>
       </div>
-      <div class="row">
-        <label data-reader-i18n="animation">动画</label>
-        <select id="set-turnfx">
-          <option value="off" data-reader-i18n="animationOff">关闭</option>
-          <option value="horizontal" data-reader-i18n="horizontalTurn">水平翻页（整页左移）</option>
-        </select>
-      </div>
-      <div class="row"><label data-reader-i18n="speed">速度</label><input type="range" id="set-turnspeed" min="0.5" max="2" step="0.1" /><span class="val" id="v-turnspeed"></span></div>
-      <h4 data-reader-i18n="pageMargins">页边距（像素）</h4>
-      <div class="margins">
-        <label><span data-reader-i18n="top">上</span> <input type="number" id="set-mt" min="0" max="160" /></label>
-        <label><span data-reader-i18n="bottom">下</span> <input type="number" id="set-mb" min="0" max="160" /></label>
-        <label><span data-reader-i18n="left">左</span> <input type="number" id="set-ml" min="0" max="240" /></label>
-        <label><span data-reader-i18n="right">右</span> <input type="number" id="set-mr" min="0" max="240" /></label>
-      </div>
-      <h4 data-reader-i18n="speech">朗读 🔊</h4>
-      <div class="row"><label data-reader-i18n="speechSource">音源</label><select id="set-ttssrc">
-        <option value="edge" data-reader-i18n="ttsMicrosoftAuto">在线 · 微软神经</option>
-        <option value="system" data-reader-i18n="ttsSystemOffline">系统语音</option>
-      </select></div>
-      <div class="row"><label data-reader-i18n="speechRate">语速</label><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.1" /><span class="val" id="v-ttsrate"></span></div>
         </div>
       </div>
+      <div id="reader-quick-layout-preview" class="reader-quick-layout-preview" aria-hidden="true" hidden></div>
       <div id="reader-preferences-modal" class="modal" role="dialog" aria-modal="true" aria-label="阅读偏好" data-reader-i18n-aria="readerPreferences">
         <section class="modal-card reader-preferences-card">
           <div class="reader-preference-scope" role="group" aria-label="偏好保存范围" data-reader-i18n-aria="preferenceScopeLabel">
@@ -879,15 +875,15 @@
             <button type="button" data-pref-scope="book" data-reader-i18n="preferenceBook" aria-pressed="false">独立</button>
           </div>
           <div class="reader-preferences-body">
-            <nav class="reader-preferences-nav" aria-label="阅读偏好分类" data-reader-i18n-aria="preferenceNavigation">
-              <button class="active" type="button" data-pref-section="appearance" data-reader-i18n="preferenceAppearance">外观与配色</button>
-              <button type="button" data-pref-section="pagination" data-reader-i18n="preferencePagination">排版与分页</button>
-              <button type="button" data-pref-section="toolbar" data-reader-i18n="preferenceToolbar">工具栏与操作</button>
-              <button type="button" data-pref-section="advanced" data-reader-i18n="preferenceAdvanced">高级</button>
+            <nav id="reader-preferences-nav" class="reader-preferences-nav" aria-label="阅读偏好分类" data-reader-i18n-aria="preferenceNavigation">
+              <button class="active" type="button" data-pref-section="appearance"><span class="reader-preferences-nav-icon" aria-hidden="true">◐</span><span class="reader-preferences-nav-label" data-reader-i18n="preferenceAppearance">外观与配色</span></button>
+              <button type="button" data-pref-section="pagination"><span class="reader-preferences-nav-icon" aria-hidden="true">▤</span><span class="reader-preferences-nav-label" data-reader-i18n="preferencePagination">排版与分页</span></button>
+              <button type="button" data-pref-section="toolbar"><span class="reader-preferences-nav-icon" aria-hidden="true">☷</span><span class="reader-preferences-nav-label" data-reader-i18n="preferenceToolbar">工具栏与操作</span></button>
+              <button type="button" data-pref-section="advanced"><span class="reader-preferences-nav-icon" aria-hidden="true">⚙</span><span class="reader-preferences-nav-label" data-reader-i18n="preferenceAdvanced">高级</span></button>
             </nav>
+            <button id="reader-preferences-nav-toggle" class="reader-preferences-nav-toggle" type="button" aria-expanded="true" aria-label="收起分类" title="收起分类"><span class="reader-preferences-nav-toggle-icon reader-preferences-nav-toggle-collapse" aria-hidden="true">‹</span><span class="reader-preferences-nav-toggle-icon reader-preferences-nav-toggle-expand" aria-hidden="true">›</span></button>
             <div class="reader-preferences-content">
               <section class="reader-preference-panel" data-pref-panel="appearance">
-                <h3 data-reader-i18n="preferenceAppearance">外观与配色</h3>
                 <div id="pref-palette-scroll" class="reader-palette-scroll"><div id="pref-palette-grid" class="reader-palette-grid" aria-label="配色方案" data-reader-i18n-aria="paletteGrid"></div></div>
                 <div class="reader-color-grid">
                   <label class="reader-color-field"><span data-reader-i18n="textColor">正文颜色</span><input type="color" data-pref-color="textColor" /></label><label class="reader-color-field"><span data-reader-i18n="linkColor">链接颜色</span><input type="color" data-pref-color="linkColor" /></label><label class="reader-color-field"><span data-reader-i18n="selectionColor">选中文本</span><input type="color" data-pref-color="selectionColor" /></label><label class="reader-color-field"><span data-reader-i18n="footnoteBackground">脚注背景</span><input type="color" data-pref-color="footnoteBackground" /></label><label class="reader-color-field"><span data-reader-i18n="footnoteBorder">脚注边框</span><input type="color" data-pref-color="footnoteBorder" /></label>
@@ -896,25 +892,112 @@
                 <div class="reader-appearance-actions"><button id="pref-reset-colors" class="reader-preferences-reset" type="button" data-reader-i18n="restorePaletteColors">恢复默认</button><button id="pref-clear-book-appearance" class="reader-preferences-reset danger" type="button" hidden data-reader-i18n="clearBookAppearance">清除本书独立外观</button></div>
               </section>
               <section class="reader-preference-panel" data-pref-panel="pagination" hidden>
-                <h3 data-reader-i18n="preferencePagination">排版与分页</h3><p class="reader-preference-hint" data-reader-i18n="paginationHint">适用于 EPUB 的分页模式。滚动模式保持内容连续。</p>
-                <div class="reader-preference-row"><label><span data-reader-i18n="imagePagination">图片跨页处理</span><small data-reader-i18n="imagePaginationHint">默认优先显示完整图片；超出单页时等比缩小。</small></label><select id="pref-image-pagination"><option value="next-page" data-reader-i18n="imagePaginationNext">移到下一页完整显示（推荐）</option><option value="continuous" data-reader-i18n="imagePaginationContinuous">允许跨页连续显示</option></select></div>
-                <div class="reader-preference-row"><label for="pref-dual-page-gap"><span data-reader-i18n="dualPageGap">双页中缝</span><small data-reader-i18n="dualPageGapHint">仅在双页分页时生效；单页和滚动阅读不受影响。</small></label><span class="reader-preference-range-control"><input id="pref-dual-page-gap" type="range" min="0" max="120" step="1" /><output id="pref-dual-page-gap-value" for="pref-dual-page-gap">40 px</output></span></div>
+                <div class="reader-pagination-layout">
+                  <section class="reader-pagination-card">
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="imagePagination">图片跨页处理</h4><p data-reader-i18n="imagePaginationHint">默认优先显示完整图片；超出单页时等比缩小。</p></div></div>
+                    <div id="pref-image-pagination" class="reader-pagination-choice-grid" role="radiogroup" aria-label="图片跨页处理" data-reader-i18n-aria="imagePagination">
+                      <button type="button" class="reader-pagination-choice active" data-image-pagination="next-page" role="radio" aria-checked="true"><span class="reader-pagination-choice-mark" aria-hidden="true"></span><span data-reader-i18n="imagePaginationNext">移到下一页完整显示（推荐）</span></button>
+                      <button type="button" class="reader-pagination-choice" data-image-pagination="continuous" role="radio" aria-checked="false"><span class="reader-pagination-choice-mark" aria-hidden="true"></span><span data-reader-i18n="imagePaginationContinuous">允许跨页连续显示</span></button>
+                    </div>
+                  </section>
+                  <section class="reader-pagination-card">
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="dualPageGap">双页中缝</h4><p data-reader-i18n="dualPageGapHint">仅在双页分页时生效；单页和滚动阅读不受影响。</p></div><output id="pref-dual-page-gap-value" for="pref-dual-page-gap">40 px</output></div>
+                    <div class="reader-pagination-range"><input id="pref-dual-page-gap" type="range" min="0" max="120" step="1" aria-label="双页中缝" data-reader-i18n-aria="dualPageGap" /></div>
+                  </section>
+                  <section class="reader-pagination-card reader-pagination-detail-card">
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="typographyDetails">排版细节</h4><p data-reader-i18n="typographyDetailsHint">书籍样式与精细字距通常只需设置一次。</p></div></div>
+                    <div class="reader-preference-compact-list">
+                      <div class="reader-preference-row"><label data-reader-i18n="style">样式</label><select id="set-style-mode"><option value="local" data-reader-i18n="localStyle">本地样式（推荐）</option><option value="book" data-reader-i18n="bookStyle">图书样式（使用原书字号）</option></select></div>
+                      <div class="reader-preference-row"><label data-reader-i18n="noteFontSize">注释字号</label><span class="reader-preference-inline-range"><input type="range" id="set-note-size" min="10" max="22" step="1" /><output id="v-note-size"></output></span></div>
+                      <div class="reader-preference-row"><label data-reader-i18n="paragraphSpacing">段间距</label><span class="reader-preference-inline-range"><input type="range" id="set-para" min="0" max="2" step="0.1" /><output id="v-para"></output></span></div>
+                      <div class="reader-preference-row"><label data-reader-i18n="letterSpacing">字间距</label><span class="reader-preference-inline-range"><input type="range" id="set-letter" min="0" max="5" step="0.5" /><output id="v-letter"></output></span></div>
+                      <div class="reader-preference-margin-section"><div class="reader-preference-margin-heading"><strong data-reader-i18n="pageMargins">页边距</strong><small data-reader-i18n="pageMarginsHint">分别控制正文与阅读窗口四周的留白。</small></div><div class="reader-preference-margin-grid">
+                        <label><span data-reader-i18n="top">上</span><input type="number" id="set-mt" min="0" max="160" /><small>px</small></label>
+                        <label><span data-reader-i18n="bottom">下</span><input type="number" id="set-mb" min="0" max="160" /><small>px</small></label>
+                        <label><span data-reader-i18n="left">左</span><input type="number" id="set-ml" min="0" max="240" /><small>px</small></label>
+                        <label><span data-reader-i18n="right">右</span><input type="number" id="set-mr" min="0" max="240" /><small>px</small></label>
+                      </div></div>
+                    </div>
+                  </section>
+                  <section class="reader-pagination-card reader-pagination-detail-card">
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="pageTurnExperience">翻页体验</h4><p data-reader-i18n="pageTurnExperienceHint">动画样式与速度仅影响分页阅读。</p></div></div>
+                    <div class="reader-preference-compact-list">
+                      <div class="reader-preference-row"><label data-reader-i18n="animation">动画</label><select id="set-turnfx"><option value="off" data-reader-i18n="animationOff">关闭</option><option value="horizontal" data-reader-i18n="horizontalTurn">水平翻页（整页左移）</option></select></div>
+                      <div class="reader-preference-row"><label data-reader-i18n="speed">速度</label><span class="reader-preference-inline-range"><input type="range" id="set-turnspeed" min="0.5" max="2" step="0.1" /><output id="v-turnspeed"></output></span></div>
+                    </div>
+                  </section>
+                </div>
               </section>
               <section class="reader-preference-panel" data-pref-panel="toolbar" hidden>
-                <h3 data-reader-i18n="preferenceToolbar">工具栏与操作</h3><p class="reader-preference-hint" data-reader-i18n="toolbarHint">隐藏仅影响阅读器工具栏，不会删除功能；可随时在此恢复。</p>
-                <div class="reader-preference-row"><label data-reader-i18n="showTextConversion">显示简繁按钮</label><input type="checkbox" data-pref-bool="showTextConversion" /></div><div class="reader-preference-row"><label data-reader-i18n="showToc">显示目录按钮</label><input type="checkbox" data-pref-bool="showTocButton" /></div><div class="reader-preference-row"><label data-reader-i18n="showChapterButtons">显示上一章、下一章按钮</label><input type="checkbox" data-pref-bool="showChapterButtons" /></div><div class="reader-preference-row"><label data-reader-i18n="showTts">显示朗读按钮</label><input type="checkbox" data-pref-bool="showTtsButton" /></div><div class="reader-preference-row"><label data-reader-i18n="showAnnotations">显示批注按钮</label><input type="checkbox" data-pref-bool="showAnnotationButton" /></div><div class="reader-preference-row"><label data-reader-i18n="showVocabulary">显示生词本</label><input type="checkbox" data-pref-bool="showVocabularyButton" /></div><div class="reader-preference-row"><label data-reader-i18n="showPageInfo">显示页码与章节进度</label><input type="checkbox" data-pref-bool="showPageInfo" /></div>
+                <section class="reader-preference-group reader-quick-layout-group">
+                  <div class="reader-preference-row"><label data-reader-i18n="quickSettingsLayout">快捷设置布局</label><div class="reader-quick-ui-mode reader-toolbar-layout-mode" role="group" aria-label="设置界面布局" data-reader-i18n-aria="quickSettingsLayout"><button id="reader-quick-mode-compact" class="active" type="button" data-quick-ui-mode-option="compact" data-reader-i18n="quickSettingsCompact" aria-pressed="true">精简</button><button id="reader-quick-mode-classic" type="button" data-quick-ui-mode-option="classic" data-reader-i18n="quickSettingsClassic" aria-pressed="false">经典</button></div></div>
+                </section>
+                <section class="reader-preference-group reader-reading-display-group">
+                  <div class="reader-preference-group-head"><h4 data-reader-i18n="readingDisplay">阅读显示</h4><p data-reader-i18n="readingDisplayHint">控制正文周边的常驻阅读信息，不属于功能菜单。</p></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="showTextConversion">显示简繁按钮</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showTextConversion" /><span class="settings-slider"></span></label></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="showPageInfo">显示页码与章节进度</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showPageInfo" /><span class="settings-slider"></span></label></div>
+                </section>
+                <section class="reader-preference-group reader-tts-source-group">
+                  <div class="reader-preference-group-head"><h4 data-reader-i18n="speech">朗读</h4><p data-reader-i18n="ttsSourceHint">音源属于设备能力配置，语速仍可在快捷设置中随时调整。</p></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="speechSource">音源</label><select id="set-ttssrc"><option value="edge" data-reader-i18n="ttsMicrosoftAuto">在线 · 微软神经</option><option value="system" data-reader-i18n="ttsSystemOffline">系统语音</option></select></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="speechRate">语速</label><span class="reader-preference-inline-range"><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.1" /><output id="v-ttsrate"></output></span></div>
+                </section>
+                <details class="reader-preference-group reader-toolbar-menu-group">
+                  <summary class="reader-preference-group-head"><h4 data-reader-i18n="toolbarFunctionMenu">工具栏功能菜单</h4></summary>
+                  <div id="reader-toolbar-order-list" class="reader-toolbar-order-list" role="list" aria-label="工具栏功能排序" data-reader-i18n-aria="toolbarFunctionMenu">
+                    <div class="reader-toolbar-order-item" data-toolbar-item="toc" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动目录按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">☰</span><strong data-reader-i18n="showToc">显示目录按钮</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showTocButton" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item" data-toolbar-item="chapters" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动章节按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">◀▶</span><strong data-reader-i18n="showChapterButtons">显示上一章、下一章按钮</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showChapterButtons" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item" data-toolbar-item="tts" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动朗读按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">🔊</span><strong data-reader-i18n="showTts">显示朗读按钮</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showTtsButton" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item" data-toolbar-item="annotations" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动批注按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">🖍</span><strong data-reader-i18n="showAnnotations">显示批注按钮</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showAnnotationButton" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item" data-toolbar-item="vocabulary" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动生词本调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">📒</span><strong data-reader-i18n="showVocabulary">显示生词本</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showVocabularyButton" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item is-required" data-toolbar-item="settings" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动设置按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">⚙</span><span class="reader-toolbar-order-copy"><strong data-reader-i18n="settings">设置</strong><small data-reader-i18n="toolbarSettingsRequired">固定显示</small></span><label class="settings-switch reader-toolbar-order-toggle is-required" aria-label="设置按钮始终显示"><input type="checkbox" checked disabled data-toolbar-required /><span class="settings-slider"></span></label>
+                    </div>
+                  </div>
+                </details>
+                <section class="reader-preference-group reader-click-zone-group">
+                  <div class="reader-preference-group-head"><h4 data-reader-i18n="clickZoneTitle">正文点击区域</h4><p data-reader-i18n="clickZoneHint">区域不可重叠；点击已有区域设置功能，在空白处拖动可直接画出新区域。</p></div>
+                  <div class="reader-click-zone-editor">
+                    <div class="reader-click-zone-preset-bar">
+                      <label class="reader-click-zone-preset-select"><span data-reader-i18n="clickZonePreset">操作方案</span><select id="reader-click-zone-preset" aria-label="操作方案" data-reader-i18n-aria="clickZonePreset"></select></label>
+                      <input id="reader-click-zone-preset-name" type="text" maxlength="24" placeholder="方案名称" aria-label="方案名称" data-reader-i18n-placeholder="clickZonePresetName" data-reader-i18n-aria="clickZonePresetName" />
+                      <button id="reader-click-zone-preset-new" class="reader-click-zone-preset-action" type="button" data-reader-i18n="clickZonePresetNew">新建</button>
+                      <button id="reader-click-zone-preset-save" class="reader-click-zone-preset-action" type="button" data-reader-i18n="clickZonePresetSave">保存方案</button>
+                      <button id="reader-click-zone-preset-delete" class="reader-click-zone-preset-action danger" type="button" data-reader-i18n="clickZonePresetDelete">删除</button>
+                    </div>
+                    <div id="reader-click-zone-preview" class="reader-click-zone-preview" role="application" aria-label="正文点击区域预览" data-reader-i18n-aria="clickZonePreview">
+                      <span class="reader-click-zone-preview-title" data-reader-i18n="clickZoneDrawHint">点击已有区域设置功能；在空白处拖动画出新区域</span>
+                      <div id="reader-click-zone-canvas" class="reader-click-zone-canvas"></div>
+                    </div>
+                    <div class="reader-click-zone-actions">
+                      <button id="reader-click-zone-reset" class="reader-click-zone-reset" type="button" data-reader-i18n="clickZoneReset">恢复默认区域</button>
+                    </div>
+                  </div>
+                </section>
               </section>
               <section class="reader-preference-panel" data-pref-panel="advanced" hidden>
-                <h3 data-reader-i18n="preferenceAdvanced">高级</h3>
-                <div class="reader-preference-row reader-jump-back-preference">
-                  <label><span data-reader-i18n="readerJumpBack">显示跳转回退</span></label>
-                  <span class="reader-preference-actions"><button id="pref-reader-jump-back-settings" class="reader-preference-settings-button" type="button" title="跳转回退设置" aria-label="跳转回退设置" data-reader-i18n-title="readerJumpBackSettings" data-reader-i18n-aria="readerJumpBackSettings" aria-expanded="false">⚙</button><label class="settings-switch"><input id="pref-reader-jump-back-enabled" type="checkbox" data-pref-bool="showReaderJumpBack" /><span class="settings-slider"></span></label></span>
-                </div>
-                <div id="pref-reader-jump-back-config" class="reader-jump-back-config" hidden>
-                  <label class="reader-jump-back-dismiss-row"><span data-reader-i18n="readerJumpBackDismissMode">自动隐藏方式</span><select id="pref-reader-jump-back-dismiss-mode"><option value="pages" data-reader-i18n="readerJumpBackDismissPages">翻过指定页数</option><option value="time" data-reader-i18n="readerJumpBackDismissTime">经过指定时间</option></select><span class="reader-jump-back-amount"><input id="pref-reader-jump-back-pages" type="number" min="1" max="100" step="1" /><input id="pref-reader-jump-back-seconds" type="number" min="1" max="600" step="1" hidden /><output id="pref-reader-jump-back-dismiss-unit" for="pref-reader-jump-back-pages" data-reader-i18n="pageUnit">页</output></span></label>
-                  <label class="reader-jump-back-size-row"><span data-reader-i18n="readerJumpBackSize">图标大小</span><input id="pref-reader-jump-back-size" type="range" min="30" max="160" step="1" /><output id="pref-reader-jump-back-size-value" for="pref-reader-jump-back-size">32 px</output></label>
-                  <section id="pref-reader-jump-back-preview" class="reader-jump-back-preview" aria-label="跳转回退图标位置预览" data-reader-i18n-aria="readerJumpBackPosition"><p data-reader-i18n="readerJumpBackPositionHint">拖动图标调整屏幕位置</p><button id="pref-reader-jump-back-preview-icon" class="reader-jump-back-preview-icon" type="button" aria-label="拖动图标调整屏幕位置" data-reader-i18n-aria="readerJumpBackPosition"><svg class="reader-jump-back-arrow" viewBox="0 0 120 48" aria-hidden="true"><path d="M120 24H18M18 24L42 4M18 24L42 44"/></svg></button></section>
-                </div>
+                <section class="reader-preference-group reader-advanced-group">
+                  <div class="reader-advanced-main-row">
+                    <span class="reader-advanced-icon" aria-hidden="true">↩</span>
+                    <label class="reader-advanced-label"><span data-reader-i18n="readerJumpBack">显示跳转回退</span></label>
+                    <span class="reader-preference-actions"><button id="pref-reader-jump-back-settings" class="reader-preference-settings-button" type="button" title="跳转回退设置" aria-label="跳转回退设置" data-reader-i18n-title="readerJumpBackSettings" data-reader-i18n-aria="readerJumpBackSettings" aria-expanded="false">⚙</button><label class="settings-switch"><input id="pref-reader-jump-back-enabled" type="checkbox" data-pref-bool="showReaderJumpBack" /><span class="settings-slider"></span></label></span>
+                  </div>
+                  <div id="pref-reader-jump-back-config" class="reader-jump-back-config" hidden>
+                    <label class="reader-jump-back-dismiss-row"><span data-reader-i18n="readerJumpBackDismissMode">自动隐藏方式</span><select id="pref-reader-jump-back-dismiss-mode"><option value="pages" data-reader-i18n="readerJumpBackDismissPages">翻过指定页数</option><option value="time" data-reader-i18n="readerJumpBackDismissTime">经过指定时间</option></select><span class="reader-jump-back-amount"><input id="pref-reader-jump-back-pages" type="number" min="1" max="100" step="1" /><input id="pref-reader-jump-back-seconds" type="number" min="1" max="600" step="1" hidden /><output id="pref-reader-jump-back-dismiss-unit" for="pref-reader-jump-back-pages" data-reader-i18n="pageUnit">页</output></span></label>
+                    <label class="reader-jump-back-size-row"><span data-reader-i18n="readerJumpBackSize">图标大小</span><input id="pref-reader-jump-back-size" type="range" min="30" max="160" step="1" /><output id="pref-reader-jump-back-size-value" for="pref-reader-jump-back-size">32 px</output></label>
+                    <section id="pref-reader-jump-back-preview" class="reader-jump-back-preview" aria-label="跳转回退图标位置预览" data-reader-i18n-aria="readerJumpBackPosition"><p data-reader-i18n="readerJumpBackPositionHint">拖动图标调整屏幕位置</p><button id="pref-reader-jump-back-preview-icon" class="reader-jump-back-preview-icon" type="button" aria-label="拖动图标调整屏幕位置" data-reader-i18n-aria="readerJumpBackPosition"><svg class="reader-jump-back-arrow" viewBox="0 0 120 48" aria-hidden="true"><path d="M120 24H18M18 24L42 4M18 24L42 44"/></svg></button></section>
+                  </div>
+                </section>
               </section>
             </div>
             <div id="reader-preferences-scrollbar" class="reader-preferences-scrollbar" aria-hidden="true" hidden><span id="reader-preferences-scroll-thumb" class="reader-preferences-scroll-thumb"></span></div>
@@ -981,7 +1064,7 @@
         </div>
         <div id="toc-pane" class="toc-pane"></div>
         <div id="bm-pane" class="toc-pane" hidden>
-          <button id="bm-add2" class="bm-add" data-reader-i18n="addBookmark">➕ 在当前页加书签</button>
+          <button id="bm-add2" class="bm-add" data-reader-i18n="addBookmark">在当前页添加书签</button>
           <div id="bm-list2" class="bm-list"></div>
         </div>
       </aside>
@@ -1079,7 +1162,7 @@
     <div id="anno-modal" class="modal">
       <div class="modal-card anno-card">
         <div class="modal-head">
-          <span data-reader-i18n="annotations">批注 / 高亮</span>
+          <span class="anno-title"><strong data-reader-i18n="annotations">批注 / 高亮</strong><small>集中查看、编辑和回到原文</small></span>
           <button id="anno-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
         </div>
         <div id="anno-list"></div>
@@ -1111,6 +1194,7 @@
     <script src="animation-settings.js"></script>
     <script src="reader-settings-ui.js"></script>
     <script src="reader-preferences-ui.js"></script>
+    <script src="reader-click-zones-ui.js"></script>
     <script src="reader-recommendation-settings.js"></script>
     <script src="news-gesture.js"></script>
     <script src="browser-native-guard.js"></script>

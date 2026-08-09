@@ -7,6 +7,10 @@ const root = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "reader.html"), "utf8");
 const settings = fs.readFileSync(path.join(root, "reader-settings-ui.js"), "utf8");
 const preferences = fs.readFileSync(path.join(root, "reader-preferences-ui.js"), "utf8");
+const clickZones = fs.readFileSync(path.join(root, "reader-click-zones-ui.js"), "utf8");
+const clickZonesCss = fs.readFileSync(path.join(root, "reader-click-zones.css"), "utf8");
+const annotations = fs.readFileSync(path.join(root, "reader-page-annotations.js"), "utf8");
+const notes = fs.readFileSync(path.join(root, "reader-notes-ui.js"), "utf8");
 const layout = fs.readFileSync(path.join(root, "reader-page-layout.js"), "utf8");
 const pagination = fs.readFileSync(path.join(root, "reader-page-pagination.js"), "utf8");
 const runtime = fs.readFileSync(path.join(root, "reader-page-runtime.js"), "utf8");
@@ -23,6 +27,71 @@ test("reader settings exposes a dedicated preferences window above quick control
   assert.match(html, /data-pref-panel="advanced"/);
   assert.match(html, /reader-preferences-ui\.js/);
   assert.match(shell, /PREFERENCES: "preferences"/);
+});
+
+test("quick settings keep frequent reading controls while detailed controls live in preferences", () => {
+  const quickStart = html.indexOf('<div id="settings"');
+  const preferencesStart = html.indexOf('<div id="reader-preferences-modal"');
+  const toolbarStart = html.indexOf('data-pref-panel="toolbar"');
+  const advancedStart = html.indexOf('data-pref-panel="advanced"');
+  const quick = html.slice(quickStart, preferencesStart);
+  const paginationPanel = html.slice(html.indexOf('data-pref-panel="pagination"'), toolbarStart);
+  const toolbarPanel = html.slice(toolbarStart, advancedStart);
+
+  for (const id of ["reader-quick-palette", "set-font", "set-size", "set-line", "set-dual-mode", "set-scroll-mode", "quick-set-ttsrate"]) {
+    assert.match(quick, new RegExp(`id="${id}"`));
+  }
+  for (const id of ["set-style-mode", "set-note-size", "set-para", "set-letter", "set-turnfx", "set-turnspeed", "set-mt", "set-mb", "set-ml", "set-mr", "set-ttssrc", "set-ttsrate"]) {
+    assert.doesNotMatch(quick, new RegExp(`id="${id}"`));
+  }
+  for (const id of ["set-style-mode", "set-note-size", "set-para", "set-letter", "set-turnfx", "set-turnspeed", "set-mt", "set-mb", "set-ml", "set-mr"]) {
+    assert.match(paginationPanel, new RegExp(`id="${id}"`));
+  }
+  assert.match(toolbarPanel, /id="set-ttssrc"/);
+  assert.match(toolbarPanel, /id="set-ttsrate"/);
+  assert.match(preferencesCss, /reader-preference-compact-list/);
+  assert.match(preferencesCss, /reader-preference-margin-grid/);
+});
+
+test("classic quick settings expose visual mirrors and persist the selected layout", () => {
+  assert.match(html, /id="settings" class="settings" data-quick-ui-mode="compact"/);
+  const quickStart = html.indexOf('<div id="settings"');
+  const preferencesStart = html.indexOf('<div id="reader-preferences-modal"');
+  const quick = html.slice(quickStart, preferencesStart);
+  const preferences = html.slice(preferencesStart);
+  assert.doesNotMatch(quick, /data-quick-ui-mode-option="compact"/);
+  const toolbarPanel = preferences.match(/data-pref-panel="toolbar"[\s\S]*?<\/section>\s*<section class="reader-preference-panel" data-pref-panel="advanced"/)?.[0] || "";
+  assert.match(toolbarPanel, /reader-quick-layout-group[\s\S]*?data-quick-ui-mode-option="compact"[\s\S]*?data-quick-ui-mode-option="classic"/);
+  assert.match(html, /class="reader-quick-classic-only"[\s\S]*?id="quick-set-style-mode"[\s\S]*?id="quick-set-note-size"[\s\S]*?id="quick-set-para"[\s\S]*?id="quick-set-letter"[\s\S]*?id="quick-set-turnfx"[\s\S]*?id="quick-set-turnspeed"/);
+  assert.match(html, /id="quick-set-mt"[\s\S]*?id="quick-set-mb"[\s\S]*?id="quick-set-ml"[\s\S]*?id="quick-set-mr"/);
+  assert.doesNotMatch(html.match(/class="reader-quick-classic-only"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/)?.[0] || "", /image-pagination|set-ttssrc|set-ttsrate/);
+  assert.match(settings, /quickSettingsModeKey = "readerQuickSettingsUiMode"/);
+  assert.match(settings, /function connectQuickMirror\(proxyId, sourceId, proxyOutputId, sourceOutputId\)/);
+  assert.match(settings, /connectQuickMirror\("quick-set-style-mode", "set-style-mode"\)/);
+  assert.match(settings, /connectQuickMirror\("quick-set-turnspeed", "set-turnspeed"/);
+  assert.match(settings, /localStorage\.setItem\(quickSettingsModeKey, mode\)/);
+  assert.match(html, /id="reader-quick-layout-preview"[^>]*hidden/);
+  assert.match(settings, /function showQuickSettingsModePreview\(\)/);
+  assert.match(settings, /quickSettingsPanel\.cloneNode\(true\)/);
+  assert.match(settings, /showQuickSettingsModePreview\(\);/);
+  assert.match(settings, /QUICK_SETTINGS_PREVIEW_DURATION_MS = 1500/);
+  assert.match(settings, /QUICK_SETTINGS_PREVIEW_EXTENSION_MS = 1000/);
+  assert.match(settings, /QUICK_SETTINGS_PREVIEW_FADE_MS = 160/);
+  assert.match(settings, /quickSettingsPreviewDeadline \+ QUICK_SETTINGS_PREVIEW_EXTENSION_MS/);
+  assert.match(settings, /function scheduleQuickSettingsModePreviewFade\(\)/);
+  assert.match(settings, /function extendQuickSettingsModePreview\(\)/);
+  assert.match(settings, /quickSettingsPreview\.classList\.remove\("is-fading"\)/);
+  assert.match(settings, /globalThis\.setTimeout\(hideQuickSettingsModePreview, remaining\)/);
+  assert.match(settings, /function triggerQuickSettingsModePreview\(event\)/);
+  assert.match(settings, /document\.addEventListener\("pointerdown", triggerQuickSettingsModePreview, true\)/);
+  assert.match(settings, /document\.addEventListener\("click", triggerQuickSettingsModePreview, true\)/);
+  assert.match(settings, /quickSettingsPreview\?\.addEventListener\("pointerdown"/);
+  assert.doesNotMatch(preferencesCss, /reader-quick-layout-preview-fade/);
+  assert.match(preferencesCss, /reader-quick-layout-preview\.is-fading\{opacity:0/);
+  assert.match(preferencesCss, /reader-quick-layout-preview \.settings\{[^}]*pointer-events:auto[^}]*cursor:pointer/s);
+  assert.match(preferencesCss, /\.settings\[data-quick-ui-mode="classic"\] \.reader-quick-classic-only\{display:grid/);
+  assert.match(preferencesCss, /\.settings\[data-quick-ui-mode="classic"\] \.reader-quick-current-only\{display:none\}/);
+  assert.match(preferencesCss, /\.reader-toolbar-layout-mode\{width:min\(250px,62%\);margin:0\}/);
 });
 
 test("advanced preferences configure the independent jump-back icon lifetime", () => {
@@ -52,6 +121,11 @@ test("advanced preferences configure the independent jump-back icon lifetime", (
   assert.match(settings, /app_settings_sync_save/);
   assert.match(settings, /app-settings-synced/);
   assert.match(settings, /remote\?\.exists/);
+  assert.match(settings, /readerLayoutSettings: normalizedReaderLayoutSettings\(settings\)/);
+  assert.match(settings, /hasReaderLayoutSettings/);
+  assert.match(settings, /fontFamily/);
+  assert.match(settings, /dualPageGap/);
+  assert.match(settings, /imagePagination/);
   assert.match(preferences, /readerJumpBackDismissMode: event\.target\.value === "time" \? "time" : "pages"/);
   assert.match(preferences, /readerJumpBackDismissPages: value/);
   assert.match(preferences, /readerJumpBackDismissSeconds: value/);
@@ -73,6 +147,37 @@ test("advanced preferences configure the independent jump-back icon lifetime", (
   assert.match(preferencesCss, /reader-jump-back-preview-icon\{[^}]*background:transparent[^}]*color:#315f9f[^}]*box-shadow:none/s);
 });
 
+test("preference navigation uses localized collapse labels and only shows section icons when collapsed", () => {
+  assert.match(html, /id="reader-preferences-nav-toggle"/);
+  assert.match(preferences, /translated && translated !== key \? translated : fallback/);
+  assert.match(i18n, /collapsePreferenceNavigation: "收起分类"/);
+  assert.match(i18n, /expandPreferenceNavigation: "展开分类"/);
+  assert.match(preferencesCss, /\.reader-preferences-nav button\[data-pref-section\] \.reader-preferences-nav-icon\{display:none\}/);
+  assert.match(preferencesCss, /\.reader-preferences-card\.nav-collapsed \.reader-preferences-nav button\[data-pref-section\] \.reader-preferences-nav-icon\{display:grid\}/);
+});
+
+test("preference categories collapse to one icon rail and preserve all four sections", () => {
+  assert.match(html, /<\/nav>\s*<button id="reader-preferences-nav-toggle"[^>]*aria-expanded="true"[^>]*aria-label="收起分类"/);
+  assert.match(html, /data-pref-section="appearance"[\s\S]*?data-pref-section="pagination"[\s\S]*?data-pref-section="toolbar"[\s\S]*?data-pref-section="advanced"/);
+  assert.match(html, /reader-preferences-nav-icon/);
+  assert.match(preferences, /PREFERENCE_NAV_COLLAPSED_KEY = "readerPreferencesNavCollapsed"/);
+  assert.match(preferences, /function applyPreferenceNavState\(\)/);
+  assert.match(preferences, /preferencesCard\?\.classList\.toggle\("nav-collapsed", preferenceNavCollapsed\)/);
+  assert.match(preferencesCss, /\.reader-preferences-card\.nav-collapsed \.reader-preferences-body/);
+  assert.match(preferencesCss, /\.reader-preferences-card\.nav-collapsed \.reader-preferences-nav-label/);
+  assert.match(preferencesCss, /\.reader-preferences-nav-toggle\{position:absolute/);
+  assert.match(preferencesCss, /\.reader-preferences-card\.nav-collapsed #reader-preferences-nav-toggle\{left:62px!important\}/);
+  assert.match(html, /reader-preferences-nav-toggle-collapse[\s\S]*?reader-preferences-nav-toggle-expand/);
+  assert.match(preferencesCss, /\.reader-preferences-nav-toggle-expand\{display:none\}/);
+  assert.match(preferencesCss, /\.reader-preferences-card\.nav-collapsed \.reader-preferences-nav-toggle-expand\{display:block\}/);
+  assert.match(preferencesCss, /#reader-preferences-nav-toggle\{top:50%!important;left:172px!important/);
+  assert.match(preferencesCss, /\.reader-preferences-card\.nav-collapsed \.reader-preferences-nav button\{width:38px;min-height:38px;padding:6px\}/);
+  assert.doesNotMatch(html, /data-pref-panel="appearance">\s*<h3/);
+  assert.doesNotMatch(html, /data-pref-panel="pagination">\s*<h3/);
+  assert.doesNotMatch(html, /data-pref-panel="toolbar">\s*<h3/);
+  assert.doesNotMatch(html, /data-pref-panel="advanced">\s*<h3/);
+});
+
 test("appearance defaults use a restrained palette and reset custom colors at the lower right", () => {
   assert.match(preferences, /link: "#2f6fad", selection: "#dceafa", footnote: "#f3f6fa", border: "#b7c7da"/);
   assert.match(preferences, /link: "#9abfe8", selection: "#3a4f6b", footnote: "#252f3a", border: "#647a94"/);
@@ -81,6 +186,7 @@ test("appearance defaults use a restrained palette and reset custom colors at th
   assert.doesNotMatch(preferences, /pref-reset-colors[^\n]*textColor: ""/);
   assert.match(html, /class="reader-appearance-actions"[\s\S]*?id="pref-reset-colors"[\s\S]*?恢复默认/);
   assert.match(html, /reader-appearance-actions\{display:flex;justify-content:flex-end/);
+  assert.match(preferencesCss, /\.reader-palette-grid\{grid-template-columns:repeat\(5,minmax\(0,1fr\)\);gap:9px\}/);
 });
 test("preferences preserve old themes and update the same local reader settings object", () => {
   assert.match(settings, /if \(!stored\.backgroundPreset && \["light", "dark", "sepia"\]\.includes\(stored\.theme\)\)/);
@@ -118,6 +224,12 @@ test("preferences preserve old themes and update the same local reader settings 
 });
 
 test("EPUB preferences distinguish whole-image and continuous image pagination", () => {
+  assert.match(html, /id="pref-image-pagination" class="reader-pagination-choice-grid" role="radiogroup"/);
+  assert.match(html, /data-image-pagination="next-page"[\s\S]*?data-image-pagination="continuous"/);
+  assert.doesNotMatch(html, /<select id="pref-image-pagination"/);
+  assert.match(preferences, /querySelectorAll\("\[data-image-pagination\]"\)/);
+  assert.match(preferencesCss, /\.reader-pagination-card\{[^}]*border-radius:13px[^}]*background:linear-gradient/s);
+  assert.match(preferencesCss, /\.reader-pagination-choice\.active\{[^}]*background:#edf5ff/s);
   assert.match(layout, /footnoteBackground/);
   assert.match(layout, /footnoteBorder/);
   assert.match(layout, /两种图片过渡方式共享同一份正文分页规则/);
@@ -238,4 +350,128 @@ test("two-page gutter is a precise, dual-mode-only pagination preference", () =>
   assert.match(layout, /dualPageGap:40/);
   assert.match(pagination, /function dualPageGapPx\(\)\{[\s\S]*?Math\.max\(0,Math\.min\(120,v\)\)/);
   assert.match(pagination, /if\(isDualPage\(\)\)\{[\s\S]*?var gap=dualPageGapPx\(\)/);
+});
+
+test("page margins are grouped with typography details instead of using a separate card", () => {
+  const typography = html.match(/data-reader-i18n="typographyDetails"[\s\S]*?data-reader-i18n="pageTurnExperience"/)?.[0] || "";
+  assert.match(typography, /reader-preference-margin-section/);
+  assert.match(typography, /id="set-mt"[\s\S]*?id="set-mb"[\s\S]*?id="set-ml"[\s\S]*?id="set-mr"/);
+  assert.match(preferencesCss, /reader-preference-margin-section \.reader-preference-margin-grid\{padding:0\}/);
+});
+
+test("reading display settings are separated from toolbar function menus", () => {
+  assert.match(html, /reader-reading-display-group[\s\S]*?data-pref-bool="showTextConversion"[\s\S]*?data-pref-bool="showPageInfo"/);
+  assert.match(html, /<details class="reader-preference-group reader-toolbar-menu-group">[\s\S]*?<summary class="reader-preference-group-head"><h4 data-reader-i18n="toolbarFunctionMenu"/);
+  assert.match(html, /reader-toolbar-menu-group[\s\S]*?id="reader-toolbar-order-list"[\s\S]*?data-pref-bool="showTocButton"[\s\S]*?data-pref-bool="showVocabularyButton"/);
+  assert.doesNotMatch(html, /reader-toolbar-menu-group[\s\S]*?toolbarFunctionMenuHint/);
+  assert.doesNotMatch(html, /reader-toolbar-menu-group[\s\S]*?data-pref-bool="showTextConversion"/);
+  assert.match(html, /data-reader-i18n="readingDisplay"/);
+  assert.match(html, /data-reader-i18n="toolbarFunctionMenu"/);
+  assert.match(preferencesCss, /reader-preference-group-head/);
+  assert.match(preferencesCss, /\.reader-toolbar-menu-group>summary\{display:flex/);
+});
+
+test("pagination and toolbar panels begin directly with their settings", () => {
+  assert.doesNotMatch(html, /data-pref-panel="pagination" hidden>\s*<p class="reader-preference-hint reader-pagination-intro"/);
+  assert.doesNotMatch(html, /data-pref-panel="toolbar" hidden>\s*<p class="reader-preference-hint" data-reader-i18n="toolbarDisplayHint"/);
+  assert.match(html, /data-pref-panel="pagination" hidden>\s*<div class="reader-pagination-layout">/);
+  assert.match(html, /data-pref-panel="toolbar" hidden>\s*<section class="reader-preference-group reader-quick-layout-group">/);
+});
+
+test("toolbar and advanced panels use the lightweight preference design", () => {
+  assert.match(html, /reader-reading-display-group[\s\S]*?class="settings-switch"[\s\S]*?data-pref-bool="showTextConversion"/);
+  assert.match(html, /data-pref-panel="advanced"[\s\S]*?class="reader-preference-group reader-advanced-group"/);
+  assert.match(html, /class="reader-advanced-main-row"[\s\S]*?class="reader-advanced-icon"[\s\S]*?id="pref-reader-jump-back-config"/);
+  assert.match(preferencesCss, /\.reader-toolbar-order-item\{[^}]*min-height:47px[^}]*border:0[^}]*background:transparent[^}]*box-shadow:none/s);
+  assert.match(preferencesCss, /\.reader-advanced-main-row\{[^}]*grid-template-columns:38px minmax\(0,1fr\) auto/s);
+  assert.match(preferencesCss, /\.reader-advanced-group \.reader-jump-back-config\{[^}]*margin:0[^}]*border-top:1px solid #e8edf4/s);
+  assert.match(clickZonesCss, /\.reader-click-zone-actions\{display:flex;justify-content:flex-end/);
+  assert.match(clickZonesCss, /\.reader-click-zone-reset\{[^}]*border-color:transparent[^}]*background:transparent/s);
+});
+
+test("toolbar function cards reorder the live reader toolbar with animated avoidance", () => {
+  assert.match(html, /data-toolbar-item="toc"[\s\S]*data-toolbar-item="chapters"[\s\S]*data-toolbar-item="tts"[\s\S]*data-toolbar-item="annotations"[\s\S]*data-toolbar-item="vocabulary"[\s\S]*data-toolbar-item="settings"/);
+  assert.match(html, /data-toolbar-item="settings"[\s\S]*?<input type="checkbox" checked disabled data-toolbar-required/);
+  assert.match(html, /id="reader-settings-toolbar-item" class="gear-wrap"/);
+  assert.match(settings, /READER_TOOLBAR_ITEM_IDS = Object\.freeze\(\["toc", "chapters", "tts", "annotations", "vocabulary", "settings"\]\)/);
+  assert.match(settings, /toolbarOrder: READER_TOOLBAR_ITEM_IDS\.slice\(\)/);
+  assert.match(settings, /function normalizedReaderToolbarOrder\(value\)/);
+  assert.match(settings, /function applyReaderToolbarOrder\(value\)/);
+  assert.match(settings, /toolbar\.insertBefore\(element, anchor\)/);
+  assert.match(settings, /applyReaderToolbarOrder\(settings\.toolbarOrder\)/);
+  assert.match(preferences, /function animateToolbarPlaceholder\(state, beforeNode\)/);
+  assert.match(preferences, /item\.style\.transform = `translateY\(\$\{dy\}px\)`/);
+  assert.match(preferences, /function moveToolbarDrag\(event\)/);
+  assert.match(preferences, /function finishToolbarDrag\(event\)/);
+  assert.match(preferences, /ReaderSettings\.update\(\{ toolbarOrder: toolbarOrderFromList\(list\) \}\)/);
+  assert.match(preferencesCss, /\.reader-toolbar-order-item\.dragging/);
+  assert.match(preferencesCss, /\.reader-toolbar-order-placeholder/);
+  assert.match(preferencesCss, /input:disabled:checked\+\.settings-slider\{background:#b8c0cb\}/);
+});
+
+test("reader preferences draw non-overlapping zones directly on the canvas", () => {
+  assert.match(html, /href="reader-click-zones\.css"/);
+  assert.match(html, /id="reader-click-zone-preview"[^>]*role="application"/);
+  assert.match(html, /id="reader-click-zone-canvas"/);
+  assert.match(html, /id="reader-click-zone-preset"[\s\S]*?id="reader-click-zone-preset-name"[\s\S]*?id="reader-click-zone-preset-new"[\s\S]*?id="reader-click-zone-preset-save"[\s\S]*?id="reader-click-zone-preset-delete"/);
+  assert.doesNotMatch(html, /id="reader-click-zone-redraw"/);
+  assert.doesNotMatch(html, /id="reader-click-zone-add"/);
+  assert.match(html, /id="reader-click-zone-reset"/);
+  assert.match(html, /src="reader-click-zones-ui\.js"/);
+  assert.match(settings, /DEFAULT_READER_CLICK_ZONES = Object\.freeze/);
+  assert.match(settings, /action: "prev", x: 0, y: 0, width: 400, height: 1000/);
+  assert.match(settings, /action: "center", x: 400, y: 0, width: 200, height: 1000/);
+  assert.match(settings, /action: "next", x: 600, y: 0, width: 400, height: 1000/);
+  assert.match(settings, /clickZones: DEFAULT_READER_CLICK_ZONES\.map/);
+  assert.match(settings, /function normalizedReaderClickZones\(value\)/);
+  assert.match(settings, /MAX_READER_CLICK_ZONES = 12/);
+  assert.match(clickZones, /const MAX_PRESETS = 12/);
+  assert.match(clickZones, /const PRESET_STORAGE_KEY = "readerClickZonePresetsV1"/);
+  assert.match(clickZones, /function normalizePresets\(value, fallbackZones\)/);
+  assert.match(clickZones, /function syncActivePreset\(\)/);
+  assert.match(clickZones, /presetSelect\.addEventListener\("change"/);
+  assert.match(clickZones, /presetNewButton\.addEventListener\("click"/);
+  assert.match(clickZones, /presetSaveButton\.addEventListener\("click"/);
+  assert.match(clickZones, /presetDeleteButton\.addEventListener\("click"/);
+  assert.match(i18n, /clickZonePreset: "操作方案"/);
+  assert.match(settings, /source\.map\(\(raw, index\) => \{/);
+  assert.match(settings, /function readerZonesOverlap\(a, b\)/);
+  assert.match(settings, /function removeReaderZoneOverlaps\(source\)/);
+  assert.match(settings, /return removeReaderZoneOverlaps\(normalized\)/);
+  assert.match(settings, /clickActionAt\(clientX, clientY, width, height\)/);
+  assert.match(clickZones, /const ACTIONS = Object\.freeze\(\["prev", "center", "next", "none"\]\)/);
+  assert.match(clickZones, /function drawnRectangle\(start, point\)/);
+  assert.match(clickZones, /function resizedRectangle\(zone, handle, point\)/);
+  assert.doesNotMatch(clickZones, /state\.mode === "draw"/);
+  assert.match(clickZones, /state\.mode === "resize"/);
+  assert.match(clickZones, /target \? "move" : "create"/);
+  assert.match(clickZones, /function candidateAllowed\(candidate, id\)/);
+  assert.match(clickZones, /function applyCandidate\(state, candidate\)/);
+  assert.match(clickZones, /state\.mode === "create"/);
+  assert.doesNotMatch(clickZones, /redrawArmed|reader-click-zone-redraw/);
+  assert.match(clickZones, /if \(!state\.moved\) return/);
+  assert.match(clickZones, /openOnRelease = !state\.moved && state\.mode === "move"/);
+  assert.match(clickZones, /if \(!state\.moved && state\.mode === "create"\)/);
+  assert.match(clickZones, /zones = zones\.filter\(\(zone\) => zone\.id !== state\.zone\.id\)/);
+  assert.match(clickZones, /function createActionPopover\(zone, index\)/);
+  assert.match(clickZones, /button\.dataset\.zoneAction = action/);
+  assert.match(clickZones, /zones = zones\.filter\(\(item\) => item\.id !== zone\.id\)/);
+  assert.match(clickZones, /zones = zones\.concat\(zone\)/);
+  assert.doesNotMatch(clickZones, /reader-click-zone-add/);
+  assert.match(clickZones, /global\.ReaderSettings\.update\(\{ clickZones:/);
+  assert.match(clickZonesCss, /\.reader-click-zone\.active/);
+  assert.match(clickZonesCss, /\.reader-click-zone-handle\.handle-se/);
+  assert.match(clickZonesCss, /\.reader-click-zone-popover/);
+  assert.match(clickZonesCss, /\.reader-click-zone-action-grid/);
+  assert.match(annotations, /function tapActionAt\(x,y\)/);
+  assert.match(annotations, /supplied\.length\?supplied:defaults/);
+  assert.match(annotations, /function overlaps\(a,b\)/);
+  assert.match(annotations, /var accepted=\[\]/);
+  assert.doesNotMatch(annotations, /matches\.sort/);
+  assert.match(annotations, /if\(tapAction==='next'\)/);
+  assert.match(annotations, /else if\(tapAction==='prev'\)/);
+  assert.match(annotations, /else if\(tapAction==='center'\)/);
+  assert.match(annotations, /else readerBugTrace\('click','none',e\)/);
+  assert.doesNotMatch(annotations, /window\.innerWidth\*0\.4/);
+  assert.match(notes, /ReaderSettings\?\.clickActionAt/);
 });

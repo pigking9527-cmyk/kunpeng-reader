@@ -8,6 +8,7 @@ const html = fs.readFileSync(path.join(root, "ui", "index.html"), "utf8");
 const app = fs.readFileSync(path.join(root, "ui", "app.js"), "utf8");
 const shelf = fs.readFileSync(path.join(root, "ui", "shelf-ui.js"), "utf8");
 const notice = fs.readFileSync(path.join(root, "ui", "notice-ui.js"), "utf8");
+const dialog = fs.readFileSync(path.join(root, "ui", "dialog-ui.js"), "utf8");
 const css = fs.readFileSync(path.join(root, "ui", "styles.css"), "utf8");
 
 test("empty-shelf feedback uses a 1.5 second text-only fade", () => {
@@ -20,4 +21,17 @@ test("empty-shelf feedback uses a 1.5 second text-only fade", () => {
   assert.match(notice, /--notice-duration/);
   assert.match(css, /\.app-notice\.text-only\.show[\s\S]*?app-notice-text-life/);
   assert.match(css, /@keyframes app-notice-text-life[\s\S]*?0%[\s\S]*?14%[\s\S]*?72%[\s\S]*?100%/);
+});
+
+test("recovery uses an accessible Web dialog instead of native message boxes", () => {
+  assert.ok(html.indexOf("dialog-ui.js") < html.indexOf("app.js"));
+  assert.match(dialog, /setAttribute\("role", "dialog"\)/);
+  assert.match(dialog, /setAttribute\("aria-modal", "true"\)/);
+  assert.match(dialog, /global\.AppDialog = Object\.freeze\(\{ alert, confirm \}\)/);
+  const recoveryFlow = app.slice(app.indexOf("recoveryBackupButton?.addEventListener"), app.indexOf("window.addEventListener(\"app-language-changed\""));
+  assert.match(recoveryFlow, /await window\.AppDialog\?\.confirm/);
+  assert.match(recoveryFlow, /await window\.AppDialog\?\.alert/);
+  assert.doesNotMatch(recoveryFlow, /\b(?:alert|confirm)\(/);
+  assert.match(css, /\.app-dialog-backdrop\s*\{[^}]*backdrop-filter:\s*blur/s);
+  assert.match(css, /\.app-dialog\s*\{[^}]*border-radius:\s*18px[^}]*box-shadow:/s);
 });

@@ -45,6 +45,9 @@ let statScope = "day";
 let statAnchor = new Date(); // 当前查看的日/月/年
 const STAT_VISIBLE_KEY = "readingStatsVisibleItems";
 const STAT_CHART_METRIC_KEY = "readingStatsChartMetric";
+const STAT_LINE_CHART_KEY = "readingStatsLineChart";
+const STAT_HEATMAP_THEME_KEY = "readingStatsHeatmapTheme";
+const STAT_HEATMAP_THEMES = new Set(["green", "blue", "orange"]);
 const DEFAULT_STAT_VISIBLE = {
   duration: true,
   words: true,
@@ -56,6 +59,10 @@ const DEFAULT_STAT_VISIBLE = {
 };
 let statVisible = readStatVisible();
 let statChartMetric = localStorage.getItem(STAT_CHART_METRIC_KEY) === "words" ? "words" : "time";
+let statLineChart = localStorage.getItem(STAT_LINE_CHART_KEY) === "1";
+let statHeatmapTheme = STAT_HEATMAP_THEMES.has(localStorage.getItem(STAT_HEATMAP_THEME_KEY))
+  ? localStorage.getItem(STAT_HEATMAP_THEME_KEY)
+  : "green";
 let statsRequestSerial = 0;
 function readStatVisible() {
   try {
@@ -176,6 +183,47 @@ function barChart(bars, color, metric) {
     if (i % everyLabel === 0) s += `<text x="${x + slot / 2}" y="${H - 6}" font-size="9" fill="#aaa" text-anchor="middle">${b.label}</text>`;
   });
   return s + "</svg>";
+}
+function compactChartValue(value, metric) {
+  const amount = Math.max(0, Number(value) || 0);
+  if (metric === "words") {
+    if (amount >= 10000) return `${(amount / 10000).toFixed(amount >= 100000 ? 0 : 1).replace(/\.0$/, "")}万`;
+    if (amount >= 1000) return `${(amount / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+    return String(Math.round(amount));
+  }
+  if (amount < 60) return `${Math.round(amount)}s`;
+  if (amount < 3600) return `${Math.round(amount / 60)}m`;
+  return `${(amount / 3600).toFixed(amount >= 36000 ? 0 : 1).replace(/\.0$/, "")}h`;
+}
+function lineChart(bars, color, metric) {
+  const W = 600, H = 156, padL = 42, padR = 14, padT = 23, padB = 22;
+  const plotW = W - padL - padR;
+  const max = Math.max(1, ...bars.map((bar) => bar.value));
+  const everyLabel = bars.length <= 24 ? 1 : Math.ceil(bars.length / 12);
+  const pointX = (index) => bars.length <= 1 ? padL + plotW / 2 : padL + (index / (bars.length - 1)) * plotW;
+  const pointY = (value) => padT + (1 - ((Number(value) || 0) / max)) * (H - padT - padB);
+  let svg = `<svg class="stats-line-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="${statsEscapeAttr(statsText("lineChartData", "Line chart data"))}">`;
+  [0.5, 1].forEach((ratio) => {
+    const y = pointY(max * ratio);
+    svg += `<line class="axis-line" x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}"></line>`;
+    svg += `<text class="axis-label" x="${padL - 5}" y="${y + 3}" text-anchor="end">${fmtAxisValue(max * ratio, metric)}</text>`;
+  });
+  if (bars.length) {
+    const points = bars.map((bar, index) => `${pointX(index)},${pointY(bar.value)}`).join(" ");
+    const areaPoints = `${pointX(0)},${H - padB} ${points} ${pointX(bars.length - 1)},${H - padB}`;
+    svg += `<polygon class="stats-line-area" points="${areaPoints}" fill="${color}"></polygon>`;
+    svg += `<polyline class="stats-line-path" points="${points}" stroke="${color}"></polyline>`;
+  }
+  bars.forEach((bar, index) => {
+    const x = pointX(index), y = pointY(bar.value);
+    const labelY = Math.max(10, y - 7 - ((index % 2) * 9));
+    if (bar.value > 0) {
+      svg += `<g class="stats-line-point"><circle cx="${x}" cy="${y}" r="3.2" fill="${color}"><title>${bar.label}：${metric === "words" ? fmtWords(bar.value) : fmtTime(bar.value)}</title></circle>`;
+      svg += `<text class="stats-line-value" x="${x}" y="${labelY}" text-anchor="middle">${compactChartValue(bar.value, metric)}</text></g>`;
+    }
+    if (index % everyLabel === 0) svg += `<text x="${x}" y="${H - 6}" font-size="9" fill="#aaa" text-anchor="middle">${bar.label}</text>`;
+  });
+  return svg + "</svg>";
 }
 function statBars(data) {
   const metric = statChartMetric;
@@ -325,7 +373,11 @@ async function renderStats() {
     : "";
   const quality = statsQualityNote(data);
   const qualityNote = quality ? `<div class="stats-quality-note">${statsEscapeHtml(quality)}</div>` : "";
-  const chart = `<div class="stat-chart">${barChart(statBars(data), "#5aa0ff", statChartMetric)}</div>`;
+  const bars = statBars(data);
+  const chartSvg = statLineChart
+    ? lineChart(bars, "#4d8fe8", statChartMetric)
+    : barChart(bars, "#5aa0ff", statChartMetric);
+  const chart = `<div class="stat-chart" data-chart-style="${statLineChart ? "line" : "bar"}">${chartSvg}</div>`;
   let books;
   if (data.books.length) {
     books = `<div class="stat-sec-title">${statsText("currentPeriodBooks", "Books read this {unit}", { unit })}</div>`;
@@ -337,7 +389,7 @@ async function renderStats() {
     books = `<div class="stats-empty">${statsText("noReadingRecords", "No reading records in this period")}</div>`;
   }
   if (!bodyEl) return;
-  bodyEl.innerHTML = overviewStats(allData) + `<div class="stat-sec-title">${statsText("yearlyHeatmap", "Daily reading heatmap for the past year")}</div>` + contributionGraph(allData) + cards + qualityNote + chart + books;
+  bodyEl.innerHTML = overviewStats(allData) + contributionGraph(allData) + cards + qualityNote + chart + books;
   scheduleFrame(() => {
     if (requestSerial !== statsRequestSerial) return;
     const maxScrollTop = Math.max(0, bodyEl.scrollHeight - bodyEl.clientHeight);
@@ -360,6 +412,7 @@ function openStats() {
 function closeStats() {
   statsModal.classList.remove("show");
   statsSettings.classList.remove("show");
+  statsSettingsBtn.setAttribute("aria-expanded", "false");
 }
 document.getElementById("stats-toolbar-btn").addEventListener("click", openStats);
 document.querySelectorAll(".stats-tab").forEach((t) => {
@@ -373,18 +426,33 @@ document.getElementById("stats-prev").addEventListener("click", () => statStep(-
 document.getElementById("stats-next").addEventListener("click", () => statStep(1));
 const statsSettings = document.getElementById("stats-settings");
 const statsSettingsBtn = document.getElementById("stats-settings-btn");
-const statsChartMetric = document.getElementById("stats-chart-metric");
-const statsChartMode = document.getElementById("stats-chart-mode");
-function syncStatsChartMetricControl() {
-  if (!statsChartMetric || !statsChartMode) return;
-  statsChartMetric.checked = statChartMetric === "words";
-  statsChartMode.textContent = statChartMetric === "words" ? statsText("readingWords", "Words read") : statsText("time", "Time");
+function syncStatsHeatmapTheme() {
+  statsModal.dataset.heatmapTheme = statHeatmapTheme;
+  document.querySelectorAll("[data-heatmap-option]").forEach((button) => {
+    const active = button.dataset.heatmapOption === statHeatmapTheme;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+function syncStatsChartControls() {
+  document.querySelectorAll("[data-chart-style-option]").forEach((button) => {
+    const active = button.dataset.chartStyleOption === (statLineChart ? "line" : "bar");
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-chart-metric-option]").forEach((button) => {
+    const active = button.dataset.chartMetricOption === statChartMetric;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
 }
 syncStatVisibleControls();
-syncStatsChartMetricControl();
+syncStatsChartControls();
+syncStatsHeatmapTheme();
 statsSettingsBtn.addEventListener("click", (e) => {
   e.stopPropagation();
-  statsSettings.classList.toggle("show");
+  const open = statsSettings.classList.toggle("show");
+  statsSettingsBtn.setAttribute("aria-expanded", open ? "true" : "false");
 });
 statsSettings.addEventListener("click", (e) => e.stopPropagation());
 document.querySelectorAll("[data-stat-item]").forEach((input) => {
@@ -394,11 +462,30 @@ document.querySelectorAll("[data-stat-item]").forEach((input) => {
     renderStats();
   });
 });
-statsChartMetric?.addEventListener("change", () => {
-  statChartMetric = statsChartMetric.checked ? "words" : "time";
-  localStorage.setItem(STAT_CHART_METRIC_KEY, statChartMetric);
-  syncStatsChartMetricControl();
-  renderStats();
+document.querySelectorAll("[data-chart-style-option]").forEach((button) => {
+  button.addEventListener("click", () => {
+    statLineChart = button.dataset.chartStyleOption === "line";
+    localStorage.setItem(STAT_LINE_CHART_KEY, statLineChart ? "1" : "0");
+    syncStatsChartControls();
+    renderStats();
+  });
+});
+document.querySelectorAll("[data-chart-metric-option]").forEach((button) => {
+  button.addEventListener("click", () => {
+    statChartMetric = button.dataset.chartMetricOption === "words" ? "words" : "time";
+    localStorage.setItem(STAT_CHART_METRIC_KEY, statChartMetric);
+    syncStatsChartControls();
+    renderStats();
+  });
+});
+document.querySelectorAll("[data-heatmap-option]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const theme = button.dataset.heatmapOption;
+    if (!STAT_HEATMAP_THEMES.has(theme)) return;
+    statHeatmapTheme = theme;
+    localStorage.setItem(STAT_HEATMAP_THEME_KEY, statHeatmapTheme);
+    syncStatsHeatmapTheme();
+  });
 });
 statsModal.addEventListener("click", (e) => {
   if (e.target === statsModal) {
@@ -407,10 +494,11 @@ statsModal.addEventListener("click", (e) => {
   }
   if (!statsSettings.contains(e.target) && e.target !== statsSettingsBtn) {
     statsSettings.classList.remove("show");
+    statsSettingsBtn.setAttribute("aria-expanded", "false");
   }
 });
 if (typeof global.addEventListener === "function") global.addEventListener("app-language-changed", () => {
-  syncStatsChartMetricControl();
+  syncStatsChartControls();
   if (statsModal.classList.contains("show")) renderStats();
 });
 

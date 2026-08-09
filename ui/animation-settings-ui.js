@@ -41,7 +41,6 @@
       event.preventDefault();
       event.stopPropagation();
       render();
-      commonSettingsModal?.classList.remove("show");
       modal?.classList.add("show");
     });
     masterInput?.addEventListener("change", () => {

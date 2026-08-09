@@ -14,7 +14,7 @@
   let hintTimer = 0;
   let sharedSettings = null;
   let pendingFrameSurfaceClose = null;
-  const closedOverlays = [];
+  const closedSurfaces = [];
   const hint = createHint();
 
   function trace(event) {
@@ -63,7 +63,11 @@
     if (hintTimer) global.clearTimeout(hintTimer);
     hintTimer = global.setTimeout(() => { hint.hidden = true; }, HINT_DURATION_MS);
   }
-  function actionLabel(action) { return ({ back: "返回／关闭当前页", book_info: "打开图书信息", reopen_last: "重新打开上一个页面" })[action] || "返回／关闭当前页"; }
+  function actionLabel(action) { return ({ back: "返回／关闭当前页", book_info: "信息提取／说明", reopen_last: "重新打开上一个页面", restore_jump: "恢复跳转前位置" })[action] || "返回／关闭当前页"; }
+  function normalizeScope(action, value) {
+    if (action === "restore_jump") return "reader";
+    return value === "main" || value === "reader" ? value : "auto";
+  }
   function normalizeSharedSettings(value) {
     const source = value && typeof value === "object" ? value : {};
     const profiles = Array.isArray(source.profiles) ? source.profiles : [];
@@ -72,11 +76,12 @@
       globalPrecision: api.normalizePrecision(source.globalPrecision),
       profiles: profiles.map((profile) => ({
         name: String(profile?.name || actionLabel(profile?.action)).slice(0, 24),
+        scope: normalizeScope(profile?.action, profile?.scope),
         action: profile?.action,
         enabled: profile?.enabled !== false,
         points: api.cleanPoints(profile?.points),
         precision: profile?.precisionMode === "global" ? api.normalizePrecision(source.globalPrecision) : api.normalizePrecision(profile?.precision),
-      })).filter((profile) => profile.enabled && ["back", "book_info", "reopen_last"].includes(profile.action) && profile.points.length === api.SAMPLE_COUNT),
+      })).filter((profile) => profile.enabled && profile.scope !== "main" && ["back", "book_info", "reopen_last", "restore_jump"].includes(profile.action) && profile.points.length === api.SAMPLE_COUNT),
       hintSettings: {
         enabled: source?.hintSettings?.enabled === true,
         fontSize: Math.max(12, Math.min(28, Number(source?.hintSettings?.fontSize) || 16)),
@@ -116,8 +121,8 @@
       const enabled = enabledValue === "true" || enabledValue === "1";
       const saved = JSON.parse(global.localStorage?.getItem?.(MANAGER_KEY) || "{}");
       const list = Array.isArray(saved?.profiles) ? saved.profiles : [];
-      const usable = list.filter((profile) => profile?.enabled !== false && ["back", "book_info", "reopen_last"].includes(profile?.action) && api.cleanPoints(profile.points).length === api.SAMPLE_COUNT)
-        .map((profile) => ({ name: String(profile.name || actionLabel(profile.action)).slice(0, 24), action: profile.action, points: api.cleanPoints(profile.points), precision: profile.precisionMode === "global" ? api.normalizePrecision(saved.globalPrecision) : api.normalizePrecision(profile.precision) }));
+      const usable = list.filter((profile) => profile?.enabled !== false && (profile?.action === "restore_jump" || profile?.scope !== "main") && ["back", "book_info", "reopen_last", "restore_jump"].includes(profile?.action) && api.cleanPoints(profile.points).length === api.SAMPLE_COUNT)
+        .map((profile) => ({ name: String(profile.name || actionLabel(profile.action)).slice(0, 24), scope: normalizeScope(profile?.action, profile?.scope), action: profile.action, points: api.cleanPoints(profile.points), precision: profile.precisionMode === "global" ? api.normalizePrecision(saved.globalPrecision) : api.normalizePrecision(profile.precision) }));
       if (enabled && usable.length) return usable;
     } catch (_) { /* fall back to legacy reader gesture */ }
     const path = api.load(global.localStorage);
@@ -141,7 +146,35 @@
     });
     return best;
   }
-  function canReopenOverlay() { return closedOverlays.length > 0; }
+  function previewMatchFor(gesture) {
+    let best = null;
+    gesture.profiles.forEach((profile) => {
+      if (!canApplyAction(profile.action)) return;
+      const score = api.prefixSimilarity(profile.points, gesture.points);
+      if (score >= Math.max(0.70, api.matchThreshold(profile.precision)) && (!best || score > best.score)) best = { profile, score };
+    });
+    return best;
+  }
+  function rememberClosedSurface(name, reopen) {
+    if (typeof reopen !== "function") return;
+    closedSurfaces.push({ name: String(name || "上一个页面").slice(0, 48), reopen });
+    if (closedSurfaces.length > 8) closedSurfaces.splice(0, closedSurfaces.length - 8);
+  }
+  function canReopenSurface() { return closedSurfaces.length > 0; }
+  function listenForClosedSurfaces() {
+    global.addEventListener("reader-shell-statechange", (event) => {
+      const previous = event.detail?.previous?.overlay;
+      const next = event.detail?.next?.overlay;
+      const none = global.ReaderShell?.OVERLAY?.NONE || "none";
+      if (!previous || previous === none || next !== none) return;
+      rememberClosedSurface(previous, () => global.ReaderShell?.setOverlay?.(previous, true));
+    });
+    global.addEventListener("reader-surface-closed", (event) => {
+      const name = String(event.detail?.name || "上一个页面");
+      const reopen = event.detail?.reopen;
+      if (typeof reopen === "function") rememberClosedSurface(name, reopen);
+    });
+  }
   function requestFrameSurfaceClose() {
     const frame = root.getElementById("frame");
     if (!frame?.contentWindow) return Promise.resolve(false);
@@ -168,8 +201,6 @@
     const shell = global.ReaderShell;
     const overlay = shell?.getState?.().overlay;
     if (overlay && overlay !== shell.OVERLAY?.NONE) {
-      closedOverlays.push(overlay);
-      if (closedOverlays.length > 8) closedOverlays.splice(0, closedOverlays.length - 8);
       shell.closeOverlay?.();
       return;
     }
@@ -177,14 +208,16 @@
     global.closeReaderWindow?.();
   }
   function reopenReaderSurface() {
-    const overlay = closedOverlays.pop();
-    if (overlay) global.ReaderShell?.setOverlay?.(overlay, true);
+    closedSurfaces.pop()?.reopen?.();
   }
   function canApplyAction(action) {
-    return action === "back" || action === "reopen_last" && canReopenOverlay() || action === "book_info" && typeof global.openReaderBookInfo === "function";
+    return action === "back"
+      || action === "reopen_last" && canReopenSurface()
+      || action === "restore_jump" && global.hasReaderJumpHistory?.() === true
+      || action === "book_info" && typeof global.openReaderBookInfo === "function";
   }
   function previewMatch(gesture) {
-    const matched = bestMatch(gesture);
+    const matched = previewMatchFor(gesture);
     if (!matched) {
       gesture.previewProfileId = null;
       return;
@@ -207,6 +240,10 @@
       reopenReaderSurface();
       return;
     }
+    if (match.profile.action === "restore_jump") {
+      global.restoreReaderJumpPosition?.();
+      return;
+    }
     void closeReaderSurface(gesture.source);
   }  function finish(cancelled = false) {
     if (!active) return;
@@ -215,15 +252,13 @@
     trace("finish cancelled=" + Boolean(cancelled) + " action=" + (matched?.profile?.action || "none") + " points=" + gesture.points.length);
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clear();
-    if (matched && canApplyAction(matched.profile.action)) { showHint(matched.profile.name); execute(matched, gesture); }
+    if (matched && canApplyAction(matched.profile.action)) execute(matched, gesture);
   }
   function cancelKeepHint() {
     if (!active) return;
     const gesture = active; active = null;
-    const matched = bestMatch(gesture);
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clear();
-    if (matched && canApplyAction(matched.profile.action)) showHint(matched.profile.name);
   }
   function fromFrame(payload) {
     const frame = root.getElementById("frame");
@@ -256,6 +291,7 @@
   global.addEventListener("mouseup", () => finish(), true);
   global.addEventListener("blur", () => finish(true));
   global.addEventListener("contextmenu", (event) => { if (active || Date.now() < suppressContextMenuUntil) event.preventDefault(); }, true);
+  listenForClosedSurfaces();
   void connectSharedSettings();
   global.ReaderGestureClose = { fromFrame, frameSurfaceClosed };
 })(window);

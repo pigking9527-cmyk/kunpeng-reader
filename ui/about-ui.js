@@ -9,6 +9,7 @@
     const updateBar = root.getElementById("update-bar");
     const updateButton = root.getElementById("about-update");
     const notesElement = root.getElementById("about-notes");
+    const pendingUpdateKey = "pendingUpdateV1";
     let pendingRelease = null;
 
     function text(key, fallback, values = {}) {
@@ -46,12 +47,71 @@
         .trim();
     }
 
+    function isIgnored(info) {
+      const ignored = storage.getItem("ignoredUpdate");
+      return Boolean(ignored && compareVersions(info.latest, ignored) <= 0);
+    }
+
+    function isNewerThanCurrent(info) {
+      return Boolean(info?.latest && info?.current && compareVersions(info.latest, info.current) > 0);
+    }
+
+    function cachePendingUpdate(info) {
+      if (!isNewerThanCurrent(info)) return;
+      try {
+        storage.setItem(pendingUpdateKey, JSON.stringify({
+          current: String(info.current), latest: String(info.latest), notes: String(info.notes || ""), url: String(info.url || ""),
+        }));
+      } catch (_) { /* The live network result can still be shown without a local cache. */ }
+    }
+
+    function cachedPendingUpdate() {
+      try {
+        const info = JSON.parse(storage.getItem(pendingUpdateKey) || "null");
+        return isNewerThanCurrent(info) ? info : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
     function showUpdateBanner(info) {
       pendingRelease = { version: info.latest, url: info.url || "" };
       root.getElementById("ub-current").textContent = "当前 v" + String(info.current || "?").replace(/^v/i, "");
       root.getElementById("ub-ver").textContent = "v" + String(info.latest).replace(/^v/i, "");
       root.getElementById("ub-notes").textContent = conciseNotes(info.notes) || "已发布新版本，查看更新说明了解改进内容。";
       updateBar.classList.add("show");
+    }
+
+    function hideUpdateCard() {
+      updateBar.classList.remove("show");
+    }
+
+    function reopenUpdateCard() {
+      if (pendingRelease) {
+        updateBar.classList.add("show");
+        return;
+      }
+      const cached = cachedPendingUpdate();
+      if (cached && !isIgnored(cached)) showUpdateBanner(cached);
+    }
+
+    function restorePendingUpdate() {
+      const cached = cachedPendingUpdate();
+      if (cached && !isIgnored(cached)) showUpdateBanner(cached);
+    }
+
+    function discardStalePendingUpdate(info) {
+      // A successful response from the deployment manifest is authoritative.
+      // Keep cached notices through a transient network failure, but remove a
+      // test/released notice once that manifest says this app is up to date.
+      if (info?.source !== "server" || info?.has_update) return;
+      const cached = cachedPendingUpdate();
+      if (!cached || String(cached.current) !== String(info.current)) return;
+      try { storage.removeItem(pendingUpdateKey); } catch (_) {}
+      if (pendingRelease?.version === cached.latest) {
+        pendingRelease = null;
+        hideUpdateCard();
+      }
     }
 
     async function checkUpdate(force) {
@@ -69,13 +129,14 @@
         return;
       }
       if (!info.has_update) {
+        discardStalePendingUpdate(info);
         if (force) setUpdateState("latestVersion");
         return;
       }
+      cachePendingUpdate(info);
       if (force) setUpdateState();
       if (!force) {
-        const ignored = storage.getItem("ignoredUpdate");
-        if (ignored && compareVersions(info.latest, ignored) <= 0) return;
+        if (isIgnored(info)) return;
       }
       showUpdateBanner(info);
     }
@@ -104,9 +165,10 @@
     });
     root.getElementById("ub-ignore").addEventListener("click", () => {
       if (pendingRelease) storage.setItem("ignoredUpdate", pendingRelease.version);
-      updateBar.classList.remove("show");
+      try { storage.removeItem(pendingUpdateKey); } catch (_) {}
+      hideUpdateCard();
     });
-    root.getElementById("ub-close").addEventListener("click", () => updateBar.classList.remove("show"));
+    root.getElementById("ub-close").addEventListener("click", hideUpdateCard);
     updateButton.addEventListener("click", () => {
       setUpdateState("checkingUpdate");
       checkUpdate(true);
@@ -125,9 +187,14 @@
       if (notesElement.dataset.i18nState) setNotesState(notesElement.dataset.i18nState);
     });
 
-    activeController = Object.freeze({ checkUpdate });
+    restorePendingUpdate();
+    activeController = Object.freeze({ checkUpdate, hideUpdateCard, reopenUpdateCard });
     return activeController;
   }
 
-  global.ReaderAboutUI = Object.freeze({ init });
+  global.ReaderAboutUI = Object.freeze({
+    init,
+    hideUpdateCard: () => activeController?.hideUpdateCard?.(),
+    reopenUpdateCard: () => activeController?.reopenUpdateCard?.(),
+  });
 })(window);

@@ -124,6 +124,8 @@ test("library assistant keeps whole-library as the unselected default and offers
   assert.doesNotMatch(html, />检索范围<|展示最相关的前 20 本（每本 1 段）/);
   assert.match(controller, /const selectedBookIds = new Set\(\)/);
   assert.match(controller, /const MAX_QUESTION_SOURCES = 20/);
+  assert.match(controller, /: i18n\("scopeAllBooks", "当前范围：全部书库"\)/);
+  assert.doesNotMatch(controller, /questionScopeAll/);
   assert.match(controller, /function selectVisibleBooks\(\)/);
   assert.match(controller, /function invertVisibleBooks\(\)/);
   assert.match(controller, /正在检索全部书库，并筛选可支撑回答的文本证据/);
@@ -157,6 +159,8 @@ test("library assistant can choose one of the locally configured large models", 
   assert.match(html, /id="api-settings-open"/);
   assert.match(html, /id="api-settings-modal"/);
   assert.match(html, /id="api-ai-profile"/);
+  assert.match(html, /id="api-ai-purpose-picker"[\s\S]*?data-ai-purpose="reading"[\s\S]*?data-ai-purpose="library"[\s\S]*?data-ai-purpose="other"/);
+  assert.doesNotMatch(html, /id="api-ai-use"|api-ai-current-summary/);
   assert.match(html, /id="api-ai-preset"[\s\S]*?DeepSeek[\s\S]*?OpenAI（GPT）[\s\S]*?Anthropic（Claude）[\s\S]*?OpenAI 兼容接口/);
   assert.match(html, /id="api-translation-provider"/);
   assert.match(html, /id="library-ai-model-profile"/);
@@ -168,7 +172,7 @@ test("library assistant can choose one of the locally configured large models", 
   assert.match(apiSettings, /notifyProfilesChanged/);
   assert.doesNotMatch(apiSettings, /api-ai-new/);
   assert.match(controller, /function renderModelProfiles/);
-  assert.match(controller, /select_ai_reader_profile/);
+  assert.match(controller, /assign_ai_reader_profile[\s\S]*?purpose: "library"/);
   assert.match(html, /library-ai-head-actions[\s\S]*?id="library-ai-model-profile"/);
   assert.match(readerHtml, /id="ai-reader-profile"/);
   assert.match(reader, /renderAiReaderProfiles/);
@@ -176,6 +180,8 @@ test("library assistant can choose one of the locally configured large models", 
   assert.match(annotations, /function applyTranslationProfiles/);
   assert.match(backend, /CONFIG_PROFILES_KEY/);
   assert.match(backend, /fn persist_profiles/);
+  assert.match(backend, /struct AiReaderProfileAssignments/);
+  assert.match(backend, /fn assign_ai_reader_profile/);
   assert.match(backend, /profile_summary_never_exposes_the_api_key/);
   assert.match(translate, /TRANSLATION_ACTIVE_PROVIDER_KEY/);
   assert.match(translate, /fn translation_credentials_status/);
@@ -184,8 +190,11 @@ test("library assistant can choose one of the locally configured large models", 
 
 test("library assistant readiness stays quiet when API and local indexes are available", () => {
   assert.match(controller, /function readinessMessage\(aiStatus, semanticStatus\)/);
+  assert.match(controller, /invoke\("semantic_tasks", \{ reconcile: true \}\)/);
   assert.match(controller, /invoke\("semantic_status"\)/);
+  assert.match(controller, /semanticStatus\?\.semantic_ready/);
   assert.match(controller, /semanticStatus\?\.semantic_done/);
+  assert.match(controller, /semanticStatus\?\.status_refreshing/);
   assert.match(controller, /if \(apiReady && indexReady\) return ""/);
   assert.match(controller, /配置大模型 API、模型和密钥/);
   assert.match(controller, /为本地图书建立语义索引/);
@@ -193,15 +202,19 @@ test("library assistant readiness stays quiet when API and local indexes are ava
 });
 
 test("library assistant classifies model tags with progress and can use them independently from manual tags", () => {
+  const classificationSettings = fs.readFileSync(path.join(ui, "book-classification-settings-ui.js"), "utf8");
+  assert.match(html, /id="book-classification-settings-open"/);
+  assert.match(html, /id="book-classification-settings-modal"/);
+  assert.match(html, /id="set-use-model-tags"/);
   assert.match(html, /id="library-ai-classify"[^>]*>书籍分类/);
-  assert.match(html, /id="library-ai-classify-status"[^>]*hidden/);
   assert.doesNotMatch(html, /本地资料不足时，会检索百度和豆瓣读书/);
-  assert.match(controller, /start_library_auto_classification/);
-  assert.match(controller, /library_profile_status/);
-  assert.match(controller, /library_profile_coverage_status/);
-  assert.match(controller, /完成：\$\{total\} 本图书的分类/);
-  assert.match(controller, /button\.title = label/);
-  assert.match(controller, /未覆盖完整八维/);
+  assert.match(classificationSettings, /start_library_auto_classification/);
+  assert.match(classificationSettings, /library_profile_status/);
+  assert.match(classificationSettings, /library_profile_coverage_status/);
+  assert.match(classificationSettings, /从已保存的位置继续/);
+  assert.match(controller, /ReaderBookClassificationSettingsUI\?\.open\?\./);
+  assert.match(classificationSettings, /已完成 \$\{complete\} \/ \$\{total\} 本图书的分类/);
+  assert.match(classificationSettings, /status\.title = text/);
   assert.match(backend, /LibraryClassification/);
   assert.match(backend, /library_book_classify/);
   assert.match(backend, /model_tags_by_book/);
@@ -222,19 +235,41 @@ test("library assistant classifies model tags with progress and can use them ind
   assert.doesNotMatch(html, /library-ai-promote-tags/);
   assert.doesNotMatch(controller, /promote_library_dark_tags/);
   assert.doesNotMatch(backend, /promote_library_dark_tags/);
-  assert.match(styles, /\.library-ai-classify\s*\{[^}]*white-space:nowrap/s);
-  assert.match(styles, /\.library-ai-classify-status\s*\{[^}]*text-overflow:ellipsis/s);
-  assert.match(controller, /task\?\.state === "paused"/);
-  assert.match(controller, /从已保存的位置继续/);
+  assert.match(styles, /\.book-classification-settings-status\s*\{[^}]*text-overflow:\s*ellipsis/s);
+  assert.match(classificationSettings, /task\?\.state === "paused"/);
+});
+
+test("save-as-booklist controls are visible only in recommendation mode", () => {
+  assert.match(html, /id="library-ai-booklist-save"[^>]*hidden/);
+  assert.match(styles, /\.library-ai-booklist-save\[hidden\]\s*\{\s*display:\s*none/);
+  assert.match(controller, /\$\("library-ai-booklist-save"\)\.hidden = mode !== "recommend"/);
+  assert.match(controller, /\$\("mode-recommend"\)\?\.addEventListener\("click", \(\) => setMode\("recommend"\)\)/);
+});
+
+test("recommendation candidate and model result counts have independent ranges", () => {
+  assert.match(html, /id="library-ai-recommendation-candidate-limit"[^>]*type="number"[^>]*min="5"[^>]*max="100"[^>]*value="20"/);
+  assert.match(html, /id="library-ai-recommendation-result-limit"[^>]*type="number"[^>]*min="5"[^>]*max="30"[^>]*value="12"/);
+  assert.match(controller, /recommendationCandidateLimit = DEFAULT_RECOMMENDATION_CANDIDATE_LIMIT/);
+  assert.match(controller, /recommendationResultLimit = DEFAULT_RECOMMENDATION_RESULT_LIMIT/);
+  assert.match(controller, /set_library_recommendation_candidate_limit/);
+  assert.match(controller, /set_library_recommendation_result_limit/);
+  assert.match(controller, /推荐范围：全部书库（本地粗选 \$\{recommendationCandidateLimit\} 本，大模型精选 \$\{recommendationResultLimit\} 本）/);
+  assert.match(backend, /DEFAULT_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT: usize = 20/);
+  assert.match(backend, /MAX_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT: usize = 100/);
+  assert.match(backend, /DEFAULT_LIBRARY_RECOMMENDATION_RESULT_LIMIT: usize = 12/);
+  assert.match(backend, /MAX_LIBRARY_RECOMMENDATION_RESULT_LIMIT: usize = 30/);
+  assert.match(backend, /fn select_library_sources_with_limit/);
+  assert.match(backend, /library_recommendation_respects_the_configured_candidate_limit/);
+  assert.match(backend, /library_booklist_recommendation_keeps_fewer_than_five_candidates/);
 });
 
 test("common settings can opt into model classification tags without changing their sync behavior", () => {
-  const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
+  const classificationSettings = fs.readFileSync(path.join(ui, "book-classification-settings-ui.js"), "utf8");
   assert.match(html, /id="set-use-model-tags"/);
   assert.match(html, /使用大模型分类的标签/);
-  assert.match(app, /library_model_tags_settings/);
-  assert.match(app, /set_library_model_tags_enabled/);
-  assert.match(app, /library-model-tags-setting-changed/);
+  assert.match(classificationSettings, /library_model_tags_settings/);
+  assert.match(classificationSettings, /set_library_model_tags_enabled/);
+  assert.match(classificationSettings, /library-model-tags-setting-changed/);
   assert.match(backend, /LIBRARY_MODEL_TAGS_ENABLED_KEY/);
   assert.match(backend, /materialize_library_profiles_into_model_tags/);
   assert.match(backend, /大模型标签始终参与问答/);
@@ -310,7 +345,7 @@ test("library answer provider accepts compatible response envelopes and retries 
 
 test("library answers save locally and can sync a de-identified history", () => {
   assert.match(html, /id="library-ai-history"[^>]*>问答记录/);
-  assert.match(html, /同步单书智读历史[\s\S]*书库问答请在其设置中选择同步方式/);
+  assert.match(html, /id="account-sync-history"[\s\S]*智读与书库问答记录/);
   assert.match(controller, /private_sync_library_history_list/);
   assert.match(controller, /private_sync_library_history_merge/);
   assert.match(controller, /private_sync_library_history_delete/);

@@ -57,6 +57,7 @@
         "chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "flow_mode", "page_mode", "input",
         "image_mode", "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
         "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text", "image_near_top", "image_text_before", "image_probed",
+        "layout_fast", "layout_view_height", "layout_root_height", "layout_root_style_height", "layout_padding_bottom", "layout_line_height", "layout_step", "layout_current_line_count", "layout_last_top", "layout_last_bottom", "layout_last_height", "layout_next_top", "layout_next_bottom", "layout_next_height", "layout_visible_free", "layout_content_free", "layout_tail_cross", "layout_tail_fit", "layout_tail_tightened",
       ]);
       const stringFields = ["kind", "source", "outcome", "zone", "target", "direction", "key", "input", "flow_mode", "page_mode", "image_mode"];
       const numberFields = [
@@ -64,11 +65,12 @@
         "before_chapter", "before_page", "after_chapter", "after_page", "chapter_pending",
         "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
         "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text",
+        "layout_view_height", "layout_root_height", "layout_root_style_height", "layout_padding_bottom", "layout_line_height", "layout_step", "layout_current_line_count", "layout_last_top", "layout_last_bottom", "layout_last_height", "layout_next_top", "layout_next_bottom", "layout_next_height", "layout_visible_free", "layout_content_free", "layout_tail_cross", "layout_tail_fit", "layout_tail_tightened",
       ];
-      const booleanFields = ["chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "image_near_top", "image_text_before", "image_probed"];
+      const booleanFields = ["chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "image_near_top", "image_text_before", "image_probed", "layout_fast"];
       return isRecord(trace)
         && Object.keys(trace).length > 0
-        && Object.keys(trace).length <= 30
+        && Object.keys(trace).length <= 48
         && Object.keys(trace).every((key) => allowed.has(key))
         && stringFields.every((key) => textWithin(trace[key], key === "zone" ? 16 : (key === "key" ? 24 : 32)))
         && numberFields.every((key) =>
