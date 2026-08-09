@@ -10,7 +10,7 @@
     "ttsErr", "ttsNoZh", "outline", "pdfState", "searchResults", "uiClick", "userNav", "readerNavigated", "readerJump",
     "centerTap", "readerPerf", "bugTrace", "ready", "readerAnchorReady", "measured", "pageCache", "downloadImage", "webSearch", "crossSearch",
     "semanticSearch", "aiReader", "translateText", "dict", "vocabAdd", "addHighlight",
-    "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations",
+    "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations", "readerGestureSurfaceClosed",
     "removeHighlight", "setHighlightNote", "setHighlightText", "setHighlightColor", "addBookmark", "tocResolved",
     "getTranslationCredentialStatus", "saveTranslationCredential", "bookEnd", "readerGesture",
   ]);
@@ -46,27 +46,35 @@
         && typeof jump.chFrac === "number" && Number.isFinite(jump.chFrac) && jump.chFrac >= 0 && jump.chFrac <= 1;
     }
     if (action === "readerGesture") { const gesture = data.readerGesture; return isRecord(gesture) && ["start", "move", "end", "cancel"].includes(gesture.phase) && Number.isFinite(gesture.x) && Number.isFinite(gesture.y) && Math.abs(gesture.x) <= 100000 && Math.abs(gesture.y) <= 100000; }
+    if (action === "readerGestureSurfaceClosed") return typeof data.readerGestureSurfaceClosed === "boolean";
     if (action === "readerPerf") return textWithin(data[action], 1000);
     if (action === "bugTrace") {
       const trace = data.bugTrace;
       const allowed = new Set([
         "kind", "source", "outcome", "zone", "target", "direction", "key",
-        "chapter", "page", "x_pct", "y_pct", "duration_ms",
+        "chapter", "page", "x_pct", "y_pct", "duration_ms", "pages", "turn_id",
+        "before_chapter", "before_page", "after_chapter", "after_page", "chapter_pending",
+        "chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "flow_mode", "page_mode", "input",
+        "image_mode", "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
+        "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text", "image_near_top", "image_text_before", "image_probed",
       ]);
+      const stringFields = ["kind", "source", "outcome", "zone", "target", "direction", "key", "input", "flow_mode", "page_mode", "image_mode"];
+      const numberFields = [
+        "chapter", "page", "x_pct", "y_pct", "duration_ms", "pages", "turn_id",
+        "before_chapter", "before_page", "after_chapter", "after_page", "chapter_pending",
+        "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
+        "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text",
+      ];
+      const booleanFields = ["chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "image_near_top", "image_text_before", "image_probed"];
       return isRecord(trace)
         && Object.keys(trace).length > 0
-        && Object.keys(trace).length <= 12
+        && Object.keys(trace).length <= 30
         && Object.keys(trace).every((key) => allowed.has(key))
-        && textWithin(trace.kind, 32)
-        && textWithin(trace.source, 32)
-        && textWithin(trace.outcome, 32)
-        && textWithin(trace.zone, 16)
-        && textWithin(trace.target, 32)
-        && textWithin(trace.direction, 16)
-        && textWithin(trace.key, 24)
-        && ["chapter", "page", "x_pct", "y_pct", "duration_ms"].every((key) =>
+        && stringFields.every((key) => textWithin(trace[key], key === "zone" ? 16 : (key === "key" ? 24 : 32)))
+        && numberFields.every((key) =>
           trace[key] === undefined || (typeof trace[key] === "number" && Number.isFinite(trace[key]))
-        );
+        )
+        && booleanFields.every((key) => trace[key] === undefined || typeof trace[key] === "boolean");
     }
     if (action === "webSearch") {
       const request = data.webSearch;

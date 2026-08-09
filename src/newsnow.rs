@@ -56,6 +56,7 @@ const ARTICLE_RETURN_SCRIPT: &str = r##"
 (() => {
   if (window.top !== window) return;
   const returnUrl = "https://reader.localhost/__kunpeng_news_return__";
+  const hideReturnIcon = __KUNPENG_HIDE_RETURN_ICON__;
   const navigateHere = (value) => {
     try {
       const target = new URL(String(value || ""), window.location.href);
@@ -65,12 +66,12 @@ const ARTICLE_RETURN_SCRIPT: &str = r##"
     } catch (_) { return false; }
   };
   const install = () => {
-    if (document.getElementById("kunpeng-news-return")) return;
+    if (hideReturnIcon || document.getElementById("kunpeng-news-return")) return;
     const button = document.createElement("button");
     button.id = "kunpeng-news-return";
     button.type = "button";
-    button.title = "返回资讯页";
-    button.setAttribute("aria-label", "返回资讯页");
+    button.title = "返回资讯页；也可以通过手势关闭页面";
+    button.setAttribute("aria-label", "返回资讯页；也可以通过手势关闭页面");
     button.textContent = "←";
     button.style.cssText = "position:fixed;z-index:2147483647;top:50%;right:18px;width:44px;height:44px;transform:translateY(-50%);border:1px solid #9ab9e6;border-radius:50%;color:#1e64c4;background:rgba(255,255,255,.96);box-shadow:0 4px 16px rgba(44,92,158,.24);font:25px/1 system-ui;cursor:pointer;";
     button.addEventListener("mouseenter", () => { button.style.background = "#f2f7ff"; });
@@ -173,8 +174,16 @@ fn article_initialization_script(request: &NewsNowOpenRequest) -> String {
         &[]
     };
     let json = serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string());
+    let return_script = ARTICLE_RETURN_SCRIPT.replace(
+        "__KUNPENG_HIDE_RETURN_ICON__",
+        if request.hide_return_icon {
+            "true"
+        } else {
+            "false"
+        },
+    );
     format!(
-        "{ARTICLE_RETURN_SCRIPT}\n{}",
+        "{return_script}\n{}",
         ARTICLE_GESTURE_SCRIPT.replace("__KUNPENG_GESTURE_POINTS__", &json)
     )
 }
@@ -521,6 +530,8 @@ pub(crate) struct NewsNowOpenRequest {
     pub gesture_enabled: bool,
     #[serde(default)]
     pub gesture_points: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub hide_return_icon: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]

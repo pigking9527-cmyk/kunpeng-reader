@@ -29,6 +29,34 @@ test("problem trace keeps two bounded minutes of redacted metadata", () => {
   assert.equal(trace._snapshotForTests(Date.now() + trace.WINDOW_MS + 1).length, 0);
 });
 
+test("problem trace includes allowlisted software settings without secrets or raw images", () => {
+  const storage = new Map([
+    ["readerSettings", JSON.stringify({ theme: "dark", fontFamily: "Noto Serif CJK SC", fontSize: 27, flowMode: "paged", customBackgroundImage: "data:image/png;base64,PRIVATE_IMAGE" })],
+    ["readerAnimationSettingsV1", JSON.stringify({ allAnimations: false, pageTurn: true })],
+    ["debugSettingsV1", JSON.stringify({ bg_sync: false })],
+    ["kunpeng.reader.experimental-features.v1", JSON.stringify({ newsnow: true })],
+    ["kunpeng.reader.news.back-gesture.enabled.v1", "true"],
+    ["kunpeng.reader.news.back-gesture.precision.v1", "7"],
+    ["kunpeng.reader.news.back-gesture.v2", JSON.stringify({ points: [{ x: 0, y: 0 }] })],
+    ["shelfLayout", "list"],
+    ["shelfGridColumnsValue", "4"],
+    ["syncAccountCacheV1", JSON.stringify({ username: "private-user", token: "PRIVATE_TOKEN" })],
+    ["readerCustomPalettesV1", JSON.stringify([{ id: "private-palette", backgroundImage: "data:image/png;base64,PRIVATE_PALETTE" }])],
+  ]);
+  const settings = mainTraceApi._collectSoftwareSettingsForTests({
+    getItem: (key) => storage.get(key) ?? null,
+  });
+  assert.equal(settings.reader.theme, "dark");
+  assert.equal(settings.reader.font_size, 27);
+  assert.equal(settings.reader.custom_background_image_configured, true);
+  assert.equal(settings.animations.allAnimations, false);
+  assert.equal(settings.experimental_features.newsnow, true);
+  assert.equal(settings.gestures.precision, 7);
+  assert.equal(settings.shelf.layout, "list");
+  const serialized = JSON.stringify(settings);
+  assert.doesNotMatch(serialized, /PRIVATE_TOKEN|PRIVATE_IMAGE|PRIVATE_PALETTE|private-user/);
+  assert.ok(settings.omitted_sensitive_settings.includes("sync_account"));
+});
 test("problem trace summarizes startup speed across application restarts", () => {
   const summary = mainTraceApi._summarizeStartupPerformanceForTests([
     { session: "one", name: "startup", phase: "webview_script", detail: "120ms" },
@@ -68,6 +96,31 @@ test("progress trace keeps numeric chapter offset metadata without book text", (
     progress: 42.5,
     anchor_offset: 1510000,
   });
+});
+
+test("image pagination trace keeps only layout geometry and mode", () => {
+  trace.reset();
+  trace.record("page_image_pagination", {
+    source: "reader_page",
+    outcome: "no_candidate",
+    image_mode: "continuous",
+    image_source_page: 8,
+    image_candidate_page: 9,
+    image_top: 126,
+    image_width: 903,
+    image_height: 730,
+    image_free_height: 318,
+    image_preview_height: 0,
+    image_next_count: 1,
+    image_skipped_text: 0,
+    image_url: "reader://private/image.png",
+    body_text: "正文不可记录",
+  });
+  const event = trace._snapshotForTests().at(-1);
+  assert.equal(event.detail.image_mode, "continuous");
+  assert.equal(event.detail.image_height, 730);
+  assert.equal(event.detail.image_url, undefined);
+  assert.equal(event.detail.body_text, undefined);
 });
 
 test("Bug feedback requests the reader problem-state snapshot as an attachment", () => {
@@ -202,6 +255,13 @@ test("reader page reports why a click did not turn the page", () => {
   assert.match(annotations, /markPageTurnInput\('tap'\)/);
   assert.match(annotations, /markPageTurnInput\('keyboard'\)/);
   assert.match(runtime, /markPageTurnInput\('shell'\)/);
+  assert.match(runtime, /function tracePagedImageLayout\(outcome,detail\)/);
+  assert.match(runtime, /readerBugTrace\('image_pagination',outcome,null,data\)/);
+  assert.match(runtime, /tracePagedImageLayout\('no_candidate'/);
+  assert.match(runtime, /tracePagedImageLayout\('fits_full'/);
+  assert.match(runtime, /tracePagedImageLayout\('scheduled'/);
+  assert.match(pageTrace, /image_candidate_page/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "reader-message.js"), "utf8"), /image_preview_height/);
   assert.match(layout, /beginChapterBugTrace\(i,where\)/);
   assert.match(layout, /finishChapterBugTrace\(bugTraceToken,true,pageInCh\)/);
   ["chapter_pending", "overlay", "drag"].forEach((outcome) => {

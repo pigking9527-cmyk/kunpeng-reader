@@ -240,9 +240,10 @@ test("智读侧栏提供三档宽度、可收起脑图和按条目选择的云�
   assert.match(html, /data-ai-reader-width="current"/);
   assert.match(html, /data-ai-reader-width="half"/);
   assert.match(html, /data-ai-reader-width="full"/);
-  assert.match(html, />▮<\/button>/);
-  assert.match(html, />▮▮<\/button>/);
-  assert.match(html, />▮▮▮<\/button>/);
+  assert.match(html, /data-ai-reader-width="current"[^>]*><span class="ai-reader-width-glyph" aria-hidden="true"><i><\/i><\/span><\/button>/);
+  assert.match(html, /data-ai-reader-width="half"[^>]*><span class="ai-reader-width-glyph" aria-hidden="true"><i><\/i><i><\/i><\/span><\/button>/);
+  assert.match(html, /data-ai-reader-width="full"[^>]*><span class="ai-reader-width-glyph" aria-hidden="true"><i><\/i><i><\/i><i><\/i><\/span><\/button>/);
+  assert.match(html, /\.ai-reader-width-glyph > i \{[^}]*width: 1px;[^}]*height: 14px;[^}]*background: currentColor;/);
   assert.match(reader, /const AI_READER_WIDTH_KEY = "aiReaderSideWidthV1";/);
   assert.match(reader, /selected === "half" \? "50%" : "100%"/);
   assert.match(html, /id="ai-reader-history-settings-btn"/);
@@ -302,6 +303,8 @@ test("从选中文本打开智读时不再向问题框插入固定提问句", ()
 
 test("开关智读以覆盖层呈现，不压缩正文列宽或改变阅读位置", () => {
   assert.match(reader, /智读为覆盖层：不改变正文 iframe 宽度/);
+  assert.match(reader, /function closeAiReaderSide\(\)[\s\S]*?setAiReaderSide\(false\)/);
+  assert.match(reader, /window\.closeAiReaderSide = closeAiReaderSide/);
   assert.doesNotMatch(reader, /preserveAnchor: 1/);
   assert.match(reader, /openAiReader\(request\.text \|\| "", \{[\s\S]*?start: request\.anchorStart/);
   assert.match(annotations, /aiReader:\{text:t,anchorStart:o&&o\.start,anchorEnd:o&&o\.end\}/);
@@ -399,12 +402,19 @@ test("bottom progress history stays separate from TOC and internal-link navigati
   assert.match(annotations, /inFootnote\?['"]footnote['"]:['"]link['"]/);
   assert.match(html, /\.book-progress-restore \{[^}]*width: 30px;[^}]*height: 30px;[^}]*font: 27px\/1 sans-serif;/s);
   assert.match(html, /id="book-progress-restore"/);
-  assert.match(html, /\.reader-jump-back \{[^}]*top: 50%;[^}]*right: 24px;[^}]*width: var\(--reader-jump-back-hit-size, 44px\);[^}]*height: var\(--reader-jump-back-hit-size, 44px\);/s);
-  assert.match(html, /id="reader-jump-back"[^>]*hidden>←<\/button>/);
+  assert.match(html, /\.reader-jump-back \{[^}]*top: var\(--reader-jump-back-position-y, 50%\);[^}]*left: var\(--reader-jump-back-position-x, calc\(100% - var\(--reader-jump-back-hit-size, 44px\)\)\);[^}]*width: var\(--reader-jump-back-hit-size, 44px\);[^}]*height: var\(--reader-jump-back-hit-size, 44px\);/s);
+  assert.match(html, /id="reader-jump-back"[^>]*hidden><svg class="reader-jump-back-arrow" viewBox="0 0 120 48"/);
   assert.match(html, /\.reader-jump-back \{[^}]*border: 0;[^}]*background: transparent;[^}]*box-shadow: none;[^}]*opacity: \.56;/s);
   assert.match(reader, /enabled: current\.showReaderJumpBack !== false/);
-  assert.match(reader, /sizeLevel: Math\.max\(1, Math\.min\(10, Number\(current\.readerJumpBackSizeLevel\) \|\| 1\)\)/);
-  assert.match(reader, /const iconSize = Math\.round\(32 \* \(1 \+ \(\(normalized - 1\) \* 4 \/ 9\)\)\)/);
+  assert.match(reader, /iconSizePx: hasPixelSize[\s\S]*?normalizeReaderJumpBackIconSizePx\(current\.readerJumpBackIconSizePx\)/);
+  assert.match(reader, /positionX: normalizeReaderJumpBackPosition\(current\.readerJumpBackPositionX, 950\)/);
+  assert.match(reader, /positionY: normalizeReaderJumpBackPosition\(current\.readerJumpBackPositionY, 500\)/);
+  assert.match(reader, /const iconSize = normalizeReaderJumpBackIconSizePx\(iconSizePx\)/);
+  assert.match(reader, /const iconHeight = readerJumpBackIconHeightPx\(iconSize\)/);
+  assert.match(reader, /function readerJumpBackTrackPoint\(length, iconSize, hitSize, position\)/);
+  assert.match(reader, /const hitTargetInset = Math\.max\(0, hitSize - iconSize\) \/ 2/);
+  assert.match(reader, /readerJumpBack\.style\.left = `\$\{Math\.round\(readerJumpBackTrackPoint\(width, iconSize, hitSize, positionX\)\)\}px`/);
+  assert.match(reader, /readerJumpBack\.style\.top = `\$\{Math\.round\(readerJumpBackTrackPoint\(height, iconHeight, hitSize, positionY\)\)\}px`/);
   assert.match(reader, /--reader-jump-back-icon-size/);
   assert.match(reader, /readerNavigationDismissTimer = setTimeout\(\(\) => dismissReaderNavigationBack\(false\), config\.seconds \* 1000\)/);
   assert.match(reader, /readerNavigationPagesMoved \+= 1;[\s\S]*?readerNavigationPagesMoved >= config\.pages/);

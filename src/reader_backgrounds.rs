@@ -3,13 +3,29 @@
 //! The reader receives only a short immutable `reader://.../background/...`
 //! URL. Raw images are decoded once at import, stored as files, and sync uses
 //! their SHA-256 references rather than passing data URLs through WebView IPC.
-use crate::db::SyncEntity;
+use crate::{atomic_file, db::SyncEntity};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const RECOVERY_ASSET_BUNDLE_FILE: &str = "reader-background-assets-v1.json";
+
+#[derive(Serialize, Deserialize)]
+struct RecoveryAssetBundle {
+    version: u32,
+    assets: Vec<RecoveryAsset>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RecoveryAsset {
+    asset_id: String,
+    mime: String,
+    data_base64: String,
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +42,13 @@ fn cache_dir() -> Result<PathBuf, String> {
     path.push("ebook-reader");
     path.push("reader-backgrounds");
     std::fs::create_dir_all(&path).map_err(|e| format!("创建背景缓存目录失败：{e}"))?;
+    Ok(path)
+}
+
+fn recovery_bundle_path() -> Result<PathBuf, String> {
+    let mut path = dirs::config_dir().ok_or("找不到应用配置目录")?;
+    path.push("ebook-reader");
+    path.push(RECOVERY_ASSET_BUNDLE_FILE);
     Ok(path)
 }
 
@@ -120,7 +143,7 @@ pub(crate) fn reader_background_local_url(
 ) -> Result<String, String> {
     let ext = extension_for_mime(&mime).ok_or("背景图片类型无效")?;
     let path = cache_dir()?.join(format!("{asset_id}.{ext}"));
-    if !path.is_file() {
+    if !path.is_file() && !restore_cached_asset_from_bundle(&asset_id, &mime)? {
         return Err("本机尚未缓存该背景图片".into());
     }
     local_url(&asset_id, &mime)
@@ -147,6 +170,86 @@ pub(crate) fn read_cached_background(name: &str) -> Option<(Vec<u8>, String)> {
 pub(crate) fn cached_asset_bytes(asset_id: &str, mime: &str) -> Option<Vec<u8>> {
     let ext = extension_for_mime(mime)?;
     std::fs::read(cache_dir().ok()?.join(format!("{asset_id}.{ext}"))).ok()
+}
+
+fn collect_asset_references(value: &Value, assets: &mut BTreeMap<String, String>) {
+    match value {
+        Value::Object(map) => {
+            if let (Some(id), Some(mime)) = (
+                map.get("backgroundAssetId").and_then(Value::as_str),
+                map.get("backgroundAssetMime").and_then(Value::as_str),
+            ) {
+                if valid_asset_id(id) && extension_for_mime(mime).is_some() {
+                    assets
+                        .entry(id.to_ascii_lowercase())
+                        .or_insert_with(|| mime.to_string());
+                }
+            }
+            for value in map.values() {
+                collect_asset_references(value, assets);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_asset_references(value, assets);
+            }
+        }
+        Value::String(text) if text.starts_with('{') || text.starts_with('[') => {
+            if let Ok(value) = serde_json::from_str(text) {
+                collect_asset_references(&value, assets);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Writes just the background files referenced by saved user settings. The
+/// base64 payload only lives in the local recovery file; it is never exposed
+/// to a reader URL, postMessage, or dynamic stylesheet.
+pub(crate) fn write_recovery_asset_bundle(
+    path: &std::path::Path,
+    snapshots: &[Value],
+) -> Result<(), String> {
+    let mut references = BTreeMap::new();
+    for snapshot in snapshots {
+        collect_asset_references(snapshot, &mut references);
+    }
+    let assets = references
+        .into_iter()
+        .filter_map(|(asset_id, mime)| {
+            cached_asset_bytes(&asset_id, &mime).map(|bytes| RecoveryAsset {
+                asset_id,
+                mime,
+                data_base64: STANDARD.encode(bytes),
+            })
+        })
+        .collect();
+    atomic_file::write_json(path, &RecoveryAssetBundle { version: 1, assets }, true)
+}
+
+fn restore_cached_asset_from_bundle(asset_id: &str, mime: &str) -> Result<bool, String> {
+    let bytes = match std::fs::read(recovery_bundle_path()?) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("读取恢复背景图片失败：{error}")),
+    };
+    let bundle: RecoveryAssetBundle =
+        serde_json::from_slice(&bytes).map_err(|error| format!("恢复背景图片清单无效：{error}"))?;
+    if bundle.version != 1 {
+        return Err("恢复背景图片清单版本无效".into());
+    }
+    let Some(asset) = bundle
+        .assets
+        .into_iter()
+        .find(|asset| asset.asset_id.eq_ignore_ascii_case(asset_id) && asset.mime == mime)
+    else {
+        return Ok(false);
+    };
+    let bytes = STANDARD
+        .decode(asset.data_base64)
+        .map_err(|_| "恢复背景图片编码无效".to_string())?;
+    cache_asset_bytes(asset_id, mime, &bytes)?;
+    Ok(true)
 }
 
 #[derive(Deserialize)]
@@ -283,4 +386,24 @@ pub(crate) fn sync_download_referenced_assets(
         cache_asset_bytes(&asset_id, &mime, &bytes)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_bundle_scans_nested_serialized_preferences() {
+        let id = "a".repeat(64);
+        let value = serde_json::json!({
+            "settings": {
+                "readerCustomPalettesV1": format!(
+                    "[{{\"backgroundAssetId\":\"{id}\",\"backgroundAssetMime\":\"image/png\"}}]"
+                )
+            }
+        });
+        let mut found = BTreeMap::new();
+        collect_asset_references(&value, &mut found);
+        assert_eq!(found.get(&id), Some(&"image/png".to_string()));
+    }
 }

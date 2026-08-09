@@ -23,6 +23,11 @@ const MAX_LIBRARY_QUESTION_CHARS: usize = 2_000;
 const MAX_LIBRARY_COMPARE_BOOKS: usize = 8;
 const MAX_LIBRARY_QUESTION_SOURCES: usize = 20;
 const MAX_LIBRARY_DEEP_SOURCES: usize = 10;
+/// The three existing answer lengths also control how much surrounding prose
+/// the final answer may read. Short keeps its compact citation unchanged.
+const LIBRARY_MEDIUM_SOURCE_CONTEXT_CHARS: usize = 800;
+const LIBRARY_LONG_SOURCE_CONTEXT_CHARS: usize = 1_200;
+
 // Whole-library questions should synthesize evidence, rather than turn one
 // highly-ranked paragraph into a conclusion about an entire genre.
 const MIN_LIBRARY_SYNTHESIS_SOURCES: usize = 4;
@@ -1420,6 +1425,50 @@ fn library_source(book: &semantic::SemBookHits, hit: &semantic::SemHit) -> Optio
         source_kind: "正文检索".into(),
         tags: Vec::new(),
     })
+}
+
+fn library_source_context_chars(answer_length: LibraryAnswerLength) -> Option<usize> {
+    match answer_length {
+        LibraryAnswerLength::Short => None,
+        LibraryAnswerLength::Medium => Some(LIBRARY_MEDIUM_SOURCE_CONTEXT_CHARS),
+        LibraryAnswerLength::Long => Some(LIBRARY_LONG_SOURCE_CONTEXT_CHARS),
+    }
+}
+
+/// Compact passages decide which evidence is relevant. Only selected evidence
+/// is then widened to its bounded, chapter-local prose so medium and long
+/// answers retain qualifications and counterexamples without sending every
+/// candidate passage to the configured reading service.
+fn expand_library_semantic_sources(
+    app: &tauri::AppHandle,
+    sources: &mut [AiReaderSource],
+    source_ids: &[usize],
+    answer_length: LibraryAnswerLength,
+) {
+    let Some(max_chars) = library_source_context_chars(answer_length) else {
+        return;
+    };
+    for source_id in source_ids {
+        let Some(source) = sources.get_mut(source_id.saturating_sub(1)) else {
+            continue;
+        };
+        if source.source_kind != "正文检索" {
+            continue;
+        }
+        let Some(context) = semantic::semantic_context_around(
+            app,
+            &source.book_id,
+            source.chapter,
+            &source.excerpt,
+            max_chars,
+        ) else {
+            continue;
+        };
+        if context.chars().count() > source.excerpt.chars().count() {
+            source.excerpt = context;
+            source.source_kind = "正文检索（连续上下文）".into();
+        }
+    }
 }
 
 fn source_key(source: &AiReaderSource) -> String {
@@ -3467,6 +3516,7 @@ pub(crate) async fn ask_library_assistant(
         } else {
             ensure_library_synthesis_source_ids(&sources, source_ids, &question, answer_length)
         };
+        expand_library_semantic_sources(&app, &mut sources, &source_ids, answer_length);
         let context = library_context_for_source_ids(&sources, &source_ids);
         if context.is_empty() {
             return Err("没有可发送的深度解读证据".into());
@@ -3708,6 +3758,22 @@ pub(crate) async fn ask_reading_assistant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answer_length_controls_continuous_source_windows() {
+        assert_eq!(
+            library_source_context_chars(LibraryAnswerLength::Short),
+            None
+        );
+        assert_eq!(
+            library_source_context_chars(LibraryAnswerLength::Medium),
+            Some(800)
+        );
+        assert_eq!(
+            library_source_context_chars(LibraryAnswerLength::Long),
+            Some(1_200)
+        );
+    }
 
     #[test]
     fn normalizes_full_chat_completions_url_to_a_base_url() {

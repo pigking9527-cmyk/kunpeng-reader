@@ -1,4 +1,4 @@
-var S={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1,backgroundPreset:"light",customBackgroundColor:"#fffdf8",customBackgroundImage:"",customPaletteId:"",textColor:"",linkColor:"",selectionColor:"",footnoteBackground:"",footnoteBorder:"",imagePagination:"next-page",uiLanguage:"zh-CN"};
+var S={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,dualPageGap:40,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1,backgroundPreset:"light",customBackgroundColor:"#fffdf8",customBackgroundImage:"",customPaletteId:"",textColor:"",linkColor:"",selectionColor:"",footnoteBackground:"",footnoteBorder:"",imagePagination:"next-page",uiLanguage:"zh-CN"};
 var READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
 var readerAnimationGroupByKey={annotationAdd:'readerPage',readingMode:'readerPage',pageTurn:'readerPage',highlightSettings:'readerPage'};
 var readerAnimationSettingsOverride=null;
@@ -27,7 +27,6 @@ function applyStyle(){
   var st=document.getElementById('user-style');
   if(!st){st=document.createElement('style');st.id='user-style';document.head.appendChild(st);}
   var hm=hMargins(),scroll=isScrollMode();
-  // 滚动模式的边距属于可视 PageBox；整页/双页模式的边距仍属于分页内容盒。
   var padT=scroll?0:mg(S.marginTop),padB=scroll?0:mg(S.marginBottom);
   var padL=scroll?0:(isDualPage()?0:hm.l);
   var padR=scroll?0:(isDualPage()?0:hm.r);
@@ -68,7 +67,7 @@ function applyStyle(){
     c+='.rr h1{font-size:1.7em !important;} .rr h2{font-size:1.4em !important;} .rr h3{font-size:1.2em !important;} .rr h4{font-size:1.1em !important;}';
     c+='.rr sup,.rr sub{font-size:.75em !important;}'; // 上下标（注释角标）仍保持小一号
   }
-  var presets={light:['#fff','#222','#246ed4','#f7dc82','#eef7ef','#6f8f7d'],dark:['#1c1c1e','#d2d2d2','#8ab4ff','#536f9b','#273626','#82aa8c'],sepia:['#f4ecd8','#5b4636','#8a4a2f','#e7c77f','#efe0c5','#a57c4c'],paper:['#f8f1df','#443a2d','#7b4c26','#e8d290','#f2e7c9','#a48453'],blue:['#eaf2fa','#26394d','#2369a8','#b9d8f4','#dcecf9','#6d9cc7'],custom:['#fffdf8','#222','#246ed4','#f7dc82','#eef7ef','#6f8f7d']};
+  var presets={light:['#fff','#222','#2f6fad','#dceafa','#f3f6fa','#b7c7da'],dark:['#1c1c1e','#d2d2d2','#9abfe8','#3a4f6b','#252f3a','#647a94'],sepia:['#f4ecd8','#5b4636','#875b37','#e7dab8','#f3ebdd','#b79d76'],paper:['#f8f1df','#443a2d','#875b37','#e7dab8','#f3ebdd','#b79d76'],blue:['#eaf2fa','#26394d','#2f6fad','#d3e4f6','#edf3f9','#a7c1dd'],custom:['#fffdf8','#222','#2f6fad','#dceafa','#f3f6fa','#b7c7da']};
   var preset=presets[S.backgroundPreset]||presets.light,validColor=function(v,f){return /^#[0-9a-f]{3,8}$/i.test(String(v||''))?String(v):f;},backgroundImageValue=String(S.customBackgroundImage||'');var bg=S.backgroundPreset==='custom'?validColor(S.customBackgroundColor,preset[0]):preset[0],fg=validColor(S.textColor,preset[1]),link=validColor(S.linkColor,preset[2]),selection=validColor(S.selectionColor,preset[3]),noteBg=validColor(S.footnoteBackground,preset[4]),noteBorder=validColor(S.footnoteBorder,preset[5]),bgImage=/^(?:reader:\/\/localhost|http:\/\/reader\.localhost)\/background\/[0-9a-f]{64}\.(?:png|jpg|webp|gif)$/i.test(backgroundImageValue)?backgroundImageValue:'';
   var bgImageRule=bgImage?'background-image:url("'+bgImage+'") !important;background-size:cover !important;background-position:center !important;background-attachment:fixed !important;':'';
   c+='html,body{background:'+bg+' !important;'+bgImageRule+'}#page-mask{background:'+bg+' !important;'+bgImageRule+'}#virtual-page{--reader-bg:'+bg+';'+bgImageRule+'}';
@@ -80,8 +79,8 @@ function applyStyle(){
   c+='#virtual-page .rr-note-ref{margin:0 !important;}';
   c+='.rr .rr-note-ref::before,.rr .rr-note-ref::after,#virtual-page .rr-note-ref::before,#virtual-page .rr-note-ref::after{content:none !important;}';
   c+='.rr .rr-note-badge,#virtual-page .rr-note-badge{display:inline-flex !important;align-items:center !important;justify-content:center !important;width:100% !important;height:100% !important;box-sizing:border-box !important;color:'+link+' !important;background:transparent !important;border:0 !important;border-radius:50% !important;font:700 9px/1 system-ui,"Microsoft YaHei",sans-serif !important;text-decoration:none !important;letter-spacing:0 !important;}';
-  if(S.imagePagination!=='continuous')c+='.rr img,.rr figure,.rr svg{break-inside:avoid !important;page-break-inside:avoid !important;-webkit-column-break-inside:avoid !important;max-height:calc(100vh - '+(mg(S.marginTop)+mg(S.marginBottom)+8)+'px) !important;max-width:100% !important;object-fit:contain !important;}';
-  // 强制横排：有些书自带 -epub-writing-mode:vertical-rl（竖排），覆盖成横排左→右
+  // 两种图片过渡方式共享同一份正文分页规则。
+  c+='.rr img,.rr figure,.rr svg{break-inside:avoid !important;page-break-inside:avoid !important;-webkit-column-break-inside:avoid !important;max-height:calc(100vh - '+(mg(S.marginTop)+mg(S.marginBottom)+8)+'px) !important;max-width:100% !important;object-fit:contain !important;}';
   c+='html,body,.rr,.rr *{writing-mode:horizontal-tb !important;-webkit-writing-mode:horizontal-tb !important;-epub-writing-mode:horizontal-tb !important;text-orientation:mixed !important;}.rr{direction:ltr !important;orphans:1 !important;widows:1 !important;-webkit-line-box-contain:block glyphs replaced !important;}.rr p,.rr div,.rr li,.rr blockquote{orphans:1 !important;widows:1 !important;}';
   c+='html,body,#pager,#scroller,.rr{overflow-anchor:none;}';
   c+='body.scroll-mode #pager{overflow:hidden !important;}body.scroll-mode #scroller{overflow-y:auto !important;overflow-x:hidden !important;}';
@@ -1236,9 +1235,9 @@ function styleSyntheticNoteBadge(badge,el){
   badge.style.height=size+'px';
   badge.style.boxSizing='border-box';
   badge.style.borderRadius='50%';
-  badge.style.background='#eef7ef';
-  badge.style.border='1px solid #6f8f7d';
-  badge.style.color='#5f7f6d';
+  badge.style.background='#f3f6fa';
+  badge.style.border='1px solid #b7c7da';
+  badge.style.color='#2f6fad';
   badge.style.fontFamily=cs&&cs.fontFamily?cs.fontFamily:"system-ui,'Microsoft YaHei',sans-serif";
   badge.style.fontSize=Math.max(9,Math.round(size*0.62))+'px';
   badge.style.fontWeight='700';
@@ -2227,6 +2226,7 @@ function watchFlowMedia(){
     el.__kpFlowWatch=1;
     el.addEventListener('load',refreshLayoutAfterMedia,{once:false});
     el.addEventListener('error',refreshLayoutAfterMedia,{once:false});
+    if((el.tagName||'').toLowerCase()==='img'&&el.complete&&el.naturalWidth>0)setTimeout(refreshLayoutAfterMedia,0);
   }
 }
 function markNoteSeparators(){

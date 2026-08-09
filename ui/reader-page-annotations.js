@@ -23,6 +23,16 @@ var READER_HIGHLIGHT_COPY={
 Object.keys(READER_HIGHLIGHT_COPY).forEach(function(locale){
   READER_PAGE_COPY[locale]=Object.assign(READER_PAGE_COPY[locale]||{},READER_HIGHLIGHT_COPY[locale]);
 });
+Object.assign(READER_PAGE_COPY['zh-CN'],{gray:'灰色'});
+Object.assign(READER_PAGE_COPY['zh-TW'],{gray:'灰色'});
+Object.assign(READER_PAGE_COPY.en,{gray:'Gray'});
+Object.assign(READER_PAGE_COPY.ja,{gray:'グレー'});
+Object.assign(READER_PAGE_COPY.ko,{gray:'회색'});
+Object.assign(READER_PAGE_COPY.fr,{gray:'Gris'});
+Object.assign(READER_PAGE_COPY.de,{gray:'Grau'});
+Object.assign(READER_PAGE_COPY.es,{gray:'Gris'});
+Object.assign(READER_PAGE_COPY.ru,{gray:'Серый'});
+Object.assign(READER_PAGE_COPY['pt-BR'],{gray:'Cinza'});
 function readerPageLanguage(){var raw=(S&&S.uiLanguage)||document.documentElement.lang||'zh-CN';if(READER_PAGE_COPY[raw])return raw;var base=String(raw).split('-')[0];return base==='zh'?'zh-CN':(READER_PAGE_COPY[base]?base:'en');}
 function readerPageText(key){var lang=readerPageLanguage(),copy=READER_PAGE_COPY[lang]||READER_PAGE_COPY.en;return copy[key]||READER_PAGE_COPY.en[key]||key;}
 // 初次排版本章首页后才能恢复锚点；恢复完成前禁止持久化这个临时位置。
@@ -431,10 +441,24 @@ function init(){
   loadInit();
   setTimeout(function(){reveal();parent.postMessage({ready:1},'*');},8000); // 兜底
   // 记录是否发生了拖动（用于区分“单击翻页”与“拖动选字”）
-  var readerGestureDrawing=false;
-  document.addEventListener('mousedown',function(e){if(e.button!==2)return;readerGestureDrawing=true;parent.postMessage({readerGesture:{phase:'start',x:e.clientX,y:e.clientY}},'*');e.preventDefault();},true);
-  document.addEventListener('mousemove',function(e){if(!readerGestureDrawing)return;parent.postMessage({readerGesture:{phase:'move',x:e.clientX,y:e.clientY}},'*');e.preventDefault();},true);
-  document.addEventListener('mouseup',function(e){if(!readerGestureDrawing)return;readerGestureDrawing=false;parent.postMessage({readerGesture:{phase:'end',x:e.clientX,y:e.clientY}},'*');e.preventDefault();},true);  document.addEventListener('mousedown',function(e){downX=e.clientX;downY=e.clientY;didDrag=false;if(e.detail>1)e.preventDefault();}); // e.detail>1：双击/三击 → 阻止浏览器选词/选段（连点翻页常被当双击而误选）
+  // 使用 Pointer Events 并捕获指针：通过触控板远程操作时，旧 mouseup 可能在
+  // 指针离开正文 iframe 后丢失，外层就收不到完整手势，造成书架可用而阅读页无效。
+  var readerGestureDrawing=false,readerGesturePointerId=null,readerGestureSource='';
+  function reportReaderGesture(phase,e){parent.postMessage({readerGesture:{phase:phase,x:e.clientX,y:e.clientY}},'*');}
+  function startReaderGesture(e,source){if(readerGestureDrawing)return;readerGestureDrawing=true;readerGestureSource=source;readerGesturePointerId=source==='pointer'?e.pointerId:null;if(source==='pointer')try{document.documentElement.setPointerCapture(e.pointerId);}catch(_){}reportReaderGesture('start',e);e.preventDefault();}
+  function finishReaderGesture(e,phase){if(!readerGestureDrawing)return;readerGestureDrawing=false;readerGesturePointerId=null;readerGestureSource='';reportReaderGesture(phase,e);if(e.preventDefault)e.preventDefault();}
+  document.addEventListener('pointerdown',function(e){if(e.button===2)startReaderGesture(e,'pointer');},true);
+  document.addEventListener('pointermove',function(e){if(!readerGestureDrawing||readerGestureSource!=='pointer'||e.pointerId!==readerGesturePointerId)return;reportReaderGesture('move',e);e.preventDefault();},true);
+  document.addEventListener('pointerup',function(e){if(readerGestureDrawing&&readerGestureSource==='pointer'&&e.pointerId===readerGesturePointerId)finishReaderGesture(e,'end');},true);
+  document.addEventListener('pointercancel',function(e){if(readerGestureDrawing&&readerGestureSource==='pointer'&&e.pointerId===readerGesturePointerId)finishReaderGesture(e,'cancel');},true);
+  // ToSwak 等远程触控板有时只注入 MouseEvent，不会同时产生 PointerEvent。
+  // 保留这条兜底链，且以 source 标记与上面的 pointer 链互斥。
+  document.addEventListener('mousedown',function(e){if(e.button===2)startReaderGesture(e,'mouse');},true);
+  document.addEventListener('mousemove',function(e){if(!readerGestureDrawing||readerGestureSource!=='mouse')return;reportReaderGesture('move',e);e.preventDefault();},true);
+  document.addEventListener('mouseup',function(e){if(readerGestureDrawing&&readerGestureSource==='mouse')finishReaderGesture(e,'end');},true);
+  window.addEventListener('blur',function(){if(!readerGestureDrawing)return;readerGestureDrawing=false;readerGesturePointerId=null;readerGestureSource='';parent.postMessage({readerGesture:{phase:'cancel',x:0,y:0}},'*');},true);
+  document.addEventListener('contextmenu',function(e){if(readerGestureDrawing)e.preventDefault();},true);
+  document.addEventListener('mousedown',function(e){downX=e.clientX;downY=e.clientY;didDrag=false;if(e.detail>1)e.preventDefault();}); // e.detail>1：双击/三击 → 阻止浏览器选词/选段（连点翻页常被当双击而误选）
   document.addEventListener('mousemove',function(e){if(downX!==null&&(Math.abs(e.clientX-downX)>4||Math.abs(e.clientY-downY)>4))didDrag=true;});
   document.addEventListener('mouseup',function(){downX=null;downY=null;});
   var macFastTap=null;
@@ -623,7 +647,7 @@ var HL_WEB_ENGINE_KEY='highlightWebSearchEngineV1';
 var HL_MENU_COLOR_KEY='highlightMenuMultiColorV1';
 var HL_SELECTED_COLOR_KEY='highlightMenuColorV1';
 var HL_COLORS=[
-  {key:'y',labelKey:'yellow',value:'rgba(255,218,92,.42)'},
+  {key:'y',labelKey:'gray',value:'rgba(126,136,148,.34)'},
   {key:'g',labelKey:'green',value:'rgba(135,220,151,.42)'},
   {key:'b',labelKey:'blue',value:'rgba(119,185,255,.42)'},
   {key:'p',labelKey:'pink',value:'rgba(255,143,184,.42)'}
@@ -918,6 +942,11 @@ function showCorrectionDraft(o,rect){
   placeHighlightTextPop(rect);
 }
 function hideExcerptPage(){if(excerptPage)excerptPage.style.display='none';}
+function closeReaderPageGestureSurface(){
+  if(excerptPage&&excerptPage.style.display==='block'){hideExcerptPage();return true;}
+  if(hlTextPop&&hlTextPop.style.display==='block'){hideHlTextPop();return true;}
+  return false;
+}
 function showExcerptPage(text){
   var t=(text||'').trim();if(!t)return;
   excerptText=t;

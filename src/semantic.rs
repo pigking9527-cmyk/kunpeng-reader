@@ -18,6 +18,7 @@ pub(crate) use search::{SemBookHits, SemHit};
 pub(crate) use vector::SemData;
 
 use crate::AppState;
+use tauri::Manager;
 // ===========================================================================
 //  语义检索（向量嵌入）：把段落转成向量，按余弦相似度排序，找“意思相近”的文本
 // ===========================================================================
@@ -120,8 +121,8 @@ pub(crate) fn select_semantic_retrieval_mode(
 }
 
 #[tauri::command]
-pub(crate) async fn download_semantic_reranker(app: tauri::AppHandle) -> Result<(), String> {
-    retrieval::download_reranker(app).await
+pub(crate) fn download_semantic_reranker(app: tauri::AppHandle) -> Result<(), String> {
+    retrieval::download_reranker(app)
 }
 
 #[tauri::command]
@@ -170,6 +171,25 @@ pub(crate) fn delete_semantic_index(
         clear_multi_profile_cache();
         clear_sem_status_cache();
         let mut p = state.sem_progress.lock().unwrap();
+        // 删除已成功时不能让旧任务计数继续作为状态来源，否则前端会显示
+        // “已删除”但仍保留旧进度条和可点击的删除按钮。
+        p.done = 0;
+        p.total = 0;
+        p.shard_done = 0;
+        p.shard_total = 0;
+        p.semantic_done = 0;
+        p.semantic_total = 0;
+        p.semantic_ready = false;
+        p.semantic_bytes = 0;
+        p.accelerator_done = 0;
+        p.accelerator_total = 0;
+        p.accelerator_ready = false;
+        p.accelerator_resumable = false;
+        p.accelerator_bytes = 0;
+        p.multi_profile_done = 0;
+        p.multi_profile_total = 0;
+        p.multi_profile_ready = false;
+        p.multi_profile_bytes = 0;
         p.current = "语义索引和加速索引已删除".into();
         p.error.clear();
         Ok(())
@@ -260,6 +280,26 @@ pub(crate) async fn semantic_search(
     ids: Option<Vec<String>>,
 ) -> Result<Vec<SemBookHits>, String> {
     search::semantic_search(app, query, ids).await
+}
+
+/// Expand a retrieved short passage into its neighbouring prose without
+/// reading the original book file. The semantic index preserves chapter
+/// ordering, so this remains local and bounded while a reader is open.
+pub(crate) fn semantic_context_around(
+    app: &tauri::AppHandle,
+    book_id: &str,
+    chapter: u32,
+    snippet: &str,
+    max_chars: usize,
+) -> Option<String> {
+    let id = book_id.parse::<u64>().ok()?;
+    search::context_around(
+        app.state::<AppState>().inner(),
+        id,
+        chapter,
+        snippet,
+        max_chars,
+    )
 }
 
 #[tauri::command]

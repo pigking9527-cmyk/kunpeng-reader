@@ -28,6 +28,19 @@ fn http_agent() -> ureq::Agent {
         .into()
 }
 
+/// The deployment manifest is intentionally checked before GitHub during
+/// startup. It is geographically close to the app's primary users and carries
+/// the same public release metadata; a short timeout keeps an unavailable
+/// mirror from delaying the GitHub fallback.
+fn quick_server_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_millis(900)))
+        .timeout_recv_response(Some(std::time::Duration::from_millis(1_500)))
+        .timeout_recv_body(Some(std::time::Duration::from_millis(1_500)))
+        .build()
+        .into()
+}
+
 fn ver_gt(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u32> {
         s.trim()
@@ -158,9 +171,26 @@ pub(crate) async fn check_update() -> UpdateInfo {
 
 fn check_update_blocking() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();
+    let page = format!("https://github.com/{GITHUB_REPO}/releases/latest");
+    if let Some(server_api) = configured_server_update_url("latest") {
+        if let Some(v) = fetch_json(&quick_server_agent(), &server_api) {
+            let tag = rel_tag(&v);
+            if !tag.is_empty() {
+                let latest = tag.trim_start_matches(['v', 'V']).to_string();
+                return UpdateInfo {
+                    ok: true,
+                    has_update: ver_gt(&latest, &current),
+                    latest,
+                    notes: rel_notes(&v),
+                    url: rel_url(&v, &page),
+                    source: "server".to_string(),
+                    current,
+                };
+            }
+        }
+    }
     let agent = http_agent();
     let api = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let page = format!("https://github.com/{GITHUB_REPO}/releases/latest");
     if let Some(v) = fetch_json(&agent, &api) {
         let tag = rel_tag(&v);
         if !tag.is_empty() {
@@ -176,23 +206,6 @@ fn check_update_blocking() -> UpdateInfo {
                 source: "github".to_string(),
                 current,
             };
-        }
-    }
-    if let Some(server_api) = configured_server_update_url("latest") {
-        if let Some(v) = fetch_json(&agent, &server_api) {
-            let tag = rel_tag(&v);
-            if !tag.is_empty() {
-                let latest = tag.trim_start_matches(['v', 'V']).to_string();
-                return UpdateInfo {
-                    ok: true,
-                    has_update: ver_gt(&latest, &current),
-                    latest,
-                    notes: rel_notes(&v),
-                    url: rel_url(&v, &page),
-                    source: "server".to_string(),
-                    current,
-                };
-            }
         }
     }
     UpdateInfo {

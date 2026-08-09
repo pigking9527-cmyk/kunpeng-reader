@@ -97,6 +97,13 @@ try {
     }
   }
 
+  if (-not $SkipBuild) {
+    $updateBase = [Environment]::GetEnvironmentVariable('KUNPENG_UPDATE_BASE')
+    if ([string]::IsNullOrWhiteSpace($updateBase) -or $updateBase -notmatch '^https://[^\s/]+(?:/[^\s]*)?$') {
+      throw "Missing or invalid KUNPENG_UPDATE_BASE. Official builds require an HTTPS update fallback endpoint outside the repository."
+    }
+  }
+
   Invoke-Step "worktree" { Assert-CleanWorktree }
 
   if (-not $SkipChecks) {

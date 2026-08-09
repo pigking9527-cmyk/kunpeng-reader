@@ -446,6 +446,14 @@ pub(crate) fn ensure_reader_window(
             mark_reader_close_started(&event_label);
             set_reader_window_closing(&event_label, true);
             emit_reader_window_trace(&event_app, "close_requested", "saving", Duration::ZERO);
+            // The shelf can restore this reader through its reopen gesture.
+            // Only a stable book ID crosses the window boundary.
+            if let Some(main) = event_app.get_webview_window("main") {
+                let _ = main.emit(
+                    "reader-closed-for-reopen",
+                    serde_json::json!({ "bookId": id_num.to_string() }),
+                );
+            }
             if let Some(closing) = event_app.get_webview_window(&event_label) {
                 let state = event_app.state::<AppState>();
                 // 页数测量的实际工作在这个 WebView 中。关闭时把已经落盘的

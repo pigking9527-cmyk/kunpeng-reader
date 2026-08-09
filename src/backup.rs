@@ -1,4 +1,7 @@
-use crate::{atomic_file, db, stats::StatsStore, vocab::VocabStore, AppState};
+use crate::{
+    atomic_file, db, reader_backgrounds, recovery_settings, stats::StatsStore, vocab::VocabStore,
+    AppState,
+};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -8,8 +11,18 @@ use tauri::Manager;
 
 const MAX_RECOVERY_BACKUPS: usize = 7;
 const BACKUP_METADATA_KEY: &str = "last_recovery_backup_day";
-const PORTABLE_FILES: &[&str] = &["library.json", "stats.json", "vocab.json"];
+const RUNTIME_PROJECTION_FILES: &[&str] = &["library.json", "stats.json", "vocab.json"];
+const PORTABLE_FILES: &[&str] = &[
+    "library.json",
+    "stats.json",
+    "vocab.json",
+    "gesture-settings-v1.json",
+    recovery_settings::MAIN_SNAPSHOT_FILE,
+    recovery_settings::READER_SNAPSHOT_FILE,
+    reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE,
+];
 const SQLITE_FILES: &[&str] = &["external-dicts.db"];
+const BACKUP_FORMAT_VERSION: u32 = 3;
 const RESTORE_TRANSACTION_FILE: &str = ".restore-transaction.json";
 const RESTORE_TRANSACTION_VERSION: u32 = 2;
 static BACKUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -179,7 +192,7 @@ fn manifest_for(path: &Path) -> Result<BackupManifest, String> {
         .map_err(|e| format!("读取恢复点清单失败 {}：{e}", path.display()))?;
     let manifest: BackupManifest = serde_json::from_str(&manifest)
         .map_err(|e| format!("恢复点清单格式无效 {}：{e}", path.display()))?;
-    if manifest.format != "kunpeng-reader-recovery" || !matches!(manifest.version, 1 | 2) {
+    if manifest.format != "kunpeng-reader-recovery" || manifest.version != BACKUP_FORMAT_VERSION {
         return Err(format!("不支持的恢复点格式：{}", path.display()));
     }
     if !manifest_contains(&manifest, "reader.db") {
@@ -318,8 +331,17 @@ fn create_locked_with_data(
     let result = (|| {
         db.backup_to(&temp_dir.join("reader.db"))?;
         let config = config_dir()?;
+        recovery_settings::ensure_snapshot_files()?;
+        reader_backgrounds::write_recovery_asset_bundle(
+            &temp_dir.join(reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE),
+            &recovery_settings::snapshot_values(),
+        )?;
         let mut files = vec!["reader.db".to_string()];
         for name in PORTABLE_FILES {
+            if *name == reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE {
+                files.push((*name).to_string());
+                continue;
+            }
             let source = config.join(name);
             if source.is_file() {
                 std::fs::copy(&source, temp_dir.join(name))
@@ -351,7 +373,7 @@ fn create_locked_with_data(
             &temp_dir.join("manifest.json"),
             &BackupManifest {
                 format: "kunpeng-reader-recovery".to_string(),
-                version: 2,
+                version: BACKUP_FORMAT_VERSION,
                 app_version: env!("CARGO_PKG_VERSION").to_string(),
                 created_at: Local::now().to_rfc3339(),
                 files,
@@ -1131,8 +1153,10 @@ fn stage_runtime_projections(
     directory: &Path,
     files: &[(&str, Vec<u8>)],
 ) -> Result<Vec<RestoreFilePlan>, String> {
-    if files.len() != PORTABLE_FILES.len()
-        || files.iter().any(|(name, _)| !PORTABLE_FILES.contains(name))
+    if files.len() != RUNTIME_PROJECTION_FILES.len()
+        || files
+            .iter()
+            .any(|(name, _)| !RUNTIME_PROJECTION_FILES.contains(name))
         || files
             .iter()
             .map(|(name, _)| *name)
@@ -1652,6 +1676,7 @@ pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String
     *data.stats = StatsStore::load();
     *data.vocab = VocabStore::load();
     state.reset_runtime_caches_after_restore();
+    recovery_settings::mark_restore_pending()?;
     status()
 }
 
@@ -1714,6 +1739,10 @@ mod tests {
         assert!(PORTABLE_FILES.contains(&"library.json"));
         assert!(PORTABLE_FILES.contains(&"stats.json"));
         assert!(PORTABLE_FILES.contains(&"vocab.json"));
+        assert!(PORTABLE_FILES.contains(&"gesture-settings-v1.json"));
+        assert!(PORTABLE_FILES.contains(&recovery_settings::MAIN_SNAPSHOT_FILE));
+        assert!(PORTABLE_FILES.contains(&recovery_settings::READER_SNAPSHOT_FILE));
+        assert!(PORTABLE_FILES.contains(&reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE));
         assert!(SQLITE_FILES.contains(&"external-dicts.db"));
     }
 
@@ -1732,7 +1761,7 @@ mod tests {
         std::fs::write(dir.join("reader.db"), b"valid-database").unwrap();
         let manifest = BackupManifest {
             format: "kunpeng-reader-recovery".into(),
-            version: 2,
+            version: BACKUP_FORMAT_VERSION,
             app_version: "test".into(),
             created_at: "now".into(),
             files: vec![verified_manifest_file(&dir, "reader.db").unwrap()],
@@ -1743,6 +1772,25 @@ mod tests {
         )
         .unwrap();
         assert!(manifest_for(&dir).is_ok());
+        let old_manifest = BackupManifest {
+            version: 2,
+            ..manifest
+        };
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&old_manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest_for(&dir).is_err());
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&BackupManifest {
+                version: BACKUP_FORMAT_VERSION,
+                ..old_manifest
+            })
+            .unwrap(),
+        )
+        .unwrap();
         std::fs::write(dir.join("reader.db"), b"valid-databasf").unwrap();
         assert!(manifest_for(&dir).is_err());
         std::fs::remove_dir_all(dir).unwrap();

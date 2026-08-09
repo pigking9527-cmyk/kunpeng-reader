@@ -38,6 +38,17 @@ test("bug traces accept only bounded metadata and never raw text or links", () =
     },
   }), true);
   assert.equal(guard.validateData({
+    bugTrace: {
+      kind: "image_pagination", source: "reader_page", outcome: "no_candidate", target: "unknown",
+      chapter: 3, page: 8, pages: 19, chapter_pending: 0, chapter_turn_pending: false,
+      turn_fx_active: false, turn_timer_active: false, scroll_paged: false, flow_mode: "paged", page_mode: "single",
+      image_mode: "continuous", image_source_page: 8, image_candidate_page: 9,
+      image_top: 126, image_width: 903, image_height: 730, image_free_height: 318,
+      image_preview_height: 0, image_next_count: 1, image_future_count: 1, image_skipped_text: 0,
+      image_near_top: false, image_text_before: false, image_probed: true,
+    },
+  }), true);
+  assert.equal(guard.validateData({
     bugTrace: { kind: "click", outcome: "link", href: "https://secret.invalid" },
   }), false);
   assert.equal(guard.validateData({

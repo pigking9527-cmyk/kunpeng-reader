@@ -20,6 +20,11 @@ mod windows {
     use tauri::Emitter;
 
     const VERSION: &str = "cuda-12.8-cudnn-9.10.2-windows-x64-v1";
+    // Tokio's blocking workers can have a comparatively small native stack.
+    // Keep the large CUDA archive I/O buffer well below that limit: the old
+    // 1 MiB stack arrays overflowed while validating an already-downloaded
+    // archive, which terminated the whole desktop process.
+    const IO_BUFFER_BYTES: usize = 64 * 1024;
 
     #[derive(Clone, Copy)]
     struct RuntimeFile {
@@ -182,7 +187,7 @@ mod windows {
         let mut input = File::open(path).map_err(|error| format!("打开文件失败：{error}"))?;
         let mut hasher = Sha256::new();
         let mut bytes = 0_u64;
-        let mut buffer = [0_u8; 1024 * 1024];
+        let mut buffer = vec![0_u8; IO_BUFFER_BYTES];
         loop {
             let read = input
                 .read(&mut buffer)
@@ -338,7 +343,7 @@ mod windows {
             let mut downloaded = if append { resume_from } else { 0 };
             let mut reported = downloaded;
             let mut input = response.body_mut().as_reader();
-            let mut buffer = [0_u8; 1024 * 1024];
+            let mut buffer = vec![0_u8; IO_BUFFER_BYTES];
             loop {
                 let read = match input.read(&mut buffer) {
                     Ok(read) => read,

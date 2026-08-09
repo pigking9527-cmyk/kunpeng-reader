@@ -16,6 +16,9 @@
     "frame_ready", "immersive", "loading", "pages", "turn_id", "input",
     "before_chapter", "before_page", "after_chapter", "after_page",
     "chapter_pending", "chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "flow_mode", "page_mode",
+    // 图片分页只保存布局数值和模式，不保存正文、图片地址或本机文件路径。
+    "image_mode", "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
+    "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text", "image_near_top", "image_text_before", "image_probed",
   ]);
   const BLOCKERS = new Set(["selection", "drag", "link", "overlay", "chapter_pending", "turn_busy"]);
   const events = [];

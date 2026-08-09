@@ -119,6 +119,7 @@
 
     let catalog = [], sourceIds = [], pendingSourceIds = [], tiebaBarNames = loadStoredTiebaBars(), tiebaEnabledBarNames = loadStoredEnabledTiebaBars(tiebaBarNames), pendingTiebaBarNames = [], pendingTiebaEnabledBarNames = [], allItems = [];
     let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
+    let newsSettingsSyncReady = false, newsSettingsSyncTimer = 0;
     let layout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
     let articleScrollTop = 0, sourcePageScrollTop = 0, articleOpen = false, currentArticleUrl = "", masonryResizeTimer = 0, renderedMasonryColumnCount = 0, feedRenderPending = false;
@@ -152,6 +153,58 @@
         void load(true);
       }, 450);
     }
+    function queueNewsSourceSettingsSync() {
+      if (!newsSettingsSyncReady || !invoke) return;
+      global.clearTimeout(newsSettingsSyncTimer);
+      newsSettingsSyncTimer = global.setTimeout(() => {
+        invoke("app_settings_sync_save", {
+          request: {
+            newsSourceIds: sourceIds,
+            newsTiebaBars: tiebaBarNames,
+            newsEnabledTiebaBars: tiebaEnabledBarNames,
+          },
+        }).catch(() => {});
+      }, 180);
+    }
+    function applySyncedNewsSources(remote) {
+      const bars = normalizeTiebaBars(remote?.newsTiebaBars);
+      const enabledBars = enabledTiebaBars(remote?.newsEnabledTiebaBars, bars);
+      const selected = allowedSourceIds(remote?.newsSourceIds, catalog);
+      if (!selected.length) return false;
+      if (enabledBars.length && !selected.includes("tieba")) {
+        if (selected.length >= MAX_SOURCES) return false;
+        selected.push("tieba");
+      }
+      sourceIds = selected;
+      tiebaBarNames = bars;
+      tiebaEnabledBarNames = enabledBars;
+      storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds));
+      storageSet(TIEBA_BARS_STORAGE_KEY, JSON.stringify(tiebaBarNames));
+      storageSet(TIEBA_ENABLED_BARS_STORAGE_KEY, JSON.stringify(tiebaEnabledBarNames));
+      queueNewsSourceSettingsSync();
+      selectedCategory = "全部";
+      renderCategories();
+      if (!sourcePicker.hidden) {
+        pendingSourceIds = sourceIds.slice();
+        pendingTiebaBarNames = tiebaBarNames.slice();
+        pendingTiebaEnabledBarNames = tiebaEnabledBarNames.slice();
+        renderSourcePicker();
+      }
+      if (!page.hidden) scheduleSourceRefresh();
+      return true;
+    }
+    async function hydrateNewsSourceSettings() {
+      if (!catalog.length || !invoke) return;
+      try {
+        const remote = await invoke("app_settings_sync_get");
+        newsSettingsSyncReady = false;
+        if (remote?.hasNewsSourceSettings) applySyncedNewsSources(remote);
+        newsSettingsSyncReady = true;
+        if (!remote?.hasNewsSourceSettings) queueNewsSourceSettingsSync();
+      } catch (_) {
+        newsSettingsSyncReady = true;
+      }
+    }
     function persistSourceChanges() {
       const activeTiebaBars = enabledTiebaBars(pendingTiebaEnabledBarNames, pendingTiebaBarNames);
       const selected = allowedSourceIds(pendingSourceIds.filter((id) => id !== "tieba"), catalog);
@@ -166,6 +219,7 @@
       storageSet(SOURCE_STORAGE_KEY, JSON.stringify(sourceIds));
       storageSet(TIEBA_BARS_STORAGE_KEY, JSON.stringify(tiebaBarNames));
       storageSet(TIEBA_ENABLED_BARS_STORAGE_KEY, JSON.stringify(tiebaEnabledBarNames));
+      queueNewsSourceSettingsSync();
       selectedCategory = "全部";
       renderCategories();
       setSourceStatus(i18n("newsSourcesSaved", "Saved. Refreshing news automatically…"), "muted");
@@ -281,6 +335,7 @@
           publishedAt: text(item.publishedAt || item.published_at || item.pubDate || item.date),
           gestureEnabled: gestureApi.loadEnabled(global.localStorage),
           gesturePoints: gestureApi.load(global.localStorage).map((point) => [point.x, point.y]),
+          hideReturnIcon: global.ReaderExperimentalFeatures?.enabled?.("newsnowHideReturnIcon") === true,
         } });
         if (article?.local) renderLocalArticle(article);
         else readerStatus.textContent = "";
@@ -410,7 +465,7 @@
     }
     async function loadSources() {
       if (catalog.length) return catalog; if (catalogueLoading) return catalogueLoading;
-      catalogueLoading = Promise.resolve(invoke && invoke("newsnow_sources")).then((sources) => Array.isArray(sources) ? sources : []).then((sources) => { catalog = sources; sourceIds = loadStoredSourceIds(catalog); renderCategories(); return catalog; }).catch(() => { catalog = []; sourceIds = []; return catalog; }).finally(() => { catalogueLoading = null; });
+      catalogueLoading = Promise.resolve(invoke && invoke("newsnow_sources")).then((sources) => Array.isArray(sources) ? sources : []).then((sources) => { catalog = sources; sourceIds = loadStoredSourceIds(catalog); renderCategories(); void hydrateNewsSourceSettings(); return catalog; }).catch(() => { catalog = []; sourceIds = []; return catalog; }).finally(() => { catalogueLoading = null; });
       return catalogueLoading;
     }
     function applyNewsResult(result, { announce = false } = {}) {
@@ -508,6 +563,7 @@
       }, 120);
     });
     global.addEventListener("app-language-changed", () => { renderSourceSelection(); renderCategories(); renderSourcePicker(); renderFeed(); });
+    global.__TAURI__?.event?.listen?.("app-settings-synced", () => { void hydrateNewsSourceSettings(); });
     global.__TAURI__?.event?.listen?.("newsnow-return-to-feed", () => closeArticle({ focus: true }));
     global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); if (event.detail?.key === "newsnow" || event.detail?.key === "newsnowPrefetch") scheduleBackgroundPrefetch(); }); applyExperimentalAvailability(); applyDisplayOptions(); scheduleBackgroundPrefetch();
     return { open, close, gestureSurface: () => (!reader.hidden ? reader : (!page.hidden ? page : null)), gestureBack: () => { if (!reader.hidden) closeArticle({ focus: false }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: false }); else if (!page.hidden) close({ focus: false }); }, refresh: () => load(true), render: (items) => { allItems = resultItems(items); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: () => layout, order: () => order };

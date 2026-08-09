@@ -10,7 +10,7 @@
   const ENABLED_KEY = "kunpeng.reader.news.back-gesture.enabled.v1";
   const PRECISION_KEY = "kunpeng.reader.news.back-gesture.precision.v1";
   const SAMPLE_COUNT = 48;
-  const MIN_PATH_LENGTH = 64;
+  const MIN_PATH_LENGTH = 32;
   const MATCH_THRESHOLD = 0.78;
   const PRECISION_THRESHOLDS = Object.freeze([0.62, 0.66, 0.70, 0.74, MATCH_THRESHOLD, 0.82, 0.86, 0.89, 0.92, 0.95]);
   const MATCH_THRESHOLDS = Object.freeze({ low: PRECISION_THRESHOLDS[2], medium: MATCH_THRESHOLD, high: PRECISION_THRESHOLDS[6] });
@@ -79,12 +79,64 @@
     return alreadyNormalized ? list : normalize(list);
   }
 
+  function directionDistance(left, right) {
+    const delta = Math.abs(left - right) % 8;
+    return Math.min(delta, 8 - delta);
+  }
+
+  function directionSequence(points) {
+    const list = normalizedInput(points);
+    if (!list.length) return [];
+    const directions = [];
+    // 跨两个归一化采样点取方向，过滤鼠标细小抖动；这里只保留方向顺序，
+    // 不保留每一段占整条轨迹的长度比例。
+    for (let index = 2; index < list.length; index += 1) {
+      const dx = list[index].x - list[index - 2].x;
+      const dy = list[index].y - list[index - 2].y;
+      if (Math.hypot(dx, dy) < 0.008) continue;
+      const sector = ((Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) % 8) + 8) % 8;
+      if (directions[directions.length - 1] !== sector) directions.push(sector);
+    }
+    // 等距采样会在直角拐弯处短暂产生一个对角方向，例如“下、右下、右”。
+    // 该中间方向只是插值结果，不是用户额外画的一段，移除后得到稳定的转折序列。
+    let changed = true;
+    while (changed && directions.length >= 3) {
+      changed = false;
+      for (let index = 1; index < directions.length - 1; index += 1) {
+        const previous = directions[index - 1], current = directions[index], next = directions[index + 1];
+        if (previous === next || directionDistance(previous, next) === 2 && directionDistance(previous, current) === 1 && directionDistance(current, next) === 1) {
+          directions.splice(index, 1);
+          changed = true;
+          break;
+        }
+      }
+    }
+    return directions.slice(0, 16);
+  }
+
+  function directionSimilarity(reference, candidate) {
+    const saved = directionSequence(reference), current = directionSequence(candidate);
+    if (!saved.length || !current.length) return 0;
+    const rows = Array.from({ length: saved.length + 1 }, () => Array(current.length + 1).fill(0));
+    for (let left = 0; left <= saved.length; left += 1) rows[left][0] = left;
+    for (let right = 0; right <= current.length; right += 1) rows[0][right] = right;
+    for (let left = 1; left <= saved.length; left += 1) {
+      for (let right = 1; right <= current.length; right += 1) {
+        const substitution = directionDistance(saved[left - 1], current[right - 1]) / 4;
+        rows[left][right] = Math.min(rows[left - 1][right] + 1, rows[left][right - 1] + 1, rows[left - 1][right - 1] + substitution);
+      }
+    }
+    return Math.max(0, Math.min(1, 1 - rows[saved.length][current.length] / Math.max(saved.length, current.length)));
+  }
+
   function similarity(reference, candidate) {
     const saved = normalizedInput(reference), current = normalizedInput(candidate);
     if (!saved.length || !current.length) return 0;
     const forward = meanDistance(saved, current);
-    const reverse = meanDistance(saved, current.slice().reverse());
-    return Math.max(0, Math.min(1, 1 - Math.min(forward, reverse) / 0.72));
+    const shapeScore = Math.max(0, Math.min(1, 1 - forward / 0.72));
+    // 逐点形状仍用于区分曲线细节；方向序列作为长度比例无关的补充。
+    // 因而“下很长、右较短”和录制的“下、右”仍会命中，但“右、下”不会。
+    return Math.max(shapeScore, directionSimilarity(saved, current));
   }
 
   function parseStored(value) {
@@ -178,5 +230,5 @@
     context.stroke();
   }
 
-  return { STORAGE_KEY, ENABLED_KEY, PRECISION_KEY, SAMPLE_COUNT, MIN_PATH_LENGTH, MATCH_THRESHOLD, MATCH_THRESHOLDS, PRECISION_THRESHOLDS, cleanPoints, pathLength, normalize, similarity, parseStored, load, save, loadEnabled, saveEnabled, normalizePrecision, loadPrecision, savePrecision, matchThreshold, clear, draw };
+  return { STORAGE_KEY, ENABLED_KEY, PRECISION_KEY, SAMPLE_COUNT, MIN_PATH_LENGTH, MATCH_THRESHOLD, MATCH_THRESHOLDS, PRECISION_THRESHOLDS, cleanPoints, pathLength, normalize, directionSequence, directionSimilarity, similarity, parseStored, load, save, loadEnabled, saveEnabled, normalizePrecision, loadPrecision, savePrecision, matchThreshold, clear, draw };
 });

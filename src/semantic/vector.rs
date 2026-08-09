@@ -1098,6 +1098,27 @@ mod tests {
     }
 
     #[test]
+    fn context_window_is_continuous_and_never_crosses_a_chapter() {
+        let data = SemData {
+            dim: 1,
+            vecs: vec![1.0, 1.0, 1.0, 1.0],
+            chunks: vec![
+                Chunk::new(2, "前文论证。".into()),
+                Chunk::new(2, "核心结论及其限定。".into()),
+                Chunk::new(2, "后续例外。".into()),
+                Chunk::new(3, "下一章不能混入。".into()),
+            ],
+            _memory_permit: None,
+        };
+
+        let context = data.context_around(2, "核心结论", 64).unwrap();
+        assert!(context.contains("前文论证"));
+        assert!(context.contains("核心结论及其限定"));
+        assert!(context.contains("后续例外"));
+        assert!(!context.contains("下一章不能混入"));
+    }
+
+    #[test]
     fn status_metadata_reads_only_scalar_head_and_tail_windows() {
         let head = format!(
             r#"{{"v":{SEM_VERSION},"model":"{}","mtime":123,"dim":512,"chunks":[{{"c":0,"t":"正文不应被反序列化"}}"#,

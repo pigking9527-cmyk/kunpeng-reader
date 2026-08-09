@@ -29,6 +29,7 @@
     let historyLayout = "list";
     let classificationPoll = null;
     let answerFontSize = DEFAULT_ANSWER_FONT_SIZE, answerLength = "short", semanticStatus = null;
+    let appSettingsSyncReady = false, appSettingsSyncTimer = 0;
     let longContextHelpTimer = null;
     let questionContextMenu = null;
     const organizationName = (value) => String(value || "").trim();
@@ -55,6 +56,63 @@
       if (decrease) decrease.disabled = answerFontSize <= MIN_ANSWER_FONT_SIZE;
       if (increase) increase.disabled = answerFontSize >= MAX_ANSWER_FONT_SIZE;
       if (save) try { global.localStorage?.setItem(ANSWER_FONT_SIZE_KEY, String(answerFontSize)); } catch (_) {}
+    }
+
+    function queueLibraryAnswerSettingsSync() {
+      if (!appSettingsSyncReady || !invoke) return;
+      global.clearTimeout(appSettingsSyncTimer);
+      appSettingsSyncTimer = global.setTimeout(() => {
+        invoke("app_settings_sync_save", {
+          request: {
+            libraryAnswerLength: answerLength,
+            libraryHistorySyncMode: historySyncMode,
+            libraryAnswerFontSize: answerFontSize,
+            libraryLongContextEnabled: Boolean(semanticStatus?.m3_long_context_enabled),
+          },
+        }).catch(() => {});
+      }, 180);
+    }
+
+    async function applySyncedLibraryAnswerSettings(remote) {
+      if (!remote?.hasLibraryAnswerSettings) return false;
+      appSettingsSyncReady = false;
+      answerLength = ["short", "medium", "long"].includes(remote.libraryAnswerLength) ? remote.libraryAnswerLength : "short";
+      answerFontSize = Math.max(MIN_ANSWER_FONT_SIZE, Math.min(MAX_ANSWER_FONT_SIZE, Math.round(Number(remote.libraryAnswerFontSize) || DEFAULT_ANSWER_FONT_SIZE)));
+      applyAnswerFontSize(true);
+      try {
+        const settings = await invoke("set_library_answer_length", { request: { answerLength } });
+        answerLength = settings?.answerLength || answerLength;
+        const snapshot = await invoke("private_sync_set_library_history_mode", {
+          request: { syncMode: ["off", "recent", "manual"].includes(remote.libraryHistorySyncMode) ? remote.libraryHistorySyncMode : "off" },
+        });
+        applyLibraryHistorySnapshot(snapshot);
+        if (remote.libraryLongContextEnabled === false && semanticStatus?.m3_long_context_enabled) {
+          await invoke("set_semantic_m3_long_context", { enabled: false });
+          semanticStatus = await invoke("semantic_status");
+        } else if (remote.libraryLongContextEnabled === true && semanticStatus?.model_id === "bge-m3") {
+          await invoke("set_semantic_m3_long_context", { enabled: true });
+          semanticStatus = await invoke("semantic_status");
+        }
+      } catch (_) {
+        // 保留本机值并在下次同步完成或重新打开书库问答时重试。
+      } finally {
+        appSettingsSyncReady = true;
+        renderAnswerLengthSettings();
+        if (showingHistory) renderLibraryHistory();
+      }
+      return true;
+    }
+
+    async function hydrateLibraryAnswerSettings() {
+      if (!invoke) return;
+      try {
+        const remote = await invoke("app_settings_sync_get");
+        const applied = await applySyncedLibraryAnswerSettings(remote);
+        appSettingsSyncReady = true;
+        if (!applied) queueLibraryAnswerSettingsSync();
+      } catch (_) {
+        appSettingsSyncReady = true;
+      }
     }
 
     function readHistoryLayout() {
@@ -123,6 +181,7 @@
       try {
         const settings = await invoke("set_library_answer_length", { request: { answerLength: length } });
         answerLength = settings?.answerLength || length;
+        queueLibraryAnswerSettingsSync();
         renderAnswerLengthSettings();
         state("", false);
       } catch (error) {
@@ -144,6 +203,7 @@
       try {
         const snapshot = await invoke("private_sync_set_library_history_mode", { request: { syncMode } });
         applyLibraryHistorySnapshot(snapshot);
+        queueLibraryAnswerSettingsSync();
         renderAnswerLengthSettings();
         if (showingHistory) renderLibraryHistory();
         state(syncMode === "recent" ? "已开启最近回答同步；云端最多保留 100 条。" : syncMode === "manual" ? "已开启手动同步；可在问答记录中点“云端”保存。" : "书库问答将只保存在本机。", false);
@@ -158,6 +218,7 @@
       try {
         await invoke("set_semantic_m3_long_context", { enabled });
         semanticStatus = await invoke("semantic_status");
+        queueLibraryAnswerSettingsSync();
         renderAnswerLengthSettings();
         state(enabled
           ? i18n("longContextEnabled", "Long-context reading is enabled.")
@@ -1171,6 +1232,7 @@
         useModelTags = modelTagSettings?.enabled !== false;
         answerLength = answerSettings?.answerLength || "short";
         renderAnswerLengthSettings();
+        await hydrateLibraryAnswerSettings();
         applyBooks(list);
         const readiness = readinessMessage(status, semanticStatus);
         state(readiness, !status?.configured);
@@ -1235,10 +1297,12 @@
     $("library-ai-font-decrease")?.addEventListener("click", () => {
       answerFontSize = Math.max(MIN_ANSWER_FONT_SIZE, answerFontSize - 1);
       applyAnswerFontSize(true);
+      queueLibraryAnswerSettingsSync();
     });
     $("library-ai-font-increase")?.addEventListener("click", () => {
       answerFontSize = Math.min(MAX_ANSWER_FONT_SIZE, answerFontSize + 1);
       applyAnswerFontSize(true);
+      queueLibraryAnswerSettingsSync();
     });
     $("library-ai-model-profile")?.addEventListener("change", async (event) => {
       const id = event.currentTarget.value;
@@ -1271,6 +1335,7 @@
     global.addEventListener("ai-reader-profiles-changed", () => {
       invoke("ai_reader_profiles").then(renderModelProfiles).catch(() => {});
     });
+    global.addEventListener("app-settings-synced", () => { void hydrateLibraryAnswerSettings(); });
     global.addEventListener("app-language-changed", () => {
       renderAnswerLengthSettings();
       renderFilterOptions($("tag-filter"), "tags", i18n("allTags", "全部标签"));

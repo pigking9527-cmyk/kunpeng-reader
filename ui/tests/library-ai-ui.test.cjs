@@ -379,6 +379,13 @@ test("library answer font size is adjusted in place and remembered locally", () 
   assert.match(html, /id="library-ai-font-increase"/);
   assert.match(controller, /ANSWER_FONT_SIZE_KEY = "libraryAiAnswerFontSizeV1"/);
   assert.match(controller, /function applyAnswerFontSize\(save = false\)/);
+  assert.match(controller, /function queueLibraryAnswerSettingsSync/);
+  assert.match(controller, /function hydrateLibraryAnswerSettings/);
+  assert.match(controller, /libraryAnswerLength: answerLength/);
+  assert.match(controller, /libraryHistorySyncMode: historySyncMode/);
+  assert.match(controller, /libraryAnswerFontSize: answerFontSize/);
+  assert.match(controller, /libraryLongContextEnabled/);
+  assert.match(controller, /hasLibraryAnswerSettings/);
   assert.match(controller, /localStorage\?\.setItem\(ANSWER_FONT_SIZE_KEY/);
   assert.match(styles, /--library-ai-answer-font-size/);
   assert.match(styles, /\.library-ai-font-controls\s*\{/);

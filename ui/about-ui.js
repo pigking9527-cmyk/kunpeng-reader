@@ -39,9 +39,18 @@
       return 0;
     }
 
-    function showUpdateBanner(version, url) {
-      pendingRelease = { version, url: url || "" };
-      root.getElementById("ub-ver").textContent = "v" + String(version).replace(/^v/i, "");
+    function conciseNotes(notes) {
+      return String(notes || "")
+        .replace(/\r\n?/g, "\n")
+        .replace(/^\s*[-*]\s*/gm, "• ")
+        .trim();
+    }
+
+    function showUpdateBanner(info) {
+      pendingRelease = { version: info.latest, url: info.url || "" };
+      root.getElementById("ub-current").textContent = "当前 v" + String(info.current || "?").replace(/^v/i, "");
+      root.getElementById("ub-ver").textContent = "v" + String(info.latest).replace(/^v/i, "");
+      root.getElementById("ub-notes").textContent = conciseNotes(info.notes) || "已发布新版本，查看更新说明了解改进内容。";
       updateBar.classList.add("show");
     }
 
@@ -68,7 +77,7 @@
         const ignored = storage.getItem("ignoredUpdate");
         if (ignored && compareVersions(info.latest, ignored) <= 0) return;
       }
-      showUpdateBanner(info.latest, info.url);
+      showUpdateBanner(info);
     }
 
     async function loadCurrentNotes() {

@@ -54,6 +54,18 @@ pub(crate) struct SemProgress {
     pub(crate) error: String,
 }
 
+impl SemProgress {
+    /// 重排模型只影响查询阶段。它加载时不能清空已经核对完成的向量索引、
+    /// 加速索引和多中心画像状态，否则 UI 会把已完成的索引误显示为待建立。
+    fn begin_reranker_load(&mut self, task_id: &str, background_task_id: String, current: &str) {
+        self.reranker_loading = true;
+        self.active_task = task_id.into();
+        self.background_task_id = background_task_id;
+        self.current = current.into();
+        self.error.clear();
+    }
+}
+
 /// 所有长任务的排他入口：在工作线程启动前发布可观察快照。
 pub(crate) fn begin_semantic_task(
     state: &AppState,
@@ -76,10 +88,14 @@ pub(crate) fn begin_semantic_task(
         _ => BackgroundTaskKind::SemanticVectors,
     };
     let task = state.background_tasks.enqueue_or_resume(kind, current);
+    if reranker_loading {
+        progress.begin_reranker_load(task_id, task.id().into(), current);
+        // 不清空逐书索引的状态缓存：重排模型与向量索引互不依赖。
+        return Ok(task);
+    }
     *progress = SemProgress {
-        building: !model_download && !reranker_loading,
-        model_downloading: model_download && !reranker_loading,
-        reranker_loading,
+        building: !model_download,
+        model_downloading: model_download,
         active_task: task_id.into(),
         background_task_id: task.id().into(),
         current: current.into(),
@@ -104,6 +120,7 @@ pub(crate) fn finish_semantic_task(
         .sem_progress
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let reranker_task = progress.active_task == "semantic_reranker";
     progress.building = false;
     progress.model_downloading = false;
     progress.reranker_loading = false;
@@ -115,5 +132,34 @@ pub(crate) fn finish_semantic_task(
         None => progress.error.clear(),
     }
     drop(progress);
-    clear_sem_status_cache();
+    // 结束重排加载也不应让语义索引重新进入“后台核对”状态。
+    if !reranker_task {
+        clear_sem_status_cache();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SemProgress;
+
+    #[test]
+    fn reranker_loading_keeps_existing_index_snapshot() {
+        let mut progress = SemProgress {
+            semantic_done: 781,
+            semantic_total: 781,
+            semantic_ready: true,
+            accelerator_done: 781,
+            accelerator_total: 781,
+            accelerator_ready: true,
+            ..Default::default()
+        };
+
+        progress.begin_reranker_load("semantic_reranker", "task-1".into(), "加载重排模型…");
+
+        assert!(progress.reranker_loading);
+        assert_eq!(progress.semantic_done, 781);
+        assert_eq!(progress.semantic_total, 781);
+        assert!(progress.semantic_ready);
+        assert!(progress.accelerator_ready);
+    }
 }

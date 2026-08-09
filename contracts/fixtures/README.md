@@ -19,4 +19,4 @@
 13. `independent-book-organization.v1.json` 固定用户标签与收藏夹独立实体，以及旧 `book_state_v2` 空数组不得覆盖独立实体的兼容规则。
 14. `sync-recovery-history.v1.json` 固定完整变化实体压缩、90 天锚点、恢复世代、密钥包排除，以及 7 日/4 周/12 月整库压缩快照策略。
 15. `reader-palettes.v1.json` 固定自定义阅读配色按主题独立 LWW、排序实体、最多 10 个自定义主题及 10 MiB 原始背景图上限；默认主题不上传。
-16. `app-settings.v1.json` 固定 Windows、Linux、macOS 共享的非敏感软件设置实体、跳转回退图标 1–10 级大小边界及未知字段保留。
+16. `app-settings.v1.json` 固定 Windows、Linux、macOS 共享的非敏感软件设置实体、跳转回退图标 30–160 px 大小与保留的 1–10 级兼容镜像、资讯来源与自定义贴吧选择、书库问答偏好及未知字段保留。

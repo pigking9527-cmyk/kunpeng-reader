@@ -117,6 +117,35 @@ pub(super) fn model_dir() -> Option<std::path::PathBuf> {
     model_dir_for(active())
 }
 
+/// 只在模型下载期间读取当前模型缓存目录的文件大小，用于向界面显示文本进度。
+/// 这不是已安装模型的精确占用统计：下载结束后状态页仍避免展示混有旧缓存的
+/// 容量，防止用户误把历史模型文件当成当前模型的一部分。
+pub(super) fn downloaded_bytes() -> u64 {
+    fn tree_bytes(path: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        entries.flatten().fold(0u64, |total, entry| {
+            let bytes = entry
+                .metadata()
+                .ok()
+                .map(|metadata| {
+                    if metadata.is_dir() {
+                        tree_bytes(&entry.path())
+                    } else if metadata.is_file() {
+                        metadata.len()
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0);
+            total.saturating_add(bytes)
+        })
+    }
+
+    model_dir().map_or(0, |path| tree_bytes(&path))
+}
+
 fn model_dir_for(selected: SemanticModel) -> Option<std::path::PathBuf> {
     let mut dir = dirs::cache_dir()?;
     dir.push("ebook-reader");

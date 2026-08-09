@@ -60,6 +60,12 @@ SUPPORTED_ENTITY_KINDS = frozenset((
     "ai_reader_config_v1", "translation_config_v1", "ai_reader_history_v1", "secret_bundle_v1",
     "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1",
 ))
+# Inventory intentionally excludes private configuration/history entities, but
+# must cover every entity type included by the desktop client's all_sync_entities.
+INVENTORY_ENTITY_KINDS = frozenset((
+    "book_state_v2", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "vocab", "reading_bucket_v2",
+    "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1",
+))
 FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "pigking9527@gmail.com").strip()
 FEEDBACK_SMTP_HOST = os.environ.get("FEEDBACK_SMTP_HOST", "").strip()
 FEEDBACK_SMTP_PORT = int(os.environ.get("FEEDBACK_SMTP_PORT", "465"))
@@ -602,14 +608,15 @@ def row_to_entity(row):
 
 
 def inventory_rows(conn, user_id):
+    placeholders = ",".join("?" for _ in INVENTORY_ENTITY_KINDS)
     return conn.execute(
-        """
+        f"""
         SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at
         FROM entities
-        WHERE user_id=? AND kind IN ('book_state_v2','model_book_tags_v1','user_book_tags_v1','book_collections_v1','vocab','reading_bucket_v2')
+        WHERE user_id=? AND kind IN ({placeholders})
         ORDER BY kind,id
         """,
-        (user_id,),
+        (user_id, *sorted(INVENTORY_ENTITY_KINDS)),
     ).fetchall()
 
 
@@ -872,7 +879,43 @@ def app_settings_payload_is_valid(payload):
         ("readerJumpBackDismissPages", 1, 100),
         ("readerJumpBackSizeLevel", 1, 10),
     )
-    return all(type(payload.get(key)) is int and low <= payload[key] <= high for key, low, high in limits)
+    if not all(type(payload.get(key)) is int and low <= payload[key] <= high for key, low, high in limits):
+        return False
+    if "readerJumpBackIconSizePx" in payload and (
+        type(payload["readerJumpBackIconSizePx"]) is not int or not 30 <= payload["readerJumpBackIconSizePx"] <= 160
+    ):
+        return False
+
+    def unique_text_list(value, maximum, text_limit):
+        return (isinstance(value, list)
+                and len(value) <= maximum
+                and len(set(value)) == len(value)
+                and all(isinstance(item, str) and 0 < len(item) <= text_limit
+                        and not any(ord(char) < 32 or ord(char) == 127 for char in item)
+                        for item in value))
+
+    news_keys = ("newsSourceIds", "newsTiebaBars", "newsEnabledTiebaBars")
+    if any(key in payload for key in news_keys):
+        if not all(key in payload for key in news_keys):
+            return False
+        if not unique_text_list(payload["newsSourceIds"], 24, 64) or not payload["newsSourceIds"]:
+            return False
+        if not unique_text_list(payload["newsTiebaBars"], 8, 48):
+            return False
+        if not unique_text_list(payload["newsEnabledTiebaBars"], 8, 48):
+            return False
+        if not set(payload["newsEnabledTiebaBars"]).issubset(payload["newsTiebaBars"]):
+            return False
+
+    if "libraryAnswerLength" in payload and payload["libraryAnswerLength"] not in ("short", "medium", "long"):
+        return False
+    if "libraryHistorySyncMode" in payload and payload["libraryHistorySyncMode"] not in ("off", "recent", "manual"):
+        return False
+    if "libraryAnswerFontSize" in payload and (type(payload["libraryAnswerFontSize"]) is not int or not 14 <= payload["libraryAnswerFontSize"] <= 22):
+        return False
+    if "libraryLongContextEnabled" in payload and type(payload["libraryLongContextEnabled"]) is not bool:
+        return False
+    return True
 
 
 def record_ignored(details, detail):

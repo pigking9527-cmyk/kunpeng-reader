@@ -19,6 +19,7 @@ mod epub_runtime;
 mod epub_toc;
 mod external_dict;
 mod feedback;
+mod gesture_settings;
 mod hownet;
 mod html_sanitize;
 mod import;
@@ -34,6 +35,7 @@ mod reader_fonts;
 mod reader_page;
 mod reader_palettes;
 mod reader_protocol;
+mod recovery_settings;
 mod runtime_support;
 mod search;
 mod search_cache;
@@ -70,7 +72,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use {book::Library, stats::StatsStore};
-/// 全局状态：书架 + 已打开的 EPUB 缓存（避免每个资源请求都重新解压）。
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
 pub(crate) struct AppState {
     pub(crate) background_tasks: background_tasks::BackgroundTaskRegistry,
@@ -136,7 +137,6 @@ impl AppState {
                 }
             },
         ));
-
         let global_index = Arc::clone(&self.global_index);
         handles.push(governor.register_reclaimer(
             memory_budget::MemoryClass::SemanticGraph,
@@ -152,7 +152,6 @@ impl AppState {
             }),
         );
     }
-
     pub(crate) fn reset_runtime_caches_after_restore(&self) {
         self.epub_runtime.clear();
         self.pending_jump.lock().map(|mut cache| cache.clear()).ok();
@@ -200,9 +199,7 @@ fn main() {
             }
         },
         Err(error) => {
-            // Do not call AppDb::open after a failed recovery: SQLite would
-            // create an empty reader.db if the crash happened after the old
-            // file was renamed but before the new file was committed.
+            // Never create an empty reader.db while failed recovery files are incomplete.
             log(&format!(
                 "未完成恢复事务自救失败，已阻止创建空数据库：{error}"
             ));
@@ -244,8 +241,7 @@ fn main() {
                 state.install_memory_reclaimers();
                 if let Err(error) = data_migration::apply_local_organization_entities(state.inner())
                 {
-                    // Do not project an old library file when the authoritative
-                    // organization entities could not be read.
+                    // Do not project an old library when authoritative organization data failed.
                     log(&format!(
                         "独立标签/收藏夹恢复失败，已阻止 SQLite 投影：{error}"
                     ));
@@ -410,6 +406,8 @@ fn main() {
             data_commands::recovery_backup_status,
             data_commands::create_recovery_backup,
             data_commands::restore_recovery_backup,
+            recovery_settings::recovery_web_settings_save,
+            recovery_settings::recovery_web_settings_take_restored,
             data_commands::migrate_data_to_sqlite,
             data_commands::export_data_package,
             data_commands::import_data_package,
@@ -426,6 +424,8 @@ fn main() {
             import::auto_import_scan,
             library_commands::open_book,
             epub_runtime::book_info,
+            gesture_settings::reader_gesture_settings_save,
+            gesture_settings::reader_gesture_settings_load,
             app_commands::reader_perf_log,
             reader_commands::book_meta,
             reader_commands::book_meta_by_id,

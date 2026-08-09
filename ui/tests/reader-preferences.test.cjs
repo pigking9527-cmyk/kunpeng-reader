@@ -8,6 +8,9 @@ const html = fs.readFileSync(path.join(root, "reader.html"), "utf8");
 const settings = fs.readFileSync(path.join(root, "reader-settings-ui.js"), "utf8");
 const preferences = fs.readFileSync(path.join(root, "reader-preferences-ui.js"), "utf8");
 const layout = fs.readFileSync(path.join(root, "reader-page-layout.js"), "utf8");
+const pagination = fs.readFileSync(path.join(root, "reader-page-pagination.js"), "utf8");
+const runtime = fs.readFileSync(path.join(root, "reader-page-runtime.js"), "utf8");
+const i18n = fs.readFileSync(path.join(root, "reader-i18n.js"), "utf8");
 const shell = fs.readFileSync(path.join(root, "reader-shell-state.js"), "utf8");
 const preferencesCss = fs.readFileSync(path.join(root, "reader-preferences.css"), "utf8");
 
@@ -30,15 +33,21 @@ test("advanced preferences configure the independent jump-back icon lifetime", (
   assert.match(preferences, /global\.addEventListener\("click", \(event\) => \{/);
   assert.match(preferences, /config\.contains\(event\.target\) \|\| readerJumpBackSettingsButton\?\.contains\(event\.target\)/);
   assert.match(preferences, /setReaderJumpBackConfigExpanded\(false\)/);
+  assert.match(preferences, /if \(expanded\) renderJumpBackPreview\(global\.ReaderSettings\.get\(\)\)/);
   assert.match(html, /id="pref-reader-jump-back-dismiss-mode"[\s\S]*?value="pages"[\s\S]*?value="time"/);
   assert.match(html, /id="pref-reader-jump-back-pages"[^>]*min="1"[^>]*max="100"/);
   assert.match(html, /id="pref-reader-jump-back-seconds"[^>]*min="1"[^>]*max="600"/);
-  assert.match(html, /id="pref-reader-jump-back-size"[^>]*min="1"[^>]*max="10"/);
+  assert.match(html, /id="pref-reader-jump-back-size"[^>]*min="30"[^>]*max="160"[^>]*step="1"/);
+  assert.match(html, /id="pref-reader-jump-back-preview"/);
+  assert.match(html, /id="pref-reader-jump-back-preview-icon"[^>]*><svg class="reader-jump-back-arrow" viewBox="0 0 120 48"/);
   assert.match(settings, /showReaderJumpBack: true/);
   assert.match(settings, /readerJumpBackDismissMode: "pages"/);
   assert.match(settings, /readerJumpBackDismissSeconds: 30/);
   assert.match(settings, /readerJumpBackDismissPages: 3/);
   assert.match(settings, /readerJumpBackSizeLevel: 1/);
+  assert.match(settings, /readerJumpBackIconSizePx: 32/);
+  assert.match(settings, /readerJumpBackPositionX: 950/);
+  assert.match(settings, /readerJumpBackPositionY: 500/);
   assert.match(settings, /app_settings_sync_get/);
   assert.match(settings, /app_settings_sync_save/);
   assert.match(settings, /app-settings-synced/);
@@ -46,9 +55,32 @@ test("advanced preferences configure the independent jump-back icon lifetime", (
   assert.match(preferences, /readerJumpBackDismissMode: event\.target\.value === "time" \? "time" : "pages"/);
   assert.match(preferences, /readerJumpBackDismissPages: value/);
   assert.match(preferences, /readerJumpBackDismissSeconds: value/);
-  assert.match(preferences, /readerJumpBackSizeLevel: value/);
+  assert.match(preferences, /readerJumpBackIconSizePx: value/);
+  assert.match(preferences, /readerJumpBackPositionX/);
+  assert.match(preferences, /pointerdown/);
+  assert.match(preferences, /const jumpBackSettings = global\.ReaderSettings\.get\(\)/);
+  assert.match(preferences, /renderJumpBackPreview\(jumpBackSettings\)/);
+  assert.match(preferences, /global\.addEventListener\("pointermove", moveJumpBackPreviewDrag, true\)/);
+  assert.match(preferences, /global\.addEventListener\("pointerup", finishJumpBackPreviewDrag, true\)/);
+  assert.match(preferences, /function jumpBackPreviewTrackPoint\(length, iconSize, hitSize, position\)/);
+  assert.match(preferences, /function jumpBackPreviewPositionFromPoint\(point, length, iconSize\)/);
+  assert.match(preferences, /function jumpBackIconHeight\(iconSizePx\)/);
+  assert.match(preferences, /const hitTargetInset = Math\.max\(0, hitSize - iconSize\) \/ 2/);
+  assert.match(preferences, /jumpBackIconPixels\(value\).*px/);
   assert.match(preferencesCss, /reader-preference-settings-button/);
   assert.match(preferencesCss, /reader-jump-back-config/);
+  assert.match(preferencesCss, /reader-jump-back-preview/);
+  assert.match(preferencesCss, /reader-jump-back-preview-icon\{[^}]*background:transparent[^}]*color:#315f9f[^}]*box-shadow:none/s);
+});
+
+test("appearance defaults use a restrained palette and reset custom colors at the lower right", () => {
+  assert.match(preferences, /link: "#2f6fad", selection: "#dceafa", footnote: "#f3f6fa", border: "#b7c7da"/);
+  assert.match(preferences, /link: "#9abfe8", selection: "#3a4f6b", footnote: "#252f3a", border: "#647a94"/);
+  assert.match(preferences, /backgroundPreset: "light", customPaletteId: "", customBackgroundColor: "#fffdf8"/);
+  assert.match(preferences, /linkColor: "", selectionColor: "", footnoteBackground: "", footnoteBorder: "", theme: "light"/);
+  assert.doesNotMatch(preferences, /pref-reset-colors[^\n]*textColor: ""/);
+  assert.match(html, /class="reader-appearance-actions"[\s\S]*?id="pref-reset-colors"[\s\S]*?恢复默认/);
+  assert.match(html, /reader-appearance-actions\{display:flex;justify-content:flex-end/);
 });
 test("preferences preserve old themes and update the same local reader settings object", () => {
   assert.match(settings, /if \(!stored\.backgroundPreset && \["light", "dark", "sepia"\]\.includes\(stored\.theme\)\)/);
@@ -85,11 +117,29 @@ test("preferences preserve old themes and update the same local reader settings 
   assert.match(html, /data-pref-bool="showPageInfo"/);
 });
 
-test("EPUB preferences colorize notes and keep oversized images whole by default", () => {
+test("EPUB preferences distinguish whole-image and continuous image pagination", () => {
   assert.match(layout, /footnoteBackground/);
   assert.match(layout, /footnoteBorder/);
-  assert.match(layout, /S\.imagePagination!=='continuous'/);
+  assert.match(layout, /两种图片过渡方式共享同一份正文分页规则/);
+  assert.doesNotMatch(layout, /if\(S\.imagePagination/);
   assert.match(layout, /break-inside:avoid/);
+  assert.match(layout, /imagePagination:"next-page"/);
+  assert.match(layout, /el\.complete&&el\.naturalWidth>0/);
+  assert.match(runtime, /S\.imagePagination!=='continuous'&&S\.imagePagination!=='next-page'/);
+  assert.match(runtime, /if\(S\.imagePagination!=='continuous'\)\{clearPagedImagePreview\(\);return;\}/);
+  assert.match(runtime, /function probeNextPagedImage\(pr,current,step\)/);
+  assert.match(runtime, /root\.style\.transform='translateX\(-'/);
+  assert.match(runtime, /inFutureColumn&&page===current\+1/);
+  assert.match(runtime, /function hasPagedTextBeforeMedia\(lines,rootRect,step,page,mediaTop\)/);
+  assert.match(runtime, /nearPageTop\|\|mediaIsNextContent/);
+  assert.match(runtime, /pagedImagePreview\.parentNode!==document\.body/);
+  assert.match(runtime, /position:fixed;display:none/);
+  assert.match(runtime, /function visiblePagedTextBottom\(pr\)/);
+  assert.match(runtime, /candidate\.__kpPagedPreviewHeight=crop/);
+  assert.match(runtime, /var imagePaginationChanged=/);
+  assert.match(runtime, /var imagePaginationOnly=/);
+  assert.match(runtime, /if\(imagePaginationOnly\)\{/);
+  assert.match(runtime, /tracePagedImageLayout\('setting_deferred'/);
   assert.match(layout, /max-height:calc\(100vh/);
   assert.match(layout, /transition:none !important/);
   assert.match(settings, /reader-theme-instant/);
@@ -97,6 +147,21 @@ test("EPUB preferences colorize notes and keep oversized images whole by default
   assert.match(settings, /sanitizeBackgroundImage/);
   assert.match(layout, /bgImage=.*background/);
   assert.doesNotMatch(layout, /backgroundImageValue\.length<=MAX_INLINE_BACKGROUND_IMAGE_CHARS/);
+});
+
+test("two-page pagination exposes a bounded configurable gutter", () => {
+  assert.match(html, /id="pref-dual-page-gap"[^>]*min="0"[^>]*max="120"[^>]*step="1"/);
+  assert.match(settings, /dualPageGap: 40/);
+  assert.match(settings, /Math\.max\(0, Math\.min\(120, Math\.round\(dualPageGap\)\)\)/);
+  assert.match(preferences, /ReaderSettings\.update\(\{ dualPageGap: value \}\)/);
+  assert.match(preferences, /id="pref-dual-page-gap-value"|pref-dual-page-gap-value/);
+  assert.match(pagination, /S\.dualPageGap/);
+  assert.match(pagination, /function dualPageGapPx\(\)/);
+  assert.match(pagination, /var gap=dualPageGapPx\(\)/);
+  assert.match(pagination, /S\.marginRight,S\.dualPageGap,S\.pageMode/);
+  assert.match(i18n, /dualPageGap: "Two-page gutter"/);
+  assert.match(i18n, /dualPageGap: "双页中缝"/);
+  assert.match(preferencesCss, /reader-preference-range-control/);
 });
 
 test("appearance supports book overrides, saved palettes, image backgrounds, and animated reordering", () => {
@@ -160,4 +225,17 @@ test("appearance supports book overrides, saved palettes, image backgrounds, and
   assert.match(settings, /Object\.entries\(bookAppearance\)\.filter\(\(\[key\]\) => READER_APPEARANCE_KEYS\.has\(key\)\)/);
   assert.match(settings, /Object\.entries\(patch \|\| \{\}\)\.filter\(\(\[key\]\) => READER_APPEARANCE_KEYS\.has\(key\)\)/);
   assert.match(layout, /customBackgroundImage/);
+});
+
+test("two-page gutter is a precise, dual-mode-only pagination preference", () => {
+  const pagination = fs.readFileSync(path.join(root, "reader-page-pagination.js"), "utf8");
+  assert.match(html, /id="pref-dual-page-gap"[^>]*min="0"[^>]*max="120"[^>]*step="1"/);
+  assert.match(html, /data-reader-i18n="dualPageGap"[\s\S]*?data-reader-i18n="dualPageGapHint"/);
+  assert.match(preferences, /function dualPageGapPixels\(value\)/);
+  assert.match(preferences, /ReaderSettings\.update\(\{ dualPageGap: value \}\)/);
+  assert.match(settings, /dualPageGap: 40/);
+  assert.match(settings, /Math\.max\(0, Math\.min\(120, Math\.round\(dualPageGap\)\)\)/);
+  assert.match(layout, /dualPageGap:40/);
+  assert.match(pagination, /function dualPageGapPx\(\)\{[\s\S]*?Math\.max\(0,Math\.min\(120,v\)\)/);
+  assert.match(pagination, /if\(isDualPage\(\)\)\{[\s\S]*?var gap=dualPageGapPx\(\)/);
 });

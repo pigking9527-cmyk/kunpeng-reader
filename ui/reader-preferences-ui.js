@@ -19,15 +19,83 @@
   let paletteSyncTimer = 0;
   let paletteSyncReady = false;
   const builtinPalettes = [
-    { id: "light", name: "浅色", nameKey: "paletteLight", background: "#ffffff", text: "#222222", link: "#246ed4", selection: "#f7dc82", footnote: "#eef7ef", border: "#6f8f7d", theme: "light" },
-    { id: "dark", name: "深色", nameKey: "paletteDark", background: "#1c1c1e", text: "#d2d2d2", link: "#8ab4ff", selection: "#536f9b", footnote: "#273626", border: "#82aa8c", theme: "dark" },
-    { id: "paper", name: "羊皮纸", nameKey: "palettePaper", background: "#f8f1df", text: "#443a2d", link: "#7b4c26", selection: "#e8d290", footnote: "#f2e7c9", border: "#a48453", theme: "light" },
+    { id: "light", name: "浅色", nameKey: "paletteLight", background: "#ffffff", text: "#222222", link: "#2f6fad", selection: "#dceafa", footnote: "#f3f6fa", border: "#b7c7da", theme: "light" },
+    { id: "dark", name: "深色", nameKey: "paletteDark", background: "#1c1c1e", text: "#d2d2d2", link: "#9abfe8", selection: "#3a4f6b", footnote: "#252f3a", border: "#647a94", theme: "dark" },
+    { id: "paper", name: "羊皮纸", nameKey: "palettePaper", background: "#f8f1df", text: "#443a2d", link: "#875b37", selection: "#e7dab8", footnote: "#f3ebdd", border: "#b79d76", theme: "light" },
   ];
   const colorMap = { customBackgroundColor: "background", textColor: "text", linkColor: "link", selectionColor: "selection", footnoteBackground: "footnote", footnoteBorder: "border" };
   let scope = "default";
   let pointerDrag = null;
   let suppressPaletteClickUntil = 0;
   let preferencesScrollDrag = null;
+  let jumpBackPreviewDrag = null;
+
+  function jumpBackIconPixels(iconSizePx) {
+    const size = Number(iconSizePx);
+    return Math.max(30, Math.min(160, Math.round(Number.isFinite(size) ? size : 32)));
+  }
+
+  function dualPageGapPixels(value) {
+    const gap = Number(value);
+    return Math.max(0, Math.min(120, Math.round(Number.isFinite(gap) ? gap : 40)));
+  }
+
+  function jumpBackIconHeight(iconSizePx) {
+    return Math.max(12, Math.round(jumpBackIconPixels(iconSizePx) * 0.4));
+  }
+
+  function jumpBackPosition(value, fallback) {
+    const number = Number(value);
+    return Math.max(0, Math.min(1000, Math.round(Number.isFinite(number) ? number : fallback)));
+  }
+
+  // Position is defined by the visible icon, not by the larger transparent
+  // hit target. This lets the arrow itself reach all four preview edges.
+  function jumpBackPreviewTrackPoint(length, iconSize, hitSize, position) {
+    const visualTrack = Math.max(0, length - iconSize);
+    const hitTargetInset = Math.max(0, hitSize - iconSize) / 2;
+    return visualTrack * jumpBackPosition(position, 0) / 1000 - hitTargetInset;
+  }
+
+  function jumpBackPreviewPositionFromPoint(point, length, iconSize) {
+    const track = Math.max(0, length - iconSize);
+    return track ? Math.round(point / track * 1000) : 500;
+  }
+
+  function renderJumpBackPreview(settings) {
+    const preview = document.getElementById("pref-reader-jump-back-preview");
+    const icon = document.getElementById("pref-reader-jump-back-preview-icon");
+    if (!preview || !icon) return;
+    const size = jumpBackIconPixels(settings.readerJumpBackIconSizePx);
+    const height = jumpBackIconHeight(size);
+    const hitSize = Math.max(44, size + 12);
+    const x = jumpBackPosition(settings.readerJumpBackPositionX, 950);
+    const y = jumpBackPosition(settings.readerJumpBackPositionY, 500);
+    icon.style.setProperty("--preview-jump-back-icon-size", `${size}px`);
+    icon.style.setProperty("--preview-jump-back-icon-height", `${height}px`);
+    icon.style.setProperty("--preview-jump-back-hit-size", `${hitSize}px`);
+    const bounds = preview.getBoundingClientRect();
+    const left = jumpBackPreviewTrackPoint(bounds.width, size, hitSize, x);
+    const top = jumpBackPreviewTrackPoint(bounds.height, height, hitSize, y);
+    icon.style.left = `${left}px`;
+    icon.style.top = `${top}px`;
+  }
+
+  function updateJumpBackPreviewPosition(event) {
+    const preview = document.getElementById("pref-reader-jump-back-preview");
+    const icon = document.getElementById("pref-reader-jump-back-preview-icon");
+    if (!preview || !icon) return;
+    const bounds = preview.getBoundingClientRect();
+    const iconSize = jumpBackIconPixels(global.ReaderSettings.get().readerJumpBackIconSizePx);
+    const iconHeight = jumpBackIconHeight(iconSize);
+    const hitSize = Math.max(44, iconSize + 12);
+    const left = Math.max(0, Math.min(Math.max(0, bounds.width - iconSize), event.clientX - bounds.left - iconSize / 2));
+    const top = Math.max(0, Math.min(Math.max(0, bounds.height - iconHeight), event.clientY - bounds.top - iconHeight / 2));
+    global.ReaderSettings.update({
+      readerJumpBackPositionX: jumpBackPreviewPositionFromPoint(left, bounds.width, iconSize),
+      readerJumpBackPositionY: jumpBackPreviewPositionFromPoint(top, bounds.height, iconHeight),
+    });
+  }
 
   function localAssetUrl(palette) {
     const id = String(palette?.backgroundAssetId || "").toLowerCase();
@@ -273,7 +341,7 @@
     const requestedName = String(nameInput?.value || "").trim().slice(0, 24);
     const palette = {
       id, name: requestedName || readerPreferenceT("customPaletteName", `我的配色 ${palettes.length + 1}`, { number: palettes.length + 1 }), background: current.customBackgroundColor || active?.background || "#fffdf8", backgroundImage: "", backgroundAssetId: current.customBackgroundAssetId || active?.backgroundAssetId || "", backgroundAssetSha256: current.customBackgroundAssetSha256 || active?.backgroundAssetSha256 || "", backgroundAssetMime: current.customBackgroundAssetMime || active?.backgroundAssetMime || "", backgroundAssetBytes: current.customBackgroundAssetBytes || active?.backgroundAssetBytes || 0,
-      text: current.textColor || active?.text || "#222222", link: current.linkColor || active?.link || "#246ed4", selection: current.selectionColor || active?.selection || "#f7dc82", footnote: current.footnoteBackground || active?.footnote || "#eef7ef", border: current.footnoteBorder || active?.border || "#6f8f7d", theme: current.theme || "light",
+      text: current.textColor || active?.text || "#222222", link: current.linkColor || active?.link || "#2f6fad", selection: current.selectionColor || active?.selection || "#dceafa", footnote: current.footnoteBackground || active?.footnote || "#f3f6fa", border: current.footnoteBorder || active?.border || "#b7c7da", theme: current.theme || "light",
     };
     palettes.push(palette);
     saveCustomPalettes(palettes);
@@ -389,6 +457,7 @@
 
   function render() {
     const settings = read();
+    const jumpBackSettings = global.ReaderSettings.get();
     modal.querySelectorAll("[data-pref-scope]").forEach((button) => {
       const selected = button.dataset.prefScope === scope;
       button.classList.toggle("active", selected);
@@ -404,21 +473,32 @@
     if (clearBook) clearBook.hidden = scope !== "book" || !global.ReaderSettings.hasBookAppearance?.();
     const image = document.getElementById("pref-image-pagination");
     if (image) image.value = settings.imagePagination === "continuous" ? "continuous" : "next-page";
+    const dualPageGap = dualPageGapPixels(jumpBackSettings.dualPageGap);
+    const dualPageGapInput = document.getElementById("pref-dual-page-gap");
+    if (dualPageGapInput) dualPageGapInput.value = String(dualPageGap);
+    const dualPageGapValue = document.getElementById("pref-dual-page-gap-value");
+    if (dualPageGapValue) dualPageGapValue.textContent = `${dualPageGap} px`;
     modal.querySelectorAll("[data-pref-bool]").forEach((input) => { input.checked = settings[input.dataset.prefBool] !== false; });
-    const jumpBackMode = settings.readerJumpBackDismissMode === "time" ? "time" : "pages";
+    const jumpBackMode = jumpBackSettings.readerJumpBackDismissMode === "time" ? "time" : "pages";
     const jumpBackModeSelect = document.getElementById("pref-reader-jump-back-dismiss-mode");
     if (jumpBackModeSelect) jumpBackModeSelect.value = jumpBackMode;
     const jumpBackPages = document.getElementById("pref-reader-jump-back-pages");
-    if (jumpBackPages) jumpBackPages.value = String(Math.max(1, Math.min(100, Number(settings.readerJumpBackDismissPages) || 3)));
+    if (jumpBackPages) jumpBackPages.value = String(Math.max(1, Math.min(100, Number(jumpBackSettings.readerJumpBackDismissPages) || 3)));
     const jumpBackSeconds = document.getElementById("pref-reader-jump-back-seconds");
-    if (jumpBackSeconds) jumpBackSeconds.value = String(Math.max(1, Math.min(600, Number(settings.readerJumpBackDismissSeconds) || 30)));
-    const jumpBackSize = Math.max(1, Math.min(10, Number(settings.readerJumpBackSizeLevel) || 1));
+    if (jumpBackSeconds) jumpBackSeconds.value = String(Math.max(1, Math.min(600, Number(jumpBackSettings.readerJumpBackDismissSeconds) || 30)));
+    const jumpBackSize = jumpBackIconPixels(jumpBackSettings.readerJumpBackIconSizePx);
     const jumpBackSizeInput = document.getElementById("pref-reader-jump-back-size");
     if (jumpBackSizeInput) jumpBackSizeInput.value = String(jumpBackSize);
     const jumpBackSizeValue = document.getElementById("pref-reader-jump-back-size-value");
-    if (jumpBackSizeValue) jumpBackSizeValue.textContent = String(jumpBackSize);
-    document.getElementById("pref-reader-jump-back-pages-row")?.toggleAttribute("hidden", jumpBackMode !== "pages");
-    document.getElementById("pref-reader-jump-back-seconds-row")?.toggleAttribute("hidden", jumpBackMode !== "time");
+    if (jumpBackSizeValue) jumpBackSizeValue.textContent = `${jumpBackSize} px`;
+    jumpBackPages?.toggleAttribute("hidden", jumpBackMode !== "pages");
+    jumpBackSeconds?.toggleAttribute("hidden", jumpBackMode !== "time");
+    const jumpBackUnit = document.getElementById("pref-reader-jump-back-dismiss-unit");
+    if (jumpBackUnit) {
+      jumpBackUnit.htmlFor = jumpBackMode === "time" ? "pref-reader-jump-back-seconds" : "pref-reader-jump-back-pages";
+      jumpBackUnit.textContent = readerPreferenceT(jumpBackMode === "time" ? "secondsUnit" : "pageUnit", jumpBackMode === "time" ? "秒" : "页");
+    }
+    requestAnimationFrame(() => renderJumpBackPreview(jumpBackSettings));
     applyToolbar(global.ReaderSettings.get());
     renderPaletteGrid();
     renderQuickPalettes();
@@ -480,13 +560,25 @@ reader.onload = async () => {
   document.getElementById("pref-clear-background-image")?.addEventListener("click", () => updateAppearance({ customBackgroundImage: "", customBackgroundAssetId: "", customBackgroundAssetSha256: "", customBackgroundAssetMime: "", customBackgroundAssetBytes: 0 }));
   document.getElementById("pref-add-palette")?.addEventListener("click", addCurrentPalette);
   document.getElementById("pref-image-pagination")?.addEventListener("change", (event) => global.ReaderSettings.update({ imagePagination: event.target.value === "continuous" ? "continuous" : "next-page" }));
+  document.getElementById("pref-dual-page-gap")?.addEventListener("input", (event) => {
+    const value = dualPageGapPixels(event.target.value);
+    const output = document.getElementById("pref-dual-page-gap-value");
+    if (output) output.textContent = `${value} px`;
+    global.ReaderSettings.update({ dualPageGap: value });
+  });
   function setReaderJumpBackConfigExpanded(expanded) {
     const config = document.getElementById("pref-reader-jump-back-config");
     const button = document.getElementById("pref-reader-jump-back-settings");
     if (!config || !button) return;
     config.hidden = !expanded;
     button.setAttribute("aria-expanded", String(expanded));
-    requestAnimationFrame(updatePreferencesScrollbar);
+    // The preview measures its containing panel. When that panel was hidden its
+    // rectangle was 0 × 0, so the edge clamp made every saved position look
+    // like the top-left corner. Re-measure only after the disclosure is visible.
+    requestAnimationFrame(() => {
+      if (expanded) renderJumpBackPreview(global.ReaderSettings.get());
+      updatePreferencesScrollbar();
+    });
   }
   const readerJumpBackSettingsButton = document.getElementById("pref-reader-jump-back-settings");
   readerJumpBackSettingsButton?.addEventListener("click", () => {
@@ -511,13 +603,54 @@ reader.onload = async () => {
     global.ReaderSettings.update({ readerJumpBackDismissSeconds: value });
   });
   document.getElementById("pref-reader-jump-back-size")?.addEventListener("input", (event) => {
-    const value = Math.max(1, Math.min(10, Number(event.target.value) || 1));
+    const value = jumpBackIconPixels(event.target.value);
     const output = document.getElementById("pref-reader-jump-back-size-value");
-    if (output) output.textContent = String(value);
-    global.ReaderSettings.update({ readerJumpBackSizeLevel: value });
+    if (output) output.textContent = `${jumpBackIconPixels(value)} px`;
+    global.ReaderSettings.update({ readerJumpBackIconSizePx: value });
+  });
+  const jumpBackPreviewIcon = document.getElementById("pref-reader-jump-back-preview-icon");
+  jumpBackPreviewIcon?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    jumpBackPreviewDrag = event.pointerId;
+    try { jumpBackPreviewIcon.setPointerCapture(event.pointerId); } catch (_) {}
+    updateJumpBackPreviewPosition(event);
+  });
+  function moveJumpBackPreviewDrag(event) {
+    if (jumpBackPreviewDrag !== event.pointerId) return;
+    event.preventDefault();
+    updateJumpBackPreviewPosition(event);
+  }
+  const finishJumpBackPreviewDrag = (event) => {
+    if (jumpBackPreviewDrag !== event.pointerId) return;
+    try { jumpBackPreviewIcon?.releasePointerCapture(event.pointerId); } catch (_) {}
+    jumpBackPreviewDrag = null;
+  };
+  // WebView pointer capture can be lost when a drag leaves the button. Keep
+  // tracking at the window just like gesture-hint placement, otherwise the
+  // last half-icon near every edge can never be reached.
+  global.addEventListener("pointermove", moveJumpBackPreviewDrag, true);
+  global.addEventListener("pointerup", finishJumpBackPreviewDrag, true);
+  global.addEventListener("pointercancel", finishJumpBackPreviewDrag, true);
+  jumpBackPreviewIcon?.addEventListener("keydown", (event) => {
+    const settings = global.ReaderSettings.get();
+    const step = event.shiftKey ? 50 : 10;
+    const patch = {};
+    if (event.key === "ArrowLeft") patch.readerJumpBackPositionX = Math.max(0, jumpBackPosition(settings.readerJumpBackPositionX, 950) - step);
+    else if (event.key === "ArrowRight") patch.readerJumpBackPositionX = Math.min(1000, jumpBackPosition(settings.readerJumpBackPositionX, 950) + step);
+    else if (event.key === "ArrowUp") patch.readerJumpBackPositionY = Math.max(0, jumpBackPosition(settings.readerJumpBackPositionY, 500) - step);
+    else if (event.key === "ArrowDown") patch.readerJumpBackPositionY = Math.min(1000, jumpBackPosition(settings.readerJumpBackPositionY, 500) + step);
+    else return;
+    event.preventDefault();
+    global.ReaderSettings.update(patch);
   });
   modal.querySelectorAll("[data-pref-bool]").forEach((input) => input.addEventListener("change", () => global.ReaderSettings.update({ [input.dataset.prefBool]: input.checked })));
-  document.getElementById("pref-reset-colors")?.addEventListener("click", () => updateAppearance({ textColor: "", linkColor: "", selectionColor: "", footnoteBackground: "", footnoteBorder: "", customPaletteId: "" }));
+  document.getElementById("pref-reset-colors")?.addEventListener("click", () => updateAppearance({
+    // 正文颜色保留；其余颜色和自定义背景恢复软件默认值。
+    backgroundPreset: "light", customPaletteId: "", customBackgroundColor: "#fffdf8", customBackgroundImage: "",
+    customBackgroundAssetId: "", customBackgroundAssetSha256: "", customBackgroundAssetMime: "", customBackgroundAssetBytes: 0,
+    linkColor: "", selectionColor: "", footnoteBackground: "", footnoteBorder: "", theme: "light",
+  }));
   document.getElementById("pref-clear-book-appearance")?.addEventListener("click", () => { global.ReaderSettings.clearBookAppearance?.(); render(); });
   global.addEventListener("reader-settings-changed", render);
   global.addEventListener("reader-language-changed", render);

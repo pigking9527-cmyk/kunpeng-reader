@@ -86,7 +86,18 @@ test("paged image preview is limited to the page immediately before the stable o
   vm.runInNewContext(helper[0], context);
   assert.equal(context.pagedImageSourcePage({ left: -900 }, { left: -2000 }, 1000), 1);
   assert.equal(context.pagedImageSourcePage({ left: 2100 }, { left: 100 }, 1000), 2);
-  assert.match(source, /if\(page!==current\+1\)continue/);
+  assert.match(source, /inFutureColumn&&page===current\+1/);
+  assert.match(source, /hasPagedTextBeforeMedia\(lines,rr,step,current\+1,r\.top\)/);
+  assert.match(source, /function immediatePagedImageAfterVisibleText\(pr\)/);
+  assert.match(source, /if\(hasPagedTextBetween\(last,img\)\)return null/);
+  assert.match(source, /probePagedImageElement\(pr,current,step,immediate\)/);
+  assert.match(source, /function pageBeforePagedImage\(img,rootRect,step\)/);
+  assert.match(source, /nextPagedImageByPrecedingContent\(imgs,rr,step,current\)/);
+  assert.match(source, /inCurrentView&&S\.imagePagination==='continuous'&&img\.__kpPagedPreviewFromPage===current-1&&Math\.floor\(img\.__kpPagedPreviewHeight\|\|0\)>=32/);
+  assert.match(source, /function hasPendingContinuousPagedImageSource\(\)/);
+  assert.match(source, /if\(hasPendingContinuousPagedImageSource\(\)\)\{[\s\S]*?refreshPagedImagePreview\(\);[\s\S]*?return;/);
+  assert.match(source, /candidate\.__kpPagedPreviewFromPage===current-1/);
+  assert.match(source, /if\(consumed<32\)\{/);
   assert.match(source, /logicalLeft=candidateRect\.left-rr\.left/);
   assert.match(source, /applyScrollImagePreview\(\);/);
   assert.match(source, /sizeVirtualPreviewClone\(clone,next\)/);
@@ -122,7 +133,7 @@ test("mode switches restore anchors inside the already inset scroll viewport", (
   assert.doesNotMatch(source, /forwardPagedAnchor/);
   assert.match(source, /box\._rrPreviewSource=candidate/);
   assert.match(source, /scrollPreview\._rrPreviewSource=src\|\|previewSourceElement\(next\.el\)/);
-  assert.match(source, /Math\.round\(last\)\+imagePreviewGapPx\(\)/);
+  assert.match(source, /Math\.round\(space\.last\)\+imagePreviewGapPx\(\)/);
   assert.match(source, /Math\.round\(contentBottom-top\)\+imagePreviewGapPx\(\)/);
   assert.match(source, /function modeSwitchDiagBegin\(/);
   assert.match(source, /modeSwitchDiagLog\(modeDiagSeq,'after_relayout',anchorOffset\)/);
@@ -202,5 +213,5 @@ test("highlight menu keeps appearance compact and supports persisted four-color 
   assert.match(style, /\.hs-appearance\{grid-template-columns:auto auto 1fr 38px/);
   assert.match(style, /\.hs-layout-size\{grid-template-columns:auto auto auto auto/);
   assert.match(style, /\.hm-color-host .hm-color-button/);
-  assert.match(style, /var\(--hl-color,rgba\(255,218,92,.34\)\)/);
+  assert.match(style, /var\(--hl-color,rgba\(126,136,148,.34\)\)/);
 });

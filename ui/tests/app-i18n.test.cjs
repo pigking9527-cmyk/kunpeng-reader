@@ -76,7 +76,8 @@ test("main settings expose a persistent software language selector", () => {
   assert.doesNotMatch(app, /alert\("已打开 Windows 默认应用设置/);
   assert.match(fs.readFileSync(path.join(uiRoot, "sync-ui.js"), "utf8"), /app-language-changed[\s\S]*?applyAccountSecurityStatus\(lastAccountSecurity\)/);
   assert.match(fs.readFileSync(path.join(uiRoot, "stats-ui.js"), "utf8"), /app-language-changed[\s\S]*?renderStats\(\)/);
-  assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*min-width:\s*0;[^}]*overflow-x:\s*hidden;/s);
+  assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*min-width:\s*0;[^}]*overflow-x:\s*hidden;[^}]*user-select:\s*none;/s);
+  assert.match(styles, /#fp-settings-modal \.modal-card input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\):not\(\[type="range"\]\),[\s\S]*user-select:\s*text;/);
   assert.match(styles, /#fp-settings-modal \.fp-set-row > :first-child\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
   assert.match(styles, /\.default-apps-setting > \.btn-plain\s*\{[^}]*width:\s*fit-content;[^}]*max-width:\s*48%;/s);
   assert.match(styles, /\.recovery-backup-actions \.btn-plain\s*\{[^}]*width:\s*auto;[^}]*max-width:\s*100%;/s);

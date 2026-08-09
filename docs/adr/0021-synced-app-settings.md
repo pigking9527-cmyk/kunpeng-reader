@@ -7,7 +7,14 @@
 
 Windows、Linux 与 macOS 桌面端使用可选同步实体 `app_settings_v1/default` 保存账户级、非敏感的软件设置。实体沿用现有 LWW 顺序（`updated_at`、`sync_version`、`device_id`），不进入离线核心迁移包，也不包含路径、密钥、书籍内容或平台专属运行状态。
 
-首批字段仅包括阅读页中部“跳转回退”功能的开关、自动隐藏方式、秒数、翻页数和图标大小级别。图标大小为 1 至 10 级：1 级保持当前 32 px 图标，10 级为 160 px（五倍），中间按线性比例计算。客户端写回时必须保留自己不认识的 payload 字段。
+首批字段包括阅读页中部“跳转回退”功能的开关、自动隐藏方式、秒数、翻页数、图标大小和图标位置。新客户端以 `readerJumpBackIconSizePx` 保存 30–160 px 的整数大小（步进 1 px）；原 `readerJumpBackSizeLevel` 继续作为旧客户端的 1–10 级兼容镜像，绝不复用为像素值。读取旧 payload 时客户端按旧线性规则转换级别；新客户端写回时同时写入最近的兼容级别。位置使用 `readerJumpBackPositionX` / `readerJumpBackPositionY` 两个 0–1000 的整数，和手势提示一样映射为图标左上角在可见区域内的完整轨道：0 和 1000 分别贴齐左/上与右/下边界。这样图标不会越界，且整段拖动范围都均匀可调；缺失字段按旧版默认右侧中部（950, 500）读取。
+
+同一 `v1` payload 还允许两组独立的账户偏好：
+
+- `newsSourceIds`、`newsTiebaBars` 与 `newsEnabledTiebaBars`：资讯页选中的内置来源、自定义贴吧名称及启用状态。它们不包含资讯正文、缓存、文章 URL、阅读记录或版式排序。
+- `libraryAnswerLength`、`libraryHistorySyncMode`、`libraryAnswerFontSize` 与 `libraryLongContextEnabled`：书库问答的回答长度、历史同步策略、回答字号和 BGE-M3 长文精读偏好。语义模型、索引、模型文件和运行时能力仍只在本机保存；目标设备未准备 BGE-M3 时只保留偏好，准备完成后才可实际启用。
+
+客户端以字段补丁写回：只更新本次所属设置组，合并时保留其余已知及未知字段，避免资讯、书库问答和阅读页的独立界面互相重置。
 
 ## 兼容性
 

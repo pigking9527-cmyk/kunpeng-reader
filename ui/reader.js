@@ -155,6 +155,11 @@ function setAiReaderSide(open) {
   if (!open) aiReaderHideSourcePreview();
   applyAiReaderSide(!!open);
 }
+function closeAiReaderSide() {
+  aiReaderHideSourcePreview();
+  setAiReaderSide(false);
+}
+window.closeAiReaderSide = closeAiReaderSide;
 function aiReaderSetStatus(value) { if (aiReaderStatus) aiReaderStatus.textContent = value || ""; }
 const aiReaderProfileInput = document.getElementById("ai-reader-profile");
 function renderAiReaderProfiles(status) {
@@ -688,7 +693,7 @@ async function runAiReader(task) {
   } finally { aiReaderStopProgress(); aiReaderRequestRunning = false; }
 }
 document.getElementById("ai-reader-btn")?.addEventListener("click", (event) => { event.stopPropagation(); openAiReader(); });
-document.getElementById("ai-reader-close")?.addEventListener("click", () => { aiReaderHideSourcePreview(); setAiReaderSide(false); });
+document.getElementById("ai-reader-close")?.addEventListener("click", closeAiReaderSide);
 document.getElementById("ai-reader-history-btn")?.addEventListener("click", aiReaderShowHistory);
 aiReaderHistorySettingsButton?.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -1237,22 +1242,59 @@ let bookProgressLastFrac = 0;
 let bookProgressLastSent = 0;
 let bookProgressPreviewFrac = null;
 let bookProgressPreviewTimer = 0;
+function normalizeReaderJumpBackPosition(value, fallback) {
+  const number = Number(value);
+  return Math.max(0, Math.min(1000, Math.round(Number.isFinite(number) ? number : fallback)));
+}
+function normalizeReaderJumpBackIconSizePx(value, fallback = 32) {
+  const number = Number(value);
+  return Math.max(30, Math.min(160, Math.round(Number.isFinite(number) ? number : fallback)));
+}
+function readerJumpBackIconHeightPx(iconSizePx) {
+  return Math.max(12, Math.round(normalizeReaderJumpBackIconSizePx(iconSizePx) * 0.4));
+}
+function readerJumpBackIconSizePxFromLegacyLevel(value) {
+  const level = Math.max(1, Math.min(10, Number(value) || 1));
+  return Math.round(32 * (1 + ((level - 1) * 4 / 9)));
+}
+// Keep the transparent hit target large, but store the placement of the
+// visible arrow. At either limit the arrow itself, rather than its padding,
+// reaches the screen edge.
+function readerJumpBackTrackPoint(length, iconSize, hitSize, position) {
+  const normalized = normalizeReaderJumpBackPosition(position, 0);
+  const visualTrack = Math.max(0, length - iconSize);
+  const hitTargetInset = Math.max(0, hitSize - iconSize) / 2;
+  return visualTrack * normalized / 1000 - hitTargetInset;
+}
 function readerJumpBackConfig() {
   const current = window.ReaderSettings?.get?.() || {};
+  const hasPixelSize = Object.prototype.hasOwnProperty.call(current, "readerJumpBackIconSizePx");
   return {
     enabled: current.showReaderJumpBack !== false,
     mode: current.readerJumpBackDismissMode === "time" ? "time" : "pages",
     seconds: Math.max(1, Math.min(600, Number(current.readerJumpBackDismissSeconds) || 30)),
     pages: Math.max(1, Math.min(100, Number(current.readerJumpBackDismissPages) || 3)),
-    sizeLevel: Math.max(1, Math.min(10, Number(current.readerJumpBackSizeLevel) || 1)),
+    iconSizePx: hasPixelSize
+      ? normalizeReaderJumpBackIconSizePx(current.readerJumpBackIconSizePx)
+      : readerJumpBackIconSizePxFromLegacyLevel(current.readerJumpBackSizeLevel),
+    positionX: normalizeReaderJumpBackPosition(current.readerJumpBackPositionX, 950),
+    positionY: normalizeReaderJumpBackPosition(current.readerJumpBackPositionY, 500),
   };
 }
-function applyReaderJumpBackSize(sizeLevel) {
+function applyReaderJumpBackPlacement(iconSizePx, positionX, positionY) {
   if (!readerJumpBack) return;
-  const normalized = Math.max(1, Math.min(10, Number(sizeLevel) || 1));
-  const iconSize = Math.round(32 * (1 + ((normalized - 1) * 4 / 9)));
+  const iconSize = normalizeReaderJumpBackIconSizePx(iconSizePx);
+  const iconHeight = readerJumpBackIconHeightPx(iconSize);
+  const hitSize = Math.max(44, iconSize + 12);
   readerJumpBack.style.setProperty("--reader-jump-back-icon-size", `${iconSize}px`);
-  readerJumpBack.style.setProperty("--reader-jump-back-hit-size", `${Math.max(44, iconSize + 12)}px`);
+  readerJumpBack.style.setProperty("--reader-jump-back-icon-height", `${iconHeight}px`);
+  readerJumpBack.style.setProperty("--reader-jump-back-hit-size", `${hitSize}px`);
+  const container = readerJumpBack.offsetParent;
+  const width = Number(container?.clientWidth) || 0;
+  const height = Number(container?.clientHeight) || 0;
+  if (!width || !height) return;
+  readerJumpBack.style.left = `${Math.round(readerJumpBackTrackPoint(width, iconSize, hitSize, positionX))}px`;
+  readerJumpBack.style.top = `${Math.round(readerJumpBackTrackPoint(height, iconHeight, hitSize, positionY))}px`;
 }
 function clearReaderNavigationDismissTimer() {
   if (readerNavigationDismissTimer) clearTimeout(readerNavigationDismissTimer);
@@ -1304,10 +1346,10 @@ function trackReaderNavigationBackProgress(data) {
 }
 function syncReaderJumpBackSettings() {
   const config = readerJumpBackConfig();
-  const signature = `${config.enabled}_${config.mode}_${config.seconds}_${config.pages}_${config.sizeLevel}`;
+  const signature = `${config.enabled}_${config.mode}_${config.seconds}_${config.pages}_${config.iconSizePx}_${config.positionX}_${config.positionY}`;
   if (signature === readerJumpBackSettingsSignature) return;
   readerJumpBackSettingsSignature = signature;
-  applyReaderJumpBackSize(config.sizeLevel);
+  applyReaderJumpBackPlacement(config.iconSizePx, config.positionX, config.positionY);
   if (!config.enabled) dismissReaderNavigationBack(true);
   else if (readerNavigationHistory.length) armReaderNavigationBackVisibility();
   else updateBookProgress();
@@ -1479,6 +1521,10 @@ function restorePreviousReaderNavigation(e) {
 bookProgressRestore?.addEventListener("click", restorePreviousBookProgress);
 readerJumpBack?.addEventListener("click", restorePreviousReaderNavigation);
 window.addEventListener("reader-settings-changed", syncReaderJumpBackSettings);
+window.addEventListener("resize", () => {
+  const config = readerJumpBackConfig();
+  applyReaderJumpBackPlacement(config.iconSizePx, config.positionX, config.positionY);
+});
 syncReaderJumpBackSettings();
 function fracFromY(clientY) {
   const rect = vbar.getBoundingClientRect();
@@ -1659,7 +1705,7 @@ const infoStars = document.getElementById("info-stars");
 makeStars(infoStars, (v) => invoke("set_rating", { rating: v }).catch(() => {}));
 invoke("book_meta").then((m) => { currentBookTitle = m.title || ""; }).catch(() => {});
 
-document.getElementById("info-btn")?.addEventListener("click", async () => {
+async function openReaderBookInfo() {
   document.getElementById("info-words").textContent = "统计中…";
   ReaderShell.setOverlay(ReaderShell.OVERLAY.INFO, true);
   try {
@@ -1677,6 +1723,10 @@ document.getElementById("info-btn")?.addEventListener("click", async () => {
   } catch (e) {
     document.getElementById("info-words").textContent = "读取失败：" + e;
   }
+}
+window.openReaderBookInfo = openReaderBookInfo;
+document.getElementById("info-btn")?.addEventListener("click", () => {
+  void openReaderBookInfo();
 });
 document.getElementById("info-close").addEventListener("click", () => {
   ReaderShell.setOverlay(ReaderShell.OVERLAY.INFO, false);
@@ -1779,6 +1829,7 @@ readerEndModal?.addEventListener("click", (event) => {
 window.addEventListener("message", (e) => {
   if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
   if (e.data.readerGesture) { window.ReaderGestureClose?.fromFrame?.(e.data.readerGesture); return; }
+  if (e.data.readerGestureSurfaceClosed !== undefined) { window.ReaderGestureClose?.frameSurfaceClosed?.(e.data.readerGestureSurfaceClosed); return; }
   if (e.data.bugTrace) {
     window.ReaderBugTrace?.ingestPageEvent(e.data.bugTrace);
     return;

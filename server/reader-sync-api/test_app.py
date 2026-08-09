@@ -104,6 +104,10 @@ class ReaderSyncApiTests(unittest.TestCase):
         )
         self.assertNotIn("book", app.SUPPORTED_ENTITY_KINDS)
         self.assertNotIn("reading_bucket", app.SUPPORTED_ENTITY_KINDS)
+        self.assertEqual(
+            app.INVENTORY_ENTITY_KINDS,
+            {"book_state_v2", "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "vocab", "reading_bucket_v2", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1"},
+        )
 
     def test_reader_palette_validation_limits_images_and_order(self):
         palette = {
@@ -125,15 +129,32 @@ class ReaderSyncApiTests(unittest.TestCase):
             "readerJumpBackDismissSeconds": 30,
             "readerJumpBackDismissPages": 3,
             "readerJumpBackSizeLevel": 10,
+            "readerJumpBackIconSizePx": 160,
+            "newsSourceIds": ["weibo", "tieba"],
+            "newsTiebaBars": ["阅读"],
+            "newsEnabledTiebaBars": ["阅读"],
+            "libraryAnswerLength": "medium",
+            "libraryHistorySyncMode": "manual",
+            "libraryAnswerFontSize": 18,
+            "libraryLongContextEnabled": True,
             "futureDesktopSetting": "preserve-me",
         }
         self.assertTrue(app.app_settings_payload_is_valid(settings))
+        legacy = dict(settings)
+        legacy.pop("readerJumpBackIconSizePx")
+        self.assertTrue(app.app_settings_payload_is_valid(legacy))
         for key, bad_value in (
             ("readerJumpBackDismissMode", "never"),
             ("readerJumpBackDismissSeconds", 0),
             ("readerJumpBackDismissPages", 101),
             ("readerJumpBackSizeLevel", 11),
+            ("readerJumpBackIconSizePx", 161),
             ("showReaderJumpBack", 1),
+            ("newsSourceIds", []),
+            ("libraryAnswerLength", "unbounded"),
+            ("libraryHistorySyncMode", "always"),
+            ("libraryAnswerFontSize", 23),
+            ("libraryLongContextEnabled", 1),
         ):
             invalid = dict(settings)
             invalid[key] = bad_value
@@ -939,6 +960,34 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(before["entity_count"], 2)
         self.assertEqual(after["entity_count"], 1)
         self.assertNotEqual(before["inventory_digest"], after["inventory_digest"])
+
+    def test_inventory_and_reconcile_include_palette_and_app_settings(self):
+        entities = [
+            ("reader_palette_v1", "custom-one"),
+            ("reader_palette_order_v1", "default"),
+            ("app_settings_v1", "default"),
+        ]
+        conn = app.connect()
+        with conn:
+            for version, (kind, entity_id) in enumerate(entities, start=1):
+                conn.execute(
+                    "INSERT INTO entities(user_id,kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (self.USER_ID, kind, entity_id, "{}", 100 + version, 0, "device-a", version, 100 + version),
+                )
+        conn.close()
+
+        inventory = self.request_json("GET", "/sync/inventory")
+        self.assertEqual(inventory["entity_count"], len(entities))
+        manifest = [
+            {"kind": kind, "id": entity_id, "updated_at": 100 + version, "deleted_at": 0, "device_id": "device-a", "sync_version": version}
+            for version, (kind, entity_id) in enumerate(entities, start=1)
+        ]
+        reconcile = self.request_json(
+            "POST", "/sync/reconcile", {"schema_version": 2, "manifest": manifest}
+        )
+        self.assertEqual(reconcile["entity_count"], len(entities))
+        self.assertEqual(reconcile["upload"], [])
+        self.assertEqual(reconcile["entities"], [])
 
     def test_reset_secret_state_returns_tombstone_for_stale_bundle(self):
         before = self.request_json("GET", "/sync/secret-state")

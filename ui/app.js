@@ -28,7 +28,7 @@ const aboutUI = window.ReaderAboutUI.init({
   invoke,
   storage: window.localStorage,
   menuElement: menuEl,
-  alertAction: (message) => window.alert(message),
+  alertAction: (message) => window.AppNotice.show(message, { duration: 7200 }),
 });
 const shelfUI = window.ReaderShelfUI.init({
   root: document,
@@ -372,6 +372,7 @@ recoveryBackupButton?.addEventListener("click", async () => {
   recoveryBackupButton.disabled = true;
   recoveryBackupButton.textContent = appText("recoveryCreating", "正在创建…");
   try {
+    await window.ReaderRecoverySettings?.flush?.(true);
     const status = await invoke("create_recovery_backup");
     renderRecoveryBackupStatus(status);
   } catch (e) {
@@ -385,7 +386,7 @@ restoreRecoveryBackupButton?.addEventListener("click", async () => {
   const backupId = recoveryBackupSelect?.value;
   if (!backupId) return;
   const choice = recoveryBackupSelect.options[recoveryBackupSelect.selectedIndex]?.textContent || backupId;
-  if (!confirm("恢复到“" + choice + "”吗？\n\n软件会先自动创建一个当前数据的保护恢复点，然后覆盖书架、统计、生词本和同步数据。请先关闭所有阅读窗口。")) return;
+  if (!confirm("恢复到“" + choice + "”吗？\n\n软件会先自动创建一个当前数据的保护恢复点，然后恢复书架、阅读数据、软件设置、手势和阅读背景图。请先关闭所有阅读窗口。")) return;
   restoreRecoveryBackupButton.disabled = true;
   restoreRecoveryBackupButton.textContent = appText("recoveryRestoring", "正在恢复…");
   try {
@@ -1057,10 +1058,9 @@ function renderBookInfoTags(element, manualTags, modelTags) {
     element.appendChild(empty);
   }
 }
-async function openSelectedBookInfo() {
-  const selectedIds = shelfUI.getSelectedIds();
-  if (selectedIds.length !== 1) return;
-  currentInfoBookId = String(selectedIds[0]);
+async function openBookInfoById(id) {
+  if (!id) return;
+  currentInfoBookId = String(id);
   bookInfoModal.classList.add("show");
   document.getElementById("book-info-words").textContent = "统计中…";
   bookOrganizationUI.open(currentInfoBookId, shelfUI.getBook(currentInfoBookId));
@@ -1082,13 +1082,26 @@ async function openSelectedBookInfo() {
     document.getElementById("book-info-words").textContent = "读取失败：" + e;
   }
 }
+function hasSingleSelectedBook() {
+  return shelfUI.getSelectedIds().length === 1;
+}
+async function openSelectedBookInfo() {
+  const selectedIds = shelfUI.getSelectedIds();
+  if (selectedIds.length !== 1) return;
+  return openBookInfoById(selectedIds[0]);
+}
 shelfUI.makeStars(bookInfoStars, (rating) => {
   if (!currentInfoBookId) return;
   bookInfoStars.setVal(rating);
   shelfUI.updateBook(currentInfoBookId, { rating });
   invoke("set_book_rating", { id: currentInfoBookId, rating }).catch(() => {});
 });
-bookInfoBtn.addEventListener("click", openSelectedBookInfo);
+window.ReaderBookInfo = Object.freeze({ hasSingleSelected: hasSingleSelectedBook, openById: openBookInfoById, openSelected: openSelectedBookInfo });
+tauriEvent.listen("reader-gesture-action", (event) => {
+  const payload = event?.payload || {};
+  if (payload.action !== "book_info" || !payload.bookId) return;
+  window.setTimeout(() => { void openBookInfoById(payload.bookId); }, 80);
+});bookInfoBtn.addEventListener("click", openSelectedBookInfo);
 document.getElementById("book-info-close").addEventListener("click", () => bookInfoModal.classList.remove("show"));
 bookInfoModal.addEventListener("click", (e) => {
   if (e.target === bookInfoModal) bookInfoModal.classList.remove("show");
@@ -1252,13 +1265,12 @@ window.addEventListener("DOMContentLoaded", () => {
       if (!debugSettingOn("reader_words_detect")) return;
       runWhenNoReader("word-counts", () => invoke("compute_word_counts"));
     }, 25000);
-    // 更新检查只是轻量网络请求，不应像索引任务一样等待阅读窗口关闭。
-    // 旧逻辑延迟 15 秒后再等待阅读窗口关闭；用户若先打开图书，检查会每 30 秒
-    // 继续推迟，表现为“启动不提示、手动检查才提示”。首屏稳定后直接异步检查一次。
+    // 更新检查不阻塞首屏：绑定完 UI 后立刻异步请求本机发布清单。
+    // 服务端不可用时后端会短超时后再回退 GitHub，不能再让首屏等待 15 秒。
     setTimeout(() => {
       if (!debugSettingOn("bg_update_check")) return;
       startupTimed("update-check", () => aboutUI.checkUpdate(false), "background").catch(() => {});
-    }, 2000);
+    }, 0);
     // “关于”里的版本号取自后端，保持单一来源
     startupTimed("app-version", () => invoke("app_version"), "background")
       .then((v) => {

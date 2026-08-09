@@ -325,11 +325,18 @@
         <button id="win-close" class="win-btn close" type="button" title="关闭" aria-label="关闭">×</button>
       </div>
     </header>
-    <div id="update-bar" class="update-bar">
-      <span class="ub-text">🎉 发现新版本 <b id="ub-ver"></b></span>
-      <button id="ub-view" class="ub-btn">查看更新</button>
-      <button id="ub-ignore" class="ub-link">忽略此版本</button>
-      <button id="ub-close" class="ub-x" title="关闭">✕</button>
+    <section id="update-bar" class="update-bar" aria-live="polite">
+      <div class="ub-copy">
+        <div class="ub-kicker">发现新版本</div>
+        <div class="ub-versions"><span id="ub-current"></span><span class="ub-arrow" aria-hidden="true">→</span><strong id="ub-ver"></strong></div>
+        <p id="ub-notes" class="ub-notes"></p>
+      </div>
+      <div class="ub-actions">
+        <button id="ub-view" class="ub-btn">立即更新</button>
+        <button id="ub-ignore" class="ub-link">忽略此版本</button>
+      </div>
+      <button id="ub-close" class="ub-x" title="关闭" aria-label="关闭">✕</button>
+    </section>
     </div>
     <div id="stats-modal" class="modal">
       <div class="modal-card stats-card">
@@ -488,19 +495,78 @@
       </div>
     </div>
     <div id="gesture-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="gesture-settings-title">
-      <div class="modal-card gesture-settings-card">
-        <div class="modal-head"><span id="gesture-settings-title">手势</span><button id="gesture-settings-close" class="btn-plain" type="button" aria-label="关闭手势设置">✕</button></div>
+      <div class="modal-card gesture-settings-card gesture-manager-card">
         <section class="gesture-setting" aria-labelledby="gesture-settings-title">
-          <div class="gesture-setting-heading"><span>手势</span><label class="switch" title="启用手势"><input id="gesture-settings-enabled" type="checkbox" /><span class="slider"></span></label></div>
-          <div class="gesture-precision-control">
-            <div class="gesture-precision-label"><label for="gesture-precision">匹配精度</label><output id="gesture-precision-value" for="gesture-precision">5</output></div>
-            <input id="gesture-precision" type="range" min="1" max="10" step="1" aria-label="手势匹配精度，共 10 档" />
-            <div class="gesture-precision-levels" aria-hidden="true"><span>低</span><span>高</span></div>
+          <div class="gesture-settings-head">
+            <button id="gesture-settings-toggle" class="gesture-settings-toggle" type="button" aria-controls="gesture-settings-content" aria-expanded="false"><span id="gesture-settings-title">手势设置</span><span class="gesture-disclosure-chevron" aria-hidden="true">⌄</span></button>
+            <button id="gesture-editor-close" class="btn-plain gesture-editor-close" type="button" aria-label="收起手势编辑器">✕</button>
           </div>
-          <p class="gesture-settings-note">按住左键画出轨迹并保存；在资讯、书库问答或阅读页按住鼠标右键滑动即可执行返回或关闭。</p>
-          <canvas id="gesture-pad" class="gesture-pad" aria-label="绘制手势轨迹"></canvas>
-          <div class="gesture-actions"><button id="gesture-clear" class="btn-plain" type="button">清除</button><button id="gesture-save" class="btn-primary" type="button">保存轨迹</button></div>
-          <p id="gesture-status" class="gesture-status" aria-live="polite"></p>
+          <div id="gesture-settings-content" class="gesture-settings-content" hidden>
+            <div class="gesture-manager-toolbar">
+              <section class="gesture-disclosure">
+                <button id="gesture-global-precision-toggle" class="gesture-disclosure-toggle" type="button" aria-controls="gesture-global-precision-settings" aria-expanded="false"><span>全局手势精度</span><output id="gesture-global-precision-value" for="gesture-global-precision">5</output><span class="gesture-disclosure-chevron" aria-hidden="true">⌄</span></button>
+                <div id="gesture-global-precision-settings" class="gesture-global-precision-settings" hidden>
+                  <input id="gesture-global-precision" type="range" min="1" max="10" step="1" aria-label="全局手势匹配精度，共 10 档" />
+                  <div class="gesture-precision-levels" aria-hidden="true"><span>低</span><span>推荐</span><span>高</span></div>
+                </div>
+              </section>
+              <section class="gesture-disclosure gesture-hint-disclosure">
+                <div class="gesture-disclosure-row">
+                  <button id="gesture-hint-settings-toggle" class="gesture-hint-settings-entry" type="button" aria-controls="gesture-hint-settings" aria-expanded="false">手势提示 <span class="gesture-disclosure-chevron" aria-hidden="true">⌄</span></button>
+                  <label class="gesture-hint-enable" for="gesture-hint-enabled"><input id="gesture-hint-enabled" type="checkbox" role="switch" aria-label="启用手势提示" /></label>
+                </div>
+                <section id="gesture-hint-settings" class="gesture-hint-settings" aria-labelledby="gesture-hint-settings-title" hidden>
+                  <div class="gesture-choice-heading"><strong id="gesture-hint-settings-title">手势提示设置</strong><span>仅在动作能于当前页面生效时显示</span></div>
+                  <div class="gesture-hint-controls">
+                    <label><span>文字大小 <output id="gesture-hint-font-size-value" for="gesture-hint-font-size">16px</output></span><input id="gesture-hint-font-size" type="range" min="12" max="28" step="1" /></label>
+                    <label><span>不透明度 <output id="gesture-hint-opacity-value" for="gesture-hint-opacity">88%</output></span><input id="gesture-hint-opacity" type="range" min="20" max="100" step="1" /></label>
+                    <label class="gesture-hint-background-control"><span>背景</span><input id="gesture-hint-background-enabled" type="checkbox" role="switch" aria-label="显示手势提示背景" /><input id="gesture-hint-background" type="color" value="#173b6b" /></label>
+                  </div>
+                  <div class="gesture-hint-preview" aria-label="手势提示实时预览；拖动提示文字可调整显示位置"><span id="gesture-hint-preview-text" title="拖动以调整提示位置">返回／关闭当前页</span></div>
+                </section>
+              </section>
+            </div>
+          </div>
+          <div id="gesture-manager-layout" class="gesture-manager-layout">
+            <section class="gesture-manager-list-pane" aria-label="已配置手势">
+              <section id="gesture-action-choice" class="gesture-choice-section" hidden aria-labelledby="gesture-action-label">
+                <div class="gesture-choice-heading"><strong id="gesture-action-label">执行操作</strong><span>选择手势命中后要做什么</span></div>
+                <input id="gesture-action-search" class="gesture-action-search" type="search" placeholder="例如：返回、图书信息、重新打开" autocomplete="off" />
+                <div id="gesture-action-options" class="gesture-action-options" role="radiogroup" aria-label="执行操作">
+                  <button class="gesture-choice-tile" type="button" data-gesture-action="back" role="radio"><strong>← 返回／关闭当前页</strong><span>在支持的页面关闭当前页或返回上一级</span></button>
+                  <button class="gesture-choice-tile" type="button" data-gesture-action="book_info" role="radio"><strong>ⓘ 打开当前图书信息</strong><span>书架选中一册图书，或在阅读页时执行</span></button>
+                  <button class="gesture-choice-tile" type="button" data-gesture-action="reopen_last" role="radio"><strong>↗ 重新打开上一个页面</strong><span>恢复刚才由返回手势关闭的页面</span></button>
+                </div>
+                <p id="gesture-action-empty" class="gesture-action-empty" hidden>没有找到匹配的操作。</p>
+                <p id="gesture-action-hint" class="gesture-auto-scope-note">手势会自动在所有页面参与匹配；不支持该操作的页面不会执行。</p>
+                <input id="gesture-action" type="hidden" value="back" />
+              </section>
+              <label class="gesture-search-label" for="gesture-search">搜索手势或操作</label>
+              <input id="gesture-search" class="gesture-search" type="search" placeholder="例如：返回、图书信息" autocomplete="off" />
+              <button id="gesture-new" class="gesture-create-button" type="button">创建手势</button>
+              <div id="gesture-list" class="gesture-list" aria-live="polite"></div>
+            </section>
+            <section id="gesture-editor" class="gesture-editor" aria-label="编辑手势" hidden>
+              <section id="gesture-editor-options" class="gesture-editor-options" hidden aria-label="手势名称和匹配设置">
+                <label class="gesture-field"><span>名称（可选）</span><input id="gesture-name" type="text" maxlength="24" placeholder="例如：书架返回" /></label>
+                <label class="gesture-field"><span>触发方式</span><select id="gesture-input"><option value="mouse-right">鼠标右键拖动</option></select></label>
+                <div class="gesture-precision-control">
+                  <div class="gesture-precision-label"><label for="gesture-precision">匹配精度</label><output id="gesture-precision-value" for="gesture-precision">5</output></div>
+                  <div class="gesture-precision-mode" role="radiogroup" aria-label="匹配精度来源">
+                    <label><input id="gesture-precision-global" name="gesture-precision-mode" type="radio" value="global" checked /> 全局 <span id="gesture-precision-global-hint">5</span></label>
+                    <label><input id="gesture-precision-independent" name="gesture-precision-mode" type="radio" value="independent" /> 独立</label>
+                  </div>
+                  <input id="gesture-precision" type="range" min="1" max="10" step="1" aria-label="手势匹配精度，共 10 档" />
+                  <div class="gesture-precision-levels" aria-hidden="true"><span>低</span><span>推荐</span><span>高</span></div>
+                </div>
+              </section>
+              <div class="gesture-editor-head"><strong id="gesture-editor-title">新建手势</strong></div>
+              <p class="gesture-settings-note">按住左键录制轨迹；执行时会匹配保存路径及绘制方向。</p>
+              <canvas id="gesture-pad" class="gesture-pad" aria-label="绘制手势轨迹"></canvas>
+              <div class="gesture-actions"><button id="gesture-test" class="btn-plain" type="button">测试此手势</button><button id="gesture-clear" class="btn-plain" type="button">清除</button><button id="gesture-save" class="btn-primary" type="button">保存</button></div>
+              <p id="gesture-status" class="gesture-status" aria-live="polite"></p>
+            </section>
+          </div>
         </section>
       </div>
     </div>    <div id="newsnow-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="newsnow-settings-title">
@@ -508,6 +574,8 @@
         <div class="modal-head"><span id="newsnow-settings-title" data-i18n="newsSettings">资讯设置</span><button id="newsnow-settings-close" class="btn-plain" type="button" aria-label="关闭资讯设置" data-i18n-aria="closeNewsSettings">✕</button></div>
         <div class="fp-set-row"><span data-i18n="backgroundPrefetch">后台预取</span><label class="switch"><input id="experimental-newsnow-prefetch" type="checkbox" /><span class="slider"></span></label></div>
         <p class="newsnow-settings-note" data-i18n="backgroundPrefetchNote">应用空闲后每 5 分钟更新已启用来源。图片仍在卡片进入视野时才加载。</p>
+        <div class="fp-set-row"><span data-i18n="newsHideReturnIcon">关闭返回图标</span><label class="switch"><input id="experimental-newsnow-hide-return-icon" type="checkbox" /><span class="slider"></span></label></div>
+        <p class="newsnow-settings-note" data-i18n="newsHideReturnIconNote">默认关闭，返回图标会显示。开启后隐藏资讯原文右侧的返回图标；可用手势直接关闭页面。</p>
       </div>
     </div>
     <div id="reader-recommendation-settings-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="reader-recommendation-settings-title">
@@ -667,6 +735,7 @@
             <div>
               <div class="sem-title" data-i18n="semIndexTitle">语义索引</div>
               <div id="sem-vector-meta" class="sem-meta" data-i18n="semNotBuilt">尚未建立</div>
+              <div id="sem-vector-gpu-meta" class="sem-index-acceleration" hidden></div>
             </div>
             <div class="sem-actions">
               <button id="sem-vector-build" class="btn-plain" type="button" data-i18n="semBuildIndex">建立语义索引</button>
@@ -674,7 +743,7 @@
               <button id="sem-vector-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete">删除</button>
             </div>
           </div>
-          <div class="sem-progressbar"><span id="sem-vector-bar"></span></div>
+          <div id="sem-vector-progress" class="sem-progressbar"><span id="sem-vector-bar"></span></div>
         </section>
         <details class="sem-advanced-tools">
           <summary data-i18n="semAdvanced">高级管理：检索增强、加速索引、画像索引与单项删除</summary>
@@ -1053,6 +1122,7 @@
       <article id="newsnow-reader-content" class="newsnow-reader-content"></article>
     </section>
     <canvas id="newsnow-gesture-trail" class="newsnow-gesture-trail" hidden aria-hidden="true"></canvas>
+    <script src="recovery-settings-snapshot.js"></script>
     <script src="startup-perf.js"></script>
     <script src="app-i18n.js"></script>
     <script src="startup-enhancement-ui.js"></script>
@@ -1079,6 +1149,7 @@
     <script src="auto-import-ui.js"></script>
     <script src="reader-recommendation-settings.js"></script>
     <script src="problem-trace-ui.js"></script>
+    <script src="browser-native-guard.js"></script>
     <script src="app.js"></script>
     <script src="search-ui.js"></script>
     <script src="debug-ui.js"></script>

@@ -92,7 +92,17 @@
         "readerJumpBackDismissMode": { "enum": ["pages", "time"] },
         "readerJumpBackDismissSeconds": { "type": "integer", "minimum": 1, "maximum": 600 },
         "readerJumpBackDismissPages": { "type": "integer", "minimum": 1, "maximum": 100 },
-        "readerJumpBackSizeLevel": { "type": "integer", "minimum": 1, "maximum": 10 }
+        "readerJumpBackSizeLevel": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "readerJumpBackIconSizePx": { "description": "Canonical icon size for new clients, in pixels. The legacy readerJumpBackSizeLevel remains required for older clients and is a nearest-level compatibility mirror.", "type": "integer", "minimum": 30, "maximum": 160 },
+        "readerJumpBackPositionX": { "description": "Optional legacy-compatible horizontal center position in thousandths of the reader width; 0 is left and 1000 is right.", "type": "integer", "minimum": 0, "maximum": 1000 },
+        "readerJumpBackPositionY": { "description": "Optional legacy-compatible vertical center position in thousandths of the reader height; 0 is top and 1000 is bottom.", "type": "integer", "minimum": 0, "maximum": 1000 },
+        "newsSourceIds": { "type": "array", "minItems": 1, "maxItems": 24, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "newsTiebaBars": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 48 } },
+        "newsEnabledTiebaBars": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 48 } },
+        "libraryAnswerLength": { "enum": ["short", "medium", "long"] },
+        "libraryHistorySyncMode": { "enum": ["off", "recent", "manual"] },
+        "libraryAnswerFontSize": { "type": "integer", "minimum": 14, "maximum": 22 },
+        "libraryLongContextEnabled": { "type": "boolean" }
       },
       "additionalProperties": true
     },

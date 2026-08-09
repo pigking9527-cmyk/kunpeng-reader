@@ -3,7 +3,7 @@
   "use strict";
 
   const STORAGE_KEY = "kunpeng.reader.experimental-features.v1";
-  const DEFAULTS = Object.freeze({ newsnow: false, newsnowPrefetch: true });
+  const DEFAULTS = Object.freeze({ newsnow: false, newsnowPrefetch: true, newsnowHideReturnIcon: false });
 
   function read() {
     try {
@@ -32,13 +32,16 @@
     const settingsModal = root?.getElementById("newsnow-settings-modal");
     const closeSettings = root?.getElementById("newsnow-settings-close");
     const prefetch = root?.getElementById("experimental-newsnow-prefetch");
-    if (!news || !gear || !settingsModal || !closeSettings || !prefetch) return null;
+    const hideReturnIcon = root?.getElementById("experimental-newsnow-hide-return-icon");
+    if (!news || !gear || !settingsModal || !closeSettings || !prefetch || !hideReturnIcon) return null;
     const refresh = () => {
       news.checked = enabled("newsnow");
       prefetch.checked = enabled("newsnowPrefetch");
+      hideReturnIcon.checked = enabled("newsnowHideReturnIcon");
     };
     news.addEventListener("change", () => set("newsnow", news.checked));
     prefetch.addEventListener("change", () => set("newsnowPrefetch", prefetch.checked));
+    hideReturnIcon.addEventListener("change", () => set("newsnowHideReturnIcon", hideReturnIcon.checked));
     const close = () => {
       settingsModal.classList.remove("show");
     };

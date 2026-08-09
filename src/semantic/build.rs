@@ -72,6 +72,7 @@ fn sem_index_done_for_book(book: &book::Book) -> bool {
 
 /// 为一本书建立语义索引：切块 → 批量嵌入（归一化）→ 落盘（.vec 原始 f32 + .json 元信息）。
 struct SemBuildBookInput<'a> {
+    title: &'a str,
     id: u64,
     mtime: u64,
     source_id: &'a str,
@@ -87,6 +88,7 @@ fn sem_build_book(
     task: Option<&crate::background_tasks::TaskRunGuard>,
 ) -> Result<(), String> {
     let SemBuildBookInput {
+        title,
         id,
         mtime,
         source_id,
@@ -222,7 +224,7 @@ fn sem_build_book(
             task.update_progress(
                 offset as u64,
                 items.len() as u64,
-                format!("正在编码第 {offset}/{} 段", items.len()),
+                format!("{title} · 正在编码第 {offset}/{} 段", items.len()),
             )
             .map_err(|error| format!("更新任务进度失败：{error}"))?;
         }
@@ -412,6 +414,7 @@ pub(super) async fn build_semantic_index(
                     if let Err(err) = sem_build_book(
                         &embedder,
                         SemBuildBookInput {
+                            title: &b.title,
                             id,
                             mtime,
                             source_id: &b.content_id,
@@ -641,6 +644,7 @@ async fn build_semantic_vectors_scoped(
                     match sem_build_book(
                         &embedder,
                         SemBuildBookInput {
+                            title: &b.title,
                             id,
                             mtime,
                             source_id: &b.content_id,
@@ -681,8 +685,22 @@ async fn build_semantic_vectors_scoped(
             update_vector_book_progress(state.inner(), completed, total, b.title.clone());
         }
         let (semantic_done, semantic_total) = semantic_book_counts(state.inner());
+        // 循环开头的检查点代表“下一本开始前已完成的本数”。最后一本发布后若
+        // 不再落一次检查点，持久任务中心会永久停在 total - 1，重开窗口时便
+        // 像还有一本未完成。以严格的最终核对结果写回，供重启/重开页面恢复。
+        if let Err(error) = task.checkpoint(
+            semantic_done as u64,
+            semantic_total as u64,
+            "语义索引完成",
+            format!(r#"{{"completed":{semantic_done},"total":{semantic_total},"finished":true}}"#),
+        ) {
+            abort_for_checkpoint_failure(state.inner(), task, error);
+            return;
+        }
+        let incomplete_without_error = failures.is_empty() && semantic_done < semantic_total;
         let mut p = state.sem_progress.lock().unwrap();
-        p.done = completed;
+        p.done = semantic_done;
+        p.total = semantic_total;
         p.semantic_done = semantic_done;
         p.semantic_total = semantic_total;
         p.semantic_ready = semantic_total > 0 && semantic_done == semantic_total;
@@ -694,7 +712,9 @@ async fn build_semantic_vectors_scoped(
         p.vector_paused = false;
         clear_sem_query_cache();
         clear_sem_profile_cache();
-        p.current = if failures.is_empty() {
+        p.current = if incomplete_without_error {
+            format!("语义索引已完成本轮：{semantic_done}/{semantic_total} 本；可继续建立")
+        } else if failures.is_empty() {
             "语义索引完成".into()
         } else {
             format!(
@@ -710,10 +730,14 @@ async fn build_semantic_vectors_scoped(
         };
         drop(p);
         clear_sem_status_cache();
-        if failures.is_empty() {
+        if failures.is_empty() && !incomplete_without_error {
             let _ = task.complete();
         } else {
-            let message = format!("{} 本图书索引失败", failures.len());
+            let message = if incomplete_without_error {
+                format!("语义索引仍有 {} 本待建立", semantic_total - semantic_done)
+            } else {
+                format!("{} 本图书索引失败", failures.len())
+            };
             let _ = task.log(crate::background_tasks::TaskLogLevel::Warning, message);
             let _ = task.complete();
         }
@@ -850,7 +874,9 @@ mod tests {
         assert!(!book_build.contains("task.checkpoint("));
         let task_builders = &source
             [source.find("fn semantic_complete(").unwrap()..source.find("#[cfg(test)]").unwrap()];
-        assert!(task_builders.matches("task.checkpoint(").count() >= 2);
+        assert!(task_builders.matches("task.checkpoint(").count() >= 3);
+        assert!(task_builders.contains("\"语义索引完成\""));
+        assert!(task_builders.contains("\"finished\":true"));
     }
 
     #[test]

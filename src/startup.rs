@@ -39,10 +39,11 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn instance_scope_key() -> String {
-    // A version-scoped key lets one old and one new reader run side by side,
-    // while preserving the single-instance rule within each version.
-    format!("v{}", env!("CARGO_PKG_VERSION"))
+fn instance_scope_key() -> &'static str {
+    // 所有版本共享同一实例锁和唤醒通道。它们也共享本机数据库、模型缓存及
+    // 后台任务状态；允许升级前后的两个进程同时运行会造成任务实际在旧进程
+    // 执行、而新窗口显示“尚未建立”的状态分裂。
+    "global"
 }
 fn associated_book_paths(args: &[String], cwd: &Path) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -140,7 +141,7 @@ pub(crate) fn spawn_associated_book_watcher(app: tauri::AppHandle) {
     });
 }
 
-/// Windows 同版本单实例：不同版本使用各自的锁与文件转发通道。
+/// Windows 全版本单实例：升级前后的进程也使用同一锁与文件转发通道。
 #[cfg(windows)]
 pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
     use std::os::windows::ffi::OsStrExt;

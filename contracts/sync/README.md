@@ -25,7 +25,7 @@
 - `secret_bundle_v1`：客户端加密后的 API Key/翻译凭据包；由用户设置同步密码后明确开启。
 - `reader_palette_v1`：一个用户自定义阅读配色。每个主题单独使用 LWW 与删除墓碑同步，最多 10 个活跃主题；新客户端只保存 `backgroundAssetId`、SHA-256、MIME 与字节数，二进制图片通过认证的 `/sync/assets/*` 分块通道传输并缓存为本机 reader 资源。`backgroundImage` data URL 仅为旧客户端迁移期的可读兼容字段；新客户端不得写入、不得放进阅读 URL、postMessage 或动态 CSS。默认主题不作为实体上传。
 - `reader_palette_order_v1/default`：用户主题顺序。它仅保存当前默认主题与自定义主题的稳定 ID 排列；未知 ID 必须忽略。
-- `app_settings_v1/default`：Windows、Linux、macOS 共用的账户级非敏感软件设置。首批同步跳转回退开关、隐藏规则与 1–10 级图标大小；写回时必须保留未知字段，旧客户端忽略整个可选实体。
+- `app_settings_v1/default`：Windows、Linux、macOS 共用的账户级非敏感软件设置。同步跳转回退开关、隐藏规则、30–160 px（步进 1）的 `readerJumpBackIconSizePx` 图标大小及其相对位置（`readerJumpBackPositionX/Y` 为 0–1000 的图标左上角可见轨道比例，0/1000 分别贴齐两个边界）；旧 `readerJumpBackSizeLevel` 保留为 1–10 级兼容镜像，不复用为像素值。还同步资讯页的内置来源选择、自定义贴吧名称及启用状态，以及书库问答的回答长度、历史同步策略、字号和 BGE-M3 长文精读偏好。它不含资讯正文、文章 URL/缓存、语义模型、索引或路径；目标端没有 BGE-M3 时仅保留长文精读偏好。写回必须是字段补丁并保留未知字段，旧客户端忽略整个可选实体。
 
 ## 账户同步准入与资源预算
 

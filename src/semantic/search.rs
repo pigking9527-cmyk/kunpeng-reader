@@ -59,6 +59,19 @@ fn get_sem_data(state: &AppState, id: u64) -> Option<Arc<SemData>> {
     vector::load(state, id)
 }
 
+/// Retrieval ranks compact chunks; the answer stage can request the
+/// neighbouring prose from the same verified local index without reopening a
+/// raw EPUB or enlarging the stored vector index.
+pub(super) fn context_around(
+    state: &AppState,
+    book_id: u64,
+    chapter: u32,
+    snippet: &str,
+    max_chars: usize,
+) -> Option<String> {
+    get_sem_data(state, book_id)?.context_around(chapter, snippet, max_chars)
+}
+
 #[derive(Clone, Serialize)]
 pub(crate) struct SemHit {
     // The local reading assistant turns these already-local semantic hits into
@@ -667,6 +680,9 @@ pub(super) async fn semantic_search(
     query: String,
     ids: Option<Vec<String>>,
 ) -> Result<Vec<SemBookHits>, String> {
+    // 高精度策略只按需载入已下载的重排模型；当前查询无需等待，准备完成后的
+    // 后续查询会自动使用它。未下载模型必须由用户在设置页明确点击下载。
+    super::retrieval::ensure_reranker_loading(&app);
     {
         let state = app.state::<AppState>();
         if !semantic_model_available(state.inner()) {

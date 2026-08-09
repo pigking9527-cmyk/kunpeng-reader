@@ -139,6 +139,136 @@
     }
   }
 
+  function storageValue(storage, key) {
+    try { return storage?.getItem?.(key); } catch (_) { return null; }
+  }
+
+  function storageJson(storage, key, fallback) {
+    try {
+      const value = storageValue(storage, key);
+      return value == null ? fallback : JSON.parse(value);
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function boundedInteger(value, fallback, min, max) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback;
+  }
+
+  function choice(value, allowed, fallback) {
+    return allowed.includes(value) ? value : fallback;
+  }
+
+  function safePreferenceText(value) {
+    const text = String(value || "").trim();
+    return text && text.length <= 80 && !/[\\/\u0000-\u001f]/.test(text) && !/^(?:data:|https?:)/i.test(text) ? text : "";
+  }
+
+  function booleanFlags(value, keys, defaults = true) {
+    const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    return Object.fromEntries(keys.map((key) => [key, source[key] !== false && (source[key] !== true ? defaults : source[key]) ]));
+  }
+
+  // The problem record is an opt-in support attachment. Keep a strict allowlist
+  // of settings that affect behavior or layout, never serializing raw localStorage.
+  function collectSoftwareSettings(storage = root.localStorage) {
+    const reader = storageJson(storage, "readerSettings", {});
+    const palettes = storageJson(storage, "readerCustomPalettesV1", []);
+    const bookAppearance = storageJson(storage, "readerBookAppearanceV1", {});
+    const animations = storageJson(storage, "readerAnimationSettingsV1", {});
+    const debug = storageJson(storage, "debugSettingsV1", {});
+    const experimental = storageJson(storage, "kunpeng.reader.experimental-features.v1", {});
+    const gesture = storageJson(storage, "kunpeng.reader.news.back-gesture.v2", null);
+    const newsSources = storageJson(storage, "kunpeng.reader.news.sources.v2", []);
+    const tiebaBars = storageJson(storage, "kunpeng.reader.news.tieba-bars.v1", []);
+    const readerAppearance = reader && typeof reader === "object" && !Array.isArray(reader) ? reader : {};
+    const settings = {
+      language: choice(root.ReaderAppI18n?.selectedLanguage?.(), ["system", "zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"], "system"),
+      shelf: {
+        sort: choice(storageValue(storage, "shelfSort"), ["title", "author", "imported", "folder", "recent", "reading_time", "size", "progress"], "title"),
+        layout: choice(storageValue(storage, "shelfLayout"), ["grid", "list"], "grid"),
+        grid_columns: boundedInteger(storageValue(storage, "shelfGridColumnsValue"), 3, 1, 12),
+        show_cover_progress: storageValue(storage, "showCoverProgress") !== "0",
+        show_cover_rating: storageValue(storage, "showCoverRating") !== "0",
+        show_cover_title: storageValue(storage, "showCoverTitle") === "1",
+        single_click_opens_book: storageValue(storage, "shelfSingleClickOpen") !== "0",
+        search_enabled: storageValue(storage, "shelfSearchEnabled") === "1",
+      },
+      reader: {
+        theme: choice(readerAppearance.theme, ["light", "dark", "sepia"], "light"),
+        font_family: safePreferenceText(readerAppearance.fontFamily),
+        style_mode: choice(readerAppearance.styleMode, ["local", "book"], "local"),
+        text_conversion: choice(readerAppearance.textConversion, ["t2s", "s2t", "none"], "t2s"),
+        font_size: boundedInteger(readerAppearance.fontSize, 18, 8, 96),
+        note_font_size: boundedInteger(readerAppearance.noteFontSize, 14, 8, 96),
+        line_height: boundedInteger(Number(readerAppearance.lineHeight || 1.7) * 100, 170, 80, 400) / 100,
+        paragraph_spacing: boundedInteger(Number(readerAppearance.paraSpacing || 0.6) * 100, 60, 0, 1000) / 100,
+        letter_spacing: boundedInteger(Number(readerAppearance.letterSpacing || 0) * 100, 0, -1000, 1000) / 100,
+        page_mode: choice(readerAppearance.pageMode, ["single", "double"], "single"),
+        flow_mode: choice(readerAppearance.flowMode, ["paged", "scroll"], "paged"),
+        page_turn_effect: choice(readerAppearance.pageTurnEffect, ["off", "horizontal"], "horizontal"),
+        page_turn_speed: boundedInteger(Number(readerAppearance.pageTurnSpeed || 1) * 100, 100, 25, 300) / 100,
+        tts_source: choice(readerAppearance.ttsSource, ["edge", "system", "online"], "edge"),
+        tts_rate: boundedInteger(Number(readerAppearance.ttsRate || 1) * 100, 100, 25, 400) / 100,
+        background_preset: choice(readerAppearance.backgroundPreset, ["light", "dark", "sepia", "custom"], "light"),
+        custom_background_color: /^#[0-9a-f]{3,8}$/i.test(String(readerAppearance.customBackgroundColor || "")) ? readerAppearance.customBackgroundColor : "",
+        custom_background_image_configured: Boolean(String(readerAppearance.customBackgroundImage || "")),
+        custom_palette_count: Array.isArray(palettes) ? Math.min(10, palettes.length) : 0,
+        per_book_appearance_count: bookAppearance && typeof bookAppearance === "object" && !Array.isArray(bookAppearance) ? Math.min(10000, Object.keys(bookAppearance).length) : 0,
+        show_text_conversion: readerAppearance.showTextConversion !== false,
+        show_toc_button: readerAppearance.showTocButton !== false,
+        show_chapter_buttons: readerAppearance.showChapterButtons !== false,
+        show_vocabulary_button: readerAppearance.showVocabularyButton !== false,
+        show_tts_button: readerAppearance.showTtsButton !== false,
+        show_annotation_button: readerAppearance.showAnnotationButton !== false,
+        show_page_info: readerAppearance.showPageInfo !== false,
+        show_reader_jump_back: readerAppearance.showReaderJumpBack !== false,
+        jump_back_dismiss_mode: choice(readerAppearance.readerJumpBackDismissMode, ["pages", "time"], "pages"),
+        jump_back_dismiss_seconds: boundedInteger(readerAppearance.readerJumpBackDismissSeconds, 30, 1, 600),
+        jump_back_dismiss_pages: boundedInteger(readerAppearance.readerJumpBackDismissPages, 3, 1, 100),
+        jump_back_size_level: boundedInteger(readerAppearance.readerJumpBackSizeLevel, 1, 1, 10),
+      },
+      gestures: {
+        enabled: storageValue(storage, "kunpeng.reader.news.back-gesture.enabled.v1") !== "0" && storageValue(storage, "kunpeng.reader.news.back-gesture.enabled.v1") !== "false",
+        precision: boundedInteger(storageValue(storage, "kunpeng.reader.news.back-gesture.precision.v1"), 5, 1, 10),
+        path_saved: Array.isArray(gesture?.points || gesture),
+      },
+      animations: booleanFlags(animations, ["allAnimations", "mainWindow", "readerPage", "searchPopup", "shelfSearchToggle", "commonSettingsSwitch", "filterButton", "annotationAdd", "readingMode", "pageTurn", "highlightSettings", "booklistSort"]),
+      experimental_features: booleanFlags(experimental, ["newsnow", "newsnowPrefetch", "newsnowHideReturnIcon"], false),
+      recommendations: {
+        enabled: storageValue(storage, "readerEndRecommendationsV1") !== "0",
+        min_words: boundedInteger(storageValue(storage, "readerRecommendationMinWordsV1"), 10000, 0, 100000000),
+      },
+      vocabulary: {
+        show_count: storageValue(storage, "vocabShowCount") !== "0",
+        sort: choice(storageValue(storage, "vocabSort"), ["time", "word", "count"], "time"),
+        auto_speak: storageValue(storage, "vocabAutoSpeak") !== "0",
+        disk_audio_cache: storageValue(storage, "wordAudioDiskCache") === "1",
+      },
+      reading_statistics: {
+        chart_metric: choice(storageValue(storage, "statChartMetricV1"), ["time", "words"], "time"),
+      },
+      news: {
+        layout: choice(storageValue(storage, "kunpeng.reader.news.layout.v1"), ["list", "grid"], "list"),
+        order: choice(storageValue(storage, "kunpeng.reader.news.order.v1"), ["mixed", "source"], "mixed"),
+        selected_source_count: Array.isArray(newsSources) ? Math.min(24, newsSources.length) : 0,
+        custom_forum_count: Array.isArray(tiebaBars) ? Math.min(8, tiebaBars.length) : 0,
+      },
+      debug: booleanFlags(debug, ["bg_cover_preload", "bg_fulltext_index", "bg_semantic_index", "bg_sync", "bg_update_check", "bg_tts_cache", "bg_vocab_polling", "reader_stats_report", "reader_words_detect", "reader_page_measure", "reader_immersive", "reader_cross_search", "reader_footnotes"]),
+      omitted_sensitive_settings: ["sync_account", "api_credentials", "translation_credentials", "auto_import_paths", "background_image_content", "saved_queries", "history"],
+    };
+    const startup = root.ReaderStartupEnhancement?.snapshot?.();
+    if (startup && typeof startup === "object") {
+      settings.startup_enhancement = {
+        enabled: startup.enabled === true,
+        continue_high_cost: startup.continueHighCost === true,
+        launch_at_login: startup.launchAtLogin === true,
+      };
+    }
+    return settings;
+  }
   function mergeShellEvents(snapshot) {
     const capturedAt = Date.now();
     pruneShellEvents(capturedAt);
@@ -153,7 +283,8 @@
       ...snapshot,
       captured_at: new Date(capturedAt).toISOString(),
       window_ms: WINDOW_MS,
-      privacy: "No book text, selection text, URLs, file paths, account data, API credentials, or form values.",
+      privacy: "No book text, selection text, URLs, file paths, account data, API credentials, form values, or raw sensitive settings. Includes an allowlisted snapshot of non-sensitive software settings.",
+      software_settings: collectSoftwareSettings(),
       startup_performance: readStartupPerformance(),
       reader_performance: summarizeReaderPerformance(recentShell),
       events: [...readerEvents, ...recentShell].sort((left, right) => String(left.at).localeCompare(String(right.at))),
@@ -313,5 +444,6 @@
     _recentReaderSnapshotForTests: recentReaderSnapshot,
     _shellEventsForTests: () => shellEvents.map((event) => ({ ...event, detail: { ...event.detail } })),
     _summarizeStartupPerformanceForTests: summarizeStartupPerformance,
+    _collectSoftwareSettingsForTests: collectSoftwareSettings,
   });
 });

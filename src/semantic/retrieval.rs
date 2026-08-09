@@ -233,11 +233,16 @@ pub(super) fn reranker_available(state: &AppState) -> bool {
         .try_lock()
         .map(|slot| slot.is_some())
         .unwrap_or(false)
-        || reranker_dir().as_deref().is_some_and(contains_onnx)
 }
 
 pub(super) fn reranker_available_disk() -> bool {
     reranker_dir().as_deref().is_some_and(contains_onnx)
+}
+
+/// FastEmbed 会把已完成文件写入模型缓存；中断时缓存目录会保留，下一次初始化
+/// 可复用已完成部分。这里仅用于把下载按钮标为“继续下载”，不把临时文件误认为模型就绪。
+pub(super) fn reranker_download_partial() -> bool {
+    reranker_dir().is_some_and(|path| path.exists()) && !reranker_available_disk()
 }
 
 fn reranker(state: &AppState) -> Result<Arc<Mutex<fastembed::TextRerank>>, String> {
@@ -264,7 +269,7 @@ fn reranker(state: &AppState) -> Result<Arc<Mutex<fastembed::TextRerank>>, Strin
     Ok(model)
 }
 
-pub(super) async fn download_reranker(app: tauri::AppHandle) -> Result<(), String> {
+pub(super) fn download_reranker(app: tauri::AppHandle) -> Result<(), String> {
     let handle = begin_semantic_task(
         app.state::<AppState>().inner(),
         "semantic_reranker",
@@ -297,6 +302,33 @@ pub(super) async fn download_reranker(app: tauri::AppHandle) -> Result<(), Strin
             );
         })?;
     Ok(())
+}
+
+/// 不让一次普通查询同步阻塞在模型加载或首次下载上。选择高精度策略、或在
+/// 该策略下发起查询时，都只会发起一次后台准备；准备完成后后续查询自动重排。
+/// 单纯打开语义设置页绝不触发加载，已下载模型由 UI 作为“已就绪（按需载入）”
+/// 展示，避免用户只查看状态就占用内存。
+pub(super) fn ensure_reranker_loading(app: &tauri::AppHandle) {
+    // 高精度查询只能载入已经由用户确认下载的模型；不得在用户首次提问时
+    // 暗中开始约 1.6 GB 的下载。
+    if !active_mode().uses_reranker() || !reranker_available_disk() {
+        return;
+    }
+    {
+        let state = app.state::<AppState>();
+        if reranker_available(state.inner()) {
+            return;
+        }
+        let Ok(progress) = state.sem_progress.lock() else {
+            return;
+        };
+        if progress.building || progress.model_downloading || progress.reranker_loading {
+            return;
+        }
+    }
+    // 只在这里同步登记任务；真正的模型下载和 ONNX 会话创建仍在
+    // `spawn_detached` 工作线程中执行。这样同一次状态读取就能看到“正在准备”。
+    let _ = download_reranker(app.clone());
 }
 
 pub(super) fn delete_reranker(state: tauri::State<AppState>) -> Result<(), String> {

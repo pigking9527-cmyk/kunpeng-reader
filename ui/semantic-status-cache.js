@@ -12,11 +12,30 @@
 
   function snapshot(p = {}) {
     return {
+      // 关闭语义设置只是关闭弹窗，后台任务仍在同一 WebView 进程中继续。
+      // 保存这组运行态可让用户立刻重开时仍看到“正在建立”，并禁用重复的
+      // 建立按钮；随后异步状态请求会用 Rust 的实时数据覆盖它。
+      building: !!p.building,
+      model_downloading: !!p.model_downloading,
+      reranker_loading: !!p.reranker_loading,
+      vector_pause_requested: !!p.vector_pause_requested,
+      vector_paused: !!p.vector_paused,
+      active_task: p.active_task || "",
+      done: Number(p.done || 0),
+      total: Number(p.total || 0),
+      shard_done: Number(p.shard_done || 0),
+      shard_total: Number(p.shard_total || 0),
+      current: p.current || "",
+      error: p.error || "",
       model_ready: !!p.model_ready,
       model_id: p.model_id || activeModelId || "bge-small-zh-v1.5",
       model_label: p.model_label || "BGE Small 中文（默认）",
       model_supported: p.model_supported !== false,
       model_bytes: Number(p.model_bytes || 0),
+      // 文件已下载可跨弹窗复用；“已加载”仍由 Rust 的当前进程状态决定，
+      // 不持久化，避免重启软件后把未载入的模型误显示为已就绪。
+      reranker_downloaded: !!p.reranker_downloaded,
+      reranker_partial: !!p.reranker_partial,
       semantic_done: Number(p.semantic_done || 0),
       semantic_total: Number(p.semantic_total || 0),
       semantic_ready: !!p.semantic_ready,
@@ -94,6 +113,8 @@
       model_label: fallback("model_label") || "BGE Small 中文（默认）",
       model_supported: fallback("model_supported") !== false,
       model_bytes: fallback("model_bytes") || 0,
+      reranker_downloaded: fallback("reranker_downloaded"),
+      reranker_partial: fallback("reranker_partial"),
       semantic_done: fallback("semantic_done") || 0,
       semantic_total: fallback("semantic_total") || 0,
       semantic_ready: fallback("semantic_ready"),

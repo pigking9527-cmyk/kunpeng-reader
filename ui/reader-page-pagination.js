@@ -12,7 +12,7 @@ function columnPitch(){return window.innerWidth/columnsPerView();}
 var pageCountViewportWidth=Math.max(1,Math.round(window.innerWidth||1));
 function pageCountWidth(){return Math.max(1,Math.round(pageCountViewportWidth||window.innerWidth||1));}
 // 版式签名：窗口尺寸+字体/字号/行距/段距/字间距/页边距必须一致。
-function layoutSig(){return [window.innerWidth,viewportHeight(),S.styleMode,S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.pageMode,S.flowMode].join('|');}
+function layoutSig(){return [window.innerWidth,viewportHeight(),S.styleMode,S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.dualPageGap,S.pageMode,S.flowMode].join('|');}
 // 书籍总页数以单页版式为基准：双页只改变一次展示几页，不能把总页数除以二。
 // 因此页数缓存不包含 pageMode；智读侧栏宽度也不参与；滚动模式的页高口径不同，仍独立缓存。
 function pageCountSig(){return [pageCountWidth(),viewportHeight(),S.styleMode,S.fontSize,S.noteFontSize,S.lineHeight,S.paraSpacing,S.letterSpacing,S.fontFamily,S.marginTop,S.marginBottom,S.marginLeft,S.marginRight,S.flowMode].join('|');}
@@ -82,10 +82,11 @@ function lineBreakVisibleHeight(){
 }
 // 页边距夹到非负且有上限：负内边距会破坏分栏排版（正文溢出/整体变形）
 function mg(v){v=parseInt(v,10);if(isNaN(v)||v<0)return 0;return v>240?240:v;}
+function dualPageGapPx(){var v=Math.round(Number(S.dualPageGap));return isFinite(v)?Math.max(0,Math.min(120,v)):40;}
 function pageLayout(){
   var vw=window.innerWidth,l=mg(S.marginLeft),r=mg(S.marginRight);
   if(isDualPage()){
-    var gap=Math.max(32,Math.min(56,Math.round(vw*0.024)));
+    var gap=dualPageGapPx();
     var maxOuter=Math.max(0,vw-gap-320);
     if(l+r>maxOuter&&l+r>0){
       var s=maxOuter/(l+r);

@@ -6,8 +6,11 @@
     <title>阅读</title>
     <link rel="stylesheet" href="reader-preferences.css" />
     <link rel="stylesheet" href="window-resize.css" />
+    <style>.reader-appearance-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}.reader-appearance-actions .reader-preferences-reset{margin-top:0}.reader-appearance-actions .reader-preferences-reset.danger{margin-left:0}</style>
     <style>
       * { box-sizing: border-box; }
+      html, body, body * { user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
+      input, textarea, [contenteditable="true"], [data-native-selection] { user-select: text; -webkit-user-select: text; }
       html, body { margin: 0; height: 100%; overflow: hidden; }
       body {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
@@ -232,7 +235,9 @@
       .book-progress-restore { width: 30px; height: 30px; flex: 0 0 30px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #5d6b82; font: 27px/1 sans-serif; cursor: pointer; opacity: 0; transform: scale(.65); pointer-events: none; transition: opacity .14s ease, transform .14s ease, background .14s ease; }
       .book-progress.can-restore .book-progress-restore { opacity: 1; transform: scale(1); pointer-events: auto; }
       .book-progress-restore:hover { background: rgba(67,140,255,.12); color: #246bd7; }
-      .reader-jump-back { position: absolute; z-index: 12; top: 50%; right: 24px; display: inline-grid; width: var(--reader-jump-back-hit-size, 44px); height: var(--reader-jump-back-hit-size, 44px); place-items: center; padding: 0; border: 0; border-radius: 0; color: #315f9f; background: transparent; box-shadow: none; font: var(--reader-jump-back-icon-size, 32px)/1 system-ui; text-shadow: 0 1px 2px rgba(255,255,255,.72); cursor: pointer; opacity: .56; transform: translateY(-50%); transition: opacity .14s ease, color .14s ease; }
+      .reader-jump-back { position: absolute; z-index: 12; top: var(--reader-jump-back-position-y, 50%); left: var(--reader-jump-back-position-x, calc(100% - var(--reader-jump-back-hit-size, 44px))); display: inline-grid; width: var(--reader-jump-back-hit-size, 44px); height: var(--reader-jump-back-hit-size, 44px); place-items: center; padding: 0; border: 0; border-radius: 0; color: #315f9f; background: transparent; box-shadow: none; cursor: pointer; opacity: .56; transform: none; transition: opacity .14s ease, color .14s ease; }
+      .reader-jump-back .reader-jump-back-arrow { width: var(--reader-jump-back-icon-size, 32px); height: var(--reader-jump-back-icon-height, 13px); }
+      .reader-jump-back-preview-icon { left: calc(100% - var(--preview-jump-back-hit-size, 44px)); width: var(--preview-jump-back-hit-size, 44px); height: var(--preview-jump-back-hit-size, 44px); transform: none; }
       .reader-jump-back[hidden] { display: none !important; }
       .reader-jump-back:hover { color: #1e5fae; background: transparent; opacity: .92; }
       iframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
@@ -498,7 +503,9 @@
       .ai-reader-side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .ai-reader-side-head-actions { display: flex; align-items: center; gap: 5px; }
       .ai-reader-side-title { font-size: 17px; font-weight: 700; }
-      .ai-reader-size-btn { width: 28px; min-width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center; color: #667792; font-size: 14px; letter-spacing: 1px; }
+      .ai-reader-size-btn { width: 28px; min-width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center; color: #667792; }
+      .ai-reader-width-glyph { display: inline-flex; align-items: center; justify-content: center; gap: 3px; height: 14px; }
+      .ai-reader-width-glyph > i { display: block; width: 1px; height: 14px; border-radius: 1px; background: currentColor; }
       .ai-reader-size-btn.is-active { color: #276dce; border-color: #7ea9ed; background: #edf5ff; }
       .ai-reader-help { margin: 10px 0 0; color: #687386; font-size: 12px; line-height: 1.5; }
       .ai-reader-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
@@ -886,11 +893,12 @@
                   <label class="reader-color-field"><span data-reader-i18n="textColor">正文颜色</span><input type="color" data-pref-color="textColor" /></label><label class="reader-color-field"><span data-reader-i18n="linkColor">链接颜色</span><input type="color" data-pref-color="linkColor" /></label><label class="reader-color-field"><span data-reader-i18n="selectionColor">选中文本</span><input type="color" data-pref-color="selectionColor" /></label><label class="reader-color-field"><span data-reader-i18n="footnoteBackground">脚注背景</span><input type="color" data-pref-color="footnoteBackground" /></label><label class="reader-color-field"><span data-reader-i18n="footnoteBorder">脚注边框</span><input type="color" data-pref-color="footnoteBorder" /></label>
                 </div>
                 <div class="reader-custom-background"><span class="reader-custom-background-title" data-reader-i18n="customBackground">自定义背景</span><input id="pref-palette-name" class="reader-palette-name-field" type="text" maxlength="24" placeholder="主题名称" aria-label="主题名称" data-reader-i18n-placeholder="paletteName" data-reader-i18n-aria="paletteName" /><input class="reader-background-color-picker" type="color" data-pref-color="customBackgroundColor" aria-label="自定义背景颜色" data-reader-i18n-aria="customBackgroundColor" /><label class="reader-background-import"><span data-reader-i18n="importImage">导入图片</span><input id="pref-background-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label><span id="pref-background-image-name" class="reader-background-image-name" data-reader-i18n="backgroundNotImported">未导入图片</span><button id="pref-clear-background-image" type="button" data-reader-i18n="removeImage">移除图片</button><button id="pref-add-palette" type="button" data-reader-i18n="addPalette">添加为配色</button></div>
-                <button id="pref-reset-colors" class="reader-preferences-reset" type="button" data-reader-i18n="restorePaletteColors">恢复当前背景的默认配色</button><button id="pref-clear-book-appearance" class="reader-preferences-reset danger" type="button" hidden data-reader-i18n="clearBookAppearance">清除本书独立外观</button>
+                <div class="reader-appearance-actions"><button id="pref-reset-colors" class="reader-preferences-reset" type="button" data-reader-i18n="restorePaletteColors">恢复默认</button><button id="pref-clear-book-appearance" class="reader-preferences-reset danger" type="button" hidden data-reader-i18n="clearBookAppearance">清除本书独立外观</button></div>
               </section>
               <section class="reader-preference-panel" data-pref-panel="pagination" hidden>
                 <h3 data-reader-i18n="preferencePagination">排版与分页</h3><p class="reader-preference-hint" data-reader-i18n="paginationHint">适用于 EPUB 的分页模式。滚动模式保持内容连续。</p>
                 <div class="reader-preference-row"><label><span data-reader-i18n="imagePagination">图片跨页处理</span><small data-reader-i18n="imagePaginationHint">默认优先显示完整图片；超出单页时等比缩小。</small></label><select id="pref-image-pagination"><option value="next-page" data-reader-i18n="imagePaginationNext">移到下一页完整显示（推荐）</option><option value="continuous" data-reader-i18n="imagePaginationContinuous">允许跨页连续显示</option></select></div>
+                <div class="reader-preference-row"><label for="pref-dual-page-gap"><span data-reader-i18n="dualPageGap">双页中缝</span><small data-reader-i18n="dualPageGapHint">仅在双页分页时生效；单页和滚动阅读不受影响。</small></label><span class="reader-preference-range-control"><input id="pref-dual-page-gap" type="range" min="0" max="120" step="1" /><output id="pref-dual-page-gap-value" for="pref-dual-page-gap">40 px</output></span></div>
               </section>
               <section class="reader-preference-panel" data-pref-panel="toolbar" hidden>
                 <h3 data-reader-i18n="preferenceToolbar">工具栏与操作</h3><p class="reader-preference-hint" data-reader-i18n="toolbarHint">隐藏仅影响阅读器工具栏，不会删除功能；可随时在此恢复。</p>
@@ -903,10 +911,9 @@
                   <span class="reader-preference-actions"><button id="pref-reader-jump-back-settings" class="reader-preference-settings-button" type="button" title="跳转回退设置" aria-label="跳转回退设置" data-reader-i18n-title="readerJumpBackSettings" data-reader-i18n-aria="readerJumpBackSettings" aria-expanded="false">⚙</button><label class="settings-switch"><input id="pref-reader-jump-back-enabled" type="checkbox" data-pref-bool="showReaderJumpBack" /><span class="settings-slider"></span></label></span>
                 </div>
                 <div id="pref-reader-jump-back-config" class="reader-jump-back-config" hidden>
-                  <label><span data-reader-i18n="readerJumpBackDismissMode">自动隐藏方式</span><select id="pref-reader-jump-back-dismiss-mode"><option value="pages" data-reader-i18n="readerJumpBackDismissPages">翻过指定页数</option><option value="time" data-reader-i18n="readerJumpBackDismissTime">经过指定时间</option></select></label>
-                  <label id="pref-reader-jump-back-pages-row"><span data-reader-i18n="readerJumpBackPages">翻页数</span><input id="pref-reader-jump-back-pages" type="number" min="1" max="100" step="1" /><span data-reader-i18n="pageUnit">页</span></label>
-                  <label id="pref-reader-jump-back-seconds-row" hidden><span data-reader-i18n="readerJumpBackSeconds">显示时间</span><input id="pref-reader-jump-back-seconds" type="number" min="1" max="600" step="1" /><span data-reader-i18n="secondsUnit">秒</span></label>
-                  <label><span data-reader-i18n="readerJumpBackSize">图标大小</span><input id="pref-reader-jump-back-size" type="range" min="1" max="10" step="1" /><output id="pref-reader-jump-back-size-value">1</output></label>
+                  <label class="reader-jump-back-dismiss-row"><span data-reader-i18n="readerJumpBackDismissMode">自动隐藏方式</span><select id="pref-reader-jump-back-dismiss-mode"><option value="pages" data-reader-i18n="readerJumpBackDismissPages">翻过指定页数</option><option value="time" data-reader-i18n="readerJumpBackDismissTime">经过指定时间</option></select><span class="reader-jump-back-amount"><input id="pref-reader-jump-back-pages" type="number" min="1" max="100" step="1" /><input id="pref-reader-jump-back-seconds" type="number" min="1" max="600" step="1" hidden /><output id="pref-reader-jump-back-dismiss-unit" for="pref-reader-jump-back-pages" data-reader-i18n="pageUnit">页</output></span></label>
+                  <label class="reader-jump-back-size-row"><span data-reader-i18n="readerJumpBackSize">图标大小</span><input id="pref-reader-jump-back-size" type="range" min="30" max="160" step="1" /><output id="pref-reader-jump-back-size-value" for="pref-reader-jump-back-size">32 px</output></label>
+                  <section id="pref-reader-jump-back-preview" class="reader-jump-back-preview" aria-label="跳转回退图标位置预览" data-reader-i18n-aria="readerJumpBackPosition"><p data-reader-i18n="readerJumpBackPositionHint">拖动图标调整屏幕位置</p><button id="pref-reader-jump-back-preview-icon" class="reader-jump-back-preview-icon" type="button" aria-label="拖动图标调整屏幕位置" data-reader-i18n-aria="readerJumpBackPosition"><svg class="reader-jump-back-arrow" viewBox="0 0 120 48" aria-hidden="true"><path d="M120 24H18M18 24L42 4M18 24L42 44"/></svg></button></section>
                 </div>
               </section>
             </div>
@@ -933,9 +940,9 @@
         <div class="ai-reader-side-head">
           <span class="ai-reader-side-title" data-reader-i18n="aiReading">✨ 智读</span>
           <div class="ai-reader-side-head-actions">
-            <button class="tbtn ai-reader-size-btn is-active" type="button" data-ai-reader-width="current" title="当前大小" data-reader-i18n-title="aiReaderSizeCurrent" data-reader-i18n-aria="aiReaderSizeCurrent">▮</button>
-            <button class="tbtn ai-reader-size-btn" type="button" data-ai-reader-width="half" title="阅读页一半" data-reader-i18n-title="aiReaderSizeHalf" data-reader-i18n-aria="aiReaderSizeHalf">▮▮</button>
-            <button class="tbtn ai-reader-size-btn" type="button" data-ai-reader-width="full" title="占满阅读页" data-reader-i18n-title="aiReaderSizeFull" data-reader-i18n-aria="aiReaderSizeFull">▮▮▮</button>
+            <button class="tbtn ai-reader-size-btn is-active" type="button" data-ai-reader-width="current" title="当前大小" data-reader-i18n-title="aiReaderSizeCurrent" data-reader-i18n-aria="aiReaderSizeCurrent"><span class="ai-reader-width-glyph" aria-hidden="true"><i></i></span></button>
+            <button class="tbtn ai-reader-size-btn" type="button" data-ai-reader-width="half" title="阅读页一半" data-reader-i18n-title="aiReaderSizeHalf" data-reader-i18n-aria="aiReaderSizeHalf"><span class="ai-reader-width-glyph" aria-hidden="true"><i></i><i></i></span></button>
+            <button class="tbtn ai-reader-size-btn" type="button" data-ai-reader-width="full" title="占满阅读页" data-reader-i18n-title="aiReaderSizeFull" data-reader-i18n-aria="aiReaderSizeFull"><span class="ai-reader-width-glyph" aria-hidden="true"><i></i><i></i><i></i></span></button>
             <button id="ai-reader-close" class="tbtn" type="button" title="关闭智读" data-reader-i18n-title="closeAiReading" data-reader-i18n-aria="closeAiReading">✕</button>
           </div>
         </div>
@@ -1040,7 +1047,7 @@
         </div>
         <button id="book-progress-restore" class="book-progress-restore" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置" data-reader-i18n-title="restorePosition" data-reader-i18n-aria="restorePosition">↶</button>
       </div>
-      <button id="reader-jump-back" class="reader-jump-back" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置" data-reader-i18n-title="restorePosition" data-reader-i18n-aria="restorePosition" hidden>←</button>
+      <button id="reader-jump-back" class="reader-jump-back" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置" data-reader-i18n-title="restorePosition" data-reader-i18n-aria="restorePosition" hidden><svg class="reader-jump-back-arrow" viewBox="0 0 120 48" aria-hidden="true"><path d="M120 24H18M18 24L42 4M18 24L42 44"/></svg></button>
     </div>
     <div id="info-modal" class="modal">
       <div class="modal-card">
@@ -1094,6 +1101,7 @@
     </div>
     <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果" data-reader-i18n-title="returnToPreviousBook" data-reader-i18n-aria="returnToPreviousBook">←</button>
     <canvas id="reader-gesture-trail" class="reader-gesture-trail" hidden aria-hidden="true"></canvas>
+    <script src="recovery-settings-snapshot.js"></script>
     <script src="window-resize.js"></script>
     <script src="reader-i18n.js"></script>
     <script src="reader-message.js"></script>
@@ -1105,6 +1113,7 @@
     <script src="reader-preferences-ui.js"></script>
     <script src="reader-recommendation-settings.js"></script>
     <script src="news-gesture.js"></script>
+    <script src="browser-native-guard.js"></script>
     <script src="reader.js"></script>
     <script src="reader-gesture.js"></script>
     <script src="reader-notes-ui.js"></script>

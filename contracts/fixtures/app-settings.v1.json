@@ -14,7 +14,17 @@
         "readerJumpBackDismissMode": "pages",
         "readerJumpBackDismissSeconds": 30,
         "readerJumpBackDismissPages": 3,
-        "readerJumpBackSizeLevel": 6,
+        "readerJumpBackSizeLevel": 3,
+        "readerJumpBackIconSizePx": 60,
+        "readerJumpBackPositionX": 950,
+        "readerJumpBackPositionY": 500,
+        "newsSourceIds": ["weibo", "zhihu", "tieba"],
+        "newsTiebaBars": ["阅读", "电子书"],
+        "newsEnabledTiebaBars": ["阅读"],
+        "libraryAnswerLength": "medium",
+        "libraryHistorySyncMode": "manual",
+        "libraryAnswerFontSize": 18,
+        "libraryLongContextEnabled": true,
         "futureDesktopSetting": "preserve-me"
       }
     }

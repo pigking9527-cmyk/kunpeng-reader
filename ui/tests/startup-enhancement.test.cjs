@@ -83,11 +83,18 @@ test("a shortcut activation reaches a hidden instance even without a book path",
   assert.match(startup, /struct AssociatedBookRequest[\s\S]*?activate: bool/);
   assert.match(startup, /AssociatedBookRequest \{[\s\S]*?activate: true,[\s\S]*?paths/);
   assert.match(startup, /startup_enhancement::activate_main\(&app, request\.id\)/);
-  assert.match(startup, /fn instance_scope_key\(\)[\s\S]*?CARGO_PKG_VERSION/);
+  assert.match(startup, /fn instance_scope_key\(\) -> &'static str[\s\S]*?"global"/);
+  assert.doesNotMatch(startup, /CARGO_PKG_VERSION/);
   assert.match(startup, /KunpengReader_\{\}_SingleInstance_Mutex/);
   assert.match(main, /set_title\(startup::VERSIONED_MAIN_WINDOW_TITLE\)/);
   assert.match(startup, /associated-book-request-\{\}\.json/);
   assert.match(enhancement, /"startup-enhancement"[\s\S]*?"activated"[\s\S]*?hot activation/);
+});
+
+test("reader versions share one process scope because their local task state is shared", () => {
+  assert.match(startup, /所有版本共享同一实例锁和唤醒通道/);
+  assert.match(startup, /升级前后的进程也使用同一锁与文件转发通道/);
+  assert.match(startup, /associated-book-request-\{\}\.json/);
 });
 
 test("closing pauses high-cost work by default and can explicitly allow it", () => {

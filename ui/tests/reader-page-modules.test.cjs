@@ -36,6 +36,18 @@ test("chapter iframe receives the reader language and rebuilds transient control
   assert.match(annotations, /readerPageText\('dictionarySettings'\)/);
 });
 
+test("reader gesture closes an open excerpt or correction editor before the reader window", () => {
+  const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
+  const runtime = fs.readFileSync(path.join(uiRoot, "reader-page-runtime.js"), "utf8");
+  const reader = fs.readFileSync(path.join(uiRoot, "reader.js"), "utf8");
+  const messageGuard = fs.readFileSync(path.join(uiRoot, "reader-message.js"), "utf8");
+  assert.match(annotations, /function closeReaderPageGestureSurface\(\)[\s\S]*?hideExcerptPage\(\)[\s\S]*?hideHlTextPop\(\)/);
+  assert.match(runtime, /e\.data\.readerGestureAction==='back'/);
+  assert.match(runtime, /parent\.postMessage\(\{readerGestureSurfaceClosed:!!readerGestureSurfaceClosed\},'\*'\)/);
+  assert.match(reader, /ReaderGestureClose\?\.frameSurfaceClosed\?\.\(e\.data\.readerGestureSurfaceClosed\)/);
+  assert.match(messageGuard, /"readerGestureSurfaceClosed"/);
+});
+
 test("highlight menu and settings provide native copy for all ten reader languages", () => {
   const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
   const copyStart = annotations.indexOf("var READER_PAGE_COPY=");
@@ -46,7 +58,7 @@ test("highlight menu and settings provide native copy for all ten reader languag
 
   const locales = ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"];
   const keys = [
-    "yellow", "green", "blue", "pink", "web", "dict", "translate", "copy",
+    "gray", "yellow", "green", "blue", "pink", "web", "dict", "translate", "copy",
     "highlight", "correct", "excerpt", "cross", "semantic", "aiReader", "note",
     "bookmark", "removeHighlight", "highlightMenuSettings", "display", "both", "text",
     "icon", "colorful", "layout", "row", "grid", "size", "small", "medium", "large",
@@ -64,6 +76,15 @@ test("highlight menu and settings provide native copy for all ten reader languag
   }
   assert.match(annotations, /setBtn\.title=settingsLabel/);
   assert.match(annotations, /hlSettingsPop\.setAttribute\('aria-label',readerPageText\('highlightMenuSettings'\)\)/);
+});
+
+test("default highlights and footnotes use the neutral reader palette", () => {
+  const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
+  const pageStyle = fs.readFileSync(path.join(uiRoot, "reader-page-style.html"), "utf8");
+  assert.match(annotations, /\{key:'y',labelKey:'gray',value:'rgba\(126,136,148,\.34\)'\}/);
+  assert.match(layout, /light:\['#fff','#222','#2f6fad','#dceafa','#f3f6fa','#b7c7da'\]/);
+  assert.match(pageStyle, /#fn-pop\{[\s\S]*?background:#f3f6fa;border:1px solid #b7c7da[\s\S]*?color:#303945/);
+  assert.match(pageStyle, /var\(--hl-color,rgba\(126,136,148,\.34\)\)/);
 });
 
 test("paged touchpad gestures end on actual wheel quiet instead of a fixed cooldown", () => {

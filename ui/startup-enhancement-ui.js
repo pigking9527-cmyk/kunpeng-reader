@@ -83,5 +83,10 @@
     highCostRetryDelay: () => (
       backgrounded ? 0 : Math.max(0, highCostResumeAtMs - Date.now())
     ),
+    snapshot: () => ({
+      enabled: config.enabled,
+      continueHighCost: config.continueHighCost,
+      launchAtLogin: config.launchAtLogin,
+    }),
   };
 })(window);

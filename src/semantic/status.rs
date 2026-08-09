@@ -4,6 +4,7 @@
 //! 合并，避免 UI 轮询阻塞模型下载、向量构建或阅读窗口。
 
 use super::{m3, model, profile, retrieval};
+use crate::background_tasks::{BackgroundTaskKind, BackgroundTaskSnapshot, BackgroundTaskState};
 use crate::semantic_tasks::SemProgress;
 use crate::{now_ms, set_thread_background, AppState};
 use serde::Serialize;
@@ -79,6 +80,7 @@ pub(crate) struct SemanticProgressDto {
     retrieval_mode_label: String,
     reranker_ready: bool,
     reranker_downloaded: bool,
+    reranker_partial: bool,
     m3_long_context_enabled: bool,
     m3_index_done: u32,
     m3_index_total: u32,
@@ -123,6 +125,7 @@ impl From<&SemProgress> for SemanticProgressDto {
             retrieval_mode_label: retrieval::active_mode().label().into(),
             reranker_ready: progress.reranker_ready,
             reranker_downloaded: retrieval::reranker_available_disk(),
+            reranker_partial: retrieval::reranker_download_partial(),
             m3_long_context_enabled: retrieval::long_context_enabled(),
             m3_index_done: if progress.m3_index_done > 0 {
                 progress.m3_index_done
@@ -171,6 +174,68 @@ fn provisional_semantic_book_total(state: &AppState) -> u32 {
         .count() as u32
 }
 
+fn active_vector_task_progress(task: &BackgroundTaskSnapshot) -> Option<u32> {
+    // 向量构建会在段落编码期间更新任务的显示进度，但耐久检查点仍保留
+    // 已完整完成的书本数；语义页应以它恢复“本”的进度，避免把段数误标成本数。
+    task.checkpoint
+        .as_deref()
+        .and_then(|checkpoint| serde_json::from_str::<serde_json::Value>(checkpoint).ok())
+        .and_then(|value| value.get("completed")?.as_u64())
+        .and_then(|completed| u32::try_from(completed).ok())
+}
+
+/// 后台任务注册表比弹窗内存状态更耐久。弹窗关闭、WebView 重绘或状态快照尚未
+/// 建立时，仍应从它恢复运行中或已暂停的语义任务。暂停不是运行态：它必须
+/// 恢复为“可续建”，而不是继续禁用续建按钮。
+fn hydrate_vector_task(state: &AppState, progress: &mut SemProgress) {
+    let Some(task) = state
+        .background_tasks
+        .snapshots()
+        .into_iter()
+        .filter(|task| {
+            task.kind == BackgroundTaskKind::SemanticVectors
+                && matches!(
+                    task.state,
+                    BackgroundTaskState::Queued
+                        | BackgroundTaskState::Running
+                        | BackgroundTaskState::Pausing
+                        | BackgroundTaskState::Paused
+                )
+        })
+        .max_by_key(|task| task.created_at_ms)
+    else {
+        return;
+    };
+    let total = provisional_semantic_book_total(state);
+    let completed = active_vector_task_progress(&task)
+        .unwrap_or_else(|| u32::try_from(task.progress.done).unwrap_or(u32::MAX))
+        .min(total);
+    let paused = task.state == BackgroundTaskState::Paused;
+    progress.building = !paused;
+    progress.active_task = if !paused {
+        "semantic_vectors".into()
+    } else {
+        String::new()
+    };
+    progress.background_task_id = if !paused { task.id } else { String::new() };
+    progress.vector_pause_requested =
+        task.state == BackgroundTaskState::Pausing || task.pause_requested;
+    progress.vector_paused = paused;
+    progress.done = completed;
+    progress.total = total;
+    progress.semantic_done = completed;
+    progress.semantic_total = total;
+    progress.semantic_ready = false;
+    progress.current = if paused {
+        "语义索引已暂停；可从未完成图书继续建立".into()
+    } else if !task.current.is_empty() {
+        task.current
+    } else {
+        progress.current.clone()
+    };
+    progress.error = task.error.unwrap_or_default();
+}
+
 fn provisional_snapshot(state: &AppState, mut progress: SemProgress) -> SemProgress {
     let selected = model::active();
     progress.model_id = selected.id().to_string();
@@ -182,10 +247,13 @@ fn provisional_snapshot(state: &AppState, mut progress: SemProgress) -> SemProgr
         .unwrap_or_default();
 
     let total = provisional_semantic_book_total(state);
-    progress.semantic_done = 0;
+    // 构建线程在每本书完整发布后用严格的 `vector::is_complete` 计数写回
+    // `SemProgress`。状态缓存刚被清除时（特别是最后一册完成后），保留这一份
+    // 同进程的已验证部分进度，避免 UI 短暂倒退为“尚未建立”。应用重启后这里
+    // 仍是默认 0，必须等待后台逐书核对，绝不从文件名猜测完成度。
+    progress.semantic_done = progress.semantic_done.min(total);
     progress.semantic_total = total;
-    progress.semantic_ready = false;
-    progress.semantic_bytes = 0;
+    progress.semantic_ready = total > 0 && progress.semantic_done == total;
     progress.accelerator_done = 0;
     progress.accelerator_total = 0;
     progress.accelerator_ready = false;
@@ -342,7 +410,10 @@ fn enrich(state: &AppState, mut progress: SemProgress) -> SemProgress {
 fn merge(mut live: SemProgress, cached: &SemProgress) -> SemProgress {
     live.model_ready = cached.model_ready;
     live.model_path = cached.model_path.clone();
-    live.model_bytes = cached.model_bytes;
+    // 下载中的文件大小每次轮询都来自当前缓存目录，不能被旧快照覆盖。
+    if !live.model_downloading {
+        live.model_bytes = cached.model_bytes;
+    }
     live.semantic_done = cached.semantic_done;
     live.semantic_total = cached.semantic_total;
     live.semantic_ready = cached.semantic_ready;
@@ -598,6 +669,7 @@ pub(super) fn public_snapshot(app: &tauri::AppHandle, state: &AppState) -> Seman
 pub(super) fn clear() {
     if let Ok(mut cache) = cache().lock() {
         cache.refresh_id = cache.refresh_id.wrapping_add(1);
+        cache.snapshot = None;
         cache.refreshing = false;
         cache.refresh_started_at = 0;
         cache.last_attempt_at = 0;
@@ -631,6 +703,9 @@ pub(super) fn snapshot(app: &tauri::AppHandle, state: &AppState, reconcile: bool
     live.model_id = selected.id().to_string();
     live.model_label = selected.label().to_string();
     live.model_supported = selected.locally_supported();
+    if live.model_downloading {
+        live.model_bytes = model::downloaded_bytes();
+    }
     let now = now_ms();
     let mut refresh_id = None;
     let cached_snapshot = {
@@ -648,7 +723,10 @@ pub(super) fn snapshot(app: &tauri::AppHandle, state: &AppState, reconcile: bool
             .is_none_or(|_| now.saturating_sub(status_cache.updated_at) > STATUS_CACHE_TTL_MS);
         let retry_due = status_cache.last_attempt_at == 0
             || now.saturating_sub(status_cache.last_attempt_at) > STATUS_CACHE_TTL_MS;
-        if reconcile && snapshot_expired && !status_cache.refreshing && retry_due {
+        // 正在构建时，进度来自任务检查点；不要同时逐书扫描数百个元数据文件。
+        // 稍后轮询会在任务结束、缓存清空后自动启动这次核对。
+        if reconcile && !live.building && snapshot_expired && !status_cache.refreshing && retry_due
+        {
             status_cache.refreshing = true;
             status_cache.refresh_started_at = now;
             status_cache.last_attempt_at = now;
@@ -692,12 +770,32 @@ pub(super) fn snapshot(app: &tauri::AppHandle, state: &AppState, reconcile: bool
         live = provisional_snapshot(state, live);
         live.status_refreshing = true;
     }
+    // 这一步必须在缓存/临时快照之后执行，确保它不会被“尚未建立”的保守
+    // 首屏状态覆盖。后台任务仍在运行时，重开弹窗立即显示真实运行态。
+    hydrate_vector_task(state, &mut live);
     live
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_status_drops_the_previous_snapshot() {
+        {
+            let mut status_cache = cache().lock().unwrap();
+            status_cache.snapshot = Some(SemProgress {
+                semantic_done: 22,
+                semantic_total: 781,
+                ..Default::default()
+            });
+            status_cache.updated_at = now_ms();
+        }
+        clear();
+        let status_cache = cache().lock().unwrap();
+        assert!(status_cache.snapshot.is_none());
+        assert_eq!(status_cache.updated_at, 0);
+    }
 
     #[test]
     fn task_status_precedence_is_stable() {
@@ -840,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn provisional_snapshot_never_reports_a_completed_index() {
+    fn provisional_snapshot_keeps_only_in_memory_committed_progress() {
         let source = include_str!("status.rs");
         let start = source
             .find("fn provisional_snapshot")
@@ -850,8 +948,11 @@ mod tests {
                 .find("fn switch_ready_message")
                 .expect("switch message must follow provisional snapshot");
         let implementation = &source[start..end];
-        assert!(implementation.contains("progress.semantic_done = 0"));
-        assert!(implementation.contains("progress.semantic_ready = false"));
+        assert!(
+            implementation.contains("progress.semantic_done = progress.semantic_done.min(total)")
+        );
+        assert!(implementation
+            .contains("progress.semantic_ready = total > 0 && progress.semantic_done == total"));
         assert!(implementation.contains("progress.accelerator_total = 0"));
         assert!(implementation.contains("progress.multi_profile_total = 0"));
     }
