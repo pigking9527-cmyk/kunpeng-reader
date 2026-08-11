@@ -1,0 +1,5 @@
+{
+  "name": "@kunpeng/tauri-api",
+  "private": true,
+  "type": "module"
+}

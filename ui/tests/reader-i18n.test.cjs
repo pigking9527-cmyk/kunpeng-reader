@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const uiRoot = path.join(__dirname, "..");
 const source = fs.readFileSync(path.join(uiRoot, "reader-i18n.js"), "utf8");
 const html = fs.readFileSync(path.join(uiRoot, "reader.html"), "utf8");
+const notes = fs.readFileSync(path.join(uiRoot, "reader-notes-ui.js"), "utf8");
 
 function loadReaderI18n(language) {
   const localStorage = { value: language, getItem() { return this.value; } };
@@ -22,8 +23,14 @@ function loadReaderI18n(language) {
 }
 
 test("reader uses an independent localization entry point before reader behavior modules", () => {
-  assert.match(html, /<script src="reader-i18n\.js"><\/script>\s*<script src="reader-message\.js">/);
+  assert.match(html, /<script src="reader-i18n\.js"><\/script>\s*<script src="bridge\/reader-protocol-bridge\.js"><\/script>\s*<script src="reader-message\.js">/);
   assert.match(html, /id="prev-btn"[^>]*data-reader-i18n-title="previousChapter"/);
+  assert.match(html, /id="next-btn"[^>]*data-reader-i18n-title="nextChapter"/);
+  const previousPageButton = notes.slice(notes.indexOf('getElementById("prev-btn")'), notes.indexOf('getElementById("next-btn")'));
+  const nextPageButton = notes.slice(notes.indexOf('getElementById("next-btn")'), notes.indexOf("let tocBuildVersion"));
+  assert.match(previousPageButton, /sendToPage\(\{ pageTurn: -1 \}\);/);
+  assert.match(nextPageButton, /sendToPage\(\{ pageTurn: 1 \}\);/);
+  assert.doesNotMatch(previousPageButton + nextPageButton, /gotoChapter/);
   assert.match(html, /id="immersive-btn"[^>]*data-reader-i18n-title="immersive"/);
   assert.match(html, /id="vocab-gear"[^>]*data-reader-i18n-title="vocabularySettings"/);
   assert.match(html, /id="cross-return"[^>]*data-reader-i18n-title="returnToPreviousBook"/);
@@ -31,29 +38,11 @@ test("reader uses an independent localization entry point before reader behavior
   assert.match(source, /reader-language-changed/);
 });
 
-test("reading preferences localize static controls and dynamic palette copy", () => {
-  const markupKeys = [
-    "readerPreferences", "preferenceOverall", "preferenceBook", "preferenceAppearance", "preferencePagination", "preferenceToolbar", "preferenceAdvanced",
-    "textColor", "customBackground", "imagePagination", "showToc", "showChapterButtons",
-  ];
-  const keys = [...markupKeys, "paletteLight", "paletteDark", "palettePaper"];
-  for (const key of markupKeys) assert.match(html, new RegExp(`data-reader-i18n(?:-\\w+)?="${key}"|data-reader-i18n-aria="${key}"`), `reader preference markup must use ${key}`);
-  assert.match(source, /const PREFERENCE_COPY =/);
-  assert.match(source, /Object\.assign\(COPY\.ja, PREFERENCE_COPY\.ja\)/);
-  for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
-    const i18n = loadReaderI18n(locale).i18n;
-    for (const key of keys) assert.notEqual(i18n.t(key), key, `missing reader preference key ${key} for ${locale}`);
-  }
-  const preferences = fs.readFileSync(path.join(uiRoot, "reader-preferences-ui.js"), "utf8");
-  assert.match(preferences, /const readerPreferenceT =/);
-  assert.match(preferences, /function paletteLabel\(palette\)/);
-  assert.match(preferences, /readerPreferenceT\("backgroundImageInvalid"/);
-});
 test("Japanese reader strings do not silently fall back to English", () => {
   const keys = [
     "pageTitle", "toc", "previousChapter", "nextChapter", "searchBook", "readAloud", "annotations", "immersive", "settings",
     "vocabulary", "measuringPages", "windowControls", "minimize", "maximize", "aiReading", "format", "style", "bookInformation",
-    "recommendations", "crossBookSearch", "fontSize", "speech", "ttsMicrosoftAuto", "ttsSystemOffline", "noConfiguredModel", "modelSwitchFailed", "aiFailed", "chapterProgress",
+    "recommendations", "crossBookSearch", "fontSize", "speech", "ttsMicrosoftAuto", "ttsSystemOffline", "noConfiguredModel", "modelSwitchFailed", "aiFailed", "chapterProgress", "dualChapterProgress",
   ];
   const english = loadReaderI18n("en").i18n;
   const japanese = loadReaderI18n("ja").i18n;

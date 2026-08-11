@@ -1,5 +1,6 @@
 // PDF.js 自渲染阅读器（连续滚动 + 文字层选择 + 目录 + 缩放 + 主题），通过 postMessage 与外壳工具栏联动
 import * as pdfjsLib from "./pdfjs/pdf.min.mjs";
+import { createPdfLegacyAdapter } from "./bridge/pdf-engine-legacy-adapter.js";
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", location.href).href;
 
 window.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -9,8 +10,22 @@ window.addEventListener("keydown", (e) => {
 }, true);
 
 const P = new URLSearchParams(location.search);
-const pdfUrl = P.get("u");
-let resumePage = parseInt(P.get("p") || "1", 10) || 1;
+// The PDF iframe must import its bridge explicitly. A classic side-effect
+// script can be omitted by the packaged asset loader, leaving the PDF blank
+// even though its trusted reader:// resource URL is valid.
+const pdfEngineAdapter = createPdfLegacyAdapter();
+const pdfBootstrap = pdfEngineAdapter?.bootstrap?.({ href: location.href, search: location.search }) || null;
+const actualParent = window.parent;
+// Shadow the ambient Window.parent with a tiny compatibility sender. Existing
+// imperative code below keeps its one-way notifications, but every event now
+// has a fixed explicit target origin and a bounded payload.
+const parent = Object.freeze({
+  postMessage(payload) {
+    pdfEngineAdapter?.postLegacyEvent?.(actualParent, pdfBootstrap, payload);
+  },
+});
+const pdfUrl = pdfBootstrap?.sourceUrl || "";
+let resumePage = pdfBootstrap?.initialPage || 1;
 let settings = {};
 try { settings = JSON.parse(decodeURIComponent(P.get("s") || "{}")); } catch (e) {}
 
@@ -23,6 +38,42 @@ let pageTextChars = {}; // 每页可统计文字数；扫描页通常为 0
 let searchTerm = "", searchMatches = [], searchIdx = 0;
 let overlayOpen = false; // 外壳里搜索框/设置面板是否打开
 let hlMenu = null, activeHi = -1;
+let pdfSession = null;
+let pdfDisposed = false;
+const renderOperations = new Map();
+
+function postToShell(payload) { parent.postMessage(payload, "*"); }
+function searchPayloadWithinLimit(payload) {
+  try { return new TextEncoder().encode(JSON.stringify(payload)).byteLength <= 16 * 1024; } catch (_) { return false; }
+}
+function boundedSearchResultsPayload() {
+  const results = [];
+  for (const match of searchMatches) {
+    const next = { page: match.page, chapter: match.page - 1, snippet: match.snippet };
+    const candidate = { searchResults: [...results, next], searchCount: searchMatches.length };
+    if (!searchPayloadWithinLimit(candidate)) break;
+    results.push(next);
+  }
+  return { searchResults: results, searchCount: searchMatches.length };
+}
+function cancelRenderOperation(operationId) {
+  const entry = renderOperations.get(operationId);
+  if (!entry) return;
+  renderOperations.delete(operationId);
+  entry.untrack();
+  try { entry.task.cancel(); } catch (_) {}
+}
+function disposePdfView() {
+  if (pdfDisposed) return;
+  pdfDisposed = true;
+  if (io) { io.disconnect(); io = null; }
+  for (const operationId of [...renderOperations.keys()]) cancelRenderOperation(operationId);
+  void pdfSession?.dispose?.();
+  if (pdf?.destroy) Promise.resolve(pdf.destroy()).catch(() => {});
+  pdf = null;
+}
+window.addEventListener("pagehide", disposePdfView, { once: true });
+window.addEventListener("beforeunload", disposePdfView, { once: true });
 
 function countReadablePdfChars(text) {
   return (text || "").replace(/\s+/g, "").length;
@@ -96,10 +147,7 @@ async function searchPdf(term) {
     }
     if (searchMatches.length > 1500) break;
   }
-  parent.postMessage(
-    { searchResults: searchMatches.map((m) => ({ page: m.page, chapter: m.page - 1, snippet: m.snippet })), searchCount: searchMatches.length },
-    "*"
-  );
+  postToShell(boundedSearchResultsPayload());
   for (let i = 1; i <= total; i++) markSearchOnPage(i);
   if (searchMatches.length) { searchIdx = 0; gotoMatch(0); }
 }
@@ -188,10 +236,12 @@ function throttle(fn, ms) {
 }
 
 async function renderPage(i) {
+  if (pdfDisposed || pdfSession?.signal?.aborted) return;
   const d = divs[i];
   if (!d || d.dataset.done) return;
   d.dataset.done = "1";
   const page = await pdf.getPage(i);
+  if (pdfDisposed || pdfSession?.signal?.aborted) return;
   const vp = page.getViewport({ scale });
   const ratio = window.devicePixelRatio || 1;
   const canvas = document.createElement("canvas");
@@ -204,7 +254,20 @@ async function renderPage(i) {
   d.innerHTML = "";
   d.appendChild(canvas);
   const ctx = canvas.getContext("2d");
-  await page.render({ canvasContext: ctx, viewport: vp, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null }).promise;
+  const operationId = pdfSession?.nextOperationId?.("render");
+  const renderTask = page.render({ canvasContext: ctx, viewport: vp, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
+  const untrack = pdfSession?.trackRenderTask?.(renderTask) || (() => {});
+  if (operationId) renderOperations.set(operationId, { task: renderTask, untrack });
+  try {
+    await renderTask.promise;
+  } catch (error) {
+    if (!pdfDisposed && !pdfSession?.signal?.aborted) throw error;
+    return;
+  } finally {
+    if (operationId) renderOperations.delete(operationId);
+    untrack();
+  }
+  if (pdfDisposed || pdfSession?.signal?.aborted) return;
   // 文字层（选择/复制/划词）
   try {
     const tl = document.createElement("div");
@@ -391,34 +454,51 @@ function setupCenterTap() {
 }
 
 window.addEventListener("message", (e) => {
-  if (!e.data) return;
-  if (e.data.gotoChapter !== undefined) gotoPage((e.data.gotoChapter | 0) + 1, true);
-  if (e.data.gotoFrac !== undefined) gotoPage(Math.round(e.data.gotoFrac * total) || 1, false);
-  if (e.data.zoom) setZoom(e.data.zoom);
-  if (e.data.pageTurn) gotoPage(turnTarget(e.data.pageTurn > 0 ? 1 : -1), false); // 外壳转发的翻页键：单页1页/双页一对
-  if (e.data.dual !== undefined) setDual(e.data.dual);
-  if (e.data.settings && e.data.settings.theme !== undefined) applyTheme(e.data.settings.theme);
-  if (e.data.overlayOpen !== undefined) overlayOpen = !!e.data.overlayOpen;
-  if (e.data.search !== undefined) searchPdf(e.data.search);
-  if (e.data.searchNav) gotoMatch(searchIdx + e.data.searchNav);
-  if (e.data.clearMarks) { searchTerm = ""; clearSearchMarks(); }
-  if (e.data.highlights) { HLD = e.data.highlights; renderAllHighlights(); }
-  if (e.data.showHlMenuFor !== undefined) {
-    const idx = e.data.showHlMenuFor, h = HLD[idx];
+  const message = pdfBootstrap && pdfEngineAdapter?.normalizeIncomingMessage?.(e, pdfBootstrap);
+  if (!message) return;
+  if (message.protocol === "kunpeng-pdf-renderer") {
+    const command = message;
+    if (command.action === "close-document") { disposePdfView(); return; }
+    if (command.action === "cancel-operation") { cancelRenderOperation(command.payload.operationId); return; }
+    if (command.action === "render-page") { gotoPage(command.payload.page, false); return; }
+    if (command.action === "open-document") { gotoPage(command.payload.initialPage, false); return; }
+    return;
+  }
+  if (message.gotoChapter !== undefined) gotoPage((message.gotoChapter | 0) + 1, true);
+  if (message.gotoFrac !== undefined) gotoPage(Math.round(message.gotoFrac * total) || 1, false);
+  if (message.zoom) setZoom(message.zoom);
+  if (message.pageTurn) gotoPage(turnTarget(message.pageTurn > 0 ? 1 : -1), false); // 外壳转发的翻页键：单页1页/双页一对
+  if (message.dual !== undefined) setDual(message.dual);
+  if (message.settings && message.settings.theme !== undefined) applyTheme(message.settings.theme);
+  if (message.overlayOpen !== undefined) overlayOpen = !!message.overlayOpen;
+  if (message.search !== undefined) searchPdf(message.search);
+  if (message.searchNav) gotoMatch(searchIdx + message.searchNav);
+  if (message.clearMarks) { searchTerm = ""; clearSearchMarks(); }
+  if (message.highlights) { HLD = message.highlights; renderAllHighlights(); }
+  if (message.showHlMenuFor !== undefined) {
+    const idx = message.showHlMenuFor, h = HLD[idx];
     if (h) { gotoPage((h.chapter || 0) + 1, false); setTimeout(() => { const b = divs[(h.chapter || 0) + 1] && divs[(h.chapter || 0) + 1].querySelector('.hl-box[data-hi="' + idx + '"]'); if (b) showHlMenu(idx, b); }, 200); }
   }
-  if (e.data.gotoHighlight !== undefined) {
-    const h = HLD[e.data.gotoHighlight];
+  if (message.gotoHighlight !== undefined) {
+    const h = HLD[message.gotoHighlight];
     if (h) gotoPage((h.chapter || 0) + 1, true);
   }
 });
 
 async function init() {
+  if (!pdfBootstrap || !pdfEngineAdapter) {
+    pagesEl.innerHTML = '<div class="loading">PDF 打开失败：阅读器安全桥未就绪。</div>';
+    return;
+  }
+  pdfSession = pdfEngineAdapter.createSession(pdfBootstrap);
   applyTheme(settings.theme);
   try {
-    pdf = await pdfjsLib.getDocument({ url: pdfUrl, disableRange: true, disableStream: true }).promise;
+    const loadingTask = pdfjsLib.getDocument({ url: pdfUrl, disableRange: true, disableStream: true, disableAutoFetch: true });
+    pdfSession.trackLoadingTask(loadingTask);
+    pdf = await loadingTask.promise;
+    if (pdfDisposed || pdfSession.signal.aborted) { disposePdfView(); return; }
   } catch (e) {
-    pagesEl.innerHTML = '<div class="loading">PDF 打开失败：' + e + "</div>";
+    pagesEl.innerHTML = '<div class="loading">PDF 打开失败：无法读取受控图书资源。</div>';
     parent.postMessage({ ready: 1 }, "*");
     return;
   }

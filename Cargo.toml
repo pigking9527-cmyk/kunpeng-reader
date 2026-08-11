@@ -1,6 +1,6 @@
 [package]
 name = "ebook-reader-tauri"
-version = "1.15.0"
+version = "1.16.0"
 edition = "2021"
 
 [workspace]
@@ -36,7 +36,8 @@ futures-util = "0.3"
 sha2 = "0.11"
 base64 = "0.22"
 ureq = { version = "3.3", features = ["json"] }
-tokio = { version = "1", features = ["rt", "sync"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
 flate2 = "1"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 mobi = "0.8"
@@ -53,6 +54,11 @@ notify = "8.2"
 # 因此同一安装包仍可在没有 NVIDIA 显卡的设备上运行。
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["cuda"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3.2", features = ["NSEvent", "block2"] }
 
 # 正式发布档：保留优化，同时加快日常 release 构建。
 [profile.release]

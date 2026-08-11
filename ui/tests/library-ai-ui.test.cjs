@@ -57,16 +57,16 @@ test("library answer length is local while the fixed shell keeps scrolling insid
   assert.match(backend, /library_answer_settings/);
   assert.match(backend, /set_library_answer_length/);
   assert.match(styles, /\.library-ai-page\s*\{[^}]*overflow:\s*hidden/s);
-  assert.match(styles, /\.library-ai-page\[hidden\]\s*\{[^}]*display:none/s);
-  assert.match(styles, /\.library-ai-page-inner\s*\{[^}]*flex-direction:column/s);
-  assert.match(styles, /\.library-ai-grid\s*\{[^}]*min-height:0/s);
-  assert.match(styles, /\.library-ai-scope\s*\{[^}]*overflow:hidden/s);
-  assert.match(styles, /\.library-ai-books\s*\{[^}]*flex:1 1 auto[^}]*overflow:auto/s);
-  assert.match(styles, /\.library-ai-workspace\s*\{[^}]*overflow-y:auto/s);
-  assert.match(styles, /\.library-ai-answer\s*\{[^}]*flex:0 0 auto[^}]*overflow:visible/s);
-  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.library-ai-page\s*\{[^}]*overflow-y:auto/s);
-  assert.match(styles, /\.library-ai-answer-settings-overlay\s*\{[^}]*position:fixed/s);
-  assert.match(styles, /\.library-ai-answer-toggle\s*\{[^}]*border-radius:999px/s);
+  assert.match(styles, /\.library-ai-page\[hidden\]\s*\{[^}]*display:\s*none/s);
+  assert.match(styles, /\.library-ai-page-inner\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(styles, /\.library-ai-grid\s*\{[^}]*min-height:\s*0/s);
+  assert.match(styles, /\.library-ai-scope\s*\{[^}]*overflow:\s*hidden/s);
+  assert.match(styles, /\.library-ai-books\s*\{[^}]*flex:\s*1 1 auto[^}]*overflow:\s*auto/s);
+  assert.match(styles, /\.library-ai-workspace\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(styles, /\.library-ai-answer\s*\{[^}]*flex:\s*0 0 auto[^}]*overflow:\s*visible/s);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.library-ai-page\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(styles, /\.library-ai-answer-settings-overlay\s*\{[^}]*position:\s*fixed/s);
+  assert.match(styles, /\.library-ai-answer-toggle\s*\{[^}]*border-radius:\s*999px/s);
 });
 
 test("library assistant opens lazily in the main window and can return to the shelf", () => {
@@ -118,9 +118,9 @@ test("library assistant toolbar toggles back to the shelf when it is already ope
 
 test("library assistant keeps whole-library as the unselected default and offers scoped selection tools", () => {
   assert.match(html, /id="scope-summary"[^>]*>当前范围：全部书库/);
-  assert.match(html, /id="clear-selection"[^>]*>取消限定/);
-  assert.match(html, /id="select-visible"[^>]*>全选当前列表/);
-  assert.match(html, /id="invert-visible"[^>]*>反选当前列表/);
+  assert.match(html, /id="clear-selection"[^>]*>\s*取消限定/);
+  assert.match(html, /id="select-visible"[^>]*>\s*全选当前列表/);
+  assert.match(html, /id="invert-visible"[^>]*>\s*反选当前列表/);
   assert.doesNotMatch(html, />检索范围<|展示最相关的前 20 本（每本 1 段）/);
   assert.match(controller, /const selectedBookIds = new Set\(\)/);
   assert.match(controller, /const MAX_QUESTION_SOURCES = 20/);
@@ -206,7 +206,7 @@ test("library assistant classifies model tags with progress and can use them ind
   assert.match(html, /id="book-classification-settings-open"/);
   assert.match(html, /id="book-classification-settings-modal"/);
   assert.match(html, /id="set-use-model-tags"/);
-  assert.match(html, /id="library-ai-classify"[^>]*>书籍分类/);
+  assert.match(html, /id="library-ai-classify"[^>]*>\s*书籍分类/);
   assert.doesNotMatch(html, /本地资料不足时，会检索百度和豆瓣读书/);
   assert.match(classificationSettings, /start_library_auto_classification/);
   assert.match(classificationSettings, /library_profile_status/);
@@ -320,7 +320,7 @@ test("answer citations render as hoverable, clickable source footnotes", () => {
   assert.doesNotMatch(controller, /footnote\.title/);
   assert.match(styles, /\.library-ai-footnote\s*\{/);
   assert.match(styles, /\.library-ai-source-preview\s*\{/);
-  assert.match(styles, /\.library-ai-source-preview\s*\{[^}]*position:fixed/s);
+  assert.match(styles, /\.library-ai-source-preview\s*\{[^}]*position:\s*fixed/s);
 });
 
 test("library answers render a safe subset of Markdown instead of exposing raw markers", () => {
@@ -344,7 +344,7 @@ test("library answer provider accepts compatible response envelopes and retries 
 });
 
 test("library answers save locally and can sync a de-identified history", () => {
-  assert.match(html, /id="library-ai-history"[^>]*>问答记录/);
+  assert.match(html, /id="library-ai-history"[^>]*>\s*问答记录/);
   assert.match(html, /id="account-sync-history"[\s\S]*智读与书库问答记录/);
   assert.match(controller, /private_sync_library_history_list/);
   assert.match(controller, /private_sync_library_history_merge/);

@@ -31,6 +31,8 @@ static NEXT_ASSOCIATED_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 /// when a newer version is running alongside it. U+2063 is visually empty.
 pub(crate) const VERSIONED_MAIN_WINDOW_TITLE: &str = "鲲鹏阅读器\u{2063}";
 static PRIMARY_INSTANCE_STARTED_AT: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+static SINGLE_INSTANCE_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
 fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
@@ -61,6 +63,31 @@ fn associated_book_paths(args: &[String], cwd: &Path) -> Vec<String> {
         })
         .filter(|path| seen.insert(path.to_ascii_lowercase()))
         .collect()
+}
+
+fn supported_existing_book_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| path.is_file() && import_core::is_supported_book_path(path))
+        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|path| seen.insert(path.to_ascii_lowercase()))
+        .collect()
+}
+
+/// Delivers a Finder/LaunchServices open request to a running desktop reader.
+/// Initial launch paths are still kept in `StartupBookPaths`; this function is
+/// for the macOS `Opened` event, which bypasses a second process entirely.
+pub(crate) fn open_associated_book_paths(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
+    let paths = supported_existing_book_paths(paths);
+    if paths.is_empty() {
+        return;
+    }
+    let request_id = next_associated_request_id();
+    startup_enhancement::activate_main(app, request_id);
+    if let Err(error) = app.emit("associated-book-open", paths) {
+        log(&format!("传递 Finder 打开的图书失败：{error}"));
+    }
 }
 
 pub(crate) fn startup_book_paths() -> Vec<String> {
@@ -188,37 +215,34 @@ pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
 /// Unix（包括 macOS）使用内核 `flock`。文件对象保存在进程级静态变量中，
 /// 因而锁会一直持有到进程退出；崩溃后内核会自动释放锁，遗留的空文件无害。
 #[cfg(unix)]
-pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
-    use std::fs::{File, OpenOptions};
+fn acquire_single_instance_lock(lock_path: &Path, startup_book_paths: Vec<String>) -> bool {
+    use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
 
     const LOCK_EX: core::ffi::c_int = 2;
     const LOCK_NB: core::ffi::c_int = 4;
-    static SINGLE_INSTANCE_FILE: Mutex<Option<File>> = Mutex::new(None);
 
     extern "C" {
         fn flock(fd: core::ffi::c_int, operation: core::ffi::c_int) -> core::ffi::c_int;
     }
 
     let instance_started_at = unix_time_ms();
-    let Some(mut lock_path) = dirs::cache_dir() else {
-        log("初始化单实例文件锁失败：无法确定缓存目录；为避免并发写入已终止启动");
+    let Some(lock_dir) = lock_path.parent() else {
+        log("初始化单实例文件锁失败：锁路径没有父目录；为避免并发写入已终止启动");
         return false;
     };
-    lock_path.push("ebook-reader");
-    if let Err(error) = std::fs::create_dir_all(&lock_path) {
+    if let Err(error) = std::fs::create_dir_all(lock_dir) {
         log(&format!(
             "初始化单实例文件锁失败：无法创建锁目录：{error}；为避免并发写入已终止启动"
         ));
         return false;
     }
-    lock_path.push("single-instance.lock");
     let file = match OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock_path)
+        .open(lock_path)
     {
         Ok(file) => file,
         Err(error) => {
@@ -263,6 +287,23 @@ pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
     *retained = Some(file);
     PRIMARY_INSTANCE_STARTED_AT.store(instance_started_at, Ordering::Relaxed);
     true
+}
+
+#[cfg(unix)]
+fn default_single_instance_lock_path() -> Option<PathBuf> {
+    let mut lock_dir = dirs::cache_dir()?;
+    lock_dir.push("ebook-reader");
+    lock_dir.push("single-instance.lock");
+    Some(lock_dir)
+}
+
+#[cfg(unix)]
+pub(crate) fn ensure_single_instance(startup_book_paths: Vec<String>) -> bool {
+    let Some(lock_path) = default_single_instance_lock_path() else {
+        log("初始化单实例文件锁失败：无法确定缓存目录；为避免并发写入已终止启动");
+        return false;
+    };
+    acquire_single_instance_lock(&lock_path, startup_book_paths)
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -365,6 +406,25 @@ mod tests {
     }
 
     #[test]
+    fn opened_paths_keep_only_supported_existing_books_once() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-reader-opened-paths-{}-{}",
+            std::process::id(),
+            next_associated_request_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let book = root.join("sample.epub");
+        let ignored = root.join("sample.png");
+        std::fs::write(&book, b"book").unwrap();
+        std::fs::write(&ignored, b"image").unwrap();
+
+        let paths = supported_existing_book_paths(vec![book.clone(), ignored, book.clone()]);
+
+        assert_eq!(paths, vec![book.to_string_lossy().into_owned()]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn activation_request_is_valid_without_a_book_path() {
         let request = AssociatedBookRequest {
             id: 42,
@@ -384,18 +444,30 @@ mod tests {
     #[test]
     fn unix_process_lock_rejects_a_second_process() {
         const CHILD_MARKER: &str = "KUNPENG_SINGLE_INSTANCE_TEST_CHILD";
+        const LOCK_PATH: &str = "KUNPENG_SINGLE_INSTANCE_TEST_LOCK_PATH";
         if std::env::var_os(CHILD_MARKER).is_some() {
-            assert!(!ensure_single_instance(Vec::new()));
+            let lock_path = PathBuf::from(std::env::var_os(LOCK_PATH).unwrap());
+            assert!(!acquire_single_instance_lock(&lock_path, Vec::new()));
             return;
         }
 
-        assert!(ensure_single_instance(Vec::new()));
+        // The desktop app may legitimately own the production-wide lock while
+        // this test suite runs. Use one test-only path, inherited by the child
+        // process, so the test proves process-level exclusion without touching
+        // or depending on a user's running reader.
+        let lock_path = std::env::temp_dir().join(format!(
+            "kunpeng-reader-single-instance-test-{}-{}.lock",
+            std::process::id(),
+            next_associated_request_id()
+        ));
+        assert!(acquire_single_instance_lock(&lock_path, Vec::new()));
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "startup::tests::unix_process_lock_rejects_a_second_process",
             ])
             .env(CHILD_MARKER, "1")
+            .env(LOCK_PATH, &lock_path)
             .status()
             .unwrap();
         assert!(status.success());

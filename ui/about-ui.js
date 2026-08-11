@@ -9,6 +9,7 @@
     const updateBar = root.getElementById("update-bar");
     const updateButton = root.getElementById("about-update");
     const notesElement = root.getElementById("about-notes");
+    const updateNotesElement = root.getElementById("ub-notes");
     const pendingUpdateKey = "pendingUpdateV1";
     let pendingRelease = null;
 
@@ -40,11 +41,141 @@
       return 0;
     }
 
-    function conciseNotes(notes) {
-      return String(notes || "")
-        .replace(/\r\n?/g, "\n")
-        .replace(/^\s*[-*]\s*/gm, "• ")
-        .trim();
+    function safeReleaseUrl(value) {
+      try {
+        const url = new URL(String(value || ""));
+        return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+      } catch (_) {
+        return "";
+      }
+    }
+
+    // Release notes are remote Markdown. Build a small allowlist directly with
+    // DOM nodes instead of assigning remote text to innerHTML.
+    function appendReleaseInline(parent, value) {
+      const source = String(value || "");
+      const token = /(\*\*([^*\n]+)\*\*)|(`([^`\n]+)`)|(\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\))|(\*([^*\n]+)\*)/g;
+      let cursor = 0;
+      let match;
+      while ((match = token.exec(source))) {
+        parent.append(root.createTextNode(source.slice(cursor, match.index)));
+        if (match[2] !== undefined) {
+          const strong = root.createElement("strong");
+          appendReleaseInline(strong, match[2]);
+          parent.append(strong);
+        } else if (match[4] !== undefined) {
+          const code = root.createElement("code");
+          code.textContent = match[4];
+          parent.append(code);
+        } else if (match[6] !== undefined) {
+          const url = safeReleaseUrl(match[7]);
+          if (!url) parent.append(root.createTextNode(match[5]));
+          else {
+            const link = root.createElement("a");
+            link.href = url;
+            link.textContent = match[6];
+            link.addEventListener("click", (event) => {
+              event.preventDefault();
+              invoke("open_url", { url }).catch(() => {});
+            });
+            parent.append(link);
+          }
+        } else {
+          const emphasis = root.createElement("em");
+          appendReleaseInline(emphasis, match[9]);
+          parent.append(emphasis);
+        }
+        cursor = token.lastIndex;
+      }
+      parent.append(root.createTextNode(source.slice(cursor)));
+    }
+
+    function renderReleaseNotes(target, value, fallback = "") {
+      const fragment = root.createDocumentFragment();
+      const lines = String(value || fallback || "").replace(/\r/g, "").split("\n");
+      let paragraph = [];
+      let list = null;
+      let listKind = "";
+      let codeLines = null;
+      const closeList = () => { list = null; listKind = ""; };
+      const flushParagraph = () => {
+        if (!paragraph.length) return;
+        const element = root.createElement("p");
+        appendReleaseInline(element, paragraph.join(" "));
+        fragment.append(element);
+        paragraph = [];
+      };
+      const appendListItem = (kind, text) => {
+        flushParagraph();
+        if (!list || listKind !== kind) {
+          list = root.createElement(kind);
+          listKind = kind;
+          fragment.append(list);
+        }
+        const item = root.createElement("li");
+        appendReleaseInline(item, text);
+        list.append(item);
+      };
+      lines.forEach((raw) => {
+        const line = raw.trim();
+        if (/^```/.test(line)) {
+          if (codeLines) {
+            const block = root.createElement("pre");
+            const code = root.createElement("code");
+            code.textContent = codeLines.join("\n");
+            block.append(code);
+            fragment.append(block);
+            codeLines = null;
+          } else {
+            flushParagraph();
+            closeList();
+            codeLines = [];
+          }
+          return;
+        }
+        if (codeLines) { codeLines.push(raw); return; }
+        if (!line) { flushParagraph(); closeList(); return; }
+        const heading = line.match(/^(#{1,3})\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          closeList();
+          const element = root.createElement(heading[1].length === 1 ? "h3" : heading[1].length === 2 ? "h4" : "h5");
+          appendReleaseInline(element, heading[2]);
+          fragment.append(element);
+          return;
+        }
+        const bullet = line.match(/^[-*+]\s+(.+)$/);
+        if (bullet) { appendListItem("ul", bullet[1]); return; }
+        const numbered = line.match(/^\d+[.)]\s+(.+)$/);
+        if (numbered) { appendListItem("ol", numbered[1]); return; }
+        const quote = line.match(/^>\s?(.+)$/);
+        if (quote) {
+          flushParagraph();
+          closeList();
+          const block = root.createElement("blockquote");
+          appendReleaseInline(block, quote[1]);
+          fragment.append(block);
+          return;
+        }
+        if (/^([-*_])\1\1+$/.test(line)) {
+          flushParagraph();
+          closeList();
+          fragment.append(root.createElement("hr"));
+          return;
+        }
+        closeList();
+        paragraph.push(line);
+      });
+      if (codeLines) {
+        const block = root.createElement("pre");
+        const code = root.createElement("code");
+        code.textContent = codeLines.join("\n");
+        block.append(code);
+        fragment.append(block);
+      }
+      flushParagraph();
+      target.classList.add("release-notes-markdown");
+      target.replaceChildren(fragment);
     }
 
     function isIgnored(info) {
@@ -78,7 +209,7 @@
       pendingRelease = { version: info.latest, url: info.url || "" };
       root.getElementById("ub-current").textContent = "当前 v" + String(info.current || "?").replace(/^v/i, "");
       root.getElementById("ub-ver").textContent = "v" + String(info.latest).replace(/^v/i, "");
-      root.getElementById("ub-notes").textContent = conciseNotes(info.notes) || "已发布新版本，查看更新说明了解改进内容。";
+      renderReleaseNotes(updateNotesElement, info.notes, "已发布新版本，查看更新说明了解改进内容。");
       updateBar.classList.add("show");
     }
 
@@ -146,7 +277,7 @@
       const cached = storage.getItem("notes_" + version);
       if (cached) {
         notesElement.dataset.i18nState = "";
-        notesElement.textContent = cached;
+        renderReleaseNotes(notesElement, cached);
       } else {
         setNotesState("releaseNotesLoading");
       }
@@ -154,7 +285,7 @@
       if (notes) {
         storage.setItem("notes_" + version, notes);
         notesElement.dataset.i18nState = "";
-        notesElement.textContent = notes;
+        renderReleaseNotes(notesElement, notes);
       } else if (!cached) {
         setNotesState("releaseNotesUnavailable");
       }

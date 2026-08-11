@@ -11,6 +11,7 @@
   const ORDER_STORAGE_KEY = "kunpeng.reader.news.order.v1";
   const MAX_SOURCES = 24;
   const MAX_TIEBA_BARS = 8;
+  const ALL_CATEGORY = "__all__";
   const BACKGROUND_PREFETCH_DELAY_MS = 30 * 1000;
   const BACKGROUND_PREFETCH_INTERVAL_MS = 5 * 60 * 1000;
   const BACKGROUND_PREFETCH_BATCHES = 4;
@@ -44,18 +45,18 @@
   }
   function withTimeout(promise, timeoutMs = LOAD_TIMEOUT_MS) {
     let timer;
-    const timeout = new Promise((_, reject) => { timer = global.setTimeout(() => reject(new Error("资讯请求超时")), timeoutMs); });
+    const timeout = new Promise((_, reject) => { timer = global.setTimeout(() => reject(new Error("news-request-timeout")), timeoutMs); });
     return Promise.race([Promise.resolve(promise), timeout]).finally(() => global.clearTimeout(timer));
   }
   function itemDate(item) {
     const value = item.published_at || item.publishedAt || item.published || item.time || item.created_at || item.createdAt;
     if (!value) return "";
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? text(value) : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+    return Number.isNaN(date.getTime()) ? text(value) : new Intl.DateTimeFormat(global.ReaderAppI18n?.resolvedLanguage?.() || "zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
   }
   const sourceCategory = (source) => text(source?.category).trim() || i18n("newsCategoryOther", "其他");
-  const sourceId = (item) => text(item?.sourceId || item?.source_id || item?.source || "资讯");
-  const sourceName = (item) => text(item?.source || item?.source_name || item?.site || "资讯").trim();
+  const sourceId = (item) => text(item?.sourceId || item?.source_id || item?.source || i18n("news", "资讯"));
+  const sourceName = (item) => text(item?.source || item?.source_name || item?.site || i18n("news", "资讯")).trim();
   const defaultSourceIds = (catalog) => catalog.filter((source) => source.defaultEnabled || source.default_enabled).map((source) => text(source.id));
   function allowedSourceIds(ids, catalog) {
     const allowed = new Set(catalog.map((source) => text(source.id)));
@@ -118,7 +119,7 @@
     if (!button || !page || !back || !refresh || !gestureSettings || !gestureApi || !sourceToggle || !sourcePicker || !sourceSearch || !sourceOptions || !sourceStatus || !sourceClose || !tiebaBars || !tiebaAddToggle || !tiebaBarForm || !tiebaBarInput || !tiebaBarCancel || !tiebaBarList || !tiebaBarCount || !sourceSelection || !listLayout || !gridLayout || !mixedOrder || !sourceOrder || !status || !feed || !feedView || !reader || !readerStatus || !readerBack || !readerMeta || !readerTitle || !readerOriginal || !readerContent || !categories || !updated || !shell) return null;
 
     let catalog = [], sourceIds = [], pendingSourceIds = [], tiebaBarNames = loadStoredTiebaBars(), tiebaEnabledBarNames = loadStoredEnabledTiebaBars(tiebaBarNames), pendingTiebaBarNames = [], pendingTiebaEnabledBarNames = [], allItems = [];
-    let selectedCategory = "全部", loading = false, catalogueLoading = null, sourceQuery = "";
+    let selectedCategory = ALL_CATEGORY, loading = false, catalogueLoading = null, sourceQuery = "";
     let newsSettingsSyncReady = false, newsSettingsSyncTimer = 0;
     let layout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
@@ -182,7 +183,7 @@
       storageSet(TIEBA_BARS_STORAGE_KEY, JSON.stringify(tiebaBarNames));
       storageSet(TIEBA_ENABLED_BARS_STORAGE_KEY, JSON.stringify(tiebaEnabledBarNames));
       queueNewsSourceSettingsSync();
-      selectedCategory = "全部";
+      selectedCategory = ALL_CATEGORY;
       renderCategories();
       if (!sourcePicker.hidden) {
         pendingSourceIds = sourceIds.slice();
@@ -220,7 +221,7 @@
       storageSet(TIEBA_BARS_STORAGE_KEY, JSON.stringify(tiebaBarNames));
       storageSet(TIEBA_ENABLED_BARS_STORAGE_KEY, JSON.stringify(tiebaEnabledBarNames));
       queueNewsSourceSettingsSync();
-      selectedCategory = "全部";
+      selectedCategory = ALL_CATEGORY;
       renderCategories();
       setSourceStatus(i18n("newsSourcesSaved", "Saved. Refreshing news automatically…"), "muted");
       scheduleSourceRefresh();
@@ -228,13 +229,13 @@
     }
     function renderTiebaBars() {
       pendingTiebaEnabledBarNames = enabledTiebaBars(pendingTiebaEnabledBarNames, pendingTiebaBarNames);
-      tiebaBarCount.textContent = `已添加 ${pendingTiebaBarNames.length} / ${MAX_TIEBA_BARS} 个吧 · 已启用 ${pendingTiebaEnabledBarNames.length}`;
-      if (!pendingTiebaBarNames.length) { const empty = root.createElement("p"); empty.className = "newsnow-tieba-bar-empty"; empty.textContent = "还没有添加吧名。"; tiebaBarList.replaceChildren(empty); return; }
+      tiebaBarCount.textContent = format("tiebaCount", "已添加 {count} / {max} 个吧 · 已启用 {enabled}", { count: pendingTiebaBarNames.length, max: MAX_TIEBA_BARS, enabled: pendingTiebaEnabledBarNames.length });
+      if (!pendingTiebaBarNames.length) { const empty = root.createElement("p"); empty.className = "newsnow-tieba-bar-empty"; empty.textContent = i18n("tiebaEmpty", "还没有添加吧名。"); tiebaBarList.replaceChildren(empty); return; }
       tiebaBarList.replaceChildren(...pendingTiebaBarNames.map((bar) => {
         const chip = root.createElement("span"), enabled = root.createElement("input"), name = root.createElement("span"), remove = root.createElement("button");
         chip.className = "newsnow-tieba-bar-chip";
-        enabled.type = "checkbox"; enabled.checked = pendingTiebaEnabledBarNames.includes(bar); enabled.title = `启用 ${bar}吧`; enabled.setAttribute("aria-label", enabled.title);
-        name.textContent = `${bar}吧`;
+        enabled.type = "checkbox"; enabled.checked = pendingTiebaEnabledBarNames.includes(bar); enabled.title = format("tiebaEnable", "启用 {name}吧", { name: bar }); enabled.setAttribute("aria-label", enabled.title);
+        name.textContent = format("tiebaBarName", "{name}吧", { name: bar });
         enabled.addEventListener("change", () => {
           const previousEnabled = pendingTiebaEnabledBarNames.slice(), previousSources = pendingSourceIds.slice();
           if (enabled.checked) {
@@ -244,7 +245,7 @@
           if (!persistSourceChanges()) { pendingTiebaEnabledBarNames = previousEnabled; pendingSourceIds = previousSources; enabled.checked = previousEnabled.includes(bar); }
           renderTiebaBars(); renderSourceSelection();
         });
-        remove.type = "button"; remove.title = `删除 ${bar}吧`; remove.setAttribute("aria-label", remove.title); remove.textContent = "×";
+        remove.type = "button"; remove.title = format("tiebaRemove", "删除 {name}吧", { name: bar }); remove.setAttribute("aria-label", remove.title); remove.textContent = "×";
         remove.addEventListener("click", () => { const previousBars = pendingTiebaBarNames.slice(), previousEnabled = pendingTiebaEnabledBarNames.slice(), previousSources = pendingSourceIds.slice(); pendingTiebaBarNames = pendingTiebaBarNames.filter((name) => name !== bar); pendingTiebaEnabledBarNames = pendingTiebaEnabledBarNames.filter((name) => name !== bar); syncPendingTiebaSource(); if (!persistSourceChanges()) { pendingTiebaBarNames = previousBars; pendingTiebaEnabledBarNames = previousEnabled; pendingSourceIds = previousSources; } renderTiebaBars(); renderSourceSelection(); });
         chip.append(enabled, name, remove); return chip;
       }));
@@ -269,7 +270,7 @@
     function setLayout(next) { layout = next === "grid" ? "grid" : "list"; storageSet(LAYOUT_STORAGE_KEY, layout); applyDisplayOptions(); renderFeed(); }
     function setOrder(next) { order = next === "source" ? "source" : "mixed"; storageSet(ORDER_STORAGE_KEY, order); applyDisplayOptions(); renderFeed(); }
     function renderCategories() {
-      const all = "全部", list = [all, ...categoriesForSelection()];
+      const all = ALL_CATEGORY, list = [all, ...categoriesForSelection()];
       if (!list.includes(selectedCategory)) selectedCategory = all;
       categories.replaceChildren(...list.map((name) => {
         const tag = root.createElement("button");
@@ -310,7 +311,7 @@
     function setReaderVisible(visible) { reader.hidden = !visible; page.hidden = visible; closeSourcePicker({ restoreScroll: false }); }
     function renderLocalArticle(article) {
       readerMeta.textContent = [text(article?.source).trim(), text(article?.publishedAt || article?.published_at).trim()].filter(Boolean).join(" · ");
-      readerTitle.textContent = text(article?.title).trim() || "资讯正文";
+      readerTitle.textContent = text(article?.title).trim() || i18n("newsReader", "资讯正文");
       readerContent.innerHTML = text(article?.contentHtml || article?.content_html);
       readerStatus.textContent = "";
       readerContent.scrollTop = 0;
@@ -326,7 +327,7 @@
     }
     async function openArticle(item) {
       const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
-      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; currentArticleUrl = url; readerMeta.textContent = sourceName(item); readerTitle.textContent = text(item.title || item.name || "资讯正文"); readerContent.replaceChildren(); readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true);
+      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; currentArticleUrl = url; readerMeta.textContent = sourceName(item); readerTitle.textContent = text(item.title || item.name || i18n("newsReader", "资讯正文")); readerContent.replaceChildren(); readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true);
       try {
         const article = await invoke("newsnow_open_article", { request: {
           url,
@@ -340,7 +341,7 @@
         if (article?.local) renderLocalArticle(article);
         else readerStatus.textContent = "";
       }
-      catch (_) { articleOpen = false; currentArticleUrl = ""; setReaderVisible(false); setStatus("资讯正文加载失败，请稍后重试。", "error"); }
+      catch (_) { articleOpen = false; currentArticleUrl = ""; setReaderVisible(false); setStatus(i18n("newsArticleLoadFailed", "资讯正文加载失败，请稍后重试。"), "error"); }
     }
     function applyCardImage(image, card, url) {
       if (!url) return;
@@ -395,7 +396,7 @@
     }
     function makeCard(item) {
       const article = root.createElement("article"), url = safeHttpUrl(item.url || item.link || item.href), rail = root.createElement("div"), content = root.createElement("div"), meta = root.createElement("div"), source = root.createElement("span"), title = root.createElement("h2");
-      article.className = "newsnow-card"; article.tabIndex = url ? 0 : -1; rail.className = "newsnow-card-rail"; rail.style.background = text(item.sourceColor || item.source_color || "#718097"); content.className = "newsnow-card-content"; meta.className = "newsnow-meta"; source.className = "newsnow-source-name"; source.textContent = sourceName(item); title.textContent = text(item.title || item.name || "未命名新闻"); meta.appendChild(source);
+      article.className = "newsnow-card"; article.tabIndex = url ? 0 : -1; rail.className = "newsnow-card-rail"; rail.style.background = text(item.sourceColor || item.source_color || "#718097"); content.className = "newsnow-card-content"; meta.className = "newsnow-meta"; source.className = "newsnow-source-name"; source.textContent = sourceName(item); title.textContent = text(item.title || item.name || i18n("untitledNews", "未命名新闻")); meta.appendChild(source);
       const time = itemDate(item); if (time) { const timeEl = root.createElement("time"); timeEl.textContent = time; meta.appendChild(timeEl); }
       const prefetchedImage = safeImageDataUrl(item.previewDataUrl || item.preview_data_url);
       const image = root.createElement("img"); image.className = "newsnow-card-image"; image.alt = ""; image.loading = "lazy"; image.hidden = true;
@@ -409,7 +410,7 @@
       if (url) { const open = root.createElement("span"); open.className = "newsnow-open-hint"; open.textContent = i18n("openWebPage", "打开网页 →"); content.appendChild(open); article.addEventListener("click", () => openArticle(item)); article.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openArticle(item); } }); }
       article.append(rail, content); return article;
     }
-    function filteredItems() { return selectedCategory === "全部" ? allItems : allItems.filter((item) => sourceCategory(sourceForId(sourceId(item))) === selectedCategory); }
+    function filteredItems() { return selectedCategory === ALL_CATEGORY ? allItems : allItems.filter((item) => sourceCategory(sourceForId(sourceId(item))) === selectedCategory); }
     function masonryColumnCount() {
       const minimumCardWidth = 210, gap = 13, width = feed.clientWidth || page.clientWidth;
       if (!width) return Math.max(1, renderedMasonryColumnCount || 1);
@@ -420,7 +421,7 @@
       const availableWidth = Math.max(160, ((feed.clientWidth || page.clientWidth || 210) - gap * (columnCount - 1)) / columnCount - 40);
       const charsPerLine = Math.max(10, Math.floor(availableWidth / 16));
       const lineCount = (value, maximum) => Math.min(maximum, Math.max(1, Math.ceil(Array.from(text(value)).length / charsPerLine)));
-      const titleLines = lineCount(item.title || item.name || "未命名新闻", 4);
+      const titleLines = lineCount(item.title || item.name || i18n("untitledNews", "未命名新闻"), 4);
       const summary = text(item.summary || item.description || item.content || item.excerpt).trim();
       const summaryLines = summary ? lineCount(summary, 3) : 0;
       const hasImage = Boolean(safeImageDataUrl(item.previewDataUrl || item.preview_data_url));
@@ -461,7 +462,7 @@
           if (leftPriority !== rightPriority) return leftPriority - rightPriority;
           return 0;
         });
-      feed.replaceChildren(...orderedIds.map((id) => { const section = root.createElement("section"), heading = root.createElement("h2"), cards = root.createElement("div"), source = sourceForId(id); section.className = "newsnow-source-section"; heading.textContent = text(source?.name || groups.get(id)[0] && sourceName(groups.get(id)[0]) || "资讯"); cards.className = "newsnow-source-cards"; renderCards(cards, groups.get(id)); section.append(heading, cards); return section; }));
+      feed.replaceChildren(...orderedIds.map((id) => { const section = root.createElement("section"), heading = root.createElement("h2"), cards = root.createElement("div"), source = sourceForId(id); section.className = "newsnow-source-section"; heading.textContent = text(source?.name || groups.get(id)[0] && sourceName(groups.get(id)[0]) || i18n("news", "资讯")); cards.className = "newsnow-source-cards"; renderCards(cards, groups.get(id)); section.append(heading, cards); return section; }));
     }
     async function loadSources() {
       if (catalog.length) return catalog; if (catalogueLoading) return catalogueLoading;
@@ -493,7 +494,7 @@
         }
         if (result) applyNewsResult(result, { announce });
       } catch (_) {
-        if (announce && !page.hidden) setStatus("资讯后台更新失败，正在保留已显示内容。", "warning");
+        if (announce && !page.hidden) setStatus(i18n("newsBackgroundRefreshFailed", "资讯后台更新失败，正在保留已显示内容。"), "warning");
       } finally { backgroundRefreshRunning = false; }
     }
     function stopBackgroundPrefetch() {
@@ -524,7 +525,7 @@
         const needsPreviewCache = hasPendingPreviews(result);
         if (result?.stale || needsPreviewCache) void refreshInBackground({ announce: true });
       }
-      catch (error) { renderFeed(); setStatus(error?.message === "资讯请求超时" ? "资讯请求超时，正在保留当前内容。" : "资讯加载失败，请检查网络后重试。", "error"); }
+      catch (error) { renderFeed(); setStatus(error?.message === "news-request-timeout" ? i18n("newsRequestTimedOut", "资讯请求超时，正在保留当前内容。") : i18n("newsLoadFailed", "资讯加载失败，请检查网络后重试。"), "error"); }
       finally { loading = false; refresh.disabled = false; refresh.textContent = i18n("refresh", "刷新"); }
     }
     async function open() {
@@ -562,7 +563,7 @@
         if (masonryColumnCount() !== renderedMasonryColumnCount) renderFeed();
       }, 120);
     });
-    global.addEventListener("app-language-changed", () => { renderSourceSelection(); renderCategories(); renderSourcePicker(); renderFeed(); });
+    global.addEventListener("app-language-changed", () => { renderSourceSelection(); renderCategories(); renderSourcePicker(); renderFeed(); if (loading) refresh.textContent = i18n("loadingNews", "加载中…"); });
     global.__TAURI__?.event?.listen?.("app-settings-synced", () => { void hydrateNewsSourceSettings(); });
     global.__TAURI__?.event?.listen?.("newsnow-return-to-feed", () => closeArticle({ focus: true }));
     global.addEventListener("reader-experimental-features-changed", (event) => { if (event.detail?.key === "newsnow") applyExperimentalAvailability(); if (event.detail?.key === "newsnow" || event.detail?.key === "newsnowPrefetch") scheduleBackgroundPrefetch(); }); applyExperimentalAvailability(); applyDisplayOptions(); scheduleBackgroundPrefetch();

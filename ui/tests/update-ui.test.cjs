@@ -38,9 +38,11 @@ test("update card is centered, icon-free, and shows readable release notes", () 
   assert.match(html, /id="ub-ver"/);
   assert.match(html, /id="ub-notes"/);
   assert.doesNotMatch(html, /class="ub-icon"/);
-  assert.match(styles, /\.update-bar \{ display: none; position: fixed;/);
-  assert.match(styles, /\.update-bar \.ub-notes \{[\s\S]*?white-space: pre-wrap;/);
-  assert.match(about, /function conciseNotes\(notes\)/);
+  assert.match(styles, /\.update-bar\s*\{[\s\S]*?display:\s*none;[\s\S]*?position:\s*fixed;/);
+  assert.match(about, /function renderReleaseNotes\(target, value, fallback/);
+  assert.match(about, /function appendReleaseInline\(parent, value\)/);
+  assert.match(about, /target\.replaceChildren\(fragment\)/);
+  assert.doesNotMatch(about, /\.innerHTML\s*=/);
   assert.match(about, /showUpdateBanner\(info\)/);
   assert.match(about, /info\.current/);
   assert.match(about, /info\.latest/);
@@ -56,7 +58,7 @@ test("closing an update card is restorable and never turns its gesture into an a
   assert.match(about, /function reopenUpdateCard\(\)/);
   assert.match(about, /cachePendingUpdate\(info\)/);
   assert.match(gestures, /const updateCard = root\.getElementById\("update-bar"\)/);
-  assert.match(gestures, /runCloseOrReopen\(action, "更新说明"/);
+  assert.match(gestures, /runCloseOrUndo\(\s*action,\s*"更新说明"/);
   assert.match(gestures, /ReaderAboutUI\?\.hideUpdateCard/);
   assert.match(gestures, /ReaderAboutUI\?\.reopenUpdateCard/);
 });

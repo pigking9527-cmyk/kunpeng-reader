@@ -18,7 +18,7 @@
 
 14. 独立 `user_book_tags_v1` / `book_collections_v1` 存在时，旧 `book_state_v2` 空数组不能覆盖它们。
 15. 服务端只为实际接受的实体变化记录压缩完整版本；90 天清理保留每实体窗口前锚点，恢复后递增 `data_generation`、撤销令牌，并把目标时间之后创建的实体写成墓碑。
-16. 旧客户端忽略 `app_settings_v1/default`；认识该实体的桌面客户端写回已知设置时保留未知字段。账户无该实体时以本机当前值建种，不用默认值覆盖本机偏好。资讯来源/自定义贴吧和书库问答设置必须按字段补丁合并，不能因保存其中一项而重置跳转回退或另一个设置组；缺失 `readerJumpBackPositionX/Y` 的旧 payload 必须继续有效，并按右侧中部（950, 500）读取。缺失 `readerJumpBackIconSizePx` 时按旧 `readerJumpBackSizeLevel` 线性换算；新客户端同时保留最近的 1–10 级镜像，不能把旧字段直接改写成像素。
+16. 旧客户端忽略 `app_settings_v1/default`；认识该实体的桌面客户端写回已知设置时保留未知字段。首次为一个账户同步时，云端 `app_settings_v1/default` 必须优先于 WebView 预先写入的本机默认值。账户无该实体时以本机当前值建种，不用默认值覆盖本机偏好。资讯来源/自定义贴吧和书库问答设置必须按字段补丁合并，不能因保存其中一项而重置跳转回退或另一个设置组；缺失 `readerJumpBackPositionX/Y` 的旧 payload 必须继续有效，并按右侧中部（950, 500）读取。缺失 `readerJumpBackIconSizePx` 时按旧 `readerJumpBackSizeLevel` 线性换算；新客户端同时保留最近的 1–10 级镜像，不能把旧字段直接改写成像素。`gestureSettings.profilesInitialized: true` 表示空 `profiles` 是明确删除；缺少该标记的旧空列表不能覆盖本机已录制手势。
 17. `booklist_v1` 只能保存稳定 list ID、名称、简介、内容 ID、顺序和逐书评语；成员关系仍以 `book_collections_v1` 为准。接收端不得用它创建带远端路径的书架图书，未知字段必须保留，删除使用实体墓碑。
 
 待真实服务端字段完成逐项对齐后，这里会补每个端可直接运行的断言脚本。

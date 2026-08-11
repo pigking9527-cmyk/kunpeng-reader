@@ -29,6 +29,28 @@ test("large chapter layout threshold selects only large HTML", () => {
   assert.equal(macContext.largeChapterFastLayout("x".repeat(16 * 1024)), true);
 });
 
+test("highlight menu keeps settings in the original reader without selection text", () => {
+  const annotations = fs.readFileSync(path.join(__dirname, "..", "reader-page-annotations.js"), "utf8");
+  const runtime = fs.readFileSync(path.join(__dirname, "..", "reader-page-runtime.js"), "utf8");
+  assert.match(annotations, /window\.ReaderHighlightMenuSettings\s*=\s*Object\.freeze\(\{[\s\S]*?get:function\(\)[\s\S]*?update:function\(value\)/);
+  assert.match(annotations, /actions:readHlMenuConfig\(\)\.map\(function\(item\)\{return \{key:item\.key,visible:item\.show!==false\};\}\)/);
+  assert.doesNotMatch(annotations.match(/function highlightMenuPreferencesSnapshot\(\)\{[\s\S]*?\n\}/)?.[0] || "", /selectedText|chapterHtml|documentUrl/);
+  assert.match(runtime, /readerHighlightMenuSettings/);
+  assert.match(runtime, /window\.ReaderHighlightMenuSettings\.update\(highlightMenuRequest\.settings\)/);
+  assert.match(runtime, /readerHighlightMenuPreferencesReady:true/);
+  assert.match(annotations, /showHlSettings\(selMenu\)/);
+  assert.match(annotations, /showHlSettings\(hlMenu\)/);
+  assert.match(annotations, /parent\.postMessage\(\{readerHighlightMenuPreferences:highlightMenuPreferencesSnapshot\(\)\}/);
+  const reader = fs.readFileSync(path.join(__dirname, "..", "reader.js"), "utf8");
+  assert.match(reader, /const READER_HIGHLIGHT_MENU_PREFERENCES_KEY = "readerHighlightMenuPreferencesV1";/);
+  assert.match(reader, /const operation = preferences \? "update" : "get";/);
+  assert.match(reader, /readerHighlightMenuSettings:\s*\{\s*requestId:\s*1,\s*operation,\s*settings:\s*preferences\s*\}/);
+  assert.match(reader, /if \(e\.data\.readerHighlightMenuPreferencesReady\) \{\s*restoreHighlightMenuPreferences\(\);/);
+  assert.match(reader, /requestId === 1/);
+  assert.match(reader, /persistHighlightMenuPreferences\(e\.data\.readerHighlightMenuPreferences\)/);
+  assert.doesNotMatch(reader, /frame\.addEventListener\("load", \(\) => \{[\s\S]*?restoreHighlightMenuPreferences/);
+});
+
 test("whole-book page counts are enabled and resume from incremental cache", () => {
   assert.match(source, /var fullBookMeasureEnabled=true;/);
   assert.match(source, /function pageCountSig\(\)\{[\s\S]*?S\.flowMode/);
@@ -49,9 +71,10 @@ test("whole-book page counts are enabled and resume from incremental cache", () 
 test("large chapters use batched geometry and skip repeated exact layout", () => {
   assert.match(
     source,
-    /\.rr \*\{break-before:auto !important[\s\S]*?body:not\(\.scroll-mode\):not\(\.line-paged-mode\) \.rr-end\{break-before:column !important/
+    /body:not\(\.scroll-mode\):not\(\.line-paged-mode\) \.rr-end\{display:none !important[\s\S]*?body\.scroll-mode \.rr-end\{display:block !important[\s\S]*?break-before:auto !important/
   );
   assert.match(source, /function fastPagedPageCount\(el\)/);
+  assert.match(source, /if\(isDualPage\(\)\)return fastDualPagedPageCount\(el\);/);
   assert.match(source, /columnCountFromWidth\(el\.scrollWidth\|\|0,hasEnd\)/);
   assert.match(source, /function fastDocumentTextLineRects\(\)/);
   assert.match(source, /if\(fastChapterLayout\)return fastDocumentTextLineRects\(\)/);
@@ -95,6 +118,8 @@ test("paged image preview is limited to the page immediately before the stable o
   assert.match(source, /nextPagedImageByPrecedingContent\(imgs,rr,step,current\)/);
   assert.match(source, /inCurrentView&&S\.imagePagination==='continuous'&&img\.__kpPagedPreviewFromPage===current-1&&Math\.floor\(img\.__kpPagedPreviewHeight\|\|0\)>=32/);
   assert.match(source, /function hasPendingContinuousPagedImageSource\(\)/);
+  assert.match(source, /if\(S\.imagePagination!==\'continuous\'\)\{clearPagedImagePreview\(\);return;\}/);
+  assert.match(source, /isDualPage\(\)\|\|S\.imagePagination!==\'continuous\'/);
   assert.match(source, /if\(hasPendingContinuousPagedImageSource\(\)\)\{[\s\S]*?refreshPagedImagePreview\(\);[\s\S]*?return;/);
   assert.match(source, /candidate\.__kpPagedPreviewFromPage===current-1/);
   assert.match(source, /if\(consumed<32\)\{/);
@@ -120,7 +145,7 @@ test("scroll image preview reflows through the virtual page instead of covering 
 });
 test("mode switches restore anchors inside the already inset scroll viewport", () => {
   assert.match(source, /function applyCols\(\)\{[\s\S]*?if\(isScrollMode\(\)\)\{\s*\/\/[\s\S]*?viewOffset=0;\s*var sb=scrollPageBox\(\)/);
-  assert.match(source, /x=Math\.max\(2,pr\.left\+8\)/);
+  assert.match(source, /x=Math\.max\(2,pr\.left\+hm\.l\+8\)/);
   assert.match(source, /y=Math\.max\(2,pr\.top\+8\)/);
   assert.doesNotMatch(source, /pr\.left\+mg\(S\.marginLeft\)\+8/);
   assert.doesNotMatch(source, /pr\.top\+mg\(S\.marginTop\)\+8/);
@@ -201,6 +226,13 @@ test("highlight web search keeps a local Baidu or Google choice", () => {
   assert.match(source, /webSearch:\{term:highlightDisplayText\(h\),engine:readHlWebEngine\(\)\}/);
 });
 
+test("highlight menu starts with the product defaults for new readers", () => {
+  assert.match(source, /function readHlMenuMode\(\)\{[\s\S]*?\?m:'text';\}/);
+  assert.match(source, /function readHlMenuLayout\(\)\{[\s\S]*?s==='row'\?'row':'grid';\}/);
+  assert.match(source, /function readHlMenuSize\(\)\{[\s\S]*?\?s:'medium';\}/);
+  assert.match(source, /function readHlWebEngine\(\)\{[\s\S]*?\?'google':'baidu';\}/);
+});
+
 test("highlight menu keeps appearance compact and supports persisted four-color highlights", () => {
   const style = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
   assert.match(source, /var HL_MENU_COLOR_KEY='highlightMenuMultiColorV1'/);
@@ -216,4 +248,6 @@ test("highlight menu keeps appearance compact and supports persisted four-color 
   assert.match(source, /web:'<svg viewBox=/);
   assert.match(style, /\.hm-color-host .hm-color-button/);
   assert.match(style, /var\(--hl-color,rgba\(126,136,148,.34\)\)/);
+  assert.match(source, /hlMenuPreferencesSynced=false/);
+  assert.match(source, /if\(hlMenuPreferencesRestoring\|\|!hlMenuPreferencesSynced\)return/);
 });

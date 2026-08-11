@@ -58,7 +58,14 @@ try {
       Where-Object { $_.FullName -notlike "*\ui\pdfjs\*" } |
       Sort-Object FullName
     foreach ($file in $jsFiles) {
-      node --check $file.FullName
+      if ($file.Name -eq "pdfview.js") {
+        Get-Content -LiteralPath $file.FullName -Raw | node --input-type=module --check
+      } else {
+        node --check $file.FullName
+      }
+      if ($LASTEXITCODE -ne 0) {
+        throw "node --check failed for $($file.FullName)"
+      }
     }
   }
 

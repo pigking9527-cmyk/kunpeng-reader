@@ -76,21 +76,11 @@ document.getElementById("gear-btn").addEventListener("click", () => {
 });
 document.getElementById("prev-btn").addEventListener("click", () => {
   window.keepImmersiveBarAfterNav?.();
-  if (vchaps.length) {
-    if (curVchap > 0) {
-      const v = vchaps[curVchap - 1];
-      sendToPage({ gotoChapter: v.ch, frag: v.frag || undefined });
-    }
-  } else if (curChapter > 0) sendToPage({ gotoChapter: curChapter - 1 });
+  sendToPage({ pageTurn: -1 });
 });
 document.getElementById("next-btn").addEventListener("click", () => {
   window.keepImmersiveBarAfterNav?.();
-  if (vchaps.length) {
-    if (curVchap < vchapTotal - 1) {
-      const v = vchaps[curVchap + 1];
-      sendToPage({ gotoChapter: v.ch, frag: v.frag || undefined });
-    }
-  } else if (curChapter < curTotalCh - 1) sendToPage({ gotoChapter: curChapter + 1 });
+  sendToPage({ pageTurn: 1 });
 });
 
 let tocBuildVersion = 0;

@@ -215,7 +215,7 @@
         background_preset: choice(readerAppearance.backgroundPreset, ["light", "dark", "sepia", "custom"], "light"),
         custom_background_color: /^#[0-9a-f]{3,8}$/i.test(String(readerAppearance.customBackgroundColor || "")) ? readerAppearance.customBackgroundColor : "",
         custom_background_image_configured: Boolean(String(readerAppearance.customBackgroundImage || "")),
-        custom_palette_count: Array.isArray(palettes) ? Math.min(10, palettes.length) : 0,
+        custom_palette_count: Array.isArray(palettes) ? Math.min(15, palettes.length) : 0,
         per_book_appearance_count: bookAppearance && typeof bookAppearance === "object" && !Array.isArray(bookAppearance) ? Math.min(10000, Object.keys(bookAppearance).length) : 0,
         show_text_conversion: readerAppearance.showTextConversion !== false,
         show_toc_button: readerAppearance.showTocButton !== false,

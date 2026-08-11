@@ -4,7 +4,10 @@ use crate::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::{atomic::Ordering, LazyLock, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        LazyLock, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager};
@@ -49,6 +52,9 @@ static CLOSING_READER_WINDOWS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static READER_CLOSE_STARTED: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+// This flag is set only by the explicit user-facing exit command. Ordinary
+// close and Cmd+Q continue to follow startup-enhancement hide behavior.
+static EXPLICIT_APPLICATION_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn mark_reader_close_started(label: &str) {
     READER_CLOSE_STARTED
@@ -238,13 +244,26 @@ pub(crate) fn main_window_close(window: tauri::WebviewWindow) -> Result<(), Stri
     window.close().map_err(|e| e.to_string())
 }
 
+/// End the application after an explicit user action. This must not be folded
+/// into `main_window_close`: with startup enhancement enabled that command is
+/// deliberately a hide-and-keep-running action.
+#[tauri::command]
+pub(crate) fn main_window_exit(app: tauri::AppHandle) -> Result<(), String> {
+    EXPLICIT_APPLICATION_EXIT_REQUESTED.store(true, Ordering::Release);
+    app.exit(0);
+    Ok(())
+}
+
+/// Consumed by the application event loop when an exit request arrives.
+pub(crate) fn take_explicit_application_exit_request() -> bool {
+    EXPLICIT_APPLICATION_EXIT_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
 /// 主窗口以隐藏状态创建，等待书架完成首帧绘制后再由前端调用。
 /// 这能避免 WebView2 在默认左上位置短暂显示白色空窗口。
 #[tauri::command]
 pub(crate) fn main_window_show(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.show().map_err(|e| e.to_string())?;
-    window.unminimize().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())
+    crate::startup_enhancement::reveal_main(window.app_handle())
 }
 
 #[tauri::command]
@@ -439,6 +458,15 @@ pub(crate) fn ensure_reader_window(
         open_started.elapsed(),
     );
     let window = result.map_err(|error| error.to_string())?;
+    // macOS may create a new WebView window behind the shelf when the command
+    // originates from an already-active app. Explicitly restore and focus it:
+    // a successful build must result in a visible reader, not a background one.
+    let shown = window.show().is_ok();
+    let restored = window.unminimize().is_ok();
+    let focused = window.set_focus().is_ok();
+    log(&format!(
+        "open_book activate shown={shown} restored={restored} focused={focused}"
+    ));
     if !on_screen {
         let _ = window.center(); // 上次坐标已不在任何屏幕内 → 回到屏幕中央
     }
@@ -633,6 +661,10 @@ fn position_on_screen(window: &tauri::WebviewWindow, geom: &WinGeom) -> bool {
 
 /// 安全地把保存的几何信息应用到窗口：尺寸超屏会收缩，位置越界则真正居中（不依赖 center()）。
 pub(crate) fn apply_geom_safe(window: &tauri::WebviewWindow, geom: &Option<WinGeom>) {
+    // Geometry is applied while hidden. This is also important on macOS, where
+    // AppKit may animate a maximization that was requested after a window was
+    // already visible.
+    let _ = window.hide();
     let _ = window.unminimize();
     if let Some(saved) = geom {
         // 目标尺寸，超过主屏幕则收缩，避免窗口比屏幕还大

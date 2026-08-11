@@ -1146,6 +1146,49 @@ pub(crate) struct DataResetResponse {
     tokens_revoked: bool,
 }
 
+/// Non-sensitive summary of the server-side entity history available for a
+/// deliberate cloud restore. It intentionally carries no entity payloads.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncRecoveryStatus {
+    pub available: bool,
+    #[serde(alias = "retention_days")]
+    pub retention_days: i64,
+    #[serde(alias = "restorable_from")]
+    pub restorable_from: i64,
+    #[serde(alias = "latest_version_at")]
+    pub latest_version_at: i64,
+    #[serde(alias = "version_count")]
+    pub version_count: i64,
+    #[serde(alias = "data_generation")]
+    pub data_generation: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncRecoveryRestoreRequest {
+    pub target_at: i64,
+    pub data_generation: i64,
+    pub password: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncRecoveryRestoreResponse {
+    #[serde(alias = "data_generation")]
+    pub data_generation: i64,
+    #[serde(alias = "tokens_revoked")]
+    pub tokens_revoked: bool,
+    #[serde(alias = "target_at")]
+    pub target_at: i64,
+    #[serde(alias = "restored_at")]
+    pub restored_at: i64,
+    #[serde(alias = "restored_entities")]
+    pub restored_entities: i64,
+    #[serde(alias = "tombstoned_entities")]
+    pub tombstoned_entities: i64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SecretBundleState {
@@ -1371,6 +1414,57 @@ pub(crate) async fn sync_reset_cloud_data(
 }
 
 #[tauri::command]
+pub(crate) async fn sync_recovery_status(
+    app: tauri::AppHandle,
+) -> Result<SyncRecoveryStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        authenticated_endpoint(
+            app.state::<AppState>().inner(),
+            "/sync/recovery/status",
+            None,
+        )
+    })
+    .await
+    .map_err(|e| format!("读取云端恢复状态任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn sync_recovery_restore(
+    app: tauri::AppHandle,
+    request: SyncRecoveryRestoreRequest,
+) -> Result<SyncRecoveryRestoreResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.password.is_empty() {
+            return Err("请输入登录密码".into());
+        }
+        if request.target_at <= 0 || request.data_generation <= 0 {
+            return Err("云端恢复请求无效".into());
+        }
+        let state = app.state::<AppState>();
+        let _account_change = acquire_account_change(state.inner())?;
+        let response: SyncRecoveryRestoreResponse = authenticated_endpoint(
+            state.inner(),
+            "/sync/recovery/restore",
+            Some(serde_json::json!({
+                "targetAt": request.target_at,
+                "dataGeneration": request.data_generation,
+                "password": request.password,
+                "confirm": true,
+            })),
+        )?;
+        // The server revokes every token at restore time. Remove the local
+        // credential too so this installation cannot accidentally write its
+        // pre-restore state back before the user deliberately reauthenticates.
+        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        clear_sync_account(db)?;
+        Ok(response)
+    })
+    .await
+    .map_err(|e| format!("云端恢复任务失败：{e}"))?
+}
+
+#[tauri::command]
 pub(crate) async fn auth_delete_account(
     app: tauri::AppHandle,
     request: AccountDeleteRequest,
@@ -1511,7 +1605,7 @@ fn sync_now_inner_with_limits_impl(
             request_timeout,
         )?)
     };
-    let (settings, device_id, scope, cursor) = {
+    let (settings, device_id, scope, cursor, is_initial_scope_sync) = {
         let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
         if !saved_account_unchanged(db, &initial_settings, &initial_verified_scope)? {
@@ -1537,8 +1631,15 @@ fn sync_now_inner_with_limits_impl(
             // cursor advanced. Start from the beginning once it is enabled.
             db.set_sync_scope_metadata(&scope, "cursor", "")?;
         }
+        let is_initial_scope_sync = db.sync_scope_metadata(&scope, "last_sync_at").is_none();
         let cursor = db.sync_scope_metadata(&scope, "cursor").unwrap_or_default();
-        (settings, db.device_id(), scope, cursor)
+        (
+            settings,
+            db.device_id(),
+            scope,
+            cursor,
+            is_initial_scope_sync,
+        )
     };
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(request_timeout))
@@ -1605,7 +1706,12 @@ fn sync_now_inner_with_limits_impl(
         pulled += {
             let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
             let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-            db.import_sync_page(&scope, &enabled_entities, &page_checkpoint)?
+            db.import_sync_page_with_remote_app_settings_priority(
+                &scope,
+                &enabled_entities,
+                &page_checkpoint,
+                is_initial_scope_sync,
+            )?
         };
         log_sync_stage(
             "pull_commit",
@@ -1955,8 +2061,7 @@ pub(crate) async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::collections::VecDeque;
 
     #[test]
     fn auth_request_deserializes_as_one_object() {
@@ -2295,33 +2400,54 @@ mod tests {
     }
 
     #[test]
-    fn request_retry_recovers_against_a_real_transient_http_endpoint() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            for request_index in 0..3 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request).unwrap();
-                let status = if request_index < 2 {
-                    "503 Service Unavailable"
-                } else {
-                    "200 OK"
-                };
-                write!(
-                    stream,
-                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
-                .unwrap();
-                stream.flush().unwrap();
-            }
-        });
-
-        let url = format!("http://{address}/sync-test");
-        sync_request_with_retry_delays("integration-test", None, &[0, 0], || {
-            ureq::get(&url).call().map(|_| ())
+    fn request_retry_recovers_from_a_scripted_transient_transport() {
+        // `sync_request_with_retry_delays` owns retry policy and accepts the
+        // concrete ureq call as a closure. A scripted transport checks the
+        // same 503 → 503 → success boundary without binding a loopback port,
+        // which is prohibited in some sandboxed test environments.
+        let mut responses = VecDeque::from([
+            Err(ureq::Error::StatusCode(503)),
+            Err(ureq::Error::StatusCode(503)),
+            Ok("synced"),
+        ]);
+        let value = sync_request_with_retry_delays("integration-test", None, &[0, 0], || {
+            responses.pop_front().expect("scripted transport response")
         })
         .unwrap();
-        server.join().unwrap();
+
+        assert_eq!(value, "synced");
+        assert!(responses.is_empty());
+    }
+
+    #[test]
+    fn cloud_recovery_payloads_keep_only_status_and_result_metadata() {
+        // The Python API returns snake_case. The Tauri boundary re-serializes
+        // these structs as camelCase for the TypeScript port.
+        let status: SyncRecoveryStatus = serde_json::from_value(serde_json::json!({
+            "available": true,
+            "retention_days": 90,
+            "restorable_from": 1_700_000_000_000i64,
+            "latest_version_at": 1_700_000_100_000i64,
+            "version_count": 12,
+            "data_generation": 4,
+        }))
+        .unwrap();
+        assert!(status.available);
+        assert_eq!(status.retention_days, 90);
+        assert_eq!(status.data_generation, 4);
+
+        let result: SyncRecoveryRestoreResponse = serde_json::from_value(serde_json::json!({
+            "data_generation": 5,
+            "tokens_revoked": true,
+            "target_at": 1_700_000_050_000i64,
+            "restored_at": 1_700_000_200_000i64,
+            "restored_entities": 9,
+            "tombstoned_entities": 3,
+        }))
+        .unwrap();
+        assert!(result.tokens_revoked);
+        assert_eq!(result.restored_entities, 9);
+        assert_eq!(result.tombstoned_entities, 3);
+        assert_eq!(result.data_generation, 5);
     }
 }

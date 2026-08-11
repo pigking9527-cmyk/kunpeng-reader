@@ -4,6 +4,35 @@
 var measurer,chapterPages=[],measureDone=false,measureToken=0,measureTimer=null,pageSig='',measurePaused=false;
 var fullBookMeasureEnabled=true;
 
+function fastTextRangeNeedsChunks(rects){
+  var limit=Math.max(24,lineHeightPx()*2.4),seen=0;
+  for(var i=0;i<(rects?rects.length:0);i++){
+    var r=rects[i];
+    if(!r||r.width<1||r.height<3)continue;
+    seen++;
+    if(r.height>limit)return true;
+  }
+  return seen===0;
+}
+function appendFastRangeRects(out,node,rects,pr,scrollTop){
+  for(var i=0;i<(rects?rects.length:0);i++){
+    var r=rects[i];
+    if(!r||r.width<1||r.height<3)continue;
+    out.push({top:r.top-pr.top+scrollTop,bottom:r.bottom-pr.top+scrollTop,height:r.height,left:r.left-pr.left,right:r.right-pr.left,fragments:[],flowNodes:[node]});
+  }
+}
+function appendFastTextRangeLines(out,node,range,start,end,pr,scrollTop){
+  var rects=[];
+  try{range.setStart(node,start);range.setEnd(node,end);rects=range.getClientRects();}catch(_){return;}
+  if(!fastTextRangeNeedsChunks(rects)){appendFastRangeRects(out,node,rects,pr,scrollTop);return;}
+  // 极少数电子书会把每个 192 字片段也合成一个高矩形；仅对该小片段退回逐字
+  // 测量，确保页面可读，而不会把整章都变成逐字扫描。
+  for(var i=start;i<end;i++){
+    try{range.setStart(node,i);range.setEnd(node,i+1);rects=range.getClientRects();}catch(_){continue;}
+    appendFastRangeRects(out,node,rects,pr,scrollTop);
+  }
+}
+function imagePreviewGapPx(){return 4;}
 function primaryCharacterRect(rects){
   if(!rects||!rects.length)return null;
   var best=null,bestScore=-1;

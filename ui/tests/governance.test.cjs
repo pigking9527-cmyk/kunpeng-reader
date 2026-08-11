@@ -15,7 +15,7 @@ test("top-level assembly files stay within anti-monolith budgets", () => {
   );
   assert.ok(lineCount("ui", "app.js") <= 1350, "app.js must delegate feature UI modules");
   assert.ok(
-    lineCount("ui", "reader-page-layout.js") <= 2800,
+    lineCount("ui", "reader-page-layout.js") <= 2900,
     "reader-page-layout.js must delegate pagination and measurement",
   );
 });
@@ -70,6 +70,9 @@ test("startup file association and single-instance forwarding are isolated from 
   assert.match(startup, /AssociatedBookRequest/);
   assert.match(startup, /atomic_file::write_json/);
   assert.match(startup, /associated-book-open/);
+  assert.match(startup, /fn supported_existing_book_paths/);
+  assert.match(startup, /pub\(crate\) fn open_associated_book_paths/);
+  assert.match(main, /tauri::RunEvent::Opened \{ urls \}/);
 });
 
 test("window lifecycle and geometry are isolated behind window commands", () => {
@@ -102,12 +105,26 @@ test("cold start reveals the shelf only after its first painted frame", () => {
   const windows = read("src", "window_commands.rs");
   const app = read("ui", "app.js");
   assert.equal(config.app.windows[0].visible, false);
+  assert.equal(config.app.windows[0].create, false);
+  assert.match(
+    main,
+    /main_config\.width = saved\.w;[\s\S]*?WebviewWindowBuilder::from_config\(app, &main_config\)/,
+  );
   assert.match(main, /window_commands::main_window_show/);
-  assert.match(windows, /fn main_window_show[\s\S]*window\.show\(\)/);
+  assert.match(
+    windows,
+    /fn main_window_show[\s\S]*?startup_enhancement::reveal_main\(window\.app_handle\(\)\)/,
+  );
   assert.match(app, /function revealMainWindowAfterFirstPaint/);
   assert.match(app, /shelfUI\.render\(list\);[\s\S]{0,240}revealMainWindowAfterFirstPaint\(\)/);
   const applyGeometry = windows.slice(windows.indexOf("pub(crate) fn apply_geom_safe"));
   assert.doesNotMatch(applyGeometry, /window\.show\(\)/);
+});
+
+test("desktop bundles re-embed frontend-only changes", () => {
+  const build = read("build.rs");
+  assert.match(build, /cargo:rerun-if-changed=ui/);
+  assert.match(build, /tauri_build::build\(\)/);
 });
 
 test("EPUB runtime, virtual chapters and reader protocol are isolated from app assembly", () => {

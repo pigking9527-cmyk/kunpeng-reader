@@ -5,8 +5,39 @@ use crate::{
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
+
+/// A short-lived cancellation channel for one local-library AI request.
+/// The request id is generated in the renderer and is never persisted or
+/// synchronized; it only lets a later cancel command drop the active HTTP
+/// future on this device.
+pub(crate) struct LibraryAiRequestGuard {
+    id: String,
+    registry: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    sender: watch::Sender<bool>,
+}
+
+impl LibraryAiRequestGuard {
+    pub(crate) fn cancellation(&self) -> watch::Receiver<bool> {
+        self.sender.subscribe()
+    }
+}
+
+impl Drop for LibraryAiRequestGuard {
+    fn drop(&mut self) {
+        let Ok(mut registry) = self.registry.lock() else {
+            return;
+        };
+        if registry
+            .get(&self.id)
+            .is_some_and(|current| current.same_channel(&self.sender))
+        {
+            registry.remove(&self.id);
+        }
+    }
+}
 
 pub(crate) struct AppState {
     pub(crate) background_tasks: background_tasks::BackgroundTaskRegistry,
@@ -31,6 +62,7 @@ pub(crate) struct AppState {
     pub(crate) vocab: Mutex<vocab::VocabStore>,
     pub(crate) word_pack: Mutex<tts::WordPackState>,
     pub(crate) sync_running: AtomicBool,
+    library_ai_requests: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     memory_reclaimers: Mutex<Vec<memory_budget::ReclaimerHandle>>,
 }
 
@@ -58,8 +90,43 @@ impl AppState {
             vocab: Mutex::new(vocab::VocabStore::load()),
             word_pack: Mutex::new(tts::WordPackState::default()),
             sync_running: AtomicBool::new(false),
+            library_ai_requests: Arc::new(Mutex::new(HashMap::new())),
             memory_reclaimers: Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn begin_library_ai_request(
+        &self,
+        id: String,
+    ) -> Result<LibraryAiRequestGuard, String> {
+        let (sender, _receiver) = watch::channel(false);
+        let mut registry = self
+            .library_ai_requests
+            .lock()
+            .map_err(|_| "书库问答取消状态不可用".to_string())?;
+        if registry.contains_key(&id) {
+            return Err("同一书库问答请求仍在运行".to_string());
+        }
+        registry.insert(id.clone(), sender.clone());
+        Ok(LibraryAiRequestGuard {
+            id,
+            registry: Arc::clone(&self.library_ai_requests),
+            sender,
+        })
+    }
+
+    pub(crate) fn cancel_library_ai_request(&self, id: &str) -> Result<bool, String> {
+        let registry = self
+            .library_ai_requests
+            .lock()
+            .map_err(|_| "书库问答取消状态不可用".to_string())?;
+        let Some(sender) = registry.get(id) else {
+            return Ok(false);
+        };
+        sender
+            .send(true)
+            .map_err(|_| "书库问答请求已结束".to_string())?;
+        Ok(true)
     }
 
     pub(crate) fn install_memory_reclaimers(&self) {
@@ -138,5 +205,38 @@ impl AppState {
         self.reranker.lock().map(|mut model| *model = None).ok();
         semantic::clear_semantic_aux_memory_caches();
         self.backfilled.store(false, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+
+    #[test]
+    fn library_ai_cancel_is_scoped_to_one_live_request_and_cleans_up() {
+        let state = AppState::new(None);
+        let first = state
+            .begin_library_ai_request("library-one".to_string())
+            .expect("first request registers");
+        let second = state
+            .begin_library_ai_request("library-two".to_string())
+            .expect("second request registers");
+        let first_cancel = first.cancellation();
+        let second_cancel = second.cancellation();
+
+        assert!(state
+            .cancel_library_ai_request("library-one")
+            .expect("request can cancel"));
+        assert!(*first_cancel.borrow());
+        assert!(!*second_cancel.borrow());
+        assert!(!state
+            .cancel_library_ai_request("unknown")
+            .expect("unknown is a harmless no-op"));
+
+        drop(first);
+        assert!(!state
+            .cancel_library_ai_request("library-one")
+            .expect("finished request no longer exists"));
+        drop(second);
     }
 }

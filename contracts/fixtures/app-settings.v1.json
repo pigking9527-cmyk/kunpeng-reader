@@ -34,6 +34,7 @@
           "version": 1,
           "enabled": true,
           "globalPrecision": "5",
+          "profilesInitialized": true,
           "profiles": [],
           "hintSettings": {
             "enabled": true,

@@ -1,5 +1,6 @@
 //! Windows CUDA/cuDNN large runtime downloaded on demand.
 
+#[cfg(target_os = "windows")]
 use serde::Serialize;
 
 pub(crate) const DOWNLOAD_BYTES: u64 = if cfg!(target_os = "windows") {
@@ -539,11 +540,13 @@ mod windows {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) fn prepare() {
     #[cfg(target_os = "windows")]
     windows::prepare();
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) fn install_available() -> bool {
     cfg!(target_os = "windows")
 }

@@ -43,6 +43,7 @@ function fmtWords(n) {
 }
 let statScope = "day";
 let statAnchor = new Date(); // 当前查看的日/月/年
+let firstReadingDay = null;
 const STAT_VISIBLE_KEY = "readingStatsVisibleItems";
 const STAT_CHART_METRIC_KEY = "readingStatsChartMetric";
 const STAT_LINE_CHART_KEY = "readingStatsLineChart";
@@ -63,6 +64,9 @@ let statLineChart = localStorage.getItem(STAT_LINE_CHART_KEY) === "1";
 let statHeatmapTheme = STAT_HEATMAP_THEMES.has(localStorage.getItem(STAT_HEATMAP_THEME_KEY))
   ? localStorage.getItem(STAT_HEATMAP_THEME_KEY)
   : "green";
+// 图形切换只能改变绘制方式，不能改变下方内容的起始位置。
+const STAT_CHART_WIDTH = 600;
+const STAT_CHART_HEIGHT = 156;
 let statsRequestSerial = 0;
 function readStatVisible() {
   try {
@@ -144,12 +148,62 @@ function statPeriodLabel() {
   if (statScope === "year") return new Intl.DateTimeFormat(global.ReaderAppI18n?.resolvedLanguage?.() || undefined, { year: "numeric" }).format(d);
   return statsText("statsAll", "All");
 }
+
+function normalizeStatAnchor(date, scope = statScope) {
+  const value = new Date(date);
+  if (scope === "month") return new Date(value.getFullYear(), value.getMonth(), 1);
+  if (scope === "year") return new Date(value.getFullYear(), 0, 1);
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate());
+}
+
+function firstStatAnchor() {
+  return firstReadingDay ? normalizeStatAnchor(dateFromYmd(firstReadingDay)) : null;
+}
+
+function lastStatAnchor() {
+  return normalizeStatAnchor(new Date());
+}
+
+function compareStatAnchors(first, second) {
+  return first.getTime() - second.getTime();
+}
+
+function syncStatsNavigation() {
+  const previous = document.getElementById("stats-prev");
+  const next = document.getElementById("stats-next");
+  const showNavigation = statScope !== "total";
+  const earliest = firstStatAnchor();
+  const latest = lastStatAnchor();
+  const anchor = normalizeStatAnchor(statAnchor);
+  const previousDisabled = !showNavigation || !earliest || compareStatAnchors(anchor, earliest) <= 0;
+  const nextDisabled = !showNavigation || compareStatAnchors(anchor, latest) >= 0;
+  [previous, next].forEach((button) => {
+    if (!button) return;
+    button.style.visibility = showNavigation ? "visible" : "hidden";
+  });
+  if (previous) previous.disabled = previousDisabled;
+  if (next) next.disabled = nextDisabled;
+}
+
+function steppedStatAnchor(direction) {
+  const current = normalizeStatAnchor(statAnchor);
+  if (statScope === "day") return addDays(current, direction);
+  if (statScope === "month") return new Date(current.getFullYear(), current.getMonth() + direction, 1);
+  if (statScope === "year") return new Date(current.getFullYear() + direction, 0, 1);
+  return current;
+}
+
 function statStep(dir) {
-  const d = statAnchor;
-  if (statScope === "day") d.setDate(d.getDate() + dir);
-  else if (statScope === "month") d.setMonth(d.getMonth() + dir);
-  else if (statScope === "year") d.setFullYear(d.getFullYear() + dir);
-  else return;
+  if (statScope === "total") return;
+  const candidate = steppedStatAnchor(dir);
+  const earliest = firstStatAnchor();
+  const latest = lastStatAnchor();
+  if ((dir < 0 && (!earliest || compareStatAnchors(candidate, earliest) < 0)) ||
+      (dir > 0 && compareStatAnchors(candidate, latest) > 0)) {
+    syncStatsNavigation();
+    return;
+  }
+  statAnchor = candidate;
   renderStats();
 }
 function fmtAxisTime(sec) {
@@ -162,12 +216,13 @@ function fmtAxisTime(sec) {
 function fmtAxisValue(v, metric) {
   return metric === "words" ? fmtWords(v || 0) : fmtAxisTime(v || 0);
 }
+function statChartColumnX(index, count, width, padLeft, padRight) {
+  const plotWidth = width - padLeft - padRight;
+  return padLeft + ((index + 0.5) / Math.max(1, count)) * plotWidth;
+}
 function barChart(bars, color, metric) {
-  const W = 600, H = 142, padL = 42, padR = 14, padT = 10, padB = 22;
-  const rawSlot = bars.length ? (W - padL - padR) / bars.length : 0;
-  const slot = bars.length <= 12 ? Math.min(rawSlot, 58) : rawSlot;
-  const chartWidth = slot * bars.length;
-  const left = padL + Math.max(0, (W - padL - padR - chartWidth) / 2);
+  const W = STAT_CHART_WIDTH, H = STAT_CHART_HEIGHT, padL = 42, padR = 14, padT = 23, padB = 22;
+  const slot = bars.length ? (W - padL - padR) / bars.length : 0;
   const max = Math.max(1, ...bars.map((b) => b.value));
   const everyLabel = bars.length <= 24 ? 1 : Math.ceil(bars.length / 12);
   let s = `<svg viewBox="0 0 ${W} ${H}">`;
@@ -177,10 +232,10 @@ function barChart(bars, color, metric) {
     s += `<text class="axis-label" x="${padL - 5}" y="${y + 3}" text-anchor="end">${fmtAxisValue(max * ratio, metric)}</text>`;
   });
   bars.forEach((b, i) => {
-    const h = (b.value / max) * (H - padT - padB), x = left + i * slot, y = H - padB - h;
+    const h = (b.value / max) * (H - padT - padB), x = padL + i * slot, y = H - padB - h;
     const rectW = Math.max(4, slot * 0.72);
     s += `<rect x="${x + (slot - rectW) / 2}" y="${y}" width="${rectW}" height="${h}" rx="2" fill="${b.value ? color : "#e3e6ec"}"><title>${b.label}：${metric === "words" ? fmtWords(b.value || 0) : fmtTime(b.value || 0)}</title></rect>`;
-    if (i % everyLabel === 0) s += `<text x="${x + slot / 2}" y="${H - 6}" font-size="9" fill="#aaa" text-anchor="middle">${b.label}</text>`;
+    if (i % everyLabel === 0) s += `<text x="${statChartColumnX(i, bars.length, W, padL, padR)}" y="${H - 6}" font-size="9" fill="#aaa" text-anchor="middle">${b.label}</text>`;
   });
   return s + "</svg>";
 }
@@ -196,11 +251,10 @@ function compactChartValue(value, metric) {
   return `${(amount / 3600).toFixed(amount >= 36000 ? 0 : 1).replace(/\.0$/, "")}h`;
 }
 function lineChart(bars, color, metric) {
-  const W = 600, H = 156, padL = 42, padR = 14, padT = 23, padB = 22;
-  const plotW = W - padL - padR;
+  const W = STAT_CHART_WIDTH, H = STAT_CHART_HEIGHT, padL = 42, padR = 14, padT = 23, padB = 22;
   const max = Math.max(1, ...bars.map((bar) => bar.value));
   const everyLabel = bars.length <= 24 ? 1 : Math.ceil(bars.length / 12);
-  const pointX = (index) => bars.length <= 1 ? padL + plotW / 2 : padL + (index / (bars.length - 1)) * plotW;
+  const pointX = (index) => statChartColumnX(index, bars.length, W, padL, padR);
   const pointY = (value) => padT + (1 - ((Number(value) || 0) / max)) * (H - padT - padB);
   let svg = `<svg class="stats-line-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="${statsEscapeAttr(statsText("lineChartData", "Line chart data"))}">`;
   [0.5, 1].forEach((ratio) => {
@@ -338,9 +392,7 @@ async function renderStats() {
     bodyEl.classList.add("refreshing");
   }
   document.getElementById("stats-period").textContent = statPeriodLabel();
-  const navVis = statScope === "total" ? "hidden" : "visible";
-  document.getElementById("stats-prev").style.visibility = navVis;
-  document.getElementById("stats-next").style.visibility = navVis;
+  syncStatsNavigation();
   const [from, to] = statRange();
   let data, allData;
   try {
@@ -358,6 +410,10 @@ async function renderStats() {
     return;
   }
   if (requestSerial !== statsRequestSerial) return;
+  firstReadingDay = (Array.isArray(allData.days) ? allData.days : []).reduce((earliest, day) => (
+    !earliest || day.day < earliest ? day.day : earliest
+  ), null);
+  syncStatsNavigation();
   const unit = { day: statsText("day", "Day"), month: statsText("month", "Month"), year: statsText("year", "Year"), total: statsText("statsPeriodUnit", "period") }[statScope];
   const statItems = [
     ["duration", statsText("readingDuration", "Reading time"), fmtTime(data.total_seconds)],
@@ -405,6 +461,7 @@ function openStats() {
   closeSearch(true);
   statScope = "day";
   statAnchor = new Date();
+  firstReadingDay = null;
   document.querySelectorAll(".stats-tab").forEach((t) => t.classList.toggle("active", t.dataset.scope === "day"));
   statsModal.classList.add("show");
   renderStats();

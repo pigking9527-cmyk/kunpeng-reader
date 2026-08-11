@@ -24,7 +24,7 @@
   const status = document.getElementById("feedback-status");
   const MAX_IMAGES = 3;
   const MAX_IMAGE_BYTES = 1024 * 1024;
-  const MAX_JSON_BYTES = 256 * 1024;
+  const MAX_JSON_BYTES = 4 * 1024 * 1024;
   let kind = "bug";
   let images = [];
   let jsonAttachment = null;

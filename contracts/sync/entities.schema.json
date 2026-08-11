@@ -141,6 +141,7 @@
         "version": { "const": 1 },
         "enabled": { "type": "boolean" },
         "globalPrecision": { "enum": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] },
+        "profilesInitialized": { "description": "When true, an empty profiles list is an explicit user deletion. Legacy payloads without it are treated as migration-ambiguous.", "type": "boolean" },
         "profiles": { "type": "array", "maxItems": 24, "items": { "$ref": "#/$defs/gestureProfileV1" } },
         "hintSettings": { "$ref": "#/$defs/gestureHintSettingsV1" }
       },

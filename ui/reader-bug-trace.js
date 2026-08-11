@@ -8,7 +8,6 @@
   "use strict";
 
   const WINDOW_MS = 2 * 60 * 1000;
-  const MAX_EVENTS = 320;
   const SAFE_EVENT_KEYS = new Set([
     "source", "outcome", "zone", "target", "direction", "key", "overlay",
     "chapter", "page", "progress", "chapter_frac", "anchor_offset", "sequence", "total_chapters", "x_pct",
@@ -16,11 +15,16 @@
     "frame_ready", "immersive", "loading", "pages", "turn_id", "input",
     "before_chapter", "before_page", "after_chapter", "after_page",
     "chapter_pending", "chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "flow_mode", "page_mode",
+    // 触控板分页只保存脱敏输入与手势状态，用于定位惯性事件或计时器竞争。
+    "wheel_seq", "wheel_delta_x", "wheel_delta_y", "wheel_delta_px", "wheel_delta_mode", "wheel_gap_ms", "wheel_accumulated_px", "wheel_threshold_px", "wheel_quiet_ms", "wheel_gesture_age_ms", "wheel_gesture_active", "wheel_timer_active", "wheel_event_cancelable", "wheel_replay", "wheel_mode_pending",
     // 图片分页只保存布局数值和模式，不保存正文、图片地址或本机文件路径。
     "image_mode", "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
     "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text", "image_near_top", "image_text_before", "image_probed",
     // 分页空白诊断：只保存像素几何，绝不保存文字、DOM 路径或 URL。
     "layout_fast", "layout_view_height", "layout_root_height", "layout_root_style_height", "layout_padding_bottom", "layout_line_height", "layout_step", "layout_current_line_count", "layout_last_top", "layout_last_bottom", "layout_last_height", "layout_next_top", "layout_next_bottom", "layout_next_height", "layout_visible_free", "layout_content_free", "layout_tail_cross", "layout_tail_fit", "layout_tail_tightened",
+    // 阅读偏好预览浮层诊断：只记录固定的渲染元数据，便于判断层叠与挂载问题。
+    "preview_created", "preview_connected", "preview_parent", "preview_position", "preview_z_index", "preview_display", "preview_visibility", "preview_width", "preview_height", "preview_top", "preview_left", "preview_type", "preview_phase",
+    "modal_position", "modal_z_index", "modal_display", "modal_parent", "modal_contains_preview",
   ]);
   const BLOCKERS = new Set(["selection", "drag", "link", "overlay", "chapter_pending", "turn_busy"]);
   const events = [];
@@ -67,7 +71,6 @@
   function prune(now) {
     const cutoff = now - WINDOW_MS;
     while (events.length && events[0].at_ms < cutoff) events.shift();
-    while (events.length > MAX_EVENTS) events.shift();
   }
 
   function record(type, detail) {
@@ -338,7 +341,6 @@
 
   return Object.freeze({
     WINDOW_MS,
-    MAX_EVENTS,
     record,
     ingestPageEvent,
     capture,

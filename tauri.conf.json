@@ -1,9 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "鲲鹏阅读器",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "identifier": "com.pigking.ebookreader",
   "build": {
+    "beforeDevCommand": "npm run desktop-ui:build",
+    "beforeBuildCommand": "npm run desktop-ui:build",
     "frontendDist": "./ui"
   },
   "app": {
@@ -11,11 +13,12 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "鲲鹏阅读器",
         "width": 980,
         "height": 720,
-        "minWidth": 480,
-        "minHeight": 360,
+        "minWidth": 960,
+        "minHeight": 640,
         "visible": false,
         "decorations": false,
         "url": "index.html"
@@ -45,5 +48,3 @@
     "icon": ["icons/icon.ico", "icons/icon.png", "icons/icon.icns"]
   }
 }
-
-

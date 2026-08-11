@@ -61,24 +61,32 @@ function readerBugTrace(kind,outcome,e,extra){
   if(y!==null)data.y_pct=Math.max(0,Math.min(100,Math.round(y/Math.max(1,window.innerHeight)*1000)/10));
   if(extra&&typeof extra==='object'){
     ['direction','key','duration_ms','chapter','page','pages','turn_id','input','before_chapter','before_page','after_chapter','after_page',
+      'wheel_seq','wheel_delta_x','wheel_delta_y','wheel_delta_px','wheel_delta_mode','wheel_gap_ms','wheel_accumulated_px','wheel_threshold_px','wheel_quiet_ms','wheel_gesture_age_ms','wheel_gesture_active','wheel_timer_active','wheel_event_cancelable','wheel_replay','wheel_mode_pending',
       'image_mode','image_source_page','image_candidate_page','image_top','image_width','image_height',
       'image_free_height','image_preview_height','image_next_count','image_future_count','image_skipped_text','image_near_top','image_text_before','image_probed'
     ].forEach(function(key){if(extra[key]!==undefined)data[key]=extra[key];});
   }
   parent.postMessage({bugTrace:data},'*');
 }
-function markPageTurnInput(input){pageTurnTraceInput=input||'unknown';}
+var pageTurnTraceDetail=null;
+function markPageTurnInput(input,detail){pageTurnTraceInput=input||'unknown';pageTurnTraceDetail=detail&&typeof detail==='object'?detail:null;}
+function pageTurnTraceData(token,extra){
+  var data={turn_id:token.id,direction:token.direction,input:token.input,before_chapter:token.chapter,before_page:token.page};
+  if(extra)Object.keys(extra).forEach(function(key){if(/^wheel_/.test(key))data[key]=extra[key];});
+  return data;
+}
 function beginPageTurnBugTrace(direction){
-  var token={id:++pageTurnTraceSequence,direction:direction,chapter:curCh,page:pageInCh,input:pageTurnTraceInput||'unknown'};
-  pageTurnTraceInput='unknown';
-  readerBugTrace('turn','requested',null,{turn_id:token.id,direction:token.direction,input:token.input,before_chapter:token.chapter,before_page:token.page});
+  var token={id:++pageTurnTraceSequence,direction:direction,chapter:curCh,page:pageInCh,input:pageTurnTraceInput||'unknown',detail:pageTurnTraceDetail};
+  pageTurnTraceInput='unknown';pageTurnTraceDetail=null;
+  readerBugTrace('turn','requested',null,pageTurnTraceData(token,token.detail));
   return token;
 }
 function finishPageTurnBugTrace(token){
   if(!token)return;
   var moved=token.chapter!==curCh||token.page!==pageInCh;
   var busy=chapterPending>0||(typeof chapterTurnPending!=='undefined'&&chapterTurnPending);
-  readerBugTrace('turn',moved?'applied':(busy?'turn_busy':'no_change'),null,{turn_id:token.id,direction:token.direction,input:token.input,before_chapter:token.chapter,before_page:token.page,after_chapter:curCh,after_page:pageInCh});
+  var data=pageTurnTraceData(token,token.detail);data.after_chapter=curCh;data.after_page=pageInCh;
+  readerBugTrace('turn',moved?'applied':(busy?'turn_busy':'no_change'),null,data);
 }
 function beginChapterBugTrace(chapter,where){
   chapterPending++;

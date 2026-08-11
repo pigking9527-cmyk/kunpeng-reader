@@ -337,24 +337,42 @@ function saveSettings() {
   localStorage.setItem("readerSettings", JSON.stringify(defaultAppearanceSettings));
 }
 // 把设置发给合并页（实时注入样式）
-function pushSettings() {
+function pushSettings(options) {
   // UI language is window state, not a persisted reading preference.  Pass it
   // through with every layout update so the injected chapter iframe never
   // keeps stale Chinese controls after the user changes language.
   const pageSettings = Object.assign({}, settings, {
     uiLanguage: window.ReaderI18n?.resolvedLanguage?.() || "zh-CN",
   });
-  if (frame.contentWindow) frame.contentWindow.postMessage({ settings: pageSettings }, "*");
+  if (frame.contentWindow) frame.contentWindow.postMessage({
+    settings: pageSettings,
+    deferModeChange: !!options?.deferModeChange,
+  }, "*");
+  // WebKit 不会把 macOS 的 momentumPhase 交给网页 WheelEvent。整屏模式由
+  // 原生层过滤惯性尾流，正文仅处理手指仍接触触控板时的直接输入；滚动模式
+  // 则完全保留系统的自然惯性滚动。
+  if (typeof readerSettingsInvoke === "function") {
+    readerSettingsInvoke("set_reader_paged_wheel_momentum_filter", {
+      enabled: !window.isPdf && pageSettings.flowMode !== "scroll",
+    }).catch(() => {});
+  }
 }
+window.addEventListener("pagehide", () => {
+  if (typeof readerSettingsInvoke === "function") {
+    readerSettingsInvoke("set_reader_paged_wheel_momentum_filter", { enabled: false }).catch(() => {});
+  }
+});
 window.addEventListener("reader-language-changed", pushSettings);
-function onChange() {
+function onChange(options) {
   Object.keys(settings).forEach((key) => { if (!READER_APPEARANCE_KEYS.has(key)) defaultAppearanceSettings[key] = settings[key]; });
   saveSettings();
-  pushSettings();
+  // 版式滑杆的实时预览由独立的阅读页承担。拖动过程中不要反复重排
+  // 用户正在看的 iframe；松手后再一次性应用到真实阅读页。
+  if (!options?.deferPageApply) pushSettings(options);
   window.dispatchEvent(new CustomEvent("reader-settings-changed", { detail: Object.assign({}, settings) }));
 }
 
-function setReaderSettings(patch) {
+function setReaderSettings(patch, options) {
   Object.assign(settings, patch || {});
   Object.assign(defaultAppearanceSettings, patch || {});
   sanitizeBackgroundImage(settings);
@@ -367,7 +385,7 @@ function setReaderSettings(patch) {
   }
   normalizeModeSettings();
   applyShellTheme(settings.theme);
-  onChange();
+  onChange(options);
 }
 
 function applyAppearanceSettings(next) {
@@ -417,6 +435,7 @@ function updateAppearance(patch, scope) {
 window.ReaderSettings = Object.freeze({
   get() { return Object.assign({}, settings); },
   update: setReaderSettings,
+  applyDeferredSettings() { pushSettings(); },
   getAppearance(scope) { return appearanceForScope(scope); },
   updateAppearance,
   setBookContext(bookId) {
@@ -572,6 +591,14 @@ function bindRange(id, vid, key, fmt) {
   el.addEventListener("input", () => {
     settings[key] = parseFloat(el.value);
     vEl.textContent = fmt(settings[key]);
+    if (key === "ttsRate") {
+      const counterpartId = id === "set-ttsrate" ? "quick-set-ttsrate" : "set-ttsrate";
+      const counterpartValueId = id === "set-ttsrate" ? "quick-v-ttsrate" : "v-ttsrate";
+      const counterpart = document.getElementById(counterpartId);
+      const counterpartValue = document.getElementById(counterpartValueId);
+      if (counterpart) counterpart.value = el.value;
+      if (counterpartValue) counterpartValue.textContent = fmt(settings[key]);
+    }
     onChange();
   });
 }
@@ -587,6 +614,7 @@ function ensureNoteSizeControl() {
 }
 function bindNum(id, key) {
   const el = document.getElementById(id);
+  if (!el) return;
   const lo = el.min !== "" ? parseInt(el.min, 10) : 0;
   const hi = el.max !== "" ? parseInt(el.max, 10) : 9999;
   const clamp = (v) => Math.max(lo, Math.min(hi, isNaN(v) ? 0 : v));
@@ -783,12 +811,10 @@ function initSettingsUI() {
   }
   if (dualModeToggle) {
     dualModeToggle.addEventListener("change", () => {
-      if (dualModeToggle.checked) {
-        settings.flowMode = "paged";
-        settings.pageMode = "dual";
-      } else {
-        settings.pageMode = "single";
-      }
+      // 单页/双页属于分页模式；无论朝哪个方向切换都立即退出滚动模式。
+      // 这样从“滚动”点回“单页”时不会只改一个不可见的 pageMode。
+      settings.flowMode = "paged";
+      settings.pageMode = dualModeToggle.checked ? "dual" : "single";
       refreshReadingModeToggles();
       onChange();
     });
@@ -808,7 +834,7 @@ function initSettingsUI() {
         animateToggleOff(dualModeToggle);
       }
       refreshReadingModeToggles();
-      onChange();
+      onChange({ deferModeChange: true });
     });
   }
   refreshReadingModeToggles();
@@ -818,13 +844,31 @@ function initSettingsUI() {
     const el = document.getElementById(id);
     if (!el) return;
     el.value = settings[key];
-    el.addEventListener("change", () => { settings[key] = el.value; onChange(); });
+    el.addEventListener("change", () => {
+      settings[key] = el.value;
+      if (key === "ttsSource") {
+        ["set-ttssrc", "quick-set-ttssrc"].forEach((sourceId) => {
+          const source = document.getElementById(sourceId);
+          if (source) source.value = el.value;
+        });
+      }
+      onChange();
+    });
   };
   bindSel("set-ttssrc", "ttsSource");
-  bindRange("set-ttsrate", "v-ttsrate", "ttsRate", (v) => v.toFixed(1) + "×");
+  bindSel("quick-set-ttssrc", "ttsSource");
+  const formatTtsRate = (value) => {
+    const twentieths = Math.round(value * 20);
+    const rounded = twentieths / 20;
+    return rounded.toFixed(2) + "×";
+  };
+  bindRange("set-ttsrate", "v-ttsrate", "ttsRate", formatTtsRate);
+  bindRange("quick-set-ttsrate", "quick-v-ttsrate", "ttsRate", formatTtsRate);
+  document.getElementById("quick-tts-btn")?.addEventListener("click", () => {
+    document.getElementById("tts-btn")?.click();
+  });
 
-  // 精简与经典界面共用同一份真实控件和设置状态。经典面板里的控件只是
-  // 可视镜像，所有输入都转发到阅读偏好中的主控件，避免两套数值分叉。
+  // 经典模式只镜像完整阅读偏好中的低频排版项，避免两套设置状态分叉。
   const quickSettingsPanel = document.getElementById("settings");
   const quickSettingsModeKey = "readerQuickSettingsUiMode";
   const quickMirrorSync = [];
@@ -850,7 +894,6 @@ function initSettingsUI() {
     quickMirrorSync.push(sync);
     sync();
   }
-  connectQuickMirror("quick-set-ttsrate", "set-ttsrate", "quick-v-ttsrate", "v-ttsrate");
   connectQuickMirror("quick-set-style-mode", "set-style-mode");
   connectQuickMirror("quick-set-note-size", "set-note-size", "quick-v-note-size", "v-note-size");
   connectQuickMirror("quick-set-para", "set-para", "quick-v-para", "v-para");
@@ -862,67 +905,6 @@ function initSettingsUI() {
   connectQuickMirror("quick-set-ml", "set-ml");
   connectQuickMirror("quick-set-mr", "set-mr");
   const syncQuickMirrors = () => quickMirrorSync.forEach((sync) => sync());
-  const quickSettingsPreview = document.getElementById("reader-quick-layout-preview");
-  const QUICK_SETTINGS_PREVIEW_DURATION_MS = 1500;
-  const QUICK_SETTINGS_PREVIEW_EXTENSION_MS = 1000;
-  const QUICK_SETTINGS_PREVIEW_FADE_MS = 160;
-  let quickSettingsPreviewDeadline = 0;
-  let quickSettingsPreviewFadeTimer = 0;
-  let quickSettingsPreviewHideTimer = 0;
-  function hideQuickSettingsModePreview() {
-    if (quickSettingsPreviewDeadline > Date.now()) return scheduleQuickSettingsModePreviewFade();
-    quickSettingsPreview.hidden = true;
-    quickSettingsPreview.replaceChildren();
-    quickSettingsPreview.classList.remove("is-fading", "is-resetting");
-    quickSettingsPreviewDeadline = 0;
-    quickSettingsPreviewHideTimer = 0;
-  }
-  function scheduleQuickSettingsModePreviewFade() {
-    globalThis.clearTimeout(quickSettingsPreviewFadeTimer);
-    globalThis.clearTimeout(quickSettingsPreviewHideTimer);
-    const remaining = Math.max(0, quickSettingsPreviewDeadline - Date.now());
-    const fadeDelay = Math.max(0, remaining - QUICK_SETTINGS_PREVIEW_FADE_MS);
-    quickSettingsPreviewFadeTimer = globalThis.setTimeout(() => {
-      if (quickSettingsPreviewDeadline > Date.now() + QUICK_SETTINGS_PREVIEW_FADE_MS) return scheduleQuickSettingsModePreviewFade();
-      quickSettingsPreview.classList.add("is-fading");
-    }, fadeDelay);
-    quickSettingsPreviewHideTimer = globalThis.setTimeout(hideQuickSettingsModePreview, remaining);
-  }
-  function extendQuickSettingsModePreview() {
-    const now = Date.now();
-    if (quickSettingsPreview.hidden || quickSettingsPreviewDeadline <= now) return false;
-    quickSettingsPreviewDeadline += QUICK_SETTINGS_PREVIEW_EXTENSION_MS;
-    quickSettingsPreview.classList.add("is-resetting");
-    quickSettingsPreview.classList.remove("is-fading");
-    void quickSettingsPreview.offsetWidth;
-    quickSettingsPreview.classList.remove("is-resetting");
-    scheduleQuickSettingsModePreviewFade();
-    return true;
-  }
-  function showQuickSettingsModePreview() {
-    if (!quickSettingsPreview || !quickSettingsPanel) return;
-    const previewPanel = quickSettingsPanel.cloneNode(true);
-    previewPanel.removeAttribute("id");
-    previewPanel.setAttribute("aria-hidden", "true");
-    previewPanel.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
-    previewPanel.querySelectorAll("[for]").forEach((element) => element.removeAttribute("for"));
-    previewPanel.querySelectorAll("input, select, button, textarea").forEach((element) => {
-      element.disabled = true;
-      element.tabIndex = -1;
-    });
-    quickSettingsPreview.replaceChildren(previewPanel);
-    const now = Date.now();
-    const alreadyVisible = !quickSettingsPreview.hidden && quickSettingsPreviewDeadline > now;
-    quickSettingsPreviewDeadline = alreadyVisible
-      ? quickSettingsPreviewDeadline + QUICK_SETTINGS_PREVIEW_EXTENSION_MS
-      : now + QUICK_SETTINGS_PREVIEW_DURATION_MS;
-    quickSettingsPreview.hidden = false;
-    quickSettingsPreview.classList.add("is-resetting");
-    quickSettingsPreview.classList.remove("is-fading");
-    void quickSettingsPreview.offsetWidth;
-    quickSettingsPreview.classList.remove("is-resetting");
-    scheduleQuickSettingsModePreviewFade();
-  }
   function setQuickSettingsMode(value, persist = true) {
     const mode = value === "classic" ? "classic" : "compact";
     if (quickSettingsPanel) quickSettingsPanel.dataset.quickUiMode = mode;
@@ -936,32 +918,14 @@ function initSettingsUI() {
       try { localStorage.setItem(quickSettingsModeKey, mode); } catch (_) {}
     }
   }
-  let quickSettingsPreviewLastPointerButton = null;
-  let quickSettingsPreviewLastPointerAt = 0;
-  function triggerQuickSettingsModePreview(event) {
+  document.addEventListener("click", (event) => {
     const button = event.target?.closest?.("[data-quick-ui-mode-option]");
-    if (!button) return;
-    const now = Date.now();
-    if (event.type === "click" && button === quickSettingsPreviewLastPointerButton && now - quickSettingsPreviewLastPointerAt < 700) return;
-    if (event.type === "pointerdown") {
-      quickSettingsPreviewLastPointerButton = button;
-      quickSettingsPreviewLastPointerAt = now;
-    }
-    setQuickSettingsMode(button.dataset.quickUiModeOption);
-    showQuickSettingsModePreview();
-  }
-  // 预览本身位于偏好窗口之上。捕获阶段在按下时续时，避免等待 click 的抬起
-  // 事件，也让连续点击不会被预览层的重绘打断；click 仍保留给键盘操作。
-  document.addEventListener("pointerdown", triggerQuickSettingsModePreview, true);
-  document.addEventListener("click", triggerQuickSettingsModePreview, true);
-  quickSettingsPreview?.addEventListener("pointerdown", (event) => {
-    if (!extendQuickSettingsModePreview()) return;
-    event.preventDefault();
-    event.stopPropagation();
-  }, true);
+    if (button) setQuickSettingsMode(button.dataset.quickUiModeOption);
+  });
   let initialQuickSettingsMode = "compact";
   try { initialQuickSettingsMode = localStorage.getItem(quickSettingsModeKey) || "compact"; } catch (_) {}
   setQuickSettingsMode(initialQuickSettingsMode, false);
   window.addEventListener("reader-settings-changed", syncQuickMirrors);
+
   applyReaderSettingsVisibility();
 }

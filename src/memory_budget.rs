@@ -617,6 +617,8 @@ pub(crate) fn ram_total_available() -> (u64, u64) {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn ram_total_available() -> (u64, u64) {
+    use mach2::mach_init::mach_host_self;
+
     unsafe fn sysctl_u64(name: &'static [u8]) -> Option<u64> {
         let mut value = 0_u64;
         let mut size = std::mem::size_of::<u64>();
@@ -637,7 +639,7 @@ pub(crate) fn ram_total_available() -> (u64, u64) {
     let mut count = libc::HOST_VM_INFO64_COUNT;
     let status = unsafe {
         libc::host_statistics64(
-            libc::mach_host_self(),
+            mach_host_self(),
             libc::HOST_VM_INFO64,
             (&mut statistics as *mut libc::vm_statistics64).cast(),
             &mut count,

@@ -48,8 +48,8 @@ test("missing Windows CUDA dependencies can be installed on demand with pinned h
   assert.match(gpuRust, /runtime_downloaded_bytes/);
   assert.match(gpuRust, /"缺少 CUDA 组件"/);
   assert.match(gpuRust, /creation_flags\(0x0800_0000\)/);
-  assert.match(styles, /#sem-gpu-meta \{ height: 1\.45em; overflow: hidden;/);
-  assert.match(styles, /#sem-gpu-section \.sem-actions \{ min-width: 230px;/);
+  assert.match(styles, /#sem-gpu-meta \{\s*height: 1\.45em;\s*overflow: hidden;/);
+  assert.match(styles, /#sem-gpu-section \.sem-actions \{\s*min-width: 230px;/);
   assert.match(windowsBundle, /cudart64_12\.dll/);
   assert.match(windowsBundle, /cudnn64_9\.dll/);
 });
@@ -152,7 +152,7 @@ test("deleting a semantic index cannot keep an old cached progress snapshot", ()
 });
 
 test("semantic indexing identifies active GPU acceleration beneath the book progress", () => {
-  assert.match(html, /id="sem-vector-gpu-meta" class="sem-index-acceleration" hidden/);
+  assert.match(html, /id="sem-vector-gpu-meta"[\s\S]*?class="sem-index-acceleration"[\s\S]*?hidden/);
   assert.match(semanticUi, /const gpuIndexing = vectorLive && !!gpuStatus\?\.runtime_ready/);
   assert.match(semanticUi, /vectorGpuMeta\.hidden = !gpuIndexing/);
   assert.match(semanticUi, /semGpuIndexing/);
@@ -165,7 +165,7 @@ test("model download reports textual byte progress instead of adding a second pr
   assert.match(semanticUi, /const modelDownloadPercent/);
   assert.match(semanticUi, /semModelDownloadProgress/);
   assert.match(semanticUi, /modelDownloaded > 0 && modelDownloadTotal > 0/);
-  assert.match(i18n, /semModelDownloadProgress: "正在下载模型：\{percent\}%（\{downloaded\}\/\{total\}）"/);
+  assert.match(i18n, /semModelDownloadProgress:\s*"正在下载模型：\{percent\}%（\{downloaded\}\/\{total\}）"/);
   assert.match(modelRust, /pub\(super\) fn downloaded_bytes\(\) -> u64/);
   assert.match(modelRust, /fn tree_bytes\(path: &std::path::Path\) -> u64/);
 });
@@ -264,8 +264,8 @@ test("semantic settings are catalog-based and refresh when the app language chan
   for (const key of ["semTitle", "semDescription", "semSelectModel", "semGpu", "semRetrievalStrategy", "semReranker", "semM3Index", "semAccelerator", "semMultiProfile"]) {
     assert.match(html, new RegExp(`data-i18n(?:-aria)?="${key}"`));
   }
-  assert.match(i18n, /ja: \{ semTitle: "セマンティック索引"/);
-  assert.match(i18n, /ko: \{ semTitle: "의미 색인"/);
+  assert.match(i18n, /ja: \{\s*semTitle: "セマンティック索引"/);
+  assert.match(i18n, /ko: \{\s*semTitle: "의미 색인"/);
   assert.match(semanticUi, /app-language-changed/);
   assert.match(semanticUi, /global\.ReaderAppI18n\?\.apply\?\.\(modal\)/);
   assert.doesNotMatch(semanticUi, /task\?\.detail/);

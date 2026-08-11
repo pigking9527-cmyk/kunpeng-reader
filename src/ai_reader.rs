@@ -9,8 +9,12 @@ use crate::{
     AppState,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    future::Future,
+};
 use tauri::Manager;
+use tokio::sync::watch;
 
 const CONFIG_KEY: &str = "ai_reader_config_protected";
 const CONFIG_PROFILES_KEY: &str = "ai_reader_config_profiles_protected:v1";
@@ -59,6 +63,7 @@ const LIBRARY_SYNTHESIS_PROVIDER_MAX_TOKENS: u16 = 4_096;
 // with only the strongest compact evidence instead of making the reader lose
 // an otherwise answerable question.
 const MAX_READING_RETRY_CONTEXT_CHARS: usize = 4_800;
+const LIBRARY_REQUEST_CANCELLED: &str = "书库问答已取消";
 const LIBRARY_PROFILE_PREFIX: &str = "library_ai_profile:v2:";
 const LIBRARY_MODEL_TAGS_ENABLED_KEY: &str = "library_ai_use_model_tags:v1";
 const LIBRARY_ANSWER_LENGTH_KEY: &str = "library_ai_answer_length:v1";
@@ -218,6 +223,16 @@ pub(crate) struct LibraryAiReaderAskRequest {
     question: String,
     #[serde(default)]
     selected_book_ids: Vec<String>,
+    /// A renderer-generated, local-only operation id. It is deliberately not
+    /// persisted or included in history/sync payloads.
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryAiReaderCancelRequest {
+    request_id: String,
 }
 
 /// Whole-library answer length is a local preference, deliberately separate
@@ -2706,41 +2721,182 @@ async fn call_library_answer_with_retry(
     task: String,
     question: String,
     context: String,
+    cancellation: Option<watch::Receiver<bool>>,
 ) -> Result<String, String> {
-    let primary_config = config.clone();
-    let primary_task = task.clone();
-    let primary_question = question.clone();
-    let primary_context = context.clone();
-    let primary = tokio::task::spawn_blocking(move || {
-        call_reading_provider(
-            primary_config,
-            primary_task,
-            primary_question,
-            primary_context,
-        )
-    })
-    .await
-    .map_err(|error| format!("书库问答任务失败：{error}"))?;
+    let primary = await_library_provider(
+        cancellation.clone(),
+        call_reading_provider_async(
+            config.clone(),
+            task.clone(),
+            question.clone(),
+            context.clone(),
+        ),
+    )
+    .await;
     match primary {
         Ok(answer) => Ok(answer),
         Err(primary_error) => {
+            if primary_error == LIBRARY_REQUEST_CANCELLED {
+                return Err(primary_error);
+            }
             let retry_context = trim_to_chars(&context, MAX_READING_RETRY_CONTEXT_CHARS);
             let retry_context = if retry_context.trim().is_empty() {
                 context
             } else {
                 retry_context
             };
-            let retry = tokio::task::spawn_blocking(move || {
-                call_reading_provider(config, task, question, retry_context)
-            })
-            .await
-            .map_err(|error| format!("书库精简重试任务失败：{error}"))?;
+            let retry = await_library_provider(
+                cancellation,
+                call_reading_provider_async(config, task, question, retry_context),
+            )
+            .await;
             retry.map_err(|retry_error| {
+                if retry_error == LIBRARY_REQUEST_CANCELLED {
+                    return retry_error;
+                }
                 format!(
                     "接口没有返回可用回答：首次请求为 {primary_error}；精简证据重试为 {retry_error}"
                 )
             })
         }
+    }
+}
+
+async fn await_library_provider<T, F>(
+    cancellation: Option<watch::Receiver<bool>>,
+    work: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let Some(mut cancellation) = cancellation else {
+        return work.await;
+    };
+    if *cancellation.borrow() {
+        return Err(LIBRARY_REQUEST_CANCELLED.to_string());
+    }
+    tokio::select! {
+        result = work => result,
+        changed = cancellation.changed() => {
+            let _ = changed;
+            Err(LIBRARY_REQUEST_CANCELLED.to_string())
+        }
+    }
+}
+
+async fn call_openai_compatible_async(
+    config: StoredConfig,
+    task: String,
+    question: String,
+    context: String,
+) -> Result<String, String> {
+    let endpoint = endpoint_for(&config.base_url, "/chat/completions");
+    let payload = serde_json::json!({
+        "model": config.model,
+        "stream": false,
+        "max_tokens": provider_max_tokens(&task),
+        "messages": [
+            {"role":"system", "content": system_prompt(&task)},
+            {"role":"user", "content": format!("阅读内容：{}\n\n任务：{}\n问题：{}", context, task, question)}
+        ]
+    });
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(READING_PROVIDER_RESPONSE_TIMEOUT)
+        .build()
+        .map_err(|error| format!("阅读助手客户端不可用：{error}"))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(config.api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("阅读助手请求失败：{error}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("阅读助手响应读取失败：{error}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "阅读助手请求失败：{}",
+            provider_error_summary(status, &body)
+        ));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|error| format!("阅读助手响应解析失败：{error}"))?;
+    openai_compatible_content(&value).ok_or_else(|| "接口没有返回可用回答".to_string())
+}
+
+async fn call_anthropic_messages_async(
+    config: StoredConfig,
+    task: String,
+    question: String,
+    context: String,
+) -> Result<String, String> {
+    let endpoint = endpoint_for(&config.base_url, "/v1/messages");
+    let payload = serde_json::json!({
+        "model": config.model,
+        "max_tokens": provider_max_tokens(&task),
+        "temperature": 0.2,
+        "system": system_prompt(&task),
+        "messages": [{
+            "role": "user",
+            "content": format!("阅读内容：{}\n\n任务：{}\n问题：{}", context, task, question)
+        }]
+    });
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(READING_PROVIDER_RESPONSE_TIMEOUT)
+        .build()
+        .map_err(|error| format!("阅读助手客户端不可用：{error}"))?;
+    let response = client
+        .post(endpoint)
+        .header("x-api-key", config.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("阅读助手请求失败：{error}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("阅读助手响应读取失败：{error}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "阅读助手请求失败：{}",
+            provider_error_summary(status, &body)
+        ));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|error| format!("阅读助手响应解析失败：{error}"))?;
+    value
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|blocks| {
+            blocks.iter().find_map(|block| {
+                (block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+                    .then(|| block.get("text").and_then(serde_json::Value::as_str))
+                    .flatten()
+            })
+        })
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "Claude 接口没有返回可用回答".to_string())
+}
+
+async fn call_reading_provider_async(
+    config: StoredConfig,
+    task: String,
+    question: String,
+    context: String,
+) -> Result<String, String> {
+    if config.provider == "anthropic" {
+        call_anthropic_messages_async(config, task, question, context).await
+    } else {
+        call_openai_compatible_async(config, task, question, context).await
     }
 }
 
@@ -3501,18 +3657,35 @@ pub(crate) fn start_library_auto_classification(
     Ok(snapshot)
 }
 
+/// Inputs to the verification pass. Keeping them together prevents call sites
+/// from swapping the draft, evidence context, or cancellation channel.
+struct LibraryAnswerVerification<'a> {
+    config: StoredConfig,
+    task: &'a str,
+    question: &'a str,
+    draft: String,
+    context: String,
+    evidence_sources: Option<&'a [AiReaderSource]>,
+    answer_length: LibraryAnswerLength,
+    cancellation: Option<watch::Receiver<bool>>,
+}
+
 /// Re-read a completed answer against exactly the cited local context. A
 /// provider failure must not discard an otherwise usable answer, so callers
 /// receive the draft as a safe fallback.
 async fn verify_library_answer(
-    config: StoredConfig,
-    task: &str,
-    question: &str,
-    draft: String,
-    context: String,
-    evidence_sources: Option<&[AiReaderSource]>,
-    answer_length: LibraryAnswerLength,
-) -> String {
+    verification: LibraryAnswerVerification<'_>,
+) -> Result<String, String> {
+    let LibraryAnswerVerification {
+        config,
+        task,
+        question,
+        draft,
+        context,
+        evidence_sources,
+        answer_length,
+        cancellation,
+    } = verification;
     let is_readable_final = |answer: &str| is_final_library_verification(task, answer);
     let accepts = |answer: &str| {
         is_readable_final(answer)
@@ -3526,25 +3699,26 @@ async fn verify_library_answer(
         answer_length.prompt_specification()
     );
     let verify_task = task.to_string();
-    let provider_task = verify_task.clone();
-    let verify_config = config.clone();
-    let verify_context = context.clone();
-    let verified = tokio::task::spawn_blocking(move || {
-        call_reading_provider(
-            verify_config,
-            provider_task,
+    let verified = match await_library_provider(
+        cancellation.clone(),
+        call_reading_provider_async(
+            config.clone(),
+            verify_task.clone(),
             verify_question,
-            verify_context,
-        )
-    })
+            context.clone(),
+        ),
+    )
     .await
-    .ok()
-    .and_then(Result::ok);
+    {
+        Ok(answer) => Some(answer),
+        Err(error) if error == LIBRARY_REQUEST_CANCELLED => return Err(error),
+        Err(_) => None,
+    };
     if let Some(answer) = verified.as_deref().filter(|answer| accepts(answer)) {
-        return answer.to_string();
+        return Ok(answer.to_string());
     }
     if accepts(&draft) {
-        return draft;
+        return Ok(draft);
     }
 
     let repair_task =
@@ -3554,17 +3728,21 @@ async fn verify_library_answer(
             "用户问题：{question}\n\n作答规格：{}\n\n请只输出最终答案，并严格遵守该作答规格。",
             answer_length.prompt_specification()
         );
-        tokio::task::spawn_blocking(move || {
-            call_reading_provider(config, repair_task.to_string(), repair_question, context)
-        })
+        match await_library_provider(
+            cancellation,
+            call_reading_provider_async(config, repair_task.to_string(), repair_question, context),
+        )
         .await
-        .ok()
-        .and_then(Result::ok)
+        {
+            Ok(answer) => Some(answer),
+            Err(error) if error == LIBRARY_REQUEST_CANCELLED => return Err(error),
+            Err(_) => None,
+        }
     } else {
         None
     };
     if let Some(answer) = repaired.as_deref().filter(|answer| accepts(answer)) {
-        return answer.to_string();
+        return Ok(answer.to_string());
     }
 
     // Evidence breadth is an improvement target, not a reason to erase a
@@ -3580,10 +3758,10 @@ async fn verify_library_answer(
     .flatten()
     {
         if is_readable_final(answer) {
-            return answer.to_string();
+            return Ok(answer.to_string());
         }
     }
-    "本次回答未通过格式与引用校验，请重新提问。".to_string()
+    Ok("本次回答未通过格式与引用校验，请重新提问。".to_string())
 }
 
 /// Do not replace a usable draft with a model audit transcript. This check
@@ -3738,12 +3916,33 @@ fn normalize_history_book_title(value: &str) -> String {
 /// whole library, or a selected cross-book comparison). The retrieval phase
 /// only reads existing local vector/index files; it does not build an index,
 /// open raw book files, or synchronize any RAG data.
+fn library_request_id(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 96
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("书库问答请求标识无效".to_string());
+    }
+    Ok(Some(value.to_string()))
+}
+
 #[tauri::command]
 pub(crate) async fn ask_library_assistant(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: LibraryAiReaderAskRequest,
 ) -> Result<AiReaderAnswer, String> {
+    let request_id = library_request_id(request.request_id.as_deref())?;
+    let request_guard = request_id
+        .map(|id| state.begin_library_ai_request(id))
+        .transpose()?;
+    let cancellation = request_guard.as_ref().map(|guard| guard.cancellation());
     let task = request.task.trim().to_ascii_lowercase();
     if !matches!(task.as_str(), "question" | "compare" | "recommend") {
         return Err("书库问答只支持 question、compare 或 recommend 任务".into());
@@ -3868,6 +4067,7 @@ pub(crate) async fn ask_library_assistant(
             "library_booklist_recommend".to_string(),
             recommendation_question,
             context,
+            cancellation.clone(),
         )
         .await?;
         let recommendation =
@@ -3893,40 +4093,43 @@ pub(crate) async fn ask_library_assistant(
             "library_compare".to_string(),
             library_question_with_length(&question, answer_length),
             context.clone(),
+            cancellation.clone(),
         )
         .await?;
-        verify_library_answer(
+        verify_library_answer(LibraryAnswerVerification {
             config,
-            "library_compare_verify",
-            &question,
+            task: "library_compare_verify",
+            question: &question,
             draft,
             context,
-            None,
+            evidence_sources: None,
             answer_length,
-        )
-        .await
+            cancellation: cancellation.clone(),
+        })
+        .await?
     } else {
         let candidate_context = library_context(&sources);
         if candidate_context.is_empty() {
             return Err("没有可发送的检索片段".into());
         }
-        let selection_question = question.clone();
-        let filter_config = config.clone();
         let filter_task = if single_book {
             "library_single_book_evidence_filter"
         } else {
             "library_evidence_filter"
         };
-        let filtered = tokio::task::spawn_blocking(move || {
-            call_reading_provider(
-                filter_config,
+        let filtered = await_library_provider(
+            cancellation.clone(),
+            call_reading_provider_async(
+                config.clone(),
                 filter_task.to_string(),
-                selection_question,
+                question.clone(),
                 candidate_context,
-            )
-        })
-        .await
-        .map_err(|error| format!("书库证据筛选任务失败：{error}"))?;
+            ),
+        )
+        .await;
+        if matches!(filtered.as_ref(), Err(error) if error == LIBRARY_REQUEST_CANCELLED) {
+            return Err(LIBRARY_REQUEST_CANCELLED.to_string());
+        }
         let mut source_ids = filtered
             .ok()
             .map(|response| parse_deep_source_ids(&response, sources.len()))
@@ -3953,6 +4156,7 @@ pub(crate) async fn ask_library_assistant(
             answer_task.to_string(),
             library_question_with_length(&question, answer_length),
             context.clone(),
+            cancellation.clone(),
         )
         .await?;
         let verify_task = if single_book {
@@ -3960,16 +4164,17 @@ pub(crate) async fn ask_library_assistant(
         } else {
             "library_question_verify"
         };
-        verify_library_answer(
+        verify_library_answer(LibraryAnswerVerification {
             config,
-            verify_task,
-            &question,
+            task: verify_task,
+            question: &question,
             draft,
             context,
-            (!single_book).then_some(sources.as_slice()),
+            evidence_sources: (!single_book).then_some(sources.as_slice()),
             answer_length,
-        )
-        .await
+            cancellation,
+        })
+        .await?
     };
     Ok(AiReaderAnswer {
         ok: true,
@@ -3981,6 +4186,21 @@ pub(crate) async fn ask_library_assistant(
         recommendation: None,
         error: String::new(),
     })
+}
+
+/// Cancel one active local-library provider request. Dropping the corresponding
+/// reqwest future closes the in-flight HTTP exchange; completed/unknown ids are
+/// harmless so a late UI cleanup cannot surface a misleading error.
+#[tauri::command]
+pub(crate) fn cancel_library_assistant(
+    state: tauri::State<'_, AppState>,
+    request: LibraryAiReaderCancelRequest,
+) -> Result<(), String> {
+    let Some(request_id) = library_request_id(Some(&request.request_id))? else {
+        return Ok(());
+    };
+    let _ = state.cancel_library_ai_request(&request_id)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -5025,5 +5245,30 @@ mod tests {
         ));
         assert!(!title_matches_explicit_question("明史", "南明史"));
         assert!(explicit_book_titles("南明史说了什么").is_empty());
+    }
+
+    #[test]
+    fn library_request_id_is_local_bounded_and_nonempty() {
+        assert_eq!(library_request_id(None).unwrap(), None);
+        assert_eq!(
+            library_request_id(Some("library-abc_123")).unwrap(),
+            Some("library-abc_123".to_string())
+        );
+        assert!(library_request_id(Some("")).is_err());
+        assert!(library_request_id(Some("library id")).is_err());
+        assert!(library_request_id(Some(&"a".repeat(97))).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_an_inflight_library_provider_future() {
+        let (sender, receiver) = watch::channel(false);
+        let pending = async { std::future::pending::<Result<(), String>>().await };
+        let task = tokio::spawn(await_library_provider(Some(receiver), pending));
+        tokio::task::yield_now().await;
+        sender.send(true).expect("receiver remains active");
+        assert_eq!(
+            task.await.expect("task joins"),
+            Err(LIBRARY_REQUEST_CANCELLED.to_string())
+        );
     }
 }

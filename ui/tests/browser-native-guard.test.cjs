@@ -16,8 +16,8 @@ test("application surfaces suppress browser-native drag and incidental text sele
   assert.match(guard, /document\.addEventListener\("dragstart", \(event\) => event\.preventDefault\(\), true\)/);
   assert.match(guard, /document\.addEventListener\("selectstart"/);
   assert.match(guard, /input, textarea, \[contenteditable="true"\], \[data-native-selection\]/);
-  assert.match(styles, /body, body \*\s*\{[^}]*user-select:\s*none;[^}]*-webkit-user-drag:\s*none;/s);
-  assert.match(styles, /input, textarea, \[contenteditable="true"\], \[data-native-selection\]\s*\{[^}]*user-select:\s*text;/s);
+  assert.match(styles, /body,\s*body \*\s*\{[^}]*user-select:\s*none;[^}]*-webkit-user-drag:\s*none;/s);
+  assert.match(styles, /input,\s*textarea,\s*\[contenteditable="true"\],\s*\[data-native-selection\]\s*\{[^}]*user-select:\s*text;/s);
   assert.match(index, /<script src="browser-native-guard\.js"><\/script>[\s\S]*?<script src="app\.js">/);
   assert.match(reader, /<script src="browser-native-guard\.js"><\/script>[\s\S]*?<script src="reader\.js">/);
 });

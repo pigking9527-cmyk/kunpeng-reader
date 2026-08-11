@@ -1,6 +1,7 @@
 // 书架页逻辑
 const invoke = window.__TAURI__.core.invoke;
 const dialog = window.__TAURI__.dialog;
+
 window.addEventListener("contextmenu", (e) => e.preventDefault()); // 禁用浏览器右键菜单
 
 // 禁用浏览器自带查找（Ctrl+F / F3）
@@ -78,9 +79,17 @@ let mainWindowRevealed = false;
 function revealMainWindowAfterFirstPaint() {
   if (mainWindowRevealed) return;
   mainWindowRevealed = true;
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    invoke("main_window_show").catch(() => {});
-  }));
+  // macOS does not necessarily dispatch rAF while a WebView window is hidden.
+  // Do not make the native reveal depend on a frame from the hidden window:
+  // a login-background launch must stay hidden by Rust policy, while a regular
+  // cold launch must be able to reveal itself without requiring a second click.
+  invoke("main_window_show").catch((error) => {
+    startupPerfLog(
+      "main-window-show",
+      "error",
+      error && error.message ? error.message : String(error),
+    );
+  });
 }
 
 function debugSettingOn(key) {
@@ -132,8 +141,6 @@ function runWhenNoReader(name, work, retryMs = 30000) {
 // ---- “我的书架”设置：封面进度开关 + 自动导入目录（多目录） ----
 let autoImport = { enabled: false, dirs: [] };
 const setAutoChk = document.getElementById("set-auto-import");
-const importDirsEnabledChk = document.getElementById("import-dirs-enabled");
-const importDirsEnabledRow = document.getElementById("import-dirs-enabled-row");
 const importDirsModal = document.getElementById("import-dirs-modal");
 const dirsListEl = document.getElementById("dirs-list");
 const dirsStatusEl = document.getElementById("dirs-status");
@@ -177,7 +184,6 @@ function renderDirsList() {
 }
 function reflectAutoImport() {
   setAutoChk.checked = !!autoImport.enabled;
-  if (importDirsEnabledChk) importDirsEnabledChk.checked = !!autoImport.enabled;
   renderDirsList();
 }
 const autoImportUI = ReaderAutoImportUI.create({
@@ -205,9 +211,6 @@ async function setAutoImportEnabled(enabled, opts = {}) {
   const prev = !!autoImport.enabled;
   autoImport.enabled = enabled;
   reflectAutoImport();
-  if (enabled && !autoImport.dirs.length) {
-    importDirsModal.classList.add("show"); // 还没设目录：顺手打开让用户添加
-  }
   try {
     await applyAutoImport(enabled, Object.assign({
       scan: enabled && autoImport.dirs.length > 0,
@@ -224,20 +227,6 @@ async function setAutoImportEnabled(enabled, opts = {}) {
 setAutoChk.addEventListener("change", async () => {
   await setAutoImportEnabled(setAutoChk.checked);
 });
-if (importDirsEnabledChk) {
-  importDirsEnabledChk.addEventListener("change", async (e) => {
-    e.stopPropagation();
-    await setAutoImportEnabled(importDirsEnabledChk.checked);
-  });
-}
-if (importDirsEnabledRow) {
-  importDirsEnabledRow.addEventListener("click", async (e) => {
-    if (e.target === importDirsEnabledChk) return;
-    e.preventDefault();
-    e.stopPropagation();
-    await setAutoImportEnabled(!autoImport.enabled);
-  });
-}
 // 把当前 enabled + dirs 提交后端；扫描导入单独走后台，避免设置窗口卡住。
 async function applyAutoImport(enabled, opts = {}) {
   try {
@@ -417,9 +406,9 @@ restoreRecoveryBackupButton?.addEventListener("click", async () => {
 window.addEventListener("app-language-changed", () => { if (lastRecoveryBackupStatus) renderRecoveryBackupStatus(lastRecoveryBackupStatus); });
 document.getElementById("open-default-apps-settings")?.addEventListener("click", async () => {
   try {
-    await invoke("open_default_apps_settings");
+    const message = await invoke("open_default_apps_settings");
     window.AppNotice?.show(
-      appText("defaultOpenToast", "已打开 Windows 默认应用设置。请在“按文件类型选择默认值”中，分别将 .epub 和 .pdf 设为由“鲲鹏阅读器”打开。"),
+      String(message || appText("defaultOpenToast", "默认打开方式已更新。")),
       { variant: "text", duration: 1500 },
     );
   } catch (e) {

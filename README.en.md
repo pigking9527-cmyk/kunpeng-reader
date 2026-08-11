@@ -6,7 +6,7 @@ A high-performance local ebook reader for Windows, macOS, Linux, and Android. Th
 
 > **License notice:** this repository is **source-available**. The code is public only for learning, evaluation, and communication. Copying, modifying, distributing, commercial use, or publishing derivative versions requires the author's written permission. See [LICENSE](LICENSE).
 
-> Latest release: Windows, macOS, and Linux **v1.15.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases). v1.15.0 is the desktop app's full UI redesign release.
+> Latest release: Windows, macOS, and Linux **v1.16.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases). v1.16.0 completes the React + TypeScript + Vite migration for the desktop business layer while retaining the Rust + Tauri 2 and reader-engine boundaries.
 
 ## Features
 

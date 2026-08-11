@@ -1,4 +1,8 @@
 (() => {
+  const browserNavigator = typeof navigator === "undefined" ? {} : navigator;
+  const platform = browserNavigator.userAgentData?.platform || browserNavigator.platform || browserNavigator.userAgent || "";
+  document.documentElement?.classList?.toggle("platform-macos", /mac/i.test(platform));
+
   const invoke = window.__TAURI__?.core?.invoke;
   if (!invoke) return;
 

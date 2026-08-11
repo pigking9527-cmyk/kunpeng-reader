@@ -1451,16 +1451,36 @@ impl AppDb {
     /// Import one pull page and advance its resume cursor in the same SQLite
     /// transaction. If either step fails, both are rolled back and requesting
     /// the same page again remains safe.
+    #[cfg(test)]
     pub fn import_sync_page(
         &mut self,
         scope: &str,
         items: &[SyncEntity],
         next_cursor: &str,
     ) -> Result<u32, String> {
+        self.import_sync_page_with_remote_app_settings_priority(scope, items, next_cursor, false)
+    }
+
+    /// Import one pull page while optionally giving the account's existing
+    /// software-settings entity priority. This is used only when an account is
+    /// first connected on this installation: WebViews may already have saved
+    /// their local defaults before the initial pull starts, but those defaults
+    /// must not win LWW over the account's established cloud preferences.
+    pub fn import_sync_page_with_remote_app_settings_priority(
+        &mut self,
+        scope: &str,
+        items: &[SyncEntity],
+        next_cursor: &str,
+        prefer_remote_app_settings: bool,
+    ) -> Result<u32, String> {
         let started = Instant::now();
         let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
         Self::ensure_active_sync_scope_on(&transaction, scope)?;
-        let count = Self::import_sync_entities_in_transaction(&transaction, items)?;
+        let count = Self::import_sync_entities_in_transaction_with_remote_app_settings_priority(
+            &transaction,
+            items,
+            prefer_remote_app_settings,
+        )?;
         Self::upsert_sync_acknowledgements(&transaction, scope, items)?;
         let next_cursor = next_cursor.trim();
         if !next_cursor.is_empty() {
@@ -1499,29 +1519,78 @@ impl AppDb {
         transaction: &Connection,
         items: &[SyncEntity],
     ) -> Result<u32, String> {
+        Self::import_sync_entities_in_transaction_with_remote_app_settings_priority(
+            transaction,
+            items,
+            false,
+        )
+    }
+
+    fn import_sync_entities_in_transaction_with_remote_app_settings_priority(
+        transaction: &Connection,
+        items: &[SyncEntity],
+        prefer_remote_app_settings: bool,
+    ) -> Result<u32, String> {
         let mut count = 0u32;
         for item in items {
             if !is_supported_entity_kind(&item.kind) {
                 continue;
             }
             let txt = serde_json::to_string(&item.json).map_err(|e| e.to_string())?;
-            if Self::upsert_incoming_entity(
-                transaction,
-                &IncomingEntity {
-                    kind: &item.kind,
-                    id: &item.id,
-                    json_text: &txt,
-                    updated_at: item.updated_at,
-                    deleted_at: item.deleted_at,
-                    device_id: &item.device_id,
-                    sync_version: item.sync_version,
-                },
-                0,
-            )? {
+            let incoming = IncomingEntity {
+                kind: &item.kind,
+                id: &item.id,
+                json_text: &txt,
+                updated_at: item.updated_at,
+                deleted_at: item.deleted_at,
+                device_id: &item.device_id,
+                sync_version: item.sync_version,
+            };
+            let imported = if prefer_remote_app_settings
+                && item.kind == "app_settings_v1"
+                && item.id == "default"
+            {
+                Self::upsert_incoming_entity_unconditionally(transaction, &incoming, 0)?
+            } else {
+                Self::upsert_incoming_entity(transaction, &incoming, 0)?
+            };
+            if imported {
                 count += 1;
             }
         }
         Ok(count)
+    }
+
+    fn upsert_incoming_entity_unconditionally(
+        conn: &Connection,
+        item: &IncomingEntity<'_>,
+        dirty: i64,
+    ) -> Result<bool, String> {
+        conn.execute(
+            r#"
+                INSERT INTO entities(kind,id,json,updated_at,deleted_at,device_id,sync_version,dirty)
+                VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(kind,id) DO UPDATE SET
+                    json=excluded.json,
+                    updated_at=excluded.updated_at,
+                    deleted_at=excluded.deleted_at,
+                    device_id=excluded.device_id,
+                    sync_version=excluded.sync_version,
+                    dirty=excluded.dirty
+                "#,
+            params![
+                item.kind,
+                item.id,
+                item.json_text,
+                item.updated_at,
+                item.deleted_at,
+                item.device_id,
+                item.sync_version,
+                dirty
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
     }
 }
 
@@ -1780,6 +1849,43 @@ mod tests {
         assert_eq!(
             db.entity_json("vocab", "zh:断点").unwrap(),
             Some(json!({"word":"断点"}))
+        );
+    }
+
+    #[test]
+    fn first_account_pull_prioritizes_remote_app_settings_over_webview_defaults() {
+        let mut db = memory_db();
+        let scope = "first-account";
+        activate_sync_scope(&db, scope);
+        db.upsert_json_batch(&[(
+            "app_settings_v1".into(),
+            "default".into(),
+            json!({"gestureSettings":{"profiles":[]}}),
+        )])
+        .unwrap();
+        let remote = SyncEntity {
+            kind: "app_settings_v1".into(),
+            id: "default".into(),
+            json: json!({"gestureSettings":{"profiles":[{"id":"cloud"}]}}),
+            updated_at: 1,
+            deleted_at: 0,
+            device_id: "remote-device".into(),
+            sync_version: 1,
+        };
+
+        assert_eq!(
+            db.import_sync_page_with_remote_app_settings_priority(
+                scope,
+                &[remote],
+                "cursor-1",
+                true,
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.entity_json("app_settings_v1", "default").unwrap(),
+            Some(json!({"gestureSettings":{"profiles":[{"id":"cloud"}]}}))
         );
     }
 

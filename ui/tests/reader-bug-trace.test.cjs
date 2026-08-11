@@ -16,17 +16,19 @@ const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.j
 const runtime = fs.readFileSync(path.join(uiRoot, "reader-page-runtime.js"), "utf8");
 const mainTraceApi = require("../problem-trace-ui.js");
 
-test("problem trace keeps two bounded minutes of redacted metadata", () => {
+test("problem trace keeps all recent two-minute redacted metadata without a count cap", () => {
   trace.reset();
-  for (let index = 0; index < trace.MAX_EVENTS + 12; index += 1) {
+  const eventCount = 512;
+  for (let index = 0; index < eventCount; index += 1) {
     trace.record("click", { outcome: "selection", target: "p", text: "正文不可记录", href: "https://secret.invalid" });
   }
   const current = trace._snapshotForTests();
-  assert.equal(current.length, trace.MAX_EVENTS);
+  assert.equal(current.length, eventCount + 1); // reset() keeps the trace_started marker.
   assert.equal(current.at(-1).detail.outcome, "selection");
   assert.equal(current.at(-1).detail.text, undefined);
   assert.equal(current.at(-1).detail.href, undefined);
   assert.equal(trace._snapshotForTests(Date.now() + trace.WINDOW_MS + 1).length, 0);
+  assert.equal(trace.MAX_EVENTS, undefined);
 });
 
 test("problem trace includes allowlisted software settings without secrets or raw images", () => {
@@ -123,13 +125,62 @@ test("image pagination trace keeps only layout geometry and mode", () => {
   assert.equal(event.detail.body_text, undefined);
 });
 
+test("touchpad pagination trace keeps gesture timing but no reading content", () => {
+  trace.reset();
+  trace.record("page_wheel", {
+    source: "reader_page", outcome: "ignored", direction: "forward",
+    wheel_seq: 8, wheel_delta_x: 0, wheel_delta_y: 1.25, wheel_delta_px: 1.25,
+    wheel_delta_mode: 0, wheel_gap_ms: 16, wheel_accumulated_px: 0, wheel_threshold_px: 2,
+    wheel_quiet_ms: 36, wheel_gesture_age_ms: 32, wheel_gesture_active: true, wheel_timer_active: true,
+    wheel_event_cancelable: true, wheel_replay: false, wheel_mode_pending: false,
+    book_text: "正文不可记录",
+  });
+  const event = trace._snapshotForTests().at(-1);
+  assert.equal(event.detail.wheel_delta_px, 1.25);
+  assert.equal(event.detail.wheel_gesture_active, true);
+  assert.equal(event.detail.wheel_timer_active, true);
+  assert.equal(event.detail.book_text, undefined);
+});
+
+test("preference preview trace keeps only layout and layer metadata", () => {
+  trace.reset();
+  trace.record("preference_preview", {
+    source: "reader_preferences",
+    outcome: "painted",
+    preview_created: true,
+    preview_connected: true,
+    preview_parent: "body",
+    preview_position: "fixed",
+    preview_z_index: "2147483600",
+    preview_display: "block",
+    preview_visibility: "visible",
+    preview_width: 1440,
+    preview_height: 900,
+    preview_type: "dual_page_gap",
+    preview_phase: "frame",
+    modal_position: "fixed",
+    modal_z_index: "50",
+    modal_display: "grid",
+    modal_parent: "other",
+    modal_contains_preview: false,
+    image_url: "reader://private/alice.jpg",
+    body_text: "正文不可记录",
+  });
+  const event = trace._snapshotForTests().at(-1);
+  assert.equal(event.detail.preview_parent, "body");
+  assert.equal(event.detail.preview_z_index, "2147483600");
+  assert.equal(event.detail.modal_contains_preview, false);
+  assert.equal(event.detail.image_url, undefined);
+  assert.equal(event.detail.body_text, undefined);
+});
+
 test("Bug feedback requests the reader problem-state snapshot as an attachment", () => {
   assert.doesNotMatch(html, /id="bug-trace-btn"/);
   assert.doesNotMatch(html, /id="bug-trace-modal"/);
   assert.doesNotMatch(mainHtml, /id="mi-problem-trace"/);
   assert.doesNotMatch(mainHtml, /id="problem-trace-modal"/);
-  assert.match(mainHtml, /id="feedback-attach-problem-trace"[^>]*data-i18n="attachTrace"[^>]*>附到本次反馈（推荐）<\/button>/);
-  assert.match(mainHtml, /id="feedback-save-problem-trace"[^>]*data-i18n="saveTraceDesktop"[^>]*>保存问题记录到桌面<\/button>/);
+  assert.match(mainHtml, /id="feedback-attach-problem-trace"[^>]*data-i18n="attachTrace"[^>]*>\s*附到本次反馈（推荐）\s*<\/button\s*>/);
+  assert.match(mainHtml, /id="feedback-save-problem-trace"[^>]*data-i18n="saveTraceDesktop"[^>]*>\s*保存问题记录到桌面\s*<\/button\s*>/);
   assert.match(mainHtml, /<script src="problem-trace-ui\.js"><\/script>/);
   assert.match(html, /reader-bug-trace\.js/);
   assert.match(reader, /ReaderBugTrace\?\.setContextProvider/);
@@ -258,6 +309,9 @@ test("reader page reports why a click did not turn the page", () => {
   assert.match(layout, /finishPageTurnBugTrace\(trace\)/);
   assert.match(annotations, /markPageTurnInput\('tap'\)/);
   assert.match(annotations, /markPageTurnInput\('keyboard'\)/);
+  assert.match(annotations, /readerBugTrace\('wheel',phase,null,data\)/);
+  assert.match(pageTrace, /wheel_accumulated_px/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "reader-message.js"), "utf8"), /wheel_gesture_age_ms/);
   assert.match(runtime, /markPageTurnInput\('shell'\)/);
   assert.match(runtime, /function tracePagedImageLayout\(outcome,detail\)/);
   assert.match(runtime, /readerBugTrace\('image_pagination',outcome,null,data\)/);

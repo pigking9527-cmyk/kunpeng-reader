@@ -27,7 +27,7 @@ test("common settings use a categorized wide layout with a live shelf preview", 
   assert.doesNotMatch(html, /id="fp-settings-close"/);
   assert.doesNotMatch(html, /class="modal-head fp-settings-head"/);
   assert.match(styles, /\.fp-settings-content\s*\{[^}]*overflow-y:\s*auto/);
-  assert.match(styles, /@media \(max-width: 720px\)[\s\S]*\.fp-settings-nav\s*\{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(styles, /@media \(max-width: 720px\)[\s\S]*\.fp-settings-nav\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
 });
 
 test("common settings navigation can collapse to icons with the reader-preferences behavior", () => {
@@ -66,7 +66,7 @@ test("all common-settings child pages share the compact detail design system", (
     "api-settings-modal",
   ];
   for (const id of childIds) {
-    assert.match(html, new RegExp(`id="${id}" class="modal settings-detail-modal"[\\s\\S]*?<div class="modal-card settings-detail-card`));
+    assert.match(html, new RegExp(`id="${id}"[\\s\\S]*?class="modal settings-detail-modal"[\\s\\S]*?<div[\\s\\S]*?class="modal-card settings-detail-card`));
   }
   assert.match(styles, /\.settings-detail-modal\s*\{[^}]*backdrop-filter:\s*blur\(4px\)[^}]*\}/s);
   assert.match(styles, /\.settings-detail-card\s*\{[^}]*border-radius:\s*18px;[^}]*box-shadow:/s);
@@ -151,7 +151,7 @@ test("book information opens organization management on demand and right click o
   assert.match(info, /id="book-info-collections-manage"/);
   assert.doesNotMatch(info, /id="book-info-tags"|id="book-info-collections"/);
   assert.match(manager, /id="book-info-tags" class="book-info-organization-editor"/);
-  assert.match(manager, /id="book-info-collections" class="book-info-organization-editor"/);
+  assert.match(manager, /id="book-info-collections"[\s\S]*?class="book-info-organization-editor"/);
   assert.match(manager, /role="tablist"/);
   assert.match(html, /src="book-info-organization\.js"/);
   assert.doesNotMatch(html, /id="batch-tag-btn"|id="batch-collection-btn"|id="batch-organization-modal"|id="book-organizer-menu"/);
@@ -171,7 +171,7 @@ test("book information opens organization management on demand and right click o
 test("book information uses a compact identity, facts, organization and description layout", () => {
   const info = html.slice(html.indexOf('id="book-info-modal"'), html.indexOf('id="book-organization-modal"'));
   assert.doesNotMatch(info, /book-info-eyebrow|>图书信息<|id="book-info-close"/);
-  assert.match(info, /id="book-info-cover" class="book-info-cover"/);
+  assert.match(info, /id="book-info-cover"[\s\S]*?class="book-info-cover"/);
   assert.match(info, /class="book-info-cover-stack"[\s\S]*?id="cover-btn"/);
   assert.match(info, /class="book-info-hero"/);
   assert.match(info, /class="book-info-primary"/);
@@ -245,7 +245,7 @@ test("book information displays persisted model tags with the backend field name
 
 test("funnel groups sorting, reading status and display controls by purpose", () => {
   const panel = html.slice(html.indexOf('<div id="filter-panel"'), html.indexOf('<div class="toolbar-action menu-wrap"'));
-  assert.match(panel, /id="filter-result-summary"[^>]*>0\/0/);
+  assert.match(panel, /id="filter-result-summary"[^>]*>\s*0\/0/);
   assert.ok(panel.indexOf('id="filter-result-summary"') > panel.indexOf('class="layout-config-row"'));
   const top = panel.indexOf("fp-top-grid");
   const sorting = panel.indexOf("fp-sort-grid");

@@ -14,7 +14,7 @@
   let hintTimer = 0;
   let sharedSettings = null;
   let pendingFrameSurfaceClose = null;
-  const closedSurfaces = [];
+  const undoHistory = [];
   const hint = createHint();
 
   function trace(event) {
@@ -22,14 +22,19 @@
     if (typeof invoke === "function") void Promise.resolve(invoke("reader_perf_log", { event: "gesture " + String(event).slice(0, 480) })).catch(() => {});
   }
 
-  function hintHex(value) { return /^#[0-9a-f]{6}$/i.test(String(value || "")) ? String(value).toLowerCase() : "#173b6b"; }
+  const DEFAULT_HINT_SETTINGS = Object.freeze({ fontSize: 20, backgroundEnabled: true, background: "#173b6b", opacity: 60, positionX: 0.96, positionY: 0.04, frameWidth: 200, frameHeight: 60, frameShape: "rect", framePath: [] });
+  function hintHex(value) { return /^#[0-9a-f]{6}$/i.test(String(value || "")) ? String(value).toLowerCase() : DEFAULT_HINT_SETTINGS.background; }
   function hintPosition(value, fallback) { return Math.max(0, Math.min(1, Number.isFinite(Number(value)) ? Number(value) : fallback)); }
+  function hintFrameSize(value, fallback, minimum, maximum) { return Math.max(minimum, Math.min(maximum, Number.isFinite(Number(value)) ? Number(value) : fallback)); }
+  function hintFrameShape(value) { return value === "freeform" ? "freeform" : "rect"; }
+  function hintFramePath(value) { return Array.isArray(value) ? value.map((point) => ({ x: Number(point?.x), y: Number(point?.y) })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.x <= 100 && point.y >= 0 && point.y <= 100).slice(0, 48) : []; }
+  function hintClipPath(settings) { return settings.frameShape === "freeform" && settings.framePath.length >= 3 ? "polygon(" + settings.framePath.map((point) => point.x + "% " + point.y + "%").join(",") + ")" : "none"; }
   function hintSettings() {
     if (sharedSettings?.hintSettings) return sharedSettings.hintSettings;
     try {
       const saved = JSON.parse(global.localStorage?.getItem?.(HINT_SETTINGS_KEY) || "{}");
-    return { enabled: saved.enabled === true, fontSize: Math.max(12, Math.min(28, Number(saved.fontSize) || 16)), backgroundEnabled: saved.backgroundEnabled !== false, background: hintHex(saved.background), opacity: Math.max(20, Math.min(100, Number(saved.opacity) || 88)), positionX: hintPosition(saved.positionX, 1), positionY: hintPosition(saved.positionY, 0) };
-    } catch (_) { return { enabled: false, fontSize: 16, backgroundEnabled: true, background: "#173b6b", opacity: 88, positionX: 1, positionY: 0 }; }
+    return { enabled: saved.enabled === true, fontSize: Math.max(12, Math.min(28, Number(saved.fontSize) || DEFAULT_HINT_SETTINGS.fontSize)), backgroundEnabled: saved.backgroundEnabled !== false, background: hintHex(saved.background), opacity: Math.max(20, Math.min(100, Number(saved.opacity) || DEFAULT_HINT_SETTINGS.opacity)), positionX: hintPosition(saved.positionX, DEFAULT_HINT_SETTINGS.positionX), positionY: hintPosition(saved.positionY, DEFAULT_HINT_SETTINGS.positionY), frameWidth: hintFrameSize(saved.frameWidth, DEFAULT_HINT_SETTINGS.frameWidth, 96, 520), frameHeight: hintFrameSize(saved.frameHeight, DEFAULT_HINT_SETTINGS.frameHeight, 40, 240), frameShape: hintFrameShape(saved.frameShape), framePath: hintFramePath(saved.framePath) };
+    } catch (_) { return { enabled: false, ...DEFAULT_HINT_SETTINGS }; }
   }
   function hintColor(settings) {
     if (!settings.backgroundEnabled) return "transparent";
@@ -39,7 +44,7 @@
   }
   function createHint() {
     const node = root.createElement("div");
-    node.style.cssText = "position:fixed;z-index:10050;top:16px;right:16px;width:max-content;max-width:calc(100vw - 32px);box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:9px 13px;border-radius:9px;color:#fff;font-weight:700;line-height:1.35;box-shadow:0 8px 22px rgba(32,57,93,.2);pointer-events:none";
+    node.style.cssText = "position:fixed;z-index:10050;top:16px;right:16px;display:flex;align-items:center;justify-content:center;width:max-content;max-width:calc(100vw - 32px);box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:9px 13px;border-radius:9px;color:#fff;font-weight:700;line-height:1.35;text-align:center;box-shadow:0 8px 22px rgba(32,57,93,.2);pointer-events:none";
     node.hidden = true;
     root.body?.appendChild(node);
     return node;
@@ -51,6 +56,11 @@
     hint.style.top = Math.round(maxTop * settings.positionY) + "px";
     hint.style.right = "auto";
   }
+  function hideHint() {
+    if (hintTimer) global.clearTimeout(hintTimer);
+    hintTimer = 0;
+    hint.hidden = true;
+  }
   function showHint(name) {
     // Settings are loaded for each match so changes made in the main window apply immediately.
     const settings = hintSettings();
@@ -58,15 +68,28 @@
     hint.textContent = name || "手势已匹配";
     hint.style.fontSize = settings.fontSize + "px";
     hint.style.background = hintColor(settings);
+    hint.style.width = Math.round(settings.frameWidth) + "px";
+    hint.style.minHeight = Math.round(settings.frameHeight) + "px";
+    hint.style.clipPath = hintClipPath(settings);
     hint.hidden = false;
     placeHint(settings);
     if (hintTimer) global.clearTimeout(hintTimer);
-    hintTimer = global.setTimeout(() => { hint.hidden = true; }, HINT_DURATION_MS);
+    hintTimer = global.setTimeout(hideHint, HINT_DURATION_MS);
   }
-  function actionLabel(action) { return ({ back: "返回／关闭当前页", book_info: "信息提取／说明", reopen_last: "重新打开上一个页面", restore_jump: "恢复跳转前位置" })[action] || "返回／关闭当前页"; }
-  function normalizeScope(action, value) {
-    if (action === "restore_jump") return "reader";
+  function normalizeAction(value) {
+    if (value === "book_info") return "book_info";
+    if (value === "undo_last" || value === "reopen_last" || value === "restore_jump") return "undo_last";
+    return "back";
+  }
+  function actionLabel(action) { return ({ back: "返回／关闭当前页", book_info: "信息提取／说明", undo_last: "撤销上一步" })[action] || "返回／关闭当前页"; }
+  function normalizeScope(_action, value) {
     return value === "main" || value === "reader" ? value : "auto";
+  }
+  function profileName(profile, action) {
+    const savedName = String(profile?.name || "").trim().slice(0, 24);
+    return action === "undo_last" && ["重新打开上一个页面", "恢复跳转前位置"].includes(savedName)
+      ? actionLabel(action)
+      : savedName || actionLabel(action);
   }
   function normalizeSharedSettings(value) {
     const source = value && typeof value === "object" ? value : {};
@@ -74,22 +97,29 @@
     return {
       enabled: source.enabled === true,
       globalPrecision: api.normalizePrecision(source.globalPrecision),
-      profiles: profiles.map((profile) => ({
-        name: String(profile?.name || actionLabel(profile?.action)).slice(0, 24),
-        scope: normalizeScope(profile?.action, profile?.scope),
-        action: profile?.action,
+      profiles: profiles.map((profile) => {
+        const action = normalizeAction(profile?.action);
+        return {
+        name: profileName(profile, action),
+        scope: normalizeScope(action, profile?.scope),
+        action,
         enabled: profile?.enabled !== false,
         points: api.cleanPoints(profile?.points),
         precision: profile?.precisionMode === "global" ? api.normalizePrecision(source.globalPrecision) : api.normalizePrecision(profile?.precision),
-      })).filter((profile) => profile.enabled && profile.scope !== "main" && ["back", "book_info", "reopen_last", "restore_jump"].includes(profile.action) && profile.points.length === api.SAMPLE_COUNT),
+      };
+      }).filter((profile) => profile.enabled && profile.scope !== "main" && ["back", "book_info", "undo_last"].includes(profile.action) && profile.points.length === api.SAMPLE_COUNT),
       hintSettings: {
         enabled: source?.hintSettings?.enabled === true,
-        fontSize: Math.max(12, Math.min(28, Number(source?.hintSettings?.fontSize) || 16)),
+        fontSize: Math.max(12, Math.min(28, Number(source?.hintSettings?.fontSize) || DEFAULT_HINT_SETTINGS.fontSize)),
         backgroundEnabled: source?.hintSettings?.backgroundEnabled !== false,
         background: hintHex(source?.hintSettings?.background),
-        opacity: Math.max(20, Math.min(100, Number(source?.hintSettings?.opacity) || 88)),
-        positionX: hintPosition(source?.hintSettings?.positionX, 1),
-        positionY: hintPosition(source?.hintSettings?.positionY, 0),
+        opacity: Math.max(20, Math.min(100, Number(source?.hintSettings?.opacity) || DEFAULT_HINT_SETTINGS.opacity)),
+        positionX: hintPosition(source?.hintSettings?.positionX, DEFAULT_HINT_SETTINGS.positionX),
+        positionY: hintPosition(source?.hintSettings?.positionY, DEFAULT_HINT_SETTINGS.positionY),
+        frameWidth: hintFrameSize(source?.hintSettings?.frameWidth, DEFAULT_HINT_SETTINGS.frameWidth, 96, 520),
+        frameHeight: hintFrameSize(source?.hintSettings?.frameHeight, DEFAULT_HINT_SETTINGS.frameHeight, 40, 240),
+        frameShape: hintFrameShape(source?.hintSettings?.frameShape),
+        framePath: hintFramePath(source?.hintSettings?.framePath),
       },
     };
   }
@@ -121,8 +151,17 @@
       const enabled = enabledValue === "true" || enabledValue === "1";
       const saved = JSON.parse(global.localStorage?.getItem?.(MANAGER_KEY) || "{}");
       const list = Array.isArray(saved?.profiles) ? saved.profiles : [];
-      const usable = list.filter((profile) => profile?.enabled !== false && (profile?.action === "restore_jump" || profile?.scope !== "main") && ["back", "book_info", "reopen_last", "restore_jump"].includes(profile?.action) && api.cleanPoints(profile.points).length === api.SAMPLE_COUNT)
-        .map((profile) => ({ name: String(profile.name || actionLabel(profile.action)).slice(0, 24), scope: normalizeScope(profile?.action, profile?.scope), action: profile.action, points: api.cleanPoints(profile.points), precision: profile.precisionMode === "global" ? api.normalizePrecision(saved.globalPrecision) : api.normalizePrecision(profile.precision) }));
+      const usable = list.map((profile) => {
+        const action = normalizeAction(profile?.action);
+        return {
+          name: profileName(profile, action),
+          scope: normalizeScope(action, profile?.scope),
+          action,
+          enabled: profile?.enabled !== false,
+          points: api.cleanPoints(profile?.points),
+          precision: profile?.precisionMode === "global" ? api.normalizePrecision(saved.globalPrecision) : api.normalizePrecision(profile?.precision),
+        };
+      }).filter((profile) => profile.enabled && profile.scope !== "main" && ["back", "book_info", "undo_last"].includes(profile.action) && profile.points.length === api.SAMPLE_COUNT);
       if (enabled && usable.length) return usable;
     } catch (_) { /* fall back to legacy reader gesture */ }
     const path = api.load(global.localStorage);
@@ -134,6 +173,7 @@
 
     const currentProfiles = profiles();
     if (!currentProfiles.length) return;
+    hideHint();
     trace("start source=" + (sharedSettings ? "shared" : "local") + " actions=" + currentProfiles.map((profile) => profile.action).join(","));
     active = { points: [{ x, y }], profiles: currentProfiles, previewProfileId: null, source };
     paint(active.points);
@@ -155,24 +195,30 @@
     });
     return best;
   }
+  function rememberUndoEntry(entry) {
+    undoHistory.push({ ...entry, at: Date.now() });
+    if (undoHistory.length > 16) undoHistory.splice(0, undoHistory.length - 16);
+  }
   function rememberClosedSurface(name, reopen) {
     if (typeof reopen !== "function") return;
-    closedSurfaces.push({ name: String(name || "上一个页面").slice(0, 48), reopen });
-    if (closedSurfaces.length > 8) closedSurfaces.splice(0, closedSurfaces.length - 8);
+    rememberUndoEntry({ kind: "surface", name: String(name || "上一个页面").slice(0, 48), reopen });
   }
-  function canReopenSurface() { return closedSurfaces.length > 0; }
+  function listenForUndoCheckpoints() {
+    global.addEventListener("reader-undo-checkpoint", () => rememberUndoEntry({ kind: "jump" }));
+  }
   function listenForClosedSurfaces() {
     global.addEventListener("reader-shell-statechange", (event) => {
-      const previous = event.detail?.previous?.overlay;
-      const next = event.detail?.next?.overlay;
+      const previous = event.detail?.previous || {};
+      const next = event.detail?.next || {};
       const none = global.ReaderShell?.OVERLAY?.NONE || "none";
-      if (!previous || previous === none || next !== none) return;
-      rememberClosedSurface(previous, () => global.ReaderShell?.setOverlay?.(previous, true));
-    });
-    global.addEventListener("reader-surface-closed", (event) => {
-      const name = String(event.detail?.name || "上一个页面");
-      const reopen = event.detail?.reopen;
-      if (typeof reopen === "function") rememberClosedSurface(name, reopen);
+      const noSidePanel = global.ReaderShell?.SIDE_PANEL?.NONE || "none";
+      if (previous.sidePanel && previous.sidePanel !== noSidePanel && next.sidePanel === noSidePanel) {
+        const name = previous.sidePanel === "ai-reader" ? "智读" : previous.sidePanel;
+        rememberClosedSurface(name, () => global.ReaderShell?.setSidePanel?.(previous.sidePanel, true));
+        return;
+      }
+      if (!previous.overlay || previous.overlay === none || next.overlay !== none) return;
+      rememberClosedSurface(previous.overlay, () => global.ReaderShell?.setOverlay?.(previous.overlay, true));
     });
   }
   function requestFrameSurfaceClose() {
@@ -193,27 +239,33 @@
     if (pendingFrameSurfaceClose) pendingFrameSurfaceClose(handled);
   }
   async function closeReaderSurface(source) {
-    if (root.body?.classList.contains("ai-reader-open")) {
-      global.closeAiReaderSide?.();
-      return;
-    }
-
     const shell = global.ReaderShell;
-    const overlay = shell?.getState?.().overlay;
-    if (overlay && overlay !== shell.OVERLAY?.NONE) {
-      shell.closeOverlay?.();
-      return;
-    }
+    if (shell?.closeSurface?.()) return;
     if (source === "frame" && await requestFrameSurfaceClose()) return;
     global.closeReaderWindow?.();
   }
-  function reopenReaderSurface() {
-    closedSurfaces.pop()?.reopen?.();
+  function canUndoLastReaderAction() {
+    while (undoHistory.length) {
+      const previous = undoHistory[undoHistory.length - 1];
+      if (previous.kind !== "jump" || global.hasReaderJumpHistory?.() === true) return true;
+      undoHistory.pop();
+    }
+    return false;
+  }
+  function undoLastReaderAction() {
+    while (canUndoLastReaderAction()) {
+      const previous = undoHistory.pop();
+      if (previous?.kind === "surface") {
+        previous.reopen?.();
+        return true;
+      }
+      if (global.restoreReaderJumpPosition?.()) return true;
+    }
+    return false;
   }
   function canApplyAction(action) {
     return action === "back"
-      || action === "reopen_last" && canReopenSurface()
-      || action === "restore_jump" && global.hasReaderJumpHistory?.() === true
+      || action === "undo_last" && canUndoLastReaderAction()
       || action === "book_info" && typeof global.openReaderBookInfo === "function";
   }
   function previewMatch(gesture) {
@@ -236,12 +288,8 @@
       }
       return;
     }
-    if (match.profile.action === "reopen_last") {
-      reopenReaderSurface();
-      return;
-    }
-    if (match.profile.action === "restore_jump") {
-      global.restoreReaderJumpPosition?.();
+    if (match.profile.action === "undo_last") {
+      undoLastReaderAction();
       return;
     }
     void closeReaderSurface(gesture.source);
@@ -252,13 +300,15 @@
     trace("finish cancelled=" + Boolean(cancelled) + " action=" + (matched?.profile?.action || "none") + " points=" + gesture.points.length);
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clear();
+    hideHint();
     if (matched && canApplyAction(matched.profile.action)) execute(matched, gesture);
   }
   function cancelKeepHint() {
-    if (!active) return;
+    if (!active) { hideHint(); return; }
     const gesture = active; active = null;
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clear();
+    hideHint();
   }
   function fromFrame(payload) {
     const frame = root.getElementById("frame");
@@ -289,9 +339,11 @@
   }, true);
   global.addEventListener("mousemove", (event) => { if (active) { event.preventDefault(); move(event.clientX, event.clientY); } }, { capture: true, passive: false });
   global.addEventListener("mouseup", () => finish(), true);
-  global.addEventListener("blur", () => finish(true));
+  global.addEventListener("blur", () => { finish(true); hideHint(); });
+  root.addEventListener("visibilitychange", () => { if (root.hidden) hideHint(); });
   global.addEventListener("contextmenu", (event) => { if (active || Date.now() < suppressContextMenuUntil) event.preventDefault(); }, true);
   listenForClosedSurfaces();
+  listenForUndoCheckpoints();
   void connectSharedSettings();
   global.ReaderGestureClose = { fromFrame, frameSurfaceClosed };
 })(window);

@@ -19,6 +19,7 @@ pub(crate) struct StartupEnhancementConfig {
     pub(crate) enabled: bool,
     pub(crate) continue_high_cost: bool,
     pub(crate) launch_at_login: bool,
+    pub(crate) launch_at_login_background: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -28,12 +29,16 @@ pub(crate) struct StartupEnhancementStatus {
     continue_high_cost: bool,
     launch_at_login: bool,
     launch_at_login_available: bool,
+    launch_at_login_background: bool,
+    launch_at_login_background_available: bool,
 }
 
 pub(crate) struct StartupEnhancementState {
     enabled: AtomicBool,
     continue_high_cost: AtomicBool,
     launch_at_login: AtomicBool,
+    launch_at_login_background: AtomicBool,
+    login_backgrounded: AtomicBool,
     backgrounded: AtomicBool,
     high_cost_resume_at_ms: AtomicU64,
 }
@@ -45,6 +50,8 @@ impl StartupEnhancementState {
             enabled: AtomicBool::new(config.enabled),
             continue_high_cost: AtomicBool::new(config.continue_high_cost),
             launch_at_login: AtomicBool::new(config.launch_at_login),
+            launch_at_login_background: AtomicBool::new(config.launch_at_login_background),
+            login_backgrounded: AtomicBool::new(login_background_requested()),
             backgrounded: AtomicBool::new(false),
             high_cost_resume_at_ms: AtomicU64::new(0),
         }
@@ -55,12 +62,21 @@ impl StartupEnhancementState {
             enabled: self.enabled.load(Ordering::Acquire),
             continue_high_cost: self.continue_high_cost.load(Ordering::Acquire),
             launch_at_login: self.launch_at_login.load(Ordering::Acquire),
+            launch_at_login_background: self.launch_at_login_background.load(Ordering::Acquire),
         }
     }
 
-    fn update(&self, config: StartupEnhancementConfig) -> Result<(), String> {
-        if config.launch_at_login != self.launch_at_login.load(Ordering::Acquire) {
-            configure_launch_at_login(config.launch_at_login)?;
+    fn update(
+        &self,
+        app: &tauri::AppHandle,
+        mut config: StartupEnhancementConfig,
+    ) -> Result<(), String> {
+        config.launch_at_login_background &= config.launch_at_login;
+        let current = self.config();
+        if config.launch_at_login != current.launch_at_login
+            || config.launch_at_login_background != current.launch_at_login_background
+        {
+            configure_launch_at_login(app, config)?;
         }
         save_config(config)?;
         self.enabled.store(config.enabled, Ordering::Release);
@@ -68,6 +84,8 @@ impl StartupEnhancementState {
             .store(config.continue_high_cost, Ordering::Release);
         self.launch_at_login
             .store(config.launch_at_login, Ordering::Release);
+        self.launch_at_login_background
+            .store(config.launch_at_login_background, Ordering::Release);
         Ok(())
     }
 
@@ -77,7 +95,12 @@ impl StartupEnhancementState {
             enabled: config.enabled,
             continue_high_cost: config.continue_high_cost,
             launch_at_login: config.launch_at_login,
-            launch_at_login_available: cfg!(windows),
+            launch_at_login_available: cfg!(any(target_os = "windows", target_os = "macos")),
+            launch_at_login_background: config.launch_at_login_background,
+            launch_at_login_background_available: cfg!(any(
+                target_os = "windows",
+                target_os = "macos"
+            )),
         }
     }
 
@@ -120,7 +143,11 @@ fn windows_registry_command() -> Command {
 }
 
 #[cfg(windows)]
-fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
+fn configure_launch_at_login(
+    _app: &tauri::AppHandle,
+    config: StartupEnhancementConfig,
+) -> Result<(), String> {
+    let enabled = config.launch_at_login;
     if !enabled {
         let exists = windows_registry_command()
             .args(["query", WINDOWS_RUN_KEY, "/v", WINDOWS_RUN_VALUE])
@@ -144,7 +171,11 @@ fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
 
     let executable =
         std::env::current_exe().map_err(|error| format!("无法确定当前程序路径：{error}"))?;
-    let command_line = format!("\"{}\"", executable.display());
+    let background_argument = config
+        .launch_at_login_background
+        .then_some(LOGIN_BACKGROUND_ARGUMENT)
+        .unwrap_or("");
+    let command_line = format!("\"{}\" {background_argument}", executable.display());
     let output = windows_registry_command()
         .args([
             "add",
@@ -169,10 +200,113 @@ fn configure_launch_at_login(enabled: bool) -> Result<(), String> {
     }
 }
 
-#[cfg(not(windows))]
-fn configure_launch_at_login(_enabled: bool) -> Result<(), String> {
+#[cfg(target_os = "macos")]
+const MACOS_LAUNCH_AGENT_FILE: &str = "com.kunpeng.reader.plist";
+const LOGIN_BACKGROUND_ARGUMENT: &str = "--kunpeng-login-background";
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or("无法确定当前用户主目录")?;
+    Ok(home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(MACOS_LAUNCH_AGENT_FILE))
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_plist(
+    executable: &std::path::Path,
+    launch_in_background: bool,
+) -> Result<String, String> {
+    let executable = executable
+        .to_str()
+        .ok_or("应用程序路径不是有效 UTF-8，无法设置开机自启")?;
+    let executable = xml_escape(executable);
+    let background_argument = if launch_in_background {
+        format!("    <string>{LOGIN_BACKGROUND_ARGUMENT}</string>\n")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kunpeng.reader</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{executable}</string>
+{background_argument}  </array>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
+"#
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn configure_launch_at_login(
+    _app: &tauri::AppHandle,
+    config: StartupEnhancementConfig,
+) -> Result<(), String> {
+    let enabled = config.launch_at_login;
+    let path = macos_launch_agent_path()?;
+    if !enabled {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("关闭开机自启失败：{error}")),
+        };
+    }
+
+    let executable =
+        std::env::current_exe().map_err(|error| format!("无法确定当前程序路径：{error}"))?;
+    let plist = macos_launch_agent_plist(&executable, config.launch_at_login_background)?;
+    atomic_file::write(&path, plist.as_bytes())
+        .map_err(|error| format!("开启开机自启失败：{error}"))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn configure_launch_at_login(
+    _app: &tauri::AppHandle,
+    _config: StartupEnhancementConfig,
+) -> Result<(), String> {
     Err("当前平台暂不支持开机自启设置".to_string())
 }
+
+fn login_background_requested() -> bool {
+    std::env::args().any(|argument| argument == LOGIN_BACKGROUND_ARGUMENT)
+}
+
+pub(crate) fn should_start_login_background(app: &tauri::AppHandle) -> bool {
+    app.state::<StartupEnhancementState>()
+        .login_backgrounded
+        .load(Ordering::Acquire)
+}
+
+pub(crate) fn begin_login_background(app: &tauri::AppHandle) {
+    if !should_start_login_background(app) {
+        return;
+    }
+    background_main(app);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+}
+
 fn config_path() -> Option<PathBuf> {
     let mut path = dirs::config_dir()?;
     path.push("ebook-reader");
@@ -228,10 +362,11 @@ pub(crate) fn startup_enhancement_config(
 
 #[tauri::command]
 pub(crate) fn set_startup_enhancement_config(
+    app: tauri::AppHandle,
     state: tauri::State<StartupEnhancementState>,
     request: StartupEnhancementConfig,
 ) -> Result<StartupEnhancementStatus, String> {
-    state.update(request)?;
+    state.update(&app, request)?;
     Ok(state.status())
 }
 
@@ -268,16 +403,34 @@ pub(crate) fn background_main(app: &tauri::AppHandle) {
     }
 }
 
+/// The single native path that turns a hidden main window back into the
+/// foreground application. Cold-start first paint, Dock/Finder reopen and warm
+/// activation all use this instead of competing `show` calls.
+pub(crate) fn reveal_main(app: &tauri::AppHandle) -> Result<(), String> {
+    if should_start_login_background(app) {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Regular)
+        .map_err(|error| error.to_string())?;
+    let Some(main) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    main.set_skip_taskbar(false)
+        .map_err(|error| error.to_string())?;
+    main.show().map_err(|error| error.to_string())?;
+    main.unminimize().map_err(|error| error.to_string())?;
+    main.set_focus().map_err(|error| error.to_string())
+}
+
 pub(crate) fn activate_main(app: &tauri::AppHandle, requested_at_ms: u64) {
     let enhancement = app.state::<StartupEnhancementState>();
+    enhancement
+        .login_backgrounded
+        .store(false, Ordering::Release);
     enhancement.backgrounded.store(false, Ordering::Release);
     let resume_at_ms = enhancement.begin_hot_activation_grace(crate::now_ms());
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.set_skip_taskbar(false);
-        let _ = main.show();
-        let _ = main.unminimize();
-        let _ = main.set_focus();
-    }
+    let _ = reveal_main(app);
     emit_background_state(
         app,
         false,
@@ -316,11 +469,29 @@ mod tests {
             enabled: true,
             continue_high_cost: true,
             launch_at_login: true,
+            launch_at_login_background: true,
         };
         assert_eq!(
             serde_json::to_value(config).unwrap(),
-            serde_json::json!({"enabled": true, "continueHighCost": true, "launchAtLogin": true})
+            serde_json::json!({"enabled": true, "continueHighCost": true, "launchAtLogin": true, "launchAtLoginBackground": true})
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launch_agent_plist_uses_the_current_executable_as_its_only_argument() {
+        let plist = macos_launch_agent_plist(
+            std::path::Path::new("/Applications/鲲鹏 & 阅读器.app/Contents/MacOS/鲲鹏阅读器"),
+            true,
+        )
+        .unwrap();
+        assert!(plist.contains("<string>com.kunpeng.reader</string>"));
+        assert!(plist.contains(
+            "<string>/Applications/鲲鹏 &amp; 阅读器.app/Contents/MacOS/鲲鹏阅读器</string>"
+        ));
+        assert!(plist.contains("<string>--kunpeng-login-background</string>"));
+        assert_eq!(plist.matches("</array>").count(), 1);
+        assert!(plist.contains("<false/>"));
     }
 
     #[test]
@@ -329,6 +500,8 @@ mod tests {
             enabled: AtomicBool::new(true),
             continue_high_cost: AtomicBool::new(false),
             launch_at_login: AtomicBool::new(false),
+            launch_at_login_background: AtomicBool::new(false),
+            login_backgrounded: AtomicBool::new(false),
             backgrounded: AtomicBool::new(false),
             high_cost_resume_at_ms: AtomicU64::new(110),
         };

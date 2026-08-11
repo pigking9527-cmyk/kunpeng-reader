@@ -1,0 +1,156 @@
+name: Windows x64 build
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Replace the matching vX.Y.Z Windows assets in GitHub Release"
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-build.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "eslint.config.mjs"
+      - "build.rs"
+      - "tauri.conf.json"
+      - "packaging/windows/**"
+      - "icons/**"
+      - "apps/desktop-ui/**"
+      - "packages/**"
+      - "scripts/build-release.ps1"
+      - "scripts/prepare-windows-gpu-runtime.ps1"
+      - "scripts/run-typescript-tests.mjs"
+      - "scripts/run-legacy-ui-tests.cjs"
+      - "src/**"
+      - "ui/**"
+      - "vendor/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Portable executable and NSIS installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-x64
+          cache-on-failure: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked Node dependencies
+        run: npm ci
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Run frontend migration gates
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run test:typed
+          npm run test:legacy-ui
+          npm run desktop-ui:build
+
+      - name: Run Rust tests
+        shell: pwsh
+        run: |
+          cargo test -p ebook-reader-tauri -p reader-core --locked
+          cargo test -p epub --lib --locked
+
+      - name: Build portable executable and bundled GPU runtime
+        shell: pwsh
+        run: ./scripts/build-release.ps1 -SkipIconCacheRefresh
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: cargo tauri build --config packaging/windows/tauri.release.conf.json
+
+      - name: Prepare artifacts and checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if (-not $version) { throw 'Cannot read version from Cargo.toml.' }
+          $out = Join-Path $PWD 'target/windows-release'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $portable = Join-Path $PWD '鲲鹏阅读器.exe'
+          $installer = Get-ChildItem -LiteralPath 'target/release/bundle/nsis' -Filter "*_${version}_x64-setup.exe" -File | Select-Object -First 1
+          if (-not (Test-Path -LiteralPath $portable)) { throw 'Portable executable was not built.' }
+          if ($null -eq $installer) { throw "NSIS installer for $version was not built." }
+          $portableOut = Join-Path $out "Kunpeng-Reader-v${version}-Windows-x64-portable.exe"
+          $installerOut = Join-Path $out "Kunpeng-Reader-v${version}-Windows-x64-setup.exe"
+          Copy-Item -LiteralPath $portable -Destination $portableOut -Force
+          Copy-Item -LiteralPath $installer.FullName -Destination $installerOut -Force
+          @($portableOut, $installerOut) | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($_))"
+          } | Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS-Windows.txt') -Encoding utf8NoBOM
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: Kunpeng-Reader-Windows-x64
+          path: target/windows-release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish Windows release assets
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download verified Windows artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: Kunpeng-Reader-Windows-x64
+          path: target/windows-release
+
+      - name: Replace GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          out_dir="target/windows-release"
+          gh release upload "v${version}" \
+            "$out_dir/Kunpeng-Reader-v${version}-Windows-x64-portable.exe" \
+            "$out_dir/Kunpeng-Reader-v${version}-Windows-x64-setup.exe" \
+            "$out_dir/SHA256SUMS-Windows.txt" \
+            --clobber

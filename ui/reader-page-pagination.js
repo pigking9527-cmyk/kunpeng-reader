@@ -7,6 +7,29 @@ function isLinePagedMode(){return false;}
 function usesLineBreakPaging(){return isScrollMode();}
 function columnsPerView(){return isDualPage()?2:1;}
 function columnPitch(){return window.innerWidth/columnsPerView();}
+function fastDualPagedPageCount(el){
+  if(!el)return 1;
+  var base=el.getBoundingClientRect().left,pl=pageLayout(),right=0;
+  // 大章节不逐字扫描整章；只读取末尾可见正文块的行矩形。scrollWidth 会把
+  // rr-end 的强制空栏算进去，双页模式因此可能凭空多出一整个 spread。
+  var blocks=el.querySelectorAll('p,li,blockquote,h1,h2,h3,h4,h5,h6,pre,figure,img,svg,canvas,table');
+  for(var i=blocks.length-1;i>=0&&right<1;i--){
+    var block=blocks[i];
+    if(block.closest&&block.closest('.rr-end,.rr-dual-continuation'))continue;
+    var range=document.createRange(),rects=[];
+    try{range.selectNodeContents(block);rects=range.getClientRects();}catch(_){rects=block.getClientRects();}
+    for(var j=0;j<rects.length;j++)if(rects[j].width>0&&rects[j].height>0)right=Math.max(right,rects[j].right-base);
+  }
+  var physical=right>0?Math.max(1,Math.ceil((right+1)/pl.colPitch)):1;
+  var bias=typeof dualStartColumn==='number'?dualStartColumn:0;
+  return Math.max(1,Math.ceil(Math.max(1,physical-bias)/2));
+}
+function fastPagedPageCount(el){
+  if(!el)return 1;
+  if(isDualPage())return fastDualPagedPageCount(el);
+  var hasEnd=!!el.querySelector('.rr-end');
+  return columnCountFromWidth(el.scrollWidth||0,hasEnd);
+}
 // 全书页数按没有打开智读侧栏时的阅读窗口宽度统计。智读只临时压缩正文，
 // 不应产生另一套页数缓存；真正调整窗口时由父页面更新此宽度。
 var pageCountViewportWidth=Math.max(1,Math.round(window.innerWidth||1));
@@ -136,14 +159,20 @@ function contentRectExtent(el){
   var walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT,null),node;
   while((node=walker.nextNode())){
     if(!(node.nodeValue||'').trim())continue;
+    var parent=node.parentElement;
+    if(parent&&parent.closest&&parent.closest('.rr-end,.rr-dual-continuation'))continue;
     var range=document.createRange();
     try{range.selectNodeContents(node);}catch(e){continue;}
     var rects=range.getClientRects();
     for(var i=0;i<rects.length;i++)addRect(rects[i]);
   }
-  var els=el.querySelectorAll('img,svg,canvas,table,pre,blockquote,h1,h2,h3,h4,h5,h6,p,li');
+  // 文本节点上面的 Range 已经给出了真实字形的最右边界。不能再读取 p/li/h*
+  // 的盒子：在多栏排版中，段后的 margin 可能单独被推入下一栏，盒子虽存在
+  // 却没有任何文字，若把它计入便会在章节末尾虚构一整张空白 spread。
+  // 这里仅补充无文本也应占页的真实媒体。
+  var els=el.querySelectorAll('img,svg,canvas,video,object,embed,iframe');
   for(var j=0;j<els.length;j++){
-    if(els[j].classList&&els[j].classList.contains('rr-end'))continue;
+    if(els[j].closest&&els[j].closest('.rr-end,.rr-dual-continuation'))continue;
     var rs=els[j].getClientRects();
     for(var k=0;k<rs.length;k++)addRect(rs[k]);
   }
@@ -159,6 +188,43 @@ function pagedPageCountFromContent(el){
   var physical=physicalPageCountFromContent(el);
   var bias=typeof dualStartColumn==='number'?dualStartColumn:0;
   return isDualPage()?Math.max(1,Math.ceil(Math.max(1,physical-bias)/2)):physical;
+}
+// 浏览器的 column flow 偶尔会在正文之后留下只含段距或强制换栏标记的列。
+// 几何宽度会把这些列算进去，但用户实际看到的是整张空白页。按真实文字行和
+// 非文本媒体逐页复核末尾，可作为所有页数估算路径的最终兜底。
+function pagedViewHasVisibleContent(el,index){
+  if(!el||isScrollMode())return true;
+  var base=el.getBoundingClientRect().left,pl=pageLayout();
+  var start=isDualPage()?index*2+(typeof dualStartColumn==='number'?dualStartColumn:0):index;
+  var width=isDualPage()?pl.colPitch:pl.pageStep;
+  var count=isDualPage()?2:1;
+  function inView(r){
+    if(!r||r.width<1||r.height<3)return false;
+    var column=Math.floor((r.left-base+1)/width);
+    return column>=start&&column<start+count;
+  }
+  var walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT,null),node;
+  while((node=walker.nextNode())){
+    if(!(node.nodeValue||'').trim())continue;
+    var parent=node.parentElement;
+    if(parent&&parent.closest&&parent.closest('.rr-end,.rr-dual-continuation'))continue;
+    var range=document.createRange();
+    try{range.selectNodeContents(node);}catch(_){continue;}
+    var rects=range.getClientRects();
+    for(var i=0;i<rects.length;i++)if(inView(rects[i]))return true;
+  }
+  var media=el.querySelectorAll('img,svg,canvas,video,object,embed,iframe');
+  for(var j=0;j<media.length;j++){
+    if(media[j].closest&&media[j].closest('.rr-end,.rr-dual-continuation'))continue;
+    var mediaRects=media[j].getClientRects();
+    for(var k=0;k<mediaRects.length;k++)if(inView(mediaRects[k]))return true;
+  }
+  return false;
+}
+function trimTrailingBlankPagedViews(el,count){
+  var pages=Math.max(1,Math.floor(Number(count)||1));
+  while(pages>1&&!pagedViewHasVisibleContent(el,pages-1))pages--;
+  return pages;
 }
 function pageCountLayout(){
   var vw=pageCountWidth(),l=mg(S.marginLeft),r=mg(S.marginRight);
@@ -203,6 +269,7 @@ function alignDualAnchorToLeftPage(a){
   var physical=Math.max(0,Math.floor((x+1)/pl.colPitch));
   dualStartColumn=physical%2;
   pagesInCh=fastChapterLayout?fastPagedPageCount(root):pagedPageCountFromContent(root);
+  if(!fastChapterLayout)pagesInCh=trimTrailingBlankPagedViews(root,pagesInCh);
   pageInCh=Math.max(0,Math.min(pagesInCh-1,Math.floor((physical-dualStartColumn)/2)));
   return true;
 }

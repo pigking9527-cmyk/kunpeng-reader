@@ -600,6 +600,57 @@ fn map_physical_chapter_to_virtual(meta: &EpubMetaCache, chapter: u32) -> u32 {
     }
 }
 
+fn clamp_virtual_chapter(meta: &EpubMetaCache, chapter: u32) -> u32 {
+    chapter.min(meta.virtuals.len().saturating_sub(1) as u32)
+}
+
+/// Move both the legacy chapter field and the authoritative text anchor. A
+/// `ReadingPosition::normalized` value takes its chapter from the anchor, so
+/// changing only the legacy field would silently restore the old physical
+/// chapter whenever an anchor exists.
+fn remap_reading_position_chapter(
+    position: &mut reader_core::ReadingPosition,
+    meta: &EpubMetaCache,
+) {
+    position.chapter = map_physical_chapter_to_virtual(meta, position.chapter);
+    if let Some(anchor) = position.anchor.as_mut() {
+        anchor.chapter = map_physical_chapter_to_virtual(meta, anchor.chapter);
+    }
+    *position = position.clone().normalized();
+}
+
+/// Even a current-format bookmark can point past the final virtual chapter
+/// after the underlying EPUB was replaced or re-imported. Keep the legacy
+/// field and its authoritative anchor within the same document bounds.
+fn clamp_reading_position_chapter(
+    position: &mut reader_core::ReadingPosition,
+    meta: &EpubMetaCache,
+) {
+    position.chapter = clamp_virtual_chapter(meta, position.chapter);
+    if let Some(anchor) = position.anchor.as_mut() {
+        anchor.chapter = clamp_virtual_chapter(meta, anchor.chapter);
+    }
+    *position = position.clone().normalized();
+}
+
+fn remap_highlight_chapter(highlight: &mut book::Highlight, meta: &EpubMetaCache) {
+    highlight.chapter = map_physical_chapter_to_virtual(meta, highlight.chapter);
+    if let Some(range) = highlight.range_anchor.as_mut() {
+        for anchor in [&mut range.start, &mut range.end].into_iter().flatten() {
+            anchor.chapter = map_physical_chapter_to_virtual(meta, anchor.chapter);
+        }
+    }
+}
+
+fn clamp_highlight_chapter(highlight: &mut book::Highlight, meta: &EpubMetaCache) {
+    highlight.chapter = clamp_virtual_chapter(meta, highlight.chapter);
+    if let Some(range) = highlight.range_anchor.as_mut() {
+        for anchor in [&mut range.start, &mut range.end].into_iter().flatten() {
+            anchor.chapter = clamp_virtual_chapter(meta, anchor.chapter);
+        }
+    }
+}
+
 pub(crate) fn map_physical_chapter_for_book(
     state: &AppState,
     id: u64,
@@ -823,28 +874,37 @@ pub(crate) async fn book_info(
     let resume_chapter = if should_map_old_chapters {
         map_physical_chapter_to_virtual(&meta, resume_chapter)
     } else {
-        resume_chapter.min(meta.virtuals.len().saturating_sub(1) as u32)
+        clamp_virtual_chapter(&meta, resume_chapter)
     };
     let resume_position = resume_position.map(|mut position| {
         if should_map_old_chapters {
-            position.chapter = map_physical_chapter_to_virtual(&meta, position.chapter);
+            remap_reading_position_chapter(&mut position, &meta);
         } else {
-            position.chapter = position
-                .chapter
-                .min(meta.virtuals.len().saturating_sub(1) as u32);
+            clamp_reading_position_chapter(&mut position, &meta);
         }
-        position.normalized()
+        position
     });
     let mut bookmarks = bookmarks;
-    if should_map_old_chapters {
-        for bookmark in &mut bookmarks {
+    for bookmark in &mut bookmarks {
+        if should_map_old_chapters {
             bookmark.chapter = map_physical_chapter_to_virtual(&meta, bookmark.chapter);
+        } else {
+            bookmark.chapter = clamp_virtual_chapter(&meta, bookmark.chapter);
+        }
+        if let Some(position) = bookmark.position.as_mut() {
+            if should_map_old_chapters {
+                remap_reading_position_chapter(position, &meta);
+            } else {
+                clamp_reading_position_chapter(position, &meta);
+            }
         }
     }
     let mut highlights = highlights;
-    if should_map_old_chapters {
-        for highlight in &mut highlights {
-            highlight.chapter = map_physical_chapter_to_virtual(&meta, highlight.chapter);
+    for highlight in &mut highlights {
+        if should_map_old_chapters {
+            remap_highlight_chapter(highlight, &meta);
+        } else {
+            clamp_highlight_chapter(highlight, &meta);
         }
     }
 
@@ -1118,6 +1178,27 @@ pub(crate) fn handle_protocol_request<R: tauri::Runtime>(
 mod tests {
     use super::*;
 
+    fn chapter_remap_meta() -> EpubMetaCache {
+        EpubMetaCache {
+            mtime: 0,
+            spine_paths: Vec::new(),
+            chapter_map: HashMap::new(),
+            virtuals: (0..5)
+                .map(|part| EpubVirtualChapter {
+                    spine_idx: part,
+                    path: format!("chapter-{part}.xhtml"),
+                    base_dir: String::new(),
+                    part: 0,
+                    body_start: 0,
+                    body_end: 0,
+                })
+                .collect(),
+            toc: Vec::new(),
+            // A former physical chapter 1 was split into virtual chapter 3.
+            physical_to_virtual: vec![0, 3, 4],
+        }
+    }
+
     #[test]
     fn small_chapters_are_not_split() {
         let body = "<p>短章节</p>";
@@ -1173,5 +1254,111 @@ mod tests {
         assert!(converted.contains(r#"href="/资源/开放""#));
         assert!(converted.contains("開放中文"));
         assert!(converted.contains("閱讀"));
+    }
+
+    #[test]
+    fn old_epub_chapter_remap_keeps_resume_bookmark_and_highlight_anchors_together() {
+        let meta = chapter_remap_meta();
+        let anchor = reader_core::ReadingAnchor {
+            chapter: 1,
+            dom_path: "p:nth-of-type(2)".to_string(),
+            text_offset: 17,
+            context_before: "前文".to_string(),
+            context_after: "后文".to_string(),
+            viewport_offset: 0.0,
+        };
+        let mut position = reader_core::ReadingPosition {
+            chapter: 1,
+            anchor: Some(anchor.clone()),
+            fraction: 0.4,
+        };
+        remap_reading_position_chapter(&mut position, &meta);
+        assert_eq!(position.chapter, 3);
+        assert_eq!(position.anchor.as_ref().map(|value| value.chapter), Some(3));
+
+        let mut bookmark = book::Bookmark {
+            chapter: 1,
+            frac: 0.4,
+            label: "续读".to_string(),
+            position: Some(reader_core::ReadingPosition {
+                chapter: 1,
+                anchor: Some(anchor.clone()),
+                fraction: 0.4,
+            }),
+        };
+        bookmark.chapter = map_physical_chapter_to_virtual(&meta, bookmark.chapter);
+        remap_reading_position_chapter(bookmark.position.as_mut().unwrap(), &meta);
+        assert_eq!(bookmark.chapter, 3);
+        assert_eq!(bookmark.effective_position().authoritative_chapter(), 3);
+
+        let mut highlight = book::Highlight {
+            chapter: 1,
+            range_anchor: Some(reader_core::TextRangeAnchor {
+                start: Some(anchor.clone()),
+                end: Some(reader_core::ReadingAnchor {
+                    text_offset: 29,
+                    ..anchor
+                }),
+            }),
+            ..Default::default()
+        };
+        remap_highlight_chapter(&mut highlight, &meta);
+        assert_eq!(highlight.chapter, 3);
+        let range = highlight.range_anchor.unwrap();
+        assert_eq!(range.start.map(|value| value.chapter), Some(3));
+        assert_eq!(range.end.map(|value| value.chapter), Some(3));
+    }
+
+    #[test]
+    fn current_epub_positions_clamp_resume_bookmark_and_highlight_anchors_together() {
+        let meta = chapter_remap_meta();
+        let anchor = reader_core::ReadingAnchor {
+            chapter: 99,
+            dom_path: "p:nth-of-type(2)".to_string(),
+            text_offset: 17,
+            context_before: "前文".to_string(),
+            context_after: "后文".to_string(),
+            viewport_offset: 0.0,
+        };
+        let mut position = reader_core::ReadingPosition {
+            chapter: 99,
+            anchor: Some(anchor.clone()),
+            fraction: 0.4,
+        };
+        clamp_reading_position_chapter(&mut position, &meta);
+        assert_eq!(position.chapter, 4);
+        assert_eq!(position.anchor.as_ref().map(|value| value.chapter), Some(4));
+
+        let mut bookmark = book::Bookmark {
+            chapter: 99,
+            frac: 0.4,
+            label: "续读".to_string(),
+            position: Some(reader_core::ReadingPosition {
+                chapter: 99,
+                anchor: Some(anchor.clone()),
+                fraction: 0.4,
+            }),
+        };
+        bookmark.chapter = clamp_virtual_chapter(&meta, bookmark.chapter);
+        clamp_reading_position_chapter(bookmark.position.as_mut().unwrap(), &meta);
+        assert_eq!(bookmark.chapter, 4);
+        assert_eq!(bookmark.effective_position().authoritative_chapter(), 4);
+
+        let mut highlight = book::Highlight {
+            chapter: 99,
+            range_anchor: Some(reader_core::TextRangeAnchor {
+                start: Some(anchor.clone()),
+                end: Some(reader_core::ReadingAnchor {
+                    text_offset: 29,
+                    ..anchor
+                }),
+            }),
+            ..Default::default()
+        };
+        clamp_highlight_chapter(&mut highlight, &meta);
+        assert_eq!(highlight.chapter, 4);
+        let range = highlight.range_anchor.unwrap();
+        assert_eq!(range.start.map(|value| value.chapter), Some(4));
+        assert_eq!(range.end.map(|value| value.chapter), Some(4));
     }
 }

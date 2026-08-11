@@ -7,7 +7,6 @@ const root = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const source = fs.readFileSync(path.join(root, "toolbar-settings-ui.js"), "utf8");
 const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
-const readerPreferences = fs.readFileSync(path.join(root, "reader-preferences-ui.js"), "utf8");
 const shelf = fs.readFileSync(path.join(root, "shelf-ui.js"), "utf8");
 const annotations = fs.readFileSync(path.join(root, "reader-page-annotations.js"), "utf8");
 
@@ -27,7 +26,7 @@ test("library QA and news use distinct monochrome toolbar glyphs", () => {
   const news = html.match(/id="newsnow-toolbar-btn"[\s\S]*?<\/button>/)?.[0] || "";
   assert.match(library, /M4\.5 5\.5c2\.3-1\.2/);
   assert.match(library, /M15\.2 9\.2a1\.9/);
-  assert.match(news, /<rect x="4\.5" y="5" width="15" height="14"/);
+  assert.match(news, /<rect\s+x="4\.5"\s+y="5"\s+width="15"\s+height="14"/);
   assert.match(news, /M13 8h3\.5/);
   assert.doesNotMatch(library + news, /fill="#fff"/);
 });
@@ -47,7 +46,7 @@ test("toolbar settings keep settings visible and reflow neighboring actions", ()
   assert.match(styles, /\.toolbar-content-button\.toolbar-content-has-text/);
   assert.match(styles, /\.toolbar-action\.toolbar-user-hidden\s*\{\s*display:\s*none;/);
   assert.match(styles, /--toolbar-item-size/);
-  assert.match(styles, /\.toolbar-leading-action \{ flex: 0 0 auto; \}/);
+  assert.match(styles, /\.toolbar-leading-action \{\s*flex: 0 0 auto;\s*\}/);
 });
 
 test("toolbar ordering uses pointer capture instead of unreliable native drag events", () => {
@@ -70,12 +69,10 @@ test("toolbar ordering uses pointer capture instead of unreliable native drag ev
   assert.doesNotMatch(source, /item\.draggable|dragstart|dragover|dragend/);
 });
 
-test("every reorder overlay is clamped to the bounds of its replacement list", () => {
-  assert.match(readerPreferences, /const bounds = list\?\.getBoundingClientRect\(\)/);
-  assert.match(readerPreferences, /const bounds = grid\?\.getBoundingClientRect\(\)/);
+test("remaining reorder overlays are clamped to the bounds of their replacement lists", () => {
   assert.match(shelf, /const bounds = booklistBooks\.getBoundingClientRect\(\)/);
   assert.match(annotations, /var bounds=list\.getBoundingClientRect\(\)/);
-  for (const code of [readerPreferences, shelf, annotations]) {
+  for (const code of [shelf, annotations]) {
     assert.match(code, /Math\.max\(bounds\.top,\s*Math\.min\(maxTop,/);
   }
 });

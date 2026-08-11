@@ -21,12 +21,14 @@ test("read aloud automatically selects Microsoft Neural voices for all supported
   assert.match(core, /edge_ssml_uses_the_selected_voice_locale/);
 });
 
-test("TTS settings keep source and speed but do not expose a manual voice picker", () => {
-  const sourceRow = html.slice(html.indexOf('id="set-ttssrc"'), html.indexOf('id="set-ttsrate"'));
+test("TTS settings keep source and speed without a manual voice picker", () => {
   assert.match(html, /id="set-ttssrc"/);
+  assert.match(html, /微软/);
+  assert.match(html, /系统语音/);
+  assert.match(html, /id="quick-set-ttsrate"[^>]*step="0\.05"/);
+  assert.match(html, /id="set-ttsrate"[^>]*step="0\.05"/);
+  assert.match(settings, /const formatTtsRate/);
+  assert.match(settings, /rounded\.toFixed\(2\) \+ "×"/);
   assert.doesNotMatch(html, /id="set-ttsvoice"/);
-  assert.match(sourceRow, /data-reader-i18n="ttsMicrosoftAuto"/);
-  assert.doesNotMatch(sourceRow, /按正文语言自动朗读/);
-  assert.doesNotMatch(sourceRow, /按正文语言匹配/);
   assert.doesNotMatch(settings, /bindSel\("set-ttsvoice"/);
 });

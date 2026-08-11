@@ -22,10 +22,10 @@ jobs:
     timeout-minutes: 90
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
-      # Ad-hoc signing prevents Gatekeeper from treating an unsigned app bundle
-      # as structurally damaged. A public release still needs Developer ID
-      # signing and Apple notarization.
-      APPLE_SIGNING_IDENTITY: "-"
+      # Normal CI remains reproducible with an ad-hoc signature. A manually
+      # published release imports a Developer ID certificate below and replaces
+      # this value with the protected repository secret.
+      APPLE_SIGNING_IDENTITY: ${{ inputs.publish_release && secrets.APPLE_SIGNING_IDENTITY || '-' }}
 
     steps:
       - name: Checkout
@@ -45,16 +45,66 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked Node dependencies
+        run: npm ci
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version '^2' --locked
 
-      - name: Run UI tests
-        run: node --test ui/tests/*.test.cjs
+      - name: Import Developer ID signing certificate
+        if: ${{ inputs.publish_release }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          keychain="$RUNNER_TEMP/kunpeng-release.keychain-db"
+          certificate="$RUNNER_TEMP/DeveloperID.p12"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+
+      - name: Run frontend migration gates
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run test:typed
+          npm run test:legacy-ui
+          npm run desktop-ui:build
 
       # The semantic search runtime does not ship Intel macOS prebuilt binaries.
       - name: Build Apple Silicon macOS bundles
         run: cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Seal macOS application bundle
+        shell: bash
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+        run: |
+          set -euo pipefail
+          app_path="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app_path"
+          # Tauri's ad-hoc fallback signs the executable, but `codesign
+          # --strict` and Apple's notarization require the outer app bundle to
+          # seal Info.plist and Resources too. Publish builds additionally need
+          # Hardened Runtime and a trusted timestamp.
+          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+            codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_path"
+          else
+            codesign --force --deep --sign - "$app_path"
+          fi
 
       - name: Verify macOS application signature
         shell: bash
@@ -64,6 +114,33 @@ jobs:
           test -n "$app_path"
           codesign --verify --deep --strict --verbose=4 "$app_path"
           codesign --display --verbose=4 "$app_path"
+
+      - name: Notarize and staple published release bundles
+        if: ${{ inputs.publish_release }}
+        shell: bash
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_NOTARY_APPLE_ID"
+          test -n "$APPLE_NOTARY_TEAM_ID"
+          test -n "$APPLE_NOTARY_PASSWORD"
+          bundle_dir="target/aarch64-apple-darwin/release/bundle"
+          app_path="$(find "$bundle_dir/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg_path="$(find "$bundle_dir/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$app_path"
+          test -n "$dmg_path"
+          app_submission="$RUNNER_TEMP/Kunpeng-Reader-notarization.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$app_submission"
+          xcrun notarytool submit "$app_submission" --apple-id "$APPLE_NOTARY_APPLE_ID" --team-id "$APPLE_NOTARY_TEAM_ID" --password "$APPLE_NOTARY_PASSWORD" --wait
+          xcrun stapler staple "$app_path"
+          xcrun notarytool submit "$dmg_path" --apple-id "$APPLE_NOTARY_APPLE_ID" --team-id "$APPLE_NOTARY_TEAM_ID" --password "$APPLE_NOTARY_PASSWORD" --wait
+          xcrun stapler staple "$dmg_path"
+          codesign --verify --deep --strict --verbose=4 "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+          spctl --assess --type open --verbose=4 "$dmg_path"
 
       - name: Prepare artifacts and checksums
         shell: bash

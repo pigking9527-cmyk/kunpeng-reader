@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "latest": "1.15.0",
+  "latest": "1.16.0",
   "releases": {
+    "1.16.0": {
+      "android_version": "0.3.0",
+      "release_notes": "- 桌面业务页面完成 React + TypeScript + Vite 迁移，新增严格类型检查、lint、类型测试和跨平台构建门禁；Rust + Tauri 2 继续负责系统能力、数据库、同步与窗口。\n- EPUB/PDF、分页、选区和手势保持独立阅读引擎，并补强阅读页分页、图片、批注/脚注跳转、进度和跨章稳定性。\n- 同步、账户恢复和设置交换补充类型化接口、契约兼容与更稳妥的恢复/确认流程；图书正文、原文件、本机路径和明文凭据仍不会上传。\n- 修复统计日期切换与图表布局抖动、账户概览状态提示动画、启动后窗口首次显示、鼠标手势配置、PDF 桥接等桌面端问题。\n- 更新说明和“关于”页面支持 Markdown 富文本；发布 Windows x64、macOS Apple Silicon、Linux x86_64 安装资产及各平台 SHA-256 清单；Android 继续 v0.3.0。",
+      "url": "https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.16.0",
+      "published_at": "2026-08-12"
+    },
     "1.15.0": {
       "android_version": "0.3.0",
       "release_notes": "- 全新桌面 UI：重做工具栏、设置、账户、图书信息、书架筛选、阅读偏好和 API 配置。\n- 新增书单推荐：本机语义候选结合用户配置的大模型精选，不上传整座书库正文。\n- 同步升级为按项选择和逐条 AI 历史/独立书单元数据，减少重复上传；账户页显示存储与每日同步额度。\n- 阅读页新增多套正文点击区域方案、跳转位置连续恢复和更清晰的手势提示。\n- 发布 Windows x64、macOS Apple Silicon、Linux x86_64 安装资产及各平台 SHA-256 清单；Android 继续 v0.3.0。",

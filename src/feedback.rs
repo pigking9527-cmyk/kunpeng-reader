@@ -6,7 +6,7 @@ const MAX_TEXT_CHARS: usize = 20_000;
 const MAX_IMAGES: usize = 3;
 const MAX_IMAGE_BYTES: usize = 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 1;
-const MAX_JSON_BYTES: usize = 256 * 1024;
+const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,7 +102,7 @@ fn validate(request: &FeedbackRequest) -> Result<(), String> {
             .decode(&attachment.data)
             .map_err(|_| "JSON 附件数据损坏".to_string())?;
         if bytes.is_empty() || bytes.len() > MAX_JSON_BYTES {
-            return Err("JSON 附件不能超过 256 KB".to_string());
+            return Err("JSON 附件不能超过 4 MB".to_string());
         }
         let text =
             std::str::from_utf8(&bytes).map_err(|_| "JSON 附件必须使用 UTF-8".to_string())?;

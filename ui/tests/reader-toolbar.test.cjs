@@ -36,12 +36,14 @@ test("reader progress names the whole-book page total once it is measured", () =
   assert.match(html, /id="chapter-progress" class="title epub-only"/);
   assert.match(html, /id="progress" class="title page-count-loading"/);
   assert.match(html, /\.reader-progress-group\s*\{[^}]*gap:\s*8px;[^}]*flex:\s*0\s+0\s+auto;/s);
-  assert.match(html, /#progress\.page-count-total\s*\{[^}]*width:\s*auto;[^}]*flex:\s*0\s+0\s+auto;/s);
+  assert.match(html, /\.reader-progress-group\s*\{[^}]*font-variant-numeric:\s*tabular-nums;/s);
+  assert.match(html, /#chapter-progress\s*\{[^}]*width:\s*min\(245px,\s*38vw\);[^}]*justify-content:\s*flex-start;[^}]*text-align:\s*left;/s);
+  assert.match(html, /#progress\.page-count-total\s*\{[^}]*width:\s*84px;[^}]*justify-content:\s*flex-end;[^}]*text-align:\s*right;/s);
   assert.match(html, /#progress\.page-count-loading/);
   assert.match(reader, /function showWholeBookPages\(page, total\)/);
   assert.match(reader, /const text = readerText\("wholeBookPages", "\{page\}\/\{total\}页", \{ page, total \}\);/);
-  assert.match(reader, /function showChapterProgress\(page, total, progress\)/);
-  assert.match(reader, /showChapterProgress\(e\.data\.page, e\.data\.total, curProgress\)/);
+  assert.match(reader, /function showChapterProgress\(page, total, progress, dualContinuationChapter\)/);
+  assert.match(reader, /showChapterProgress\(e\.data\.page, e\.data\.total, curProgress, e\.data\.dualContinuationChapter\)/);
   assert.match(reader, /else if \(pageCountMeasuring\)[\s\S]*?showProgressLoading\(\)/);
   assert.match(reader, /if \(e\.data\.pageCache\)/);
   assert.match(reader, /complete: !!pc\.complete/);
@@ -49,7 +51,7 @@ test("reader progress names the whole-book page total once it is measured", () =
   assert.match(annotations, /if\(!sideTxn\)[\s\S]*?pageSig!==pageCountSig\(\)/);
 });
 
-test("all explicit reader jumps share one restorable history and a dedicated gesture", () => {
+test("all explicit reader jumps share a chronological undo gesture", () => {
   assert.doesNotMatch(reader, /bookProgressJumpHistory/);
   assert.match(reader, /const readerNavigationHistory = \[\];/);
   assert.match(reader, /function rememberReaderNavigationPoint\(point\)[\s\S]*?readerNavigationHistory\.push\(next\)/);
@@ -62,10 +64,13 @@ test("all explicit reader jumps share one restorable history and a dedicated ges
   assert.match(notes, /window\.rememberReaderJumpPosition\?\.\("toc"\)/);
   assert.match(notes, /window\.rememberReaderJumpPosition\?\.\(\{ kind: "bookmark" \}\)/);
   assert.match(annotations, /parent\.postMessage\(\{readerJump:/);
-  assert.match(appHtml, /data-gesture-action="restore_jump"/);
-  assert.match(gestureManager, /source\.action === "restore_jump"/);
-  assert.match(readerGestures, /restore_jump: "恢复跳转前位置"/);
-  assert.match(readerGestures, /action === "restore_jump" && global\.hasReaderJumpHistory\?\.\(\) === true/);
+  assert.match(appHtml, /data-gesture-action="undo_last"/);
+  assert.match(gestureManager, /value === "restore_jump"/);
+  assert.match(gestureManager, /return "undo_last"/);
+  assert.match(readerGestures, /undo_last: "撤销上一步"/);
+  assert.match(readerGestures, /action === "undo_last" && canUndoLastReaderAction\(\)/);
+  assert.match(readerGestures, /reader-undo-checkpoint/);
+  assert.match(reader, /new CustomEvent\("reader-undo-checkpoint"\)/);
   assert.match(readerGestures, /global\.restoreReaderJumpPosition\?\.\(\)/);
 });
 
@@ -82,7 +87,8 @@ test("gesture previews use the drawn route prefix and reopening tracks normal cl
   const readerFinish = readerGestures.slice(readerGestures.indexOf("function finish(cancelled = false)"), readerGestures.indexOf("function cancelKeepHint"));
   assert.doesNotMatch(readerFinish, /showHint\(/);
   assert.match(readerGestures, /reader-shell-statechange/);
-  assert.match(reader, /reader-surface-closed/);
+  assert.match(readerGestures, /previous\.sidePanel/);
+  assert.match(readerGestures, /setSidePanel/);
 });
 
 test("gesture profiles can be automatic or explicitly scoped to the main or reader window", () => {
@@ -90,13 +96,13 @@ test("gesture profiles can be automatic or explicitly scoped to the main or read
   assert.match(appHtml, /value="auto">自动适用（推荐）/);
   assert.match(appHtml, /value="main">仅主窗口/);
   assert.match(appHtml, /value="reader">仅阅读页/);
-  assert.match(gestureManager, /function actionSupportedScopes\(action\) \{ return action === "restore_jump" \? \["reader"\] : \["main", "reader"\]; \}/);
+  assert.match(gestureManager, /function actionSupportedScopes\(\) \{\s*return \["main", "reader"\];\s*\}/);
   assert.match(gestureManager, /scope: normalizeScope\(action, source\.scope\)/);
   assert.match(gestureManager, /scopeInput\.disabled = scopes\.length === 1;/);
   assert.match(gestureManager, /此操作目前只支持阅读页，不能设为主窗口。/);
   assert.match(gestureManager, /profile\.scope !== "reader"/);
   assert.match(gestureManager, /function scopesOverlap\(first, second\)/);
-  assert.match(readerGestures, /function normalizeScope\(action, value\) \{\s*if \(action === "restore_jump"\) return "reader";/);
+  assert.match(readerGestures, /function normalizeScope\(_action, value\) \{/);
   assert.match(readerGestures, /profile\.scope !== "main"/);
 });
 
@@ -154,7 +160,6 @@ test("reader settings show one state character and map off to simplified, on to 
 });
 
 test("整页翻页仅保留水平滑动动画，并迁移旧动画设置", () => {
-  assert.match(html, /option value="horizontal" data-reader-i18n="horizontalTurn">水平翻页（整页左移）<\/option>/);
   assert.doesNotMatch(html, /纸张效果（Google）|仿真翻页/);
   assert.match(settingsUi, /pageTurnEffect: "horizontal"/);
   assert.match(settingsUi, /\["google-paper", "curl"\]\.includes\(settings\.pageTurnEffect\)/);
@@ -359,10 +364,13 @@ test("开关智读以覆盖层呈现，不压缩正文列宽或改变阅读位�
   assert.match(reader, /智读为覆盖层：不改变正文 iframe 宽度/);
   assert.match(reader, /function closeAiReaderSide\(\)[\s\S]*?setAiReaderSide\(false\)/);
   assert.match(reader, /window\.closeAiReaderSide = closeAiReaderSide/);
+  assert.match(reader, /ReaderShell\.setSidePanel\(ReaderShell\.SIDE_PANEL\.AI_READER, !!open\)/);
+  assert.match(reader, /ReaderShell\.registerSidePanel\(ReaderShell\.SIDE_PANEL\.AI_READER/);
   assert.doesNotMatch(reader, /preserveAnchor: 1/);
   assert.match(reader, /openAiReader\(request\.text \|\| "", \{[\s\S]*?start: request\.anchorStart/);
   assert.match(annotations, /aiReader:\{text:t,anchorStart:o&&o\.start,anchorEnd:o&&o\.end\}/);
   assert.match(annotations, /aiReader:\{text:highlightDisplayText\(h\),anchorStart:h\.start,anchorEnd:h\.end\}/);
+  assert.match(html, /body\.ai-reader-open \.ai-reader-side\s*\{\s*display:\s*flex;/);
   assert.doesNotMatch(html, /body\.ai-reader-open #frame\s*\{\s*width:/);
   assert.doesNotMatch(html, /body\.ai-reader-open #vbar\s*\{\s*right:/);
   assert.doesNotMatch(html, /body\.ai-reader-open \.book-progress\s*\{\s*right:/);

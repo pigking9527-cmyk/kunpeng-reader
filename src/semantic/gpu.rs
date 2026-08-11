@@ -35,6 +35,7 @@ pub(crate) struct SemanticGpuStatus {
     pub(crate) message: String,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn driver_meets_minimum(value: &str, minimum: (u32, u32)) -> bool {
     let mut parts = value
         .trim()
@@ -113,6 +114,7 @@ fn cuda_runtime_ready() -> Result<(), String> {
         .register(&mut builder)
         .map_err(|error| error.to_string())
 }
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn cuda_runtime_error_summary(error: &str) -> String {
     const DEPENDENCIES: &[&str] = &[
         "cublasLt64_12.dll",
@@ -183,7 +185,7 @@ pub(super) fn strict_cuda_execution_providers() -> Vec<fastembed::ExecutionProvi
 fn semantic_gpu_status_blocking() -> SemanticGpuStatus {
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        return SemanticGpuStatus {
+        SemanticGpuStatus {
             detected: false,
             supported: false,
             component_available: false,
@@ -194,7 +196,7 @@ fn semantic_gpu_status_blocking() -> SemanticGpuStatus {
             name: String::new(),
             driver: String::new(),
             message: "当前平台不支持 NVIDIA CUDA 加速，语义模型使用 CPU。".into(),
-        };
+        }
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

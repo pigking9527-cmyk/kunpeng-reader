@@ -12,11 +12,12 @@
     "semanticSearch", "aiReader", "translateText", "dict", "vocabAdd", "addHighlight",
     "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations", "readerGestureSurfaceClosed",
     "removeHighlight", "setHighlightNote", "setHighlightText", "setHighlightColor", "addBookmark", "tocResolved",
-    "getTranslationCredentialStatus", "saveTranslationCredential", "bookEnd", "readerGesture",
+    "getTranslationCredentialStatus", "saveTranslationCredential", "bookEnd", "readerGesture", "readerHighlightMenuPreferences", "readerHighlightMenuPreferencesReady", "readerHighlightMenuSettings",
   ]);
   const MAX_MESSAGE_CHARS = 12 * 1024 * 1024;
   const MAX_TEXT_CHARS = 20_000;
   const MAX_IMAGE_CHARS = 10 * 1024 * 1024;
+  const MAX_BUG_TRACE_FIELDS = 64;
 
   function isRecord(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -37,6 +38,25 @@
     return value === undefined || (typeof value === "string" && value.length <= limit);
   }
 
+  function validHighlightMenuPreferences(value) {
+    if (!isRecord(value)) return false;
+    const allowed = new Set(["displayMode", "layout", "size", "webSearchEngine", "colorful", "actions"]);
+    if (!Object.keys(value).length || !Object.keys(value).every((key) => allowed.has(key))) return false;
+    if (value.displayMode !== undefined && !["both", "text", "icon"].includes(value.displayMode)) return false;
+    if (value.layout !== undefined && !["row", "grid"].includes(value.layout)) return false;
+    if (value.size !== undefined && !["small", "medium", "large"].includes(value.size)) return false;
+    if (value.webSearchEngine !== undefined && !["baidu", "google"].includes(value.webSearchEngine)) return false;
+    if (value.colorful !== undefined && typeof value.colorful !== "boolean") return false;
+    return value.actions === undefined || (
+      Array.isArray(value.actions) && value.actions.length <= 12 && value.actions.every((action) =>
+        isRecord(action)
+        && typeof action.key === "string" && action.key.length <= 32
+        && typeof action.visible === "boolean"
+        && Object.keys(action).every((key) => key === "key" || key === "visible")
+      )
+    );
+  }
+
   function validActionPayload(action, data) {
     if (action === "readerJump") {
       const jump = data.readerJump;
@@ -55,6 +75,7 @@
         "chapter", "page", "x_pct", "y_pct", "duration_ms", "pages", "turn_id",
         "before_chapter", "before_page", "after_chapter", "after_page", "chapter_pending",
         "chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "flow_mode", "page_mode", "input",
+        "wheel_seq", "wheel_delta_x", "wheel_delta_y", "wheel_delta_px", "wheel_delta_mode", "wheel_gap_ms", "wheel_accumulated_px", "wheel_threshold_px", "wheel_quiet_ms", "wheel_gesture_age_ms", "wheel_gesture_active", "wheel_timer_active", "wheel_event_cancelable", "wheel_replay", "wheel_mode_pending",
         "image_mode", "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
         "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text", "image_near_top", "image_text_before", "image_probed",
         "layout_fast", "layout_view_height", "layout_root_height", "layout_root_style_height", "layout_padding_bottom", "layout_line_height", "layout_step", "layout_current_line_count", "layout_last_top", "layout_last_bottom", "layout_last_height", "layout_next_top", "layout_next_bottom", "layout_next_height", "layout_visible_free", "layout_content_free", "layout_tail_cross", "layout_tail_fit", "layout_tail_tightened",
@@ -63,14 +84,15 @@
       const numberFields = [
         "chapter", "page", "x_pct", "y_pct", "duration_ms", "pages", "turn_id",
         "before_chapter", "before_page", "after_chapter", "after_page", "chapter_pending",
+        "wheel_seq", "wheel_delta_x", "wheel_delta_y", "wheel_delta_px", "wheel_delta_mode", "wheel_gap_ms", "wheel_accumulated_px", "wheel_threshold_px", "wheel_quiet_ms", "wheel_gesture_age_ms",
         "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
         "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text",
         "layout_view_height", "layout_root_height", "layout_root_style_height", "layout_padding_bottom", "layout_line_height", "layout_step", "layout_current_line_count", "layout_last_top", "layout_last_bottom", "layout_last_height", "layout_next_top", "layout_next_bottom", "layout_next_height", "layout_visible_free", "layout_content_free", "layout_tail_cross", "layout_tail_fit", "layout_tail_tightened",
       ];
-      const booleanFields = ["chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "image_near_top", "image_text_before", "image_probed", "layout_fast"];
+      const booleanFields = ["chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "wheel_gesture_active", "wheel_timer_active", "wheel_event_cancelable", "wheel_replay", "wheel_mode_pending", "image_near_top", "image_text_before", "image_probed", "layout_fast"];
       return isRecord(trace)
         && Object.keys(trace).length > 0
-        && Object.keys(trace).length <= 48
+        && Object.keys(trace).length <= MAX_BUG_TRACE_FIELDS
         && Object.keys(trace).every((key) => allowed.has(key))
         && stringFields.every((key) => textWithin(trace[key], key === "zone" ? 16 : (key === "key" ? 24 : 32)))
         && numberFields.every((key) =>
@@ -104,6 +126,15 @@
       return isRecord(request)
         && Number.isInteger(request.index) && request.index >= 0
         && ["y", "g", "b", "p"].includes(request.color);
+    }
+    if (action === "readerHighlightMenuPreferences") return validHighlightMenuPreferences(data.readerHighlightMenuPreferences);
+    if (action === "readerHighlightMenuPreferencesReady") return data.readerHighlightMenuPreferencesReady === true;
+    if (action === "readerHighlightMenuSettings") {
+      const response = data.readerHighlightMenuSettings;
+      return isRecord(response)
+        && Number.isInteger(response.requestId) && response.requestId > 0 && response.requestId <= 1_000_000
+        && validHighlightMenuPreferences(response.settings)
+        && Object.keys(response).every((key) => key === "requestId" || key === "settings");
     }
     if (action === "translateText") {
       const request = data.translateText;
@@ -156,18 +187,35 @@
 
   function expectedFrameOrigin(frame, hostLocation) {
     try {
-      return new URL(frame.src, hostLocation.href).origin;
+      const url = new URL(frame.src, hostLocation.href);
+      return url.origin !== "null" ? url.origin : (url.host ? `${url.protocol}//${url.host}` : "");
     } catch (_) {
       return "";
     }
   }
 
   function validateEvent(event, frame, hostLocation) {
-    if (!event || !frame || !frame.contentWindow || event.source !== frame.contentWindow) return false;
-    const expected = expectedFrameOrigin(frame, hostLocation || window.location);
-    if (event.origin && event.origin !== "null" && expected && event.origin !== expected) return false;
-    return validateData(event.data);
+    return normalizeEvent(event, frame, hostLocation) !== null;
   }
 
-  return Object.freeze({ ACTIONS, validateData, validateEvent });
+  function normalizeEvent(event, frame, hostLocation) {
+    if (!event || !frame || !frame.contentWindow || event.source !== frame.contentWindow) return null;
+    const location = hostLocation || (typeof window !== "undefined" ? window.location : null);
+    const expected = expectedFrameOrigin(frame, location);
+    // The reader iframe renders user-controlled book content.  Its messages
+    // therefore need both a matching WindowProxy and a concrete, expected
+    // origin; an omitted or opaque origin must never become a wildcard.
+    if (!expected || typeof event.origin !== "string" || event.origin === "null" || event.origin !== expected) return null;
+    // New v1 envelopes deliberately go through the TypeScript reader-engine
+    // parser in the standalone validation bridge.  The classic script keeps accepting existing
+    // raw payloads, so an opt-in rollout cannot break old EPUB/PDF runtimes.
+    const bridge = typeof globalThis !== "undefined" ? globalThis.KunpengReaderProtocolBridge : null;
+    if (bridge?.isReaderFrameProtocolEnvelope?.(event.data)) {
+      const normalized = bridge.normalizeReaderFrameProtocolEvent?.(event, frame, location);
+      return validateData(normalized) ? normalized : null;
+    }
+    return validateData(event.data) ? event.data : null;
+  }
+
+  return Object.freeze({ ACTIONS, validateData, validateEvent, normalizeEvent });
 });

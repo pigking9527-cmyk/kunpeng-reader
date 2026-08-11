@@ -110,17 +110,37 @@ test("stats show a loading state immediately instead of a blank panel", () => {
   assert.match(indexSource, /id="stats-body" class="stats-body"/);
 });
 
+test("stats navigation stays between the first reading day and today", () => {
+  assert.match(statsSource, /let firstReadingDay = null;/);
+  assert.match(statsSource, /function firstStatAnchor\(\)/);
+  assert.match(statsSource, /function lastStatAnchor\(\)/);
+  assert.match(statsSource, /previous\.disabled = previousDisabled/);
+  assert.match(statsSource, /next\.disabled = nextDisabled/);
+  assert.match(statsSource, /firstReadingDay = \(Array\.isArray\(allData\.days\) \? allData\.days : \[\]\)\.reduce/);
+  assert.match(statsSource, /new Date\(current\.getFullYear\(\), current\.getMonth\(\) \+ direction, 1\)/);
+});
+
+test("stats hide stale book covers while a new period is loading", () => {
+  assert.match(stylesSource, /\.stats-body\[data-loading="1"\] \.stats-book-strip\s*\{\s*visibility:\s*hidden;/);
+  assert.match(statsSource, /bodyEl\.dataset\.loading = "1"/);
+  assert.match(statsSource, /delete bodyEl\.dataset\.loading/);
+});
+
 test("stats header is folded into the scope tabs with settings after total", () => {
   const modal = indexSource.slice(indexSource.indexOf('id="stats-modal"'), indexSource.indexOf('id="notes-modal"'));
   assert.doesNotMatch(modal, /class="modal-head stats-head"/);
   assert.doesNotMatch(modal, /data-i18n="readingStats">阅读统计/);
   assert.match(modal, /data-scope="day"[\s\S]*?data-scope="month"[\s\S]*?data-scope="year"[\s\S]*?data-scope="total"[\s\S]*?id="stats-settings-btn"/);
-  assert.match(stylesSource, /\.stats-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(4,minmax\(0,1fr\)\) 42px;/s);
+  assert.match(stylesSource, /\.stats-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)\s*42px;/s);
   assert.match(stylesSource, /\.stats-settings-btn\s*\{[^}]*width:\s*42px;[^}]*height:\s*40px;/s);
 });
 
 test("stats settings persist three live heatmap palettes", () => {
   assert.match(indexSource, /data-heatmap-option="green"[\s\S]*?data-heatmap-option="blue"[\s\S]*?data-heatmap-option="orange"/);
+  assert.match(indexSource, /data-heatmap-option="green"[\s\S]*?data-i18n-aria="heatmapGreen"/);
+  assert.match(indexSource, /data-heatmap-option="blue"[\s\S]*?data-i18n-aria="heatmapBlue"/);
+  assert.match(indexSource, /data-heatmap-option="orange"[\s\S]*?data-i18n-aria="heatmapOrange"/);
+  assert.doesNotMatch(indexSource, /<span data-i18n="heatmap(?:Green|Blue|Orange)">/);
   assert.doesNotMatch(indexSource, /data-i18n="statsVisibleItems"/);
   assert.doesNotMatch(indexSource, /<strong[^>]*data-i18n="heatmapColor"/);
   assert.match(statsSource, /STAT_HEATMAP_THEME_KEY = "readingStatsHeatmapTheme"/);
@@ -136,7 +156,7 @@ test("stats settings persist three live heatmap palettes", () => {
 test("stats settings can persist a labelled line chart without changing the default bar chart", () => {
   assert.match(indexSource, /data-chart-style-option="bar"[\s\S]*?data-chart-style-option="line"/);
   assert.match(indexSource, /data-chart-metric-option="time"[\s\S]*?data-chart-metric-option="words"[^>]*data-i18n="chartWords"/);
-  assert.match(stylesSource, /\.stats-chart-settings\s*\{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/s);
+  assert.match(stylesSource, /\.stats-chart-settings\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s);
   assert.match(statsSource, /STAT_LINE_CHART_KEY = "readingStatsLineChart"/);
   assert.match(statsSource, /let statLineChart = localStorage\.getItem\(STAT_LINE_CHART_KEY\) === "1"/);
   assert.match(statsSource, /statLineChart\s*\? lineChart\(bars/);
@@ -144,4 +164,36 @@ test("stats settings can persist a labelled line chart without changing the defa
   assert.match(statsSource, /localStorage\.setItem\(STAT_LINE_CHART_KEY, statLineChart \? "1" : "0"\)/);
   assert.match(statsSource, /localStorage\.setItem\(STAT_CHART_METRIC_KEY, statChartMetric\)/);
   assert.match(stylesSource, /\.stat-chart \.stats-line-path/);
+});
+
+test("bar and line charts reserve the same layout height", () => {
+  assert.match(statsSource, /const STAT_CHART_WIDTH = 600;/);
+  assert.match(statsSource, /const STAT_CHART_HEIGHT = 156;/);
+  const barChart = statsSource.slice(statsSource.indexOf("function barChart"), statsSource.indexOf("function compactChartValue"));
+  const lineChart = statsSource.slice(statsSource.indexOf("function lineChart"), statsSource.indexOf("function statBars"));
+  assert.match(barChart, /const W = STAT_CHART_WIDTH, H = STAT_CHART_HEIGHT/);
+  assert.match(lineChart, /const W = STAT_CHART_WIDTH, H = STAT_CHART_HEIGHT/);
+});
+
+test("switching chart styles keeps the lower statistics area in place", () => {
+  assert.match(statsSource, /const STAT_CHART_HEIGHT = 156/);
+  assert.match(
+    statsSource,
+    /function barChart\(bars, color, metric\) \{\s*const W = STAT_CHART_WIDTH, H = STAT_CHART_HEIGHT/s,
+  );
+  assert.match(
+    statsSource,
+    /function lineChart\(bars, color, metric\) \{\s*const W = STAT_CHART_WIDTH, H = STAT_CHART_HEIGHT/s,
+  );
+  assert.match(stylesSource, /\.stat-chart\s*\{[^}]*aspect-ratio:\s*600\s*\/\s*156;/s);
+  assert.match(stylesSource, /\.stat-chart svg\s*\{[^}]*height:\s*100%;/s);
+});
+
+test("switching chart styles keeps lower axis labels in the same columns", () => {
+  const barChart = statsSource.slice(statsSource.indexOf("function barChart"), statsSource.indexOf("function compactChartValue"));
+  const lineChart = statsSource.slice(statsSource.indexOf("function lineChart"), statsSource.indexOf("function statBars"));
+  assert.match(statsSource, /function statChartColumnX\(index, count, width, padLeft, padRight\)/);
+  assert.match(barChart, /statChartColumnX\(i, bars\.length, W, padL, padR\)/);
+  assert.match(lineChart, /const pointX = \(index\) => statChartColumnX\(index, bars\.length, W, padL, padR\)/);
+  assert.doesNotMatch(barChart, /rawSlot|chartWidth|Math\.min\(rawSlot, 58\)/);
 });

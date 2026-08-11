@@ -146,22 +146,13 @@ function setAiReaderSideWidth(mode) {
 function restoreAiReaderSideWidth() {
   try { setAiReaderSideWidth(localStorage.getItem(AI_READER_WIDTH_KEY) || "current"); } catch (_) { setAiReaderSideWidth("current"); }
 }
-function applyAiReaderSide(open) {
-  if (!aiReaderSide) return;
-  document.body.classList.toggle("ai-reader-open", !!open);
-}
 function setAiReaderSide(open) {
   // 智读为覆盖层：不改变正文 iframe 宽度，因此不需要在重排后猜测或恢复锚点。
-  if (!open) aiReaderHideSourcePreview();
-  applyAiReaderSide(!!open);
+  ReaderShell.setSidePanel(ReaderShell.SIDE_PANEL.AI_READER, !!open);
 }
 function closeAiReaderSide() {
-  if (!document.body.classList.contains("ai-reader-open")) return;
-  aiReaderHideSourcePreview();
+  if (!ReaderShell.isSidePanel(ReaderShell.SIDE_PANEL.AI_READER)) return;
   setAiReaderSide(false);
-  window.dispatchEvent(new CustomEvent("reader-surface-closed", {
-    detail: { name: "智读", reopen: () => setAiReaderSide(true) },
-  }));
 }
 window.closeAiReaderSide = closeAiReaderSide;
 function aiReaderSetStatus(value) { if (aiReaderStatus) aiReaderStatus.textContent = value || ""; }
@@ -340,6 +331,11 @@ function aiReaderHideSourcePreview() {
   aiReaderPreviewCitation?.setAttribute("aria-expanded", "false");
   aiReaderPreviewCitation = null;
 }
+ReaderShell.registerSidePanel(ReaderShell.SIDE_PANEL.AI_READER, {
+  onClose() {
+    aiReaderHideSourcePreview();
+  },
+});
 function aiReaderShowSourcePreview(source, index, citation) {
   if (!aiReaderSourcePreview || !citation) return;
   if (aiReaderPreviewCitation === citation && !aiReaderSourcePreview.hidden) {
@@ -731,11 +727,9 @@ document.getElementById("ai-reader-ask")?.addEventListener("click", () => runAiR
 document.getElementById("ai-reader-summary")?.addEventListener("click", () => runAiReader("summary"));
 document.getElementById("ai-reader-mindmap")?.addEventListener("click", () => runAiReader("mindmap"));
 readerToolbar?.addEventListener("pointerenter", () => {
-  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.PREFERENCES)) return;
   ReaderShell.dispatch({ type: "TOOLBAR_POINTER_ENTER" });
 });
 readerToolbar?.addEventListener("pointerleave", () => {
-  if (ReaderShell.isOverlay(ReaderShell.OVERLAY.PREFERENCES)) return;
   ReaderShell.dispatch({ type: "TOOLBAR_POINTER_LEAVE" });
 });
 document.getElementById("immersive-btn").addEventListener("click", (e) => {
@@ -825,11 +819,16 @@ function showWholeBookPages(page, total) {
   progressEl.setAttribute("aria-label", text);
   progressEl.textContent = text;
 }
-function showChapterProgress(page, total, progress) {
+function showChapterProgress(page, total, progress, dualContinuationChapter) {
   if (!chapterProgressEl) return;
-  const text = readerText("chapterProgress", "第{chapter}/{chapters}章 · 本章 {page}/{total}页 · {progress}%", {
+  const continuation = Number(dualContinuationChapter);
+  const values = {
     chapter: curVchap + 1, chapters: vchapTotal, page: page || 1, total: total || 1, progress: progress.toFixed(1),
-  });
+    nextChapter: continuation + 1,
+  };
+  const text = Number.isInteger(continuation) && continuation >= 0
+    ? readerText("dualChapterProgress", "第{chapter}/{chapters}章 · 左页 本章 {page}/{total}页 · 右页 第{nextChapter}章开头 · {progress}%", values)
+    : readerText("chapterProgress", "第{chapter}/{chapters}章 · 本章 {page}/{total}页 · {progress}%", values);
   chapterProgressEl.title = text;
   chapterProgressEl.setAttribute("aria-label", text);
   chapterProgressEl.textContent = text;
@@ -843,6 +842,29 @@ let curChapter = 0;
 let curChFrac = 0; // 章内比例
 let curReadingAnchor = null; // 排版无关的正文字符锚点，供下次续读恢复
 let curTotalCh = 1;
+
+// 阅读偏好中的双页预览是另一张真正的 reader:// 阅读页，而不是手工拼出的
+// 文字或图片。原页面始终保持不动，避免拖动中缝时重排当前阅读位置。
+window.ReaderLayoutPreview = Object.freeze({
+  source(dualPageGap) {
+    if (isPdf || !frameReady || !frame.src) return "";
+    try {
+      const url = new URL(frame.src, window.location.href);
+      const settings = Object.assign({}, window.ReaderSettings?.get?.() || {}, {
+        flowMode: "paged",
+        pageMode: "dual",
+        dualPageGap: Math.max(0, Math.min(120, Math.round(Number(dualPageGap) || 0))),
+      });
+      url.searchParams.set("rc", String(Math.max(0, Math.floor(Number(curChapter) || 0))));
+      url.searchParams.set("rf", String(Math.max(0, Math.min(1, Number(curChFrac) || 0))));
+      url.searchParams.set("ra", JSON.stringify(curReadingAnchor || null));
+      url.searchParams.set("s", JSON.stringify(settings));
+      return url.href;
+    } catch (_) {
+      return "";
+    }
+  },
+});
 let isPdf = false; // PDF.js 模式
 let lastPosSig = ""; // 阅读位置签名，用于沉浸模式翻页时自动收起工具栏
 let keepImmersiveBarUntil = 0;
@@ -868,6 +890,7 @@ window.ReaderBugTrace?.setContextProvider(() => {
       chapter_frac: curChFrac,
       total_chapters: curTotalCh,
       overlay: shell.overlay,
+      side_panel: shell.sidePanel,
       toolbar: shell.toolbar,
       frame_ready: frameReady,
       loading: !loadingHidden,
@@ -900,6 +923,7 @@ window.addEventListener("reader-shell-statechange", (e) => {
   window.ReaderBugTrace?.record("shell_state", {
     source: "reader_shell",
     overlay: e.detail?.next?.overlay || "none",
+    side_panel: e.detail?.next?.sidePanel || "none",
     outcome: e.detail?.next?.toolbar || "normal",
   });
   if (e.detail?.previous?.overlay !== e.detail?.next?.overlay) syncOverlay();
@@ -1458,7 +1482,13 @@ function sameBookProgressPoint(left, right) {
 function rememberReaderNavigationPoint(point) {
   const next = normalizedBookProgressPoint(point);
   const previous = readerNavigationHistory[readerNavigationHistory.length - 1];
-  if (!sameBookProgressPoint(previous, next)) readerNavigationHistory.push(next);
+  const added = !sameBookProgressPoint(previous, next);
+  if (added) {
+    readerNavigationHistory.push(next);
+    // The gesture manager combines this checkpoint with closed reader surfaces
+    // so “撤销上一步” follows the real order of user-visible operations.
+    window.dispatchEvent(new CustomEvent("reader-undo-checkpoint"));
+  }
   if (readerNavigationHistory.length > 100) readerNavigationHistory.splice(0, readerNavigationHistory.length - 100);
   if (readerJumpBackConfig().enabled) armReaderNavigationBackVisibility();
   else updateBookProgress();
@@ -1833,9 +1863,72 @@ readerEndModal?.addEventListener("click", (event) => {
 
 // 全书搜索 UI 与 sendToPage 消息桥在 reader-search-ui.js。
 
+// 正文 iframe 使用 reader:// 协议，不能把它自己的 Web 存储当成跨重开
+// 阅读器仍可用的唯一来源。外壳只保存高亮菜单的外观和动作开关，不接收选文、
+// 正文、批注或图书标识；正文每次加载后再恢复这份受限快照。
+const READER_HIGHLIGHT_MENU_PREFERENCES_KEY = "readerHighlightMenuPreferencesV1";
+function savedHighlightMenuPreferences() {
+  try {
+    const value = JSON.parse(localStorage.getItem(READER_HIGHLIGHT_MENU_PREFERENCES_KEY) || "null");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch (_) {
+    return null;
+  }
+}
+function persistHighlightMenuPreferences(value) {
+  try {
+    localStorage.setItem(READER_HIGHLIGHT_MENU_PREFERENCES_KEY, JSON.stringify(value));
+  } catch (_) {
+    // 本机设置不可写时，本次会话的正文仍可继续使用当前菜单配置。
+  }
+}
+function restoreHighlightMenuPreferences() {
+  if (isPdf || !frame.contentWindow) return;
+  const preferences = savedHighlightMenuPreferences();
+  const operation = preferences ? "update" : "get";
+  let targetOrigin = "*";
+  try {
+    const origin = new URL(frame.src, window.location.href).origin;
+    if (origin && origin !== "null") targetOrigin = origin;
+  } catch (_) {}
+  frame.contentWindow.postMessage({
+    readerHighlightMenuSettings: { requestId: 1, operation, settings: preferences },
+  }, targetOrigin);
+}
+function activateHighlightMenuPreferences() {
+  if (isPdf || !frame.contentWindow) return;
+  let targetOrigin = "*";
+  try {
+    const origin = new URL(frame.src, window.location.href).origin;
+    if (origin && origin !== "null") targetOrigin = origin;
+  } catch (_) {}
+  frame.contentWindow.postMessage({
+    readerHighlightMenuSettings: { requestId: 2, operation: "activate" },
+  }, targetOrigin);
+}
+
 // 接收合并页上报：阅读进度 / 正文被点击 / 搜索结果数
 window.addEventListener("message", (e) => {
-  if (!window.ReaderMessageGuard?.validateEvent(e, frame, window.location)) return;
+  const data = window.ReaderMessageGuard?.normalizeEvent?.(e, frame, window.location);
+  if (!data) return;
+  // The rest of this legacy handler intentionally consumes the normalized
+  // compatibility payload. `e` has no other event metadata consumers here.
+  e = { data };
+  if (e.data.readerHighlightMenuPreferencesReady) {
+    restoreHighlightMenuPreferences();
+    return;
+  }
+  if (e.data.readerHighlightMenuSettings) {
+    if (e.data.readerHighlightMenuSettings.requestId === 1) {
+      persistHighlightMenuPreferences(e.data.readerHighlightMenuSettings.settings);
+      activateHighlightMenuPreferences();
+    }
+    return;
+  }
+  if (e.data.readerHighlightMenuPreferences) {
+    persistHighlightMenuPreferences(e.data.readerHighlightMenuPreferences);
+    return;
+  }
   if (e.data.readerGesture) { window.ReaderGestureClose?.fromFrame?.(e.data.readerGesture); return; }
   if (e.data.readerGestureSurfaceClosed !== undefined) { window.ReaderGestureClose?.frameSurfaceClosed?.(e.data.readerGestureSurfaceClosed); return; }
   if (e.data.bugTrace) {
@@ -1844,13 +1937,6 @@ window.addEventListener("message", (e) => {
   }
   if (e.data.bookEnd) {
     if (window.ReaderRecommendationSettings?.isEnabled()) openReaderEnd();
-    return;
-  }
-  if (e.data.readerAnchorReady) {
-    const pending = aiReaderSidePending;
-    if (pending && (!e.data.aiReaderSideRequestId || e.data.aiReaderSideRequestId === pending.requestId)) {
-      applyAiReaderSide(pending.open, pending.requestId);
-    }
     return;
   }
   if (typeof e.data.readerPerf === "string") {
@@ -1885,7 +1971,7 @@ window.addEventListener("message", (e) => {
       });
     } else {
       // 全书页数是补充信息，不能覆盖原有的章节、本章页数和百分比。
-      showChapterProgress(e.data.page, e.data.total, curProgress);
+      showChapterProgress(e.data.page, e.data.total, curProgress, e.data.dualContinuationChapter);
       const gP = e.data.gPage || 0,
         gT = e.data.gTotal || 0;
       if (gT > 0) {
@@ -2268,8 +2354,7 @@ window.addEventListener("keydown", (e) => {
     // 翻页同时收起浮层与沉浸工具栏
     if (
       ReaderShell.isOverlay(ReaderShell.OVERLAY.SEARCH) ||
-      ReaderShell.isOverlay(ReaderShell.OVERLAY.SETTINGS) ||
-      ReaderShell.isOverlay(ReaderShell.OVERLAY.PREFERENCES)
+      ReaderShell.isOverlay(ReaderShell.OVERLAY.SETTINGS)
     ) ReaderShell.closeOverlay();
     hideBookProgressAfterReadingAction();
     ReaderShell.dispatch({ type: "HIDE_TOOLBAR" });

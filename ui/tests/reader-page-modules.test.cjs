@@ -8,7 +8,9 @@ const uiRoot = path.join(__dirname, "..");
 const pagination = fs.readFileSync(path.join(uiRoot, "reader-page-pagination.js"), "utf8");
 const measurement = fs.readFileSync(path.join(uiRoot, "reader-page-measurement.js"), "utf8");
 const layout = fs.readFileSync(path.join(uiRoot, "reader-page-layout.js"), "utf8");
+const reader = fs.readFileSync(path.join(uiRoot, "reader.js"), "utf8");
 const modeSwitch = fs.readFileSync(path.join(uiRoot, "reader-page-mode-switch.js"), "utf8");
+const pageBugTrace = fs.readFileSync(path.join(uiRoot, "reader-page-bug-trace.js"), "utf8");
 
 test("reader page modules parse in their compiled injection order", () => {
   const source = [
@@ -22,6 +24,53 @@ test("reader page modules parse in their compiled injection order", () => {
     "reader-page-runtime.js",
   ].map((name) => fs.readFileSync(path.join(uiRoot, name), "utf8")).join("");
   assert.doesNotThrow(() => new vm.Script(source));
+});
+
+test("pagination and measurement helpers stay outside the layout assembly", () => {
+  assert.doesNotMatch(layout, /function fastPagedPageCount\(/);
+  assert.doesNotMatch(layout, /function fastTextRangeNeedsChunks\(/);
+  assert.doesNotMatch(layout, /function appendFastTextRangeLines\(/);
+  assert.match(pagination, /function fastPagedPageCount\(el\)/);
+  assert.match(pagination, /function pagedViewHasVisibleContent\(el,index\)/);
+  assert.match(pagination, /function trimTrailingBlankPagedViews\(el,count\)/);
+  assert.match(pagination, /function fastDualPagedPageCount\(el\)/);
+  assert.match(pagination, /var els=el\.querySelectorAll\('img,svg,canvas,video,object,embed,iframe'\)/);
+  assert.match(pagination, /rr-dual-continuation/);
+  assert.match(measurement, /function fastTextRangeNeedsChunks\(rects\)/);
+  assert.match(measurement, /function appendFastTextRangeLines\(out,node,range,start,end,pr,scrollTop\)/);
+});
+
+test("scroll and paged reading share one horizontal content box", () => {
+  assert.match(layout, /var padL=isDualPage\(\)\?0:hm\.l/);
+  assert.match(layout, /var padR=isDualPage\(\)\?0:hm\.r/);
+  assert.match(layout, /if\(isScrollMode\(\)\)\{[\s\S]*?pager\.style\.top=sb\.top\+'px';[\s\S]*?pager\.style\.left='0';[\s\S]*?pager\.style\.right='0';/);
+  assert.match(layout, /x=Math\.max\(2,pr\.left\+hm\.l\+8\)/);
+});
+
+test("solid reader backgrounds never render body text with insufficient contrast", () => {
+  assert.match(layout, /var colorParts=function\(v\)/);
+  assert.match(layout, /if\(!bgImage&&contrast\(fg,bg\)<4\.5\)fg=preset\[1\]/);
+  assert.match(layout, /custom:\['#fffdf8','#222'/);
+});
+
+test("paged chapters discard a trailing spread with no actual text or media", () => {
+  assert.match(layout, /if\(!fastLargeChapter\)pagesInCh=trimTrailingBlankPagedViews\(root,pagesInCh\)/);
+  assert.match(pagination, /while\(pages>1&&!pagedViewHasVisibleContent\(el,pages-1\)\)pages--/);
+  assert.match(pagination, /parent\.closest&&parent\.closest\('\.rr-end,\.rr-dual-continuation'\)/);
+});
+
+test("scroll-mode changes defer layout but replay the first input in the target mode", () => {
+  const settings = fs.readFileSync(path.join(uiRoot, "reader-settings-ui.js"), "utf8");
+  const runtime = fs.readFileSync(path.join(uiRoot, "reader-page-runtime.js"), "utf8");
+  const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
+  assert.match(settings, /onChange\(\{ deferModeChange: true \}\)/);
+  assert.match(settings, /dualModeToggle\.addEventListener\("change", \(\) => \{[\s\S]*?settings\.flowMode = "paged";\s*settings\.pageMode = dualModeToggle\.checked \? "dual" : "single";[\s\S]*?refreshReadingModeToggles\(\);\s*onChange\(\);/);
+  assert.match(runtime, /function queuePendingReaderModeInput\(replay\)[\s\S]*?pendingReaderModeApplying=true[\s\S]*?window\.postMessage\(\{settings:next,applyQueuedReaderModeChange:1\},'\*'\)/);
+  assert.match(runtime, /var shouldDeferFlowModeChange=!!e\.data\.deferModeChange&&requestedFlow!==S\.flowMode;[\s\S]*?if\(shouldDeferFlowModeChange\)[\s\S]*?pendingReaderModeSettings=Object\.assign\(\{\},e\.data\.settings\)/);
+  assert.match(runtime, /requestAnimationFrame\(function\(\)\{[\s\S]*?window\.replayPendingReaderModeInput\(replay\)/);
+  assert.match(annotations, /queuePendingReaderModeInput\(readerModeWheelReplay\(e\)\)/);
+  assert.match(annotations, /window\.replayPendingReaderModeInput=function\(input\)\{[\s\S]*?handleReaderWheel\(input\.event\)/);
+  assert.match(annotations, /else if\(e\.replay\)\{/);
 });
 
 test("chapter iframe receives the reader language and rebuilds transient controls", () => {
@@ -87,15 +136,68 @@ test("default highlights and footnotes use the neutral reader palette", () => {
   assert.match(pageStyle, /var\(--hl-color,rgba\(126,136,148,\.34\)\)/);
 });
 
-test("paged touchpad gestures end on actual wheel quiet instead of a fixed cooldown", () => {
+test("footnote clicks stay inside the reader page, popup links can jump, and cards cannot overflow horizontally", () => {
+  const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
+  const pageStyle = fs.readFileSync(path.join(uiRoot, "reader-page-style.html"), "utf8");
+  assert.match(annotations, /var inFootnote=!!\(target\.closest&&target\.closest\('#fn-pop'\)\);/);
+  assert.match(annotations, /if\(!inFootnote&&!\(targetAnchor&&isNoteLink\(targetAnchor\)\)\)parent\.postMessage\(\{uiClick:1\},'\*'\);/);
+  const setupFn = annotations.slice(annotations.indexOf("function setupFn"), annotations.indexOf("// ---- 离线词典"));
+  assert.match(setupFn, /fnPop\.addEventListener\('click',function\(e\)\{if\(e\.target\.closest&&e\.target\.closest\('a'\)\)e\.preventDefault\(\);\}\);/);
+  assert.doesNotMatch(setupFn, /fnPop\.addEventListener\('click',function\(e\)\{e\.stopPropagation\(\)/);
+  assert.match(annotations, /var targetPage=pageOf\(el\);hideFn\(\);if\(targetPage!==pageInCh\)\{rememberReaderJump/);
+  assert.match(annotations, /var targetPage2=pageOf\(el2\);hideFn\(\);if\(targetPage2!==pageInCh\)\{rememberReaderJump/);
+  const popFootnote = annotations.slice(annotations.indexOf("function popFootnote"), annotations.indexOf("function noteHtml"));
+  assert.doesNotMatch(popFootnote, /uiClick:1/);
+  assert.match(pageStyle, /#fn-pop\{[\s\S]*?overflow-x:hidden;overflow-y:auto/);
+  assert.match(pageStyle, /#fn-pop \.fn-body\{min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word\}/);
+  assert.match(layout, /\.rr \.rr-note-wrap\{display:inline !important;margin:0 !important;padding:0 !important/);
+  assert.match(layout, /margin:0 0 0 \.02em !important/);
+});
+
+test("scroll-page taps only cross chapters at an actual chapter boundary", () => {
+  const scrollTurn = layout.slice(layout.indexOf("function scrollPageBy"), layout.indexOf("function pageOf"));
+  assert.match(scrollTurn, /var atChapterBoundary=canLeaveScrollChapter\(dir\);/);
+  assert.match(scrollTurn, /if\(!target&&!atChapterBoundary\)\{[\s\S]*?var fallbackIndex=[\s\S]*?scrollSliceFromCanonicalBreak/);
+  assert.match(scrollTurn, /if\(!target\)\{\s*if\(!atChapterBoundary\)\{[\s\S]*?captureAnchor\(\);report\(true\);\s*return true;/);
+  assert.match(scrollTurn, /if\(dir>0&&curCh<CH-1\)\{beginChapterTurnFx\(dir,curCh\+1,'start'\);return true;\}/);
+});
+
+test("scroll-page taps use real long-text line geometry and leave complete glyphs visible", () => {
+  const fastLines = layout.slice(layout.indexOf("function fastDocumentTextLineRects"), layout.indexOf("function documentTextLineRects"));
+  const virtualPage = layout.slice(layout.indexOf("function buildVirtualPageFromIndex"), layout.indexOf("function applyVirtualFragmentStyle"));
+  const mask = layout.slice(layout.indexOf("function applyScrollPageMask"), layout.indexOf("function currentScrollPageClipBlank"));
+  assert.match(measurement, /function fastTextRangeNeedsChunks\(rects\)/);
+  assert.match(measurement, /function appendFastTextRangeLines\(out,node,range,start,end,pr,scrollTop\)/);
+  assert.match(fastLines, /if\(fastTextRangeNeedsChunks\(rects\)\)\{[\s\S]*?appendFastTextRangeLines/);
+  assert.match(fastLines, /start\+=192/);
+  assert.match(measurement, /极少数电子书会把每个 192 字片段也合成一个高矩形/);
+  assert.match(virtualPage, /var lh=lineHeightPx\(\),glyphPad=scrollGlyphSafePx\(\),bottomGuard=IS_MAC_WEBKIT\?Math\.max\(glyphPad,Math\.ceil\(lh\*0\.36\)\)/);
+  assert.match(virtualPage, /items\[startIdx\].top\)\|\|0\)-glyphPad/);
+  assert.match(virtualPage, /items\[nextIdx\].top\)\|\|0\)-glyphPad/);
+  assert.match(mask, /if\(!scrollPagedView\)\{[\s\S]*?clipPath='none'[\s\S]*?return;/);
+  assert.match(mask, /var macPage=!fastChapterLayout&&virtualSlice\?macVirtualPageForSlice\(virtualSlice\):null;/);
+  assert.match(mask, /applyMacReadableScrollClip\(virtualSlice,maskPort\?maskPort\.clientHeight:0\)/);
+  assert.match(layout, /function applyMacReadableScrollClip\(slice,viewH\)/);
+});
+
+test("paged touchpad gestures remain grouped across normal macOS inter-event gaps", () => {
   const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
   const wheelHandler = annotations.slice(annotations.indexOf("var pageWheelGesture=null"), annotations.indexOf("window.addEventListener('resize'"));
-  assert.match(wheelHandler, /var pageWheelGesture=null,pageWheelGestureTimer=null,pageWheelTraceEvents=0,scrollChapterLock=false/);
-  assert.match(wheelHandler, /function tracePageWheel\(phase,e,gesture\)/);
-  assert.match(wheelHandler, /if\(pageWheelTraceEvents\+\+>=48\)return;/);
-  assert.match(wheelHandler, /if\(pageWheelGesture===gesture\)pageWheelGesture=null;[\s\S]*?\},80\)/);
+  assert.match(wheelHandler, /var pageWheelGesture=null,pageWheelGestureTimer=null,pageWheelStartDelta=0,pageWheelTraceEvents=0,pageWheelGestureTraceEvents=0,pageWheelLastTraceAt=0,scrollChapterLock=false/);
+  assert.match(wheelHandler, /var PAGE_WHEEL_QUIET_MS=64,PAGE_WHEEL_START_DELTA_PX=2/);
+  assert.match(wheelHandler, /function tracePageWheel\(phase,e,gesture,delta,extra\)/);
+  assert.match(wheelHandler, /pageWheelGestureTraceEvents\+\+;[\s\S]*?pageWheelTraceEvents\+\+;/);
+  assert.doesNotMatch(wheelHandler, /PAGE_WHEEL_TRACE_MAX_EVENTS_PER_GESTURE/);
+  assert.match(wheelHandler, /wheel_gap_ms:gap,wheel_accumulated_px:num\(pageWheelStartDelta\),wheel_threshold_px:PAGE_WHEEL_START_DELTA_PX,wheel_quiet_ms:PAGE_WHEEL_QUIET_MS/);
+  assert.match(wheelHandler, /readerBugTrace\('wheel',phase,null,data\)/);
+  assert.match(wheelHandler, /if\(pageWheelGesture===gesture\)\{[\s\S]*?tracePageWheel\('rearmed',null,null,0,\{direction:gesture.direction,wheel_timer_active:false\}\);[\s\S]*?pageWheelGestureTraceEvents=0;[\s\S]*?\},PAGE_WHEEL_QUIET_MS\)/);
   assert.match(wheelHandler, /if\(gesture\)\{[\s\S]*?armPageWheelGestureQuietTimer\(gesture\);[\s\S]*?return;/);
-  assert.match(wheelHandler, /if\(direction>0\)nextPage\(\);else prevPage\(\);/);
+  assert.doesNotMatch(wheelHandler, /reentry|canReenterPageWheelGesture|observePageWheelTail/);
+  assert.match(wheelHandler, /pageWheelStartDelta\+=delta;[\s\S]*?if\(magnitude<PAGE_WHEEL_START_DELTA_PX\)\{tracePageWheel\('accumulating',e,null,delta\);return;\}/);
+  assert.match(wheelHandler, /tracePageWheel\('mode_pending',e,pageWheelGesture,wheelDeltaPx\(e\),\{wheel_mode_pending:true\}\)/);
+  assert.match(wheelHandler, /pageWheelGesture=gesture;[\s\S]*?pageWheelGestureTraceEvents=0;[\s\S]*?var wheelTurnTrace=tracePageWheel\('turn',e,gesture,delta\);[\s\S]*?markPageTurnInput\('wheel',wheelTurnTrace\);[\s\S]*?if\(direction>0\)nextPage\(\);else prevPage\(\);/);
+  assert.match(pageBugTrace, /function pageTurnTraceData\(token,extra\)[\s\S]*?\^wheel_/);
+  assert.match(pageBugTrace, /markPageTurnInput\(input,detail\)[\s\S]*?pageTurnTraceDetail=detail/);
   assert.doesNotMatch(wheelHandler, /quietFor|strongNewInput|>=700/);
 });
 
@@ -261,6 +363,17 @@ test("pagination geometry clamps unsafe margins and keeps dual counts in spreads
   const layout = context.pageLayout();
   const sixPhysicalColumns = 6 * layout.colPitch + layout.l - layout.gap;
   assert.equal(context.columnCountFromWidth(sixPhysicalColumns, false), 3);
+});
+
+test("dual-page chapter endings fill the right page and label the cross-chapter spread", () => {
+  assert.match(layout, /appendDualChapterContinuation/);
+  assert.match(layout, /class="rr-dual-continuation"/);
+  assert.match(layout, /dualContinuationChapter===curCh\+1&&pageInCh===pagesInCh-1/);
+  assert.match(layout, /root\.insertAdjacentHTML\('beforeend','<div class="rr-end"><\/div>'\)/);
+  assert.match(layout, /body:not\(\.scroll-mode\):not\(\.line-paged-mode\) \.rr-end\{display:none !important;\}/);
+  assert.match(layout, /beginChapterTurnFx\(1,visibleDualContinuationChapter\(\),'after-dual-continuation'\)/);
+  assert.match(pagination, /\.rr-end,\.rr-dual-continuation/);
+  assert.match(reader, /dualChapterProgress/);
 });
 
 test("incremental page cache resumes incomplete books and accepts complete books", () => {

@@ -23,7 +23,8 @@ function classList() {
 function boot(immersive = false) {
   const ids = [
     "settings", "rsearch", "toc", "vocab", "info-modal", "anno-modal",
-    "cross-modal", "reader-end-modal", "backdrop", "vocab-settings",
+    "cross-modal", "reader-end-modal", "ai-reader-side",
+    "backdrop", "vocab-settings",
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, { classList: classList() }]));
   const body = { classList: classList() };
@@ -122,6 +123,30 @@ test("sidebar, modal and toolbar rendering all come from shell state", () => {
   assert.equal(body.classList.contains("reader-controls-visible"), false);
 });
 
+test("side panels coexist with overlays and close before them", () => {
+  const { shell, elements } = boot();
+  let closed = 0;
+  shell.registerSidePanel(shell.SIDE_PANEL.AI_READER, { onClose() { closed += 1; } });
+  shell.setOverlay(shell.OVERLAY.SETTINGS, true);
+  shell.setSidePanel(shell.SIDE_PANEL.AI_READER, true);
+
+  assert.equal(shell.getState().overlay, "settings");
+  assert.equal(shell.getState().sidePanel, "ai-reader");
+  assert.equal(elements.settings.classList.contains("show"), true);
+  assert.equal(elements["ai-reader-side"].classList.contains("show"), true);
+  assert.equal(shell.hasSurface(), true);
+
+  assert.equal(shell.closeSurface(), true);
+  assert.equal(shell.getState().overlay, "settings");
+  assert.equal(shell.getState().sidePanel, "none");
+  assert.equal(elements["ai-reader-side"].classList.contains("show"), false);
+  assert.equal(closed, 1);
+
+  assert.equal(shell.closeSurface(), true);
+  assert.equal(shell.getState().overlay, "none");
+  assert.equal(shell.hasSurface(), false);
+});
+
 test("managed shell modules do not mutate overlay visibility directly", () => {
   const files = [
     "reader.js", "reader-search-ui.js", "reader-notes-ui.js",
@@ -132,6 +157,6 @@ test("managed shell modules do not mutate overlay visibility directly", () => {
     .join("\n");
   assert.doesNotMatch(
     managed,
-    /(?:settingsEl|rsearch|tocEl|vocabEl|infoModal|annoModal|crossModal|backdropEl)\.classList\.(?:add|remove|toggle)\("show"/
+    /(?:settingsEl|rsearch|tocEl|vocabEl|infoModal|annoModal|crossModal|backdropEl|aiReaderSide)\.classList\.(?:add|remove|toggle)\("show"/
   );
 });

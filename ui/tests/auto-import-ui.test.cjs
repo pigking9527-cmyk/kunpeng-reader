@@ -23,6 +23,14 @@ test("automatic directory imports serialize scans and refresh the shelf while im
   assert.match(controller, /refreshShelf[\s\S]*?invoke\("list_books"\)[\s\S]*?renderShelf/);
 });
 
+test("the automatic-import switch only changes its enabled state", () => {
+  assert.match(html, /data-i18n="autoImport">自动导入<\/span\s*>/);
+  assert.doesNotMatch(html, /id="import-dirs-enabled(?:-row|-switch)?"/);
+  assert.doesNotMatch(app, /importDirsEnabled(?:Chk|Row)/);
+  assert.doesNotMatch(app, /enabled && !autoImport\.dirs\.length/);
+  assert.match(app, /dirsGearBtn\.addEventListener\("click",[\s\S]*?openImportDirsSettings\(\)/);
+});
+
 test("overlapping automatic scan requests run sequentially and progress refreshes current books", async () => {
   const timers = [];
   const context = {

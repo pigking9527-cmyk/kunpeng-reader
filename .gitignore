@@ -39,3 +39,8 @@ id_rsa
 id_ed25519
 *交接*.md
 *handover*.md
+
+# Node / TypeScript build output
+node_modules/
+dist/
+/ui/bridge/

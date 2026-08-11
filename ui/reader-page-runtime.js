@@ -106,8 +106,45 @@ function ttsStop(){
   if(window.CSS&&CSS.highlights)CSS.highlights.delete('tts');
   parent.postMessage({ttsState:0},'*');
 }
+// 阅读模式开关先保存“目标模式”，不立即改变 iframe 的布局。第一条阅读输入
+// 会把同一份设置送回此处，重排完成后由 annotations 按目标模式重放该输入。
+// 后续同一手势的事件在重排期间不会再入队，避免触控板惯性被延后回放。
+var pendingReaderModeSettings=null,pendingReaderModeReplay=null,pendingReaderModeApplying=false;
+function queuePendingReaderModeInput(replay){
+  if(!pendingReaderModeSettings)return false;
+  if(pendingReaderModeApplying)return true;
+  pendingReaderModeApplying=true;
+  pendingReaderModeReplay=replay;
+  var next=pendingReaderModeSettings;
+  pendingReaderModeSettings=null;
+  window.postMessage({settings:next,applyQueuedReaderModeChange:1},'*');
+  return true;
+}
 window.addEventListener('message',function(e){
   if(!e.data)return;
+  // Bounded settings-only bridge for the original reader preferences panel. It never carries
+  // selected text, highlights, chapter HTML or a document URL. The imperative
+  // page validates and applies the values before re-rendering its own menu.
+  if(e.data.readerHighlightMenuSettings){
+    var highlightMenuRequest=e.data.readerHighlightMenuSettings;
+    var highlightMenuRequestId=Math.max(0,parseInt(highlightMenuRequest.requestId,10)||0);
+    if(highlightMenuRequestId&&typeof window.ReaderHighlightMenuSettings==='object'){
+      var highlightMenuOp=String(highlightMenuRequest.operation||'');
+      var highlightMenuSettings=highlightMenuOp==='get'
+        ?window.ReaderHighlightMenuSettings.get()
+        :highlightMenuOp==='update'
+          ?window.ReaderHighlightMenuSettings.update(highlightMenuRequest.settings)
+          :highlightMenuOp==='activate'
+            ?window.ReaderHighlightMenuSettings.activate()
+          :null;
+      if(highlightMenuSettings)parent.postMessage({readerHighlightMenuSettings:{requestId:highlightMenuRequestId,settings:highlightMenuSettings}},'*');
+    }
+    return;
+  }
+  if(e.data.showHighlightMenuSettings){
+    if(typeof showHlSettings==='function')showHlSettings(selMenu||hlMenu);
+    return;
+  }
   if(e.data.readerGestureAction==='back'){
     var readerGestureSurfaceClosed=typeof closeReaderPageGestureSurface==='function'&&closeReaderPageGestureSurface();
     parent.postMessage({readerGestureSurfaceClosed:!!readerGestureSurfaceClosed},'*');
@@ -184,9 +221,22 @@ window.addEventListener('message',function(e){
     }
   }
   if(e.data.settings){
+    var requestedFlow=e.data.settings.flowMode||S.flowMode;
+    var requestedPageMode=e.data.settings.pageMode||S.pageMode;
+    // 只延后“整屏/滚动”的流式模式切换。单双页必须立刻重排，不能被
+    // 上一次滚动模式切换的等待状态吞掉。
+    var shouldDeferFlowModeChange=!!e.data.deferModeChange&&requestedFlow!==S.flowMode;
+    if(shouldDeferFlowModeChange){
+      // 整屏单页和滚动单页的 pageMode 同为 single；是否需要切换必须以
+      // flowMode 为准，不能因 pageMode 相同而丢掉这次切换。
+      pendingReaderModeSettings=Object.assign({},e.data.settings);
+      return;
+    }
+    pendingReaderModeSettings=null;
     var prevFlow=S.flowMode,prevPageMode=S.pageMode,prevFontFamily=S.fontFamily,prevTextConversion=S.textConversion,prevImagePagination=S.imagePagination;
     var imagePaginationChanged=e.data.settings.imagePagination!==undefined&&prevImagePagination!==e.data.settings.imagePagination;
     var imagePaginationOnly=imagePaginationChanged&&Object.keys(e.data.settings).every(function(key){return key==='imagePagination'||e.data.settings[key]===S[key];});
+    var dualPageGapOnly=e.data.settings.dualPageGap!==undefined&&Object.keys(e.data.settings).every(function(key){return key==='dualPageGap'||e.data.settings[key]===S[key];});
     var nextFlow=e.data.settings.flowMode||prevFlow,nextPageMode=e.data.settings.pageMode||prevPageMode;
     var incomingModeChange=prevFlow!==nextFlow||prevPageMode!==nextPageMode;
     var prevPageCountSig=pageCountSig();
@@ -245,6 +295,9 @@ window.addEventListener('message',function(e){
       tracePagedImageLayout('setting_deferred',{image_source_page:pageInCh,image_candidate_page:-1,image_probed:false});
       return;
     }
+    // 单页和滚动阅读根本不会使用中缝。保存该偏好时无需让正在阅读的
+    // iframe 重排；真正的双页预览 iframe 仍会即时应用这个值。
+    if(dualPageGapOnly&&!isDualPage())return;
     var flowChanged=prevFlow!==S.flowMode;
     var pageModeChanged=prevPageMode!==S.pageMode;
     if(flowChanged||pageModeChanged)cancelPagedImagePreview();
@@ -268,6 +321,16 @@ window.addEventListener('message',function(e){
     if(modeDiagSeq){modeSwitchDiagLog(modeDiagSeq,'after_relayout',anchorOffset);modeSwitchDiagSchedule(modeDiagSeq,anchorOffset);}
     if(flowChanged||pageModeChanged)scheduleImageVisualAnchorRestore(imageAnchor);
     scheduleMeasure();
+    if(pendingReaderModeReplay){
+      var replay=pendingReaderModeReplay;
+      pendingReaderModeReplay=null;
+      requestAnimationFrame(function(){
+        pendingReaderModeApplying=false;
+        if(typeof window.replayPendingReaderModeInput==='function')window.replayPendingReaderModeInput(replay);
+      });
+    }else{
+      pendingReaderModeApplying=false;
+    }
   }
   if(e.data.tts){if(e.data.tts==='start')ttsStart();else ttsStop();}
   if(e.data.ttsAudio){var a=e.data.ttsAudio;if(ttsOn&&a.seq===ttsGen){ttsCache[a.idx]=a;if(ttsWaiting===a.idx)ttsRenderAudio(a.idx,a);}}
@@ -319,6 +382,15 @@ window.addEventListener('message',function(e){
     parent.postMessage({tocResolved:{chapter:curCh,frag:bestFrag}},'*');
   }
 });
+// Do not let the iframe's own default storage overwrite a preference saved by
+// the reader shell.  The shell starts synchronization only after this handler
+// and the visual settings API both exist.
+function announceHighlightMenuPreferencesReady(){
+  if(typeof window.ReaderHighlightMenuSettings==='object')parent.postMessage({readerHighlightMenuPreferencesReady:true},'*');
+  else setTimeout(announceHighlightMenuPreferencesReady,0);
+}
+if(document.readyState==='complete')setTimeout(announceHighlightMenuPreferencesReady,0);
+else window.addEventListener('load',announceHighlightMenuPreferencesReady,{once:true});
 
 var pagedImagePreview=null,pagedImageTraceSignature='';
 function tracePagedImageLayout(outcome,detail){
@@ -583,7 +655,10 @@ function probePagedImageElement(pr,current,step,img){
 function refreshPagedImagePreview(){
   if(!root||!pager||isScrollMode()||isDualPage()){clearPagedImagePreview();return;}
   var pr=viewRect(),rr=root.getBoundingClientRect(),step=pageStep||window.innerWidth||1,current=pageInCh;
-  if(S.imagePagination!=='continuous'&&S.imagePagination!=='next-page'){clearPagedImagePreview();return;}
+  // “下一页完整显示”不能创建任何视觉预览：原图已经由多栏正文负责
+  // 移到下一页。此前这里也生成克隆图，结果在原图前再叠出一截同图，
+  // 特别是带插图 EPUB 会出现重复、交错，并把一次翻页拆成数次。
+  if(S.imagePagination!=='continuous'){clearPagedImagePreview();return;}
   var imgs=root.querySelectorAll('img'),candidate=null,candidateRect=null,sourcePage=-1,nextImageCount=0,futureImageCount=0,skippedForText=0,firstNextImage=null,firstFutureImage=null;
   var lines=filterTextLines(documentTextLineRects());
   for(var i=0;i<imgs.length;i++){
@@ -705,7 +780,7 @@ function schedulePagedImagePreview(){
   var generation=++pagedImagePreviewGeneration;
   if(pagedImagePreviewFrame){cancelAnimationFrame(pagedImagePreviewFrame);pagedImagePreviewFrame=0;}
   clearPagedImagePreview();
-  if(!root||!pager||isScrollMode()||isDualPage()){
+  if(!root||!pager||isScrollMode()||isDualPage()||S.imagePagination!=='continuous'){
     tracePagedImageLayout('schedule_skipped',{image_source_page:pageInCh,image_candidate_page:-1,image_probed:false});
     return;
   }

@@ -27,11 +27,13 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(i18n, /data-i18n-placeholder/);
   assert.match(i18n, /function t\(key\)[\s\S]*?language === "ja"/);
   assert.match(html, /id="newsnow-page"[\s\S]*?data-i18n="manageSources"/);
+  assert.match(html, /id="newsnow-toolbar-btn"[^>]*data-i18n-title="news"[^>]*data-i18n-aria="news"/);
+  assert.doesNotMatch(html.match(/id="newsnow-toolbar-btn"[\s\S]*?<\/button>/)?.[0] || "", /NewsNow/);
   assert.match(html, /id="library-ai-page"[\s\S]*?data-i18n="libraryQuestion"/);
   assert.doesNotMatch(html, /data-i18n="libraryDescription"/);
   assert.match(fs.readFileSync(path.join(uiRoot, "news-ui.js"), "utf8"), /app-language-changed/);
   assert.match(fs.readFileSync(path.join(uiRoot, "library-ai.js"), "utf8"), /app-language-changed/);
-  assert.match(html, /id="open-default-apps-settings"[^>]*data-i18n="defaultOpenButton"/);
+  assert.match(html, /class="fp-set-row default-apps-setting"[\s\S]*?id="open-default-apps-settings"[^>]*data-i18n="defaultOpenButton"/);
   assert.match(html, /id="recovery-backup-status"[^>]*data-i18n="recoveryLoading"/);
   assert.match(html, /id="settings-export-data"[^>]*data-i18n="dataExport"/);
   assert.match(html, /id="settings-restore-backup"[^>]*data-i18n-aria="recoverySelect"/);
@@ -54,31 +56,32 @@ test("main settings expose a persistent software language selector", () => {
   for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
     const localeMarker = ["zh-CN", "zh-TW", "pt-BR"].includes(locale) ? `"${locale}": {` : `${locale}: {`;
     const localeStart = settingsCopy.indexOf(localeMarker);
-    const localeEnd = settingsCopy.indexOf("\n    ", localeStart + localeMarker.length);
-    const localeCopy = settingsCopy.slice(localeStart, localeEnd < 0 ? undefined : localeEnd);
     assert.notEqual(localeStart, -1, `missing settings copy for ${locale}`);
+    const nextLocale = settingsCopy.indexOf("\n  },\n  ", localeStart + localeMarker.length);
+    const localeCopy = settingsCopy.slice(localeStart, nextLocale < 0 ? undefined : nextLocale);
     for (const key of ["defaultOpenTitle", "recoveryTitle", "recoverySelect", "recoveryStatus", "dataImport"]) assert.match(localeCopy, new RegExp(`${key}:`));
   }
   const accountCopy = i18n.slice(i18n.indexOf("const ACCOUNT_SEARCH_COPY"), i18n.indexOf("const SYNC_COUNTS_COPY"));
   for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
     const marker = ["zh-CN", "zh-TW", "pt-BR"].includes(locale) ? `"${locale}": {` : `${locale}: {`;
     const start = accountCopy.indexOf(marker);
-    const end = accountCopy.indexOf("\n    ", start + marker.length);
-    const copy = accountCopy.slice(start, end < 0 ? undefined : end);
     assert.notEqual(start, -1, `missing account/search copy for ${locale}`);
+    const nextLocale = accountCopy.indexOf("\n  },\n  ", start + marker.length);
+    const copy = accountCopy.slice(start, nextLocale < 0 ? undefined : nextLocale);
     for (const key of ["syncContent", "lastSync", "searchPlaceholder", "shelfSearchPlaceholder"]) assert.match(copy, new RegExp(`${key}:`));
   }
   assert.match(app, /function renderRecoveryBackupStatus/);
   assert.match(app, /appText\("recoveryStatus"/);
   assert.match(app, /app-language-changed[\s\S]*?renderRecoveryBackupStatus\(lastRecoveryBackupStatus\)/);
   assert.match(i18n, /const DEFAULT_APPS_NOTICE_COPY/);
-  assert.match(app, /AppNotice\?\.show\([\s\S]*?defaultOpenToast[\s\S]*?variant:\s*"text"[\s\S]*?duration:\s*1500/s);
+  assert.match(app, /const message = await invoke\("open_default_apps_settings"\)/);
+  assert.match(app, /AppNotice\?\.show\([\s\S]*?String\(message \|\| appText\("defaultOpenToast"[\s\S]*?variant:\s*"text"[\s\S]*?duration:\s*1500/s);
   assert.match(app, /defaultOpenFailed/);
   assert.doesNotMatch(app, /alert\("已打开 Windows 默认应用设置/);
   assert.match(fs.readFileSync(path.join(uiRoot, "sync-ui.js"), "utf8"), /app-language-changed[\s\S]*?applyAccountSecurityStatus\(lastAccountSecurity\)/);
   assert.match(fs.readFileSync(path.join(uiRoot, "stats-ui.js"), "utf8"), /app-language-changed[\s\S]*?renderStats\(\)/);
   assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*min-width:\s*0;[^}]*overflow-x:\s*hidden;[^}]*user-select:\s*none;/s);
-  assert.match(styles, /#fp-settings-modal \.modal-card input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\):not\(\[type="range"\]\),[\s\S]*user-select:\s*text;/);
+  assert.match(styles, /#fp-settings-modal\s+\.modal-card\s+input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\):not\(\[type="range"\]\),[\s\S]*user-select:\s*text;/);
   assert.match(styles, /#fp-settings-modal \.fp-set-row > :first-child\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
   assert.match(styles, /\.default-apps-setting > \.btn-plain\s*\{[^}]*width:\s*fit-content;[^}]*max-width:\s*48%;/s);
   assert.match(html, /class="recovery-backup-controls"[\s\S]*id="settings-restore-backup-button"[\s\S]*id="settings-create-backup"[^>]*data-i18n="recoveryCreateShort"/);
@@ -177,4 +180,28 @@ test("all ten languages localize About, feedback, and sync runtime states", () =
   assert.match(feedback, /feedbackTextFor\("feedbackSubmitting"\)/);
   assert.match(sync, /setSyncButtonState\("fail", "syncFailed"/);
   assert.match(sync, /syncText\("syncFailedDetail"/);
+});
+
+test("all ten languages localize the complete news surface and switching rerenders it", () => {
+  const chinese = loadAppI18n("zh-CN");
+  const keys = [
+    "news", "manageSources", "sourceSearch", "listLayout", "gridLayout",
+    "newsReaderBack", "newsOpenOriginal", "tiebaSection", "tiebaHint",
+    "tiebaCount", "newsArticleLoadFailed", "newsRequestTimedOut", "newsLoadFailed",
+  ];
+  for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
+    const localized = loadAppI18n(locale);
+    for (const key of keys) {
+      assert.doesNotMatch(localized.t(key), /^⟦.+⟧$/, `${locale} must define ${key}`);
+    }
+    if (locale !== "zh-CN") {
+      for (const key of ["news", "tiebaHint", "newsArticleLoadFailed"]) {
+        assert.notEqual(localized.t(key), chinese.t(key), `${locale} must not retain Chinese ${key}`);
+      }
+    }
+  }
+  const news = fs.readFileSync(path.join(uiRoot, "news-ui.js"), "utf8");
+  assert.match(news, /const ALL_CATEGORY = "__all__"/);
+  assert.match(news, /app-language-changed[\s\S]*?renderSourcePicker\(\)[\s\S]*?renderFeed\(\)/);
+  assert.match(i18n, /const NEWS_SURFACE_COPY/);
 });

@@ -543,14 +543,14 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             conn.execute("UPDATE sync_clock SET value=0 WHERE id=1")
         conn.close()
 
-    def request_json(self, method, path, body=None):
+    def request_json(self, method, path, body=None, token=None):
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path,
             data=data,
             method=method,
             headers={
-                "Authorization": f"Bearer {self.TOKEN}",
+                "Authorization": f"Bearer {token or self.TOKEN}",
                 "Content-Type": "application/json",
             },
         )
@@ -558,14 +558,14 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             return json.loads(response.read().decode("utf-8"))
 
-    def request_error_json(self, method, path, body=None):
+    def request_error_json(self, method, path, body=None, token=None):
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path,
             data=data,
             method=method,
             headers={
-                "Authorization": f"Bearer {self.TOKEN}",
+                "Authorization": f"Bearer {token or self.TOKEN}",
                 "Content-Type": "application/json",
             },
         )
@@ -573,10 +573,10 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             self.opener.open(request, timeout=3)
         return raised.exception.code, json.loads(raised.exception.read().decode("utf-8"))
 
-    def request_bytes(self, method, path, data=None, headers=None):
+    def request_bytes(self, method, path, data=None, headers=None, token=None):
         request = urllib.request.Request(
             self.base_url + path, data=data, method=method,
-            headers={"Authorization": f"Bearer {self.TOKEN}"},
+            headers={"Authorization": f"Bearer {token or self.TOKEN}"},
         )
         for name, value in (headers or {}).items():
             request.add_header(name, value)
@@ -623,6 +623,100 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         })
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"], "EMAIL_VERIFICATION_REQUIRED")
+
+    def test_local_email_verification_unblocks_sync_without_sending_real_mail(self):
+        sent = []
+        old_mail_configured = app.account_mail_configured
+        old_send_mail = app.send_account_email
+        app.account_mail_configured = lambda: True
+        app.send_account_email = lambda recipient, _subject, text: sent.append((recipient, text))
+        email = "verify-fixture@example.test"
+        try:
+            conn = app.connect()
+            with conn:
+                conn.execute("DELETE FROM account_emails WHERE user_id=?", (self.USER_ID,))
+                conn.execute("UPDATE users SET sync_verified_at=0 WHERE id=?", (self.USER_ID,))
+            conn.close()
+
+            status, payload = self.request_error_json(
+                "POST", "/sync/push", {"schema_version": 2, "device_id": "before-verify", "entities": []}
+            )
+            self.assertEqual(status, 403)
+            self.assertEqual(payload["error"], "EMAIL_VERIFICATION_REQUIRED")
+
+            self.request_json("POST", "/auth/email/start", {"email": email})
+            self.assertEqual(sent[-1][0], email)
+            code = sent[-1][1].split("：", 1)[1].split("\n", 1)[0]
+            verified = self.request_json("POST", "/auth/email/confirm", {"email": email, "code": code})
+            self.assertTrue(verified["ok"])
+            self.assertNotEqual(verified["email"], email)
+
+            accepted = self.push([self.entity("zh:邮箱验证后")], "after-verify")
+            self.assertEqual(accepted["accepted_count"], 1)
+        finally:
+            app.account_mail_configured = old_mail_configured
+            app.send_account_email = old_send_mail
+
+    def test_password_change_revokes_other_device_tokens(self):
+        other_token = "integration-other-device-token"
+        conn = app.connect()
+        with conn:
+            conn.execute(
+                "INSERT INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
+                (other_token, self.USER_ID, app.now_ms(), app.now_ms()),
+            )
+        conn.close()
+
+        changed = self.request_json(
+            "POST", "/auth/password/change",
+            {"currentPassword": self.PASSWORD, "newPassword": "replacement-password"},
+        )
+        self.assertTrue(changed["ok"])
+        status, payload = self.request_error_json("GET", "/auth/me", token=other_token)
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"], "UNAUTHORIZED")
+        self.request_error_json(
+            "POST", "/auth/login", {"username": self.USER_ID, "password": self.PASSWORD}
+        )
+        login = self.request_json(
+            "POST", "/auth/login", {"username": self.USER_ID, "password": "replacement-password"}
+        )
+        self.assertTrue(login["token"])
+
+    def test_password_reset_uses_local_delivery_stub_and_revokes_existing_tokens(self):
+        sent = []
+        old_mail_configured = app.account_mail_configured
+        old_send_mail = app.send_account_email
+        app.account_mail_configured = lambda: True
+        app.send_account_email = lambda recipient, _subject, text: sent.append((recipient, text))
+        email = "reset-fixture@example.test"
+        try:
+            conn = app.connect()
+            with conn:
+                conn.execute(
+                    "INSERT INTO account_emails(user_id,email,verified_at) VALUES(?,?,?)",
+                    (self.USER_ID, email, app.now_ms()),
+                )
+            conn.close()
+            requested = self.request_json(
+                "POST", "/auth/password/reset/request", {"username": self.USER_ID, "email": email}
+            )
+            self.assertTrue(requested["ok"])
+            self.assertEqual(sent[-1][0], email)
+            code = sent[-1][1].split("：", 1)[1].split("\n", 1)[0]
+            reset = self.request_json(
+                "POST", "/auth/password/reset/confirm",
+                {"username": self.USER_ID, "code": code, "newPassword": "reset-password"},
+            )
+            self.assertTrue(reset["token"])
+            status, payload = self.request_error_json("GET", "/auth/me")
+            self.assertEqual(status, 401)
+            self.assertEqual(payload["error"], "UNAUTHORIZED")
+            restored = self.request_json("GET", "/auth/me", token=reset["token"])
+            self.assertEqual(restored["username"], self.USER_ID)
+        finally:
+            app.account_mail_configured = old_mail_configured
+            app.send_account_email = old_send_mail
 
     def test_reader_background_asset_is_resumable_hash_checked_and_range_downloadable(self):
         raw = b"reader-background-asset" * 70000
@@ -694,6 +788,47 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(duplicate["entities"][0]["id"], "zh:幂等")
         self.assertEqual([item["id"] for item in pulled["entities"]], ["zh:幂等"])
         self.assertEqual(pulled["entities"][0]["json"], {"value": "value"})
+
+    def test_two_device_tokens_receive_incremental_update_and_tombstone(self):
+        device_b_token = "integration-device-b-token"
+        conn = app.connect()
+        with conn:
+            conn.execute(
+                "INSERT INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
+                (device_b_token, self.USER_ID, app.now_ms(), app.now_ms()),
+            )
+        conn.close()
+
+        first = self.entity("zh:双设备", "device-a", "from-a", 100, 1)
+        self.push([first], "device-a")
+        initial = self.request_json("GET", "/sync/pull?cursor=0&limit=100", token=device_b_token)
+        self.assertEqual(initial["entities"][0]["json"], {"value": "from-a"})
+
+        second = self.entity("zh:双设备", "device-b", "from-b", 200, 2)
+        updated = self.request_json(
+            "POST", "/sync/push",
+            {"schema_version": 2, "device_id": "device-b", "entities": [second]},
+            token=device_b_token,
+        )
+        self.assertEqual(updated["accepted_count"], 1)
+        incremental = self.request_json(
+            "GET", "/sync/pull?" + urllib.parse.urlencode({"cursor": initial["next_cursor"], "limit": 100})
+        )
+        self.assertEqual(incremental["entities"][0]["json"], {"value": "from-b"})
+
+        tombstone = self.entity("zh:双设备", "device-b", "unused", 300, 3)
+        tombstone["deleted_at"] = 300
+        deleted = self.request_json(
+            "POST", "/sync/push",
+            {"schema_version": 2, "device_id": "device-b", "entities": [tombstone]},
+            token=device_b_token,
+        )
+        self.assertEqual(deleted["accepted_count"], 1)
+        after_delete = self.request_json(
+            "GET", "/sync/pull?" + urllib.parse.urlencode({"cursor": incremental["next_cursor"], "limit": 100})
+        )
+        self.assertGreater(after_delete["entities"][0]["deleted_at"], 0)
+        self.assertEqual(after_delete["entities"][0]["device_id"], "device-b")
 
     def test_push_normalizes_legacy_epoch_seconds_and_preserves_milliseconds(self):
         legacy = self.entity(

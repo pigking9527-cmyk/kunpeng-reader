@@ -394,6 +394,18 @@ fn normalized_gesture_settings(value: Value) -> Option<Value> {
     normalized.insert("enabled".into(), json!(enabled));
     normalized.insert("globalPrecision".into(), json!(global_precision));
     normalized.insert("profiles".into(), json!(profiles));
+    // v1 payloads created before this marker cannot distinguish an unconfigured
+    // empty list from an intentional clear. Preserve that ambiguity on read so
+    // the Web UI can protect a locally recorded gesture during migration.
+    if source
+        .get("profilesInitialized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        normalized.insert("profilesInitialized".into(), json!(true));
+    } else {
+        normalized.remove("profilesInitialized");
+    }
     normalized.insert("hintSettings".into(), Value::Object(normalized_hint));
     Some(Value::Object(normalized))
 }
@@ -1008,6 +1020,7 @@ mod tests {
                     "version": 1,
                     "enabled": true,
                     "globalPrecision": "7",
+                    "profilesInitialized": true,
                     "profiles": [{
                         "id": "back-home",
                         "name": "返回主页",
@@ -1039,6 +1052,7 @@ mod tests {
         assert_eq!(payload["libraryAnswerLength"], "long");
         assert_eq!(payload["gestureSettings"]["version"], 1);
         assert_eq!(payload["gestureSettings"]["globalPrecision"], "7");
+        assert_eq!(payload["gestureSettings"]["profilesInitialized"], true);
         assert_eq!(
             payload["gestureSettings"]["profiles"][0]["points"]
                 .as_array()

@@ -198,10 +198,22 @@
         border: 2px solid rgba(80,90,110,.22); border-top-color: #5aa0ff;
         border-radius: 50%; animation: spin .75s linear infinite;
       }
-      .reader-progress-group { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; margin-right: 4px; }
-      #chapter-progress { width: auto; max-width: min(38vw, 290px); flex: 0 1 auto; }
+      /* 阅读状态每次翻页都会更新页码与百分比；固定占位并使用等宽数字，避免
+         1/9 → 10/9 或 9.9% → 10.0% 时右上角文字左右跳动。 */
+      .reader-progress-group {
+        display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; margin-right: 4px;
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1;
+      }
+      #chapter-progress {
+        width: min(245px, 38vw); max-width: min(38vw, 290px); flex: 0 1 min(245px, 38vw);
+        justify-content: flex-start; text-align: left;
+      }
       #progress.page-count-loading { width: 30px; max-width: 30px; flex-basis: 30px; }
-      #progress.page-count-total { width: auto; max-width: none; flex: 0 0 auto; }
+      #progress.page-count-total {
+        width: 84px; max-width: 84px; flex: 0 0 84px;
+        justify-content: flex-end; text-align: right;
+      }
       @keyframes spin { to { transform: rotate(360deg); } }
       body.animations-all-off *, body.animations-all-off *::before, body.animations-all-off *::after {
         animation-duration: .001ms !important;
@@ -444,13 +456,19 @@
       .settings .margins label { display: flex; align-items: center; gap: 4px; }
       .settings .margins input { width: 56px; font: inherit; }
       .settings h4 { margin: 4px 0 2px; font-size: 12px; color: #888; font-weight: normal; }
-      .reader-quick-section { display: grid; gap: 11px; margin-top: 8px; padding: 12px; border: 1px solid #e3e9f1; border-radius: 12px; background: #f9fbfd; }
+      .reader-quick-section { display: grid; gap: 10px; margin-top: 8px; padding: 12px; border: 1px solid #e3e9f1; border-radius: 12px; background: #f9fbfd; }
       .reader-quick-section .reader-quick-palette-row { display: grid; gap: 8px; }
       .reader-quick-section .reader-quick-palette-row > label:first-child { width: auto; color: #35445a; font-weight: 650; }
       .reader-quick-slider-row input[type="range"] { min-width: 0; accent-color: #3c82d8; }
-      .reader-quick-mode-row { padding-top: 10px; border-top: 1px solid #e5ebf2; }
-      .reader-quick-mode-row .mode-toggle-group { justify-content: space-between; }
-      .reader-quick-speech-row { padding-top: 10px; border-top: 1px solid #e5ebf2; }
+      .reader-quick-mode-row { padding-top: 8px; border-top: 1px solid #e5ebf2; }
+      .reader-quick-mode-row .mode-toggle-group { justify-content: flex-start; gap: 8px; }
+      .reader-quick-speech-row { gap: 6px !important; padding-top: 8px; border-top: 1px solid #e5ebf2; }
+      .settings .reader-quick-speech-row > label:first-child { width: 28px; flex: 0 0 28px; }
+      .reader-quick-speech-button { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; border: 1px solid #ccd6e4; border-radius: 8px; background: #fff; color: #356da9; font-size: 15px; cursor: pointer; }
+      .reader-quick-speech-button:hover { border-color: #76a2df; background: #edf5ff; }
+      .reader-quick-speech-row input[type="range"] { flex: 1 1 112px; min-width: 72px; }
+      .settings .reader-quick-speech-source { width: 78px; min-width: 78px; flex: 0 0 78px; padding: 4px 5px; }
+      .reader-quick-speech-row .val { width: 34px; flex: 0 0 34px; font-variant-numeric: tabular-nums; }
       .theme-row { display: flex; gap: 6px; flex: 1; }
       .theme-btn {
         flex: 1; font: inherit; padding: 5px 0; border: 1px solid #c9c9cf;
@@ -635,6 +653,8 @@
       body.theme-dark .reader-quick-section .reader-quick-palette-row > label:first-child { color: #e0e6ef; }
       body.theme-dark .reader-quick-mode-row,
       body.theme-dark .reader-quick-speech-row { border-color: #414750; }
+      body.theme-dark .reader-quick-speech-button { border-color: #4c5665; background: #30343a; color: #bad7ff; }
+      body.theme-dark .reader-quick-speech-button:hover { background: #3a4656; }
       body.theme-dark .text-conversion-choice { color: #ddd; }
             body.theme-dark .settings select,
       body.theme-dark .rsearch input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
@@ -813,7 +833,10 @@
       <div id="reader-settings-toolbar-item" class="gear-wrap">
         <button id="gear-btn" class="tbtn" data-reader-i18n="settings">⚙ 设置</button>
         <div id="settings" class="settings" data-quick-ui-mode="compact">
-      <button id="reader-preferences-btn" class="reader-preferences-launch" type="button"><span data-reader-i18n="readerPreferences">阅读偏好</span> <span aria-hidden="true">⚙</span></button>
+      <div class="reader-quick-header">
+        <button id="reader-preferences-btn" class="reader-preferences-launch" type="button"><span data-reader-i18n="readerPreferences">阅读偏好</span> <span aria-hidden="true">⚙</span></button>
+        <div class="reader-quick-ui-mode" role="group" aria-label="设置界面布局" data-reader-i18n-aria="quickSettingsLayout"><button id="reader-quick-mode-compact" class="active" type="button" data-quick-ui-mode-option="compact" data-reader-i18n="quickSettingsCompact" aria-pressed="true">精简</button><button id="reader-quick-mode-classic" type="button" data-quick-ui-mode-option="classic" data-reader-i18n="quickSettingsClassic" aria-pressed="false">经典</button></div>
+      </div>
       <div class="reader-quick-section">
         <div class="row reader-quick-palette-row">
           <label data-reader-i18n="theme">主题</label>
@@ -854,7 +877,7 @@
             </label>
           </div>
         </div>
-        <div class="row reader-quick-slider-row reader-quick-speech-row reader-quick-current-only"><label data-reader-i18n="speechRate">朗读语速</label><input type="range" id="quick-set-ttsrate" min="0.5" max="2" step="0.1" /><span class="val" id="quick-v-ttsrate"></span></div>
+        <div class="row reader-quick-slider-row reader-quick-speech-row"><label data-reader-i18n="speechRate">语速</label><input type="range" id="quick-set-ttsrate" min="0.5" max="2" step="0.05" /><span class="val" id="quick-v-ttsrate"></span><select id="quick-set-ttssrc" class="reader-quick-speech-source" data-reader-i18n-aria="speechSource"><option value="edge" data-reader-i18n="ttsMicrosoftAuto">微软</option><option value="system" data-reader-i18n="ttsSystemOffline">系统语音</option></select><button id="quick-tts-btn" class="reader-quick-speech-button" type="button" title="朗读（从当前页开始，自动翻页）" data-reader-i18n-title="readAloud" data-reader-i18n-aria="readAloud">🔊</button></div>
         <div class="reader-quick-classic-only">
           <div class="row"><label data-reader-i18n="style">样式</label><select id="quick-set-style-mode"><option value="local" data-reader-i18n="localStyle">本地样式（推荐）</option><option value="book" data-reader-i18n="bookStyle">图书样式（使用原书字号）</option></select></div>
           <div class="row reader-quick-slider-row"><label data-reader-i18n="noteFontSize">注释字号</label><input type="range" id="quick-set-note-size" min="10" max="22" step="1" /><span class="val" id="quick-v-note-size"></span></div>
@@ -867,9 +890,12 @@
       </div>
         </div>
       </div>
-      <div id="reader-quick-layout-preview" class="reader-quick-layout-preview" aria-hidden="true" hidden></div>
       <div id="reader-preferences-modal" class="modal" role="dialog" aria-modal="true" aria-label="阅读偏好" data-reader-i18n-aria="readerPreferences">
         <section class="modal-card reader-preferences-card">
+          <header class="reader-preferences-head">
+            <strong data-reader-i18n="readerPreferences">阅读偏好</strong>
+            <button id="reader-preferences-close" class="reader-preferences-close" type="button" aria-label="关闭" title="关闭" data-reader-i18n-aria="close" data-reader-i18n-title="close">×</button>
+          </header>
           <div class="reader-preference-scope" role="group" aria-label="偏好保存范围" data-reader-i18n-aria="preferenceScopeLabel">
             <button class="active" type="button" data-pref-scope="default" data-reader-i18n="preferenceOverall" aria-pressed="true">总体</button>
             <button type="button" data-pref-scope="book" data-reader-i18n="preferenceBook" aria-pressed="false">独立</button>
@@ -886,9 +912,14 @@
               <section class="reader-preference-panel" data-pref-panel="appearance">
                 <div id="pref-palette-scroll" class="reader-palette-scroll"><div id="pref-palette-grid" class="reader-palette-grid" aria-label="配色方案" data-reader-i18n-aria="paletteGrid"></div></div>
                 <div class="reader-color-grid">
-                  <label class="reader-color-field"><span data-reader-i18n="textColor">正文颜色</span><input type="color" data-pref-color="textColor" /></label><label class="reader-color-field"><span data-reader-i18n="linkColor">链接颜色</span><input type="color" data-pref-color="linkColor" /></label><label class="reader-color-field"><span data-reader-i18n="selectionColor">选中文本</span><input type="color" data-pref-color="selectionColor" /></label><label class="reader-color-field"><span data-reader-i18n="footnoteBackground">脚注背景</span><input type="color" data-pref-color="footnoteBackground" /></label><label class="reader-color-field"><span data-reader-i18n="footnoteBorder">脚注边框</span><input type="color" data-pref-color="footnoteBorder" /></label>
+                  <div class="reader-color-field"><span data-reader-i18n="textColor">正文颜色</span><button class="reader-color-picker" type="button" data-pref-color="textColor" aria-label="正文颜色"></button></div><div class="reader-color-field"><span data-reader-i18n="linkColor">链接颜色</span><button class="reader-color-picker" type="button" data-pref-color="linkColor" aria-label="链接颜色"></button></div><div class="reader-color-field"><span data-reader-i18n="selectionColor">选中文本</span><button class="reader-color-picker" type="button" data-pref-color="selectionColor" aria-label="选中文本"></button></div><div class="reader-color-field"><span data-reader-i18n="footnoteBackground">脚注背景</span><button class="reader-color-picker" type="button" data-pref-color="footnoteBackground" aria-label="脚注背景"></button></div><div class="reader-color-field"><span data-reader-i18n="footnoteBorder">脚注边框</span><button class="reader-color-picker" type="button" data-pref-color="footnoteBorder" aria-label="脚注边框"></button></div>
                 </div>
-                <div class="reader-custom-background"><span class="reader-custom-background-title" data-reader-i18n="customBackground">自定义背景</span><input id="pref-palette-name" class="reader-palette-name-field" type="text" maxlength="24" placeholder="主题名称" aria-label="主题名称" data-reader-i18n-placeholder="paletteName" data-reader-i18n-aria="paletteName" /><input class="reader-background-color-picker" type="color" data-pref-color="customBackgroundColor" aria-label="自定义背景颜色" data-reader-i18n-aria="customBackgroundColor" /><label class="reader-background-import"><span data-reader-i18n="importImage">导入图片</span><input id="pref-background-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label><span id="pref-background-image-name" class="reader-background-image-name" data-reader-i18n="backgroundNotImported">未导入图片</span><button id="pref-clear-background-image" type="button" data-reader-i18n="removeImage">移除图片</button><button id="pref-add-palette" type="button" data-reader-i18n="addPalette">添加为配色</button></div>
+                <div class="reader-custom-background"><span class="reader-custom-background-title" data-reader-i18n="customBackground">自定义背景</span><input id="pref-palette-name" class="reader-palette-name-field" type="text" maxlength="24" placeholder="主题名称" aria-label="主题名称" data-reader-i18n-placeholder="paletteName" data-reader-i18n-aria="paletteName" /><button class="reader-color-picker reader-background-color-picker" type="button" data-pref-color="customBackgroundColor" aria-label="自定义背景颜色" data-reader-i18n-aria="customBackgroundColor"></button><label class="reader-background-import"><span data-reader-i18n="importImage">导入图片</span><input id="pref-background-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label><span id="pref-background-image-name" class="reader-background-image-name" data-reader-i18n="backgroundNotImported">未导入图片</span><button id="pref-clear-background-image" type="button" data-reader-i18n="removeImage">移除图片</button><button id="pref-add-palette" type="button" data-reader-i18n="addPalette">添加主题</button></div>
+                <div id="reader-color-popover" class="reader-color-popover" role="dialog" aria-label="选择颜色" hidden>
+                  <div class="reader-color-presets" aria-label="常用颜色"><button type="button" data-pref-color-swatch="#000000"></button><button type="button" data-pref-color-swatch="#212121"></button><button type="button" data-pref-color-swatch="#424242"></button><button type="button" data-pref-color-swatch="#616161"></button><button type="button" data-pref-color-swatch="#9e9e9e"></button><button type="button" data-pref-color-swatch="#bdbdbd"></button><button type="button" data-pref-color-swatch="#e0e0e0"></button><button type="button" data-pref-color-swatch="#ffffff"></button><button type="button" data-pref-color-swatch="#f44336"></button><button type="button" data-pref-color-swatch="#e91e63"></button><button type="button" data-pref-color-swatch="#9c27b0"></button><button type="button" data-pref-color-swatch="#673ab7"></button><button type="button" data-pref-color-swatch="#3f51b5"></button><button type="button" data-pref-color-swatch="#2196f3"></button><button type="button" data-pref-color-swatch="#03a9f4"></button><button type="button" data-pref-color-swatch="#00bcd4"></button><button type="button" data-pref-color-swatch="#009688"></button><button type="button" data-pref-color-swatch="#4caf50"></button><button type="button" data-pref-color-swatch="#8bc34a"></button><button type="button" data-pref-color-swatch="#cddc39"></button><button type="button" data-pref-color-swatch="#ffeb3b"></button><button type="button" data-pref-color-swatch="#ffc107"></button><button type="button" data-pref-color-swatch="#ff9800"></button><button type="button" data-pref-color-swatch="#ff5722"></button><button type="button" data-pref-color-swatch="#795548"></button><button type="button" data-pref-color-swatch="#607d8b"></button><button type="button" data-pref-color-swatch="#7f1d1d"></button><button type="button" data-pref-color-swatch="#9d174d"></button><button type="button" data-pref-color-swatch="#6d28d9"></button><button type="button" data-pref-color-swatch="#1d4ed8"></button><button type="button" data-pref-color-swatch="#0f766e"></button><button type="button" data-pref-color-swatch="#166534"></button><button type="button" data-pref-color-swatch="#854d0e"></button><button type="button" data-pref-color-swatch="#b54708"></button><button type="button" data-pref-color-swatch="#dceafa"></button><button type="button" data-pref-color-swatch="#fff3d6"></button><button type="button" data-pref-color-swatch="#f3f6fa"></button><button type="button" data-pref-color-swatch="#b7c7da"></button><button type="button" data-pref-color-swatch="#1c1c1e"></button><button type="button" data-pref-color-swatch="#f8f1df"></button></div>
+                  <label>色相<input id="reader-color-hue" type="range" min="0" max="360" step="1" /></label><label>饱和<input id="reader-color-saturation" type="range" min="0" max="100" step="1" /></label><label>明度<input id="reader-color-lightness" type="range" min="0" max="100" step="1" /></label>
+                  <label class="reader-color-hex-label">HEX<input id="reader-color-hex" type="text" inputmode="text" maxlength="7" spellcheck="false" /></label>
+                </div>
                 <div class="reader-appearance-actions"><button id="pref-reset-colors" class="reader-preferences-reset" type="button" data-reader-i18n="restorePaletteColors">恢复默认</button><button id="pref-clear-book-appearance" class="reader-preferences-reset danger" type="button" hidden data-reader-i18n="clearBookAppearance">清除本书独立外观</button></div>
               </section>
               <section class="reader-preference-panel" data-pref-panel="pagination" hidden>
@@ -901,7 +932,7 @@
                     </div>
                   </section>
                   <section class="reader-pagination-card">
-                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="dualPageGap">双页中缝</h4><p data-reader-i18n="dualPageGapHint">仅在双页分页时生效；单页和滚动阅读不受影响。</p></div><output id="pref-dual-page-gap-value" for="pref-dual-page-gap">40 px</output></div>
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="dualPageGap">双页中缝</h4><p data-reader-i18n="dualPageGapHint">仅在双页分页时生效；单页和滚动阅读不受影响。</p></div><div class="reader-pagination-card-actions"><output id="pref-dual-page-gap-value" for="pref-dual-page-gap">40 px</output><button id="pref-dual-page-gap-reset" class="reader-pagination-reset" type="button" data-reader-i18n="restoreDualPageGap">恢复默认</button></div></div>
                     <div class="reader-pagination-range"><input id="pref-dual-page-gap" type="range" min="0" max="120" step="1" aria-label="双页中缝" data-reader-i18n-aria="dualPageGap" /></div>
                   </section>
                   <section class="reader-pagination-card reader-pagination-detail-card">
@@ -929,9 +960,6 @@
                 </div>
               </section>
               <section class="reader-preference-panel" data-pref-panel="toolbar" hidden>
-                <section class="reader-preference-group reader-quick-layout-group">
-                  <div class="reader-preference-row"><label data-reader-i18n="quickSettingsLayout">快捷设置布局</label><div class="reader-quick-ui-mode reader-toolbar-layout-mode" role="group" aria-label="设置界面布局" data-reader-i18n-aria="quickSettingsLayout"><button id="reader-quick-mode-compact" class="active" type="button" data-quick-ui-mode-option="compact" data-reader-i18n="quickSettingsCompact" aria-pressed="true">精简</button><button id="reader-quick-mode-classic" type="button" data-quick-ui-mode-option="classic" data-reader-i18n="quickSettingsClassic" aria-pressed="false">经典</button></div></div>
-                </section>
                 <section class="reader-preference-group reader-reading-display-group">
                   <div class="reader-preference-group-head"><h4 data-reader-i18n="readingDisplay">阅读显示</h4><p data-reader-i18n="readingDisplayHint">控制正文周边的常驻阅读信息，不属于功能菜单。</p></div>
                   <div class="reader-preference-row"><label data-reader-i18n="showTextConversion">显示简繁按钮</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showTextConversion" /><span class="settings-slider"></span></label></div>
@@ -939,8 +967,8 @@
                 </section>
                 <section class="reader-preference-group reader-tts-source-group">
                   <div class="reader-preference-group-head"><h4 data-reader-i18n="speech">朗读</h4><p data-reader-i18n="ttsSourceHint">音源属于设备能力配置，语速仍可在快捷设置中随时调整。</p></div>
-                  <div class="reader-preference-row"><label data-reader-i18n="speechSource">音源</label><select id="set-ttssrc"><option value="edge" data-reader-i18n="ttsMicrosoftAuto">在线 · 微软神经</option><option value="system" data-reader-i18n="ttsSystemOffline">系统语音</option></select></div>
-                  <div class="reader-preference-row"><label data-reader-i18n="speechRate">语速</label><span class="reader-preference-inline-range"><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.1" /><output id="v-ttsrate"></output></span></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="speechSource">音源</label><select id="set-ttssrc"><option value="edge" data-reader-i18n="ttsMicrosoftAuto">微软</option><option value="system" data-reader-i18n="ttsSystemOffline">系统语音</option></select></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="speechRate">语速</label><span class="reader-preference-inline-range"><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.05" /><output id="v-ttsrate"></output></span></div>
                 </section>
                 <details class="reader-preference-group reader-toolbar-menu-group">
                   <summary class="reader-preference-group-head"><h4 data-reader-i18n="toolbarFunctionMenu">工具栏功能菜单</h4></summary>
@@ -1187,6 +1215,7 @@
     <script src="recovery-settings-snapshot.js"></script>
     <script src="window-resize.js"></script>
     <script src="reader-i18n.js"></script>
+    <script src="bridge/reader-protocol-bridge.js"></script>
     <script src="reader-message.js"></script>
     <script src="reader-shell-state.js"></script>
     <script src="reader-bug-trace.js"></script>

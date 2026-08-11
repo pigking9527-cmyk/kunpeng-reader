@@ -239,7 +239,11 @@
     context.lineJoin = "round";
     context.shadowColor = "rgba(19,67,131,.28)";
     context.shadowBlur = 5;
-    context.stroke();
+    if (list.length === 1) {
+      context.fillStyle = color;
+      context.arc(list[0].x, list[0].y, Math.max(lineWidth / 2, 3), 0, Math.PI * 2);
+      context.fill();
+    } else context.stroke();
   }
 
   return { STORAGE_KEY, ENABLED_KEY, PRECISION_KEY, SAMPLE_COUNT, MIN_PATH_LENGTH, MATCH_THRESHOLD, MATCH_THRESHOLDS, PRECISION_THRESHOLDS, cleanPoints, pathLength, normalize, directionSequence, directionSimilarity, prefixSimilarity, similarity, parseStored, load, save, loadEnabled, saveEnabled, normalizePrecision, loadPrecision, savePrecision, matchThreshold, clear, draw };

@@ -27,6 +27,7 @@ mod html_sanitize;
 mod import;
 mod import_core;
 mod library_commands;
+mod macos_reader_wheel;
 mod memory_budget;
 mod newsnow;
 mod pdf_support;
@@ -70,7 +71,12 @@ pub(crate) use runtime_support::{
     emit_startup_perf, interactive_search_workers, log, now_ms, report_save_error,
     set_thread_background, with_thread_background_priority, DEFAULT_SYNC_URL, RES_BASE,
 };
-use tauri::Manager;
+#[cfg(target_os = "macos")]
+use tauri::menu::MenuItem;
+use tauri::{menu::Menu, Manager};
+
+#[cfg(target_os = "macos")]
+const MENU_MAIN_WINDOW_CLOSE: &str = "main-window-close";
 fn main() {
     runtime_support::mark_process_started();
     if std::env::args().any(|a| a == "--sem-probe") {
@@ -106,7 +112,48 @@ fn main() {
         .manage(startup::StartupBookPaths::new(startup_book_paths))
         .manage(startup_enhancement::StartupEnhancementState::load())
         .manage(AppState::new(startup_database))
+        .menu(|app| {
+            let menu = Menu::default(app)?;
+            #[cfg(target_os = "macos")]
+            if let Some(file_menu) = menu.items()?.into_iter().find_map(|item| {
+                let submenu = item.as_submenu()?;
+                (submenu.text().ok().as_deref() == Some("File")).then(|| submenu.clone())
+            }) {
+                // 无边框 WebView 在部分 macOS 环境不会可靠执行预置菜单项的
+                // performClose:。用有明确 ID 的原生菜单项接管 Command+W。
+                let _ = file_menu.remove_at(0)?;
+                let close = MenuItem::with_id(
+                    app,
+                    MENU_MAIN_WINDOW_CLOSE,
+                    "关闭窗口",
+                    true,
+                    Some("CmdOrCtrl+W"),
+                )?;
+                file_menu.insert(&close, 0)?;
+            }
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            #[cfg(target_os = "macos")]
+            if event.id() == MENU_MAIN_WINDOW_CLOSE {
+                if let Some(window) = app
+                    .webview_windows()
+                    .into_values()
+                    .find(|window| window.is_focused().unwrap_or(false))
+                {
+                    let result = if window.label() == "main" {
+                        window_commands::main_window_close(window)
+                    } else {
+                        window.close().map_err(|error| error.to_string())
+                    };
+                    if let Err(error) = result {
+                        log(&format!("原生关闭窗口快捷键失败：{error}"));
+                    }
+                }
+            }
+        })
         .setup(|app| {
+            macos_reader_wheel::install_paged_reader_wheel_monitor();
             semantic::initialize_semantic_model_selection();
             {
                 let state = app.state::<AppState>();
@@ -129,6 +176,36 @@ fn main() {
                     }
                 }
             }
+            // Tauri's declarative window would otherwise be created with the
+            // fallback 980×720 frame before the library has been read. Create
+            // it only after the saved geometry is available, still hidden.
+            let geom = {
+                app.state::<AppState>()
+                    .library
+                    .lock()
+                    .unwrap()
+                    .main_geom
+                    .clone()
+            };
+            let mut main_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|config| config.label == "main")
+                .cloned()
+                .ok_or("缺少主窗口配置")?;
+            if let Some(saved) = geom.as_ref().filter(|saved| {
+                saved.w >= 300.0 && saved.h >= 300.0 && saved.x > -10_000.0 && saved.y > -10_000.0
+            }) {
+                main_config.width = saved.w;
+                main_config.height = saved.h;
+                main_config.x = Some(saved.x);
+                main_config.y = Some(saved.y);
+                main_config.maximized = saved.maximized;
+            }
+            let _main_window =
+                tauri::WebviewWindowBuilder::from_config(app, &main_config)?.build()?;
             backup::spawn_daily(app.handle().clone());
             semantic::spawn_semantic_profile_warmup(app.handle().clone());
             startup::spawn_associated_book_watcher(app.handle().clone());
@@ -136,15 +213,12 @@ fn main() {
             startup::spawn_maintenance(app.handle().clone()); // 延后低抢占维护任务，避免刚打开窗口拖动卡顿
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_title(startup::VERSIONED_MAIN_WINDOW_TITLE);
-                let geom = {
-                    app.state::<AppState>()
-                        .library
-                        .lock()
-                        .unwrap()
-                        .main_geom
-                        .clone()
-                };
                 window_commands::apply_geom_safe(&win, &geom);
+                // 主窗口保持隐藏，直到书架完成首帧绘制并经 main_window_show
+                // 揭示。这样已保存的位置、尺寸和最大化状态会先稳定下来。
+                if startup_enhancement::should_start_login_background(app.handle()) {
+                    startup_enhancement::begin_login_background(app.handle());
+                }
                 let app_ev = app.handle().clone();
                 win.on_window_event(move |ev| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
@@ -165,6 +239,7 @@ fn main() {
             window_commands::main_window_minimize,
             window_commands::main_window_toggle_maximize,
             window_commands::main_window_close,
+            window_commands::main_window_exit,
             window_commands::main_window_show,
             window_commands::main_window_start_dragging,
             window_commands::main_window_start_resize_dragging,
@@ -228,6 +303,7 @@ fn main() {
             ai_reader::save_ai_reader_config,
             ai_reader::ask_reading_assistant,
             ai_reader::ask_library_assistant,
+            ai_reader::cancel_library_assistant,
             ai_reader::library_history_source_preview,
             ai_reader::library_profile_status,
             ai_reader::library_profile_coverage_status,
@@ -278,6 +354,8 @@ fn main() {
             sync::auth_rebind_email_new_confirm,
             sync::auth_change_password,
             sync::sync_reset_cloud_data,
+            sync::sync_recovery_status,
+            sync::sync_recovery_restore,
             sync::auth_delete_account,
             sync::auth_request_password_reset,
             sync::auth_confirm_password_reset,
@@ -377,8 +455,40 @@ fn main() {
             reader_commands::set_highlight_note,
             reader_commands::set_highlight_text,
             reader_commands::set_highlight_color,
-            library_commands::relocate_book
+            library_commands::relocate_book,
+            macos_reader_wheel::set_reader_paged_wheel_momentum_filter
         ])
-        .run(tauri::generate_context!())
-        .expect("启动 Tauri 失败");
+        .build(tauri::generate_context!())
+        .expect("启动 Tauri 失败")
+        .run(|app, event| match event {
+            // Command+Q、菜单栏“退出”和关闭主窗口都遵循启动增强开关：开启时
+            // 改为隐藏窗口、保留进程；仅显式退出命令可以结束进程。
+            tauri::RunEvent::ExitRequested { api, .. }
+                if startup_enhancement::should_keep_running(app)
+                    && !window_commands::take_explicit_application_exit_request() =>
+            {
+                api.prevent_exit();
+                startup_enhancement::background_main(app);
+            }
+            // macOS 在 Dock 或 Finder 重新打开一个没有可见窗口的应用时，
+            // 不会走前端的 `main_window_show`。关闭后保留后台进程时，
+            // 必须在系统 Reopen 事件中恢复主窗口。
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => startup_enhancement::activate_main(app, now_ms()),
+            // Finder sends an Opened event to the already-running app instead
+            // of launching a second process. Convert only local supported book
+            // files, then let the existing front end import and open them.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
+                let paths = urls
+                    .into_iter()
+                    .filter_map(|url| url.to_file_path().ok())
+                    .collect();
+                startup::open_associated_book_paths(app, paths);
+            }
+            _ => {}
+        });
 }

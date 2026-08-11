@@ -1,0 +1,21 @@
+{
+  "name": "kunpeng-reader-desktop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "eslint apps packages",
+    "test:typed": "node scripts/run-typescript-tests.mjs",
+    "test:legacy-ui": "node scripts/run-legacy-ui-tests.cjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "desktop-ui:build": "vite build --config apps/desktop-ui/vite.pdf-engine.config.ts && vite build --config apps/desktop-ui/vite.reader-protocol.config.ts && node apps/desktop-ui/scripts/verify-pdf-adapter-output.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.35.0",
+    "@types/node": "24.10.1",
+    "eslint": "^9.35.0",
+    "tsx": "4.20.6",
+    "typescript": "5.7.3",
+    "typescript-eslint": "^8.42.0",
+    "vite": "7.1.5"
+  }
+}

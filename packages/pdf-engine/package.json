@@ -1,0 +1,5 @@
+{
+  "name": "@kunpeng/pdf-engine",
+  "private": true,
+  "type": "module"
+}

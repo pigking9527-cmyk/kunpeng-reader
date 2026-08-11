@@ -1,4 +1,4 @@
-// 阅读页外壳状态机：统一管理工具栏和外壳级浮层。
+// 阅读页外壳状态机：统一管理工具栏、独占浮层和并存侧栏。
 // 正文 iframe 内的选区、词典、翻译、脚注等局部弹层不属于这里。
 (function initReaderShellState() {
   "use strict";
@@ -21,8 +21,14 @@
     IMMERSIVE_HOVER: "immersive-hover",
     IMMERSIVE_PINNED: "immersive-pinned",
   });
+  const SIDE_PANEL = Object.freeze({
+    NONE: "none",
+    AI_READER: "ai-reader",
+  });
   const overlayValues = new Set(Object.values(OVERLAY));
-  const hooks = new Map();
+  const sidePanelValues = new Set(Object.values(SIDE_PANEL));
+  const overlayHooks = new Map();
+  const sidePanelHooks = new Map();
   const overlayElements = new Map([
     [OVERLAY.SETTINGS, document.getElementById("settings")],
     [OVERLAY.PREFERENCES, document.getElementById("reader-preferences-modal")],
@@ -34,12 +40,16 @@
     [OVERLAY.CROSS_SEARCH, document.getElementById("cross-modal")],
     [OVERLAY.END_RECOMMENDATIONS, document.getElementById("reader-end-modal")],
   ]);
+  const sidePanelElements = new Map([
+    [SIDE_PANEL.AI_READER, document.getElementById("ai-reader-side")],
+  ]);
   const backdrop = document.getElementById("backdrop");
   const vocabSettings = document.getElementById("vocab-settings");
   const startsImmersive = localStorage.getItem("immersive") === "1";
 
   let state = Object.freeze({
     overlay: OVERLAY.NONE,
+    sidePanel: SIDE_PANEL.NONE,
     toolbar: startsImmersive ? TOOLBAR.IMMERSIVE_HIDDEN : TOOLBAR.NORMAL,
     settingsPointerExited: false,
   });
@@ -64,6 +74,11 @@
           settingsPointerExited: false,
         });
       }
+      case "SET_SIDE_PANEL":
+        return Object.freeze({
+          ...current,
+          sidePanel: sidePanelValues.has(action.sidePanel) ? action.sidePanel : SIDE_PANEL.NONE,
+        });
       case "TOOLBAR_POINTER_LEAVE":
         return Object.freeze({
           ...current,
@@ -131,12 +146,13 @@
     // 禁止两个组件各自 toggle，否则一次中部点击会把它们切成相反状态。
     document.body.classList.toggle("reader-controls-visible", controlsVisible);
     overlayElements.forEach((element, name) => element?.classList.toggle("show", next.overlay === name));
+    sidePanelElements.forEach((element, name) => element?.classList.toggle("show", next.sidePanel === name));
     backdrop?.classList.toggle("show", next.overlay === OVERLAY.TOC || next.overlay === OVERLAY.VOCAB);
     if (next.overlay !== OVERLAY.VOCAB) vocabSettings?.classList.remove("show");
   }
 
-  function runHook(name, type, transition) {
-    const hook = hooks.get(name)?.[type];
+  function runHook(registry, name, type, transition) {
+    const hook = registry.get(name)?.[type];
     if (typeof hook !== "function") return;
     hook(transition);
   }
@@ -147,14 +163,19 @@
     if (
       next === previous ||
       (next.overlay === previous.overlay &&
+        next.sidePanel === previous.sidePanel &&
         next.toolbar === previous.toolbar &&
         next.settingsPointerExited === previous.settingsPointerExited)
     ) return state;
     state = next;
     render(state);
     if (previous.overlay !== state.overlay) {
-      runHook(previous.overlay, "onClose", { previous, next: state, action });
-      runHook(state.overlay, "onOpen", { previous, next: state, action });
+      runHook(overlayHooks, previous.overlay, "onClose", { previous, next: state, action });
+      runHook(overlayHooks, state.overlay, "onOpen", { previous, next: state, action });
+    }
+    if (previous.sidePanel !== state.sidePanel) {
+      runHook(sidePanelHooks, previous.sidePanel, "onClose", { previous, next: state, action });
+      runHook(sidePanelHooks, state.sidePanel, "onOpen", { previous, next: state, action });
     }
     const wasImmersive = isImmersiveState(previous.toolbar);
     const nowImmersive = isImmersiveState(state.toolbar);
@@ -171,22 +192,63 @@
     return state;
   }
 
+  function closeOverlay() {
+    return dispatch({ type: "SET_OVERLAY", overlay: OVERLAY.NONE });
+  }
+
+  function setSidePanel(name, open) {
+    if (open) return dispatch({ type: "SET_SIDE_PANEL", sidePanel: name });
+    if (state.sidePanel === name) return dispatch({ type: "SET_SIDE_PANEL", sidePanel: SIDE_PANEL.NONE });
+    return state;
+  }
+
+  function closeSidePanel() {
+    return dispatch({ type: "SET_SIDE_PANEL", sidePanel: SIDE_PANEL.NONE });
+  }
+
+  function closeSurface() {
+    // 与旧手势保持一致：侧栏打开时先收起侧栏，再处理独占浮层。
+    if (state.sidePanel !== SIDE_PANEL.NONE) {
+      closeSidePanel();
+      return true;
+    }
+    if (state.overlay !== OVERLAY.NONE) {
+      closeOverlay();
+      return true;
+    }
+    return false;
+  }
+
   const api = Object.freeze({
     OVERLAY,
     TOOLBAR,
+    SIDE_PANEL,
     dispatch,
     setOverlay,
-    closeOverlay() {
-      return dispatch({ type: "SET_OVERLAY", overlay: OVERLAY.NONE });
-    },
+    closeOverlay,
     registerOverlay(name, lifecycle) {
-      if (name !== OVERLAY.NONE && overlayValues.has(name)) hooks.set(name, lifecycle || {});
+      if (name !== OVERLAY.NONE && overlayValues.has(name)) overlayHooks.set(name, lifecycle || {});
+    },
+    setSidePanel,
+    closeSidePanel,
+    closeSurface,
+    registerSidePanel(name, lifecycle) {
+      if (name !== SIDE_PANEL.NONE && sidePanelValues.has(name)) sidePanelHooks.set(name, lifecycle || {});
     },
     isOverlay(name) {
       return state.overlay === name;
     },
     hasOverlay() {
       return state.overlay !== OVERLAY.NONE;
+    },
+    isSidePanel(name) {
+      return state.sidePanel === name;
+    },
+    hasSidePanel() {
+      return state.sidePanel !== SIDE_PANEL.NONE;
+    },
+    hasSurface() {
+      return state.overlay !== OVERLAY.NONE || state.sidePanel !== SIDE_PANEL.NONE;
     },
     isImmersive() {
       return isImmersiveState(state.toolbar);

@@ -7,7 +7,7 @@
 
   const PALETTE_STORAGE_KEY = "readerCustomPalettesV1";
   const PALETTE_ORDER_KEY = "readerPaletteOrderV1";
-  const MAX_CUSTOM_PALETTES = 10;
+  const MAX_CUSTOM_PALETTES = 15;
   const MAX_BACKGROUND_IMAGE_BYTES = 10 * 1024 * 1024;
   const MAX_INLINE_BACKGROUND_IMAGE_CHARS = 160000; // legacy migration only
   const TOOLBAR_ITEM_IDS = Object.freeze(["toc", "chapters", "tts", "annotations", "vocabulary", "settings"]);
@@ -38,6 +38,9 @@
   let scope = "default";
   let pointerDrag = null;
   let suppressPaletteClickUntil = 0;
+  let autoPreviewThemeId = "";
+  let preferencesOutsidePointerDown = false;
+  let activeColorControl = null;
   let preferencesScrollDrag = null;
   let jumpBackPreviewDrag = null;
   let toolbarPointerDrag = null;
@@ -63,6 +66,166 @@
     const gap = Number(value);
     return Math.max(0, Math.min(120, Math.round(Number.isFinite(gap) ? gap : 40)));
   }
+
+  function normalizedHex(value, fallback = "#222222") {
+    const raw = String(value || "").trim();
+    const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw);
+    if (!match) return fallback;
+    const color = match[1].toLowerCase();
+    return `#${color.length === 3 ? color.split("").map((part) => part + part).join("") : color}`;
+  }
+
+  function hexToHsl(value) {
+    const hex = normalizedHex(value).slice(1);
+    const red = parseInt(hex.slice(0, 2), 16) / 255;
+    const green = parseInt(hex.slice(2, 4), 16) / 255;
+    const blue = parseInt(hex.slice(4, 6), 16) / 255;
+    const max = Math.max(red, green, blue), min = Math.min(red, green, blue);
+    const lightness = (max + min) / 2;
+    if (max === min) return { h: 0, s: 0, l: Math.round(lightness * 100) };
+    const delta = max - min;
+    const saturation = delta / (1 - Math.abs(2 * lightness - 1));
+    let hue = max === red ? ((green - blue) / delta) % 6 : max === green ? (blue - red) / delta + 2 : (red - green) / delta + 4;
+    hue = Math.round((hue * 60 + 360) % 360);
+    return { h: hue, s: Math.round(saturation * 100), l: Math.round(lightness * 100) };
+  }
+
+  function hslToHex(hue, saturation, lightness) {
+    const h = ((Number(hue) % 360) + 360) % 360;
+    const s = Math.max(0, Math.min(100, Number(saturation) || 0)) / 100;
+    const l = Math.max(0, Math.min(100, Number(lightness) || 0)) / 100;
+    const chroma = (1 - Math.abs(2 * l - 1)) * s;
+    const x = chroma * (1 - Math.abs((h / 60) % 2 - 1));
+    const m = l - chroma / 2;
+    const [red, green, blue] = h < 60 ? [chroma, x, 0] : h < 120 ? [x, chroma, 0] : h < 180 ? [0, chroma, x] : h < 240 ? [0, x, chroma] : h < 300 ? [x, 0, chroma] : [chroma, 0, x];
+    const channel = (value) => Math.round((value + m) * 255).toString(16).padStart(2, "0");
+    return `#${channel(red)}${channel(green)}${channel(blue)}`;
+  }
+
+  const DEFAULT_DUAL_PAGE_GAP = 40;
+  const READER_LAYOUT_PREVIEW_REVEAL_DELAY = 160;
+  let readerLayoutPreviewTimer = 0;
+  let readerLayoutPreviewRevealTimer = 0;
+  let readerLayoutPreview = null;
+  let readerLayoutPreviewFrame = null;
+
+  function ensureReaderLayoutPreview() {
+    if (readerLayoutPreview) return readerLayoutPreview;
+    const preview = document.createElement("div");
+    preview.className = "reader-preferences-layout-preview";
+    preview.hidden = true;
+    preview.setAttribute("aria-hidden", "true");
+    const previewFrame = document.createElement("iframe");
+    previewFrame.className = "reader-preferences-layout-preview-frame";
+    previewFrame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+    previewFrame.setAttribute("referrerpolicy", "no-referrer");
+    previewFrame.tabIndex = -1;
+    preview.append(previewFrame);
+    modal.insertAdjacentElement("afterend", preview);
+    readerLayoutPreview = preview;
+    readerLayoutPreviewFrame = previewFrame;
+    return preview;
+  }
+
+  function previewReaderSettings(dualPageGap) {
+    return Object.assign({}, global.ReaderSettings.get(), {
+      flowMode: "paged",
+      pageMode: "dual",
+      dualPageGap: dualPageGapPixels(dualPageGap),
+    });
+  }
+
+  function updateReaderLayoutPreviewFrame(dualPageGap) {
+    if (!readerLayoutPreviewFrame?.contentWindow) return;
+    readerLayoutPreviewFrame.contentWindow.postMessage({ settings: previewReaderSettings(dualPageGap) }, "*");
+  }
+
+  function loadReaderLayoutPreviewFrame(dualPageGap) {
+    const source = global.ReaderLayoutPreview?.source?.(dualPageGap);
+    if (!source || !readerLayoutPreviewFrame) return false;
+    global.clearTimeout(readerLayoutPreviewRevealTimer);
+    readerLayoutPreviewRevealTimer = 0;
+    readerLayoutPreview.classList.remove("is-ready");
+    readerLayoutPreview.dataset.source = source;
+    readerLayoutPreviewFrame.src = source;
+    return true;
+  }
+
+  function clearReaderLayoutPreview() {
+    global.clearTimeout(readerLayoutPreviewTimer);
+    global.clearTimeout(readerLayoutPreviewRevealTimer);
+    readerLayoutPreviewTimer = 0;
+    readerLayoutPreviewRevealTimer = 0;
+    if (!readerLayoutPreview) return;
+    readerLayoutPreview.hidden = true;
+    readerLayoutPreview.classList.remove("is-ready");
+    readerLayoutPreview.dataset.source = "";
+    delete readerLayoutPreview.dataset.dismissWhenReady;
+    if (readerLayoutPreviewFrame) readerLayoutPreviewFrame.removeAttribute("src");
+    ["left", "top", "width", "height"].forEach((part) => readerLayoutPreview.style.removeProperty(`--reader-preference-preview-cutout-${part}`));
+  }
+
+  function scheduleReaderLayoutPreviewClear(delay) {
+    global.clearTimeout(readerLayoutPreviewTimer);
+    readerLayoutPreviewTimer = global.setTimeout(clearReaderLayoutPreview, delay);
+  }
+
+  function revealReaderLayoutPreviewAfterPaint() {
+    global.clearTimeout(readerLayoutPreviewRevealTimer);
+    const preview = readerLayoutPreview;
+    const source = preview?.dataset.source;
+    if (!preview || !source) return;
+    // reader:// signals ready before its first composited frame. Keep the
+    // genuine reader hidden briefly so its initial blank canvas never flashes.
+    readerLayoutPreviewRevealTimer = global.setTimeout(() => {
+      if (!readerLayoutPreview || readerLayoutPreview.hidden || readerLayoutPreview.dataset.source !== source) return;
+      readerLayoutPreview.classList.add("is-ready");
+      const gap = dualPageGapPixels(document.getElementById("pref-dual-page-gap")?.value);
+      updateReaderLayoutPreviewFrame(gap);
+      if (readerLayoutPreview.dataset.dismissWhenReady === "true") {
+        delete readerLayoutPreview.dataset.dismissWhenReady;
+        scheduleReaderLayoutPreviewClear(850);
+      }
+    }, READER_LAYOUT_PREVIEW_REVEAL_DELAY);
+  }
+
+  function renderReaderLayoutPreview({ phase, dualPageGap }) {
+    global.clearTimeout(readerLayoutPreviewTimer);
+    readerLayoutPreviewTimer = 0;
+    const preview = ensureReaderLayoutPreview();
+    delete preview.dataset.dismissWhenReady;
+    const sliderRect = document.getElementById("pref-dual-page-gap")?.getBoundingClientRect?.();
+    if (sliderRect) {
+      const insetX = 6;
+      const insetY = 5;
+      const viewportWidth = global.innerWidth || document.documentElement.clientWidth;
+      const viewportHeight = global.innerHeight || document.documentElement.clientHeight;
+      preview.style.setProperty("--reader-preference-preview-cutout-left", `${Math.max(0, sliderRect.left - insetX)}px`);
+      preview.style.setProperty("--reader-preference-preview-cutout-top", `${Math.max(0, sliderRect.top - insetY)}px`);
+      preview.style.setProperty("--reader-preference-preview-cutout-width", `${Math.min(viewportWidth, sliderRect.width + insetX * 2)}px`);
+      preview.style.setProperty("--reader-preference-preview-cutout-height", `${Math.min(viewportHeight, sliderRect.height + insetY * 2)}px`);
+    }
+    if (!preview.dataset.source && !loadReaderLayoutPreviewFrame(dualPageGap)) return;
+    updateReaderLayoutPreviewFrame(dualPageGap);
+    preview.hidden = false;
+    if (phase === "finished") {
+      if (preview.classList.contains("is-ready")) scheduleReaderLayoutPreviewClear(850);
+      else preview.dataset.dismissWhenReady = "true";
+    }
+  }
+
+  function previewReaderLayout(detail) {
+    if (detail?.type !== "dual-page-gap") return;
+    renderReaderLayoutPreview({
+      phase: detail.phase || "finished",
+      dualPageGap: detail.dualPageGap,
+    });
+  }
+
+  global.addEventListener("message", (event) => {
+    if (!readerLayoutPreviewFrame || event.source !== readerLayoutPreviewFrame.contentWindow || !event.data?.ready) return;
+    revealReaderLayoutPreviewAfterPaint();
+  });
 
   function jumpBackIconHeight(iconSizePx) {
     return Math.max(12, Math.round(jumpBackIconPixels(iconSizePx) * 0.4));
@@ -138,7 +301,23 @@
   function sanitizePalette(palette) {
     if (!palette || typeof palette !== "object") return palette;
     const image = localAssetUrl(palette) || safePaletteImage(palette.backgroundImage);
-    return Object.assign({}, palette, { backgroundImage: image });
+    // Themes created before the complete reading-color preview only retained
+    // their background reliably. Fill every visual channel on load so an old
+    // saved theme is upgraded before it is rendered or synced again.
+    const defaults = {
+      background: "#fffdf8",
+      text: "#222222",
+      link: "#2f6fad",
+      selection: "#dceafa",
+      footnote: "#f3f6fa",
+      border: "#b7c7da",
+      theme: "light",
+    };
+    const completed = Object.assign({}, defaults, palette, { backgroundImage: image });
+    Object.keys(defaults).forEach((key) => {
+      if (typeof completed[key] !== "string" || !completed[key].trim()) completed[key] = defaults[key];
+    });
+    return completed;
   }
 
   function loadCustomPalettes() {
@@ -149,7 +328,7 @@
   }
 
   function saveCustomPalettes(palettes) {
-    const limited = palettes.slice(0, MAX_CUSTOM_PALETTES);
+    const limited = palettes.slice(0, MAX_CUSTOM_PALETTES).map(sanitizePalette);
     localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(limited));
     queuePaletteSync(limited);
   }
@@ -191,6 +370,30 @@
     const safeImage = safePaletteImage(image);
     element.classList.toggle("has-background-image", Boolean(safeImage));
     element.style.backgroundImage = safeImage ? `url("${safeImage}")` : "";
+  }
+
+  function appendPaletteReadingPreview(tile) {
+    const preview = document.createElement("span");
+    preview.className = "reader-palette-reading-preview";
+    preview.setAttribute("aria-hidden", "true");
+
+    const copy = document.createElement("span");
+    copy.className = "reader-palette-preview-copy";
+    copy.append("春风又绿江南岸，");
+    const selection = document.createElement("mark");
+    selection.className = "reader-palette-preview-selection";
+    selection.textContent = "明月";
+    copy.append(selection);
+    const link = document.createElement("span");
+    link.className = "reader-palette-preview-link";
+    link.textContent = "何时";
+    copy.append(link, "照我还。");
+
+    const footnote = document.createElement("span");
+    footnote.className = "reader-palette-preview-footnote";
+    footnote.textContent = "注";
+    preview.append(copy, footnote);
+    tile.append(preview);
   }
 
   function updateCustomPalette(id, patch) {
@@ -388,9 +591,9 @@
 
   function palettePatch(palette) {
     if (builtinPalettes.some((item) => item.id === palette.id)) {
-      return { backgroundPreset: palette.id, customPaletteId: "", customBackgroundImage: "", theme: palette.theme, textColor: "", linkColor: "", selectionColor: "", footnoteBackground: "", footnoteBorder: "" };
+      return { backgroundPreset: palette.id, customPaletteId: "", customBackgroundImage: "", customBackgroundAssetId: "", customBackgroundAssetSha256: "", customBackgroundAssetMime: "", customBackgroundAssetBytes: 0, theme: palette.theme, textColor: "", linkColor: "", selectionColor: "", footnoteBackground: "", footnoteBorder: "" };
     }
-    return { backgroundPreset: "custom", customPaletteId: palette.id, customBackgroundColor: palette.background, customBackgroundImage: safePaletteImage(palette.backgroundImage), textColor: palette.text, linkColor: palette.link, selectionColor: palette.selection, footnoteBackground: palette.footnote, footnoteBorder: palette.border, theme: palette.theme || "light" };
+    return { backgroundPreset: "custom", customPaletteId: palette.id, customBackgroundColor: palette.background, customBackgroundImage: safePaletteImage(palette.backgroundImage), customBackgroundAssetId: palette.backgroundAssetId || "", customBackgroundAssetSha256: palette.backgroundAssetSha256 || "", customBackgroundAssetMime: palette.backgroundAssetMime || "", customBackgroundAssetBytes: palette.backgroundAssetBytes || 0, textColor: palette.text, linkColor: palette.link, selectionColor: palette.selection, footnoteBackground: palette.footnote, footnoteBorder: palette.border, theme: palette.theme || "light" };
   }
 
   function updateAppearance(patch, targetScope = scope) {
@@ -495,7 +698,7 @@
     const active = paletteForSettings(current);
     const palettes = loadCustomPalettes();
     if (palettes.length >= MAX_CUSTOM_PALETTES) {
-      global.alert?.(readerPreferenceT("paletteLimit", "自定义配色最多可保存 10 个。"));
+      global.alert?.(readerPreferenceT("paletteLimit", "自定义配色最多可保存 30 个。"));
       return;
     }
     const id = `custom-${Date.now().toString(36)}`;
@@ -507,8 +710,122 @@
     };
     palettes.push(palette);
     saveCustomPalettes(palettes);
+    autoPreviewThemeId = palette.id;
     if (nameInput) nameInput.value = "";
     updateAppearance(palettePatch(palette));
+  }
+
+  function themeFromCurrentSettings(id, name, patch = {}) {
+    const settings = read();
+    const active = paletteForSettings(settings);
+    const hasPatch = (key) => Object.prototype.hasOwnProperty.call(patch, key);
+    const value = (settingKey, paletteKey, fallback) => hasPatch(settingKey) ? patch[settingKey] : settings[settingKey] || active?.[paletteKey] || fallback;
+    return {
+      id,
+      name,
+      background: value("customBackgroundColor", "background", "#fffdf8"),
+      backgroundImage: value("customBackgroundImage", "backgroundImage", ""),
+      backgroundAssetId: value("customBackgroundAssetId", "backgroundAssetId", ""),
+      backgroundAssetSha256: value("customBackgroundAssetSha256", "backgroundAssetSha256", ""),
+      backgroundAssetMime: value("customBackgroundAssetMime", "backgroundAssetMime", ""),
+      backgroundAssetBytes: value("customBackgroundAssetBytes", "backgroundAssetBytes", 0),
+      text: value("textColor", "text", "#222222"),
+      link: value("linkColor", "link", "#2f6fad"),
+      selection: value("selectionColor", "selection", "#dceafa"),
+      footnote: value("footnoteBackground", "footnote", "#f3f6fa"),
+      border: value("footnoteBorder", "border", "#b7c7da"),
+      theme: patch.theme || settings.theme || active?.theme || "light",
+    };
+  }
+
+  function updateAutomaticPreviewTheme(patch) {
+    const palettes = loadCustomPalettes();
+    const active = paletteForSettings(read());
+    let index = palettes.findIndex((palette) => palette.id === autoPreviewThemeId && active?.id === autoPreviewThemeId);
+    if (index < 0) {
+      if (palettes.length >= MAX_CUSTOM_PALETTES) {
+        global.alert?.(readerPreferenceT("paletteLimit", "自定义主题最多可保存 30 个。"));
+        updateAppearance(Object.assign({ backgroundPreset: "custom", customPaletteId: "", theme: read().theme }, patch));
+        return;
+      }
+      const id = `custom-${Date.now().toString(36)}`;
+      const requestedName = String(document.getElementById("pref-palette-name")?.value || "").trim().slice(0, 24);
+      const name = requestedName || readerPreferenceT("customPaletteName", `我的主题 ${palettes.length + 1}`, { number: palettes.length + 1 });
+      palettes.push(themeFromCurrentSettings(id, name, patch));
+      index = palettes.length - 1;
+      autoPreviewThemeId = id;
+    } else {
+      palettes[index] = Object.assign({}, themeFromCurrentSettings(autoPreviewThemeId, palettes[index].name, patch), { name: palettes[index].name });
+    }
+    const theme = palettes[index];
+    saveCustomPalettes(palettes);
+    updateAppearance(palettePatch(theme));
+  }
+
+  function colorControlValue(control, settings = read()) {
+    const palette = paletteForSettings(settings) || builtinPalettes[0];
+    return normalizedHex(control?.dataset?.colorValue || settings[control?.dataset?.prefColor] || palette[colorMap[control?.dataset?.prefColor]]);
+  }
+
+  function paintColorControl(control, value) {
+    if (!control) return;
+    const color = normalizedHex(value);
+    control.dataset.colorValue = color;
+    control.style.setProperty("--reader-color", color);
+    control.setAttribute("aria-valuetext", color.toUpperCase());
+  }
+
+  function paintColorPreset(button) {
+    if (!button) return;
+    const color = normalizedHex(button.dataset.prefColorSwatch);
+    button.style.setProperty("--color", color);
+    button.style.setProperty("background", color, "important");
+    button.setAttribute("aria-label", color.toUpperCase());
+  }
+
+  function closeColorPopover() {
+    activeColorControl = null;
+    const popover = document.getElementById("reader-color-popover");
+    if (popover) popover.hidden = true;
+  }
+
+  function setActiveColor(value) {
+    if (!activeColorControl) return;
+    const color = normalizedHex(value, colorControlValue(activeColorControl));
+    paintColorControl(activeColorControl, color);
+    const hexInput = document.getElementById("reader-color-hex");
+    const hue = document.getElementById("reader-color-hue");
+    const saturation = document.getElementById("reader-color-saturation");
+    const lightness = document.getElementById("reader-color-lightness");
+    const hsl = hexToHsl(color);
+    if (hexInput) hexInput.value = color.toUpperCase();
+    if (hue) hue.value = String(hsl.h);
+    if (saturation) saturation.value = String(hsl.s);
+    if (lightness) lightness.value = String(hsl.l);
+    updateAutomaticPreviewTheme({ [activeColorControl.dataset.prefColor]: color });
+  }
+
+  function openColorPopover(control) {
+    const popover = document.getElementById("reader-color-popover");
+    if (!popover) return;
+    activeColorControl = control;
+    const value = colorControlValue(control);
+    paintColorControl(control, value);
+    popover.hidden = false;
+    const rect = control.getBoundingClientRect();
+    const maxLeft = Math.max(12, window.innerWidth - popover.offsetWidth - 12);
+    const maxTop = Math.max(12, window.innerHeight - popover.offsetHeight - 12);
+    popover.style.left = `${Math.max(12, Math.min(maxLeft, rect.right - popover.offsetWidth))}px`;
+    popover.style.top = `${Math.max(12, Math.min(maxTop, rect.bottom + 8))}px`;
+    const hsl = hexToHsl(value);
+    const hexInput = document.getElementById("reader-color-hex");
+    const hue = document.getElementById("reader-color-hue");
+    const saturation = document.getElementById("reader-color-saturation");
+    const lightness = document.getElementById("reader-color-lightness");
+    if (hexInput) hexInput.value = value.toUpperCase();
+    if (hue) hue.value = String(hsl.h);
+    if (saturation) saturation.value = String(hsl.s);
+    if (lightness) lightness.value = String(hsl.l);
   }
 
 
@@ -547,11 +864,16 @@
       tile.dataset.paletteId = palette.id;
       tile.style.setProperty("--pref-bg", palette.background);
       tile.style.setProperty("--pref-fg", palette.text);
+      tile.style.setProperty("--pref-link", palette.link);
+      tile.style.setProperty("--pref-selection", palette.selection);
+      tile.style.setProperty("--pref-footnote", palette.footnote);
+      tile.style.setProperty("--pref-border", palette.border);
       applyPalettePreview(tile, palette);
       tile.setAttribute("aria-label", readerPreferenceT("paletteDragHint", `${paletteLabel(palette)}，按住拖动以排序`, { name: paletteLabel(palette) }));
       const name = document.createElement("span");
       name.className = "reader-palette-name" + (isBuiltinPalette(palette) ? "" : " editable");
       name.textContent = paletteLabel(palette);
+      appendPaletteReadingPreview(tile);
       tile.append(name);
       if (!isBuiltinPalette(palette)) {
         name.title = readerPreferenceT("editPaletteName", "编辑主题名称");
@@ -628,7 +950,9 @@
     const bookScope = modal.querySelector('[data-pref-scope="book"]');
     if (bookScope) bookScope.disabled = !global.currentBookId;
     const palette = paletteForSettings(settings) || builtinPalettes[0];
-    modal.querySelectorAll("[data-pref-color]").forEach((input) => { input.value = settings[input.dataset.prefColor] || palette[colorMap[input.dataset.prefColor]]; });
+    modal.querySelectorAll("[data-pref-color]").forEach((control) => {
+      paintColorControl(control, settings[control.dataset.prefColor] || palette[colorMap[control.dataset.prefColor]]);
+    });
     const imageName = modal.querySelector("#pref-background-image-name");
     if (imageName) imageName.textContent = settings.customBackgroundImage ? readerPreferenceT("backgroundImported", "已导入图片背景") : "";
     const clearBook = modal.querySelector("#pref-clear-book-appearance");
@@ -684,9 +1008,36 @@
     try { localStorage.setItem(PREFERENCE_NAV_COLLAPSED_KEY, preferenceNavCollapsed ? "1" : "0"); } catch (_) {}
     applyPreferenceNavState();
   });
-  closeButton?.addEventListener("click", () => global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, false));
-  modal.addEventListener("click", (event) => { if (event.target === modal) global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, false); });
-  global.addEventListener("keydown", (event) => { if (event.key === "Escape" && global.ReaderShell?.isOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES)) global.ReaderShell.closeOverlay(); });
+  const preferencesOverlay = global.ReaderShell?.OVERLAY?.PREFERENCES || "preferences";
+  closeButton?.addEventListener("click", () => {
+    closeColorPopover();
+    clearReaderLayoutPreview();
+    global.ReaderShell?.setOverlay?.(preferencesOverlay, false);
+  });
+  modal.addEventListener("pointerdown", (event) => {
+    preferencesOutsidePointerDown = event.target === modal;
+  });
+  modal.addEventListener("click", (event) => {
+    if (event.target !== modal || !preferencesOutsidePointerDown) return;
+    preferencesOutsidePointerDown = false;
+    closeColorPopover();
+    global.ReaderShell?.setOverlay?.(preferencesOverlay, false);
+  });
+  global.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !global.ReaderShell?.isOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES)) return;
+    if (activeColorControl) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeColorPopover();
+      return;
+    }
+    global.ReaderShell.closeOverlay();
+  });
+  global.addEventListener("reader-shell-statechange", (event) => {
+    const preferences = global.ReaderShell?.OVERLAY?.PREFERENCES;
+    if (event.detail?.previous?.overlay !== preferences || event.detail?.next?.overlay === preferences) return;
+    clearReaderLayoutPreview();
+  });
   preferencesContent?.addEventListener("scroll", updatePreferencesScrollbar, { passive: true });
 
   preferencesScrollThumb?.addEventListener("pointerdown", (event) => {
@@ -711,7 +1062,26 @@
   if (typeof ResizeObserver === "function" && preferencesContent) new ResizeObserver(updatePreferencesScrollbar).observe(preferencesContent);
   modal.querySelectorAll("[data-pref-section]").forEach((button) => button.addEventListener("click", () => setSection(button.dataset.prefSection)));
   modal.querySelectorAll("[data-pref-scope]").forEach((button) => button.addEventListener("click", () => { if (!button.disabled) { scope = button.dataset.prefScope; render(); } }));
-  modal.querySelectorAll("[data-pref-color]").forEach((input) => input.addEventListener("input", () => updateAppearance({ backgroundPreset: "custom", customPaletteId: "", theme: read().theme, [input.dataset.prefColor]: input.value })));
+  const colorPopover = document.getElementById("reader-color-popover");
+  modal.querySelectorAll("[data-pref-color]").forEach((control) => control.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (activeColorControl === control && colorPopover && !colorPopover.hidden) closeColorPopover();
+    else openColorPopover(control);
+  }));
+  colorPopover?.querySelectorAll("[data-pref-color-swatch]").forEach((button) => {
+    paintColorPreset(button);
+    button.addEventListener("click", () => setActiveColor(button.dataset.prefColorSwatch));
+  });
+  const colorHue = document.getElementById("reader-color-hue");
+  const colorSaturation = document.getElementById("reader-color-saturation");
+  const colorLightness = document.getElementById("reader-color-lightness");
+  [colorHue, colorSaturation, colorLightness].forEach((input) => input?.addEventListener("input", () => setActiveColor(hslToHex(colorHue?.value, colorSaturation?.value, colorLightness?.value))));
+  document.getElementById("reader-color-hex")?.addEventListener("change", (event) => setActiveColor(event.target.value));
+  document.addEventListener("pointerdown", (event) => {
+    if (!activeColorControl || colorPopover?.contains(event.target) || activeColorControl.contains(event.target)) return;
+    closeColorPopover();
+  }, true);
   document.getElementById("pref-background-image")?.addEventListener("change", (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -723,23 +1093,39 @@ reader.onload = async () => {
       try {
         const asset = typeof invoke === "function" ? await invoke("cache_reader_background_image", { dataUrl: source }) : null;
         if (!asset?.url || !asset?.assetId) throw new Error("cache unavailable");
-        updateAppearance({ backgroundPreset: "custom", customPaletteId: "", theme: read().theme, customBackgroundImage: asset.url, customBackgroundAssetId: asset.assetId, customBackgroundAssetSha256: asset.sha256, customBackgroundAssetMime: asset.mime, customBackgroundAssetBytes: asset.byteSize });
+        updateAutomaticPreviewTheme({ customBackgroundImage: asset.url, customBackgroundAssetId: asset.assetId, customBackgroundAssetSha256: asset.sha256, customBackgroundAssetMime: asset.mime, customBackgroundAssetBytes: asset.byteSize });
         if (status) status.textContent = file.name;
       } catch (_) { if (status) status.textContent = readerPreferenceT("backgroundImageImportFailed", "背景图片导入失败"); }
       event.target.value = "";
     };
     reader.readAsDataURL(file);
   });
-  document.getElementById("pref-clear-background-image")?.addEventListener("click", () => updateAppearance({ customBackgroundImage: "", customBackgroundAssetId: "", customBackgroundAssetSha256: "", customBackgroundAssetMime: "", customBackgroundAssetBytes: 0 }));
+  document.getElementById("pref-clear-background-image")?.addEventListener("click", () => updateAutomaticPreviewTheme({ customBackgroundImage: "", customBackgroundAssetId: "", customBackgroundAssetSha256: "", customBackgroundAssetMime: "", customBackgroundAssetBytes: 0 }));
   document.getElementById("pref-add-palette")?.addEventListener("click", addCurrentPalette);
   modal.querySelectorAll("[data-image-pagination]").forEach((button) => button.addEventListener("click", () => {
-    global.ReaderSettings.update({ imagePagination: button.dataset.imagePagination === "continuous" ? "continuous" : "next-page" });
+    const imagePagination = button.dataset.imagePagination === "continuous" ? "continuous" : "next-page";
+    global.ReaderSettings.update({ imagePagination });
   }));
   document.getElementById("pref-dual-page-gap")?.addEventListener("input", (event) => {
     const value = dualPageGapPixels(event.target.value);
     const output = document.getElementById("pref-dual-page-gap-value");
     if (output) output.textContent = `${value} px`;
+    global.ReaderSettings.update({ dualPageGap: value }, { deferPageApply: true });
+    previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "adjusting" });
+  });
+  document.getElementById("pref-dual-page-gap")?.addEventListener("change", (event) => {
+    const value = dualPageGapPixels(event.target.value);
+    global.ReaderSettings.applyDeferredSettings?.();
+    previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "finished" });
+  });
+  document.getElementById("pref-dual-page-gap-reset")?.addEventListener("click", () => {
+    const value = DEFAULT_DUAL_PAGE_GAP;
+    const input = document.getElementById("pref-dual-page-gap");
+    const output = document.getElementById("pref-dual-page-gap-value");
+    if (input) input.value = String(value);
+    if (output) output.textContent = `${value} px`;
     global.ReaderSettings.update({ dualPageGap: value });
+    previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "finished" });
   });
   function setReaderJumpBackConfigExpanded(expanded) {
     const config = document.getElementById("pref-reader-jump-back-config");

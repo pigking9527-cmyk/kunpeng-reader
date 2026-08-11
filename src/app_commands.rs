@@ -97,7 +97,7 @@ pub(crate) fn save_download_image(name: String, data_url: String) -> Result<Stri
 }
 
 const PROBLEM_TRACE_WINDOW_MS: u64 = 2 * 60 * 1000;
-const PROBLEM_TRACE_MAX_BYTES: usize = 256 * 1024;
+const PROBLEM_TRACE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 fn validate_problem_trace_checkpoint(snapshot: &serde_json::Value) -> Result<(), String> {
     let object = snapshot
@@ -113,7 +113,7 @@ fn validate_problem_trace_checkpoint(snapshot: &serde_json::Value) -> Result<(),
     }
     let bytes = serde_json::to_vec(snapshot).map_err(|_| "问题记录数据格式不正确".to_string())?;
     if bytes.is_empty() || bytes.len() > PROBLEM_TRACE_MAX_BYTES {
-        return Err("问题记录超过 256 KB，无法缓存".to_string());
+        return Err("问题记录超过 4 MB，无法缓存".to_string());
     }
     Ok(())
 }
@@ -154,13 +154,13 @@ pub(crate) fn save_problem_trace_to_desktop(name: String, data: String) -> Resul
     use base64::Engine;
 
     if data.len() > PROBLEM_TRACE_MAX_BYTES.saturating_mul(2) {
-        return Err("问题记录超过 256 KB，无法保存".to_string());
+        return Err("问题记录超过 4 MB，无法保存".to_string());
     }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .map_err(|_| "问题记录数据格式不正确".to_string())?;
     if bytes.is_empty() || bytes.len() > PROBLEM_TRACE_MAX_BYTES {
-        return Err("问题记录超过 256 KB，无法保存".to_string());
+        return Err("问题记录超过 4 MB，无法保存".to_string());
     }
     serde_json::from_slice::<serde_json::Value>(&bytes)
         .map_err(|_| "问题记录不是有效的 JSON".to_string())?;
@@ -358,7 +358,7 @@ pub(crate) fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub(crate) fn open_default_apps_settings() -> Result<(), String> {
+pub(crate) fn open_default_apps_settings() -> Result<String, String> {
     url_open::open_default_apps_settings()
 }
 

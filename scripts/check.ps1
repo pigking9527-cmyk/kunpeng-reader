@@ -40,18 +40,40 @@ try {
     throw 'Node.js not found: cannot run JavaScript syntax checks.'
   }
 
+  Write-Host '== frontend TypeScript lint =='
+  Invoke-NativeCheck 'frontend TypeScript lint' { npm run lint }
+
+  Write-Host '== frontend TypeScript typecheck =='
+  Invoke-NativeCheck 'frontend TypeScript typecheck' { npm run typecheck }
+
   Write-Host '== node --check =='
   $jsFiles = Get-ChildItem -LiteralPath 'ui' -Filter '*.js' -File -Recurse |
     Where-Object { $_.FullName -notlike "*\ui\pdfjs\*" } |
     Sort-Object FullName
   foreach ($file in $jsFiles) {
-    Invoke-NativeCheck "node --check $($file.FullName)" { node --check $file.FullName }
+    if ($file.Name -eq 'pdfview.js') {
+      # ui/package.json deliberately keeps legacy scripts CommonJS-shaped for
+      # their Node tests. pdfview.js is the one native browser ES module, so
+      # validate its source through module-mode stdin instead of misparsing it
+      # as a CommonJS file.
+      Invoke-NativeCheck "node --check (module) $($file.FullName)" {
+        Get-Content -LiteralPath $file.FullName -Raw | node --input-type=module --check
+      }
+    } else {
+      Invoke-NativeCheck "node --check $($file.FullName)" { node --check $file.FullName }
+    }
   }
 
   Write-Host '== frontend behavior tests =='
-  Invoke-NativeCheck 'frontend behavior tests' { node --test 'ui/tests/*.test.cjs' }
+  Invoke-NativeCheck 'frontend behavior tests' { npm run test:legacy-ui }
 
-  if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+  $python = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $python) {
+    # macOS and many Linux distributions install Python 3 without a `python`
+    # alias. The sync suite is identical in either case.
+    $python = Get-Command python3 -ErrorAction SilentlyContinue
+  }
+  if (-not $python) {
     throw 'Python not found: cannot run sync server tests.'
   }
   Write-Host '== sync server tests =='
@@ -59,7 +81,7 @@ try {
   $env:PYTHONDONTWRITEBYTECODE = '1'
   Push-Location (Join-Path $repo 'server\reader-sync-api')
   try {
-    Invoke-NativeCheck 'sync server tests' { python -m unittest -v test_app.py test_backup_recovery.py }
+    Invoke-NativeCheck 'sync server tests' { & $python.Source -m unittest -v test_app.py test_backup_recovery.py }
   } finally {
     Pop-Location
     $env:PYTHONDONTWRITEBYTECODE = $previousNoBytecode
@@ -164,17 +186,18 @@ try {
   Write-Host '== UTF-8 strict check =='
   $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
   $extensions = @('.rs', '.js', '.html', '.css', '.json', '.toml', '.md', '.ps1')
-  $skipParts = @('\.git\', '\target\', '\ui\pdfjs\')
   $bad = New-Object System.Collections.Generic.List[string]
   Get-ChildItem -LiteralPath $repo -Recurse -File | Where-Object {
     $path = $_.FullName
+    $normalizedPath = $path.Replace('\', '/')
     ($extensions -contains $_.Extension.ToLowerInvariant()) -and
-    -not ($skipParts | Where-Object { $path -like "*$_*" })
+    $normalizedPath -notmatch '/(\.git|target|node_modules|ui/pdfjs)/'
   } | ForEach-Object {
+    $file = $_
     try {
-      [void]$utf8.GetString([System.IO.File]::ReadAllBytes($_.FullName))
+      [void]$utf8.GetString([System.IO.File]::ReadAllBytes($file.FullName))
     } catch {
-      $bad.Add($_.FullName)
+      $bad.Add($file.FullName)
     }
   }
   if ($bad.Count) {
