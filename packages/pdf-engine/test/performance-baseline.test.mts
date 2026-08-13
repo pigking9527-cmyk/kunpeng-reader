@@ -21,6 +21,37 @@ function expect(condition: unknown, description: string): asserts condition {
   if (!condition) throw new Error(description);
 }
 
+class CountingAbortSignal {
+  public aborted = false;
+  private readonly listeners = new Set<() => void>();
+
+  public addEventListener(type: string, listener: () => void): void {
+    if (type === "abort") this.listeners.add(listener);
+  }
+
+  public removeEventListener(type: string, listener: () => void): void {
+    if (type === "abort") this.listeners.delete(listener);
+  }
+
+  public get listenerCount(): number {
+    return this.listeners.size;
+  }
+
+  public abort(): void {
+    if (this.aborted) return;
+    this.aborted = true;
+    for (const listener of [...this.listeners]) listener();
+  }
+
+  public asAbortSignal(): AbortSignal {
+    return this as unknown as AbortSignal;
+  }
+}
+
+function currentAbortListenerCount(signal: CountingAbortSignal): number {
+  return signal.listenerCount;
+}
+
 function measureBatch(label: string, run: () => void): void {
   const heapBefore = process.memoryUsage().heapUsed;
   const start = performance.now();
@@ -282,6 +313,103 @@ expect(activeSurfaceClearCount >= 2, "open and close both clear the imperative s
 expect(!closedDiagnostics.hasActiveDocument && !closedDiagnostics.hasLoadingTask, "close releases active document ownership");
 await activeDocumentPort.dispose();
 expect(activeSurfaceUnmountCount === 1, "disposing a closed port unmounts its surface exactly once");
+
+const externalAbortPort = createPdfRendererPort({
+  resolver: { async resolve(): Promise<typeof resolvedBytes> { return resolvedBytes; } },
+  loader: {
+    getDocument() {
+      return {
+        promise: Promise.resolve({ numPages: 1, destroy: (): void => {} }),
+        destroy(): void {},
+      };
+    },
+  },
+  surface: {
+    mount(): void {},
+    async render(): Promise<{ readonly width: number; readonly height: number }> { return { width: 1, height: 1 }; },
+    clear(): void {},
+    unmount(): void {},
+  },
+});
+const reusedHostSignal = new CountingAbortSignal();
+const externalAbortOperation = createPdfOperationId("external-abort-open");
+await externalAbortPort.open({ documentId, operationId: externalAbortOperation, initialPage: 1 }, reusedHostSignal.asAbortSignal());
+expect(reusedHostSignal.listenerCount === 0, "a settled open detaches the host abort listener");
+await externalAbortPort.renderPage({
+  documentId,
+  operationId: createPdfOperationId("external-abort-render"),
+  page: 1,
+  scale: 1,
+  rotation: 0,
+}, reusedHostSignal.asAbortSignal());
+expect(reusedHostSignal.listenerCount === 0, "a settled render detaches the host abort listener");
+const replacementSignal = new CountingAbortSignal();
+const replacementOperation = createPdfOperationId("external-abort-replacement");
+const firstRender = externalAbortPort.renderPage({
+  documentId,
+  operationId: replacementOperation,
+  page: 1,
+  scale: 1,
+  rotation: 0,
+}, replacementSignal.asAbortSignal());
+const secondRender = externalAbortPort.renderPage({
+  documentId,
+  operationId: replacementOperation,
+  page: 1,
+  scale: 1,
+  rotation: 0,
+}, replacementSignal.asAbortSignal());
+await Promise.all([firstRender, secondRender]);
+expect(replacementSignal.listenerCount === 0, "replacing an operation detaches both host abort listeners");
+await externalAbortPort.dispose();
+expect(externalAbortPort.diagnostics.activeOperationCount === 0, "external abort cleanup leaves no active operation");
+
+let markDelayedRenderStarted: () => void = (): void => {};
+const delayedRenderStarted = new Promise<void>((resolve) => { markDelayedRenderStarted = resolve; });
+let finishDelayedRender: () => void = (): void => {};
+const delayedRenderFinished = new Promise<void>((resolve) => { finishDelayedRender = resolve; });
+const closingExternalAbortPort = createPdfRendererPort({
+  resolver: { async resolve(): Promise<typeof resolvedBytes> { return resolvedBytes; } },
+  loader: {
+    getDocument() {
+      return {
+        promise: Promise.resolve({ numPages: 1, destroy: (): void => {} }),
+        destroy(): void {},
+      };
+    },
+  },
+  surface: {
+    mount(): void {},
+    async render(): Promise<{ readonly width: number; readonly height: number }> {
+      markDelayedRenderStarted();
+      await delayedRenderFinished;
+      return { width: 1, height: 1 };
+    },
+    clear(): void {},
+    unmount(): void {},
+  },
+});
+await closingExternalAbortPort.open({
+  documentId,
+  operationId: createPdfOperationId("external-abort-close-open"),
+  initialPage: 1,
+});
+const closingSignal = new CountingAbortSignal();
+const closingRender = closingExternalAbortPort.renderPage({
+  documentId,
+  operationId: createPdfOperationId("external-abort-close-render"),
+  page: 1,
+  scale: 1,
+  rotation: 0,
+}, closingSignal.asAbortSignal());
+await delayedRenderStarted;
+expect(closingSignal.listenerCount === 1, "a pending render retains exactly one host abort listener");
+await closingExternalAbortPort.close();
+const listenerCountAfterClose = currentAbortListenerCount(closingSignal);
+expect(listenerCountAfterClose === 0, "close detaches a pending render host abort listener");
+finishDelayedRender();
+await closingRender;
+await closingExternalAbortPort.dispose();
 
 const lifecycleMilliseconds = performance.now() - lifecycleStart;
 expect(lifecycleMilliseconds < MAX_BATCH_MILLISECONDS, `cancel/cleanup exceeded ${MAX_BATCH_MILLISECONDS}ms`);

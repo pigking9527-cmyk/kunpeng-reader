@@ -506,6 +506,7 @@ export function createPdfRendererPort<TDocument extends PdfJsDocument>(
 class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfRendererPort {
   private readonly listeners = new Set<(event: PdfRendererEvent) => void>();
   private readonly controllers = new Map<PdfOperationId, AbortController>();
+  private readonly externalAbortDetachers = new WeakMap<AbortController, () => void>();
   private lifecycleValue: PdfRendererLifecycle = { state: "idle" };
   private documentValue: { readonly id: PdfDocumentId; readonly document: TDocument } | null = null;
   private loadingTask: PdfJsLoadingTask<TDocument> | null = null;
@@ -647,12 +648,18 @@ class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfR
   }
 
   public cancel(operationId: PdfOperationId): void {
-    this.controllers.get(operationId)?.abort();
+    const controller = this.controllers.get(operationId);
+    if (controller === undefined) return;
+    this.detachExternalAbort(controller);
+    controller.abort();
   }
 
   public async close(): Promise<void> {
     ++this.epoch;
-    for (const controller of this.controllers.values()) controller.abort();
+    for (const controller of this.controllers.values()) {
+      this.detachExternalAbort(controller);
+      controller.abort();
+    }
     this.controllers.clear();
     if (this.loadingTask !== null) {
       await this.destroyLoadingTask(this.loadingTask);
@@ -681,16 +688,33 @@ class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfR
   private beginOperation(operationId: PdfOperationId, externalSignal?: AbortSignal): AbortController {
     this.cancel(operationId);
     const controller = new AbortController();
+    let detachExternalAbort = (): void => {};
     if (externalSignal !== undefined) {
       if (externalSignal.aborted) controller.abort();
-      else externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
+      else {
+        const abortFromHost = (): void => controller.abort();
+        externalSignal.addEventListener("abort", abortFromHost, { once: true });
+        let detached = false;
+        detachExternalAbort = (): void => {
+          if (detached) return;
+          detached = true;
+          externalSignal.removeEventListener("abort", abortFromHost);
+        };
+      }
     }
+    this.externalAbortDetachers.set(controller, detachExternalAbort);
     this.controllers.set(operationId, controller);
     return controller;
   }
 
   private endOperation(operationId: PdfOperationId, controller: AbortController): void {
     if (this.controllers.get(operationId) === controller) this.controllers.delete(operationId);
+    this.detachExternalAbort(controller);
+  }
+
+  private detachExternalAbort(controller: AbortController): void {
+    this.externalAbortDetachers.get(controller)?.();
+    this.externalAbortDetachers.delete(controller);
   }
 
   /**
