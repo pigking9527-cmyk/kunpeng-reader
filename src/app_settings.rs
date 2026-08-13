@@ -38,6 +38,8 @@ pub(crate) struct AppSettingsSyncRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reader_jump_back_position_y: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    epub_layout_engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     news_source_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     news_tieba_bars: Option<Vec<String>>,
@@ -76,6 +78,7 @@ struct AppSettings {
     reader_jump_back_icon_size_px: u8,
     reader_jump_back_position_x: u16,
     reader_jump_back_position_y: u16,
+    epub_layout_engine: String,
     news_source_ids: Vec<String>,
     news_tieba_bars: Vec<String>,
     news_enabled_tieba_bars: Vec<String>,
@@ -102,6 +105,7 @@ impl Default for AppSettings {
             reader_jump_back_icon_size_px: 32,
             reader_jump_back_position_x: 950,
             reader_jump_back_position_y: 500,
+            epub_layout_engine: "legacy".into(),
             news_source_ids: Vec::new(),
             news_tieba_bars: Vec::new(),
             news_enabled_tieba_bars: Vec::new(),
@@ -137,6 +141,7 @@ pub(crate) struct AppSettingsSyncSnapshot {
     reader_jump_back_icon_size_px: u8,
     reader_jump_back_position_x: u16,
     reader_jump_back_position_y: u16,
+    epub_layout_engine: String,
     has_news_source_settings: bool,
     news_source_ids: Vec<String>,
     news_tieba_bars: Vec<String>,
@@ -182,6 +187,13 @@ fn normalize_patch(mut request: AppSettingsSyncRequest) -> AppSettingsSyncReques
     }
     if let Some(position) = request.reader_jump_back_position_y.as_mut() {
         *position = (*position).clamp(0, 1000);
+    }
+    if let Some(engine) = request.epub_layout_engine.as_mut() {
+        *engine = if engine == "modern" {
+            "modern".into()
+        } else {
+            "legacy".into()
+        };
     }
     if let Some(ids) = request.news_source_ids.take() {
         request.news_source_ids = Some(clipped_unique(ids, MAX_NEWS_SOURCES, 64, false));
@@ -255,6 +267,9 @@ fn apply_patch(settings: &mut AppSettings, request: AppSettingsSyncRequest) {
     }
     if let Some(value) = request.reader_jump_back_position_y {
         settings.reader_jump_back_position_y = value;
+    }
+    if let Some(value) = request.epub_layout_engine {
+        settings.epub_layout_engine = value;
     }
     if let Some(value) = request.news_source_ids {
         settings.news_source_ids = value;
@@ -333,6 +348,7 @@ fn snapshot(value: Option<&Value>) -> AppSettingsSyncSnapshot {
         reader_jump_back_icon_size_px: settings.reader_jump_back_icon_size_px,
         reader_jump_back_position_x: settings.reader_jump_back_position_x,
         reader_jump_back_position_y: settings.reader_jump_back_position_y,
+        epub_layout_engine: settings.epub_layout_engine,
         has_news_source_settings: has_any(
             value,
             &["newsSourceIds", "newsTiebaBars", "newsEnabledTiebaBars"],
@@ -459,6 +475,10 @@ fn merge_payload(existing: Option<Value>, request: AppSettingsSyncRequest) -> Va
     object.insert(
         "readerJumpBackPositionY".into(),
         json!(settings.reader_jump_back_position_y),
+    );
+    object.insert(
+        "epubLayoutEngine".into(),
+        json!(settings.epub_layout_engine),
     );
     if has_news_settings {
         object.insert("newsSourceIds".into(), json!(settings.news_source_ids));
@@ -848,5 +868,34 @@ mod tests {
             snapshot.reader_layout_settings.unwrap()["textConversion"],
             "s2t"
         );
+    }
+
+    #[test]
+    fn epub_layout_engine_defaults_to_legacy_and_preserves_unknown_fields() {
+        let legacy = snapshot(Some(&json!({
+            "version": 1,
+            "showReaderJumpBack": true,
+            "futureDesktopSetting": "keep"
+        })));
+        assert_eq!(legacy.epub_layout_engine, "legacy");
+
+        let payload = merge_payload(
+            Some(json!({"version": 1, "futureDesktopSetting": "keep"})),
+            AppSettingsSyncRequest {
+                epub_layout_engine: Some("modern".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(payload["epubLayoutEngine"], "modern");
+        assert_eq!(payload["futureDesktopSetting"], "keep");
+
+        let invalid = merge_payload(
+            Some(payload),
+            AppSettingsSyncRequest {
+                epub_layout_engine: Some("future-engine".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(invalid["epubLayoutEngine"], "legacy");
     }
 }

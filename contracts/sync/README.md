@@ -37,7 +37,7 @@
 - `secret_bundle_v1`：客户端加密后的 API Key/翻译凭据包；由用户设置同步密码后明确开启。
 - `reader_palette_v1`：一个用户自定义阅读配色。每个主题单独使用 LWW 与删除墓碑同步，最多 10 个活跃主题；新客户端只保存 `backgroundAssetId`、SHA-256、MIME 与字节数，二进制图片通过认证的 `/v1/sync/assets/*` 分块通道传输并缓存为本机 reader 资源。`backgroundImage` data URL 仅为旧客户端迁移期的可读兼容字段；新客户端不得写入、不得放进阅读 URL、postMessage 或动态 CSS。默认主题不作为实体上传。
 - `reader_palette_order_v1/default`：用户主题顺序。它仅保存当前默认主题与自定义主题的稳定 ID 排列；未知 ID 必须忽略。
-- `app_settings_v1/default`：Windows、Linux、macOS 共用的账户级非敏感软件设置。跳转回退图标只使用 30–160 px（步进 1）的整数 `readerJumpBackIconSizePx`，位置 `readerJumpBackPositionX/Y` 为 0–1000 的图标左上角可见轨道比例；`readerJumpBackSizeLevel` 已由协议 v5 永久退役，出现该字段或缺失像素字段的 payload 均不得进入 v5 同步。其余资讯、书库问答、菜单栏、手势和全局阅读排版字段保持本段既有边界；已知字段按字段补丁合并并保留未来未知字段，但“保留未知字段”不适用于已退役的大小级别字段。首次接入账户时，云端的该实体优先于 WebView 启动期写入的本机默认值。完整断代、切换与回滚条件见 ADR-0031。
+- `app_settings_v1/default`：Windows、Linux、macOS 共用的账户级非敏感软件设置。`epubLayoutEngine` 可选值为 `legacy` / `modern`，缺失或非法时按 `legacy` 处理，仅影响 EPUB，详见 ADR-0033。跳转回退图标只使用 30–160 px（步进 1）的整数 `readerJumpBackIconSizePx`，位置 `readerJumpBackPositionX/Y` 为 0–1000 的图标左上角可见轨道比例；`readerJumpBackSizeLevel` 已由协议 v5 永久退役，出现该字段或缺失像素字段的 payload 均不得进入 v5 同步。其余资讯、书库问答、菜单栏、手势和全局阅读排版字段保持本段既有边界；已知字段按字段补丁合并并保留未来未知字段，但“保留未知字段”不适用于已退役的大小级别字段。首次接入账户时，云端的该实体优先于 WebView 启动期写入的本机默认值。完整断代、切换与回滚条件见 ADR-0031。
 
 ## 账户同步准入与资源预算
 

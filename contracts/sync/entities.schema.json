@@ -116,6 +116,7 @@
         "readerJumpBackIconSizePx": { "description": "Canonical icon size in pixels.", "type": "integer", "minimum": 30, "maximum": 160 },
         "readerJumpBackPositionX": { "description": "Horizontal icon position in thousandths of the visible reader track; 0 is left and 1000 is right.", "type": "integer", "minimum": 0, "maximum": 1000 },
         "readerJumpBackPositionY": { "description": "Vertical icon position in thousandths of the visible reader track; 0 is top and 1000 is bottom.", "type": "integer", "minimum": 0, "maximum": 1000 },
+        "epubLayoutEngine": { "description": "EPUB layout strategy. Missing values are treated as legacy by clients; PDF ignores this setting.", "enum": ["legacy", "modern"] },
         "newsSourceIds": { "type": "array", "minItems": 1, "maxItems": 24, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
         "newsTiebaBars": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 48 } },
         "newsEnabledTiebaBars": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 48 } },

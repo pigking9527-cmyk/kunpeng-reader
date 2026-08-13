@@ -66,6 +66,7 @@
           "pageTurnSpeed": 1,
           "imagePagination": "next-page"
         },
+        "epubLayoutEngine": "modern",
         "futureDesktopSetting": "preserve-me"
       }
     }
