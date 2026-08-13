@@ -16,8 +16,9 @@
    `server/reader-sync-api-rs/scripts/check-deployment-config.sh`。它只解析配置，不连接
    数据库、不绑定端口，也不会回显连接串或密钥。
 7. 在上传二进制前，使用 `create-artifact-provenance.sh` 为已提交、干净的服务 checkout 创建
-   并复验本地 SHA-256 溯源清单。它必须同时匹配源提交/树、`Cargo.lock`、全部 migration 和
-   待上传二进制；未跟踪或有未提交改动的服务目录会被拒绝，不能将该构建用于部署。
+   并复验本地 SHA-256 溯源清单。它必须同时匹配源提交/树、`Cargo.lock`、编译期 v5
+   entity fixture、全部 migration 和待上传二进制；未跟踪或有未提交改动的服务目录或 fixture
+   会被拒绝，不能将该构建用于部署。
 
 ## 运行边界
 

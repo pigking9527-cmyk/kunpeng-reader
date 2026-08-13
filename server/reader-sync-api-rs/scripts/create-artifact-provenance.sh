@@ -96,14 +96,28 @@ service_relative=$(git -C "$service_dir" rev-parse --show-prefix 2>/dev/null) ||
 service_relative=${service_relative%/}
 [[ -n "$service_relative" ]] || fail 'refusing to use the repository root as a service directory'
 
+# The service deliberately compiles the v5 envelope fixture into its test suite.
+# Treat that repository-level contract input as release material too: otherwise a
+# clean service subtree could be paired with a changed fixture and falsely pass
+# the provenance check.
+fixture_relative='contracts/fixtures/api-v5-entity-envelope.json'
+fixture_path="$repo_root/$fixture_relative"
+[[ -f "$fixture_path" ]] || fail 'required v5 contract fixture is missing'
+
 # A release manifest may identify a commit only if every source input is actually represented
 # by it. Check both tracked modifications and untracked service files, including migrations.
 git -C "$repo_root" ls-files --error-unmatch -- "$service_relative/Cargo.toml" "$service_relative/Cargo.lock" >/dev/null 2>&1 \
   || fail 'service manifest inputs are not tracked by Git; commit the service source before release'
+git -C "$repo_root" ls-files --error-unmatch -- "$fixture_relative" >/dev/null 2>&1 \
+  || fail 'required v5 contract fixture is not tracked by Git'
 git -C "$repo_root" diff --quiet HEAD -- "$service_relative" \
   || fail 'service source has unstaged changes; commit or revert them before release'
 git -C "$repo_root" diff --cached --quiet HEAD -- "$service_relative" \
   || fail 'service source has staged but uncommitted changes; commit them before release'
+git -C "$repo_root" diff --quiet HEAD -- "$fixture_relative" \
+  || fail 'required v5 contract fixture has unstaged changes; commit or revert them before release'
+git -C "$repo_root" diff --cached --quiet HEAD -- "$fixture_relative" \
+  || fail 'required v5 contract fixture has staged but uncommitted changes; commit it before release'
 if [[ -n $(git -C "$repo_root" ls-files --others --exclude-standard -- "$service_relative") ]]; then
   fail 'service source has untracked files; commit or remove them before release'
 fi
@@ -136,6 +150,7 @@ done
 source_commit=$(git -C "$repo_root" rev-parse HEAD)
 source_tree=$(git -C "$repo_root" rev-parse "HEAD:$service_relative")
 cargo_lock_sha256=$(sha256_file "$service_dir/Cargo.lock")
+fixture_sha256=$(sha256_file "$fixture_path")
 binary_sha256=$(sha256_file "$binary")
 
 emit_manifest() {
@@ -144,6 +159,7 @@ emit_manifest() {
   printf 'source_commit=%s\n' "$source_commit"
   printf 'source_tree=%s\n' "$source_tree"
   printf 'cargo_lock_sha256=%s\n' "$cargo_lock_sha256"
+  printf 'contract_fixture=%s:%s\n' "$fixture_relative" "$fixture_sha256"
   printf 'migration_count=%s\n' "${#migrations[@]}"
   for migration in "${migrations[@]}"; do
     printf 'migration=%s:%s\n' "$(basename -- "$migration")" "$(sha256_file "$migration")"

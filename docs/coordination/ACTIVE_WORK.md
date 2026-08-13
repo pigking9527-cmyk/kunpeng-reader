@@ -13,6 +13,9 @@
 ## 当前占用
 
 | 会话/分支 | 任务 | 占用范围 | 状态 | 备注 |
+| /root/sqlite_next_safe | P3 实体 JSON 读取 SQL 计时补齐 | `src/db/entities.rs`、`docs/coordination/ACTIVE_WORK.md` | 进行中，未提交 | 为单条和批量实体 JSON 投影补固定、脱敏 SQL 计时与行数；不改查询语义、同步、备份、连接池或 AppState 生命周期。 |
+| /root/reader_image_overlay_fix | 爱丽丝插图翻页首帧与全局弹窗顺序修复 | `ui/{reader-page-runtime.js,overlay-stack.js,tests/{reader-large-chapter,overlay-stack}.test.cjs}`、`docs/{architecture/desktop-frontend-and-rust.md,coordination/ACTIVE_WORK.md}` | 进行中，未提交 | 保留现有分页/叠层拆分，只修复程序化翻页后需轻触才刷新的媒体合成，以及跨页面新弹窗应高于当前操作窗的全局打开顺序。 |
+| /root | P5 v5 发布清单跨目录 fixture 完整性 | `server/reader-sync-api-rs/{scripts,README.md,DEPLOYMENT.md}`、`docs/coordination/ACTIVE_WORK.md` | 已完成，未提交 | 编译期引入的 v5 契约 fixture 已纳入发布清单的 Git 清洁度与 SHA-256 复验，避免服务目录之外的输入漂移；自测覆盖 fixture 漂移拒绝。未连接服务器、数据库或 SMTP。 |
 | /root | P5 v5 服务 Linux 可复现构建产物 | `.github/workflows/sync-api-v5.yml`、`docs/coordination/ACTIVE_WORK.md` | 已完成，已提交 | CI 现以 Rust 1.97.1 在 Ubuntu 24.04 锁定构建服务端，运行格式、测试、Clippy、迁移/演练工具，并上传通过源码/二进制/迁移/Cargo.lock 复验的 Linux x86_64 候选产物；不连接服务器、数据库或 SMTP，不配置反代或切流。提交 `17261520`。 |
 | --- | --- | --- | --- | --- |
 | /root/reader_annotation_rules | P1 阅读页高亮菜单纯矩形规则拆分 | `ui/{reader-page-annotations.js,reader-page-highlight-rules.js,tests/{reader-page-modules,reader-toolbar}.test.cjs}`、`src/reader_page.rs`、`ui/tests/governance.test.cjs`、`docs/coordination/ACTIVE_WORK.md` | 已完成，未提交 | 已将高亮矩形包络、指针最近命中、同页行分组及跨页/末行菜单锚点移至冻结、无 DOM/存储/IPC 依赖的编译期规则脚本；批注渲染、选区、分页、事件、IPC 和 EPUB/PDF 命令式阅读引擎留在原模块。定向 157 项与全量 409 项 Legacy UI、`cargo test reader_page` 和差异检查通过；全仓 rustfmt 仅被任务外正在修改的 update 模块差异阻断。 |
