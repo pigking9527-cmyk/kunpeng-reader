@@ -16,6 +16,7 @@ const backend = fs.readFileSync(path.join(ui, "..", "src", "ai_reader.rs"), "utf
 const backendModules = [
   backend,
   fs.readFileSync(path.join(ui, "..", "src", "ai_reader", "profiles.rs"), "utf8"),
+  fs.readFileSync(path.join(ui, "..", "src", "ai_reader", "library_profiles.rs"), "utf8"),
   fs.readFileSync(path.join(ui, "..", "src", "ai_reader", "provider.rs"), "utf8"),
   fs.readFileSync(path.join(ui, "..", "src", "ai_reader", "retrieval.rs"), "utf8"),
 ].join("\n");
@@ -231,7 +232,7 @@ test("library assistant classifies model tags with progress and can use them ind
   assert.match(backend, /LIBRARY_WEB_LOOKUP_DELAY/);
   assert.match(backend, /PendingLibraryWebClassification/);
   assert.match(backend, /LIBRARY_PROFILE_DIMENSIONS/);
-  assert.match(backend, /profile_has_all_dimensions/);
+  assert.match(backendModules, /profile_has_all_dimensions/);
   assert.match(backend, /profile_is_settled/);
   assert.match(backend, /library_classification_checkpoint/);
   assert.match(backend, /enqueue_or_resume/);

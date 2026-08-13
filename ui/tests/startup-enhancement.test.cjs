@@ -18,6 +18,7 @@ const startup = read("src", "startup.rs");
 const enhancement = read("src", "startup_enhancement.rs");
 const windowCommands = read("src", "window_commands.rs");
 const tasks = read("src", "background_tasks.rs");
+const taskPolicy = read("src", "background_tasks", "task_policy.rs");
 const problemTrace = read("ui", "problem-trace-ui.js");
 
 test("common settings expose startup boost with a gear and master switch", () => {
@@ -272,7 +273,7 @@ test("closing pauses high-cost work by default and can explicitly allow it", () 
     "CoverGeneration",
     "LibraryClassification",
   ]) {
-    assert.match(tasks, new RegExp(`Self::${kind}`));
+    assert.match(`${tasks}\n${taskPolicy}`, new RegExp(`Self::${kind}`));
   }
   assert.match(
     app,
