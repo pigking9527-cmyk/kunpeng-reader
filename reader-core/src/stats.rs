@@ -201,3 +201,96 @@ pub fn aggregate_stats_range(
         total_notes,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book(id: u64, title: &str, progress: f32) -> BookStatInput {
+        BookStatInput {
+            id,
+            title: title.to_string(),
+            cover: None,
+            reading_seconds: 0,
+            words_read: 0,
+            progress,
+            finished_day: 0,
+            highlights: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn summary_counts_started_finished_time_and_words() {
+        let mut a = book(1, "a", 0.0);
+        a.reading_seconds = 10;
+        a.words_read = 100;
+        let mut b = book(2, "b", 50.0);
+        b.reading_seconds = 20;
+        b.words_read = 200;
+        let mut c = book(3, "c", 99.0);
+        c.reading_seconds = 30;
+        c.words_read = 300;
+
+        let summary = summarize_books(&[a, b, c]);
+        assert_eq!(summary.total_books, 3);
+        assert_eq!(summary.total_seconds, 60);
+        assert_eq!(summary.total_words, 600);
+        assert_eq!(summary.started, 2);
+        assert_eq!(summary.finished, 1);
+    }
+
+    #[test]
+    fn aggregate_range_filters_days_and_fills_hours_books_days() {
+        let mut buckets = HashMap::new();
+        buckets.insert((20260701, 1, 1), (30, 300));
+        buckets.insert((20260701, 25, 2), (40, 400));
+        buckets.insert((20260703, 2, 1), (50, 500));
+        let books = vec![book(1, "alpha", 10.0), book(2, "beta", 20.0)];
+
+        let range = aggregate_stats_range(&buckets, &books, 20260701, 20260702);
+        assert_eq!(range.total_seconds, 70);
+        assert_eq!(range.total_words, 700);
+        assert_eq!(range.hours[1], 30);
+        assert_eq!(range.hours[23], 40);
+        assert_eq!(
+            range.days,
+            vec![DayStat {
+                day: 20260701,
+                seconds: 70,
+                words: 700
+            }]
+        );
+        assert_eq!(range.books[0].title, "beta");
+        assert_eq!(range.books[1].title, "alpha");
+    }
+
+    #[test]
+    fn aggregate_range_counts_highlights_notes_and_finished_books() {
+        let mut buckets = HashMap::new();
+        buckets.insert((20260702, 3, 1), (60, 600));
+        let mut b = book(1, "done", 100.0);
+        b.finished_day = 20260702;
+        b.highlights = vec![
+            HighlightStatInput {
+                day: 20260702,
+                has_note: false,
+            },
+            HighlightStatInput {
+                day: 20260702,
+                has_note: true,
+            },
+            HighlightStatInput {
+                day: 20260703,
+                has_note: true,
+            },
+        ];
+
+        let range = aggregate_stats_range(&buckets, &[b], 20260702, 20260702);
+        assert_eq!(range.finished_count, 1);
+        assert_eq!(range.total_highlights, 2);
+        assert_eq!(range.total_notes, 1);
+        assert!(range.finished[0].finished);
+        assert_eq!(range.books[0].highlights, 2);
+        assert_eq!(range.books[0].notes, 1);
+    }
+}

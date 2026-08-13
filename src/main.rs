@@ -53,11 +53,7 @@ mod smoke_tests;
 mod startup;
 mod startup_enhancement;
 mod stats;
-#[cfg(test)]
-mod stats_core;
 mod sync;
-#[cfg(test)]
-mod sync_core;
 mod text_chapters;
 mod translate;
 mod tts;
