@@ -7,6 +7,9 @@
 //! 取消；不应再自行选择 Tokio 或创建系统线程。
 
 mod registry;
+mod task_policy;
+
+pub use task_policy::{BackgroundTaskKind, BackgroundTaskState, TaskControlSignal, TaskProgress};
 
 use registry::{
     find_record_mut, load_persisted_registry, load_persisted_registry_classified, prune_finished,
@@ -114,94 +117,6 @@ fn shared_executor() -> Result<Arc<SharedExecutor>, String> {
         .map_err(Clone::clone)
 }
 
-/// 统一登记的长任务类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BackgroundTaskKind {
-    SemanticModel,
-    SemanticVectors,
-    Accelerator,
-    MultiProfile,
-    /// Persistent full-text/Bloom index.  It is independent of semantic
-    /// vectors and can resume at a completed-book boundary.
-    FullTextIndex,
-    /// Renderer-side whole-book page measurement, mirrored here so the task
-    /// center can expose its lifecycle consistently across platforms.
-    PageCount,
-    /// Cover extraction or thumbnail regeneration.
-    CoverGeneration,
-    /// Local, opt-in AI classification for library question-answering. The
-    /// generated profiles stay in local metadata and are only retrieval/model
-    /// hints; they never become normal shelf tags.
-    LibraryClassification,
-    Import,
-    Sync,
-}
-
-impl BackgroundTaskKind {
-    fn id_prefix(self) -> &'static str {
-        match self {
-            Self::SemanticModel => "semantic_model",
-            Self::SemanticVectors => "semantic_vectors",
-            Self::Accelerator => "accelerator",
-            Self::MultiProfile => "multi_profile",
-            Self::FullTextIndex => "full_text_index",
-            Self::PageCount => "page_count",
-            Self::CoverGeneration => "cover_generation",
-            Self::LibraryClassification => "library_classification",
-            Self::Import => "import",
-            Self::Sync => "sync",
-        }
-    }
-
-    pub(crate) fn is_high_cost(self) -> bool {
-        matches!(
-            self,
-            Self::SemanticModel
-                | Self::SemanticVectors
-                | Self::Accelerator
-                | Self::MultiProfile
-                | Self::FullTextIndex
-                | Self::PageCount
-                | Self::CoverGeneration
-                | Self::LibraryClassification
-        )
-    }
-    fn supports_resume(self) -> bool {
-        // Library classification checkpoints each completed book in SQLite and
-        // in this registry.  It is safe to reconstruct its remaining work
-        // after an application restart; treating it as unresumable caused the
-        // next click to look like a fresh 0/total pass.
-        !matches!(self, Self::Import)
-    }
-}
-
-/// 对外可见的统一任务状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BackgroundTaskState {
-    Queued,
-    Running,
-    Pausing,
-    Paused,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl BackgroundTaskState {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-
-    pub fn is_active(self) -> bool {
-        matches!(
-            self,
-            Self::Queued | Self::Running | Self::Pausing | Self::Paused
-        )
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskLogLevel {
@@ -216,22 +131,6 @@ pub struct TaskLogEntry {
     pub timestamp_ms: u64,
     pub level: TaskLogLevel,
     pub message: String,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskProgress {
-    pub done: u64,
-    pub total: u64,
-}
-
-impl TaskProgress {
-    pub fn fraction(self) -> f64 {
-        if self.total == 0 {
-            0.0
-        } else {
-            (self.done.min(self.total) as f64) / (self.total as f64)
-        }
-    }
 }
 
 /// 可直接返回给前端的只读任务快照。
@@ -264,14 +163,6 @@ impl TaskCancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.requested.load(Ordering::Acquire)
     }
-}
-
-/// 工作线程在安全边界应采取的动作。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskControlSignal {
-    Continue,
-    Pause,
-    Cancel,
 }
 
 #[derive(Clone)]
