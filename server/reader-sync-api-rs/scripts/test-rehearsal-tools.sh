@@ -26,6 +26,12 @@ expect_rejection env KUNPENG_SYNC_TEST_DATABASE_URL='postgresql://localhost/read
 expect_rejection env KUNPENG_SYNC_DATABASE_URL='' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' "$config_checker"
 expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='too-short' "$config_checker"
 expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_BIND='0.0.0.0:8788' "$config_checker"
+expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_DATABASE_MAX_CONNECTIONS=0 "$config_checker"
+expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS=0 "$config_checker"
+expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_MAX_CONCURRENT_PASSWORD_OPERATIONS=0 "$config_checker"
+expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_REQUEST_TIMEOUT_SECONDS=0 "$config_checker"
+expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_BODY_LIMIT_BYTES=0 "$config_checker"
+expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_SMTP_HOST='smtp.invalid' KUNPENG_SYNC_SMTP_FROM='noreply@example.invalid' KUNPENG_SYNC_SMTP_PORT=0 "$config_checker"
 env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' "$config_checker" >/dev/null
 "$script_dir/check-migrations.sh"
 "$artifact_provenance_checker"
