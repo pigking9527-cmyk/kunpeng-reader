@@ -1,14 +1,16 @@
 use encoding_rs::Encoding;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+mod import;
+
+use import::{decode_text, guess_lang, parse_delimited, parse_ifo, parse_json, ImportEntry};
 
 /// SQLite WAL only coordinates individual database transactions. This lock also
 /// protects the larger read/modify/write sequences (and lets backup/restore
@@ -54,15 +56,6 @@ pub struct ExternalDictHit {
     pub phonetic: String,
     pub def: String,
     pub def_en: String,
-}
-
-#[derive(Default)]
-struct ImportEntry {
-    word: String,
-    lang: String,
-    phonetic: String,
-    def: String,
-    def_en: String,
 }
 
 fn now_secs() -> i64 {
@@ -121,300 +114,11 @@ fn open_db() -> Result<Connection, String> {
 
 fn normalize_word(w: &str, lang: &str) -> String {
     let s = w.trim();
-    if lang == "en" || !has_cjk(s) {
+    if lang == "en" || !import::has_cjk(s) {
         s.to_lowercase()
     } else {
         s.to_string()
     }
-}
-
-fn has_cjk(s: &str) -> bool {
-    s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-}
-
-fn guess_lang(word: &str, explicit: &str) -> String {
-    let e = explicit.trim().to_lowercase();
-    if e.starts_with("zh") || e == "cn" || e == "chinese" || e == "中" {
-        return "zh".to_string();
-    }
-    if e.starts_with("en") || e == "english" || e == "英" {
-        return "en".to_string();
-    }
-    if has_cjk(word) {
-        "zh".to_string()
-    } else {
-        "en".to_string()
-    }
-}
-
-fn decode_text(bytes: &[u8]) -> String {
-    if bytes.starts_with(&[0xff, 0xfe]) {
-        let (s, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
-        return s.into_owned();
-    }
-    if bytes.starts_with(&[0xfe, 0xff]) {
-        let (s, _, _) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
-        return s.into_owned();
-    }
-    let mut det = chardetng::EncodingDetector::new();
-    det.feed(bytes, true);
-    let enc = det.guess(None, true);
-    let (s, _, had_err) = enc.decode(bytes);
-    if !had_err {
-        s.into_owned()
-    } else {
-        String::from_utf8_lossy(bytes).into_owned()
-    }
-}
-
-fn read_text(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|e| format!("读取词典文件失败：{e}"))?;
-    Ok(decode_text(&bytes))
-}
-
-fn split_delimited(line: &str, delim: char) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut chars = line.chars().peekable();
-    let mut quoted = false;
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            if quoted && chars.peek() == Some(&'"') {
-                cur.push('"');
-                chars.next();
-            } else {
-                quoted = !quoted;
-            }
-        } else if c == delim && !quoted {
-            out.push(cur.trim().to_string());
-            cur.clear();
-        } else {
-            cur.push(c);
-        }
-    }
-    out.push(cur.trim().to_string());
-    out
-}
-
-fn column_index(headers: &[String], names: &[&str]) -> Option<usize> {
-    headers.iter().position(|h| {
-        let k = h.trim().trim_start_matches('\u{feff}').to_lowercase();
-        names.iter().any(|n| k == *n)
-    })
-}
-
-fn parse_delimited(path: &Path, delim: char) -> Result<Vec<ImportEntry>, String> {
-    let text = read_text(path)?;
-    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let first = match lines.next() {
-        Some(v) => v,
-        None => return Ok(Vec::new()),
-    };
-    let first_cols = split_delimited(first, delim);
-    let has_header = first_cols.iter().any(|c| {
-        let k = c.trim().trim_start_matches('\u{feff}').to_lowercase();
-        matches!(
-            k.as_str(),
-            "word" | "term" | "key" | "headword" | "词" | "词条" | "definition" | "def" | "释义"
-        )
-    });
-    let (headers, rows): (Vec<String>, Vec<Vec<String>>) = if has_header {
-        let mut rows = Vec::new();
-        for line in lines {
-            rows.push(split_delimited(line, delim));
-        }
-        (first_cols, rows)
-    } else {
-        let mut rows = vec![first_cols];
-        for line in lines {
-            rows.push(split_delimited(line, delim));
-        }
-        (Vec::new(), rows)
-    };
-    let wi = if has_header {
-        column_index(&headers, &["word", "term", "key", "headword", "词", "词条"]).unwrap_or(0)
-    } else {
-        0
-    };
-    let pi = if has_header {
-        column_index(&headers, &["phonetic", "pron", "pinyin", "音标", "拼音"])
-    } else if rows.first().map(|r| r.len()).unwrap_or(0) >= 3 {
-        Some(1)
-    } else {
-        None
-    };
-    let di = if has_header {
-        column_index(
-            &headers,
-            &["def", "definition", "translation", "释义", "解释", "中文"],
-        )
-        .or(if headers.len() > 1 { Some(1) } else { None })
-    } else if rows.first().map(|r| r.len()).unwrap_or(0) >= 3 {
-        Some(2)
-    } else {
-        Some(1)
-    };
-    let dei = if has_header {
-        column_index(&headers, &["def_en", "english", "en_def", "英文", "英释"])
-    } else if rows.first().map(|r| r.len()).unwrap_or(0) >= 4 {
-        Some(3)
-    } else {
-        None
-    };
-    let li = if has_header {
-        column_index(&headers, &["lang", "language", "语言"])
-    } else {
-        None
-    };
-    let mut out = Vec::new();
-    for r in rows {
-        let word = r.get(wi).map(|s| s.trim()).unwrap_or("");
-        if word.is_empty() {
-            continue;
-        }
-        let lang = guess_lang(
-            word,
-            li.and_then(|i| r.get(i)).map(|s| s.as_str()).unwrap_or(""),
-        );
-        let def = di.and_then(|i| r.get(i)).cloned().unwrap_or_default();
-        let def_en = dei.and_then(|i| r.get(i)).cloned().unwrap_or_default();
-        if def.trim().is_empty() && def_en.trim().is_empty() {
-            continue;
-        }
-        out.push(ImportEntry {
-            word: word.to_string(),
-            lang,
-            phonetic: pi.and_then(|i| r.get(i)).cloned().unwrap_or_default(),
-            def,
-            def_en,
-        });
-    }
-    Ok(out)
-}
-
-fn parse_json(path: &Path) -> Result<Vec<ImportEntry>, String> {
-    let text = read_text(path)?;
-    let v: Value = serde_json::from_str(&text).map_err(|e| format!("JSON 词典格式错误：{e}"))?;
-    let mut out = Vec::new();
-    fn entry_from_obj(
-        o: &serde_json::Map<String, Value>,
-        fallback_word: Option<&str>,
-    ) -> Option<ImportEntry> {
-        let word = o
-            .get("word")
-            .or_else(|| o.get("term"))
-            .or_else(|| o.get("key"))
-            .and_then(|v| v.as_str())
-            .or(fallback_word)
-            .unwrap_or("")
-            .trim();
-        if word.is_empty() {
-            return None;
-        }
-        let lang_raw = o
-            .get("lang")
-            .or_else(|| o.get("language"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let lang = guess_lang(word, lang_raw);
-        let phonetic = o
-            .get("phonetic")
-            .or_else(|| o.get("pron"))
-            .or_else(|| o.get("pinyin"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let def = o
-            .get("def")
-            .or_else(|| o.get("definition"))
-            .or_else(|| o.get("translation"))
-            .or_else(|| o.get("zh"))
-            .and_then(value_to_text)
-            .unwrap_or_default();
-        let def_en = o
-            .get("def_en")
-            .or_else(|| o.get("english"))
-            .or_else(|| o.get("en"))
-            .and_then(value_to_text)
-            .unwrap_or_default();
-        if def.trim().is_empty() && def_en.trim().is_empty() {
-            return None;
-        }
-        Some(ImportEntry {
-            word: word.to_string(),
-            lang,
-            phonetic,
-            def,
-            def_en,
-        })
-    }
-    match v {
-        Value::Array(arr) => {
-            for item in arr {
-                if let Value::Object(o) = item {
-                    if let Some(e) = entry_from_obj(&o, None) {
-                        out.push(e);
-                    }
-                }
-            }
-        }
-        Value::Object(map) => {
-            if map.contains_key("entries") {
-                if let Some(Value::Array(arr)) = map.get("entries") {
-                    for item in arr {
-                        if let Value::Object(o) = item {
-                            if let Some(e) = entry_from_obj(o, None) {
-                                out.push(e);
-                            }
-                        }
-                    }
-                }
-            } else {
-                for (word, val) in map {
-                    match val {
-                        Value::String(s) => out.push(ImportEntry {
-                            lang: guess_lang(&word, ""),
-                            word,
-                            phonetic: String::new(),
-                            def: s,
-                            def_en: String::new(),
-                        }),
-                        Value::Object(o) => {
-                            if let Some(e) = entry_from_obj(&o, Some(&word)) {
-                                out.push(e);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(out)
-}
-
-fn value_to_text(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(a) => {
-            let parts: Vec<String> = a.iter().filter_map(value_to_text).collect();
-            Some(parts.join("\n"))
-        }
-        Value::Object(_) => Some(v.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_ifo(path: &Path) -> Result<HashMap<String, String>, String> {
-    let text = read_text(path)?;
-    let mut m = HashMap::new();
-    for line in text.lines() {
-        if let Some((k, v)) = line.split_once('=') {
-            m.insert(k.trim().to_string(), v.trim().to_string());
-        }
-    }
-    Ok(m)
 }
 
 fn parse_stardict(path: &Path) -> Result<(String, Vec<ImportEntry>), String> {
@@ -1236,7 +940,7 @@ fn lookup_unlocked(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
         Err(_) => return out,
     };
     for c in candidates {
-        let norm = normalize_word(c, if has_cjk(c) { "zh" } else { "en" });
+        let norm = normalize_word(c, if import::has_cjk(c) { "zh" } else { "en" });
         let rows = match stmt.query_map(params![norm], |r| {
             Ok(ExternalDictHit {
                 dict_id: r.get(0)?,
