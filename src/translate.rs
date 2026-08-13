@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+mod language;
+use language::{normalize_baidu_lang, normalize_common_lang, normalize_deepl_lang};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TranslateResult {
     pub ok: bool,
@@ -276,26 +279,6 @@ fn md5_hex(input: &[u8]) -> String {
     out.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn normalize_baidu_lang(lang: &str, fallback: &str) -> String {
-    let s = lang.trim();
-    if s.is_empty() || s.eq_ignore_ascii_case("system") {
-        return fallback.to_string();
-    }
-    match s.to_ascii_lowercase().as_str() {
-        "auto" => "auto".to_string(),
-        "zh" | "zh-cn" | "cn" => "zh".to_string(),
-        "zh-tw" | "cht" | "tw" => "cht".to_string(),
-        "en" | "en-us" | "en-gb" => "en".to_string(),
-        "ja" | "jp" => "jp".to_string(),
-        "ko" | "kr" => "kor".to_string(),
-        "fr" => "fra".to_string(),
-        "de" => "de".to_string(),
-        "es" => "spa".to_string(),
-        "ru" => "ru".to_string(),
-        _ => fallback.to_string(),
-    }
-}
-
 fn sha256_hex(input: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(input);
@@ -334,44 +317,6 @@ fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
-}
-
-fn normalize_common_lang(lang: &str, fallback: &str) -> String {
-    let s = lang.trim();
-    if s.is_empty() || s.eq_ignore_ascii_case("system") {
-        return fallback.to_string();
-    }
-    match s.to_ascii_lowercase().as_str() {
-        "auto" => "auto".to_string(),
-        "zh" | "zh-cn" | "cn" => "zh".to_string(),
-        "zh-tw" | "cht" | "tw" => "zh-TW".to_string(),
-        "en" | "en-us" | "en-gb" => "en".to_string(),
-        "ja" | "jp" => "ja".to_string(),
-        "ko" | "kr" => "ko".to_string(),
-        "fr" => "fr".to_string(),
-        "de" => "de".to_string(),
-        "es" => "es".to_string(),
-        "ru" => "ru".to_string(),
-        _ => fallback.to_string(),
-    }
-}
-
-fn normalize_deepl_lang(lang: &str, fallback: &str, is_target: bool) -> String {
-    let normalized = normalize_common_lang(lang, fallback);
-    match normalized.as_str() {
-        "auto" if is_target => fallback.to_string(),
-        "zh" => "ZH".to_string(),
-        "zh-TW" => "ZH-HANT".to_string(),
-        "en" if is_target => "EN-US".to_string(),
-        "en" => "EN".to_string(),
-        "ja" => "JA".to_string(),
-        "ko" => "KO".to_string(),
-        "fr" => "FR".to_string(),
-        "de" => "DE".to_string(),
-        "es" => "ES".to_string(),
-        "ru" => "RU".to_string(),
-        _ => normalized.to_ascii_uppercase(),
-    }
 }
 
 fn baidu_translate(
@@ -723,33 +668,11 @@ pub(crate) fn translate_text(
 
 #[cfg(test)]
 mod tests {
-    use super::{md5_hex, normalize_baidu_lang, normalize_common_lang, normalize_deepl_lang};
+    use super::md5_hex;
 
     #[test]
     fn md5_matches_known_vectors() {
         assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
         assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
-    }
-
-    #[test]
-    fn normalize_baidu_lang_maps_common_aliases() {
-        assert_eq!(normalize_baidu_lang("zh-CN", "en"), "zh");
-        assert_eq!(normalize_baidu_lang("ja", "zh"), "jp");
-        assert_eq!(normalize_baidu_lang("ko", "zh"), "kor");
-    }
-
-    #[test]
-    fn normalize_common_lang_maps_provider_aliases() {
-        assert_eq!(normalize_common_lang("system", "zh"), "zh");
-        assert_eq!(normalize_common_lang("zh-CN", "en"), "zh");
-        assert_eq!(normalize_common_lang("ja", "en"), "ja");
-        assert_eq!(normalize_common_lang("ko", "en"), "ko");
-    }
-
-    #[test]
-    fn normalize_deepl_target_uses_supported_locale_forms() {
-        assert_eq!(normalize_deepl_lang("zh-CN", "en", true), "ZH");
-        assert_eq!(normalize_deepl_lang("en", "zh", true), "EN-US");
-        assert_eq!(normalize_deepl_lang("ja", "en", false), "JA");
     }
 }
