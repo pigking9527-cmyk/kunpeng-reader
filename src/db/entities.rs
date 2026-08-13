@@ -138,7 +138,10 @@ impl AppDb {
     }
 
     pub fn all_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
-        self.sync_entities_where(&format!("kind IN ({ALL_SYNC_ENTITY_KINDS})"))
+        self.sync_entities_where(
+            &format!("kind IN ({ALL_SYNC_ENTITY_KINDS})"),
+            "all_sync_entities",
+        )
     }
 
     pub fn sync_entities_by_kind(&self, kind: &str) -> Result<Vec<SyncEntity>, String> {
@@ -161,6 +164,7 @@ impl AppDb {
         scope: &str,
         items: &[SyncEntity],
     ) -> Result<(), String> {
+        let started = Instant::now();
         let mut statement = connection
             .prepare(
                 "INSERT INTO sync_acknowledgements(\
@@ -173,6 +177,7 @@ impl AppDb {
                     deleted_at=excluded.deleted_at",
             )
             .map_err(|error| error.to_string())?;
+        let mut rows = 0usize;
         for item in items
             .iter()
             .filter(|item| is_supported_entity_kind(&item.kind))
@@ -188,7 +193,9 @@ impl AppDb {
                     item.deleted_at
                 ])
                 .map_err(|error| error.to_string())?;
+            rows += 1;
         }
+        log_db_operation("sync_acknowledgements_upsert", started, rows);
         Ok(())
     }
 
@@ -225,10 +232,17 @@ impl AppDb {
     /// rows because they contain machine-local paths and cover-cache paths.
     #[cfg(test)]
     pub fn dirty_sync_entities(&self) -> Result<Vec<SyncEntity>, String> {
-        self.sync_entities_where(&format!("dirty=1 AND kind IN ({ALL_SYNC_ENTITY_KINDS})"))
+        self.sync_entities_where(
+            &format!("dirty=1 AND kind IN ({ALL_SYNC_ENTITY_KINDS})"),
+            "dirty_sync_entities",
+        )
     }
 
-    fn sync_entities_where(&self, predicate: &str) -> Result<Vec<SyncEntity>, String> {
+    fn sync_entities_where(
+        &self,
+        predicate: &str,
+        operation: &'static str,
+    ) -> Result<Vec<SyncEntity>, String> {
         let started = Instant::now();
         let sql = format!(
             "SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version FROM entities WHERE {predicate} ORDER BY kind,id"
@@ -240,7 +254,7 @@ impl AppDb {
         let entities = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
-        log_db_operation("sync_entities_where", started, entities.len());
+        log_db_operation(operation, started, entities.len());
         Ok(entities)
     }
 
@@ -344,6 +358,7 @@ impl AppDb {
         items: &[SyncEntity],
         prefer_remote_app_settings: bool,
     ) -> Result<u32, String> {
+        let started = Instant::now();
         let mut count = 0u32;
         for item in items {
             if !is_supported_entity_kind(&item.kind) {
@@ -371,6 +386,11 @@ impl AppDb {
                 count += 1;
             }
         }
+        log_db_operation(
+            "sync_entities_import_batch",
+            started,
+            usize::try_from(count).unwrap_or(usize::MAX),
+        );
         Ok(count)
     }
 }
@@ -411,5 +431,59 @@ mod tests {
             .as_u64()
             .unwrap();
         assert!(after >= before.saturating_add(2));
+    }
+
+    #[test]
+    fn sync_entity_batches_record_fixed_sql_timing_labels_and_rows() {
+        let mut database = AppDb::open_in_memory_for_tests();
+        database
+            .upsert_json_batch(&[(
+                "vocab".to_string(),
+                "visible".to_string(),
+                json!({"ok": true}),
+            )])
+            .unwrap();
+        let before = serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap();
+
+        let local = database.all_sync_entities().unwrap();
+        assert_eq!(local.len(), 1);
+        let transaction = database.conn.transaction().unwrap();
+        AppDb::upsert_sync_acknowledgements(&transaction, "test-scope", &local).unwrap();
+        AppDb::import_sync_entities_in_transaction(
+            &transaction,
+            &[SyncEntity {
+                kind: "vocab".into(),
+                id: "remote".into(),
+                json: json!({"word": "remote"}),
+                updated_at: 10,
+                deleted_at: 0,
+                device_id: "remote-device".into(),
+                sync_version: 1,
+            }],
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+
+        let acknowledged_rows: i64 = database
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_acknowledgements WHERE scope='test-scope'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(acknowledged_rows, 1);
+        assert_eq!(
+            database.entity_json("vocab", "remote").unwrap(),
+            Some(json!({"word": "remote"}))
+        );
+        let after = serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap();
+        assert!(after >= before.saturating_add(4));
     }
 }
