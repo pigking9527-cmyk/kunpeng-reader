@@ -11,3 +11,12 @@ export type {
   SupportPort,
   UpdateInfo,
 } from "./support-port.js";
+export {
+  createSupportController,
+  legacySupportDomIds,
+  type SupportController,
+  type SupportLoadPhase,
+  type SupportRenderer,
+  type SupportUpdatePhase,
+  type SupportViewState,
+} from "./support-controller.js";
