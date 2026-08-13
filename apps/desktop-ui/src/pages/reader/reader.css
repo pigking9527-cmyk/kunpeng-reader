@@ -1,0 +1,73 @@
+.reader-page,
+.reader-engine-host {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.reader-page {
+  position: relative;
+  overflow: hidden;
+  background: #fff;
+  display: grid;
+  grid-template-rows: 39px minmax(0, 1fr);
+}
+
+.reader-engine-host { grid-row: 2; }
+
+.reader-engine-host iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.reader-page-status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 24px;
+  color: #6b7280;
+  background: #fff;
+  font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  text-align: center;
+}
+
+.reader-page-status p { margin: 0; }
+
+.reader-page-chrome {
+  display: flex;
+  grid-row: 1;
+  align-items: center;
+  min-width: 0;
+  border-bottom: 1px solid #e3e3e6;
+  background: #fafafa;
+  color: #555;
+  font: 13px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.reader-page-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  padding: 0 12px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-page-close {
+  width: 39px;
+  height: 38px;
+  border: 0;
+  background: transparent;
+  color: #333;
+  cursor: pointer;
+  font: 24px/1 system-ui, sans-serif;
+}
+
+.reader-page-close:hover { background: #e81123; color: #fff; }
