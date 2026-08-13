@@ -4,16 +4,16 @@
 //! recovery point must never copy the browser profile as a whole.  Instead the
 //! two application origins periodically persist a bounded, filtered snapshot.
 
+mod rules;
+
 use crate::atomic_file;
-use serde_json::{Map, Value};
+use rules::sanitize_settings;
+use serde_json::Value;
 use std::path::PathBuf;
 
 pub(crate) const MAIN_SNAPSHOT_FILE: &str = "web-settings-main-v1.json";
 pub(crate) const READER_SNAPSHOT_FILE: &str = "web-settings-reader-v1.json";
 const RESTORE_PENDING_FILE: &str = "web-settings-restore-pending-v1.json";
-const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_SETTING_COUNT: usize = 2048;
-const MAX_KEY_BYTES: usize = 256;
 
 fn config_dir() -> Result<PathBuf, String> {
     crate::profile::app_config_dir().ok_or("无法确定应用配置目录".into())
@@ -35,46 +35,6 @@ fn pending_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join(RESTORE_PENDING_FILE))
 }
 
-fn is_sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    [
-        "token",
-        "password",
-        "secret",
-        "api_key",
-        "apikey",
-        "credential",
-    ]
-    .iter()
-    .any(|needle| key.contains(needle))
-}
-
-fn sanitize_settings(settings: Value) -> Result<Value, String> {
-    let source = settings.as_object().ok_or("网页设置快照必须是键值对象")?;
-    if source.len() > MAX_SETTING_COUNT {
-        return Err("网页设置项过多，未保存".into());
-    }
-    let mut filtered = Map::new();
-    for (key, value) in source {
-        if key.is_empty() || key.len() > MAX_KEY_BYTES || is_sensitive_key(key) {
-            continue;
-        }
-        let Some(value) = value.as_str() else {
-            continue;
-        };
-        filtered.insert(key.clone(), Value::String(value.to_string()));
-    }
-    let snapshot = serde_json::json!({ "version": 1, "settings": filtered });
-    if serde_json::to_vec(&snapshot)
-        .map_err(|error| format!("序列化网页设置失败：{error}"))?
-        .len()
-        > MAX_SNAPSHOT_BYTES
-    {
-        return Err("网页设置过大，未保存".into());
-    }
-    Ok(snapshot)
-}
-
 pub(crate) fn snapshot_values() -> Vec<Value> {
     ["main", "reader"]
         .into_iter()
@@ -87,7 +47,11 @@ pub(crate) fn ensure_snapshot_files() -> Result<(), String> {
     for scope in ["main", "reader"] {
         let path = snapshot_path(scope)?;
         if !path.is_file() {
-            atomic_file::write_json(&path, &sanitize_settings(Value::Object(Map::new()))?, true)?;
+            atomic_file::write_json(
+                &path,
+                &sanitize_settings(Value::Object(serde_json::Map::new()))?,
+                true,
+            )?;
         }
     }
     Ok(())
@@ -119,7 +83,7 @@ pub(crate) fn recovery_web_settings_take_restored(scope: String) -> Result<Optio
     let settings = sanitize_settings(snapshot.get("settings").cloned().unwrap_or(Value::Null))?
         .get("settings")
         .cloned()
-        .unwrap_or_else(|| Value::Object(Map::new()));
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
     pending.retain(|item| item != &scope);
     if pending.is_empty() {
         match std::fs::remove_file(path) {
@@ -135,23 +99,4 @@ pub(crate) fn recovery_web_settings_take_restored(scope: String) -> Result<Optio
 
 pub(crate) fn mark_restore_pending() -> Result<(), String> {
     atomic_file::write_json(&pending_path()?, &vec!["main", "reader"], true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keeps_preferences_but_removes_credentials() {
-        let value = sanitize_settings(serde_json::json!({
-            "readerSettings": "{}", "translateApiKey": "private", "syncToken": "private",
-            "empty": 4,
-        }))
-        .unwrap();
-        let settings = value.get("settings").and_then(Value::as_object).unwrap();
-        assert!(settings.contains_key("readerSettings"));
-        assert!(!settings.contains_key("translateApiKey"));
-        assert!(!settings.contains_key("syncToken"));
-        assert!(!settings.contains_key("empty"));
-    }
 }
