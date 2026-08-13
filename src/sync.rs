@@ -23,7 +23,10 @@ use reader_core::sync::sync_scope_id;
 use reconcile::{reconcile_request_body, reconcile_upload_entities};
 use retry::sync_request_with_retry_delays;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use validation::{
@@ -39,6 +42,46 @@ const SYNC_RETRY_DELAYS_MS: &[u64] = &[1_000, 2_000, 4_000, 8_000, 16_000];
 const SYNC_PAUSED: &str = "__sync_paused__";
 const SYNC_CANCELLED: &str = "__sync_cancelled__";
 struct SyncRunGuard<'a>(&'a AtomicBool);
+
+#[derive(Clone)]
+struct CachedSyncToken {
+    protected_marker: String,
+    token: String,
+}
+
+// macOS may ask to unlock the login keychain when a protected item is first
+// read. Keep the successfully read token only in process memory so a single
+// sync operation and adjacent account-status calls do not repeatedly prompt.
+// Account writes and clears invalidate this cache below.
+static SYNC_TOKEN_CACHE: OnceLock<Mutex<Option<CachedSyncToken>>> = OnceLock::new();
+
+fn sync_token_cache() -> &'static Mutex<Option<CachedSyncToken>> {
+    SYNC_TOKEN_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn cached_sync_token(protected_marker: &str) -> Option<String> {
+    sync_token_cache()
+        .lock()
+        .ok()
+        .and_then(|cached| cached.as_ref().cloned())
+        .filter(|cached| cached.protected_marker == protected_marker)
+        .map(|cached| cached.token)
+}
+
+fn cache_sync_token(protected_marker: &str, token: &str) {
+    if let Ok(mut cached) = sync_token_cache().lock() {
+        *cached = Some(CachedSyncToken {
+            protected_marker: protected_marker.to_string(),
+            token: token.to_string(),
+        });
+    }
+}
+
+fn clear_cached_sync_token() {
+    if let Ok(mut cached) = sync_token_cache().lock() {
+        *cached = None;
+    }
+}
 
 impl Drop for SyncRunGuard<'_> {
     fn drop(&mut self) {
@@ -202,7 +245,17 @@ fn sync_settings_record_from_db(db: &db::AppDb) -> SyncSettingsRecord {
 
 fn resolve_sync_settings(record: SyncSettingsRecord) -> Result<SyncSettings, String> {
     let token = if let Some(protected) = record.protected_token.as_deref() {
-        secret_store::unprotect_secret(protected)
+        if secret_store::is_platform_protected(protected) {
+            if let Some(token) = cached_sync_token(protected) {
+                Ok(token)
+            } else {
+                let token = secret_store::unprotect_secret(protected)?;
+                cache_sync_token(protected, &token);
+                Ok(token)
+            }
+        } else {
+            secret_store::unprotect_secret(protected)
+        }
     } else {
         Ok(record.legacy_token)
     }?;
@@ -245,7 +298,13 @@ fn migrate_sync_token_to_platform_store(db: &mut db::AppDb) -> Result<(), String
 }
 
 fn protect_sync_token(token: &str) -> Result<String, String> {
-    secret_store::protect_secret(token.trim())
+    let protected = secret_store::protect_secret(token.trim())?;
+    if secret_store::is_platform_protected(&protected) {
+        cache_sync_token(&protected, token.trim());
+    } else {
+        clear_cached_sync_token();
+    }
+    Ok(protected)
 }
 
 fn auth_base_from_state(state: &AppState, requested: &str) -> Result<String, String> {
@@ -1785,6 +1844,32 @@ mod tests {
         let settings = resolve_sync_settings(record).unwrap();
         assert_eq!(settings.token, "legacy-token");
         assert_eq!(settings.data_generation, 3);
+    }
+
+    #[test]
+    fn platform_token_is_cached_only_for_the_current_protected_marker() {
+        clear_cached_sync_token();
+        let record = SyncSettingsRecord {
+            url: String::new(),
+            protected_token: Some("keychain:v1".into()),
+            legacy_token: String::new(),
+            username: String::new(),
+            user_id: String::new(),
+            data_generation: 1,
+            last_sync_at: 0,
+            last_sync_pushed: 0,
+            last_sync_pulled: 0,
+            last_sync_accepted: 0,
+            last_sync_ignored: 0,
+        };
+        cache_sync_token("keychain:v1", "session-token");
+        assert_eq!(
+            resolve_sync_settings(record.clone()).unwrap().token,
+            "session-token"
+        );
+
+        clear_cached_sync_token();
+        assert!(resolve_sync_settings(record).is_err());
     }
 
     #[test]
