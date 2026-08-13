@@ -7,6 +7,7 @@
 
 pub mod domain;
 pub mod import;
+pub mod metadata_text;
 pub mod parser;
 pub mod stats;
 pub mod sync;
