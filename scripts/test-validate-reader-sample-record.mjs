@@ -73,6 +73,13 @@ try {
   assert.equal(missingEvidenceResult.status, 2);
   assert.match(missingEvidenceResult.stderr, /视觉证据/u);
 
+  const duplicateEvidence = structuredClone(record);
+  duplicateEvidence.evidence[2].sha256 = duplicateEvidence.evidence[0].sha256;
+  write(duplicateEvidence);
+  const duplicateEvidenceResult = run(recordPath);
+  assert.equal(duplicateEvidenceResult.status, 2);
+  assert.match(duplicateEvidenceResult.stderr, /独立的媒体摘要/u);
+
   console.log("reader sample record validator checks passed");
 } finally {
   rmSync(temporaryDirectory, { recursive: true, force: true });

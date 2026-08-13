@@ -243,6 +243,14 @@ try {
     },
   };
 
+  const evidenceHashes = new Set();
+  for (const item of record.evidence) {
+    if (evidenceHashes.has(item.sha256)) {
+      throw new Error("每个必测视觉场景必须使用独立的截图或录屏媒体，不能复用同一摘要");
+    }
+    evidenceHashes.add(item.sha256);
+  }
+
   writeFileSync(resolvedOutput, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
   console.log("已写入私有验收记录（路径未输出）");
 } catch (error) {

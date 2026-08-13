@@ -91,13 +91,16 @@ function validate(record) {
 
   if (!Array.isArray(record.evidence) || record.evidence.length !== requiredEvidenceIdsByFormat[format].length) fail("evidence 必须完整覆盖格式要求的视觉证据");
   const evidenceIds = new Set();
+  const evidenceHashes = new Set();
   for (const item of record.evidence) {
     exactKeys(item, "evidence 条目", ["id", "kind", "sha256"]);
     safeReference(item.id, "evidence.id");
     if (item.kind !== "screenshot" && item.kind !== "recording") fail("evidence.kind 只能是 screenshot 或 recording");
     sha256(item.sha256, "evidence.sha256");
     if (evidenceIds.has(item.id)) fail("evidence.id 不能重复");
+    if (evidenceHashes.has(item.sha256)) fail("每个必测视觉场景必须使用独立的媒体摘要");
     evidenceIds.add(item.id);
+    evidenceHashes.add(item.sha256);
   }
   for (const id of requiredEvidenceIdsByFormat[format]) if (!evidenceIds.has(id)) fail(`evidence 缺少必填视觉证据 ${id}`);
 

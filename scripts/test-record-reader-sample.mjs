@@ -17,6 +17,8 @@ const output = join(records, "sample.json");
 const pdfOutput = join(records, "sample-pdf.json");
 const firstPageScreenshot = join(temporaryDirectory, "first-page.png");
 const pageTurnRecording = join(temporaryDirectory, "page-turn.mov");
+const searchScreenshot = join(temporaryDirectory, "search.png");
+const pdfRenderRecording = join(temporaryDirectory, "pdf-render.mov");
 const baseArgs = [
   fileURLToPath(script),
   "--format", "epub",
@@ -58,13 +60,15 @@ try {
   writeFileSync(pdfSample, "%PDF-like-content-is-not-read", "utf8");
   writeFileSync(firstPageScreenshot, "not-a-real-image", "utf8");
   writeFileSync(pageTurnRecording, "not-a-real-recording", "utf8");
+  writeFileSync(searchScreenshot, "not-a-real-search-image", "utf8");
+  writeFileSync(pdfRenderRecording, "not-a-real-pdf-rendering", "utf8");
   mkdirSync(records);
 
   const success = run([
     ...baseArgs,
     "--screenshot", `EPUB-FIRST-PAGE=${firstPageScreenshot}`,
     "--recording", `EPUB-PAGE-TURN=${pageTurnRecording}`,
-    "--screenshot", `EPUB-SEARCH=${firstPageScreenshot}`,
+    "--screenshot", `EPUB-SEARCH=${searchScreenshot}`,
     "--output", output,
   ]);
   assert.equal(success.status, 0, success.stderr);
@@ -115,8 +119,8 @@ try {
     "--timing", "zoomMs=70,71,72,73,74",
     "--screenshot", `PDF-FIRST-PAGE=${firstPageScreenshot}`,
     "--recording", `PDF-PAGE-TURN=${pageTurnRecording}`,
-    "--screenshot", `PDF-SEARCH=${firstPageScreenshot}`,
-    "--recording", `PDF-RENDER-ZOOM=${pageTurnRecording}`,
+    "--screenshot", `PDF-SEARCH=${searchScreenshot}`,
+    "--recording", `PDF-RENDER-ZOOM=${pdfRenderRecording}`,
     "--output", pdfOutput,
   ]);
   assert.equal(pdfSuccess.status, 0, pdfSuccess.stderr);
@@ -159,6 +163,16 @@ try {
   ]);
   assert.equal(missingMemory.status, 2);
   assert.match(missingMemory.stderr, /必须提供第 5 次和第 20 次关闭循环工作集/u);
+
+  const duplicateEvidence = run([
+    ...baseArgs,
+    "--screenshot", `EPUB-FIRST-PAGE=${firstPageScreenshot}`,
+    "--recording", `EPUB-PAGE-TURN=${pageTurnRecording}`,
+    "--screenshot", `EPUB-SEARCH=${firstPageScreenshot}`,
+    "--output", join(records, "duplicate-evidence.json"),
+  ]);
+  assert.equal(duplicateEvidence.status, 2);
+  assert.match(duplicateEvidence.stderr, /不能复用同一摘要/u);
 
   console.log("reader sample recorder checks passed");
 } finally {

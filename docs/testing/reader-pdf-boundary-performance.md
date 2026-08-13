@@ -43,7 +43,7 @@ PDF 生命周期测试额外连续取消 128 次尚未解析完成的打开请�
 
 仓库不保存真实 EPUB/PDF、其路径、标题、正文、URL、截图或录像。准备好已获准的样本后，用下列工具在**仓库外**创建验收记录；工具流式计算 SHA-256，且只写入命令显式提供的匿名样本编号、许可/来源引用、计时和内存数值。它会拒绝向本仓库写入记录。
 
-验收人可另外传入仓库外受控截图或录屏。记录只保存验收人指定的非路径证据编号、媒体类型和 SHA-256；不保存媒体路径、文件名、缩略图、时长或任何画面内容。EPUB 必须保留首屏、翻页和搜索；PDF 必须保留首屏、翻页、搜索及缩放/旋转后渲染四类能由私有证据编号关联的视觉证据。性能度量固定为 EPUB 的 `firstReadableMs`、`turnPageMs`、`searchMs`，以及 PDF 的 `firstReadableMs`、`turnPageMs`、`searchMs`、`pdfRenderMs`、`zoomMs`；截图或录屏实际保管、访问控制和保留期由团队受控证据库负责。
+验收人可另外传入仓库外受控截图或录屏。记录只保存验收人指定的非路径证据编号、媒体类型和 SHA-256；不保存媒体路径、文件名、缩略图、时长或任何画面内容。每个必测场景必须使用独立媒体摘要，不能以同一截图或录屏重复覆盖多个场景。EPUB 必须保留首屏、翻页和搜索；PDF 必须保留首屏、翻页、搜索及缩放/旋转后渲染四类能由私有证据编号关联的视觉证据。性能度量固定为 EPUB 的 `firstReadableMs`、`turnPageMs`、`searchMs`，以及 PDF 的 `firstReadableMs`、`turnPageMs`、`searchMs`、`pdfRenderMs`、`zoomMs`；截图或录屏实际保管、访问控制和保留期由团队受控证据库负责。
 
 ```sh
 node scripts/record-reader-sample.mjs \
@@ -64,7 +64,7 @@ node scripts/record-reader-sample.mjs \
   --output /controlled-records/epub-LEGAL-SAMPLE-001.json
 ```
 
-每个性能项目提供恰好 3 个预热值和 5 个记录值；工具会写出 P50/P95。EPUB 必须记录 `firstReadableMs`、`turnPageMs`、`searchMs` 及 `EPUB-FIRST-PAGE`、`EPUB-PAGE-TURN`、`EPUB-SEARCH` 三个匿名视觉证据；PDF 还必须记录 `pdfRenderMs`、`zoomMs` 及 `PDF-FIRST-PAGE`、`PDF-PAGE-TURN`、`PDF-SEARCH`、`PDF-RENDER-ZOOM` 四个证据。`--condition` 标记本次冷启动或预热态；`--units` 对 EPUB 表示章节数、对 PDF 表示页数。关闭循环的第 5/20 次工作集须成对提供，工具会标注是否低于 100 MiB 增长门槛。可重复 `--screenshot` 或 `--recording`，格式是 `匿名证据编号=/绝对/受控媒体路径`；工具拒绝仓库内媒体文件，且 JSON 只写入编号、类型和摘要。生成后请执行 `node scripts/validate-reader-sample-record.mjs /仓库外/record.json`；校验器只接受 schema v3 的精确字段形状、必填计时/证据和由原始数据计算出的 P50/P95、内存增长，不允许路径、标题、正文、URL 或其他未知字段。生成记录的字段形状见 [`reader-pdf-sample-record.template.json`](reader-pdf-sample-record.template.json)；模板只含示例数据，不能视为验收结果。
+每个性能项目提供恰好 3 个预热值和 5 个记录值；工具会写出 P50/P95。EPUB 必须记录 `firstReadableMs`、`turnPageMs`、`searchMs` 及 `EPUB-FIRST-PAGE`、`EPUB-PAGE-TURN`、`EPUB-SEARCH` 三个匿名视觉证据；PDF 还必须记录 `pdfRenderMs`、`zoomMs` 及 `PDF-FIRST-PAGE`、`PDF-PAGE-TURN`、`PDF-SEARCH`、`PDF-RENDER-ZOOM` 四个证据。`--condition` 标记本次冷启动或预热态；`--units` 对 EPUB 表示章节数、对 PDF 表示页数。关闭循环的第 5/20 次工作集须成对提供，工具会标注是否低于 100 MiB 增长门槛。可重复 `--screenshot` 或 `--recording`，格式是 `匿名证据编号=/绝对/受控媒体路径`；工具拒绝仓库内媒体文件，且要求不同必测场景的媒体摘要不同，JSON 只写入编号、类型和摘要。生成后请执行 `node scripts/validate-reader-sample-record.mjs /仓库外/record.json`；校验器只接受 schema v3 的精确字段形状、必填计时/证据和由原始数据计算出的 P50/P95、内存增长，不允许路径、标题、正文、URL 或其他未知字段。生成记录的字段形状见 [`reader-pdf-sample-record.template.json`](reader-pdf-sample-record.template.json)；模板只含示例数据，不能视为验收结果。
 
 ### macOS 人工验收表
 
