@@ -7,11 +7,11 @@ use crate::{atomic_file, db::SyncEntity};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+mod rules;
+
 pub(crate) const RECOVERY_ASSET_BUNDLE_FILE: &str = "reader-background-assets-v1.json";
 
 #[derive(Serialize, Deserialize)]
@@ -50,49 +50,15 @@ fn recovery_bundle_path() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn extension_for_mime(mime: &str) -> Option<&'static str> {
-    match mime {
-        "image/png" => Some("png"),
-        "image/jpeg" => Some("jpg"),
-        "image/webp" => Some("webp"),
-        "image/gif" => Some("gif"),
-        _ => None,
-    }
-}
-
-fn mime_for_header(header: &str) -> Option<&'static str> {
-    match header {
-        "data:image/png;base64" => Some("image/png"),
-        "data:image/jpeg;base64" => Some("image/jpeg"),
-        "data:image/webp;base64" => Some("image/webp"),
-        "data:image/gif;base64" => Some("image/gif"),
-        _ => None,
-    }
-}
-
-fn valid_asset_id(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 const SYNC_PROTOCOL_HEADER: &str = "X-Sync-Protocol-Version";
 const SYNC_PROTOCOL_VERSION: &str = "5";
 
 pub(crate) fn local_url(asset_id: &str, mime: &str) -> Result<String, String> {
-    if !valid_asset_id(asset_id) {
+    if !rules::valid_asset_id(asset_id) {
         return Err("背景图片资产标识无效".into());
     }
-    let ext = extension_for_mime(mime).ok_or("背景图片类型无效")?;
+    let ext = rules::extension_for_mime(mime).ok_or("背景图片类型无效")?;
     Ok(format!("{}/background/{asset_id}.{ext}", crate::RES_BASE))
-}
-
-fn decode(data_url: &str) -> Result<(Vec<u8>, &'static str), String> {
-    let (header, encoded) = data_url.trim().split_once(',').ok_or("背景图片格式无效")?;
-    let mime = mime_for_header(header).ok_or("背景图片仅支持 PNG、JPG、WebP 或 GIF")?;
-    let bytes = STANDARD.decode(encoded).map_err(|_| "背景图片编码无效")?;
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
-        return Err("背景图片不能超过 10MB".into());
-    }
-    Ok((bytes, mime))
 }
 
 pub(crate) fn cache_asset_bytes(
@@ -100,18 +66,12 @@ pub(crate) fn cache_asset_bytes(
     mime: &str,
     bytes: &[u8],
 ) -> Result<ReaderBackgroundAsset, String> {
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
-        return Err("背景图片不能超过 10MB".into());
-    }
-    let digest = Sha256::digest(bytes);
-    let sha256 = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if asset_id != sha256 || !valid_asset_id(asset_id) {
+    rules::validate_image_bytes(bytes)?;
+    let sha256 = rules::sha256_hex(bytes);
+    if asset_id != sha256 || !rules::valid_asset_id(asset_id) {
         return Err("背景图片校验失败".into());
     }
-    let ext = extension_for_mime(mime).ok_or("背景图片类型无效")?;
+    let ext = rules::extension_for_mime(mime).ok_or("背景图片类型无效")?;
     let path = cache_dir()?.join(format!("{asset_id}.{ext}"));
     if !path.exists() {
         std::fs::write(&path, bytes).map_err(|e| format!("保存背景图片失败：{e}"))?;
@@ -129,11 +89,8 @@ pub(crate) fn cache_asset_bytes(
 pub(crate) fn cache_reader_background_image(
     data_url: String,
 ) -> Result<ReaderBackgroundAsset, String> {
-    let (bytes, mime) = decode(&data_url)?;
-    let asset_id = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let (bytes, mime) = rules::decode_data_url(&data_url)?;
+    let asset_id = rules::sha256_hex(&bytes);
     cache_asset_bytes(&asset_id, mime, &bytes)
 }
 
@@ -142,7 +99,7 @@ pub(crate) fn reader_background_local_url(
     asset_id: String,
     mime: String,
 ) -> Result<String, String> {
-    let ext = extension_for_mime(&mime).ok_or("背景图片类型无效")?;
+    let ext = rules::extension_for_mime(&mime).ok_or("背景图片类型无效")?;
     let path = cache_dir()?.join(format!("{asset_id}.{ext}"));
     if !path.is_file() && !restore_cached_asset_from_bundle(&asset_id, &mime)? {
         return Err("本机尚未缓存该背景图片".into());
@@ -152,7 +109,7 @@ pub(crate) fn reader_background_local_url(
 
 pub(crate) fn read_cached_background(name: &str) -> Option<(Vec<u8>, String)> {
     let (asset_id, ext) = name.rsplit_once('.')?;
-    if !valid_asset_id(asset_id) {
+    if !rules::valid_asset_id(asset_id) {
         return None;
     }
     let mime = match ext {
@@ -169,7 +126,7 @@ pub(crate) fn read_cached_background(name: &str) -> Option<(Vec<u8>, String)> {
 }
 
 pub(crate) fn cached_asset_bytes(asset_id: &str, mime: &str) -> Option<Vec<u8>> {
-    let ext = extension_for_mime(mime)?;
+    let ext = rules::extension_for_mime(mime)?;
     std::fs::read(cache_dir().ok()?.join(format!("{asset_id}.{ext}"))).ok()
 }
 
@@ -180,7 +137,7 @@ fn collect_asset_references(value: &Value, assets: &mut BTreeMap<String, String>
                 map.get("backgroundAssetId").and_then(Value::as_str),
                 map.get("backgroundAssetMime").and_then(Value::as_str),
             ) {
-                if valid_asset_id(id) && extension_for_mime(mime).is_some() {
+                if rules::valid_asset_id(id) && rules::extension_for_mime(mime).is_some() {
                     assets
                         .entry(id.to_ascii_lowercase())
                         .or_insert_with(|| mime.to_string());
@@ -295,10 +252,10 @@ fn referenced_assets(entities: &[SyncEntity]) -> Vec<(String, String, usize)> {
             .get("backgroundAssetBytes")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0) as usize;
-        if valid_asset_id(id)
-            && extension_for_mime(mime).is_some()
+        if rules::valid_asset_id(id)
+            && rules::extension_for_mime(mime).is_some()
             && size > 0
-            && size <= MAX_IMAGE_BYTES
+            && size <= rules::MAX_IMAGE_BYTES
             && !assets.iter().any(|(known, _, _)| known == id)
         {
             assets.push((id.to_string(), mime.to_string(), size));
