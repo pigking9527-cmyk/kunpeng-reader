@@ -13,6 +13,22 @@ const sortEl = document.getElementById("sort");
 const summaryEl = document.getElementById("summary");
 const resultsEl = document.getElementById("results");
 const qhistEl = document.getElementById("qhistory");
+const searchAlert = document.getElementById("search-alert");
+const searchAlertTitle = document.getElementById("search-alert-title");
+const searchAlertMessage = document.getElementById("search-alert-message");
+const searchAlertOk = document.getElementById("search-alert-ok");
+
+function showSearchAlert(message, title = "提示") {
+  if (window.parent !== window && window.parent.AppDialog?.alert) {
+    return window.parent.AppDialog.alert(message, { title, confirmLabel: "知道了", tone: "warning" });
+  }
+  searchAlertTitle.textContent = title;
+  searchAlertMessage.textContent = message;
+  if (typeof searchAlert.showModal === "function") searchAlert.showModal();
+  else window.alert(message);
+  return Promise.resolve();
+}
+searchAlertOk.addEventListener("click", () => searchAlert.close());
 
 // 搜索窗口打开即预热模型；不加载全局向量图，也不等待结果，因此不影响关键词输入。
 // 这样用户切换到语义模式时，模型加载通常已经完成。
@@ -40,37 +56,65 @@ function saveQHist() {
 function saveQCommon() {
   localStorage.setItem("shelfSearchCommon", JSON.stringify(qcommon));
 }
+
+// search-history-rules.js 未加载时继续使用这一份等价纯规则回退，避免独立
+// WebView 的脚本加载失败破坏历史搜索入口。
+const searchHistoryRules = window.ReaderSearchHistoryRules || (() => {
+  function normalizedSearchTerm(value) {
+    return String(value || "").trim();
+  }
+  function recordSearchQuery(history, common, query, now, maxHistory) {
+    const term = normalizedSearchTerm(query);
+    const limit = Number.isInteger(maxHistory) && maxHistory > 0 ? maxHistory : 12;
+    const entries = Array.isArray(history) ? history : [];
+    const counts = common && typeof common === "object" && !Array.isArray(common) ? common : {};
+    if (!term) return { history: entries.slice(0, limit), common: { ...counts } };
+    const previous = counts[term] || {};
+    return {
+      history: [term, ...entries.filter((entry) => entry !== term)].slice(0, limit),
+      common: { ...counts, [term]: { count: (Number(previous.count) || 0) + 1, last: now } },
+    };
+  }
+  function removeSearchQuery(history, query) {
+    const term = normalizedSearchTerm(query);
+    return (Array.isArray(history) ? history : []).filter((entry) => entry !== term);
+  }
+  function commonSearches(common, limit) {
+    const maximum = Number.isInteger(limit) && limit >= 0 ? limit : 6;
+    const counts = common && typeof common === "object" && !Array.isArray(common) ? common : {};
+    return Object.entries(counts)
+      .sort((left, right) => (Number(right[1]?.count) || 0) - (Number(left[1]?.count) || 0)
+        || (Number(right[1]?.last) || 0) - (Number(left[1]?.last) || 0))
+      .slice(0, maximum)
+      .map(([query, value]) => ({ query, count: Number(value?.count) || 0 }));
+  }
+  return { normalizedSearchTerm, recordSearchQuery, removeSearchQuery, commonSearches };
+})();
+
 function addQHist(q) {
-  q = (q || "").trim();
-  if (!q) return;
-  qhist = qhist.filter((h) => h !== q);
-  qhist.unshift(q);
-  qhist = qhist.slice(0, 12);
-  const old = qcommon[q] || { count: 0, last: 0 };
-  qcommon[q] = { count: old.count + 1, last: Date.now() };
+  const next = searchHistoryRules.recordSearchQuery(qhist, qcommon, q, Date.now(), 12);
+  qhist = next.history;
+  qcommon = next.common;
   saveQHist();
   saveQCommon();
 }
 function renderQHist() {
   qhistEl.innerHTML = "";
-  const common = Object.entries(qcommon)
-    .sort((a, b) => (b[1].count || 0) - (a[1].count || 0) || (b[1].last || 0) - (a[1].last || 0))
-    .slice(0, 6)
-    .map(([q, v]) => ({ q, count: v.count || 0 }));
+  const common = searchHistoryRules.commonSearches(qcommon, 6);
   if (common.length) {
     const title = document.createElement("div");
     title.className = "qh-empty";
     title.textContent = "常搜词";
     qhistEl.appendChild(title);
-    common.forEach(({ q, count }) => {
+    common.forEach(({ query, count }) => {
       const item = document.createElement("div");
       item.className = "qh-item";
       item.innerHTML = '<span class="qh-text"></span><span class="qh-del">×' + count + "</span>";
-      item.querySelector(".qh-text").textContent = q;
+      item.querySelector(".qh-text").textContent = query;
       item.addEventListener("click", () => {
-        qEl.value = q;
+        qEl.value = query;
         hideQHist();
-        runSearch(q);
+        runSearch(query);
       });
       qhistEl.appendChild(item);
     });
@@ -98,7 +142,7 @@ function renderQHist() {
     item.append(t, del);
     item.addEventListener("click", (e) => {
       if (e.target === del) {
-        qhist = qhist.filter((h) => h !== q);
+        qhist = searchHistoryRules.removeSearchQuery(qhist, q);
         saveQHist();
         renderQHist();
         return;
@@ -125,8 +169,28 @@ let curSimilar = []; // 保留结果结构兼容；关键词检索不再偷偷�
 let pendingBooks = 0; // 缺少已发布全文索引、已转交后台补建的图书数
 let searchSeq = 0;
 let renderGeneration = 0;
+let keywordRetryTimer = 0;
+let keywordRetryCount = 0;
 const RESULT_GROUPS_PER_FRAME = 8;
 const INITIAL_EXPANDED_BOOKS = 1;
+const KEYWORD_RETRY_LIMIT = 180;
+
+function stopKeywordRetry() {
+  window.clearTimeout(keywordRetryTimer);
+  keywordRetryTimer = 0;
+  keywordRetryCount = 0;
+}
+
+function scheduleKeywordRetry(term) {
+  if (mode !== "kw" || !pendingBooks || keywordRetryTimer || keywordRetryCount >= KEYWORD_RETRY_LIMIT) return;
+  keywordRetryCount += 1;
+  keywordRetryTimer = window.setTimeout(() => {
+    keywordRetryTimer = 0;
+    if (mode === "kw" && qEl.value.trim() === term && pendingBooks > 0) {
+      void runSearch(term, { retry: true });
+    }
+  }, 1000);
+}
 
 function parseInitial() {
   const p = new URLSearchParams(location.search);
@@ -135,70 +199,72 @@ function parseInitial() {
   curIds = ids ? ids.split(",").filter(Boolean) : [];
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-}
-function cjkNgramsForHighlight(text) {
-  const chars = Array.from(text).filter((ch) => /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u.test(ch));
-  const out = [];
-  for (const n of [3, 2]) {
-    if (chars.length < n) continue;
-    for (let i = 0; i + n <= chars.length; i++) out.push(chars.slice(i, i + n).join(""));
+// search-result-rules.js 尚未加入 search.html 时继续使用这里的等价回退。
+// 这样提取纯规则不会改变当前独立窗口的加载顺序或可用性。
+const searchResultRules = window.ReaderSearchResultRules || (() => {
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[character]));
   }
-  return out;
-}
-function highlightNeedles(term) {
-  const raw = (term || "").trim();
-  const seen = new Set();
-  const out = [];
-  function add(s, allowSingleCjk) {
-    s = (s || "").trim();
-    if (s.length < 2 && !allowSingleCjk) return;
-    const key = s.toLowerCase();
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(s);
+  function cjkNgramsForHighlight(text) {
+    const chars = Array.from(String(text).match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/gu) || []);
+    const out = [];
+    for (const n of [3, 2]) {
+      if (chars.length < n) continue;
+      for (let i = 0; i + n <= chars.length; i += 1) out.push(chars.slice(i, i + n).join(""));
     }
+    return out;
   }
-  add(raw, /^[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]$/u.test(raw));
-  (raw.match(/[A-Za-z0-9]{2,}/g) || []).forEach(add);
-  cjkNgramsForHighlight(raw).forEach(add);
-  out.sort((a, b) => b.length - a.length);
-  return out;
-}
-function highlight(snippet, term) {
-  const needles = highlightNeedles(term);
-  if (!needles.length) return escapeHtml(snippet);
-  const low = snippet.toLowerCase();
-  let html = "";
-  let pos = 0;
-  while (pos < snippet.length) {
-    let match = null;
-    for (const needle of needles) {
-      if (low.startsWith(needle.toLowerCase(), pos)) {
-        match = needle;
-        break;
+  function highlightNeedles(term) {
+    const raw = String(term || "").trim();
+    const seen = new Set();
+    const out = [];
+    function add(value, allowSingleCjk) {
+      const normalized = String(value || "").trim();
+      if (normalized.length < 2 && !allowSingleCjk) return;
+      const key = normalized.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(normalized);
       }
     }
-    if (match) {
-      html += "<mark>" + escapeHtml(snippet.slice(pos, pos + match.length)) + "</mark>";
-      pos += match.length;
-    } else {
-      html += escapeHtml(snippet[pos]);
-      pos += 1;
-    }
+    add(raw, /^[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]$/u.test(raw));
+    (raw.match(/[A-Za-z0-9]{2,}/g) || []).forEach(add);
+    cjkNgramsForHighlight(raw).forEach(add);
+    return out.sort((left, right) => right.length - left.length);
   }
-  return html;
-}
-
+  function highlightSnippet(snippet, term) {
+    const text = String(snippet || "");
+    const needles = highlightNeedles(term);
+    if (!needles.length) return escapeHtml(text);
+    const low = text.toLowerCase();
+    let html = "";
+    let pos = 0;
+    while (pos < text.length) {
+      const match = needles.find((needle) => low.startsWith(needle.toLowerCase(), pos));
+      if (match) {
+        html += "<mark>" + escapeHtml(text.slice(pos, pos + match.length)) + "</mark>";
+        pos += match.length;
+      } else {
+        html += escapeHtml(text[pos]);
+        pos += 1;
+      }
+    }
+    return html;
+  }
+  function sortSearchResults(list, mode) {
+    const results = list.slice();
+    if (mode === "title") results.sort((left, right) => (left.title || "").localeCompare(right.title || "", "zh"));
+    else if (mode === "author") results.sort((left, right) => (left.author || "").localeCompare(right.author || "", "zh"));
+    else if (mode === "hits") results.sort((left, right) => right.count - left.count);
+    else results.sort((left, right) => (right.score || right.count || 0) - (left.score || left.count || 0));
+    return results;
+  }
+  return { escapeHtml, cjkNgramsForHighlight, highlightNeedles, highlightSnippet, sortSearchResults };
+})();
+const escapeHtml = searchResultRules.escapeHtml;
+const highlight = searchResultRules.highlightSnippet;
 function sortResults(list) {
-  const a = list.slice();
-  const mode = sortEl.value;
-  if (mode === "title") a.sort((x, y) => (x.title || "").localeCompare(y.title || "", "zh"));
-  else if (mode === "author") a.sort((x, y) => (x.author || "").localeCompare(y.author || "", "zh"));
-  else if (mode === "hits") a.sort((x, y) => y.count - x.count);
-  else a.sort((x, y) => (y.score || y.count || 0) - (x.score || x.count || 0));
-  return a;
+  return searchResultRules.sortSearchResults(list, sortEl.value);
 }
 
 // 把某本书的命中片段实际建进 DOM（懒加载：展开时才建，避免一次性渲染上千条而卡顿）
@@ -349,9 +415,11 @@ function openHit(bookId, chapter) {
   invoke("open_book_at", { request: { id: bookId, chapter, term: curTerm } }).catch(() => {});
 }
 
-async function runSearch(term) {
+async function runSearch(term, options = {}) {
+  const retry = options.retry === true;
+  if (!retry) stopKeywordRetry();
   const seq = ++searchSeq;
-  renderGeneration += 1; // 立即终止上一轮仍在分帧追加的结果
+  if (!retry) renderGeneration += 1; // 立即终止上一轮仍在分帧追加的结果
   curTerm = (term || "").trim();
   qEl.value = curTerm;
   if (!curTerm) {
@@ -362,10 +430,12 @@ async function runSearch(term) {
     resultsEl.innerHTML = '<div class="empty">输入文字后回车检索</div>';
     return;
   }
-  addQHist(curTerm);
-  hideQHist();
-  summaryEl.textContent = "检索中…";
-  resultsEl.innerHTML = '<div class="loading">检索中…</div>';
+  if (!retry) {
+    addQHist(curTerm);
+    hideQHist();
+    summaryEl.textContent = "检索中…";
+    resultsEl.innerHTML = '<div class="loading">正在检索书架内容…</div>';
+  }
   const limit = curIds.length ? curIds : null;
   try {
     if (mode === "sem") {
@@ -401,9 +471,11 @@ async function runSearch(term) {
       : "";
     summaryEl.textContent = books
       ? "在 " + books + " 本书中找到 " + hits + " 处" + (curIds.length ? "（限定 " + curIds.length + " 本）" : "") + pendingHint
-      : (pendingBooks ? "全文索引正在后台准备 " + pendingBooks + " 本书，完成后再次搜索" : "未找到结果");
+      : (pendingBooks ? "正在准备 " + pendingBooks + " 本书的全文索引，页面将自动显示结果…" : "未找到结果");
   }
   render();
+  if (mode === "kw" && pendingBooks > 0) scheduleKeywordRetry(curTerm);
+  else if (mode === "kw") stopKeywordRetry();
 }
 
 // ---- 关键词 / 语义 模式切换 ----
@@ -411,9 +483,35 @@ let mode = "kw";
 const modeKw = document.getElementById("mode-kw");
 const modeSem = document.getElementById("mode-sem");
 const sortBox = sortEl;
-function setMode(m) {
+async function semanticReadiness() {
+  try {
+    const status = await invoke("semantic_status");
+    if (!status?.model_ready) {
+      return "语义模型尚未下载或加载。\n请先在“语义索引设置”中下载模型。";
+    }
+    const ready = await invoke("semantic_index_done", { ids: curIds.length ? curIds : null });
+    if (!ready) {
+      const scope = curIds.length ? "当前选定的图书" : "书架图书";
+      return scope + "还没有完成语义索引。\n请点击“建立语义索引”，完成后再使用语义检索。";
+    }
+    return "";
+  } catch (_error) {
+    return "暂时无法确认语义检索状态。\n请稍后重试，或在语义索引设置中检查模型与索引。";
+  }
+}
+
+async function setMode(m) {
   if (mode === m) return;
+  if (m === "sem") {
+    const warning = await semanticReadiness();
+    if (warning) {
+      await showSearchAlert(warning, "语义检索未就绪");
+      return;
+    }
+  }
+  stopKeywordRetry();
   mode = m;
+  document.body.classList.toggle("semantic-mode", m === "sem");
   modeKw.classList.toggle("active", m === "kw");
   modeSem.classList.toggle("active", m === "sem");
   sortBox.style.display = m === "sem" ? "none" : ""; // 语义按相似度固定排序
@@ -424,8 +522,8 @@ function setMode(m) {
   const inputTerm = qEl.value.trim();
   if (inputTerm) runSearch(inputTerm);
 }
-modeKw.addEventListener("click", () => setMode("kw"));
-modeSem.addEventListener("click", () => setMode("sem"));
+modeKw.addEventListener("click", () => { void setMode("kw"); });
+modeSem.addEventListener("click", () => { void setMode("sem"); });
 
 // ---- 建立语义索引 + 进度 ----
 const buildBtn = document.getElementById("build-sem");
@@ -494,6 +592,7 @@ qEl.addEventListener("input", () => {
   // 用户已经开始改下一次查询时，旧请求即使随后返回也不得重建结果 DOM。
   searchSeq += 1;
   renderGeneration += 1;
+  stopKeywordRetry();
   if (qEl.value.trim()) hideQHist();
   else showQHist();
 });

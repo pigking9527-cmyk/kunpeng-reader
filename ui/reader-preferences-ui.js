@@ -2,7 +2,6 @@
   "use strict";
   const modal = document.getElementById("reader-preferences-modal");
   const openButton = document.getElementById("reader-preferences-btn");
-  const closeButton = document.getElementById("reader-preferences-close");
   if (!modal || !openButton || !global.ReaderSettings) return;
 
   const PALETTE_STORAGE_KEY = "readerCustomPalettesV1";
@@ -11,6 +10,8 @@
   const MAX_BACKGROUND_IMAGE_BYTES = 10 * 1024 * 1024;
   const MAX_INLINE_BACKGROUND_IMAGE_CHARS = 160000; // legacy migration only
   const TOOLBAR_ITEM_IDS = Object.freeze(["toc", "chapters", "tts", "annotations", "vocabulary", "settings"]);
+  const colorRules = global.ReaderPreferenceColorRules && ["normalizedHex", "hexToHsl", "hslToHex"]
+    .every((name) => typeof global.ReaderPreferenceColorRules[name] === "function") ? global.ReaderPreferenceColorRules : null;
   const invoke = global.__TAURI__?.core?.invoke;
   // 语言文件比偏好页晚更新或被旧缓存复用时，ReaderI18n 会回显键名。
   // 偏好页不能把内部键名当作可见文案，因此此处稳定退回到内置文案。
@@ -68,6 +69,7 @@
   }
 
   function normalizedHex(value, fallback = "#222222") {
+    if (colorRules) return colorRules.normalizedHex(value, fallback);
     const raw = String(value || "").trim();
     const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw);
     if (!match) return fallback;
@@ -76,6 +78,7 @@
   }
 
   function hexToHsl(value) {
+    if (colorRules) return colorRules.hexToHsl(value);
     const hex = normalizedHex(value).slice(1);
     const red = parseInt(hex.slice(0, 2), 16) / 255;
     const green = parseInt(hex.slice(2, 4), 16) / 255;
@@ -91,6 +94,7 @@
   }
 
   function hslToHex(hue, saturation, lightness) {
+    if (colorRules) return colorRules.hslToHex(hue, saturation, lightness);
     const h = ((Number(hue) % 360) + 360) % 360;
     const s = Math.max(0, Math.min(100, Number(saturation) || 0)) / 100;
     const l = Math.max(0, Math.min(100, Number(lightness) || 0)) / 100;
@@ -104,6 +108,7 @@
 
   const DEFAULT_DUAL_PAGE_GAP = 40;
   const READER_LAYOUT_PREVIEW_REVEAL_DELAY = 160;
+  const READER_LAYOUT_PREVIEW_RESET_DURATION = 1000;
   let readerLayoutPreviewTimer = 0;
   let readerLayoutPreviewRevealTimer = 0;
   let readerLayoutPreview = null;
@@ -115,13 +120,15 @@
     preview.className = "reader-preferences-layout-preview";
     preview.hidden = true;
     preview.setAttribute("aria-hidden", "true");
+    preview.dataset.overlaySurface = "reader-layout-preview";
+    preview.dataset.overlayRole = "feedback";
     const previewFrame = document.createElement("iframe");
     previewFrame.className = "reader-preferences-layout-preview-frame";
     previewFrame.setAttribute("sandbox", "allow-scripts allow-same-origin");
     previewFrame.setAttribute("referrerpolicy", "no-referrer");
     previewFrame.tabIndex = -1;
     preview.append(previewFrame);
-    modal.insertAdjacentElement("afterend", preview);
+    document.body.append(preview);
     readerLayoutPreview = preview;
     readerLayoutPreviewFrame = previewFrame;
     return preview;
@@ -140,28 +147,43 @@
     readerLayoutPreviewFrame.contentWindow.postMessage({ settings: previewReaderSettings(dualPageGap) }, "*");
   }
 
-  function loadReaderLayoutPreviewFrame(dualPageGap) {
-    const source = global.ReaderLayoutPreview?.source?.(dualPageGap);
+  function readerLayoutPreviewSourceKey(source) {
+    try {
+      const url = new URL(source, global.location?.href);
+      url.searchParams.delete("s");
+      return url.href;
+    } catch (_) {
+      return String(source || "");
+    }
+  }
+
+  function loadReaderLayoutPreviewFrame(dualPageGap, source = global.ReaderLayoutPreview?.source?.(dualPageGap)) {
     if (!source || !readerLayoutPreviewFrame) return false;
     global.clearTimeout(readerLayoutPreviewRevealTimer);
     readerLayoutPreviewRevealTimer = 0;
     readerLayoutPreview.classList.remove("is-ready");
     readerLayoutPreview.dataset.source = source;
+    readerLayoutPreview.dataset.sourceKey = readerLayoutPreviewSourceKey(source);
     readerLayoutPreviewFrame.src = source;
     return true;
   }
 
+  function preloadReaderLayoutPreview(dualPageGap) {
+    const preview = ensureReaderLayoutPreview();
+    const source = global.ReaderLayoutPreview?.source?.(dualPageGap);
+    if (!source) return false;
+    if (preview.dataset.source && preview.dataset.sourceKey === readerLayoutPreviewSourceKey(source)) return true;
+    preview.hidden = true;
+    return loadReaderLayoutPreviewFrame(dualPageGap, source);
+  }
+
   function clearReaderLayoutPreview() {
     global.clearTimeout(readerLayoutPreviewTimer);
-    global.clearTimeout(readerLayoutPreviewRevealTimer);
     readerLayoutPreviewTimer = 0;
-    readerLayoutPreviewRevealTimer = 0;
     if (!readerLayoutPreview) return;
     readerLayoutPreview.hidden = true;
-    readerLayoutPreview.classList.remove("is-ready");
-    readerLayoutPreview.dataset.source = "";
+    delete readerLayoutPreview.dataset.overlayActive;
     delete readerLayoutPreview.dataset.dismissWhenReady;
-    if (readerLayoutPreviewFrame) readerLayoutPreviewFrame.removeAttribute("src");
     ["left", "top", "width", "height"].forEach((part) => readerLayoutPreview.style.removeProperty(`--reader-preference-preview-cutout-${part}`));
   }
 
@@ -178,18 +200,22 @@
     // reader:// signals ready before its first composited frame. Keep the
     // genuine reader hidden briefly so its initial blank canvas never flashes.
     readerLayoutPreviewRevealTimer = global.setTimeout(() => {
-      if (!readerLayoutPreview || readerLayoutPreview.hidden || readerLayoutPreview.dataset.source !== source) return;
+      if (!readerLayoutPreview || readerLayoutPreview.dataset.source !== source) return;
       readerLayoutPreview.classList.add("is-ready");
       const gap = dualPageGapPixels(document.getElementById("pref-dual-page-gap")?.value);
       updateReaderLayoutPreviewFrame(gap);
       if (readerLayoutPreview.dataset.dismissWhenReady === "true") {
         delete readerLayoutPreview.dataset.dismissWhenReady;
-        scheduleReaderLayoutPreviewClear(850);
+        scheduleReaderLayoutPreviewClear(READER_LAYOUT_PREVIEW_RESET_DURATION);
       }
     }, READER_LAYOUT_PREVIEW_REVEAL_DELAY);
   }
 
   function renderReaderLayoutPreview({ phase, dualPageGap }) {
+    if (phase === "finished") {
+      clearReaderLayoutPreview();
+      return;
+    }
     global.clearTimeout(readerLayoutPreviewTimer);
     readerLayoutPreviewTimer = 0;
     const preview = ensureReaderLayoutPreview();
@@ -208,8 +234,9 @@
     if (!preview.dataset.source && !loadReaderLayoutPreviewFrame(dualPageGap)) return;
     updateReaderLayoutPreviewFrame(dualPageGap);
     preview.hidden = false;
-    if (phase === "finished") {
-      if (preview.classList.contains("is-ready")) scheduleReaderLayoutPreviewClear(850);
+    preview.dataset.overlayActive = "true";
+    if (phase === "reset") {
+      if (preview.classList.contains("is-ready")) scheduleReaderLayoutPreviewClear(READER_LAYOUT_PREVIEW_RESET_DURATION);
       else preview.dataset.dismissWhenReady = "true";
     }
   }
@@ -219,6 +246,14 @@
     renderReaderLayoutPreview({
       phase: detail.phase || "finished",
       dualPageGap: detail.dualPageGap,
+    });
+  }
+
+  function applyDeferredReaderSettingsAfterPreviewPaint() {
+    // Let the preview visibility change reach the compositor before the real
+    // reader starts its comparatively expensive pagination pass.
+    global.requestAnimationFrame(() => {
+      global.requestAnimationFrame(() => global.ReaderSettings.applyDeferredSettings?.());
     });
   }
 
@@ -999,21 +1034,24 @@
   function setSection(name) {
     modal.querySelectorAll("[data-pref-section]").forEach((button) => button.classList.toggle("active", button.dataset.prefSection === name));
     modal.querySelectorAll("[data-pref-panel]").forEach((panel) => { panel.hidden = panel.dataset.prefPanel !== name; });
+    // Panels have very different heights. Leaving the previous panel's scroll
+    // offset in place can put the short Advanced panel entirely above view,
+    // which makes the jump-back settings look as if they disappeared.
+    if (preferencesContent) preferencesContent.scrollTop = 0;
     requestAnimationFrame(updatePreferencesScrollbar);
   }
 
-  openButton.addEventListener("click", (event) => { event.stopPropagation(); global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, true); render(); });
+  openButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, true);
+    render();
+  });
   preferencesNavToggle?.addEventListener("click", () => {
     preferenceNavCollapsed = !preferenceNavCollapsed;
     try { localStorage.setItem(PREFERENCE_NAV_COLLAPSED_KEY, preferenceNavCollapsed ? "1" : "0"); } catch (_) {}
     applyPreferenceNavState();
   });
   const preferencesOverlay = global.ReaderShell?.OVERLAY?.PREFERENCES || "preferences";
-  closeButton?.addEventListener("click", () => {
-    closeColorPopover();
-    clearReaderLayoutPreview();
-    global.ReaderShell?.setOverlay?.(preferencesOverlay, false);
-  });
   modal.addEventListener("pointerdown", (event) => {
     preferencesOutsidePointerDown = event.target === modal;
   });
@@ -1110,13 +1148,13 @@ reader.onload = async () => {
     const value = dualPageGapPixels(event.target.value);
     const output = document.getElementById("pref-dual-page-gap-value");
     if (output) output.textContent = `${value} px`;
-    global.ReaderSettings.update({ dualPageGap: value }, { deferPageApply: true });
     previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "adjusting" });
+    global.ReaderSettings.update({ dualPageGap: value }, { deferPageApply: true });
   });
   document.getElementById("pref-dual-page-gap")?.addEventListener("change", (event) => {
     const value = dualPageGapPixels(event.target.value);
-    global.ReaderSettings.applyDeferredSettings?.();
     previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "finished" });
+    applyDeferredReaderSettingsAfterPreviewPaint();
   });
   document.getElementById("pref-dual-page-gap-reset")?.addEventListener("click", () => {
     const value = DEFAULT_DUAL_PAGE_GAP;
@@ -1124,8 +1162,9 @@ reader.onload = async () => {
     const output = document.getElementById("pref-dual-page-gap-value");
     if (input) input.value = String(value);
     if (output) output.textContent = `${value} px`;
-    global.ReaderSettings.update({ dualPageGap: value });
-    previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "finished" });
+    previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "reset" });
+    global.ReaderSettings.update({ dualPageGap: value }, { deferPageApply: true });
+    applyDeferredReaderSettingsAfterPreviewPaint();
   });
   function setReaderJumpBackConfigExpanded(expanded) {
     const config = document.getElementById("pref-reader-jump-back-config");

@@ -44,7 +44,7 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
   assert.doesNotMatch(backend, /正在显示本地缓存，后台正在更新/);
   assert.match(html, /id="newsnow-feed"/);
   assert.match(html, /<\/section>\s*<section[\s\S]*?id="newsnow-reader"/);
-  assert.match(html, /<script src="news-ui\.js"><\/script>/);
+  assert.match(html, /<script src="news-layout-rules\.js"><\/script>\s*<script src="news-ui\.js"><\/script>/);
   assert.doesNotMatch(html, /class="newsnow-title-row"/);
   assert.doesNotMatch(html, />READING BRIEF</);
   assert.doesNotMatch(html, />今日资讯</);
@@ -278,7 +278,10 @@ test("Gesture settings live in common settings and return from news, library, an
     html,
     /id="gesture-global-precision"[\s\S]*?type="range"[\s\S]*?min="1"[\s\S]*?max="10"[\s\S]*?step="1"/,
   );
-  assert.match(html, /id="gesture-hint-enabled"[\s\S]*?type="checkbox"[\s\S]*?role="switch"/);
+  assert.match(
+    html,
+    /id="gesture-hint-enabled"[\s\S]*?type="checkbox"[\s\S]*?role="switch"/,
+  );
   assert.match(html, /id="gesture-hint-settings-toggle"[^>]*>\s*手势提示/);
   assert.match(html, /id="gesture-hint-settings"[^>]*hidden/);
   assert.match(
@@ -435,8 +438,14 @@ test("Gesture settings live in common settings and return from news, library, an
   assert.match(gestureUi, /querySelector\("\.content-shell"\)/);
   assert.match(gestureUi, /invoke\("main_window_close"\)/);
   assert.match(gestureUi, /event\.button !== 2/);
-  assert.match(gestureUi, /pad\.addEventListener\("pointermove", moveTraining/);
-  assert.match(gestureUi, /pad\.addEventListener\("lostpointercapture", cancelTraining\)/);
+  assert.match(
+    gestureUi,
+    /pad\.addEventListener\("pointermove", movePointerTraining/,
+  );
+  assert.match(
+    gestureUi,
+    /pad\.addEventListener\("lostpointercapture", cancelTraining\)/,
+  );
   assert.match(gestureUi, /"PointerEvent" in global/);
   assert.doesNotMatch(gestureUi, /test\.addEventListener\("click"/);
   assert.match(gestureUi, /api\.similarity\(profile\.points, points\)/);
@@ -592,11 +601,23 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(html, /id="gesture-hint-background"/);
   assert.match(html, /id="gesture-hint-background-reset"[^>]*>\s*恢复默认/);
   assert.match(html, /id="gesture-hint-background-presets"/);
-  assert.match(html, /id="gesture-hint-color-picker-toggle"[^>]*aria-label="打开背景色盘"/);
-  assert.match(html, /id="gesture-hint-background"[^>]*class="gesture-hint-native-color-input"[^>]*type="color"/);
-  assert.match(html, /id="gesture-hint-quick-color-add"[^>]*aria-label="添加当前颜色为快捷色"[^>]*hidden[^>]*>\s*\+/);
+  assert.match(
+    html,
+    /id="gesture-hint-color-picker-toggle"[^>]*aria-label="打开背景色盘"/,
+  );
+  assert.match(
+    html,
+    /id="gesture-hint-background"[^>]*class="gesture-hint-native-color-input"[^>]*type="color"/,
+  );
+  assert.match(
+    html,
+    /id="gesture-hint-quick-color-add"[^>]*aria-label="添加当前颜色为快捷色"[^>]*hidden[^>]*>\s*\+/,
+  );
   assert.match(html, /id="gesture-hint-shape-rect"[^>]*aria-pressed="true"/);
-  assert.match(html, /id="gesture-hint-shape-freeform"[^>]*aria-pressed="false"/);
+  assert.match(
+    html,
+    /id="gesture-hint-shape-freeform"[^>]*aria-pressed="false"/,
+  );
   assert.match(html, /id="gesture-hint-preview-path"/);
   assert.doesNotMatch(html, /gesture-hint-frame-draw/);
   assert.match(html, /id="gesture-hint-background"[^>]*type="color"/);
@@ -636,23 +657,26 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(gestureUi, /frameWidth: 200/);
   assert.match(gestureUi, /frameHeight: 60/);
   assert.match(gestureUi, /frameShape: "rect"/);
-  assert.match(
-    gestureUi,
-    /hintBackgroundReset\.addEventListener\("click"/,
-  );
+  assert.match(gestureUi, /hintBackgroundReset\.addEventListener\("click"/);
   assert.match(gestureUi, /function normalizeHintQuickColors\(value\)/);
   assert.match(gestureUi, /function renderHintBackgroundPresets\(\)/);
   assert.match(gestureUi, /let selectedQuickColorId = null/);
   assert.match(gestureUi, /let hoveredQuickColorId = null/);
   assert.match(gestureUi, /gesture-hint-quick-color-bridge/);
-  assert.match(gestureUi, /hoveredQuickColorId = null;\s*selectedQuickColorId = null/);
+  assert.match(
+    gestureUi,
+    /hoveredQuickColorId = null;\s*selectedQuickColorId = null/,
+  );
   assert.match(gestureUi, /let hintColorPickerOpen = false/);
   assert.match(gestureUi, /hintQuickColorAdd\.addEventListener\("click"/);
   assert.match(gestureUi, /hintColorPickerToggle\.addEventListener\("click"/);
   assert.match(gestureUi, /hintQuickColorAdd\.hidden = !hintColorPickerOpen/);
   assert.match(gestureUi, /hintBackground\.addEventListener\("change"/);
   assert.match(gestureUi, /hintSettings\.quickColors\.length < 6/);
-  assert.match(gestureUi, /hintPreview\.hidden = !hintSettings\.backgroundEnabled \|\| hintDrawingFrame/);
+  assert.match(
+    gestureUi,
+    /hintPreview\.hidden = !hintSettings\.backgroundEnabled \|\| hintDrawingFrame/,
+  );
   assert.match(gestureUi, /function updateHintFrame\(event\)/);
   assert.match(gestureUi, /function commitHintFrame\(\)/);
   assert.match(gestureUi, /hintDrawingFrame = true/);
@@ -725,20 +749,38 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     styles,
     /\.gesture-hint-controls \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
   );
+  assert.match(styles, /\.gesture-hint-background-row \{[^}]*flex-wrap: wrap/);
   assert.match(
     styles,
-    /\.gesture-hint-background-row \{[^}]*flex-wrap: wrap/,
+    /\.gesture-hint-quick-color-bridge \{[^}]*top: 100%;[^}]*width: 18px;[^}]*height: 6px/,
   );
-  assert.match(styles, /\.gesture-hint-quick-color-bridge \{[^}]*top: 100%;[^}]*width: 18px;[^}]*height: 6px/);
-  assert.match(styles, /\.gesture-hint-quick-color-remove \{[^}]*top: calc\(100% \+ 5px\)/);
-  assert.match(styles, /\.gesture-hint-quick-color-remove\[hidden\] \{[^}]*display: none/);
+  assert.match(
+    styles,
+    /\.gesture-hint-quick-color-remove \{[^}]*top: calc\(100% \+ 5px\)/,
+  );
+  assert.match(
+    styles,
+    /\.gesture-hint-quick-color-remove\[hidden\] \{[^}]*display: none/,
+  );
   assert.match(styles, /\.gesture-hint-background-preset \{[^}]*border: 0/);
-  assert.match(styles, /\.gesture-hint-preview span\[hidden\] \{[^}]*display: none/);
+  assert.match(
+    styles,
+    /\.gesture-hint-preview span\[hidden\] \{[^}]*display: none/,
+  );
   assert.doesNotMatch(styles, /\.gesture-hint-color-picker-panel \{/);
-  assert.match(styles, /\.gesture-hint-color-picker-toggle \{[^}]*conic-gradient/);
+  assert.match(
+    styles,
+    /\.gesture-hint-color-picker-toggle \{[^}]*conic-gradient/,
+  );
   assert.match(styles, /\.gesture-hint-native-color-input \{[^}]*opacity: 0/);
-  assert.match(styles, /\.gesture-hint-shape-tools \{[^}]*backdrop-filter: blur/);
-  assert.match(styles, /\.gesture-hint-quick-color-add \{[^}]*background: #3478d4/);
+  assert.match(
+    styles,
+    /\.gesture-hint-shape-tools \{[^}]*backdrop-filter: blur/,
+  );
+  assert.match(
+    styles,
+    /\.gesture-hint-quick-color-add \{[^}]*background: #3478d4/,
+  );
   assert.match(styles, /\.gesture-hint-preview \{[^}]*min-height: 180px/);
   assert.match(styles, /\.gesture-hint-preview span \{[^}]*cursor: grab/);
   assert.match(
@@ -759,12 +801,18 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     gestureUi,
     /const gestureSettings = root\.getElementById\("gesture-settings-modal"\)/,
   );
+  assert.doesNotMatch(gestureUi, /if \(pad\.contains\(target\)\) return null;/);
   assert.match(
     gestureUi,
-    /runCloseOrUndo\(action, "手势设置", closeSettings, openSettings\)/,
+    /if \(!editor\.hidden && editor\.contains\(target\)\) \{[\s\S]*?allowedActions: supportedActions\(\["back"\]\),[\s\S]*?closeEditor\(\);[\s\S]*?return \{[\s\S]*?allowedActions: supportedActions\(\["back"\]\),[\s\S]*?"手势设置", closeSettings, openSettings/,
   );
   assert.match(gestureUi, /allowedActions: supportedActions\(\["back"\]\)/);
   assert.match(gestureUi, /function canApplyAction\(surface, action\)/);
+  assert.doesNotMatch(gestureUi, /startPointerGesture|activePointerId/);
+  assert.match(
+    gestureUi,
+    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", move,[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\(event\), true\);/,
+  );
   assert.match(gestureUi, /reader-closed-for-reopen/);
   assert.match(gestureUi, /invoke\("open_book", \{ id \}\)/);
   assert.match(
@@ -809,9 +857,54 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   );
   assert.match(
     gestureUi,
-    /pad\.addEventListener\("pointermove", moveTraining, \{ passive: false \}\)/,
+    /pad\.addEventListener\("pointermove", movePointerTraining, \{ passive: false \}\)/,
   );
-  assert.match(gestureUi, /pad\.addEventListener\("pointerup", finishTraining\)/);
+  assert.match(
+    gestureUi,
+    /pad\.addEventListener\("pointerup", finishPointerTraining\)/,
+  );
+  assert.match(
+    gestureUi,
+    /pad\.addEventListener\("mousedown", beginTraining\)/,
+  );
+  assert.match(
+    gestureUi,
+    /global\.addEventListener\("mousemove", moveTraining, \{[\s\S]*?capture: true,[\s\S]*?passive: false/,
+  );
+  assert.match(
+    gestureUi,
+    /global\.addEventListener\("mouseup", finishTraining, true\)/,
+  );
+  assert.match(
+    gestureUi,
+    /function beginPointerTraining\(event\) \{[\s\S]*?if \(event\.pointerType === "mouse"\) return;/,
+  );
+  assert.doesNotMatch(
+    gestureUi,
+    /if \(modal\.contains\(event\.target\)\) return;/,
+  );
+  assert.match(
+    gestureUi,
+    /function appendTrainingPoints\(event\) \{[\s\S]*?event\.getCoalescedEvents\?\.\(\)[\s\S]*?\[\.\.\.coalesced, event\][\s\S]*?training\.push\(point\)/,
+  );
+  const trainingStart = gestureUi.slice(
+    gestureUi.indexOf("function beginTraining"),
+    gestureUi.indexOf("function appendTrainingPoints"),
+  );
+  assert.match(trainingStart, /if \(event\.button !== 0\) return;/);
+  assert.match(trainingStart, /event\.preventDefault\(\);/);
+  const trainingFinish = gestureUi.slice(
+    gestureUi.indexOf("function finishTraining"),
+    gestureUi.indexOf("function cancelTraining"),
+  );
+  assert.match(
+    trainingFinish,
+    /appendTrainingPoints\(event\);[\s\S]*?if \(length < api\.MIN_PATH_LENGTH\) \{\s*training = \[\];\s*api\.draw\(pad, training\);[\s\S]*?已清除，请重新画。[\s\S]*?return;/,
+  );
+  assert.match(
+    gestureUi,
+    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", move,[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\(event\), true\);/,
+  );
   const matcher = gestureUi.slice(
     gestureUi.indexOf("function matchProfile"),
     gestureUi.indexOf("function begin"),
@@ -823,10 +916,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     /surface\.allowedActions\.includes\(profile\.action\)/,
   );
   assert.match(readerGesture, /async function closeReaderSurface\(source\)/);
-  assert.match(
-    readerGesture,
-    /if \(shell\?\.closeSurface\?\.\(\)\) return;/,
-  );
+  assert.match(readerGesture, /if \(shell\?\.closeSurface\?\.\(\)\) return;/);
   assert.match(
     readerGesture,
     /previous\.sidePanel === "ai-reader" \? "智读" : previous\.sidePanel/,
@@ -901,8 +991,10 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
     /\.newsnow-layout-grid-icon::before\s*\{[^}]*width: 9px[^}]*height: 9px[^}]*box-shadow:\s*11px 0 currentColor,\s*0 11px currentColor,\s*11px 11px currentColor/s,
   );
   assert.match(script, /function masonryColumnCount\(\)/);
+  assert.match(script, /ReaderNewsLayoutRules/);
   assert.match(script, /className = "newsnow-masonry-column"/);
   assert.match(script, /function estimatedCardHeight\(item, columnCount\)/);
+  assert.match(script, /balancedColumnIndexes/);
   assert.match(script, /const columnHeights = Array\.from/);
   assert.match(script, /renderedMasonryColumnCount = columnCount/);
   assert.match(

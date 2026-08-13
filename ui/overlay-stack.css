@@ -1,0 +1,45 @@
+/*
+ * Semantic overlay rule: information and operation surfaces share one
+ * interactive band and follow actual opening order; critical confirmations
+ * sit above them, and non-interactive feedback sits above every page. Feature
+ * code never owns numeric z-indexes.
+ */
+.modal[data-overlay-managed="true"],
+[data-overlay-surface][data-overlay-managed="true"] {
+  /* The stack manager is the only owner of cross-page depth. Important is
+     intentional: it neutralizes legacy ID selectors without page branching. */
+  z-index: var(--overlay-z-index) !important;
+}
+
+/* Shared by the main and reader windows; placement and colors remain settings. */
+.reader-gesture-hint {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 9px 13px;
+  border-radius: 9px;
+  color: #fff;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 8px 22px rgba(32, 57, 93, 0.2);
+  pointer-events: none;
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+}
+
+.reader-gesture-hint[hidden] {
+  display: flex;
+  opacity: 0;
+  transform: translateY(-8px);
+}

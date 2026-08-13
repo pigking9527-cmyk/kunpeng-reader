@@ -1,18 +1,20 @@
 param(
   [string]$Version = "",
-  [string]$Repo = "pigking9527-cmyk/kunpeng-reader",
+  [string]$Repo = $env:KUNPENG_RELEASE_REPOSITORY,
   [switch]$SkipChecks,
   [switch]$SkipBuild,
   [switch]$SkipInstaller,
   [switch]$SkipPush,
   [switch]$SkipGitHubRelease,
-  [switch]$SkipServerUpdateManifest,
   [switch]$Draft,
   [switch]$AllowDirty
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+
+& node (Join-Path $repoRoot "scripts/assert-public-release-allowed.mjs")
+if ($LASTEXITCODE -ne 0) { throw "Public release is paused by the repository license policy." }
 
 function Invoke-Step {
   param(
@@ -89,12 +91,8 @@ try {
   $tag = "v$Version"
   Write-Host "Release: $tag"
 
-  if (-not $SkipServerUpdateManifest) {
-    foreach ($name in @('KUNPENG_RELEASE_SERVER', 'KUNPENG_RELEASE_IDENTITY_FILE', 'KUNPENG_RELEASE_REMOTE_PATH')) {
-      if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-        throw "Missing $name. Set private release deployment settings outside the repository, or pass -SkipServerUpdateManifest."
-      }
-    }
+  if (-not $SkipGitHubRelease -and [string]::IsNullOrWhiteSpace($Repo)) {
+    throw "Missing KUNPENG_RELEASE_REPOSITORY. Configure the new owner/repository outside the repository."
   }
 
   if (-not $SkipBuild) {
@@ -157,12 +155,6 @@ try {
       }
       gh release upload $tag $assets[0] $assets[1] $assets[2] --repo $Repo --clobber
       gh release view $tag --repo $Repo --json url,assets
-    }
-  }
-
-  if (-not $SkipGitHubRelease -and -not $SkipServerUpdateManifest) {
-    Invoke-Step "server update manifest" {
-      & (Join-Path $repoRoot "scripts\publish-update-manifest.ps1") -Version $Version
     }
   }
 } finally {

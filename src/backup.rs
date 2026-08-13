@@ -2,14 +2,39 @@ use crate::{
     atomic_file, db, reader_backgrounds, recovery_settings, stats::StatsStore, vocab::VocabStore,
     AppState,
 };
+mod catalog;
+mod restore;
+mod retention;
+mod snapshot;
+mod transaction_log;
+
 use chrono::Local;
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-const MAX_RECOVERY_BACKUPS: usize = 7;
+pub(crate) use catalog::BackupStatus;
+use catalog::{backup_directories, backup_sort_key, recovery_directory};
+use restore::{
+    is_sqlite_target, runtime_projection_names_are_exact, staging_path, transaction_directory,
+    transaction_plan_states, RestoreFilePlan,
+};
+use retention::select_expired_paths;
+#[cfg(test)]
+use retention::MAX_RECOVERY_BACKUPS;
+use snapshot::{
+    file_sha256, manifest_contains, manifest_for, verified_manifest_file, BackupManifest,
+    BACKUP_FORMAT_VERSION,
+};
+#[cfg(test)]
+use transaction_log::RestoreTransactionPlanState;
+#[cfg(test)]
+use transaction_log::RESTORE_TRANSACTION_VERSION;
+use transaction_log::{
+    load_manifest, RestoreTransactionLog, RestoreTransactionManifest, RestoreTransactionPhase,
+    RESTORE_TRANSACTION_FILE,
+};
 const BACKUP_METADATA_KEY: &str = "last_recovery_backup_day";
 const RUNTIME_PROJECTION_FILES: &[&str] = &["library.json", "stats.json", "vocab.json"];
 const PORTABLE_FILES: &[&str] = &[
@@ -22,9 +47,6 @@ const PORTABLE_FILES: &[&str] = &[
     reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE,
 ];
 const SQLITE_FILES: &[&str] = &["external-dicts.db"];
-const BACKUP_FORMAT_VERSION: u32 = 3;
-const RESTORE_TRANSACTION_FILE: &str = ".restore-transaction.json";
-const RESTORE_TRANSACTION_VERSION: u32 = 2;
 static BACKUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serializes a core-data installation with backup and restore. Callers that
@@ -36,238 +58,21 @@ pub(crate) fn core_installation_lock() -> Result<std::sync::MutexGuard<'static, 
         .map_err(|_| "核心数据安装锁定失败".to_string())
 }
 
-#[derive(Clone, Default, Serialize)]
-pub(crate) struct BackupStatus {
-    directory: String,
-    latest: String,
-    count: u32,
-    total_bytes: u64,
-    created: bool,
-    backups: Vec<BackupEntry>,
-}
-
-#[derive(Clone, Serialize)]
-pub(crate) struct BackupEntry {
-    id: String,
-    created_at: String,
-    total_bytes: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-struct BackupManifest {
-    format: String,
-    version: u32,
-    app_version: String,
-    created_at: String,
-    files: Vec<BackupManifestFile>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-enum BackupManifestFile {
-    Legacy(String),
-    Verified {
-        name: String,
-        bytes: u64,
-        sha256: String,
-    },
-}
-
-impl BackupManifestFile {
-    fn name(&self) -> &str {
-        match self {
-            Self::Legacy(name) | Self::Verified { name, .. } => name,
-        }
-    }
-}
-
 fn config_dir() -> Result<PathBuf, String> {
-    let mut dir = dirs::config_dir().ok_or("无法确定应用配置目录")?;
-    dir.push("ebook-reader");
-    Ok(dir)
+    crate::profile::app_config_dir().ok_or("无法确定应用配置目录".into())
 }
 
 fn backup_root() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("backups"))
 }
 
-fn directory_bytes(path: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| {
-            let path = entry.path();
-            if path.is_dir() {
-                directory_bytes(&path)
-            } else {
-                entry.metadata().map(|metadata| metadata.len()).unwrap_or(0)
-            }
-        })
-        .sum()
-}
-
-fn backup_directories() -> Result<Vec<PathBuf>, String> {
-    let root = backup_root()?;
-    let mut backups = std::fs::read_dir(&root)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.is_dir()
-                        && !path
-                            .file_name()
-                            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    backups.sort();
-    Ok(backups)
-}
-
-fn file_sha256(path: &Path) -> Result<(u64, String), String> {
-    let file = std::fs::File::open(path)
-        .map_err(|error| format!("打开校验文件失败 {}：{error}", path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut total = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("读取校验文件失败 {}：{error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        total = total.saturating_add(read as u64);
-    }
-    let sha256 = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect();
-    Ok((total, sha256))
-}
-
-fn verified_manifest_file(directory: &Path, name: &str) -> Result<BackupManifestFile, String> {
-    let (bytes, sha256) = file_sha256(&directory.join(name))?;
-    Ok(BackupManifestFile::Verified {
-        name: name.into(),
-        bytes,
-        sha256,
-    })
-}
-
-fn manifest_contains(manifest: &BackupManifest, name: &str) -> bool {
-    manifest.files.iter().any(|file| file.name() == name)
-}
-
-fn validate_manifest_files(path: &Path, manifest: &BackupManifest) -> Result<(), String> {
-    let mut seen = std::collections::HashSet::new();
-    for file in &manifest.files {
-        let name = file.name();
-        if !seen.insert(name) || std::path::Path::new(name).components().count() != 1 {
-            return Err(format!("恢复点文件名无效或重复：{name}"));
-        }
-        let file_path = path.join(name);
-        if !file_path.is_file() {
-            return Err(format!("恢复点文件缺失：{}", file_path.display()));
-        }
-        if let BackupManifestFile::Verified { bytes, sha256, .. } = file {
-            let (actual_bytes, actual_sha256) = file_sha256(&file_path)?;
-            if actual_bytes != *bytes || actual_sha256 != *sha256 {
-                return Err(format!("恢复点文件完整性检查失败：{name}"));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn manifest_for(path: &Path) -> Result<BackupManifest, String> {
-    let manifest = std::fs::read_to_string(path.join("manifest.json"))
-        .map_err(|e| format!("读取恢复点清单失败 {}：{e}", path.display()))?;
-    let manifest: BackupManifest = serde_json::from_str(&manifest)
-        .map_err(|e| format!("恢复点清单格式无效 {}：{e}", path.display()))?;
-    if manifest.format != "kunpeng-reader-recovery" || manifest.version != BACKUP_FORMAT_VERSION {
-        return Err(format!("不支持的恢复点格式：{}", path.display()));
-    }
-    if !manifest_contains(&manifest, "reader.db") {
-        return Err(format!("恢复点缺少 reader.db：{}", path.display()));
-    }
-    validate_manifest_files(path, &manifest)?;
-    Ok(manifest)
-}
-
-fn backup_entry(path: &Path) -> BackupEntry {
-    let id = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let created_at = manifest_for(path)
-        .map(|manifest| manifest.created_at)
-        .unwrap_or_else(|_| id.clone());
-    BackupEntry {
-        id,
-        created_at,
-        total_bytes: directory_bytes(path),
-    }
-}
-
 pub(crate) fn status() -> Result<BackupStatus, String> {
     let root = backup_root()?;
-    let backups = backup_directories()?;
-    Ok(BackupStatus {
-        directory: root.to_string_lossy().into_owned(),
-        latest: backups
-            .last()
-            .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        count: backups.len() as u32,
-        total_bytes: backups.iter().map(|path| directory_bytes(path)).sum(),
-        created: false,
-        backups: backups
-            .iter()
-            .rev()
-            .map(|path| backup_entry(path))
-            .collect(),
-    })
+    Ok(catalog::status(&root))
 }
 
-fn backup_sort_key(path: &Path) -> i128 {
-    if let Ok(manifest) = manifest_for(path) {
-        if let Ok(created_at) = chrono::DateTime::parse_from_rfc3339(&manifest.created_at) {
-            return created_at.timestamp_millis() as i128;
-        }
-    }
-    std::fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i128)
-        .unwrap_or(i128::MIN)
-}
-
-fn rotate_backup_paths(mut backups: Vec<PathBuf>, protected: Option<&Path>) -> Result<(), String> {
-    backups.sort_by(|left, right| {
-        backup_sort_key(left)
-            .cmp(&backup_sort_key(right))
-            .then_with(|| left.cmp(right))
-    });
-    let remove_count = backups.len().saturating_sub(MAX_RECOVERY_BACKUPS);
-    let removable = backups
-        .into_iter()
-        .filter(|path| protected != Some(path.as_path()))
-        .take(remove_count)
-        .collect::<Vec<_>>();
-    if removable.len() != remove_count {
-        return Err("恢复点轮转无法在保护本次快照的同时满足保留数量".into());
-    }
-    for path in removable {
+fn rotate_backup_paths(backups: Vec<PathBuf>, protected: Option<&Path>) -> Result<(), String> {
+    for path in select_expired_paths(backups, protected, backup_sort_key)? {
         std::fs::remove_dir_all(&path)
             .map_err(|e| format!("删除旧恢复点失败 {}：{e}", path.display()))?;
     }
@@ -275,7 +80,7 @@ fn rotate_backup_paths(mut backups: Vec<PathBuf>, protected: Option<&Path>) -> R
 }
 
 fn rotate_backups(protected: Option<&Path>) -> Result<(), String> {
-    rotate_backup_paths(backup_directories()?, protected)
+    rotate_backup_paths(backup_directories(&backup_root()?), protected)
 }
 
 struct LockedCoreData<'a> {
@@ -413,258 +218,6 @@ impl BackupStatus {
             Ok(&self.latest)
         }
     }
-}
-
-fn safe_backup_id(id: &str) -> bool {
-    !id.is_empty()
-        && std::path::Path::new(id).components().count() == 1
-        && !id.contains(['/', '\\'])
-        && !id.starts_with('.')
-}
-
-fn recovery_directory(id: &str) -> Result<PathBuf, String> {
-    if !safe_backup_id(id) {
-        return Err("恢复点标识无效".to_string());
-    }
-    let path = backup_root()?.join(id);
-    if !path.is_dir() {
-        return Err("所选恢复点不存在或已被清理".to_string());
-    }
-    Ok(path)
-}
-
-fn staging_path(destination: &Path, label: &str) -> Result<PathBuf, String> {
-    let parent = destination
-        .parent()
-        .ok_or_else(|| format!("无法确定恢复目标目录：{}", destination.display()))?;
-    let name = destination
-        .file_name()
-        .ok_or_else(|| format!("恢复目标无文件名：{}", destination.display()))?
-        .to_string_lossy();
-    Ok(parent.join(format!(".{name}.{label}-{}", std::process::id())))
-}
-
-struct RestoreFilePlan {
-    destination: PathBuf,
-    staged: PathBuf,
-    previous: PathBuf,
-    had_previous: bool,
-    expected_bytes: u64,
-    expected_sha256: String,
-    original_bytes: Option<u64>,
-    original_sha256: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RestoreTransactionPhase {
-    Installing,
-    Validated,
-}
-
-#[derive(Serialize, Deserialize)]
-struct RestoreTransactionManifest {
-    version: u32,
-    phase: RestoreTransactionPhase,
-    plans: Vec<RestoreTransactionPlanState>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct RestoreTransactionPlanState {
-    destination: PathBuf,
-    staged: PathBuf,
-    previous: PathBuf,
-    had_previous: bool,
-    expected_bytes: u64,
-    expected_sha256: String,
-    original_bytes: Option<u64>,
-    original_sha256: Option<String>,
-    original_moved: bool,
-    new_committed: bool,
-}
-
-struct RestoreTransactionLog {
-    path: PathBuf,
-    manifest: RestoreTransactionManifest,
-}
-
-impl RestoreTransactionLog {
-    fn begin(plans: &[RestoreFilePlan]) -> Result<Self, String> {
-        let directory = restore_plan_directory(plans)?;
-        let path = directory.join(RESTORE_TRANSACTION_FILE);
-        let transaction = Self {
-            path,
-            manifest: RestoreTransactionManifest {
-                version: RESTORE_TRANSACTION_VERSION,
-                phase: RestoreTransactionPhase::Installing,
-                plans: plans
-                    .iter()
-                    .map(|plan| RestoreTransactionPlanState {
-                        destination: plan.destination.clone(),
-                        staged: plan.staged.clone(),
-                        previous: plan.previous.clone(),
-                        had_previous: plan.had_previous,
-                        expected_bytes: plan.expected_bytes,
-                        expected_sha256: plan.expected_sha256.clone(),
-                        original_bytes: plan.original_bytes,
-                        original_sha256: plan.original_sha256.clone(),
-                        original_moved: false,
-                        new_committed: false,
-                    })
-                    .collect(),
-            },
-        };
-        transaction.persist_new()?;
-        Ok(transaction)
-    }
-
-    fn persist_new(&self) -> Result<(), String> {
-        let bytes = serde_json::to_vec(&self.manifest)
-            .map_err(|error| format!("序列化恢复事务日志失败：{error}"))?;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&self.path)
-            .map_err(|error| {
-                format!(
-                    "创建恢复事务日志失败（可能已有恢复任务）：{}：{error}",
-                    self.path.display()
-                )
-            })?;
-        let result = (|| {
-            file.write_all(&bytes)
-                .map_err(|error| format!("写入恢复事务日志失败：{error}"))?;
-            file.flush()
-                .map_err(|error| format!("刷新恢复事务日志失败：{error}"))?;
-            file.sync_all()
-                .map_err(|error| format!("同步恢复事务日志失败：{error}"))
-        })();
-        drop(file);
-        if result.is_err() {
-            let _ = std::fs::remove_file(&self.path);
-        }
-        result
-    }
-
-    fn persist(&self) -> Result<(), String> {
-        atomic_file::write_json(&self.path, &self.manifest, false)
-            .map_err(|error| format!("保存恢复事务日志失败：{error}"))
-    }
-
-    fn mark_original_moved(&mut self, index: usize) -> Result<(), String> {
-        let plan = self
-            .manifest
-            .plans
-            .get_mut(index)
-            .ok_or("恢复事务计划索引无效")?;
-        plan.original_moved = true;
-        self.persist()
-    }
-
-    fn mark_new_committed(&mut self, index: usize) -> Result<(), String> {
-        let plan = self
-            .manifest
-            .plans
-            .get_mut(index)
-            .ok_or("恢复事务计划索引无效")?;
-        plan.new_committed = true;
-        self.persist()
-    }
-
-    fn refresh_committed_integrity(&mut self) -> Result<(), String> {
-        for plan in &mut self.manifest.plans {
-            let (bytes, sha256) = file_sha256(&plan.destination)?;
-            plan.expected_bytes = bytes;
-            plan.expected_sha256 = sha256;
-        }
-        self.persist()
-    }
-
-    fn mark_validated(&mut self) -> Result<(), String> {
-        self.manifest.phase = RestoreTransactionPhase::Validated;
-        self.persist()
-    }
-
-    fn finish(self) -> Result<(), String> {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "清理恢复事务日志失败 {}：{error}",
-                self.path.display()
-            )),
-        }
-    }
-}
-
-fn restore_plan_directory(plans: &[RestoreFilePlan]) -> Result<PathBuf, String> {
-    let directory = plans
-        .first()
-        .and_then(|plan| plan.destination.parent())
-        .ok_or("恢复事务没有有效目标目录")?
-        .to_path_buf();
-    if plans.iter().any(|plan| {
-        plan.destination.parent() != Some(directory.as_path())
-            || plan.staged.parent() != Some(directory.as_path())
-            || plan.previous.parent() != Some(directory.as_path())
-    }) {
-        return Err("恢复事务文件必须位于同一数据目录".into());
-    }
-    Ok(directory)
-}
-
-fn valid_restore_target_name(name: &str) -> bool {
-    name == "reader.db" || PORTABLE_FILES.contains(&name) || SQLITE_FILES.contains(&name)
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn validate_restore_transaction_plan(
-    directory: &Path,
-    plan: &RestoreTransactionPlanState,
-) -> Result<(), String> {
-    if plan.destination.parent() != Some(directory)
-        || plan.staged.parent() != Some(directory)
-        || plan.previous.parent() != Some(directory)
-    {
-        return Err("恢复事务包含数据目录之外的路径".into());
-    }
-    let destination_name = plan
-        .destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("恢复事务目标文件名无效")?;
-    if !valid_restore_target_name(destination_name) {
-        return Err(format!("恢复事务目标不受支持：{destination_name}"));
-    }
-    if !valid_sha256(&plan.expected_sha256)
-        || plan.original_bytes.is_some() != plan.original_sha256.is_some()
-        || plan
-            .original_sha256
-            .as_deref()
-            .is_some_and(|hash| !valid_sha256(hash))
-        || plan.had_previous != plan.original_sha256.is_some()
-    {
-        return Err(format!("恢复事务文件校验信息无效：{destination_name}"));
-    }
-    let staged_name = plan
-        .staged
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let previous_name = plan
-        .previous
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    if !staged_name.starts_with(&format!(".{destination_name}.restore-new-"))
-        || !previous_name.starts_with(&format!(".{destination_name}.restore-previous-"))
-    {
-        return Err("恢复事务暂存文件名与目标不匹配".into());
-    }
-    Ok(())
 }
 
 fn remove_file_if_present(path: &Path, context: &str) -> Result<(), String> {
@@ -855,12 +408,7 @@ fn rollback_manifest_plans(manifest: &RestoreTransactionManifest) -> Result<(), 
     }
 
     for plan in &manifest.plans {
-        let target_name = plan
-            .destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if matches!(target_name, "reader.db" | "external-dicts.db") {
+        if is_sqlite_target(&plan.destination) {
             remove_sqlite_sidecars(&plan.destination)?;
         }
     }
@@ -902,27 +450,13 @@ fn validated_live_files_match(manifest: &RestoreTransactionManifest) -> Result<b
 }
 
 fn recover_interrupted_restore_in_dir(directory: &Path) -> Result<(), String> {
-    let transaction_path = directory.join(RESTORE_TRANSACTION_FILE);
-    if !try_exists(&transaction_path, "检查恢复事务日志失败")? {
+    let allowed_targets = std::iter::once("reader.db")
+        .chain(PORTABLE_FILES.iter().copied())
+        .chain(SQLITE_FILES.iter().copied())
+        .collect::<Vec<_>>();
+    let Some(manifest) = load_manifest(directory, &allowed_targets)? else {
         return recover_legacy_restore_artifacts(directory);
-    }
-    let bytes = std::fs::read(&transaction_path).map_err(|error| {
-        format!(
-            "读取未完成恢复事务失败 {}：{error}",
-            transaction_path.display()
-        )
-    })?;
-    let manifest: RestoreTransactionManifest = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("解析未完成恢复事务失败：{error}"))?;
-    if manifest.version != RESTORE_TRANSACTION_VERSION || manifest.plans.is_empty() {
-        return Err(format!(
-            "未完成恢复事务版本无效，请保留数据目录并人工检查：{}",
-            transaction_path.display()
-        ));
-    }
-    for plan in &manifest.plans {
-        validate_restore_transaction_plan(directory, plan)?;
-    }
+    };
 
     match manifest.phase {
         RestoreTransactionPhase::Installing => rollback_manifest_plans(&manifest)?,
@@ -934,7 +468,10 @@ fn recover_interrupted_restore_in_dir(directory: &Path) -> Result<(), String> {
             }
         }
     }
-    remove_file_if_present(&transaction_path, "清理恢复事务日志失败")
+    remove_file_if_present(
+        &directory.join(RESTORE_TRANSACTION_FILE),
+        "清理恢复事务日志失败",
+    )
 }
 
 /// Must run before AppDb::open. If the previous process died while replacing
@@ -1153,17 +690,7 @@ fn stage_runtime_projections(
     directory: &Path,
     files: &[(&str, Vec<u8>)],
 ) -> Result<Vec<RestoreFilePlan>, String> {
-    if files.len() != RUNTIME_PROJECTION_FILES.len()
-        || files
-            .iter()
-            .any(|(name, _)| !RUNTIME_PROJECTION_FILES.contains(name))
-        || files
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            != files.len()
-    {
+    if !runtime_projection_names_are_exact(files, RUNTIME_PROJECTION_FILES) {
         return Err("运行时投影必须且只能包含 library.json、stats.json、vocab.json".to_string());
     }
     let mut plans = Vec::with_capacity(files.len());
@@ -1263,7 +790,7 @@ fn rollback_durable_restore(
     transaction: RestoreTransactionLog,
     primary: String,
 ) -> Result<(), String> {
-    match rollback_manifest_plans(&transaction.manifest) {
+    match rollback_manifest_plans(transaction.manifest()) {
         Ok(()) => match transaction.finish() {
             Ok(()) => Err(primary),
             Err(cleanup) => Err(format!("{primary}；清理事务日志失败：{cleanup}")),
@@ -1452,7 +979,15 @@ where
     C: FnMut(usize, &RestoreFilePlan) -> Result<(), String>,
     V: FnOnce() -> Result<(), String>,
 {
-    let mut transaction = match RestoreTransactionLog::begin(plans) {
+    let transaction_plans = transaction_plan_states(plans);
+    let directory = match transaction_directory(plans) {
+        Ok(directory) => directory,
+        Err(error) => {
+            cleanup_restore_plans(plans);
+            return Err(error);
+        }
+    };
+    let mut transaction = match RestoreTransactionLog::begin(directory, transaction_plans) {
         Ok(transaction) => Some(transaction),
         Err(error) => {
             cleanup_restore_plans(plans);
@@ -1590,7 +1125,7 @@ pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String
     let config = config_dir()?;
     std::fs::create_dir_all(&config).map_err(|error| format!("创建应用数据目录失败：{error}"))?;
     recover_interrupted_restore_in_dir(&config)?;
-    let recovery = recovery_directory(id)?;
+    let recovery = recovery_directory(&backup_root()?, id)?;
     let manifest = manifest_for(&recovery)?;
     let snapshot_db = recovery.join("reader.db");
     let snapshot = rusqlite::Connection::open(&snapshot_db)
@@ -1757,10 +1292,10 @@ mod tests {
 
     #[test]
     fn recovery_ids_cannot_escape_the_backup_directory() {
-        assert!(safe_backup_id("20260720-185825-180"));
-        assert!(!safe_backup_id("../reader.db"));
-        assert!(!safe_backup_id("a/b"));
-        assert!(!safe_backup_id(".temporary"));
+        assert!(catalog::is_safe_backup_id("20260720-185825-180"));
+        assert!(!catalog::is_safe_backup_id("../reader.db"));
+        assert!(!catalog::is_safe_backup_id("a/b"));
+        assert!(!catalog::is_safe_backup_id(".temporary"));
     }
 
     #[test]

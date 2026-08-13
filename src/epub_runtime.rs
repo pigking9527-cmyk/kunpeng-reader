@@ -272,8 +272,7 @@ fn epub_entry_sizes(path: &Path) -> HashMap<String, usize> {
 }
 
 fn epub_cache_dir() -> Option<PathBuf> {
-    let mut dir = dirs::cache_dir()?;
-    dir.push("ebook-reader");
+    let mut dir = crate::profile::app_cache_dir()?;
     dir.push("epub-cache");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)

@@ -253,14 +253,11 @@ pub(crate) async fn translate_text(
     let fallback_provider = provider.clone().unwrap_or_else(|| "baidu".to_string());
     let fallback_source = source_lang.clone().unwrap_or_else(|| "auto".to_string());
     let fallback_target = target_lang.clone().unwrap_or_else(|| "zh-CN".to_string());
-    let credential = state
-        .db
-        .lock()
-        .map_err(|_| "数据库锁定失败".to_string())
-        .and_then(|guard| {
-            let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-            translate::resolve_translation_credential(db, &credential_config_id)
-        });
+    // Read credentials before scheduling network work; never hold the sole
+    // SQLite connection while the translation provider is running.
+    let credential = state.with_db_read("resolve_translation_credential", |db| {
+        translate::resolve_translation_credential(db, &credential_config_id)
+    });
     let (stored_provider, api_id, api_key) = match credential {
         Ok(value) => value,
         Err(error) => {
@@ -305,18 +302,19 @@ pub(crate) fn translation_credential_status(
     state: tauri::State<'_, AppState>,
     provider: String,
 ) -> Result<translate::TranslationCredentialStatus, String> {
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    translate::translation_credential_status(db, &provider)
+    state.with_db_read("translation_credential_status", |db| {
+        translate::translation_credential_status(db, &provider)
+    })
 }
 
 #[tauri::command]
 pub(crate) fn translation_credentials_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<translate::TranslationCredentialsStatus, String> {
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    translate::translation_credentials_status(db)
+    state.with_db_read(
+        "translation_credentials_status",
+        translate::translation_credentials_status,
+    )
 }
 
 #[tauri::command]
@@ -324,9 +322,9 @@ pub(crate) fn set_translation_active_provider(
     state: tauri::State<'_, AppState>,
     provider: String,
 ) -> Result<translate::TranslationCredentialsStatus, String> {
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    translate::set_translation_active_provider(db, &provider)
+    state.with_db_write("set_translation_active_provider", |db| {
+        translate::set_translation_active_provider(db, &provider)
+    })
 }
 
 #[derive(Deserialize)]
@@ -347,9 +345,9 @@ pub(crate) fn save_translation_credential(
         api_id,
         api_key,
     } = request;
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    translate::save_translation_credential(db, &provider, &api_id, &api_key)
+    state.with_db_write("save_translation_credential", |db| {
+        translate::save_translation_credential(db, &provider, &api_id, &api_key)
+    })
 }
 
 #[tauri::command]

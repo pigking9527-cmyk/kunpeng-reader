@@ -79,8 +79,7 @@ pub(crate) struct ReaderFontStatus {
 }
 
 fn font_dir() -> Option<PathBuf> {
-    let mut path = dirs::data_local_dir()?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_data_dir()?;
     path.push("fonts");
     Some(path)
 }

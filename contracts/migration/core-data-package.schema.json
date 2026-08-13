@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/pigking9527-cmyk/kunpeng-reader/contracts/migration/core-data-package.schema.json",
+  "$id": "https://schemas.kunpeng-reader.invalid/migration/core-data-package.schema.json",
   "title": "Kunpeng Reader core sync state migration package",
   "type": "object",
   "required": ["format", "version", "exported_at", "source_device_id", "entities"],

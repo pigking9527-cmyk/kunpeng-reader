@@ -22,6 +22,7 @@ const preferencesCss = fs.readFileSync(path.join(root, "reader-preferences.css")
 test("reader settings exposes a dedicated preferences window above quick controls", () => {
   assert.match(html, /id="reader-preferences-btn"[\s\S]*?阅读偏好/);
   assert.match(html, /id="reader-preferences-modal"/);
+  assert.doesNotMatch(html, /id="reader-preferences-close"/);
   assert.match(html, /data-pref-panel="appearance"/);
   assert.match(html, /data-pref-panel="pagination"/);
   assert.match(html, /data-pref-panel="toolbar"/);
@@ -80,6 +81,7 @@ test("advanced preferences configure the independent jump-back icon lifetime", (
   assert.match(preferences, /global\.addEventListener\("click", \(event\) => \{/);
   assert.match(preferences, /config\.contains\(event\.target\) \|\| readerJumpBackSettingsButton\?\.contains\(event\.target\)/);
   assert.match(preferences, /setReaderJumpBackConfigExpanded\(false\)/);
+  assert.match(preferences, /if \(preferencesContent\) preferencesContent\.scrollTop = 0/);
   assert.match(preferences, /if \(expanded\) renderJumpBackPreview\(global\.ReaderSettings\.get\(\)\)/);
   assert.match(html, /id="pref-reader-jump-back-dismiss-mode"[\s\S]*?value="pages"[\s\S]*?value="time"/);
   assert.match(html, /id="pref-reader-jump-back-pages"[^>]*min="1"[^>]*max="100"/);
@@ -91,7 +93,8 @@ test("advanced preferences configure the independent jump-back icon lifetime", (
   assert.match(settings, /readerJumpBackDismissMode: "pages"/);
   assert.match(settings, /readerJumpBackDismissSeconds: 30/);
   assert.match(settings, /readerJumpBackDismissPages: 3/);
-  assert.match(settings, /readerJumpBackSizeLevel: 1/);
+  assert.match(settings, /const \{ readerJumpBackSizeLevel: _removedJumpBackSizeLevel, \.\.\.current \} = stored;/);
+  assert.doesNotMatch(settings, /readerJumpBackIconSizePxFromLegacyLevel|readerJumpBackLegacySizeLevelFromPx/);
   assert.match(settings, /readerJumpBackIconSizePx: 32/);
   assert.match(settings, /readerJumpBackPositionX: 950/);
   assert.match(settings, /readerJumpBackPositionY: 500/);
@@ -175,7 +178,7 @@ test("preferences preserve old themes and update the same local reader settings 
   assert.match(preferences, /FileReader/);
   assert.match(preferences, /movePaletteDrag/);
   assert.match(html, /data-pref-scope="default"[^>]*>总体</);
-  assert.match(html, /id="reader-preferences-close"/);
+  assert.doesNotMatch(html, /reader-preferences-close/);
   assert.match(preferences, /preferencesOutsidePointerDown/);
   assert.match(preferences, /activeColorControl/);
   assert.match(preferences, /function openColorPopover\(control\)/);
@@ -254,7 +257,11 @@ test("EPUB preferences distinguish whole-image and continuous image pagination",
   assert.match(preferences, /reader-preferences-layout-preview/);
   assert.match(preferences, /reader-preference-preview-cutout-left/);
   assert.doesNotMatch(preferences, /ALICE_PREVIEW_IMAGE|ALICE_PREVIEW_TEXT/);
-  assert.match(preferencesCss, /\.reader-preferences-layout-preview\{position:fixed;inset:0;z-index:51/);
+  assert.match(preferencesCss, /\.reader-preferences-layout-preview\{position:fixed;inset:0;overflow:hidden/);
+  assert.match(preferences, /preview\.dataset\.overlaySurface = "reader-layout-preview"/);
+  assert.match(preferences, /preview\.dataset\.overlayRole = "feedback"/);
+  assert.match(preferences, /preview\.dataset\.overlayActive = "true"/);
+  assert.match(preferences, /document\.body\.append\(preview\)/);
   assert.match(preferencesCss, /-webkit-mask-composite:xor/);
   assert.match(preferencesCss, /reader-preferences-layout-preview-frame/);
   assert.doesNotMatch(preferences, /is-gutter-adjusting/);
@@ -291,10 +298,22 @@ test("two-page pagination exposes a bounded configurable gutter", () => {
   assert.match(preferencesCss, /reader-preference-range-control/);
   assert.match(preferences, /function renderReaderLayoutPreview\(\{ phase, dualPageGap \}\)/);
   assert.match(preferences, /READER_LAYOUT_PREVIEW_REVEAL_DELAY = 160/);
+  assert.match(preferences, /READER_LAYOUT_PREVIEW_RESET_DURATION = 1000/);
   assert.match(preferences, /function revealReaderLayoutPreviewAfterPaint\(\)/);
-  assert.match(preferences, /readerLayoutPreview\.hidden \|\| readerLayoutPreview\.dataset\.source !== source/);
+  assert.match(preferences, /function preloadReaderLayoutPreview\(dualPageGap\)/);
+  assert.match(preferences, /function readerLayoutPreviewSourceKey\(source\)[\s\S]*?searchParams\.delete\("s"\)/);
+  assert.match(preferences, /preview\.dataset\.sourceKey === readerLayoutPreviewSourceKey\(source\)/);
+  assert.doesNotMatch(preferences, /openButton\.addEventListener\("click"[\s\S]{0,300}?preloadReaderLayoutPreview/);
+  assert.doesNotMatch(preferences, /if \(name === "pagination"\)[\s\S]{0,200}?preloadReaderLayoutPreview/);
+  assert.match(preferences, /readerLayoutPreview\.dataset\.source !== source/);
+  assert.doesNotMatch(preferences, /readerLayoutPreviewFrame\.removeAttribute\("src"\)/);
+  assert.match(preferences, /function applyDeferredReaderSettingsAfterPreviewPaint\(\)[\s\S]*?requestAnimationFrame[\s\S]*?requestAnimationFrame[\s\S]*?applyDeferredSettings/);
   assert.match(preferences, /DEFAULT_DUAL_PAGE_GAP/);
   assert.match(preferences, /dualPageGap: detail\.dualPageGap/);
+  assert.match(preferences, /if \(phase === "finished"\) \{\s*clearReaderLayoutPreview\(\);\s*return;/);
+  assert.match(preferences, /pref-dual-page-gap"\)\?\.addEventListener\("change"[\s\S]*?phase: "finished"[\s\S]*?applyDeferredReaderSettingsAfterPreviewPaint/);
+  assert.match(preferences, /pref-dual-page-gap-reset"\)\?\.addEventListener\("click"[\s\S]*?phase: "reset"[\s\S]*?deferPageApply: true[\s\S]*?applyDeferredReaderSettingsAfterPreviewPaint/);
+  assert.match(preferences, /scheduleReaderLayoutPreviewClear\(READER_LAYOUT_PREVIEW_RESET_DURATION\)/);
   assert.match(preferencesCss, /\.reader-preferences-layout-preview/);
   assert.match(preferencesCss, /mask-composite:exclude/);
 });

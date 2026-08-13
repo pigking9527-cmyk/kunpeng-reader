@@ -118,9 +118,18 @@ test("paged image preview is limited to the page immediately before the stable o
   assert.match(source, /nextPagedImageByPrecedingContent\(imgs,rr,step,current\)/);
   assert.match(source, /inCurrentView&&S\.imagePagination==='continuous'&&img\.__kpPagedPreviewFromPage===current-1&&Math\.floor\(img\.__kpPagedPreviewHeight\|\|0\)>=32/);
   assert.match(source, /function hasPendingContinuousPagedImageSource\(\)/);
+  assert.match(source, /function continuousPagedImageSourceState\(\)/);
   assert.match(source, /if\(S\.imagePagination!==\'continuous\'\)\{clearPagedImagePreview\(\);return;\}/);
   assert.match(source, /isDualPage\(\)\|\|S\.imagePagination!==\'continuous\'/);
   assert.match(source, /if\(hasPendingContinuousPagedImageSource\(\)\)\{[\s\S]*?refreshPagedImagePreview\(\);[\s\S]*?return;/);
+  assert.match(source, /function stabilizeProgrammaticViewPaint\(\)/);
+  assert.match(source, /pendingContinuous[\s\S]*?!pendingContinuous&&typeof refreshPagedImagePreview/);
+  assert.match(source, /applyScrollPageMask\(true\)/);
+  assert.match(source, /void root\.offsetWidth;[\s\S]*?root\.style\.transform='translateX\(-'/);
+  assert.match(source, /refreshPagedImagePreview\(\);[\s\S]*?stabilizeProgrammaticViewPaint\(\)/);
+  assert.match(source, /updateScrollPageAfterProgrammatic\(\);[\s\S]*?stabilizeProgrammaticViewPaint\(\)/);
+  assert.match(source, /cropPagedImageSource\(box,candidate,remaining\);[\s\S]*?void root\.offsetWidth;[\s\S]*?root\.style\.transform='translateX\(-'/);
+  assert.match(source, /__kpPagedOriginalHeight[\s\S]*?originalHeight-consumed/);
   assert.match(source, /candidate\.__kpPagedPreviewFromPage===current-1/);
   assert.match(source, /if\(consumed<32\)\{/);
   assert.match(source, /logicalLeft=candidateRect\.left-rr\.left/);

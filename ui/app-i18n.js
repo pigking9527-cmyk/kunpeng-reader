@@ -3118,6 +3118,18 @@
     .forEach((locale) =>
       Object.assign(COPY[locale], PANEL_COPY.en, PANEL_COPY[locale] || {}),
     );
+  // The main window loads this catalog immediately before this compatibility
+  // entry. Keep the local data only for isolated consumers that load this
+  // file alone (for example a standalone regression harness).
+  const STATS_CATALOG = global.ReaderAppI18nStatsCatalog;
+  if (
+    STATS_CATALOG !== undefined &&
+    (typeof STATS_CATALOG.applyChart !== "function" ||
+      typeof STATS_CATALOG.applyDetail !== "function" ||
+      typeof STATS_CATALOG.applyHeatmap !== "function")
+  ) {
+    throw new Error("ReaderAppI18nStatsCatalog must expose statistics appliers");
+  }
   const STATS_CHART_COPY = {
     "zh-CN": {
       lineChartData: "折线图显示数据",
@@ -3172,13 +3184,17 @@
       chartWords: "글자 수",
     },
   };
-  Object.keys(COPY).forEach((locale) =>
-    Object.assign(
-      COPY[locale],
-      STATS_CHART_COPY.en,
-      STATS_CHART_COPY[locale] || {},
-    ),
-  );
+  if (STATS_CATALOG) {
+    STATS_CATALOG.applyChart(COPY);
+  } else {
+    Object.keys(COPY).forEach((locale) =>
+      Object.assign(
+        COPY[locale],
+        STATS_CHART_COPY.en,
+        STATS_CHART_COPY[locale] || {},
+      ),
+    );
+  }
   const DYNAMIC_PANEL_COPY = {
     "zh-CN": {
       activeFilters: "已启用筛选",
@@ -3323,15 +3339,19 @@
     "zh-TW": { statsBookNotes: "標示 {highlights} · 批註 {notes}" },
     en: { statsBookNotes: "Highlights {highlights} · Notes {notes}" },
   };
-  Object.keys(COPY)
-    .filter((locale) => locale !== "ja" && locale !== "ko")
-    .forEach((locale) =>
-      Object.assign(
-        COPY[locale],
-        STATS_DETAIL_COPY.en,
-        STATS_DETAIL_COPY[locale] || {},
-      ),
-    );
+  if (STATS_CATALOG) {
+    STATS_CATALOG.applyDetail(COPY);
+  } else {
+    Object.keys(COPY)
+      .filter((locale) => locale !== "ja" && locale !== "ko")
+      .forEach((locale) =>
+        Object.assign(
+          COPY[locale],
+          STATS_DETAIL_COPY.en,
+          STATS_DETAIL_COPY[locale] || {},
+        ),
+      );
+  }
   const STATS_HEATMAP_COPY = {
     "zh-CN": {
       heatmapColor: "热力图颜色",
@@ -3364,13 +3384,17 @@
       heatmapOrange: "주황",
     },
   };
-  Object.keys(COPY).forEach((locale) =>
-    Object.assign(
-      COPY[locale],
-      STATS_HEATMAP_COPY.en,
-      STATS_HEATMAP_COPY[locale] || {},
-    ),
-  );
+  if (STATS_CATALOG) {
+    STATS_CATALOG.applyHeatmap(COPY);
+  } else {
+    Object.keys(COPY).forEach((locale) =>
+      Object.assign(
+        COPY[locale],
+        STATS_HEATMAP_COPY.en,
+        STATS_HEATMAP_COPY[locale] || {},
+      ),
+    );
+  }
   const ACCOUNT_RUNTIME_COPY = {
     "zh-CN": {
       accountSecurityBoundEmail:
@@ -3872,6 +3896,18 @@
       SEMANTIC_SETTINGS_COPY[locale] || {},
     ),
   );
+  // The main window preloads the data-only catalog below. Keep the local
+  // table as the explicit standalone fallback for an isolated WebView that
+  // loads this compatibility entry on its own.
+  const SEMANTIC_RUNTIME_CATALOG = global.ReaderAppI18nSemanticRuntimeCatalog;
+  if (
+    SEMANTIC_RUNTIME_CATALOG !== undefined &&
+    typeof SEMANTIC_RUNTIME_CATALOG.apply !== "function"
+  ) {
+    throw new Error(
+      "ReaderAppI18nSemanticRuntimeCatalog must expose a semantic runtime applier",
+    );
+  }
   const SEMANTIC_RUNTIME_COPY = {
     "zh-CN": {
       semSmallTitle: "轻量语义检索 · BGE Small 中文",
@@ -4039,13 +4075,17 @@
       semBuildMulti: "다중 프로필 만들기",
     },
   };
-  Object.keys(COPY).forEach((locale) =>
-    Object.assign(
-      COPY[locale],
-      SEMANTIC_RUNTIME_COPY.en,
-      SEMANTIC_RUNTIME_COPY[locale] || {},
-    ),
-  );
+  if (SEMANTIC_RUNTIME_CATALOG) {
+    SEMANTIC_RUNTIME_CATALOG.apply(COPY);
+  } else {
+    Object.keys(COPY).forEach((locale) =>
+      Object.assign(
+        COPY[locale],
+        SEMANTIC_RUNTIME_COPY.en,
+        SEMANTIC_RUNTIME_COPY[locale] || {},
+      ),
+    );
+  }
   const SEMANTIC_DIMENSION_COPY = {
     "zh-CN": {
       semVectorDimensions: "{dimensions} 维",
@@ -5308,6 +5348,18 @@
     }
     COPY[locale].syncAiHistoryHint = text;
   });
+  // The main window loads this catalog immediately before this compatibility
+  // entry. Keep the local data only for isolated consumers that load this
+  // file alone (for example a standalone regression harness).
+  const NEWS_SURFACE_CATALOG = global.ReaderAppI18nNewsSurfaceCatalog;
+  if (
+    NEWS_SURFACE_CATALOG !== undefined &&
+    typeof NEWS_SURFACE_CATALOG.apply !== "function"
+  ) {
+    throw new Error(
+      "ReaderAppI18nNewsSurfaceCatalog must expose a news surface applier",
+    );
+  }
   // The news surface renders both static markup and dynamic controls. Keep its
   // complete catalog together so switching the app language never leaves a
   // Chinese fallback in the feed, source picker, or article view.
@@ -5343,9 +5395,13 @@
       newsTitle: "Notícias de hoje", newsDescription: "Um feed de notícias leve, em ordem cronológica, carregado apenas quando você o abre.", backToShelf: "Voltar à estante", manageSources: "Gerenciar fontes", refresh: "Atualizar", sourceSettings: "Fontes de notícias", sourceSettingsHint: "Escolha as fontes que deseja ver. A seleção é sincronizada nos dispositivos conectados.", sourceSearch: "Buscar fontes, categorias ou palavras-chave", listLayout: "Layout de lista", gridLayout: "Layout de grade", mixedOrder: "Misto", bySourceOrder: "Por fonte", newsCategoryAll: "Todas", newsSelectedSources: "{count} / {max} selecionadas", noMatchingSources: "Nenhuma fonte integrada correspondente.", maxSources: "Você pode selecionar até {max} fontes.", openWebPage: "Abrir página da web →", noNewsInCategory: "Ainda não há notícias nesta categoria.", noNews: "Ainda não há notícias. Atualize ou altere as fontes em Gerenciar fontes.", loadingNews: "Carregando…", refreshingNews: "Atualizando…", newsUpdatedAt: "Atualizado {time}", newsSourceRequired: "Mantenha pelo menos uma fonte de notícias.", newsSourcesSaved: "Salvo. Atualizando as notícias automaticamente…", newsTiebaLimit: "Você pode adicionar até {max} fóruns.", newsSourceLimit: "O limite de fontes foi atingido; {name} ainda não pode ser ativado.", newsCategories: "Categorias de notícias", newsLayout: "Layout de notícias", newsOrder: "Ordem das notícias", newsReader: "Artigo", newsReaderBack: "Voltar ao feed de notícias", newsOpenOriginal: "Abrir original no navegador", tiebaSection: "Fóruns personalizados do Baidu Tieba", tiebaHint: "Depois de adicionar um fórum, selecione-o para incluir as publicações mais recentes no feed.", tiebaAdd: "+ Adicionar fórum", tiebaInput: "Digite o nome de um fórum, por exemplo Genshin Impact", tiebaInputAria: "Adicionar um fórum do Baidu Tieba", tiebaConfirm: "Confirmar", tiebaCancel: "Cancelar", tiebaCount: "{count} / {max} fóruns adicionados · {enabled} ativados", tiebaEmpty: "Nenhum fórum foi adicionado.", tiebaBarName: "Fórum {name}", tiebaEnable: "Ativar fórum {name}", tiebaRemove: "Remover fórum {name}", untitledNews: "Notícia sem título", newsArticleLoadFailed: "Não foi possível carregar o artigo. Tente novamente mais tarde.", newsBackgroundRefreshFailed: "A atualização em segundo plano falhou. Os itens atuais continuam disponíveis.", newsRequestTimedOut: "A solicitação de notícias expirou. Os itens atuais serão mantidos.", newsLoadFailed: "Não foi possível carregar as notícias. Verifique a conexão e tente novamente.",
     },
   };
-  Object.entries(NEWS_SURFACE_COPY).forEach(([locale, copy]) =>
-    Object.assign(COPY[locale], copy),
-  );
+  if (NEWS_SURFACE_CATALOG) {
+    NEWS_SURFACE_CATALOG.apply(COPY);
+  } else {
+    Object.entries(NEWS_SURFACE_COPY).forEach(([locale, copy]) =>
+      Object.assign(COPY[locale], copy),
+    );
+  }
   function selectedLanguage() {
     return localStorage.getItem(STORAGE_KEY) || "system";
   }
@@ -5426,63 +5482,12 @@
     );
   }
   // 重排模型由高精度策略自动准备，状态不再把“下载/加载”操作暴露给用户。
-  const RERANKER_AUTOLOAD_COPY = {
-    "zh-CN": {
-      semRerankerLoading:
-        "正在下载/载入重排模型；它会对初步检索出的候选内容重新排序，让回答引用更准确。",
-      semRerankerReady:
-        "已就绪；高精度检索实际调用时会自动载入，再对候选内容重新排序，让回答引用更准确。",
-      semRerankerNotDownloaded:
-        "未下载；点击“下载重排模型”后可用于高精度检索。",
-      semRerankerPartial:
-        "下载未完成；点击“继续下载重排模型”可复用已下载部分。",
-      semResumeReranker: "继续下载重排模型",
-    },
-    "zh-TW": {
-      semRerankerLoading:
-        "正在下載/載入重排模型；它會對初步檢索出的候選內容重新排序，讓回答引用更準確。",
-      semRerankerReady:
-        "已就緒；高精度檢索實際調用時會自動載入，再對候選內容重新排序，讓回答引用更準確。",
-      semRerankerNotDownloaded:
-        "未下載；點擊「下載重排模型」後可用於高精度檢索。",
-      semRerankerPartial:
-        "下載未完成；點擊「繼續下載重排模型」可重用已下載部分。",
-      semResumeReranker: "繼續下載重排模型",
-    },
-    en: {
-      semRerankerLoading:
-        "Downloading/loading the reranker. It reranks candidate content so citations are more accurate.",
-      semRerankerReady:
-        "Ready. It loads automatically when high-precision retrieval calls it, then reranks candidate content for more accurate citations.",
-      semRerankerNotDownloaded:
-        "Not downloaded. Download the reranker before using high-precision retrieval.",
-      semRerankerPartial:
-        "Download incomplete. Resume to reuse the parts already downloaded.",
-      semResumeReranker: "Resume reranker download",
-    },
-    ja: {
-      semRerankerLoading:
-        "再ランキングモデルをダウンロード / 読み込み中です。候補内容を並べ替え、回答の引用精度を高めます。",
-      semRerankerReady:
-        "準備完了。高精度検索で実際に呼び出されたとき自動で読み込み、候補内容を並べ替えて引用精度を高めます。",
-      semRerankerNotDownloaded:
-        "未ダウンロードです。高精度検索を使う前に再ランキングモデルをダウンロードしてください。",
-      semRerankerPartial:
-        "ダウンロード未完了です。「再ランキングモデルのダウンロードを再開」で既存部分を再利用できます。",
-      semResumeReranker: "再ランキングモデルのダウンロードを再開",
-    },
-    ko: {
-      semRerankerLoading:
-        "재정렬 모델을 다운로드/불러오는 중입니다. 후보 내용을 다시 정렬해 답변 인용의 정확도를 높입니다.",
-      semRerankerReady:
-        "준비됨. 고정밀 검색에서 실제로 호출할 때 자동으로 불러온 뒤 후보 내용을 다시 정렬해 답변 인용의 정확도를 높입니다.",
-      semRerankerNotDownloaded:
-        "다운로드되지 않았습니다. 고정밀 검색을 사용하기 전에 재정렬 모델을 다운로드하세요.",
-      semRerankerPartial:
-        "다운로드가 완료되지 않았습니다. 다시 받기를 선택하면 이미 받은 부분을 재사용합니다.",
-      semResumeReranker: "재정렬 모델 다운로드 다시 받기",
-    },
-  };
+  // Catalogs load before this compatibility entry; keeping the guard explicit
+  // makes a packaging-order error fail early instead of silently falling back.
+  const RERANKER_AUTOLOAD_COPY = global.ReaderAppI18nRerankerCatalog;
+  if (!RERANKER_AUTOLOAD_COPY) {
+    throw new Error("ReaderAppI18nRerankerCatalog must load before app-i18n.js");
+  }
   Object.keys(COPY).forEach((locale) =>
     Object.assign(
       COPY[locale],

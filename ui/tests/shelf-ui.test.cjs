@@ -5,6 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "shelf-ui.js"), "utf8");
+const rulesSource = fs.readFileSync(path.join(__dirname, "..", "shelf-ui-rules.js"), "utf8");
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 const settingsLayout = fs.readFileSync(path.join(__dirname, "..", "settings-layout-ui.js"), "utf8");
@@ -117,13 +118,17 @@ test("shelf covers cannot trigger native browser drag selection", () => {
 test("shelf assigns every cover URL and lets only non-first-screen images use native lazy loading", () => {
   const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
   const i18n = fs.readFileSync(path.join(__dirname, "..", "app-i18n.js"), "utf8");
+  const coverRulesPosition = html.indexOf('src="shelf-cover-loading-rules.js"');
+  const shelfPosition = html.indexOf('src="shelf-ui.js"');
   assert.match(source, /const DEFAULT_FIRST_SCREEN_COVER_COUNT = 24/);
+  assert.match(source, /const coverLoadingRules = global\.ReaderShelfCoverLoadingRules/);
   assert.match(source, /function estimateFirstScreenCoverCount\(\)/);
-  assert.match(source, /firstScreenCoverCount = Math\.max\(DEFAULT_FIRST_SCREEN_COVER_COUNT, estimateFirstScreenCoverCount\(\)\)/);
-  assert.match(card, /const eagerCoverLoad = index < firstScreenCoverCount/);
-  assert.match(card, /img\.loading = eagerCoverLoad \? "eager" : "lazy"/);
-  assert.match(card, /img\.decoding = eagerCoverLoad \? "sync" : "async"/);
-  assert.match(card, /img\.fetchPriority = eagerCoverLoad \? "high" : "auto"/);
+  assert.match(source, /coverLoadingRules\.firstScreenCoverCount\(/);
+  assert.match(card, /coverLoadingRules\.coverLoadPriority\(index, firstScreenCoverCount\)/);
+  assert.match(card, /img\.loading = coverPriority\.loading/);
+  assert.match(card, /img\.decoding = coverPriority\.decoding/);
+  assert.match(card, /img\.fetchPriority = coverPriority\.fetchPriority/);
+  assert.ok(coverRulesPosition >= 0 && coverRulesPosition < shelfPosition);
   assert.match(card, /img\.src = b\.cover/);
   assert.doesNotMatch(card, /dataset\.coverSrc/);
   assert.doesNotMatch(source, /shelfCoverOnDemand|coverOnDemand|coverObserver|activateDeferredCovers|IntersectionObserver/);
@@ -145,15 +150,17 @@ test("shelf opening preference switches between single-click opening and double-
 });
 
 test("book information opens organization management on demand and right click opens no organizer", () => {
+  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
   const info = html.slice(html.indexOf('id="book-info-modal"'), html.indexOf('id="book-organization-modal"'));
-  const manager = html.slice(html.indexOf('id="book-organization-modal"'), html.indexOf('id="similar-books-modal"'));
-  assert.match(info, /id="book-info-tags-manage"/);
-  assert.match(info, /id="book-info-collections-manage"/);
+  const manager = html.slice(html.indexOf('id="book-organization-modal"'), html.indexOf('id="booklist-modal"'));
+  assert.doesNotMatch(info, /id="book-info-tags-manage"/);
+  assert.doesNotMatch(info, /id="book-info-collections-manage"/);
   assert.doesNotMatch(info, /id="book-info-tags"|id="book-info-collections"/);
   assert.match(manager, /id="book-info-tags" class="book-info-organization-editor"/);
   assert.match(manager, /id="book-info-collections"[\s\S]*?class="book-info-organization-editor"/);
   assert.match(manager, /role="tablist"/);
-  assert.match(html, /src="book-info-organization\.js"/);
+  assert.match(html, /src="book-info-panel\.js"[\s\S]*?src="book-info-organization\.js"/);
+  assert.match(app, /ReaderBookInfoPanel\.mount\([\s\S]*?prefix: "book-info"[\s\S]*?ReaderBookOrganizationUI\.init\(/);
   assert.doesNotMatch(html, /id="batch-tag-btn"|id="batch-collection-btn"|id="batch-organization-modal"|id="book-organizer-menu"/);
   assert.match(organizationEditor, /invoke\("set_book_organization"/);
   assert.match(organizationEditor, /invoke\("rename_book_organization"/);
@@ -168,27 +175,34 @@ test("book information opens organization management on demand and right click o
   assert.doesNotMatch(organizationEditor, /global\.prompt|global\.confirm/);
 });
 
-test("book information uses a compact identity, facts, organization and description layout", () => {
+test("book information uses a compact identity, author row, organization controls and description layout", () => {
   const info = html.slice(html.indexOf('id="book-info-modal"'), html.indexOf('id="book-organization-modal"'));
-  assert.doesNotMatch(info, /book-info-eyebrow|>图书信息<|id="book-info-close"/);
-  assert.match(info, /id="book-info-cover"[\s\S]*?class="book-info-cover"/);
-  assert.match(info, /class="book-info-cover-stack"[\s\S]*?id="cover-btn"/);
-  assert.match(info, /class="book-info-hero"/);
-  assert.match(info, /class="book-info-primary"/);
-  assert.match(info, /class="book-info-facts"/);
-  assert.match(info, /class="book-info-organization-grid"/);
-  assert.match(info, /class="[^"]*book-info-description"/);
-  assert.match(styles, /\.book-info-facts\s*\{[^}]*grid-template-columns:\s*repeat\(4,/s);
-  assert.match(styles, /\.book-info-organization-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,/s);
+  const panel = fs.readFileSync(path.join(__dirname, "..", "book-info-panel.js"), "utf8");
+  const panelStyles = fs.readFileSync(path.join(__dirname, "..", "book-info-panel.css"), "utf8");
+  assert.match(info, /^id="book-info-modal"[\s\S]*?class="modal"[\s\S]*?><\/div>/);
+  assert.match(panel, /id="\$\{ids\.cover\}" class="book-info-cover"/);
+  assert.match(panel, /class="book-info-cover-stack"[\s\S]*?data-book-info-action="cover"/);
+  assert.match(panel, /class="book-info-hero"/);
+  assert.match(panel, /class="book-info-primary"/);
+  assert.match(panel, /class="book-info-author-field"/);
+  assert.match(panel, /class="book-info-facts"/);
+  assert.match(panel, /class="book-info-organization-grid"/);
+  assert.doesNotMatch(panel, /<h3>整理<\/h3>|<span>标签与书单<\/span>/);
+  assert.match(panel, /class="book-info-section book-info-description"/);
+  assert.match(panelStyles, /\.book-info-facts \{ display:grid; grid-template-columns:repeat\(4,/);
+  assert.match(panelStyles, /\.book-info-organization-grid \{ display:grid; grid-template-columns:repeat\(2,/);
 });
 
-test("book information keeps its cover current and remains behind the reading timeline", () => {
+test("book information keeps its cover current and opens shared related information above itself", () => {
   const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
-  const timeline = app.slice(app.indexOf("async function openReadingTimeline"), app.indexOf("function fmtWords"));
-  assert.doesNotMatch(timeline, /bookInfoModal\.classList\.remove\("show"\)/);
-  assert.match(app, /function renderBookInfoCover\(book\)/);
-  assert.match(app, /await shelfUI\.changeCoverById\(currentInfoBookId\);[\s\S]*?renderBookInfoCover\(shelfUI\.getBook\(currentInfoBookId\)\)/);
-  assert.match(styles, /#reading-timeline-modal\s*\{\s*z-index:\s*55;/);
+  const related = fs.readFileSync(path.join(__dirname, "..", "book-info-related.js"), "utf8");
+  assert.match(app, /window\.ReaderBookInfoRelated\.mount\(\{/);
+  assert.match(app, /bookInfoRelated\.openSimilar\(currentInfoBookId, shelfUI\.getBook\(currentInfoBookId\)\)/);
+  assert.match(app, /bookInfoRelated\.openTimeline\(currentInfoBookId\)/);
+  assert.match(app, /await shelfUI\.changeCoverById\(currentInfoBookId\);[\s\S]*?bookInfoPanel\.renderCover\(shelfUI\.getBook\(currentInfoBookId\)\)/);
+  assert.match(related, /id="reading-timeline-modal"[\s\S]*?data-overlay-role="information"/);
+  assert.match(related, /id="similar-books-modal"[\s\S]*?data-overlay-role="information"/);
+  assert.doesNotMatch(app, /function openReadingTimeline|function renderSimilarBooks/);
 });
 
 test("startup shelf can receive keyboard paging focus without stealing it on refresh", () => {
@@ -239,8 +253,10 @@ test("account overview makes clear that book source files stay local", () => {
 
 test("book information displays persisted model tags with the backend field name", () => {
   const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  assert.doesNotMatch(html, /<script>\s*window\.ReaderBookInfoPanel\.mount/s);
+  assert.ok(app.indexOf("const bookInfoPanel = window.ReaderBookInfoPanel.mount(") < app.indexOf("const bookOrganizationUI = window.ReaderBookOrganizationUI.init("));
   assert.match(app, /bookOrganizationUI\.open\(currentInfoBookId, m\)/);
-  assert.match(app, /renderBookInfoTags\(document\.getElementById\("book-info-model-tags"\), \[\], m\.model_tags \|\| m\.modelTags\)/);
+  assert.match(app, /bookInfoPanel\.render\(\{ \.\.\.book, \.\.\.m, cover: m\.cover \|\| book\.cover \}\)/);
 });
 
 test("funnel groups sorting, reading status and display controls by purpose", () => {
@@ -274,11 +290,12 @@ test("active shelf filters pulse blue, explain their state and show the visible 
 });
 
 test("new shelf sorting uses reading duration, real file size and progress", () => {
-  const sorter = source.slice(source.indexOf("function sortBooks"), source.indexOf("function matchesShelfSearch"));
+  const sorter = rulesSource.slice(rulesSource.indexOf("function sortBooks"), rulesSource.indexOf("function matchesShelfSearch"));
   assert.match(sorter, /case "reading-time":[\s\S]*reading_seconds/);
   assert.match(sorter, /case "size":[\s\S]*bookFileSizes/);
   assert.match(sorter, /case "progress":[\s\S]*\.progress/);
   assert.match(source, /invoke\("book_file_sizes"\)/);
+  assert.match(source, /rules\.sortBooks\(list, \{ bookFileSizes, sortKey \}\)/);
 });
 
 test("book organization uses book information controls and the existing funnel filters", () => {
@@ -288,8 +305,8 @@ test("book organization uses book information controls and the existing funnel f
   assert.match(organizationEditor, /rename_book_organization/);
   assert.match(organizationEditor, /delete_book_organization/);
   assert.match(source, /matchesOrganizationFilters/);
-  assert.match(source, /mode === "all"[\s\S]*?selectedTags\)\.every[\s\S]*?selectedCollections\)\.every/);
-  assert.match(source, /selectedTags\)\.some[\s\S]*?selectedCollections\)\.some/);
+  assert.match(rulesSource, /mode === "all"[\s\S]*?selectedTags\)\.every[\s\S]*?selectedCollections\)\.every/);
+  assert.match(rulesSource, /selectedTags\)\.some[\s\S]*?selectedCollections\)\.some/);
   assert.match(source, /shelfOrganizationMatchMode/);
   assert.match(source, /shelfText\("matchAll"[\s\S]*?shelfText\("matchAny"/);
   assert.match(html, /id="organization-match-mode"[^>]*data-i18n="matchAny"/);
@@ -315,25 +332,100 @@ test("book organization uses book information controls and the existing funnel f
 });
 
 test("organization match mode applies to every selected tag and collection", () => {
-  const nameFn = source.match(/function organizationName\([^)]*\)\s*\{[^}]*\}/)?.[0];
-  const keyFn = source.match(/function organizationKey\([^)]*\)\s*\{[^}]*\}/)?.[0];
-  const matcherStart = source.indexOf("function matchesOrganizationSelection");
-  const matcherEnd = source.indexOf("function matchesOrganizationFilters", matcherStart);
-  const matcherFn = matcherStart >= 0 && matcherEnd > matcherStart ? source.slice(matcherStart, matcherEnd) : "";
-  assert.ok(nameFn && keyFn && matcherFn, "pure organization matcher must remain testable");
-  const context = {};
-  vm.runInNewContext(`${nameFn}\n${keyFn}\n${matcherFn}`, context);
+  const context = { window: null };
+  context.window = context;
+  vm.runInNewContext(rulesSource, context);
+  assert.match(source, /const organizationName = rules\.organizationName/);
+  assert.match(source, /rules\.matchesOrganizationSelection\(book, tagFilter, collectionFilter, organizationMatchMode\)/);
   const book = { tags: ["古文"], collections: ["历史"] };
   const tags = new Set(["古文", "历史著作"]);
   const collections = new Set(["历史", "武侠小说"]);
-  assert.equal(context.matchesOrganizationSelection(book, tags, collections, "any"), true);
-  assert.equal(context.matchesOrganizationSelection(book, tags, collections, "all"), false);
-  assert.equal(context.matchesOrganizationSelection(
+  assert.equal(context.ReaderShelfRules.matchesOrganizationSelection(book, tags, collections, "any"), true);
+  assert.equal(context.ReaderShelfRules.matchesOrganizationSelection(book, tags, collections, "all"), false);
+  assert.equal(context.ReaderShelfRules.matchesOrganizationSelection(
     { tags: ["古文", "历史著作"], collections: ["历史", "武侠小说"] },
     tags,
     collections,
     "all",
   ), true);
+});
+
+test("shelf pure rules preserve layout bounds, search precedence, filters and render identity", () => {
+  const context = { window: null };
+  context.window = context;
+  vm.runInNewContext(rulesSource, context);
+  const rules = context.ReaderShelfRules;
+  assert.equal(rules.parseGridColumns("-3"), 0);
+  assert.equal(rules.parseGridColumns("100"), 12);
+  assert.equal(rules.parseGridColumns("4"), 4);
+  assert.equal(rules.colorFor("三国演义"), rules.colorFor("三国演义"));
+  assert.notEqual(
+    rules.bookRenderKey({ id: "a", title: "甲" }, { showCoverProgress: false, showCoverRating: false }),
+    rules.bookRenderKey({ id: "a", title: "甲" }, { showCoverProgress: true, showCoverRating: false }),
+  );
+  const books = [
+    { id: "unread", title: "Alpha", progress: 0, rating: 5, tags: ["古文"] },
+    { id: "reading", title: "Beta", progress: 50, rating: 4, tags: ["历史"] },
+    { id: "done", title: "Gamma", progress: 99, rating: 1, collections: ["收藏"] },
+  ];
+  const filters = {
+    collectionFilter: new Set(),
+    minRating: 4,
+    organizationMatchMode: "any",
+    readingFilter: { unread: false, reading: true, done: false },
+    searchQuery: "",
+    tagFilter: new Set(),
+  };
+  assert.deepEqual(rules.currentList(books, filters).map((book) => book.id), ["reading"]);
+  assert.deepEqual(
+    rules.currentList(books, { ...filters, searchQuery: "gamma" }).map((book) => book.id),
+    ["done"],
+  );
+  assert.deepEqual(
+    rules.sortBooks(books, { sortKey: "progress" }).map((book) => book.id),
+    ["done", "reading", "unread"],
+  );
+});
+
+test("shelf scrollbar geometry maps content ratios and pointer movement without DOM state", () => {
+  const context = { window: null };
+  context.window = context;
+  vm.runInNewContext(rulesSource, context);
+  const rules = context.ReaderShelfRules;
+  assert.deepEqual(
+    { ...rules.scrollbarGeometry({ viewport: 480, total: 4800, trackHeight: 300, scrollTop: 2160 }) },
+    { maxScroll: 4320, maxTop: 270, thumbHeight: 30, top: 135, visible: true },
+  );
+  assert.deepEqual(
+    { ...rules.scrollbarGeometry({ viewport: 480, total: 481, trackHeight: 300, scrollTop: 0 }) },
+    { visible: false },
+  );
+  assert.equal(
+    rules.scrollbarTrackScrollTop({
+      clientY: 220,
+      rectTop: 100,
+      thumbHeight: 30,
+      total: 4800,
+      trackHeight: 300,
+      viewport: 480,
+    }),
+    1680,
+  );
+  assert.equal(
+    rules.scrollbarDragScrollTop({
+      clientY: 190,
+      dragStartScrollTop: 1000,
+      dragStartY: 140,
+      thumbHeight: 30,
+      total: 4800,
+      trackHeight: 300,
+      viewport: 480,
+    }),
+    1800,
+  );
+  assert.match(source, /rules\.scrollbarGeometry\s*\?/);
+  assert.match(source, /rules\.scrollbarTrackScrollTop\s*\?/);
+  assert.match(source, /rules\.scrollbarDragScrollTop\s*\?/);
 });
 
 test("shelf select-all ignores the current search filter and batch-removes the whole library", async () => {
@@ -424,6 +516,7 @@ test("shelf select-all ignores the current search filter and batch-removes the w
     setTimeout,
   };
   context.window = context;
+  vm.runInNewContext(rulesSource, context);
   vm.runInNewContext(source, context);
   const shelf = context.ReaderShelfUI.init({
     root,

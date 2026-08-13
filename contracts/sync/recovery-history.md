@@ -1,32 +1,34 @@
 # 云端同步恢复历史 API
 
-本契约由 ADR-0017 定义，是同步 API v2 的可选恢复扩展，不改变 `syncProtocolVersion`。 请求与响应的机器可读结构见 [`recovery.schema.json`](recovery.schema.json)。
+本契约由 ADR-0017 定义，是同步 API 的可选恢复扩展。协议 v5 使用同一恢复语义，
+但每个 `/v1/sync/*` 请求仍须遵守 v5 请求头。请求与响应的机器可读结构见
+[`recovery.schema.json`](recovery.schema.json)。
 
-## `GET /sync/recovery/status`
+## `GET /v1/sync/recovery/status`
 
 需要 Bearer Token。响应只包含元数据，不返回历史 payload：
 
 ```json
 {
   "ok": true,
-  "schema_version": 1,
-  "server_time": 1786160000000,
-  "data_generation": 1,
-  "retention_days": 90,
+  "schemaVersion": 1,
+  "serverTime": 1786160000000,
+  "dataGeneration": 1,
+  "retentionDays": 90,
   "available": true,
-  "enabled_at": 1786150000000,
-  "restorable_from": 1786150000000,
-  "latest_version_at": 1786159000000,
-  "version_count": 42,
-  "compressed_bytes": 16384,
-  "uncompressed_bytes": 65536,
-  "last_pruned_at": 1786159500000
+  "enabledAt": 1786150000000,
+  "restorableFrom": 1786150000000,
+  "latestVersionAt": 1786159000000,
+  "versionCount": 42,
+  "compressedBytes": 16384,
+  "uncompressedBytes": 65536,
+  "lastPrunedAt": 1786159500000
 }
 ```
 
-`restorable_from` 之前的目标必须拒绝。首次部署以前没有历史，不得推断可恢复。
+`restorableFrom` 之前的目标必须拒绝。首次部署以前没有历史，不得推断可恢复。
 
-## `POST /sync/recovery/restore`
+## `POST /v1/sync/recovery/restore`
 
 需要 Bearer Token 和登录密码：
 
@@ -34,8 +36,8 @@
 {
   "password": "用户现场输入，不得记录",
   "confirm": true,
-  "target_at": 1786155000000,
-  "data_generation": 1
+  "targetAt": 1786155000000,
+  "dataGeneration": 1
 }
 ```
 
@@ -44,12 +46,12 @@
 ```json
 {
   "ok": true,
-  "target_at": 1786155000000,
-  "restored_at": 1786160000000,
-  "restored_entities": 120,
-  "tombstoned_entities": 3,
-  "data_generation": 2,
-  "tokens_revoked": true
+  "targetAt": 1786155000000,
+  "restoredAt": 1786160000000,
+  "restoredEntities": 120,
+  "tombstonedEntities": 3,
+  "dataGeneration": 2,
+  "tokensRevoked": true
 }
 ```
 

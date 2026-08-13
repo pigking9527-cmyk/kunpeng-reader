@@ -11,20 +11,20 @@
   },
   "status": {
     "method": "GET",
-    "path": "/sync/recovery/status",
+    "path": "/v1/sync/recovery/status",
     "returnsPayload": false
   },
   "restore": {
     "method": "POST",
-    "path": "/sync/recovery/restore",
+    "path": "/v1/sync/recovery/restore",
     "request": {
       "confirm": true,
-      "target_at": 1786155000000,
-      "data_generation": 1
+      "targetAt": 1786155000000,
+      "dataGeneration": 1
     },
     "expected": {
-      "data_generation": 2,
-      "tokens_revoked": true,
+      "dataGeneration": 2,
+      "tokensRevoked": true,
       "entitiesCreatedAfterTargetBecomeTombstones": true
     }
   },

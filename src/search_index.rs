@@ -112,8 +112,7 @@ struct Asset {
 }
 
 pub(crate) fn index_dir() -> Option<PathBuf> {
-    let mut dir = dirs::cache_dir()?;
-    dir.push("ebook-reader");
+    let mut dir = crate::profile::app_cache_dir()?;
     dir.push("index");
     Some(dir)
 }

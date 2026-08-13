@@ -15,7 +15,7 @@ $paths = if ($Staged) {
 if ($LASTEXITCODE -ne 0) { throw 'Unable to list files for the repository safety check.' }
 
 $errors = New-Object System.Collections.Generic.List[string]
-$publicHandoffAllowlist = @('ANDROID_HANDOFF.md')
+$publicHandoffAllowlist = @()
 $textExtensions = @('.md', '.txt', '.json', '.yml', '.yaml', '.toml', '.ini', '.env', '.ps1', '.sh')
 $secretPatterns = @(
   @{ Name = 'private key'; Pattern = '-----BEGIN (?:RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY-----' },

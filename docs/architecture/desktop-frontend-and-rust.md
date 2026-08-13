@@ -2,74 +2,48 @@
 
 ## 状态
 
-本方向由 ADR-0025 确认。v1.16.0 已完成桌面业务页面的 React + TypeScript + Vite 替换；它服务于长期大规模维护，并保留独立阅读引擎的性能边界。
+ADR-0030 确定桌面端只维护一套产品 UI。当前唯一可视实现位于 `ui/`；`apps/desktop-ui/` 只承载无视图 TypeScript 业务边界和 Vite 构建的阅读协议/PDF adapter。
 
 ## 技术边界
 
-| 范围 | 长期选择 | 说明 |
+| 范围 | 选择 | 说明 |
 | --- | --- | --- |
-| 新增桌面业务 UI | React + TypeScript + Vite | 适用于书架、设置、同步、账户、统计、资讯等普通业务界面。 |
-| 阅读引擎及相邻 Web 层 | JavaScript 与 TypeScript 共存 | 阅读高频路径按明确边界演进；禁止仅为后缀而全量改写。 |
-| 阅读引擎 | 命令式 TypeScript/DOM/Canvas | EPUB/PDF、分页、选区、手势与高频渲染保持独立，不由 React 接管。 |
-| 桌面原生层 | Rust + Tauri 2 | 窗口、原生菜单、文件、数据库、同步、系统集成和高耗时任务留在 Rust。 |
-| 新建独立 Rust HTTP 服务 | Axum + Tokio（需要时） | 仅适用于新服务；现有服务不因技术统一而重写。 |
+| 桌面业务 UI | `ui/` 的 HTML/CSS/JavaScript | 所有业务页只有一份 DOM、样式和交互实现。 |
+| 业务状态与边界 | 严格 TypeScript | state、rules、controller 和 port 可独立测试，不定义另一份页面。 |
+| 阅读引擎 | 命令式 DOM/Canvas | EPUB/PDF、分页、选区、手势与高频渲染保持独立引擎边界。 |
+| 桌面原生层 | Rust + Tauri 2 | 窗口、菜单、文件、数据库、同步、系统集成和高耗时任务留在 Rust。 |
+| 新建独立 Rust HTTP 服务 | Axum + Tokio（需要时） | 只适用于新服务；不因语言统一重写已部署服务。 |
 
-Tauri 是桌面端 Rust 框架。桌面端不采用 Leptos、Yew、Dioxus 等第二套 Rust UI 渲染框架：它们会与 React Web UI 重叠，增加两份组件体系和迁移成本。
+桌面端不引入第二套 UI 框架或 Rust UI 渲染体系。如未来更换可视层技术，必须以业务整页为单位，在同一变更内删除被替代的旧 UI；不用产品内双轨作为回退。
 
 ## 前端分层
 
-新模块按下列依赖方向组织；业务 UI 不直接触碰系统 API 或 SQLite 细节：
-
 ```text
-React 页面/组件
+ui/ 唯一可视层
         ↓
-feature use cases（业务操作、状态与权限）
+feature state / rules / controller
         ↓
-tauri-api（唯一允许调用 Tauri invoke / event 的前端适配层）
+tauri-api
         ↓
 Rust commands / domain / storage / sync
 ```
 
-- `contracts/` 仍是跨端数据和 API 语义的唯一事实来源。前端类型不得自行改写协议含义。
-- 全局状态只存跨页面/跨组件的 UI 状态；服务端或 Tauri 异步数据有独立缓存层；单组件状态留在组件内部。
-- 复杂、可枚举的流程（同步、导入、账户恢复、阅读器外壳）采用显式状态机或 reducer，不以分散布尔值表达。
-- CSS 继续使用设计变量和模块边界。既有全局样式不强行重写；新 React 功能使用 CSS Modules 或等价的局部样式方案。
-- 禁止业务组件直接使用 `window.__TAURI__`、散落的 `window.ReaderXxx` 全局对象，或跨功能目录修改 DOM。
+- `contracts/` 是跨端数据和 API 语义的唯一事实来源。
+- 复杂流程（同步、导入、账户恢复、阅读器外壳）使用显式状态机或 reducer。
+- 业务页不直接散落调用 `window.__TAURI__`；原生能力通过类型化适配边界进入。
+- 页面内的空态、加载、错误和取消都由同一可视实现承担。
 
-## 推荐目录演进
+### 统一叠层规则
 
-目录是目标边界，不是立即移动现有文件的要求：
-
-```text
-apps/
-  desktop-ui/            # React 页面入口和窗口入口
-packages/
-  ui/                    # 可复用视觉组件、设计变量、图标
-  domain/                # 纯 TypeScript 业务模型和规则
-  tauri-api/             # 类型化 invoke/event 适配层
-  reader-engine/         # EPUB/PDF、分页、选区、手势
-  contracts-ts/          # 从 contracts 衍生的类型和运行时校验
-  test-utils/            # 测试夹具和模拟器
-```
-
-既有 `ui/` 继续承载阅读引擎与相邻边界；业务页面已迁入 `apps/desktop-ui/`。后续按模块演进，不为了目录美观做大规模移动。
+- 所有跨页浮层只申明语义角色：默认为 `operation`，信息/说明/详情为 `information`，必须压住业务交互的确认为 `critical`，手势提示、手势轨迹和全局短提示为 `feedback`。
+- 固定层级关系是 `feedback > critical > interactive`；`information` 与 `operation` 同属交互层，按实际打开顺序叠放，确保从当前窗口继续打开的新窗口总在上面。
+- 跨页浮层必须挂载到当前窗口顶层 `document.body`，声明 `data-overlay-surface` 和 `data-overlay-role`；短暂反馈还要用 `data-overlay-active="true"` 表示正在显示。iframe 内的功能不得在 iframe 内绘制全局提示，应通知所属窗口的顶层反馈层。
+- 业务页不按页面 ID 或功能写具体 `z-index`。新浮层只声明语义角色，层级由共享 `overlay-stack` 统一计算。
 
 ## 工程门禁
 
-前端进入 TypeScript 后必须有真实覆盖源码的严格类型检查，而不是只检查声明文件。新增模块至少满足：
-
-1. `strict` TypeScript；
-2. 格式化与 lint；
-3. 单元测试；
-4. 涉及 Tauri 交互的集成/端到端验收；
-5. Rust command 的输入、输出和错误映射有类型化包装。
-
-Rust 侧继续以小模块和明确层次组织。新增异步任务使用 Tokio；新增错误边界采用可结构化、可测试的错误类型；日志逐步统一到结构化记录，但不得把私密资料写进日志。
-
-## 后续演进
-
-1. 保持 TypeScript 构建、类型检查、lint 与测试门禁；
-2. 保持 `tauri-api` 和 contracts 的类型边界；
-3. 新增桌面业务 UI 继续使用 React + TypeScript；
-4. 阅读引擎只在有明确收益和回归测试覆盖时演进；
-5. 回归通过修复或 Git 提交回滚处理，不在产品内保留两套业务页面。
+1. TypeScript 源码使用 `strict` 类型检查；
+2. 新规则/controller 有单元测试；
+3. 涉及 Tauri 交互时增加集成或端到端验收；
+4. `ui/tests/governance.test.cjs` 阻止再次引入双 UI；
+5. 可见改动后构建完整 macOS 应用，并使用规定脚本覆盖安装。

@@ -541,6 +541,7 @@ class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfR
 
     const epoch = ++this.epoch;
     const controller = this.beginOperation(request.operationId, signal);
+    let task: PdfJsLoadingTask<TDocument> | null = null;
     this.setLifecycle({ state: "loading", documentId: request.documentId, operationId: request.operationId });
     try {
       if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -548,9 +549,12 @@ class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfR
       if (epoch !== this.epoch || controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
       if (binary.documentId !== request.documentId) throw new TypeError("Resolved document id does not match the request.");
       const parameters = createPdfJsLoadParameters(binary);
-      const task = this.dependencies.loader.getDocument(parameters);
+      task = this.dependencies.loader.getDocument(parameters);
       this.loadingTask = task;
-      const abortLoading = () => { void Promise.resolve(task.destroy()); };
+      const installedTask = task;
+      const abortLoading = () => {
+        void this.destroyLoadingTask(installedTask);
+      };
       controller.signal.addEventListener("abort", abortLoading, { once: true });
       const document = await task.promise;
       controller.signal.removeEventListener("abort", abortLoading);
@@ -560,7 +564,7 @@ class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfR
       }
       if (!isPageNumber(document.numPages)) throw new TypeError("PDF.js returned an invalid page count.");
       this.documentValue = { id: request.documentId, document };
-      this.loadingTask = null;
+      if (this.loadingTask === task) this.loadingTask = null;
       this.setLifecycle({ state: "ready", documentId: request.documentId, pageCount: document.numPages });
       this.emit({
         protocol: PDF_RENDERER_PROTOCOL_NAME,
@@ -578,7 +582,10 @@ class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfR
         this.fail(request.documentId, request.operationId, mapOpenError(error));
       }
     } finally {
-      this.loadingTask = null;
+      // A replacement open may already own a newer loading task by the time a
+      // superseded request settles. Only the request that installed the task
+      // may release it; otherwise close/dispose would lose the new task.
+      if (task !== null && this.loadingTask === task) this.loadingTask = null;
       this.endOperation(request.operationId, controller);
     }
   }
@@ -648,8 +655,7 @@ class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfR
     for (const controller of this.controllers.values()) controller.abort();
     this.controllers.clear();
     if (this.loadingTask !== null) {
-      await Promise.resolve(this.loadingTask.destroy());
-      this.loadingTask = null;
+      await this.destroyLoadingTask(this.loadingTask);
     }
     const active = this.documentValue;
     this.documentValue = null;
@@ -685,6 +691,17 @@ class ControlledPdfRendererPort<TDocument extends PdfJsDocument> implements PdfR
 
   private endOperation(operationId: PdfOperationId, controller: AbortController): void {
     if (this.controllers.get(operationId) === controller) this.controllers.delete(operationId);
+  }
+
+  /**
+   * Take ownership before destroying. An abort listener and `close()` can race
+   * for the same PDF.js loading task; only the caller that atomically clears
+   * the current reference is allowed to invoke PDF.js cleanup.
+   */
+  private async destroyLoadingTask(task: PdfJsLoadingTask<TDocument>): Promise<void> {
+    if (this.loadingTask !== task) return;
+    this.loadingTask = null;
+    await Promise.resolve(task.destroy());
   }
 
   private ensureUsable(): void {

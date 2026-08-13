@@ -2,14 +2,13 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "resources": {
-      "onnxruntime.dll": "onnxruntime.dll",
-      "onnxruntime_providers_cuda.dll": "onnxruntime_providers_cuda.dll",
-      "onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
-      "cudart64_12.dll": "cudart64_12.dll",
-      "cudnn64_9.dll": "cudnn64_9.dll",
-      "ONNX-Runtime-LICENSE.txt": "licenses/ONNX-Runtime-LICENSE.txt",
-      "NVIDIA-CUDA-LICENSE.txt": "licenses/NVIDIA-CUDA-LICENSE.txt",
-      "NVIDIA-cuDNN-LICENSE.txt": "licenses/NVIDIA-cuDNN-LICENSE.txt"
+      "LICENSE": "licenses/Kunpeng-Reader-LICENSE.txt",
+      "THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "target/license-audit/DEPENDENCY_LICENSES.md": "licenses/DEPENDENCY_LICENSES.md",
+      "LICENSES": "licenses/third-party",
+      "src/dict/ECDICT_SOURCE.md": "licenses/sources/ECDICT_SOURCE.md",
+      "src/dict/CC_CEDICT_SOURCE.md": "licenses/sources/CC_CEDICT_SOURCE.md",
+      "onnxruntime.dll": "onnxruntime.dll"
     }
   }
 }

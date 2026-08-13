@@ -22,6 +22,7 @@ export type NewsAction =
   | { readonly type: "load-cancelled"; readonly requestId: number }
   | { readonly type: "preferences-changed"; readonly preferences: NewsPreferences }
   | { readonly type: "article-opened"; readonly article: NewsArticleDocument }
+  | { readonly type: "native-article-opened" }
   | { readonly type: "article-closed" }
   | { readonly type: "message"; readonly message: string | null };
 
@@ -41,6 +42,7 @@ export function newsReducer(state: NewsState, action: NewsAction): NewsState {
       return action.requestId === state.requestId ? { ...state, phase: "cancelled", message: "资讯请求已取消。" } : state;
     case "preferences-changed": return { ...state, preferences: action.preferences };
     case "article-opened": return { ...state, article: action.article, message: null };
+    case "native-article-opened": return { ...state, message: "文章已在独立窗口打开。" };
     case "article-closed": return { ...state, article: null };
     case "message": return { ...state, message: action.message };
   }

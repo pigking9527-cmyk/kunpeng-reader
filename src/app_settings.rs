@@ -4,33 +4,21 @@
 //! preserves unknown fields so a newer desktop client is not damaged by an
 //! older Windows, Linux, or macOS build writing its known settings.
 
+mod rules;
+
 use crate::{db::AppDb, AppState};
+use rules::{
+    clipped_unique, normalized_gesture_settings, normalized_reader_layout_settings,
+    normalized_toolbar_content_order, normalized_toolbar_content_visible,
+    normalized_toolbar_hidden, normalized_toolbar_order, MAX_NEWS_SOURCES, MAX_TIEBA_BARS,
+    TOOLBAR_CONTENT_IDS, TOOLBAR_ITEM_IDS,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
 pub(crate) const APP_SETTINGS_KIND: &str = "app_settings_v1";
 const DEFAULT_ID: &str = "default";
-const MAX_NEWS_SOURCES: usize = 24;
-const MAX_TIEBA_BARS: usize = 8;
-const MAX_GESTURE_PROFILES: usize = 24;
-const GESTURE_POINT_COUNT: usize = 48;
-const READER_FONT_FAMILIES: &[&str] = &[
-    "",
-    "'Microsoft YaHei',sans-serif",
-    "'SimSun',serif",
-    "'SimHei',sans-serif",
-    "'KaiTi',serif",
-    "'Kunpeng LXGW WenKai Lite','Microsoft YaHei',sans-serif",
-    "'Kunpeng Source Han Serif SC','SimSun',serif",
-    "'Kunpeng Zhuque Fangsong','FangSong','SimSun',serif",
-    "serif",
-    "sans-serif",
-];
-const TOOLBAR_ITEM_IDS: &[&str] = &[
-    "account", "search", "stats", "library", "news", "filter", "settings", "menu",
-];
-const TOOLBAR_CONTENT_IDS: &[&str] = &["icon", "text"];
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,8 +31,6 @@ pub(crate) struct AppSettingsSyncRequest {
     reader_jump_back_dismiss_seconds: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reader_jump_back_dismiss_pages: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    reader_jump_back_size_level: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reader_jump_back_icon_size_px: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,7 +73,6 @@ struct AppSettings {
     reader_jump_back_dismiss_mode: String,
     reader_jump_back_dismiss_seconds: u16,
     reader_jump_back_dismiss_pages: u8,
-    reader_jump_back_size_level: u8,
     reader_jump_back_icon_size_px: u8,
     reader_jump_back_position_x: u16,
     reader_jump_back_position_y: u16,
@@ -114,7 +99,6 @@ impl Default for AppSettings {
             reader_jump_back_dismiss_mode: "pages".into(),
             reader_jump_back_dismiss_seconds: 30,
             reader_jump_back_dismiss_pages: 3,
-            reader_jump_back_size_level: 1,
             reader_jump_back_icon_size_px: 32,
             reader_jump_back_position_x: 950,
             reader_jump_back_position_y: 500,
@@ -150,7 +134,6 @@ pub(crate) struct AppSettingsSyncSnapshot {
     reader_jump_back_dismiss_mode: String,
     reader_jump_back_dismiss_seconds: u16,
     reader_jump_back_dismiss_pages: u8,
-    reader_jump_back_size_level: u8,
     reader_jump_back_icon_size_px: u8,
     reader_jump_back_position_x: u16,
     reader_jump_back_position_y: u16,
@@ -177,316 +160,6 @@ pub(crate) struct AppSettingsSyncSnapshot {
     reader_layout_settings: Option<Value>,
 }
 
-fn clipped_unique(
-    values: Vec<String>,
-    limit: usize,
-    max_len: usize,
-    strip_tieba_suffix: bool,
-) -> Vec<String> {
-    let mut seen = HashSet::new();
-    values
-        .into_iter()
-        .map(|value| {
-            let trimmed = value.trim();
-            if strip_tieba_suffix {
-                trimmed
-                    .strip_suffix('吧')
-                    .unwrap_or(trimmed)
-                    .trim()
-                    .to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
-        .filter(|value| {
-            !value.is_empty() && value.len() <= max_len && !value.chars().any(char::is_control)
-        })
-        .filter(|value| seen.insert(value.clone()))
-        .take(limit)
-        .collect()
-}
-
-fn icon_size_px_from_legacy_level(level: u8) -> u8 {
-    let level = level.clamp(1, 10) as u16;
-    ((32 * (9 + (level - 1) * 4) + 4) / 9) as u8
-}
-
-fn legacy_level_from_icon_size_px(size: u8) -> u8 {
-    let size = size.clamp(30, 160) as i16;
-    (((size * 9 - 32 * 9 + 64) / (32 * 4)) + 1).clamp(1, 10) as u8
-}
-
-fn normalized_toolbar_order(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut order = values
-        .into_iter()
-        .filter(|value| TOOLBAR_ITEM_IDS.contains(&value.as_str()))
-        .filter(|value| seen.insert(value.clone()))
-        .collect::<Vec<_>>();
-    if seen.insert("account".to_string()) {
-        order.insert(0, "account".to_string());
-    }
-    for id in TOOLBAR_ITEM_IDS {
-        if seen.insert((*id).to_string()) {
-            order.push((*id).to_string());
-        }
-    }
-    order
-}
-
-fn normalized_toolbar_hidden(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    values
-        .into_iter()
-        .filter(|value| value != "settings" && TOOLBAR_ITEM_IDS.contains(&value.as_str()))
-        .filter(|value| seen.insert(value.clone()))
-        .collect()
-}
-
-fn normalized_toolbar_content_order(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut order = values
-        .into_iter()
-        .filter(|value| TOOLBAR_CONTENT_IDS.contains(&value.as_str()))
-        .filter(|value| seen.insert(value.clone()))
-        .collect::<Vec<_>>();
-    for id in TOOLBAR_CONTENT_IDS {
-        if seen.insert((*id).to_string()) {
-            order.push((*id).to_string());
-        }
-    }
-    order
-}
-
-fn normalized_toolbar_content_visible(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let visible = values
-        .into_iter()
-        .filter(|value| TOOLBAR_CONTENT_IDS.contains(&value.as_str()))
-        .filter(|value| seen.insert(value.clone()))
-        .collect::<Vec<_>>();
-    if visible.is_empty() {
-        vec!["icon".into()]
-    } else {
-        visible
-    }
-}
-
-fn valid_gesture_text(value: &str, max_chars: usize) -> bool {
-    !value.is_empty() && value.chars().count() <= max_chars && !value.chars().any(char::is_control)
-}
-
-fn normalized_gesture_settings(value: Value) -> Option<Value> {
-    let source = value.as_object()?;
-    if source.get("version")?.as_u64()? != 1 {
-        return None;
-    }
-    let enabled = source.get("enabled")?.as_bool()?;
-    let global_precision = source.get("globalPrecision")?.as_str()?;
-    if !matches!(
-        global_precision,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10"
-    ) {
-        return None;
-    }
-    let hint = source.get("hintSettings")?.as_object()?;
-    let hint_enabled = hint.get("enabled")?.as_bool()?;
-    let hint_font_size = hint.get("fontSize")?.as_u64()?.clamp(12, 28);
-    let hint_background_enabled = hint.get("backgroundEnabled")?.as_bool()?;
-    let hint_background = hint.get("background")?.as_str()?.to_ascii_lowercase();
-    if hint_background.len() != 7
-        || !hint_background.starts_with('#')
-        || !hint_background[1..]
-            .chars()
-            .all(|value| value.is_ascii_hexdigit())
-    {
-        return None;
-    }
-    let hint_opacity = hint.get("opacity")?.as_u64()?.clamp(20, 100);
-    let hint_position_x = hint.get("positionX")?.as_f64()?;
-    let hint_position_y = hint.get("positionY")?.as_f64()?;
-    if !hint_position_x.is_finite()
-        || !hint_position_y.is_finite()
-        || !(0.0..=1.0).contains(&hint_position_x)
-        || !(0.0..=1.0).contains(&hint_position_y)
-    {
-        return None;
-    }
-
-    let source_profiles = source.get("profiles")?.as_array()?;
-    if source_profiles.len() > MAX_GESTURE_PROFILES {
-        return None;
-    }
-    let mut ids = HashSet::new();
-    let mut profiles = Vec::with_capacity(source_profiles.len());
-    for raw in source_profiles {
-        let profile = raw.as_object()?;
-        let id = profile.get("id")?.as_str()?.to_string();
-        let name = profile.get("name")?.as_str()?.trim().to_string();
-        if !valid_gesture_text(&id, 64) || !valid_gesture_text(&name, 24) || !ids.insert(id.clone())
-        {
-            return None;
-        }
-        let action = profile.get("action")?.as_str()?;
-        if !matches!(
-            action,
-            "back" | "book_info" | "reopen_last" | "restore_jump"
-        ) {
-            return None;
-        }
-        let scope = profile.get("scope")?.as_str()?;
-        if !matches!(scope, "auto" | "main" | "reader")
-            || (action == "restore_jump" && scope != "reader")
-        {
-            return None;
-        }
-        if profile.get("input")?.as_str()? != "mouse-right" {
-            return None;
-        }
-        let profile_enabled = profile.get("enabled")?.as_bool()?;
-        let precision_mode = profile.get("precisionMode")?.as_str()?;
-        if !matches!(precision_mode, "global" | "independent") {
-            return None;
-        }
-        let precision = profile.get("precision")?.as_str()?;
-        if !matches!(
-            precision,
-            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10"
-        ) {
-            return None;
-        }
-        let source_points = profile.get("points")?.as_array()?;
-        if source_points.len() != GESTURE_POINT_COUNT {
-            return None;
-        }
-        let mut points = Vec::with_capacity(GESTURE_POINT_COUNT);
-        for point in source_points {
-            let point = point.as_object()?;
-            let x = point.get("x")?.as_f64()?;
-            let y = point.get("y")?.as_f64()?;
-            if !x.is_finite() || !y.is_finite() || x.abs() > 1.5 || y.abs() > 1.5 {
-                return None;
-            }
-            points.push(json!({ "x": x, "y": y }));
-        }
-        let mut normalized_profile = profile.clone();
-        normalized_profile.insert("id".into(), json!(id));
-        normalized_profile.insert("name".into(), json!(name));
-        normalized_profile.insert("scope".into(), json!(scope));
-        normalized_profile.insert("action".into(), json!(action));
-        normalized_profile.insert("input".into(), json!("mouse-right"));
-        normalized_profile.insert("enabled".into(), json!(profile_enabled));
-        normalized_profile.insert("points".into(), json!(points));
-        normalized_profile.insert("precisionMode".into(), json!(precision_mode));
-        normalized_profile.insert("precision".into(), json!(precision));
-        profiles.push(Value::Object(normalized_profile));
-    }
-    let mut normalized_hint = hint.clone();
-    normalized_hint.insert("enabled".into(), json!(hint_enabled));
-    normalized_hint.insert("fontSize".into(), json!(hint_font_size));
-    normalized_hint.insert("backgroundEnabled".into(), json!(hint_background_enabled));
-    normalized_hint.insert("background".into(), json!(hint_background));
-    normalized_hint.insert("opacity".into(), json!(hint_opacity));
-    normalized_hint.insert("positionX".into(), json!(hint_position_x));
-    normalized_hint.insert("positionY".into(), json!(hint_position_y));
-    let mut normalized = source.clone();
-    normalized.insert("version".into(), json!(1));
-    normalized.insert("enabled".into(), json!(enabled));
-    normalized.insert("globalPrecision".into(), json!(global_precision));
-    normalized.insert("profiles".into(), json!(profiles));
-    // v1 payloads created before this marker cannot distinguish an unconfigured
-    // empty list from an intentional clear. Preserve that ambiguity on read so
-    // the Web UI can protect a locally recorded gesture during migration.
-    if source
-        .get("profilesInitialized")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        normalized.insert("profilesInitialized".into(), json!(true));
-    } else {
-        normalized.remove("profilesInitialized");
-    }
-    normalized.insert("hintSettings".into(), Value::Object(normalized_hint));
-    Some(Value::Object(normalized))
-}
-
-fn normalized_reader_layout_settings(value: Value) -> Option<Value> {
-    let source = value.as_object()?;
-    if source.get("version")?.as_u64()? != 1 {
-        return None;
-    }
-    let font_family = source.get("fontFamily")?.as_str()?;
-    if !READER_FONT_FAMILIES.contains(&font_family) {
-        return None;
-    }
-    let style_mode = source.get("styleMode")?.as_str()?;
-    if !matches!(style_mode, "local" | "book") {
-        return None;
-    }
-    let text_conversion = source.get("textConversion")?.as_str()?;
-    if !matches!(text_conversion, "t2s" | "s2t") {
-        return None;
-    }
-    let normalized_step = |key: &str, min: f64, max: f64, step: f64| -> Option<f64> {
-        let value = source.get(key)?.as_f64()?;
-        if !value.is_finite() {
-            return None;
-        }
-        Some(((value.clamp(min, max) / step).round() * step * 10.0).round() / 10.0)
-    };
-    let font_size = source.get("fontSize")?.as_u64()?.clamp(12, 40);
-    let note_font_size = source.get("noteFontSize")?.as_u64()?.clamp(10, 22);
-    let line_height = normalized_step("lineHeight", 1.0, 2.6, 0.1)?;
-    let para_spacing = normalized_step("paraSpacing", 0.0, 2.0, 0.1)?;
-    let letter_spacing = normalized_step("letterSpacing", 0.0, 5.0, 0.5)?;
-    let margin_top = source.get("marginTop")?.as_u64()?.clamp(0, 160);
-    let margin_bottom = source.get("marginBottom")?.as_u64()?.clamp(0, 160);
-    let margin_left = source.get("marginLeft")?.as_u64()?.clamp(0, 240);
-    let margin_right = source.get("marginRight")?.as_u64()?.clamp(0, 240);
-    let dual_page_gap = source.get("dualPageGap")?.as_u64()?.clamp(0, 120);
-    let flow_mode = source.get("flowMode")?.as_str()?;
-    if !matches!(flow_mode, "paged" | "scroll") {
-        return None;
-    }
-    let mut page_mode = source.get("pageMode")?.as_str()?;
-    if !matches!(page_mode, "single" | "dual") {
-        return None;
-    }
-    if flow_mode == "scroll" {
-        page_mode = "single";
-    }
-    let page_turn_effect = source.get("pageTurnEffect")?.as_str()?;
-    if !matches!(page_turn_effect, "off" | "horizontal") {
-        return None;
-    }
-    let page_turn_speed = normalized_step("pageTurnSpeed", 0.5, 2.0, 0.1)?;
-    let image_pagination = source.get("imagePagination")?.as_str()?;
-    if !matches!(image_pagination, "next-page" | "continuous") {
-        return None;
-    }
-    let mut normalized = source.clone();
-    normalized.insert("version".into(), json!(1));
-    normalized.insert("fontFamily".into(), json!(font_family));
-    normalized.insert("styleMode".into(), json!(style_mode));
-    normalized.insert("textConversion".into(), json!(text_conversion));
-    normalized.insert("fontSize".into(), json!(font_size));
-    normalized.insert("noteFontSize".into(), json!(note_font_size));
-    normalized.insert("lineHeight".into(), json!(line_height));
-    normalized.insert("paraSpacing".into(), json!(para_spacing));
-    normalized.insert("letterSpacing".into(), json!(letter_spacing));
-    normalized.insert("marginTop".into(), json!(margin_top));
-    normalized.insert("marginBottom".into(), json!(margin_bottom));
-    normalized.insert("marginLeft".into(), json!(margin_left));
-    normalized.insert("marginRight".into(), json!(margin_right));
-    normalized.insert("dualPageGap".into(), json!(dual_page_gap));
-    normalized.insert("pageMode".into(), json!(page_mode));
-    normalized.insert("flowMode".into(), json!(flow_mode));
-    normalized.insert("pageTurnEffect".into(), json!(page_turn_effect));
-    normalized.insert("pageTurnSpeed".into(), json!(page_turn_speed));
-    normalized.insert("imagePagination".into(), json!(image_pagination));
-    Some(Value::Object(normalized))
-}
-
 fn normalize_patch(mut request: AppSettingsSyncRequest) -> AppSettingsSyncRequest {
     if let Some(mode) = request.reader_jump_back_dismiss_mode.as_mut() {
         *mode = if mode == "time" {
@@ -500,9 +173,6 @@ fn normalize_patch(mut request: AppSettingsSyncRequest) -> AppSettingsSyncReques
     }
     if let Some(pages) = request.reader_jump_back_dismiss_pages.as_mut() {
         *pages = (*pages).clamp(1, 100);
-    }
-    if let Some(size) = request.reader_jump_back_size_level.as_mut() {
-        *size = (*size).clamp(1, 10);
     }
     if let Some(size) = request.reader_jump_back_icon_size_px.as_mut() {
         *size = (*size).clamp(30, 160);
@@ -577,15 +247,8 @@ fn apply_patch(settings: &mut AppSettings, request: AppSettingsSyncRequest) {
     if let Some(value) = request.reader_jump_back_dismiss_pages {
         settings.reader_jump_back_dismiss_pages = value;
     }
-    let legacy_size_level = request.reader_jump_back_size_level;
-    if let Some(value) = legacy_size_level {
-        settings.reader_jump_back_size_level = value;
-    }
     if let Some(value) = request.reader_jump_back_icon_size_px {
         settings.reader_jump_back_icon_size_px = value;
-        settings.reader_jump_back_size_level = legacy_level_from_icon_size_px(value);
-    } else if let Some(value) = legacy_size_level {
-        settings.reader_jump_back_icon_size_px = icon_size_px_from_legacy_level(value);
     }
     if let Some(value) = request.reader_jump_back_position_x {
         settings.reader_jump_back_position_x = value;
@@ -667,7 +330,6 @@ fn snapshot(value: Option<&Value>) -> AppSettingsSyncSnapshot {
         reader_jump_back_dismiss_mode: settings.reader_jump_back_dismiss_mode,
         reader_jump_back_dismiss_seconds: settings.reader_jump_back_dismiss_seconds,
         reader_jump_back_dismiss_pages: settings.reader_jump_back_dismiss_pages,
-        reader_jump_back_size_level: settings.reader_jump_back_size_level,
         reader_jump_back_icon_size_px: settings.reader_jump_back_icon_size_px,
         reader_jump_back_position_x: settings.reader_jump_back_position_x,
         reader_jump_back_position_y: settings.reader_jump_back_position_y,
@@ -783,10 +445,9 @@ fn merge_payload(existing: Option<Value>, request: AppSettingsSyncRequest) -> Va
         "readerJumpBackDismissPages".into(),
         json!(settings.reader_jump_back_dismiss_pages),
     );
-    object.insert(
-        "readerJumpBackSizeLevel".into(),
-        json!(settings.reader_jump_back_size_level),
-    );
+    // Protocol v5 intentionally discards the retired 1–10 level.  It must
+    // not survive generic unknown-field preservation after any settings save.
+    object.remove("readerJumpBackSizeLevel");
     object.insert(
         "readerJumpBackIconSizePx".into(),
         json!(settings.reader_jump_back_icon_size_px),
@@ -864,14 +525,46 @@ fn entity(db: &AppDb) -> Result<Option<Value>, String> {
     db.entity_json(APP_SETTINGS_KIND, DEFAULT_ID)
 }
 
+/// Applies the destructive v5 shape to a pre-v5 local entity before it can be
+/// selected for upload.  The retired level is never converted: absent or
+/// invalid pixel values reset to the v5 default of 32 px.
+pub(crate) fn normalize_protocol_v5_entity(state: &AppState) -> Result<(), String> {
+    state.with_db_write("app_settings_normalize_protocol_v5", |db| {
+        let Some(current) = entity(db)? else {
+            return Ok(());
+        };
+        let needs_normalization = current
+            .as_object()
+            .map(|object| {
+                object.contains_key("readerJumpBackSizeLevel")
+                    || !matches!(
+                        object
+                            .get("readerJumpBackIconSizePx")
+                            .and_then(Value::as_u64),
+                        Some(30..=160)
+                    )
+            })
+            .unwrap_or(true);
+        if !needs_normalization {
+            return Ok(());
+        }
+        let payload = merge_payload(Some(current), AppSettingsSyncRequest::default());
+        db.upsert_json_batch(&[(
+            APP_SETTINGS_KIND.to_string(),
+            DEFAULT_ID.to_string(),
+            payload,
+        )])
+    })
+}
+
 #[tauri::command]
 pub(crate) fn app_settings_sync_get(
     state: tauri::State<AppState>,
 ) -> Result<AppSettingsSyncSnapshot, String> {
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    let current = entity(db)?;
-    Ok(snapshot(current.as_ref()))
+    state.with_db_read("app_settings_sync_get", |db| {
+        let current = entity(db)?;
+        Ok(snapshot(current.as_ref()))
+    })
 }
 
 #[tauri::command]
@@ -879,15 +572,15 @@ pub(crate) fn app_settings_sync_save(
     state: tauri::State<AppState>,
     request: AppSettingsSyncRequest,
 ) -> Result<AppSettingsSyncSnapshot, String> {
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let payload = merge_payload(entity(db)?, request);
-    db.upsert_json_batch(&[(
-        APP_SETTINGS_KIND.to_string(),
-        DEFAULT_ID.to_string(),
-        payload.clone(),
-    )])?;
-    Ok(snapshot(Some(&payload)))
+    state.with_db_write("app_settings_sync_save", |db| {
+        let payload = merge_payload(entity(db)?, request);
+        db.upsert_json_batch(&[(
+            APP_SETTINGS_KIND.to_string(),
+            DEFAULT_ID.to_string(),
+            payload.clone(),
+        )])?;
+        Ok(snapshot(Some(&payload)))
+    })
 }
 
 #[cfg(test)]
@@ -902,7 +595,6 @@ mod tests {
                 reader_jump_back_dismiss_mode: Some("unknown".into()),
                 reader_jump_back_dismiss_seconds: Some(0),
                 reader_jump_back_dismiss_pages: Some(255),
-                reader_jump_back_size_level: Some(42),
                 reader_jump_back_icon_size_px: Some(u8::MAX),
                 reader_jump_back_position_x: Some(u16::MAX),
                 reader_jump_back_position_y: Some(u16::MAX),
@@ -913,14 +605,13 @@ mod tests {
         assert_eq!(payload["readerJumpBackDismissMode"], "pages");
         assert_eq!(payload["readerJumpBackDismissSeconds"], 1);
         assert_eq!(payload["readerJumpBackDismissPages"], 100);
-        assert_eq!(payload["readerJumpBackSizeLevel"], 10);
         assert_eq!(payload["readerJumpBackIconSizePx"], 160);
         assert_eq!(payload["readerJumpBackPositionX"], 1000);
         assert_eq!(payload["readerJumpBackPositionY"], 1000);
     }
 
     #[test]
-    fn legacy_icon_size_level_is_converted_to_pixels_and_kept_as_a_mirror() {
+    fn retired_icon_size_level_is_removed_on_the_next_settings_write() {
         let payload = merge_payload(
             Some(json!({
                 "version": 1,
@@ -935,8 +626,33 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(payload["readerJumpBackIconSizePx"], 60);
-        assert_eq!(payload["readerJumpBackSizeLevel"], 3);
+        assert_eq!(payload["readerJumpBackIconSizePx"], 32);
+        assert!(payload.get("readerJumpBackSizeLevel").is_none());
+    }
+
+    #[test]
+    fn v5_normalization_removes_the_retired_level_and_resets_missing_pixels() {
+        let state = AppState::new(Some(AppDb::open_in_memory_for_tests()));
+        state
+            .with_db_write("seed_app_settings_v5_normalization", |db| {
+                db.upsert_json_batch(&[(
+                    APP_SETTINGS_KIND.to_string(),
+                    DEFAULT_ID.to_string(),
+                    json!({"version": 1, "readerJumpBackSizeLevel": 10}),
+                )])
+            })
+            .unwrap();
+
+        normalize_protocol_v5_entity(&state).unwrap();
+
+        state
+            .with_db_read("assert_app_settings_v5_normalization", |db| {
+                let payload = entity(db)?.expect("settings entity");
+                assert_eq!(payload["readerJumpBackIconSizePx"], 32);
+                assert!(payload.get("readerJumpBackSizeLevel").is_none());
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
@@ -948,7 +664,6 @@ mod tests {
                 "readerJumpBackDismissMode": "time",
                 "readerJumpBackDismissSeconds": 45,
                 "readerJumpBackDismissPages": 6,
-                "readerJumpBackSizeLevel": 4,
                 "readerJumpBackIconSizePx": 60,
                 "readerJumpBackPositionX": 880,
                 "readerJumpBackPositionY": 360,
@@ -967,7 +682,7 @@ mod tests {
         assert_eq!(payload["showReaderJumpBack"], false);
         assert_eq!(payload["readerJumpBackDismissMode"], "time");
         assert_eq!(payload["readerJumpBackIconSizePx"], 60);
-        assert_eq!(payload["readerJumpBackSizeLevel"], 3);
+        assert!(payload.get("readerJumpBackSizeLevel").is_none());
         assert_eq!(payload["readerJumpBackPositionX"], 880);
         assert_eq!(payload["readerJumpBackPositionY"], 360);
         assert_eq!(payload["libraryAnswerLength"], "long");
@@ -1006,7 +721,7 @@ mod tests {
 
     #[test]
     fn gesture_settings_syncs_normalized_profiles_without_resetting_other_groups() {
-        let points = (0..GESTURE_POINT_COUNT)
+        let points = (0..rules::GESTURE_POINT_COUNT)
             .map(|index| json!({ "x": index as f64 / 100.0, "y": 0.0 }))
             .collect::<Vec<_>>();
         let payload = merge_payload(
@@ -1058,7 +773,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            GESTURE_POINT_COUNT
+            rules::GESTURE_POINT_COUNT
         );
         assert_eq!(
             payload["gestureSettings"]["profiles"][0]["futureProfileSetting"],

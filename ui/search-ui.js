@@ -158,7 +158,6 @@ historyEl.addEventListener("mouseleave", () => {
 const shelfChk = document.getElementById("shelf-search-chk");
 const shelfSearchModal = document.getElementById("shelf-search-modal");
 const shelfSearchFrame = document.getElementById("shelf-search-frame");
-const shelfSearchClose = document.getElementById("shelf-search-close");
 try {
   shelfChk.checked = localStorage.getItem("shelfSearchEnabled") === "1";
 } catch (e) {}
@@ -208,7 +207,6 @@ function closeShelfSearchModal() {
   shelfSearchFrame.removeAttribute("src");
   closeSearch(true);
 }
-shelfSearchClose.addEventListener("click", closeShelfSearchModal);
 shelfSearchModal.addEventListener("click", (e) => {
   if (e.target === shelfSearchModal) closeShelfSearchModal();
 });

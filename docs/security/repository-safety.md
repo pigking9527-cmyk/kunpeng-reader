@@ -16,17 +16,17 @@
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/install-git-hooks.ps1
 ```
 
-提交钩子会扫描暂存内容，阻止私钥、常见云/服务 Token、SSH 登录到 IP、身份文件路径、明文凭据赋值和私密交接文档。平台公开说明仅允许 `ANDROID_HANDOFF.md`，新增例外必须经过人工安全审查。
+提交钩子会扫描暂存内容，阻止私钥、常见云/服务 Token、SSH 登录到 IP、身份文件路径、明文凭据赋值和交接文档。交接资料必须保存在仓库外；新增例外必须经过人工安全审查。
 
 ## 发布
 
 不得使用 `git add -A`、`git commit -a` 或 GUI 的“暂存全部”完成发布。使用明确文件列表：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/stage-release.ps1 -Path Cargo.toml,tauri.conf.json,README.md,README.en.md,CHANGELOG.md,开发记录.md,开发文档.md,server/reader-sync-api/updates.json
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/stage-release.ps1 -Path Cargo.toml,tauri.conf.json,README.md,README.en.md,CHANGELOG.md,开发记录.md,开发文档.md
 git diff --cached --name-status
 ```
 
-如需更新服务器发布清单，在仓库外设置 `KUNPENG_RELEASE_SERVER`、`KUNPENG_RELEASE_IDENTITY_FILE` 与 `KUNPENG_RELEASE_REMOTE_PATH`，或在命令行显式传入；不要将这些值写回脚本。
+发布仓库通过仓库外的 `KUNPENG_RELEASE_REPOSITORY` 配置；更新服务地址通过 `KUNPENG_UPDATE_BASE` 注入构建。不要将真实值写回脚本。
 
 CI 会对所有受跟踪文件执行同一检查。CI 失败不应通过修改规则或新增白名单规避；应先移除敏感资料并轮换已经暴露的凭据。

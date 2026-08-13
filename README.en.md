@@ -5,8 +5,9 @@
 A high-performance local ebook reader for Windows, macOS, Linux, and Android. The desktop app is built with **Rust + Tauri 2 + the system WebView**. Its shelf and reading window are independent; EPUB content is rendered natively and loaded on demand by chapter or virtual subchapter for faster opening of large books.
 
 > **License notice:** this repository is **source-available**. The code is public only for learning, evaluation, and communication. Copying, modifying, distributing, commercial use, or publishing derivative versions requires the author's written permission. See [LICENSE](LICENSE).
+> See [licensing scope](docs/legal/licensing-scope.md) and [third-party notices](THIRD_PARTY_NOTICES.md) for first-party and bundled-material boundaries. New public binary publication is currently held by the license gate while historical GPL dependency remediation is reviewed; local and CI acceptance builds remain available.
 
-> Latest release: Windows, macOS, and Linux **v1.16.0** · Android **v0.3.0**. Downloads are available from [Releases](https://github.com/pigking9527-cmyk/kunpeng-reader/releases). v1.16.0 completes the React + TypeScript + Vite migration for the desktop business layer while retaining the Rust + Tauri 2 and reader-engine boundaries.
+> The remediated clean baseline is **1.0.0**. Public source does not embed sync, update-service, or code-hosting addresses; every release remains subject to the license and IP gates.
 
 ## Features
 

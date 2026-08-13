@@ -30,6 +30,8 @@
     if (backdrop) return;
     backdrop = global.document.createElement("div");
     backdrop.className = "app-dialog-backdrop";
+    backdrop.dataset.overlaySurface = "dialog";
+    backdrop.dataset.overlayRole = "critical";
     backdrop.hidden = true;
     backdrop.setAttribute("aria-hidden", "true");
 

@@ -38,16 +38,14 @@ pub(crate) struct ReaderBackgroundAsset {
 }
 
 fn cache_dir() -> Result<PathBuf, String> {
-    let mut path = dirs::data_local_dir().ok_or("找不到本机数据目录")?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_data_dir().ok_or("找不到本机数据目录")?;
     path.push("reader-backgrounds");
     std::fs::create_dir_all(&path).map_err(|e| format!("创建背景缓存目录失败：{e}"))?;
     Ok(path)
 }
 
 fn recovery_bundle_path() -> Result<PathBuf, String> {
-    let mut path = dirs::config_dir().ok_or("找不到应用配置目录")?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_config_dir().ok_or("找不到应用配置目录")?;
     path.push(RECOVERY_ASSET_BUNDLE_FILE);
     Ok(path)
 }
@@ -75,6 +73,9 @@ fn mime_for_header(header: &str) -> Option<&'static str> {
 fn valid_asset_id(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
+
+const SYNC_PROTOCOL_HEADER: &str = "X-Sync-Protocol-Version";
+const SYNC_PROTOCOL_VERSION: &str = "5";
 
 pub(crate) fn local_url(asset_id: &str, mime: &str) -> Result<String, String> {
     if !valid_asset_id(asset_id) {
@@ -256,8 +257,17 @@ fn restore_cached_asset_from_bundle(asset_id: &str, mime: &str) -> Result<bool, 
 #[serde(rename_all = "camelCase")]
 struct AssetInitResponse {
     complete: bool,
-    #[serde(default)]
     received_bytes: usize,
+}
+
+fn asset_init_payload(asset_id: &str, mime: &str, byte_size: usize, data_generation: i64) -> Value {
+    serde_json::json!({
+        "assetId": asset_id,
+        "sha256": asset_id,
+        "mime": mime,
+        "byteSize": byte_size,
+        "dataGeneration": data_generation,
+    })
 }
 
 fn referenced_assets(entities: &[SyncEntity]) -> Vec<(String, String, usize)> {
@@ -309,13 +319,16 @@ pub(crate) fn sync_upload_referenced_assets(
 ) -> Result<(), String> {
     for (asset_id, mime, byte_size) in referenced_assets(entities) {
         let init: AssetInitResponse = agent
-            .post(&format!("{base}/sync/assets/init"))
+            .post(&format!("{base}/v1/sync/assets/init"))
             .header("Authorization", &format!("Bearer {token}"))
             .header("Content-Type", "application/json")
-            .send_json(serde_json::json!({
-                "assetId": asset_id, "sha256": asset_id, "mime": mime,
-                "byteSize": byte_size, "data_generation": data_generation,
-            }))
+            .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
+            .send_json(asset_init_payload(
+                &asset_id,
+                &mime,
+                byte_size,
+                data_generation,
+            ))
             .map_err(|e| format!("背景图片上传初始化失败：{e}"))?
             .body_mut()
             .read_json()
@@ -335,9 +348,10 @@ pub(crate) fn sync_upload_referenced_assets(
         while offset < bytes.len() {
             let end = (offset + 1024 * 1024).min(bytes.len());
             agent
-                .put(&format!("{base}/sync/assets/{asset_id}"))
+                .put(&format!("{base}/v1/sync/assets/{asset_id}"))
                 .header("Authorization", &format!("Bearer {token}"))
                 .header("Content-Type", &mime)
+                .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
                 .header("X-Data-Generation", data_generation.to_string())
                 .header(
                     "Content-Range",
@@ -368,8 +382,9 @@ pub(crate) fn sync_download_referenced_assets(
         while offset < byte_size {
             let end = (offset + 1024 * 1024).min(byte_size);
             let mut response = agent
-                .get(&format!("{base}/sync/assets/{asset_id}"))
+                .get(&format!("{base}/v1/sync/assets/{asset_id}"))
                 .header("Authorization", &format!("Bearer {token}"))
+                .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
                 .header("Range", format!("bytes={offset}-{}", end - 1))
                 .call()
                 .map_err(|e| format!("背景图片下载失败：{e}"))?;
@@ -405,5 +420,12 @@ mod recovery_tests {
         let mut found = BTreeMap::new();
         collect_asset_references(&value, &mut found);
         assert_eq!(found.get(&id), Some(&"image/png".to_string()));
+    }
+
+    #[test]
+    fn asset_init_payload_uses_the_v5_camel_case_generation_field() {
+        let body = asset_init_payload(&"a".repeat(64), "image/png", 7, 2);
+        assert_eq!(body["dataGeneration"], 2);
+        assert!(body.get("data_generation").is_none());
     }
 }

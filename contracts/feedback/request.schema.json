@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/pigking9527-cmyk/kunpeng-reader/contracts/feedback/request.schema.json",
+  "$id": "https://schemas.kunpeng-reader.invalid/feedback/request.schema.json",
   "title": "Kunpeng Reader feedback request",
   "type": "object",
   "required": ["kind", "text", "appVersion", "platform", "images"],

@@ -51,6 +51,13 @@ jobs:
       - name: Install locked Node dependencies
         run: npm ci
 
+      - name: Check dependency and asset licenses
+        run: npm run license:check && npm run ip:check
+
+      - name: Enforce public release hold
+        if: ${{ inputs.publish_release }}
+        run: npm run release:license-gate
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version '^2' --locked
 
@@ -87,6 +94,14 @@ jobs:
       # The semantic search runtime does not ship Intel macOS prebuilt binaries.
       - name: Build Apple Silicon macOS bundles
         run: cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Verify packaged license inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -s "$app_path/Contents/Resources/licenses/THIRD_PARTY_NOTICES.md"
+          test -s "$app_path/Contents/Resources/licenses/DEPENDENCY_LICENSES.md"
 
       - name: Seal macOS application bundle
         shell: bash

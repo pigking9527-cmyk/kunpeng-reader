@@ -11,8 +11,7 @@ use std::path::PathBuf;
 const MAX_SETTINGS_BYTES: usize = 96 * 1024;
 
 fn settings_path() -> Option<PathBuf> {
-    let mut path = dirs::config_dir().or_else(dirs::cache_dir)?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_config_dir().or_else(crate::profile::app_cache_dir)?;
     path.push("gesture-settings-v1.json");
     Some(path)
 }

@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>鲲鹏阅读器</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="overlay-stack.css" />
+    <link rel="stylesheet" href="book-info-panel.css" />
+    <link rel="stylesheet" href="book-info-related.css" />
     <link rel="stylesheet" href="window-resize.css" />
   </head>
   <body>
@@ -89,6 +92,59 @@
               </button>
             </div>
             <section
+              id="sync-registration"
+              class="account-security-panel account-data-card sync-registration-panel"
+              hidden
+            >
+              <strong>邮箱验证注册</strong>
+              <small
+                >先发送邮箱验证码，验证通过后才会创建账号。密码不会在发送验证码时上传。</small
+              >
+              <input
+                id="sync-register-email"
+                type="email"
+                autocomplete="email"
+                placeholder="邮箱地址"
+              />
+              <div class="account-security-actions">
+                <button
+                  id="sync-register-code-request"
+                  class="btn-plain"
+                  type="button"
+                >
+                  发送验证码
+                </button>
+              </div>
+              <input
+                id="sync-register-code"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="6"
+                placeholder="6 位邮箱验证码"
+              />
+              <div class="account-security-actions">
+                <button
+                  id="sync-register-confirm"
+                  class="btn-plain"
+                  type="button"
+                >
+                  验证并注册
+                </button>
+                <button
+                  id="sync-register-cancel"
+                  class="btn-plain"
+                  type="button"
+                >
+                  取消
+                </button>
+              </div>
+              <div
+                id="sync-register-status"
+                class="private-sync-status"
+                aria-live="polite"
+              ></div>
+            </section>
+            <section
               id="sync-password-reset"
               class="account-security-panel"
               hidden
@@ -125,7 +181,7 @@
                 id="sync-reset-new-password"
                 type="password"
                 autocomplete="new-password"
-                placeholder="新登录密码（至少 8 个字符）"
+                placeholder="新登录密码（至少 12 个字符）"
                 data-i18n-placeholder="newLoginPassword"
               />
               <div class="account-security-actions">
@@ -671,6 +727,46 @@
                       data-i18n="clearThisDevice"
                     >
                       清除此设备
+                    </button>
+                  </div>
+
+                  <div class="account-data-card">
+                    <div>
+                      <strong>恢复云端历史版本</strong
+                      ><small
+                        >仅恢复当前账号云端同步实体到指定时间；不是本机“数据恢复点”，不读取或显示书籍内容。成功后会退出所有设备，并清除此设备的旧同步数据。</small
+                      >
+                    </div>
+                    <p
+                      id="account-cloud-recovery-status"
+                      class="private-sync-status"
+                      aria-live="polite"
+                    >
+                      登录后可读取云端恢复状态。
+                    </p>
+                    <label class="account-data-confirm"
+                      ><span>恢复到时间</span
+                      ><input
+                        id="account-cloud-recovery-target"
+                        type="datetime-local"
+                        step="1"
+                        disabled
+                    /></label>
+                    <label class="account-data-confirm"
+                      ><span data-i18n="loginPassword">登录密码</span
+                      ><input
+                        id="account-cloud-recovery-password"
+                        type="password"
+                        autocomplete="current-password"
+                        disabled
+                    /></label>
+                    <button
+                      id="account-cloud-recovery-restore"
+                      class="btn-plain account-danger-button"
+                      type="button"
+                      disabled
+                    >
+                      恢复云端历史版本
                     </button>
                   </div>
 
@@ -2465,6 +2561,7 @@
     <div
       id="gesture-info-modal"
       class="modal"
+      data-overlay-role="information"
       role="dialog"
       aria-modal="true"
       aria-labelledby="gesture-info-title"
@@ -3028,15 +3125,6 @@
         <div id="library-health-body" class="library-health-body"></div>
       </div>
     </div>
-    <div id="reading-timeline-modal" class="modal">
-      <div class="modal-card timeline-card">
-        <div class="modal-head">
-          <span id="reading-timeline-title">阅读时间线</span
-          ><button id="reading-timeline-close" class="btn-plain">✕</button>
-        </div>
-        <div id="reading-timeline-body" class="timeline-body"></div>
-      </div>
-    </div>
     <div
       id="semantic-index-modal"
       class="modal settings-detail-modal"
@@ -3407,7 +3495,7 @@
         </div>
       </div>
     </div>
-    <div id="about-modal" class="modal">
+    <div id="about-modal" class="modal" data-overlay-role="information">
       <div class="modal-card about-card">
         <section class="about-version-card">
           <div>
@@ -3444,13 +3532,6 @@
             加载中…
           </div>
         </section>
-        <a
-          id="about-github"
-          class="about-github-card"
-          href="https://github.com/pigking9527-cmyk/kunpeng-reader"
-          >GitHub<span>github.com/pigking9527-cmyk/kunpeng-reader</span
-          ><b aria-hidden="true">↗</b></a
-        >
         <div class="about-feedback-actions">
           <button
             id="about-feedback-bug"
@@ -3591,124 +3672,11 @@
         <div id="feedback-status" class="ai-status" aria-live="polite"></div>
       </div>
     </div>
-    <div id="book-info-modal" class="modal">
-      <div class="modal-card book-info-card">
-        <section class="book-info-hero">
-          <div class="book-info-cover-stack">
-            <div
-              id="book-info-cover"
-              class="book-info-cover"
-              aria-label="图书封面"
-            ></div>
-            <button
-              id="cover-btn"
-              class="book-info-cover-change"
-              type="button"
-              title="选择图片更换封面"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 7.5h4l1.5-2h5l1.5 2h4v11H4z" />
-                <circle cx="12" cy="13" r="3.2" /></svg
-              ><span>更换封面</span>
-            </button>
-          </div>
-          <div class="book-info-identity">
-            <section class="book-info-primary">
-              <label class="book-info-title-field"
-                ><span>书名</span
-                ><input
-                  id="book-info-title"
-                  class="info-input"
-                  type="text"
-                  autocomplete="off"
-              /></label>
-              <p id="book-info-author" class="book-info-author"></p>
-            </section>
-            <section class="book-info-facts" aria-label="图书属性">
-              <div>
-                <span>格式</span><strong id="book-info-format"></strong>
-              </div>
-              <div><span>字数</span><strong id="book-info-words"></strong></div>
-              <div><span>大小</span><strong id="book-info-size"></strong></div>
-              <div>
-                <span>我的评分</span
-                ><span
-                  id="book-info-stars"
-                  class="info-stars"
-                  title="点击打分，再点同一颗清除"
-                ></span>
-              </div>
-            </section>
-          </div>
-        </section>
-        <section class="book-info-section">
-          <div class="book-info-section-head">
-            <h3>整理</h3>
-            <span>标签与书单</span>
-          </div>
-          <div class="book-info-organization-grid">
-            <div class="book-info-organization-entry">
-              <span class="info-k">标签</span
-              ><span
-                id="book-info-tag-summary"
-                class="info-v book-info-organization-summary"
-                >未添加</span
-              ><button
-                id="book-info-tags-manage"
-                class="book-info-organization-link"
-                type="button"
-              >
-                管理
-              </button>
-            </div>
-            <div class="book-info-organization-entry">
-              <span class="info-k">收藏书单</span
-              ><span
-                id="book-info-collection-summary"
-                class="info-v book-info-organization-summary"
-                >未添加</span
-              ><button
-                id="book-info-collections-manage"
-                class="book-info-organization-link"
-                type="button"
-              >
-                管理
-              </button>
-            </div>
-          </div>
-        </section>
-        <section class="book-info-section">
-          <div class="book-info-section-head">
-            <h3>AI 分类</h3>
-            <span>自动识别</span>
-          </div>
-          <div
-            id="book-info-model-tags"
-            class="info-v info-chips book-info-model-tags"
-          ></div>
-        </section>
-        <section class="book-info-section book-info-tools">
-          <div class="book-info-section-head"><h3>操作</h3></div>
-          <div class="info-action-buttons">
-            <button id="similar-books-btn" class="btn-plain">相似图书</button>
-            <button id="reading-timeline-btn" class="btn-plain">
-              阅读时间线
-            </button>
-          </div>
-        </section>
-        <section class="book-info-section book-info-description">
-          <div class="book-info-section-head">
-            <h3>简介</h3>
-            <span>失焦后自动保存</span>
-          </div>
-          <div
-            id="book-info-desc"
-            class="info-desc"
-            contenteditable="true"
-          ></div>
-        </section>
-      </div>
-    </div>
+    <div
+      id="book-info-modal"
+      class="modal"
+      data-overlay-role="information"
+    ></div>
     <div id="book-organization-modal" class="modal">
       <div class="modal-card book-organization-card">
         <div class="modal-head">
@@ -3765,16 +3733,6 @@
             class="book-info-organization-editor"
           ></div>
         </section>
-      </div>
-    </div>
-    <div id="similar-books-modal" class="modal">
-      <div class="modal-card similar-books-card">
-        <div class="modal-head">
-          <span>相似图书</span
-          ><button id="similar-books-close" class="btn-plain">✕</button>
-        </div>
-        <div id="similar-books-source" class="similar-source"></div>
-        <div id="similar-books-list" class="similar-list"></div>
       </div>
     </div>
     <div id="booklist-modal" class="modal">
@@ -3875,14 +3833,10 @@
     </div>
     <div id="shelf-search-modal" class="modal">
       <div class="modal-card shelf-search-card">
-        <div class="modal-head">
-          <span>书架全文检索</span
-          ><button id="shelf-search-close" class="btn-plain">✕</button>
-        </div>
         <iframe
           id="shelf-search-frame"
           class="shelf-search-frame"
-          title="书架全文检索"
+          title="搜索结果"
         ></iframe>
       </div>
     </div>
@@ -4631,17 +4585,18 @@
     <canvas
       id="newsnow-gesture-trail"
       class="newsnow-gesture-trail"
+      data-overlay-surface="gesture-trail"
+      data-overlay-role="feedback"
       hidden
       aria-hidden="true"
     ></canvas>
-    <!--
-      The legacy application owns this mount point. It is intentionally empty
-      and remains hidden until the original application opens a product page.
-      Keeping it outside all existing pages makes turning the feature off a
-      complete return to the old DOM.
-    -->
     <script src="recovery-settings-snapshot.js"></script>
+    <script src="overlay-stack.js"></script>
     <script src="startup-perf.js"></script>
+    <script src="app-i18n-reranker-catalog.js"></script>
+    <script src="app-i18n-stats-catalog.js"></script>
+    <script src="app-i18n-news-surface-catalog.js"></script>
+    <script src="app-i18n-semantic-runtime-catalog.js"></script>
     <script src="app-i18n.js"></script>
     <script src="startup-enhancement-ui.js"></script>
     <script src="window-resize.js"></script>
@@ -4653,11 +4608,16 @@
     <script src="sync-ui.js"></script>
     <script src="about-ui.js"></script>
     <script src="feedback-ui.js"></script>
+    <script src="stats-rules.js"></script>
     <script src="stats-ui.js"></script>
+    <script src="shelf-ui-rules.js"></script>
+    <script src="shelf-cover-loading-rules.js"></script>
     <script src="shelf-ui.js"></script>
     <script src="booklist-settings-ui.js"></script>
     <script src="settings-layout-ui.js"></script>
     <script src="toolbar-settings-ui.js"></script>
+    <script src="book-info-panel.js"></script>
+    <script src="book-info-related.js"></script>
     <script src="book-info-organization.js"></script>
     <script src="notice-ui.js"></script>
     <script src="dialog-ui.js"></script>
@@ -4665,7 +4625,9 @@
     <script src="library-ai-entry.js"></script>
     <script src="news-gesture.js"></script>
     <script src="experimental-features.js"></script>
+    <script src="news-layout-rules.js"></script>
     <script src="news-ui.js"></script>
+    <script src="gesture-hint-rules.js"></script>
     <script src="gesture-ui.js"></script>
     <script src="api-settings-ui.js"></script>
     <script src="auto-import-ui.js"></script>

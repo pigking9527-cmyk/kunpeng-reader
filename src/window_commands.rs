@@ -438,6 +438,10 @@ pub(crate) fn ensure_reader_window(
             .decorations(false)
             .resizable(true)
             .min_inner_size(420.0, 320.0);
+    #[cfg(target_os = "macos")]
+    if let Some(identifier) = crate::profile::webview_data_store_identifier() {
+        builder = builder.data_store_identifier(identifier);
+    }
     match &geom {
         Some(saved) if saved.w >= 300.0 && saved.h >= 300.0 => {
             builder = builder.inner_size(saved.w, saved.h);

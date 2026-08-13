@@ -1,9 +1,13 @@
 # ADR-0021：桌面软件设置同步
 
-- 状态：已接受
+- 状态：部分被 ADR-0031 取代（历史记录）
 - 日期：2026-08-08
 
 ## 决定
+
+> 本 ADR 记录协议 v1 至 v4 时的兼容设计。ADR-0031 已在协议 v5 明确移除
+> `readerJumpBackSizeLevel` 和所有 1–10 级转换/镜像要求；下文相关段落仅保留历史背景，
+> 不得作为 v5 实现依据。
 
 Windows、Linux 与 macOS 桌面端使用可选同步实体 `app_settings_v1/default` 保存账户级、非敏感的软件设置。实体沿用现有 LWW 顺序（`updated_at`、`sync_version`、`device_id`），不进入离线核心迁移包，也不包含路径、密钥、书籍内容或平台专属运行状态。
 

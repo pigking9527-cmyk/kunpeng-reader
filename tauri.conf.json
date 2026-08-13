@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "鲲鹏阅读器",
-  "version": "1.16.0",
-  "identifier": "com.pigking.ebookreader",
+  "version": "1.0.0",
+  "identifier": "com.kunpeng.reader",
   "build": {
     "beforeDevCommand": "npm run desktop-ui:build",
     "beforeBuildCommand": "npm run desktop-ui:build",
@@ -25,12 +25,20 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' blob: reader: http://reader.localhost; style-src 'self'; img-src 'self' data: blob: reader: http://reader.localhost https:; font-src 'self' data: reader: http://reader.localhost; media-src 'self' data: blob: reader: http://reader.localhost; connect-src 'self' ipc: http://ipc.localhost reader: http://reader.localhost https://api.github.com https://github.com; frame-src 'self' reader: http://reader.localhost https:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+      "csp": "default-src 'self'; script-src 'self' blob: reader: http://reader.localhost; style-src 'self'; img-src 'self' data: blob: reader: http://reader.localhost https:; font-src 'self' data: reader: http://reader.localhost; media-src 'self' data: blob: reader: http://reader.localhost; connect-src 'self' ipc: http://ipc.localhost reader: http://reader.localhost https:; frame-src 'self' reader: http://reader.localhost https:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": {
+      "LICENSE": "licenses/Kunpeng-Reader-LICENSE.txt",
+      "THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "target/license-audit/DEPENDENCY_LICENSES.md": "licenses/DEPENDENCY_LICENSES.md",
+      "LICENSES": "licenses/third-party",
+      "src/dict/ECDICT_SOURCE.md": "licenses/sources/ECDICT_SOURCE.md",
+      "src/dict/CC_CEDICT_SOURCE.md": "licenses/sources/CC_CEDICT_SOURCE.md"
+    },
     "fileAssociations": [
       {
         "ext": ["epub"],

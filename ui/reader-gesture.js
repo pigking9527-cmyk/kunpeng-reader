@@ -44,7 +44,9 @@
   }
   function createHint() {
     const node = root.createElement("div");
-    node.style.cssText = "position:fixed;z-index:10050;top:16px;right:16px;display:flex;align-items:center;justify-content:center;width:max-content;max-width:calc(100vw - 32px);box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:9px 13px;border-radius:9px;color:#fff;font-weight:700;line-height:1.35;text-align:center;box-shadow:0 8px 22px rgba(32,57,93,.2);pointer-events:none";
+    node.className = "reader-gesture-hint";
+    node.dataset.overlaySurface = "gesture-hint";
+    node.dataset.overlayRole = "feedback";
     node.hidden = true;
     root.body?.appendChild(node);
     return node;
@@ -60,6 +62,7 @@
     if (hintTimer) global.clearTimeout(hintTimer);
     hintTimer = 0;
     hint.hidden = true;
+    hint.removeAttribute("data-overlay-active");
   }
   function showHint(name) {
     // Settings are loaded for each match so changes made in the main window apply immediately.
@@ -71,6 +74,7 @@
     hint.style.width = Math.round(settings.frameWidth) + "px";
     hint.style.minHeight = Math.round(settings.frameHeight) + "px";
     hint.style.clipPath = hintClipPath(settings);
+    hint.dataset.overlayActive = "true";
     hint.hidden = false;
     placeHint(settings);
     if (hintTimer) global.clearTimeout(hintTimer);
@@ -167,8 +171,17 @@
     const path = api.load(global.localStorage);
     return api.loadEnabled(global.localStorage) && path.length ? [{ name: "返回／关闭当前页", action: "back", points: path, precision: api.loadPrecision(global.localStorage) }] : [];
   }
-  function clear() { active = null; trail.hidden = true; api.draw(trail, []); }
-  function paint(points) { trail.hidden = false; api.draw(trail, points, { color: "#3478d4", lineWidth: 5 }); }
+  function clear() {
+    active = null;
+    trail.hidden = true;
+    trail.removeAttribute("data-overlay-active");
+    api.draw(trail, []);
+  }
+  function paint(points) {
+    trail.dataset.overlayActive = "true";
+    trail.hidden = false;
+    api.draw(trail, points, { color: "#3478d4", lineWidth: 5 });
+  }
   function start(x, y, source = "host") {
 
     const currentProfiles = profiles();
@@ -331,12 +344,16 @@
     paint(active.points);
     previewMatch(active);
   }
-  global.addEventListener("mousedown", (event) => {
+  function startMouseGesture(event) {
     if (event.button === 0) { cancelKeepHint(); return; }
     if (event.button !== 2) return;
     start(event.clientX, event.clientY);
     if (active) event.preventDefault();
-  }, true);
+  }
+  // Keep mouse gestures on one event family. macOS WebKit can advertise mouse
+  // PointerEvents while omitting their move phase, which leaves a gesture at
+  // its first point and prevents matching.
+  global.addEventListener("mousedown", startMouseGesture, true);
   global.addEventListener("mousemove", (event) => { if (active) { event.preventDefault(); move(event.clientX, event.clientY); } }, { capture: true, passive: false });
   global.addEventListener("mouseup", () => finish(), true);
   global.addEventListener("blur", () => { finish(true); hideHint(); });

@@ -656,22 +656,21 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
             value,
         ));
     }
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    db.upsert_json_batch(&batch)?;
-    // Seed split organization entities only once from legacy state. A startup
-    // projection is not proof of an intentional edit and cannot clear them.
-    let organization_seeds = organization_seeds
-        .into_iter()
-        .filter_map(|item| match db.entity_json(&item.0, &item.1) {
-            Ok(None) => Some(Ok(item)),
-            Ok(Some(_)) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    db.upsert_json_batch(&organization_seeds)?;
-    crate::private_sync::append_sync_entities(db)?;
-    drop(db_guard);
+    state.with_db_write("seed_entity_model", |db| {
+        db.upsert_json_batch(&batch)?;
+        // Seed split organization entities only once from legacy state. A startup
+        // projection is not proof of an intentional edit and cannot clear them.
+        let organization_seeds = organization_seeds
+            .into_iter()
+            .filter_map(|item| match db.entity_json(&item.0, &item.1) {
+                Ok(None) => Some(Ok(item)),
+                Ok(Some(_)) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        db.upsert_json_batch(&organization_seeds)?;
+        crate::private_sync::append_sync_entities(db)
+    })?;
     crate::booklist_sync::seed_local_booklists(state)
 }
 
@@ -714,10 +713,9 @@ pub(crate) fn persist_book_organization_entities(
             ));
         }
     }
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    db.upsert_json_batch(&batch)?;
-    drop(db_guard);
+    state.with_db_write("persist_book_organization_entities", |db| {
+        db.upsert_json_batch(&batch)
+    })?;
     if persist_collections {
         crate::booklist_sync::persist_all_booklists(state)?;
     }
@@ -727,11 +725,9 @@ pub(crate) fn persist_book_organization_entities(
 /// Rehydrate organization fields before any startup projection can publish a
 /// library file previously saved by an old or incomplete executable.
 pub(crate) fn apply_local_organization_entities(state: &AppState) -> Result<(), String> {
-    let items = {
-        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        db.all_sync_entities()?
-    };
+    let items = state.with_db_read("apply_local_organization_entities", |db| {
+        db.all_sync_entities()
+    })?;
     let user_tags = items
         .iter()
         .filter(|item| item.kind == USER_BOOK_TAGS_KIND_V1 && item.deleted_at == 0)
@@ -797,19 +793,31 @@ pub(crate) fn apply_pending_book_state(
     if target.content_id.is_empty() {
         return Ok(false);
     }
-    let (progress, reading_data, statistics, book_state, model_tags, user_tags, collections) = {
-        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        (
-            db.entity_json(READING_PROGRESS_KIND_V1, &target.content_id)?,
-            db.entity_json(READING_DATA_KIND_V1, &target.content_id)?,
-            db.entity_json(READING_STATISTICS_KIND_V1, &target.content_id)?,
-            db.entity_json(BOOK_STATE_KIND_V2, &target.content_id)?,
-            db.entity_json(MODEL_BOOK_TAGS_KIND_V1, &target.content_id)?,
-            db.entity_json(USER_BOOK_TAGS_KIND_V1, &target.content_id)?,
-            db.entity_json(BOOK_COLLECTIONS_KIND_V1, &target.content_id)?,
-        )
-    };
+    let (progress, reading_data, statistics, book_state, model_tags, user_tags, collections) = state
+        .with_db_read("apply_pending_book_state", |db| {
+        let values = db.entity_json_many(&[
+            (READING_PROGRESS_KIND_V1, &target.content_id),
+            (READING_DATA_KIND_V1, &target.content_id),
+            (READING_STATISTICS_KIND_V1, &target.content_id),
+            (BOOK_STATE_KIND_V2, &target.content_id),
+            (MODEL_BOOK_TAGS_KIND_V1, &target.content_id),
+            (USER_BOOK_TAGS_KIND_V1, &target.content_id),
+            (BOOK_COLLECTIONS_KIND_V1, &target.content_id),
+        ])?;
+        let [progress, reading_data, statistics, book_state, model_tags, user_tags, collections] =
+            values
+                .try_into()
+                .map_err(|_| "批量读取图书同步状态数量不一致".to_string())?;
+        Ok((
+            progress,
+            reading_data,
+            statistics,
+            book_state,
+            model_tags,
+            user_tags,
+            collections,
+        ))
+    })?;
     let has_split_state = progress.is_some() || reading_data.is_some() || statistics.is_some();
     if !has_split_state
         && book_state.is_none()
@@ -869,11 +877,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     // restore take the same gate before their locks, so this cannot deadlock
     // with a recovery operation while we hold the complete projection boundary.
     let _installation = crate::backup::core_installation_lock()?;
-    let items = {
-        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        db.all_sync_entities()?
-    };
+    let items = state.with_db_read("apply_sqlite_to_runtime", |db| db.all_sync_entities())?;
     let mut progress: Vec<ReadingProgressV1> = Vec::new();
     let mut reading_data: Vec<ReadingDataV1> = Vec::new();
     let mut statistics: Vec<ReadingStatisticsV1> = Vec::new();
@@ -1063,21 +1067,19 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
 
 /// Converge the local store once all portable v2 rows have been materialized.
 pub(crate) fn converge_entity_model(state: &AppState) -> Result<u32, String> {
-    {
-        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        if db.metadata(ENTITY_MODEL_VERSION_KEY).as_deref() == Some(ENTITY_MODEL_VERSION) {
-            return Ok(0);
-        }
+    if state.with_db_read("converge_entity_model_check", |db| {
+        Ok(db.metadata(ENTITY_MODEL_VERSION_KEY).as_deref() == Some(ENTITY_MODEL_VERSION))
+    })? {
+        return Ok(0);
     }
 
     // Never discard a legacy row until a complete recovery point exists.
     crate::backup::create(state, true)?;
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let removed = db.purge_legacy_entities()?;
-    db.set_metadata(ENTITY_MODEL_VERSION_KEY, ENTITY_MODEL_VERSION)?;
-    Ok(removed)
+    state.with_db_write("converge_entity_model", |db| {
+        let removed = db.purge_legacy_entities()?;
+        db.set_metadata(ENTITY_MODEL_VERSION_KEY, ENTITY_MODEL_VERSION)?;
+        Ok(removed)
+    })
 }
 
 #[cfg(test)]

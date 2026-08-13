@@ -6,6 +6,8 @@ const test = require("node:test");
 const source = fs.readFileSync(path.join(__dirname, "..", "search-ui.js"), "utf8");
 const shelfSearchSource = fs.readFileSync(path.join(__dirname, "..", "search.js"), "utf8");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+const searchHtml = fs.readFileSync(path.join(__dirname, "..", "search.html"), "utf8");
 
 test("startup restores the full-text toggle and its matching placeholder together", () => {
   assert.match(source, /shelfChk\.checked = localStorage\.getItem\("shelfSearchEnabled"\) === "1"/);
@@ -27,6 +29,29 @@ test("shelf search warms semantic model when its window opens", () => {
   assert.match(shelfSearchSource, /function warmSemanticModelForShelfSearch\(\)/);
   assert.match(shelfSearchSource, /warmSemanticModelForShelfSearch\(\);/);
   assert.match(shelfSearchSource, /invoke\("warm_semantic_model"\)\.catch\(\(\) => \{\}\)/);
+});
+
+test("full-text search uses one clean embedded page without a duplicate heading or close X", () => {
+  const modal = html.slice(html.indexOf('id="shelf-search-modal"'), html.indexOf('id="organization-filter-modal"'));
+  assert.doesNotMatch(modal, /书架全文检索/);
+  assert.doesNotMatch(modal, /shelf-search-close/);
+  assert.match(searchHtml, /class="search-shell"/);
+  assert.match(searchHtml, /id="search-alert"/);
+});
+
+test("keyword search automatically retries while its background index is being prepared", () => {
+  assert.match(shelfSearchSource, /function scheduleKeywordRetry\(term\)/);
+  assert.match(shelfSearchSource, /runSearch\(term, \{ retry: true \}\)/);
+  assert.match(shelfSearchSource, /if \(mode === "kw" && pendingBooks > 0\) scheduleKeywordRetry\(curTerm\)/);
+  assert.match(shelfSearchSource, /页面将自动显示结果/);
+});
+
+test("semantic search checks model and index readiness and shows a visible dialog", () => {
+  assert.match(shelfSearchSource, /async function semanticReadiness\(\)/);
+  assert.match(shelfSearchSource, /invoke\("semantic_status"\)/);
+  assert.match(shelfSearchSource, /invoke\("semantic_index_done", \{ ids:/);
+  assert.match(shelfSearchSource, /showSearchAlert\(warning, "语义检索未就绪"\)/);
+  assert.match(shelfSearchSource, /if \(warning\) \{[\s\S]*?return;[\s\S]*?\}/);
 });
 
 test("startup backfills full-text indices after the shelf becomes interactive", () => {

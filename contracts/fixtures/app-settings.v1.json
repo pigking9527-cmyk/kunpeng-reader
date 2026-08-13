@@ -1,5 +1,5 @@
 {
-  "syncProtocolVersion": 1,
+  "syncProtocolVersion": 5,
   "entities": [
     {
       "id": "default",
@@ -14,7 +14,6 @@
         "readerJumpBackDismissMode": "pages",
         "readerJumpBackDismissSeconds": 30,
         "readerJumpBackDismissPages": 3,
-        "readerJumpBackSizeLevel": 3,
         "readerJumpBackIconSizePx": 60,
         "readerJumpBackPositionX": 950,
         "readerJumpBackPositionY": 500,

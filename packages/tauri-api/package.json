@@ -1,5 +1,6 @@
 {
   "name": "@kunpeng/tauri-api",
   "private": true,
+  "license": "SEE LICENSE IN ../../LICENSE",
   "type": "module"
 }

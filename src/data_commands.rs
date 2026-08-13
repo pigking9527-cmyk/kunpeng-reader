@@ -13,17 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use tauri::Manager;
 
-const APP_DATA_DIRECTORY: &str = "ebook-reader";
-
-fn owned_app_directory(base: Option<PathBuf>, label: &str) -> Result<PathBuf, String> {
-    let base = base.ok_or_else(|| format!("无法确定{label}目录"))?;
-    let target = base.join(APP_DATA_DIRECTORY);
-    if target.parent() != Some(base.as_path())
-        || target.file_name().and_then(|name| name.to_str()) != Some(APP_DATA_DIRECTORY)
-    {
-        return Err(format!("拒绝清除意外的{label}路径：{}", target.display()));
-    }
-    Ok(target)
+fn owned_app_directory(target: Option<PathBuf>, label: &str) -> Result<PathBuf, String> {
+    target.ok_or_else(|| format!("无法确定{label}目录"))
 }
 
 fn remove_owned_directory(path: &Path) -> Result<(), String> {
@@ -79,9 +70,9 @@ pub(crate) fn export_data_package(
     path: String,
 ) -> Result<(), String> {
     data_migration::migrate_json_to_sqlite(state.inner())?;
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let package = db.export_package()?;
+    // Build the portable envelope while holding the database boundary, then
+    // release SQLite before filesystem I/O writes the potentially large JSON.
+    let package = state.with_db_read("export_data_package", |db| db.export_package())?;
     atomic_file::write_json(std::path::Path::new(&path), &package, true)
 }
 
@@ -112,11 +103,7 @@ pub(crate) fn import_data_package(
     // rather than trying to reconstruct only selected database rows.
     let recovery = backup::create(state.inner(), true)?;
     let recovery_id = recovery.latest_id()?.to_string();
-    let imported = {
-        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        db.import_package(&value)?
-    };
+    let imported = state.with_db_write("import_data_package", |db| db.import_package(&value))?;
     if let Err(error) = data_migration::apply_sqlite_to_runtime(state.inner()) {
         if let Err(rollback_error) = backup::restore(state.inner(), &recovery_id) {
             return Err(format!(
@@ -152,9 +139,9 @@ pub(crate) fn clear_local_app_data(
     }
 
     let targets = [
-        owned_app_directory(dirs::config_dir(), "配置")?,
-        owned_app_directory(dirs::cache_dir(), "缓存")?,
-        owned_app_directory(dirs::data_local_dir(), "本地数据")?,
+        owned_app_directory(crate::profile::app_config_dir(), "配置")?,
+        owned_app_directory(crate::profile::app_cache_dir(), "缓存")?,
+        owned_app_directory(crate::profile::app_data_dir(), "本地数据")?,
     ]
     .into_iter()
     .collect::<HashSet<_>>();

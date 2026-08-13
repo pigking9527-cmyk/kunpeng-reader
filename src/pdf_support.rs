@@ -20,8 +20,7 @@ pub(crate) struct PageCacheData {
 }
 
 fn pages_dir() -> Option<std::path::PathBuf> {
-    let mut d = dirs::cache_dir()?;
-    d.push("ebook-reader");
+    let mut d = crate::profile::app_cache_dir()?;
     d.push("pages");
     Some(d)
 }
@@ -170,8 +169,7 @@ pub(crate) struct PdfState {
 }
 
 fn pdf_state_path(id: u64) -> Option<std::path::PathBuf> {
-    let mut d = dirs::cache_dir()?;
-    d.push("ebook-reader");
+    let mut d = crate::profile::app_cache_dir()?;
     d.push("pdfstate");
     Some(d.join(format!("{id}.json")))
 }

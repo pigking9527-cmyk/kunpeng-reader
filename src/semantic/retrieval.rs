@@ -57,15 +57,13 @@ impl RetrievalMode {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    let mut path = dirs::config_dir().or_else(dirs::cache_dir)?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_config_dir().or_else(crate::profile::app_cache_dir)?;
     path.push("semantic-retrieval-mode.txt");
     Some(path)
 }
 
 fn long_context_settings_path() -> Option<PathBuf> {
-    let mut path = dirs::config_dir().or_else(dirs::cache_dir)?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_config_dir().or_else(crate::profile::app_cache_dir)?;
     path.push("semantic-m3-long-context.txt");
     Some(path)
 }
@@ -205,8 +203,7 @@ pub(super) fn select_mode(state: tauri::State<AppState>, value: &str) -> Result<
 }
 
 fn reranker_dir() -> Option<PathBuf> {
-    let mut path = dirs::cache_dir()?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_cache_dir()?;
     path.push("reranker");
     Some(path)
 }

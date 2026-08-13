@@ -62,18 +62,15 @@ export function createWindowSettingsState(): WindowSettingsState {
 }
 
 export type WindowSettingsAction =
+  | { readonly type: "load-started" }
   | { readonly type: "load-succeeded"; readonly settings: StartupEnhancementSettings }
-  | { readonly type: "load-failed"; readonly message: string }
+  | { readonly type: "load-failed" }
   | { readonly type: "patch"; readonly patch: Partial<StartupEnhancementSettings> }
   | { readonly type: "reset" }
   | { readonly type: "save-started"; readonly requestId: number }
   | { readonly type: "save-succeeded"; readonly requestId: number; readonly settings: StartupEnhancementSettings }
-  | { readonly type: "save-failed"; readonly requestId: number; readonly message: string }
+  | { readonly type: "save-failed"; readonly requestId: number }
   | { readonly type: "save-cancelled"; readonly requestId: number };
-
-function failureMessage(prefix: string, message: string): string {
-  return message.trim() ? `${prefix}：${message}` : `${prefix}。`;
-}
 
 /** Pure state machine so save races and platform capabilities can be unit tested. */
 export function windowSettingsReducer(
@@ -81,6 +78,8 @@ export function windowSettingsReducer(
   action: WindowSettingsAction,
 ): WindowSettingsState {
   switch (action.type) {
+    case "load-started":
+      return { ...state, phase: "loading", statusMessage: "正在读取窗口设置…" };
     case "load-succeeded": {
       const settings = normalizeStartupEnhancementSettings(action.settings);
       return { ...state, phase: "ready", saved: settings, draft: settings, statusMessage: null };
@@ -89,14 +88,20 @@ export function windowSettingsReducer(
       return {
         ...state,
         phase: "failed",
-        statusMessage: failureMessage("无法读取窗口设置", action.message),
+        // Native errors may contain local paths or platform details.  This
+        // renderer surface always uses fixed, actionable copy instead.
+        statusMessage: "无法读取窗口设置，请稍后重试。",
       };
     case "patch":
       return {
         ...state,
-        phase: state.phase === "saved" ? "ready" : state.phase,
+        phase: state.phase === "saved" || state.phase === "failed" || state.phase === "cancelled"
+          ? "ready"
+          : state.phase,
         draft: normalizeStartupEnhancementSettings({ ...state.draft, ...action.patch }),
-        statusMessage: state.phase === "saved" ? null : state.statusMessage,
+        statusMessage: state.phase === "saved" || state.phase === "failed" || state.phase === "cancelled"
+          ? null
+          : state.statusMessage,
       };
     case "reset":
       return {
@@ -117,16 +122,17 @@ export function windowSettingsReducer(
       return {
         ...state,
         phase: "failed",
-        statusMessage: failureMessage("保存窗口设置失败", action.message),
+        statusMessage: "保存窗口设置失败，请检查后重试。",
       };
     case "save-cancelled":
       if (action.requestId !== state.requestId) return state;
-      return { ...state, phase: "cancelled", statusMessage: "已取消保存，尚未写入更改。" };
+      return {
+        ...state,
+        phase: "cancelled",
+        draft: state.saved,
+        statusMessage: "已取消保存，尚未写入更改。",
+      };
   }
-}
-
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "发生未知错误";
 }
 
 export function isAbortError(error: unknown, signal: AbortSignal): boolean {

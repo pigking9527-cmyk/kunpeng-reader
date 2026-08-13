@@ -94,10 +94,10 @@ pub(crate) fn persist_booklist(state: &AppState, list_id: &str) -> Result<(), St
             .ok_or("找不到书单")?;
         (list.id.clone(), payload_from_list(&library, &list))
     };
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let value = merge_known_payload(db.entity_json(BOOKLIST_KIND_V1, &id)?, &payload)?;
-    db.upsert_json_batch(&[(BOOKLIST_KIND_V1.to_string(), id, value)])
+    state.with_db_write("persist_booklist", |db| {
+        let value = merge_known_payload(db.entity_json(BOOKLIST_KIND_V1, &id)?, &payload)?;
+        db.upsert_json_batch(&[(BOOKLIST_KIND_V1.to_string(), id, value)])
+    })
 }
 
 /// Persist every local booklist after a collection-level edit.  Booklist
@@ -140,29 +140,29 @@ pub(crate) fn seed_local_booklists(state: &AppState) -> Result<(), String> {
     if lists.is_empty() {
         return Ok(());
     }
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let mut batch = Vec::new();
-    for (id, payload) in lists {
-        if db.entity_json(BOOKLIST_KIND_V1, &id)?.is_none() {
-            batch.push((
-                BOOKLIST_KIND_V1.to_string(),
-                id,
-                serde_json::to_value(payload).map_err(|error| error.to_string())?,
-            ));
+    state.with_db_write("seed_local_booklists", |db| {
+        let mut batch = Vec::new();
+        for (id, payload) in lists {
+            if db.entity_json(BOOKLIST_KIND_V1, &id)?.is_none() {
+                batch.push((
+                    BOOKLIST_KIND_V1.to_string(),
+                    id,
+                    serde_json::to_value(payload).map_err(|error| error.to_string())?,
+                ));
+            }
         }
-    }
-    if batch.is_empty() {
-        Ok(())
-    } else {
-        db.upsert_json_batch(&batch)
-    }
+        if batch.is_empty() {
+            Ok(())
+        } else {
+            db.upsert_json_batch(&batch)
+        }
+    })
 }
 
 pub(crate) fn tombstone_booklist(state: &AppState, list_id: &str) -> Result<(), String> {
-    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    db.soft_delete(BOOKLIST_KIND_V1, list_id)
+    state.with_db_write("tombstone_booklist", |db| {
+        db.soft_delete(BOOKLIST_KIND_V1, list_id)
+    })
 }
 
 /// Apply only durable presentation data to books already present locally.

@@ -1,9 +1,18 @@
-import type { AccountSummary, RecoveryPoint, SyncConflict, SyncProgress, SyncReport } from "./account-sync-port.js";
+import type {
+  AccountSummary,
+  CloudRecoveryRestoreResult,
+  CloudRecoveryStatus,
+  RecoveryPoint,
+  SyncConflict,
+  SyncProgress,
+  SyncReport,
+} from "./account-sync-port.js";
 
 export type AsyncPhase = "idle" | "loading" | "success" | "failure" | "cancelled";
 export type SyncPhase = "idle" | "syncing" | "success" | "failure" | "cancelled" | "offline" | "conflict";
 export type SensitiveAction = "clear-device" | "clear-cloud" | "delete-account";
 export type RecoveryPhase = "idle" | "loading" | "ready" | "confirming" | "running" | "success" | "failure" | "cancelled";
+export type CloudRecoveryPhase = "idle" | "loading" | "ready" | "restoring" | "success" | "failure" | "cancelled";
 
 export interface AccountSyncState {
   readonly account: AccountSummary | null;
@@ -22,6 +31,13 @@ export interface AccountSyncState {
     readonly points: readonly RecoveryPoint[];
     readonly pendingAction: SensitiveAction | null;
   };
+  /** Summary-only server history state. It never contains synchronized entities or credentials. */
+  readonly cloudRecovery: {
+    readonly phase: CloudRecoveryPhase;
+    readonly requestId: number;
+    readonly status: CloudRecoveryStatus | null;
+    readonly result: CloudRecoveryRestoreResult | null;
+  };
   /** Safe, user-facing status only. Never use port error text here. */
   readonly notice: string;
 }
@@ -32,6 +48,7 @@ export const initialAccountSyncState: AccountSyncState = Object.freeze({
   authRequestId: 0,
   sync: Object.freeze({ phase: "idle", requestId: 0, progress: null, report: null, conflict: null }),
   recovery: Object.freeze({ phase: "idle", requestId: 0, points: [], pendingAction: null }),
+  cloudRecovery: Object.freeze({ phase: "idle", requestId: 0, status: null, result: null }),
   notice: "",
 });
 
@@ -54,6 +71,12 @@ export type AccountSyncAction =
   | { readonly type: "recovery-ready"; readonly requestId: number; readonly points: readonly RecoveryPoint[] }
   | { readonly type: "recovery-failed"; readonly requestId: number; readonly notice: string }
   | { readonly type: "recovery-cancelled"; readonly requestId: number }
+  | { readonly type: "cloud-recovery-loading"; readonly requestId: number }
+  | { readonly type: "cloud-recovery-ready"; readonly requestId: number; readonly status: CloudRecoveryStatus }
+  | { readonly type: "cloud-recovery-restoring"; readonly requestId: number }
+  | { readonly type: "cloud-recovery-restored"; readonly requestId: number; readonly result: CloudRecoveryRestoreResult }
+  | { readonly type: "cloud-recovery-failed"; readonly requestId: number; readonly notice: string }
+  | { readonly type: "cloud-recovery-cancelled"; readonly requestId: number }
   | { readonly type: "confirm-sensitive-action"; readonly action: SensitiveAction }
   | { readonly type: "dismiss-sensitive-action" }
   | { readonly type: "sensitive-action-started"; readonly action: SensitiveAction }
@@ -119,6 +142,35 @@ export function accountSyncReducer(state: AccountSyncState, action: AccountSyncA
     case "recovery-cancelled":
       if (!isCurrent(action.requestId, state.recovery.requestId)) return state;
       return { ...state, recovery: { ...state.recovery, phase: "cancelled", pendingAction: null }, notice: "操作已取消。" };
+    case "cloud-recovery-loading":
+      return {
+        ...state,
+        cloudRecovery: { phase: "loading", requestId: action.requestId, status: null, result: null },
+        notice: "正在读取云端恢复状态…",
+      };
+    case "cloud-recovery-ready":
+      if (!isCurrent(action.requestId, state.cloudRecovery.requestId)) return state;
+      return { ...state, cloudRecovery: { ...state.cloudRecovery, phase: "ready", status: action.status }, notice: "" };
+    case "cloud-recovery-restoring":
+      return {
+        ...state,
+        cloudRecovery: { ...state.cloudRecovery, phase: "restoring", requestId: action.requestId, result: null },
+        notice: "正在恢复云端数据…",
+      };
+    case "cloud-recovery-restored":
+      if (!isCurrent(action.requestId, state.cloudRecovery.requestId)) return state;
+      return {
+        ...state,
+        account: null,
+        cloudRecovery: { ...state.cloudRecovery, phase: "success", result: action.result },
+        notice: "云端恢复已完成，请重新登录后同步。",
+      };
+    case "cloud-recovery-failed":
+      if (!isCurrent(action.requestId, state.cloudRecovery.requestId)) return state;
+      return { ...state, cloudRecovery: { ...state.cloudRecovery, phase: "failure" }, notice: action.notice };
+    case "cloud-recovery-cancelled":
+      if (!isCurrent(action.requestId, state.cloudRecovery.requestId)) return state;
+      return { ...state, cloudRecovery: { ...state.cloudRecovery, phase: "cancelled" }, notice: "云端恢复已取消。" };
     case "confirm-sensitive-action":
       return { ...state, recovery: { ...state.recovery, phase: "confirming", pendingAction: action.action }, notice: "请阅读确认说明后继续。" };
     case "dismiss-sensitive-action":

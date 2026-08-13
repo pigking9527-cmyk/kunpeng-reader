@@ -7,7 +7,6 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $release = Join-Path $repo "target\release\ebook-reader-tauri.exe"
 $releaseOrt = Join-Path $repo "target\release\onnxruntime.dll"
-$providerNames = @("onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll", "cudart64_12.dll", "cudnn64_9.dll", "ONNX-Runtime-LICENSE.txt", "NVIDIA-CUDA-LICENSE.txt", "NVIDIA-cuDNN-LICENSE.txt")
 $repoExe = Join-Path $repo "鲲鹏阅读器.exe"
 $repoOrt = Join-Path $repo "onnxruntime.dll"
 $desktop = [Environment]::GetFolderPath("Desktop")
@@ -92,20 +91,12 @@ try {
   if (-not $SkipBuild) {
     cargo build --release
   }
-  & (Join-Path $PSScriptRoot "prepare-windows-gpu-runtime.ps1") -Destination "target\release"
   if (-not (Test-Path -LiteralPath $release)) { throw "release exe 不存在：$release" }
   if (-not (Test-Path -LiteralPath $releaseOrt)) { throw "release ONNX Runtime DLL 不存在：$releaseOrt" }
-  foreach ($name in $providerNames) {
-    $provider = Join-Path (Split-Path -Parent $release) $name
-    if (-not (Test-Path -LiteralPath $provider)) { throw "release CUDA Provider 不存在：$provider" }
-  }
   Assert-NewIconEmbedded
   Stop-ReaderProcesses
   Copy-Item -LiteralPath $release -Destination $repoExe -Force
   Copy-Item -LiteralPath $releaseOrt -Destination $repoOrt -Force
-  foreach ($name in $providerNames) {
-    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $release) $name) -Destination (Join-Path $repo $name) -Force
-  }
   Write-DesktopShortcut
   Remove-Item -LiteralPath $legacyDesktopExe, $legacyDesktopOrt -Force -ErrorAction SilentlyContinue
   if (-not $SkipIconCacheRefresh) { Clear-ExplorerIconCache }
@@ -113,4 +104,3 @@ try {
 } finally {
   Pop-Location
 }
-

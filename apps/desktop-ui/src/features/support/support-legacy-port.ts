@@ -43,7 +43,7 @@ function throwIfAborted(signal: AbortSignal): void {
 
 function supportFailure(): Error {
   // The caller intentionally receives no native path, server response, or
-  // attachment details. SupportFeature turns this into user-facing generic copy.
+  // attachment details. The caller turns this into user-facing generic copy.
   return new Error("Support operation failed.");
 }
 

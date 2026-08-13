@@ -3,13 +3,17 @@
   "productName": "kunpeng-reader",
   "bundle": {
     "targets": ["appimage", "deb"],
+    "resources": {
+      "LICENSE": "licenses/Kunpeng-Reader-LICENSE.txt",
+      "THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "target/license-audit/DEPENDENCY_LICENSES.md": "licenses/DEPENDENCY_LICENSES.md",
+      "LICENSES": "licenses/third-party",
+      "src/dict/ECDICT_SOURCE.md": "licenses/sources/ECDICT_SOURCE.md",
+      "src/dict/CC_CEDICT_SOURCE.md": "licenses/sources/CC_CEDICT_SOURCE.md"
+    },
     "linux": {
       "deb": {
-        "desktopTemplate": "packaging/linux/kunpeng-reader.desktop",
-        "files": {
-          "/usr/bin/libonnxruntime_providers_cuda.so": "packaging/linux/runtime/libonnxruntime_providers_cuda.so",
-          "/usr/bin/libonnxruntime_providers_shared.so": "packaging/linux/runtime/libonnxruntime_providers_shared.so"
-        }
+        "desktopTemplate": "packaging/linux/kunpeng-reader.desktop"
       }
     }
   }

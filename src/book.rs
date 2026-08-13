@@ -1020,14 +1020,12 @@ impl Library {
         #[cfg(target_os = "android")]
         {
             return Some(PathBuf::from(
-                "/data/user/0/com.pigking.ebookreader/files/ebook-reader",
+                "/data/user/0/com.kunpeng.reader/files/ebook-reader",
             ));
         }
         #[cfg(not(target_os = "android"))]
         {
-            let mut dir = dirs::config_dir()?;
-            dir.push("ebook-reader");
-            Some(dir)
+            crate::profile::app_config_dir()
         }
     }
 
@@ -1040,14 +1038,12 @@ impl Library {
         #[cfg(target_os = "android")]
         {
             return Some(PathBuf::from(
-                "/data/user/0/com.pigking.ebookreader/cache/ebook-reader",
+                "/data/user/0/com.kunpeng.reader/cache/ebook-reader",
             ));
         }
         #[cfg(not(target_os = "android"))]
         {
-            let mut dir = dirs::cache_dir()?;
-            dir.push("ebook-reader");
-            Some(dir)
+            crate::profile::app_cache_dir()
         }
     }
 

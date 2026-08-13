@@ -42,14 +42,15 @@ export interface AppSettingsV1Payload extends JsonObject {
   readonly readerJumpBackDismissMode: "pages" | "time";
   readonly readerJumpBackDismissSeconds: number;
   readonly readerJumpBackDismissPages: number;
-  readonly readerJumpBackSizeLevel: number;
+  readonly readerJumpBackIconSizePx: number;
 }
 
 export type AppSettingsV1Entity = SyncEntity<"app_settings_v1", AppSettingsV1Payload>;
 
 /** The stable shape used by `contracts/fixtures/app-settings.v1.json`. */
 export interface AppSettingsFixture {
-  readonly syncProtocolVersion: number;
+  /** Protocol v5 is a destructive fresh-baseline fixture. */
+  readonly syncProtocolVersion: 5;
   readonly entities: readonly AppSettingsV1Entity[];
   /** Root-level future fields are preserved without assigning them semantics. */
   readonly [key: string]: JsonValue | readonly AppSettingsV1Entity[];

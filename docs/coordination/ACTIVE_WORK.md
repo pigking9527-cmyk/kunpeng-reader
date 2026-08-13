@@ -13,8 +13,9 @@
 ## 当前占用
 
 | 会话/分支 | 任务 | 占用范围 | 状态 | 备注 |
-| /root/sqlite_next_safe | P3 实体 JSON 读取 SQL 计时补齐 | `src/db/entities.rs`、`docs/coordination/ACTIVE_WORK.md` | 进行中，未提交 | 为单条和批量实体 JSON 投影补固定、脱敏 SQL 计时与行数；不改查询语义、同步、备份、连接池或 AppState 生命周期。 |
-| /root/reader_image_overlay_fix | 爱丽丝插图翻页首帧与全局弹窗顺序修复 | `ui/{reader-page-runtime.js,overlay-stack.js,tests/{reader-large-chapter,overlay-stack}.test.cjs}`、`docs/{architecture/desktop-frontend-and-rust.md,coordination/ACTIVE_WORK.md}` | 进行中，未提交 | 保留现有分页/叠层拆分，只修复程序化翻页后需轻触才刷新的媒体合成，以及跨页面新弹窗应高于当前操作窗的全局打开顺序。 |
+| /root | P5 受保护空 PostgreSQL 演练尝试 | 受保护服务器临时数据库/角色/源码目录、`docs/coordination/{CURRENT,ACTIVE_WORK}.md` | 已安全停止 | 仅创建前缀受限的临时库和最小权限角色；Docker Hub 获取 Rust 1.97.1 镜像超时，测试和迁移均未开始。已立即销毁临时库、角色和源码目录；旧服务、反代和正式数据未改。需可用的受信 Rust x86_64 构建镜像或 CI 候选物后重试。 |
+| /root/sqlite_next_safe | P3 实体 JSON 读取 SQL 计时补齐 | `src/db/entities.rs`、`docs/coordination/ACTIVE_WORK.md` | 已完成，未提交 | 单条与批量 JSON 投影现记录固定 `entity_json`/`entity_json_many` SQL 标签与结果行数，不采集键或 JSON；不改查询语义、同步、备份、连接池或 AppState 生命周期。定向 3 项实体读取测试、全目标 Clippy 与范围差异检查通过。 |
+| /root/reader_image_overlay_fix | 爱丽丝插图翻页首帧与全局弹窗顺序修复 | `ui/{reader-page-layout.js,reader-page-runtime.js,overlay-stack.js,tests/{reader-large-chapter,overlay-stack}.test.cjs}`、`docs/{architecture/desktop-frontend-and-rust.md,coordination/ACTIVE_WORK.md}` | 进行中，未提交 | 保留现有分页/叠层拆分，只修复程序化翻页后需轻触才刷新的媒体合成，以及跨页面新弹窗应高于当前操作窗的全局打开顺序。 |
 | /root | P5 v5 发布清单跨目录 fixture 完整性 | `server/reader-sync-api-rs/{scripts,README.md,DEPLOYMENT.md}`、`docs/coordination/ACTIVE_WORK.md` | 已完成，未提交 | 编译期引入的 v5 契约 fixture 已纳入发布清单的 Git 清洁度与 SHA-256 复验，避免服务目录之外的输入漂移；自测覆盖 fixture 漂移拒绝。未连接服务器、数据库或 SMTP。 |
 | /root | P5 v5 服务 Linux 可复现构建产物 | `.github/workflows/sync-api-v5.yml`、`docs/coordination/ACTIVE_WORK.md` | 已完成，已提交 | CI 现以 Rust 1.97.1 在 Ubuntu 24.04 锁定构建服务端，运行格式、测试、Clippy、迁移/演练工具，并上传通过源码/二进制/迁移/Cargo.lock 复验的 Linux x86_64 候选产物；不连接服务器、数据库或 SMTP，不配置反代或切流。提交 `17261520`。 |
 | --- | --- | --- | --- | --- |

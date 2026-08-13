@@ -51,6 +51,54 @@ class ReaderSyncApiTests(unittest.TestCase):
         self.assertEqual(count, app.MAX_TOKENS_PER_USER)
         conn.close()
 
+    def test_tokens_and_short_codes_use_server_keyed_digests(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        app.migrate(conn)
+        with conn:
+            conn.execute(
+                "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
+                ("digest-user", "digest-user", "not-used", app.now_ms()),
+            )
+            raw = app.issue_token(conn, "digest-user")
+        stored = conn.execute(
+            "SELECT token FROM tokens WHERE user_id=?", ("digest-user",)
+        ).fetchone()[0]
+        self.assertNotEqual(stored, raw)
+        self.assertTrue(stored.startswith("hmac:"))
+        self.assertEqual(app.user_by_token(conn, raw)["id"], "digest-user")
+        code_hash = app.hash_one_time_code("123456")
+        self.assertTrue(code_hash.startswith("hmac:"))
+        self.assertTrue(app.verify_one_time_code("123456", code_hash))
+        self.assertFalse(app.verify_one_time_code("654321", code_hash))
+        conn.close()
+
+    def test_storage_usage_is_maintained_without_full_table_sums(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        app.migrate(conn)
+        with conn:
+            conn.execute(
+                "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
+                ("usage-user", "usage-user", "not-used", app.now_ms()),
+            )
+            app.ensure_account_usage(conn, "usage-user")
+            conn.execute(
+                "INSERT INTO entities(user_id,kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("usage-user", "vocab", "one", '{"x":1}', 1, 0, "device", 1, 1),
+            )
+        self.assertEqual(app.account_storage_bytes(conn, "usage-user"), len('{"x":1}'))
+        with conn:
+            conn.execute(
+                "UPDATE entities SET json=? WHERE user_id=? AND kind=? AND id=?",
+                ('{"value":"longer"}', "usage-user", "vocab", "one"),
+            )
+        self.assertEqual(app.account_storage_bytes(conn, "usage-user"), len('{"value":"longer"}'))
+        with conn:
+            conn.execute("DELETE FROM entities WHERE user_id=?", ("usage-user",))
+        self.assertEqual(app.account_storage_bytes(conn, "usage-user"), 0)
+        conn.close()
+
     def test_migration_removes_nonportable_legacy_entities(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -288,6 +336,33 @@ class ReaderSyncApiTests(unittest.TestCase):
         )
         conn.close()
 
+    def test_existing_recovery_table_gains_delta_history_columns(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        with conn:
+            conn.execute(
+                "CREATE TABLE users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,created_at INTEGER NOT NULL)"
+            )
+            conn.execute(
+                """CREATE TABLE entity_history(
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,entity_id TEXT NOT NULL,payload_zlib BLOB NOT NULL,
+                    payload_bytes INTEGER NOT NULL,payload_sha256 TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,deleted_at INTEGER NOT NULL DEFAULT 0,
+                    device_id TEXT NOT NULL DEFAULT '',sync_version INTEGER NOT NULL DEFAULT 0,
+                    recorded_at INTEGER NOT NULL,source TEXT NOT NULL,
+                    UNIQUE(user_id,kind,entity_id,recorded_at,source))"""
+            )
+        app.migrate(conn)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_history)")}
+        self.assertTrue(
+            {"payload_kind", "base_sequence", "state_bytes", "state_sha256"}.issubset(columns)
+        )
+        self.assertIsNotNone(
+            conn.execute("SELECT 1 FROM schema_migrations WHERE version=17").fetchone()
+        )
+        conn.close()
+
     def test_feedback_migration_and_text_payload(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -300,8 +375,10 @@ class ReaderSyncApiTests(unittest.TestCase):
             row[0] for row in conn.execute("SELECT version FROM schema_migrations")
         }
         self.assertIn("feedback", tables)
+        self.assertIn("pending_registrations", tables)
         self.assertIn(7, versions)
         self.assertIn(10, versions)
+        self.assertIn(18, versions)
         feedback_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(feedback)")
         }
@@ -473,6 +550,7 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         app.RATE_LIMITER = app.RateLimiter()
+        app.FAST_RATE_LIMITER = app.RateLimiter()
         cls.PASSWORD_HASH = app.hash_password(cls.PASSWORD)
         conn = app.connect()
         with conn:
@@ -493,11 +571,11 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             def log_message(self, _format, *_args):
                 pass
 
-            def begin_push_transaction(self, conn):
+            def begin_push_transaction(self, conn, user_id):
                 barrier = type(self).push_transaction_barrier
                 if barrier is not None:
                     barrier.wait(timeout=5)
-                super().begin_push_transaction(conn)
+                super().begin_push_transaction(conn, user_id)
 
         cls.handler_class = QuietHandler
         cls.server = app.ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
@@ -518,6 +596,7 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
 
     def setUp(self):
         app.RATE_LIMITER = app.RateLimiter()
+        app.FAST_RATE_LIMITER = app.RateLimiter()
         conn = app.connect()
         with conn:
             conn.execute(
@@ -544,6 +623,8 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         conn.close()
 
     def request_json(self, method, path, body=None, token=None):
+        if path.startswith(("/auth/", "/sync/")):
+            path = "/v1" + path
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path,
@@ -559,6 +640,8 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             return json.loads(response.read().decode("utf-8"))
 
     def request_error_json(self, method, path, body=None, token=None):
+        if path.startswith(("/auth/", "/sync/")):
+            path = "/v1" + path
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path,
@@ -574,9 +657,13 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         return raised.exception.code, json.loads(raised.exception.read().decode("utf-8"))
 
     def request_bytes(self, method, path, data=None, headers=None, token=None):
+        if path.startswith(("/auth/", "/sync/")):
+            path = "/v1" + path
         request = urllib.request.Request(
             self.base_url + path, data=data, method=method,
-            headers={"Authorization": f"Bearer {token or self.TOKEN}"},
+            headers={
+                "Authorization": f"Bearer {token or self.TOKEN}",
+            },
         )
         for name, value in (headers or {}).items():
             request.add_header(name, value)
@@ -588,6 +675,18 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         with self.opener.open(request, timeout=3) as response:
             self.assertEqual(response.status, 200)
             return json.loads(response.read().decode("utf-8"))
+
+    def test_legacy_api_path_is_rejected_before_authentication(self):
+        request = urllib.request.Request(
+            self.base_url + "/sync/pull?cursor=0&limit=1",
+            method="GET",
+            headers={"Authorization": f"Bearer {self.TOKEN}"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.opener.open(request, timeout=3)
+        self.assertEqual(raised.exception.code, 426)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(payload["code"], "CLIENT_UPGRADE_REQUIRED")
 
     def push(self, entities, device_id="device-a"):
         return self.request_json(
@@ -623,6 +722,47 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         })
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"], "EMAIL_VERIFICATION_REQUIRED")
+
+    def test_registration_verifies_email_before_hashing_password_and_issues_device_session(self):
+        sent = []
+        old_mail_configured = app.account_mail_configured
+        old_send_mail = app.send_account_email
+        app.account_mail_configured = lambda: True
+        app.send_account_email = lambda recipient, _subject, text: sent.append((recipient, text))
+        username = "registration-fixture"
+        email = "registration-fixture@example.test"
+        try:
+            started = self.request_json(
+                "POST", "/auth/register/start", {"username": username, "email": email}
+            )
+            self.assertTrue(started["ok"])
+            self.assertEqual(sent[-1][0], email)
+            code = sent[-1][1].split("：", 1)[1].split("\n", 1)[0]
+            registered = self.request_json(
+                "POST",
+                "/auth/register/confirm",
+                {
+                    "username": username,
+                    "email": email,
+                    "code": code,
+                    "password": "registration-password",
+                    "installationId": "registration-installation",
+                    "deviceName": "test",
+                },
+            )
+            self.assertTrue(registered["token"])
+            conn = app.connect()
+            user = conn.execute("SELECT id,password_hash FROM users WHERE username=?", (username,)).fetchone()
+            self.assertTrue(str(user["password_hash"]).startswith("scrypt$"))
+            token = conn.execute(
+                "SELECT installation_id,device_name FROM tokens WHERE user_id=?", (user["id"],)
+            ).fetchone()
+            self.assertEqual(token["installation_id"], "registration-installation")
+            self.assertEqual(token["device_name"], "test")
+            conn.close()
+        finally:
+            app.account_mail_configured = old_mail_configured
+            app.send_account_email = old_send_mail
 
     def test_local_email_verification_unblocks_sync_without_sending_real_mail(self):
         sent = []
@@ -760,6 +900,7 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
     def test_authenticated_account_usage_exposes_aggregate_quotas_only(self):
         conn = app.connect()
         with conn:
+            app.ensure_account_usage(conn, self.USER_ID)
             conn.execute(
                 "UPDATE account_usage SET storage_limit_bytes=?,daily_written_bytes=?,daily_entity_writes=?,daily_window_at=? WHERE user_id=?",
                 (1234, 456, 7, app.utc_day_window(), self.USER_ID),
@@ -939,7 +1080,8 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         health = self.request_json("GET", "/health")
         self.assertTrue(health["ok"])
         self.assertEqual(health["schema_version"], 2)
-        self.assertEqual(health["api_version"], "0.9")
+        self.assertEqual(health["api_version"], "1.0")
+        self.assertEqual(health["api_base"], "/v1")
 
     def test_sync_data_reset_revokes_tokens_and_rejects_stale_generation(self):
         self.push([self.entity("zh:将被清除")])
@@ -1123,6 +1265,24 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(before["entity_count"], 2)
         self.assertEqual(after["entity_count"], 1)
         self.assertNotEqual(before["inventory_digest"], after["inventory_digest"])
+
+    def test_inventory_and_reconcile_can_scope_enabled_kinds(self):
+        vocab = self.entity("scope-vocab", value="word")
+        settings = self.entity("default", value="settings")
+        settings["kind"] = "app_settings_v1"
+        settings["json"] = {"version": 1}
+        self.push([vocab, settings])
+        inventory = self.request_json("GET", "/sync/inventory?kind=vocab")
+        self.assertEqual(inventory["kinds"], ["vocab"])
+        self.assertEqual(inventory["entity_count"], 1)
+        manifest = [{key: vocab[key] for key in ("kind", "id", "updated_at", "deleted_at", "device_id", "sync_version")}]
+        reconciled = self.request_json(
+            "POST", "/sync/reconcile", {"schema_version": 3, "kinds": ["vocab"], "manifest": manifest}
+        )
+        self.assertEqual(reconciled["kinds"], ["vocab"])
+        self.assertEqual(reconciled["entity_count"], 1)
+        self.assertEqual(reconciled["entities"], [])
+        self.assertEqual(reconciled["upload"], [])
 
     def test_inventory_and_reconcile_include_palette_and_app_settings(self):
         entities = [
@@ -1337,11 +1497,9 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
             "schema_version": 3, "device_id": "device-a", "capabilities": ["push_dispositions_v1"], "entities": [leaking],
         })
         self.assertEqual(rejected["dispositions"][0]["error"], "INVALID_HISTORY_ENTRY")
-    def test_legacy_client_gets_non_success_for_unidentifiable_reject(self):
-        oversized = self.entity("zh:旧客户端过大")
-        oversized["json"] = {"value": "x" * (app.MAX_ENTITY_JSON_BYTES + 1)}
+    def test_legacy_client_is_stopped_before_payload_validation(self):
         data = json.dumps(
-            {"schema_version": 2, "device_id": "legacy", "entities": [oversized]}
+            {"schema_version": 2, "device_id": "legacy", "entities": []}
         ).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + "/sync/push",
@@ -1355,7 +1513,9 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
 
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.opener.open(request, timeout=3)
-        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(raised.exception.code, 426)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(payload["code"], "CLIENT_UPGRADE_REQUIRED")
 
     def test_pull_pagination_cursor_strictly_advances(self):
         self.push([self.entity(f"zh:{index}") for index in range(3)])
@@ -1376,6 +1536,28 @@ class ReaderSyncHttpIntegrationTests(unittest.TestCase):
         self.assertEqual(final_page["entities"], [])
         self.assertEqual(final_page["next_cursor"], cursor)
         self.assertEqual(len(set(seen)), 3)
+
+    def test_pull_pagination_also_obeys_response_byte_budget(self):
+        self.push(
+            [self.entity(f"byte-budget-{index}", value="payload" * 80) for index in range(3)]
+        )
+        original_budget = app.MAX_PULL_RESPONSE_BYTES
+        app.MAX_PULL_RESPONSE_BYTES = 900
+        try:
+            first = self.request_json("GET", "/sync/pull?cursor=0&limit=100")
+            self.assertEqual(len(first["entities"]), 1)
+            self.assertTrue(first["has_more"])
+            self.assertGreater(int(first["next_cursor"]), 0)
+            second = self.request_json(
+                "GET",
+                "/sync/pull?"
+                + urllib.parse.urlencode(
+                    {"cursor": first["next_cursor"], "limit": 100}
+                ),
+            )
+            self.assertGreater(int(second["next_cursor"]), int(first["next_cursor"]))
+        finally:
+            app.MAX_PULL_RESPONSE_BYTES = original_budget
 
 
 

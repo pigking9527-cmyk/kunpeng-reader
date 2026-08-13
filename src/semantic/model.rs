@@ -147,8 +147,7 @@ pub(super) fn downloaded_bytes() -> u64 {
 }
 
 fn model_dir_for(selected: SemanticModel) -> Option<std::path::PathBuf> {
-    let mut dir = dirs::cache_dir()?;
-    dir.push("ebook-reader");
+    let mut dir = crate::profile::app_cache_dir()?;
     dir.push("models");
     // 旧版 bge-small 缓存就在 models 根目录；保留它避免升级后重复下载。
     if selected != SemanticModel::BgeSmallZhV15 {
@@ -183,8 +182,7 @@ fn model_artifact_dir_for(selected: SemanticModel) -> Option<std::path::PathBuf>
 }
 
 fn selection_path() -> Option<std::path::PathBuf> {
-    let mut path = dirs::config_dir().or_else(dirs::cache_dir)?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_config_dir().or_else(crate::profile::app_cache_dir)?;
     path.push("semantic-model.txt");
     Some(path)
 }
@@ -473,8 +471,7 @@ pub(super) fn select(state: tauri::State<AppState>, model_id: String) -> Result<
 }
 
 fn probe_file() -> std::path::PathBuf {
-    let mut dir = dirs::cache_dir().unwrap_or(std::env::temp_dir());
-    dir.push("ebook-reader");
+    let mut dir = crate::profile::app_cache_dir().unwrap_or_else(std::env::temp_dir);
     let _ = std::fs::create_dir_all(&dir);
     dir.push("sem_probe.txt");
     dir

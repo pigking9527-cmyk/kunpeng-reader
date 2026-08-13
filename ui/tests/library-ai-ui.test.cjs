@@ -13,6 +13,12 @@ test("library AI settings header has no device-only subtitle", () => {
 const controller = fs.readFileSync(path.join(ui, "library-ai.js"), "utf8");
 const entry = fs.readFileSync(path.join(ui, "library-ai-entry.js"), "utf8");
 const backend = fs.readFileSync(path.join(ui, "..", "src", "ai_reader.rs"), "utf8");
+const backendModules = [
+  backend,
+  fs.readFileSync(path.join(ui, "..", "src", "ai_reader", "profiles.rs"), "utf8"),
+  fs.readFileSync(path.join(ui, "..", "src", "ai_reader", "provider.rs"), "utf8"),
+  fs.readFileSync(path.join(ui, "..", "src", "ai_reader", "retrieval.rs"), "utf8"),
+].join("\n");
 
 test("library assistant is mounted inside the main window content area", () => {
   assert.match(html, /id="library-ai-page"/);
@@ -89,9 +95,9 @@ test("library assistant gives multi-stage RAG calls enough time without allowing
   assert.match(backend, /READING_PROVIDER_RESPONSE_TIMEOUT[^\n]*from_secs\(120\)/);
   assert.match(backend, /READING_PROVIDER_MAX_TOKENS: u16 = 1_600/);
   assert.match(backend, /LIBRARY_SYNTHESIS_PROVIDER_MAX_TOKENS: u16 = 4_096/);
-  assert.match(backend, /"max_tokens": provider_max_tokens\(&task\)/);
-  assert.match(backend, /fn provider_max_tokens\(task: &str\)/);
-  assert.doesNotMatch(backend, /timeout_recv_response\(Some\(std::time::Duration::from_secs\(45\)\)\)/);
+  assert.match(backend, /max_tokens: provider_max_tokens\(task\)/);
+  assert.match(backendModules, /fn provider_max_tokens\(task: &str\)/);
+  assert.doesNotMatch(backendModules, /timeout_recv_response\(Some\(std::time::Duration::from_secs\(45\)\)\)/);
 });
 
 test("library question Enter submits while Shift+Enter keeps a newline", () => {
@@ -180,7 +186,7 @@ test("library assistant can choose one of the locally configured large models", 
   assert.match(annotations, /function applyTranslationProfiles/);
   assert.match(backend, /CONFIG_PROFILES_KEY/);
   assert.match(backend, /fn persist_profiles/);
-  assert.match(backend, /struct AiReaderProfileAssignments/);
+  assert.match(backendModules, /struct AiReaderProfileAssignments/);
   assert.match(backend, /fn assign_ai_reader_profile/);
   assert.match(backend, /profile_summary_never_exposes_the_api_key/);
   assert.match(translate, /TRANSLATION_ACTIVE_PROVIDER_KEY/);
@@ -275,14 +281,16 @@ test("common settings can opt into model classification tags without changing th
   assert.match(backend, /大模型标签始终参与问答/);
 });
 
-test("book information manages manual tags and shows model tags with an explicit source marker", () => {
+test("book information separates manual tags from model categories with an explicit source marker", () => {
   const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
   const reader = fs.readFileSync(path.join(ui, "reader.js"), "utf8");
+  const panel = fs.readFileSync(path.join(ui, "book-info-panel.js"), "utf8");
+  const panelStyles = fs.readFileSync(path.join(ui, "book-info-panel.css"), "utf8");
   assert.match(app, /bookOrganizationUI\.open\(currentInfoBookId, m\)/);
-  assert.match(app, /renderBookInfoTags\(document\.getElementById\("book-info-model-tags"\), \[\], m\.model_tags \|\| m\.modelTags\)/);
-  assert.match(reader, /renderBookInfoTags\(document\.getElementById\("info-tags"\), m\.tags, m\.model_tags \|\| m\.modelTags\)/);
-  assert.match(app, /info-chip-origin/);
-  assert.match(styles, /\.info-chip\.model-tag/);
+  assert.match(app, /bookInfoPanel\.render\(\{ \.\.\.book, \.\.\.m, cover: m\.cover \|\| book\.cover \}\)/);
+  assert.match(reader, /readerInfoPanel\.render\(m\)/);
+  assert.match(panel, /origin\.className = "info-chip-origin"/);
+  assert.match(panelStyles, /\.book-info-card \.info-chip\.model-tag/);
 });
 
 test("question keeps twenty diverse sources while comparison remains bounded", () => {
@@ -335,8 +343,8 @@ test("library answers render a safe subset of Markdown instead of exposing raw m
 
 test("library answer provider accepts compatible response envelopes and retries an empty completion", () => {
   assert.doesNotMatch(backend, /pointer\("\/choices\/0\/message\/reasoning_content"\)/);
-  assert.match(backend, /data\/choices\/0\/message\/content/);
-  assert.match(backend, /Response\/Choices\/0\/Message\/Content/);
+  assert.match(backendModules, /data\/choices\/0\/message\/content/);
+  assert.match(backendModules, /Response\/Choices\/0\/Message\/Content/);
   assert.match(backend, /async fn call_library_answer_with_retry/);
   assert.match(backend, /MAX_READING_RETRY_CONTEXT_CHARS/);
   assert.match(backend, /fn is_final_library_verification/);

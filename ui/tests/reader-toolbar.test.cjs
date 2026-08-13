@@ -6,6 +6,9 @@ const path = require("node:path");
 const html = fs.readFileSync(path.join(__dirname, "..", "reader.html"), "utf8");
 const appHtml = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 const reader = fs.readFileSync(path.join(__dirname, "..", "reader.js"), "utf8");
+const jumpBackRules = fs.readFileSync(path.join(__dirname, "..", "reader-jump-back-rules.js"), "utf8");
+const navigationRules = fs.readFileSync(path.join(__dirname, "..", "reader-navigation-rules.js"), "utf8");
+const aiHistoryRules = fs.readFileSync(path.join(__dirname, "..", "reader-ai-history-rules.js"), "utf8");
 const i18n = fs.readFileSync(path.join(__dirname, "..", "reader-i18n.js"), "utf8");
 const shell = fs.readFileSync(path.join(__dirname, "..", "reader-shell-state.js"), "utf8");
 const notes = fs.readFileSync(path.join(__dirname, "..", "reader-notes-ui.js"), "utf8");
@@ -22,8 +25,9 @@ const gestureManager = fs.readFileSync(path.join(__dirname, "..", "gesture-ui.js
 
 test("AI reader local history is unlimited while deletion tombstones stay bounded", () => {
   assert.doesNotMatch(reader, /AI_READER_LOCAL_HISTORY_LIMIT/);
-  assert.match(reader, /const AI_READER_HISTORY_TOMBSTONE_LIMIT = 200;/);
-  assert.match(reader, /entries\.filter\(\(entry\) => !aiReaderHistoryDeleted\(entry\)\)\s*\.sort/s);
+  assert.match(reader, /const AI_READER_HISTORY_TOMBSTONE_LIMIT = readerAiHistoryRules\.TOMBSTONE_LIMIT;/);
+  assert.match(aiHistoryRules, /const TOMBSTONE_LIMIT = 200;/);
+  assert.match(aiHistoryRules, /entries\.filter\(\(entry\) => !isHistoryDeleted\(entry\)\)\s*\.sort/s);
 });
 
 test("reader toolbar buttons stay horizontal and do not flex-shrink", () => {
@@ -54,7 +58,11 @@ test("reader progress names the whole-book page total once it is measured", () =
 test("all explicit reader jumps share a chronological undo gesture", () => {
   assert.doesNotMatch(reader, /bookProgressJumpHistory/);
   assert.match(reader, /const readerNavigationHistory = \[\];/);
-  assert.match(reader, /function rememberReaderNavigationPoint\(point\)[\s\S]*?readerNavigationHistory\.push\(next\)/);
+  assert.match(reader, /const readerNavigationRules = window\.ReaderNavigationRules \|\| \(\(\) =>/);
+  assert.match(html, /reader-jump-back-rules\.js[\s\S]*?reader-navigation-rules\.js[\s\S]*?reader\.js/);
+  assert.match(reader, /function rememberReaderNavigationPoint\(point\)[\s\S]*?readerNavigationRules\.appendHistory\(readerNavigationHistory/);
+  assert.match(reader, /readerNavigationHistory\.splice\(0, readerNavigationHistory\.length, \.\.\.result\.history\)/);
+  assert.match(navigationRules, /function appendHistory\(entries, point, fallback, limit = HISTORY_LIMIT\)/);
   assert.match(reader, /function rememberBookProgressRestorePoint\(point\)[\s\S]*?rememberReaderNavigationPoint\(point\)/);
   assert.match(reader, /const canRestoreProgress = readerNavigationHistory\.length > 0;/);
   assert.match(reader, /window\.restoreReaderJumpPosition = restorePreviousReaderNavigation;/);
@@ -104,6 +112,11 @@ test("gesture profiles can be automatic or explicitly scoped to the main or read
   assert.match(gestureManager, /function scopesOverlap\(first, second\)/);
   assert.match(readerGestures, /function normalizeScope\(_action, value\) \{/);
   assert.match(readerGestures, /profile\.scope !== "main"/);
+  assert.match(
+    readerGestures,
+    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", \(event\) => \{ if \(active\)[\s\S]*?global\.addEventListener\("mouseup", \(\) => finish\(\), true\);/,
+  );
+  assert.doesNotMatch(readerGestures, /startPointerGesture|activePointerId/);
 });
 
 test("reader toolbar supports narrow windows and macOS system fonts", () => {
@@ -123,11 +136,30 @@ test("reader settings dropdown has no pointer gap below the toolbar", () => {
   assert.doesNotMatch(html, /\.settings\s*\{[^}]*top:\s*calc\(100%\s*\+\s*8px\);/s);
 });
 
-test("dictionary enhancement switches restore every persisted option", () => {
+test("dictionary enhancement switches default off and restore only explicit opt-ins", () => {
   for (const key of ["plain", "sense", "context", "hypernyms", "synonyms", "antonyms"]) {
-    assert.match(annotations, new RegExp(`${key}:v\\.${key}!==false`));
+    assert.match(annotations, new RegExp(`${key}:false`));
+    assert.match(annotations, new RegExp(`${key}:v\\.${key}===true`));
     assert.match(annotations, new RegExp(`st\\.${key}!==false`));
   }
+  assert.match(annotations, /DICT_HN_SETTINGS_KEY='dictEnhancementSettingsV2'/);
+  assert.doesNotMatch(annotations, /localStorage\.getItem\('dictHownetSettings'\)/);
+});
+
+test("dictionary enhancement switches reject unavailable data before enabling", () => {
+  assert.match(annotations, /function dictEnhancementAvailable\(result,key\)/);
+  assert.match(annotations, /var field=key==='context'\?'example_note':key/);
+  assert.match(annotations, /if\(input\.checked&&!dictEnhancementAvailable\(lastDict,cfg\.key\)\)/);
+  assert.match(annotations, /input\.checked=false;[\s\S]*?st\[cfg\.key\]=false;[\s\S]*?setDictHnSettings\(st\)/);
+  assert.match(annotations, /dictSettingsStatus=dictEnhancementUnavailableText\(cfg\)/);
+  assert.match(pageStyle, /\.dc-settings-status\{[^}]*background:#fff4dd[^}]*color:#8a5c00/);
+});
+
+test("built-in dictionary keeps Chinese and English meanings switchable", () => {
+  assert.match(annotations, /if\(r\.def\)sources\.push\(\{k:'c',label:readerPageText\('chinese'\),text:r\.def\}\)/);
+  assert.match(annotations, /if\(r\.def_en\)sources\.push\(\{k:'e',label:readerPageText\('english'\),text:r\.def_en\}\)/);
+  assert.match(annotations, /if\(sources\.length>1\)[^{]*\{[^}]*className='dc-toggle'/s);
+  assert.match(annotations, /setDictSel\(r\.lang,sel\);renderDict\(\)/);
 });
 
 test("reader settings show one state character and map off to simplified, on to traditional", () => {
@@ -278,6 +310,8 @@ test("智读提交携带实时已读位置、选区、锚点和本机会话记�
   assert.match(reader, /sessionMemory:\s*aiReaderSessionMemory\(\)/);
   assert.match(reader, /function aiReaderSessionMemoryKey\(\)/);
   assert.match(reader, /localStorage\.setItem\(aiReaderSessionMemoryKey\(\)/);
+  assert.match(reader, /readerAiHistoryRules\.sessionPrompt\(aiReaderReadSessionMemory\(\), aiReaderTaskLabel\)/);
+  assert.match(html, /<script src="reader-ai-history-rules\.js"><\/script>\s*<script src="reader-startup-guard\.js"><\/script>\s*<script src="reader-reading-metrics\.js"><\/script>\s*<script src="reader\.js"><\/script>/);
   const sessionMemoryBlock = reader.match(/function aiReaderRememberSession\(entry\) \{([\s\S]*?)\n\}/)?.[1] || "";
   assert.doesNotMatch(sessionMemoryBlock, /private_sync_history_merge/);
   assert.match(reader, /event\.key === "Enter" && !event\.shiftKey && !event\.isComposing && event\.keyCode !== 229/);
@@ -350,7 +384,7 @@ test("阅读正文先开始导航，大目录随后按空闲时间分批构建",
   assert.match(notes, /function scheduleTocBuild\(toc\)/);
   assert.match(notes, /requestIdleCallback\(callback, \{ timeout: 500 \}\)/);
   assert.match(notes, /while \(index < entries\.length && added < 120\)/);
-  assert.match(reader, /frame\.src = info\.url \+ q;\s*\/\/ 正文导航已经开始后再分批构建目录[^\n]*\s*scheduleTocBuild\(toc\);/s);
+  assert.match(reader, /beginFrameNavigation\?\.\(readerSource\)[\s\S]*?frame\.src = readerSource;\s*\/\/ 正文导航已经开始后再分批构建目录[^\n]*\s*scheduleTocBuild\(toc\);/s);
   assert.match(reader, /shell_info elapsed_ms=/);
   assert.match(reader, /shell_ready elapsed_ms=/);
 });
@@ -377,13 +411,17 @@ test("开关智读以覆盖层呈现，不压缩正文列宽或改变阅读位�
 });
 
 test("高亮菜单按真实高度避让页末：横排和九宫格都完整可见", () => {
+  const highlightRules = fs.readFileSync(path.join(__dirname, "..", "reader-page-highlight-rules.js"), "utf8");
   assert.match(annotations, /function visibleHighlightLineRects\(idx,fallbackEl\)/);
   assert.match(annotations, /function nearestHighlightRect\(rects,evt\)/);
   assert.match(annotations, /function highlightLineGroups\(rects\)/);
   assert.match(annotations, /function highlightMenuPlacement\(idx,fallbackEl,evt\)/);
-  assert.match(annotations, /keys\.length>1[\s\S]*?highlightRectEnvelope\(groups\[keys\[0\]\]\),above:true/);
-  assert.match(annotations, /lines\.length<=1[\s\S]*?nearestHighlightRect\(rects,evt\)/);
-  assert.match(annotations, /var last=lines\[0\][\s\S]*?return \{rect:last,above:false\}/);
+  assert.match(annotations, /ReaderPageHighlightRules\.placement/);
+  assert.match(annotations, /ReaderPageHighlightRules\.nearestRect/);
+  assert.match(annotations, /ReaderPageHighlightRules\.groupedEnvelopes/);
+  assert.match(highlightRules, /pageKeys\.length>1[\s\S]*?envelope\(pages\[pageKeys\[0\]\]\),above:true/);
+  assert.match(highlightRules, /lines\.length<=1[\s\S]*?nearestRect\(rects,pointer\)/);
+  assert.match(highlightRules, /var last=lines\[0\][\s\S]*?return \{rect:last,above:false\}/);
   assert.match(annotations, /highlightMenuPlacement\(idx,el,evt\)/);
   assert.match(annotations, /addEventListener\('mousemove',[\s\S]*?showHlMenu\(activeHi,false,m,e\)/);
   assert.match(annotations, /function readerViewportHeight\(\)/);
@@ -448,7 +486,7 @@ test("bottom progress history shares TOC and internal-link navigation history", 
   assert.match(reader, /const readerNavigationHistory = \[\]/);
   assert.match(reader, /let bookProgressPinned = false/);
   assert.match(reader, /function rememberBookProgressRestorePoint\(point\)[\s\S]*?rememberReaderNavigationPoint\(point\)/);
-  assert.match(reader, /readerNavigationHistory\.push\(next\)/);
+  assert.match(reader, /readerNavigationRules\.appendHistory\(readerNavigationHistory/);
   assert.match(reader, /readerNavigationHistory\.pop\(\)/);
   assert.doesNotMatch(reader, /if \(bookProgressRestorePoint\) return/);
   assert.match(reader, /function pinBookProgress\(\) \{\s*bookProgressPinned = true;\s*showBookProgress\(\);\s*\}/);
@@ -467,18 +505,21 @@ test("bottom progress history shares TOC and internal-link navigation history", 
   assert.match(html, /id="reader-jump-back"[^>]*hidden><svg class="reader-jump-back-arrow" viewBox="0 0 120 48"/);
   assert.match(html, /\.reader-jump-back \{[^}]*border: 0;[^}]*background: transparent;[^}]*box-shadow: none;[^}]*opacity: \.56;/s);
   assert.match(reader, /enabled: current\.showReaderJumpBack !== false/);
-  assert.match(reader, /iconSizePx: hasPixelSize[\s\S]*?normalizeReaderJumpBackIconSizePx\(current\.readerJumpBackIconSizePx\)/);
-  assert.match(reader, /positionX: normalizeReaderJumpBackPosition\(current\.readerJumpBackPositionX, 950\)/);
-  assert.match(reader, /positionY: normalizeReaderJumpBackPosition\(current\.readerJumpBackPositionY, 500\)/);
-  assert.match(reader, /const iconSize = normalizeReaderJumpBackIconSizePx\(iconSizePx\)/);
-  assert.match(reader, /const iconHeight = readerJumpBackIconHeightPx\(iconSize\)/);
-  assert.match(reader, /function readerJumpBackTrackPoint\(length, iconSize, hitSize, position\)/);
-  assert.match(reader, /const hitTargetInset = Math\.max\(0, hitSize - iconSize\) \/ 2/);
-  assert.match(reader, /readerJumpBack\.style\.left = `\$\{Math\.round\(readerJumpBackTrackPoint\(width, iconSize, hitSize, positionX\)\)\}px`/);
-  assert.match(reader, /readerJumpBack\.style\.top = `\$\{Math\.round\(readerJumpBackTrackPoint\(height, iconHeight, hitSize, positionY\)\)\}px`/);
+  assert.match(reader, /iconSizePx: readerJumpBackRules\.normalizeIconSizePx\(current\.readerJumpBackIconSizePx\)/);
+  assert.doesNotMatch(reader, /iconSizePxFromLegacyLevel/);
+  assert.match(reader, /positionX: readerJumpBackRules\.normalizePosition\(current\.readerJumpBackPositionX, 950\)/);
+  assert.match(reader, /positionY: readerJumpBackRules\.normalizePosition\(current\.readerJumpBackPositionY, 500\)/);
+  assert.match(reader, /const iconSize = readerJumpBackRules\.normalizeIconSizePx\(iconSizePx\)/);
+  assert.match(reader, /const iconHeight = readerJumpBackRules\.iconHeightPx\(iconSize\)/);
+  assert.match(html, /reader-settings-ui\.js[\s\S]*?reader-jump-back-rules\.js[\s\S]*?reader\.js/);
+  assert.doesNotMatch(reader, /const readerJumpBackTrackPoint = readerJumpBackRules\.trackPoint;/);
+  assert.match(jumpBackRules, /function trackPoint\(length, iconSize, hitSize, position\)/);
+  assert.match(jumpBackRules, /const hitTargetInset = Math\.max\(0, hitSize - iconSize\) \/ 2/);
+  assert.match(reader, /readerJumpBack\.style\.left = `\$\{Math\.round\(readerJumpBackRules\.trackPoint\(width, iconSize, hitSize, positionX\)\)\}px`/);
+  assert.match(reader, /readerJumpBack\.style\.top = `\$\{Math\.round\(readerJumpBackRules\.trackPoint\(height, iconHeight, hitSize, positionY\)\)\}px`/);
   assert.match(reader, /--reader-jump-back-icon-size/);
   assert.match(reader, /readerNavigationDismissTimer = setTimeout\(\(\) => dismissReaderNavigationBack\(false\), config\.seconds \* 1000\)/);
-  assert.match(reader, /readerNavigationPagesMoved \+= 1;[\s\S]*?readerNavigationPagesMoved >= config\.pages/);
+  assert.match(reader, /readerNavigationRules\.trackPageDismissal\([\s\S]*?data, config\.pages\)/);
   assert.match(reader, /trackReaderNavigationBackProgress\(e\.data\)/);
 });
 

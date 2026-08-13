@@ -95,6 +95,11 @@ function addDays(d, n) {
   return x;
 }
 function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); } // m: 0-based
+// index.html 目前不能调整脚本加载顺序，因此保留以下等价内嵌回退。将来统计
+// 规则脚本被预加载时，日期范围和导航统一委托给无副作用的 ReaderStatsRules。
+const statCalendarRules = global.ReaderStatsRules && [
+  "compareAnchors", "firstAnchor", "lastAnchor", "normalizeAnchor", "range", "steppedAnchor",
+].every((name) => typeof global.ReaderStatsRules[name] === "function") ? global.ReaderStatsRules : null;
 function statsEscapeHtml(s) { return String(s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 function statsEscapeAttr(s) {
   return String(s || "").replace(/[&<>"']/g, (c) => ({
@@ -135,6 +140,7 @@ function statsQualityNote(data) {
   return "";
 }
 function statRange() {
+  if (statCalendarRules) return statCalendarRules.range(statScope, statAnchor);
   const d = statAnchor, y = d.getFullYear(), m = d.getMonth();
   if (statScope === "day") { const v = ymd(d); return [v, v]; }
   if (statScope === "month") return [y * 10000 + (m + 1) * 100 + 1, y * 10000 + (m + 1) * 100 + 31];
@@ -150,6 +156,7 @@ function statPeriodLabel() {
 }
 
 function normalizeStatAnchor(date, scope = statScope) {
+  if (statCalendarRules) return statCalendarRules.normalizeAnchor(date, scope);
   const value = new Date(date);
   if (scope === "month") return new Date(value.getFullYear(), value.getMonth(), 1);
   if (scope === "year") return new Date(value.getFullYear(), 0, 1);
@@ -157,14 +164,17 @@ function normalizeStatAnchor(date, scope = statScope) {
 }
 
 function firstStatAnchor() {
+  if (statCalendarRules) return statCalendarRules.firstAnchor(firstReadingDay, statScope);
   return firstReadingDay ? normalizeStatAnchor(dateFromYmd(firstReadingDay)) : null;
 }
 
 function lastStatAnchor() {
+  if (statCalendarRules) return statCalendarRules.lastAnchor(new Date(), statScope);
   return normalizeStatAnchor(new Date());
 }
 
 function compareStatAnchors(first, second) {
+  if (statCalendarRules) return statCalendarRules.compareAnchors(first, second);
   return first.getTime() - second.getTime();
 }
 
@@ -186,6 +196,7 @@ function syncStatsNavigation() {
 }
 
 function steppedStatAnchor(direction) {
+  if (statCalendarRules) return statCalendarRules.steppedAnchor(statScope, statAnchor, direction);
   const current = normalizeStatAnchor(statAnchor);
   if (statScope === "day") return addDays(current, direction);
   if (statScope === "month") return new Date(current.getFullYear(), current.getMonth() + direction, 1);

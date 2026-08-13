@@ -269,8 +269,6 @@
       render();
     }
 
-    root.getElementById("book-info-tags-manage")?.addEventListener("click", () => openManager("tags"));
-    root.getElementById("book-info-collections-manage")?.addEventListener("click", () => openManager("collections"));
     tabs.tags?.addEventListener("click", () => selectPanel("tags"));
     tabs.collections?.addEventListener("click", () => selectPanel("collections"));
     root.getElementById("book-organization-close")?.addEventListener("click", closeManager);

@@ -32,6 +32,11 @@ on:
       - "src/**"
       - "ui/**"
       - "vendor/**"
+      - "crates/**"
+      - "LICENSES/**"
+      - "THIRD_PARTY_NOTICES.md"
+      - "scripts/check-licenses.mjs"
+      - "scripts/license-policy.json"
 
 permissions:
   contents: read
@@ -69,6 +74,15 @@ jobs:
       - name: Install locked Node dependencies
         run: npm ci
 
+      - name: Check dependency and asset licenses
+        env:
+          RUST_TARGET: x86_64-pc-windows-msvc
+        run: npm run license:check && npm run ip:check
+
+      - name: Enforce public release hold
+        if: ${{ inputs.publish_release }}
+        run: npm run release:license-gate
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version '^2' --locked
 
@@ -86,7 +100,7 @@ jobs:
           cargo test -p ebook-reader-tauri -p reader-core --locked
           cargo test -p epub --lib --locked
 
-      - name: Build portable executable and bundled GPU runtime
+      - name: Build portable executable
         shell: pwsh
         run: ./scripts/build-release.ps1 -SkipIconCacheRefresh
 

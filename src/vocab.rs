@@ -35,8 +35,7 @@ pub(crate) struct VocabStore {
 
 impl VocabStore {
     fn file() -> Option<std::path::PathBuf> {
-        let mut d = dirs::config_dir()?;
-        d.push("ebook-reader");
+        let d = crate::profile::app_config_dir()?;
         Some(d.join("vocab.json"))
     }
     pub(crate) fn load() -> Self {

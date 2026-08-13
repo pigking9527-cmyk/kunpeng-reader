@@ -279,8 +279,7 @@ impl SemData {
 }
 
 pub(super) fn directory() -> Option<std::path::PathBuf> {
-    let mut directory = dirs::cache_dir()?;
-    directory.push("ebook-reader");
+    let mut directory = crate::profile::app_cache_dir()?;
     directory.push("sem");
     // 保留旧版 bge-small 的磁盘布局，其他模型各自使用独立目录。
     if model::active() != model::SemanticModel::BgeSmallZhV15 {

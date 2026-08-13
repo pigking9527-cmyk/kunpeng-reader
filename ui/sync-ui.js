@@ -38,6 +38,21 @@
     const syncLogoutBtn = document.getElementById("sync-logout");
     const syncRegisterBtn = document.getElementById("sync-register");
     const syncLoginBtn = document.getElementById("sync-login");
+    const syncRegistrationEl = document.getElementById("sync-registration");
+    const syncRegisterEmailEl = document.getElementById("sync-register-email");
+    const syncRegisterCodeEl = document.getElementById("sync-register-code");
+    const syncRegisterCodeRequestBtn = document.getElementById(
+      "sync-register-code-request",
+    );
+    const syncRegisterConfirmBtn = document.getElementById(
+      "sync-register-confirm",
+    );
+    const syncRegisterCancelBtn = document.getElementById(
+      "sync-register-cancel",
+    );
+    const syncRegisterStatusEl = document.getElementById(
+      "sync-register-status",
+    );
     const syncPasswordResetOpenBtn = document.getElementById(
       "sync-password-reset-open",
     );
@@ -152,6 +167,18 @@
       "account-clear-cloud-password",
     );
     const accountClearCloudBtn = document.getElementById("account-clear-cloud");
+    const accountCloudRecoveryStatusEl = document.getElementById(
+      "account-cloud-recovery-status",
+    );
+    const accountCloudRecoveryTargetEl = document.getElementById(
+      "account-cloud-recovery-target",
+    );
+    const accountCloudRecoveryPasswordEl = document.getElementById(
+      "account-cloud-recovery-password",
+    );
+    const accountCloudRecoveryRestoreBtn = document.getElementById(
+      "account-cloud-recovery-restore",
+    );
     const accountDeletePasswordEl = document.getElementById(
       "account-delete-password",
     );
@@ -209,6 +236,7 @@
     let lastAccountSecurity = null;
     let lastPrivateSync = null;
     let lastAccountUsage = null;
+    let lastCloudRecoveryStatus = null;
     let lastSyncButtonState = {
       state: "",
       key: "syncNow",
@@ -463,6 +491,9 @@
     function closeAccountPanel() {
       accountPanel.classList.remove("show");
       closeAccountSubpages();
+      syncRegistrationEl.hidden = true;
+      syncRegisterCodeEl.value = "";
+      syncRegisterStatusEl.textContent = "";
       syncPasswordResetEl.hidden = true;
       accountBtn.classList.remove("active");
       hideSavedAccounts();
@@ -495,6 +526,59 @@
       accountClearLocalBtn.disabled = busy;
       accountClearCloudBtn.disabled = busy || !loggedIn;
       accountDeleteBtn.disabled = busy || !loggedIn;
+      const available = !!lastCloudRecoveryStatus?.available;
+      accountCloudRecoveryTargetEl.disabled = busy || !available;
+      accountCloudRecoveryPasswordEl.disabled = busy || !available;
+      accountCloudRecoveryRestoreBtn.disabled = busy || !available;
+    }
+    function dateTimeLocalValue(timestamp) {
+      const date = new Date(Number(timestamp));
+      if (!Number.isFinite(date.getTime())) return "";
+      const pad = (value) => String(value).padStart(2, "0");
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    }
+    function cloudRecoveryTargetAt() {
+      const targetAt = new Date(accountCloudRecoveryTargetEl.value).getTime();
+      return Number.isSafeInteger(targetAt) && targetAt > 0 ? targetAt : 0;
+    }
+    function applyCloudRecoveryStatus(status) {
+      lastCloudRecoveryStatus = status && typeof status === "object" ? status : null;
+      const available = !!lastCloudRecoveryStatus?.available;
+      const from = Number(lastCloudRecoveryStatus?.restorableFrom) || 0;
+      const latest = Number(lastCloudRecoveryStatus?.latestVersionAt) || 0;
+      const count = Number(lastCloudRecoveryStatus?.versionCount) || 0;
+      const generation = Number(lastCloudRecoveryStatus?.dataGeneration) || 0;
+      accountCloudRecoveryTargetEl.min = dateTimeLocalValue(from);
+      accountCloudRecoveryTargetEl.max = dateTimeLocalValue(latest);
+      if (available && !cloudRecoveryTargetAt())
+        accountCloudRecoveryTargetEl.value = dateTimeLocalValue(latest);
+      if (!available) accountCloudRecoveryTargetEl.value = "";
+      accountCloudRecoveryStatusEl.textContent = available
+        ? `云端可恢复 ${count} 个历史版本：${formatSyncTime(from)} 至 ${formatSyncTime(latest)}。恢复会使数据世代从 ${generation} 递增，并退出所有设备。`
+        : "当前账号没有可恢复的云端历史版本。";
+      accountCloudRecoveryStatusEl.className = "private-sync-status";
+      setDataActionBusy(false);
+    }
+    async function loadCloudRecoveryStatus() {
+      lastCloudRecoveryStatus = null;
+      accountCloudRecoveryPasswordEl.value = "";
+      accountCloudRecoveryTargetEl.value = "";
+      accountCloudRecoveryTargetEl.disabled = true;
+      accountCloudRecoveryPasswordEl.disabled = true;
+      accountCloudRecoveryRestoreBtn.disabled = true;
+      if (!syncUsernameEl.value.trim()) {
+        accountCloudRecoveryStatusEl.textContent = "登录后可读取云端恢复状态。";
+        accountCloudRecoveryStatusEl.className = "private-sync-status";
+        return;
+      }
+      accountCloudRecoveryStatusEl.textContent = "正在读取云端恢复状态…";
+      accountCloudRecoveryStatusEl.className = "private-sync-status";
+      try {
+        applyCloudRecoveryStatus(await invoke("sync_recovery_status"));
+      } catch (error) {
+        accountCloudRecoveryStatusEl.textContent = "无法读取云端恢复状态，请稍后重试。";
+        accountCloudRecoveryStatusEl.className = "private-sync-status error";
+      }
     }
     function setAccountSecurityDisclosure(disclosure, toggle, open) {
       disclosure.open = open;
@@ -718,6 +802,11 @@
       await loadSyncSettingsOnce();
       if (startupAutoSyncStarted || !syncUsernameEl.value.trim()) return;
       startupAutoSyncStarted = true;
+      // Stagger a fleet of clients launched after an update or machine login.
+      // This delay is background-only and never affects a manual sync click.
+      await new Promise((resolve) =>
+        setTimeout(resolve, 1500 + Math.floor(Math.random() * 8500)),
+      );
       syncNowBtn.disabled = true;
       setSyncButtonState("syncing", "autoSyncInProgress");
       try {
@@ -843,6 +932,7 @@
       }
     });
     syncPasswordResetOpenBtn.addEventListener("click", () => {
+      syncRegistrationEl.hidden = true;
       syncPasswordResetEl.hidden = !syncPasswordResetEl.hidden;
       if (!syncPasswordResetEl.hidden) syncResetEmailEl.focus();
     });
@@ -866,7 +956,6 @@
           request: {
             url: "",
             username: syncUsernameEl.value.trim(),
-            email: syncResetEmailEl.value.trim(),
             code: syncResetCodeEl.value.trim(),
             newPassword: syncResetNewPasswordEl.value,
           },
@@ -905,6 +994,7 @@
       accountDeleteUsernameEl.disabled = !username;
       accountClearCloudBtn.disabled = !username;
       accountDeleteBtn.disabled = !username;
+      void loadCloudRecoveryStatus();
       setAccountDataStatus(
         username
           ? ""
@@ -951,6 +1041,41 @@
         clearBrowserStateAndReload();
       } catch (error) {
         setAccountDataStatus("清除失败：" + error, "error");
+        setDataActionBusy(false);
+      }
+    });
+    accountCloudRecoveryRestoreBtn.addEventListener("click", async () => {
+      const status = lastCloudRecoveryStatus;
+      const targetAt = cloudRecoveryTargetAt();
+      const password = accountCloudRecoveryPasswordEl.value;
+      accountCloudRecoveryPasswordEl.value = "";
+      if (!status?.available || !targetAt || !Number.isSafeInteger(status.dataGeneration) || status.dataGeneration <= 0 || !password) {
+        accountCloudRecoveryStatusEl.textContent = "请先选择可恢复时间，并输入当前登录密码。";
+        accountCloudRecoveryStatusEl.className = "private-sync-status error";
+        return;
+      }
+      const from = Number(status.restorableFrom) || 0;
+      const latest = Number(status.latestVersionAt) || 0;
+      if (targetAt < from || targetAt > latest) {
+        accountCloudRecoveryStatusEl.textContent = "恢复时间必须位于服务器给出的可恢复范围内。";
+        accountCloudRecoveryStatusEl.className = "private-sync-status error";
+        return;
+      }
+      if (!global.confirm("确定将云端同步数据恢复到选定时间吗？\n\n这不是本机数据恢复点。成功后所有设备会退出登录；此设备的旧同步数据将被清除，随后请重新登录并先完成拉取同步。")) return;
+      setDataActionBusy(true);
+      accountCloudRecoveryStatusEl.textContent = "正在恢复云端历史版本…";
+      accountCloudRecoveryStatusEl.className = "private-sync-status";
+      try {
+        const result = await invoke("sync_recovery_restore", {
+          request: { targetAt, dataGeneration: status.dataGeneration, password },
+        });
+        if (!result?.tokensRevoked) throw new Error("恢复响应无效");
+        accountCloudRecoveryStatusEl.textContent = "云端恢复已完成，正在清除此设备的旧同步数据…";
+        await invoke("clear_local_app_data");
+        clearBrowserStateAndReload();
+      } catch (error) {
+        accountCloudRecoveryStatusEl.textContent = "云端恢复未完成，请核对确认信息后重试。";
+        accountCloudRecoveryStatusEl.className = "private-sync-status error";
         setDataActionBusy(false);
       }
     });
@@ -1146,32 +1271,76 @@
         setAccountSecurityStatus("修改失败：" + error, "error");
       }
     });
-    async function syncAuth(action) {
-      const isRegister = action === "register";
-      const activeBtn = isRegister ? syncRegisterBtn : syncLoginBtn;
-      const idleText = isRegister ? "注册" : "登录";
+    function saveAuthentication(res) {
+      syncUsernameEl.value = res.user?.username || syncUsernameEl.value;
+      saveAccountInfo(syncUsernameEl.value);
+      syncPasswordEl.value = "";
+      hideSavedAccounts();
+      syncSettingsLoaded = true;
+      updateAccountView({ username: syncUsernameEl.value });
+    }
+
+    async function finishAuthentication(res) {
+      saveAuthentication(res);
+      closeAccountPanel();
+      setSyncButtonState("syncing", "firstSyncInProgress");
+      try {
+        const report = await invoke("sync_now");
+        setSyncButtonState("ok", "syncSuccess", report.message);
+        updateSyncSummary({
+          last_sync_at: report.server_time,
+          last_sync_pushed: report.pushed,
+          last_sync_pulled: report.pulled,
+          last_sync_accepted: report.accepted,
+          last_sync_ignored: report.ignored,
+        });
+        syncStatusEl.textContent = report.message;
+        renderShelf(await invoke("shelf_books"));
+      } catch (syncError) {
+        // Authentication succeeded. Keep the account signed in and let the user
+        // retry synchronization without re-entering the password.
+        setSyncButtonState("fail", "syncFailed", String(syncError));
+      }
+    }
+
+    function openRegistration() {
+      const username = syncUsernameEl.value.trim();
+      const password = syncPasswordEl.value;
+      if (username.length < 3 || username.length > 64) {
+        syncStatusEl.textContent = "注册账号长度必须为 3 到 64 个字符。";
+        syncUsernameEl.focus();
+        return;
+      }
+      if (password.length < 8) {
+        syncStatusEl.textContent = "注册密码至少需要 8 个字符。";
+        syncPasswordEl.focus();
+        return;
+      }
+      syncPasswordResetEl.hidden = true;
+      syncRegistrationEl.hidden = false;
+      syncRegisterStatusEl.textContent = "请输入可接收验证码的邮箱。";
+      syncRegisterStatusEl.className = "private-sync-status";
+      syncRegisterEmailEl.focus();
+    }
+
+    async function syncAuth() {
       syncRegisterBtn.disabled = true;
       syncLoginBtn.disabled = true;
-      activeBtn.textContent = isRegister ? "注册中…" : "登录中…";
-      syncStatusEl.textContent = isRegister ? "注册中…" : "登录中…";
+      syncLoginBtn.textContent = "登录中…";
+      syncStatusEl.textContent = "登录中…";
       const username = syncUsernameEl.value.trim();
       const password = syncPasswordEl.value;
       closeAccountPanel();
       try {
-        const res = await invoke(isRegister ? "auth_register" : "auth_login", {
+        const res = await invoke("auth_login", {
           request: {
             url: "",
             username,
             password,
           },
         });
-        syncUsernameEl.value = res.user?.username || syncUsernameEl.value;
-        saveAccountInfo(syncUsernameEl.value);
-        syncPasswordEl.value = "";
-        hideSavedAccounts();
-        syncSettingsLoaded = true;
-        updateAccountView({ username: syncUsernameEl.value });
         if (res.sync_enabled === false) {
+          saveAuthentication(res);
           openAccountPanel();
           await loadAccountSecurityStatus();
           syncStatusEl.textContent =
@@ -1179,35 +1348,85 @@
           setSyncButtonState("fail", "syncFailed", syncStatusEl.textContent);
           return;
         }
-        setSyncButtonState("syncing", "firstSyncInProgress");
-        try {
-          const report = await invoke("sync_now");
-          setSyncButtonState("ok", "syncSuccess", report.message);
-          updateSyncSummary({
-            last_sync_at: report.server_time,
-            last_sync_pushed: report.pushed,
-            last_sync_pulled: report.pulled,
-            last_sync_accepted: report.accepted,
-            last_sync_ignored: report.ignored,
-          });
-          syncStatusEl.textContent = report.message;
-          renderShelf(await invoke("shelf_books"));
-        } catch (syncError) {
-          // Authentication succeeded. Keep the account signed in and let the user
-          // retry synchronization without re-entering the password.
-          setSyncButtonState("fail", "syncFailed", String(syncError));
-        }
+        await finishAuthentication(res);
       } catch (e) {
         openAccountPanel();
-        syncStatusEl.textContent = `${isRegister ? "注册" : "登录"}失败：${e}`;
+        syncStatusEl.textContent = `登录失败：${e}`;
       } finally {
         syncRegisterBtn.disabled = false;
         syncLoginBtn.disabled = false;
-        activeBtn.textContent = idleText;
+        syncLoginBtn.textContent = "登录";
       }
     }
-    syncRegisterBtn.addEventListener("click", () => syncAuth("register"));
-    syncLoginBtn.addEventListener("click", () => syncAuth("login"));
+    syncRegisterBtn.addEventListener("click", openRegistration);
+    syncRegisterCancelBtn.addEventListener("click", () => {
+      syncRegistrationEl.hidden = true;
+      syncRegisterCodeEl.value = "";
+      syncRegisterStatusEl.textContent = "";
+    });
+    syncRegisterCodeRequestBtn.addEventListener("click", async () => {
+      const username = syncUsernameEl.value.trim();
+      const email = syncRegisterEmailEl.value.trim();
+      if (username.length < 3 || username.length > 64) {
+        syncRegisterStatusEl.textContent =
+          "注册账号长度必须为 3 到 64 个字符。";
+        syncRegisterStatusEl.className = "private-sync-status error";
+        syncUsernameEl.focus();
+        return;
+      }
+      if (!email || !email.includes("@")) {
+        syncRegisterStatusEl.textContent = "请输入有效邮箱地址。";
+        syncRegisterStatusEl.className = "private-sync-status error";
+        return;
+      }
+      syncRegisterCodeRequestBtn.disabled = true;
+      syncRegisterCodeRequestBtn.textContent = "发送中…";
+      try {
+        await invoke("auth_register_start", {
+          request: { url: "", username, email },
+        });
+        syncRegisterStatusEl.textContent =
+          "验证码已发送，15 分钟内有效。请检查收件箱和垃圾邮件。";
+        syncRegisterStatusEl.className = "private-sync-status ok";
+        syncRegisterCodeEl.focus();
+      } catch (error) {
+        syncRegisterStatusEl.textContent = `发送失败：${error}`;
+        syncRegisterStatusEl.className = "private-sync-status error";
+      } finally {
+        syncRegisterCodeRequestBtn.disabled = false;
+        syncRegisterCodeRequestBtn.textContent = "发送验证码";
+      }
+    });
+    syncRegisterConfirmBtn.addEventListener("click", async () => {
+      const request = {
+        url: "",
+        username: syncUsernameEl.value.trim(),
+        email: syncRegisterEmailEl.value.trim(),
+        code: syncRegisterCodeEl.value.trim(),
+        password: syncPasswordEl.value,
+      };
+      if (request.code.length !== 6 || request.password.length < 8) {
+        syncRegisterStatusEl.textContent =
+          "请输入 6 位验证码，并使用至少 8 个字符的密码。";
+        syncRegisterStatusEl.className = "private-sync-status error";
+        return;
+      }
+      syncRegisterConfirmBtn.disabled = true;
+      syncRegisterConfirmBtn.textContent = "注册中…";
+      try {
+        const res = await invoke("auth_register_confirm", { request });
+        syncRegistrationEl.hidden = true;
+        syncRegisterCodeEl.value = "";
+        await finishAuthentication(res);
+      } catch (error) {
+        syncRegisterStatusEl.textContent = `注册失败：${error}`;
+        syncRegisterStatusEl.className = "private-sync-status error";
+      } finally {
+        syncRegisterConfirmBtn.disabled = false;
+        syncRegisterConfirmBtn.textContent = "验证并注册";
+      }
+    });
+    syncLoginBtn.addEventListener("click", syncAuth);
     syncUsernameEl.addEventListener("focus", renderSavedAccounts);
     syncUsernameEl.addEventListener("click", renderSavedAccounts);
     syncUsernameEl.addEventListener("input", () => {
@@ -1227,7 +1446,7 @@
       el.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          syncAuth("login");
+          syncAuth();
         } else if (e.key === "Escape") {
           hideSavedAccounts();
         }

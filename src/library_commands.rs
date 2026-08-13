@@ -3,10 +3,13 @@ use crate::{
     search_index, window_commands, AppState, RES_BASE,
 };
 use book::Library;
+use presentation::title_initial;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 use tauri::{Emitter, Manager};
+
+mod presentation;
 
 // ---------------------------------------------------------------------------
 //  传给前端的数据结构
@@ -115,108 +118,6 @@ fn booklist_snapshot(lib: &Library) -> Vec<BookListDto> {
             }
         })
         .collect()
-}
-
-/// 一个汉字的拼音首字母（GB2312 编码区间法，覆盖绝大多数常用字）；非常用字/非汉字返回 None。
-fn pinyin_initial(c: char) -> Option<char> {
-    if c.is_ascii_alphabetic() {
-        return Some(c.to_ascii_uppercase());
-    }
-    if !('\u{4e00}'..='\u{9fff}').contains(&c) {
-        return None;
-    }
-    let mut buf = [0u8; 4];
-    let s = c.encode_utf8(&mut buf);
-    let (bytes, _, _) = encoding_rs::GBK.encode(s);
-    if bytes.len() != 2 {
-        return None;
-    }
-    let code = ((bytes[0] as u16) << 8) | (bytes[1] as u16);
-    // 各拼音首字母在 GB2312 里的起始码
-    const T: [(u16, char); 23] = [
-        (0xB0A1, 'A'),
-        (0xB0C5, 'B'),
-        (0xB2C1, 'C'),
-        (0xB4EE, 'D'),
-        (0xB6EA, 'E'),
-        (0xB7A2, 'F'),
-        (0xB8C1, 'G'),
-        (0xB9FE, 'H'),
-        (0xBBF7, 'J'),
-        (0xBFA6, 'K'),
-        (0xC0AC, 'L'),
-        (0xC2E8, 'M'),
-        (0xC4C3, 'N'),
-        (0xC5B6, 'O'),
-        (0xC5BE, 'P'),
-        (0xC6DA, 'Q'),
-        (0xC8BB, 'R'),
-        (0xC8F6, 'S'),
-        (0xCBFA, 'T'),
-        (0xCDDA, 'W'),
-        (0xCEF4, 'X'),
-        (0xD1B9, 'Y'),
-        (0xD4D1, 'Z'),
-    ];
-    if code < T[0].0 || code > 0xD7F9 {
-        return None;
-    }
-    let mut ans = 'A';
-    for (start, ch) in T.iter() {
-        if code >= *start {
-            ans = *ch;
-        } else {
-            break;
-        }
-    }
-    Some(ans)
-}
-
-fn is_skip_punct(c: char) -> bool {
-    matches!(
-        c,
-        '《' | '》'
-            | '「'
-            | '」'
-            | '『'
-            | '』'
-            | '【'
-            | '】'
-            | '('
-            | ')'
-            | '（'
-            | '）'
-            | '['
-            | ']'
-            | '"'
-            | '\''
-            | '“'
-            | '”'
-            | '‘'
-            | '’'
-            | '·'
-            | '…'
-            | '—'
-            | '-'
-            | '_'
-            | '.'
-            | '、'
-            | ','
-            | '，'
-            | '*'
-            | '#'
-    )
-}
-
-/// 书名的分组首字母：跳过前导标点/书名号，取第一个有效字符的拼音首字母；数字/其它符号归 '#'。
-fn title_initial(title: &str) -> char {
-    for c in title.chars() {
-        if c.is_whitespace() || is_skip_punct(c) {
-            continue;
-        }
-        return pinyin_initial(c).unwrap_or('#');
-    }
-    '#'
 }
 
 fn to_dto(b: &book::Book) -> BookDto {
@@ -1111,14 +1012,6 @@ pub(crate) fn compute_word_counts(app: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn title_initial_skips_book_punctuation_and_handles_ascii() {
-        assert_eq!(title_initial("  《hello》"), 'H');
-        assert_eq!(title_initial("【中文】"), 'Z');
-        assert_eq!(title_initial("123"), '#');
-        assert_eq!(title_initial("---"), '#');
-    }
 
     #[test]
     fn navigation_requests_deserialize_as_one_object() {

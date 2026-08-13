@@ -251,10 +251,10 @@ fn snapshot(db: &AppDb) -> Result<ReaderPaletteSyncSnapshot, String> {
 pub(crate) fn reader_palette_sync_get(
     state: tauri::State<AppState>,
 ) -> Result<ReaderPaletteSyncSnapshot, String> {
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    migrate_legacy_backgrounds(db)?;
-    snapshot(db)
+    state.with_db_write("reader_palette_sync_get", |db| {
+        migrate_legacy_backgrounds(db)?;
+        snapshot(db)
+    })
 }
 
 #[tauri::command]
@@ -280,26 +280,26 @@ pub(crate) fn reader_palette_sync_save(
         palettes.push(palette);
     }
     let order = normalized_order(request.order, &ids);
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let existing = db.sync_entities_by_kind(READER_PALETTE_KIND)?;
-    for item in existing.into_iter().filter(|item| item.deleted_at == 0) {
-        if !ids.contains(&item.id) {
-            db.soft_delete(READER_PALETTE_KIND, &item.id)?;
+    state.with_db_write("reader_palette_sync_save", |db| {
+        let existing = db.sync_entities_by_kind(READER_PALETTE_KIND)?;
+        for item in existing.into_iter().filter(|item| item.deleted_at == 0) {
+            if !ids.contains(&item.id) {
+                db.soft_delete(READER_PALETTE_KIND, &item.id)?;
+            }
         }
-    }
-    let mut writes = palettes
-        .into_iter()
-        .filter_map(|palette| {
-            let id = palette.get("id").and_then(Value::as_str)?.to_string();
-            Some((READER_PALETTE_KIND.to_string(), id, palette))
-        })
-        .collect::<Vec<_>>();
-    writes.push((
-        READER_PALETTE_ORDER_KIND.to_string(),
-        DEFAULT_ID.to_string(),
-        json!({ "version": 1, "order": order }),
-    ));
-    db.upsert_json_batch(&writes)?;
-    snapshot(db)
+        let mut writes = palettes
+            .into_iter()
+            .filter_map(|palette| {
+                let id = palette.get("id").and_then(Value::as_str)?.to_string();
+                Some((READER_PALETTE_KIND.to_string(), id, palette))
+            })
+            .collect::<Vec<_>>();
+        writes.push((
+            READER_PALETTE_ORDER_KIND.to_string(),
+            DEFAULT_ID.to_string(),
+            json!({ "version": 1, "order": order }),
+        ));
+        db.upsert_json_batch(&writes)?;
+        snapshot(db)
+    })
 }

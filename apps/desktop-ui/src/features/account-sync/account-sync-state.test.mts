@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AccountSummary, SyncReport } from "./account-sync-port.ts";
+import type { AccountSummary, CloudRecoveryStatus, SyncReport } from "./account-sync-port.ts";
 import { accountSyncReducer, initialAccountSyncState, progressPercent, safeFailureNotice } from "./account-sync-state.ts";
 
 const account: AccountSummary = { username: "reader", emailVerified: true, syncEnabled: true };
@@ -60,4 +60,19 @@ test("a failed confirmation stays visible for retry and a cancellation dismisses
 test("unsafe transport text is never selected as a user-facing error", () => {
   const error = new Error("password=do-not-show server-internal-details");
   assert.equal(safeFailureNotice(error, "同步未完成，请稍后重试。"), "同步未完成，请稍后重试。");
+});
+
+test("cloud recovery stores only status/result metadata and ignores stale requests", () => {
+  const status: CloudRecoveryStatus = {
+    available: true, retentionDays: 90, restorableFrom: 100, latestVersionAt: 200, versionCount: 3, dataGeneration: 4,
+  };
+  let state = accountSyncReducer(initialAccountSyncState, { type: "cloud-recovery-loading", requestId: 2 });
+  state = accountSyncReducer(state, { type: "cloud-recovery-ready", requestId: 2, status });
+  state = accountSyncReducer(state, { type: "cloud-recovery-restoring", requestId: 3 });
+  const stale = accountSyncReducer(state, { type: "cloud-recovery-restored", requestId: 2, result: { restoredEntities: 8, tombstonedEntities: 1, restoredAt: 201 } });
+  assert.equal(stale, state);
+  state = accountSyncReducer(state, { type: "cloud-recovery-restored", requestId: 3, result: { restoredEntities: 8, tombstonedEntities: 1, restoredAt: 201 } });
+  assert.equal(state.account, null);
+  assert.equal(state.cloudRecovery.result?.restoredEntities, 8);
+  assert.equal("password" in state.cloudRecovery, false);
 });

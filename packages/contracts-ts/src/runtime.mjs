@@ -39,7 +39,9 @@ function requireBoolean(value, path) {
  */
 export function parseAppSettingsFixture(value) {
   const fixture = requireRecord(value, "app-settings fixture");
-  requireIntegerInRange(fixture.syncProtocolVersion, "syncProtocolVersion", 1, Number.MAX_SAFE_INTEGER);
+  if (fixture.syncProtocolVersion !== 5) {
+    throw new TypeError("syncProtocolVersion must be 5.");
+  }
   if (!Array.isArray(fixture.entities) || fixture.entities.length === 0) {
     throw new TypeError("entities must be a non-empty array.");
   }
@@ -66,7 +68,10 @@ export function parseAppSettingsFixture(value) {
     }
     requireIntegerInRange(payload.readerJumpBackDismissSeconds, `${path}.payload.readerJumpBackDismissSeconds`, 1, 600);
     requireIntegerInRange(payload.readerJumpBackDismissPages, `${path}.payload.readerJumpBackDismissPages`, 1, 100);
-    requireIntegerInRange(payload.readerJumpBackSizeLevel, `${path}.payload.readerJumpBackSizeLevel`, 1, 10);
+    requireIntegerInRange(payload.readerJumpBackIconSizePx, `${path}.payload.readerJumpBackIconSizePx`, 30, 160);
+    if (Object.prototype.hasOwnProperty.call(payload, "readerJumpBackSizeLevel")) {
+      throw new TypeError(`${path}.payload.readerJumpBackSizeLevel is retired by sync protocol version 5.`);
+    }
   });
 
   return fixture;

@@ -3,9 +3,9 @@
 // receives S.uiLanguage from the reader shell and keeps every transient menu
 // in the same language as the surrounding reader.
 var READER_PAGE_COPY={
-  'zh-CN':{yellow:'黄色',green:'绿色',blue:'蓝色',pink:'粉色',web:'网页搜索',dict:'词典',translate:'翻译',copy:'复制',highlight:'高亮',correct:'改错',excerpt:'书摘',cross:'跨书搜索',semantic:'相似语义',aiReader:'智读',note:'批注',bookmark:'书签',removeHighlight:'取消高亮',display:'显示',both:'图文',text:'文字',icon:'图标',colorful:'多彩高亮',layout:'布局',row:'横排',grid:'九宫格',size:'大小',small:'小',medium:'中',large:'大',dragSort:'拖动排序',searchEngineGoogle:'谷歌',searchEngineBaidu:'百度',original:'原文',cancel:'取消',save:'保存',downloadImage:'下载图片',generatingImage:'正在生成图片…',downloadStarted:'已开始下载',source:'原文',translation:'译文',loading:'加载中…',autoDetect:'自动检测',chinese:'中文',english:'英文',japanese:'日文',korean:'韩文',systemLanguage:'系统语言',translationFailed:'翻译失败',fillCredential:'请填写',checkCredential:'正在检查凭据配置…',savingCredential:'正在安全保存凭据…',dictionarySettings:'词典增强设置',lookingUp:'查词中…',meaningHint:'词义提示',possibleSenses:'可能义项',contextHint:'结合当前句子',hypernyms:'上位词',synonyms:'近义',antonyms:'反义',notFoundDefinition:'（未找到该词的释义）',noDefinition:'（无释义）',pronunciation:'发音',externalDictionary:'外置词典',footnoteLoading:'加载中…',footnoteNotFound:'（未找到注释内容）',footnoteFailed:'（注释加载失败）'},
+  'zh-CN':{yellow:'黄色',green:'绿色',blue:'蓝色',pink:'粉色',web:'网页搜索',dict:'词典',translate:'翻译',copy:'复制',highlight:'高亮',correct:'改错',excerpt:'书摘',cross:'跨书搜索',semantic:'相似语义',aiReader:'智读',note:'批注',bookmark:'书签',removeHighlight:'取消高亮',display:'显示',both:'图文',text:'文字',icon:'图标',colorful:'多彩高亮',layout:'布局',row:'横排',grid:'九宫格',size:'大小',small:'小',medium:'中',large:'大',dragSort:'拖动排序',searchEngineGoogle:'谷歌',searchEngineBaidu:'百度',original:'原文',cancel:'取消',save:'保存',downloadImage:'下载图片',generatingImage:'正在生成图片…',downloadStarted:'已开始下载',source:'原文',translation:'译文',loading:'加载中…',autoDetect:'自动检测',chinese:'中文',english:'英文',japanese:'日文',korean:'韩文',systemLanguage:'系统语言',translationFailed:'翻译失败',fillCredential:'请填写',checkCredential:'正在检查凭据配置…',savingCredential:'正在安全保存凭据…',dictionarySettings:'词典增强设置',lookingUp:'查词中…',meaningHint:'词义提示',possibleSenses:'可能义项',contextHint:'结合当前句子',hypernyms:'上位词',synonyms:'近义',antonyms:'反义',dictionaryEnhancementUnavailable:'当前词没有可用的“{option}”数据，未开启。',notFoundDefinition:'（未找到该词的释义）',noDefinition:'（无释义）',pronunciation:'发音',externalDictionary:'外置词典',footnoteLoading:'加载中…',footnoteNotFound:'（未找到注释内容）',footnoteFailed:'（注释加载失败）'},
   'zh-TW':{yellow:'黃色',green:'綠色',blue:'藍色',pink:'粉色',web:'網頁搜尋',dict:'詞典',translate:'翻譯',copy:'複製',highlight:'螢光標記',correct:'校正',excerpt:'書摘',cross:'跨書搜尋',semantic:'相似語義',aiReader:'智讀',note:'批註',bookmark:'書籤',removeHighlight:'取消標記',display:'顯示',both:'圖文',text:'文字',icon:'圖示',colorful:'多彩標記',layout:'版面',row:'橫排',grid:'九宮格',size:'大小',small:'小',medium:'中',large:'大',dragSort:'拖曳排序',searchEngineGoogle:'Google',searchEngineBaidu:'百度',original:'原文',cancel:'取消',save:'儲存',downloadImage:'下載圖片',generatingImage:'正在產生圖片…',downloadStarted:'已開始下載',source:'原文',translation:'譯文',loading:'載入中…',autoDetect:'自動偵測',chinese:'中文',english:'英文',japanese:'日文',korean:'韓文',systemLanguage:'系統語言',translationFailed:'翻譯失敗',fillCredential:'請填寫',checkCredential:'正在檢查憑據設定…',savingCredential:'正在安全儲存憑據…',dictionarySettings:'詞典增強設定',lookingUp:'查詞中…',meaningHint:'詞義提示',possibleSenses:'可能義項',contextHint:'結合目前句子',hypernyms:'上位詞',synonyms:'近義詞',antonyms:'反義詞',notFoundDefinition:'（找不到該詞釋義）',noDefinition:'（無釋義）',pronunciation:'發音',externalDictionary:'外部詞典',footnoteLoading:'載入中…',footnoteNotFound:'（找不到註釋內容）',footnoteFailed:'（註釋載入失敗）'},
-  en:{yellow:'Yellow',green:'Green',blue:'Blue',pink:'Pink',web:'Web search',dict:'Dictionary',translate:'Translate',copy:'Copy',highlight:'Highlight',correct:'Correct',excerpt:'Excerpt',cross:'Search library',semantic:'Similar meaning',aiReader:'AI Reader',note:'Note',bookmark:'Bookmark',removeHighlight:'Remove highlight',display:'Display',both:'Icon + text',text:'Text',icon:'Icon',colorful:'Highlight colors',layout:'Layout',row:'Row',grid:'Grid',size:'Size',small:'Small',medium:'Medium',large:'Large',dragSort:'Drag to reorder',searchEngineGoogle:'Google',searchEngineBaidu:'Baidu',original:'Original',cancel:'Cancel',save:'Save',downloadImage:'Download image',generatingImage:'Creating image…',downloadStarted:'Download started',source:'Source',translation:'Translation',loading:'Loading…',autoDetect:'Detect automatically',chinese:'Chinese',english:'English',japanese:'Japanese',korean:'Korean',systemLanguage:'System language',translationFailed:'Translation failed',fillCredential:'Enter',checkCredential:'Checking credential setup…',savingCredential:'Saving credentials securely…',dictionarySettings:'Dictionary options',lookingUp:'Looking up…',meaningHint:'Meaning hint',possibleSenses:'Possible senses',contextHint:'In this context',hypernyms:'Broader terms',synonyms:'Synonyms',antonyms:'Antonyms',notFoundDefinition:'(No definition found)',noDefinition:'(No definition)',pronunciation:'Pronunciation',externalDictionary:'External dictionary',footnoteLoading:'Loading…',footnoteNotFound:'(Footnote not found)',footnoteFailed:'(Could not load footnote)'},
+  en:{yellow:'Yellow',green:'Green',blue:'Blue',pink:'Pink',web:'Web search',dict:'Dictionary',translate:'Translate',copy:'Copy',highlight:'Highlight',correct:'Correct',excerpt:'Excerpt',cross:'Search library',semantic:'Similar meaning',aiReader:'AI Reader',note:'Note',bookmark:'Bookmark',removeHighlight:'Remove highlight',display:'Display',both:'Icon + text',text:'Text',icon:'Icon',colorful:'Highlight colors',layout:'Layout',row:'Row',grid:'Grid',size:'Size',small:'Small',medium:'Medium',large:'Large',dragSort:'Drag to reorder',searchEngineGoogle:'Google',searchEngineBaidu:'Baidu',original:'Original',cancel:'Cancel',save:'Save',downloadImage:'Download image',generatingImage:'Creating image…',downloadStarted:'Download started',source:'Source',translation:'Translation',loading:'Loading…',autoDetect:'Detect automatically',chinese:'Chinese',english:'English',japanese:'Japanese',korean:'Korean',systemLanguage:'System language',translationFailed:'Translation failed',fillCredential:'Enter',checkCredential:'Checking credential setup…',savingCredential:'Saving credentials securely…',dictionarySettings:'Dictionary options',lookingUp:'Looking up…',meaningHint:'Meaning hint',possibleSenses:'Possible senses',contextHint:'In this context',hypernyms:'Broader terms',synonyms:'Synonyms',antonyms:'Antonyms',dictionaryEnhancementUnavailable:'No {option} data is available for this word, so it remains off.',notFoundDefinition:'(No definition found)',noDefinition:'(No definition)',pronunciation:'Pronunciation',externalDictionary:'External dictionary',footnoteLoading:'Loading…',footnoteNotFound:'(Footnote not found)',footnoteFailed:'(Could not load footnote)'},
   ja:{yellow:'黄色',green:'緑色',blue:'青色',pink:'ピンク',web:'ウェブ検索',dict:'辞書',translate:'翻訳',copy:'コピー',highlight:'ハイライト',correct:'修正',excerpt:'抜粋',cross:'本棚を検索',semantic:'類似した意味',aiReader:'AI 読解',note:'注釈',bookmark:'しおり',removeHighlight:'ハイライトを削除',display:'表示',both:'アイコンと文字',text:'文字',icon:'アイコン',colorful:'色付きハイライト',layout:'レイアウト',row:'横並び',grid:'グリッド',size:'サイズ',small:'小',medium:'中',large:'大',dragSort:'ドラッグして並べ替え',searchEngineGoogle:'Google',searchEngineBaidu:'Baidu',original:'原文',cancel:'キャンセル',save:'保存',downloadImage:'画像をダウンロード',generatingImage:'画像を作成中…',downloadStarted:'ダウンロードを開始しました',source:'原文',translation:'翻訳',loading:'読み込み中…',autoDetect:'自動検出',chinese:'中国語',english:'英語',japanese:'日本語',korean:'韓国語',systemLanguage:'システム言語',translationFailed:'翻訳に失敗しました',fillCredential:'入力してください:',checkCredential:'認証情報を確認中…',savingCredential:'認証情報を安全に保存中…',dictionarySettings:'辞書の設定',lookingUp:'検索中…',meaningHint:'語義のヒント',possibleSenses:'候補の語義',contextHint:'文脈での意味',hypernyms:'上位語',synonyms:'類義語',antonyms:'対義語',notFoundDefinition:'（定義が見つかりません）',noDefinition:'（定義がありません）',pronunciation:'発音',externalDictionary:'外部辞書',footnoteLoading:'読み込み中…',footnoteNotFound:'（注釈が見つかりません）',footnoteFailed:'（注釈を読み込めません）'}
 };
 var READER_HIGHLIGHT_COPY={
@@ -1524,48 +1524,20 @@ function highlightPageKey(rect){
   return Math.floor((rect.left-pr.left+viewOffset+1)/pageStep);
 }
 function highlightRectEnvelope(rects){
-  var left=Infinity,top=Infinity,right=-Infinity,bottom=-Infinity;
-  rects.forEach(function(r){left=Math.min(left,r.left);top=Math.min(top,r.top);right=Math.max(right,r.right);bottom=Math.max(bottom,r.bottom);});
-  return {left:left,top:top,right:right,bottom:bottom,width:Math.max(0,right-left),height:Math.max(0,bottom-top)};
+  return ReaderPageHighlightRules.envelope(rects);
 }
 function nearestHighlightRect(rects,evt){
-  if(!evt||typeof evt.clientX!=='number'||typeof evt.clientY!=='number')return rects[0];
-  var x=evt.clientX,y=evt.clientY,best=rects[0],bestD=Infinity;
-  for(var i=0;i<rects.length;i++){
-    var r=rects[i];
-    if(x>=r.left-3&&x<=r.right+3&&y>=r.top-5&&y<=r.bottom+5)return r;
-    var cx=Math.max(r.left,Math.min(r.right,x)),cy=Math.max(r.top,Math.min(r.bottom,y));
-    var dx=x-cx,dy=y-cy,d=dx*dx+dy*dy;
-    if(d<bestD){bestD=d;best=r;}
-  }
-  return best;
+  return ReaderPageHighlightRules.nearestRect(rects,evt&&typeof evt.clientX==='number'&&typeof evt.clientY==='number'?{x:evt.clientX,y:evt.clientY}:null);
 }
 function highlightLineGroups(rects){
-  var groups={};
-  rects.forEach(function(r){
-    // 同一行内的多个内联片段应看成一行，否则单行高亮会误判为多行。
-    var key=highlightPageKey(r)+':'+Math.round(r.top)+':'+Math.round(r.bottom);
-    (groups[key]||(groups[key]=[])).push(r);
-  });
-  return Object.keys(groups).map(function(key){return highlightRectEnvelope(groups[key]);});
+  // 同一行内的多个内联片段应看成一行，否则单行高亮会误判为多行。
+  return ReaderPageHighlightRules.groupedEnvelopes(rects,function(r){return highlightPageKey(r)+':'+Math.round(r.top)+':'+Math.round(r.bottom);});
 }
 function highlightMenuPlacement(idx,fallbackEl,evt){
   var rects=visibleHighlightLineRects(idx,fallbackEl);
   if(!rects.length){var fallback=anchorRectForElement(fallbackEl,evt);return {rect:fallback,above:false};}
-  var groups={};rects.forEach(function(r){var key=highlightPageKey(r);(groups[key]||(groups[key]=[])).push(r);});
-  var keys=Object.keys(groups).map(Number).sort(function(a,b){return a-b;});
-  if(keys.length>1){
-    // 高亮跨页：优先取较早一页（其文字位于页末）的完整区块，并把菜单放在区块上方。
-    return {rect:highlightRectEnvelope(groups[keys[0]]),above:true};
-  }
-  var lines=highlightLineGroups(rects);
-  if(lines.length<=1){
-    // 单行仍以鼠标所在文字片段为锚点，保留原来的跟随手感。
-    return {rect:nearestHighlightRect(rects,evt),above:false};
-  }
-  // 同页多行：锚在最末一行，菜单紧跟在高亮之后，不再遮住中间行。
-  var last=lines[0];lines.forEach(function(r){if(r.bottom>last.bottom||(r.bottom===last.bottom&&r.right>last.right))last=r;});
-  return {rect:last,above:false};
+  // 跨页优先较早一页；同页多行紧跟末行，单行则跟随指针所在文字片段。
+  return ReaderPageHighlightRules.placement(rects,evt&&typeof evt.clientX==='number'&&typeof evt.clientY==='number'?{x:evt.clientX,y:evt.clientY}:null,highlightPageKey,function(r){return highlightPageKey(r)+':'+Math.round(r.top)+':'+Math.round(r.bottom);});
 }
 function readerViewportHeight(){
   // iframe 的 innerHeight 偶尔会滞后一帧；以 layout viewport 的较小值为准，
@@ -1714,31 +1686,42 @@ function setupFn(){
   document.addEventListener('wheel',hideFn,{passive:true});
 }
 // ---- 离线词典：选中文字/已高亮 → 就地弹释义（释义由外壳查后端再回传）----
-var dictPop=null,dictRect=null,dictContext='';
+var dictPop=null,dictRect=null,dictContext='',dictSettingsStatus='';
+var DICT_HN_SETTINGS_KEY='dictEnhancementSettingsV2';
 var DICT_HN_CFG=[
   {key:'plain',labelKey:'meaningHint'}, {key:'sense',labelKey:'possibleSenses'},
   {key:'context',labelKey:'contextHint'}, {key:'hypernyms',labelKey:'hypernyms'},
   {key:'synonyms',labelKey:'synonyms'}, {key:'antonyms',labelKey:'antonyms'}
 ];
 function dictHnSettings(){
-  var defaults={plain:true,sense:true,context:true,hypernyms:true,synonyms:true,antonyms:true};
+  var defaults={plain:false,sense:false,context:false,hypernyms:false,synonyms:false,antonyms:false};
   try{
-    var raw=localStorage.getItem('dictHownetSettings');
+    var raw=localStorage.getItem(DICT_HN_SETTINGS_KEY);
     if(raw){
       var v=JSON.parse(raw)||{};
       return {
-        plain:v.plain!==false,
-        sense:v.sense!==false,
-        context:v.context!==false,
-        hypernyms:v.hypernyms!==false,
-        synonyms:v.synonyms!==false,
-        antonyms:v.antonyms!==false
+        plain:v.plain===true,
+        sense:v.sense===true,
+        context:v.context===true,
+        hypernyms:v.hypernyms===true,
+        synonyms:v.synonyms===true,
+        antonyms:v.antonyms===true
       };
     }
   }catch(_){}
   return defaults;
 }
-function setDictHnSettings(v){try{localStorage.setItem('dictHownetSettings',JSON.stringify(v));}catch(_){}}
+function setDictHnSettings(v){try{localStorage.setItem(DICT_HN_SETTINGS_KEY,JSON.stringify(v));}catch(_){}}
+function dictEnhancementAvailable(result,key){
+  var h=result&&result.hownet;
+  if(!h)return false;
+  var field=key==='context'?'example_note':key;
+  var value=h[field];
+  return Array.isArray(value)?value.length>0:typeof value==='string'?value.trim().length>0:value!=null;
+}
+function dictEnhancementUnavailableText(cfg){
+  return readerPageText('dictionaryEnhancementUnavailable').replace('{option}',readerPageText(cfg.labelKey));
+}
 function hideDict(){
   if(!dictPop)return;
   dictPop.style.display='none';
@@ -1805,6 +1788,9 @@ function toggleDictSettings(){
 function renderDictSettings(pop){
   var st=dictHnSettings();
   pop.innerHTML='';
+  if(dictSettingsStatus){
+    var status=document.createElement('div');status.className='dc-settings-status';status.textContent=dictSettingsStatus;pop.appendChild(status);
+  }
   DICT_HN_CFG.forEach(function(cfg){
     var row=document.createElement('label');row.className='dc-set-row';
     var name=document.createElement('span');name.textContent=readerPageText(cfg.labelKey);row.appendChild(name);
@@ -1813,6 +1799,15 @@ function renderDictSettings(pop){
     var slider=document.createElement('span');slider.className='dc-slider';
     input.addEventListener('change',function(e){
       e.stopPropagation();
+      if(input.checked&&!dictEnhancementAvailable(lastDict,cfg.key)){
+        input.checked=false;
+        st[cfg.key]=false;
+        setDictHnSettings(st);
+        dictSettingsStatus=dictEnhancementUnavailableText(cfg);
+        renderDictSettings(pop);pop.classList.add('show');placeDictSettings(pop);
+        return;
+      }
+      dictSettingsStatus='';
       st[cfg.key]=input.checked;
       setDictHnSettings(st);
       renderDict();
@@ -1948,7 +1943,7 @@ function renderDict(){
 }
 function showDictResult(r){
   if(!dictPop)setupDict();
-  lastDict=r;renderDict();
+  lastDict=r;dictSettingsStatus='';renderDict();
   if(r&&r.found&&r.lang==='en'&&r.autoSpeak)speakWord(r.word); // 按生词本设置决定是否自动读一次
   if(r&&r.found)parent.postMessage({vocabAdd:{word:r.word,lang:r.lang,def:r.def||'',def_en:r.def_en||'',phonetic:r.phonetic||'',example:dictContext||''}},'*'); // 记入生词本
   placeDict();

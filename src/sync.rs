@@ -2,21 +2,40 @@ use crate::{
     background_tasks::{BackgroundTaskKind, TaskControlSignal, TaskRunGuard},
     data_migration, db, secret_store, AppState, DEFAULT_SYNC_URL,
 };
+
+mod client;
+mod commands;
+mod protocol;
+mod reconcile;
+mod retry;
+mod validation;
+
+use client::{
+    agent_with_timeout, authenticated_json, JsonRequestError, SYNC_PROTOCOL_HEADER,
+    SYNC_PROTOCOL_VERSION,
+};
+use protocol::{
+    cursor_strictly_advances, inventory_matches, newer_cursor, reconcile_proves_inventory,
+    sync_push_batches, SyncInventoryResponse, SyncPullResponse, SyncPushRequest, SyncPushResponse,
+    SyncReconcileResponse,
+};
 use reader_core::sync::sync_scope_id;
+use reconcile::{reconcile_request_body, reconcile_upload_entities};
+use retry::sync_request_with_retry_delays;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
+use validation::{
+    account_sync_scope, default_data_generation, ensure_data_generation, normalize_auth_base,
+    normalize_sync_base,
+};
 
 const SYNC_PULL_PAGE_SIZE: usize = 1_000;
 const MAX_SYNC_PULL_PAGES: usize = 1_000;
-const SYNC_PUSH_BATCH_ENTITIES: usize = 400;
-const SYNC_PUSH_BATCH_BYTES: usize = 2 * 1024 * 1024;
 const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const SYNC_REQUEST_ATTEMPTS: usize = 3;
-const SYNC_RETRY_DELAYS_MS: &[u64] = &[250, 500];
+const SYNC_REQUEST_ATTEMPTS: usize = 6;
+const SYNC_RETRY_DELAYS_MS: &[u64] = &[1_000, 2_000, 4_000, 8_000, 16_000];
 const SYNC_PAUSED: &str = "__sync_paused__";
 const SYNC_CANCELLED: &str = "__sync_cancelled__";
 struct SyncRunGuard<'a>(&'a AtomicBool);
@@ -41,95 +60,6 @@ fn check_sync_control(task: Option<&TaskRunGuard>) -> Result<(), String> {
         Some(TaskControlSignal::Cancel) => Err(SYNC_CANCELLED.into()),
         _ => Ok(()),
     }
-}
-
-fn sync_error_retryable(error: &ureq::Error) -> bool {
-    match error {
-        ureq::Error::StatusCode(code) => {
-            matches!(*code, 408 | 425 | 429) || (500..=599).contains(code)
-        }
-        ureq::Error::Io(_)
-        | ureq::Error::Timeout(_)
-        | ureq::Error::HostNotFound
-        | ureq::Error::ConnectionFailed
-        | ureq::Error::Protocol(_) => true,
-        _ => false,
-    }
-}
-
-fn sync_error_class(error: &ureq::Error) -> &'static str {
-    match error {
-        ureq::Error::StatusCode(429) => "http_429",
-        ureq::Error::StatusCode(code) if (500..=599).contains(code) => "http_5xx",
-        ureq::Error::StatusCode(_) => "http_4xx",
-        ureq::Error::Timeout(_) => "timeout",
-        ureq::Error::HostNotFound => "dns",
-        ureq::Error::ConnectionFailed => "connection_failed",
-        ureq::Error::Io(_) => "io",
-        ureq::Error::Protocol(_) => "protocol",
-        _ => "other",
-    }
-}
-
-fn sync_request_with_retry_delays<T>(
-    stage: &str,
-    task: Option<&TaskRunGuard>,
-    retry_delays_ms: &[u64],
-    mut request: impl FnMut() -> Result<T, ureq::Error>,
-) -> Result<T, String> {
-    let started = Instant::now();
-    let attempts = SYNC_REQUEST_ATTEMPTS.min(retry_delays_ms.len().saturating_add(1));
-    for attempt in 1..=attempts {
-        check_sync_control(task)?;
-        let attempt_started = Instant::now();
-        match request() {
-            Ok(value) => {
-                if attempt > 1 {
-                    crate::diagnostics::record_retry_recovered(
-                        stage,
-                        attempt as u64,
-                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    );
-                }
-                crate::log(&format!(
-                    "[sync] stage={stage} attempt={attempt} elapsed_ms={} status=ok",
-                    started.elapsed().as_millis()
-                ));
-                return Ok(value);
-            }
-            Err(error) => {
-                let retry = attempt < attempts && sync_error_retryable(&error);
-                let delay_ms = if retry {
-                    retry_delays_ms[attempt - 1]
-                } else {
-                    0
-                };
-                crate::diagnostics::record_retry_failure(
-                    stage,
-                    attempt as u64,
-                    u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    sync_error_class(&error),
-                    retry,
-                    delay_ms,
-                );
-                crate::log(&format!(
-                    "[sync] stage={stage} attempt={attempt} elapsed_ms={} retry={retry} error={error}",
-                    started.elapsed().as_millis()
-                ));
-                if let Some(task) = task {
-                    let _ = task.log(
-                        crate::background_tasks::TaskLogLevel::Warning,
-                        format!("{stage} 第 {attempt} 次请求失败：{error}"),
-                    );
-                }
-                if !retry {
-                    return Err(format!("{stage} 失败：{error}"));
-                }
-                std::thread::sleep(Duration::from_millis(delay_ms));
-            }
-        }
-    }
-    unreachable!("retry loop always returns")
 }
 
 fn log_sync_stage(stage: &str, started: Instant, detail: impl std::fmt::Display) {
@@ -175,60 +105,34 @@ pub(crate) struct AuthUser {
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AuthResponse {
-    #[serde(default)]
     ok: bool,
     #[serde(skip_serializing)]
     token: String,
     user: AuthUser,
-    #[serde(default = "default_data_generation")]
     data_generation: i64,
-    #[serde(default)]
     sync_enabled: bool,
 }
 
-fn default_data_generation() -> i64 {
-    1
-}
-
-fn ensure_data_generation(expected: i64, actual: i64) -> Result<(), String> {
-    if expected.max(1) == actual.max(1) {
-        Ok(())
-    } else {
-        Err("云端数据版本已经变化；请在“数据与隐私”中清除此设备数据后重新登录".into())
-    }
-}
-
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AuthMeResponse {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    username: String,
-    #[serde(default)]
     user: AuthUser,
-    #[serde(default = "default_data_generation")]
     data_generation: i64,
 }
 
 impl AuthMeResponse {
     fn into_verified_identity(self) -> Result<(AuthUser, i64), String> {
-        let user = if self.user.id.trim().is_empty() {
-            AuthUser {
-                id: self.id,
-                username: self.username,
-            }
-        } else {
-            self.user
-        };
-        if user.id.trim().is_empty() {
+        if self.user.id.trim().is_empty() || self.data_generation < 1 {
             return Err("服务器没有返回账户 ID".into());
         }
-        Ok((user, self.data_generation.max(1)))
+        Ok((self.user, self.data_generation))
     }
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SyncReport {
     ok: bool,
     message: String,
@@ -237,240 +141,6 @@ pub(crate) struct SyncReport {
     accepted: usize,
     ignored: usize,
     server_time: i64,
-}
-
-#[derive(Deserialize)]
-struct SyncPushResponse {
-    server_time: i64,
-    #[serde(default = "default_data_generation")]
-    data_generation: i64,
-    #[serde(default)]
-    entities: Vec<db::SyncEntity>,
-    #[serde(default)]
-    accepted_count: Option<u32>,
-    #[serde(default)]
-    accepted: Option<serde_json::Value>,
-    #[serde(default)]
-    ignored_count: Option<u32>,
-    #[serde(default)]
-    ignored: Option<serde_json::Value>,
-    #[serde(default)]
-    dispositions: Vec<SyncPushDisposition>,
-}
-
-#[derive(Deserialize)]
-struct SyncPushDisposition {
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    device_id: String,
-    #[serde(default)]
-    sync_version: i64,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    error: String,
-}
-
-impl SyncPushResponse {
-    fn accepted_total(&self) -> u32 {
-        self.accepted_count
-            .unwrap_or_else(|| legacy_sync_count(self.accepted.as_ref()))
-    }
-
-    fn ignored_total(&self) -> u32 {
-        self.ignored_count
-            .unwrap_or_else(|| legacy_sync_count(self.ignored.as_ref()))
-    }
-
-    fn quota_rejected(&self) -> bool {
-        self.dispositions
-            .iter()
-            .any(|item| item.status == "rejected" && item.error == "QUOTA_EXCEEDED")
-    }
-
-    fn rejected_total(&self) -> usize {
-        self.dispositions
-            .iter()
-            .filter(|item| item.status == "rejected")
-            .count()
-    }
-
-    /// Return only exact local versions which the server explicitly settled.
-    /// A rejected entity (quota, validation or payload limits) must remain
-    /// dirty.  A conflict is acknowledged only when the response also carries
-    /// the authoritative entity that will replace it in the same transaction.
-    fn acknowledged_entities(&self, batch: &[db::SyncEntity]) -> Vec<db::SyncEntity> {
-        if self.dispositions.is_empty() {
-            // Compatibility with pre-disposition servers is deliberately
-            // conservative: a completely accepted batch is safe, a mixed
-            // response is not identifiable and therefore remains retryable.
-            if self.ignored_total() == 0
-                && usize::try_from(self.accepted_total()).ok() == Some(batch.len())
-            {
-                return batch.to_vec();
-            }
-            return Vec::new();
-        }
-
-        let authoritative: std::collections::HashSet<(&str, &str)> = self
-            .entities
-            .iter()
-            .map(|entity| (entity.kind.as_str(), entity.id.as_str()))
-            .collect();
-        let settled: std::collections::HashSet<(&str, &str, &str, i64)> = self
-            .dispositions
-            .iter()
-            .filter(|item| {
-                item.status == "accepted"
-                    || (item.status == "conflict"
-                        && authoritative.contains(&(item.kind.as_str(), item.id.as_str())))
-            })
-            .map(|item| {
-                (
-                    item.kind.as_str(),
-                    item.id.as_str(),
-                    item.device_id.as_str(),
-                    item.sync_version,
-                )
-            })
-            .collect();
-        batch
-            .iter()
-            .filter(|item| {
-                settled.contains(&(
-                    item.kind.as_str(),
-                    item.id.as_str(),
-                    item.device_id.as_str(),
-                    item.sync_version,
-                ))
-            })
-            .cloned()
-            .collect()
-    }
-}
-
-fn legacy_sync_count(value: Option<&serde_json::Value>) -> u32 {
-    match value {
-        Some(serde_json::Value::Number(n)) => n
-            .as_u64()
-            .and_then(|count| u32::try_from(count).ok())
-            .unwrap_or_default(),
-        Some(serde_json::Value::Array(items)) => u32::try_from(items.len()).unwrap_or(u32::MAX),
-        _ => 0,
-    }
-}
-
-#[derive(Deserialize)]
-struct SyncPullResponse {
-    server_time: i64,
-    #[serde(default = "default_data_generation")]
-    data_generation: i64,
-    #[serde(default)]
-    entities: Vec<db::SyncEntity>,
-    #[serde(default)]
-    next_cursor: String,
-    #[serde(default)]
-    has_more: bool,
-}
-
-#[derive(Deserialize)]
-struct SyncInventoryResponse {
-    server_time: i64,
-    #[serde(default = "default_data_generation")]
-    data_generation: i64,
-    entity_count: usize,
-    inventory_digest: String,
-    #[serde(default)]
-    revision: String,
-}
-
-#[derive(Clone, Serialize)]
-struct SyncManifestEntry {
-    kind: String,
-    id: String,
-    updated_at: i64,
-    deleted_at: i64,
-    device_id: String,
-    sync_version: i64,
-}
-
-impl From<&db::SyncEntity> for SyncManifestEntry {
-    fn from(entity: &db::SyncEntity) -> Self {
-        Self {
-            kind: entity.kind.clone(),
-            id: entity.id.clone(),
-            updated_at: entity.updated_at,
-            deleted_at: entity.deleted_at,
-            device_id: entity.device_id.clone(),
-            sync_version: entity.sync_version,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct SyncEntityKey {
-    kind: String,
-    id: String,
-}
-
-#[derive(Deserialize)]
-struct SyncReconcileResponse {
-    server_time: i64,
-    #[serde(default = "default_data_generation")]
-    data_generation: i64,
-    #[serde(default)]
-    entity_count: usize,
-    #[serde(default)]
-    inventory_digest: String,
-    #[serde(default)]
-    revision: String,
-    #[serde(default)]
-    upload: Vec<SyncEntityKey>,
-    #[serde(default)]
-    entities: Vec<db::SyncEntity>,
-}
-
-fn reconcile_proves_inventory(local_count: usize, response: &SyncReconcileResponse) -> bool {
-    response.entity_count == local_count
-        && response.upload.is_empty()
-        && response.entities.is_empty()
-}
-
-fn update_inventory_text(hasher: &mut Sha256, value: &str) {
-    let bytes = value.as_bytes();
-    hasher.update(u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
-    hasher.update(bytes);
-}
-
-fn sync_inventory_digest(entities: &[db::SyncEntity]) -> String {
-    let mut sorted = entities.iter().collect::<Vec<_>>();
-    sorted.sort_by(|left, right| {
-        left.kind
-            .cmp(&right.kind)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let mut hasher = Sha256::new();
-    for entity in sorted {
-        update_inventory_text(&mut hasher, &entity.kind);
-        update_inventory_text(&mut hasher, &entity.id);
-        update_inventory_text(&mut hasher, &entity.device_id);
-        hasher.update(entity.sync_version.to_be_bytes());
-        hasher.update(entity.updated_at.to_be_bytes());
-        hasher.update(entity.deleted_at.to_be_bytes());
-    }
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn inventory_matches(local: &[db::SyncEntity], remote: &SyncInventoryResponse) -> bool {
-    local.len() == remote.entity_count
-        && sync_inventory_digest(local).eq_ignore_ascii_case(&remote.inventory_digest)
 }
 
 pub(crate) fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
@@ -521,82 +191,44 @@ fn read_sync_token(db: &db::AppDb) -> Result<String, String> {
     Ok(db.metadata("sync_token").unwrap_or_default())
 }
 
+fn migrate_sync_token_to_platform_store(db: &mut db::AppDb) -> Result<(), String> {
+    let stored = db.metadata("sync_token_protected").unwrap_or_default();
+    if secret_store::is_platform_protected(&stored) {
+        return Ok(());
+    }
+    let token = read_sync_token(db)?;
+    if token.is_empty() {
+        return Ok(());
+    }
+    let protected = protect_sync_token(&token)?;
+    db.set_metadata_batch(&[("sync_token_protected", &protected), ("sync_token", "")])
+}
+
 fn protect_sync_token(token: &str) -> Result<String, String> {
     secret_store::protect_secret(token.trim())
 }
 
-fn is_local_http_base(base: &str) -> bool {
-    base == "http://localhost"
-        || base.starts_with("http://localhost:")
-        || base == "http://127.0.0.1"
-        || base.starts_with("http://127.0.0.1:")
-        || base == "http://[::1]"
-        || base.starts_with("http://[::1]:")
-}
-
-pub(crate) fn normalize_sync_base(input: &str) -> Result<String, String> {
-    let base = input.trim().trim_end_matches('/').to_string();
-    if base.is_empty() {
-        return Err("请先在同步设置中填写 HTTPS 服务器地址".into());
-    }
-    if base.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err("同步服务器地址包含非法空白字符".into());
-    }
-    if base.starts_with("https://") {
-        return Ok(base);
-    }
-    if base.starts_with("http://") {
-        // 只允许本机调试使用明文 HTTP；公网同步必须走 HTTPS。
-        if is_local_http_base(&base) {
-            return Ok(base);
-        }
-        return Err("同步服务器必须使用 HTTPS；只有本机调试地址允许 HTTP".into());
-    }
-    Err("同步服务器地址必须以 https:// 开头".into())
-}
-
-fn normalize_auth_base(input: &str) -> Result<String, String> {
-    let value = if input.trim().is_empty() {
-        DEFAULT_SYNC_URL
-    } else {
-        input
-    };
-    normalize_sync_base(value)
-}
-
 fn auth_base_from_state(state: &AppState, requested: &str) -> Result<String, String> {
     if !requested.trim().is_empty() {
-        return normalize_auth_base(requested);
+        return normalize_auth_base(requested, DEFAULT_SYNC_URL);
     }
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    normalize_auth_base(&sync_settings_from_db(db).url)
-}
-
-fn account_sync_scope(base: &str, user_id: &str) -> Result<String, String> {
-    let user_id = user_id.trim();
-    if user_id.is_empty() {
-        return Err("同步账户身份缺失，请重新登录".into());
-    }
-    Ok(sync_scope_id(base, user_id))
+    state.with_db_read("auth_base_from_state", |db| {
+        normalize_auth_base(&sync_settings_from_db(db).url, DEFAULT_SYNC_URL)
+    })
 }
 
 fn fetch_auth_user(base: &str, token: &str, timeout: Duration) -> Result<(AuthUser, i64), String> {
     if token.trim().is_empty() {
         return Err("同步 token 为空".into());
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .build()
-        .into();
-    let response: AuthMeResponse = agent
-        .get(&format!("{base}/auth/me"))
-        .header("Authorization", &format!("Bearer {}", token.trim()))
-        .call()
-        .map_err(|e| format!("账户身份确认失败：{e}"))?
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("账户身份返回解析失败：{e}"))?;
+    let agent = agent_with_timeout(timeout);
+    let response: AuthMeResponse =
+        authenticated_json(&agent, base, "/v1/auth/me", token.trim(), None).map_err(|error| {
+            match error {
+                JsonRequestError::Request(error) => format!("账户身份确认失败：{error}"),
+                JsonRequestError::Decode(error) => format!("账户身份返回解析失败：{error}"),
+            }
+        })?;
     response.into_verified_identity()
 }
 
@@ -611,7 +243,9 @@ fn save_sync_account(
     if token.trim().is_empty() {
         return Err("服务器没有返回登录 token".into());
     }
-    let data_generation = data_generation.max(1);
+    if data_generation < 1 {
+        return Err("服务器返回的云端数据版本无效".into());
+    }
     let previous_generation = db
         .sync_scope_metadata(&scope, "data_generation")
         .and_then(|value| value.parse::<i64>().ok())
@@ -668,18 +302,16 @@ fn saved_account_unchanged(
 
 /// Assign pre-v4 global state to the currently saved account before replacing
 /// or clearing its credentials. Legacy tokens (including the server's default
-/// account token) are resolved through `/auth/me`; an unverifiable owner is
+/// account token) are resolved through `/v1/auth/me`; an unverifiable owner is
 /// deliberately sealed as unclaimed so the next login performs a full sync.
 fn prepare_saved_account_for_switch(state: &AppState) -> Result<(), String> {
-    let (saved, verified_scope) = {
-        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        (
+    let (saved, verified_scope) = state.with_db_read("prepare_saved_account_snapshot", |db| {
+        Ok((
             sync_settings_from_db(db),
             db.metadata(db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY)
                 .unwrap_or_default(),
-        )
-    };
+        ))
+    })?;
     let base = normalize_sync_base(&saved.url).ok();
     let stored_scope = base
         .as_deref()
@@ -706,62 +338,25 @@ fn prepare_saved_account_for_switch(state: &AppState) -> Result<(), String> {
         _ => None,
     };
 
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    if !saved_account_unchanged(db, &saved, &verified_scope)? {
-        return Err("同步账户设置已变化，请重试".into());
-    }
-    match (base.as_deref(), resolved_user) {
-        (Some(base), Some((user, data_generation))) => {
-            if saved.token.trim().is_empty() {
-                let scope = account_sync_scope(base, &user.id)?;
-                db.migrate_legacy_sync_state(&scope)?;
-            } else {
-                save_sync_account(db, base, &saved.token, &user, data_generation)?;
+    state.with_db_write("prepare_saved_account_commit", |db| {
+        if !saved_account_unchanged(db, &saved, &verified_scope)? {
+            return Err("同步账户设置已变化，请重试".into());
+        }
+        match (base.as_deref(), resolved_user) {
+            (Some(base), Some((user, data_generation))) => {
+                if saved.token.trim().is_empty() {
+                    let scope = account_sync_scope(base, &user.id)?;
+                    db.migrate_legacy_sync_state(&scope)?;
+                } else {
+                    save_sync_account(db, base, &saved.token, &user, data_generation)?;
+                }
+            }
+            _ => {
+                db.seal_unclaimed_legacy_sync_state()?;
             }
         }
-        _ => {
-            db.seal_unclaimed_legacy_sync_state()?;
-        }
-    }
-    Ok(())
-}
-
-fn sync_push_batches(entities: &[db::SyncEntity]) -> Result<Vec<Vec<db::SyncEntity>>, String> {
-    let mut batches = Vec::new();
-    let mut batch = Vec::new();
-    let mut batch_bytes = 0usize;
-
-    // Per-entry history retention can replace an old live entity with a
-    // tombstone in the same sync. Send retirements first so the server can
-    // enforce the account limit without rejecting the following replacement.
-    let mut ordered = entities.to_vec();
-    ordered.sort_by_key(|entity| {
-        (
-            entity.deleted_at == 0,
-            entity.kind.clone(),
-            entity.id.clone(),
-        )
-    });
-    for entity in &ordered {
-        let entity_bytes = serde_json::to_vec(entity)
-            .map_err(|e| format!("同步实体序列化失败：{e}"))?
-            .len();
-        if !batch.is_empty()
-            && (batch.len() >= SYNC_PUSH_BATCH_ENTITIES
-                || batch_bytes.saturating_add(entity_bytes) > SYNC_PUSH_BATCH_BYTES)
-        {
-            batches.push(batch);
-            batch = Vec::new();
-            batch_bytes = 0;
-        }
-        batch_bytes = batch_bytes.saturating_add(entity_bytes);
-        batch.push(entity.clone());
-    }
-    if !batch.is_empty() {
-        batches.push(batch);
-    }
-    Ok(batches)
+        Ok(())
+    })
 }
 
 #[derive(Default)]
@@ -769,8 +364,6 @@ struct PushTotals {
     pushed: usize,
     accepted: usize,
     ignored: usize,
-    rejected: usize,
-    quota_rejected: bool,
     server_time: i64,
 }
 
@@ -782,7 +375,6 @@ fn push_sync_entities(
     agent: &ureq::Agent,
     base: &str,
     token: &str,
-    device_id: &str,
     scope: &str,
     data_generation: i64,
     entities: &[db::SyncEntity],
@@ -791,42 +383,39 @@ fn push_sync_entities(
     let mut totals = PushTotals::default();
     for (batch_index, batch) in sync_push_batches(entities)?.into_iter().enumerate() {
         check_sync_control(task)?;
-        let push_body = serde_json::json!({
-            "schema_version": 3,
-            "device_id": device_id,
-            "data_generation": data_generation,
-            "capabilities": ["push_dispositions_v1"],
-            "entities": batch,
-        });
+        let push_body = SyncPushRequest::new(data_generation, &batch);
         let push: SyncPushResponse =
             sync_request_with_retry_delays("push", task, retry_delays_ms, || {
                 agent
-                    .post(&format!("{base}/sync/push"))
+                    .post(&format!("{base}/v1/sync/push"))
                     .header("Authorization", &format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    // kind + id + device_id + sync_version make retries idempotent.
+                    .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
+                    // One mutation ID per batch makes retries idempotent at the v5 boundary.
                     .send_json(push_body.clone())?
                     .body_mut()
                     .read_json()
             })?;
+        if push.mutation_id != push_body.mutation_id() {
+            return Err("push 响应请求 ID 不匹配，已拒绝提交本地同步状态".into());
+        }
         ensure_data_generation(data_generation, push.data_generation)?;
         totals.pushed += batch.len();
-        totals.accepted += push.accepted_total() as usize;
-        totals.ignored += push.ignored_total() as usize;
-        totals.rejected += push.rejected_total();
-        totals.quota_rejected |= push.quota_rejected();
-        totals.server_time = totals.server_time.max(push.server_time);
+        let acknowledged = push.accepted_entities();
+        let authoritative = push.conflicts();
+        totals.accepted += acknowledged.len();
+        totals.ignored += authoritative.len();
+        totals.server_time = totals.server_time.max(crate::now_ms() as i64);
         let commit_started = Instant::now();
-        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        let acknowledged = push.acknowledged_entities(&batch);
-        let _ = db.commit_sync_push(scope, &acknowledged, &push.entities)?;
+        state.with_db_write("sync_push_commit", |db| {
+            let _ = db.commit_sync_push(scope, &acknowledged, &authoritative)?;
+            Ok(())
+        })?;
         log_sync_stage(
             "push_commit",
             commit_started,
             format_args!("batch={} entities={}", batch_index + 1, batch.len()),
         );
-        drop(db_guard);
         if let Some(task) = task {
             task.checkpoint(
                 (progress_base + totals.pushed) as u64,
@@ -839,58 +428,28 @@ fn push_sync_entities(
                 ),
             )?;
         }
-        // A quota response cannot be fixed by uploading the following batches.
-        // Stop here: rejected rows stay dirty and will retry after capacity is
-        // available, without resending the whole pending queue in one run.
-        if totals.quota_rejected {
-            break;
-        }
     }
     Ok(totals)
-}
-
-fn newer_cursor(current: &str, candidate: &str) -> String {
-    let current = current.trim();
-    let candidate = candidate.trim();
-    match (current.parse::<i128>(), candidate.parse::<i128>()) {
-        (Ok(current_value), Ok(candidate_value)) if candidate_value > current_value => {
-            candidate.to_string()
-        }
-        (Ok(_), Ok(_)) => current.to_string(),
-        _ if candidate.is_empty() || candidate == current => current.to_string(),
-        _ => candidate.to_string(),
-    }
-}
-
-fn cursor_strictly_advances(current: &str, candidate: &str) -> bool {
-    let current = current.trim();
-    let candidate = candidate.trim();
-    if candidate.is_empty() || candidate == current {
-        return false;
-    }
-    match (current.parse::<i128>(), candidate.parse::<i128>()) {
-        (Ok(current), Ok(candidate)) => candidate > current,
-        _ => true,
-    }
 }
 
 fn save_auth_response(db: &mut db::AppDb, base: &str, res: &AuthResponse) -> Result<(), String> {
     save_sync_account(db, base, &res.token, &res.user, res.data_generation).map(|_| ())
 }
 
-fn auth_request_inner(
+pub(crate) fn auth_request_inner(
     state: &AppState,
     endpoint: &str,
     url: String,
     username: String,
     password: String,
 ) -> Result<AuthResponse, String> {
-    let base = normalize_auth_base(&url)?;
+    let base = normalize_auth_base(&url, DEFAULT_SYNC_URL)?;
     let username = username.trim().to_string();
     if username.is_empty() || password.is_empty() {
         return Err("请输入账号和密码".into());
     }
     let _account_change = acquire_account_change(state)?;
+    let installation_id = state.with_db_read("auth_installation_id", |db| Ok(db.device_id()))?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(20)))
         .build()
@@ -898,6 +457,8 @@ fn auth_request_inner(
     let body = serde_json::json!({
         "username": username,
         "password": password,
+        "installationId": installation_id,
+        "deviceName": std::env::consts::OS,
     });
     let res: AuthResponse = agent
         .post(&format!("{base}{endpoint}"))
@@ -914,17 +475,22 @@ fn auth_request_inner(
     // credentials are verified, preserve (or safely retire) the old global
     // baseline before atomically installing the new account tuple.
     prepare_saved_account_for_switch(state)?;
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    save_auth_response(db, &base, &res)?;
+    state.with_db_write("auth_save_response", |db| {
+        save_auth_response(db, &base, &res)
+    })?;
     Ok(res)
 }
 
+pub(crate) fn sync_get_settings_inner(state: &AppState) -> Result<SyncSettings, String> {
+    state.with_db_read("sync_get_settings", |db| Ok(sync_settings_from_db(db)))
+}
+
+// `tauri::generate_handler!` needs the command macro's private helper symbols
+// in this parent module, so each exported command is a deliberately tiny
+// forwarder to the adapter module.
 #[tauri::command]
 pub(crate) fn sync_get_settings(state: tauri::State<AppState>) -> Result<SyncSettings, String> {
-    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    Ok(sync_settings_from_db(db))
+    commands::sync_get_settings(state)
 }
 
 #[tauri::command]
@@ -945,22 +511,22 @@ pub(crate) async fn sync_set_settings(
             Some(fetch_auth_user(&base, &token, SYNC_REQUEST_TIMEOUT)?)
         };
         prepare_saved_account_for_switch(state.inner())?;
-        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        if let Some((user, data_generation)) = user {
-            save_sync_account(db, &base, &token, &user, data_generation)?;
-        } else {
-            let protected = protect_sync_token("")?;
-            db.set_metadata_batch(&[
-                ("sync_url", &base),
-                ("sync_token_protected", &protected),
-                ("sync_token", ""),
-                ("sync_username", ""),
-                ("sync_user_id", ""),
-                (db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY, ""),
-            ])?;
-        }
-        Ok(sync_settings_from_db(db))
+        state.with_db_write("sync_set_settings", |db| {
+            if let Some((user, data_generation)) = user {
+                save_sync_account(db, &base, &token, &user, data_generation)?;
+            } else {
+                let protected = protect_sync_token("")?;
+                db.set_metadata_batch(&[
+                    ("sync_url", &base),
+                    ("sync_token_protected", &protected),
+                    ("sync_token", ""),
+                    ("sync_username", ""),
+                    ("sync_user_id", ""),
+                    (db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY, ""),
+                ])?;
+            }
+            Ok(sync_settings_from_db(db))
+        })
     })
     .await
     .map_err(|e| format!("保存同步设置任务失败：{e}"))?
@@ -971,11 +537,8 @@ pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, S
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _account_change = acquire_account_change(state.inner())?;
-        let settings = {
-            let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-            let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-            sync_settings_from_db(db)
-        };
+        let settings =
+            state.with_db_read("auth_logout_settings", |db| Ok(sync_settings_from_db(db)))?;
         prepare_saved_account_for_switch(state.inner())?;
         if !settings.token.is_empty() {
             if let Ok(base) = normalize_sync_base(&settings.url) {
@@ -986,16 +549,16 @@ pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, S
                     .build()
                     .into();
                 let _ = agent
-                    .post(&format!("{base}/auth/logout"))
+                    .post(&format!("{base}/v1/auth/logout"))
                     .header("Authorization", &format!("Bearer {}", settings.token))
                     .header("Content-Type", "application/json")
                     .send_json(serde_json::json!({}));
             }
         }
-        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        clear_sync_account(db)?;
-        Ok(sync_settings_from_db(db))
+        state.with_db_write("auth_logout_clear", |db| {
+            clear_sync_account(db)?;
+            Ok(sync_settings_from_db(db))
+        })
     })
     .await
     .map_err(|e| format!("退出登录任务失败：{e}"))?
@@ -1009,9 +572,115 @@ pub(crate) struct AuthRequest {
     password: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegistrationStartRequest {
+    url: String,
+    username: String,
+    email: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegistrationConfirmRequest {
+    url: String,
+    username: String,
+    email: String,
+    code: String,
+    password: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegistrationStartResponse {
+    ok: bool,
+    expires_in: u64,
+}
+
 #[tauri::command]
-pub(crate) async fn auth_register(
+pub(crate) async fn auth_register_start(
     app: tauri::AppHandle,
+    request: RegistrationStartRequest,
+) -> Result<RegistrationStartResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let base = normalize_auth_base(&request.url, DEFAULT_SYNC_URL)?;
+        let username = request.username.trim();
+        let email = request.email.trim();
+        if username.is_empty() || email.is_empty() {
+            return Err("请输入账号和邮箱".into());
+        }
+        let _account_change = acquire_account_change(state.inner())?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(25)))
+            .build()
+            .into();
+        agent
+            .post(&format!("{base}/v1/auth/register/start"))
+            .header("Content-Type", "application/json")
+            .send_json(serde_json::json!({"username": username, "email": email}))
+            .map_err(|e| format!("发送注册验证码失败：{e}"))?
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("注册返回解析失败：{e}"))
+    })
+    .await
+    .map_err(|e| format!("注册任务失败：{e}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn auth_register_confirm(
+    app: tauri::AppHandle,
+    request: RegistrationConfirmRequest,
+) -> Result<AuthResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let base = normalize_auth_base(&request.url, DEFAULT_SYNC_URL)?;
+        if request.username.trim().is_empty()
+            || request.email.trim().is_empty()
+            || request.code.trim().is_empty()
+            || request.password.is_empty()
+        {
+            return Err("请输入账号、邮箱、验证码和密码".into());
+        }
+        let _account_change = acquire_account_change(state.inner())?;
+        let installation_id =
+            state.with_db_read("auth_register_installation", |db| Ok(db.device_id()))?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(25)))
+            .build()
+            .into();
+        let res: AuthResponse = agent
+            .post(&format!("{base}/v1/auth/register/confirm"))
+            .header("Content-Type", "application/json")
+            .send_json(serde_json::json!({
+                "username": request.username.trim(),
+                "email": request.email.trim(),
+                "code": request.code.trim(),
+                "password": request.password,
+                "installationId": installation_id,
+                "deviceName": std::env::consts::OS,
+            }))
+            .map_err(|e| format!("确认注册失败：{e}"))?
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("注册返回解析失败：{e}"))?;
+        if res.token.trim().is_empty() || res.user.id.trim().is_empty() {
+            return Err("服务器返回的登录身份不完整".into());
+        }
+        prepare_saved_account_for_switch(state.inner())?;
+        state.with_db_write("auth_register_save_response", |db| {
+            save_auth_response(db, &base, &res)
+        })?;
+        Ok(res)
+    })
+    .await
+    .map_err(|e| format!("注册任务失败：{e}"))?
+}
+
+pub(crate) fn auth_request_from_command(
+    state: &AppState,
+    endpoint: &str,
     request: AuthRequest,
 ) -> Result<AuthResponse, String> {
     let AuthRequest {
@@ -1019,12 +688,15 @@ pub(crate) async fn auth_register(
         username,
         password,
     } = request;
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        auth_request_inner(state.inner(), "/auth/register", url, username, password)
-    })
-    .await
-    .map_err(|e| format!("认证任务失败：{e}"))?
+    auth_request_inner(state, endpoint, url, username, password)
+}
+
+#[tauri::command]
+pub(crate) async fn auth_register(
+    app: tauri::AppHandle,
+    request: AuthRequest,
+) -> Result<AuthResponse, String> {
+    commands::auth_register(app, request).await
 }
 
 #[tauri::command]
@@ -1032,17 +704,7 @@ pub(crate) async fn auth_login(
     app: tauri::AppHandle,
     request: AuthRequest,
 ) -> Result<AuthResponse, String> {
-    let AuthRequest {
-        url,
-        username,
-        password,
-    } = request;
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        auth_request_inner(state.inner(), "/auth/login", url, username, password)
-    })
-    .await
-    .map_err(|e| format!("认证任务失败：{e}"))?
+    commands::auth_login(app, request).await
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -1140,6 +802,7 @@ pub(crate) struct AccountDeleteRequest {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DataResetResponse {
     ok: bool,
     data_generation: i64,
@@ -1152,15 +815,10 @@ pub(crate) struct DataResetResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SyncRecoveryStatus {
     pub available: bool,
-    #[serde(alias = "retention_days")]
     pub retention_days: i64,
-    #[serde(alias = "restorable_from")]
     pub restorable_from: i64,
-    #[serde(alias = "latest_version_at")]
     pub latest_version_at: i64,
-    #[serde(alias = "version_count")]
     pub version_count: i64,
-    #[serde(alias = "data_generation")]
     pub data_generation: i64,
 }
 
@@ -1175,17 +833,11 @@ pub(crate) struct SyncRecoveryRestoreRequest {
 #[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SyncRecoveryRestoreResponse {
-    #[serde(alias = "data_generation")]
     pub data_generation: i64,
-    #[serde(alias = "tokens_revoked")]
     pub tokens_revoked: bool,
-    #[serde(alias = "target_at")]
     pub target_at: i64,
-    #[serde(alias = "restored_at")]
     pub restored_at: i64,
-    #[serde(alias = "restored_entities")]
     pub restored_entities: i64,
-    #[serde(alias = "tombstoned_entities")]
     pub tombstoned_entities: i64,
 }
 
@@ -1200,40 +852,22 @@ fn authenticated_endpoint<T: DeserializeOwned>(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<T, String> {
-    let settings = {
-        let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        sync_settings_from_db(db)
-    };
+    let settings = state.with_db_read("authenticated_endpoint_settings", |db| {
+        Ok(sync_settings_from_db(db))
+    })?;
     let base = normalize_sync_base(&settings.url)?;
     if settings.token.trim().is_empty() {
         return Err("请先登录账号".into());
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(SYNC_REQUEST_TIMEOUT))
-        .build()
-        .into();
-    let request = if let Some(body) = body {
-        agent
-            .post(&format!("{base}{path}"))
-            .header("Authorization", &format!("Bearer {}", settings.token))
-            .header("Content-Type", "application/json")
-            .send_json(body)
-    } else {
-        agent
-            .get(&format!("{base}{path}"))
-            .header("Authorization", &format!("Bearer {}", settings.token))
-            .call()
-    };
-    request
-        .map_err(|e| format!("账户安全请求失败：{e}"))?
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("账户安全返回解析失败：{e}"))
+    let agent = agent_with_timeout(SYNC_REQUEST_TIMEOUT);
+    authenticated_json(&agent, &base, path, &settings.token, body).map_err(|error| match error {
+        JsonRequestError::Request(error) => format!("账户安全请求失败：{error}"),
+        JsonRequestError::Decode(error) => format!("账户安全返回解析失败：{error}"),
+    })
 }
 
 pub(crate) fn private_secret_bundle_state(state: &AppState) -> Result<SecretBundleState, String> {
-    authenticated_endpoint(state, "/sync/secret-state", None)
+    authenticated_endpoint(state, "/v1/sync/secret-state", None)
 }
 
 pub(crate) fn reset_private_secret_bundle_state(
@@ -1241,29 +875,29 @@ pub(crate) fn reset_private_secret_bundle_state(
 ) -> Result<SecretBundleState, String> {
     authenticated_endpoint(
         state,
-        "/sync/secret-state/reset",
+        "/v1/sync/secret-state/reset",
         Some(serde_json::json!({})),
     )
+}
+
+pub(crate) fn auth_security_status_inner(state: &AppState) -> Result<AuthSecurityStatus, String> {
+    authenticated_endpoint(state, "/v1/auth/security", None)
+}
+
+pub(crate) fn auth_usage_status_inner(state: &AppState) -> Result<AccountUsageStatus, String> {
+    authenticated_endpoint(state, "/v1/auth/usage", None)
 }
 
 #[tauri::command]
 pub(crate) async fn auth_security_status(
     app: tauri::AppHandle,
 ) -> Result<AuthSecurityStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        authenticated_endpoint(app.state::<AppState>().inner(), "/auth/security", None)
-    })
-    .await
-    .map_err(|e| format!("账户安全任务失败：{e}"))?
+    commands::auth_security_status(app).await
 }
 
 #[tauri::command]
 pub(crate) async fn auth_usage_status(app: tauri::AppHandle) -> Result<AccountUsageStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        authenticated_endpoint(app.state::<AppState>().inner(), "/auth/usage", None)
-    })
-    .await
-    .map_err(|e| format!("账户额度任务失败：{e}"))?
+    commands::auth_usage_status(app).await
 }
 
 #[tauri::command]
@@ -1274,7 +908,7 @@ pub(crate) async fn auth_bind_email_start(
     tauri::async_runtime::spawn_blocking(move || {
         let _: serde_json::Value = authenticated_endpoint(
             app.state::<AppState>().inner(),
-            "/auth/email/start",
+            "/v1/auth/email/start",
             Some(serde_json::json!({"email": request.email})),
         )?;
         Ok(())
@@ -1291,10 +925,10 @@ pub(crate) async fn auth_bind_email_confirm(
     tauri::async_runtime::spawn_blocking(move || {
         let _: serde_json::Value = authenticated_endpoint(
             app.state::<AppState>().inner(),
-            "/auth/email/confirm",
+            "/v1/auth/email/confirm",
             Some(serde_json::json!({"email": request.email, "code": request.code})),
         )?;
-        authenticated_endpoint(app.state::<AppState>().inner(), "/auth/security", None)
+        authenticated_endpoint(app.state::<AppState>().inner(), "/v1/auth/security", None)
     })
     .await
     .map_err(|e| format!("确认邮箱任务失败：{e}"))?
@@ -1305,7 +939,7 @@ pub(crate) async fn auth_rebind_email_old_start(app: tauri::AppHandle) -> Result
     tauri::async_runtime::spawn_blocking(move || {
         let _: serde_json::Value = authenticated_endpoint(
             app.state::<AppState>().inner(),
-            "/auth/email/rebind/old/start",
+            "/v1/auth/email/rebind/old/start",
             Some(serde_json::json!({})),
         )?;
         Ok(())
@@ -1322,7 +956,7 @@ pub(crate) async fn auth_rebind_email_old_confirm(
     tauri::async_runtime::spawn_blocking(move || {
         let response: EmailRebindGrantResponse = authenticated_endpoint(
             app.state::<AppState>().inner(),
-            "/auth/email/rebind/old/confirm",
+            "/v1/auth/email/rebind/old/confirm",
             Some(serde_json::json!({"code": request.code})),
         )?;
         Ok(response.rebind_grant)
@@ -1339,7 +973,7 @@ pub(crate) async fn auth_rebind_email_new_start(
     tauri::async_runtime::spawn_blocking(move || {
         let _: serde_json::Value = authenticated_endpoint(
             app.state::<AppState>().inner(),
-            "/auth/email/rebind/new/start",
+            "/v1/auth/email/rebind/new/start",
             Some(serde_json::json!({
                 "email": request.email,
                 "rebindGrant": request.rebind_grant,
@@ -1359,10 +993,10 @@ pub(crate) async fn auth_rebind_email_new_confirm(
     tauri::async_runtime::spawn_blocking(move || {
         let _: serde_json::Value = authenticated_endpoint(
             app.state::<AppState>().inner(),
-            "/auth/email/rebind/new/confirm",
+            "/v1/auth/email/rebind/new/confirm",
             Some(serde_json::json!({"email": request.email, "code": request.code})),
         )?;
-        authenticated_endpoint(app.state::<AppState>().inner(), "/auth/security", None)
+        authenticated_endpoint(app.state::<AppState>().inner(), "/v1/auth/security", None)
     })
     .await
     .map_err(|e| format!("确认新邮箱失败：{e}"))?
@@ -1376,7 +1010,7 @@ pub(crate) async fn auth_change_password(
     tauri::async_runtime::spawn_blocking(move || {
         let _: serde_json::Value = authenticated_endpoint(
             app.state::<AppState>().inner(),
-            "/auth/password/change",
+            "/v1/auth/password/change",
             Some(serde_json::json!({
                 "currentPassword": request.current_password,
                 "newPassword": request.new_password,
@@ -1401,13 +1035,13 @@ pub(crate) async fn sync_reset_cloud_data(
         let _account_change = acquire_account_change(state.inner())?;
         let response: DataResetResponse = authenticated_endpoint(
             state.inner(),
-            "/sync/data/reset",
+            "/v1/sync/data/reset",
             Some(serde_json::json!({"password": request.password})),
         )?;
-        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        clear_sync_account(db)?;
-        Ok(response)
+        state.with_db_write("sync_reset_cloud_data_clear_account", |db| {
+            clear_sync_account(db)?;
+            Ok(response)
+        })
     })
     .await
     .map_err(|e| format!("清除云端数据任务失败：{e}"))?
@@ -1420,7 +1054,7 @@ pub(crate) async fn sync_recovery_status(
     tauri::async_runtime::spawn_blocking(move || {
         authenticated_endpoint(
             app.state::<AppState>().inner(),
-            "/sync/recovery/status",
+            "/v1/sync/recovery/status",
             None,
         )
     })
@@ -1444,7 +1078,7 @@ pub(crate) async fn sync_recovery_restore(
         let _account_change = acquire_account_change(state.inner())?;
         let response: SyncRecoveryRestoreResponse = authenticated_endpoint(
             state.inner(),
-            "/sync/recovery/restore",
+            "/v1/sync/recovery/restore",
             Some(serde_json::json!({
                 "targetAt": request.target_at,
                 "dataGeneration": request.data_generation,
@@ -1455,10 +1089,10 @@ pub(crate) async fn sync_recovery_restore(
         // The server revokes every token at restore time. Remove the local
         // credential too so this installation cannot accidentally write its
         // pre-restore state back before the user deliberately reauthenticates.
-        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        clear_sync_account(db)?;
-        Ok(response)
+        state.with_db_write("sync_recovery_restore_clear_account", |db| {
+            clear_sync_account(db)?;
+            Ok(response)
+        })
     })
     .await
     .map_err(|e| format!("云端恢复任务失败：{e}"))?
@@ -1477,15 +1111,13 @@ pub(crate) async fn auth_delete_account(
         let _account_change = acquire_account_change(state.inner())?;
         let _: serde_json::Value = authenticated_endpoint(
             state.inner(),
-            "/auth/account/delete",
+            "/v1/auth/account/delete",
             Some(serde_json::json!({
                 "password": request.password,
                 "username": request.username.trim(),
             })),
         )?;
-        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        clear_sync_account(db)
+        state.with_db_write("auth_delete_account_clear", clear_sync_account)
     })
     .await
     .map_err(|e| format!("删除账号任务失败：{e}"))?
@@ -1504,7 +1136,7 @@ pub(crate) async fn auth_request_password_reset(
             .build()
             .into();
         let _: serde_json::Value = agent
-            .post(&format!("{base}/auth/password/reset/request"))
+            .post(&format!("{base}/v1/auth/password/reset/request"))
             .header("Content-Type", "application/json")
             .send_json(serde_json::json!({"username": request.username, "email": request.email}))
             .map_err(|e| format!("找回密码请求失败：{e}"))?
@@ -1525,17 +1157,21 @@ pub(crate) async fn auth_confirm_password_reset(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let base = auth_base_from_state(state.inner(), &request.url)?;
+        let installation_id =
+            state.with_db_read("password_reset_installation", |db| Ok(db.device_id()))?;
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(SYNC_REQUEST_TIMEOUT))
             .build()
             .into();
         let response: AuthResponse = agent
-            .post(&format!("{base}/auth/password/reset/confirm"))
+            .post(&format!("{base}/v1/auth/password/reset/confirm"))
             .header("Content-Type", "application/json")
             .send_json(serde_json::json!({
                 "username": request.username,
                 "code": request.code,
                 "newPassword": request.new_password,
+                "installationId": installation_id,
+                "deviceName": std::env::consts::OS,
             }))
             .map_err(|e| format!("重置密码请求失败：{e}"))?
             .body_mut()
@@ -1546,9 +1182,9 @@ pub(crate) async fn auth_confirm_password_reset(
         }
         let state = app.state::<AppState>();
         prepare_saved_account_for_switch(state.inner())?;
-        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        save_auth_response(db, &base, &response)?;
+        state.with_db_write("password_reset_save_response", |db| {
+            save_auth_response(db, &base, &response)
+        })?;
         Ok(response)
     })
     .await
@@ -1578,6 +1214,10 @@ fn sync_now_inner_with_limits_impl(
     let _ = crate::ai_reader::materialize_library_profiles_into_model_tags(state)?;
     // Snapshot local JSON first so unsynced edits are represented in SQLite.
     data_migration::migrate_json_to_sqlite(state)?;
+    // v5 is intentionally incompatible with the retired 1–10 jump-back
+    // setting. Normalize the local entity before pending rows are selected;
+    // otherwise an unopened legacy reader setting could be uploaded verbatim.
+    crate::app_settings::normalize_protocol_v5_entity(state)?;
     log_sync_stage("prepare_local", prepare_started, "status=ok");
     let (initial_settings, initial_verified_scope) = {
         let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
@@ -1605,9 +1245,10 @@ fn sync_now_inner_with_limits_impl(
             request_timeout,
         )?)
     };
-    let (settings, device_id, scope, cursor, is_initial_scope_sync) = {
+    let (settings, scope, cursor, is_initial_scope_sync) = {
         let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        migrate_sync_token_to_platform_store(db)?;
         if !saved_account_unchanged(db, &initial_settings, &initial_verified_scope)? {
             return Err("同步账户设置已变化，请重试".into());
         }
@@ -1631,15 +1272,21 @@ fn sync_now_inner_with_limits_impl(
             // cursor advanced. Start from the beginning once it is enabled.
             db.set_sync_scope_metadata(&scope, "cursor", "")?;
         }
-        let is_initial_scope_sync = db.sync_scope_metadata(&scope, "last_sync_at").is_none();
+        // v4 stored a timestamp-like cursor; v5 Axum uses a monotonically
+        // increasing server sequence. Never reinterpret an old opaque value
+        // as the new cursor or an initial v5 pull could skip existing rows.
+        let protocol_upgraded = db
+            .sync_scope_metadata(&scope, "protocol_version")
+            .as_deref()
+            != Some("5");
+        if protocol_upgraded {
+            db.set_sync_scope_metadata(&scope, "cursor", "")?;
+            db.set_sync_scope_metadata(&scope, "protocol_version", "5")?;
+        }
+        let is_initial_scope_sync =
+            protocol_upgraded || db.sync_scope_metadata(&scope, "last_sync_at").is_none();
         let cursor = db.sync_scope_metadata(&scope, "cursor").unwrap_or_default();
-        (
-            settings,
-            db.device_id(),
-            scope,
-            cursor,
-            is_initial_scope_sync,
-        )
+        (settings, scope, cursor, is_initial_scope_sync)
     };
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(request_timeout))
@@ -1653,7 +1300,7 @@ fn sync_now_inner_with_limits_impl(
     let mut pull_server_time = 0i64;
     let mut sync_cursor = cursor.clone();
     let mut pull_cursor = if cursor.is_empty() {
-        settings.last_sync_at.to_string()
+        "0".to_string()
     } else {
         cursor
     };
@@ -1663,18 +1310,19 @@ fn sync_now_inner_with_limits_impl(
         let pull: SyncPullResponse =
             sync_request_with_retry_delays("pull", task, retry_delays_ms, || {
                 agent
-                    .get(&format!("{base}/sync/pull"))
+                    .get(&format!("{base}/v1/sync/pull"))
                     .query("cursor", &pull_cursor)
                     .query("limit", SYNC_PULL_PAGE_SIZE.to_string())
                     .header("Authorization", &format!("Bearer {}", settings.token))
+                    .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
                     .call()?
                     .body_mut()
                     .read_json()
             })?;
         ensure_data_generation(settings.data_generation, pull.data_generation)?;
-        pull_server_time = pull_server_time.max(pull.server_time);
-        let next_cursor = pull.next_cursor.trim();
-        if pull.has_more && !cursor_strictly_advances(&pull_cursor, next_cursor) {
+        pull_server_time = pull_server_time.max(crate::now_ms() as i64);
+        let next_cursor = pull.next_cursor.to_string();
+        if pull.has_more && !cursor_strictly_advances(&pull_cursor, &next_cursor) {
             return Err("pull 游标没有前进，已停止以避免重复同步".into());
         }
         let checkpoint_base = if sync_cursor.is_empty() {
@@ -1682,41 +1330,36 @@ fn sync_now_inner_with_limits_impl(
         } else {
             sync_cursor.as_str()
         };
-        let page_checkpoint = if next_cursor.is_empty() {
-            checkpoint_base.to_string()
-        } else {
-            newer_cursor(checkpoint_base, next_cursor)
-        };
+        let page_checkpoint = newer_cursor(checkpoint_base, &next_cursor);
         let merge_started = Instant::now();
-        {
-            let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-            let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-            db.ensure_active_sync_scope(&scope)?;
-        }
+        state.with_db_read("sync_pull_scope_check", |db| {
+            db.ensure_active_sync_scope(&scope)
+        })?;
+        let has_more = pull.has_more;
+        let pulled_entities = pull.into_entities();
+        let pulled_entity_count = pulled_entities.len();
         let enabled_entities = {
             let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
             let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-            pull.entities
+            pulled_entities
                 .iter()
                 .filter(|entity| crate::private_sync::is_entity_enabled(db, &entity.kind))
                 .cloned()
                 .collect::<Vec<_>>()
         };
         data_migration::merge_pulled_book_states(state, &enabled_entities)?;
-        pulled += {
-            let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-            let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        pulled += state.with_db_write("sync_pull_commit", |db| {
             db.import_sync_page_with_remote_app_settings_priority(
                 &scope,
                 &enabled_entities,
                 &page_checkpoint,
                 is_initial_scope_sync,
-            )?
-        };
+            )
+        })?;
         log_sync_stage(
             "pull_commit",
             merge_started,
-            format_args!("page={} entities={}", page_index + 1, pull.entities.len()),
+            format_args!("page={} entities={}", page_index + 1, pulled_entity_count),
         );
         sync_cursor = page_checkpoint;
         if let Some(task) = task {
@@ -1731,22 +1374,20 @@ fn sync_now_inner_with_limits_impl(
                 ),
             )?;
         }
-        if !pull.has_more {
+        if !has_more {
             pull_completed = true;
             break;
         }
-        pull_cursor = next_cursor.to_string();
+        pull_cursor = next_cursor;
     }
     if !pull_completed {
         return Err("pull 分页数量超过安全上限，稍后可继续同步".into());
     }
     // Palette entities carry only asset metadata. Download their binary files
     // before runtime settings consume the references, never through WebView IPC.
-    let downloaded_assets = {
-        let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        db.sync_entities_by_kind(crate::reader_palettes::READER_PALETTE_KIND)?
-    };
+    let downloaded_assets = state.with_db_read("sync_palette_asset_projection", |db| {
+        db.sync_entities_by_kind(crate::reader_palettes::READER_PALETTE_KIND)
+    })?;
     crate::reader_backgrounds::sync_download_referenced_assets(
         &agent,
         &base,
@@ -1780,7 +1421,6 @@ fn sync_now_inner_with_limits_impl(
         &agent,
         &base,
         &settings.token,
-        &device_id,
         &scope,
         settings.data_generation,
         &entities,
@@ -1790,38 +1430,30 @@ fn sync_now_inner_with_limits_impl(
     let mut accepted = initial_push.accepted;
     let mut ignored = initial_push.ignored;
     let mut push_server_time = initial_push.server_time;
-    if initial_push.quota_rejected {
-        return Err(format!(
-            "同步未完成：服务器今日写入额度已满，{} 条待同步数据已保留，额度恢复后会自动重试",
-            initial_push.rejected.max(1)
-        ));
-    }
-    if initial_push.rejected > 0 {
-        return Err(format!(
-            "同步未完成：服务端拒绝了 {} 条数据，未确认的数据已保留在本机",
-            initial_push.rejected
-        ));
-    }
-
     // A local acknowledgement is only a cache of a previous server response;
     // it is not proof that a restored or repaired server still owns that row.
     // Verify the actual account inventory after every incremental sync. A
     // matching digest costs one tiny request. On mismatch, exchange only
     // version metadata and transfer just the missing/winning entities.
-    // The server inventory is account-wide, while the user can independently
-    // pause any category on this device. Comparing the two would falsely
-    // report a mismatch and then reconcile disabled entities. Incremental
-    // pull/push remains authoritative for the enabled categories.
-    let sync_filters_active = true;
-    let mut inventory_verified = sync_filters_active;
-    if !sync_filters_active {
+    // Inventory is scoped to the exact categories enabled on this device. This
+    // retains post-restore self-healing without touching paused categories.
+    let enabled_kinds = state.with_db_read("sync_inventory_enabled_kinds", |db| {
+        Ok(crate::private_sync::enabled_inventory_kinds(db)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>())
+    })?;
+    let mut inventory_verified = enabled_kinds.is_empty();
+    if !enabled_kinds.is_empty() {
         for reconcile_pass in 0..=3 {
             check_sync_control(task)?;
             let inventory: SyncInventoryResponse =
                 sync_request_with_retry_delays("inventory", task, retry_delays_ms, || {
                     agent
-                        .get(&format!("{base}/sync/inventory"))
+                        .get(&format!("{base}/v1/sync/inventory"))
+                        .query_pairs(enabled_kinds.iter().map(|kind| ("kind", kind.as_str())))
                         .header("Authorization", &format!("Bearer {}", settings.token))
+                        .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
                         .call()?
                         .body_mut()
                         .read_json()
@@ -1832,6 +1464,9 @@ fn sync_now_inner_with_limits_impl(
                 let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
                 let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
                 db.all_sync_entities()?
+                    .into_iter()
+                    .filter(|entity| enabled_kinds.contains(&entity.kind))
+                    .collect::<Vec<_>>()
             };
             if inventory_matches(&local, &inventory) {
                 inventory_verified = true;
@@ -1853,21 +1488,15 @@ fn sync_now_inner_with_limits_impl(
             if reconcile_pass == 3 {
                 break;
             }
-            let manifest = local
-                .iter()
-                .map(SyncManifestEntry::from)
-                .collect::<Vec<_>>();
-            let reconcile_body = serde_json::json!({
-                "schema_version": 3,
-                "data_generation": settings.data_generation,
-                "manifest": manifest,
-            });
+            let reconcile_body =
+                reconcile_request_body(settings.data_generation, &enabled_kinds, &local);
             let reconcile: SyncReconcileResponse =
                 sync_request_with_retry_delays("reconcile", task, retry_delays_ms, || {
                     agent
-                        .post(&format!("{base}/sync/reconcile"))
+                        .post(&format!("{base}/v1/sync/reconcile"))
                         .header("Authorization", &format!("Bearer {}", settings.token))
                         .header("Content-Type", "application/json")
+                        .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
                         .send_json(reconcile_body.clone())?
                         .body_mut()
                         .read_json()
@@ -1892,43 +1521,29 @@ fn sync_now_inner_with_limits_impl(
                 break;
             }
 
-            if !reconcile.entities.is_empty() {
-                data_migration::merge_pulled_book_states(state, &reconcile.entities)?;
+            let reconciled_entities = reconcile.entities();
+            if !reconciled_entities.is_empty() {
+                data_migration::merge_pulled_book_states(state, &reconciled_entities)?;
                 pulled = pulled
-                    .saturating_add(u32::try_from(reconcile.entities.len()).unwrap_or(u32::MAX));
-                let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-                let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-                let _ = db.import_reconciled_sync_entities(&scope, &reconcile.entities)?;
-                drop(db_guard);
+                    .saturating_add(u32::try_from(reconciled_entities.len()).unwrap_or(u32::MAX));
+                state.with_db_write("sync_reconcile_commit", |db| {
+                    let _ = db.import_reconciled_sync_entities(&scope, &reconciled_entities)?;
+                    Ok(())
+                })?;
                 data_migration::apply_sqlite_to_runtime(state)?;
                 data_migration::migrate_json_to_sqlite(state)?;
             }
 
-            let upload_keys = reconcile
-                .upload
-                .into_iter()
-                .map(|item| (item.kind, item.id))
-                .collect::<HashSet<_>>();
-            if !upload_keys.is_empty() {
-                let local_by_key = {
-                    let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-                    let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-                    db.all_sync_entities()?
-                        .into_iter()
-                        .map(|entity| ((entity.kind.clone(), entity.id.clone()), entity))
-                        .collect::<HashMap<_, _>>()
-                };
-                let missing_local = upload_keys
-                    .iter()
-                    .filter(|key| !local_by_key.contains_key(*key))
-                    .collect::<Vec<_>>();
-                if !missing_local.is_empty() {
-                    return Err("服务器请求补传的实体已不在本地，请重新同步".into());
-                }
-                let repair_entities = upload_keys
-                    .iter()
-                    .filter_map(|key| local_by_key.get(key).cloned())
-                    .collect::<Vec<_>>();
+            // The server response may have installed authoritative rows above;
+            // reload before selecting a requested repair so we never resend a
+            // superseded local version from the pre-reconcile inventory.
+            let repair_source = {
+                let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+                let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
+                db.all_sync_entities()?
+            };
+            let repair_entities = reconcile_upload_entities(&repair_source, &reconcile)?;
+            if !repair_entities.is_empty() {
                 let repair = push_sync_entities(
                     state,
                     task,
@@ -1936,7 +1551,6 @@ fn sync_now_inner_with_limits_impl(
                     &agent,
                     &base,
                     &settings.token,
-                    &device_id,
                     &scope,
                     settings.data_generation,
                     &repair_entities,
@@ -1953,10 +1567,8 @@ fn sync_now_inner_with_limits_impl(
         return Err("同步后本地与服务器库存仍不一致，已停止并保留未确认状态".into());
     }
 
-    let server_time = {
-        let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        let server_time = push_server_time.max(pull_server_time);
+    let server_time = push_server_time.max(pull_server_time);
+    state.with_db_write("sync_finalize_metadata", |db| {
         db.set_sync_scope_metadata(&scope, "last_sync_at", &server_time.to_string())?;
         if !sync_cursor.is_empty() {
             db.set_sync_scope_metadata(&scope, "cursor", &sync_cursor)?;
@@ -1966,8 +1578,8 @@ fn sync_now_inner_with_limits_impl(
         db.set_sync_scope_metadata(&scope, "last_accepted", &accepted.to_string())?;
         db.set_sync_scope_metadata(&scope, "last_ignored", &ignored.to_string())?;
         db.set_metadata(crate::private_sync::SYNC_FILTERS_CHANGED_KEY, "0")?;
-        server_time
-    };
+        Ok(())
+    })?;
     data_migration::apply_sqlite_to_runtime(state)?;
     let report = SyncReport {
         ok: true,
@@ -2061,7 +1673,6 @@ pub(crate) async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
 
     #[test]
     fn auth_request_deserializes_as_one_object() {
@@ -2110,326 +1721,29 @@ mod tests {
     }
 
     #[test]
-    fn auth_me_accepts_nested_and_legacy_top_level_user_shapes() {
-        for (json, expected_id) in [
-            (
-                r#"{"user":{"id":"default","username":"legacy"}}"#,
-                "default",
-            ),
-            (r#"{"id":"u2","username":"bob"}"#, "u2"),
-        ] {
-            let response: AuthMeResponse = serde_json::from_str(json).unwrap();
-            let (user, generation) = response.into_verified_identity().unwrap();
-            assert_eq!(user.id, expected_id);
-            assert_eq!(generation, 1);
-        }
-        let response: AuthMeResponse = serde_json::from_str("{}").unwrap();
+    fn auth_me_requires_v5_nested_user_and_data_generation() {
+        let response: AuthMeResponse =
+            serde_json::from_str(r#"{"user":{"id":"u2","username":"bob"},"dataGeneration":3}"#)
+                .unwrap();
+        let (user, generation) = response.into_verified_identity().unwrap();
+        assert_eq!(user.id, "u2");
+        assert_eq!(generation, 3);
+        assert!(serde_json::from_str::<AuthMeResponse>(r#"{"id":"u2","username":"bob"}"#).is_err());
+        let response: AuthMeResponse =
+            serde_json::from_str(r#"{"user":{"id":"u2","username":"bob"},"dataGeneration":0}"#)
+                .unwrap();
         assert!(response.into_verified_identity().is_err());
     }
 
     #[test]
-    fn sync_base_requires_https_except_localhost() {
-        assert_eq!(normalize_auth_base("").unwrap(), "https://117.72.220.69");
-        assert_eq!(
-            normalize_sync_base(" https://reader.example.com/ ").unwrap(),
-            "https://reader.example.com"
-        );
-        assert!(normalize_sync_base("").is_err());
-        assert_eq!(
-            normalize_sync_base("http://127.0.0.1:8787/").unwrap(),
-            "http://127.0.0.1:8787"
-        );
-        assert!(normalize_sync_base("http://example.com").is_err());
-        assert!(normalize_sync_base("ftp://example.com").is_err());
-        assert!(normalize_sync_base("https://example.com/a b").is_err());
-    }
-
-    #[test]
-    fn inventory_digest_matches_server_binary_format() {
-        let entities = vec![
-            db::SyncEntity {
-                kind: "vocab".into(),
-                id: "zh:词".into(),
-                json: serde_json::json!({}),
-                updated_at: 1_700_000_000_100,
-                deleted_at: 1_700_000_000_200,
-                device_id: "device-b".into(),
-                sync_version: 7,
-            },
-            db::SyncEntity {
-                kind: "book_state_v2".into(),
-                id: "书-1".into(),
-                json: serde_json::json!({}),
-                updated_at: 1_700_000_000_000,
-                deleted_at: 0,
-                device_id: "device-a".into(),
-                sync_version: 3,
-            },
-        ];
-        assert_eq!(
-            sync_inventory_digest(&entities),
-            "5b47a5b8875ddb2d9cf9fc65c7698eaa3de450ccb547b84a11f2f688fa41c267"
-        );
-        let inventory = SyncInventoryResponse {
-            server_time: 0,
-            data_generation: 1,
-            entity_count: 2,
-            inventory_digest: "5b47a5b8875ddb2d9cf9fc65c7698eaa3de450ccb547b84a11f2f688fa41c267"
-                .into(),
-            revision: "10".into(),
-        };
-        assert!(inventory_matches(&entities, &inventory));
-    }
-
-    #[test]
-    fn empty_reconcile_with_equal_count_proves_inventory_despite_digest_drift() {
-        let response = SyncReconcileResponse {
-            server_time: 1,
-            data_generation: 1,
-            entity_count: 2,
-            inventory_digest: "legacy-digest".into(),
-            revision: "10".into(),
-            upload: vec![],
-            entities: vec![],
-        };
-        assert!(reconcile_proves_inventory(2, &response));
-        assert!(!reconcile_proves_inventory(1, &response));
-    }
-
-    #[test]
-    fn reconcile_actions_never_prove_inventory() {
-        let upload = SyncReconcileResponse {
-            server_time: 1,
-            data_generation: 1,
-            entity_count: 2,
-            inventory_digest: String::new(),
-            revision: String::new(),
-            upload: vec![SyncEntityKey {
-                kind: "vocab".into(),
-                id: "word".into(),
-            }],
-            entities: vec![],
-        };
-        assert!(!reconcile_proves_inventory(2, &upload));
-
-        let mut download = upload;
-        download.upload.clear();
-        download.entities.push(db::SyncEntity {
-            kind: "vocab".into(),
-            id: "word".into(),
-            json: serde_json::json!({}),
-            updated_at: 1,
-            deleted_at: 0,
-            device_id: "device-a".into(),
-            sync_version: 1,
-        });
-        assert!(!reconcile_proves_inventory(2, &download));
-    }
-
-    #[test]
-    fn push_response_accepts_v1_v2_and_combined_count_fields() {
-        for (json, accepted, ignored) in [
-            (r#"{"server_time":1,"accepted":2,"ignored":3}"#, 2, 3),
-            (
-                r#"{"server_time":1,"accepted":["a","b"],"ignored":["c"]}"#,
-                2,
-                1,
-            ),
-            (
-                r#"{"server_time":1,"accepted_count":4,"ignored_count":5}"#,
-                4,
-                5,
-            ),
-            (
-                r#"{"server_time":1,"accepted_count":6,"accepted":["a","b"],"ignored_count":7,"ignored":["c"]}"#,
-                6,
-                7,
-            ),
-        ] {
-            let response: SyncPushResponse = serde_json::from_str(json).unwrap();
-            assert_eq!(response.accepted_total(), accepted);
-            assert_eq!(response.ignored_total(), ignored);
-        }
-    }
-
-    #[test]
-    fn push_response_only_acknowledges_explicitly_settled_versions() {
-        let batch = vec![
-            db::SyncEntity {
-                kind: "vocab".into(),
-                id: "accepted".into(),
-                json: serde_json::json!({}),
-                updated_at: 1,
-                deleted_at: 0,
-                device_id: "device-a".into(),
-                sync_version: 1,
-            },
-            db::SyncEntity {
-                kind: "vocab".into(),
-                id: "conflict".into(),
-                json: serde_json::json!({}),
-                updated_at: 1,
-                deleted_at: 0,
-                device_id: "device-a".into(),
-                sync_version: 2,
-            },
-            db::SyncEntity {
-                kind: "vocab".into(),
-                id: "rejected".into(),
-                json: serde_json::json!({}),
-                updated_at: 1,
-                deleted_at: 0,
-                device_id: "device-a".into(),
-                sync_version: 3,
-            },
-        ];
-        let response: SyncPushResponse = serde_json::from_value(serde_json::json!({
-            "server_time": 1,
-            "accepted_count": 1,
-            "ignored_count": 2,
-            "dispositions": [
-                {"kind":"vocab","id":"accepted","device_id":"device-a","sync_version":1,"status":"accepted"},
-                {"kind":"vocab","id":"conflict","device_id":"device-a","sync_version":2,"status":"conflict"},
-                {"kind":"vocab","id":"rejected","device_id":"device-a","sync_version":3,"status":"rejected"}
-            ],
-            "entities": [{
-                "kind":"vocab","id":"conflict","json":{"remote":true},
-                "updated_at":2,"deleted_at":0,"device_id":"device-z","sync_version":2
-            }]
-        }))
-        .unwrap();
-
-        let acknowledged = response.acknowledged_entities(&batch);
-        assert_eq!(
-            acknowledged
-                .iter()
-                .map(|entity| entity.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["accepted", "conflict"]
-        );
-    }
-
-    #[test]
-    fn legacy_mixed_push_response_keeps_entire_batch_dirty() {
-        let response: SyncPushResponse =
-            serde_json::from_str(r#"{"server_time":1,"accepted_count":1,"ignored_count":1}"#)
-                .unwrap();
-        let batch = vec![db::SyncEntity {
-            kind: "vocab".into(),
-            id: "unknown".into(),
-            json: serde_json::json!({}),
-            updated_at: 1,
-            deleted_at: 0,
-            device_id: "device-a".into(),
-            sync_version: 1,
-        }];
-        assert!(response.acknowledged_entities(&batch).is_empty());
-    }
-
-    #[test]
-    fn sync_push_batches_bound_entity_count() {
-        let entities = (0..(SYNC_PUSH_BATCH_ENTITIES + 1))
-            .map(|index| db::SyncEntity {
-                kind: "vocab".to_string(),
-                id: index.to_string(),
-                json: serde_json::json!({"word": "test"}),
-                updated_at: index as i64,
-                deleted_at: 0,
-                device_id: "test".to_string(),
-                sync_version: 1,
-            })
-            .collect::<Vec<_>>();
-        let batches = sync_push_batches(&entities).unwrap();
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].len(), SYNC_PUSH_BATCH_ENTITIES);
-        assert_eq!(batches[1].len(), 1);
-    }
-
-    #[test]
-    fn newer_cursor_never_moves_backwards() {
-        assert_eq!(newer_cursor("100", "99"), "100");
-        assert_eq!(newer_cursor("100", "101"), "101");
-        assert_eq!(newer_cursor("", "101"), "101");
-        assert_eq!(newer_cursor("page-a", "page-b"), "page-b");
-    }
-
-    #[test]
-    fn numeric_pull_cursor_must_advance_but_opaque_cursor_may_change() {
-        assert!(cursor_strictly_advances("100", "101"));
-        assert!(!cursor_strictly_advances("100", "100"));
-        assert!(!cursor_strictly_advances("100", "99"));
-        assert!(!cursor_strictly_advances("100", ""));
-        assert!(cursor_strictly_advances("page-a", "page-b"));
-    }
-
-    #[test]
-    fn retry_policy_retries_transient_errors_but_not_client_errors() {
-        assert!(sync_error_retryable(&ureq::Error::StatusCode(429)));
-        assert!(sync_error_retryable(&ureq::Error::StatusCode(503)));
-        assert!(sync_error_retryable(&ureq::Error::HostNotFound));
-        assert!(!sync_error_retryable(&ureq::Error::StatusCode(400)));
-        assert!(!sync_error_retryable(&ureq::Error::StatusCode(401)));
-    }
-
-    #[test]
-    fn request_retry_recovers_after_transient_failures_without_sleeping_in_tests() {
-        let mut attempts = 0usize;
-        let value = sync_request_with_retry_delays("test", None, &[0, 0], || {
-            attempts += 1;
-            if attempts < 3 {
-                Err(ureq::Error::StatusCode(503))
-            } else {
-                Ok("ok")
-            }
-        })
-        .unwrap();
-        assert_eq!(value, "ok");
-        assert_eq!(attempts, 3);
-    }
-
-    #[test]
-    fn request_retry_stops_immediately_for_non_retryable_error() {
-        let mut attempts = 0usize;
-        let error = sync_request_with_retry_delays::<()>("test", None, &[0, 0], || {
-            attempts += 1;
-            Err(ureq::Error::StatusCode(401))
-        })
-        .unwrap_err();
-        assert!(error.contains("401"));
-        assert_eq!(attempts, 1);
-    }
-
-    #[test]
-    fn request_retry_recovers_from_a_scripted_transient_transport() {
-        // `sync_request_with_retry_delays` owns retry policy and accepts the
-        // concrete ureq call as a closure. A scripted transport checks the
-        // same 503 → 503 → success boundary without binding a loopback port,
-        // which is prohibited in some sandboxed test environments.
-        let mut responses = VecDeque::from([
-            Err(ureq::Error::StatusCode(503)),
-            Err(ureq::Error::StatusCode(503)),
-            Ok("synced"),
-        ]);
-        let value = sync_request_with_retry_delays("integration-test", None, &[0, 0], || {
-            responses.pop_front().expect("scripted transport response")
-        })
-        .unwrap();
-
-        assert_eq!(value, "synced");
-        assert!(responses.is_empty());
-    }
-
-    #[test]
-    fn cloud_recovery_payloads_keep_only_status_and_result_metadata() {
-        // The Python API returns snake_case. The Tauri boundary re-serializes
-        // these structs as camelCase for the TypeScript port.
+    fn cloud_recovery_payloads_require_v5_camel_case_metadata() {
         let status: SyncRecoveryStatus = serde_json::from_value(serde_json::json!({
             "available": true,
-            "retention_days": 90,
-            "restorable_from": 1_700_000_000_000i64,
-            "latest_version_at": 1_700_000_100_000i64,
-            "version_count": 12,
-            "data_generation": 4,
+            "retentionDays": 90,
+            "restorableFrom": 1_700_000_000_000i64,
+            "latestVersionAt": 1_700_000_100_000i64,
+            "versionCount": 12,
+            "dataGeneration": 4,
         }))
         .unwrap();
         assert!(status.available);
@@ -2437,17 +1751,29 @@ mod tests {
         assert_eq!(status.data_generation, 4);
 
         let result: SyncRecoveryRestoreResponse = serde_json::from_value(serde_json::json!({
-            "data_generation": 5,
-            "tokens_revoked": true,
-            "target_at": 1_700_000_050_000i64,
-            "restored_at": 1_700_000_200_000i64,
-            "restored_entities": 9,
-            "tombstoned_entities": 3,
+            "dataGeneration": 5,
+            "tokensRevoked": true,
+            "targetAt": 1_700_000_050_000i64,
+            "restoredAt": 1_700_000_200_000i64,
+            "restoredEntities": 9,
+            "tombstonedEntities": 3,
         }))
         .unwrap();
         assert!(result.tokens_revoked);
         assert_eq!(result.restored_entities, 9);
         assert_eq!(result.tombstoned_entities, 3);
         assert_eq!(result.data_generation, 5);
+
+        assert!(
+            serde_json::from_value::<SyncRecoveryStatus>(serde_json::json!({
+                "available": true,
+                "retention_days": 90,
+                "restorable_from": 1,
+                "latest_version_at": 2,
+                "version_count": 3,
+                "data_generation": 4
+            }))
+            .is_err()
+        );
     }
 }

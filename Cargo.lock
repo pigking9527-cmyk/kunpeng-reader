@@ -1412,7 +1412,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ebook-reader-tauri"
-version = "1.16.0"
+version = "1.0.0"
 dependencies = [
  "ammonia",
  "base64 0.22.1",
@@ -1455,6 +1455,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "ureq",
+ "uuid",
  "zip",
 ]
 
@@ -1583,12 +1584,11 @@ dependencies = [
 
 [[package]]
 name = "epub"
-version = "2.1.5"
+version = "0.1.0"
 dependencies = [
- "percent-encoding",
- "regex",
- "thiserror 2.0.18",
- "xml-rs",
+ "quick-xml",
+ "rbook",
+ "tempfile",
  "zip",
 ]
 
@@ -4394,7 +4394,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4600,6 +4600,19 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rbook"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "663ec1a8b0a945c8bb9c9912b1f8b328ba698a05165a81072e16604be019f45d"
+dependencies = [
+ "indexmap 2.14.0",
+ "percent-encoding",
+ "quick-xml",
+ "thiserror 2.0.18",
+ "zip",
 ]
 
 [[package]]
@@ -7536,21 +7549,6 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
-]
-
-[[package]]
-name = "xml"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "636f85e5ca6488e96401b61eb7de54f4e44755c988af0f52cf90230c312a1a89"
-
-[[package]]
-name = "xml-rs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3a56132a0d6ecbe77352edc10232f788fc4ceefefff4cab784a98e0e16b6b51"
-dependencies = [
- "xml",
 ]
 
 [[package]]

@@ -411,6 +411,7 @@ function restorePagedImagePreviewSource(){
     else source.setAttribute('style',pagedImagePreview._rrSourceStyle);
     source.__kpPagedPreviewHeight=0;
     source.__kpPagedPreviewFromPage=-1;
+    source.__kpPagedOriginalHeight=0;
   }
   pagedImagePreview._rrCroppedSource=null;
   pagedImagePreview._rrSourceStyle=null;
@@ -610,6 +611,15 @@ function cropPagedImageSource(box,source,height){
   source.style.setProperty('break-before','column','important');
   source.style.setProperty('-webkit-column-break-before','always','important');
 }
+function continuousPagedImageSourceState(){
+  if(!root||S.imagePagination!=='continuous')return null;
+  var imgs=root.querySelectorAll('img');
+  for(var i=0;i<imgs.length;i++){
+    var img=imgs[i],consumed=Math.floor(img.__kpPagedPreviewHeight||0);
+    if(img.__kpPagedPreviewFromPage===pageInCh-1&&consumed>=32)return {source:img,consumed:consumed};
+  }
+  return null;
+}
 function probeNextPagedImage(pr,current,step){
   if(!root)return null;
   var previousTransform=root.style.transform;
@@ -750,8 +760,17 @@ function refreshPagedImagePreview(){
       tracePagedImageLayout('source_without_preview',{image_source_page:sourcePage,image_candidate_page:sourcePage,image_top:Math.round(candidateRect.top-pr.top),image_width:Math.round(candidateRect.width),image_height:Math.round(candidateRect.height),image_free_height:Math.round(free),image_preview_height:0,image_next_count:nextImageCount,image_future_count:futureImageCount,image_skipped_text:skippedForText,image_near_top:candidateRect.top-pr.top<=mg(S.marginTop)+Math.max(32,lineHeightPx()*1.5),image_text_before:false,image_probed:false});
       clearPagedImagePreview();return;
     }
-    var remaining=Math.floor(candidateRect.height)-consumed;
+    // refresh 可能因字体加载、窗口动画或首帧稳定器在同一页被调用多次。
+    // 始终用首次裁切前的原始高度计算，避免每次刷新再减一次 consumed。
+    var originalHeight=Math.max(Math.floor(candidate.__kpPagedOriginalHeight||0),Math.floor(candidateRect.height));
+    candidate.__kpPagedOriginalHeight=originalHeight;
+    var remaining=originalHeight-consumed;
     cropPagedImageSource(box,candidate,remaining);
+    // 改写图片高度会让 WebKit 重新计算后续多栏位置。真实图片保留在当前栏，
+    // 但它后面的正文可能被推到旧栏坐标；再提交一次当前页 transform 后重新
+    // 取几何，效果与用户轻微滑动触发的稳定重绘相同。
+    void root.offsetWidth;
+    root.style.transform='translateX(-'+viewOffset+'px)';
     // 保留到离开本页时由 clearPagedImagePreview() 复原；不能在这里清理，
     // 否则刚裁掉的上半段会在同一帧被还原，图注仍被原始整图高度推开。
     box.innerHTML='';
@@ -768,13 +787,7 @@ function refreshPagedImagePreview(){
 }
 var pagedImagePreviewFrame=0,pagedImagePreviewGeneration=0;
 function hasPendingContinuousPagedImageSource(){
-  if(!root||S.imagePagination!=='continuous')return false;
-  var imgs=root.querySelectorAll('img');
-  for(var i=0;i<imgs.length;i++){
-    var img=imgs[i];
-    if(img.__kpPagedPreviewFromPage===pageInCh-1&&Math.floor(img.__kpPagedPreviewHeight||0)>=32)return true;
-  }
-  return false;
+  return !!continuousPagedImageSourceState();
 }
 function schedulePagedImagePreview(){
   var generation=++pagedImagePreviewGeneration;
@@ -800,6 +813,7 @@ setViewOffset=function(){
   if(hasPendingContinuousPagedImageSource()){
     if(pagedImagePreviewFrame){cancelAnimationFrame(pagedImagePreviewFrame);pagedImagePreviewFrame=0;}
     refreshPagedImagePreview();
+    if(typeof stabilizeProgrammaticViewPaint==='function')stabilizeProgrammaticViewPaint();
     return;
   }
   schedulePagedImagePreview();

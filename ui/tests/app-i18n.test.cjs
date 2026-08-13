@@ -7,6 +7,22 @@ const vm = require("node:vm");
 const uiRoot = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(uiRoot, "index.html"), "utf8");
 const i18n = fs.readFileSync(path.join(uiRoot, "app-i18n.js"), "utf8");
+const rerankerCatalog = fs.readFileSync(
+  path.join(uiRoot, "app-i18n-reranker-catalog.js"),
+  "utf8",
+);
+const statsCatalog = fs.readFileSync(
+  path.join(uiRoot, "app-i18n-stats-catalog.js"),
+  "utf8",
+);
+const newsSurfaceCatalog = fs.readFileSync(
+  path.join(uiRoot, "app-i18n-news-surface-catalog.js"),
+  "utf8",
+);
+const semanticRuntimeCatalog = fs.readFileSync(
+  path.join(uiRoot, "app-i18n-semantic-runtime-catalog.js"),
+  "utf8",
+);
 const app = fs.readFileSync(path.join(uiRoot, "app.js"), "utf8");
 const styles = fs.readFileSync(path.join(uiRoot, "styles.css"), "utf8");
 
@@ -16,7 +32,10 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(html, /data-i18n="endRecommendations"/);
   assert.match(html, /src="reader-recommendation-settings\.js"/);
   assert.match(i18n, /COPY\[locale\]\.endRecommendations = label/);
-  assert.match(html, /src="app-i18n\.js"/);
+  assert.match(
+    html,
+    /src="app-i18n-reranker-catalog\.js"[\s\S]*?src="app-i18n-stats-catalog\.js"[\s\S]*?src="app-i18n-news-surface-catalog\.js"[\s\S]*?src="app-i18n-semantic-runtime-catalog\.js"[\s\S]*?src="app-i18n\.js"/,
+  );
   assert.match(i18n, /const STORAGE_KEY = "appLanguageV1"/);
   assert.match(i18n, /\["system", "跟随系统"\]/);
   for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
@@ -94,13 +113,121 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(styles, /\.recovery-backup-actions \.btn-plain\s*\{[^}]*width:\s*auto;[^}]*max-width:\s*100%;/s);
 });
 
-function loadAppI18n(language) {
+function loadAppI18n(
+  language,
+  {
+    loadStatsCatalog = false,
+    loadNewsSurfaceCatalog = false,
+    loadSemanticRuntimeCatalog = false,
+  } = {},
+) {
   const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
   const localStorage = { getItem() { return language; }, setItem() {} };
   const window = { document, localStorage, navigator: { language: language === "ja" ? "ja-JP" : language }, addEventListener() {}, dispatchEvent() {} };
-  vm.runInNewContext(i18n, { window, document, localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+  const context = {
+    window,
+    document,
+    localStorage,
+    navigator: window.navigator,
+    CustomEvent: function CustomEvent() {},
+  };
+  vm.runInNewContext(rerankerCatalog, context);
+  if (loadStatsCatalog) vm.runInNewContext(statsCatalog, context);
+  if (loadNewsSurfaceCatalog) vm.runInNewContext(newsSurfaceCatalog, context);
+  if (loadSemanticRuntimeCatalog) vm.runInNewContext(semanticRuntimeCatalog, context);
+  vm.runInNewContext(i18n, context);
   return window.ReaderAppI18n;
 }
+
+test("staged statistics catalog delegates when loaded and preserves the standalone fallback", () => {
+  assert.match(statsCatalog, /ReaderAppI18nStatsCatalog/);
+  assert.match(statsCatalog, /function applyChart\(copy\)/);
+  assert.match(statsCatalog, /function applyDetail\(copy\)/);
+  assert.match(statsCatalog, /function applyHeatmap\(copy\)/);
+  assert.match(i18n, /const STATS_CATALOG = global\.ReaderAppI18nStatsCatalog/);
+  assert.match(i18n, /STATS_CATALOG !== undefined/);
+  assert.match(html, /src="app-i18n-stats-catalog\.js"[\s\S]*?src="app-i18n\.js"/);
+
+  const standalone = loadAppI18n("ja");
+  const delegated = loadAppI18n("ja", { loadStatsCatalog: true });
+  assert.equal(standalone.t("lineChartData"), "折れ線グラフで表示");
+  assert.equal(delegated.t("lineChartData"), standalone.t("lineChartData"));
+  assert.equal(delegated.t("heatmapColor"), "ヒートマップの色");
+
+  assert.throws(
+    () => {
+      const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
+      const window = { document, localStorage: { getItem() { return "en"; }, setItem() {} }, navigator: { language: "en" }, addEventListener() {}, dispatchEvent() {}, ReaderAppI18nStatsCatalog: {} };
+      vm.runInNewContext(i18n, { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+    },
+    /ReaderAppI18nStatsCatalog must expose statistics appliers/,
+  );
+});
+
+test("news surface catalog delegates when loaded and preserves the standalone fallback", () => {
+  assert.match(newsSurfaceCatalog, /ReaderAppI18nNewsSurfaceCatalog/);
+  assert.match(newsSurfaceCatalog, /function apply\(copy\)/);
+  assert.match(i18n, /const NEWS_SURFACE_CATALOG = global\.ReaderAppI18nNewsSurfaceCatalog/);
+  assert.match(i18n, /NEWS_SURFACE_CATALOG !== undefined/);
+  assert.match(html, /src="app-i18n-news-surface-catalog\.js"[\s\S]*?src="app-i18n\.js"/);
+
+  const standalone = loadAppI18n("ja");
+  const delegated = loadAppI18n("ja", { loadNewsSurfaceCatalog: true });
+  assert.equal(standalone.t("newsTitle"), "今日のニュース");
+  assert.equal(delegated.t("newsTitle"), standalone.t("newsTitle"));
+  assert.equal(delegated.t("newsOpenOriginal"), "ブラウザで原文を開く");
+
+  assert.throws(
+    () => {
+      const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
+      const window = { document, localStorage: { getItem() { return "en"; }, setItem() {} }, navigator: { language: "en" }, addEventListener() {}, dispatchEvent() {}, ReaderAppI18nNewsSurfaceCatalog: {} };
+      vm.runInNewContext(i18n, { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+    },
+    /ReaderAppI18nNewsSurfaceCatalog must expose a news surface applier/,
+  );
+});
+
+test("semantic runtime catalog delegates when loaded and preserves the standalone fallback", () => {
+  assert.match(semanticRuntimeCatalog, /ReaderAppI18nSemanticRuntimeCatalog/);
+  assert.match(semanticRuntimeCatalog, /function apply\(copy\)/);
+  assert.match(i18n, /const SEMANTIC_RUNTIME_CATALOG = global\.ReaderAppI18nSemanticRuntimeCatalog/);
+  assert.match(i18n, /SEMANTIC_RUNTIME_CATALOG !== undefined/);
+  assert.match(html, /src="app-i18n-semantic-runtime-catalog\.js"[\s\S]*?src="app-i18n\.js"/);
+
+  const standalone = loadAppI18n("ja");
+  const delegated = loadAppI18n("ja", { loadSemanticRuntimeCatalog: true });
+  assert.equal(standalone.t("semSmallTitle"), "軽量セマンティック検索・BGE Small 中国語");
+  assert.equal(delegated.t("semSmallTitle"), standalone.t("semSmallTitle"));
+  assert.equal(delegated.t("semRetrievalM3Copy"), standalone.t("semRetrievalM3Copy"));
+
+  assert.throws(
+    () => {
+      const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
+      const window = { document, localStorage: { getItem() { return "en"; }, setItem() {} }, navigator: { language: "en" }, addEventListener() {}, dispatchEvent() {}, ReaderAppI18nSemanticRuntimeCatalog: {} };
+      vm.runInNewContext(i18n, { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+    },
+    /ReaderAppI18nSemanticRuntimeCatalog must expose a semantic runtime applier/,
+  );
+});
+
+
+test("reranker catalog loads before the compatibility entry and keeps localized fallbacks", () => {
+  assert.match(rerankerCatalog, /ReaderAppI18nRerankerCatalog/);
+  assert.match(i18n, /global\.ReaderAppI18nRerankerCatalog/);
+  assert.doesNotMatch(
+    i18n.slice(i18n.indexOf("const RERANKER_AUTOLOAD_COPY")),
+    /semRerankerLoading:/,
+  );
+
+  const japanese = loadAppI18n("ja");
+  const french = loadAppI18n("fr");
+  assert.match(japanese.t("semRerankerReady"), /準備完了/);
+  assert.equal(
+    french.t("semResumeReranker"),
+    "Resume reranker download",
+    "languages without a dedicated reranker message retain the English fallback",
+  );
+});
 
 test("Japanese main-window catalog is complete and never uses English fallback", () => {
   const japanese = loadAppI18n("ja");

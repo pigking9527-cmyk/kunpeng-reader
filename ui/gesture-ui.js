@@ -3,6 +3,7 @@
   "use strict";
   const root = global.document;
   const api = global.ReaderNewsGesture;
+  const hintRules = global.ReaderGestureHintRules;
   if (!root || !api) return;
 
   const MANAGER_KEY = "kunpeng.reader.gesture-manager.v1";
@@ -193,6 +194,7 @@
   let editing = null;
   let training = [];
   let trainingPointerId = null;
+  let trainingMouseActive = false;
   let active = null;
   let suppressContextMenuUntil = 0;
   let hintTimer = 0;
@@ -251,9 +253,10 @@
         typeof source.id === "string" && source.id
           ? source.id
           : "gesture-" + index,
-      name: savedName && !(action === "undo_last" && legacyUndoName)
-        ? savedName
-        : actionLabel(action),
+      name:
+        savedName && !(action === "undo_last" && legacyUndoName)
+          ? savedName
+          : actionLabel(action),
       scope: normalizeScope(action, source.scope),
       action,
       input: "mouse-right",
@@ -405,17 +408,22 @@
   }
 
   function hintHex(value) {
+    if (typeof hintRules?.hintHex === "function") return hintRules.hintHex(value);
     return /^#[0-9a-f]{6}$/i.test(String(value || ""))
       ? String(value).toLowerCase()
       : DEFAULT_HINT_SETTINGS.background;
   }
   function normalizeHintQuickColors(value) {
+    if (typeof hintRules?.normalizeQuickColors === "function")
+      return hintRules.normalizeQuickColors(value, makeId);
     if (!Array.isArray(value)) return [];
     return value
       .map((item) => {
         const color = String(item?.color || "").trim();
         if (!/^#[0-9a-f]{6}$/i.test(color)) return null;
-        const name = String(item?.name || "快捷颜色").trim().slice(0, 12);
+        const name = String(item?.name || "快捷颜色")
+          .trim()
+          .slice(0, 12);
         return {
           id: String(item?.id || makeId()).slice(0, 80),
           name: name || "快捷颜色",
@@ -426,19 +434,26 @@
       .slice(0, 6);
   }
   function hintPosition(value, fallback) {
+    if (typeof hintRules?.hintPosition === "function")
+      return hintRules.hintPosition(value, fallback);
     return Math.max(
       0,
       Math.min(1, Number.isFinite(Number(value)) ? Number(value) : fallback),
     );
   }
   function normalizeHintSettings(value) {
+    if (typeof hintRules?.normalizeHintSettings === "function")
+      return hintRules.normalizeHintSettings(value, makeId);
     try {
       const saved = value && typeof value === "object" ? value : {};
       return {
         enabled: saved.enabled === true,
         fontSize: Math.max(
           12,
-          Math.min(28, Number(saved.fontSize) || DEFAULT_HINT_SETTINGS.fontSize),
+          Math.min(
+            28,
+            Number(saved.fontSize) || DEFAULT_HINT_SETTINGS.fontSize,
+          ),
         ),
         backgroundEnabled:
           saved.backgroundEnabled !== false &&
@@ -448,8 +463,14 @@
           20,
           Math.min(100, Number(saved.opacity) || DEFAULT_HINT_SETTINGS.opacity),
         ),
-        positionX: hintPosition(saved.positionX, DEFAULT_HINT_SETTINGS.positionX),
-        positionY: hintPosition(saved.positionY, DEFAULT_HINT_SETTINGS.positionY),
+        positionX: hintPosition(
+          saved.positionX,
+          DEFAULT_HINT_SETTINGS.positionX,
+        ),
+        positionY: hintPosition(
+          saved.positionY,
+          DEFAULT_HINT_SETTINGS.positionY,
+        ),
         frameWidth: hintFrameSize(
           saved.frameWidth,
           DEFAULT_HINT_SETTINGS.frameWidth,
@@ -617,6 +638,8 @@
   function createHint() {
     const node = root.createElement("div");
     node.className = "reader-gesture-hint";
+    node.dataset.overlaySurface = "gesture-hint";
+    node.dataset.overlayRole = "feedback";
     node.hidden = true;
     root.body?.appendChild(node);
     return node;
@@ -651,9 +674,13 @@
     globalPrecisionSettings.hidden = !globalPrecisionSettingsOpen;
   }
   function normalizeHintFrameShape(value) {
+    if (typeof hintRules?.normalizeHintFrameShape === "function")
+      return hintRules.normalizeHintFrameShape(value);
     return value === "freeform" ? "freeform" : "rect";
   }
   function normalizeHintFramePath(value) {
+    if (typeof hintRules?.normalizeHintFramePath === "function")
+      return hintRules.normalizeHintFramePath(value);
     if (!Array.isArray(value)) return [];
     return value
       .map((point) => ({ x: Number(point?.x), y: Number(point?.y) }))
@@ -669,11 +696,15 @@
       .slice(0, 48);
   }
   function hintFrameClipPath(settings) {
+    if (typeof hintRules?.hintFrameClipPath === "function")
+      return hintRules.hintFrameClipPath(settings);
     if (settings.frameShape !== "freeform" || settings.framePath.length < 3)
       return "none";
     return `polygon(${settings.framePath.map((point) => `${point.x}% ${point.y}%`).join(",")})`;
   }
   function hintFrameSize(value, fallback, minimum, maximum) {
+    if (typeof hintRules?.hintFrameSize === "function")
+      return hintRules.hintFrameSize(value, fallback, minimum, maximum);
     return Math.max(
       minimum,
       Math.min(
@@ -740,7 +771,10 @@
       "--gesture-hint-swatch",
       hintSettings.background,
     );
-    hintColorPickerToggle.setAttribute("aria-expanded", String(hintColorPickerOpen));
+    hintColorPickerToggle.setAttribute(
+      "aria-expanded",
+      String(hintColorPickerOpen),
+    );
     hintQuickColorAdd.hidden = !hintColorPickerOpen;
     hintShapeTools.hidden = !hintSettings.backgroundEnabled;
     hintShapeRect.setAttribute(
@@ -767,7 +801,10 @@
       if (hintSettings.backgroundEnabled) placeHintPreview();
       placeHintInViewport(hint, hintSettings);
     });
-    if (!hintSettings.enabled) hint.hidden = true;
+    if (!hintSettings.enabled) {
+      hint.hidden = true;
+      hint.removeAttribute("data-overlay-active");
+    }
   }
   function collapseNewGestureDisclosures() {
     settingsOpen = false;
@@ -793,11 +830,13 @@
   function showHint(name) {
     if (!hintSettings.enabled) return;
     hint.textContent = name || "手势已匹配";
+    hint.dataset.overlayActive = "true";
     hint.hidden = false;
     placeHintInViewport(hint, hintSettings);
     if (hintTimer) global.clearTimeout(hintTimer);
     hintTimer = global.setTimeout(() => {
       hint.hidden = true;
+      hint.removeAttribute("data-overlay-active");
     }, HINT_DURATION_MS);
   }
   function gestureInfoForTarget(target) {
@@ -896,9 +935,7 @@
     actionEmpty.hidden = visible > 0;
   }
   function syncEditorChoices() {
-    const action = ["book_info", "undo_last"].includes(
-      actionInput.value,
-    )
+    const action = ["book_info", "undo_last"].includes(actionInput.value)
       ? actionInput.value
       : "back";
     actionInput.value = action;
@@ -1156,7 +1193,9 @@
     if (
       conflict &&
       !global.confirm(
-        "这条轨迹与“" + conflict.name + "”相似度较高，可能触发错误功能。仍要保存吗？",
+        "这条轨迹与“" +
+          conflict.name +
+          "”相似度较高，可能触发错误功能。仍要保存吗？",
       )
     )
       return;
@@ -1320,10 +1359,12 @@
   function clearTrail() {
     active = null;
     trail.hidden = true;
+    trail.removeAttribute("data-overlay-active");
     api.draw(trail, []);
     trail.classList.remove("matched", "rejected");
   }
   function paintTrail(points) {
+    trail.dataset.overlayActive = "true";
     trail.hidden = false;
     api.draw(trail, points, { color: "#3478d4", lineWidth: 5 });
   }
@@ -1383,6 +1424,22 @@
       gestureSettings?.classList.contains("show") &&
       gestureSettings.contains(target)
     ) {
+      // The canvas reserves only left-button input for drawing; right-button
+      // gestures remain available there and throughout every page. Back keeps
+      // navigation inside the gesture settings: the editor returns to its
+      // overview, while the overview closes this modal.
+      if (!editor.hidden && editor.contains(target)) {
+        return {
+          allowedActions: supportedActions(["back"]),
+          onMatch: (action) => {
+            if (action === "undo_last") {
+              runCloseOrUndo(action);
+              return;
+            }
+            closeEditor();
+          },
+        };
+      }
       return {
         allowedActions: supportedActions(["back"]),
         onMatch: (action) =>
@@ -1573,7 +1630,10 @@
     if (event.button !== 2) return;
     const surface = activeSurface(event.target);
     if (!surface) return;
-    event.preventDefault();
+    // Cancelling pointerdown suppresses the compatibility mouse stream in
+    // WebKit, which is precisely the fallback needed when later PointerEvents
+    // are missing. The context menu is suppressed separately after the stroke.
+    if (!event.type.startsWith("pointer")) event.preventDefault();
     active = {
       points: [{ x: event.clientX, y: event.clientY }],
       surface,
@@ -1594,7 +1654,7 @@
   }
   function move(event) {
     if (!active) return;
-    event.preventDefault();
+    if (!event.type.startsWith("pointer")) event.preventDefault();
     const previous = active.points[active.points.length - 1];
     if (Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 4)
       return;
@@ -1629,6 +1689,58 @@
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
+    if (trainingMouseActive) return;
+    trainingMouseActive = true;
+    training = [padPoint(event)];
+    status.textContent = "正在记录轨迹（0px）…";
+    api.draw(pad, training, { color: "#3478d4", lineWidth: 5 });
+  }
+  function appendTrainingPoints(event) {
+    const coalesced = event.getCoalescedEvents?.();
+    const samples = coalesced?.length ? [...coalesced, event] : [event];
+    let appended = false;
+    samples.forEach((sample) => {
+      const point = padPoint(sample);
+      const previous = training[training.length - 1];
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) < 3) return;
+      training.push(point);
+      appended = true;
+    });
+    return appended;
+  }
+  function moveTraining(event) {
+    if (!trainingMouseActive) return;
+    event.preventDefault();
+    if (!appendTrainingPoints(event)) return;
+    api.draw(pad, training, { color: "#3478d4", lineWidth: 5 });
+    status.textContent =
+      "正在记录轨迹（" + Math.round(api.pathLength(training)) + "px）…";
+  }
+  function finishTraining(event) {
+    if (!trainingMouseActive) return;
+    appendTrainingPoints(event);
+    trainingMouseActive = false;
+    // WebKit may deliver a quick stroke almost entirely at mouseup. Always
+    // retain the release point before validating the minimum path length.
+    const length = Math.round(api.pathLength(training));
+    if (length < api.MIN_PATH_LENGTH) {
+      training = [];
+      api.draw(pad, training);
+      status.textContent = "轨迹太短（" + length + "px），已清除，请重新画。";
+      return;
+    }
+    status.textContent = "轨迹已画好（" + length + "px），点击“保存”生效。";
+  }
+  function cancelTraining(event) {
+    if (trainingPointerId !== event.pointerId) return;
+    trainingPointerId = null;
+    status.textContent = "录制已取消，请重新画。";
+  }
+  function beginPointerTraining(event) {
+    if (event.pointerType === "mouse") return;
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
     trainingPointerId = event.pointerId;
     training = [padPoint(event)];
     try {
@@ -1639,35 +1751,23 @@
     status.textContent = "正在记录轨迹（0px）…";
     api.draw(pad, training, { color: "#3478d4", lineWidth: 5 });
   }
-  function moveTraining(event) {
-    if (trainingPointerId !== event.pointerId) return;
+  function movePointerTraining(event) {
+    if (event.pointerId !== trainingPointerId) return;
     event.preventDefault();
-    const point = padPoint(event);
-    const previous = training[training.length - 1];
-    if (Math.hypot(point.x - previous.x, point.y - previous.y) < 3) return;
-    training.push(point);
+    if (!appendTrainingPoints(event)) return;
     api.draw(pad, training, { color: "#3478d4", lineWidth: 5 });
     status.textContent =
       "正在记录轨迹（" + Math.round(api.pathLength(training)) + "px）…";
   }
-  function finishTraining(event) {
-    if (trainingPointerId !== event.pointerId) return;
+  function finishPointerTraining(event) {
+    if (event.pointerId !== trainingPointerId) return;
+    appendTrainingPoints(event);
     trainingPointerId = null;
-    try {
-      pad.releasePointerCapture(event.pointerId);
-    } catch (_) {
-      /* best effort */
-    }
     const length = Math.round(api.pathLength(training));
     status.textContent =
       length >= api.MIN_PATH_LENGTH
         ? "轨迹已画好（" + length + "px），点击“保存”生效。"
         : "轨迹太短（" + length + "px），请重新画。";
-  }
-  function cancelTraining(event) {
-    if (trainingPointerId !== event.pointerId) return;
-    trainingPointerId = null;
-    status.textContent = "录制已取消，请重新画。";
   }
   function openSettings() {
     search.value = "";
@@ -1722,7 +1822,10 @@
   hintFontSize.addEventListener("input", () => {
     hintSettings.fontSize = Math.max(
       12,
-      Math.min(28, Number(hintFontSize.value) || DEFAULT_HINT_SETTINGS.fontSize),
+      Math.min(
+        28,
+        Number(hintFontSize.value) || DEFAULT_HINT_SETTINGS.fontSize,
+      ),
     );
     saveHintSettings();
   });
@@ -1737,7 +1840,9 @@
   });
   hintQuickColorAdd.addEventListener("click", () => {
     const color = hintHex(hintSettings.background);
-    const existing = hintSettings.quickColors.find((item) => item.color === color);
+    const existing = hintSettings.quickColors.find(
+      (item) => item.color === color,
+    );
     if (existing) {
       selectedQuickColorId = existing.id;
     } else if (hintSettings.quickColors.length < 6) {
@@ -1761,7 +1866,9 @@
     applyHintSettings();
   });
   hintBackgroundPresets.addEventListener("click", (event) => {
-    const remove = event.target.closest("[data-gesture-hint-quick-color-remove]");
+    const remove = event.target.closest(
+      "[data-gesture-hint-quick-color-remove]",
+    );
     if (remove) {
       hintSettings.quickColors = hintSettings.quickColors.filter(
         (item) => item.id !== remove.dataset.gestureHintQuickColorRemove,
@@ -1774,9 +1881,10 @@
     const preset = event.target.closest("[data-gesture-hint-background]");
     if (preset) {
       hintSettings.background = hintHex(preset.dataset.gestureHintBackground);
-      selectedQuickColorId = hintSettings.quickColors.find(
-        (item) => item.color === hintSettings.background,
-      )?.id || null;
+      selectedQuickColorId =
+        hintSettings.quickColors.find(
+          (item) => item.color === hintSettings.background,
+        )?.id || null;
       hintSettings.backgroundEnabled = true;
       saveHintSettings();
     }
@@ -1837,8 +1945,14 @@
   function updateHintFrame(event) {
     if (!hintFrameStart) return;
     const rect = hintPreviewArea.getBoundingClientRect();
-    const currentX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-    const currentY = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+    const currentX = Math.max(
+      0,
+      Math.min(rect.width, event.clientX - rect.left),
+    );
+    const currentY = Math.max(
+      0,
+      Math.min(rect.height, event.clientY - rect.top),
+    );
     hintFrameDraft = {
       left: hintFrameStart.x,
       top: hintFrameStart.y,
@@ -1879,7 +1993,8 @@
     const top = Math.max(0, Math.min(rect.height - height, hintFrameDraft.top));
     hintSettings.frameWidth = width;
     hintSettings.frameHeight = height;
-    hintSettings.positionX = rect.width > width ? left / (rect.width - width) : 0;
+    hintSettings.positionX =
+      rect.width > width ? left / (rect.width - width) : 0;
     hintSettings.positionY =
       rect.height > height ? top / (rect.height - height) : 0;
     hintSettings.frameShape = "rect";
@@ -1909,10 +2024,13 @@
     hintPreviewPath.hidden = false;
   }
   function compactHintFreeformPoints(points, maximum) {
+    if (typeof hintRules?.compactFreeformPoints === "function")
+      return hintRules.compactFreeformPoints(points, maximum);
     if (points.length <= maximum) return points.slice();
     const last = points.length - 1;
-    return Array.from({ length: maximum }, (_, index) =>
-      points[Math.round((index * last) / (maximum - 1))],
+    return Array.from(
+      { length: maximum },
+      (_, index) => points[Math.round((index * last) / (maximum - 1))],
     );
   }
   function updateHintFreeform(event) {
@@ -1950,7 +2068,8 @@
     );
     hintSettings.frameWidth = width;
     hintSettings.frameHeight = height;
-    hintSettings.positionX = rect.width > width ? left / (rect.width - width) : 0;
+    hintSettings.positionX =
+      rect.width > width ? left / (rect.width - width) : 0;
     hintSettings.positionY =
       rect.height > height ? top / (rect.height - height) : 0;
     hintSettings.frameShape = "freeform";
@@ -2087,42 +2206,43 @@
   precision.addEventListener("input", updateEditorPrecision);
   precisionGlobalMode.addEventListener("change", updateEditorPrecision);
   precisionIndependentMode.addEventListener("change", updateEditorPrecision);
-  // Keep the recorder on the canvas itself. WebKit can drop window-level Pointer
-  // listeners while a modal is scrolling; pointer capture keeps the path intact
-  // after it leaves the canvas.
+  // Mouse recording deliberately uses one event family. macOS WebKit may emit
+  // pointerdown for a mouse without a matching pointermove, and pointer capture
+  // can then suppress the reliable compatibility mouse stream. Pointer Events
+  // remain available only for non-mouse input such as a pen.
   if ("PointerEvent" in global) {
-    pad.addEventListener("pointerdown", beginTraining);
-    pad.addEventListener("pointermove", moveTraining, { passive: false });
-    pad.addEventListener("pointerup", finishTraining);
+    pad.addEventListener("pointerdown", beginPointerTraining);
+    pad.addEventListener("pointermove", movePointerTraining, { passive: false });
+    pad.addEventListener("pointerup", finishPointerTraining);
     pad.addEventListener("pointercancel", cancelTraining);
     pad.addEventListener("lostpointercapture", cancelTraining);
-  } else {
-    // Fallback for older WebViews without Pointer Events.
-    pad.addEventListener("mousedown", beginTraining);
-    global.addEventListener("mousemove", moveTraining, {
-      capture: true,
-      passive: false,
-    });
-    global.addEventListener("mouseup", finishTraining, true);
   }
+  pad.addEventListener("mousedown", beginTraining);
+  global.addEventListener("mousemove", moveTraining, {
+    capture: true,
+    passive: false,
+  });
+  global.addEventListener("mouseup", finishTraining, true);
   save.addEventListener("click", saveEditor);
   clear.addEventListener("click", () => {
     training = [];
     api.draw(pad, []);
     status.textContent = "轨迹已清除；点击“保存”后生效。";
   });
-  global.addEventListener(
-    "mousedown",
-    (event) => {
-      if (event.button === 0) {
-        cancelGestureKeepHint();
-        return;
-      }
-      begin(event);
-    },
-    true,
-  );
-  global.addEventListener("mousemove", move, { capture: true, passive: false });
+  function startMouseGesture(event) {
+    if (event.button === 0) {
+      cancelGestureKeepHint();
+      return;
+    }
+    if (!active) begin(event);
+  }
+  // Right-button gestures use the same single mouse channel as the editor.
+  // This avoids the incomplete mouse PointerEvent sequence in macOS WebKit.
+  global.addEventListener("mousedown", startMouseGesture, true);
+  global.addEventListener("mousemove", move, {
+    capture: true,
+    passive: false,
+  });
   global.addEventListener("mouseup", (event) => finish(event), true);
   global.addEventListener("blur", () => finish(null, true));
   global.addEventListener(

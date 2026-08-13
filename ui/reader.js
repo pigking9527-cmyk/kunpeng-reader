@@ -189,27 +189,16 @@ function aiReaderHistoryIdentity() { return String(window.currentBookContentId |
 function aiReaderHistoryKey() { return "aiReaderHistoryV1:" + aiReaderHistoryIdentity(); }
 function aiReaderSessionMemoryKey() { return "aiReaderSessionMemoryV1:" + aiReaderHistoryIdentity(); }
 function aiReaderTaskLabel(task) { return task === "summary" ? readerText("summaryTask", "总结已读内容") : task === "mindmap" ? readerText("mindMapTask", "生成脑图") : readerText("askTask", "提问"); }
-function aiReaderHistoryEntryId(entry) { return String(entry?.id || `legacy:${entry?.at || "unknown"}`); }
-function aiReaderHistoryDeleted(entry) { return Boolean(entry?.deletedAt || entry?.deleted_at); }
-
-const AI_READER_HISTORY_TOMBSTONE_LIMIT = 200;
+const readerAiHistoryRules = window.ReaderAiHistoryRules;
+const AI_READER_HISTORY_TOMBSTONE_LIMIT = readerAiHistoryRules.TOMBSTONE_LIMIT;
+function aiReaderHistoryEntryId(entry) { return readerAiHistoryRules.historyEntryId(entry); }
+function aiReaderHistoryDeleted(entry) { return readerAiHistoryRules.isHistoryDeleted(entry); }
 function aiReaderNewHistoryId() {
   const suffix = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return `reader:${new Date().toISOString()}:${suffix}`;
 }
 function aiReaderMergeHistoryEntries(...groups) {
-  const byId = new Map();
-  groups.flat().filter(Boolean).forEach((entry) => {
-    const normalized = { ...entry, id: aiReaderHistoryEntryId(entry) };
-    const known = byId.get(normalized.id);
-    if (aiReaderHistoryDeleted(normalized) || !known || !aiReaderHistoryDeleted(known)) byId.set(normalized.id, normalized);
-  });
-  const entries = Array.from(byId.values());
-  const live = entries.filter((entry) => !aiReaderHistoryDeleted(entry))
-    .sort((left, right) => String(right.at || "").localeCompare(String(left.at || "")));
-  const tombstones = entries.filter(aiReaderHistoryDeleted)
-    .sort((left, right) => String(right.deletedAt || right.deleted_at || "").localeCompare(String(left.deletedAt || left.deleted_at || ""))).slice(0, AI_READER_HISTORY_TOMBSTONE_LIMIT);
-  return [...live, ...tombstones];
+  return readerAiHistoryRules.mergeEntries(...groups);
 }
 function aiReaderReadHistory() {
   try {
@@ -240,20 +229,11 @@ function aiReaderRememberSession(entry) {
   // local continuity recap for the book currently being read.
   try {
     const entries = aiReaderReadSessionMemory();
-    entries.unshift({
-      task: entry.task || "question",
-      question: String(entry.question || "").slice(0, 220),
-      content: String(entry.content || "").slice(0, 760),
-      at: entry.at || new Date().toISOString(),
-    });
-    localStorage.setItem(aiReaderSessionMemoryKey(), JSON.stringify(entries.slice(0, 6)));
+    localStorage.setItem(aiReaderSessionMemoryKey(), JSON.stringify(readerAiHistoryRules.prependSessionEntry(entries, entry)));
   } catch (_) { /* 本机会话记忆不可用不影响本次智读。 */ }
 }
 function aiReaderSessionMemory() {
-  return aiReaderReadSessionMemory().slice(0, 4).map((entry, index) => {
-    const task = aiReaderTaskLabel(entry.task);
-    return `会话 ${index + 1}（${task}）：${String(entry.content || "").slice(0, 620)}`;
-  }).join("\n\n").slice(0, 2800);
+  return readerAiHistoryRules.sessionPrompt(aiReaderReadSessionMemory(), aiReaderTaskLabel);
 }
 function aiReaderApplyHistorySnapshot(snapshot) {
   if (!snapshot || !Array.isArray(snapshot.entries)) return;
@@ -1000,16 +980,19 @@ function sendProgressNow() {
 async function closeReaderWindow() {
   if (readerWindowClosePending) return;
   readerWindowClosePending = true;
-  // 跨章翻页可能仍在等待章节样式和最终分栏。先让正文页完成这次排版并
-  // 回传稳定锚点，再保存；否则外壳可能把上一章或临时页的位置写入数据库。
-  await requestPagePositionSnapshot();
-  // beforeunload 中发起的异步 IPC 可能随 WebView 一起被销毁。关闭按钮必须先等
-  // 当前页位置确实写入，再让原生窗口进入隐藏/销毁流程。
-  await sendProgressNow();
-  invoke("main_window_close").catch((error) => {
+  try {
+    // 跨章翻页可能仍在等待章节样式和最终分栏。先让正文页完成这次排版并
+    // 回传稳定锚点，再保存；否则外壳可能把上一章或临时页的位置写入数据库。
+    await requestPagePositionSnapshot();
+    // beforeunload 中发起的异步 IPC 可能随 WebView 一起被销毁。关闭按钮必须先等
+    // 当前页位置确实写入，再让原生窗口进入隐藏/销毁流程。
+    await sendProgressNow();
+    await invoke("main_window_close");
+  } catch (error) {
     readerWindowClosePending = false;
     console.warn("关闭阅读窗口失败", error);
-  });
+    throw error;
+  }
 }
 function reportProgress(immediate = false) {
   // 续读位置是核心状态，不属于可关闭的阅读统计。此前复用
@@ -1038,23 +1021,8 @@ window.addEventListener("pagehide", () => reportProgress(true));
 window.addEventListener("beforeunload", () => reportProgress(true));
 
 // ---- 已读字数统计：按可见字数、停留时间、短页和快速翻页折算，避免大窗口短停虚高 ----
-const READ_TRACK = {
-  normalCpmLimit: 1200,
-  shortPageCpmLimit: 900,
-  shortPageChars: 150,
-  tinyPageChars: 30,
-  shortMinMs: 2000,
-  shortMaxMs: 8000,
-  fastTurnRatio: 0.3,
-  fastTurnStreak: 3,
-  fastTurnCredit: 0.25,
-  idleCapMs: 2 * 60 * 1000,
-  minDwellMs: 500,
-  periodicCreditMs: 10000,
-  backtrackCooldownMs: 2500,
-  readingTimeTickMs: 15000,
-  readingTimeMaxCreditSec: 20,
-};
+const readerReadingMetrics = window.ReaderReadingMetrics;
+const READ_TRACK = readerReadingMetrics.READ_TRACK;
 let rwSegment = null,
   rwAccum = 0,
   rwTimer = null,
@@ -1064,9 +1032,6 @@ let rwLastPosition = 0,
   rwBacktrackBlockedUntil = 0,
   rwBacktrackResumeTimer = null,
   rtLastActiveAt = Date.now();
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
 function flushReadWords(immediate = false) {
   if (DIAG_DISABLE_READER_REPORTS) return;
   if (isWindowDragging() && !immediate) return;
@@ -1097,27 +1062,6 @@ function readTrackingBlocked() {
   if (Date.now() < rwBacktrackBlockedUntil) return true;
   return ReaderShell.hasOverlay();
 }
-function readPageKey(d) {
-  const chapter = Number.isFinite(d.chapter) ? d.chapter : curChapter || 0;
-  const gp = Number(d.gPage || 0);
-  const page = Number(d.page || 0);
-  return chapter + ":" + (gp > 0 ? "g" + gp : "p" + page);
-}
-function readPagePosition(d) {
-  const gp = Number(d.gPage || 0);
-  if (gp > 0) return gp;
-  const chapter = Number.isFinite(d.chapter) ? d.chapter : curChapter || 0;
-  const page = Number(d.page || 0);
-  return chapter * 100000 + page;
-}
-function requiredReadMs(chars) {
-  if (chars <= 0) return 0;
-  if (chars < READ_TRACK.tinyPageChars) return 1000;
-  if (chars < READ_TRACK.shortPageChars) {
-    return clamp((chars / READ_TRACK.shortPageCpmLimit) * 60000, READ_TRACK.shortMinMs, READ_TRACK.shortMaxMs);
-  }
-  return (chars / READ_TRACK.normalCpmLimit) * 60000;
-}
 function creditReadSegment(reason, options = {}) {
   if (!rwSegment) return;
   const seg = rwSegment;
@@ -1126,11 +1070,11 @@ function creditReadSegment(reason, options = {}) {
   const rawDwell = Math.max(0, Date.now() - seg.startedAt);
   const chars = Math.max(0, seg.chars || 0);
   if (chars <= 0 || rawDwell < READ_TRACK.minDwellMs) return;
-  const required = requiredReadMs(chars);
+  const required = readerReadingMetrics.requiredDwellMs(chars);
   if (required <= 0) return;
   const dwellCap = Math.max(READ_TRACK.idleCapMs, required);
-  const dwell = clamp(rawDwell, 0, dwellCap);
-  const ratio = clamp(dwell / required, 0, 1);
+  const dwell = readerReadingMetrics.clamp(rawDwell, 0, dwellCap);
+  const ratio = readerReadingMetrics.clamp(dwell / required, 0, 1);
   if (ratio < READ_TRACK.fastTurnRatio) rwFastStreak += 1;
   else rwFastStreak = 0;
   const creditRatio = rwFastStreak >= READ_TRACK.fastTurnStreak ? ratio * READ_TRACK.fastTurnCredit : ratio;
@@ -1180,10 +1124,10 @@ function scheduleBacktrackResume(d) {
 }
 function trackReadWords(d) {
   if (!readerDebugSettingOn("reader_words_detect")) return;
-  const key = readPageKey(d);
+  const key = readerReadingMetrics.pageKey(d, curChapter);
   const chars = Math.max(0, d.pageChars || 0);
   if (!key || chars <= 0) return;
-  const pos = readPagePosition(d);
+  const pos = readerReadingMetrics.pagePosition(d, curChapter);
   if (pos > 0 && rwLastPosition > 0 && pos < rwLastPosition) {
     rwBacktrackBlockedUntil = Date.now() + READ_TRACK.backtrackCooldownMs;
     discardReadTracking("backtrack");
@@ -1275,49 +1219,65 @@ let bookProgressLastFrac = 0;
 let bookProgressLastSent = 0;
 let bookProgressPreviewFrac = null;
 let bookProgressPreviewTimer = 0;
-function normalizeReaderJumpBackPosition(value, fallback) {
-  const number = Number(value);
-  return Math.max(0, Math.min(1000, Math.round(Number.isFinite(number) ? number : fallback)));
-}
-function normalizeReaderJumpBackIconSizePx(value, fallback = 32) {
-  const number = Number(value);
-  return Math.max(30, Math.min(160, Math.round(Number.isFinite(number) ? number : fallback)));
-}
-function readerJumpBackIconHeightPx(iconSizePx) {
-  return Math.max(12, Math.round(normalizeReaderJumpBackIconSizePx(iconSizePx) * 0.4));
-}
-function readerJumpBackIconSizePxFromLegacyLevel(value) {
-  const level = Math.max(1, Math.min(10, Number(value) || 1));
-  return Math.round(32 * (1 + ((level - 1) * 4 / 9)));
-}
-// Keep the transparent hit target large, but store the placement of the
-// visible arrow. At either limit the arrow itself, rather than its padding,
-// reaches the screen edge.
-function readerJumpBackTrackPoint(length, iconSize, hitSize, position) {
-  const normalized = normalizeReaderJumpBackPosition(position, 0);
-  const visualTrack = Math.max(0, length - iconSize);
-  const hitTargetInset = Math.max(0, hitSize - iconSize) / 2;
-  return visualTrack * normalized / 1000 - hitTargetInset;
-}
+const readerJumpBackRules = window.ReaderJumpBackRules;
+if (!readerJumpBackRules) throw new Error("ReaderJumpBackRules is required");
+const readerNavigationRules = window.ReaderNavigationRules || (() => {
+  const limit = 100;
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const normalizePoint = (point, fallback = {}) => {
+    const source = point && typeof point === "object" ? point : {};
+    return {
+      chapter: Math.max(0, Number(source.chapter ?? fallback.chapter) || 0),
+      chFrac: clamp(Number(source.chFrac ?? fallback.chFrac) || 0, 0, 1),
+      progress: clamp(Number(source.progress ?? fallback.progress) || 0, 0, 100),
+    };
+  };
+  const samePoint = (left, right) => !!left && !!right
+    && left.chapter === right.chapter && Math.abs(left.chFrac - right.chFrac) < 0.0001;
+  return {
+    HISTORY_LIMIT: limit,
+    normalizePoint,
+    samePoint,
+    appendHistory(entries, point, fallback, max = limit) {
+      const history = Array.isArray(entries) ? entries : [];
+      const next = normalizePoint(point, fallback);
+      const added = !samePoint(history[history.length - 1], next);
+      return { point: next, added, history: (added ? [...history, next] : history.slice()).slice(-Math.max(1, Math.floor(Number(max) || limit)))};
+    },
+    pageSignature(data) {
+      return `${Number(data?.gPage) || 0}_${Number(data?.page) || 0}_${Number(data?.chapter) || 0}`;
+    },
+    trackPageDismissal(state, data, pageLimit) {
+      const current = state && typeof state === "object" ? state : {};
+      const visible = current.visible === true;
+      const awaitingLanding = current.awaitingLanding === true;
+      const lastPageSignature = String(current.lastPageSignature || "");
+      const pagesMoved = Math.max(0, Math.floor(Number(current.pagesMoved) || 0));
+      if (!visible) return { visible, awaitingLanding, lastPageSignature, pagesMoved, dismissed: false };
+      const signature = this.pageSignature(data);
+      if (awaitingLanding) return { visible: true, awaitingLanding: false, lastPageSignature: signature, pagesMoved: 0, dismissed: false };
+      const moved = lastPageSignature && signature !== lastPageSignature ? pagesMoved + 1 : pagesMoved;
+      if (moved >= Math.max(1, Math.floor(Number(pageLimit) || 1))) return { visible: false, awaitingLanding: false, lastPageSignature: "", pagesMoved: 0, dismissed: true };
+      return { visible: true, awaitingLanding: false, lastPageSignature: signature, pagesMoved: moved, dismissed: false };
+    },
+  };
+})();
 function readerJumpBackConfig() {
   const current = window.ReaderSettings?.get?.() || {};
-  const hasPixelSize = Object.prototype.hasOwnProperty.call(current, "readerJumpBackIconSizePx");
   return {
     enabled: current.showReaderJumpBack !== false,
     mode: current.readerJumpBackDismissMode === "time" ? "time" : "pages",
     seconds: Math.max(1, Math.min(600, Number(current.readerJumpBackDismissSeconds) || 30)),
     pages: Math.max(1, Math.min(100, Number(current.readerJumpBackDismissPages) || 3)),
-    iconSizePx: hasPixelSize
-      ? normalizeReaderJumpBackIconSizePx(current.readerJumpBackIconSizePx)
-      : readerJumpBackIconSizePxFromLegacyLevel(current.readerJumpBackSizeLevel),
-    positionX: normalizeReaderJumpBackPosition(current.readerJumpBackPositionX, 950),
-    positionY: normalizeReaderJumpBackPosition(current.readerJumpBackPositionY, 500),
+    iconSizePx: readerJumpBackRules.normalizeIconSizePx(current.readerJumpBackIconSizePx),
+    positionX: readerJumpBackRules.normalizePosition(current.readerJumpBackPositionX, 950),
+    positionY: readerJumpBackRules.normalizePosition(current.readerJumpBackPositionY, 500),
   };
 }
 function applyReaderJumpBackPlacement(iconSizePx, positionX, positionY) {
   if (!readerJumpBack) return;
-  const iconSize = normalizeReaderJumpBackIconSizePx(iconSizePx);
-  const iconHeight = readerJumpBackIconHeightPx(iconSize);
+  const iconSize = readerJumpBackRules.normalizeIconSizePx(iconSizePx);
+  const iconHeight = readerJumpBackRules.iconHeightPx(iconSize);
   const hitSize = Math.max(44, iconSize + 12);
   readerJumpBack.style.setProperty("--reader-jump-back-icon-size", `${iconSize}px`);
   readerJumpBack.style.setProperty("--reader-jump-back-icon-height", `${iconHeight}px`);
@@ -1326,8 +1286,8 @@ function applyReaderJumpBackPlacement(iconSizePx, positionX, positionY) {
   const width = Number(container?.clientWidth) || 0;
   const height = Number(container?.clientHeight) || 0;
   if (!width || !height) return;
-  readerJumpBack.style.left = `${Math.round(readerJumpBackTrackPoint(width, iconSize, hitSize, positionX))}px`;
-  readerJumpBack.style.top = `${Math.round(readerJumpBackTrackPoint(height, iconHeight, hitSize, positionY))}px`;
+  readerJumpBack.style.left = `${Math.round(readerJumpBackRules.trackPoint(width, iconSize, hitSize, positionX))}px`;
+  readerJumpBack.style.top = `${Math.round(readerJumpBackRules.trackPoint(height, iconHeight, hitSize, positionY))}px`;
 }
 function clearReaderNavigationDismissTimer() {
   if (readerNavigationDismissTimer) clearTimeout(readerNavigationDismissTimer);
@@ -1362,20 +1322,17 @@ function armReaderNavigationBackVisibility() {
 function trackReaderNavigationBackProgress(data) {
   const config = readerJumpBackConfig();
   if (!readerNavigationBackVisible || config.mode !== "pages") return;
-  const signature = `${Number(data?.gPage) || 0}_${Number(data?.page) || 0}_${Number(data?.chapter) || 0}`;
-  if (readerNavigationAwaitingLanding) {
-    readerNavigationAwaitingLanding = false;
-    readerNavigationLastPageSignature = signature;
-    return;
-  }
-  if (readerNavigationLastPageSignature && signature !== readerNavigationLastPageSignature) {
-    readerNavigationPagesMoved += 1;
-    if (readerNavigationPagesMoved >= config.pages) {
-      dismissReaderNavigationBack(false);
-      return;
-    }
-  }
-  readerNavigationLastPageSignature = signature;
+  const next = readerNavigationRules.trackPageDismissal({
+    visible: readerNavigationBackVisible,
+    awaitingLanding: readerNavigationAwaitingLanding,
+    lastPageSignature: readerNavigationLastPageSignature,
+    pagesMoved: readerNavigationPagesMoved,
+  }, data, config.pages);
+  readerNavigationBackVisible = next.visible;
+  readerNavigationAwaitingLanding = next.awaitingLanding;
+  readerNavigationLastPageSignature = next.lastPageSignature;
+  readerNavigationPagesMoved = next.pagesMoved;
+  if (next.dismissed) dismissReaderNavigationBack(false);
 }
 function syncReaderJumpBackSettings() {
   const config = readerJumpBackConfig();
@@ -1468,28 +1425,18 @@ function paintBookProgress(percent) {
   bookProgressThumb.style.left = percent + "%";
   bookProgressTrack.setAttribute("aria-valuenow", String(Math.max(1, Math.round(percent))));
 }
-function normalizedBookProgressPoint(point) {
-  const source = point && typeof point === "object" ? point : {};
-  return {
-    chapter: Math.max(0, Number(source.chapter ?? curChapter) || 0),
-    chFrac: Math.max(0, Math.min(1, Number(source.chFrac ?? curChFrac) || 0)),
-    progress: Math.max(0, Math.min(100, Number(source.progress ?? curProgress) || 0)),
-  };
-}
-function sameBookProgressPoint(left, right) {
-  return !!left && !!right && left.chapter === right.chapter && Math.abs(left.chFrac - right.chFrac) < 0.0001;
-}
 function rememberReaderNavigationPoint(point) {
-  const next = normalizedBookProgressPoint(point);
-  const previous = readerNavigationHistory[readerNavigationHistory.length - 1];
-  const added = !sameBookProgressPoint(previous, next);
-  if (added) {
-    readerNavigationHistory.push(next);
+  const result = readerNavigationRules.appendHistory(readerNavigationHistory, point, {
+    chapter: curChapter,
+    chFrac: curChFrac,
+    progress: curProgress,
+  });
+  readerNavigationHistory.splice(0, readerNavigationHistory.length, ...result.history);
+  if (result.added) {
     // The gesture manager combines this checkpoint with closed reader surfaces
     // so “撤销上一步” follows the real order of user-visible operations.
     window.dispatchEvent(new CustomEvent("reader-undo-checkpoint"));
   }
-  if (readerNavigationHistory.length > 100) readerNavigationHistory.splice(0, readerNavigationHistory.length - 100);
   if (readerJumpBackConfig().enabled) armReaderNavigationBackVisibility();
   else updateBookProgress();
 }
@@ -1637,145 +1584,70 @@ window.addEventListener("resize", () => {
 
 // ---- 书籍信息弹窗 ----
 const infoModal = document.getElementById("info-modal");
+const readerInfoPanel = window.ReaderBookInfoPanel.mount({ root: document, host: infoModal, prefix: "info" });
+const readerBookInfoRelated = window.ReaderBookInfoRelated.mount({
+  root: document,
+  invoke,
+  onOpenBook(book) {
+    ReaderShell.setOverlay(ReaderShell.OVERLAY.INFO, false);
+    invoke("open_book_at", { request: { id: String(book.id), chapter: 0, term: "" } }).catch(() => {});
+  },
+});
+let readerInfoMeta = {};
 ReaderShell.registerOverlay(ReaderShell.OVERLAY.INFO, {
   onOpen() {
     window.pauseReadTracking?.("book-info");
   },
 });
-function fmtWords(n) {
-  n = n || 0;
-  if (n >= 10000) return (n / 10000).toFixed(2) + " 万字";
-  return n + " 字";
-}
-function fmtSize(b) {
-  b = b || 0;
-  if (b >= 1048576) return (b / 1048576).toFixed(1) + "M";
-  if (b >= 1024) return Math.round(b / 1024) + "K";
-  return b + "B";
-}
-function renderInfoChips(element, values) {
-  element.replaceChildren();
-  const items = Array.isArray(values) ? values.filter(Boolean) : [];
-  if (!items.length) {
-    const empty = document.createElement("span");
-    empty.className = "info-chip empty";
-    empty.textContent = "未添加";
-    element.appendChild(empty);
-    return;
-  }
-  items.forEach((value) => {
-    const chip = document.createElement("span");
-    chip.className = "info-chip";
-    chip.textContent = value;
-    element.appendChild(chip);
-  });
-}
-function renderBookInfoTags(element, manualTags, modelTags) {
-  element.replaceChildren();
-  const append = (values, model) => (Array.isArray(values) ? values : []).filter(Boolean).forEach((value) => {
-    const chip = document.createElement("span");
-    chip.className = "info-chip" + (model ? " model-tag" : "");
-    if (model) {
-      const origin = document.createElement("span");
-      origin.className = "info-chip-origin";
-      origin.textContent = "AI";
-      chip.append(origin, document.createTextNode(value));
-      chip.title = "大模型分类标签";
-    } else {
-      chip.textContent = value;
-    }
-    element.appendChild(chip);
-  });
-  append(manualTags, false);
-  append(modelTags, true);
-  if (!element.childElementCount) {
-    const empty = document.createElement("span");
-    empty.className = "info-chip empty";
-    empty.textContent = "未添加";
-    element.appendChild(empty);
-  }
-}
-// ---- 评分（五颗星，支持半星 0.5 刻度；点左半=半星、右半=整星，再点同一处清除）----
-// 通用半星组件：在 container 里建 5 颗叠层星，鼠标悬停预览、点击回调 onPick(value)。
-function makeStars(container, onPick) {
-  for (let i = 0; i < 5; i++) {
-    const st = document.createElement("span");
-    st.className = "star";
-    const bg = document.createElement("span");
-    bg.className = "s-bg";
-    bg.textContent = "★";
-    const fg = document.createElement("span");
-    fg.className = "s-fg";
-    fg.textContent = "★";
-    st.append(bg, fg);
-    container.appendChild(st);
-  }
-  const stars = [...container.querySelectorAll(".star")];
-  function paint(v) {
-    stars.forEach((st, i) => {
-      const f = Math.max(0, Math.min(1, v - i)); // 该颗的填充比例：0 / .5 / 1
-      st.querySelector(".s-fg").style.width = f * 100 + "%";
-    });
-  }
-  function valAt(e) {
-    for (let i = 0; i < stars.length; i++) {
-      const r = stars[i].getBoundingClientRect();
-      if (e.clientX <= r.right) return i + (e.clientX < r.left + r.width / 2 ? 0.5 : 1);
-    }
-    return 5;
-  }
-  container.addEventListener("mousemove", (e) => paint(valAt(e)));
-  container.addEventListener("mouseleave", () => paint(container._val || 0));
-  container.addEventListener("click", (e) => {
-    let v = valAt(e);
-    if (v === container._val) v = 0; // 点中当前值 → 清除
-    container._val = v;
-    paint(v);
-    onPick(v);
-  });
-  container.setVal = (v) => {
-    container._val = v || 0;
-    paint(container._val);
-  };
-  paint(0);
-}
-const infoStars = document.getElementById("info-stars");
-makeStars(infoStars, (v) => invoke("set_rating", { rating: v }).catch(() => {}));
 invoke("book_meta").then((m) => { currentBookTitle = m.title || ""; }).catch(() => {});
 
 async function openReaderBookInfo() {
-  document.getElementById("info-words").textContent = "统计中…";
+  readerInfoPanel.setLoading();
   ReaderShell.setOverlay(ReaderShell.OVERLAY.INFO, true);
   try {
     const m = await invoke("book_meta");
     currentBookTitle = m.title || "";
-    document.getElementById("info-title").textContent = m.title || "—";
-    document.getElementById("info-author").textContent = m.author || "未知";
-    document.getElementById("info-format").textContent = (m.format || "").toUpperCase();
-    document.getElementById("info-words").textContent = fmtWords(m.word_count);
-    document.getElementById("info-size").textContent = fmtSize(m.size);
-  renderBookInfoTags(document.getElementById("info-tags"), m.tags, m.model_tags || m.modelTags);
-    renderInfoChips(document.getElementById("info-collections"), m.collections);
-    document.getElementById("info-desc").textContent = m.description || "";
-    infoStars.setVal(m.rating || 0);
+    readerInfoMeta = m;
+    readerInfoPanel.render(m);
   } catch (e) {
-    document.getElementById("info-words").textContent = "读取失败：" + e;
+    readerInfoPanel.setError(e);
   }
 }
 window.openReaderBookInfo = openReaderBookInfo;
 document.getElementById("info-btn")?.addEventListener("click", () => {
   void openReaderBookInfo();
 });
-document.getElementById("info-close").addEventListener("click", () => {
-  ReaderShell.setOverlay(ReaderShell.OVERLAY.INFO, false);
-});
 infoModal.addEventListener("click", (e) => {
   if (e.target === infoModal) ReaderShell.setOverlay(ReaderShell.OVERLAY.INFO, false);
 });
-// 简介编辑：失焦保存
-document.getElementById("info-desc").addEventListener("blur", () => {
-  const desc = document.getElementById("info-desc").textContent.trim();
-  invoke("set_description", { description: desc }).catch(() => {});
+function openReaderOrganization(field) {
+  if (!currentBookId) return;
+  emit("reader-gesture-action", { action: "book_organization", field, bookId: String(currentBookId) }).catch(() => {});
+  ReaderShell.setOverlay(ReaderShell.OVERLAY.INFO, false);
+}
+readerInfoPanel.configure({
+  onRating(rating) {
+    if (currentBookId) invoke("set_book_rating", { id: String(currentBookId), rating }).catch(() => {});
+  },
+  onTitle(title) {
+    if (!currentBookId || !title || title === currentBookTitle) return;
+    invoke("set_book_title", { id: String(currentBookId), title }).then(() => { currentBookTitle = title; }).catch(() => {});
+  },
+  onDescription(description) {
+    if (currentBookId) invoke("set_book_description", { id: String(currentBookId), description }).catch(() => {});
+  },
+  onAction(action) {
+    if (action === "tags" || action === "collections") {
+      openReaderOrganization(action);
+    } else if (action === "cover" && currentBookId) {
+      emit("reader-gesture-action", { action: "change_cover", bookId: String(currentBookId) }).catch(() => {});
+      ReaderShell.setOverlay(ReaderShell.OVERLAY.INFO, false);
+    } else if (action === "similar") {
+      void readerBookInfoRelated.openSimilar(currentBookId, readerInfoMeta);
+    } else if (action === "timeline" && currentBookId) {
+      void readerBookInfoRelated.openTimeline(currentBookId);
+    }
+  },
 });
 
 const readerEndModal = document.getElementById("reader-end-modal");
@@ -2063,6 +1935,7 @@ window.addEventListener("message", (e) => {
   if (e.data.ready) {
     hideLoading();
     frameReady = true;
+    window.ReaderStartupGuard?.markFrameReady?.();
     if (!readerFirstReadyLogged) {
       readerFirstReadyLogged = true;
       const readyElapsedMs = performance.now() - readerShellStartedAt;
@@ -2376,10 +2249,15 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
 
 // 目录、书签、批注/高亮 UI 在 reader-notes-ui.js。
 
+// From here on, startup only performs asynchronous book loading. The emergency
+// close path may now hand control back to the normal save-and-close flow.
+window.ReaderStartupGuard?.markScriptReady?.();
+
 (async () => {
   initSettingsUI();
   applyShellTheme(settings.theme);
   try {
+    window.ReaderStartupGuard?.beginBookLoad?.();
     const info = await invoke("book_info");
     const infoElapsedMs = performance.now() - readerShellStartedAt;
     invoke("reader_perf_log", { event: `shell_info elapsed_ms=${infoElapsedMs.toFixed(1)}` }).catch(() => {});
@@ -2417,12 +2295,14 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
         pdfDual = true;
         document.getElementById("pdf-dual").classList.add("active");
       }
-      frame.src =
+      const pdfSource =
         "pdfview.html?u=" + encodeURIComponent(info.url) +
         "&p=" + rp +
         "&scale=" + pscale +
         "&dual=" + pdual +
         "&s=" + encodeURIComponent(JSON.stringify(settings));
+      if (!window.ReaderStartupGuard?.beginFrameNavigation?.(pdfSource)) return;
+      frame.src = pdfSource;
       return;
     }
     resumeChapter = info.resume_chapter || 0;
@@ -2449,13 +2329,16 @@ setInterval(creditCurrentReadPage, READ_TRACK.periodicCreditMs);
       "&rf=" + resumeFrac +
       "&ra=" + encodeURIComponent(JSON.stringify(info.resume_position || null)) +
       "&s=" + encodeURIComponent(JSON.stringify(settings));
-    frame.src = info.url + q;
+    const readerSource = info.url + q;
+    if (!window.ReaderStartupGuard?.beginFrameNavigation?.(readerSource)) return;
+    frame.src = readerSource;
     // 正文导航已经开始后再分批构建目录；超大目录不再阻塞首屏。
     scheduleTocBuild(toc);
     // 若本次是从书架检索点开的，取走待跳转位置，合并页就绪后跳过去
     invoke("take_pending_jump").then((j) => { if (j) doJump(j); }).catch(() => {});
   } catch (e) {
-    document.body.innerHTML =
-      "<p style='padding:20px;color:#b00'>" + readerText("openBookFailed", "Could not open book: {error}", { error: e }) + "</p>";
+    // Keep the native close control and outer shell alive. Replacing body here
+    // used to leave an uncloseable reader with its iframe at about:blank.
+    window.ReaderStartupGuard?.failBookLoad?.(e);
   }
 })();

@@ -25,14 +25,16 @@ pub(crate) const RES_BASE: &str = "reader://localhost";
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub(crate) const RES_BASE: &str = "http://reader.localhost";
 
-/// 公共发行版的默认同步端点。数据库中已经保存的自定义地址始终优先，
-/// 因此自托管用户不会被迁移或覆盖。
-pub(crate) const DEFAULT_SYNC_URL: &str = "https://117.72.220.69";
+/// 公共发行构建可从仓库外的 `KUNPENG_DEFAULT_SYNC_URL` 注入 HTTPS 端点；
+/// 源码、自托管构建和未配置的本地开发仍要求用户显式填写。
+pub(crate) const DEFAULT_SYNC_URL: &str = match option_env!("KUNPENG_DEFAULT_SYNC_URL") {
+    Some(value) => value,
+    None => "",
+};
 
 /// 调试日志：写到 %LOCALAPPDATA%\ebook-reader\debug.log（windows 子系统下没有 stderr）。
 pub(crate) fn log(msg: &str) {
-    if let Some(mut dir) = dirs::cache_dir() {
-        dir.push("ebook-reader");
+    if let Some(mut dir) = crate::profile::app_cache_dir() {
         let _ = std::fs::create_dir_all(&dir);
         dir.push("debug.log");
         use std::io::Write;
@@ -164,7 +166,7 @@ mod tests {
     #[test]
     fn now_ms_is_nonzero_and_resource_base_matches_platform() {
         assert!(now_ms() > 0);
-        assert_eq!(DEFAULT_SYNC_URL, "https://117.72.220.69");
+        assert!(DEFAULT_SYNC_URL.is_empty() || DEFAULT_SYNC_URL.starts_with("https://"));
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         assert_eq!(RES_BASE, "reader://localhost");
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]

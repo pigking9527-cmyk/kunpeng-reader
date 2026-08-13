@@ -6,7 +6,10 @@
     <title>阅读</title>
     <link rel="stylesheet" href="reader-preferences.css" />
     <link rel="stylesheet" href="reader-click-zones.css" />
+    <link rel="stylesheet" href="book-info-panel.css" />
+    <link rel="stylesheet" href="book-info-related.css" />
     <link rel="stylesheet" href="window-resize.css" />
+    <link rel="stylesheet" href="overlay-stack.css" />
     <style>.reader-appearance-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}.reader-appearance-actions .reader-preferences-reset{margin-top:0}.reader-appearance-actions .reader-preferences-reset.danger{margin-left:0}</style>
     <style>
       * { box-sizing: border-box; }
@@ -19,7 +22,7 @@
         display: flex; flex-direction: column; height: 100vh;
         color: #222; background: #fff;
       }
-      .reader-gesture-trail { position: fixed; z-index: 120; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+      .reader-gesture-trail { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
       .reader-gesture-trail[hidden] { display: none; }
       .toolbar {
         display: flex; align-items: center; gap: 6px;
@@ -55,7 +58,7 @@
 
       /* 窄窗口优先压缩标题和空白，不让滚动容器裁掉绝对定位的设置面板。 */
       @media (max-width: 760px) {
-        .reader-gesture-trail { position: fixed; z-index: 120; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+        .reader-gesture-trail { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
       .reader-gesture-trail[hidden] { display: none; }
       .toolbar { gap: 3px; padding-left: 6px; }
         .toolbar .title { max-width: 20vw; }
@@ -145,7 +148,7 @@
       body.theme-dark .cross-hit:hover { background: #3a3a3d; }
       body.theme-dark .cross-head:hover { background: #31343b; }
 
-      /* 书籍信息弹窗 */
+      /* 图书信息：与书架使用同一代信息卡布局 */
       .modal {
         display: none; position: fixed; inset: 0; z-index: 50;
         background: rgba(0,0,0,0.35); align-items: center; justify-content: center;
@@ -165,20 +168,6 @@
       }
       .modal-head { display: flex; align-items: center; justify-content: space-between;
         font-size: 16px; font-weight: 600; margin-bottom: 10px; }
-      .info-row { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid #f0f0f2; font-size: 14px; }
-      .info-row.col { flex-direction: column; gap: 5px; }
-      .info-k { color: #888; flex: 0 0 48px; }
-      .info-v { color: #222; word-break: break-word; }
-      .info-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-      .info-chip { padding: 3px 9px; border-radius: 999px; background: #edf3ff; color: #315f9e; font-size: 12px; }
-      .info-chip.empty { background: transparent; color: #999; padding-left: 0; }
-      .stars { display: inline-flex; gap: 4px; cursor: pointer; }
-      .stars .star { position: relative; width: 1em; height: 1em; font-size: 20px; line-height: 1; user-select: none; }
-      .stars .s-bg { color: #d4d4d8; }
-      .stars .s-fg { position: absolute; left: 0; top: 0; width: 0; overflow: hidden; color: #f5a623; white-space: nowrap; }
-      body.theme-dark .stars .s-bg { color: #555; }
-      .info-desc { color: #333; line-height: 1.7; white-space: pre-wrap;
-        max-height: 38vh; overflow-y: auto; }
 
       .body { position: relative; flex: 1 1 auto; min-height: 0; }
 
@@ -659,9 +648,6 @@
             body.theme-dark .settings select,
       body.theme-dark .rsearch input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
       body.theme-dark .mode-toggle-item { color: #ddd; }
-      body.theme-dark .info-k { color: #999; }
-      body.theme-dark .info-v, body.theme-dark .info-desc { color: #ddd; }
-      body.theme-dark .info-row { border-color: #3a3a3d; }
       .reader-end-card { width: min(1040px, calc(100vw - 48px)); max-height: min(720px, calc(100vh - 64px)); display: flex; flex-direction: column; }
       .reader-end-intro { color: #777; font-size: 13px; margin: 0 0 12px; }
       .reader-end-list { display: grid; grid-template-columns: repeat(5,minmax(150px,1fr)); gap: 12px; overflow-x: auto; padding: 2px 2px 8px; }
@@ -894,7 +880,6 @@
         <section class="modal-card reader-preferences-card">
           <header class="reader-preferences-head">
             <strong data-reader-i18n="readerPreferences">阅读偏好</strong>
-            <button id="reader-preferences-close" class="reader-preferences-close" type="button" aria-label="关闭" title="关闭" data-reader-i18n-aria="close" data-reader-i18n-title="close">×</button>
           </header>
           <div class="reader-preference-scope" role="group" aria-label="偏好保存范围" data-reader-i18n-aria="preferenceScopeLabel">
             <button class="active" type="button" data-pref-scope="default" data-reader-i18n="preferenceOverall" aria-pressed="true">总体</button>
@@ -1160,23 +1145,7 @@
       </div>
       <button id="reader-jump-back" class="reader-jump-back" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置" data-reader-i18n-title="restorePosition" data-reader-i18n-aria="restorePosition" hidden><svg class="reader-jump-back-arrow" viewBox="0 0 120 48" aria-hidden="true"><path d="M120 24H18M18 24L42 4M18 24L42 44"/></svg></button>
     </div>
-    <div id="info-modal" class="modal">
-      <div class="modal-card">
-        <div class="modal-head">
-          <span data-reader-i18n="bookInformation">书籍信息</span>
-          <button id="info-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
-        </div>
-        <div class="info-row"><span class="info-k" data-reader-i18n="title">书名</span><span id="info-title" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k" data-reader-i18n="author">作者</span><span id="info-author" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k" data-reader-i18n="format">格式</span><span id="info-format" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k" data-reader-i18n="wordCount">字数</span><span id="info-words" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k" data-reader-i18n="size">大小</span><span id="info-size" class="info-v"></span></div>
-        <div class="info-row"><span class="info-k" data-reader-i18n="rating">评分</span><span id="info-stars" class="stars" title="点击打分，再点同一颗清除" data-reader-i18n-title="ratingHint"></span></div>
-        <div class="info-row"><span class="info-k" data-reader-i18n="tags">标签</span><span id="info-tags" class="info-v info-chips"></span></div>
-        <div class="info-row"><span class="info-k" data-reader-i18n="collections">书单</span><span id="info-collections" class="info-v info-chips"></span></div>
-        <div class="info-row col"><span class="info-k" data-reader-i18n="description">简介（可编辑，失焦保存）</span><div id="info-desc" class="info-desc" contenteditable="true"></div></div>
-      </div>
-    </div>
+    <div id="info-modal" class="modal" data-overlay-role="information" role="dialog" aria-modal="true" aria-label="书籍信息"></div>
     <div id="reader-end-modal" class="modal">
       <div class="modal-card reader-end-card">
         <div class="modal-head">
@@ -1211,8 +1180,9 @@
       </div>
     </div>
     <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果" data-reader-i18n-title="returnToPreviousBook" data-reader-i18n-aria="returnToPreviousBook">←</button>
-    <canvas id="reader-gesture-trail" class="reader-gesture-trail" hidden aria-hidden="true"></canvas>
+    <canvas id="reader-gesture-trail" class="reader-gesture-trail" data-overlay-surface="gesture-trail" data-overlay-role="feedback" hidden aria-hidden="true"></canvas>
     <script src="recovery-settings-snapshot.js"></script>
+    <script src="overlay-stack.js"></script>
     <script src="window-resize.js"></script>
     <script src="reader-i18n.js"></script>
     <script src="bridge/reader-protocol-bridge.js"></script>
@@ -1222,11 +1192,19 @@
     <script src="reader-search-ui.js"></script>
     <script src="animation-settings.js"></script>
     <script src="reader-settings-ui.js"></script>
+    <script src="reader-jump-back-rules.js"></script>
+    <script src="reader-navigation-rules.js"></script>
+    <script src="reader-preference-color-rules.js"></script>
     <script src="reader-preferences-ui.js"></script>
     <script src="reader-click-zones-ui.js"></script>
     <script src="reader-recommendation-settings.js"></script>
     <script src="news-gesture.js"></script>
     <script src="browser-native-guard.js"></script>
+    <script src="book-info-panel.js"></script>
+    <script src="book-info-related.js"></script>
+    <script src="reader-ai-history-rules.js"></script>
+    <script src="reader-startup-guard.js"></script>
+    <script src="reader-reading-metrics.js"></script>
     <script src="reader.js"></script>
     <script src="reader-gesture.js"></script>
     <script src="reader-notes-ui.js"></script>

@@ -5,13 +5,13 @@
 ## 数据世代
 
 - 每个账户拥有整数 `data_generation`，初始值为 `1`，只增不减。
-- `/auth/register`、`/auth/login`、`/auth/me`、`/sync/pull`、`/sync/inventory`、`/sync/push` 和 `/sync/reconcile` 返回 `data_generation`。
-- 新版客户端在 `/sync/push` 与 `/sync/reconcile` JSON 中发送 `data_generation`。
+- `/v1/auth/register`、`/v1/auth/login`、`/v1/auth/me`、`/v1/sync/pull`、`/v1/sync/inventory`、`/v1/sync/push` 和 `/v1/sync/reconcile` 返回 `data_generation`。
+- 新版客户端在 `/v1/sync/push` 与 `/v1/sync/reconcile` JSON 中发送 `data_generation`。
 - 当前世代大于 1 时，缺失或不相等的写请求返回 HTTP 409、`DATA_GENERATION_MISMATCH`，不得接收任何实体。
 
 ## 清空云端同步数据
 
-`POST /sync/data/reset`
+`POST /v1/sync/data/reset`
 
 请求：
 
@@ -29,7 +29,7 @@
 
 ## 永久删除账户
 
-`POST /auth/account/delete`
+`POST /v1/auth/account/delete`
 
 请求：
 

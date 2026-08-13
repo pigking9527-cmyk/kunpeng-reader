@@ -60,14 +60,4 @@ export interface SaveShelfBooklistRequest {
 export interface ShelfPort {
   load(signal: AbortSignal): Promise<ShelfSnapshot>;
   openBook(bookId: ShelfBookId, signal: AbortSignal): Promise<void>;
-  /** Additive only: implementations must not replace existing membership. */
-  addOrganization(request: AddShelfOrganizationRequest, signal: AbortSignal): Promise<ShelfSnapshot>;
-  /** Saves an existing host-provided booklist without changing its identity. */
-  saveBooklist(request: SaveShelfBooklistRequest, signal: AbortSignal): Promise<ShelfSnapshot>;
-  /** Creates an empty named booklist through the host's existing sync-aware path. */
-  createBooklist(name: string, signal: AbortSignal): Promise<ShelfSnapshot>;
-  /** Removes only the named booklist and its membership relations, never books. */
-  deleteBooklist(id: string, signal: AbortSignal): Promise<ShelfSnapshot>;
-  /** Removes books from the local shelf only; source files remain untouched. */
-  removeBooks(bookIds: readonly ShelfBookId[], signal: AbortSignal): Promise<ShelfSnapshot>;
 }

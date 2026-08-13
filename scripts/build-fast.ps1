@@ -6,7 +6,6 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $fastExe = Join-Path $repo "target\fast\ebook-reader-tauri.exe"
 $fastOrt = Join-Path $repo "target\fast\onnxruntime.dll"
-$providerNames = @("onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll", "cudart64_12.dll", "cudnn64_9.dll", "ONNX-Runtime-LICENSE.txt", "NVIDIA-CUDA-LICENSE.txt", "NVIDIA-cuDNN-LICENSE.txt")
 $productName = -join @([char]0x9cb2, [char]0x9e4f, [char]0x9605, [char]0x8bfb, [char]0x5668)
 $repoExe = Join-Path $repo ($productName + ".exe")
 $repoOrt = Join-Path $repo "onnxruntime.dll"
@@ -71,7 +70,6 @@ try {
 
   Write-Host "== cargo build --profile fast =="
   cargo build --profile fast
-  & (Join-Path $PSScriptRoot "prepare-windows-gpu-runtime.ps1") -Destination "target\fast"
 
   if (-not (Test-Path -LiteralPath $fastExe)) {
     throw "Fast exe not found: $fastExe"
@@ -79,20 +77,13 @@ try {
   if (-not (Test-Path -LiteralPath $fastOrt)) {
     throw "ONNX Runtime DLL not found: $fastOrt"
   }
-  foreach ($name in $providerNames) {
-    $provider = Join-Path (Split-Path -Parent $fastExe) $name
-    if (-not (Test-Path -LiteralPath $provider)) { throw "CUDA Provider not found: $provider" }
-  }
 
   Stop-ReaderProcesses
   Copy-DesktopArtifact $fastExe $repoExe
   Copy-DesktopArtifact $fastOrt $repoOrt
-  foreach ($name in $providerNames) {
-    Copy-DesktopArtifact (Join-Path (Split-Path -Parent $fastExe) $name) (Join-Path $repo $name)
-  }
   Write-DesktopShortcut
   Remove-Item -LiteralPath $legacyDesktopExe, $legacyDesktopOrt -Force -ErrorAction SilentlyContinue
-  $delivered = @($repoExe, $repoOrt, $desktopShortcut) + ($providerNames | ForEach-Object { Join-Path $repo $_ })
+  $delivered = @($repoExe, $repoOrt, $desktopShortcut)
   Get-Item -LiteralPath $delivered | Select-Object FullName, Length, LastWriteTime
   Write-Host "Fast GUI executable and ONNX Runtime stay in the repository; desktop only receives a shortcut. Use scripts/build-release.ps1 for official releases."
 } finally {

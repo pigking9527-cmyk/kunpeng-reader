@@ -17,20 +17,29 @@
   const BACKGROUND_PREFETCH_BATCHES = 4;
   const VISIBLE_IMAGE_CONCURRENCY = 4;
 
+  // `news-rules.js` is deliberately optional while deployments catch up with
+  // the new classic-script asset. Keep this exact fallback in the single UI:
+  // an older WebView must not lose source management or link validation just
+  // because it has a cached index page.
+  const newsRules = global.ReaderNewsRules;
+  const newsLayoutRules = global.ReaderNewsLayoutRules;
   const text = (value) => String(value == null ? "" : value);
   const i18n = (key, fallback) => global.ReaderAppI18n?.t?.(key) || fallback;
   const format = (key, fallback, values) => i18n(key, fallback).replace(/\{(\w+)\}/g, (_, name) => values?.[name] ?? "");
   function safeHttpUrl(value) {
+    if (typeof newsRules?.safeHttpUrl === "function") return newsRules.safeHttpUrl(value);
     try {
       const url = new URL(text(value));
       return url.protocol === "https:" ? url.href : "";
     } catch (_) { return ""; }
   }
   function safeImageDataUrl(value) {
+    if (typeof newsRules?.safeImageDataUrl === "function") return newsRules.safeImageDataUrl(value);
     const image = text(value).trim();
     return /^data:image\/(?:jpeg|png|gif|webp);base64,[a-z0-9+/=]+$/i.test(image) ? image : "";
   }
   function resultItems(result) {
+    if (typeof newsRules?.resultItems === "function") return newsRules.resultItems(result);
     if (Array.isArray(result)) return result;
     if (Array.isArray(result?.items)) return result.items;
     if (Array.isArray(result?.data)) return result.data;
@@ -38,9 +47,11 @@
     return [];
   }
   function previewAttempted(item) {
+    if (typeof newsRules?.previewAttempted === "function") return newsRules.previewAttempted(item);
     return item?.previewAttempted === true || item?.preview_attempted === true || Boolean(safeImageDataUrl(item?.previewDataUrl || item?.preview_data_url));
   }
   function hasPendingPreviews(result) {
+    if (typeof newsRules?.hasPendingPreviews === "function") return newsRules.hasPendingPreviews(result);
     return resultItems(result).some((item) => !previewAttempted(item) && Boolean(safeHttpUrl(item?.url || item?.link || item?.href)));
   }
   function withTimeout(promise, timeoutMs = LOAD_TIMEOUT_MS) {
@@ -57,8 +68,12 @@
   const sourceCategory = (source) => text(source?.category).trim() || i18n("newsCategoryOther", "其他");
   const sourceId = (item) => text(item?.sourceId || item?.source_id || item?.source || i18n("news", "资讯"));
   const sourceName = (item) => text(item?.source || item?.source_name || item?.site || i18n("news", "资讯")).trim();
-  const defaultSourceIds = (catalog) => catalog.filter((source) => source.defaultEnabled || source.default_enabled).map((source) => text(source.id));
+  const defaultSourceIds = (catalog) => {
+    if (typeof newsRules?.defaultSourceIds === "function") return newsRules.defaultSourceIds(catalog);
+    return catalog.filter((source) => source.defaultEnabled || source.default_enabled).map((source) => text(source.id));
+  };
   function allowedSourceIds(ids, catalog) {
+    if (typeof newsRules?.allowedSourceIds === "function") return newsRules.allowedSourceIds(ids, catalog, MAX_SOURCES);
     const allowed = new Set(catalog.map((source) => text(source.id)));
     const seen = new Set();
     return (Array.isArray(ids) ? ids : []).map(text).filter((id) => allowed.has(id) && !seen.has(id) && (seen.add(id), true)).slice(0, MAX_SOURCES);
@@ -69,11 +84,16 @@
     return selected.length ? selected : defaultSourceIds(catalog);
   }
   function normalizeTiebaBars(values) {
+    if (typeof newsRules?.normalizeTiebaBars === "function") return newsRules.normalizeTiebaBars(values, MAX_TIEBA_BARS);
     const seen = new Set();
     return (Array.isArray(values) ? values : []).map((value) => text(value).trim().replace(/吧$/, "").trim()).filter((name) => name && name.length <= 48 && !/[\u0000-\u001f\u007f]/.test(name) && !seen.has(name) && (seen.add(name), true)).slice(0, MAX_TIEBA_BARS);
   }
   function loadStoredTiebaBars() { return normalizeTiebaBars(readJson(TIEBA_BARS_STORAGE_KEY)); }
-  function enabledTiebaBars(values, bars) { const available = new Set(normalizeTiebaBars(bars)); return normalizeTiebaBars(values).filter((name) => available.has(name)); }
+  function enabledTiebaBars(values, bars) {
+    if (typeof newsRules?.enabledTiebaBars === "function") return newsRules.enabledTiebaBars(values, bars, MAX_TIEBA_BARS);
+    const available = new Set(normalizeTiebaBars(bars));
+    return normalizeTiebaBars(values).filter((name) => available.has(name));
+  }
   function loadStoredEnabledTiebaBars(bars) { const saved = readJson(TIEBA_ENABLED_BARS_STORAGE_KEY); return Array.isArray(saved) ? enabledTiebaBars(saved, bars) : bars.slice(); }
   function storageGet(key, fallback) { try { return global.localStorage.getItem(key) || fallback; } catch (_) { return fallback; } }
   function storageSet(key, value) { try { global.localStorage.setItem(key, value); } catch (_) { /* preferences are optional */ } }
@@ -413,18 +433,22 @@
     function filteredItems() { return selectedCategory === ALL_CATEGORY ? allItems : allItems.filter((item) => sourceCategory(sourceForId(sourceId(item))) === selectedCategory); }
     function masonryColumnCount() {
       const minimumCardWidth = 210, gap = 13, width = feed.clientWidth || page.clientWidth;
+      if (typeof newsLayoutRules?.masonryColumnCount === "function") return newsLayoutRules.masonryColumnCount(width, renderedMasonryColumnCount, { minimumCardWidth, gap });
       if (!width) return Math.max(1, renderedMasonryColumnCount || 1);
       return Math.max(1, Math.floor((width + gap) / (minimumCardWidth + gap)));
     }
     function estimatedCardHeight(item, columnCount) {
       const gap = 13;
-      const availableWidth = Math.max(160, ((feed.clientWidth || page.clientWidth || 210) - gap * (columnCount - 1)) / columnCount - 40);
+      const width = feed.clientWidth || page.clientWidth || 210;
+      const title = item.title || item.name || i18n("untitledNews", "未命名新闻");
+      const summary = text(item.summary || item.description || item.content || item.excerpt).trim();
+      const hasImage = Boolean(safeImageDataUrl(item.previewDataUrl || item.preview_data_url));
+      if (typeof newsLayoutRules?.estimateCardHeight === "function") return newsLayoutRules.estimateCardHeight({ title, summary, hasImage }, { width, columnCount, gap });
+      const availableWidth = Math.max(160, (width - gap * (columnCount - 1)) / columnCount - 40);
       const charsPerLine = Math.max(10, Math.floor(availableWidth / 16));
       const lineCount = (value, maximum) => Math.min(maximum, Math.max(1, Math.ceil(Array.from(text(value)).length / charsPerLine)));
-      const titleLines = lineCount(item.title || item.name || i18n("untitledNews", "未命名新闻"), 4);
-      const summary = text(item.summary || item.description || item.content || item.excerpt).trim();
+      const titleLines = lineCount(title, 4);
       const summaryLines = summary ? lineCount(summary, 3) : 0;
-      const hasImage = Boolean(safeImageDataUrl(item.previewDataUrl || item.preview_data_url));
       return 68 + titleLines * 27 + summaryLines * 21 + (hasImage ? 146 : 0) + 44;
     }
     function renderCards(container, items) {
@@ -434,10 +458,17 @@
         const column = root.createElement("div"); column.className = "newsnow-masonry-column"; return column;
       });
       const columnHeights = Array.from({ length: columnCount }, () => 0);
-      items.forEach((item) => {
-        const target = columnHeights.reduce((shortest, height, index) => height < columnHeights[shortest] ? index : shortest, 0);
+      const estimatedHeights = items.map((item) => estimatedCardHeight(item, columnCount));
+      const targets = typeof newsLayoutRules?.balancedColumnIndexes === "function"
+        ? newsLayoutRules.balancedColumnIndexes(estimatedHeights, columnCount)
+        : estimatedHeights.map((_, itemIndex) => {
+          const target = columnHeights.reduce((shortest, height, index) => height < columnHeights[shortest] ? index : shortest, 0);
+          columnHeights[target] += estimatedHeights[itemIndex];
+          return target;
+        });
+      items.forEach((item, itemIndex) => {
+        const target = targets[itemIndex];
         columns[target].appendChild(makeCard(item));
-        columnHeights[target] += estimatedCardHeight(item, columnCount);
       });
       renderedMasonryColumnCount = columnCount;
       container.replaceChildren(...columns);

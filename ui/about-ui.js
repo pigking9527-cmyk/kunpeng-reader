@@ -217,6 +217,16 @@
       updateBar.classList.remove("show");
     }
 
+    function closeAbout() {
+      modal.classList.remove("show");
+    }
+
+    function openAbout() {
+      menuElement?.classList.remove("show");
+      modal.classList.add("show");
+      loadCurrentNotes();
+    }
+
     function reopenUpdateCard() {
       if (pendingRelease) {
         updateBar.classList.add("show");
@@ -304,14 +314,10 @@
       setUpdateState("checkingUpdate");
       checkUpdate(true);
     });
-    root.getElementById("mi-about").addEventListener("click", () => {
-      menuElement?.classList.remove("show");
-      modal.classList.add("show");
-      loadCurrentNotes();
-    });
-    root.getElementById("about-close").addEventListener("click", () => modal.classList.remove("show"));
+    root.getElementById("mi-about").addEventListener("click", openAbout);
+    root.getElementById("about-close").addEventListener("click", closeAbout);
     modal.addEventListener("click", (event) => {
-      if (event.target === modal) modal.classList.remove("show");
+      if (event.target === modal) closeAbout();
     });
     global.addEventListener?.("app-language-changed", () => {
       setUpdateState(updateButton.dataset.i18nState || "checkUpdates");

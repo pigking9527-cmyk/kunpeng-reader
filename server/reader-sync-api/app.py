@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 
+import database
 import recovery
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +30,7 @@ PORT = int(os.environ.get("SYNC_PORT", "8787"))
 DEFAULT_USER_ID = "default"
 DEFAULT_USERNAME = "default"
 MAX_BODY_BYTES = 16 * 1024 * 1024
+MAX_PULL_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_ENTITIES = 5000
 MAX_ENTITY_JSON_BYTES = 1024 * 1024
 MAX_READER_PALETTE_JSON_BYTES = 15 * 1024 * 1024
@@ -45,14 +47,18 @@ MAX_USER_ENTITIES = 50_000
 MAX_USER_JSON_BYTES = 150 * 1024 * 1024
 MAX_USERS = 10_000
 MAX_TOKENS_PER_USER = 5
+MAX_ACCOUNT_DEVICES = 5
 TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000
 MAX_CONCURRENT_REQUESTS = 32
+MAX_CONCURRENT_PASSWORD_OPERATIONS = 4
 MAX_IGNORED_DETAILS = 100
 DEFAULT_ACCOUNT_STORAGE_LIMIT_BYTES = 25 * 1024 * 1024
 LEGACY_ACCOUNT_STORAGE_LIMIT_BYTES = 100 * 1024 * 1024
 MAX_ACCOUNT_DAILY_WRITE_BYTES = 10 * 1024 * 1024
 MAX_ACCOUNT_DAILY_ENTITY_WRITES = 3_000
 RATE_LIMIT_HMAC_KEY = os.environ.get("RATE_LIMIT_HMAC_KEY", "").encode("utf-8")
+RATE_LIMIT_HMAC_PREVIOUS_KEY = os.environ.get("RATE_LIMIT_HMAC_PREVIOUS_KEY", "").encode("utf-8")
+REGISTRATION_ENABLED = os.environ.get("REGISTRATION_ENABLED", "1") != "0"
 SECURITY_ALERT_TO = os.environ.get("SECURITY_ALERT_TO", "").strip()
 SECURITY_ALERT_WINDOW_MS = 15 * 60 * 1000
 SUPPORTED_ENTITY_KINDS = frozenset((
@@ -68,7 +74,7 @@ INVENTORY_ENTITY_KINDS = frozenset((
     "model_book_tags_v1", "user_book_tags_v1", "book_collections_v1", "booklist_v1", "vocab", "reading_bucket_v2",
     "ai_reader_history_entry_v2", "reader_palette_v1", "reader_palette_order_v1", "app_settings_v1",
 ))
-FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "pigking9527@gmail.com").strip()
+FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "").strip()
 FEEDBACK_SMTP_HOST = os.environ.get("FEEDBACK_SMTP_HOST", "").strip()
 FEEDBACK_SMTP_PORT = int(os.environ.get("FEEDBACK_SMTP_PORT", "465"))
 FEEDBACK_SMTP_USER = os.environ.get("FEEDBACK_SMTP_USER", "").strip()
@@ -76,6 +82,8 @@ FEEDBACK_SMTP_PASSWORD = os.environ.get("FEEDBACK_SMTP_PASSWORD", "")
 FEEDBACK_SMTP_FROM = os.environ.get("FEEDBACK_SMTP_FROM", FEEDBACK_SMTP_USER).strip()
 FEEDBACK_SMTP_SSL = os.environ.get("FEEDBACK_SMTP_SSL", "1") != "0"
 FEEDBACK_SMTP_STARTTLS = os.environ.get("FEEDBACK_SMTP_STARTTLS", "0") == "1"
+DATABASE_ERRORS = database.postgres_error_types()
+DATABASE_INTEGRITY_ERRORS = database.postgres_integrity_error_types()
 ACCOUNT_SMTP_HOST = os.environ.get("ACCOUNT_SMTP_HOST", "").strip()
 ACCOUNT_SMTP_PORT = int(os.environ.get("ACCOUNT_SMTP_PORT", "465"))
 ACCOUNT_SMTP_USER = os.environ.get("ACCOUNT_SMTP_USER", "").strip()
@@ -85,6 +93,7 @@ ACCOUNT_SMTP_SSL = os.environ.get("ACCOUNT_SMTP_SSL", "1") != "0"
 ACCOUNT_SMTP_STARTTLS = os.environ.get("ACCOUNT_SMTP_STARTTLS", "0") == "1"
 ACCOUNT_CODE_TTL_MS = 15 * 60 * 1000
 ACCOUNT_CODE_ATTEMPTS = 8
+TOKEN_LAST_USED_WRITE_INTERVAL_MS = 60 * 60 * 1000
 MAX_FEEDBACK_TEXT_CHARS = 20_000
 MAX_FEEDBACK_IMAGES = 3
 MAX_FEEDBACK_IMAGE_BYTES = 1024 * 1024
@@ -188,6 +197,8 @@ class RateLimiter:
         conn = connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            if database.is_postgresql():
+                conn.transaction_lock("rate", f"{scope}:{bucket_key}")
             row = conn.execute(
                 "SELECT tokens,last_seen_at FROM rate_limit_buckets WHERE scope=? AND bucket_key=?",
                 (scope, bucket_key),
@@ -211,7 +222,7 @@ class RateLimiter:
                 conn.execute("DELETE FROM rate_limit_buckets WHERE last_seen_at<?", (now - self.stale_after * 1000,))
             conn.commit()
             return allowed, retry_after
-        except sqlite3.Error:
+        except DATABASE_ERRORS:
             conn.rollback()
             # Fail closed when the shared limiter is unavailable.
             return False, 5
@@ -220,7 +231,60 @@ class RateLimiter:
 
 
 RATE_LIMITER = RateLimiter(persistent=True)
+FAST_RATE_LIMITER = RateLimiter(persistent=False)
+FAST_RATE_SCOPES = frozenset(("request_ip", "health_ip", "updates_ip"))
 REQUEST_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+PASSWORD_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_PASSWORD_OPERATIONS)
+
+
+class PasswordCapacity(Exception):
+    """Raised instead of queueing request threads behind expensive scrypt work."""
+
+
+
+class RequestMetrics:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.started_at = time.time()
+        self.requests = 0
+        self.responses = {}
+        self.duration_seconds = 0.0
+        self.active = 0
+        self.peak_active = 0
+
+    def begin(self):
+        with self.lock:
+            self.active += 1
+            self.peak_active = max(self.peak_active, self.active)
+
+    def finish(self, status, elapsed):
+        status_class = f"{max(0, int(status)) // 100}xx"
+        with self.lock:
+            self.active = max(0, self.active - 1)
+            self.requests += 1
+            self.responses[status_class] = self.responses.get(status_class, 0) + 1
+            self.duration_seconds += max(0.0, float(elapsed))
+
+    def prometheus(self):
+        with self.lock:
+            lines = [
+                "# TYPE reader_sync_uptime_seconds gauge",
+                f"reader_sync_uptime_seconds {max(0.0, time.time() - self.started_at):.3f}",
+                "# TYPE reader_sync_requests_total counter",
+                f"reader_sync_requests_total {self.requests}",
+                "# TYPE reader_sync_request_duration_seconds_total counter",
+                f"reader_sync_request_duration_seconds_total {self.duration_seconds:.6f}",
+                "# TYPE reader_sync_active_requests gauge",
+                f"reader_sync_active_requests {self.active}",
+                "# TYPE reader_sync_peak_active_requests gauge",
+                f"reader_sync_peak_active_requests {self.peak_active}",
+            ]
+            for status_class, count in sorted(self.responses.items()):
+                lines.append(f'reader_sync_responses_total{{class="{status_class}"}} {count}')
+            return "\n".join(lines) + "\n"
+
+
+REQUEST_METRICS = RequestMetrics()
 
 
 def now_ms():
@@ -238,11 +302,18 @@ def b64d(text):
 def hash_password(password):
     salt = secrets.token_bytes(16)
     n, r, p = 16384, 8, 1
-    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32)
+    if not PASSWORD_SLOTS.acquire(blocking=False):
+        raise PasswordCapacity()
+    try:
+        digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32)
+    finally:
+        PASSWORD_SLOTS.release()
     return f"scrypt${n}${r}${p}${b64e(salt)}${b64e(digest)}"
 
 
 def verify_password(password, stored):
+    if not PASSWORD_SLOTS.acquire(blocking=False):
+        raise PasswordCapacity()
     try:
         scheme, n, r, p, salt, digest = stored.split("$", 5)
         if scheme != "scrypt":
@@ -258,10 +329,44 @@ def verify_password(password, stored):
         return hmac.compare_digest(b64d(digest), actual)
     except Exception:
         return False
+    finally:
+        PASSWORD_SLOTS.release()
+
+
+def keyed_digest(purpose, value):
+    """Return a domain-separated server-side digest for low-entropy secrets."""
+    secret = RATE_LIMIT_HMAC_KEY or b"reader-sync-private-digest-v1"
+    message = f"{purpose}\0{value}".encode("utf-8", "replace")
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def keyed_digest_with(secret, purpose, value):
+    message = f"{purpose}\0{value}".encode("utf-8", "replace")
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def legacy_digest_keys(purpose, value):
+    secrets_to_try = []
+    if RATE_LIMIT_HMAC_PREVIOUS_KEY:
+        secrets_to_try.append(RATE_LIMIT_HMAC_PREVIOUS_KEY)
+    fallback = b"reader-sync-private-digest-v1"
+    if not RATE_LIMIT_HMAC_KEY or fallback not in secrets_to_try:
+        secrets_to_try.append(fallback)
+    return ["hmac:" + keyed_digest_with(secret, purpose, value) for secret in secrets_to_try]
 
 
 def hash_one_time_code(code):
-    return hashlib.sha256(str(code).encode("utf-8")).hexdigest()
+    return "hmac:" + keyed_digest("account-code", str(code))
+
+
+def verify_one_time_code(code, stored):
+    expected = hash_one_time_code(code)
+    if hmac.compare_digest(str(stored or ""), expected):
+        return True
+    # Codes issued before migration 14 expire within fifteen minutes. Keep
+    # them usable during a rolling deployment, then naturally age them out.
+    legacy = hashlib.sha256(str(code).encode("utf-8")).hexdigest()
+    return hmac.compare_digest(str(stored or ""), legacy)
 
 
 def new_one_time_code():
@@ -289,14 +394,43 @@ def new_token():
     return secrets.token_urlsafe(48)
 
 
+def token_storage_key(token):
+    return "hmac:" + keyed_digest("session-token", str(token or ""))
+
+
+def token_lookup_keys(token):
+    current = token_storage_key(token)
+    values = [current, *legacy_digest_keys("session-token", str(token or "")), str(token or "")]
+    unique = list(dict.fromkeys(values))
+    while len(unique) < 4:
+        unique.append(f"<unused-{len(unique)}>")
+    return tuple(unique[:4])
+
+
+_MIGRATION_LOCK = threading.Lock()
+_MIGRATED_DATABASES = set()
+_TOKEN_CLEANUP_LOCK = threading.Lock()
+_TOKEN_CLEANUP_LAST_AT = 0.0
+
+
 def connect():
+    if database.is_postgresql():
+        return database.connect_postgresql()
+    database_key = os.path.abspath(DB_PATH)
+    database_existed = os.path.exists(database_key)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
-    migrate(conn)
+    if not database_existed:
+        _MIGRATED_DATABASES.discard(database_key)
+    if database_key not in _MIGRATED_DATABASES:
+        with _MIGRATION_LOCK:
+            if database_key not in _MIGRATED_DATABASES:
+                conn.execute("PRAGMA journal_mode=WAL")
+                migrate(conn)
+                _MIGRATED_DATABASES.add(database_key)
     return conn
 
 
@@ -360,6 +494,8 @@ def migrate(conn):
                 user_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_used_at INTEGER NOT NULL,
+                installation_id TEXT NOT NULL DEFAULT 'legacy',
+                device_name TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
             """
@@ -374,7 +510,7 @@ def migrate(conn):
         if LEGACY_TOKEN:
             conn.execute(
                 "INSERT OR IGNORE INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
-                (LEGACY_TOKEN, DEFAULT_USER_ID, now_ms(), now_ms()),
+                (token_storage_key(LEGACY_TOKEN), DEFAULT_USER_ID, now_ms(), now_ms()),
             )
         if table_exists(conn, "entities") and not has_column(conn, "entities", "user_id"):
             conn.execute("ALTER TABLE entities RENAME TO entities_legacy")
@@ -403,6 +539,11 @@ def migrate(conn):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tokens_created_at ON tokens(created_at)"
         )
+        token_columns = {row[1] for row in conn.execute("PRAGMA table_info(tokens)").fetchall()}
+        if "installation_id" not in token_columns:
+            conn.execute("ALTER TABLE tokens ADD COLUMN installation_id TEXT NOT NULL DEFAULT 'legacy'")
+        if "device_name" not in token_columns:
+            conn.execute("ALTER TABLE tokens ADD COLUMN device_name TEXT NOT NULL DEFAULT ''")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sync_clock(id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL)"
         )
@@ -510,6 +651,7 @@ def migrate(conn):
             "SELECT 1 FROM schema_migrations WHERE version=11"
         ).fetchone() is None
         recovery.initialize(conn, seed_existing=recovery_pending, recorded_at=now_ms())
+        recovery.upgrade_history_schema(conn)
         record_migration(conn, 11)
         user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "sync_verified_at" not in user_columns:
@@ -534,6 +676,76 @@ def migrate(conn):
         conn.execute("CREATE TABLE IF NOT EXISTS reader_asset_uploads (user_id TEXT NOT NULL, asset_id TEXT NOT NULL, sha256 TEXT NOT NULL, mime TEXT NOT NULL, total_bytes INTEGER NOT NULL, received_bytes INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(user_id,asset_id), FOREIGN KEY(user_id) REFERENCES users(id))")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_reader_assets_user_created ON reader_assets(user_id,created_at)")
         record_migration(conn, 13)
+        # Session bearer tokens are credentials, not identifiers. Store only a
+        # server-keyed digest so a database copy cannot be used to impersonate
+        # every active client. Existing plaintext rows are upgraded in place.
+        token_rows = conn.execute("SELECT token FROM tokens WHERE token NOT LIKE 'hmac:%'").fetchall()
+        for row in token_rows:
+            raw_token = str(row["token"])
+            conn.execute(
+                "UPDATE OR REPLACE tokens SET token=? WHERE token=?",
+                (token_storage_key(raw_token), raw_token),
+            )
+        record_migration(conn, 14)
+        usage_columns = {row[1] for row in conn.execute("PRAGMA table_info(account_usage)").fetchall()}
+        if "storage_bytes" not in usage_columns:
+            conn.execute("ALTER TABLE account_usage ADD COLUMN storage_bytes INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            """UPDATE account_usage SET storage_bytes=
+               COALESCE((SELECT SUM(LENGTH(json)) FROM entities WHERE entities.user_id=account_usage.user_id),0)+
+               COALESCE((SELECT SUM(LENGTH(payload_zlib)) FROM entity_history WHERE entity_history.user_id=account_usage.user_id),0)+
+               COALESCE((SELECT SUM(byte_size) FROM reader_assets WHERE reader_assets.user_id=account_usage.user_id),0)"""
+        )
+        for name, table, insert_expr, delete_expr in (
+            ("entities", "entities", "LENGTH(NEW.json)", "LENGTH(OLD.json)"),
+            ("history", "entity_history", "LENGTH(NEW.payload_zlib)", "LENGTH(OLD.payload_zlib)"),
+            ("assets", "reader_assets", "NEW.byte_size", "OLD.byte_size"),
+        ):
+            conn.execute(
+                f"""CREATE TRIGGER IF NOT EXISTS trg_storage_{name}_insert AFTER INSERT ON {table}
+                    BEGIN UPDATE account_usage SET storage_bytes=MAX(0,storage_bytes+{insert_expr}),updated_at=strftime('%s','now')*1000 WHERE user_id=NEW.user_id; END"""
+            )
+            conn.execute(
+                f"""CREATE TRIGGER IF NOT EXISTS trg_storage_{name}_delete AFTER DELETE ON {table}
+                    BEGIN UPDATE account_usage SET storage_bytes=MAX(0,storage_bytes-{delete_expr}),updated_at=strftime('%s','now')*1000 WHERE user_id=OLD.user_id; END"""
+            )
+            conn.execute(
+                f"""CREATE TRIGGER IF NOT EXISTS trg_storage_{name}_update AFTER UPDATE ON {table}
+                    BEGIN UPDATE account_usage SET storage_bytes=MAX(0,storage_bytes-{delete_expr}+{insert_expr}),updated_at=strftime('%s','now')*1000 WHERE user_id=NEW.user_id; END"""
+            )
+        record_migration(conn, 15)
+        # Feedback routing never needs a recoverable network address. Replace
+        # legacy raw values with the same server-keyed subject used by audit.
+        for row in conn.execute("SELECT id,client_ip FROM feedback").fetchall():
+            value = str(row["client_ip"] or "")
+            already_digest = len(value) == 64 and all(
+                character in "0123456789abcdef" for character in value.casefold()
+            )
+            if value and not already_digest:
+                conn.execute(
+                    "UPDATE feedback SET client_ip=? WHERE id=?",
+                    (keyed_digest("security-subject", value), row["id"]),
+                )
+        record_migration(conn, 16)
+        # Migration 11 predates delta-history metadata. The upgrade above is
+        # idempotent and must also run on databases that already recorded 11.
+        record_migration(conn, 17)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_registrations (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                email TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_registration_username ON pending_registrations(username)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_registration_email ON pending_registrations(email)")
+        record_migration(conn, 18)
 
 
 def next_server_stamp(conn):
@@ -545,6 +757,19 @@ def next_server_stamp(conn):
     return conn.execute("SELECT value FROM sync_clock WHERE id=1").fetchone()[0]
 
 
+def reserve_server_stamps(conn, count):
+    count = max(0, int(count))
+    if count == 0:
+        return iter(())
+    current = now_ms()
+    conn.execute(
+        "UPDATE sync_clock SET value=MAX(value,?)+? WHERE id=1",
+        (current, count),
+    )
+    last = int(conn.execute("SELECT value FROM sync_clock WHERE id=1").fetchone()[0])
+    return iter(range(last - count + 1, last + 1))
+
+
 def row_to_user(row):
     return {"id": row["id"], "username": row["username"], "sync_enabled": bool(row["sync_verified_at"]) and not bool(row["disabled_at"])}
 
@@ -552,29 +777,62 @@ def row_to_user(row):
 def user_by_token(conn, token):
     if not token:
         return None
+    stored_token = token_storage_key(token)
+    lookup_keys = token_lookup_keys(token)
     cutoff = now_ms() - TOKEN_TTL_MS
-    conn.execute("DELETE FROM tokens WHERE created_at<?", (cutoff,))
+    global _TOKEN_CLEANUP_LAST_AT
+    cleanup_due = False
+    monotonic_now = time.monotonic()
+    if monotonic_now - _TOKEN_CLEANUP_LAST_AT >= 3600:
+        with _TOKEN_CLEANUP_LOCK:
+            if monotonic_now - _TOKEN_CLEANUP_LAST_AT >= 3600:
+                _TOKEN_CLEANUP_LAST_AT = monotonic_now
+                cleanup_due = True
+    if cleanup_due:
+        conn.execute("DELETE FROM tokens WHERE created_at<?", (cutoff,))
+        conn.commit()
     row = conn.execute(
         """
-        SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,users.disabled_reason FROM tokens
+        SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,users.disabled_reason,
+               tokens.token AS stored_token,tokens.last_used_at
+        FROM tokens
         JOIN users ON users.id=tokens.user_id
-        WHERE tokens.token=? AND tokens.created_at>=?
+        WHERE tokens.token IN (?,?,?,?) AND tokens.created_at>=?
         """,
-        (token, cutoff),
+        (*lookup_keys[:4], cutoff),
     ).fetchone()
     if row:
-        conn.execute("UPDATE tokens SET last_used_at=? WHERE token=?", (now_ms(), token))
-    conn.commit()
+        current = now_ms()
+        if row["stored_token"] != stored_token or int(row["last_used_at"]) < current - TOKEN_LAST_USED_WRITE_INTERVAL_MS:
+            conn.execute(
+                "UPDATE tokens SET token=?,last_used_at=? WHERE token=?",
+                (stored_token, current, row["stored_token"]),
+            )
+            conn.commit()
     return row
 
 
-def issue_token(conn, user_id):
+def normalize_installation_id(value):
+    value = str(value or "").strip()
+    if not value:
+        return "legacy"
+    return value[:128]
+
+
+def issue_token(conn, user_id, installation_id="legacy", device_name=""):
     now = now_ms()
     token = new_token()
+    installation_id = normalize_installation_id(installation_id)
+    device_name = str(device_name or "").strip()[:64]
     conn.execute("DELETE FROM tokens WHERE created_at<?", (now - TOKEN_TTL_MS,))
+    if installation_id != "legacy":
+        conn.execute(
+            "DELETE FROM tokens WHERE user_id=? AND installation_id=?",
+            (user_id, installation_id),
+        )
     conn.execute(
-        "INSERT INTO tokens(token,user_id,created_at,last_used_at) VALUES(?,?,?,?)",
-        (token, user_id, now, now),
+        "INSERT INTO tokens(token,user_id,created_at,last_used_at,installation_id,device_name) VALUES(?,?,?,?,?,?)",
+        (token_storage_key(token), user_id, now, now, installation_id, device_name),
     )
     conn.execute(
         """
@@ -588,6 +846,24 @@ def issue_token(conn, user_id):
         (user_id, user_id, MAX_TOKENS_PER_USER),
     )
     return token
+
+
+def device_limit_reached(conn, user_id, installation_id):
+    installation_id = normalize_installation_id(installation_id)
+    if installation_id == "legacy":
+        return False
+    existing = conn.execute(
+        "SELECT 1 FROM tokens WHERE user_id=? AND installation_id=? AND created_at>=?",
+        (user_id, installation_id, now_ms() - TOKEN_TTL_MS),
+    ).fetchone()
+    if existing:
+        return False
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT installation_id) FROM tokens "
+        "WHERE user_id=? AND installation_id<>'legacy' AND created_at>=?",
+        (user_id, now_ms() - TOKEN_TTL_MS),
+    ).fetchone()
+    return int(row[0]) >= MAX_ACCOUNT_DEVICES
 
 
 def row_to_entity(row):
@@ -609,8 +885,18 @@ def row_to_entity(row):
     }
 
 
-def inventory_rows(conn, user_id):
-    placeholders = ",".join("?" for _ in INVENTORY_ENTITY_KINDS)
+def requested_inventory_kinds(values=None):
+    if not values:
+        return tuple(sorted(INVENTORY_ENTITY_KINDS))
+    kinds = tuple(sorted({str(value) for value in values if str(value)}))
+    if not kinds or any(kind not in INVENTORY_ENTITY_KINDS for kind in kinds):
+        raise ValueError("INVALID_INVENTORY_KINDS")
+    return kinds
+
+
+def inventory_rows(conn, user_id, kinds=None):
+    kinds = requested_inventory_kinds(kinds)
+    placeholders = ",".join("?" for _ in kinds)
     return conn.execute(
         f"""
         SELECT kind,id,json,updated_at,deleted_at,device_id,sync_version,server_updated_at
@@ -618,7 +904,7 @@ def inventory_rows(conn, user_id):
         WHERE user_id=? AND kind IN ({placeholders})
         ORDER BY kind,id
         """,
-        (user_id, *sorted(INVENTORY_ENTITY_KINDS)),
+        (user_id, *kinds),
     ).fetchall()
 
 
@@ -630,23 +916,19 @@ def utc_day_window(now=None):
 def ensure_account_usage(conn, user_id, legacy=False):
     limit = LEGACY_ACCOUNT_STORAGE_LIMIT_BYTES if legacy else DEFAULT_ACCOUNT_STORAGE_LIMIT_BYTES
     conn.execute(
-        "INSERT OR IGNORE INTO account_usage(user_id,storage_limit_bytes,updated_at) VALUES(?,?,?)",
-        (user_id, limit, now_ms()),
+        """INSERT OR IGNORE INTO account_usage(user_id,storage_limit_bytes,storage_bytes,updated_at)
+           VALUES(?,?,
+             COALESCE((SELECT SUM(LENGTH(json)) FROM entities WHERE user_id=?),0)+
+             COALESCE((SELECT SUM(LENGTH(payload_zlib)) FROM entity_history WHERE user_id=?),0)+
+             COALESCE((SELECT SUM(byte_size) FROM reader_assets WHERE user_id=?),0),?)""",
+        (user_id, limit, user_id, user_id, user_id, now_ms()),
     )
     return conn.execute("SELECT * FROM account_usage WHERE user_id=?", (user_id,)).fetchone()
 
 
 def account_storage_bytes(conn, user_id):
-    active = conn.execute(
-        "SELECT COALESCE(SUM(LENGTH(json)),0) FROM entities WHERE user_id=?", (user_id,)
-    ).fetchone()[0]
-    history = conn.execute(
-        "SELECT COALESCE(SUM(LENGTH(payload_zlib)),0) FROM entity_history WHERE user_id=?", (user_id,)
-    ).fetchone()[0]
-    assets = conn.execute(
-        "SELECT COALESCE(SUM(byte_size),0) FROM reader_assets WHERE user_id=?", (user_id,)
-    ).fetchone()[0] if table_exists(conn, "reader_assets") else 0
-    return int(active or 0) + int(history or 0) + int(assets or 0)
+    usage = ensure_account_usage(conn, user_id)
+    return int(usage["storage_bytes"] or 0)
 
 
 def asset_file(user_id, asset_id, partial=False):
@@ -756,16 +1038,47 @@ def security_subject(value):
 
 def audit_security(conn, event, severity="info", user_id="", subject="", detail=None):
     occurred_at = now_ms()
+    event = str(event)[:96]
+    severity = str(severity)[:16]
+    user_id = str(user_id)[:64]
+    subject = str(subject)[:96]
     detail_json = json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":"))[:2048]
+    if severity in ("warning", "critical"):
+        pending = conn.execute(
+            "SELECT id FROM security_alerts "
+            "WHERE event=? AND severity=? AND subject=? AND notified_at=0 AND occurred_at>=? "
+            "ORDER BY occurred_at DESC LIMIT 1",
+            (event, severity, subject, occurred_at - 15 * 60 * 1000),
+        ).fetchone()
+        if pending:
+            conn.execute(
+                "UPDATE security_alerts SET occurred_at=?,count=count+1,detail_json=? WHERE id=?",
+                (occurred_at, detail_json, pending["id"]),
+            )
+            return
     conn.execute(
         "INSERT INTO security_audit(occurred_at,event,severity,user_id,subject,detail_json) VALUES(?,?,?,?,?,?)",
-        (occurred_at, str(event)[:96], str(severity)[:16], str(user_id)[:64], str(subject)[:96], detail_json),
+        (occurred_at, event, severity, user_id, subject, detail_json),
     )
     if severity in ("warning", "critical"):
         conn.execute(
             "INSERT INTO security_alerts(occurred_at,event,severity,subject,detail_json) VALUES(?,?,?,?,?)",
-            (occurred_at, str(event)[:96], str(severity)[:16], str(subject)[:96], detail_json),
+            (occurred_at, event, severity, subject, detail_json),
         )
+
+
+def audit_password_capacity(client_ip):
+    conn = connect()
+    try:
+        with conn:
+            audit_security(
+                conn,
+                "password_capacity_rejected",
+                "warning",
+                subject=security_subject(client_ip),
+            )
+    finally:
+        conn.close()
 
 def inventory_summary(rows):
     """Hash the exact portable entity versions held by one account.
@@ -1079,12 +1392,45 @@ def consume_account_code(conn, user_id, purpose, email, code):
         return False
     if row["attempts"] >= ACCOUNT_CODE_ATTEMPTS:
         return False
-    if not hmac.compare_digest(row["code_hash"], hash_one_time_code(code)):
+    if not verify_one_time_code(code, row["code_hash"]):
         with conn:
             conn.execute("UPDATE account_codes SET attempts=attempts+1 WHERE id=?", (row["id"],))
         return False
     with conn:
         conn.execute("UPDATE account_codes SET used_at=? WHERE id=?", (now_ms(), row["id"]))
+    return True
+
+
+def registration_network(client_ip):
+    address = ipaddress.ip_address(client_ip)
+    prefix = 24 if address.version == 4 else 64
+    return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
+
+
+def issue_registration_challenge(conn, username, email):
+    now = now_ms()
+    code = new_one_time_code()
+    conn.execute("DELETE FROM pending_registrations WHERE expires_at<?", (now - 24 * 60 * 60 * 1000,))
+    conn.execute("DELETE FROM pending_registrations WHERE username=? OR email=?", (username, email))
+    conn.execute(
+        "INSERT INTO pending_registrations(id,username,email,code_hash,created_at,expires_at) VALUES(?,?,?,?,?,?)",
+        (str(uuid.uuid4()), username, email, hash_one_time_code(code), now, now + ACCOUNT_CODE_TTL_MS),
+    )
+    return code
+
+
+def consume_registration_challenge(conn, username, email, code):
+    row = conn.execute(
+        "SELECT id,code_hash,expires_at,attempts FROM pending_registrations "
+        "WHERE username=? AND email=? ORDER BY created_at DESC LIMIT 1",
+        (username, email),
+    ).fetchone()
+    if not row or int(row["expires_at"]) < now_ms() or int(row["attempts"]) >= ACCOUNT_CODE_ATTEMPTS:
+        return False
+    if not verify_one_time_code(code, row["code_hash"]):
+        conn.execute("UPDATE pending_registrations SET attempts=attempts+1 WHERE id=?", (row["id"],))
+        return False
+    conn.execute("DELETE FROM pending_registrations WHERE id=?", (row["id"],))
     return True
 
 
@@ -1329,15 +1675,18 @@ class PayloadTooLarge(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ReaderSyncAPI/0.9"
+    server_version = "ReaderSyncAPI/1.0"
+    API_PREFIX = "/v1"
 
-    def begin_push_transaction(self, conn):
+    def begin_push_transaction(self, conn, user_id):
         # `with conn` only commits/rolls back an already-open transaction; it
         # does not acquire a write lock on entry.  Take the write reservation
         # before reading usage or the current entity so concurrent requests
         # cannot both decide against the same stale row and let the later
         # writer overwrite the deterministic conflict winner.
         conn.execute("BEGIN IMMEDIATE")
+        if database.is_postgresql():
+            conn.transaction_lock("push", user_id)
 
     def log_message(self, fmt, *args):
         print(
@@ -1353,6 +1702,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         for name, value in (extra_headers or {}).items():
             self.send_header(name, str(value))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def send_text(self, status, payload, mime="text/plain; charset=utf-8"):
+        body = str(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", mime)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -1378,7 +1739,8 @@ class Handler(BaseHTTPRequestHandler):
         return peer
 
     def allow_rate(self, scope, key, capacity, period_seconds):
-        allowed, retry_after = RATE_LIMITER.allow(scope, key, capacity, period_seconds)
+        limiter = FAST_RATE_LIMITER if scope in FAST_RATE_SCOPES else RATE_LIMITER
+        allowed, retry_after = limiter.allow(scope, key, capacity, period_seconds)
         if not allowed:
             self.send_error_code(429, "RATE_LIMITED", "请求过于频繁，请稍后重试", retry_after)
         return allowed
@@ -1387,10 +1749,63 @@ class Handler(BaseHTTPRequestHandler):
         if not REQUEST_SLOTS.acquire(blocking=False):
             self.send_error_code(503, "SERVER_BUSY", "服务器繁忙，请稍后重试", 2)
             return False
+        self._request_started_at = time.monotonic()
+        self._response_status = 0
+        REQUEST_METRICS.begin()
+        path = urlparse(self.path).path
+        if path.startswith(("/auth/", "/sync/")):
+            self.send_error_code(
+                426,
+                "CLIENT_UPGRADE_REQUIRED",
+                "旧版客户端同步服务已停止，请安装新的 1.0 版本。",
+            )
+            self.finish_request_metrics()
+            REQUEST_SLOTS.release()
+            return False
+        if path.startswith((f"{self.API_PREFIX}/auth/", f"{self.API_PREFIX}/sync/")):
+            # Existing handlers keep their stable internal route names. Only
+            # the public API base changes, so no client-generation header or
+            # version-dependent request metadata is required.
+            self.path = self.path[len(self.API_PREFIX):]
         if not self.allow_rate("request_ip", self.client_ip(), 120, 60):
+            self.finish_request_metrics()
             REQUEST_SLOTS.release()
             return False
         return True
+
+    def send_response(self, code, message=None):
+        self._response_status = int(code)
+        super().send_response(code, message)
+
+    def finish_request_metrics(self):
+        started = getattr(self, "_request_started_at", None)
+        if started is not None:
+            REQUEST_METRICS.finish(
+                getattr(self, "_response_status", 0), time.monotonic() - started
+            )
+            self._request_started_at = None
+
+    def handle_operational_error(self, error):
+        message = str(error).casefold()
+        # SQLite diagnostics contain schema/locking state, never request JSON.
+        # Keep the bounded message server-side so an unexpected 500 can be
+        # diagnosed without logging account content or bearer credentials.
+        print(
+            f"reader-sync database operational error: {type(error).__name__}: {str(error)[:240]}",
+            flush=True,
+        )
+        if "locked" in message or "busy" in message:
+            self.send_error_code(503, "SERVER_BUSY", "服务器繁忙，请稍后重试", 2)
+            return
+        audit_subject = security_subject(type(error).__name__)
+        try:
+            conn = connect()
+            with conn:
+                audit_security(conn, "database_operational_error", "error", subject=audit_subject)
+            conn.close()
+        except DATABASE_ERRORS:
+            pass
+        self.send_error_code(500, "INTERNAL_ERROR")
 
     def read_json(self):
         length = safe_int(self.headers.get("Content-Length", "0"))
@@ -1612,11 +2027,15 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "schema_version": 2,
-                        "api_version": "0.9",
+                        "api_version": "1.0",
+                        "api_base": "/v1",
                         "server_time": now_ms(),
                         "service": "reader-sync",
                     },
                 )
+                return
+            if parsed.path == "/internal/metrics" and self.client_ip() in ("127.0.0.1", "::1"):
+                self.send_text(200, REQUEST_METRICS.prometheus(), "text/plain; version=0.0.4")
                 return
             if parsed.path == "/updates/latest":
                 if not self.allow_rate("updates_ip", self.client_ip(), 60, 60):
@@ -1679,7 +2098,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.handle_asset_get(asset_id)
                     return
             self.send_error_code(404, "NOT_FOUND")
+        except DATABASE_ERRORS as error:
+            self.handle_operational_error(error)
+        except PasswordCapacity:
+            audit_password_capacity(self.client_ip())
+            self.send_error_code(503, "SERVER_BUSY", "服务器繁忙，请稍后重试", 2)
         finally:
+            self.finish_request_metrics()
             REQUEST_SLOTS.release()
 
     def handle_pull(self, parsed):
@@ -1702,6 +2127,15 @@ class Handler(BaseHTTPRequestHandler):
             """,
             (user["id"], cursor, limit),
         ).fetchall()
+        bounded_rows = []
+        response_bytes = 0
+        for row in rows:
+            row_bytes = len(str(row["json"]).encode("utf-8")) + 512
+            if bounded_rows and response_bytes + row_bytes > MAX_PULL_RESPONSE_BYTES:
+                break
+            bounded_rows.append(row)
+            response_bytes += row_bytes
+        rows = bounded_rows
         next_cursor = rows[-1]["server_updated_at"] if rows else cursor
         has_more = conn.execute(
             "SELECT 1 FROM entities WHERE user_id=? AND server_updated_at>? LIMIT 1",
@@ -1729,7 +2163,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allow_rate("sync_user", user["id"], 30, 60):
             conn.close()
             return
-        rows = inventory_rows(conn, user["id"])
+        try:
+            kinds = requested_inventory_kinds(parse_qs(urlparse(self.path).query).get("kind"))
+        except ValueError as error:
+            self.send_error_code(400, str(error))
+            conn.close()
+            return
+        rows = inventory_rows(conn, user["id"], kinds)
         self.send_json(
             200,
             {
@@ -1737,6 +2177,7 @@ class Handler(BaseHTTPRequestHandler):
                 "schema_version": 2,
                 "server_time": now_ms(),
                 "data_generation": account_data_generation(conn, user["id"]),
+                "kinds": list(kinds),
                 **inventory_summary(rows),
             },
         )
@@ -1749,6 +2190,10 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             if parsed.path == "/auth/register":
                 self.handle_register()
+            elif parsed.path == "/auth/register/start":
+                self.handle_register_start()
+            elif parsed.path == "/auth/register/confirm":
+                self.handle_register_confirm()
             elif parsed.path == "/auth/login":
                 self.handle_login()
             elif parsed.path == "/auth/email/start":
@@ -1789,7 +2234,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_feedback()
             else:
                 self.send_error_code(404, "NOT_FOUND")
+        except DATABASE_ERRORS as error:
+            self.handle_operational_error(error)
+        except PasswordCapacity:
+            audit_password_capacity(self.client_ip())
+            self.send_error_code(503, "SERVER_BUSY", "服务器繁忙，请稍后重试", 2)
         finally:
+            self.finish_request_metrics()
             REQUEST_SLOTS.release()
 
     def do_PUT(self):
@@ -1803,7 +2254,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.handle_asset_put(asset_id)
                     return
             self.send_error_code(404, "NOT_FOUND")
+        except DATABASE_ERRORS as error:
+            self.handle_operational_error(error)
         finally:
+            self.finish_request_metrics()
             REQUEST_SLOTS.release()
 
     def handle_feedback(self):
@@ -1856,7 +2310,7 @@ class Handler(BaseHTTPRequestHandler):
                     json.dumps(feedback["attachments"], ensure_ascii=False, separators=(",", ":")),
                     feedback["app_version"],
                     feedback["platform"],
-                    client_ip,
+                    security_subject(client_ip),
                     created_at,
                 ),
             )
@@ -1913,6 +2367,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error_code(413, "TOO_MANY_ENTITIES")
             conn.close()
             return
+        try:
+            kinds = requested_inventory_kinds(body.get("kinds"))
+        except ValueError as error:
+            self.send_error_code(400, str(error))
+            conn.close()
+            return
 
         local_by_key = {}
         for item in manifest:
@@ -1923,7 +2383,7 @@ class Handler(BaseHTTPRequestHandler):
             kind = str(item.get("kind", "") or "")
             entity_id = str(item.get("id", "") or "")
             if (
-                kind not in SUPPORTED_ENTITY_KINDS
+                kind not in kinds
                 or not entity_id
                 or len(kind) > 128
                 or len(entity_id) > 512
@@ -1945,7 +2405,7 @@ class Handler(BaseHTTPRequestHandler):
                 "sync_version": safe_int(item.get("sync_version")),
             }
 
-        rows = inventory_rows(conn, user["id"])
+        rows = inventory_rows(conn, user["id"], kinds)
         server_by_key = {(row["kind"], row["id"]): row for row in rows}
         upload = []
         authoritative = []
@@ -1970,6 +2430,7 @@ class Handler(BaseHTTPRequestHandler):
                 "schema_version": 2,
                 "server_time": now_ms(),
                 "data_generation": generation,
+                "kinds": list(kinds),
                 **inventory_summary(rows),
                 "upload": upload,
                 "entities": authoritative,
@@ -1987,37 +2448,126 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def handle_register(self):
-        if not self.allow_rate("register_ip", self.client_ip(), 5, 3600):
+        self.send_error_code(409, "REGISTRATION_EMAIL_REQUIRED", "请先验证邮箱后注册")
+
+    def handle_register_start(self):
+        if not REGISTRATION_ENABLED:
+            self.send_error_code(503, "REGISTRATION_UNAVAILABLE", "注册暂时关闭")
             return
         body = self.read_auth_body()
         if body is None:
             return
         username = str(body.get("username", "") or "").strip()
-        password = str(body.get("password", "") or "")
+        email = normalize_email(body.get("email"))
         if not 3 <= len(username) <= 64:
             self.send_error_code(400, "INVALID_USERNAME", "账号长度必须为 3 到 64 个字符")
             return
-        if len(password) < 8:
-            self.send_error_code(400, "WEAK_PASSWORD", "密码至少需要 8 个字符")
+        if not email:
+            self.send_error_code(400, "INVALID_EMAIL", "请输入有效邮箱地址")
+            return
+        client_ip = self.client_ip()
+        domain = email.rsplit("@", 1)[1]
+        limits = (
+            ("register_ip", client_ip, 5, 3600),
+            ("register_network", registration_network(client_ip), 20, 3600),
+            ("register_email", email, 3, 3600),
+            ("register_domain", domain, 30, 3600),
+            ("register_global_hour", "all", 30, 3600),
+            ("register_global_day", "all", 100, 24 * 3600),
+        )
+        for scope, key, capacity, period in limits:
+            if not self.allow_rate(scope, key, capacity, period):
+                if scope.startswith("register_global"):
+                    conn = connect()
+                    with conn:
+                        audit_security(conn, "registration_global_limit", "warning", subject=security_subject(scope))
+                    conn.close()
+                return
+        if not account_mail_configured():
+            self.send_error_code(503, "REGISTRATION_UNAVAILABLE", "注册邮件暂时不可用")
             return
         conn = connect()
         user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if user_count >= MAX_USERS:
+            with conn:
+                audit_security(conn, "account_capacity_reached", "critical")
             conn.close()
             self.send_error_code(503, "ACCOUNT_CAPACITY", "当前注册容量已满，请稍后再试")
             return
+        occupied = conn.execute(
+            "SELECT 1 FROM users WHERE username=? UNION SELECT 1 FROM account_emails WHERE email=? LIMIT 1",
+            (username, email),
+        ).fetchone()
+        if occupied:
+            conn.close()
+            self.send_json(200, {"ok": True, "expiresIn": ACCOUNT_CODE_TTL_MS // 1000})
+            return
         try:
             with conn:
-                user_id = str(uuid.uuid4())
+                code = issue_registration_challenge(conn, username, email)
+            send_account_email(
+                email,
+                "鲲鹏阅读器：验证注册邮箱",
+                f"你的注册验证码是：{code}\n\n验证码 15 分钟内有效。若不是你本人操作，请忽略此邮件。",
+            )
+        except Exception:
+            conn.rollback()
+            with conn:
                 conn.execute(
-                    "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
-                    (user_id, username, hash_password(password), now_ms()),
+                    "DELETE FROM pending_registrations WHERE username=? AND email=?",
+                    (username, email),
                 )
-                ensure_account_usage(conn, user_id)
-                audit_security(conn, "account_registered", "info", user_id, security_subject(self.client_ip()))
-                token = issue_token(conn, user_id)
-        except sqlite3.IntegrityError:
-            self.send_error_code(409, "USERNAME_EXISTS")
+            conn.close()
+            self.send_error_code(503, "REGISTRATION_UNAVAILABLE", "注册邮件暂时不可用")
+            return
+        conn.close()
+        self.send_json(200, {"ok": True, "expiresIn": ACCOUNT_CODE_TTL_MS // 1000})
+
+    def handle_register_confirm(self):
+        if not REGISTRATION_ENABLED:
+            self.send_error_code(503, "REGISTRATION_UNAVAILABLE", "注册暂时关闭")
+            return
+        body = self.read_auth_body()
+        if body is None:
+            return
+        username = str(body.get("username", "") or "").strip()
+        email = normalize_email(body.get("email"))
+        code = str(body.get("code", "") or "").strip()
+        password = str(body.get("password", "") or "")
+        installation_id = normalize_installation_id(body.get("installationId"))
+        device_name = str(body.get("deviceName", "") or "")[:64]
+        if not 3 <= len(username) <= 64 or not email or len(password) < 8:
+            self.send_error_code(400, "INVALID_REGISTRATION")
+            return
+        if not self.allow_rate("register_confirm_ip", self.client_ip(), 10, 3600):
+            return
+        conn = connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if database.is_postgresql():
+                conn.transaction_lock("register", username.casefold())
+            if not consume_registration_challenge(conn, username, email, code):
+                conn.commit()
+                self.send_error_code(400, "INVALID_OR_EXPIRED_CODE")
+                conn.close()
+                return
+            user_id = str(uuid.uuid4())
+            created_at = now_ms()
+            conn.execute(
+                "INSERT INTO users(id,username,password_hash,created_at,sync_verified_at) VALUES(?,?,?,?,?)",
+                (user_id, username, hash_password(password), created_at, created_at),
+            )
+            conn.execute(
+                "INSERT INTO account_emails(user_id,email,verified_at) VALUES(?,?,?)",
+                (user_id, email, created_at),
+            )
+            ensure_account_usage(conn, user_id)
+            audit_security(conn, "account_registered", "info", user_id, security_subject(self.client_ip()))
+            token = issue_token(conn, user_id, installation_id, device_name)
+            conn.commit()
+        except DATABASE_INTEGRITY_ERRORS:
+            conn.rollback()
+            self.send_error_code(409, "REGISTRATION_CONFLICT")
             conn.close()
             return
         self.send_json(
@@ -2025,8 +2575,8 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "token": token,
-                "user": {"id": user_id, "username": username, "sync_enabled": False},
-                "sync_enabled": False,
+                "user": {"id": user_id, "username": username, "sync_enabled": True},
+                "sync_enabled": True,
                 "data_generation": 1,
             },
         )
@@ -2040,6 +2590,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         username = str(body.get("username", "") or "").strip()
         password = str(body.get("password", "") or "")
+        installation_id = normalize_installation_id(body.get("installationId"))
+        device_name = str(body.get("deviceName", "") or "")[:64]
         if not self.allow_rate("login_username", username.casefold() or "<empty>", 5, 900):
             return
         conn = connect()
@@ -2056,8 +2608,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error_code(403, "ACCOUNT_DISABLED", "账号已被限制，请联系支持")
             conn.close()
             return
+        if device_limit_reached(conn, user["id"], installation_id):
+            with conn:
+                audit_security(conn, "device_limit_reached", "warning", user["id"], security_subject(installation_id))
+            self.send_error_code(403, "DEVICE_LIMIT_REACHED", "已达到设备数量上限，请先在已有设备退出登录")
+            conn.close()
+            return
         with conn:
-            token = issue_token(conn, user["id"])
+            token = issue_token(conn, user["id"], installation_id, device_name)
         self.send_json(
             200,
             {
@@ -2076,7 +2634,10 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             return
         with conn:
-            conn.execute("DELETE FROM tokens WHERE token=?", (token,))
+            conn.execute(
+                "DELETE FROM tokens WHERE token IN (?,?)",
+                (token_storage_key(token), token),
+            )
         conn.close()
         self.send_json(200, {"ok": True})
 
@@ -2119,7 +2680,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         current_at = now_ms()
         with conn:
-            recovery.prune_history(conn, user["id"], current_at)
+            recovery.prune_history_if_due(conn, user["id"], current_at)
         payload = recovery.status(conn, user["id"], current_at)
         self.send_json(
             200,
@@ -2349,7 +2910,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 conn.execute("UPDATE users SET sync_verified_at=? WHERE id=?", (now_ms(), user["id"]))
                 audit_security(conn, "email_verified_for_sync", "info", user["id"], security_subject(email))
-        except sqlite3.IntegrityError:
+        except DATABASE_INTEGRITY_ERRORS:
             self.send_error_code(409, "EMAIL_ALREADY_BOUND")
             conn.close()
             return
@@ -2489,7 +3050,7 @@ class Handler(BaseHTTPRequestHandler):
                     "UPDATE account_emails SET email=?,verified_at=? WHERE user_id=?",
                     (email, now_ms(), user["id"]),
                 )
-        except sqlite3.IntegrityError:
+        except DATABASE_INTEGRITY_ERRORS:
             self.send_error_code(409, "EMAIL_ALREADY_BOUND")
             conn.close()
             return
@@ -2521,7 +3082,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         with conn:
             conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new_password), user["id"]))
-            conn.execute("DELETE FROM tokens WHERE user_id=? AND token<>?", (user["id"], token))
+            conn.execute(
+                "DELETE FROM tokens WHERE user_id=? AND token NOT IN (?,?)",
+                (user["id"], token_storage_key(token), token),
+            )
         self.send_json(200, {"ok": True, "message": "登录密码已修改，其他设备已退出登录"})
         conn.close()
 
@@ -2662,8 +3226,9 @@ class Handler(BaseHTTPRequestHandler):
         rejected_count = 0
         stale_assets = []
         with conn:
-            self.begin_push_transaction(conn)
-            recovery.prune_history(conn, user["id"], now_ms())
+            self.begin_push_transaction(conn, user["id"])
+            recovery.prune_history_if_due(conn, user["id"], now_ms())
+            reserved_stamps = reserve_server_stamps(conn, len(entities))
             account_usage = refresh_daily_usage(conn, user["id"])
             account_storage = account_storage_bytes(conn, user["id"])
             daily_write_delta = 0
@@ -2852,7 +3417,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     quota_rejected = True
                     continue
-                normalized["server_updated_at"] = next_server_stamp(conn)
+                normalized["server_updated_at"] = next(reserved_stamps)
                 conn.execute(
                     """
                     INSERT INTO entities(
@@ -2890,7 +3455,6 @@ class Handler(BaseHTTPRequestHandler):
                 accepted.append(normalized)
                 dispositions.append({**input_identity, "status": "accepted"})
             if accepted:
-                recovery.prune_history(conn, user["id"], now_ms())
                 conn.execute(
                     "UPDATE account_usage SET daily_written_bytes=daily_written_bytes+?,daily_entity_writes=daily_entity_writes+?,updated_at=? WHERE user_id=?",
                     (daily_write_delta, daily_entity_delta, now_ms(), user["id"]),

@@ -1,5 +1,6 @@
 {
   "name": "@kunpeng/test-utils",
   "private": true,
+  "license": "SEE LICENSE IN ../../LICENSE",
   "type": "module"
 }

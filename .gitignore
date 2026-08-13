@@ -1,5 +1,6 @@
 # Rust / Tauri build output (large, regenerated)
 /target
+/server/*/target/
 
 # OS / editor
 Thumbs.db
@@ -44,3 +45,4 @@ id_ed25519
 node_modules/
 dist/
 /ui/bridge/
+/ui/react-bridge/

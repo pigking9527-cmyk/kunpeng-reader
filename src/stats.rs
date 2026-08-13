@@ -67,8 +67,7 @@ pub(crate) struct StatsStore {
 }
 
 fn stats_path() -> Option<std::path::PathBuf> {
-    let mut d = dirs::config_dir()?; // 和 library.json 同处（%APPDATA%），属持久用户数据
-    d.push("ebook-reader");
+    let d = crate::profile::app_config_dir()?; // 和 library.json 同处（%APPDATA%），属持久用户数据
     Some(d.join("stats.json"))
 }
 

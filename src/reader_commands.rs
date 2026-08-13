@@ -1,4 +1,4 @@
-use crate::{book, pdf_support, window_commands::reader_window_id, AppState};
+use crate::{book, pdf_support, window_commands::reader_window_id, AppState, RES_BASE};
 use serde::{Deserialize, Serialize};
 
 fn report_save_error(result: Result<(), String>) {
@@ -60,30 +60,6 @@ pub(crate) fn set_book_rating(
     lib.set_rating(id_num, rating);
     lib.save()?;
     Ok(())
-}
-
-/// 修改简介（信息弹窗里可编辑）。
-#[tauri::command]
-pub(crate) fn set_description(
-    window: tauri::WebviewWindow,
-    state: tauri::State<AppState>,
-    description: String,
-) {
-    if let Some(id) = reader_window_id(&window) {
-        let mut lib = state.library.lock().unwrap();
-        lib.set_description(id, description);
-        report_save_error(lib.save());
-    }
-}
-
-/// 给当前阅读的书打分（0~5，0.5 刻度，0=清除评分）。
-#[tauri::command]
-pub(crate) fn set_rating(window: tauri::WebviewWindow, state: tauri::State<AppState>, rating: f32) {
-    if let Some(id) = reader_window_id(&window) {
-        let mut lib = state.library.lock().unwrap();
-        lib.set_rating(id, rating);
-        report_save_error(lib.save());
-    }
 }
 
 /// 新增一处高亮/批注，返回该书全部高亮。
@@ -248,6 +224,7 @@ pub(crate) struct BookMeta {
     author: String,
     description: String,
     format: String,
+    cover: Option<String>,
     word_count: u64,
     size: u64,   // 文件字节数
     rating: f32, // 用户评分 0~5（0.5 刻度）
@@ -257,7 +234,7 @@ pub(crate) struct BookMeta {
 }
 
 async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String> {
-    let (title, mut author, description, format, rating, tags, model_tags, collections) = {
+    let (title, mut author, description, format, cover, rating, tags, model_tags, collections) = {
         let lib = state.library.lock().unwrap();
         let b = lib.get(id).ok_or("找不到这本书")?;
         (
@@ -265,6 +242,9 @@ async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String>
             b.author.clone(),
             b.description.clone(),
             b.format.clone(),
+            b.cover
+                .as_ref()
+                .map(|_| format!("{RES_BASE}/cover/{}?v={}", b.id, b.cover_ver)),
             b.rating,
             b.tags.clone(),
             b.model_tags.clone(),
@@ -316,6 +296,7 @@ async fn book_meta_for_id(state: &AppState, id: u64) -> Result<BookMeta, String>
         author,
         description: crate::html_sanitize::html_to_plain_text(&description),
         format,
+        cover,
         word_count,
         size,
         rating,

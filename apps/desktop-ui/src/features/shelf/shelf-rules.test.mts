@@ -56,4 +56,6 @@ test("safe cover fallback accepts only image data and browser-safe image transpo
   assert.equal(safeCoverUrl("data:image/svg+xml,<svg />"), null);
   assert.equal(safeCoverUrl("data:image/png;base64,AAA"), "data:image/png;base64,AAA");
   assert.match(safeCoverUrl("https://example.test/cover.jpg") ?? "", /^https:/);
+  assert.match(safeCoverUrl("reader://localhost/cover/1?v=2") ?? "", /^reader:/);
+  assert.equal(safeCoverUrl("reader://not-localhost/cover/1"), null);
 });

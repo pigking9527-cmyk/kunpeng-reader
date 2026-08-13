@@ -5,6 +5,7 @@ use crate::{
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::watch;
 
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
@@ -93,6 +94,43 @@ impl AppState {
             library_ai_requests: Arc::new(Mutex::new(HashMap::new())),
             memory_reclaimers: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Serializes access to the sole SQLite connection while measuring mutex
+    /// contention separately from SQLite query time. Backup and recovery rely
+    /// on this single-connection lifecycle, so this is an observability and
+    /// boundary improvement rather than an unsafe connection-pool substitute.
+    pub(crate) fn with_db_read<T>(
+        &self,
+        operation: &'static str,
+        access: impl FnOnce(&db::AppDb) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let waiting = Instant::now();
+        let guard = self.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        record_db_lock_wait(operation, waiting);
+        let database = guard.as_ref().ok_or("SQLite 数据库不可用")?;
+        let access_started = Instant::now();
+        let result = access(database);
+        record_db_locked_access(operation, access_started);
+        result
+    }
+
+    /// See [`Self::with_db_read`]. Mutable access remains serialized because
+    /// restore temporarily closes the sole SQLite connection before replacing
+    /// the database and WAL files.
+    pub(crate) fn with_db_write<T>(
+        &self,
+        operation: &'static str,
+        access: impl FnOnce(&mut db::AppDb) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let waiting = Instant::now();
+        let mut guard = self.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        record_db_lock_wait(operation, waiting);
+        let database = guard.as_mut().ok_or("SQLite 数据库不可用")?;
+        let access_started = Instant::now();
+        let result = access(database);
+        record_db_locked_access(operation, access_started);
+        result
     }
 
     pub(crate) fn begin_library_ai_request(
@@ -208,9 +246,52 @@ impl AppState {
     }
 }
 
+fn record_db_lock_wait(operation: &str, waiting: Instant) {
+    let elapsed_ms = waiting.elapsed().as_millis();
+    let elapsed_ms = u64::try_from(elapsed_ms).unwrap_or(u64::MAX);
+    crate::diagnostics::record_db_lock_wait(operation, elapsed_ms);
+    if elapsed_ms >= 250 {
+        crate::log(&format!(
+            "[db] lock_wait={operation} elapsed_ms={elapsed_ms}"
+        ));
+    }
+}
+
+fn record_db_locked_access(operation: &str, started: Instant) {
+    let elapsed_ms = started.elapsed().as_millis();
+    let elapsed_ms = u64::try_from(elapsed_ms).unwrap_or(u64::MAX);
+    crate::diagnostics::record_db_locked_access(operation, elapsed_ms);
+    if elapsed_ms >= 250 {
+        crate::log(&format!(
+            "[db] locked_access={operation} elapsed_ms={elapsed_ms}"
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AppState;
+    use super::{db, AppState};
+
+    #[test]
+    fn database_access_helpers_preserve_read_write_callbacks() {
+        let state = AppState::new(Some(db::AppDb::open_in_memory_for_tests()));
+        let original = state
+            .with_db_read("app_state_test_read", |database| Ok(database.device_id()))
+            .expect("read callback receives database");
+        assert_eq!(original, "test-device");
+
+        state
+            .with_db_write("app_state_test_write", |database| {
+                database.set_metadata("app_state_test", "written")
+            })
+            .expect("write callback receives database");
+        let saved = state
+            .with_db_read("app_state_test_verify", |database| {
+                Ok(database.metadata("app_state_test"))
+            })
+            .expect("read callback succeeds");
+        assert_eq!(saved.as_deref(), Some("written"));
+    }
 
     #[test]
     fn library_ai_cancel_is_scoped_to_one_live_request_and_cleans_up() {

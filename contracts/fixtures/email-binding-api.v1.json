@@ -1,0 +1,34 @@
+{
+  "contractVersion": 1,
+  "authentication": {
+    "required": true,
+    "syncProtocolHeaderRequired": false,
+    "cacheControl": "no-store"
+  },
+  "challengeResponse": {
+    "ok": true,
+    "expiresIn": 900,
+    "requestId": "00000000-0000-4000-8000-000000000001"
+  },
+  "rebindGrantResponseContract": {
+    "requiredFields": ["ok", "rebindGrant", "requestId"],
+    "publicExample": {
+      "ok": true,
+      "requestId": "00000000-0000-4000-8000-000000000002"
+    },
+    "sensitiveFieldsOmitted": ["rebindGrant"]
+  },
+  "flows": {
+    "bind": {
+      "start": { "path": "/v1/auth/email/start", "requestFields": ["email"], "successStatus": 202 },
+      "confirm": { "path": "/v1/auth/email/confirm", "requestFields": ["email", "code"], "successStatus": 200 }
+    },
+    "rebind": {
+      "oldStart": { "path": "/v1/auth/email/rebind/old/start", "requestFields": [], "successStatus": 202 },
+      "oldConfirm": { "path": "/v1/auth/email/rebind/old/confirm", "requestFields": ["code"], "successStatus": 200 },
+      "newStart": { "path": "/v1/auth/email/rebind/new/start", "requestFields": ["email", "rebindGrant"], "successStatus": 202 },
+      "newConfirm": { "path": "/v1/auth/email/rebind/new/confirm", "requestFields": ["email", "code"], "successStatus": 200 }
+    }
+  },
+  "sensitiveValuesOmitted": ["email", "code", "rebindGrant", "authorizationToken"]
+}

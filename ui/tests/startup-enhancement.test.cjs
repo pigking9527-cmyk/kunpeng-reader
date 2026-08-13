@@ -227,7 +227,7 @@ test("a shortcut activation reaches a hidden instance even without a book path",
   );
   assert.match(
     startup,
-    /fn instance_scope_key\(\) -> &'static str[\s\S]*?"global"/,
+    /fn instance_scope_key\(\) -> String[\s\S]*?crate::profile::instance_scope_key\(\)/,
   );
   assert.doesNotMatch(startup, /CARGO_PKG_VERSION/);
   assert.match(startup, /KunpengReader_\{\}_SingleInstance_Mutex/);

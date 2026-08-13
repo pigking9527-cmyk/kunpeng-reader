@@ -146,7 +146,12 @@ export function safeCoverUrl(value: string | undefined): string | null {
     // The host supplies an already-resolved local/remote image URL. Refusing
     // relative strings keeps this pure module independent of browser globals.
     const url = new URL(trimmed);
-    return url.protocol === "https:" || url.protocol === "http:" || url.protocol === "blob:" ? url.href : null;
+    return url.protocol === "https:"
+      || url.protocol === "http:"
+      || url.protocol === "blob:"
+      || (url.protocol === "reader:" && url.hostname === "localhost")
+      ? url.href
+      : null;
   } catch {
     return null;
   }

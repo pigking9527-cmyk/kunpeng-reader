@@ -8,7 +8,7 @@ import {
 declare function expectType<TExpected>(value: TExpected): void;
 
 const unknownFixture: unknown = {
-  syncProtocolVersion: 1,
+  syncProtocolVersion: 5,
   entities: [],
 };
 

@@ -99,10 +99,7 @@ test("账户概览只用最近同步摘要行承载当前同步结果", () => {
     indexSource.match(
       /<section id="account-overview-panel"[\s\S]*?<section\s+id="private-sync-panel"/,
     )?.[0] || "";
-  assert.match(
-    overview,
-    /id="sync-last-counts"[^>]*aria-live="polite"/,
-  );
+  assert.match(overview, /id="sync-last-counts"[^>]*aria-live="polite"/);
   assert.doesNotMatch(indexSource, /id="sync-status"/);
   assert.match(syncSource, /const syncStatusEl = syncLastCountsEl/);
   assert.match(
@@ -181,8 +178,14 @@ test("账户概览区分立即同步操作与同步服务连通状态", () => {
     stylesSource,
     /\.account-sync-state:is\(:hover, :focus-visible\)[^{]*\{[^}]*width:\s*auto/,
   );
-  assert.match(stylesSource, /\.account-sync-state:is\(:hover, :focus-visible\) \.account-sync-state-label\s*\{[^}]*max-width:\s*8em/);
-  assert.match(stylesSource, /\.account-sync-state:not\(\.checking\)::before\s*\{[^}]*transform:\s*translateX\(0\)[^}]*cubic-bezier\(0\.34,\s*1\.56,\s*0\.64,\s*1\)/s);
+  assert.match(
+    stylesSource,
+    /\.account-sync-state:is\(:hover, :focus-visible\) \.account-sync-state-label\s*\{[^}]*max-width:\s*8em/,
+  );
+  assert.match(
+    stylesSource,
+    /\.account-sync-state:not\(\.checking\)::before\s*\{[^}]*transform:\s*translateX\(0\)[^}]*cubic-bezier\(0\.34,\s*1\.56,\s*0\.64,\s*1\)/s,
+  );
   assert.match(
     stylesSource,
     /\.account-overview-commands \.account-sync-state\s*\{[^}]*justify-self:\s*end/,
@@ -263,6 +266,13 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "sync-logout",
     "sync-register",
     "sync-login",
+    "sync-registration",
+    "sync-register-email",
+    "sync-register-code",
+    "sync-register-code-request",
+    "sync-register-confirm",
+    "sync-register-cancel",
+    "sync-register-status",
     "sync-password-reset-open",
     "sync-password-reset",
     "sync-reset-email",
@@ -315,6 +325,10 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "account-clear-local",
     "account-clear-cloud-password",
     "account-clear-cloud",
+    "account-cloud-recovery-status",
+    "account-cloud-recovery-target",
+    "account-cloud-recovery-password",
+    "account-cloud-recovery-restore",
     "account-delete-password",
     "account-delete-username",
     "account-delete",
@@ -359,6 +373,13 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     invoke: async (command, payload) => {
       calls.push({ command, payload });
       if (command === "auth_login") return { user: { username: "alice" } };
+      if (command === "auth_register_start")
+        return { ok: true, expiresIn: 900 };
+      if (command === "auth_register_confirm")
+        return {
+          user: { username: "new-reader" },
+          sync_enabled: true,
+        };
       if (command === "sync_now")
         return {
           message: "ok",
@@ -381,6 +402,69 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
   });
   assert.equal(calls[1].command, "sync_now");
   assert.equal(calls[2].command, "shelf_books");
+
+  calls.length = 0;
+  elements.get("sync-registration").hidden = true;
+  elements.get("sync-username").value = "new-reader";
+  elements.get("sync-password").value = "long-enough-password";
+  await elements.get("sync-register").emit("click");
+  assert.equal(elements.get("sync-registration").hidden, false);
+  assert.equal(elements.get("sync-password-reset").hidden, true);
+
+  elements.get("sync-register-email").value = "reader@example.invalid";
+  await elements.get("sync-register-code-request").emit("click");
+  assert.equal(calls[0].command, "auth_register_start");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].payload)), {
+    request: {
+      url: "",
+      username: "new-reader",
+      email: "reader@example.invalid",
+    },
+  });
+  assert.equal("password" in calls[0].payload.request, false);
+
+  elements.get("sync-register-code").value = "123456";
+  await elements.get("sync-register-confirm").emit("click");
+  assert.equal(calls[1].command, "auth_register_confirm");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1].payload)), {
+    request: {
+      url: "",
+      username: "new-reader",
+      email: "reader@example.invalid",
+      code: "123456",
+      password: "long-enough-password",
+    },
+  });
+  assert.equal(calls[2].command, "sync_now");
+  assert.equal(calls[3].command, "shelf_books");
+
+  calls.length = 0;
+  elements.get("sync-registration").hidden = true;
+  elements.get("sync-username").value = "new-reader";
+  await elements.get("sync-password-reset-open").emit("click");
+  assert.equal(elements.get("sync-password-reset").hidden, false);
+  elements.get("sync-reset-email").value = "reader@example.invalid";
+  await elements.get("sync-reset-request").emit("click");
+  assert.equal(calls[0].command, "auth_request_password_reset");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].payload)), {
+    request: {
+      url: "",
+      username: "new-reader",
+      email: "reader@example.invalid",
+    },
+  });
+  elements.get("sync-reset-code").value = "123456";
+  elements.get("sync-reset-new-password").value = "replacement-password";
+  await elements.get("sync-reset-confirm").emit("click");
+  assert.equal(calls[1].command, "auth_confirm_password_reset");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1].payload)), {
+    request: {
+      url: "",
+      username: "new-reader",
+      code: "123456",
+      newPassword: "replacement-password",
+    },
+  });
 
   elements.get("account-security-panel").hidden = true;
   elements.get("account-data-panel").hidden = true;
@@ -425,6 +509,7 @@ test("账户中心采用有下限的窗口和居中自适应面板", () => {
 });
 
 test("账户中心在同一窗口切换概览、同步、安全和数据页面", () => {
+  assert.match(syncSource, /selectAccountTab\("overview"\)/);
   assert.match(indexSource, /id="account-tab-overview"/);
   assert.match(indexSource, /id="account-tab-sync"/);
   assert.match(
@@ -541,4 +626,13 @@ test("数据与隐私提供本机、云端和账号三级清理并明确保留�
   assert.match(syncSource, /invoke\("clear_local_app_data"\)/);
   assert.match(syncSource, /invoke\("sync_reset_cloud_data"/);
   assert.match(syncSource, /invoke\("auth_delete_account"/);
+});
+
+test("单一账户 UI 将云端时间恢复与本机恢复点明确区分，并在成功后清除旧本机数据", () => {
+  assert.match(indexSource, /id="account-cloud-recovery-status"/);
+  assert.match(indexSource, /仅恢复当前账号云端同步实体到指定时间；不是本机“数据恢复点”/);
+  assert.match(syncSource, /invoke\("sync_recovery_status"\)/);
+  assert.match(syncSource, /invoke\("sync_recovery_restore",\s*\{[\s\S]*?targetAt, dataGeneration: status\.dataGeneration, password/s);
+  assert.match(syncSource, /云端恢复已完成，正在清除此设备的旧同步数据…[\s\S]*?invoke\("clear_local_app_data"\)/);
+  assert.match(syncSource, /accountCloudRecoveryPasswordEl\.value = "";/);
 });

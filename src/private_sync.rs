@@ -34,6 +34,10 @@ const SECRET_KIND: &str = "secret_bundle_v1";
 const DEFAULT_ID: &str = "default";
 const KDF_ITERATIONS: u32 = 210_000;
 const AAD: &[u8] = b"kunpeng-reader:secret_bundle_v1";
+/// A local compare-and-swap generation for secret-bundle operations. It is
+/// deliberately independent from the server epoch: a local reset must win
+/// over an in-flight, CPU-bound password operation before it can write back.
+const SECRET_BUNDLE_WRITE_GENERATION_KEY: &str = "private_sync_secret_bundle_write_generation_v1";
 pub(crate) const SYNC_FILTERS_CHANGED_KEY: &str = "sync_content_filters_changed";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -159,7 +163,7 @@ pub(crate) struct PrivateSyncStatus {
     pub cloud_secret_available: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 struct SecretBundle {
     version: u8,
     #[serde(default)]
@@ -192,6 +196,29 @@ fn options_from_db(db: &AppDb) -> PrivateSyncOptions {
 pub(crate) fn is_entity_enabled(db: &AppDb, kind: &str) -> bool {
     let options = options_from_db(db);
     entity_enabled_for_options(&options, kind).unwrap_or(false)
+}
+
+pub(crate) fn enabled_inventory_kinds(db: &AppDb) -> Vec<&'static str> {
+    const KINDS: &[&str] = &[
+        "reading_progress_v1",
+        "reading_data_v1",
+        "reading_statistics_v1",
+        "model_book_tags_v1",
+        "user_book_tags_v1",
+        "book_collections_v1",
+        "booklist_v1",
+        "vocab",
+        "reading_bucket_v2",
+        "ai_reader_history_entry_v2",
+        "reader_palette_v1",
+        "reader_palette_order_v1",
+        "app_settings_v1",
+    ];
+    KINDS
+        .iter()
+        .copied()
+        .filter(|kind| is_entity_enabled(db, kind))
+        .collect()
 }
 
 /// Keep the exchange-category map exhaustive. A newly supported entity must
@@ -881,6 +908,27 @@ fn envelope_epoch(value: &Value) -> Result<u64, String> {
     }
 }
 
+fn secret_bundle_write_generation(db: &AppDb) -> u64 {
+    db.metadata(SECRET_BUNDLE_WRITE_GENERATION_KEY)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn advance_secret_bundle_write_generation(db: &AppDb) -> Result<(), String> {
+    let next = secret_bundle_write_generation(db)
+        .checked_add(1)
+        .ok_or("本机密钥包操作世代已耗尽")?;
+    db.set_metadata(SECRET_BUNDLE_WRITE_GENERATION_KEY, &next.to_string())
+}
+
+fn ensure_secret_bundle_epoch(state: &AppState, expected_epoch: u64) -> Result<(), String> {
+    let actual_epoch = sync::private_secret_bundle_state(state)?.secret_bundle_epoch;
+    if actual_epoch != expected_epoch {
+        return Err("云端密钥包已被撤销；请重新同步后再设置或解锁".into());
+    }
+    Ok(())
+}
+
 fn materialize(db: &mut AppDb) -> Result<(), String> {
     let options = options_from_db(db);
     if options.sync_configs {
@@ -969,11 +1017,10 @@ pub(crate) fn apply_downloaded_entities(
     state: &AppState,
     items: &[crate::db::SyncEntity],
 ) -> Result<(), String> {
-    let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let options = options_from_db(db);
-    for item in items {
-        match item.kind.as_str() {
+    state.with_db_write("private_sync_apply_downloaded_entities", |db| {
+        let options = options_from_db(db);
+        for item in items {
+            match item.kind.as_str() {
             AI_CONFIG_KIND if options.sync_configs && item.deleted_at == 0 => {
                 ai_reader::import_public_config(db, &item.json)?
             }
@@ -1075,21 +1122,22 @@ pub(crate) fn apply_downloaded_entities(
                 }
                 write_library_history(db, merged)?;
             }
-            _ => {}
+                _ => {}
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[tauri::command]
 pub(crate) fn private_sync_get_settings(
     state: tauri::State<AppState>,
 ) -> Result<PrivateSyncStatus, String> {
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    Ok(PrivateSyncStatus {
-        options: options_from_db(db),
-        cloud_secret_available: db.entity_json(SECRET_KIND, DEFAULT_ID)?.is_some(),
+    state.with_db_read("private_sync_get_settings", |db| {
+        Ok(PrivateSyncStatus {
+            options: options_from_db(db),
+            cloud_secret_available: db.entity_json(SECRET_KIND, DEFAULT_ID)?.is_some(),
+        })
     })
 }
 
@@ -1098,17 +1146,17 @@ pub(crate) fn private_sync_set_options(
     state: tauri::State<AppState>,
     options: PrivateSyncOptions,
 ) -> Result<PrivateSyncStatus, String> {
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    db.set_metadata(
-        OPTIONS_KEY,
-        &serde_json::to_string(&options).map_err(|e| e.to_string())?,
-    )?;
-    db.set_metadata(SYNC_FILTERS_CHANGED_KEY, "1")?;
-    materialize(db)?;
-    Ok(PrivateSyncStatus {
-        options,
-        cloud_secret_available: db.entity_json(SECRET_KIND, DEFAULT_ID)?.is_some(),
+    state.with_db_write("private_sync_set_options", |db| {
+        db.set_metadata(
+            OPTIONS_KEY,
+            &serde_json::to_string(&options).map_err(|e| e.to_string())?,
+        )?;
+        db.set_metadata(SYNC_FILTERS_CHANGED_KEY, "1")?;
+        materialize(db)?;
+        Ok(PrivateSyncStatus {
+            options,
+            cloud_secret_available: db.entity_json(SECRET_KIND, DEFAULT_ID)?.is_some(),
+        })
     })
 }
 
@@ -1120,9 +1168,9 @@ pub(crate) fn private_sync_history_list(
     if !valid_content_id(&content_id) {
         return Ok(Vec::new());
     }
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    Ok(read_history(db, &content_id))
+    state.with_db_read("private_sync_history_list", |db| {
+        Ok(read_history(db, &content_id))
+    })
 }
 
 #[tauri::command]
@@ -1133,12 +1181,12 @@ pub(crate) fn private_sync_history_merge(
     if !valid_content_id(&request.content_id) {
         return Err("图书同步身份无效；请重新导入原书后再同步智读历史".into());
     }
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let mut merged = read_history(db, &request.content_id);
-    merged.extend(request.entries);
-    write_history(db, &request.content_id, merged)?;
-    materialize(db)
+    state.with_db_write("private_sync_history_merge", |db| {
+        let mut merged = read_history(db, &request.content_id);
+        merged.extend(request.entries);
+        write_history(db, &request.content_id, merged)?;
+        materialize(db)
+    })
 }
 
 #[tauri::command]
@@ -1149,16 +1197,16 @@ pub(crate) fn private_sync_history_delete(
     if !valid_content_id(&request.content_id) || request.id.trim().is_empty() {
         return Err("智读历史记录身份无效".into());
     }
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let mut merged = read_history(db, &request.content_id);
-    merged.push(serde_json::json!({
-        "id": clipped_text(&request.id, 160),
-        "deletedAt": chrono::Utc::now().to_rfc3339(),
-    }));
-    write_history(db, &request.content_id, merged)?;
-    materialize(db)?;
-    Ok(read_history(db, &request.content_id))
+    state.with_db_write("private_sync_history_delete", |db| {
+        let mut merged = read_history(db, &request.content_id);
+        merged.push(serde_json::json!({
+            "id": clipped_text(&request.id, 160),
+            "deletedAt": chrono::Utc::now().to_rfc3339(),
+        }));
+        write_history(db, &request.content_id, merged)?;
+        materialize(db)?;
+        Ok(read_history(db, &request.content_id))
+    })
 }
 
 #[tauri::command]
@@ -1169,9 +1217,9 @@ pub(crate) fn private_sync_reader_history_snapshot(
     if !valid_content_id(&content_id) {
         return Err("图书同步身份无效；请重新导入原书后再同步智读历史".into());
     }
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    Ok(reader_history_snapshot(db, &content_id))
+    state.with_db_read("private_sync_reader_history_snapshot", |db| {
+        Ok(reader_history_snapshot(db, &content_id))
+    })
 }
 
 #[tauri::command]
@@ -1184,17 +1232,17 @@ pub(crate) fn private_sync_set_reader_history_mode(
     {
         return Err("智读历史同步方式无效".into());
     }
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let mut options = options_from_db(db);
-    options.sync_ai_history = true;
-    db.set_metadata(
-        OPTIONS_KEY,
-        &serde_json::to_string(&options).map_err(|error| error.to_string())?,
-    )?;
-    db.set_metadata(READER_HISTORY_SYNC_MODE_KEY, &request.sync_mode)?;
-    materialize(db)?;
-    Ok(reader_history_snapshot(db, &request.content_id))
+    state.with_db_write("private_sync_set_reader_history_mode", |db| {
+        let mut options = options_from_db(db);
+        options.sync_ai_history = true;
+        db.set_metadata(
+            OPTIONS_KEY,
+            &serde_json::to_string(&options).map_err(|error| error.to_string())?,
+        )?;
+        db.set_metadata(READER_HISTORY_SYNC_MODE_KEY, &request.sync_mode)?;
+        materialize(db)?;
+        Ok(reader_history_snapshot(db, &request.content_id))
+    })
 }
 
 #[tauri::command]
@@ -1205,54 +1253,56 @@ pub(crate) fn private_sync_set_reader_history_cloud_saved(
     if !valid_content_id(&request.content_id) || request.id.trim().is_empty() {
         return Err("智读历史记录身份无效".into());
     }
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    if reader_history_sync_mode(db) != "manual" {
-        return Err("请先在智读历史设置中选择手动同步".into());
-    }
-    let id = clipped_text(&request.id, 160);
-    if request.cloud_saved {
-        let selected = db
-            .metadata_with_prefix(HISTORY_PREFIX)?
-            .into_iter()
-            .flat_map(|(_, text)| {
-                serde_json::from_str::<Value>(&text)
-                    .ok()
-                    .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
-                    .unwrap_or_default()
-            })
-            .filter(|entry| !is_history_tombstone(entry))
-            .filter(|entry| entry.get("cloudSaved").and_then(Value::as_bool) == Some(true))
-            .filter(|entry| history_entry_id(entry).as_deref() != Some(id.as_str()))
-            .count();
-        if selected >= HISTORY_LIVE_LIMIT {
-            return Err("智读与脑图云端共用最多 100 条记录；请先取消一条".into());
+    state.with_db_write("private_sync_set_reader_history_cloud_saved", |db| {
+        if reader_history_sync_mode(db) != "manual" {
+            return Err("请先在智读历史设置中选择手动同步".into());
         }
-    }
-    let mut entries = read_history(db, &request.content_id);
-    let mut found = false;
-    for entry in &mut entries {
-        if !is_history_tombstone(entry) && history_entry_id(entry).as_deref() == Some(id.as_str()) {
-            entry["cloudSaved"] = Value::Bool(request.cloud_saved);
-            found = true;
-            break;
+        let id = clipped_text(&request.id, 160);
+        if request.cloud_saved {
+            let selected = db
+                .metadata_with_prefix(HISTORY_PREFIX)?
+                .into_iter()
+                .flat_map(|(_, text)| {
+                    serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
+                        .unwrap_or_default()
+                })
+                .filter(|entry| !is_history_tombstone(entry))
+                .filter(|entry| entry.get("cloudSaved").and_then(Value::as_bool) == Some(true))
+                .filter(|entry| history_entry_id(entry).as_deref() != Some(id.as_str()))
+                .count();
+            if selected >= HISTORY_LIVE_LIMIT {
+                return Err("智读与脑图云端共用最多 100 条记录；请先取消一条".into());
+            }
         }
-    }
-    if !found {
-        return Err("找不到这条智读记录".into());
-    }
-    write_history(db, &request.content_id, entries)?;
-    materialize(db)?;
-    Ok(reader_history_snapshot(db, &request.content_id))
+        let mut entries = read_history(db, &request.content_id);
+        let mut found = false;
+        for entry in &mut entries {
+            if !is_history_tombstone(entry)
+                && history_entry_id(entry).as_deref() == Some(id.as_str())
+            {
+                entry["cloudSaved"] = Value::Bool(request.cloud_saved);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err("找不到这条智读记录".into());
+        }
+        write_history(db, &request.content_id, entries)?;
+        materialize(db)?;
+        Ok(reader_history_snapshot(db, &request.content_id))
+    })
 }
 
 #[tauri::command]
 pub(crate) fn private_sync_library_history_list(
     state: tauri::State<AppState>,
 ) -> Result<LibraryHistorySnapshot, String> {
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    Ok(library_history_snapshot(db))
+    state.with_db_read("private_sync_library_history_list", |db| {
+        Ok(library_history_snapshot(db))
+    })
 }
 #[tauri::command]
 pub(crate) fn private_sync_set_library_history_mode(
@@ -1262,11 +1312,11 @@ pub(crate) fn private_sync_set_library_history_mode(
     if !matches!(request.sync_mode.as_str(), "off" | "recent" | "manual") {
         return Err("书库问答同步方式无效".into());
     }
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    db.set_metadata(LIBRARY_HISTORY_SYNC_MODE_KEY, &request.sync_mode)?;
-    materialize(db)?;
-    Ok(library_history_snapshot(db))
+    state.with_db_write("private_sync_set_library_history_mode", |db| {
+        db.set_metadata(LIBRARY_HISTORY_SYNC_MODE_KEY, &request.sync_mode)?;
+        materialize(db)?;
+        Ok(library_history_snapshot(db))
+    })
 }
 
 #[tauri::command]
@@ -1274,13 +1324,13 @@ pub(crate) fn private_sync_library_history_merge(
     state: tauri::State<AppState>,
     request: LibraryHistoryMergeRequest,
 ) -> Result<LibraryHistorySnapshot, String> {
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let mut merged = read_library_history(db);
-    merged.extend(request.entries);
-    write_library_history(db, merged)?;
-    materialize(db)?;
-    Ok(library_history_snapshot(db))
+    state.with_db_write("private_sync_library_history_merge", |db| {
+        let mut merged = read_library_history(db);
+        merged.extend(request.entries);
+        write_library_history(db, merged)?;
+        materialize(db)?;
+        Ok(library_history_snapshot(db))
+    })
 }
 #[tauri::command]
 pub(crate) fn private_sync_set_library_history_cloud_saved(
@@ -1290,38 +1340,40 @@ pub(crate) fn private_sync_set_library_history_cloud_saved(
     if request.id.trim().is_empty() {
         return Err("书库问答记录身份无效".into());
     }
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    if library_history_sync_mode(db) != "manual" {
-        return Err("请先在书库问答设置中选择手动同步".into());
-    }
-    let id = clipped_text(&request.id, 160);
-    let mut entries = read_library_history(db);
-    if request.cloud_saved {
-        let selected = entries
-            .iter()
-            .filter(|entry| !is_history_tombstone(entry))
-            .filter(|entry| entry.get("cloudSaved").and_then(Value::as_bool) == Some(true))
-            .filter(|entry| history_entry_id(entry).as_deref() != Some(id.as_str()))
-            .count();
-        if selected >= HISTORY_LIVE_LIMIT {
-            return Err("云端最多保留 100 条问答；请先取消一条云端记录".into());
+    state.with_db_write("private_sync_set_library_history_cloud_saved", |db| {
+        if library_history_sync_mode(db) != "manual" {
+            return Err("请先在书库问答设置中选择手动同步".into());
         }
-    }
-    let mut found = false;
-    for entry in &mut entries {
-        if !is_history_tombstone(entry) && history_entry_id(entry).as_deref() == Some(id.as_str()) {
-            entry["cloudSaved"] = Value::Bool(request.cloud_saved);
-            found = true;
-            break;
+        let id = clipped_text(&request.id, 160);
+        let mut entries = read_library_history(db);
+        if request.cloud_saved {
+            let selected = entries
+                .iter()
+                .filter(|entry| !is_history_tombstone(entry))
+                .filter(|entry| entry.get("cloudSaved").and_then(Value::as_bool) == Some(true))
+                .filter(|entry| history_entry_id(entry).as_deref() != Some(id.as_str()))
+                .count();
+            if selected >= HISTORY_LIVE_LIMIT {
+                return Err("云端最多保留 100 条问答；请先取消一条云端记录".into());
+            }
         }
-    }
-    if !found {
-        return Err("找不到这条书库问答记录".into());
-    }
-    write_library_history(db, entries)?;
-    materialize(db)?;
-    Ok(library_history_snapshot(db))
+        let mut found = false;
+        for entry in &mut entries {
+            if !is_history_tombstone(entry)
+                && history_entry_id(entry).as_deref() == Some(id.as_str())
+            {
+                entry["cloudSaved"] = Value::Bool(request.cloud_saved);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err("找不到这条书库问答记录".into());
+        }
+        write_library_history(db, entries)?;
+        materialize(db)?;
+        Ok(library_history_snapshot(db))
+    })
 }
 
 #[tauri::command]
@@ -1332,16 +1384,16 @@ pub(crate) fn private_sync_library_history_delete(
     if request.id.trim().is_empty() {
         return Err("书库问答记录身份无效".into());
     }
-    let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-    let mut merged = read_library_history(db);
-    merged.push(serde_json::json!({
-        "id": clipped_text(&request.id, 160),
-        "deletedAt": chrono::Utc::now().to_rfc3339(),
-    }));
-    write_library_history(db, merged)?;
-    materialize(db)?;
-    Ok(library_history_snapshot(db))
+    state.with_db_write("private_sync_library_history_delete", |db| {
+        let mut merged = read_library_history(db);
+        merged.push(serde_json::json!({
+            "id": clipped_text(&request.id, 160),
+            "deletedAt": chrono::Utc::now().to_rfc3339(),
+        }));
+        write_library_history(db, merged)?;
+        materialize(db)?;
+        Ok(library_history_snapshot(db))
+    })
 }
 
 #[tauri::command]
@@ -1352,28 +1404,49 @@ pub(crate) async fn private_sync_set_password(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let epoch = sync::private_secret_bundle_state(state.inner())?.secret_bundle_epoch;
-        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        let bundle = SecretBundle {
-            version: 1,
-            ai_reader: ai_reader::export_secret_config(db)?,
-            translations: translate::export_secret_configs(db)?,
-        };
+        let (bundle, write_generation) =
+            state.with_db_read("private_sync_set_password.read", |db| {
+                Ok((
+                    SecretBundle {
+                        version: 1,
+                        ai_reader: ai_reader::export_secret_config(db)?,
+                        translations: translate::export_secret_configs(db)?,
+                    },
+                    secret_bundle_write_generation(db),
+                ))
+            })?;
         if bundle.ai_reader.is_none() && bundle.translations.is_empty() {
             return Err("本机还没有可同步的智读或翻译密钥".into());
         }
+        // PBKDF2 and AES-GCM intentionally run after with_db_read has dropped
+        // the sole SQLite mutex.
         let encrypted = encrypt_bundle(&password, &bundle, epoch)?;
-        db.upsert_json_batch(&[(SECRET_KIND.to_string(), DEFAULT_ID.to_string(), encrypted)])?;
-        let mut options = options_from_db(db);
-        options.sync_secrets = true;
-        db.set_metadata(
-            OPTIONS_KEY,
-            &serde_json::to_string(&options).map_err(|e| e.to_string())?,
-        )?;
-        db.set_metadata(SYNC_FILTERS_CHANGED_KEY, "1")?;
-        Ok(PrivateSyncStatus {
-            options,
-            cloud_secret_available: true,
+        ensure_secret_bundle_epoch(state.inner(), epoch)?;
+        state.with_db_write("private_sync_set_password.write", |db| {
+            if secret_bundle_write_generation(db) != write_generation {
+                return Err("本机密钥包状态已变化，请重新设置同步密码".into());
+            }
+            let current_bundle = SecretBundle {
+                version: 1,
+                ai_reader: ai_reader::export_secret_config(db)?,
+                translations: translate::export_secret_configs(db)?,
+            };
+            if current_bundle != bundle {
+                return Err("本机密钥配置已变化，请重新设置同步密码".into());
+            }
+            db.upsert_json_batch(&[(SECRET_KIND.to_string(), DEFAULT_ID.to_string(), encrypted)])?;
+            let mut options = options_from_db(db);
+            options.sync_secrets = true;
+            db.set_metadata(
+                OPTIONS_KEY,
+                &serde_json::to_string(&options).map_err(|e| e.to_string())?,
+            )?;
+            db.set_metadata(SYNC_FILTERS_CHANGED_KEY, "1")?;
+            advance_secret_bundle_write_generation(db)?;
+            Ok(PrivateSyncStatus {
+                options,
+                cloud_secret_available: true,
+            })
         })
     })
     .await
@@ -1388,19 +1461,37 @@ pub(crate) async fn private_sync_unlock_secrets(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let expected_epoch = sync::private_secret_bundle_state(state.inner())?.secret_bundle_epoch;
-        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        let value = db
-            .entity_json(SECRET_KIND, DEFAULT_ID)?
-            .ok_or("云端没有可解锁的密钥包；请先同步或在拥有密钥的设备重新加密")?;
-        if envelope_epoch(&value)? != expected_epoch {
-            return Err("云端密钥包已被撤销；请在拥有 API Key 的设备重新设置同步密码".into());
-        }
+        let (value, write_generation) =
+            state.with_db_read("private_sync_unlock_secrets.read", |db| {
+                let value = db
+                    .entity_json(SECRET_KIND, DEFAULT_ID)?
+                    .ok_or("云端没有可解锁的密钥包；请先同步或在拥有密钥的设备重新加密")?;
+                if envelope_epoch(&value)? != expected_epoch {
+                    return Err(
+                        "云端密钥包已被撤销；请在拥有 API Key 的设备重新设置同步密码".into(),
+                    );
+                }
+                Ok((value, secret_bundle_write_generation(db)))
+            })?;
+        // PBKDF2 and AES-GCM intentionally run after with_db_read has dropped
+        // the sole SQLite mutex.
         let bundle = decrypt_bundle(&password, &value)?;
-        if let Some(config) = bundle.ai_reader {
-            ai_reader::import_secret_config(db, &config)?;
-        }
-        translate::import_secret_configs(db, &bundle.translations)
+        ensure_secret_bundle_epoch(state.inner(), expected_epoch)?;
+        state.with_db_write("private_sync_unlock_secrets.write", |db| {
+            if secret_bundle_write_generation(db) != write_generation {
+                return Err("本机密钥包状态已变化，请重新同步后再解锁".into());
+            }
+            let current = db
+                .entity_json(SECRET_KIND, DEFAULT_ID)?
+                .ok_or("云端没有可解锁的密钥包；请先同步或在拥有密钥的设备重新加密")?;
+            if current != value || envelope_epoch(&current)? != expected_epoch {
+                return Err("本机密钥包状态已变化，请重新同步后再解锁".into());
+            }
+            if let Some(config) = bundle.ai_reader {
+                ai_reader::import_secret_config(db, &config)?;
+            }
+            translate::import_secret_configs(db, &bundle.translations)
+        })
     })
     .await
     .map_err(|e| format!("解锁密钥任务失败：{e}"))?
@@ -1413,19 +1504,20 @@ pub(crate) async fn private_sync_forget_password(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _state = sync::reset_private_secret_bundle_state(state.inner())?;
-        let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        db.soft_delete(SECRET_KIND, DEFAULT_ID)?;
-        let mut options = options_from_db(db);
-        options.sync_secrets = false;
-        db.set_metadata(
-            OPTIONS_KEY,
-            &serde_json::to_string(&options).map_err(|e| e.to_string())?,
-        )?;
-        db.set_metadata(SYNC_FILTERS_CHANGED_KEY, "1")?;
-        Ok(PrivateSyncStatus {
-            options,
-            cloud_secret_available: false,
+        state.with_db_write("private_sync_forget_password.write", |db| {
+            db.soft_delete(SECRET_KIND, DEFAULT_ID)?;
+            let mut options = options_from_db(db);
+            options.sync_secrets = false;
+            db.set_metadata(
+                OPTIONS_KEY,
+                &serde_json::to_string(&options).map_err(|e| e.to_string())?,
+            )?;
+            db.set_metadata(SYNC_FILTERS_CHANGED_KEY, "1")?;
+            advance_secret_bundle_write_generation(db)?;
+            Ok(PrivateSyncStatus {
+                options,
+                cloud_secret_available: false,
+            })
         })
     })
     .await

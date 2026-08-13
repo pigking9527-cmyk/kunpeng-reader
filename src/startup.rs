@@ -41,11 +41,11 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn instance_scope_key() -> &'static str {
+fn instance_scope_key() -> String {
     // 所有版本共享同一实例锁和唤醒通道。它们也共享本机数据库、模型缓存及
     // 后台任务状态；允许升级前后的两个进程同时运行会造成任务实际在旧进程
     // 执行、而新窗口显示“尚未建立”的状态分裂。
-    "global"
+    crate::profile::instance_scope_key()
 }
 fn associated_book_paths(args: &[String], cwd: &Path) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -97,8 +97,7 @@ pub(crate) fn startup_book_paths() -> Vec<String> {
 }
 
 fn associated_book_request_path() -> Option<PathBuf> {
-    let mut dir = dirs::cache_dir()?;
-    dir.push("ebook-reader");
+    let mut dir = crate::profile::app_cache_dir()?;
     dir.push(format!(
         "associated-book-request-{}.json",
         instance_scope_key()
@@ -291,8 +290,7 @@ fn acquire_single_instance_lock(lock_path: &Path, startup_book_paths: Vec<String
 
 #[cfg(unix)]
 fn default_single_instance_lock_path() -> Option<PathBuf> {
-    let mut lock_dir = dirs::cache_dir()?;
-    lock_dir.push("ebook-reader");
+    let mut lock_dir = crate::profile::app_cache_dir()?;
     lock_dir.push("single-instance.lock");
     Some(lock_dir)
 }
@@ -354,7 +352,7 @@ pub(crate) fn spawn_maintenance(app: tauri::AppHandle) {
             );
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
-        search::spawn_build_index(app.clone());
+        search::spawn_build_index(app.clone(), false);
         // 语义索引的续建只能由用户在“语义索引”面板显式点击触发。升级后
         // 自动迁移旧切块会恰好与打开设置页重合，造成“刚进入就自动续建”的
         // 观感，还会抢占前台交互。因此这里只记录待更新状态，不后台启动任务。

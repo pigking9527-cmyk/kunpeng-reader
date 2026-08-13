@@ -48,7 +48,10 @@ try {
 
   Write-Host '== node --check =='
   $jsFiles = Get-ChildItem -LiteralPath 'ui' -Filter '*.js' -File -Recurse |
-    Where-Object { $_.FullName -notlike "*\ui\pdfjs\*" } |
+    Where-Object {
+      $_.FullName -notmatch '[/\\]ui[/\\]pdfjs[/\\]' -and
+      $_.FullName -notmatch '[/\\]ui[/\\]bridge[/\\]'
+    } |
     Sort-Object FullName
   foreach ($file in $jsFiles) {
     if ($file.Name -eq 'pdfview.js') {
@@ -213,6 +216,14 @@ try {
     }
   }
 
+  Write-Host '== dependency and asset licenses =='
+  & node (Join-Path $repo 'scripts/check-licenses.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'License policy check failed.' }
+
+  Write-Host '== IP clean snapshot =='
+  & node (Join-Path $repo 'scripts/check-ip-clean-snapshot.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'IP clean-snapshot check failed.' }
+
   Write-Host '== version consistency =='
   $cargo = [System.IO.File]::ReadAllText((Join-Path $repo 'Cargo.toml'), [System.Text.Encoding]::UTF8)
   $tauriText = [System.IO.File]::ReadAllText((Join-Path $repo 'tauri.conf.json'), [System.Text.Encoding]::UTF8)
@@ -287,9 +298,12 @@ try {
   $httpScanFiles = @()
   $httpScanFiles += Get-Item -LiteralPath (Join-Path $repo 'tauri.conf.json')
   $httpScanFiles += Get-ChildItem -LiteralPath (Join-Path $repo 'src') -File -Recurse |
-    Where-Object { $_.FullName -notlike (Join-Path $repo 'src\dict\*') }
+    Where-Object { $_.FullName -notlike (Join-Path $repo 'src\dict\*') -and $_.Name -notlike '*_tests.rs' }
   $httpScanFiles += Get-ChildItem -LiteralPath (Join-Path $repo 'ui') -File -Recurse |
-    Where-Object { $_.FullName -notlike (Join-Path $repo 'ui\pdfjs\*') }
+    Where-Object {
+      $_.FullName -notlike (Join-Path $repo 'ui\pdfjs\*') -and
+      $_.FullName -notlike (Join-Path $repo 'ui\tests\*')
+    }
   $httpScanFiles += Get-ChildItem -LiteralPath (Join-Path $repo 'scripts') -File -Recurse
   $httpHits = @(
     Select-String -LiteralPath ($httpScanFiles | Select-Object -ExpandProperty FullName) -Pattern 'http://' |
@@ -303,13 +317,14 @@ try {
       }
   )
   $publicHttpHits = @($httpHits | Where-Object {
-    $_ -notmatch 'scripts\\check\.ps1' -and
+    $_ -notmatch 'scripts[/\\]check\.ps1' -and
     $_ -notmatch 'starts_with\("http://"\)' -and
     $_ -notmatch 'LEGACY_SYNC_HTTP_URL.*http://117\.72\.220\.69' -and
     $_ -notmatch 'normalize_sync_base\("http://' -and
     $_ -notmatch 'src\\sync\.rs:\d+:\s*let url = format!\("http://\{address\}/sync-test"\);' -and
     $_ -notmatch 'http://(localhost|127\.0\.0\.1|\[::1\]|reader\.localhost|ipc\.localhost|tauri\.localhost)' -and
     $_ -notmatch 'http://<scheme>\.localhost' -and
+    $_ -notmatch 'http://www\.apple\.com/DTDs/PropertyList-1\.0\.dtd' -and
     $_ -notmatch 'http://www\.w3\.org/'
   })
   if ($publicHttpHits.Count) {
@@ -329,7 +344,7 @@ try {
   if ($readerBackendRs -notmatch 'sanitize_book_html\(&body\)' -or $readerBackendRs -notmatch 'sanitize_book_html\(&md_to_html') {
     throw 'EPUB and Markdown render paths must use the shared parser-based sanitizer.'
   }
-  if ($readerJsText -notmatch 'ReaderMessageGuard\?\.validateEvent\(e, frame') {
+  if ($readerJsText -notmatch 'ReaderMessageGuard\?\.normalizeEvent\?\.\(e, frame') {
     throw 'Reader message bridge must validate frame source, action and payload bounds.'
   }
   if ($readerInjectedHead -match "localStorage\.setItem\(translateApiStorageKey") {

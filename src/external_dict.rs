@@ -73,8 +73,7 @@ fn now_secs() -> i64 {
 }
 
 fn dict_dir() -> Result<PathBuf, String> {
-    let mut d = dirs::config_dir().ok_or_else(|| "无法确定配置目录".to_string())?;
-    d.push("ebook-reader");
+    let d = crate::profile::app_config_dir().ok_or_else(|| "无法确定配置目录".to_string())?;
     fs::create_dir_all(&d).map_err(|e| format!("创建词典目录失败：{e}"))?;
     Ok(d)
 }

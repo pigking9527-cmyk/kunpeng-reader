@@ -6,6 +6,7 @@ const vm = require("node:vm");
 
 const uiDir = path.resolve(__dirname, "..");
 const statsSource = fs.readFileSync(path.join(uiDir, "stats-ui.js"), "utf8");
+const statsRulesSource = fs.readFileSync(path.join(uiDir, "stats-rules.js"), "utf8");
 const indexSource = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
 const stylesSource = fs.readFileSync(path.join(uiDir, "styles.css"), "utf8");
 
@@ -59,6 +60,7 @@ test("stats UI uses an injected command boundary and keeps range payloads", asyn
   };
   const context = {};
   context.window = context;
+  vm.runInNewContext(statsRulesSource, context);
   vm.runInNewContext(statsSource, context);
   const controller = context.ReaderStatsUI.init({
     root: {
@@ -87,9 +89,11 @@ test("stats UI uses an injected command boundary and keeps range payloads", asyn
 
 test("stats and sync APIs load before app.js initializes them", () => {
   const syncPosition = indexSource.indexOf('src="sync-ui.js"');
+  const rulesPosition = indexSource.indexOf('src="stats-rules.js"');
   const statsPosition = indexSource.indexOf('src="stats-ui.js"');
   const appPosition = indexSource.indexOf('src="app.js"');
   assert.ok(syncPosition >= 0 && syncPosition < appPosition);
+  assert.ok(rulesPosition >= 0 && rulesPosition < statsPosition);
   assert.ok(statsPosition >= 0 && statsPosition < appPosition);
   assert.match(statsSource, /global\.ReaderStatsUI = Object\.freeze/);
 });
@@ -111,6 +115,9 @@ test("stats show a loading state immediately instead of a blank panel", () => {
 });
 
 test("stats navigation stays between the first reading day and today", () => {
+  assert.match(statsSource, /const statCalendarRules = global\.ReaderStatsRules/);
+  assert.match(statsSource, /statCalendarRules\.range\(statScope, statAnchor\)/);
+  assert.match(statsSource, /statCalendarRules\.steppedAnchor\(statScope, statAnchor, direction\)/);
   assert.match(statsSource, /let firstReadingDay = null;/);
   assert.match(statsSource, /function firstStatAnchor\(\)/);
   assert.match(statsSource, /function lastStatAnchor\(\)/);

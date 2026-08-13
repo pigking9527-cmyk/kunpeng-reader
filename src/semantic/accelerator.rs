@@ -1525,8 +1525,7 @@ pub(super) fn probe() {
         }
     }
     let write = |s: &str| {
-        let mut d = dirs::cache_dir().unwrap_or(std::env::temp_dir());
-        d.push("ebook-reader");
+        let mut d = crate::profile::app_cache_dir().unwrap_or_else(std::env::temp_dir);
         let _ = std::fs::create_dir_all(&d);
         d.push("hnsw_probe.txt");
         let _ = std::fs::write(&d, s);

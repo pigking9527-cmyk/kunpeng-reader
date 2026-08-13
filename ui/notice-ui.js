@@ -13,6 +13,8 @@ function ensureNotice() {
   if (notice) return;
   notice = global.document.createElement("div");
   notice.className = "app-notice";
+  notice.dataset.overlaySurface = "notice";
+  notice.dataset.overlayRole = "feedback";
   notice.setAttribute("role", "status");
   notice.setAttribute("aria-live", "polite");
   message = global.document.createElement("span");

@@ -79,6 +79,10 @@ function applyStyle(){
   if(mg(S.marginBottom)===0)c+='.rr>:last-child,.rr body>:last-child{margin-bottom:0 !important;padding-bottom:0 !important;}';
   if(mg(S.marginLeft)===0)c+='.rr,.rr>*,.rr body{margin-left:0 !important;padding-left:0 !important;}';
   if(mg(S.marginRight)===0)c+='.rr,.rr>*,.rr body{margin-right:0 !important;padding-right:0 !important;}';
+  // 0 px 的含义是两栏内容边缘真正相接。真实 EPUB 的首层 body/section
+  // 可能自带水平留白；只在双页且中缝明确为 0 时清掉它，其他中缝值和
+  // 外侧阅读边距仍由 pageLayout() 正常控制。
+  if(isDualPage()&&dualPageGapPx()===0)c+='.rr,.rr>*,.rr body{margin-left:0 !important;margin-right:0 !important;padding-left:0 !important;padding-right:0 !important;}';
   if(useLocalStyle&&S.fontSize){
     c+='.rr *{font-size:inherit !important;}';
     c+='.rr h1{font-size:1.7em !important;} .rr h2{font-size:1.4em !important;} .rr h3{font-size:1.2em !important;} .rr h4{font-size:1.1em !important;}';
@@ -370,6 +374,31 @@ pager.style.bottom=linePagedViewportBottomGapPx()+'px';
   if(pager)pager.scrollLeft=0;
   if(root)root.style.transform='translateX(-'+viewOffset+'px)';
   refreshHighlights();
+}
+var readerViewPaintGeneration=0,readerViewPaintFrame=0;
+function stabilizeProgrammaticViewPaint(){
+  var generation=++readerViewPaintGeneration;
+  if(readerViewPaintFrame){cancelAnimationFrame(readerViewPaintFrame);readerViewPaintFrame=0;}
+  readerViewPaintFrame=requestAnimationFrame(function(){requestAnimationFrame(function(){
+    readerViewPaintFrame=0;
+    if(generation!==readerViewPaintGeneration||!root||!pager)return;
+    var pendingContinuous=typeof hasPendingContinuousPagedImageSource==='function'&&hasPendingContinuousPagedImageSource();
+    if(usesLineBreakPaging()){
+      // macOS WebKit 偶尔在程序化 scrollTop 后沿用上一页的虚拟图层；轻微
+      // 滚动之所以能恢复，是 scroll 事件强制重画了遮罩。这里在新页首帧
+      // 主动完成同一次稳定重画，图片与其后的正文无需再由用户滑动唤醒。
+      applyScrollPageMask(true);
+    }else{
+      // 多栏 transform 的新可视列包含大图时，WebKit 可能只提交上一合成层。
+      // 读取几何并重写同一 transform，不改变页码或布局，只提交当前列。
+      void root.offsetWidth;
+      root.style.transform='translateX(-'+viewOffset+'px)';
+    }
+    // 连续图片已在 setViewOffset() 中完成裁切；这里再次计算会把已经裁过的
+    // 高度当作原高。只提交合成层，不重复改变图片几何。
+    if(!pendingContinuous&&typeof refreshPagedImagePreview==='function')refreshPagedImagePreview();
+    refreshHighlights();
+  });});
 }
 function scrollMaxTop(){
   if(!pager)return 0;
@@ -777,19 +806,10 @@ function isPreviewableBlock(it){
   return /^(figure|img|svg|canvas|video)$/.test(it.tag||'');
 }
 function pageBottomForSlice(pageTop,viewH,endItem,nextItem,bottomGuard){
-  var fullBottom=pageTop+viewH;
-  if(nextItem&&nextItem.type==='block'&&nextItem.atomic&&!isPreviewableBlock(nextItem)&&nextItem.top<fullBottom-1&&nextItem.bottom>fullBottom+0.5){
-    return Math.max(pageTop,Math.min(fullBottom,Math.round(nextItem.top)));
-  }
-  return fullBottom;
+  return ReaderPageScrollRules.pageBottomForSlice(pageTop,viewH,nextItem);
 }
 function firstUnfinishedScrollItemIndex(items,startIdx,bottom){
-  if(!items||!items.length)return -1;
-  startIdx=Math.max(0,Math.min(items.length-1,startIdx||0));
-  for(var i=startIdx;i<items.length;i++){
-    if(items[i].bottom>bottom+0.5)return i;
-  }
-  return items.length;
+  return ReaderPageScrollRules.firstUnfinishedItemIndex(items,startIdx,bottom);
 }
 function scrollLineTopAtOrBefore(lines,target,maxTop){
   target=Math.max(0,Math.min(maxTop,target||0));
@@ -815,36 +835,16 @@ function readableNavMaxTop(lines,maxTop){
   return scrollLineTopAtOrBefore(lines,last?Math.round(last.top||0):0,maxTop);
 }
 function scrollPageTopForStartItem(items,startIdx,navMaxTop,topPad){
-  if(!items||!items.length||startIdx<=0)return 0;
-  var it=items[Math.max(0,Math.min(items.length-1,startIdx))];
-  return Math.max(0,Math.min(navMaxTop,Math.round((it?it.top:0)-(topPad||0))));
+  return ReaderPageScrollRules.pageTopForStartItem(items,startIdx,navMaxTop,topPad);
 }
 function scrollAlignedPageStart(items,startIdx,navMaxTop,topPad){
-  startIdx=Math.max(0,Math.min((items&&items.length?items.length:1)-1,startIdx||0));
-  var pageTop=scrollPageTopForStartItem(items,startIdx,navMaxTop,topPad);
-  var guard=0;
-  while(startIdx>0&&items[startIdx-1].bottom>pageTop+1&&guard++<1000){
-    startIdx--;
-    pageTop=scrollPageTopForStartItem(items,startIdx,navMaxTop,topPad);
-  }
-  return {startIdx:startIdx,pageTop:pageTop};
+  return ReaderPageScrollRules.alignedPageStart(items,startIdx,navMaxTop,topPad);
 }
 function nearestScrollBreakIndex(top){
-  if(!scrollBreaks.length)return 0;
-  var best=0,bestD=Infinity;
-  for(var i=0;i<scrollBreaks.length;i++){
-    var d=Math.abs(scrollBreaks[i]-top);
-    if(d<bestD){best=i;bestD=d;}
-  }
-  return best;
+  return ReaderPageScrollRules.nearestBreakIndex(scrollBreaks,top);
 }
 function pageIndexForScrollTop(top){
-  if(!scrollBreaks.length)return 0;
-  var idx=0;
-  for(var i=0;i<scrollBreaks.length;i++){
-    if(scrollBreaks[i]<=top+2)idx=i;else break;
-  }
-  return Math.max(0,Math.min(scrollBreaks.length-1,idx));
+  return ReaderPageScrollRules.pageIndexForTop(scrollBreaks,top,2);
 }
 function snapScrollTopToBreak(target){
   buildScrollBreaks(false);
@@ -2115,6 +2115,7 @@ function gotoPage(p,dir){
       syncScrollPageFromTop();
     }
     captureAnchor();report(true);notifyReaderEndIfReached(dir);scheduleNoteNumberDisplayRefresh();
+    stabilizeProgrammaticViewPaint();
   });
 }
 function filterTextLines(lines){
@@ -2280,6 +2281,7 @@ function scrollPageBy(dir){
     sp.scrollTop=next;
     updateScrollPageAfterProgrammatic();
     notifyReaderEndIfReached(dir);
+    stabilizeProgrammaticViewPaint();
   });
   return true;
 }

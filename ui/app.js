@@ -46,14 +46,6 @@ const shelfUI = window.ReaderShelfUI.init({
   alertAction: (message, options) => window.AppNotice.show(message, options),
   requestAnimationFrame: (callback) => window.requestAnimationFrame(callback),
 });
-const bookOrganizationUI = window.ReaderBookOrganizationUI.init({
-  root: document,
-  invoke,
-  getBooks: () => shelfUI.getBooks(),
-  onBooksChanged: (list) => shelfUI.render(list),
-  openBooklist: (name) => shelfUI.openBooklist(name),
-  alertAction: (message) => window.AppNotice.show(message),
-});
 window.ReaderStatsUI.init({
   root: document,
   invoke,
@@ -421,12 +413,6 @@ document.getElementById("open-default-apps-settings")?.addEventListener("click",
 fpSettingsModal.addEventListener("click", (e) => {
   if (e.target === fpSettingsModal) fpSettingsModal.classList.remove("show");
 });
-// GitHub 链接：在系统默认浏览器打开，而不是在 WebView 里跳转。
-document.getElementById("about-github")?.addEventListener("click", (e) => {
-  e.preventDefault();
-  invoke("open_url", { url: e.currentTarget.href }).catch(() => {});
-});
-
 // 语义设置由独立模块管理；这里只注入书架应用拥有的依赖。
 window.ReaderSemanticUI.init({
   root: document,
@@ -909,182 +895,51 @@ tauriEvent.listen("tauri://drag-drop", async (e) => {
   if (paths.length) await importBookPaths(paths);
 });
 // ---- 单本图书信息与相关内容 ----
-const coverBtn = document.getElementById("cover-btn");
 const bookInfoBtn = document.getElementById("book-info-btn");
-const similarBooksBtn = document.getElementById("similar-books-btn");
-const readingTimelineBtn = document.getElementById("reading-timeline-btn");
 const bookInfoModal = document.getElementById("book-info-modal");
-const bookInfoCover = document.getElementById("book-info-cover");
-const bookInfoTitle = document.getElementById("book-info-title");
-const bookInfoDesc = document.getElementById("book-info-desc");
-const bookInfoStars = document.getElementById("book-info-stars");
-const similarBooksModal = document.getElementById("similar-books-modal");
-const similarBooksSource = document.getElementById("similar-books-source");
-const similarBooksList = document.getElementById("similar-books-list");
+const bookInfoPanel = window.ReaderBookInfoPanel.mount({
+  root: document,
+  host: bookInfoModal,
+  prefix: "book-info",
+  coverChangeId: "cover-btn",
+  similarId: "similar-books-btn",
+  timelineId: "reading-timeline-btn",
+});
+const bookOrganizationUI = window.ReaderBookOrganizationUI.init({
+  root: document,
+  invoke,
+  getBooks: () => shelfUI.getBooks(),
+  onBooksChanged: (list) => shelfUI.render(list),
+  openBooklist: (name) => shelfUI.openBooklist(name),
+  alertAction: (message) => window.AppNotice.show(message),
+});
+const bookInfoRelated = window.ReaderBookInfoRelated.mount({
+  root: document,
+  invoke,
+  coverColor: (title) => shelfUI.coverColor(title),
+  onOpenBook(book) {
+    clearCrossReturnMemory();
+    invoke("open_book", { id: book.id }).catch((error) => alert("打开失败：" + error));
+  },
+});
 let currentInfoBookId = "";
 
-function timelineDateTime(seconds) {
-  return seconds ? new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false }) : "—";
-}
-function timelineDayLabel(day) {
-  const raw = String(day || "");
-  return raw.length === 8 ? `${raw.slice(4, 6)}/${raw.slice(6)}` : "—";
-}
-function timelineAxisTime(seconds) {
-  const minutes = Math.round(Number(seconds || 0) / 60);
-  return minutes >= 60 ? `${(minutes / 60).toFixed(minutes % 60 ? 1 : 0)}时` : `${minutes}分`;
-}
-function timelineAxisWords(words) {
-  words = Number(words || 0);
-  return words >= 10000 ? `${(words / 10000).toFixed(1)}万` : `${Math.round(words)}`;
-}
-function timelineDailyBars(buckets) {
-  const days = new Map();
-  (buckets || []).forEach((bucket) => {
-    const key = String(bucket.day || "");
-    const item = days.get(key) || { day: bucket.day, seconds: 0, words: 0 };
-    item.seconds += Number(bucket.seconds || 0);
-    item.words += Number(bucket.words || 0);
-    days.set(key, item);
-  });
-  const items = [...days.values()].sort((a, b) => Number(a.day) - Number(b.day)).slice(-28);
-  if (!items.length) return '<div class="stats-empty">暂无历史阅读时段</div>';
-  const maxSeconds = Math.max(...items.map((item) => item.seconds), 1);
-  const maxWords = Math.max(...items.map((item) => item.words), 1);
-  return `<div class="timeline-legend"><span><i class="time"></i>阅读时长</span><span><i class="words"></i>阅读字数</span><span class="timeline-peak">峰值参考：${fmtTime(maxSeconds)} · ${fmtWords(maxWords)}</span></div>` +
-    (() => {
-      const plotWidth = Math.max(640, items.length * 58);
-      const axisWidth = 48, chartWidth = plotWidth + axisWidth * 2;
-      const top = 24, baseline = 170, chartHeight = baseline - top;
-      const left = axisWidth, right = left + plotWidth;
-      const step = plotWidth / items.length;
-      const grid = Array.from({ length: 5 }, (_, index) => {
-        const ratio = index / 4;
-        const y = baseline - chartHeight * ratio;
-        return `<line class="timeline-gridline" x1="${left}" y1="${y}" x2="${right}" y2="${y}"/><text class="timeline-axis-time" x="${left - 7}" y="${y + 4}" text-anchor="end">${timelineAxisTime(maxSeconds * ratio)}</text><text class="timeline-axis-words" x="${right + 7}" y="${y + 4}">${timelineAxisWords(maxWords * ratio)}</text>`;
-      }).join("");
-      const bars = items.map((item, index) => {
-      const timeHeight = Math.max(1, Math.round(item.seconds / maxSeconds * chartHeight));
-      const wordsHeight = Math.max(1, Math.round(item.words / maxWords * chartHeight));
-      const raw = String(item.day || "");
-      const date = raw.length === 8 ? `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6)}` : "未知日期";
-      const tip = `${date} · 阅读 ${fmtTime(item.seconds)} · ${fmtWords(item.words)}`;
-      const x = Math.round(left + index * step + step / 2);
-      const tooltipWidth = 126, tooltipHeight = 52;
-      const tooltipX = Math.max(left, Math.min(x - tooltipWidth / 2, right - tooltipWidth));
-      return `<g class="timeline-bar-group"><title>${tip}</title><rect x="${x - 8}" y="${baseline - timeHeight}" width="7" height="${timeHeight}" rx="2" fill="#3778df"/><rect x="${x + 2}" y="${baseline - wordsHeight}" width="7" height="${wordsHeight}" rx="2" fill="#8053ca"/><text class="timeline-day-label" x="${x}" y="188" text-anchor="middle">${timelineDayLabel(item.day)}</text><g class="timeline-svg-tooltip" pointer-events="none"><rect x="${tooltipX}" y="${top + 5}" width="${tooltipWidth}" height="${tooltipHeight}" rx="5"/><text x="${tooltipX + 8}" y="${top + 21}">${date}</text><text x="${tooltipX + 8}" y="${top + 36}">时长 ${fmtTime(item.seconds)} · ${fmtWords(item.words)}</text></g></g>`;
-      }).join("");
-      return `<div class="timeline-chart" aria-label="每日阅读时长和字数柱状图"><svg viewBox="0 0 ${chartWidth} 196" role="img">${grid}${bars}</svg></div>`;
-    })() + '<div class="timeline-chart-note">左轴为时长、右轴为字数；横线为两项峰值参考线。悬停任一天柱组可查看具体数据</div>';
-}
-
-function fmtTime(sec) {
-  sec = Math.max(0, Number(sec) || 0);
-  const hours = Math.floor(sec / 3600);
-  const minutes = Math.floor((sec % 3600) / 60);
-  if (hours > 0) return hours + " 小时 " + minutes + " 分钟";
-  if (minutes > 0) return minutes + " 分钟";
-  return Math.floor(sec) + " 秒";
-}
-async function openReadingTimeline() {
-  if (!currentInfoBookId) return;
-  const modal = document.getElementById("reading-timeline-modal");
-  const body = document.getElementById("reading-timeline-body");
-  modal.classList.add("show");
-  body.innerHTML = '<div class="stats-empty">正在整理阅读记录…</div>';
-  try {
-    const data = await invoke("book_reading_timeline", { id: currentInfoBookId });
-    document.getElementById("reading-timeline-title").textContent = "阅读时间线 · " + (data.title || "");
-    const events = (data.events || []).slice().reverse();
-    const eventHtml = events.length ? events.map((event) =>
-      `<div class="timeline-event"><time>${timelineDateTime(event.at)}</time><span>第 ${Number(event.chapter || 0) + 1} 章</span><span class="timeline-progress">${Number(event.progress || 0).toFixed(1)}%</span></div>`
-    ).join("") : '<div class="stats-empty">从现在起，阅读到新的章节或进度时会记录在这里。</div>';
-    body.innerHTML = `<section class="timeline-section"><h4>何时阅读</h4>${timelineDailyBars(data.buckets)}</section><section class="timeline-section"><h4>每天最后读到哪里</h4>${eventHtml}</section>`;
-  } catch (e) {
-    body.innerHTML = '<div class="stats-empty">读取失败：' + libraryHealthEscape(e) + '</div>';
-  }
-}
-readingTimelineBtn.addEventListener("click", openReadingTimeline);
-document.getElementById("reading-timeline-close").addEventListener("click", () => document.getElementById("reading-timeline-modal").classList.remove("show"));
-document.getElementById("reading-timeline-modal").addEventListener("click", (e) => { if (e.target.id === "reading-timeline-modal") e.currentTarget.classList.remove("show"); });
-
-function fmtWords(n) {
-  n = n || 0;
-  if (n >= 10000) return (n / 10000).toFixed(2) + " 万字";
-  return n + " 字";
-}
-function fmtSize(bytes) {
-  bytes = bytes || 0;
-  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + "M";
-  if (bytes >= 1024) return Math.round(bytes / 1024) + "K";
-  return bytes + "B";
-}
-function renderInfoChips(element, values) {
-  element.replaceChildren();
-  const items = Array.isArray(values) ? values.filter(Boolean) : [];
-  if (!items.length) {
-    const empty = document.createElement("span");
-    empty.className = "info-chip empty";
-    empty.textContent = "未添加";
-    element.appendChild(empty);
-    return;
-  }
-  items.forEach((value) => {
-    const chip = document.createElement("span");
-    chip.className = "info-chip";
-    chip.textContent = value;
-    element.appendChild(chip);
-  });
-}
-function renderBookInfoTags(element, manualTags, modelTags) {
-  element.replaceChildren();
-  const append = (values, model) => (Array.isArray(values) ? values : []).filter(Boolean).forEach((value) => {
-    const chip = document.createElement("span");
-    chip.className = "info-chip" + (model ? " model-tag" : "");
-    if (model) {
-      const origin = document.createElement("span");
-      origin.className = "info-chip-origin";
-      origin.textContent = "AI";
-      chip.append(origin, document.createTextNode(value));
-      chip.title = "大模型分类标签";
-    } else {
-      chip.textContent = value;
-    }
-    element.appendChild(chip);
-  });
-  append(manualTags, false);
-  append(modelTags, true);
-  if (!element.childElementCount) {
-    const empty = document.createElement("span");
-    empty.className = "info-chip empty";
-    empty.textContent = "未添加";
-    element.appendChild(empty);
-  }
-}
 async function openBookInfoById(id) {
   if (!id) return;
   currentInfoBookId = String(id);
   bookInfoModal.classList.add("show");
-  renderBookInfoCover(shelfUI.getBook(currentInfoBookId));
-  document.getElementById("book-info-words").textContent = "统计中…";
+  bookInfoPanel.render({ ...shelfUI.getBook(currentInfoBookId), word_count: "统计中…" });
+  bookInfoPanel.setLoading();
   bookOrganizationUI.open(currentInfoBookId, shelfUI.getBook(currentInfoBookId));
-  renderBookInfoTags(document.getElementById("book-info-model-tags"), [], []);
   try {
     const m = await invoke("book_meta_by_id", { id: currentInfoBookId });
-    bookInfoTitle.value = m.title || "";
-    renderBookInfoCover(Object.assign({}, shelfUI.getBook(currentInfoBookId) || {}, { title: m.title || "" }));
-    document.getElementById("book-info-author").textContent = m.author || "未知";
-    document.getElementById("book-info-format").textContent = (m.format || "").toUpperCase();
-    document.getElementById("book-info-words").textContent = fmtWords(m.word_count);
-    document.getElementById("book-info-size").textContent = fmtSize(m.size);
+    const book = shelfUI.getBook(currentInfoBookId) || {};
     // Tauri 的 BookMeta 维持既有 snake_case 序列化；兼容曾短暂使用过的
     // camelCase 前端载荷，避免已分类的暗标签在图书信息里被当成空数组。
     bookOrganizationUI.open(currentInfoBookId, m);
-    renderBookInfoTags(document.getElementById("book-info-model-tags"), [], m.model_tags || m.modelTags);
-    bookInfoDesc.textContent = m.description || "";
-    bookInfoStars.setVal(m.rating || 0);
+    bookInfoPanel.render({ ...book, ...m, cover: m.cover || book.cover });
   } catch (e) {
-    document.getElementById("book-info-words").textContent = "读取失败：" + e;
+    bookInfoPanel.setError(e);
   }
 }
 function hasSingleSelectedBook() {
@@ -1095,154 +950,66 @@ async function openSelectedBookInfo() {
   if (selectedIds.length !== 1) return;
   return openBookInfoById(selectedIds[0]);
 }
-shelfUI.makeStars(bookInfoStars, (rating) => {
-  if (!currentInfoBookId) return;
-  bookInfoStars.setVal(rating);
-  shelfUI.updateBook(currentInfoBookId, { rating });
-  invoke("set_book_rating", { id: currentInfoBookId, rating }).catch(() => {});
-});
 window.ReaderBookInfo = Object.freeze({ hasSingleSelected: hasSingleSelectedBook, openById: openBookInfoById, openSelected: openSelectedBookInfo });
 tauriEvent.listen("reader-gesture-action", (event) => {
   const payload = event?.payload || {};
-  if (payload.action !== "book_info" || !payload.bookId) return;
-  window.setTimeout(() => { void openBookInfoById(payload.bookId); }, 80);
+  if (!payload.bookId) return;
+  window.setTimeout(() => {
+    if (payload.action === "book_info") {
+      void openBookInfoById(payload.bookId);
+    } else if (payload.action === "book_organization") {
+      void openBookInfoById(payload.bookId).then(() => bookOrganizationUI.openManager(payload.field === "collections" ? "collections" : "tags"));
+    } else if (payload.action === "change_cover") {
+      void openBookInfoById(payload.bookId).then(async () => {
+        await shelfUI.changeCoverById(currentInfoBookId);
+        bookInfoPanel.renderCover(shelfUI.getBook(currentInfoBookId));
+      });
+    } else if (payload.action === "reading_timeline") {
+      void openBookInfoById(payload.bookId).then(() => bookInfoRelated.openTimeline(payload.bookId));
+    }
+  }, 80);
 });bookInfoBtn.addEventListener("click", openSelectedBookInfo);
 bookInfoModal.addEventListener("click", (e) => {
   if (e.target === bookInfoModal) bookInfoModal.classList.remove("show");
 });
-bookInfoTitle.addEventListener("blur", async () => {
-  if (!currentInfoBookId) return;
-  const title = bookInfoTitle.value.trim();
-  if (!title) {
-    const b = shelfUI.getBook(currentInfoBookId);
-    bookInfoTitle.value = b?.title || "";
-    return;
-  }
-  try {
-    await invoke("set_book_title", { id: currentInfoBookId, title });
-    shelfUI.updateBook(currentInfoBookId, { title });
-    renderBookInfoCover(shelfUI.getBook(currentInfoBookId));
-  } catch (e) {
-    alert("保存书名失败：" + e);
-  }
-});
-bookInfoDesc.addEventListener("blur", () => {
-  if (!currentInfoBookId) return;
-  const description = bookInfoDesc.textContent.trim();
-  shelfUI.updateBook(currentInfoBookId, { description });
-  invoke("set_book_description", { id: currentInfoBookId, description }).catch(() => {});
-});
-
-function renderSimilarCover(b) {
-  const cover = document.createElement("div");
-  cover.className = "similar-cover";
-  if (b.cover) {
-    cover.classList.add("has-img");
-    const img = document.createElement("img");
-    img.alt = b.title || "";
-    img.src = b.cover;
-    cover.appendChild(img);
-  } else {
-    cover.style.background = shelfUI.coverColor(b.title || "");
-    const spine = document.createElement("div");
-    spine.className = "spine";
-    const gen = document.createElement("div");
-    gen.className = "gen";
-    gen.textContent = b.title || "未命名";
-    cover.append(spine, gen);
-  }
-  return cover;
-}
-function renderSimilarBooks(sourceTitle, list) {
-  similarBooksSource.textContent = sourceTitle ? "基于《" + sourceTitle + "》的正文语义相似度" : "基于正文语义相似度";
-  similarBooksList.innerHTML = "";
-  if (!list.length) {
-    similarBooksList.innerHTML = '<div class="similar-empty">没有找到相似图书。可能需要先建立语义索引，或其它图书尚未参与索引。</div>';
-    return;
-  }
-  list.forEach((b) => {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "similar-item";
-    item.appendChild(renderSimilarCover(b));
-    const body = document.createElement("div");
-    body.className = "similar-body";
-    const title = document.createElement("div");
-    title.className = "similar-title";
-    title.textContent = b.title || "未命名";
-    const meta = document.createElement("div");
-    meta.className = "similar-meta";
-    const pct = Math.round(Math.max(0, Math.min(1, Number(b.score || 0))) * 100);
-    meta.textContent = (b.author ? b.author + " · " : "") + "相关性 " + pct + "%";
-    const bar = document.createElement("div");
-    bar.className = "similar-score";
-    const fill = document.createElement("span");
-    fill.style.width = pct + "%";
-    bar.appendChild(fill);
-    body.append(title, meta);
-    if (b.description) {
-      const description = document.createElement("div");
-      description.className = "similar-description";
-      description.textContent = b.description;
-      body.appendChild(description);
+bookInfoPanel.configure({
+  onRating(rating) {
+    if (!currentInfoBookId) return;
+    shelfUI.updateBook(currentInfoBookId, { rating });
+    invoke("set_book_rating", { id: currentInfoBookId, rating }).catch(() => {});
+  },
+  async onTitle(title) {
+    if (!currentInfoBookId) return;
+    if (!title) {
+      bookInfoPanel.elements.title.value = shelfUI.getBook(currentInfoBookId)?.title || "";
+      return;
     }
-    body.appendChild(bar);
-    item.appendChild(body);
-    item.addEventListener("click", () => {
-      similarBooksModal.classList.remove("show");
-      clearCrossReturnMemory();
-      invoke("open_book", { id: b.id }).catch((e) => alert("打开失败：" + e));
-    });
-    similarBooksList.appendChild(item);
-  });
-}
-async function openSimilarBooks(id = currentInfoBookId) {
-  if (!id) return;
-  id = String(id);
-  const source = shelfUI.getBook(id);
-  similarBooksModal.classList.add("show");
-  similarBooksSource.textContent = source ? "基于《" + source.title + "》的正文语义相似度" : "基于正文语义相似度";
-  similarBooksList.innerHTML = '<div class="similar-empty">正在计算相似图书…</div>';
-  try {
-    const list = await invoke("similar_books", { id });
-    renderSimilarBooks(source && source.title, list || []);
-  } catch (e) {
-    similarBooksList.innerHTML = '<div class="similar-empty">读取失败：' + escapeHtml(String(e || "")) + "</div>";
-  }
-}
-similarBooksBtn.addEventListener("click", () => openSimilarBooks());
-document.getElementById("similar-books-close").addEventListener("click", () => similarBooksModal.classList.remove("show"));
-similarBooksModal.addEventListener("click", (e) => {
-  if (e.target === similarBooksModal) similarBooksModal.classList.remove("show");
-});
-
-// 图书信息里的单本操作。
-function renderBookInfoCover(book) {
-  if (!bookInfoCover) return;
-  const title = String(book?.title || bookInfoTitle?.value || "未命名");
-  const renderFallback = () => {
-    const fallback = document.createElement("span");
-    fallback.className = "book-info-cover-fallback";
-    fallback.textContent = title;
-    fallback.style.background = shelfUI.coverColor(title);
-    bookInfoCover.replaceChildren(fallback);
-  };
-  if (!book?.cover) {
-    renderFallback();
-    return;
-  }
-  const image = document.createElement("img");
-  image.alt = title;
-  image.draggable = false;
-  image.decoding = "async";
-  image.src = book.cover;
-  image.addEventListener("error", renderFallback, { once: true });
-  bookInfoCover.replaceChildren(image);
-}
-coverBtn.addEventListener("click", async () => {
-  if (!currentInfoBookId) return;
-  await shelfUI.changeCoverById(currentInfoBookId);
-  renderBookInfoCover(shelfUI.getBook(currentInfoBookId));
+    try {
+      await invoke("set_book_title", { id: currentInfoBookId, title });
+      shelfUI.updateBook(currentInfoBookId, { title });
+      bookInfoPanel.renderCover(shelfUI.getBook(currentInfoBookId));
+    } catch (error) {
+      alert("保存书名失败：" + error);
+    }
+  },
+  onDescription(description) {
+    if (!currentInfoBookId) return;
+    shelfUI.updateBook(currentInfoBookId, { description });
+    invoke("set_book_description", { id: currentInfoBookId, description }).catch(() => {});
+  },
+  async onAction(action) {
+    if (!currentInfoBookId) return;
+    if (action === "cover") {
+      await shelfUI.changeCoverById(currentInfoBookId);
+      bookInfoPanel.renderCover(shelfUI.getBook(currentInfoBookId));
+    } else if (action === "tags" || action === "collections") {
+      bookOrganizationUI.openManager(action);
+    } else if (action === "similar") {
+      void bookInfoRelated.openSimilar(currentInfoBookId, shelfUI.getBook(currentInfoBookId));
+    } else if (action === "timeline") {
+      void bookInfoRelated.openTimeline(currentInfoBookId);
+    }
+  },
 });
 
 // 书架选择、批量删除与焦点刷新由 ReaderShelfUI 管理。

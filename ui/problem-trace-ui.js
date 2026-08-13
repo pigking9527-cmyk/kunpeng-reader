@@ -228,7 +228,7 @@
         jump_back_dismiss_mode: choice(readerAppearance.readerJumpBackDismissMode, ["pages", "time"], "pages"),
         jump_back_dismiss_seconds: boundedInteger(readerAppearance.readerJumpBackDismissSeconds, 30, 1, 600),
         jump_back_dismiss_pages: boundedInteger(readerAppearance.readerJumpBackDismissPages, 3, 1, 100),
-        jump_back_size_level: boundedInteger(readerAppearance.readerJumpBackSizeLevel, 1, 1, 10),
+        jump_back_icon_size_px: boundedInteger(readerAppearance.readerJumpBackIconSizePx, 32, 30, 160),
       },
       gestures: {
         enabled: storageValue(storage, "kunpeng.reader.news.back-gesture.enabled.v1") !== "0" && storageValue(storage, "kunpeng.reader.news.back-gesture.enabled.v1") !== "false",

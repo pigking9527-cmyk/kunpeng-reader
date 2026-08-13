@@ -22,7 +22,6 @@ mod epub_toc;
 mod external_dict;
 mod feedback;
 mod gesture_settings;
-mod hownet;
 mod html_sanitize;
 mod import;
 mod import_core;
@@ -32,6 +31,7 @@ mod memory_budget;
 mod newsnow;
 mod pdf_support;
 mod private_sync;
+mod profile;
 mod reader_backgrounds;
 mod reader_commands;
 mod reader_fonts;
@@ -65,6 +65,7 @@ mod tts_core;
 mod update;
 mod url_open;
 mod vocab;
+
 mod window_commands;
 pub(crate) use app_state::AppState;
 pub(crate) use runtime_support::{
@@ -78,6 +79,12 @@ use tauri::{menu::Menu, Manager};
 #[cfg(target_os = "macos")]
 const MENU_MAIN_WINDOW_CLOSE: &str = "main-window-close";
 fn main() {
+    if let Err(error) =
+        profile::preflight_process_args().and_then(|()| profile::initialize_from_process_args())
+    {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
     runtime_support::mark_process_started();
     if std::env::args().any(|a| a == "--sem-probe") {
         semantic::sem_probe();
@@ -204,8 +211,13 @@ fn main() {
                 main_config.y = Some(saved.y);
                 main_config.maximized = saved.maximized;
             }
-            let _main_window =
-                tauri::WebviewWindowBuilder::from_config(app, &main_config)?.build()?;
+            let mut main_window_builder =
+                tauri::WebviewWindowBuilder::from_config(app, &main_config)?;
+            #[cfg(target_os = "macos")]
+            if let Some(identifier) = profile::webview_data_store_identifier() {
+                main_window_builder = main_window_builder.data_store_identifier(identifier);
+            }
+            let _main_window = main_window_builder.build()?;
             backup::spawn_daily(app.handle().clone());
             semantic::spawn_semantic_profile_warmup(app.handle().clone());
             startup::spawn_associated_book_watcher(app.handle().clone());
@@ -343,6 +355,8 @@ fn main() {
             sync::sync_get_settings,
             sync::sync_set_settings,
             sync::auth_register,
+            sync::auth_register_start,
+            sync::auth_register_confirm,
             sync::auth_login,
             sync::auth_security_status,
             sync::auth_usage_status,
@@ -414,10 +428,8 @@ fn main() {
             pdf_support::get_pdf_state,
             pdf_support::set_pdf_state,
             epub_runtime::search_book,
-            reader_commands::set_description,
             reader_commands::set_book_description,
             reader_commands::set_book_title,
-            reader_commands::set_rating,
             reader_commands::set_book_rating,
             search::web_search,
             library_commands::open_book_at,
@@ -458,7 +470,7 @@ fn main() {
             library_commands::relocate_book,
             macos_reader_wheel::set_reader_paged_wheel_momentum_filter
         ])
-        .build(tauri::generate_context!())
+        .build(tauri::generate_context!("tauri.conf.json"))
         .expect("启动 Tauri 失败")
         .run(|app, event| match event {
             // Command+Q、菜单栏“退出”和关闭主窗口都遵循启动增强开关：开启时

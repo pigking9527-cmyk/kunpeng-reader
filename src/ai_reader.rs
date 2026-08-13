@@ -1,4 +1,11 @@
 //! Local BYOK reading assistant. API secrets never enter the sync entity model.
+mod commands;
+mod context;
+mod history;
+mod profiles;
+mod provider;
+mod retrieval;
+
 use crate::{
     background_tasks::{
         BackgroundTaskKind, BackgroundTaskSnapshot, BackgroundTaskState, TaskControlSignal,
@@ -15,6 +22,37 @@ use std::{
 };
 use tauri::Manager;
 use tokio::sync::watch;
+
+use context::{
+    compact_reading_context_for_source_ids, fallback_deep_source_ids,
+    library_answer_has_sufficient_synthesis, library_booklist_candidate_context, library_context,
+    library_context_for_source_ids, library_question_with_length, parse_deep_source_ids,
+};
+use history::{matching_local_book_id, restored_source_kind, LocalHistoryBookRef};
+use profiles::{
+    active_profile, canonicalize_deepseek_config, default_profile_name, has_profile,
+    known_provider, normalize_base_url, normalize_profile_assignments, profile_for_purpose,
+    profile_summary, status, AiReaderProfileAssignments, AiReaderProfilesStatus, AiReaderStatus,
+    AssignAiReaderProfileRequest, SaveAiReaderConfigRequest, SaveAiReaderProfileRequest,
+    StoredAiReaderProfile, StoredAiReaderProfiles, StoredConfig,
+};
+use retrieval::{library_retrieval_queries, library_theme_terms, single_book_retrieval_queries};
+
+#[doc(hidden)]
+pub(crate) use commands::{
+    __cmd__ai_reader_profiles, __cmd__ai_reader_status, __cmd__assign_ai_reader_profile,
+    __cmd__save_ai_reader_config, __cmd__save_ai_reader_profile, __cmd__select_ai_reader_profile,
+};
+#[doc(hidden)]
+pub(crate) use commands::{
+    __tauri_command_name_ai_reader_profiles, __tauri_command_name_ai_reader_status,
+    __tauri_command_name_assign_ai_reader_profile, __tauri_command_name_save_ai_reader_config,
+    __tauri_command_name_save_ai_reader_profile, __tauri_command_name_select_ai_reader_profile,
+};
+pub(crate) use commands::{
+    ai_reader_profiles, ai_reader_status, assign_ai_reader_profile, save_ai_reader_config,
+    save_ai_reader_profile, select_ai_reader_profile,
+};
 
 const CONFIG_KEY: &str = "ai_reader_config_protected";
 const CONFIG_PROFILES_KEY: &str = "ai_reader_config_profiles_protected:v1";
@@ -78,108 +116,6 @@ const LIBRARY_WEB_LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_
 const LIBRARY_PROFILE_DIMENSIONS: [&str; 8] = [
     "类别", "时代", "体裁", "篇幅", "主题", "地域", "语言", "用途",
 ];
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct StoredConfig {
-    #[serde(default)]
-    provider: String,
-    base_url: String,
-    model: String,
-    api_key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredAiReaderProfile {
-    id: String,
-    name: String,
-    #[serde(flatten)]
-    config: StoredConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct StoredAiReaderProfiles {
-    #[serde(default)]
-    active_id: String,
-    #[serde(default)]
-    assignments: AiReaderProfileAssignments,
-    #[serde(default)]
-    profiles: Vec<StoredAiReaderProfile>,
-}
-
-/// The legacy active profile remains the reading-assistant profile.  Keeping
-/// that mirror lets existing private-sync payloads and older clients keep
-/// their single-profile behaviour while new installs can choose per feature.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AiReaderProfileAssignments {
-    #[serde(default)]
-    pub reading_id: String,
-    #[serde(default)]
-    pub library_id: String,
-    #[serde(default)]
-    pub other_id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AiReaderProfileSummary {
-    pub id: String,
-    pub name: String,
-    pub provider: String,
-    pub base_url: String,
-    pub model: String,
-    pub configured: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AiReaderProfilesStatus {
-    pub active_id: String,
-    pub assignments: AiReaderProfileAssignments,
-    pub profiles: Vec<AiReaderProfileSummary>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AiReaderStatus {
-    pub configured: bool,
-    pub provider: String,
-    pub base_url: String,
-    pub model: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SaveAiReaderConfigRequest {
-    #[serde(default)]
-    provider: String,
-    base_url: String,
-    model: String,
-    api_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SaveAiReaderProfileRequest {
-    #[serde(default)]
-    id: String,
-    name: String,
-    #[serde(default)]
-    provider: String,
-    base_url: String,
-    model: String,
-    /// Leaving this blank while updating an existing profile keeps its key.
-    #[serde(default)]
-    api_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AssignAiReaderProfileRequest {
-    /// reading | library | other
-    purpose: String,
-    id: String,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -264,7 +200,7 @@ impl LibraryAnswerLength {
         }
     }
 
-    fn source_limit(self) -> usize {
+    pub(super) fn source_limit(self) -> usize {
         match self {
             Self::Short => TARGET_LIBRARY_SYNTHESIS_SOURCES,
             Self::Medium => 7,
@@ -272,7 +208,7 @@ impl LibraryAnswerLength {
         }
     }
 
-    fn required_books(self) -> usize {
+    pub(super) fn required_books(self) -> usize {
         match self {
             Self::Short => MIN_LIBRARY_SYNTHESIS_BOOKS,
             Self::Medium => 4,
@@ -280,7 +216,7 @@ impl LibraryAnswerLength {
         }
     }
 
-    fn required_sources(self) -> usize {
+    pub(super) fn required_sources(self) -> usize {
         match self {
             Self::Short => MIN_LIBRARY_SYNTHESIS_SOURCES,
             Self::Medium => 6,
@@ -288,7 +224,7 @@ impl LibraryAnswerLength {
         }
     }
 
-    fn prompt_specification(self) -> &'static str {
+    pub(super) fn prompt_specification(self) -> &'static str {
         match self {
             Self::Short => {
                 "以 700 个汉字以内为目标；关键依据 4—6 条。材料足够时，至少使用 3 部作品、4 个不同来源；解读 2—3 句。"
@@ -350,17 +286,17 @@ pub(crate) struct LibraryHistorySourcePreviewRequest {
 pub(crate) struct AiReaderSource {
     /// Local library id, used by the UI to open the cited chapter. It is not a
     /// cross-device sync identifier and is never uploaded by this command.
-    book_id: String,
-    book_title: String,
-    chapter: u32,
-    excerpt: String,
+    pub(super) book_id: String,
+    pub(super) book_title: String,
+    pub(super) chapter: u32,
+    pub(super) excerpt: String,
     /// Describes how the local excerpt was selected, for example a directory
     /// entry, a chapter opening, or a semantic body passage.
     #[serde(default)]
-    source_kind: String,
+    pub(super) source_kind: String,
     /// Local AI classification labels are retrieval hints, never source text.
     #[serde(default)]
-    tags: Vec<String>,
+    pub(super) tags: Vec<String>,
 }
 
 struct SingleBookDepthResults {
@@ -550,9 +486,9 @@ fn parse_library_classification_decision(
 }
 
 fn load_library_profiles(state: &AppState) -> Result<HashMap<String, LibraryProfile>, String> {
-    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db.as_ref().ok_or("SQLite 数据库不可用")?;
-    let entries = db.metadata_with_prefix(LIBRARY_PROFILE_PREFIX)?;
+    let entries = state.with_db_read("ai_reader_load_library_profiles", |db| {
+        db.metadata_with_prefix(LIBRARY_PROFILE_PREFIX)
+    })?;
     Ok(entries
         .into_iter()
         .filter_map(|(key, value)| {
@@ -564,9 +500,9 @@ fn load_library_profiles(state: &AppState) -> Result<HashMap<String, LibraryProf
 }
 
 fn model_tags_enabled(state: &AppState) -> Result<bool, String> {
-    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db.as_ref().ok_or("SQLite 数据库不可用")?;
-    Ok(db.metadata(LIBRARY_MODEL_TAGS_ENABLED_KEY).as_deref() != Some("false"))
+    state.with_db_read("ai_reader_model_tags_enabled", |db| {
+        Ok(db.metadata(LIBRARY_MODEL_TAGS_ENABLED_KEY).as_deref() != Some("false"))
+    })
 }
 
 fn model_tags_by_book(state: &AppState) -> Result<HashMap<String, Vec<String>>, String> {
@@ -704,120 +640,6 @@ fn boost_results_with_profiles(
     matched.into_keys().collect()
 }
 
-fn normalize_base_url(value: &str) -> Result<String, String> {
-    // OpenAI compatible providers normally ask for a base URL ending in `/v1`,
-    // but it is natural for users to paste the full chat-completions URL from
-    // their provider's documentation. Store one canonical base either way so
-    // we never emit `.../chat/completions/chat/completions`.
-    let value = value.trim().trim_end_matches('/');
-    let value = value
-        .strip_suffix("/chat/completions")
-        .or_else(|| value.strip_suffix("/v1/messages"))
-        .unwrap_or(value)
-        .trim_end_matches('/');
-    const LOCAL_HTTP_PREFIX: &str = concat!("http", "://");
-    let local_http = if let Some(local_value) = value.strip_prefix(LOCAL_HTTP_PREFIX) {
-        let authority = local_value.split('/').next().unwrap_or_default();
-        let host = if authority.starts_with('[') {
-            authority
-                .split_once(']')
-                .map(|(host, _)| host.trim_start_matches('['))
-                .unwrap_or_default()
-        } else {
-            authority.split(':').next().unwrap_or_default()
-        };
-        !authority.contains('@') && matches!(host, "localhost" | "127.0.0.1" | "::1")
-    } else {
-        false
-    };
-    if !(value.starts_with("https://") || local_http) {
-        return Err("接口地址必须使用 HTTPS；仅本机服务可使用 HTTP".into());
-    }
-    if value.len() > 500 {
-        return Err("接口地址过长".into());
-    }
-    Ok(value.to_string())
-}
-
-fn known_provider(value: &str) -> &'static str {
-    match value.trim() {
-        "deepseek" => "deepseek",
-        "openai" => "openai",
-        "anthropic" => "anthropic",
-        _ => "compatible",
-    }
-}
-
-fn infer_provider(base_url: &str) -> &'static str {
-    let base_url = base_url.trim().to_ascii_lowercase();
-    if base_url.starts_with("https://api.deepseek.com") {
-        "deepseek"
-    } else if base_url.starts_with("https://api.openai.com") {
-        "openai"
-    } else if base_url.starts_with("https://api.anthropic.com") {
-        "anthropic"
-    } else {
-        "compatible"
-    }
-}
-
-fn canonicalize_deepseek_config(mut config: StoredConfig) -> StoredConfig {
-    // DeepSeek retired the old `deepseek-chat` / `deepseek-reasoner` names on
-    // 2026-07-24. Keep compatibility only for the official endpoint; third
-    // party OpenAI-compatible servers may intentionally still expose them.
-    let provider = if config.provider.trim().is_empty() {
-        infer_provider(&config.base_url)
-    } else {
-        known_provider(&config.provider)
-    };
-    config.provider = provider.to_string();
-    let official_base = provider == "deepseek";
-    if official_base && matches!(config.model.trim(), "deepseek-chat" | "deepseek-reasoner") {
-        config.model = "deepseek-v4-flash".to_string();
-    }
-    config
-}
-
-fn endpoint_for(base_url: &str, suffix: &str) -> String {
-    let base_url = base_url.trim_end_matches('/');
-    if base_url.ends_with(suffix) {
-        return base_url.to_string();
-    }
-    if suffix == "/v1/messages" && base_url.ends_with("/v1") {
-        return format!("{base_url}/messages");
-    }
-    format!("{base_url}{suffix}")
-}
-
-fn provider_error_summary(status: u16, body: &str) -> String {
-    let message = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            let message = value
-                .pointer("/error/message")
-                .or_else(|| value.get("message"))
-                .and_then(serde_json::Value::as_str)?;
-            Some(message.to_string())
-        })
-        .unwrap_or_else(|| body.to_string())
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let message = trim_to_chars(&message, 600);
-    let hint = match status {
-        400 => "请检查接口地址、模型名和请求参数；若服务端列出了可用模型，请直接使用其中之一。",
-        401 | 403 => "请检查 API Key 是否有效、是否属于这个接口账户。",
-        404 => "请检查接口地址；地址应填到 /v1，不必填写 /chat/completions。",
-        429 => "接口当前限流或余额不足，请稍后重试并检查账户额度。",
-        _ => "请稍后重试；若持续出现，请保留本提示中的服务端说明。",
-    };
-    if message.is_empty() {
-        format!("HTTP {status}。{hint}")
-    } else {
-        format!("HTTP {status}：{message}。{hint}")
-    }
-}
-
 fn load_legacy_config(db: &crate::db::AppDb) -> Result<StoredConfig, String> {
     let protected = db.metadata(CONFIG_KEY).unwrap_or_default();
     if protected.is_empty() {
@@ -825,20 +647,6 @@ fn load_legacy_config(db: &crate::db::AppDb) -> Result<StoredConfig, String> {
     }
     let json = secret_store::unprotect_secret(&protected)?;
     serde_json::from_str(&json).map_err(|error| format!("阅读助手配置损坏：{error}"))
-}
-
-fn default_profile_name(config: &StoredConfig) -> String {
-    let provider = match known_provider(&config.provider) {
-        "deepseek" => "DeepSeek",
-        "openai" => "OpenAI",
-        "anthropic" => "Anthropic",
-        _ => "兼容接口",
-    };
-    if config.model.trim().is_empty() {
-        provider.to_string()
-    } else {
-        format!("{provider} · {}", trim_to_chars(config.model.trim(), 48))
-    }
 }
 
 fn load_profiles(db: &crate::db::AppDb) -> Result<StoredAiReaderProfiles, String> {
@@ -888,60 +696,6 @@ fn load_profiles(db: &crate::db::AppDb) -> Result<StoredAiReaderProfiles, String
     })
 }
 
-fn has_profile(store: &StoredAiReaderProfiles, id: &str) -> bool {
-    !id.trim().is_empty() && store.profiles.iter().any(|profile| profile.id == id)
-}
-
-fn normalize_profile_assignments(store: &mut StoredAiReaderProfiles) {
-    if !has_profile(store, &store.active_id) {
-        store.active_id = store
-            .profiles
-            .first()
-            .map(|profile| profile.id.clone())
-            .unwrap_or_default();
-    }
-    let fallback = store.active_id.clone();
-    // Each capability always needs a model. Empty or stale bindings repair to
-    // the legacy active model, including users who briefly tried the old
-    // click-again-to-cancel interaction.
-    if !has_profile(store, &store.assignments.reading_id) {
-        store.assignments.reading_id = fallback.clone();
-    }
-    if !has_profile(store, &store.assignments.library_id) {
-        store.assignments.library_id = fallback.clone();
-    }
-    if !has_profile(store, &store.assignments.other_id) {
-        store.assignments.other_id = fallback.clone();
-    }
-    // `active_id` is deliberately the old one-model representation of
-    // reading, so importing an old client remains predictable.
-    store.active_id = store.assignments.reading_id.clone();
-}
-
-fn active_profile(store: &StoredAiReaderProfiles) -> Option<&StoredAiReaderProfile> {
-    store
-        .profiles
-        .iter()
-        .find(|profile| profile.id == store.active_id)
-}
-
-fn profile_for_purpose<'a>(
-    store: &'a StoredAiReaderProfiles,
-    purpose: &str,
-) -> Option<&'a StoredAiReaderProfile> {
-    let id = match purpose {
-        "reading" => &store.assignments.reading_id,
-        "library" => &store.assignments.library_id,
-        "other" => &store.assignments.other_id,
-        _ => &store.active_id,
-    };
-    store
-        .profiles
-        .iter()
-        .find(|profile| profile.id == *id)
-        .or_else(|| active_profile(store))
-}
-
 fn persist_profiles(db: &crate::db::AppDb, store: &StoredAiReaderProfiles) -> Result<(), String> {
     let json = serde_json::to_string(store).map_err(|error| error.to_string())?;
     db.set_metadata(CONFIG_PROFILES_KEY, &secret_store::protect_secret(&json)?)?;
@@ -962,20 +716,6 @@ fn load_config_for_purpose(db: &crate::db::AppDb, purpose: &str) -> Result<Store
     Ok(profile_for_purpose(&load_profiles(db)?, purpose)
         .map(|profile| profile.config.clone())
         .unwrap_or_default())
-}
-
-fn profile_summary(profile: &StoredAiReaderProfile) -> AiReaderProfileSummary {
-    let config = canonicalize_deepseek_config(profile.config.clone());
-    AiReaderProfileSummary {
-        id: profile.id.clone(),
-        name: profile.name.clone(),
-        configured: !config.base_url.is_empty()
-            && !config.model.is_empty()
-            && !config.api_key.is_empty(),
-        provider: config.provider,
-        base_url: config.base_url,
-        model: config.model,
-    }
 }
 
 /// Portable configuration deliberately omits the credential. It is safe to
@@ -1136,66 +876,44 @@ pub(crate) fn import_secret_config(
     persist_profiles(db, &profiles)
 }
 
-fn status(config: &StoredConfig) -> AiReaderStatus {
-    AiReaderStatus {
-        configured: !config.base_url.is_empty()
-            && !config.model.is_empty()
-            && !config.api_key.is_empty(),
-        provider: config.provider.clone(),
-        base_url: config.base_url.clone(),
-        model: config.model.clone(),
-    }
-}
-
-#[tauri::command]
-pub(crate) fn ai_reader_status(
-    state: tauri::State<'_, AppState>,
-) -> Result<AiReaderStatus, String> {
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    Ok(status(&canonicalize_deepseek_config(load_config(db)?)))
-}
-
-#[tauri::command]
-pub(crate) fn ai_reader_profiles(
-    state: tauri::State<'_, AppState>,
-) -> Result<AiReaderProfilesStatus, String> {
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    let profiles = load_profiles(db)?;
-    Ok(AiReaderProfilesStatus {
-        active_id: profiles.active_id,
-        assignments: profiles.assignments,
-        profiles: profiles.profiles.iter().map(profile_summary).collect(),
+fn ai_reader_status_inner(state: &AppState) -> Result<AiReaderStatus, String> {
+    state.with_db_read("ai_reader_status", |db| {
+        Ok(status(&canonicalize_deepseek_config(load_config(db)?)))
     })
 }
 
-#[tauri::command]
-pub(crate) fn select_ai_reader_profile(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<AiReaderStatus, String> {
-    let id = id.trim();
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    let mut profiles = load_profiles(db)?;
-    let profile = profiles
-        .profiles
-        .iter()
-        .find(|profile| profile.id == id)
-        .ok_or("找不到所选大模型配置")?;
-    let selected_id = profile.id.clone();
-    let config = canonicalize_deepseek_config(profile.config.clone());
-    profiles.active_id = selected_id.clone();
-    profiles.assignments.reading_id = selected_id;
-    normalize_profile_assignments(&mut profiles);
-    persist_profiles(db, &profiles)?;
-    Ok(status(&config))
+fn ai_reader_profiles_inner(state: &AppState) -> Result<AiReaderProfilesStatus, String> {
+    state.with_db_read("ai_reader_profiles", |db| {
+        let profiles = load_profiles(db)?;
+        Ok(AiReaderProfilesStatus {
+            active_id: profiles.active_id,
+            assignments: profiles.assignments,
+            profiles: profiles.profiles.iter().map(profile_summary).collect(),
+        })
+    })
 }
 
-#[tauri::command]
-pub(crate) fn assign_ai_reader_profile(
-    state: tauri::State<'_, AppState>,
+fn select_ai_reader_profile_inner(state: &AppState, id: String) -> Result<AiReaderStatus, String> {
+    let id = id.trim();
+    state.with_db_write("ai_reader_select_profile", |db| {
+        let mut profiles = load_profiles(db)?;
+        let profile = profiles
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .ok_or("找不到所选大模型配置")?;
+        let selected_id = profile.id.clone();
+        let config = canonicalize_deepseek_config(profile.config.clone());
+        profiles.active_id = selected_id.clone();
+        profiles.assignments.reading_id = selected_id;
+        normalize_profile_assignments(&mut profiles);
+        persist_profiles(db, &profiles)?;
+        Ok(status(&config))
+    })
+}
+
+fn assign_ai_reader_profile_inner(
+    state: &AppState,
     request: AssignAiReaderProfileRequest,
 ) -> Result<AiReaderProfilesStatus, String> {
     let purpose = request.purpose.trim();
@@ -1203,30 +921,29 @@ pub(crate) fn assign_ai_reader_profile(
         return Err("不支持的大模型用途".into());
     }
     let id = request.id.trim();
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    let mut profiles = load_profiles(db)?;
-    if !has_profile(&profiles, id) {
-        return Err("找不到所选大模型配置".into());
-    }
-    match purpose {
-        "reading" => profiles.assignments.reading_id = id.to_string(),
-        "library" => profiles.assignments.library_id = id.to_string(),
-        "other" => profiles.assignments.other_id = id.to_string(),
-        _ => unreachable!(),
-    }
-    normalize_profile_assignments(&mut profiles);
-    persist_profiles(db, &profiles)?;
-    Ok(AiReaderProfilesStatus {
-        active_id: profiles.active_id,
-        assignments: profiles.assignments,
-        profiles: profiles.profiles.iter().map(profile_summary).collect(),
+    state.with_db_write("ai_reader_assign_profile", |db| {
+        let mut profiles = load_profiles(db)?;
+        if !has_profile(&profiles, id) {
+            return Err("找不到所选大模型配置".into());
+        }
+        match purpose {
+            "reading" => profiles.assignments.reading_id = id.to_string(),
+            "library" => profiles.assignments.library_id = id.to_string(),
+            "other" => profiles.assignments.other_id = id.to_string(),
+            _ => unreachable!(),
+        }
+        normalize_profile_assignments(&mut profiles);
+        persist_profiles(db, &profiles)?;
+        Ok(AiReaderProfilesStatus {
+            active_id: profiles.active_id,
+            assignments: profiles.assignments,
+            profiles: profiles.profiles.iter().map(profile_summary).collect(),
+        })
     })
 }
 
-#[tauri::command]
-pub(crate) fn save_ai_reader_profile(
-    state: tauri::State<'_, AppState>,
+fn save_ai_reader_profile_inner(
+    state: &AppState,
     request: SaveAiReaderProfileRequest,
 ) -> Result<AiReaderProfilesStatus, String> {
     let name = trim_to_chars(request.name.trim(), 80);
@@ -1245,48 +962,47 @@ pub(crate) fn save_ai_reader_profile(
     if config.model.len() > 200 || config.api_key.len() > 2_000 {
         return Err("模型名或 API Key 过长".into());
     }
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    let mut profiles = load_profiles(db)?;
-    let id = if request.id.trim().is_empty() {
-        format!("profile-{}", crate::runtime_support::now_ms())
-    } else {
-        request.id.trim().to_string()
-    };
-    if let Some(existing) = profiles
-        .profiles
-        .iter_mut()
-        .find(|profile| profile.id == id)
-    {
-        if config.api_key.is_empty() {
-            config.api_key = existing.config.api_key.clone();
+    state.with_db_write("ai_reader_save_profile", |db| {
+        let mut profiles = load_profiles(db)?;
+        let id = if request.id.trim().is_empty() {
+            format!("profile-{}", crate::runtime_support::now_ms())
+        } else {
+            request.id.trim().to_string()
+        };
+        if let Some(existing) = profiles
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+        {
+            if config.api_key.is_empty() {
+                config.api_key = existing.config.api_key.clone();
+            }
+            existing.name = name;
+            existing.config = config;
+        } else {
+            if config.api_key.is_empty() {
+                return Err("请填写 API Key".into());
+            }
+            profiles.profiles.push(StoredAiReaderProfile {
+                id: id.clone(),
+                name,
+                config,
+            });
         }
-        existing.name = name;
-        existing.config = config;
-    } else {
-        if config.api_key.is_empty() {
-            return Err("请填写 API Key".into());
-        }
-        profiles.profiles.push(StoredAiReaderProfile {
-            id: id.clone(),
-            name,
-            config,
-        });
-    }
-    profiles.active_id = id.clone();
-    profiles.assignments.reading_id = id;
-    normalize_profile_assignments(&mut profiles);
-    persist_profiles(db, &profiles)?;
-    Ok(AiReaderProfilesStatus {
-        active_id: profiles.active_id,
-        assignments: profiles.assignments,
-        profiles: profiles.profiles.iter().map(profile_summary).collect(),
+        profiles.active_id = id.clone();
+        profiles.assignments.reading_id = id;
+        normalize_profile_assignments(&mut profiles);
+        persist_profiles(db, &profiles)?;
+        Ok(AiReaderProfilesStatus {
+            active_id: profiles.active_id,
+            assignments: profiles.assignments,
+            profiles: profiles.profiles.iter().map(profile_summary).collect(),
+        })
     })
 }
 
-#[tauri::command]
-pub(crate) fn save_ai_reader_config(
-    state: tauri::State<'_, AppState>,
+fn save_ai_reader_config_inner(
+    state: &AppState,
     request: SaveAiReaderConfigRequest,
 ) -> Result<AiReaderStatus, String> {
     let config = canonicalize_deepseek_config(StoredConfig {
@@ -1301,30 +1017,30 @@ pub(crate) fn save_ai_reader_config(
     if config.model.len() > 200 || config.api_key.len() > 2_000 {
         return Err("模型名或 API Key 过长".into());
     }
-    let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-    let mut profiles = load_profiles(db)?;
-    let active_id = profiles.active_id.clone();
-    if let Some(profile) = profiles
-        .profiles
-        .iter_mut()
-        .find(|profile| profile.id == active_id)
-    {
-        profile.config = config.clone();
-        if profile.name.trim().is_empty() {
-            profile.name = default_profile_name(&config);
+    state.with_db_write("ai_reader_save_config", |db| {
+        let mut profiles = load_profiles(db)?;
+        let active_id = profiles.active_id.clone();
+        if let Some(profile) = profiles
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == active_id)
+        {
+            profile.config = config.clone();
+            if profile.name.trim().is_empty() {
+                profile.name = default_profile_name(&config);
+            }
+        } else {
+            profiles.active_id = "default".to_string();
+            profiles.profiles.push(StoredAiReaderProfile {
+                id: "default".to_string(),
+                name: default_profile_name(&config),
+                config: config.clone(),
+            });
         }
-    } else {
-        profiles.active_id = "default".to_string();
-        profiles.profiles.push(StoredAiReaderProfile {
-            id: "default".to_string(),
-            name: default_profile_name(&config),
-            config: config.clone(),
-        });
-    }
-    normalize_profile_assignments(&mut profiles);
-    persist_profiles(db, &profiles)?;
-    Ok(status(&config))
+        normalize_profile_assignments(&mut profiles);
+        persist_profiles(db, &profiles)?;
+        Ok(status(&config))
+    })
 }
 
 fn select_context(
@@ -1679,39 +1395,6 @@ fn push_library_source(
     push_ai_source(sources, seen, source, max_sources);
 }
 
-fn library_theme_terms(question: &str) -> Option<&'static [&'static str]> {
-    let question = question.trim();
-    if ["情爱", "爱情", "恋爱", "爱恋", "感情", "情感", "相思"]
-        .iter()
-        .any(|term| question.contains(term))
-    {
-        Some(&[
-            "情爱",
-            "爱情",
-            "爱恋",
-            "恋爱",
-            "相思",
-            "钟情",
-            "倾心",
-            "爱慕",
-            "相爱",
-            "恋人",
-            "夫妻",
-            "夫妇",
-            "婚姻",
-            "婚嫁",
-            "妻子",
-            "丈夫",
-            "未婚妻",
-            "情人",
-            "相守",
-            "离别",
-        ])
-    } else {
-        None
-    }
-}
-
 fn hit_matches_library_theme(hit: &semantic::SemHit, terms: &[&str]) -> bool {
     terms.iter().any(|term| hit.snippet.contains(term))
 }
@@ -1727,19 +1410,6 @@ struct MergedLibrarySearchResults {
     // give up everything for \"她\"). Keep that local retrieval signal until
     // the evidence-filter stage instead of discarding it with a word match.
     thematic_hit_keys: HashSet<String>,
-}
-
-fn library_retrieval_queries(question: &str) -> Vec<String> {
-    let mut queries = vec![question.trim().to_string()];
-    if library_theme_terms(question).is_some() {
-        queries.push("武侠小说中的情爱、爱情、爱恋、相思、夫妻、婚姻与人物关系描写".to_string());
-    }
-    let mut seen = HashSet::new();
-    queries
-        .into_iter()
-        .filter(|query| !query.is_empty())
-        .filter(|query| seen.insert(query.clone()))
-        .collect()
 }
 
 fn merge_library_search_results(
@@ -2093,22 +1763,6 @@ fn select_single_book_sources(
     Ok(sources)
 }
 
-fn single_book_retrieval_queries(question: &str, title: &str) -> Vec<String> {
-    let title = title.trim();
-    let candidates = [
-        question.trim().to_string(),
-        format!("《{title}》的全书主要内容、叙述范围与核心主题"),
-        format!("《{title}》的重要人物、事件、论点与结论"),
-        format!("《{title}》的目录、章节结构、各章主题与全书结论"),
-    ];
-    let mut seen = HashSet::new();
-    candidates
-        .into_iter()
-        .filter(|query| !query.trim().is_empty())
-        .filter(|query| seen.insert(query.trim().to_lowercase()))
-        .collect()
-}
-
 fn merge_single_book_depth_results(
     book_id: &str,
     batches: Vec<Vec<semantic::SemBookHits>>,
@@ -2188,198 +1842,6 @@ async fn single_book_depth_search(
         semantic_results,
         structure_sources,
     })
-}
-
-fn library_context_entries<'a>(
-    entries: impl IntoIterator<Item = (usize, &'a AiReaderSource)>,
-) -> String {
-    let mut context = String::new();
-    let mut remaining = MAX_CONTEXT_CHARS;
-    for (source_id, source) in entries {
-        if remaining == 0 {
-            break;
-        }
-        let labels = if source.tags.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "｜标签：{}",
-                source
-                    .tags
-                    .iter()
-                    .take(6)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("、")
-            )
-        };
-        let source_kind = if source.source_kind.is_empty() {
-            String::new()
-        } else {
-            format!("｜材料：{}", source.source_kind)
-        };
-        let header = format!(
-            "[来源 {}｜《{}》｜第 {} 章{}{}｜本地书籍 ID {}]\n",
-            source_id,
-            source.book_title,
-            source.chapter + 1,
-            labels,
-            source_kind,
-            source.book_id
-        );
-        let header_chars = header.chars().count();
-        if header_chars >= remaining {
-            break;
-        }
-        let excerpt = trim_to_chars(&source.excerpt, remaining - header_chars);
-        if excerpt.trim().is_empty() {
-            continue;
-        }
-        context.push_str(&header);
-        context.push_str(&excerpt);
-        context.push_str("\n\n");
-        remaining = remaining.saturating_sub(header_chars + excerpt.chars().count() + 2);
-    }
-    context
-}
-
-fn library_context(sources: &[AiReaderSource]) -> String {
-    library_context_entries(
-        sources
-            .iter()
-            .enumerate()
-            .map(|(index, source)| (index + 1, source)),
-    )
-}
-
-/// Recommendation can expose up to one hundred locally ranked books.  The
-/// ordinary evidence context deliberately gives a few sources long excerpts,
-/// which would silently omit the tail of such a candidate pool.  This compact
-/// one-line form budgets space per book so every selected candidate, including
-/// the last one, reaches the model within the same privacy-safe context cap.
-fn library_booklist_candidate_context(sources: &[AiReaderSource]) -> String {
-    if sources.is_empty() {
-        return String::new();
-    }
-    let per_source_budget = (MAX_CONTEXT_CHARS / sources.len()).max(72);
-    let mut context = String::new();
-    for (index, source) in sources.iter().enumerate() {
-        let title = trim_to_chars(&source.book_title, 32);
-        let tags = trim_to_chars(
-            &source
-                .tags
-                .iter()
-                .take(4)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("、"),
-            28,
-        );
-        let prefix = format!(
-            "[候选{}｜本地书籍 ID {}｜《{}》{}] ",
-            index + 1,
-            source.book_id,
-            title,
-            if tags.is_empty() {
-                String::new()
-            } else {
-                format!("｜标签：{tags}")
-            }
-        );
-        let excerpt_budget = per_source_budget
-            .saturating_sub(prefix.chars().count() + 1)
-            .max(12);
-        let line = format!(
-            "{}{}\n",
-            prefix,
-            trim_to_chars(&source.excerpt, excerpt_budget)
-        );
-        if context.chars().count() + line.chars().count() > MAX_CONTEXT_CHARS {
-            // The fixed title/ID prefix is intentionally retained for every
-            // candidate; if unusually long IDs consume the final budget, use
-            // a final tightly bounded line rather than dropping the book.
-            let remaining = MAX_CONTEXT_CHARS.saturating_sub(context.chars().count());
-            if remaining > 0 {
-                context.push_str(&trim_to_chars(&line, remaining));
-            }
-            break;
-        }
-        context.push_str(&line);
-    }
-    context
-}
-
-fn library_context_for_source_ids(sources: &[AiReaderSource], source_ids: &[usize]) -> String {
-    library_context_entries(source_ids.iter().filter_map(|source_id| {
-        sources
-            .get(source_id.saturating_sub(1))
-            .map(|source| (*source_id, source))
-    }))
-}
-
-fn compact_reading_context_for_source_ids(
-    sources: &[AiReaderSource],
-    source_ids: &[usize],
-) -> String {
-    let mut context = String::new();
-    let mut remaining = MAX_READING_RETRY_CONTEXT_CHARS;
-    for source_id in source_ids.iter().copied().take(3) {
-        let Some(source) = sources.get(source_id.saturating_sub(1)) else {
-            continue;
-        };
-        let header = format!(
-            "[来源 {}｜第 {} 章｜材料：{}]\n",
-            source_id,
-            source.chapter + 1,
-            source.source_kind
-        );
-        let header_chars = header.chars().count();
-        if header_chars >= remaining {
-            break;
-        }
-        let excerpt = trim_to_chars(&source.excerpt, (remaining - header_chars).min(1_600));
-        if excerpt.trim().is_empty() {
-            continue;
-        }
-        context.push_str(&header);
-        context.push_str(&excerpt);
-        context.push_str("\n\n");
-        remaining = remaining.saturating_sub(header_chars + excerpt.chars().count() + 2);
-    }
-    context
-}
-
-fn parse_deep_source_ids(response: &str, source_count: usize) -> Vec<usize> {
-    let response = response.trim().trim_matches('`').trim();
-    let json = serde_json::from_str::<serde_json::Value>(response).or_else(|_| {
-        let start = response
-            .find('{')
-            .ok_or_else(|| serde_json::Error::io(std::io::Error::other("missing JSON object")))?;
-        let end = response
-            .rfind('}')
-            .ok_or_else(|| serde_json::Error::io(std::io::Error::other("missing JSON object")))?;
-        serde_json::from_str(&response[start..=end])
-    });
-    let Ok(json) = json else {
-        return Vec::new();
-    };
-    let ids = json
-        .get("sourceIds")
-        .or_else(|| json.get("source_ids"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_u64)
-        .filter_map(|id| usize::try_from(id).ok())
-        .filter(|id| (1..=source_count).contains(id));
-    let mut seen = HashSet::new();
-    ids.filter(|id| seen.insert(*id))
-        .take(MAX_LIBRARY_DEEP_SOURCES)
-        .collect()
-}
-
-fn fallback_deep_source_ids(source_count: usize) -> Vec<usize> {
-    (1..=source_count.min(MAX_LIBRARY_DEEP_SOURCES)).collect()
 }
 
 fn parse_library_booklist_recommendation(
@@ -2517,58 +1979,6 @@ fn ensure_library_synthesis_source_ids(
     ids
 }
 
-fn cited_library_source_ids(answer: &str, source_count: usize) -> Vec<usize> {
-    let mut ids = Vec::new();
-    let mut seen = HashSet::new();
-    for (start, _) in answer.match_indices("[来源 ") {
-        let after_marker = &answer[start + "[来源 ".len()..];
-        let Some(end) = after_marker.find(']') else {
-            continue;
-        };
-        let Ok(id) = after_marker[..end].trim().parse::<usize>() else {
-            continue;
-        };
-        if (1..=source_count).contains(&id) && seen.insert(id) {
-            ids.push(id);
-        }
-    }
-    ids
-}
-
-fn library_answer_has_sufficient_synthesis(
-    answer: &str,
-    sources: &[AiReaderSource],
-    answer_length: LibraryAnswerLength,
-) -> bool {
-    let available_books = sources
-        .iter()
-        .map(|source| source.book_id.as_str())
-        .collect::<HashSet<_>>();
-    if sources.len() < answer_length.required_sources()
-        || available_books.len() < answer_length.required_books()
-    {
-        return true;
-    }
-    let cited = cited_library_source_ids(answer, sources.len());
-    if cited.len() < answer_length.required_sources() {
-        return false;
-    }
-    cited
-        .iter()
-        .filter_map(|id| sources.get(id.saturating_sub(1)))
-        .map(|source| source.book_id.as_str())
-        .collect::<HashSet<_>>()
-        .len()
-        >= answer_length.required_books()
-}
-
-fn library_question_with_length(question: &str, answer_length: LibraryAnswerLength) -> String {
-    format!(
-        "{question}\n\n【作答规格】{} 这条规格覆盖提示词中任何冲突的篇幅、依据条数和来源数量要求。",
-        answer_length.prompt_specification()
-    )
-}
-
 fn system_prompt(task: &str) -> &'static str {
     match task {
         "summary" => {
@@ -2629,71 +2039,6 @@ fn system_prompt(task: &str) -> &'static str {
             "你是严谨的阅读助手。只依据提供的章节内容回答中文问题；无法从内容确认时必须说“提供的内容中未找到依据”。回答末尾列出依据章节号。"
         }
     }
-}
-
-fn json_text_content(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => {
-            let value = value.trim();
-            (!value.is_empty()).then(|| value.to_string())
-        }
-        serde_json::Value::Array(values) => {
-            let joined = values
-                .iter()
-                .filter_map(json_text_content)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let joined = joined.trim();
-            (!joined.is_empty()).then(|| joined.to_string())
-        }
-        serde_json::Value::Object(_) => value
-            .get("text")
-            .or_else(|| value.get("value"))
-            .or_else(|| value.get("content"))
-            .and_then(json_text_content),
-        _ => None,
-    }
-}
-
-fn openai_compatible_content(value: &serde_json::Value) -> Option<String> {
-    // Provider reasoning fields are internal traces, never reader-facing
-    // answers. A reasoning-only envelope is treated as an empty completion so
-    // the bounded retry path requests normal content.
-    let first_choice = value
-        .pointer("/choices/0/message/content")
-        .and_then(json_text_content)
-        .or_else(|| value.pointer("/choices/0/text").and_then(json_text_content))
-        .or_else(|| {
-            value
-                .pointer("/choices/0/delta/content")
-                .and_then(json_text_content)
-        })
-        .or_else(|| {
-            value
-                .pointer("/choices/0/content")
-                .and_then(json_text_content)
-        });
-    first_choice
-        .or_else(|| {
-            value
-                .pointer("/data/choices/0/message/content")
-                .and_then(json_text_content)
-        })
-        .or_else(|| {
-            value
-                .pointer("/response/choices/0/message/content")
-                .and_then(json_text_content)
-        })
-        // A small number of OpenAI-compatible services retain the Tencent
-        // response envelope and capitalise the JSON field names.
-        .or_else(|| {
-            value
-                .pointer("/Response/Choices/0/Message/Content")
-                .and_then(json_text_content)
-        })
-        // A few OpenAI-compatible gateways forward the Responses API body.
-        .or_else(|| value.get("output_text").and_then(json_text_content))
-        .or_else(|| value.get("output").and_then(json_text_content))
 }
 
 fn provider_max_tokens(task: &str) -> u16 {
@@ -2784,228 +2129,13 @@ where
     }
 }
 
-async fn call_openai_compatible_async(
-    config: StoredConfig,
-    task: String,
-    question: String,
-    context: String,
-) -> Result<String, String> {
-    let endpoint = endpoint_for(&config.base_url, "/chat/completions");
-    let payload = serde_json::json!({
-        "model": config.model,
-        "stream": false,
-        "max_tokens": provider_max_tokens(&task),
-        "messages": [
-            {"role":"system", "content": system_prompt(&task)},
-            {"role":"user", "content": format!("阅读内容：{}\n\n任务：{}\n问题：{}", context, task, question)}
-        ]
-    });
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .timeout(READING_PROVIDER_RESPONSE_TIMEOUT)
-        .build()
-        .map_err(|error| format!("阅读助手客户端不可用：{error}"))?;
-    let response = client
-        .post(endpoint)
-        .bearer_auth(config.api_key)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| format!("阅读助手请求失败：{error}"))?;
-    let status = response.status().as_u16();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("阅读助手响应读取失败：{error}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "阅读助手请求失败：{}",
-            provider_error_summary(status, &body)
-        ));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(&body).map_err(|error| format!("阅读助手响应解析失败：{error}"))?;
-    openai_compatible_content(&value).ok_or_else(|| "接口没有返回可用回答".to_string())
-}
-
-async fn call_anthropic_messages_async(
-    config: StoredConfig,
-    task: String,
-    question: String,
-    context: String,
-) -> Result<String, String> {
-    let endpoint = endpoint_for(&config.base_url, "/v1/messages");
-    let payload = serde_json::json!({
-        "model": config.model,
-        "max_tokens": provider_max_tokens(&task),
-        "temperature": 0.2,
-        "system": system_prompt(&task),
-        "messages": [{
-            "role": "user",
-            "content": format!("阅读内容：{}\n\n任务：{}\n问题：{}", context, task, question)
-        }]
-    });
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .timeout(READING_PROVIDER_RESPONSE_TIMEOUT)
-        .build()
-        .map_err(|error| format!("阅读助手客户端不可用：{error}"))?;
-    let response = client
-        .post(endpoint)
-        .header("x-api-key", config.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| format!("阅读助手请求失败：{error}"))?;
-    let status = response.status().as_u16();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("阅读助手响应读取失败：{error}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "阅读助手请求失败：{}",
-            provider_error_summary(status, &body)
-        ));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(&body).map_err(|error| format!("阅读助手响应解析失败：{error}"))?;
-    value
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|blocks| {
-            blocks.iter().find_map(|block| {
-                (block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
-                    .then(|| block.get("text").and_then(serde_json::Value::as_str))
-                    .flatten()
-            })
-        })
-        .map(str::trim)
-        .filter(|content| !content.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "Claude 接口没有返回可用回答".to_string())
-}
-
 async fn call_reading_provider_async(
     config: StoredConfig,
     task: String,
     question: String,
     context: String,
 ) -> Result<String, String> {
-    if config.provider == "anthropic" {
-        call_anthropic_messages_async(config, task, question, context).await
-    } else {
-        call_openai_compatible_async(config, task, question, context).await
-    }
-}
-
-fn call_openai_compatible(
-    config: StoredConfig,
-    task: String,
-    question: String,
-    context: String,
-) -> Result<String, String> {
-    let endpoint = endpoint_for(&config.base_url, "/chat/completions");
-    let payload = serde_json::json!({
-        "model": config.model,
-        "stream": false,
-        "max_tokens": provider_max_tokens(&task),
-        "messages": [
-            {"role":"system", "content": system_prompt(&task)},
-            {"role":"user", "content": format!("阅读内容：{}\n\n任务：{}\n问题：{}", context, task, question)}
-        ]
-    });
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        // We must keep the response body for 4xx/5xx. Providers such as
-        // DeepSeek return the actionable reason there (invalid model, quota,
-        // malformed request, etc.); the default ureq behavior loses it.
-        .http_status_as_error(false)
-        .timeout_connect(Some(std::time::Duration::from_secs(8)))
-        .timeout_recv_response(Some(READING_PROVIDER_RESPONSE_TIMEOUT))
-        .timeout_recv_body(Some(READING_PROVIDER_RESPONSE_TIMEOUT))
-        .build()
-        .into();
-    let response = agent
-        .post(&endpoint)
-        .header("Authorization", &format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json")
-        .send_json(payload)
-        .map_err(|error| format!("阅读助手请求失败：{error}"))?;
-    let status = response.status().as_u16();
-    let body = response
-        .into_body()
-        .read_to_string()
-        .map_err(|error| format!("阅读助手响应读取失败：{error}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "阅读助手请求失败：{}",
-            provider_error_summary(status, &body)
-        ));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(&body).map_err(|error| format!("阅读助手响应解析失败：{error}"))?;
-    openai_compatible_content(&value).ok_or_else(|| "接口没有返回可用回答".to_string())
-}
-
-fn call_anthropic_messages(
-    config: StoredConfig,
-    task: String,
-    question: String,
-    context: String,
-) -> Result<String, String> {
-    let endpoint = endpoint_for(&config.base_url, "/v1/messages");
-    let payload = serde_json::json!({
-        "model": config.model,
-        "max_tokens": provider_max_tokens(&task),
-        "temperature": 0.2,
-        "system": system_prompt(&task),
-        "messages": [{
-            "role": "user",
-            "content": format!("阅读内容：{}\n\n任务：{}\n问题：{}", context, task, question)
-        }]
-    });
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_connect(Some(std::time::Duration::from_secs(8)))
-        .timeout_recv_response(Some(READING_PROVIDER_RESPONSE_TIMEOUT))
-        .timeout_recv_body(Some(READING_PROVIDER_RESPONSE_TIMEOUT))
-        .build()
-        .into();
-    let response = agent
-        .post(&endpoint)
-        .header("x-api-key", &config.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("Content-Type", "application/json")
-        .send_json(payload)
-        .map_err(|error| format!("阅读助手请求失败：{error}"))?;
-    let status = response.status().as_u16();
-    let body = response
-        .into_body()
-        .read_to_string()
-        .map_err(|error| format!("阅读助手响应读取失败：{error}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "阅读助手请求失败：{}",
-            provider_error_summary(status, &body)
-        ));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(&body).map_err(|error| format!("阅读助手响应解析失败：{error}"))?;
-    value
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|blocks| {
-            blocks.iter().find_map(|block| {
-                (block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
-                    .then(|| block.get("text").and_then(serde_json::Value::as_str))
-                    .flatten()
-            })
-        })
-        .map(str::trim)
-        .filter(|content| !content.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "Claude 接口没有返回可用回答".to_string())
+    provider::call_async(provider_request(&config, &task, &question, &context)).await
 }
 
 fn call_reading_provider(
@@ -3014,10 +2144,26 @@ fn call_reading_provider(
     question: String,
     context: String,
 ) -> Result<String, String> {
-    if config.provider == "anthropic" {
-        call_anthropic_messages(config, task, question, context)
-    } else {
-        call_openai_compatible(config, task, question, context)
+    provider::call(provider_request(&config, &task, &question, &context))
+}
+
+fn provider_request<'a>(
+    config: &'a StoredConfig,
+    task: &'a str,
+    question: &'a str,
+    context: &'a str,
+) -> provider::Request<'a> {
+    provider::Request {
+        provider: &config.provider,
+        base_url: &config.base_url,
+        model: &config.model,
+        api_key: &config.api_key,
+        task,
+        prompt: system_prompt(task),
+        question,
+        context,
+        max_tokens: provider_max_tokens(task),
+        response_timeout: READING_PROVIDER_RESPONSE_TIMEOUT,
     }
 }
 
@@ -3143,11 +2289,9 @@ fn save_library_profile(
 ) -> Result<(), String> {
     let encoded =
         serde_json::to_string(profile).map_err(|error| format!("分类序列化失败：{error}"))?;
-    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    db.as_ref()
-        .ok_or("SQLite 数据库不可用")?
-        .set_metadata(&library_profile_key(book_id), &encoded)?;
-    drop(db);
+    state.with_db_write("ai_reader_save_library_profile", |db| {
+        db.set_metadata(&library_profile_key(book_id), &encoded)
+    })?;
     let id = book_id
         .parse::<u64>()
         .map_err(|_| "分类图书 ID 无效".to_string())?;
@@ -3548,10 +2692,9 @@ fn library_answer_settings_from_db(db: &crate::db::AppDb) -> LibraryAnswerSettin
 pub(crate) fn library_answer_settings(
     state: tauri::State<AppState>,
 ) -> Result<LibraryAnswerSettings, String> {
-    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    Ok(library_answer_settings_from_db(
-        db.as_ref().ok_or("SQLite 数据库不可用")?,
-    ))
+    state.with_db_read("ai_reader_library_answer_settings", |db| {
+        Ok(library_answer_settings_from_db(db))
+    })
 }
 
 #[tauri::command]
@@ -3561,10 +2704,10 @@ pub(crate) fn set_library_answer_length(
 ) -> Result<LibraryAnswerSettings, String> {
     let answer_length = LibraryAnswerLength::parse(&request.answer_length)
         .ok_or("作答长度只支持 short、medium 或 long")?;
-    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db.as_ref().ok_or("SQLite 数据库不可用")?;
-    db.set_metadata(LIBRARY_ANSWER_LENGTH_KEY, answer_length.as_str())?;
-    Ok(library_answer_settings_from_db(db))
+    state.with_db_write("ai_reader_set_answer_length", |db| {
+        db.set_metadata(LIBRARY_ANSWER_LENGTH_KEY, answer_length.as_str())?;
+        Ok(library_answer_settings_from_db(db))
+    })
 }
 
 #[tauri::command]
@@ -3579,13 +2722,13 @@ pub(crate) fn set_library_recommendation_candidate_limit(
             "推荐书单粗选数量只支持 {MIN_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT}–{MAX_LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT} 本"
         ));
     }
-    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db.as_ref().ok_or("SQLite 数据库不可用")?;
-    db.set_metadata(
-        LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT_KEY,
-        &request.candidate_limit.to_string(),
-    )?;
-    Ok(library_answer_settings_from_db(db))
+    state.with_db_write("ai_reader_set_recommendation_candidate_limit", |db| {
+        db.set_metadata(
+            LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT_KEY,
+            &request.candidate_limit.to_string(),
+        )?;
+        Ok(library_answer_settings_from_db(db))
+    })
 }
 
 #[tauri::command]
@@ -3600,13 +2743,13 @@ pub(crate) fn set_library_recommendation_result_limit(
             "大模型精选数量只支持 {MIN_LIBRARY_RECOMMENDATION_RESULT_LIMIT}–{MAX_LIBRARY_RECOMMENDATION_RESULT_LIMIT} 本"
         ));
     }
-    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let db = db.as_ref().ok_or("SQLite 数据库不可用")?;
-    db.set_metadata(
-        LIBRARY_RECOMMENDATION_RESULT_LIMIT_KEY,
-        &request.result_limit.to_string(),
-    )?;
-    Ok(library_answer_settings_from_db(db))
+    state.with_db_write("ai_reader_set_recommendation_result_limit", |db| {
+        db.set_metadata(
+            LIBRARY_RECOMMENDATION_RESULT_LIMIT_KEY,
+            &request.result_limit.to_string(),
+        )?;
+        Ok(library_answer_settings_from_db(db))
+    })
 }
 
 #[tauri::command]
@@ -3614,11 +2757,12 @@ pub(crate) fn set_library_model_tags_enabled(
     state: tauri::State<AppState>,
     enabled: bool,
 ) -> Result<LibraryModelTagsSettings, String> {
-    let mut db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    db.as_mut().ok_or("SQLite 数据库不可用")?.set_metadata(
-        LIBRARY_MODEL_TAGS_ENABLED_KEY,
-        if enabled { "true" } else { "false" },
-    )?;
+    state.with_db_write("ai_reader_set_model_tags_enabled", |db| {
+        db.set_metadata(
+            LIBRARY_MODEL_TAGS_ENABLED_KEY,
+            if enabled { "true" } else { "false" },
+        )
+    })?;
     Ok(LibraryModelTagsSettings { enabled })
 }
 
@@ -3627,13 +2771,11 @@ pub(crate) fn start_library_auto_classification(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<BackgroundTaskSnapshot, String> {
-    let config = {
-        let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        canonicalize_deepseek_config(load_config_for_purpose(
-            db.as_ref().ok_or("SQLite 数据库不可用")?,
-            "other",
-        )?)
-    };
+    let config = state.with_db_read("ai_reader_start_library_classification", |db| {
+        Ok(canonicalize_deepseek_config(load_config_for_purpose(
+            db, "other",
+        )?))
+    })?;
     if !status(&config).configured {
         return Err("请先在任意阅读页的“智读”中配置接口、模型和 API Key".into());
     }
@@ -3839,26 +2981,16 @@ pub(crate) fn library_history_source_preview(
             .library
             .lock()
             .map_err(|_| "书架锁定失败，暂时无法读取引用正文".to_string())?;
-        library
-            .books
-            .iter()
-            .find(|book| {
-                let expected = normalize_history_book_title(&request.book_title);
-                !expected.is_empty() && normalize_history_book_title(&book.title) == expected
-            })
-            .or_else(|| {
-                // A title-less legacy reference may only fall back to a local
-                // id. Imported shelves can assign that id to a different
-                // book, so never use it when the history has a title.
-                if normalize_history_book_title(&request.book_title).is_empty() {
-                    library
-                        .books
-                        .iter()
-                        .find(|book| book.id.to_string() == request.book_id)
-                } else {
-                    None
-                }
-            })
+        let local_id = matching_local_book_id(
+            library.books.iter().map(|book| LocalHistoryBookRef {
+                id: book.id,
+                title: &book.title,
+            }),
+            &request.book_id,
+            &request.book_title,
+        );
+        local_id
+            .and_then(|id| library.books.iter().find(|book| book.id == id))
             .cloned()
             .ok_or_else(|| "原书未加入本机书架或已被移除，无法显示引用正文".to_string())?
     };
@@ -3872,44 +3004,14 @@ pub(crate) fn library_history_source_preview(
     if excerpt.is_empty() {
         return Err("该章节没有可显示的正文".to_string());
     }
-    let original_kind = request.source_kind.trim();
     Ok(AiReaderSource {
         book_id: book.id.to_string(),
         book_title: book.title,
         chapter: request.chapter,
         excerpt,
-        source_kind: if original_kind.is_empty() {
-            "旧记录恢复的章节正文".to_string()
-        } else {
-            format!("{original_kind}（旧记录恢复的章节正文）")
-        },
+        source_kind: restored_source_kind(&request.source_kind),
         tags: Vec::new(),
     })
-}
-
-fn normalize_history_book_title(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| {
-            !character.is_whitespace()
-                && !matches!(
-                    character,
-                    '《' | '》'
-                        | '〈'
-                        | '〉'
-                        | '“'
-                        | '”'
-                        | '‘'
-                        | '’'
-                        | '「'
-                        | '」'
-                        | '『'
-                        | '』'
-                        | '"'
-                )
-        })
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 /// Answer a question from the locally indexed library (one selected book, the
@@ -3979,16 +3081,15 @@ pub(crate) async fn ask_library_assistant(
     } else {
         Some(full_library_semantic_scope(state.inner())?)
     };
-    let (config, answer_length, recommendation_candidate_limit, recommendation_result_limit) = {
-        let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        (
-            canonicalize_deepseek_config(load_config_for_purpose(db, "library")?),
-            library_answer_length(db),
-            library_recommendation_candidate_limit(db),
-            library_recommendation_result_limit(db),
-        )
-    };
+    let (config, answer_length, recommendation_candidate_limit, recommendation_result_limit) =
+        state.with_db_read("ai_reader_library_answer_config", |db| {
+            Ok((
+                canonicalize_deepseek_config(load_config_for_purpose(db, "library")?),
+                library_answer_length(db),
+                library_recommendation_candidate_limit(db),
+                library_recommendation_result_limit(db),
+            ))
+        })?;
     if !status(&config).configured {
         return Err("请先在阅读助手中配置接口、模型和 API Key".into());
     }
@@ -4270,13 +3371,11 @@ pub(crate) async fn ask_reading_assistant(
     if candidate_context.is_empty() {
         return Err("当前图书没有可发送的正文内容".into());
     }
-    let config = {
-        let guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        canonicalize_deepseek_config(load_config_for_purpose(
-            guard.as_ref().ok_or("SQLite 数据库不可用")?,
-            "reading",
-        )?)
-    };
+    let config = state.with_db_read("ai_reader_reading_answer_config", |db| {
+        Ok(canonicalize_deepseek_config(load_config_for_purpose(
+            db, "reading",
+        )?))
+    })?;
     if !status(&config).configured {
         return Err("请先在阅读助手中配置接口、模型和 API Key".into());
     }
@@ -4432,7 +3531,8 @@ mod tests {
 
     #[test]
     fn provider_error_keeps_actionable_message_without_a_secret() {
-        let error = provider_error_summary(400, r#"{\"error\":{\"message\":\"Model Not Exist\"}}"#);
+        let error =
+            provider::error_summary(400, r#"{\"error\":{\"message\":\"Model Not Exist\"}}"#);
         assert!(error.contains("Model Not Exist"));
         assert!(error.contains("模型名"));
         assert!(!error.contains("Bearer"));
@@ -4527,14 +3627,20 @@ mod tests {
 
     #[test]
     fn recognizes_provider_and_uses_the_correct_protocol_endpoint() {
-        assert_eq!(infer_provider("https://api.openai.com/v1"), "openai");
-        assert_eq!(infer_provider("https://api.anthropic.com"), "anthropic");
         assert_eq!(
-            endpoint_for("https://api.anthropic.com", "/v1/messages"),
+            profiles::infer_provider("https://api.openai.com/v1"),
+            "openai"
+        );
+        assert_eq!(
+            profiles::infer_provider("https://api.anthropic.com"),
+            "anthropic"
+        );
+        assert_eq!(
+            provider::endpoint_for("https://api.anthropic.com", "/v1/messages"),
             "https://api.anthropic.com/v1/messages"
         );
         assert_eq!(
-            endpoint_for("https://api.anthropic.com/v1", "/v1/messages"),
+            provider::endpoint_for("https://api.anthropic.com/v1", "/v1/messages"),
             "https://api.anthropic.com/v1/messages"
         );
     }
@@ -4635,7 +3741,7 @@ mod tests {
             "choices": [{"message": {"content": "  直接回答  "}}]
         });
         assert_eq!(
-            openai_compatible_content(&string_response).as_deref(),
+            provider::openai_compatible_content(&string_response).as_deref(),
             Some("直接回答")
         );
         let block_response = serde_json::json!({
@@ -4645,25 +3751,28 @@ mod tests {
             ]}}]
         });
         assert_eq!(
-            openai_compatible_content(&block_response).as_deref(),
+            provider::openai_compatible_content(&block_response).as_deref(),
             Some("第一段\n第二段")
         );
         let wrapped_response = serde_json::json!({
             "data": {"choices": [{"message": {"content": "包装后的回答"}}]}
         });
         assert_eq!(
-            openai_compatible_content(&wrapped_response).as_deref(),
+            provider::openai_compatible_content(&wrapped_response).as_deref(),
             Some("包装后的回答")
         );
         let reasoning_only_response = serde_json::json!({
             "choices": [{"message": {"content": "", "reasoning_content": "内部推理，不应展示"}}]
         });
-        assert_eq!(openai_compatible_content(&reasoning_only_response), None);
+        assert_eq!(
+            provider::openai_compatible_content(&reasoning_only_response),
+            None
+        );
         let capitalized_response = serde_json::json!({
             "Response": {"Choices": [{"Message": {"Content": "大写包装回答"}}]}
         });
         assert_eq!(
-            openai_compatible_content(&capitalized_response).as_deref(),
+            provider::openai_compatible_content(&capitalized_response).as_deref(),
             Some("大写包装回答")
         );
     }

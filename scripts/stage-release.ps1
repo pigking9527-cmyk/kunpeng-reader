@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$allowed = @('Cargo.toml', 'tauri.conf.json', 'tauri.linux.conf.json', 'README.md', 'README.en.md', 'CHANGELOG.md', '开发记录.md', '开发文档.md', 'server/reader-sync-api/updates.json')
+$allowed = @('Cargo.toml', 'tauri.conf.json', 'tauri.linux.conf.json', 'README.md', 'README.en.md', 'CHANGELOG.md', '开发记录.md', '开发文档.md')
 foreach ($item in $Path) {
   $relative = $item.Replace('\', '/')
   $isReleaseNotes = $relative -match '^RELEASE_NOTES_v\d+\.\d+\.\d+\.md$'

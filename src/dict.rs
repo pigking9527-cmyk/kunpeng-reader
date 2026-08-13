@@ -4,31 +4,31 @@
 // ============================================================================
 
 use crate::external_dict;
-use crate::hownet::{self, HowNetEnhancement};
+use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::OnceLock;
 
 const EN_GZ: &[u8] = include_bytes!("dict/english.tsv.gz"); // word \t phonetic \t 中文释义（ECDICT）
-const ZH_CC_GZ: &[u8] = include_bytes!("dict/zh_cc.tsv.gz"); // 词/字(简) \t 拼音 \t 中文释义（萌典·国语辞典，繁→简）
+const ZH_ZH_GZ: &[u8] = include_bytes!("dict/zh_zh.tsv.gz"); // 词(简/繁) \t 拼音 \t 中文释义（中文维基词典）
 const ZH_WORD_GZ: &[u8] = include_bytes!("dict/zh_word.tsv.gz"); // 词(简/繁) \t 拼音 \t 英文释义（CC-CEDICT）
 
 static EN: OnceLock<HashMap<String, (String, String, String)>> = OnceLock::new(); // 词→(音标, 中文翻译, 英文释义)
-static ZH_CC: OnceLock<HashMap<String, (String, String)>> = OnceLock::new();
+static ZH_ZH: OnceLock<HashMap<String, (String, String)>> = OnceLock::new();
 static ZH_WORD: OnceLock<HashMap<String, (String, String)>> = OnceLock::new();
+static TRADITIONAL_TO_SIMPLIFIED: OnceLock<Option<OpenCC>> = OnceLock::new();
 
 #[derive(Serialize, Default)]
 pub struct DictResult {
     pub found: bool,
-    pub lang: String,                      // "en" / "zh" / ""
-    pub word: String,                      // 实际命中的词（可能是词根/前缀）
-    pub phonetic: String,                  // 英文音标 / 中文拼音
-    pub def: String,                       // 主释义：英文词→中文翻译；中文词→中中释义
-    pub def_en: String,                    // 中文词的中英释义（CC-CEDICT），供切换；英文词为空
-    pub hownet: Option<HowNetEnhancement>, // 中文词 OpenHowNet 语义增强
-    pub source_name: String,               // 命中来源：外置词典名或“内置词典”
-    pub sources: Vec<DictSourceResult>,    // 多个外置词典命中时，用于前端折叠/展开
+    pub lang: String,                   // "en" / "zh" / ""
+    pub word: String,                   // 实际命中的词（可能是词根/前缀）
+    pub phonetic: String,               // 英文音标 / 中文拼音
+    pub def: String,                    // 中文释义：英文词→英中；中文词→中中
+    pub def_en: String,                 // 英文释义：英文词→英英；中文词→中英
+    pub source_name: String,            // 命中来源：外置词典名或“内置词典”
+    pub sources: Vec<DictSourceResult>, // 多个外置词典命中时，用于前端折叠/展开
 }
 
 #[derive(Serialize, Default, Clone)]
@@ -74,11 +74,19 @@ fn load_triple(gz: &[u8], cap: usize) -> HashMap<String, (String, String)> {
     }
     m
 }
-fn zh_cc_map() -> &'static HashMap<String, (String, String)> {
-    ZH_CC.get_or_init(|| load_triple(ZH_CC_GZ, 160_000))
-}
 fn zh_word_map() -> &'static HashMap<String, (String, String)> {
     ZH_WORD.get_or_init(|| load_triple(ZH_WORD_GZ, 200_000))
+}
+fn zh_zh_map() -> &'static HashMap<String, (String, String)> {
+    ZH_ZH.get_or_init(|| load_triple(ZH_ZH_GZ, 120_000))
+}
+
+fn simplify_chinese(value: &str) -> String {
+    TRADITIONAL_TO_SIMPLIFIED
+        .get_or_init(|| OpenCC::from_config(BuiltinConfig::T2s).ok())
+        .as_ref()
+        .map(|converter| converter.convert(value))
+        .unwrap_or_else(|| value.to_owned())
 }
 
 /// 英文简易词形还原：原词查不到时，按常见后缀规则生成候选词根再试。
@@ -134,7 +142,7 @@ fn has_cjk(s: &str) -> bool {
 }
 
 /// 查词：自动按语种选库。中文按"整段→前缀"逐步缩短；英文做小写 + 词形还原回退。
-pub fn lookup(term: &str, context: &str) -> DictResult {
+pub fn lookup(term: &str, _context: &str) -> DictResult {
     let t = term.trim();
     if t.is_empty() {
         return DictResult::default();
@@ -154,7 +162,6 @@ pub fn lookup(term: &str, context: &str) -> DictResult {
                 phonetic: first.phonetic.clone(),
                 def: first.def.clone(),
                 def_en: first.def_en.clone(),
-                hownet: hownet::enhance(&first.word, context),
                 source_name: first.source_name.clone(),
                 sources: external
                     .into_iter()
@@ -169,15 +176,15 @@ pub fn lookup(term: &str, context: &str) -> DictResult {
                     .collect(),
             };
         }
-        let cc = zh_cc_map(); // 中中（萌典）
+        let zz = zh_zh_map(); // 中中（中文维基词典）
         let zw = zh_word_map(); // 中英（CC-CEDICT）
-                                // 整段优先，再取越来越短的前缀；命中即返回中中+中英两种释义供切换
+                                // 整段优先，再取越来越短的前缀；任一词库命中即返回。
         for len in (1..=chars.len()).rev() {
             let sub: String = chars[..len].iter().collect();
-            let m_cc = cc.get(&sub);
+            let m_zh = zz.get(&sub);
             let m_en = zw.get(&sub);
-            if m_cc.is_some() || m_en.is_some() {
-                let phonetic = m_cc
+            if m_zh.is_some() || m_en.is_some() {
+                let phonetic = m_zh
                     .map(|(p, _)| p.clone())
                     .filter(|p| !p.is_empty())
                     .or_else(|| m_en.map(|(p, _)| p.clone()))
@@ -187,9 +194,12 @@ pub fn lookup(term: &str, context: &str) -> DictResult {
                     lang: "zh".into(),
                     word: sub.clone(),
                     phonetic,
-                    def: m_cc.map(|(_, d)| d.clone()).unwrap_or_default(),
-                    def_en: m_en.map(|(_, d)| d.clone()).unwrap_or_default(),
-                    hownet: hownet::enhance(&sub, context),
+                    def: m_zh
+                        .map(|(_, definition)| simplify_chinese(definition))
+                        .unwrap_or_default(),
+                    def_en: m_en
+                        .map(|(_, definition)| definition.clone())
+                        .unwrap_or_default(),
                     source_name: "内置词典".into(),
                     sources: Vec::new(),
                 };
@@ -214,7 +224,6 @@ pub fn lookup(term: &str, context: &str) -> DictResult {
                 phonetic: first.phonetic.clone(),
                 def: first.def.clone(),
                 def_en: first.def_en.clone(),
-                hownet: None,
                 source_name: first.source_name.clone(),
                 sources: external
                     .into_iter()
@@ -243,7 +252,6 @@ pub fn lookup(term: &str, context: &str) -> DictResult {
                 phonetic: p.clone(),
                 def: trans.clone(),    // 英中
                 def_en: endef.clone(), // 英英
-                hownet: None,
                 source_name: "内置词典".into(),
                 sources: Vec::new(),
             };
@@ -253,5 +261,38 @@ pub fn lookup(term: &str, context: &str) -> DictResult {
             word: t.to_string(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lookup;
+
+    #[test]
+    fn chinese_lookup_restores_chinese_and_english_definitions() {
+        let result = lookup("阅读", "");
+        assert!(result.found);
+        assert_eq!(result.lang, "zh");
+        assert_eq!(result.word, "阅读");
+        assert!(result.def.contains("阅览") || result.def.contains("诵读"));
+        assert!(!result.def_en.is_empty());
+        assert_eq!(result.source_name, "内置词典");
+    }
+
+    #[test]
+    fn simplified_redirects_keep_real_chinese_definitions() {
+        let result = lookup("爱", "");
+        assert!(result.found);
+        assert!(result.def.contains("喜欢") || result.def.contains("感情"));
+        assert!(!result.def.contains("请见"));
+    }
+
+    #[test]
+    fn english_lookup_keeps_chinese_and_english_definitions() {
+        let result = lookup("reader", "");
+        assert!(result.found);
+        assert_eq!(result.lang, "en");
+        assert!(!result.def.is_empty());
+        assert!(!result.def_en.is_empty());
     }
 }

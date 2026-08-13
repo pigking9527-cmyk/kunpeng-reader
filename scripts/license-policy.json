@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "publicReleaseAllowed": false,
+  "releaseHoldReason": "Historical binaries linked GPL-3.0 epub code. New public assets remain paused until the parser migration, packaged notices, IP attestation, and legal review are accepted.",
+  "deniedLicenseTokens": ["AGPL-", "GPL-", "LGPL-", "SSPL-", "BUSL-"],
+  "allowedRustLicenseIds": [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Python-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib"
+  ],
+  "allowedNpmLicenses": ["Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "CC-BY-4.0", "ISC", "MIT", "Python-2.0"],
+  "requiredDistributionNotices": [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSES/Apache-2.0.txt",
+    "LICENSES/CC-BY-SA-4.0.txt",
+    "LICENSES/ECDICT-MIT.txt",
+    "src/dict/ECDICT_SOURCE.md",
+    "src/dict/CC_CEDICT_SOURCE.md"
+  ],
+  "forbiddenDistributionPaths": [
+    "vendor/epub",
+    "src/dict/zh_cc.tsv.gz",
+    "src/dict/hownet.tsv.gz",
+    "src/hownet.rs",
+    "src/dict/FREQUENCY_SOURCE.md",
+    "src/dict/HOWNET_SOURCE.md",
+    "tools/export_hownet_tsv.py",
+    "scripts/prepare-windows-gpu-runtime.ps1"
+  ]
+}

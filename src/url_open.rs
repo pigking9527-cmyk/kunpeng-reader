@@ -28,7 +28,7 @@ pub(crate) fn open_default_apps_settings() -> Result<String, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        set_macos_default_book_handlers("com.pigking.ebookreader")?;
+        set_macos_default_book_handlers("com.kunpeng.reader")?;
         Ok("已将 EPUB 和 PDF 设为默认由“鲲鹏阅读器”打开。".into())
     }
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]

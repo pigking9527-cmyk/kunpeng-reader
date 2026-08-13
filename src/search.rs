@@ -137,12 +137,16 @@ static BOOK_FILTER_CACHE: OnceLock<Mutex<BookFilterCache>> = OnceLock::new();
 // 交互式检索发现缺失索引时会请求后台补建。全局闸门避免多次搜索、导入和启动维护
 // 同时解压同一批 EPUB，进而把 WebView 线程饿死。
 static INDEX_BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
+// 用户正在等待全文检索时，索引任务不应因另一个阅读窗口而无限暂停。
+// 它仍使用后台线程和全局单任务闸门，只提升已有任务的调度优先级。
+static INDEX_BUILD_INTERACTIVE: AtomicBool = AtomicBool::new(false);
 
 struct IndexBuildGuard;
 
 impl Drop for IndexBuildGuard {
     fn drop(&mut self) {
         INDEX_BUILD_RUNNING.store(false, Ordering::Release);
+        INDEX_BUILD_INTERACTIVE.store(false, Ordering::Release);
     }
 }
 
@@ -471,7 +475,10 @@ pub(crate) fn maintain_index(
     attach_memory_health(state, search_index::maintain(&valid_ids, enforce_quota))
 }
 /// 后台为全书架建立/更新索引。只补缺失，避免启动时全量重建抢 UI。
-pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
+pub(crate) fn spawn_build_index(app: tauri::AppHandle, interactive: bool) {
+    if interactive {
+        INDEX_BUILD_INTERACTIVE.store(true, Ordering::Release);
+    }
     if INDEX_BUILD_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -502,9 +509,11 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
         let mut content_ids_changed = false;
         for (index, mut b) in books.into_iter().enumerate().skip(resume_from) {
             // 关键词维护会逐本读取源文件；让阅读窗口优先，避免在章节切换时抢磁盘。
-            while window_commands::any_reader_window_open(&app) {
+            while window_commands::any_reader_window_open(&app)
+                && !INDEX_BUILD_INTERACTIVE.load(Ordering::Acquire)
+            {
                 emit_startup_perf(&app, "keyword-index", "paused", "reader window open");
-                std::thread::sleep(std::time::Duration::from_secs(15));
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
             match task.control_signal() {
                 TaskControlSignal::Continue => {}
@@ -593,7 +602,7 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle) {
 
 #[tauri::command]
 pub(crate) fn build_shelf_index(app: tauri::AppHandle) {
-    spawn_build_index(app);
+    spawn_build_index(app, false);
 }
 
 #[derive(Clone, Serialize)]
@@ -981,7 +990,7 @@ fn shelf_search_blocking(
         }
     }
     if pending_books > 0 {
-        spawn_build_index(app.clone());
+        spawn_build_index(app.clone(), true);
     }
 
     let nthreads = interactive_search_workers(ready_targets.len());
@@ -1057,12 +1066,16 @@ pub(crate) async fn open_search_window(
         url_encode(&term),
         url_encode(&ids_csv)
     );
-    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
-        .title("书架全文检索")
-        .inner_size(1000.0, 760.0)
-        .min_inner_size(520.0, 400.0)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let mut builder =
+        tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
+            .title("书架全文检索")
+            .inner_size(1000.0, 760.0)
+            .min_inner_size(520.0, 400.0);
+    #[cfg(target_os = "macos")]
+    if let Some(identifier) = crate::profile::webview_data_store_identifier() {
+        builder = builder.data_store_identifier(identifier);
+    }
+    builder.build().map_err(|e| e.to_string())?;
     Ok(())
 }
 

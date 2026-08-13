@@ -26,32 +26,29 @@ test("semantic model picker offers Chinese and multilingual local models", () =>
   assert.doesNotMatch(html, /完整语义检索|一键启用/);
 });
 
-test("Windows and Linux bundles ship the CUDA provider used by FastEmbed", () => {
+test("Windows and Linux keep optional CUDA code but do not bundle unreviewed providers", () => {
   assert.match(cargoToml, /target_os = "windows".*target_os = "linux"/);
   assert.match(cargoToml, /ort = \{ version = "=2\.0\.0-rc\.12", features = \["cuda"\] \}/);
   assert.match(gpuRust, /provider_component_present\(\)/);
   assert.match(modelRust, /with_execution_providers\(execution_providers/);
   for (const bundle of [windowsBundle, linuxBundle]) {
-    assert.match(bundle, /onnxruntime_providers_cuda/);
-    assert.match(bundle, /onnxruntime_providers_shared/);
+    assert.doesNotMatch(bundle, /onnxruntime_providers_cuda/);
+    assert.doesNotMatch(bundle, /cudart|cudnn/i);
   }
 });
-test("missing Windows CUDA dependencies can be installed on demand with pinned hashes", () => {
+test("NVIDIA runtime redistribution stays disabled pending legal review", () => {
   assert.match(html, /id="sem-gpu-install"/);
-  assert.match(semanticUi, /semantic-gpu-runtime-progress/);
   assert.match(semanticUi, /runtime_install_available/);
-  assert.match(gpuRuntimeRust, /cuda-runtime-windows-v1/);
-  assert.match(gpuRuntimeRust, /1_494_396_282/);
-  assert.match(gpuRuntimeRust, /sha256/i);
-  assert.match(gpuRuntimeRust, /header\("Range"/);
+  assert.match(gpuRuntimeRust, /DOWNLOAD_BYTES: u64 = 0/);
+  assert.match(gpuRuntimeRust, /install_available\(\) -> bool \{\s*false/);
+  assert.match(gpuRuntimeRust, /自动下载已暂停/);
+  assert.doesNotMatch(gpuRuntimeRust, /https:\/\//);
   assert.match(gpuRust, /spawn_blocking\(semantic_gpu_status_blocking\)/);
   assert.match(gpuRust, /runtime_downloaded_bytes/);
-  assert.match(gpuRust, /"缺少 CUDA 组件"/);
   assert.match(gpuRust, /creation_flags\(0x0800_0000\)/);
   assert.match(styles, /#sem-gpu-meta \{\s*height: 1\.45em;\s*overflow: hidden;/);
   assert.match(styles, /#sem-gpu-section \.sem-actions \{\s*min-width: 230px;/);
-  assert.match(windowsBundle, /cudart64_12\.dll/);
-  assert.match(windowsBundle, /cudnn64_9\.dll/);
+  assert.doesNotMatch(windowsBundle, /cudart64_12\.dll|cudnn64_9\.dll/);
 });
 
 test("model picker explains local model choices and reads the normal task status", () => {

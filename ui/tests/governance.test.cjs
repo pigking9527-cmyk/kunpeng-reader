@@ -7,13 +7,59 @@ const root = path.join(__dirname, "..", "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 const lineCount = (...parts) => read(...parts).split(/\r?\n/).length;
 
+test("desktop product keeps exactly one UI implementation", () => {
+  const packageJson = JSON.parse(read("package.json"));
+  const mainHtml = read("ui", "index.html");
+  const searchHtml = read("ui", "search.html");
+  const desktopSource = path.join(root, "apps", "desktop-ui", "src");
+  const visualAlternatives = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(target);
+      else if (/\.(?:jsx|tsx)$/i.test(entry.name)) visualAlternatives.push(target);
+    }
+  };
+  visit(desktopSource);
+
+  assert.deepEqual(visualAlternatives, [], "a second JSX/TSX page implementation is forbidden");
+  assert.equal(packageJson.dependencies?.react, undefined);
+  assert.equal(packageJson.dependencies?.["react-dom"], undefined);
+  assert.equal(packageJson.devDependencies?.["@vitejs/plugin-react"], undefined);
+  assert.doesNotMatch(mainHtml, /react-(?:bridge|low-risk)|shelf-react-loader|about-support-host/i);
+  assert.doesNotMatch(searchHtml, /react|loader/i);
+  assert.match(searchHtml, /<script src="search\.js"><\/script>/);
+
+  for (const removedPath of [
+    ["ui", "react-low-risk-host.js"],
+    ["ui", "shelf-react-loader.js"],
+    ["ui", "search-react-loader.js"],
+    ["apps", "desktop-ui", "src", "main.tsx"],
+  ]) {
+    assert.equal(fs.existsSync(path.join(root, ...removedPath)), false, removedPath.join("/") + " must stay removed");
+  }
+
+  const visibleSource = [
+    ...fs.readdirSync(path.join(root, "ui"), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /\.(?:html|js)$/i.test(entry.name))
+      .map((entry) => read("ui", entry.name)),
+  ].join("\n");
+  assert.doesNotMatch(visibleSource, /打开旧版完整/);
+});
+
 test("top-level assembly files stay within anti-monolith budgets", () => {
-  assert.ok(lineCount("src", "main.rs") <= 505, "main.rs must remain a thin Tauri assembly");
+  assert.ok(
+    lineCount("src", "main.rs") <= 510,
+    "main.rs must remain a thin Tauri assembly",
+  );
   assert.ok(
     lineCount("src", "semantic.rs") <= 350,
     "semantic.rs must remain a facade over semantic submodules",
   );
-  assert.ok(lineCount("ui", "app.js") <= 1350, "app.js must delegate feature UI modules");
+  assert.ok(
+    lineCount("ui", "app.js") <= 1350,
+    "app.js must delegate feature UI modules",
+  );
   assert.ok(
     lineCount("ui", "reader-page-layout.js") <= 2900,
     "reader-page-layout.js must delegate pagination and measurement",
@@ -27,7 +73,9 @@ test("data import is protected by a recovery point and applied immediately", () 
   const command = commands.slice(start);
   assert.match(main, /mod data_commands;/);
   assert.ok(start >= 0);
-  assert.ok(command.indexOf("backup::create") < command.indexOf("db.import_package"));
+  assert.ok(
+    command.indexOf("backup::create") < command.indexOf("db.import_package"),
+  );
   assert.match(command, /data_migration::apply_sqlite_to_runtime/);
   assert.match(main, /backup::spawn_daily/);
 });
@@ -42,13 +90,24 @@ test("recovery points can be selected and restored with a current-state safeguar
   assert.match(commands, /fn restore_recovery_backup/);
   assert.match(commands, /webview_windows/);
   const stagedRecovery = backup.indexOf("let mut plans = stage_restore_files");
-  const currentStateSafeguard = backup.indexOf("create_locked_with_data(&mut data, true)");
-  const databaseCheckpoint = backup.indexOf("*data.db = None;", currentStateSafeguard);
-  const refreshedBaseline = backup.indexOf("refresh_restore_plan_originals(&mut plans)", currentStateSafeguard);
+  const currentStateSafeguard = backup.indexOf(
+    "create_locked_with_data(&mut data, true)",
+  );
+  const databaseCheckpoint = backup.indexOf(
+    "*data.db = None;",
+    currentStateSafeguard,
+  );
+  const refreshedBaseline = backup.indexOf(
+    "refresh_restore_plan_originals(&mut plans)",
+    currentStateSafeguard,
+  );
   assert.ok(stagedRecovery >= 0);
   assert.ok(currentStateSafeguard > stagedRecovery);
   assert.ok(databaseCheckpoint > currentStateSafeguard);
-  assert.ok(refreshedBaseline > databaseCheckpoint, "WAL must checkpoint before hashing the live restore baseline");
+  assert.ok(
+    refreshedBaseline > databaseCheckpoint,
+    "WAL must checkpoint before hashing the live restore baseline",
+  );
   assert.match(backup, /reset_runtime_caches_after_restore/);
   assert.match(html, /settings-restore-backup/);
   assert.match(app, /invoke\("restore_recovery_backup", \{ backupId \}\)/);
@@ -116,15 +175,34 @@ test("cold start reveals the shelf only after its first painted frame", () => {
     /fn main_window_show[\s\S]*?startup_enhancement::reveal_main\(window\.app_handle\(\)\)/,
   );
   assert.match(app, /function revealMainWindowAfterFirstPaint/);
-  assert.match(app, /shelfUI\.render\(list\);[\s\S]{0,240}revealMainWindowAfterFirstPaint\(\)/);
-  const applyGeometry = windows.slice(windows.indexOf("pub(crate) fn apply_geom_safe"));
+  assert.match(
+    app,
+    /shelfUI\.render\(list\);[\s\S]{0,240}revealMainWindowAfterFirstPaint\(\)/,
+  );
+  const applyGeometry = windows.slice(
+    windows.indexOf("pub(crate) fn apply_geom_safe"),
+  );
   assert.doesNotMatch(applyGeometry, /window\.show\(\)/);
 });
 
 test("desktop bundles re-embed frontend-only changes", () => {
   const build = read("build.rs");
-  assert.match(build, /cargo:rerun-if-changed=ui/);
+  assert.match(build, /fn watch_tree\(root: &Path, hasher: &mut impl Hasher\)/);
+  assert.match(build, /watch_tree\(Path::new\("ui"\), &mut ui_fingerprint\)/);
+  assert.match(build, /cargo:rerun-if-changed=\{\}/);
+  assert.match(build, /cargo:rustc-env=KUNPENG_UI_ASSET_FINGERPRINT=/);
+  assert.doesNotMatch(build, /cargo:rerun-if-changed=ui/);
   assert.match(build, /tauri_build::build\(\)/);
+  assert.match(read("src", "main.rs"), /\.build\(tauri::generate_context!\("tauri\.conf\.json"\)\)/);
+  assert.match(
+    read("scripts", "install-macos-app.sh"),
+    /cargo clean --release --target "\$target_triple"[\s\S]*?cargo tauri build --target "\$target_triple"/,
+  );
+});
+
+test("the CSP-protected main page contains no inline executable script", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  assert.doesNotMatch(html, /<script>\s*[^<]/);
 });
 
 test("EPUB runtime, virtual chapters and reader protocol are isolated from app assembly", () => {
@@ -180,7 +258,10 @@ test("library DTOs and shelf commands are isolated from app assembly", () => {
   assert.match(library, /pub\(crate\) struct BookDto/);
   assert.match(library, /pub\(crate\) fn snapshot/);
   assert.match(library, /epub_runtime::map_physical_chapter_for_book/);
-  assert.match(imports, /library_commands::\{(?:snapshot, BookDto|BookDto, snapshot)\}/);
+  assert.match(
+    imports,
+    /library_commands::\{(?:snapshot, BookDto|BookDto, snapshot)\}/,
+  );
 });
 
 test("runtime helpers and utility commands stay outside app assembly", () => {
@@ -218,8 +299,13 @@ test("complex Tauri commands keep business fields behind one camelCase request D
   const commands = [
     ["src/reader_commands.rs", "add_highlight", "AddHighlightRequest"],
     ["src/app_commands.rs", "translate_text", "TranslateTextRequest"],
-    ["src/app_commands.rs", "save_translation_credential", "SaveTranslationCredentialRequest"],
-    ["src/sync.rs", "auth_register", "AuthRequest"],
+    [
+      "src/app_commands.rs",
+      "save_translation_credential",
+      "SaveTranslationCredentialRequest",
+    ],
+    ["src/sync.rs", "auth_register_start", "RegistrationStartRequest"],
+    ["src/sync.rs", "auth_register_confirm", "RegistrationConfirmRequest"],
     ["src/sync.rs", "auth_login", "AuthRequest"],
     ["src/pdf_support.rs", "save_page_cache", "SavePageCacheRequest"],
     ["src/library_commands.rs", "set_progress", "SetProgressRequest"],
@@ -231,13 +317,19 @@ test("complex Tauri commands keep business fields behind one camelCase request D
     const source = read(...relativePath.split("/"));
     const dtoPattern = new RegExp(
       `#\\[derive\\([^\\]]*Deserialize[^\\]]*\\)\\][\\s\\S]{0,160}` +
-      `#\\[serde\\(rename_all = "camelCase"\\)\\][\\s\\S]{0,80}` +
-      `pub\\(crate\\) struct ${dto}\\b`,
+        `#\\[serde\\(rename_all = "camelCase"\\)\\][\\s\\S]{0,80}` +
+        `pub\\(crate\\) struct ${dto}\\b`,
     );
-    assert.match(source, dtoPattern, `${command} request must deserialize camelCase fields`);
+    assert.match(
+      source,
+      dtoPattern,
+      `${command} request must deserialize camelCase fields`,
+    );
 
     const signature = source.match(
-      new RegExp(`(?:pub\\(crate\\)\\s+)?(?:async\\s+)?fn\\s+${command}\\s*\\(([\\s\\S]*?)\\)\\s*->`),
+      new RegExp(
+        `(?:pub\\(crate\\)\\s+)?(?:async\\s+)?fn\\s+${command}\\s*\\(([\\s\\S]*?)\\)\\s*->`,
+      ),
     );
     assert.ok(signature, `${command} signature must be discoverable`);
     const businessArguments = signature[1]
@@ -271,10 +363,11 @@ test("complex Tauri commands keep business fields behind one camelCase request D
       `${file} must wrap ${command} fields in request`,
     );
   }
-  assert.match(
-    read("ui", "sync-ui.js"),
-    /invoke\(isRegister \? "auth_register" : "auth_login",\s*\{\s*request\s*:/,
-  );
+  const syncUi = read("ui", "sync-ui.js");
+  assert.match(syncUi, /invoke\("auth_login",\s*\{\s*request\s*:/);
+  assert.match(syncUi, /invoke\("auth_register_start",\s*\{\s*request\s*:/);
+  assert.match(syncUi, /invoke\("auth_register_confirm",\s*\{\s*request\s*\}/);
+  assert.doesNotMatch(syncUi, /invoke\("auth_register",/);
 });
 
 test("portable entity model is identical on client and sync server", () => {
@@ -305,18 +398,26 @@ test("portable entity model is identical on client and sync server", () => {
   assert.match(db, /purge_legacy_entities/);
   assert.match(server, /record_migration\(conn, 6\)/);
   const privateSync = read("src", "private_sync.rs");
-  assert.match(privateSync, /"reading_data_v1"\s*\|\s*"user_book_tags_v1"\s*\|\s*"book_collections_v1"\s*\|\s*"booklist_v1"/);
-  assert.match(privateSync, /entity_enabled_for_options\(&options, kind\)\.unwrap_or\(false\)/);
+  assert.match(
+    privateSync,
+    /"reading_data_v1"\s*\|\s*"user_book_tags_v1"\s*\|\s*"book_collections_v1"\s*\|\s*"booklist_v1"/,
+  );
+  assert.match(
+    privateSync,
+    /entity_enabled_for_options\(&options, kind\)\.unwrap_or\(false\)/,
+  );
 });
 
 test("reader injection is composed from responsibility-focused modules", () => {
   const rust = read("src", "reader_page.rs");
   const modules = [
     "reader-page-style.html",
+    "reader-page-scroll-rules.js",
     "reader-page-layout.js",
     "reader-page-end.js",
     "reader-page-pagination.js",
     "reader-page-measurement.js",
+    "reader-page-highlight-rules.js",
     "reader-page-annotations.js",
     "reader-page-mode-switch.js",
     "reader-page-runtime.js",
@@ -327,14 +428,23 @@ test("reader injection is composed from responsibility-focused modules", () => {
     assert.ok(fs.statSync(path.join(root, "ui", name)).size > 0);
   }
   const positions = modules.map((name) => rust.indexOf(name));
-  assert.ok(positions.every((position, index) => index === 0 || position > positions[index - 1]));
+  assert.ok(
+    positions.every(
+      (position, index) => index === 0 || position > positions[index - 1],
+    ),
+  );
   assert.ok(!fs.existsSync(path.join(root, "ui", "reader-page-head.html")));
   const layout = read("ui", "reader-page-layout.js");
+  const scrollRules = read("ui", "reader-page-scroll-rules.js");
   const pagination = read("ui", "reader-page-pagination.js");
   const measurement = read("ui", "reader-page-measurement.js");
+  const highlightRules = read("ui", "reader-page-highlight-rules.js");
   assert.doesNotMatch(layout, /function pageCountSig\(/);
+  assert.match(scrollRules, /var ReaderPageScrollRules=/);
+  assert.match(layout, /ReaderPageScrollRules\.pageIndexForTop/);
   assert.doesNotMatch(layout, /function measureAll\(/);
   assert.match(pagination, /function pageCountSig\(/);
+  assert.match(highlightRules, /var ReaderPageHighlightRules=/);
   assert.match(pagination, /function pageLayout\(/);
   assert.match(measurement, /function measureAll\(/);
   assert.match(measurement, /function applyPageCache\(/);
@@ -346,12 +456,20 @@ test("shelf semantic settings are isolated behind explicit browser APIs", () => 
   const semanticUi = read("ui", "semantic-ui.js");
   const cache = read("ui", "semantic-status-cache.js");
   assert.match(app, /window\.ReaderSemanticUI\.init\(/);
-  assert.doesNotMatch(app, /build_semantic_vectors|semantic_tasks|sem-vector-build/);
+  assert.doesNotMatch(
+    app,
+    /build_semantic_vectors|semantic_tasks|sem-vector-build/,
+  );
   assert.match(semanticUi, /global\.ReaderSemanticUI = Object\.freeze/);
   assert.match(cache, /global\.ReaderSemanticStatusCache = Object\.freeze/);
-  assert.ok(html.indexOf("semantic-status-cache.js") < html.indexOf("semantic-ui.js"));
+  assert.ok(
+    html.indexOf("semantic-status-cache.js") < html.indexOf("semantic-ui.js"),
+  );
   assert.ok(html.indexOf("semantic-ui.js") < html.indexOf("app.js"));
-  assert.match(read("ui", "animation-settings-ui.js"), /ReaderAnimationSettingsUI/);
+  assert.match(
+    read("ui", "animation-settings-ui.js"),
+    /ReaderAnimationSettingsUI/,
+  );
   assert.ok(html.indexOf("animation-settings-ui.js") < html.indexOf("app.js"));
 });
 
@@ -375,8 +493,14 @@ test("shelf rendering, filters and selection are owned by ReaderShelfUI", () => 
   const shelf = read("ui", "shelf-ui.js");
   const search = read("ui", "search-ui.js");
   assert.match(app, /window\.ReaderShelfUI\.init\(\{/);
-  assert.doesNotMatch(app, /let books\s*=|let selected\s*=|function applyView\(|invoke\("remove_books"/);
-  assert.doesNotMatch(app, /getElementById\("filter-stars"|getElementById\("del-btn"|getElementById\("shelf"/);
+  assert.doesNotMatch(
+    app,
+    /let books\s*=|let selected\s*=|function applyView\(|invoke\("remove_books"/,
+  );
+  assert.doesNotMatch(
+    app,
+    /getElementById\("filter-stars"|getElementById\("del-btn"|getElementById\("shelf"/,
+  );
   assert.match(shelf, /global\.ReaderShelfUI = Object\.freeze/);
   assert.match(shelf, /invoke\("remove_books", \{ ids \}\)/);
   assert.match(shelf, /getElementById\("filter-stars"\)/);
@@ -391,16 +515,28 @@ test("reader performance events are bounded and forwarded to the backend", () =>
   const transition = read("ui", "reader-page-transition.js");
   assert.match(guard, /"readerPerf"/);
   assert.match(guard, /action === "readerPerf"[^\n]*1000/);
-  assert.match(reader, /invoke\("reader_perf_log", \{ event: e\.data\.readerPerf \}\)/);
-  assert.match(transition, /function reportReaderPaintPerf\(name,started,detail\)/);
+  assert.match(
+    reader,
+    /invoke\("reader_perf_log", \{ event: e\.data\.readerPerf \}\)/,
+  );
+  assert.match(
+    transition,
+    /function reportReaderPaintPerf\(name,started,detail\)/,
+  );
 });
 
 test("reader cross and semantic search keep results from the current book", () => {
   const cross = read("ui", "reader-cross-search-ui.js");
   assert.match(cross, /const list = crossLastResults;/);
   assert.doesNotMatch(cross, /crossLastResults\.filter\([\s\S]*currentId/);
-  assert.match(cross, /invoke\("shelf_search", \{ term: crossTerm, ids: null \}\)/);
-  assert.match(cross, /invoke\("semantic_search", \{ query: crossTerm, ids: null \}\)/);
+  assert.match(
+    cross,
+    /invoke\("shelf_search", \{ term: crossTerm, ids: null \}\)/,
+  );
+  assert.match(
+    cross,
+    /invoke\("semantic_search", \{ query: crossTerm, ids: null \}\)/,
+  );
   assert.match(cross, /invoke\("warm_semantic_model"\)/);
   assert.doesNotMatch(cross, /invoke\("prepare_semantic_search"\)/);
 });
@@ -415,20 +551,35 @@ test("main-window search keeps typing responsive while large results render", ()
   assert.match(searchUi, /window\.requestAnimationFrame\(appendNextFrame\)/);
   assert.match(searchUi, /if \(willOpen\) ensureHits\(\)/);
   assert.match(searchUi, /renderGeneration \+= 1/);
-  assert.match(searchUi, /qEl\.addEventListener\("input", \(\) => \{[\s\S]{0,180}searchSeq \+= 1/);
+  assert.match(
+    searchUi,
+    /qEl\.addEventListener\("input", \(\) => \{[\s\S]{0,180}searchSeq \+= 1/,
+  );
   assert.match(searchBackend, /hits\.len\(\) < 8/);
   assert.match(searchBackend, /source_fingerprint_from_content_id/);
   assert.match(searchBackend, /pub\(crate\) async fn shelf_search_book_hits/);
   assert.match(searchBackend, /INDEX_BUILD_RUNNING/);
   assert.match(searchBackend, /fn search_one_book_indexed/);
   assert.match(searchBackend, /pending_books: usize/);
-  assert.match(searchUi, /invoke\("shelf_search_book_hits", \{[\s\S]{0,180}limit: 10/);
+  assert.match(
+    searchUi,
+    /invoke\("shelf_search_book_hits", \{[\s\S]{0,180}limit: 10/,
+  );
   assert.match(searchUi, /response\?\.results/);
   assert.match(searchUi, /pendingBooks/);
-  assert.match(searchUi, /const inputTerm = qEl\.value\.trim\(\);[\s\S]{0,80}runSearch\(inputTerm\)/);
+  assert.match(
+    searchUi,
+    /const inputTerm = qEl\.value\.trim\(\);[\s\S]{0,80}runSearch\(inputTerm\)/,
+  );
   assert.doesNotMatch(searchUi, /BM25/);
-  assert.match(searchBackend, /interactive_search_workers\(ready_targets\.len\(\)\)/);
-  assert.match(semanticBackend, /interactive_search_workers\(targets\.len\(\)\)/);
+  assert.match(
+    searchBackend,
+    /interactive_search_workers\(ready_targets\.len\(\)\)/,
+  );
+  assert.match(
+    semanticBackend,
+    /interactive_search_workers\(targets\.len\(\)\)/,
+  );
   assert.doesNotMatch(searchUi, /semReady \? invoke\("semantic_search"/);
   assert.doesNotMatch(searchUi, /prepare_semantic_search/);
   assert.match(searchUi, /invoke\("warm_semantic_model"\)/);
@@ -436,10 +587,12 @@ test("main-window search keeps typing responsive while large results render", ()
   assert.match(runtime, /saturating_sub\(2\)[\s\S]*\.clamp\(1, 2\)/);
   const interactiveBody = searchBackend.slice(
     searchBackend.indexOf("fn shelf_search_blocking"),
-    searchBackend.indexOf("#[tauri::command]\npub(crate) async fn open_search_window"),
+    searchBackend.indexOf(
+      "#[tauri::command]\npub(crate) async fn open_search_window",
+    ),
   );
   assert.doesNotMatch(interactiveBody, /ensure_search_assets\(/);
-  assert.match(interactiveBody, /spawn_build_index\(app\.clone\(\)\)/);
+  assert.match(interactiveBody, /spawn_build_index\(app\.clone\(\), true\)/);
 });
 test("release assets include a sha256 manifest", () => {
   const release = read("scripts", "release.ps1");

@@ -15,15 +15,49 @@ const pageBugTrace = fs.readFileSync(path.join(uiRoot, "reader-page-bug-trace.js
 test("reader page modules parse in their compiled injection order", () => {
   const source = [
     "reader-page-bug-trace.js",
+    "reader-page-scroll-rules.js",
     "reader-page-layout.js",
     "reader-page-end.js",
     "reader-page-pagination.js",
     "reader-page-measurement.js",
+    "reader-page-highlight-rules.js",
     "reader-page-annotations.js",
     "reader-page-mode-switch.js",
     "reader-page-runtime.js",
   ].map((name) => fs.readFileSync(path.join(uiRoot, name), "utf8")).join("");
   assert.doesNotThrow(() => new vm.Script(source));
+});
+
+test("highlight menu geometry delegates to a side-effect-free rules module", () => {
+  const rules = fs.readFileSync(path.join(uiRoot, "reader-page-highlight-rules.js"), "utf8");
+  const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
+  const context = {};
+  vm.runInNewContext(rules, context);
+  const api = context.ReaderPageHighlightRules;
+  assert.ok(api);
+  assert.equal(Object.isFrozen(api), true);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(api.envelope([{ left: 8, top: 20, right: 30, bottom: 32 }, { left: 34, top: 20, right: 52, bottom: 32 }]))),
+    { left: 8, top: 20, right: 52, bottom: 32, width: 44, height: 12 },
+  );
+  const rects = [
+    { left: 8, top: 20, right: 30, bottom: 32 },
+    { left: 34, top: 20, right: 52, bottom: 32 },
+    { left: 8, top: 40, right: 25, bottom: 52 },
+  ];
+  assert.equal(api.nearestRect(rects, { x: 48, y: 25 }), rects[1]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(api.placement(rects, { x: 48, y: 25 }, () => 0, (rect) => `${rect.top}:${rect.bottom}`))),
+    { rect: { left: 8, top: 40, right: 25, bottom: 52, width: 17, height: 12 }, above: false },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(api.placement(rects, null, (rect) => rect.top < 40 ? 1 : 2, (rect) => `${rect.top}:${rect.bottom}`))),
+    { rect: { left: 8, top: 20, right: 52, bottom: 32, width: 44, height: 12 }, above: true },
+  );
+  assert.match(rules, /不读取 DOM、设置或/);
+  assert.doesNotMatch(rules, /document\.|window\.|localStorage|parent\.postMessage/);
+  assert.match(annotations, /ReaderPageHighlightRules\.placement/);
+  assert.match(annotations, /ReaderPageHighlightRules\.groupedEnvelopes/);
 });
 
 test("pagination and measurement helpers stay outside the layout assembly", () => {
@@ -40,11 +74,36 @@ test("pagination and measurement helpers stay outside the layout assembly", () =
   assert.match(measurement, /function appendFastTextRangeLines\(out,node,range,start,end,pr,scrollTop\)/);
 });
 
+test("scroll pagination geometry delegates to a side-effect-free rules module", () => {
+  const rules = fs.readFileSync(path.join(uiRoot, "reader-page-scroll-rules.js"), "utf8");
+  const context = {};
+  vm.runInNewContext(rules, context);
+  const api = context.ReaderPageScrollRules;
+  assert.ok(api);
+  assert.equal(Object.isFrozen(api), true);
+  assert.equal(api.firstUnfinishedItemIndex([{ bottom: 10 }, { bottom: 42 }], 0, 10), 1);
+  assert.equal(api.pageBottomForSlice(100, 80, { type: "block", atomic: true, preview: false, top: 155, bottom: 220 }), 155);
+  const aligned = api.alignedPageStart([{ top: 0, bottom: 24 }, { top: 24, bottom: 50 }, { top: 74, bottom: 90 }], 2, 200, 4);
+  assert.equal(aligned.startIdx, 2);
+  assert.equal(aligned.pageTop, 70);
+  assert.equal(api.nearestBreakIndex([0, 108, 217], 161), 1);
+  assert.equal(api.pageIndexForTop([0, 108, 217], 216, 2), 2);
+  assert.match(rules, /不读取 DOM、设置或\n\/\/ 全局状态/);
+  assert.doesNotMatch(rules, /document\.|window\.|localStorage|parent\.postMessage/);
+  assert.match(layout, /ReaderPageScrollRules\.pageBottomForSlice/);
+  assert.match(layout, /ReaderPageScrollRules\.alignedPageStart/);
+  assert.match(layout, /ReaderPageScrollRules\.nearestBreakIndex/);
+});
+
 test("scroll and paged reading share one horizontal content box", () => {
   assert.match(layout, /var padL=isDualPage\(\)\?0:hm\.l/);
   assert.match(layout, /var padR=isDualPage\(\)\?0:hm\.r/);
   assert.match(layout, /if\(isScrollMode\(\)\)\{[\s\S]*?pager\.style\.top=sb\.top\+'px';[\s\S]*?pager\.style\.left='0';[\s\S]*?pager\.style\.right='0';/);
   assert.match(layout, /x=Math\.max\(2,pr\.left\+hm\.l\+8\)/);
+});
+
+test("zero dual-page gutter removes inherited content-edge spacing", () => {
+  assert.match(layout, /if\(isDualPage\(\)&&dualPageGapPx\(\)===0\)c\+='\.rr,\.rr>\*,\.rr body\{margin-left:0 !important;margin-right:0 !important;padding-left:0 !important;padding-right:0 !important;\}'/);
 });
 
 test("solid reader backgrounds never render body text with insufficient contrast", () => {

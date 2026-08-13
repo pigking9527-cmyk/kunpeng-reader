@@ -13,9 +13,12 @@ import json
 import time
 import zlib
 
+import database
+
 HISTORY_SCHEMA_VERSION = 2
 HISTORY_RETENTION_DAYS = 90
 HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000
+HISTORY_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
 HISTORY_COMPRESSION_LEVEL = 6
 MAX_RESTORE_ENTITIES = 50_000
 SNAPSHOT = "snapshot"
@@ -159,6 +162,8 @@ def _last_history_row(conn, user_id, kind, entity_id):
 
 
 def initialize(conn, seed_existing=False, recorded_at=None):
+    if database.is_postgresql():
+        return 0
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS entity_history (
@@ -205,6 +210,8 @@ def initialize(conn, seed_existing=False, recorded_at=None):
 
 def upgrade_history_schema(conn):
     """Upgrade v1 full snapshots in place; old rows remain valid snapshots."""
+    if database.is_postgresql():
+        return
     columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_history)").fetchall()}
     additions = (
         ("payload_kind", "TEXT NOT NULL DEFAULT 'snapshot'"),
@@ -305,6 +312,17 @@ def prune_history(conn, user_id, current_at=None):
         conn.execute("DELETE FROM entity_history WHERE user_id=? AND recorded_at<? AND sequence NOT IN (" + ",".join("?" for _ in anchors) + ")", (user_id, cutoff, *(int(row["sequence"]) for row in anchors)))
     conn.execute("UPDATE recovery_accounts SET last_pruned_at=? WHERE user_id=?", (current_at, user_id))
     return len(anchors)
+
+
+def prune_history_if_due(conn, user_id, current_at=None):
+    """Bound pruning work to once per account per day on request paths."""
+    current_at = int(current_at or _now_ms())
+    account = conn.execute(
+        "SELECT last_pruned_at FROM recovery_accounts WHERE user_id=?", (user_id,)
+    ).fetchone()
+    if account and current_at - int(account["last_pruned_at"] or 0) < HISTORY_PRUNE_INTERVAL_MS:
+        return 0
+    return prune_history(conn, user_id, current_at)
 
 
 def status(conn, user_id, current_at=None):

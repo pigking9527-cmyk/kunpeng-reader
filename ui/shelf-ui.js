@@ -25,6 +25,8 @@ function init(options = {}) {
   if (!menuEl || !filterPanel) throw new Error("ReaderShelfUI.init 缺少浮层元素");
   if (typeof closeAccountPanel !== "function" || typeof closeSearch !== "function") throw new Error("ReaderShelfUI.init 缺少浮层关闭接口");
   if (typeof clearCrossReturnMemory !== "function" || typeof startPerformance !== "function") throw new Error("ReaderShelfUI.init 缺少书架生命周期接口");
+  const rules = global.ReaderShelfRules;
+  if (!rules) throw new Error("ReaderShelfUI.init 缺少纯规则模块");
 
 const shelfEl = document.getElementById("shelf");
 const emptyEl = document.getElementById("empty");
@@ -72,13 +74,8 @@ let bookFileSizesPromise = null;
 let layout = localStorage.getItem("shelfLayout") || "grid";
 const GRID_COL_MIN = 1;
 const GRID_COL_MAX = 12;
-function parseGridColumns(value) {
-  const parsed = parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-  return Math.max(GRID_COL_MIN, Math.min(GRID_COL_MAX, parsed));
-}
-let shelfGridColumns = parseGridColumns(localStorage.getItem("shelfGridColumns") || "0");
-let shelfGridColumnsValue = parseGridColumns(localStorage.getItem("shelfGridColumnsValue") || "3") || 3;
+let shelfGridColumns = rules.parseGridColumns(localStorage.getItem("shelfGridColumns") || "0");
+let shelfGridColumnsValue = rules.parseGridColumns(localStorage.getItem("shelfGridColumnsValue") || "3") || 3;
 let readingFilter = { unread: true, reading: true, done: true };
 try {
   readingFilter = Object.assign(readingFilter, JSON.parse(localStorage.getItem("readingFilter") || "{}"));
@@ -87,8 +84,8 @@ let minRating = +(localStorage.getItem("minRating") || 0);
 let searchQuery = "";
 let selected = new Set();
 const shelfText = (key, fallback) => global.ReaderAppI18n?.t?.(key) || fallback;
-function organizationName(value) { return String(value || "").trim(); }
-function organizationKey(value) { return organizationName(value).toLocaleLowerCase("zh-CN"); }
+const organizationName = rules.organizationName;
+const organizationKey = rules.organizationKey;
 function loadOrganizationFilter(key) {
   try {
     const values = JSON.parse(localStorage.getItem(key) || "[]");
@@ -112,6 +109,11 @@ let singleClickOpensBook = localStorage.getItem("shelfSingleClickOpen") !== "0";
 const DEFAULT_FIRST_SCREEN_COVER_COUNT = 24;
 const MAX_FIRST_SCREEN_COVER_COUNT = 160;
 let firstScreenCoverCount = DEFAULT_FIRST_SCREEN_COVER_COUNT;
+const coverLoadingRules = global.ReaderShelfCoverLoadingRules && [
+  "coverLoadPriority", "estimateFirstScreenCoverCount", "firstScreenCoverCount",
+].every((name) => typeof global.ReaderShelfCoverLoadingRules[name] === "function")
+  ? global.ReaderShelfCoverLoadingRules
+  : null;
 
 // 书架是应用控件，不是网页正文。禁止浏览器把拖过的封面图片、书名和进度
 // 当成可拖对象或文本选区；多选只通过阅读器自己的选中态完成。
@@ -127,6 +129,14 @@ function setSingleClickOpenPreference(value) {
 function estimateFirstScreenCoverCount() {
   const width = Number(contentEl?.clientWidth || 0);
   const height = Number(contentEl?.clientHeight || 0);
+  if (coverLoadingRules) {
+    return coverLoadingRules.estimateFirstScreenCoverCount({
+      gridColumns: shelfGridColumns,
+      height,
+      layout,
+      width,
+    });
+  }
   if (width <= 0 || height <= 0) return 0;
   if (layout === "list") return Math.max(1, Math.ceil(height / 108));
   const columns = shelfGridColumns > 0
@@ -338,27 +348,6 @@ document.getElementById("grid-cols-inc")?.addEventListener("click", () => {
   applyView();
 });
 
-// 阅读状态：done 已读 / unread 未读 / reading 正在阅读
-function readStatus(b) {
-  const p = b.progress || 0;
-  if (p >= 99) return "done";
-  if (p < 1) return "unread";
-  return "reading";
-}
-
-const PALETTE = [
-  "#3e5a8c", "#8c4650", "#46785f", "#82643c",
-  "#5f5082", "#3c6e78", "#78556e", "#5a6446",
-];
-function colorFor(title) {
-  let h = 2166136261;
-  for (let i = 0; i < title.length; i++) {
-    h ^= title.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
-  return PALETTE[h % PALETTE.length];
-}
-
 // 只读的评分小星（支持半星），叠在封面底部
 function staticStars(v) {
   const wrap = document.createElement("div");
@@ -379,18 +368,6 @@ function staticStars(v) {
   return wrap;
 }
 
-function bookRenderKey(b) {
-  return [
-    b.id || "",
-    b.title || "",
-    b.cover || "",
-    b.progress || 0,
-    b.rating || 0,
-    b.missing ? 1 : 0,
-    showCoverProgress ? 1 : 0,
-    showCoverRating ? 1 : 0,
-  ].join("\u001f");
-}
 function closeShelfCardFloaters() {
   // 书卡会阻止事件冒泡，因此不能依赖 document 的兜底点击处理器。
   menuEl.classList.remove("show");
@@ -413,15 +390,19 @@ function bookCard(b, index = 0) {
     const img = document.createElement("img");
     img.alt = b.title;
     img.draggable = false;
-    const eagerCoverLoad = index < firstScreenCoverCount;
-    img.loading = eagerCoverLoad ? "eager" : "lazy";
-    img.decoding = eagerCoverLoad ? "sync" : "async";
-    img.fetchPriority = eagerCoverLoad ? "high" : "auto";
+    const coverPriority = coverLoadingRules
+      ? coverLoadingRules.coverLoadPriority(index, firstScreenCoverCount)
+      : (index < firstScreenCoverCount
+        ? { decoding: "sync", fetchPriority: "high", loading: "eager" }
+        : { decoding: "async", fetchPriority: "auto", loading: "lazy" });
+    img.loading = coverPriority.loading;
+    img.decoding = coverPriority.decoding;
+    img.fetchPriority = coverPriority.fetchPriority;
     img.src = b.cover;
     cover.appendChild(img);
   } else {
     // 生成的占位封面：书名 + 配色
-    cover.style.background = colorFor(b.title);
+    cover.style.background = rules.colorFor(b.title);
     const spine = document.createElement("div");
     spine.className = "spine";
     const gen = document.createElement("div");
@@ -455,7 +436,7 @@ function bookCard(b, index = 0) {
 
   card.dataset.id = b.id;
   card.dataset.problemTarget = "book-card";
-  card.dataset.renderKey = bookRenderKey(b);
+  card.dataset.renderKey = rules.bookRenderKey(b, { showCoverProgress, showCoverRating });
   if (selected.has(b.id)) card.classList.add("selected");
 
   card.appendChild(cover);
@@ -592,53 +573,8 @@ async function relocateBook(b) {
   render(await invoke("relocate_book", { id: b.id, path }));
 }
 
-function sortBooks(list) {
-  const arr = list.slice();
-  arr.sort((a, b) => {
-    switch (sortKey) {
-      case "author":
-        return (
-          (a.author || "").localeCompare(b.author || "", "zh") ||
-          a.title.localeCompare(b.title, "zh")
-        );
-      case "added":
-        return (b.added_at || 0) - (a.added_at || 0); // 新导入在前
-      case "dir":
-        return (a.path || "").localeCompare(b.path || "", "zh"); // 按存储目录/路径
-      case "read":
-        return (b.last_read_at || 0) - (a.last_read_at || 0) ||
-          a.title.localeCompare(b.title, "zh"); // 最近读的在前
-      case "reading-time":
-        return (b.reading_seconds || 0) - (a.reading_seconds || 0) ||
-          a.title.localeCompare(b.title, "zh");
-      case "size":
-        return (bookFileSizes.get(String(b.id)) || 0) -
-          (bookFileSizes.get(String(a.id)) || 0) ||
-          a.title.localeCompare(b.title, "zh");
-      case "progress":
-        return (b.progress || 0) - (a.progress || 0) ||
-          a.title.localeCompare(b.title, "zh");
-      default: {
-        // 书名：按拼音首字母分组排序（# 组排最后），同字母内按书名
-        const ra = !a.initial || a.initial === "#" ? "~" : a.initial;
-        const rb = !b.initial || b.initial === "#" ? "~" : b.initial;
-        return ra.localeCompare(rb) || a.title.localeCompare(b.title, "zh");
-      }
-    }
-  });
-  return arr;
-}
-
-function matchesShelfSearch(b) {
-  if (!searchQuery) return true;
-  return (
-    (b.title || "").toLowerCase().includes(searchQuery) ||
-    (b.author || "").toLowerCase().includes(searchQuery) ||
-    (b.description || "").toLowerCase().includes(searchQuery)
-  );
-}
 function hasActiveShelfFilters() {
-  return minRating > 0 || tagFilter.size > 0 || collectionFilter.size > 0 || !(readingFilter.unread && readingFilter.reading && readingFilter.done);
+  return rules.hasActiveShelfFilters({ minRating, tagFilter, collectionFilter, readingFilter });
 }
 function updateShelfFilterStatus(visibleCount) {
   const active = hasActiveShelfFilters();
@@ -650,19 +586,8 @@ function updateShelfFilterStatus(visibleCount) {
   }
 }
 
-function matchesOrganizationSelection(book, selectedTags, selectedCollections, mode) {
-  if (!selectedTags.size && !selectedCollections.size) return true;
-  const bookTags = new Set((book.tags || []).map(organizationKey));
-  const bookCollections = new Set((book.collections || []).map(organizationKey));
-  if (mode === "all") {
-    return Array.from(selectedTags).every((key) => bookTags.has(key))
-      && Array.from(selectedCollections).every((key) => bookCollections.has(key));
-  }
-  return Array.from(selectedTags).some((key) => bookTags.has(key))
-    || Array.from(selectedCollections).some((key) => bookCollections.has(key));
-}
 function matchesOrganizationFilters(book) {
-  return matchesOrganizationSelection(book, tagFilter, collectionFilter, organizationMatchMode);
+  return rules.matchesOrganizationSelection(book, tagFilter, collectionFilter, organizationMatchMode);
 }
 
 function renderOrganizationMatchMode() {
@@ -686,20 +611,14 @@ renderOrganizationMatchMode();
 
 // 当前真正显示在书架上的书。搜索永远搜索整座书架，避免被评分/阅读过滤误挡住。
 function currentList() {
-  let list = books;
-  if (searchQuery) {
-    return books.filter(matchesShelfSearch);
-  }
-  // 阅读状态过滤（三项全勾=全部显示）
-  if (!(readingFilter.unread && readingFilter.reading && readingFilter.done)) {
-    list = list.filter((b) => readingFilter[readStatus(b)]);
-  }
-  // 评分过滤（minRating>0 → 只显示评分≥该值的书）
-  if (minRating > 0) {
-    list = list.filter((b) => (b.rating || 0) >= minRating);
-  }
-  list = list.filter(matchesOrganizationFilters);
-  return list;
+  return rules.currentList(books, {
+    collectionFilter,
+    minRating,
+    organizationMatchMode,
+    readingFilter,
+    searchQuery,
+    tagFilter,
+  });
 }
 
 function organizationEntries(field) {
@@ -1545,18 +1464,29 @@ function updateShelfScrollbar() {
   if (!contentEl || !shelfScrollbar || !shelfScrollbarThumb) return;
   const viewport = contentEl.clientHeight;
   const total = contentEl.scrollHeight;
-  const maxScroll = Math.max(0, total - viewport);
-  if (viewport <= 0 || maxScroll <= 1) {
+  const trackHeight = shelfScrollbar.clientHeight;
+  const geometry = rules.scrollbarGeometry
+    ? rules.scrollbarGeometry({ scrollTop: contentEl.scrollTop, total, trackHeight, viewport })
+    : (() => {
+      const maxScroll = Math.max(0, total - viewport);
+      if (viewport <= 0 || maxScroll <= 1) return { visible: false };
+      const thumbHeight = Math.max(28, Math.round((viewport / total) * trackHeight));
+      const maxTop = Math.max(0, trackHeight - thumbHeight);
+      return {
+        maxScroll,
+        maxTop,
+        thumbHeight,
+        top: maxScroll ? Math.round((contentEl.scrollTop / maxScroll) * maxTop) : 0,
+        visible: true,
+      };
+    })();
+  if (!geometry.visible) {
     shelfScrollbar.classList.remove("show");
     return;
   }
   shelfScrollbar.classList.add("show");
-  const trackHeight = shelfScrollbar.clientHeight;
-  const thumbHeight = Math.max(28, Math.round((viewport / total) * trackHeight));
-  const maxTop = Math.max(0, trackHeight - thumbHeight);
-  const top = maxScroll ? Math.round((contentEl.scrollTop / maxScroll) * maxTop) : 0;
-  shelfScrollbarThumb.style.height = thumbHeight + "px";
-  shelfScrollbarThumb.style.transform = "translateY(" + top + "px)";
+  shelfScrollbarThumb.style.height = geometry.thumbHeight + "px";
+  shelfScrollbarThumb.style.transform = "translateY(" + geometry.top + "px)";
 }
 function scheduleShelfScrollbarUpdate() {
   if (shelfScrollUpdateRaf) return;
@@ -1580,11 +1510,22 @@ function initShelfScrollbar() {
     const rect = shelfScrollbar.getBoundingClientRect();
     const trackHeight = shelfScrollbar.clientHeight;
     const thumbHeight = shelfScrollbarThumb.offsetHeight;
-    const maxTop = Math.max(1, trackHeight - thumbHeight);
-    const maxScroll = Math.max(1, contentEl.scrollHeight - contentEl.clientHeight);
     if (e.target !== shelfScrollbarThumb) {
-      const targetTop = Math.min(maxTop, Math.max(0, e.clientY - rect.top - thumbHeight / 2));
-      contentEl.scrollTop = (targetTop / maxTop) * maxScroll;
+      contentEl.scrollTop = rules.scrollbarTrackScrollTop
+        ? rules.scrollbarTrackScrollTop({
+          clientY: e.clientY,
+          rectTop: rect.top,
+          thumbHeight,
+          total: contentEl.scrollHeight,
+          trackHeight,
+          viewport: contentEl.clientHeight,
+        })
+        : (() => {
+          const maxTop = Math.max(1, trackHeight - thumbHeight);
+          const maxScroll = Math.max(1, contentEl.scrollHeight - contentEl.clientHeight);
+          const targetTop = Math.min(maxTop, Math.max(0, e.clientY - rect.top - thumbHeight / 2));
+          return (targetTop / maxTop) * maxScroll;
+        })();
     }
     dragging = true;
     dragStartY = e.clientY;
@@ -1597,9 +1538,21 @@ function initShelfScrollbar() {
     e.preventDefault();
     const trackHeight = shelfScrollbar.clientHeight;
     const thumbHeight = shelfScrollbarThumb.offsetHeight;
-    const maxTop = Math.max(1, trackHeight - thumbHeight);
-    const maxScroll = Math.max(1, contentEl.scrollHeight - contentEl.clientHeight);
-    contentEl.scrollTop = dragStartScrollTop + ((e.clientY - dragStartY) / maxTop) * maxScroll;
+    contentEl.scrollTop = rules.scrollbarDragScrollTop
+      ? rules.scrollbarDragScrollTop({
+        clientY: e.clientY,
+        dragStartScrollTop,
+        dragStartY,
+        thumbHeight,
+        total: contentEl.scrollHeight,
+        trackHeight,
+        viewport: contentEl.clientHeight,
+      })
+      : (() => {
+        const maxTop = Math.max(1, trackHeight - thumbHeight);
+        const maxScroll = Math.max(1, contentEl.scrollHeight - contentEl.clientHeight);
+        return dragStartScrollTop + ((e.clientY - dragStartY) / maxTop) * maxScroll;
+      })();
   });
   const stopDrag = (e) => {
     if (!dragging) return;
@@ -1622,7 +1575,14 @@ function applyView(options = {}) {
   shelfEl.classList.toggle("list", layout === "list");
   shelfEl.classList.toggle("show-titles", showCoverTitle); // 网格视图是否显示书名
   applyShelfGridColumns();
-  firstScreenCoverCount = Math.max(DEFAULT_FIRST_SCREEN_COVER_COUNT, estimateFirstScreenCoverCount());
+  firstScreenCoverCount = coverLoadingRules
+    ? coverLoadingRules.firstScreenCoverCount({
+      gridColumns: shelfGridColumns,
+      height: Number(contentEl?.clientHeight || 0),
+      layout,
+      width: Number(contentEl?.clientWidth || 0),
+    })
+    : Math.max(DEFAULT_FIRST_SCREEN_COVER_COUNT, estimateFirstScreenCoverCount());
   shelfRendering = true;
   const list = currentList();
   updateShelfFilterStatus(list.length);
@@ -1638,7 +1598,7 @@ function applyView(options = {}) {
         : "书架还是空的。点右上角「⋮」→「导入书籍」添加（可一次选多本）。";
     emptyEl.style.display = "block";
   }
-  const sorted = sortBooks(list);
+  const sorted = rules.sortBooks(list, { bookFileSizes, sortKey });
   const finishCoverRender = startPerformance("cover-render", "critical books=" + sorted.length + " layout=" + layout);
   let chunks = 0;
   function restoreShelfScroll() {
@@ -1665,13 +1625,13 @@ function applyView(options = {}) {
   let changedCards = 0;
   for (const b of sorted) {
     const card = existingCards.get(b.id);
-    if (!card || card.dataset.renderKey !== bookRenderKey(b)) changedCards += 1;
+    if (!card || card.dataset.renderKey !== rules.bookRenderKey(b, { showCoverProgress, showCoverRating })) changedCards += 1;
   }
   const shouldReuse = existingCards.size > 0 && changedCards <= Math.max(24, sorted.length * 0.35);
   if (shouldReuse) {
     const frag = document.createDocumentFragment();
     sorted.forEach((b, index) => {
-      const key = bookRenderKey(b);
+      const key = rules.bookRenderKey(b, { showCoverProgress, showCoverRating });
       let card = existingCards.get(b.id);
       if (!card || card.dataset.renderKey !== key) {
         card = bookCard(b, index);
@@ -1768,7 +1728,7 @@ global.addEventListener("app-language-changed", () => {
     changeCoverById,
     clearSelection,
     count: () => books.length,
-    coverColor: colorFor,
+    coverColor: rules.colorFor,
     getBook,
     getBooks: () => books.slice(),
     getSearchQuery: () => searchQuery,

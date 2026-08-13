@@ -191,6 +191,68 @@ expect(pendingLoadDiagnostics.activeOperationCount === 0, "pending-load cancella
 expect(!pendingLoadDiagnostics.hasLoadingTask && !pendingLoadDiagnostics.hasActiveDocument, "pending-load cancellation retains no renderer object");
 await pendingLoadPort.dispose();
 
+let firstLoaderStarted: (() => void) | undefined;
+const firstLoaderStartedPromise = new Promise<void>((resolve) => { firstLoaderStarted = resolve; });
+let secondLoaderStarted: (() => void) | undefined;
+const secondLoaderStartedPromise = new Promise<void>((resolve) => { secondLoaderStarted = resolve; });
+let rejectFirstLoad: ((reason: unknown) => void) | undefined;
+let rejectSecondLoad: ((reason: unknown) => void) | undefined;
+let firstSupersededTaskDestroyCount = 0;
+let secondActiveTaskDestroyCount = 0;
+let loaderCallCount = 0;
+const replacementOpenPort = createPdfRendererPort({
+  resolver: { async resolve(): Promise<typeof resolvedBytes> { return resolvedBytes; } },
+  loader: {
+    getDocument() {
+      loaderCallCount += 1;
+      if (loaderCallCount === 1) {
+        firstLoaderStarted?.();
+        return {
+          promise: new Promise<PdfJsDocument>((_resolve, reject: (reason: unknown) => void) => { rejectFirstLoad = reject; }),
+          destroy(): void {
+            firstSupersededTaskDestroyCount += 1;
+            rejectFirstLoad?.(new DOMException("Aborted", "AbortError"));
+          },
+        };
+      }
+      secondLoaderStarted?.();
+      return {
+        promise: new Promise<PdfJsDocument>((_resolve, reject: (reason: unknown) => void) => { rejectSecondLoad = reject; }),
+        destroy(): void {
+          secondActiveTaskDestroyCount += 1;
+          rejectSecondLoad?.(new DOMException("Aborted", "AbortError"));
+        },
+      };
+    },
+  },
+  surface: {
+    mount(): void {},
+    async render(): Promise<{ readonly width: number; readonly height: number }> { return { width: 1, height: 1 }; },
+    clear(): void {},
+    unmount(): void {},
+  },
+});
+const firstReplacementOpen = replacementOpenPort.open({
+  documentId,
+  operationId: createPdfOperationId("replacement-first-open"),
+  initialPage: 1,
+});
+await firstLoaderStartedPromise;
+const secondReplacementOpen = replacementOpenPort.open({
+  documentId,
+  operationId: createPdfOperationId("replacement-second-open"),
+  initialPage: 1,
+});
+await secondLoaderStartedPromise;
+expect(firstSupersededTaskDestroyCount === 1, "a replacement open destroys the superseded loading task once");
+await firstReplacementOpen;
+expect(replacementOpenPort.diagnostics.hasLoadingTask, "a superseded request cannot clear the replacement loading task");
+await replacementOpenPort.close();
+await secondReplacementOpen;
+expect(secondActiveTaskDestroyCount === 1, "close still destroys the replacement loading task exactly once");
+expect(!replacementOpenPort.diagnostics.hasLoadingTask, "replacement cleanup retains no loading-task reference");
+await replacementOpenPort.dispose();
+
 let activeDocumentDestroyCount = 0;
 let activeSurfaceClearCount = 0;
 let activeSurfaceUnmountCount = 0;

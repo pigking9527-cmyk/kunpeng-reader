@@ -161,8 +161,7 @@ async fn edge_tts_inner(text: String, voice: String, rate: i32) -> Result<TtsAud
 }
 
 fn word_tts_cache_dir() -> Result<std::path::PathBuf, String> {
-    let mut dir = dirs::config_dir().ok_or("无法确定用户配置目录")?;
-    dir.push("ebook-reader");
+    let mut dir = crate::profile::app_config_dir().ok_or("无法确定用户配置目录")?;
     dir.push("word-tts-cache");
     Ok(dir)
 }

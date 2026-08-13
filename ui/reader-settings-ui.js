@@ -8,15 +8,6 @@ function normalizeReaderJumpBackIconSizePx(value, fallback = 32) {
   return Math.max(30, Math.min(160, Math.round(Number.isFinite(number) ? number : fallback)));
 }
 
-function readerJumpBackIconSizePxFromLegacyLevel(value) {
-  const level = Math.max(1, Math.min(10, Number(value) || 1));
-  return Math.round(32 * (1 + ((level - 1) * 4 / 9)));
-}
-
-function readerJumpBackLegacySizeLevelFromPx(value) {
-  return Math.max(1, Math.min(10, Math.round((normalizeReaderJumpBackIconSizePx(value) / 32 - 1) * 9 / 4 + 1)));
-}
-
 // 阅读页设置会经 postMessage 传给章节 iframe，再动态拼入 CSS。将原始 10 MB
 // 图片直接作为 data URL 传递会让 WebView2 的消息和样式文本膨胀到十余 MB，甚至
 // 使阅读器无法打开。导入端会先压缩；这里仍保留迁移保护，用于清理旧版本留下的值。
@@ -203,8 +194,6 @@ const DEFAULTS = {
   readerJumpBackDismissMode: "pages",
   readerJumpBackDismissSeconds: 30,
   readerJumpBackDismissPages: 3,
-  // 旧端仍读取此字段；新端以 readerJumpBackIconSizePx 为准。
-  readerJumpBackSizeLevel: 1,
   readerJumpBackIconSizePx: 32,
   // 坐标以阅读区域宽高的千分比表示，因而在不同屏幕尺寸下仍保持相对位置。
   readerJumpBackPositionX: 950,
@@ -229,16 +218,14 @@ function applyShellTheme(theme) {
 function loadSettings() {
   try {
     const stored = JSON.parse(localStorage.getItem("readerSettings") || "{}");
-    const merged = Object.assign({}, DEFAULTS, stored);
-    if (!Object.prototype.hasOwnProperty.call(stored, "readerJumpBackIconSizePx")) {
-      merged.readerJumpBackIconSizePx = readerJumpBackIconSizePxFromLegacyLevel(stored.readerJumpBackSizeLevel);
-    } else {
-      merged.readerJumpBackIconSizePx = normalizeReaderJumpBackIconSizePx(stored.readerJumpBackIconSizePx);
-    }
+    const { readerJumpBackSizeLevel: _removedJumpBackSizeLevel, ...current } = stored;
+    const merged = Object.assign({}, DEFAULTS, current);
+    merged.readerJumpBackIconSizePx = normalizeReaderJumpBackIconSizePx(merged.readerJumpBackIconSizePx);
     // Older settings stored the three original backgrounds in theme only.
     if (!stored.backgroundPreset && ["light", "dark", "sepia"].includes(stored.theme)) merged.backgroundPreset = stored.theme;
-    if (sanitizeBackgroundImage(merged)) localStorage.setItem("readerSettings", JSON.stringify(merged));
-    if (sanitizeBackgroundImage(merged)) localStorage.setItem("readerSettings", JSON.stringify(merged));
+    if (_removedJumpBackSizeLevel !== undefined || sanitizeBackgroundImage(merged)) {
+      localStorage.setItem("readerSettings", JSON.stringify(merged));
+    }
     return merged;
   } catch (e) {
     return Object.assign({}, DEFAULTS);
@@ -510,8 +497,6 @@ function normalizedAppSettingsSyncPayload() {
     readerJumpBackDismissMode: settings.readerJumpBackDismissMode === "time" ? "time" : "pages",
     readerJumpBackDismissSeconds: Math.max(1, Math.min(600, Number(settings.readerJumpBackDismissSeconds) || 30)),
     readerJumpBackDismissPages: Math.max(1, Math.min(100, Number(settings.readerJumpBackDismissPages) || 3)),
-    // 为仍在使用 1–10 级的旧桌面端保留近似值；新端只读取像素字段。
-    readerJumpBackSizeLevel: readerJumpBackLegacySizeLevelFromPx(settings.readerJumpBackIconSizePx),
     readerJumpBackIconSizePx: normalizeReaderJumpBackIconSizePx(settings.readerJumpBackIconSizePx),
     readerJumpBackPositionX: normalizedJumpBackPosition(settings.readerJumpBackPositionX, 950),
     readerJumpBackPositionY: normalizedJumpBackPosition(settings.readerJumpBackPositionY, 500),
@@ -553,10 +538,7 @@ async function hydrateAppSettingsSync() {
         readerJumpBackDismissMode: remote.readerJumpBackDismissMode === "time" ? "time" : "pages",
         readerJumpBackDismissSeconds: Math.max(1, Math.min(600, Number(remote.readerJumpBackDismissSeconds) || 30)),
         readerJumpBackDismissPages: Math.max(1, Math.min(100, Number(remote.readerJumpBackDismissPages) || 3)),
-        readerJumpBackSizeLevel: Math.max(1, Math.min(10, Number(remote.readerJumpBackSizeLevel) || 1)),
-        readerJumpBackIconSizePx: Object.prototype.hasOwnProperty.call(remote, "readerJumpBackIconSizePx")
-          ? normalizeReaderJumpBackIconSizePx(remote.readerJumpBackIconSizePx)
-          : readerJumpBackIconSizePxFromLegacyLevel(remote.readerJumpBackSizeLevel),
+        readerJumpBackIconSizePx: normalizeReaderJumpBackIconSizePx(remote.readerJumpBackIconSizePx),
         readerJumpBackPositionX: normalizedJumpBackPosition(remote.readerJumpBackPositionX, 950),
         readerJumpBackPositionY: normalizedJumpBackPosition(remote.readerJumpBackPositionY, 500),
         ...(remoteLayout || {}),

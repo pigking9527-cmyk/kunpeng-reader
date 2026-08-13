@@ -16,9 +16,7 @@ const MAX_SETTING_COUNT: usize = 2048;
 const MAX_KEY_BYTES: usize = 256;
 
 fn config_dir() -> Result<PathBuf, String> {
-    let mut dir = dirs::config_dir().ok_or("无法确定应用配置目录")?;
-    dir.push("ebook-reader");
-    Ok(dir)
+    crate::profile::app_config_dir().ok_or("无法确定应用配置目录".into())
 }
 
 fn snapshot_name(scope: &str) -> Result<&'static str, String> {

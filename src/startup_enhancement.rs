@@ -45,7 +45,14 @@ pub(crate) struct StartupEnhancementState {
 
 impl StartupEnhancementState {
     pub(crate) fn load() -> Self {
-        let config = load_config().unwrap_or_default();
+        let mut config = load_config().unwrap_or_default();
+        // An isolated acceptance profile must never inherit or create a
+        // user-level LaunchAgent. Keep the rest of its local UI preferences
+        // independent, but force both login-launch switches off in memory.
+        if crate::profile::is_isolated() {
+            config.launch_at_login = false;
+            config.launch_at_login_background = false;
+        }
         Self {
             enabled: AtomicBool::new(config.enabled),
             continue_high_cost: AtomicBool::new(config.continue_high_cost),
@@ -72,6 +79,10 @@ impl StartupEnhancementState {
         mut config: StartupEnhancementConfig,
     ) -> Result<(), String> {
         config.launch_at_login_background &= config.launch_at_login;
+        if crate::profile::is_isolated() {
+            config.launch_at_login = false;
+            config.launch_at_login_background = false;
+        }
         let current = self.config();
         if config.launch_at_login != current.launch_at_login
             || config.launch_at_login_background != current.launch_at_login_background
@@ -95,12 +106,13 @@ impl StartupEnhancementState {
             enabled: config.enabled,
             continue_high_cost: config.continue_high_cost,
             launch_at_login: config.launch_at_login,
-            launch_at_login_available: cfg!(any(target_os = "windows", target_os = "macos")),
+            launch_at_login_available: cfg!(any(target_os = "windows", target_os = "macos"))
+                && !crate::profile::is_isolated(),
             launch_at_login_background: config.launch_at_login_background,
             launch_at_login_background_available: cfg!(any(
                 target_os = "windows",
                 target_os = "macos"
-            )),
+            )) && !crate::profile::is_isolated(),
         }
     }
 
@@ -206,6 +218,9 @@ const LOGIN_BACKGROUND_ARGUMENT: &str = "--kunpeng-login-background";
 
 #[cfg(target_os = "macos")]
 fn macos_launch_agent_path() -> Result<PathBuf, String> {
+    if crate::profile::is_isolated() {
+        return Err("隔离配置禁止注册登录后台任务".into());
+    }
     let home = dirs::home_dir().ok_or("无法确定当前用户主目录")?;
     Ok(home
         .join("Library")
@@ -291,6 +306,9 @@ fn login_background_requested() -> bool {
 }
 
 pub(crate) fn should_start_login_background(app: &tauri::AppHandle) -> bool {
+    if crate::profile::is_isolated() {
+        return false;
+    }
     app.state::<StartupEnhancementState>()
         .login_backgrounded
         .load(Ordering::Acquire)
@@ -308,8 +326,7 @@ pub(crate) fn begin_login_background(app: &tauri::AppHandle) {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let mut path = dirs::config_dir()?;
-    path.push("ebook-reader");
+    let mut path = crate::profile::app_config_dir()?;
     path.push("startup-enhancement.json");
     Some(path)
 }
