@@ -152,6 +152,14 @@ try {
   assert.equal(repositoryEvidence.status, 2);
   assert.match(repositoryEvidence.stderr, /媒体文件必须位于仓库外/u);
 
+  const missingMemoryIndex = baseArgs.indexOf("--memory-cycle-5-mib");
+  const missingMemory = run([
+    ...baseArgs.slice(0, missingMemoryIndex),
+    "--output", join(records, "missing-memory.json"),
+  ]);
+  assert.equal(missingMemory.status, 2);
+  assert.match(missingMemory.stderr, /必须提供第 5 次和第 20 次关闭循环工作集/u);
+
   console.log("reader sample recorder checks passed");
 } finally {
   rmSync(temporaryDirectory, { recursive: true, force: true });

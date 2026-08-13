@@ -182,15 +182,13 @@ try {
   for (const name of timingNames) if (!Object.hasOwn(warmups, name)) throw new Error(`--timing 的 ${name} 缺少对应的 3 次 --warmup`);
   for (const name of Object.keys(warmups)) if (!Object.hasOwn(timings, name)) throw new Error(`--warmup 的 ${name} 缺少对应的 5 次 --timing`);
 
-  const hasCycle5 = values.has("--memory-cycle-5-mib");
-  const hasCycle20 = values.has("--memory-cycle-20-mib");
-  if (hasCycle5 !== hasCycle20) throw new Error("内存循环记录必须同时提供第 5 次和第 20 次工作集");
-  const memory = hasCycle5 ? (() => {
-    const cycle5MiB = parseMiB(values.get("--memory-cycle-5-mib"), "--memory-cycle-5-mib");
-    const cycle20MiB = parseMiB(values.get("--memory-cycle-20-mib"), "--memory-cycle-20-mib");
-    const growthMiB = cycle20MiB - cycle5MiB;
-    return { cycle5MiB, cycle20MiB, growthMiB, within100MiBLimit: growthMiB <= 100 };
-  })() : null;
+  if (!values.has("--memory-cycle-5-mib") || !values.has("--memory-cycle-20-mib")) {
+    throw new Error("必须提供第 5 次和第 20 次关闭循环工作集，才能生成可校验的验收记录");
+  }
+  const cycle5MiB = parseMiB(values.get("--memory-cycle-5-mib"), "--memory-cycle-5-mib");
+  const cycle20MiB = parseMiB(values.get("--memory-cycle-20-mib"), "--memory-cycle-20-mib");
+  const growthMiB = cycle20MiB - cycle5MiB;
+  const memory = { cycle5MiB, cycle20MiB, growthMiB, within100MiBLimit: growthMiB <= 100 };
 
   const evidence = [
     ...parseEvidence(repeated.get("--screenshot") ?? [], "screenshot"),
