@@ -70,10 +70,22 @@ jobs:
             --binary target/sync-api-v5-release/reader-sync-api \
             --manifest target/sync-api-v5-release/provenance.txt
 
+      - name: Stage and verify the restricted upload bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+            --binary target/sync-api-v5-release/reader-sync-api \
+            --manifest target/sync-api-v5-release/provenance.txt \
+            --output-dir target/sync-api-v5-upload
+          server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+            --verify \
+            --bundle-dir target/sync-api-v5-upload
+
       - name: Upload release-candidate artifact
         uses: actions/upload-artifact@v6
         with:
           name: reader-sync-api-v5-linux-x86_64
-          path: target/sync-api-v5-release/
+          path: target/sync-api-v5-upload/
           if-no-files-found: error
           retention-days: 14
