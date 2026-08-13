@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tauri::Manager;
 
+mod ranking;
+
 static SEM_QUERY_CACHE: OnceLock<Mutex<SemQueryCache>> = OnceLock::new();
 static SEM_EMBED_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static SEM_QUERY_ACTIVE: AtomicUsize = AtomicUsize::new(0);
@@ -91,83 +93,6 @@ pub(crate) struct SemBookHits {
     pub(crate) hits: Vec<SemHit>,
 }
 
-fn compact_lexical_phrase(query: &str) -> Option<String> {
-    let phrase = query
-        .trim()
-        .trim_matches(|character: char| {
-            matches!(
-                character,
-                '"' | '\'' | '“' | '”' | '‘' | '’' | '《' | '》' | '〈' | '〉'
-            )
-        })
-        .trim();
-    let count = phrase.chars().count();
-    ((2..=16).contains(&count) && !phrase.chars().any(char::is_whitespace))
-        .then(|| phrase.to_lowercase())
-}
-
-fn lexical_relevance(phrase: &str, text: &str) -> f32 {
-    if phrase.is_empty() || text.is_empty() {
-        return 0.0;
-    }
-    let folded = text.to_lowercase();
-    if folded.contains(phrase) {
-        return 1.0;
-    }
-    let query_chars = phrase.chars().collect::<Vec<_>>();
-    if query_chars.len() < 2 {
-        return 0.0;
-    }
-    let text_chars = folded.chars().collect::<Vec<_>>();
-    let bigram_total = query_chars.len() - 1;
-    let bigram_matches = query_chars
-        .windows(2)
-        .filter(|query_pair| text_chars.windows(2).any(|pair| pair == *query_pair))
-        .count();
-    let char_matches = query_chars
-        .iter()
-        .filter(|character| text_chars.contains(character))
-        .count();
-    let bigram_coverage = bigram_matches as f32 / bigram_total as f32;
-    let char_coverage = char_matches as f32 / query_chars.len() as f32;
-    (bigram_coverage * 0.8 + char_coverage * 0.2).clamp(0.0, 1.0)
-}
-
-fn hybrid_score(semantic: f32, lexical: f32, compact_phrase: bool) -> f32 {
-    let (semantic_weight, lexical_weight) = if compact_phrase {
-        (0.65, 0.35)
-    } else {
-        (0.88, 0.12)
-    };
-    (semantic.clamp(-1.0, 1.0) * semantic_weight + lexical * lexical_weight).clamp(-1.0, 1.0)
-}
-
-/// 融合来自不同检索器的排序，不能直接比较它们的原始分数。RRF 只使用名次，
-/// 因此对余弦相似度、全文命中数和后续稀疏检索都稳定；常数 60 是常用的
-/// 平滑项，避免一条偶然词面命中压过明显更相关的语义结果。
-fn apply_rrf(books: &mut [SemBookHits], lexical_ranks: &HashMap<u64, usize>) {
-    let dense_ranks: HashMap<u64, usize> = books
-        .iter()
-        .enumerate()
-        .filter_map(|(rank, book)| book.book_id.parse::<u64>().ok().map(|id| (id, rank + 1)))
-        .collect();
-    for book in books {
-        let Ok(id) = book.book_id.parse::<u64>() else {
-            continue;
-        };
-        let dense = dense_ranks
-            .get(&id)
-            .map(|rank| 1.0 / (60.0 + *rank as f32))
-            .unwrap_or(0.0);
-        let lexical = lexical_ranks
-            .get(&id)
-            .map(|rank| 1.0 / (60.0 + *rank as f32))
-            .unwrap_or(0.0);
-        // 保留少量原始段落分数用于同名次稳定排序；主信号为可比较的排名融合。
-        book.score = dense + lexical + book.score.max(0.0) * 0.0001;
-    }
-}
-
 /// 在一本书里做语义检索。短专名使用“向量相似度 + 完整短语/相邻字词面”
 /// 混合排序，确保精确事件名不会被只共享地名的长段落压过。
 fn sem_search_book(
@@ -189,10 +114,13 @@ fn sem_search_book(
         let lexical = lexical_phrase
             .and_then(|phrase| {
                 data.chunk(i)
-                    .map(|(_, text)| lexical_relevance(phrase, text))
+                    .map(|(_, text)| ranking::lexical_relevance(phrase, text))
             })
             .unwrap_or(0.0);
-        scored.push((hybrid_score(semantic, lexical, lexical_phrase.is_some()), i));
+        scored.push((
+            ranking::hybrid_score(semantic, lexical, lexical_phrase.is_some()),
+            i,
+        ));
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let best = scored[0].0;
@@ -302,22 +230,6 @@ fn brute_force_books(
             .flat_map(|h| h.join().unwrap_or_default())
             .collect()
     })
-}
-
-fn rerank_graph_book(book: &mut SemBookHits, lexical_phrase: Option<&str>) {
-    let Some(phrase) = lexical_phrase else {
-        return;
-    };
-    for hit in &mut book.hits {
-        hit.score = hybrid_score(hit.score, lexical_relevance(phrase, &hit.snippet), true);
-    }
-    book.hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    book.score = book.hits.first().map(|hit| hit.score).unwrap_or(book.score);
 }
 
 fn merge_book_results(results: Vec<SemBookHits>) -> Vec<SemBookHits> {
@@ -546,9 +458,9 @@ fn semantic_search_inner(
         loaded_shards = index.shard_count();
         covered = index.covered_ids();
         let mut graph_results = accelerator::search_loaded_shards(&index, &q, &titles);
-        let lexical_phrase = compact_lexical_phrase(&query);
+        let lexical_phrase = ranking::compact_lexical_phrase(&query);
         for book in &mut graph_results {
-            rerank_graph_book(book, lexical_phrase.as_deref());
+            ranking::rerank_graph_book(book, lexical_phrase.as_deref());
         }
         results.extend(graph_results);
     }
@@ -579,7 +491,7 @@ fn semantic_search_inner(
     let fallback_books = targets.len();
     let profile_started = Instant::now();
     let mut multi_profile_books = 0usize;
-    let lexical_phrase = compact_lexical_phrase(&query);
+    let lexical_phrase = ranking::compact_lexical_phrase(&query);
     let lexical_candidates = lexical_phrase
         .as_deref()
         .map(|phrase| {
@@ -643,7 +555,7 @@ fn semantic_search_inner(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    apply_rrf(&mut results, &lexical_ranks);
+    ranking::apply_rrf(&mut results, &lexical_ranks);
     results.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -718,44 +630,6 @@ mod tests {
             sem_query_cache_key("阅读", &None),
             "阅读\nrank=hybrid-v1\nids=*"
         );
-    }
-
-    #[test]
-    fn compact_phrase_accepts_short_terms_and_rejects_sentences() {
-        assert_eq!(
-            compact_lexical_phrase("“天津教案”").as_deref(),
-            Some("天津教案")
-        );
-        assert_eq!(
-            compact_lexical_phrase("天津教案").as_deref(),
-            Some("天津教案")
-        );
-        assert_eq!(compact_lexical_phrase("天津 教案"), None);
-        assert_eq!(
-            compact_lexical_phrase("请分析天津教案发生的历史背景和影响"),
-            None
-        );
-    }
-
-    #[test]
-    fn lexical_relevance_prefers_exact_compound_over_shared_place_name() {
-        let exact = lexical_relevance("天津教案", "晚清天津教案的起因与影响");
-        let partial = lexical_relevance("天津教案", "天津工业与农业发展");
-        let unrelated = lexical_relevance("天津教案", "江南赋税制度");
-        assert_eq!(exact, 1.0);
-        assert!(exact > partial);
-        assert!(partial > unrelated);
-    }
-
-    #[test]
-    fn hybrid_ranking_can_promote_an_exact_event_name() {
-        let exact = hybrid_score(0.48, 1.0, true);
-        let generic = hybrid_score(
-            0.60,
-            lexical_relevance("天津教案", "天津工业与农业发展"),
-            true,
-        );
-        assert!(exact > generic);
     }
 
     #[test]
