@@ -1253,6 +1253,12 @@ fn sync_now_inner_with_limits_impl(
     let _ = crate::ai_reader::materialize_library_profiles_into_model_tags(state)?;
     // Snapshot local JSON first so unsynced edits are represented in SQLite.
     data_migration::migrate_json_to_sqlite(state)?;
+    // v5 accepts only Unix-millisecond entity envelopes. Older desktop
+    // releases persisted some envelope timestamps in seconds; repair that
+    // metadata before pending rows are selected for the first v5 push.
+    state.with_db_write("sync_normalize_v5_timestamps", |db| {
+        db.normalize_protocol_v5_entity_timestamps().map(|_| ())
+    })?;
     // v5 is intentionally incompatible with the retired 1–10 jump-back
     // setting. Normalize the local entity before pending rows are selected;
     // otherwise an unopened legacy reader setting could be uploaded verbatim.

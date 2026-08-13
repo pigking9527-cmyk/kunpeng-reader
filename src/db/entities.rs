@@ -14,6 +14,11 @@ use std::time::Instant;
 
 const ALL_SYNC_ENTITY_KINDS: &str = "'reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_history_entry_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1'";
 const PENDING_SYNC_ENTITY_KINDS: &str = "'reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_config_v1','translation_config_v1','ai_reader_history_entry_v2','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1'";
+// Protocol v5 uses Unix milliseconds. Older desktop releases wrote these
+// envelope fields in seconds; the bounded range keeps the repair from
+// reinterpreting arbitrary or already-canonical values.
+const MIN_PROTOCOL_EPOCH_SECONDS: i64 = 946_684_800;
+const MAX_PROTOCOL_EPOCH_SECONDS: i64 = 4_102_444_800;
 
 /// A JSON-envelope sync entity. Unknown JSON fields stay opaque so clients
 /// cannot accidentally discard fields introduced by newer protocol versions.
@@ -60,6 +65,27 @@ fn sync_entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncEntity>
 }
 
 impl AppDb {
+    /// Repairs legacy second-based sync-envelope timestamps before a v5 push.
+    ///
+    /// The payload is intentionally untouched. Marking repaired rows dirty
+    /// makes the upgraded envelope eligible for a fresh acknowledgement.
+    pub fn normalize_protocol_v5_entity_timestamps(&mut self) -> Result<usize, String> {
+        let started = Instant::now();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE entities SET \
+                    updated_at=CASE WHEN updated_at BETWEEN ?1 AND ?2 THEN updated_at * 1000 ELSE updated_at END, \
+                    deleted_at=CASE WHEN deleted_at BETWEEN ?1 AND ?2 THEN deleted_at * 1000 ELSE deleted_at END, \
+                    dirty=1 \
+                 WHERE updated_at BETWEEN ?1 AND ?2 OR deleted_at BETWEEN ?1 AND ?2",
+                params![MIN_PROTOCOL_EPOCH_SECONDS, MAX_PROTOCOL_EPOCH_SECONDS],
+            )
+            .map_err(|error| error.to_string())?;
+        log_db_operation("normalize_protocol_v5_timestamps", started, changed);
+        Ok(changed)
+    }
+
     pub(super) fn existing_sync_meta(
         conn: &Connection,
         kind: &str,
@@ -399,6 +425,64 @@ impl AppDb {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn protocol_v5_timestamp_repair_converts_only_legacy_seconds() {
+        let mut database = AppDb::open_in_memory_for_tests();
+        database
+            .upsert_json_batch(&[
+                (
+                    "vocab".to_string(),
+                    "seconds".to_string(),
+                    json!({"word": "old"}),
+                ),
+                (
+                    "vocab".to_string(),
+                    "millis".to_string(),
+                    json!({"word": "new"}),
+                ),
+            ])
+            .unwrap();
+        database
+            .conn
+            .execute(
+                "UPDATE entities SET updated_at=?1, deleted_at=?2, dirty=0 WHERE kind='vocab' AND id='seconds'",
+                params![1_783_690_277_i64, 1_783_690_278_i64],
+            )
+            .unwrap();
+        let canonical_updated_at: i64 = database
+            .conn
+            .query_row(
+                "SELECT updated_at FROM entities WHERE kind='vocab' AND id='millis'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            database.normalize_protocol_v5_entity_timestamps().unwrap(),
+            1
+        );
+
+        let repaired: (i64, i64, i64) = database
+            .conn
+            .query_row(
+                "SELECT updated_at, deleted_at, dirty FROM entities WHERE kind='vocab' AND id='seconds'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(repaired, (1_783_690_277_000, 1_783_690_278_000, 1));
+        let untouched_updated_at: i64 = database
+            .conn
+            .query_row(
+                "SELECT updated_at FROM entities WHERE kind='vocab' AND id='millis'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(untouched_updated_at, canonical_updated_at);
+    }
 
     #[test]
     fn entity_json_reads_record_fixed_sql_timing_labels() {
