@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod import;
 
@@ -924,10 +924,11 @@ pub fn move_priority(id: String, dir: i32) -> Result<Vec<ExternalDictMeta>, Stri
     move_priority_unlocked(id, dir)
 }
 
-fn lookup_unlocked(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
-    let Ok(conn) = open_db() else {
-        return Vec::new();
-    };
+fn lookup_with_open_connection(conn: &Connection, candidates: &[String]) -> Vec<ExternalDictHit> {
+    // Start after opening the database: this records only the SQL prepare,
+    // query and result-collection path, under a fixed label with no lookup
+    // text, dictionary path or dictionary name in diagnostics.
+    let started = Instant::now();
     let mut out = Vec::new();
     let mut stmt = match conn.prepare(
         "SELECT d.id,d.name,e.word,e.lang,e.phonetic,e.def,e.def_en
@@ -937,7 +938,14 @@ fn lookup_unlocked(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
          LIMIT 12",
     ) {
         Ok(s) => s,
-        Err(_) => return out,
+        Err(_) => {
+            crate::diagnostics::record_db_sql_operation(
+                "external_dict_lookup",
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                0,
+            );
+            return out;
+        }
     };
     for c in candidates {
         let norm = normalize_word(c, if import::has_cjk(c) { "zh" } else { "en" });
@@ -967,7 +975,19 @@ fn lookup_unlocked(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
             break;
         }
     }
+    crate::diagnostics::record_db_sql_operation(
+        "external_dict_lookup",
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        out.len() as u64,
+    );
     out
+}
+
+fn lookup_unlocked(_term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
+    let Ok(conn) = open_db() else {
+        return Vec::new();
+    };
+    lookup_with_open_connection(&conn, candidates)
 }
 
 pub fn lookup(term: &str, candidates: &[String]) -> Vec<ExternalDictHit> {
@@ -980,6 +1000,70 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    fn lookup_test_database() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE dictionaries (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                lang TEXT NOT NULL,
+                format TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                priority INTEGER NOT NULL,
+                entry_count INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                imported_at INTEGER NOT NULL
+            );
+            CREATE TABLE entries (
+                dict_id TEXT NOT NULL,
+                word TEXT NOT NULL,
+                word_norm TEXT NOT NULL,
+                lang TEXT NOT NULL,
+                phonetic TEXT NOT NULL,
+                def TEXT NOT NULL,
+                def_en TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dictionaries VALUES ('dict', 'Dictionary', 'en', 'TSV', '/private/dict.tsv', 1, 1, 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entries VALUES ('dict', 'word', 'word', 'en', '', 'definition', '')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn sql_operation_count() -> u64 {
+        serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap()
+    }
+
+    #[test]
+    fn lookup_records_a_sql_measurement_for_hits_and_empty_results() {
+        let conn = lookup_test_database();
+        let before = sql_operation_count();
+
+        assert_eq!(
+            lookup_with_open_connection(&conn, &["word".to_string()]).len(),
+            1
+        );
+        let after_hit = sql_operation_count();
+        assert!(after_hit >= before.saturating_add(1));
+
+        assert!(lookup_with_open_connection(&conn, &["missing".to_string()]).is_empty());
+        assert!(sql_operation_count() >= after_hit.saturating_add(1));
+    }
 
     #[test]
     fn maintenance_lock_excludes_normal_dictionary_access() {
