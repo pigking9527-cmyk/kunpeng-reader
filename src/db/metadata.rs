@@ -98,12 +98,14 @@ impl AppDb {
     }
 
     pub fn set_metadata(&self, key: &str, value: &str) -> Result<(), String> {
+        let started = Instant::now();
         self.conn
             .execute(
                 "INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 params![key, value],
             )
             .map_err(|error| error.to_string())?;
+        log_db_operation("metadata_set", started, 1);
         Ok(())
     }
 
@@ -111,6 +113,7 @@ impl AppDb {
     /// this so a crash cannot combine a new token with the previous server or
     /// account id.
     pub fn set_metadata_batch(&mut self, entries: &[(&str, &str)]) -> Result<(), String> {
+        let started = Instant::now();
         let transaction = self.conn.transaction().map_err(|error| error.to_string())?;
         {
             let mut statement = transaction
@@ -125,7 +128,9 @@ impl AppDb {
                     .map_err(|error| error.to_string())?;
             }
         }
-        transaction.commit().map_err(|error| error.to_string())
+        transaction.commit().map_err(|error| error.to_string())?;
+        log_db_operation("metadata_set_batch", started, entries.len());
+        Ok(())
     }
 
     /// Read progress for one normalized server/account pair. Before the one-time
@@ -273,6 +278,26 @@ impl AppDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_writes_record_fixed_sql_operation_labels() {
+        let mut database = AppDb::open_in_memory_for_tests();
+        let before = serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap();
+        database.set_metadata("one", "first").unwrap();
+        database
+            .set_metadata_batch(&[("two", "second"), ("three", "third")])
+            .unwrap();
+        assert_eq!(database.metadata("one").as_deref(), Some("first"));
+        assert_eq!(database.metadata("two").as_deref(), Some("second"));
+        let after = serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap();
+        assert!(after >= before.saturating_add(4));
+    }
 
     #[test]
     fn metadata_get_records_a_fixed_sql_operation_label() {
