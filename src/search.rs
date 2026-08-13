@@ -1,139 +1,23 @@
-use crate::search_core::{ascii_lower_bytes, snippet_at_with_context, BookSearchBloom};
+use crate::search_core::{ascii_lower_bytes, snippet_at_with_context};
 use crate::search_index::{self, BookIndex, SourceFingerprint, INDEX_VERSION};
 use crate::{
-    atomic_file,
     background_tasks::{BackgroundTaskKind, TaskControlSignal},
     book, emit_startup_perf, html_sanitize, interactive_search_workers,
     reader_protocol::strip_tags,
     set_thread_background, url_open, window_commands, with_thread_background_priority, AppState,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock, Weak,
+    Arc,
 };
 use tauri::{Emitter, Manager};
 
+mod filter;
+
 type EpubDoc = epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>;
-
-const FILTER_MAGIC: &[u8; 8] = b"KPBLOOM2";
-const FILTER_HEADER_LEN: usize = 8 + 4 + 8 + 32 + 4 + 32;
-
-struct CachedBookFilter {
-    source: SourceFingerprint,
-    bloom: Arc<BookSearchBloom>,
-    bytes: usize,
-    _permit: crate::memory_budget::MemoryPermit,
-}
-
-struct BookFilterCache {
-    entries: HashMap<u64, CachedBookFilter>,
-    order: VecDeque<u64>,
-    retired: Vec<(Weak<BookSearchBloom>, crate::memory_budget::MemoryPermit)>,
-    bytes: usize,
-    budget: usize,
-}
-
-impl Default for BookFilterCache {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            retired: Vec::new(),
-            bytes: 0,
-            budget: crate::memory_budget::plan().search_filter_bytes as usize,
-        }
-    }
-}
-
-impl BookFilterCache {
-    fn sweep_retired(&mut self) {
-        self.retired.retain(|(value, permit)| {
-            let _ = permit.bytes();
-            value.strong_count() > 0
-        });
-    }
-
-    fn get(&mut self, id: u64, source: &SourceFingerprint) -> Option<Arc<BookSearchBloom>> {
-        self.sweep_retired();
-        let value = match self.entries.get(&id) {
-            Some(entry) if entry.source == *source => Some(entry.bloom.clone()),
-            Some(_) => {
-                self.remove(id);
-                None
-            }
-            None => None,
-        };
-        if value.is_some() {
-            self.touch(id);
-        }
-        value
-    }
-
-    fn touch(&mut self, id: u64) {
-        self.order.retain(|existing| *existing != id);
-        self.order.push_back(id);
-    }
-
-    fn remove(&mut self, id: u64) {
-        if let Some(entry) = self.entries.remove(&id) {
-            self.bytes = self.bytes.saturating_sub(entry.bytes);
-            if Arc::strong_count(&entry.bloom) > 1 {
-                self.retired
-                    .push((Arc::downgrade(&entry.bloom), entry._permit));
-            }
-        }
-        self.order.retain(|existing| *existing != id);
-        self.sweep_retired();
-    }
-
-    fn insert(&mut self, id: u64, source: SourceFingerprint, bloom: Arc<BookSearchBloom>) {
-        self.sweep_retired();
-        self.remove(id);
-        let bytes = bloom.bits().len();
-        if bytes > self.budget {
-            return;
-        }
-        while self.bytes.saturating_add(bytes) > self.budget {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            self.remove(oldest);
-        }
-        let Ok(permit) = crate::memory_budget::governor().try_acquire(
-            crate::memory_budget::MemoryClass::SearchFilter,
-            crate::memory_budget::MemoryUsageKind::Resident,
-            bytes as u64,
-        ) else {
-            return;
-        };
-        self.entries.insert(
-            id,
-            CachedBookFilter {
-                source,
-                bloom,
-                bytes,
-                _permit: permit,
-            },
-        );
-        self.bytes += bytes;
-        self.touch(id);
-    }
-
-    fn clear(&mut self) {
-        for id in self.entries.keys().copied().collect::<Vec<_>>() {
-            self.remove(id);
-        }
-        self.order.clear();
-        self.bytes = 0;
-        self.sweep_retired();
-    }
-}
-
-static BOOK_FILTER_CACHE: OnceLock<Mutex<BookFilterCache>> = OnceLock::new();
 // 交互式检索发现缺失索引时会请求后台补建。全局闸门避免多次搜索、导入和启动维护
 // 同时解压同一批 EPUB，进而把 WebView 线程饿死。
 static INDEX_BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -156,80 +40,8 @@ struct SearchQueryPayload {
     ids: Vec<String>,
 }
 
-fn filter_cache() -> &'static Mutex<BookFilterCache> {
-    BOOK_FILTER_CACHE.get_or_init(|| Mutex::new(BookFilterCache::default()))
-}
-
 pub(crate) fn clear_filter_memory_cache() {
-    if let Ok(mut cache) = filter_cache().try_lock() {
-        cache.clear();
-    }
-}
-
-fn encode_book_filter(source: &SourceFingerprint, bloom: &BookSearchBloom) -> Vec<u8> {
-    let bits = bloom.bits();
-    let bits_sha256: [u8; 32] = Sha256::digest(bits).into();
-    let mut bytes = Vec::with_capacity(FILTER_HEADER_LEN + bits.len());
-    bytes.extend_from_slice(FILTER_MAGIC);
-    bytes.extend_from_slice(&source.v.to_le_bytes());
-    bytes.extend_from_slice(&source.bytes.to_le_bytes());
-    bytes.extend_from_slice(&source.sha256);
-    bytes.extend_from_slice(&(bits.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(&bits_sha256);
-    bytes.extend_from_slice(bits);
-    bytes
-}
-
-fn decode_book_filter(
-    bytes: &[u8],
-    expected_source: &SourceFingerprint,
-) -> Option<BookSearchBloom> {
-    if bytes.len() < FILTER_HEADER_LEN || &bytes[..8] != FILTER_MAGIC {
-        return None;
-    }
-    let stored_source = SourceFingerprint {
-        v: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
-        bytes: u64::from_le_bytes(bytes[12..20].try_into().ok()?),
-        sha256: bytes[20..52].try_into().ok()?,
-    };
-    let length = u32::from_le_bytes(bytes[52..56].try_into().ok()?) as usize;
-    let expected_bits_sha256: [u8; 32] = bytes[56..88].try_into().ok()?;
-    if stored_source != *expected_source || bytes.len() != FILTER_HEADER_LEN.checked_add(length)? {
-        return None;
-    }
-    let bits = &bytes[FILTER_HEADER_LEN..];
-    let actual_bits_sha256: [u8; 32] = Sha256::digest(bits).into();
-    if actual_bits_sha256 != expected_bits_sha256 {
-        return None;
-    }
-    BookSearchBloom::from_bits(bits.to_vec())
-}
-
-fn load_book_filter(id: u64, source: &SourceFingerprint) -> Option<Arc<BookSearchBloom>> {
-    if let Ok(mut cache) = filter_cache().lock() {
-        if let Some(bloom) = cache.get(id, source) {
-            return Some(bloom);
-        }
-    }
-    let bytes = std::fs::read(search_index::filter_path(id)?).ok()?;
-    let bloom = Arc::new(decode_book_filter(&bytes, source)?);
-    if let Ok(mut cache) = filter_cache().lock() {
-        cache.insert(id, source.clone(), bloom.clone());
-    }
-    Some(bloom)
-}
-
-fn save_book_filter(
-    id: u64,
-    source: &SourceFingerprint,
-    chapters: &[String],
-) -> Result<(), String> {
-    let bloom = Arc::new(BookSearchBloom::from_chapters(chapters));
-    let path = search_index::filter_path(id).ok_or("无法确定检索预筛选索引目录")?;
-    atomic_file::write(&path, &encode_book_filter(source, &bloom))?;
-    let mut cache = filter_cache().lock().map_err(|e| e.to_string())?;
-    cache.insert(id, source.clone(), bloom);
-    Ok(())
+    filter::clear_memory_cache();
 }
 
 /// Returns `None` when the book has no ready Bloom filter. Interactive search
@@ -241,7 +53,7 @@ fn book_might_contain(book: &book::Book, query: &str) -> Option<bool> {
     else {
         return None;
     };
-    load_book_filter(book.id, &source).map(|bloom| bloom.might_contain(query))
+    filter::load(book.id, &source).map(|bloom| bloom.might_contain(query))
 }
 
 /// 为短中文专名/固定短语补充词面候选。这里只读取常驻 Bloom 过滤器，不解压
@@ -277,7 +89,7 @@ pub(crate) fn semantic_lexical_candidates(
                 &book.content_id,
             )
             .ok()
-            .and_then(|source| load_book_filter(book.id, &source))
+            .and_then(|source| filter::load(book.id, &source))
             .map(|bloom| bloom.might_contain(query))
             .unwrap_or(false);
             (metadata_score, bloom_match, book.clone())
@@ -329,14 +141,14 @@ fn search_assets_current(book: &book::Book, source: &SourceFingerprint) -> bool 
     search_index::load_index(book.id)
         .map(|(index, _legacy)| index.is_current(source))
         .unwrap_or(false)
-        && load_book_filter(book.id, source).is_some()
+        && filter::load(book.id, source).is_some()
 }
 
 fn ensure_search_assets(book: &book::Book, source: &SourceFingerprint) -> bool {
     let Some(index) = ensure_book_index_with_source(book, source) else {
         return false;
     };
-    save_book_filter(book.id, source, &index.chapters).is_ok()
+    filter::save(book.id, source, &index.chapters).is_ok()
 }
 
 fn source_content_id(source: &SourceFingerprint) -> String {
@@ -453,12 +265,9 @@ fn attach_memory_health(
         health.memory_bytes = cache.bytes() as u64;
         health.memory_entries = cache.entries() as u32;
     }
-    if let Ok(cache) = filter_cache().lock() {
-        health.memory_bytes = health.memory_bytes.saturating_add(cache.bytes as u64);
-        health.memory_entries = health
-            .memory_entries
-            .saturating_add(cache.entries.len() as u32);
-    }
+    let (filter_bytes, filter_entries) = filter::memory_usage();
+    health.memory_bytes = health.memory_bytes.saturating_add(filter_bytes);
+    health.memory_entries = health.memory_entries.saturating_add(filter_entries);
     health
 }
 
@@ -1110,14 +919,6 @@ fn url_encode(s: &str) -> String {
 mod tests {
     use super::*;
 
-    fn test_source(bytes: &[u8]) -> SourceFingerprint {
-        SourceFingerprint {
-            v: 1,
-            bytes: bytes.len() as u64,
-            sha256: Sha256::digest(bytes).into(),
-        }
-    }
-
     #[test]
     fn url_encode_escapes_unicode_and_spaces() {
         assert_eq!(url_encode("南明 a"), "%E5%8D%97%E6%98%8E%20a");
@@ -1129,37 +930,5 @@ mod tests {
             file_mtime(Path::new("__definitely_missing_kunpeng_reader__")),
             0
         );
-    }
-    #[test]
-    fn bloom_file_roundtrip_checks_source_and_payload_integrity() {
-        let bloom = BookSearchBloom::from_chapters(&["中国文史哲 Rust".to_string()]);
-        let source = test_source(b"book-A");
-        let bytes = encode_book_filter(&source, &bloom);
-        let decoded = decode_book_filter(&bytes, &source).unwrap();
-        assert!(decoded.might_contain("文史哲"));
-        assert!(decoded.might_contain("RUST"));
-        assert!(decode_book_filter(&bytes, &test_source(b"book-B")).is_none());
-        assert!(decode_book_filter(&bytes[..bytes.len() - 1], &source).is_none());
-
-        let mut flipped = bytes;
-        flipped[FILTER_HEADER_LEN] ^= 0x80;
-        assert!(decode_book_filter(&flipped, &source).is_none());
-    }
-
-    #[test]
-    fn filter_eviction_keeps_permit_while_a_search_borrows_the_bloom() {
-        let mut cache = BookFilterCache::default();
-        let source = test_source(b"book");
-        cache.insert(
-            7,
-            source.clone(),
-            Arc::new(BookSearchBloom::from_chapters(&["中国文史哲".to_string()])),
-        );
-        let borrowed = cache.get(7, &source).unwrap();
-        cache.clear();
-        assert_eq!(cache.retired.len(), 1);
-        drop(borrowed);
-        cache.sweep_retired();
-        assert!(cache.retired.is_empty());
     }
 }
