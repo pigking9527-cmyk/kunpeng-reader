@@ -1338,15 +1338,14 @@ fn sync_now_inner_with_limits_impl(
         let has_more = pull.has_more;
         let pulled_entities = pull.into_entities();
         let pulled_entity_count = pulled_entities.len();
-        let enabled_entities = {
-            let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-            let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-            pulled_entities
-                .iter()
-                .filter(|entity| crate::private_sync::is_entity_enabled(db, &entity.kind))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
+        let enabled_entities: Vec<db::SyncEntity> =
+            state.with_db_read("sync_pull_enabled_entities", |db| {
+                Ok(pulled_entities
+                    .iter()
+                    .filter(|entity| crate::private_sync::is_entity_enabled(db, &entity.kind))
+                    .cloned()
+                    .collect::<Vec<_>>())
+            })?;
         data_migration::merge_pulled_book_states(state, &enabled_entities)?;
         pulled += state.with_db_write("sync_pull_commit", |db| {
             db.import_sync_page_with_remote_app_settings_priority(
@@ -1397,14 +1396,14 @@ fn sync_now_inner_with_limits_impl(
     data_migration::apply_sqlite_to_runtime(state)?;
     // Persist the field-wise book merge; unchanged JSON does not become dirty.
     data_migration::migrate_json_to_sqlite(state)?;
-    let entities = {
-        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        db.pending_sync_entities(&scope)?
-            .into_iter()
-            .filter(|entity| crate::private_sync::is_entity_enabled(db, &entity.kind))
-            .collect::<Vec<_>>()
-    };
+    let entities: Vec<db::SyncEntity> =
+        state.with_db_read("sync_pending_enabled_entities", |db| {
+            Ok(db
+                .pending_sync_entities(&scope)?
+                .into_iter()
+                .filter(|entity| crate::private_sync::is_entity_enabled(db, &entity.kind))
+                .collect::<Vec<_>>())
+        })?;
     // Ensure every referenced image has reached the authenticated binary store
     // before the tiny palette entity can make that reference visible remotely.
     crate::reader_backgrounds::sync_upload_referenced_assets(
@@ -1460,14 +1459,14 @@ fn sync_now_inner_with_limits_impl(
                 })?;
             ensure_data_generation(settings.data_generation, inventory.data_generation)?;
             push_server_time = push_server_time.max(inventory.server_time);
-            let local = {
-                let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-                let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-                db.all_sync_entities()?
-                    .into_iter()
-                    .filter(|entity| enabled_kinds.contains(&entity.kind))
-                    .collect::<Vec<_>>()
-            };
+            let local: Vec<db::SyncEntity> =
+                state.with_db_read("sync_inventory_local_entities", |db| {
+                    Ok(db
+                        .all_sync_entities()?
+                        .into_iter()
+                        .filter(|entity| enabled_kinds.contains(&entity.kind))
+                        .collect::<Vec<_>>())
+                })?;
             if inventory_matches(&local, &inventory) {
                 inventory_verified = true;
                 crate::log(&format!(
@@ -1537,11 +1536,8 @@ fn sync_now_inner_with_limits_impl(
             // The server response may have installed authoritative rows above;
             // reload before selecting a requested repair so we never resend a
             // superseded local version from the pre-reconcile inventory.
-            let repair_source = {
-                let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-                let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-                db.all_sync_entities()?
-            };
+            let repair_source =
+                state.with_db_read("sync_reconcile_repair_source", |db| db.all_sync_entities())?;
             let repair_entities = reconcile_upload_entities(&repair_source, &reconcile)?;
             if !repair_entities.is_empty() {
                 let repair = push_sync_entities(
