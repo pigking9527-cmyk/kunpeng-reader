@@ -61,12 +61,22 @@ server/reader-sync-api-rs/scripts/run-postgres-e2e.sh --confirm-destructive-post
 ```bash
 server/reader-sync-api-rs/scripts/run-postgres-load-rehearsal.sh \
   --confirm-destructive-postgres-load-rehearsal
+server/reader-sync-api-rs/scripts/test-postgres-backup-restore-rehearsal.sh
 ```
 
 可在 CI 或本机执行仅覆盖拒绝路径的安全自检：
 
 ```bash
 server/reader-sync-api-rs/scripts/test-rehearsal-tools.sh
+```
+
+获批的隔离 PostgreSQL 环境还可执行逻辑备份/恢复演练。脚本只接受两个不同的
+`reader_sync_rust_test_*` 数据库和仓库外私有临时目录；它从不回显连接串，完成后删除
+临时 dump，并仅比较协议版本与关键表的行数汇总：
+
+```bash
+server/reader-sync-api-rs/scripts/run-postgres-backup-restore-rehearsal.sh \
+  --confirm-destructive-postgres-backup-restore-rehearsal
 ```
 
 在任何上传到受保护部署环境的操作前，先以**已提交且服务目录干净**的 checkout 产出 Linux

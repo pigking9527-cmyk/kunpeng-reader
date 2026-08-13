@@ -62,16 +62,26 @@ server/reader-sync-api-rs/scripts/run-postgres-load-rehearsal.sh \
    正常运行时重复执行。
 2. 用隔离账户完成：注册邮件、验证、登录、多设备 push/pull、幂等重放、资产
    分块/Range、密码修改和找回、恢复时间点、云端数据清除，以及旧 token/世代被拒绝。
-3. 在写入测试数据后，按 PostgreSQL 运维方案创建逻辑备份和物理基备份；校验
-   备份可读、在另一空目标库恢复、迁移版本和关键聚合与源库一致。记录仅可包含
-   操作标签、schema version、行数和校验结果，不能包含实体 JSON、账号或路径。
+3. 在写入测试数据后，先执行受保护的逻辑备份/恢复启动器。它要求源库、恢复目标库
+   都是**不同**的 `reader_sync_rust_test_*` 数据库，且恢复目标在执行前没有任何
+   `public` 表；它还要求仓库外私有临时目录，并在
+   `pg_dump`/`pg_restore` 后仅比较协议版本及关键表行数；连接串、账号、路径、实体 JSON
+   和 dump 内容不会输出。物理基备份仍须按获批的 PostgreSQL 运维方案另行演练：
+
+   ```sh
+   export KUNPENG_SYNC_BACKUP_SOURCE_DATABASE_URL='postgresql://…/reader_sync_rust_test_source'
+   export KUNPENG_SYNC_BACKUP_TARGET_DATABASE_URL='postgresql://…/reader_sync_rust_test_restore'
+   export KUNPENG_SYNC_BACKUP_REHEARSAL_DIR='/private/controlled-temp'
+   server/reader-sync-api-rs/scripts/run-postgres-backup-restore-rehearsal.sh \
+     --confirm-destructive-postgres-backup-restore-rehearsal
+   ```
 4. 通过真实反向代理/TLS 运行健康、认证、同步和恢复 smoke test；确认应用只在
    回环监听且 `/metrics` 不对公网暴露。
 5. 仅在上述证据、回滚入口和维护窗口已获批准后，才切换上游流量。若失败，停止
    切换并回到旧服务；不要把 v5 会话写入旧服务，也不要通过数据库复制伪造回滚。
 
-当前仓库没有可执行的 PostgreSQL 备份/恢复或 systemd/反代部署脚本；这是一项
-部署前缺口，必须在获批的私有运维环境中补齐并演练，不能用旧 Python/SQLite
+当前仓库提供受保护的逻辑备份/恢复演练启动器，但没有物理基备、systemd 或反代部署
+脚本；后者仍是部署前缺口，必须在获批的私有运维环境中完成，不能用旧 Python/SQLite
 脚本替代。
 
 仓库内还提供不连接数据库的启动器拒绝路径自检：

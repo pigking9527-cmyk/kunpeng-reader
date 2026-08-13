@@ -8,6 +8,7 @@ load_runner="$script_dir/run-postgres-load-rehearsal.sh"
 config_checker="$script_dir/check-deployment-config.sh"
 artifact_provenance_checker="$script_dir/test-artifact-provenance.sh"
 artifact_bundle_checker="$script_dir/test-artifact-bundle.sh"
+backup_restore_checker="$script_dir/test-postgres-backup-restore-rehearsal.sh"
 
 expect_rejection() {
   if "$@" >/dev/null 2>&1; then
@@ -29,4 +30,5 @@ env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_tes
 "$script_dir/check-migrations.sh"
 "$artifact_provenance_checker"
 "$artifact_bundle_checker"
+"$backup_restore_checker"
 printf '%s\n' 'PostgreSQL rehearsal tool refusal checks passed.'
