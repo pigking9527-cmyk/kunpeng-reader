@@ -616,6 +616,35 @@ async fn password_and_reset_requests_reject_unknown_or_snake_case_fields_before_
 }
 
 #[tokio::test]
+async fn registration_confirmation_accepts_the_desktop_minimum_password_length() {
+    let valid = json_request(
+        "POST",
+        "/v1/auth/register/confirm",
+        &serde_json::json!({
+            "username": "fixture-reader",
+            "email": "fixture@example.com",
+            "code": "000000",
+            "password": "12345678",
+            "installationId": "fixture-installation"
+        }),
+    );
+    assert_reaches_database_boundary(app(test_state()).oneshot(valid).await.unwrap()).await;
+
+    let invalid = json_request(
+        "POST",
+        "/v1/auth/register/confirm",
+        &serde_json::json!({
+            "username": "fixture-reader",
+            "email": "fixture@example.com",
+            "code": "000000",
+            "password": "1234567",
+            "installationId": "fixture-installation"
+        }),
+    );
+    assert_invalid_request(app(test_state()).oneshot(invalid).await.unwrap()).await;
+}
+
+#[tokio::test]
 async fn sync_runtime_uses_camel_case_request_fields_before_database_access() {
     let asset_id = "0".repeat(64);
     let asset_valid = json_request(

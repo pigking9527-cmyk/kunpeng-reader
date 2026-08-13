@@ -243,7 +243,7 @@ pub async fn confirm(
             .expose_secret()
             .bytes()
             .all(|byte| byte.is_ascii_digit())
-        || !(12..=1024).contains(&input.password.expose_secret().len())
+        || !(8..=1024).contains(&input.password.expose_secret().len())
         || input.installation_id.trim().is_empty()
         || input.installation_id.len() > 128
         || input.device_name.len() > 64
