@@ -83,10 +83,20 @@ server/reader-sync-api-rs/scripts/create-artifact-provenance.sh \
   --verify \
   --binary server/reader-sync-api-rs/target/release/reader-sync-api \
   --manifest /secure-local-output/reader-sync-api.provenance
+server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+  --binary server/reader-sync-api-rs/target/release/reader-sync-api \
+  --manifest /secure-local-output/reader-sync-api.provenance \
+  --output-dir /secure-local-output/reader-sync-api-candidate
+server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+  --verify \
+  --bundle-dir /secure-local-output/reader-sync-api-candidate
 server/reader-sync-api-rs/scripts/test-artifact-provenance.sh
+server/reader-sync-api-rs/scripts/test-artifact-bundle.sh
 ```
 
-该工具不上传文件、不会连接数据库或服务器，也不会替代 PostgreSQL/反代/TLS 演练。
+暂存包只包含经复验的候选二进制和 `provenance.txt`；它拒绝符号链接、额外文件及与
+清单不符的内容。上述工具均不上传文件、不会连接数据库或服务器，也不会替代
+PostgreSQL/反代/TLS 演练。
 
 生产切换之前必须额外完成契约验证、空库部署和回滚验证。
 

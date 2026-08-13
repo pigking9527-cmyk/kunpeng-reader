@@ -7,6 +7,7 @@ runner="$script_dir/run-postgres-e2e.sh"
 load_runner="$script_dir/run-postgres-load-rehearsal.sh"
 config_checker="$script_dir/check-deployment-config.sh"
 artifact_provenance_checker="$script_dir/test-artifact-provenance.sh"
+artifact_bundle_checker="$script_dir/test-artifact-bundle.sh"
 
 expect_rejection() {
   if "$@" >/dev/null 2>&1; then
@@ -27,4 +28,5 @@ expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/rea
 env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' "$config_checker" >/dev/null
 "$script_dir/check-migrations.sh"
 "$artifact_provenance_checker"
+"$artifact_bundle_checker"
 printf '%s\n' 'PostgreSQL rehearsal tool refusal checks passed.'
