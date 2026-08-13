@@ -2,6 +2,7 @@
 mod commands;
 mod context;
 mod history;
+mod library_profiles;
 mod profiles;
 mod provider;
 mod reading_evidence;
@@ -9,8 +10,7 @@ mod retrieval;
 
 use crate::{
     background_tasks::{
-        BackgroundTaskKind, BackgroundTaskSnapshot, BackgroundTaskState, TaskControlSignal,
-        TaskLogLevel,
+        BackgroundTaskKind, BackgroundTaskSnapshot, TaskControlSignal, TaskLogLevel,
     },
     search, secret_store, semantic,
     window_commands::reader_window_id,
@@ -30,6 +30,11 @@ use context::{
     library_context_for_source_ids, library_question_with_length, parse_deep_source_ids,
 };
 use history::{matching_local_book_id, restored_source_kind, LocalHistoryBookRef};
+use library_profiles::{
+    classification_task_blocks_start, library_classification_checkpoint,
+    parse_library_classification_decision, profile_is_settled, profile_missing_dimensions,
+    LibraryProfile, LIBRARY_PROFILE_DIMENSIONS,
+};
 use profiles::{
     active_profile, canonicalize_deepseek_config, default_profile_name, has_profile,
     known_provider, normalize_base_url, normalize_profile_assignments, profile_for_purpose,
@@ -110,14 +115,9 @@ const LIBRARY_ANSWER_LENGTH_KEY: &str = "library_ai_answer_length:v1";
 const LIBRARY_RECOMMENDATION_CANDIDATE_LIMIT_KEY: &str =
     "library_ai_recommendation_candidate_limit:v1";
 const LIBRARY_RECOMMENDATION_RESULT_LIMIT_KEY: &str = "library_ai_recommendation_result_limit:v1";
-const MAX_LIBRARY_PROFILE_TAGS: usize = 12;
-const MAX_LIBRARY_PROFILE_TAG_CHARS: usize = 32;
 const MAX_LIBRARY_WEB_PAGE_CHARS: usize = 2_400;
 const LIBRARY_WEB_LOOKUP_EVERY_BOOKS: usize = 6;
 const LIBRARY_WEB_LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_millis(850);
-const LIBRARY_PROFILE_DIMENSIONS: [&str; 8] = [
-    "类别", "时代", "体裁", "篇幅", "主题", "地域", "语言", "用途",
-];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -341,26 +341,6 @@ pub(crate) struct LibraryBooklistRecommendation {
     items: Vec<LibraryBooklistRecommendationItem>,
 }
 
-/// Local classification scheduling/provenance.  The canonical labels are also
-/// written to `Book.model_tags`, which sync as a separate entity; they never
-/// enter the reader's manual `Book.tags` organization.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct LibraryProfile {
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    web_attempted: bool,
-    #[serde(default)]
-    web_enriched: bool,
-}
-
-#[derive(Debug, Default)]
-struct LibraryClassificationDecision {
-    profile: LibraryProfile,
-    needs_web_search: bool,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LibraryProfileCoverageStatus {
@@ -382,109 +362,6 @@ fn trim_to_chars(value: &str, limit: usize) -> String {
 
 fn library_profile_key(book_id: &str) -> String {
     format!("{LIBRARY_PROFILE_PREFIX}{book_id}")
-}
-
-fn clean_profile_tag(value: &str) -> Option<String> {
-    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let value = trim_to_chars(value.trim(), MAX_LIBRARY_PROFILE_TAG_CHARS);
-    // A model label must carry a category and a value, for example
-    // “时代：明清” or “体裁：章回体”. This keeps the tag cloud useful and
-    // prevents free-form explanations from becoming shelf tags later.
-    let (category, detail) = value.split_once(['：', ':'])?;
-    let category = category.trim();
-    let detail = detail.trim();
-    (!category.is_empty() && !detail.is_empty()).then(|| format!("{category}：{detail}"))
-}
-
-fn profile_missing_dimensions(profile: &LibraryProfile) -> Vec<String> {
-    let present = profile
-        .tags
-        .iter()
-        .filter_map(|tag| tag.split_once('：').or_else(|| tag.split_once(':')))
-        .map(|(category, _)| category.trim())
-        .collect::<HashSet<_>>();
-    LIBRARY_PROFILE_DIMENSIONS
-        .iter()
-        .filter(|dimension| !present.contains(**dimension))
-        .map(|dimension| (*dimension).to_string())
-        .collect()
-}
-
-fn profile_has_all_dimensions(profile: &LibraryProfile) -> bool {
-    profile_missing_dimensions(profile).is_empty()
-}
-
-/// A profile is only considered settled once its eight dimensions are present
-/// and any requested public-catalogue lookup has reached a durable outcome.
-/// This exact predicate is also used to reconstruct a classification run after
-/// interruption, so saved books are never sent through the local model again.
-fn profile_is_settled(profile: &LibraryProfile) -> bool {
-    profile_has_all_dimensions(profile) && profile.web_attempted
-}
-
-fn library_classification_checkpoint(book_id: &str, phase: &str) -> String {
-    serde_json::json!({
-        "schemaVersion": 1,
-        "lastBookId": book_id,
-        "phase": phase,
-    })
-    .to_string()
-}
-
-/// A paused classification is deliberately *not* considered active here: the
-/// next click must call `enqueue_or_resume` and launch its durable continuation.
-fn classification_task_blocks_start(state: BackgroundTaskState) -> bool {
-    matches!(
-        state,
-        BackgroundTaskState::Queued | BackgroundTaskState::Running | BackgroundTaskState::Pausing
-    )
-}
-
-fn parse_library_classification_decision(
-    response: &str,
-) -> Result<LibraryClassificationDecision, String> {
-    let response = response.trim().trim_matches('`').trim();
-    let json = serde_json::from_str::<serde_json::Value>(response)
-        .or_else(|_| {
-            let start = response.find('{').ok_or_else(|| {
-                serde_json::Error::io(std::io::Error::other("missing JSON object"))
-            })?;
-            let end = response.rfind('}').ok_or_else(|| {
-                serde_json::Error::io(std::io::Error::other("missing JSON object"))
-            })?;
-            serde_json::from_str(&response[start..=end])
-        })
-        .map_err(|_| "分类模型没有返回可用 JSON".to_string())?;
-    let tags = json
-        .get("tags")
-        .or_else(|| json.get("labels"))
-        .and_then(serde_json::Value::as_array)
-        .ok_or("分类模型没有返回 tags 数组")?
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .filter_map(clean_profile_tag)
-        .collect::<Vec<_>>();
-    let mut seen = HashSet::new();
-    let tags = tags
-        .into_iter()
-        .filter(|tag| seen.insert(tag.to_lowercase()))
-        .take(MAX_LIBRARY_PROFILE_TAGS)
-        .collect::<Vec<_>>();
-    if tags.is_empty() {
-        return Err("分类模型没有返回规范的分类标签".into());
-    }
-    Ok(LibraryClassificationDecision {
-        profile: LibraryProfile {
-            tags,
-            web_attempted: false,
-            web_enriched: false,
-        },
-        needs_web_search: json
-            .get("needsWebSearch")
-            .or_else(|| json.get("needs_web_search"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-    })
 }
 
 fn load_library_profiles(state: &AppState) -> Result<HashMap<String, LibraryProfile>, String> {
@@ -3932,60 +3809,11 @@ mod tests {
     }
 
     #[test]
-    fn local_profile_parses_only_compact_category_labels() {
-        let decision = parse_library_classification_decision(
-            r#"```json
-            {"tags":["类别: 小说", "时代：明清", "这不是分类"],"needsWebSearch":true}
-            ```"#,
-        )
-        .unwrap();
-        assert_eq!(decision.profile.tags, vec!["类别：小说", "时代：明清"]);
-        assert!(decision.needs_web_search);
-    }
-
-    #[test]
     fn catalog_query_encoding_preserves_safe_bytes() {
         assert_eq!(
             percent_encode_query("三国志 A-1"),
             "%E4%B8%89%E5%9B%BD%E5%BF%97%20A-1"
         );
-    }
-
-    #[test]
-    fn incomplete_profiles_are_eligible_for_reclassification() {
-        let incomplete = LibraryProfile {
-            tags: vec!["类别：小说".into(), "时代：明清".into()],
-            web_attempted: true,
-            web_enriched: false,
-        };
-        assert_eq!(
-            profile_missing_dimensions(&incomplete),
-            vec!["体裁", "篇幅", "主题", "地域", "语言", "用途"]
-        );
-        assert!(!profile_has_all_dimensions(&incomplete));
-
-        let complete = LibraryProfile {
-            tags: LIBRARY_PROFILE_DIMENSIONS
-                .iter()
-                .map(|dimension| format!("{dimension}：待确认"))
-                .collect(),
-            web_attempted: true,
-            web_enriched: false,
-        };
-        assert!(profile_has_all_dimensions(&complete));
-    }
-
-    #[test]
-    fn paused_library_classification_can_be_started_as_a_resume() {
-        assert!(!classification_task_blocks_start(
-            BackgroundTaskState::Paused
-        ));
-        assert!(classification_task_blocks_start(
-            BackgroundTaskState::Queued
-        ));
-        assert!(classification_task_blocks_start(
-            BackgroundTaskState::Running
-        ));
     }
 
     #[test]
