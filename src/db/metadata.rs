@@ -62,7 +62,9 @@ impl AppDb {
     }
 
     pub fn metadata(&self, key: &str) -> Option<String> {
-        self.conn
+        let started = Instant::now();
+        let value = self
+            .conn
             .query_row(
                 "SELECT value FROM metadata WHERE key=?",
                 params![key],
@@ -70,7 +72,9 @@ impl AppDb {
             )
             .optional()
             .ok()
-            .flatten()
+            .flatten();
+        log_db_operation("metadata_get", started, usize::from(value.is_some()));
+        value
     }
 
     /// Enumerate application-owned metadata without exposing the SQLite
@@ -269,6 +273,29 @@ impl AppDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_get_records_a_fixed_sql_operation_label() {
+        let database = AppDb::open_in_memory_for_tests();
+        database
+            .set_metadata("sync_url", "https://example.invalid")
+            .unwrap();
+
+        let before = serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            database.metadata("sync_url").as_deref(),
+            Some("https://example.invalid")
+        );
+        assert_eq!(database.metadata("missing"), None);
+        let after = serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap();
+        assert!(after >= before.saturating_add(2));
+    }
 
     #[test]
     fn metadata_prefix_query_records_a_fixed_sql_operation_label() {
