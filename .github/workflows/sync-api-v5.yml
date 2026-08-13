@@ -54,21 +54,28 @@ jobs:
         working-directory: server/reader-sync-api-rs
         run: cargo build --release --locked
 
-      - name: Create and verify provenance manifest
+      - name: Create, stage, and verify provenance candidate bundle
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p target/sync-api-v5-release
+          mkdir -p target/sync-api-v5-staging
           cp server/reader-sync-api-rs/target/release/reader-sync-api \
-            target/sync-api-v5-release/reader-sync-api
-          chmod 0755 target/sync-api-v5-release/reader-sync-api
+            target/sync-api-v5-staging/reader-sync-api
+          chmod 0755 target/sync-api-v5-staging/reader-sync-api
           server/reader-sync-api-rs/scripts/create-artifact-provenance.sh \
-            --binary target/sync-api-v5-release/reader-sync-api \
-            --output target/sync-api-v5-release/provenance.txt
+            --binary target/sync-api-v5-staging/reader-sync-api \
+            --output target/sync-api-v5-staging/provenance.txt
           server/reader-sync-api-rs/scripts/create-artifact-provenance.sh \
             --verify \
-            --binary target/sync-api-v5-release/reader-sync-api \
-            --manifest target/sync-api-v5-release/provenance.txt
+            --binary target/sync-api-v5-staging/reader-sync-api \
+            --manifest target/sync-api-v5-staging/provenance.txt
+          server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+            --binary target/sync-api-v5-staging/reader-sync-api \
+            --manifest target/sync-api-v5-staging/provenance.txt \
+            --output-dir target/sync-api-v5-release
+          server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+            --verify \
+            --bundle-dir target/sync-api-v5-release
 
       - name: Stage and verify the restricted upload bundle
         shell: bash
