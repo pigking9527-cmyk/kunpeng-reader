@@ -209,13 +209,16 @@ impl AppDb {
 
     #[allow(dead_code)]
     pub fn soft_delete(&self, kind: &str, id: &str) -> Result<(), String> {
+        let started = Instant::now();
         let now = now_millis();
-        self.conn
+        let changed = self
+            .conn
             .execute(
                 "UPDATE entities SET deleted_at=?, updated_at=?, device_id=?, sync_version=sync_version+1, dirty=1 WHERE kind=? AND id=?",
                 params![now, now, self.device_id, kind, id],
             )
             .map_err(|e| e.to_string())?;
+        log_db_operation("soft_delete", started, changed);
         Ok(())
     }
 
@@ -541,6 +544,30 @@ mod tests {
                     && sample["rows"] == 2
             });
         assert!(timing.is_some());
+    }
+
+    #[test]
+    fn soft_delete_records_a_fixed_sql_operation_label() {
+        let mut db = memory_db();
+        db.upsert_json_batch(&[(
+            "vocab".to_string(),
+            "deleted".to_string(),
+            json!({"value": 2}),
+        )])
+        .unwrap();
+        let before = serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap();
+
+        db.soft_delete("vocab", "deleted").unwrap();
+
+        let after = serde_json::to_value(crate::diagnostics::snapshot()).unwrap()["counters"]
+            ["db_sql_operations_total"]
+            .as_u64()
+            .unwrap();
+        assert!(after >= before.saturating_add(1));
+        assert_eq!(db.entity_json("vocab", "deleted").unwrap(), None);
     }
 
     #[test]
