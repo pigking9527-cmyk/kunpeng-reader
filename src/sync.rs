@@ -350,7 +350,7 @@ fn prepare_saved_account_for_switch(state: &AppState) -> Result<(), String> {
                 .unwrap_or_default(),
         ))
     })?;
-    let saved = resolve_sync_settings(record.clone())?;
+    let saved = resolve_sync_settings(record.clone()).unwrap_or_default();
     let base = normalize_sync_base(&saved.url).ok();
     let stored_scope = base
         .as_deref()
@@ -1266,7 +1266,7 @@ fn sync_now_inner_with_limits_impl(
                     .unwrap_or_default(),
             ))
         })?;
-    let initial_settings = resolve_sync_settings(initial_record.clone())?;
+    let initial_settings = resolve_sync_settings(initial_record.clone()).unwrap_or_default();
     if initial_settings.url.trim().is_empty() || initial_settings.token.trim().is_empty() {
         return Err("请先登录账号".into());
     }
@@ -1326,7 +1326,7 @@ fn sync_now_inner_with_limits_impl(
         let cursor = db.sync_scope_metadata(&scope, "cursor").unwrap_or_default();
         (settings_record, scope, cursor, is_initial_scope_sync)
     };
-    let settings = resolve_sync_settings(settings_record)?;
+    let settings = resolve_sync_settings(settings_record).unwrap_or_default();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(request_timeout))
         .build()
