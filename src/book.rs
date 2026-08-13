@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 pub use reader_core::{Bookmark, Highlight, ProgressTimelineEntry};
 
+mod progress;
+pub(crate) use progress::{apply_reading_position, merge_daily_progress_history};
+
 fn organization_name_key(value: &str) -> String {
     reader_core::domain::organization_name_key(value)
 }
@@ -87,32 +90,6 @@ pub fn now_secs() -> u64 {
 
 pub(crate) fn normalize_organization_names(values: Vec<String>) -> Vec<String> {
     reader_core::domain::normalize_names(values)
-}
-
-fn local_day_key(secs: u64) -> u32 {
-    use chrono::{Datelike, Local, TimeZone};
-    Local
-        .timestamp_opt(secs as i64, 0)
-        .single()
-        .map(|time| time.year() as u32 * 10000 + time.month() * 100 + time.day())
-        .unwrap_or(0)
-}
-
-/// 合并并压缩每日位置摘要：同一天只保留时间更晚的那条，最多保留十年。
-pub(crate) fn merge_daily_progress_history(
-    target: &mut Vec<ProgressTimelineEntry>,
-    incoming: &[ProgressTimelineEntry],
-) {
-    let mut days = std::collections::BTreeMap::<u32, ProgressTimelineEntry>::new();
-    for entry in target.iter().chain(incoming.iter()) {
-        let day = local_day_key(entry.at);
-        if days.get(&day).is_none_or(|old| entry.at >= old.at) {
-            days.insert(day, entry.clone());
-        }
-    }
-    const MAX_DAILY_PROGRESS_HISTORY: usize = 3650;
-    let skip = days.len().saturating_sub(MAX_DAILY_PROGRESS_HISTORY);
-    *target = days.into_values().skip(skip).collect();
 }
 
 impl Book {
@@ -849,62 +826,7 @@ impl Library {
         anchor: Option<ReadingAnchor>,
     ) -> bool {
         if let Some(b) = self.books.iter_mut().find(|b| b.id == id) {
-            let position = ReadingPosition {
-                chapter,
-                anchor,
-                fraction: frac,
-            }
-            .normalized();
-            // 分页测量会在同一源码锚点上得到不同的页数/百分比。源码位置没有
-            // 变化时，后一次只是派生值重算，绝不能覆盖已保存的续读位置。
-            let same_source_anchor = b
-                .resume_position
-                .as_ref()
-                .and_then(|saved| saved.anchor.as_ref())
-                .zip(position.anchor.as_ref())
-                .is_some_and(|(saved, incoming)| {
-                    saved.chapter == incoming.chapter && saved.text_offset == incoming.text_offset
-                });
-            if same_source_anchor {
-                return false;
-            }
-            let anchor_changed =
-                position.anchor.is_some() && b.resume_position.as_ref() != Some(&position);
-            let changed = (b.progress - progress).abs() >= 0.05
-                || b.resume_chapter != chapter
-                || (b.resume_frac - frac).abs() >= 0.02
-                || anchor_changed;
-            b.progress = progress;
-            b.resume_chapter = position.authoritative_chapter();
-            b.resume_frac = position.fraction;
-            // Older clients keep reporting fraction-only positions. Do not let
-            // them erase a newer source anchor saved by another device.
-            if position.anchor.is_some() {
-                b.resume_position = Some(position.clone());
-            }
-            if changed {
-                let at = now_secs();
-                let entry = ProgressTimelineEntry {
-                    at,
-                    progress: progress.clamp(0.0, 100.0),
-                    chapter: position.authoritative_chapter(),
-                    frac: position.fraction,
-                    position: position.anchor.is_some().then_some(position),
-                };
-                if b.progress_history
-                    .last()
-                    .is_some_and(|last| local_day_key(last.at) == local_day_key(at))
-                {
-                    *b.progress_history.last_mut().unwrap() = entry;
-                } else {
-                    b.progress_history.push(entry);
-                }
-                merge_daily_progress_history(&mut b.progress_history, &[]);
-            }
-            if progress >= 99.0 && b.finished_at == 0 {
-                b.finished_at = now_secs(); // 首次读完打时间戳，供"本月/本年读完了哪些书"
-            }
-            return changed;
+            return apply_reading_position(b, progress, chapter, frac, anchor, now_secs());
         }
         false
     }
