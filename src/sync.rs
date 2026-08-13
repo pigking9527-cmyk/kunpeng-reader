@@ -143,7 +143,22 @@ pub(crate) struct SyncReport {
     server_time: i64,
 }
 
-pub(crate) fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
+#[derive(Clone, PartialEq, Eq)]
+struct SyncSettingsRecord {
+    url: String,
+    protected_token: Option<String>,
+    legacy_token: String,
+    username: String,
+    user_id: String,
+    data_generation: i64,
+    last_sync_at: i64,
+    last_sync_pushed: usize,
+    last_sync_pulled: usize,
+    last_sync_accepted: usize,
+    last_sync_ignored: usize,
+}
+
+fn sync_settings_record_from_db(db: &db::AppDb) -> SyncSettingsRecord {
     let url = db
         .metadata("sync_url")
         .unwrap_or_else(|| DEFAULT_SYNC_URL.to_string());
@@ -157,9 +172,10 @@ pub(crate) fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
             .as_deref()
             .and_then(|scope| db.sync_scope_metadata(scope, key))
     };
-    SyncSettings {
+    SyncSettingsRecord {
         url,
-        token: read_sync_token(db).unwrap_or_default(),
+        protected_token: db.metadata("sync_token_protected"),
+        legacy_token: db.metadata("sync_token").unwrap_or_default(),
         username: db.metadata("sync_username").unwrap_or_default(),
         user_id,
         data_generation: scoped("data_generation")
@@ -184,11 +200,35 @@ pub(crate) fn sync_settings_from_db(db: &db::AppDb) -> SyncSettings {
     }
 }
 
+fn resolve_sync_settings(record: SyncSettingsRecord) -> Result<SyncSettings, String> {
+    let token = if let Some(protected) = record.protected_token.as_deref() {
+        secret_store::unprotect_secret(protected)
+    } else {
+        Ok(record.legacy_token)
+    }?;
+    Ok(SyncSettings {
+        url: record.url,
+        token,
+        username: record.username,
+        user_id: record.user_id,
+        data_generation: record.data_generation,
+        last_sync_at: record.last_sync_at,
+        last_sync_pushed: record.last_sync_pushed,
+        last_sync_pulled: record.last_sync_pulled,
+        last_sync_accepted: record.last_sync_accepted,
+        last_sync_ignored: record.last_sync_ignored,
+    })
+}
+
+fn read_sync_settings(state: &AppState, operation: &'static str) -> Result<SyncSettings, String> {
+    let record = state.with_db_read(operation, |db| Ok(sync_settings_record_from_db(db)))?;
+    // Preserve the existing settings surface: an inaccessible OS credential
+    // is represented as an empty token and therefore as a logged-out account.
+    Ok(resolve_sync_settings(record).unwrap_or_default())
+}
+
 fn read_sync_token(db: &db::AppDb) -> Result<String, String> {
-    if let Some(protected) = db.metadata("sync_token_protected") {
-        return secret_store::unprotect_secret(&protected);
-    }
-    Ok(db.metadata("sync_token").unwrap_or_default())
+    resolve_sync_settings(sync_settings_record_from_db(db)).map(|settings| settings.token)
 }
 
 fn migrate_sync_token_to_platform_store(db: &mut db::AppDb) -> Result<(), String> {
@@ -213,7 +253,7 @@ fn auth_base_from_state(state: &AppState, requested: &str) -> Result<String, Str
         return normalize_auth_base(requested, DEFAULT_SYNC_URL);
     }
     state.with_db_read("auth_base_from_state", |db| {
-        normalize_auth_base(&sync_settings_from_db(db).url, DEFAULT_SYNC_URL)
+        normalize_auth_base(&sync_settings_record_from_db(db).url, DEFAULT_SYNC_URL)
     })
 }
 
@@ -285,19 +325,17 @@ fn clear_sync_account(db: &mut db::AppDb) -> Result<(), String> {
     ])
 }
 
-fn saved_account_unchanged(
+fn saved_account_record_unchanged(
     db: &db::AppDb,
-    expected: &SyncSettings,
+    expected: &SyncSettingsRecord,
     expected_verified_scope: &str,
 ) -> Result<bool, String> {
-    let current = sync_settings_from_db(db);
-    Ok(current.url == expected.url
-        && current.user_id == expected.user_id
+    let current = sync_settings_record_from_db(db);
+    Ok(current == *expected
         && db
             .metadata(db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY)
             .unwrap_or_default()
-            == expected_verified_scope
-        && read_sync_token(db)? == expected.token)
+            == expected_verified_scope)
 }
 
 /// Assign pre-v4 global state to the currently saved account before replacing
@@ -305,13 +343,14 @@ fn saved_account_unchanged(
 /// account token) are resolved through `/v1/auth/me`; an unverifiable owner is
 /// deliberately sealed as unclaimed so the next login performs a full sync.
 fn prepare_saved_account_for_switch(state: &AppState) -> Result<(), String> {
-    let (saved, verified_scope) = state.with_db_read("prepare_saved_account_snapshot", |db| {
+    let (record, verified_scope) = state.with_db_read("prepare_saved_account_snapshot", |db| {
         Ok((
-            sync_settings_from_db(db),
+            sync_settings_record_from_db(db),
             db.metadata(db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY)
                 .unwrap_or_default(),
         ))
     })?;
+    let saved = resolve_sync_settings(record.clone())?;
     let base = normalize_sync_base(&saved.url).ok();
     let stored_scope = base
         .as_deref()
@@ -339,7 +378,7 @@ fn prepare_saved_account_for_switch(state: &AppState) -> Result<(), String> {
     };
 
     state.with_db_write("prepare_saved_account_commit", |db| {
-        if !saved_account_unchanged(db, &saved, &verified_scope)? {
+        if !saved_account_record_unchanged(db, &record, &verified_scope)? {
             return Err("同步账户设置已变化，请重试".into());
         }
         match (base.as_deref(), resolved_user) {
@@ -482,7 +521,7 @@ pub(crate) fn auth_request_inner(
 }
 
 pub(crate) fn sync_get_settings_inner(state: &AppState) -> Result<SyncSettings, String> {
-    state.with_db_read("sync_get_settings", |db| Ok(sync_settings_from_db(db)))
+    read_sync_settings(state, "sync_get_settings")
 }
 
 // `tauri::generate_handler!` needs the command macro's private helper symbols
@@ -511,7 +550,7 @@ pub(crate) async fn sync_set_settings(
             Some(fetch_auth_user(&base, &token, SYNC_REQUEST_TIMEOUT)?)
         };
         prepare_saved_account_for_switch(state.inner())?;
-        state.with_db_write("sync_set_settings", |db| {
+        let record = state.with_db_write("sync_set_settings", |db| {
             if let Some((user, data_generation)) = user {
                 save_sync_account(db, &base, &token, &user, data_generation)?;
             } else {
@@ -525,8 +564,9 @@ pub(crate) async fn sync_set_settings(
                     (db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY, ""),
                 ])?;
             }
-            Ok(sync_settings_from_db(db))
-        })
+            Ok(sync_settings_record_from_db(db))
+        })?;
+        Ok(resolve_sync_settings(record).unwrap_or_default())
     })
     .await
     .map_err(|e| format!("保存同步设置任务失败：{e}"))?
@@ -537,8 +577,7 @@ pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, S
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _account_change = acquire_account_change(state.inner())?;
-        let settings =
-            state.with_db_read("auth_logout_settings", |db| Ok(sync_settings_from_db(db)))?;
+        let settings = read_sync_settings(state.inner(), "auth_logout_settings")?;
         prepare_saved_account_for_switch(state.inner())?;
         if !settings.token.is_empty() {
             if let Ok(base) = normalize_sync_base(&settings.url) {
@@ -555,10 +594,11 @@ pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, S
                     .send_json(serde_json::json!({}));
             }
         }
-        state.with_db_write("auth_logout_clear", |db| {
+        let record = state.with_db_write("auth_logout_clear", |db| {
             clear_sync_account(db)?;
-            Ok(sync_settings_from_db(db))
-        })
+            Ok(sync_settings_record_from_db(db))
+        })?;
+        Ok(resolve_sync_settings(record).unwrap_or_default())
     })
     .await
     .map_err(|e| format!("退出登录任务失败：{e}"))?
@@ -852,9 +892,7 @@ fn authenticated_endpoint<T: DeserializeOwned>(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<T, String> {
-    let settings = state.with_db_read("authenticated_endpoint_settings", |db| {
-        Ok(sync_settings_from_db(db))
-    })?;
+    let settings = read_sync_settings(state, "authenticated_endpoint_settings")?;
     let base = normalize_sync_base(&settings.url)?;
     if settings.token.trim().is_empty() {
         return Err("请先登录账号".into());
@@ -1156,6 +1194,7 @@ pub(crate) async fn auth_confirm_password_reset(
 ) -> Result<AuthResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _account_change = acquire_account_change(state.inner())?;
         let base = auth_base_from_state(state.inner(), &request.url)?;
         let installation_id =
             state.with_db_read("password_reset_installation", |db| Ok(db.device_id()))?;
@@ -1219,19 +1258,18 @@ fn sync_now_inner_with_limits_impl(
     // otherwise an unopened legacy reader setting could be uploaded verbatim.
     crate::app_settings::normalize_protocol_v5_entity(state)?;
     log_sync_stage("prepare_local", prepare_started, "status=ok");
-    let (initial_settings, initial_verified_scope) = {
-        let db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let db = db_guard.as_ref().ok_or("SQLite 数据库不可用")?;
-        let settings = sync_settings_from_db(db);
-        if settings.url.trim().is_empty() || settings.token.trim().is_empty() {
-            return Err("请先登录账号".into());
-        }
-        (
-            settings,
-            db.metadata(db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY)
-                .unwrap_or_default(),
-        )
-    };
+    let (initial_record, initial_verified_scope) =
+        state.with_db_read("sync_initial_account_snapshot", |db| {
+            Ok((
+                sync_settings_record_from_db(db),
+                db.metadata(db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY)
+                    .unwrap_or_default(),
+            ))
+        })?;
+    let initial_settings = resolve_sync_settings(initial_record.clone())?;
+    if initial_settings.url.trim().is_empty() || initial_settings.token.trim().is_empty() {
+        return Err("请先登录账号".into());
+    }
     let base = normalize_sync_base(&initial_settings.url)?;
     let stored_scope = account_sync_scope(&base, &initial_settings.user_id).ok();
     let identity_is_verified = stored_scope.as_deref() == Some(initial_verified_scope.as_str());
@@ -1245,13 +1283,13 @@ fn sync_now_inner_with_limits_impl(
             request_timeout,
         )?)
     };
-    let (settings, scope, cursor, is_initial_scope_sync) = {
+    let (settings_record, scope, cursor, is_initial_scope_sync) = {
         let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
-        migrate_sync_token_to_platform_store(db)?;
-        if !saved_account_unchanged(db, &initial_settings, &initial_verified_scope)? {
+        if !saved_account_record_unchanged(db, &initial_record, &initial_verified_scope)? {
             return Err("同步账户设置已变化，请重试".into());
         }
+        migrate_sync_token_to_platform_store(db)?;
         let scope = if let Some((user, data_generation)) = resolved_user {
             save_sync_account(db, &base, &initial_settings.token, &user, data_generation)?
         } else {
@@ -1262,7 +1300,7 @@ fn sync_now_inner_with_limits_impl(
             db.migrate_legacy_sync_state(&scope)?;
             scope
         };
-        let settings = sync_settings_from_db(db);
+        let settings_record = sync_settings_record_from_db(db);
         if db
             .metadata(crate::private_sync::SYNC_FILTERS_CHANGED_KEY)
             .as_deref()
@@ -1286,8 +1324,9 @@ fn sync_now_inner_with_limits_impl(
         let is_initial_scope_sync =
             protocol_upgraded || db.sync_scope_metadata(&scope, "last_sync_at").is_none();
         let cursor = db.sync_scope_metadata(&scope, "cursor").unwrap_or_default();
-        (settings, scope, cursor, is_initial_scope_sync)
+        (settings_record, scope, cursor, is_initial_scope_sync)
     };
+    let settings = resolve_sync_settings(settings_record)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(request_timeout))
         .build()
@@ -1714,6 +1753,32 @@ mod tests {
         assert!(auth_json.get("token").is_none());
         assert_eq!(settings_json["username"], "alice");
         assert_eq!(auth_json["user"]["username"], "alice");
+    }
+
+    #[test]
+    fn settings_record_is_plain_sqlite_snapshot_and_resolves_legacy_token() {
+        let database = db::AppDb::open_in_memory_for_tests();
+        database
+            .set_metadata("sync_url", "https://reader.example")
+            .unwrap();
+        database.set_metadata("sync_username", "alice").unwrap();
+        database.set_metadata("sync_user_id", "u1").unwrap();
+        database.set_metadata("sync_token", "legacy-token").unwrap();
+        let scope = account_sync_scope("https://reader.example", "u1").unwrap();
+        database
+            .set_sync_scope_metadata(&scope, "data_generation", "3")
+            .unwrap();
+        database
+            .set_sync_scope_metadata(&scope, "last_pushed", "7")
+            .unwrap();
+
+        let record = sync_settings_record_from_db(&database);
+        assert_eq!(record.protected_token, None);
+        assert_eq!(record.legacy_token, "legacy-token");
+        assert_eq!(record.last_sync_pushed, 7);
+        let settings = resolve_sync_settings(record).unwrap();
+        assert_eq!(settings.token, "legacy-token");
+        assert_eq!(settings.data_generation, 3);
     }
 
     #[test]
