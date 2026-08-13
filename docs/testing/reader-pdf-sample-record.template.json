@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "recordedAt": "2026-01-01T00:00:00.000Z",
   "sample": {
     "id": "LEGAL-SAMPLE-001",
@@ -13,23 +13,25 @@
   "environment": {
     "appBuild": "1.0.0",
     "platform": "macos-arm64",
-    "deviceId": "bench-device-01",
-    "condition": "cold-start"
+    "deviceId": "bench-device-01"
   },
   "metrics": {
     "firstReadableMs": {
+      "measurementCondition": "cold-start",
       "warmupMs": [120, 115, 118],
       "measuredMs": [109, 112, 110, 108, 111],
       "p50Ms": 110,
       "p95Ms": 112
     },
     "turnPageMs": {
+      "measurementCondition": "warmed",
       "warmupMs": [42, 41, 43],
       "measuredMs": [40, 41, 42, 43, 44],
       "p50Ms": 42,
       "p95Ms": 44
     },
     "searchMs": {
+      "measurementCondition": "warmed",
       "warmupMs": [62, 61, 63],
       "measuredMs": [60, 61, 62, 63, 64],
       "p50Ms": 62,

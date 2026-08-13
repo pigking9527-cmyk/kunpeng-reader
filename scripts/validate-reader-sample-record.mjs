@@ -60,7 +60,11 @@ function percentile(values, quantile) {
 }
 
 function validateMetric(name, value) {
-  exactKeys(value, `metrics.${name}`, ["warmupMs", "measuredMs", "p50Ms", "p95Ms"]);
+  exactKeys(value, `metrics.${name}`, ["measurementCondition", "warmupMs", "measuredMs", "p50Ms", "p95Ms"]);
+  const expectedCondition = name === "firstReadableMs" ? "cold-start" : "warmed";
+  if (value.measurementCondition !== expectedCondition) {
+    fail(`metrics.${name}.measurementCondition 必须为 ${expectedCondition}`);
+  }
   milliseconds(value.warmupMs, 3, `metrics.${name}.warmupMs`);
   milliseconds(value.measuredMs, 5, `metrics.${name}.measuredMs`);
   if (typeof value.p50Ms !== "number" || !Number.isFinite(value.p50Ms) || value.p50Ms !== percentile(value.measuredMs, 0.5)) fail(`metrics.${name}.p50Ms 必须由记录值计算`);
@@ -69,7 +73,7 @@ function validateMetric(name, value) {
 
 function validate(record) {
   exactKeys(record, "记录根对象", ["schemaVersion", "recordedAt", "sample", "environment", "metrics", "evidence", "closeCycleMemory", "privacy"]);
-  if (record.schemaVersion !== 3) fail("只接受 schemaVersion 3 的阅读样本记录");
+  if (record.schemaVersion !== 4) fail("只接受 schemaVersion 4 的阅读样本记录");
   if (typeof record.recordedAt !== "string" || Number.isNaN(Date.parse(record.recordedAt))) fail("recordedAt 必须是有效 ISO 时间");
 
   exactKeys(record.sample, "sample", ["id", "format", "sha256", "license", "sourceId", "unitKind", "unitCount"]);
@@ -82,8 +86,8 @@ function validate(record) {
   if (record.sample.unitKind !== (format === "epub" ? "chapters" : "pages")) fail("sample.unitKind 与格式不一致");
   if (!Number.isInteger(record.sample.unitCount) || record.sample.unitCount < 1) fail("sample.unitCount 必须是正整数");
 
-  exactKeys(record.environment, "environment", ["appBuild", "platform", "deviceId", "condition"]);
-  for (const field of ["appBuild", "platform", "deviceId", "condition"]) safeReference(record.environment[field], `environment.${field}`);
+  exactKeys(record.environment, "environment", ["appBuild", "platform", "deviceId"]);
+  for (const field of ["appBuild", "platform", "deviceId"]) safeReference(record.environment[field], `environment.${field}`);
 
   const requiredMetrics = requiredMetricsByFormat[format];
   exactKeys(record.metrics, "metrics", requiredMetrics);

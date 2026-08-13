@@ -12,14 +12,14 @@ const temporaryDirectory = mkdtempSync(join(tmpdir(), "kunpeng-reader-sample-val
 const recordPath = join(temporaryDirectory, "record.json");
 
 const record = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   recordedAt: "2026-08-13T00:00:00.000Z",
   sample: { id: "LEGAL-EPUB-001", format: "epub", sha256: "a".repeat(64), license: "CC-BY-4.0", sourceId: "approval-2026-001", unitKind: "chapters", unitCount: 12 },
-  environment: { appBuild: "1.0.0", platform: "macos-arm64", deviceId: "bench-mac-01", condition: "cold-start" },
+  environment: { appBuild: "1.0.0", platform: "macos-arm64", deviceId: "bench-mac-01" },
   metrics: {
-    firstReadableMs: { warmupMs: [120, 115, 118], measuredMs: [109, 112, 110, 108, 111], p50Ms: 110, p95Ms: 112 },
-    turnPageMs: { warmupMs: [42, 41, 43], measuredMs: [40, 41, 42, 43, 44], p50Ms: 42, p95Ms: 44 },
-    searchMs: { warmupMs: [62, 61, 63], measuredMs: [60, 61, 62, 63, 64], p50Ms: 62, p95Ms: 64 },
+    firstReadableMs: { measurementCondition: "cold-start", warmupMs: [120, 115, 118], measuredMs: [109, 112, 110, 108, 111], p50Ms: 110, p95Ms: 112 },
+    turnPageMs: { measurementCondition: "warmed", warmupMs: [42, 41, 43], measuredMs: [40, 41, 42, 43, 44], p50Ms: 42, p95Ms: 44 },
+    searchMs: { measurementCondition: "warmed", warmupMs: [62, 61, 63], measuredMs: [60, 61, 62, 63, 64], p50Ms: 62, p95Ms: 64 },
   },
   evidence: [
     { id: "EPUB-FIRST-PAGE", kind: "screenshot", sha256: "b".repeat(64) },
@@ -79,6 +79,20 @@ try {
   const duplicateEvidenceResult = run(recordPath);
   assert.equal(duplicateEvidenceResult.status, 2);
   assert.match(duplicateEvidenceResult.stderr, /独立的媒体摘要/u);
+
+  const wrongStartCondition = structuredClone(record);
+  wrongStartCondition.metrics.firstReadableMs.measurementCondition = "warmed";
+  write(wrongStartCondition);
+  const wrongStartConditionResult = run(recordPath);
+  assert.equal(wrongStartConditionResult.status, 2);
+  assert.match(wrongStartConditionResult.stderr, /cold-start/u);
+
+  const wrongWarmCondition = structuredClone(record);
+  wrongWarmCondition.metrics.searchMs.measurementCondition = "cold-start";
+  write(wrongWarmCondition);
+  const wrongWarmConditionResult = run(recordPath);
+  assert.equal(wrongWarmConditionResult.status, 2);
+  assert.match(wrongWarmConditionResult.stderr, /warmed/u);
 
   console.log("reader sample record validator checks passed");
 } finally {

@@ -18,7 +18,6 @@ const allowedKeys = new Set([
   "--app-build",
   "--platform",
   "--device-id",
-  "--condition",
   "--warmup",
   "--timing",
   "--screenshot",
@@ -45,7 +44,7 @@ function usage(message) {
     --format epub|pdf --file /受控样本/reader.epub \\
     --sample-id LEGAL-SAMPLE-001 --license SPDX-or-approved-reference \\
     --source-id approved-source-reference --units 12 \\
-    --app-build 1.0.0 --platform macos-arm64 --device-id bench-mac-01 --condition cold-start \\
+    --app-build 1.0.0 --platform macos-arm64 --device-id bench-mac-01 \\
     --warmup firstReadableMs=120,115,118 \\
     --timing firstReadableMs=109,112,110,108,111 \\
     --memory-cycle-5-mib 420 --memory-cycle-20-mib 435 \\
@@ -75,7 +74,7 @@ for (let index = 0; index < args.length; index += 1) {
   else values.set(key, value);
 }
 
-const required = ["--format", "--file", "--sample-id", "--license", "--source-id", "--units", "--app-build", "--platform", "--device-id", "--condition", "--output"];
+const required = ["--format", "--file", "--sample-id", "--license", "--source-id", "--units", "--app-build", "--platform", "--device-id", "--output"];
 for (const key of required) if (!values.has(key)) usage(`缺少必填参数 ${key}`);
 
 const format = values.get("--format");
@@ -171,7 +170,6 @@ try {
   const appBuild = safeReference(values.get("--app-build"), "--app-build");
   const platform = safeReference(values.get("--platform"), "--platform");
   const deviceId = safeReference(values.get("--device-id"), "--device-id");
-  const condition = safeReference(values.get("--condition"), "--condition");
   const units = parsePositiveInteger(values.get("--units"), "--units");
   const warmups = parseMeasurements(repeated.get("--warmup") ?? [], 3, "--warmup");
   const timings = parseMeasurements(repeated.get("--timing") ?? [], 5, "--timing");
@@ -206,6 +204,7 @@ try {
   const metrics = Object.fromEntries(timingNames.map((name) => {
     const sorted = [...timings[name]].sort((left, right) => left - right);
     return [name, {
+      measurementCondition: name === "firstReadableMs" ? "cold-start" : "warmed",
       warmupMs: warmups[name],
       measuredMs: timings[name],
       p50Ms: percentile(sorted, 0.5),
@@ -214,7 +213,7 @@ try {
   }));
 
   const record = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     recordedAt: new Date().toISOString(),
     sample: {
       id: sampleId,
@@ -225,7 +224,7 @@ try {
       unitKind: format === "epub" ? "chapters" : "pages",
       unitCount: units,
     },
-    environment: { appBuild, platform, deviceId, condition },
+    environment: { appBuild, platform, deviceId },
     metrics,
     evidence: await Promise.all(evidence.map(async ({ id, kind, mediaPath }) => ({
       id,

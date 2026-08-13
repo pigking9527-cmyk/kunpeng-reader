@@ -30,7 +30,6 @@ const baseArgs = [
   "--app-build", "1.0.0",
   "--platform", "macos-arm64",
   "--device-id", "bench-mac-01",
-  "--condition", "cold-start",
     "--warmup", "firstReadableMs=120,115,118",
     "--timing", "firstReadableMs=109,112,110,108,111",
     "--warmup", "turnPageMs=42,41,43",
@@ -76,15 +75,17 @@ try {
   assert.doesNotMatch(success.stdout, new RegExp(temporaryDirectory.replaceAll("/", "\\\\/"), "u"));
   const record = JSON.parse(readFileSync(output, "utf8"));
   assert.equal(record.sample.format, "epub");
-  assert.equal(record.schemaVersion, 3);
+  assert.equal(record.schemaVersion, 4);
   assert.match(record.sample.sha256, /^[a-f0-9]{64}$/u);
   assert.equal(record.sample.unitKind, "chapters");
   assert.deepEqual(record.metrics.firstReadableMs, {
+    measurementCondition: "cold-start",
     warmupMs: [120, 115, 118],
     measuredMs: [109, 112, 110, 108, 111],
     p50Ms: 110,
     p95Ms: 112,
   });
+  assert.equal(record.metrics.turnPageMs.measurementCondition, "warmed");
   assert.deepEqual(record.evidence.map(({ id, kind }) => ({ id, kind })), [
     { id: "EPUB-FIRST-PAGE", kind: "screenshot" },
     { id: "EPUB-SEARCH", kind: "screenshot" },

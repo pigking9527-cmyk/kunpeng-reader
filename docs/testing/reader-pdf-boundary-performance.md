@@ -50,7 +50,7 @@ node scripts/record-reader-sample.mjs \
   --format epub --file /controlled-samples/reader.epub \
   --sample-id LEGAL-SAMPLE-001 --license CC-BY-4.0 \
   --source-id approved-source-reference --units 12 \
-  --app-build 1.0.0 --platform macos-arm64 --device-id bench-device-01 --condition cold-start \
+  --app-build 1.0.0 --platform macos-arm64 --device-id bench-device-01 \
   --warmup firstReadableMs=120,115,118 \
   --timing firstReadableMs=109,112,110,108,111 \
   --warmup turnPageMs=42,41,43 \
@@ -64,7 +64,7 @@ node scripts/record-reader-sample.mjs \
   --output /controlled-records/epub-LEGAL-SAMPLE-001.json
 ```
 
-每个性能项目提供恰好 3 个预热值和 5 个记录值；工具会写出 P50/P95。EPUB 必须记录 `firstReadableMs`、`turnPageMs`、`searchMs` 及 `EPUB-FIRST-PAGE`、`EPUB-PAGE-TURN`、`EPUB-SEARCH` 三个匿名视觉证据；PDF 还必须记录 `pdfRenderMs`、`zoomMs` 及 `PDF-FIRST-PAGE`、`PDF-PAGE-TURN`、`PDF-SEARCH`、`PDF-RENDER-ZOOM` 四个证据。`--condition` 标记本次冷启动或预热态；`--units` 对 EPUB 表示章节数、对 PDF 表示页数。关闭循环的第 5/20 次工作集须成对提供，工具会标注是否低于 100 MiB 增长门槛。可重复 `--screenshot` 或 `--recording`，格式是 `匿名证据编号=/绝对/受控媒体路径`；工具拒绝仓库内媒体文件，且要求不同必测场景的媒体摘要不同，JSON 只写入编号、类型和摘要。生成后请执行 `node scripts/validate-reader-sample-record.mjs /仓库外/record.json`；校验器只接受 schema v3 的精确字段形状、必填计时/证据和由原始数据计算出的 P50/P95、内存增长，不允许路径、标题、正文、URL 或其他未知字段。生成记录的字段形状见 [`reader-pdf-sample-record.template.json`](reader-pdf-sample-record.template.json)；模板只含示例数据，不能视为验收结果。
+每个性能项目提供恰好 3 个预热值和 5 个记录值；工具会写出 P50/P95。EPUB 必须记录 `firstReadableMs`、`turnPageMs`、`searchMs` 及 `EPUB-FIRST-PAGE`、`EPUB-PAGE-TURN`、`EPUB-SEARCH` 三个匿名视觉证据；PDF 还必须记录 `pdfRenderMs`、`zoomMs` 及 `PDF-FIRST-PAGE`、`PDF-PAGE-TURN`、`PDF-SEARCH`、`PDF-RENDER-ZOOM` 四个证据。记录会按指标固定标明采样条件：`firstReadableMs` 必须为 `cold-start`，其余指标必须为 `warmed`；`--units` 对 EPUB 表示章节数、对 PDF 表示页数。关闭循环的第 5/20 次工作集须成对提供，工具会标注是否低于 100 MiB 增长门槛。可重复 `--screenshot` 或 `--recording`，格式是 `匿名证据编号=/绝对/受控媒体路径`；工具拒绝仓库内媒体文件，且要求不同必测场景的媒体摘要不同，JSON 只写入编号、类型和摘要。生成后请执行 `node scripts/validate-reader-sample-record.mjs /仓库外/record.json`；校验器只接受 schema v4 的精确字段形状、必填计时/证据、固定采样条件和由原始数据计算出的 P50/P95、内存增长，不允许路径、标题、正文、URL 或其他未知字段。生成记录的字段形状见 [`reader-pdf-sample-record.template.json`](reader-pdf-sample-record.template.json)；模板只含示例数据，不能视为验收结果。
 
 ### macOS 人工验收表
 
