@@ -16,8 +16,8 @@ use client::{
 };
 use protocol::{
     cursor_strictly_advances, inventory_matches, newer_cursor, reconcile_proves_inventory,
-    sync_push_batches, SyncInventoryResponse, SyncPullResponse, SyncPushRequest, SyncPushResponse,
-    SyncReconcileResponse,
+    sync_push_batches, SyncCheckpointResponse, SyncInventoryResponse, SyncPullResponse,
+    SyncPushRequest, SyncPushResponse, SyncReconcileResponse,
 };
 use reader_core::sync::sync_scope_id;
 use reconcile::{reconcile_request_body, reconcile_upload_entities};
@@ -36,17 +36,75 @@ use validation::{
 
 const SYNC_PULL_PAGE_SIZE: usize = 1_000;
 const MAX_SYNC_PULL_PAGES: usize = 1_000;
-const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const SYNC_REQUEST_ATTEMPTS: usize = 6;
-const SYNC_RETRY_DELAYS_MS: &[u64] = &[1_000, 2_000, 4_000, 8_000, 16_000];
+// Keep the client deadline longer than the service's 15-second handler
+// deadline. This leaves enough time to receive a structured 504 and apply the
+// bounded retry policy instead of racing the server with a transport timeout.
+// Durable SQLite state and the automatic scheduler still handle a later retry.
+const SYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const SYNC_REQUEST_ATTEMPTS: usize = 3;
+const SYNC_RETRY_DELAYS_MS: &[u64] = &[750, 1_500];
+// A laptop can wake before Wi-Fi or its captive portal is ready.  These are
+// process-local retry delays for the startup refresh only: durable local edits
+// still use the SQLite-backed scheduler below.  Keeping this bounded avoids a
+// permanently noisy task after a real outage while letting a routine network
+// transition recover without another click.
+const SILENT_STARTUP_RETRY_DELAYS_MS: &[u64] = &[5_000, 15_000, 45_000, 120_000, 300_000];
+const SYNC_FULL_INVENTORY_REPAIR_INTERVAL_MS: u64 = 60 * 60 * 1000;
+const SYNC_LAST_FULL_INVENTORY_AT_KEY: &str = "last_full_inventory_at";
 const SYNC_PAUSED: &str = "__sync_paused__";
 const SYNC_CANCELLED: &str = "__sync_cancelled__";
 struct SyncRunGuard<'a>(&'a AtomicBool);
 
+fn checkpoint_inventory_repair_due(last_full_inventory_at: u64, now: u64) -> bool {
+    last_full_inventory_at == 0
+        || now.saturating_sub(last_full_inventory_at) >= SYNC_FULL_INVENTORY_REPAIR_INTERVAL_MS
+}
+
+fn checkpoint_is_eligible(
+    cursor: Option<i64>,
+    is_initial_scope_sync: bool,
+    runtime_projection_pending: bool,
+    has_pending_local_entities: bool,
+    last_full_inventory_at: u64,
+    now: u64,
+) -> bool {
+    cursor.is_some()
+        && !is_initial_scope_sync
+        && !runtime_projection_pending
+        && !has_pending_local_entities
+        && !checkpoint_inventory_repair_due(last_full_inventory_at, now)
+}
+
+/// A service deployed before these independently optional entities rejects the
+/// whole scoped inventory request with HTTP 400.  The regular reading data is
+/// still compatible, so remove only the newer categories and retry rather
+/// than making a successful login unusable.  A current service keeps the
+/// complete list and never takes this path.
+fn legacy_inventory_fallback_kinds(kinds: &[String]) -> Option<Vec<String>> {
+    let fallback = kinds
+        .iter()
+        .filter(|kind| {
+            !matches!(
+                kind.as_str(),
+                crate::private_sync::READING_HANDOFF_KIND
+                    | crate::private_sync::NEWS_SUBSCRIPTIONS_KIND
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    (fallback.len() < kinds.len() && !fallback.is_empty()).then_some(fallback)
+}
+
 #[derive(Clone)]
 struct CachedSyncToken {
     protected_marker: String,
-    token: String,
+    value: CachedSyncTokenValue,
+}
+
+#[derive(Clone)]
+enum CachedSyncTokenValue {
+    Token(String),
+    AccessDenied(String),
 }
 
 // macOS may ask to unlock the login keychain when a protected item is first
@@ -59,21 +117,109 @@ fn sync_token_cache() -> &'static Mutex<Option<CachedSyncToken>> {
     SYNC_TOKEN_CACHE.get_or_init(|| Mutex::new(None))
 }
 
-fn cached_sync_token(protected_marker: &str) -> Option<String> {
-    sync_token_cache()
-        .lock()
-        .ok()
-        .and_then(|cached| cached.as_ref().cloned())
-        .filter(|cached| cached.protected_marker == protected_marker)
-        .map(|cached| cached.token)
-}
-
 fn cache_sync_token(protected_marker: &str, token: &str) {
     if let Ok(mut cached) = sync_token_cache().lock() {
         *cached = Some(CachedSyncToken {
             protected_marker: protected_marker.to_string(),
-            token: token.to_string(),
+            value: CachedSyncTokenValue::Token(token.to_string()),
         });
+    }
+}
+
+fn cached_sync_token(protected_marker: &str) -> Option<String> {
+    let cached = sync_token_cache().lock().ok()?;
+    let value = cached
+        .as_ref()
+        .filter(|value| value.protected_marker == protected_marker)?;
+    match &value.value {
+        CachedSyncTokenValue::Token(token) => Some(token.clone()),
+        CachedSyncTokenValue::AccessDenied(_) => None,
+    }
+}
+
+/// Decide whether automatic work may use credentials without opening an
+/// operating-system credential prompt.  A remembered macOS account can resume
+/// after restart when Keychain grants access silently; otherwise the scheduler
+/// remains dormant instead of turning a background read into a prompt.
+pub(crate) fn automatic_sync_credentials_ready_without_prompt(db: &db::AppDb) -> bool {
+    let record = sync_settings_record_from_db(db);
+    if record.url.trim().is_empty() || record.user_id.trim().is_empty() {
+        return false;
+    }
+    match record.protected_token.as_deref() {
+        Some(protected) if secret_store::is_sync_secret_protected(protected) => {
+            resolve_platform_sync_token_without_interaction(protected)
+                .is_ok_and(|token| !token.trim().is_empty())
+        }
+        Some(protected) => !protected.trim().is_empty(),
+        None => !record.legacy_token.trim().is_empty(),
+    }
+}
+
+fn resolve_platform_sync_token_without_interaction(
+    protected_marker: &str,
+) -> Result<String, String> {
+    let mut cached = sync_token_cache()
+        .lock()
+        .map_err(|_| "同步凭据缓存不可用".to_string())?;
+    if let Some(value) = cached
+        .as_ref()
+        .filter(|value| value.protected_marker == protected_marker)
+    {
+        return match &value.value {
+            CachedSyncTokenValue::Token(token) => Ok(token.clone()),
+            CachedSyncTokenValue::AccessDenied(error) => Err(error.clone()),
+        };
+    }
+    match secret_store::unprotect_sync_secret_without_interaction(protected_marker) {
+        Ok(token) => {
+            *cached = Some(CachedSyncToken {
+                protected_marker: protected_marker.to_string(),
+                value: CachedSyncTokenValue::Token(token.clone()),
+            });
+            Ok(token)
+        }
+        // A no-prompt Keychain probe may fail merely because macOS requires
+        // interactive authorization.  That is not a user cancellation: do
+        // not cache it, so an explicit Sync click can still ask once.
+        Err(error) => Err(error),
+    }
+}
+
+fn resolve_platform_sync_token(protected_marker: &str) -> Result<String, String> {
+    // Hold the cache lock across the OS credential read. Startup restores
+    // account state and may start background sync from different tasks; a
+    // check-then-read gap lets all of them queue their own macOS Keychain
+    // prompt before the first successful read reaches the cache.
+    let mut cached = sync_token_cache()
+        .lock()
+        .map_err(|_| "同步凭据缓存不可用".to_string())?;
+    if let Some(value) = cached
+        .as_ref()
+        .filter(|value| value.protected_marker == protected_marker)
+    {
+        return match &value.value {
+            CachedSyncTokenValue::Token(token) => Ok(token.clone()),
+            CachedSyncTokenValue::AccessDenied(error) => Err(error.clone()),
+        };
+    }
+    match secret_store::unprotect_sync_secret(protected_marker) {
+        Ok(token) => {
+            *cached = Some(CachedSyncToken {
+                protected_marker: protected_marker.to_string(),
+                value: CachedSyncTokenValue::Token(token.clone()),
+            });
+            Ok(token)
+        }
+        Err(error) => {
+            if secret_store::credential_access_was_denied(&error) {
+                *cached = Some(CachedSyncToken {
+                    protected_marker: protected_marker.to_string(),
+                    value: CachedSyncTokenValue::AccessDenied(error.clone()),
+                });
+            }
+            Err(error)
+        }
     }
 }
 
@@ -81,6 +227,21 @@ fn clear_cached_sync_token() {
     if let Ok(mut cached) = sync_token_cache().lock() {
         *cached = None;
     }
+}
+
+/// A manual Sync click is affirmative user intent to unlock the platform
+/// credential.  It is the sole path that clears a remembered cancellation;
+/// account rendering and automatic work must remain non-interactive.
+fn prepare_explicit_sync_credential_retry() {
+    if let Ok(mut cached) = sync_token_cache().lock() {
+        if cached
+            .as_ref()
+            .is_some_and(|value| matches!(&value.value, CachedSyncTokenValue::AccessDenied(_)))
+        {
+            *cached = None;
+        }
+    }
+    secret_store::allow_explicit_sync_secret_retry();
 }
 
 impl Drop for SyncRunGuard<'_> {
@@ -139,6 +300,19 @@ pub(crate) struct SyncSettings {
     last_sync_accepted: usize,
     #[serde(default)]
     last_sync_ignored: usize,
+}
+
+/// A non-authenticated connection observation for the account overview.
+/// It intentionally contains neither the saved URL nor a credential: opening
+/// the panel may show whether the service answers, but must not leak or unlock
+/// the account token just to render the page.
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncConnectionStatus {
+    configured: bool,
+    online: bool,
+    credentials_ready: bool,
+    requires_user_action: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -245,16 +419,10 @@ fn sync_settings_record_from_db(db: &db::AppDb) -> SyncSettingsRecord {
 
 fn resolve_sync_settings(record: SyncSettingsRecord) -> Result<SyncSettings, String> {
     let token = if let Some(protected) = record.protected_token.as_deref() {
-        if secret_store::is_platform_protected(protected) {
-            if let Some(token) = cached_sync_token(protected) {
-                Ok(token)
-            } else {
-                let token = secret_store::unprotect_secret(protected)?;
-                cache_sync_token(protected, &token);
-                Ok(token)
-            }
+        if secret_store::is_sync_secret_protected(protected) {
+            resolve_platform_sync_token(protected)
         } else {
-            secret_store::unprotect_secret(protected)
+            secret_store::unprotect_sync_secret(protected)
         }
     } else {
         Ok(record.legacy_token)
@@ -277,7 +445,7 @@ fn read_sync_settings(state: &AppState, operation: &'static str) -> Result<SyncS
     let record = state.with_db_read(operation, |db| Ok(sync_settings_record_from_db(db)))?;
     // Preserve the existing settings surface: an inaccessible OS credential
     // is represented as an empty token and therefore as a logged-out account.
-    Ok(resolve_sync_settings(record).unwrap_or_default())
+    resolve_sync_settings(record)
 }
 
 fn read_sync_token(db: &db::AppDb) -> Result<String, String> {
@@ -286,7 +454,7 @@ fn read_sync_token(db: &db::AppDb) -> Result<String, String> {
 
 fn migrate_sync_token_to_platform_store(db: &mut db::AppDb) -> Result<(), String> {
     let stored = db.metadata("sync_token_protected").unwrap_or_default();
-    if secret_store::is_platform_protected(&stored) {
+    if secret_store::is_current_sync_secret_platform_marker(&stored) {
         return Ok(());
     }
     let token = read_sync_token(db)?;
@@ -298,8 +466,10 @@ fn migrate_sync_token_to_platform_store(db: &mut db::AppDb) -> Result<(), String
 }
 
 fn protect_sync_token(token: &str) -> Result<String, String> {
-    let protected = secret_store::protect_secret(token.trim())?;
-    if secret_store::is_platform_protected(&protected) {
+    let protected = secret_store::protect_sync_secret(token.trim())?;
+    if token.trim().is_empty() {
+        clear_cached_sync_token();
+    } else if secret_store::is_sync_secret_protected(&protected) {
         cache_sync_token(&protected, token.trim());
     } else {
         clear_cached_sync_token();
@@ -374,9 +544,16 @@ fn save_sync_account(
 }
 
 fn clear_sync_account(db: &mut db::AppDb) -> Result<(), String> {
-    let protected = protect_sync_token("")?;
+    // A changed development signature can make an old Keychain ACL reject
+    // deletion. That stale OS item must not keep the local account signed in.
+    if let Err(error) = secret_store::clear_sync_secret_for_logout() {
+        crate::log(&format!(
+            "[sync] local_credential_cleanup=deferred error={error}"
+        ));
+    }
+    clear_cached_sync_token();
     db.set_metadata_batch(&[
-        ("sync_token_protected", &protected),
+        ("sync_token_protected", ""),
         ("sync_token", ""),
         ("sync_username", ""),
         ("sync_user_id", ""),
@@ -455,6 +632,49 @@ fn prepare_saved_account_for_switch(state: &AppState) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// Logout is a local credential-removal operation. A verified account can
+/// assign any remaining legacy state from SQLite metadata alone; an old,
+/// unverifiable account is sealed as unclaimed. Neither case needs to unlock
+/// the OS credential store.
+fn prepare_saved_account_for_logout(state: &AppState) -> Result<SyncSettingsRecord, String> {
+    let (record, verified_scope) = state.with_db_read("prepare_logout_snapshot", |db| {
+        Ok((
+            sync_settings_record_from_db(db),
+            db.metadata(db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY)
+                .unwrap_or_default(),
+        ))
+    })?;
+    let base = normalize_sync_base(&record.url).ok();
+    let stored_scope = base
+        .as_deref()
+        .and_then(|base| account_sync_scope(base, &record.user_id).ok());
+    state.with_db_write("prepare_logout_commit", |db| {
+        if !saved_account_record_unchanged(db, &record, &verified_scope)? {
+            return Err("同步账户设置已变化，请重试".into());
+        }
+        if let Some(scope) = stored_scope
+            .as_deref()
+            .filter(|scope| *scope == verified_scope)
+        {
+            db.migrate_legacy_sync_state(scope)?;
+        } else {
+            db.seal_unclaimed_legacy_sync_state()?;
+        }
+        Ok(())
+    })?;
+    Ok(record)
+}
+
+fn logout_token_without_keychain_prompt(record: &SyncSettingsRecord) -> String {
+    match record.protected_token.as_deref() {
+        Some(protected) if secret_store::is_sync_secret_protected(protected) => {
+            cached_sync_token(protected).unwrap_or_default()
+        }
+        Some(protected) => secret_store::unprotect_sync_secret(protected).unwrap_or_default(),
+        None => record.legacy_token.clone(),
+    }
 }
 
 #[derive(Default)]
@@ -580,7 +800,56 @@ pub(crate) fn auth_request_inner(
 }
 
 pub(crate) fn sync_get_settings_inner(state: &AppState) -> Result<SyncSettings, String> {
-    read_sync_settings(state, "sync_get_settings")
+    let record = state.with_db_read("sync_get_settings", |db| {
+        Ok(sync_settings_record_from_db(db))
+    })?;
+    // This command never serializes the token. Do not unlock the OS credential
+    // store merely to render the remembered account during application start.
+    Ok(SyncSettings {
+        url: record.url,
+        token: String::new(),
+        username: record.username,
+        user_id: record.user_id,
+        data_generation: record.data_generation,
+        last_sync_at: record.last_sync_at,
+        last_sync_pushed: record.last_sync_pushed,
+        last_sync_pulled: record.last_sync_pulled,
+        last_sync_accepted: record.last_sync_accepted,
+        last_sync_ignored: record.last_sync_ignored,
+    })
+}
+
+pub(crate) fn sync_account_open_refresh_inner(
+    state: &AppState,
+) -> Result<SyncConnectionStatus, String> {
+    let record = state.with_db_read("sync_account_open_status", |db| {
+        Ok(sync_settings_record_from_db(db))
+    })?;
+    let Ok(base) = normalize_sync_base(&record.url) else {
+        return Ok(SyncConnectionStatus::default());
+    };
+    let credentials_ready = state.with_db_read("sync_account_open_credentials", |db| {
+        Ok(automatic_sync_credentials_ready_without_prompt(db))
+    })?;
+    // Health is deliberately unauthenticated. This keeps an account-panel
+    // open from turning into a Keychain prompt, while still distinguishing a
+    // sleeping/offline service from a credential that needs user action.
+    let online = agent_with_timeout(Duration::from_secs(5))
+        .get(&format!("{base}/health"))
+        .call()
+        .is_ok();
+    Ok(SyncConnectionStatus {
+        configured: true,
+        online,
+        credentials_ready,
+        requires_user_action: !credentials_ready
+            && (!record
+                .protected_token
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+                || !record.legacy_token.trim().is_empty()),
+    })
 }
 
 // `tauri::generate_handler!` needs the command macro's private helper symbols
@@ -589,6 +858,13 @@ pub(crate) fn sync_get_settings_inner(state: &AppState) -> Result<SyncSettings, 
 #[tauri::command]
 pub(crate) fn sync_get_settings(state: tauri::State<AppState>) -> Result<SyncSettings, String> {
     commands::sync_get_settings(state)
+}
+
+#[tauri::command]
+pub(crate) async fn sync_account_open_refresh(
+    app: tauri::AppHandle,
+) -> Result<SyncConnectionStatus, String> {
+    commands::sync_account_open_refresh(app).await
 }
 
 #[tauri::command]
@@ -613,15 +889,8 @@ pub(crate) async fn sync_set_settings(
             if let Some((user, data_generation)) = user {
                 save_sync_account(db, &base, &token, &user, data_generation)?;
             } else {
-                let protected = protect_sync_token("")?;
-                db.set_metadata_batch(&[
-                    ("sync_url", &base),
-                    ("sync_token_protected", &protected),
-                    ("sync_token", ""),
-                    ("sync_username", ""),
-                    ("sync_user_id", ""),
-                    (db::SYNC_IDENTITY_VERIFIED_SCOPE_KEY, ""),
-                ])?;
+                clear_sync_account(db)?;
+                db.set_metadata("sync_url", &base)?;
             }
             Ok(sync_settings_record_from_db(db))
         })?;
@@ -636,10 +905,10 @@ pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, S
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _account_change = acquire_account_change(state.inner())?;
-        let settings = read_sync_settings(state.inner(), "auth_logout_settings")?;
-        prepare_saved_account_for_switch(state.inner())?;
-        if !settings.token.is_empty() {
-            if let Ok(base) = normalize_sync_base(&settings.url) {
+        let record = prepare_saved_account_for_logout(state.inner())?;
+        let token = logout_token_without_keychain_prompt(&record);
+        if !token.is_empty() {
+            if let Ok(base) = normalize_sync_base(&record.url) {
                 // Remote revocation is best effort: an offline user must still
                 // be able to remove credentials from this device immediately.
                 let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -648,7 +917,7 @@ pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, S
                     .into();
                 let _ = agent
                     .post(&format!("{base}/v1/auth/logout"))
-                    .header("Authorization", &format!("Bearer {}", settings.token))
+                    .header("Authorization", &format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .send_json(serde_json::json!({}));
             }
@@ -657,7 +926,10 @@ pub(crate) async fn auth_logout(app: tauri::AppHandle) -> Result<SyncSettings, S
             clear_sync_account(db)?;
             Ok(sync_settings_record_from_db(db))
         })?;
-        Ok(resolve_sync_settings(record).unwrap_or_default())
+        Ok(SyncSettings {
+            url: record.url,
+            ..SyncSettings::default()
+        })
     })
     .await
     .map_err(|e| format!("退出登录任务失败：{e}"))?
@@ -908,38 +1180,6 @@ pub(crate) struct DataResetResponse {
     tokens_revoked: bool,
 }
 
-/// Non-sensitive summary of the server-side entity history available for a
-/// deliberate cloud restore. It intentionally carries no entity payloads.
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SyncRecoveryStatus {
-    pub available: bool,
-    pub retention_days: i64,
-    pub restorable_from: i64,
-    pub latest_version_at: i64,
-    pub version_count: i64,
-    pub data_generation: i64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SyncRecoveryRestoreRequest {
-    pub target_at: i64,
-    pub data_generation: i64,
-    pub password: String,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SyncRecoveryRestoreResponse {
-    pub data_generation: i64,
-    pub tokens_revoked: bool,
-    pub target_at: i64,
-    pub restored_at: i64,
-    pub restored_entities: i64,
-    pub tombstoned_entities: i64,
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SecretBundleState {
@@ -1145,57 +1385,6 @@ pub(crate) async fn sync_reset_cloud_data(
 }
 
 #[tauri::command]
-pub(crate) async fn sync_recovery_status(
-    app: tauri::AppHandle,
-) -> Result<SyncRecoveryStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        authenticated_endpoint(
-            app.state::<AppState>().inner(),
-            "/v1/sync/recovery/status",
-            None,
-        )
-    })
-    .await
-    .map_err(|e| format!("读取云端恢复状态任务失败：{e}"))?
-}
-
-#[tauri::command]
-pub(crate) async fn sync_recovery_restore(
-    app: tauri::AppHandle,
-    request: SyncRecoveryRestoreRequest,
-) -> Result<SyncRecoveryRestoreResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        if request.password.is_empty() {
-            return Err("请输入登录密码".into());
-        }
-        if request.target_at <= 0 || request.data_generation <= 0 {
-            return Err("云端恢复请求无效".into());
-        }
-        let state = app.state::<AppState>();
-        let _account_change = acquire_account_change(state.inner())?;
-        let response: SyncRecoveryRestoreResponse = authenticated_endpoint(
-            state.inner(),
-            "/v1/sync/recovery/restore",
-            Some(serde_json::json!({
-                "targetAt": request.target_at,
-                "dataGeneration": request.data_generation,
-                "password": request.password,
-                "confirm": true,
-            })),
-        )?;
-        // The server revokes every token at restore time. Remove the local
-        // credential too so this installation cannot accidentally write its
-        // pre-restore state back before the user deliberately reauthenticates.
-        state.with_db_write("sync_recovery_restore_clear_account", |db| {
-            clear_sync_account(db)?;
-            Ok(response)
-        })
-    })
-    .await
-    .map_err(|e| format!("云端恢复任务失败：{e}"))?
-}
-
-#[tauri::command]
 pub(crate) async fn auth_delete_account(
     app: tauri::AppHandle,
     request: AccountDeleteRequest,
@@ -1331,7 +1520,7 @@ fn sync_now_inner_with_limits_impl(
                     .unwrap_or_default(),
             ))
         })?;
-    let initial_settings = resolve_sync_settings(initial_record.clone()).unwrap_or_default();
+    let initial_settings = resolve_sync_settings(initial_record.clone())?;
     if initial_settings.url.trim().is_empty() || initial_settings.token.trim().is_empty() {
         return Err("请先登录账号".into());
     }
@@ -1348,7 +1537,14 @@ fn sync_now_inner_with_limits_impl(
             request_timeout,
         )?)
     };
-    let (settings_record, scope, cursor, is_initial_scope_sync) = {
+    let (
+        settings_record,
+        scope,
+        cursor,
+        is_initial_scope_sync,
+        runtime_projection_pending,
+        last_full_inventory_at,
+    ) = {
         let mut db_guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         let db = db_guard.as_mut().ok_or("SQLite 数据库不可用")?;
         if !saved_account_record_unchanged(db, &initial_record, &initial_verified_scope)? {
@@ -1389,19 +1585,102 @@ fn sync_now_inner_with_limits_impl(
         let is_initial_scope_sync =
             protocol_upgraded || db.sync_scope_metadata(&scope, "last_sync_at").is_none();
         let cursor = db.sync_scope_metadata(&scope, "cursor").unwrap_or_default();
-        (settings_record, scope, cursor, is_initial_scope_sync)
+        let runtime_projection_pending = db
+            .sync_scope_metadata(&scope, "runtime_projection_pending")
+            .as_deref()
+            == Some("1");
+        let last_full_inventory_at = db
+            .sync_scope_metadata(&scope, SYNC_LAST_FULL_INVENTORY_AT_KEY)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        (
+            settings_record,
+            scope,
+            cursor,
+            is_initial_scope_sync,
+            runtime_projection_pending,
+            last_full_inventory_at,
+        )
     };
-    let settings = resolve_sync_settings(settings_record).unwrap_or_default();
+    let settings = resolve_sync_settings(settings_record)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(request_timeout))
         .build()
         .into();
+
+    // A previously complete cursor is a stronger no-change proof than a
+    // fresh inventory scan, provided this device has no local entity awaiting
+    // upload.  Keep a periodic full inventory repair pass: checkpoint is a
+    // fast path, not a replacement for reconciliation after local corruption
+    // or a future protocol mistake.
+    let checkpoint_cursor = cursor.trim().parse::<i64>().ok();
+    let has_pending_local_entities =
+        state.with_db_read("sync_checkpoint_pending_entities", |db| {
+            Ok(db
+                .pending_sync_entities(&scope)?
+                .into_iter()
+                .any(|entity| crate::private_sync::is_entity_enabled(db, &entity.kind)))
+        })?;
+    let now = crate::now_ms();
+    if checkpoint_is_eligible(
+        checkpoint_cursor,
+        is_initial_scope_sync,
+        runtime_projection_pending,
+        has_pending_local_entities,
+        last_full_inventory_at,
+        now,
+    ) {
+        check_sync_control(task)?;
+        let cursor = checkpoint_cursor.expect("eligible checkpoint cursor");
+        let checkpoint: Result<SyncCheckpointResponse, ureq::Error> = agent
+            .get(&format!("{base}/v1/sync/checkpoint"))
+            .query("dataGeneration", settings.data_generation.to_string())
+            .query("cursor", cursor.to_string())
+            .header("Authorization", &format!("Bearer {}", settings.token))
+            .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
+            .call()
+            .and_then(|mut response| response.body_mut().read_json());
+        if let Ok(checkpoint) = checkpoint {
+            if checkpoint.proves_caught_up(settings.data_generation, cursor) {
+                let server_time = i64::try_from(now).unwrap_or(i64::MAX);
+                state.with_db_write("sync_checkpoint_finalize", |db| {
+                    db.set_sync_scope_metadata(&scope, "last_sync_at", &server_time.to_string())?;
+                    db.set_sync_scope_metadata(&scope, "last_pushed", "0")?;
+                    db.set_sync_scope_metadata(&scope, "last_pulled", "0")?;
+                    db.set_sync_scope_metadata(&scope, "last_accepted", "0")?;
+                    db.set_sync_scope_metadata(&scope, "last_ignored", "0")?;
+                    Ok(())
+                })?;
+                let report = SyncReport {
+                    ok: true,
+                    message: "同步完成：服务端 cursor 已确认，无需传输数据".into(),
+                    pushed: 0,
+                    pulled: 0,
+                    accepted: 0,
+                    ignored: 0,
+                    server_time,
+                };
+                log_sync_stage("checkpoint", sync_started, "caught_up=true");
+                return Ok(report);
+            }
+        }
+        // A negative, an older server, a generation mismatch, malformed JSON,
+        // or a network error must retain the original full synchronization
+        // behavior.  The optional fast path never turns a transient outage
+        // into a visible failure or an unverified local success.
+        log_sync_stage("checkpoint", sync_started, "caught_up=false_or_unavailable");
+    }
 
     // Pull before push. A newly imported zero-progress book must not overwrite
     // the established position from another computer. Continue paging until the
     // server confirms that this cursor has caught up.
     let mut pulled = 0u32;
     let mut pull_server_time = 0i64;
+    // A pull/reconcile transaction persists this marker with its cursor and
+    // rows.  It makes it safe to skip costly runtime projection on a stable
+    // cursor, while still recovering correctly if the process stopped after a
+    // durable remote commit and before its local files were applied.
+    let mut runtime_projection_pending = runtime_projection_pending;
     let mut sync_cursor = cursor.clone();
     let mut pull_cursor = if cursor.is_empty() {
         "0".to_string()
@@ -1459,6 +1738,7 @@ fn sync_now_inner_with_limits_impl(
                 is_initial_scope_sync,
             )
         })?;
+        runtime_projection_pending |= !enabled_entities.is_empty();
         log_sync_stage(
             "pull_commit",
             merge_started,
@@ -1497,9 +1777,22 @@ fn sync_now_inner_with_limits_impl(
         &settings.token,
         &downloaded_assets,
     )?;
-    data_migration::apply_sqlite_to_runtime(state)?;
-    // Persist the field-wise book merge; unchanged JSON does not become dirty.
-    data_migration::migrate_json_to_sqlite(state)?;
+    if runtime_projection_pending {
+        let runtime_projection_started = Instant::now();
+        data_migration::apply_sqlite_to_runtime(state)?;
+        // Persist the field-wise book merge only when a durable remote commit
+        // (or a recovered pending projection) actually changed the runtime.
+        data_migration::migrate_json_to_sqlite_from_remote_projection(state)?;
+        state.with_db_write("sync_clear_runtime_projection_after_pull", |db| {
+            db.set_sync_scope_metadata(&scope, "runtime_projection_pending", "0")
+        })?;
+        runtime_projection_pending = false;
+        log_sync_stage(
+            "runtime_projection",
+            runtime_projection_started,
+            "source=pull",
+        );
+    }
     let entities: Vec<db::SyncEntity> =
         state.with_db_read("sync_pending_enabled_entities", |db| {
             Ok(db
@@ -1546,30 +1839,42 @@ fn sync_now_inner_with_limits_impl(
             .map(str::to_string)
             .collect::<Vec<_>>())
     })?;
-    let mut inventory_verified = enabled_kinds.is_empty();
-    if !enabled_kinds.is_empty() {
+    let had_enabled_kinds = !enabled_kinds.is_empty();
+    let mut inventory_kinds = enabled_kinds;
+    let mut inventory_verified = inventory_kinds.is_empty();
+    if !inventory_kinds.is_empty() {
         for reconcile_pass in 0..=3 {
             check_sync_control(task)?;
             let inventory: SyncInventoryResponse =
-                sync_request_with_retry_delays("inventory", task, retry_delays_ms, || {
+                match sync_request_with_retry_delays("inventory", task, retry_delays_ms, || {
                     agent
                         .get(&format!("{base}/v1/sync/inventory"))
-                        .query_pairs(enabled_kinds.iter().map(|kind| ("kind", kind.as_str())))
+                        .query_pairs(inventory_kinds.iter().map(|kind| ("kind", kind.as_str())))
                         .header("Authorization", &format!("Bearer {}", settings.token))
                         .header(SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION)
                         .call()?
                         .body_mut()
                         .read_json()
-                })?;
+                }) {
+                    Ok(inventory) => inventory,
+                    Err(error) if error.contains("http status: 400") => {
+                        let Some(fallback) = legacy_inventory_fallback_kinds(&inventory_kinds)
+                        else {
+                            return Err(error);
+                        };
+                        crate::log(
+                            "[sync] inventory=legacy-server-fallback optional_categories_deferred",
+                        );
+                        inventory_kinds = fallback;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
             ensure_data_generation(settings.data_generation, inventory.data_generation)?;
             push_server_time = push_server_time.max(inventory.server_time);
-            let local: Vec<db::SyncEntity> =
-                state.with_db_read("sync_inventory_local_entities", |db| {
-                    Ok(db
-                        .all_sync_entities()?
-                        .into_iter()
-                        .filter(|entity| enabled_kinds.contains(&entity.kind))
-                        .collect::<Vec<_>>())
+            let local: Vec<db::SyncEntityManifest> = state
+                .with_db_read("sync_inventory_local_entities", |db| {
+                    db.sync_entity_manifest_for_kinds(&inventory_kinds)
                 })?;
             if inventory_matches(&local, &inventory) {
                 inventory_verified = true;
@@ -1592,7 +1897,7 @@ fn sync_now_inner_with_limits_impl(
                 break;
             }
             let reconcile_body =
-                reconcile_request_body(settings.data_generation, &enabled_kinds, &local);
+                reconcile_request_body(settings.data_generation, &inventory_kinds, &local);
             let reconcile: SyncReconcileResponse =
                 sync_request_with_retry_delays("reconcile", task, retry_delays_ms, || {
                     agent
@@ -1634,7 +1939,11 @@ fn sync_now_inner_with_limits_impl(
                     Ok(())
                 })?;
                 data_migration::apply_sqlite_to_runtime(state)?;
-                data_migration::migrate_json_to_sqlite(state)?;
+                data_migration::migrate_json_to_sqlite_from_remote_projection(state)?;
+                state.with_db_write("sync_clear_runtime_projection_after_reconcile", |db| {
+                    db.set_sync_scope_metadata(&scope, "runtime_projection_pending", "0")
+                })?;
+                runtime_projection_pending = false;
             }
 
             // The server response may have installed authoritative rows above;
@@ -1677,10 +1986,37 @@ fn sync_now_inner_with_limits_impl(
         db.set_sync_scope_metadata(&scope, "last_pulled", &pulled.to_string())?;
         db.set_sync_scope_metadata(&scope, "last_accepted", &accepted.to_string())?;
         db.set_sync_scope_metadata(&scope, "last_ignored", &ignored.to_string())?;
+        if had_enabled_kinds {
+            db.set_sync_scope_metadata(
+                &scope,
+                SYNC_LAST_FULL_INVENTORY_AT_KEY,
+                &crate::now_ms().to_string(),
+            )?;
+        }
         db.set_metadata(crate::private_sync::SYNC_FILTERS_CHANGED_KEY, "0")?;
         Ok(())
     })?;
-    data_migration::apply_sqlite_to_runtime(state)?;
+    // Push conflicts can install an authoritative remote row after the pull
+    // projection.  Their transaction sets the same durable marker; avoid a
+    // second full runtime JSON/SQLite pass when no such row arrived.
+    runtime_projection_pending |= state.with_db_read("sync_runtime_projection_pending", |db| {
+        Ok(db
+            .sync_scope_metadata(&scope, "runtime_projection_pending")
+            .as_deref()
+            == Some("1"))
+    })?;
+    if runtime_projection_pending {
+        let runtime_projection_started = Instant::now();
+        data_migration::apply_sqlite_to_runtime(state)?;
+        state.with_db_write("sync_clear_runtime_projection_after_push", |db| {
+            db.set_sync_scope_metadata(&scope, "runtime_projection_pending", "0")
+        })?;
+        log_sync_stage(
+            "runtime_projection",
+            runtime_projection_started,
+            "source=push",
+        );
+    }
     let report = SyncReport {
         ok: true,
         message: format!(
@@ -1751,8 +2087,127 @@ fn settle_sync_task(task: TaskRunGuard, result: &Result<SyncReport, String>) {
     }
 }
 
+/// Start one deferred local-change sync.  The durable generation is owned by
+/// SQLite; this function only hands the real network work to the existing
+/// single-flight sync path and reports its outcome back to the scheduler.
+pub(crate) fn start_automatic_sync(app: tauri::AppHandle, generation: u64) {
+    let task_handle = app
+        .state::<AppState>()
+        .background_tasks
+        .enqueue_or_resume(BackgroundTaskKind::Sync, "自动同步阅读数据");
+    let _ = task_handle.spawn_detached("自动同步阅读数据", move |task| {
+        let state = app.state::<AppState>();
+        let result = sync_now_inner(state.inner(), Some(&task));
+        let busy = matches!(&result, Err(error) if error == "同步任务正在进行");
+        if busy {
+            let _ = task.complete();
+        } else {
+            settle_sync_task(task, &result);
+        }
+        if result.is_ok() {
+            let _ = app.emit("app-settings-synced", ());
+        } else if !busy {
+            // UI may have attached to this automatic single-flight run after
+            // receiving "同步任务正在进行".  Always send a terminal signal so
+            // it cannot remain visually syncing after the task has failed.
+            let _ = app.emit("app-settings-sync-failed", ());
+        }
+        // A manual task may have won the single-flight guard after this timer
+        // became due. Keep the task centre clean, but apply the normal short
+        // retry delay so an already-overdue marker cannot spin new tasks.
+        if busy {
+            state
+                .sync_auto_scheduler
+                .finish_run(state.inner(), generation, false);
+        } else {
+            state
+                .sync_auto_scheduler
+                .finish_run(state.inner(), generation, result.is_ok());
+        }
+    });
+}
+
+/// Resume one remembered account at application startup.  This is deliberately
+/// separate from local-change scheduling: remote edits should become visible
+/// after restart even when this device has no pending mutation.  Keychain is
+/// consulted only through the non-interactive path above, so a locked or
+/// unapproved credential simply skips this run without a modal prompt.
+pub(crate) fn start_silent_startup_sync(app: tauri::AppHandle) {
+    start_silent_startup_sync_attempt(app, 0);
+}
+
+fn start_silent_startup_sync_attempt(app: tauri::AppHandle, retry_index: usize) {
+    let credentials_ready = app
+        .state::<AppState>()
+        .with_db_read("sync_startup_credentials", |db| {
+            Ok(automatic_sync_credentials_ready_without_prompt(db))
+        })
+        .unwrap_or(false);
+    if !credentials_ready {
+        return;
+    }
+    let task_handle = app
+        .state::<AppState>()
+        .background_tasks
+        .enqueue_or_resume(BackgroundTaskKind::Sync, "启动同步阅读数据");
+    let _ = task_handle.spawn_detached("启动同步阅读数据", move |task| {
+        let state = app.state::<AppState>();
+        let result = sync_now_inner(state.inner(), Some(&task));
+        let busy = matches!(&result, Err(error) if error == "同步任务正在进行");
+        if busy {
+            let _ = task.complete();
+        } else {
+            settle_sync_task(task, &result);
+        }
+        if result.is_ok() {
+            let _ = app.emit("app-settings-synced", ());
+        } else if !busy {
+            let _ = app.emit("app-settings-sync-failed", ());
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| silent_startup_sync_error_is_retryable(error))
+            {
+                schedule_silent_startup_sync_retry(app, retry_index);
+            }
+        }
+    });
+}
+
+fn silent_startup_sync_error_is_retryable(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "connection",
+        "hostnotfound",
+        "host not found",
+        "timeout",
+        "timed out",
+        "network",
+        "dns",
+        "io:",
+        "status code: 5",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
+}
+
+fn schedule_silent_startup_sync_retry(app: tauri::AppHandle, retry_index: usize) {
+    let Some(delay_ms) = SILENT_STARTUP_RETRY_DELAYS_MS.get(retry_index).copied() else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        start_silent_startup_sync_attempt(app, retry_index.saturating_add(1));
+    });
+}
+
 #[tauri::command]
 pub(crate) async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String> {
+    let automatic_generation = app
+        .state::<AppState>()
+        .with_db_read("sync_manual_auto_generation", |db| {
+            Ok(db.automatic_sync_due()?.map(|due| due.generation))
+        })?;
     let task_handle = app
         .state::<AppState>()
         .background_tasks
@@ -1760,10 +2215,32 @@ pub(crate) async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String
     task_handle
         .run_blocking(move |task| {
             let state = app.state::<AppState>();
+            prepare_explicit_sync_credential_retry();
             let result = sync_now_inner(state.inner(), Some(&task));
             settle_sync_task(task, &result);
             if result.is_ok() {
                 let _ = app.emit("app-settings-synced", ());
+            }
+            if let Some(generation) = automatic_generation {
+                // A manual run is still the attempt for the pending durable
+                // local generation.  On failure, persist the same bounded
+                // backoff as an automatic run.  If the credential was just
+                // read successfully, `finish_run` wakes the cache-only
+                // scheduler; if access was denied it remains dormant and
+                // cannot create another Keychain prompt.
+                state
+                    .sync_auto_scheduler
+                    .finish_run(state.inner(), generation, result.is_ok());
+            } else if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| silent_startup_sync_error_is_retryable(error))
+            {
+                // A user can press Sync while Wi-Fi is still returning.  Do
+                // not make them press it again after a transient failure: the
+                // retry path reuses the already-authorized token and never
+                // opens Keychain on its own.
+                schedule_silent_startup_sync_retry(app.clone(), 0);
             }
             result
         })
@@ -1773,6 +2250,13 @@ pub(crate) async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sync_token_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn auth_request_deserializes_as_one_object() {
@@ -1785,6 +2269,23 @@ mod tests {
         assert_eq!(request.url, "https://reader.example");
         assert_eq!(request.username, "alice");
         assert_eq!(request.password, "secret");
+    }
+
+    #[test]
+    fn legacy_inventory_fallback_only_defers_new_optional_categories() {
+        let kinds = vec![
+            "reading_progress_v1".to_string(),
+            crate::private_sync::READING_HANDOFF_KIND.to_string(),
+            crate::private_sync::NEWS_SUBSCRIPTIONS_KIND.to_string(),
+        ];
+        assert_eq!(
+            legacy_inventory_fallback_kinds(&kinds),
+            Some(vec!["reading_progress_v1".to_string()])
+        );
+        assert_eq!(
+            legacy_inventory_fallback_kinds(&["reading_progress_v1".to_string()]),
+            None
+        );
     }
 
     #[test]
@@ -1848,6 +2349,7 @@ mod tests {
 
     #[test]
     fn platform_token_is_cached_only_for_the_current_protected_marker() {
+        let _test_lock = sync_token_test_lock();
         clear_cached_sync_token();
         let record = SyncSettingsRecord {
             url: String::new(),
@@ -1873,6 +2375,168 @@ mod tests {
     }
 
     #[test]
+    fn explicit_sync_retry_discards_only_a_cached_keychain_cancellation() {
+        let _test_lock = sync_token_test_lock();
+        clear_cached_sync_token();
+        if let Ok(mut cached) = sync_token_cache().lock() {
+            *cached = Some(CachedSyncToken {
+                protected_marker: "test:remembered".into(),
+                value: CachedSyncTokenValue::AccessDenied("cancelled".into()),
+            });
+        }
+
+        prepare_explicit_sync_credential_retry();
+        assert!(cached_sync_token("test:remembered").is_none());
+
+        cache_sync_token("test:remembered", "already-unlocked");
+        prepare_explicit_sync_credential_retry();
+        assert_eq!(
+            cached_sync_token("test:remembered").as_deref(),
+            Some("already-unlocked")
+        );
+        clear_cached_sync_token();
+    }
+
+    #[test]
+    fn startup_refresh_retries_network_failures_but_not_credentials_or_quota() {
+        assert!(silent_startup_sync_error_is_retryable(
+            "pull 失败：io: Connection refused"
+        ));
+        assert!(silent_startup_sync_error_is_retryable(
+            "inventory 失败：status code: 503"
+        ));
+        assert!(!silent_startup_sync_error_is_retryable(
+            "已取消或拒绝访问 macOS 钥匙串；本次启动不再重复请求"
+        ));
+        assert!(!silent_startup_sync_error_is_retryable(
+            "push 失败：status code: 429"
+        ));
+        assert!(!silent_startup_sync_error_is_retryable("请先登录账号"));
+    }
+
+    #[test]
+    fn automatic_sync_warms_a_platform_token_without_interaction() {
+        let _test_lock = sync_token_test_lock();
+        clear_cached_sync_token();
+        let database = db::AppDb::open_in_memory_for_tests();
+        database
+            .set_metadata("sync_url", "https://reader.example")
+            .unwrap();
+        database.set_metadata("sync_user_id", "u1").unwrap();
+        database
+            .set_metadata("sync_token_protected", "test:cmVtZW1iZXJlZA==")
+            .unwrap();
+
+        // The test-only marker exercises the same cache-warming branch as a
+        // macOS Keychain item that grants access while interaction is disabled.
+        assert!(automatic_sync_credentials_ready_without_prompt(&database));
+        assert_eq!(
+            cached_sync_token("test:cmVtZW1iZXJlZA==").as_deref(),
+            Some("remembered")
+        );
+        clear_cached_sync_token();
+    }
+
+    #[test]
+    fn automatic_sync_keeps_legacy_in_database_token_noninteractive() {
+        let database = db::AppDb::open_in_memory_for_tests();
+        database
+            .set_metadata("sync_url", "https://reader.example")
+            .unwrap();
+        database.set_metadata("sync_user_id", "u1").unwrap();
+        database.set_metadata("sync_token", "legacy-token").unwrap();
+
+        assert!(automatic_sync_credentials_ready_without_prompt(&database));
+    }
+
+    #[test]
+    fn checkpoint_fast_path_requires_a_stable_complete_local_snapshot() {
+        let now = 7_200_000;
+        assert!(checkpoint_is_eligible(
+            Some(42),
+            false,
+            false,
+            false,
+            now - 60_000,
+            now
+        ));
+        assert!(!checkpoint_is_eligible(
+            None,
+            false,
+            false,
+            false,
+            now - 60_000,
+            now
+        ));
+        assert!(!checkpoint_is_eligible(
+            Some(42),
+            true,
+            false,
+            false,
+            now - 60_000,
+            now
+        ));
+        assert!(!checkpoint_is_eligible(
+            Some(42),
+            false,
+            true,
+            false,
+            now - 60_000,
+            now
+        ));
+        assert!(!checkpoint_is_eligible(
+            Some(42),
+            false,
+            false,
+            true,
+            now - 60_000,
+            now
+        ));
+        assert!(!checkpoint_is_eligible(
+            Some(42),
+            false,
+            false,
+            false,
+            0,
+            now
+        ));
+        assert!(!checkpoint_is_eligible(
+            Some(42),
+            false,
+            false,
+            false,
+            now - SYNC_FULL_INVENTORY_REPAIR_INTERVAL_MS,
+            now,
+        ));
+    }
+
+    #[test]
+    fn logout_uses_only_an_already_cached_platform_token() {
+        let _test_lock = sync_token_test_lock();
+        clear_cached_sync_token();
+        let record = SyncSettingsRecord {
+            url: "https://reader.example".into(),
+            protected_token: Some("keychain:v1".into()),
+            legacy_token: String::new(),
+            username: "alice".into(),
+            user_id: "u1".into(),
+            data_generation: 1,
+            last_sync_at: 0,
+            last_sync_pushed: 0,
+            last_sync_pulled: 0,
+            last_sync_accepted: 0,
+            last_sync_ignored: 0,
+        };
+        assert_eq!(logout_token_without_keychain_prompt(&record), "");
+        cache_sync_token("keychain:v1", "session-token");
+        assert_eq!(
+            logout_token_without_keychain_prompt(&record),
+            "session-token"
+        );
+        clear_cached_sync_token();
+    }
+
+    #[test]
     fn auth_me_requires_v5_nested_user_and_data_generation() {
         let response: AuthMeResponse =
             serde_json::from_str(r#"{"user":{"id":"u2","username":"bob"},"dataGeneration":3}"#)
@@ -1885,47 +2549,5 @@ mod tests {
             serde_json::from_str(r#"{"user":{"id":"u2","username":"bob"},"dataGeneration":0}"#)
                 .unwrap();
         assert!(response.into_verified_identity().is_err());
-    }
-
-    #[test]
-    fn cloud_recovery_payloads_require_v5_camel_case_metadata() {
-        let status: SyncRecoveryStatus = serde_json::from_value(serde_json::json!({
-            "available": true,
-            "retentionDays": 90,
-            "restorableFrom": 1_700_000_000_000i64,
-            "latestVersionAt": 1_700_000_100_000i64,
-            "versionCount": 12,
-            "dataGeneration": 4,
-        }))
-        .unwrap();
-        assert!(status.available);
-        assert_eq!(status.retention_days, 90);
-        assert_eq!(status.data_generation, 4);
-
-        let result: SyncRecoveryRestoreResponse = serde_json::from_value(serde_json::json!({
-            "dataGeneration": 5,
-            "tokensRevoked": true,
-            "targetAt": 1_700_000_050_000i64,
-            "restoredAt": 1_700_000_200_000i64,
-            "restoredEntities": 9,
-            "tombstonedEntities": 3,
-        }))
-        .unwrap();
-        assert!(result.tokens_revoked);
-        assert_eq!(result.restored_entities, 9);
-        assert_eq!(result.tombstoned_entities, 3);
-        assert_eq!(result.data_generation, 5);
-
-        assert!(
-            serde_json::from_value::<SyncRecoveryStatus>(serde_json::json!({
-                "available": true,
-                "retention_days": 90,
-                "restorable_from": 1,
-                "latest_version_at": 2,
-                "version_count": 3,
-                "data_generation": 4
-            }))
-            .is_err()
-        );
     }
 }

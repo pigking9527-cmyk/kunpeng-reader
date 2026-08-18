@@ -131,12 +131,38 @@ pub(crate) fn keychain_service() -> String {
     keychain_service_for(current())
 }
 
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn sync_token_keychain_service() -> String {
+    sync_token_keychain_service_for(current(), 6)
+}
+
+/// The v2-v5 slots remain readable so an existing login is never discarded
+/// merely because the credential storage format changed.  Fresh logins use
+/// the current slot above, which lets them recover when an older macOS
+/// Keychain item's ACL can no longer be read or updated.
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn legacy_sync_token_keychain_service(version: u8) -> String {
+    sync_token_keychain_service_for(current(), version)
+}
+
 fn keychain_service_for(profile: &LaunchProfile) -> String {
     match profile {
         LaunchProfile::Default => "com.kunpeng.reader.sync".to_string(),
         LaunchProfile::Isolated(profile) => {
             format!(
                 "com.kunpeng.reader.sync.isolated.{}",
+                hex(&profile.identifier)
+            )
+        }
+    }
+}
+
+fn sync_token_keychain_service_for(profile: &LaunchProfile, version: u8) -> String {
+    match profile {
+        LaunchProfile::Default => format!("com.kunpeng.reader.sync-token.v{version}"),
+        LaunchProfile::Isolated(profile) => {
+            format!(
+                "com.kunpeng.reader.sync-token.v{version}.isolated.{}",
                 hex(&profile.identifier)
             )
         }
@@ -355,6 +381,10 @@ mod tests {
         assert_eq!(
             keychain_service_for(&launch_profile),
             format!("com.kunpeng.reader.sync.isolated.{id}")
+        );
+        assert_eq!(
+            sync_token_keychain_service_for(&launch_profile, 6),
+            format!("com.kunpeng.reader.sync-token.v6.isolated.{id}")
         );
         assert_eq!(
             first.root.join("config").join(APP_DIRECTORY),
