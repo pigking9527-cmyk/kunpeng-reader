@@ -12,7 +12,8 @@ const LEGACY_SYNC_KEYCHAIN_MARKER_V2: &str = "keychain:sync-token:v2";
 const LEGACY_SYNC_KEYCHAIN_MARKER_V3: &str = "keychain:sync-token:v3";
 const LEGACY_SYNC_KEYCHAIN_MARKER_V4: &str = "keychain:sync-token:v4";
 const LEGACY_SYNC_KEYCHAIN_MARKER_V5: &str = "keychain:sync-token:v5";
-const SYNC_KEYCHAIN_MARKER: &str = "keychain:sync-token:v6";
+const LEGACY_SYNC_KEYCHAIN_MARKER_V6: &str = "keychain:sync-token:v6";
+const SYNC_KEYCHAIN_MARKER: &str = "keychain:sync-token:v7";
 const SECRET_TOOL_MARKER: &str = "secret-service:v1";
 const KEYCHAIN_ACCESS_DENIED: &str = "已取消或拒绝访问 macOS 钥匙串；本次启动不再重复请求";
 const LEGACY_SYNC_CREDENTIAL: &str =
@@ -107,6 +108,7 @@ fn is_sync_keychain_marker(stored: &str) -> bool {
     matches!(
         stored,
         SYNC_KEYCHAIN_MARKER
+            | LEGACY_SYNC_KEYCHAIN_MARKER_V6
             | LEGACY_SYNC_KEYCHAIN_MARKER_V5
             | LEGACY_SYNC_KEYCHAIN_MARKER_V4
             | LEGACY_SYNC_KEYCHAIN_MARKER_V3
@@ -643,6 +645,7 @@ fn macos_keychain_read_sync_without_interaction(marker: &str) -> Result<String, 
 fn macos_sync_keychain_service(marker: &str) -> Result<String, String> {
     match marker {
         SYNC_KEYCHAIN_MARKER => Ok(crate::profile::sync_token_keychain_service()),
+        LEGACY_SYNC_KEYCHAIN_MARKER_V6 => Ok(crate::profile::legacy_sync_token_keychain_service(6)),
         LEGACY_SYNC_KEYCHAIN_MARKER_V5 => Ok(crate::profile::legacy_sync_token_keychain_service(5)),
         LEGACY_SYNC_KEYCHAIN_MARKER_V4 => Ok(crate::profile::legacy_sync_token_keychain_service(4)),
         LEGACY_SYNC_KEYCHAIN_MARKER_V3 => Ok(crate::profile::legacy_sync_token_keychain_service(3)),

@@ -133,10 +133,10 @@ pub(crate) fn keychain_service() -> String {
 
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) fn sync_token_keychain_service() -> String {
-    sync_token_keychain_service_for(current(), 6)
+    sync_token_keychain_service_for(current(), 7)
 }
 
-/// The v2-v5 slots remain readable so an existing login is never discarded
+/// The v2-v6 slots remain readable so an existing login is never discarded
 /// merely because the credential storage format changed.  Fresh logins use
 /// the current slot above, which lets them recover when an older macOS
 /// Keychain item's ACL can no longer be read or updated.
@@ -383,8 +383,8 @@ mod tests {
             format!("com.kunpeng.reader.sync.isolated.{id}")
         );
         assert_eq!(
-            sync_token_keychain_service_for(&launch_profile, 6),
-            format!("com.kunpeng.reader.sync-token.v6.isolated.{id}")
+            sync_token_keychain_service_for(&launch_profile, 7),
+            format!("com.kunpeng.reader.sync-token.v7.isolated.{id}")
         );
         assert_eq!(
             first.root.join("config").join(APP_DIRECTORY),
