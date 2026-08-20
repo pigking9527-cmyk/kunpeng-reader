@@ -176,7 +176,7 @@ fn read_platform_secret(_stored: &str) -> Result<String, String> {
     Err("测试环境没有操作系统凭据项".into())
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn protect_platform_secret(secret: &str) -> Result<String, String> {
     protect_bytes(secret.as_bytes())
         .map(|bytes| format!("{DPAPI_PREFIX}{}", STANDARD.encode(bytes)))
@@ -187,7 +187,7 @@ fn read_platform_secret(stored: &str) -> Result<String, String> {
     Err(format!("当前平台不支持凭据标记：{stored}"))
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn clear_platform_secret() -> Result<(), String> {
     Ok(())
 }
@@ -946,7 +946,7 @@ fn platform_command_delete(program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn protect_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
     win_dpapi(input, true)
 }
