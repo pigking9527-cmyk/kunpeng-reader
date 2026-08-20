@@ -34,6 +34,7 @@ jobs:
       - name: Setup Rust targets
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: rustfmt, clippy
           targets: aarch64-apple-darwin
 
       - name: Cache Cargo
