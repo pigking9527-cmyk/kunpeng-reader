@@ -78,7 +78,7 @@ jobs:
 
       - name: Build portable executable
         shell: pwsh
-        run: ./scripts/build-release.ps1 -SkipIconCacheRefresh
+        run: cargo build --release --locked
 
       - name: Build NSIS installer
         shell: pwsh
@@ -92,7 +92,7 @@ jobs:
           if (-not $version) { throw 'Cannot read version from Cargo.toml.' }
           $out = Join-Path $PWD 'target/windows-release'
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          $portable = Join-Path $PWD '鲲鹏阅读器.exe'
+          $portable = Join-Path $PWD 'target/release/ebook-reader-tauri.exe'
           $installer = Get-ChildItem -LiteralPath 'target/release/bundle/nsis' -Filter "*_${version}_x64-setup.exe" -File | Select-Object -First 1
           if (-not (Test-Path -LiteralPath $portable)) { throw 'Portable executable was not built.' }
           if ($null -eq $installer) { throw "NSIS installer for $version was not built." }
