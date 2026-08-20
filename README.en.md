@@ -2,7 +2,7 @@
 
 [中文](README.md) | **English**
 
-A high-performance local ebook reader for Windows, macOS, Linux, and Android. The desktop app is built with **Rust + Tauri 2 + the system WebView**. Its shelf and reading window are independent; EPUB content is rendered natively and loaded on demand by chapter or virtual subchapter for faster opening of large books.
+A high-performance local ebook reader for Windows, macOS, and Linux. The desktop app is built with **Rust + Tauri 2 + the system WebView**. Its shelf and reading window are independent; EPUB content is rendered natively and loaded on demand by chapter or virtual subchapter for faster opening of large books.
 
 > **License notice:** this repository is **source-available**. The code is public only for learning, evaluation, and communication. Copying, modifying, distributing, commercial use, or publishing derivative versions requires the author's written permission. See [LICENSE](LICENSE).
 > See [licensing scope](docs/legal/licensing-scope.md) and [third-party notices](THIRD_PARTY_NOTICES.md) for first-party and bundled-material boundaries. New public binary publication is currently held by the license gate while historical GPL dependency remediation is reviewed; local and CI acceptance builds remain available.
@@ -37,13 +37,6 @@ A high-performance local ebook reader for Windows, macOS, Linux, and Android. Th
 - Reader-style extracted articles that remove navigation, advertising, comments and login overlays while retaining title, content, images, source and time.
 - Optional background prefetch, five-minute refresh while idle, six concurrent fetches, local-cache-first opening and lazy cover loading.
 
-### Android v0.3.0
-
-- Shelf, import, account, search, statistics, filtering, settings and more entry points; EPUB/TXT import, Download auto-import, batch import and reading-progress covers.
-- Background EPUB parsing/cache, image and footnote compatibility, scroll/page turning/selection tools, local dictionaries, annotations, excerpts, bookmarks, translation, web/library/semantic search and AI Reader.
-- Private account sync for light reading data; API keys only sync when the user enables a separate encrypted sync password.
-- Local full-text and semantic indexes. Book bodies and vectors never leave the device.
-
 ### Search, data and reliability
 
 - Shelf full-text search uses compressed chapter text, Bloom prefiltering, bounded LRU cache, threaded byte-level `memmem`, and exact-scan fallback.
@@ -51,7 +44,7 @@ A high-performance local ebook reader for Windows, macOS, Linux, and Android. Th
 - Redesigned day/month/year/all-time reading statistics with a contribution heatmap and SVG charts; retain display preferences and switch time/words, bar/line charts, and heatmap color. SQLite light-data storage uses WAL management, daily restore points, verified restore/data-package imports, and a single-instance runtime.
 - Account sync covers light data such as progress, highlights, annotations, vocabulary, statistics and settings. Book files, semantic models, indexes, local paths and plaintext API keys are not synced.
 - Settings can clear local data, clear local and cloud data, or permanently delete an account. None of these actions delete user-imported original book files.
-- Release workflow includes GitHub Actions, shared local checks, Windows portable/NSIS builds, macOS Apple Silicon DMG/App ZIP, Linux AppImage/deb, Android APKs and SHA-256 manifests.
+- Release workflow includes GitHub Actions, shared local checks, Windows portable/NSIS builds, macOS Apple Silicon DMG/App ZIP, Linux AppImage/deb and SHA-256 manifests.
 
 > AI features use your own API key. Credentials are protected with system capabilities and stored locally; they are not sync entities. Only already-read relevant passages and explicitly selected text are sent to an AI provider.
 
@@ -110,6 +103,4 @@ The current semantic-search runtime requires glibc 2.38 or later, so Ubuntu 24.0
 
 ## Technology
 
-Desktop: Rust · Tauri 2 · WebView2 / WKWebView / WebKitGTK · custom URI protocol for chapter/resource virtualisation · fastembed (ONNX) · instant-distance (HNSW) · PDF.js · tokio-tungstenite (edge-tts).
-
-Android: Flutter / Dart · Android WebView (a separate project that follows this repository's `contracts/`; current version v0.3.0).
+Rust · Tauri 2 · WebView2 / WKWebView / WebKitGTK · custom URI protocol for chapter/resource virtualisation · fastembed (ONNX) · instant-distance (HNSW) · PDF.js · tokio-tungstenite (edge-tts).

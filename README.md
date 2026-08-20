@@ -2,7 +2,7 @@
 
 **中文** | [English](README.en.md)
 
-一个面向 Windows、macOS、Linux 与 Android 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
+一个面向 Windows、macOS 与 Linux 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 > 第一方代码的适用范围和第三方材料见 [许可证范围](docs/legal/licensing-scope.md) 与 [第三方声明](THIRD_PARTY_NOTICES.md)。受历史 GPL 依赖整改影响，新增公开二进制发布目前由许可证门禁暂停；本机与 CI 验收构建不受影响。
 
@@ -42,14 +42,6 @@
 - **干净正文**：点击资讯后在阅读器内打开提取后的标题、正文、图片、来源与发布时间，丢弃站点导航、广告、评论和登录浮层；右侧保留单一返回资讯流按钮
 - **本地缓存与预取**：可在资讯设置中启用后台预取；应用空闲后每 5 分钟刷新已启用来源，最多 6 路并发，打开时优先显示本地缓存，封面仍按卡片进入视野时懒加载
 
-**Android v0.3.0**
-- **书架与导入**：账号、搜索、统计、筛选与布局、设置、更多六个一级入口；支持系统文件选择导入 EPUB / TXT、Download 自动导入、批量导入及封面墙阅读进度显示
-- **阅读与 EPUB 兼容**：后台解析与缓存改善大书打开；兼容 EPUB 封面/正文图片、章节头图与脚注；支持滚动、整页左右翻页、点击翻页和长按自定义划词菜单
-- **划词工具与词典**：高亮、批注、书摘、书签、离线中英文词典、翻译、Web / 跨书 / 相似语义搜索与智读；查词可进入生词本并按熟悉度复习
-- **账号与私密同步**：新增邮箱绑定/换绑、修改/找回密码；智读与翻译设置可同步，API Key 使用独立同步密码加密后才可跨设备恢复
-- **性能与稳定性**：EPUB 在后台 isolate 安全解析并按章缓存；书架延后加载大段标注数据，进入章节后预热相邻章节；滚动手势降低惯性并限制跨章边界
-- **全文与语义检索**：新增本机全文索引、搜索结果页及 Android 端语义索引构建；索引仅保留在设备本地，不上传书籍正文或向量。
-
 **检索**
 - **书架全文检索**：压缩逐章文本索引 + Bloom 预筛选 + 有界 LRU 缓存 + 多线程字节级 `memmem`；保留精确扫描兜底，兼顾速度与结果完整性
 - **语义检索**：`bge-small-zh-v1.5`（fastembed / ONNX，离线）向量嵌入；合并多中心画像 + 分片 HNSW 近邻索引，兼容并自动迁移旧版语义画像/HNSW；主设置页可管理模型、语义索引和加速索引
@@ -67,7 +59,7 @@
 - **高频词语音包**：可在本机生成前 10,000 高频英文词语音缓存，支持暂停、继续、进度显示和删除
 - **「我的书架」显示设置**：封面是否显示阅读进度 / 评分 / 书名，各自开关；网格视图可只显示封面，筛选面板可保持默认自适应或指定封面列数
 - **新版提示**：启动后台优先检查 GitHub 最新发行版，连接失败时走服务器更新清单兜底；「关于」里可手动检查更新、看本版更新内容
-- **稳定发布流程**：GitHub Actions CI 与本地固定检查脚本共用 `scripts/check.ps1`，覆盖测试、UTF-8、版本一致、图标、安全基线和 CSS；release 构建脚本自动校验图标并刷新 Windows 图标缓存；GitHub Release 同时发布 Windows 单文件绿色版/安装包、macOS Apple Silicon DMG/App ZIP、Linux AppImage/deb、Android APK 与各平台 SHA-256 校验清单
+- **稳定发布流程**：GitHub Actions CI 与本地固定检查脚本共用 `scripts/check.ps1`，覆盖测试、UTF-8、版本一致、图标、安全基线和 CSS；release 构建脚本自动校验图标并刷新 Windows 图标缓存；GitHub Release 同时发布 Windows 单文件绿色版/安装包、macOS Apple Silicon DMG/App ZIP、Linux AppImage/deb 与各平台 SHA-256 校验清单
 - 划词 web 搜索、独立窗口（EPUB 与 PDF 各自记忆几何）、关于页
 
 > 智读采用用户自备 API Key。接口配置经系统能力保护后仅保存在本机，不进入同步实体；发送内容限制为当前书已经读到的相关章节和用户明确选择的文字。
@@ -136,4 +128,4 @@ sudo apt install ./Kunpeng-Reader-v*-Linux-x86_64.deb
 
 ## 技术栈
 
-桌面：Rust · Tauri 2 · WebView2 / WKWebView / WebKitGTK · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)；Android：Flutter / Dart · Android WebView（独立工程，遵循本仓库 `contracts/`；当前版本 v0.3.0）。
+Rust · Tauri 2 · WebView2 / WKWebView / WebKitGTK · 自定义 URI 协议（按章/资源虚拟化）· fastembed(ONNX) · instant-distance(HNSW) · PDF.js · tokio-tungstenite(edge-tts)。
