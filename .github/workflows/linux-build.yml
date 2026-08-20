@@ -217,7 +217,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download verified Linux artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: Kunpeng-Reader-Linux-x86_64
           path: target/linux-release

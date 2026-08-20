@@ -196,7 +196,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download verified macOS artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: Kunpeng-Reader-macOS-Apple-Silicon
           path: target/macos-release
