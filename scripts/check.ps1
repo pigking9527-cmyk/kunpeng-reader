@@ -25,6 +25,17 @@ try {
   & (Join-Path $repo 'scripts\check-repository-safety.ps1') -AllTracked
   if ($LASTEXITCODE -ne 0) { throw 'Repository safety check failed.' }
 
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    throw 'Node.js not found: cannot generate the packaged license inventory or run frontend checks.'
+  }
+
+  # Tauri treats the generated dependency inventory as a packaged resource,
+  # so every Cargo command that evaluates build.rs needs this file first on a
+  # fresh checkout. Keep the license gate ahead of clippy/check/test.
+  Write-Host '== dependency and asset licenses =='
+  & node (Join-Path $repo 'scripts/check-licenses.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'License policy check failed.' }
+
   Write-Host '== cargo fmt --check =='
   Invoke-NativeCheck 'cargo fmt --check' { cargo fmt -- --check }
 
@@ -36,10 +47,6 @@ try {
 
   Write-Host '== cargo test =='
   Invoke-NativeCheck 'cargo test' { cargo test }
-  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw 'Node.js not found: cannot run JavaScript syntax checks.'
-  }
-
   Write-Host '== frontend TypeScript lint =='
   Invoke-NativeCheck 'frontend TypeScript lint' { npm run lint }
 
@@ -211,10 +218,6 @@ try {
       throw "scripts/release.ps1 missing required release integrity hook: $requiredReleaseHook"
     }
   }
-
-  Write-Host '== dependency and asset licenses =='
-  & node (Join-Path $repo 'scripts/check-licenses.mjs')
-  if ($LASTEXITCODE -ne 0) { throw 'License policy check failed.' }
 
   Write-Host '== IP clean snapshot =='
   & node (Join-Path $repo 'scripts/check-ip-clean-snapshot.mjs')

@@ -2389,7 +2389,7 @@ mod tests {
         clear_cached_sync_token();
         let record = SyncSettingsRecord {
             url: String::new(),
-            protected_token: Some("keychain:v1".into()),
+            protected_token: Some("test:remembered".into()),
             legacy_token: String::new(),
             username: String::new(),
             user_id: String::new(),
@@ -2400,7 +2400,7 @@ mod tests {
             last_sync_accepted: 0,
             last_sync_ignored: 0,
         };
-        cache_sync_token("keychain:v1", "session-token");
+        cache_sync_token("test:remembered", "session-token");
         assert_eq!(
             resolve_sync_settings(record.clone()).unwrap().token,
             "session-token"
@@ -2566,7 +2566,7 @@ mod tests {
         clear_cached_sync_token();
         let record = SyncSettingsRecord {
             url: "https://reader.example".into(),
-            protected_token: Some("keychain:v1".into()),
+            protected_token: Some("test:remembered".into()),
             legacy_token: String::new(),
             username: "alice".into(),
             user_id: "u1".into(),
@@ -2578,7 +2578,7 @@ mod tests {
             last_sync_ignored: 0,
         };
         assert_eq!(logout_token_without_keychain_prompt(&record), "");
-        cache_sync_token("keychain:v1", "session-token");
+        cache_sync_token("test:remembered", "session-token");
         assert_eq!(
             logout_token_without_keychain_prompt(&record),
             "session-token"
