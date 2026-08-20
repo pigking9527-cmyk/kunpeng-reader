@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { defineConfig, type LibraryFormats, type Plugin, type UserConfig } from "vite";
 
-const virtualEntryName = "kunpeng:legacy-ts-entry";
+const virtualEntryName = "kunpeng-legacy-ts-entry.js";
 const virtualEntryId = `\0${virtualEntryName}`;
 
 function requiredEnvironment(name: string): string {
@@ -15,7 +15,8 @@ function classicEntryPlugin(source: string, installExport: string): Plugin {
   return {
     name: "kunpeng-classic-legacy-entry",
     resolveId(id) {
-      return id === virtualEntryName || id.endsWith(`/apps/desktop-ui/${virtualEntryName}`)
+      const normalizedId = id.replaceAll("\\", "/");
+      return id === virtualEntryName || normalizedId.endsWith(`/${virtualEntryName}`)
         ? virtualEntryId
         : null;
     },
