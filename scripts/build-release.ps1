@@ -6,13 +6,10 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $release = Join-Path $repo "target\release\ebook-reader-tauri.exe"
-$releaseOrt = Join-Path $repo "target\release\onnxruntime.dll"
 $repoExe = Join-Path $repo "鲲鹏阅读器.exe"
-$repoOrt = Join-Path $repo "onnxruntime.dll"
 $desktop = [Environment]::GetFolderPath("Desktop")
 $desktopShortcut = Join-Path $desktop "鲲鹏阅读器.lnk"
 $legacyDesktopExe = Join-Path $desktop "鲲鹏阅读器.exe"
-$legacyDesktopOrt = Join-Path $desktop "onnxruntime.dll"
 
 function Stop-ReaderProcesses {
   # 只关闭本脚本明确交付路径中的进程，绝不按同名进程猜测。
@@ -92,15 +89,13 @@ try {
     cargo build --release
   }
   if (-not (Test-Path -LiteralPath $release)) { throw "release exe 不存在：$release" }
-  if (-not (Test-Path -LiteralPath $releaseOrt)) { throw "release ONNX Runtime DLL 不存在：$releaseOrt" }
   Assert-NewIconEmbedded
   Stop-ReaderProcesses
   Copy-Item -LiteralPath $release -Destination $repoExe -Force
-  Copy-Item -LiteralPath $releaseOrt -Destination $repoOrt -Force
   Write-DesktopShortcut
-  Remove-Item -LiteralPath $legacyDesktopExe, $legacyDesktopOrt -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $legacyDesktopExe -Force -ErrorAction SilentlyContinue
   if (-not $SkipIconCacheRefresh) { Clear-ExplorerIconCache }
-  Get-Item -LiteralPath $repoExe, $repoOrt, $desktopShortcut | Select-Object FullName, Length, LastWriteTime
+  Get-Item -LiteralPath $repoExe, $desktopShortcut | Select-Object FullName, Length, LastWriteTime
 } finally {
   Pop-Location
 }

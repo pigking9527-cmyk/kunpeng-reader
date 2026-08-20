@@ -5,14 +5,11 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $fastExe = Join-Path $repo "target\fast\ebook-reader-tauri.exe"
-$fastOrt = Join-Path $repo "target\fast\onnxruntime.dll"
 $productName = -join @([char]0x9cb2, [char]0x9e4f, [char]0x9605, [char]0x8bfb, [char]0x5668)
 $repoExe = Join-Path $repo ($productName + ".exe")
-$repoOrt = Join-Path $repo "onnxruntime.dll"
 $desktop = [Environment]::GetFolderPath("Desktop")
 $desktopShortcut = Join-Path $desktop ($productName + ".lnk")
 $legacyDesktopExe = Join-Path $desktop ($productName + ".exe")
-$legacyDesktopOrt = Join-Path $desktop "onnxruntime.dll"
 
 function Stop-ReaderProcesses {
   # 只关闭本脚本明确交付路径中的进程，绝不按同名进程猜测。
@@ -74,18 +71,14 @@ try {
   if (-not (Test-Path -LiteralPath $fastExe)) {
     throw "Fast exe not found: $fastExe"
   }
-  if (-not (Test-Path -LiteralPath $fastOrt)) {
-    throw "ONNX Runtime DLL not found: $fastOrt"
-  }
 
   Stop-ReaderProcesses
   Copy-DesktopArtifact $fastExe $repoExe
-  Copy-DesktopArtifact $fastOrt $repoOrt
   Write-DesktopShortcut
-  Remove-Item -LiteralPath $legacyDesktopExe, $legacyDesktopOrt -Force -ErrorAction SilentlyContinue
-  $delivered = @($repoExe, $repoOrt, $desktopShortcut)
+  Remove-Item -LiteralPath $legacyDesktopExe -Force -ErrorAction SilentlyContinue
+  $delivered = @($repoExe, $desktopShortcut)
   Get-Item -LiteralPath $delivered | Select-Object FullName, Length, LastWriteTime
-  Write-Host "Fast GUI executable and ONNX Runtime stay in the repository; desktop only receives a shortcut. Use scripts/build-release.ps1 for official releases."
+  Write-Host "Fast GUI executable stays in the repository; desktop only receives a shortcut. Use scripts/build-release.ps1 for official releases."
 } finally {
   Pop-Location
 }

@@ -375,13 +375,11 @@ try {
     $releaseExe = Join-Path $repo 'target\release\ebook-reader-tauri.exe'
     $productExe = [string]$tauri.productName + '.exe'
     $repoExe = Join-Path $repo $productExe
-    $repoOrt = Join-Path $repo 'onnxruntime.dll'
     $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) ([string]$tauri.productName + '.lnk')
-    foreach ($file in @($releaseExe, $repoExe, $repoOrt)) {
+    foreach ($file in @($releaseExe, $repoExe)) {
       if (-not (Test-Path -LiteralPath $file)) { throw "Release artifact missing: $file" }
       $item = Get-Item -LiteralPath $file
-      $minimumSize = if ($file -eq $repoOrt) { 1MB } else { 10MB }
-      if ($item.Length -lt $minimumSize) { throw "Release artifact looks too small: $file ($($item.Length) bytes)" }
+      if ($item.Length -lt 10MB) { throw "Release artifact looks too small: $file ($($item.Length) bytes)" }
     }
     if (-not (Test-Path -LiteralPath $desktopShortcut)) {
       throw "Desktop shortcut missing: $desktopShortcut"

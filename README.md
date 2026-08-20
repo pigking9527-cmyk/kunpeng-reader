@@ -100,7 +100,7 @@ cargo tauri build
 # 安装包输出：target/release/bundle/nsis/
 ```
 
-- 单文件绿色版：`target/release/ebook-reader-tauri.exe`；本机运行文件为项目根目录的 `鲲鹏阅读器.exe` 与 `onnxruntime.dll`，桌面仅创建 `鲲鹏阅读器.lnk` 快捷方式
+- 单文件绿色版：`target/release/ebook-reader-tauri.exe`；ONNX Runtime 已静态链接，本机运行文件为项目根目录的 `鲲鹏阅读器.exe`，桌面仅创建 `鲲鹏阅读器.lnk` 快捷方式
 - 安装包：`target/release/bundle/nsis/`
 
 ### Linux x86_64
