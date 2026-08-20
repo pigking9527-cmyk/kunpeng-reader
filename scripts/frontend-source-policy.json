@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "expectedDirectTauriOccurrences": 0,
+  "visualContract": {
+    "html": {
+      "ui/index.html": "3b4752ffe86e69f66504950a046b3c7425ec2749949c3961a6e10fa6bcf8f1e6",
+      "ui/pdfview.html": "d0de4f5c7e6c278e157d2ca370ee26c463afab647bff5a16b3f616a836dfab00",
+      "ui/reader-page-style.html": "cee3915099b8b34970011c4f6eaf63c5f4b37b1d6a63797a528547ac3b9ab06c",
+      "ui/reader.html": "5a80480c53922433c4216b207a0c0fc4db3ea8a4b1f229279edf4447f4b6aae5",
+      "ui/search.html": "3ee0b49137bab1fa2c5324ec78344d715d2d3f6e62982a64613f2de7a0f46d3e"
+    },
+    "css": {
+      "packages/ui/src/tokens.css": "401f0963e93e18b56357e6508dcce0e6b1c0bc4660d45b5fe9507a4fc688e285",
+      "ui/book-info-panel.css": "4b96008decc381955a2acfe39e03ef58ab8f82e7656d0b93ed96cf88f93d94a9",
+      "ui/book-info-related.css": "265b306f3474870ae16a397ea025ed6e3941864599a1198f728433c2ddd37467",
+      "ui/overlay-stack.css": "6dd1e8166fa7d004dfc69f4e6b12aac75cd0e94d3e6b5ec2de08b0119970b92a",
+      "ui/reader-click-zones.css": "f0881621eee64692f3851a90c13b84a104d0e8bc88b103627982fe2d3ae04fa7",
+      "ui/reader-preferences.css": "aa16df648f5e651fd22f07b1699cdda008f81a243d22d4962ebe448741b52a35",
+      "ui/styles.css": "955600c3e081a0c2b46b93d29b850026bddd41adedecdbdc5979743a53afb101",
+      "ui/window-resize.css": "db2a368b04f36295c8dc3a39f709838334171029fc3c6ba5960e6c8f0a7e1334"
+    }
+  },
+  "note": "Update this baseline downward in the same change that migrates original UI calls to packages/tauri-api."
+}

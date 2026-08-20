@@ -5,8 +5,8 @@ const assert = require("node:assert/strict");
 
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "reader.html"), "utf8");
-const runtime = fs.readFileSync(path.join(root, "reader-page-runtime.js"), "utf8");
-const settings = fs.readFileSync(path.join(root, "reader-settings-ui.js"), "utf8");
+const runtime = fs.readFileSync(path.join(root, "generated-reader-page-ts", "reader-page-runtime.js"), "utf8");
+const settings = fs.readFileSync(path.join(root, "generated-ts", "reader-settings-ui.js"), "utf8");
 const core = fs.readFileSync(path.join(root, "..", "src", "tts_core.rs"), "utf8");
 
 test("read aloud automatically selects Microsoft Neural voices for all supported UI languages", () => {
@@ -15,9 +15,9 @@ test("read aloud automatically selects Microsoft Neural voices for all supported
     "ko-KR-SunHiNeural", "fr-FR-DeniseNeural", "de-DE-KatjaNeural", "es-ES-ElviraNeural",
     "ru-RU-SvetlanaNeural", "pt-BR-FranciscaNeural",
   ].forEach((voice) => assert.match(runtime, new RegExp(voice)));
-  assert.match(runtime, /function ttsLanguageForText/);
-  assert.match(runtime, /function ttsVoiceForText/);
-  assert.match(runtime, /voice:ttsVoiceForText\(ttsSents\[i\]\.text\)/);
+  assert.match(runtime, /const ttsLanguageForText = \(text\) =>/);
+  assert.match(runtime, /const ttsVoiceForText = \(text\) =>/);
+  assert.match(runtime, /voice: ttsVoiceForText\(sentence\.text\)/);
   assert.match(core, /edge_ssml_uses_the_selected_voice_locale/);
 });
 

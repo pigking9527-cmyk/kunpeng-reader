@@ -168,11 +168,7 @@ fn schedule_reading_stats_save(app: tauri::AppHandle) {
     std::thread::spawn(move || loop {
         let before_wait = READING_STATS_SAVE_EPOCH.load(Ordering::Acquire);
         std::thread::sleep(Duration::from_secs(5));
-        if app
-            .webview_windows()
-            .keys()
-            .any(|label| label.starts_with("reader-"))
-        {
+        if crate::window_commands::any_bound_reader_window(&app) {
             std::thread::sleep(Duration::from_secs(25));
             continue;
         }

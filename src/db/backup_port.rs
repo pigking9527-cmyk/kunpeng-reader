@@ -48,7 +48,7 @@ impl AppDb {
         let count = self
             .conn
             .execute(
-                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_config_v1','translation_config_v1','ai_reader_history_v1','ai_reader_history_entry_v2','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1')",
+                "DELETE FROM entities WHERE kind NOT IN ('book_state_v2','reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_config_v1','translation_config_v1','ai_reader_history_v1','ai_reader_history_entry_v2','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1','reading_handoff_v1','news_subscriptions_v1')",
                 [],
             )
             .map(|count| count as u32)

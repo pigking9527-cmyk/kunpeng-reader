@@ -401,7 +401,11 @@ pub(crate) fn background_main(app: &tauri::AppHandle) {
 
     for (label, reader) in app.webview_windows() {
         if label.starts_with("reader-") {
-            let _ = reader.close();
+            if crate::window_commands::reader_window_id(&reader).is_some() {
+                let _ = reader.close();
+            } else {
+                let _ = reader.destroy();
+            }
         }
     }
     if !config.continue_high_cost {
@@ -448,6 +452,7 @@ pub(crate) fn activate_main(app: &tauri::AppHandle, requested_at_ms: u64) {
     enhancement.backgrounded.store(false, Ordering::Release);
     let resume_at_ms = enhancement.begin_hot_activation_grace(crate::now_ms());
     let _ = reveal_main(app);
+    crate::window_commands::schedule_clean_reader_shell(app);
     emit_background_state(
         app,
         false,

@@ -5,9 +5,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const uiRoot = path.join(__dirname, "..");
-const source = fs.readFileSync(path.join(uiRoot, "reader-i18n.js"), "utf8");
+const source = fs.readFileSync(path.join(uiRoot, "generated-ts", "reader-i18n.js"), "utf8");
 const html = fs.readFileSync(path.join(uiRoot, "reader.html"), "utf8");
-const notes = fs.readFileSync(path.join(uiRoot, "reader-notes-ui.js"), "utf8");
+const notes = fs.readFileSync(path.join(uiRoot, "generated-ts", "reader-notes-ui.js"), "utf8");
 
 function loadReaderI18n(language) {
   const localStorage = { value: language, getItem() { return this.value; } };
@@ -18,18 +18,20 @@ function loadReaderI18n(language) {
     localStorage, navigator: { language: language === "ja" ? "ja-JP" : language }, document,
     addEventListener() {}, dispatchEvent() {},
   };
-  vm.runInNewContext(source, { window, document, localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+  window.window = window;
+  window.CustomEvent = function CustomEvent() {};
+  vm.runInNewContext(source, window);
   return { i18n: window.ReaderI18n, localStorage };
 }
 
 test("reader uses an independent localization entry point before reader behavior modules", () => {
-  assert.match(html, /<script src="reader-i18n\.js"><\/script>\s*<script src="bridge\/reader-protocol-bridge\.js"><\/script>\s*<script src="reader-message\.js">/);
+  assert.match(html, /<script src="generated-ts\/reader-i18n\.js"><\/script>\s*<script src="bridge\/reader-protocol-bridge\.js"><\/script>\s*<script src="generated-ts\/reader-message\.js">/);
   assert.match(html, /id="prev-btn"[^>]*data-reader-i18n-title="previousChapter"/);
   assert.match(html, /id="next-btn"[^>]*data-reader-i18n-title="nextChapter"/);
-  const previousPageButton = notes.slice(notes.indexOf('getElementById("prev-btn")'), notes.indexOf('getElementById("next-btn")'));
-  const nextPageButton = notes.slice(notes.indexOf('getElementById("next-btn")'), notes.indexOf("let tocBuildVersion"));
-  assert.match(previousPageButton, /sendToPage\(\{ pageTurn: -1 \}\);/);
-  assert.match(nextPageButton, /sendToPage\(\{ pageTurn: 1 \}\);/);
+  const previousPageButton = notes.slice(notes.indexOf('requiredElement(document, "prev-btn")'), notes.indexOf('requiredElement(document, "next-btn")'));
+  const nextPageButton = notes.slice(notes.indexOf('requiredElement(document, "next-btn")'), notes.indexOf("const createTocItem"));
+  assert.match(previousPageButton, /host\.sendToPage\(\{ pageTurn: -1 \}\);/);
+  assert.match(nextPageButton, /host\.sendToPage\(\{ pageTurn: 1 \}\);/);
   assert.doesNotMatch(previousPageButton + nextPageButton, /gotoChapter/);
   assert.match(html, /id="immersive-btn"[^>]*data-reader-i18n-title="immersive"/);
   assert.match(html, /id="vocab-gear"[^>]*data-reader-i18n-title="vocabularySettings"/);

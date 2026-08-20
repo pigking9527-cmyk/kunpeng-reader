@@ -103,10 +103,14 @@ fn snapshot(db: &AppDb) -> Result<ReaderPaletteSyncSnapshot, String> {
 pub(crate) fn reader_palette_sync_get(
     state: tauri::State<AppState>,
 ) -> Result<ReaderPaletteSyncSnapshot, String> {
-    state.with_db_write("reader_palette_sync_get", |db| {
+    let snapshot = state.with_db_write("reader_palette_sync_get", |db| {
         migrate_legacy_backgrounds(db)?;
         snapshot(db)
-    })
+    })?;
+    // Cache reclamation is deliberately best-effort: an inaccessible cache
+    // directory must never prevent a user from reading or editing themes.
+    let _ = crate::reader_backgrounds::prune_unreferenced_cached_assets(state.inner());
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -132,7 +136,7 @@ pub(crate) fn reader_palette_sync_save(
         palettes.push(palette);
     }
     let order = normalized_order(request.order, &ids);
-    state.with_db_write("reader_palette_sync_save", |db| {
+    let snapshot = state.with_db_write("reader_palette_sync_save", |db| {
         let existing = db.sync_entities_by_kind(READER_PALETTE_KIND)?;
         for item in existing.into_iter().filter(|item| item.deleted_at == 0) {
             if !ids.contains(&item.id) {
@@ -153,5 +157,7 @@ pub(crate) fn reader_palette_sync_save(
         ));
         db.upsert_json_batch(&writes)?;
         snapshot(db)
-    })
+    })?;
+    let _ = crate::reader_backgrounds::prune_unreferenced_cached_assets(state.inner());
+    Ok(snapshot)
 }

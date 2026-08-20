@@ -18,6 +18,15 @@ fn test_state() -> AppState {
         pool: pool_for_test(),
         metrics,
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -128,6 +137,75 @@ async fn sync_accepts_protocol_v5_and_rejects_v4() {
 }
 
 #[tokio::test]
+async fn checkpoint_requires_v5_authentication_and_a_valid_query() {
+    let missing_protocol = app(test_state())
+        .oneshot(
+            Request::get("/v1/sync/checkpoint?dataGeneration=1&cursor=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_protocol.status(), StatusCode::UPGRADE_REQUIRED);
+
+    let invalid = app(test_state())
+        .oneshot(
+            Request::get("/v1/sync/checkpoint?dataGeneration=0&cursor=-1")
+                .header("x-sync-protocol-version", "5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_invalid_request(invalid).await;
+
+    let reaches_auth = app(test_state())
+        .oneshot(
+            Request::get("/v1/sync/checkpoint?dataGeneration=1&cursor=0")
+                .header("x-sync-protocol-version", "5")
+                .header("authorization", "Bearer fixture-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_reaches_database_boundary(reaches_auth).await;
+}
+
+#[test]
+fn sync_checkpoint_fixture_matches_the_schema_surface() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../contracts/sync/sync-checkpoint.schema.json"
+    ))
+    .expect("checkpoint schema JSON");
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../contracts/fixtures/sync-checkpoint.v1.json"
+    ))
+    .expect("checkpoint fixture JSON");
+    assert_eq!(fixture["path"], "/v1/sync/checkpoint");
+    assert_eq!(fixture["method"], "GET");
+    for case_name in ["caughtUp", "behind"] {
+        let case = &fixture[case_name];
+        for field in schema["$defs"]["query"]["required"].as_array().unwrap() {
+            assert!(case["query"].get(field.as_str().unwrap()).is_some());
+        }
+        for field in schema["$defs"]["response"]["required"].as_array().unwrap() {
+            assert!(case["response"].get(field.as_str().unwrap()).is_some());
+        }
+    }
+    assert!(
+        fixture["caughtUp"]["response"]["caughtUp"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(!fixture["behind"]["response"]["caughtUp"].as_bool().unwrap());
+    assert_eq!(
+        fixture["generationMismatch"]["errorCode"],
+        "DATA_GENERATION_MISMATCH"
+    );
+}
+
+#[tokio::test]
 async fn auth_responses_are_never_cached() {
     let response = app(test_state())
         .oneshot(
@@ -207,6 +285,45 @@ async fn registration_is_unavailable_without_smtp() {
 }
 
 #[tokio::test]
+async fn phone_registration_is_unavailable_without_sms_provider() {
+    let mut state = test_state();
+    state.config.sms = None;
+    let mut request = Request::post("/v1/auth/register/phone/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"username":"new-reader","phone":"+8613711112222","installationId":"test-installation"}"#,
+        ))
+        .unwrap();
+    loopback_peer(&mut request);
+    let response = app(state).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    assert_eq!(body["error"]["code"], "PHONE_REGISTRATION_UNAVAILABLE");
+}
+
+#[tokio::test]
+async fn phone_registration_rejects_non_e164_before_database_access() {
+    let mut state = test_state();
+    state.config.sms = Some(reader_sync_api::config::TencentSmsConfig {
+        secret_id: "test-id".to_owned(),
+        secret_key: secrecy::SecretString::from("test-secret-key-value".to_owned()),
+        sdk_app_id: "1400000000".to_owned(),
+        sign_name: "test".to_owned(),
+        template_id: "1000".to_owned(),
+        region: "ap-guangzhou".to_owned(),
+        daily_send_limit: 10,
+    });
+    let mut request = Request::post("/v1/auth/register/phone/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"username":"new-reader","phone":"13711112222","installationId":"test-installation"}"#,
+        ))
+        .unwrap();
+    loopback_peer(&mut request);
+    assert_invalid_request(app(state).oneshot(request).await.unwrap()).await;
+}
+
+#[tokio::test]
 async fn password_reset_request_is_unavailable_without_smtp() {
     let mut state = test_state();
     state.config.smtp = None;
@@ -278,35 +395,6 @@ fn assert_v5_protocol_header(body: &Value, path: &str, method: &str) {
     assert_eq!(protocol["description"], "Must be 5");
 }
 
-fn assert_recovery_openapi(body: &Value) {
-    assert!(body["paths"]["/v1/sync/recovery/status"].is_object());
-    assert!(body["paths"]["/v1/sync/recovery/restore"].is_object());
-    assert_eq!(
-        body["paths"]["/v1/sync/recovery/status"]["get"]["security"][0]["bearer_token"],
-        serde_json::json!([])
-    );
-    assert_eq!(
-        body["paths"]["/v1/sync/recovery/restore"]["post"]["security"][0]["bearer_token"],
-        serde_json::json!([])
-    );
-    assert_eq!(
-        body["components"]["schemas"]["RecoveryRestoreRequest"]["required"],
-        serde_json::json!(["password", "confirm", "targetAt", "dataGeneration"])
-    );
-    assert_eq!(
-        body["components"]["schemas"]["RecoveryRestoreResponse"]["required"],
-        serde_json::json!([
-            "ok",
-            "targetAt",
-            "restoredAt",
-            "restoredEntities",
-            "tombstonedEntities",
-            "dataGeneration",
-            "tokensRevoked"
-        ])
-    );
-}
-
 #[tokio::test]
 async fn openapi_defines_bearer_security_and_sync_routes() {
     let response = app(test_state())
@@ -321,13 +409,75 @@ async fn openapi_defines_bearer_security_and_sync_routes() {
     );
     assert!(body["paths"]["/v1/sync/push"].is_object());
     assert!(body["paths"]["/v1/sync/pull"].is_object());
+    assert!(body["paths"]["/v1/sync/checkpoint"].is_object());
     assert!(body["paths"]["/v1/sync/inventory"].is_object());
     assert!(body["paths"]["/v1/sync/reconcile"].is_object());
     assert!(body["paths"]["/v1/sync/secret-state"].is_object());
     assert!(body["paths"]["/v1/sync/secret-state/reset"].is_object());
     assert!(body["paths"]["/v1/sync/data/reset"].is_object());
-    assert_recovery_openapi(&body);
+    assert!(body["paths"]["/v1/sync/recovery/status"].is_null());
+    assert!(body["paths"]["/v1/sync/recovery/restore"].is_null());
     assert_assets_openapi(&body);
+}
+
+#[tokio::test]
+async fn cloud_recovery_routes_are_not_available() {
+    for request in [
+        Request::get("/v1/sync/recovery/status")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/v1/sync/recovery/restore")
+            .body(Body::from("{}"))
+            .unwrap(),
+    ] {
+        let response = app(test_state()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[test]
+fn phone_registration_contract_fixture_matches_json_schema() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../contracts/auth/phone-registration.schema.json"
+    ))
+    .expect("phone registration schema JSON");
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../contracts/fixtures/phone-registration-api.v1.json"
+    ))
+    .expect("phone registration fixture JSON");
+    let start = &fixture["start"]["requestExample"];
+    let confirm = &fixture["confirm"]["requestExample"];
+    let response = &fixture["start"]["response"];
+    assert_eq!(
+        start
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        schema["$defs"]["startRequest"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    assert_eq!(
+        response["expiresIn"],
+        schema["$defs"]["startResponse"]["properties"]["expiresIn"]["const"]
+    );
+    assert_eq!(confirm["phone"], "+8613711112222");
+    assert_eq!(confirm["code"].as_str().unwrap().len(), 6);
+    for required in schema["$defs"]["confirmRequest"]["required"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(confirm.get(required.as_str().unwrap()).is_some());
+    }
+    for sensitive in fixture["sensitiveValuesOmitted"].as_array().unwrap() {
+        let sensitive = sensitive.as_str().unwrap();
+        assert!(fixture["start"]["response"].get(sensitive).is_none());
+    }
 }
 
 #[tokio::test]
@@ -343,13 +493,12 @@ async fn openapi_sync_protocol_headers_require_v5() {
         ("/v1/sync/status", "get"),
         ("/v1/sync/push", "post"),
         ("/v1/sync/pull", "get"),
+        ("/v1/sync/checkpoint", "get"),
         ("/v1/sync/inventory", "get"),
         ("/v1/sync/reconcile", "post"),
         ("/v1/sync/secret-state", "get"),
         ("/v1/sync/secret-state/reset", "post"),
         ("/v1/sync/data/reset", "post"),
-        ("/v1/sync/recovery/status", "get"),
-        ("/v1/sync/recovery/restore", "post"),
         ("/v1/sync/assets/init", "post"),
         ("/v1/sync/assets/{asset_id}", "get"),
         ("/v1/sync/assets/{asset_id}", "put"),
@@ -360,6 +509,12 @@ async fn openapi_sync_protocol_headers_require_v5() {
         body["paths"]["/v1/sync/data/reset"]["post"]["security"][0]["bearer_token"],
         serde_json::json!([])
     );
+    assert_eq!(
+        body["paths"]["/v1/sync/checkpoint"]["get"]["security"][0]["bearer_token"],
+        serde_json::json!([])
+    );
+    assert!(body["components"]["schemas"]["CheckpointQuery"].is_object());
+    assert!(body["components"]["schemas"]["CheckpointResponse"].is_object());
     assert_eq!(
         body["components"]["schemas"]["DataResetRequest"]["required"],
         serde_json::json!(["password"])
@@ -387,6 +542,16 @@ async fn openapi_sync_protocol_headers_require_v5() {
     assert_eq!(
         body["components"]["schemas"]["RegistrationConfirmRequest"]["required"],
         serde_json::json!(["username", "email", "code", "password", "installationId"])
+    );
+    assert!(body["paths"]["/v1/auth/register/phone/start"].is_object());
+    assert!(body["paths"]["/v1/auth/register/phone/confirm"].is_object());
+    assert_eq!(
+        body["components"]["schemas"]["PhoneRegistrationStartRequest"]["required"],
+        serde_json::json!(["username", "phone", "installationId"])
+    );
+    assert_eq!(
+        body["components"]["schemas"]["PhoneRegistrationConfirmRequest"]["required"],
+        serde_json::json!(["username", "phone", "code", "password", "installationId"])
     );
     assert_password_reset_openapi(&body);
     assert!(body["paths"]["/v1/auth/password/change"].is_object());
@@ -616,7 +781,7 @@ async fn password_and_reset_requests_reject_unknown_or_snake_case_fields_before_
 }
 
 #[tokio::test]
-async fn registration_confirmation_accepts_the_desktop_minimum_password_length() {
+async fn registration_confirmation_enforces_the_new_password_character_range() {
     let valid = json_request(
         "POST",
         "/v1/auth/register/confirm",
@@ -624,7 +789,7 @@ async fn registration_confirmation_accepts_the_desktop_minimum_password_length()
             "username": "fixture-reader",
             "email": "fixture@example.com",
             "code": "000000",
-            "password": "12345678",
+            "password": "密密密密密密密密",
             "installationId": "fixture-installation"
         }),
     );
@@ -685,61 +850,6 @@ async fn sync_runtime_uses_camel_case_request_fields_before_database_access() {
         .headers_mut()
         .insert("x-sync-protocol-version", "5".parse().unwrap());
     assert_invalid_request(app(test_state()).oneshot(asset_snake_case).await.unwrap()).await;
-
-    let mut recovery_fixture: Value = serde_json::from_str(include_str!(
-        "../../../contracts/fixtures/sync-recovery-history.v1.json"
-    ))
-    .expect("recovery contract fixture");
-    let recovery_request = recovery_fixture["restore"]["request"]
-        .as_object_mut()
-        .expect("recovery restore request fixture");
-    recovery_request.insert(
-        "password".to_owned(),
-        Value::String("long-enough-password".to_owned()),
-    );
-    assert_eq!(recovery_request.len(), 4);
-    assert!(recovery_request.contains_key("confirm"));
-    assert!(recovery_request.contains_key("targetAt"));
-    assert!(recovery_request.contains_key("dataGeneration"));
-    assert!(recovery_request.contains_key("password"));
-    let recovery_valid = json_request(
-        "POST",
-        "/v1/sync/recovery/restore",
-        &recovery_fixture["restore"]["request"],
-    )
-    .into_parts();
-    let mut recovery_valid = Request::from_parts(recovery_valid.0, recovery_valid.1);
-    recovery_valid
-        .headers_mut()
-        .insert("x-sync-protocol-version", "5".parse().unwrap());
-    recovery_valid
-        .headers_mut()
-        .insert("authorization", "Bearer fixture-token".parse().unwrap());
-    assert_reaches_database_boundary(app(test_state()).oneshot(recovery_valid).await.unwrap())
-        .await;
-
-    let recovery_snake_case = json_request(
-        "POST",
-        "/v1/sync/recovery/restore",
-        &serde_json::json!({
-            "password": "long-enough-password",
-            "confirm": true,
-            "target_at": 1_786_155_000_000_i64,
-            "dataGeneration": 1
-        }),
-    )
-    .into_parts();
-    let mut recovery_snake_case = Request::from_parts(recovery_snake_case.0, recovery_snake_case.1);
-    recovery_snake_case
-        .headers_mut()
-        .insert("x-sync-protocol-version", "5".parse().unwrap());
-    assert_invalid_request(
-        app(test_state())
-            .oneshot(recovery_snake_case)
-            .await
-            .unwrap(),
-    )
-    .await;
 }
 
 #[tokio::test]

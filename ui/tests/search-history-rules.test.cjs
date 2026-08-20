@@ -4,8 +4,9 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "search-history-rules.js"), "utf8");
-const context = { window: {}, Date, Number, Object, Array, String };
+const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "search-history-rules.js"), "utf8");
+const context = { Date, Number, Object, Array, String };
+context.window = context;
 vm.runInNewContext(source, context, { filename: "search-history-rules.js" });
 const rules = context.window.ReaderSearchHistoryRules;
 

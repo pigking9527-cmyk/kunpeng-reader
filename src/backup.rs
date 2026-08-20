@@ -3,6 +3,7 @@ use crate::{
     AppState,
 };
 mod catalog;
+mod error;
 mod restore;
 mod retention;
 mod snapshot;
@@ -1167,7 +1168,8 @@ pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String
     if let Err(error) = refresh_restore_plan_originals(&mut plans) {
         cleanup_restore_plans(&plans);
         return match db::AppDb::open_existing() {
-            Ok(database) => {
+            Ok(mut database) => {
+                state.bind_sync_auto_scheduler(&mut database);
                 *data.db = Some(database);
                 Err(error)
             }
@@ -1191,7 +1193,7 @@ pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String
             Ok(())
         },
     );
-    let restored_db = match installed {
+    let mut restored_db = match installed {
         Ok(()) => db::AppDb::open_existing()
             .map_err(|error| format!("恢复已验证但重新打开数据库失败：{error}"))?,
         Err(primary) => {
@@ -1205,7 +1207,8 @@ pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String
             }
             let reopen = db::AppDb::open_existing();
             return match reopen {
-                Ok(database) => {
+                Ok(mut database) => {
+                    state.bind_sync_auto_scheduler(&mut database);
                     *data.db = Some(database);
                     Err(primary)
                 }
@@ -1215,6 +1218,7 @@ pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String
             };
         }
     };
+    state.bind_sync_auto_scheduler(&mut restored_db);
     *data.db = Some(restored_db);
     *data.library = crate::book::Library::load();
     *data.stats = StatsStore::load();

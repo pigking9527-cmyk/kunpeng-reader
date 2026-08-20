@@ -5,7 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const ui = path.join(__dirname, "..");
-const source = fs.readFileSync(path.join(ui, "window-resize.js"), "utf8");
+const source = fs.readFileSync(path.join(ui, "generated-ts", "window-resize.js"), "utf8");
 const css = fs.readFileSync(path.join(ui, "window-resize.css"), "utf8");
 const mainHtml = fs.readFileSync(path.join(ui, "index.html"), "utf8");
 const readerHtml = fs.readFileSync(path.join(ui, "reader.html"), "utf8");
@@ -41,14 +41,16 @@ function linuxHarness() {
       return Promise.resolve();
     } } },
   };
-  vm.runInNewContext(source, { window, document });
+  window.window = window;
+  window.document = document;
+  vm.runInNewContext(source, window);
   return { body, calls };
 }
 
 test("main and reader windows load the shared Linux resize layer", () => {
   for (const html of [mainHtml, readerHtml]) {
     assert.match(html, /href="window-resize\.css"/);
-    assert.match(html, /src="window-resize\.js"/);
+    assert.match(html, /src="generated-ts\/window-resize\.js"/);
   }
 });
 
@@ -86,12 +88,12 @@ test("a primary pointer press starts native resize dragging", () => {
 
 test("non-Linux webviews do not add custom resize handles", () => {
   const body = { children: [], appendChild(child) { this.children.push(child); } };
-  vm.runInNewContext(source, {
-    window: {
-      navigator: { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-      __TAURI__: { core: { invoke: () => Promise.resolve() } },
-    },
+  const context = {
+    navigator: { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+    __TAURI__: { core: { invoke: () => Promise.resolve() } },
     document: { body },
-  });
+  };
+  context.window = context;
+  vm.runInNewContext(source, context);
   assert.equal(body.children.length, 0);
 });

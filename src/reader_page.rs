@@ -4,17 +4,12 @@
 pub(crate) const READER_PAGE_HEAD: &str = concat!(
     include_str!("../ui/reader-page-style.html"),
     "<script>",
-    include_str!("../ui/reader-page-bug-trace.js"),
-    include_str!("../ui/reader-page-scroll-rules.js"),
-    include_str!("../ui/reader-page-layout.js"),
-    include_str!("../ui/reader-page-end.js"),
-    include_str!("../ui/reader-page-pagination.js"),
-    include_str!("../ui/reader-page-measurement.js"),
-    include_str!("../ui/reader-page-highlight-rules.js"),
-    include_str!("../ui/reader-page-annotations.js"),
-    include_str!("../ui/reader-page-mode-switch.js"),
-    include_str!("../ui/reader-page-runtime.js"),
-    include_str!("../ui/reader-page-transition.js"),
+    include_str!("../ui/generated-reader-page-ts/reader-page-bug-trace.js"),
+    include_str!("../ui/generated-reader-page-ts/reader-page-scroll-rules.js"),
+    include_str!("../ui/generated-reader-page-ts/reader-page-layout-annotations.js"),
+    include_str!("../ui/generated-reader-page-ts/reader-page-mode-switch.js"),
+    include_str!("../ui/generated-reader-page-ts/reader-page-runtime.js"),
+    include_str!("../ui/generated-reader-page-ts/reader-page-transition.js"),
     "</script>
 "
 );
@@ -25,7 +20,10 @@ mod tests {
 
     #[test]
     fn reader_page_head_keeps_required_hooks() {
-        assert!(READER_PAGE_HEAD.contains("window.addEventListener('message'"));
+        assert!(
+            READER_PAGE_HEAD.contains("window.addEventListener('message'")
+                || READER_PAGE_HEAD.contains("w.addEventListener(\"message\"")
+        );
         assert!(READER_PAGE_HEAD.contains("function showChapter"));
         assert!(READER_PAGE_HEAD.contains("parent.postMessage"));
         assert!(READER_PAGE_HEAD.contains("ttsStart"));
@@ -34,6 +32,7 @@ mod tests {
         assert!(READER_PAGE_HEAD.contains("function showDictResult"));
         assert!(READER_PAGE_HEAD.contains("function showFootnote"));
         assert!(READER_PAGE_HEAD.contains("function measureAll"));
+        assert!(READER_PAGE_HEAD.contains("Object.assign(global, api)"));
         assert!(READER_PAGE_HEAD.contains("function pageCountSig"));
         assert!(READER_PAGE_HEAD.contains("function renderHlSettings"));
         assert!(READER_PAGE_HEAD.contains("function applyConfiguredMenu"));
@@ -44,10 +43,14 @@ mod tests {
         assert!(READER_PAGE_HEAD.contains("translateResult"));
         assert!(READER_PAGE_HEAD.contains("dictResult"));
         let layout = READER_PAGE_HEAD.find("function showChapter").unwrap();
-        let pagination = READER_PAGE_HEAD.find("// ---- 分页几何").unwrap();
-        let measurement = READER_PAGE_HEAD.find("// ---- 全书页数").unwrap();
-        let annotations = READER_PAGE_HEAD.find("// ---- 高亮/批注 ----").unwrap();
-        let runtime = READER_PAGE_HEAD.find("// ---- 朗读").unwrap();
+        // Generated IIFEs do not retain source comments, so assert order by stable
+        // responsibility hooks from each of the six jointly compiled sections.
+        let pagination = READER_PAGE_HEAD.find("function pageLayout").unwrap();
+        let measurement = READER_PAGE_HEAD.find("function measureAll").unwrap();
+        let annotations = READER_PAGE_HEAD.find("ReaderPageHighlightRules =").unwrap();
+        let runtime = READER_PAGE_HEAD
+            .find("function installReaderPageRuntime")
+            .unwrap();
         assert!(
             layout < pagination
                 && pagination < measurement

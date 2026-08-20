@@ -46,6 +46,7 @@ mobi = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 ammonia = "4.1"
+quick-xml = "0.41"
 libc = "0.2"
 ring = "0.17"
 ferrous-opencc = "0.3.1"

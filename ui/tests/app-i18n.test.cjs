@@ -6,35 +6,35 @@ const vm = require("node:vm");
 
 const uiRoot = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(uiRoot, "index.html"), "utf8");
-const i18n = fs.readFileSync(path.join(uiRoot, "app-i18n.js"), "utf8");
+const i18n = fs.readFileSync(path.join(uiRoot, "generated-ts", "app-i18n.js"), "utf8");
 const rerankerCatalog = fs.readFileSync(
-  path.join(uiRoot, "app-i18n-reranker-catalog.js"),
+  path.join(uiRoot, "generated-ts", "app-i18n-reranker-catalog.js"),
   "utf8",
 );
 const statsCatalog = fs.readFileSync(
-  path.join(uiRoot, "app-i18n-stats-catalog.js"),
+  path.join(uiRoot, "generated-ts", "app-i18n-stats-catalog.js"),
   "utf8",
 );
 const newsSurfaceCatalog = fs.readFileSync(
-  path.join(uiRoot, "app-i18n-news-surface-catalog.js"),
+  path.join(uiRoot, "generated-ts", "app-i18n-news-surface-catalog.js"),
   "utf8",
 );
 const semanticRuntimeCatalog = fs.readFileSync(
-  path.join(uiRoot, "app-i18n-semantic-runtime-catalog.js"),
+  path.join(uiRoot, "generated-ts", "app-i18n-semantic-runtime-catalog.js"),
   "utf8",
 );
-const app = fs.readFileSync(path.join(uiRoot, "app.js"), "utf8");
+const app = fs.readFileSync(path.join(uiRoot, "generated-ts", "app.js"), "utf8");
 const styles = fs.readFileSync(path.join(uiRoot, "styles.css"), "utf8");
 
 test("main settings expose a persistent software language selector", () => {
   assert.match(html, /id="set-app-language"/);
   assert.match(html, /id="set-end-recommendations"[^>]*checked/);
   assert.match(html, /data-i18n="endRecommendations"/);
-  assert.match(html, /src="reader-recommendation-settings\.js"/);
-  assert.match(i18n, /COPY\[locale\]\.endRecommendations = label/);
+  assert.match(html, /src="generated-ts\/reader-recommendation-settings\.js"/);
+  assert.match(i18n, /localeCopy\(COPY, locale\)\.endRecommendations = label/);
   assert.match(
     html,
-    /src="app-i18n-reranker-catalog\.js"[\s\S]*?src="app-i18n-stats-catalog\.js"[\s\S]*?src="app-i18n-news-surface-catalog\.js"[\s\S]*?src="app-i18n-semantic-runtime-catalog\.js"[\s\S]*?src="app-i18n\.js"/,
+    /src="generated-ts\/app-i18n-reranker-catalog\.js"[\s\S]*?src="generated-ts\/app-i18n-stats-catalog\.js"[\s\S]*?src="generated-ts\/app-i18n-news-surface-catalog\.js"[\s\S]*?src="generated-ts\/app-i18n-semantic-runtime-catalog\.js"[\s\S]*?src="generated-ts\/app-i18n\.js"/,
   );
   assert.match(i18n, /const STORAGE_KEY = "appLanguageV1"/);
   assert.match(i18n, /\["system", "跟随系统"\]/);
@@ -50,8 +50,11 @@ test("main settings expose a persistent software language selector", () => {
   assert.doesNotMatch(html.match(/id="newsnow-toolbar-btn"[\s\S]*?<\/button>/)?.[0] || "", /NewsNow/);
   assert.match(html, /id="library-ai-page"[\s\S]*?data-i18n="libraryQuestion"/);
   assert.doesNotMatch(html, /data-i18n="libraryDescription"/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "news-ui.js"), "utf8"), /app-language-changed/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "library-ai.js"), "utf8"), /app-language-changed/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "news-ui.js"), "utf8"), /app-language-changed/);
+  assert.match(
+    fs.readFileSync(path.join(uiRoot, "generated-ts", "library-ai.js"), "utf8"),
+    /app-language-changed/,
+  );
   assert.match(html, /class="fp-set-row default-apps-setting"[\s\S]*?id="open-default-apps-settings"[^>]*data-i18n="defaultOpenButton"/);
   assert.match(html, /id="recovery-backup-status"[^>]*data-i18n="recoveryLoading"/);
   assert.match(html, /id="settings-export-data"[^>]*data-i18n="dataExport"/);
@@ -69,7 +72,7 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(i18n, /const PANEL_COPY/);
   assert.match(i18n, /const ACCOUNT_RUNTIME_COPY/);
   assert.doesNotMatch(html, /id="search-input"[^>]*data-i18n-placeholder/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "search-ui.js"), "utf8"), /updateShelfSearchMode\(\)[\s\S]*?shelfSearchPlaceholder/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "search-ui.js"), "utf8"), /updateShelfSearchMode[\s\S]*?shelfSearchPlaceholder/);
   assert.match(i18n, /const SETTINGS_COPY/);
   const settingsCopy = i18n.slice(i18n.indexOf("const SETTINGS_COPY"), i18n.indexOf("Object.entries(SETTINGS_COPY)"));
   for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"]) {
@@ -97,8 +100,8 @@ test("main settings expose a persistent software language selector", () => {
   assert.match(app, /AppNotice\?\.show\([\s\S]*?String\(message \|\| appText\("defaultOpenToast"[\s\S]*?variant:\s*"text"[\s\S]*?duration:\s*1500/s);
   assert.match(app, /defaultOpenFailed/);
   assert.doesNotMatch(app, /alert\("已打开 Windows 默认应用设置/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "sync-ui.js"), "utf8"), /app-language-changed[\s\S]*?applyAccountSecurityStatus\(lastAccountSecurity\)/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "stats-ui.js"), "utf8"), /app-language-changed[\s\S]*?renderStats\(\)/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "sync-ui.js"), "utf8"), /app-language-changed[\s\S]*?applyAccountSecurityStatus\(lastAccountSecurity\)/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "stats-ui.js"), "utf8"), /app-language-changed[\s\S]*?renderStats\(\)/);
   assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*min-width:\s*0;[^}]*overflow-x:\s*hidden;[^}]*user-select:\s*none;/s);
   assert.match(styles, /#fp-settings-modal\s+\.modal-card\s+input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\):not\(\[type="range"\]\),[\s\S]*user-select:\s*text;/);
   assert.match(styles, /#fp-settings-modal \.fp-set-row > :first-child\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
@@ -124,13 +127,9 @@ function loadAppI18n(
   const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
   const localStorage = { getItem() { return language; }, setItem() {} };
   const window = { document, localStorage, navigator: { language: language === "ja" ? "ja-JP" : language }, addEventListener() {}, dispatchEvent() {} };
-  const context = {
-    window,
-    document,
-    localStorage,
-    navigator: window.navigator,
-    CustomEvent: function CustomEvent() {},
-  };
+  window.window = window;
+  window.CustomEvent = function CustomEvent() {};
+  const context = window;
   vm.runInNewContext(rerankerCatalog, context);
   if (loadStatsCatalog) vm.runInNewContext(statsCatalog, context);
   if (loadNewsSurfaceCatalog) vm.runInNewContext(newsSurfaceCatalog, context);
@@ -141,12 +140,12 @@ function loadAppI18n(
 
 test("staged statistics catalog delegates when loaded and preserves the standalone fallback", () => {
   assert.match(statsCatalog, /ReaderAppI18nStatsCatalog/);
-  assert.match(statsCatalog, /function applyChart\(copy\)/);
-  assert.match(statsCatalog, /function applyDetail\(copy\)/);
-  assert.match(statsCatalog, /function applyHeatmap\(copy\)/);
+  assert.match(statsCatalog, /applyChart\(copy\)/);
+  assert.match(statsCatalog, /applyDetail\(copy\)/);
+  assert.match(statsCatalog, /applyHeatmap\(copy\)/);
   assert.match(i18n, /const STATS_CATALOG = global\.ReaderAppI18nStatsCatalog/);
-  assert.match(i18n, /STATS_CATALOG !== undefined/);
-  assert.match(html, /src="app-i18n-stats-catalog\.js"[\s\S]*?src="app-i18n\.js"/);
+  assert.match(i18n, /STATS_CATALOG !== void 0/);
+  assert.match(html, /src="generated-ts\/app-i18n-stats-catalog\.js"[\s\S]*?src="generated-ts\/app-i18n\.js"/);
 
   const standalone = loadAppI18n("ja");
   const delegated = loadAppI18n("ja", { loadStatsCatalog: true });
@@ -158,7 +157,10 @@ test("staged statistics catalog delegates when loaded and preserves the standalo
     () => {
       const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
       const window = { document, localStorage: { getItem() { return "en"; }, setItem() {} }, navigator: { language: "en" }, addEventListener() {}, dispatchEvent() {}, ReaderAppI18nStatsCatalog: {} };
-      vm.runInNewContext(i18n, { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+      const context = { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} };
+      vm.runInNewContext(rerankerCatalog, context);
+      context.ReaderAppI18nStatsCatalog = window.ReaderAppI18nStatsCatalog;
+      vm.runInNewContext(i18n, context);
     },
     /ReaderAppI18nStatsCatalog must expose statistics appliers/,
   );
@@ -166,10 +168,10 @@ test("staged statistics catalog delegates when loaded and preserves the standalo
 
 test("news surface catalog delegates when loaded and preserves the standalone fallback", () => {
   assert.match(newsSurfaceCatalog, /ReaderAppI18nNewsSurfaceCatalog/);
-  assert.match(newsSurfaceCatalog, /function apply\(copy\)/);
+  assert.match(newsSurfaceCatalog, /apply\(copy\)/);
   assert.match(i18n, /const NEWS_SURFACE_CATALOG = global\.ReaderAppI18nNewsSurfaceCatalog/);
-  assert.match(i18n, /NEWS_SURFACE_CATALOG !== undefined/);
-  assert.match(html, /src="app-i18n-news-surface-catalog\.js"[\s\S]*?src="app-i18n\.js"/);
+  assert.match(i18n, /NEWS_SURFACE_CATALOG !== void 0/);
+  assert.match(html, /src="generated-ts\/app-i18n-news-surface-catalog\.js"[\s\S]*?src="generated-ts\/app-i18n\.js"/);
 
   const standalone = loadAppI18n("ja");
   const delegated = loadAppI18n("ja", { loadNewsSurfaceCatalog: true });
@@ -181,7 +183,10 @@ test("news surface catalog delegates when loaded and preserves the standalone fa
     () => {
       const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
       const window = { document, localStorage: { getItem() { return "en"; }, setItem() {} }, navigator: { language: "en" }, addEventListener() {}, dispatchEvent() {}, ReaderAppI18nNewsSurfaceCatalog: {} };
-      vm.runInNewContext(i18n, { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+      const context = { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} };
+      vm.runInNewContext(rerankerCatalog, context);
+      context.ReaderAppI18nNewsSurfaceCatalog = window.ReaderAppI18nNewsSurfaceCatalog;
+      vm.runInNewContext(i18n, context);
     },
     /ReaderAppI18nNewsSurfaceCatalog must expose a news surface applier/,
   );
@@ -189,10 +194,10 @@ test("news surface catalog delegates when loaded and preserves the standalone fa
 
 test("semantic runtime catalog delegates when loaded and preserves the standalone fallback", () => {
   assert.match(semanticRuntimeCatalog, /ReaderAppI18nSemanticRuntimeCatalog/);
-  assert.match(semanticRuntimeCatalog, /function apply\(copy\)/);
+  assert.match(semanticRuntimeCatalog, /apply\(copy\)/);
   assert.match(i18n, /const SEMANTIC_RUNTIME_CATALOG = global\.ReaderAppI18nSemanticRuntimeCatalog/);
-  assert.match(i18n, /SEMANTIC_RUNTIME_CATALOG !== undefined/);
-  assert.match(html, /src="app-i18n-semantic-runtime-catalog\.js"[\s\S]*?src="app-i18n\.js"/);
+  assert.match(i18n, /SEMANTIC_RUNTIME_CATALOG !== void 0/);
+  assert.match(html, /src="generated-ts\/app-i18n-semantic-runtime-catalog\.js"[\s\S]*?src="generated-ts\/app-i18n\.js"/);
 
   const standalone = loadAppI18n("ja");
   const delegated = loadAppI18n("ja", { loadSemanticRuntimeCatalog: true });
@@ -204,7 +209,10 @@ test("semantic runtime catalog delegates when loaded and preserves the standalon
     () => {
       const document = { readyState: "complete", documentElement: {}, querySelectorAll() { return []; }, addEventListener() {} };
       const window = { document, localStorage: { getItem() { return "en"; }, setItem() {} }, navigator: { language: "en" }, addEventListener() {}, dispatchEvent() {}, ReaderAppI18nSemanticRuntimeCatalog: {} };
-      vm.runInNewContext(i18n, { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} });
+      const context = { window, document, localStorage: window.localStorage, navigator: window.navigator, CustomEvent: function CustomEvent() {} };
+      vm.runInNewContext(rerankerCatalog, context);
+      context.ReaderAppI18nSemanticRuntimeCatalog = window.ReaderAppI18nSemanticRuntimeCatalog;
+      vm.runInNewContext(i18n, context);
     },
     /ReaderAppI18nSemanticRuntimeCatalog must expose a semantic runtime applier/,
   );
@@ -213,7 +221,7 @@ test("semantic runtime catalog delegates when loaded and preserves the standalon
 
 test("reranker catalog loads before the compatibility entry and keeps localized fallbacks", () => {
   assert.match(rerankerCatalog, /ReaderAppI18nRerankerCatalog/);
-  assert.match(i18n, /global\.ReaderAppI18nRerankerCatalog/);
+  assert.match(i18n, /host\.ReaderAppI18nRerankerCatalog/);
   assert.doesNotMatch(
     i18n.slice(i18n.indexOf("const RERANKER_AUTOLOAD_COPY")),
     /semRerankerLoading:/,
@@ -301,8 +309,11 @@ test("all ten languages localize About, feedback, and sync runtime states", () =
   for (const key of ["aboutReleaseNotes", "submitBug", "suggestFeature", "problemTraceOptional", "addScreenshot"]) {
     assert.match(html, new RegExp(`data-i18n="${key}"`), `About/feedback HTML must bind ${key}`);
   }
-  const feedback = fs.readFileSync(path.join(uiRoot, "feedback-ui.js"), "utf8");
-  const sync = fs.readFileSync(path.join(uiRoot, "sync-ui.js"), "utf8");
+  const feedback = fs.readFileSync(
+    path.join(uiRoot, "generated-ts", "feedback-ui.js"),
+    "utf8",
+  );
+  const sync = fs.readFileSync(path.join(uiRoot, "generated-ts", "sync-ui.js"), "utf8");
   assert.match(feedback, /app-language-changed/);
   assert.match(feedback, /feedbackTextFor\("feedbackSubmitting"\)/);
   assert.match(sync, /setSyncButtonState\("fail", "syncFailed"/);
@@ -327,7 +338,7 @@ test("all ten languages localize the complete news surface and switching rerende
       }
     }
   }
-  const news = fs.readFileSync(path.join(uiRoot, "news-ui.js"), "utf8");
+  const news = fs.readFileSync(path.join(uiRoot, "generated-ts", "news-ui.js"), "utf8");
   assert.match(news, /const ALL_CATEGORY = "__all__"/);
   assert.match(news, /app-language-changed[\s\S]*?renderSourcePicker\(\)[\s\S]*?renderFeed\(\)/);
   assert.match(i18n, /const NEWS_SURFACE_COPY/);

@@ -49,11 +49,7 @@ pub(crate) fn restore_recovery_backup(
     app: tauri::AppHandle,
     backup_id: String,
 ) -> Result<backup::BackupStatus, String> {
-    if app
-        .webview_windows()
-        .keys()
-        .any(|label| label.starts_with("reader-"))
-    {
+    if crate::window_commands::any_bound_reader_window(&app) {
         return Err("恢复前请先关闭所有阅读窗口，避免覆盖尚未保存的阅读进度".to_string());
     }
     backup::restore(state.inner(), &backup_id)
@@ -117,24 +113,17 @@ pub(crate) fn import_data_package(
     Ok(imported)
 }
 
-/// Clear data owned by this installation without touching any original book
-/// file referenced by the shelf. The UI reloads after this command returns.
-#[tauri::command]
-pub(crate) fn clear_local_app_data(
-    state: tauri::State<AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
+fn local_app_data_clear_targets(
+    state: &AppState,
+    app: &tauri::AppHandle,
+) -> Result<HashSet<PathBuf>, String> {
     if state.sync_running.load(Ordering::Acquire) {
         return Err("同步任务正在进行，请完成后再清除此设备数据".into());
     }
     if !state.background_tasks.active_snapshots().is_empty() {
         return Err("后台任务正在运行，请完成或取消后再清除此设备数据".into());
     }
-    if app
-        .webview_windows()
-        .keys()
-        .any(|label| label.starts_with("reader-"))
-    {
+    if crate::window_commands::any_bound_reader_window(app) {
         return Err("请先关闭所有阅读窗口，再清除此设备数据".into());
     }
 
@@ -164,6 +153,28 @@ pub(crate) fn clear_local_app_data(
         ));
     }
 
+    Ok(targets)
+}
+
+/// Verify that a later local clear can start before performing an irreversible
+/// cloud operation. This command only inspects current runtime and file paths.
+#[tauri::command]
+pub(crate) fn clear_local_app_data_preflight(
+    state: tauri::State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    local_app_data_clear_targets(state.inner(), &app).map(|_| ())
+}
+
+/// Clear data owned by this installation without touching any original book
+/// file referenced by the shelf. The UI reloads after this command returns.
+#[tauri::command]
+pub(crate) fn clear_local_app_data(
+    state: tauri::State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let targets = local_app_data_clear_targets(state.inner(), &app)?;
+
     for window in app.webview_windows().values() {
         window
             .clear_all_browsing_data()
@@ -180,7 +191,8 @@ pub(crate) fn clear_local_app_data(
     for target in &targets {
         if let Err(error) = remove_owned_directory(target) {
             let reopened = db::AppDb::open();
-            if let Ok(database) = reopened {
+            if let Ok(mut database) = reopened {
+                state.bind_sync_auto_scheduler(&mut database);
                 if let Ok(mut guard) = state.db.lock() {
                     *guard = Some(database);
                 }
@@ -189,7 +201,8 @@ pub(crate) fn clear_local_app_data(
         }
     }
 
-    let database = db::AppDb::open()?;
+    let mut database = db::AppDb::open()?;
+    state.bind_sync_auto_scheduler(&mut database);
     {
         let mut guard = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
         *guard = Some(database);

@@ -46,6 +46,18 @@ try {
   Write-Host '== frontend TypeScript typecheck =='
   Invoke-NativeCheck 'frontend TypeScript typecheck' { npm run typecheck }
 
+  Write-Host '== frontend single-UI source policy =='
+  Invoke-NativeCheck 'frontend single-UI source policy' { npm run frontend:source-policy }
+
+  Write-Host '== frontend typed tests =='
+  Invoke-NativeCheck 'frontend typed tests' { npm run test:typed }
+
+  Write-Host '== legacy TypeScript deterministic build pipeline tests =='
+  Invoke-NativeCheck 'legacy TypeScript deterministic build pipeline tests' { npm run test:legacy-ts-pipeline }
+
+  Write-Host '== desktop frontend build =='
+  Invoke-NativeCheck 'desktop frontend build' { npm run desktop-ui:build }
+
   Write-Host '== node --check =='
   $jsFiles = Get-ChildItem -LiteralPath 'ui' -Filter '*.js' -File -Recurse |
     Where-Object {
@@ -68,27 +80,7 @@ try {
   }
 
   Write-Host '== frontend behavior tests =='
-  Invoke-NativeCheck 'frontend behavior tests' { npm run test:legacy-ui }
-
-  $python = Get-Command python -ErrorAction SilentlyContinue
-  if (-not $python) {
-    # macOS and many Linux distributions install Python 3 without a `python`
-    # alias. The sync suite is identical in either case.
-    $python = Get-Command python3 -ErrorAction SilentlyContinue
-  }
-  if (-not $python) {
-    throw 'Python not found: cannot run sync server tests.'
-  }
-  Write-Host '== sync server tests =='
-  $previousNoBytecode = $env:PYTHONDONTWRITEBYTECODE
-  $env:PYTHONDONTWRITEBYTECODE = '1'
-  Push-Location (Join-Path $repo 'server\reader-sync-api')
-  try {
-    Invoke-NativeCheck 'sync server tests' { & $python.Source -m unittest -v test_app.py test_backup_recovery.py }
-  } finally {
-    Pop-Location
-    $env:PYTHONDONTWRITEBYTECODE = $previousNoBytecode
-  }
+  Invoke-NativeCheck 'frontend behavior tests' { npm run test:legacy-ui:ready }
 
   if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
     Write-Host '== cargo audit =='
@@ -98,16 +90,16 @@ try {
   }
 
   Write-Host '== frontend module boundaries =='
-  $mainSyncJs = Join-Path $repo 'ui\sync-ui.js'
-  $mainStatsJs = Join-Path $repo 'ui\stats-ui.js'
-  $mainShelfJs = Join-Path $repo 'ui\shelf-ui.js'
-  $semanticStatusCacheJs = Join-Path $repo 'ui\semantic-status-cache.js'
-  $semanticUiJs = Join-Path $repo 'ui\semantic-ui.js'
-  if (-not (Test-Path -LiteralPath $mainSyncJs)) { throw 'ui/sync-ui.js missing.' }
-  if (-not (Test-Path -LiteralPath $mainStatsJs)) { throw 'ui/stats-ui.js missing.' }
-  if (-not (Test-Path -LiteralPath $mainShelfJs)) { throw 'ui/shelf-ui.js missing.' }
-  if (-not (Test-Path -LiteralPath $semanticStatusCacheJs)) { throw 'ui/semantic-status-cache.js missing.' }
-  if (-not (Test-Path -LiteralPath $semanticUiJs)) { throw 'ui/semantic-ui.js missing.' }
+  $mainSyncJs = Join-Path $repo 'ui\generated-ts\sync-ui.js'
+  $mainStatsJs = Join-Path $repo 'ui\generated-ts\stats-ui.js'
+  $mainShelfJs = Join-Path $repo 'ui\generated-ts\shelf-ui.js'
+  $semanticStatusCacheJs = Join-Path $repo 'ui\generated-ts\semantic-status-cache.js'
+  $semanticUiJs = Join-Path $repo 'ui\generated-ts\semantic-ui.js'
+  if (-not (Test-Path -LiteralPath $mainSyncJs)) { throw 'ui/generated-ts/sync-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $mainStatsJs)) { throw 'ui/generated-ts/stats-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $mainShelfJs)) { throw 'ui/generated-ts/shelf-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $semanticStatusCacheJs)) { throw 'ui/generated-ts/semantic-status-cache.js missing.' }
+  if (-not (Test-Path -LiteralPath $semanticUiJs)) { throw 'ui/generated-ts/semantic-ui.js missing.' }
   $indexHtmlForScripts = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\index.html'), [System.Text.Encoding]::UTF8)
   $appJsPos = $indexHtmlForScripts.IndexOf('app.js')
   $syncUiPos = $indexHtmlForScripts.IndexOf('sync-ui.js')
@@ -127,20 +119,20 @@ try {
     }
   }
 
-  $readerSearchJs = Join-Path $repo 'ui\reader-search-ui.js'
-  $readerSettingsJs = Join-Path $repo 'ui\reader-settings-ui.js'
-  $readerNotesJs = Join-Path $repo 'ui\reader-notes-ui.js'
-  $readerCrossJs = Join-Path $repo 'ui\reader-cross-search-ui.js'
-  if (-not (Test-Path -LiteralPath $readerSearchJs)) { throw 'ui/reader-search-ui.js missing.' }
-  if (-not (Test-Path -LiteralPath $readerSettingsJs)) { throw 'ui/reader-settings-ui.js missing.' }
-  if (-not (Test-Path -LiteralPath $readerNotesJs)) { throw 'ui/reader-notes-ui.js missing.' }
-  if (-not (Test-Path -LiteralPath $readerCrossJs)) { throw 'ui/reader-cross-search-ui.js missing.' }
+  $readerSearchJs = Join-Path $repo 'ui\generated-ts\reader-search-ui.js'
+  $readerSettingsJs = Join-Path $repo 'ui\generated-ts\reader-settings-ui.js'
+  $readerNotesJs = Join-Path $repo 'ui\generated-ts\reader-notes-ui.js'
+  $readerCrossJs = Join-Path $repo 'ui\generated-ts\reader-cross-search-ui.js'
+  if (-not (Test-Path -LiteralPath $readerSearchJs)) { throw 'ui/generated-ts/reader-search-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $readerSettingsJs)) { throw 'ui/generated-ts/reader-settings-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $readerNotesJs)) { throw 'ui/generated-ts/reader-notes-ui.js missing.' }
+  if (-not (Test-Path -LiteralPath $readerCrossJs)) { throw 'ui/generated-ts/reader-cross-search-ui.js missing.' }
   $readerHtmlForScripts = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader.html'), [System.Text.Encoding]::UTF8)
   $readerSearchPos = $readerHtmlForScripts.IndexOf('reader-search-ui.js')
   $readerSettingsPos = $readerHtmlForScripts.IndexOf('reader-settings-ui.js')
   $readerNotesPos = $readerHtmlForScripts.IndexOf('reader-notes-ui.js')
   $readerCrossPos = $readerHtmlForScripts.IndexOf('reader-cross-search-ui.js')
-  $readerJsPos = $readerHtmlForScripts.IndexOf('reader.js')
+  $readerJsPos = $readerHtmlForScripts.IndexOf('generated-ts/reader.js')
   $vocabUiPos = $readerHtmlForScripts.IndexOf('vocab-ui.js')
   if ($readerSearchPos -lt 0 -or $readerJsPos -lt 0 -or $readerSearchPos -gt $readerJsPos) {
     throw 'reader-search-ui.js must be loaded before reader.js because it provides sendToPage and search UI globals.'
@@ -149,23 +141,27 @@ try {
     throw 'reader-settings-ui.js must be loaded before reader.js because it provides reader settings globals.'
   }
   if ($readerNotesPos -lt 0 -or $readerJsPos -lt 0 -or $readerNotesPos -lt $readerJsPos) {
-    throw 'reader-notes-ui.js must be loaded after reader.js because it binds reader DOM globals.'
+    throw 'generated-ts/reader-notes-ui.js must be loaded after reader.js because it binds reader DOM globals.'
   }
   if ($vocabUiPos -ge 0 -and $readerNotesPos -gt $vocabUiPos) {
-    throw 'reader-notes-ui.js must be loaded before vocab-ui.js because vocab UI calls setToc.'
+    throw 'generated-ts/reader-notes-ui.js must be loaded before vocab-ui.js because vocab UI calls setToc.'
   }
   if ($readerCrossPos -lt 0 -or $readerJsPos -lt 0 -or $readerCrossPos -lt $readerJsPos) {
     throw 'reader-cross-search-ui.js must be loaded after reader.js because it uses reader window globals and invokes open_book_at.'
   }
   $readerPageRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\reader_page.rs'), [System.Text.Encoding]::UTF8)
-  $readerModuleNames = @('reader-page-style.html', 'reader-page-layout.js', 'reader-page-pagination.js', 'reader-page-measurement.js', 'reader-page-annotations.js', 'reader-page-runtime.js')
-  foreach ($readerModuleName in $readerModuleNames) {
-    $readerModuleNeedle = 'include_str!("../ui/' + $readerModuleName + '")'
+  $readerModulePaths = @(
+    'reader-page-style.html',
+    'generated-reader-page-ts/reader-page-layout-annotations.js',
+    'generated-reader-page-ts/reader-page-runtime.js'
+  )
+  foreach ($readerModulePath in $readerModulePaths) {
+    $readerModuleNeedle = 'include_str!("../ui/' + $readerModulePath + '")'
     if ($readerPageRs -notmatch [regex]::Escape($readerModuleNeedle)) {
-      throw "reader_page.rs missing injected reader module: $readerModuleName"
+      throw "reader_page.rs missing injected reader module: $readerModulePath"
     }
   }
-  $readerInjectedHead = ($readerModuleNames | ForEach-Object {
+  $readerInjectedHead = ($readerModulePaths | ForEach-Object {
     [System.IO.File]::ReadAllText((Join-Path $repo "ui\$_"), [System.Text.Encoding]::UTF8)
   }) -join ''
   foreach ($requiredReaderHook in @('showTranslateResult', 'translateText', 'semanticSearch', 'hl-settings-pop', 'highlightMenuActionsV1', 'highlightMenuDisplayModeV1', 'highlightMenuSizeV1', 'showFootnote')) {
@@ -173,13 +169,13 @@ try {
       throw "reader injected modules missing required hook: $requiredReaderHook"
     }
   }
-  $readerJsText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader.js'), [System.Text.Encoding]::UTF8)
+  $readerJsText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\generated-ts\reader.js'), [System.Text.Encoding]::UTF8)
   foreach ($requiredReaderJsHook in @('translate_text', 'semanticSearch')) {
     if ($readerJsText -notmatch [regex]::Escape($requiredReaderJsHook)) {
-      throw "ui/reader.js missing required reader bridge hook: $requiredReaderJsHook"
+      throw "ui/generated-ts/reader.js missing required reader bridge hook: $requiredReaderJsHook"
     }
   }
-  $readerCrossText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\reader-cross-search-ui.js'), [System.Text.Encoding]::UTF8)
+  $readerCrossText = [System.IO.File]::ReadAllText((Join-Path $repo 'ui\generated-ts\reader-cross-search-ui.js'), [System.Text.Encoding]::UTF8)
   foreach ($requiredCrossHook in @('reader_cross_search', 'open_book_at', 'pendingCrossSearch', 'semantic_search', 'openSemanticSearch')) {
     if ($readerCrossText -notmatch [regex]::Escape($requiredCrossHook)) {
       throw "ui/reader-cross-search-ui.js missing required cross-search hook: $requiredCrossHook"
@@ -277,13 +273,18 @@ try {
   if ($syncRs -notmatch '#\[serde\(skip_serializing\)\]\s*token:\s*String') {
     throw 'Sync tokens must not be serialized back to the frontend.'
   }
-  if ($syncRs -notmatch 'sync_token_protected' -or $syncRs -notmatch 'protect_secret' -or $syncRs -notmatch 'unprotect_secret') {
+  if ($syncRs -notmatch 'sync_token_protected' -or
+      $syncRs -notmatch 'protect_sync_token' -or
+      $syncRs -notmatch 'protect_sync_secret' -or
+      $syncRs -notmatch 'unprotect_sync_secret') {
     throw 'Sync tokens must use protected local storage instead of plaintext metadata.'
   }
   if ($syncRs -match 'set_metadata\("sync_token",\s*(token|res\.token)') {
     throw 'Sync token must not be written directly to the legacy plaintext sync_token field.'
   }
-  if ($syncRs -notmatch 'fn\s+normalize_sync_base' -or $syncRs -notmatch 'sync_base_requires_https_except_localhost') {
+  $syncValidationRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\sync\validation.rs'), [System.Text.Encoding]::UTF8)
+  if ($syncValidationRs -notmatch 'fn\s+normalize_sync_base' -or
+      $syncValidationRs -notmatch 'sync_base_requires_https_except_explicit_loopback') {
     throw 'Sync URL normalization and HTTPS policy tests are required.'
   }
   Write-Host '== security baseline =='
@@ -321,11 +322,13 @@ try {
     $_ -notmatch 'starts_with\("http://"\)' -and
     $_ -notmatch 'LEGACY_SYNC_HTTP_URL.*http://117\.72\.220\.69' -and
     $_ -notmatch 'normalize_sync_base\("http://' -and
+    $_ -notmatch 'join_https_update_url\("http://' -and
     $_ -notmatch 'src\\sync\.rs:\d+:\s*let url = format!\("http://\{address\}/sync-test"\);' -and
     $_ -notmatch 'http://(localhost|127\.0\.0\.1|\[::1\]|reader\.localhost|ipc\.localhost|tauri\.localhost)' -and
     $_ -notmatch 'http://<scheme>\.localhost' -and
     $_ -notmatch 'http://www\.apple\.com/DTDs/PropertyList-1\.0\.dtd' -and
-    $_ -notmatch 'http://www\.w3\.org/'
+    $_ -notmatch 'http://www\.w3\.org/' -and
+    $_ -notmatch 'xmlns:(content|media)="http://(purl\.org/rss/1\.0/modules/content/|search\.yahoo\.com/mrss/)"'
   })
   if ($publicHttpHits.Count) {
     $publicHttpHits | ForEach-Object { Write-Error $_ }
@@ -344,7 +347,7 @@ try {
   if ($readerBackendRs -notmatch 'sanitize_book_html\(&body\)' -or $readerBackendRs -notmatch 'sanitize_book_html\(&md_to_html') {
     throw 'EPUB and Markdown render paths must use the shared parser-based sanitizer.'
   }
-  if ($readerJsText -notmatch 'ReaderMessageGuard\?\.normalizeEvent\?\.\(e, frame') {
+  if ($readerJsText -notmatch 'ReaderMessageGuard\?\.normalizeEvent\?\.\((e|event), frame') {
     throw 'Reader message bridge must validate frame source, action and payload bounds.'
   }
   if ($readerInjectedHead -match "localStorage\.setItem\(translateApiStorageKey") {

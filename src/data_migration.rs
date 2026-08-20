@@ -1,166 +1,24 @@
-use crate::{book, vocab, AppState};
+use crate::{book, AppState};
 use reader_core::stats::ReadBucket;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const BOOK_STATE_KIND_V2: &str = "book_state_v2";
-/// Protocol v2 splits the former monolithic book_state_v2 so each user-facing
-/// category can be selected independently in sync settings.
-pub(crate) const READING_PROGRESS_KIND_V1: &str = "reading_progress_v1";
-pub(crate) const READING_DATA_KIND_V1: &str = "reading_data_v1";
-pub(crate) const READING_STATISTICS_KIND_V1: &str = "reading_statistics_v1";
-pub(crate) const MODEL_BOOK_TAGS_KIND_V1: &str = "model_book_tags_v1";
-pub(crate) const USER_BOOK_TAGS_KIND_V1: &str = "user_book_tags_v1";
-pub(crate) const BOOK_COLLECTIONS_KIND_V1: &str = "book_collections_v1";
+mod projection;
+mod schema;
+
+use projection::{project_active_entities, project_pulled_book_entities};
+use schema::{
+    BookCollectionsV1, ModelBookTagsV1, PortableReadBucketV2, ReadingDataV1, ReadingProgressV1,
+    ReadingStatisticsV1, UserBookTagsV1,
+};
+pub(crate) use schema::{
+    BookSyncStateV2, BOOK_COLLECTIONS_KIND_V1, BOOK_STATE_KIND_V2, MODEL_BOOK_TAGS_KIND_V1,
+    READING_DATA_KIND_V1, READING_PROGRESS_KIND_V1, READING_STATISTICS_KIND_V1,
+    USER_BOOK_TAGS_KIND_V1,
+};
+
 const ENTITY_MODEL_VERSION_KEY: &str = "entity_model_version";
 const ENTITY_MODEL_VERSION: &str = "3";
-
-/// Cross-device state for one book. Machine-local paths and cover-cache paths
-/// never leave the device; the full file hash is the stable identity.
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct BookSyncStateV2 {
-    #[serde(default = "book_state_schema_version")]
-    schema_version: u32,
-    content_id: String,
-    #[serde(default)]
-    fingerprint: u64,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    author: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    format: String,
-    #[serde(default)]
-    last_read_at: u64,
-    #[serde(default)]
-    progress: f32,
-    #[serde(default)]
-    resume_chapter: u32,
-    #[serde(default)]
-    resume_frac: f32,
-    #[serde(default)]
-    resume_position: Option<reader_core::ReadingPosition>,
-    #[serde(default)]
-    chapter_index_version: u32,
-    #[serde(default)]
-    bookmarks: Vec<book::Bookmark>,
-    #[serde(default)]
-    highlights: Vec<book::Highlight>,
-    #[serde(default)]
-    reading_seconds: u64,
-    #[serde(default)]
-    words_read: u64,
-    #[serde(default)]
-    finished_at: u64,
-    #[serde(default)]
-    rating: f32,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    collections: Vec<String>,
-    #[serde(default)]
-    progress_history: Vec<book::ProgressTimelineEntry>,
-}
-
-fn book_state_schema_version() -> u32 {
-    4
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct PortableReadBucketV2 {
-    day: u32,
-    hour: u8,
-    content_id: String,
-    secs: u32,
-    words: u32,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ReadingProgressV1 {
-    #[serde(default = "organization_schema_version")]
-    schema_version: u32,
-    content_id: String,
-    #[serde(default)]
-    last_read_at: u64,
-    #[serde(default)]
-    progress: f32,
-    #[serde(default)]
-    resume_chapter: u32,
-    #[serde(default)]
-    resume_frac: f32,
-    #[serde(default)]
-    resume_position: Option<reader_core::ReadingPosition>,
-    #[serde(default)]
-    chapter_index_version: u32,
-    #[serde(default)]
-    progress_history: Vec<book::ProgressTimelineEntry>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ReadingDataV1 {
-    #[serde(default = "organization_schema_version")]
-    schema_version: u32,
-    content_id: String,
-    #[serde(default)]
-    bookmarks: Vec<book::Bookmark>,
-    #[serde(default)]
-    highlights: Vec<book::Highlight>,
-    #[serde(default)]
-    rating: f32,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ReadingStatisticsV1 {
-    #[serde(default = "organization_schema_version")]
-    schema_version: u32,
-    content_id: String,
-    #[serde(default)]
-    reading_seconds: u64,
-    #[serde(default)]
-    words_read: u64,
-    #[serde(default)]
-    finished_at: u64,
-}
-
-/// Sync model-derived labels in an independent entity. This keeps old clients
-/// from rewriting an entire book state without fields they do not yet know,
-/// and never conflates the reader's own `tags` with automatic classification.
-#[derive(Clone, Serialize, Deserialize)]
-struct ModelBookTagsV1 {
-    #[serde(default = "model_book_tags_schema_version")]
-    schema_version: u32,
-    content_id: String,
-    #[serde(default)]
-    tags: Vec<String>,
-}
-
-fn model_book_tags_schema_version() -> u32 {
-    1
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct UserBookTagsV1 {
-    #[serde(default = "organization_schema_version")]
-    schema_version: u32,
-    content_id: String,
-    #[serde(default)]
-    tags: Vec<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct BookCollectionsV1 {
-    #[serde(default = "organization_schema_version")]
-    schema_version: u32,
-    content_id: String,
-    #[serde(default)]
-    collections: Vec<String>,
-}
-
-fn organization_schema_version() -> u32 {
-    1
-}
 
 impl UserBookTagsV1 {
     fn from_book(book: &book::Book) -> Self {
@@ -447,38 +305,15 @@ pub(crate) fn merge_pulled_book_states(
     state: &AppState,
     items: &[crate::db::SyncEntity],
 ) -> Result<(), String> {
-    let progress = items
-        .iter()
-        .filter(|item| item.kind == READING_PROGRESS_KIND_V1 && item.deleted_at == 0)
-        .filter_map(|item| serde_json::from_value::<ReadingProgressV1>(item.json.clone()).ok())
-        .collect::<Vec<_>>();
-    let reading_data = items
-        .iter()
-        .filter(|item| item.kind == READING_DATA_KIND_V1 && item.deleted_at == 0)
-        .filter_map(|item| serde_json::from_value::<ReadingDataV1>(item.json.clone()).ok())
-        .collect::<Vec<_>>();
-    let statistics = items
-        .iter()
-        .filter(|item| item.kind == READING_STATISTICS_KIND_V1 && item.deleted_at == 0)
-        .filter_map(|item| serde_json::from_value::<ReadingStatisticsV1>(item.json.clone()).ok())
-        .collect::<Vec<_>>();
-    let model_tags = items
-        .iter()
-        .filter(|item| item.kind == MODEL_BOOK_TAGS_KIND_V1 && item.deleted_at == 0)
-        .filter_map(|item| serde_json::from_value::<ModelBookTagsV1>(item.json.clone()).ok())
-        .collect::<Vec<_>>();
-    if progress.is_empty()
-        && reading_data.is_empty()
-        && statistics.is_empty()
-        && model_tags.is_empty()
-    {
+    let projection = project_pulled_book_entities(items);
+    if projection.is_empty() {
         return Ok(());
     }
     let mut lib = state
         .library
         .lock()
         .map_err(|_| "书架锁定失败".to_string())?;
-    for remote in progress {
+    for remote in projection.progress {
         if let Some(local) = lib
             .books
             .iter_mut()
@@ -487,7 +322,7 @@ pub(crate) fn merge_pulled_book_states(
             remote.merge_into_book(local);
         }
     }
-    for remote in reading_data {
+    for remote in projection.reading_data {
         if let Some(local) = lib
             .books
             .iter_mut()
@@ -496,7 +331,7 @@ pub(crate) fn merge_pulled_book_states(
             remote.merge_into_book(local);
         }
     }
-    for remote in statistics {
+    for remote in projection.statistics {
         if let Some(local) = lib
             .books
             .iter_mut()
@@ -505,7 +340,7 @@ pub(crate) fn merge_pulled_book_states(
             remote.merge_into_book(local);
         }
     }
-    for remote in model_tags {
+    for remote in projection.model_tags {
         if let Some(local) = lib
             .books
             .iter_mut()
@@ -553,6 +388,22 @@ pub(crate) fn ensure_content_ids_for_sync(state: &AppState) -> Result<(), String
 }
 
 pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
+    migrate_json_to_sqlite_with_origin(state, true)
+}
+
+/// Re-project data immediately after a remote pull/reconcile without turning
+/// that remote change into a new automatic-sync trigger. The usual manual and
+/// local-edit projection continues to use [`migrate_json_to_sqlite`].
+pub(crate) fn migrate_json_to_sqlite_from_remote_projection(
+    state: &AppState,
+) -> Result<(), String> {
+    migrate_json_to_sqlite_with_origin(state, false)
+}
+
+fn migrate_json_to_sqlite_with_origin(
+    state: &AppState,
+    schedule_automatic_sync: bool,
+) -> Result<(), String> {
     let books = state
         .library
         .lock()
@@ -657,7 +508,11 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
         ));
     }
     state.with_db_write("seed_entity_model", |db| {
-        db.upsert_json_batch(&batch)?;
+        if schedule_automatic_sync {
+            db.upsert_json_batch(&batch)?;
+        } else {
+            db.upsert_json_batch_from_remote_projection(&batch)?;
+        }
         // Seed split organization entities only once from legacy state. A startup
         // projection is not proof of an intentional edit and cannot clear them.
         let organization_seeds = organization_seeds
@@ -668,10 +523,22 @@ pub(crate) fn migrate_json_to_sqlite(state: &AppState) -> Result<(), String> {
                 Err(error) => Some(Err(error)),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        db.upsert_json_batch(&organization_seeds)?;
-        crate::private_sync::append_sync_entities(db)
+        if schedule_automatic_sync {
+            db.upsert_json_batch(&organization_seeds)?;
+        } else {
+            db.upsert_json_batch_from_remote_projection(&organization_seeds)?;
+        }
+        if schedule_automatic_sync {
+            crate::private_sync::append_sync_entities(db)
+        } else {
+            Ok(())
+        }
     })?;
-    crate::booklist_sync::seed_local_booklists(state)
+    if schedule_automatic_sync {
+        crate::booklist_sync::seed_local_booklists(state)
+    } else {
+        Ok(())
+    }
 }
 
 /// Persist an explicit user organization edit. Unlike startup migration, this
@@ -878,64 +745,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     // with a recovery operation while we hold the complete projection boundary.
     let _installation = crate::backup::core_installation_lock()?;
     let items = state.with_db_read("apply_sqlite_to_runtime", |db| db.all_sync_entities())?;
-    let mut progress: Vec<ReadingProgressV1> = Vec::new();
-    let mut reading_data: Vec<ReadingDataV1> = Vec::new();
-    let mut statistics: Vec<ReadingStatisticsV1> = Vec::new();
-    let mut model_tags: Vec<ModelBookTagsV1> = Vec::new();
-    let mut user_tags: Vec<UserBookTagsV1> = Vec::new();
-    let mut collections: Vec<BookCollectionsV1> = Vec::new();
-    let mut vocab: Vec<vocab::VocabEntry> = Vec::new();
-    let mut buckets: Vec<PortableReadBucketV2> = Vec::new();
-    for item in &items {
-        if item.deleted_at != 0 {
-            continue;
-        }
-        match item.kind.as_str() {
-            READING_PROGRESS_KIND_V1 => {
-                if let Ok(value) = serde_json::from_value::<ReadingProgressV1>(item.json.clone()) {
-                    progress.push(value);
-                }
-            }
-            READING_DATA_KIND_V1 => {
-                if let Ok(value) = serde_json::from_value::<ReadingDataV1>(item.json.clone()) {
-                    reading_data.push(value);
-                }
-            }
-            READING_STATISTICS_KIND_V1 => {
-                if let Ok(value) = serde_json::from_value::<ReadingStatisticsV1>(item.json.clone())
-                {
-                    statistics.push(value);
-                }
-            }
-            MODEL_BOOK_TAGS_KIND_V1 => {
-                if let Ok(tags) = serde_json::from_value::<ModelBookTagsV1>(item.json.clone()) {
-                    model_tags.push(tags);
-                }
-            }
-            USER_BOOK_TAGS_KIND_V1 => {
-                if let Ok(tags) = serde_json::from_value::<UserBookTagsV1>(item.json.clone()) {
-                    user_tags.push(tags);
-                }
-            }
-            BOOK_COLLECTIONS_KIND_V1 => {
-                if let Ok(value) = serde_json::from_value::<BookCollectionsV1>(item.json.clone()) {
-                    collections.push(value);
-                }
-            }
-            "vocab" => {
-                if let Ok(value) = serde_json::from_value::<vocab::VocabEntry>(item.json.clone()) {
-                    vocab.push(value);
-                }
-            }
-            "reading_bucket_v2" => {
-                if let Ok(value) = serde_json::from_value::<PortableReadBucketV2>(item.json.clone())
-                {
-                    buckets.push(value);
-                }
-            }
-            _ => {}
-        }
-    }
+    let projection = project_active_entities(&items);
 
     // This can only affect private-sync entity kinds, which a core migration
     // package rejects. Keep it before the file installation anyway: a future
@@ -958,7 +768,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     let mut next_stats = stats.clone();
     let mut next_vocab = vocab_store.clone();
 
-    for remote in &progress {
+    for remote in &projection.progress {
         if let Some(local) = next_library
             .books
             .iter_mut()
@@ -967,7 +777,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             remote.merge_into_book(local);
         }
     }
-    for remote in &reading_data {
+    for remote in &projection.reading_data {
         if let Some(local) = next_library
             .books
             .iter_mut()
@@ -976,7 +786,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             remote.merge_into_book(local);
         }
     }
-    for remote in &statistics {
+    for remote in &projection.statistics {
         if let Some(local) = next_library
             .books
             .iter_mut()
@@ -985,7 +795,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             remote.merge_into_book(local);
         }
     }
-    for remote in &model_tags {
+    for remote in &projection.model_tags {
         if let Some(local) = next_library
             .books
             .iter_mut()
@@ -994,7 +804,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             remote.apply_to_book(local);
         }
     }
-    for remote in &user_tags {
+    for remote in &projection.user_tags {
         if let Some(local) = next_library
             .books
             .iter_mut()
@@ -1003,7 +813,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
             remote.apply_to_book(local);
         }
     }
-    for remote in &collections {
+    for remote in &projection.collections {
         if let Some(local) = next_library
             .books
             .iter_mut()
@@ -1016,7 +826,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
     crate::booklist_sync::apply_downloaded_booklists(&mut next_library, &items);
     // Unmatched states are intentionally left in SQLite as pending; do not
     // create broken shelf entries with another computer's file path.
-    next_vocab.list = vocab;
+    next_vocab.list = projection.vocab;
     let local_ids_by_content: HashMap<String, u64> = next_library
         .books
         .iter()
@@ -1024,7 +834,7 @@ pub(crate) fn apply_sqlite_to_runtime(state: &AppState) -> Result<(), String> {
         .map(|book| (book.content_id.clone(), book.id))
         .collect();
     next_stats.map.clear();
-    for bucket in buckets {
+    for bucket in projection.buckets {
         if let Some(local_id) = local_ids_by_content.get(&bucket.content_id) {
             next_stats.map.insert(
                 (bucket.day, bucket.hour, *local_id),

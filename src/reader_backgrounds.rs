@@ -3,16 +3,26 @@
 //! The reader receives only a short immutable `reader://.../background/...`
 //! URL. Raw images are decoded once at import, stored as files, and sync uses
 //! their SHA-256 references rather than passing data URLs through WebView IPC.
-use crate::{atomic_file, db::SyncEntity};
+use crate::{atomic_file, db::SyncEntity, AppState};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod rules;
 
 pub(crate) const RECOVERY_ASSET_BUNDLE_FILE: &str = "reader-background-assets-v1.json";
+const ORPHAN_INDEX_FILE: &str = "reader-background-orphans-v1.json";
+const ORPHAN_GRACE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+#[derive(Default, Deserialize, Serialize)]
+struct LocalOrphanIndex {
+    version: u8,
+    #[serde(default)]
+    first_unreferenced_at: BTreeMap<String, i64>,
+}
 
 #[derive(Serialize, Deserialize)]
 struct RecoveryAssetBundle {
@@ -35,6 +45,7 @@ pub(crate) struct ReaderBackgroundAsset {
     pub(crate) mime: String,
     pub(crate) byte_size: usize,
     pub(crate) url: String,
+    pub(crate) compressed: bool,
 }
 
 fn cache_dir() -> Result<PathBuf, String> {
@@ -48,6 +59,100 @@ fn recovery_bundle_path() -> Result<PathBuf, String> {
     let mut path = crate::profile::app_config_dir().ok_or("找不到应用配置目录")?;
     path.push(RECOVERY_ASSET_BUNDLE_FILE);
     Ok(path)
+}
+
+fn orphan_index_path() -> Result<PathBuf, String> {
+    let mut path = crate::profile::app_config_dir().ok_or("找不到应用配置目录")?;
+    path.push(ORPHAN_INDEX_FILE);
+    Ok(path)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+fn load_orphan_index() -> LocalOrphanIndex {
+    let Ok(path) = orphan_index_path() else {
+        return LocalOrphanIndex::default();
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return LocalOrphanIndex::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn cached_asset_name(name: &str) -> bool {
+    let Some((asset_id, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    rules::valid_asset_id(asset_id) && matches!(extension, "png" | "jpg" | "webp" | "gif")
+}
+
+const fn orphan_grace_elapsed(now: i64, first_unreferenced_at: i64) -> bool {
+    now.saturating_sub(first_unreferenced_at) >= ORPHAN_GRACE_MS
+}
+
+/// Delays deletion for seven days so a freshly deleted theme can still be
+/// restored from a local undo/backup before its no-longer-referenced image is
+/// reclaimed. The index contains only cache file names and timestamps.
+pub(crate) fn prune_unreferenced_cached_assets(state: &AppState) -> Result<usize, String> {
+    let references = state.with_db_read("reader_background_orphan_references", |db| {
+        Ok(referenced_assets(&db.all_sync_entities()?)
+            .into_iter()
+            .filter_map(|(asset_id, mime, _)| {
+                rules::extension_for_mime(&mime).map(|extension| format!("{asset_id}.{extension}"))
+            })
+            .collect::<BTreeSet<_>>())
+    })?;
+    let directory = cache_dir()?;
+    let now = now_ms();
+    let mut index = load_orphan_index();
+    index.version = 1;
+    let mut deleted = 0;
+    let mut cached_names = BTreeSet::new();
+
+    for entry in
+        std::fs::read_dir(&directory).map_err(|error| format!("读取背景缓存目录失败：{error}"))?
+    {
+        let entry = entry.map_err(|error| format!("读取背景缓存文件失败：{error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("读取背景缓存文件类型失败：{error}"))?
+            .is_file()
+        {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !cached_asset_name(&name) {
+            continue;
+        }
+        cached_names.insert(name.clone());
+        if references.contains(&name) {
+            index.first_unreferenced_at.remove(&name);
+            continue;
+        }
+        let first_unreferenced_at = *index
+            .first_unreferenced_at
+            .entry(name.clone())
+            .or_insert(now);
+        if orphan_grace_elapsed(now, first_unreferenced_at) {
+            std::fs::remove_file(entry.path())
+                .map_err(|error| format!("清理孤立背景图片失败：{error}"))?;
+            index.first_unreferenced_at.remove(&name);
+            deleted += 1;
+        }
+    }
+    index
+        .first_unreferenced_at
+        .retain(|name, _| cached_names.contains(name) && !references.contains(name));
+    atomic_file::write_json(&orphan_index_path()?, &index, true)?;
+    Ok(deleted)
 }
 
 const SYNC_PROTOCOL_HEADER: &str = "X-Sync-Protocol-Version";
@@ -66,7 +171,7 @@ pub(crate) fn cache_asset_bytes(
     mime: &str,
     bytes: &[u8],
 ) -> Result<ReaderBackgroundAsset, String> {
-    rules::validate_image_bytes(bytes)?;
+    rules::validate_cached_image_bytes(bytes)?;
     let sha256 = rules::sha256_hex(bytes);
     if asset_id != sha256 || !rules::valid_asset_id(asset_id) {
         return Err("背景图片校验失败".into());
@@ -82,6 +187,7 @@ pub(crate) fn cache_asset_bytes(
         mime: mime.to_string(),
         byte_size: bytes.len(),
         url: local_url(asset_id, mime)?,
+        compressed: false,
     })
 }
 
@@ -89,9 +195,12 @@ pub(crate) fn cache_asset_bytes(
 pub(crate) fn cache_reader_background_image(
     data_url: String,
 ) -> Result<ReaderBackgroundAsset, String> {
-    let (bytes, mime) = rules::decode_data_url(&data_url)?;
-    let asset_id = rules::sha256_hex(&bytes);
-    cache_asset_bytes(&asset_id, mime, &bytes)
+    let (bytes, mime) = rules::decode_import_data_url(&data_url)?;
+    let normalized = rules::normalize_import_image(bytes, mime)?;
+    let asset_id = rules::sha256_hex(&normalized.bytes);
+    let mut asset = cache_asset_bytes(&asset_id, normalized.mime, &normalized.bytes)?;
+    asset.compressed = normalized.compressed;
+    Ok(asset)
 }
 
 #[tauri::command]
@@ -99,9 +208,9 @@ pub(crate) fn reader_background_local_url(
     asset_id: String,
     mime: String,
 ) -> Result<String, String> {
-    let ext = rules::extension_for_mime(&mime).ok_or("背景图片类型无效")?;
-    let path = cache_dir()?.join(format!("{asset_id}.{ext}"));
-    if !path.is_file() && !restore_cached_asset_from_bundle(&asset_id, &mime)? {
+    if cached_asset_bytes(&asset_id, &mime).is_none()
+        && !restore_cached_asset_from_bundle(&asset_id, &mime)?
+    {
         return Err("本机尚未缓存该背景图片".into());
     }
     local_url(&asset_id, &mime)
@@ -119,15 +228,14 @@ pub(crate) fn read_cached_background(name: &str) -> Option<(Vec<u8>, String)> {
         "gif" => "image/gif",
         _ => return None,
     };
-    Some((
-        std::fs::read(cache_dir().ok()?.join(name)).ok()?,
-        mime.to_string(),
-    ))
+    let bytes = std::fs::read(cache_dir().ok()?.join(name)).ok()?;
+    (bytes.len() <= rules::MAX_IMPORTED_IMAGE_BYTES).then_some((bytes, mime.to_string()))
 }
 
 pub(crate) fn cached_asset_bytes(asset_id: &str, mime: &str) -> Option<Vec<u8>> {
     let ext = rules::extension_for_mime(mime)?;
-    std::fs::read(cache_dir().ok()?.join(format!("{asset_id}.{ext}"))).ok()
+    let bytes = std::fs::read(cache_dir().ok()?.join(format!("{asset_id}.{ext}"))).ok()?;
+    (bytes.len() <= rules::MAX_IMPORTED_IMAGE_BYTES).then_some(bytes)
 }
 
 fn collect_asset_references(value: &Value, assets: &mut BTreeMap<String, String>) {
@@ -255,7 +363,7 @@ fn referenced_assets(entities: &[SyncEntity]) -> Vec<(String, String, usize)> {
         if rules::valid_asset_id(id)
             && rules::extension_for_mime(mime).is_some()
             && size > 0
-            && size <= rules::MAX_IMAGE_BYTES
+            && size <= rules::MAX_IMPORTED_IMAGE_BYTES
             && !assets.iter().any(|(known, _, _)| known == id)
         {
             assets.push((id.to_string(), mime.to_string(), size));
@@ -384,5 +492,11 @@ mod recovery_tests {
         let body = asset_init_payload(&"a".repeat(64), "image/png", 7, 2);
         assert_eq!(body["dataGeneration"], 2);
         assert!(body.get("data_generation").is_none());
+    }
+
+    #[test]
+    fn orphan_cleanup_waits_a_full_seven_days() {
+        assert!(!orphan_grace_elapsed(ORPHAN_GRACE_MS - 1, 0));
+        assert!(orphan_grace_elapsed(ORPHAN_GRACE_MS, 0));
     }
 }

@@ -1,6 +1,7 @@
 use std::{
-    sync::LazyLock,
-    time::{SystemTime, UNIX_EPOCH},
+    collections::HashMap,
+    sync::{LazyLock, RwLock},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -11,25 +12,37 @@ use axum::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Postgres, Transaction};
+use sqlx::{FromRow, PgConnection, Postgres, Transaction, pool::PoolConnection};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
+    account_validation::{normalize_username, valid_existing_password, valid_new_password},
     credentials::{hash_password, new_session_token, session_token_digest, verify_password},
     error::ApiError,
     middleware::RequestContext,
-    rate_limit::{check_account_delete_limits, check_password_change_limits},
+    rate_limit::{
+        check_account_delete_limits, check_authenticated_account_admission_on_connection,
+        check_password_change_limits,
+    },
     state::AppState,
 };
 
 const SESSION_TTL_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 const MAX_ACTIVE_DEVICES: i64 = 5;
 const LAST_USED_WRITE_INTERVAL_MS: i64 = 5 * 60 * 1000;
+const MAX_LAST_USED_TOUCH_CACHE: usize = 65_536;
 static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
     hash_password(&SecretString::from("kunpeng-dummy-password-v4".to_owned()))
         .unwrap_or_else(|_| "$argon2id$invalid".to_owned())
 });
+// This is deliberately only an audit-write suppression cache.  Every request
+// still performs the authoritative session/user read below, so logout,
+// password reset, deletion and disablement remain visible immediately across
+// service instances.  The cache merely avoids planning a no-op UPDATE for the
+// same session during the documented five-minute audit interval.
+static LAST_USED_TOUCH_CACHE: LazyLock<RwLock<HashMap<[u8; 32], i64>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -146,8 +159,16 @@ pub(crate) struct AuthenticatedUser {
     pub username: String,
     pub sync_verified_at: i64,
     disabled_at: i64,
-    pub data_generation: i64,
     pub expires_at: i64,
+    // Only `/session` and `/me` request this projection. Keeping it optional
+    // avoids making every sync request join the generation table merely
+    // because authentication is shared by all authenticated endpoints.
+    data_generation: Option<i64>,
+}
+
+pub(crate) struct AuthenticatedConnection {
+    pub user: AuthenticatedUser,
+    pub connection: PoolConnection<Postgres>,
 }
 
 struct ValidatedLogin {
@@ -222,20 +243,19 @@ pub async fn login(
 }
 
 fn validate_login(input: LoginRequest) -> Result<ValidatedLogin, ApiError> {
-    let username = input.username.trim();
+    let (username, _) =
+        normalize_username(&input.username).map_err(|_| ApiError::InvalidRequest)?;
     let installation_id = input.installation_id.trim();
     let device_name = input.device_name.trim();
-    if username.is_empty()
-        || username.len() > 128
-        || installation_id.is_empty()
+    if installation_id.is_empty()
         || installation_id.len() > 128
         || device_name.len() > 64
-        || input.password.expose_secret().len() > 1024
+        || !valid_existing_password(input.password.expose_secret())
     {
         return Err(ApiError::InvalidRequest);
     }
     Ok(ValidatedLogin {
-        username: username.to_owned(),
+        username,
         password: input.password,
         installation_id: installation_id.to_owned(),
         device_name: device_name.to_owned(),
@@ -396,21 +416,27 @@ pub async fn session(
     Extension(context): Extension<RequestContext>,
     headers: HeaderMap,
 ) -> Response {
-    match authenticate(&state, &headers).await {
-        Ok(user) => Json(SessionResponse {
-            ok: true,
-            token: None,
-            expires_at: user.expires_at,
-            user: SessionUser {
-                id: user.id,
-                username: user.username,
+    match authenticate_with_data_generation(&state, &headers).await {
+        Ok(user) => match user.data_generation {
+            Some(data_generation) => Json(SessionResponse {
+                ok: true,
+                token: None,
+                expires_at: user.expires_at,
+                user: SessionUser {
+                    id: user.id,
+                    username: user.username,
+                    sync_enabled: user.sync_verified_at != 0,
+                },
+                data_generation,
                 sync_enabled: user.sync_verified_at != 0,
-            },
-            data_generation: user.data_generation,
-            sync_enabled: user.sync_verified_at != 0,
-            request_id: context.request_id,
-        })
-        .into_response(),
+                request_id: context.request_id,
+            })
+            .into_response(),
+            // An authenticated account without its required generation row is
+            // database corruption, not an authorization failure. Preserve the
+            // previous endpoint behaviour while avoiding a second round trip.
+            None => ApiError::DatabaseUnavailable.response(context),
+        },
         Err(error) => error.response(context),
     }
 }
@@ -519,11 +545,10 @@ pub async fn delete_account(
     let Ok(Json(input)) = input else {
         return ApiError::InvalidRequest.response(context);
     };
-    if input.password.expose_secret().is_empty()
-        || input.password.expose_secret().len() > 1_024
-        || input.username.trim().is_empty()
-        || input.username.len() > 128
-    {
+    let Ok((username, _)) = normalize_username(&input.username) else {
+        return ApiError::InvalidRequest.response(context);
+    };
+    if !valid_existing_password(input.password.expose_secret()) {
         return ApiError::InvalidRequest.response(context);
     }
     let user = match authenticate(&state, &headers).await {
@@ -533,7 +558,7 @@ pub async fn delete_account(
     if let Err(error) = check_account_delete_limits(&state, &user.id).await {
         return error.response(context);
     }
-    if input.username.trim() != user.username {
+    if username != user.username {
         return ApiError::AccountConfirmationMismatch.response(context);
     }
     let stored_hash =
@@ -589,8 +614,11 @@ async fn delete_account_records(state: &AppState, user_id: &str) -> Result<(), A
 }
 
 const ACCOUNT_STORAGE_QUOTA_BYTES: i64 = 25 * 1024 * 1024;
-const DAILY_WRITE_QUOTA_BYTES: i64 = 10 * 1024 * 1024;
-const DAILY_WRITE_QUOTA_ENTITIES: i64 = 3_000;
+const DAILY_WRITE_QUOTA_BYTES: i64 = 25 * 1024 * 1024;
+// Keep the value exposed by account usage consistent with push enforcement.
+// A first sync legitimately contains several thousand small metadata
+// entities; the independent 25 MiB byte cap remains the bandwidth guard.
+const DAILY_WRITE_QUOTA_ENTITIES: i64 = 10_000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 async fn account_usage(state: &AppState, user_id: &str) -> Result<AccountUsageResponse, ApiError> {
@@ -609,8 +637,7 @@ async fn account_usage(state: &AppState, user_id: &str) -> Result<AccountUsageRe
     .map_err(|_| ApiError::DatabaseUnavailable)?;
     let storage_bytes = sqlx::query_scalar::<_, i64>(
         "SELECT COALESCE((SELECT SUM(octet_length(envelope::text)) FROM sync_entities_v4 WHERE user_id=$1),0) \
-         + COALESCE((SELECT SUM(octet_length(body)) FROM sync_assets_v4 WHERE user_id=$1),0) \
-         + COALESCE((SELECT SUM(octet_length(compressed_envelope)) FROM sync_entity_history_v4 WHERE user_id=$1),0)",
+         + COALESCE((SELECT SUM(octet_length(body)) FROM sync_assets_v4 WHERE user_id=$1),0)",
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -750,9 +777,8 @@ pub async fn change_password(
 }
 
 fn valid_password_change(input: &PasswordChangeRequest) -> bool {
-    let current_length = input.current_password.expose_secret().len();
-    let new_length = input.new_password.expose_secret().len();
-    (1..=1024).contains(&current_length) && (12..=1024).contains(&new_length)
+    valid_existing_password(input.current_password.expose_secret())
+        && valid_new_password(input.new_password.expose_secret())
 }
 
 async fn persist_password_change(
@@ -799,35 +825,207 @@ pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedUser, ApiError> {
+    Ok(authenticate_inner(state, headers, false).await?.user)
+}
+
+async fn authenticate_with_data_generation(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedUser, ApiError> {
+    Ok(authenticate_inner(state, headers, true).await?.user)
+}
+
+pub(crate) async fn authenticate_with_connection(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedConnection, ApiError> {
+    authenticate_inner(state, headers, false).await
+}
+
+async fn authenticate_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    include_data_generation: bool,
+) -> Result<AuthenticatedConnection, ApiError> {
     let token = bearer(headers).ok_or(ApiError::Unauthorized)?;
     let digest =
         session_token_digest(&state.token_hmac_key, &token).map_err(|_| ApiError::Unauthorized)?;
     let now = now_ms();
-    let row = sqlx::query_as::<_, AuthenticatedUser>(
-        "SELECT users.id,users.username,users.sync_verified_at,users.disabled_at, \
-         g.generation AS data_generation,s.expires_at FROM auth_sessions_v4 s \
-         JOIN users ON users.id=s.user_id JOIN account_data_generations g ON g.user_id=users.id \
-         WHERE s.token_digest=$1 AND s.revoked_at=0 AND s.expires_at>$2",
-    )
-    .bind(digest.as_slice())
-    .bind(now)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|_| ApiError::DatabaseUnavailable)?
-    .ok_or(ApiError::Unauthorized)?;
+    let touch_due = last_used_touch_due(&digest, now);
+    let mut connection = acquire_auth_connection(state).await?;
+    // Keep authorization authoritative in PostgreSQL on every request.  A
+    // refresh of `last_used_at` is audit data, not an authorization decision,
+    // so skip only its repeated write plan while this process has already
+    // completed the same interval's refresh for this token.
+    let query_started = Instant::now();
+    let result = if include_data_generation {
+        authenticate_query_with_generation(&mut connection, digest.as_slice(), now, touch_due).await
+    } else {
+        authenticate_query(&mut connection, digest.as_slice(), now, touch_due).await
+    };
+    metrics::histogram!("reader_sync_database_query_seconds", "operation" => "auth")
+        .record(query_started.elapsed().as_secs_f64());
+    let row = result
+        .map_err(|_| {
+            metrics::counter!(
+                "reader_sync_database_failures_total",
+                "operation" => "auth",
+                "phase" => "query"
+            )
+            .increment(1);
+            ApiError::DatabaseUnavailable
+        })?
+        .ok_or(ApiError::Unauthorized)?;
+    if touch_due {
+        remember_last_used_touch(digest, now);
+    }
     if row.disabled_at != 0 {
         return Err(ApiError::AccountDisabled);
     }
-    let _last_used_update = sqlx::query(
-        "UPDATE auth_sessions_v4 SET last_used_at=$2 \
-         WHERE token_digest=$1 AND last_used_at<$2-$3",
-    )
-    .bind(digest.as_slice())
-    .bind(now)
-    .bind(LAST_USED_WRITE_INTERVAL_MS)
-    .execute(&state.pool)
-    .await;
-    Ok(row)
+    check_authenticated_account_admission_on_connection(state, &row.id, &mut connection).await?;
+    Ok(AuthenticatedConnection {
+        user: row,
+        connection,
+    })
+}
+
+async fn acquire_auth_connection(
+    state: &AppState,
+) -> Result<sqlx::pool::PoolConnection<Postgres>, ApiError> {
+    let acquire_started = Instant::now();
+    let result = state.pool.acquire().await;
+    metrics::histogram!("reader_sync_database_pool_acquire_seconds", "operation" => "auth")
+        .record(acquire_started.elapsed().as_secs_f64());
+    result.map_err(|_| {
+        metrics::counter!(
+            "reader_sync_database_failures_total",
+            "operation" => "auth",
+            "phase" => "acquire"
+        )
+        .increment(1);
+        ApiError::DatabaseUnavailable
+    })
+}
+
+async fn authenticate_query(
+    connection: &mut PgConnection,
+    digest: &[u8],
+    now: i64,
+    touch_due: bool,
+) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
+    if touch_due {
+        sqlx::query_as::<_, AuthenticatedUser>(
+            "WITH authenticated AS ( \
+                 SELECT users.id,users.username,users.sync_verified_at,users.disabled_at, \
+                        s.expires_at,NULL::BIGINT AS data_generation \
+                 FROM auth_sessions_v4 s \
+                 JOIN users ON users.id=s.user_id \
+                 WHERE s.token_digest=$1 AND s.revoked_at=0 AND s.expires_at>$2 \
+             ), touched AS ( \
+                 UPDATE auth_sessions_v4 s SET last_used_at=$2 \
+                 WHERE s.token_digest=$1 AND s.last_used_at<$2-$3 \
+                   AND EXISTS (SELECT 1 FROM authenticated) \
+                 RETURNING s.token_digest \
+             ) \
+             SELECT id,username,sync_verified_at,disabled_at,expires_at,data_generation \
+             FROM authenticated",
+        )
+        .bind(digest)
+        .bind(now)
+        .bind(LAST_USED_WRITE_INTERVAL_MS)
+        .fetch_optional(&mut *connection)
+        .await
+    } else {
+        sqlx::query_as::<_, AuthenticatedUser>(
+            "SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,s.expires_at, \
+             NULL::BIGINT AS data_generation \
+             FROM auth_sessions_v4 s JOIN users ON users.id=s.user_id \
+             WHERE s.token_digest=$1 AND s.revoked_at=0 AND s.expires_at>$2",
+        )
+        .bind(digest)
+        .bind(now)
+        .fetch_optional(&mut *connection)
+        .await
+    }
+}
+
+async fn authenticate_query_with_generation(
+    connection: &mut PgConnection,
+    digest: &[u8],
+    now: i64,
+    touch_due: bool,
+) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
+    if touch_due {
+        sqlx::query_as::<_, AuthenticatedUser>(
+            "WITH authenticated AS ( \
+                 SELECT users.id,users.username,users.sync_verified_at,users.disabled_at, \
+                        s.expires_at,g.generation AS data_generation \
+                 FROM auth_sessions_v4 s \
+                 JOIN users ON users.id=s.user_id \
+                 LEFT JOIN account_data_generations g ON g.user_id=users.id \
+                 WHERE s.token_digest=$1 AND s.revoked_at=0 AND s.expires_at>$2 \
+             ), touched AS ( \
+                 UPDATE auth_sessions_v4 s SET last_used_at=$2 \
+                 WHERE s.token_digest=$1 AND s.last_used_at<$2-$3 \
+                   AND EXISTS (SELECT 1 FROM authenticated) \
+                 RETURNING s.token_digest \
+             ) \
+             SELECT id,username,sync_verified_at,disabled_at,expires_at,data_generation \
+             FROM authenticated",
+        )
+        .bind(digest)
+        .bind(now)
+        .bind(LAST_USED_WRITE_INTERVAL_MS)
+        .fetch_optional(&mut *connection)
+        .await
+    } else {
+        sqlx::query_as::<_, AuthenticatedUser>(
+            "SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,s.expires_at, \
+             g.generation AS data_generation \
+             FROM auth_sessions_v4 s JOIN users ON users.id=s.user_id \
+             LEFT JOIN account_data_generations g ON g.user_id=users.id \
+             WHERE s.token_digest=$1 AND s.revoked_at=0 AND s.expires_at>$2",
+        )
+        .bind(digest)
+        .bind(now)
+        .fetch_optional(&mut *connection)
+        .await
+    }
+}
+
+fn last_used_touch_due(digest: &[u8; 32], now: i64) -> bool {
+    let Ok(cache) = LAST_USED_TOUCH_CACHE.read() else {
+        // A poisoned cache cannot weaken authorization.  Fall back to the
+        // original PostgreSQL touch path for this request.
+        return true;
+    };
+    // Keep the request hot path O(1). Expired timestamps are harmless because
+    // `last_used_at_due` treats them as due; bounded O(1) eviction already
+    // happens in `remember_last_used_touch` when the cache reaches capacity.
+    // Retaining the whole map here made every authenticated request scan all
+    // active sessions, which dominates API CPU under a large account pool.
+    last_used_at_due(cache.get(digest).copied(), now)
+}
+
+fn last_used_at_due(touched_at: Option<i64>, now: i64) -> bool {
+    touched_at
+        .is_none_or(|touched_at| now.saturating_sub(touched_at) >= LAST_USED_WRITE_INTERVAL_MS)
+}
+
+fn remember_last_used_touch(digest: [u8; 32], now: i64) {
+    let Ok(mut cache) = LAST_USED_TOUCH_CACHE.write() else {
+        return;
+    };
+    if cache.len() >= MAX_LAST_USED_TOUCH_CACHE {
+        // Evict one arbitrary audit timestamp in O(1) average time instead of
+        // scanning a full cache on every new token. An evicted active session
+        // merely performs one extra guarded `last_used_at` write next time;
+        // authorization remains authoritative in PostgreSQL on every request.
+        if let Some(evicted) = cache.keys().next().copied() {
+            cache.remove(&evicted);
+        }
+    }
+    cache.insert(digest, now);
 }
 
 fn bearer(headers: &HeaderMap) -> Option<SecretString> {
@@ -842,4 +1040,56 @@ fn now_ms() -> i64 {
         .map_or(0, |duration| {
             i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ACCOUNT_STORAGE_QUOTA_BYTES, DAILY_WRITE_QUOTA_BYTES, DAILY_WRITE_QUOTA_ENTITIES,
+        LAST_USED_TOUCH_CACHE, LAST_USED_WRITE_INTERVAL_MS, last_used_at_due, last_used_touch_due,
+    };
+
+    #[test]
+    fn usage_exposes_a_full_account_upload_budget_for_the_day() {
+        assert_eq!(DAILY_WRITE_QUOTA_BYTES, ACCOUNT_STORAGE_QUOTA_BYTES);
+        assert_eq!(DAILY_WRITE_QUOTA_ENTITIES, 10_000);
+    }
+
+    #[test]
+    fn last_used_audit_touch_is_due_only_at_the_interval_boundary() {
+        let touched = 10_000_i64;
+        assert!(last_used_at_due(None, touched));
+        assert!(!last_used_at_due(Some(touched), touched));
+        assert!(!last_used_at_due(
+            Some(touched),
+            touched + LAST_USED_WRITE_INTERVAL_MS - 1
+        ));
+        assert!(last_used_at_due(
+            Some(touched),
+            touched + LAST_USED_WRITE_INTERVAL_MS
+        ));
+    }
+
+    #[test]
+    fn expired_last_used_cache_entry_is_due_without_request_path_sweep() {
+        let digest = [0xA7; 32];
+        let now = 10 * LAST_USED_WRITE_INTERVAL_MS;
+        LAST_USED_TOUCH_CACHE
+            .write()
+            .expect("last-used cache")
+            .insert(digest, now - LAST_USED_WRITE_INTERVAL_MS);
+
+        assert!(last_used_touch_due(&digest, now));
+        assert!(
+            LAST_USED_TOUCH_CACHE
+                .read()
+                .expect("last-used cache")
+                .contains_key(&digest),
+            "request lookup must not scan and evict the whole cache"
+        );
+        LAST_USED_TOUCH_CACHE
+            .write()
+            .expect("last-used cache")
+            .remove(&digest);
+    }
 }

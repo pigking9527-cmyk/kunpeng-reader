@@ -5,7 +5,10 @@ const assert = require("node:assert/strict");
 
 const uiRoot = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(uiRoot, "index.html"), "utf8");
-const source = fs.readFileSync(path.join(uiRoot, "feedback-ui.js"), "utf8");
+const source = fs.readFileSync(
+  path.join(uiRoot, "generated-ts", "feedback-ui.js"),
+  "utf8",
+);
 
 test("main menu keeps labels but removes decorative icons", () => {
   const menu = html.slice(
@@ -56,7 +59,7 @@ test("about exposes shared bug and feature feedback editor", () => {
   assert.match(html, /id="feedback-insert-image"[^>]*>[\s\S]*?添加截图/);
   assert.doesNotMatch(html, /id="feedback-json-input"/);
   assert.doesNotMatch(html, /id="feedback-insert-json"/);
-  assert.match(html, /src="feedback-ui\.js"/);
+  assert.match(html, /src="generated-ts\/feedback-ui\.js"/);
 });
 
 test("feedback images are compressed and submitted through the native command", () => {

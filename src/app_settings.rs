@@ -4,18 +4,15 @@
 //! preserves unknown fields so a newer desktop client is not damaged by an
 //! older Windows, Linux, or macOS build writing its known settings.
 
+pub(crate) mod commands;
+mod patch;
 mod rules;
 
 use crate::{db::AppDb, AppState};
-use rules::{
-    clipped_unique, normalized_gesture_settings, normalized_reader_layout_settings,
-    normalized_toolbar_content_order, normalized_toolbar_content_visible,
-    normalized_toolbar_hidden, normalized_toolbar_order, MAX_NEWS_SOURCES, MAX_TIEBA_BARS,
-    TOOLBAR_CONTENT_IDS, TOOLBAR_ITEM_IDS,
-};
+use patch::{apply_patch, normalize_patch};
+use rules::{TOOLBAR_CONTENT_IDS, TOOLBAR_ITEM_IDS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
 
 pub(crate) const APP_SETTINGS_KIND: &str = "app_settings_v1";
 const DEFAULT_ID: &str = "default";
@@ -163,164 +160,6 @@ pub(crate) struct AppSettingsSyncSnapshot {
     has_reader_layout_settings: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reader_layout_settings: Option<Value>,
-}
-
-fn normalize_patch(mut request: AppSettingsSyncRequest) -> AppSettingsSyncRequest {
-    if let Some(mode) = request.reader_jump_back_dismiss_mode.as_mut() {
-        *mode = if mode == "time" {
-            "time".into()
-        } else {
-            "pages".into()
-        };
-    }
-    if let Some(seconds) = request.reader_jump_back_dismiss_seconds.as_mut() {
-        *seconds = (*seconds).clamp(1, 600);
-    }
-    if let Some(pages) = request.reader_jump_back_dismiss_pages.as_mut() {
-        *pages = (*pages).clamp(1, 100);
-    }
-    if let Some(size) = request.reader_jump_back_icon_size_px.as_mut() {
-        *size = (*size).clamp(30, 160);
-    }
-    if let Some(position) = request.reader_jump_back_position_x.as_mut() {
-        *position = (*position).clamp(0, 1000);
-    }
-    if let Some(position) = request.reader_jump_back_position_y.as_mut() {
-        *position = (*position).clamp(0, 1000);
-    }
-    if let Some(engine) = request.epub_layout_engine.as_mut() {
-        *engine = if engine == "modern" {
-            "modern".into()
-        } else {
-            "legacy".into()
-        };
-    }
-    if let Some(ids) = request.news_source_ids.take() {
-        request.news_source_ids = Some(clipped_unique(ids, MAX_NEWS_SOURCES, 64, false));
-    }
-    if let Some(bars) = request.news_tieba_bars.take() {
-        request.news_tieba_bars = Some(clipped_unique(bars, MAX_TIEBA_BARS, 48, true));
-    }
-    if let Some(enabled) = request.news_enabled_tieba_bars.take() {
-        request.news_enabled_tieba_bars = Some(clipped_unique(enabled, MAX_TIEBA_BARS, 48, true));
-    }
-    if let Some(length) = request.library_answer_length.as_mut() {
-        *length = match length.as_str() {
-            "medium" => "medium".into(),
-            "long" => "long".into(),
-            _ => "short".into(),
-        };
-    }
-    if let Some(mode) = request.library_history_sync_mode.as_mut() {
-        *mode = match mode.as_str() {
-            "recent" => "recent".into(),
-            "manual" => "manual".into(),
-            _ => "off".into(),
-        };
-    }
-    if let Some(size) = request.library_answer_font_size.as_mut() {
-        *size = (*size).clamp(14, 22);
-    }
-    if let Some(size) = request.toolbar_icon_size_px.as_mut() {
-        *size = (*size).clamp(28, 52);
-    }
-    if let Some(order) = request.toolbar_item_order.take() {
-        request.toolbar_item_order = Some(normalized_toolbar_order(order));
-    }
-    if let Some(hidden) = request.toolbar_hidden_items.take() {
-        request.toolbar_hidden_items = Some(normalized_toolbar_hidden(hidden));
-    }
-    if let Some(order) = request.toolbar_content_order.take() {
-        request.toolbar_content_order = Some(normalized_toolbar_content_order(order));
-    }
-    if let Some(visible) = request.toolbar_content_visible.take() {
-        request.toolbar_content_visible = Some(normalized_toolbar_content_visible(visible));
-    }
-    if let Some(settings) = request.gesture_settings.take() {
-        request.gesture_settings = normalized_gesture_settings(settings);
-    }
-    if let Some(settings) = request.reader_layout_settings.take() {
-        request.reader_layout_settings = normalized_reader_layout_settings(settings);
-    }
-    request
-}
-
-fn apply_patch(settings: &mut AppSettings, request: AppSettingsSyncRequest) {
-    let request = normalize_patch(request);
-    if let Some(value) = request.show_reader_jump_back {
-        settings.show_reader_jump_back = value;
-    }
-    if let Some(value) = request.reader_jump_back_dismiss_mode {
-        settings.reader_jump_back_dismiss_mode = value;
-    }
-    if let Some(value) = request.reader_jump_back_dismiss_seconds {
-        settings.reader_jump_back_dismiss_seconds = value;
-    }
-    if let Some(value) = request.reader_jump_back_dismiss_pages {
-        settings.reader_jump_back_dismiss_pages = value;
-    }
-    if let Some(value) = request.reader_jump_back_icon_size_px {
-        settings.reader_jump_back_icon_size_px = value;
-    }
-    if let Some(value) = request.reader_jump_back_position_x {
-        settings.reader_jump_back_position_x = value;
-    }
-    if let Some(value) = request.reader_jump_back_position_y {
-        settings.reader_jump_back_position_y = value;
-    }
-    if let Some(value) = request.epub_layout_engine {
-        settings.epub_layout_engine = value;
-    }
-    if let Some(value) = request.news_source_ids {
-        settings.news_source_ids = value;
-    }
-    if let Some(value) = request.news_tieba_bars {
-        settings.news_tieba_bars = value;
-    }
-    if let Some(value) = request.news_enabled_tieba_bars {
-        let available = settings
-            .news_tieba_bars
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>();
-        settings.news_enabled_tieba_bars = value
-            .into_iter()
-            .filter(|name| available.contains(name))
-            .collect();
-    }
-    if let Some(value) = request.library_answer_length {
-        settings.library_answer_length = value;
-    }
-    if let Some(value) = request.library_history_sync_mode {
-        settings.library_history_sync_mode = value;
-    }
-    if let Some(value) = request.library_answer_font_size {
-        settings.library_answer_font_size = value;
-    }
-    if let Some(value) = request.library_long_context_enabled {
-        settings.library_long_context_enabled = value;
-    }
-    if let Some(value) = request.toolbar_icon_size_px {
-        settings.toolbar_icon_size_px = value;
-    }
-    if let Some(value) = request.toolbar_item_order {
-        settings.toolbar_item_order = value;
-    }
-    if let Some(value) = request.toolbar_hidden_items {
-        settings.toolbar_hidden_items = value;
-    }
-    if let Some(value) = request.toolbar_content_order {
-        settings.toolbar_content_order = value;
-    }
-    if let Some(value) = request.toolbar_content_visible {
-        settings.toolbar_content_visible = value;
-    }
-    if let Some(value) = request.gesture_settings {
-        settings.gesture_settings = Some(value);
-    }
-    if let Some(value) = request.reader_layout_settings {
-        settings.reader_layout_settings = Some(value);
-    }
 }
 
 fn settings_from_value(value: &Value) -> AppSettings {
@@ -577,19 +416,15 @@ pub(crate) fn normalize_protocol_v5_entity(state: &AppState) -> Result<(), Strin
     })
 }
 
-#[tauri::command]
-pub(crate) fn app_settings_sync_get(
-    state: tauri::State<AppState>,
-) -> Result<AppSettingsSyncSnapshot, String> {
+fn app_settings_sync_get_inner(state: &AppState) -> Result<AppSettingsSyncSnapshot, String> {
     state.with_db_read("app_settings_sync_get", |db| {
         let current = entity(db)?;
         Ok(snapshot(current.as_ref()))
     })
 }
 
-#[tauri::command]
-pub(crate) fn app_settings_sync_save(
-    state: tauri::State<AppState>,
+fn app_settings_sync_save_inner(
+    state: &AppState,
     request: AppSettingsSyncRequest,
 ) -> Result<AppSettingsSyncSnapshot, String> {
     state.with_db_write("app_settings_sync_save", |db| {
@@ -760,7 +595,7 @@ mod tests {
                         "id": "back-home",
                         "name": "返回主页",
                         "scope": "auto",
-                        "action": "back",
+                        "action": "undo_last",
                         "input": "mouse-right",
                         "enabled": true,
                         "points": points,
@@ -796,6 +631,10 @@ mod tests {
             rules::GESTURE_POINT_COUNT
         );
         assert_eq!(
+            payload["gestureSettings"]["profiles"][0]["action"],
+            "undo_last"
+        );
+        assert_eq!(
             payload["gestureSettings"]["profiles"][0]["futureProfileSetting"],
             "keep"
         );
@@ -812,6 +651,55 @@ mod tests {
             snapshot.gesture_settings.unwrap()["profiles"][0]["name"],
             "返回主页"
         );
+    }
+
+    #[test]
+    fn legacy_gesture_recovery_actions_are_readable_and_canonicalized() {
+        let points = (0..rules::GESTURE_POINT_COUNT)
+            .map(|index| json!({ "x": index as f64 / 100.0, "y": 0.0 }))
+            .collect::<Vec<_>>();
+        let normalized = rules::normalized_gesture_settings(json!({
+            "version": 1,
+            "enabled": true,
+            "globalPrecision": "5",
+            "profilesInitialized": true,
+            "profiles": [
+                {
+                    "id": "legacy-reopen",
+                    "name": "恢复页面",
+                    "scope": "main",
+                    "action": "reopen_last",
+                    "input": "mouse-right",
+                    "enabled": true,
+                    "points": points.clone(),
+                    "precisionMode": "global",
+                    "precision": "5"
+                },
+                {
+                    "id": "legacy-reader-jump",
+                    "name": "恢复跳转",
+                    "scope": "reader",
+                    "action": "restore_jump",
+                    "input": "mouse-right",
+                    "enabled": true,
+                    "points": points,
+                    "precisionMode": "global",
+                    "precision": "5"
+                }
+            ],
+            "hintSettings": {
+                "enabled": false,
+                "fontSize": 16,
+                "backgroundEnabled": true,
+                "background": "#173b6b",
+                "opacity": 88,
+                "positionX": 1.0,
+                "positionY": 0.0
+            }
+        }))
+        .expect("legacy recovery gesture settings remain valid");
+        assert_eq!(normalized["profiles"][0]["action"], "undo_last");
+        assert_eq!(normalized["profiles"][1]["action"], "undo_last");
     }
 
     #[test]

@@ -78,9 +78,7 @@ mod tests {
         assert!(should_send_sync_protocol_header("/v1/sync/pull"));
         assert!(should_send_sync_protocol_header("/v1/sync/inventory"));
         assert!(should_send_sync_protocol_header("/v1/sync/assets/example"));
-        assert!(should_send_sync_protocol_header(
-            "/v1/sync/recovery/restore"
-        ));
+        assert!(should_send_sync_protocol_header("/v1/sync/data/reset"));
         assert!(!should_send_sync_protocol_header(
             "/v1/auth/password/change"
         ));

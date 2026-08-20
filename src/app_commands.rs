@@ -4,10 +4,16 @@ use crate::{
     background_tasks, diagnostics, dict, external_dict, log, now_ms, translate, url_open, AppState,
 };
 use serde::Deserialize;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[tauri::command]
 pub(crate) fn reader_perf_log(window: tauri::WebviewWindow, event: String) {
     if event.len() <= 1000 && window.label().starts_with("reader-") {
+        if event.starts_with("shell_ready ") {
+            crate::window_commands::record_reader_ready(&window);
+        }
+        crate::window_commands::record_reader_shell_benchmark_phase(&window, &event);
         log(&format!("reader_perf label={} {event}", window.label()));
     }
 }
@@ -98,6 +104,7 @@ pub(crate) fn save_download_image(name: String, data_url: String) -> Result<Stri
 
 const PROBLEM_TRACE_WINDOW_MS: u64 = 2 * 60 * 1000;
 const PROBLEM_TRACE_MAX_BYTES: usize = 4 * 1024 * 1024;
+const PROBLEM_TRACE_LATEST_FILE: &str = "problem-trace-latest.json";
 
 fn validate_problem_trace_checkpoint(snapshot: &serde_json::Value) -> Result<(), String> {
     let object = snapshot
@@ -122,8 +129,71 @@ static PROBLEM_TRACE_CACHE: std::sync::LazyLock<
     std::sync::Mutex<Option<(u64, serde_json::Value)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-/// Keep the latest redacted reader snapshot in the Rust process so closing the
-/// reader WebView does not destroy the only copy before the Bug dialog opens.
+fn problem_trace_checkpoint_path() -> Result<PathBuf, String> {
+    let directory =
+        crate::profile::app_cache_dir().ok_or_else(|| "问题记录缓存目录不可用".to_string())?;
+    Ok(directory.join(PROBLEM_TRACE_LATEST_FILE))
+}
+
+fn persist_problem_trace_checkpoint_at(
+    path: &Path,
+    snapshot: &serde_json::Value,
+) -> Result<(), String> {
+    validate_problem_trace_checkpoint(snapshot)?;
+    let bytes = serde_json::to_vec(snapshot).map_err(|_| "问题记录数据格式不正确".to_string())?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| "问题记录缓存目录不可用".to_string())?;
+    std::fs::create_dir_all(directory).map_err(|error| format!("创建问题记录缓存失败：{error}"))?;
+    let temporary = directory.join(format!(".{PROBLEM_TRACE_LATEST_FILE}.tmp"));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("写入问题记录缓存失败：{error}"))?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("写入问题记录缓存失败：{error}"))?;
+    drop(file);
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|error| format!("更新问题记录缓存失败：{error}"))?;
+    }
+    std::fs::rename(&temporary, path).map_err(|error| format!("更新问题记录缓存失败：{error}"))?;
+    Ok(())
+}
+
+fn load_problem_trace_checkpoint_at(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("读取问题记录缓存失败：{error}")),
+    };
+    if bytes.is_empty() || bytes.len() > PROBLEM_TRACE_MAX_BYTES {
+        return Err("问题记录缓存数据不正确".to_string());
+    }
+    let snapshot = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "问题记录缓存不是有效的 JSON".to_string())?;
+    validate_problem_trace_checkpoint(&snapshot)?;
+    Ok(Some(snapshot))
+}
+
+fn persist_problem_trace_checkpoint(snapshot: &serde_json::Value) -> Result<(), String> {
+    persist_problem_trace_checkpoint_at(&problem_trace_checkpoint_path()?, snapshot)
+}
+
+fn load_problem_trace_checkpoint() -> Result<Option<serde_json::Value>, String> {
+    load_problem_trace_checkpoint_at(&problem_trace_checkpoint_path()?)
+}
+
+/// Keep the latest redacted reader snapshot in memory and in the application
+/// cache so closing the reader WebView or the process does not destroy the only
+/// diagnostic copy. The file is bounded and replaced rather than accumulated.
 #[tauri::command]
 pub(crate) fn problem_trace_checkpoint(
     snapshot: Option<serde_json::Value>,
@@ -133,17 +203,19 @@ pub(crate) fn problem_trace_checkpoint(
         .map_err(|_| "问题记录缓存暂时不可用".to_string())?;
     if let Some(snapshot) = snapshot {
         validate_problem_trace_checkpoint(&snapshot)?;
-        *cached = Some((now_ms(), snapshot));
+        *cached = Some((now_ms(), snapshot.clone()));
+        if let Err(error) = persist_problem_trace_checkpoint(&snapshot) {
+            log(&format!("problem_trace_checkpoint persist_failed {error}"));
+        }
         return Ok(None);
     }
-    let Some((stored_at, snapshot)) = cached.as_ref() else {
-        return Ok(None);
-    };
-    if now_ms().saturating_sub(*stored_at) <= PROBLEM_TRACE_WINDOW_MS {
-        return Ok(Some(snapshot.clone()));
+    if let Some((stored_at, snapshot)) = cached.as_ref() {
+        if now_ms().saturating_sub(*stored_at) <= PROBLEM_TRACE_WINDOW_MS {
+            return Ok(Some(snapshot.clone()));
+        }
     }
     *cached = None;
-    Ok(None)
+    load_problem_trace_checkpoint()
 }
 
 /// Saves the user-requested, redacted problem-trace attachment directly to the desktop.
@@ -391,5 +463,54 @@ mod tests {
             .unwrap();
         assert_eq!(credential.api_id, "id");
         assert_eq!(credential.api_key, "key");
+    }
+
+    #[test]
+    fn problem_trace_checkpoint_is_atomically_replaced_and_reloadable() {
+        let directory = std::env::temp_dir().join(format!(
+            "kunpeng-problem-trace-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let path = directory.join(PROBLEM_TRACE_LATEST_FILE);
+        let first = serde_json::json!({
+            "schema_version": 1,
+            "captured_at": "2026-08-16T12:00:00.000Z",
+            "events": [{"type": "page_click", "detail": {"chapter": 2}}]
+        });
+        persist_problem_trace_checkpoint_at(&path, &first).unwrap();
+        assert_eq!(
+            load_problem_trace_checkpoint_at(&path).unwrap(),
+            Some(first)
+        );
+
+        let second = serde_json::json!({
+            "schema_version": 1,
+            "captured_at": "2026-08-16T12:01:00.000Z",
+            "events": []
+        });
+        persist_problem_trace_checkpoint_at(&path, &second).unwrap();
+        assert_eq!(
+            load_problem_trace_checkpoint_at(&path).unwrap(),
+            Some(second)
+        );
+        assert!(!directory
+            .join(format!(".{PROBLEM_TRACE_LATEST_FILE}.tmp"))
+            .exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn problem_trace_checkpoint_rejects_invalid_persisted_json() {
+        let directory = std::env::temp_dir().join(format!(
+            "kunpeng-problem-trace-invalid-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(PROBLEM_TRACE_LATEST_FILE);
+        std::fs::write(&path, b"not-json").unwrap();
+        assert!(load_problem_trace_checkpoint_at(&path).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

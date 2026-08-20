@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "shelf-cover-loading-rules.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "shelf-cover-loading-rules.js"), "utf8");
 
 function rules() {
   const context = { window: null };

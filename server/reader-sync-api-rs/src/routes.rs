@@ -58,15 +58,19 @@ pub async fn ready(
         "SELECT to_regclass('public.users') IS NOT NULL \
          AND to_regclass('public.auth_sessions_v4') IS NOT NULL \
          AND to_regclass('public.account_emails_v4') IS NOT NULL \
+         AND to_regclass('public.account_phones_v5') IS NOT NULL \
          AND to_regclass('public.account_data_generations') IS NOT NULL \
          AND to_regclass('public.sync_entities_v4') IS NOT NULL \
          AND to_regclass('public.sync_push_receipts_v4') IS NOT NULL \
          AND to_regclass('public.registration_challenges_v4') IS NOT NULL \
+         AND to_regclass('public.phone_registration_challenges_v5') IS NOT NULL \
          AND to_regclass('public.password_reset_challenges_v4') IS NOT NULL \
          AND to_regclass('public.account_email_challenges_v5') IS NOT NULL \
          AND to_regclass('public.account_email_rebind_grants_v5') IS NOT NULL \
          AND to_regclass('public.sync_secret_bundle_epochs_v5') IS NOT NULL \
          AND to_regclass('public.mail_outbox_v4') IS NOT NULL \
+         AND to_regclass('public.sms_outbox_v5') IS NOT NULL \
+         AND to_regclass('public.sms_daily_usage_v5') IS NOT NULL \
          AND to_regclass('public.rate_limit_buckets_v4') IS NOT NULL \
          AND to_regclass('public.account_daily_usage_v4') IS NOT NULL \
          AND to_regclass('public.sync_assets_v4') IS NOT NULL \

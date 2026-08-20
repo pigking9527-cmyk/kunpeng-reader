@@ -161,6 +161,7 @@ fn main() {
             {
                 let state = app.state::<AppState>();
                 state.install_memory_reclaimers();
+                state.sync_auto_scheduler.attach(app.handle().clone());
                 if let Err(error) = data_migration::apply_local_organization_entities(state.inner())
                 {
                     // Do not project an old library when authoritative organization data failed.
@@ -177,6 +178,11 @@ fn main() {
                         Ok(_) => {}
                         Err(error) => log(&format!("实体模型收敛已安全跳过：{error}")),
                     }
+                }
+                if let Err(error) =
+                    reader_backgrounds::prune_unreferenced_cached_assets(state.inner())
+                {
+                    log(&format!("孤立主题背景图清理已跳过：{error}"));
                 }
             }
             // Tauri's declarative window would otherwise be created with the
@@ -214,6 +220,7 @@ fn main() {
                 main_window_builder = main_window_builder.data_store_identifier(identifier);
             }
             let _main_window = main_window_builder.build()?;
+            sync::start_silent_startup_sync(app.handle().clone());
             backup::spawn_daily(app.handle().clone());
             semantic::spawn_semantic_profile_warmup(app.handle().clone());
             startup::spawn_associated_book_watcher(app.handle().clone());
@@ -267,6 +274,7 @@ fn main() {
             library_commands::merge_duplicate_books,
             library_commands::book_reading_timeline,
             window_commands::reader_window_open,
+            window_commands::reader_shell_pool_ready,
             app_commands::background_task_status,
             app_commands::background_task_cancel,
             app_commands::background_task_pause,
@@ -323,8 +331,10 @@ fn main() {
             ai_reader::set_library_model_tags_enabled,
             ai_reader::start_library_auto_classification,
             private_sync::private_sync_get_settings,
-            app_settings::app_settings_sync_get,
-            app_settings::app_settings_sync_save,
+            app_settings::commands::app_settings_sync_get,
+            app_settings::commands::app_settings_sync_save,
+            newsnow::newsnow_custom_sources_get,
+            newsnow::newsnow_custom_sources_save,
             reader_palettes::reader_palette_sync_get,
             reader_palettes::reader_palette_sync_save,
             private_sync::private_sync_set_options,
@@ -349,6 +359,7 @@ fn main() {
             vocab::vocab_review,
             vocab::notes_summary,
             sync::sync_get_settings,
+            sync::sync_account_open_refresh,
             sync::sync_set_settings,
             sync::auth_register,
             sync::auth_register_start,
@@ -364,8 +375,6 @@ fn main() {
             sync::auth_rebind_email_new_confirm,
             sync::auth_change_password,
             sync::sync_reset_cloud_data,
-            sync::sync_recovery_status,
-            sync::sync_recovery_restore,
             sync::auth_delete_account,
             sync::auth_request_password_reset,
             sync::auth_confirm_password_reset,
@@ -379,6 +388,7 @@ fn main() {
             data_commands::migrate_data_to_sqlite,
             data_commands::export_data_package,
             data_commands::import_data_package,
+            data_commands::clear_local_app_data_preflight,
             data_commands::clear_local_app_data,
             update::check_update,
             update::release_notes,
@@ -391,7 +401,17 @@ fn main() {
             import::set_auto_import,
             import::auto_import_scan,
             library_commands::open_book,
+            epub_runtime::prewarm_book,
+            window_commands::reader_shell_preload_status,
+            window_commands::set_reader_shell_preload_enabled,
+            window_commands::set_recent_reading_chapter_cache_enabled,
+            window_commands::clear_recent_reading_chapter_cache,
+            window_commands::benchmark_reader_shell_opening,
+            window_commands::reader_shell_hidden_after_save,
             epub_runtime::book_info,
+            window_commands::prepare_reader_switch_target,
+            window_commands::cancel_prepared_reader_switch_target,
+            window_commands::complete_reader_switch,
             gesture_settings::reader_gesture_settings_save,
             gesture_settings::reader_gesture_settings_load,
             app_commands::reader_perf_log,

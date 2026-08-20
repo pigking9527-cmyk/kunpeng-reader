@@ -1,539 +1,727 @@
-// PDF.js 自渲染阅读器（连续滚动 + 文字层选择 + 目录 + 缩放 + 主题），通过 postMessage 与外壳工具栏联动
 import * as pdfjsLib from "./pdfjs/pdf.min.mjs";
 import { createPdfLegacyAdapter } from "./bridge/pdf-engine-legacy-adapter.js";
+function countReadablePdfChars(text) {
+  return text.replace(/\s+/g, "").length;
+}
+function boundedPdfSearchResults(matches, maximumBytes, serializedBytes) {
+  const searchResults = [];
+  for (const match of matches) {
+    const next = { page: match.page, chapter: match.page - 1, snippet: match.snippet };
+    if (serializedBytes({ searchResults: [...searchResults, next], searchCount: matches.length }) > maximumBytes) break;
+    searchResults.push(next);
+  }
+  return Object.freeze({ searchResults: Object.freeze(searchResults), searchCount: matches.length });
+}
+function pdfTurnTarget(currentPage, direction, dualMode2) {
+  return dualMode2 ? (currentPage % 2 === 1 ? currentPage : currentPage - 1) + direction * 2 : currentPage + direction;
+}
+function clampPdfScale(value) {
+  return Math.max(0.4, Math.min(4, value));
+}
+function fitPdfScale(windowWidth, nativeWidth, dualMode2) {
+  const available = Math.max(200, windowWidth - 28);
+  return clampPdfScale((dualMode2 ? (available - 12) / 2 : available) / nativeWidth);
+}
+function normalisePdfPage(total2, requested) {
+  return Math.max(1, Math.min(total2, requested | 0));
+}
+function isLegacyCommand(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isLegacySettings(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function numberAt(value) {
+  return Number(value ?? "");
+}
+function elementTarget(target) {
+  return target instanceof Element ? target : null;
+}
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", location.href).href;
-
-window.addEventListener("contextmenu", (e) => e.preventDefault());
-// 禁用浏览器自带查找（Ctrl+F / F3），用 PDF 自带搜索
-window.addEventListener("keydown", (e) => {
-  if (((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) || e.key === "F3") e.preventDefault();
+window.addEventListener("contextmenu", (event) => event.preventDefault());
+window.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F") || event.key === "F3") event.preventDefault();
 }, true);
-
-const P = new URLSearchParams(location.search);
-// The PDF iframe must import its bridge explicitly. A classic side-effect
-// script can be omitted by the packaged asset loader, leaving the PDF blank
-// even though its trusted reader:// resource URL is valid.
+const parameters = new URLSearchParams(location.search);
 const pdfEngineAdapter = createPdfLegacyAdapter();
-const pdfBootstrap = pdfEngineAdapter?.bootstrap?.({ href: location.href, search: location.search }) || null;
+const pdfBootstrap = pdfEngineAdapter.bootstrap({ href: location.href, search: location.search });
 const actualParent = window.parent;
-// Shadow the ambient Window.parent with a tiny compatibility sender. Existing
-// imperative code below keeps its one-way notifications, but every event now
-// has a fixed explicit target origin and a bounded payload.
-const parent = Object.freeze({
-  postMessage(payload) {
-    pdfEngineAdapter?.postLegacyEvent?.(actualParent, pdfBootstrap, payload);
-  },
-});
-const pdfUrl = pdfBootstrap?.sourceUrl || "";
-let resumePage = pdfBootstrap?.initialPage || 1;
+const parent = Object.freeze({ postMessage(payload) {
+  if (pdfBootstrap) pdfEngineAdapter.postLegacyEvent(actualParent, pdfBootstrap, payload);
+} });
+const pdfUrl = pdfBootstrap?.sourceUrl ?? "";
+const resumePage = pdfBootstrap?.initialPage ?? 1;
 let settings = {};
-try { settings = JSON.parse(decodeURIComponent(P.get("s") || "{}")); } catch (e) {}
-
-const pagesEl = document.getElementById("pages");
-let pdf = null, total = 0, scale = 1.3, divs = [], baseW = 600, baseH = 800, curPage = 1, io = null;
-let nativeW = 600, nativeH = 800, dualMode = false; // 页面原生尺寸(scale=1) + 双页模式
-let HLD = []; // 高亮列表（外壳传来）
-let pageText = {}; // 每页文字缓存
-let pageTextChars = {}; // 每页可统计文字数；扫描页通常为 0
-let searchTerm = "", searchMatches = [], searchIdx = 0;
-let overlayOpen = false; // 外壳里搜索框/设置面板是否打开
-let hlMenu = null, activeHi = -1;
+try {
+  const parsed = JSON.parse(decodeURIComponent(parameters.get("s") ?? "{}"));
+  if (isLegacySettings(parsed)) settings = parsed;
+} catch {
+}
+const pagesEl = document.getElementById("pages") ?? (() => {
+  throw new Error("PDF page container is missing.");
+})();
+let pdf = null;
+let total = 0;
+let scale = 1.3;
+const divs = [];
+let baseW = 600;
+let baseH = 800;
+let curPage = 1;
+let io = null;
+let nativeW = 600;
+let nativeH = 800;
+let dualMode = false;
+let highlights = [];
+const pageText = {};
+const pageTextChars = {};
+let searchTerm = "";
+let searchMatches = [];
+let searchIdx = 0;
+let overlayOpen = false;
+let hlMenu = null;
+let activeHi = -1;
+let selMenu = null;
 let pdfSession = null;
 let pdfDisposed = false;
-const renderOperations = new Map();
-
-function postToShell(payload) { parent.postMessage(payload, "*"); }
-function searchPayloadWithinLimit(payload) {
-  try { return new TextEncoder().encode(JSON.stringify(payload)).byteLength <= 16 * 1024; } catch (_) { return false; }
+const renderOperations = /* @__PURE__ */ new Map();
+function postToShell(payload) {
+  parent.postMessage(payload);
+}
+function setupReaderGestureForwarding() {
+  let drawing = false;
+  let source = null;
+  let pointerId = null;
+  const report2 = (phase, clientX, clientY) => {
+    postToShell({ readerGesture: { phase, x: clientX, y: clientY } });
+  };
+  const start = (event, nextSource) => {
+    if (drawing || event.button !== 2) return;
+    drawing = true;
+    source = nextSource;
+    if (nextSource === "pointer" && "pointerId" in event) {
+      pointerId = event.pointerId;
+      try {
+        document.documentElement.setPointerCapture(pointerId);
+      } catch {
+      }
+    }
+    report2("start", event.clientX, event.clientY);
+    event.preventDefault();
+  };
+  const finish = (phase, event) => {
+    if (!drawing) return;
+    const capturedPointerId = pointerId;
+    drawing = false;
+    source = null;
+    pointerId = null;
+    if (capturedPointerId !== null) {
+      try {
+        document.documentElement.releasePointerCapture(capturedPointerId);
+      } catch {
+      }
+    }
+    report2(phase, event?.clientX ?? 0, event?.clientY ?? 0);
+    event?.preventDefault();
+  };
+  document.addEventListener("pointerdown", (event) => start(event, "pointer"), true);
+  document.addEventListener("pointermove", (event) => {
+    if (!drawing || source !== "pointer" || event.pointerId !== pointerId) return;
+    report2("move", event.clientX, event.clientY);
+    event.preventDefault();
+  }, { capture: true, passive: false });
+  document.addEventListener("pointerup", (event) => {
+    if (source === "pointer" && event.pointerId === pointerId) finish("end", event);
+  }, true);
+  document.addEventListener("pointercancel", (event) => {
+    if (source === "pointer" && event.pointerId === pointerId) finish("cancel", event);
+  }, true);
+  document.addEventListener("mousedown", (event) => start(event, "mouse"), true);
+  document.addEventListener("mousemove", (event) => {
+    if (!drawing || source !== "mouse") return;
+    report2("move", event.clientX, event.clientY);
+    event.preventDefault();
+  }, { capture: true, passive: false });
+  document.addEventListener("mouseup", (event) => {
+    if (source === "mouse" && event.button === 2) finish("end", event);
+  }, true);
+  window.addEventListener("blur", () => finish("cancel"));
 }
 function boundedSearchResultsPayload() {
-  const results = [];
-  for (const match of searchMatches) {
-    const next = { page: match.page, chapter: match.page - 1, snippet: match.snippet };
-    const candidate = { searchResults: [...results, next], searchCount: searchMatches.length };
-    if (!searchPayloadWithinLimit(candidate)) break;
-    results.push(next);
-  }
-  return { searchResults: results, searchCount: searchMatches.length };
+  return boundedPdfSearchResults(searchMatches, 16 * 1024, (value) => {
+    try {
+      return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    } catch {
+      return Number.POSITIVE_INFINITY;
+    }
+  });
 }
 function cancelRenderOperation(operationId) {
   const entry = renderOperations.get(operationId);
   if (!entry) return;
   renderOperations.delete(operationId);
   entry.untrack();
-  try { entry.task.cancel(); } catch (_) {}
+  try {
+    entry.task.cancel();
+  } catch {
+  }
 }
 function disposePdfView() {
   if (pdfDisposed) return;
   pdfDisposed = true;
-  if (io) { io.disconnect(); io = null; }
+  io?.disconnect();
+  io = null;
   for (const operationId of [...renderOperations.keys()]) cancelRenderOperation(operationId);
-  void pdfSession?.dispose?.();
-  if (pdf?.destroy) Promise.resolve(pdf.destroy()).catch(() => {});
+  void pdfSession?.dispose();
+  if (pdf?.destroy) void Promise.resolve(pdf.destroy()).catch(() => void 0);
   pdf = null;
 }
 window.addEventListener("pagehide", disposePdfView, { once: true });
 window.addEventListener("beforeunload", disposePdfView, { once: true });
-
-function countReadablePdfChars(text) {
-  return (text || "").replace(/\s+/g, "").length;
+function requirePdf() {
+  if (!pdf) throw new Error("PDF is not loaded.");
+  return pdf;
 }
-async function getPageText(i) {
-  if (pageText[i] != null) return pageText[i];
+async function getPageText(pageNumber) {
+  const cached = pageText[pageNumber];
+  if (cached !== void 0) return cached;
   try {
-    const page = await pdf.getPage(i);
-    const tc = await page.getTextContent();
-    pageText[i] = tc.items.map((it) => it.str).join("");
-  } catch (e) { pageText[i] = ""; }
-  pageTextChars[i] = countReadablePdfChars(pageText[i]);
-  return pageText[i];
+    const content = await (await requirePdf().getPage(pageNumber)).getTextContent();
+    pageText[pageNumber] = content.items.map((item) => item.str).join("");
+  } catch {
+    pageText[pageNumber] = "";
+  }
+  const text = pageText[pageNumber] ?? "";
+  pageTextChars[pageNumber] = countReadablePdfChars(text);
+  return text;
 }
-
-// ---- 高亮叠层 ----
-function renderPageHighlights(i) {
-  const d = divs[i];
-  if (!d || !d.dataset.done) return;
-  d.querySelectorAll(".hl-box").forEach((b) => b.remove());
-  const pw = parseFloat(d.style.width), ph = parseFloat(d.style.height);
-  HLD.forEach((h, idx) => {
-    if ((h.chapter || 0) + 1 !== i) return;
+function renderPageHighlights(pageNumber) {
+  const page = divs[pageNumber];
+  if (!page?.dataset.done) return;
+  page.querySelectorAll(".hl-box").forEach((box) => box.remove());
+  const pageWidth = Number.parseFloat(page.style.width);
+  const pageHeight = Number.parseFloat(page.style.height);
+  highlights.forEach((highlight, index) => {
+    if ((highlight.chapter ?? 0) + 1 !== pageNumber) return;
     let rects = [];
-    try { rects = JSON.parse(h.rects || "[]"); } catch (e) {}
-    rects.forEach((r) => {
+    try {
+      rects = JSON.parse(highlight.rects ?? "[]");
+    } catch {
+      rects = [];
+    }
+    if (!Array.isArray(rects)) return;
+    for (const rect of rects) {
+      if (!Array.isArray(rect) || rect.length < 4 || !rect.slice(0, 4).every((value) => typeof value === "number")) continue;
+      const [left, top, width, height] = rect;
       const box = document.createElement("div");
-      box.className = "hl-box" + (h.note ? " has-note" : "");
-      box.dataset.hi = idx;
-      box.style.left = r[0] * pw + "px";
-      box.style.top = r[1] * ph + "px";
-      box.style.width = r[2] * pw + "px";
-      box.style.height = r[3] * ph + "px";
-      if (h.note) box.title = h.note;
-      box.addEventListener("click", (e) => { e.stopPropagation(); showHlMenu(idx, box); });
-      d.appendChild(box);
-    });
+      box.className = `hl-box${highlight.note ? " has-note" : ""}`;
+      box.dataset.hi = String(index);
+      box.style.left = `${left * pageWidth}px`;
+      box.style.top = `${top * pageHeight}px`;
+      box.style.width = `${width * pageWidth}px`;
+      box.style.height = `${height * pageHeight}px`;
+      if (highlight.note) box.title = highlight.note;
+      box.addEventListener("click", (event) => {
+        event.stopPropagation();
+        showHlMenu(index, box);
+      });
+      page.appendChild(box);
+    }
   });
 }
-function renderAllHighlights() { for (let i = 1; i <= total; i++) renderPageHighlights(i); }
-
-// ---- 书内搜索 ----
-function clearSearchMarks() {
-  document.querySelectorAll(".textLayer span.search-hit").forEach((s) => s.classList.remove("search-hit", "cur"));
+function renderAllHighlights() {
+  for (let pageNumber = 1; pageNumber <= total; pageNumber += 1) renderPageHighlights(pageNumber);
 }
-function markSearchOnPage(i) {
-  if (!searchTerm) return;
-  const d = divs[i];
-  if (!d) return;
-  const tl = d.querySelector(".textLayer");
-  if (!tl) return;
-  const low = searchTerm.toLowerCase();
-  tl.querySelectorAll("span").forEach((s) => {
-    if ((s.textContent || "").toLowerCase().includes(low)) s.classList.add("search-hit");
+function clearSearchMarks() {
+  document.querySelectorAll(".textLayer span.search-hit").forEach((span) => span.classList.remove("search-hit", "cur"));
+}
+function markSearchOnPage(pageNumber) {
+  const layer = divs[pageNumber]?.querySelector(".textLayer");
+  if (!searchTerm || !layer) return;
+  const lower = searchTerm.toLowerCase();
+  layer.querySelectorAll("span").forEach((span) => {
+    if ((span.textContent ?? "").toLowerCase().includes(lower)) span.classList.add("search-hit");
   });
 }
 async function searchPdf(term) {
-  searchTerm = (term || "").trim();
+  searchTerm = term.trim();
   clearSearchMarks();
-  if (!searchTerm) { parent.postMessage({ searchResults: [], searchCount: 0 }, "*"); return; }
-  const low = searchTerm.toLowerCase();
+  if (!searchTerm) {
+    postToShell({ searchResults: [], searchCount: 0 });
+    return;
+  }
+  const lower = searchTerm.toLowerCase();
   searchMatches = [];
-  for (let i = 1; i <= total; i++) {
-    const t = await getPageText(i);
-    const lt = t.toLowerCase();
-    let idx = lt.indexOf(low), n = 0;
-    while (idx >= 0 && n < 80) {
-      searchMatches.push({ page: i, snippet: t.slice(Math.max(0, idx - 24), idx + searchTerm.length + 24).trim() });
-      idx = lt.indexOf(low, idx + searchTerm.length);
-      n++;
+  for (let pageNumber = 1; pageNumber <= total; pageNumber += 1) {
+    const text = await getPageText(pageNumber);
+    const normalized = text.toLowerCase();
+    let index = normalized.indexOf(lower);
+    let count = 0;
+    while (index >= 0 && count < 80) {
+      searchMatches.push({ page: pageNumber, snippet: text.slice(Math.max(0, index - 24), index + searchTerm.length + 24).trim() });
+      index = normalized.indexOf(lower, index + searchTerm.length);
+      count += 1;
     }
     if (searchMatches.length > 1500) break;
   }
   postToShell(boundedSearchResultsPayload());
-  for (let i = 1; i <= total; i++) markSearchOnPage(i);
-  if (searchMatches.length) { searchIdx = 0; gotoMatch(0); }
+  for (let pageNumber = 1; pageNumber <= total; pageNumber += 1) markSearchOnPage(pageNumber);
+  if (searchMatches.length) {
+    searchIdx = 0;
+    gotoMatch(0);
+  }
 }
-function gotoMatch(k) {
+function gotoMatch(index) {
   if (!searchMatches.length) return;
-  searchIdx = ((k % searchMatches.length) + searchMatches.length) % searchMatches.length;
-  const m = searchMatches[searchIdx];
-  gotoPage(m.page, true);
-  setTimeout(() => {
-    document.querySelectorAll(".textLayer span.cur").forEach((s) => s.classList.remove("cur"));
-    const d = divs[m.page];
-    const s = d && d.querySelector(".textLayer span.search-hit");
-    if (s) { s.classList.add("cur"); s.scrollIntoView({ block: "center" }); }
-    parent.postMessage({ searchPos: searchIdx + 1, searchCount: searchMatches.length }, "*");
+  searchIdx = (index % searchMatches.length + searchMatches.length) % searchMatches.length;
+  const match = searchMatches[searchIdx];
+  if (!match) return;
+  gotoPage(match.page, true);
+  window.setTimeout(() => {
+    document.querySelectorAll(".textLayer span.cur").forEach((span2) => span2.classList.remove("cur"));
+    const span = divs[match.page]?.querySelector(".textLayer span.search-hit");
+    if (span) {
+      span.classList.add("cur");
+      span.scrollIntoView({ block: "center" });
+    }
+    postToShell({ searchPos: searchIdx + 1, searchCount: searchMatches.length });
   }, 250);
 }
-
-// ---- 已高亮菜单（web搜索 / 取消高亮 / 批注）----
-function hideHlMenu() { if (hlMenu) hlMenu.style.display = "none"; }
+function hideHlMenu() {
+  if (hlMenu) hlMenu.style.display = "none";
+}
+function showHlMenu(index, box) {
+  if (!hlMenu) return;
+  activeHi = index;
+  const rect = box.getBoundingClientRect();
+  hlMenu.style.display = "block";
+  const width = hlMenu.offsetWidth || 200;
+  const height = hlMenu.offsetHeight || 34;
+  const left = Math.max(6, Math.min(window.innerWidth - width - 6, rect.left + rect.width / 2 - width / 2));
+  let top = rect.top - height - 8;
+  if (top < 6) top = rect.bottom + 8;
+  hlMenu.style.left = `${left}px`;
+  hlMenu.style.top = `${top}px`;
+}
 function setupHlMenu() {
   hlMenu = document.createElement("div");
   hlMenu.id = "hl-menu";
-  const web = document.createElement("button"); web.type = "button"; web.textContent = "🔍 web搜索";
-  const del = document.createElement("button"); del.type = "button"; del.textContent = "🗑 取消高亮";
-  const note = document.createElement("button"); note.type = "button"; note.textContent = "📝 批注";
-  hlMenu.append(web, del, note);
+  const web = document.createElement("button");
+  const remove = document.createElement("button");
+  const note = document.createElement("button");
+  web.type = "button";
+  web.textContent = "🔍 web搜索";
+  remove.type = "button";
+  remove.textContent = "🗑 取消高亮";
+  note.type = "button";
+  note.textContent = "📝 批注";
+  hlMenu.append(web, remove, note);
   document.body.appendChild(hlMenu);
-  [web, del, note].forEach((b) => b.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); }));
-  web.addEventListener("click", (e) => { e.stopPropagation(); const h = HLD[activeHi]; if (h) parent.postMessage({ webSearch: h.text }, "*"); hideHlMenu(); });
-  del.addEventListener("click", (e) => { e.stopPropagation(); if (activeHi >= 0) parent.postMessage({ removeHighlight: activeHi }, "*"); hideHlMenu(); });
-  note.addEventListener("click", (e) => { e.stopPropagation(); if (activeHi >= 0) parent.postMessage({ openAnnotations: activeHi }, "*"); hideHlMenu(); });
-  document.addEventListener("mousedown", (e) => { if (hlMenu && !hlMenu.contains(e.target) && !(e.target.classList && e.target.classList.contains("hl-box"))) hideHlMenu(); });
+  [web, remove, note].forEach((button) => button.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  }));
+  web.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const highlight = highlights[activeHi];
+    if (highlight) postToShell({ webSearch: highlight.text });
+    hideHlMenu();
+  });
+  remove.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (activeHi >= 0) postToShell({ removeHighlight: activeHi });
+    hideHlMenu();
+  });
+  note.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (activeHi >= 0) postToShell({ openAnnotations: activeHi });
+    hideHlMenu();
+  });
+  document.addEventListener("mousedown", (event) => {
+    const target = elementTarget(event.target);
+    if (hlMenu && !hlMenu.contains(target) && !target?.classList.contains("hl-box")) hideHlMenu();
+  });
   document.addEventListener("wheel", hideHlMenu, { passive: true });
 }
-function showHlMenu(idx, box) {
-  activeHi = idx;
-  const rect = box.getBoundingClientRect();
-  hlMenu.style.display = "block";
-  const mw = hlMenu.offsetWidth || 200, mh = hlMenu.offsetHeight || 34;
-  let left = rect.left + rect.width / 2 - mw / 2;
-  left = Math.max(6, Math.min(window.innerWidth - mw - 6, left));
-  let top = rect.top - mh - 8; if (top < 6) top = rect.bottom + 8;
-  hlMenu.style.left = left + "px"; hlMenu.style.top = top + "px";
-}
-
-// 选区 → {chapter(页-1), rects(归一化), text, context}
-function selRects() {
-  const sel = getSelection();
-  if (!sel || !sel.rangeCount) return null;
-  const r = sel.getRangeAt(0);
-  const text = (sel + "").trim();
+function selectionPayload() {
+  const selection = getSelection();
+  if (!selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  const text = selection.toString().trim();
   if (!text) return null;
-  let node = r.startContainer;
-  const el = node.nodeType === 1 ? node : node.parentNode;
-  const pg = el && el.closest ? el.closest(".pg") : null;
-  if (!pg) return null;
-  const pageRect = pg.getBoundingClientRect();
-  const pageNo = +pg.dataset.p;
+  const ancestor = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement;
+  const page = ancestor?.closest(".pg");
+  if (!page) return null;
+  const pageRect = page.getBoundingClientRect();
+  const pageNumber = numberAt(page.dataset.p);
   const rects = [];
-  const list = r.getClientRects();
-  for (const cr of list) {
-    if (cr.width < 1 || cr.height < 1) continue;
-    rects.push([
-      (cr.left - pageRect.left) / pageRect.width,
-      (cr.top - pageRect.top) / pageRect.height,
-      cr.width / pageRect.width,
-      cr.height / pageRect.height,
-    ]);
-  }
-  if (!rects.length) return null;
-  return { chapter: pageNo - 1, start: 0, end: 0, rects: JSON.stringify(rects), text: text, context: text };
+  for (const rect of range.getClientRects()) if (rect.width >= 1 && rect.height >= 1) rects.push([(rect.left - pageRect.left) / pageRect.width, (rect.top - pageRect.top) / pageRect.height, rect.width / pageRect.width, rect.height / pageRect.height]);
+  return rects.length ? { chapter: pageNumber - 1, start: 0, end: 0, rects: JSON.stringify(rects), text, context: text } : null;
 }
-
-function applyTheme(t) {
+function applyTheme(theme) {
   document.body.classList.remove("theme-dark", "theme-sepia");
-  if (t === "dark") document.body.classList.add("theme-dark");
-  else if (t === "sepia") document.body.classList.add("theme-sepia");
+  if (theme === "dark") document.body.classList.add("theme-dark");
+  else if (theme === "sepia") document.body.classList.add("theme-sepia");
 }
-function throttle(fn, ms) {
-  let t = 0, pend = null;
-  return function () {
+function throttle(callback, milliseconds) {
+  let last = 0;
+  let pending;
+  return () => {
     const now = Date.now();
-    if (now - t >= ms) { t = now; fn(); }
-    else { clearTimeout(pend); pend = setTimeout(() => { t = Date.now(); fn(); }, ms); }
+    if (now - last >= milliseconds) {
+      last = now;
+      callback();
+    } else {
+      if (pending !== void 0) window.clearTimeout(pending);
+      pending = window.setTimeout(() => {
+        last = Date.now();
+        callback();
+      }, milliseconds);
+    }
   };
 }
-
-async function renderPage(i) {
-  if (pdfDisposed || pdfSession?.signal?.aborted) return;
-  const d = divs[i];
-  if (!d || d.dataset.done) return;
-  d.dataset.done = "1";
-  const page = await pdf.getPage(i);
-  if (pdfDisposed || pdfSession?.signal?.aborted) return;
-  const vp = page.getViewport({ scale });
+async function renderPage(pageNumber) {
+  if (pdfDisposed || pdfSession?.signal.aborted) return;
+  const pageElement = divs[pageNumber];
+  if (!pageElement || pageElement.dataset.done) return;
+  pageElement.dataset.done = "1";
+  const page = await requirePdf().getPage(pageNumber);
+  if (pdfDisposed || pdfSession?.signal.aborted) return;
+  const viewport = page.getViewport({ scale });
   const ratio = window.devicePixelRatio || 1;
   const canvas = document.createElement("canvas");
-  canvas.width = Math.floor(vp.width * ratio);
-  canvas.height = Math.floor(vp.height * ratio);
-  canvas.style.width = vp.width + "px";
-  canvas.style.height = vp.height + "px";
-  d.style.width = vp.width + "px";
-  d.style.height = vp.height + "px";
-  d.innerHTML = "";
-  d.appendChild(canvas);
-  const ctx = canvas.getContext("2d");
-  const operationId = pdfSession?.nextOperationId?.("render");
-  const renderTask = page.render({ canvasContext: ctx, viewport: vp, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
-  const untrack = pdfSession?.trackRenderTask?.(renderTask) || (() => {});
-  if (operationId) renderOperations.set(operationId, { task: renderTask, untrack });
+  canvas.width = Math.floor(viewport.width * ratio);
+  canvas.height = Math.floor(viewport.height * ratio);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  pageElement.style.width = `${viewport.width}px`;
+  pageElement.style.height = `${viewport.height}px`;
+  pageElement.innerHTML = "";
+  pageElement.appendChild(canvas);
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const operationId = pdfSession?.nextOperationId("render");
+  const task = page.render({ canvasContext: context, viewport, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
+  const untrack = pdfSession?.trackRenderTask(task) ?? (() => void 0);
+  if (operationId) renderOperations.set(operationId, { task, untrack });
   try {
-    await renderTask.promise;
+    await task.promise;
   } catch (error) {
-    if (!pdfDisposed && !pdfSession?.signal?.aborted) throw error;
+    if (!pdfDisposed && !pdfSession?.signal.aborted) throw error;
     return;
   } finally {
     if (operationId) renderOperations.delete(operationId);
     untrack();
   }
-  if (pdfDisposed || pdfSession?.signal?.aborted) return;
-  // 文字层（选择/复制/划词）
+  if (pdfDisposed || pdfSession?.signal.aborted) return;
   try {
-    const tl = document.createElement("div");
-    tl.className = "textLayer";
-    tl.style.width = vp.width + "px";
-    tl.style.height = vp.height + "px";
-    d.appendChild(tl);
-    const tc = await page.getTextContent();
-    const text = tc.items.map((it) => it.str).join("");
-    pageText[i] = text;
-    pageTextChars[i] = countReadablePdfChars(text);
-    const layer = new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport: vp });
-    await layer.render();
-  } catch (err) {}
-  renderPageHighlights(i);
-  markSearchOnPage(i);
+    const layerElement = document.createElement("div");
+    layerElement.className = "textLayer";
+    layerElement.style.width = `${viewport.width}px`;
+    layerElement.style.height = `${viewport.height}px`;
+    pageElement.appendChild(layerElement);
+    const textContent = await page.getTextContent();
+    const text = textContent.items.map((item) => item.str).join("");
+    pageText[pageNumber] = text;
+    pageTextChars[pageNumber] = countReadablePdfChars(text);
+    await new pdfjsLib.TextLayer({ textContentSource: textContent, container: layerElement, viewport }).render();
+  } catch {
+  }
+  renderPageHighlights(pageNumber);
+  markSearchOnPage(pageNumber);
 }
-function renderAround(i) {
-  for (let k = i - 1; k <= i + 2; k++) if (k >= 1 && k <= total) renderPage(k);
+function renderAround(pageNumber) {
+  for (let next = pageNumber - 1; next <= pageNumber + 2; next += 1) if (next >= 1 && next <= total) void renderPage(next);
 }
 function pageAtTop() {
   const y = window.scrollY + 12;
-  for (let i = 1; i <= total; i++) {
-    const d = divs[i];
-    if (d && d.offsetTop + d.offsetHeight > y) return i;
+  for (let pageNumber = 1; pageNumber <= total; pageNumber += 1) {
+    const page = divs[pageNumber];
+    if (page && page.offsetTop + page.offsetHeight > y) return pageNumber;
   }
   return total;
 }
+function reportPdfState() {
+  postToShell({ pdfState: { scale, dual: dualMode } });
+}
 function report() {
-  const prog = total > 1 ? ((curPage - 1) / (total - 1)) * 100 : 100;
-  const pageNo = curPage;
-  const pageChars = pageTextChars[pageNo] || 0;
-  parent.postMessage(
-    { progress: prog, chapter: pageNo - 1, chFrac: 0, totalCh: total, page: pageNo, total: total, gPage: pageNo, gTotal: total, isPdf: 1, pageChars },
-    "*"
-  );
-  if (pageTextChars[pageNo] == null) {
-    getPageText(pageNo).then(() => { if (curPage === pageNo) report(); }).catch(() => {});
-  }
-  reportPdfState(); // 持续同步缩放/双页，保证关闭前一定保存过（不只在手动缩放时）
+  const pageNumber = curPage;
+  const progress = total > 1 ? (pageNumber - 1) / (total - 1) * 100 : 100;
+  const pageChars = pageTextChars[pageNumber] ?? 0;
+  postToShell({ progress, chapter: pageNumber - 1, chFrac: 0, totalCh: total, page: pageNumber, total, gPage: pageNumber, gTotal: total, isPdf: 1, pageChars });
+  if (pageTextChars[pageNumber] === void 0) void getPageText(pageNumber).then(() => {
+    if (curPage === pageNumber) report();
+  });
+  reportPdfState();
 }
-// 翻页目标页：单页 = ±1；双页 = 整对(行)前后移 2，对齐到行首(奇数页)，
-// 否则双页里两页同一行、滚到同一处，要按两下才过一对。
-function turnTarget(dir) {
-  if (dualMode) {
-    const first = curPage % 2 === 1 ? curPage : curPage - 1;
-    return first + dir * 2;
-  }
-  return curPage + dir;
+function turnTarget(direction) {
+  return pdfTurnTarget(curPage, direction, dualMode);
 }
-let progScrollUntil = 0; // 程序化滚动期间，忽略滚动监听对 curPage 的改写（否则平滑滚动中途会把 curPage 改回原页）
-function gotoPage(n, smooth) {
-  n = Math.max(1, Math.min(total, n | 0));
-  curPage = n;
-  renderAround(n);
+let progScrollUntil = 0;
+function gotoPage(pageNumber, smooth) {
+  const next = normalisePdfPage(total, pageNumber);
+  curPage = next;
+  renderAround(next);
   progScrollUntil = Date.now() + (smooth ? 700 : 150);
-  const d = divs[n];
-  if (d) d.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+  divs[next]?.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
   report();
 }
-// 适配窗口的缩放：单页铺满窗口宽，双页则每页占一半
 function fitScale() {
-  const avail = Math.max(200, window.innerWidth - 28);
-  const per = dualMode ? (avail - 12) / 2 : avail;
-  return Math.max(0.4, Math.min(4, per / nativeW));
+  return fitPdfScale(window.innerWidth, nativeW, dualMode);
 }
-function reportPdfState() { parent.postMessage({ pdfState: { scale: scale, dual: dualMode } }, "*"); }
-function applyScale(s) {
+function applyScale(nextScale) {
   const keep = curPage;
-  scale = Math.max(0.4, Math.min(4, s));
-  baseW = nativeW * scale; baseH = nativeH * scale;
-  // 只改占位尺寸+清"已渲染"标记（不清 innerHTML，省得大书每次缩放都狂清 DOM）；
-  // 可见页立即重渲，离屏页滚到时再重渲（renderPage 会自己换掉旧画布）
-  divs.forEach((d) => {
-    if (!d) return;
-    d.dataset.done = "";
-    d.style.width = baseW + "px"; d.style.height = baseH + "px";
-  });
+  scale = clampPdfScale(nextScale);
+  baseW = nativeW * scale;
+  baseH = nativeH * scale;
+  for (const page of divs) if (page) {
+    page.dataset.done = "";
+    page.style.width = `${baseW}px`;
+    page.style.height = `${baseH}px`;
+  }
   renderAround(keep);
   gotoPage(keep, false);
-  reportPdfState(); // 记住缩放/双页
+  reportPdfState();
 }
-function setZoom(dir) {
-  if (dir === "in") applyScale(scale * 1.1); // 细粒度：每次 10%
-  else if (dir === "out") applyScale(scale / 1.1);
+function setZoom(direction) {
+  applyScale(direction === "in" ? scale * 1.1 : scale / 1.1);
 }
-function setDual(on) {
-  dualMode = !!on;
+function setDual(value) {
+  dualMode = value;
   document.body.classList.toggle("dual", dualMode);
-  applyScale(fitScale()); // 切换后按新模式重新铺满
+  applyScale(fitScale());
 }
-
-// ---- 目录（PDF 内置书签）----
-async function destToPage(dest) {
+async function destToPage(destination) {
   try {
-    let d = dest;
-    if (typeof d === "string") d = await pdf.getDestination(d);
-    if (!d || !d[0]) return 1;
-    const idx = await pdf.getPageIndex(d[0]);
-    return idx + 1;
-  } catch (e) { return 1; }
-}
-async function flatOutline(items, level, out) {
-  out = out || [];
-  if (!items) return out;
-  for (const it of items) {
-    const pg = await destToPage(it.dest);
-    out.push({ label: it.title || "", chapter: pg - 1, frag: "", level: level || 0 });
-    if (it.items && it.items.length) await flatOutline(it.items, (level || 0) + 1, out);
+    let resolved = destination;
+    if (typeof resolved === "string") resolved = await requirePdf().getDestination(resolved);
+    if (!Array.isArray(resolved) || !resolved[0]) return 1;
+    return await requirePdf().getPageIndex(resolved[0]) + 1;
+  } catch {
+    return 1;
   }
-  return out;
 }
-
-// ---- 选区菜单（web搜索 / 书签）----
-let selMenu = null;
-function hideSelMenu() { if (selMenu) selMenu.style.display = "none"; }
+async function flatOutline(items, level = 0, output = []) {
+  if (!items) return output;
+  for (const item of items) {
+    const page = await destToPage(item.dest);
+    output.push({ label: item.title || "", chapter: page - 1, frag: "", level });
+    if (item.items.length) await flatOutline(item.items, level + 1, output);
+  }
+  return output;
+}
+function hideSelMenu() {
+  if (selMenu) selMenu.style.display = "none";
+}
 function setupSelMenu() {
   selMenu = document.createElement("div");
   selMenu.id = "sel-menu";
-  const bWeb = document.createElement("button"); bWeb.type = "button"; bWeb.textContent = "🔍 web搜索";
-  const bHL = document.createElement("button"); bHL.type = "button"; bHL.textContent = "🖍 高亮";
-  const bNote = document.createElement("button"); bNote.type = "button"; bNote.textContent = "📝 批注";
-  const bBm = document.createElement("button"); bBm.type = "button"; bBm.textContent = "🔖 书签";
-  selMenu.append(bWeb, bHL, bNote, bBm);
+  const web = document.createElement("button");
+  const highlight = document.createElement("button");
+  const note = document.createElement("button");
+  const bookmark = document.createElement("button");
+  web.type = highlight.type = note.type = bookmark.type = "button";
+  web.textContent = "🔍 web搜索";
+  highlight.textContent = "🖍 高亮";
+  note.textContent = "📝 批注";
+  bookmark.textContent = "🔖 书签";
+  selMenu.append(web, highlight, note, bookmark);
   document.body.appendChild(selMenu);
-  [bWeb, bHL, bNote, bBm].forEach((b) => b.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); }));
-  // 操作后清掉选区并收起菜单：否则 mouseup 监听会因"仍有选区"把菜单重新弹出来（叠菜单）；
-  // 而且高亮重绘期间仍残留 PDF 文字层选区，正是触发 WebView 崩溃的元凶。
-  const done = () => { const s = getSelection(); if (s) s.removeAllRanges(); hideSelMenu(); };
-  bWeb.addEventListener("click", (e) => { e.stopPropagation(); const t = (getSelection() + "").trim(); if (t) parent.postMessage({ webSearch: t }, "*"); done(); });
-  bHL.addEventListener("click", (e) => { e.stopPropagation(); const o = selRects(); if (o) parent.postMessage({ addHighlight: o }, "*"); done(); });
-  bNote.addEventListener("click", (e) => { e.stopPropagation(); const o = selRects(); if (o) parent.postMessage({ addHighlightNote: o }, "*"); done(); });
-  bBm.addEventListener("click", (e) => { e.stopPropagation(); const t = (getSelection() + "").trim(); parent.postMessage({ addBookmark: { chapter: curPage - 1, frac: 0, text: t.slice(0, 24) } }, "*"); done(); });
+  [web, highlight, note, bookmark].forEach((button) => button.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  }));
+  const done = () => {
+    getSelection()?.removeAllRanges();
+    hideSelMenu();
+  };
+  web.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const text = getSelection()?.toString().trim() ?? "";
+    if (text) postToShell({ webSearch: text });
+    done();
+  });
+  highlight.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const payload = selectionPayload();
+    if (payload) postToShell({ addHighlight: payload });
+    done();
+  });
+  note.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const payload = selectionPayload();
+    if (payload) postToShell({ addHighlightNote: payload });
+    done();
+  });
+  bookmark.addEventListener("click", (event) => {
+    event.stopPropagation();
+    postToShell({ addBookmark: { chapter: curPage - 1, frac: 0, text: (getSelection()?.toString().trim() ?? "").slice(0, 24) } });
+    done();
+  });
   document.addEventListener("mouseup", () => {
-    setTimeout(() => {
-      const sel = getSelection();
-      const t = sel ? (sel + "").trim() : "";
-      if (!t) { hideSelMenu(); return; }
-      let rect; try { rect = sel.getRangeAt(0).getBoundingClientRect(); } catch (_) { hideSelMenu(); return; }
-      if (!rect || (!rect.width && !rect.height)) { hideSelMenu(); return; }
+    window.setTimeout(() => {
+      const selection = getSelection();
+      const text = selection?.toString().trim() ?? "";
+      if (!selection?.rangeCount || !text || !selMenu) {
+        hideSelMenu();
+        return;
+      }
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      if (!rect.width && !rect.height) {
+        hideSelMenu();
+        return;
+      }
       selMenu.style.display = "block";
-      const mw = selMenu.offsetWidth || 140, mh = selMenu.offsetHeight || 34;
-      let left = rect.left + rect.width / 2 - mw / 2;
-      left = Math.max(6, Math.min(window.innerWidth - mw - 6, left));
-      let top = rect.top - mh - 8; if (top < 6) top = rect.bottom + 8;
-      selMenu.style.left = left + "px"; selMenu.style.top = top + "px";
+      const width = selMenu.offsetWidth || 140;
+      const height = selMenu.offsetHeight || 34;
+      const left = Math.max(6, Math.min(window.innerWidth - width - 6, rect.left + rect.width / 2 - width / 2));
+      let top = rect.top - height - 8;
+      if (top < 6) top = rect.bottom + 8;
+      selMenu.style.left = `${left}px`;
+      selMenu.style.top = `${top}px`;
     }, 0);
   });
-  document.addEventListener("mousedown", (e) => { if (selMenu && !selMenu.contains(e.target)) hideSelMenu(); });
+  document.addEventListener("mousedown", (event) => {
+    if (selMenu && !selMenu.contains(elementTarget(event.target))) hideSelMenu();
+  });
   document.addEventListener("wheel", hideSelMenu, { passive: true });
 }
-
-// 点屏幕中间 → 通知外壳（沉浸模式唤出工具栏）
 function setupCenterTap() {
-  document.addEventListener("click", (e) => {
-    parent.postMessage({ uiClick: 1 }, "*"); // 任何点击都通知外壳关闭搜索/设置浮层
-    if (overlayOpen) return; // 浮层打开时，点击只用于关闭它，不唤出/切换工具栏
-    const sel = getSelection();
-    if (sel && (sel + "").trim()) return; // 在选字，不算点击
-    const x = e.clientX, w = window.innerWidth;
-    if (x > w * 0.33 && x < w * 0.67) parent.postMessage({ centerTap: 1 }, "*");
+  document.addEventListener("click", (event) => {
+    postToShell({ uiClick: 1 });
+    if (overlayOpen || getSelection()?.toString().trim()) return;
+    if (event.clientX > window.innerWidth * 0.33 && event.clientX < window.innerWidth * 0.67) postToShell({ centerTap: 1 });
   });
-  const nav = () => parent.postMessage({ userNav: 1 }, "*"); // 滚动/翻页 → 收起浮层
-  const navThrottled = throttle(nav, 200);
-  let zT = 0;
-  window.addEventListener("wheel", (e) => {
-    if (e.altKey) { // Alt + 滚轮 = 细粒度缩放，不滚动页面
-      e.preventDefault();
+  const navigation = () => postToShell({ userNav: 1 });
+  const throttledNavigation = throttle(navigation, 200);
+  let zoomAt = 0;
+  window.addEventListener("wheel", (event) => {
+    if (event.altKey) {
+      event.preventDefault();
       const now = Date.now();
-      if (now - zT < 45) return;
-      zT = now;
-      applyScale(scale * (e.deltaY < 0 ? 1.05 : 1 / 1.05));
+      if (now - zoomAt < 45) return;
+      zoomAt = now;
+      applyScale(scale * (event.deltaY < 0 ? 1.05 : 1 / 1.05));
       return;
     }
-    navThrottled();
+    throttledNavigation();
   }, { passive: false });
-  window.addEventListener("keydown", (e) => {
-    let dir = 0;
-    if (e.key === "PageDown" || e.key === "ArrowRight" || (e.key === " " && !e.shiftKey)) dir = 1;
-    else if (e.key === "PageUp" || e.key === "ArrowLeft" || (e.key === " " && e.shiftKey)) dir = -1;
-    if (dir !== 0) { e.preventDefault(); gotoPage(turnTarget(dir), false); nav(); return; } // 翻页键：单页翻1页/双页翻一对（瞬移）
-    if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(e.key) >= 0) nav(); // 这些保留原生滚动
+  window.addEventListener("keydown", (event) => {
+    let direction = 0;
+    if (event.key === "PageDown" || event.key === "ArrowRight" || event.key === " " && !event.shiftKey) direction = 1;
+    else if (event.key === "PageUp" || event.key === "ArrowLeft" || event.key === " " && event.shiftKey) direction = -1;
+    if (direction) {
+      event.preventDefault();
+      gotoPage(turnTarget(direction), false);
+      navigation();
+    } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) navigation();
   });
 }
-
-window.addEventListener("message", (e) => {
-  const message = pdfBootstrap && pdfEngineAdapter?.normalizeIncomingMessage?.(e, pdfBootstrap);
-  if (!message) return;
-  if (message.protocol === "kunpeng-pdf-renderer") {
-    const command = message;
-    if (command.action === "close-document") { disposePdfView(); return; }
-    if (command.action === "cancel-operation") { cancelRenderOperation(command.payload.operationId); return; }
-    if (command.action === "render-page") { gotoPage(command.payload.page, false); return; }
-    if (command.action === "open-document") { gotoPage(command.payload.initialPage, false); return; }
+window.addEventListener("message", (event) => {
+  const normalized = pdfBootstrap ? pdfEngineAdapter.normalizeIncomingMessage(event, pdfBootstrap) : null;
+  if (!isLegacyCommand(normalized)) return;
+  if (normalized.protocol === "kunpeng-pdf-renderer") {
+    const action = normalized.action;
+    const payload = normalized.payload;
+    if (action === "close-document") disposePdfView();
+    else if (action === "cancel-operation" && payload?.operationId) cancelRenderOperation(payload.operationId);
+    else if ((action === "render-page" || action === "open-document") && (payload?.page ?? payload?.initialPage) !== void 0) gotoPage(payload?.page ?? payload?.initialPage ?? 1, false);
     return;
   }
-  if (message.gotoChapter !== undefined) gotoPage((message.gotoChapter | 0) + 1, true);
-  if (message.gotoFrac !== undefined) gotoPage(Math.round(message.gotoFrac * total) || 1, false);
-  if (message.zoom) setZoom(message.zoom);
-  if (message.pageTurn) gotoPage(turnTarget(message.pageTurn > 0 ? 1 : -1), false); // 外壳转发的翻页键：单页1页/双页一对
-  if (message.dual !== undefined) setDual(message.dual);
-  if (message.settings && message.settings.theme !== undefined) applyTheme(message.settings.theme);
-  if (message.overlayOpen !== undefined) overlayOpen = !!message.overlayOpen;
-  if (message.search !== undefined) searchPdf(message.search);
-  if (message.searchNav) gotoMatch(searchIdx + message.searchNav);
-  if (message.clearMarks) { searchTerm = ""; clearSearchMarks(); }
-  if (message.highlights) { HLD = message.highlights; renderAllHighlights(); }
-  if (message.showHlMenuFor !== undefined) {
-    const idx = message.showHlMenuFor, h = HLD[idx];
-    if (h) { gotoPage((h.chapter || 0) + 1, false); setTimeout(() => { const b = divs[(h.chapter || 0) + 1] && divs[(h.chapter || 0) + 1].querySelector('.hl-box[data-hi="' + idx + '"]'); if (b) showHlMenu(idx, b); }, 200); }
+  if (normalized.gotoChapter !== void 0) gotoPage((normalized.gotoChapter | 0) + 1, true);
+  if (normalized.gotoFrac !== void 0) gotoPage(Math.round(normalized.gotoFrac * total) || 1, false);
+  if (normalized.zoom) setZoom(normalized.zoom);
+  if (normalized.pageTurn) gotoPage(turnTarget(normalized.pageTurn > 0 ? 1 : -1), false);
+  if (normalized.dual !== void 0) setDual(normalized.dual);
+  if (normalized.settings?.theme !== void 0) applyTheme(normalized.settings.theme);
+  if (normalized.overlayOpen !== void 0) overlayOpen = normalized.overlayOpen;
+  if (normalized.search !== void 0) void searchPdf(normalized.search);
+  if (normalized.searchNav) gotoMatch(searchIdx + normalized.searchNav);
+  if (normalized.clearMarks) {
+    searchTerm = "";
+    clearSearchMarks();
   }
-  if (message.gotoHighlight !== undefined) {
-    const h = HLD[message.gotoHighlight];
-    if (h) gotoPage((h.chapter || 0) + 1, true);
+  if (normalized.highlights) {
+    highlights = normalized.highlights;
+    renderAllHighlights();
+  }
+  if (normalized.showHlMenuFor !== void 0) {
+    const index = normalized.showHlMenuFor;
+    const highlight = highlights[index];
+    if (highlight) {
+      const page = (highlight.chapter ?? 0) + 1;
+      gotoPage(page, false);
+      window.setTimeout(() => {
+        const box = divs[page]?.querySelector(`.hl-box[data-hi="${index}"]`);
+        if (box) showHlMenu(index, box);
+      }, 200);
+    }
+  }
+  if (normalized.gotoHighlight !== void 0) {
+    const highlight = highlights[normalized.gotoHighlight];
+    if (highlight) gotoPage((highlight.chapter ?? 0) + 1, true);
   }
 });
-
 async function init() {
-  if (!pdfBootstrap || !pdfEngineAdapter) {
+  if (!pdfBootstrap) {
     pagesEl.innerHTML = '<div class="loading">PDF 打开失败：阅读器安全桥未就绪。</div>';
     return;
   }
+  setupReaderGestureForwarding();
   pdfSession = pdfEngineAdapter.createSession(pdfBootstrap);
   applyTheme(settings.theme);
   try {
     const loadingTask = pdfjsLib.getDocument({ url: pdfUrl, disableRange: true, disableStream: true, disableAutoFetch: true });
     pdfSession.trackLoadingTask(loadingTask);
     pdf = await loadingTask.promise;
-    if (pdfDisposed || pdfSession.signal.aborted) { disposePdfView(); return; }
-  } catch (e) {
+    if (pdfDisposed || pdfSession.signal.aborted) {
+      disposePdfView();
+      return;
+    }
+  } catch {
     pagesEl.innerHTML = '<div class="loading">PDF 打开失败：无法读取受控图书资源。</div>';
-    parent.postMessage({ ready: 1 }, "*");
+    postToShell({ ready: 1 });
     return;
   }
-  total = pdf.numPages;
-  const p1 = await pdf.getPage(1);
-  const v1 = p1.getViewport({ scale: 1 });
-  nativeW = v1.width; nativeH = v1.height;
-  // 恢复上次的双页/缩放；没有则按窗口宽度铺满（开箱即舒适尺寸）
-  const savedScale = parseFloat(P.get("scale") || "0") || 0;
-  if (P.get("dual") === "1") { dualMode = true; document.body.classList.add("dual"); }
-  scale = savedScale > 0 ? Math.max(0.4, Math.min(4, savedScale)) : fitScale();
-  baseW = nativeW * scale; baseH = nativeH * scale;
-  pagesEl.innerHTML = "";
-  for (let i = 1; i <= total; i++) {
-    const d = document.createElement("div");
-    d.className = "pg"; d.dataset.p = i;
-    d.style.width = baseW + "px"; d.style.height = baseH + "px";
-    pagesEl.appendChild(d); divs[i] = d;
+  total = requirePdf().numPages;
+  const firstViewport = (await requirePdf().getPage(1)).getViewport({ scale: 1 });
+  nativeW = firstViewport.width;
+  nativeH = firstViewport.height;
+  const savedScale = Number.parseFloat(parameters.get("scale") ?? "0") || 0;
+  if (parameters.get("dual") === "1") {
+    dualMode = true;
+    document.body.classList.add("dual");
   }
-  io = new IntersectionObserver(
-    (ents) => ents.forEach((en) => { if (en.isIntersecting) { const i = +en.target.dataset.p; renderPage(i); } }),
-    { root: null, rootMargin: "500px 0px" }
-  );
-  divs.forEach((d) => { if (d) io.observe(d); });
+  scale = savedScale > 0 ? Math.max(0.4, Math.min(4, savedScale)) : fitScale();
+  baseW = nativeW * scale;
+  baseH = nativeH * scale;
+  pagesEl.innerHTML = "";
+  for (let pageNumber = 1; pageNumber <= total; pageNumber += 1) {
+    const page = document.createElement("div");
+    page.className = "pg";
+    page.dataset.p = String(pageNumber);
+    page.style.width = `${baseW}px`;
+    page.style.height = `${baseH}px`;
+    pagesEl.appendChild(page);
+    divs[pageNumber] = page;
+  }
+  io = new IntersectionObserver((entries) => {
+    for (const entry of entries) if (entry.isIntersecting) {
+      const page = entry.target instanceof HTMLDivElement ? numberAt(entry.target.dataset.p) : 0;
+      if (page) void renderPage(page);
+    }
+  }, { root: null, rootMargin: "500px 0px" });
+  for (const page of divs) if (page) io.observe(page);
   window.addEventListener("scroll", throttle(() => {
-    if (Date.now() < progScrollUntil) return; // 翻页/跳转的平滑滚动中：别用半路的 pageAtTop 覆盖 curPage
+    if (Date.now() < progScrollUntil) return;
     curPage = pageAtTop();
     report();
   }, 200), { passive: true });
   setupSelMenu();
   setupHlMenu();
   setupCenterTap();
-  pdf.getOutline().then((o) => flatOutline(o)).then((flat) => parent.postMessage({ outline: flat }, "*")).catch(() => {});
+  void requirePdf().getOutline().then((outline) => flatOutline(outline)).then((outline) => postToShell({ outline })).catch(() => void 0);
   gotoPage(resumePage, false);
-  parent.postMessage({ ready: 1 }, "*");
+  postToShell({ ready: 1 });
   report();
 }
-init();
+void init();

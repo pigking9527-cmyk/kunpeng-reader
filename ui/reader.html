@@ -878,9 +878,6 @@
       </div>
       <div id="reader-preferences-modal" class="modal" role="dialog" aria-modal="true" aria-label="阅读偏好" data-reader-i18n-aria="readerPreferences">
         <section class="modal-card reader-preferences-card">
-          <header class="reader-preferences-head">
-            <strong data-reader-i18n="readerPreferences">阅读偏好</strong>
-          </header>
           <div class="reader-preference-scope" role="group" aria-label="偏好保存范围" data-reader-i18n-aria="preferenceScopeLabel">
             <button class="active" type="button" data-pref-scope="default" data-reader-i18n="preferenceOverall" aria-pressed="true">总体</button>
             <button type="button" data-pref-scope="book" data-reader-i18n="preferenceBook" aria-pressed="false">独立</button>
@@ -1000,6 +997,14 @@
               </section>
               <section class="reader-preference-panel" data-pref-panel="advanced" hidden>
                 <section class="reader-preference-group reader-advanced-group">
+                  <div class="reader-advanced-main-row reader-layout-engine-row" role="group" aria-label="排版引擎">
+                    <span class="reader-advanced-icon" aria-hidden="true">▤</span>
+                    <span class="reader-advanced-label">排版引擎</span>
+                    <span class="reader-layout-engine-options">
+                      <button type="button" data-pref-epub-layout-engine="legacy" aria-pressed="false">兼容排版</button>
+                      <button type="button" data-pref-epub-layout-engine="modern" aria-pressed="false">新版排版</button>
+                    </span>
+                  </div>
                   <div class="reader-advanced-main-row">
                     <span class="reader-advanced-icon" aria-hidden="true">↩</span>
                     <label class="reader-advanced-label"><span data-reader-i18n="readerJumpBack">显示跳转回退</span></label>
@@ -1181,34 +1186,34 @@
     </div>
     <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果" data-reader-i18n-title="returnToPreviousBook" data-reader-i18n-aria="returnToPreviousBook">←</button>
     <canvas id="reader-gesture-trail" class="reader-gesture-trail" data-overlay-surface="gesture-trail" data-overlay-role="feedback" hidden aria-hidden="true"></canvas>
-    <script src="recovery-settings-snapshot.js"></script>
-    <script src="overlay-stack.js"></script>
-    <script src="window-resize.js"></script>
-    <script src="reader-i18n.js"></script>
+    <script src="generated-ts/recovery-settings-snapshot.js"></script>
+    <script src="generated-ts/overlay-stack.js"></script>
+    <script src="generated-ts/window-resize.js"></script>
+    <script src="generated-ts/reader-i18n.js"></script>
     <script src="bridge/reader-protocol-bridge.js"></script>
-    <script src="reader-message.js"></script>
-    <script src="reader-shell-state.js"></script>
-    <script src="reader-bug-trace.js"></script>
-    <script src="reader-search-ui.js"></script>
-    <script src="animation-settings.js"></script>
-    <script src="reader-settings-ui.js"></script>
-    <script src="reader-jump-back-rules.js"></script>
-    <script src="reader-navigation-rules.js"></script>
-    <script src="reader-preference-color-rules.js"></script>
-    <script src="reader-preferences-ui.js"></script>
-    <script src="reader-click-zones-ui.js"></script>
-    <script src="reader-recommendation-settings.js"></script>
-    <script src="news-gesture.js"></script>
-    <script src="browser-native-guard.js"></script>
-    <script src="book-info-panel.js"></script>
-    <script src="book-info-related.js"></script>
-    <script src="reader-ai-history-rules.js"></script>
-    <script src="reader-startup-guard.js"></script>
-    <script src="reader-reading-metrics.js"></script>
-    <script src="reader.js"></script>
-    <script src="reader-gesture.js"></script>
-    <script src="reader-notes-ui.js"></script>
-    <script src="vocab-ui.js"></script>
-    <script src="reader-cross-search-ui.js"></script>
+    <script src="generated-ts/reader-message.js"></script>
+    <script src="generated-ts/reader-shell-state.js"></script>
+    <script src="generated-ts/reader-bug-trace.js"></script>
+    <script src="generated-ts/reader-search-ui.js"></script>
+    <script src="generated-ts/animation-settings.js"></script>
+    <script src="generated-ts/reader-settings-ui.js"></script>
+    <script src="generated-ts/reader-jump-back-rules.js"></script>
+    <script src="generated-ts/reader-navigation-rules.js"></script>
+    <script src="generated-ts/reader-preference-color-rules.js"></script>
+    <script src="generated-ts/reader-preferences-ui.js"></script>
+    <script src="generated-ts/reader-click-zones-ui.js"></script>
+    <script src="generated-ts/reader-recommendation-settings.js"></script>
+    <script src="generated-ts/news-gesture.js"></script>
+    <script src="generated-ts/browser-native-guard.js"></script>
+    <script src="generated-ts/book-info-panel.js"></script>
+    <script src="generated-ts/book-info-related.js"></script>
+    <script src="generated-ts/reader-ai-history-rules.js"></script>
+    <script src="generated-ts/reader-startup-guard.js"></script>
+    <script src="generated-ts/reader-reading-metrics.js"></script>
+    <script src="generated-ts/reader.js"></script>
+    <script src="generated-ts/reader-gesture.js"></script>
+    <script src="generated-ts/reader-notes-ui.js"></script>
+    <script src="generated-ts/vocab-ui.js"></script>
+    <script src="generated-ts/reader-cross-search-ui.js"></script>
   </body>
 </html>

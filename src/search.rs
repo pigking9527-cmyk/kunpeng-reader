@@ -16,6 +16,13 @@ use std::sync::{
 use tauri::{Emitter, Manager};
 
 mod filter;
+mod hit_scan;
+mod rules;
+
+use hit_scan::{scan_book_hits, scan_hit_page};
+use rules::{
+    hit_page_window, metadata_match_score, needs_ascii_case_fold, percent_encode, sha256_hex,
+};
 
 type EpubDoc = epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>;
 // 交互式检索发现缺失索引时会请求后台补建。全局闸门避免多次搜索、导入和启动维护
@@ -75,15 +82,7 @@ pub(crate) fn semantic_lexical_candidates(
             let title = book.title.to_lowercase();
             let author = book.author.to_lowercase();
             let description = book.description.to_lowercase();
-            let metadata_score = if title.contains(&folded_query) {
-                3u8
-            } else if description.contains(&folded_query) {
-                2
-            } else if author.contains(&folded_query) {
-                1
-            } else {
-                0
-            };
+            let metadata_score = metadata_match_score(&title, &author, &description, &folded_query);
             let bloom_match = search_index::source_fingerprint_from_content_id(
                 Path::new(&book.path),
                 &book.content_id,
@@ -109,7 +108,7 @@ pub(crate) fn semantic_lexical_candidates(
     });
     candidates.truncate(limit.saturating_mul(4).max(limit));
     let term_lower = ascii_lower_bytes(query);
-    let needs_ci = query.bytes().any(|byte| byte.is_ascii_alphabetic());
+    let needs_ci = needs_ascii_case_fold(query);
     let mut ranked = candidates
         .into_iter()
         .filter_map(|(metadata_score, bloom_match, book)| {
@@ -149,14 +148,6 @@ fn ensure_search_assets(book: &book::Book, source: &SourceFingerprint) -> bool {
         return false;
     };
     filter::save(book.id, source, &index.chapters).is_ok()
-}
-
-fn source_content_id(source: &SourceFingerprint) -> String {
-    source
-        .sha256
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 pub(crate) fn file_mtime(path: &Path) -> u64 {
@@ -350,7 +341,7 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle, interactive: bool) {
                 );
                 continue;
             };
-            let verified_content_id = source_content_id(&source);
+            let verified_content_id = sha256_hex(&source.sha256);
             if b.content_id != verified_content_id {
                 state
                     .library
@@ -586,61 +577,36 @@ fn search_one_book_chapters(
     term_lower: &[u8],
     needs_ci: bool,
 ) -> Option<ShelfBookHits> {
-    let finder = memchr::memmem::Finder::new(term_lower);
-    let mut count = 0u32;
-    let mut hits: Vec<ChapterHit> = Vec::new();
-    if needs_ci {
-        let lower_chapters = get_lower_book_chapters(state, book, &chapters);
-        for (ci, lower) in lower_chapters.iter().enumerate() {
-            let text = &chapters[ci];
-            for mb in finder.find_iter(lower) {
-                count += 1;
-                if hits.len() < 8 {
-                    hits.push(ChapterHit {
-                        chapter: ci as u32,
-                        snippet: snippet_at_with_context(text, mb, term_lower.len(), 260),
-                        count: 1,
-                        score: 0.0,
-                    });
-                }
-                if count >= 3000 {
-                    break;
-                }
-            }
-            if count >= 3000 {
-                break;
-            }
-        }
-    } else {
-        for (ci, text) in chapters.iter().enumerate() {
-            for mb in finder.find_iter(text.as_bytes()) {
-                count += 1;
-                if hits.len() < 8 {
-                    hits.push(ChapterHit {
-                        chapter: ci as u32,
-                        snippet: snippet_at_with_context(text, mb, term_lower.len(), 260),
-                        count: 1,
-                        score: 0.0,
-                    });
-                }
-                if count >= 3000 {
-                    break;
-                }
-            }
-            if count >= 3000 {
-                break;
-            }
-        }
-    }
-    if count == 0 {
+    let lower_chapters = needs_ci.then(|| get_lower_book_chapters(state, book, &chapters));
+    let scan = scan_book_hits(
+        &chapters,
+        lower_chapters.as_deref().map(Vec::as_slice),
+        term_lower,
+    );
+    if scan.count == 0 {
         return None;
     }
+    let hits = scan
+        .previews
+        .into_iter()
+        .map(|location| ChapterHit {
+            chapter: location.chapter as u32,
+            snippet: snippet_at_with_context(
+                &chapters[location.chapter],
+                location.byte_offset,
+                term_lower.len(),
+                260,
+            ),
+            count: 1,
+            score: 0.0,
+        })
+        .collect();
     Some(ShelfBookHits {
         book_id: book.id.to_string(),
         title: book.title.clone(),
         author: book.author.clone(),
-        count,
-        score: count as f64,
+        count: scan.count,
+        score: scan.count as f64,
         hits,
     })
 }
@@ -655,55 +621,33 @@ fn search_book_hit_page(
     let Some(chapters) = get_book_chapters(state, book) else {
         return Vec::new();
     };
-    let needs_ci = term.bytes().any(|byte| byte.is_ascii_alphabetic());
+    let needs_ci = needs_ascii_case_fold(term);
     let term_lower = ascii_lower_bytes(term);
     if term_lower.is_empty() {
         return Vec::new();
     }
-    let finder = memchr::memmem::Finder::new(&term_lower);
-    let offset = offset.min(3000);
-    let limit = limit.clamp(1, 50).min(3000usize.saturating_sub(offset));
-    let mut seen = 0usize;
-    let mut hits = Vec::with_capacity(limit);
-
-    if needs_ci {
-        let lower_chapters = get_lower_book_chapters(state, book, &chapters);
-        for (chapter, lower) in lower_chapters.iter().enumerate() {
-            let text = &chapters[chapter];
-            for position in finder.find_iter(lower) {
-                if seen >= offset {
-                    hits.push(ChapterHit {
-                        chapter: chapter as u32,
-                        snippet: snippet_at_with_context(text, position, term_lower.len(), 260),
-                        count: 1,
-                        score: 0.0,
-                    });
-                    if hits.len() >= limit {
-                        return hits;
-                    }
-                }
-                seen += 1;
-            }
-        }
-    } else {
-        for (chapter, text) in chapters.iter().enumerate() {
-            for position in finder.find_iter(text.as_bytes()) {
-                if seen >= offset {
-                    hits.push(ChapterHit {
-                        chapter: chapter as u32,
-                        snippet: snippet_at_with_context(text, position, term_lower.len(), 260),
-                        count: 1,
-                        score: 0.0,
-                    });
-                    if hits.len() >= limit {
-                        return hits;
-                    }
-                }
-                seen += 1;
-            }
-        }
-    }
-    hits
+    let (offset, limit) = hit_page_window(offset, limit);
+    let lower_chapters = needs_ci.then(|| get_lower_book_chapters(state, book, &chapters));
+    scan_hit_page(
+        &chapters,
+        lower_chapters.as_deref().map(Vec::as_slice),
+        &term_lower,
+        offset,
+        limit,
+    )
+    .into_iter()
+    .map(|location| ChapterHit {
+        chapter: location.chapter as u32,
+        snippet: snippet_at_with_context(
+            &chapters[location.chapter],
+            location.byte_offset,
+            term_lower.len(),
+            260,
+        ),
+        count: 1,
+        score: 0.0,
+    })
+    .collect()
 }
 
 /// 关键词结果按书分页取片段。首轮只回传少量预览，用户点击“另有…”时再取
@@ -783,7 +727,7 @@ fn shelf_search_blocking(
     };
     let target_count = targets.len();
 
-    let needs_ci = term.bytes().any(|b| b.is_ascii_alphabetic());
+    let needs_ci = needs_ascii_case_fold(&term);
     let term_lower = ascii_lower_bytes(&term);
 
     let st: &AppState = state.inner();
@@ -872,8 +816,8 @@ pub(crate) async fn open_search_window(
     }
     let url = format!(
         "search.html?q={}&ids={}",
-        url_encode(&term),
-        url_encode(&ids_csv)
+        percent_encode(&term),
+        percent_encode(&ids_csv)
     );
     let mut builder =
         tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
@@ -895,34 +839,16 @@ pub(crate) async fn web_search(term: String, engine: Option<String>) -> Result<(
         return Ok(());
     }
     let url = if engine.as_deref() == Some("google") {
-        format!("https://www.google.com/search?q={}", url_encode(t))
+        format!("https://www.google.com/search?q={}", percent_encode(t))
     } else {
-        format!("https://www.baidu.com/s?wd={}", url_encode(t))
+        format!("https://www.baidu.com/s?wd={}", percent_encode(t))
     };
     url_open::open_https_url(&url)
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn url_encode_escapes_unicode_and_spaces() {
-        assert_eq!(url_encode("南明 a"), "%E5%8D%97%E6%98%8E%20a");
-    }
 
     #[test]
     fn file_mtime_returns_zero_for_missing_path() {

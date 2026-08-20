@@ -1,4 +1,6 @@
 pub mod account_email;
+pub mod account_mutation;
+pub mod account_validation;
 pub mod assets;
 pub mod auth;
 pub mod config;
@@ -8,14 +10,15 @@ pub mod feedback;
 pub mod mail;
 pub mod middleware;
 pub mod password_reset;
+pub mod phone_registration;
 pub mod rate_limit;
-pub mod recovery;
 pub mod registration;
 pub mod routes;
+pub mod sms;
 pub mod state;
 pub mod sync;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -25,7 +28,7 @@ use axum::{
     middleware as axum_middleware,
     routing::get,
 };
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use secrecy::ExposeSecret;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::Semaphore;
@@ -63,14 +66,15 @@ use crate::{
         feedback::submit,
         registration::start,
         registration::confirm,
+        phone_registration::start,
+        phone_registration::confirm,
         sync::reset_data,
-        recovery::status,
-        recovery::restore,
         assets::init,
         assets::upload_chunk,
         assets::download,
         sync::push,
         sync::pull,
+        sync::checkpoint,
         sync::inventory,
         sync::reconcile,
         sync::secret_state,
@@ -105,17 +109,19 @@ use crate::{
         registration::RegistrationStartRequest,
         registration::RegistrationStartResponse,
         registration::RegistrationConfirmRequest,
+        phone_registration::PhoneRegistrationStartRequest,
+        phone_registration::PhoneRegistrationStartResponse,
+        phone_registration::PhoneRegistrationConfirmRequest,
         sync::EntityEnvelope,
         sync::PushRequest,
         sync::PushResponse,
         sync::DataResetRequest,
         sync::DataResetResponse,
-        recovery::RecoveryStatusResponse,
-        recovery::RecoveryRestoreRequest,
-        recovery::RecoveryRestoreResponse,
         assets::AssetInitRequest,
         assets::AssetInitResponse,
         sync::PullResponse,
+        sync::CheckpointQuery,
+        sync::CheckpointResponse,
         sync::InventoryResponse,
         sync::ReconcileRequest,
         sync::ManifestEntry,
@@ -160,10 +166,13 @@ impl Modify for SecurityAddon {
 pub async fn build_state(config: Config) -> Result<AppState> {
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
-        .acquire_timeout(Duration::from_secs(5))
+        .acquire_timeout(config.database_acquire_timeout)
         .connect_lazy(config.database_url.expose_secret())
         .context("failed to configure PostgreSQL pool")?;
     if config.run_migrations {
+        // Keep the embedded SQLx migration set in the executable used by the
+        // disposable candidate service; migrations are part of the runtime
+        // artifact, not merely deployment-side files.
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
@@ -174,6 +183,15 @@ pub async fn build_state(config: Config) -> Result<AppState> {
         pool,
         metrics,
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -181,16 +199,45 @@ pub async fn build_state(config: Config) -> Result<AppState> {
 }
 
 fn install_metrics() -> Result<PrometheusHandle> {
+    // Fixed buckets make the per-stage capacity monitor subtractable.  The
+    // default rolling summaries are useful for a live dashboard but cannot
+    // attribute a P99 to one bounded load phase.  The metric names and their
+    // route/class/operation labels are all controlled by this service.
+    const REQUEST_LATENCY_BUCKETS: &[f64] = &[
+        0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0,
+    ];
     PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Full("reader_sync_request_queue_wait_seconds".to_owned()),
+            REQUEST_LATENCY_BUCKETS,
+        )
+        .context("failed to configure request queue latency buckets")?
+        .set_buckets_for_metric(
+            Matcher::Full("reader_sync_request_handler_duration_seconds".to_owned()),
+            REQUEST_LATENCY_BUCKETS,
+        )
+        .context("failed to configure request handler latency buckets")?
+        .set_buckets_for_metric(
+            Matcher::Full("reader_sync_database_pool_acquire_seconds".to_owned()),
+            REQUEST_LATENCY_BUCKETS,
+        )
+        .context("failed to configure database acquire latency buckets")?
+        .set_buckets_for_metric(
+            Matcher::Full("reader_sync_database_query_seconds".to_owned()),
+            REQUEST_LATENCY_BUCKETS,
+        )
+        .context("failed to configure database query latency buckets")?
         .install_recorder()
         .context("failed to install Prometheus recorder")
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn app(state: AppState) -> Router {
     let sync = Router::new()
         .route("/status", get(routes::sync_status))
         .route("/push", axum::routing::post(sync::push))
         .route("/pull", get(sync::pull))
+        .route("/checkpoint", get(sync::checkpoint))
         .route("/inventory", get(sync::inventory))
         .route("/reconcile", axum::routing::post(sync::reconcile))
         .route("/secret-state", get(sync::secret_state))
@@ -199,8 +246,6 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(sync::reset_secret_state),
         )
         .route("/data/reset", axum::routing::post(sync::reset_data))
-        .route("/recovery/status", get(recovery::status))
-        .route("/recovery/restore", axum::routing::post(recovery::restore))
         .route("/assets/init", axum::routing::post(assets::init))
         .route(
             "/assets/{asset_id}",
@@ -261,6 +306,14 @@ pub fn app(state: AppState) -> Router {
             "/register/confirm",
             axum::routing::post(registration::confirm),
         )
+        .route(
+            "/register/phone/start",
+            axum::routing::post(phone_registration::start),
+        )
+        .route(
+            "/register/phone/confirm",
+            axum::routing::post(phone_registration::confirm),
+        )
         .route_layer(axum_middleware::from_fn(no_store));
     let openapi = ApiDoc::openapi();
     Router::new()
@@ -296,11 +349,25 @@ pub fn app(state: AppState) -> Router {
 /// server fails.
 pub async fn serve(config: Config) -> Result<()> {
     let bind = config.bind;
+    let listen_backlog = config.listen_backlog;
     let state = build_state(config).await?;
     let mail_worker = mail::spawn_worker(state.clone())?;
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
+    let sms_worker = sms::spawn_worker(state.clone())?;
+    let orphan_asset_reclaimer = assets::spawn_orphan_reclaimer(state.clone());
+    let socket = match bind {
+        std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+        std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+    }
+    .with_context(|| format!("failed to create TCP socket for {bind}"))?;
+    socket
+        .set_reuseaddr(true)
+        .with_context(|| format!("failed to configure TCP socket for {bind}"))?;
+    socket
+        .bind(bind)
         .with_context(|| format!("failed to bind {bind}"))?;
+    let listener = socket
+        .listen(listen_backlog)
+        .with_context(|| format!("failed to listen on {bind}"))?;
     info!(%bind, "reader sync API listening");
     let result = axum::serve(
         listener,
@@ -312,6 +379,10 @@ pub async fn serve(config: Config) -> Result<()> {
     if let Some(worker) = mail_worker {
         worker.abort();
     }
+    if let Some(worker) = sms_worker {
+        worker.abort();
+    }
+    orphan_asset_reclaimer.abort();
     result
 }
 

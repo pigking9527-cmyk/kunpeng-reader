@@ -6,7 +6,9 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-pub(super) const MAX_NEWS_SOURCES: usize = 24;
+// All currently shipped built-in sources fit below this defensive transport
+// ceiling. The product does not impose a selectable-source limit.
+pub(super) const MAX_NEWS_SOURCES: usize = 1024;
 pub(super) const MAX_TIEBA_BARS: usize = 8;
 const MAX_GESTURE_PROFILES: usize = 24;
 pub(super) const GESTURE_POINT_COUNT: usize = 48;
@@ -167,16 +169,18 @@ pub(super) fn normalized_gesture_settings(value: Value) -> Option<Value> {
         {
             return None;
         }
-        let action = profile.get("action")?.as_str()?;
-        if !matches!(
-            action,
-            "back" | "book_info" | "reopen_last" | "restore_jump"
-        ) {
-            return None;
-        }
+        let source_action = profile.get("action")?.as_str()?;
+        // `undo_last` is the current cross-surface recovery action. Keep the
+        // former names readable so an older desktop can still sync its saved
+        // profile, but always write the current canonical action back.
+        let action = match source_action {
+            "back" | "book_info" => source_action,
+            "undo_last" | "reopen_last" | "restore_jump" => "undo_last",
+            _ => return None,
+        };
         let scope = profile.get("scope")?.as_str()?;
         if !matches!(scope, "auto" | "main" | "reader")
-            || (action == "restore_jump" && scope != "reader")
+            || (source_action == "restore_jump" && scope != "reader")
         {
             return None;
         }

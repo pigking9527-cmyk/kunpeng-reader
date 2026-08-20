@@ -1,5 +1,12 @@
 //! EPUB document lifetime, virtual chapters and custom reader protocol.
 
+mod cache_paths;
+mod chapter_cache;
+mod protocol_path;
+mod search_rules;
+mod text_conversion;
+mod virtual_chapters;
+
 use crate::epub_toc::{epub3_nav_toc, flatten_toc, TocDto};
 use crate::html_sanitize::{sanitize_book_html, sanitize_epub_head, sanitize_mobi_html};
 use crate::reader_protocol::{
@@ -7,116 +14,37 @@ use crate::reader_protocol::{
     md_to_html, percent_decode, rewrite_attrs, rewrite_css_url, strip_tags, txt_body, txt_html,
 };
 use crate::{book, log, reader_page, AppState, RES_BASE};
-use ferrous_opencc::{config::BuiltinConfig, OpenCC};
+use cache_paths::{epub_entry_sizes, file_mtime_ms, meta_cache_path, meta_cache_path_for};
+use chapter_cache::ProcessedChapterHtml;
+use protocol_path::parse_request_path;
+use search_rules::find_snippets;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::Manager;
+use text_conversion::{convert_reader_html_text, ReaderTextConversion};
+#[cfg(test)]
+use virtual_chapters::TEST_VIRTUAL_CHAPTER_TARGET_BYTES;
+use virtual_chapters::{
+    build_virtual_chapter_map, clamp_char_boundary, clamp_highlight_chapter,
+    clamp_reading_position_chapter, clamp_virtual_chapter, map_physical_chapter_to_virtual,
+    remap_highlight_chapter, remap_reading_position_chapter, split_body_ranges,
+    BIG_EPUB_CHAPTER_BYTES,
+};
 
 type EpubDoc = epub::doc::EpubDoc<std::io::BufReader<std::fs::File>>;
 
-const BIG_EPUB_CHAPTER_BYTES: usize = 800 * 1024;
-const BIG_EPUB_CHAPTER_CHARS: usize = 1_000_000;
-const VIRTUAL_CHAPTER_TARGET_BYTES: usize = 520 * 1024;
-const VIRTUAL_CHAPTER_SEARCH_BYTES: usize = 160 * 1024;
 pub(crate) const CACHE_VERSION: u32 = 3;
 const CACHE_COMPAT_VERSIONS: &[u32] = &[2, 3];
+pub(crate) const RECENT_READING_CHAPTER_CACHE_BOOK_LIMIT: usize = 3;
+pub(crate) const RECENT_READING_CHAPTER_CACHE_BYTE_LIMIT: u64 = 6 * 1024 * 1024;
+const TRANSIENT_CHAPTER_CACHE_BOOK_LIMIT: usize = 1;
+const TRANSIENT_CHAPTER_CACHE_BYTE_LIMIT: u64 = 1024 * 1024;
 
 static READER_RESOURCE_REQUEST_LOGGED: AtomicBool = AtomicBool::new(false);
-static SIMPLIFIED_TO_TRADITIONAL: OnceLock<Option<OpenCC>> = OnceLock::new();
-static TRADITIONAL_TO_SIMPLIFIED: OnceLock<Option<OpenCC>> = OnceLock::new();
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReaderTextConversion {
-    Original,
-    ToSimplified,
-    ToTraditional,
-}
-
-impl ReaderTextConversion {
-    fn parse(value: &str) -> Self {
-        match value {
-            "t2s" => Self::ToSimplified,
-            "s2t" => Self::ToTraditional,
-            _ => Self::Original,
-        }
-    }
-}
-
-fn reader_text_converter(mode: ReaderTextConversion) -> Option<&'static OpenCC> {
-    match mode {
-        ReaderTextConversion::Original => None,
-        ReaderTextConversion::ToTraditional => SIMPLIFIED_TO_TRADITIONAL
-            .get_or_init(|| OpenCC::from_config(BuiltinConfig::S2t).ok())
-            .as_ref(),
-        ReaderTextConversion::ToSimplified => TRADITIONAL_TO_SIMPLIFIED
-            .get_or_init(|| OpenCC::from_config(BuiltinConfig::T2s).ok())
-            .as_ref(),
-    }
-}
-
-/// Converts only visible HTML text, deliberately leaving markup and resource URLs intact.
-/// Reader chapter HTML is sanitised before this runs, but we still avoid changing the
-/// contents of style/script blocks should a book retain one.
-fn convert_reader_html_text(html: &str, mode: ReaderTextConversion) -> String {
-    let Some(converter) = reader_text_converter(mode) else {
-        return html.to_owned();
-    };
-    let mut out = String::with_capacity(html.len());
-    let mut cursor = 0usize;
-    let mut raw_text_tag: Option<&str> = None;
-    while let Some(relative_start) = html[cursor..].find('<') {
-        let start = cursor + relative_start;
-        if raw_text_tag.is_none() {
-            out.push_str(&converter.convert(&html[cursor..start]));
-        } else {
-            out.push_str(&html[cursor..start]);
-        }
-        let Some(relative_end) = html[start..].find('>') else {
-            if raw_text_tag.is_none() {
-                out.push_str(&converter.convert(&html[start..]));
-            } else {
-                out.push_str(&html[start..]);
-            }
-            return out;
-        };
-        let end = start + relative_end + 1;
-        let tag = &html[start..end];
-        let tag_name = tag
-            .trim_start_matches('<')
-            .trim_start_matches('/')
-            .trim_start()
-            .split(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
-            .next()
-            .unwrap_or("");
-        let closes_tag = tag.trim_start_matches('<').trim_start().starts_with('/');
-        if let Some(raw) = raw_text_tag {
-            if closes_tag && tag_name.eq_ignore_ascii_case(raw) {
-                raw_text_tag = None;
-            }
-        } else if !closes_tag
-            && (tag_name.eq_ignore_ascii_case("style") || tag_name.eq_ignore_ascii_case("script"))
-        {
-            raw_text_tag = Some(if tag_name.eq_ignore_ascii_case("style") {
-                "style"
-            } else {
-                "script"
-            });
-        }
-        out.push_str(tag);
-        cursor = end;
-    }
-    if raw_text_tag.is_none() {
-        out.push_str(&converter.convert(&html[cursor..]));
-    } else {
-        out.push_str(&html[cursor..]);
-    }
-    out
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 struct EpubVirtualChapter {
     spine_idx: usize,
@@ -145,12 +73,6 @@ struct EpubMetaDiskCache {
     virtuals: Vec<EpubVirtualChapter>,
     toc: Vec<TocDto>,
     physical_to_virtual: Vec<u32>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ProcessedChapterHtml {
-    head: String,
-    body: String,
 }
 
 #[derive(Serialize)]
@@ -186,7 +108,116 @@ pub(crate) struct BookMetadata {
 pub(crate) struct EpubRuntime {
     epubs: Mutex<HashMap<u64, EpubDoc>>,
     meta_cache: Mutex<HashMap<u64, Arc<EpubMetaCache>>>,
-    chapter_html_cache: Mutex<HashMap<(u64, u64, usize), Arc<ProcessedChapterHtml>>>,
+    chapter_html_cache: Mutex<ChapterHtmlCache>,
+    recent_reading_chapter_cache_enabled: AtomicBool,
+}
+
+type ChapterCacheKey = (u64, u64, usize);
+
+/// The reader only keeps processed source for a small, recent working set.
+/// Browser layout itself is intentionally not retained: it is bound to the
+/// current viewport and typography, while source preparation is reusable.
+#[derive(Default)]
+struct ChapterHtmlCache {
+    entries: HashMap<ChapterCacheKey, Arc<ProcessedChapterHtml>>,
+    entry_order: VecDeque<ChapterCacheKey>,
+    book_order: VecDeque<u64>,
+    bytes: u64,
+}
+
+impl ChapterHtmlCache {
+    fn chapter_bytes(chapter: &ProcessedChapterHtml) -> u64 {
+        u64::try_from(chapter.head.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(chapter.body.len()).unwrap_or(u64::MAX))
+    }
+
+    fn touch_book(&mut self, book_id: u64) {
+        self.book_order.retain(|id| *id != book_id);
+        self.book_order.push_back(book_id);
+    }
+
+    fn touch_entry(&mut self, key: ChapterCacheKey) {
+        self.entry_order.retain(|existing| *existing != key);
+        self.entry_order.push_back(key);
+    }
+
+    fn get(&mut self, key: ChapterCacheKey) -> Option<Arc<ProcessedChapterHtml>> {
+        let chapter = Arc::clone(self.entries.get(&key)?);
+        self.touch_book(key.0);
+        self.touch_entry(key);
+        Some(chapter)
+    }
+
+    fn remove(&mut self, key: ChapterCacheKey) {
+        if let Some(chapter) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(Self::chapter_bytes(&chapter));
+        }
+        self.entry_order.retain(|existing| *existing != key);
+        if !self.entries.keys().any(|existing| existing.0 == key.0) {
+            self.book_order.retain(|book_id| *book_id != key.0);
+        }
+    }
+
+    fn remove_book(&mut self, book_id: u64) {
+        let keys: Vec<ChapterCacheKey> = self
+            .entries
+            .keys()
+            .copied()
+            .filter(|key| key.0 == book_id)
+            .collect();
+        for key in keys {
+            self.remove(key);
+        }
+        self.book_order.retain(|id| *id != book_id);
+    }
+
+    fn insert(
+        &mut self,
+        key: ChapterCacheKey,
+        chapter: Arc<ProcessedChapterHtml>,
+        book_limit: usize,
+        byte_limit: u64,
+    ) {
+        self.remove(key);
+        self.bytes = self.bytes.saturating_add(Self::chapter_bytes(&chapter));
+        self.entries.insert(key, chapter);
+        self.touch_book(key.0);
+        self.touch_entry(key);
+        while self.book_order.len() > book_limit {
+            if let Some(book_id) = self.book_order.pop_front() {
+                self.remove_book(book_id);
+            }
+        }
+        while self.bytes > byte_limit {
+            let Some(oldest) = self.entry_order.pop_front() else {
+                break;
+            };
+            self.remove(oldest);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.entry_order.clear();
+        self.book_order.clear();
+        self.bytes = 0;
+    }
+}
+
+/// A bounded, content-free view of the caches affected by book preparation.
+/// The byte count is the UTF-8 payload currently retained for sanitized EPUB
+/// chapter HTML; it deliberately does not claim to be the process RSS.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReaderPreloadCacheStatus {
+    epub_documents: u32,
+    metadata_entries: u32,
+    chapter_entries: u32,
+    chapter_html_bytes: u64,
+    recent_reading_chapter_cache_enabled: bool,
+    recent_reading_chapter_books: u32,
+    recent_reading_chapter_limit_bytes: u64,
 }
 
 impl Default for EpubRuntime {
@@ -194,7 +225,8 @@ impl Default for EpubRuntime {
         Self {
             epubs: Mutex::new(HashMap::new()),
             meta_cache: Mutex::new(HashMap::new()),
-            chapter_html_cache: Mutex::new(HashMap::new()),
+            chapter_html_cache: Mutex::new(ChapterHtmlCache::default()),
+            recent_reading_chapter_cache_enabled: AtomicBool::new(false),
         }
     }
 }
@@ -207,6 +239,75 @@ impl EpubRuntime {
             .lock()
             .map(|mut cache| cache.clear())
             .ok();
+    }
+
+    fn chapter_cache_limits(&self) -> (usize, u64) {
+        if self
+            .recent_reading_chapter_cache_enabled
+            .load(Ordering::Acquire)
+        {
+            (
+                RECENT_READING_CHAPTER_CACHE_BOOK_LIMIT,
+                RECENT_READING_CHAPTER_CACHE_BYTE_LIMIT,
+            )
+        } else {
+            (
+                TRANSIENT_CHAPTER_CACHE_BOOK_LIMIT,
+                TRANSIENT_CHAPTER_CACHE_BYTE_LIMIT,
+            )
+        }
+    }
+
+    pub(crate) fn set_recent_reading_chapter_cache_enabled(&self, enabled: bool) {
+        self.recent_reading_chapter_cache_enabled
+            .store(enabled, Ordering::Release);
+        if !enabled {
+            self.chapter_html_cache
+                .lock()
+                .map(|mut cache| cache.clear())
+                .ok();
+        }
+    }
+
+    pub(crate) fn clear_recent_reading_chapter_cache(&self) {
+        self.chapter_html_cache
+            .lock()
+            .map(|mut cache| cache.clear())
+            .ok();
+    }
+}
+
+pub(crate) fn reader_preload_cache_status(state: &AppState) -> ReaderPreloadCacheStatus {
+    let epub_documents = state
+        .epub_runtime
+        .epubs
+        .lock()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let metadata_entries = state
+        .epub_runtime
+        .meta_cache
+        .lock()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let (chapter_entries, chapter_html_bytes, recent_reading_chapter_books) = state
+        .epub_runtime
+        .chapter_html_cache
+        .lock()
+        .map(|items| (items.entries.len(), items.bytes, items.book_order.len()))
+        .unwrap_or((0, 0, 0));
+    ReaderPreloadCacheStatus {
+        epub_documents: u32::try_from(epub_documents).unwrap_or(u32::MAX),
+        metadata_entries: u32::try_from(metadata_entries).unwrap_or(u32::MAX),
+        chapter_entries: u32::try_from(chapter_entries).unwrap_or(u32::MAX),
+        chapter_html_bytes,
+        recent_reading_chapter_cache_enabled: state
+            .epub_runtime
+            .recent_reading_chapter_cache_enabled
+            .load(Ordering::Acquire),
+        recent_reading_chapter_books: u32::try_from(recent_reading_chapter_books)
+            .unwrap_or(u32::MAX),
+        recent_reading_chapter_limit_bytes: RECENT_READING_CHAPTER_CACHE_BYTE_LIMIT,
     }
 }
 
@@ -242,77 +343,6 @@ fn ensure_epub_loaded(state: &AppState, id: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn file_mtime_ms(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| {
-            duration.as_secs().saturating_mul(1000) + u64::from(duration.subsec_millis())
-        })
-        .unwrap_or(0)
-}
-
-fn epub_entry_sizes(path: &Path) -> HashMap<String, usize> {
-    let mut sizes = HashMap::new();
-    let Ok(file) = std::fs::File::open(path) else {
-        return sizes;
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return sizes;
-    };
-    for index in 0..archive.len() {
-        let Ok(entry) = archive.by_index(index) else {
-            continue;
-        };
-        let size = entry.size().min(usize::MAX as u64) as usize;
-        sizes.insert(entry.name().replace('\\', "/"), size);
-    }
-    sizes
-}
-
-fn epub_cache_dir() -> Option<PathBuf> {
-    let mut dir = crate::profile::app_cache_dir()?;
-    dir.push("epub-cache");
-    let _ = std::fs::create_dir_all(&dir);
-    Some(dir)
-}
-
-fn meta_cache_path_for(id: u64, mtime: u64, version: u32) -> Option<PathBuf> {
-    Some(epub_cache_dir()?.join(format!("meta-v{version}-{id}-{mtime}.json")))
-}
-
-fn meta_cache_path(id: u64, mtime: u64) -> Option<PathBuf> {
-    meta_cache_path_for(id, mtime, CACHE_VERSION)
-}
-
-fn chapter_cache_path_for(id: u64, mtime: u64, index: usize, version: u32) -> Option<PathBuf> {
-    Some(epub_cache_dir()?.join(format!("chapter-v{version}-{id}-{mtime}-{index}.json")))
-}
-
-fn chapter_cache_path(id: u64, mtime: u64, index: usize) -> Option<PathBuf> {
-    chapter_cache_path_for(id, mtime, index, CACHE_VERSION)
-}
-
-fn build_virtual_chapter_map(
-    spine_paths: &[String],
-    physical_to_virtual: &[u32],
-) -> HashMap<String, usize> {
-    spine_paths
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            (
-                path.clone(),
-                physical_to_virtual
-                    .get(index)
-                    .copied()
-                    .unwrap_or(index as u32) as usize,
-            )
-        })
-        .collect()
-}
-
 fn load_epub_meta_disk_cache(id: u64, mtime: u64) -> Option<Arc<EpubMetaCache>> {
     for version in CACHE_COMPAT_VERSIONS {
         let Some(path) = meta_cache_path_for(id, mtime, *version) else {
@@ -345,7 +375,7 @@ fn load_epub_meta_disk_cache(id: u64, mtime: u64) -> Option<Arc<EpubMetaCache>> 
 }
 
 fn save_epub_meta_disk_cache(id: u64, meta: &EpubMetaCache) {
-    let Some(path) = meta_cache_path(id, meta.mtime) else {
+    let Some(path) = meta_cache_path(id, meta.mtime, CACHE_VERSION) else {
         return;
     };
     let disk = EpubMetaDiskCache {
@@ -359,118 +389,6 @@ fn save_epub_meta_disk_cache(id: u64, meta: &EpubMetaCache) {
     if let Ok(bytes) = serde_json::to_vec(&disk) {
         let _ = std::fs::write(path, bytes);
     }
-}
-
-fn clamp_char_boundary(text: &str, mut index: usize) -> usize {
-    index = index.min(text.len());
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn first_needle_pos(haystack: &str, needles: &[&str]) -> Option<usize> {
-    needles
-        .iter()
-        .filter_map(|needle| haystack.find(needle))
-        .min()
-}
-
-fn last_needle_pos(haystack: &str, needles: &[&str]) -> Option<(usize, usize)> {
-    needles
-        .iter()
-        .filter_map(|needle| {
-            haystack
-                .rfind(needle)
-                .map(|position| (position, needle.len()))
-        })
-        .max_by_key(|(position, _)| *position)
-}
-
-fn find_virtual_split(body: &str, start: usize, target: usize) -> usize {
-    let len = body.len();
-    let target = clamp_char_boundary(body, target.min(len));
-    if target >= len {
-        return len;
-    }
-
-    let forward_end = clamp_char_boundary(body, (target + VIRTUAL_CHAPTER_SEARCH_BYTES).min(len));
-    if forward_end > target {
-        let window = &body[target..forward_end];
-        if let Some(position) = first_needle_pos(
-            window,
-            &[
-                "<h1", "<h2", "<h3", "<h4", "<h5", "<h6", "<p", "<div", "<section", "<H1", "<H2",
-                "<H3", "<H4", "<H5", "<H6", "<P", "<DIV", "<SECTION",
-            ],
-        ) {
-            return clamp_char_boundary(body, target + position);
-        }
-        if let Some((position, needle_len)) =
-            first_needle_pos(window, &["</p>", "</P>"]).map(|position| (position, 4usize))
-        {
-            return clamp_char_boundary(body, target + position + needle_len);
-        }
-    }
-
-    let backward_start = clamp_char_boundary(
-        body,
-        target
-            .saturating_sub(VIRTUAL_CHAPTER_SEARCH_BYTES)
-            .max(start),
-    );
-    if backward_start < target {
-        let window = &body[backward_start..target];
-        if let Some((position, needle_len)) = last_needle_pos(
-            window,
-            &[
-                "</p>",
-                "</div>",
-                "</section>",
-                "</h1>",
-                "</h2>",
-                "</h3>",
-                "</P>",
-                "</DIV>",
-                "</SECTION>",
-                "</H1>",
-                "</H2>",
-                "</H3>",
-            ],
-        ) {
-            let split = backward_start + position + needle_len;
-            if split > start {
-                return clamp_char_boundary(body, split);
-            }
-        }
-    }
-
-    target
-}
-
-fn split_body_ranges(body: &str, html_len: usize) -> Vec<(usize, usize)> {
-    if html_len <= BIG_EPUB_CHAPTER_BYTES && body.chars().count() <= BIG_EPUB_CHAPTER_CHARS {
-        return vec![(0, body.len())];
-    }
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    let len = body.len();
-    while start < len {
-        let target = start.saturating_add(VIRTUAL_CHAPTER_TARGET_BYTES).min(len);
-        let mut end = find_virtual_split(body, start, target);
-        if end <= start {
-            end = clamp_char_boundary(body, target);
-        }
-        if end <= start {
-            end = len;
-        }
-        ranges.push((start, end));
-        start = end;
-    }
-    if ranges.is_empty() {
-        ranges.push((0, body.len()));
-    }
-    ranges
 }
 
 fn extract_head_asset_source(html: &str) -> &str {
@@ -590,66 +508,6 @@ fn ensure_epub_meta(state: &AppState, id: u64) -> Result<Arc<EpubMetaCache>, Str
     Ok(meta)
 }
 
-fn map_physical_chapter_to_virtual(meta: &EpubMetaCache, chapter: u32) -> u32 {
-    let index = chapter as usize;
-    if index < meta.physical_to_virtual.len() {
-        meta.physical_to_virtual[index]
-    } else {
-        chapter.min(meta.virtuals.len().saturating_sub(1) as u32)
-    }
-}
-
-fn clamp_virtual_chapter(meta: &EpubMetaCache, chapter: u32) -> u32 {
-    chapter.min(meta.virtuals.len().saturating_sub(1) as u32)
-}
-
-/// Move both the legacy chapter field and the authoritative text anchor. A
-/// `ReadingPosition::normalized` value takes its chapter from the anchor, so
-/// changing only the legacy field would silently restore the old physical
-/// chapter whenever an anchor exists.
-fn remap_reading_position_chapter(
-    position: &mut reader_core::ReadingPosition,
-    meta: &EpubMetaCache,
-) {
-    position.chapter = map_physical_chapter_to_virtual(meta, position.chapter);
-    if let Some(anchor) = position.anchor.as_mut() {
-        anchor.chapter = map_physical_chapter_to_virtual(meta, anchor.chapter);
-    }
-    *position = position.clone().normalized();
-}
-
-/// Even a current-format bookmark can point past the final virtual chapter
-/// after the underlying EPUB was replaced or re-imported. Keep the legacy
-/// field and its authoritative anchor within the same document bounds.
-fn clamp_reading_position_chapter(
-    position: &mut reader_core::ReadingPosition,
-    meta: &EpubMetaCache,
-) {
-    position.chapter = clamp_virtual_chapter(meta, position.chapter);
-    if let Some(anchor) = position.anchor.as_mut() {
-        anchor.chapter = clamp_virtual_chapter(meta, anchor.chapter);
-    }
-    *position = position.clone().normalized();
-}
-
-fn remap_highlight_chapter(highlight: &mut book::Highlight, meta: &EpubMetaCache) {
-    highlight.chapter = map_physical_chapter_to_virtual(meta, highlight.chapter);
-    if let Some(range) = highlight.range_anchor.as_mut() {
-        for anchor in [&mut range.start, &mut range.end].into_iter().flatten() {
-            anchor.chapter = map_physical_chapter_to_virtual(meta, anchor.chapter);
-        }
-    }
-}
-
-fn clamp_highlight_chapter(highlight: &mut book::Highlight, meta: &EpubMetaCache) {
-    highlight.chapter = clamp_virtual_chapter(meta, highlight.chapter);
-    if let Some(range) = highlight.range_anchor.as_mut() {
-        for anchor in [&mut range.start, &mut range.end].into_iter().flatten() {
-            anchor.chapter = clamp_virtual_chapter(meta, anchor.chapter);
-        }
-    }
-}
-
 pub(crate) fn map_physical_chapter_for_book(
     state: &AppState,
     id: u64,
@@ -658,37 +516,74 @@ pub(crate) fn map_physical_chapter_for_book(
     ensure_epub_meta(state, id).map(|meta| map_physical_chapter_to_virtual(&meta, chapter))
 }
 
-fn load_processed_chapter_disk_cache(
-    id: u64,
-    mtime: u64,
-    index: usize,
-) -> Option<Arc<ProcessedChapterHtml>> {
-    for version in CACHE_COMPAT_VERSIONS {
-        let Some(path) = chapter_cache_path_for(id, mtime, index, *version) else {
-            continue;
-        };
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        if let Ok(chapter) = serde_json::from_slice::<ProcessedChapterHtml>(&bytes) {
-            return Some(Arc::new(chapter));
-        }
+pub(crate) fn prewarm_book_data(state: &AppState, id: u64) -> Result<(), String> {
+    let (format, resume_chapter, chapter_index_version) = {
+        let library = state.library.lock().unwrap();
+        let book = library.get(id).ok_or("找不到这本书")?;
+        (
+            book.format.clone(),
+            book.resume_chapter,
+            book.chapter_index_version,
+        )
+    };
+    if format != "epub" {
+        return Ok(());
     }
-    None
+    let meta = ensure_epub_meta(state, id)?;
+    let chapter = if chapter_index_version < CACHE_VERSION {
+        map_physical_chapter_to_virtual(&meta, resume_chapter)
+    } else {
+        clamp_virtual_chapter(&meta, resume_chapter)
+    } as usize;
+    process_virtual_chapter(state, id, chapter, &meta)
+        .map(|_| ())
+        .ok_or_else(|| "无法预热续读章节".to_string())
 }
 
-fn save_processed_chapter_disk_cache(
-    id: u64,
-    mtime: u64,
-    index: usize,
-    chapter: &ProcessedChapterHtml,
-) {
-    let Some(path) = chapter_cache_path(id, mtime, index) else {
+/// Warms the resume chapter for the most recently read EPUBs. This is source
+/// preparation only: it never creates a reader WebView or retains decoded
+/// images, so it is safe to run while the shelf remains responsive.
+pub(crate) fn prewarm_recent_reading_chapters(state: &AppState) {
+    if !state
+        .epub_runtime
+        .recent_reading_chapter_cache_enabled
+        .load(Ordering::Acquire)
+    {
         return;
-    };
-    if let Ok(bytes) = serde_json::to_vec(chapter) {
-        let _ = std::fs::write(path, bytes);
     }
+    let mut ids: Vec<(u64, u64)> = state
+        .library
+        .lock()
+        .map(|library| {
+            library
+                .books
+                .iter()
+                .filter(|book| book.format.eq_ignore_ascii_case("epub") && book.path.exists())
+                .map(|book| (book.id, book.last_read_at))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort_unstable_by(|left, right| right.cmp(left));
+    for (id, _) in ids
+        .into_iter()
+        .take(RECENT_READING_CHAPTER_CACHE_BOOK_LIMIT)
+    {
+        let _ = prewarm_book_data(state, id);
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn prewarm_book(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    // 书架悬停只预热 EPUB 的续读章节和正文缓存；隐藏阅读窗口由预加载
+    // 开关、主窗口显示和换书补池提前准备，点击图书时直接消费，绝不把
+    // 指针悬停变成窗口创建动作。
+    let id = id.parse::<u64>().map_err(|_| "无效的图书 ID".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        prewarm_book_data(state.inner(), id)
+    })
+    .await
+    .map_err(|error| format!("图书预热任务失败：{error}"))?
 }
 
 fn process_virtual_chapter(
@@ -699,18 +594,19 @@ fn process_virtual_chapter(
 ) -> Option<Arc<ProcessedChapterHtml>> {
     let key = (id, meta.mtime, index);
     {
-        let cache = state.epub_runtime.chapter_html_cache.lock().unwrap();
-        if let Some(chapter) = cache.get(&key) {
-            return Some(Arc::clone(chapter));
+        let mut cache = state.epub_runtime.chapter_html_cache.lock().unwrap();
+        if let Some(chapter) = cache.get(key) {
+            return Some(chapter);
         }
     }
-    if let Some(chapter) = load_processed_chapter_disk_cache(id, meta.mtime, index) {
+    if let Some(chapter) = chapter_cache::load(id, meta.mtime, index, CACHE_COMPAT_VERSIONS) {
+        let (book_limit, byte_limit) = state.epub_runtime.chapter_cache_limits();
         state
             .epub_runtime
             .chapter_html_cache
             .lock()
             .unwrap()
-            .insert(key, Arc::clone(&chapter));
+            .insert(key, Arc::clone(&chapter), book_limit, byte_limit);
         return Some(chapter);
     }
 
@@ -767,13 +663,14 @@ fn process_virtual_chapter(
         body
     };
     let chapter = Arc::new(ProcessedChapterHtml { head, body });
-    save_processed_chapter_disk_cache(id, meta.mtime, index, &chapter);
+    chapter_cache::save(id, meta.mtime, index, CACHE_VERSION, &chapter);
+    let (book_limit, byte_limit) = state.epub_runtime.chapter_cache_limits();
     state
         .epub_runtime
         .chapter_html_cache
         .lock()
         .unwrap()
-        .insert(key, Arc::clone(&chapter));
+        .insert(key, Arc::clone(&chapter), book_limit, byte_limit);
     Some(chapter)
 }
 
@@ -785,11 +682,7 @@ pub(crate) async fn book_info(
     let started = Instant::now();
     let label = window.label().to_string();
     log(&format!("book_info label={label}"));
-    let id = label
-        .strip_prefix("reader-")
-        .ok_or("当前窗口不是阅读窗口")?
-        .to_string();
-    let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
+    let id_num = crate::window_commands::reader_window_id(&window).ok_or("当前窗口未绑定图书")?;
 
     let (
         title,
@@ -954,11 +847,6 @@ pub(crate) async fn search_book(
         };
         doc.spine.iter().map(|entry| entry.idref.clone()).collect()
     };
-    let query: Vec<char> = term
-        .chars()
-        .map(|character| character.to_ascii_lowercase())
-        .collect();
-    let query_len = query.len();
     let mut hits = Vec::new();
 
     for (chapter_index, idref) in spine.iter().enumerate() {
@@ -976,40 +864,17 @@ pub(crate) async fn search_book(
             continue;
         };
         let text = strip_tags(&html);
-        let text_chars: Vec<char> = text.chars().collect();
-        let lowercase: Vec<char> = text_chars
-            .iter()
-            .map(|character| character.to_ascii_lowercase())
-            .collect();
-        let mut index = 0usize;
-        while index + query_len <= lowercase.len() {
-            if lowercase[index..index + query_len] == query[..] {
-                let start = index.saturating_sub(30);
-                let end = (index + query_len + 30).min(lowercase.len());
-                let snippet: String = text_chars[start..end].iter().collect();
-                hits.push(SearchHit {
-                    chapter: chapter_index as u32,
-                    snippet: snippet.trim().to_string(),
-                });
-                index += query_len;
-                if hits.len() >= 300 {
-                    return Ok(hits);
-                }
-            } else {
-                index += 1;
-            }
+        for snippet in find_snippets(&text, &term, 300usize.saturating_sub(hits.len())) {
+            hits.push(SearchHit {
+                chapter: chapter_index as u32,
+                snippet,
+            });
+        }
+        if hits.len() >= 300 {
+            return Ok(hits);
         }
     }
     Ok(hits)
-}
-
-fn parse_request_path(path: &str) -> Option<(String, u64, String)> {
-    let decoded = percent_decode(path);
-    let mut parts = decoded.trim_start_matches('/').splitn(3, '/');
-    let kind = parts.next()?.to_string();
-    let id = parts.next()?.parse().ok()?;
-    let rest = parts.next().unwrap_or("").to_string();
-    Some((kind, id, rest))
 }
 
 fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
@@ -1206,7 +1071,7 @@ mod tests {
 
     #[test]
     fn large_chapters_split_on_structure_and_keep_utf8_boundaries() {
-        let mut body = "甲".repeat(VIRTUAL_CHAPTER_TARGET_BYTES / 3 + 128);
+        let mut body = "甲".repeat(TEST_VIRTUAL_CHAPTER_TARGET_BYTES / 3 + 128);
         let heading = body.len();
         body.push_str("<h2>第二节</h2>");
         body.push_str(&"乙".repeat(120_000));
@@ -1243,6 +1108,44 @@ mod tests {
     fn cache_versions_remain_backward_compatible() {
         assert_eq!(CACHE_VERSION, 3);
         assert_eq!(CACHE_COMPAT_VERSIONS, &[2, 3]);
+    }
+
+    fn cached_chapter(bytes: usize) -> Arc<ProcessedChapterHtml> {
+        Arc::new(ProcessedChapterHtml {
+            head: String::new(),
+            body: "x".repeat(bytes),
+        })
+    }
+
+    #[test]
+    fn recent_reading_chapter_cache_is_bounded_by_books_and_bytes() {
+        let mut cache = ChapterHtmlCache::default();
+        cache.insert((1, 1, 0), cached_chapter(4), 3, 12);
+        cache.insert((2, 1, 0), cached_chapter(4), 3, 12);
+        cache.insert((3, 1, 0), cached_chapter(4), 3, 12);
+        assert_eq!(cache.entries.len(), 3);
+        assert_eq!(cache.book_order.len(), 3);
+        assert_eq!(cache.bytes, 12);
+
+        cache.insert((4, 1, 0), cached_chapter(4), 3, 12);
+        assert!(!cache.entries.contains_key(&(1, 1, 0)));
+        assert_eq!(cache.entries.len(), 3);
+        assert_eq!(cache.book_order.len(), 3);
+
+        cache.insert((4, 1, 1), cached_chapter(13), 3, 12);
+        assert!(cache.bytes <= 12);
+        assert!(!cache.entries.contains_key(&(4, 1, 1)));
+    }
+
+    #[test]
+    fn recent_reading_chapter_cache_refreshes_recency_on_read() {
+        let mut cache = ChapterHtmlCache::default();
+        cache.insert((1, 1, 0), cached_chapter(3), 2, 12);
+        cache.insert((2, 1, 0), cached_chapter(3), 2, 12);
+        assert!(cache.get((1, 1, 0)).is_some());
+        cache.insert((3, 1, 0), cached_chapter(3), 2, 12);
+        assert!(cache.entries.contains_key(&(1, 1, 0)));
+        assert!(!cache.entries.contains_key(&(2, 1, 0)));
     }
 
     #[test]

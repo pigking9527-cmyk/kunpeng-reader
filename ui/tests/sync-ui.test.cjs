@@ -5,9 +5,15 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const uiDir = path.resolve(__dirname, "..");
-const syncSource = fs.readFileSync(path.join(uiDir, "sync-ui.js"), "utf8");
+const syncSource = fs.readFileSync(
+  path.join(uiDir, "generated-ts", "sync-ui.js"),
+  "utf8",
+);
 const indexSource = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
-const i18nSource = fs.readFileSync(path.join(uiDir, "app-i18n.js"), "utf8");
+const i18nSource = fs.readFileSync(
+  path.join(uiDir, "generated-ts", "app-i18n.js"),
+  "utf8",
+);
 const stylesSource = fs.readFileSync(path.join(uiDir, "styles.css"), "utf8");
 const tauriConfigSource = fs.readFileSync(
   path.join(uiDir, "..", "tauri.conf.json"),
@@ -48,6 +54,7 @@ test("账户概览保留同步执行和额度；同步管理仍在独立页面",
   assert.match(indexSource, /id="sync-now"/);
   assert.match(indexSource, /id="account-storage-value"/);
   assert.match(indexSource, /id="account-daily-value"/);
+  assert.match(indexSource, /id="sync-auth-status"[^>]*aria-live="polite"/);
   assert.match(indexSource, /class="account-center-nav"/);
   assert.match(indexSource, /id="account-tab-sync"/);
   assert.match(indexSource, /id="private-sync-panel"/);
@@ -79,7 +86,7 @@ test("同步内容逐项说明真实实体范围并包含书单元数据", () =>
   assert.match(i18nSource, /syncPalettes:\s*"自定义阅读主题与背景"/);
 });
 
-test("账户概览展示服务端权威的总存储与每日同步额度", () => {
+test("账户概览展示服务端权威的总存储与今日上传额度", () => {
   const overview =
     indexSource.match(
       /<section id="account-overview-panel"[\s\S]*?<\/section>/,
@@ -89,12 +96,14 @@ test("账户概览展示服务端权威的总存储与每日同步额度", () =>
   assert.match(overview, /id="sync-logout"/);
   assert.match(indexSource, /id="account-storage-value"/);
   assert.match(indexSource, /id="account-daily-value"/);
+  assert.match(indexSource, /今日上传/);
+  assert.match(indexSource, /恢复下载不计入今日上传额度/);
   assert.match(syncSource, /invoke\("auth_usage_status"\)/);
   assert.match(syncSource, /function applyAccountUsage/);
   assert.match(syncSource, /dailyResetAt/);
 });
 
-test("账户概览只用最近同步摘要行承载当前同步结果", () => {
+test("账户概览用同一行承载最近同步和当前结果", () => {
   const overview =
     indexSource.match(
       /<section id="account-overview-panel"[\s\S]*?<section\s+id="private-sync-panel"/,
@@ -104,11 +113,11 @@ test("账户概览只用最近同步摘要行承载当前同步结果", () => {
   assert.match(syncSource, /const syncStatusEl = syncLastCountsEl/);
   assert.match(
     syncSource,
-    /updateSyncSummary\(\{[\s\S]*?last_sync_ignored: report\.ignored,[\s\S]*?\}\);\s*syncStatusEl\.textContent = report\.message;/,
+    /updateSyncSummary\(\{[\s\S]*?last_sync_ignored: report\.ignored[\s\S]*?\}\);\s*syncStatusEl\.textContent = report\.message;/,
   );
   assert.match(
     stylesSource,
-    /\.sync-last-counts\s*\{[^}]*height:\s*2\.9em[^}]*-webkit-line-clamp:\s*2[^}]*font-size:\s*12px/s,
+    /\.sync-last-counts\s*\{[^}]*display:\s*-webkit-box[^}]*height:\s*2\.9em[^}]*-webkit-line-clamp:\s*2[^}]*font-size:\s*12px/s,
   );
   assert.match(
     stylesSource,
@@ -128,7 +137,7 @@ test("账户概览只用最近同步摘要行承载当前同步结果", () => {
   );
 });
 
-test("账户概览区分立即同步操作与同步服务连通状态", () => {
+test("账户概览把服务可达与最近同步结果分开，额度检查不能覆盖失败", () => {
   assert.match(
     indexSource,
     /id="account-overview-sync-state"[^>]*class="account-sync-state checking"[^>]*role="status"/,
@@ -153,6 +162,14 @@ test("账户概览区分立即同步操作与同步服务连通状态", () => {
   assert.match(
     syncSource,
     /setConnectionState\("offline", "serviceOffline", String\(error\)\)/,
+  );
+  assert.match(
+    syncSource,
+    /else if \(state === "fail"\)\s*renderOverviewState\("offline", "syncFailed", title, values\)/,
+  );
+  assert.match(
+    syncSource,
+    /if \(!lastSyncButtonState\.state\)\s*renderOverviewState\(state, key, title, values\)/,
   );
   assert.match(
     stylesSource,
@@ -195,15 +212,23 @@ test("账户概览区分立即同步操作与同步服务连通状态", () => {
   assert.match(i18nSource, /serviceOffline:\s*"连接异常"/);
 });
 
-test("persisted account is restored and automatically synced on startup", () => {
-  const appSource = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
+test("persisted account is restored without unlocking credentials on startup", () => {
+  const appSource = fs.readFileSync(
+    path.join(uiDir, "generated-ts", "app.js"),
+    "utf8",
+  );
   assert.match(syncSource, /async function syncOnStartup\(\)/);
   assert.match(syncSource, /await loadSyncSettingsOnce\(\)/);
-  assert.match(syncSource, /await invoke\("sync_now"\)/);
-  assert.match(
-    syncSource,
-    /setSyncButtonState\("fail", "autoSyncFailed", String\(e\)\);\s*syncStatusEl\.textContent = syncText\("syncFailedDetail", \{ error: e \}\);/s,
+  const startupSync = syncSource.slice(
+    syncSource.indexOf("async function syncOnStartup"),
+    syncSource.indexOf('accountBtn.addEventListener("click"'),
   );
+  assert.doesNotMatch(startupSync, /sync_now|auth_usage_status/);
+  const accountOpen = syncSource.slice(
+    syncSource.indexOf("function openAccountPanel"),
+    syncSource.indexOf("function renderSavedAccounts"),
+  );
+  assert.doesNotMatch(accountOpen, /loadAccountUsage/);
   assert.match(
     appSource,
     /await syncUI\.loadSettingsOnce\(\);[\s\S]*await syncUI\.syncOnStartup\(\)/,
@@ -257,6 +282,7 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "sync-form",
     "sync-account",
     "sync-account-name",
+    "sync-auth-status",
     "sync-username",
     "sync-password",
     "saved-accounts",
@@ -273,14 +299,7 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "sync-register-confirm",
     "sync-register-cancel",
     "sync-register-status",
-    "sync-password-reset-open",
-    "sync-password-reset",
-    "sync-reset-email",
-    "sync-reset-code",
-    "sync-reset-new-password",
-    "sync-reset-request",
-    "sync-reset-confirm",
-    "sync-reset-status",
+    "account-auth-open",
     "account-security-open",
     "account-security-panel",
     "account-overview-panel",
@@ -325,10 +344,6 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "account-clear-local",
     "account-clear-cloud-password",
     "account-clear-cloud",
-    "account-cloud-recovery-status",
-    "account-cloud-recovery-target",
-    "account-cloud-recovery-password",
-    "account-cloud-recovery-restore",
     "account-delete-password",
     "account-delete-username",
     "account-delete",
@@ -343,6 +358,7 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
     "account-sync-configs",
     "account-sync-history",
     "account-sync-secrets",
+    "account-sync-news-subscriptions",
     "private-sync-password",
     "private-sync-save-password",
     "private-sync-unlock",
@@ -402,14 +418,19 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
   });
   assert.equal(calls[1].command, "sync_now");
   assert.equal(calls[2].command, "shelf_books");
+  assert.equal(elements.get("account-panel").classList.contains("show"), true);
+  assert.equal(elements.get("account-panel").dataset.accountTab, "overview");
 
   calls.length = 0;
   elements.get("sync-registration").hidden = true;
   elements.get("sync-username").value = "new-reader";
-  elements.get("sync-password").value = "long-enough-password";
+  elements.get("sync-password").value = "";
   await elements.get("sync-register").emit("click");
   assert.equal(elements.get("sync-registration").hidden, false);
-  assert.equal(elements.get("sync-password-reset").hidden, true);
+  assert.equal(
+    elements.get("sync-form").classList.contains("registration-open"),
+    true,
+  );
 
   elements.get("sync-register-email").value = "reader@example.invalid";
   await elements.get("sync-register-code-request").emit("click");
@@ -424,6 +445,7 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
   assert.equal("password" in calls[0].payload.request, false);
 
   elements.get("sync-register-code").value = "123456";
+  elements.get("sync-password").value = "long-enough-password";
   await elements.get("sync-register-confirm").emit("click");
   assert.equal(calls[1].command, "auth_register_confirm");
   assert.deepEqual(JSON.parse(JSON.stringify(calls[1].payload)), {
@@ -437,34 +459,6 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
   });
   assert.equal(calls[2].command, "sync_now");
   assert.equal(calls[3].command, "shelf_books");
-
-  calls.length = 0;
-  elements.get("sync-registration").hidden = true;
-  elements.get("sync-username").value = "new-reader";
-  await elements.get("sync-password-reset-open").emit("click");
-  assert.equal(elements.get("sync-password-reset").hidden, false);
-  elements.get("sync-reset-email").value = "reader@example.invalid";
-  await elements.get("sync-reset-request").emit("click");
-  assert.equal(calls[0].command, "auth_request_password_reset");
-  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].payload)), {
-    request: {
-      url: "",
-      username: "new-reader",
-      email: "reader@example.invalid",
-    },
-  });
-  elements.get("sync-reset-code").value = "123456";
-  elements.get("sync-reset-new-password").value = "replacement-password";
-  await elements.get("sync-reset-confirm").emit("click");
-  assert.equal(calls[1].command, "auth_confirm_password_reset");
-  assert.deepEqual(JSON.parse(JSON.stringify(calls[1].payload)), {
-    request: {
-      url: "",
-      username: "new-reader",
-      code: "123456",
-      newPassword: "replacement-password",
-    },
-  });
 
   elements.get("account-security-panel").hidden = true;
   elements.get("account-data-panel").hidden = true;
@@ -489,7 +483,7 @@ test("sync UI exposes an explicit init API and preserves authentication payloads
   );
 
   await elements.get("account-btn").emit("click");
-  assert.equal(elements.get("account-panel").classList.contains("show"), true);
+  assert.equal(elements.get("account-panel").classList.contains("show"), false);
 });
 
 test("账户中心采用有下限的窗口和居中自适应面板", () => {
@@ -508,6 +502,63 @@ test("账户中心采用有下限的窗口和居中自适应面板", () => {
   assert.match(tauriConfigSource, /"minHeight":\s*640/);
 });
 
+test("未登录概览进入无标题紧凑登录页，注册点击后立即显示邮箱", () => {
+  assert.match(
+    indexSource,
+    /id="account-overview-panel"[\s\S]*?id="account-auth-open"[\s\S]*?>\s*登录\s*<\/button>/,
+  );
+  assert.match(
+    syncSource,
+    /accountPanel\.classList\.toggle\("logged-out", loggedOut\)/,
+  );
+  assert.match(
+    syncSource,
+    /function openAuthenticationPage\(\)[\s\S]*?accountPanel\.classList\.add\("auth-entry"\)/,
+  );
+  assert.match(
+    stylesSource,
+    /\.account-panel\.auth-entry,[\s\S]*?width:\s*min\(760px, calc\(100vw - 48px\)\);[\s\S]*?height:\s*302px/,
+  );
+  assert.match(
+    stylesSource,
+    /\.account-panel\.auth-entry \.sync-form\s*\{[\s\S]*?width:\s*min\(360px, calc\(100% - 48px\)\);/,
+  );
+  assert.match(
+    stylesSource,
+    /\.account-panel\.auth-entry:has\(\.sync-form\.registration-open\)\s*\{[\s\S]*?width:\s*min\(520px, calc\(100vw - 48px\)\);[\s\S]*?min-height:\s*0/,
+  );
+  assert.match(
+    stylesSource,
+    /\.account-panel\[data-account-tab="overview"\]\s*\{[^}]*height:\s*302px[^}]*overflow:\s*hidden/s,
+  );
+  assert.match(
+    indexSource,
+    /id="sync-account" class="sync-account account-center show"/,
+  );
+  assert.doesNotMatch(indexSource, /sync-auth-heading|account-auth-back|返回概览/);
+  assert.match(
+    syncSource,
+    /function openRegistration\(\)[\s\S]*?classList\.add\("registration-open"\)[\s\S]*?syncRegistrationEl\.hidden = false/,
+  );
+  assert.match(
+    stylesSource,
+    /#sync-login\s*\{[^}]*background:\s*#68717f/s,
+  );
+  assert.match(
+    stylesSource,
+    /\.sync-auth-status\.error\s*\{[^}]*color:\s*#c53f35/s,
+  );
+  assert.match(
+    indexSource,
+    /id="sync-registration"\s+class="account-security-panel sync-registration-panel"/,
+  );
+  assert.doesNotMatch(indexSource, /sync-password-reset|sync-reset-/);
+  assert.doesNotMatch(
+    syncSource,
+    /auth_request_password_reset|auth_confirm_password_reset/,
+  );
+});
+
 test("账户中心在同一窗口切换概览、同步、安全和数据页面", () => {
   assert.match(syncSource, /selectAccountTab\("overview"\)/);
   assert.match(indexSource, /id="account-tab-overview"/);
@@ -518,11 +569,11 @@ test("账户中心在同一窗口切换概览、同步、安全和数据页面",
   );
   assert.match(
     syncSource,
-    /accountSecurityOpenBtn\.addEventListener\("click", \(\) =>\s*selectAccountTab\("security"\),?\s*\)/,
+    /accountSecurityOpenBtn\.addEventListener\([\s\S]*?"click",[\s\S]*?\(\) => selectAccountTab\("security"\)[\s\S]*?\)/,
   );
   assert.match(
     syncSource,
-    /accountSecurityPanel\.addEventListener\("click", \(event\) =>\s*event\.stopPropagation\(\),\s*\)/,
+    /accountSecurityPanel\.addEventListener\([\s\S]*?"click",[\s\S]*?\(event\) => event\.stopPropagation\(\)[\s\S]*?\)/,
   );
   assert.match(
     syncSource,
@@ -534,7 +585,7 @@ test("账户中心在同一窗口切换概览、同步、安全和数据页面",
   );
   assert.match(
     syncSource,
-    /accountDataOpenBtn\.addEventListener\("click", \(\) =>\s*selectAccountTab\("data"\),?\s*\)/,
+    /accountDataOpenBtn\.addEventListener\([\s\S]*?"click",[\s\S]*?\(\) => selectAccountTab\("data"\)[\s\S]*?\)/,
   );
 });
 
@@ -562,7 +613,7 @@ test("账户安全的子项使用原生折叠控件，脚本异常时仍可展�
 });
 
 test("账户中心仅在非概览页使用统一的扩展高度", () => {
-  assert.match(syncSource, /accountPanel\.dataset\.accountTab = tab/);
+  assert.match(syncSource, /accountPanel\.dataset\.accountTab = selectedTab/);
   assert.match(
     stylesSource,
     /\.account-panel\[data-account-tab="sync"\],[\s\S]*?height:\s*min\(680px, calc\(100vh - 48px\)\)/,
@@ -616,6 +667,18 @@ test("账户中心安全与数据入口使用统一图标导航和轻量焦点�
 });
 
 test("数据与隐私提供本机、云端和账号三级清理并明确保留原始图书", () => {
+  assert.match(
+    indexSource,
+    /class="account-data-section account-data-section-device"[\s\S]*?id="account-clear-local"[\s\S]*?<\/section>/,
+  );
+  assert.match(
+    indexSource,
+    /class="account-data-section account-data-section-cloud"[\s\S]*?id="account-clear-cloud"[\s\S]*?<\/section>/,
+  );
+  assert.match(
+    indexSource,
+    /class="account-data-section account-data-section-account"[\s\S]*?id="account-delete"[\s\S]*?<\/section>/,
+  );
   assert.match(indexSource, /id="account-clear-local"/);
   assert.match(indexSource, /id="account-clear-cloud"/);
   assert.match(indexSource, /id="account-delete"/);
@@ -624,15 +687,17 @@ test("数据与隐私提供本机、云端和账号三级清理并明确保留�
     /不会删除电脑中的原始 EPUB、PDF、TXT、MOBI 或 AZW\s*图书文件/,
   );
   assert.match(syncSource, /invoke\("clear_local_app_data"\)/);
+  assert.match(syncSource, /invoke\("clear_local_app_data_preflight"\)/);
   assert.match(syncSource, /invoke\("sync_reset_cloud_data"/);
   assert.match(syncSource, /invoke\("auth_delete_account"/);
-});
-
-test("单一账户 UI 将云端时间恢复与本机恢复点明确区分，并在成功后清除旧本机数据", () => {
-  assert.match(indexSource, /id="account-cloud-recovery-status"/);
-  assert.match(indexSource, /仅恢复当前账号云端同步实体到指定时间；不是本机“数据恢复点”/);
-  assert.match(syncSource, /invoke\("sync_recovery_status"\)/);
-  assert.match(syncSource, /invoke\("sync_recovery_restore",\s*\{[\s\S]*?targetAt, dataGeneration: status\.dataGeneration, password/s);
-  assert.match(syncSource, /云端恢复已完成，正在清除此设备的旧同步数据…[\s\S]*?invoke\("clear_local_app_data"\)/);
-  assert.match(syncSource, /accountCloudRecoveryPasswordEl\.value = "";/);
+  assert.match(stylesSource, /\.account-data-section-cloud\s*\{/);
+  assert.match(stylesSource, /\.account-data-section-account\s*\{/);
+  assert.match(
+    syncSource,
+    /云端数据已清空，所有设备已退出登录；但此设备数据未清除/,
+  );
+  assert.match(syncSource, /账号和云端数据已删除；但此设备数据未清除/);
+  assert.doesNotMatch(indexSource, /恢复云端历史版本|account-cloud-recovery/);
+  assert.doesNotMatch(syncSource, /sync_recovery|CloudRecovery|cloudRecovery/);
+  assert.doesNotMatch(`${indexSource}\n${syncSource}`, /恢复版本/);
 });

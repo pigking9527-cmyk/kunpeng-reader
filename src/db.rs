@@ -9,8 +9,10 @@ mod metadata;
 mod migration;
 mod portable_package;
 mod schema;
+mod sync_commit;
 use entities::IncomingEntity;
-pub use entities::SyncEntity;
+pub use entities::{SyncEntity, SyncEntityManifest};
+use metadata::LocalSyncMutationClass;
 pub(crate) use metadata::SYNC_IDENTITY_VERIFIED_SCOPE_KEY;
 use migration::compact_legacy_database;
 #[cfg(test)]
@@ -53,6 +55,8 @@ pub(crate) const SUPPORTED_ENTITY_KINDS: &[&str] = &[
     "reader_palette_v1",
     "reader_palette_order_v1",
     "app_settings_v1",
+    "reading_handoff_v1",
+    "news_subscriptions_v1",
 ];
 
 pub(crate) fn is_supported_entity_kind(kind: &str) -> bool {
@@ -62,6 +66,7 @@ pub(crate) fn is_supported_entity_kind(kind: &str) -> bool {
 pub struct AppDb {
     conn: Connection,
     device_id: String,
+    sync_local_change_notifier: Option<std::sync::Arc<crate::app_state::SyncAutoScheduler>>,
 }
 
 #[cfg(test)]
@@ -105,6 +110,7 @@ impl AppDb {
         let mut database = Self {
             conn: Connection::open_in_memory().expect("open in-memory SQLite database"),
             device_id: "test-device".to_string(),
+            sync_local_change_notifier: None,
         };
         database
             .init()
@@ -159,6 +165,7 @@ impl AppDb {
         let mut db = Self {
             conn,
             device_id: String::new(),
+            sync_local_change_notifier: None,
         };
         db.init()?;
         db.device_id = db.ensure_device_id()?;
@@ -173,11 +180,47 @@ impl AppDb {
         self.device_id.clone()
     }
 
+    /// AppState installs this once per live SQLite connection.  It is an
+    /// in-process wake-up only; the actual pending generation is persisted in
+    /// metadata by the same transaction as each changed local entity.
+    pub(crate) fn set_sync_local_change_notifier(
+        &mut self,
+        notifier: std::sync::Arc<crate::app_state::SyncAutoScheduler>,
+    ) {
+        self.sync_local_change_notifier = Some(notifier);
+    }
+
+    fn notify_local_sync_change(&self) {
+        if let Some(notifier) = &self.sync_local_change_notifier {
+            notifier.note_local_entity_change();
+        }
+    }
+
     pub fn upsert_json_batch(&mut self, items: &[(String, String, Value)]) -> Result<(), String> {
+        self.upsert_json_batch_with_auto_schedule(items, true)
+    }
+
+    /// Used only while projecting a just-imported remote commit back into the
+    /// local runtime.  The entity write retains its normal LWW/dirty behavior,
+    /// but must not schedule a second network round trip caused solely by pull
+    /// or reconcile data.
+    pub(crate) fn upsert_json_batch_from_remote_projection(
+        &mut self,
+        items: &[(String, String, Value)],
+    ) -> Result<(), String> {
+        self.upsert_json_batch_with_auto_schedule(items, false)
+    }
+
+    fn upsert_json_batch_with_auto_schedule(
+        &mut self,
+        items: &[(String, String, Value)],
+        schedule_automatic_sync: bool,
+    ) -> Result<(), String> {
         let started = Instant::now();
         let now = now_millis();
         let device_id = self.device_id.clone();
         let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
+        let mut changed_kinds = Vec::new();
         {
             let mut statement = transaction
                 .prepare(
@@ -197,27 +240,60 @@ impl AppDb {
                 .map_err(|e| e.to_string())?;
             for (kind, id, value) in items {
                 let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
-                statement
+                let changed = statement
                     .execute(params![kind, id, json, now, device_id])
                     .map_err(|e| e.to_string())?;
+                if changed > 0 {
+                    changed_kinds.push(kind.as_str());
+                }
             }
         }
+        if schedule_automatic_sync && !changed_kinds.is_empty() {
+            let class = if changed_kinds.iter().all(|kind| {
+                matches!(
+                    *kind,
+                    "book_state_v2"
+                        | "reading_progress_v1"
+                        | "reading_data_v1"
+                        | "reading_statistics_v1"
+                        | "reading_bucket_v2"
+                )
+            }) {
+                LocalSyncMutationClass::Reading
+            } else {
+                LocalSyncMutationClass::Ordinary
+            };
+            Self::record_local_sync_entity_mutation_on(&transaction, class)?;
+        }
         transaction.commit().map_err(|e| e.to_string())?;
+        if schedule_automatic_sync && !changed_kinds.is_empty() {
+            self.notify_local_sync_change();
+        }
         log_db_operation("upsert_json_batch", started, items.len());
         Ok(())
     }
 
     #[allow(dead_code)]
-    pub fn soft_delete(&self, kind: &str, id: &str) -> Result<(), String> {
+    pub fn soft_delete(&mut self, kind: &str, id: &str) -> Result<(), String> {
         let started = Instant::now();
         let now = now_millis();
-        let changed = self
-            .conn
+        let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
+        let changed = transaction
             .execute(
                 "UPDATE entities SET deleted_at=?, updated_at=?, device_id=?, sync_version=sync_version+1, dirty=1 WHERE kind=? AND id=?",
                 params![now, now, self.device_id, kind, id],
             )
             .map_err(|e| e.to_string())?;
+        if changed > 0 {
+            Self::record_local_sync_entity_mutation_on(
+                &transaction,
+                LocalSyncMutationClass::Ordinary,
+            )?;
+        }
+        transaction.commit().map_err(|e| e.to_string())?;
+        if changed > 0 {
+            self.notify_local_sync_change();
+        }
         log_db_operation("soft_delete", started, changed);
         Ok(())
     }
@@ -292,118 +368,17 @@ impl AppDb {
                 count += 1;
             }
         }
+        if count > 0 {
+            Self::record_local_sync_entity_mutation_on(
+                &transaction,
+                LocalSyncMutationClass::Ordinary,
+            )?;
+        }
         transaction.commit().map_err(|e| e.to_string())?;
+        if count > 0 {
+            self.notify_local_sync_change();
+        }
         log_db_operation("import_package", started, items.len());
-        Ok(count)
-    }
-    /// Commit one push response atomically. `acknowledged` contains only the
-    /// exact local versions explicitly settled by the server; authoritative
-    /// conflict rows are merged before the transaction is committed.
-    pub fn commit_sync_push(
-        &mut self,
-        scope: &str,
-        acknowledged: &[SyncEntity],
-        authoritative: &[SyncEntity],
-    ) -> Result<u32, String> {
-        let started = Instant::now();
-        let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
-        Self::ensure_active_sync_scope_on(&transaction, scope)?;
-        {
-            let mut stmt = transaction
-                .prepare(
-                    "UPDATE entities SET dirty=0 WHERE kind=? AND id=? AND device_id=? AND sync_version=?",
-                )
-                .map_err(|e| e.to_string())?;
-            for item in acknowledged {
-                stmt.execute(params![
-                    item.kind,
-                    item.id,
-                    item.device_id,
-                    item.sync_version
-                ])
-                .map_err(|e| e.to_string())?;
-            }
-        }
-        Self::upsert_sync_acknowledgements(&transaction, scope, acknowledged)?;
-        let imported = Self::import_sync_entities_in_transaction(&transaction, authoritative)?;
-        Self::upsert_sync_acknowledgements(&transaction, scope, authoritative)?;
-        transaction.commit().map_err(|e| e.to_string())?;
-        log_db_operation(
-            "commit_sync_push",
-            started,
-            acknowledged.len() + authoritative.len(),
-        );
-        Ok(imported)
-    }
-
-    #[cfg(test)]
-    pub fn import_sync_entities(&mut self, items: &[SyncEntity]) -> Result<u32, String> {
-        let started = Instant::now();
-        let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
-        let count = Self::import_sync_entities_in_transaction(&transaction, items)?;
-        transaction.commit().map_err(|e| e.to_string())?;
-        log_db_operation("import_sync_entities", started, items.len());
-        Ok(count)
-    }
-
-    /// Import one pull page and advance its resume cursor in the same SQLite
-    /// transaction. If either step fails, both are rolled back and requesting
-    /// the same page again remains safe.
-    #[cfg(test)]
-    pub fn import_sync_page(
-        &mut self,
-        scope: &str,
-        items: &[SyncEntity],
-        next_cursor: &str,
-    ) -> Result<u32, String> {
-        self.import_sync_page_with_remote_app_settings_priority(scope, items, next_cursor, false)
-    }
-
-    /// Import one pull page while optionally giving the account's existing
-    /// software-settings entity priority. This is used only when an account is
-    /// first connected on this installation: WebViews may already have saved
-    /// their local defaults before the initial pull starts, but those defaults
-    /// must not win LWW over the account's established cloud preferences.
-    pub fn import_sync_page_with_remote_app_settings_priority(
-        &mut self,
-        scope: &str,
-        items: &[SyncEntity],
-        next_cursor: &str,
-        prefer_remote_app_settings: bool,
-    ) -> Result<u32, String> {
-        let started = Instant::now();
-        let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
-        Self::ensure_active_sync_scope_on(&transaction, scope)?;
-        let count = Self::import_sync_entities_in_transaction_with_remote_app_settings_priority(
-            &transaction,
-            items,
-            prefer_remote_app_settings,
-        )?;
-        Self::upsert_sync_acknowledgements(&transaction, scope, items)?;
-        let next_cursor = next_cursor.trim();
-        if !next_cursor.is_empty() {
-            Self::set_sync_cursor_on(&transaction, scope, next_cursor)?;
-        }
-        transaction.commit().map_err(|e| e.to_string())?;
-        log_db_operation("import_sync_page", started, items.len());
-        Ok(count)
-    }
-
-    /// Install authoritative entities returned by the server's inventory
-    /// reconciliation without changing the incremental pull cursor. The entity
-    /// rows and their exact server acknowledgements commit atomically.
-    pub fn import_reconciled_sync_entities(
-        &mut self,
-        scope: &str,
-        items: &[SyncEntity],
-    ) -> Result<u32, String> {
-        let started = Instant::now();
-        let transaction = self.conn.transaction().map_err(|e| e.to_string())?;
-        Self::ensure_active_sync_scope_on(&transaction, scope)?;
-        let count = Self::import_sync_entities_in_transaction(&transaction, items)?;
-        Self::upsert_sync_acknowledgements(&transaction, scope, items)?;
-        transaction.commit().map_err(|e| e.to_string())?;
-        log_db_operation("import_reconciled_sync_entities", started, items.len());
         Ok(count)
     }
 }
@@ -485,6 +460,18 @@ mod tests {
             .unwrap();
         db.upsert_json_batch(&row).unwrap();
         assert!(db.dirty_sync_entities().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_projection_write_does_not_schedule_an_automatic_sync() {
+        let mut db = memory_db();
+        db.upsert_json_batch_from_remote_projection(&[(
+            "vocab".to_string(),
+            "remote".to_string(),
+            json!({"word": "remote"}),
+        )])
+        .unwrap();
+        assert!(db.automatic_sync_due().unwrap().is_none());
     }
 
     #[test]

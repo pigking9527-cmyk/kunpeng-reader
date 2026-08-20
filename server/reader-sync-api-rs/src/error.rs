@@ -51,20 +51,14 @@ pub enum ApiError {
     RegistrationEmailRequired,
     #[error("registration email delivery is unavailable")]
     RegistrationUnavailable,
+    #[error("phone registration delivery is unavailable")]
+    PhoneRegistrationUnavailable,
+    #[error("daily SMS safety budget exceeded")]
+    SmsBudgetExceeded,
     #[error("rate limit exceeded")]
     RateLimited,
     #[error("synchronization quota exceeded")]
     SyncQuotaExceeded,
-    #[error("recovery confirmation is required")]
-    RecoveryConfirmationRequired,
-    #[error("recovery history is unavailable")]
-    RecoveryUnavailable,
-    #[error("recovery target is outside the retained window")]
-    RecoveryTargetOutOfRange,
-    #[error("recovery history is corrupt")]
-    RecoveryHistoryCorrupt,
-    #[error("recovery request exceeds the entity limit")]
-    RecoveryEntityLimit,
     #[error("invalid request")]
     InvalidRequest,
     #[error("database is unavailable")]
@@ -95,6 +89,7 @@ impl ApiError {
     #[must_use]
     pub fn response(self, context: RequestContext) -> Response {
         let (status, code, message, retry_after) = self.response_details();
+        metrics::counter!("reader_sync_api_errors_total", "code" => code).increment(1);
         let mut response = (
             status,
             Json(ErrorBody {
@@ -118,9 +113,6 @@ impl ApiError {
     #[allow(clippy::too_many_lines)]
     fn response_details(self) -> (StatusCode, &'static str, &'static str, Option<u64>) {
         if let Some(details) = self.registration_response_details() {
-            return details;
-        }
-        if let Some(details) = self.recovery_response_details() {
             return details;
         }
         match self {
@@ -194,12 +186,9 @@ impl ApiError {
             | Self::AccountConfirmationMismatch
             | Self::RegistrationEmailRequired
             | Self::RegistrationUnavailable
-            | Self::RateLimited
-            | Self::RecoveryConfirmationRequired
-            | Self::RecoveryUnavailable
-            | Self::RecoveryTargetOutOfRange
-            | Self::RecoveryHistoryCorrupt
-            | Self::RecoveryEntityLimit => unreachable!("handled above"),
+            | Self::PhoneRegistrationUnavailable
+            | Self::SmsBudgetExceeded
+            | Self::RateLimited => unreachable!("handled above"),
             Self::SyncQuotaExceeded => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "SYNC_QUOTA_EXCEEDED",
@@ -292,49 +281,23 @@ impl ApiError {
                 "registration email delivery is unavailable",
                 Some(5),
             )),
+            Self::PhoneRegistrationUnavailable => Some((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "PHONE_REGISTRATION_UNAVAILABLE",
+                "phone registration delivery is unavailable",
+                Some(5),
+            )),
+            Self::SmsBudgetExceeded => Some((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SMS_BUDGET_EXCEEDED",
+                "daily SMS safety budget exceeded",
+                None,
+            )),
             Self::RateLimited => Some((
                 StatusCode::TOO_MANY_REQUESTS,
                 "RATE_LIMITED",
                 "rate limit exceeded",
                 Some(60),
-            )),
-            _ => None,
-        }
-    }
-
-    fn recovery_response_details(
-        &self,
-    ) -> Option<(StatusCode, &'static str, &'static str, Option<u64>)> {
-        match self {
-            Self::RecoveryConfirmationRequired => Some((
-                StatusCode::BAD_REQUEST,
-                "RECOVERY_CONFIRMATION_REQUIRED",
-                "recovery requires explicit confirmation",
-                None,
-            )),
-            Self::RecoveryUnavailable => Some((
-                StatusCode::CONFLICT,
-                "RECOVERY_UNAVAILABLE",
-                "recovery history is unavailable",
-                None,
-            )),
-            Self::RecoveryTargetOutOfRange => Some((
-                StatusCode::BAD_REQUEST,
-                "RECOVERY_TARGET_OUT_OF_RANGE",
-                "recovery target is outside the retained window",
-                None,
-            )),
-            Self::RecoveryHistoryCorrupt => Some((
-                StatusCode::CONFLICT,
-                "RECOVERY_HISTORY_CORRUPT",
-                "recovery history integrity verification failed",
-                None,
-            )),
-            Self::RecoveryEntityLimit => Some((
-                StatusCode::CONFLICT,
-                "RECOVERY_ENTITY_LIMIT",
-                "recovery request exceeds the entity limit",
-                None,
             )),
             _ => None,
         }

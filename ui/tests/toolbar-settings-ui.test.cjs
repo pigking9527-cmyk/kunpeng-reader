@@ -5,10 +5,13 @@ const path = require("node:path");
 
 const root = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
-const source = fs.readFileSync(path.join(root, "toolbar-settings-ui.js"), "utf8");
+const source = fs.readFileSync(
+  path.join(root, "generated-ts", "toolbar-settings-ui.js"),
+  "utf8",
+);
 const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
-const shelf = fs.readFileSync(path.join(root, "shelf-ui.js"), "utf8");
-const annotations = fs.readFileSync(path.join(root, "reader-page-annotations.js"), "utf8");
+const shelf = fs.readFileSync(path.join(root, "generated-ts", "shelf-ui.js"), "utf8");
+const annotations = require("./reader-page-test-source.cjs").compact;
 
 test("main toolbar exposes a dedicated customizable action set", () => {
   for (const id of ["account", "search", "stats", "library", "news", "filter", "settings", "menu"]) {
@@ -32,16 +35,16 @@ test("library QA and news use distinct monochrome toolbar glyphs", () => {
 });
 
 test("toolbar settings keep settings visible and reflow neighboring actions", () => {
-  assert.match(source, /const ITEM_IDS = Object\.freeze\(\["account", "search", "stats", "library", "news", "filter", "settings", "menu"\]\)/);
+  assert.match(source, /const TOOLBAR_ITEM_IDS = Object\.freeze\(\[/);
   assert.match(source, /id !== "settings"/);
-  assert.match(source, /const leading = document\.getElementById\("toolbar-leading-action"\)/);
+  assert.match(source, /const leading = document\.getElementById\([\s\S]*?"toolbar-leading-action"/);
   assert.match(source, /\(index === 0 && leading \? leading : root\)\.append\(item\)/);
   assert.match(source, /item\.animate\(/);
   assert.match(source, /app_settings_sync_save/);
   assert.match(source, /account: \["账户", "登录、同步与账户管理"\]/);
-  assert.match(source, /toolbarContentOrder: CONTENT_IDS\.slice\(\)/);
+  assert.match(source, /toolbarContentOrder: TOOLBAR_CONTENT_IDS\.slice\(\)/);
   assert.match(source, /toolbarContentVisible: \["icon"\]/);
-  assert.match(source, /ensureToolbarButtonContent\(item\.dataset\.toolbarItem\)/);
+  assert.match(source, /if \(id\) ensureToolbarButtonContent\(id\)/);
   assert.match(source, /if \(!next\.size\)/);
   assert.match(styles, /\.toolbar-content-button\.toolbar-content-has-text/);
   assert.match(styles, /\.toolbar-action\.toolbar-user-hidden\s*\{\s*display:\s*none;/);
@@ -55,13 +58,19 @@ test("toolbar ordering uses pointer capture instead of unreliable native drag ev
   assert.match(source, /handle\.addEventListener\("pointermove"/);
   assert.match(source, /placeholder\.className = "toolbar-settings-placeholder"/);
   assert.match(source, /item\.style\.position = "fixed"/);
-  assert.match(source, /function animateListPlaceholder\(state, beforeNode\)/);
-  assert.match(source, /list\.insertBefore\(placeholder, beforeNode \|\| null\)/);
+  assert.match(source, /const animateListPlaceholder = \(state, beforeNode\) =>/);
+  assert.match(source, /list\.insertBefore\(placeholder, beforeNode\)/);
   assert.match(source, /item\.style\.transform = `translateY\(\$\{dy\}px\)`/);
   assert.match(source, /const bounds = list\?\.getBoundingClientRect\(\)/);
-  assert.match(source, /Math\.max\(bounds\.top, Math\.min\(maxTop, event\.clientY - state\.offsetY\)\)/);
+  assert.match(
+    source,
+    /Math\.max\([\s\S]*?bounds\.top,[\s\S]*?Math\.min\(maxTop, event\.clientY - state\.offsetY\)/,
+  );
   assert.match(source, /const bounds = contentList\?\.getBoundingClientRect\(\)/);
-  assert.match(source, /Math\.max\(bounds\.left, Math\.min\(maxLeft, event\.clientX - state\.offsetX\)\)/);
+  assert.match(
+    source,
+    /Math\.max\([\s\S]*?bounds\.left,[\s\S]*?Math\.min\(maxLeft, event\.clientX - state\.offsetX\)/,
+  );
   assert.match(styles, /\.toolbar-settings-placeholder\s*\{/);
   assert.match(source, /handle\.addEventListener\("pointerdown"/);
   assert.match(source, /toolbarContentOrder: contentListItems\(\)\.map/);
@@ -71,7 +80,7 @@ test("toolbar ordering uses pointer capture instead of unreliable native drag ev
 
 test("remaining reorder overlays are clamped to the bounds of their replacement lists", () => {
   assert.match(shelf, /const bounds = booklistBooks\.getBoundingClientRect\(\)/);
-  assert.match(annotations, /var bounds=list\.getBoundingClientRect\(\)/);
+  assert.match(annotations, /const bounds=list\.getBoundingClientRect\(\)/);
   for (const code of [shelf, annotations]) {
     assert.match(code, /Math\.max\(bounds\.top,\s*Math\.min\(maxTop,/);
   }

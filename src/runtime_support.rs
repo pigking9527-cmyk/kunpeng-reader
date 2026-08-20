@@ -25,8 +25,9 @@ pub(crate) const RES_BASE: &str = "reader://localhost";
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub(crate) const RES_BASE: &str = "http://reader.localhost";
 
-/// 公共发行构建可从仓库外的 `KUNPENG_DEFAULT_SYNC_URL` 注入 HTTPS 端点；
-/// 源码、自托管构建和未配置的本地开发仍要求用户显式填写。
+/// 公共发行构建可从仓库外的 `KUNPENG_DEFAULT_SYNC_URL` 注入 HTTPS 端点。
+/// 构建脚本还严格允许 `127.0.0.1` 的 HTTP 回环端点，供经加密本机隧道
+/// 连接的开发/恢复环境使用；任何公网 HTTP 地址都会在构建时被拒绝。
 pub(crate) const DEFAULT_SYNC_URL: &str = match option_env!("KUNPENG_DEFAULT_SYNC_URL") {
     Some(value) => value,
     None => "",
@@ -166,7 +167,11 @@ mod tests {
     #[test]
     fn now_ms_is_nonzero_and_resource_base_matches_platform() {
         assert!(now_ms() > 0);
-        assert!(DEFAULT_SYNC_URL.is_empty() || DEFAULT_SYNC_URL.starts_with("https://"));
+        assert!(
+            DEFAULT_SYNC_URL.is_empty()
+                || DEFAULT_SYNC_URL.starts_with("https://")
+                || DEFAULT_SYNC_URL.starts_with("http://127.0.0.1:")
+        );
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         assert_eq!(RES_BASE, "reader://localhost");
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]

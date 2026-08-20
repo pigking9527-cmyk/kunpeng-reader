@@ -110,6 +110,35 @@ impl SyncPullResponse {
     }
 }
 
+/// A compact, authenticated proof that a previously completed cursor is still
+/// at the server's high-water mark.  It is deliberately narrower than an
+/// inventory: callers must retain periodic full reconciliation as a repair
+/// path for a corrupted local manifest.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SyncCheckpointResponse {
+    pub(super) data_generation: i64,
+    cursor: i64,
+    server_cursor: i64,
+    caught_up: bool,
+}
+
+impl SyncCheckpointResponse {
+    /// Do not trust a syntactically valid response to prove more than the
+    /// exact request the client made.  In particular, a future/server bug must
+    /// not turn a different cursor or generation into a skipped pull.
+    pub(super) const fn proves_caught_up(
+        &self,
+        expected_generation: i64,
+        expected_cursor: i64,
+    ) -> bool {
+        self.caught_up
+            && self.data_generation == expected_generation
+            && self.cursor == expected_cursor
+            && self.server_cursor == expected_cursor
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SyncInventoryResponse {
@@ -131,8 +160,8 @@ pub(super) struct SyncManifestEntry {
     sync_version: i64,
 }
 
-impl From<&db::SyncEntity> for SyncManifestEntry {
-    fn from(entity: &db::SyncEntity) -> Self {
+impl From<&db::SyncEntityManifest> for SyncManifestEntry {
+    fn from(entity: &db::SyncEntityManifest) -> Self {
         Self {
             kind: entity.kind.clone(),
             id: entity.id.clone(),
@@ -183,7 +212,7 @@ fn update_inventory_text(hasher: &mut Sha256, value: &str) {
     hasher.update(bytes);
 }
 
-pub(super) fn sync_inventory_digest(entities: &[db::SyncEntity]) -> String {
+pub(super) fn sync_inventory_digest(entities: &[db::SyncEntityManifest]) -> String {
     let mut sorted = entities.iter().collect::<Vec<_>>();
     sorted.sort_by(|left, right| {
         left.kind
@@ -206,7 +235,10 @@ pub(super) fn sync_inventory_digest(entities: &[db::SyncEntity]) -> String {
         .collect()
 }
 
-pub(super) fn inventory_matches(local: &[db::SyncEntity], remote: &SyncInventoryResponse) -> bool {
+pub(super) fn inventory_matches(
+    local: &[db::SyncEntityManifest],
+    remote: &SyncInventoryResponse,
+) -> bool {
     local.len() == remote.entity_count
         && sync_inventory_digest(local).eq_ignore_ascii_case(&remote.inventory_digest)
 }
@@ -327,19 +359,17 @@ mod tests {
     #[test]
     fn inventory_digest_and_cursor_rules_are_deterministic() {
         let entities = vec![
-            db::SyncEntity {
+            db::SyncEntityManifest {
                 kind: "vocab".into(),
                 id: "zh:词".into(),
-                json: serde_json::json!({}),
                 updated_at: 1_700_000_000_100,
                 deleted_at: 1_700_000_000_200,
                 device_id: "device-b".into(),
                 sync_version: 7,
             },
-            db::SyncEntity {
+            db::SyncEntityManifest {
                 kind: "book_state_v2".into(),
                 id: "书-1".into(),
-                json: serde_json::json!({}),
                 updated_at: 1_700_000_000_000,
                 deleted_at: 0,
                 device_id: "device-a".into(),
@@ -431,6 +461,29 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn checkpoint_requires_an_exact_generation_and_cursor_echo() {
+        let checkpoint: SyncCheckpointResponse = serde_json::from_value(serde_json::json!({
+            "dataGeneration": 3,
+            "cursor": 42,
+            "serverCursor": 42,
+            "caughtUp": true
+        }))
+        .unwrap();
+        assert!(checkpoint.proves_caught_up(3, 42));
+        assert!(!checkpoint.proves_caught_up(4, 42));
+        assert!(!checkpoint.proves_caught_up(3, 41));
+
+        let contradictory: SyncCheckpointResponse = serde_json::from_value(serde_json::json!({
+            "dataGeneration": 3,
+            "cursor": 42,
+            "serverCursor": 43,
+            "caughtUp": true
+        }))
+        .unwrap();
+        assert!(!contradictory.proves_caught_up(3, 42));
     }
 
     #[test]

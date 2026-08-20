@@ -4,16 +4,25 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "shelf-ui.js"), "utf8");
-const rulesSource = fs.readFileSync(path.join(__dirname, "..", "shelf-ui-rules.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "shelf-ui.js"), "utf8");
+const rulesSource = fs.readFileSync(
+  path.join(__dirname, "..", "generated-ts", "shelf-ui-rules.js"),
+  "utf8",
+);
 const styles = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
-const settingsLayout = fs.readFileSync(path.join(__dirname, "..", "settings-layout-ui.js"), "utf8");
-const appShell = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
-const appI18n = fs.readFileSync(path.join(__dirname, "..", "app-i18n.js"), "utf8");
-const animationSettings = fs.readFileSync(path.join(__dirname, "..", "animation-settings-ui.js"), "utf8");
-const semanticSettings = fs.readFileSync(path.join(__dirname, "..", "semantic-ui.js"), "utf8");
-const organizationEditor = fs.readFileSync(path.join(__dirname, "..", "book-info-organization.js"), "utf8");
+const settingsLayout = fs.readFileSync(
+  path.join(__dirname, "..", "generated-ts", "settings-layout-ui.js"),
+  "utf8",
+);
+const appShell = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app.js"), "utf8");
+const appI18n = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app-i18n.js"), "utf8");
+const animationSettings = fs.readFileSync(
+  path.join(__dirname, "..", "generated-ts", "animation-settings-ui.js"),
+  "utf8",
+);
+const semanticSettings = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "semantic-ui.js"), "utf8");
+const organizationEditor = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "book-info-organization.js"), "utf8");
 
 test("common settings use a categorized wide layout with a live shelf preview", () => {
   assert.match(styles, /#fp-settings-modal \.modal-card\s*\{[^}]*width:\s*min\(920px,\s*calc\(100vw - 48px\)\);/s);
@@ -21,10 +30,10 @@ test("common settings use a categorized wide layout with a live shelf preview", 
   assert.match(html, /data-settings-section="basic"[\s\S]*data-settings-section="toolbar"[\s\S]*data-settings-section="shelf"[\s\S]*data-settings-section="reading"[\s\S]*data-settings-section="smart"[\s\S]*data-settings-section="data"/);
   assert.match(html, /data-settings-panel="basic"[\s\S]*data-settings-panel="toolbar"[^>]*hidden[\s\S]*data-settings-panel="shelf"[^>]*hidden[\s\S]*data-settings-panel="data"[^>]*hidden/);
   assert.match(html, /id="fp-shelf-preview-title"[\s\S]*id="fp-shelf-preview-progress"[\s\S]*id="fp-shelf-preview-rating"/);
-  assert.match(html, /src="settings-layout-ui\.js"/);
+  assert.match(html, /src="generated-ts\/settings-layout-ui\.js"/);
   assert.match(settingsLayout, /const STORAGE_KEY = "commonSettingsSectionV1"/);
-  assert.match(settingsLayout, /function activateSection\(id, persist = true\)/);
-  assert.match(settingsLayout, /function syncShelfPreview\(\)/);
+  assert.match(settingsLayout, /const activateSection = \(id, persist = true\) =>/);
+  assert.match(settingsLayout, /const syncShelfPreview = \(\) =>/);
   assert.doesNotMatch(html, /id="fp-settings-close"/);
   assert.doesNotMatch(html, /class="modal-head fp-settings-head"/);
   assert.match(styles, /\.fp-settings-content\s*\{[^}]*overflow-y:\s*auto/);
@@ -36,7 +45,7 @@ test("common settings navigation can collapse to icons with the reader-preferenc
   assert.match(html, /class="fp-settings-nav-icon"/);
   assert.match(html, /class="fp-settings-nav-label"/);
   assert.match(settingsLayout, /const NAV_COLLAPSED_KEY = "commonSettingsNavCollapsedV1"/);
-  assert.match(settingsLayout, /function applyNavState\(\)/);
+  assert.match(settingsLayout, /const applyNavState = \(\) =>/);
   assert.match(settingsLayout, /navToggle\?\.addEventListener\("click"/);
   assert.match(styles, /\.fp-settings-card\.nav-collapsed \.fp-settings-layout\s*\{[^}]*grid-template-columns:\s*62px/s);
   assert.match(styles, /\.fp-settings-card\.nav-collapsed \.fp-settings-nav-label\s*\{[^}]*clip-path:\s*inset\(50%\)/s);
@@ -80,16 +89,19 @@ test("all common-settings child pages share the compact detail design system", (
 test("book card clicks explicitly close main-window floaters", () => {
   const helper = source.match(/function closeShelfCardFloaters\(\)\s*\{([\s\S]*?)\n\}/);
   assert.ok(helper, "shelf floater closer must remain explicit");
-  assert.match(helper[1], /menuEl\.classList\.remove\("show"\)/);
-  assert.match(helper[1], /filterPanel\.classList\.remove\("show"\)/);
-  assert.match(helper[1], /closeAccountPanel\(\)/);
-  assert.match(helper[1], /closeSearch\(false\)/);
+  assert.match(helper[1], /menuElement\.classList\.remove\("show"\)/);
+  assert.match(helper[1], /filterPanelElement\.classList\.remove\("show"\)/);
+  assert.match(helper[1], /closeAccount\(\)/);
+  assert.match(helper[1], /closeShelfSearch\(false\)/);
 
   const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
   assert.match(card, /addEventListener\("click",[\s\S]*?closeShelfCardFloaters\(\)/);
   assert.match(card, /addEventListener\("dblclick",[\s\S]*?closeShelfCardFloaters\(\)/);
-  assert.match(card, /if \(selected\.size > 0\)[\s\S]*?toggleSelect\(b\.id, card\)/);
-  assert.match(card, /openTimer = setTimeout\([\s\S]*?if \(!selected\.size\) openBook\("single"\)/);
+  assert.match(card, /if \(e\.metaKey \|\| e\.ctrlKey \|\| selected\.size > 0\)[\s\S]*?toggleSelect\(b\.id, card\)/);
+  assert.doesNotMatch(card, /openTimer|220/);
+  assert.match(card, /if \(e\.metaKey \|\| e\.ctrlKey \|\| selected\.size > 0\)/);
+  assert.match(card, /if \(e\.detail > 1\) return;[\s\S]*?openBook\("single"\)/);
+  assert.match(card, /tauriApi\.invoke\("prewarm_book", \{ id: b\.id \}\)/);
   assert.match(card, /let selectionTimer = null/);
   assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?selectionTimer = setTimeout\([\s\S]*?toggleSelect\(b\.id, card\)/);
   assert.match(card, /selectionTimer = setTimeout\([\s\S]*?\}, 180\)/);
@@ -117,11 +129,11 @@ test("shelf covers cannot trigger native browser drag selection", () => {
 
 test("shelf assigns every cover URL and lets only non-first-screen images use native lazy loading", () => {
   const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
-  const i18n = fs.readFileSync(path.join(__dirname, "..", "app-i18n.js"), "utf8");
-  const coverRulesPosition = html.indexOf('src="shelf-cover-loading-rules.js"');
-  const shelfPosition = html.indexOf('src="shelf-ui.js"');
+  const i18n = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app-i18n.js"), "utf8");
+  const coverRulesPosition = html.indexOf('src="generated-ts/shelf-cover-loading-rules.js"');
+  const shelfPosition = html.indexOf('src="generated-ts/shelf-ui.js"');
   assert.match(source, /const DEFAULT_FIRST_SCREEN_COVER_COUNT = 24/);
-  assert.match(source, /const coverLoadingRules = global\.ReaderShelfCoverLoadingRules/);
+  assert.match(source, /const coverRulesCandidate = global\.ReaderShelfCoverLoadingRules/);
   assert.match(source, /function estimateFirstScreenCoverCount\(\)/);
   assert.match(source, /coverLoadingRules\.firstScreenCoverCount\(/);
   assert.match(card, /coverLoadingRules\.coverLoadPriority\(index, firstScreenCoverCount\)/);
@@ -150,7 +162,7 @@ test("shelf opening preference switches between single-click opening and double-
 });
 
 test("book information opens organization management on demand and right click opens no organizer", () => {
-  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app.js"), "utf8");
   const info = html.slice(html.indexOf('id="book-info-modal"'), html.indexOf('id="book-organization-modal"'));
   const manager = html.slice(html.indexOf('id="book-organization-modal"'), html.indexOf('id="booklist-modal"'));
   assert.doesNotMatch(info, /id="book-info-tags-manage"/);
@@ -159,25 +171,25 @@ test("book information opens organization management on demand and right click o
   assert.match(manager, /id="book-info-tags" class="book-info-organization-editor"/);
   assert.match(manager, /id="book-info-collections"[\s\S]*?class="book-info-organization-editor"/);
   assert.match(manager, /role="tablist"/);
-  assert.match(html, /src="book-info-panel\.js"[\s\S]*?src="book-info-organization\.js"/);
+  assert.match(html, /src="generated-ts\/book-info-panel\.js"[\s\S]*?src="generated-ts\/book-info-organization\.js"/);
   assert.match(app, /ReaderBookInfoPanel\.mount\([\s\S]*?prefix: "book-info"[\s\S]*?ReaderBookOrganizationUI\.init\(/);
   assert.doesNotMatch(html, /id="batch-tag-btn"|id="batch-collection-btn"|id="batch-organization-modal"|id="book-organizer-menu"/);
   assert.match(organizationEditor, /invoke\("set_book_organization"/);
   assert.match(organizationEditor, /invoke\("rename_book_organization"/);
   assert.match(organizationEditor, /invoke\("delete_book_organization"/);
   assert.match(organizationEditor, /openBooklist\?\.\(entry\.name\)/);
-  assert.match(organizationEditor, /function showInlineRename/);
+  assert.match(organizationEditor, /showInlineRename\s*=/);
   assert.match(organizationEditor, /remove\.textContent = "确认删除"/);
-  assert.match(organizationEditor, /function openManager\(field\)/);
+  assert.match(organizationEditor, /openManager\s*=\s*\(field\)/);
   assert.match(organizationEditor, /infoModal\?\.classList\.remove\("show"\)/);
-  assert.match(organizationEditor, /function closeManager\(\)[\s\S]*?infoModal\?\.classList\.add\("show"\)/);
+  assert.match(organizationEditor, /closeManager\s*=\s*\(\)[\s\S]*?infoModal\?\.classList\.add\("show"\)/);
   assert.match(organizationEditor, /renderSummary\(tagSummary, book\?\.tags\)/);
   assert.doesNotMatch(organizationEditor, /global\.prompt|global\.confirm/);
 });
 
 test("book information uses a compact identity, author row, organization controls and description layout", () => {
   const info = html.slice(html.indexOf('id="book-info-modal"'), html.indexOf('id="book-organization-modal"'));
-  const panel = fs.readFileSync(path.join(__dirname, "..", "book-info-panel.js"), "utf8");
+  const panel = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "book-info-panel.js"), "utf8");
   const panelStyles = fs.readFileSync(path.join(__dirname, "..", "book-info-panel.css"), "utf8");
   assert.match(info, /^id="book-info-modal"[\s\S]*?class="modal"[\s\S]*?><\/div>/);
   assert.match(panel, /id="\$\{ids\.cover\}" class="book-info-cover"/);
@@ -194,8 +206,8 @@ test("book information uses a compact identity, author row, organization control
 });
 
 test("book information keeps its cover current and opens shared related information above itself", () => {
-  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
-  const related = fs.readFileSync(path.join(__dirname, "..", "book-info-related.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app.js"), "utf8");
+  const related = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "book-info-related.js"), "utf8");
   assert.match(app, /window\.ReaderBookInfoRelated\.mount\(\{/);
   assert.match(app, /bookInfoRelated\.openSimilar\(currentInfoBookId, shelfUI\.getBook\(currentInfoBookId\)\)/);
   assert.match(app, /bookInfoRelated\.openTimeline\(currentInfoBookId\)/);
@@ -209,12 +221,12 @@ test("startup shelf can receive keyboard paging focus without stealing it on ref
   assert.match(source, /function focusShelf\(\)[\s\S]*?contentEl\.focus\(\{ preventScroll: true \}\)/);
   assert.match(source, /focusShelf,/);
   assert.match(html, /<div class="content" tabindex="-1">/);
-  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app.js"), "utf8");
   assert.match(app, /shelfUI\.render\(list\);[\s\S]*?requestAnimationFrame\(\(\) => shelfUI\.focusShelf\(\)\)/);
 });
 
 test("opening a book immediately updates recent-reading order without waiting for window focus", () => {
-  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app.js"), "utf8");
   const windows = fs.readFileSync(path.join(__dirname, "..", "..", "src", "window_commands.rs"), "utf8");
   assert.match(windows, /main\.emit\(\s*"shelf-book-read"/s);
   assert.match(windows, /"lastReadAt": last_read_at/);
@@ -222,29 +234,21 @@ test("opening a book immediately updates recent-reading order without waiting fo
   assert.match(app, /shelfUI\.updateBook\(String\(e\?\.payload\?\.id \|\| ""\), \{ last_read_at: Number\(e\?\.payload\?\.lastReadAt \|\| 0\) \}\)/);
 });
 
-test("reader close keeps its transition marked until the old window unregisters", () => {
+test("reader close caches the same book and safely rebuilds for another book", () => {
   const windows = fs.readFileSync(path.join(__dirname, "..", "..", "src", "window_commands.rs"), "utf8");
-  assert.match(windows, /CLOSING_READER_WINDOWS/);
-  assert.match(windows, /WindowEvent::CloseRequested[\s\S]*?set_reader_window_closing\(&event_label, true\)/);
-  assert.match(windows, /WindowEvent::Destroyed[\s\S]*?不在后台按标签轮询并清 closing/);
-  assert.match(windows, /else if reader_window_is_closing\(&label\)[\s\S]*?already_unregistered/);
-  assert.doesNotMatch(windows, /fn clear_reader_closing_after_unregister/);
-  assert.match(windows, /open_wait[\s\S]*?while app\.get_webview_window\(&label\)\.is_some\(\)[\s\S]*?open_build/);
-  assert.match(windows, /force_destroy[\s\S]*?stale_window\.destroy\(\)/);
   const closeCommand = windows.slice(windows.indexOf("pub(crate) fn main_window_close"), windows.indexOf("pub(crate) fn main_window_start_dragging"));
-  assert.match(closeCommand, /set_reader_window_closing\(window\.label\(\), true\)[\s\S]*?window\.close\(\)/);
+  assert.match(closeCommand, /update_reader_geom[\s\S]*?window\.hide\(\)/);
+  assert.match(closeCommand, /hidden_cached/);
+  assert.match(windows, /reader-switch-request/);
+  assert.match(windows, /pub\(crate\) fn complete_reader_switch[\s\S]*?window\.destroy\(\)[\s\S]*?ensure_reader_window\(&app, &state, id_num\)/);
+  assert.doesNotMatch(windows, /window\.navigate\(reader_url\)/);
+  assert.match(windows, /WindowEvent::CloseRequested \{ api, \.\. \}[\s\S]*?api\.prevent_close\(\)[\s\S]*?reader-hide-request/);
   assert.match(windows, /fn activate_shelf_after_reader_close[\s\S]*?is_visible[\s\S]*?unminimize[\s\S]*?set_focus/);
   assert.match(windows, /main\.as_ref\(\)\.set_focus\(\)/);
-  assert.match(windows, /fn schedule_shelf_activation_after_reader_close[\s\S]*?get_webview_window\(&label\)[\s\S]*?run_on_main_thread/);
-  assert.match(windows, /WindowEvent::CloseRequested[\s\S]*?activate_shelf_after_reader_close\(&event_app\)[\s\S]*?WindowEvent::Destroyed/);
-  assert.match(windows, /WindowEvent::Destroyed[\s\S]*?schedule_shelf_activation_after_reader_close\(&event_app, &event_label\)/);
   assert.match(windows, /mod windows_activation[\s\S]*?GetForegroundWindow[\s\S]*?SetForegroundWindow/);
   assert.match(windows, /focus_confirmed[\s\S]*?"focused"[\s\S]*?focus_requested[\s\S]*?"requested"/);
   assert.match(windows, /"focus_restore"/);
-  assert.doesNotMatch(windows, /force_windows_foreground|focus_main_window|finish_reader_window_close|prevent_close|Duration::from_millis\(80\)|Duration::from_millis\(1200\)/);
   assert.match(windows, /reader-window-trace/);
-  assert.match(windows, /READER_CLOSE_STARTED/);
-  assert.match(windows, /WindowEvent::Destroyed[\s\S]*?take_reader_close_elapsed\(&event_label\)/);
 });
 
 test("account overview makes clear that book source files stay local", () => {
@@ -252,7 +256,7 @@ test("account overview makes clear that book source files stay local", () => {
 });
 
 test("book information displays persisted model tags with the backend field name", () => {
-  const app = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app.js"), "utf8");
   assert.doesNotMatch(html, /<script>\s*window\.ReaderBookInfoPanel\.mount/s);
   assert.ok(app.indexOf("const bookInfoPanel = window.ReaderBookInfoPanel.mount(") < app.indexOf("const bookOrganizationUI = window.ReaderBookOrganizationUI.init("));
   assert.match(app, /bookOrganizationUI\.open\(currentInfoBookId, m\)/);
@@ -294,8 +298,8 @@ test("new shelf sorting uses reading duration, real file size and progress", () 
   assert.match(sorter, /case "reading-time":[\s\S]*reading_seconds/);
   assert.match(sorter, /case "size":[\s\S]*bookFileSizes/);
   assert.match(sorter, /case "progress":[\s\S]*\.progress/);
-  assert.match(source, /invoke\("book_file_sizes"\)/);
-  assert.match(source, /rules\.sortBooks\(list, \{ bookFileSizes, sortKey \}\)/);
+  assert.match(source, /tauriApi\.invoke\("book_file_sizes"\)/);
+  assert.match(source, /shelfRules\.sortBooks\(list, \{ bookFileSizes, sortKey \}\)/);
 });
 
 test("book organization uses book information controls and the existing funnel filters", () => {
@@ -320,12 +324,12 @@ test("book organization uses book information controls and the existing funnel f
   assert.match(styles, /\.fp-choice-clear/);
   const opener = source.match(/function openOrganizationFilter\([\s\S]*?\n\}/);
   assert.ok(opener, "organization picker opener must exist");
-  assert.ok(opener[0].indexOf("positionOrganizationFilter(anchor)") < opener[0].indexOf('filterPanel.classList.remove("show")'), "must capture the trigger position before hiding its panel");
-  assert.match(opener[0], /organizationFilterReturnToPanel = filterPanel\.classList\.contains\("show"\)/);
+  assert.ok(opener[0].indexOf("positionOrganizationFilter(anchor)") < opener[0].indexOf('filterPanelElement.classList.remove("show")'), "must capture the trigger position before hiding its panel");
+  assert.match(opener[0], /organizationFilterReturnToPanel = filterPanelElement\.classList\.contains\("show"\)/);
   const closer = source.match(/function closeOrganizationFilter\(\)\s*\{([\s\S]*?)\n\}/);
   assert.ok(closer, "organization picker closer must exist");
   assert.match(closer[1], /requestFrame\(\(\) =>/);
-  assert.match(closer[1], /filterPanel\.classList\.add\("show"\)/);
+  assert.match(closer[1], /filterPanelElement\.classList\.add\("show"\)/);
   assert.match(styles, /\.book-info-organization-editor/);
   assert.match(styles, /\.organization-filter-card/);
   assert.match(styles, /\.fp-org-row/);
@@ -335,8 +339,8 @@ test("organization match mode applies to every selected tag and collection", () 
   const context = { window: null };
   context.window = context;
   vm.runInNewContext(rulesSource, context);
-  assert.match(source, /const organizationName = rules\.organizationName/);
-  assert.match(source, /rules\.matchesOrganizationSelection\(book, tagFilter, collectionFilter, organizationMatchMode\)/);
+  assert.match(source, /const organizationName = shelfRules\.organizationName/);
+  assert.match(source, /shelfRules\.matchesOrganizationSelection\(book, tagFilter, collectionFilter, organizationMatchMode\)/);
   const book = { tags: ["古文"], collections: ["历史"] };
   const tags = new Set(["古文", "历史著作"]);
   const collections = new Set(["历史", "武侠小说"]);
@@ -423,9 +427,9 @@ test("shelf scrollbar geometry maps content ratios and pointer movement without 
     }),
     1800,
   );
-  assert.match(source, /rules\.scrollbarGeometry\s*\?/);
-  assert.match(source, /rules\.scrollbarTrackScrollTop\s*\?/);
-  assert.match(source, /rules\.scrollbarDragScrollTop\s*\?/);
+  assert.match(source, /shelfRules\.scrollbarGeometry\s*\?/);
+  assert.match(source, /shelfRules\.scrollbarTrackScrollTop\s*\?/);
+  assert.match(source, /shelfRules\.scrollbarDragScrollTop\s*\?/);
 });
 
 test("shelf select-all ignores the current search filter and batch-removes the whole library", async () => {
@@ -490,7 +494,7 @@ test("shelf select-all ignores the current search filter and batch-removes the w
     "shelf", "empty", "shelf-scrollbar", "shelf-scrollbar-thumb", "filter-btn", "filter-stars",
     "set-cover-prog", "set-cover-rating", "set-cover-title", "grid-cols-default", "grid-cols-value",
     "grid-cols-dec", "grid-cols-inc", "del-group", "del-btn", "book-info-btn", "del-cancel",
-    "mi-selectall", "mi-random",
+    "mi-selectall", "mi-random", "booklist-description", "booklist-books",
   ];
   const elements = new Map(ids.map((id) => [id, new FakeElement()]));
   const content = new FakeElement();
@@ -513,6 +517,7 @@ test("shelf select-all ignores the current search filter and batch-removes the w
   const context = {
     addEventListener() {},
     clearTimeout,
+    HTMLElement: FakeElement,
     setTimeout,
   };
   context.window = context;

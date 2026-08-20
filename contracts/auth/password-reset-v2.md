@@ -37,7 +37,7 @@
 }
 ```
 
-`newPassword` 长度为 12–1024 个 UTF-8 字节；`installationId` 为当前安装的稳定随机 ID，长度最多 128；`deviceName` 可选、最多 64 字节，仅用于设备展示。
+`username` 长度为 3–32 个 ASCII 字符，只允许字母、数字、`_` 和 `-`。`newPassword` 长度为 8–32 个 Unicode 字符；`installationId` 为当前安装的稳定随机 ID，长度最多 128；`deviceName` 可选、最多 64 字节，仅用于设备展示。
 
 成功返回 `200`，形状与登录响应一致，并携带**当前安装**的新会话 Token：
 

@@ -40,7 +40,6 @@ aggregate_snapshot() {
       (SELECT count(*) FROM auth_sessions_v4),
       (SELECT count(*) FROM sync_entities_v4),
       (SELECT count(*) FROM sync_assets_v4),
-      (SELECT count(*) FROM sync_entity_history_v4),
       (SELECT count(*) FROM feedback_v4);" \
     | tr -d '[:space:]'
 }

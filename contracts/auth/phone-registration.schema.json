@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kunpeng-reader.invalid/auth/phone-registration.schema.json",
+  "title": "Kunpeng Reader phone registration API objects",
+  "oneOf": [
+    { "$ref": "#/$defs/startRequest" },
+    { "$ref": "#/$defs/startResponse" },
+    { "$ref": "#/$defs/confirmRequest" }
+  ],
+  "$defs": {
+    "username": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 32,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "phone": {
+      "type": "string",
+      "pattern": "^\\+[1-9][0-9]{7,14}$"
+    },
+    "installationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "startRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["username", "phone", "installationId"],
+      "properties": {
+        "username": { "$ref": "#/$defs/username" },
+        "phone": { "$ref": "#/$defs/phone" },
+        "installationId": { "$ref": "#/$defs/installationId" }
+      }
+    },
+    "startResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "expiresIn", "requestId"],
+      "properties": {
+        "ok": { "const": true },
+        "expiresIn": { "const": 300 },
+        "requestId": { "type": "string", "format": "uuid" }
+      }
+    },
+    "confirmRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["username", "phone", "code", "password", "installationId"],
+      "properties": {
+        "username": { "$ref": "#/$defs/username" },
+        "phone": { "$ref": "#/$defs/phone" },
+        "code": { "type": "string", "pattern": "^[0-9]{6}$" },
+        "password": { "type": "string", "minLength": 8, "maxLength": 32 },
+        "installationId": { "$ref": "#/$defs/installationId" },
+        "deviceName": { "type": "string", "maxLength": 64 }
+      }
+    }
+  }
+}

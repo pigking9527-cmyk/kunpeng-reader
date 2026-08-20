@@ -148,3 +148,14 @@ export {
   type WindowControls,
   type WindowResizeDirection,
 } from "./window-controls.js";
+
+export {
+  dialogsFromTauriGlobal,
+  type ConfirmDialogOptions,
+  type DialogFilter,
+  type DialogKind,
+  type MessageDialogOptions,
+  type OpenDialogOptions,
+  type SaveDialogOptions,
+  type TauriDialogs,
+} from "./dialogs.js";

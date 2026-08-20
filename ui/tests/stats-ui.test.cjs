@@ -5,8 +5,8 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const uiDir = path.resolve(__dirname, "..");
-const statsSource = fs.readFileSync(path.join(uiDir, "stats-ui.js"), "utf8");
-const statsRulesSource = fs.readFileSync(path.join(uiDir, "stats-rules.js"), "utf8");
+const statsSource = fs.readFileSync(path.join(uiDir, "generated-ts", "stats-ui.js"), "utf8");
+const statsRulesSource = fs.readFileSync(path.join(uiDir, "generated-ts", "stats-rules.js"), "utf8");
 const indexSource = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
 const stylesSource = fs.readFileSync(path.join(uiDir, "styles.css"), "utf8");
 
@@ -58,7 +58,7 @@ test("stats UI uses an injected command boundary and keeps range payloads", asyn
     hours: new Array(24).fill(0),
     hours_words: new Array(24).fill(0),
   };
-  const context = {};
+  const context = { localStorage: storage, requestAnimationFrame: (callback) => callback() };
   context.window = context;
   vm.runInNewContext(statsRulesSource, context);
   vm.runInNewContext(statsSource, context);
@@ -88,14 +88,17 @@ test("stats UI uses an injected command boundary and keeps range payloads", asyn
 });
 
 test("stats and sync APIs load before app.js initializes them", () => {
-  const syncPosition = indexSource.indexOf('src="sync-ui.js"');
-  const rulesPosition = indexSource.indexOf('src="stats-rules.js"');
-  const statsPosition = indexSource.indexOf('src="stats-ui.js"');
-  const appPosition = indexSource.indexOf('src="app.js"');
+  const syncPosition = indexSource.indexOf('src="generated-ts/sync-ui.js"');
+  const rulesPosition = indexSource.indexOf('src="generated-ts/stats-rules.js"');
+  const statsPosition = indexSource.indexOf('src="generated-ts/stats-ui.js"');
+  const searchPosition = indexSource.indexOf('src="generated-ts/search-ui.js"');
+  const appPosition = indexSource.indexOf('src="generated-ts/app.js"');
   assert.ok(syncPosition >= 0 && syncPosition < appPosition);
   assert.ok(rulesPosition >= 0 && rulesPosition < statsPosition);
   assert.ok(statsPosition >= 0 && statsPosition < appPosition);
-  assert.match(statsSource, /global\.ReaderStatsUI = Object\.freeze/);
+  assert.ok(searchPosition >= 0 && searchPosition < appPosition, "search API must load before app.js binds closeSearch/hideHistory");
+  assert.match(statsSource, /const publicApi = Object\.freeze/);
+  assert.match(statsSource, /global\.ReaderStatsUI = publicApi/);
 });
 
 test("read books render as one clipped cover row ordered by reading duration", () => {
@@ -115,7 +118,8 @@ test("stats show a loading state immediately instead of a blank panel", () => {
 });
 
 test("stats navigation stays between the first reading day and today", () => {
-  assert.match(statsSource, /const statCalendarRules = global\.ReaderStatsRules/);
+  assert.match(statsSource, /const statsRulesCandidate = global\.ReaderStatsRules/);
+  assert.match(statsSource, /const statCalendarRules = statsRulesCandidate/);
   assert.match(statsSource, /statCalendarRules\.range\(statScope, statAnchor\)/);
   assert.match(statsSource, /statCalendarRules\.steppedAnchor\(statScope, statAnchor, direction\)/);
   assert.match(statsSource, /let firstReadingDay = null;/);
@@ -151,7 +155,7 @@ test("stats settings persist three live heatmap palettes", () => {
   assert.doesNotMatch(indexSource, /data-i18n="statsVisibleItems"/);
   assert.doesNotMatch(indexSource, /<strong[^>]*data-i18n="heatmapColor"/);
   assert.match(statsSource, /STAT_HEATMAP_THEME_KEY = "readingStatsHeatmapTheme"/);
-  assert.match(statsSource, /STAT_HEATMAP_THEMES = new Set\(\["green", "blue", "orange"\]\)/);
+  assert.match(statsSource, /STAT_HEATMAP_THEMES = [^;]*new Set\(\["green", "blue", "orange"\]\)/);
   assert.match(statsSource, /statsModal\.dataset\.heatmapTheme = statHeatmapTheme/);
   assert.match(statsSource, /localStorage\.setItem\(STAT_HEATMAP_THEME_KEY, statHeatmapTheme\)/);
   assert.match(stylesSource, /#stats-modal\[data-heatmap-theme="blue"\]/);

@@ -34,6 +34,10 @@ X-Sync-Protocol-Version: 5
 reconcile、密钥状态/重置、数据重置、资产以及账户安全/用量表面，并以 v5 header、请求
 体和响应语义完成端到端验证。单独存在的 push/pull 路由不足以宣布 v5 就绪。
 
+`GET /v1/sync/checkpoint` 是可选的会话级轻量确认：无待上传变更且完成上次 pull 的客户端
+可用它比较 `dataGeneration` 与精确 cursor，命中时跳过本轮 pull/inventory/reconcile。它不能替代
+每小时一次的完整清单修复，详细请求、响应和回退规则见 [`sync-checkpoint-v1.md`](sync-checkpoint-v1.md)。
+
 账户安全还包括经过认证的邮箱绑定与换绑；其精确 route、挑战和短时授权码边界见
 [`../auth/email-binding-v1.md`](../auth/email-binding-v1.md)。它们位于 `/v1/auth/*`，不是
 `/v1/sync/*`，因此不发送同步协议 header。

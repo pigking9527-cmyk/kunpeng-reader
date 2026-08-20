@@ -15,6 +15,14 @@ export KUNPENG_SYNC_SMTP_TLS_MODE='starttls' # 或 implicit（通常为 465）
 export KUNPENG_SYNC_SMTP_FROM='鲲鹏阅读器 <noreply@example.com>'
 export KUNPENG_SYNC_SMTP_USERNAME='...'
 export KUNPENG_SYNC_SMTP_PASSWORD='...'
+# 可选手机号注册：必须整组配置；模板变量顺序为“验证码、有效分钟数”
+export KUNPENG_SYNC_TENCENT_SMS_SECRET_ID='...'
+export KUNPENG_SYNC_TENCENT_SMS_SECRET_KEY='...'
+export KUNPENG_SYNC_TENCENT_SMS_SDK_APP_ID='...'
+export KUNPENG_SYNC_TENCENT_SMS_SIGN_NAME='已审核签名正文'
+export KUNPENG_SYNC_TENCENT_SMS_TEMPLATE_ID='已审核模板 ID'
+export KUNPENG_SYNC_TENCENT_SMS_REGION='ap-guangzhou'
+export KUNPENG_SYNC_TENCENT_SMS_DAILY_SEND_LIMIT='100'
 # 仅当同机反向代理覆盖写入 X-Real-IP 时开启
 export KUNPENG_SYNC_TRUST_LOOPBACK_PROXY_HEADERS='1'
 cargo run --manifest-path server/reader-sync-api-rs/Cargo.toml
@@ -70,6 +78,33 @@ server/reader-sync-api-rs/scripts/test-postgres-backup-restore-rehearsal.sh
 server/reader-sync-api-rs/scripts/test-rehearsal-tools.sh
 ```
 
+### 容量压测（一键运行）
+
+容量压测始终针对隔离、可销毁的 v5 PostgreSQL 测试服务，而不是正式服务。将部署目标、
+至少 2048 个独立测试账户的临时令牌文件和远程监控脚本路径保存在仓库外的私有环境变量后，
+压测机只需运行：
+
+```bash
+server/reader-sync-api-rs/scripts/run-capacity-test.sh --short
+server/reader-sync-api-rs/scripts/run-capacity-test.sh --full
+```
+
+`--short` 固定为每个阶段 30 秒（总计 330 秒），适合确认最近改动；`--full` 固定执行
+20 分钟的 5、75、150、200、250、300、350、400、450、500、25 并发曲线。运行器先在
+测试服务主机启动 CPU/RSS/可用内存采样，再从独立压测机以 k6 保活连接运行请求混合，并保存
+P50/P95/P99、状态和失败类别；本机 k6 的 CPU/RSS 也单独采样。每阶段都会原子更新 probe
+报告，因此链路中断不会丢失已完成阶段。
+
+默认目标应是 SSH localhost 隧道。只有测试端口已被云防火墙限制为压测机当前公网 `/32`
+时，才设置 `KUNPENG_CAPACITY_ALLOW_EXTERNAL_TARGET=1` 使用直连；该端口不得进入反向代理
+或改成全网开放。所需环境变量及安全边界可由 `run-capacity-test.sh --help` 查看，脚本不包含
+任何地址、数据库连接串或凭据。
+
+开发测试服务还提供不发送负载的 `--diagnose`，用于读取脱敏的并发/描述符/监听队列与
+硬件配置；`--tune-capacity-host`、`--install-capacity-build-toolchain` 和
+`--deploy-capacity-candidate` 仅接受名字显式标识为可销毁测试服务的目标。后两者用于把当前
+本地服务端源码构建为测试候选，绝不是正式发布或切流机制。
+
 获批的隔离 PostgreSQL 环境还可执行逻辑备份/恢复演练。脚本只接受两个不同的
 `reader_sync_rust_test_*` 数据库和仓库外私有临时目录；它从不回显连接串，完成后删除
 临时 dump，并仅比较协议版本与关键表的行数汇总：
@@ -117,16 +152,18 @@ PostgreSQL/反代/TLS 演练。
   v5 最小 push/pull、符合 `contracts/auth/registration-v2.md` 的两阶段注册、受当前会话授权的
   登录密码修改（保留当前会话、撤销其他会话）、符合 `contracts/auth/password-reset-v2.md` 的
   已验证邮箱密码找回（单次挑战、撤销所有旧会话并为当前安装签发新会话）、邮件
-  outbox 和强制 TLS SMTP 投递 worker（支持隐式 TLS 与 STARTTLS）。SMTP 未配置时注册入口明确不可用；注册限流键
-  HMAC 后持久化，同步执行 25 MiB 总量及每日 10 MiB/3000 实体配额；匿名 `POST /v1/feedback`
+  outbox 和强制 TLS SMTP 投递 worker（支持隐式 TLS 与 STARTTLS）。SMTP 未配置时邮箱注册
+  明确不可用；注册限流键 HMAC 后持久化。另实现可选的手机两阶段注册：只接受 E.164 号码，通过服务端腾讯云
+  TC3-HMAC-SHA256 短信适配器投递，供应商接受前不能确认；完整号码和验证码只存在于短时
+  outbox，长期只保存 keyed HMAC 摘要及末四位，并有手机号/IP/网段/安装 ID/全局限流和每日
+  费用熔断。短信配置缺失时手机号入口 fail closed，不影响邮箱注册。同步执行 25 MiB 总量及
+  每日 25 MiB/10,000 实体上传配额；拉取和新设备恢复下载不计入该额度。匿名 `POST /v1/feedback`
   使用持久化限流与 PostgreSQL 收件箱，严格校验契约中的图片和可选 Bug JSON 附件，并返回
   `acceptedAttachments`。反馈不会复用注册 SMTP 配置，因此当前响应始终明确 `emailed: false`；
   `POST /v1/sync/data/reset` 会在同一 PostgreSQL 事务中复核当前密码、递增数据世代、清空 v5
-  同步实体/收据/当日配额和背景资产并撤销所有会话；背景资产使用认证的、最多 10 MiB 的
-  顺序 1 MiB 分块上传与 Range 下载，服务端验证 SHA-256 并将其计入账户总量和每日写入配额。
-- 已实现：认证的恢复历史状态与确认恢复；只对实际接受的非密钥包实体写入压缩完整版本，
-  保留 90 天历史和每实体窗口前锚点。恢复会生成必要墓碑、递增数据世代并撤销全部会话。
-  该服务仍未部署，生产前须在受保护的 PostgreSQL 测试库完成端到端演练。
-- v5 只部署到全新数据库；不导入旧账户、会话、实体、恢复历史或资产。既有存储对象保留
+  同步实体/收据/当日配额和背景资产并撤销所有会话；背景资产使用认证的、最多 5 MiB 的
+  顺序 1 MiB 分块上传与 Range 下载，服务端验证 SHA-256 并将其计入账户总量和每日写入配额。主题删除后，未被任何活动主题引用的资产延迟七天回收。
+- 云端历史版本恢复已移除；服务端不保存实体版本历史，也不提供恢复状态或恢复接口。
+- v5 只部署到全新数据库；不导入旧账户、会话、实体或资产。既有存储对象保留
   `*_v4` 名称，因为本次只升级协议门禁，不改变载荷。正式
   `/v1/auth/*` 与 `/v1/sync/*` 已切到 Rust，旧无前缀接口只保留为短期回滚边界。

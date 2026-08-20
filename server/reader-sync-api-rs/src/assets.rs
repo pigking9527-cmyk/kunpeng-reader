@@ -10,19 +10,178 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use metrics::counter;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::FromRow;
+use sqlx::{FromRow, Postgres, Transaction};
+use std::time::Duration;
+use tokio::{
+    task::JoinHandle,
+    time::{MissedTickBehavior, interval},
+};
 use utoipa::ToSchema;
 
-use crate::{auth::authenticate, error::ApiError, middleware::RequestContext, state::AppState};
+use crate::{
+    account_mutation, auth::authenticate, error::ApiError, middleware::RequestContext,
+    state::AppState, sync::storage_usage_bytes,
+};
 
-const MAX_ASSET_BYTES: i64 = 10 * 1024 * 1024;
+const MAX_NEW_ASSET_BYTES: i64 = 5 * 1024 * 1024;
 const MAX_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_ASSETS_PER_ACCOUNT: i64 = 10;
 const ACCOUNT_STORAGE_QUOTA_BYTES: i64 = 25 * 1024 * 1024;
-const DAILY_WRITE_QUOTA_BYTES: i64 = 10 * 1024 * 1024;
+const DAILY_WRITE_QUOTA_BYTES: i64 = 25 * 1024 * 1024;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const ORPHAN_GRACE_MS: i64 = 7 * DAY_MS;
+const ORPHAN_RECLAIM_INTERVAL: Duration = Duration::from_hours(1);
+const ORPHAN_RECLAIM_ACCOUNT_BATCH: i64 = 100;
+const PUSH_RECEIPT_RECLAIM_INTERVAL: Duration = Duration::from_mins(5);
+
+fn orphan_cutoff(now: i64) -> i64 {
+    now.saturating_sub(ORPHAN_GRACE_MS).max(0)
+}
+
+/// Reconciles one account inside the maintenance worker.  A palette deliberately
+/// uploads its immutable image before publishing its reference, so this work
+/// must not run in asset initialization or the foreground push transaction.
+async fn reconcile_orphaned_assets(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    now: i64,
+) -> Result<u64, ApiError> {
+    let updated = sqlx::query(
+        "UPDATE sync_assets_v4 AS asset SET orphaned_at = CASE \
+         WHEN EXISTS (SELECT 1 FROM sync_entities_v4 AS entity \
+             WHERE entity.user_id=asset.user_id \
+               AND entity.kind='reader_palette_v1' \
+               AND entity.deleted_at=0 \
+               AND entity.envelope->'payload'->>'backgroundAssetId'=asset.asset_id) \
+             THEN 0 \
+         WHEN asset.orphaned_at=0 THEN $2 \
+         ELSE asset.orphaned_at END \
+         WHERE asset.user_id=$1",
+    )
+    .bind(user_id)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| ApiError::DatabaseUnavailable)?
+    .rows_affected();
+    let deleted = sqlx::query(
+        "DELETE FROM sync_assets_v4 \
+         WHERE user_id=$1 AND orphaned_at<>0 AND orphaned_at <= $2",
+    )
+    .bind(user_id)
+    .bind(orphan_cutoff(now))
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| ApiError::DatabaseUnavailable)?
+    .rows_affected();
+    // `updated` is intentionally not exported separately because it includes
+    // harmless re-confirmations. It remains useful here as a sanity check that
+    // the maintenance transaction did inspect the account without exposing an
+    // account or asset identifier in metrics.
+    let _ = updated;
+    Ok(deleted)
+}
+
+/// Runs a single bounded maintenance loop.  Receipt cleanup and orphan
+/// reconciliation never run in a foreground sync transaction.  Failed work is
+/// left untouched and retried on a later tick; account identifiers and asset
+/// metadata are deliberately never logged or used as metric labels.
+pub(crate) fn spawn_orphan_reclaimer(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut receipt_ticks = interval(PUSH_RECEIPT_RECLAIM_INTERVAL);
+        receipt_ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut orphan_ticks = interval(ORPHAN_RECLAIM_INTERVAL);
+        orphan_ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = receipt_ticks.tick() => reclaim_expired_push_receipts(&state).await,
+                _ = orphan_ticks.tick() => reclaim_orphaned_assets(&state).await,
+            }
+        }
+    })
+}
+
+async fn reclaim_expired_push_receipts(state: &AppState) {
+    match crate::sync::prune_expired_push_receipts(&state.pool).await {
+        Ok(deleted) => {
+            counter!("reader_sync_background_maintenance_runs_total", "job" => "push_receipts", "outcome" => "success").increment(1);
+            counter!("reader_sync_background_maintenance_items_total", "job" => "push_receipts")
+                .increment(deleted);
+        }
+        Err(_) => {
+            counter!("reader_sync_background_maintenance_runs_total", "job" => "push_receipts", "outcome" => "error").increment(1);
+        }
+    }
+}
+
+async fn reclaim_orphaned_assets(app_state: &AppState) {
+    match reconcile_orphaned_asset_batch(app_state).await {
+        Ok(stats) => {
+            counter!("reader_sync_background_maintenance_runs_total", "job" => "orphan_assets", "outcome" => "success").increment(1);
+            counter!("reader_sync_background_maintenance_items_total", "job" => "orphan_assets_accounts").increment(stats.accounts);
+            counter!("reader_sync_background_maintenance_items_total", "job" => "orphan_assets_deleted").increment(stats.deleted_assets);
+            counter!("reader_sync_background_maintenance_items_total", "job" => "orphan_assets_busy").increment(stats.busy_accounts);
+        }
+        Err(_) => {
+            counter!("reader_sync_background_maintenance_runs_total", "job" => "orphan_assets", "outcome" => "error").increment(1);
+        }
+    }
+}
+
+#[derive(Default)]
+struct OrphanReclaimStats {
+    accounts: u64,
+    busy_accounts: u64,
+    deleted_assets: u64,
+}
+
+async fn reconcile_orphaned_asset_batch(
+    app_state: &AppState,
+) -> Result<OrphanReclaimStats, ApiError> {
+    let now = now_ms();
+    let users = sqlx::query_scalar::<_, String>(
+        "SELECT asset.user_id FROM sync_assets_v4 AS asset \
+         WHERE asset.orphaned_at<>0 OR NOT EXISTS ( \
+           SELECT 1 FROM sync_entities_v4 AS entity \
+           WHERE entity.user_id=asset.user_id \
+             AND entity.kind='reader_palette_v1' \
+             AND entity.deleted_at=0 \
+             AND entity.envelope->'payload'->>'backgroundAssetId'=asset.asset_id \
+         ) GROUP BY asset.user_id ORDER BY asset.user_id LIMIT $1",
+    )
+    .bind(ORPHAN_RECLAIM_ACCOUNT_BATCH)
+    .fetch_all(&app_state.pool)
+    .await
+    .map_err(|_| ApiError::DatabaseUnavailable)?;
+    let mut batch = OrphanReclaimStats::default();
+    for user_id in users {
+        let mut transaction = app_state
+            .pool
+            .begin()
+            .await
+            .map_err(|_| ApiError::DatabaseUnavailable)?;
+        match account_mutation::try_lock(&mut transaction, &user_id).await {
+            Ok(()) => {
+                let deleted = reconcile_orphaned_assets(&mut transaction, &user_id, now).await?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| ApiError::DatabaseUnavailable)?;
+                batch.accounts = batch.accounts.saturating_add(1);
+                batch.deleted_assets = batch.deleted_assets.saturating_add(deleted);
+            }
+            Err(ApiError::Busy) => {
+                let _ = transaction.rollback().await;
+                batch.busy_accounts = batch.busy_accounts.saturating_add(1);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(batch)
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -244,6 +403,9 @@ async fn initialize_asset(
             received_bytes: asset.received_bytes,
         });
     }
+    if !permits_new_asset(input.byte_size) {
+        return Err(ApiError::InvalidRequest);
+    }
     // A client uploads all referenced images before it pushes the palette
     // entities.  Do not reclaim seemingly orphaned assets here: doing so would
     // make a multi-palette upload lose earlier bytes before the subsequent
@@ -259,8 +421,8 @@ async fn initialize_asset(
     }
     sqlx::query(
         "INSERT INTO sync_assets_v4 \
-         (user_id,asset_id,sha256,mime,byte_size,received_bytes,body,completed_at,created_at,updated_at) \
-         VALUES ($1,$2,$3,$4,$5,0,''::bytea,0,$6,$6)",
+         (user_id,asset_id,sha256,mime,byte_size,received_bytes,body,completed_at,orphaned_at,created_at,updated_at) \
+         VALUES ($1,$2,$3,$4,$5,0,''::bytea,0,$6,$6,$6)",
     )
     .bind(user_id)
     .bind(&input.asset_id)
@@ -377,14 +539,9 @@ async fn lock_account_assets(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: &str,
 ) -> Result<(), ApiError> {
-    // Serialize every account-data mutation with the entity push and reset
-    // transaction, so the shared storage and daily-write quotas cannot race.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(user_id)
-        .execute(&mut **transaction)
-        .await
-        .map(|_| ())
-        .map_err(|_| ApiError::DatabaseUnavailable)
+    // Share the non-queueing account mutation gate with entities and reset so
+    // asset chunks cannot consume every write slot behind one account.
+    account_mutation::try_lock(transaction, user_id).await
 }
 
 async fn ensure_generation(
@@ -428,15 +585,9 @@ async fn enforce_asset_quotas(
     user_id: &str,
     increment: i64,
 ) -> Result<(), ApiError> {
-    let combined_bytes = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE((SELECT SUM(octet_length(envelope::text)) FROM sync_entities_v4 WHERE user_id=$1),0) \
-         + COALESCE((SELECT SUM(octet_length(body)) FROM sync_assets_v4 WHERE user_id=$1),0) \
-         + COALESCE((SELECT SUM(octet_length(compressed_envelope)) FROM sync_entity_history_v4 WHERE user_id=$1),0)",
-    )
-    .bind(user_id)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(|_| ApiError::DatabaseUnavailable)?;
+    // This is a point lookup against the transactionally maintained ledger,
+    // rather than three account-wide SUM scans for every asset chunk.
+    let combined_bytes = storage_usage_bytes(&mut **transaction, user_id).await?;
     if combined_bytes.saturating_add(increment) > ACCOUNT_STORAGE_QUOTA_BYTES {
         return Err(ApiError::SyncQuotaExceeded);
     }
@@ -482,7 +633,11 @@ fn valid_metadata(asset_id: &str, sha256: &str, mime: &str, byte_size: i64) -> b
     valid_asset_id(asset_id)
         && asset_id == sha256
         && valid_mime(mime)
-        && (1..=MAX_ASSET_BYTES).contains(&byte_size)
+        && permits_new_asset(byte_size)
+}
+
+const fn permits_new_asset(byte_size: i64) -> bool {
+    byte_size > 0 && byte_size <= MAX_NEW_ASSET_BYTES
 }
 
 fn valid_asset_id(value: &str) -> bool {
@@ -575,7 +730,27 @@ mod tests {
             1
         ));
         assert!(!valid_metadata(&id, &id, "image/svg+xml", 1));
-        assert!(!valid_metadata(&id, &id, "image/png", MAX_ASSET_BYTES + 1));
+        assert!(valid_metadata(&id, &id, "image/png", MAX_NEW_ASSET_BYTES));
+        assert!(!valid_metadata(
+            &id,
+            &id,
+            "image/png",
+            MAX_NEW_ASSET_BYTES + 1
+        ));
+        assert!(permits_new_asset(MAX_NEW_ASSET_BYTES));
+        assert!(!permits_new_asset(MAX_NEW_ASSET_BYTES + 1));
+    }
+
+    #[test]
+    fn asset_upload_daily_budget_matches_the_account_storage_budget() {
+        assert_eq!(DAILY_WRITE_QUOTA_BYTES, ACCOUNT_STORAGE_QUOTA_BYTES);
+    }
+
+    #[test]
+    fn orphan_reclamation_waits_seven_full_days() {
+        assert_eq!(orphan_cutoff(ORPHAN_GRACE_MS - 1), 0);
+        assert_eq!(orphan_cutoff(ORPHAN_GRACE_MS), 0);
+        assert_eq!(orphan_cutoff(ORPHAN_GRACE_MS + 1), 1);
     }
 
     #[test]

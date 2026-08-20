@@ -4,15 +4,33 @@
 //! server only sees JSON for the public options and an opaque AES-GCM envelope
 //! for secrets; the password is never stored locally or sent to the server.
 
-use crate::{ai_reader, db::AppDb, sync, translate, AppState};
-use base64::{engine::general_purpose::STANDARD, Engine};
-use ring::{
-    aead, pbkdf2,
-    rand::{SecureRandom, SystemRandom},
+mod downloaded_history;
+mod history_materialize;
+mod history_projection;
+mod history_rules;
+mod history_storage;
+mod secret_envelope;
+
+use self::downloaded_history::{
+    merge_granular_entry, merge_legacy_library_history, merge_legacy_reader_history,
 };
+use self::history_materialize::store_history_projection;
+use self::history_projection::{
+    desired_library_history_entities, desired_reader_history_entities as desired_history_entities,
+    entry_id_from_entity_id as history_entry_id_from_entity_id,
+};
+use self::history_rules::{
+    account_history_payloads, clipped_text, history_entry_id, is_history_tombstone,
+    valid_content_id,
+};
+use self::history_storage::{
+    read_library_history, read_reader_histories, read_reader_history as read_history,
+    write_library_history, write_reader_history as write_history,
+};
+use self::secret_envelope::{decrypt_bundle, encrypt_bundle, envelope_epoch, SecretBundle};
+use crate::{ai_reader, db::AppDb, sync, translate, AppState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::num::NonZeroU32;
 use tauri::Manager;
 
 const OPTIONS_KEY: &str = "private_sync_options_v1";
@@ -31,9 +49,10 @@ const LIBRARY_HISTORY_ID: &str = "library-v1";
 const HISTORY_LIVE_LIMIT: usize = 100;
 const HISTORY_TOMBSTONE_LIMIT: usize = 200;
 const SECRET_KIND: &str = "secret_bundle_v1";
+pub(crate) const READING_HANDOFF_KIND: &str = "reading_handoff_v1";
+pub(crate) const NEWS_SUBSCRIPTIONS_KIND: &str = "news_subscriptions_v1";
 const DEFAULT_ID: &str = "default";
-const KDF_ITERATIONS: u32 = 210_000;
-const AAD: &[u8] = b"kunpeng-reader:secret_bundle_v1";
+const READING_HANDOFF_CONTENT_ID_KEY: &str = "private_sync_reading_handoff_content_id_v1";
 /// A local compare-and-swap generation for secret-bundle operations. It is
 /// deliberately independent from the server epoch: a local reset must win
 /// over an in-flight, CPU-bound password operation before it can write back.
@@ -63,6 +82,10 @@ pub(crate) struct PrivateSyncOptions {
     pub sync_ai_history: bool,
     #[serde(default)]
     pub sync_secrets: bool,
+    /// Custom RSS/Atom URLs are intentionally separate from ordinary app
+    /// settings: enabling this is an explicit consent to exchange them.
+    #[serde(default)]
+    pub sync_news_subscriptions: bool,
 }
 
 fn default_true() -> bool {
@@ -82,6 +105,7 @@ impl Default for PrivateSyncOptions {
             sync_configs: true,
             sync_ai_history: false,
             sync_secrets: false,
+            sync_news_subscriptions: false,
         }
     }
 }
@@ -163,27 +187,6 @@ pub(crate) struct PrivateSyncStatus {
     pub cloud_secret_available: bool,
 }
 
-#[derive(PartialEq, Serialize, Deserialize)]
-struct SecretBundle {
-    version: u8,
-    #[serde(default)]
-    ai_reader: Option<Value>,
-    #[serde(default)]
-    translations: Vec<Value>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct EncryptedEnvelope {
-    version: u8,
-    #[serde(default)]
-    epoch: u64,
-    kdf: String,
-    iterations: u32,
-    salt: String,
-    nonce: String,
-    ciphertext: String,
-}
-
 fn options_from_db(db: &AppDb) -> PrivateSyncOptions {
     db.metadata(OPTIONS_KEY)
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -213,6 +216,8 @@ pub(crate) fn enabled_inventory_kinds(db: &AppDb) -> Vec<&'static str> {
         "reader_palette_v1",
         "reader_palette_order_v1",
         "app_settings_v1",
+        READING_HANDOFF_KIND,
+        NEWS_SUBSCRIPTIONS_KIND,
     ];
     KINDS
         .iter()
@@ -226,6 +231,7 @@ pub(crate) fn enabled_inventory_kinds(db: &AppDb) -> Vec<&'static str> {
 fn entity_enabled_for_options(options: &PrivateSyncOptions, kind: &str) -> Option<bool> {
     match kind {
         "reading_progress_v1" => Some(options.sync_progress),
+        READING_HANDOFF_KIND => Some(options.sync_progress),
         "reading_data_v1" | "user_book_tags_v1" | "book_collections_v1" | "booklist_v1" => {
             Some(options.sync_reading_data)
         }
@@ -237,6 +243,7 @@ fn entity_enabled_for_options(options: &PrivateSyncOptions, kind: &str) -> Optio
         AI_CONFIG_KIND | TRANSLATE_CONFIG_KIND => Some(options.sync_configs),
         HISTORY_KIND | HISTORY_ENTRY_KIND => Some(options.sync_ai_history),
         SECRET_KIND => Some(options.sync_secrets),
+        NEWS_SUBSCRIPTIONS_KIND => Some(options.sync_news_subscriptions),
         // Legacy v1 monolith is retained locally only as a migration seed.
         "book_state_v2" => Some(false),
         _ => None,
@@ -259,21 +266,7 @@ fn reader_history_snapshot(db: &AppDb, content_id: &str) -> ReaderHistorySnapsho
     let sync_mode = reader_history_sync_mode(db);
     let mut entries = read_history(db, content_id);
     if sync_mode != "off" {
-        let histories = db
-            .metadata_with_prefix(HISTORY_PREFIX)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(key, text)| {
-                let content_id = key.strip_prefix(HISTORY_PREFIX)?;
-                valid_content_id(content_id).then_some((
-                    content_id.to_string(),
-                    serde_json::from_str::<Value>(&text)
-                        .ok()
-                        .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
-                        .unwrap_or_default(),
-                ))
-            })
-            .collect();
+        let histories = read_reader_histories(db).unwrap_or_default();
         let cloud_ids = account_history_payloads(histories, &sync_mode)
             .remove(content_id)
             .unwrap_or_default()
@@ -321,593 +314,6 @@ fn library_history_snapshot(db: &AppDb) -> LibraryHistorySnapshot {
     }
 }
 
-fn history_key(content_id: &str) -> String {
-    format!("{HISTORY_PREFIX}{content_id}")
-}
-
-fn valid_content_id(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn history_entry_id(entry: &Value) -> Option<String> {
-    entry
-        .get("id")
-        .and_then(Value::as_str)
-        .map(|value| clipped_text(value, 160))
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            entry
-                .get("at")
-                .and_then(Value::as_str)
-                .map(|at| format!("legacy:{at}"))
-        })
-}
-
-fn is_history_tombstone(entry: &Value) -> bool {
-    entry
-        .get("deletedAt")
-        .or_else(|| entry.get("deleted_at"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// Keep live entries and per-entry tombstones together. Tombstones prevent an
-/// older local history cache on another device from recreating a deleted item
-/// after the next sync. They contain no answer text or source excerpt.
-fn normalized_entries(entries: Vec<Value>) -> Vec<Value> {
-    let mut by_id = std::collections::BTreeMap::<String, Value>::new();
-    for mut entry in entries {
-        if !entry.is_object()
-            || !serde_json::to_string(&entry)
-                .map(|value| value.len() <= 32_000)
-                .unwrap_or(false)
-        {
-            continue;
-        }
-        let Some(id) = history_entry_id(&entry) else {
-            continue;
-        };
-        if is_history_tombstone(&entry) {
-            let deleted_at = entry
-                .get("deletedAt")
-                .or_else(|| entry.get("deleted_at"))
-                .and_then(Value::as_str)
-                .map(|value| clipped_text(value, 64))
-                .filter(|value| !value.is_empty());
-            let Some(deleted_at) = deleted_at else {
-                continue;
-            };
-            by_id.insert(
-                id.clone(),
-                serde_json::json!({ "id": id, "deletedAt": deleted_at }),
-            );
-            continue;
-        }
-        entry["id"] = Value::String(id.clone());
-        match by_id.get(&id) {
-            Some(existing) if is_history_tombstone(existing) => {}
-            _ => {
-                by_id.insert(id, entry);
-            }
-        }
-    }
-    let mut live = by_id
-        .values()
-        .filter(|entry| !is_history_tombstone(entry))
-        .cloned()
-        .collect::<Vec<_>>();
-    live.sort_by(|left, right| {
-        right
-            .get("at")
-            .and_then(Value::as_str)
-            .cmp(&left.get("at").and_then(Value::as_str))
-    });
-    let mut tombstones = by_id
-        .values()
-        .filter(|entry| is_history_tombstone(entry))
-        .cloned()
-        .collect::<Vec<_>>();
-    tombstones.sort_by(|left, right| {
-        right
-            .get("deletedAt")
-            .and_then(Value::as_str)
-            .cmp(&left.get("deletedAt").and_then(Value::as_str))
-    });
-    tombstones.truncate(HISTORY_TOMBSTONE_LIMIT);
-    live.extend(tombstones);
-    live
-}
-
-fn clipped_text(value: &str, max_bytes: usize) -> String {
-    let mut value = value.trim().to_string();
-    while value.len() > max_bytes {
-        value.pop();
-    }
-    value
-}
-
-/// Select the account-wide cloud subset for per-book AI-reading history.
-/// Local per-book history remains available; only the latest records across
-/// all books are materialized as sync entities.
-fn account_history_payloads(
-    histories: Vec<(String, Vec<Value>)>,
-    sync_mode: &str,
-) -> std::collections::BTreeMap<String, Vec<Value>> {
-    let mut live = Vec::<(String, Value)>::new();
-    let mut tombstones = Vec::<(String, Value)>::new();
-    for (content_id, entries) in histories {
-        for entry in normalized_entries(entries) {
-            if is_history_tombstone(&entry) {
-                tombstones.push((content_id.clone(), entry));
-            } else if sync_mode == "recent"
-                || entry.get("cloudSaved").and_then(Value::as_bool) == Some(true)
-            {
-                live.push((content_id.clone(), entry));
-            }
-        }
-    }
-    live.sort_by(|(_, left), (_, right)| {
-        right
-            .get("at")
-            .and_then(Value::as_str)
-            .cmp(&left.get("at").and_then(Value::as_str))
-    });
-    live.truncate(HISTORY_LIVE_LIMIT);
-    tombstones.sort_by(|(_, left), (_, right)| {
-        right
-            .get("deletedAt")
-            .and_then(Value::as_str)
-            .cmp(&left.get("deletedAt").and_then(Value::as_str))
-    });
-    tombstones.truncate(HISTORY_TOMBSTONE_LIMIT);
-
-    let mut grouped = std::collections::BTreeMap::<String, Vec<Value>>::new();
-    for (content_id, entry) in live.into_iter().chain(tombstones) {
-        grouped.entry(content_id).or_default().push(entry);
-    }
-    grouped
-}
-
-/// Library answers are saved as user-owned notes.  The source list deliberately
-/// excludes `excerpt` and the machine-local `bookId`: a sync entity may carry
-/// citations, but never book-body passages or local paths/ids.
-fn normalized_library_entries(entries: Vec<Value>) -> Vec<Value> {
-    let mut sanitized = Vec::new();
-    for entry in entries {
-        if is_history_tombstone(&entry) {
-            if let Some(id) = history_entry_id(&entry) {
-                if let Some(deleted_at) = entry
-                    .get("deletedAt")
-                    .or_else(|| entry.get("deleted_at"))
-                    .and_then(Value::as_str)
-                    .map(|value| clipped_text(value, 64))
-                    .filter(|value| !value.is_empty())
-                {
-                    sanitized.push(serde_json::json!({ "id": id, "deletedAt": deleted_at }));
-                }
-            }
-            continue;
-        }
-        let question = entry
-            .get("question")
-            .and_then(Value::as_str)
-            .map(|value| clipped_text(value, 4_000))
-            .filter(|value| !value.is_empty());
-        let content = entry
-            .get("content")
-            .and_then(Value::as_str)
-            .map(|value| clipped_text(value, 20_000))
-            .filter(|value| !value.is_empty());
-        let at = entry
-            .get("at")
-            .and_then(Value::as_str)
-            .map(|value| clipped_text(value, 64))
-            .filter(|value| !value.is_empty());
-        let (Some(question), Some(content), Some(at)) = (question, content, at) else {
-            continue;
-        };
-        let task = entry
-            .get("task")
-            .and_then(Value::as_str)
-            .map(|value| clipped_text(value, 32))
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "question".to_string());
-        let sources = entry
-            .get("sources")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|source| {
-                        let title = source
-                            .get("bookTitle")
-                            .or_else(|| source.get("book_title"))
-                            .and_then(Value::as_str)
-                            .map(|value| clipped_text(value, 800))
-                            .filter(|value| !value.is_empty())?;
-                        let chapter = source.get("chapter").and_then(Value::as_u64).unwrap_or(0);
-                        let source_kind = source
-                            .get("sourceKind")
-                            .or_else(|| source.get("source_kind"))
-                            .and_then(Value::as_str)
-                            .map(|value| clipped_text(value, 120))
-                            .unwrap_or_default();
-                        Some(serde_json::json!({
-                            "bookTitle": title,
-                            "chapter": chapter,
-                            "sourceKind": source_kind,
-                        }))
-                    })
-                    .take(20)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let id = history_entry_id(&entry).unwrap_or_else(|| format!("legacy:{at}"));
-        let mut normalized = serde_json::json!({
-            "id": id,
-            "version": 1,
-            "scope": "library",
-            "task": task,
-            "question": question,
-            "content": content,
-            "sources": sources,
-            "at": at,
-        });
-        if entry.get("cloudSaved").and_then(Value::as_bool) == Some(true) {
-            normalized["cloudSaved"] = Value::Bool(true);
-        }
-        sanitized.push(normalized);
-    }
-    normalized_entries(sanitized)
-}
-
-fn sanitized_history_sources(entry: &Value) -> Vec<Value> {
-    entry
-        .get("sources")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|source| {
-                    let title = source
-                        .get("bookTitle")
-                        .or_else(|| source.get("book_title"))
-                        .and_then(Value::as_str)
-                        .map(|value| clipped_text(value, 800))
-                        .filter(|value| !value.is_empty())?;
-                    let chapter = source.get("chapter").and_then(Value::as_u64).unwrap_or(0);
-                    let source_kind = source
-                        .get("sourceKind")
-                        .or_else(|| source.get("source_kind"))
-                        .and_then(Value::as_str)
-                        .map(|value| clipped_text(value, 120))
-                        .unwrap_or_default();
-                    let tags = source
-                        .get("tags")
-                        .and_then(Value::as_array)
-                        .map(|tags| {
-                            tags.iter()
-                                .filter_map(Value::as_str)
-                                .map(|tag| clipped_text(tag, 120))
-                                .filter(|tag| !tag.is_empty())
-                                .take(20)
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    Some(serde_json::json!({
-                        "bookTitle": title,
-                        "chapter": chapter,
-                        "sourceKind": source_kind,
-                        "tags": tags,
-                    }))
-                })
-                .take(20)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
-/// Produce the only representation allowed to leave this device. In
-/// particular, `excerpt`, local `bookId` and paths are intentionally never
-/// copied from the locally retained history record.
-fn sanitized_history_entry(entry: &Value, scope: &str) -> Option<Value> {
-    if is_history_tombstone(entry) {
-        return None;
-    }
-    let id = history_entry_id(entry)?;
-    let content = entry
-        .get("content")
-        .or_else(|| entry.get("answer"))
-        .and_then(Value::as_str)
-        .map(|value| clipped_text(value, 20_000))
-        .filter(|value| !value.is_empty())?;
-    let mut sanitized = serde_json::json!({
-        "id": id,
-        "version": 2,
-        "scope": scope,
-        "content": content,
-        "sources": sanitized_history_sources(entry),
-    });
-    if let Some(question) = entry
-        .get("question")
-        .and_then(Value::as_str)
-        .map(|value| clipped_text(value, 4_000))
-        .filter(|value| !value.is_empty())
-    {
-        sanitized["question"] = Value::String(question);
-    }
-    if let Some(task) = entry
-        .get("task")
-        .and_then(Value::as_str)
-        .map(|value| clipped_text(value, 32))
-        .filter(|value| !value.is_empty())
-    {
-        sanitized["task"] = Value::String(task);
-    }
-    if let Some(at) = entry
-        .get("at")
-        .and_then(Value::as_str)
-        .map(|value| clipped_text(value, 64))
-        .filter(|value| !value.is_empty())
-    {
-        sanitized["at"] = Value::String(at);
-    }
-    Some(sanitized)
-}
-
-fn reader_history_entity_id(content_id: &str, entry_id: &str) -> String {
-    format!("reader:{content_id}:{entry_id}")
-}
-
-fn library_history_entity_id(entry_id: &str) -> String {
-    format!("library:{entry_id}")
-}
-
-fn history_entry_id_from_entity_id(entity_id: &str, scope: &str) -> Option<String> {
-    let prefix = if scope == "library" {
-        "library:"
-    } else {
-        "reader:"
-    };
-    let rest = entity_id.strip_prefix(prefix)?;
-    if scope == "library" {
-        (!rest.is_empty()).then(|| clipped_text(rest, 160))
-    } else {
-        let (_, entry_id) = rest.split_once(':')?;
-        (!entry_id.is_empty()).then(|| clipped_text(entry_id, 160))
-    }
-}
-
-fn desired_history_entities(
-    histories: Vec<(String, Vec<Value>)>,
-    sync_mode: &str,
-) -> (
-    std::collections::BTreeMap<String, Value>,
-    std::collections::BTreeSet<String>,
-) {
-    let mut active = std::collections::BTreeMap::new();
-    let mut tombstones = std::collections::BTreeSet::new();
-    for (content_id, entries) in account_history_payloads(histories, sync_mode) {
-        for entry in entries {
-            let Some(entry_id) = history_entry_id(&entry) else {
-                continue;
-            };
-            let entity_id = reader_history_entity_id(&content_id, &entry_id);
-            if is_history_tombstone(&entry) {
-                tombstones.insert(entity_id);
-            } else if let Some(entry) = sanitized_history_entry(&entry, "reader") {
-                active.insert(
-                    entity_id,
-                    serde_json::json!({
-                        "version": 2,
-                        "scope": "reader",
-                        "contentId": content_id,
-                        "entry": entry,
-                    }),
-                );
-            }
-        }
-    }
-    (active, tombstones)
-}
-
-fn desired_library_history_entities(
-    entries: Vec<Value>,
-    sync_mode: &str,
-) -> (
-    std::collections::BTreeMap<String, Value>,
-    std::collections::BTreeSet<String>,
-) {
-    let mut active = std::collections::BTreeMap::new();
-    let mut tombstones = std::collections::BTreeSet::new();
-    for entry in cloud_library_history_entries(entries, sync_mode) {
-        let Some(entry_id) = history_entry_id(&entry) else {
-            continue;
-        };
-        let entity_id = library_history_entity_id(&entry_id);
-        if is_history_tombstone(&entry) {
-            tombstones.insert(entity_id);
-        } else if let Some(entry) = sanitized_history_entry(&entry, "library") {
-            active.insert(
-                entity_id,
-                serde_json::json!({
-                    "version": 2,
-                    "scope": "library",
-                    "entry": entry,
-                }),
-            );
-        }
-    }
-    (active, tombstones)
-}
-
-fn read_history(db: &AppDb, content_id: &str) -> Vec<Value> {
-    db.metadata(&history_key(content_id))
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
-        .map(normalized_entries)
-        .unwrap_or_default()
-}
-
-fn write_history(db: &AppDb, content_id: &str, entries: Vec<Value>) -> Result<(), String> {
-    db.set_metadata(
-        &history_key(content_id),
-        &serde_json::to_string(&serde_json::json!({
-            "version": 1,
-            "contentId": content_id,
-            "entries": normalized_entries(entries),
-        }))
-        .map_err(|e| e.to_string())?,
-    )
-}
-
-fn read_library_history(db: &AppDb) -> Vec<Value> {
-    db.metadata(LIBRARY_HISTORY_KEY)
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
-        .map(normalized_library_entries)
-        .unwrap_or_default()
-}
-
-fn write_library_history(db: &AppDb, entries: Vec<Value>) -> Result<(), String> {
-    db.set_metadata(
-        LIBRARY_HISTORY_KEY,
-        &serde_json::to_string(&serde_json::json!({
-            "version": 1,
-            "scope": "library",
-            "entries": normalized_library_entries(entries),
-        }))
-        .map_err(|e| e.to_string())?,
-    )
-}
-/// A local library history may grow without a live-entry cap. Only this
-/// compact projection is sent to the cloud, where it remains bounded to 100
-/// answers (plus deletion tombstones). In manual mode an answer joins the
-/// projection only after the user explicitly selects "云端".
-fn cloud_library_history_entries(entries: Vec<Value>, sync_mode: &str) -> Vec<Value> {
-    let normalized = normalized_library_entries(entries);
-    let mut live = normalized
-        .iter()
-        .filter(|entry| !is_history_tombstone(entry))
-        .filter(|entry| {
-            sync_mode == "recent" || entry.get("cloudSaved").and_then(Value::as_bool) == Some(true)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    live.sort_by(|left, right| {
-        right
-            .get("at")
-            .and_then(Value::as_str)
-            .cmp(&left.get("at").and_then(Value::as_str))
-    });
-    live.truncate(HISTORY_LIVE_LIMIT);
-    let mut tombstones = normalized
-        .into_iter()
-        .filter(is_history_tombstone)
-        .collect::<Vec<_>>();
-    tombstones.sort_by(|left, right| {
-        right
-            .get("deletedAt")
-            .and_then(Value::as_str)
-            .cmp(&left.get("deletedAt").and_then(Value::as_str))
-    });
-    tombstones.truncate(HISTORY_TOMBSTONE_LIMIT);
-    live.extend(tombstones);
-    live
-}
-
-fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
-    if password.chars().count() < 10 {
-        return Err("同步密码至少需要 10 个字符".into());
-    }
-    let mut key = [0u8; 32];
-    pbkdf2::derive(
-        pbkdf2::PBKDF2_HMAC_SHA256,
-        NonZeroU32::new(KDF_ITERATIONS).expect("constant is nonzero"),
-        salt,
-        password.as_bytes(),
-        &mut key,
-    );
-    Ok(key)
-}
-
-fn encrypt_bundle(password: &str, bundle: &SecretBundle, epoch: u64) -> Result<Value, String> {
-    if epoch == 0 {
-        return Err("云端密钥包世代无效，请稍后重试".into());
-    }
-    let rng = SystemRandom::new();
-    let mut salt = [0u8; 16];
-    let mut nonce = [0u8; 12];
-    rng.fill(&mut salt).map_err(|_| "无法生成加密随机数")?;
-    rng.fill(&mut nonce).map_err(|_| "无法生成加密随机数")?;
-    let key = derive_key(password, &salt)?;
-    let unbound =
-        aead::UnboundKey::new(&aead::AES_256_GCM, &key).map_err(|_| "无法创建加密密钥")?;
-    let key = aead::LessSafeKey::new(unbound);
-    let mut ciphertext = serde_json::to_vec(bundle).map_err(|e| e.to_string())?;
-    key.seal_in_place_append_tag(
-        aead::Nonce::assume_unique_for_key(nonce),
-        aead::Aad::from(AAD),
-        &mut ciphertext,
-    )
-    .map_err(|_| "密钥包加密失败")?;
-    serde_json::to_value(EncryptedEnvelope {
-        version: 2,
-        epoch,
-        kdf: "PBKDF2-HMAC-SHA256/AES-256-GCM".into(),
-        iterations: KDF_ITERATIONS,
-        salt: STANDARD.encode(salt),
-        nonce: STANDARD.encode(nonce),
-        ciphertext: STANDARD.encode(ciphertext),
-    })
-    .map_err(|e| e.to_string())
-}
-
-fn decrypt_bundle(password: &str, value: &Value) -> Result<SecretBundle, String> {
-    let envelope: EncryptedEnvelope =
-        serde_json::from_value(value.clone()).map_err(|_| "云端密钥包格式无效")?;
-    if !(envelope.version == 1 || envelope.version == 2)
-        || envelope.iterations != KDF_ITERATIONS
-        || envelope.kdf != "PBKDF2-HMAC-SHA256/AES-256-GCM"
-    {
-        return Err("云端密钥包版本不受支持".into());
-    }
-    let salt = STANDARD
-        .decode(envelope.salt)
-        .map_err(|_| "云端密钥包盐值无效")?;
-    let nonce = STANDARD
-        .decode(envelope.nonce)
-        .map_err(|_| "云端密钥包随机数无效")?;
-    if salt.len() != 16 || nonce.len() != 12 {
-        return Err("云端密钥包长度无效".into());
-    }
-    let key = derive_key(password, &salt)?;
-    let unbound =
-        aead::UnboundKey::new(&aead::AES_256_GCM, &key).map_err(|_| "无法创建解密密钥")?;
-    let key = aead::LessSafeKey::new(unbound);
-    let mut ciphertext = STANDARD
-        .decode(envelope.ciphertext)
-        .map_err(|_| "云端密钥包密文无效")?;
-    let plaintext = key
-        .open_in_place(
-            aead::Nonce::try_assume_unique_for_key(&nonce).map_err(|_| "云端密钥包随机数无效")?,
-            aead::Aad::from(AAD),
-            &mut ciphertext,
-        )
-        .map_err(|_| "同步密码不正确，或云端密钥包已损坏")?;
-    serde_json::from_slice(plaintext).map_err(|_| "云端密钥包内容无效".into())
-}
-
-fn envelope_epoch(value: &Value) -> Result<u64, String> {
-    let envelope: EncryptedEnvelope =
-        serde_json::from_value(value.clone()).map_err(|_| "云端密钥包格式无效")?;
-    match envelope.version {
-        1 => Ok(1),
-        2 if envelope.epoch > 0 => Ok(envelope.epoch),
-        _ => Err("云端密钥包世代无效".into()),
-    }
-}
-
 fn secret_bundle_write_generation(db: &AppDb) -> u64 {
     db.metadata(SECRET_BUNDLE_WRITE_GENERATION_KEY)
         .and_then(|value| value.parse().ok())
@@ -945,72 +351,55 @@ fn materialize(db: &mut AppDb) -> Result<(), String> {
         ));
         db.upsert_json_batch(&entities)?;
     }
-    let stored_histories = db.metadata_with_prefix(HISTORY_PREFIX)?;
-    let mut histories = Vec::new();
-    for (key, text) in stored_histories {
-        let Some(content_id) = key.strip_prefix(HISTORY_PREFIX) else {
-            continue;
-        };
-        if !valid_content_id(content_id) {
-            continue;
+    if options.sync_progress {
+        if let Some(content_id) = db.metadata(READING_HANDOFF_CONTENT_ID_KEY) {
+            if valid_content_id(&content_id) {
+                db.upsert_json_batch(&[(
+                    READING_HANDOFF_KIND.to_string(),
+                    DEFAULT_ID.to_string(),
+                    serde_json::json!({ "version": 1, "contentId": content_id }),
+                )])?;
+            }
         }
-        let entries = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| value.get("entries").and_then(Value::as_array).cloned())
-            .unwrap_or_default();
-        histories.push((content_id.to_string(), entries));
     }
+    if options.sync_news_subscriptions {
+        crate::newsnow::append_custom_subscriptions_sync_entity(db)?;
+    }
+    let histories = read_reader_histories(db)?;
     let reader_history_sync_mode = reader_history_sync_mode(db);
     if reader_history_sync_mode != "off" {
         let (active, tombstones) = desired_history_entities(histories, &reader_history_sync_mode);
-        let existing = db.sync_entities_by_kind(HISTORY_ENTRY_KIND)?;
-        for entity in existing
-            .into_iter()
-            .filter(|entity| entity.id.starts_with("reader:"))
-        {
-            if active.contains_key(&entity.id) {
-                continue;
-            }
-            // A tombstone, an item no longer selected manually, or an item
-            // pushed out of the 100-entry recent window must retire only this
-            // individual entity.
-            if entity.deleted_at == 0 || tombstones.contains(&entity.id) {
-                db.soft_delete(HISTORY_ENTRY_KIND, &entity.id)?;
-            }
-        }
-        let writes = active
-            .into_iter()
-            .map(|(id, payload)| (HISTORY_ENTRY_KIND.to_string(), id, payload))
-            .collect::<Vec<_>>();
-        db.upsert_json_batch(&writes)?;
+        store_history_projection(db, "reader:", active, &tombstones)?;
     }
     let library_sync_mode = library_history_sync_mode(db);
     if library_sync_mode != "off" {
         let (active, tombstones) =
             desired_library_history_entities(read_library_history(db), &library_sync_mode);
-        let existing = db.sync_entities_by_kind(HISTORY_ENTRY_KIND)?;
-        for entity in existing
-            .into_iter()
-            .filter(|entity| entity.id.starts_with("library:"))
-        {
-            if active.contains_key(&entity.id) {
-                continue;
-            }
-            if entity.deleted_at == 0 || tombstones.contains(&entity.id) {
-                db.soft_delete(HISTORY_ENTRY_KIND, &entity.id)?;
-            }
-        }
-        let writes = active
-            .into_iter()
-            .map(|(id, payload)| (HISTORY_ENTRY_KIND.to_string(), id, payload))
-            .collect::<Vec<_>>();
-        db.upsert_json_batch(&writes)?;
+        store_history_projection(db, "library:", active, &tombstones)?;
     }
     Ok(())
 }
 
 pub(crate) fn append_sync_entities(db: &mut AppDb) -> Result<(), String> {
     materialize(db)
+}
+
+/// Record the portable identity of the book currently being read.  The file,
+/// title, local id and path are deliberately not copied; another device can
+/// offer the handoff only after the same content has been imported there.
+pub(crate) fn record_reading_handoff(db: &mut AppDb, content_id: &str) -> Result<(), String> {
+    if !valid_content_id(content_id) {
+        return Ok(());
+    }
+    db.set_metadata(READING_HANDOFF_CONTENT_ID_KEY, content_id)?;
+    if options_from_db(db).sync_progress {
+        db.upsert_json_batch(&[(
+            READING_HANDOFF_KIND.to_string(),
+            DEFAULT_ID.to_string(),
+            serde_json::json!({ "version": 1, "contentId": content_id }),
+        )])?;
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_downloaded_entities(
@@ -1021,107 +410,89 @@ pub(crate) fn apply_downloaded_entities(
         let options = options_from_db(db);
         for item in items {
             match item.kind.as_str() {
-            AI_CONFIG_KIND if options.sync_configs && item.deleted_at == 0 => {
-                ai_reader::import_public_config(db, &item.json)?
-            }
-            HISTORY_KIND
-                if item.deleted_at == 0
-                    && reader_history_sync_mode(db) != "off"
-                    && valid_content_id(&item.id) =>
-            {
-                let mut merged = read_history(db, &item.id);
-                let mut cloud_ids = std::collections::BTreeSet::new();
-                if let Some(remote) = item.json.get("entries").and_then(Value::as_array) {
-                    cloud_ids.extend(remote.iter().filter_map(history_entry_id));
-                    merged.extend(remote.iter().cloned());
-                }
-                if reader_history_sync_mode(db) == "manual" {
-                    merged = normalized_entries(merged)
-                        .into_iter()
-                        .map(|mut entry| {
-                            if !is_history_tombstone(&entry) {
-                                entry["cloudSaved"] = Value::Bool(
-                                    history_entry_id(&entry)
-                                        .is_some_and(|id| cloud_ids.contains(&id)),
-                                );
-                            }
-                            entry
-                        })
-                        .collect();
-                }
-                write_history(db, &item.id, merged)?;
-            }
-            HISTORY_KIND
-                if item.deleted_at == 0
-                    && library_history_sync_mode(db) != "off"
-                    && item.id == LIBRARY_HISTORY_ID
-                    && item.json.get("scope").and_then(Value::as_str) == Some("library") =>
-            {
-                let mut merged = read_library_history(db);
-                let mut cloud_ids = std::collections::BTreeSet::new();
-                if let Some(remote) = item.json.get("entries").and_then(Value::as_array) {
-                    cloud_ids.extend(remote.iter().filter_map(history_entry_id));
-                    merged.extend(remote.iter().cloned());
-                }
-                if library_history_sync_mode(db) == "manual" {
-                    merged = normalized_library_entries(merged)
-                        .into_iter()
-                        .map(|mut entry| {
-                            if !is_history_tombstone(&entry) {
-                                entry["cloudSaved"] = Value::Bool(
-                                    history_entry_id(&entry)
-                                        .is_some_and(|id| cloud_ids.contains(&id)),
-                                );
-                            }
-                            entry
-                        })
-                        .collect();
-                }
-                write_library_history(db, merged)?;
-            }
-            HISTORY_ENTRY_KIND if reader_history_sync_mode(db) != "off" => {
-                let content_id = item.json.get("contentId").and_then(Value::as_str);
-                let entry_id = history_entry_id_from_entity_id(&item.id, "reader");
-                if item.json.get("scope").and_then(Value::as_str) != Some("reader")
-                    || !content_id.is_some_and(valid_content_id)
-                    || entry_id.is_none()
+                READING_HANDOFF_KIND
+                    if options.sync_progress && item.deleted_at == 0 && item.id == DEFAULT_ID =>
                 {
-                    continue;
-                }
-                let content_id = content_id.unwrap();
-                let entry_id = entry_id.unwrap();
-                let mut merged = read_history(db, content_id);
-                if item.deleted_at != 0 {
-                    merged.push(serde_json::json!({ "id": entry_id, "deletedAt": item.updated_at.to_string() }));
-                } else if let Some(mut entry) = item.json.get("entry").cloned() {
-                    entry["id"] = Value::String(entry_id);
-                    if reader_history_sync_mode(db) == "manual" {
-                        entry["cloudSaved"] = Value::Bool(true);
+                    if let Some(content_id) = item.json.get("contentId").and_then(Value::as_str) {
+                        if valid_content_id(content_id) {
+                            db.set_metadata(READING_HANDOFF_CONTENT_ID_KEY, content_id)?;
+                        }
                     }
-                    merged.push(entry);
                 }
-                write_history(db, content_id, merged)?;
-            }
-            HISTORY_ENTRY_KIND if library_history_sync_mode(db) != "off" => {
-                let entry_id = history_entry_id_from_entity_id(&item.id, "library");
-                if item.json.get("scope").and_then(Value::as_str) != Some("library")
-                    || entry_id.is_none()
+                NEWS_SUBSCRIPTIONS_KIND
+                    if options.sync_news_subscriptions
+                        && item.deleted_at == 0
+                        && item.id == DEFAULT_ID =>
                 {
-                    continue;
+                    crate::newsnow::apply_downloaded_custom_subscriptions(db, &item.json)?;
                 }
-                let entry_id = entry_id.unwrap();
-                let mut merged = read_library_history(db);
-                if item.deleted_at != 0 {
-                    merged.push(serde_json::json!({ "id": entry_id, "deletedAt": item.updated_at.to_string() }));
-                } else if let Some(mut entry) = item.json.get("entry").cloned() {
-                    entry["id"] = Value::String(entry_id);
-                    if library_history_sync_mode(db) == "manual" {
-                        entry["cloudSaved"] = Value::Bool(true);
+                AI_CONFIG_KIND if options.sync_configs && item.deleted_at == 0 => {
+                    ai_reader::import_public_config(db, &item.json)?
+                }
+                HISTORY_KIND
+                    if item.deleted_at == 0
+                        && reader_history_sync_mode(db) != "off"
+                        && valid_content_id(&item.id) =>
+                {
+                    let merged = merge_legacy_reader_history(
+                        read_history(db, &item.id),
+                        &item.json,
+                        reader_history_sync_mode(db) == "manual",
+                    );
+                    write_history(db, &item.id, merged)?;
+                }
+                HISTORY_KIND
+                    if item.deleted_at == 0
+                        && library_history_sync_mode(db) != "off"
+                        && item.id == LIBRARY_HISTORY_ID
+                        && item.json.get("scope").and_then(Value::as_str) == Some("library") =>
+                {
+                    let merged = merge_legacy_library_history(
+                        read_library_history(db),
+                        &item.json,
+                        library_history_sync_mode(db) == "manual",
+                    );
+                    write_library_history(db, merged)?;
+                }
+                HISTORY_ENTRY_KIND if reader_history_sync_mode(db) != "off" => {
+                    let content_id = item.json.get("contentId").and_then(Value::as_str);
+                    let entry_id = history_entry_id_from_entity_id(&item.id, "reader");
+                    if item.json.get("scope").and_then(Value::as_str) != Some("reader")
+                        || !content_id.is_some_and(valid_content_id)
+                        || entry_id.is_none()
+                    {
+                        continue;
                     }
-                    merged.push(entry);
+                    let content_id = content_id.unwrap();
+                    let entry_id = entry_id.unwrap();
+                    let merged = merge_granular_entry(
+                        read_history(db, content_id),
+                        entry_id,
+                        item.json.get("entry").cloned(),
+                        item.deleted_at,
+                        item.updated_at,
+                        reader_history_sync_mode(db) == "manual",
+                    );
+                    write_history(db, content_id, merged)?;
                 }
-                write_library_history(db, merged)?;
-            }
+                HISTORY_ENTRY_KIND if library_history_sync_mode(db) != "off" => {
+                    let entry_id = history_entry_id_from_entity_id(&item.id, "library");
+                    if item.json.get("scope").and_then(Value::as_str) != Some("library")
+                        || entry_id.is_none()
+                    {
+                        continue;
+                    }
+                    let entry_id = entry_id.unwrap();
+                    let merged = merge_granular_entry(
+                        read_library_history(db),
+                        entry_id,
+                        item.json.get("entry").cloned(),
+                        item.deleted_at,
+                        item.updated_at,
+                        library_history_sync_mode(db) == "manual",
+                    );
+                    write_library_history(db, merged)?;
+                }
                 _ => {}
             }
         }
@@ -1561,6 +932,35 @@ mod tests {
     }
 
     #[test]
+    fn handoff_is_scoped_to_progress_and_never_contains_a_local_book_id() {
+        let mut db = AppDb::open_in_memory_for_tests();
+        let content_id = "a".repeat(64);
+        record_reading_handoff(&mut db, &content_id).unwrap();
+        let payload = db
+            .entity_json(READING_HANDOFF_KIND, DEFAULT_ID)
+            .unwrap()
+            .expect("handoff entity");
+        assert_eq!(payload["contentId"], content_id);
+        assert!(payload.get("bookId").is_none());
+        assert!(payload.get("path").is_none());
+
+        let mut disabled = PrivateSyncOptions::default();
+        disabled.sync_progress = false;
+        assert_eq!(
+            entity_enabled_for_options(&disabled, READING_HANDOFF_KIND),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn custom_subscriptions_are_default_off() {
+        assert_eq!(
+            entity_enabled_for_options(&PrivateSyncOptions::default(), NEWS_SUBSCRIPTIONS_KIND),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn secret_bundle_is_unreadable_without_the_sync_password() {
         let bundle = SecretBundle {
             version: 1,
@@ -1579,7 +979,7 @@ mod tests {
         let entries = (0..105)
             .map(|i| serde_json::json!({"at": format!("2026-07-29T{i:03}:00:00Z"), "question": "q", "content": i}))
             .collect::<Vec<_>>();
-        let normalized = normalized_entries(entries);
+        let normalized = history_rules::normalized_entries(entries);
         assert_eq!(normalized.len(), 105);
         assert!(valid_content_id(&"a".repeat(64)));
     }
@@ -1653,7 +1053,7 @@ mod tests {
 
     #[test]
     fn history_tombstone_wins_over_a_live_entry_with_the_same_id() {
-        let normalized = normalized_entries(vec![
+        let normalized = history_rules::normalized_entries(vec![
             serde_json::json!({
                 "id": "reader:one",
                 "at": "2026-08-05T00:00:00Z",
@@ -1673,7 +1073,7 @@ mod tests {
 
     #[test]
     fn library_history_keeps_answer_and_reference_but_never_book_text_or_local_id() {
-        let entries = normalized_library_entries(vec![serde_json::json!({
+        let entries = history_rules::normalized_library_entries(vec![serde_json::json!({
             "question": "《南明史》说了什么？",
             "content": "保存的回答。",
             "task": "question",
@@ -1708,7 +1108,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let normalized = normalized_library_entries(entries);
+        let normalized = history_rules::normalized_library_entries(entries);
         assert_eq!(normalized.len(), 105);
         assert_eq!(normalized[0]["question"], "q-104");
     }
@@ -1726,12 +1126,15 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        assert_eq!(normalized_library_entries(entries.clone()).len(), 105);
         assert_eq!(
-            cloud_library_history_entries(entries.clone(), "recent").len(),
+            history_rules::normalized_library_entries(entries.clone()).len(),
+            105
+        );
+        assert_eq!(
+            history_rules::cloud_library_history_entries(entries.clone(), "recent").len(),
             HISTORY_LIVE_LIMIT
         );
-        let manual = cloud_library_history_entries(entries, "manual");
+        let manual = history_rules::cloud_library_history_entries(entries, "manual");
         assert_eq!(manual.len(), 53);
         assert!(manual.iter().all(|entry| entry["cloudSaved"] == true));
     }
@@ -1780,14 +1183,17 @@ mod tests {
             )],
             "recent",
         );
-        let entity_id = reader_history_entity_id(&content_id, "answer-1");
+        let entity_id = history_projection::reader_entity_id(&content_id, "answer-1");
         let payload = active.get(&entity_id).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(payload["version"], 2);
         assert_eq!(payload["entry"]["content"], "回答");
         assert!(payload["entry"]["sources"][0].get("bookId").is_none());
         assert!(payload["entry"]["sources"][0].get("excerpt").is_none());
-        assert!(tombstones.contains(&reader_history_entity_id(&content_id, "answer-2")));
+        assert!(tombstones.contains(&history_projection::reader_entity_id(
+            &content_id,
+            "answer-2"
+        )));
     }
 
     #[test]

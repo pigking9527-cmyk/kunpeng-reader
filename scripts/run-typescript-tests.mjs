@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const testRoots = [
   join(repositoryRoot, "apps", "desktop-ui", "src"),
+  join(repositoryRoot, "packages", "tauri-api", "test"),
   join(repositoryRoot, "packages", "reader-engine", "test"),
   join(repositoryRoot, "packages", "pdf-engine", "test"),
 ];

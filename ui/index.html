@@ -37,9 +37,16 @@
             />
           </svg>
         </button>
-        <div id="account-panel" class="account-panel">
-          <div id="sync-form" class="sync-form">
-            <div class="fp-title" data-i18n="syncTitle">同步</div>
+        <div
+          id="account-panel"
+          class="account-panel logged-out"
+          data-account-tab="overview"
+        >
+          <div
+            id="sync-form"
+            class="sync-form hidden"
+            aria-label="鲲鹏阅读器账户登录"
+          >
             <label class="sync-field">
               <span data-i18n="accountLabel">账号</span>
               <span class="account-input-wrap">
@@ -65,48 +72,57 @@
                 data-1p-ignore="true"
               />
             </label>
-            <div class="fp-set-actions">
-              <button
-                id="sync-register"
-                class="btn-plain"
-                type="button"
-                data-i18n="register"
-              >
-                注册
-              </button>
+            <div class="sync-auth-actions">
               <button
                 id="sync-login"
-                class="btn-plain"
+                class="btn-plain sync-auth-primary"
                 type="button"
                 data-i18n="login"
               >
                 登录
               </button>
               <button
-                id="sync-password-reset-open"
-                class="btn-plain"
+                id="sync-register"
+                class="btn-plain sync-auth-secondary"
                 type="button"
-                data-i18n="recoverPassword"
+                data-i18n="register"
               >
-                找回密码
+                注册
               </button>
             </div>
+            <div
+              id="sync-auth-status"
+              class="sync-auth-status"
+              role="status"
+              aria-live="polite"
+            ></div>
             <section
               id="sync-registration"
-              class="account-security-panel account-data-card sync-registration-panel"
+              class="account-security-panel sync-registration-panel"
               hidden
             >
-              <strong>邮箱验证注册</strong>
-              <small
-                >先发送邮箱验证码，验证通过后才会创建账号。密码不会在发送验证码时上传。</small
-              >
-              <input
-                id="sync-register-email"
-                type="email"
-                autocomplete="email"
-                placeholder="邮箱地址"
-              />
-              <div class="account-security-actions">
+              <div class="sync-auth-flow-heading">
+                <div>
+                  <strong>注册鲲鹏阅读器</strong>
+                  <small
+                    >邮箱验证码通过后创建账号，密码只在确认注册时提交。</small
+                  >
+                </div>
+                <button
+                  id="sync-register-cancel"
+                  class="btn-plain sync-auth-flow-cancel"
+                  type="button"
+                >
+                  返回登录
+                </button>
+              </div>
+              <div class="sync-auth-inline-field">
+                <input
+                  id="sync-register-email"
+                  type="email"
+                  autocomplete="email"
+                  placeholder="邮箱地址"
+                />
                 <button
                   id="sync-register-code-request"
                   class="btn-plain"
@@ -115,27 +131,20 @@
                   发送验证码
                 </button>
               </div>
-              <input
-                id="sync-register-code"
-                inputmode="numeric"
-                autocomplete="one-time-code"
-                maxlength="6"
-                placeholder="6 位邮箱验证码"
-              />
-              <div class="account-security-actions">
+              <div class="sync-auth-inline-field">
+                <input
+                  id="sync-register-code"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  maxlength="6"
+                  placeholder="6 位邮箱验证码"
+                />
                 <button
                   id="sync-register-confirm"
-                  class="btn-plain"
+                  class="btn-plain sync-auth-primary"
                   type="button"
                 >
                   验证并注册
-                </button>
-                <button
-                  id="sync-register-cancel"
-                  class="btn-plain"
-                  type="button"
-                >
-                  取消
                 </button>
               </div>
               <div
@@ -144,60 +153,8 @@
                 aria-live="polite"
               ></div>
             </section>
-            <section
-              id="sync-password-reset"
-              class="account-security-panel"
-              hidden
-            >
-              <strong data-i18n="recoverPassword">找回密码</strong>
-              <small
-                >仅已绑定并验证邮箱的账户可找回；重置后其他设备会退出登录。</small
-              >
-              <input
-                id="sync-reset-email"
-                type="email"
-                autocomplete="email"
-                placeholder="已绑定的邮箱"
-                data-i18n-placeholder="boundEmail"
-              />
-              <div class="account-security-actions">
-                <button
-                  id="sync-reset-request"
-                  class="btn-plain"
-                  type="button"
-                  data-i18n="sendCode"
-                >
-                  发送验证码
-                </button>
-              </div>
-              <input
-                id="sync-reset-code"
-                inputmode="numeric"
-                autocomplete="one-time-code"
-                placeholder="邮箱验证码"
-                data-i18n-placeholder="emailCode"
-              />
-              <input
-                id="sync-reset-new-password"
-                type="password"
-                autocomplete="new-password"
-                placeholder="新登录密码（至少 12 个字符）"
-                data-i18n-placeholder="newLoginPassword"
-              />
-              <div class="account-security-actions">
-                <button
-                  id="sync-reset-confirm"
-                  class="btn-plain"
-                  type="button"
-                  data-i18n="resetAndLogin"
-                >
-                  确认重置并登录
-                </button>
-              </div>
-              <div id="sync-reset-status" class="private-sync-status"></div>
-            </section>
           </div>
-          <div id="sync-account" class="sync-account account-center">
+          <div id="sync-account" class="sync-account account-center show">
             <div class="account-center-layout">
               <nav class="account-center-nav" aria-label="账户选项">
                 <button
@@ -219,6 +176,7 @@
                   class="account-tab-button"
                   type="button"
                   data-account-tab="sync"
+                  disabled
                 >
                   <span class="account-tab-icon" aria-hidden="true"
                     ><svg viewBox="0 0 24 24">
@@ -233,6 +191,7 @@
                   class="account-tab-button account-tab-secondary"
                   type="button"
                   data-account-tab="security"
+                  disabled
                 >
                   <span class="account-tab-icon" aria-hidden="true"
                     ><svg viewBox="0 0 24 24">
@@ -249,6 +208,7 @@
                   class="account-tab-button"
                   type="button"
                   data-account-tab="data"
+                  disabled
                 >
                   <span class="account-tab-icon" aria-hidden="true"
                     ><svg viewBox="0 0 24 24">
@@ -266,13 +226,20 @@
                   <div class="account-page-heading account-overview-heading">
                     <div>
                       <h2 id="sync-account-name" data-i18n="accountPrefix">
-                        账号：
+                        尚未登录
                       </h2>
                       <p id="account-center-summary">
                         图书正文、原文件和本机路径不会上传。
                       </p>
                     </div>
                     <div class="account-overview-commands">
+                      <button
+                        id="account-auth-open"
+                        class="sync-now-btn account-auth-open"
+                        type="button"
+                      >
+                        登录
+                      </button>
                       <strong
                         id="account-overview-sync-state"
                         class="account-sync-state checking"
@@ -309,24 +276,24 @@
                     <section class="account-quota-card">
                       <div class="account-quota-label">
                         <span>总存储</span
-                        ><strong id="account-storage-value">读取中</strong>
+                        ><strong id="account-storage-value">登录后查看</strong>
                       </div>
                       <div class="account-quota-track">
                         <span id="account-storage-bar"></span>
                       </div>
                       <small id="account-storage-note"
-                        >同步实体和恢复版本会计入此额度</small
+                        >登录后可查看同步存储用量</small
                       >
                     </section>
                     <section class="account-quota-card">
                       <div class="account-quota-label">
-                        <span>每日同步</span
-                        ><strong id="account-daily-value">读取中</strong>
+                        <span>今日上传</span
+                        ><strong id="account-daily-value">登录后查看</strong>
                       </div>
                       <div class="account-quota-track">
                         <span id="account-daily-bar"></span>
                       </div>
-                      <small id="account-daily-note">正在读取今日额度</small>
+                      <small id="account-daily-note">恢复下载不计入今日上传额度</small>
                     </section>
                   </div>
                   <div class="account-last-sync">
@@ -431,6 +398,19 @@
                       ><input id="account-sync-history" type="checkbox" /><span
                         data-i18n="syncHistory"
                         >智读与书库问答记录（可选）</span
+                      ></label
+                    >
+                  </div>
+                  <h3>资讯</h3>
+                  <div class="account-sync-grid">
+                    <label class="account-sync-choice"
+                      ><input
+                        id="account-sync-news-subscriptions"
+                        type="checkbox"
+                      /><span
+                        >自定义 RSS / Atom 订阅（可选）<small
+                          >开启后才会把你添加的订阅地址同步到其他设备；不包含资讯正文、缓存或阅读记录。</small
+                        ></span
                       ></label
                     >
                   </div>
@@ -711,122 +691,144 @@
                     </div>
                   </div>
 
-                  <div class="account-data-card">
-                    <div>
-                      <strong data-i18n="clearThisDeviceData"
-                        >清除此设备数据</strong
-                      ><small data-i18n="clearThisDeviceDescription"
-                        >清除书架记录、阅读进度、批注、生词、统计、缓存、索引、模型、已下载字体、账号登录和
-                        API 配置。</small
-                      >
-                    </div>
-                    <button
-                      id="account-clear-local"
-                      class="btn-plain account-danger-button"
-                      type="button"
-                      data-i18n="clearThisDevice"
+                  <div class="account-data-groups">
+                    <section
+                      class="account-data-section account-data-section-device"
+                      aria-labelledby="account-data-device-heading"
                     >
-                      清除此设备
-                    </button>
-                  </div>
+                      <header class="account-data-section-heading">
+                        <div>
+                          <h3
+                            id="account-data-device-heading"
+                            data-i18n="accountDataDeviceGroup"
+                          >
+                            此设备
+                          </h3>
+                          <p data-i18n="accountDataDeviceGroupHint">
+                            只影响当前电脑，不改动云端同步数据。
+                          </p>
+                        </div>
+                      </header>
+                      <div
+                        class="account-data-card account-data-card-local"
+                      >
+                        <div>
+                          <strong data-i18n="clearThisDeviceData"
+                            >清除此设备数据</strong
+                          ><small data-i18n="clearThisDeviceDescription"
+                            >清除书架记录、阅读进度、批注、生词、统计、缓存、索引、模型、已下载字体、账号登录和
+                            API 配置。</small
+                          >
+                        </div>
+                        <button
+                          id="account-clear-local"
+                          class="btn-plain account-danger-button"
+                          type="button"
+                          data-i18n="clearThisDevice"
+                        >
+                          清除此设备
+                        </button>
+                      </div>
+                    </section>
 
-                  <div class="account-data-card">
-                    <div>
-                      <strong>恢复云端历史版本</strong
-                      ><small
-                        >仅恢复当前账号云端同步实体到指定时间；不是本机“数据恢复点”，不读取或显示书籍内容。成功后会退出所有设备，并清除此设备的旧同步数据。</small
+                    <section
+                      class="account-data-section account-data-section-cloud"
+                      aria-labelledby="account-data-cloud-heading"
+                    >
+                      <header class="account-data-section-heading">
+                        <div>
+                          <h3
+                            id="account-data-cloud-heading"
+                            data-i18n="accountDataCloudGroup"
+                          >
+                            云端同步数据
+                          </h3>
+                          <p data-i18n="accountDataCloudGroupHint">
+                            影响全部设备，需要验证当前登录密码。
+                          </p>
+                        </div>
+                      </header>
+                      <div
+                        class="account-data-card account-data-card-cloud-reset"
                       >
-                    </div>
-                    <p
-                      id="account-cloud-recovery-status"
-                      class="private-sync-status"
-                      aria-live="polite"
-                    >
-                      登录后可读取云端恢复状态。
-                    </p>
-                    <label class="account-data-confirm"
-                      ><span>恢复到时间</span
-                      ><input
-                        id="account-cloud-recovery-target"
-                        type="datetime-local"
-                        step="1"
-                        disabled
-                    /></label>
-                    <label class="account-data-confirm"
-                      ><span data-i18n="loginPassword">登录密码</span
-                      ><input
-                        id="account-cloud-recovery-password"
-                        type="password"
-                        autocomplete="current-password"
-                        disabled
-                    /></label>
-                    <button
-                      id="account-cloud-recovery-restore"
-                      class="btn-plain account-danger-button"
-                      type="button"
-                      disabled
-                    >
-                      恢复云端历史版本
-                    </button>
-                  </div>
+                        <div>
+                          <strong data-i18n="clearDeviceAndCloudData"
+                            >清除此设备及云端数据</strong
+                          ><small data-i18n="clearDeviceAndCloudDescription"
+                            >清空当前账号的全部同步数据，并让所有设备退出登录；账号本身保留。</small
+                          >
+                        </div>
+                        <label class="account-data-confirm"
+                          ><span data-i18n="loginPassword">登录密码</span
+                          ><input
+                            id="account-clear-cloud-password"
+                            type="password"
+                            autocomplete="current-password"
+                        /></label>
+                        <button
+                          id="account-clear-cloud"
+                          class="btn-plain account-danger-button"
+                          type="button"
+                          data-i18n="clearDeviceAndCloud"
+                        >
+                          清除本机及云端
+                        </button>
+                      </div>
+                    </section>
 
-                  <div class="account-data-card">
-                    <div>
-                      <strong data-i18n="clearDeviceAndCloudData"
-                        >清除此设备及云端数据</strong
-                      ><small data-i18n="clearDeviceAndCloudDescription"
-                        >清空当前账号的全部同步数据，并让所有设备退出登录；账号本身保留。</small
-                      >
-                    </div>
-                    <label class="account-data-confirm"
-                      ><span data-i18n="loginPassword">登录密码</span
-                      ><input
-                        id="account-clear-cloud-password"
-                        type="password"
-                        autocomplete="current-password"
-                    /></label>
-                    <button
-                      id="account-clear-cloud"
-                      class="btn-plain account-danger-button"
-                      type="button"
-                      data-i18n="clearDeviceAndCloud"
+                    <section
+                      class="account-data-section account-data-section-account"
+                      aria-labelledby="account-data-account-heading"
                     >
-                      清除本机及云端
-                    </button>
-                  </div>
-
-                  <div class="account-data-card account-data-delete">
-                    <div>
-                      <strong data-i18n="deleteAccountPermanently"
-                        >永久删除账号</strong
-                      ><small data-i18n="deleteAccountDescription"
-                        >删除账号及全部云端数据，同时清除此设备数据。此操作不可恢复。</small
+                      <header class="account-data-section-heading">
+                        <div>
+                          <h3
+                            id="account-data-account-heading"
+                            data-i18n="accountDataAccountGroup"
+                          >
+                            账号
+                          </h3>
+                          <p data-i18n="accountDataAccountGroupHint">
+                            永久操作，仅在不再使用此账号时执行。
+                          </p>
+                        </div>
+                      </header>
+                      <div
+                        class="account-data-card account-data-delete"
                       >
-                    </div>
-                    <label class="account-data-confirm"
-                      ><span data-i18n="loginPassword">登录密码</span
-                      ><input
-                        id="account-delete-password"
-                        type="password"
-                        autocomplete="current-password"
-                    /></label>
-                    <label class="account-data-confirm"
-                      ><span data-i18n="enterFullAccountName"
-                        >输入完整账号名</span
-                      ><input
-                        id="account-delete-username"
-                        type="text"
-                        autocomplete="off"
-                        spellcheck="false"
-                    /></label>
-                    <button
-                      id="account-delete"
-                      class="btn-plain account-danger-button account-delete-button"
-                      type="button"
-                      data-i18n="deleteAccountPermanently"
-                    >
-                      永久删除账号
-                    </button>
+                        <div>
+                          <strong data-i18n="deleteAccountPermanently"
+                            >永久删除账号</strong
+                          ><small data-i18n="deleteAccountDescription"
+                            >删除账号及全部云端数据，同时清除此设备数据。此操作不可恢复。</small
+                          >
+                        </div>
+                        <label class="account-data-confirm"
+                          ><span data-i18n="loginPassword">登录密码</span
+                          ><input
+                            id="account-delete-password"
+                            type="password"
+                            autocomplete="current-password"
+                        /></label>
+                        <label class="account-data-confirm"
+                          ><span data-i18n="enterFullAccountName"
+                            >输入完整账号名</span
+                          ><input
+                            id="account-delete-username"
+                            type="text"
+                            autocomplete="off"
+                            spellcheck="false"
+                        /></label>
+                        <button
+                          id="account-delete"
+                          class="btn-plain account-danger-button account-delete-button"
+                          type="button"
+                          data-i18n="deleteAccountPermanently"
+                        >
+                          永久删除账号
+                        </button>
+                      </div>
+                    </section>
                   </div>
                   <div
                     id="account-data-status"
@@ -1022,6 +1024,34 @@
               />
               <path
                 d="M13 8h3.5M13 10.4h3.5M7 14.5h9.5M7 16.7h6.3"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.65"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+        </div>
+        <div class="toolbar-action" data-toolbar-item="intelligence-lab">
+          <button
+            id="intelligence-lab-toolbar-btn"
+            class="icon-btn intelligence-lab-toolbar-btn"
+            type="button"
+            title="情报中心（测试）"
+            aria-label="打开情报中心测试"
+            aria-pressed="false"
+          >
+            <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
+              <path
+                d="M8.25 4.5h7.5M10 4.5v5.05L5.65 17.1A2.2 2.2 0 0 0 7.56 20.5h8.88a2.2 2.2 0 0 0 1.91-3.4L14 9.55V4.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.65"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M8.15 15.2h7.7M10.2 17.7h.01M13.8 17.7h.01"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="1.65"
@@ -1710,6 +1740,26 @@
                       ></span></label
                   ></span>
                 </div>
+                <div class="fp-set-row">
+                  <span>预加载</span
+                  ><span class="fp-set-tail"
+                    ><button
+                      id="reader-shell-preload-gear"
+                      class="fp-row-gear fp-settings-detail"
+                      type="button"
+                      title="预加载设置"
+                      aria-label="预加载设置"
+                    >
+                      <span>设置</span><span aria-hidden="true">›</span></button
+                    ><label class="switch" title="启用预加载"
+                      ><input
+                        type="checkbox"
+                        id="reader-shell-preload-enabled"
+                        aria-label="启用预加载" /><span
+                        class="slider"
+                      ></span></label
+                  ></span>
+                </div>
                 <section
                   class="fp-set-row default-apps-setting"
                   aria-label="默认打开方式"
@@ -2348,7 +2398,7 @@
                     <span
                       id="gesture-hint-preview-text"
                       title="拖动以调整提示位置"
-                      >返回／关闭当前页</span
+                      >关闭</span
                     >
                   </div>
                 </section>
@@ -2371,7 +2421,7 @@
                   id="gesture-action-search"
                   class="gesture-action-search"
                   type="search"
-                  placeholder="例如：返回、信息说明、重新打开"
+                  placeholder="例如：关闭、信息说明、撤销"
                   autocomplete="off"
                 />
                 <div
@@ -2386,8 +2436,8 @@
                     data-gesture-action="back"
                     role="radio"
                   >
-                    <strong>← 返回／关闭当前页</strong
-                    ><span>在支持的页面关闭当前页或返回上一级</span>
+                    <strong>✕ 关闭</strong
+                    ><span>关闭当前页面、面板或窗口，不执行返回或后退</span>
                   </button>
                   <button
                     class="gesture-choice-tile"
@@ -3084,6 +3134,73 @@
             </div>
           </div>
         </section>
+      </div>
+    </div>
+    <div
+      id="reader-shell-preload-modal"
+      class="modal settings-detail-modal"
+      data-gesture-info-title="预加载"
+      data-gesture-info="预加载会提前创建隐藏阅读窗口，点击图书时直接使用。开启后会增加内存占用；可选缓存最近阅读 EPUB 的续读章节排版准备资料。"
+    >
+      <div
+        class="modal-card settings-detail-card reader-shell-preload-settings-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reader-shell-preload-modal-title"
+      >
+        <div class="modal-head">
+          <span id="reader-shell-preload-modal-title">预加载</span
+          ><button
+            id="reader-shell-preload-close"
+            class="btn-plain"
+            type="button"
+            aria-label="关闭"
+          >
+            ✕
+          </button>
+        </div>
+        <p class="reader-shell-preload-modal-note">
+          预加载会提前创建隐藏阅读窗口，点击图书时直接使用。开启后会增加内存占用；关闭会释放空闲窗口，已打开的阅读窗口不受影响。
+        </p>
+        <section class="reader-shell-preload-status-wrap" aria-label="内存占用">
+          <strong>内存占用</strong>
+          <p id="reader-shell-preload-status" aria-live="polite">
+            正在读取预加载状态…
+          </p>
+        </section>
+        <section class="reader-shell-recent-cache" aria-label="最近阅读章节缓存">
+          <div class="reader-shell-recent-cache-head">
+            <div>
+              <strong>最近阅读章节缓存</strong>
+              <span class="reader-shell-cache-badge">仅 EPUB</span>
+              <p>保留最近 3 本书的续读章节排版准备资料；章节正文最多 6 MiB，实际进程占用以上方驻留内存为准，不保留图片或额外阅读窗口。</p>
+            </div>
+            <label class="switch" title="缓存最近阅读章节">
+              <input id="reader-shell-recent-cache-enabled" type="checkbox" aria-label="缓存最近阅读章节" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="reader-shell-recent-cache-foot">
+            <span id="reader-shell-recent-cache-status" aria-live="polite">正在读取章节缓存状态…</span>
+            <button id="reader-shell-recent-cache-clear" class="btn-plain" type="button">清理缓存</button>
+          </div>
+        </section>
+        <section class="reader-shell-preload-benchmark" aria-label="打开速度对比">
+          <div>
+            <strong>打开速度对比</strong>
+            <p>以 EPUB 为样本对比普通打开与预加载窗口，分别记录外壳、排版、首屏加载与总耗时。</p>
+          </div>
+          <button id="reader-shell-preload-benchmark" class="btn-plain" type="button">
+            开始测速
+          </button>
+        </section>
+        <p
+          id="reader-shell-preload-benchmark-result"
+          class="reader-shell-preload-result"
+          aria-live="polite"
+          hidden
+        ></p>
+        <div id="reader-shell-preload-rows" class="reader-shell-preload-rows" hidden></div>
       </div>
     </div>
     <div id="import-dirs-modal" class="modal settings-detail-modal">
@@ -4329,6 +4446,8 @@
         hidden
         aria-label="资讯来源设置"
         data-i18n-aria="sourceSettings"
+        data-gesture-info-title="管理资讯来源"
+        data-gesture-info="这里集中管理内置与本机自定义 RSS/Atom 来源。目录按提供方和分类展开，搜索与提供方筛选可快速定位；来源目录不限制勾选数量，刷新时会按 12 路并发分批处理。将指针悬停在来源上可查看它的用途、内容类型和分类。信息提取手势仅用于此页面空白处的总说明。自定义来源仅保存在本机，不会同步地址或凭据。"
       >
         <div class="newsnow-source-picker-head">
           <div class="newsnow-source-picker-title">
@@ -4338,7 +4457,7 @@
             </p>
           </div>
           <span id="newsnow-source-selection" class="newsnow-source-selection"
-            >已选 0 / 24</span
+            >已选 0 个</span
           ><button
             id="newsnow-source-close"
             class="newsnow-picker-close"
@@ -4360,7 +4479,54 @@
           data-i18n-placeholder="sourceSearch"
           data-i18n-aria="sourceSearch"
         />
-        <div id="newsnow-source-options" class="newsnow-source-options"></div>
+        <details
+          id="newsnow-custom-sources"
+          class="newsnow-custom-sources"
+          aria-label="自定义 RSS 或 Atom 来源"
+        >
+          <summary class="newsnow-custom-sources-summary">
+            <div>
+              <strong>自定义 RSS / Atom</strong>
+              <span>按需添加，避免占用来源目录空间</span>
+            </div>
+            <span id="newsnow-custom-source-count" class="newsnow-custom-source-count" aria-live="polite">已添加 0 / 200</span>
+          </summary>
+          <div class="newsnow-custom-sources-content">
+            <p>仅接受 HTTPS 地址。添加后可在下方目录中启停或删除；本机最多保存 200 条。</p>
+            <form id="newsnow-custom-source-form" class="newsnow-custom-source-form">
+              <label>
+                <span>名称</span>
+                <input id="newsnow-custom-source-name" type="text" maxlength="80" autocomplete="off" required placeholder="例如：我的科技订阅" />
+              </label>
+              <label class="newsnow-custom-source-url-field">
+                <span>HTTPS RSS / Atom 地址</span>
+                <input id="newsnow-custom-source-url" type="url" maxlength="2048" inputmode="url" autocomplete="url" required placeholder="https://example.com/feed.xml" />
+              </label>
+              <label>
+                <span>分类</span>
+                <input id="newsnow-custom-source-category" type="text" maxlength="48" autocomplete="off" required value="自定义" placeholder="例如：科技" />
+              </label>
+              <button class="btn-primary" type="submit">添加来源</button>
+            </form>
+            <div id="newsnow-custom-source-list" class="newsnow-custom-source-list" aria-live="polite"></div>
+          </div>
+        </details>
+        <section class="newsnow-source-directory" aria-label="来源目录">
+          <div class="newsnow-source-directory-head">
+            <div>
+              <strong>来源目录</strong>
+              <p id="newsnow-source-directory-summary" class="newsnow-source-directory-summary" aria-live="polite">
+                正在加载来源目录…
+              </p>
+            </div>
+          </div>
+          <div
+            id="newsnow-source-provider-filters"
+            class="newsnow-source-provider-filters"
+            aria-label="按提供方筛选来源"
+          ></div>
+          <div id="newsnow-source-options" class="newsnow-source-options" data-layout="catalog"></div>
+        </section>
         <section
           id="newsnow-tieba-bars"
           class="newsnow-tieba-bars"
@@ -4582,6 +4748,224 @@
         class="newsnow-reader-content"
       ></article>
     </section>
+    <section
+      id="intelligence-workspace-page"
+      class="intelligence-workspace-page"
+      hidden
+      aria-label="情报中心测试"
+      data-gesture-info-title="情报中心（测试）"
+      data-gesture-info="这是统一情报工作台原型。它暂时复用资讯流数据展示简报、态势和研究布局；不会上传书库，也不会调用外部模型。"
+      data-layout="briefing"
+    >
+      <header class="intelligence-workspace-head">
+        <div class="intelligence-workspace-title-row">
+          <button
+            id="intelligence-workspace-back"
+            class="intelligence-workspace-back"
+            type="button"
+            title="返回书架"
+            aria-label="返回书架"
+          >
+            ←
+          </button>
+          <div>
+            <div class="intelligence-workspace-kicker">情报中心 <span>测试</span></div>
+            <h1>从事件到阅读与书库理解</h1>
+            <p>同一批资讯在不同任务下，以简报、态势、研究和星际旅行四种视角呈现。</p>
+          </div>
+        </div>
+        <div class="intelligence-workspace-actions">
+          <div class="intelligence-layout-switch" role="group" aria-label="情报中心布局">
+            <button
+              id="intelligence-layout-briefing"
+              type="button"
+              aria-pressed="true"
+            >
+              简报
+            </button>
+            <button
+              id="intelligence-layout-monitor"
+              type="button"
+              aria-pressed="false"
+            >
+              态势
+            </button>
+            <button
+              id="intelligence-layout-research"
+              type="button"
+              aria-pressed="false"
+            >
+              研究
+            </button>
+            <button
+              id="intelligence-layout-interstellar"
+              type="button"
+              aria-pressed="false"
+            >
+              星际旅行
+            </button>
+          </div>
+          <button id="intelligence-open-sources" class="btn-plain" type="button">信息来源</button>
+          <button id="intelligence-refresh" class="btn-plain" type="button">刷新</button>
+        </div>
+      </header>
+      <p id="intelligence-workspace-status" class="intelligence-workspace-status" aria-live="polite"></p>
+      <div id="intelligence-standard-view" class="intelligence-workspace-grid">
+        <aside class="intelligence-source-rail" aria-label="情报处理链路">
+          <section class="intelligence-stage-card intelligence-stage-horizon">
+            <div class="intelligence-stage-label">Horizon · 后端</div>
+            <h2>今日信号筛选</h2>
+            <p>已接入公开的人道与安全信号源；未选来源不会参与抓取、去重或排序。</p>
+            <div class="intelligence-stage-pills" aria-label="Horizon 数据处理">
+              <span>抓取</span><span>去重</span><span>排序</span>
+            </div>
+          </section>
+          <section class="intelligence-stage-card intelligence-stage-world">
+            <div class="intelligence-stage-label">WorldMonitor · 展示</div>
+            <h2>全球态势</h2>
+            <p>已接入地震、自然事件与灾害预警源，并保留事件、地区和时间上下文。</p>
+            <div class="intelligence-world-grid" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            </div>
+          </section>
+        </aside>
+        <main class="intelligence-main-panel">
+          <section class="intelligence-main-head">
+            <div>
+              <div class="intelligence-panel-label">资讯 · 展示</div>
+              <h2>今日可读信号</h2>
+            </div>
+            <p>选择一条资讯，右侧会保留其事件上下文。</p>
+          </section>
+          <div id="intelligence-digest-list" class="intelligence-digest-list" aria-live="polite"></div>
+        </main>
+        <aside class="intelligence-context-panel" aria-label="事件与书库上下文">
+          <section class="intelligence-context-card intelligence-signal-card">
+            <div class="intelligence-panel-label">事件 · 上下文</div>
+            <h2>关联信号</h2>
+            <div id="intelligence-signal-list" class="intelligence-signal-list"></div>
+          </section>
+          <section class="intelligence-context-card intelligence-rag-card">
+            <div class="intelligence-panel-label">RAG · 后端</div>
+            <h2 id="intelligence-context-title">选择一条资讯</h2>
+            <p id="intelligence-context-body">这里将显示可追溯的新闻证据、书库章节与模型推断。此测试版不会读取或上传你的书籍。</p>
+            <button id="intelligence-open-news" class="btn-primary" type="button">查看资讯详情</button>
+          </section>
+        </aside>
+      </div>
+      <section
+        id="interstellar-progress-view"
+        class="interstellar-progress-view"
+        aria-label="星际旅行进度"
+        hidden
+      >
+        <section class="interstellar-hero">
+          <div class="interstellar-hero-copy">
+            <div class="intelligence-panel-label">INTERSTELLAR READINESS · 首版人工基线</div>
+            <h2>无人恒星际飞越探测器</h2>
+            <p>目标场景：达到约 0.05c，飞越一颗近邻恒星并返回科学数据。这里衡量的是能力成熟度，不是工程完成百分比或发布日期承诺。</p>
+            <div class="interstellar-scenario-tags" aria-label="任务边界">
+              <span>无人任务</span><span>近邻恒星</span><span>0.05c 级</span><span>可追溯证据</span>
+            </div>
+          </div>
+          <div class="interstellar-total" role="img" aria-label="综合进度17%，估计区间12%到23%">
+            <div class="interstellar-total-ring">
+              <strong>17<span>%</span></strong>
+              <small>综合进度</small>
+            </div>
+            <p>估计区间 12%–23%</p>
+          </div>
+          <div class="interstellar-baseline-note">
+            <span>基线日期</span>
+            <strong>2026-08-18</strong>
+            <p>下一次经审核的证据快照会形成首个可计算速度。</p>
+          </div>
+        </section>
+
+        <section class="interstellar-pillars" aria-label="三大推进支柱">
+          <article class="interstellar-pillar-card is-research">
+            <div><span>基础研究</span><strong>34%</strong></div>
+            <div class="interstellar-meter"><i style="width: 34%"></i></div>
+            <p>相对论、推进物理、材料、生命科学与自主系统的知识基础。</p>
+          </article>
+          <article class="interstellar-pillar-card is-engineering">
+            <div><span>工程实现</span><strong>13%</strong></div>
+            <div class="interstellar-meter"><i style="width: 13%"></i></div>
+            <p>原型、相关环境验证、长期可靠性、制造与太空基础设施。</p>
+          </article>
+          <article class="interstellar-pillar-card is-institution">
+            <div><span>制度与产业</span><strong>9%</strong></div>
+            <div class="interstellar-meter"><i style="width: 9%"></i></div>
+            <p>跨世代投资、国际协作、风险治理、资源和持续工业能力。</p>
+          </article>
+        </section>
+
+        <div class="interstellar-dashboard-grid">
+          <section class="interstellar-panel interstellar-bottleneck-panel">
+            <div class="interstellar-section-head">
+              <div>
+                <div class="intelligence-panel-label">能力图谱 · 当前瓶颈</div>
+                <h2>任何关键短板都不能被高分项抵消</h2>
+              </div>
+              <span class="interstellar-model-badge">6 项关键能力</span>
+            </div>
+            <div class="interstellar-bottlenecks">
+              <div class="interstellar-bottleneck"><span>太空工业与长期制度</span><i><b style="width: 9%"></b></i><strong>9%</strong></div>
+              <div class="interstellar-bottleneck"><span>高比冲推进与减速</span><i><b style="width: 11%"></b></i><strong>11%</strong></div>
+              <div class="interstellar-bottleneck"><span>高密度能源与散热</span><i><b style="width: 17%"></b></i><strong>17%</strong></div>
+              <div class="interstellar-bottleneck"><span>数十年可靠性与自修复</span><i><b style="width: 20%"></b></i><strong>20%</strong></div>
+              <div class="interstellar-bottleneck"><span>材料、尘埃与辐射防护</span><i><b style="width: 28%"></b></i><strong>28%</strong></div>
+              <div class="interstellar-bottleneck"><span>自主 AI、导航与通信</span><i><b style="width: 42%"></b></i><strong>42%</strong></div>
+            </div>
+          </section>
+
+          <aside class="interstellar-side-stack">
+            <section class="interstellar-panel interstellar-attribution-panel">
+              <div class="intelligence-panel-label">总体贡献归因</div>
+              <h2>人类与 AI</h2>
+              <div class="interstellar-attribution-bar" aria-label="人类贡献15个百分点，AI贡献2个百分点">
+                <i class="is-human" style="width: 88.24%"></i><i class="is-ai" style="width: 11.76%"></i>
+              </div>
+              <div class="interstellar-attribution-legend">
+                <span><i class="is-human"></i>人类 15.0 点</span>
+                <span><i class="is-ai"></i>AI 2.0 点</span>
+              </div>
+              <p>只记录有明确证据的直接或辅助贡献；未知归因不会强行分配。</p>
+            </section>
+            <section class="interstellar-panel interstellar-velocity-panel">
+              <div class="intelligence-panel-label">发展速度</div>
+              <h2>基线建立中</h2>
+              <strong>待累计 2 个审核快照</strong>
+              <p>资金、政策和灾害主要影响速度；理论、实验与成熟工程主要影响当前进度。</p>
+            </section>
+            <section class="interstellar-panel interstellar-rule-panel">
+              <div class="intelligence-panel-label">动态计算规则</div>
+              <p>理论贡献会随对应工程成熟度逐步释放，但不会重复加分；撤稿、失败实验和项目取消可以降低进度。</p>
+            </section>
+          </aside>
+        </div>
+
+        <section class="interstellar-panel interstellar-signals-panel">
+          <div class="interstellar-section-head">
+            <div>
+              <div class="intelligence-panel-label">当前资讯 · 审核队列</div>
+              <h2>可能影响星际旅行的候选信号</h2>
+            </div>
+            <span id="interstellar-signal-count" class="interstellar-model-badge">等待资讯</span>
+          </div>
+          <p class="interstellar-signals-disclaimer">系统只做相关性筛选。候选新闻在确认原始论文、工程数据或正式公告前，不会改变任何进度。</p>
+          <div class="interstellar-signal-layout">
+            <div id="interstellar-signal-list" class="interstellar-candidate-list" aria-live="polite"></div>
+            <aside class="interstellar-candidate-detail">
+              <div class="intelligence-panel-label">候选证据</div>
+              <h3 id="interstellar-context-title">尚未发现候选信号</h3>
+              <p id="interstellar-context-body">刷新当前已选来源后，系统会筛选推进、能源、材料、太空工程与自主 AI 等相关信息。</p>
+              <button id="interstellar-open-news" class="btn-primary" type="button" disabled>查看资讯详情</button>
+            </aside>
+          </div>
+        </section>
+      </section>
+    </section>
     <canvas
       id="newsnow-gesture-trail"
       class="newsnow-gesture-trail"
@@ -4590,53 +4974,55 @@
       hidden
       aria-hidden="true"
     ></canvas>
-    <script src="recovery-settings-snapshot.js"></script>
-    <script src="overlay-stack.js"></script>
-    <script src="startup-perf.js"></script>
-    <script src="app-i18n-reranker-catalog.js"></script>
-    <script src="app-i18n-stats-catalog.js"></script>
-    <script src="app-i18n-news-surface-catalog.js"></script>
-    <script src="app-i18n-semantic-runtime-catalog.js"></script>
-    <script src="app-i18n.js"></script>
-    <script src="startup-enhancement-ui.js"></script>
-    <script src="window-resize.js"></script>
-    <script src="titlebar.js"></script>
-    <script src="animation-settings.js"></script>
-    <script src="animation-settings-ui.js"></script>
-    <script src="semantic-status-cache.js"></script>
-    <script src="semantic-ui.js"></script>
-    <script src="sync-ui.js"></script>
-    <script src="about-ui.js"></script>
-    <script src="feedback-ui.js"></script>
-    <script src="stats-rules.js"></script>
-    <script src="stats-ui.js"></script>
-    <script src="shelf-ui-rules.js"></script>
-    <script src="shelf-cover-loading-rules.js"></script>
-    <script src="shelf-ui.js"></script>
-    <script src="booklist-settings-ui.js"></script>
-    <script src="settings-layout-ui.js"></script>
-    <script src="toolbar-settings-ui.js"></script>
-    <script src="book-info-panel.js"></script>
-    <script src="book-info-related.js"></script>
-    <script src="book-info-organization.js"></script>
-    <script src="notice-ui.js"></script>
-    <script src="dialog-ui.js"></script>
-    <script src="library-ai.js"></script>
-    <script src="library-ai-entry.js"></script>
-    <script src="news-gesture.js"></script>
-    <script src="experimental-features.js"></script>
-    <script src="news-layout-rules.js"></script>
-    <script src="news-ui.js"></script>
-    <script src="gesture-hint-rules.js"></script>
-    <script src="gesture-ui.js"></script>
-    <script src="api-settings-ui.js"></script>
-    <script src="auto-import-ui.js"></script>
-    <script src="reader-recommendation-settings.js"></script>
-    <script src="book-classification-settings-ui.js"></script>
-    <script src="problem-trace-ui.js"></script>
-    <script src="browser-native-guard.js"></script>
-    <script src="app.js"></script>
-    <script src="search-ui.js"></script>
-    <script src="debug-ui.js"></script>
+    <script src="generated-ts/recovery-settings-snapshot.js"></script>
+    <script src="generated-ts/overlay-stack.js"></script>
+    <script src="generated-ts/startup-perf.js"></script>
+    <script src="generated-ts/app-i18n-reranker-catalog.js"></script>
+    <script src="generated-ts/app-i18n-stats-catalog.js"></script>
+    <script src="generated-ts/app-i18n-news-surface-catalog.js"></script>
+    <script src="generated-ts/app-i18n-semantic-runtime-catalog.js"></script>
+    <script src="generated-ts/app-i18n.js"></script>
+    <script src="generated-ts/startup-enhancement-ui.js"></script>
+    <script src="generated-ts/window-resize.js"></script>
+    <script src="generated-ts/titlebar.js"></script>
+    <script src="generated-ts/animation-settings.js"></script>
+    <script src="generated-ts/animation-settings-ui.js"></script>
+    <script src="generated-ts/semantic-status-cache.js"></script>
+    <script src="generated-ts/semantic-ui.js"></script>
+    <script src="generated-ts/sync-ui.js"></script>
+    <script src="generated-ts/about-ui.js"></script>
+    <script src="generated-ts/feedback-ui.js"></script>
+    <script src="generated-ts/stats-rules.js"></script>
+    <script src="generated-ts/stats-ui.js"></script>
+    <script src="generated-ts/shelf-ui-rules.js"></script>
+    <script src="generated-ts/shelf-cover-loading-rules.js"></script>
+    <script src="generated-ts/shelf-ui.js"></script>
+    <script src="generated-ts/reader-shell-preload-ui.js"></script>
+    <script src="generated-ts/booklist-settings-ui.js"></script>
+    <script src="generated-ts/settings-layout-ui.js"></script>
+    <script src="generated-ts/toolbar-settings-ui.js"></script>
+    <script src="generated-ts/book-info-panel.js"></script>
+    <script src="generated-ts/book-info-related.js"></script>
+    <script src="generated-ts/book-info-organization.js"></script>
+    <script src="generated-ts/notice-ui.js"></script>
+    <script src="generated-ts/dialog-ui.js"></script>
+    <script src="generated-ts/library-ai.js"></script>
+    <script src="generated-ts/library-ai-entry.js"></script>
+    <script src="generated-ts/news-gesture.js"></script>
+    <script src="generated-ts/experimental-features.js"></script>
+    <script src="generated-ts/news-layout-rules.js"></script>
+    <script src="generated-ts/news-ui.js"></script>
+    <script src="generated-ts/intelligence-workspace-ui.js"></script>
+    <script src="generated-ts/gesture-hint-rules.js"></script>
+    <script src="generated-ts/gesture-ui.js"></script>
+    <script src="generated-ts/api-settings-ui.js"></script>
+    <script src="generated-ts/auto-import-ui.js"></script>
+    <script src="generated-ts/reader-recommendation-settings.js"></script>
+    <script src="generated-ts/book-classification-settings-ui.js"></script>
+    <script src="generated-ts/problem-trace-ui.js"></script>
+    <script src="generated-ts/browser-native-guard.js"></script>
+    <script src="generated-ts/search-ui.js"></script>
+    <script src="generated-ts/app.js"></script>
+    <script src="generated-ts/debug-ui.js"></script>
   </body>
 </html>

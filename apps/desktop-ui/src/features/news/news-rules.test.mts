@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   GESTURE_SAMPLE_COUNT,
-  MAX_NEWS_SOURCES,
   normaliseGesturePath,
   normalisePreferences,
   normaliseTiebaBars,
@@ -21,9 +20,9 @@ test("news URLs only accept HTTPS", () => {
   assert.equal(safeHttpsUrl("javascript:alert(1)"), null);
 });
 
-test("source and Tieba preferences are bounded and force tieba only with enabled bars", () => {
+test("source selection is catalog-wide while Tieba only appears with enabled bars", () => {
   const preferences: NewsPreferences = {
-    sourceIds: Array.from({ length: MAX_NEWS_SOURCES + 3 }, (_, index) => `unknown-${index}`),
+    sourceIds: Array.from({ length: 3 }, (_, index) => `unknown-${index}`),
     tiebaBars: ["测试吧", "测试吧", "\u0000bad"],
     enabledTiebaBars: ["测试"], layout: "grid", order: "source",
   };
@@ -31,6 +30,20 @@ test("source and Tieba preferences are bounded and force tieba only with enabled
   assert.deepEqual(normaliseTiebaBars(preferences.tiebaBars), ["测试"]);
   assert.deepEqual(normalised.sourceIds, ["tieba"]);
   assert.deepEqual(normalised.enabledTiebaBars, ["测试"]);
+});
+
+test("every known source survives normalisation", () => {
+  const expandedCatalog = Array.from({ length: 700 }, (_, index) => ({
+    id: `source-${index}`,
+    name: `Source ${index}`,
+    category: "测试",
+    defaultEnabled: false,
+  }));
+  const normalised = normalisePreferences({
+    sourceIds: expandedCatalog.map((source) => source.id),
+    tiebaBars: [], enabledTiebaBars: [], layout: "grid", order: "source",
+  }, expandedCatalog);
+  assert.equal(normalised.sourceIds.length, 700);
 });
 
 test("recorded gestures are resampled to the fixed 48-point exchange model", () => {

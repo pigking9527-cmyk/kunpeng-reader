@@ -51,6 +51,16 @@ the reader-window-open query, and startup elapsed time. It does not change
 window behaviour or connect any legacy UI; a future feature can call its
 named methods instead of sending raw command strings.
 
+## Dialog capabilities
+
+`dialogsFromTauriGlobal()` is the corresponding narrow boundary for the Tauri
+file/message dialog plugin. It validates native return values before exposing
+paths or confirmation results and is constructed once at a window boundary.
+Migrated features receive `TauriDialogs` (or a still narrower feature
+capability); they do not read `window.__TAURI__.dialog` themselves. File paths
+must stay inside the immediate capability-to-command call when a feature does
+not need to display or persist them.
+
 ## Window settings feature adapter
 
 The window-settings integration has its own concrete adapter at

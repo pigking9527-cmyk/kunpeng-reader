@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "stats-rules.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "stats-rules.js"), "utf8");
 
 function rules() {
   const context = { window: null };

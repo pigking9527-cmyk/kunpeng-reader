@@ -2,6 +2,8 @@
 
 客户端服务入口见 [`api-base-v1.md`](api-base-v1.md)。当前仅 `/v1/auth/*` 与
 `/v1/sync/*` 承载认证和同步；无需客户端世代请求头。这不改变实体的 `syncProtocolVersion`。
+无待上传变更的客户端可选用 [`sync-checkpoint-v1.md`](sync-checkpoint-v1.md) 轻量确认
+已追上服务端 cursor；它不替代完整 inventory/reconcile 自愈。
 
 所有同步实体应具备稳定 ID、实体种类、更新时间、删除墓碑、来源设备和版本/冲突信息。实体内容按 `kind` 区分，客户端应忽略自己不认识的可选字段。
 
@@ -27,7 +29,7 @@
 可选同步分类：
 
 - 每一类均是**本机交换范围**：关闭时不上传、不下载、不生成墓碑，也不删除本机或云端副本；重新开启后客户端从头拉取，以恢复该类云端数据。
-- `user_book_tags_v1`、`book_collections_v1` 和 `booklist_v1` 归入“书签、高亮、批注、评分、标签、收藏夹与书单”；`reader_palette_v1` 与 `reader_palette_order_v1` 归入“自定义阅读主题与背景”；`app_settings_v1` 归入“软件设置”。
+- `user_book_tags_v1`、`book_collections_v1` 和 `booklist_v1` 归入“书签、高亮、批注、评分、标签、收藏夹与书单”；`reader_palette_v1` 与 `reader_palette_order_v1` 归入“自定义阅读主题与背景”；`app_settings_v1` 归入“软件设置”；`reading_handoff_v1` 归入“阅读进度与续读位置”。
 
 可选私密扩展：
 
@@ -35,16 +37,18 @@
 - `translation_config_v1`：翻译服务的非敏感偏好，不含凭据；默认同步。
 - `ai_reader_history_entry_v2`：一条智读或书库问答历史对应一个同步实体。单书 ID 为 `reader:<content-id>:<entry-id>`，书库 ID 为 `library:<entry-id>`；本机历史不设活跃记录上限，云端读者历史和书库问答各最多 100 条活跃实体与 200 条墓碑。`off`、`recent`、`manual` 只决定本机哪些条目物化；新增、修改或删除一条记录只交换该实体。只同步问题、回答和脱敏来源书名/章节/材料类型，不同步书籍原文片段、本机 `bookId` 或路径。`ai_reader_history_v1` 仅作为旧云端数组的只读迁移来源，协议 v3 客户端不再上传它；完整规则见 ADR-0023。
 - `secret_bundle_v1`：客户端加密后的 API Key/翻译凭据包；由用户设置同步密码后明确开启。
-- `reader_palette_v1`：一个用户自定义阅读配色。每个主题单独使用 LWW 与删除墓碑同步，最多 10 个活跃主题；新客户端只保存 `backgroundAssetId`、SHA-256、MIME 与字节数，二进制图片通过认证的 `/v1/sync/assets/*` 分块通道传输并缓存为本机 reader 资源。`backgroundImage` data URL 仅为旧客户端迁移期的可读兼容字段；新客户端不得写入、不得放进阅读 URL、postMessage 或动态 CSS。默认主题不作为实体上传。
+- `reader_palette_v1`：一个用户自定义阅读配色。每个主题单独使用 LWW 与删除墓碑同步，最多 10 个活跃主题；新客户端只保存 `backgroundAssetId`、SHA-256、MIME 与字节数，二进制图片通过认证的 `/v1/sync/assets/*` 分块通道传输并缓存为本机 reader 资源。导入后最大 5 MiB；超过 5 MiB 的旧资产不再支持读取、显示或续传，客户端只保留主题颜色并移除背景引用。主题删除后，本机和云端均延迟七天清理仍未被任何活动主题引用的图片。`backgroundImage` data URL 仅为旧客户端迁移期的可读兼容字段；新客户端不得写入、不得放进阅读 URL、postMessage 或动态 CSS。默认主题不作为实体上传。
 - `reader_palette_order_v1/default`：用户主题顺序。它仅保存当前默认主题与自定义主题的稳定 ID 排列；未知 ID 必须忽略。
 - `app_settings_v1/default`：Windows、Linux、macOS 共用的账户级非敏感软件设置。`epubLayoutEngine` 可选值为 `legacy` / `modern`，缺失或非法时按 `legacy` 处理，仅影响 EPUB，详见 ADR-0033。跳转回退图标只使用 30–160 px（步进 1）的整数 `readerJumpBackIconSizePx`，位置 `readerJumpBackPositionX/Y` 为 0–1000 的图标左上角可见轨道比例；`readerJumpBackSizeLevel` 已由协议 v5 永久退役，出现该字段或缺失像素字段的 payload 均不得进入 v5 同步。其余资讯、书库问答、菜单栏、手势和全局阅读排版字段保持本段既有边界；已知字段按字段补丁合并并保留未来未知字段，但“保留未知字段”不适用于已退役的大小级别字段。首次接入账户时，云端的该实体优先于 WebView 启动期写入的本机默认值。完整断代、切换与回滚条件见 ADR-0031。
+- `reading_handoff_v1/default`：最近一次实际保存阅读位置的内容 ID。它只用于让另一台已导入同一内容的设备恢复“继续阅读”上下文；不含本机书 ID、路径、文件、封面、标题或正文。随“阅读进度与续读位置”开关同步。
+- `news_subscriptions_v1/default`：用户明确启用“自定义 RSS / Atom 订阅（可选）”后才交换的 HTTPS 订阅定义，最多 200 条。它不含资讯正文、缓存、健康检查、文章 URL、阅读历史或浏览记录；关闭开关只停止收发，不删除任一端已保存的定义。
 
 ## 账户同步准入与资源预算
 
 - 新注册账号可登录并在“账户安全”绑定邮箱；只有成功验证绑定邮箱后才可调用任何 `/v1/sync/*` 接口。未验证时服务端返回 `403 EMAIL_VERIFICATION_REQUIRED`；客户端必须引导用户完成验证而不是把本机数据丢弃。
 - 已登录账户的首个邮箱绑定与旧/新邮箱两阶段换绑，见 [`../auth/email-binding-v1.md`](../auth/email-binding-v1.md)。这些认证请求不携带同步协议 header；换绑授权码是短时一次性机密，不能进入任何同步数据或持久化客户端状态。
 - 被后台封禁的账号返回 `403 ACCOUNT_DISABLED`；封禁会撤销已有同步令牌。
-- 服务端按账号限制存储总量和每日实际接受写入量。当前实体 JSON 与用于误操作恢复的压缩历史均计入存储；被拒绝、重复或 LWW 冲突的实体不消耗每日额度。超额实体在支持 disposition 的请求中返回 `QUOTA_EXCEEDED`。
+- 服务端按账号限制存储总量和每日实际接受写入量。当前实体 JSON 与同步资产计入存储；被拒绝、重复或 LWW 冲突的实体不消耗每日额度。拉取、断点恢复下载和新设备从已有云端状态恢复不计入每日写入额度；超额写入在支持 disposition 的请求中返回 `QUOTA_EXCEEDED`。
 - 已登录客户端可调用 `GET /v1/auth/usage` 查看自己的汇总额度：`storageBytes/storageLimitBytes`、`dailyWrittenBytes/dailyWriteLimitBytes`、`dailyEntityWrites/dailyEntityWriteLimit` 与 `dailyResetAt`。该端点不返回实体、历史内容、其他账号或认证资料；客户端以它为账户概览的事实来源。
 - API 入口还会返回 `429 RATE_LIMITED` 和 `503 SERVER_BUSY`。客户端必须保留待同步本地变更，并在 `Retry-After` 后退避重试。
 ## 账户找回与私密密钥包
@@ -55,6 +59,4 @@
 - 同步密码不可找回；仍持有本机 API Key 的设备可用新密码重新加密并上传当前世代包。
 
 账户级清除与删除见 [`account-data-lifecycle.md`](account-data-lifecycle.md)。云端数据清除使用只增不减的 `data_generation` 并撤销全部令牌；世代大于 1 后，旧客户端或旧世代写入必须被拒绝，不能让其他设备复活已清空的数据。
-云端误覆盖恢复见 [`recovery-history.md`](recovery-history.md)，API 对象结构见 [`recovery.schema.json`](recovery.schema.json)。服务端只为实际接受的变化保存压缩完整实体版本，保留 90 天滚动窗口和窗口前锚点；恢复成功后递增 `data_generation` 并撤销全部令牌。`secret_bundle_v1` 不参与时间回滚，主动云端清除和账号删除同时物理删除恢复历史。
-
 `entities.schema.json` 是契约抽取时的结构底座，不代表已替代服务端运行时校验。协议 v5 的服务端运行时也必须拒绝已退役字段；这是明确授权的破坏性升级，不提供旧客户端兼容层。

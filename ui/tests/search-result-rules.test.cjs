@@ -4,8 +4,9 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "search-result-rules.js"), "utf8");
-const context = { window: {}, Set };
+const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "search-result-rules.js"), "utf8");
+const context = { Set };
+context.window = context;
 vm.runInNewContext(source, context, { filename: "search-result-rules.js" });
 const rules = context.window.ReaderSearchResultRules;
 

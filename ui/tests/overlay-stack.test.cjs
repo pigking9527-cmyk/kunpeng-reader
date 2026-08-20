@@ -2,18 +2,22 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const { resolve } = require("node:path");
-const { ROLE_BASE, normalizeRole, computeLevels } = require("../overlay-stack.js");
+const vm = require("node:vm");
 
 const ui = resolve(__dirname, "..");
 const indexHtml = readFileSync(resolve(ui, "index.html"), "utf8");
 const readerHtml = readFileSync(resolve(ui, "reader.html"), "utf8");
-const dialogUi = readFileSync(resolve(ui, "dialog-ui.js"), "utf8");
+const dialogUi = readFileSync(resolve(ui, "generated-ts", "dialog-ui.js"), "utf8");
 const overlayCss = readFileSync(resolve(ui, "overlay-stack.css"), "utf8");
-const overlaySource = readFileSync(resolve(ui, "overlay-stack.js"), "utf8");
-const relatedSource = readFileSync(resolve(ui, "book-info-related.js"), "utf8");
-const gestureSource = readFileSync(resolve(ui, "gesture-ui.js"), "utf8");
-const readerGestureSource = readFileSync(resolve(ui, "reader-gesture.js"), "utf8");
-const noticeSource = readFileSync(resolve(ui, "notice-ui.js"), "utf8");
+const overlaySource = readFileSync(resolve(ui, "generated-ts", "overlay-stack.js"), "utf8");
+const overlayContext = {};
+overlayContext.window = overlayContext;
+vm.runInNewContext(overlaySource, overlayContext);
+const { ROLE_BASE, normalizeRole, computeLevels } = overlayContext.ReaderOverlayStack;
+const relatedSource = readFileSync(resolve(ui, "generated-ts", "book-info-related.js"), "utf8");
+const gestureSource = readFileSync(resolve(ui, "generated-ts", "gesture-ui.js"), "utf8");
+const readerGestureSource = readFileSync(resolve(ui, "generated-ts", "reader-gesture.js"), "utf8");
+const noticeSource = readFileSync(resolve(ui, "generated-ts", "notice-ui.js"), "utf8");
 const styles = readFileSync(resolve(ui, "styles.css"), "utf8");
 
 test("interactive overlays follow opening order across information and operation roles", () => {
@@ -71,9 +75,9 @@ test("critical confirmations remain above every interactive overlay", () => {
 
 test("desktop windows share the semantic overlay rule without page-id branching", () => {
   assert.match(indexHtml, /href="overlay-stack\.css"/);
-  assert.match(indexHtml, /src="overlay-stack\.js"/);
+  assert.match(indexHtml, /src="generated-ts\/overlay-stack\.js"/);
   assert.match(readerHtml, /href="overlay-stack\.css"/);
-  assert.match(readerHtml, /src="overlay-stack\.js"/);
+  assert.match(readerHtml, /src="generated-ts\/overlay-stack\.js"/);
   assert.match(
     indexHtml,
     /id="gesture-info-modal"[\s\S]*?data-overlay-role="information"/,
@@ -102,7 +106,7 @@ test("desktop windows share the semantic overlay rule without page-id branching"
   assert.match(noticeSource, /notice\.dataset\.overlayRole = "feedback"/);
   assert.match(
     overlaySource,
-    /\[data-overlay-surface\]\[data-overlay-active=\\"true\\"\]/,
+    /\[data-overlay-surface\]\[data-overlay-active="true"\]/,
   );
   assert.match(
     overlayCss,

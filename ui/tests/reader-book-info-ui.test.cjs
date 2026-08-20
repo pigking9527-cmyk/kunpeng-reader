@@ -5,10 +5,10 @@ const test = require("node:test");
 
 const root = resolve(__dirname, "..");
 const readerHtml = readFileSync(resolve(root, "reader.html"), "utf8");
-const readerJs = readFileSync(resolve(root, "reader.js"), "utf8");
-const panelJs = readFileSync(resolve(root, "book-info-panel.js"), "utf8");
+const readerJs = readFileSync(resolve(root, "generated-ts", "reader.js"), "utf8");
+const panelJs = readFileSync(resolve(root, "generated-ts", "book-info-panel.js"), "utf8");
 const panelCss = readFileSync(resolve(root, "book-info-panel.css"), "utf8");
-const relatedJs = readFileSync(resolve(root, "book-info-related.js"), "utf8");
+const relatedJs = readFileSync(resolve(root, "generated-ts", "book-info-related.js"), "utf8");
 const relatedCss = readFileSync(resolve(root, "book-info-related.css"), "utf8");
 
 test("阅读页图书信息与书架使用相同的完整信息面", () => {
@@ -20,7 +20,7 @@ test("阅读页图书信息与书架使用相同的完整信息面", () => {
   assert.match(infoModal, /<div id="info-modal" class="modal"[^>]*role="dialog"[^>]*aria-modal="true"[^>]*aria-label="书籍信息"><\/div>/);
   assert.match(readerHtml, /<link rel="stylesheet" href="book-info-panel\.css" \/>/);
   assert.match(readerHtml, /<link rel="stylesheet" href="book-info-related\.css" \/>/);
-  assert.match(readerHtml, /<script src="book-info-panel\.js"><\/script>[\s\S]*?<script src="book-info-related\.js"><\/script>[\s\S]*?<script src="reader\.js"><\/script>/);
+  assert.match(readerHtml, /<script src="generated-ts\/book-info-panel\.js"><\/script>[\s\S]*?<script src="generated-ts\/book-info-related\.js"><\/script>[\s\S]*?<script src="generated-ts\/reader\.js"><\/script>/);
   assert.match(panelJs, /function markup\(ids\)/);
   assert.match(panelJs, /class="modal-card book-info-card"/);
   assert.match(panelJs, /data-book-info-action="tags"/);
@@ -50,7 +50,7 @@ test("相似图书和阅读时间线只有一套共享信息层实现", () => {
   assert.match(readerJs, /window\.ReaderBookInfoRelated\.mount\(\{/);
   assert.match(relatedJs, /data-book-related="similar" data-overlay-role="information"/);
   assert.match(relatedJs, /data-book-related="timeline" data-overlay-role="information"/);
-  assert.match(relatedJs, /function timelineMarkup\(data\)/);
+  assert.match(relatedJs, /function timelineMarkup\(data, formatWords\)/);
   assert.match(relatedCss, /\.timeline-summary \{/);
   assert.match(relatedCss, /\.timeline-event-list::before/);
   assert.doesNotMatch(readerJs, /function renderSimilarBooks|function timelineMarkup/);

@@ -2,32 +2,89 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const html = fs.readFileSync(path.join(__dirname, "..", "reader.html"), "utf8");
 const appHtml = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
-const reader = fs.readFileSync(path.join(__dirname, "..", "reader.js"), "utf8");
-const jumpBackRules = fs.readFileSync(path.join(__dirname, "..", "reader-jump-back-rules.js"), "utf8");
-const navigationRules = fs.readFileSync(path.join(__dirname, "..", "reader-navigation-rules.js"), "utf8");
-const aiHistoryRules = fs.readFileSync(path.join(__dirname, "..", "reader-ai-history-rules.js"), "utf8");
-const i18n = fs.readFileSync(path.join(__dirname, "..", "reader-i18n.js"), "utf8");
-const shell = fs.readFileSync(path.join(__dirname, "..", "reader-shell-state.js"), "utf8");
-const notes = fs.readFileSync(path.join(__dirname, "..", "reader-notes-ui.js"), "utf8");
-const annotations = fs.readFileSync(path.join(__dirname, "..", "reader-page-annotations.js"), "utf8");
-const runtime = fs.readFileSync(path.join(__dirname, "..", "reader-page-runtime.js"), "utf8");
-const layout = fs.readFileSync(path.join(__dirname, "..", "reader-page-layout.js"), "utf8");
-const transition = fs.readFileSync(path.join(__dirname, "..", "reader-page-transition.js"), "utf8");
+const reader = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader.js"), "utf8");
+const jumpBackRules = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-jump-back-rules.js"), "utf8");
+const navigationRules = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-navigation-rules.js"), "utf8");
+const aiHistoryRules = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-ai-history-rules.js"), "utf8");
+const i18n = fs.readFileSync(
+  path.join(__dirname, "..", "generated-ts", "reader-i18n.js"),
+  "utf8",
+);
+const shell = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-shell-state.js"), "utf8");
+const notes = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-notes-ui.js"), "utf8");
+const annotations = require("./reader-page-test-source.cjs").compact;
+const runtime = fs.readFileSync(path.join(__dirname, "..", "generated-reader-page-ts", "reader-page-runtime.js"), "utf8");
+const layout = annotations;
+const transition = fs.readFileSync(path.join(__dirname, "..", "generated-reader-page-ts", "reader-page-transition.js"), "utf8");
 const pageStyle = fs.readFileSync(path.join(__dirname, "..", "reader-page-style.html"), "utf8");
-const settingsUi = fs.readFileSync(path.join(__dirname, "..", "reader-settings-ui.js"), "utf8");
-const searchUi = fs.readFileSync(path.join(__dirname, "..", "reader-search-ui.js"), "utf8");
+const settingsUi = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-settings-ui.js"), "utf8");
+const searchUi = fs.readFileSync(
+  path.join(__dirname, "..", "generated-ts", "reader-search-ui.js"),
+  "utf8",
+);
 const libraryCommands = fs.readFileSync(path.join(__dirname, "..", "..", "src", "library_commands.rs"), "utf8");
-const readerGestures = fs.readFileSync(path.join(__dirname, "..", "reader-gesture.js"), "utf8");
-const gestureManager = fs.readFileSync(path.join(__dirname, "..", "gesture-ui.js"), "utf8");
+const readerGestures = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-gesture.js"), "utf8");
+const gestureManager = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "gesture-ui.js"), "utf8");
+
+function readerShellClassList() {
+  const values = new Set();
+  return {
+    add(...names) { names.forEach((name) => values.add(name)); },
+    remove(...names) { names.forEach((name) => values.delete(name)); },
+    toggle(name, force) {
+      const on = force === undefined ? !values.has(name) : Boolean(force);
+      if (on) values.add(name); else values.delete(name);
+      return on;
+    },
+    contains(name) { return values.has(name); },
+  };
+}
+
+function bootReaderShell(immersive = false) {
+  const ids = [
+    "settings", "reader-preferences-modal", "rsearch", "toc", "vocab", "info-modal",
+    "anno-modal", "cross-modal", "reader-end-modal", "ai-reader-side", "backdrop",
+    "vocab-settings",
+  ];
+  const elements = Object.fromEntries(ids.map((id) => [id, { classList: readerShellClassList() }]));
+  const body = { classList: readerShellClassList() };
+  const stored = new Map([["immersive", immersive ? "1" : "0"]]);
+  const events = [];
+  const context = {
+    dispatchEvent(event) { events.push(event); },
+    document: {
+      body,
+      getElementById(id) { return elements[id] || null; },
+    },
+    localStorage: {
+      getItem(key) { return stored.get(key) || null; },
+      setItem(key, value) { stored.set(key, String(value)); },
+    },
+    Map,
+    Object,
+    Set,
+  };
+  class CustomEvent {
+    constructor(type, init) {
+      this.type = type;
+      this.detail = init?.detail;
+    }
+  }
+  context.CustomEvent = CustomEvent;
+  context.window = context;
+  vm.runInNewContext(shell, context);
+  return { body, elements, events, shell: context.ReaderShell, stored };
+}
 
 test("AI reader local history is unlimited while deletion tombstones stay bounded", () => {
   assert.doesNotMatch(reader, /AI_READER_LOCAL_HISTORY_LIMIT/);
-  assert.match(reader, /const AI_READER_HISTORY_TOMBSTONE_LIMIT = readerAiHistoryRules\.TOMBSTONE_LIMIT;/);
-  assert.match(aiHistoryRules, /const TOMBSTONE_LIMIT = 200;/);
-  assert.match(aiHistoryRules, /entries\.filter\(\(entry\) => !isHistoryDeleted\(entry\)\)\s*\.sort/s);
+  assert.match(reader, /readerAiHistoryRules\.TOMBSTONE_LIMIT/);
+  assert.match(aiHistoryRules, /const READER_AI_HISTORY_TOMBSTONE_LIMIT = 200;/);
+  assert.match(aiHistoryRules, /entries\.filter\(\(entry\) => !isReaderAiHistoryDeleted\(entry\)\)\.sort/s);
 });
 
 test("reader toolbar buttons stay horizontal and do not flex-shrink", () => {
@@ -58,19 +115,24 @@ test("reader progress names the whole-book page total once it is measured", () =
 test("all explicit reader jumps share a chronological undo gesture", () => {
   assert.doesNotMatch(reader, /bookProgressJumpHistory/);
   assert.match(reader, /const readerNavigationHistory = \[\];/);
-  assert.match(reader, /const readerNavigationRules = window\.ReaderNavigationRules \|\| \(\(\) =>/);
-  assert.match(html, /reader-jump-back-rules\.js[\s\S]*?reader-navigation-rules\.js[\s\S]*?reader\.js/);
+  assert.match(reader, /const readerNavigationRules = window\.ReaderNavigationRules \|\|[\s\S]{0,40}\(\(\) =>/);
+  assert.match(html, /generated-ts\/reader-jump-back-rules\.js[\s\S]*?generated-ts\/reader-navigation-rules\.js[\s\S]*?reader\.js/);
   assert.match(reader, /function rememberReaderNavigationPoint\(point\)[\s\S]*?readerNavigationRules\.appendHistory\(readerNavigationHistory/);
   assert.match(reader, /readerNavigationHistory\.splice\(0, readerNavigationHistory\.length, \.\.\.result\.history\)/);
-  assert.match(navigationRules, /function appendHistory\(entries, point, fallback, limit = HISTORY_LIMIT\)/);
+  assert.match(navigationRules, /function appendReaderNavigationHistory\(entries, point, fallback, limit = READER_NAVIGATION_HISTORY_LIMIT\)/);
   assert.match(reader, /function rememberBookProgressRestorePoint\(point\)[\s\S]*?rememberReaderNavigationPoint\(point\)/);
   assert.match(reader, /const canRestoreProgress = readerNavigationHistory\.length > 0;/);
   assert.match(reader, /window\.restoreReaderJumpPosition = restorePreviousReaderNavigation;/);
+  const restoreNavigation = reader.slice(
+    reader.indexOf("function restorePreviousReaderNavigation"),
+    reader.indexOf("bookProgressRestore?.addEventListener"),
+  );
+  assert.doesNotMatch(restoreNavigation, /isPdf/);
   assert.match(reader, /window\.hasReaderJumpHistory = \(\) => readerNavigationHistory\.length > 0;/);
   assert.match(reader, /vthumb\.addEventListener\("mousedown"[\s\S]*?rememberReaderNavigationPoint\(\)/);
   assert.match(reader, /vbar\.addEventListener\("mousedown"[\s\S]*?rememberReaderNavigationPoint\(\)/);
-  assert.match(notes, /window\.rememberReaderJumpPosition\?\.\("toc"\)/);
-  assert.match(notes, /window\.rememberReaderJumpPosition\?\.\(\{ kind: "bookmark" \}\)/);
+  assert.match(notes, /runtime\.rememberReaderJumpPosition\?\.\("toc"\)/);
+  assert.match(notes, /runtime\.rememberReaderJumpPosition\?\.\(\{ kind: "bookmark" \}\)/);
   assert.match(annotations, /parent\.postMessage\(\{readerJump:/);
   assert.match(appHtml, /data-gesture-action="undo_last"/);
   assert.match(gestureManager, /value === "restore_jump"/);
@@ -84,13 +146,13 @@ test("all explicit reader jumps share a chronological undo gesture", () => {
 
 test("gesture previews use the drawn route prefix and reopening tracks normal closes", () => {
   assert.match(gestureManager, /function previewProfile\(surface, points\)/);
-  assert.match(gestureManager, /api\.prefixSimilarity\(profile\.points, points\)/);
+  assert.match(gestureManager, /gestureApi\.prefixSimilarity\(profile\.points, points\)/);
   const mainFinish = gestureManager.slice(gestureManager.indexOf("function finish(event, cancelled = false)"), gestureManager.indexOf("function cancelGestureKeepHint"));
   assert.doesNotMatch(mainFinish, /showHint\(/);
   assert.match(gestureManager, /function listenForClosedMainSurfaces\(\)/);
   assert.match(gestureManager, /root\.querySelectorAll\("\.modal\.show"\)/);
   assert.match(gestureManager, /"newsnow-reader"/);
-  assert.match(readerGestures, /function previewMatchFor\(gesture\)/);
+  assert.match(readerGestures, /function previewMatch\(gesture\)/);
   assert.match(readerGestures, /api\.prefixSimilarity\(profile\.points, gesture\.points\)/);
   const readerFinish = readerGestures.slice(readerGestures.indexOf("function finish(cancelled = false)"), readerGestures.indexOf("function cancelKeepHint"));
   assert.doesNotMatch(readerFinish, /showHint\(/);
@@ -104,17 +166,17 @@ test("gesture profiles can be automatic or explicitly scoped to the main or read
   assert.match(appHtml, /value="auto">自动适用（推荐）/);
   assert.match(appHtml, /value="main">仅主窗口/);
   assert.match(appHtml, /value="reader">仅阅读页/);
-  assert.match(gestureManager, /function actionSupportedScopes\(\) \{\s*return \["main", "reader"\];\s*\}/);
+  assert.match(gestureManager, /function actionSupportedScopes\(action\) \{\s*return \["main", "reader"\];\s*\}/);
   assert.match(gestureManager, /scope: normalizeScope\(action, source\.scope\)/);
   assert.match(gestureManager, /scopeInput\.disabled = scopes\.length === 1;/);
   assert.match(gestureManager, /此操作目前只支持阅读页，不能设为主窗口。/);
   assert.match(gestureManager, /profile\.scope !== "reader"/);
   assert.match(gestureManager, /function scopesOverlap\(first, second\)/);
-  assert.match(readerGestures, /function normalizeScope\(_action, value\) \{/);
+  assert.match(readerGestures, /const normalizeScope = \(_action, value\) =>/);
   assert.match(readerGestures, /profile\.scope !== "main"/);
   assert.match(
     readerGestures,
-    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", \(event\) => \{ if \(active\)[\s\S]*?global\.addEventListener\("mouseup", \(\) => finish\(\), true\);/,
+    /global\.addEventListener\([\s\S]*?"mousedown"[\s\S]*?startMouseGesture[\s\S]*?true[\s\S]*?global\.addEventListener\([\s\S]*?"mousemove"[\s\S]*?if \(active\)[\s\S]*?global\.addEventListener\("mouseup", \(\) => finish\(\), true\);/,
   );
   assert.doesNotMatch(readerGestures, /startPointerGesture|activePointerId/);
 });
@@ -136,6 +198,12 @@ test("reader settings dropdown has no pointer gap below the toolbar", () => {
   assert.doesNotMatch(html, /\.settings\s*\{[^}]*top:\s*calc\(100%\s*\+\s*8px\);/s);
 });
 
+test("reader settings use an explicit shell-to-notes bridge after IIFE migration", () => {
+  assert.match(reader, /window\.setReaderSettingsOpen = \(open\) => \{\s*setSettingsOpen\(open\);/s);
+  assert.match(notes, /runtime\.setReaderSettingsOpen\?\.\(open\)/);
+  assert.doesNotMatch(notes, /setSettingsOpen\(open\);\s*\}\s*\};\s*\}\s*function initializeReaderNotesUi/s);
+});
+
 test("dictionary enhancement switches default off and restore only explicit opt-ins", () => {
   for (const key of ["plain", "sense", "context", "hypernyms", "synonyms", "antonyms"]) {
     assert.match(annotations, new RegExp(`${key}:false`));
@@ -148,10 +216,11 @@ test("dictionary enhancement switches default off and restore only explicit opt-
 
 test("dictionary enhancement switches reject unavailable data before enabling", () => {
   assert.match(annotations, /function dictEnhancementAvailable\(result,key\)/);
-  assert.match(annotations, /var field=key==='context'\?'example_note':key/);
+  assert.match(annotations, /const field=key==='context'\?'example_note':key/);
   assert.match(annotations, /if\(input\.checked&&!dictEnhancementAvailable\(lastDict,cfg\.key\)\)/);
   assert.match(annotations, /input\.checked=false;[\s\S]*?st\[cfg\.key\]=false;[\s\S]*?setDictHnSettings\(st\)/);
   assert.match(annotations, /dictSettingsStatus=dictEnhancementUnavailableText\(cfg\)/);
+  assert.match(annotations, /function openDict\(term,context(?:='')?\)\{[\s\S]*?lastDict=null;dictSettingsStatus='';/);
   assert.match(pageStyle, /\.dc-settings-status\{[^}]*background:#fff4dd[^}]*color:#8a5c00/);
 });
 
@@ -174,32 +243,35 @@ test("reader settings show one state character and map off to simplified, on to 
   assert.match(html, /id="set-dual-mode-label" data-reader-i18n="twoPages">双页<\/span>/);
   assert.match(html, /id="set-scroll-mode-label" data-reader-i18n="scrollMode">滚动<\/span>/);
   assert.match(html, /class="settings-switch"/);
-  assert.match(settingsUi, /const dualModeLabel = document\.getElementById\("set-dual-mode-label"\);/);
-  assert.match(settingsUi, /const scrollModeLabel = document\.getElementById\("set-scroll-mode-label"\);/);
+  assert.match(settingsUi, /const dualModeLabel = elementById\("set-dual-mode-label"\);/);
+  assert.match(settingsUi, /const scrollModeLabel = elementById\("set-scroll-mode-label"\);/);
   assert.match(settingsUi, /dualModeLabel\.textContent = dualModeToggle\?\.checked[\s\S]*?readerSettingsT\("twoPages", "双页"\)[\s\S]*?readerSettingsT\("singlePage", "单页"\)/);
   assert.match(settingsUi, /scrollModeLabel\.textContent = scrollModeToggle\?\.checked[\s\S]*?readerSettingsT\("scrollMode", "滚动"\)[\s\S]*?readerSettingsT\("pagedMode", "整屏"\)/);
-  assert.match(settingsUi, /window\.addEventListener\("reader-language-changed", refreshReadingModeToggles\)/);
+  assert.match(settingsUi, /global\.addEventListener\(\s*"reader-language-changed",\s*refreshReadingModeToggles\s*\)/);
   assert.match(i18n, /singlePage: "Single page"/);
   assert.match(i18n, /pagedMode: "Full-page view"/);
   assert.match(settingsUi, /textConversion: "t2s"/);
   assert.match(settingsUi, /settings\.textConversion === "original"/);
-  assert.match(settingsUi, /getElementById\("set-text-conversion-simple"\)/);
+  assert.match(settingsUi, /elementById\("set-text-conversion-simple"\)/);
   assert.match(settingsUi, /textConversionToggle\.checked = traditional/);
   assert.match(settingsUi, /textConversionToggle\.checked \? "s2t" : "t2s"/);
   assert.match(settingsUi, /textConversionLabel\.textContent = traditional \? "繁" : "简"/);
-  assert.match(layout, /var conversion=\['t2s','s2t'\]\.indexOf\(S\.textConversion\)>=0\?S\.textConversion:'original';/);
-  assert.match(runtime, /if\(textConversionChanged\)\{\s*showChapter\(curCh,pageInCh\);\s*return;/);
+  assert.match(layout, /const conversion=S\.textConversion==='t2s'\|\|S\.textConversion==='s2t'\?S\.textConversion:'original'/);
+  assert.match(runtime, /if \(previousConversion !== g\.S\.textConversion\) \{\s*fn\(g, "showChapter", g\.curCh, g\.pageInCh\);\s*return;/);
 });
 
 test("整页翻页仅保留水平滑动动画，并迁移旧动画设置", () => {
   assert.doesNotMatch(html, /纸张效果（Google）|仿真翻页/);
   assert.match(settingsUi, /pageTurnEffect: "horizontal"/);
   assert.match(settingsUi, /\["google-paper", "curl"\]\.includes\(settings\.pageTurnEffect\)/);
-  assert.match(transition, /return \/.*off\|horizontal.*test\(fx\)\?fx:'horizontal';/);
+  assert.match(transition, /\/\^\(off\|horizontal\)\$\/u\.test\(String\(effect\)\) \? effect : "horizontal"/);
   assert.match(transition, /turnFxDuration\(360\)/);
-  assert.match(transition, /captureTurnFxPage\('turn-fx-outgoing'\)[\s\S]*?move\(\);[\s\S]*?captureTurnFxPage\('turn-fx-incoming'\)/);
-  assert.match(transition, /function beginChapterTurnFx[\s\S]*?captureTurnFxPage\('turn-fx-outgoing'\)[\s\S]*?return showChapter\(chapter,where\)\.then[\s\S]*?captureTurnFxPage\('turn-fx-incoming'\)/);
-  assert.match(transition, /if\(fx==='off'\)[\s\S]*?captureTurnFxPage\('turn-fx-outgoing'\)[\s\S]*?turn-fx-hold[\s\S]*?waitForChapterPaint/);
+  assert.match(transition, /captureTurnFxPage\("turn-fx-outgoing"\)[\s\S]*?move\(\);[\s\S]*?captureTurnFxPage\("turn-fx-incoming"\)/);
+  assert.match(transition, /function beginChapterTurnFx[\s\S]*?captureTurnFxPage\("turn-fx-outgoing"\)[\s\S]*?showChapter\(chapter, where\)\.then[\s\S]*?captureTurnFxPage\("turn-fx-incoming"\)/);
+  assert.match(transition, /if \(effect === "off"\)[\s\S]*?captureTurnFxPage\("turn-fx-outgoing"\)[\s\S]*?turn-fx-hold[\s\S]*?waitForChapterPaint/);
+  assert.match(transition, /rememberCurrentChapterBoundarySnapshot\(\)[\s\S]*?showCachedChapterBoundary\(chapter, where\)/);
+  assert.match(transition, /visibleVirtualPage[\s\S]*?global\.virtualPage\?\.style\.display === "block"[\s\S]*?visibleVirtualPage \?\? root/);
+  assert.match(transition, /clone\.id = "virtual-page"/);
   assert.match(pageStyle, /#pager\.turn-fx-hold #turn-fx-sheet\{[^}]*opacity:1 !important/);
   assert.match(layout, /beginChapterTurnFx\(1,curCh\+1,'start'\)/);
   assert.match(layout, /beginChapterTurnFx\(-1,curCh-1,'end'\)/);
@@ -221,16 +293,16 @@ test("空白 EPUB spine 章节自动跳到首个可见内容页", () => {
 test("跨章加载在末页定位完成前隐藏新正文", () => {
   assert.match(layout, /root\.style\.visibility='hidden';\s*root\.innerHTML=/);
   assert.match(layout, /setViewOffset\(\);[\s\S]{0,300}?root\.style\.visibility='';/);
-  assert.match(layout, /function\(\)\{root\.style\.visibility='';finishChapterBugTrace\(bugTraceToken,false,0\);\}/);
+  assert.match(layout, /function\(\)\{root\.style\.visibility='';finishChapterBugTrace\(bugTraceToken,false,0\)\}/);
 });
 
 test("章节分页等待 EPUB 样式加载，避免双页续读总页数漂移", () => {
   assert.match(annotations, /function injectHead\(htmlStr,seen\)[\s\S]*?addEventListener\('load',done/);
   assert.match(annotations, /addEventListener\('error',done/);
-  assert.match(annotations, /timer=setTimeout\(done,2000\)/);
+  assert.match(annotations, /timer=setTimeout\(done,(?:2000|2e3)\)/);
   assert.match(annotations, /return Promise\.all\(waits\)/);
   const showChapter = layout.slice(layout.indexOf("function showChapter("), layout.indexOf("var curTopAnchor="));
-  assert.match(showChapter, /var headReady=d\.head\?injectHead\(d\.head,headSeen\):Promise\.resolve\(\);/);
+  assert.match(showChapter, /(?:const|let|var) headReady=d\.head\?injectHead\(d\.head,headSeen\):Promise\.resolve\(\);/);
   assert.match(showChapter, /return headReady\.then\(function\(\)\{[\s\S]*?applyCols\(\)/);
   assert.ok(showChapter.indexOf("headReady.then") < showChapter.indexOf("curCh=i"));
 });
@@ -247,14 +319,15 @@ test("双页续读先采集本页锚点并把锚点恢复到左页", () => {
 
 test("续读恢复完成前不保存章节首页，真实翻页立即提交位置", () => {
   assert.match(annotations, /var initialResumePending=true/);
-  assert.match(layout, /function report\(commitPosition,restoredPosition,positionSnapshotRequestId\)\{\s*if\(initialResumePending\)return;/);
+  assert.match(layout, /function report\(commitPosition=false,restoredPosition=false,positionSnapshotRequestId=0\)\{if\(initialResumePending\)return/);
   assert.match(layout, /positionCommit:commitPosition\?1:0/);
   assert.match(annotations, /initialResumePending=false;\s*captureAnchor\(\);\s*report\(false,true\)/);
   assert.match(reader, /if \(e\.data\.positionRestored !== 1\) reportProgress\(e\.data\.positionCommit === 1\)/);
   assert.match(annotations, /nearestTextOccurrence\(whole,probe,[^)]+\)/);
-  assert.match(runtime, /if\(e\.data\.positionSnapshotRequest!==undefined\)/);
-  assert.match(runtime, /if\(chapterTurnPending&&Date\.now\(\)-snapshotStarted<2400\)/);
-  assert.match(runtime, /captureAnchor\(\);report\(false,false,snapshotId\)/);
+  assert.match(runtime, /if \(data\.positionSnapshotRequest !== void 0\)/);
+  assert.match(runtime, /positionSnapshotTurnWaitMs/);
+  assert.match(runtime, /if \(g\.chapterTurnPending && Date\.now\(\) - started < turnWaitMs\)/);
+  assert.match(runtime, /"captureAnchor"[\s\S]*?"report", false, false, id/);
   assert.match(reader, /Number\(e\.data\.positionSnapshotRequestId\) === pendingPositionSnapshot\.requestId/);
   assert.equal((layout.match(/function visibleTopTextAnchor\(\)/g) || []).length, 1);
   assert.match(layout, /r\.right<=pr\.left\+1\|\|r\.left>=pr\.right-1/);
@@ -270,7 +343,7 @@ test("进度问题记录包含章内偏移和前后端保存结果但不包含�
   assert.match(saveProgress, /sequence/);
   assert.match(saveProgress, /chapter_frac/);
   assert.match(saveProgress, /anchor_offset/);
-  assert.match(saveProgress, /ReaderBugTrace\?\.record\("progress_save"/);
+  assert.match(saveProgress, /ReaderBugTrace\?\.record\?\.\("progress_save"/);
   assert.match(saveProgress, /progressSaveDetail\(sequence, request, "requested"\)/);
   assert.match(saveProgress, /progressSaveDetail\(sequence, request, "ok"\)/);
   assert.doesNotMatch(saveProgress, /context_before|context_after|dom_path|text_content/);
@@ -285,7 +358,7 @@ test("in-book search dropdown has no pointer gap below the toolbar", () => {
 
 test("in-book search remains open while the WebView briefly loses focus", () => {
   assert.doesNotMatch(searchUi, /window\.addEventListener\("(?:blur|mouseout)"[\s\S]*?toggleSearch\(false\)/);
-  assert.match(searchUi, /window\.isReaderSearchEditing = function \(\)/);
+  assert.match(searchUi, /global\.isReaderSearchEditing = isReaderSearchEditing/);
   assert.match(searchUi, /rsearchEditingUntil = Date\.now\(\) \+ 1200/);
   assert.match(searchUi, /compositionstart/);
   assert.match(searchUi, /rsearchComposing \|\| rsearch\.contains\(document\.activeElement\)/);
@@ -293,12 +366,29 @@ test("in-book search remains open while the WebView briefly loses focus", () => 
   assert.match(reader, /if \(!isSearchInputEditActive\(\)\) ReaderShell\.closeOverlay\(\)/);
   assert.match(reader, /e\.isComposing \|\| e\.key === "Process" \|\| e\.keyCode === 229/);
   assert.match(annotations, /e\.isComposing\|\|e\.key==='Process'\|\|e\.keyCode===229/);
-  assert.match(searchUi, /e\.key === "Escape"\) toggleSearch\(false\)/);
+  assert.match(searchUi, /event\.key === "Escape"\) toggleSearch\(false\)/);
 });
 
 test("an open in-book search pins the immersive toolbar during IME pointer transitions", () => {
-  assert.match(shell, /overlay === OVERLAY\.SEARCH && isImmersiveState\(current\.toolbar\)[\s\S]*?TOOLBAR\.IMMERSIVE_PINNED/);
-  assert.match(shell, /current\.overlay === OVERLAY\.SEARCH && isImmersiveState\(current\.toolbar\)[\s\S]*?TOOLBAR\.IMMERSIVE_PINNED/);
+  const { body, elements, events, shell: readerShell } = bootReaderShell(true);
+
+  assert.equal(readerShell.getState().toolbar, readerShell.TOOLBAR.IMMERSIVE_HIDDEN);
+  assert.equal(body.classList.contains("reader-controls-visible"), false);
+  readerShell.setOverlay(readerShell.OVERLAY.SEARCH, true);
+  assert.equal(readerShell.getState().overlay, readerShell.OVERLAY.SEARCH);
+  assert.equal(readerShell.getState().toolbar, readerShell.TOOLBAR.IMMERSIVE_PINNED);
+  assert.equal(elements.rsearch.classList.contains("show"), true);
+  assert.equal(body.classList.contains("immersive"), true);
+  assert.equal(body.classList.contains("bar-show"), true);
+  assert.equal(body.classList.contains("reader-controls-visible"), true);
+
+  readerShell.dispatch({ type: "TOOLBAR_POINTER_LEAVE" });
+  assert.equal(readerShell.getState().toolbar, readerShell.TOOLBAR.IMMERSIVE_PINNED);
+  readerShell.closeOverlay();
+  readerShell.dispatch({ type: "TOOLBAR_POINTER_LEAVE" });
+  assert.equal(readerShell.getState().toolbar, readerShell.TOOLBAR.IMMERSIVE_HIDDEN);
+  assert.equal(body.classList.contains("bar-show"), false);
+  assert.equal(events.at(-1).type, "reader-shell-statechange");
 });
 
 test("智读提交携带实时已读位置、选区、锚点和本机会话记忆，并用 Enter 发起提问", () => {
@@ -311,7 +401,7 @@ test("智读提交携带实时已读位置、选区、锚点和本机会话记�
   assert.match(reader, /function aiReaderSessionMemoryKey\(\)/);
   assert.match(reader, /localStorage\.setItem\(aiReaderSessionMemoryKey\(\)/);
   assert.match(reader, /readerAiHistoryRules\.sessionPrompt\(aiReaderReadSessionMemory\(\), aiReaderTaskLabel\)/);
-  assert.match(html, /<script src="reader-ai-history-rules\.js"><\/script>\s*<script src="reader-startup-guard\.js"><\/script>\s*<script src="reader-reading-metrics\.js"><\/script>\s*<script src="reader\.js"><\/script>/);
+  assert.match(html, /<script src="generated-ts\/reader-ai-history-rules\.js"><\/script>\s*<script src="generated-ts\/reader-startup-guard\.js"><\/script>\s*<script src="generated-ts\/reader-reading-metrics\.js"><\/script>\s*<script src="generated-ts\/reader\.js"><\/script>/);
   const sessionMemoryBlock = reader.match(/function aiReaderRememberSession\(entry\) \{([\s\S]*?)\n\}/)?.[1] || "";
   assert.doesNotMatch(sessionMemoryBlock, /private_sync_history_merge/);
   assert.match(reader, /event\.key === "Enter" && !event\.shiftKey && !event\.isComposing && event\.keyCode !== 229/);
@@ -381,10 +471,11 @@ test("智读只切换书架中已配置的大模型，不在阅读页编辑密�
 });
 
 test("阅读正文先开始导航，大目录随后按空闲时间分批构建", () => {
-  assert.match(notes, /function scheduleTocBuild\(toc\)/);
-  assert.match(notes, /requestIdleCallback\(callback, \{ timeout: 500 \}\)/);
+  assert.match(notes, /const scheduleTocBuild = \(toc\) =>/);
+  assert.match(notes, /runtime\.requestIdleCallback\(callback, \{ timeout: 500 \}\)/);
   assert.match(notes, /while \(index < entries\.length && added < 120\)/);
-  assert.match(reader, /beginFrameNavigation\?\.\(readerSource\)[\s\S]*?frame\.src = readerSource;\s*\/\/ 正文导航已经开始后再分批构建目录[^\n]*\s*scheduleTocBuild\(toc\);/s);
+  assert.match(reader, /beginFrameNavigation\?\.\(readerSource\)[\s\S]*?frame\.src = readerSource;[\s\S]*?window\.pendingReaderToc = toc;\s*window\.scheduleTocBuild\?\.\(toc\);/s);
+  assert.match(notes, /runtime\.scheduleTocBuild = scheduleTocBuild;[\s\S]*?scheduleTocBuild\(pending\)/);
   assert.match(reader, /shell_info elapsed_ms=/);
   assert.match(reader, /shell_ready elapsed_ms=/);
 });
@@ -395,13 +486,13 @@ test("从选中文本打开智读时不再向问题框插入固定提问句", ()
 });
 
 test("开关智读以覆盖层呈现，不压缩正文列宽或改变阅读位置", () => {
-  assert.match(reader, /智读为覆盖层：不改变正文 iframe 宽度/);
+  assert.match(reader, /ReaderShell\.setSidePanel\(ReaderShell\.SIDE_PANEL\.AI_READER, !!open\)/);
   assert.match(reader, /function closeAiReaderSide\(\)[\s\S]*?setAiReaderSide\(false\)/);
   assert.match(reader, /window\.closeAiReaderSide = closeAiReaderSide/);
   assert.match(reader, /ReaderShell\.setSidePanel\(ReaderShell\.SIDE_PANEL\.AI_READER, !!open\)/);
   assert.match(reader, /ReaderShell\.registerSidePanel\(ReaderShell\.SIDE_PANEL\.AI_READER/);
   assert.doesNotMatch(reader, /preserveAnchor: 1/);
-  assert.match(reader, /openAiReader\(request\.text \|\| "", \{[\s\S]*?start: request\.anchorStart/);
+  assert.match(reader, /openAiReader\(String\(request\.text \|\| ""\), \{[\s\S]*?start: Number\(request\.anchorStart\)/);
   assert.match(annotations, /aiReader:\{text:t,anchorStart:o&&o\.start,anchorEnd:o&&o\.end\}/);
   assert.match(annotations, /aiReader:\{text:highlightDisplayText\(h\),anchorStart:h\.start,anchorEnd:h\.end\}/);
   assert.match(html, /body\.ai-reader-open \.ai-reader-side\s*\{\s*display:\s*flex;/);
@@ -411,36 +502,43 @@ test("开关智读以覆盖层呈现，不压缩正文列宽或改变阅读位�
 });
 
 test("高亮菜单按真实高度避让页末：横排和九宫格都完整可见", () => {
-  const highlightRules = fs.readFileSync(path.join(__dirname, "..", "reader-page-highlight-rules.js"), "utf8");
-  assert.match(annotations, /function visibleHighlightLineRects\(idx,fallbackEl\)/);
-  assert.match(annotations, /function nearestHighlightRect\(rects,evt\)/);
+  const highlightRules = annotations;
+  assert.match(annotations, /function visibleHighlightLineRects\(idx,fallbackEl=null\)/);
+  assert.match(annotations, /function nearestHighlightRect\(rects,evt=null\)/);
   assert.match(annotations, /function highlightLineGroups\(rects\)/);
   assert.match(annotations, /function highlightMenuPlacement\(idx,fallbackEl,evt\)/);
   assert.match(annotations, /ReaderPageHighlightRules\.placement/);
   assert.match(annotations, /ReaderPageHighlightRules\.nearestRect/);
   assert.match(annotations, /ReaderPageHighlightRules\.groupedEnvelopes/);
-  assert.match(highlightRules, /pageKeys\.length>1[\s\S]*?envelope\(pages\[pageKeys\[0\]\]\),above:true/);
+  assert.match(highlightRules, /pageKeys\.length>1[\s\S]*?envelope\(requiredRecordValue\(pages,firstPageKey\)\)[\s\S]*?above:true/);
   assert.match(highlightRules, /lines\.length<=1[\s\S]*?nearestRect\(rects,pointer\)/);
-  assert.match(highlightRules, /var last=lines\[0\][\s\S]*?return \{rect:last,above:false\}/);
+  assert.match(highlightRules, /let last=requiredArrayItem\(lines,0\)[\s\S]*?return\{rect:last,above:false\}/);
   assert.match(annotations, /highlightMenuPlacement\(idx,el,evt\)/);
   assert.match(annotations, /addEventListener\('mousemove',[\s\S]*?showHlMenu\(activeHi,false,m,e\)/);
   assert.match(annotations, /function readerViewportHeight\(\)/);
   assert.match(annotations, /function placeHighlightMenuVertically\(menu,rect,preferAbove\)/);
   assert.match(annotations, /Number\(menu&&menu\.offsetHeight\)\|\|34/);
-  assert.match(annotations, /var canAbove=aboveTop>=safe,canBelow=belowTop\+mh<=vh-safe/);
+  assert.match(annotations, /(?:const|let|var) canAbove=aboveTop>=safe,canBelow=belowTop\+mh<=vh-safe/);
   assert.match(annotations, /function repositionVisibleHighlightMenu\(menu\)/);
   assert.match(annotations, /placeHighlightMenuVertically\(menu,rect,!!menu\._menuPreferredAbove\)/);
-  assert.match(annotations, /selMenu\._menuPreferredAbove=false[\s\S]*?repositionVisibleHighlightMenu\(selMenu\)/);
+  assert.match(annotations, /menu\._menuPreferredAbove=false[\s\S]*?repositionVisibleHighlightMenu\(menu\)/);
   assert.match(annotations, /refreshConfiguredMenus\(\)[\s\S]*?repositionVisibleHighlightMenu\(hlMenu\)/);
   assert.match(annotations, /hlMenu\._menuPreferredAbove=placement\.above[\s\S]*?repositionVisibleHighlightMenu\(hlMenu\)/);
 });
 
 test("returning to the toolbar closes settings left open after a pointer exit", () => {
-  assert.match(shell, /settingsPointerExited:\s*current\.overlay === OVERLAY\.SETTINGS/);
-  assert.match(shell, /current\.overlay === OVERLAY\.SETTINGS && current\.settingsPointerExited/);
-  assert.match(reader, /pointerenter[\s\S]*TOOLBAR_POINTER_ENTER/);
-  assert.match(reader, /pointerleave[\s\S]*TOOLBAR_POINTER_LEAVE/);
-  assert.match(notes, /ReaderShell\.isOverlay\(ReaderShell\.OVERLAY\.SETTINGS\)/);
+  const { elements, shell: readerShell } = bootReaderShell();
+
+  readerShell.setOverlay(readerShell.OVERLAY.SETTINGS, true);
+  readerShell.dispatch({ type: "TOOLBAR_POINTER_LEAVE" });
+  assert.equal(readerShell.getState().overlay, readerShell.OVERLAY.SETTINGS);
+  assert.equal(readerShell.getState().settingsPointerExited, true);
+  assert.equal(elements.settings.classList.contains("show"), true);
+
+  readerShell.dispatch({ type: "TOOLBAR_POINTER_ENTER" });
+  assert.equal(readerShell.getState().overlay, readerShell.OVERLAY.NONE);
+  assert.equal(readerShell.getState().settingsPointerExited, false);
+  assert.equal(elements.settings.classList.contains("show"), false);
 });
 
 test("reader settings selects shrink inside the settings panel", () => {
@@ -456,9 +554,9 @@ test("阅读设置提供三款按需下载并校验的开源中文字体", () =>
   assert.match(html, /data-reader-font-id="zhuque-fangsong"[^>]*>朱雀仿宋/);
   assert.match(html, /id="reader-font-download-status"/);
   assert.match(settingsUi, /invoke\("reader_font_status"\)/);
-  assert.match(settingsUi, /invoke\("download_reader_font", \{ fontId: id \}\)/);
+  assert.match(settingsUi, /settingsPort\.downloadFont\(id\)/);
   assert.match(settingsUi, /下载后自动应用/);
-  assert.match(layout, /@font-face\{font-family:"Kunpeng LXGW WenKai Lite"/);
+  assert.match(layout, /@font-face\{font-family:'Kunpeng LXGW WenKai Lite'/);
   assert.match(layout, /reader:\/\/localhost\/font\/2\/SourceHanSerifSC-Regular\.otf/);
   assert.match(layout, /reader:\/\/localhost\/font\/3\/ZhuqueFangsong-Regular\.ttf/);
 });
@@ -467,7 +565,7 @@ test("center taps toggle bottom progress outside immersive mode", () => {
   assert.match(reader, /function toggleBookProgressFromCenterTap\(\)/);
   assert.match(reader, /classList\.contains\("book-progress-hidden"\)[\s\S]*showBookProgress\(\);[\s\S]*hideBookProgressAfterReadingAction\(\);/);
   assert.match(reader, /if \(e\.data\.centerTap\) \{[\s\S]*toggleBookProgressFromCenterTap\(\);\s*toggleReaderToolbar\(\);\s*\}/);
-  assert.match(notes, /window\.toggleReaderToolbar\?\.\(\)/);
+  assert.match(notes, /runtime\.toggleReaderToolbar\?\.\(\)/);
   assert.match(annotations, /if\(overlayOpen\)[\s\S]*parent\.postMessage\(\{centerTap:1\}/);
 });
 
@@ -490,7 +588,7 @@ test("bottom progress history shares TOC and internal-link navigation history", 
   assert.match(reader, /readerNavigationHistory\.pop\(\)/);
   assert.doesNotMatch(reader, /if \(bookProgressRestorePoint\) return/);
   assert.match(reader, /function pinBookProgress\(\) \{\s*bookProgressPinned = true;\s*showBookProgress\(\);\s*\}/);
-  assert.match(reader, /function jumpByBookProgress[\s\S]*?sendToPage\(\{ gotoFrac: target \}\);[\s\S]*?pinBookProgress\(\);[\s\S]*?requestAnimationFrame\(pinBookProgress\)/);
+  assert.match(reader, /function jumpByBookProgress[\s\S]*?sendToPage\(\{ gotoFrac: target\d* \}\);[\s\S]*?pinBookProgress\(\);[\s\S]*?requestAnimationFrame\(pinBookProgress\)/);
   assert.match(reader, /immersive && toolbarPinned && !panelOpen && !bookProgressPinned/);
   assert.match(reader, /if \(e\.data\.readerJump\) \{\s*rememberReaderNavigationPoint\(e\.data\.readerJump\);\s*\}/);
   assert.match(reader, /readerJumpBack\.hidden = !readerJumpBackConfig\(\)\.enabled \|\| !readerNavigationBackVisible \|\| readerNavigationHistory\.length === 0/);
@@ -511,20 +609,20 @@ test("bottom progress history shares TOC and internal-link navigation history", 
   assert.match(reader, /positionY: readerJumpBackRules\.normalizePosition\(current\.readerJumpBackPositionY, 500\)/);
   assert.match(reader, /const iconSize = readerJumpBackRules\.normalizeIconSizePx\(iconSizePx\)/);
   assert.match(reader, /const iconHeight = readerJumpBackRules\.iconHeightPx\(iconSize\)/);
-  assert.match(html, /reader-settings-ui\.js[\s\S]*?reader-jump-back-rules\.js[\s\S]*?reader\.js/);
+  assert.match(html, /reader-settings-ui\.js[\s\S]*?generated-ts\/reader-jump-back-rules\.js[\s\S]*?reader\.js/);
   assert.doesNotMatch(reader, /const readerJumpBackTrackPoint = readerJumpBackRules\.trackPoint;/);
-  assert.match(jumpBackRules, /function trackPoint\(length, iconSize, hitSize, position\)/);
+  assert.match(jumpBackRules, /function readerJumpBackTrackPoint\(length, iconSize, hitSize, position\)/);
   assert.match(jumpBackRules, /const hitTargetInset = Math\.max\(0, hitSize - iconSize\) \/ 2/);
   assert.match(reader, /readerJumpBack\.style\.left = `\$\{Math\.round\(readerJumpBackRules\.trackPoint\(width, iconSize, hitSize, positionX\)\)\}px`/);
   assert.match(reader, /readerJumpBack\.style\.top = `\$\{Math\.round\(readerJumpBackRules\.trackPoint\(height, iconHeight, hitSize, positionY\)\)\}px`/);
   assert.match(reader, /--reader-jump-back-icon-size/);
-  assert.match(reader, /readerNavigationDismissTimer = setTimeout\(\(\) => dismissReaderNavigationBack\(false\), config\.seconds \* 1000\)/);
+  assert.match(reader, /readerNavigationDismissTimer = setTimeout\(\(\) => dismissReaderNavigationBack\(false\), config\.seconds \* (?:1000|1e3)\)/);
   assert.match(reader, /readerNavigationRules\.trackPageDismissal\([\s\S]*?data, config\.pages\)/);
   assert.match(reader, /trackReaderNavigationBackProgress\(e\.data\)/);
 });
 
 test("bottom progress hides after navigation and is toggled by a normal-mode center tap", () => {
-  assert.match(shell, /classList\.toggle\("reader-controls-visible", controlsVisible\)/);
+  assert.match(shell, /classList\.toggle\("reader-controls-visible", projection\.controlsVisible\)/);
   assert.match(html, /\.book-progress\s*\{[^}]*display:\s*none;[^}]*pointer-events:\s*none;/s);
   assert.match(html, /body\.reader-controls-visible \.book-progress\s*\{[^}]*display:\s*flex;[^}]*pointer-events:\s*auto;/s);
   assert.match(html, /body:not\(\.immersive\)\.book-progress-hidden \.book-progress\s*\{[^}]*display:\s*none;[^}]*pointer-events:\s*none;/s);
@@ -543,10 +641,23 @@ test("immersive mode hides controls but keeps reading and page-count status visi
 });
 
 test("immersive toolbar appears on hover and retracts when the pointer leaves", () => {
-  assert.match(reader, /readerToolbar\?\.addEventListener\("pointerenter"[\s\S]*TOOLBAR_POINTER_ENTER/);
-  assert.match(reader, /readerToolbar\?\.addEventListener\("pointerleave"[\s\S]*TOOLBAR_POINTER_LEAVE/);
-  assert.match(shell, /bar-hover[\s\S]*TOOLBAR\.IMMERSIVE_HOVER/);
-  assert.match(shell, /bar-show[\s\S]*TOOLBAR\.IMMERSIVE_PINNED/);
+  const { body, shell: readerShell, stored } = bootReaderShell(true);
+
+  readerShell.dispatch({ type: "TOOLBAR_POINTER_ENTER" });
+  assert.equal(readerShell.getState().toolbar, readerShell.TOOLBAR.IMMERSIVE_HOVER);
+  assert.equal(body.classList.contains("bar-hover"), true);
+  assert.equal(body.classList.contains("bar-show"), false);
+  assert.equal(body.classList.contains("reader-controls-visible"), true);
+
+  readerShell.dispatch({ type: "TOOLBAR_POINTER_LEAVE" });
+  assert.equal(readerShell.getState().toolbar, readerShell.TOOLBAR.IMMERSIVE_HIDDEN);
+  assert.equal(body.classList.contains("bar-hover"), false);
+  assert.equal(body.classList.contains("reader-controls-visible"), false);
+  assert.equal(stored.get("immersive"), "1");
+
+  readerShell.dispatch({ type: "SHOW_TOOLBAR" });
+  assert.equal(readerShell.getState().toolbar, readerShell.TOOLBAR.IMMERSIVE_PINNED);
+  assert.equal(body.classList.contains("bar-show"), true);
   assert.match(html, /body\.immersive\.bar-hover \.toolbar > \*:not\(#reader-progress-group\)\s*\{[^}]*visibility:\s*visible;[^}]*pointer-events:\s*auto;/s);
 });
 
@@ -567,10 +678,18 @@ test("macOS switch workaround does not run in Windows Chromium", () => {
 test("macOS WebKit uses a fast pointerup path without changing Chromium clicks", () => {
   assert.match(annotations, /isMacWebKit=IS_MAC_WEBKIT/);
   assert.match(annotations, /if\(isMacWebKit\)document\.addEventListener\('pointerup'/);
+  assert.match(annotations, /pointerTarget\.closest\([^\n]*\[data-vnote-badge=[^\n]*\.rr-note-ref[^\n]*\.vp-inline/);
   assert.match(annotations, /Date\.now\(\)-macFastTap\.at<700/);
 });
 
+test("virtual footnotes keep explicit cross-chapter targets and avoid whole-book scans", () => {
+  assert.match(annotations, /const compound=\/\^c\(\\d\+\)~\(\.\+\)\$\//);
+  assert.match(annotations, /showFootnote\(el,info\.targetChapter===null\?curCh:info\.targetChapter,info\.frag,info\.targetChapter!==null\)/);
+  assert.match(annotations, /if\(exactTarget\)\{add\(ci\);return out;?\}/);
+  assert.match(annotations, /showFootnote\(a,ciT,frag,!!m\)/);
+});
+
 test("macOS WebKit switches ordinary chapters to batched geometry earlier", () => {
-  assert.match(layout, /var IS_MAC_WEBKIT=.*AppleWebKit/);
-  assert.match(transition, /FAST_CHAPTER_LAYOUT_CHARS=\(IS_MAC_WEBKIT\?16:120\)\*1024/);
+  assert.match(layout, /const IS_MAC_WEBKIT=.*AppleWebKit/);
+  assert.match(transition, /global\.FAST_CHAPTER_LAYOUT_CHARS = \(global\.IS_MAC_WEBKIT \? 4 : 120\) \* 1024/);
 });

@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "reader-shell-state.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-shell-state.js"), "utf8");
 
 function classList() {
   const values = new Set();
@@ -30,14 +30,8 @@ function boot(immersive = false) {
   const body = { classList: classList() };
   const stored = new Map([["immersive", immersive ? "1" : "0"]]);
   const events = [];
-  const window = {
+  const context = {
     dispatchEvent(event) { events.push(event); },
-  };
-  class CustomEvent {
-    constructor(type, init) { this.type = type; this.detail = init?.detail; }
-  }
-  vm.runInNewContext(source, {
-    window,
     document: {
       body,
       getElementById(id) { return elements[id] || null; },
@@ -46,12 +40,17 @@ function boot(immersive = false) {
       getItem(key) { return stored.get(key) || null; },
       setItem(key, value) { stored.set(key, String(value)); },
     },
-    CustomEvent,
     Set,
     Map,
     Object,
-  });
-  return { shell: window.ReaderShell, elements, events, stored, body };
+  };
+  class CustomEvent {
+    constructor(type, init) { this.type = type; this.detail = init?.detail; }
+  }
+  context.CustomEvent = CustomEvent;
+  context.window = context;
+  vm.runInNewContext(source, context);
+  return { shell: context.ReaderShell, elements, events, stored, body };
 }
 
 test("shell overlays are exclusive and lifecycle cleanup runs once", () => {
@@ -149,8 +148,8 @@ test("side panels coexist with overlays and close before them", () => {
 
 test("managed shell modules do not mutate overlay visibility directly", () => {
   const files = [
-    "reader.js", "reader-search-ui.js", "reader-notes-ui.js",
-    "vocab-ui.js", "reader-cross-search-ui.js",
+    "generated-ts/reader.js", "generated-ts/reader-search-ui.js", "generated-ts/reader-notes-ui.js",
+    "generated-ts/vocab-ui.js", "generated-ts/reader-cross-search-ui.js",
   ];
   const managed = files
     .map((name) => fs.readFileSync(path.join(__dirname, "..", name), "utf8"))

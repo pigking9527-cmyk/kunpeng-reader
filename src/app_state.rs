@@ -5,10 +5,97 @@ use crate::{
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tauri::Manager;
 use tokio::sync::watch;
 
 type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
+
+/// Process-local wake-up companion for SQLite's durable automatic-sync
+/// generation.  Entity writes persist the generation first; this object only
+/// avoids waiting for the next application launch to observe it.
+pub(crate) struct SyncAutoScheduler {
+    app: Mutex<Option<tauri::AppHandle>>,
+    timer_armed: AtomicBool,
+}
+
+impl SyncAutoScheduler {
+    fn new() -> Self {
+        Self {
+            app: Mutex::new(None),
+            timer_armed: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn attach(&self, app: tauri::AppHandle) {
+        if let Ok(mut slot) = self.app.lock() {
+            *slot = Some(app);
+        }
+        self.note_local_entity_change();
+    }
+
+    pub(crate) fn note_local_entity_change(&self) {
+        let app = self.app.lock().ok().and_then(|slot| slot.clone());
+        let Some(app) = app else {
+            return;
+        };
+        if self
+            .timer_armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let scheduler = app.state::<AppState>().sync_auto_scheduler.clone();
+        tauri::async_runtime::spawn(async move {
+            scheduler.wait_for_due_sync(app).await;
+        });
+    }
+
+    async fn wait_for_due_sync(self: Arc<Self>, app: tauri::AppHandle) {
+        loop {
+            let pending = app.state::<AppState>().with_db_read("sync_auto_due", |db| {
+                if db.automatic_sync_is_configured()
+                    && crate::sync::automatic_sync_credentials_ready_without_prompt(db)
+                {
+                    db.automatic_sync_due()
+                } else {
+                    Ok(None)
+                }
+            });
+            let Some(due) = pending.ok().flatten() else {
+                self.timer_armed.store(false, Ordering::Release);
+                // Close the small race between the read above and clearing the
+                // armed flag. A concurrent writer either observes false and
+                // starts its own timer, or this second kick sees its durable
+                // generation.
+                self.note_local_entity_change();
+                return;
+            };
+            let now = crate::now_ms();
+            if due.due_at_ms > now {
+                tokio::time::sleep(Duration::from_millis(due.due_at_ms - now)).await;
+                continue;
+            }
+            self.timer_armed.store(false, Ordering::Release);
+            crate::sync::start_automatic_sync(app, due.generation);
+            return;
+        }
+    }
+
+    pub(crate) fn finish_run(&self, state: &AppState, generation: u64, success: bool) {
+        let pending = state.with_db_write("sync_auto_finish", |db| {
+            if success {
+                db.settle_automatic_sync_generation(generation)
+            } else {
+                db.fail_automatic_sync_generation(generation)
+            }
+        });
+        if pending.unwrap_or(false) {
+            self.note_local_entity_change();
+        }
+    }
+}
 
 /// A short-lived cancellation channel for one local-library AI request.
 /// The request id is generated in the renderer and is never persisted or
@@ -63,12 +150,17 @@ pub(crate) struct AppState {
     pub(crate) vocab: Mutex<vocab::VocabStore>,
     pub(crate) word_pack: Mutex<tts::WordPackState>,
     pub(crate) sync_running: AtomicBool,
+    pub(crate) sync_auto_scheduler: Arc<SyncAutoScheduler>,
     library_ai_requests: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     memory_reclaimers: Mutex<Vec<memory_budget::ReclaimerHandle>>,
 }
 
 impl AppState {
-    pub(crate) fn new(startup_database: Option<db::AppDb>) -> Self {
+    pub(crate) fn new(mut startup_database: Option<db::AppDb>) -> Self {
+        let sync_auto_scheduler = Arc::new(SyncAutoScheduler::new());
+        if let Some(database) = startup_database.as_mut() {
+            database.set_sync_local_change_notifier(Arc::clone(&sync_auto_scheduler));
+        }
         Self {
             background_tasks: background_tasks::BackgroundTaskRegistry::new_persistent_default(),
             page_count_tasks: Mutex::new(HashMap::new()),
@@ -91,9 +183,16 @@ impl AppState {
             vocab: Mutex::new(vocab::VocabStore::load()),
             word_pack: Mutex::new(tts::WordPackState::default()),
             sync_running: AtomicBool::new(false),
+            sync_auto_scheduler,
             library_ai_requests: Arc::new(Mutex::new(HashMap::new())),
             memory_reclaimers: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Restored/reopened databases are fresh connections and must be rebound
+    /// to the in-process notifier. The durable generation remains in SQLite.
+    pub(crate) fn bind_sync_auto_scheduler(&self, database: &mut db::AppDb) {
+        database.set_sync_local_change_notifier(Arc::clone(&self.sync_auto_scheduler));
     }
 
     /// Serializes access to the sole SQLite connection while measuring mutex

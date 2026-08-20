@@ -12,8 +12,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::time::Instant;
 
-const ALL_SYNC_ENTITY_KINDS: &str = "'reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_history_entry_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1'";
-const PENDING_SYNC_ENTITY_KINDS: &str = "'reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_config_v1','translation_config_v1','ai_reader_history_entry_v2','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1'";
+const ALL_SYNC_ENTITY_KINDS: &str = "'reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_history_entry_v2','reader_palette_v1','reader_palette_order_v1','app_settings_v1','reading_handoff_v1','news_subscriptions_v1'";
+const PENDING_SYNC_ENTITY_KINDS: &str = "'reading_progress_v1','reading_data_v1','reading_statistics_v1','model_book_tags_v1','user_book_tags_v1','book_collections_v1','booklist_v1','vocab','reading_bucket_v2','ai_reader_config_v1','translation_config_v1','ai_reader_history_entry_v2','secret_bundle_v1','reader_palette_v1','reader_palette_order_v1','app_settings_v1','reading_handoff_v1','news_subscriptions_v1'";
 // Protocol v5 uses Unix milliseconds. Older desktop releases wrote these
 // envelope fields in seconds; the bounded range keeps the repair from
 // reinterpreting arbitrary or already-canonical values.
@@ -29,6 +29,19 @@ pub struct SyncEntity {
     pub json: Value,
     pub updated_at: i64,
     #[serde(default, deserialize_with = "deserialize_nullable_i64")]
+    pub deleted_at: i64,
+    pub device_id: String,
+    pub sync_version: i64,
+}
+
+/// The version fields required by inventory and reconciliation, without the
+/// opaque payload.  Steady-state sync must not deserialize every entity JSON
+/// document merely to compare a server inventory digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncEntityManifest {
+    pub kind: String,
+    pub id: String,
+    pub updated_at: i64,
     pub deleted_at: i64,
     pub device_id: String,
     pub sync_version: i64,
@@ -61,6 +74,17 @@ fn sync_entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncEntity>
         deleted_at: row.get(4)?,
         device_id: row.get(5)?,
         sync_version: row.get(6)?,
+    })
+}
+
+fn sync_entity_manifest_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncEntityManifest> {
+    Ok(SyncEntityManifest {
+        kind: row.get(0)?,
+        id: row.get(1)?,
+        updated_at: row.get(2)?,
+        deleted_at: row.get(3)?,
+        device_id: row.get(4)?,
+        sync_version: row.get(5)?,
     })
 }
 
@@ -182,6 +206,40 @@ impl AppDb {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
         log_db_operation("sync_entities_by_kind", started, entities.len());
+        Ok(entities)
+    }
+
+    /// Read the compact local inventory for the currently enabled exchange
+    /// kinds.  Unlike [`Self::all_sync_entities`], this deliberately leaves
+    /// `entities.json` in SQLite: inventory and reconcile requests need only
+    /// identity and LWW metadata.  Full JSON is still read for an actual
+    /// repair upload.
+    pub fn sync_entity_manifest_for_kinds(
+        &self,
+        kinds: &[String],
+    ) -> Result<Vec<SyncEntityManifest>, String> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = Instant::now();
+        let placeholders = std::iter::repeat_n("?", kinds.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT kind,id,updated_at,deleted_at,device_id,sync_version \
+             FROM entities WHERE kind IN ({placeholders}) ORDER BY kind,id"
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(
+                params_from_iter(kinds.iter()),
+                sync_entity_manifest_from_row,
+            )
+            .map_err(|error| error.to_string())?;
+        let entities = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        log_db_operation("sync_entity_manifest_for_kinds", started, entities.len());
         Ok(entities)
     }
 
@@ -569,5 +627,34 @@ mod tests {
             .as_u64()
             .unwrap();
         assert!(after >= before.saturating_add(4));
+    }
+
+    #[test]
+    fn sync_manifest_reads_lww_columns_without_deserializing_payloads() {
+        let database = AppDb::open_in_memory_for_tests();
+        database
+            .conn
+            .execute(
+                "INSERT INTO entities(kind,id,json,updated_at,deleted_at,device_id,sync_version,dirty) \
+                 VALUES('vocab','opaque','not valid json',11,0,'remote-device',3,0)",
+                [],
+            )
+            .unwrap();
+
+        let manifest = database
+            .sync_entity_manifest_for_kinds(&["vocab".to_string()])
+            .unwrap();
+        assert_eq!(
+            manifest,
+            vec![SyncEntityManifest {
+                kind: "vocab".into(),
+                id: "opaque".into(),
+                updated_at: 11,
+                deleted_at: 0,
+                device_id: "remote-device".into(),
+                sync_version: 3,
+            }]
+        );
+        assert_eq!(database.all_sync_entities().unwrap()[0].json, Value::Null);
     }
 }

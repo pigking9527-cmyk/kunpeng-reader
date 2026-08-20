@@ -3,7 +3,7 @@ use crate::{
     search_index, window_commands, AppState, RES_BASE,
 };
 use book::Library;
-use presentation::title_initial;
+use presentation::{project_book_reading_timeline, title_initial, BookReadingTimeline};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
@@ -56,29 +56,6 @@ pub(crate) struct LibraryHealthReport {
     missing: Vec<LibraryHealthBook>,
     duplicates: Vec<LibraryDuplicateGroup>,
     search_index: search_index::SearchIndexDiskHealth,
-}
-
-#[derive(Serialize)]
-struct ProgressTimelinePoint {
-    at: u64,
-    progress: f32,
-    chapter: u32,
-    frac: f32,
-}
-
-#[derive(Serialize)]
-struct ReadingTimelineBucket {
-    day: u32,
-    hour: u8,
-    seconds: u32,
-    words: u32,
-}
-
-#[derive(Serialize)]
-pub(crate) struct BookReadingTimeline {
-    title: String,
-    events: Vec<ProgressTimelinePoint>,
-    buckets: Vec<ReadingTimelineBucket>,
 }
 
 #[derive(Serialize)]
@@ -623,43 +600,10 @@ pub(crate) fn book_reading_timeline(
 }
 
 fn reading_timeline_for_book(state: &AppState, id_num: u64) -> Result<BookReadingTimeline, String> {
-    let (title, events) = {
-        let lib = state.library.lock().unwrap();
-        let book = lib.get(id_num).ok_or("图书不存在")?;
-        (
-            book.title.clone(),
-            book.progress_history
-                .iter()
-                .map(|event| ProgressTimelinePoint {
-                    at: event.at,
-                    progress: event.progress,
-                    chapter: event.chapter,
-                    frac: event.frac,
-                })
-                .collect(),
-        )
-    };
-    let mut buckets: Vec<ReadingTimelineBucket> = state
-        .stats
-        .lock()
-        .unwrap()
-        .map
-        .iter()
-        .filter_map(|(&(day, hour, book), &(seconds, words))| {
-            (book == id_num).then_some(ReadingTimelineBucket {
-                day,
-                hour,
-                seconds,
-                words,
-            })
-        })
-        .collect();
-    buckets.sort_by_key(|bucket| (bucket.day, bucket.hour));
-    Ok(BookReadingTimeline {
-        title,
-        events,
-        buckets,
-    })
+    let library = state.library.lock().unwrap();
+    let book = library.get(id_num).ok_or("图书不存在")?;
+    let stats = state.stats.lock().unwrap();
+    Ok(project_book_reading_timeline(book, &stats.map))
 }
 
 /// 首次加载：回填旧书缺失的作者（重读 EPUB 元数据）和导入时间，然后返回书单。
@@ -745,6 +689,12 @@ pub(crate) async fn set_progress(
     let anchor_offset = anchor.as_ref().map(|value| value.text_offset);
     let mut lib = state.library.lock().unwrap();
     let mut changed = lib.set_position_with_anchor(id, progress, chapter, frac, anchor);
+    let handoff_content_id = lib
+        .books
+        .iter()
+        .find(|book| book.id == id)
+        .map(|book| book.content_id.clone())
+        .unwrap_or_default();
     if let Some(book) = lib.books.iter_mut().find(|b| b.id == id) {
         if book.format == "epub" && book.chapter_index_version != epub_runtime::CACHE_VERSION {
             book.chapter_index_version = epub_runtime::CACHE_VERSION;
@@ -762,6 +712,10 @@ pub(crate) async fn set_progress(
             format!("保存阅读位置失败：{error}")
         })?;
     }
+    drop(lib);
+    state.with_db_write("set_progress_reading_handoff", |db| {
+        crate::private_sync::record_reading_handoff(db, &handoff_content_id)
+    })?;
     crate::runtime_support::log(&format!(
         "set_progress ok id={id} seq={sequence} chapter={chapter} frac={frac:.6} progress={progress:.4} anchor_offset={} changed={changed}",
         anchor_offset

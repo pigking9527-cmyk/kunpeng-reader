@@ -3,18 +3,21 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const trace = require("../reader-bug-trace.js");
+const trace = require("../generated-ts/reader-bug-trace.js");
 const uiRoot = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(uiRoot, "reader.html"), "utf8");
 const mainHtml = fs.readFileSync(path.join(uiRoot, "index.html"), "utf8");
-const mainTrace = fs.readFileSync(path.join(uiRoot, "problem-trace-ui.js"), "utf8");
-const feedbackUi = fs.readFileSync(path.join(uiRoot, "feedback-ui.js"), "utf8");
-const reader = fs.readFileSync(path.join(uiRoot, "reader.js"), "utf8");
-const pageTrace = fs.readFileSync(path.join(uiRoot, "reader-page-bug-trace.js"), "utf8");
-const layout = fs.readFileSync(path.join(uiRoot, "reader-page-layout.js"), "utf8");
-const annotations = fs.readFileSync(path.join(uiRoot, "reader-page-annotations.js"), "utf8");
-const runtime = fs.readFileSync(path.join(uiRoot, "reader-page-runtime.js"), "utf8");
-const mainTraceApi = require("../problem-trace-ui.js");
+const mainTrace = fs.readFileSync(path.join(uiRoot, "generated-ts", "problem-trace-ui.js"), "utf8");
+const feedbackUi = fs.readFileSync(
+  path.join(uiRoot, "generated-ts", "feedback-ui.js"),
+  "utf8",
+);
+const reader = fs.readFileSync(path.join(uiRoot, "generated-ts", "reader.js"), "utf8");
+const pageTrace = fs.readFileSync(path.join(uiRoot, "generated-reader-page-ts", "reader-page-bug-trace.js"), "utf8");
+const layout = require("./reader-page-test-source.cjs").compact;
+const annotations = layout;
+const runtime = fs.readFileSync(path.join(uiRoot, "generated-reader-page-ts", "reader-page-runtime.js"), "utf8");
+const mainTraceApi = require("../generated-ts/problem-trace-ui.js");
 
 test("problem trace keeps all recent two-minute redacted metadata without a count cap", () => {
   trace.reset();
@@ -181,7 +184,7 @@ test("Bug feedback requests the reader problem-state snapshot as an attachment",
   assert.doesNotMatch(mainHtml, /id="problem-trace-modal"/);
   assert.match(mainHtml, /id="feedback-attach-problem-trace"[^>]*data-i18n="attachTrace"[^>]*>\s*附到本次反馈（推荐）\s*<\/button\s*>/);
   assert.match(mainHtml, /id="feedback-save-problem-trace"[^>]*data-i18n="saveTraceDesktop"[^>]*>\s*保存问题记录到桌面\s*<\/button\s*>/);
-  assert.match(mainHtml, /<script src="problem-trace-ui\.js"><\/script>/);
+  assert.match(mainHtml, /<script src="generated-ts\/problem-trace-ui\.js"><\/script>/);
   assert.match(html, /reader-bug-trace\.js/);
   assert.match(reader, /ReaderBugTrace\?\.setContextProvider/);
   assert.match(reader, /ReaderBugTrace\?\.ingestPageEvent/);
@@ -194,18 +197,18 @@ test("Bug feedback requests the reader problem-state snapshot as an attachment",
   assert.match(mainTrace, /reader-bug-trace-checkpoint/);
   assert.match(mainTrace, /problem_trace_checkpoint/);
   assert.match(mainTrace, /recentReaderSnapshot/);
-  assert.match(mainTrace, /function shellOnlySnapshot/);
+  assert.match(mainTrace, /const shellOnlySnapshot =/);
   assert.doesNotMatch(mainTrace + feedbackUi, /请先打开一本书并复现问题/);
   assert.match(mainTrace, /retryTimer/);
   assert.match(mainTrace, /eventApi\.emit\("reader-bug-trace-request"/);
   assert.match(mainTrace, /eventApi\.listen\("reader-bug-trace-response"/);
-  assert.match(mainTrace, /const WINDOW_MS = 2 \* 60 \* 1000/);
-  assert.match(mainTrace, /function wireShellOperations/);
+  assert.match(mainTrace, /const WINDOW_MS = 2 \* 60 \* 1e3/);
+  assert.match(mainTrace, /const wireShellOperations =/);
   assert.match(mainTrace, /\[data-problem-target\]/);
   assert.match(mainTrace, /reader-window-trace/);
-  assert.match(mainTrace, /function restoreShelfDocumentFocus/);
-  assert.match(mainTrace, /root\.focus\?\.\(\)/);
-  assert.match(mainTrace, /querySelector\?\.\("\.content"\)\?\.focus/);
+  assert.match(mainTrace, /const restoreShelfDocumentFocus =/);
+  assert.match(mainTrace, /runtime\.focus\?\.\(\)/);
+  assert.match(mainTrace, /querySelector\("\.content"\)\?\.focus/);
   assert.match(mainTrace, /attempts < 6/);
   assert.match(mainTrace, /pushShellEvent\("main_focus"/);
   assert.match(mainTrace, /reader-performance-trace/);
@@ -215,8 +218,8 @@ test("Bug feedback requests the reader problem-state snapshot as an attachment",
   assert.match(reader, /function recordReaderPerformance/);
   assert.match(reader, /recordReaderPerformance\("book_info"/);
   assert.match(reader, /recordReaderPerformance\("frame_ready"/);
-  assert.match(mainTrace, /function recordShelfBookOpen/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "shelf-ui.js"), "utf8"), /dataset\.problemTarget = "book-card"/);
+  assert.match(mainTrace, /const recordShelfBookOpen =/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "shelf-ui.js"), "utf8"), /dataset\.problemTarget = "book-card"/);
   assert.match(mainTrace, /library_qa/);
   assert.match(mainTrace, /reading_stats/);
   assert.match(mainTrace, /book_organization/);
@@ -224,7 +227,7 @@ test("Bug feedback requests the reader problem-state snapshot as an attachment",
   assert.match(mainTrace, /news/);
   assert.doesNotMatch(mainTrace, /save_problem_trace_json/);
   assert.doesNotMatch(mainTrace, /dialog\.save/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "reader-bug-trace.js"), "utf8"), /problem_trace_checkpoint/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "reader-bug-trace.js"), "utf8"), /problem_trace_checkpoint/);
 });
 
 test("main-window bugs can attach a shell-only trace without opening a reader", async () => {
@@ -288,19 +291,19 @@ test("Chinese 注1 cross-chapter references are treated as in-place notes", () =
   assert.match(layout, /\(\?:注\|註\)\\s\*\\d\{1,5\}/);
   assert.match(layout, /\^zww\\d\{1,5\}\$/);
   assert.match(annotations, /\(\?:\(\?:注\|註\)\\s\*\)\?\\d\{1,4\}/);
-  assert.match(annotations, /var footnoteJump=inFootnote\|\|isNoteLink\(a\)/);
-  assert.match(annotations, /footnoteJump&&frag\)\{showFootnote\(a,ciT,frag\);return;\}/);
+  assert.match(annotations, /(?:const|let|var) footnoteJump=inFootnote\|\|isNoteLink\(a\)/);
+  assert.match(annotations, /footnoteJump&&frag\)\{showFootnote\(a,ciT,frag,!!m\);return;?\}/);
 });
 
 test("reader page reports why a click did not turn the page", () => {
-  assert.match(pageTrace, /var chapterPending=0/);
-  assert.match(pageTrace, /function readerBugTrace\(kind,outcome,e,extra\)/);
+  assert.match(pageTrace, /global\.chapterPending = 0/);
+  assert.match(pageTrace, /function readerBugTrace\(kind, outcome, event, extra\)/);
   assert.match(pageTrace, /function pagedLayoutSnapshot\(\)/);
   assert.match(pageTrace, /layout_visible_free/);
   assert.match(pageTrace, /layout_content_free/);
   assert.match(pageTrace, /layout_tail_tightened/);
-  assert.match(pageTrace, /readerBugTrace\('chapter','chapter_start'/);
-  assert.match(pageTrace, /ready\?'chapter_ready':'chapter_error'/);
+  assert.match(pageTrace, /readerBugTrace\("chapter", "chapter_start"/);
+  assert.match(pageTrace, /ready \? "chapter_ready" : "chapter_error"/);
   assert.match(pageTrace, /function beginPageTurnBugTrace\(direction\)/);
   assert.match(pageTrace, /function finishPageTurnBugTrace\(token\)/);
   assert.match(pageTrace, /chapter_turn_pending/);
@@ -311,16 +314,16 @@ test("reader page reports why a click did not turn the page", () => {
   assert.match(annotations, /markPageTurnInput\('keyboard'\)/);
   assert.match(annotations, /readerBugTrace\('wheel',phase,null,data\)/);
   assert.match(pageTrace, /wheel_accumulated_px/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "reader-message.js"), "utf8"), /wheel_gesture_age_ms/);
-  assert.match(runtime, /markPageTurnInput\('shell'\)/);
-  assert.match(runtime, /function tracePagedImageLayout\(outcome,detail\)/);
-  assert.match(runtime, /readerBugTrace\('image_pagination',outcome,null,data\)/);
-  assert.match(runtime, /tracePagedImageLayout\('no_candidate'/);
-  assert.match(runtime, /tracePagedImageLayout\('fits_full'/);
-  assert.match(runtime, /tracePagedImageLayout\('scheduled'/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "reader-message.js"), "utf8"), /wheel_gesture_age_ms/);
+  assert.match(runtime, /"markPageTurnInput", "shell"/);
+  assert.match(runtime, /const tracePagedImageLayout = \(outcome, detail = \{\}\) =>/);
+  assert.match(runtime, /"readerBugTrace", "image_pagination", outcome, null, data/);
+  assert.match(runtime, /tracePagedImageLayout\("no_candidate"/);
+  assert.match(runtime, /tracePagedImageLayout\("preview"/);
+  assert.match(runtime, /const schedulePagedImagePreview = \(\) =>/);
   assert.match(pageTrace, /image_candidate_page/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "reader-message.js"), "utf8"), /layout_tail_fit/);
-  assert.match(fs.readFileSync(path.join(uiRoot, "reader-message.js"), "utf8"), /image_preview_height/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "reader-message.js"), "utf8"), /layout_tail_fit/);
+  assert.match(fs.readFileSync(path.join(uiRoot, "generated-ts", "reader-message.js"), "utf8"), /image_preview_height/);
   assert.match(layout, /beginChapterBugTrace\(i,where\)/);
   assert.match(layout, /finishChapterBugTrace\(bugTraceToken,true,pageInCh\)/);
   ["chapter_pending", "overlay", "drag"].forEach((outcome) => {
@@ -334,8 +337,14 @@ test("reader page reports why a click did not turn the page", () => {
 });
 
 test("a transient selection no longer swallows the first page-turn click", () => {
-  assert.match(annotations, /if\(didDrag\)\{readerBugTrace\('click','drag',e\);return;\}/);
-  assert.match(annotations, /if\(tapHasSelection\(\)\)\{\s*if\(window\.getSelection\)window\.getSelection\(\)\.removeAllRanges\(\);\s*hideSelMenu\(\);\s*\}/s);
+  assert.match(annotations, /if\(didDrag\)\{readerBugTrace\('click','drag',e\);return;?\}/);
+  const selectionClear = annotations.slice(
+    annotations.indexOf("if(tapHasSelection())"),
+    annotations.indexOf("const tapStarted", annotations.indexOf("if(tapHasSelection())")),
+  );
+  assert.match(selectionClear, /window\.getSelection/);
+  assert.match(selectionClear, /removeAllRanges\(\)/);
+  assert.match(selectionClear, /hideSelMenu\(\)/);
   assert.doesNotMatch(annotations, /tapHasSelection\(\)\)\{readerBugTrace\('click','selection',e\);return;/);
-  assert.match(annotations, /document\.addEventListener\('mouseup',function\(\)\{downX=null;downY=null;\}\)/);
+  assert.match(annotations, /document\.addEventListener\('mouseup',function\(\)\{downX=null;downY=null;?\}\)/);
 });

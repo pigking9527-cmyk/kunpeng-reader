@@ -10,8 +10,11 @@ const styles = fs.readFileSync(path.join(ui, "styles.css"), "utf8");
 test("library AI settings header has no device-only subtitle", () => {
   assert.doesNotMatch(html, /只保存在这台设备。/);
 });
-const controller = fs.readFileSync(path.join(ui, "library-ai.js"), "utf8");
-const entry = fs.readFileSync(path.join(ui, "library-ai-entry.js"), "utf8");
+const controller = fs.readFileSync(path.join(ui, "generated-ts", "library-ai.js"), "utf8");
+const entry = fs.readFileSync(
+  path.join(ui, "generated-ts", "library-ai-entry.js"),
+  "utf8",
+);
 const backend = fs.readFileSync(path.join(ui, "..", "src", "ai_reader.rs"), "utf8");
 const backendModules = [
   backend,
@@ -24,8 +27,8 @@ const backendModules = [
 test("library assistant is mounted inside the main window content area", () => {
   assert.match(html, /id="library-ai-page"/);
   assert.match(html, /id="library-ai-back"/);
-  assert.match(html, /<script src="library-ai\.js"><\/script>/);
-  assert.match(html, /<script src="library-ai-entry\.js"><\/script>/);
+  assert.match(html, /<script src="generated-ts\/library-ai\.js"><\/script>/);
+  assert.match(html, /<script src="generated-ts\/library-ai-entry\.js"><\/script>/);
   assert.match(styles, /\.library-ai-page\s*\{/);
   assert.match(styles, /\.library-ai-grid\s*\{[^}]*grid-template-columns/s);
   assert.match(styles, /@media \(max-width: 760px\)/);
@@ -89,7 +92,7 @@ test("library assistant opens lazily in the main window and can return to the sh
   assert.match(entry, /event\.key === "Escape"/);
   assert.doesNotMatch(entry, /open_library_ai_window/);
   assert.match(controller, /function init\(/);
-  assert.match(controller, /initialized lazily/);
+  assert.match(controller, /return \{ load, refreshBooks, run, setMode, renderBooks \}/);
 });
 
 test("library assistant gives multi-stage RAG calls enough time without allowing unbounded answers", () => {
@@ -107,7 +110,7 @@ test("library question Enter submits while Shift+Enter keeps a newline", () => {
 });
 
 test("library question input has a copy-cut-paste-only right-click menu", () => {
-  const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
+  const app = fs.readFileSync(path.join(ui, "generated-ts", "app.js"), "utf8");
   assert.match(app, /contextmenu", \(e\) => e\.preventDefault\(\)/);
   assert.match(controller, /function showQuestionContextMenu/);
   assert.match(controller, /addAction\(i18n\("copy", "复制"\)/);
@@ -119,7 +122,7 @@ test("library question input has a copy-cut-paste-only right-click menu", () => 
 });
 
 test("library assistant toolbar toggles back to the shelf when it is already open", () => {
-  assert.match(entry, /function toggle\(\) \{\s*if \(page\.hidden\) \{\s*void open\(\);\s*\} else \{\s*close\(\);/s);
+  assert.match(entry, /const toggle = \(\) => \{\s*if \(page\.hidden\) void open\(\);\s*else close\(\);/s);
   assert.match(entry, /button\.addEventListener\("click", toggle\)/);
 });
 
@@ -129,7 +132,7 @@ test("library assistant keeps whole-library as the unselected default and offers
   assert.match(html, /id="select-visible"[^>]*>\s*全选当前列表/);
   assert.match(html, /id="invert-visible"[^>]*>\s*反选当前列表/);
   assert.doesNotMatch(html, />检索范围<|展示最相关的前 20 本（每本 1 段）/);
-  assert.match(controller, /const selectedBookIds = new Set\(\)/);
+  assert.match(controller, /const selectedBookIds = (?:\/\* @__PURE__ \*\/ )?new Set\(\)/);
   assert.match(controller, /const MAX_QUESTION_SOURCES = 20/);
   assert.match(controller, /: i18n\("scopeAllBooks", "当前范围：全部书库"\)/);
   assert.doesNotMatch(controller, /questionScopeAll/);
@@ -156,11 +159,14 @@ test("library assistant supports tag and collection quick filters", () => {
 });
 
 test("library assistant can choose one of the locally configured large models", () => {
-  const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
-  const apiSettings = fs.readFileSync(path.join(ui, "api-settings-ui.js"), "utf8");
-  const reader = fs.readFileSync(path.join(ui, "reader.js"), "utf8");
+  const app = fs.readFileSync(path.join(ui, "generated-ts", "app.js"), "utf8");
+  const apiSettings = fs.readFileSync(
+    path.join(ui, "generated-ts", "api-settings-ui.js"),
+    "utf8",
+  );
+  const reader = fs.readFileSync(path.join(ui, "generated-ts", "reader.js"), "utf8");
   const readerHtml = fs.readFileSync(path.join(ui, "reader.html"), "utf8");
-  const annotations = fs.readFileSync(path.join(ui, "reader-page-annotations.js"), "utf8");
+  const annotations = require("./reader-page-test-source.cjs").compact;
   const translate = fs.readFileSync(path.join(ui, "..", "src", "translate.rs"), "utf8");
   const commands = fs.readFileSync(path.join(ui, "..", "src", "app_commands.rs"), "utf8");
   assert.match(html, /id="api-settings-open"/);
@@ -171,7 +177,7 @@ test("library assistant can choose one of the locally configured large models", 
   assert.match(html, /id="api-ai-preset"[\s\S]*?DeepSeek[\s\S]*?OpenAI（GPT）[\s\S]*?Anthropic（Claude）[\s\S]*?OpenAI 兼容接口/);
   assert.match(html, /id="api-translation-provider"/);
   assert.match(html, /id="library-ai-model-profile"/);
-  assert.match(html, /<script src="api-settings-ui\.js"><\/script>/);
+  assert.match(html, /<script src="generated-ts\/api-settings-ui\.js"><\/script>/);
   assert.match(app, /ReaderApiSettingsUI\?\.init\(\{ invoke \}\)/);
   assert.match(apiSettings, /invoke\("ai_reader_profiles"\)/);
   assert.match(apiSettings, /invoke\("save_ai_reader_profile"/);
@@ -196,12 +202,12 @@ test("library assistant can choose one of the locally configured large models", 
 });
 
 test("library assistant readiness stays quiet when API and local indexes are available", () => {
-  assert.match(controller, /function readinessMessage\(aiStatus, semanticStatus\)/);
+  assert.match(controller, /function readinessMessage\(aiStatus, semanticStatusValue\)/);
   assert.match(controller, /invoke\("semantic_tasks", \{ reconcile: true \}\)/);
   assert.match(controller, /invoke\("semantic_status"\)/);
-  assert.match(controller, /semanticStatus\?\.semantic_ready/);
-  assert.match(controller, /semanticStatus\?\.semantic_done/);
-  assert.match(controller, /semanticStatus\?\.status_refreshing/);
+  assert.match(controller, /semanticStatusValue\?\.semantic_ready/);
+  assert.match(controller, /semanticStatusValue\?\.semantic_done/);
+  assert.match(controller, /semanticStatusValue\?\.status_refreshing/);
   assert.match(controller, /if \(apiReady && indexReady\) return ""/);
   assert.match(controller, /配置大模型 API、模型和密钥/);
   assert.match(controller, /为本地图书建立语义索引/);
@@ -209,7 +215,10 @@ test("library assistant readiness stays quiet when API and local indexes are ava
 });
 
 test("library assistant classifies model tags with progress and can use them independently from manual tags", () => {
-  const classificationSettings = fs.readFileSync(path.join(ui, "book-classification-settings-ui.js"), "utf8");
+  const classificationSettings = fs.readFileSync(
+    path.join(ui, "generated-ts", "book-classification-settings-ui.js"),
+    "utf8",
+  );
   assert.match(html, /id="book-classification-settings-open"/);
   assert.match(html, /id="book-classification-settings-modal"/);
   assert.match(html, /id="set-use-model-tags"/);
@@ -221,7 +230,7 @@ test("library assistant classifies model tags with progress and can use them ind
   assert.match(classificationSettings, /从已保存的位置继续/);
   assert.match(controller, /ReaderBookClassificationSettingsUI\?\.open\?\./);
   assert.match(classificationSettings, /已完成 \$\{complete\} \/ \$\{total\} 本图书的分类/);
-  assert.match(classificationSettings, /status\.title = text/);
+  assert.match(classificationSettings, /status\.title = String\(text\)/);
   assert.match(backend, /LibraryClassification/);
   assert.match(backend, /library_book_classify/);
   assert.match(backend, /model_tags_by_book/);
@@ -271,7 +280,10 @@ test("recommendation candidate and model result counts have independent ranges",
 });
 
 test("common settings can opt into model classification tags without changing their sync behavior", () => {
-  const classificationSettings = fs.readFileSync(path.join(ui, "book-classification-settings-ui.js"), "utf8");
+  const classificationSettings = fs.readFileSync(
+    path.join(ui, "generated-ts", "book-classification-settings-ui.js"),
+    "utf8",
+  );
   assert.match(html, /id="set-use-model-tags"/);
   assert.match(html, /使用大模型分类的标签/);
   assert.match(classificationSettings, /library_model_tags_settings/);
@@ -283,9 +295,9 @@ test("common settings can opt into model classification tags without changing th
 });
 
 test("book information separates manual tags from model categories with an explicit source marker", () => {
-  const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
-  const reader = fs.readFileSync(path.join(ui, "reader.js"), "utf8");
-  const panel = fs.readFileSync(path.join(ui, "book-info-panel.js"), "utf8");
+  const app = fs.readFileSync(path.join(ui, "generated-ts", "app.js"), "utf8");
+  const reader = fs.readFileSync(path.join(ui, "generated-ts", "reader.js"), "utf8");
+  const panel = fs.readFileSync(path.join(ui, "generated-ts", "book-info-panel.js"), "utf8");
   const panelStyles = fs.readFileSync(path.join(ui, "book-info-panel.css"), "utf8");
   assert.match(app, /bookOrganizationUI\.open\(currentInfoBookId, m\)/);
   assert.match(app, /bookInfoPanel\.render\(\{ \.\.\.book, \.\.\.m, cover: m\.cover \|\| book\.cover \}\)/);
@@ -334,8 +346,8 @@ test("answer citations render as hoverable, clickable source footnotes", () => {
 
 test("library answers render a safe subset of Markdown instead of exposing raw markers", () => {
   assert.match(controller, /function appendAnswerInline\(parent, text, sources\)/);
-  assert.match(controller, /heading\[1\]\.length === 1 \? "h3" : "h4"/);
-  assert.match(controller, /appendListItem\("ul", bullet\[1\]\)/);
+  assert.match(controller, /hashes\.length === 1 \? "h3" : "h4"/);
+  assert.match(controller, /appendListItem\("ul", bullet\[1\] \?\? ""\)/);
   assert.match(controller, /root\.createElement\("strong"\)/);
   assert.match(styles, /\.library-ai-answer h3/);
   assert.match(styles, /\.library-ai-answer-list/);
@@ -370,8 +382,11 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.match(controller, /function portableSourceReference\(source\)/);
   assert.match(controller, /bookTitle/);
   assert.match(controller, /sourceKind/);
-  assert.doesNotMatch(controller.match(/function portableSourceReference\(source\)[\s\S]*?\n    }/)[0], /excerpt/);
-  assert.doesNotMatch(controller.match(/function portableSourceReference\(source\)[\s\S]*?\n    }/)[0], /bookId/);
+  const portableSourceBody = controller.match(
+    /function portableSourceReference\(source\)\s*\{\s*return \{([\s\S]*?)\n\s*\};\s*\}/,
+  )?.[1] || "";
+  assert.doesNotMatch(portableSourceBody, /excerpt/);
+  assert.doesNotMatch(portableSourceBody, /bookId/);
   assert.match(controller, /问答已保存到本机/);
   assert.match(controller, /下次同步时上传/);
   assert.match(controller, /HISTORY_LAYOUT_KEY/);
@@ -387,7 +402,7 @@ test("library answers save locally and can sync a de-identified history", () => 
   assert.doesNotMatch(controller, /const at = entry\.at \? new Date\(entry\.at\)/);
   assert.doesNotMatch(controller, /已将书库问答设为/);
   assert.match(controller, /function renderAnswer\(content, sources, \{ hideDirectAnswerHeading = false \} = \{\}\)/);
-  assert.match(controller, /hideDirectAnswerHeading && heading\[2\]\.trim\(\) === "直接回答"/);
+  assert.match(controller, /hideDirectAnswerHeading && headingText\.trim\(\) === "直接回答"/);
   assert.match(controller, /renderAnswer\(entry\.content, sources, \{ hideDirectAnswerHeading: true \}\)/);
   assert.doesNotMatch(controller, /renderLibraryHistoryAnswer/);
   assert.match(styles, /\.library-ai-history-list\s*\{/);

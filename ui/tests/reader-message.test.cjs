@@ -9,8 +9,8 @@ const vm = require("node:vm");
 // in an actual CommonJS-shaped context rather than relying on Node's ESM
 // namespace returned by require("../reader-message.js").
 function loadGuard(context) {
-  const source = fs.readFileSync(path.join(__dirname, "..", "reader-message.js"), "utf8");
-  vm.runInNewContext(source, {
+  const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-message.js"), "utf8");
+  const runtime = {
     URL,
     Set,
     Object,
@@ -18,7 +18,12 @@ function loadGuard(context) {
     JSON,
     Number,
     ...context,
-  }, { filename: "reader-message.js" });
+  };
+  if (context.globalThis && typeof context.globalThis === "object") {
+    Object.assign(context.globalThis, context);
+    runtime.globalThis = context.globalThis;
+  }
+  vm.runInNewContext(source, runtime, { filename: "reader-message.js" });
   return context;
 }
 

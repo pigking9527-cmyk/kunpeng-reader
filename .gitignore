@@ -45,4 +45,8 @@ id_ed25519
 node_modules/
 dist/
 /ui/bridge/
+/ui/generated-ts/
+/ui/generated-reader-page-ts/
+/ui/.generated-ts-build-*/
+/ui/.generated-reader-page-ts-build-*/
 /ui/react-bridge/

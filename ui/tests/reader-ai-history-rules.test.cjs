@@ -4,12 +4,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const rulesSource = fs.readFileSync(path.join(__dirname, "..", "reader-ai-history-rules.js"), "utf8");
+const rulesSource = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-ai-history-rules.js"), "utf8");
 
 function loadRules() {
-  const context = { window: {} };
+  const context = {};
+  context.window = context;
   vm.runInNewContext(rulesSource, context, { filename: "reader-ai-history-rules.js" });
-  return context.window.ReaderAiHistoryRules;
+  return context.ReaderAiHistoryRules;
 }
 
 test("AI history rules expose a frozen, DOM-free boundary", () => {

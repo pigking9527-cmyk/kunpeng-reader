@@ -9,9 +9,12 @@ use std::time::{Duration, Instant};
 
 fn sync_error_retryable(error: &ureq::Error) -> bool {
     match error {
-        ureq::Error::StatusCode(code) => {
-            matches!(*code, 408 | 425 | 429) || (500..=599).contains(code)
-        }
+        // HTTP 429 is a server decision, not a transient transport fault.
+        // Retrying the identical push several times only keeps the desktop
+        // visibly "syncing" while an account quota or admission window is
+        // unchanged.  The durable automatic scheduler will make a later
+        // attempt; surface this result immediately to the user.
+        ureq::Error::StatusCode(code) => matches!(*code, 408 | 425) || (500..=599).contains(code),
         ureq::Error::Io(_)
         | ureq::Error::Timeout(_)
         | ureq::Error::HostNotFound
@@ -120,8 +123,11 @@ mod tests {
 
     #[test]
     fn retry_policy_retries_transient_errors_but_not_client_errors() {
-        assert!(sync_error_retryable(&ureq::Error::StatusCode(429)));
+        assert!(!sync_error_retryable(&ureq::Error::StatusCode(429)));
         assert!(sync_error_retryable(&ureq::Error::StatusCode(503)));
+        assert!(sync_error_retryable(&ureq::Error::Timeout(
+            ureq::Timeout::Global
+        )));
         assert!(sync_error_retryable(&ureq::Error::HostNotFound));
         assert!(!sync_error_retryable(&ureq::Error::StatusCode(400)));
         assert!(!sync_error_retryable(&ureq::Error::StatusCode(401)));
@@ -152,6 +158,19 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.contains("401"));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn request_retry_stops_immediately_for_server_admission_or_quota() {
+        let mut attempts = 0usize;
+        let error = sync_request_with_retry_delays::<()>("push", None, &[0, 0], || {
+            attempts += 1;
+            Err(ureq::Error::StatusCode(429))
+        })
+        .unwrap_err();
+
+        assert!(error.contains("429"));
         assert_eq!(attempts, 1);
     }
 

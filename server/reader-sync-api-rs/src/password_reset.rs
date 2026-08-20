@@ -20,6 +20,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
+    account_validation::{normalize_username, valid_new_password},
     auth::{IssuedSession, SessionResponse, SessionUser, issue_initial_session},
     credentials::{bytes_match, hash_password, new_verification_code, verification_code_digest},
     error::ApiError,
@@ -154,7 +155,7 @@ pub async fn confirm(
     let Ok(Json(input)) = input else {
         return ApiError::InvalidRequest.response(context);
     };
-    let Ok(username_key) = normalize_username(&input.username) else {
+    let Ok((_, username_key)) = normalize_username(&input.username) else {
         return ApiError::InvalidRequest.response(context);
     };
     if !valid_confirm_request(&input) {
@@ -384,31 +385,19 @@ fn valid_confirm_request(input: &PasswordResetConfirmRequest) -> bool {
             .expose_secret()
             .bytes()
             .all(|byte| byte.is_ascii_digit())
-        && (12..=1024).contains(&input.new_password.expose_secret().len())
+        && valid_new_password(input.new_password.expose_secret())
         && !input.installation_id.trim().is_empty()
         && input.installation_id.len() <= 128
         && input.device_name.len() <= 64
 }
 
 fn normalize_request_identity(username: &str, email: &str) -> Result<(String, String), ()> {
-    let username_key = normalize_username(username)?;
+    let (_, username_key) = normalize_username(username).map_err(|_| ())?;
     let email = email.trim().to_ascii_lowercase();
     if email.len() > 254 || !EmailAddress::is_valid(&email) {
         return Err(());
     }
     Ok((username_key, email))
-}
-
-fn normalize_username(username: &str) -> Result<String, ()> {
-    let username = username.trim();
-    if !(3..=32).contains(&username.len())
-        || !username
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err(());
-    }
-    Ok(username.to_ascii_lowercase())
 }
 
 fn client_ip(state: &AppState, peer: SocketAddr, headers: &HeaderMap) -> std::net::IpAddr {

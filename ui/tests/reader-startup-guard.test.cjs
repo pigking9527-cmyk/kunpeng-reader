@@ -6,8 +6,8 @@ const vm = require("node:vm");
 
 const ui = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(ui, "reader.html"), "utf8");
-const reader = fs.readFileSync(path.join(ui, "reader.js"), "utf8");
-const guard = fs.readFileSync(path.join(ui, "reader-startup-guard.js"), "utf8");
+const reader = fs.readFileSync(path.join(ui, "generated-ts", "reader.js"), "utf8");
+const guard = fs.readFileSync(path.join(ui, "generated-ts", "reader-startup-guard.js"), "utf8");
 
 function loadGuard() {
   const listeners = new Map();
@@ -21,22 +21,23 @@ function loadGuard() {
   window.document = {
     getElementById(id) { return id === "win-close" ? close : null; },
   };
-  vm.runInNewContext(guard, { window }, { filename: "reader-startup-guard.js" });
+  window.window = window;
+  vm.runInNewContext(guard, window, { filename: "reader-startup-guard.js" });
   return window.ReaderStartupGuard;
 }
 
 test("reader startup failures stay diagnosable and closable", () => {
   assert.ok(
-    html.indexOf('<script src="reader-startup-guard.js"></script>') <
-      html.indexOf('<script src="reader.js"></script>'),
+    html.indexOf('<script src="generated-ts/reader-startup-guard.js"></script>') <
+      html.indexOf('<script src="generated-ts/reader.js"></script>'),
   );
   assert.match(guard, /addEventListener\("error"/);
   assert.match(guard, /invoke\("reader_perf_log"/);
-  assert.match(guard, /getElementById\("win-close"\)[\s\S]*?closeSafely\(global\.closeReaderWindow\)/);
-  assert.match(guard, /function validDocumentSource[\s\S]*?source === "about:blank"/);
+  assert.match(guard, /getElementById\("win-close"\)[\s\S]*?closeSafely\(target\.closeReaderWindow\)/);
+  assert.match(guard, /function isValidReaderDocumentSource[\s\S]*?source !== "about:blank"/);
   assert.match(guard, /function beginBookLoad[\s\S]*?book_info did not provide a document URL/);
   assert.match(guard, /function beginFrameNavigation[\s\S]*?frame_ready_timeout/);
-  assert.match(guard, /function closeSafely[\s\S]*?CLOSE_FALLBACK_MS[\s\S]*?nativeClose/);
+  assert.match(guard, /function closeSafely[\s\S]*?READER_CLOSE_FALLBACK_MS[\s\S]*?nativeClose/);
   assert.match(reader, /ReaderStartupGuard\?\.markScriptReady\?\.\(\);[\s\S]*?\(async \(\) =>/);
   assert.match(reader, /ReaderStartupGuard\?\.beginBookLoad\?\.\(\);[\s\S]*?invoke\("book_info"\)/);
   assert.match(reader, /beginFrameNavigation\?\.\(pdfSource\)[\s\S]*?frame\.src = pdfSource/);

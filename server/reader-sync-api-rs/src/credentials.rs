@@ -144,6 +144,19 @@ pub fn rate_limit_subject_digest(
     Ok(mac.finalize().into_bytes().into())
 }
 
+/// Computes a stable, non-reversible lookup digest for a normalized phone number.
+///
+/// # Errors
+///
+/// Returns an error if the configured HMAC key is rejected.
+pub fn phone_number_digest(key: &SecretString, phone: &str) -> Result<[u8; 32], CredentialError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.expose_secret().as_bytes())
+        .map_err(|_| CredentialError::Hashing)?;
+    mac.update(b"reader-sync/phone-number/v5\0");
+    mac.update(phone.as_bytes());
+    Ok(mac.finalize().into_bytes().into())
+}
+
 #[must_use]
 pub fn digest_matches(expected: &[u8; 32], actual: &[u8; 32]) -> bool {
     bool::from(expected.ct_eq(actual))
@@ -213,5 +226,15 @@ mod tests {
         let first = verification_code_digest(&key, id, &code).expect("code digest");
         let second = verification_code_digest(&key, id, &code).expect("same digest");
         assert!(digest_matches(&first, &second));
+    }
+
+    #[test]
+    fn phone_digest_is_stable_and_domain_separated() {
+        let key = SecretString::from("test-key-with-more-than-thirty-two-bytes".to_owned());
+        let first = phone_number_digest(&key, "+8613711112222").expect("phone digest");
+        let second = phone_number_digest(&key, "+8613711112222").expect("same digest");
+        assert!(digest_matches(&first, &second));
+        let rate = rate_limit_subject_digest(&key, "phone", "+8613711112222").expect("rate digest");
+        assert!(!digest_matches(&first, &rate));
     }
 }

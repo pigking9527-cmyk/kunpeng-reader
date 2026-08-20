@@ -4,11 +4,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const reader = fs.readFileSync(path.join(__dirname, "..", "reader.js"), "utf8");
-const metrics = fs.readFileSync(path.join(__dirname, "..", "reader-reading-metrics.js"), "utf8");
+const reader = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader.js"), "utf8");
+const metrics = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-reading-metrics.js"), "utf8");
 
 function loadMetrics() {
-  const context = { window: {} };
+  const context = {};
+  context.window = context;
   vm.runInNewContext(metrics, context, { filename: "reader-reading-metrics.js" });
   return context.window.ReaderReadingMetrics;
 }
@@ -42,7 +43,7 @@ test("word-credit thresholds and page keys are pure reader-shell rules", () => {
 
 test("reader shell consumes the metrics boundary before its own script", () => {
   const html = fs.readFileSync(path.join(__dirname, "..", "reader.html"), "utf8");
-  assert.match(html, /<script src="reader-reading-metrics\.js"><\/script>\s*<script src="reader\.js"><\/script>/);
+  assert.match(html, /<script src="generated-ts\/reader-reading-metrics\.js"><\/script>\s*<script src="generated-ts\/reader\.js"><\/script>/);
   assert.match(reader, /const readerReadingMetrics = window\.ReaderReadingMetrics;/);
   assert.match(reader, /readerReadingMetrics\.pageKey\(d, curChapter\)/);
   assert.match(reader, /readerReadingMetrics\.requiredDwellMs\(chars\)/);

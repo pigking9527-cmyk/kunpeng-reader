@@ -107,6 +107,7 @@ body.theme-dark #reader-preferences-nav-toggle{border-color:#4d5561;background:r
 .reader-advanced-main-row{display:grid;min-height:64px;grid-template-columns:38px minmax(0,1fr) auto;align-items:center;gap:11px;padding:11px 13px}
 .reader-advanced-icon{display:grid;width:36px;height:36px;place-items:center;border-radius:10px;background:#edf4ff;color:#2d6fbd;font:20px/1 "Segoe UI Symbol","Segoe UI",sans-serif}
 .reader-advanced-label{min-width:0;color:#324259;font-size:14px;font-weight:680}
+.reader-layout-engine-options{display:inline-grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px;padding:3px;border:1px solid #dce5f0;border-radius:10px;background:#f1f5fa}.reader-layout-engine-options button{min-height:30px;padding:4px 9px;border:0;border-radius:7px;background:transparent;color:#637288;font:inherit;font-size:12px;white-space:nowrap;cursor:pointer}.reader-layout-engine-options button:hover{color:#285f9f}.reader-layout-engine-options button.active{background:#fff;color:#246ab8;font-weight:700;box-shadow:0 1px 4px rgba(34,61,96,.12)}
 .reader-advanced-group .reader-preference-settings-button{width:31px;height:31px;border:0;border-radius:9px;background:#f1f4f8;color:#66778d;font-size:17px}
 .reader-advanced-group .reader-preference-settings-button:hover,.reader-advanced-group .reader-preference-settings-button[aria-expanded="true"]{border:0;background:#e7f1ff;color:#2468b8}
 .reader-advanced-group .reader-jump-back-config{margin:0;padding:13px 14px 14px;border:0;border-top:1px solid #e8edf4;border-radius:0;background:#f8fafc}
@@ -126,10 +127,11 @@ body.theme-dark .reader-toolbar-order-item.is-required{background:transparent;co
 body.theme-dark .reader-toolbar-order-icon{background:#354153;color:#b9d4f7}
 body.theme-dark .reader-advanced-icon{background:#35465e;color:#c5ddff}
 body.theme-dark .reader-advanced-label{color:#e0e5ec}
+body.theme-dark .reader-layout-engine-options{border-color:#4b5665;background:#343b45}body.theme-dark .reader-layout-engine-options button{color:#b8c6d8}body.theme-dark .reader-layout-engine-options button:hover{color:#d5e6ff}body.theme-dark .reader-layout-engine-options button.active{background:#43536a;color:#e0eeff;box-shadow:none}
 body.theme-dark .reader-advanced-group .reader-preference-settings-button{background:#383d45;color:#b8c2d0}
 body.theme-dark .reader-advanced-group .reader-preference-settings-button:hover,body.theme-dark .reader-advanced-group .reader-preference-settings-button[aria-expanded="true"]{background:#35465e;color:#c9dfff}
 body.theme-dark .reader-advanced-group .reader-jump-back-config{border-color:#41464f;background:#292c32}
-@media(max-width:760px){.reader-toolbar-order-item{grid-template-columns:22px 28px minmax(0,1fr) 38px}.reader-advanced-main-row{grid-template-columns:34px minmax(0,1fr) auto;padding:10px 11px}.reader-advanced-icon{width:34px;height:34px}.reader-advanced-group .reader-jump-back-config{padding:11px}}
+@media(max-width:760px){.reader-toolbar-order-item{grid-template-columns:22px 28px minmax(0,1fr) 38px}.reader-advanced-main-row{grid-template-columns:34px minmax(0,1fr) auto;padding:10px 11px}.reader-advanced-icon{width:34px;height:34px}.reader-layout-engine-options button{padding-left:7px;padding-right:7px}.reader-advanced-group .reader-jump-back-config{padding:11px}}
 
 /* 快捷设置与完整阅读偏好分层：高频项保持紧凑，低频排版项使用卡片承载。 */
 .reader-preferences-launch{min-height:42px;margin:0;padding:7px 9px 7px 12px;border:1px solid #e0e6ef;border-radius:11px;background:#f5f8fc;color:#314158;font-size:14px;font-weight:680}

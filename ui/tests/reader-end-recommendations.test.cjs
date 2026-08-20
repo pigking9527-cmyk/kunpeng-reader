@@ -7,13 +7,13 @@ const vm = require("node:vm");
 const ui = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(ui, "reader.html"), "utf8");
 const mainHtml = fs.readFileSync(path.join(ui, "index.html"), "utf8");
-const reader = fs.readFileSync(path.join(ui, "reader.js"), "utf8");
-const layout = fs.readFileSync(path.join(ui, "reader-page-layout.js"), "utf8");
-const end = fs.readFileSync(path.join(ui, "reader-page-end.js"), "utf8");
-const transition = fs.readFileSync(path.join(ui, "reader-page-transition.js"), "utf8");
-const shell = fs.readFileSync(path.join(ui, "reader-shell-state.js"), "utf8");
-const settings = fs.readFileSync(path.join(ui, "reader-recommendation-settings.js"), "utf8");
-const appI18n = fs.readFileSync(path.join(ui, "app-i18n.js"), "utf8");
+const reader = fs.readFileSync(path.join(ui, "generated-ts", "reader.js"), "utf8");
+const layout = require("./reader-page-test-source.cjs").compact;
+const end = fs.readFileSync(path.join(ui, "generated-reader-page-ts", "reader-page-layout-annotations.js"), "utf8");
+const transition = fs.readFileSync(path.join(ui, "generated-reader-page-ts", "reader-page-transition.js"), "utf8");
+const shell = fs.readFileSync(path.join(ui, "generated-ts", "reader-shell-state.js"), "utf8");
+const settings = fs.readFileSync(path.join(ui, "generated-ts", "reader-recommendation-settings.js"), "utf8");
+const appI18n = fs.readFileSync(path.join(ui, "generated-ts", "app-i18n.js"), "utf8");
 
 test("last-page recommendations show five horizontal cover cards with relevance", () => {
   assert.match(html, /id="reader-end-modal"/);
@@ -27,12 +27,12 @@ test("last-page recommendations show five horizontal cover cards with relevance"
 });
 
 test("the final page stays readable until another forward turn crosses the end", () => {
-  assert.match(end, /function notifyReaderEndIfReached\(dir,boundaryAttempt\)/);
-  assert.match(end, /if\(!atEnd\)\{readerEndNotified=false;return false;\}/);
-  assert.match(end, /dir>0&&boundaryAttempt===true&&!readerEndNotified/);
+  assert.match(layout, /function notifyReaderEndIfReached\(dir,boundaryAttempt=false\)/);
+  assert.match(layout, /if\(!atEnd\)\{readerEndNotified=false;return false\}/);
+  assert.match(layout, /dir>0&&boundaryAttempt===true&&!readerEndNotified/);
   assert.match(layout, /captureAnchor\(\);report\(true\);notifyReaderEndIfReached\(dir\)/);
   assert.match(layout, /updateScrollPageAfterProgrammatic\(\);\s*notifyReaderEndIfReached\(dir\)/);
-  assert.match(transition, /showChapter\(chapter,where\)[\s\S]*?notifyReaderEndIfReached\(dir\)/);
+  assert.match(transition, /showChapter\(chapter, where\)[\s\S]*?notifyReaderEndIfReached\?\.\(direction\)/);
   assert.match(layout, /else notifyReaderEndIfReached\(1,true\);/);
   assert.match(layout, /if\(!target\)[\s\S]*?notifyReaderEndIfReached\(dir,dir>0\);/);
 
@@ -43,8 +43,13 @@ test("the final page stays readable until another forward turn crosses the end",
     pageInCh: 0,
     pagesInCh: 1,
     parent: { postMessage(message) { messages.push(message); } },
+    globalThis: null,
   };
-  vm.runInNewContext(end, state);
+  state.globalThis = state;
+  const endStart = end.indexOf("let readerEndNotified = false;");
+  const endFinish = end.indexOf("function isScrollMode()", endStart);
+  assert.ok(endStart >= 0 && endFinish > endStart, "reader-end logic must remain extractable from the combined bundle");
+  vm.runInNewContext(end.slice(endStart, endFinish), state);
 
   assert.equal(state.notifyReaderEndIfReached(1), false, "entering the last page must not open recommendations");
   assert.equal(messages.length, 0);
@@ -62,12 +67,12 @@ test("the final page stays readable until another forward turn crosses the end",
 
 test("recommendations participate in exclusive reader overlays", () => {
   assert.match(shell, /END_RECOMMENDATIONS:\s*"end-recommendations"/);
-  assert.match(shell, /OVERLAY\.END_RECOMMENDATIONS, document\.getElementById\("reader-end-modal"\)/);
+  assert.match(shell, /READER_SHELL_OVERLAY\.END_RECOMMENDATIONS, target\.document\.getElementById\("reader-end-modal"\)/);
   assert.match(reader, /ReaderShell\.setOverlay\(ReaderShell\.OVERLAY\.END_RECOMMENDATIONS, true\)/);
 });
 
 test("the persistent recommendation setting has a gear, word threshold, and shorter label", () => {
-  assert.match(html, /src="reader-recommendation-settings\.js"/);
+  assert.match(html, /src="generated-ts\/reader-recommendation-settings\.js"/);
   assert.match(mainHtml, /data-i18n="endRecommendations">\s*读后推荐\s*<\/span\s*>/);
   assert.match(mainHtml, /id="end-recommendations-gear"[\s\S]*?id="set-end-recommendations"/);
   assert.match(mainHtml, /id="reader-recommendation-settings-modal"/);
@@ -76,11 +81,11 @@ test("the persistent recommendation setting has a gear, word threshold, and shor
   assert.match(appI18n, /"zh-CN": "读后推荐"/);
   assert.match(appI18n, /en: \{\s*recommendationSettings: "Post-reading recommendations",\s*recommendationThresholdBefore: "Do not recommend books below"/);
   assert.match(appI18n, /"zh-TW": \{\s*recommendationSettings: "讀後推薦設定",\s*recommendationThresholdBefore: "不推薦低於"/);
-  assert.match(settings, /const STORAGE_KEY = "readerEndRecommendationsV1"/);
-  assert.match(settings, /const MIN_WORDS_STORAGE_KEY = "readerRecommendationMinWordsV1"/);
-  assert.match(settings, /const DEFAULT_MIN_RECOMMENDATION_WORDS = 10000/);
-  assert.match(settings, /setItem\(STORAGE_KEY, checkbox\.checked \? "1" : "0"\)/);
-  assert.match(reader, /ReaderRecommendationSettings\?\.isEnabled\(\)\) openReaderEnd\(\)/);
+  assert.match(settings, /const READER_RECOMMENDATION_STORAGE_KEY = "readerEndRecommendationsV1"/);
+  assert.match(settings, /const READER_RECOMMENDATION_MIN_WORDS_STORAGE_KEY = "readerRecommendationMinWordsV1"/);
+  assert.match(settings, /const READER_RECOMMENDATION_DEFAULT_MIN_WORDS = 1e4/);
+  assert.match(settings, /READER_RECOMMENDATION_STORAGE_KEY,[\s\S]*?checkbox\.checked \? "1" : "0"/);
+  assert.match(reader, /ReaderRecommendationSettings\?\.isEnabled\?\.\(\)\) openReaderEnd\(\)/);
   assert.match(reader, /if \(list === null\) return/);
   const readingPanel = mainHtml.slice(mainHtml.indexOf('data-settings-panel="reading"'), mainHtml.indexOf('data-settings-panel="smart"'));
   const smartPanel = mainHtml.slice(mainHtml.indexOf('data-settings-panel="smart"'), mainHtml.indexOf('data-settings-panel="data"'));

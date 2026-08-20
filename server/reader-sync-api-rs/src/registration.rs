@@ -17,6 +17,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
+    account_validation::{normalize_username, valid_new_password},
     auth::{SessionResponse, SessionUser, issue_initial_session},
     credentials::{bytes_match, hash_password, new_verification_code, verification_code_digest},
     error::ApiError,
@@ -243,7 +244,7 @@ pub async fn confirm(
             .expose_secret()
             .bytes()
             .all(|byte| byte.is_ascii_digit())
-        || !(8..=1024).contains(&input.password.expose_secret().len())
+        || !valid_new_password(input.password.expose_secret())
         || input.installation_id.trim().is_empty()
         || input.installation_id.len() > 128
         || input.device_name.len() > 64
@@ -380,19 +381,12 @@ async fn hash_password_bounded(
 }
 
 fn normalize_identity(username: &str, email: &str) -> Result<(String, String, String), ()> {
-    let username = username.trim();
-    if !(3..=32).contains(&username.len())
-        || !username
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err(());
-    }
+    let (username, username_key) = normalize_username(username).map_err(|_| ())?;
     let email = email.trim().to_ascii_lowercase();
     if email.len() > 254 || !EmailAddress::is_valid(&email) {
         return Err(());
     }
-    Ok((username.to_owned(), username.to_ascii_lowercase(), email))
+    Ok((username, username_key, email))
 }
 
 fn now_ms() -> i64 {

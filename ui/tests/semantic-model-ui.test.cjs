@@ -5,9 +5,9 @@ const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
-const semanticUi = fs.readFileSync(path.join(root, "semantic-ui.js"), "utf8");
-const semanticCache = fs.readFileSync(path.join(root, "semantic-status-cache.js"), "utf8");
-const i18n = fs.readFileSync(path.join(root, "app-i18n.js"), "utf8");
+const semanticUi = fs.readFileSync(path.join(root, "generated-ts", "semantic-ui.js"), "utf8");
+const semanticCache = fs.readFileSync(path.join(root, "generated-ts", "semantic-status-cache.js"), "utf8");
+const i18n = fs.readFileSync(path.join(root, "generated-ts", "app-i18n.js"), "utf8");
 const styles = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 const repoRoot = path.resolve(root, "..");
 const semanticTasksRust = fs.readFileSync(path.join(repoRoot, "src", "semantic_tasks.rs"), "utf8");
@@ -92,8 +92,8 @@ test("reranker distinguishes downloaded files from a loaded runtime", () => {
   assert.match(semanticUi, /download_semantic_reranker/);
   assert.match(semanticUi, /semResumeReranker/);
   assert.match(semanticUi, /semRerankerNotDownloaded/);
-  assert.match(semanticCache, /reranker_downloaded: !!p\.reranker_downloaded/);
-  assert.match(semanticCache, /reranker_partial: !!p\.reranker_partial/);
+  assert.match(semanticCache, /reranker_downloaded: Boolean\(input\.reranker_downloaded\)/);
+  assert.match(semanticCache, /reranker_partial: Boolean\(input\.reranker_partial\)/);
   assert.match(semanticCache, /reranker_downloaded: fallback\("reranker_downloaded"\)/);
   assert.match(semanticCache, /reranker_partial: fallback\("reranker_partial"\)/);
   assert.match(semanticTasksRust, /fn begin_reranker_load/);
@@ -127,7 +127,7 @@ test("an empty semantic index hides its progress track and delete action", () =>
   assert.match(semanticUi, /const hasSemanticIndex = vectorLive \|\| vectorDone > 0 \|\| !!progress\.semantic_ready/);
   assert.match(semanticUi, /vectorProgress\.hidden = vectorStatusChecking \|\| !hasSemanticIndex/);
   assert.match(semanticUi, /!hasSemanticIndex\s*\? semText\("semNotBuilt"/);
-  assert.match(semanticUi, /vectorDeleteButton\.disabled = vectorStatusChecking \|\| \(vectorTask \? !vectorTask\.can_delete : \(busy \|\| vectorDone <= 0\)\)/);
+  assert.match(semanticUi, /vectorDeleteButton\.disabled = vectorStatusChecking \|\| \(vectorTask \? !vectorTask\.can_delete : busy \|\| vectorDone <= 0\)/);
 });
 
 test("semantic index waits for verification before showing an empty or completed result", () => {
@@ -140,7 +140,7 @@ test("semantic index waits for verification before showing an empty or completed
 });
 
 test("deleting a semantic index cannot keep an old cached progress snapshot", () => {
-  assert.match(semanticUi, /delete_semantic_index[\s\S]*?\(\) => cache\.clear\(\)/);
+  assert.match(semanticUi, /semanticPort\.deleteIndex\("semantic"\)[\s\S]*?\(\) => semanticCache\.clear\(\)/);
   const semanticStatusRust = fs.readFileSync(path.join(repoRoot, "src", "semantic", "status.rs"), "utf8");
   const semanticRust = fs.readFileSync(path.join(repoRoot, "src", "semantic.rs"), "utf8");
   assert.match(semanticStatusRust, /cache\.snapshot = None/);
@@ -168,7 +168,7 @@ test("model download reports textual byte progress instead of adding a second pr
 });
 
 test("model cards and switch feedback show the actual vector dimensions", () => {
-  assert.match(semanticUi, /const MODEL_DIMENSIONS = Object\.freeze/);
+  assert.match(semanticUi, /const SEMANTIC_MODEL_DIMENSIONS = Object\.freeze/);
   assert.match(semanticUi, /"bge-small-zh-v1\.5": 512/);
   assert.match(semanticUi, /"bge-large-zh-v1\.5": 1024/);
   assert.match(semanticUi, /"bge-m3": 1024/);
@@ -188,17 +188,23 @@ test("semantic management reconciles on open and after a background task settles
   const openEnd = semanticUi.indexOf("function close()", openStart);
   const open = semanticUi.slice(openStart, openEnd);
   assert.doesNotMatch(html, /id="sem-status-refresh"/);
-  assert.ok(open.indexOf("cache.get()") < open.indexOf("setTimeout(() => { void refresh(true); }"));
-  assert.match(semanticUi, /setInterval\(\(\) => \{ void refresh\(true\); \}, 1500\)/);
+  assert.ok(open.indexOf("semanticCache.get()") < open.indexOf("void refresh(true)"));
+  assert.match(
+    semanticUi,
+    /global\.setInterval\(\(\) => \{\s*void refresh\(true\);\s*\}, 1500\)/,
+  );
   assert.match(open, /refreshGpuStatus\(\)/);
   assert.match(semanticUi, /gpuRefreshInFlight/);
   assert.match(semanticUi, /runtime_downloaded_bytes/);
   assert.doesNotMatch(semanticUi, /semGpuDownloadSaved/);
   assert.match(semanticUi, /semResumeGpuRuntime/);
-  assert.match(semanticUi, /invoke\("semantic_tasks", \{ reconcile \}\)/);
-  assert.match(semanticUi, /select_semantic_model[\s\S]*?await refresh\(true\);/);
+  assert.match(semanticUi, /semanticPort\.tasks\(reconcile\)/);
+  assert.match(semanticUi, /semanticPort\.selectModel\(next\)[\s\S]*?await refresh\(true\);/);
   assert.match(semanticUi, /if \(statusInFlight\) return/);
-  assert.match(semanticUi, /updatePolling\(!!\(progress\.model_downloading \|\| progress\.building \|\| progress\.reranker_loading \|\| refreshing\)\)/);
+  assert.match(
+    semanticUi,
+    /updatePolling\(\s*!!\(progress\.model_downloading \|\| progress\.building \|\| progress\.reranker_loading \|\| refreshing\)\s*\)/,
+  );
   assert.doesNotMatch(open, /build_semantic_vectors|spawn_outdated_chunk_rebuild/);
 });
 
@@ -206,7 +212,7 @@ test("closing and reopening semantic management preserves the live task snapshot
   for (const field of ["building", "active_task", "done", "total", "current"]) {
     assert.match(semanticCache, new RegExp(`${field}:`), `cache must preserve ${field}`);
   }
-  assert.match(semanticCache, /后台任务仍在同一 WebView 进程中继续/);
+  assert.match(semanticCache, /building: Boolean\(input\.building\)/);
   const semanticStatusRust = fs.readFileSync(path.join(repoRoot, "src", "semantic", "status.rs"), "utf8");
   assert.match(semanticStatusRust, /fn hydrate_vector_task/);
   assert.match(semanticStatusRust, /BackgroundTaskState::Paused/);
@@ -214,19 +220,25 @@ test("closing and reopening semantic management preserves the live task snapshot
   assert.match(semanticStatusRust, /\.snapshots\(\)/);
   assert.match(semanticStatusRust, /BackgroundTaskKind::SemanticVectors/);
   assert.match(semanticStatusRust, /active_vector_task_progress/);
-  assert.match(semanticUi, /const cached = cache\.get\(\);[\s\S]*?if \(cached\) render\(cached\);/);
-  assert.match(semanticUi, /updatePolling\(!!\(progress\.model_downloading \|\| progress\.building/);
+  assert.match(semanticUi, /const cached = semanticCache\.get\(\);[\s\S]*?if \(cached\) render\(cached\);/);
+  assert.match(
+    semanticUi,
+    /updatePolling\(\s*!!\(progress\.model_downloading \|\| progress\.building/,
+  );
   assert.match(semanticUi, /vectorBuildButton\.disabled = vectorStatusChecking \|\| busy \|\| \(vectorTask \? !vectorTask\.can_start/);
 });
 
 
 test("semantic reopen reads the durable generic task snapshot when a vector build is running", () => {
   const semanticBuildRust = fs.readFileSync(path.join(repoRoot, "src", "semantic", "build.rs"), "utf8");
-  assert.match(semanticUi, /function activeVectorTask\(snapshots\)/);
-  assert.match(semanticUi, /invoke\("background_task_status"\)/);
-  assert.match(semanticUi, /function restoreLiveVectorTask\(center, snapshots\)/);
+  assert.match(semanticUi, /function activeSemanticVectorTask\(snapshots\)/);
+  assert.match(semanticUi, /semanticPort\.backgroundTasks\(\)/);
+  assert.match(semanticUi, /function restoreLiveSemanticVectorTask\(center, snapshots, cachedSemanticTotal\)/);
   assert.match(semanticUi, /can_start: false/);
-  assert.match(semanticUi, /on\(vectorBuildButton, "click", \(\) => run\([\s\S]*?cache\.update\(\{[\s\S]*?building: true/);
+  assert.match(
+    semanticUi,
+    /on\(\s*vectorBuildButton,\s*"click",\s*\(\) =>[\s\S]*?semanticCache\.update\(\{[\s\S]*?building: true/,
+  );
   assert.match(semanticUi, /vectorBuildButton\.disabled = vectorStatusChecking \|\| busy \|\|/);
   assert.match(semanticUi, /completedBooksFromCheckpoint/);
   assert.match(semanticBuildRust, /title: &'a str/);
@@ -235,13 +247,13 @@ test("semantic reopen reads the durable generic task snapshot when a vector buil
 test("semantic status stays usable while exact metadata verification runs", () => {
   assert.doesNotMatch(semanticUi, /disabled = busy \|\| refreshing/);
   assert.doesNotMatch(semanticUi, /正在后台读取索引状态/);
-  assert.match(semanticUi, /const cachedNext = cache\.use\(next\)/);
+  assert.match(semanticUi, /const cachedNext = semanticCache\.use\(next\)/);
   assert.doesNotMatch(semanticUi, /select_semantic_model[\s\S]{0,180}cache\.clear\(\)/);
   assert.match(semanticCache, /semanticIndexStatusByModelV3/);
   assert.doesNotMatch(semanticCache, /semanticIndexStatusByModelV2/);
   assert.match(semanticCache, /statuses\[next\.model_id\] = next/);
   assert.match(semanticCache, /function use\(modelId\)/);
-  assert.match(semanticUi, /if \(!refreshing\) \{\s*cache\.save\(progress\)/);
+  assert.match(semanticUi, /if \(!refreshing\) \{\s*semanticCache\.save\(progress\)/);
 });
 
 test("semantic management does not present ambiguous disk usage as an exact size", () => {

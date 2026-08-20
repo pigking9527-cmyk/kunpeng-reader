@@ -5,15 +5,18 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..", "..");
-const app = fs.readFileSync(path.join(root, "ui", "app.js"), "utf8");
+const app = fs.readFileSync(path.join(root, "ui", "generated-ts", "app.js"), "utf8");
 const html = fs.readFileSync(path.join(root, "ui", "index.html"), "utf8");
-const controller = fs.readFileSync(path.join(root, "ui", "auto-import-ui.js"), "utf8");
+const controller = fs.readFileSync(
+  path.join(root, "ui", "generated-ts", "auto-import-ui.js"),
+  "utf8",
+);
 const backend = fs.readFileSync(path.join(root, "src", "import.rs"), "utf8");
 const watcher = fs.readFileSync(path.join(root, "src", "auto_import_watch.rs"), "utf8");
 const cargo = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
 
 test("automatic directory imports serialize scans and refresh the shelf while importing", () => {
-  assert.ok(html.indexOf("auto-import-ui.js") < html.indexOf("app.js"));
+  assert.ok(html.indexOf("generated-ts/auto-import-ui.js") < html.indexOf("app.js"));
   assert.match(app, /ReaderAutoImportUI\.create/);
   assert.match(controller, /let scanPromise = null/);
   assert.match(controller, /if \(scanPromise\)[\s\S]*?scanQueued = true/);
@@ -94,7 +97,7 @@ test("automatic imports use native recursive watching with debounce and fallback
   assert.match(watcher, /CHANGE_DEBOUNCE:[^=]*= Duration::from_secs\(3\)/);
   assert.match(watcher, /FALLBACK_SCAN_INTERVAL:[^=]*= Duration::from_secs\(5 \* 60\)/);
   assert.match(watcher, /"auto-import-change"/);
-  assert.match(controller, /eventApi\.listen\("auto-import-change"/);
+  assert.match(controller, /events\.listen\("auto-import-change"/);
   assert.match(app, /autoImportUI\.bindEvents\(tauriEvent\)/);
   assert.doesNotMatch(app, /debugSettingOn\("bg_auto_import"\)/);
 });

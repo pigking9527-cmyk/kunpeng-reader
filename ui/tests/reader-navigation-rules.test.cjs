@@ -4,10 +4,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "reader-navigation-rules.js"), "utf8");
-const context = { window: {} };
+const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-navigation-rules.js"), "utf8");
+const context = {};
+context.window = context;
 vm.runInNewContext(source, context, { filename: "reader-navigation-rules.js" });
-const rules = context.window.ReaderNavigationRules;
+const rules = context.ReaderNavigationRules;
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test("navigation rules normalize, de-duplicate, and bound explicit jump history", () => {

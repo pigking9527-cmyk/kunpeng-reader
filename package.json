@@ -11,9 +11,18 @@
     "test:typed": "node scripts/run-typescript-tests.mjs",
     "test:reader-sample-recorder": "node scripts/test-record-reader-sample.mjs",
     "test:reader-sample-record": "node scripts/test-record-reader-sample.mjs && node scripts/test-validate-reader-sample-record.mjs",
-    "test:legacy-ui": "node scripts/run-legacy-ui-tests.cjs",
+    "test:legacy-ui": "npm run legacy-ts:build && node scripts/run-legacy-ui-tests.cjs",
+    "test:legacy-ui:ready": "node scripts/run-legacy-ui-tests.cjs",
+    "test:legacy-ts-pipeline": "npm run legacy-ts:build -- --deterministic && npm run reader-page-ts:build -- --deterministic && node --test apps/desktop-ui/scripts/legacy-ts-pipeline.test.mjs apps/desktop-ui/scripts/reader-page-ts-pipeline.test.mjs apps/desktop-ui/scripts/verify-pdfview-output.test.mjs scripts/check-frontend-source-policy.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "desktop-ui:build": "vite build --config apps/desktop-ui/vite.pdf-engine.config.ts && vite build --config apps/desktop-ui/vite.reader-protocol.config.ts && node apps/desktop-ui/scripts/verify-pdf-adapter-output.mjs"
+    "frontend:source-policy": "node scripts/check-frontend-source-policy.mjs",
+    "legacy-ts:build": "node apps/desktop-ui/scripts/build-legacy-ts.mjs",
+    "legacy-ts:verify": "node apps/desktop-ui/scripts/verify-legacy-ts-output.mjs",
+    "reader-page-ts:build": "node apps/desktop-ui/scripts/build-reader-page-ts.mjs",
+    "reader-page-ts:verify": "node apps/desktop-ui/scripts/verify-reader-page-ts-output.mjs",
+    "pdfview:build": "vite build --config apps/desktop-ui/vite.pdfview.config.ts",
+    "pdfview:verify": "node apps/desktop-ui/scripts/verify-pdfview-output.mjs",
+    "desktop-ui:build": "npm run frontend:source-policy && vite build --config apps/desktop-ui/vite.pdf-engine.config.ts && vite build --config apps/desktop-ui/vite.reader-protocol.config.ts && node apps/desktop-ui/scripts/verify-pdf-adapter-output.mjs && npm run pdfview:build && npm run pdfview:verify && npm run legacy-ts:build && npm run legacy-ts:verify && npm run reader-page-ts:build && npm run reader-page-ts:verify"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

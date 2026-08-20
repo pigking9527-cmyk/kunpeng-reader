@@ -7,6 +7,7 @@
 //! 取消；不应再自行选择 Tokio 或创建系统线程。
 
 mod registry;
+mod scheduler_policy;
 mod task_policy;
 
 pub use task_policy::{BackgroundTaskKind, BackgroundTaskState, TaskControlSignal, TaskProgress};
@@ -17,6 +18,7 @@ use registry::{
     TaskRecord, MAX_CHECKPOINT_CHARS, MAX_CURRENT_CHARS, MAX_ERROR_CHARS, MAX_LABEL_CHARS,
     PERSISTENCE_VERSION,
 };
+use scheduler_policy::{persistence_write_due, shared_worker_count};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -56,7 +58,7 @@ impl SharedExecutor {
         let available = std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or(2);
-        let worker_count = available.saturating_sub(1).clamp(1, 2);
+        let worker_count = shared_worker_count(available);
         let executor = Arc::new(Self {
             queue: Mutex::new(VecDeque::new()),
             wake: Condvar::new(),
@@ -778,7 +780,7 @@ impl BackgroundTaskRegistry {
             .shared
             .last_persisted_elapsed_ms
             .load(Ordering::Acquire);
-        if !force && now.saturating_sub(previous) < PERSIST_THROTTLE_MS {
+        if !persistence_write_due(force, now, previous, PERSIST_THROTTLE_MS) {
             return Ok(());
         }
         let mut tasks: Vec<_> = inner.tasks.values().map(TaskRecord::persisted).collect();

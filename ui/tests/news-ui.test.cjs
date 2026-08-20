@@ -6,17 +6,325 @@ const vm = require("node:vm");
 
 const ui = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(ui, "index.html"), "utf8");
-const script = fs.readFileSync(path.join(ui, "news-ui.js"), "utf8");
+const script = fs.readFileSync(
+  path.join(ui, "generated-ts", "news-ui.js"),
+  "utf8",
+);
 const styles = fs.readFileSync(path.join(ui, "styles.css"), "utf8");
 const backend = fs.readFileSync(
   path.join(ui, "..", "src", "newsnow.rs"),
   "utf8",
 );
 
+class FakeClassList {
+  constructor() {
+    this.values = new Set();
+  }
+
+  add(...values) {
+    values.forEach((value) => this.values.add(value));
+  }
+
+  remove(...values) {
+    values.forEach((value) => this.values.delete(value));
+  }
+
+  contains(value) {
+    return this.values.has(value);
+  }
+
+  toggle(value, force) {
+    const next = force === undefined ? !this.values.has(value) : Boolean(force);
+    if (next) this.values.add(value);
+    else this.values.delete(value);
+    return next;
+  }
+}
+
+class FakeElement {
+  constructor(tagName = "div") {
+    this.tagName = tagName.toUpperCase();
+    this.children = [];
+    this.listeners = new Map();
+    this.classList = new FakeClassList();
+    this.style = { setProperty: () => {} };
+    this.attributes = new Map();
+    this.dataset = {};
+    this.hidden = false;
+    this.isConnected = true;
+    this.clientWidth = 640;
+    this.scrollTop = 0;
+    this.value = "";
+    this.textContent = "";
+    this.innerHTML = "";
+    this.disabled = false;
+  }
+
+  append(...children) {
+    children.forEach((child) => this.appendChild(child));
+  }
+
+  appendChild(child) {
+    if (child) this.children.push(child);
+    return child;
+  }
+
+  replaceChildren(...children) {
+    this.children = [];
+    this.append(...children);
+  }
+
+  addEventListener(name, listener) {
+    const listeners = this.listeners.get(name) || [];
+    listeners.push(listener);
+    this.listeners.set(name, listeners);
+  }
+
+  dispatch(name, event = {}) {
+    for (const listener of this.listeners.get(name) || []) {
+      listener({
+        target: this,
+        key: "",
+        preventDefault() {},
+        ...event,
+      });
+    }
+  }
+
+  click() {
+    this.dispatch("click");
+  }
+
+  focus() {
+    this.focused = true;
+  }
+
+  reset() {
+    this.resetCalled = true;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) || null;
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+
+  querySelectorAll(selector) {
+    const className = selector.startsWith(".") ? selector.slice(1) : "";
+    const result = [];
+    const visit = (element) => {
+      for (const child of element.children) {
+        if (child instanceof FakeElement) {
+          if (
+            className &&
+            (child.classList.contains(className) ||
+              String(child.className || "")
+                .split(/\s+/)
+                .includes(className))
+          )
+            result.push(child);
+          visit(child);
+        }
+      }
+    };
+    visit(this);
+    return result;
+  }
+}
+
+class FakeDocument {
+  constructor(elements = new Map()) {
+    this.elements = elements;
+    this.body = new FakeElement("body");
+  }
+
+  getElementById(id) {
+    return this.elements.get(id) || null;
+  }
+
+  querySelector(selector) {
+    if (selector === ".content-shell")
+      return this.elements.get("content-shell") || null;
+    return null;
+  }
+
+  createElement(tagName) {
+    return new FakeElement(tagName);
+  }
+}
+
+function newsFixture() {
+  const ids = [
+    "newsnow-toolbar-btn",
+    "newsnow-page",
+    "newsnow-back",
+    "newsnow-refresh",
+    "newsnow-gesture-settings",
+    "newsnow-source-toggle",
+    "newsnow-source-picker",
+    "newsnow-source-search",
+    "newsnow-custom-source-form",
+    "newsnow-custom-source-name",
+    "newsnow-custom-source-url",
+    "newsnow-custom-source-category",
+    "newsnow-custom-source-list",
+    "newsnow-custom-source-count",
+    "newsnow-source-directory-summary",
+    "newsnow-source-provider-filters",
+    "newsnow-source-options",
+    "newsnow-source-status",
+    "newsnow-source-close",
+    "newsnow-tieba-bars",
+    "newsnow-tieba-add-toggle",
+    "newsnow-tieba-bar-form",
+    "newsnow-tieba-bar-input",
+    "newsnow-tieba-bar-cancel",
+    "newsnow-tieba-bar-list",
+    "newsnow-tieba-bar-count",
+    "newsnow-source-selection",
+    "newsnow-layout-list",
+    "newsnow-layout-grid",
+    "newsnow-order-mixed",
+    "newsnow-order-source",
+    "newsnow-status",
+    "newsnow-feed",
+    "newsnow-feed-view",
+    "newsnow-reader",
+    "newsnow-reader-status",
+    "newsnow-reader-back",
+    "newsnow-reader-meta",
+    "newsnow-reader-title",
+    "newsnow-reader-original",
+    "newsnow-reader-content",
+    "newsnow-categories",
+    "newsnow-updated",
+    "content-shell",
+  ];
+  const elements = new Map(ids.map((id) => [id, new FakeElement()]));
+  elements.get("newsnow-page").hidden = true;
+  elements.get("newsnow-reader").hidden = true;
+  elements.get("newsnow-source-picker").hidden = true;
+  elements.get("newsnow-tieba-bar-form").hidden = true;
+  const root = new FakeDocument(elements);
+  const storage = new Map();
+  const invocations = [];
+  const context = {
+    Document: FakeDocument,
+    Element: FakeElement,
+    HTMLImageElement: FakeElement,
+    document: new FakeDocument(),
+    URL,
+    Intl,
+    Date,
+    Promise,
+    console,
+    setTimeout: () => 1,
+    clearTimeout() {},
+    setInterval: () => 2,
+    clearInterval() {},
+    requestAnimationFrame(callback) {
+      callback();
+      return 3;
+    },
+    addEventListener() {},
+    ReaderNewsGesture: { loadEnabled: () => false, load: () => [] },
+    ReaderExperimentalFeatures: {
+      enabled: (key) => key === "newsnow" || key === "newsnowHideReturnIcon",
+    },
+    localStorage: {
+      getItem: (key) => storage.get(key) || null,
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+    },
+    __TAURI__: {
+      core: {
+        invoke(command, args) {
+          invocations.push({ command, args });
+          if (command === "newsnow_sources") {
+            return Promise.resolve([
+              {
+                id: "alpha",
+                name: "Alpha",
+                category: "科技",
+                provider: "reader",
+                kind: "news",
+                defaultEnabled: true,
+              },
+              {
+                id: "beta",
+                name: "Beta",
+                category: "时事",
+                provider: "horizon",
+                kind: "advisory",
+                defaultEnabled: true,
+              },
+              {
+                id: "gamma",
+                name: "Gamma",
+                category: "灾害",
+                provider: "worldmonitor",
+                kind: "earthquake",
+                defaultEnabled: false,
+              },
+              { id: "tieba", name: "贴吧", category: "社区" },
+            ]);
+          }
+          if (command === "newsnow_list" || command === "newsnow_refresh") {
+            return Promise.resolve({
+              items: [
+                {
+                  id: "article-1",
+                  sourceId: "alpha",
+                  source: "Alpha",
+                  title: "资讯标题",
+                  summary: "资讯摘要",
+                  url: "https://example.com/article",
+                  publishedAt: "2026-01-01T00:00:00Z",
+                },
+              ],
+            });
+          }
+          if (command === "newsnow_open_article") {
+            return Promise.resolve({
+              local: true,
+              source: "Alpha",
+              title: "资讯标题",
+              contentHtml: "<p>离线正文</p>",
+            });
+          }
+          if (command === "app_settings_sync_get")
+            return Promise.resolve({ hasNewsSourceSettings: false });
+          return Promise.resolve({});
+        },
+      },
+    },
+  };
+  context.window = context;
+  vm.runInNewContext(script, context, { filename: "news-ui.js" });
+  return { context, root, elements, storage, invocations };
+}
+
+async function settle() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function loadBrowserGestureApi() {
   const context = {};
   vm.runInNewContext(
-    fs.readFileSync(path.join(ui, "news-gesture.js"), "utf8"),
+    fs.readFileSync(path.join(ui, "generated-ts", "news-gesture.js"), "utf8"),
     context,
     { filename: "news-gesture.js" },
   );
@@ -44,13 +352,19 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
   assert.doesNotMatch(backend, /正在显示本地缓存，后台正在更新/);
   assert.match(html, /id="newsnow-feed"/);
   assert.match(html, /<\/section>\s*<section[\s\S]*?id="newsnow-reader"/);
-  assert.match(html, /<script src="news-layout-rules\.js"><\/script>\s*<script src="news-ui\.js"><\/script>/);
+  assert.match(
+    html,
+    /<script src="generated-ts\/news-layout-rules\.js"><\/script>\s*<script src="generated-ts\/news-ui\.js"><\/script>/,
+  );
+  assert.doesNotMatch(
+    html,
+    /<script src="generated-ts\/news-rules\.js"><\/script>/,
+  );
   assert.doesNotMatch(html, /class="newsnow-title-row"/);
   assert.doesNotMatch(html, />READING BRIEF</);
   assert.doesNotMatch(html, />今日资讯</);
   assert.doesNotMatch(html, /按时间归并的轻量资讯流/);
   assert.doesNotMatch(html, /id="newsnow-source-summary"/);
-  assert.doesNotMatch(script, /renderSourceSummary/);
   assert.doesNotMatch(
     html,
     /<div class="newsnow-layout-control"[^>]*>\s*<span[^>]*>布局<\/span>/,
@@ -59,7 +373,7 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
 
 test("NewsNow is always available while its detailed local options remain configurable", () => {
   const experiments = fs.readFileSync(
-    path.join(ui, "experimental-features.js"),
+    path.join(ui, "generated-ts", "experimental-features.js"),
     "utf8",
   );
   assert.doesNotMatch(html, /id="experimental-newsnow"(?![-\w])/);
@@ -78,7 +392,7 @@ test("NewsNow is always available while its detailed local options remain config
   assert.doesNotMatch(html, /<div class="fp-title">实验室<\/div>/);
   assert.match(
     experiments,
-    /const DEFAULTS = Object\.freeze\(\{ newsnowPrefetch: true, newsnowHideReturnIcon: false \}\)/,
+    /const EXPERIMENTAL_FEATURE_DEFAULTS = Object\.freeze\(\{[\s\S]*?newsnowPrefetch: true,[\s\S]*?newsnowHideReturnIcon: false[\s\S]*?\}\)/,
   );
   assert.match(experiments, /if \(key === "newsnow"\) return true;/);
   assert.match(experiments, /set\("newsnowPrefetch", prefetch\.checked\)/);
@@ -90,56 +404,23 @@ test("NewsNow is always available while its detailed local options remain config
   assert.match(experiments, /settingsModal\.classList\.remove\("show"\)/);
   assert.doesNotMatch(experiments, /fp-settings-modal/);
   assert.match(experiments, /"kunpeng\.reader\.experimental-features\.v1"/);
-  assert.match(
-    script,
-    /ReaderExperimentalFeatures\?\.enabled\?\.\("newsnow"\) === true/,
-  );
-  assert.match(script, /reader-experimental-features-changed/);
-  assert.match(
-    script,
-    /if \(!enabled && \(!page\.hidden \|\| !reader\.hidden\)\) close\(\{ focus: false \}\)/,
-  );
 });
 
-test("NewsNow opens source pages and renders extracted local articles with a stable return control", () => {
-  assert.match(script, /function safeHttpUrl/);
-  assert.match(script, /url\.protocol === "https:" \? url\.href : ""/);
-  assert.match(
-    script,
-    /page\.hidden = false; feedView\.hidden = false; sourcePicker\.hidden = true;[\s\S]*?shell\.hidden = true/,
-  );
-  assert.match(script, /newsnow_open_article/);
-  assert.match(script, /title: text\(item\.title \|\| item\.name\)/);
-  assert.match(script, /summary: text\(item\.summary \|\| item\.description/);
-  assert.match(script, /function withTimeout/);
-  assert.match(script, /news-request-timeout/);
-  assert.match(script, /reader\.hidden = !visible; page\.hidden = visible/);
-  assert.match(script, /ReaderLibraryAiEntry\?\.close\(\)/);
+test("NewsNow keeps the local article reader surface in the original page", () => {
   assert.match(html, /id="newsnow-reader-back"/);
   assert.match(html, /id="newsnow-reader-content"/);
   assert.match(html, /id="newsnow-reader-original"/);
-  assert.match(script, /if \(article\?\.local\) renderLocalArticle\(article\)/);
-  assert.match(
-    script,
-    /readerContent\.innerHTML = text\(article\?\.contentHtml/,
-  );
-  assert.match(script, /readerBack\.addEventListener\("click"/);
-  assert.match(script, /invoke\("open_url", \{ url: currentArticleUrl \}\)/);
   assert.doesNotMatch(html, /id="newsnow-reader-frame"/);
 });
 
 test("News original-page return icon can be hidden while gesture close remains available", () => {
   const experiments = fs.readFileSync(
-    path.join(ui, "experimental-features.js"),
+    path.join(ui, "generated-ts", "experimental-features.js"),
     "utf8",
   );
   assert.match(html, /data-i18n="newsHideReturnIcon">关闭返回图标/);
   assert.match(html, /data-i18n="newsHideReturnIconNote"/);
   assert.match(experiments, /newsnowHideReturnIcon: false/);
-  assert.match(
-    script,
-    /hideReturnIcon: global\.ReaderExperimentalFeatures\?\.enabled\?\.\("newsnowHideReturnIcon"\) === true/,
-  );
   assert.match(backend, /pub hide_return_icon: bool/);
   assert.match(backend, /const hideReturnIcon = __KUNPENG_HIDE_RETURN_ICON__;/);
   assert.match(
@@ -156,75 +437,53 @@ test("News original-page return icon can be hidden while gesture close remains a
 test("NewsNow syncs its bounded source selection and optional Tieba bar names", () => {
   assert.match(html, /id="newsnow-source-picker"/);
   assert.match(html, /id="newsnow-source-search"/);
+  assert.match(html, /<details\s+id="newsnow-custom-sources"[^>]*>/);
+  assert.match(html, /<summary class="newsnow-custom-sources-summary">/);
+  assert.match(html, /id="newsnow-custom-source-form"/);
+  assert.match(html, /id="newsnow-custom-source-name"[^>]*maxlength="80"/);
+  assert.match(html, /id="newsnow-custom-source-url"[^>]*type="url"[^>]*maxlength="2048"/);
+  assert.match(html, /id="newsnow-custom-source-category"[^>]*maxlength="48"/);
+  assert.match(html, /id="newsnow-custom-source-list"/);
+  assert.match(html, /id="newsnow-source-directory-summary"/);
+  assert.match(html, /id="newsnow-source-provider-filters"/);
+  assert.match(html, /id="newsnow-source-options"[^>]*data-layout="catalog"/);
   assert.doesNotMatch(html, /id="newsnow-source-apply"/);
   assert.doesNotMatch(html, /id="newsnow-source-reset"/);
-  assert.match(
-    script,
-    /const SOURCE_STORAGE_KEY = "kunpeng\.reader\.news\.sources\.v2"/,
-  );
-  assert.match(script, /const MAX_SOURCES = 24/);
-  assert.match(script, /function allowedSourceIds/);
-  assert.match(script, /sourceQuery = ""/);
-  assert.match(script, /sourceSearch\.addEventListener\("input"/);
   assert.match(html, /id="newsnow-tieba-bar-form"/);
   assert.doesNotMatch(html, /id="newsnow-tieba-enabled"/);
   assert.match(html, /id="newsnow-tieba-bar-input"/);
   assert.match(html, /id="newsnow-tieba-add-toggle"/);
   assert.match(html, /id="newsnow-tieba-bar-cancel"/);
   assert.match(html, /id="newsnow-tieba-bar-list"/);
-  assert.match(
-    script,
-    /const TIEBA_BARS_STORAGE_KEY = "kunpeng\.reader\.news\.tieba-bars\.v1"/,
-  );
-  assert.match(
-    script,
-    /const TIEBA_ENABLED_BARS_STORAGE_KEY = "kunpeng\.reader\.news\.tieba-enabled-bars\.v1"/,
-  );
-  assert.match(script, /const MAX_TIEBA_BARS = 8/);
-  assert.match(script, /function normalizeTiebaBars/);
-  assert.match(script, /function setTiebaAddOpen/);
-  assert.match(script, /text\(source\.id\) !== "tieba"/);
-  assert.match(script, /function syncPendingTiebaSource/);
-  assert.match(script, /function persistSourceChanges/);
-  assert.match(script, /function queueNewsSourceSettingsSync/);
-  assert.match(script, /function hydrateNewsSourceSettings/);
-  assert.match(script, /newsSourceIds: sourceIds/);
-  assert.match(script, /newsTiebaBars: tiebaBarNames/);
-  assert.match(script, /newsEnabledTiebaBars: tiebaEnabledBarNames/);
-  assert.match(script, /hasNewsSourceSettings/);
-  assert.match(script, /function scheduleSourceRefresh/);
-  assert.match(
-    script,
-    /setTimeout\(\(\) => \{[\s\S]*?void load\(true\);[\s\S]*?\}, 450\)/,
-  );
-  assert.match(script, /enabled\.type = "checkbox"/);
-  assert.match(script, /pendingTiebaEnabledBarNames/);
-  assert.match(
-    script,
-    /function newsRequest\(\) \{ return \{ sourceIds, tiebaBars:/,
-  );
-  assert.match(script, /left === "tieba" \? 0 : 1/);
-  assert.match(script, /tiebaBarForm\.addEventListener\("submit"/);
-  assert.match(
-    script,
-    /format\("maxSources", "最多选择 \{max\} 个来源。", \{ max: MAX_SOURCES \}\)/,
-  );
-  assert.match(script, /app-language-changed/);
+});
+
+test("source management keeps one scalable provider and category directory", () => {
+  assert.match(html, /class="newsnow-source-directory"/);
+  assert.match(html, /class="newsnow-source-provider-filters"/);
+  assert.match(styles, /\.newsnow-source-options\s*\{[^}]*grid-template-columns: repeat\(auto-fit, minmax\(300px, 1fr\)\)/s);
+  assert.match(styles, /\.newsnow-source-group\[data-provider="horizon"\]/);
+  assert.match(styles, /\.newsnow-source-group\[data-provider="worldmonitor"\]/);
+  assert.match(styles, /\.newsnow-source-group\[data-provider="custom"\]/);
+  assert.match(styles, /\.newsnow-custom-sources-summary\s*\{/);
+  assert.match(styles, /\.newsnow-custom-sources-content\s*\{/);
+  assert.match(styles, /\.newsnow-source-choice::after\s*\{[\s\S]*?content: attr\(data-source-tooltip\)/);
+  assert.match(script, /const sourceDescription = \(source\) =>/);
+  assert.match(script, /label\.dataset\.sourceTooltip = description/);
+  assert.match(script, /label\.dataset\.gestureInfoStop = "true"/);
+  assert.doesNotMatch(script, /sourceHoverDescription/);
+  assert.doesNotMatch(script, /gestureInfoTitle/);
+  assert.doesNotMatch(script, /newsnow_source_availability/);
+  assert.doesNotMatch(html, /newsnow-source-check/);
+  assert.doesNotMatch(html, /newsnow-source-health-status/);
+  assert.doesNotMatch(html, /newsnow-source-pipeline/);
+  assert.doesNotMatch(html, /勾选后会加入资讯/);
+  assert.doesNotMatch(html, /newsnow-source-picker-actions/);
 });
 
 test("source management is an independent page that hides and restores the news feed", () => {
   assert.match(html, /id="newsnow-feed-view" class="newsnow-feed-view"/);
   assert.match(html, /id="newsnow-source-status"/);
   assert.match(html, /id="newsnow-source-close"[^>]*>\s*←\s*<\/button>/);
-  assert.match(script, /sourcePageScrollTop = page\.scrollTop/);
-  assert.match(script, /feedView\.hidden = true; sourcePicker\.hidden = false/);
-  assert.match(script, /sourcePicker\.hidden = true; feedView\.hidden = false/);
-  assert.match(script, /page\.classList\.add\("newsnow-source-page-active"\)/);
-  assert.match(
-    script,
-    /page\.classList\.remove\("newsnow-source-page-active"\)/,
-  );
-  assert.match(script, /page\.scrollTop = sourcePageScrollTop/);
   assert.match(
     styles,
     /\.newsnow-feed-view\[hidden\],\s*\.newsnow-source-picker\[hidden\]\s*\{\s*display: none/,
@@ -237,19 +496,259 @@ test("source management is an independent page that hides and restores the news 
   assert.doesNotMatch(styles, /\.newsnow-source-picker-actions/);
 });
 
-test("Gesture settings live in common settings and return from news, library, and reader", () => {
-  const gestureUi = fs.readFileSync(path.join(ui, "gesture-ui.js"), "utf8");
+test("classic NewsNow installer opens feeds, persists display choices, and restores source pages", async () => {
+  const { context, root, elements, storage, invocations } = newsFixture();
+  const uiApi = context.ReaderNewsUI;
+  const controller = uiApi.init({ root });
+
+  assert.equal(
+    uiApi.safeHttpUrl("https://example.com/article"),
+    "https://example.com/article",
+  );
+  assert.equal(uiApi.safeHttpUrl("http://example.com/article"), "");
+  assert.deepEqual(
+    Array.from(
+      uiApi.allowedSourceIds(
+        ["beta", "missing", "beta", "alpha"],
+        [
+          { id: "alpha", defaultEnabled: true },
+          { id: "beta", defaultEnabled: true },
+        ],
+      ),
+    ),
+    ["beta", "alpha"],
+  );
+
+  await controller.open();
+  await settle();
+  assert.equal(elements.get("newsnow-page").hidden, false);
+  assert.equal(elements.get("content-shell").hidden, true);
+  assert.equal(elements.get("newsnow-feed").children.length, 1);
+  assert.deepEqual(
+    plain(
+      invocations.filter(({ command }) => command === "newsnow_list")[0].args
+        .request,
+    ),
+    { sourceIds: ["alpha", "beta"], tiebaBars: [], customSources: [] },
+  );
+
+  elements.get("newsnow-layout-grid").click();
+  elements.get("newsnow-order-source").click();
+  assert.equal(controller.layout(), "grid");
+  assert.equal(controller.order(), "source");
+  assert.equal(storage.get("kunpeng.reader.news.layout.v1"), "grid");
+  assert.equal(storage.get("kunpeng.reader.news.order.v1"), "source");
+  assert.equal(
+    elements.get("newsnow-feed").classList.contains("newsnow-feed-grid"),
+    true,
+  );
+  assert.equal(
+    elements.get("newsnow-feed").classList.contains("newsnow-feed-by-source"),
+    true,
+  );
+
+  elements.get("newsnow-source-toggle").click();
+  await settle();
+  assert.equal(elements.get("newsnow-feed-view").hidden, true);
+  assert.equal(elements.get("newsnow-source-picker").hidden, false);
+  assert.equal(
+    elements
+      .get("newsnow-page")
+      .classList.contains("newsnow-source-page-active"),
+    true,
+  );
+  assert.equal(
+    elements.get("newsnow-source-directory-summary").textContent,
+    "共 3 个来源 · 3 个提供方 · 当前显示 3 个",
+  );
+  assert.deepEqual(
+    Array.from(elements.get("newsnow-source-provider-filters").children).map(
+      (button) => button.dataset.provider,
+    ),
+    ["all", "reader", "horizon", "worldmonitor"],
+  );
+  elements.get("newsnow-custom-source-name").value = "不安全地址";
+  elements.get("newsnow-custom-source-url").value = "http://example.com/feed.xml";
+  elements.get("newsnow-custom-source-category").value = "科技";
+  elements.get("newsnow-custom-source-form").dispatch("submit");
+  assert.equal(elements.get("newsnow-custom-source-count").textContent, "已添加 0 / 200");
+  elements.get("newsnow-custom-source-name").value = "我的 RSS";
+  elements.get("newsnow-custom-source-url").value = "https://example.com/atom.xml";
+  elements.get("newsnow-custom-source-category").value = "科技";
+  elements.get("newsnow-custom-source-form").dispatch("submit");
+  assert.equal(elements.get("newsnow-custom-source-count").textContent, "已添加 1 / 200");
+  assert.equal(
+    elements.get("newsnow-source-directory-summary").textContent,
+    "共 4 个来源 · 4 个提供方 · 当前显示 4 个",
+  );
+  assert.equal(
+    elements
+      .get("newsnow-source-provider-filters")
+      .children.some((button) => button.dataset.provider === "custom"),
+    true,
+  );
+  assert.deepEqual(
+    plain(await controller.sourceRequest()),
+    {
+      sourceIds: ["alpha", "beta", "custom-rss-1fnz5cq1egon7w"],
+      tiebaBars: [],
+      customSources: [
+        {
+          id: "custom-rss-1fnz5cq1egon7w",
+          name: "我的 RSS",
+          url: "https://example.com/atom.xml",
+          category: "科技",
+        },
+      ],
+    },
+  );
+  const custom = elements
+    .get("newsnow-source-provider-filters")
+    .children.find((button) => button.dataset.provider === "custom");
+  custom.click();
+  assert.equal(elements.get("newsnow-source-options").children.length, 1);
+  assert.equal(
+    elements.get("newsnow-source-options").children[0].dataset.category,
+    "科技",
+  );
+  const customChoice = elements.get("newsnow-source-options").children[0].children[1].children[0];
+  assert.equal(customChoice.dataset.gestureInfoTitle, undefined);
+  assert.equal(customChoice.dataset.gestureInfo, undefined);
+  assert.match(
+    customChoice.dataset.sourceTooltip,
+    /我的 RSS：这是你添加的自定义订阅；是否跨设备保存由账户页的“自定义 RSS \/ Atom 订阅”开关决定。主要覆盖科技分类，内容形式为RSS \/ Atom。/,
+  );
+  const worldmonitor = elements
+    .get("newsnow-source-provider-filters")
+    .children.find((button) => button.dataset.provider === "worldmonitor");
+  worldmonitor.click();
+  assert.equal(elements.get("newsnow-source-options").children.length, 1);
+  assert.equal(
+    elements.get("newsnow-source-options").children[0].dataset.provider,
+    "worldmonitor",
+  );
+  assert.equal(
+    elements.get("newsnow-source-options").children[0].children[0].textContent,
+    "WorldMonitor · 灾害",
+  );
+  let customToggle = elements.get("newsnow-custom-source-list").children[0].children[0];
+  customToggle.checked = false;
+  customToggle.dispatch("change");
+  assert.deepEqual(
+    plain(await controller.sourceRequest()),
+    { sourceIds: ["alpha", "beta"], tiebaBars: [], customSources: [] },
+  );
+  customToggle = elements.get("newsnow-custom-source-list").children[0].children[0];
+  customToggle.checked = true;
+  customToggle.dispatch("change");
+  assert.equal(
+    plain(await controller.sourceRequest()).customSources.length,
+    1,
+  );
+  elements.get("newsnow-custom-source-list").children[0].children[2].click();
+  assert.equal(elements.get("newsnow-custom-source-count").textContent, "已添加 0 / 200");
+  assert.deepEqual(
+    plain(await controller.sourceRequest()),
+    { sourceIds: ["alpha", "beta"], tiebaBars: [], customSources: [] },
+  );
+  const reopenSources = controller.gestureReopen();
+  controller.gestureBack();
+  assert.equal(elements.get("newsnow-source-picker").hidden, true);
+  reopenSources();
+  await settle();
+  assert.equal(elements.get("newsnow-source-picker").hidden, false);
+  elements.get("newsnow-source-close").click();
+  assert.equal(elements.get("newsnow-feed-view").hidden, false);
+  assert.equal(elements.get("newsnow-source-picker").hidden, true);
+  assert.equal(
+    elements
+      .get("newsnow-page")
+      .classList.contains("newsnow-source-page-active"),
+    false,
+  );
+});
+
+test("classic NewsNow installer opens local articles and returns to the feed", async () => {
+  const { context, root, elements, invocations } = newsFixture();
+  const controller = context.ReaderNewsUI.init({ root });
+  await controller.open();
+  await settle();
+  controller.render([
+    {
+      id: "article-1",
+      sourceId: "alpha",
+      source: "Alpha",
+      title: "资讯标题",
+      summary: "资讯摘要",
+      url: "https://example.com/article",
+      publishedAt: "2026-01-01T00:00:00Z",
+    },
+  ]);
+  const card = elements.get("newsnow-feed").querySelector(".newsnow-card");
+  assert.ok(
+    card,
+    `feed rendering should expose the loaded article as a clickable card; children=${elements
+      .get("newsnow-feed")
+      .children.map((child) => child.className)
+      .join(",")}`,
+  );
+  card.click();
+  await settle();
+
+  assert.equal(elements.get("newsnow-reader").hidden, false);
+  assert.equal(elements.get("newsnow-page").hidden, true);
+  assert.equal(elements.get("newsnow-reader-title").textContent, "资讯标题");
+  assert.equal(
+    elements.get("newsnow-reader-content").innerHTML,
+    "<p>离线正文</p>",
+  );
+  assert.deepEqual(
+    plain(
+      invocations.find(({ command }) => command === "newsnow_open_article").args
+        .request,
+    ),
+    {
+      url: "https://example.com/article",
+      title: "资讯标题",
+      summary: "资讯摘要",
+      publishedAt: "2026-01-01T00:00:00Z",
+      gestureEnabled: false,
+      gesturePoints: [],
+      hideReturnIcon: true,
+    },
+  );
+
+  const reopenArticle = controller.gestureReopen();
+  controller.gestureBack();
+  assert.equal(elements.get("newsnow-reader").hidden, true);
+  reopenArticle();
+  await settle();
+  assert.equal(elements.get("newsnow-reader").hidden, false);
+  assert.equal(elements.get("newsnow-reader-title").textContent, "资讯标题");
+
+  elements.get("newsnow-reader-back").click();
+  assert.equal(elements.get("newsnow-reader").hidden, true);
+  assert.equal(elements.get("newsnow-page").hidden, false);
+  assert.ok(
+    invocations.some(({ command }) => command === "newsnow_close_article"),
+  );
+});
+
+test("Gesture settings live in common settings and close news, library, and reader surfaces", () => {
+  const gestureUi = fs.readFileSync(
+    path.join(ui, "generated-ts", "gesture-ui.js"),
+    "utf8",
+  );
   const readerGesture = fs.readFileSync(
-    path.join(ui, "reader-gesture.js"),
+    path.join(ui, "generated-ts", "reader-gesture.js"),
     "utf8",
   );
   const readerHtml = fs.readFileSync(path.join(ui, "reader.html"), "utf8");
-  const readerPage = fs.readFileSync(
-    path.join(ui, "reader-page-annotations.js"),
-    "utf8",
-  );
+  const readerPageTestSource = require("./reader-page-test-source.cjs");
+  const readerPage = readerPageTestSource.compact;
+  const readerPageSource = readerPageTestSource.source;
   const readerMessage = fs.readFileSync(
-    path.join(ui, "reader-message.js"),
+    path.join(ui, "generated-ts", "reader-message.js"),
     "utf8",
   );
   assert.match(
@@ -349,6 +848,11 @@ test("Gesture settings live in common settings and return from news, library, an
   assert.match(html, /data-gesture-action="back"/);
   assert.match(
     html,
+    /data-gesture-action="back"[\s\S]*?<strong>✕ 关闭<\/strong\s*>[\s\S]*?不执行返回或后退/,
+  );
+  assert.doesNotMatch(html, /返回／关闭当前页|返回上一级/);
+  assert.match(
+    html,
     /id="gesture-action-hint" class="gesture-auto-scope-note"/,
   );
   assert.match(html, /id="gesture-action"[\s\S]*?type="hidden"/);
@@ -365,7 +869,7 @@ test("Gesture settings live in common settings and return from news, library, an
   );
   assert.match(
     html,
-    /<script src="news-ui\.js"><\/script>[\s\S]*?<script src="gesture-ui\.js"><\/script>/,
+    /<script src="generated-ts\/news-ui\.js"><\/script>[\s\S]*?<script src="generated-ts\/gesture-ui\.js"><\/script>/,
   );
   assert.doesNotMatch(html, /id="newsnow-gesture-enabled"/);
   assert.doesNotMatch(html, /id="newsnow-gesture-precision"/);
@@ -402,7 +906,7 @@ test("Gesture settings live in common settings and return from news, library, an
   );
   assert.match(
     gestureUi,
-    /function saveEditor\(\) \{[\s\S]*?saveProfiles\(\);\s*training = \[\];\s*editing = next;\s*api\.draw\(pad, \[\]\);/,
+    /function saveEditor\(\) \{[\s\S]*?saveProfiles\(\);\s*training = \[\];\s*editing = next;\s*gestureApi\.draw\(pad, \[\]\);/,
   );
   const gestureConflict = gestureUi.slice(
     gestureUi.indexOf("function conflictFor"),
@@ -423,7 +927,10 @@ test("Gesture settings live in common settings and return from news, library, an
     ),
     /other\.action === profile\.action/,
   );
-  assert.match(gestureUi, /profile\.points\.length === api\.SAMPLE_COUNT/);
+  assert.match(
+    gestureUi,
+    /profile\.points\.length === gestureApi\.SAMPLE_COUNT/,
+  );
   assert.match(gestureUi, /return false;/);
   assert.match(
     gestureUi,
@@ -431,9 +938,9 @@ test("Gesture settings live in common settings and return from news, library, an
   );
   assert.match(gestureUi, /global\.ReaderNewsUI\?\.instance/);
   assert.match(gestureUi, /ReaderLibraryAiEntry\?\.close/);
-  assert.match(gestureUi, /getElementById\("fp-settings-modal"\)/);
+  assert.match(gestureUi, /optional\("fp-settings-modal"\)/);
   assert.match(gestureUi, /commonSettings\.classList\.remove\("show"\)/);
-  assert.match(gestureUi, /getElementById\("stats-modal"\)/);
+  assert.match(gestureUi, /optional\("stats-modal"\)/);
   assert.match(gestureUi, /ReaderStatsUI\?\.close\?\.\(\)/);
   assert.match(gestureUi, /querySelector\("\.content-shell"\)/);
   assert.match(gestureUi, /invoke\("main_window_close"\)/);
@@ -448,31 +955,42 @@ test("Gesture settings live in common settings and return from news, library, an
   );
   assert.match(gestureUi, /"PointerEvent" in global/);
   assert.doesNotMatch(gestureUi, /test\.addEventListener\("click"/);
-  assert.match(gestureUi, /api\.similarity\(profile\.points, points\)/);
+  assert.match(gestureUi, /gestureApi\.similarity\(profile\.points, points\)/);
   assert.match(gestureUi, /相似度较高/);
-  assert.match(script, /gestureSurface: \(\) => \(!reader\.hidden \? reader/);
   assert.match(
     script,
-    /gestureBack: \(\) => \{ if \(!reader\.hidden\) closeArticle/,
+    /gestureSurface: \(\) => !reader\.hidden \? reader/,
+  );
+  assert.match(
+    script,
+    /function gestureBack\(\) \{[\s\S]*?if \(!reader\.hidden\) closeArticle/,
+  );
+  assert.match(
+    script,
+    /function gestureReopen\(\) \{[\s\S]*?currentArticleItem[\s\S]*?openArticle\(item\)[\s\S]*?loadSources\(\)\.then\(openSourcePicker\)/,
+  );
+  assert.match(
+    gestureUi,
+    /news\.gestureReopen\?\.\(\) \|\| \(\(\) => void news\.open/,
   );
   assert.match(
     readerHtml,
-    /<script src="news-gesture\.js"><\/script>[\s\S]*?<script src="reader-gesture\.js"><\/script>/,
+    /<script src="generated-ts\/news-gesture\.js"><\/script>[\s\S]*?<script src="generated-ts\/reader-gesture\.js"><\/script>/,
   );
-  assert.match(readerGesture, /global\.closeReaderWindow\?\.\(\)/);
+  assert.match(
+    readerGesture,
+    /typeof global\.closeReaderWindow === "function"[\s\S]*?root\.getElementById\("win-close"\)\?\.click\(\)/,
+  );
   assert.match(
     readerPage,
-    /readerGestureDrawing=true;readerGestureSource=source;readerGesturePointerId=source==='pointer'\?e\.pointerId:null/,
+    /readerGestureDrawing=true;readerGestureSource=source;readerGesturePointerId=source==='pointer'&&e instanceof PointerEvent\?e\.pointerId:null/,
   );
   assert.match(
     readerPage,
     /document\.documentElement\.setPointerCapture\(e\.pointerId\)/,
   );
-  assert.match(
-    readerPage,
-    /readerGesture:\{phase:phase,x:e\.clientX,y:e\.clientY\}/,
-  );
-  assert.match(readerPage, /ToSwak.*MouseEvent/);
+  assert.match(readerPage, /readerGesture:\{phase,x:e\.clientX,y:e\.clientY\}/);
+  assert.match(readerPageSource, /ToSwak.*MouseEvent/);
   assert.match(readerMessage, /"readerGesture"/);
   assert.match(styles, /\.gesture-precision-control input\[type="range"\]/);
   assert.match(styles, /\.gesture-create-button/);
@@ -563,13 +1081,32 @@ test("Gesture settings live in common settings and return from news, library, an
   assert.ok(gestures.matchThreshold("1") < gestures.matchThreshold("5"));
   assert.ok(gestures.matchThreshold("10") > gestures.matchThreshold("5"));
 });
-test("Gesture feedback, reopen, and contextual information are integrated across the shell and reader", () => {
-  const gestureUi = fs.readFileSync(path.join(ui, "gesture-ui.js"), "utf8");
-  const readerGesture = fs.readFileSync(
-    path.join(ui, "reader-gesture.js"),
+
+test("Close gesture dismisses gesture editing before closing settings and preserves undo state", () => {
+  const gestureUi = fs.readFileSync(
+    path.join(ui, "generated-ts", "gesture-ui.js"),
     "utf8",
   );
-  const app = fs.readFileSync(path.join(ui, "app.js"), "utf8");
+  assert.match(
+    gestureUi,
+    /gestureSettings\.contains\(target\)[\s\S]*?if \(!editor\.hidden\)[\s\S]*?returnToSettingsOverview\(\);[\s\S]*?runCloseOrUndo\([\s\S]*?"手势设置"[\s\S]*?closeSettings/,
+  );
+  assert.match(
+    gestureUi,
+    /function returnToSettingsOverview\(\) \{[\s\S]*?captureEditorSnapshot\(\);[\s\S]*?closeEditor\(\);[\s\S]*?rememberClosedPage\([\s\S]*?restoreEditorSnapshot\(snapshot\)/,
+  );
+});
+
+test("Gesture feedback, reopen, and contextual information are integrated across the shell and reader", () => {
+  const gestureUi = fs.readFileSync(
+    path.join(ui, "generated-ts", "gesture-ui.js"),
+    "utf8",
+  );
+  const readerGesture = fs.readFileSync(
+    path.join(ui, "generated-ts", "reader-gesture.js"),
+    "utf8",
+  );
+  const app = fs.readFileSync(path.join(ui, "generated-ts", "app.js"), "utf8");
   assert.match(html, /data-gesture-action="book_info"/);
   assert.match(
     html,
@@ -591,6 +1128,10 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(
     html,
     /id="newsnow-page"[^>]*data-gesture-info-title="资讯"[^>]*data-gesture-info=/,
+  );
+  assert.match(
+    html,
+    /id="newsnow-source-picker"[^>]*data-gesture-info-title="管理资讯来源"[^>]*data-gesture-info=/,
   );
   assert.match(html, /id="gesture-hint-font-size"/);
   assert.match(html, /id="gesture-hint-background-enabled"/);
@@ -629,7 +1170,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(html, /拖动提示文字可调整显示位置/);
   assert.match(html, /id="gesture-action-search"/);
   assert.match(html, /id="gesture-action-empty"[^>]*hidden/);
-  assert.match(gestureUi, /getElementById\("gesture-action-choice"\)/);
+  assert.match(gestureUi, /get\("gesture-action-choice"\)/);
   assert.match(gestureUi, /actionChoice\.hidden = false/);
   assert.match(gestureUi, /actionChoice\.hidden = true/);
   assert.match(gestureUi, /editorOptions\.hidden = false/);
@@ -703,7 +1244,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   );
   assert.match(gestureUi, /hintBackground\.click\(\)/);
   assert.match(gestureUi, /if \(event\.target === hintPreview\)/);
-  assert.match(gestureUi, /getElementById\("gesture-hint-enabled"\)/);
+  assert.match(gestureUi, /get\("gesture-hint-enabled"\)/);
   assert.match(gestureUi, /function applySettingsDisclosure\(\)/);
   assert.match(gestureUi, /settingsToggle\.addEventListener\("click"/);
   assert.match(
@@ -713,7 +1254,10 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(gestureUi, /globalPrecisionToggle\.addEventListener\("click"/);
   assert.match(gestureUi, /function showHint\(name\)/);
   assert.match(gestureUi, /function gestureInfoForTarget\(target\)/);
-  assert.match(gestureUi, /target\?\.closest\?\.\("\[data-gesture-info\]"\)/);
+  assert.match(
+    gestureUi,
+    /element\?\.closest\("\[data-gesture-info-stop\]"\)/,
+  );
   assert.match(gestureUi, /if \(!body\) return null/);
   assert.match(gestureUi, /function openGestureInfo\(info\)/);
   assert.match(gestureUi, /function withGestureInfo\(target, surface\)/);
@@ -772,7 +1316,10 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     styles,
     /\.gesture-hint-color-picker-toggle \{[^}]*conic-gradient/,
   );
-  assert.match(styles, /\.gesture-hint-native-color-input \{[^}]*opacity: 0/);
+  assert.match(
+    styles,
+    /\.gesture-hint-native-color-input \{[^}]*inset: 0;[^}]*width: 28px;[^}]*height: 28px;[^}]*opacity: 0/,
+  );
   assert.match(
     styles,
     /\.gesture-hint-shape-tools \{[^}]*backdrop-filter: blur/,
@@ -799,19 +1346,20 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(gestureUi, /function fallbackSurface\(target\)/);
   assert.match(
     gestureUi,
-    /const gestureSettings = root\.getElementById\("gesture-settings-modal"\)/,
+    /const gestureSettings = get\("gesture-settings-modal"\)/,
   );
   assert.doesNotMatch(gestureUi, /if \(pad\.contains\(target\)\) return null;/);
+  assert.doesNotMatch(gestureUi, /editor\.contains\(target\)/);
   assert.match(
     gestureUi,
-    /if \(!editor\.hidden && editor\.contains\(target\)\) \{[\s\S]*?allowedActions: supportedActions\(\["back"\]\),[\s\S]*?closeEditor\(\);[\s\S]*?return \{[\s\S]*?allowedActions: supportedActions\(\["back"\]\),[\s\S]*?"手势设置", closeSettings, openSettings/,
+    /gestureSettings\.contains\(target\)[\s\S]*?allowedActions: supportedActions\(\["back"\]\),[\s\S]*?runCloseOrUndo\([\s\S]*?"手势设置"[\s\S]*?closeSettings/,
   );
   assert.match(gestureUi, /allowedActions: supportedActions\(\["back"\]\)/);
   assert.match(gestureUi, /function canApplyAction\(surface, action\)/);
   assert.doesNotMatch(gestureUi, /startPointerGesture|activePointerId/);
   assert.match(
     gestureUi,
-    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", move,[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\(event\), true\);/,
+    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", move,[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\((?:event)?\), true\);/,
   );
   assert.match(gestureUi, /reader-closed-for-reopen/);
   assert.match(gestureUi, /invoke\("open_book", \{ id \}\)/);
@@ -820,23 +1368,28 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     /matched && canApplyAction\(gesture\.surface, matched\.profile\.action\)/,
   );
   assert.match(gestureUi, /onMatch\(matched\.profile\.action\)/);
-  assert.match(gestureUi, /getElementById\("book-info-modal"\)/);
+  assert.match(gestureUi, /optional\("book-info-modal"\)/);
   assert.match(gestureUi, /bookInfo\.classList\.remove\("show"\)/);
-  assert.match(gestureUi, /getElementById\("book-organization-modal"\)/);
+  assert.match(gestureUi, /optional\("book-organization-modal"\)/);
+  assert.match(gestureUi, /optional\("book-organization-close"\)\?\.click\(\)/);
+  assert.match(gestureUi, /optional\("booklist-modal"\)/);
+  assert.match(gestureUi, /optional\("booklist-close"\)\?\.click\(\)/);
+  assert.match(gestureUi, /supportedActions\(\["back"\]\)/);
   assert.match(
     gestureUi,
-    /getElementById\("book-organization-close"\)\?\.click\(\)/,
+    /asElement\(target\)\?\.closest\("\.book\[data-id\]"\)/,
   );
-  assert.match(gestureUi, /getElementById\("booklist-modal"\)/);
-  assert.match(gestureUi, /getElementById\("booklist-close"\)\?\.click\(\)/);
-  assert.match(gestureUi, /supportedActions\(\["back"\]\)/);
-  assert.match(gestureUi, /target\?\.closest\?\.\("\.book\[data-id\]"\)/);
   assert.match(gestureUi, /const bookId = cardBookId \|\| selectedBookId/);
   assert.match(gestureUi, /ReaderBookInfo\?\.openById\?\.\(bookId\)/);
   assert.match(gestureUi, /reader-gesture-settings-request/);
   assert.match(gestureUi, /reader-gesture-settings/);
   assert.match(gestureUi, /reader_gesture_settings_save/);
   assert.match(gestureUi, /function runCloseOrUndo\(/);
+  assert.match(
+    gestureUi,
+    /function closeMainWindowOrUndo\(action\) \{[\s\S]*?if \(action === "undo_last"\)[\s\S]*?reopenLastClosedPage\(\);[\s\S]*?mainWindowClose\(\);/,
+  );
+  assert.doesNotMatch(gestureUi, /action === "back"[^\n]*reopenLastClosedPage/);
   assert.match(
     styles,
     /\.gesture-settings-card \{[^}]*max-height: calc\(100dvh - 32px\);[^}]*overflow-y: auto/,
@@ -899,11 +1452,11 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   );
   assert.match(
     trainingFinish,
-    /appendTrainingPoints\(event\);[\s\S]*?if \(length < api\.MIN_PATH_LENGTH\) \{\s*training = \[\];\s*api\.draw\(pad, training\);[\s\S]*?已清除，请重新画。[\s\S]*?return;/,
+    /appendTrainingPoints\(event\);[\s\S]*?if \(length < gestureApi\.MIN_PATH_LENGTH\) \{\s*training = \[\];\s*gestureApi\.draw\(pad, training\);[\s\S]*?已清除，请重新画。[\s\S]*?return;/,
   );
   assert.match(
     gestureUi,
-    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", move,[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\(event\), true\);/,
+    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", move,[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\((?:event)?\), true\);/,
   );
   const matcher = gestureUi.slice(
     gestureUi.indexOf("function matchProfile"),
@@ -916,19 +1469,30 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     /surface\.allowedActions\.includes\(profile\.action\)/,
   );
   assert.match(readerGesture, /async function closeReaderSurface\(source\)/);
-  assert.match(readerGesture, /if \(shell\?\.closeSurface\?\.\(\)\) return;/);
+  assert.match(
+    readerGesture,
+    /if \(global\.ReaderShell\?\.closeSurface\?\.\(\)\) return;/,
+  );
+  assert.match(
+    readerGesture,
+    /root\.getElementById\("win-close"\)\?\.click\(\)/,
+  );
+  assert.match(
+    readerGesture,
+    /const publicApi = \{ activate: startGestureRuntime, fromFrame, frameSurfaceClosed \};[\s\S]*?global\.ReaderGestureClose = publicApi/,
+  );
   assert.match(
     readerGesture,
     /previous\.sidePanel === "ai-reader" \? "智读" : previous\.sidePanel/,
   );
   assert.match(
     readerGesture,
-    /ReaderShell\?\.setSidePanel\?\.\(previous\.sidePanel, true\)/,
+    /ReaderShell\?\.setSidePanel\?\.\(String\(previous\.sidePanel\), true\)/,
   );
   assert.match(readerGesture, /function requestFrameSurfaceClose\(\)/);
   assert.match(
     readerGesture,
-    /frame\.contentWindow\.postMessage\(\{ readerGestureAction: "back" \}, "\*"\)/,
+    /frame\.contentWindow\?\.postMessage\(\{ readerGestureAction: "back" \}, "\*"\)/,
   );
   assert.match(
     readerGesture,
@@ -958,7 +1522,10 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.doesNotMatch(readerGesture, /reader-gesture-action/);
   assert.match(readerGesture, /function cancelKeepHint\(\)/);
   assert.match(readerGesture, /function hideHint\(\)/);
-  assert.match(readerGesture, /if \(!active\) \{ hideHint\(\); return; \}/);
+  assert.match(
+    readerGesture,
+    /if \(!active\) \{\s*hideHint\(\);\s*return;\s*\}/,
+  );
   assert.match(app, /hasSingleSelected: hasSingleSelectedBook/);
   assert.match(app, /openById: openBookInfoById/);
   assert.match(app, /tauriEvent\.listen\("reader-gesture-action"/);
@@ -966,47 +1533,13 @@ test("Gesture feedback, reopen, and contextual information are integrated across
 test("NewsNow has a persisted horizontal and grid layout switch", () => {
   assert.match(html, /id="newsnow-layout-list"/);
   assert.match(html, /id="newsnow-layout-grid"/);
-  assert.match(
-    script,
-    /const LAYOUT_STORAGE_KEY = "kunpeng\.reader\.news\.layout\.v1"/,
-  );
-  assert.match(script, /function setLayout\(next\)/);
-  assert.match(script, /feed\.classList\.toggle\("newsnow-feed-grid", grid\)/);
-  assert.match(script, /newsnow-card-image/);
-  assert.match(script, /safeImageDataUrl/);
-  assert.match(script, /item\.previewDataUrl \|\| item\.preview_data_url/);
-  assert.match(script, /const VISIBLE_IMAGE_CONCURRENCY = 4/);
-  assert.match(script, /new global\.IntersectionObserver/);
-  assert.match(script, /invoke\("newsnow_preview_image"/);
-  assert.match(script, /rootMargin: "500px 0px"/);
   assert.match(styles, /\.newsnow-card-image\.loading/);
-  assert.match(
-    script,
-    /gridLayout\.addEventListener\("click", \(\) => setLayout\("grid"\)\)/,
-  );
   assert.match(styles, /\.newsnow-feed\.newsnow-feed-grid\s*\{/);
   assert.match(styles, /\.newsnow-layout-grid-icon\s*\{/);
   assert.match(
     styles,
     /\.newsnow-layout-grid-icon::before\s*\{[^}]*width: 9px[^}]*height: 9px[^}]*box-shadow:\s*11px 0 currentColor,\s*0 11px currentColor,\s*11px 11px currentColor/s,
   );
-  assert.match(script, /function masonryColumnCount\(\)/);
-  assert.match(script, /ReaderNewsLayoutRules/);
-  assert.match(script, /className = "newsnow-masonry-column"/);
-  assert.match(script, /function estimatedCardHeight\(item, columnCount\)/);
-  assert.match(script, /balancedColumnIndexes/);
-  assert.match(script, /const columnHeights = Array\.from/);
-  assert.match(script, /renderedMasonryColumnCount = columnCount/);
-  assert.match(
-    script,
-    /if \(page\.hidden \|\| feedView\.hidden\) \{ feedRenderPending = true; return; \}/,
-  );
-  assert.match(
-    script,
-    /if \(feedRenderPending \|\| layout === "grid"\) renderFeed\(\)/,
-  );
-  assert.match(script, /renderedMasonryColumnCount \|\| 1/);
-  assert.match(script, /global\.addEventListener\("resize"/);
   assert.match(
     styles,
     /\.newsnow-feed\.newsnow-feed-grid\s*\{[^}]*repeat\(var\(--newsnow-grid-columns, 1\)/s,
@@ -1029,40 +1562,23 @@ test("NewsNow has a persisted horizontal and grid layout switch", () => {
 });
 
 test("NewsNow prefetches enabled sources and bounds visible image requests", () => {
-  assert.match(script, /const BACKGROUND_PREFETCH_DELAY_MS = 30 \* 1000/);
-  assert.match(
-    script,
-    /const BACKGROUND_PREFETCH_INTERVAL_MS = 5 \* 60 \* 1000/,
-  );
-  assert.match(script, /const BACKGROUND_PREFETCH_BATCHES = 4/);
-  assert.match(script, /function scheduleBackgroundPrefetch\(\)/);
-  assert.match(script, /function refreshIfIdle\(\)/);
-  assert.match(
-    script,
-    /Date\.now\(\) - lastUserActivityAt < BACKGROUND_PREFETCH_DELAY_MS/,
-  );
-  assert.match(
-    script,
-    /invoke\("newsnow_prefetch", \{ request: newsRequest\(\) \}\)/,
-  );
-  assert.match(script, /function previewAttempted\(item\)/);
-  assert.match(script, /function hasPendingPreviews\(result\)/);
-  assert.match(script, /batch < BACKGROUND_PREFETCH_BATCHES/);
-  assert.match(
-    script,
-    /const needsPreviewCache = hasPendingPreviews\(result\)/,
-  );
-  assert.match(script, /visibleImageRunning < VISIBLE_IMAGE_CONCURRENCY/);
   assert.match(
     backend,
     /const PREVIEW_IMAGE_MAX_BYTES: u64 = 4 \* 1024 \* 1024/,
   );
+  assert.match(backend, /const NEWS_FEED_SOURCE_TIMEOUT: Duration = Duration::from_secs\(6\)/);
+  assert.match(backend, /const MAX_REFRESH_CONCURRENCY: usize = 12/);
+  assert.match(
+    backend,
+    /fetch_source\(\s*&news_feed_agent\(\),\s*&base,\s*source,\s*force_refresh,\s*&tieba_bars,\s*\)/,
+  );
   assert.match(backend, /remember_preview_attempt/);
+  assert.match(script, /const enqueueWhenConnected = \(\) => \{/);
   assert.match(
     script,
-    /if \(result\?\.stale \|\| needsPreviewCache\) void refreshInBackground\(\{ announce: true \}\)/,
+    /if \(!image\.isConnected \|\| image\.dataset\.previewLoaded === "true"\) return;/,
   );
-  assert.match(script, /masonryColumnCount\(\) === renderedMasonryColumnCount/);
+  assert.match(script, /host\.requestAnimationFrame\(enqueueWhenConnected\);/);
   assert.match(
     styles,
     /\.experimental-settings\s*\{[^}]*padding: 0;[^}]*border: 0/s,
@@ -1077,24 +1593,7 @@ test("NewsNow prefetches enabled sources and bounds visible image requests", () 
 test("NewsNow persists mixed or source-grouped ordering", () => {
   assert.match(html, /id="newsnow-order-mixed"/);
   assert.match(html, /id="newsnow-order-source"/);
-  assert.match(
-    script,
-    /const ORDER_STORAGE_KEY = "kunpeng\.reader\.news\.order\.v1"/,
-  );
-  assert.match(script, /function setOrder\(next\)/);
-  assert.match(script, /newsnow-feed-by-source/);
   assert.match(styles, /\.newsnow-source-section\s*\{/);
-});
-
-test("NewsNow toolbar toggles the main-window news page", () => {
-  assert.match(
-    script,
-    /button\.addEventListener\("click", \(\) => \{ if \(!page\.hidden \|\| !reader\.hidden\) close/,
-  );
-  assert.match(
-    script,
-    /page\.hidden = false; feedView\.hidden = false; sourcePicker\.hidden = true;[\s\S]*?shell\.hidden = true/,
-  );
 });
 
 test("NewsNow presents a chronological reading feed and stays usable on narrow windows", () => {

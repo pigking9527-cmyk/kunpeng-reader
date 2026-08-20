@@ -12,6 +12,11 @@ pub use reader_core::{Bookmark, Highlight, ProgressTimelineEntry};
 
 mod progress;
 pub(crate) use progress::{apply_reading_position, merge_daily_progress_history};
+mod source;
+pub use source::{
+    compute_content_id, compute_fingerprint, decode_bytes, ext_lower, id_for_path, normalize_text,
+    title_from_path,
+};
 
 fn organization_name_key(value: &str) -> String {
     reader_core::domain::organization_name_key(value)
@@ -1007,85 +1012,6 @@ impl Library {
     }
 }
 
-// ---------------------------------------------------------------------------
-//  工具
-// ---------------------------------------------------------------------------
-
-pub fn title_from_path(path: &Path) -> String {
-    path.file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "未命名".to_string())
-}
-
-pub fn ext_lower(path: &Path) -> String {
-    path.extension()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
-}
-
-/// 由文件路径稳定地算出 u64 ID（仅在导入时用来"铸造"一次 id，之后存盘不再依赖路径）。
-pub fn id_for_path(path: &Path) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// 内容指纹：文件大小 + 首尾各 64KB 采样的哈希。够快，且对"同一本书换了路径"稳定。
-/// 失败（文件不存在等）返回 0。
-pub fn compute_fingerprint(path: &Path) -> u64 {
-    use std::hash::{Hash, Hasher};
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(meta) = std::fs::metadata(path) else {
-        return 0;
-    };
-    let len = meta.len();
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return 0;
-    };
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    len.hash(&mut hasher);
-    let mut head = vec![0u8; 65536.min(len as usize)];
-    if f.read_exact(&mut head).is_ok() {
-        head.hash(&mut hasher);
-    }
-    if len > 131072 {
-        let mut tail = vec![0u8; 65536];
-        if f.seek(SeekFrom::End(-65536)).is_ok() && f.read_exact(&mut tail).is_ok() {
-            tail.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
-/// 完整文件 SHA-256，作为跨设备同步身份。只在导入、迁移或重新定位时计算一次。
-pub fn compute_content_id(path: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return String::new();
-    };
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
-    loop {
-        let Ok(read) = file.read(&mut buffer) else {
-            return String::new();
-        };
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
-
 fn cover_cache_dir() -> Option<PathBuf> {
     let mut dir = Library::cache_dir()?;
     dir.push("covers");
@@ -1192,23 +1118,11 @@ fn extract_cover_thumbnail<R: std::io::Read + std::io::Seek>(
     Some(out)
 }
 
-// ---------------------------------------------------------------------------
-//  纯文本解码（GBK/UTF-8 自动识别 + 换行规整），供 txt/md 阅读用
-// ---------------------------------------------------------------------------
-
-pub fn decode_bytes(bytes: &[u8]) -> String {
-    reader_core::text::decode_text_bytes(bytes)
-}
-
-pub fn normalize_text(s: &str) -> String {
-    reader_core::text::normalize_text(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_content_id, compute_fingerprint, merge_daily_progress_history, Book, Bookmark,
-        Highlight, Library, ProgressTimelineEntry, ReadingAnchor,
+        compute_fingerprint, merge_daily_progress_history, Book, Bookmark, Highlight, Library,
+        ProgressTimelineEntry, ReadingAnchor,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1278,16 +1192,6 @@ mod tests {
         assert_eq!(lib.books[0].progress, 42.0);
         assert_eq!(lib.books[0].resume_chapter, 3);
         assert_eq!(path_str(&lib.books[0].path), path_str(&new_path));
-    }
-
-    #[test]
-    fn content_id_is_stable_across_different_paths() {
-        let first_dir = TempDir::new("content-id-a");
-        let second_dir = TempDir::new("content-id-b");
-        let first = first_dir.file("a.epub", "same bytes");
-        let second = second_dir.file("renamed.epub", "same bytes");
-        assert_eq!(compute_content_id(&first), compute_content_id(&second));
-        assert_eq!(compute_content_id(&first).len(), 64);
     }
 
     #[test]

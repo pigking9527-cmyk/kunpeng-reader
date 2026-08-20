@@ -5,7 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(
-  path.join(__dirname, "..", "gesture-hint-rules.js"),
+  path.join(__dirname, "..", "generated-ts", "gesture-hint-rules.js"),
   "utf8",
 );
 const indexHtml = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
@@ -95,7 +95,7 @@ test("gesture hint rules compact freeform samples while preserving endpoints", (
 test("main-window gesture shell preloads the hint rule boundary", () => {
   assert.match(
     indexHtml,
-    /<script src="gesture-hint-rules\.js"><\/script>[\s\S]*?<script src="gesture-ui\.js"><\/script>/,
+    /<script src="generated-ts\/gesture-hint-rules\.js"><\/script>[\s\S]*?<script src="generated-ts\/gesture-ui\.js"><\/script>/,
   );
-  assert.match(source, /global\.ReaderGestureHintRules = Object\.freeze/);
+  assert.match(source, /ReaderGestureHintRules/);
 });

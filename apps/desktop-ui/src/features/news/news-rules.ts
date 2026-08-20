@@ -10,7 +10,6 @@ import type {
   NewsSource,
 } from "./news-port.js";
 
-export const MAX_NEWS_SOURCES = 24;
 export const MAX_TIEBA_BARS = 8;
 export const MAX_GESTURE_PROFILES = 24;
 export const GESTURE_SAMPLE_COUNT = 48;
@@ -38,7 +37,7 @@ function unique(values: readonly string[]): string[] {
 
 export function normaliseSourceIds(values: readonly string[], catalog: readonly NewsSource[]): string[] {
   const allowed = new Set(catalog.map((source) => source.id));
-  return unique(values).filter((value) => allowed.has(value)).slice(0, MAX_NEWS_SOURCES);
+  return unique(values).filter((value) => allowed.has(value));
 }
 
 export function defaultSourceIds(catalog: readonly NewsSource[]): string[] {
@@ -64,7 +63,7 @@ export function normalisePreferences(
   const enabledTiebaBars = normaliseEnabledTiebaBars(preferences.enabledTiebaBars, bars);
   const withoutTieba = normaliseSourceIds(preferences.sourceIds.filter((id) => id !== "tieba"), catalog);
   const sourceIds = enabledTiebaBars.length > 0 && catalog.some((source) => source.id === "tieba")
-    ? [...withoutTieba, "tieba"].slice(0, MAX_NEWS_SOURCES)
+    ? [...withoutTieba, "tieba"]
     : withoutTieba;
   const fallback = sourceIds.length ? sourceIds : defaultSourceIds(catalog);
   return {

@@ -187,6 +187,139 @@ async fn assert_account_identity(service: &Router, token: &str) {
     assert_eq!(me["token"], Value::Null);
 }
 
+async fn assert_materialized_checkpoint_cursor(
+    pool: &sqlx::PgPool,
+    service: &Router,
+    token: &str,
+    user_id: &str,
+) {
+    let (generation, account_cursor, entity_cursor) = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT account.generation,account.server_cursor, \
+                COALESCE(MAX(entity.server_cursor),0)::bigint \
+         FROM account_data_generations AS account \
+         LEFT JOIN sync_entities_v4 AS entity ON entity.user_id=account.user_id \
+         WHERE account.user_id=$1 \
+         GROUP BY account.user_id,account.generation,account.server_cursor",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .expect("materialized checkpoint cursor");
+    assert!(account_cursor > 0);
+    assert_eq!(account_cursor, entity_cursor);
+    let checkpoint = service
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/v1/sync/checkpoint?dataGeneration={generation}&cursor={account_cursor}"),
+            Some(token),
+            &Value::Null,
+        ))
+        .await
+        .expect("materialized checkpoint response");
+    assert_eq!(checkpoint.status(), StatusCode::OK);
+    let checkpoint = response_json(checkpoint).await;
+    assert_eq!(checkpoint["serverCursor"], account_cursor);
+    assert_eq!(checkpoint["caughtUp"], true);
+}
+
+async fn install_checkpoint_update_audit(pool: &sqlx::PgPool) {
+    remove_checkpoint_update_audit(pool).await;
+    sqlx::query(
+        "CREATE TABLE checkpoint_cursor_update_audit_v5_test(\
+           user_id text NOT NULL,server_cursor bigint NOT NULL)",
+    )
+    .execute(pool)
+    .await
+    .expect("create checkpoint audit table");
+    sqlx::query(
+        "CREATE FUNCTION record_checkpoint_cursor_update_v5_test() \
+         RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           INSERT INTO checkpoint_cursor_update_audit_v5_test(user_id,server_cursor) \
+           VALUES(NEW.user_id,NEW.server_cursor); \
+           RETURN NEW; \
+         END; \
+         $$",
+    )
+    .execute(pool)
+    .await
+    .expect("create checkpoint audit function");
+    sqlx::query(
+        "CREATE TRIGGER checkpoint_cursor_update_audit_v5_test \
+         AFTER UPDATE OF server_cursor ON account_data_generations \
+         FOR EACH ROW EXECUTE FUNCTION record_checkpoint_cursor_update_v5_test()",
+    )
+    .execute(pool)
+    .await
+    .expect("create checkpoint audit trigger");
+}
+
+async fn remove_checkpoint_update_audit(pool: &sqlx::PgPool) {
+    sqlx::query(
+        "DROP TRIGGER IF EXISTS checkpoint_cursor_update_audit_v5_test \
+         ON account_data_generations",
+    )
+    .execute(pool)
+    .await
+    .expect("drop previous checkpoint audit trigger");
+    sqlx::query("DROP FUNCTION IF EXISTS record_checkpoint_cursor_update_v5_test()")
+        .execute(pool)
+        .await
+        .expect("drop previous checkpoint audit function");
+    sqlx::query("DROP TABLE IF EXISTS checkpoint_cursor_update_audit_v5_test")
+        .execute(pool)
+        .await
+        .expect("drop previous checkpoint audit table");
+}
+
+async fn assert_bulk_push_updates_checkpoint_once(
+    pool: &sqlx::PgPool,
+    service: &Router,
+    token: &str,
+    entities: Value,
+) {
+    sqlx::query("TRUNCATE checkpoint_cursor_update_audit_v5_test")
+        .execute(pool)
+        .await
+        .expect("reset checkpoint audit");
+    let response = service
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/sync/push",
+            Some(token),
+            &json!({
+                "mutationId": Uuid::new_v4(),
+                "dataGeneration": 1,
+                "entities": entities
+            }),
+        ))
+        .await
+        .expect("audited bulk push");
+    assert_eq!(response.status(), StatusCode::OK);
+    let update_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM checkpoint_cursor_update_audit_v5_test \
+         WHERE user_id='load-rehearsal-user'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("checkpoint account update count");
+    assert_eq!(update_count, 1, "one account-row update per bulk push");
+}
+
+fn checkpoint_audit_entity(id: &str, updated_at: i64, sync_version: i64) -> Value {
+    json!({
+        "id": id,
+        "kind": "bookmark",
+        "updatedAt": updated_at,
+        "deletedAt": 0,
+        "deviceId": "checkpoint-audit-device",
+        "syncVersion": sync_version,
+        "payload": {"chapter": sync_version}
+    })
+}
+
 async fn data_reset_fixture(database_url: &str) -> (sqlx::PgPool, Router) {
     let pool = PgPoolOptions::new()
         .max_connections(4)
@@ -204,7 +337,7 @@ async fn data_reset_fixture(database_url: &str) -> (sqlx::PgPool, Router) {
     let password = SecretString::from("reset-password-v4".to_owned());
     let password_hash = hash_password(&password).expect("hash password");
     sqlx::query(
-        "INSERT INTO users(id,username,username_key,password_hash,created_at,sync_verified_at) \\
+        "INSERT INTO users(id,username,username_key,password_hash,created_at,sync_verified_at) \
          VALUES ('data-reset-user','data-reset-user','data-reset-user',$1,1786521600000,1786521600000)",
     )
     .bind(password_hash)
@@ -217,62 +350,20 @@ async fn data_reset_fixture(database_url: &str) -> (sqlx::PgPool, Router) {
         pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
     };
     (pool, app(state))
-}
-
-async fn recovery_fixture(database_url: &str) -> (sqlx::PgPool, Router, String) {
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(database_url)
-        .await
-        .expect("connect to explicit test database");
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("migrate explicit test database");
-    sqlx::query("TRUNCATE users CASCADE")
-        .execute(&pool)
-        .await
-        .expect("clear explicit test database");
-    let password = SecretString::from("recovery-password-v4".to_owned());
-    let password_hash = hash_password(&password).expect("hash password");
-    sqlx::query(
-        "INSERT INTO users(id,username,username_key,password_hash,created_at,sync_verified_at) \
-         VALUES ('recovery-user','recovery-user','recovery-user',$1,1786521600000,1786521600000)",
-    )
-    .bind(password_hash)
-    .execute(&pool)
-    .await
-    .expect("insert recovery test user");
-    let config = Config::for_test(database_url);
-    let recorder = PrometheusBuilder::new().build_recorder();
-    let state = AppState {
-        pool: pool.clone(),
-        metrics: recorder.handle(),
-        request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
-        password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
-        token_hmac_key: config.token_hmac_key.clone(),
-        config,
-    };
-    let service = app(state);
-    let token = response_json(
-        login_with_password(
-            &service,
-            "recovery-user",
-            "recovery-password-v4",
-            "recovery-device",
-        )
-        .await,
-    )
-    .await["token"]
-        .as_str()
-        .expect("recovery token")
-        .to_owned();
-    (pool, service, token)
 }
 
 async fn assert_data_reset_database_state(pool: &sqlx::PgPool) {
@@ -293,11 +384,6 @@ async fn assert_data_reset_database_state(pool: &sqlx::PgPool) {
             "asset count",
         ),
         (
-            "SELECT COUNT(*) FROM sync_entity_history_v4 WHERE user_id='data-reset-user'",
-            0,
-            "history count",
-        ),
-        (
             "SELECT COUNT(*) FROM sync_secret_bundle_epochs_v5 WHERE user_id='data-reset-user'",
             0,
             "secret epoch count",
@@ -306,6 +392,11 @@ async fn assert_data_reset_database_state(pool: &sqlx::PgPool) {
             "SELECT generation FROM account_data_generations WHERE user_id='data-reset-user'",
             2,
             "generation",
+        ),
+        (
+            "SELECT server_cursor FROM account_data_generations WHERE user_id='data-reset-user'",
+            0,
+            "checkpoint cursor",
         ),
     ] {
         assert_eq!(
@@ -329,9 +420,14 @@ async fn assert_data_reset_database_state(pool: &sqlx::PgPool) {
 }
 
 async fn assert_data_reset_response(response: axum::response::Response) {
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["cache-control"], "no-store");
+    let status = response.status();
+    let cache_control = response.headers()["cache-control"]
+        .to_str()
+        .unwrap_or_default()
+        .to_owned();
     let body = response_json(response).await;
+    assert_eq!(status, StatusCode::OK, "unexpected reset response: {body}");
+    assert_eq!(cache_control, "no-store");
     assert_eq!(body["ok"], true);
     assert_eq!(body["dataGeneration"], 2);
     assert_eq!(body["tokensRevoked"], true);
@@ -378,6 +474,15 @@ async fn password_reset_fixture(database_url: &str) -> (sqlx::PgPool, Router) {
         pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -436,6 +541,15 @@ async fn asset_fixture(database_url: &str) -> (sqlx::PgPool, Router, String) {
         pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -508,9 +622,18 @@ async fn login_push_replay_conflict_and_pull() {
     let config = Config::for_test(&database_url);
     let recorder = PrometheusBuilder::new().build_recorder();
     let state = AppState {
-        pool,
+        pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -547,6 +670,7 @@ async fn login_push_replay_conflict_and_pull() {
         assert_eq!(body["accepted"][0]["future_field"], "preserved");
         assert_eq!(body["mutationId"], mutation_id.to_string());
     }
+    assert_materialized_checkpoint_cursor(&pool, &service, &token, "e2e-user").await;
 
     let conflicting_push = service
         .clone()
@@ -581,6 +705,92 @@ async fn login_push_replay_conflict_and_pull() {
     let pull_body = response_json(pull).await;
     assert_eq!(pull_body["entities"][0]["payload"]["chapter"], 7);
     assert_eq!(pull_body["entities"][0]["future_field"], "preserved");
+}
+
+#[tokio::test]
+async fn bulk_push_updates_materialized_checkpoint_once() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _database_guard = E2E_DATABASE_LOCK.lock().await;
+    let (pool, service, token) = load_rehearsal_fixture(&database_url).await;
+    install_checkpoint_update_audit(&pool).await;
+
+    assert_bulk_push_updates_checkpoint_once(
+        &pool,
+        &service,
+        &token,
+        json!([
+            checkpoint_audit_entity("checkpoint-a", 1_786_521_600_100, 1),
+            checkpoint_audit_entity("checkpoint-b", 1_786_521_600_101, 1)
+        ]),
+    )
+    .await;
+    assert_bulk_push_updates_checkpoint_once(
+        &pool,
+        &service,
+        &token,
+        json!([
+            checkpoint_audit_entity("checkpoint-a", 1_786_521_600_200, 2),
+            checkpoint_audit_entity("checkpoint-b", 1_786_521_600_201, 2)
+        ]),
+    )
+    .await;
+    assert_bulk_push_updates_checkpoint_once(
+        &pool,
+        &service,
+        &token,
+        json!([
+            checkpoint_audit_entity("checkpoint-a", 1_786_521_600_300, 3),
+            checkpoint_audit_entity("checkpoint-c", 1_786_521_600_301, 1)
+        ]),
+    )
+    .await;
+    assert_materialized_checkpoint_cursor(&pool, &service, &token, "load-rehearsal-user").await;
+    remove_checkpoint_update_audit(&pool).await;
+}
+
+#[tokio::test]
+async fn user_cascade_delete_with_entities_keeps_checkpoint_trigger_safe() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _database_guard = E2E_DATABASE_LOCK.lock().await;
+    let (pool, service, token) = load_rehearsal_fixture(&database_url).await;
+    let push = service
+        .oneshot(request(
+            "POST",
+            "/v1/sync/push",
+            Some(&token),
+            &json!({
+                "mutationId": Uuid::new_v4(),
+                "dataGeneration": 1,
+                "entities": [checkpoint_audit_entity(
+                    "checkpoint-cascade",
+                    1_786_521_600_400,
+                    1
+                )]
+            }),
+        ))
+        .await
+        .expect("push cascade fixture");
+    assert_eq!(push.status(), StatusCode::OK);
+
+    let deleted = sqlx::query("DELETE FROM users WHERE id='load-rehearsal-user'")
+        .execute(&pool)
+        .await
+        .expect("cascade user with materialized checkpoint");
+    assert_eq!(deleted.rows_affected(), 1);
+    let remaining = sqlx::query_scalar::<_, i64>(
+        "SELECT (SELECT COUNT(*) FROM account_data_generations \
+                 WHERE user_id='load-rehearsal-user') + \
+                (SELECT COUNT(*) FROM sync_entities_v4 \
+                 WHERE user_id='load-rehearsal-user')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("cascade checkpoint rows");
+    assert_eq!(remaining, 0);
 }
 
 #[tokio::test]
@@ -619,6 +829,15 @@ async fn inventory_reconcile_and_secret_epoch_match_desktop_v5_semantics() {
         pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -728,6 +947,31 @@ async fn inventory_reconcile_and_secret_epoch_match_desktop_v5_semantics() {
         .expect("secret reset response");
     assert_eq!(reset.status(), StatusCode::OK);
     assert_eq!(response_json(reset).await["secretBundleEpoch"], 2);
+    let first_reset_cursor = sqlx::query_scalar::<_, i64>(
+        "SELECT server_cursor FROM account_data_generations WHERE user_id='inventory-user'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("first secret reset cursor");
+    let reset_again = service
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/sync/secret-state/reset",
+            Some(&token),
+            &json!({}),
+        ))
+        .await
+        .expect("second secret reset response");
+    assert_eq!(reset_again.status(), StatusCode::OK);
+    assert_eq!(response_json(reset_again).await["secretBundleEpoch"], 3);
+    let second_reset_cursor = sqlx::query_scalar::<_, i64>(
+        "SELECT server_cursor FROM account_data_generations WHERE user_id='inventory-user'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("second secret reset cursor");
+    assert!(second_reset_cursor > first_reset_cursor);
     let tombstone = sqlx::query_as::<_, (i64, String)>(
         "SELECT deleted_at,device_id FROM sync_entities_v4 \
          WHERE user_id='inventory-user' AND kind='secret_bundle_v1' AND entity_id='default'",
@@ -737,6 +981,7 @@ async fn inventory_reconcile_and_secret_epoch_match_desktop_v5_semantics() {
     .expect("secret reset tombstone");
     assert!(tombstone.0 > 0);
     assert_eq!(tombstone.1, "server-secret-reset");
+    assert_materialized_checkpoint_cursor(&pool, &service, &token, "inventory-user").await;
 }
 
 #[tokio::test]
@@ -774,6 +1019,15 @@ async fn account_email_rebind_and_delete_follow_desktop_v5_flow() {
         pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -948,10 +1202,14 @@ async fn load_rehearsal_fixture(database_url: &str) -> (sqlx::PgPool, Router, St
         .execute(&pool)
         .await
         .expect("clear explicit test database");
+    sqlx::query("TRUNCATE rate_limit_buckets_v4")
+        .execute(&pool)
+        .await
+        .expect("clear load rehearsal rate limits");
     let password = SecretString::from("load-rehearsal-password-v4".to_owned());
     let password_hash = hash_password(&password).expect("hash password");
     sqlx::query(
-        "INSERT INTO users(id,username,username_key,password_hash,created_at,sync_verified_at) \\
+        "INSERT INTO users(id,username,username_key,password_hash,created_at,sync_verified_at) \
          VALUES ('load-rehearsal-user','load-rehearsal-user','load-rehearsal-user',$1,1786521600000,1786521600000)",
     )
     .bind(password_hash)
@@ -964,6 +1222,15 @@ async fn load_rehearsal_fixture(database_url: &str) -> (sqlx::PgPool, Router, St
         pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -986,6 +1253,139 @@ async fn load_rehearsal_fixture(database_url: &str) -> (sqlx::PgPool, Router, St
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn single_connection_pool_serves_hot_routes_and_observes_session_revocation() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _database_guard = E2E_DATABASE_LOCK.lock().await;
+    let setup_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to explicit test database");
+    sqlx::migrate!("./migrations")
+        .run(&setup_pool)
+        .await
+        .expect("migrate explicit test database");
+    sqlx::query("TRUNCATE users CASCADE")
+        .execute(&setup_pool)
+        .await
+        .expect("clear explicit test database");
+    sqlx::query("TRUNCATE rate_limit_buckets_v4")
+        .execute(&setup_pool)
+        .await
+        .expect("clear admission buckets");
+    let password = SecretString::from("single-connection-password-v5".to_owned());
+    let password_hash = hash_password(&password).expect("hash password");
+    sqlx::query(
+        "INSERT INTO users(id,username,username_key,password_hash,created_at,sync_verified_at) \
+         VALUES ('single-connection-user','single-connection-user','single-connection-user',$1,1786521600000,1786521600000)",
+    )
+    .bind(password_hash)
+    .execute(&setup_pool)
+    .await
+    .expect("insert single-connection user");
+
+    let service_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect single-connection service pool");
+    let config = Config::for_test(&database_url);
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let state = AppState {
+        pool: service_pool,
+        metrics: recorder.handle(),
+        request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
+        password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
+        token_hmac_key: config.token_hmac_key.clone(),
+        config,
+    };
+    let service = app(state);
+    let token = response_json(
+        login_with_password(
+            &service,
+            "single-connection-user",
+            "single-connection-password-v5",
+            "single-connection-device",
+        )
+        .await,
+    )
+    .await["token"]
+        .as_str()
+        .expect("single-connection token")
+        .to_owned();
+
+    let push_body = json!({
+        "mutationId": Uuid::new_v4(),
+        "dataGeneration": 1,
+        "entities": [{
+            "id": "single-connection-progress",
+            "kind": "reading_progress_v1",
+            "updatedAt": 1_786_521_600_123_i64,
+            "deletedAt": 0,
+            "deviceId": "single-connection-device",
+            "syncVersion": 1,
+            "payload": {"progress": 0.5}
+        }]
+    });
+    for (method, uri, body) in [
+        ("POST", "/v1/sync/push", push_body),
+        (
+            "GET",
+            "/v1/sync/checkpoint?dataGeneration=1&cursor=0",
+            Value::Null,
+        ),
+        ("GET", "/v1/sync/pull?cursor=0&limit=50", Value::Null),
+        ("GET", "/v1/sync/inventory", Value::Null),
+    ] {
+        // Force the persistent admission branch for every request. With a
+        // one-connection service pool, any hidden second checkout would time
+        // out instead of reaching the route's business statement.
+        reader_sync_api::rate_limit::clear_authenticated_account_leases_for_test();
+        let response = service
+            .clone()
+            .oneshot(request(method, uri, Some(&token), &body))
+            .await
+            .expect("single-connection hot route response");
+        assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+    }
+
+    sqlx::query(
+        "UPDATE auth_sessions_v4 SET revoked_at=1786521601000 \
+         WHERE user_id='single-connection-user'",
+    )
+    .execute(&setup_pool)
+    .await
+    .expect("revoke single-connection session");
+    reader_sync_api::rate_limit::clear_authenticated_account_leases_for_test();
+    let revoked = service
+        .oneshot(request(
+            "GET",
+            "/v1/sync/checkpoint?dataGeneration=1&cursor=0",
+            Some(&token),
+            &Value::Null,
+        ))
+        .await
+        .expect("revoked session response");
+    assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response_json(revoked).await["error"]["code"],
+        "UNAUTHORIZED"
+    );
+}
+
+#[tokio::test]
 async fn load_rehearsal_idempotent_push_is_single_write() {
     let Some(database_url) = explicit_test_database_url() else {
         return;
@@ -1005,21 +1405,13 @@ async fn load_rehearsal_idempotent_push_is_single_write() {
             "payload": {"chapter": 7}
         }]
     });
-    let mut tasks = tokio::task::JoinSet::new();
-    for _ in 0..12 {
-        let service = service.clone();
-        let token = token.clone();
-        let push_body = push_body.clone();
-        tasks.spawn(async move {
-            service
-                .oneshot(request("POST", "/v1/sync/push", Some(&token), &push_body))
-                .await
-                .expect("load rehearsal push")
-                .status()
-        });
-    }
-    while let Some(result) = tasks.join_next().await {
-        assert_eq!(result.expect("load rehearsal task"), StatusCode::OK);
+    for _ in 0..2 {
+        let response = service
+            .clone()
+            .oneshot(request("POST", "/v1/sync/push", Some(&token), &push_body))
+            .await
+            .expect("idempotent retry response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1038,6 +1430,241 @@ async fn load_rehearsal_idempotent_push_is_single_write() {
         .await
         .expect("load rehearsal receipt count"),
         1
+    );
+}
+
+async fn assert_retired_history_storage_removed(pool: &sqlx::PgPool) {
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('public.sync_entity_history_v4')::text",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("retired history table lookup"),
+        None
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM information_schema.columns \
+             WHERE table_schema='public' AND table_name='account_storage_usage_v5' \
+             AND column_name='history_bytes'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("retired history ledger column lookup"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn storage_ledger_tracks_batch_push_assets_and_reset() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _database_guard = E2E_DATABASE_LOCK.lock().await;
+    let (pool, service, token) = load_rehearsal_fixture(&database_url).await;
+    assert_retired_history_storage_removed(&pool).await;
+    let entities = (1_i64..=3)
+        .map(|index| {
+            json!({
+                "id": format!("ledger-bookmark-{index}"),
+                "kind": "bookmark",
+                "updatedAt": 1_786_521_600_100_i64 + index,
+                "deletedAt": 0,
+                "deviceId": "ledger-device",
+                "syncVersion": 1,
+                "payload": {"chapter": index}
+            })
+        })
+        .collect::<Vec<_>>();
+    let pushed = service
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/sync/push",
+            Some(&token),
+            &json!({
+                "mutationId": Uuid::new_v4(),
+                "dataGeneration": 1,
+                "entities": entities
+            }),
+        ))
+        .await
+        .expect("batch push response");
+    assert_eq!(pushed.status(), StatusCode::OK);
+    let pushed = response_json(pushed).await;
+    assert_eq!(pushed["accepted"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        pushed["accepted"]
+            .as_array()
+            .and_then(|accepted| accepted.first())
+            .and_then(|entity| entity["id"].as_str()),
+        Some("ledger-bookmark-1")
+    );
+
+    let bytes = b"\x89PNG\r\n\x1a\nledger-asset".to_vec();
+    let asset_id = sha256_hex(&bytes);
+    assert_eq!(
+        initialize_asset(&service, &token, &asset_id, bytes.len()).await,
+        0
+    );
+    assert_eq!(
+        upload_asset_chunk(
+            &service,
+            &token,
+            &asset_id,
+            format!("bytes 0-{}/{}", bytes.len() - 1, bytes.len()),
+            bytes,
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (entities_bytes, assets_bytes) = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT entity_bytes,asset_bytes \
+         FROM account_storage_usage_v5 WHERE user_id='load-rehearsal-user'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("storage ledger");
+    let exact = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT \
+           COALESCE((SELECT SUM(octet_length(envelope::text)) FROM sync_entities_v4 WHERE user_id='load-rehearsal-user'),0), \
+           COALESCE((SELECT SUM(octet_length(body)) FROM sync_assets_v4 WHERE user_id='load-rehearsal-user'),0)",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("exact source totals");
+    assert_eq!((entities_bytes, assets_bytes), exact);
+    assert!(entities_bytes > 0 && assets_bytes > 0);
+
+    let reset = service
+        .oneshot(request(
+            "POST",
+            "/v1/sync/data/reset",
+            Some(&token),
+            &json!({"password":"load-rehearsal-password-v4"}),
+        ))
+        .await
+        .expect("data reset response");
+    let reset_status = reset.status();
+    let reset_body = response_json(reset).await;
+    assert_eq!(
+        reset_status,
+        StatusCode::OK,
+        "unexpected reset response: {reset_body}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT entity_bytes,asset_bytes \
+             FROM account_storage_usage_v5 WHERE user_id='load-rehearsal-user'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("zeroed storage ledger"),
+        (0, 0)
+    );
+}
+
+#[tokio::test]
+async fn account_mutation_lock_rejects_busy_push_without_queueing() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _database_guard = E2E_DATABASE_LOCK.lock().await;
+    let (pool, service, token) = load_rehearsal_fixture(&database_url).await;
+    let mut held_lock = pool.begin().await.expect("begin held account lock");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind("load-rehearsal-user")
+        .execute(&mut *held_lock)
+        .await
+        .expect("hold account mutation lock");
+    let body = json!({
+        "mutationId": "ee752a35-ec33-44d2-93a8-01d3ad9ef401",
+        "dataGeneration": 1,
+        "entities": []
+    });
+    let busy = service
+        .clone()
+        .oneshot(request("POST", "/v1/sync/push", Some(&token), &body))
+        .await
+        .expect("busy push response");
+    assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(busy.headers()["retry-after"], "1");
+    assert_eq!(response_json(busy).await["error"]["code"], "SERVER_BUSY");
+    held_lock
+        .rollback()
+        .await
+        .expect("release account mutation lock");
+    let retried = service
+        .oneshot(request("POST", "/v1/sync/push", Some(&token), &body))
+        .await
+        .expect("retried push response");
+    assert_eq!(retried.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn authenticated_account_admission_is_shared_by_api_instances() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _database_guard = E2E_DATABASE_LOCK.lock().await;
+    let (pool, _fixture_service, token) = load_rehearsal_fixture(&database_url).await;
+    reader_sync_api::rate_limit::clear_authenticated_account_leases_for_test();
+    let mut config = Config::for_test(&database_url);
+    config.max_authenticated_account_requests_per_minute = 2;
+    let first_instance = app(AppState {
+        pool: pool.clone(),
+        metrics: PrometheusBuilder::new().build_recorder().handle(),
+        request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
+        password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
+        token_hmac_key: config.token_hmac_key.clone(),
+        config: config.clone(),
+    });
+    let second_instance = app(AppState {
+        pool,
+        metrics: PrometheusBuilder::new().build_recorder().handle(),
+        request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
+        password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
+        token_hmac_key: config.token_hmac_key.clone(),
+        config,
+    });
+
+    for _ in 0..2 {
+        assert_session_status(&first_instance, &token, StatusCode::OK).await;
+    }
+    let rejected = second_instance
+        .oneshot(request(
+            "GET",
+            "/v1/auth/session",
+            Some(&token),
+            &Value::Null,
+        ))
+        .await
+        .expect("admission response");
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rejected.headers()["retry-after"], "60");
+    assert_eq!(
+        response_json(rejected).await["error"]["code"],
+        "RATE_LIMITED"
     );
 }
 
@@ -1109,6 +1736,15 @@ async fn registration_uses_outbox_code_and_creates_verified_account() {
         pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -1176,6 +1812,140 @@ async fn registration_uses_outbox_code_and_creates_verified_account() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn phone_registration_requires_delivered_sms_and_stores_only_digest() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _database_guard = E2E_DATABASE_LOCK.lock().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .expect("connect to explicit test database");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate explicit test database");
+    sqlx::query("TRUNCATE users CASCADE")
+        .execute(&pool)
+        .await
+        .expect("clear explicit test database");
+    sqlx::query(
+        "TRUNCATE phone_registration_challenges_v5,sms_outbox_v5,sms_daily_usage_v5,rate_limit_buckets_v4",
+    )
+    .execute(&pool)
+    .await
+    .expect("clear phone registration queues");
+
+    let mut config = Config::for_test(&database_url);
+    config.sms = Some(reader_sync_api::config::TencentSmsConfig {
+        secret_id: "test-id".to_owned(),
+        secret_key: SecretString::from("test-secret-key-value".to_owned()),
+        sdk_app_id: "1400000000".to_owned(),
+        sign_name: "test".to_owned(),
+        template_id: "1000".to_owned(),
+        region: "ap-guangzhou".to_owned(),
+        daily_send_limit: 10,
+    });
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let state = AppState {
+        pool: pool.clone(),
+        metrics: recorder.handle(),
+        request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
+        password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
+        token_hmac_key: config.token_hmac_key.clone(),
+        config,
+    };
+    let service = app(state);
+    let phone = "+8613711112222";
+    let start = service
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/auth/register/phone/start",
+            None,
+            &json!({
+                "username": "Phone_Reader",
+                "phone": phone,
+                "installationId": "phone-reader-installation"
+            }),
+        ))
+        .await
+        .expect("phone registration start");
+    assert_eq!(start.status(), StatusCode::ACCEPTED);
+    let (outbox_id, payload) = sqlx::query_as::<_, (Uuid, Value)>(
+        "SELECT id,payload FROM sms_outbox_v5 WHERE kind='phone_registration'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("queued registration SMS");
+    let confirm = json!({
+        "username": "Phone_Reader",
+        "phone": phone,
+        "code": payload["code"],
+        "password": "a-long-phone-password",
+        "installationId": "phone-reader-installation",
+        "deviceName": "phone-reader-device"
+    });
+    let before_delivery = service
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/auth/register/phone/confirm",
+            None,
+            &confirm,
+        ))
+        .await
+        .expect("undelivered phone registration confirm");
+    assert_eq!(before_delivery.status(), StatusCode::BAD_REQUEST);
+
+    sqlx::query("UPDATE sms_outbox_v5 SET delivered_at=$2 WHERE id=$1")
+        .bind(outbox_id)
+        .bind(1_786_521_600_000_i64)
+        .execute(&pool)
+        .await
+        .expect("simulate SMS provider acceptance");
+    let confirmed = service
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/auth/register/phone/confirm",
+            None,
+            &confirm,
+        ))
+        .await
+        .expect("phone registration confirm");
+    assert_eq!(confirmed.status(), StatusCode::CREATED);
+    let (digest_length, last_four) = sqlx::query_as::<_, (i32, String)>(
+        "SELECT octet_length(phone_digest),last_four FROM account_phones_v5",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("stored phone digest");
+    assert_eq!(digest_length, 32);
+    assert_eq!(last_four, "2222");
+    let (recipient, stored_payload) = sqlx::query_as::<_, (String, Value)>(
+        "SELECT recipient,payload FROM sms_outbox_v5 WHERE id=$1",
+    )
+    .bind(outbox_id)
+    .fetch_one(&pool)
+    .await
+    .expect("cleared SMS outbox");
+    assert!(recipient.is_empty());
+    assert_eq!(stored_payload, json!({}));
+}
+
+#[tokio::test]
 async fn feedback_persists_valid_bug_attachment() {
     let Some(database_url) = explicit_test_database_url() else {
         return;
@@ -1201,6 +1971,15 @@ async fn feedback_persists_valid_bug_attachment() {
         pool: pool.clone(),
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -1233,7 +2012,9 @@ async fn feedback_persists_valid_bug_attachment() {
     assert_eq!(body["acceptedAttachments"], 1);
     let saved_attachments =
         sqlx::query_scalar::<_, Value>("SELECT attachments_json FROM feedback_v4 WHERE id=$1")
-            .bind(body["id"].as_str().expect("feedback id"))
+            .bind(
+                Uuid::parse_str(body["id"].as_str().expect("feedback id")).expect("feedback UUID"),
+            )
             .fetch_one(&pool)
             .await
             .expect("saved feedback attachment");
@@ -1277,6 +2058,15 @@ async fn password_change_keeps_current_session_and_revokes_other_devices() {
         pool,
         metrics: recorder.handle(),
         request_slots: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        checkpoint_request_slots: Arc::new(Semaphore::new(
+            config.max_concurrent_checkpoint_requests,
+        )),
+        read_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_read_requests)),
+        checkpoint_request_queue_slots: Arc::new(Semaphore::new(
+            config.max_queued_checkpoint_requests,
+        )),
+        write_request_slots: Arc::new(Semaphore::new(config.max_concurrent_write_requests)),
+        write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
         config,
@@ -1634,141 +2424,4 @@ async fn upload_data_reset_asset(service: &Router, token: &str) {
         .await,
         StatusCode::NO_CONTENT
     );
-}
-
-#[tokio::test]
-async fn recovery_status_and_restore_rewind_versions_and_tombstone_later_entities() {
-    let Some(database_url) = explicit_test_database_url() else {
-        return;
-    };
-    let _database_guard = E2E_DATABASE_LOCK.lock().await;
-    let (pool, service, token) = recovery_fixture(&database_url).await;
-    let early = 1_786_521_600_001_i64;
-    let later = early + 10;
-    push_recovery_history_versions(&service, &token, early, later).await;
-    assert_recovery_history_rows(&pool).await;
-    let history_target = recovery_status_and_target(&service, &pool, &token).await;
-    let restored = restore_recovery_target(&service, &token, history_target).await;
-    assert_eq!(restored["dataGeneration"], 2);
-    assert_eq!(restored["restoredEntities"], 1);
-    assert_eq!(restored["tombstonedEntities"], 1);
-    assert_session_status(&service, &token, StatusCode::UNAUTHORIZED).await;
-    assert_recovery_restored_rows(&pool).await;
-}
-
-async fn push_recovery_history_versions(service: &Router, token: &str, early: i64, later: i64) {
-    for (mutation_id, entities) in [
-        (
-            Uuid::new_v4(),
-            json!([{
-                "id":"recovery-bookmark", "kind":"bookmark", "updatedAt":early,
-                "deletedAt":0, "deviceId":"recovery-device", "syncVersion":1,
-                "payload":{"chapter":1}
-            }]),
-        ),
-        (
-            Uuid::new_v4(),
-            json!([
-                {
-                    "id":"recovery-bookmark", "kind":"bookmark", "updatedAt":later,
-                    "deletedAt":0, "deviceId":"recovery-device", "syncVersion":2,
-                    "payload":{"chapter":2}
-                },
-                {
-                    "id":"later-bookmark", "kind":"bookmark", "updatedAt":later,
-                    "deletedAt":0, "deviceId":"recovery-device", "syncVersion":1,
-                    "payload":{"chapter":3}
-                },
-                {
-                    "id":"secret", "kind":"secret_bundle_v1", "updatedAt":later,
-                    "deletedAt":0, "deviceId":"recovery-device", "syncVersion":1,
-                    "payload":{"ciphertext":"keep"}
-                }
-            ]),
-        ),
-    ] {
-        let response = service
-            .clone()
-            .oneshot(request(
-                "POST",
-                "/v1/sync/push",
-                Some(token),
-                &json!({"mutationId":mutation_id,"dataGeneration":1,"entities":entities}),
-            ))
-            .await
-            .expect("recovery push");
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-}
-
-async fn assert_recovery_history_rows(pool: &sqlx::PgPool) {
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM sync_entity_history_v4 WHERE user_id='recovery-user'",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("recovery history count"),
-        3,
-        "secret bundle must not be present in recovery history"
-    );
-}
-
-async fn recovery_status_and_target(service: &Router, pool: &sqlx::PgPool, token: &str) -> i64 {
-    let before = response_json(
-        service
-            .clone()
-            .oneshot(request(
-                "GET",
-                "/v1/sync/recovery/status",
-                Some(token),
-                &Value::Null,
-            ))
-            .await
-            .expect("recovery status"),
-    )
-    .await;
-    assert_eq!(before["available"], true);
-    assert_eq!(before["versionCount"], 3);
-    sqlx::query_scalar::<_, i64>(
-        "SELECT MIN(recorded_at) FROM sync_entity_history_v4 WHERE user_id='recovery-user'",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("first history time")
-}
-
-async fn restore_recovery_target(service: &Router, token: &str, history_target: i64) -> Value {
-    let response = service
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v1/sync/recovery/restore",
-            Some(token),
-            &json!({
-                "password":"recovery-password-v4", "confirm":true,
-                "targetAt":history_target, "dataGeneration":1
-            }),
-        ))
-        .await
-        .expect("restore response");
-    assert_eq!(response.status(), StatusCode::OK);
-    response_json(response).await
-}
-
-async fn assert_recovery_restored_rows(pool: &sqlx::PgPool) {
-    let envelopes = sqlx::query_as::<_, (String, Value)>(
-        "SELECT entity_id,envelope FROM sync_entities_v4 \
-         WHERE user_id='recovery-user' ORDER BY entity_id",
-    )
-    .fetch_all(pool)
-    .await
-    .expect("restored entities");
-    assert_eq!(envelopes[0].0, "later-bookmark");
-    assert!(envelopes[0].1["deletedAt"].as_i64().is_some());
-    assert_ne!(envelopes[0].1["deletedAt"], 0);
-    assert_eq!(envelopes[1].0, "recovery-bookmark");
-    assert_eq!(envelopes[1].1["payload"]["chapter"], 1);
-    assert_eq!(envelopes[2].0, "secret");
-    assert_eq!(envelopes[2].1["payload"]["ciphertext"], "keep");
 }

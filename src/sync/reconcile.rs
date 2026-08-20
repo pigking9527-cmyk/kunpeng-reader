@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 pub(super) fn reconcile_request_body(
     data_generation: i64,
     enabled_kinds: &[String],
-    local: &[db::SyncEntity],
+    local: &[db::SyncEntityManifest],
 ) -> serde_json::Value {
     let manifest = local
         .iter()
@@ -82,6 +82,17 @@ mod tests {
         }
     }
 
+    fn manifest(kind: &str, id: &str) -> db::SyncEntityManifest {
+        db::SyncEntityManifest {
+            kind: kind.into(),
+            id: id.into(),
+            updated_at: 1,
+            deleted_at: 0,
+            device_id: "device-a".into(),
+            sync_version: 1,
+        }
+    }
+
     fn response(upload: &[(&str, &str)]) -> SyncReconcileResponse {
         SyncReconcileResponse {
             server_time: 1,
@@ -105,7 +116,7 @@ mod tests {
         let body = reconcile_request_body(
             7,
             &["vocab".into()],
-            &[entity("vocab", "word"), entity("book_state_v2", "book")],
+            &[manifest("vocab", "word"), manifest("book_state_v2", "book")],
         );
 
         assert!(body.get("schema_version").is_none());

@@ -4,10 +4,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "reader-jump-back-rules.js"), "utf8");
-const context = { window: {} };
+const source = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "reader-jump-back-rules.js"), "utf8");
+const context = {};
+context.window = context;
 vm.runInNewContext(source, context, { filename: "reader-jump-back-rules.js" });
-const rules = context.window.ReaderJumpBackRules;
+const rules = context.ReaderJumpBackRules;
 
 test("jump-back rules clamp and round stored coordinates and icon sizes", () => {
   assert.equal(Object.isFrozen(rules), true);

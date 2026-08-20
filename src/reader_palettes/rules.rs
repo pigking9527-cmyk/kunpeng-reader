@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 pub(super) const MAX_CUSTOM_PALETTES: usize = 10;
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_DATA_URL_BYTES: usize = 15 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_DATA_URL_BYTES: usize = 7 * 1024 * 1024;
 const BUILTIN_IDS: &[&str] = &["light", "dark", "paper"];
 
 fn valid_color(value: &str) -> bool {
@@ -43,7 +43,9 @@ fn validated_background_image(value: Option<&str>) -> Result<String, String> {
         return Ok(String::new());
     }
     if image.len() > MAX_DATA_URL_BYTES {
-        return Err("背景图片编码过大，单张图片不能超过 10MB".into());
+        // This is a legacy in-entity data URL. Oversized old backgrounds are
+        // no longer supported, but their palette colours remain usable.
+        return Ok(String::new());
     }
     let Some((header, encoded)) = image.split_once(',') else {
         return Err("背景图片格式无效".into());
@@ -61,7 +63,7 @@ fn validated_background_image(value: Option<&str>) -> Result<String, String> {
         .decode(encoded)
         .map_err(|_| "背景图片编码无效".to_string())?;
     if bytes.len() > MAX_IMAGE_BYTES {
-        return Err("背景图片不能超过 10MB".into());
+        return Ok(String::new());
     }
     Ok(image.to_string())
 }
@@ -122,11 +124,13 @@ pub(super) fn normalize_palette(value: &Value) -> Result<Value, String> {
                 "image/png" | "image/jpeg" | "image/webp" | "image/gif"
             )
             || byte_size == 0
-            || byte_size > MAX_IMAGE_BYTES as u64
         {
             return Err("背景图片资产引用无效".into());
         }
-        Some((asset_id, sha256, mime, byte_size))
+        // Keep the palette's colors when an old oversized image arrives, but
+        // deliberately drop only that background reference. A strict 5 MiB
+        // policy must not make the whole custom theme disappear on upgrade.
+        (byte_size <= MAX_IMAGE_BYTES as u64).then_some((asset_id, sha256, mime, byte_size))
     };
     let mut normalized = json!({
         "version": 1, "id": id, "name": name, "background": background,
@@ -202,6 +206,36 @@ mod tests {
             normalize_palette(&invalid_asset),
             Err("背景图片资产引用无效".into())
         );
+    }
+
+    #[test]
+    fn preserves_palette_colours_but_drops_an_oversized_background_reference() {
+        let asset_id = "b".repeat(64);
+        let normalized = normalize_palette(&json!({
+            "id": "custom-legacy", "name": "Legacy colours",
+            "background": "#fff", "text": "#111", "link": "#123456",
+            "selection": "#abc", "footnote": "#def", "border": "#012345",
+            "theme": "light", "backgroundAssetId": asset_id,
+            "backgroundAssetSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "backgroundAssetMime": "image/png", "backgroundAssetBytes": 5_242_881,
+        }))
+        .expect("palette colours remain valid");
+        assert_eq!(normalized["background"], "#fff");
+        assert!(normalized.get("backgroundAssetId").is_none());
+    }
+
+    #[test]
+    fn drops_an_unsupported_oversized_legacy_data_url_but_keeps_palette_colours() {
+        let encoded = STANDARD.encode(vec![7; MAX_IMAGE_BYTES + 1]);
+        let normalized = normalize_palette(&json!({
+            "id": "custom-old-image", "name": "Old image",
+            "background": "#fff", "text": "#111", "link": "#123456",
+            "selection": "#abc", "footnote": "#def", "border": "#012345",
+            "theme": "light", "backgroundImage": format!("data:image/png;base64,{encoded}"),
+        }))
+        .expect("oversized legacy image only loses its image");
+        assert_eq!(normalized["background"], "#fff");
+        assert_eq!(normalized["backgroundImage"], "");
     }
 
     #[test]

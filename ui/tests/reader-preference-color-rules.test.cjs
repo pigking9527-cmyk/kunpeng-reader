@@ -5,13 +5,14 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.join(__dirname, "..");
-const source = fs.readFileSync(path.join(root, "reader-preference-color-rules.js"), "utf8");
+const source = fs.readFileSync(path.join(root, "generated-ts", "reader-preference-color-rules.js"), "utf8");
 const readerHtml = fs.readFileSync(path.join(root, "reader.html"), "utf8");
-const preferences = fs.readFileSync(path.join(root, "reader-preferences-ui.js"), "utf8");
+const preferences = fs.readFileSync(path.join(root, "generated-ts", "reader-preferences-ui.js"), "utf8");
 
 function rules() {
   const window = {};
-  vm.runInNewContext(source, { window });
+  window.window = window;
+  vm.runInNewContext(source, window);
   return window.ReaderPreferenceColorRules;
 }
 
@@ -34,8 +35,8 @@ test("reader preference color rules convert canonical hex and bounded HSL", () =
 });
 
 test("reader preference UI loads color rules first and retains its standalone fallback", () => {
-  assert.match(readerHtml, /reader-settings-ui\.js[\s\S]*?reader-preference-color-rules\.js[\s\S]*?reader-preferences-ui\.js/);
-  assert.match(preferences, /const colorRules = global\.ReaderPreferenceColorRules/);
+  assert.match(readerHtml, /reader-settings-ui\.js[\s\S]*?generated-ts\/reader-preference-color-rules\.js[\s\S]*?reader-preferences-ui\.js/);
+  assert.match(preferences, /const colorRules = colorRulesFrom\(global\.ReaderPreferenceColorRules\)/);
   assert.match(preferences, /if \(colorRules\) return colorRules\.normalizedHex\(value, fallback\)/);
   assert.match(preferences, /if \(colorRules\) return colorRules\.hexToHsl\(value\)/);
   assert.match(preferences, /if \(colorRules\) return colorRules\.hslToHex\(hue, saturation, lightness\)/);

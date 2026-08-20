@@ -7,16 +7,16 @@ const vm = require("node:vm");
 const read = (name) => fs.readFileSync(path.join(__dirname, "..", name), "utf8");
 const html = read("index.html");
 const styles = read("styles.css");
-const app = read("app.js");
-const settings = read("animation-settings.js");
-const settingsUi = read("animation-settings-ui.js");
+const app = read("generated-ts/app.js");
+const settings = read("generated-ts/animation-settings.js");
+const settingsUi = read("generated-ts/animation-settings-ui.js");
 const readerHtml = read("reader.html");
-const readerSettings = read("reader-settings-ui.js");
-const notes = read("reader-notes-ui.js");
-const layout = read("reader-page-layout.js");
-const transition = read("reader-page-transition.js");
-const annotations = read("reader-page-annotations.js");
-const runtime = read("reader-page-runtime.js");
+const readerSettings = read("generated-ts/reader-settings-ui.js");
+const notes = read("generated-ts/reader-notes-ui.js");
+const layout = require("./reader-page-test-source.cjs").compact;
+const transition = read("generated-reader-page-ts/reader-page-transition.js");
+const annotations = layout;
+const runtime = read("generated-reader-page-ts/reader-page-runtime.js");
 const pageStyle = read("reader-page-style.html");
 
 test("visible-book count shares the layout and column row", () => {
@@ -44,9 +44,9 @@ test("common settings has a non-destructive global animation switch and separate
   assert.match(settings, /allAnimations: true/);
   assert.match(settings, /key === "allAnimations" \|\| values\.allAnimations !== false/);
   assert.match(settings, /GROUP_BY_KEY/);
-  assert.match(settings, /function isEnabled/);
+  assert.match(settings, /function isAnimationEnabled/);
   assert.match(settings, /syncPageTurnEffect/);
-  assert.match(settings, /localStorage\.setItem\("readerSettings"/);
+  assert.match(settings, /storage\.setItem\("readerSettings"/);
   assert.match(settingsUi, /ReaderAnimationSettings\?\.set/);
   assert.match(settingsUi, /set\?\.\("allAnimations", masterInput\.checked\)/);
   assert.match(settingsUi, /input\.disabled = !masterEnabled/);
@@ -71,10 +71,9 @@ test("global animation switch preserves every category and child setting", () =>
     },
     dispatchEvent() {},
   };
-  vm.runInNewContext(settings, {
-    window: fakeWindow,
-    CustomEvent: class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
-  });
+  fakeWindow.CustomEvent = class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail; } };
+  fakeWindow.window = fakeWindow;
+  vm.runInNewContext(settings, fakeWindow);
   const api = fakeWindow.ReaderAnimationSettings;
   api.set("searchPopup", false);
   api.set("annotationAdd", false);
@@ -99,7 +98,7 @@ test("global animation switch preserves every category and child setting", () =>
   assert.match(styles, /body\.animations-all-off \*/);
   assert.match(readerHtml, /body\.animations-all-off \*/);
   assert.match(pageStyle, /html\.animations-all-off \*/);
-  assert.match(runtime, /classList\.toggle\('animations-all-off'/);
+  assert.match(runtime, /classList\.toggle\("animations-all-off"/);
 });
 
 test("animation category switches clear their children and child switches restore the category", () => {
@@ -111,10 +110,9 @@ test("animation category switches clear their children and child switches restor
     },
     dispatchEvent() {},
   };
-  vm.runInNewContext(settings, {
-    window: fakeWindow,
-    CustomEvent: class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
-  });
+  fakeWindow.CustomEvent = class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail; } };
+  fakeWindow.window = fakeWindow;
+  vm.runInNewContext(settings, fakeWindow);
   const api = fakeWindow.ReaderAnimationSettings;
 
   api.set("pageTurn", true);
@@ -175,11 +173,11 @@ test("reader animation controls reach each requested interaction", () => {
   assert.match(readerSettings, /ReaderAnimationSettings\?\.applyReader/);
   assert.match(notes, /openAnnotations\(highlights\.length - 1, true\)/);
   assert.match(layout, /readerAnimationSettingOn/);
-  assert.match(transition, /readerAnimationSettingOn\('pageTurn'\)/);
+  assert.match(transition, /global\.readerAnimationSettingOn\("pageTurn"\)/);
   assert.doesNotMatch(transition, /prefers-reduced-motion/);
   assert.doesNotMatch(pageStyle, /prefers-reduced-motion/);
-  assert.match(readerSettings, /event\.key !== "readerSettings"/);
-  assert.match(readerSettings, /ReaderAnimationSettings\?\.setPageTurnFromReader\?\.\(turnFx\.value !== "off"\)/);
+  assert.match(readerSettings, /storageEvent\.key !== "readerSettings"/);
+  assert.match(readerSettings, /global\.ReaderAnimationSettings\?\.setPageTurnFromReader\?\.\(\s*turnFx\.value !== "off"\s*\)/);
   assert.match(annotations, /readerAnimationSettingOn\('highlightSettings'\)/);
   assert.match(runtime, /animationSettings/);
   assert.match(runtime, /anim-highlight-settings-off/);

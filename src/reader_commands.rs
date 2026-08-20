@@ -312,11 +312,7 @@ pub(crate) async fn book_meta(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
 ) -> Result<BookMeta, String> {
-    let label = window.label().to_string();
-    let id: u64 = label
-        .strip_prefix("reader-")
-        .and_then(|s| s.parse().ok())
-        .ok_or("非阅读窗口")?;
+    let id = reader_window_id(&window).ok_or("非阅读窗口")?;
     book_meta_for_id(state.inner(), id).await
 }
 

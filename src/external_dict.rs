@@ -1,4 +1,3 @@
-use encoding_rs::Encoding;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,8 +8,13 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod import;
+mod mdx_format;
 
 use import::{decode_text, guess_lang, parse_delimited, parse_ifo, parse_json, ImportEntry};
+use mdx_format::{
+    be_u16_at, be_u32_at, be_u64_at, decode_header as decode_mdx_header,
+    decode_text as decode_mdx_text, header_attr as mdx_attr,
+};
 
 /// SQLite WAL only coordinates individual database transactions. This lock also
 /// protects the larger read/modify/write sequences (and lets backup/restore
@@ -534,87 +538,6 @@ impl<'a> SliceReader<'a> {
             Err("MDX key 字符串越界".to_string())
         }
     }
-}
-
-fn be_u16_at(data: &[u8], pos: usize) -> Result<u16, String> {
-    if pos + 2 > data.len() {
-        return Err("MDX 数据不完整".to_string());
-    }
-    Ok(u16::from_be_bytes([data[pos], data[pos + 1]]))
-}
-
-fn be_u32_at(data: &[u8], pos: usize) -> Result<u32, String> {
-    if pos + 4 > data.len() {
-        return Err("MDX 数据不完整".to_string());
-    }
-    Ok(u32::from_be_bytes([
-        data[pos],
-        data[pos + 1],
-        data[pos + 2],
-        data[pos + 3],
-    ]))
-}
-
-fn be_u64_at(data: &[u8], pos: usize) -> Result<u64, String> {
-    if pos + 8 > data.len() {
-        return Err("MDX 数据不完整".to_string());
-    }
-    Ok(u64::from_be_bytes([
-        data[pos],
-        data[pos + 1],
-        data[pos + 2],
-        data[pos + 3],
-        data[pos + 4],
-        data[pos + 5],
-        data[pos + 6],
-        data[pos + 7],
-    ]))
-}
-
-fn decode_mdx_header(bytes: &[u8]) -> String {
-    if bytes.starts_with(&[0xff, 0xfe]) {
-        let (s, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
-        return s.into_owned();
-    }
-    if bytes.starts_with(&[0xfe, 0xff]) {
-        let (s, _, _) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
-        return s.into_owned();
-    }
-    let zero_odd = bytes.len() > 2 && bytes.iter().skip(1).step_by(2).take(16).all(|b| *b == 0);
-    if zero_odd {
-        let (s, _, _) = encoding_rs::UTF_16LE.decode(bytes);
-        return s.into_owned();
-    }
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-fn decode_mdx_text(bytes: &[u8], enc: &str) -> String {
-    let e = enc.to_ascii_uppercase();
-    if e.contains("UTF-16") || e.contains("UTF16") {
-        if bytes.starts_with(&[0xfe, 0xff]) || e.contains("BE") {
-            let (s, _, _) =
-                encoding_rs::UTF_16BE.decode(bytes.strip_prefix(&[0xfe, 0xff]).unwrap_or(bytes));
-            s.into_owned()
-        } else {
-            let (s, _, _) =
-                encoding_rs::UTF_16LE.decode(bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(bytes));
-            s.into_owned()
-        }
-    } else if e.contains("GB") || e.contains("BIG5") {
-        let enc = Encoding::for_label(enc.as_bytes()).unwrap_or(encoding_rs::UTF_8);
-        let (s, _, _) = enc.decode(bytes);
-        s.into_owned()
-    } else {
-        String::from_utf8_lossy(bytes).into_owned()
-    }
-}
-
-fn mdx_attr(header: &str, key: &str) -> Option<String> {
-    let pat = format!(r#"{key}=""#);
-    header.find(&pat).and_then(|i| {
-        let rest = &header[i + pat.len()..];
-        rest.find('"').map(|j| rest[..j].trim().to_string())
-    })
 }
 
 fn decompress_mdx_block(block: &[u8], expected: usize) -> Result<Vec<u8>, String> {

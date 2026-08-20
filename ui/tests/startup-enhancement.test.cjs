@@ -8,18 +8,18 @@ const ui = path.join(__dirname, "..");
 const root = path.join(ui, "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 const html = read("ui", "index.html");
-const i18n = read("ui", "app-i18n.js");
-const startupUi = read("ui", "startup-enhancement-ui.js");
-const titlebar = read("ui", "titlebar.js");
+const i18n = read("ui", "generated-ts", "app-i18n.js");
+const startupUi = read("ui", "generated-ts", "startup-enhancement-ui.js");
+const titlebar = read("ui", "generated-ts", "titlebar.js");
 const styles = read("ui", "styles.css");
-const app = read("ui", "app.js");
+const app = read("ui", "generated-ts", "app.js");
 const main = read("src", "main.rs");
 const startup = read("src", "startup.rs");
 const enhancement = read("src", "startup_enhancement.rs");
 const windowCommands = read("src", "window_commands.rs");
 const tasks = read("src", "background_tasks.rs");
 const taskPolicy = read("src", "background_tasks", "task_policy.rs");
-const problemTrace = read("ui", "problem-trace-ui.js");
+const problemTrace = read("ui", "generated-ts", "problem-trace-ui.js");
 
 test("common settings expose startup boost with a gear and master switch", () => {
   assert.match(
@@ -41,7 +41,7 @@ test("common settings expose startup boost with a gear and master switch", () =>
   assert.match(html, /id="startup-enhancement-high-cost"/);
   assert.doesNotMatch(html, /立即完全退出/);
   assert.doesNotMatch(html, /tray|托盘/i);
-  assert.match(html, /src="startup-enhancement-ui\.js"/);
+  assert.match(html, /src="generated-ts\/startup-enhancement-ui\.js"/);
 });
 
 test("startup boost settings are localized in all ten catalogs", () => {
@@ -129,7 +129,7 @@ test("master off means full exit while master on hides without a tray", () => {
   );
   assert.match(
     windowCommands,
-    /fn main_window_show[\s\S]*?startup_enhancement::reveal_main\(window\.app_handle\(\)\)/,
+    /fn main_window_show[\s\S]*?let app = window\.app_handle\(\)\.clone\(\);[\s\S]*?startup_enhancement::reveal_main\(&app\)/,
   );
   assert.doesNotMatch(enhancement, /TrayIconBuilder|tray::|plugin.*tray/i);
   assert.match(
@@ -142,7 +142,7 @@ test("master off means full exit while master on hides without a tray", () => {
   );
   assert.match(
     titlebar,
-    /closeBtn\?\.addEventListener\("click"[\s\S]*?invoke\("main_window_close"\)/,
+    /closeButton\?\.addEventListener\("click"[\s\S]*?controls\.close\(\)/,
   );
   assert.doesNotMatch(titlebar, /syncBackend|Promise\.resolve/);
   assert.match(
@@ -188,19 +188,23 @@ test("the custom titlebar close button dispatches immediately", () => {
       },
     ]),
   );
-  vm.runInNewContext(titlebar, {
-    window: {
-      __TAURI__: {
-        core: {
-          invoke: (command) => {
-            calls.push(command);
-            return Promise.resolve();
-          },
+  const context = {
+    __TAURI__: {
+      core: {
+        invoke: (command) => {
+          calls.push(command);
+          return Promise.resolve();
         },
       },
     },
-    document: { getElementById: (id) => buttons[id] || null },
-  });
+    navigator: { userAgent: "Macintosh" },
+    document: {
+      documentElement: { classList: { toggle() {} } },
+      getElementById: (id) => buttons[id] || null,
+    },
+  };
+  context.window = context;
+  vm.runInNewContext(titlebar, context);
 
   let prevented = false;
   let stopped = false;
@@ -251,11 +255,11 @@ test("closing pauses high-cost work by default and can explicitly allow it", () 
   assert.match(startupUi, /highCostResumeAtMs/);
   assert.match(
     startupUi,
-    /backgroundWorkAllowed:[\s\S]*?Date\.now\(\) >= highCostResumeAtMs/,
+    /backgroundWorkAllowed:[\s\S]*?now\(\) >= highCostResumeAtMs/,
   );
   assert.match(
     startupUi,
-    /highCostRetryDelay:[\s\S]*?highCostResumeAtMs - Date\.now\(\)/,
+    /highCostRetryDelay:[\s\S]*?highCostResumeAtMs - now\(\)/,
   );
   assert.match(
     enhancement,
@@ -348,7 +352,7 @@ test("launch at login supports silent Windows and macOS background startup", () 
   );
   assert.match(
     startupUi,
-    /set_startup_enhancement_config[\s\S]*?\.then\(\(saved\)/,
+    /await api\.invoke\("set_startup_enhancement_config"[\s\S]*?config = normalizeStartupEnhancementConfig\(saved \|\| config\)/,
   );
   assert.match(
     main,
