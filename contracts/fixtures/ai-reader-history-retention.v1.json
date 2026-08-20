@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "kind": "ai_reader_history_v1",
+  "policy": {
+    "aiReaderLivePerAccount": 100,
+    "libraryLivePerAccount": 100,
+    "tombstonesPerCategory": 200,
+    "aiReaderGrouping": "book-content-sha256",
+    "libraryEntityId": "library-v1",
+    "localLiveEntries": "unbounded",
+    "librarySyncModes": ["off", "recent", "manual"],
+    "aiReaderSyncModes": ["off", "recent", "manual"],
+    "aiReaderTasksShareLiveLimit": ["question", "summary", "mindmap"],
+    "manualCloudSelectionMax": 100
+  },
+  "compatibility": {
+    "syncProtocolVersion": 1,
+    "change": "retention-limit-increase",
+    "olderClientsMayRetainFewerRecords": true,
+    "unknownFieldsMustBePreserved": true
+  }
+}

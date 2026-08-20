@@ -1,0 +1,238 @@
+name: Linux x86_64 build
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Replace the matching vX.Y.Z Linux assets in GitHub Release"
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/linux-build.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "eslint.config.mjs"
+      - "build.rs"
+      - "tauri.conf.json"
+      - "tauri.linux.conf.json"
+      - "icons/**"
+      - "packaging/linux/**"
+      - "reader-core/**"
+      - "apps/desktop-ui/**"
+      - "packages/**"
+      - "scripts/check.ps1"
+      - "scripts/run-typescript-tests.mjs"
+      - "scripts/run-legacy-ui-tests.cjs"
+      - "src/**"
+      - "ui/**"
+      - "vendor/**"
+      - "crates/**"
+      - "LICENSES/**"
+      - "THIRD_PARTY_NOTICES.md"
+      - "scripts/check-licenses.mjs"
+      - "scripts/license-policy.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-x86_64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: AppImage and Debian package
+    # fastembed/ort's current Linux runtime requires glibc 2.38 symbols.
+    # Ubuntu 24.04 supplies glibc 2.39 and is the oldest supported CI baseline
+    # until the semantic runtime publishes an older-glibc compatible build.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2t64 \
+            xvfb \
+            dbus-x11
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked Node dependencies
+        run: npm ci
+
+      - name: Check dependency and asset licenses
+        env:
+          RUST_TARGET: x86_64-unknown-linux-gnu
+        run: npm run license:check && npm run ip:check
+
+      - name: Enforce public release hold
+        if: ${{ inputs.publish_release }}
+        run: npm run release:license-gate
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64-ubuntu-24.04
+          cache-on-failure: true
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Run frontend migration gates
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run test:typed
+          npm run test:legacy-ui
+          npm run desktop-ui:build
+
+      - name: Run Rust tests on Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ebook-reader-tauri -p reader-core --locked
+          cargo test -p epub --lib --locked
+
+      - name: Build AppImage and Debian package
+        run: cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --config tauri.linux.conf.json --verbose
+
+      - name: Check native binary linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd target/x86_64-unknown-linux-gnu/release/ebook-reader-tauri | tee target/linux-ldd.txt
+          if grep -q "not found" target/linux-ldd.txt; then
+            echo "The Linux executable has unresolved shared libraries." >&2
+            exit 1
+          fi
+
+      - name: Smoke-test application startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          timeout 15s xvfb-run -a \
+            target/x86_64-unknown-linux-gnu/release/ebook-reader-tauri \
+            >target/linux-startup.log 2>&1
+          status=$?
+          set -e
+
+          if [ "$status" -ne 124 ]; then
+            cat target/linux-startup.log
+            echo "The Linux application exited during the startup smoke test (status $status)." >&2
+            exit "$status"
+          fi
+
+      - name: Prepare artifacts and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="target/x86_64-unknown-linux-gnu/release/bundle"
+          out_dir="target/linux-release"
+          mkdir -p "$out_dir"
+
+          mapfile -t appimages < <(find "$bundle_dir/appimage" -maxdepth 1 -type f -name '*.AppImage' -print)
+          mapfile -t debs < <(find "$bundle_dir/deb" -maxdepth 1 -type f -name '*.deb' -print)
+          test "${#appimages[@]}" -eq 1
+          test "${#debs[@]}" -eq 1
+
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+
+          appimage_name="Kunpeng-Reader-v${version}-Linux-x86_64.AppImage"
+          deb_name="Kunpeng-Reader-v${version}-Linux-x86_64.deb"
+          cp "${appimages[0]}" "$out_dir/$appimage_name"
+          cp "${debs[0]}" "$out_dir/$deb_name"
+          chmod +x "$out_dir/$appimage_name"
+
+          file "$out_dir/$appimage_name" "$out_dir/$deb_name"
+          dpkg-deb --info "$out_dir/$deb_name"
+          dpkg-deb --contents "$out_dir/$deb_name" | tee target/linux-deb-contents.txt
+          package_name="$(dpkg-deb --field "$out_dir/$deb_name" Package)"
+          test "$package_name" = "kunpeng-reader"
+          [[ "$package_name" =~ ^[a-z0-9][a-z0-9+.-]+$ ]]
+          sudo apt-get install -y "$PWD/$out_dir/$deb_name"
+          dpkg-query -W -f='${Status}\n' "$package_name" | grep -Fx 'install ok installed'
+          (cd "$out_dir" && sha256sum "$appimage_name" "$deb_name" > SHA256SUMS-Linux.txt)
+
+          {
+            echo "### Linux x86_64 test artifacts"
+            echo
+            echo "- \`$appimage_name\`"
+            echo "- \`$deb_name\`"
+            echo "- \`SHA256SUMS-Linux.txt\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: Kunpeng-Reader-Linux-x86_64
+          path: target/linux-release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish Linux release assets
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download verified Linux artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: Kunpeng-Reader-Linux-x86_64
+          path: target/linux-release
+
+      - name: Replace GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          out_dir="target/linux-release"
+          gh release upload "v${version}" \
+            "$out_dir/Kunpeng-Reader-v${version}-Linux-x86_64.AppImage" \
+            "$out_dir/Kunpeng-Reader-v${version}-Linux-x86_64.deb" \
+            "$out_dir/SHA256SUMS-Linux.txt" \
+            --clobber

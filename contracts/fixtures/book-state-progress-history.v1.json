@@ -1,0 +1,26 @@
+{
+  "syncProtocolVersion": 1,
+  "kind": "book_state_v2",
+  "description": "The later entry on the same local day wins; a client writing afterward preserves the received extension.",
+  "localPayload": {
+    "schema_version": 4,
+    "content_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "progress_history": [
+      { "at": 1785585600, "progress": 12, "chapter": 2, "frac": 0.1, "position": null },
+      { "at": 1785672000, "progress": 42, "chapter": 6, "frac": 0.25, "position": null }
+    ]
+  },
+  "incomingPayload": {
+    "schema_version": 4,
+    "content_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "progress_history": [
+      { "at": 1785589200, "progress": 20, "chapter": 3, "frac": 0.5, "position": null }
+    ],
+    "future_reader_extension": { "preserve": true }
+  },
+  "expectedProgressHistory": [
+    { "at": 1785589200, "progress": 20, "chapter": 3, "frac": 0.5, "position": null },
+    { "at": 1785672000, "progress": 42, "chapter": 6, "frac": 0.25, "position": null }
+  ],
+  "expectedUnknownPayload": { "future_reader_extension": { "preserve": true } }
+}

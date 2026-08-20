@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "LICENSE": "licenses/Kunpeng-Reader-LICENSE.txt",
+      "THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "target/license-audit/DEPENDENCY_LICENSES.md": "licenses/DEPENDENCY_LICENSES.md",
+      "LICENSES": "licenses/third-party",
+      "src/dict/ECDICT_SOURCE.md": "licenses/sources/ECDICT_SOURCE.md",
+      "src/dict/CC_CEDICT_SOURCE.md": "licenses/sources/CC_CEDICT_SOURCE.md",
+      "onnxruntime.dll": "onnxruntime.dll"
+    }
+  }
+}

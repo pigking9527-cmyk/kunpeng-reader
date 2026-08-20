@@ -1,0 +1,135 @@
+/*
+ * Foundation tokens for typed business screens.
+ *
+ * Import this stylesheet once from an application's composition root, then put
+ * the `kp-ui` class on that application's root element. The selectors are
+ * intentionally scoped so this package cannot change the legacy `ui/` shell.
+ */
+
+@layer kunpeng.tokens {
+  .kp-ui {
+    color-scheme: light;
+
+    /* Color: semantic roles, not feature-specific colors. */
+    --kp-color-canvas: #f6f7f9;
+    --kp-color-surface: #ffffff;
+    --kp-color-surface-muted: #f1f4f8;
+    --kp-color-surface-raised: #ffffff;
+    --kp-color-text: #1f2937;
+    --kp-color-text-muted: #64748b;
+    --kp-color-text-on-accent: #ffffff;
+    --kp-color-border: #d8e0ea;
+    --kp-color-border-strong: #b8c6d8;
+    --kp-color-accent: #246bc1;
+    --kp-color-accent-hover: #1d5ca8;
+    --kp-color-accent-active: #174a87;
+    --kp-color-accent-subtle: #e9f2ff;
+    --kp-color-success: #207a4d;
+    --kp-color-success-subtle: #e8f7ee;
+    --kp-color-warning: #a46008;
+    --kp-color-warning-subtle: #fff4dc;
+    --kp-color-danger: #b23e39;
+    --kp-color-danger-subtle: #ffebe9;
+    --kp-color-focus-ring: #4d91eb;
+    --kp-color-scrim: rgb(15 23 42 / 48%);
+
+    /* Layout: four-pixel base, with named steps for component consistency. */
+    --kp-space-1: 0.25rem;
+    --kp-space-2: 0.5rem;
+    --kp-space-3: 0.75rem;
+    --kp-space-4: 1rem;
+    --kp-space-5: 1.25rem;
+    --kp-space-6: 1.5rem;
+    --kp-space-8: 2rem;
+    --kp-space-10: 2.5rem;
+    --kp-space-12: 3rem;
+
+    /* Type: system stack keeps desktop startup and CJK rendering predictable. */
+    --kp-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --kp-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --kp-font-size-xs: 0.75rem;
+    --kp-font-size-sm: 0.875rem;
+    --kp-font-size-md: 1rem;
+    --kp-font-size-lg: 1.125rem;
+    --kp-font-size-xl: 1.25rem;
+    --kp-line-height-tight: 1.25;
+    --kp-line-height-normal: 1.5;
+    --kp-font-weight-regular: 400;
+    --kp-font-weight-medium: 500;
+    --kp-font-weight-semibold: 600;
+
+    /* Shape, elevation and motion. */
+    --kp-radius-sm: 0.375rem;
+    --kp-radius-md: 0.5rem;
+    --kp-radius-lg: 0.75rem;
+    --kp-radius-round: 9999px;
+    --kp-shadow-sm: 0 1px 2px rgb(15 23 42 / 8%);
+    --kp-shadow-md: 0 8px 24px rgb(15 23 42 / 12%);
+    --kp-duration-fast: 120ms;
+    --kp-duration-normal: 180ms;
+    --kp-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+
+    /* Interaction minimums. */
+    --kp-control-height: 2.5rem;
+    --kp-icon-button-size: 2.5rem;
+    --kp-focus-ring-width: 0.1875rem;
+    --kp-focus-ring-offset: 0.125rem;
+  }
+
+  .kp-ui[data-kp-theme="dark"] {
+    color-scheme: dark;
+    --kp-color-canvas: #20242b;
+    --kp-color-surface: #2b3038;
+    --kp-color-surface-muted: #252a31;
+    --kp-color-surface-raised: #343a44;
+    --kp-color-text: #e7edf5;
+    --kp-color-text-muted: #aab6c7;
+    --kp-color-text-on-accent: #ffffff;
+    --kp-color-border: #47515f;
+    --kp-color-border-strong: #647184;
+    --kp-color-accent: #75adf5;
+    --kp-color-accent-hover: #9ac6ff;
+    --kp-color-accent-active: #b6d8ff;
+    --kp-color-accent-subtle: #2f4561;
+    --kp-color-success: #72c99b;
+    --kp-color-success-subtle: #29493a;
+    --kp-color-warning: #f0bb66;
+    --kp-color-warning-subtle: #523f20;
+    --kp-color-danger: #f09a93;
+    --kp-color-danger-subtle: #513536;
+    --kp-color-focus-ring: #94c3ff;
+    --kp-color-scrim: rgb(0 0 0 / 60%);
+    --kp-shadow-sm: 0 1px 2px rgb(0 0 0 / 22%);
+    --kp-shadow-md: 0 10px 30px rgb(0 0 0 / 32%);
+  }
+
+  .kp-ui :focus-visible {
+    outline: var(--kp-focus-ring-width) solid var(--kp-color-focus-ring);
+    outline-offset: var(--kp-focus-ring-offset);
+  }
+
+  .kp-ui [data-kp-interactive="true"] {
+    min-block-size: var(--kp-control-height);
+    transition:
+      background-color var(--kp-duration-fast) var(--kp-easing-standard),
+      border-color var(--kp-duration-fast) var(--kp-easing-standard),
+      color var(--kp-duration-fast) var(--kp-easing-standard),
+      box-shadow var(--kp-duration-fast) var(--kp-easing-standard);
+  }
+
+  .kp-ui [data-kp-interactive="true"][aria-disabled="true"],
+  .kp-ui [data-kp-interactive="true"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .kp-ui *,
+    .kp-ui *::before,
+    .kp-ui *::after {
+      scroll-behavior: auto;
+      transition-duration: 0ms !important;
+      animation-duration: 0ms !important;
+    }
+  }
+}

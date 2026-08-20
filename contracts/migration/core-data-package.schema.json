@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kunpeng-reader.invalid/migration/core-data-package.schema.json",
+  "title": "Kunpeng Reader core sync state migration package",
+  "type": "object",
+  "required": ["format", "version", "exported_at", "source_device_id", "entities"],
+  "additionalProperties": false,
+  "properties": {
+    "format": { "const": "kunpeng-reader-core-data-package" },
+    "version": { "enum": [1, 2] },
+    "exported_at": {
+      "description": "Unix epoch milliseconds when this package was written.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "source_device_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "entities": {
+      "type": "array",
+      "maxItems": 50000,
+      "items": { "$ref": "#/$defs/entity" }
+    }
+  },
+  "$defs": {
+    "entity": {
+      "type": "object",
+      "required": ["kind", "id", "data", "updated_at", "deleted_at", "device_id", "sync_version"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": ["book_state_v2", "reading_progress_v1", "reading_data_v1", "reading_statistics_v1", "model_book_tags_v1", "vocab", "reading_bucket_v2"]
+        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "data": { "$ref": "#/$defs/safePayload" },
+        "updated_at": { "type": "integer", "minimum": 0 },
+        "deleted_at": { "type": "integer", "minimum": 0 },
+        "device_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sync_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "safePayload": {
+      "type": "object",
+      "maxProperties": 512,
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "not": {
+            "anyOf": [
+              { "required": ["data_generation"] },
+              { "required": ["cursor"] },
+              { "required": ["sync_cursor"] },
+              { "required": ["sync_ack"] },
+              { "required": ["sync_acknowledgement"] },
+              { "required": ["api_key"] },
+              { "required": ["token"] },
+              { "required": ["password"] },
+              { "required": ["secret_bundle"] },
+              { "required": ["source_path"] },
+              { "required": ["cover_path"] },
+              { "required": ["file_path"] },
+              { "required": ["saf_uri"] }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "version": { "const": 1 } } },
+      "then": {
+        "properties": {
+          "entities": {
+            "items": {
+              "properties": {
+                "kind": { "enum": ["book_state_v2", "model_book_tags_v1", "vocab", "reading_bucket_v2"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "version": { "const": 2 } } },
+      "then": {
+        "properties": {
+          "entities": {
+            "items": {
+              "properties": {
+                "kind": { "enum": ["reading_progress_v1", "reading_data_v1", "reading_statistics_v1", "model_book_tags_v1", "vocab", "reading_bucket_v2"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kunpeng-reader.invalid/sync/sync-checkpoint.schema.json",
+  "title": "Kunpeng Reader sync checkpoint v1 objects",
+  "oneOf": [
+    { "$ref": "#/$defs/query" },
+    { "$ref": "#/$defs/response" }
+  ],
+  "$defs": {
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataGeneration", "cursor"],
+      "properties": {
+        "dataGeneration": { "type": "integer", "minimum": 1 },
+        "cursor": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "dataGeneration", "cursor", "serverCursor", "caughtUp", "requestId"],
+      "properties": {
+        "ok": { "const": true },
+        "dataGeneration": { "type": "integer", "minimum": 1 },
+        "cursor": { "type": "integer", "minimum": 0 },
+        "serverCursor": { "type": "integer", "minimum": 0 },
+        "caughtUp": { "type": "boolean" },
+        "requestId": { "type": "string", "format": "uuid" }
+      }
+    }
+  }
+}

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>鲲鹏阅读器目录启动基准</title>
+  <style>
+    body { font: 15px/1.6 system-ui, sans-serif; margin: 24px; color: #1f2937; }
+    table { border-collapse: collapse; width: 100%; max-width: 980px; }
+    th, td { border: 1px solid #d8dee9; padding: 8px 10px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    th { background: #f4f7fb; }
+    #status { margin: 12px 0; color: #52657f; }
+    .bench-pane { position: absolute; left: -20000px; top: 0; width: 340px; }
+    .toc-item { box-sizing: border-box; min-height: 32px; padding: 5px 8px; }
+    small { color: #65758b; }
+  </style>
+</head>
+<body>
+  <h1>目录构建对图书首屏的影响</h1>
+  <p id="status">正在运行基准……</p>
+  <table>
+    <thead>
+      <tr>
+        <th>目录条数</th>
+        <th>旧版正文导航等待</th>
+        <th>新版正文导航等待</th>
+        <th>等待缩短</th>
+        <th>新版最长目录批次</th>
+        <th>新版目录全部完成</th>
+      </tr>
+    </thead>
+    <tbody id="results"></tbody>
+  </table>
+  <p><small>同一 Chromium DOM、同一目录数据；每档预热 1 次、正式运行 5 次，表格显示中位数。新版“全部完成”是墙钟时间，期间会主动让出主线程，不阻塞正文加载。</small></p>
+  <script>
+    const sizes = [1000, 3500, 6700];
+    const trials = 5;
+
+    function median(values) {
+      const sorted = [...values].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)];
+    }
+
+    function createEntries(count) {
+      return Array.from({ length: count }, (_, index) => ({
+        label: `第 ${index + 1} 节 目录标题示例`,
+        level: index % 11 === 0 ? 1 : 0,
+        chapter: Math.floor(index / 3),
+        frag: `section-${index}`,
+      }));
+    }
+
+    function createPane() {
+      const pane = document.createElement("div");
+      pane.className = "bench-pane";
+      document.body.appendChild(pane);
+      return pane;
+    }
+
+    function createTocItem(entry) {
+      const item = document.createElement("div");
+      item.className = "toc-item";
+      item.style.paddingLeft = 8 + entry.level * 14 + "px";
+      item.textContent = entry.label;
+      item.title = entry.label;
+      item.dataset.chapter = entry.chapter;
+      item.dataset.frag = entry.frag || "";
+      item.addEventListener("click", () => {});
+      return item;
+    }
+
+    function oldOpen(entries) {
+      const pane = createPane();
+      const started = performance.now();
+      for (const entry of entries) pane.appendChild(createTocItem(entry));
+      // 旧版到这里才会执行 frame.src = info.url + q。
+      const navigationStarted = performance.now();
+      pane.remove();
+      return { navigationWait: navigationStarted - started };
+    }
+
+    function schedule(callback) {
+      if (typeof requestIdleCallback === "function") {
+        requestIdleCallback(callback, { timeout: 500 });
+      } else {
+        setTimeout(() => callback(null), 16);
+      }
+    }
+
+    function newOpen(entries) {
+      const pane = createPane();
+      const started = performance.now();
+      // 新版此处立即执行 frame.src = info.url + q，然后才安排目录任务。
+      const navigationStarted = performance.now();
+      let index = 0;
+      let longestBatch = 0;
+      return new Promise((resolve) => {
+        const appendBatch = (deadline) => {
+          const fragment = document.createDocumentFragment();
+          const batchStarted = performance.now();
+          let added = 0;
+          while (index < entries.length && added < 120) {
+            if (added >= 20 && performance.now() - batchStarted >= 6) break;
+            if (added >= 20 && deadline?.timeRemaining && deadline.timeRemaining() < 2) break;
+            fragment.appendChild(createTocItem(entries[index++]));
+            added += 1;
+          }
+          pane.appendChild(fragment);
+          longestBatch = Math.max(longestBatch, performance.now() - batchStarted);
+          if (index < entries.length) {
+            schedule(appendBatch);
+          } else {
+            const completed = performance.now();
+            pane.remove();
+            resolve({
+              navigationWait: navigationStarted - started,
+              longestBatch,
+              total: completed - started,
+            });
+          }
+        };
+        schedule(appendBatch);
+      });
+    }
+
+    async function measure(count) {
+      const entries = createEntries(count);
+      oldOpen(entries);
+      await newOpen(entries);
+      const samples = [];
+      for (let trial = 0; trial < trials; trial += 1) {
+        const oldResult = oldOpen(entries);
+        const newResult = await newOpen(entries);
+        samples.push({ oldResult, newResult });
+      }
+      const oldWait = median(samples.map((sample) => sample.oldResult.navigationWait));
+      const newWait = median(samples.map((sample) => sample.newResult.navigationWait));
+      return {
+        count,
+        oldNavigationWaitMs: oldWait,
+        newNavigationWaitMs: newWait,
+        navigationWaitReductionPct: oldWait ? (1 - newWait / oldWait) * 100 : 0,
+        newLongestBatchMs: median(samples.map((sample) => sample.newResult.longestBatch)),
+        newTocTotalMs: median(samples.map((sample) => sample.newResult.total)),
+      };
+    }
+
+    function ms(value) {
+      return `${value.toFixed(2)} ms`;
+    }
+
+    (async () => {
+      const output = [];
+      for (const size of sizes) {
+        document.getElementById("status").textContent = `正在测试 ${size.toLocaleString()} 条目录……`;
+        const result = await measure(size);
+        output.push(result);
+        document.getElementById("results").insertAdjacentHTML("beforeend", `
+          <tr>
+            <td>${size.toLocaleString()}</td>
+            <td>${ms(result.oldNavigationWaitMs)}</td>
+            <td>${ms(result.newNavigationWaitMs)}</td>
+            <td>${result.navigationWaitReductionPct.toFixed(1)}%</td>
+            <td>${ms(result.newLongestBatchMs)}</td>
+            <td>${ms(result.newTocTotalMs)}</td>
+          </tr>`);
+      }
+      document.getElementById("status").textContent = "基准完成";
+      document.body.dataset.ready = "true";
+      window.benchmarkResults = output;
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "outputDirectory": "ui/generated-reader-page-ts",
+  "entries": [
+    {
+      "id": "reader-page-bug-trace",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-page-modules/reader-page-bug-trace.ts",
+      "output": "reader-page-bug-trace.js",
+      "globalName": "ReaderPageBugTraceInstaller",
+      "installExport": "installReaderPageBugTrace",
+      "replaces": "ui/reader-page-bug-trace.js",
+      "after": "ui/reader-page-style.html",
+      "before": "ui/reader-page-scroll-rules.js"
+    },
+    {
+      "id": "reader-page-scroll-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-page-modules/reader-page-scroll-rules.ts",
+      "output": "reader-page-scroll-rules.js",
+      "globalName": "ReaderPageScrollRulesInstaller",
+      "installExport": "installReaderPageScrollRules",
+      "replaces": "ui/reader-page-scroll-rules.js",
+      "after": "ui/reader-page-bug-trace.js",
+      "before": "ui/reader-page-layout.js"
+    },
+    {
+      "id": "reader-page-layout-annotations",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-page-modules/reader-page-layout-annotations.ts",
+      "output": "reader-page-layout-annotations.js",
+      "globalName": "ReaderPageLayoutAnnotationsInstaller",
+      "installExport": "installReaderPageLayoutAnnotations",
+      "replaces": [
+        "ui/reader-page-layout.js",
+        "ui/reader-page-end.js",
+        "ui/reader-page-pagination.js",
+        "ui/reader-page-measurement.js",
+        "ui/reader-page-highlight-rules.js",
+        "ui/reader-page-annotations.js"
+      ],
+      "after": "ui/reader-page-scroll-rules.js",
+      "before": "ui/reader-page-mode-switch.js"
+    },
+    {
+      "id": "reader-page-mode-switch",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-page-modules/reader-page-mode-switch.ts",
+      "output": "reader-page-mode-switch.js",
+      "globalName": "ReaderPageModeSwitchInstaller",
+      "installExport": "installReaderPageModeSwitch",
+      "replaces": "ui/reader-page-mode-switch.js",
+      "after": "ui/reader-page-annotations.js",
+      "before": "ui/reader-page-runtime.js"
+    },
+    {
+      "id": "reader-page-runtime",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-page-modules/reader-page-runtime.ts",
+      "output": "reader-page-runtime.js",
+      "globalName": "ReaderPageRuntimeInstaller",
+      "installExport": "installReaderPageRuntime",
+      "replaces": "ui/reader-page-runtime.js",
+      "after": "ui/reader-page-mode-switch.js",
+      "before": "ui/reader-page-transition.js"
+    },
+    {
+      "id": "reader-page-transition",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-page-modules/reader-page-transition.ts",
+      "output": "reader-page-transition.js",
+      "globalName": "ReaderPageTransitionInstaller",
+      "installExport": "installReaderPageTransition",
+      "replaces": "ui/reader-page-transition.js",
+      "after": "ui/reader-page-runtime.js",
+      "terminal": true
+    }
+  ]
+}

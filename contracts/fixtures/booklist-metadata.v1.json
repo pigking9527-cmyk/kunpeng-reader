@@ -1,0 +1,27 @@
+{
+  "syncProtocolVersion": 3,
+  "entities": [
+    {
+      "id": "list-history-2026",
+      "kind": "booklist_v1",
+      "updated_at": 1786153200002,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": {
+        "version": 1,
+        "id": "list-history-2026",
+        "name": "明清史入门",
+        "description": "围绕制度与政局的阅读顺序。",
+        "coverContentId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "items": [
+          {
+            "contentId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "review": "它先把制度与人物放回明清转换的脉络，适合回答权力如何重组这个问题。"
+          }
+        ],
+        "futureClientField": { "preserve": true }
+      }
+    }
+  ]
+}

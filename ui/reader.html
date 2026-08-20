@@ -1,0 +1,1219 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>阅读</title>
+    <link rel="stylesheet" href="reader-preferences.css" />
+    <link rel="stylesheet" href="reader-click-zones.css" />
+    <link rel="stylesheet" href="book-info-panel.css" />
+    <link rel="stylesheet" href="book-info-related.css" />
+    <link rel="stylesheet" href="window-resize.css" />
+    <link rel="stylesheet" href="overlay-stack.css" />
+    <style>.reader-appearance-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}.reader-appearance-actions .reader-preferences-reset{margin-top:0}.reader-appearance-actions .reader-preferences-reset.danger{margin-left:0}</style>
+    <style>
+      * { box-sizing: border-box; }
+      html, body, body * { user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
+      input, textarea, [contenteditable="true"], [data-native-selection] { user-select: text; -webkit-user-select: text; }
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
+          "PingFang SC", "Hiragino Sans GB", sans-serif;
+        display: flex; flex-direction: column; height: 100vh;
+        color: #222; background: #fff;
+      }
+      .reader-gesture-trail { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+      .reader-gesture-trail[hidden] { display: none; }
+      .toolbar {
+        display: flex; align-items: center; gap: 6px;
+        height: 39px; box-sizing: border-box; padding: 0 6px 0 10px;
+        border-bottom: 1px solid #e3e3e6; background: #fafafa;
+        flex: 0 0 auto; position: relative; z-index: 20;
+        user-select: none; /* 外壳不可选，避免从工具栏拖拽把整页（含 iframe）选中变灰 */
+      }
+      .body { user-select: none; } /* 正文选择由 iframe 内部处理，外壳层不参与选择 */
+      .toolbar .title {
+        color: #555; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        width: 245px; max-width: 34vw; min-width: 0; flex: 0 1 245px; text-align: center;
+        display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+      }
+      .reader-drag-space { flex: 1 1 auto; align-self: stretch; min-width: 24px; cursor: default; }
+      .window-controls { display: inline-flex; align-items: center; height: 36px; margin-left: 2px; flex: 0 0 auto; }
+      .win-btn {
+        width: 38px; height: 34px; border: 1px solid transparent; border-radius: 6px;
+        background: transparent; color: #333; cursor: pointer;
+        font: 20px/1 "Segoe UI", system-ui, sans-serif;
+        display: inline-flex; align-items: center; justify-content: center;
+      }
+      .win-btn:hover { background: #edf1f7; }
+      .win-btn.close:hover { background: #e81123; color: #fff; }
+      .tbtn {
+        font: inherit; padding: 4px 10px; border: 1px solid #c9c9cf;
+        border-radius: 6px; background: #fff; cursor: pointer;
+        white-space: nowrap; flex: 0 0 auto;
+      }
+      .tbtn:hover { background: #eef2ff; border-color: #93b4ff; }
+      .tbtn.active { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
+      .toolbar > [hidden] { display: none !important; }
+
+      /* 窄窗口优先压缩标题和空白，不让滚动容器裁掉绝对定位的设置面板。 */
+      @media (max-width: 760px) {
+        .reader-gesture-trail { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+      .reader-gesture-trail[hidden] { display: none; }
+      .toolbar { gap: 3px; padding-left: 6px; }
+        .toolbar .title { max-width: 20vw; }
+        .reader-drag-space { min-width: 0; }
+        .tbtn { padding-left: 6px; padding-right: 6px; }
+        .win-btn { width: 32px; }
+      }
+      @media (max-width: 600px) {
+        .toolbar .title:not(#progress), .reader-drag-space { display: none; }
+        #progress { display: inline-flex; }
+        #tts-btn, #hl-btn, #immersive-btn { display: none; }
+      }
+
+      /* 书内搜索框：贴着搜索键的下拉面板（与设置面板一致），不再占满整行 */
+      .search-wrap { position: relative; display: inline-flex; }
+      .rsearch {
+        display: none; flex-direction: column; gap: 6px;
+        /* 紧贴触发按钮，避免鼠标经过空隙时触发沉浸工具栏的 pointerleave。 */
+        position: absolute; top: 100%; left: 0; z-index: 30;
+        width: 340px; max-width: 86vw; max-height: 70vh;
+        padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px;
+        background: #fff; box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+      }
+      .rsearch.show { display: flex; }
+      .rsearch-row { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+      .rsearch input {
+        flex: 1; font: inherit; padding: 5px 9px;
+        border: 1px solid #c9c9cf; border-radius: 6px; outline: none;
+      }
+      .rsearch input:focus { border-color: #5aa0ff; }
+      .rcount { color: #888; font-size: 12px; }
+      .rsearch-results { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+      .rs-item {
+        padding: 7px 8px; border-radius: 5px; cursor: pointer; font-size: 13px;
+        line-height: 1.6; border-bottom: 1px solid #ececec;
+      }
+      .rs-item:hover { background: #eef2ff; }
+      .rs-item mark { background: #ffe58a; color: inherit; }
+      .rs-ch { color: #aaa; font-size: 11px; margin-right: 6px; }
+      .rs-empty { padding: 8px; color: #aaa; font-size: 13px; }
+      body.theme-dark .rs-item { color: #ddd; border-color: #3a3a3d; }
+      body.theme-dark .rs-item:hover { background: #3a3a3d; }
+      /* 阅读页跨书搜索 */
+      .cross-card { width: clamp(640px, 68vw, 1040px); height: clamp(500px, 72vh, 820px); max-width: 96vw; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+      .cross-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+      .cross-row input { flex: 1; font: inherit; padding: 7px 10px; border: 1px solid #c9c9cf; border-radius: 7px; outline: none; }
+      .cross-row input:focus { border-color: #5aa0ff; }
+      .cross-status { color: #888; font-size: 13px; min-width: 96px; text-align: right; }
+      .cross-results { flex: 1 1 auto; min-height: 0; overflow-y: auto; border-top: 1px solid #eee; padding-top: 8px; }
+      .cross-empty { padding: 28px; color: #aaa; text-align: center; }
+      .cross-book { border-bottom: 1px solid #eee; padding: 8px 0 10px; }
+      .cross-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; padding: 3px 6px; border-radius: 6px; cursor: pointer; }
+      .cross-head:hover { background: #f3f6ff; }
+      .cross-toggle { color: #999; font-size: 13px; width: 16px; flex: 0 0 auto; }
+      .cross-title { font-weight: 600; color: #222; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cross-author { color: #888; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cross-count { margin-left: auto; color: #999; font-size: 12px; white-space: nowrap; }
+      .cross-hit { padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; line-height: 1.65; }
+      .cross-hit-line {
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 4;
+        overflow: hidden;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        max-width: 100%;
+      }
+      .cross-hit:hover { background: #eef2ff; }
+      .cross-hit mark { background: #ffe58a; color: inherit; }
+      .cross-ch { color: #999; font-size: 11px; margin-right: 6px; }
+      .cross-score { color: #4b72aa; font-size: 11px; margin-right: 8px; white-space: nowrap; }
+      .cross-more { display: inline-flex; align-items: center; gap: 8px; color: #888; font-size: 12px; padding: 7px 10px; margin: 4px 0 0 6px; border: 1px solid #e3e6ef; border-radius: 999px; background: #fafbff; cursor: pointer; }
+      .cross-more:hover { background: #eef2ff; border-color: #b7c8ff; color: #1c4fb0; }
+      .cross-more-ico { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 20px; border-radius: 999px; background: #e8efff; color: #2b6cff; font-weight: 700; }
+      .cross-book.collapsed .cross-hit, .cross-book.collapsed .cross-more { display: none; }
+      .cross-return {
+        position: fixed; left: 18px; bottom: 18px; z-index: 80; display: none;
+        width: 54px; height: 54px; border: 0; border-radius: 50%;
+        background: transparent; color: #777; font: 42px/1 system-ui, sans-serif;
+        box-shadow: none; cursor: pointer;
+      }
+      .cross-return.show { display: inline-flex; align-items: center; justify-content: center; }
+      .cross-return:hover { background: transparent; color: #444; }
+      body.theme-dark .cross-row input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .cross-results, body.theme-dark .cross-book { border-color: #3a3a3d; }
+      body.theme-dark .cross-title { color: #eee; }
+      body.theme-dark .cross-hit:hover { background: #3a3a3d; }
+      body.theme-dark .cross-head:hover { background: #31343b; }
+
+      /* 图书信息：与书架使用同一代信息卡布局 */
+      .modal {
+        display: none; position: fixed; inset: 0; z-index: 50;
+        background: rgba(0,0,0,0.35); align-items: center; justify-content: center;
+      }
+      .modal.show { display: flex; }
+      .modal-card {
+        background: #fff; width: 440px; max-width: 90vw; max-height: 80vh;
+        border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        padding: 16px 18px; overflow-y: auto;
+      }
+      .modal-card.cross-card {
+        width: clamp(720px, 74vw, 1180px);
+        height: clamp(560px, 78vh, 900px);
+        max-width: 96vw;
+        max-height: 92vh;
+        overflow: hidden;
+      }
+      .modal-head { display: flex; align-items: center; justify-content: space-between;
+        font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+
+      .body { position: relative; flex: 1 1 auto; min-height: 0; }
+
+      /* 加载动画：大书排版期间显示，避免空白卡住的观感 */
+      .loading {
+        position: absolute; inset: 0; z-index: 8;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 12px; background: #fff; color: #888;
+      }
+      .loading.hide { display: none; }
+      .spinner {
+        width: 32px; height: 32px; border: 3px solid #ddd; border-top-color: #5aa0ff;
+        border-radius: 50%; animation: spin 0.8s linear infinite;
+      }
+      .title .mini-spinner {
+        display: inline-block; flex: 0 0 auto; width: 16px; height: 16px; vertical-align: -3px;
+        border: 2px solid rgba(80,90,110,.22); border-top-color: #5aa0ff;
+        border-radius: 50%; animation: spin .75s linear infinite;
+      }
+      /* 阅读状态每次翻页都会更新页码与百分比；固定占位并使用等宽数字，避免
+         1/9 → 10/9 或 9.9% → 10.0% 时右上角文字左右跳动。 */
+      .reader-progress-group {
+        display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; margin-right: 4px;
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1;
+      }
+      #chapter-progress {
+        width: min(245px, 38vw); max-width: min(38vw, 290px); flex: 0 1 min(245px, 38vw);
+        justify-content: flex-start; text-align: left;
+      }
+      #progress.page-count-loading { width: 30px; max-width: 30px; flex-basis: 30px; }
+      #progress.page-count-total {
+        width: 84px; max-width: 84px; flex: 0 0 84px;
+        justify-content: flex-end; text-align: right;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      body.animations-all-off *, body.animations-all-off *::before, body.animations-all-off *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: .001ms !important;
+      }
+      body.theme-dark .loading { background: #1c1c1e; }
+      body.reader-theme-instant, body.reader-theme-instant * { transition: none !important; }
+      .mode-switch-btn[hidden] { display: none; }
+
+      /* 右侧自定义垂直滚动条（代表全书进度，可拖动/点击跳页） */
+      .vbar {
+        position: absolute; top: 0; right: 0; bottom: 0; width: 12px; z-index: 7;
+      }
+      .vbar:hover { background: rgba(0,0,0,0.05); }
+      .vthumb {
+        position: absolute; right: 2px; top: 0; width: 8px; height: 40px;
+        border-radius: 4px; background: rgba(0,0,0,0.3); cursor: pointer;
+      }
+      .vthumb:hover { background: rgba(0,0,0,0.5); }
+      /* 普通模式的顶部菜单常驻；底部整本书进度则在翻页/滚动/中部点击后单独收起。 */
+      .book-progress { position: absolute; left: 20px; right: 20px; bottom: 10px; z-index: 10; height: 30px; display: none; align-items: center; gap: 9px; padding: 0 11px; border-radius: 999px; box-sizing: border-box; background: rgba(232,235,241,.94); box-shadow: 0 4px 16px rgba(30,45,70,.15); pointer-events: none; }
+      body.reader-controls-visible .book-progress { display: flex; pointer-events: auto; }
+      body:not(.immersive).book-progress-hidden .book-progress { display: none; pointer-events: none; }
+      .book-progress-track { position: relative; flex: 1 1 auto; height: 4px; min-width: 32px; border-radius: 999px; background: rgba(120,130,148,.34); cursor: pointer; transition: height .14s ease, background .14s ease; }
+      .book-progress:hover .book-progress-track, body.reader-controls-visible .book-progress-track { height: 6px; background: rgba(120,130,148,.44); }
+      .book-progress-fill { position: absolute; inset: 0 auto 0 0; width: 0%; border-radius: inherit; background: #438cff; pointer-events: none; }
+      .book-progress-thumb { position: absolute; left: 0%; top: 50%; width: 18px; height: 18px; border: 4px solid #438cff; border-radius: 50%; box-sizing: border-box; background: #fff; box-shadow: 0 1px 5px rgba(30,70,145,.5); transform: translate(-50%,-50%) scale(.35); opacity: 0; pointer-events: none; transition: transform .14s ease, opacity .14s ease; cursor: grab; }
+      body.reader-controls-visible .book-progress-thumb { opacity: 1; pointer-events: auto; transform: translate(-50%,-50%) scale(1); }
+      .book-progress-thumb:active { cursor: grabbing; }
+      .book-progress-restore { width: 30px; height: 30px; flex: 0 0 30px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #5d6b82; font: 27px/1 sans-serif; cursor: pointer; opacity: 0; transform: scale(.65); pointer-events: none; transition: opacity .14s ease, transform .14s ease, background .14s ease; }
+      .book-progress.can-restore .book-progress-restore { opacity: 1; transform: scale(1); pointer-events: auto; }
+      .book-progress-restore:hover { background: rgba(67,140,255,.12); color: #246bd7; }
+      .reader-jump-back { position: absolute; z-index: 12; top: var(--reader-jump-back-position-y, 50%); left: var(--reader-jump-back-position-x, calc(100% - var(--reader-jump-back-hit-size, 44px))); display: inline-grid; width: var(--reader-jump-back-hit-size, 44px); height: var(--reader-jump-back-hit-size, 44px); place-items: center; padding: 0; border: 0; border-radius: 0; color: #315f9f; background: transparent; box-shadow: none; cursor: pointer; opacity: .56; transform: none; transition: opacity .14s ease, color .14s ease; }
+      .reader-jump-back .reader-jump-back-arrow { width: var(--reader-jump-back-icon-size, 32px); height: var(--reader-jump-back-icon-height, 13px); }
+      .reader-jump-back-preview-icon { left: calc(100% - var(--preview-jump-back-hit-size, 44px)); width: var(--preview-jump-back-hit-size, 44px); height: var(--preview-jump-back-hit-size, 44px); transform: none; }
+      .reader-jump-back[hidden] { display: none !important; }
+      .reader-jump-back:hover { color: #1e5fae; background: transparent; opacity: .92; }
+      iframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+
+      .backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.18); z-index: 5; display: none; }
+      .backdrop.show { display: block; }
+
+      /* 目录抽屉：浮在正文之上，不挤占 */
+      .toc {
+        position: absolute; left: 0; top: 0; bottom: 0; width: 292px;
+        background: #fcfcfd; border-right: 1px solid #e3e8f0;
+        box-shadow: 12px 0 32px rgba(32, 52, 82, .16);
+        z-index: 6; display: flex; flex-direction: column;
+        transform: translateX(-100%); transition: transform 0.15s ease;
+      }
+      .toc.show { transform: translateX(0); }
+      .toc-tabs { display: flex; flex: 0 0 auto; gap: 4px; margin: 12px 14px 8px; padding: 4px; border: 1px solid #e5eaf2; border-radius: 10px; background: #f2f5f9; }
+      .toc-tab { flex: 1; padding: 8px 0; border: none; border-radius: 7px; background: transparent; cursor: pointer;
+        font: inherit; font-size: 14px; color: #758195; transition: color .15s ease, background .15s ease, box-shadow .15s ease; }
+      .toc-tab.active { color: #225fb8; font-weight: 700; background: #fff; box-shadow: 0 1px 4px rgba(44, 69, 106, .13); }
+      .toc-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 10px 16px; }
+      .toc-pane[hidden] { display: none; }
+      body.theme-dark .toc-tab { color: #aaa; }
+      body.theme-dark .toc-tab.active { color: #8ab4ff; }
+      body.theme-dark .toc-tabs { border-color: #3a3a3d; }
+      .toc .toc-item {
+        position: relative; padding: 9px 10px; border-radius: 8px; cursor: pointer; font-size: 14px; color: #4f5d70;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background .15s ease, color .15s ease;
+      }
+      .toc .toc-item:hover { background: #eef4ff; color: #225fb8; }
+      .toc .toc-item.toc-current { color: #1e5dae; font-weight: 700; background: #e9f1ff; }
+      .toc .toc-item.toc-current::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 3px; background: #3477dc; }
+      body.theme-dark .toc .toc-item.toc-current { color: #8ab4ff; }
+      /* 生词本：独立居中浮层，覆盖目录抽屉的左侧布局 */
+      .toc.vocab {
+        left: 50%; top: 50%; bottom: auto;
+        width: min(700px, calc(100vw - 140px));
+        max-width: calc(100vw - 48px);
+        height: min(820px, calc((100vh - 96px) * 0.8));
+        max-height: calc(100vh - 96px);
+        border: 1px solid #ddd; border-radius: 10px;
+        box-shadow: 0 12px 36px rgba(0,0,0,0.28);
+        transform: translate(-50%, calc(-50% + 10px));
+        opacity: 0; pointer-events: none;
+      }
+      .toc.vocab.show {
+        left: 50%;
+        transform: translate(-50%, -50%);
+        opacity: 1; pointer-events: auto;
+      }
+      .vocab .toc-tabs { align-items: center; gap: 8px; padding: 0 12px; }
+      .vocab .toc-tab { flex: 0 0 auto; padding: 10px 14px; min-width: 56px; }
+      .vocab .vc-gear {
+        margin-left: auto; border: none; background: transparent; cursor: pointer;
+        color: #888; font-size: 17px; line-height: 1; padding: 7px 6px;
+      }
+      .vocab .vc-gear:hover { color: #2b6cff; }
+      .vocab .vc-settings {
+        position: absolute; top: 42px; right: 12px; z-index: 2;
+        display: none; min-width: 260px; padding: 8px 10px;
+        background: #fff; border: 1px solid #d8d8de; border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+      }
+      .vocab .vc-settings.show { display: block; }
+      .vocab .vc-set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 14px; color: #333; }
+      .vocab .vc-set-row + .vc-set-row { margin-top: 8px; }
+      .vocab .vc-cache-info { color: #777; font-size: 12px; }
+      .vocab .vc-cache-info[hidden] { display: none; }
+      .vocab .vc-cache-del {
+        border: 1px solid #d8d8de; border-radius: 5px; background: #fff; color: #666;
+        cursor: pointer; font: inherit; font-size: 12px; padding: 3px 8px;
+      }
+      .vocab .vc-cache-del:hover { color: #d94b43; border-color: #e2a09c; }
+      .vocab .vc-pack {
+        margin-top: 8px; padding-top: 8px; border-top: 1px solid #ececf0;
+        font-size: 12px; color: #666;
+      }
+      .vocab .vc-pack[hidden] { display: none; }
+      .vocab .vc-pack-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .vocab .vc-pack-progress { width: 100%; height: 7px; margin: 7px 0 5px; accent-color: #2b6cff; display: block; }
+      .vocab .vc-pack-meta { min-height: 18px; line-height: 1.4; overflow-wrap: anywhere; }
+      .vocab .vc-pack-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; }
+      .vocab .vc-pack-btn {
+        border: 1px solid #d8d8de; border-radius: 5px; background: #fff; color: #555;
+        cursor: pointer; font: inherit; font-size: 12px; padding: 4px 10px;
+      }
+      .vocab .vc-pack-btn.primary { color: #fff; background: #2b6cff; border-color: #2b6cff; }
+      .vocab .vc-pack-btn:disabled { opacity: 0.55; cursor: default; }
+      .vocab .vc-pack-btn:not(:disabled):hover { border-color: #93b4ff; }
+      .vocab .vc-seg { display: inline-flex; border: 1px solid #d8d8de; border-radius: 6px; overflow: hidden; }
+      .vocab .vc-sort {
+        border: none; background: #fff; color: #666; cursor: pointer;
+        font: inherit; font-size: 12px; padding: 3px 9px;
+      }
+      .vocab .vc-sort + .vc-sort { border-left: 1px solid #d8d8de; }
+      .vocab .vc-sort.active { background: #2b6cff; color: #fff; }
+      .vc-switch { position: relative; display: inline-block; width: 38px; height: 20px; flex: 0 0 auto; }
+      .vc-switch input { opacity: 0; width: 0; height: 0; }
+      .vc-switch .vc-slider {
+        position: absolute; inset: 0; background: #cfcfd6; border-radius: 20px;
+        transition: 0.18s; cursor: pointer;
+      }
+      .vc-switch .vc-slider::before {
+        content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+        background: #fff; border-radius: 50%; transition: 0.18s; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+      }
+      .vc-switch input:checked + .vc-slider { background: #5aa0ff; }
+      .vc-switch input:checked + .vc-slider::before { transform: translateX(18px); }
+      .vc-pane {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        padding: 12px;
+      }
+      .vc-pane::-webkit-scrollbar { width: 0; height: 0; display: none; }
+      .vc-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+      .vc-item {
+        display: flex; align-items: flex-start; gap: 10px;
+        min-width: 0; width: 100%;
+        padding: 10px 12px; border: 1px solid #e5e5ea; border-radius: 8px;
+        background: #fff;
+      }
+      .vc-item:hover { background: #f5f7fb; border-color: #d9e2ff; }
+      .vc-item.vc-speak { cursor: pointer; }
+      .vc-item.vc-speak:active { transform: translateY(1px); }
+      .vc-main { flex: 1 1 auto; min-width: 0; }
+      .vc-head { display: flex; align-items: baseline; gap: 8px; }
+      .vc-word { font-size: 15px; font-weight: 600; color: #1a1a1a; word-break: break-word; }
+      .vc-phon { font-size: 12px; font-weight: 400; color: #2b6cff; }
+      .vc-cnt { margin-left: auto; flex: 0 0 auto; font-size: 12px; font-weight: 500; color: #e09000; }
+      .vocab.hide-count .vc-cnt { display: none; }
+      .vc-def { font-size: 13px; line-height: 1.65; color: #555; margin-top: 4px;
+        white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+      .vc-example {
+        margin-top: 6px; padding-left: 8px; border-left: 2px solid #d7e2ff;
+        font-size: 12px; line-height: 1.55; color: #777;
+        white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+      }
+      .vc-level {
+        display: inline-flex; margin-top: 8px; border: 1px solid #d8d8de;
+        border-radius: 6px; overflow: hidden;
+      }
+      .vc-level button {
+        border: none; border-right: 1px solid #d8d8de; background: #fff; color: #666;
+        cursor: pointer; font: inherit; font-size: 12px; padding: 3px 8px;
+      }
+      .vc-level button:last-child { border-right: none; }
+      .vc-level button.active { background: #2b6cff; color: #fff; }
+      .vc-del { flex: 0 0 auto; border: none; background: transparent; cursor: pointer; color: #bbb; font-size: 14px; padding: 2px 4px; }
+      .vc-del:hover { color: #e85c50; }
+      .vc-empty { text-align: center; color: #aaa; padding: 30px 10px; font-size: 14px; }
+      body.theme-dark .vocab { border-color: #3a3a3d; box-shadow: 0 12px 36px rgba(0,0,0,0.45); }
+      body.theme-dark .vocab .vc-item { border-color: #3a3a3d; }
+      body.theme-dark .vocab .vc-item:hover { background: #333; }
+      body.theme-dark .vocab .vc-item { background: #2a2a2c; }
+      body.theme-dark .vocab .vc-gear { color: #aaa; }
+      body.theme-dark .vocab .vc-gear:hover { color: #8ab4ff; }
+      body.theme-dark .vocab .vc-settings { background: #2a2a2c; border-color: #444; }
+      body.theme-dark .vocab .vc-set-row { color: #ddd; }
+      body.theme-dark .vocab .vc-seg { border-color: #555; }
+      body.theme-dark .vocab .vc-sort { background: #2e2e30; color: #bbb; }
+      body.theme-dark .vocab .vc-sort + .vc-sort { border-left-color: #555; }
+      body.theme-dark .vocab .vc-sort.active { background: #2b6cff; color: #fff; }
+      body.theme-dark .vc-word { color: #eee; }
+      body.theme-dark .vc-def { color: #bbb; }
+      body.theme-dark .vc-example { color: #aaa; border-left-color: #435070; }
+      body.theme-dark .vc-level { border-color: #555; }
+      body.theme-dark .vc-level button { background: #2e2e30; color: #bbb; border-right-color: #555; }
+      body.theme-dark .vc-level button.active { background: #2b6cff; color: #fff; }
+      .info-desc[contenteditable] {
+        border: 1px solid #d8d8dc; border-radius: 6px; padding: 6px 8px; min-height: 3em;
+        outline: none;
+      }
+      .info-desc[contenteditable]:focus { border-color: #5aa0ff; }
+      body.theme-dark .info-desc[contenteditable] { border-color: #4a4a4d; }
+
+      /* 设置面板：锚定在齿轮按钮正下方 */
+      .gear-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+      .settings {
+        position: absolute; top: 100%; left: 0; width: 336px; max-width: calc(100vw - 16px);
+        max-height: calc(100vh - 52px); overflow-y: auto;
+        background: #fff; border: 1px solid #dbe3ee; border-radius: 16px;
+        box-shadow: 0 16px 44px rgba(35,50,75,0.18); padding: 10px; z-index: 30;
+        display: none; font-size: 13px;
+      }
+      .settings.show { display: block; }
+      .settings .row { display: flex; align-items: center; margin: 0; gap: 10px; min-width: 0; }
+      .settings .row > label:first-child { width: 58px; min-width: 0; color: #5a6779; flex: 0 0 auto; white-space: normal; overflow-wrap: anywhere; line-height: 1.2; }
+      .settings input[type="range"] { flex: 1; }
+      .settings .val { width: 42px; text-align: right; color: #666; }
+      /* WKWebView 会按最长选项保留 select 的固有宽度；width:0 让它真正按
+         剩余空间收缩，Windows WebView2 中的尺寸保持不变。 */
+      .settings select { flex: 1 1 0; width: 0; min-width: 0; max-width: 100%; min-height: 34px; font: inherit; padding: 5px 9px; border: 1px solid #ccd6e4; border-radius: 9px; background: #fff; color: #344256; }
+      .settings .reader-font-download-row { margin-top: -4px; align-items: flex-start; }
+      .reader-font-download-row[hidden] { display: none; }
+      .reader-font-download-status { flex: 1 1 auto; min-width: 0; color: #777; font-size: 12px; line-height: 1.45; }
+      .reader-font-download-action { flex: 0 0 auto; padding: 3px 9px; }
+      .settings .margins { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-top: 4px; }
+      .settings .margins label { display: flex; align-items: center; gap: 4px; }
+      .settings .margins input { width: 56px; font: inherit; }
+      .settings h4 { margin: 4px 0 2px; font-size: 12px; color: #888; font-weight: normal; }
+      .reader-quick-section { display: grid; gap: 10px; margin-top: 8px; padding: 12px; border: 1px solid #e3e9f1; border-radius: 12px; background: #f9fbfd; }
+      .reader-quick-section .reader-quick-palette-row { display: grid; gap: 8px; }
+      .reader-quick-section .reader-quick-palette-row > label:first-child { width: auto; color: #35445a; font-weight: 650; }
+      .reader-quick-slider-row input[type="range"] { min-width: 0; accent-color: #3c82d8; }
+      .reader-quick-mode-row { padding-top: 8px; border-top: 1px solid #e5ebf2; }
+      .reader-quick-mode-row .mode-toggle-group { justify-content: flex-start; gap: 8px; }
+      .reader-quick-speech-row { gap: 6px !important; padding-top: 8px; border-top: 1px solid #e5ebf2; }
+      .settings .reader-quick-speech-row > label:first-child { width: 28px; flex: 0 0 28px; }
+      .reader-quick-speech-button { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; border: 1px solid #ccd6e4; border-radius: 8px; background: #fff; color: #356da9; font-size: 15px; cursor: pointer; }
+      .reader-quick-speech-button:hover { border-color: #76a2df; background: #edf5ff; }
+      .reader-quick-speech-row input[type="range"] { flex: 1 1 112px; min-width: 72px; }
+      .settings .reader-quick-speech-source { width: 78px; min-width: 78px; flex: 0 0 78px; padding: 4px 5px; }
+      .reader-quick-speech-row .val { width: 34px; flex: 0 0 34px; font-variant-numeric: tabular-nums; }
+      .theme-row { display: flex; gap: 6px; flex: 1; }
+      .theme-btn {
+        flex: 1; font: inherit; padding: 5px 0; border: 1px solid #c9c9cf;
+        border-radius: 6px; background: #fff; cursor: pointer; color: #444;
+      }
+      .theme-btn:hover { background: #eef2ff; }
+      .theme-btn.active { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
+      .theme-btn:disabled { opacity: 0.62; cursor: default; }
+      .theme-btn:disabled:hover { background: #fff; }
+      .theme-btn.active:disabled { background: #e2ecff; border-color: #5aa0ff; color: #1c4fb0; }
+      .reading-mode-row { justify-content: flex-start; gap: 0; }
+      .mode-toggle-group { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 8px 10px; width: 100%; }
+      .mode-toggle-item {
+        display: flex; align-items: center; justify-content: space-between; gap: 6px;
+        min-width: 0; flex: 0 0 auto; color: #444; white-space: nowrap;
+      }
+      .settings .mode-toggle-item { width: auto; }
+      .settings .mode-toggle-item[hidden] { display: none !important; }
+      .text-conversion-choice { display: inline-flex; align-items: center; gap: 6px; color: #444; font-size: 12px; }
+      .text-conversion-label { display: inline; line-height: 20px; color: inherit; font-weight: inherit; }
+      .settings-switch { position: relative; display: inline-block; width: 38px; height: 20px; flex: 0 0 auto; }
+      .settings-switch input { opacity: 0; width: 0; height: 0; }
+      .settings-slider {
+        position: absolute; inset: 0; background: #cfcfd6; border-radius: 20px;
+        transition: 0.18s; cursor: pointer;
+      }
+      .settings-slider::before {
+        content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+        background: #fff; border-radius: 50%; transition: 0.18s; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+      }
+      .settings-switch input:checked + .settings-slider { background: #5aa0ff; }
+      .settings-switch input:checked + .settings-slider::before { transform: translateX(18px); }
+      @keyframes settings-switch-auto-off {
+        from { transform: translateX(18px); }
+        to { transform: translateX(0); }
+      }
+      .settings-switch.auto-off .settings-slider::before {
+        /* WKWebView 会在 keyframes 结束后补跑 transform transition。禁用这一层的
+           transition 并保持最终帧，可避免“正常滑完后又快速滑一次”。 */
+        transition: none;
+        animation: settings-switch-auto-off 0.24s cubic-bezier(0.4, 0, 0.2, 1) both;
+      }
+      body.anim-reading-mode-off .settings-slider,
+      body.anim-reading-mode-off .settings-slider::before {
+        transition: none;
+      }
+      body.anim-reading-mode-off .settings-switch.auto-off .settings-slider::before {
+        animation: none;
+      }
+      :root { --ai-reader-width: clamp(320px, 29vw, 420px); }
+      /* 智读覆盖在正文右侧，而非压缩 iframe。压缩列宽会重新分页，使高亮和
+         当前阅读位置跳到另一段文本；覆盖层保证开关前后的正文几何完全不变。 */
+      .ai-reader-side {
+        position: absolute; z-index: 9; top: 0; right: 0; bottom: 0; width: var(--ai-reader-width);
+        display: none; flex-direction: column; min-width: 0; padding: 13px;
+        border-left: 1px solid #d9dee8; background: #fbfcff; box-shadow: -8px 0 20px rgba(25,39,70,.08);
+      }
+      body.ai-reader-open .ai-reader-side { display: flex; }
+      .ai-reader-side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .ai-reader-side-head-actions { display: flex; align-items: center; gap: 5px; }
+      .ai-reader-side-title { font-size: 17px; font-weight: 700; }
+      .ai-reader-size-btn { width: 28px; min-width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center; color: #667792; }
+      .ai-reader-width-glyph { display: inline-flex; align-items: center; justify-content: center; gap: 3px; height: 14px; }
+      .ai-reader-width-glyph > i { display: block; width: 1px; height: 14px; border-radius: 1px; background: currentColor; }
+      .ai-reader-size-btn.is-active { color: #276dce; border-color: #7ea9ed; background: #edf5ff; }
+      .ai-reader-help { margin: 10px 0 0; color: #687386; font-size: 12px; line-height: 1.5; }
+      .ai-reader-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+      .ai-reader-actions .tbtn { padding: 4px 7px; }
+      .ai-reader-history-controls { position: relative; display: inline-flex; gap: 4px; }
+      .ai-reader-history-settings { min-width: 31px; padding: 3px 7px !important; font-size: 17px; line-height: 1; }
+      .ai-reader-history-menu { position: absolute; z-index: 5; top: calc(100% + 5px); right: 0; width: 230px; padding: 9px; border: 1px solid #cdd8ea; border-radius: 8px; background: #fff; box-shadow: 0 8px 22px rgba(25,39,70,.18); }
+      .ai-reader-history-menu[hidden] { display: none; }
+      .ai-reader-history-menu-title { display: block; color: #314a70; font-size: 12px; font-weight: 700; margin-bottom: 7px; }
+      .ai-reader-history-menu button { width: 100%; border: 0; border-radius: 5px; background: transparent; color: #35445d; cursor: pointer; padding: 7px; text-align: left; font: inherit; }
+      .ai-reader-history-menu button:hover, .ai-reader-history-menu button.is-active { background: #edf5ff; color: #276dce; }
+      .ai-reader-history-menu-hint { margin: 7px 3px 0; color: #7b8799; font-size: 11px; line-height: 1.45; }
+      .ai-reader-profile-label { display:flex; align-items:center; gap:7px; margin-top:10px; color:#687386; font-size:12px; }
+      .ai-reader-profile { min-width:0; flex:1; padding:5px 7px; border:1px solid #c9c9cf; border-radius:6px; background:#fff; font:inherit; color:#2d3a51; }
+      .ai-reader-question { width: 100%; min-height: 72px; resize: vertical; box-sizing: border-box; font: inherit; line-height: 1.5; padding: 9px; border: 1px solid #c9c9cf; border-radius: 7px; margin-top: 10px; }
+      .ai-reader-submit { display: flex; justify-content: flex-end; margin-top: 6px; }
+      .ai-reader-submit .tbtn { min-width: 106px; padding: 5px 10px; }
+      .ai-reader-submit + .ai-reader-answer { margin-top: 8px; }
+      .ai-reader-answer { flex: 1 1 auto; min-height: 100px; overflow: auto; line-height: 1.7; padding: 10px; border: 1px solid #e1e4eb; border-radius: 7px; background: #fff; margin-top: 10px; }
+      .ai-reader-answer.empty { color: #8490a3; }
+      .ai-reader-answer p { margin: 0 0 12px; }
+      .ai-reader-answer h3 { margin: 4px 0 12px; font-size: 20px; line-height: 1.35; color: #223d68; }
+      .ai-reader-answer h4 { margin: 18px 0 9px; font-size: 16px; line-height: 1.4; color: #2e527f; }
+      .ai-reader-answer ul, .ai-reader-answer ol { margin: 0 0 12px; padding-left: 22px; }
+      .ai-reader-answer li + li { margin-top: 7px; }
+      .ai-reader-answer blockquote { margin: 0 0 12px; padding: 3px 0 3px 10px; border-left: 3px solid #9dbdf0; color: #52647d; }
+      .ai-reader-answer code { padding: 1px 4px; border-radius: 4px; background: #eef3fa; font-family: Consolas, monospace; font-size: .92em; }
+      .ai-reader-citation { display: inline; border: 0; padding: 0 2px; background: transparent; color: #276dce; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+      .ai-reader-citation:hover, .ai-reader-citation:focus-visible { color: #124e9d; outline: none; }
+      .ai-reader-source-preview { position: absolute; z-index: 3; width: min(320px, calc(100% - 24px)); max-height: min(280px, 44vh); overflow: auto; box-sizing: border-box; padding: 11px 12px; border: 1px solid #a9bee1; border-radius: 9px; background: #fff; color: #2d3a51; box-shadow: 0 10px 28px rgba(25,39,70,.22); }
+      .ai-reader-source-preview[hidden] { display: none; }
+      .ai-reader-source-preview-label { color: #45658f; font-size: 12px; font-weight: 600; line-height: 1.4; }
+      .ai-reader-source-preview-excerpt { margin-top: 7px; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+      .ai-reader-source-preview-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+      .ai-reader-source-preview-jump { border: 0; padding: 3px 0; background: transparent; color: #276dce; cursor: pointer; font: inherit; font-size: 12px; }
+      .ai-reader-mindmap-wrap { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 7px; }
+      .ai-reader-mindmap-collapse { align-self: flex-end; border: 1px solid #cdd8ea; border-radius: 5px; background: #fff; color: #45658f; cursor: pointer; padding: 3px 7px; font: 12px system-ui, sans-serif; }
+      .ai-reader-mindmap { flex: 1 1 auto; min-height: 0; overflow: auto; border-radius: 6px; background: linear-gradient(135deg, #fafcff, #f4f7fd); }
+      .ai-reader-mindmap svg { display: block; min-width: 100%; }
+      .ai-reader-mindmap path { fill: none; stroke: #8eb1ef; stroke-width: 2; }
+      .ai-reader-mindmap rect { fill: #fff; stroke: #8cb0ef; stroke-width: 1.2; }
+      .ai-reader-mindmap .root rect { fill: #356ee4; stroke: #356ee4; }
+      .ai-reader-mindmap text { fill: #23334d; font: 13px "Microsoft YaHei", system-ui, sans-serif; pointer-events: none; }
+      .ai-reader-mindmap .root text { fill: #fff; font-weight: 600; }
+      .ai-reader-sources { color: #687386; font-size: 12px; }
+      .ai-reader-sources summary { cursor: pointer; }
+      .ai-reader-sources ul { margin: 7px 0 0; padding-left: 20px; }
+      .ai-reader-audit { margin-top: 8px; padding: 7px 8px; border-radius: 6px; background: #eef5ff; color: #4d6d9f; font-size: 12px; line-height: 1.5; }
+      .ai-reader-history { display: none; flex: 1 1 auto; min-height: 0; overflow: auto; margin-top: 10px; }
+      .ai-reader-history.show { display: block; }
+      .ai-reader-history-item { width: 100%; text-align: left; font: inherit; padding: 9px; margin: 0 0 7px; border: 1px solid #e1e4eb; border-radius: 7px; background: #fff; cursor: pointer; }
+      .ai-reader-history-item:hover { border-color: #93b4ff; background: #f3f7ff; }
+      .ai-reader-history-row { display: flex; gap: 7px; align-items: center; }
+      .ai-reader-history-cloud, .ai-reader-history-delete { flex: none; margin: 0 0 7px; border-radius: 7px; background: #fff; padding: 6px 8px; cursor: pointer; font: 12px system-ui, sans-serif; }
+      .ai-reader-history-cloud { border: 1px solid #d5d9df; color: #8d96a4; }
+      .ai-reader-history-cloud.is-synced { border-color: #9ac0fb; background: #f0f6ff; color: #276dce; }
+      .ai-reader-history-delete { border: 1px solid #e6caca; color: #a84545; }
+      .ai-reader-history-delete:hover { border-color: #d38484; background: #fff7f7; }
+      .ai-reader-history-question { display: block; color: #263a5d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ai-reader-history-meta { display: block; color: #8490a3; font-size: 11px; margin-top: 4px; }
+      .ai-reader-history-empty { color: #8490a3; padding: 16px 2px; font-size: 13px; }
+      body.theme-dark .ai-reader-answer { background: #242529; border-color: #414248; color: #ddd; }
+      body.theme-dark .ai-reader-answer h3 { color: #bdd4ff; }
+      body.theme-dark .ai-reader-answer h4 { color: #a9c6fb; }
+      body.theme-dark .ai-reader-answer code { background: #303746; }
+      body.theme-dark .ai-reader-citation { color: #8cbaff; }
+      body.theme-dark .ai-reader-source-preview { border-color: #526788; background: #2e3036; color: #e3e8f2; box-shadow: 0 10px 28px rgba(0,0,0,.42); }
+      body.theme-dark .ai-reader-source-preview-label { color: #a9c6fb; }
+      body.theme-dark .ai-reader-source-preview-jump { color: #8cbaff; }
+      body.theme-dark .ai-reader-question, body.theme-dark .ai-reader-profile { background: #2e2e30; color: #eee; border-color: #555; }
+      body.theme-dark .ai-reader-side { background: #242529; border-color: #414248; }
+      body.theme-dark .ai-reader-mindmap { background: linear-gradient(135deg, #262a32, #202226); }
+      body.theme-dark .ai-reader-mindmap rect { fill: #30333a; stroke: #6f94d5; }
+      body.theme-dark .ai-reader-mindmap .root rect { fill: #356ee4; stroke: #4d84f0; }
+      body.theme-dark .ai-reader-mindmap text { fill: #e3ebff; }
+      body.theme-dark .ai-reader-history-item { background: #2e2e30; border-color: #414248; color: #ddd; }
+      body.theme-dark .ai-reader-history-item:hover { background: #36373c; border-color: #5a82ca; }
+      body.theme-dark .ai-reader-history-cloud, body.theme-dark .ai-reader-history-delete { background: #2e2e30; }
+      body.theme-dark .ai-reader-history-cloud { border-color: #555d68; color: #a0a7b3; }
+      body.theme-dark .ai-reader-history-cloud.is-synced { border-color: #4d78b6; background: #273750; color: #9ac4ff; }
+      body.theme-dark .ai-reader-history-delete { border-color: #6c4b4b; color: #f0aaaa; }
+      body.theme-dark .ai-reader-history-menu { background: #2e2e30; border-color: #4a5363; }
+      body.theme-dark .ai-reader-history-menu-title { color: #bdd4ff; }
+      body.theme-dark .ai-reader-history-menu button { color: #d4d8df; }
+      body.theme-dark .ai-reader-history-menu button:hover, body.theme-dark .ai-reader-history-menu button.is-active { background: #29364b; color: #9ac4ff; }
+      body.theme-dark .ai-reader-history-menu-hint { color: #a0a7b3; }
+      body.theme-dark .ai-reader-size-btn.is-active { background: #29364b; color: #9ac4ff; border-color: #4d78b6; }
+      body.theme-dark .ai-reader-mindmap-collapse { background: #2e2e30; color: #bdd4ff; border-color: #4a5363; }
+      body.theme-dark .ai-reader-history-question { color: #bcd1ff; }
+      body.theme-dark .ai-reader-audit { background: #29364b; color: #b9d3ff; }
+      body.theme-dark .book-progress-track { background: rgba(210,220,240,.28); }
+      body.theme-dark .book-progress-restore { color: #b7c2d5; }
+      body.theme-dark .book-progress-restore:hover { background: rgba(100,158,255,.18); color: #c8dcff; }
+      body.theme-dark .reader-jump-back { color: #c3d6f3; background: transparent; box-shadow: none; text-shadow: 0 1px 2px rgba(0,0,0,.8); }
+      body.theme-dark .reader-jump-back:hover { color: #e0ecff; background: transparent; }
+      @media (max-width: 760px) {
+        :root { --ai-reader-width: min(88vw, 360px); }
+      }
+
+      /* 深色主题下的外壳（工具栏/目录/设置/弹窗） */
+      body.theme-dark { background: #1c1c1e; color: #ddd; }
+      body.theme-dark .toolbar,
+      body.theme-dark .rsearch { background: #262628; border-color: #3a3a3d; }
+      body.theme-dark .tbtn {
+        background: #2e2e30; color: #ddd; border-color: #4a4a4d;
+      }
+      body.theme-dark .tbtn:hover { background: #3a3a3d; }
+      body.theme-dark .toolbar .title { color: #aaa; }
+      body.theme-dark .win-btn { color: #ddd; }
+      body.theme-dark .win-btn:hover { background: #3a3a3d; }
+      body.theme-dark .win-btn.close:hover { background: #e81123; color: #fff; }
+      body.theme-dark .toc { background: #262628; border-color: #3a3a3d; }
+      body.theme-dark .toc .toc-item { color: #ddd; }
+      body.theme-dark .toc .toc-item:hover { background: #3a3a3d; }
+      body.theme-dark .settings,
+      body.theme-dark .modal-card { background: #2a2a2c; color: #ddd; border-color: #444; }
+      body.theme-dark .reader-quick-section { background: #292d33; border-color: #444b56; }
+      body.theme-dark .reader-quick-section .reader-quick-palette-row > label:first-child { color: #e0e6ef; }
+      body.theme-dark .reader-quick-mode-row,
+      body.theme-dark .reader-quick-speech-row { border-color: #414750; }
+      body.theme-dark .reader-quick-speech-button { border-color: #4c5665; background: #30343a; color: #bad7ff; }
+      body.theme-dark .reader-quick-speech-button:hover { background: #3a4656; }
+      body.theme-dark .text-conversion-choice { color: #ddd; }
+            body.theme-dark .settings select,
+      body.theme-dark .rsearch input { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .mode-toggle-item { color: #ddd; }
+      .reader-end-card { width: min(1040px, calc(100vw - 48px)); max-height: min(720px, calc(100vh - 64px)); display: flex; flex-direction: column; }
+      .reader-end-intro { color: #777; font-size: 13px; margin: 0 0 12px; }
+      .reader-end-list { display: grid; grid-template-columns: repeat(5,minmax(150px,1fr)); gap: 12px; overflow-x: auto; padding: 2px 2px 8px; }
+      .reader-end-item { display: flex; flex-direction: column; min-width: 150px; border: 1px solid #e5e8ef; border-radius: 10px; background: transparent; color: inherit; padding: 10px; text-align: left; cursor: pointer; font: inherit; }
+      .reader-end-item:hover { border-color: #9fbcf4; background: rgba(73,126,220,.07); }
+      .reader-end-cover { width: 100%; aspect-ratio: 3/4; border-radius: 7px; overflow: hidden; background: #e8ebf1; display: flex; align-items: center; justify-content: center; font-size: 12px; line-height: 1.45; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+      .reader-end-cover img { width: 100%; height: 100%; object-fit: contain; }
+      .reader-end-body { min-width: 0; width: 100%; padding-top: 9px; }
+      .reader-end-title { font-weight: 600; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .reader-end-author { color: #7a8494; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 18px; }
+      .reader-end-score { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 8px; color: #6d7788; font-size: 12px; }
+      .reader-end-score strong { color: #3974d8; font-size: 15px; font-variant-numeric: tabular-nums; }
+      .reader-end-empty { color: #888; text-align: center; padding: 26px 10px; }
+      @media (max-width: 860px) { .reader-end-list { display: flex; } .reader-end-item { flex: 0 0 160px; } }
+
+      /* 书签下拉 */
+      .bm-wrap { position: relative; display: inline-flex; }
+      .bm-panel {
+        position: absolute; top: calc(100% + 8px); right: 0; width: 260px;
+        background: #fff; border: 1px solid #ccc; border-radius: 8px;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.2); padding: 8px; z-index: 30; display: none;
+      }
+      .bm-panel.show { display: block; }
+      .bm-add {
+        width: 100%; font: inherit; padding: 10px 12px; border: 1px solid #3e7ee0;
+        border-radius: 8px; background: #f5f9ff; color: #2360b6; cursor: pointer; margin: 4px 0 10px; font-weight: 650;
+      }
+      .bm-add:hover { background: #e8f1ff; }
+      .bm-list { max-height: 50vh; overflow-y: auto; display: grid; gap: 4px; }
+      .bm-item {
+        display: flex; align-items: center; gap: 8px;
+        padding: 10px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; font-size: 13px; color: #4b596c;
+      }
+      .bm-item:hover { background: #f0f5ff; border-color: #d7e4f9; }
+      .bm-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .bm-del { color: #a3adbb; flex: 0 0 auto; padding: 2px 4px; border-radius: 4px; }
+      .bm-del:hover { color: #e85c50; }
+      .bm-empty { padding: 28px 8px; color: #98a4b4; font-size: 13px; text-align: center; }
+      body.theme-dark .bm-panel { background: #2a2a2c; border-color: #444; }
+      body.theme-dark .bm-add { background: #2e2e30; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .bm-item { color: #ddd; }
+      body.theme-dark .bm-item:hover { background: #3a3a3d; }
+      /* 高亮列表项 */
+      .hl-hint { padding: 4px 8px 8px; color: #aaa; font-size: 12px; line-height: 1.5; }
+      .hl-item { position: relative; padding: 7px 22px 7px 8px; border-radius: 6px; cursor: pointer;
+        font-size: 13px; border-bottom: 1px solid #f0f0f2; }
+      .hl-item:hover { background: #fff8e0; }
+      .hl-text { line-height: 1.5; color: #333; }
+      .hl-note { margin-top: 3px; color: #5a78d0; font-size: 12px; }
+      .hl-item .bm-del { position: absolute; right: 4px; top: 6px; }
+      body.theme-dark .hl-item { color: #ddd; border-color: #3a3a3d; }
+      body.theme-dark .hl-text { color: #ddd; }
+      body.theme-dark .hl-item:hover { background: #3a3a30; }
+
+      /* PDF 模式（PDF.js 渲染）：保留工具栏，仅缩放按钮 PDF 专用；高亮/侧滚条暂隐 */
+      .pdf-only { display: none; }
+      body.pdf-mode .pdf-only { display: inline-block; }
+      body.pdf-mode .epub-only { display: none; } /* 朗读暂仅 EPUB/txt */
+      body.pdf-mode #vbar { display: none; }
+      /* 沉浸模式：工具栏淡出但保留其占位（不改阅读区高度）→ 切换沉浸时零重排、绝不跳页；
+         点屏幕中间唤出（bar-show 时淡入）。关键：不能用 position:absolute，那会释放占位、
+         令 iframe 变高触发整书重排，正是金庸全集跳页的根因。 */
+      /* 沉浸模式：保留工具栏占位（不改阅读区高度→零重排不跳页）。只淡出按钮，
+         右上角阅读统计始终可见；点屏幕中间唤出时按钮淡入。隐藏时工具栏背景透明，
+         只剩统计文字浮在顶部，更干净；唤出时恢复背景+阴影。 */
+      body.immersive .toolbar > *:not(#reader-progress-group) {
+        opacity: 0; visibility: hidden; pointer-events: none;
+        transition: opacity 0.18s ease, visibility 0s linear 0.18s;
+      }
+      body.immersive.bar-show .toolbar > *:not(#reader-progress-group),
+      body.immersive.bar-hover .toolbar > *:not(#reader-progress-group) {
+        opacity: 1; visibility: visible; pointer-events: auto;
+        transition: opacity 0.18s ease;
+      }
+      /* 沉浸模式下仍保留阅读位置和全书页数；后者也是测量中的加载指示。 */
+      body.immersive #reader-progress-group { opacity: 1; visibility: visible; pointer-events: auto; }
+      /* 收起工具栏时不再让已隐藏的按钮、拖拽区和窗口控制占据横向空间，
+         两段阅读状态紧贴右侧显示；工具栏本身仍保留原高度，所以不会改变阅读区尺寸。 */
+      body.immersive:not(.bar-show):not(.bar-hover) .toolbar > *:not(#reader-progress-group):not(.window-controls) { display: none; }
+      body.immersive:not(.bar-show):not(.bar-hover) #reader-progress-group { margin-left: auto; }
+      /* 即使按钮淡出，也保留最小化/最大化/关闭三键的原有槽位；
+         进度组因此始终停在与按钮可见时相同的位置。 */
+      body.immersive .toolbar { background: transparent; border-bottom-color: transparent; }
+      body.immersive.bar-show .toolbar,
+      body.immersive.bar-hover .toolbar { background: transparent; border-bottom-color: transparent; }
+      body.theme-dark.immersive.bar-show .toolbar,
+      body.theme-dark.immersive.bar-hover .toolbar { background: #262628; border-bottom-color: #3a3a3d; }
+      /* 批注页（大） */
+      .anno-card { width: min(760px, 92vw); max-height: 84vh; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+      .anno-card .modal-head { padding: 18px 22px 12px; border-bottom: 1px solid #edf0f5; }
+      .anno-title { display: flex; flex-direction: column; gap: 3px; }
+      .anno-title strong { font-size: 18px; letter-spacing: .01em; }
+      .anno-title small { color: #8792a3; font-size: 12px; font-weight: 400; }
+      #anno-list { overflow-y: auto; padding: 12px 18px 18px; background: #fafbfd; }
+      .anno-empty { margin: 44px 12px; padding: 32px; text-align: center; color: #8c98a8; border: 1px dashed #cfdaea; border-radius: 12px; background: #fff; line-height: 1.8; }
+      .anno-item { padding: 14px; border: 1px solid #e3e9f2; border-radius: 12px; background: #fff; box-shadow: 0 2px 8px rgba(26, 54, 93, .035); }
+      .anno-item + .anno-item { margin-top: 10px; }
+      .anno-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+      .anno-ch { color: #2c67bd; font-size: 12px; cursor: pointer; font-weight: 650; }
+      .anno-ch:hover { text-decoration: underline; }
+      .anno-del { margin-left: auto; color: #a36a69; cursor: pointer; font-size: 12px; padding: 4px 6px; border-radius: 5px; }
+      .anno-del:hover { color: #b43d3b; background: #fff3f2; }
+      .anno-edit-btn { color: #516175; cursor: pointer; font-size: 12px; padding: 4px 6px; border-radius: 5px; }
+      .anno-edit-btn:hover, .anno-ch:hover { text-decoration: none; }
+      .anno-edit-btn:hover { color: #245eaf; background: #edf4ff; }
+      .anno-ctx { font-size: 15px; line-height: 1.85; color: #303844; background: #f7f8fa;
+        border-radius: 8px; padding: 10px 12px; max-height: 180px; overflow: auto; }
+      .anno-ctx mark { background: #dfe6ea; color: inherit; padding: 0 2px; border-radius: 3px; }
+      .anno-note-view { margin-top: 9px; font-size: 14px; line-height: 1.65; color: #285caa;
+        border-left: 3px solid #93b8ea; background: #f3f7ff; border-radius: 0 8px 8px 0; padding: 9px 12px; white-space: pre-wrap; }
+      /* 编辑区：默认收起，点"编辑"才滑开 */
+      .anno-edit { max-height: 0; overflow: hidden; transition: max-height 0.25s ease; }
+      .anno-edit.open { max-height: 280px; margin-top: 8px; }
+      .anno-note { width: 100%; box-sizing: border-box; font-size: 16px; line-height: 1.6;
+        min-height: 80px; border: 1px solid #ddd; border-radius: 8px; padding: 10px; resize: vertical;
+        font-family: inherit; outline: none; }
+      .anno-note:focus { border-color: #5aa0ff; }
+      .anno-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+      .anno-edit-actions button { font: 14px/1 inherit; padding: 7px 16px; border-radius: 8px;
+        border: 1px solid #ccc; background: #fff; cursor: pointer; }
+      .anno-edit-actions .save { background: #2b6cff; color: #fff; border-color: #2b6cff; }
+      .anno-item.target { background: #fff; border-color: #8eb5ed; box-shadow: 0 0 0 3px rgba(65, 122, 216, .12); }
+      @keyframes annotation-item-added {
+        from { opacity: 0.25; transform: translateY(12px) scale(0.985); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
+      .anno-item.target.annotation-added {
+        animation: annotation-item-added .32s cubic-bezier(.2,.8,.2,1) both;
+      }
+      body.anim-annotation-add-off .anno-item.target.annotation-added {
+        animation: none;
+      }
+      body.theme-dark .anno-card .modal-head { border-color: #3a3f49; }
+      body.theme-dark #anno-list { background: #22252a; }
+      body.theme-dark .anno-item { border-color: #3d434e; background: #292c31; box-shadow: none; }
+      body.theme-dark .anno-ctx { background: #202328; color: #ddd; }
+      body.theme-dark .anno-note-view { background: #23304a; color: #cfe0ff; }
+      body.theme-dark .anno-note { background: #1f1f21; color: #ddd; border-color: #4a4a4d; }
+      body.theme-dark .anno-item { border-color: #3a3a3d; }
+      body.theme-dark .anno-item.target { background: #3a3520; }
+      body.theme-dark .bug-trace-meta-row { background: #25272c; }
+      body.theme-dark .bug-trace-events { background: #202226; border-color: #444850; }
+      body.theme-dark .bug-trace-event { border-color: #35383f; }
+      body.theme-dark .bug-trace-event code { color: #bac6da; }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button id="toc-btn" class="tbtn" data-reader-i18n="toc">☰ 目录</button>
+      <button id="prev-btn" class="tbtn" title="上一章" data-reader-i18n-title="previousChapter" data-reader-i18n-aria="previousChapter">◀</button>
+      <button id="next-btn" class="tbtn" title="下一章" data-reader-i18n-title="nextChapter" data-reader-i18n-aria="nextChapter">▶</button>
+      <div class="search-wrap">
+        <button id="rsearch-btn" class="tbtn" title="搜索书中文字" data-reader-i18n-title="searchBook" data-reader-i18n-aria="searchBook">🔍</button>
+        <div id="rsearch" class="rsearch">
+          <div class="rsearch-row">
+            <input id="rsearch-input" type="text" autocomplete="off" />
+            <span id="rsearch-count" class="rcount"></span>
+            <button id="rsearch-close" class="tbtn" title="关闭" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
+          </div>
+          <div id="rsearch-results" class="rsearch-results"></div>
+        </div>
+      </div>
+      <button id="tts-btn" class="tbtn epub-only" title="朗读（从当前页开始，自动翻页）" data-reader-i18n-title="readAloud" data-reader-i18n-aria="readAloud">🔊</button>
+      <button id="hl-btn" class="tbtn" title="批注 / 高亮" data-reader-i18n-title="annotations" data-reader-i18n-aria="annotations">🖍</button>
+      <button id="zoom-out" class="tbtn pdf-only" title="缩小" data-reader-i18n-title="zoomOut" data-reader-i18n-aria="zoomOut">－</button>
+      <button id="zoom-in" class="tbtn pdf-only" title="放大" data-reader-i18n-title="zoomIn" data-reader-i18n-aria="zoomIn">＋</button>
+      <button id="pdf-dual" class="tbtn pdf-only" title="单页 / 双页" data-reader-i18n-title="pdfDual" data-reader-i18n-aria="pdfDual">▥</button>
+      <button id="immersive-btn" class="tbtn" title="沉浸模式（隐藏工具栏，点屏幕中间唤出）" data-reader-i18n-title="immersive" data-reader-i18n-aria="immersive">⛶</button>
+      <div id="reader-settings-toolbar-item" class="gear-wrap">
+        <button id="gear-btn" class="tbtn" data-reader-i18n="settings">⚙ 设置</button>
+        <div id="settings" class="settings" data-quick-ui-mode="compact">
+      <div class="reader-quick-header">
+        <button id="reader-preferences-btn" class="reader-preferences-launch" type="button"><span data-reader-i18n="readerPreferences">阅读偏好</span> <span aria-hidden="true">⚙</span></button>
+        <div class="reader-quick-ui-mode" role="group" aria-label="设置界面布局" data-reader-i18n-aria="quickSettingsLayout"><button id="reader-quick-mode-compact" class="active" type="button" data-quick-ui-mode-option="compact" data-reader-i18n="quickSettingsCompact" aria-pressed="true">精简</button><button id="reader-quick-mode-classic" type="button" data-quick-ui-mode-option="classic" data-reader-i18n="quickSettingsClassic" aria-pressed="false">经典</button></div>
+      </div>
+      <div class="reader-quick-section">
+        <div class="row reader-quick-palette-row">
+          <label data-reader-i18n="theme">主题</label>
+          <div id="reader-quick-palette" class="theme-row" aria-label="快捷主题"></div>
+        </div>
+        <div class="row">
+          <label data-reader-i18n="font">字体</label>
+          <select id="set-font">
+            <option value="" data-reader-i18n="bookDefaultFont">书籍默认</option>
+            <option value="'Microsoft YaHei',sans-serif">微软雅黑</option>
+            <option value="'SimSun',serif">宋体</option>
+            <option value="'SimHei',sans-serif">黑体</option>
+            <option value="'KaiTi',serif">楷体</option>
+            <option value="'Kunpeng LXGW WenKai Lite','Microsoft YaHei',sans-serif" data-reader-font-id="lxgw-wenkai-lite" data-reader-font-label="霞鹜文楷 Lite">霞鹜文楷 Lite（需下载）</option>
+            <option value="'Kunpeng Source Han Serif SC','SimSun',serif" data-reader-font-id="source-han-serif-sc" data-reader-font-label="思源宋体">思源宋体（需下载）</option>
+            <option value="'Kunpeng Zhuque Fangsong','FangSong','SimSun',serif" data-reader-font-id="zhuque-fangsong" data-reader-font-label="朱雀仿宋">朱雀仿宋（需下载）</option>
+            <option value="serif" data-reader-i18n="serif">衬线</option>
+            <option value="sans-serif" data-reader-i18n="sansSerif">无衬线</option>
+          </select>
+        </div>
+        <div class="row reader-font-download-row" id="reader-font-download-row" hidden>
+          <label></label>
+          <span class="reader-font-download-status" id="reader-font-download-status"></span>
+          <button class="reader-font-download-action" id="reader-font-download-action" type="button" data-reader-i18n="download">下载</button>
+        </div>
+        <div class="row reader-quick-slider-row"><label data-reader-i18n="fontSize">字号</label><input type="range" id="set-size" min="12" max="40" step="1" /><span class="val" id="v-size"></span></div>
+        <div class="row reader-quick-slider-row"><label data-reader-i18n="lineSpacing">行间距</label><input type="range" id="set-line" min="1" max="2.6" step="0.1" /><span class="val" id="v-line"></span></div>
+        <div class="row reading-mode-row reader-quick-mode-row">
+          <div class="mode-toggle-group">
+            <label class="mode-toggle-item text-conversion-toggle" for="set-text-conversion-simple">
+              <span class="text-conversion-choice"><span id="text-conversion-state-label" class="text-conversion-label">简</span><span class="settings-switch"><input id="set-text-conversion-simple" type="checkbox" /><span class="settings-slider"></span></span></span>
+            </label>
+            <label class="mode-toggle-item" for="set-dual-mode">
+              <span id="set-dual-mode-label" data-reader-i18n="twoPages">双页</span><span class="settings-switch"><input id="set-dual-mode" type="checkbox" /><span class="settings-slider"></span></span>
+            </label>
+            <label class="mode-toggle-item" for="set-scroll-mode">
+              <span id="set-scroll-mode-label" data-reader-i18n="scrollMode">滚动</span><span class="settings-switch"><input id="set-scroll-mode" type="checkbox" /><span class="settings-slider"></span></span>
+            </label>
+          </div>
+        </div>
+        <div class="row reader-quick-slider-row reader-quick-speech-row"><label data-reader-i18n="speechRate">语速</label><input type="range" id="quick-set-ttsrate" min="0.5" max="2" step="0.05" /><span class="val" id="quick-v-ttsrate"></span><select id="quick-set-ttssrc" class="reader-quick-speech-source" data-reader-i18n-aria="speechSource"><option value="edge" data-reader-i18n="ttsMicrosoftAuto">微软</option><option value="system" data-reader-i18n="ttsSystemOffline">系统语音</option></select><button id="quick-tts-btn" class="reader-quick-speech-button" type="button" title="朗读（从当前页开始，自动翻页）" data-reader-i18n-title="readAloud" data-reader-i18n-aria="readAloud">🔊</button></div>
+        <div class="reader-quick-classic-only">
+          <div class="row"><label data-reader-i18n="style">样式</label><select id="quick-set-style-mode"><option value="local" data-reader-i18n="localStyle">本地样式（推荐）</option><option value="book" data-reader-i18n="bookStyle">图书样式（使用原书字号）</option></select></div>
+          <div class="row reader-quick-slider-row"><label data-reader-i18n="noteFontSize">注释字号</label><input type="range" id="quick-set-note-size" min="10" max="22" step="1" /><span class="val" id="quick-v-note-size"></span></div>
+          <div class="row reader-quick-slider-row"><label data-reader-i18n="paragraphSpacing">段间距</label><input type="range" id="quick-set-para" min="0" max="2" step="0.1" /><span class="val" id="quick-v-para"></span></div>
+          <div class="row reader-quick-slider-row"><label data-reader-i18n="letterSpacing">字间距</label><input type="range" id="quick-set-letter" min="0" max="5" step="0.5" /><span class="val" id="quick-v-letter"></span></div>
+          <div class="row"><label data-reader-i18n="animation">动画</label><select id="quick-set-turnfx"><option value="off" data-reader-i18n="animationOff">关闭</option><option value="horizontal" data-reader-i18n="horizontalTurn">水平翻页（整页左移）</option></select></div>
+          <div class="row reader-quick-slider-row"><label data-reader-i18n="speed">速度</label><input type="range" id="quick-set-turnspeed" min="0.5" max="2" step="0.1" /><span class="val" id="quick-v-turnspeed"></span></div>
+          <div class="reader-quick-margin-block"><h4 data-reader-i18n="pageMargins">页边距</h4><div class="margins"><label><span data-reader-i18n="top">上</span><input type="number" id="quick-set-mt" min="0" max="160" /></label><label><span data-reader-i18n="bottom">下</span><input type="number" id="quick-set-mb" min="0" max="160" /></label><label><span data-reader-i18n="left">左</span><input type="number" id="quick-set-ml" min="0" max="240" /></label><label><span data-reader-i18n="right">右</span><input type="number" id="quick-set-mr" min="0" max="240" /></label></div></div>
+        </div>
+      </div>
+        </div>
+      </div>
+      <div id="reader-preferences-modal" class="modal" role="dialog" aria-modal="true" aria-label="阅读偏好" data-reader-i18n-aria="readerPreferences">
+        <section class="modal-card reader-preferences-card">
+          <div class="reader-preference-scope" role="group" aria-label="偏好保存范围" data-reader-i18n-aria="preferenceScopeLabel">
+            <button class="active" type="button" data-pref-scope="default" data-reader-i18n="preferenceOverall" aria-pressed="true">总体</button>
+            <button type="button" data-pref-scope="book" data-reader-i18n="preferenceBook" aria-pressed="false">独立</button>
+          </div>
+          <div class="reader-preferences-body">
+            <nav id="reader-preferences-nav" class="reader-preferences-nav" aria-label="阅读偏好分类" data-reader-i18n-aria="preferenceNavigation">
+              <button class="active" type="button" data-pref-section="appearance"><span class="reader-preferences-nav-icon" aria-hidden="true">◐</span><span class="reader-preferences-nav-label" data-reader-i18n="preferenceAppearance">外观与配色</span></button>
+              <button type="button" data-pref-section="pagination"><span class="reader-preferences-nav-icon" aria-hidden="true">▤</span><span class="reader-preferences-nav-label" data-reader-i18n="preferencePagination">排版与分页</span></button>
+              <button type="button" data-pref-section="toolbar"><span class="reader-preferences-nav-icon" aria-hidden="true">☷</span><span class="reader-preferences-nav-label" data-reader-i18n="preferenceToolbar">工具栏与操作</span></button>
+              <button type="button" data-pref-section="advanced"><span class="reader-preferences-nav-icon" aria-hidden="true">⚙</span><span class="reader-preferences-nav-label" data-reader-i18n="preferenceAdvanced">高级</span></button>
+            </nav>
+            <button id="reader-preferences-nav-toggle" class="reader-preferences-nav-toggle" type="button" aria-expanded="true" aria-label="收起分类" title="收起分类"><span class="reader-preferences-nav-toggle-icon reader-preferences-nav-toggle-collapse" aria-hidden="true">‹</span><span class="reader-preferences-nav-toggle-icon reader-preferences-nav-toggle-expand" aria-hidden="true">›</span></button>
+            <div class="reader-preferences-content">
+              <section class="reader-preference-panel" data-pref-panel="appearance">
+                <div id="pref-palette-scroll" class="reader-palette-scroll"><div id="pref-palette-grid" class="reader-palette-grid" aria-label="配色方案" data-reader-i18n-aria="paletteGrid"></div></div>
+                <div class="reader-color-grid">
+                  <div class="reader-color-field"><span data-reader-i18n="textColor">正文颜色</span><button class="reader-color-picker" type="button" data-pref-color="textColor" aria-label="正文颜色"></button></div><div class="reader-color-field"><span data-reader-i18n="linkColor">链接颜色</span><button class="reader-color-picker" type="button" data-pref-color="linkColor" aria-label="链接颜色"></button></div><div class="reader-color-field"><span data-reader-i18n="selectionColor">选中文本</span><button class="reader-color-picker" type="button" data-pref-color="selectionColor" aria-label="选中文本"></button></div><div class="reader-color-field"><span data-reader-i18n="footnoteBackground">脚注背景</span><button class="reader-color-picker" type="button" data-pref-color="footnoteBackground" aria-label="脚注背景"></button></div><div class="reader-color-field"><span data-reader-i18n="footnoteBorder">脚注边框</span><button class="reader-color-picker" type="button" data-pref-color="footnoteBorder" aria-label="脚注边框"></button></div>
+                </div>
+                <div class="reader-custom-background"><span class="reader-custom-background-title" data-reader-i18n="customBackground">自定义背景</span><input id="pref-palette-name" class="reader-palette-name-field" type="text" maxlength="24" placeholder="主题名称" aria-label="主题名称" data-reader-i18n-placeholder="paletteName" data-reader-i18n-aria="paletteName" /><button class="reader-color-picker reader-background-color-picker" type="button" data-pref-color="customBackgroundColor" aria-label="自定义背景颜色" data-reader-i18n-aria="customBackgroundColor"></button><label class="reader-background-import"><span data-reader-i18n="importImage">导入图片</span><input id="pref-background-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label><span id="pref-background-image-name" class="reader-background-image-name" data-reader-i18n="backgroundNotImported">未导入图片</span><button id="pref-clear-background-image" type="button" data-reader-i18n="removeImage">移除图片</button><button id="pref-add-palette" type="button" data-reader-i18n="addPalette">添加主题</button></div>
+                <div id="reader-color-popover" class="reader-color-popover" role="dialog" aria-label="选择颜色" hidden>
+                  <div class="reader-color-presets" aria-label="常用颜色"><button type="button" data-pref-color-swatch="#000000"></button><button type="button" data-pref-color-swatch="#212121"></button><button type="button" data-pref-color-swatch="#424242"></button><button type="button" data-pref-color-swatch="#616161"></button><button type="button" data-pref-color-swatch="#9e9e9e"></button><button type="button" data-pref-color-swatch="#bdbdbd"></button><button type="button" data-pref-color-swatch="#e0e0e0"></button><button type="button" data-pref-color-swatch="#ffffff"></button><button type="button" data-pref-color-swatch="#f44336"></button><button type="button" data-pref-color-swatch="#e91e63"></button><button type="button" data-pref-color-swatch="#9c27b0"></button><button type="button" data-pref-color-swatch="#673ab7"></button><button type="button" data-pref-color-swatch="#3f51b5"></button><button type="button" data-pref-color-swatch="#2196f3"></button><button type="button" data-pref-color-swatch="#03a9f4"></button><button type="button" data-pref-color-swatch="#00bcd4"></button><button type="button" data-pref-color-swatch="#009688"></button><button type="button" data-pref-color-swatch="#4caf50"></button><button type="button" data-pref-color-swatch="#8bc34a"></button><button type="button" data-pref-color-swatch="#cddc39"></button><button type="button" data-pref-color-swatch="#ffeb3b"></button><button type="button" data-pref-color-swatch="#ffc107"></button><button type="button" data-pref-color-swatch="#ff9800"></button><button type="button" data-pref-color-swatch="#ff5722"></button><button type="button" data-pref-color-swatch="#795548"></button><button type="button" data-pref-color-swatch="#607d8b"></button><button type="button" data-pref-color-swatch="#7f1d1d"></button><button type="button" data-pref-color-swatch="#9d174d"></button><button type="button" data-pref-color-swatch="#6d28d9"></button><button type="button" data-pref-color-swatch="#1d4ed8"></button><button type="button" data-pref-color-swatch="#0f766e"></button><button type="button" data-pref-color-swatch="#166534"></button><button type="button" data-pref-color-swatch="#854d0e"></button><button type="button" data-pref-color-swatch="#b54708"></button><button type="button" data-pref-color-swatch="#dceafa"></button><button type="button" data-pref-color-swatch="#fff3d6"></button><button type="button" data-pref-color-swatch="#f3f6fa"></button><button type="button" data-pref-color-swatch="#b7c7da"></button><button type="button" data-pref-color-swatch="#1c1c1e"></button><button type="button" data-pref-color-swatch="#f8f1df"></button></div>
+                  <label>色相<input id="reader-color-hue" type="range" min="0" max="360" step="1" /></label><label>饱和<input id="reader-color-saturation" type="range" min="0" max="100" step="1" /></label><label>明度<input id="reader-color-lightness" type="range" min="0" max="100" step="1" /></label>
+                  <label class="reader-color-hex-label">HEX<input id="reader-color-hex" type="text" inputmode="text" maxlength="7" spellcheck="false" /></label>
+                </div>
+                <div class="reader-appearance-actions"><button id="pref-reset-colors" class="reader-preferences-reset" type="button" data-reader-i18n="restorePaletteColors">恢复默认</button><button id="pref-clear-book-appearance" class="reader-preferences-reset danger" type="button" hidden data-reader-i18n="clearBookAppearance">清除本书独立外观</button></div>
+              </section>
+              <section class="reader-preference-panel" data-pref-panel="pagination" hidden>
+                <div class="reader-pagination-layout">
+                  <section class="reader-pagination-card">
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="imagePagination">图片跨页处理</h4><p data-reader-i18n="imagePaginationHint">默认优先显示完整图片；超出单页时等比缩小。</p></div></div>
+                    <div id="pref-image-pagination" class="reader-pagination-choice-grid" role="radiogroup" aria-label="图片跨页处理" data-reader-i18n-aria="imagePagination">
+                      <button type="button" class="reader-pagination-choice active" data-image-pagination="next-page" role="radio" aria-checked="true"><span class="reader-pagination-choice-mark" aria-hidden="true"></span><span data-reader-i18n="imagePaginationNext">移到下一页完整显示（推荐）</span></button>
+                      <button type="button" class="reader-pagination-choice" data-image-pagination="continuous" role="radio" aria-checked="false"><span class="reader-pagination-choice-mark" aria-hidden="true"></span><span data-reader-i18n="imagePaginationContinuous">允许跨页连续显示</span></button>
+                    </div>
+                  </section>
+                  <section class="reader-pagination-card">
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="dualPageGap">双页中缝</h4><p data-reader-i18n="dualPageGapHint">仅在双页分页时生效；单页和滚动阅读不受影响。</p></div><div class="reader-pagination-card-actions"><output id="pref-dual-page-gap-value" for="pref-dual-page-gap">40 px</output><button id="pref-dual-page-gap-reset" class="reader-pagination-reset" type="button" data-reader-i18n="restoreDualPageGap">恢复默认</button></div></div>
+                    <div class="reader-pagination-range"><input id="pref-dual-page-gap" type="range" min="0" max="120" step="1" aria-label="双页中缝" data-reader-i18n-aria="dualPageGap" /></div>
+                  </section>
+                  <section class="reader-pagination-card reader-pagination-detail-card">
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="typographyDetails">排版细节</h4><p data-reader-i18n="typographyDetailsHint">书籍样式与精细字距通常只需设置一次。</p></div></div>
+                    <div class="reader-preference-compact-list">
+                      <div class="reader-preference-row"><label data-reader-i18n="style">样式</label><select id="set-style-mode"><option value="local" data-reader-i18n="localStyle">本地样式（推荐）</option><option value="book" data-reader-i18n="bookStyle">图书样式（使用原书字号）</option></select></div>
+                      <div class="reader-preference-row"><label data-reader-i18n="noteFontSize">注释字号</label><span class="reader-preference-inline-range"><input type="range" id="set-note-size" min="10" max="22" step="1" /><output id="v-note-size"></output></span></div>
+                      <div class="reader-preference-row"><label data-reader-i18n="paragraphSpacing">段间距</label><span class="reader-preference-inline-range"><input type="range" id="set-para" min="0" max="2" step="0.1" /><output id="v-para"></output></span></div>
+                      <div class="reader-preference-row"><label data-reader-i18n="letterSpacing">字间距</label><span class="reader-preference-inline-range"><input type="range" id="set-letter" min="0" max="5" step="0.5" /><output id="v-letter"></output></span></div>
+                      <div class="reader-preference-margin-section"><div class="reader-preference-margin-heading"><strong data-reader-i18n="pageMargins">页边距</strong><small data-reader-i18n="pageMarginsHint">分别控制正文与阅读窗口四周的留白。</small></div><div class="reader-preference-margin-grid">
+                        <label><span data-reader-i18n="top">上</span><input type="number" id="set-mt" min="0" max="160" /><small>px</small></label>
+                        <label><span data-reader-i18n="bottom">下</span><input type="number" id="set-mb" min="0" max="160" /><small>px</small></label>
+                        <label><span data-reader-i18n="left">左</span><input type="number" id="set-ml" min="0" max="240" /><small>px</small></label>
+                        <label><span data-reader-i18n="right">右</span><input type="number" id="set-mr" min="0" max="240" /><small>px</small></label>
+                      </div></div>
+                    </div>
+                  </section>
+                  <section class="reader-pagination-card reader-pagination-detail-card">
+                    <div class="reader-pagination-card-head"><div><h4 data-reader-i18n="pageTurnExperience">翻页体验</h4><p data-reader-i18n="pageTurnExperienceHint">动画样式与速度仅影响分页阅读。</p></div></div>
+                    <div class="reader-preference-compact-list">
+                      <div class="reader-preference-row"><label data-reader-i18n="animation">动画</label><select id="set-turnfx"><option value="off" data-reader-i18n="animationOff">关闭</option><option value="horizontal" data-reader-i18n="horizontalTurn">水平翻页（整页左移）</option></select></div>
+                      <div class="reader-preference-row"><label data-reader-i18n="speed">速度</label><span class="reader-preference-inline-range"><input type="range" id="set-turnspeed" min="0.5" max="2" step="0.1" /><output id="v-turnspeed"></output></span></div>
+                    </div>
+                  </section>
+                </div>
+              </section>
+              <section class="reader-preference-panel" data-pref-panel="toolbar" hidden>
+                <section class="reader-preference-group reader-reading-display-group">
+                  <div class="reader-preference-group-head"><h4 data-reader-i18n="readingDisplay">阅读显示</h4><p data-reader-i18n="readingDisplayHint">控制正文周边的常驻阅读信息，不属于功能菜单。</p></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="showTextConversion">显示简繁按钮</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showTextConversion" /><span class="settings-slider"></span></label></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="showPageInfo">显示页码与章节进度</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showPageInfo" /><span class="settings-slider"></span></label></div>
+                </section>
+                <section class="reader-preference-group reader-tts-source-group">
+                  <div class="reader-preference-group-head"><h4 data-reader-i18n="speech">朗读</h4><p data-reader-i18n="ttsSourceHint">音源属于设备能力配置，语速仍可在快捷设置中随时调整。</p></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="speechSource">音源</label><select id="set-ttssrc"><option value="edge" data-reader-i18n="ttsMicrosoftAuto">微软</option><option value="system" data-reader-i18n="ttsSystemOffline">系统语音</option></select></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="speechRate">语速</label><span class="reader-preference-inline-range"><input type="range" id="set-ttsrate" min="0.5" max="2" step="0.05" /><output id="v-ttsrate"></output></span></div>
+                </section>
+                <details class="reader-preference-group reader-toolbar-menu-group">
+                  <summary class="reader-preference-group-head"><h4 data-reader-i18n="toolbarFunctionMenu">工具栏功能菜单</h4></summary>
+                  <div id="reader-toolbar-order-list" class="reader-toolbar-order-list" role="list" aria-label="工具栏功能排序" data-reader-i18n-aria="toolbarFunctionMenu">
+                    <div class="reader-toolbar-order-item" data-toolbar-item="toc" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动目录按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">☰</span><strong data-reader-i18n="showToc">显示目录按钮</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showTocButton" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item" data-toolbar-item="chapters" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动章节按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">◀▶</span><strong data-reader-i18n="showChapterButtons">显示上一章、下一章按钮</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showChapterButtons" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item" data-toolbar-item="tts" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动朗读按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">🔊</span><strong data-reader-i18n="showTts">显示朗读按钮</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showTtsButton" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item" data-toolbar-item="annotations" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动批注按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">🖍</span><strong data-reader-i18n="showAnnotations">显示批注按钮</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showAnnotationButton" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item" data-toolbar-item="vocabulary" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动生词本调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">📒</span><strong data-reader-i18n="showVocabulary">显示生词本</strong><label class="settings-switch reader-toolbar-order-toggle"><input type="checkbox" data-pref-bool="showVocabularyButton" /><span class="settings-slider"></span></label>
+                    </div>
+                    <div class="reader-toolbar-order-item is-required" data-toolbar-item="settings" role="listitem">
+                      <button class="reader-toolbar-drag-handle" type="button" aria-label="拖动设置按钮调整顺序"><span aria-hidden="true">⠿</span></button><span class="reader-toolbar-order-icon" aria-hidden="true">⚙</span><span class="reader-toolbar-order-copy"><strong data-reader-i18n="settings">设置</strong><small data-reader-i18n="toolbarSettingsRequired">固定显示</small></span><label class="settings-switch reader-toolbar-order-toggle is-required" aria-label="设置按钮始终显示"><input type="checkbox" checked disabled data-toolbar-required /><span class="settings-slider"></span></label>
+                    </div>
+                  </div>
+                </details>
+                <section class="reader-preference-group reader-click-zone-group">
+                  <div class="reader-preference-group-head"><h4 data-reader-i18n="clickZoneTitle">正文点击区域</h4><p data-reader-i18n="clickZoneHint">区域不可重叠；点击已有区域设置功能，在空白处拖动可直接画出新区域。</p></div>
+                  <div class="reader-click-zone-editor">
+                    <div class="reader-click-zone-preset-bar">
+                      <label class="reader-click-zone-preset-select"><span data-reader-i18n="clickZonePreset">操作方案</span><select id="reader-click-zone-preset" aria-label="操作方案" data-reader-i18n-aria="clickZonePreset"></select></label>
+                      <input id="reader-click-zone-preset-name" type="text" maxlength="24" placeholder="方案名称" aria-label="方案名称" data-reader-i18n-placeholder="clickZonePresetName" data-reader-i18n-aria="clickZonePresetName" />
+                      <button id="reader-click-zone-preset-new" class="reader-click-zone-preset-action" type="button" data-reader-i18n="clickZonePresetNew">新建</button>
+                      <button id="reader-click-zone-preset-save" class="reader-click-zone-preset-action" type="button" data-reader-i18n="clickZonePresetSave">保存方案</button>
+                      <button id="reader-click-zone-preset-delete" class="reader-click-zone-preset-action danger" type="button" data-reader-i18n="clickZonePresetDelete">删除</button>
+                    </div>
+                    <div id="reader-click-zone-preview" class="reader-click-zone-preview" role="application" aria-label="正文点击区域预览" data-reader-i18n-aria="clickZonePreview">
+                      <span class="reader-click-zone-preview-title" data-reader-i18n="clickZoneDrawHint">点击已有区域设置功能；在空白处拖动画出新区域</span>
+                      <div id="reader-click-zone-canvas" class="reader-click-zone-canvas"></div>
+                    </div>
+                    <div class="reader-click-zone-actions">
+                      <button id="reader-click-zone-reset" class="reader-click-zone-reset" type="button" data-reader-i18n="clickZoneReset">恢复默认区域</button>
+                    </div>
+                  </div>
+                </section>
+              </section>
+              <section class="reader-preference-panel" data-pref-panel="advanced" hidden>
+                <section class="reader-preference-group reader-advanced-group">
+                  <div class="reader-advanced-main-row reader-layout-engine-row" role="group" aria-label="排版引擎">
+                    <span class="reader-advanced-icon" aria-hidden="true">▤</span>
+                    <span class="reader-advanced-label">排版引擎</span>
+                    <span class="reader-layout-engine-options">
+                      <button type="button" data-pref-epub-layout-engine="legacy" aria-pressed="false">兼容排版</button>
+                      <button type="button" data-pref-epub-layout-engine="modern" aria-pressed="false">新版排版</button>
+                    </span>
+                  </div>
+                  <div class="reader-advanced-main-row">
+                    <span class="reader-advanced-icon" aria-hidden="true">↩</span>
+                    <label class="reader-advanced-label"><span data-reader-i18n="readerJumpBack">显示跳转回退</span></label>
+                    <span class="reader-preference-actions"><button id="pref-reader-jump-back-settings" class="reader-preference-settings-button" type="button" title="跳转回退设置" aria-label="跳转回退设置" data-reader-i18n-title="readerJumpBackSettings" data-reader-i18n-aria="readerJumpBackSettings" aria-expanded="false">⚙</button><label class="settings-switch"><input id="pref-reader-jump-back-enabled" type="checkbox" data-pref-bool="showReaderJumpBack" /><span class="settings-slider"></span></label></span>
+                  </div>
+                  <div id="pref-reader-jump-back-config" class="reader-jump-back-config" hidden>
+                    <label class="reader-jump-back-dismiss-row"><span data-reader-i18n="readerJumpBackDismissMode">自动隐藏方式</span><select id="pref-reader-jump-back-dismiss-mode"><option value="pages" data-reader-i18n="readerJumpBackDismissPages">翻过指定页数</option><option value="time" data-reader-i18n="readerJumpBackDismissTime">经过指定时间</option></select><span class="reader-jump-back-amount"><input id="pref-reader-jump-back-pages" type="number" min="1" max="100" step="1" /><input id="pref-reader-jump-back-seconds" type="number" min="1" max="600" step="1" hidden /><output id="pref-reader-jump-back-dismiss-unit" for="pref-reader-jump-back-pages" data-reader-i18n="pageUnit">页</output></span></label>
+                    <label class="reader-jump-back-size-row"><span data-reader-i18n="readerJumpBackSize">图标大小</span><input id="pref-reader-jump-back-size" type="range" min="30" max="160" step="1" /><output id="pref-reader-jump-back-size-value" for="pref-reader-jump-back-size">32 px</output></label>
+                    <section id="pref-reader-jump-back-preview" class="reader-jump-back-preview" aria-label="跳转回退图标位置预览" data-reader-i18n-aria="readerJumpBackPosition"><p data-reader-i18n="readerJumpBackPositionHint">拖动图标调整屏幕位置</p><button id="pref-reader-jump-back-preview-icon" class="reader-jump-back-preview-icon" type="button" aria-label="拖动图标调整屏幕位置" data-reader-i18n-aria="readerJumpBackPosition"><svg class="reader-jump-back-arrow" viewBox="0 0 120 48" aria-hidden="true"><path d="M120 24H18M18 24L42 4M18 24L42 44"/></svg></button></section>
+                  </div>
+                </section>
+              </section>
+            </div>
+            <div id="reader-preferences-scrollbar" class="reader-preferences-scrollbar" aria-hidden="true" hidden><span id="reader-preferences-scroll-thumb" class="reader-preferences-scroll-thumb"></span></div>
+          </div>
+        </section>
+      </div>      <button id="vocab-btn" class="tbtn" title="生词本（查过的词）" data-reader-i18n="vocabulary" data-reader-i18n-title="vocabulary">📒 生词本</button>
+      <div class="reader-drag-space" data-tauri-drag-region></div>
+      <div id="reader-progress-group" data-tauri-drag-region>
+        <span id="chapter-progress" class="title epub-only" title="阅读进度" data-reader-i18n-title="readingProgress">正在定位阅读进度…</span>
+        <span id="progress" class="title page-count-loading" title="全书页数统计中" aria-label="全书页数统计中" data-reader-i18n-title="measuringPages" data-reader-i18n-aria="measuringPages"><span class="mini-spinner"></span></span>
+      </div>
+      <div class="window-controls" aria-label="窗口控制" data-reader-i18n-aria="windowControls">
+        <button id="win-min" class="win-btn" type="button" title="最小化" aria-label="最小化" data-reader-i18n-title="minimize" data-reader-i18n-aria="minimize">−</button>
+        <button id="win-max" class="win-btn" type="button" title="最大化" aria-label="最大化" data-reader-i18n-title="maximize" data-reader-i18n-aria="maximize">□</button>
+        <button id="win-close" class="win-btn close" type="button" title="关闭" aria-label="关闭" data-reader-i18n-title="close" data-reader-i18n-aria="close">×</button>
+      </div>
+    </div>
+
+    <div class="body">
+      <!-- reader:// 内容位于独立 reader.localhost 源；allow-same-origin 仅用于章内容 fetch，仍与宿主源隔离。 -->
+      <iframe id="frame" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin"></iframe>
+      <aside id="ai-reader-side" class="ai-reader-side" aria-label="智读" data-reader-i18n-aria="aiReading">
+        <div class="ai-reader-side-head">
+          <span class="ai-reader-side-title" data-reader-i18n="aiReading">✨ 智读</span>
+          <div class="ai-reader-side-head-actions">
+            <button class="tbtn ai-reader-size-btn is-active" type="button" data-ai-reader-width="current" title="当前大小" data-reader-i18n-title="aiReaderSizeCurrent" data-reader-i18n-aria="aiReaderSizeCurrent"><span class="ai-reader-width-glyph" aria-hidden="true"><i></i></span></button>
+            <button class="tbtn ai-reader-size-btn" type="button" data-ai-reader-width="half" title="阅读页一半" data-reader-i18n-title="aiReaderSizeHalf" data-reader-i18n-aria="aiReaderSizeHalf"><span class="ai-reader-width-glyph" aria-hidden="true"><i></i><i></i></span></button>
+            <button class="tbtn ai-reader-size-btn" type="button" data-ai-reader-width="full" title="占满阅读页" data-reader-i18n-title="aiReaderSizeFull" data-reader-i18n-aria="aiReaderSizeFull"><span class="ai-reader-width-glyph" aria-hidden="true"><i></i><i></i><i></i></span></button>
+            <button id="ai-reader-close" class="tbtn" type="button" title="关闭智读" data-reader-i18n-title="closeAiReading" data-reader-i18n-aria="closeAiReading">✕</button>
+          </div>
+        </div>
+        <p class="ai-reader-help" data-reader-i18n="aiReadingHelp">只会发送当前书中已经读到的相关文字，不会自动上传整本书。</p>
+        <div class="ai-reader-actions">
+          <button id="ai-reader-ask" class="tbtn" type="button" data-reader-i18n="ask">提问</button>
+          <button id="ai-reader-summary" class="tbtn" type="button" data-reader-i18n="summary">总结</button>
+          <button id="ai-reader-mindmap" class="tbtn" type="button" data-reader-i18n="mindMap">生成脑图</button>
+          <span class="ai-reader-history-controls">
+            <button id="ai-reader-history-btn" class="tbtn" type="button" data-reader-i18n="history">历史</button>
+            <button id="ai-reader-history-settings-btn" class="tbtn ai-reader-history-settings" type="button" title="智读历史同步设置" data-reader-i18n-title="aiHistorySyncSettings" data-reader-i18n-aria="aiHistorySyncSettings">⚙</button>
+            <div id="ai-reader-history-menu" class="ai-reader-history-menu" hidden>
+              <span class="ai-reader-history-menu-title" data-reader-i18n="aiHistorySyncSettings">智读历史同步设置</span>
+              <button type="button" data-ai-reader-sync-mode="recent" data-reader-i18n="aiHistorySyncRecent">最近 100 条自动同步</button>
+              <button type="button" data-ai-reader-sync-mode="manual" data-reader-i18n="aiHistorySyncManual">手动选择同步</button>
+              <p class="ai-reader-history-menu-hint" data-reader-i18n="aiHistorySharedLimit">提问、总结和脑图共用云端 100 条。</p>
+            </div>
+          </span>
+          <span id="ai-reader-status" class="cross-status"></span>
+        </div>
+        <label class="ai-reader-profile-label"><span data-reader-i18n="model">大模型</span><select id="ai-reader-profile" class="ai-reader-profile" aria-label="智读使用的大模型" data-reader-i18n-aria="aiModelLabel"></select></label>
+        <textarea id="ai-reader-question" class="ai-reader-question" placeholder="输入问题，按 Enter 自动提问；Shift + Enter 换行" data-reader-i18n-placeholder="aiQuestionPlaceholder"></textarea>
+        <div class="ai-reader-submit"><button id="ai-reader-enter-submit" class="tbtn" type="button" title="Enter" data-reader-i18n="submitQuestion" data-reader-i18n-title="submitQuestion">Enter</button></div>
+        <div id="ai-reader-answer" class="ai-reader-answer empty" data-reader-i18n="aiReady">配置 API 后即可开始智读。</div>
+        <div id="ai-reader-history" class="ai-reader-history"></div>
+        <div id="ai-reader-source-preview" class="ai-reader-source-preview" role="dialog" aria-live="polite" hidden></div>
+        <div id="ai-reader-audit" class="ai-reader-audit" hidden></div>
+        <details id="ai-reader-sources" class="ai-reader-sources" hidden><summary data-reader-i18n="sources">本次依据</summary><ul></ul></details>
+      </aside>
+      <div id="loading" class="loading"><div class="spinner"></div><div data-reader-i18n="loading">加载中…</div></div>
+      <div id="backdrop" class="backdrop"></div>
+      <aside id="toc" class="toc">
+        <div class="toc-tabs">
+          <button id="tab-toc" class="toc-tab active" type="button" data-reader-i18n="toc">目录</button>
+          <button id="tab-bm" class="toc-tab" type="button" data-reader-i18n="bookmarks">书签</button>
+        </div>
+        <div id="toc-pane" class="toc-pane"></div>
+        <div id="bm-pane" class="toc-pane" hidden>
+          <button id="bm-add2" class="bm-add" data-reader-i18n="addBookmark">在当前页添加书签</button>
+          <div id="bm-list2" class="bm-list"></div>
+        </div>
+      </aside>
+      <aside id="vocab" class="toc vocab">
+        <div class="toc-tabs">
+          <button id="vtab-zh" class="toc-tab active" type="button" data-reader-i18n="chinese">中文</button>
+          <button id="vtab-en" class="toc-tab" type="button" data-reader-i18n="english">英文</button>
+          <button id="vocab-gear" class="vc-gear" type="button" title="生词本设置" data-reader-i18n-title="vocabularySettings" data-reader-i18n-aria="vocabularySettings">⚙</button>
+        </div>
+        <div id="vocab-settings" class="vc-settings">
+          <div class="vc-set-row">
+            <span data-reader-i18n="sort">排序</span>
+            <span class="vc-seg">
+              <button id="vsort-time" class="vc-sort active" type="button" data-reader-i18n="queriedAt">查询时间</button>
+              <button id="vsort-count" class="vc-sort" type="button" data-reader-i18n="queryCount">查询次数</button>
+            </span>
+          </div>
+          <label class="vc-set-row">
+            <span data-reader-i18n="queryHistory">查询记录</span>
+            <span class="vc-switch">
+              <input id="vocab-count-toggle" type="checkbox" />
+              <span class="vc-slider"></span>
+            </span>
+          </label>
+          <label class="vc-set-row">
+            <span data-reader-i18n="autoSpeakEnglish">英文自动发音</span>
+            <span class="vc-switch">
+              <input id="dict-auto-speak-toggle" type="checkbox" />
+              <span class="vc-slider"></span>
+            </span>
+          </label>
+          <label class="vc-set-row">
+            <span data-reader-i18n="cacheEnglishAudio">缓存英文语音</span>
+            <span class="vc-switch">
+              <input id="word-audio-cache-toggle" type="checkbox" />
+              <span class="vc-slider"></span>
+            </span>
+          </label>
+          <div id="word-audio-cache-info" class="vc-set-row vc-cache-info" hidden>
+            <span id="word-audio-cache-size" data-reader-i18n="cached">缓存：0 B</span>
+            <button id="word-audio-cache-delete" class="vc-cache-del" type="button" data-reader-i18n="deleteCache">删除缓存</button>
+          </div>
+          <div id="word-audio-pack" class="vc-pack" hidden>
+            <div class="vc-pack-head">
+              <span data-reader-i18n="frequentWordAudio">高频词语音包</span>
+              <span id="word-pack-count">0 / 10000</span>
+            </div>
+            <progress id="word-pack-progress" class="vc-pack-progress" max="10000" value="0"></progress>
+            <div id="word-pack-meta" class="vc-pack-meta" data-reader-i18n="notGenerated">尚未生成</div>
+            <div class="vc-pack-actions">
+              <button id="word-pack-delete" class="vc-pack-btn" type="button" data-reader-i18n="deleteAudioPack">删除语音包</button>
+              <button id="word-pack-toggle" class="vc-pack-btn primary" type="button" data-reader-i18n="createAudioPack">开始生成</button>
+            </div>
+          </div>
+        </div>
+        <div id="vocab-pane" class="toc-pane vc-pane"></div>
+      </aside>
+      <div id="vbar" class="vbar"><div id="vthumb" class="vthumb"></div></div>
+      <div id="book-progress" class="book-progress" aria-label="整本书阅读进度" data-reader-i18n-aria="bookProgress">
+        <div id="book-progress-track" class="book-progress-track" role="slider" tabindex="0" aria-label="调整整本书阅读进度" data-reader-i18n-aria="adjustBookProgress" aria-valuemin="1" aria-valuemax="100" aria-valuenow="1">
+          <div id="book-progress-fill" class="book-progress-fill"></div>
+          <div id="book-progress-thumb" class="book-progress-thumb"></div>
+        </div>
+        <button id="book-progress-restore" class="book-progress-restore" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置" data-reader-i18n-title="restorePosition" data-reader-i18n-aria="restorePosition">↶</button>
+      </div>
+      <button id="reader-jump-back" class="reader-jump-back" type="button" title="恢复跳转前位置" aria-label="恢复跳转前位置" data-reader-i18n-title="restorePosition" data-reader-i18n-aria="restorePosition" hidden><svg class="reader-jump-back-arrow" viewBox="0 0 120 48" aria-hidden="true"><path d="M120 24H18M18 24L42 4M18 24L42 44"/></svg></button>
+    </div>
+    <div id="info-modal" class="modal" data-overlay-role="information" role="dialog" aria-modal="true" aria-label="书籍信息"></div>
+    <div id="reader-end-modal" class="modal">
+      <div class="modal-card reader-end-card">
+        <div class="modal-head">
+          <span data-reader-i18n="recommendations">相关推荐</span>
+          <button id="reader-end-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
+        </div>
+        <p class="reader-end-intro" data-reader-i18n="recommendationHelp">根据正文语义，为你挑选 5 本内容相关的图书。</p>
+        <div id="reader-end-list" class="reader-end-list"></div>
+      </div>
+    </div>
+    <div id="anno-modal" class="modal">
+      <div class="modal-card anno-card">
+        <div class="modal-head">
+          <span class="anno-title"><strong data-reader-i18n="annotations">批注 / 高亮</strong><small>集中查看、编辑和回到原文</small></span>
+          <button id="anno-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
+        </div>
+        <div id="anno-list"></div>
+      </div>
+    </div>
+    <div id="cross-modal" class="modal">
+      <div class="modal-card cross-card">
+        <div class="modal-head">
+          <span id="cross-title" data-reader-i18n="crossBookSearch">跨书搜索</span>
+          <button id="cross-close" class="tbtn" data-reader-i18n-title="close" data-reader-i18n-aria="close">✕</button>
+        </div>
+        <div class="cross-row">
+          <input id="cross-input" type="text" autocomplete="off" />
+          <button id="cross-run" class="tbtn" type="button" data-reader-i18n="search">搜索</button>
+          <span id="cross-status" class="cross-status"></span>
+        </div>
+        <div id="cross-results" class="cross-results"></div>
+      </div>
+    </div>
+    <button id="cross-return" class="cross-return" type="button" title="返回上一本书和跨书搜索结果" aria-label="返回上一本书和跨书搜索结果" data-reader-i18n-title="returnToPreviousBook" data-reader-i18n-aria="returnToPreviousBook">←</button>
+    <canvas id="reader-gesture-trail" class="reader-gesture-trail" data-overlay-surface="gesture-trail" data-overlay-role="feedback" hidden aria-hidden="true"></canvas>
+    <script src="generated-ts/recovery-settings-snapshot.js"></script>
+    <script src="generated-ts/overlay-stack.js"></script>
+    <script src="generated-ts/window-resize.js"></script>
+    <script src="generated-ts/reader-i18n.js"></script>
+    <script src="bridge/reader-protocol-bridge.js"></script>
+    <script src="generated-ts/reader-message.js"></script>
+    <script src="generated-ts/reader-shell-state.js"></script>
+    <script src="generated-ts/reader-bug-trace.js"></script>
+    <script src="generated-ts/reader-search-ui.js"></script>
+    <script src="generated-ts/animation-settings.js"></script>
+    <script src="generated-ts/reader-settings-ui.js"></script>
+    <script src="generated-ts/reader-jump-back-rules.js"></script>
+    <script src="generated-ts/reader-navigation-rules.js"></script>
+    <script src="generated-ts/reader-preference-color-rules.js"></script>
+    <script src="generated-ts/reader-preferences-ui.js"></script>
+    <script src="generated-ts/reader-click-zones-ui.js"></script>
+    <script src="generated-ts/reader-recommendation-settings.js"></script>
+    <script src="generated-ts/news-gesture.js"></script>
+    <script src="generated-ts/browser-native-guard.js"></script>
+    <script src="generated-ts/book-info-panel.js"></script>
+    <script src="generated-ts/book-info-related.js"></script>
+    <script src="generated-ts/reader-ai-history-rules.js"></script>
+    <script src="generated-ts/reader-startup-guard.js"></script>
+    <script src="generated-ts/reader-reading-metrics.js"></script>
+    <script src="generated-ts/reader.js"></script>
+    <script src="generated-ts/reader-gesture.js"></script>
+    <script src="generated-ts/reader-notes-ui.js"></script>
+    <script src="generated-ts/vocab-ui.js"></script>
+    <script src="generated-ts/reader-cross-search-ui.js"></script>
+  </body>
+</html>
