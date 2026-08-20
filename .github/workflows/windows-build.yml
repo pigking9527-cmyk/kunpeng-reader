@@ -9,34 +9,8 @@ on:
         type: boolean
         default: false
   push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/windows-build.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "package.json"
-      - "package-lock.json"
-      - "tsconfig.json"
-      - "eslint.config.mjs"
-      - "build.rs"
-      - "tauri.conf.json"
-      - "packaging/windows/**"
-      - "icons/**"
-      - "apps/desktop-ui/**"
-      - "packages/**"
-      - "scripts/build-release.ps1"
-      - "scripts/prepare-windows-gpu-runtime.ps1"
-      - "scripts/run-typescript-tests.mjs"
-      - "scripts/run-legacy-ui-tests.cjs"
-      - "src/**"
-      - "ui/**"
-      - "vendor/**"
-      - "crates/**"
-      - "LICENSES/**"
-      - "THIRD_PARTY_NOTICES.md"
-      - "scripts/check-licenses.mjs"
-      - "scripts/license-policy.json"
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -85,8 +59,8 @@ jobs:
         if: ${{ inputs.publish_release }}
         run: npm run release:license-gate
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version '^2' --locked
+      - name: Verify project Tauri CLI
+        run: npm exec -- tauri --version
 
       - name: Run frontend migration gates
         run: |
@@ -108,7 +82,7 @@ jobs:
 
       - name: Build NSIS installer
         shell: pwsh
-        run: cargo tauri build --config packaging/windows/tauri.release.conf.json
+        run: npm exec -- tauri build --config packaging/windows/tauri.release.conf.json
 
       - name: Prepare artifacts and checksums
         shell: pwsh

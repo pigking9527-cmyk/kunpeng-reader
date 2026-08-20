@@ -171,7 +171,7 @@ pub(crate) fn unprotect_secret(stored: &str) -> Result<String, String> {
     String::from_utf8(plain).map_err(|e| format!("凭据不是有效 UTF-8：{e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn read_platform_secret(_stored: &str) -> Result<String, String> {
     Err("测试环境没有操作系统凭据项".into())
 }

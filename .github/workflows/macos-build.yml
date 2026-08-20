@@ -9,8 +9,8 @@ on:
         type: boolean
         default: false
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -59,8 +59,8 @@ jobs:
         if: ${{ inputs.publish_release }}
         run: npm run release:license-gate
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version '^2' --locked
+      - name: Verify project Tauri CLI
+        run: npm exec -- tauri --version
 
       - name: Import Developer ID signing certificate
         if: ${{ inputs.publish_release }}
@@ -94,7 +94,7 @@ jobs:
 
       # The semantic search runtime does not ship Intel macOS prebuilt binaries.
       - name: Build Apple Silicon macOS bundles
-        run: cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
+        run: npm exec -- tauri build --target aarch64-apple-darwin --bundles app,dmg
 
       - name: Verify packaged license inventory
         shell: bash

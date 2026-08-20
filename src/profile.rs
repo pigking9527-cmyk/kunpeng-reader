@@ -145,6 +145,7 @@ pub(crate) fn legacy_sync_token_keychain_service(version: u8) -> String {
     sync_token_keychain_service_for(current(), version)
 }
 
+#[cfg(any(all(target_os = "macos", not(test)), test))]
 fn keychain_service_for(profile: &LaunchProfile) -> String {
     match profile {
         LaunchProfile::Default => "com.kunpeng.reader.sync".to_string(),
@@ -157,6 +158,7 @@ fn keychain_service_for(profile: &LaunchProfile) -> String {
     }
 }
 
+#[cfg(any(all(target_os = "macos", not(test)), test))]
 fn sync_token_keychain_service_for(profile: &LaunchProfile, version: u8) -> String {
     match profile {
         LaunchProfile::Default => format!("com.kunpeng.reader.sync-token.v{version}"),
@@ -171,6 +173,7 @@ fn sync_token_keychain_service_for(profile: &LaunchProfile, version: u8) -> Stri
 
 /// The identifier must be passed to every WebView belonging to this process.
 /// Tauri maps it to `WKWebsiteDataStore` on macOS 14+; it contains no user path.
+#[cfg(target_os = "macos")]
 pub(crate) fn webview_data_store_identifier() -> Option<[u8; 16]> {
     match current() {
         LaunchProfile::Default => None,

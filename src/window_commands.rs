@@ -444,7 +444,7 @@ fn build_benchmark_reader_window(
     path: &str,
 ) -> Result<tauri::WebviewWindow, String> {
     let url = tauri::WebviewUrl::App(path.into());
-    let mut builder = tauri::WebviewWindowBuilder::new(app, label, url)
+    let builder = tauri::WebviewWindowBuilder::new(app, label, url)
         .title("阅读打开测速")
         .visible(false)
         .decorations(false)
@@ -452,9 +452,11 @@ fn build_benchmark_reader_window(
         .inner_size(880.0, 760.0)
         .min_inner_size(420.0, 320.0);
     #[cfg(target_os = "macos")]
-    if let Some(identifier) = crate::profile::webview_data_store_identifier() {
-        builder = builder.data_store_identifier(identifier);
-    }
+    let builder = if let Some(identifier) = crate::profile::webview_data_store_identifier() {
+        builder.data_store_identifier(identifier)
+    } else {
+        builder
+    };
     builder.build().map_err(|error| error.to_string())
 }
 
@@ -1098,7 +1100,7 @@ fn spawn_clean_reader_shell(app: &tauri::AppHandle) -> Result<(), String> {
         READER_SHELL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
     let url = tauri::WebviewUrl::App("reader.html?pool=1".into());
-    let mut builder = tauri::WebviewWindowBuilder::new(app, &label, url)
+    let builder = tauri::WebviewWindowBuilder::new(app, &label, url)
         .title("阅读")
         .visible(false)
         .decorations(false)
@@ -1106,9 +1108,11 @@ fn spawn_clean_reader_shell(app: &tauri::AppHandle) -> Result<(), String> {
         .inner_size(880.0, 760.0)
         .min_inner_size(420.0, 320.0);
     #[cfg(target_os = "macos")]
-    if let Some(identifier) = crate::profile::webview_data_store_identifier() {
-        builder = builder.data_store_identifier(identifier);
-    }
+    let builder = if let Some(identifier) = crate::profile::webview_data_store_identifier() {
+        builder.data_store_identifier(identifier)
+    } else {
+        builder
+    };
     let window = builder.build().map_err(|error| error.to_string())?;
     install_reader_window_lifecycle(app, &window);
     log(&format!("reader_shell_pool built label={label}"));
