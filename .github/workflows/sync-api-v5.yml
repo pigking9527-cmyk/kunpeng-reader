@@ -90,7 +90,7 @@ jobs:
             --bundle-dir target/sync-api-v5-upload
 
       - name: Upload release-candidate artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: reader-sync-api-v5-linux-x86_64
           path: target/sync-api-v5-upload/
