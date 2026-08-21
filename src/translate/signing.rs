@@ -35,7 +35,7 @@ pub(super) fn md5_hex(input: &[u8]) -> String {
     let mut b0 = 0xefcdab89u32;
     let mut c0 = 0x98badcfeu32;
     let mut d0 = 0x10325476u32;
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut words = [0u32; 16];
         for (index, word) in words.iter_mut().enumerate() {
             let offset = index * 4;
