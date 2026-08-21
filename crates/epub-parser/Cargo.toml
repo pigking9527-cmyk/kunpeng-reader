@@ -1,0 +1,15 @@
+[package]
+name = "epub"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license-file = "../../LICENSE"
+description = "Kunpeng Reader EPUB compatibility adapter over Apache-2.0 rbook"
+
+[dependencies]
+quick-xml = "0.41"
+rbook = { version = "0.7.10", default-features = false, features = ["threadsafe"] }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+tempfile = "3"

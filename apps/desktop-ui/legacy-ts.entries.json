@@ -1,0 +1,654 @@
+{
+  "schemaVersion": 1,
+  "outputDirectory": "ui/generated-ts",
+  "entries": [
+    {
+      "id": "shelf-ui-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/main/shelf-ui-rules.ts",
+      "output": "shelf-ui-rules.js",
+      "globalName": "KunpengLegacyShelfUiRules",
+      "installExport": "installShelfUiRules",
+      "replaces": "ui/shelf-ui-rules.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "shelf-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/shelf-ui/shelf-ui.ts",
+      "output": "shelf-ui.js",
+      "globalName": "KunpengLegacyShelfUi",
+      "installExport": "installShelfUi",
+      "replaces": "ui/shelf-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-shell-preload-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/reader-shell-preload-ui.ts",
+      "output": "reader-shell-preload-ui.js",
+      "globalName": "KunpengReaderShellPreloadUi",
+      "installExport": "installReaderShellPreloadUi",
+      "replaces": "ui/reader-shell-preload-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "search-result-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/main-business/search-result-rules.ts",
+      "output": "search-result-rules.js",
+      "globalName": "KunpengLegacySearchResultRules",
+      "installExport": "installSearchResultRules",
+      "replaces": "ui/search-result-rules.js",
+      "hosts": ["ui/search.html"]
+    },
+    {
+      "id": "search-history-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/main-business/search-history-rules.ts",
+      "output": "search-history-rules.js",
+      "globalName": "KunpengLegacySearchHistoryRules",
+      "installExport": "installSearchHistoryRules",
+      "replaces": "ui/search-history-rules.js",
+      "hosts": ["ui/search.html"]
+    },
+    {
+      "id": "stats-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/main-business/stats-rules.ts",
+      "output": "stats-rules.js",
+      "globalName": "KunpengLegacyStatsRules",
+      "installExport": "installStatsRules",
+      "replaces": "ui/stats-rules.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "news-layout-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/main-business/news-layout-rules.ts",
+      "output": "news-layout-rules.js",
+      "globalName": "KunpengLegacyNewsLayoutRules",
+      "installExport": "installNewsLayoutRules",
+      "replaces": "ui/news-layout-rules.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "gesture-hint-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/main-business/gesture-hint-rules.ts",
+      "output": "gesture-hint-rules.js",
+      "globalName": "KunpengLegacyGestureHintRules",
+      "installExport": "installGestureHintRules",
+      "replaces": "ui/gesture-hint-rules.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-shell-state",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-entries/reader-shell-state.ts",
+      "output": "reader-shell-state.js",
+      "globalName": "KunpengLegacyReaderShell",
+      "installExport": "installReaderShell",
+      "replaces": "ui/reader-shell-state.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "reader-startup-guard",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-entries/reader-startup-guard.ts",
+      "output": "reader-startup-guard.js",
+      "globalName": "KunpengLegacyReaderStartupGuard",
+      "installExport": "installReaderStartupGuard",
+      "replaces": "ui/reader-startup-guard.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "reader-navigation-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-entries/reader-navigation-rules.ts",
+      "output": "reader-navigation-rules.js",
+      "globalName": "KunpengLegacyReaderNavigationRules",
+      "installExport": "installReaderNavigationRules",
+      "replaces": "ui/reader-navigation-rules.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "reader-jump-back-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-entries/reader-jump-back-rules.ts",
+      "output": "reader-jump-back-rules.js",
+      "globalName": "KunpengLegacyReaderJumpBackRules",
+      "installExport": "installReaderJumpBackRules",
+      "replaces": "ui/reader-jump-back-rules.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "titlebar",
+      "source": "apps/desktop-ui/src/legacy-ts/window-runtime/titlebar.ts",
+      "output": "titlebar.js",
+      "globalName": "KunpengLegacyTitlebar",
+      "installExport": "installTitlebar",
+      "replaces": "ui/titlebar.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "window-resize",
+      "source": "apps/desktop-ui/src/legacy-ts/window-runtime/window-resize.ts",
+      "output": "window-resize.js",
+      "globalName": "KunpengLegacyWindowResize",
+      "installExport": "installWindowResize",
+      "replaces": "ui/window-resize.js",
+      "hosts": ["ui/index.html", "ui/reader.html"]
+    },
+    {
+      "id": "startup-perf",
+      "source": "apps/desktop-ui/src/legacy-ts/window-runtime/startup-perf.ts",
+      "output": "startup-perf.js",
+      "globalName": "KunpengLegacyStartupPerf",
+      "installExport": "installStartupPerf",
+      "replaces": "ui/startup-perf.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "animation-settings",
+      "source": "apps/desktop-ui/src/legacy-ts/main/animation-settings.ts",
+      "output": "animation-settings.js",
+      "globalName": "KunpengLegacyAnimationSettings",
+      "installExport": "installAnimationSettings",
+      "replaces": "ui/animation-settings.js",
+      "hosts": ["ui/index.html", "ui/reader.html"]
+    },
+    {
+      "id": "overlay-stack",
+      "source": "apps/desktop-ui/src/legacy-ts/main/overlay-stack.ts",
+      "output": "overlay-stack.js",
+      "globalName": "KunpengLegacyOverlayStack",
+      "installExport": "installOverlayStack",
+      "replaces": "ui/overlay-stack.js",
+      "hosts": ["ui/index.html", "ui/reader.html"]
+    },
+    {
+      "id": "recovery-settings-snapshot",
+      "source": "apps/desktop-ui/src/legacy-ts/foundation/recovery-settings-snapshot.ts",
+      "output": "recovery-settings-snapshot.js",
+      "globalName": "KunpengRecoverySettingsSnapshot",
+      "installExport": "installRecoverySettingsSnapshot",
+      "replaces": "ui/recovery-settings-snapshot.js",
+      "hosts": ["ui/index.html", "ui/reader.html"]
+    },
+    {
+      "id": "browser-native-guard",
+      "source": "apps/desktop-ui/src/legacy-ts/foundation/browser-native-guard.ts",
+      "output": "browser-native-guard.js",
+      "globalName": "KunpengBrowserNativeGuard",
+      "installExport": "installBrowserNativeGuard",
+      "replaces": "ui/browser-native-guard.js",
+      "hosts": ["ui/index.html", "ui/reader.html", "ui/pdfview.html"]
+    },
+    {
+      "id": "reader-ai-history-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-rules/reader-ai-history-rules.ts",
+      "output": "reader-ai-history-rules.js",
+      "globalName": "ReaderAiHistoryRules",
+      "installExport": "installReaderAiHistoryRules",
+      "replaces": "ui/reader-ai-history-rules.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "reader-preference-color-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-rules/reader-preference-color-rules.ts",
+      "output": "reader-preference-color-rules.js",
+      "globalName": "ReaderPreferenceColorRules",
+      "installExport": "installReaderPreferenceColorRules",
+      "replaces": "ui/reader-preference-color-rules.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "reader-reading-metrics",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-metrics/reader-reading-metrics.ts",
+      "output": "reader-reading-metrics.js",
+      "globalName": "ReaderReadingMetrics",
+      "installExport": "installReaderReadingMetrics",
+      "replaces": "ui/reader-reading-metrics.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "shelf-cover-loading-rules",
+      "source": "apps/desktop-ui/src/legacy-ts/main-rules/shelf-cover-loading-rules.ts",
+      "output": "shelf-cover-loading-rules.js",
+      "globalName": "KunpengShelfCoverLoadingRules",
+      "installExport": "installShelfCoverLoadingRules",
+      "replaces": "ui/shelf-cover-loading-rules.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "news-gesture",
+      "source": "apps/desktop-ui/src/legacy-ts/main-rules/news-gesture.ts",
+      "output": "news-gesture.js",
+      "globalName": "KunpengNewsGesture",
+      "installExport": "installNewsGesture",
+      "replaces": "ui/news-gesture.js",
+      "hosts": ["ui/index.html", "ui/reader.html"]
+    },
+    {
+      "id": "semantic-status-cache",
+      "source": "apps/desktop-ui/src/legacy-ts/main/semantic-status-cache.ts",
+      "output": "semantic-status-cache.js",
+      "globalName": "KunpengSemanticStatusCache",
+      "installExport": "installSemanticStatusCache",
+      "replaces": "ui/semantic-status-cache.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-recommendation-settings",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-recommendations/reader-recommendation-settings.ts",
+      "output": "reader-recommendation-settings.js",
+      "globalName": "ReaderRecommendationSettings",
+      "installExport": "installReaderRecommendationSettings",
+      "replaces": "ui/reader-recommendation-settings.js",
+      "hosts": ["ui/index.html", "ui/reader.html"]
+    },
+    {
+      "id": "reader-message",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-messages/reader-message.ts",
+      "output": "reader-message.js",
+      "globalName": "ReaderMessageGuard",
+      "installExport": "installReaderMessageGuard",
+      "replaces": "ui/reader-message.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "startup-enhancement-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/window-runtime/startup-enhancement-ui.ts",
+      "output": "startup-enhancement-ui.js",
+      "globalName": "KunpengStartupEnhancementUi",
+      "installExport": "installStartupEnhancementUi",
+      "replaces": "ui/startup-enhancement-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "experimental-features",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/experimental-features.ts",
+      "output": "experimental-features.js",
+      "globalName": "KunpengExperimentalFeatures",
+      "installExport": "installExperimentalFeatures",
+      "replaces": "ui/experimental-features.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-bug-trace",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-trace/reader-bug-trace.ts",
+      "output": "reader-bug-trace.js",
+      "globalName": "ReaderBugTrace",
+      "installExport": "installReaderBugTrace",
+      "replaces": "ui/reader-bug-trace.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "reader-gesture",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-gesture/reader-gesture.ts",
+      "output": "reader-gesture.js",
+      "globalName": "ReaderGestureClose",
+      "installExport": "installReaderGesture",
+      "replaces": "ui/reader-gesture.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "booklist-settings-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/booklist-settings-ui.ts",
+      "output": "booklist-settings-ui.js",
+      "globalName": "KunpengBooklistSettingsUi",
+      "installExport": "installBooklistSettingsUi",
+      "replaces": "ui/booklist-settings-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "feedback-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/feedback-ui.ts",
+      "output": "feedback-ui.js",
+      "globalName": "KunpengFeedbackUi",
+      "installExport": "installFeedbackUi",
+      "replaces": "ui/feedback-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "settings-layout-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/settings-layout-ui.ts",
+      "output": "settings-layout-ui.js",
+      "globalName": "KunpengSettingsLayoutUi",
+      "installExport": "installSettingsLayout",
+      "replaces": "ui/settings-layout-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "animation-settings-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/animation-settings-ui.ts",
+      "output": "animation-settings-ui.js",
+      "globalName": "KunpengAnimationSettingsUi",
+      "installExport": "installAnimationSettingsUi",
+      "replaces": "ui/animation-settings-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "notice-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/foundation/notice-ui.ts",
+      "output": "notice-ui.js",
+      "globalName": "KunpengNoticeUi",
+      "installExport": "installNoticeUi",
+      "replaces": "ui/notice-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "dialog-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/foundation/dialog-ui.ts",
+      "output": "dialog-ui.js",
+      "globalName": "KunpengDialogUi",
+      "installExport": "installDialogUi",
+      "replaces": "ui/dialog-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "toolbar-settings-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/toolbar-settings-ui.ts",
+      "output": "toolbar-settings-ui.js",
+      "globalName": "KunpengToolbarSettingsUi",
+      "installExport": "installToolbarSettingsUi",
+      "replaces": "ui/toolbar-settings-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-search-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-search-ui/reader-search-ui.ts",
+      "output": "reader-search-ui.js",
+      "globalName": "ReaderSearchUi",
+      "installExport": "installReaderSearchUi",
+      "replaces": "ui/reader-search-ui.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "debug-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/debug-ui.ts",
+      "output": "debug-ui.js",
+      "globalName": "KunpengDebugUi",
+      "installExport": "installDebugUi",
+      "replaces": "ui/debug-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "api-settings-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/api-settings-ui.ts",
+      "output": "api-settings-ui.js",
+      "globalName": "KunpengApiSettingsUi",
+      "installExport": "installApiSettingsUi",
+      "replaces": "ui/api-settings-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "about-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/about-ui.ts",
+      "output": "about-ui.js",
+      "globalName": "KunpengAboutUi",
+      "installExport": "installAboutUi",
+      "replaces": "ui/about-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "app-i18n",
+      "source": "apps/desktop-ui/src/legacy-ts/main-i18n/app-i18n.ts",
+      "output": "app-i18n.js",
+      "globalName": "KunpengLegacyAppI18n",
+      "installExport": "installAppI18n",
+      "replaces": "ui/app-i18n.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "sync-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/sync-ui/sync-ui.ts",
+      "output": "sync-ui.js",
+      "globalName": "KunpengLegacySyncUi",
+      "installExport": "installSyncUi",
+      "replaces": "ui/sync-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "library-ai",
+      "source": "apps/desktop-ui/src/legacy-ts/library-ai/library-ai.ts",
+      "output": "library-ai.js",
+      "globalName": "KunpengLibraryAi",
+      "installExport": "installLibraryAi",
+      "replaces": "ui/library-ai.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "main-app",
+      "source": "apps/desktop-ui/src/legacy-ts/main-app/app.ts",
+      "output": "app.js",
+      "globalName": "KunpengLegacyMainApp",
+      "installExport": "installMainApp",
+      "replaces": "ui/app.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "library-ai-entry",
+      "source": "apps/desktop-ui/src/legacy-ts/main-business/library-ai-entry.ts",
+      "output": "library-ai-entry.js",
+      "globalName": "KunpengLibraryAiEntry",
+      "installExport": "installLibraryAiEntry",
+      "replaces": "ui/library-ai-entry.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-cross-search-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-cross-search-ui/reader-cross-search-ui.ts",
+      "output": "reader-cross-search-ui.js",
+      "globalName": "ReaderCrossSearchUi",
+      "installExport": "installReaderCrossSearchUi",
+      "replaces": "ui/reader-cross-search-ui.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "auto-import-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/auto-import-ui.ts",
+      "output": "auto-import-ui.js",
+      "globalName": "KunpengAutoImportUi",
+      "installExport": "installAutoImportUi",
+      "replaces": "ui/auto-import-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "book-classification-settings-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/book-classification-settings-ui.ts",
+      "output": "book-classification-settings-ui.js",
+      "globalName": "KunpengBookClassificationSettingsUi",
+      "installExport": "installBookClassificationSettingsUi",
+      "replaces": "ui/book-classification-settings-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-i18n",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-i18n/reader-i18n.ts",
+      "output": "reader-i18n.js",
+      "globalName": "ReaderI18nInstaller",
+      "installExport": "installReaderI18n",
+      "replaces": "ui/reader-i18n.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "app-i18n-reranker-catalog",
+      "source": "apps/desktop-ui/src/legacy-ts/i18n-catalogs/app-i18n-reranker-catalog.ts",
+      "output": "app-i18n-reranker-catalog.js",
+      "globalName": "KunpengRerankerCatalog",
+      "installExport": "installRerankerCatalog",
+      "replaces": "ui/app-i18n-reranker-catalog.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "book-info-panel",
+      "source": "apps/desktop-ui/src/legacy-ts/main-book-info/book-info-panel.ts",
+      "output": "book-info-panel.js",
+      "globalName": "KunpengBookInfoPanel",
+      "installExport": "installBookInfoPanel",
+      "replaces": "ui/book-info-panel.js",
+      "hosts": ["ui/index.html", "ui/reader.html"]
+    },
+    {
+      "id": "book-info-related",
+      "source": "apps/desktop-ui/src/legacy-ts/main-book-info/book-info-related.ts",
+      "output": "book-info-related.js",
+      "globalName": "KunpengBookInfoRelated",
+      "installExport": "installBookInfoRelated",
+      "replaces": "ui/book-info-related.js",
+      "hosts": ["ui/index.html", "ui/reader.html"]
+    },
+    {
+      "id": "app-i18n-stats-catalog",
+      "source": "apps/desktop-ui/src/legacy-ts/i18n-catalogs/app-i18n-stats-catalog.ts",
+      "output": "app-i18n-stats-catalog.js",
+      "globalName": "KunpengStatsCatalog",
+      "installExport": "installStatsCatalog",
+      "replaces": "ui/app-i18n-stats-catalog.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "app-i18n-semantic-runtime-catalog",
+      "source": "apps/desktop-ui/src/legacy-ts/i18n-catalogs/app-i18n-semantic-runtime-catalog.ts",
+      "output": "app-i18n-semantic-runtime-catalog.js",
+      "globalName": "KunpengSemanticRuntimeCatalog",
+      "installExport": "installSemanticRuntimeCatalog",
+      "replaces": "ui/app-i18n-semantic-runtime-catalog.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "book-info-organization",
+      "source": "apps/desktop-ui/src/legacy-ts/main-book-info/book-info-organization.ts",
+      "output": "book-info-organization.js",
+      "globalName": "KunpengBookInfoOrganization",
+      "installExport": "installBookInfoOrganization",
+      "replaces": "ui/book-info-organization.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "search-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-search/search-ui.ts",
+      "output": "search-ui.js",
+      "globalName": "KunpengSearchUi",
+      "installExport": "installSearchUi",
+      "replaces": "ui/search-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "app-i18n-news-surface-catalog",
+      "source": "apps/desktop-ui/src/legacy-ts/i18n-catalogs/app-i18n-news-surface-catalog.ts",
+      "output": "app-i18n-news-surface-catalog.js",
+      "globalName": "KunpengNewsSurfaceCatalog",
+      "installExport": "installNewsSurfaceCatalog",
+      "replaces": "ui/app-i18n-news-surface-catalog.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "vocab-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-vocab/vocab-ui.ts",
+      "output": "vocab-ui.js",
+      "globalName": "KunpengVocabUi",
+      "installExport": "installVocabUi",
+      "replaces": "ui/vocab-ui.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "stats-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-stats/stats-ui.ts",
+      "output": "stats-ui.js",
+      "globalName": "KunpengStatsUi",
+      "installExport": "installStatsUi",
+      "replaces": "ui/stats-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-notes-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-notes/reader-notes-ui.ts",
+      "output": "reader-notes-ui.js",
+      "globalName": "KunpengReaderNotesUi",
+      "installExport": "installReaderNotesUi",
+      "replaces": "ui/reader-notes-ui.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "search-window",
+      "source": "apps/desktop-ui/src/legacy-ts/search-window/search.ts",
+      "output": "search.js",
+      "globalName": "KunpengSearchWindow",
+      "installExport": "installSearchWindow",
+      "replaces": "ui/search.js",
+      "hosts": ["ui/search.html"]
+    },
+    {
+      "id": "problem-trace-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-settings/problem-trace-ui.ts",
+      "output": "problem-trace-ui.js",
+      "globalName": "KunpengProblemTraceUI",
+      "installExport": "installProblemTraceUi",
+      "replaces": "ui/problem-trace-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-click-zones-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-click-zones-ui/reader-click-zones-ui.ts",
+      "output": "reader-click-zones-ui.js",
+      "globalName": "KunpengLegacyReaderClickZones",
+      "installExport": "installReaderClickZones",
+      "replaces": "ui/reader-click-zones-ui.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "semantic-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-semantic/semantic-ui.ts",
+      "output": "semantic-ui.js",
+      "globalName": "KunpengSemanticUi",
+      "installExport": "installSemanticUi",
+      "replaces": "ui/semantic-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "news-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-news/news-ui.ts",
+      "output": "news-ui.js",
+      "globalName": "KunpengLegacyNewsUi",
+      "installExport": "installNewsUi",
+      "replaces": "ui/news-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "intelligence-workspace-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-news/intelligence-workspace-ui.ts",
+      "output": "intelligence-workspace-ui.js",
+      "globalName": "KunpengIntelligenceWorkspaceUi",
+      "installExport": "installIntelligenceWorkspaceUi",
+      "replaces": "ui/intelligence-workspace-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "reader-settings-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-settings-ui/reader-settings-ui.ts",
+      "output": "reader-settings-ui.js",
+      "globalName": "KunpengReaderSettingsUi",
+      "installExport": "installReaderSettingsUi",
+      "replaces": "ui/reader-settings-ui.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "reader-preferences-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-preferences-ui/reader-preferences-ui.ts",
+      "output": "reader-preferences-ui.js",
+      "globalName": "KunpengReaderPreferencesUi",
+      "installExport": "installReaderPreferencesUi",
+      "replaces": "ui/reader-preferences-ui.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "reader-shell",
+      "source": "apps/desktop-ui/src/legacy-ts/reader-shell/reader.ts",
+      "output": "reader.js",
+      "globalName": "KunpengLegacyReaderShellRuntime",
+      "installExport": "installReaderShellRuntime",
+      "replaces": "ui/reader.js",
+      "hosts": ["ui/reader.html"]
+    },
+    {
+      "id": "gesture-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/gesture-ui/gesture-ui.ts",
+      "output": "gesture-ui.js",
+      "globalName": "KunpengLegacyGestureUi",
+      "installExport": "installGestureUi",
+      "replaces": "ui/gesture-ui.js",
+      "hosts": ["ui/index.html"]
+    }
+  ]
+}

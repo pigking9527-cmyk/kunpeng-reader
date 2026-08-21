@@ -1,0 +1,41 @@
+{
+  "description": "Optional v5 entities: cross-device continuation carries only a stable content identity, and custom feeds are synchronized only when the subscription option is explicitly enabled.",
+  "entities": [
+    {
+      "id": "default",
+      "kind": "reading_handoff_v1",
+      "updated_at": 1786966800000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": {
+        "version": 1,
+        "contentId": "b8d847c7a37086b208e5455d0f515435a3e090f3f4f52d977590a6c9b156c407"
+      }
+    },
+    {
+      "id": "default",
+      "kind": "news_subscriptions_v1",
+      "updated_at": 1786966801000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": {
+        "version": 1,
+        "sources": [
+          {
+            "id": "custom-rss-fixture",
+            "name": "Fixture public feed",
+            "url": "https://feeds.example.invalid/public.xml",
+            "category": "Technology"
+          }
+        ]
+      }
+    }
+  ],
+  "privacyAssertions": {
+    "handoffExcludes": ["localBookId", "path", "file", "cover", "bookText"],
+    "subscriptionsExclude": ["articles", "cache", "sourceHealth", "readHistory"],
+    "subscriptionsRequireExplicitOptIn": true
+  }
+}

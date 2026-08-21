@@ -1,0 +1,59 @@
+/* 图书信息页后续信息层：书架与阅读页共用。 */
+.book-info-related-modal .modal-title-stack { display:flex; min-width:0; flex-direction:column; gap:3px; }
+.book-info-related-modal .modal-title-stack strong { color:#26364c; font-size:16px; }
+.book-info-related-modal .modal-title-stack small { overflow:hidden; color:#8390a3; font-size:12px; font-weight:400; text-overflow:ellipsis; white-space:nowrap; }
+.book-related-head { align-items:flex-start; padding:17px 19px 14px; border-bottom:1px solid #e7ebf2; }
+.book-info-related-modal .btn-plain { min-width:32px; min-height:30px; padding:4px 9px; border:1px solid #d9e0ea; border-radius:8px; background:#fff; color:#647187; font:inherit; cursor:pointer; }
+.book-info-related-modal .btn-plain:hover { border-color:#b7c7df; background:#f4f7fb; color:#315f9e; }
+.book-info-related-modal .similar-books-card { width:min(660px,calc(100vw - 40px)); max-height:min(760px,calc(100vh - 48px)); padding:0; overflow:hidden; }
+.book-info-related-modal .similar-list { display:flex; min-height:180px; max-height:calc(100vh - 150px); padding:14px 18px 20px; overflow-y:auto; background:#f7f9fc; flex-direction:column; gap:9px; }
+.book-info-related-modal .similar-item { display:grid; grid-template-columns:58px minmax(0,1fr); align-items:center; gap:13px; width:100%; padding:10px; border:1px solid #e4e9f1; border-radius:12px; background:#fff; color:inherit; font:inherit; text-align:left; cursor:pointer; transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease; }
+.book-info-related-modal .similar-item:hover { border-color:#b9ccef; box-shadow:0 8px 24px rgba(45,74,121,.10); transform:translateY(-1px); }
+.book-info-related-modal .similar-cover { position:relative; display:flex; width:58px; height:80px; overflow:hidden; border-radius:8px; background:#3e5a8c; box-shadow:0 3px 10px rgba(32,45,66,.20); }
+.book-info-related-modal .similar-cover.has-img { background:#eef1f5; }
+.book-info-related-modal .similar-cover img { width:100%; height:100%; object-fit:cover; }
+.book-info-related-modal .similar-cover .spine { position:absolute; inset:0 auto 0 0; width:6px; background:rgba(0,0,0,.2); }
+.book-info-related-modal .similar-cover .gen { flex:1; padding:10px 7px 8px 11px; overflow:hidden; color:#fff; font-size:11px; line-height:1.35; }
+.book-info-related-modal .similar-body { display:flex; min-width:0; flex-direction:column; }
+.book-info-related-modal .similar-title { overflow:hidden; color:#28384e; font-size:14px; text-overflow:ellipsis; white-space:nowrap; }
+.book-info-related-modal .similar-meta { margin-top:5px; overflow:hidden; color:#7b8798; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.book-info-related-modal .similar-description { display:-webkit-box; margin-top:7px; overflow:hidden; color:#5f6c7f; font-size:12px; line-height:1.5; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
+.book-info-related-modal .similar-score { display:block; height:4px; margin-top:9px; overflow:hidden; border-radius:999px; background:#e9edf4; }
+.book-info-related-modal .similar-score > span { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#4e7cf1,#42b39d); }
+.book-related-empty { display:grid; min-height:150px; place-items:center; padding:28px; color:#7d8999; font-size:13px; line-height:1.6; text-align:center; }
+.book-related-empty.is-loading::before { content:""; width:22px; height:22px; margin-right:10px; border:2px solid #d9e2f0; border-top-color:#4f7fe8; border-radius:50%; animation:book-related-spin .8s linear infinite; }
+@keyframes book-related-spin { to { transform:rotate(360deg); } }
+
+.book-info-related-modal .timeline-card { width:min(900px,calc(100vw - 40px)); max-height:min(820px,calc(100vh - 48px)); padding:0; overflow:hidden; border-radius:18px; }
+.book-info-related-modal .timeline-body { display:flex; min-height:320px; padding:18px 20px 24px; overflow-y:auto; background:linear-gradient(145deg,#f6f8fc,#fbfcfe); flex-direction:column; gap:15px; }
+.timeline-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+.timeline-summary > div { position:relative; display:flex; min-width:0; min-height:82px; padding:14px 15px; overflow:hidden; border:1px solid rgba(220,228,240,.95); border-radius:14px; background:rgba(255,255,255,.9); box-shadow:0 5px 18px rgba(46,68,105,.06); flex-direction:column; gap:7px; }
+.timeline-summary > div::after { content:""; position:absolute; right:-14px; bottom:-22px; width:64px; height:64px; border-radius:50%; background:linear-gradient(135deg,rgba(92,124,244,.14),rgba(58,179,157,.05)); }
+.timeline-summary span { color:#8290a4; font-size:11px; }
+.timeline-summary strong { overflow:hidden; color:#2c3e58; font-size:17px; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+.timeline-panel { padding:17px 18px; border:1px solid #e1e7f0; border-radius:15px; background:rgba(255,255,255,.92); box-shadow:0 6px 22px rgba(46,68,105,.06); }
+.timeline-panel-head { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; }
+.timeline-panel-head > div { display:flex; flex-direction:column; gap:2px; }
+.timeline-panel-head h3 { margin:0; color:#2a3b52; font-size:15px; }
+.timeline-panel-head > span { color:#8b97a8; font-size:11px; }
+.timeline-eyebrow { color:#5a7bdd; font-size:9px; font-weight:750; letter-spacing:.12em; }
+.book-info-related-modal .timeline-chart { margin-top:12px; overflow-x:auto; }
+.book-info-related-modal .timeline-chart svg { display:block; width:100%; min-width:620px; height:166px; }
+.book-info-related-modal .timeline-chart line { stroke:#e1e7ef; stroke-width:1; stroke-dasharray:3 5; }
+.book-info-related-modal .timeline-bar rect { fill:url(#timeline-bar-gradient); transition:opacity .14s ease; }
+.book-info-related-modal .timeline-bar:hover rect { opacity:.72; }
+.book-info-related-modal .timeline-bar text { fill:#7f8da0; font:10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.timeline-chart-caption { display:flex; justify-content:space-between; gap:12px; margin-top:5px; color:#8b97a8; font-size:10px; }
+.timeline-event-list { position:relative; margin-top:13px; padding-left:5px; }
+.timeline-event-list::before { content:""; position:absolute; top:12px; bottom:12px; left:11px; width:1px; background:linear-gradient(#6d8df0,#cfd8e8 85%,transparent); }
+.timeline-event-card { position:relative; display:grid; grid-template-columns:14px minmax(0,1fr) auto; align-items:center; gap:12px; min-height:58px; padding:7px 6px; }
+.timeline-event-dot { z-index:1; width:9px; height:9px; border:3px solid #fff; border-radius:50%; background:#6688ed; box-shadow:0 0 0 2px rgba(102,136,237,.22); }
+.timeline-event-date { display:flex; min-width:0; flex-direction:column; gap:3px; }
+.timeline-event-date strong { overflow:hidden; color:#40516a; font-size:12px; font-weight:600; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+.timeline-event-date span { color:#929dab; font-size:10px; }
+.timeline-event-place { display:flex; align-items:center; gap:12px; color:#6d798b; font-size:12px; }
+.timeline-event-place strong { min-width:54px; padding:5px 8px; border-radius:999px; background:#edf2ff; color:#4f70d2; font-size:12px; text-align:center; }
+body.theme-dark .book-info-related-modal .modal-card,body.theme-dark .timeline-panel,body.theme-dark .timeline-summary > div,body.theme-dark .book-info-related-modal .similar-item { border-color:#454d59; background:#2c3037; color:#d8e0eb; }
+body.theme-dark .book-info-related-modal .timeline-body,body.theme-dark .book-info-related-modal .similar-list { background:#24282e; }
+body.theme-dark .book-info-related-modal .modal-title-stack strong,body.theme-dark .timeline-panel-head h3,body.theme-dark .timeline-summary strong,body.theme-dark .book-info-related-modal .similar-title,body.theme-dark .timeline-event-date strong { color:#e1e7ef; }
+@media (max-width:680px) { .timeline-summary { grid-template-columns:repeat(2,minmax(0,1fr)); } .timeline-panel-head { align-items:flex-start; flex-direction:column; gap:5px; } .timeline-event-card { grid-template-columns:14px minmax(0,1fr); } .timeline-event-place { grid-column:2; justify-content:space-between; } }

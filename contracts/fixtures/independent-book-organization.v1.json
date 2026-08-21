@@ -1,0 +1,42 @@
+{
+  "syncProtocolVersion": 1,
+  "entities": [
+    {
+      "id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "kind": "user_book_tags_v1",
+      "updated_at": 1786153200000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": {
+        "schema_version": 1,
+        "content_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "tags": ["待读", "历史"]
+      }
+    },
+    {
+      "id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "kind": "book_collections_v1",
+      "updated_at": 1786153200001,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop",
+      "sync_version": 1,
+      "payload": {
+        "schema_version": 1,
+        "content_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "collections": ["近期待读"]
+      }
+    }
+  ],
+  "legacyOverwriteMustNotChangeIndependentEntities": {
+    "kind": "book_state_v2",
+    "id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "payload": {
+      "schema_version": 4,
+      "content_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "progress": 55,
+      "tags": [],
+      "collections": []
+    }
+  }
+}

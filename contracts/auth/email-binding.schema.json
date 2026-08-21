@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.kunpeng-reader.invalid/auth/email-binding.schema.json",
+  "title": "Kunpeng Reader authenticated email binding API objects",
+  "oneOf": [
+    { "$ref": "#/$defs/emailStartRequest" },
+    { "$ref": "#/$defs/emailConfirmRequest" },
+    { "$ref": "#/$defs/rebindOldConfirmRequest" },
+    { "$ref": "#/$defs/rebindNewStartRequest" },
+    { "$ref": "#/$defs/challengeResponse" },
+    { "$ref": "#/$defs/rebindGrantResponse" }
+  ],
+  "$defs": {
+    "email": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 254,
+      "format": "email"
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^[0-9]{6}$"
+    },
+    "requestId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "emailStartRequest": {
+      "type": "object",
+      "required": ["email"],
+      "properties": { "email": { "$ref": "#/$defs/email" } },
+      "additionalProperties": false
+    },
+    "emailConfirmRequest": {
+      "type": "object",
+      "required": ["email", "code"],
+      "properties": {
+        "email": { "$ref": "#/$defs/email" },
+        "code": { "$ref": "#/$defs/code" }
+      },
+      "additionalProperties": false
+    },
+    "rebindOldConfirmRequest": {
+      "type": "object",
+      "required": ["code"],
+      "properties": { "code": { "$ref": "#/$defs/code" } },
+      "additionalProperties": false
+    },
+    "rebindNewStartRequest": {
+      "type": "object",
+      "required": ["email", "rebindGrant"],
+      "properties": {
+        "email": { "$ref": "#/$defs/email" },
+        "rebindGrant": { "type": "string", "minLength": 1, "maxLength": 256 }
+      },
+      "additionalProperties": false
+    },
+    "challengeResponse": {
+      "type": "object",
+      "required": ["ok", "expiresIn", "requestId"],
+      "properties": {
+        "ok": { "const": true },
+        "expiresIn": { "const": 900 },
+        "requestId": { "$ref": "#/$defs/requestId" }
+      },
+      "additionalProperties": false
+    },
+    "rebindGrantResponse": {
+      "type": "object",
+      "required": ["ok", "rebindGrant", "requestId"],
+      "properties": {
+        "ok": { "const": true },
+        "rebindGrant": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "requestId": { "$ref": "#/$defs/requestId" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

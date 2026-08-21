@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 4,
+  "recordedAt": "2026-01-01T00:00:00.000Z",
+  "sample": {
+    "id": "LEGAL-SAMPLE-001",
+    "format": "epub",
+    "sha256": "64 lowercase hexadecimal characters",
+    "license": "SPDX-or-approved-license-reference",
+    "sourceId": "approved-source-reference",
+    "unitKind": "chapters",
+    "unitCount": 12
+  },
+  "environment": {
+    "appBuild": "1.0.0",
+    "platform": "macos-arm64",
+    "deviceId": "bench-device-01"
+  },
+  "metrics": {
+    "firstReadableMs": {
+      "measurementCondition": "cold-start",
+      "warmupMs": [120, 115, 118],
+      "measuredMs": [109, 112, 110, 108, 111],
+      "p50Ms": 110,
+      "p95Ms": 112
+    },
+    "turnPageMs": {
+      "measurementCondition": "warmed",
+      "warmupMs": [42, 41, 43],
+      "measuredMs": [40, 41, 42, 43, 44],
+      "p50Ms": 42,
+      "p95Ms": 44
+    },
+    "searchMs": {
+      "measurementCondition": "warmed",
+      "warmupMs": [62, 61, 63],
+      "measuredMs": [60, 61, 62, 63, 64],
+      "p50Ms": 62,
+      "p95Ms": 64
+    }
+  },
+  "evidence": [
+    {
+      "id": "EPUB-FIRST-PAGE",
+      "kind": "screenshot",
+      "sha256": "64 lowercase hexadecimal characters"
+    },
+    {
+      "id": "EPUB-PAGE-TURN",
+      "kind": "recording",
+      "sha256": "64 lowercase hexadecimal characters"
+    },
+    {
+      "id": "EPUB-SEARCH",
+      "kind": "screenshot",
+      "sha256": "64 lowercase hexadecimal characters"
+    }
+  ],
+  "closeCycleMemory": {
+    "cycle5MiB": 420,
+    "cycle20MiB": 435,
+    "growthMiB": 15,
+    "within100MiBLimit": true
+  },
+  "privacy": {
+    "samplePathRecorded": false,
+    "titleRecorded": false,
+    "contentRecorded": false,
+    "screenshotOrVideoContentRecorded": false,
+    "evidencePathRecorded": false,
+    "evidenceMetadataRecorded": true
+  }
+}

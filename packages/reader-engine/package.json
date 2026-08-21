@@ -1,0 +1,6 @@
+{
+  "name": "@kunpeng/reader-engine",
+  "private": true,
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "type": "module"
+}

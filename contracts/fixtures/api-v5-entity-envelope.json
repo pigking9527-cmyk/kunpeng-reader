@@ -1,0 +1,17 @@
+{
+  "id": "book-state-fixture-001",
+  "kind": "book_state_v2",
+  "updatedAt": 1786521600123,
+  "deletedAt": 0,
+  "deviceId": "fixture-device-a",
+  "syncVersion": 7,
+  "payload": {
+    "schema_version": 2,
+    "content_id": "fixture-content-001",
+    "progress": 42.5,
+    "futurePayloadField": {
+      "preserved": true
+    }
+  },
+  "futureEnvelopeField": "preserve-me"
+}
