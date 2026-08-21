@@ -7,25 +7,62 @@
 use serde_json::Value;
 
 pub(super) fn version_is_newer(candidate: &str, current: &str) -> bool {
-    let parse = |value: &str| -> Vec<u32> {
-        value
+    fn parse(value: &str) -> (Vec<u64>, Option<Vec<&str>>) {
+        let version = value
             .trim()
             .trim_start_matches(['v', 'V'])
-            .split('.')
-            .map(|segment| segment.trim().parse().unwrap_or(0))
-            .collect()
-    };
-    let (candidate, current) = (parse(candidate), parse(current));
-    for index in 0..candidate.len().max(current.len()) {
+            .split_once('+')
+            .map_or_else(
+                || value.trim().trim_start_matches(['v', 'V']),
+                |(left, _)| left,
+            );
+        let (core, prerelease) = version
+            .split_once('-')
+            .map_or((version, None), |(core, prerelease)| {
+                (core, Some(prerelease.split('.').collect::<Vec<_>>()))
+            });
+        (
+            core.split('.')
+                .map(|segment| segment.trim().parse().unwrap_or(0))
+                .collect(),
+            prerelease,
+        )
+    }
+    let (candidate_core, candidate_prerelease) = parse(candidate);
+    let (current_core, current_prerelease) = parse(current);
+    for index in 0..candidate_core.len().max(current_core.len()) {
         let (left, right) = (
-            candidate.get(index).copied().unwrap_or(0),
-            current.get(index).copied().unwrap_or(0),
+            candidate_core.get(index).copied().unwrap_or(0),
+            current_core.get(index).copied().unwrap_or(0),
         );
         if left != right {
             return left > right;
         }
     }
-    false
+    match (candidate_prerelease, current_prerelease) {
+        (None, Some(_)) => true,
+        (Some(_), None) | (None, None) => false,
+        (Some(candidate), Some(current)) => {
+            for index in 0..candidate.len().max(current.len()) {
+                let Some(left) = candidate.get(index) else {
+                    return false;
+                };
+                let Some(right) = current.get(index) else {
+                    return true;
+                };
+                let ordering = match (left.parse::<u64>(), right.parse::<u64>()) {
+                    (Ok(left), Ok(right)) => left.cmp(&right),
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Err(_)) => left.cmp(right),
+                };
+                if !ordering.is_eq() {
+                    return ordering.is_gt();
+                }
+            }
+            false
+        }
+    }
 }
 
 pub(super) fn release_tag(value: &Value) -> String {
@@ -38,6 +75,30 @@ pub(super) fn release_tag(value: &Value) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+/// Returns the first non-draft prerelease from GitHub's reverse-chronological
+/// releases listing. Stable clients deliberately do not consume this fallback.
+pub(super) fn latest_prerelease(value: &Value) -> Option<&Value> {
+    value.as_array()?.iter().find(|release| {
+        release
+            .get("prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !release
+                .get("draft")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            && !release_tag(release).is_empty()
+    })
+}
+
+pub(super) fn version_is_prerelease(value: &str) -> bool {
+    let value = value.trim().trim_start_matches(['v', 'V']);
+    value
+        .split_once('+')
+        .map_or(value, |(core, _)| core)
+        .contains('-')
 }
 
 pub(super) fn release_notes(value: &Value) -> String {
@@ -129,6 +190,11 @@ pub(super) fn configured_github_repo(value: Option<&str>) -> Option<&str> {
     Some(value)
 }
 
+pub(super) fn github_repo_from_url(value: &str) -> Option<&str> {
+    let repo = value.trim().strip_prefix("https://github.com/")?;
+    configured_github_repo(Some(repo.trim_end_matches('/')))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +206,9 @@ mod tests {
         assert!(version_is_newer("1.9", "1.8.99"));
         assert!(!version_is_newer("1.8", "1.8.0"));
         assert!(!version_is_newer("1.8.0", "1.8.1"));
+        assert!(version_is_newer("1.0.0", "1.0.0-beta.1"));
+        assert!(version_is_newer("1.0.0-beta.2", "1.0.0-beta.1"));
+        assert!(!version_is_newer("1.0.0-beta.1", "1.0.0"));
     }
 
     #[test]
@@ -163,6 +232,21 @@ mod tests {
     }
 
     #[test]
+    fn prerelease_helpers_ignore_drafts_and_stable_releases() {
+        let releases = json!([
+            {"tag_name":"v2.0.0", "draft":false, "prerelease":false},
+            {"tag_name":"v2.0.0-beta.2", "draft":true, "prerelease":true},
+            {"tag_name":"v2.0.0-beta.1", "draft":false, "prerelease":true}
+        ]);
+        assert_eq!(
+            release_tag(latest_prerelease(&releases).unwrap()),
+            "v2.0.0-beta.1"
+        );
+        assert!(version_is_prerelease("v1.0.0-beta.1+build.5"));
+        assert!(!version_is_prerelease("1.0.0"));
+    }
+
+    #[test]
     fn endpoint_and_repository_validation_rejects_non_public_configuration() {
         assert_eq!(
             join_https_update_url("https://reader.example/updates/", "latest"),
@@ -172,6 +256,10 @@ mod tests {
         assert!(join_https_update_url(" https://reader.example/bad path ", "latest").is_none());
         assert_eq!(
             configured_github_repo(Some("owner/repo-name")),
+            Some("owner/repo-name")
+        );
+        assert_eq!(
+            github_repo_from_url("https://github.com/owner/repo-name"),
             Some("owner/repo-name")
         );
         assert!(configured_github_repo(Some("owner/repo/extra")).is_none());
