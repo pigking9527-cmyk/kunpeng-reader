@@ -77,6 +77,30 @@ pub(super) fn release_tag(value: &Value) -> String {
         .to_string()
 }
 
+/// Returns the first non-draft prerelease from GitHub's reverse-chronological
+/// releases listing. Stable clients deliberately do not consume this fallback.
+pub(super) fn latest_prerelease(value: &Value) -> Option<&Value> {
+    value.as_array()?.iter().find(|release| {
+        release
+            .get("prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !release
+                .get("draft")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            && !release_tag(release).is_empty()
+    })
+}
+
+pub(super) fn version_is_prerelease(value: &str) -> bool {
+    let value = value.trim().trim_start_matches(['v', 'V']);
+    value
+        .split_once('+')
+        .map_or(value, |(core, _)| core)
+        .contains('-')
+}
+
 pub(super) fn release_notes(value: &Value) -> String {
     value
         .get("body")
@@ -185,6 +209,21 @@ mod tests {
         assert!(version_is_newer("1.0.0", "1.0.0-beta.1"));
         assert!(version_is_newer("1.0.0-beta.2", "1.0.0-beta.1"));
         assert!(!version_is_newer("1.0.0-beta.1", "1.0.0"));
+    }
+
+    #[test]
+    fn prerelease_helpers_ignore_drafts_and_stable_releases() {
+        let releases = json!([
+            {"tag_name":"v2.0.0", "draft":false, "prerelease":false},
+            {"tag_name":"v2.0.0-beta.2", "draft":true, "prerelease":true},
+            {"tag_name":"v2.0.0-beta.1", "draft":false, "prerelease":true}
+        ]);
+        assert_eq!(
+            release_tag(latest_prerelease(&releases).unwrap()),
+            "v2.0.0-beta.1"
+        );
+        assert!(version_is_prerelease("v1.0.0-beta.1+build.5"));
+        assert!(!version_is_prerelease("1.0.0"));
     }
 
     #[test]

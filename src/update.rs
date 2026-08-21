@@ -3,8 +3,8 @@ use serde::Serialize;
 mod rules;
 use rules::{
     bundled_release_notes, configured_github_repo, github_repo_from_url, join_https_update_url,
-    placeholder_release_notes, release_notes as parsed_release_notes, release_tag, release_url,
-    safe_release_tag, version_is_newer,
+    latest_prerelease, placeholder_release_notes, release_notes as parsed_release_notes,
+    release_tag, release_url, safe_release_tag, version_is_newer, version_is_prerelease,
 };
 
 const GITHUB_REPO: Option<&str> = option_env!("KUNPENG_GITHUB_REPO");
@@ -114,6 +114,26 @@ fn check_update_blocking() -> UpdateInfo {
                     source: "github".to_string(),
                     current,
                 };
+            }
+        }
+        if version_is_prerelease(&current) {
+            let prereleases = format!("https://api.github.com/repos/{repo}/releases?per_page=10");
+            if let Some(releases) = fetch_json(&agent, &prereleases) {
+                if let Some(release) = latest_prerelease(&releases) {
+                    let tag = release_tag(release);
+                    if !tag.is_empty() {
+                        let latest = tag.trim_start_matches(['v', 'V']).to_string();
+                        return UpdateInfo {
+                            ok: true,
+                            has_update: version_is_newer(&latest, &current),
+                            latest,
+                            notes: parsed_release_notes(release),
+                            url: release_url(release, &page),
+                            source: "github-prerelease".to_string(),
+                            current,
+                        };
+                    }
+                }
             }
         }
     }
