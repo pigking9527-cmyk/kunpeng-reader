@@ -91,7 +91,9 @@ try {
 
   if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
     Write-Host '== cargo audit =='
-    Invoke-NativeCheck 'cargo audit' { cargo audit --no-yanked }
+    # Keep this compatible with current cargo-audit releases, which no longer
+    # accept the historical --no-yanked switch.
+    Invoke-NativeCheck 'cargo audit' { cargo audit }
   } else {
     Write-Warning 'cargo-audit is not installed; CI installs it and enforces the audit gate.'
   }
