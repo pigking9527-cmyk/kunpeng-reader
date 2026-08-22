@@ -3,7 +3,8 @@
   "expectedDirectTauriOccurrences": 0,
   "visualContract": {
     "html": {
-      "ui/index.html": "a307bb5a51808ac22440e5d6f12faf8f881d76d49e9a7a269914ed8200f2e2e7",
+      "ui/index.html": "8397d8574c6017089034fc5021db0cb71e5a23f75ddcb48dd4123ba518382906",
+      "ui/newsnow-article-shell.html": "52a2a46840b4e372b785aca34da2d6714be8cda36082a1273ecfeb564fbe56bf",
       "ui/pdfview.html": "d0de4f5c7e6c278e157d2ca370ee26c463afab647bff5a16b3f616a836dfab00",
       "ui/reader-page-style.html": "cee3915099b8b34970011c4f6eaf63c5f4b37b1d6a63797a528547ac3b9ab06c",
       "ui/reader.html": "5a80480c53922433c4216b207a0c0fc4db3ea8a4b1f229279edf4447f4b6aae5",
@@ -16,7 +17,7 @@
       "ui/overlay-stack.css": "6dd1e8166fa7d004dfc69f4e6b12aac75cd0e94d3e6b5ec2de08b0119970b92a",
       "ui/reader-click-zones.css": "f0881621eee64692f3851a90c13b84a104d0e8bc88b103627982fe2d3ae04fa7",
       "ui/reader-preferences.css": "aa16df648f5e651fd22f07b1699cdda008f81a243d22d4962ebe448741b52a35",
-      "ui/styles.css": "53a4cf4cf951eb00338be23afa36e8a48067f4380562bff2e094a00925de4164",
+      "ui/styles.css": "13a378b4bbb91f267fba63f74fca2ed99d9c024f02e9f5a6cd5b45f4dc5a0b1b",
       "ui/window-resize.css": "db2a368b04f36295c8dc3a39f709838334171029fc3c6ba5960e6c8f0a7e1334"
     }
   },

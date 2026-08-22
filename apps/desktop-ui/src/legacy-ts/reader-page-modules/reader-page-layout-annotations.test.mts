@@ -200,8 +200,45 @@ test("macOS click paging never clips the whole page when live slice geometry is 
   assert.match(String(style.clipPath), /^inset\(0px 0px [1-9]\d*px 0px\)$/u);
 });
 
+test("Windows scroll paging never hides source text using a compacted virtual page tail", () => {
+  const start = source.indexOf("function currentScrollPageClipInsets");
+  const end = source.indexOf("function buildScrollBreaks", start);
+  assert(start >= 0 && end > start, "scroll-page clipping logic must remain extractable");
+  const clipping = source.slice(start, end);
+  assert.match(clipping, /真实跨越视口边界的半行/u);
+  assert.doesNotMatch(clipping, /virtualBottom/u, "the source scroller must not inherit virtual-page clipping");
+  assert.match(clipping, /ln\.top<top-0\.5&&ln\.bottom>top\+0\.5/u, "a partial first line must be clipped too");
+  assert.match(clipping, /if\(maskTop<=1\|\|maskBlank<=1\)\{\s*const lines=visibleTextLineRects/u, "live line rectangles must verify every paged edge when cached geometry is incomplete");
+  assert.match(clipping, /vl\.top<pr\.bottom-0\.5&&vl\.bottom>pr\.bottom\+clickPagedBottomOverflowTolerancePx\(\)/u, "only a material live bottom overflow must be clipped");
+  assert.match(clipping, /next&&next\.type==='block'&&next\.atomic&&!isPreviewableBlock\(next\)/u);
+});
+
+test("forward scroll slices keep the first unfinished source line as the next page start", () => {
+  const start = source.indexOf("function scrollSliceFromStartIndex");
+  const end = source.indexOf("function firstVisibleScrollItemIndex", start);
+  assert(start >= 0 && end > start, "forward scroll slice logic must remain extractable");
+  const forwardSlice = source.slice(start, end);
+  assert.match(forwardSlice, /const pageTop=scrollPageTopForStartItem\(items,startIdx,navMaxTop,0\)/u);
+  assert.doesNotMatch(forwardSlice, /scrollAlignedPageStart\(/u, "forward paging must not rewind to the preceding line when glyph boxes touch");
+});
+
+test("Windows scroll page turns force final line geometry before retaining the new page boundary", () => {
+  const settleStart = source.indexOf("function settleVisibleScrollPagination");
+  const settleEnd = source.indexOf("function scrollMaxTop", settleStart);
+  assert(settleStart >= 0 && settleEnd > settleStart, "scroll geometry settle helper must remain extractable");
+  const settle = source.slice(settleStart, settleEnd);
+  assert.match(settle, /void root\.offsetHeight/u);
+  assert.match(settle, /rebuildVisibleScrollPagination\(\)/u);
+  assert.match(settle, /scrollActiveSlice=scrollPages\[pageInCh\]\|\|null/u);
+
+  const turnStart = source.indexOf("function scrollPageBy");
+  const turnEnd = source.indexOf("function pageOf", turnStart);
+  assert(turnStart >= 0 && turnEnd > turnStart, "scroll page turn logic must remain extractable");
+  assert.match(source.slice(turnStart, turnEnd), /stablePort\.scrollTop=next;\s*settleVisibleScrollPagination\(\);\s*updateScrollPageAfterProgrammatic\(\)/u);
+});
+
 test("macOS compatibility pages use fragment bounds and reclaim only a blocking paragraph gap", () => {
-  const start = bundle.indexOf("function virtualItemVisualBounds");
+  const start = bundle.indexOf("function clickPagedBottomOverflowTolerancePx");
   const end = bundle.indexOf("function applyVirtualFragmentStyle", start);
   assert(start >= 0 && end > start, "virtual page packing must remain extractable");
   const context: Record<string, unknown> = {
@@ -261,6 +298,24 @@ test("macOS compatibility pages use fragment bounds and reclaim only a blocking 
   const drifted = buildPage([line(0, 27), line(72, 99)], 0, 110, 200);
   const driftedLayout = drifted.virtualLayout as Array<{ top: number }>;
   assert(driftedLayout[1] && driftedLayout[1].top < 45, "an impossible multi-line Range gap must be clamped");
+
+  const windowsContext: Record<string, unknown> = {
+    ...context,
+    IS_MAC_WEBKIT: false,
+  };
+  vm.runInNewContext(
+    `${bundle.slice(start, end)}\nObject.assign(globalThis, { buildVirtualPageFromIndex });`,
+    windowsContext,
+  );
+  const buildWindowsPage = windowsContext.buildVirtualPageFromIndex as typeof buildPage;
+  const windowsPage = buildWindowsPage([line(0, 27), line(72, 124)], 0, 100, 200);
+  assert.equal(windowsPage.endIndex, 0, "Windows must not compact source gaps when choosing the next page start");
+  assert.equal(windowsPage.nextIndex, 1, "the first line after an uncompressed gap must remain on the next page");
+
+  const nearBottomWindowsPage = buildWindowsPage([line(0, 27), line(72, 103)], 0, 100, 200);
+  assert.equal(nearBottomWindowsPage.endIndex, 1, "a line whose measured tail only slightly exceeds the viewport stays on the current page");
+  const farBottomWindowsPage = buildWindowsPage([line(0, 27), line(72, 118)], 0, 100, 200);
+  assert.equal(farBottomWindowsPage.endIndex, 0, "a materially overflowing line starts the next page");
 
   const clipped = buildPage([line(0, 28), line(27, 55, 60)], 0, 57, 200);
   assert.equal(clipped.endIndex, 0, "a fragment extending beyond the viewport must move to the next page");
@@ -475,6 +530,27 @@ test("chapter reveal schedules the same WebKit paint stabilization as in-chapter
     chapterReveal,
     /setViewOffset\(\);root\.style\.visibility='';[\s\S]*?stabilizeProgrammaticViewPaint\(\);/u,
   );
+});
+
+test("same-book reveal restores the saved character anchor after viewport resize settles", () => {
+  const start = source.indexOf("let sameBookResumeRestoreGeneration");
+  const end = source.indexOf("function nearestTextOccurrence", start);
+  assert(start >= 0 && end > start, "same-book resume transaction must remain extractable");
+  const transaction = source.slice(start, end);
+
+  assert.match(transaction, /request\.chapter!==curCh/u);
+  assert.match(
+    transaction,
+    /relayout\(\{anchor:curTopAnchor,anchorOffset:offset,exactScroll:isScrollMode\(\),scrollOffset:viewportOffset\}\)/u,
+  );
+  assert.equal((transaction.match(/restoreSameBookResumeAnchor\(request\)/gu) || []).length, 2);
+  assert.match(transaction, /stableFrames>=2[\s\S]*?finish\('stable'\)/u);
+  assert.match(transaction, /resizeSequence===lastResizeSequence/u);
+  assert.match(transaction, /report\(false,true\)/u);
+  assert.match(transaction, /readerBugTrace\('same_book_resume',restored\?'restored':'anchor_missing'/u);
+  assert.match(transaction, /sameBookResumeReportDetail=\{[\s\S]*?resize_sequence:sameBookResizeSequence[\s\S]*?restore_pending:false/u);
+  assert.match(source, /window\.addEventListener\('resize',function\(\)\{\s*sameBookResizeSequence\+\+/u);
+  assert.match(source, /sameBookResumeState:restoredPosition\?sameBookResumeReportDetail:null/u);
 });
 
 test("chapter landing keeps real rapid taps and only consumes WebKit's duplicate click", () => {

@@ -7,7 +7,10 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 #[cfg(windows)]
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Mutex,
+};
 use tauri::{Emitter, Manager};
 
 /// 唤醒后的这段时间只服务前台交互，避免索引和补全任务抢占首帧后的操作。
@@ -40,7 +43,43 @@ pub(crate) struct StartupEnhancementState {
     launch_at_login_background: AtomicBool,
     login_backgrounded: AtomicBool,
     backgrounded: AtomicBool,
+    visibility_epoch: AtomicU64,
     high_cost_resume_at_ms: AtomicU64,
+}
+
+#[derive(Clone, Copy)]
+struct BackgroundTransition {
+    visibility_epoch: u64,
+    config: StartupEnhancementConfig,
+}
+
+/// The main window can be temporarily absent from Tauri's label lookup while
+/// hidden on Windows. Retain the native handle created during setup so close
+/// to background and single-instance activation always address the same
+/// window instead of relying on that transient lookup.
+#[derive(Default)]
+pub(crate) struct MainWindowRuntime {
+    window: Mutex<Option<tauri::Window>>,
+}
+
+impl MainWindowRuntime {
+    pub(crate) fn retain(&self, window: tauri::Window) {
+        *self.window.lock().unwrap() = Some(window);
+    }
+
+    fn window(&self) -> Option<tauri::Window> {
+        self.window.lock().unwrap().clone()
+    }
+}
+
+pub(crate) fn retain_main_window(app: &tauri::AppHandle, window: tauri::Window) {
+    app.state::<MainWindowRuntime>().retain(window);
+}
+
+fn main_window(app: &tauri::AppHandle) -> Option<tauri::Window> {
+    app.state::<MainWindowRuntime>()
+        .window()
+        .or_else(|| app.get_window("main"))
 }
 
 impl StartupEnhancementState {
@@ -60,6 +99,7 @@ impl StartupEnhancementState {
             launch_at_login_background: AtomicBool::new(config.launch_at_login_background),
             login_backgrounded: AtomicBool::new(login_background_requested()),
             backgrounded: AtomicBool::new(false),
+            visibility_epoch: AtomicU64::new(0),
             high_cost_resume_at_ms: AtomicU64::new(0),
         }
     }
@@ -137,6 +177,34 @@ impl StartupEnhancementState {
         self.high_cost_resume_at_ms
             .store(resume_at_ms, Ordering::Release);
         resume_at_ms
+    }
+
+    fn begin_background(&self) -> BackgroundTransition {
+        let config = self.config();
+        let visibility_epoch = self.visibility_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.backgrounded.store(true, Ordering::Release);
+        self.high_cost_resume_at_ms.store(0, Ordering::Release);
+        BackgroundTransition {
+            visibility_epoch,
+            config,
+        }
+    }
+
+    fn activate_window(&self) -> u64 {
+        let visibility_epoch = self.visibility_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.login_backgrounded.store(false, Ordering::Release);
+        self.backgrounded.store(false, Ordering::Release);
+        visibility_epoch
+    }
+
+    fn background_is_current(&self, transition: BackgroundTransition) -> bool {
+        self.visibility_epoch.load(Ordering::Acquire) == transition.visibility_epoch
+            && self.backgrounded.load(Ordering::Acquire)
+    }
+
+    fn activation_is_current(&self, visibility_epoch: u64) -> bool {
+        self.visibility_epoch.load(Ordering::Acquire) == visibility_epoch
+            && !self.backgrounded.load(Ordering::Acquire)
     }
 }
 
@@ -359,7 +427,7 @@ fn emit_background_state(
     continue_high_cost: bool,
     high_cost_resume_at_ms: u64,
 ) {
-    if let Some(main) = app.get_webview_window("main") {
+    if let Some(main) = main_window(app) {
         let _ = main.emit(
             "startup-enhancement-state",
             BackgroundStatePayload {
@@ -392,15 +460,20 @@ pub(crate) fn should_keep_running(app: &tauri::AppHandle) -> bool {
     app.state::<StartupEnhancementState>().enabled()
 }
 
-pub(crate) fn background_main(app: &tauri::AppHandle) {
-    let enhancement = app.state::<StartupEnhancementState>();
-    let config = enhancement.config();
-    enhancement.backgrounded.store(true, Ordering::Release);
-    enhancement
-        .high_cost_resume_at_ms
-        .store(0, Ordering::Release);
+fn finish_background_main(
+    app: &tauri::AppHandle,
+    enhancement: &StartupEnhancementState,
+    transition: BackgroundTransition,
+    hide_main: bool,
+) {
+    if !enhancement.background_is_current(transition) {
+        return;
+    }
 
     for (label, reader) in app.webview_windows() {
+        if !enhancement.background_is_current(transition) {
+            return;
+        }
         if label.starts_with("reader-") {
             if crate::window_commands::reader_window_id(&reader).is_some() {
                 let _ = reader.close();
@@ -409,7 +482,10 @@ pub(crate) fn background_main(app: &tauri::AppHandle) {
             }
         }
     }
-    if !config.continue_high_cost {
+    if !enhancement.background_is_current(transition) {
+        return;
+    }
+    if !transition.config.continue_high_cost {
         let paused = app
             .state::<AppState>()
             .background_tasks
@@ -418,11 +494,38 @@ pub(crate) fn background_main(app: &tauri::AppHandle) {
             "[startup-enhancement] backgrounded paused_high_cost={paused}"
         ));
     }
-    emit_background_state(app, true, config.continue_high_cost, 0);
-    if let Some(main) = app.get_webview_window("main") {
+    if !enhancement.background_is_current(transition) {
+        return;
+    }
+    emit_background_state(app, true, transition.config.continue_high_cost, 0);
+    if hide_main && enhancement.background_is_current(transition) {
+        let Some(main) = main_window(app) else {
+            return;
+        };
         let _ = main.set_skip_taskbar(true);
         let _ = main.hide();
     }
+}
+
+pub(crate) fn background_main(app: &tauri::AppHandle) {
+    let enhancement = app.state::<StartupEnhancementState>();
+    let transition = enhancement.begin_background();
+    finish_background_main(app, &enhancement, transition, true);
+}
+
+/// Backgrounds the injected main window. The transition starts before hide,
+/// so a concurrent single-instance activation invalidates this stale hide
+/// rather than letting a previous close win after the user reopens the app.
+pub(crate) fn background_main_from_window(
+    app: &tauri::AppHandle,
+    window: &tauri::Window,
+) -> Result<(), String> {
+    let enhancement = app.state::<StartupEnhancementState>();
+    let transition = enhancement.begin_background();
+    let _ = window.set_skip_taskbar(true);
+    window.hide().map_err(|error| error.to_string())?;
+    finish_background_main(app, &enhancement, transition, false);
+    Ok(())
 }
 
 /// The single native path that turns a hidden main window back into the
@@ -435,38 +538,74 @@ pub(crate) fn reveal_main(app: &tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Regular)
         .map_err(|error| error.to_string())?;
-    let Some(main) = app.get_webview_window("main") else {
-        return Ok(());
+    let Some(main) = main_window(app) else {
+        return Err("主窗口不可用".to_string());
     };
-    main.set_skip_taskbar(false)
-        .map_err(|error| error.to_string())?;
+    let _ = main.set_skip_taskbar(false);
+    let _ = main.unminimize();
     main.show().map_err(|error| error.to_string())?;
-    main.unminimize().map_err(|error| error.to_string())?;
-    main.set_focus().map_err(|error| error.to_string())
+    let _ = main.set_focus();
+    Ok(())
+}
+
+fn complete_activation_on_main_thread(
+    app: tauri::AppHandle,
+    visibility_epoch: u64,
+    requested_at_ms: u64,
+    retry: bool,
+) {
+    let queued_app = app.clone();
+    if app
+        .run_on_main_thread(move || {
+            let enhancement = queued_app.state::<StartupEnhancementState>();
+            if !enhancement.activation_is_current(visibility_epoch) {
+                return;
+            }
+            let resume_at_ms = enhancement.begin_hot_activation_grace(crate::now_ms());
+            if reveal_main(&queued_app).is_err() {
+                // Keep the activation trace privacy-safe: native errors can include
+                // platform details, while this fixed marker is enough to distinguish
+                // a delivered single-instance request from a failed window restore.
+                log("[startup-enhancement] activation reveal_failed");
+                if !retry {
+                    let retry_app = queued_app.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(120));
+                        complete_activation_on_main_thread(
+                            retry_app,
+                            visibility_epoch,
+                            requested_at_ms,
+                            true,
+                        );
+                    });
+                }
+                return;
+            }
+            crate::window_commands::schedule_clean_reader_shell(&queued_app);
+            emit_background_state(
+                &queued_app,
+                false,
+                enhancement.config().continue_high_cost,
+                resume_at_ms,
+            );
+            let elapsed = crate::now_ms().saturating_sub(requested_at_ms);
+            emit_startup_perf(
+                &queued_app,
+                "startup-enhancement",
+                "activated",
+                format!("{elapsed}ms hot activation; high-cost work delayed 15s"),
+            );
+        })
+        .is_err()
+    {
+        log("[startup-enhancement] activation main_thread_dispatch_failed");
+    }
 }
 
 pub(crate) fn activate_main(app: &tauri::AppHandle, requested_at_ms: u64) {
     let enhancement = app.state::<StartupEnhancementState>();
-    enhancement
-        .login_backgrounded
-        .store(false, Ordering::Release);
-    enhancement.backgrounded.store(false, Ordering::Release);
-    let resume_at_ms = enhancement.begin_hot_activation_grace(crate::now_ms());
-    let _ = reveal_main(app);
-    crate::window_commands::schedule_clean_reader_shell(app);
-    emit_background_state(
-        app,
-        false,
-        enhancement.config().continue_high_cost,
-        resume_at_ms,
-    );
-    let elapsed = crate::now_ms().saturating_sub(requested_at_ms);
-    emit_startup_perf(
-        app,
-        "startup-enhancement",
-        "activated",
-        format!("{elapsed}ms hot activation; high-cost work delayed 15s"),
-    );
+    let visibility_epoch = enhancement.activate_window();
+    complete_activation_on_main_thread(app.clone(), visibility_epoch, requested_at_ms, false);
 }
 
 pub(crate) fn background_work_allowed(app: &tauri::AppHandle) -> bool {
@@ -526,9 +665,28 @@ mod tests {
             launch_at_login_background: AtomicBool::new(false),
             login_backgrounded: AtomicBool::new(false),
             backgrounded: AtomicBool::new(false),
+            visibility_epoch: AtomicU64::new(0),
             high_cost_resume_at_ms: AtomicU64::new(110),
         };
         assert!(!state.background_work_allowed_at(109));
         assert!(state.background_work_allowed_at(110));
+    }
+
+    #[test]
+    fn later_activation_invalidates_an_inflight_background_transition() {
+        let state = StartupEnhancementState {
+            enabled: AtomicBool::new(true),
+            continue_high_cost: AtomicBool::new(false),
+            launch_at_login: AtomicBool::new(false),
+            launch_at_login_background: AtomicBool::new(false),
+            login_backgrounded: AtomicBool::new(false),
+            backgrounded: AtomicBool::new(false),
+            visibility_epoch: AtomicU64::new(0),
+            high_cost_resume_at_ms: AtomicU64::new(0),
+        };
+        let background = state.begin_background();
+        assert!(state.background_is_current(background));
+        state.activate_window();
+        assert!(!state.background_is_current(background));
     }
 }

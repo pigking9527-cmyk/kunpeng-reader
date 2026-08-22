@@ -1,5 +1,5 @@
 use crate::{
-    book::{Library, WinGeom},
+    book::{Library, PhysicalWinGeom, WinGeom},
     log, now_ms, report_save_error, AppState,
 };
 use serde::Serialize;
@@ -28,25 +28,113 @@ mod windows_activation {
         fn get_foreground_window() -> Hwnd;
         #[link_name = "SetActiveWindow"]
         fn set_active_window(window: Hwnd) -> Hwnd;
-        #[link_name = "SetFocus"]
-        fn set_focus(window: Hwnd) -> Hwnd;
         #[link_name = "SetForegroundWindow"]
         fn set_foreground_window(window: Hwnd) -> i32;
+        #[link_name = "SetWindowPos"]
+        fn set_window_pos(
+            window: Hwnd,
+            insert_after: Hwnd,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            flags: u32,
+        ) -> i32;
+        #[link_name = "GetGUIThreadInfo"]
+        fn get_gui_thread_info(thread_id: u32, info: *mut GuiThreadInfo) -> i32;
+        #[link_name = "GetWindowThreadProcessId"]
+        fn get_window_thread_process_id(window: Hwnd, process_id: *mut u32) -> u32;
+        #[link_name = "IsChild"]
+        fn is_child(parent: Hwnd, child: Hwnd) -> i32;
         #[link_name = "ShowWindowAsync"]
         fn show_window_async(window: Hwnd, command: i32) -> i32;
     }
 
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[repr(C)]
+    struct GuiThreadInfo {
+        cb_size: u32,
+        flags: u32,
+        active: Hwnd,
+        focused: Hwnd,
+        captured: Hwnd,
+        menu_owner: Hwnd,
+        move_size: Hwnd,
+        caret: Hwnd,
+        caret_rect: Rect,
+    }
+
     pub(super) fn activate(window: Hwnd) -> bool {
         const SW_RESTORE: i32 = 9;
+        const SWP_NOSIZE: u32 = 0x0001;
+        const SWP_NOMOVE: u32 = 0x0002;
+        const SWP_SHOWWINDOW: u32 = 0x0040;
         // SAFETY: Tauri supplied this HWND for a live WebviewWindow owned by
         // this process. All calls are synchronous and do not retain it.
         unsafe {
             let _ = show_window_async(window, SW_RESTORE);
             let _ = bring_window_to_top(window);
             let _ = set_active_window(window);
-            let _ = set_focus(window);
             let _ = set_foreground_window(window);
+            if get_foreground_window() != window {
+                // Windows can reject SetForegroundWindow while the shelf owns
+                // the foreground. A topmost -> non-topmost bounce raises the
+                // already visible reader without leaving it permanently pinned.
+                let flags = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW;
+                let _ = set_window_pos(window, -1_isize as Hwnd, 0, 0, 0, 0, flags);
+                let _ = set_window_pos(window, -2_isize as Hwnd, 0, 0, 0, 0, flags);
+                let _ = bring_window_to_top(window);
+                let _ = set_active_window(window);
+                let _ = set_foreground_window(window);
+            }
             get_foreground_window() == window
+        }
+    }
+
+    /// `SetForegroundWindow` only proves that the top-level frame owns the
+    /// foreground. It does not prove that keyboard focus left the non-client
+    /// title bar and entered WebView2. Query the GUI thread's focused child so
+    /// a close handoff is only considered complete after the shelf WebView is
+    /// actually ready to receive the first click.
+    pub(super) fn webview_has_focus(window: Hwnd) -> bool {
+        // SAFETY: `window` is a live Tauri HWND. GetGUIThreadInfo only writes
+        // the fixed-size structure supplied here and IsChild retains no
+        // pointers.
+        unsafe {
+            if get_foreground_window() != window {
+                return false;
+            }
+            let thread_id = get_window_thread_process_id(window, std::ptr::null_mut());
+            if thread_id == 0 {
+                return false;
+            }
+            let mut info = GuiThreadInfo {
+                cb_size: std::mem::size_of::<GuiThreadInfo>() as u32,
+                flags: 0,
+                active: std::ptr::null_mut(),
+                focused: std::ptr::null_mut(),
+                captured: std::ptr::null_mut(),
+                menu_owner: std::ptr::null_mut(),
+                move_size: std::ptr::null_mut(),
+                caret: std::ptr::null_mut(),
+                caret_rect: Rect {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+            };
+            get_gui_thread_info(thread_id, &mut info) != 0
+                && !info.focused.is_null()
+                && info.focused != window
+                && is_child(window, info.focused) != 0
         }
     }
 }
@@ -744,50 +832,260 @@ fn emit_reader_window_trace(
     outcome: &str,
     duration: Duration,
 ) {
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.emit(
-            "reader-window-trace",
-            serde_json::json!({
-                "phase": phase,
-                "outcome": outcome,
-                "durationMs": duration.as_millis().min(u128::from(u32::MAX)) as u32,
-            }),
-        );
-    }
+    // Use the application event bus. The main page installs a global Tauri
+    // listener, while a WebviewWindow-scoped emit is not guaranteed to reach
+    // it when the originating reader is being hidden in the same IPC turn.
+    let _ = app.emit(
+        "reader-window-trace",
+        serde_json::json!({
+            "phase": phase,
+            "outcome": outcome,
+            "durationMs": duration.as_millis().min(u128::from(u32::MAX)) as u32,
+        }),
+    );
 }
 
-fn activate_shelf_after_reader_close(app: &tauri::AppHandle) {
-    let Some(main) = app.get_webview_window("main") else {
-        return;
-    };
-    if !main.is_visible().unwrap_or(false) {
-        emit_reader_window_trace(app, "focus_restore", "skipped_hidden", Duration::ZERO);
-        return;
-    }
-    let _ = main.unminimize();
-    let window_focus_requested = main.set_focus().is_ok();
-    #[cfg(target_os = "windows")]
-    let focus_confirmed = main
-        .hwnd()
-        .ok()
-        .map(|window| windows_activation::activate(window.0))
-        .unwrap_or(false);
-    #[cfg(not(target_os = "windows"))]
-    let focus_confirmed = false;
-    // WebviewWindow::set_focus only focuses the native top-level window. The
-    // embedded WebView has its own focus dispatcher (WebView2 MoveFocus on
-    // Windows); without this call the first shelf click is consumed merely to
-    // reactivate the document and never reaches the book-card handler.
-    let webview_focus_requested = main.as_ref().set_focus().is_ok();
-    let outcome = if focus_confirmed && webview_focus_requested {
+/// Emits only numeric window geometry and fixed lifecycle labels.  The event
+/// is deliberately free of a book title, path, window label, monitor name, or
+/// any WebView content so it can safely enter the local problem trace.
+fn emit_reader_geometry_trace(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    phase: &'static str,
+    source: &'static str,
+    outcome: &'static str,
+    requested: Option<&WinGeom>,
+    restore: Option<GeometryRestoreReport>,
+) {
+    let current = physical_geometry_from_window(window);
+    let requested = requested.and_then(|geom| geom.physical.as_ref());
+    let restore = restore.map(|report| {
+        serde_json::json!({
+            "space": report.space,
+            "size_applied": report.size_applied,
+            "position_applied": report.position_applied,
+            "clamped": report.clamped,
+            "target_width": report.target.map(|target| target.w),
+            "target_height": report.target.map(|target| target.h),
+        })
+    });
+    let _ = app.emit(
+        "reader-window-trace",
+        serde_json::json!({
+            "phase": phase,
+            "source": source,
+            "outcome": outcome,
+            "geometry": current.map(|geom| physical_geometry_json(&geom)),
+            "requested": requested.map(physical_geometry_json),
+            "restore": restore,
+        }),
+    );
+}
+
+#[derive(Clone, Copy)]
+struct ShelfFocusRequest {
+    window_requested: bool,
+    native_foreground: bool,
+    webview_requested: bool,
+    webview_confirmed: bool,
+}
+
+fn shelf_focus_outcome(request: ShelfFocusRequest) -> &'static str {
+    if request.webview_confirmed {
         "focused"
-    } else if window_focus_requested || webview_focus_requested {
+    } else if request.window_requested || request.native_foreground || request.webview_requested {
         "requested"
     } else {
         "failed"
-    };
-    emit_reader_window_trace(app, "focus_restore", outcome, Duration::ZERO);
+    }
 }
+
+fn request_shelf_focus(main: &tauri::WebviewWindow) -> ShelfFocusRequest {
+    let _ = main.unminimize();
+    let window_requested = main.set_focus().is_ok();
+    #[cfg(target_os = "windows")]
+    let (native_foreground, webview_confirmed_before) = main
+        .hwnd()
+        .ok()
+        .map(|window| {
+            (
+                windows_activation::activate(window.0),
+                windows_activation::webview_has_focus(window.0),
+            )
+        })
+        .unwrap_or((false, false));
+    #[cfg(not(target_os = "windows"))]
+    let (native_foreground, webview_confirmed_before) = (false, false);
+    // Window::set_focus targets only the top-level frame. Webview::set_focus
+    // dispatches WebView2 MoveFocus and is the step that prevents the first
+    // shelf click from being consumed as a mere activation click.
+    let webview_requested = main.as_ref().set_focus().is_ok();
+    #[cfg(target_os = "windows")]
+    let webview_confirmed = webview_confirmed_before
+        || main
+            .hwnd()
+            .ok()
+            .is_some_and(|window| windows_activation::webview_has_focus(window.0));
+    #[cfg(not(target_os = "windows"))]
+    let webview_confirmed = webview_requested;
+    ShelfFocusRequest {
+        window_requested,
+        native_foreground,
+        webview_requested,
+        webview_confirmed,
+    }
+}
+
+/// Records only fixed focus outcomes and booleans. This deliberately avoids
+/// HWND values, window labels, titles, paths and document content.
+fn emit_shelf_focus_trace(
+    app: &tauri::AppHandle,
+    outcome: &'static str,
+    duration: Duration,
+    attempt: u32,
+    request: ShelfFocusRequest,
+    visible: bool,
+) {
+    let duration_ms = duration.as_millis().min(u128::from(u32::MAX)) as u32;
+    crate::diagnostics::record_native_log(
+        file!(),
+        &format!(
+            "reader_window phase=focus_restore outcome={outcome} duration_ms={duration_ms} attempt={attempt} window_requested={} native_focused={} webview_requested={} webview_focused={} visible={visible}",
+            request.window_requested,
+            request.native_foreground,
+            request.webview_requested,
+            request.webview_confirmed,
+        ),
+    );
+    let _ = app.emit(
+        "reader-window-trace",
+        serde_json::json!({
+            "phase": "focus_restore",
+            "outcome": outcome,
+            "durationMs": duration_ms,
+            "attempt": attempt,
+            "windowRequested": request.window_requested,
+            "nativeFocused": request.native_foreground,
+            "webviewRequested": request.webview_requested,
+            "webviewFocused": request.webview_confirmed,
+            "visible": visible,
+        }),
+    );
+}
+
+fn activate_shelf_after_reader_close(app: &tauri::AppHandle) -> bool {
+    let Some(main) = app.get_webview_window("main") else {
+        return false;
+    };
+    let visible = main.is_visible().unwrap_or(false);
+    if !visible {
+        emit_reader_window_trace(app, "focus_restore", "skipped_hidden", Duration::ZERO);
+        return false;
+    }
+    let request = request_shelf_focus(&main);
+    let outcome = shelf_focus_outcome(request);
+    emit_shelf_focus_trace(app, outcome, Duration::ZERO, 0, request, visible);
+    request.webview_confirmed
+}
+
+/// A reader-close command originates inside the reader WebView. Its final
+/// browser focus bookkeeping can run after the Rust command returns and steal
+/// back the focus requested above. On Windows, retry briefly after that IPC
+/// turn and stop only when the focused HWND is a child of the shelf frame.
+#[cfg(target_os = "windows")]
+fn schedule_shelf_focus_handoff_after_hidden_reader(app: &tauri::AppHandle) {
+    // WebView2 can finish the reader command's focus bookkeeping several
+    // frames after the window is hidden. Keep retrying for about one second so
+    // the first real shelf click is not spent merely activating the WebView.
+    const RETRY_DELAYS_MS: [u64; 7] = [16, 32, 64, 96, 160, 240, 320];
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut last_request = ShelfFocusRequest {
+            window_requested: false,
+            native_foreground: false,
+            webview_requested: false,
+            webview_confirmed: false,
+        };
+        for (index, delay_ms) in RETRY_DELAYS_MS.into_iter().enumerate() {
+            let attempt = (index + 1) as u32;
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            if any_reader_window_open(&app) {
+                emit_reader_window_trace(
+                    &app,
+                    "focus_restore",
+                    "skipped_reader_open",
+                    started.elapsed(),
+                );
+                return;
+            }
+            let focus_app = app.clone();
+            let (result_sender, result_receiver) = mpsc::channel();
+            if app
+                .run_on_main_thread(move || {
+                    let request = if let Some(main) = focus_app.get_webview_window("main") {
+                        if main.is_visible().unwrap_or(false) {
+                            request_shelf_focus(&main)
+                        } else {
+                            last_request
+                        }
+                    } else {
+                        last_request
+                    };
+                    let _ = result_sender.send(request);
+                })
+                .is_err()
+            {
+                emit_reader_window_trace(
+                    &app,
+                    "focus_restore",
+                    "dispatch_failed",
+                    started.elapsed(),
+                );
+                return;
+            }
+            if let Ok(request) = result_receiver.recv_timeout(Duration::from_millis(100)) {
+                last_request = request;
+            }
+            // Both Tauri focus calls enqueue main-loop work. Give that work a
+            // frame before checking the actual focused child HWND.
+            std::thread::sleep(Duration::from_millis(16));
+            let confirmed = app
+                .get_webview_window("main")
+                .and_then(|main| main.hwnd().ok())
+                .is_some_and(|window| windows_activation::webview_has_focus(window.0));
+            last_request.webview_confirmed |= confirmed;
+            if confirmed {
+                if let Some(main) = app.get_webview_window("main") {
+                    emit_shelf_focus_trace(
+                        &app,
+                        "focused_after_retry",
+                        started.elapsed(),
+                        attempt,
+                        last_request,
+                        main.is_visible().unwrap_or(false),
+                    );
+                }
+                return;
+            }
+        }
+        let visible = app
+            .get_webview_window("main")
+            .is_some_and(|main| main.is_visible().unwrap_or(false));
+        emit_shelf_focus_trace(
+            &app,
+            "unconfirmed",
+            started.elapsed(),
+            RETRY_DELAYS_MS.len() as u32,
+            last_request,
+            visible,
+        );
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn schedule_shelf_focus_handoff_after_hidden_reader(_app: &tauri::AppHandle) {}
+
 fn schedule_shelf_activation_after_reader_close(app: &tauri::AppHandle, label: &str) {
     let app = app.clone();
     let label = label.to_string();
@@ -815,7 +1113,7 @@ fn schedule_shelf_activation_after_reader_close(app: &tauri::AppHandle, label: &
                         Duration::ZERO,
                     );
                 } else {
-                    activate_shelf_after_reader_close(&focus_app);
+                    let _ = activate_shelf_after_reader_close(&focus_app);
                 }
             })
             .is_err()
@@ -824,14 +1122,60 @@ fn schedule_shelf_activation_after_reader_close(app: &tauri::AppHandle, label: &
         }
     });
 }
-pub(crate) fn persist_main_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+
+fn reader_reveal_outcome(
+    visible: bool,
+    shown: bool,
+    restored: bool,
+    window_focused: bool,
+    native_focused: bool,
+    webview_focused: bool,
+) -> &'static str {
+    if visible && (native_focused || window_focused || webview_focused) {
+        "focused"
+    } else if visible || shown || restored {
+        "shown"
+    } else {
+        "failed"
+    }
+}
+
+fn reveal_existing_reader_window(window: &tauri::WebviewWindow) -> &'static str {
+    let shown = window.show().is_ok();
+    let restored = window.unminimize().is_ok();
+    let taskbar = window.set_skip_taskbar(false).is_ok();
+    let window_focused = window.set_focus().is_ok();
+    #[cfg(target_os = "windows")]
+    let native_focused = window
+        .hwnd()
+        .ok()
+        .map(|handle| windows_activation::activate(handle.0))
+        .unwrap_or(false);
+    #[cfg(not(target_os = "windows"))]
+    let native_focused = false;
+    let webview_focused = window.as_ref().set_focus().is_ok();
+    let visible = window.is_visible().unwrap_or(false);
+    let outcome = reader_reveal_outcome(
+        visible,
+        shown,
+        restored,
+        window_focused,
+        native_focused,
+        webview_focused,
+    );
+    log(&format!(
+        "reader_reveal outcome={outcome} shown={shown} restored={restored} taskbar={taskbar} window_focused={window_focused} native_focused={native_focused} webview_focused={webview_focused} visible={visible}"
+    ));
+    outcome
+}
+pub(crate) fn persist_main_window_state(app: &tauri::AppHandle, window: &tauri::Window) {
     let state = app.state::<AppState>();
     let previous_geom = state
         .library
         .try_lock()
         .ok()
         .and_then(|library| library.main_geom.clone());
-    let closing_geom = capture_geom(previous_geom, window);
+    let closing_geom = capture_main_window_geom(previous_geom, window);
     if let Ok(mut library) = state.library.try_lock() {
         library.main_geom = Some(closing_geom);
         report_save_error("书架", library.save());
@@ -845,12 +1189,73 @@ pub(crate) fn persist_main_window_state(app: &tauri::AppHandle, window: &tauri::
     };
 }
 
+/// Saves every bound reader before the shelf transitions to the background.
+/// External Windows close requests can arrive before the reader WebView has a
+/// chance to handle its asynchronous close event, so relying on that event
+/// would make geometry persistence race with background cleanup.
+pub(crate) fn persist_reader_window_states_before_main_close(app: &tauri::AppHandle) -> bool {
+    let readers = app
+        .webview_windows()
+        .into_values()
+        .filter(|window| reader_window_id(window).is_some())
+        .collect::<Vec<_>>();
+    if readers.is_empty() {
+        return true;
+    }
+    let state = app.state::<AppState>();
+    let captured = {
+        let mut library = state.library.lock().unwrap();
+        let captures = readers
+            .iter()
+            .map(|reader| (reader.clone(), update_reader_geom(&mut library, reader)))
+            .collect::<Vec<_>>();
+        let result = library.save();
+        report_save_error("书架", result.clone());
+        (captures, result.is_ok())
+    };
+    for (reader, geom) in &captured.0 {
+        emit_reader_geometry_trace(
+            app,
+            reader,
+            "geometry_capture",
+            "main_close",
+            "captured",
+            Some(geom),
+            None,
+        );
+        emit_reader_geometry_trace(
+            app,
+            reader,
+            "geometry_save",
+            "main_close",
+            if captured.1 { "ok" } else { "failed" },
+            Some(geom),
+            None,
+        );
+    }
+    captured.1
+}
+
+/// Emits only fixed lifecycle labels for the main-window close route. This is
+/// diagnostic state, not an error message, window label, path, or user data.
+fn emit_main_window_close_trace(
+    app: &tauri::AppHandle,
+    phase: &'static str,
+    outcome: &'static str,
+) {
+    log(&format!("[window-close] phase={phase} outcome={outcome}"));
+    let _ = app.emit(
+        "main-window-close-trace",
+        serde_json::json!({ "phase": phase, "outcome": outcome }),
+    );
+}
+
 #[tauri::command]
-pub(crate) fn main_window_minimize(window: tauri::WebviewWindow) -> Result<(), String> {
+pub(crate) fn main_window_minimize(window: tauri::Window) -> Result<(), String> {
     window.minimize().map_err(|e| e.to_string())
 }
 #[tauri::command]
-pub(crate) fn main_window_toggle_maximize(window: tauri::WebviewWindow) -> Result<(), String> {
+pub(crate) fn main_window_toggle_maximize(window: tauri::Window) -> Result<(), String> {
     if window.is_maximized().map_err(|e| e.to_string())? {
         window.unmaximize().map_err(|e| e.to_string())
     } else {
@@ -859,38 +1264,94 @@ pub(crate) fn main_window_toggle_maximize(window: tauri::WebviewWindow) -> Resul
 }
 
 #[tauri::command]
-pub(crate) fn main_window_close(window: tauri::WebviewWindow) -> Result<(), String> {
-    if window.label().starts_with("reader-") {
-        let app = window.app_handle().clone();
+pub(crate) fn main_window_close(webview: tauri::Webview) -> Result<(), String> {
+    let app = webview.app_handle().clone();
+    let label = webview.label();
+    let window = webview.window();
+    if label.starts_with("reader-") {
+        let reader = app
+            .get_webview_window(label)
+            .ok_or_else(|| "当前阅读窗口不可用".to_string())?;
         let state = app.state::<AppState>();
-        if let Some(id) = reader_window_id(&window) {
+        let closed_book_id = reader_window_id(&reader);
+        if let Some(id) = closed_book_id {
             if let Some(task) = state.page_count_tasks.lock().unwrap().remove(&id) {
                 let _ = task.pause();
             }
-            if let Some(main) = app.get_webview_window("main") {
-                let _ = main.emit(
-                    "reader-closed-for-reopen",
-                    serde_json::json!({ "bookId": id.to_string() }),
-                );
-            }
         }
-        {
+        // Windows 隐藏后的 WebView2 有时会把 outer_position 回报为默认值。
+        // 因此先在窗口仍可见时采集几何；实际磁盘写入仍放到 hide 之后，既保留
+        // 关闭的即时反馈，也不会让下一次打开丢掉用户刚调整的大小和位置。
+        let closing_geom = {
             let mut library = state.library.lock().unwrap();
-            update_reader_geom(&mut library, &window);
-            report_save_error("书架", library.save());
-        }
-        report_save_error("统计", state.stats.lock().unwrap().save());
+            update_reader_geom(&mut library, &reader)
+        };
+        emit_reader_geometry_trace(
+            &app,
+            &reader,
+            "geometry_capture",
+            "close_command",
+            "captured",
+            Some(&closing_geom),
+            None,
+        );
+        // 关闭按钮的首要反馈是让阅读页立即消失。窗口会被隐藏缓存，后续继续
+        // 完成书架、统计与阅读位置的持久化，无需让用户看着它等待。
         window.hide().map_err(|error| error.to_string())?;
         emit_reader_window_trace(&app, "close_command", "hidden_cached", Duration::ZERO);
-        activate_shelf_after_reader_close(&app);
+        let _ = activate_shelf_after_reader_close(&app);
+        schedule_shelf_focus_handoff_after_hidden_reader(&app);
+        let undo_checkpoint = match closed_book_id {
+            Some(id) => match app.emit(
+                "reader-closed-for-reopen",
+                serde_json::json!({ "bookId": id.to_string() }),
+            ) {
+                Ok(()) => "sent",
+                Err(_) => "failed",
+            },
+            None => "missing_book",
+        };
+        emit_reader_window_trace(&app, "undo_checkpoint", undo_checkpoint, Duration::ZERO);
+        let library_saved = {
+            let library = state.library.lock().unwrap();
+            let result = library.save();
+            report_save_error("书架", result.clone());
+            result.is_ok()
+        };
+        emit_reader_geometry_trace(
+            &app,
+            &reader,
+            "geometry_save",
+            "close_command",
+            if library_saved { "ok" } else { "failed" },
+            Some(&closing_geom),
+            None,
+        );
+        report_save_error("统计", state.stats.lock().unwrap().save());
         return Ok(());
     }
-    let app = window.app_handle().clone();
     if crate::startup_enhancement::should_keep_running(&app) {
+        emit_main_window_close_trace(&app, "received", "background");
+        let reader_saved = persist_reader_window_states_before_main_close(&app);
+        emit_main_window_close_trace(
+            &app,
+            "reader_geometry",
+            if reader_saved { "ok" } else { "failed" },
+        );
         persist_main_window_state(&app, &window);
-        crate::startup_enhancement::background_main(&app);
+        emit_main_window_close_trace(&app, "state_persisted", "ok");
+        // The close transition is started before hide so a rapid icon click
+        // invalidates this background request instead of being hidden again
+        // by stale cleanup after the user has reopened the application.
+        if let Err(error) = crate::startup_enhancement::background_main_from_window(&app, &window) {
+            emit_main_window_close_trace(&app, "hide", "failed");
+            return Err(error.to_string());
+        }
+        emit_main_window_close_trace(&app, "hide", "ok");
+        emit_main_window_close_trace(&app, "background_cleanup", "ok");
         return Ok(());
     }
+    emit_main_window_close_trace(&app, "received", "exit");
     window.close().map_err(|e| e.to_string())
 }
 
@@ -1066,15 +1527,16 @@ fn mark_reader_opened(app: &tauri::AppHandle, state: &AppState, id_num: u64) {
             .map(|book| book.last_read_at)
             .unwrap_or(0)
     };
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.emit(
-            "shelf-book-read",
-            serde_json::json!({
-                "id": id_num.to_string(),
-                "lastReadAt": last_read_at,
-            }),
-        );
-    }
+    // The shelf listens on Tauri's application event bus. A window-scoped
+    // emit can be missed while focus is moving to the reader, leaving the
+    // visible order stale until the next list_books refresh or disk save.
+    let _ = app.emit(
+        "shelf-book-read",
+        serde_json::json!({
+            "id": id_num.to_string(),
+            "lastReadAt": last_read_at,
+        }),
+    );
     let save_app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(2));
@@ -1216,30 +1678,18 @@ pub(crate) fn prepare_reader_switch_target(
         .copied()
         .filter(|started| started.elapsed() <= Duration::from_secs(15))
         .unwrap_or_else(Instant::now);
-    let (title, is_pdf, path_exists) = {
+    let (title, path_exists) = {
         let library = state.library.lock().unwrap();
         let book = library.get(id_num).ok_or("找不到这本书")?;
-        (book.title.clone(), book.format == "pdf", book.path.exists())
+        (book.title.clone(), book.path.exists())
     };
     if !path_exists {
         return Err("源文件已丢失，请在书架上对这本书重新定位。".to_string());
     }
     let geom = {
         let library = state.library.lock().unwrap();
-        if is_pdf {
-            library.reader_geom_pdf.clone()
-        } else {
-            library.reader_geom.clone()
-        }
+        reader_geom_for_book(&library, id_num)
     };
-    let on_screen = geom
-        .as_ref()
-        .map(|saved| {
-            app.get_webview_window("main")
-                .map(|main| position_on_screen(&main, saved))
-                .unwrap_or(true)
-        })
-        .unwrap_or(false);
     let Some(shell) = take_clean_reader_shell(&app) else {
         emit_reader_window_trace(&app, "open_pool", "unavailable", open_started.elapsed());
         schedule_clean_reader_shell(&app);
@@ -1256,17 +1706,16 @@ pub(crate) fn prepare_reader_switch_target(
         schedule_clean_reader_shell(&app);
         return Err(error.to_string());
     }
-    if let Some(saved) = geom
-        .as_ref()
-        .filter(|saved| saved.w >= 300.0 && saved.h >= 300.0)
-    {
-        let _ = shell.set_size(tauri::LogicalSize::new(saved.w, saved.h));
-        if on_screen {
-            let _ = shell.set_position(tauri::LogicalPosition::new(saved.x, saved.y));
-        }
-    } else {
-        let _ = shell.set_size(tauri::LogicalSize::new(880.0, 760.0));
-    }
+    let restore = apply_geom_safe(&shell, &geom);
+    emit_reader_geometry_trace(
+        &app,
+        &shell,
+        "geometry_restore",
+        "prepared_pool",
+        "requested",
+        geom.as_ref(),
+        Some(restore),
+    );
     READER_OPEN_STARTED_AT
         .lock()
         .unwrap()
@@ -1336,16 +1785,36 @@ pub(crate) fn ensure_reader_window(
         })
     {
         clear_recent_hidden_reader_save(window.label());
-        let _ = window.show();
-        let _ = window.unminimize();
-        let focused = window.set_focus().is_ok();
-        let _ = window.emit("reader-shell-resume", ());
-        emit_reader_window_trace(
+        // 隐藏窗口在 Windows 上可能被系统恢复为创建时的默认几何。即使同一本书
+        // 复用同一 WebView，也必须在 show 之前重新应用刚刚落盘的几何，而不能
+        // 假设 hide/show 会原样保留原生窗口大小和坐标。
+        let geom = {
+            let library = state.library.lock().unwrap();
+            reader_geom_for_book(&library, id_num)
+        };
+        let restore = apply_geom_safe(&window, &geom);
+        emit_reader_geometry_trace(
             app,
-            "open_existing",
-            if focused { "focused" } else { "shown" },
-            open_started.elapsed(),
+            &window,
+            "geometry_restore",
+            "same_book",
+            "requested",
+            geom.as_ref(),
+            Some(restore),
         );
+        let _ = window.emit("reader-shell-resume", ());
+        let outcome = reveal_existing_reader_window(&window);
+        emit_reader_geometry_trace(
+            app,
+            &window,
+            "geometry_observed",
+            "same_book",
+            outcome,
+            geom.as_ref(),
+            None,
+        );
+        emit_reader_window_trace(app, "open_existing", outcome, open_started.elapsed());
+        mark_reader_opened(app, state, id_num);
         log(&format!(
             "reader_open_total label={} source=same_book elapsed_ms={}",
             window.label(),
@@ -1411,6 +1880,7 @@ pub(crate) fn ensure_reader_window(
                 },
                 open_started.elapsed(),
             );
+            mark_reader_opened(app, state, id_num);
             return Ok(window);
         }
         // CloseRequested 到 Destroyed 之间，同名窗口仍会短暂留在 Tauri 注册表中。
@@ -1471,20 +1941,9 @@ pub(crate) fn ensure_reader_window(
     };
 
     // 读取上次阅读窗口的大小/位置，本次按它恢复（EPUB 与 PDF 分开记，各自适应）
-    let is_pdf = state
-        .library
-        .lock()
-        .unwrap()
-        .get(id_num)
-        .map(|book| book.format == "pdf")
-        .unwrap_or(false);
     let geom = {
         let library = state.library.lock().unwrap();
-        if is_pdf {
-            library.reader_geom_pdf.clone()
-        } else {
-            library.reader_geom.clone()
-        }
+        reader_geom_for_book(&library, id_num)
     };
     // 用主窗口的显示器信息判断保存的位置是否还在屏幕内（防止阅读窗口跑到屏幕外）
     let on_screen = geom
@@ -1515,17 +1974,16 @@ pub(crate) fn ensure_reader_window(
             schedule_clean_reader_shell(app);
             return Err(error.to_string());
         }
-        if let Some(saved) = geom
-            .as_ref()
-            .filter(|saved| saved.w >= 300.0 && saved.h >= 300.0)
-        {
-            let _ = window.set_size(tauri::LogicalSize::new(saved.w, saved.h));
-            if on_screen {
-                let _ = window.set_position(tauri::LogicalPosition::new(saved.x, saved.y));
-            }
-        } else {
-            let _ = window.set_size(tauri::LogicalSize::new(880.0, 760.0));
-        }
+        let restore = apply_geom_safe(&window, &geom);
+        emit_reader_geometry_trace(
+            app,
+            &window,
+            "geometry_restore",
+            "pooled_shell",
+            "requested",
+            geom.as_ref(),
+            Some(restore),
+        );
         READER_OPEN_STARTED_AT
             .lock()
             .unwrap()
@@ -1540,12 +1998,15 @@ pub(crate) fn ensure_reader_window(
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
-        if !on_screen {
-            let _ = window.center();
-        }
-        if geom.as_ref().map(|saved| saved.maximized).unwrap_or(false) {
-            let _ = window.maximize();
-        }
+        emit_reader_geometry_trace(
+            app,
+            &window,
+            "geometry_observed",
+            "pooled_shell",
+            "shown",
+            geom.as_ref(),
+            None,
+        );
         mark_reader_opened(app, state, id_num);
         log(&format!(
             "open_book pooled_shell label={pooled_label} elapsed_ms={}",
@@ -1594,21 +2055,36 @@ pub(crate) fn ensure_reader_window(
         .lock()
         .unwrap()
         .insert(label.clone(), (open_started, "new_shell"));
+    // 新建窗口也走同一条安全恢复路径：预加载池、同本书复用、冷启动三种打开
+    // 方式都使用同一套尺寸、位置、越界回中与最大化规则。
+    let restore = apply_geom_safe(&window, &geom);
+    emit_reader_geometry_trace(
+        app,
+        &window,
+        "geometry_restore",
+        "new_shell",
+        "requested",
+        geom.as_ref(),
+        Some(restore),
+    );
     // macOS may create a new WebView window behind the shelf when the command
     // originates from an already-active app. Explicitly restore and focus it:
     // a successful build must result in a visible reader, not a background one.
     let shown = window.show().is_ok();
     let restored = window.unminimize().is_ok();
     let focused = window.set_focus().is_ok();
+    emit_reader_geometry_trace(
+        app,
+        &window,
+        "geometry_observed",
+        "new_shell",
+        if shown { "shown" } else { "show_failed" },
+        geom.as_ref(),
+        None,
+    );
     log(&format!(
         "open_book activate shown={shown} restored={restored} focused={focused}"
     ));
-    if !on_screen {
-        let _ = window.center(); // 上次坐标已不在任何屏幕内 → 回到屏幕中央
-    }
-    if geom.as_ref().map(|saved| saved.maximized).unwrap_or(false) {
-        let _ = window.maximize();
-    }
 
     // 只在关闭阅读窗口时保存几何信息。
     // Moved/Resized 在拖窗期间会高频触发；每次都跨 Rust 取位置并锁书库，会让阅读页拖动周期性卡顿。
@@ -1697,6 +2173,72 @@ pub(crate) fn complete_reader_switch(
 
 /// 根据窗口当前状态算出几何信息（逻辑像素）。最大化时只更新 maximized 标志，
 /// 保留之前的还原尺寸/位置，避免把全屏尺寸当成正常大小。
+fn capture_main_window_geom(prev: Option<WinGeom>, window: &tauri::Window) -> WinGeom {
+    let mut geom = prev.unwrap_or_default();
+    // 最小化时 Windows 把窗口坐标报成 -32000 之类的哨兵值，绝不能采集，否则下次打开会跑到屏幕外
+    if window.is_minimized().unwrap_or(false) {
+        return geom;
+    }
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let maximized = window.is_maximized().unwrap_or(false);
+    geom.maximized = maximized;
+    if !maximized {
+        if let Ok(size) = window.inner_size() {
+            let logical = size.to_logical::<f64>(scale);
+            if logical.width > 100.0 && logical.height > 100.0 {
+                geom.w = logical.width;
+                geom.h = logical.height;
+            }
+        }
+        if let Ok(position) = window.outer_position() {
+            let logical = position.to_logical::<f64>(scale);
+            // 再保险一层：明显越界的坐标不采集
+            if logical.x > -10000.0 && logical.y > -10000.0 {
+                geom.x = logical.x;
+                geom.y = logical.y;
+            }
+        }
+    }
+    geom
+}
+
+#[derive(Clone, Copy)]
+struct MonitorBounds {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GeometryRestoreReport {
+    space: &'static str,
+    size_applied: bool,
+    position_applied: bool,
+    clamped: bool,
+    target: Option<MonitorBounds>,
+}
+
+fn physical_geometry_json(geom: &PhysicalWinGeom) -> serde_json::Value {
+    serde_json::json!({ "x": geom.x, "y": geom.y, "w": geom.w, "h": geom.h })
+}
+
+fn physical_geometry_from_window(window: &tauri::WebviewWindow) -> Option<PhysicalWinGeom> {
+    let size = window.inner_size().ok()?;
+    let position = window.outer_position().ok()?;
+    if size.width < 100 || size.height < 100 || position.x <= -10_000 || position.y <= -10_000 {
+        return None;
+    }
+    Some(PhysicalWinGeom {
+        x: position.x,
+        y: position.y,
+        w: size.width,
+        h: size.height,
+    })
+}
+
+/// 根据窗口当前状态算出几何信息。最大化时只更新最大化标志，保留之前的还原
+/// 尺寸/位置；新记录同时保留物理像素，避免不同 DPI 显示器之间重复缩放。
 pub(crate) fn capture_geom(prev: Option<WinGeom>, window: &tauri::WebviewWindow) -> WinGeom {
     let mut geom = prev.unwrap_or_default();
     // 最小化时 Windows 把窗口坐标报成 -32000 之类的哨兵值，绝不能采集，否则下次打开会跑到屏幕外
@@ -1721,6 +2263,9 @@ pub(crate) fn capture_geom(prev: Option<WinGeom>, window: &tauri::WebviewWindow)
                 geom.x = logical.x;
                 geom.y = logical.y;
             }
+        }
+        if let Some(physical) = physical_geometry_from_window(window) {
+            geom.physical = Some(physical);
         }
     }
     geom
@@ -1757,14 +2302,30 @@ fn centered_position(window: &tauri::WebviewWindow, w: f64, h: f64) -> Option<(f
 
 /// 把当前阅读窗口的大小/位置写入内存中的书库（不立即落盘，关闭时再统一保存）。
 /// EPUB 与 PDF 各存各的，互不影响。
-fn update_reader_geom(library: &mut Library, window: &tauri::WebviewWindow) {
+fn update_reader_geom(library: &mut Library, window: &tauri::WebviewWindow) -> WinGeom {
     let is_pdf = reader_window_id(window)
         .and_then(|id| library.get(id).map(|book| book.format == "pdf"))
         .unwrap_or(false);
     if is_pdf {
-        library.reader_geom_pdf = Some(capture_geom(library.reader_geom_pdf.clone(), window));
+        let geom = capture_geom(library.reader_geom_pdf.clone(), window);
+        library.reader_geom_pdf = Some(geom.clone());
+        geom
     } else {
-        library.reader_geom = Some(capture_geom(library.reader_geom.clone(), window));
+        let geom = capture_geom(library.reader_geom.clone(), window);
+        library.reader_geom = Some(geom.clone());
+        geom
+    }
+}
+
+fn reader_geom_for_book(library: &Library, id: u64) -> Option<WinGeom> {
+    if library
+        .get(id)
+        .map(|book| book.format == "pdf")
+        .unwrap_or(false)
+    {
+        library.reader_geom_pdf.clone()
+    } else {
+        library.reader_geom.clone()
     }
 }
 
@@ -1805,30 +2366,137 @@ fn position_on_screen(window: &tauri::WebviewWindow, geom: &WinGeom) -> bool {
     })
 }
 
+fn monitor_bounds_for_physical_geom(
+    window: &tauri::WebviewWindow,
+    geom: &PhysicalWinGeom,
+) -> Option<MonitorBounds> {
+    let rect_right = i64::from(geom.x) + i64::from(geom.w);
+    let rect_bottom = i64::from(geom.y) + i64::from(geom.h);
+    let mut best: Option<(u64, MonitorBounds)> = None;
+    for monitor in window.available_monitors().ok()? {
+        let position = monitor.position();
+        let size = monitor.size();
+        let right = i64::from(position.x) + i64::from(size.width);
+        let bottom = i64::from(position.y) + i64::from(size.height);
+        let overlap_w =
+            (rect_right.min(right) - i64::from(geom.x).max(i64::from(position.x))).max(0);
+        let overlap_h =
+            (rect_bottom.min(bottom) - i64::from(geom.y).max(i64::from(position.y))).max(0);
+        let overlap = (overlap_w as u64).saturating_mul(overlap_h as u64);
+        let bounds = MonitorBounds {
+            x: position.x,
+            y: position.y,
+            w: size.width,
+            h: size.height,
+        };
+        if best.is_none_or(|(current, _)| overlap > current) {
+            best = Some((overlap, bounds));
+        }
+    }
+    best.and_then(|(overlap, bounds)| (overlap > 0).then_some(bounds))
+        .or_else(|| {
+            window.primary_monitor().ok().flatten().map(|monitor| {
+                let position = monitor.position();
+                let size = monitor.size();
+                MonitorBounds {
+                    x: position.x,
+                    y: position.y,
+                    w: size.width,
+                    h: size.height,
+                }
+            })
+        })
+}
+
+fn clamp_physical_geom(geom: &PhysicalWinGeom, target: MonitorBounds) -> (PhysicalWinGeom, bool) {
+    let max_width = target.w.saturating_sub(40).max(300);
+    let max_height = target.h.saturating_sub(60).max(300);
+    let w = geom.w.min(max_width);
+    let h = geom.h.min(max_height);
+    let max_x = i64::from(target.x) + i64::from(target.w.saturating_sub(w));
+    let max_y = i64::from(target.y) + i64::from(target.h.saturating_sub(h));
+    let x = i64::from(geom.x).clamp(i64::from(target.x), max_x) as i32;
+    let y = i64::from(geom.y).clamp(i64::from(target.y), max_y) as i32;
+    let clamped = x != geom.x || y != geom.y || w != geom.w || h != geom.h;
+    (PhysicalWinGeom { x, y, w, h }, clamped)
+}
+
+fn physical_size_matches(current: Option<&PhysicalWinGeom>, target: &PhysicalWinGeom) -> bool {
+    current.is_some_and(|current| current.w == target.w && current.h == target.h)
+}
+
+fn physical_position_matches(current: Option<&PhysicalWinGeom>, target: &PhysicalWinGeom) -> bool {
+    current.is_some_and(|current| current.x == target.x && current.y == target.y)
+}
+
 /// 安全地把保存的几何信息应用到窗口：尺寸超屏会收缩，位置越界则真正居中（不依赖 center()）。
-pub(crate) fn apply_geom_safe(window: &tauri::WebviewWindow, geom: &Option<WinGeom>) {
+pub(crate) fn apply_geom_safe(
+    window: &tauri::WebviewWindow,
+    geom: &Option<WinGeom>,
+) -> GeometryRestoreReport {
     // Geometry is applied while hidden. This is also important on macOS, where
     // AppKit may animate a maximization that was requested after a window was
     // already visible.
     let _ = window.hide();
     let _ = window.unminimize();
+    let mut report = GeometryRestoreReport {
+        space: "none",
+        size_applied: false,
+        position_applied: false,
+        clamped: false,
+        target: None,
+    };
     if let Some(saved) = geom {
-        // 目标尺寸，超过主屏幕则收缩，避免窗口比屏幕还大
-        let (mut width, mut height) = (saved.w, saved.h);
-        if let Some((monitor_width, monitor_height)) = primary_logical_size(window) {
-            if width > monitor_width {
-                width = (monitor_width - 40.0).max(300.0);
+        if let Some(physical) = saved.physical.as_ref() {
+            report.space = "physical_v1";
+            report.target = monitor_bounds_for_physical_geom(window, physical);
+            if let Some(target) = report.target {
+                let (target_geom, clamped) = clamp_physical_geom(physical, target);
+                report.clamped = clamped;
+                if target_geom.w >= 300 && target_geom.h >= 300 {
+                    let current = physical_geometry_from_window(window);
+                    // A cached reader already has the geometry captured at close. Reapplying
+                    // the same size still emits a WebView resize and needlessly repaginates
+                    // the chapter, which is visible as a page jump on every same-book reveal.
+                    report.size_applied = physical_size_matches(current.as_ref(), &target_geom)
+                        || window
+                            .set_size(tauri::PhysicalSize::new(target_geom.w, target_geom.h))
+                            .is_ok();
+                    report.position_applied =
+                        physical_position_matches(current.as_ref(), &target_geom)
+                            || window
+                                .set_position(tauri::PhysicalPosition::new(
+                                    target_geom.x,
+                                    target_geom.y,
+                                ))
+                                .is_ok();
+                }
             }
-            if height > monitor_height {
-                height = (monitor_height - 60.0).max(300.0);
+        } else {
+            report.space = "legacy_logical_v0";
+            // 目标尺寸，超过主屏幕则收缩，避免窗口比屏幕还大
+            let (mut width, mut height) = (saved.w, saved.h);
+            if let Some((monitor_width, monitor_height)) = primary_logical_size(window) {
+                if width > monitor_width {
+                    width = (monitor_width - 40.0).max(300.0);
+                }
+                if height > monitor_height {
+                    height = (monitor_height - 60.0).max(300.0);
+                }
             }
-        }
-        if width >= 300.0 && height >= 300.0 {
-            let _ = window.set_size(tauri::LogicalSize::new(width, height));
-            if position_on_screen(window, saved) {
-                let _ = window.set_position(tauri::LogicalPosition::new(saved.x, saved.y));
-            } else if let Some((x, y)) = centered_position(window, width, height) {
-                let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+            if width >= 300.0 && height >= 300.0 {
+                report.size_applied = window
+                    .set_size(tauri::LogicalSize::new(width, height))
+                    .is_ok();
+                if position_on_screen(window, saved) {
+                    report.position_applied = window
+                        .set_position(tauri::LogicalPosition::new(saved.x, saved.y))
+                        .is_ok();
+                } else if let Some((x, y)) = centered_position(window, width, height) {
+                    report.position_applied = window
+                        .set_position(tauri::LogicalPosition::new(x, y))
+                        .is_ok();
+                }
             }
         }
         if saved.maximized {
@@ -1837,11 +2505,241 @@ pub(crate) fn apply_geom_safe(window: &tauri::WebviewWindow, geom: &Option<WinGe
     }
     // 首帧绘制之前保持隐藏；前端在书架渲染完后调用 main_window_show。
     let _ = window.unminimize();
+    report
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shelf_focus_outcome_requires_confirmed_webview_focus_for_success() {
+        assert_eq!(
+            shelf_focus_outcome(ShelfFocusRequest {
+                window_requested: true,
+                native_foreground: true,
+                webview_requested: true,
+                webview_confirmed: false,
+            }),
+            "requested"
+        );
+        assert_eq!(
+            shelf_focus_outcome(ShelfFocusRequest {
+                window_requested: false,
+                native_foreground: false,
+                webview_requested: false,
+                webview_confirmed: true,
+            }),
+            "focused"
+        );
+        assert_eq!(
+            shelf_focus_outcome(ShelfFocusRequest {
+                window_requested: false,
+                native_foreground: false,
+                webview_requested: false,
+                webview_confirmed: false,
+            }),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn hidden_reader_close_retries_focus_until_the_shelf_webview_is_confirmed() {
+        let source = include_str!("window_commands.rs");
+        let close_start = source
+            .find("pub(crate) fn main_window_close(webview: tauri::Webview)")
+            .unwrap();
+        let close_end = source[close_start..]
+            .find("pub(crate) fn reader_shell_hidden_after_save")
+            .map(|offset| close_start + offset)
+            .unwrap();
+        let close_source = &source[close_start..close_end];
+        let hide = close_source.find("window.hide()").unwrap();
+        let activate = close_source
+            .find("activate_shelf_after_reader_close(&app)")
+            .unwrap();
+        let retry = close_source
+            .find("schedule_shelf_focus_handoff_after_hidden_reader(&app)")
+            .unwrap();
+        assert!(hide < activate);
+        assert!(activate < retry);
+
+        let retry_start = source
+            .find("fn schedule_shelf_focus_handoff_after_hidden_reader")
+            .unwrap();
+        let retry_source = &source[retry_start..close_start];
+        assert!(retry_source.contains("windows_activation::webview_has_focus"));
+        assert!(retry_source.contains("\"focused_after_retry\""));
+        assert!(retry_source.contains("\"unconfirmed\""));
+        assert!(retry_source.contains("const RETRY_DELAYS_MS: [u64; 7]"));
+    }
+
+    #[test]
+    fn reader_focus_trace_uses_the_app_bus_and_keeps_only_bounded_focus_evidence() {
+        let source = include_str!("window_commands.rs");
+        let lifecycle_start = source.find("fn emit_reader_window_trace").unwrap();
+        let lifecycle_end = source[lifecycle_start..]
+            .find("fn emit_reader_geometry_trace")
+            .map(|offset| lifecycle_start + offset)
+            .unwrap();
+        let lifecycle_source = &source[lifecycle_start..lifecycle_end];
+        assert!(lifecycle_source.contains("let _ = app.emit("));
+        assert!(!lifecycle_source.contains("main.emit("));
+
+        let focus_start = source.find("fn emit_shelf_focus_trace").unwrap();
+        let focus_end = source[focus_start..]
+            .find("fn activate_shelf_after_reader_close")
+            .map(|offset| focus_start + offset)
+            .unwrap();
+        let focus_source = &source[focus_start..focus_end];
+        assert!(focus_source.contains("windowRequested"));
+        assert!(focus_source.contains("nativeFocused"));
+        assert!(focus_source.contains("webviewRequested"));
+        assert!(focus_source.contains("webviewFocused"));
+        assert!(!focus_source.contains("bookId"));
+        assert!(!focus_source.contains("title"));
+        assert!(!focus_source.contains("path"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn native_activation_does_not_leave_keyboard_focus_on_the_titlebar() {
+        let source = include_str!("window_commands.rs");
+        let module_start = source.find("mod windows_activation").unwrap();
+        let module_end = source[module_start..]
+            .find("static CLOSING_READER_WINDOWS")
+            .map(|offset| module_start + offset)
+            .unwrap();
+        let module_source = &source[module_start..module_end];
+        assert!(!module_source.contains("fn set_focus(window: Hwnd)"));
+        assert!(module_source.contains("fn get_gui_thread_info"));
+        assert!(module_source.contains("is_child(window, info.focused) != 0"));
+        assert!(module_source.contains("set_window_pos(window, -1_isize as Hwnd"));
+        assert!(module_source.contains("set_window_pos(window, -2_isize as Hwnd"));
+    }
+
+    #[test]
+    fn reader_close_broadcasts_undo_checkpoint_after_hiding() {
+        let source = include_str!("window_commands.rs");
+        let close_start = source
+            .find("pub(crate) fn main_window_close(webview: tauri::Webview)")
+            .unwrap();
+        let close_end = source[close_start..]
+            .find("pub(crate) fn reader_shell_hidden_after_save")
+            .map(|offset| close_start + offset)
+            .unwrap();
+        let close_source = &source[close_start..close_end];
+        let hidden = close_source.find("window.hide()").unwrap();
+        let capture = close_source
+            .find("update_reader_geom(&mut library, &reader)")
+            .unwrap();
+        let save = close_source.find("let library_saved").unwrap();
+        let broadcast = close_source
+            .find("app.emit(\n                \"reader-closed-for-reopen\"")
+            .unwrap();
+        assert!(capture < hidden);
+        assert!(hidden < broadcast);
+        assert!(hidden < save);
+        assert!(close_source.contains("\"undo_checkpoint\""));
+        assert!(close_source.contains("\"missing_book\""));
+    }
+
+    #[test]
+    fn main_close_saves_bound_readers_before_backgrounding_the_shelf() {
+        let source = include_str!("window_commands.rs");
+        let close_start = source
+            .find("pub(crate) fn main_window_close(webview: tauri::Webview)")
+            .unwrap();
+        let close_source = &source[close_start..];
+        let save_readers = close_source
+            .find("persist_reader_window_states_before_main_close(&app)")
+            .unwrap();
+        let save_main = close_source
+            .find("persist_main_window_state(&app, &window)")
+            .unwrap();
+        let background = close_source
+            .find("background_main_from_window(&app, &window)")
+            .unwrap();
+        assert!(save_readers < save_main);
+        assert!(save_main < background);
+        assert!(source.contains("\"main_close\""));
+    }
+
+    #[test]
+    fn hidden_reader_reveal_distinguishes_focus_show_and_failure() {
+        assert_eq!(
+            reader_reveal_outcome(true, true, true, false, true, false),
+            "focused"
+        );
+        assert_eq!(
+            reader_reveal_outcome(true, true, true, false, false, false),
+            "shown"
+        );
+        assert_eq!(
+            reader_reveal_outcome(false, false, false, false, false, false),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn hidden_reader_reopen_reapplies_saved_geometry_before_showing() {
+        let source = include_str!("window_commands.rs");
+        let start = source.find("pub(crate) fn ensure_reader_window").unwrap();
+        let end = source[start..]
+            .find("// 同一本书直接复用隐藏的 WebView")
+            .map(|offset| start + offset)
+            .unwrap();
+        let existing = &source[start..end];
+        let apply = existing.find("apply_geom_safe(&window, &geom)").unwrap();
+        let reveal = existing
+            .find("reveal_existing_reader_window(&window)")
+            .unwrap();
+        assert!(apply < reveal);
+        assert!(existing.contains("reader_geom_for_book(&library, id_num)"));
+    }
+
+    #[test]
+    fn every_successful_existing_reader_reopen_updates_recent_reading_time() {
+        let source = include_str!("window_commands.rs");
+        let start = source.find("pub(crate) fn ensure_reader_window").unwrap();
+        let end = source[start..]
+            .find("pub(crate) fn complete_reader_switch")
+            .map(|offset| start + offset)
+            .unwrap();
+        let ensure_source = &source[start..end];
+
+        let same_book_end = ensure_source
+            .find("// 同一本书直接复用隐藏的 WebView")
+            .unwrap();
+        let same_book = &ensure_source[..same_book_end];
+        let recent = same_book
+            .rfind("mark_reader_opened(app, state, id_num)")
+            .unwrap();
+        let returned = same_book.rfind("return Ok(window)").unwrap();
+        assert!(recent < returned);
+
+        let fallback_start = ensure_source
+            .find("if let Some(window) = app.get_webview_window(&label)")
+            .unwrap();
+        let fallback_end = ensure_source[fallback_start..]
+            .find("// CloseRequested 到 Destroyed")
+            .map(|offset| fallback_start + offset)
+            .unwrap();
+        let fallback = &ensure_source[fallback_start..fallback_end];
+        let recent = fallback
+            .find("mark_reader_opened(app, state, id_num)")
+            .unwrap();
+        let returned = fallback.find("return Ok(window)").unwrap();
+        assert!(recent < returned);
+    }
+
+    #[test]
+    fn close_command_keeps_the_invoking_webview_window_context() {
+        let source = include_str!("window_commands.rs");
+        assert!(source.contains("pub(crate) fn main_window_close(webview: tauri::Webview)"));
+        assert!(source.contains("let label = webview.label();"));
+        assert!(source.contains("let window = webview.window();"));
+    }
 
     #[test]
     fn reader_labels_only_accept_numeric_reader_windows() {
@@ -1867,6 +2765,55 @@ mod tests {
             (-400.0, -300.0, 200.0, 200.0),
             monitor
         ));
+    }
+
+    #[test]
+    fn physical_geometry_preserves_valid_size_and_only_clamps_a_missing_or_small_screen() {
+        let saved = PhysicalWinGeom {
+            x: 263,
+            y: 104,
+            w: 1508,
+            h: 880,
+        };
+        let current_monitor = MonitorBounds {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        assert_eq!(
+            physical_geometry_json(&clamp_physical_geom(&saved, current_monitor).0),
+            physical_geometry_json(&saved)
+        );
+        assert!(!clamp_physical_geom(&saved, current_monitor).1);
+
+        let smaller_monitor = MonitorBounds {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 720,
+        };
+        let (clamped, changed) = clamp_physical_geom(&saved, smaller_monitor);
+        assert!(changed);
+        assert_eq!((clamped.w, clamped.h), (1240, 660));
+        assert!((0..=40).contains(&clamped.x));
+        assert!((0..=60).contains(&clamped.y));
+    }
+
+    #[test]
+    fn cached_reader_skips_noop_physical_resize_and_move() {
+        let current = PhysicalWinGeom {
+            x: 120,
+            y: 80,
+            w: 1280,
+            h: 800,
+        };
+        assert!(physical_size_matches(Some(&current), &current));
+        assert!(physical_position_matches(Some(&current), &current));
+
+        let moved = PhysicalWinGeom { x: 140, ..current };
+        assert!(physical_size_matches(Some(&current), &moved));
+        assert!(!physical_position_matches(Some(&current), &moved));
     }
 
     #[test]

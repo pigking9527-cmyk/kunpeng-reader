@@ -74,25 +74,65 @@ pub(super) fn preview_image_from_html(html: &str, page_url: &str) -> String {
 }
 
 pub(super) fn html_text(value: &str) -> String {
+    // RSS/Atom descriptions frequently escape their embedded markup, for
+    // example `&lt;a href="…"&gt;`. Decode first so that the tag is removed rather
+    // than being restored as visible text after the stripping pass.
+    let value = decode_html_entities(value);
     let mut text = String::with_capacity(value.len());
     let mut in_tag = false;
-    for character in value.chars() {
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
         match character {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
+            '<' if !in_tag && starts_html_tag(characters.as_str()) => in_tag = true,
+            '<' if !in_tag => text.push(character),
+            '>' if in_tag => in_tag = false,
             _ if !in_tag => text.push(character),
             _ => {}
         }
     }
-    text.replace("&nbsp;", " ")
+
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn decode_html_entities(value: &str) -> String {
+    value
+        .replace("&nbsp;", " ")
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+}
+
+fn starts_html_tag(value: &str) -> bool {
+    let Some(end) = value.find('>') else {
+        return false;
+    };
+    let value = &value[..end];
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if matches!(first, '!' | '?') {
+        return true;
+    }
+    let mut tag_name_started = first.is_ascii_alphabetic();
+    if first == '/' {
+        tag_name_started = characters
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic());
+    }
+    if !tag_name_started {
+        return false;
+    }
+    let remainder = characters.as_str();
+    let name_end = remainder
+        .find(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .unwrap_or(remainder.len());
+    remainder[name_end..]
+        .chars()
+        .next()
+        .is_none_or(|character| character.is_ascii_whitespace() || character == '/')
 }
 
 pub(super) fn element_with_class<'a>(
@@ -496,6 +536,20 @@ mod tests {
                 "https://news.example/path/story"
             ),
             "https://news.example/body.jpg"
+        );
+    }
+
+    #[test]
+    fn html_text_removes_escaped_anchor_markup_without_hiding_plain_angle_text() {
+        assert_eq!(
+            html_text(
+                r#"Read &lt;a href="https://news.example/article/very-long-id"&gt;the report&lt;/a&gt; &amp; act."#
+            ),
+            "Read the report & act."
+        );
+        assert_eq!(
+            html_text("A value < 3 remains text."),
+            "A value < 3 remains text."
         );
     }
 }

@@ -202,8 +202,18 @@ const booklistDescription = required<HTMLTextAreaElement>("booklist-description"
 const booklistBooks = required("booklist-books");
 let activeBooklist: BooklistRecord | null = null;
 let books: ShelfBookRecord[] = [];
-const storedSortKey = localStorage.getItem("shelfSort") || "title";
-let sortKey: ShelfSortKey = storedSortKey === "rating" ? "title" : storedSortKey as ShelfSortKey;
+// 旧版本会持久化不同排序，单纯修改 fallback 无法改变已有用户。按规则版本
+// 统一迁移一次到最近阅读；迁移完成后，用户重新选择的书名、
+// 作者、导入时间等模式仍严格保留。
+const sortPreference = shelfRules.resolveShelfSortPreference(
+  localStorage.getItem("shelfSort"),
+  localStorage.getItem("shelfSortMigrationRevision"),
+);
+let sortKey: ShelfSortKey = sortPreference.sortKey;
+if (sortPreference.shouldPersist) {
+  localStorage.setItem("shelfSort", sortPreference.sortKey);
+  localStorage.setItem("shelfSortMigrationRevision", sortPreference.revision);
+}
 const bookFileSizes = new Map<string, number>();
 let bookFileSizesPromise: Promise<void> | null = null;
 let layout: ShelfLayout = localStorage.getItem("shelfLayout") === "list" ? "list" : "grid";
@@ -239,6 +249,13 @@ let shelfLoaded = false;
 let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0";
 let showCoverRating = localStorage.getItem("showCoverRating") !== "0";
 let showCoverTitle = localStorage.getItem("showCoverTitle") === "1";
+// 旧版本可能把书架留在“双击打开”状态，导致升级后第一次单击只选中、
+// 第二次才打开。按交互版本只迁移一次；之后用户仍可显式切回双击。
+const SHELF_OPEN_INTERACTION_REVISION = "single-click-default-v1";
+if (localStorage.getItem("shelfOpenInteractionRevision") !== SHELF_OPEN_INTERACTION_REVISION) {
+  localStorage.setItem("shelfSingleClickOpen", "1");
+  localStorage.setItem("shelfOpenInteractionRevision", SHELF_OPEN_INTERACTION_REVISION);
+}
 let singleClickOpensBook = localStorage.getItem("shelfSingleClickOpen") !== "0";
 // 所有封面都立即拥有 URL；原生 lazy 只调整浏览器的请求调度，不能制造空白书卡。
 const DEFAULT_FIRST_SCREEN_COVER_COUNT = 24;
@@ -596,6 +613,7 @@ function bookCard(b: ShelfBookRecord, index = 0) {
   };
   let openingBook = false;
   let prewarmStarted = false;
+  let suppressPrimaryMouseClick = false;
   const prewarmBook = () => {
     if (prewarmStarted || b.missing || global.ReaderShellPreloadSettings?.enabled() === false) return;
     prewarmStarted = true;
@@ -634,6 +652,27 @@ function bookCard(b: ShelfBookRecord, index = 0) {
     });
     void attemptOpen(0);
   };
+  card.addEventListener("pointerdown", (e) => {
+    // WebView2 在主窗口刚重新激活时可能只交付 pointerdown，不再生成
+    // click。鼠标主键因此在 pointerdown 就打开；触摸、笔和键盘继续走
+    // click，避免触摸滚动刚按下便误开图书。
+    if (!shelfRules.shouldOpenBookOnPrimaryPointerDown({
+      singleClickOpensBook,
+      pointerType: e.pointerType,
+      button: e.button,
+      isPrimary: e.isPrimary,
+      metaKey: e.metaKey,
+      ctrlKey: e.ctrlKey,
+      hasSelection: selected.size > 0,
+    })) {
+      if (e.pointerType !== "mouse") suppressPrimaryMouseClick = false;
+      return;
+    }
+    e.stopPropagation();
+    closeShelfCardFloaters();
+    suppressPrimaryMouseClick = true;
+    openBook("pointerdown");
+  });
   card.addEventListener("click", (e) => {
     e.stopPropagation();
     closeShelfCardFloaters();
@@ -654,6 +693,14 @@ function bookCard(b: ShelfBookRecord, index = 0) {
       if (e.detail === 1) toggleSelect(b.id, card);
       return;
     }
+    // 主鼠标这一物理序列已在 pointerdown 打开。吞掉随后派生的 click，
+    // 包括浏览器计为 detail=2 的快速第二击；触摸和键盘的 click 未设置
+    // 此标记，仍可正常打开。
+    if (suppressPrimaryMouseClick && e.detail > 0) {
+      suppressPrimaryMouseClick = false;
+      return;
+    }
+    suppressPrimaryMouseClick = false;
     if (e.detail > 1) return;
     openBook("single");
   });

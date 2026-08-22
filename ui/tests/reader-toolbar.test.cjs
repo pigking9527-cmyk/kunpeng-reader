@@ -332,7 +332,7 @@ test("续读恢复完成前不保存章节首页，真实翻页立即提交位�
   assert.equal((layout.match(/function visibleTopTextAnchor\(\)/g) || []).length, 1);
   assert.match(layout, /r\.right<=pr\.left\+1\|\|r\.left>=pr\.right-1/);
   assert.match(layout, /if\(!visible\)anchor=visibleTopTextAnchor\(\)\|\|anchor/);
-  assert.match(reader, /async function closeReaderWindow\(\)[\s\S]*?await requestPagePositionSnapshot\(\);[\s\S]*?await sendProgressNow\(\);[\s\S]*?invoke\("main_window_close"\)/);
+  assert.match(reader, /async function closeReaderWindow\(\)[\s\S]*?const positionSnapshot = requestPagePositionSnapshot\([\s\S]*?invoke\("main_window_close"\)[\s\S]*?await positionSnapshot[\s\S]*?await sendProgressNow\(\)/);
   const delayedSave = reader.slice(reader.indexOf("progTimer = setTimeout(() => {", reader.indexOf("function reportProgress")), reader.indexOf("window.addEventListener(\"pagehide\""));
   assert.match(delayedSave, /sendProgressNow\(\)/);
   assert.doesNotMatch(delayedSave, /reportProgress\(\)/);

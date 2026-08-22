@@ -44,6 +44,14 @@ interface NewsArticle extends NewsRecord {
   readonly content_html?: unknown;
 }
 
+/** Escaped HTML assembled from an already prepared local intelligence brief. */
+export interface PreparedNewsArticle {
+  readonly title: string;
+  readonly source: string;
+  readonly publishedAt?: string;
+  readonly contentHtml: string;
+}
+
 interface CustomNewsSource {
   readonly id: string;
   readonly name: string;
@@ -75,6 +83,7 @@ type NewsCommands = {
     readonly args: { readonly request: NewsRecord };
     readonly result: NewsResult;
   };
+  readonly newsnow_prepare_article_shell: { readonly result: unknown };
   readonly newsnow_open_article: {
     readonly args: { readonly request: NewsRecord };
     readonly result: NewsArticle;
@@ -104,6 +113,14 @@ interface NewsRuntime extends Window {
     readonly instance?: { readonly openSettings?: () => void };
   };
   readonly ReaderLibraryAiEntry?: { readonly close?: () => void };
+  readonly ReaderProblemTraceUI?: {
+    readonly recordNewsArticleTiming?: (
+      stage: unknown,
+      outcome: unknown,
+      durationMs: unknown,
+      sequence: unknown,
+    ) => void;
+  };
   readonly ReaderIntelligenceWorkspace?: {
     readonly instance?: {
       readonly close?: (options?: { readonly focus?: boolean }) => void;
@@ -117,6 +134,8 @@ export interface NewsUiController {
   readonly open: () => Promise<void>;
   /** Opens one existing news item in the same sanitized reader used by the news page. */
   readonly openItem: (item: NewsItem, options?: { readonly returnToIntelligence?: boolean }) => Promise<void>;
+  /** Opens an already prepared local intelligence article without WebView navigation. */
+  readonly openPreparedArticle: (article: PreparedNewsArticle, options?: { readonly returnToIntelligence?: boolean }) => void;
   /** Opens the single reader-owned source selector rather than duplicating it elsewhere. */
   readonly openSources: () => Promise<void>;
   /** Returns a copy of the effective source selection for another reader surface. */
@@ -438,6 +457,7 @@ export function installNewsUi(
     let layout: NewsLayout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order: NewsOrder = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
     let articleScrollTop = 0, sourcePageScrollTop = 0, articleOpen = false, articleReturnsToIntelligence = false, currentArticleUrl = "", currentArticleItem: NewsItem | null = null, masonryResizeTimer = 0, renderedMasonryColumnCount = 0, feedRenderPending = false;
+    let articleTraceSequence = 0, articleTraceStartedAt = 0, feedReturnTraceStartedAt = 0, awaitingFeedHoverTrace = false;
     let backgroundRefreshRunning = false, prefetchDelayTimer = 0, prefetchIntervalTimer = 0, lastUserActivityAt = Date.now(), sourceRefreshTimer = 0;
     let visibleImageRunning = 0;
     const visibleImageQueue: VisibleImageJob[] = [];
@@ -736,6 +756,30 @@ export function installNewsUi(
     function openSourcePicker() { pendingSourceIds = sourceIds.slice(); pendingTiebaBarNames = tiebaBarNames.slice(); pendingTiebaEnabledBarNames = tiebaEnabledBarNames.slice(); syncPendingTiebaSource(); sourceQuery = ""; selectedSourceProvider = "all"; sourceSearch.value = ""; sourceStatus.textContent = ""; setTiebaAddOpen(false); renderSourcePicker(); sourcePageScrollTop = page.scrollTop; feedView.hidden = true; sourcePicker.hidden = false; page.classList.add("newsnow-source-page-active"); page.scrollTop = 0; sourceToggle.setAttribute("aria-expanded", "true"); sourceSearch.focus({ preventScroll: true }); }
     function closeSourcePicker({ focus = false, restoreScroll = true } = {}) { const wasOpen = !sourcePicker.hidden; setTiebaAddOpen(false); sourcePicker.hidden = true; feedView.hidden = false; page.classList.remove("newsnow-source-page-active"); sourceToggle.setAttribute("aria-expanded", "false"); if (wasOpen && restoreScroll) host.requestAnimationFrame(() => { page.scrollTop = sourcePageScrollTop; if (feedRenderPending || layout === "grid") renderFeed(); }); if (focus) sourceToggle.focus({ preventScroll: true }); }
     function setReaderVisible(visible: boolean): void { reader.hidden = !visible; page.hidden = visible; closeSourcePicker({ restoreScroll: false }); }
+    function traceArticle(stage: string, outcome: string): void {
+      if (!articleTraceStartedAt) return;
+      // The trace API accepts only a phase, outcome, monotonically increasing
+      // sequence and elapsed time. It deliberately never receives the URL,
+      // title, source name or article content.
+      host.ReaderProblemTraceUI?.recordNewsArticleTiming?.(
+        stage,
+        outcome,
+        Date.now() - articleTraceStartedAt,
+        articleTraceSequence,
+      );
+    }
+    function traceFeedReturn(stage: string, outcome: string, startedAt = feedReturnTraceStartedAt): void {
+      if (!startedAt) return;
+      // Reuse the news-only redacted trace channel. The value is a duration
+      // only; no link, article title, cursor coordinates or page text leaves
+      // the renderer.
+      host.ReaderProblemTraceUI?.recordNewsArticleTiming?.(
+        stage,
+        outcome,
+        Date.now() - startedAt,
+        articleTraceSequence,
+      );
+    }
     function renderLocalArticle(article: NewsArticle): void {
       readerMeta.textContent = [text(article?.source).trim(), text(article?.publishedAt || article?.published_at).trim()].filter(Boolean).join(" · ");
       readerTitle.textContent = text(article?.title).trim() || i18n("newsReader", "资讯正文");
@@ -754,19 +798,30 @@ export function installNewsUi(
       return true;
     }
     function closeArticle({ focus = false, restoreScroll = true } = {}) {
-      if (articleOpen && canInvoke) void Promise.resolve(invoke("newsnow_close_article")).catch(() => {});
+      if (articleOpen) traceArticle("close", "requested");
+      const closeStartedAt = Date.now();
+      if (articleOpen && canInvoke) {
+        void Promise.resolve(invoke("newsnow_close_article"))
+          .then(() => traceFeedReturn("close_native_command", "completed", closeStartedAt))
+          .catch(() => traceFeedReturn("close_native_command", "failed", closeStartedAt));
+      }
       const returnToIntelligence = articleReturnsToIntelligence;
       articleOpen = false; articleReturnsToIntelligence = false; currentArticleUrl = ""; currentArticleItem = null; readerStatus.textContent = ""; readerMeta.textContent = ""; readerTitle.textContent = ""; readerContent.replaceChildren(); setReaderVisible(false);
       if (returnToIntelligence && returnToIntelligenceWorkspace()) return;
+      feedReturnTraceStartedAt = closeStartedAt; awaitingFeedHoverTrace = true;
       // 正文打开期间后台可能补齐了缩略图。资讯页隐藏时不能测量瀑布流
       // 宽度，因此回到列表后再用真实宽度重建；方格按钮与卡片列数始终一致。
       if (feedRenderPending || layout === "grid") renderFeed();
-      if (restoreScroll) host.requestAnimationFrame(() => { page.scrollTop = articleScrollTop; });
+      host.requestAnimationFrame(() => {
+        traceFeedReturn("feed_frame", "visible");
+        if (restoreScroll) page.scrollTop = articleScrollTop;
+      });
       if (focus) (feed.querySelector(".newsnow-card") as HTMLElement | null)?.focus({ preventScroll: true });
     }
     async function openArticle(item: NewsItem, { returnToIntelligence = false }: { readonly returnToIntelligence?: boolean } = {}): Promise<void> {
       const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
-      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; articleReturnsToIntelligence = returnToIntelligence; currentArticleUrl = url; currentArticleItem = { ...item }; readerMeta.textContent = sourceName(item); readerTitle.textContent = text(item.title || item.name || i18n("newsReader", "资讯正文")); readerContent.replaceChildren(); readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true);
+      articleTraceSequence += 1; articleTraceStartedAt = Date.now();
+      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; articleReturnsToIntelligence = returnToIntelligence; currentArticleUrl = url; currentArticleItem = { ...item }; readerOriginal.hidden = false; readerMeta.textContent = sourceName(item); readerTitle.textContent = text(item.title || item.name || i18n("newsReader", "资讯正文")); readerContent.replaceChildren(); readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true); traceArticle("click", "reader_shell_visible");
       try {
         const article = await invoke<NewsArticle>("newsnow_open_article", { request: {
           url,
@@ -778,10 +833,27 @@ export function installNewsUi(
           gestureThreshold: newsGesture.matchThreshold(newsGesture.loadPrecision(host.localStorage)),
           hideReturnIcon: host.ReaderExperimentalFeatures?.enabled?.("newsnowHideReturnIcon") === true,
         } });
-        if (article?.local) renderLocalArticle(article);
-        else readerStatus.textContent = "正在加载网页原文…可随时返回。";
+        if (article?.local) { traceArticle("native_command", "local_article"); renderLocalArticle(article); }
+        else { traceArticle("native_command", "navigation_queued"); readerStatus.textContent = "正在加载网页原文…可随时返回。"; }
       }
-      catch { const returnToIntelligence = articleReturnsToIntelligence; articleOpen = false; articleReturnsToIntelligence = false; currentArticleUrl = ""; currentArticleItem = null; setReaderVisible(false); if (!returnToIntelligence || !returnToIntelligenceWorkspace()) setStatus(i18n("newsArticleLoadFailed", "资讯正文加载失败，请稍后重试。"), "error"); }
+      catch { traceArticle("native_command", "failed"); const returnToIntelligence = articleReturnsToIntelligence; articleOpen = false; articleReturnsToIntelligence = false; currentArticleUrl = ""; currentArticleItem = null; setReaderVisible(false); if (!returnToIntelligence || !returnToIntelligenceWorkspace()) setStatus(i18n("newsArticleLoadFailed", "资讯正文加载失败，请稍后重试。"), "error"); }
+    }
+    function openPreparedArticle(article: PreparedNewsArticle, { returnToIntelligence = false }: { readonly returnToIntelligence?: boolean } = {}): void {
+      // Keep the shell transition identical to ordinary news links.  The
+      // intelligence workspace closes before it hands us a prepared article;
+      // without this synchronous activation its close path exposes the
+      // bookshelf shell over the already-populated reader.
+      void open({ allowWhenDisabled: true, skipFeedLoad: true });
+      articleTraceSequence += 1; articleTraceStartedAt = Date.now();
+      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; articleReturnsToIntelligence = returnToIntelligence; currentArticleUrl = ""; currentArticleItem = null;
+      readerOriginal.hidden = true;
+      readerMeta.textContent = [article.source.trim(), article.publishedAt?.trim() ?? ""].filter(Boolean).join(" · ");
+      readerTitle.textContent = article.title.trim() || i18n("newsReader", "资讯正文");
+      readerContent.innerHTML = article.contentHtml;
+      readerContent.scrollTop = 0;
+      readerStatus.textContent = "";
+      setReaderVisible(true);
+      traceArticle("prepared_brief", "ready");
     }
     function applyCardImage(image: HTMLImageElement, card: HTMLElement, url: string): void {
       if (!url) return;
@@ -1036,7 +1108,21 @@ export function installNewsUi(
     readerBack.addEventListener("click", () => closeArticle({ focus: true }));
     readerOriginal.addEventListener("click", () => { if (currentArticleUrl) void Promise.resolve(invoke("open_url", { url: currentArticleUrl })).catch(() => {}); });
     readerContent.addEventListener("click", (event) => {
-      const link = event.target instanceof Element ? event.target.closest("a") : null; if (!link || !currentArticleUrl) return;
+      const link = event.target instanceof Element ? event.target.closest("a") : null; if (!link) return;
+      const preparedSourceUrl = safeHttpUrl(link.getAttribute("data-newsnow-prepared-source-url"));
+      if (preparedSourceUrl) {
+        // A local intelligence brief has no current upstream URL. Its source
+        // citations must therefore re-enter the same in-app article flow,
+        // rather than falling through to `open_url` and an external browser.
+        event.preventDefault();
+        void openArticle({
+          url: preparedSourceUrl,
+          title: text(link.textContent) || i18n("newsReader", "资讯正文"),
+          source: i18n("newsReader", "资讯正文"),
+        }, { returnToIntelligence: articleReturnsToIntelligence });
+        return;
+      }
+      if (!currentArticleUrl) return;
       event.preventDefault();
       let url = ""; try { url = safeHttpUrl(new URL(link.getAttribute("href") || "", currentArticleUrl).href); } catch { url = ""; }
       if (url) void Promise.resolve(invoke("open_url", { url })).catch(() => {});
@@ -1091,6 +1177,17 @@ export function installNewsUi(
     tiebaBarCancel.addEventListener("click", () => setTiebaAddOpen(false, { focus: true }));
     tiebaBarForm.addEventListener("submit", (event) => { event.preventDefault(); const name = normalizeTiebaBars([tiebaBarInput.value])[0]; if (!name) { tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.includes(name)) { tiebaBarInput.value = ""; tiebaBarInput.focus(); return; } if (pendingTiebaBarNames.length >= MAX_TIEBA_BARS) { setSourceStatus(format("newsTiebaLimit", "You can add up to {max} forums.", { max: MAX_TIEBA_BARS }), "warning"); return; } const previousBars = pendingTiebaBarNames.slice(), previousEnabled = pendingTiebaEnabledBarNames.slice(), previousSources = pendingSourceIds.slice(); pendingTiebaBarNames = [...pendingTiebaBarNames, name]; pendingTiebaEnabledBarNames = [...pendingTiebaEnabledBarNames, name]; if (!syncPendingTiebaSource() || !persistSourceChanges()) { pendingTiebaBarNames = previousBars; pendingTiebaEnabledBarNames = previousEnabled; pendingSourceIds = previousSources; setSourceStatus(format("newsSourceLimit", "The source limit is reached, so {name} cannot be enabled yet.", { name }), "warning"); } renderSourcePicker(); setTiebaAddOpen(false, { focus: true }); });
     host.addEventListener("keydown", (event) => { if (event.key !== "Escape" || (page.hidden && reader.hidden)) return; if (!reader.hidden) closeArticle({ focus: true }); else if (!sourcePicker.hidden) closeSourcePicker({ focus: true }); else close(); });
+    feed.addEventListener("pointerover", (event) => {
+      if (!awaitingFeedHoverTrace || !(event.target instanceof Element) || !event.target.closest(".newsnow-card")) return;
+      awaitingFeedHoverTrace = false;
+      const receivedAt = Date.now();
+      const eventTimestamp = Number(event.timeStamp);
+      const dispatchLag = Number.isFinite(eventTimestamp) && eventTimestamp >= 0 && eventTimestamp <= host.performance.now()
+        ? Math.max(0, host.performance.now() - eventTimestamp)
+        : 0;
+      traceFeedReturn("feed_hover_dispatch", "received", receivedAt - dispatchLag);
+      host.requestAnimationFrame(() => traceFeedReturn("feed_hover_frame", "rendered", receivedAt));
+    }, { passive: true });
     ["pointerdown", "keydown", "wheel", "touchstart"].forEach((eventName) => host.addEventListener(eventName, () => { lastUserActivityAt = Date.now(); }, { passive: true }));
     host.addEventListener("resize", () => {
       if (layout !== "grid" || page.hidden || feedView.hidden || !feed.clientWidth) return;
@@ -1123,13 +1220,20 @@ export function installNewsUi(
       }).catch(() => undefined);
       void transport.listen("newsnow-article-loading", () => {
         if (!articleOpen || reader.hidden) return;
+        traceArticle("native_page_load", "started");
         readerStatus.textContent = "正在加载网页原文…可随时返回。";
       }).catch(() => undefined);
       void transport.listen("newsnow-article-ready", () => {
         if (!articleOpen || reader.hidden) return;
+        traceArticle("native_page_load", "finished");
         readerStatus.textContent = "";
       }).catch(() => undefined);
     }
+    // Keep the native article WebView warm while the main reader is idle. It
+    // uses a local loading shell and remains hidden until a news or
+    // intelligence link is clicked, so the click path only reveals and
+    // navigates an existing surface.
+    if (canInvoke) void invoke("newsnow_prepare_article_shell").catch(() => undefined);
     host.addEventListener("reader-experimental-features-changed", (event) => { const detail = event instanceof CustomEvent ? record(event.detail) : null; if (detail?.key === "newsnow") applyExperimentalAvailability(); if (detail?.key === "newsnow" || detail?.key === "newsnowPrefetch") scheduleBackgroundPrefetch(); }); applyExperimentalAvailability(); applyDisplayOptions(); scheduleBackgroundPrefetch();
     function gestureBack(): void {
       if (!reader.hidden) closeArticle({ focus: false });
@@ -1159,14 +1263,17 @@ export function installNewsUi(
       await loadSources();
       openSourcePicker();
     };
-    const openItem = async (item: NewsItem, options: { readonly returnToIntelligence?: boolean } = {}): Promise<void> => {
+    const openItem = (item: NewsItem, options: { readonly returnToIntelligence?: boolean } = {}): Promise<void> => {
       // The intelligence workspace already owns the feed data. Avoid awaiting
       // a second list request here, otherwise the ordinary news page can paint
       // briefly before the article WebView covers it.
-      await open({ allowWhenDisabled: true, skipFeedLoad: true });
-      await openArticle(item, options);
+      // Both calls publish their visible state before their first await. Do not
+      // await `open` here: doing so defers the reader transition to a later
+      // microtask and can make a link click appear unresponsive under load.
+      void open({ allowWhenDisabled: true, skipFeedLoad: true });
+      return openArticle(item, options);
     };
-    return { open, openItem, openSources, sourceRequest, close, gestureSurface: () => (!reader.hidden ? reader : (!page.hidden ? page : null)), gestureBack, gestureReopen, refresh: () => load(true), render: (items: unknown) => { allItems = resultItems(items).map((item) => record(item) ?? {}); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: (): NewsLayout => layout, order: (): NewsOrder => order };
+    return { open, openItem, openPreparedArticle, openSources, sourceRequest, close, gestureSurface: () => (!reader.hidden ? reader : (!page.hidden ? page : null)), gestureBack, gestureReopen, refresh: () => load(true), render: (items: unknown) => { allItems = resultItems(items).map((item) => record(item) ?? {}); renderCategories(); renderFeed(); }, sources: () => catalog.slice(), layout: (): NewsLayout => layout, order: (): NewsOrder => order };
   }
   const publicApi: NewsUiGlobal = {
     init,

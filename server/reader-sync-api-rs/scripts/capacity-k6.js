@@ -217,10 +217,17 @@ function accountsForBatch(stage) {
 }
 
 function mutationId(stageOrdinal, sequence) {
-  const suffix = `${stageOrdinal.toString(16).padStart(2, '0')}${sequence
-    .toString(16)
-    .padStart(10, '0')}`.slice(-12);
-  return `a82fb5c3-6c4a-4f3d-99de-${suffix}`;
+  // A mutation receipt remains in the disposable database across repeated
+  // diagnostics. Include the shared run epoch as well as the stage/sequence;
+  // otherwise a later run reuses the same UUID with a different payload and
+  // the server correctly reports an idempotency conflict. The epoch occupies
+  // 48 bits (about 8.9 years of millisecond values) and the sequence keeps a
+  // fixed 16-hex-character field within one run.
+  const epochHex = runEpoch.toString(16).padStart(12, '0').slice(-12);
+  const stageHex = stageOrdinal.toString(16).padStart(2, '0').slice(-2);
+  const sequenceHex = sequence.toString(16).padStart(16, '0').slice(-16);
+  return `${epochHex.slice(0, 8)}-${epochHex.slice(8)}-4${stageHex}${sequenceHex[0]}`
+    + `-8${sequenceHex.slice(1, 4)}-${sequenceHex.slice(4)}`;
 }
 
 function pushBody(stage, sequence, accountIndex, entityVersion) {

@@ -193,6 +193,9 @@ interface ReaderSettingsRuntime extends Record<string, unknown> {
   readonly navigator: Pick<Navigator, "userAgent">;
   readonly ReaderI18n?: ReaderI18nApi;
   readonly ReaderAnimationSettings?: ReaderAnimationSettingsApi;
+  readonly ReaderBugTrace?: {
+    record?(type: unknown, detail?: Readonly<Record<string, unknown>>): void;
+  };
   isPdf?: boolean;
   frame?: HTMLIFrameElement;
   settings?: ReaderSettingsState;
@@ -628,11 +631,16 @@ export function installReaderSettingsUi(
     /AppleWebKit/.test(global.navigator.userAgent || "") &&
     !/(?:Chrome|Chromium|Edg)\//.test(global.navigator.userAgent || "");
 
-  // 外壳（工具栏/目录/设置）的深色应用
+  // 外壳（工具栏/目录/设置）必须先于正文 iframe 应用主题。内置羊皮纸
+  // 调色板沿用浅色正文主题，但由 backgroundPreset 保留自身的外壳语义。
   function applyShellTheme(theme: unknown) {
     const body = document.body;
+    const parchment =
+      theme === "sepia" ||
+      (theme !== "dark" && settings.backgroundPreset === "paper");
     body.classList.add("reader-theme-instant");
     body.classList.toggle("theme-dark", theme === "dark");
+    body.classList.toggle("theme-sepia", parchment);
     global.requestAnimationFrame(() =>
       global.requestAnimationFrame(() => {
         body.classList.remove("reader-theme-instant");
@@ -796,6 +804,14 @@ export function installReaderSettingsUi(
     // keeps stale Chinese controls after the user changes language.
     const pageSettings = Object.assign({}, settings, {
       uiLanguage: global.ReaderI18n?.resolvedLanguage?.() || "zh-CN",
+    });
+    const frameReady = Boolean(global.frame?.contentWindow);
+    global.ReaderBugTrace?.record?.("reader_settings_dispatch", {
+      source: "reader_settings",
+      outcome: frameReady ? "sent" : "frame_missing",
+      ready: frameReady,
+      flow_mode: pageSettings.flowMode,
+      page_mode: pageSettings.pageMode,
     });
     if (global.frame?.contentWindow)
       global.frame.contentWindow.postMessage(

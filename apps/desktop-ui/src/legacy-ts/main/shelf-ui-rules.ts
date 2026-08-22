@@ -41,6 +41,24 @@ export type ShelfSortKey =
   | "size"
   | "progress";
 
+export const SHELF_SORT_MIGRATION_REVISION = "recent-read-default-v2";
+
+export interface ShelfSortPreferenceResolution {
+  readonly sortKey: ShelfSortKey;
+  readonly revision: typeof SHELF_SORT_MIGRATION_REVISION;
+  readonly shouldPersist: boolean;
+}
+
+export interface ShelfPrimaryPointerOpenInput {
+  readonly singleClickOpensBook: boolean;
+  readonly pointerType: string;
+  readonly button: number;
+  readonly isPrimary: boolean;
+  readonly metaKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly hasSelection: boolean;
+}
+
 export interface ShelfFilters {
   readonly searchQuery: string;
   readonly minRating: number;
@@ -130,6 +148,63 @@ function title(book: ShelfBook): string {
   return book.title ?? "";
 }
 
+const SHELF_SORT_KEYS: ReadonlySet<string> = new Set<ShelfSortKey>([
+  "title",
+  "author",
+  "added",
+  "dir",
+  "read",
+  "reading-time",
+  "size",
+  "progress",
+]);
+
+function shelfSortKey(value: unknown): ShelfSortKey | null {
+  return typeof value === "string" && SHELF_SORT_KEYS.has(value)
+    ? (value as ShelfSortKey)
+    : null;
+}
+
+/**
+ * Applies the product's recent-reading order to existing shelves exactly once. The shell owns
+ * storage and should persist both `sortKey` and `revision` when
+ * `shouldPersist` is true. Once the revision is current, an explicit title or
+ * other supported sort remains a user preference and is never rewritten.
+ */
+export function resolveShelfSortPreference(
+  storedSortKey: unknown,
+  storedRevision: unknown,
+): ShelfSortPreferenceResolution {
+  const parsedSortKey = shelfSortKey(storedSortKey);
+  const migrationPending = storedRevision !== SHELF_SORT_MIGRATION_REVISION;
+  if (migrationPending) {
+    return Object.freeze({
+      revision: SHELF_SORT_MIGRATION_REVISION,
+      shouldPersist: true,
+      sortKey: "read",
+    });
+  }
+  return Object.freeze({
+    revision: SHELF_SORT_MIGRATION_REVISION,
+    shouldPersist: parsedSortKey === null,
+    sortKey: parsedSortKey ?? "read",
+  });
+}
+
+export function shouldOpenBookOnPrimaryPointerDown(
+  input: ShelfPrimaryPointerOpenInput,
+): boolean {
+  return (
+    input.singleClickOpensBook &&
+    input.pointerType === "mouse" &&
+    input.button === 0 &&
+    input.isPrimary &&
+    !input.metaKey &&
+    !input.ctrlKey &&
+    !input.hasSelection
+  );
+}
+
 export function sortBooks(
   list: readonly ShelfBook[],
   options: Readonly<{
@@ -137,7 +212,7 @@ export function sortBooks(
     bookFileSizes?: ReadonlyMap<string, number>;
   }> = {},
 ): ShelfBook[] {
-  const sortKey = options.sortKey ?? "title";
+  const sortKey = options.sortKey ?? "read";
   const bookFileSizes = options.bookFileSizes ?? new Map<string, number>();
   const result = list.slice();
   result.sort((left, right) => {
@@ -345,6 +420,8 @@ export const shelfUiRules = Object.freeze({
   organizationName,
   parseGridColumns,
   readStatus,
+  resolveShelfSortPreference,
+  shouldOpenBookOnPrimaryPointerDown,
   scrollbarDragScrollTop,
   scrollbarGeometry,
   scrollbarTrackScrollTop,

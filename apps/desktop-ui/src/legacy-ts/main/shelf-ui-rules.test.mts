@@ -5,6 +5,9 @@ import {
   currentList,
   installShelfUiRules,
   parseGridColumns,
+  resolveShelfSortPreference,
+  SHELF_SORT_MIGRATION_REVISION,
+  shouldOpenBookOnPrimaryPointerDown,
   scrollbarGeometry,
   sortBooks,
 } from "./shelf-ui-rules.ts";
@@ -17,10 +20,14 @@ test("grid columns retain the legacy clamp and invalid fallback", () => {
 
 test("shelf sorting and filtering preserve the original ordering", () => {
   const books = [
-    { id: 1, title: "乙", initial: "Y", progress: 50, tags: ["史"] },
-    { id: 2, title: "甲", initial: "J", progress: 100, tags: ["文学"] },
+    { id: 1, title: "乙", initial: "Y", progress: 50, last_read_at: 200, tags: ["史"] },
+    { id: 2, title: "甲", initial: "J", progress: 100, last_read_at: 100, tags: ["文学"] },
   ];
-  assert.deepEqual(sortBooks(books).map((book) => book.id), [2, 1]);
+  assert.deepEqual(sortBooks(books).map((book) => book.id), [1, 2]);
+  assert.deepEqual(
+    sortBooks(books, { sortKey: "title" }).map((book) => book.id),
+    [2, 1],
+  );
   assert.deepEqual(
     currentList(books, {
       searchQuery: "",
@@ -34,6 +41,80 @@ test("shelf sorting and filtering preserve the original ordering", () => {
   );
 });
 
+test("historical title, empty and rating preferences migrate to recent reading once", () => {
+  for (const storedSortKey of [null, "title", "rating"]) {
+    assert.deepEqual(resolveShelfSortPreference(storedSortKey, null), {
+      revision: SHELF_SORT_MIGRATION_REVISION,
+      shouldPersist: true,
+      sortKey: "read",
+    });
+  }
+});
+
+test("the new product migration switches every historical sort to recent reading once", () => {
+  for (const sortKey of [
+    "title",
+    "author",
+    "added",
+    "dir",
+    "read",
+    "reading-time",
+    "size",
+    "progress",
+  ] as const) {
+    assert.deepEqual(resolveShelfSortPreference(sortKey, "legacy-revision"), {
+      revision: SHELF_SORT_MIGRATION_REVISION,
+      shouldPersist: true,
+      sortKey: "read",
+    });
+  }
+});
+
+test("completed migration respects later explicit title and other choices", () => {
+  for (const sortKey of ["title", "author", "added", "read"] as const) {
+    assert.deepEqual(
+      resolveShelfSortPreference(sortKey, SHELF_SORT_MIGRATION_REVISION),
+      {
+        revision: SHELF_SORT_MIGRATION_REVISION,
+        shouldPersist: false,
+        sortKey,
+      },
+    );
+  }
+});
+
+test("completed migration heals an unsupported stored sort without repeating migration", () => {
+  assert.deepEqual(
+    resolveShelfSortPreference("rating", SHELF_SORT_MIGRATION_REVISION),
+    {
+      revision: SHELF_SORT_MIGRATION_REVISION,
+      shouldPersist: true,
+      sortKey: "read",
+    },
+  );
+});
+
+test("only an unmodified primary left mouse press opens immediately", () => {
+  const primaryMouse = {
+    singleClickOpensBook: true,
+    pointerType: "mouse",
+    button: 0,
+    isPrimary: true,
+    metaKey: false,
+    ctrlKey: false,
+    hasSelection: false,
+  };
+  assert.equal(shouldOpenBookOnPrimaryPointerDown(primaryMouse), true);
+  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, pointerType: "touch" }), false);
+  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, pointerType: "pen" }), false);
+  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, button: 2 }), false);
+  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, isPrimary: false }), false);
+  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, metaKey: true }), false);
+  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, ctrlKey: true }), false);
+  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, hasSelection: true }), false);
+  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, singleClickOpensBook: false }), false);
+});
+
 test("scrollbar projection and legacy global installer are deterministic", () => {
   assert.deepEqual(
     scrollbarGeometry({ viewport: 100, total: 400, trackHeight: 200, scrollTop: 150 }),
@@ -43,4 +124,6 @@ test("scrollbar projection and legacy global installer are deterministic", () =>
   const api = installShelfUiRules(target);
   assert.equal(target.ReaderShelfRules, api);
   assert.equal(api.parseGridColumns("5"), 5);
+  assert.equal(api.resolveShelfSortPreference, resolveShelfSortPreference);
+  assert.equal(api.shouldOpenBookOnPrimaryPointerDown, shouldOpenBookOnPrimaryPointerDown);
 });

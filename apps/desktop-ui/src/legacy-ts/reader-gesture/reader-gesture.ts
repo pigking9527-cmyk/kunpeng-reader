@@ -45,10 +45,24 @@ interface SharedGestureSettings {
 }
 
 interface ActiveGesture {
+  readonly id: number;
+  readonly startedAt: number;
   readonly points: GesturePoint[];
   readonly profiles: readonly GestureProfile[];
   previewProfileId: string | null;
+  recentPreviewMatch: {
+    readonly profile: GestureProfile;
+    readonly score: number;
+    readonly threshold: number;
+    readonly pointCount: number;
+  } | null;
   readonly source: string;
+}
+
+interface GestureMatch {
+  readonly profile: GestureProfile;
+  readonly score: number;
+  readonly threshold: number;
 }
 
 interface UndoEntry {
@@ -73,6 +87,10 @@ interface GestureRuntime extends Record<string, unknown> {
   readonly innerWidth?: number;
   readonly innerHeight?: number;
   readonly ReaderNewsGesture?: NewsGestureApi;
+  readonly ReaderBugTrace?: {
+    readonly record?: (type: unknown, detail?: unknown) => void;
+    readonly checkpoint?: (delayMs?: unknown) => void;
+  };
   readonly ReaderShell?: ReaderShellApi;
   readonly closeReaderWindow?: () => unknown;
   readonly hasReaderJumpHistory?: () => unknown;
@@ -118,6 +136,7 @@ export function installReaderGesture(
   }
 
   let active: ActiveGesture | null = null;
+  let nextGestureId = 1;
   let suppressContextMenuUntil = 0;
   let hintTimer: ReturnType<typeof globalThis.setTimeout> | 0 = 0;
   let sharedSettings: SharedGestureSettings | null = null;
@@ -132,6 +151,24 @@ export function installReaderGesture(
         event: `gesture ${String(event).slice(0, 480)}`,
       })
       .catch(() => undefined);
+  }
+
+  function recordGesture(
+    type: string,
+    gesture: ActiveGesture,
+    detail: Readonly<Record<string, boolean | number | string>> = {},
+    checkpoint = false,
+  ): void {
+    try {
+      global.ReaderBugTrace?.record?.(type, {
+        gesture_id: gesture.id,
+        source: gesture.source,
+        ...detail,
+      });
+      if (checkpoint) global.ReaderBugTrace?.checkpoint?.(0);
+    } catch {
+      // Diagnostics must never affect gesture handling.
+    }
   }
 
   const defaultHintSettings = Object.freeze({
@@ -444,24 +481,26 @@ export function installReaderGesture(
       `start source=${sharedSettings ? "shared" : "local"} actions=${currentProfiles.map((profile) => profile.action).join(",")}`,
     );
     active = {
+      id: nextGestureId++,
+      startedAt: Date.now(),
       points: [{ x, y }],
       profiles: currentProfiles,
       previewProfileId: null,
+      recentPreviewMatch: null,
       source,
     };
+    recordGesture("gesture_start", active, {
+      phase: "start",
+      profile_count: currentProfiles.length,
+    });
     paint(active.points);
   }
-  function bestMatch(
-    gesture: ActiveGesture,
-  ): { readonly profile: GestureProfile; readonly score: number } | null {
-    let best: { profile: GestureProfile; score: number } | null = null;
+  function strongestMatch(gesture: ActiveGesture): GestureMatch | null {
+    let best: GestureMatch | null = null;
     gesture.profiles.forEach((profile) => {
       const score = api.similarity(profile.points, gesture.points);
-      if (
-        score >= api.matchThreshold(profile.precision) &&
-        (!best || score > best.score)
-      )
-        best = { profile, score };
+      const threshold = api.matchThreshold(profile.precision);
+      if (!best || score > best.score) best = { profile, score, threshold };
     });
     return best;
   }
@@ -532,14 +571,59 @@ export function installReaderGesture(
       frame.contentWindow?.postMessage({ readerGestureAction: "back" }, "*");
     });
   }
-  async function closeReaderSurface(source: string): Promise<void> {
-    if (global.ReaderShell?.closeSurface?.()) return;
-    if (source === "frame" && (await requestFrameSurfaceClose())) return;
+  async function closeReaderSurface(gesture: ActiveGesture): Promise<void> {
+    const shellHandled = global.ReaderShell?.closeSurface?.() === true;
+    recordGesture("gesture_execute", gesture, {
+      action: "back",
+      route: "shell_surface",
+      handled: shellHandled,
+      outcome: shellHandled ? "succeeded" : "continue",
+    }, shellHandled);
+    if (shellHandled) return;
+    if (gesture.source === "frame") {
+      const startedAt = Date.now();
+      const frameHandled = await requestFrameSurfaceClose();
+      recordGesture("gesture_execute", gesture, {
+        action: "back",
+        route: "frame_surface",
+        handled: frameHandled,
+        outcome: frameHandled ? "succeeded" : "continue",
+        duration_ms: Date.now() - startedAt,
+      }, frameHandled);
+      if (frameHandled) return;
+    }
     if (typeof global.closeReaderWindow === "function") {
-      await global.closeReaderWindow();
+      const startedAt = Date.now();
+      try {
+        await global.closeReaderWindow();
+        recordGesture("gesture_execute", gesture, {
+          action: "back",
+          route: "reader_window",
+          handled: true,
+          outcome: "succeeded",
+          duration_ms: Date.now() - startedAt,
+        }, true);
+      } catch (error) {
+        recordGesture("gesture_execute", gesture, {
+          action: "back",
+          route: "reader_window",
+          handled: false,
+          outcome: "failed",
+          reason: error instanceof Error ? error.name : "error",
+          duration_ms: Date.now() - startedAt,
+        }, true);
+        throw error;
+      }
       return;
     }
-    root.getElementById("win-close")?.click();
+    const closeButton = root.getElementById("win-close");
+    closeButton?.click();
+    recordGesture("gesture_execute", gesture, {
+      action: "back",
+      route: "window_button",
+      handled: Boolean(closeButton),
+      outcome: closeButton ? "dispatched" : "failed",
+    }, true);
   }
   function canUndoLastReaderAction(): boolean {
     while (undoHistory.length) {
@@ -566,58 +650,122 @@ export function installReaderGesture(
     (action === "undo_last" && canUndoLastReaderAction()) ||
     (action === "book_info" && typeof global.openReaderBookInfo === "function");
   function previewMatch(gesture: ActiveGesture): void {
-    let best: { profile: GestureProfile; score: number } | null = null;
+    let best: GestureMatch | null = null;
     gesture.profiles.forEach((profile) => {
       if (!canApplyAction(profile.action)) return;
       const score = api.prefixSimilarity(profile.points, gesture.points);
-      if (
-        score >= Math.max(0.7, api.matchThreshold(profile.precision)) &&
-        (!best || score > best.score)
-      )
-        best = { profile, score };
+      const threshold = Math.max(0.7, api.matchThreshold(profile.precision));
+      if (score >= threshold && (!best || score > best.score))
+        best = { profile, score, threshold };
     });
     if (!best) {
       gesture.previewProfileId = null;
       return;
     }
-    const matched = best as { profile: GestureProfile; score: number };
+    const matched = best as GestureMatch;
+    gesture.recentPreviewMatch = {
+      ...matched,
+      pointCount: gesture.points.length,
+    };
     const id = `${matched.profile.action}\0${matched.profile.name}`;
     if (gesture.previewProfileId === id) return;
     gesture.previewProfileId = id;
+    recordGesture("gesture_preview", gesture, {
+      phase: "visible",
+      action: matched.profile.action,
+      score: matched.score,
+      threshold: matched.threshold,
+      points: gesture.points.length,
+      can_apply: true,
+    });
     if (canApplyAction(matched.profile.action)) showHint(matched.profile.name);
   }
   function execute(
-    match: { readonly profile: GestureProfile },
+    match: GestureMatch,
     gesture: ActiveGesture,
   ): void {
     if (match.profile.action === "book_info") {
       trace(
         `execute book_info direct=${typeof global.openReaderBookInfo === "function"}`,
       );
-      if (typeof global.openReaderBookInfo === "function")
-        void global.openReaderBookInfo();
-      else root.getElementById("info-btn")?.click();
+      const direct = typeof global.openReaderBookInfo === "function";
+      const infoButton = direct ? null : root.getElementById("info-btn");
+      if (direct) void global.openReaderBookInfo?.();
+      else infoButton?.click();
+      recordGesture("gesture_execute", gesture, {
+        action: "book_info",
+        route: direct ? "reader_function" : "info_button",
+        handled: direct || Boolean(infoButton),
+        outcome: direct || infoButton ? "dispatched" : "failed",
+      }, true);
       return;
     }
     if (match.profile.action === "undo_last") {
-      undoLastReaderAction();
+      const historyCount = undoHistory.length;
+      const historyKind = undoHistory.at(-1)?.kind || "none";
+      const handled = undoLastReaderAction();
+      recordGesture("gesture_execute", gesture, {
+        action: "undo_last",
+        route: historyKind === "surface" ? "undo_surface" : historyKind === "jump" ? "undo_jump" : "undo_none",
+        handled,
+        outcome: handled ? "succeeded" : "failed",
+        history_count: historyCount,
+        history_kind: historyKind,
+      }, true);
       return;
     }
-    void closeReaderSurface(gesture.source);
+    void closeReaderSurface(gesture);
   }
   function finish(cancelled = false): void {
     if (!active) return;
     const gesture = active;
     active = null;
-    const matched = !cancelled ? bestMatch(gesture) : null;
+    const directCandidate = !cancelled ? strongestMatch(gesture) : null;
+    const directMatch =
+      directCandidate && directCandidate.score >= directCandidate.threshold
+        ? directCandidate
+        : null;
+    const previewMatch =
+      !cancelled &&
+      !directMatch &&
+      gesture.recentPreviewMatch &&
+      gesture.points.length - gesture.recentPreviewMatch.pointCount <= 8
+        ? gesture.recentPreviewMatch
+        : null;
+    const matched = directMatch || previewMatch;
+    const canApply = Boolean(matched && canApplyAction(matched.profile.action));
     trace(
-      `finish cancelled=${Boolean(cancelled)} action=${matched?.profile.action || "none"} points=${gesture.points.length}`,
+      `finish cancelled=${Boolean(cancelled)} action=${matched?.profile.action || "none"} points=${gesture.points.length} fallback=${previewMatch ? "preview" : "none"}`,
     );
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clear();
     hideHint();
-    if (matched && canApplyAction(matched.profile.action))
-      execute(matched, gesture);
+    recordGesture("gesture_finish", gesture, {
+      phase: "finish",
+      action: matched?.profile.action || "none",
+      direct_action: directCandidate?.profile.action || "none",
+      direct_score: directCandidate?.score ?? 0,
+      direct_threshold: directCandidate?.threshold ?? 0,
+      preview_action: previewMatch?.profile.action || "none",
+      preview_score: previewMatch?.score ?? 0,
+      preview_threshold: previewMatch?.threshold ?? 0,
+      points: gesture.points.length,
+      tail_points: previewMatch
+        ? gesture.points.length - previewMatch.pointCount
+        : 0,
+      fallback: directMatch ? "direct" : previewMatch ? "preview" : "none",
+      cancelled: Boolean(cancelled),
+      can_apply: canApply,
+      duration_ms: Date.now() - gesture.startedAt,
+    }, true);
+    if (matched && canApply) execute(matched, gesture);
+    else if (matched) recordGesture("gesture_execute", gesture, {
+      action: matched.profile.action,
+      route: "blocked",
+      handled: false,
+      outcome: "failed",
+      reason: "action_unavailable",
+    }, true);
   }
   function cancelKeepHint(): void {
     if (!active) {
@@ -629,6 +777,16 @@ export function installReaderGesture(
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clear();
     hideHint();
+    recordGesture("gesture_finish", gesture, {
+      phase: "cancel",
+      action: "none",
+      points: gesture.points.length,
+      fallback: "none",
+      cancelled: true,
+      can_apply: false,
+      duration_ms: Date.now() - gesture.startedAt,
+      reason: "cancelled",
+    }, true);
   }
   function move(x: number, y: number): void {
     if (!active) return;

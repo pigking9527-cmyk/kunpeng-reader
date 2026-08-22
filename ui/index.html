@@ -4764,7 +4764,7 @@
       hidden
       aria-label="情报中心测试"
       data-gesture-info-title="情报中心（测试）"
-      data-gesture-info="这是统一情报工作台原型。它会从本机公开来源目录抓取资讯，在本地去重、排序和整理简报；不会上传书库，也不会调用外部模型。"
+      data-gesture-info="它会从本机公开来源目录抓取资讯，在本地去重、筛选热点，并只调用你配置的本机 Qwen 27B Q3 生成可追溯简报；不会上传书库或资讯到外部模型。"
       data-layout="briefing"
     >
       <header class="intelligence-workspace-head">
@@ -4780,8 +4780,8 @@
           </button>
           <div>
             <div class="intelligence-workspace-kicker">情报中心 <span>测试</span></div>
-            <h1>从事件到阅读与书库理解</h1>
-            <p>全目录资讯经抓取、去重、重要性判断和综合整理后，以简报、态势、研究和星际旅行四种视角呈现。</p>
+            <h1>本机热点简报</h1>
+            <p>全目录资讯先在本机去重与规则过滤，再由本机 Qwen 27B Q3 复核候选事件、合并证据并生成可追溯简报。</p>
           </div>
         </div>
         <div class="intelligence-workspace-actions">
@@ -4815,11 +4815,75 @@
               星际旅行
             </button>
           </div>
+          <button
+            id="intelligence-open-audit"
+            class="btn-plain intelligence-audit-trigger"
+            type="button"
+            aria-pressed="false"
+          >处理审计</button>
           <button id="intelligence-open-sources" class="btn-plain" type="button">信息来源</button>
           <button id="intelligence-refresh" class="btn-plain" type="button">刷新</button>
         </div>
       </header>
       <p id="intelligence-workspace-status" class="intelligence-workspace-status" aria-live="polite"></p>
+      <section
+        id="intelligence-digest-history"
+        class="intelligence-digest-history"
+        aria-label="每日简报回顾"
+        data-mode="live"
+      >
+        <div class="intelligence-digest-history-copy">
+          <div class="intelligence-panel-label">每日简报</div>
+          <p id="intelligence-digest-history-summary">今天的简报会实时更新；每天结束后会固化为可回顾的只读历史快照。</p>
+        </div>
+        <div class="intelligence-digest-history-controls" role="group" aria-label="选择简报日期">
+          <button
+            id="intelligence-digest-history-previous"
+            class="intelligence-digest-history-step"
+            type="button"
+            title="查看较早的简报"
+            aria-label="查看较早的简报"
+            disabled
+          >
+            ←
+          </button>
+          <label class="intelligence-digest-history-picker" for="intelligence-digest-history-date">
+            <span>简报日期</span>
+            <select id="intelligence-digest-history-date" aria-describedby="intelligence-digest-history-summary intelligence-digest-history-readonly">
+              <option value="current" selected>今天 · 实时简报</option>
+            </select>
+          </label>
+          <button
+            id="intelligence-digest-history-next"
+            class="intelligence-digest-history-step"
+            type="button"
+            title="查看较新的简报"
+            aria-label="查看较新的简报"
+            disabled
+          >
+            →
+          </button>
+          <span id="intelligence-digest-history-readonly" class="intelligence-digest-history-readonly" aria-live="polite" hidden>历史快照 · 只读</span>
+        </div>
+      </section>
+      <section
+        id="intelligence-audit-view"
+        class="intelligence-audit-view"
+        aria-label="资讯处理审计"
+        hidden
+      >
+        <header class="intelligence-audit-head">
+          <div>
+            <div class="intelligence-panel-label">本机人工核查 · 六阶段流程</div>
+            <h2>情报处理工作台</h2>
+            <p>从采集到成稿按一条流程查看。点击一个阶段，只加载该阶段的核查记录；不展示正文、网址、本机路径或模型密钥。</p>
+          </div>
+          <button id="intelligence-audit-back" class="btn-plain" type="button">返回简报</button>
+        </header>
+        <div id="intelligence-audit-overview" class="intelligence-audit-overview" aria-live="polite"></div>
+        <nav id="intelligence-audit-flow" class="intelligence-audit-flow" aria-label="情报处理阶段"></nav>
+        <section id="intelligence-audit-detail" class="intelligence-audit-detail" aria-live="polite"></section>
+      </section>
       <section id="intelligence-source-directory" class="intelligence-source-directory" aria-label="情报中心信息来源" hidden>
         <header class="intelligence-source-directory-head">
           <div>
@@ -4837,42 +4901,59 @@
       <div id="intelligence-standard-view" class="intelligence-workspace-grid">
         <aside class="intelligence-source-rail" aria-label="情报处理链路">
           <section class="intelligence-stage-card intelligence-stage-horizon">
-            <div class="intelligence-stage-label">Horizon · 后端</div>
-            <h2>全目录信号处理</h2>
-            <p>情报中心会尝试抓取公开来源目录；普通资讯页的个人选择不会限制这里的采集范围。</p>
+            <div class="intelligence-stage-label">本机处理链路</div>
+            <h2 id="intelligence-processing-summary">等待资讯</h2>
+            <p>公开来源先去重与过滤，再提交有限的事件候选给本机模型；未进入简报的资料仍留在本机快照。</p>
             <div class="intelligence-stage-pills" aria-label="Horizon 数据处理">
-              <span>全量抓取</span><span>去重</span><span>排序</span><span>归纳</span>
+              <span>采集</span><span>去重</span><span>候选</span><span>简报</span>
             </div>
           </section>
           <section class="intelligence-stage-card intelligence-stage-world">
-            <div class="intelligence-stage-label">WorldMonitor · 展示</div>
-            <h2>全球态势</h2>
-            <p>已接入地震、自然事件与灾害预警源，并保留事件、地区和时间上下文。</p>
-            <div class="intelligence-world-grid" aria-hidden="true">
-              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
-            </div>
+            <div class="intelligence-stage-label">本机 Qwen 27B Q3</div>
+            <h2 id="intelligence-briefing-model-status">尚未配置</h2>
+            <p>仅接受本机 OpenAI 兼容服务；模型响应必须引用现有候选事件，失败时自动回退为规则候选。</p>
+            <label class="intelligence-model-field" for="intelligence-local-model-base-url">接口地址
+              <input id="intelligence-local-model-base-url" type="url" value="http://127.0.0.1:8080/v1" autocomplete="off">
+            </label>
+            <label class="intelligence-model-field" for="intelligence-local-model-name">模型名
+              <input id="intelligence-local-model-name" type="text" value="Qwen3.5-27B-Q3_K_M" autocomplete="off">
+            </label>
+            <label class="intelligence-model-field" for="intelligence-event-judge-base-url">事件判定小模型接口（可选）
+              <input id="intelligence-event-judge-base-url" type="url" placeholder="http://127.0.0.1:8081/v1" autocomplete="off">
+            </label>
+            <label class="intelligence-model-field" for="intelligence-event-judge-model">事件判定小模型名（可选）
+              <input id="intelligence-event-judge-model" type="text" placeholder="例如 Qwen3.5-4B-Instruct" autocomplete="off">
+            </label>
+            <label class="intelligence-model-field" for="intelligence-local-model-key">接口密钥（可留空）
+              <input id="intelligence-local-model-key" type="password" autocomplete="off">
+            </label>
+            <button id="intelligence-local-model-save" class="btn-plain" type="button">保存本机模型</button>
           </section>
         </aside>
         <main class="intelligence-main-panel">
           <section class="intelligence-main-head">
             <div>
-              <div class="intelligence-panel-label">综合简报 · 本地规则首版</div>
-              <h2>今日综合要点</h2>
+              <div class="intelligence-panel-label">综合简报 · 本机 Qwen 27B Q3</div>
+              <h2>今日热点要点</h2>
+              <p id="intelligence-briefing-count">等待候选事件…</p>
             </div>
           </section>
           <div id="intelligence-digest-list" class="intelligence-digest-list" aria-live="polite"></div>
         </main>
-        <aside class="intelligence-context-panel" aria-label="事件与书库上下文">
+        <aside class="intelligence-context-panel" aria-label="事件简报依据">
           <section class="intelligence-context-card intelligence-signal-card">
-            <div class="intelligence-panel-label">事件 · 上下文</div>
-            <h2>关联信号</h2>
+            <div class="intelligence-panel-label">规则候选</div>
+            <h2>候选事件</h2>
             <div id="intelligence-signal-list" class="intelligence-signal-list"></div>
           </section>
           <section class="intelligence-context-card intelligence-rag-card">
-            <div class="intelligence-panel-label">RAG · 后端</div>
-            <h2 id="intelligence-context-title">选择一条资讯</h2>
-            <p id="intelligence-context-body">这里将显示可追溯的新闻证据、书库章节与模型推断。此测试版不会读取或上传你的书籍。</p>
-            <button id="intelligence-open-news" class="btn-primary" type="button">查看资讯详情</button>
+            <div class="intelligence-panel-label">简报依据</div>
+            <h2 id="intelligence-context-title">选择一个热点</h2>
+            <p id="intelligence-context-body">模型简报只基于当前候选的公开资讯与来源证据；不会读取或上传书籍。</p>
+            <p id="intelligence-context-meta" class="intelligence-context-meta"></p>
+            <ul id="intelligence-context-reasons" class="intelligence-context-reasons"></ul>
+            <div id="intelligence-context-evidence" class="intelligence-context-evidence"></div>
+            <button id="intelligence-open-news" class="btn-primary" type="button" disabled>查看代表原文</button>
           </section>
         </aside>
       </div>
@@ -5050,6 +5131,7 @@
     <script src="generated-ts/news-layout-rules.js"></script>
     <script src="generated-ts/news-ui.js"></script>
     <script src="generated-ts/intelligence-workspace-ui.js"></script>
+    <script src="generated-ts/intelligence-audit-ui.js"></script>
     <script src="generated-ts/gesture-hint-rules.js"></script>
     <script src="generated-ts/gesture-ui.js"></script>
     <script src="generated-ts/api-settings-ui.js"></script>

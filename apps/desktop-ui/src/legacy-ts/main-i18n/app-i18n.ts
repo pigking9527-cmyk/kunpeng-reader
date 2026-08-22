@@ -2582,8 +2582,18 @@ export function installAppI18n(
       ),
     );
   const STATS_DETAIL_COPY = {
-    "zh-CN": { statsBookNotes: "高亮 {highlights} · 批注 {notes}" },
-    "zh-TW": { statsBookNotes: "標示 {highlights} · 批註 {notes}" },
+    "zh-CN": {
+      statsBookNotes: "高亮 {highlights} · 批注 {notes}",
+      statsQualityDwell: "本时段可能包含空闲时间：阅读时长较长，但统计字数较少。",
+      statsQualityFast: "本时段平均阅读速度偏高，可能包含快速翻页或重复计数。",
+      statsQualitySlow: "本时段平均阅读速度偏低，可能包含空闲时间或扫描版 PDF。",
+    },
+    "zh-TW": {
+      statsBookNotes: "標示 {highlights} · 批註 {notes}",
+      statsQualityDwell: "這段期間可能包含閒置時間：閱讀時間較長，但統計字數較少。",
+      statsQualityFast: "這段期間的平均閱讀速度偏高，可能包含快速翻頁或重複計數。",
+      statsQualitySlow: "這段期間的平均閱讀速度偏低，可能包含閒置時間或掃描版 PDF。",
+    },
     en: { statsBookNotes: "Highlights {highlights} · Notes {notes}" },
   };
   if (STATS_CATALOG) {

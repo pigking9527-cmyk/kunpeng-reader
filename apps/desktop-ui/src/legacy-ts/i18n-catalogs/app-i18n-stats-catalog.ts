@@ -18,8 +18,18 @@ const CHART_COPY: MutableCopy = {
   ko: { lineChartData: "꺾은선 그래프로 표시", lineChartDataTip: "꺾은선 그래프로 전환하고 각 데이터 지점의 값을 표시합니다", chartSettings: "차트 설정", chartStyle: "형식", barChart: "막대", lineChart: "꺾은선", chartData: "데이터", chartWords: "글자 수" },
 };
 const DETAIL_COPY: MutableCopy = {
-  "zh-CN": { statsBookNotes: "高亮 {highlights} · 批注 {notes}" },
-  "zh-TW": { statsBookNotes: "標示 {highlights} · 批註 {notes}" },
+  "zh-CN": {
+    statsBookNotes: "高亮 {highlights} · 批注 {notes}",
+    statsQualityDwell: "本时段可能包含空闲时间：阅读时长较长，但统计字数较少。",
+    statsQualityFast: "本时段平均阅读速度偏高，可能包含快速翻页或重复计数。",
+    statsQualitySlow: "本时段平均阅读速度偏低，可能包含空闲时间或扫描版 PDF。",
+  },
+  "zh-TW": {
+    statsBookNotes: "標示 {highlights} · 批註 {notes}",
+    statsQualityDwell: "這段期間可能包含閒置時間：閱讀時間較長，但統計字數較少。",
+    statsQualityFast: "這段期間的平均閱讀速度偏高，可能包含快速翻頁或重複計數。",
+    statsQualitySlow: "這段期間的平均閱讀速度偏低，可能包含閒置時間或掃描版 PDF。",
+  },
   en: { statsBookNotes: "Highlights {highlights} · Notes {notes}" },
 };
 const HEATMAP_COPY: MutableCopy = {

@@ -7,8 +7,12 @@ export const READER_BUG_TRACE_WINDOW_MS = 2 * 60 * 1_000;
 
 const SAFE_EVENT_KEYS = new Set([
   "source", "outcome", "zone", "target", "direction", "key", "overlay",
+  "gesture_id", "phase", "action", "score", "threshold", "points", "tail_points", "fallback", "cancelled", "can_apply", "route", "handled", "profile_count",
+  "direct_action", "direct_score", "direct_threshold", "preview_action", "preview_score", "preview_threshold", "history_count", "history_kind",
   "chapter", "page", "progress", "chapter_frac", "anchor_offset", "sequence", "total_chapters", "x_pct",
   "y_pct", "duration_ms", "format", "reason", "open", "ready", "is_pdf",
+  "document_focused", "active_element", "viewport_width", "viewport_height", "layout_width", "layout_height",
+  "before_anchor_offset", "after_anchor_offset", "resize_sequence", "restore_pending", "save_suppressed",
   "frame_ready", "immersive", "loading", "pages", "turn_id", "input",
   "before_chapter", "before_page", "after_chapter", "after_page",
   "chapter_pending", "chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "flow_mode", "page_mode",
@@ -17,11 +21,17 @@ const SAFE_EVENT_KEYS = new Set([
   "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text", "image_near_top", "image_text_before", "image_probed",
   "note_marker", "note_virtual", "note_link_present", "note_fragment_present", "note_click_consumed", "note_popup_visible", "note_target_chapter", "note_search_chapters",
   "layout_fast", "layout_view_height", "layout_root_height", "layout_root_style_height", "layout_padding_bottom", "layout_line_height", "layout_step", "layout_current_line_count", "layout_last_top", "layout_last_bottom", "layout_last_height", "layout_next_top", "layout_next_bottom", "layout_next_height", "layout_visible_free", "layout_content_free", "layout_tail_cross", "layout_tail_fit", "layout_tail_tightened",
+  "scroll_top", "scroll_view_height", "scroll_content_height", "scroll_item_count", "scroll_slice_start", "scroll_slice_end", "scroll_slice_next", "scroll_slice_top", "scroll_slice_bottom", "scroll_mask_top", "scroll_mask_blank", "scroll_clip_active",
+  "scroll_tail_bottom", "scroll_tail_overflow", "scroll_next_top", "scroll_next_bottom", "scroll_next_overflow", "scroll_page_tolerance", "scroll_page_guard", "scroll_break_count", "scroll_break_last",
   "preview_created", "preview_connected", "preview_parent", "preview_position", "preview_z_index", "preview_display", "preview_visibility", "preview_width", "preview_height", "preview_top", "preview_left", "preview_type", "preview_phase",
   "modal_position", "modal_z_index", "modal_display", "modal_parent", "modal_contains_preview",
 ]);
 
 const BLOCKERS = new Set(["selection", "drag", "link", "overlay", "chapter_pending", "turn_busy"]);
+const ACTIVE_ELEMENT_CATEGORIES = new Set([
+  "none", "document", "other", "book_card", "shelf_content", "control",
+  "reader_frame", "reader_shell", "titlebar",
+]);
 
 type TraceDetail = Record<string, boolean | number | string>;
 
@@ -42,6 +52,8 @@ interface ReaderTraceSnapshot {
   readonly schema_version: 1;
   readonly captured_at: string;
   readonly window_ms: number;
+  readonly operation_anchor_at: string;
+  readonly operation_anchor_type: string;
   readonly privacy: string;
   readonly version: string;
   readonly system: Readonly<Record<string, unknown>>;
@@ -51,6 +63,15 @@ interface ReaderTraceSnapshot {
   readonly runtime_diagnostics: unknown;
   readonly events: readonly RecentTraceEvent[];
 }
+
+// Only actual user intent advances the diagnostic window.  Periodic captures,
+// progress saves and asynchronous layout work must not make an older action
+// disappear merely because the reader was left open for observation.
+const USER_OPERATION_TYPES = new Set([
+  "shell_click", "shell_key", "page_click", "page_key", "page_turn",
+  "gesture", "gesture_start", "gesture_execute", "gesture_finish",
+  "reader_settings_dispatch", "book_opened", "window_drag",
+]);
 
 interface TraceI18n {
   readonly t?: (key: string, values?: Readonly<Record<string, unknown>>) => string;
@@ -102,6 +123,8 @@ export function createReaderBugTrace(
   let closingCheckpointRequested = false;
   let cachedVersion = "";
   let cachedRuntimeDiagnostics: unknown = null;
+  let operationAnchorAt = Date.now();
+  let operationAnchorType = "reader_open";
 
   function traceText(key: string, fallback: string, values?: Readonly<Record<string, unknown>>): string {
     const value = root.ReaderI18n?.t?.(key, values);
@@ -131,22 +154,35 @@ export function createReaderBugTrace(
           ? safeNumber(item, 0, 1_000_000_000)
           : safeNumber(item, -1_000_000, 1_000_000);
         if (number !== undefined) result[key] = number;
-      } else if (typeof item === "string") result[key] = safeLabel(item);
+      } else if (typeof item === "string") {
+        result[key] = key === "active_element"
+          ? ACTIVE_ELEMENT_CATEGORIES.has(item) ? item : "other"
+          : safeLabel(item);
+      }
     });
     return result;
   }
 
-  function prune(now: number): void {
-    const cutoff = now - READER_BUG_TRACE_WINDOW_MS;
-    while (events.length && (events[0]?.at_ms ?? now) < cutoff) events.shift();
+  function prune(): void {
+    const cutoff = operationAnchorAt - READER_BUG_TRACE_WINDOW_MS;
+    while (events.length && (events[0]?.at_ms ?? operationAnchorAt) < cutoff) events.shift();
   }
 
   function record(type: unknown, detail?: unknown): void {
     const now = Date.now();
     const cleanType = safeLabel(type);
-    prune(now);
+    const isUserOperation = USER_OPERATION_TYPES.has(cleanType);
+    if (isUserOperation) {
+      operationAnchorAt = now;
+      operationAnchorType = cleanType;
+    }
+    prune();
+    // Once the reaction window has elapsed, checkpoint traffic must not keep
+    // extending it.  The next user operation moves the anchor and starts a new
+    // two-minute diagnostic window with its own preceding history.
+    if (!isUserOperation && now > operationAnchorAt + READER_BUG_TRACE_WINDOW_MS) return;
     events.push({ at_ms: now, type: cleanType, detail: cleanEventDetail(detail) });
-    prune(now);
+    prune();
     if (cleanType !== "capture") checkpoint();
   }
 
@@ -205,7 +241,7 @@ export function createReaderBugTrace(
   async function capture(source = "manual"): Promise<ReaderTraceSnapshot> {
     record("capture", { source: safeLabel(source, "manual") });
     const capturedAt = Date.now();
-    prune(capturedAt);
+    prune();
     let context: Record<string, unknown> = {};
     try { context = recordValue(contextProvider()); } catch { context = {}; }
     let version = cachedVersion;
@@ -229,6 +265,8 @@ export function createReaderBugTrace(
       schema_version: 1,
       captured_at: new Date(capturedAt).toISOString(),
       window_ms: READER_BUG_TRACE_WINDOW_MS,
+      operation_anchor_at: new Date(operationAnchorAt).toISOString(),
+      operation_anchor_type: operationAnchorType,
       privacy: "No book text, selection text, URLs, file paths, account data, or API credentials.",
       version,
       system: systemSnapshot(),
@@ -278,6 +316,8 @@ export function createReaderBugTrace(
   function reset(): void {
     events.length = 0;
     frozenSnapshot = null;
+    operationAnchorAt = Date.now();
+    operationAnchorType = "trace_reset";
     record("trace_started", { source: "manual" });
   }
 
@@ -286,7 +326,8 @@ export function createReaderBugTrace(
   }
 
   function snapshotForTests(now?: unknown): readonly TraceEvent[] {
-    prune(Number.isFinite(now) ? Number(now) : Date.now());
+    void now;
+    prune();
     return events.map((event) => ({ ...event, detail: { ...event.detail } }));
   }
 
@@ -335,7 +376,7 @@ export function createReaderBugTrace(
         row.append(time, name, detail);
         eventListElement.appendChild(row);
       });
-      statusElement.textContent = traceText("traceFrozen", "已冻结最近 60 秒，共 {count} 条；不含正文、选中文字、链接和文件路径。", { count: snapshot.events.length });
+      statusElement.textContent = traceText("traceFrozen", "已按最后一次操作冻结两分钟诊断窗口，共 {count} 条；不含正文、选中文字、链接和文件路径。", { count: snapshot.events.length });
     }
 
     async function open(): Promise<void> {

@@ -615,6 +615,15 @@
       "hosts": ["ui/index.html"]
     },
     {
+      "id": "intelligence-audit-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-news/intelligence-audit-ui.ts",
+      "output": "intelligence-audit-ui.js",
+      "globalName": "KunpengIntelligenceAuditUi",
+      "installExport": "installIntelligenceAuditUi",
+      "replaces": "ui/intelligence-audit-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
       "id": "reader-settings-ui",
       "source": "apps/desktop-ui/src/legacy-ts/reader-settings-ui/reader-settings-ui.ts",
       "output": "reader-settings-ui.js",

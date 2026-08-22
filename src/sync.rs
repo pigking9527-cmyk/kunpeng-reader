@@ -903,6 +903,11 @@ pub(crate) async fn sync_account_open_refresh(
 }
 
 #[tauri::command]
+pub(crate) fn sync_start_silent(app: tauri::AppHandle) {
+    commands::sync_start_silent(app)
+}
+
+#[tauri::command]
 pub(crate) async fn sync_set_settings(
     app: tauri::AppHandle,
     url: String,

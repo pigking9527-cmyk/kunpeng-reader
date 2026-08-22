@@ -887,48 +887,64 @@ pub(crate) fn relocate_book(
 /// 后台为旧书补算内容指纹（让"移动后重新导入即识别为同一本书"对存量书也生效）。
 pub(crate) fn spawn_fingerprint_fill(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        let state = app.state::<AppState>();
-        let pending: Vec<(u64, std::path::PathBuf, bool, bool)> = {
-            let lib = state.library.lock().unwrap();
-            lib.books
-                .iter()
-                .filter(|b| b.fingerprint == 0 || b.content_id.is_empty())
-                .map(|b| {
-                    (
-                        b.id,
-                        b.path.clone(),
-                        b.fingerprint == 0,
-                        b.content_id.is_empty(),
-                    )
-                })
-                .collect()
-        };
-        let mut changed = false;
-        for (id, path, need_fingerprint, need_content_id) in pending {
-            // 指纹计算会读取整本文件。阅读期间宁可延后，也不能和章节加载争抢磁盘。
-            while window_commands::any_reader_window_open(&app) {
-                crate::log("fingerprint-fill paused: reader window open");
-                std::thread::sleep(std::time::Duration::from_secs(15));
-            }
-            if need_fingerprint {
-                let fp = book::compute_fingerprint(&path);
-                if fp != 0 {
-                    state.library.lock().unwrap().set_fingerprint(id, fp);
-                    changed = true;
+        crate::with_thread_background_priority(|| {
+            let started = Instant::now();
+            let state = app.state::<AppState>();
+            let pending: Vec<(u64, std::path::PathBuf, bool, bool)> = {
+                let lib = state.library.lock().unwrap();
+                lib.books
+                    .iter()
+                    .filter(|b| b.fingerprint == 0 || b.content_id.is_empty())
+                    .map(|b| {
+                        (
+                            b.id,
+                            b.path.clone(),
+                            b.fingerprint == 0,
+                            b.content_id.is_empty(),
+                        )
+                    })
+                    .collect()
+            };
+            crate::log(&format!(
+                "fingerprint-fill start background pending={}",
+                pending.len()
+            ));
+            let mut changed = false;
+            for (id, path, need_fingerprint, need_content_id) in pending {
+                // 指纹计算会读取整本文件。阅读期间宁可延后，也不能和章节加载争抢磁盘。
+                while window_commands::any_reader_window_open(&app) {
+                    crate::log("fingerprint-fill paused: reader window open");
+                    std::thread::sleep(std::time::Duration::from_secs(15));
                 }
-            }
-            if need_content_id {
-                let content_id = book::compute_content_id(&path);
-                if !content_id.is_empty() {
-                    state.library.lock().unwrap().set_content_id(id, content_id);
-                    changed = true;
+                if need_fingerprint {
+                    let fp = book::compute_fingerprint(&path);
+                    if fp != 0 {
+                        state.library.lock().unwrap().set_fingerprint(id, fp);
+                        changed = true;
+                    }
                 }
+                if need_content_id {
+                    let content_id = book::compute_content_id(&path);
+                    if !content_id.is_empty() {
+                        state.library.lock().unwrap().set_content_id(id, content_id);
+                        changed = true;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        if changed {
-            report_save_error("书架", state.library.lock().unwrap().save());
-        }
+            if changed {
+                report_save_error("书架", state.library.lock().unwrap().save());
+            }
+            crate::log(&format!(
+                "fingerprint-fill end elapsed_ms={} changed={changed}",
+                started.elapsed().as_millis()
+            ));
+            // The full-text index relies on content IDs to avoid rehashing
+            // every source file. Start it only after this migration finishes;
+            // the former fixed 15-second delay could run both full-library
+            // scans concurrently and freeze otherwise unrelated UI actions.
+            search::spawn_build_index(app.clone(), false);
+        });
     });
 }
 

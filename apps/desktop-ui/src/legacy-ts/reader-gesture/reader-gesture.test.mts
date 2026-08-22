@@ -133,6 +133,8 @@ interface HarnessRuntime extends Record<string, unknown> {
   readonly timers: TimerRecord[];
   readonly draws: unknown[];
   readonly shellCalls: string[];
+  readonly traceEvents: Array<{ readonly type: unknown; readonly detail: unknown }>;
+  readonly traceCheckpoints: unknown[];
   setTimeout: typeof globalThis.setTimeout;
   clearTimeout: typeof globalThis.clearTimeout;
   addEventListener: Window["addEventListener"];
@@ -203,6 +205,8 @@ function createRuntime(search = "?pool=1"): HarnessRuntime {
   const timers: TimerRecord[] = [];
   const draws: unknown[] = [];
   const shellCalls: string[] = [];
+  const traceEvents: Array<{ readonly type: unknown; readonly detail: unknown }> = [];
+  const traceCheckpoints: unknown[] = [];
   let nextTimerId = 1;
   const runtime: HarnessRuntime = {
     document: document as unknown as Document,
@@ -215,6 +219,12 @@ function createRuntime(search = "?pool=1"): HarnessRuntime {
     timers,
     draws,
     shellCalls,
+    traceEvents,
+    traceCheckpoints,
+    ReaderBugTrace: {
+      record: (type: unknown, detail?: unknown) => traceEvents.push({ type, detail }),
+      checkpoint: (delayMs?: unknown) => traceCheckpoints.push(delayMs),
+    },
     setTimeout: ((callback: TimerHandler, delay?: number) => {
       if (typeof callback !== "function")
         throw new TypeError("Callback required.");
@@ -531,6 +541,32 @@ test("typed transport, activation, canvas, hint, and back keep the compatibility
   await flush();
   assert.deepEqual(runtime.draws.at(-1), { points: [], options: null });
   assert.deepEqual(runtime.shellCalls, ["closeSurface"]);
+  const gestureEvents = runtime.traceEvents.filter(({ type }) =>
+    String(type).startsWith("gesture_"),
+  );
+  assert.deepEqual(gestureEvents.map(({ type }) => type), [
+    "gesture_start",
+    "gesture_preview",
+    "gesture_finish",
+    "gesture_execute",
+  ]);
+  assert.equal(
+    new Set(gestureEvents.map(({ detail }) => (detail as { gesture_id?: unknown }).gesture_id)).size,
+    1,
+  );
+  assert.deepEqual(gestureEvents.at(-1)?.detail, {
+    gesture_id: 1,
+    source: "frame",
+    action: "back",
+    route: "shell_surface",
+    handled: true,
+    outcome: "succeeded",
+  });
+  assert.equal(runtime.traceCheckpoints.includes(0), true);
+  const serializedTrace = JSON.stringify(gestureEvents);
+  assert.equal(serializedTrace.includes("关闭测试"), false);
+  assert.equal(serializedTrace.includes('"x"'), false);
+  assert.equal(serializedTrace.includes('"y"'), false);
   assert.equal(hint?.hidden, true);
   assert.equal(
     documentOf(runtime).getElementById("reader-gesture-trail")?.hidden,
@@ -570,6 +606,38 @@ test("frame close handshake waits for acknowledgement and does not close the win
   await flush();
   assert.equal(runtime.timers[0]?.cleared, true);
   assert.equal(documentOf(runtime).getElementById("win-close")?.clickCount, 0);
+  const frameResult = runtime.traceEvents.find(({ type, detail }) =>
+    type === "gesture_execute" &&
+    (detail as { route?: unknown }).route === "frame_surface",
+  );
+  assert.deepEqual(frameResult?.detail, {
+    gesture_id: 1,
+    source: "frame",
+    action: "back",
+    route: "frame_surface",
+    handled: true,
+    outcome: "succeeded",
+    duration_ms: 0,
+  });
+});
+
+test("finish keeps a recent valid preview when the gesture tail drifts", async () => {
+  const runtime = createRuntime();
+  runtime.ReaderNewsGesture = {
+    ...runtime.ReaderNewsGesture,
+    prefixSimilarity: () => 1,
+    similarity: () => 0,
+  };
+  const api = installTyped(runtime, null);
+  api.activate();
+
+  api.fromFrame({ phase: "start", x: 0, y: 0 });
+  api.fromFrame({ phase: "move", x: 20, y: 0 });
+  api.fromFrame({ phase: "end", x: 20, y: 0 });
+  await flush();
+
+  assert.deepEqual(runtime.shellCalls, ["closeSurface"]);
+  assert.equal(documentOf(runtime).appended[0]?.hidden, true);
 });
 
 test("closed-surface undo reopens the most recent original shell surface", async () => {
@@ -613,6 +681,14 @@ test("closed-surface undo reopens the most recent original shell surface", async
   await flush();
   assert.deepEqual(runtime.shellCalls, ["side:ai-reader:true"]);
   assert.deepEqual(runtime.draws.at(-1), { points: [], options: null });
+  assert.equal(
+    runtime.traceEvents.some(({ type, detail }) =>
+      type === "gesture_execute" &&
+      (detail as { route?: unknown }).route === "undo_surface" &&
+      (detail as { handled?: unknown }).handled === true,
+    ),
+    true,
+  );
 });
 
 test("reading-position checkpoint is restored by the undo gesture", async () => {

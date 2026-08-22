@@ -9,7 +9,18 @@ type Handler = (event?: Record<string, unknown>) => unknown;
 
 class FakeElement {
   public readonly dataset: Record<string, string> = {};
-  public readonly style: Record<string, string> = {};
+  public readonly style: Record<string, string> & {
+    setProperty(name: string, value: string): void;
+  } = {
+    setProperty: (name, value) => {
+      this.style[name] = value;
+    },
+  } as Record<string, string> & {
+    setProperty(name: string, value: string): void;
+  };
+  public scrollWidth = 44;
+  public offsetHeight = 34;
+  public offsetWidth = 34;
   public value = "";
   public textContent = "";
   public className = "";
@@ -104,6 +115,14 @@ function createHarness({
         if (rejectedSync === "busy") throw new Error("同步任务正在进行");
         if (rejectedSync === "offline") throw new Error("offline");
         return { message: "ok", server_time: 1, pushed: 1, pulled: 2, accepted: 1, ignored: 0 } as TResult;
+      }
+      if (command === "sync_account_open_refresh") {
+        return {
+          configured: true,
+          online: true,
+          credentialsReady: true,
+          requiresUserAction: false,
+        } as TResult;
       }
       if (command === "shelf_books") return [] as TResult;
       return {} as TResult;
@@ -348,6 +367,56 @@ test("opening a remembered account never requests its protected token", async ()
     harness.calls.some((call) => call.command === "auth_usage_status"),
     false,
   );
+});
+
+test("account refresh marks syncing before starting the silent background run", async () => {
+  const harness = createHarness();
+  harness.element("sync-username").value = "reader";
+  const indicator = harness.element("account-overview-sync-state");
+  const label = harness.element("account-overview-sync-label");
+  label.offsetWidth = 44;
+
+  harness.element("account-btn").emit("click");
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const refreshCall = harness.calls.findIndex(
+    (call) => call.command === "sync_account_open_refresh",
+  );
+  const startCall = harness.calls.findIndex(
+    (call) => call.command === "sync_start_silent",
+  );
+  assert.ok(refreshCall >= 0);
+  assert.ok(startCall > refreshCall);
+  assert.equal(harness.element("sync-now").classList.contains("syncing"), true);
+  indicator.emit("pointerenter");
+  assert.equal(indicator.style["--account-sync-expanded-width"], "80px");
+
+  label.offsetWidth = 58;
+  await harness.emitNativeEvent("app-settings-synced");
+  assert.equal(harness.element("sync-now").classList.contains("ok"), true);
+  assert.equal(label.textContent, "syncSuccess");
+  assert.equal(indicator.style["--account-sync-label-width"], "58px");
+  assert.equal(indicator.style["--account-sync-expanded-width"], "94px");
+});
+
+test("sync state indicator only shakes while collapsing after pointer leave", () => {
+  const harness = createHarness();
+  const indicator = harness.element("account-overview-sync-state");
+  harness.element("account-overview-sync-label").offsetWidth = 44;
+
+  indicator.emit("pointerenter");
+  assert.equal(indicator.classList.contains("is-collapsing"), false);
+  assert.equal(indicator.classList.contains("is-expanded"), true);
+  assert.equal(indicator.style["--account-sync-label-width"], "44px");
+  assert.equal(indicator.style["--account-sync-expanded-width"], "80px");
+
+  indicator.emit("pointerleave");
+  assert.equal(indicator.classList.contains("is-expanded"), false);
+  assert.equal(indicator.classList.contains("is-collapsing"), true);
+
+  indicator.emit("pointerenter");
+  assert.equal(indicator.classList.contains("is-collapsing"), false);
 });
 
 test("a reachable quota endpoint cannot repaint a failed sync as healthy", async () => {

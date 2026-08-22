@@ -133,6 +133,107 @@ test("trace cleaning, labels, number bounds, page ingestion, reset, and pruning 
   );
 });
 
+test("trace window remains anchored to the last user operation while the reader is observed", async () => {
+  const api = withFakeClock(1_000, () => createReaderBugTrace(createRuntime(), null));
+  withFakeClock(2_000, () => api.record("shell_click", { source: "reader_shell", target: "next" }));
+  withFakeClock(2_500, () => api.record("page_turn", { outcome: "requested", direction: "forward" }));
+  withFakeClock(180_000, () => api.record("progress_save", { outcome: "ok" }));
+  const snapshot = await withFakeClock(180_000, () => api.capture("manual"));
+
+  assert.equal(snapshot.operation_anchor_at, new Date(2_500).toISOString());
+  assert.equal(snapshot.operation_anchor_type, "page_turn");
+  assert.equal(snapshot.events.some((event) => event.type === "shell_click"), true);
+  assert.equal(snapshot.events.some((event) => event.type === "page_turn"), true);
+  assert.equal(snapshot.events.some((event) => event.type === "progress_save"), false);
+});
+
+test("gesture lifecycle fields survive while names and raw coordinates are removed", () => {
+  const api = withFakeClock(25_000, () => createReaderBugTrace(createRuntime(), null));
+  withFakeClock(25_100, () => api.record("gesture_finish", {
+    gesture_id: 7,
+    phase: "finish",
+    action: "undo_last",
+    score: 0.81234,
+    threshold: 0.7,
+    points: 39,
+    route: "undo_surface",
+    handled: true,
+    duration_ms: 143,
+    profile_name: "private gesture name",
+    x: 321,
+    y: 654,
+    path: "/private/book.epub",
+  }));
+  const event = api._snapshotForTests(25_100).at(-1);
+  assert.deepEqual(event?.detail, {
+    gesture_id: 7,
+    phase: "finish",
+    action: "undo_last",
+    score: 0.812,
+    threshold: 0.7,
+    points: 39,
+    route: "undo_surface",
+    handled: true,
+    duration_ms: 143,
+  });
+  const serialized = JSON.stringify(event);
+  assert.equal(serialized.includes("private gesture name"), false);
+  assert.equal(serialized.includes("/private/book.epub"), false);
+  assert.equal(serialized.includes('"x"'), false);
+  assert.equal(serialized.includes('"y"'), false);
+});
+
+test("same-book resume and relayout diagnostics keep only focus and bounded layout state", () => {
+  const api = withFakeClock(30_000, () => createReaderBugTrace(createRuntime(), null));
+  withFakeClock(30_100, () => api.record("same_book_resume", {
+    phase: "relayout_after",
+    outcome: "stable",
+    reason: "window_resize",
+    duration_ms: 18.25,
+    document_focused: true,
+    active_element: "private_account",
+    viewport_width: 1_408,
+    viewport_height: 862,
+    layout_width: 1_392,
+    layout_height: 846,
+    before_page: 17,
+    after_page: 17,
+    before_anchor_offset: 81_250,
+    after_anchor_offset: 81_250,
+    resize_sequence: 3,
+    restore_pending: false,
+    save_suppressed: true,
+    title: "private title",
+    book_id: "private-id",
+    path: "C:\\private\\book.epub",
+    url: "https://private.invalid",
+    x: 310,
+    y: 120,
+  }));
+
+  const event = api._snapshotForTests(30_100).at(-1);
+  assert.deepEqual(event?.detail, {
+    phase: "relayout_after",
+    outcome: "stable",
+    reason: "window_resize",
+    duration_ms: 18.25,
+    document_focused: true,
+    active_element: "other",
+    viewport_width: 1_408,
+    viewport_height: 862,
+    layout_width: 1_392,
+    layout_height: 846,
+    before_page: 17,
+    after_page: 17,
+    before_anchor_offset: 81_250,
+    after_anchor_offset: 81_250,
+    resize_sequence: 3,
+    restore_pending: false,
+    save_suppressed: true,
+  });
+  assert.doesNotMatch(JSON.stringify(event), /private|book\.epub|https?:\/\/|book_id|"x"|"y"/iu);
+});
+
 test("capture output and context sanitization remain equivalent without native transport", async () => {
   const classicRuntime = createRuntime();
   const typedRuntime = createRuntime();

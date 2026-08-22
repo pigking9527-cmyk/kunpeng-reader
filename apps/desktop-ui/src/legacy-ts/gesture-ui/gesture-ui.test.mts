@@ -190,6 +190,7 @@ function harness() {
   const calls: NativeCall[] = [];
   const emits: Array<{ event: string; payload: unknown }> = [];
   const listeners = new Map<string, (event: TauriEvent<unknown>) => void>();
+  const globalListeners = new Map<string, EventHandler[]>();
   const transport: TauriTransport = {
     async invoke<TResult>(
       command: string,
@@ -229,7 +230,12 @@ function harness() {
         values.delete(key);
       },
     },
-    addEventListener: () => undefined,
+    addEventListener: ((type: string, handler: EventListenerOrEventListenerObject) => {
+      if (typeof handler !== "function") return;
+      const handlers = globalListeners.get(type) ?? [];
+      handlers.push(handler as unknown as EventHandler);
+      globalListeners.set(type, handlers);
+    }) as Window["addEventListener"],
     dispatchEvent: () => true,
     requestAnimationFrame: (callback: FrameRequestCallback) => {
       callback(0);
@@ -242,7 +248,15 @@ function harness() {
     innerHeight: 800,
     confirm: () => true,
   };
-  return { calls, emits, listeners, runtime, transport, values };
+  return {
+    calls,
+    emits,
+    listeners,
+    globalListeners,
+    runtime,
+    transport,
+    values,
+  };
 }
 
 test("gesture UI freezes the original DOM, storage, command and event contract", async () => {
@@ -351,6 +365,121 @@ test("main-window close never restores a closed surface", async () => {
     source,
     /function activeSurface\(target: Node \| null\): GestureSurface \| null \{[\s\S]*?syncMainCloseHistory\(\);[\s\S]*?withGestureInfo\(target, baseSurface\(target\)\)/,
   );
+});
+
+test("reader close settles pending main surfaces before becoming the latest undo target", async () => {
+  const source = await readFile(
+    new URL("./gesture-ui.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /eventApi\.listen\("reader-closed-for-reopen",[\s\S]*?syncMainCloseHistory\(\);[\s\S]*?rememberClosedReader\(event\.payload\.bookId\)/,
+  );
+});
+
+test("right-button gestures accept Pointer Events and retain the mouse fallback", async () => {
+  const source = await readFile(
+    new URL("./gesture-ui.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /function startPointerGesture\(event: PointerEvent\): void \{[\s\S]*?event\.pointerType !== "mouse"/,
+  );
+  assert.match(
+    source,
+    /global\.addEventListener\("pointerdown", startPointerGesture, true\);[\s\S]*?global\.addEventListener\("mousedown", startMouseGesture, true\);/,
+  );
+  assert.match(
+    source,
+    /active\.input === "pointer"[\s\S]*?active\.input = "mouse"[\s\S]*?event\.preventDefault\(\);/,
+  );
+  assert.match(
+    source,
+    /function finish\([\s\S]*?input\?: ActiveGesture\["input"\][\s\S]*?if \(input && active\.input !== input\) return;/,
+  );
+});
+
+test("a complete Pointer Event stroke invokes the existing main-window close command", () => {
+  const originalElement = Object.getOwnPropertyDescriptor(globalThis, "Element");
+  const originalCustomEvent = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "CustomEvent",
+  );
+  const originalMutationObserver = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "MutationObserver",
+  );
+  Object.defineProperty(globalThis, "Element", {
+    configurable: true,
+    value: FakeElement,
+  });
+  Object.defineProperty(globalThis, "CustomEvent", {
+    configurable: true,
+    value: class {
+      public constructor(
+        public readonly type: string,
+        public readonly init: unknown,
+      ) {}
+    },
+  });
+  Object.defineProperty(globalThis, "MutationObserver", {
+    configurable: true,
+    value: class {
+      public constructor(callback: MutationCallback) {
+        void callback;
+      }
+      public observe(): void {}
+    },
+  });
+  try {
+    const view = harness();
+    Object.defineProperty(view.runtime, "PointerEvent", {
+      configurable: true,
+      value: class {},
+    });
+    assert.ok(installGestureUi(view.runtime as unknown as GestureUiRuntime, view.transport));
+    const dispatch = (type: string, event: Record<string, unknown>) => {
+      for (const handler of view.globalListeners.get(type) ?? [])
+        handler(event as unknown as Event);
+    };
+    const target = (view.runtime.document as unknown as FakeDocument).body;
+    dispatch("pointerdown", {
+      button: 2,
+      pointerType: "mouse",
+      clientX: 10,
+      clientY: 10,
+      target,
+      preventDefault: () => undefined,
+    });
+    dispatch("pointermove", {
+      clientX: 80,
+      clientY: 10,
+      target,
+      preventDefault: () => undefined,
+    });
+    dispatch("pointerup", {
+      clientX: 80,
+      clientY: 10,
+      target,
+      preventDefault: () => undefined,
+    });
+    assert.equal(
+      view.calls.filter((call) => call.command === "main_window_close").length,
+      1,
+    );
+  } finally {
+    if (originalElement)
+      Object.defineProperty(globalThis, "Element", originalElement);
+    else Reflect.deleteProperty(globalThis, "Element");
+    if (originalCustomEvent)
+      Object.defineProperty(globalThis, "CustomEvent", originalCustomEvent);
+    else Reflect.deleteProperty(globalThis, "CustomEvent");
+    if (originalMutationObserver)
+      Object.defineProperty(globalThis, "MutationObserver", originalMutationObserver);
+    else Reflect.deleteProperty(globalThis, "MutationObserver");
+  }
 });
 
 test("account panel close is handled before the main-window fallback", async () => {

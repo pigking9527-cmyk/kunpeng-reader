@@ -138,6 +138,47 @@ test("footnote target diagnostics expose only structural booleans", () => {
   assert.equal(data?.fragment, undefined);
 });
 
+test("scroll-mask diagnostics retain only numeric pagination geometry", () => {
+  const messages: PostedTrace[] = [];
+  const api = installReaderPageBugTrace(createRuntime(messages));
+  api.readerBugTrace("scroll_mask", "clip_applied", null, {
+    scroll_top: 1_240,
+    scroll_view_height: 760,
+    scroll_content_height: 4_800,
+    scroll_item_count: 165,
+    scroll_slice_start: 71,
+    scroll_slice_end: 98,
+    scroll_slice_next: 99,
+    scroll_slice_top: 1_240,
+    scroll_slice_bottom: 2_000,
+    scroll_mask_top: 19,
+    scroll_mask_blank: 27,
+    scroll_clip_active: true,
+    scroll_tail_bottom: 752,
+    scroll_tail_overflow: -8,
+    scroll_next_top: 771,
+    scroll_next_bottom: 797,
+    scroll_next_overflow: 37,
+    scroll_page_tolerance: 13,
+    scroll_page_guard: 3,
+    scroll_break_count: 7,
+    scroll_break_last: 4_010,
+    text: "正文绝不可外发",
+    href: "https://secret.invalid",
+  });
+  const data = messages[0]?.bugTrace;
+  assert.equal(data?.scroll_top, 1_240);
+  assert.equal(data?.scroll_slice_next, 99);
+  assert.equal(data?.scroll_mask_top, 19);
+  assert.equal(data?.scroll_mask_blank, 27);
+  assert.equal(data?.scroll_clip_active, true);
+  assert.equal(data?.scroll_next_overflow, 37);
+  assert.equal(data?.scroll_page_tolerance, 13);
+  assert.equal(data?.scroll_break_count, 7);
+  assert.equal(data?.text, undefined);
+  assert.equal(data?.href, undefined);
+});
+
 test("page-turn trace keeps sequence, wheel-only detail, outcomes, and reinitialization", () => {
   const messages: PostedTrace[] = [];
   const runtime = createRuntime(messages);

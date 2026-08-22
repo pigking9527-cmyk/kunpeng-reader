@@ -102,7 +102,6 @@ pub(crate) fn save_download_image(name: String, data_url: String) -> Result<Stri
     Ok(dir.to_string_lossy().into_owned())
 }
 
-const PROBLEM_TRACE_WINDOW_MS: u64 = 2 * 60 * 1000;
 const PROBLEM_TRACE_MAX_BYTES: usize = 4 * 1024 * 1024;
 const PROBLEM_TRACE_LATEST_FILE: &str = "problem-trace-latest.json";
 
@@ -123,6 +122,20 @@ fn validate_problem_trace_checkpoint(snapshot: &serde_json::Value) -> Result<(),
         return Err("问题记录超过 4 MB，无法缓存".to_string());
     }
     Ok(())
+}
+
+fn problem_trace_has_meaningful_events(snapshot: &serde_json::Value) -> bool {
+    snapshot
+        .get("events")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|events| {
+            events.iter().any(|event| {
+                !matches!(
+                    event.get("type").and_then(serde_json::Value::as_str),
+                    None | Some("trace_started" | "capture")
+                )
+            })
+        })
 }
 
 static PROBLEM_TRACE_CACHE: std::sync::LazyLock<
@@ -183,6 +196,13 @@ fn load_problem_trace_checkpoint_at(path: &Path) -> Result<Option<serde_json::Va
     Ok(Some(snapshot))
 }
 
+fn load_meaningful_problem_trace_at(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    // The frontend anchors its two-minute event window to the latest user
+    // operation. A user may wait longer to observe delayed rendering, so the
+    // file modification time must not discard that frozen diagnostic window.
+    Ok(load_problem_trace_checkpoint_at(path)?.filter(problem_trace_has_meaningful_events))
+}
+
 fn persist_problem_trace_checkpoint(snapshot: &serde_json::Value) -> Result<(), String> {
     persist_problem_trace_checkpoint_at(&problem_trace_checkpoint_path()?, snapshot)
 }
@@ -203,16 +223,34 @@ pub(crate) fn problem_trace_checkpoint(
         .map_err(|_| "问题记录缓存暂时不可用".to_string())?;
     if let Some(snapshot) = snapshot {
         validate_problem_trace_checkpoint(&snapshot)?;
+        if !problem_trace_has_meaningful_events(&snapshot) {
+            let preserve_cached = cached
+                .as_ref()
+                .is_some_and(|(_, previous)| problem_trace_has_meaningful_events(previous));
+            if preserve_cached {
+                return Ok(None);
+            }
+            match problem_trace_checkpoint_path()
+                .and_then(|path| load_meaningful_problem_trace_at(&path))
+            {
+                Ok(Some(previous)) => {
+                    *cached = Some((now_ms(), previous));
+                    return Ok(None);
+                }
+                Ok(None) => {}
+                Err(error) => log(&format!(
+                    "problem_trace_checkpoint preserve_check_failed {error}"
+                )),
+            }
+        }
         *cached = Some((now_ms(), snapshot.clone()));
         if let Err(error) = persist_problem_trace_checkpoint(&snapshot) {
             log(&format!("problem_trace_checkpoint persist_failed {error}"));
         }
         return Ok(None);
     }
-    if let Some((stored_at, snapshot)) = cached.as_ref() {
-        if now_ms().saturating_sub(*stored_at) <= PROBLEM_TRACE_WINDOW_MS {
-            return Ok(Some(snapshot.clone()));
-        }
+    if let Some((_, snapshot)) = cached.as_ref() {
+        return Ok(Some(snapshot.clone()));
     }
     *cached = None;
     load_problem_trace_checkpoint()
@@ -511,6 +549,38 @@ mod tests {
         let path = directory.join(PROBLEM_TRACE_LATEST_FILE);
         std::fs::write(&path, b"not-json").unwrap();
         assert!(load_problem_trace_checkpoint_at(&path).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn blank_cached_reader_trace_does_not_replace_a_recent_meaningful_trace() {
+        let directory = std::env::temp_dir().join(format!(
+            "kunpeng-problem-trace-preserve-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let path = directory.join(PROBLEM_TRACE_LATEST_FILE);
+        let meaningful = serde_json::json!({
+            "schema_version": 1,
+            "captured_at": "2026-08-22T13:27:00.000Z",
+            "events": [{"type": "gesture_finish", "detail": {"outcome": "none"}}]
+        });
+        let blank = serde_json::json!({
+            "schema_version": 1,
+            "captured_at": "2026-08-22T13:28:00.000Z",
+            "events": [
+                {"type": "trace_started", "detail": {}},
+                {"type": "capture", "detail": {}}
+            ]
+        });
+
+        persist_problem_trace_checkpoint_at(&path, &meaningful).unwrap();
+        assert!(!problem_trace_has_meaningful_events(&blank));
+        assert_eq!(
+            load_meaningful_problem_trace_at(&path).unwrap(),
+            Some(meaningful)
+        );
+
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -83,6 +83,7 @@ type ActiveGesture = {
   points: GesturePoint[];
   surface: GestureSurface;
   previewProfileId: string | null;
+  input: "mouse" | "pointer";
 };
 type ClosedPage = { name: string; reopen: () => void; key: string };
 type GestureEditorSnapshot = {
@@ -158,6 +159,20 @@ export interface GestureUiRuntime {
   readonly ReaderSyncUI?: { close?(): void; open?(): void };
   readonly ReaderBookInfo?: { openById?(id: string): Promise<unknown> | void };
   readonly ReaderShelfUI?: { getSelectedIds?(): readonly unknown[] };
+  readonly ReaderProblemTraceUI?: {
+    recordWindowControl?(
+      control: unknown,
+      phase: unknown,
+      outcome: unknown,
+    ): void;
+    recordGesture?(
+      input: unknown,
+      phase: unknown,
+      outcome: unknown,
+      sampleCount: unknown,
+      action: unknown,
+    ): void;
+  };
   addEventListener: Window["addEventListener"];
   clearTimeout: Window["clearTimeout"];
   confirm: Window["confirm"];
@@ -1633,6 +1648,10 @@ export function installGestureUi(
     if (!eventApi) return;
     Promise.resolve(
       eventApi.listen("reader-closed-for-reopen", (event) => {
+        // MutationObserver batches main-surface changes into a later microtask.
+        // Flush those older closures first so the reader that just closed is
+        // always the next chronological undo target.
+        syncMainCloseHistory();
         rememberClosedReader(event.payload.bookId);
       }),
     ).catch(() => {});
@@ -1756,11 +1775,58 @@ export function installGestureUi(
     trail.hidden = false;
     gestureApi.draw(trail, points, { color: "#3478d4", lineWidth: 5 });
   }
+  function windowCommandFailure(error: unknown): string {
+    const message = String(error || "").toLowerCase();
+    if (/invalid args|missing required|deserialize|argument/u.test(message))
+      return "failed_arguments";
+    if (/not allowed|permission|capability/u.test(message)) return "failed_permission";
+    if (/not found|not registered|unknown command/u.test(message)) return "failed_command";
+    if (/window|webview|label/u.test(message)) return "failed_window";
+    return "failed_other";
+  }
   function mainWindowClose() {
-    if (nativeApi)
-      void Promise.resolve(nativeApi.invoke("main_window_close")).catch(
-        () => {},
+    if (!nativeApi) {
+      global.ReaderProblemTraceUI?.recordWindowControl?.(
+        "close",
+        "command",
+        "failed_runtime",
       );
+      return;
+    }
+    global.ReaderProblemTraceUI?.recordWindowControl?.(
+      "close",
+      "command",
+      "requested",
+    );
+    void Promise.resolve(nativeApi.invoke("main_window_close")).then(
+      () =>
+        global.ReaderProblemTraceUI?.recordWindowControl?.(
+          "close",
+          "command",
+          "ok",
+        ),
+      (error) =>
+        global.ReaderProblemTraceUI?.recordWindowControl?.(
+          "close",
+          "command",
+          windowCommandFailure(error),
+        ),
+    );
+  }
+  function recordGesture(
+    input: ActiveGesture["input"],
+    phase: "start" | "finish" | "cancel" | "handoff",
+    outcome: "active" | "matched" | "no_match" | "cancelled" | "mouse",
+    sampleCount: number,
+    action = "none",
+  ): void {
+    global.ReaderProblemTraceUI?.recordGesture?.(
+      input,
+      phase,
+      outcome,
+      sampleCount,
+      action,
+    );
   }
   function closeMainWindowOrUndo(action: GestureAction): void {
     if (action === "undo_last") {
@@ -2068,19 +2134,21 @@ export function installGestureUi(
     });
     return best;
   }
-  function begin(event: MouseEvent): void {
+  function begin(event: MouseEvent, input: ActiveGesture["input"]): void {
     if (event.button !== 2) return;
     const surface = activeSurface(asElement(event.target));
     if (!surface) return;
     // Cancelling pointerdown suppresses the compatibility mouse stream in
     // WebKit, which is precisely the fallback needed when later PointerEvents
     // are missing. The context menu is suppressed separately after the stroke.
-    if (!event.type.startsWith("pointer")) event.preventDefault();
+    if (input === "mouse") event.preventDefault();
     active = {
       points: [{ x: event.clientX, y: event.clientY }],
       surface,
       previewProfileId: null,
+      input,
     };
+    recordGesture(input, "start", "active", 1);
     paintTrail(active.points);
   }
   function previewMatch(gesture: ActiveGesture): void {
@@ -2094,9 +2162,10 @@ export function installGestureUi(
     if (canApplyAction(gesture.surface, matched.profile.action))
       showHint(matched.profile.name);
   }
-  function move(event: MouseEvent): void {
+  function move(event: MouseEvent, input: ActiveGesture["input"]): void {
     if (!active) return;
-    if (!event.type.startsWith("pointer")) event.preventDefault();
+    if (active.input !== input) return;
+    if (input === "mouse") event.preventDefault();
     const previous = active.points[active.points.length - 1];
     if (
       !previous ||
@@ -2108,11 +2177,23 @@ export function installGestureUi(
     paintTrail(active.points);
     previewMatch(active);
   }
-  function finish(event: MouseEvent | null, cancelled = false): void {
+  function finish(
+    event: MouseEvent | null,
+    cancelled = false,
+    input?: ActiveGesture["input"],
+  ): void {
     if (!active) return;
+    if (input && active.input !== input) return;
     const gesture = active;
     active = null;
     const matched = !cancelled && matchProfile(gesture.surface, gesture.points);
+    recordGesture(
+      gesture.input,
+      cancelled ? "cancel" : "finish",
+      cancelled ? "cancelled" : matched ? "matched" : "no_match",
+      gesture.points.length,
+      matched ? matched.profile.action : "none",
+    );
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clearTrail();
     if (matched && canApplyAction(gesture.surface, matched.profile.action)) {
@@ -2123,6 +2204,7 @@ export function installGestureUi(
     if (!active) return;
     const gesture = active;
     active = null;
+    recordGesture(gesture.input, "cancel", "cancelled", gesture.points.length);
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clearTrail();
   }
@@ -2708,16 +2790,51 @@ export function installGestureUi(
       cancelGestureKeepHint();
       return;
     }
-    if (!active) begin(event);
+    if (!active) {
+      begin(event, "mouse");
+      return;
+    }
+    // Some WebViews emit pointerdown before the compatibility mousedown but
+    // subsequently omit pointermove. Hand the stroke over to mouse so the
+    // legacy stream remains the fallback on those platforms.
+    if (
+      active.input === "pointer" &&
+      active.points.length === 1 &&
+      active.points[0]?.x === event.clientX &&
+      active.points[0]?.y === event.clientY
+    ) {
+      active.input = "mouse";
+      event.preventDefault();
+      recordGesture("mouse", "handoff", "mouse", active.points.length);
+    }
   }
-  // Right-button gestures use the same single mouse channel as the editor.
-  // This avoids the incomplete mouse PointerEvent sequence in macOS WebKit.
+  function startPointerGesture(event: PointerEvent): void {
+    if (event.pointerType !== "mouse") return;
+    if (event.button === 0) {
+      cancelGestureKeepHint();
+      return;
+    }
+    if (!active) begin(event, "pointer");
+  }
+  // Prefer Pointer Events where they are complete, but retain the mouse
+  // channel as a compatibility fallback: macOS WebKit can issue pointerdown
+  // without the matching pointermove stream.
+  if ("PointerEvent" in global) {
+    global.addEventListener("pointerdown", startPointerGesture, true);
+    global.addEventListener(
+      "pointermove",
+      (event) => move(event, "pointer"),
+      { capture: true, passive: false },
+    );
+    global.addEventListener("pointerup", (event) => finish(event, false, "pointer"), true);
+    global.addEventListener("pointercancel", () => finish(null, true, "pointer"), true);
+  }
   global.addEventListener("mousedown", startMouseGesture, true);
-  global.addEventListener("mousemove", move, {
+  global.addEventListener("mousemove", (event) => move(event, "mouse"), {
     capture: true,
     passive: false,
   });
-  global.addEventListener("mouseup", (event) => finish(event), true);
+  global.addEventListener("mouseup", (event) => finish(event, false, "mouse"), true);
   global.addEventListener("blur", () => finish(null, true));
   global.addEventListener(
     "contextmenu",

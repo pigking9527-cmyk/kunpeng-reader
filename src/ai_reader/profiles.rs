@@ -100,6 +100,34 @@ pub(crate) struct SaveAiReaderProfileRequest {
     pub(super) api_key: String,
 }
 
+/// A deliberately separate, local-only model configuration for the
+/// intelligence workspace. It is not part of a BYOK profile assignment and
+/// never participates in the portable/synchronised reader configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(super) struct IntelligenceLocalModelConfig {
+    pub(super) base_url: String,
+    pub(super) model: String,
+    #[serde(default)]
+    pub(super) api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IntelligenceLocalModelStatus {
+    pub configured: bool,
+    pub base_url: String,
+    pub model: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveIntelligenceLocalModelRequest {
+    pub(super) base_url: String,
+    pub(super) model: String,
+    #[serde(default)]
+    pub(super) api_key: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssignAiReaderProfileRequest {
@@ -141,6 +169,70 @@ pub(super) fn normalize_base_url(value: &str) -> Result<String, String> {
         return Err("接口地址过长".into());
     }
     Ok(value.to_string())
+}
+
+/// Intelligence processing must never route public-news evidence to a remote
+/// endpoint. The normal BYOK configuration intentionally supports HTTPS
+/// providers; this narrower validator accepts only loopback HTTP services such
+/// as llama.cpp's or LM Studio's OpenAI-compatible server.
+pub(super) fn normalize_intelligence_local_base_url(value: &str) -> Result<String, String> {
+    let normalized = normalize_base_url(value)?;
+    let authority_and_path = normalized
+        .strip_prefix("http://")
+        .ok_or("情报模型接口只能使用本机 HTTP 服务")?;
+    let authority = authority_and_path.split('/').next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return Err("情报模型接口必须是 localhost、127.0.0.1 或 ::1".into());
+    }
+    let local = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, port)) = rest.split_once(']') else {
+            return Err("情报模型接口的 IPv6 地址格式无效".into());
+        };
+        host == "::1" && valid_optional_port(port)
+    } else {
+        let (host, port) = authority
+            .split_once(':')
+            .map_or((authority, ""), |(host, port)| (host, port));
+        matches!(host, "localhost" | "127.0.0.1") && (port.is_empty() || valid_port(port))
+    };
+    if !local {
+        return Err("情报模型接口只能使用 localhost、127.0.0.1 或 ::1".into());
+    }
+    Ok(normalized)
+}
+
+fn valid_optional_port(value: &str) -> bool {
+    value.strip_prefix(':').is_some_and(valid_port) || value.is_empty()
+}
+
+fn valid_port(value: &str) -> bool {
+    value.parse::<u16>().is_ok_and(|port| port > 0)
+}
+
+/// A model name is a user-declared compatibility label, not proof of the
+/// loaded weights. The local server API cannot reliably expose quantisation, so
+/// keep the constraint explicit and reject accidental remote/smaller profiles.
+pub(super) fn validate_intelligence_qwen_27b_q3_model(value: &str) -> Result<String, String> {
+    let model = value.trim();
+    if model.is_empty() || model.len() > 200 {
+        return Err("情报模型名不能为空且不能超过 200 个字节".into());
+    }
+    let normalized = model.to_ascii_lowercase();
+    if !(normalized.contains("qwen") && normalized.contains("27b") && normalized.contains("q3")) {
+        return Err("情报模型名必须明确标识为 Qwen 27B Q3；名称校验不能证明实际权重或量化".into());
+    }
+    Ok(model.to_string())
+}
+
+pub(super) fn intelligence_local_model_status(
+    config: &IntelligenceLocalModelConfig,
+) -> IntelligenceLocalModelStatus {
+    IntelligenceLocalModelStatus {
+        configured: normalize_intelligence_local_base_url(&config.base_url).is_ok()
+            && validate_intelligence_qwen_27b_q3_model(&config.model).is_ok(),
+        base_url: config.base_url.clone(),
+        model: config.model.clone(),
+    }
 }
 
 pub(super) fn known_provider(value: &str) -> &'static str {
@@ -282,6 +374,36 @@ fn trim_to_chars(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intelligence_model_accepts_only_loopback_http_and_declared_qwen_27b_q3() {
+        assert_eq!(
+            normalize_intelligence_local_base_url("http://127.0.0.1:8080/v1/").unwrap(),
+            "http://127.0.0.1:8080/v1"
+        );
+        assert_eq!(
+            normalize_intelligence_local_base_url("http://[::1]:1234/v1").unwrap(),
+            "http://[::1]:1234/v1"
+        );
+        assert!(normalize_intelligence_local_base_url("https://api.example.test/v1").is_err());
+        assert!(normalize_intelligence_local_base_url("http://192.168.1.2:8080/v1").is_err());
+        assert_eq!(
+            validate_intelligence_qwen_27b_q3_model("Qwen3-27B-UD-Q3_K_XL").unwrap(),
+            "Qwen3-27B-UD-Q3_K_XL"
+        );
+        assert!(validate_intelligence_qwen_27b_q3_model("Qwen3-14B-Q4_K_M").is_err());
+    }
+
+    #[test]
+    fn intelligence_status_does_not_require_a_local_api_key() {
+        let status = intelligence_local_model_status(&IntelligenceLocalModelConfig {
+            base_url: "http://localhost:8080/v1".into(),
+            model: "Qwen3-27B-UD-Q3_K_XL".into(),
+            api_key: String::new(),
+        });
+        assert!(status.configured);
+        assert_eq!(status.model, "Qwen3-27B-UD-Q3_K_XL");
+    }
 
     #[test]
     fn profile_summary_never_exposes_the_api_key() {

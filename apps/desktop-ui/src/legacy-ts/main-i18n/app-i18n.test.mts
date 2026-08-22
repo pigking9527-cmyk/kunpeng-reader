@@ -125,6 +125,13 @@ test("Japanese and Korean release-gated catalogs retain complete English-key cov
   assert.match(api.t("semRerankerReady"), /Ready/);
 });
 
+test("Chinese statistics quality messages override the English fallback", () => {
+  const zhCn = install(createHarness("zh-CN"));
+  assert.equal(zhCn.t("statsQualityDwell"), "本时段可能包含空闲时间：阅读时长较长，但统计字数较少。");
+  assert.equal(zhCn.t("statsQualityFast"), "本时段平均阅读速度偏高，可能包含快速翻页或重复计数。");
+  assert.equal(zhCn.t("statsQualitySlow"), "本时段平均阅读速度偏低，可能包含空闲时间或扫描版 PDF。");
+});
+
 test("apply and populate update only the original data attributes and language selector", () => {
   const harness = createHarness("en");
   const api = install(harness);

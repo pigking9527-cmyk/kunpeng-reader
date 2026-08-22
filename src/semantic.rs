@@ -28,6 +28,58 @@ pub(crate) fn initialize_semantic_model_selection() {
     retrieval::initialize();
 }
 
+/// Encode a bounded batch of public-news excerpts for the intelligence
+/// workspace.  Unlike the book RAG path, this does not load, create, or write
+/// a book vector shard or global HNSW index: the caller owns the returned
+/// vectors for the duration of one request only.
+///
+/// The semantic model must already be available locally.  A news refresh must
+/// not silently start a model download or compete with the reader's explicit
+/// semantic setup flow.
+pub(crate) fn embed_public_news_documents(
+    state: &AppState,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>, String> {
+    const MAX_PUBLIC_NEWS_DOCUMENTS: usize = 128;
+    const MAX_PUBLIC_NEWS_DOCUMENT_CHARS: usize = 1_800;
+
+    if texts.is_empty() || texts.len() > MAX_PUBLIC_NEWS_DOCUMENTS {
+        return Err(format!(
+            "资讯语义召回一次只能处理 1–{MAX_PUBLIC_NEWS_DOCUMENTS} 条候选"
+        ));
+    }
+    if !model::available(state) {
+        return Err("本地语义模型未就绪，已保留规则聚类结果".into());
+    }
+    let inputs = texts
+        .iter()
+        .map(|text| {
+            let excerpt: String = text
+                .trim()
+                .chars()
+                .take(MAX_PUBLIC_NEWS_DOCUMENT_CHARS)
+                .collect();
+            if excerpt.is_empty() {
+                Err("资讯语义候选不能是空文本".to_string())
+            } else {
+                Ok(model::document_input(&excerpt))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let embedder = model::embedder(state)?;
+    let mut vectors = embedder
+        .lock()
+        .map_err(|_| "资讯语义模型锁定失败".to_string())?
+        .embed_dense(inputs)?;
+    if vectors.len() != texts.len() || vectors.iter().any(|vector| vector.is_empty()) {
+        return Err("本地语义模型返回的资讯向量不完整".into());
+    }
+    for vector in &mut vectors {
+        crate::semantic_core::normalize(vector);
+    }
+    Ok(vectors)
+}
+
 /// 画像模块只需要向量维度、段落数量和连续向量，不接触段落文本或缓存许可。
 fn sem_data_vector_parts(data: &SemData) -> (usize, usize, &[f32]) {
     data.vector_parts()

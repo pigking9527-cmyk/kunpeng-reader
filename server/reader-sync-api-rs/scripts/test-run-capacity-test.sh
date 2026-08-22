@@ -156,6 +156,29 @@ for (const vus of [30, 40, 50, 51, 52, 53, 54]) {
     throw new Error(`hashed operation phases remain synchronized for ${vus}`);
   }
 }
+
+function mutationId(runEpoch, stageOrdinal, sequence) {
+  const epochHex = runEpoch.toString(16).padStart(12, '0').slice(-12);
+  const stageHex = stageOrdinal.toString(16).padStart(2, '0').slice(-2);
+  const sequenceHex = sequence.toString(16).padStart(16, '0').slice(-16);
+  return `${epochHex.slice(0, 8)}-${epochHex.slice(8)}-4${stageHex}${sequenceHex[0]}`
+    + `-8${sequenceHex.slice(1, 4)}-${sequenceHex.slice(4)}`;
+}
+const mutationIds = new Set();
+for (const epoch of [1_700_000_000_000, 1_700_000_000_001]) {
+  for (const stage of [0, 1, 10]) {
+    for (const sequence of [0, 1, 65_535, 1_000_000]) {
+      const id = mutationId(epoch, stage, sequence);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) {
+        throw new Error(`capacity mutation id is not a version-4 UUID: ${id}`);
+      }
+      if (mutationIds.has(id)) {
+        throw new Error(`capacity mutation id repeated across run/stage/sequence: ${id}`);
+      }
+      mutationIds.add(id);
+    }
+  }
+}
 JS
 
 if ! grep -Fq 'const batchResponses = http.batch(' "$k6_script" || \
@@ -188,6 +211,12 @@ fi
 
 if ! grep -Fq 'SYNC_LOAD_TEST_RUN_EPOCH_MILLIS=$(($(date +%s) * 1000))' "$script"; then
   echo 'runner no longer gives every capacity VU one shared version epoch' >&2
+  exit 1
+fi
+
+if ! grep -Fq "const epochHex = runEpoch.toString(16).padStart(12, '0').slice(-12);" "$k6_script" || \
+  grep -Fq 'a82fb5c3-6c4a-4f3d-99de-' "$k6_script"; then
+  echo 'capacity mutation ids no longer isolate repeated runs' >&2
   exit 1
 fi
 

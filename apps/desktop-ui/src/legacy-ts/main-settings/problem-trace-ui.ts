@@ -12,7 +12,7 @@ const MAX_SHELL_EVENTS = 320;
 
 type ProblemTraceCommands = {
   readonly problem_trace_checkpoint: {
-    readonly args: { readonly snapshot: null };
+    readonly args: { readonly snapshot: TraceSnapshot | Record<string, unknown> | null };
     readonly result: TraceSnapshot | null;
   };
 };
@@ -77,6 +77,7 @@ interface ProblemTraceRuntime extends Record<string, unknown> {
   readonly ReaderAppI18n?: { selectedLanguage?(): unknown };
   readonly ReaderStartupEnhancement?: { snapshot?(): StartupEnhancementSnapshot | null };
   focus?(): void;
+  addEventListener?(type: "focus" | "blur", listener: () => void, options?: boolean): void;
   setTimeout(callback: () => void, milliseconds: number): number;
   clearTimeout(handle?: number | null): void;
   requestAnimationFrame?(callback: FrameRequestCallback): number;
@@ -92,6 +93,35 @@ export interface ProblemTraceUiApi {
   readonly MAX_SHELL_EVENTS: number;
   readonly capture: (options?: ProblemTraceCaptureOptions) => Promise<Record<string, unknown>>;
   readonly recordShelfBookOpen: (outcome: unknown, input: unknown) => void;
+  /** Records only a redacted news-reader phase, never a URL or article text. */
+  readonly recordNewsArticleTiming: (
+    stage: unknown,
+    outcome: unknown,
+    durationMs: unknown,
+    sequence: unknown,
+  ) => void;
+  /** Records only audit render timing and aggregate counts; never news text or URLs. */
+  readonly recordIntelligenceAuditTiming: (
+    action: unknown,
+    phase: unknown,
+    durationMs: unknown,
+    stageId: unknown,
+    itemCount: unknown,
+  ) => void;
+  /** Records window-control delivery and native-command outcome without errors or paths. */
+  readonly recordWindowControl: (
+    control: unknown,
+    phase: unknown,
+    outcome: unknown,
+  ) => void;
+  /** Records a gesture lifecycle only; it never stores cursor coordinates or paths. */
+  readonly recordGesture: (
+    input: unknown,
+    phase: unknown,
+    outcome: unknown,
+    sampleCount: unknown,
+    action: unknown,
+  ) => void;
   readonly _rememberReaderSnapshotForTests: (snapshot: unknown) => boolean;
   readonly _recentReaderSnapshotForTests: (now?: number) => TraceSnapshot | null;
   readonly _shellEventsForTests: () => ShellTraceEvent[];
@@ -123,6 +153,14 @@ function runtimeFrom(value: unknown): ProblemTraceRuntime | null {
 
 function eventRecord(value: unknown): Record<string, unknown> {
   return record(value) ?? {};
+}
+
+function eventTargetElement(value: unknown): Element | null {
+  if (!value || typeof value !== "object") return null;
+  if (typeof Element !== "undefined" && value instanceof Element) return value;
+  return typeof (value as { readonly closest?: unknown }).closest === "function"
+    ? value as Element
+    : null;
 }
 
 function safeLabel(value: unknown, fallback = "other"): string {
@@ -283,6 +321,83 @@ function booleanFlags(
   );
 }
 
+/** A bounded numeric rectangle only; never accepts a monitor name, title, path, or URL. */
+function geometryDetail(value: unknown): Readonly<Record<string, number>> | null {
+  const geometry = record(value);
+  if (!geometry) return null;
+  const width = boundedInteger(geometry.w, 0, 0, 32_768);
+  const height = boundedInteger(geometry.h, 0, 0, 32_768);
+  if (width < 100 || height < 100) return null;
+  return {
+    x: boundedInteger(geometry.x, 0, -65_536, 65_536),
+    y: boundedInteger(geometry.y, 0, -65_536, 65_536),
+    w: width,
+    h: height,
+  };
+}
+
+function geometryRestoreDetail(value: unknown): Readonly<Record<string, unknown>> | null {
+  const restore = record(value);
+  if (!restore) return null;
+  return {
+    space: safeLabel(restore.space, "unknown"),
+    size_applied: restore.size_applied === true,
+    position_applied: restore.position_applied === true,
+    clamped: restore.clamped === true,
+    target_width: boundedInteger(restore.target_width, 0, 0, 32_768),
+    target_height: boundedInteger(restore.target_height, 0, 0, 32_768),
+  };
+}
+
+function activeElementCategory(document?: ProblemTraceDocument): string {
+  const active = eventTargetElement(document?.activeElement);
+  if (!active) return "none";
+  if (active.closest('[data-problem-target="book-card"]')) return "book_card";
+  if (active.closest("#shelf,.content")) return "shelf_content";
+  if (active.matches("button,input,select,textarea,a,[contenteditable=true]")) return "control";
+  if (active.matches("body,html")) return "document";
+  return "other";
+}
+
+function activeElementLabel(value: unknown): string {
+  return choice(
+    value,
+    ["none", "document", "other", "book_card", "shelf_content", "control", "reader_frame", "reader_shell", "titlebar"] as const,
+    "other",
+  );
+}
+
+function focusDetail(document?: ProblemTraceDocument): Readonly<Record<string, unknown>> {
+  return {
+    document_focused: document?.hasFocus() === true,
+    active_element: activeElementCategory(document),
+  };
+}
+
+function readerResumeNumericDetail(value: unknown): Readonly<Record<string, number>> {
+  const payload = eventRecord(value);
+  const result: Record<string, number> = {};
+  const numericFields = [
+    ["viewport_width", "viewportWidth", 0, 32_768],
+    ["viewport_height", "viewportHeight", 0, 32_768],
+    ["layout_width", "layoutWidth", 0, 32_768],
+    ["layout_height", "layoutHeight", 0, 32_768],
+    ["page", "page", 0, 1_000_000],
+    ["before_page", "beforePage", 0, 1_000_000],
+    ["after_page", "afterPage", 0, 1_000_000],
+    ["anchor_offset", "anchorOffset", 0, 1_000_000_000],
+    ["before_anchor_offset", "beforeAnchorOffset", 0, 1_000_000_000],
+    ["after_anchor_offset", "afterAnchorOffset", 0, 1_000_000_000],
+    ["resize_sequence", "resizeSequence", 0, 1_000_000],
+  ] as const;
+  numericFields.forEach(([outputKey, camelKey, minimum, maximum]) => {
+    const raw = payload[camelKey] ?? payload[outputKey];
+    if (!Number.isFinite(Number(raw))) return;
+    result[outputKey] = boundedInteger(raw, 0, minimum, maximum);
+  });
+  return result;
+}
+
 function optionalTransport(target: Record<string, unknown>): TauriTransport | undefined {
   try {
     return transportFromTauriGlobal(target);
@@ -297,6 +412,9 @@ export function initializeProblemTraceUi(
 ): ProblemTraceUiApi {
   const shellEvents: ShellTraceEvent[] = [];
   let latestReaderSnapshot: TraceSnapshot | null = null;
+  let checkpointTimer: number | null = null;
+  let lastWindowFocused = runtime.document?.hasFocus() === true;
+  let lastWindowFocusChangedAt = Date.now();
   const api = transport ? createTauriApi<VerifiedProblemTraceCommands>(transport) : null;
   const defaultEventApi: TraceEventApi | undefined = transport?.listen && transport.emit
     ? {
@@ -305,8 +423,11 @@ export function initializeProblemTraceUi(
       }
     : undefined;
 
-  const pruneShellEvents = (now = Date.now()): void => {
-    const cutoff = now - WINDOW_MS;
+  // Keep the two-minute causal window before the most recent operation.  A
+  // user may wait before opening the feedback dialog; that wait must not erase
+  // the operation sequence that led to the problem.
+  const pruneShellEvents = (referenceAt = shellEvents.at(-1)?.at_ms ?? Date.now()): void => {
+    const cutoff = referenceAt - WINDOW_MS;
     while ((shellEvents[0]?.at_ms ?? Number.POSITIVE_INFINITY) < cutoff) shellEvents.shift();
     while (shellEvents.length > MAX_SHELL_EVENTS) shellEvents.shift();
   };
@@ -319,6 +440,18 @@ export function initializeProblemTraceUi(
     pruneShellEvents(now);
     shellEvents.push({ at_ms: now, type: safeLabel(type, "shell_operation"), detail });
     pruneShellEvents(now);
+  };
+
+  const inputFocusTransitionDetail = (
+    document = runtime.document,
+  ): Readonly<Record<string, unknown>> => {
+    const ageMs = Math.max(0, Math.min(30_000, Date.now() - lastWindowFocusChangedAt));
+    return {
+      ...focusDetail(document),
+      window_focused_before_input: lastWindowFocused,
+      focus_transition_age_ms: ageMs,
+      recently_activated: lastWindowFocused && ageMs <= 250,
+    };
   };
 
   const traceArea = (target: TraceTarget | null): string => {
@@ -341,6 +474,7 @@ export function initializeProblemTraceUi(
         "control",
       ),
     });
+    scheduleShellCheckpoint();
   };
 
   const recordShelfBookOpen = (outcome: unknown, input: unknown): void => {
@@ -349,22 +483,110 @@ export function initializeProblemTraceUi(
       area: "shelf",
       outcome: safeLabel(outcome),
       input: safeLabel(input),
+      ...focusDetail(runtime.document),
     });
+    scheduleShellCheckpoint();
+  };
+
+  const recordNewsArticleTiming = (
+    stage: unknown,
+    outcome: unknown,
+    durationMs: unknown,
+    sequence: unknown,
+  ): void => {
+    pushShellEvent("news_article", {
+      source: "newsnow",
+      stage: safeLabel(stage, "unknown"),
+      outcome: safeLabel(outcome, "unknown"),
+      duration_ms: Math.max(0, Math.min(30_000, Number(durationMs) || 0)),
+      sequence: Math.max(0, Math.min(1_000_000, Math.floor(Number(sequence) || 0))),
+    });
+    scheduleShellCheckpoint();
+  };
+
+  const recordIntelligenceAuditTiming = (
+    action: unknown,
+    phase: unknown,
+    durationMs: unknown,
+    stageId: unknown,
+    itemCount: unknown,
+  ): void => {
+    pushShellEvent("intelligence_audit", {
+      source: "intelligence",
+      action: safeLabel(action, "unknown"),
+      phase: safeLabel(phase, "unknown"),
+      duration_ms: Math.max(0, Math.min(30_000, Number(durationMs) || 0)),
+      stage_id: safeLabel(stageId, "none"),
+      item_count: boundedInteger(itemCount, 0, 0, 999_999),
+    });
+    scheduleShellCheckpoint();
+  };
+
+  const recordWindowControl = (
+    control: unknown,
+    phase: unknown,
+    outcome: unknown,
+  ): void => {
+    pushShellEvent("window_control", {
+      source: "main_window",
+      control: safeLabel(control, "unknown"),
+      phase: safeLabel(phase, "unknown"),
+      outcome: safeLabel(outcome, "unknown"),
+    });
+    scheduleShellCheckpoint();
+  };
+
+  const recordGesture = (
+    input: unknown,
+    phase: unknown,
+    outcome: unknown,
+    sampleCount: unknown,
+    action: unknown,
+  ): void => {
+    pushShellEvent("gesture", {
+      source: "main_window",
+      input: safeLabel(input, "unknown"),
+      phase: safeLabel(phase, "unknown"),
+      outcome: safeLabel(outcome, "unknown"),
+      sample_count: boundedInteger(sampleCount, 0, 0, 160),
+      action: safeLabel(action, "none"),
+    });
+    scheduleShellCheckpoint();
   };
 
   const wireShellOperations = (document = runtime.document): void => {
     if (!document || document.__problemTraceShellWired) return;
     document.__problemTraceShellWired = true;
     const recordOperation = (event: Event, kind: string): void => {
-      const eventTarget = event.target instanceof Element ? event.target : null;
+      const eventTarget = eventTargetElement(event.target);
       const target = eventTarget?.closest<TraceTarget>(
         "button,[role=button],input,select,textarea,a,[contenteditable=true],[data-problem-target]",
       );
       if (!target || target.matches("textarea,[contenteditable=true]")) return;
+      if (target.dataset.problemTarget === "book-card") {
+        pushShellEvent("shelf_input", {
+          source: "main_window",
+          phase: safeLabel(kind, "input"),
+          ...inputFocusTransitionDetail(document),
+        });
+      }
       recordShellOperation(kind, target);
     };
+    document.addEventListener("pointerdown", (event) => recordOperation(event, "pointerdown"), true);
     document.addEventListener("click", (event) => recordOperation(event, "click"), true);
     document.addEventListener("change", (event) => recordOperation(event, "change"), true);
+  };
+
+  const wireWindowFocusTransitions = (): void => {
+    if (typeof runtime.addEventListener !== "function") return;
+    runtime.addEventListener("focus", () => {
+      lastWindowFocused = true;
+      lastWindowFocusChangedAt = Date.now();
+    }, true);
+    runtime.addEventListener("blur", () => {
+      lastWindowFocused = false;
+      lastWindowFocusChangedAt = Date.now();
+    }, true);
   };
 
   const readStartupPerformance = (storage = runtime.localStorage): Readonly<Record<string, unknown>> => {
@@ -393,7 +615,7 @@ export function initializeProblemTraceUi(
     const settings: Record<string, unknown> = {
       language: choice(runtime.ReaderAppI18n?.selectedLanguage?.(), ["system", "zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt-BR"], "system"),
       shelf: {
-        sort: choice(storageValue(storage, "shelfSort"), ["title", "author", "imported", "folder", "recent", "reading_time", "size", "progress"], "title"),
+        sort: choice(storageValue(storage, "shelfSort"), ["title", "author", "added", "dir", "read", "reading-time", "size", "progress"], "read"),
         layout: choice(storageValue(storage, "shelfLayout"), ["grid", "list"], "grid"),
         grid_columns: boundedInteger(storageValue(storage, "shelfGridColumnsValue"), 3, 1, 12),
         show_cover_progress: storageValue(storage, "showCoverProgress") !== "0",
@@ -478,7 +700,7 @@ export function initializeProblemTraceUi(
 
   const mergeShellEvents = (snapshot: TraceSnapshot): Record<string, unknown> => {
     const capturedAt = Date.now();
-    pruneShellEvents(capturedAt);
+    pruneShellEvents();
     const readerEvents = Array.isArray(snapshot.events)
       ? snapshot.events.map(eventRecord)
       : [];
@@ -500,6 +722,18 @@ export function initializeProblemTraceUi(
         String(left.at).localeCompare(String(right.at)),
       ),
     };
+  };
+
+  // A delayed checkpoint makes a just-reproduced navigation trace available to
+  // native diagnostics even when the user cannot immediately use the feedback UI.
+  // It contains only the same redacted allowlist produced by mergeShellEvents.
+  const scheduleShellCheckpoint = (): void => {
+    if (!api || checkpointTimer !== null) return;
+    checkpointTimer = runtime.setTimeout(() => {
+      checkpointTimer = null;
+      const snapshot = mergeShellEvents(recentReaderSnapshot() ?? shellOnlySnapshot());
+      void api.invoke("problem_trace_checkpoint", { snapshot }).catch(() => undefined);
+    }, 300);
   };
 
   const rememberReaderSnapshot = (snapshot: unknown): boolean => {
@@ -559,10 +793,18 @@ export function initializeProblemTraceUi(
     const value = eventRecord(payload);
     if (
       value.phase !== "focus_restore" ||
-      !["focused", "requested"].includes(String(value.outcome))
+      !["focused", "requested", "focused_after_retry"].includes(String(value.outcome))
     ) {
       return;
     }
+    const startedAt = Date.now();
+    pushShellEvent("focus_handoff", {
+      source: "main_window",
+      phase: "native_result",
+      outcome: safeLabel(value.outcome, "unknown"),
+      duration_ms: 0,
+      ...focusDetail(document),
+    });
     try { runtime.focus?.(); } catch { /* Best effort. */ }
     let attempts = 0;
     const verifyFocus = (): void => {
@@ -573,19 +815,25 @@ export function initializeProblemTraceUi(
         runtime.setTimeout(verifyFocus, 20);
         return;
       }
-      pushShellEvent("main_focus", {
+      pushShellEvent("focus_handoff", {
         source: "main_window",
+        phase: "document_verified",
         outcome: document?.hasFocus() ? "focused" : "not_focused",
+        duration_ms: Math.max(0, Math.min(30_000, Date.now() - startedAt)),
+        attempts,
+        ...focusDetail(document),
       });
+      scheduleShellCheckpoint();
     };
-    runtime.requestAnimationFrame?.(verifyFocus);
+    if (runtime.requestAnimationFrame) runtime.requestAnimationFrame(verifyFocus);
+    else runtime.setTimeout(verifyFocus, 0);
   };
 
   const wireReaderCheckpoints = (eventApi = defaultEventApi): void => {
     if (!eventApi) return;
     void eventApi
       .listen<{ readonly snapshot?: unknown }>("reader-bug-trace-checkpoint", (event) => {
-        rememberReaderSnapshot(event.payload?.snapshot);
+        if (rememberReaderSnapshot(event.payload?.snapshot)) scheduleShellCheckpoint();
       })
       .catch(() => undefined);
   };
@@ -593,15 +841,59 @@ export function initializeProblemTraceUi(
   const wireReaderWindowLifecycle = (eventApi = defaultEventApi): void => {
     if (!eventApi) return;
     void eventApi
+      .listen<Record<string, unknown>>("main-window-close-trace", (event) => {
+        const payload = event.payload ?? {};
+        pushShellEvent("window_control_native", {
+          source: "window_backend",
+          control: "close",
+          phase: safeLabel(payload.phase),
+          outcome: safeLabel(payload.outcome),
+        });
+        scheduleShellCheckpoint();
+      })
+      .catch(() => undefined);
+    void eventApi
       .listen<Record<string, unknown>>("reader-window-trace", (event) => {
         const payload = event.payload ?? {};
         restoreShelfDocumentFocus(payload);
-        pushShellEvent("reader_window", {
+        const detail: Record<string, unknown> = {
           source: "window_backend",
           phase: safeLabel(payload.phase),
           outcome: safeLabel(payload.outcome),
           duration_ms: Math.max(0, Math.min(30000, Number(payload.durationMs) || 0)),
+        };
+        const source = safeLabel(payload.source, "window_backend");
+        if (source !== "window_backend") detail.open_source = source;
+        const geometry = geometryDetail(payload.geometry);
+        if (geometry) detail.geometry = geometry;
+        const requested = geometryDetail(payload.requested);
+        if (requested) detail.requested = requested;
+        const restore = geometryRestoreDetail(payload.restore);
+        if (restore) detail.restore = restore;
+        const resumeNumbers = readerResumeNumericDetail(payload);
+        if (Object.keys(resumeNumbers).length) detail.resume_state = resumeNumbers;
+        if ("documentFocused" in payload || "document_focused" in payload) {
+          detail.document_focused = (payload.documentFocused ?? payload.document_focused) === true;
+        }
+        if ("activeElement" in payload || "active_element" in payload) {
+          detail.active_element = activeElementLabel(payload.activeElement ?? payload.active_element);
+        }
+        const focusBooleans = [
+          ["window_requested", payload.windowRequested ?? payload.window_requested],
+          ["window_focused", payload.windowFocused ?? payload.window_focused],
+          ["native_focused", payload.nativeFocused ?? payload.native_focused],
+          ["webview_requested", payload.webviewRequested ?? payload.webview_requested],
+          ["webview_focused", payload.webviewFocused ?? payload.webview_focused],
+          ["visible", payload.visible],
+        ] as const;
+        focusBooleans.forEach(([key, value]) => {
+          if (typeof value === "boolean") detail[key] = value;
         });
+        if (Number.isFinite(Number(payload.attempt))) {
+          detail.attempt = boundedInteger(payload.attempt, 0, 0, 32);
+        }
+        pushShellEvent("reader_window", detail);
+        scheduleShellCheckpoint();
       })
       .catch(() => undefined);
     void eventApi
@@ -678,6 +970,7 @@ export function initializeProblemTraceUi(
     });
   };
 
+  wireWindowFocusTransitions();
   wireShellOperations();
   wireReaderCheckpoints();
   wireReaderWindowLifecycle();
@@ -688,6 +981,10 @@ export function initializeProblemTraceUi(
     MAX_SHELL_EVENTS,
     capture,
     recordShelfBookOpen,
+    recordNewsArticleTiming,
+    recordIntelligenceAuditTiming,
+    recordWindowControl,
+    recordGesture,
     _rememberReaderSnapshotForTests: rememberReaderSnapshot,
     _recentReaderSnapshotForTests: recentReaderSnapshot,
     _shellEventsForTests: () =>

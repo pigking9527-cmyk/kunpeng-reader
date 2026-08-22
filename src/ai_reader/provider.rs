@@ -81,7 +81,7 @@ async fn call_async_inner(request: Request<'_>) -> ProviderResult<String> {
         call = call
             .header("x-api-key", request.api_key)
             .header("anthropic-version", "2023-06-01");
-    } else {
+    } else if has_api_key(request.api_key) {
         call = call.bearer_auth(request.api_key);
     }
     let response = call.send().await.map_err(ProviderError::AsyncRequest)?;
@@ -123,7 +123,7 @@ fn call_inner(request: Request<'_>) -> ProviderResult<String> {
         call = call
             .header("x-api-key", request.api_key)
             .header("anthropic-version", "2023-06-01");
-    } else {
+    } else if has_api_key(request.api_key) {
         call = call.header("Authorization", &format!("Bearer {}", request.api_key));
     }
     let response = call
@@ -151,7 +151,7 @@ fn payload(request: Request<'_>) -> serde_json::Value {
             "messages": [{"role": "user", "content": user_content}]
         })
     } else {
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "model": request.model,
             "stream": false,
             "max_tokens": request.max_tokens,
@@ -159,8 +159,23 @@ fn payload(request: Request<'_>) -> serde_json::Value {
                 {"role": "system", "content": request.prompt},
                 {"role": "user", "content": user_content}
             ]
-        })
+        });
+        // llama-server implements the OpenAI JSON-object constraint.  Use it
+        // only for the local intelligence editorial pass, where a malformed
+        // response must never be rendered as a completed news article.
+        if matches!(
+            request.task,
+            "intelligence_generate_brief" | "intelligence_judge_event_pairs"
+        ) {
+            payload["temperature"] = serde_json::json!(0.1);
+            payload["response_format"] = serde_json::json!({"type": "json_object"});
+        }
+        payload
     }
+}
+
+fn has_api_key(value: &str) -> bool {
+    !value.trim().is_empty()
 }
 
 fn parse_response(provider: &str, status: u16, body: &str) -> ProviderResult<String> {
@@ -316,6 +331,12 @@ mod tests {
     }
 
     #[test]
+    fn empty_local_key_does_not_request_bearer_authentication() {
+        assert!(!has_api_key(" \t "));
+        assert!(has_api_key("local-token"));
+    }
+
+    #[test]
     fn provider_error_keeps_actionable_message_without_a_secret() {
         let error = error_summary(400, r#"{"error":{"message":"Model Not Exist"}}"#);
         assert!(error.contains("Model Not Exist"));
@@ -364,5 +385,32 @@ mod tests {
     fn response_parser_accepts_compatible_text_envelopes() {
         let value = serde_json::json!({"output": [{"content": [{"text": " answer "}]}]});
         assert_eq!(openai_compatible_content(&value).as_deref(), Some("answer"));
+    }
+
+    #[test]
+    fn intelligence_editor_requests_constrained_json_from_compatible_servers() {
+        let request = Request {
+            provider: "compatible",
+            base_url: "http://127.0.0.1:8080/v1",
+            model: "local-qwen",
+            api_key: "",
+            task: "intelligence_generate_brief",
+            prompt: "system",
+            question: "question",
+            context: "context",
+            max_tokens: 768,
+            response_timeout: Duration::from_secs(30),
+        };
+        let body = payload(request);
+        assert_eq!(
+            body.pointer("/response_format/type")
+                .and_then(|value| value.as_str()),
+            Some("json_object")
+        );
+        assert_eq!(
+            body.pointer("/temperature")
+                .and_then(|value| value.as_f64()),
+            Some(0.1)
+        );
     }
 }

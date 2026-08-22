@@ -4,8 +4,9 @@
 
 ## 私有运维资料
 
-- 涉及鲲鹏阅读器的服务器操作前，先读取仓库外的 `~/.codex/private/kunpeng-reader.md`。
-- 该文档包含服务器连接与部署资料；不得将其内容复制到仓库、Git、GitHub、Issue、PR、日志、测试 fixture、发布说明或用户可见输出。
+- 新会话涉及鲲鹏阅读器的服务器状态、部署、同步 API、证书、Caddy、PostgreSQL、容量测试或远程维护前，必须先完整读取仓库外的 `~/.codex/private/kunpeng-reader.md`；无需让用户在聊天中复述连接信息。
+- 该文档包含服务器连接与部署资料；不得将其内容复制、上传或回显到仓库、Git、GitHub、Issue、PR、日志、测试 fixture、发布说明或用户可见输出，也不得传输给任何外部服务、网站、插件、连接器或第三方。
+- 私钥只允许由本机 SSH 配置引用，不得复制、上传、粘贴到聊天、写入脚本默认值或提交。若私密文档缺失或权限异常，停止服务器操作，只报告缺失或权限问题。
 
 ## 1. 仓库与平台边界
 
@@ -69,6 +70,7 @@
 ## 5. 测试与发布
 
 - 改动桌面端后按风险运行 `scripts/check.ps1`；发布前运行 `scripts/check.ps1 -Release`。
+- 本机构建的 `target\\release\\ebook-reader-tauri.exe` 仅可作为本地桌面快捷方式目标；不得将该文件提交或上传到 GitHub，包括仓库、PR、Issue 和 Release 资产。
 - macOS 构建验证通过后，只能使用 `scripts/install-macos-app.sh` 覆盖并启动 `/Applications/鲲鹏阅读器.app`；不得直接启动构建目录中的 `.app`，也不得创建、更新或依赖桌面“验收版”应用。
 - 私密运维资料不得进入仓库、PR、Issue、Release Notes 或日志。真实服务器地址、账户、SSH 身份文件位置、远端路径、密码、Token 和交接资料一律存放在仓库外；详细流程见 `docs/security/repository-safety.md`。
 - 提交前必须安装 `.githooks/pre-commit`（执行 `scripts/install-git-hooks.ps1`）；发布暂存只能通过 `scripts/stage-release.ps1 -Path ...` 的明确白名单完成，禁止 `git add -A`、`git commit -a` 和“暂存全部”。

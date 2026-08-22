@@ -78,11 +78,17 @@ function fixture(initialSettings: Record<string, unknown> = {}) {
   const listeners = new Map<string, EventListenerOrEventListenerObject[]>();
   const timers: Array<() => void> = [];
   const messages: unknown[] = [];
+  const shellThemesAtMessages: string[][] = [];
   const calls: CapturedCall[] = [];
   let syncedHandler: (() => void) | null = null;
   const body = new FakeElement();
   const frame = new FakeElement();
-  frame.contentWindow = { postMessage: (value) => messages.push(value) };
+  frame.contentWindow = {
+    postMessage: (value) => {
+      messages.push(value);
+      shellThemesAtMessages.push([...body.classList.values]);
+    },
+  };
   const elements = new Map<string, FakeElement>([
     ["prev-btn", new FakeElement()],
     ["next-btn", new FakeElement()],
@@ -171,11 +177,13 @@ function fixture(initialSettings: Record<string, unknown> = {}) {
   };
   return {
     runtime,
+    body,
     transport,
     storageValues,
     writes,
     timers,
     messages,
+    shellThemesAtMessages,
     calls,
     fire,
     syncedHandler: () => syncedHandler,
@@ -309,6 +317,32 @@ test("settings API preserves click zones, book appearance, storage, iframe and n
     (save?.args?.request as { epubLayoutEngine: string }).epubLayoutEngine,
     "modern",
   );
+});
+
+test("shell applies parchment or dark before dispatching the page appearance", async () => {
+  const view = fixture();
+  const installed = installReaderSettingsUi(view.runtime, {
+    transport: view.transport,
+  });
+  if (!installed) throw new Error("reader settings UI did not install");
+  await flushPromises();
+
+  installed.ReaderSettings.updateAppearance({
+    backgroundPreset: "paper",
+    theme: "light",
+  });
+  assert.equal(view.body.classList.values.has("theme-sepia"), true);
+  assert.equal(view.body.classList.values.has("theme-dark"), false);
+  assert.equal(view.shellThemesAtMessages.at(-1)?.includes("theme-sepia"), true);
+
+  installed.ReaderSettings.updateAppearance({
+    backgroundPreset: "dark",
+    theme: "dark",
+  });
+  assert.equal(view.body.classList.values.has("theme-dark"), true);
+  assert.equal(view.body.classList.values.has("theme-sepia"), false);
+  assert.equal(view.shellThemesAtMessages.at(-1)?.includes("theme-dark"), true);
+  assert.equal(view.shellThemesAtMessages.at(-1)?.includes("theme-sepia"), false);
 });
 
 test("controller source is strict, single-UI and emits a standalone classic installer", () => {

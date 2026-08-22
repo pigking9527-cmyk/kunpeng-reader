@@ -43,3 +43,53 @@ test("IIFE keeps one dynamic reader state and resolves post-shell dependencies l
   assert.match(source, /window\.closeReaderWindow = closeReaderWindow/u);
   assert.match(source, /window\.readerDebugSettingOn = readerDebugSettingOn/u);
 });
+
+test("reader close hides first and completes the final position save in the cached shell", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const closeStart = source.indexOf("async function closeReaderWindow");
+  const closeEnd = source.indexOf("window.closeReaderWindow = closeReaderWindow", closeStart);
+  const closeSource = source.slice(closeStart, closeEnd);
+
+  assert.match(closeSource, /turnWaitMs:\s*180/u);
+  assert.match(closeSource, /responseTimeoutMs:\s*420/u);
+  assert.ok(
+    closeSource.indexOf('await invoke("main_window_close")') <
+      closeSource.indexOf("const saved = await sendProgressNow()"),
+  );
+  assert.match(closeSource, /pauseHiddenReaderShell\(\{ preservePositionSnapshot: true \}\)/u);
+  assert.doesNotMatch(closeSource, /await requestPagePositionSnapshot\(\)/u);
+});
+
+test("same-book reveal blocks transient saves until the exact page anchor is restored", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const pauseStart = source.indexOf("function pauseHiddenReaderShell");
+  const reportStart = source.indexOf("function reportProgress", pauseStart);
+  const resumeSource = source.slice(pauseStart, reportStart);
+
+  assert.match(resumeSource, /hiddenReaderResumePosition = sameBookResumePosition\(curChapter, curReadingAnchor\)/u);
+  assert.match(resumeSource, /sendToPage\(\{ sameBookResume: position \}\)/u);
+  assert.match(resumeSource, /sameBookResumePending = true/u);
+  assert.match(source, /if \(sameBookResumePending\) \{[\s\S]*?save_suppressed: true[\s\S]*?return Promise\.resolve\(false\)/u);
+  assert.match(source, /if \(!readerBookBound \|\| readerShellHidden \|\| sameBookResumePending\) return/u);
+  assert.match(source, /e\.data\.positionRestored === 1 && sameBookResumePending[\s\S]*?sameBookResumePending = false/u);
+  assert.match(source, /if \(readerShellHidden\) \{[\s\S]*?positionSnapshotRequestId[\s\S]*?hiddenReaderResumePosition = sameBookResumePosition\(curChapter, curReadingAnchor\)[\s\S]*?pending\.resolve\(true\)/u);
+  assert.match(source, /resumeRestoreWasPending = sameBookResumePending[\s\S]*?if \(!saved && !resumeRestoreWasPending\)/u);
+});
+
+test("a switch request arriving during close settlement is replayed once instead of dropped", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const queueStart = source.indexOf("function queueReaderSwitchRequest");
+  const listenerEnd = source.indexOf('listen("reader-hide-request"', queueStart);
+  const queueSource = source.slice(queueStart, listenerEnd);
+  const closeStart = source.indexOf("async function closeReaderWindow");
+  const closeEnd = source.indexOf("window.closeReaderWindow = closeReaderWindow", closeStart);
+  const closeSource = source.slice(closeStart, closeEnd);
+
+  assert.match(queueSource, /queued\?\.id === request\.id[\s\S]*?sequence: queued\.sequence[\s\S]*?queuedAt: queued\.queuedAt/u);
+  assert.match(queueSource, /queuedReaderSwitchRequest = null[\s\S]*?age > READER_SWITCH_QUEUE_MAX_AGE_MS/u);
+  assert.match(queueSource, /recordReaderSwitchQueue\("replayed", "started"[\s\S]*?executeReaderSwitchRequest\(queued\)/u);
+  assert.match(queueSource, /if \(readerWindowClosePending\) \{\s*if \(readerCloseSettlementPending\) queueReaderSwitchRequest\(request\)/u);
+  assert.match(queueSource, /reason: "switch_in_progress"/u);
+  assert.match(closeSource, /readerCloseSettlementPending = true/u);
+  assert.match(closeSource, /\.finally\(\(\) => \{[\s\S]*?readerCloseSettlementPending = false[\s\S]*?readerWindowClosePending = false[\s\S]*?replayQueuedReaderSwitchRequest\(\)/u);
+});

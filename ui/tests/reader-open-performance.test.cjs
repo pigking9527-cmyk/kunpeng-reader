@@ -60,12 +60,14 @@ test("reader open timing distinguishes pooled, new, and same-book shells", () =>
 
 test("reader switch skips only a freshly confirmed hidden-reader position save", () => {
   const listener = reader.slice(reader.indexOf('listen("reader-switch-request"'), reader.indexOf('listen("reader-hide-request"'));
-  assert.match(listener, /prepare_reader_switch_target[\s\S]*?requestPagePositionSnapshot/);
-  assert.match(listener, /const reuseClosedSave = payload\?\.skipFinalSave === true/);
-  assert.match(listener, /if \(reuseClosedSave\)[\s\S]*?outcome: "reused_closed_save"[\s\S]*?else \{[\s\S]*?requestPagePositionSnapshot/);
-  assert.match(listener, /requestPagePositionSnapshot\(\{\s*turnWaitMs: 180,\s*responseTimeoutMs: 420\s*\}\)[\s\S]*?await sendProgressNow\(\)[\s\S]*?await flushReadWords\(true\)[\s\S]*?complete_reader_switch/);
-  assert.match(listener, /cancel_prepared_reader_switch_target/);
-  assert.match(listener, /switch_position_snapshot[\s\S]*?snapshotConfirmed \? "confirmed" : "recent_position"/);
+  const executor = reader.slice(reader.indexOf("async function executeReaderSwitchRequest"), reader.indexOf('listen("reader-switch-request"'));
+  assert.match(listener, /readerCloseSettlementPending[\s\S]*?queueReaderSwitchRequest\(request\)[\s\S]*?executeReaderSwitchRequest\(request\)/);
+  assert.match(executor, /prepare_reader_switch_target[\s\S]*?requestPagePositionSnapshot/);
+  assert.match(executor, /const \{ id, reuseClosedSave \} = request/);
+  assert.match(executor, /if \(reuseClosedSave\)[\s\S]*?outcome: "reused_closed_save"[\s\S]*?else \{[\s\S]*?requestPagePositionSnapshot/);
+  assert.match(executor, /requestPagePositionSnapshot\(\{\s*turnWaitMs: 180,\s*responseTimeoutMs: 420\s*\}\)[\s\S]*?await sendProgressNow\(\)[\s\S]*?await flushReadWords\(true\)[\s\S]*?complete_reader_switch/);
+  assert.match(executor, /cancel_prepared_reader_switch_target/);
+  assert.match(executor, /switch_position_snapshot[\s\S]*?snapshotConfirmed \? "confirmed" : "recent_position"/);
 });
 
 test("preload prepares a clean shell while a cross-book switch saves state", () => {
@@ -79,15 +81,15 @@ test("preload prepares a clean shell while a cross-book switch saves state", () 
 
 test("cached reader marks a confirmed save only after native hide", () => {
   const close = reader.slice(reader.indexOf("async function closeReaderWindow"), reader.indexOf("function reportProgress"));
-  assert.match(close, /const saved = await sendProgressNow\(\);[\s\S]*?await invoke\("main_window_close"\);[\s\S]*?pauseHiddenReaderShell\(\);[\s\S]*?if \(saved\) await invoke\("reader_shell_hidden_after_save"\);[\s\S]*?readerWindowClosePending = false/);
+  assert.match(close, /const positionSnapshot = requestPagePositionSnapshot\([\s\S]*?await invoke\("main_window_close"\);[\s\S]*?pauseHiddenReaderShell\(\{ preservePositionSnapshot: true \}\)[\s\S]*?await positionSnapshot[\s\S]*?const saved = await sendProgressNow\(\);[\s\S]*?if \(saved\) await invoke\("reader_shell_hidden_after_save"\);[\s\S]*?readerWindowClosePending = false/);
   assert.match(windows, /fn reader_was_recently_hidden_after_save[\s\S]*?RECENT_HIDDEN_READER_SAVE_WINDOW/);
 });
 
 test("hidden cached readers pause late frame messages and resume only when shown", () => {
-  assert.match(reader, /function pauseHiddenReaderShell\(\)[\s\S]*?clearTimeout\(progTimer\)[\s\S]*?clearTimeout\(rwBacktrackResumeTimer\)[\s\S]*?flushReadWords\(true\)/);
-  assert.match(reader, /listen\("reader-shell-resume", \(\) => \{[\s\S]*?resumeHiddenReaderShell\(\)/);
+  assert.match(reader, /function pauseHiddenReaderShell\(options = \{\}\)[\s\S]*?clearTimeout\(progTimer\)[\s\S]*?clearTimeout\(rwBacktrackResumeTimer\)[\s\S]*?flushReadWords\(true\)/);
+  assert.match(reader, /listen\("reader-shell-resume", \(\) => \{[\s\S]*?resumeHiddenReaderShell\(\)[\s\S]*?sendToPage\(\{ sameBookResume: position \}\)/);
   const messages = reader.slice(reader.indexOf('window.addEventListener("message"'));
-  assert.match(messages, /if \(readerShellHidden\) return/);
+  assert.match(messages, /if \(readerShellHidden\) \{[\s\S]*?positionSnapshotRequestId[\s\S]*?hiddenReaderResumePosition = sameBookResumePosition[\s\S]*?pending\.resolve\(true\)[\s\S]*?return/);
   assert.match(windows, /clear_recent_hidden_reader_save\(window\.label\(\)\)[\s\S]*?window\.emit\("reader-shell-resume"/);
 });
 

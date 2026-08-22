@@ -15,6 +15,19 @@ interface NavigatorShape {
   readonly userAgent?: unknown;
 }
 
+type WindowControlTrace = (
+  control: "minimize" | "maximize" | "close",
+  phase: "click" | "command",
+  outcome:
+    | "requested"
+    | "ok"
+    | "failed_arguments"
+    | "failed_command"
+    | "failed_permission"
+    | "failed_window"
+    | "failed_other",
+) => void;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -53,14 +66,45 @@ function controlsFromRuntime(
   }
 }
 
-function ignoreFailure(task: Promise<unknown>): void {
-  void task.catch(() => undefined);
+function traceWindowControls(target: unknown): WindowControlTrace {
+  return (control, phase, outcome) => {
+    if (!isRecord(target) || !isRecord(target.ReaderProblemTraceUI)) return;
+    const record = target.ReaderProblemTraceUI.recordWindowControl;
+    if (typeof record === "function")
+      record.call(target.ReaderProblemTraceUI, control, phase, outcome);
+  };
+}
+
+function windowControlFailure(error: unknown): Extract<
+  Parameters<WindowControlTrace>[2],
+  `failed_${string}`
+> {
+  const message = String(error || "").toLowerCase();
+  if (/invalid args|missing required|deserialize|argument/u.test(message))
+    return "failed_arguments";
+  if (/not allowed|permission|capability/u.test(message)) return "failed_permission";
+  if (/not found|not registered|unknown command/u.test(message)) return "failed_command";
+  if (/window|webview|label/u.test(message)) return "failed_window";
+  return "failed_other";
+}
+
+function runWindowControl(
+  trace: WindowControlTrace | undefined,
+  control: "minimize" | "maximize" | "close",
+  task: Promise<unknown>,
+): void {
+  trace?.(control, "click", "requested");
+  void task.then(
+    () => trace?.(control, "command", "ok"),
+    (error) => trace?.(control, "command", windowControlFailure(error)),
+  );
 }
 
 export function initializeTitlebar(
   document: Document,
   navigatorValue: unknown,
   controls: WindowControls | null,
+  trace?: WindowControlTrace,
 ): void {
   document.documentElement?.classList.toggle(
     "platform-macos",
@@ -74,16 +118,16 @@ export function initializeTitlebar(
 
   minButton?.addEventListener("click", (event) => {
     event.stopPropagation();
-    ignoreFailure(controls.minimize());
+    runWindowControl(trace, "minimize", controls.minimize());
   });
   maxButton?.addEventListener("click", (event) => {
     event.stopPropagation();
-    ignoreFailure(controls.toggleMaximize());
+    runWindowControl(trace, "maximize", controls.toggleMaximize());
   });
   closeButton?.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    ignoreFailure(controls.close());
+    runWindowControl(trace, "close", controls.close());
   });
 }
 
@@ -95,5 +139,6 @@ export function installTitlebar(target: unknown, transport?: TauriTransport): vo
     document,
     runtimeNavigator(target),
     controlsFromRuntime(target, transport),
+    traceWindowControls(target),
   );
 }

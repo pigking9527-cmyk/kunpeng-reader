@@ -115,6 +115,7 @@ type SyncCommands = {
   };
   readonly sync_get_settings: { readonly result: SyncSettings };
   readonly sync_account_open_refresh: { readonly result: SyncConnectionStatus };
+  readonly sync_start_silent: { readonly result: unknown };
   readonly private_sync_set_password: {
     readonly args: { readonly password: string };
     readonly result: PrivateSyncStatus;
@@ -366,6 +367,65 @@ export function installSyncUi(target: unknown): SyncUiGlobal | null {
     const accountOverviewSyncLabelEl = document.getElementById(
       "account-overview-sync-label",
     );
+    function prepareSyncStateExpansion() {
+      const labelStyle = accountOverviewSyncLabelEl.style;
+      const previousLabelStyle = {
+        flex: labelStyle.flex,
+        maxWidth: labelStyle.maxWidth,
+        position: labelStyle.position,
+        visibility: labelStyle.visibility,
+        width: labelStyle.width,
+      };
+      // The collapsed label has max-width: 0, so scrollWidth can report only the
+      // clipped box. Measure the same label off-layout at its full content width.
+      labelStyle.flex = "none";
+      labelStyle.maxWidth = "none";
+      labelStyle.position = "absolute";
+      labelStyle.visibility = "hidden";
+      labelStyle.width = "max-content";
+      const labelWidth = Math.ceil(accountOverviewSyncLabelEl.offsetWidth);
+      labelStyle.flex = previousLabelStyle.flex;
+      labelStyle.maxWidth = previousLabelStyle.maxWidth;
+      labelStyle.position = previousLabelStyle.position;
+      labelStyle.visibility = previousLabelStyle.visibility;
+      labelStyle.width = previousLabelStyle.width;
+      const collapsedWidth = Math.ceil(accountOverviewSyncStateEl.offsetHeight);
+      if (labelWidth > 0 && collapsedWidth > 0) {
+        accountOverviewSyncStateEl.style.setProperty(
+          "--account-sync-label-width",
+          `${labelWidth}px`,
+        );
+        accountOverviewSyncStateEl.style.setProperty(
+          "--account-sync-expanded-width",
+          `${labelWidth + collapsedWidth + 2}px`,
+        );
+      }
+    }
+    function clearSyncStateCollapseMotion() {
+      accountOverviewSyncStateEl.classList.remove("is-collapsing");
+    }
+    accountOverviewSyncStateEl.addEventListener("pointerenter", () => {
+      clearSyncStateCollapseMotion();
+      // Measure the live label so the pill visibly grows from the light to its exact content width.
+      prepareSyncStateExpansion();
+      accountOverviewSyncStateEl.classList.add("is-expanded");
+    });
+    accountOverviewSyncStateEl.addEventListener("focus", () => {
+      prepareSyncStateExpansion();
+    });
+    accountOverviewSyncStateEl.addEventListener("pointerleave", () => {
+      accountOverviewSyncStateEl.classList.remove("is-expanded");
+      if (accountOverviewSyncStateEl.classList.contains("checking")) return;
+      clearSyncStateCollapseMotion();
+      // Force a fresh animation when the pointer quickly re-enters and leaves.
+      void accountOverviewSyncStateEl.offsetWidth;
+      accountOverviewSyncStateEl.classList.add("is-collapsing");
+    });
+    accountOverviewSyncStateEl.addEventListener("animationend", (event) => {
+      if ((event as AnimationEvent).animationName === "account-sync-dot-settle") {
+        clearSyncStateCollapseMotion();
+      }
+    });
     const accountStorageValueEl = document.getElementById(
       "account-storage-value",
     );
@@ -620,8 +680,13 @@ export function installSyncUi(target: unknown): SyncUiGlobal | null {
       );
       accountOverviewSyncStateEl.classList.add(state);
       const label = syncText(key, values);
-      if (accountOverviewSyncLabelEl)
+      if (accountOverviewSyncLabelEl) {
         accountOverviewSyncLabelEl.textContent = label;
+        // The status can change while the pointer is still over the pill
+        // (for example “同步中” -> “同步成功”). Refresh the measured width in
+        // the same task so the complete new label is available before paint.
+        prepareSyncStateExpansion();
+      }
       accountOverviewSyncStateEl.setAttribute("aria-label", label);
       accountOverviewSyncStateEl.title = title;
     }
@@ -821,6 +886,15 @@ export function installSyncUi(target: unknown): SyncUiGlobal | null {
         if (status.credentialsReady) {
           setSyncButtonState("syncing", "syncInProgress");
           syncStatusEl.textContent = "同步服务在线，正在自动刷新。";
+          try {
+            // Start only after the UI has subscribed and entered its busy state;
+            // otherwise a fast terminal event can be overwritten by “同步中”.
+            await invoke("sync_start_silent");
+          } catch (error) {
+            if (generation !== accountOpenRefreshGeneration) return;
+            setSyncButtonState("fail", "syncFailed", String(error));
+            syncStatusEl.textContent = syncText("syncFailed");
+          }
         } else if (status.requiresUserAction) {
           setSyncButtonState(
             "fail",

@@ -217,8 +217,23 @@ pub fn compute_word_count(book: &Book) -> u64 {
     }
 }
 
-/// 阅读窗口的几何信息（逻辑像素）：位置 + 大小 + 是否最大化。
+/// 阅读窗口的几何信息：位置 + 大小 + 是否最大化。
 /// 全局共享——下次打开任意一本书都恢复到上次关闭阅读窗口时的大小与位置。
+///
+/// `x/y/w/h` 是早期版本保存的逻辑像素；新版本同时保存物理像素，避免显示器
+/// DPI 或窗口创建时所在显示器不同而把用户的尺寸错误缩放。
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct PhysicalWinGeom {
+    #[serde(default)]
+    pub x: i32,
+    #[serde(default)]
+    pub y: i32,
+    #[serde(default)]
+    pub w: u32,
+    #[serde(default)]
+    pub h: u32,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WinGeom {
     #[serde(default)]
@@ -231,6 +246,10 @@ pub struct WinGeom {
     pub h: f64,
     #[serde(default)]
     pub maximized: bool,
+    /// Physical pixels captured from the native window. `None` denotes an
+    /// older logical-pixel record and remains readable for compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical: Option<PhysicalWinGeom>,
 }
 
 impl Default for WinGeom {
@@ -241,6 +260,7 @@ impl Default for WinGeom {
             w: 880.0,
             h: 760.0,
             maximized: false,
+            physical: None,
         }
     }
 }

@@ -24,6 +24,7 @@ use preview_rules::{
 use quick_xml::{events::Event, Reader, XmlVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
@@ -32,8 +33,8 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+        Arc, LazyLock, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -84,6 +85,24 @@ const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
 // 封面因原图超过旧的 1.5MB 门槛被误判为“无图”，并发内存仍保持有界。
 const PREVIEW_IMAGE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const ARTICLE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+// Intelligence article enrichment is deliberately a separate, bounded local
+// cache. It contains public source material only; it is never mixed into the
+// reader database, backup or sync entities.
+const INTELLIGENCE_ARTICLE_CACHE_VERSION: u8 = 1;
+const INTELLIGENCE_ARTICLE_CACHE_MAX_ENTRIES: usize = 120;
+const INTELLIGENCE_ARTICLE_CACHE_MAX_BYTES: u64 = 48 * 1024 * 1024;
+const INTELLIGENCE_ARTICLE_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const INTELLIGENCE_ENRICHMENT_MAX_ARTICLES: usize = 12;
+const INTELLIGENCE_ENRICHMENT_MAX_BODY_CHARS: usize = 14_000;
+const INTELLIGENCE_ENRICHMENT_MAX_IMAGES: usize = 6;
+const INTELLIGENCE_ENRICHMENT_MAX_VIDEOS: usize = 3;
+const INTELLIGENCE_ENRICHMENT_IMAGE_MAX_BYTES: u64 = 480 * 1024;
+const INTELLIGENCE_ENRICHMENT_IMAGE_MAX_DIMENSION: u32 = 560;
+// The article surface is deliberately reused so the reader shell can appear
+// immediately. Stop an unfinished prior document before assigning the child to
+// the next article; otherwise WebView2 may continue its network work and delay
+// the next top-level navigation behind it.
+const ARTICLE_STOP_LOADING_SCRIPT: &str = "window.stop();";
 const TOMSGUIDE_RSS_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const TOMSGUIDE_RSS_URL: &str = "https://www.tomsguide.com/feeds/articletype/news";
 const TOMSGUIDE_ARTICLE_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -114,12 +133,22 @@ const SOURCE_IMAGE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
 const ARTICLE_WEBVIEW_LABEL: &str = "newsnow-article";
+// The article surface follows the same pool-and-reuse lifecycle as the book
+// reader shell. It stays local and hidden between articles, so a click only
+// needs to reveal an already-created WebView and start navigation.
+const ARTICLE_SHELL_URL: &str = "http://tauri.localhost/newsnow-article-shell.html";
 const ARTICLE_RETURN_URL: &str = "https://reader.localhost/__kunpeng_news_return__";
 const ARTICLE_LOADING_EVENT: &str = "newsnow-article-loading";
 const ARTICLE_READY_EVENT: &str = "newsnow-article-ready";
-const ARTICLE_WEBVIEW_CREATED: u8 = 0;
+const ARTICLE_WEBVIEW_IDLE: u8 = 0;
 const ARTICLE_WEBVIEW_LOADING: u8 = 1;
 const ARTICLE_WEBVIEW_READY: u8 = 2;
+
+static ARTICLE_WEBVIEW_STATE: LazyLock<Arc<AtomicU8>> =
+    LazyLock::new(|| Arc::new(AtomicU8::new(ARTICLE_WEBVIEW_IDLE)));
+static ARTICLE_WEBVIEW_INITIALIZATION_SCRIPT: LazyLock<Mutex<String>> =
+    LazyLock::new(|| Mutex::new(String::new()));
+static ARTICLE_WEBVIEW_PREPARE_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArticleWebviewPhase {
@@ -132,6 +161,10 @@ fn article_webview_phase(event: PageLoadEvent) -> ArticleWebviewPhase {
         PageLoadEvent::Started => ArticleWebviewPhase::Loading,
         PageLoadEvent::Finished => ArticleWebviewPhase::Ready,
     }
+}
+
+fn article_shell_url() -> Result<tauri::Url, String> {
+    tauri::Url::parse(ARTICLE_SHELL_URL).map_err(|_| "资讯预加载外壳地址无效".to_string())
 }
 
 type NewsSourceParser = fn(NewsSource, &str) -> Vec<NewsNowItem>;
@@ -756,6 +789,11 @@ pub(crate) struct NewsNowRequest {
     pub source_ids: Vec<String>,
     #[serde(default)]
     pub tieba_bars: Vec<String>,
+    /// Keep separate source records that share an article URL. This is used
+    /// by the local intelligence workspace so it can retain source evidence
+    /// before presentation-layer event grouping.
+    #[serde(default)]
+    pub preserve_evidence: bool,
     /// User supplied RSS/Atom feeds. These are validated on every request and
     /// never enter the built-in catalogue, cache metadata, logs, or article
     /// history. Their definitions enter sync only through the separate,
@@ -935,6 +973,66 @@ pub(crate) struct NewsNowArticle {
 pub(crate) struct NewsNowPreview {
     pub image_url: String,
     pub image_data_url: String,
+}
+
+/// A public article selected by the intelligence workspace for local
+/// enrichment. The request deliberately carries only already-visible feed
+/// metadata; no reader data, account data or local paths are accepted.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NewsNowIntelligenceArticleRequest {
+    pub url: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub published_at: String,
+    #[serde(default)]
+    pub image_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NewsNowIntelligenceEnrichmentRequest {
+    #[serde(default)]
+    pub articles: Vec<NewsNowIntelligenceArticleRequest>,
+}
+
+/// Locally cached public evidence for one source article. `body` is cleaned
+/// plain text for the model; `lead_image_data_url` is a bounded local preview
+/// for the prepared article surface. Videos remain URLs so the existing reader
+/// article path retains control over playback and navigation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NewsNowIntelligenceArticleEnrichment {
+    pub url: String,
+    pub source: String,
+    pub title: String,
+    pub published_at: String,
+    pub body: String,
+    #[serde(default)]
+    pub lead_image_url: String,
+    #[serde(default)]
+    pub lead_image_data_url: String,
+    #[serde(default)]
+    pub image_urls: Vec<String>,
+    #[serde(default)]
+    pub video_urls: Vec<String>,
+    #[serde(default)]
+    pub cached: bool,
+    #[serde(default)]
+    pub degraded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IntelligenceArticleCacheEntry {
+    version: u8,
+    fetched_at: i64,
+    article: NewsNowIntelligenceArticleEnrichment,
 }
 
 #[derive(Default)]
@@ -1119,6 +1217,344 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+fn intelligence_article_cache_dir() -> Option<PathBuf> {
+    crate::profile::app_cache_dir()
+        .map(|directory| directory.join("newsnow-intelligence-articles-v1"))
+}
+
+fn intelligence_article_cache_path(url: &str) -> Option<PathBuf> {
+    let directory = intelligence_article_cache_dir()?;
+    let mut digest = Sha256::new();
+    digest.update(url.as_bytes());
+    let mut filename = String::with_capacity(64 + 5);
+    for byte in digest.finalize() {
+        let _ = write!(filename, "{byte:02x}");
+    }
+    filename.push_str(".json");
+    Some(directory.join(filename))
+}
+
+fn read_intelligence_article_cache(url: &str) -> Option<NewsNowIntelligenceArticleEnrichment> {
+    let path = intelligence_article_cache_path(url)?;
+    let bytes = fs::read(path).ok()?;
+    let entry = serde_json::from_slice::<IntelligenceArticleCacheEntry>(&bytes).ok()?;
+    let age_millis = now_millis().saturating_sub(entry.fetched_at);
+    (entry.version == INTELLIGENCE_ARTICLE_CACHE_VERSION
+        && age_millis >= 0
+        && age_millis <= INTELLIGENCE_ARTICLE_CACHE_TTL.as_millis() as i64
+        && entry.article.url == url
+        && !entry.article.body.trim().is_empty())
+    .then(|| NewsNowIntelligenceArticleEnrichment {
+        cached: true,
+        ..entry.article
+    })
+}
+
+fn prune_intelligence_article_cache(directory: &PathBuf) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut files = entries
+        .flatten()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then_some((
+                entry.path(),
+                metadata.len(),
+                metadata.modified().unwrap_or(UNIX_EPOCH),
+            ))
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|(_, _, modified)| *modified);
+    let mut total = files.iter().map(|(_, bytes, _)| *bytes).sum::<u64>();
+    while files.len() > INTELLIGENCE_ARTICLE_CACHE_MAX_ENTRIES
+        || total > INTELLIGENCE_ARTICLE_CACHE_MAX_BYTES
+    {
+        let Some((path, bytes, _)) = files.first().cloned() else {
+            break;
+        };
+        let _ = fs::remove_file(path);
+        total = total.saturating_sub(bytes);
+        files.remove(0);
+    }
+}
+
+fn save_intelligence_article_cache(article: &NewsNowIntelligenceArticleEnrichment) {
+    let Some(path) = intelligence_article_cache_path(&article.url) else {
+        return;
+    };
+    let Some(directory) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(directory).is_err() {
+        return;
+    }
+    let entry = IntelligenceArticleCacheEntry {
+        version: INTELLIGENCE_ARTICLE_CACHE_VERSION,
+        fetched_at: now_millis(),
+        article: NewsNowIntelligenceArticleEnrichment {
+            cached: false,
+            ..article.clone()
+        },
+    };
+    if crate::atomic_file::write_json(&path, &entry, false).is_ok() {
+        prune_intelligence_article_cache(&directory.to_path_buf());
+    }
+}
+
+fn remove_html_element(mut value: String, tag: &str) -> String {
+    let needle = format!("<{tag}");
+    let closing = format!("</{tag}>");
+    loop {
+        let lower = value.to_ascii_lowercase();
+        let Some(start) = lower.find(&needle) else {
+            return value;
+        };
+        let Some(open_end) = lower[start..].find('>').map(|offset| start + offset + 1) else {
+            return value;
+        };
+        let end = lower[open_end..]
+            .find(&closing)
+            .map(|offset| open_end + offset + closing.len())
+            .unwrap_or(open_end);
+        value.replace_range(start..end, " ");
+    }
+}
+
+fn article_text_container(html: &str) -> &str {
+    let mut best = balanced_element_with_class(html, "article", "")
+        .or_else(|| balanced_element_with_class(html, "main", ""))
+        .map(|(_, content)| content)
+        .unwrap_or_default();
+    for class in [
+        "article-body",
+        "article-content",
+        "entry-content",
+        "post-content",
+        "story-body",
+        "content-body",
+    ] {
+        if let Some((_, candidate)) = balanced_element_with_class(html, "div", class) {
+            if html_text(candidate).chars().count() > html_text(best).chars().count() {
+                best = candidate;
+            }
+        }
+    }
+    if best.is_empty() {
+        balanced_element_with_class(html, "body", "")
+            .map(|(_, content)| content)
+            .unwrap_or(html)
+    } else {
+        best
+    }
+}
+
+fn cleaned_article_text(html: &str) -> String {
+    let mut content = article_text_container(html).to_string();
+    for tag in [
+        "script", "style", "noscript", "svg", "template", "nav", "footer", "form",
+    ] {
+        content = remove_html_element(content, tag);
+    }
+    trim_chars(&html_text(&content), INTELLIGENCE_ENRICHMENT_MAX_BODY_CHARS)
+}
+
+fn deduplicated_media_urls(html: &str, page_url: &str, tags: &[&str], limit: usize) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+    for tag_name in tags {
+        let needle = format!("<{tag_name}");
+        let mut cursor = 0;
+        while let Some(found) = lower[cursor..].find(&needle) {
+            let start = cursor + found;
+            let Some(end) = html[start..].find('>').map(|offset| start + offset + 1) else {
+                break;
+            };
+            let tag = &html[start..end];
+            if *tag_name == "source"
+                && !html_attribute(tag, "type")
+                    .is_some_and(|media_type| media_type.to_ascii_lowercase().starts_with("video/"))
+            {
+                cursor = end;
+                continue;
+            }
+            for attribute in ["data-src", "data-original", "data-lazy-src", "src"] {
+                let Some(raw_url) = html_attribute(tag, attribute) else {
+                    continue;
+                };
+                let url = absolute_image_url(page_url, &raw_url);
+                if !url.is_empty() && seen.insert(url.clone()) {
+                    urls.push(url);
+                    if urls.len() >= limit {
+                        return urls;
+                    }
+                }
+            }
+            cursor = end;
+        }
+    }
+    urls
+}
+
+fn intelligence_image_data_url(page_url: &str, image_url: &str) -> Result<String, String> {
+    let mut response = intelligence_article_agent()
+        .get(image_url)
+        .header("User-Agent", NEWSNOW_USER_AGENT)
+        .header("Referer", page_url)
+        .header(
+            "Accept",
+            "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        )
+        .call()
+        .map_err(|_| "无法请求资讯图片".to_string())?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(INTELLIGENCE_ENRICHMENT_IMAGE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "无法读取资讯图片".to_string())?;
+    if bytes.len() as u64 > INTELLIGENCE_ENRICHMENT_IMAGE_MAX_BYTES {
+        return Err("资讯图片过大".to_string());
+    }
+    let decoded =
+        image::load_from_memory(&bytes).map_err(|_| "资讯图片格式不受支持".to_string())?;
+    let (width, height) = decoded.dimensions();
+    let scaled = if width > INTELLIGENCE_ENRICHMENT_IMAGE_MAX_DIMENSION
+        || height > INTELLIGENCE_ENRICHMENT_IMAGE_MAX_DIMENSION
+    {
+        decoded.thumbnail(
+            INTELLIGENCE_ENRICHMENT_IMAGE_MAX_DIMENSION,
+            INTELLIGENCE_ENRICHMENT_IMAGE_MAX_DIMENSION,
+        )
+    } else {
+        decoded
+    };
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, 74)
+        .encode_image(&scaled)
+        .map_err(|_| "无法压缩资讯图片".to_string())?;
+    if encoded.len() as u64 > INTELLIGENCE_ENRICHMENT_IMAGE_MAX_BYTES {
+        return Err("资讯图片压缩后仍然过大".to_string());
+    }
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(encoded)
+    ))
+}
+
+fn enrichment_fallback(
+    request: &NewsNowIntelligenceArticleRequest,
+    url: String,
+) -> NewsNowIntelligenceArticleEnrichment {
+    let title = trim_chars(request.title.trim(), 320);
+    let summary = trim_chars(
+        request.summary.trim(),
+        INTELLIGENCE_ENRICHMENT_MAX_BODY_CHARS,
+    );
+    let body = [title.as_str(), summary.as_str()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    NewsNowIntelligenceArticleEnrichment {
+        url,
+        source: trim_chars(request.source.trim(), 160),
+        title,
+        published_at: trim_chars(request.published_at.trim(), 100),
+        body,
+        degraded: true,
+        ..Default::default()
+    }
+}
+
+fn fetch_intelligence_article_enrichment(
+    request: NewsNowIntelligenceArticleRequest,
+) -> NewsNowIntelligenceArticleEnrichment {
+    let Ok(canonical_url) = canonical_news_article_url(&request.url) else {
+        return enrichment_fallback(&request, String::new());
+    };
+    let Some(url) = validate_custom_feed_url(&canonical_url) else {
+        return enrichment_fallback(&request, String::new());
+    };
+    if let Some(cached) = read_intelligence_article_cache(&url) {
+        return cached;
+    }
+    let fallback = enrichment_fallback(&request, url.clone());
+    let Ok(mut response) = intelligence_article_agent()
+        .get(&url)
+        .header("User-Agent", NEWSNOW_USER_AGENT)
+        .header("Accept", "text/html,application/xhtml+xml")
+        .call()
+    else {
+        return fallback;
+    };
+    let mut bytes = Vec::new();
+    if response
+        .body_mut()
+        .as_reader()
+        .take(ARTICLE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > ARTICLE_MAX_BYTES
+    {
+        return fallback;
+    }
+    let html = String::from_utf8_lossy(&bytes);
+    let mut body = cleaned_article_text(&html);
+    if body.chars().count() < 80 {
+        return fallback;
+    }
+    let mut image_urls =
+        deduplicated_media_urls(&html, &url, &["img"], INTELLIGENCE_ENRICHMENT_MAX_IMAGES);
+    let lead_image_url = request
+        .image_url
+        .trim()
+        .is_empty()
+        .then(|| preview_image_from_html(&html, &url))
+        .unwrap_or_else(|| {
+            url_open::validate_https_url(request.image_url.trim())
+                .map(str::to_string)
+                .unwrap_or_default()
+        });
+    if !lead_image_url.is_empty() {
+        image_urls.retain(|image| image != &lead_image_url);
+        image_urls.insert(0, lead_image_url.clone());
+        image_urls.truncate(INTELLIGENCE_ENRICHMENT_MAX_IMAGES);
+    }
+    let video_urls = deduplicated_media_urls(
+        &html,
+        &url,
+        &["video", "source"],
+        INTELLIGENCE_ENRICHMENT_MAX_VIDEOS,
+    );
+    let lead_image_data_url = if lead_image_url.is_empty() {
+        String::new()
+    } else {
+        intelligence_image_data_url(&url, &lead_image_url).unwrap_or_default()
+    };
+    let title = trim_chars(request.title.trim(), 320);
+    if body.starts_with(&title) && body.chars().count() > title.chars().count() + 4 {
+        body = body[title.len()..].trim_start().to_string();
+    }
+    let article = NewsNowIntelligenceArticleEnrichment {
+        url,
+        source: trim_chars(request.source.trim(), 160),
+        title,
+        published_at: trim_chars(request.published_at.trim(), 100),
+        body,
+        lead_image_url,
+        lead_image_data_url,
+        image_urls,
+        video_urls,
+        cached: false,
+        degraded: false,
+    };
+    save_intelligence_article_cache(&article);
+    article
+}
+
 fn trim_chars(value: &str, limit: usize) -> String {
     let mut out = value.chars().take(limit).collect::<String>();
     if value.chars().nth(limit).is_some() {
@@ -1155,6 +1591,21 @@ fn http_agent() -> ureq::Agent {
         .timeout_connect(Some(Duration::from_secs(6)))
         .timeout_recv_response(Some(Duration::from_secs(12)))
         .timeout_recv_body(Some(Duration::from_secs(12)))
+        .build()
+        .into()
+}
+
+// Intelligence enrichment fetches arbitrary public publisher URLs selected
+// from feeds. Do not follow a server-provided redirect after initial URL
+// validation: that could redirect the local fetcher toward a private target.
+// A failed redirect simply falls back to the RSS evidence.
+fn intelligence_article_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(NEWS_REQUEST_TIMEOUT))
+        .timeout_connect(Some(Duration::from_secs(6)))
+        .timeout_recv_response(Some(Duration::from_secs(12)))
+        .timeout_recv_body(Some(Duration::from_secs(12)))
+        .max_redirects(0)
         .build()
         .into()
 }
@@ -2887,9 +3338,11 @@ fn source_uses_newsnow_gateway(source: NewsSource) -> bool {
         )
 }
 
-fn sort_and_deduplicate(items: &mut Vec<NewsNowItem>) {
-    let mut urls = HashSet::new();
-    items.retain(|item| urls.insert(item.url.clone()));
+fn sort_and_deduplicate(items: &mut Vec<NewsNowItem>, preserve_evidence: bool) {
+    if !preserve_evidence {
+        let mut urls = HashSet::new();
+        items.retain(|item| urls.insert(item.url.clone()));
+    }
     items.sort_by(|left, right| {
         right
             .published_at
@@ -2900,6 +3353,9 @@ fn sort_and_deduplicate(items: &mut Vec<NewsNowItem>) {
 }
 
 fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowList {
+    let preserve_evidence = request
+        .as_ref()
+        .is_some_and(|request| request.preserve_evidence);
     let tieba_bars = normalized_tieba_bars(request.as_ref());
     let sources = selected_feed_sources(request.as_ref());
     let source_ids = selected_feed_ids(&sources, &tieba_bars);
@@ -2953,7 +3409,7 @@ fn fetch_news(request: Option<NewsNowRequest>, force_refresh: bool) -> NewsNowLi
             }
         }
     }
-    sort_and_deduplicate(&mut items);
+    sort_and_deduplicate(&mut items, preserve_evidence);
     // 刷新资讯文本时复用同一篇文章已经压缩好的封面，避免每五分钟重新下载。
     // 普通后台刷新也保留“已尝试但无图”的状态，让下一批继续向后推进；
     // 用户主动刷新时则允许这些失败项重试，以恢复临时网络或站点错误。
@@ -3328,6 +3784,30 @@ pub(crate) fn newsnow_intelligence_snapshot_save(snapshot: Value) -> Result<(), 
         .map_err(|error| format!("无法保存情报快照：{error}"))
 }
 
+/// Fetch and locally cache cleaned public evidence for the source articles
+/// selected by an intelligence brief. This deliberately returns per-source
+/// fallbacks instead of failing the entire batch when one publisher blocks a
+/// request or exposes no readable HTML.
+#[tauri::command]
+pub(crate) async fn newsnow_intelligence_enrich_articles(
+    request: NewsNowIntelligenceEnrichmentRequest,
+) -> Result<Vec<NewsNowIntelligenceArticleEnrichment>, String> {
+    if request.articles.len() > INTELLIGENCE_ENRICHMENT_MAX_ARTICLES {
+        return Err(format!(
+            "单次最多增强 {INTELLIGENCE_ENRICHMENT_MAX_ARTICLES} 条资讯来源"
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        Ok(request
+            .articles
+            .into_iter()
+            .map(fetch_intelligence_article_enrichment)
+            .collect())
+    })
+    .await
+    .map_err(|error| format!("资讯正文增强任务失败：{error}"))?
+}
+
 #[tauri::command]
 pub(crate) fn newsnow_custom_sources_get(
     state: tauri::State<crate::AppState>,
@@ -3438,6 +3918,105 @@ fn canonical_news_article_url(value: &str) -> Result<String, String> {
     Ok(url)
 }
 
+fn ensure_article_webview(app: &tauri::AppHandle) -> Result<(), String> {
+    if app.get_webview(ARTICLE_WEBVIEW_LABEL).is_some() {
+        return Ok(());
+    }
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "找不到主窗口".to_string())?;
+    let parent = main.as_ref().window();
+    let navigation_app = app.clone();
+    let loading_app = app.clone();
+    let page_load_state = Arc::clone(&ARTICLE_WEBVIEW_STATE);
+    let article_webview = parent
+        .add_child(
+            WebviewBuilder::new(
+                ARTICLE_WEBVIEW_LABEL,
+                WebviewUrl::App("newsnow-article-shell.html".into()),
+            )
+            .auto_resize()
+            .on_page_load(move |webview, payload| {
+                // The hidden local shell also emits page-load events. Only
+                // publish events for an article navigation requested by the
+                // visible reader surface.
+                if page_load_state.load(Ordering::Acquire) == ARTICLE_WEBVIEW_IDLE {
+                    let _ = webview.hide();
+                    return;
+                }
+                match article_webview_phase(payload.event()) {
+                    ArticleWebviewPhase::Loading => {
+                        if let Ok(script) = ARTICLE_WEBVIEW_INITIALIZATION_SCRIPT.lock() {
+                            if !script.is_empty() {
+                                let _ = webview.eval(script.clone());
+                            }
+                        }
+                        page_load_state.store(ARTICLE_WEBVIEW_LOADING, Ordering::Release);
+                        // Keep the native child hidden until its first usable
+                        // document is ready. The main reader already exposes a
+                        // returnable loading shell synchronously on click;
+                        // showing this child here would either flash the prior
+                        // article or cover that shell with WebView2's blank
+                        // first paint.
+                        let _ = webview.hide();
+                        let _ = loading_app.emit(ARTICLE_LOADING_EVENT, ());
+                    }
+                    ArticleWebviewPhase::Ready => {
+                        page_load_state.store(ARTICLE_WEBVIEW_READY, Ordering::Release);
+                        let _ = webview.show();
+                        let _ = loading_app.emit(ARTICLE_READY_EVENT, ());
+                    }
+                }
+            })
+            .on_new_window(|_, _| NewWindowResponse::Deny)
+            .on_navigation(move |target| {
+                if target.as_str() == ARTICLE_SHELL_URL {
+                    return true;
+                }
+                if target.as_str() != ARTICLE_RETURN_URL {
+                    return target.scheme() == "https";
+                }
+                // The main UI owns the close transition and hides the child
+                // after receiving this event. Do not enqueue a local-shell
+                // navigation here: the following article click would race it
+                // with its external navigation and WebView2 serializes those
+                // requests, which made every second open appear to hang.
+                ARTICLE_WEBVIEW_STATE.store(ARTICLE_WEBVIEW_IDLE, Ordering::Release);
+                let _ = navigation_app.emit("newsnow-return-to-feed", ());
+                false
+            }),
+            tauri::LogicalPosition::new(0, 0),
+            parent
+                .inner_size()
+                .map_err(|error| format!("无法读取主窗口大小：{error}"))?,
+        )
+        .map_err(|error| format!("无法在主窗口打开资讯原文：{error}"))?;
+    ARTICLE_WEBVIEW_STATE.store(ARTICLE_WEBVIEW_IDLE, Ordering::Release);
+    let _ = article_webview.hide();
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn newsnow_prepare_article_shell(app: tauri::AppHandle) -> Result<(), String> {
+    if app.get_webview(ARTICLE_WEBVIEW_LABEL).is_some()
+        || ARTICLE_WEBVIEW_PREPARE_SCHEDULED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return Ok(());
+    }
+    // This command is issued while the main document is still initializing.
+    // Creating a child WebView synchronously from that IPC can stall WebView2's
+    // first paint. Mirror the reader-shell pool: return immediately and build
+    // the hidden article shell shortly after the host becomes responsive.
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(180));
+        let _ = ensure_article_webview(&app);
+        ARTICLE_WEBVIEW_PREPARE_SCHEDULED.store(false, Ordering::Release);
+    });
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn newsnow_open_article(
     app: tauri::AppHandle,
@@ -3475,85 +4054,26 @@ pub(crate) async fn newsnow_open_article(
     if let Some(article) = restricted_source_article(&request, &url) {
         return Ok(article);
     }
-    let main = app
-        .get_webview_window("main")
-        .ok_or_else(|| "找不到主窗口".to_string())?;
-    let parent = main.as_ref().window();
-    if let Some(existing) = app.get_webview(ARTICLE_WEBVIEW_LABEL) {
-        let _ = existing.close();
-    }
-    let article_url = url.parse().map_err(|_| "资讯原文地址无效".to_string())?;
-    let initialization_script = article_initialization_script(&request);
-    let navigation_app = app.clone();
-    let loading_app = app.clone();
-    let article_load_state = Arc::new(AtomicU8::new(ARTICLE_WEBVIEW_CREATED));
-    let page_load_state = Arc::clone(&article_load_state);
-    let article_webview = parent
-        .add_child(
-            WebviewBuilder::new(ARTICLE_WEBVIEW_LABEL, WebviewUrl::External(article_url))
-                .auto_resize()
-                .initialization_script(initialization_script)
-                .on_page_load(move |webview, payload| {
-                    match article_webview_phase(payload.event()) {
-                        ArticleWebviewPhase::Loading => {
-                            page_load_state.store(ARTICLE_WEBVIEW_LOADING, Ordering::Release);
-                            // Some sites keep subresources open indefinitely and never emit a
-                            // terminal load event. Show as soon as navigation begins: the
-                            // document-start return control and gesture script are already
-                            // injected, while waiting for Finished would leave the reader
-                            // permanently covered by its loading placeholder.
-                            let _ = webview.show();
-                            let _ = loading_app.emit(ARTICLE_LOADING_EVENT, ());
-                        }
-                        ArticleWebviewPhase::Ready => {
-                            page_load_state.store(ARTICLE_WEBVIEW_READY, Ordering::Release);
-                            let _ = webview.show();
-                            let _ = loading_app.emit(ARTICLE_READY_EVENT, ());
-                        }
-                    }
-                })
-                .on_new_window(|_, _| NewWindowResponse::Deny)
-                .on_navigation(move |target| {
-                    if target.as_str() != ARTICLE_RETURN_URL {
-                        return target.scheme() == "https";
-                    }
-                    let app = navigation_app.clone();
-                    std::thread::spawn(move || {
-                        if let Some(webview) = app.get_webview(ARTICLE_WEBVIEW_LABEL) {
-                            let _ = webview.close();
-                        }
-                        let _ = app.emit("newsnow-return-to-feed", ());
-                    });
-                    false
-                }),
-            tauri::LogicalPosition::new(0, 0),
-            parent
-                .inner_size()
-                .map_err(|error| format!("无法读取主窗口大小：{error}"))?,
-        )
-        .map_err(|error| format!("无法在主窗口打开资讯原文：{error}"))?;
-    // `add_child` may paint its default white surface before the first page-load
-    // event arrives.  Claim the initial state atomically so a very fast Finished
-    // event cannot be hidden again after it has made the article visible.
-    if article_load_state
-        .compare_exchange(
-            ARTICLE_WEBVIEW_CREATED,
-            ARTICLE_WEBVIEW_LOADING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
-        .is_ok()
     {
-        let _ = article_webview.hide();
-        let fallback_app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(700));
-            if let Some(webview) = fallback_app.get_webview(ARTICLE_WEBVIEW_LABEL) {
-                let _ = webview.show();
-                let _ = fallback_app.emit(ARTICLE_READY_EVENT, ());
-            }
-        });
+        let mut script = ARTICLE_WEBVIEW_INITIALIZATION_SCRIPT.lock().unwrap();
+        *script = article_initialization_script(&request);
     }
+    ensure_article_webview(&app)?;
+    let article_url = url.parse().map_err(|_| "资讯原文地址无效".to_string())?;
+    let article_webview = app
+        .get_webview(ARTICLE_WEBVIEW_LABEL)
+        .ok_or_else(|| "资讯预加载外壳不可用".to_string())?;
+    ARTICLE_WEBVIEW_STATE.store(ARTICLE_WEBVIEW_LOADING, Ordering::Release);
+    // The main reader switches to its returnable loading surface before this
+    // command is awaited. Hide the reusable child so its previous page cannot
+    // flash. Also stop its unfinished network/document work before submitting
+    // exactly one external navigation; hiding alone leaves that work alive and
+    // makes later opens wait behind the previous page in WebView2.
+    let _ = article_webview.hide();
+    let _ = article_webview.eval(ARTICLE_STOP_LOADING_SCRIPT);
+    article_webview
+        .navigate(article_url)
+        .map_err(|error| format!("无法打开资讯原文：{error}"))?;
     Ok(NewsNowArticle {
         url,
         ..Default::default()
@@ -3563,9 +4083,13 @@ pub(crate) async fn newsnow_open_article(
 #[tauri::command]
 pub(crate) fn newsnow_close_article(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(webview) = app.get_webview(ARTICLE_WEBVIEW_LABEL) {
+        ARTICLE_WEBVIEW_STATE.store(ARTICLE_WEBVIEW_IDLE, Ordering::Release);
+        // A hidden child keeps loading its current external page. Cancel it at
+        // close time so the next click can use the warm WebView immediately.
+        let _ = webview.eval(ARTICLE_STOP_LOADING_SCRIPT);
         webview
-            .close()
-            .map_err(|error| format!("无法关闭资讯原文：{error}"))?;
+            .hide()
+            .map_err(|error| format!("无法隐藏资讯原文：{error}"))?;
     }
     Ok(())
 }
@@ -3585,6 +4109,15 @@ mod tests {
         assert!(validate_base_url(concat!("http", "://news.example")).is_err());
         assert!(validate_base_url("https://user@news.example").is_err());
         assert!(validate_base_url("https://news.example/\nnext").is_err());
+    }
+
+    #[test]
+    fn article_preload_shell_uses_only_the_local_bundled_page() {
+        let url = article_shell_url().expect("bundled shell URL should parse");
+        assert_eq!(url.as_str(), ARTICLE_SHELL_URL);
+        assert_eq!(url.host_str(), Some("tauri.localhost"));
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.path(), "/newsnow-article-shell.html");
     }
 
     #[test]
@@ -3872,6 +4405,95 @@ mod tests {
             article_webview_phase(PageLoadEvent::Finished),
             ArticleWebviewPhase::Ready
         );
+    }
+
+    #[test]
+    fn intelligence_enrichment_keeps_readable_text_and_safe_media_metadata() {
+        let url = "https://news.example/articles/42";
+        let html = r#"
+            <html><body><nav>site navigation</nav><article>
+              <h1>Example event</h1><p>First confirmed detail.</p>
+              <p>Second complementary detail.</p><script>secret-script-content</script>
+              <img src="/images/lead.jpg"><img data-src="https://cdn.example/second.png">
+              <picture><source type="image/webp" src="https://cdn.example/cover.webp"></picture>
+              <video src="https://media.example/video.mp4"></video>
+              <video><source type="video/webm" src="https://media.example/video.webm"></video>
+            </article><footer>footer content</footer></body></html>
+        "#;
+        let body = cleaned_article_text(html);
+        assert!(body.contains("First confirmed detail."));
+        assert!(body.contains("Second complementary detail."));
+        assert!(!body.contains("site navigation"));
+        assert!(!body.contains("secret-script-content"));
+
+        let images = deduplicated_media_urls(html, url, &["img"], 6);
+        assert_eq!(
+            images,
+            vec![
+                "https://news.example/images/lead.jpg".to_string(),
+                "https://cdn.example/second.png".to_string(),
+            ]
+        );
+        let videos = deduplicated_media_urls(html, url, &["video", "source"], 3);
+        assert_eq!(
+            videos,
+            vec![
+                "https://media.example/video.mp4".to_string(),
+                "https://media.example/video.webm".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn intelligence_enrichment_fallback_keeps_feed_evidence_without_claiming_full_text() {
+        let request = NewsNowIntelligenceArticleRequest {
+            url: "https://news.example/article".to_string(),
+            source: "Example source".to_string(),
+            title: "Feed title".to_string(),
+            summary: "Feed summary supplied before enrichment.".to_string(),
+            published_at: "2026-08-22T00:00:00Z".to_string(),
+            image_url: String::new(),
+        };
+        let fallback = enrichment_fallback(&request, request.url.clone());
+        assert!(fallback.degraded);
+        assert!(fallback.body.contains("Feed title"));
+        assert!(fallback
+            .body
+            .contains("Feed summary supplied before enrichment."));
+        assert!(fallback.lead_image_data_url.is_empty());
+        assert!(fallback.video_urls.is_empty());
+    }
+
+    #[test]
+    fn intelligence_enrichment_rejects_private_targets_before_fetching() {
+        let request = NewsNowIntelligenceArticleRequest {
+            url: "https://127.0.0.1/private".to_string(),
+            title: "Safe fallback".to_string(),
+            summary: "No local request should be sent.".to_string(),
+            ..Default::default()
+        };
+        let result = fetch_intelligence_article_enrichment(request);
+        assert!(result.degraded);
+        assert!(result.url.is_empty());
+        assert!(result.body.contains("Safe fallback"));
+    }
+
+    #[test]
+    fn intelligence_article_cache_key_is_stable_and_does_not_expose_the_url() {
+        let path = intelligence_article_cache_path("https://news.example/article?query=value")
+            .expect("cache path");
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        assert_eq!(filename.len(), 69);
+        assert!(filename.ends_with(".json"));
+        assert!(!filename.contains("news.example"));
+    }
+
+    #[test]
+    fn reusable_article_webview_stops_the_previous_document_before_reuse() {
+        assert_eq!(ARTICLE_STOP_LOADING_SCRIPT, "window.stop();");
     }
 
     #[test]
@@ -4571,9 +5193,45 @@ mod tests {
                 ..Default::default()
             },
         ];
-        sort_and_deduplicate(&mut items);
+        sort_and_deduplicate(&mut items, false);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].title, "new");
+    }
+
+    #[test]
+    fn sort_and_deduplicate_preserves_same_url_source_evidence_when_requested() {
+        let mut items = vec![
+            NewsNowItem {
+                title: "first source".to_string(),
+                url: "https://example.test/shared".to_string(),
+                source_id: "source-a".to_string(),
+                published_at: "2026-08-05 12:00".to_string(),
+                ..Default::default()
+            },
+            NewsNowItem {
+                title: "second source".to_string(),
+                url: "https://example.test/shared".to_string(),
+                source_id: "source-b".to_string(),
+                published_at: "2026-08-05 13:00".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        sort_and_deduplicate(&mut items, true);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].source_id, "source-b");
+        assert_eq!(items[1].source_id, "source-a");
+    }
+
+    #[test]
+    fn evidence_preservation_request_flag_defaults_off_and_uses_camel_case_wire_name() {
+        let default_request = serde_json::from_value::<NewsNowRequest>(json!({})).unwrap();
+        assert!(!default_request.preserve_evidence);
+
+        let intelligence_request =
+            serde_json::from_value::<NewsNowRequest>(json!({ "preserveEvidence": true })).unwrap();
+        assert!(intelligence_request.preserve_evidence);
     }
 
     #[test]
@@ -4597,7 +5255,7 @@ mod tests {
                 });
             }
         }
-        sort_and_deduplicate(&mut items);
+        sort_and_deduplicate(&mut items, false);
         assert_eq!(items.len(), 1_340);
         for source_id in ["weibo", "zhihu", "tieba"] {
             assert_eq!(

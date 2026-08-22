@@ -153,6 +153,8 @@ test("shelf opening preference switches between single-click opening and double-
   assert.match(html, /id="set-single-click-open"/);
   assert.match(html, /id="set-open-book-label"[^>]*>单击打开图书/);
   assert.match(source, /shelfSingleClickOpen/);
+  assert.match(source, /const SHELF_OPEN_INTERACTION_REVISION = "single-click-default-v1"/);
+  assert.match(source, /localStorage\.setItem\("shelfSingleClickOpen", "1"\)/);
   assert.match(source, /function setSingleClickOpenPreference\(value\)/);
   assert.match(card, /if \(!singleClickOpensBook\)[\s\S]*?toggleSelect\(b\.id, card\)/);
   assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?openBook\("double"\);[\s\S]*?return;/);
@@ -227,11 +229,17 @@ test("startup shelf can receive keyboard paging focus without stealing it on ref
 
 test("opening a book immediately updates recent-reading order without waiting for window focus", () => {
   const app = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "app.js"), "utf8");
+  const shelf = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "shelf-ui.js"), "utf8");
+  const rules = fs.readFileSync(path.join(__dirname, "..", "generated-ts", "shelf-ui-rules.js"), "utf8");
   const windows = fs.readFileSync(path.join(__dirname, "..", "..", "src", "window_commands.rs"), "utf8");
-  assert.match(windows, /main\.emit\(\s*"shelf-book-read"/s);
+  assert.match(windows, /app\.emit\(\s*"shelf-book-read"/s);
+  assert.doesNotMatch(windows, /main\.emit\(\s*"shelf-book-read"/s);
   assert.match(windows, /"lastReadAt": last_read_at/);
   assert.match(app, /tauriEvent\.listen\("shelf-book-read"/);
   assert.match(app, /shelfUI\.updateBook\(String\(e\?\.payload\?\.id \|\| ""\), \{ last_read_at: Number\(e\?\.payload\?\.lastReadAt \|\| 0\) \}\)/);
+  assert.match(shelf, /resolveShelfSortPreference/);
+  assert.match(rules, /sortKey = options\.sortKey \?\? "read"/);
+  assert.match(rules, /case "read":[\s\S]*?right\.last_read_at[\s\S]*?left\.last_read_at/);
 });
 
 test("reader close caches the same book and safely rebuilds for another book", () => {
@@ -246,7 +254,8 @@ test("reader close caches the same book and safely rebuilds for another book", (
   assert.match(windows, /fn activate_shelf_after_reader_close[\s\S]*?is_visible[\s\S]*?unminimize[\s\S]*?set_focus/);
   assert.match(windows, /main\.as_ref\(\)\.set_focus\(\)/);
   assert.match(windows, /mod windows_activation[\s\S]*?GetForegroundWindow[\s\S]*?SetForegroundWindow/);
-  assert.match(windows, /focus_confirmed[\s\S]*?"focused"[\s\S]*?focus_requested[\s\S]*?"requested"/);
+  assert.match(windows, /webview_has_focus[\s\S]*?shelf_focus_outcome[\s\S]*?webview_confirmed[\s\S]*?"focused"/);
+  assert.match(windows, /schedule_shelf_focus_handoff_after_hidden_reader[\s\S]*?"focused_after_retry"[\s\S]*?"unconfirmed"/);
   assert.match(windows, /"focus_restore"/);
   assert.match(windows, /reader-window-trace/);
 });

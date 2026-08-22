@@ -18,7 +18,35 @@ function fixture(checkpoint: Record<string, unknown> | null = null) {
   const emitted: Array<{ readonly event: string; readonly payload?: unknown }> = [];
   const storage = new Map<string, string>();
   const timers = new Map<number, () => void>();
+  const documentListeners = new Map<string, (event: Event) => void>();
+  const runtimeListeners = new Map<string, () => void>();
   let timerId = 0;
+  let documentFocused = true;
+  let activeElement: Record<string, unknown>;
+  const traceElement = (kind: "book_card" | "shelf_content" | "control" | "document" | "other") => {
+    const element: Record<string, unknown> = {
+      id: "",
+      tagName: kind === "control" ? "BUTTON" : kind === "document" ? "BODY" : "DIV",
+      dataset: kind === "book_card" ? { problemTarget: "book-card" } : {},
+      closest: (selector: string) => {
+        if (kind === "book_card" && selector.includes("data-problem-target")) return element;
+        if (kind === "shelf_content" && /#shelf|\.content/u.test(selector)) return element;
+        return null;
+      },
+      matches: (selector: string) => {
+        if (kind === "control") return /button|input|select|textarea|a/u.test(selector);
+        if (kind === "document") return /body|html/u.test(selector);
+        return false;
+      },
+      focus: () => {
+        documentFocused = true;
+        activeElement = element;
+      },
+    };
+    return element;
+  };
+  activeElement = traceElement("document");
+  const shelfContent = traceElement("shelf_content");
   const transport: TauriTransport = {
     invoke: async <TResult,>(command: string, args?: Record<string, unknown>) => {
       calls.push(args ? { command, args } : { command });
@@ -34,9 +62,12 @@ function fixture(checkpoint: Record<string, unknown> | null = null) {
   };
   const document = {
     __problemTraceShellWired: false,
-    addEventListener: () => undefined,
-    querySelector: () => null,
-    hasFocus: () => true,
+    addEventListener: (event: string, listener: (event: Event) => void) => {
+      documentListeners.set(event, listener);
+    },
+    querySelector: (selector: string) => selector === ".content" ? shelfContent : null,
+    hasFocus: () => documentFocused,
+    get activeElement() { return activeElement; },
   };
   const runtime: Record<string, unknown> = {
     document,
@@ -47,6 +78,9 @@ function fixture(checkpoint: Record<string, unknown> | null = null) {
     ReaderAppI18n: { selectedLanguage: () => "zh-CN" },
     ReaderStartupEnhancement: {
       snapshot: () => ({ enabled: true, continueHighCost: false, launchAtLogin: true }),
+    },
+    addEventListener: (event: string, listener: () => void) => {
+      runtimeListeners.set(event, listener);
     },
     setTimeout: (callback: () => void) => {
       const id = ++timerId;
@@ -75,7 +109,20 @@ function fixture(checkpoint: Record<string, unknown> | null = null) {
     emitted,
     storage,
     timers,
+    documentListeners,
+    runtimeListeners,
     fireTimer,
+    traceElement,
+    setDocumentFocus: (
+      focused: boolean,
+      kind: "book_card" | "shelf_content" | "control" | "document" | "other",
+    ) => {
+      documentFocused = focused;
+      activeElement = traceElement(kind);
+    },
+    fireWindowFocus: (focused: boolean) => {
+      runtimeListeners.get(focused ? "focus" : "blur")?.();
+    },
   };
 }
 
@@ -105,7 +152,342 @@ test("frozen problem trace keeps bounded redacted shell metadata", async () => {
     area: "shelf",
     outcome: "ok",
     input: "double_click",
+    document_focused: true,
+    active_element: "document",
   });
+});
+
+test("news article timing keeps only phase, outcome, sequence, and duration", async () => {
+  const view = fixture();
+  const api = initializeProblemTraceUi(view.runtime as never);
+  await flush();
+  api.recordNewsArticleTiming("native_page_load", "started", 7_321, 9);
+
+  const snapshot = await api.capture({ timeoutMs: 10 });
+  const events = snapshot.events as Array<Record<string, unknown>>;
+  assert.equal(events.at(-1)?.type, "news_article");
+  assert.deepEqual(events.at(-1)?.detail, {
+    source: "newsnow",
+    stage: "native_page_load",
+    outcome: "started",
+    duration_ms: 7_321,
+    sequence: 9,
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot), /https?:\/\/|article title|正文/iu);
+});
+
+test("news article timing checkpoints its redacted trace for later inspection", async () => {
+  const view = fixture();
+  const api = initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+  view.calls.splice(0);
+
+  api.recordNewsArticleTiming("click", "reader_shell_visible", 0, 4);
+  const timerId = [...view.timers.keys()].at(-1);
+  assert.ok(timerId);
+  view.fireTimer(timerId!);
+  await flush();
+
+  assert.equal(view.calls.length, 1);
+  assert.equal(view.calls[0]?.command, "problem_trace_checkpoint");
+  const snapshot = view.calls[0]?.args?.snapshot as Record<string, unknown>;
+  assert.doesNotMatch(JSON.stringify(snapshot), /https?:\/\//iu);
+  const events = snapshot.events as Array<Record<string, unknown>>;
+  assert.equal(events.at(-1)?.type, "news_article");
+});
+
+test("window controls and gestures checkpoint only their redacted lifecycle", async () => {
+  const view = fixture();
+  const api = initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+  view.calls.splice(0);
+
+  api.recordWindowControl("close", "command", "failed");
+  api.recordGesture("pointer", "finish", "no_match", 42, "none");
+  const timerId = [...view.timers.keys()].at(-1);
+  assert.ok(timerId);
+  view.fireTimer(timerId!);
+  await flush();
+
+  const snapshot = view.calls[0]?.args?.snapshot as Record<string, unknown>;
+  const events = snapshot.events as Array<Record<string, unknown>>;
+  assert.deepEqual(events.slice(-2), [
+    {
+      at: events.at(-2)?.at,
+      age_ms: events.at(-2)?.age_ms,
+      type: "window_control",
+      detail: {
+        source: "main_window",
+        control: "close",
+        phase: "command",
+        outcome: "failed",
+      },
+    },
+    {
+      at: events.at(-1)?.at,
+      age_ms: events.at(-1)?.age_ms,
+      type: "gesture",
+      detail: {
+        source: "main_window",
+        input: "pointer",
+        phase: "finish",
+        outcome: "no_match",
+        sample_count: 42,
+        action: "none",
+      },
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(snapshot), /https?:\/\/|[A-Z]:\\|secret|token/iu);
+});
+
+test("native close stages keep only fixed redacted lifecycle labels", async () => {
+  const view = fixture();
+  initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+  view.calls.splice(0);
+
+  view.listeners.get("main-window-close-trace")?.({
+    event: "main-window-close-trace",
+    id: 1,
+    payload: { phase: "hide", outcome: "ok", ignored: "C:\\private\\book.epub" },
+  });
+  const timerId = [...view.timers.keys()].at(-1);
+  assert.ok(timerId);
+  view.fireTimer(timerId!);
+  await flush();
+
+  const snapshot = view.calls[0]?.args?.snapshot as Record<string, unknown>;
+  const event = (snapshot.events as Array<Record<string, unknown>>).at(-1);
+  assert.deepEqual(event?.detail, {
+    source: "window_backend",
+    control: "close",
+    phase: "hide",
+    outcome: "ok",
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot), /private|book\.epub/iu);
+});
+
+test("reader geometry trace keeps only bounded numeric restore evidence", async () => {
+  const view = fixture();
+  initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+  view.calls.splice(0);
+
+  view.listeners.get("reader-window-trace")?.({
+    event: "reader-window-trace",
+    id: 1,
+    payload: {
+      phase: "geometry_observed",
+      source: "same_book",
+      outcome: "shown",
+      geometry: { x: 312, y: 96, w: 1508, h: 880, ignored: "C:\\private\\book.epub" },
+      requested: { x: 312, y: 96, w: 1508, h: 880, title: "private book" },
+      restore: {
+        space: "physical_v1",
+        size_applied: true,
+        position_applied: true,
+        clamped: false,
+        target_width: 1920,
+        target_height: 1080,
+        monitor_name: "private monitor",
+      },
+    },
+  });
+  const timerId = [...view.timers.keys()].at(-1);
+  assert.ok(timerId);
+  view.fireTimer(timerId!);
+  await flush();
+
+  const snapshot = view.calls[0]?.args?.snapshot as Record<string, unknown>;
+  const event = (snapshot.events as Array<Record<string, unknown>>).at(-1);
+  assert.deepEqual(event?.detail, {
+    source: "window_backend",
+    phase: "geometry_observed",
+    outcome: "shown",
+    duration_ms: 0,
+    open_source: "same_book",
+    geometry: { x: 312, y: 96, w: 1508, h: 880 },
+    requested: { x: 312, y: 96, w: 1508, h: 880 },
+    restore: {
+      space: "physical_v1",
+      size_applied: true,
+      position_applied: true,
+      clamped: false,
+      target_width: 1920,
+      target_height: 1080,
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot), /private|book\.epub|monitor_name/iu);
+});
+
+test("shelf pointer and click arrival retain focus state without a book identity", async () => {
+  const view = fixture();
+  const api = initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+  view.calls.splice(0);
+  view.setDocumentFocus(false, "other");
+  view.fireWindowFocus(false);
+  const card = view.traceElement("book_card");
+
+  view.documentListeners.get("pointerdown")?.({ target: card } as unknown as Event);
+  view.setDocumentFocus(true, "book_card");
+  view.fireWindowFocus(true);
+  view.documentListeners.get("click")?.({ target: card } as unknown as Event);
+  api.recordShelfBookOpen("requested", "single_click");
+
+  const events = api._shellEventsForTests();
+  const arrivals = events.filter((event) => event.type === "shelf_input");
+  assert.deepEqual(arrivals.map((event) => {
+    const { focus_transition_age_ms: _age, ...detail } = event.detail;
+    return detail;
+  }), [
+    {
+      source: "main_window",
+      phase: "pointerdown",
+      document_focused: false,
+      active_element: "other",
+      window_focused_before_input: false,
+      recently_activated: false,
+    },
+    {
+      source: "main_window",
+      phase: "click",
+      document_focused: true,
+      active_element: "book_card",
+      window_focused_before_input: true,
+      recently_activated: true,
+    },
+  ]);
+  arrivals.forEach((event) => {
+    assert.equal(typeof event.detail.focus_transition_age_ms, "number");
+    assert.ok(Number(event.detail.focus_transition_age_ms) >= 0);
+  });
+  assert.deepEqual(events.at(-1)?.detail, {
+    source: "main_window",
+    area: "shelf",
+    outcome: "requested",
+    input: "single_click",
+    document_focused: true,
+    active_element: "book_card",
+  });
+  assert.doesNotMatch(JSON.stringify(events), /book[_ -]?id|title|path|https?:\/\//iu);
+});
+
+test("reader checkpoint is re-merged with close focus handoff instead of replacing it", async () => {
+  const view = fixture();
+  initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+  view.calls.splice(0);
+  view.setDocumentFocus(false, "other");
+
+  view.listeners.get("reader-window-trace")?.({
+    event: "reader-window-trace",
+    id: 2,
+    payload: {
+      phase: "focus_restore",
+      outcome: "focused_after_retry",
+      attempt: 3,
+      windowRequested: true,
+      nativeFocused: true,
+      webviewRequested: true,
+      webviewFocused: true,
+      visible: true,
+    },
+  });
+  view.listeners.get("reader-bug-trace-checkpoint")?.({
+    event: "reader-bug-trace-checkpoint",
+    id: 3,
+    payload: {
+      snapshot: {
+        schema_version: 1,
+        captured_at: new Date().toISOString(),
+        events: [{ at: new Date().toISOString(), type: "reader_closing", detail: {} }],
+      },
+    },
+  });
+  const timerId = [...view.timers.keys()].at(-1);
+  assert.ok(timerId);
+  view.fireTimer(timerId!);
+  await flush();
+
+  const saved = view.calls.at(-1)?.args?.snapshot as Record<string, unknown>;
+  const events = saved.events as Array<Record<string, unknown>>;
+  assert.equal(events.some((event) => event.type === "reader_closing"), true);
+  assert.equal(events.some((event) => event.type === "reader_window"), true);
+  assert.equal(events.some((event) => event.type === "focus_handoff"), true);
+  const native = events.filter((event) => event.type === "reader_window").at(-1);
+  assert.deepEqual(native?.detail, {
+    source: "window_backend",
+    phase: "focus_restore",
+    outcome: "focused_after_retry",
+    duration_ms: 0,
+    window_requested: true,
+    native_focused: true,
+    webview_requested: true,
+    webview_focused: true,
+    visible: true,
+    attempt: 3,
+  });
+  const verified = events.filter((event) => event.type === "focus_handoff").at(-1);
+  assert.deepEqual(verified?.detail, {
+    source: "main_window",
+    phase: "document_verified",
+    outcome: "focused",
+    duration_ms: 0,
+    attempts: 1,
+    document_focused: true,
+    active_element: "shelf_content",
+  });
+});
+
+test("same-book window lifecycle keeps only bounded resume and relayout numbers", async () => {
+  const view = fixture();
+  const api = initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+  view.calls.splice(0);
+
+  view.listeners.get("reader-window-trace")?.({
+    event: "reader-window-trace",
+    id: 4,
+    payload: {
+      phase: "relayout_after",
+      source: "same_book",
+      outcome: "stable",
+      viewportWidth: 1_408,
+      viewportHeight: 862,
+      beforePage: 17,
+      afterPage: 17,
+      beforeAnchorOffset: 81_250,
+      afterAnchorOffset: 81_250,
+      resizeSequence: 3,
+      documentFocused: true,
+      activeElement: "reader_frame",
+      title: "private title",
+      id: "private-id",
+      path: "C:\\private\\book.epub",
+    },
+  });
+
+  const event = api._shellEventsForTests().at(-1);
+  assert.deepEqual(event?.detail, {
+    source: "window_backend",
+    phase: "relayout_after",
+    outcome: "stable",
+    duration_ms: 0,
+    open_source: "same_book",
+    resume_state: {
+      viewport_width: 1_408,
+      viewport_height: 862,
+      before_page: 17,
+      after_page: 17,
+      before_anchor_offset: 81_250,
+      after_anchor_offset: 81_250,
+      resize_sequence: 3,
+    },
+    document_focused: true,
+    active_element: "reader_frame",
+  });
+  assert.doesNotMatch(JSON.stringify(event), /private|book\.epub|title|"id"/iu);
 });
 
 test("typed checkpoint command and event envelopes remain exact", async () => {
@@ -146,7 +528,7 @@ test("software settings use the frozen allowlist and omit sensitive values", () 
     fontSize: 23,
     customBackgroundImage: "/Users/private/background.png",
   }));
-  view.storage.set("shelfSort", "recent");
+  view.storage.set("shelfSort", "read");
   view.storage.set("syncToken", "secret-token");
   view.storage.set("apiKey", "secret-api-key");
   const api = initializeProblemTraceUi(view.runtime as never);
@@ -154,7 +536,7 @@ test("software settings use the frozen allowlist and omit sensitive values", () 
   const serialized = JSON.stringify(settings);
 
   assert.deepEqual(settings.shelf, {
-    sort: "recent",
+    sort: "read",
     layout: "grid",
     grid_columns: 1,
     show_cover_progress: true,

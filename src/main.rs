@@ -61,8 +61,8 @@ mod tts_core;
 mod update;
 mod url_open;
 mod vocab;
-
 mod window_commands;
+use crate::ai_reader as ar;
 pub(crate) use app_state::AppState;
 pub(crate) use runtime_support::{
     emit_startup_perf, interactive_search_workers, log, now_ms, report_save_error,
@@ -71,7 +71,6 @@ pub(crate) use runtime_support::{
 #[cfg(target_os = "macos")]
 use tauri::menu::MenuItem;
 use tauri::{menu::Menu, Manager};
-
 #[cfg(target_os = "macos")]
 const MENU_MAIN_WINDOW_CLOSE: &str = "main-window-close";
 fn main() {
@@ -82,6 +81,7 @@ fn main() {
         std::process::exit(2);
     }
     runtime_support::mark_process_started();
+    runtime_support::remove_legacy_debug_log();
     if std::env::args().any(|a| a == "--sem-probe") {
         semantic::sem_probe();
         return;
@@ -114,6 +114,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(startup::StartupBookPaths::new(startup_book_paths))
         .manage(startup_enhancement::StartupEnhancementState::load())
+        .manage(startup_enhancement::MainWindowRuntime::default())
         .manage(AppState::new(startup_database))
         .menu(|app| {
             let menu = Menu::default(app)?;
@@ -145,7 +146,7 @@ fn main() {
                     .find(|window| window.is_focused().unwrap_or(false))
                 {
                     let result = if window.label() == "main" {
-                        window_commands::main_window_close(window)
+                        window_commands::main_window_close(window.as_ref().clone())
                     } else {
                         window.close().map_err(|error| error.to_string())
                     };
@@ -185,9 +186,8 @@ fn main() {
                     log(&format!("孤立主题背景图清理已跳过：{error}"));
                 }
             }
-            // Tauri's declarative window would otherwise be created with the
-            // fallback 980×720 frame before the library has been read. Create
-            // it only after the saved geometry is available, still hidden.
+            // Avoid creating Tauri's fallback 980×720 frame: wait for saved
+            // geometry, then create the window hidden.
             let geom = {
                 app.state::<AppState>()
                     .library
@@ -222,6 +222,7 @@ fn main() {
                     main_window_builder
                 };
             let _main_window = main_window_builder.build()?;
+            startup_enhancement::retain_main_window(app.handle(), _main_window.as_ref().window());
             sync::start_silent_startup_sync(app.handle().clone());
             backup::spawn_daily(app.handle().clone());
             semantic::spawn_semantic_profile_warmup(app.handle().clone());
@@ -231,20 +232,22 @@ fn main() {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_title(startup::VERSIONED_MAIN_WINDOW_TITLE);
                 window_commands::apply_geom_safe(&win, &geom);
-                // 主窗口保持隐藏，直到书架完成首帧绘制并经 main_window_show
-                // 揭示。这样已保存的位置、尺寸和最大化状态会先稳定下来。
+                // 主窗口保持隐藏到书架首帧绘制后经 main_window_show 揭示，先稳定保存的几何状态。
                 if startup_enhancement::should_start_login_background(app.handle()) {
                     startup_enhancement::begin_login_background(app.handle());
                 }
                 let app_ev = app.handle().clone();
+                let main_native_window = win.as_ref().window();
                 win.on_window_event(move |ev| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
-                        if let Some(w) = app_ev.get_webview_window("main") {
-                            window_commands::persist_main_window_state(&app_ev, &w);
-                            if startup_enhancement::should_keep_running(&app_ev) {
-                                api.prevent_close();
-                                startup_enhancement::background_main(&app_ev);
-                            }
+                        window_commands::persist_reader_window_states_before_main_close(&app_ev);
+                        window_commands::persist_main_window_state(&app_ev, &main_native_window);
+                        if startup_enhancement::should_keep_running(&app_ev) {
+                            api.prevent_close();
+                            let _ = startup_enhancement::background_main_from_window(
+                                &app_ev,
+                                &main_native_window,
+                            );
                         }
                     }
                 });
@@ -309,10 +312,12 @@ fn main() {
             newsnow::newsnow_sources,
             newsnow::newsnow_intelligence_snapshot_get,
             newsnow::newsnow_intelligence_snapshot_save,
+            newsnow::newsnow_intelligence_enrich_articles,
             newsnow::newsnow_list,
             newsnow::newsnow_prefetch,
             newsnow::newsnow_refresh,
             newsnow::newsnow_preview_image,
+            newsnow::newsnow_prepare_article_shell,
             newsnow::newsnow_open_article,
             newsnow::newsnow_close_article,
             ai_reader::ai_reader_status,
@@ -321,6 +326,16 @@ fn main() {
             ai_reader::assign_ai_reader_profile,
             ai_reader::save_ai_reader_profile,
             ai_reader::save_ai_reader_config,
+            ar::intelligence_local_model_status,
+            ar::intelligence_local_model_save,
+            ar::intelligence_extract_source_evidence,
+            ar::intelligence_generate_brief,
+            ar::intelligence_judge_event_pairs,
+            ar::intelligence_triage_articles,
+            ar::intelligence_cluster_news_semantically,
+            ar::intelligence_daily_digest_save,
+            ar::intelligence_daily_digest_list,
+            ar::intelligence_daily_digest_get,
             ai_reader::ask_reading_assistant,
             ai_reader::ask_library_assistant,
             ai_reader::cancel_library_assistant,
@@ -364,6 +379,7 @@ fn main() {
             vocab::notes_summary,
             sync::sync_get_settings,
             sync::sync_account_open_refresh,
+            sync::sync_start_silent,
             sync::sync_set_settings,
             sync::auth_register,
             sync::auth_register_start,
@@ -493,8 +509,7 @@ fn main() {
         .build(tauri::generate_context!("tauri.conf.json"))
         .expect("启动 Tauri 失败")
         .run(|app, event| match event {
-            // Command+Q、菜单栏“退出”和关闭主窗口都遵循启动增强开关：开启时
-            // 改为隐藏窗口、保留进程；仅显式退出命令可以结束进程。
+            // Command+Q、菜单栏“退出”和关闭主窗口遵循启动增强开关：开启时仅隐藏窗口、保留进程。
             tauri::RunEvent::ExitRequested { api, .. }
                 if startup_enhancement::should_keep_running(app)
                     && !window_commands::take_explicit_application_exit_request() =>

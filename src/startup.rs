@@ -1,8 +1,8 @@
 //! Process startup, file-association forwarding and single-instance support.
 
 use crate::{
-    atomic_file, emit_startup_perf, import_core, library_commands, log, search,
-    set_thread_background, startup_enhancement, window_commands,
+    atomic_file, emit_startup_perf, import_core, library_commands, log, set_thread_background,
+    startup_enhancement, window_commands,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -342,19 +342,9 @@ pub(crate) fn spawn_maintenance(app: tauri::AppHandle) {
         }
         emit_startup_perf(&app, "fingerprint-fill", "start", "background");
         library_commands::spawn_fingerprint_fill(app.clone());
-        std::thread::sleep(std::time::Duration::from_secs(15));
-        while window_commands::any_reader_window_open(&app)
-            || !startup_enhancement::background_work_allowed(&app)
-        {
-            emit_startup_perf(
-                &app,
-                "keyword-index",
-                "paused",
-                "reader open or app backgrounded",
-            );
-            std::thread::sleep(std::time::Duration::from_secs(30));
-        }
-        search::spawn_build_index(app.clone(), false);
+        // `spawn_fingerprint_fill` starts the dependent keyword index only
+        // after legacy content IDs have been filled. Do not overlap two scans
+        // of the whole shelf merely because an arbitrary timer elapsed.
         // 语义索引的续建只能由用户在“语义索引”面板显式点击触发。升级后
         // 自动迁移旧切块会恰好与打开设置页重合，造成“刚进入就自动续建”的
         // 观感，还会抢占前台交互。因此这里只记录待更新状态，不后台启动任务。

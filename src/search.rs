@@ -332,7 +332,14 @@ pub(crate) fn spawn_build_index(app: tauri::AppHandle, interactive: bool) {
                     return;
                 }
             }
-            let Ok(source) = search_index::source_fingerprint(Path::new(&b.path)) else {
+            // Existing content IDs are already SHA-256 identities computed at
+            // import/fingerprint-fill time. Reuse them with current metadata
+            // instead of hashing every book again on every application start.
+            // Missing or malformed legacy IDs still safely fall back to the
+            // full-file calculation inside this helper.
+            let Ok(source) =
+                search_index::source_fingerprint_from_content_id(Path::new(&b.path), &b.content_id)
+            else {
                 let _ = task.checkpoint(
                     (index + 1) as u64,
                     total as u64,

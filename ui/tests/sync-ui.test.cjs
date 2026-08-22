@@ -189,19 +189,34 @@ test("账户概览把服务可达与最近同步结果分开，额度检查不�
   );
   assert.match(
     stylesSource,
-    /\.account-sync-state\s*\{[^}]*width:\s*var\(--account-command-height\)[^}]*height:\s*var\(--account-command-height\)[^}]*overflow:\s*hidden/,
+    /\.account-sync-state\s*\{[^}]*width:\s*var\(--account-command-height\)[^}]*height:\s*var\(--account-command-height\)[^}]*overflow:\s*hidden[^}]*transition:\s*box-shadow\s+180ms\s+ease/s,
   );
   assert.match(
     stylesSource,
-    /\.account-sync-state:is\(:hover, :focus-visible\)[^{]*\{[^}]*width:\s*auto/,
+    /\.account-sync-state\.is-expanded,\s*\.account-sync-state:focus-visible\s*\{[\s\S]*?width:\s*var\(\s*--account-sync-expanded-width,\s*calc\(var\(--account-command-height\)\s*\+\s*10em\s*\+\s*7px\)\s*\)/,
   );
   assert.match(
     stylesSource,
-    /\.account-sync-state:is\(:hover, :focus-visible\) \.account-sync-state-label\s*\{[^}]*max-width:\s*8em/,
+    /\.account-sync-state:is\(\.is-expanded, :focus-visible\) \.account-sync-state-label\s*\{[^}]*max-width:\s*var\(--account-sync-label-width,\s*24em\)/,
+  );
+  assert.doesNotMatch(stylesSource, /@keyframes\s+account-sync-expand\b/);
+  assert.doesNotMatch(stylesSource, /animation:\s*account-sync-expand\b/);
+  assert.doesNotMatch(stylesSource, /account-sync-label-reveal\b/);
+  assert.doesNotMatch(
+    stylesSource,
+    /\.account-sync-state\s*\{[^}]*transition:[^}]*\b(?:width|padding|gap)\b/s,
+  );
+  assert.doesNotMatch(
+    stylesSource,
+    /\.account-sync-state-label\s*\{[^}]*transition:[^}]*\b(?:max-width|opacity|transform)\b/s,
   );
   assert.match(
     stylesSource,
-    /\.account-sync-state:not\(\.checking\)::before\s*\{[^}]*transform:\s*translateX\(0\)[^}]*cubic-bezier\(0\.34,\s*1\.56,\s*0\.64,\s*1\)/s,
+    /\.account-sync-state:not\(\.checking\)\.is-collapsing::before\s*\{[^}]*animation:\s*account-sync-dot-settle\s+380ms/s,
+  );
+  assert.match(
+    stylesSource,
+    /@keyframes\s+account-sync-dot-settle\s*\{[\s\S]*?translateX\(-4px\)[\s\S]*?translateX\(5px\)[\s\S]*?translateX\(0\)\s+scale\(1\)/,
   );
   assert.match(
     stylesSource,

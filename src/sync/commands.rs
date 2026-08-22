@@ -25,13 +25,14 @@ pub(crate) async fn sync_account_open_refresh(
     })
     .await
     .map_err(|error| format!("同步服务状态检查失败：{error}"))??;
-    if status.online && status.credentials_ready {
-        // The status path obtained the token without interaction, so this
-        // refresh cannot introduce a Keychain prompt. Existing single-flight
-        // protection coalesces it with any startup/manual run.
-        start_silent_startup_sync(app);
-    }
     Ok(status)
+}
+
+pub(crate) fn sync_start_silent(app: tauri::AppHandle) {
+    // The caller has just completed the non-interactive status check and set
+    // its visible pending state, so the terminal event cannot be lost to a
+    // later UI update. The worker keeps the existing single-flight guard.
+    start_silent_startup_sync(app);
 }
 
 pub(crate) async fn auth_register(

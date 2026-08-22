@@ -109,6 +109,12 @@ const copiedExtraKeys = Object.freeze([
   "image_probed",
   "note_marker", "note_virtual", "note_link_present", "note_fragment_present",
   "note_click_consumed", "note_popup_visible", "note_target_chapter", "note_search_chapters",
+  "scroll_top", "scroll_view_height", "scroll_content_height", "scroll_item_count",
+  "scroll_slice_start", "scroll_slice_end", "scroll_slice_next", "scroll_slice_top",
+  "scroll_slice_bottom", "scroll_mask_top", "scroll_mask_blank", "scroll_clip_active",
+  "scroll_tail_bottom", "scroll_tail_overflow", "scroll_next_top", "scroll_next_bottom",
+  "scroll_next_overflow", "scroll_page_tolerance", "scroll_page_guard", "scroll_break_count",
+  "scroll_break_last",
 ] as const);
 
 function record(value: unknown): TraceData | null {

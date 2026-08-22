@@ -9,6 +9,26 @@ pub(crate) fn mark_process_started() {
     let _ = PROCESS_STARTED_AT.set(Instant::now());
 }
 
+fn remove_legacy_debug_log_at(path: &std::path::Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            // Cleanup is best effort. Do not recreate the legacy log merely to
+            // report that it could not be removed.
+        }
+    }
+}
+
+/// Removes the old unbounded raw log. Native diagnostics now live only in the
+/// bounded, redacted runtime snapshot embedded in the problem trace.
+pub(crate) fn remove_legacy_debug_log() {
+    if let Some(mut path) = crate::profile::app_cache_dir() {
+        path.push("debug.log");
+        remove_legacy_debug_log_at(&path);
+    }
+}
+
 pub(crate) fn process_start_elapsed_ms() -> u64 {
     PROCESS_STARTED_AT
         .get_or_init(Instant::now)
@@ -33,20 +53,11 @@ pub(crate) const DEFAULT_SYNC_URL: &str = match option_env!("KUNPENG_DEFAULT_SYN
     None => "",
 };
 
-/// 调试日志：写到 %LOCALAPPDATA%\ebook-reader\debug.log（windows 子系统下没有 stderr）。
+/// Legacy call-site adapter. Raw strings are never written to disk; they are
+/// reduced to bounded, allowlisted native diagnostics for the problem trace.
+#[track_caller]
 pub(crate) fn log(msg: &str) {
-    if let Some(mut dir) = crate::profile::app_cache_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        dir.push("debug.log");
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&dir)
-        {
-            let _ = writeln!(f, "{msg}");
-        }
-    }
+    crate::diagnostics::record_native_log(std::panic::Location::caller().file(), msg);
 }
 
 pub(crate) fn report_save_error(context: &str, result: Result<(), String>) {
@@ -184,6 +195,26 @@ mod tests {
         let first = process_start_elapsed_ms();
         let second = process_start_elapsed_ms();
         assert!(second >= first);
+    }
+
+    #[test]
+    fn legacy_debug_log_cleanup_removes_only_the_exact_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "kunpeng-debug-log-cleanup-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let debug_log = directory.join("debug.log");
+        let retained = directory.join("retained.txt");
+        std::fs::write(&debug_log, b"legacy raw data").unwrap();
+        std::fs::write(&retained, b"keep").unwrap();
+
+        remove_legacy_debug_log_at(&debug_log);
+
+        assert!(!debug_log.exists());
+        assert!(retained.exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

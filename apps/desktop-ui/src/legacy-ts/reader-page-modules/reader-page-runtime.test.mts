@@ -3,14 +3,14 @@ import test from "node:test";
 
 import { installReaderPageRuntime, type ReaderPageRuntime } from "./reader-page-runtime.ts";
 
-function runtime(): { target: ReaderPageRuntime; messages: Record<string, unknown>[]; listeners: Record<string, EventListener>; timeouts: Array<() => void> } {
+function runtime(options: { readonly referrer?: string; readonly url?: string } = {}): { target: ReaderPageRuntime; messages: Record<string, unknown>[]; listeners: Record<string, EventListener>; timeouts: Array<() => void> } {
   const messages: Record<string, unknown>[] = [];
   const listeners: Record<string, EventListener> = {};
   const timeouts: Array<() => void> = [];
   const document = {
     readyState: "complete",
-    referrer: "tauri://localhost/reader.html",
-    URL: "reader://localhost/book/1",
+    referrer: options.referrer ?? "tauri://localhost/reader.html",
+    URL: options.url ?? "reader://localhost/book/1",
     documentElement: { lang: "zh-CN" },
     addEventListener: () => undefined,
     getElementById: () => null,
@@ -111,6 +111,80 @@ test("message router accepts only the reader shell and its concrete origin", () 
   assert.equal(target.overlayOpen, undefined);
   receive?.({ source: target.parent, origin: "tauri://localhost", data: { overlayOpen: true } } as MessageEvent);
   assert.equal(target.overlayOpen, true);
+});
+
+test("same-book resume accepts only a bounded numeric anchor from the trusted shell", () => {
+  const { target, listeners } = runtime();
+  const restores: unknown[] = [];
+  target.scheduleSameBookResumeRestore = (request: unknown) => restores.push(request);
+  installReaderPageRuntime(target);
+
+  listeners.message?.({
+    source: target.parent,
+    origin: "tauri://localhost",
+    data: { sameBookResume: { chapter: 7, anchor: { text_offset: 92_341, viewport_offset: 18.4, context_after: "正文不得转发" } } },
+  } as MessageEvent);
+  listeners.message?.({
+    source: target.parent,
+    origin: "tauri://localhost",
+    data: { sameBookResume: { chapter: 7, anchor: { text_offset: -1, viewport_offset: 0 } } },
+  } as MessageEvent);
+
+  assert.deepEqual(restores, [{ chapter: 7, anchor: { text_offset: 92_341, viewport_offset: 18 } }]);
+});
+
+test("Windows reader page accepts the paired Tauri host when no-referrer omits the shell URL", () => {
+  const { target, listeners } = runtime({ referrer: "", url: "http://reader.localhost/book/1" });
+  const relayouts: unknown[] = [];
+  const traces: unknown[][] = [];
+  target.anchorValid = () => false;
+  target.topAnchor = () => null;
+  target.anchorTextOffset = () => null;
+  target.captureImageVisualAnchor = () => null;
+  target.relayout = (options: unknown) => { relayouts.push(options); return null; };
+  target.invalidateMeasure = () => undefined;
+  target.scheduleImageVisualAnchorRestore = () => undefined;
+  target.readerBugTrace = (...args: unknown[]) => { traces.push(args); };
+  installReaderPageRuntime(target);
+  const settings = { theme: "dark", fontSize: 32, flowMode: "paged", pageMode: "dual" };
+  listeners.message?.({ source: target.parent, origin: "https://evil.example", data: { settings } } as MessageEvent);
+  listeners.message?.({ source: {}, origin: "http://tauri.localhost", data: { settings } } as MessageEvent);
+  assert.equal(target.S.theme, undefined);
+  listeners.message?.({
+    source: target.parent,
+    origin: "http://tauri.localhost",
+    data: { settings },
+  } as MessageEvent);
+  assert.equal(target.S.theme, "dark");
+  assert.equal(target.S.fontSize, 32);
+  assert.equal(target.S.pageMode, "dual");
+  assert.equal(relayouts.length, 1);
+  assert.deepEqual(traces, [["settings", "applied", null]]);
+});
+
+test("a same-flow settings replay keeps active scroll paging and its partial-line mask", () => {
+  const { target, listeners } = runtime();
+  const style = { clipPath: "inset(12px 0px 9px 0px)", setProperty: () => undefined };
+  target.S = { ...target.S, flowMode: "scroll", pageMode: "single", theme: "light" };
+  target.scrollPagedView = true;
+  target.scroller = { style } as unknown as HTMLElement;
+  target.anchorValid = () => false;
+  target.topAnchor = () => null;
+  target.anchorTextOffset = () => null;
+  target.captureImageVisualAnchor = () => null;
+  target.relayout = () => null;
+  target.invalidateMeasure = () => undefined;
+  target.isScrollMode = () => true;
+  installReaderPageRuntime(target);
+
+  listeners.message?.({
+    source: target.parent,
+    origin: "tauri://localhost",
+    data: { settings: { ...target.S, theme: "dark" } },
+  } as MessageEvent);
+
+  assert.equal(target.scrollPagedView, true);
+  assert.equal(style.clipPath, "inset(12px 0px 9px 0px)");
 });
 
 test("switch snapshot bounds an unfinished chapter turn and reports the latest stable anchor", () => {

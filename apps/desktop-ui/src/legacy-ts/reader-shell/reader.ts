@@ -63,7 +63,25 @@ interface AnchorRange { readonly start: number; readonly end: number }
 interface JumpPoint extends UnknownRecord { readonly chapter: number; readonly chFrac: number; readonly progress: number }
 interface JumpRequest extends UnknownRecord { readonly chapter?: number; readonly term?: string }
 interface VirtualChapter extends UnknownRecord { readonly ch: number; readonly frag: string }
-interface ReadingAnchor extends UnknownRecord { readonly text_offset?: number }
+interface ReadingAnchor extends UnknownRecord {
+  readonly text_offset?: number;
+  readonly viewport_offset?: number;
+}
+interface SameBookResumePosition {
+  readonly chapter: number;
+  readonly anchor: { readonly text_offset: number; readonly viewport_offset: number };
+}
+interface SameBookResumeState extends UnknownRecord {
+  readonly reason?: unknown;
+  readonly before_page?: unknown;
+  readonly after_page?: unknown;
+  readonly before_anchor_offset?: unknown;
+  readonly after_anchor_offset?: unknown;
+  readonly resize_sequence?: unknown;
+  readonly layout_width?: unknown;
+  readonly layout_height?: unknown;
+  readonly restore_pending?: unknown;
+}
 interface ProgressRequest extends UnknownRecord {
   readonly progress: number; readonly chapter: number; readonly frac: number;
   readonly anchor: ReadingAnchor | null; readonly sequence: number;
@@ -113,6 +131,7 @@ interface ReaderFrameData extends UnknownRecord {
   readonly totalCh?: number; readonly logicalCh?: number; readonly logicalTotal?: number; readonly page?: number;
   readonly total?: number; readonly gPage?: number; readonly gTotal?: number; readonly positionRestored?: number;
   readonly positionCommit?: number; readonly positionSnapshotRequestId?: number; readonly dualContinuationChapter?: number;
+  readonly sameBookResumeState?: SameBookResumeState | null;
   readonly readerPerf?: string; readonly ttsState?: unknown;
   readonly ttsSynth?: { readonly text?: unknown; readonly voice?: unknown; readonly rate?: unknown; readonly seq?: unknown; readonly idx?: unknown };
   readonly pdfState?: UnknownRecord;
@@ -1042,6 +1061,20 @@ ttsBtn.addEventListener("click", (e) => {
 // 书架检索点击 → 跳到命中章节并高亮（等合并页就绪后再发）
 let frameReady = false;
 let pendingJump: JumpRequest | null = null;
+interface ReaderSwitchRequest {
+  readonly id: string;
+  readonly reuseClosedSave: boolean;
+}
+interface QueuedReaderSwitchRequest extends ReaderSwitchRequest {
+  readonly sequence: number;
+  readonly queuedAt: number;
+}
+// 与原生隐藏阅读外壳的最近保存窗口一致。关闭快照或本机磁盘偶发变慢时，
+// 第一次点击仍必须兑现；不能因为结算超过 3 秒又把已排队请求丢掉。
+const READER_SWITCH_QUEUE_MAX_AGE_MS = 15_000;
+let readerCloseSettlementPending = false;
+let queuedReaderSwitchRequest: QueuedReaderSwitchRequest | null = null;
+let readerSwitchRequestSequence = 0;
 function doJump(j: JumpRequest | null | undefined): void {
   if (!j) {
     window.consumePendingCrossSearch?.();
@@ -1055,11 +1088,65 @@ function doJump(j: JumpRequest | null | undefined): void {
   }
 }
 listen("shelf-jump", (e) => doJump(e.payload as JumpRequest));
-listen("reader-switch-request", async (event) => {
+function readerSwitchRequest(event: { readonly payload?: unknown } | null | undefined): ReaderSwitchRequest | null {
   const payload = event?.payload as { readonly bookId?: unknown; readonly skipFinalSave?: unknown } | undefined;
   const id = String(payload?.bookId || "");
-  if (!/^\d+$/.test(id) || readerWindowClosePending || !readerBookBound || !currentBookId) return;
-  const reuseClosedSave = payload?.skipFinalSave === true;
+  return /^\d+$/.test(id) ? { id, reuseClosedSave: payload?.skipFinalSave === true } : null;
+}
+function recordReaderSwitchQueue(phase: string, outcome: string, detail: UnknownRecord = {}): void {
+  window.ReaderBugTrace?.record?.("switch_request_queue", {
+    source: "reader_shell",
+    phase,
+    outcome,
+    ...detail,
+  });
+}
+function queueReaderSwitchRequest(request: ReaderSwitchRequest): void {
+  const now = performance.now();
+  const queued = queuedReaderSwitchRequest;
+  if (queued?.id === request.id) {
+    queuedReaderSwitchRequest = {
+      ...request,
+      sequence: queued.sequence,
+      queuedAt: queued.queuedAt,
+    };
+    recordReaderSwitchQueue("queued", "deduplicated", {
+      reason: "close_pending",
+      sequence: queued.sequence,
+      duration_ms: Math.max(0, Math.round(now - queued.queuedAt)),
+    });
+    return;
+  }
+  const sequence = ++readerSwitchRequestSequence;
+  queuedReaderSwitchRequest = { ...request, sequence, queuedAt: now };
+  recordReaderSwitchQueue("queued", queued ? "replaced" : "queued", {
+    reason: "close_pending",
+    sequence,
+  });
+}
+function replayQueuedReaderSwitchRequest(): void {
+  const queued = queuedReaderSwitchRequest;
+  queuedReaderSwitchRequest = null;
+  if (!queued) return;
+  const age = Math.max(0, performance.now() - queued.queuedAt);
+  if (age > READER_SWITCH_QUEUE_MAX_AGE_MS || !readerBookBound || !currentBookId) {
+    recordReaderSwitchQueue("dropped", age > READER_SWITCH_QUEUE_MAX_AGE_MS ? "expired" : "invalid_binding", {
+      reason: age > READER_SWITCH_QUEUE_MAX_AGE_MS ? "expired" : "reader_unbound",
+      sequence: queued.sequence,
+      duration_ms: Math.round(age),
+    });
+    return;
+  }
+  recordReaderSwitchQueue("replayed", "started", {
+    reason: "close_completed",
+    sequence: queued.sequence,
+    duration_ms: Math.round(age),
+  });
+  void executeReaderSwitchRequest(queued);
+}
+async function executeReaderSwitchRequest(request: ReaderSwitchRequest): Promise<void> {
+  if (readerWindowClosePending || !readerBookBound || !currentBookId) return;
+  const { id, reuseClosedSave } = request;
   readerWindowClosePending = true;
   let preparedTarget: Promise<boolean> | null = null;
   let switchCompleted = false;
@@ -1095,8 +1182,11 @@ listen("reader-switch-request", async (event) => {
         source: "reader_shell",
         outcome: snapshotConfirmed ? "confirmed" : "recent_position",
       });
+      const resumeRestoreWasPending = sameBookResumePending;
       const saved = await sendProgressNow();
-      if (!saved) throw new Error("旧图书阅读位置保存失败");
+      // 同书恢复事务尚未完成时没有任何新用户位置可保存；沿用关闭前已落盘的
+      // 锚点即可安全切书，但不能把这次“未写入”伪装成 hidden-after-save。
+      if (!saved && !resumeRestoreWasPending) throw new Error("旧图书阅读位置保存失败");
     }
     pauseReadTracking("switch-book");
     await flushReadWords(true);
@@ -1113,6 +1203,16 @@ listen("reader-switch-request", async (event) => {
     readerWindowClosePending = false;
     console.warn("切换图书失败", error);
   }
+}
+listen("reader-switch-request", (event) => {
+  const request = readerSwitchRequest(event);
+  if (!request || !readerBookBound || !currentBookId) return;
+  if (readerWindowClosePending) {
+    if (readerCloseSettlementPending) queueReaderSwitchRequest(request);
+    else recordReaderSwitchQueue("dropped", "busy", { reason: "switch_in_progress" });
+    return;
+  }
+  void executeReaderSwitchRequest(request);
 });
 listen("reader-hide-request", () => closeReaderWindow().catch(() => {}));
 listen("reader-shell-resume", () => {
@@ -1297,6 +1397,11 @@ let progTimer: ReturnType<typeof setTimeout> | null = null;
 let lastProgressReportChapter: number | null = null;
 let readerWindowClosePending = false;
 let readerShellHidden = false;
+let hiddenReaderResumePosition: SameBookResumePosition | null = null;
+let sameBookResumePending = false;
+let sameBookResumeStartedAt = 0;
+let sameBookResumeTimer: ReturnType<typeof setTimeout> | null = null;
+let lastReportedReaderPage = 0;
 let progressSaveSequence = 0;
 let positionSnapshotSequence = 0;
 let pendingPositionSnapshot: PendingSnapshot | null = null;
@@ -1339,6 +1444,19 @@ function progressSaveDetail(sequence: number, request: ProgressRequest, outcome:
   };
 }
 function sendProgressNow(): Promise<boolean> {
+  // 同书隐藏窗口刚恢复时，原生几何会先触发一轮 resize/relayout。正文页会用
+  // 关闭前的字符锚点在稳定尺寸上复位；在确认消息回来前，任何中间位置都不能
+  // 覆盖数据库，否则反复打开同一本书会在两个分页断点之间来回漂移。
+  if (sameBookResumePending) {
+    window.ReaderBugTrace?.record?.("same_book_resume", {
+      source: "reader_shell",
+      phase: "save",
+      outcome: "suppressed",
+      restore_pending: true,
+      save_suppressed: true,
+    });
+    return Promise.resolve(false);
+  }
   if (progTimer) {
     clearTimeout(progTimer);
     progTimer = null;
@@ -1372,33 +1490,72 @@ function sendProgressNow(): Promise<boolean> {
 async function closeReaderWindow(): Promise<void> {
   if (readerWindowClosePending) return;
   readerWindowClosePending = true;
+  readerCloseSettlementPending = true;
+  // 先向正文页索取最新锚点，但不再让可见窗口等待完整排版。阅读 WebView 会被
+  // 隐藏缓存，隐藏后仍能在这个短窗口内回传位置并完成最终写盘。
+  const positionSnapshot = requestPagePositionSnapshot({
+    turnWaitMs: 180,
+    responseTimeoutMs: 420,
+  });
   try {
-    // 跨章翻页可能仍在等待章节样式和最终分栏。先让正文页完成这次排版并
-    // 回传稳定锚点，再保存；否则外壳可能把上一章或临时页的位置写入数据库。
-    await requestPagePositionSnapshot();
-    // beforeunload 中发起的异步 IPC 可能随 WebView 一起被销毁。关闭按钮必须先等
-    // 当前页位置确实写入，再让原生窗口进入隐藏/销毁流程。
-    const saved = await sendProgressNow();
     await invoke("main_window_close");
-    pauseHiddenReaderShell();
-    if (saved) await invoke("reader_shell_hidden_after_save");
-    // 阅读 WebView 会被隐藏缓存而不是销毁；解除关闭门闩，才能接收下一本书的
-    // reader-switch-request。窗口已隐藏，不会因此发生重复点击。
-    readerWindowClosePending = false;
+    pauseHiddenReaderShell({ preservePositionSnapshot: true });
   } catch (error) {
+    if (pendingPositionSnapshot) {
+      clearTimeout(pendingPositionSnapshot.timer);
+      pendingPositionSnapshot.resolve(false);
+      pendingPositionSnapshot = null;
+    }
+    readerCloseSettlementPending = false;
     readerWindowClosePending = false;
+    replayQueuedReaderSwitchRequest();
     console.warn("关闭阅读窗口失败", error);
     throw error;
   }
+
+  void (async () => {
+    const snapshotConfirmed = await positionSnapshot;
+    window.ReaderBugTrace?.record?.("close_position_snapshot", {
+      source: "reader_shell",
+      outcome: snapshotConfirmed ? "confirmed" : "recent_position",
+    });
+    const saved = await sendProgressNow();
+    if (saved) await invoke("reader_shell_hidden_after_save");
+  })().catch((error) => {
+    console.warn("阅读窗口隐藏后的最终保存失败", error);
+  }).finally(() => {
+    // 阅读 WebView 会被隐藏缓存而不是销毁；最终保存结算后解除关闭门闩，才能
+    // 安全重放关闭期间到达的最后一条 reader-switch-request。
+    readerCloseSettlementPending = false;
+    readerWindowClosePending = false;
+    replayQueuedReaderSwitchRequest();
+  });
 }
 window.closeReaderWindow = closeReaderWindow;
-function pauseHiddenReaderShell(): void {
+interface PauseHiddenReaderShellOptions {
+  readonly preservePositionSnapshot?: boolean;
+}
+function sameBookResumePosition(chapter: unknown, anchor: ReadingAnchor | null | undefined): SameBookResumePosition | null {
+  const textOffset = Number(anchor?.text_offset);
+  const viewportOffset = Number(anchor?.viewport_offset);
+  return Number.isFinite(textOffset)
+    ? {
+        chapter: Math.max(0, Math.floor(Number(chapter) || 0)),
+        anchor: {
+          text_offset: Math.max(0, Math.round(textOffset)),
+          viewport_offset: Number.isFinite(viewportOffset) ? Math.max(0, Math.round(viewportOffset)) : 0,
+        },
+      }
+    : null;
+}
+function pauseHiddenReaderShell(options: PauseHiddenReaderShellOptions = {}): void {
+  hiddenReaderResumePosition = sameBookResumePosition(curChapter, curReadingAnchor);
   readerShellHidden = true;
   if (progTimer) {
     clearTimeout(progTimer);
     progTimer = null;
   }
-  if (pendingPositionSnapshot) {
+  if (pendingPositionSnapshot && !options.preservePositionSnapshot) {
     clearTimeout(pendingPositionSnapshot.timer);
     pendingPositionSnapshot.resolve(false);
     pendingPositionSnapshot = null;
@@ -1415,9 +1572,42 @@ function resumeHiddenReaderShell(): void {
   if (!readerShellHidden) return;
   readerShellHidden = false;
   resetReadingTimeClock();
+  if (isPdf || !frameReady || !hiddenReaderResumePosition) {
+    sameBookResumePending = false;
+    return;
+  }
+  sameBookResumePending = true;
+  sameBookResumeStartedAt = performance.now();
+  if (sameBookResumeTimer) clearTimeout(sameBookResumeTimer);
+  const position = hiddenReaderResumePosition;
+  window.ReaderBugTrace?.record?.("same_book_resume", {
+    source: "reader_shell",
+    phase: "requested",
+    outcome: "pending",
+    before_page: lastReportedReaderPage,
+    before_anchor_offset: position.anchor.text_offset,
+    viewport_width: Math.max(0, Math.round(window.innerWidth || 0)),
+    viewport_height: Math.max(0, Math.round(window.innerHeight || 0)),
+    restore_pending: true,
+    save_suppressed: false,
+  });
+  sendToPage({ sameBookResume: position });
+  sameBookResumeTimer = setTimeout(() => {
+    sameBookResumeTimer = null;
+    if (!sameBookResumePending) return;
+    sameBookResumePending = false;
+    window.ReaderBugTrace?.record?.("same_book_resume", {
+      source: "reader_shell",
+      phase: "completed",
+      outcome: "timeout",
+      duration_ms: Math.max(0, Math.round(performance.now() - sameBookResumeStartedAt)),
+      restore_pending: false,
+      save_suppressed: false,
+    });
+  }, 1_600);
 }
 function reportProgress(immediate = false): void {
-  if (!readerBookBound || readerShellHidden) return;
+  if (!readerBookBound || readerShellHidden || sameBookResumePending) return;
   // 续读位置是核心状态，不属于可关闭的阅读统计。此前复用
   // reader_stats_report 开关，会让关闭统计的用户永远不保存位置。
   // 原生拖窗期间也不丢弃位置，松手后再保存；关闭窗口时则立即保存。
@@ -2200,8 +2390,28 @@ window.addEventListener("message", (event) => {
   if (!data) return;
   // A cached hidden reader has already persisted its final position. Late
   // iframe messages must not restart progress timers or report a delayed
-  // frame-ready after the user has returned to the shelf.
-  if (readerShellHidden) return;
+  // frame-ready after the user has returned to the shelf. The one exception is
+  // the explicitly requested final position snapshot: it must refresh the
+  // hidden resume anchor and resolve the close transaction without touching UI.
+  if (readerShellHidden) {
+    if (
+      typeof data.progress === "number" &&
+      pendingPositionSnapshot &&
+      Number(data.positionSnapshotRequestId) === pendingPositionSnapshot.requestId
+    ) {
+      curProgress = data.progress;
+      curChapter = data.chapter || 0;
+      curChFrac = data.chFrac || 0;
+      curReadingAnchor = data.anchor || null;
+      lastReportedReaderPage = Math.max(0, Math.round(Number(data.page) || 0));
+      hiddenReaderResumePosition = sameBookResumePosition(curChapter, curReadingAnchor);
+      const pending = pendingPositionSnapshot;
+      pendingPositionSnapshot = null;
+      clearTimeout(pending.timer);
+      pending.resolve(true);
+    }
+    return;
+  }
   const e = { data };
   if (e.data.readerHighlightMenuPreferencesReady) {
     restoreHighlightMenuPreferences();
@@ -2245,8 +2455,14 @@ window.addEventListener("message", (event) => {
     curChapter = e.data.chapter || 0;
     curChFrac = e.data.chFrac || 0;
     curReadingAnchor = e.data.anchor || null;
+    lastReportedReaderPage = Math.max(0, Math.round(Number(e.data.page) || 0));
     curTotalCh = e.data.totalCh || 1;
     if (pendingPositionSnapshot && Number(e.data.positionSnapshotRequestId) === pendingPositionSnapshot.requestId) {
+      const latestResumePosition = sameBookResumePosition(curChapter, curReadingAnchor);
+      if (latestResumePosition) {
+        hiddenReaderResumePosition = latestResumePosition;
+        if (sameBookResumePending) sendToPage({ sameBookResume: latestResumePosition });
+      }
       const pending = pendingPositionSnapshot;
       pendingPositionSnapshot = null;
       clearTimeout(pending.timer);
@@ -2254,6 +2470,40 @@ window.addEventListener("message", (event) => {
     }
     if (typeof e.data.logicalCh === "number") curVchap = e.data.logicalCh;
     if (e.data.logicalTotal) vchapTotal = e.data.logicalTotal;
+    if (e.data.positionRestored === 1 && sameBookResumePending) {
+      sameBookResumePending = false;
+      if (sameBookResumeTimer) {
+        clearTimeout(sameBookResumeTimer);
+        sameBookResumeTimer = null;
+      }
+      const restoredOffset = Number(e.data.anchor?.text_offset);
+      const resumeState = e.data.sameBookResumeState;
+      const boundedInteger = (value: unknown, maximum: number): number | undefined => {
+        const number = Number(value);
+        return Number.isFinite(number) ? Math.max(0, Math.min(maximum, Math.round(number))) : undefined;
+      };
+      const reason = resumeState?.reason === "timeout" ? "timeout" : "stable";
+      window.ReaderBugTrace?.record?.("same_book_resume", {
+        source: "reader_shell",
+        phase: "completed",
+        outcome: "restored",
+        reason,
+        duration_ms: Math.max(0, Math.round(performance.now() - sameBookResumeStartedAt)),
+        before_page: boundedInteger(resumeState?.before_page, 1_000_000),
+        after_page: boundedInteger(resumeState?.after_page, 1_000_000) ?? lastReportedReaderPage,
+        before_anchor_offset: boundedInteger(resumeState?.before_anchor_offset, 1_000_000_000),
+        after_anchor_offset: boundedInteger(resumeState?.after_anchor_offset, 1_000_000_000)
+          ?? (Number.isFinite(restoredOffset) ? Math.max(0, Math.round(restoredOffset)) : undefined),
+        resize_sequence: boundedInteger(resumeState?.resize_sequence, 1_000_000),
+        layout_width: boundedInteger(resumeState?.layout_width, 100_000),
+        layout_height: boundedInteger(resumeState?.layout_height, 100_000),
+        viewport_width: Math.max(0, Math.round(window.innerWidth || 0)),
+        viewport_height: Math.max(0, Math.round(window.innerHeight || 0)),
+        restore_pending: false,
+        save_suppressed: false,
+      });
+      hiddenReaderResumePosition = null;
+    }
     if (isPdf) {
       progressEl.textContent = readerText("pdfProgress", "第 {page}/{total} 页 · {progress}%", {
         page: e.data.page || 1, total: e.data.total || 1, progress: curProgress.toFixed(1),

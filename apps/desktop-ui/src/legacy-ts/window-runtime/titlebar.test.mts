@@ -144,3 +144,53 @@ test("classic titlebar installer uses the typed injected transport and fails clo
   assert.equal(noTauri.buttons["win-min"].listeners.length, 0);
   assert.equal(noTauri.classes.has("platform-macos"), true);
 });
+
+test("titlebar records only redacted control delivery and command outcome", async () => {
+  const fixture = titlebarDocument();
+  const trace: Array<[string, string, string]> = [];
+  const runtime = {
+    document: fixture.document,
+    navigator: { platform: "Win32" },
+    ReaderProblemTraceUI: {
+      recordWindowControl: (control: string, phase: string, outcome: string) => {
+        trace.push([control, phase, outcome]);
+      },
+    },
+  };
+  installTitlebar(runtime, {
+    invoke: async <TResult,>() => undefined as TResult,
+  });
+  fixture.buttons["win-close"].listeners[0]?.listener(clickEvent().event);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(trace, [
+    ["close", "click", "requested"],
+    ["close", "command", "ok"],
+  ]);
+});
+
+test("titlebar classifies a rejected native command without retaining its error text", async () => {
+  const fixture = titlebarDocument();
+  const trace: Array<[string, string, string]> = [];
+  installTitlebar(
+    {
+      document: fixture.document,
+      ReaderProblemTraceUI: {
+        recordWindowControl: (control: string, phase: string, outcome: string) => {
+          trace.push([control, phase, outcome]);
+        },
+      },
+    },
+    {
+      invoke: async <TResult,>() => {
+        throw new Error("invalid args: missing required key window");
+        return undefined as TResult;
+      },
+    },
+  );
+  fixture.buttons["win-min"].listeners[0]?.listener(clickEvent().event);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(trace, [
+    ["minimize", "click", "requested"],
+    ["minimize", "command", "failed_arguments"],
+  ]);
+});

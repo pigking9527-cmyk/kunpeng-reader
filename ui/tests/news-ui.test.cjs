@@ -376,6 +376,18 @@ test("NewsNow has a shelf toolbar entry and an independently mounted news page",
   );
 });
 
+test("NewsNow warms one hidden article shell before a news or intelligence link is clicked", () => {
+  const { context, root, invocations } = newsFixture();
+  context.ReaderNewsUI.init({ root });
+
+  assert.ok(
+    invocations.some(({ command }) => command === "newsnow_prepare_article_shell"),
+    "the native article shell should be created while the reader is idle",
+  );
+  assert.match(backend, /WebviewUrl::App\("newsnow-article-shell\.html"\.into\(\)\)/);
+  assert.match(backend, /article_webview\.hide\(\);[\s\S]*?article_webview[\s\S]*?\.navigate\(article_url\)/);
+});
+
 test("NewsNow is always available while its detailed local options remain configurable", () => {
   const experiments = fs.readFileSync(
     path.join(ui, "generated-ts", "experimental-features.js"),
@@ -422,9 +434,12 @@ test("NewsNow keeps its return surface usable while external pages load", () => 
   assert.match(backend, /const ARTICLE_LOADING_EVENT: &str = "newsnow-article-loading"/);
   assert.match(backend, /const ARTICLE_READY_EVENT: &str = "newsnow-article-ready"/);
   assert.match(backend, /\.on_page_load\(move \|webview, payload\|/);
-  assert.match(backend, /ArticleWebviewPhase::Loading[\s\S]*?webview\.show\(\)/);
+  assert.match(backend, /ArticleWebviewPhase::Loading[\s\S]*?webview\.hide\(\)/);
   assert.match(backend, /ArticleWebviewPhase::Ready[\s\S]*?webview\.show\(\)/);
-  assert.match(backend, /Duration::from_millis\(700\)/);
+  assert.match(backend, /ARTICLE_WEBVIEW_IDLE[\s\S]*?webview\.hide\(\)/);
+  assert.match(backend, /ARTICLE_WEBVIEW_LOADING[\s\S]*?article_webview\.hide\(\)[\s\S]*?\.navigate\(article_url\)/);
+  assert.doesNotMatch(backend, /navigate\(article_shell_url\(\)\?\)/);
+  assert.doesNotMatch(backend, /Duration::from_millis\(700\)/);
   assert.match(script, /newsnow-article-loading/);
   assert.match(script, /newsnow-article-ready/);
   assert.match(script, /正在加载网页原文…可随时返回。/);
@@ -750,6 +765,28 @@ test("classic NewsNow installer opens local articles and returns to the feed", a
   assert.ok(
     invocations.some(({ command }) => command === "newsnow_close_article"),
   );
+});
+
+test("openItem switches to the in-reader article surface before its async load settles", async () => {
+  const { context, root, elements } = newsFixture();
+  const controller = context.ReaderNewsUI.init({ root });
+
+  const opening = controller.openItem({
+    id: "article-immediate",
+    sourceId: "alpha",
+    source: "Alpha",
+    title: "立即打开的资讯",
+    summary: "正文可在切页后异步加载。",
+    url: "https://example.com/immediate",
+    publishedAt: "2026-01-01T00:00:00Z",
+  });
+
+  // Do not await here: a link click must publish the article page in the
+  // current event turn, while the native article request continues in back.
+  assert.equal(elements.get("newsnow-reader").hidden, false);
+  assert.equal(elements.get("newsnow-page").hidden, true);
+  assert.equal(elements.get("newsnow-reader-title").textContent, "立即打开的资讯");
+  await opening;
 });
 
 test("Gesture settings live in common settings and close news, library, and reader surfaces", () => {
