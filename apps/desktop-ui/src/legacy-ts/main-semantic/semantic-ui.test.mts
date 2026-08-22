@@ -12,6 +12,9 @@ import {
 } from "./semantic-ui.ts";
 
 const repositoryRoot = new URL("../../../../../", import.meta.url);
+const viteCli = fileURLToPath(
+  new URL("../../../../../node_modules/vite/bin/vite.js", import.meta.url),
+);
 
 class FakeClassList {
   public readonly values = new Set<string>();
@@ -230,8 +233,8 @@ test("semantic controller source has one typed port and no alternate UI implemen
 
 test("semantic controller emits a standalone classic IIFE", () => {
   const output = execFileSync(
-    "npx",
-    ["vite", "build", "--config", "apps/desktop-ui/vite.legacy-ts.config.ts"],
+    process.execPath,
+    [viteCli, "build", "--config", "apps/desktop-ui/vite.legacy-ts.config.ts"],
     {
       cwd: repositoryRoot,
       encoding: "utf8",

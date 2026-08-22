@@ -8,6 +8,9 @@ import type { TauriTransport } from "../../../../../packages/tauri-api/src/index
 import { installReaderSettingsUi } from "./reader-settings-ui.ts";
 
 const repositoryRoot = new URL("../../../../../", import.meta.url);
+const viteCli = fileURLToPath(
+  new URL("../../../../../node_modules/vite/bin/vite.js", import.meta.url),
+);
 
 class FakeClassList {
   public readonly values = new Set<string>();
@@ -321,8 +324,8 @@ test("controller source is strict, single-UI and emits a standalone classic inst
   assert.match(source, /global\.applyShellTheme = applyShellTheme/u);
   assert.match(source, /global\.initSettingsUI = initSettingsUI/u);
   const output = execFileSync(
-    "npx",
-    ["vite", "build", "--config", "apps/desktop-ui/vite.legacy-ts.config.ts"],
+    process.execPath,
+    [viteCli, "build", "--config", "apps/desktop-ui/vite.legacy-ts.config.ts"],
     {
       cwd: repositoryRoot,
       encoding: "utf8",
