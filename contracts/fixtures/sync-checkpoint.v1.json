@@ -1,0 +1,42 @@
+{
+  "contractVersion": 1,
+  "path": "/v1/sync/checkpoint",
+  "method": "GET",
+  "authentication": {
+    "required": true,
+    "syncProtocolHeaderRequired": true,
+    "cacheControl": "no-store"
+  },
+  "caughtUp": {
+    "query": { "dataGeneration": 1, "cursor": 42 },
+    "response": {
+      "ok": true,
+      "dataGeneration": 1,
+      "cursor": 42,
+      "serverCursor": 42,
+      "caughtUp": true,
+      "requestId": "00000000-0000-4000-8000-000000000001"
+    }
+  },
+  "behind": {
+    "query": { "dataGeneration": 1, "cursor": 41 },
+    "response": {
+      "ok": true,
+      "dataGeneration": 1,
+      "cursor": 41,
+      "serverCursor": 42,
+      "caughtUp": false,
+      "requestId": "00000000-0000-4000-8000-000000000002"
+    }
+  },
+  "generationMismatch": {
+    "query": { "dataGeneration": 1, "cursor": 42 },
+    "expectedStatus": 409,
+    "errorCode": "DATA_GENERATION_MISMATCH"
+  },
+  "securityNotes": [
+    "No bearer token is present in this fixture.",
+    "A client uses caughtUp true only with no pending local writes and a completed pull.",
+    "A false result or periodic repair falls back to existing pull inventory reconcile behavior."
+  ]
+}

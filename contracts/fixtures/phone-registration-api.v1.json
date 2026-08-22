@@ -1,0 +1,46 @@
+{
+  "contractVersion": 1,
+  "authentication": {
+    "required": false,
+    "syncProtocolHeaderRequired": false,
+    "cacheControl": "no-store"
+  },
+  "start": {
+    "path": "/v1/auth/register/phone/start",
+    "requestFields": ["username", "phone", "installationId"],
+    "successStatus": 202,
+    "response": {
+      "ok": true,
+      "expiresIn": 300,
+      "requestId": "00000000-0000-4000-8000-000000000001"
+    },
+    "requestExample": {
+      "username": "reader_01",
+      "phone": "+8613711112222",
+      "installationId": "fixture-installation"
+    }
+  },
+  "confirm": {
+    "path": "/v1/auth/register/phone/confirm",
+    "requestFields": ["username", "phone", "code", "password", "installationId", "deviceName"],
+    "requiredRequestFields": ["username", "phone", "code", "password", "installationId"],
+    "successStatus": 201,
+    "responseContract": "SessionResponse",
+    "requestExample": {
+      "username": "reader_01",
+      "phone": "+8613711112222",
+      "code": "123456",
+      "password": "fixture-password",
+      "installationId": "fixture-installation",
+      "deviceName": "fixture-device"
+    }
+  },
+  "verification": {
+    "phoneFormat": "E.164",
+    "codeDigits": 6,
+    "expiresIn": 300,
+    "maximumAttempts": 5,
+    "providerAcceptanceRequired": true
+  },
+  "sensitiveValuesOmitted": ["phone", "code", "password", "smsSecretId", "smsSecretKey"]
+}

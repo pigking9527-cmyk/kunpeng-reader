@@ -1,0 +1,13 @@
+{
+  "syncProtocolVersion": 1,
+  "entities": [
+    {
+      "id": "custom-amber", "kind": "reader_palette_v1", "updated_at": 1786164000000, "deleted_at": 0, "device_id": "fixture-desktop", "sync_version": 1,
+      "payload": { "version": 1, "id": "custom-amber", "name": "琥珀", "background": "#fff8e7", "backgroundImage": "", "backgroundAssetId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "backgroundAssetSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "backgroundAssetMime": "image/webp", "backgroundAssetBytes": 65536, "text": "#342415", "link": "#9c521a", "selection": "#f5d779", "footnote": "#fff0d2", "border": "#b98b4d", "theme": "light" }
+    },
+    {
+      "id": "default", "kind": "reader_palette_order_v1", "updated_at": 1786164001000, "deleted_at": 0, "device_id": "fixture-desktop", "sync_version": 1,
+      "payload": { "version": 1, "order": ["paper", "custom-amber", "dark", "light"] }
+    }
+  ]
+}

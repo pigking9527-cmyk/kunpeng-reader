@@ -1,0 +1,100 @@
+name: Sync API v5 build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/sync-api-v5.yml"
+      - "server/reader-sync-api-rs/**"
+      - "contracts/fixtures/api-v5-entity-envelope.json"
+  pull_request:
+    paths:
+      - ".github/workflows/sync-api-v5.yml"
+      - "server/reader-sync-api-rs/**"
+      - "contracts/fixtures/api-v5-entity-envelope.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-api-v5-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Linux x86_64 provenance artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout committed source
+        uses: actions/checkout@v7
+
+      - name: Setup Rust 1.97.1
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server/reader-sync-api-rs
+
+      - name: Check formatting, tests, lint, and migration tooling
+        working-directory: server/reader-sync-api-rs
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --all-targets --locked
+          cargo clippy --all-targets --locked -- -D warnings
+          bash scripts/check-migrations.sh
+          bash scripts/test-rehearsal-tools.sh
+
+      - name: Build locked release binary
+        working-directory: server/reader-sync-api-rs
+        run: cargo build --release --locked
+
+      - name: Create, stage, and verify provenance candidate bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/sync-api-v5-staging
+          cp server/reader-sync-api-rs/target/release/reader-sync-api \
+            target/sync-api-v5-staging/reader-sync-api
+          chmod 0755 target/sync-api-v5-staging/reader-sync-api
+          server/reader-sync-api-rs/scripts/create-artifact-provenance.sh \
+            --binary target/sync-api-v5-staging/reader-sync-api \
+            --output target/sync-api-v5-staging/provenance.txt
+          server/reader-sync-api-rs/scripts/create-artifact-provenance.sh \
+            --verify \
+            --binary target/sync-api-v5-staging/reader-sync-api \
+            --manifest target/sync-api-v5-staging/provenance.txt
+          server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+            --binary target/sync-api-v5-staging/reader-sync-api \
+            --manifest target/sync-api-v5-staging/provenance.txt \
+            --output-dir target/sync-api-v5-release
+          server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+            --verify \
+            --bundle-dir target/sync-api-v5-release
+
+      - name: Stage and verify the restricted upload bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+            --binary target/sync-api-v5-release/reader-sync-api \
+            --manifest target/sync-api-v5-release/provenance.txt \
+            --output-dir target/sync-api-v5-upload
+          server/reader-sync-api-rs/scripts/stage-artifact-bundle.sh \
+            --verify \
+            --bundle-dir target/sync-api-v5-upload
+
+      - name: Upload release-candidate artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: reader-sync-api-v5-linux-x86_64
+          path: target/sync-api-v5-upload/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,2087 @@
+use crate::{
+    atomic_file, db, reader_backgrounds, recovery_settings, stats::StatsStore, vocab::VocabStore,
+    AppState,
+};
+mod catalog;
+mod error;
+mod restore;
+mod retention;
+mod snapshot;
+mod transaction_log;
+
+use chrono::Local;
+#[cfg(test)]
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use tauri::Manager;
+
+pub(crate) use catalog::BackupStatus;
+use catalog::{backup_directories, backup_sort_key, recovery_directory};
+use restore::{
+    is_sqlite_target, runtime_projection_names_are_exact, staging_path, transaction_directory,
+    transaction_plan_states, RestoreFilePlan,
+};
+use retention::select_expired_paths;
+#[cfg(test)]
+use retention::MAX_RECOVERY_BACKUPS;
+use snapshot::{
+    file_sha256, manifest_contains, manifest_for, verified_manifest_file, BackupManifest,
+    BACKUP_FORMAT_VERSION,
+};
+#[cfg(test)]
+use transaction_log::RestoreTransactionPlanState;
+#[cfg(test)]
+use transaction_log::RESTORE_TRANSACTION_VERSION;
+use transaction_log::{
+    load_manifest, RestoreTransactionLog, RestoreTransactionManifest, RestoreTransactionPhase,
+    RESTORE_TRANSACTION_FILE,
+};
+const BACKUP_METADATA_KEY: &str = "last_recovery_backup_day";
+const RUNTIME_PROJECTION_FILES: &[&str] = &["library.json", "stats.json", "vocab.json"];
+const PORTABLE_FILES: &[&str] = &[
+    "library.json",
+    "stats.json",
+    "vocab.json",
+    "gesture-settings-v1.json",
+    recovery_settings::MAIN_SNAPSHOT_FILE,
+    recovery_settings::READER_SNAPSHOT_FILE,
+    reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE,
+];
+const SQLITE_FILES: &[&str] = &["external-dicts.db"];
+static BACKUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serializes a core-data installation with backup and restore. Callers that
+/// also need the in-memory core locks must acquire this first, then take the
+/// locks in `lock_core_data` order; that prevents backup/install lock inversions.
+pub(crate) fn core_installation_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    BACKUP_LOCK
+        .lock()
+        .map_err(|_| "核心数据安装锁定失败".to_string())
+}
+
+fn config_dir() -> Result<PathBuf, String> {
+    crate::profile::app_config_dir().ok_or("无法确定应用配置目录".into())
+}
+
+fn backup_root() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("backups"))
+}
+
+pub(crate) fn status() -> Result<BackupStatus, String> {
+    let root = backup_root()?;
+    Ok(catalog::status(&root))
+}
+
+fn rotate_backup_paths(backups: Vec<PathBuf>, protected: Option<&Path>) -> Result<(), String> {
+    for path in select_expired_paths(backups, protected, backup_sort_key)? {
+        std::fs::remove_dir_all(&path)
+            .map_err(|e| format!("删除旧恢复点失败 {}：{e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn rotate_backups(protected: Option<&Path>) -> Result<(), String> {
+    rotate_backup_paths(backup_directories(&backup_root()?), protected)
+}
+
+struct LockedCoreData<'a> {
+    library: std::sync::MutexGuard<'a, crate::book::Library>,
+    stats: std::sync::MutexGuard<'a, StatsStore>,
+    vocab: std::sync::MutexGuard<'a, VocabStore>,
+    db: std::sync::MutexGuard<'a, Option<db::AppDb>>,
+}
+
+fn lock_core_data(state: &AppState) -> Result<LockedCoreData<'_>, String> {
+    // Fixed order for every multi-file snapshot/restore. Holding the complete
+    // set prevents imports, sync, reading stats and shelf edits from crossing
+    // the snapshot/installation boundary.
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "书架锁定失败".to_string())?;
+    let stats = state.stats.lock().map_err(|_| "统计锁定失败".to_string())?;
+    let vocab = state
+        .vocab
+        .lock()
+        .map_err(|_| "生词本锁定失败".to_string())?;
+    let db = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    Ok(LockedCoreData {
+        library,
+        stats,
+        vocab,
+        db,
+    })
+}
+
+fn create_locked_with_data(
+    data: &mut LockedCoreData<'_>,
+    force: bool,
+) -> Result<BackupStatus, String> {
+    let day = Local::now().format("%Y-%m-%d").to_string();
+    let db = data.db.as_ref().ok_or("SQLite 数据库不可用")?;
+    if !force && db.metadata(BACKUP_METADATA_KEY).as_deref() == Some(day.as_str()) {
+        return status();
+    }
+
+    data.library.save()?;
+    data.stats.save()?;
+    data.vocab.save()?;
+
+    let root = backup_root()?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建恢复点目录失败：{e}"))?;
+    let stamp = Local::now().format("%Y%m%d-%H%M%S-%3f").to_string();
+    let final_dir = root.join(&stamp);
+    let temp_dir = root.join(format!(".{stamp}.tmp-{}", std::process::id()));
+    std::fs::create_dir(&temp_dir).map_err(|e| format!("创建临时恢复点失败：{e}"))?;
+
+    let result = (|| {
+        db.backup_to(&temp_dir.join("reader.db"))?;
+        let config = config_dir()?;
+        recovery_settings::ensure_snapshot_files()?;
+        reader_backgrounds::write_recovery_asset_bundle(
+            &temp_dir.join(reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE),
+            &recovery_settings::snapshot_values(),
+        )?;
+        let mut files = vec!["reader.db".to_string()];
+        for name in PORTABLE_FILES {
+            if *name == reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE {
+                files.push((*name).to_string());
+                continue;
+            }
+            let source = config.join(name);
+            if source.is_file() {
+                std::fs::copy(&source, temp_dir.join(name))
+                    .map_err(|e| format!("备份 {name} 失败：{e}"))?;
+                files.push((*name).to_string());
+            }
+        }
+        for name in SQLITE_FILES {
+            let source = config.join(name);
+            if !source.is_file() {
+                continue;
+            }
+            let destination = temp_dir.join(name);
+            let connection = rusqlite::Connection::open(&source)
+                .map_err(|e| format!("打开 {name} 失败：{e}"))?;
+            connection
+                .execute(
+                    "VACUUM INTO ?1",
+                    rusqlite::params![destination.to_string_lossy().as_ref()],
+                )
+                .map_err(|e| format!("备份 {name} 失败：{e}"))?;
+            files.push((*name).to_string());
+        }
+        let files = files
+            .iter()
+            .map(|name| verified_manifest_file(&temp_dir, name))
+            .collect::<Result<Vec<_>, _>>()?;
+        atomic_file::write_json(
+            &temp_dir.join("manifest.json"),
+            &BackupManifest {
+                format: "kunpeng-reader-recovery".to_string(),
+                version: BACKUP_FORMAT_VERSION,
+                app_version: env!("CARGO_PKG_VERSION").to_string(),
+                created_at: Local::now().to_rfc3339(),
+                files,
+            },
+            true,
+        )?;
+        std::fs::rename(&temp_dir, &final_dir).map_err(|e| format!("提交恢复点失败：{e}"))?;
+        db.set_metadata(BACKUP_METADATA_KEY, &day)?;
+        rotate_backups(Some(&final_dir))?;
+        manifest_for(&final_dir).map(|_| ())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+    result?;
+    let mut current = status()?;
+    current.created = true;
+    Ok(current)
+}
+
+fn create_locked(state: &AppState, force: bool) -> Result<BackupStatus, String> {
+    let mut data = lock_core_data(state)?;
+    create_locked_with_data(&mut data, force)
+}
+
+pub(crate) fn create(state: &AppState, force: bool) -> Result<BackupStatus, String> {
+    let _operation = core_installation_lock().map_err(|_| "恢复点任务锁定失败".to_string())?;
+    let _external_dict = crate::external_dict::maintenance_lock();
+    create_locked(state, force)
+}
+
+impl BackupStatus {
+    pub(crate) fn latest_id(&self) -> Result<&str, String> {
+        if self.latest.is_empty() {
+            Err("刚创建的恢复点没有有效标识".to_string())
+        } else {
+            Ok(&self.latest)
+        }
+    }
+}
+
+fn remove_file_if_present(path: &Path, context: &str) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{context} {}：{error}", path.display())),
+    }
+}
+
+fn try_exists(path: &Path, context: &str) -> Result<bool, String> {
+    path.try_exists()
+        .map_err(|error| format!("{context} {}：{error}", path.display()))
+}
+
+fn file_matches_integrity(
+    path: &Path,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<bool, String> {
+    if !try_exists(path, "检查恢复文件是否存在失败")? {
+        return Ok(false);
+    }
+    let (bytes, sha256) = file_sha256(path)?;
+    Ok(bytes == expected_bytes && sha256.eq_ignore_ascii_case(expected_sha256))
+}
+
+fn copy_file_atomically(source: &Path, destination: &Path) -> Result<(), String> {
+    let mut reader = std::fs::File::open(source)
+        .map_err(|error| format!("打开回滚副本失败 {}：{error}", source.display()))?;
+    atomic_file::write_with(destination, |writer| {
+        std::io::copy(&mut reader, writer)
+            .map(|_| ())
+            .map_err(|error| format!("复制回滚副本失败：{error}"))
+    })
+}
+
+fn recover_legacy_restore_artifacts(directory: &Path) -> Result<(), String> {
+    let targets = std::iter::once("reader.db")
+        .chain(PORTABLE_FILES.iter().copied())
+        .chain(SQLITE_FILES.iter().copied())
+        .collect::<Vec<_>>();
+    let mut artifacts: Vec<(String, &'static str, PathBuf, String)> = Vec::new();
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("扫描旧版恢复事务失败 {}：{error}", directory.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("读取旧版恢复事务目录项失败：{error}"))?;
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        for target in &targets {
+            for (label, kind) in [
+                (format!(".{target}.restore-previous-"), "previous"),
+                (format!(".{target}.restore-new-"), "staged"),
+            ] {
+                if let Some(suffix) = file_name.strip_prefix(&label) {
+                    if suffix.is_empty() {
+                        return Err(format!("旧版恢复事务文件名无效：{file_name}"));
+                    }
+                    artifacts.push((
+                        (*target).to_string(),
+                        kind,
+                        entry.path(),
+                        suffix.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+    let suffixes = artifacts
+        .iter()
+        .map(|(_, _, _, suffix)| suffix.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if suffixes.len() != 1 {
+        return Err("发现多组旧版恢复事务，无法安全自动拼接，已阻止启动".into());
+    }
+
+    for target in targets {
+        let destination = directory.join(target);
+        let previous = artifacts
+            .iter()
+            .filter(|(name, kind, _, _)| name == target && *kind == "previous")
+            .map(|(_, _, path, _)| path)
+            .collect::<Vec<_>>();
+        let staged = artifacts
+            .iter()
+            .filter(|(name, kind, _, _)| name == target && *kind == "staged")
+            .map(|(_, _, path, _)| path)
+            .collect::<Vec<_>>();
+        if previous.len() > 1 || staged.len() > 1 {
+            return Err(format!("旧版恢复事务文件重复：{}", destination.display()));
+        }
+        let destination_exists = try_exists(&destination, "检查旧版恢复目标失败")?;
+        if let Some(previous) = previous.first() {
+            if destination_exists {
+                if file_sha256(previous)? != file_sha256(&destination)? {
+                    return Err(format!(
+                        "旧版恢复的当前文件与回滚副本同时存在且内容不同，已阻止覆盖：{}",
+                        destination.display()
+                    ));
+                }
+            } else {
+                copy_file_atomically(previous, &destination)?;
+            }
+        } else if !staged.is_empty() && !destination_exists {
+            return Err(format!(
+                "恢复目标缺失且只发现未验证的旧版暂存文件，已阻止创建空数据：{}",
+                destination.display()
+            ));
+        }
+    }
+    for (_, _, path, _) in artifacts {
+        remove_file_if_present(&path, "清理旧版恢复事务文件失败")?;
+    }
+    Ok(())
+}
+
+fn cleanup_manifest_artifacts(manifest: &RestoreTransactionManifest) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for plan in &manifest.plans {
+        for path in [&plan.staged, &plan.previous] {
+            if let Err(error) = remove_file_if_present(path, "清理恢复事务文件失败") {
+                failures.push(error);
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("；"))
+    }
+}
+
+fn rollback_manifest_plans(manifest: &RestoreTransactionManifest) -> Result<(), String> {
+    // Preflight the whole group before changing any live path. Unknown content
+    // is never silently deleted or combined with files from another snapshot.
+    for plan in &manifest.plans {
+        if plan.had_previous {
+            let original_bytes = plan.original_bytes.ok_or("恢复事务缺少原文件大小")?;
+            let original_sha256 = plan
+                .original_sha256
+                .as_deref()
+                .ok_or("恢复事务缺少原文件校验值")?;
+            let previous_exists = try_exists(&plan.previous, "检查恢复回滚副本失败")?;
+            let live_exists = try_exists(&plan.destination, "检查恢复目标失败")?;
+            let live_is_original =
+                file_matches_integrity(&plan.destination, original_bytes, original_sha256)?;
+            let live_is_expected = file_matches_integrity(
+                &plan.destination,
+                plan.expected_bytes,
+                &plan.expected_sha256,
+            )?;
+            if previous_exists
+                && !file_matches_integrity(&plan.previous, original_bytes, original_sha256)?
+            {
+                return Err(format!(
+                    "恢复回滚副本校验失败，已保留事务供人工检查：{}",
+                    plan.previous.display()
+                ));
+            }
+            if !previous_exists && !live_is_original {
+                return Err(format!(
+                    "原文件与回滚副本均不可验证，已阻止自动恢复：{}",
+                    plan.destination.display()
+                ));
+            }
+            if live_exists && !live_is_original && !live_is_expected {
+                return Err(format!(
+                    "恢复目标包含事务外的未知内容，已阻止自动覆盖：{}",
+                    plan.destination.display()
+                ));
+            }
+        } else if try_exists(&plan.destination, "检查恢复新增目标失败")?
+            && !file_matches_integrity(
+                &plan.destination,
+                plan.expected_bytes,
+                &plan.expected_sha256,
+            )?
+        {
+            return Err(format!(
+                "无旧文件的恢复目标包含未知内容，已阻止自动删除：{}",
+                plan.destination.display()
+            ));
+        }
+    }
+
+    for plan in &manifest.plans {
+        if is_sqlite_target(&plan.destination) {
+            remove_sqlite_sidecars(&plan.destination)?;
+        }
+    }
+
+    for plan in &manifest.plans {
+        if plan.had_previous {
+            let original_bytes = plan.original_bytes.ok_or("恢复事务缺少原文件大小")?;
+            let original_sha256 = plan
+                .original_sha256
+                .as_deref()
+                .ok_or("恢复事务缺少原文件校验值")?;
+            if !file_matches_integrity(&plan.destination, original_bytes, original_sha256)? {
+                copy_file_atomically(&plan.previous, &plan.destination)?;
+            }
+            if !file_matches_integrity(&plan.destination, original_bytes, original_sha256)? {
+                return Err(format!(
+                    "恢复原文件后校验失败：{}",
+                    plan.destination.display()
+                ));
+            }
+        } else if try_exists(&plan.destination, "检查待移除恢复目标失败")? {
+            remove_file_if_present(&plan.destination, "移除未完成恢复新增的文件失败")?;
+        }
+    }
+    cleanup_manifest_artifacts(manifest)
+}
+
+fn validated_live_files_match(manifest: &RestoreTransactionManifest) -> Result<bool, String> {
+    for plan in &manifest.plans {
+        if !file_matches_integrity(
+            &plan.destination,
+            plan.expected_bytes,
+            &plan.expected_sha256,
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn recover_interrupted_restore_in_dir(directory: &Path) -> Result<(), String> {
+    let allowed_targets = std::iter::once("reader.db")
+        .chain(PORTABLE_FILES.iter().copied())
+        .chain(SQLITE_FILES.iter().copied())
+        .collect::<Vec<_>>();
+    let Some(manifest) = load_manifest(directory, &allowed_targets)? else {
+        return recover_legacy_restore_artifacts(directory);
+    };
+
+    match manifest.phase {
+        RestoreTransactionPhase::Installing => rollback_manifest_plans(&manifest)?,
+        RestoreTransactionPhase::Validated => {
+            if validated_live_files_match(&manifest)? {
+                cleanup_manifest_artifacts(&manifest)?;
+            } else {
+                rollback_manifest_plans(&manifest)?;
+            }
+        }
+    }
+    remove_file_if_present(
+        &directory.join(RESTORE_TRANSACTION_FILE),
+        "清理恢复事务日志失败",
+    )
+}
+
+/// Must run before AppDb::open. If the previous process died while replacing
+/// reader.db, this replays the durable transaction log before SQLite gets a
+/// chance to create a new empty database at the missing live path.
+pub(crate) fn recover_interrupted_restore() -> Result<(), String> {
+    let _operation = BACKUP_LOCK
+        .lock()
+        .map_err(|_| "恢复事务锁定失败".to_string())?;
+    let directory = config_dir()?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("创建应用数据目录失败：{error}"))?;
+    recover_interrupted_restore_in_dir(&directory)
+}
+
+fn cleanup_restore_plans(plans: &[RestoreFilePlan]) {
+    for plan in plans {
+        let _ = std::fs::remove_file(&plan.staged);
+    }
+}
+
+/// Restore every live target touched by a failed restore attempt.
+///
+/// `prepared` is the number of plans whose pre-commit check/rename completed;
+/// `commit_attempted` includes the commit that returned an error because an OS
+/// replacement can fail after it has already made the destination visible.
+#[cfg(test)]
+fn rollback_restore_plans(
+    plans: &[RestoreFilePlan],
+    prepared: usize,
+    commit_attempted: usize,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.had_previous && index < prepared {
+            if plan.previous.exists() {
+                if plan.destination.exists() {
+                    if let Err(error) = std::fs::remove_file(&plan.destination) {
+                        failures.push(format!(
+                            "移除未完成恢复文件失败 {}：{error}",
+                            plan.destination.display()
+                        ));
+                    }
+                }
+                if !plan.destination.exists() {
+                    if let Err(error) = std::fs::rename(&plan.previous, &plan.destination) {
+                        failures.push(format!(
+                            "恢复原文件失败 {}：{error}",
+                            plan.destination.display()
+                        ));
+                    }
+                }
+            } else {
+                failures.push(format!("原文件回滚副本缺失：{}", plan.previous.display()));
+            }
+        } else if !plan.had_previous && index < commit_attempted && plan.destination.exists() {
+            if let Err(error) = std::fs::remove_file(&plan.destination) {
+                failures.push(format!(
+                    "移除新增恢复文件失败 {}：{error}",
+                    plan.destination.display()
+                ));
+            }
+        }
+        if let Err(error) = std::fs::remove_file(&plan.staged) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                failures.push(format!(
+                    "清理恢复暂存文件失败 {}：{error}",
+                    plan.staged.display()
+                ));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("；"))
+    }
+}
+
+fn stage_restore_file(source: &Path, destination: &Path) -> Result<RestoreFilePlan, String> {
+    let source_metadata = std::fs::metadata(source)
+        .map_err(|error| format!("读取恢复点文件失败 {}：{error}", source.display()))?;
+    if !source_metadata.is_file() {
+        return Err(format!("恢复点文件缺失：{}", source.display()));
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建恢复目标目录失败 {}：{error}", parent.display()))?;
+    }
+    let staged = staging_path(destination, "restore-new")?;
+    let previous = staging_path(destination, "restore-previous")?;
+    if let Err(error) = std::fs::remove_file(&staged) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "清理旧恢复暂存文件失败 {}：{error}",
+                staged.display()
+            ));
+        }
+    }
+    if try_exists(&previous, "检查旧恢复回滚副本失败")? {
+        if try_exists(destination, "检查恢复目标失败")? {
+            return Err(format!(
+                "检测到未完成恢复的原文件副本，请保留并检查：{}",
+                previous.display()
+            ));
+        }
+        std::fs::rename(&previous, destination).map_err(|error| {
+            format!(
+                "恢复上次未完成事务的原文件失败 {}：{error}",
+                destination.display()
+            )
+        })?;
+    }
+    let source_integrity = file_sha256(source)?;
+    let stage_result = (|| {
+        std::fs::copy(source, &staged)
+            .map_err(|error| format!("复制恢复点文件失败 {}：{error}", source.display()))?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&staged)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("同步恢复暂存文件失败 {}：{error}", staged.display()))?;
+        // The manifest verifies the source; this second comparison also catches
+        // a short/torn copy before any live file is renamed.
+        let staged_integrity = file_sha256(&staged)?;
+        if staged_integrity != source_integrity {
+            return Err(format!("恢复暂存文件校验失败：{}", staged.display()));
+        }
+        Ok(())
+    })();
+    if let Err(error) = stage_result {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+    let destination_exists = try_exists(destination, "检查恢复目标失败")?;
+    let original_integrity = if destination_exists {
+        Some(file_sha256(destination)?)
+    } else {
+        None
+    };
+    Ok(RestoreFilePlan {
+        destination: destination.to_path_buf(),
+        staged,
+        previous,
+        had_previous: destination_exists,
+        expected_bytes: source_integrity.0,
+        expected_sha256: source_integrity.1,
+        original_bytes: original_integrity.as_ref().map(|integrity| integrity.0),
+        original_sha256: original_integrity.map(|integrity| integrity.1),
+    })
+}
+
+fn stage_restore_files(pairs: &[(PathBuf, PathBuf)]) -> Result<Vec<RestoreFilePlan>, String> {
+    let mut plans = Vec::with_capacity(pairs.len());
+    for (source, destination) in pairs {
+        match stage_restore_file(source, destination) {
+            Ok(plan) => plans.push(plan),
+            Err(error) => {
+                cleanup_restore_plans(&plans);
+                return Err(error);
+            }
+        }
+    }
+    Ok(plans)
+}
+
+/// Prepare one generated runtime projection for the same durable installation
+/// protocol used by recovery-point restore. The bytes are fully serialized and
+/// synced before any live file is moved aside.
+fn stage_runtime_projection(destination: &Path, bytes: &[u8]) -> Result<RestoreFilePlan, String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("无法确定运行时投影目录：{}", destination.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("创建运行时投影目录失败 {}：{error}", parent.display()))?;
+    let staged = staging_path(destination, "restore-new")?;
+    let previous = staging_path(destination, "restore-previous")?;
+    remove_file_if_present(&staged, "清理旧运行时投影暂存文件失败")?;
+    if try_exists(&previous, "检查旧运行时投影回滚副本失败")? {
+        if try_exists(destination, "检查运行时投影目标失败")? {
+            return Err(format!(
+                "检测到未完成安装的原文件副本，请保留并检查：{}",
+                previous.display()
+            ));
+        }
+        std::fs::rename(&previous, destination).map_err(|error| {
+            format!(
+                "恢复上次未完成安装的原文件失败 {}：{error}",
+                destination.display()
+            )
+        })?;
+    }
+    atomic_file::write(&staged, bytes)
+        .map_err(|error| format!("暂存运行时投影失败 {}：{error}", staged.display()))?;
+    let expected = file_sha256(&staged)?;
+    let had_previous = try_exists(destination, "检查运行时投影目标失败")?;
+    let original = if had_previous {
+        Some(file_sha256(destination)?)
+    } else {
+        None
+    };
+    Ok(RestoreFilePlan {
+        destination: destination.to_path_buf(),
+        staged,
+        previous,
+        had_previous,
+        expected_bytes: expected.0,
+        expected_sha256: expected.1,
+        original_bytes: original.as_ref().map(|integrity| integrity.0),
+        original_sha256: original.map(|integrity| integrity.1),
+    })
+}
+
+fn stage_runtime_projections(
+    directory: &Path,
+    files: &[(&str, Vec<u8>)],
+) -> Result<Vec<RestoreFilePlan>, String> {
+    if !runtime_projection_names_are_exact(files, RUNTIME_PROJECTION_FILES) {
+        return Err("运行时投影必须且只能包含 library.json、stats.json、vocab.json".to_string());
+    }
+    let mut plans = Vec::with_capacity(files.len());
+    for (name, bytes) in files {
+        match stage_runtime_projection(&directory.join(name), bytes) {
+            Ok(plan) => plans.push(plan),
+            Err(error) => {
+                cleanup_restore_plans(&plans);
+                return Err(error);
+            }
+        }
+    }
+    Ok(plans)
+}
+
+/// Publish all staged files but retain every `.restore-previous-*` file until
+/// the caller has reopened and validated the restored database.
+#[cfg(test)]
+fn commit_restore_plans_with<F>(plans: &[RestoreFilePlan], mut commit_file: F) -> Result<(), String>
+where
+    F: FnMut(usize, &RestoreFilePlan) -> Result<(), String>,
+{
+    commit_restore_plans_with_log(plans, None, &mut commit_file)
+}
+
+#[cfg(test)]
+fn commit_restore_plans_with_log<F>(
+    plans: &[RestoreFilePlan],
+    mut transaction: Option<&mut RestoreTransactionLog>,
+    mut commit_file: F,
+) -> Result<(), String>
+where
+    F: FnMut(usize, &RestoreFilePlan) -> Result<(), String>,
+{
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.had_previous {
+            if let Err(error) = std::fs::rename(&plan.destination, &plan.previous) {
+                let primary = format!("暂存当前文件失败 {}：{error}", plan.destination.display());
+                return match rollback_restore_plans(plans, index, 0) {
+                    Ok(()) => Err(primary),
+                    Err(rollback) => Err(format!("{primary}；回滚也失败：{rollback}")),
+                };
+            }
+            if let Some(log) = transaction.as_deref_mut() {
+                if let Err(error) = log.mark_original_moved(index) {
+                    let primary = format!(
+                        "记录原文件暂存状态失败 {}：{error}",
+                        plan.destination.display()
+                    );
+                    return match rollback_restore_plans(plans, index + 1, 0) {
+                        Ok(()) => Err(primary),
+                        Err(rollback) => Err(format!("{primary}；回滚也失败：{rollback}")),
+                    };
+                }
+            }
+        } else if plan.destination.exists() {
+            // The target did not exist while staging but another writer created
+            // it before commit. Never overwrite or later delete that new file.
+            let primary = format!(
+                "恢复目标在提交前被其他任务创建：{}",
+                plan.destination.display()
+            );
+            return match rollback_restore_plans(plans, index, 0) {
+                Ok(()) => Err(primary),
+                Err(rollback) => Err(format!("{primary}；回滚也失败：{rollback}")),
+            };
+        }
+    }
+    for (index, plan) in plans.iter().enumerate() {
+        if let Err(error) = commit_file(index, plan) {
+            let primary = format!("提交恢复文件失败 {}：{error}", plan.destination.display());
+            return match rollback_restore_plans(plans, plans.len(), index + 1) {
+                Ok(()) => Err(primary),
+                Err(rollback) => Err(format!("{primary}；回滚也失败：{rollback}")),
+            };
+        }
+        if let Some(log) = transaction.as_deref_mut() {
+            if let Err(error) = log.mark_new_committed(index) {
+                let primary = format!(
+                    "记录恢复文件提交状态失败 {}：{error}",
+                    plan.destination.display()
+                );
+                return match rollback_restore_plans(plans, plans.len(), index + 1) {
+                    Ok(()) => Err(primary),
+                    Err(rollback) => Err(format!("{primary}；回滚也失败：{rollback}")),
+                };
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rollback_durable_restore(
+    _plans: &[RestoreFilePlan],
+    _prepared: usize,
+    _commit_attempted: usize,
+    transaction: RestoreTransactionLog,
+    primary: String,
+) -> Result<(), String> {
+    match rollback_manifest_plans(transaction.manifest()) {
+        Ok(()) => match transaction.finish() {
+            Ok(()) => Err(primary),
+            Err(cleanup) => Err(format!("{primary}；清理事务日志失败：{cleanup}")),
+        },
+        Err(rollback) => {
+            // Keep the durable manifest and any remaining previous copies. The
+            // next process will retry recovery before AppDb::open.
+            Err(format!("{primary}；回滚也失败：{rollback}"))
+        }
+    }
+}
+
+fn commit_restore_plans_durable_with<F>(
+    plans: &[RestoreFilePlan],
+    transaction: &mut Option<RestoreTransactionLog>,
+    mut commit_file: F,
+) -> Result<(), String>
+where
+    F: FnMut(usize, &RestoreFilePlan) -> Result<(), String>,
+{
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.had_previous {
+            if let Err(error) = std::fs::rename(&plan.destination, &plan.previous) {
+                let primary = format!("暂存当前文件失败 {}：{error}", plan.destination.display());
+                let transaction = transaction.take().ok_or("恢复事务日志缺失")?;
+                return rollback_durable_restore(plans, index, 0, transaction, primary);
+            }
+            if let Some(log) = transaction.as_mut() {
+                if let Err(error) = log.mark_original_moved(index) {
+                    let primary = format!(
+                        "记录原文件暂存状态失败 {}：{error}",
+                        plan.destination.display()
+                    );
+                    let transaction = transaction.take().ok_or("恢复事务日志缺失")?;
+                    return rollback_durable_restore(plans, index + 1, 0, transaction, primary);
+                }
+            }
+        } else if plan.destination.exists() {
+            let primary = format!(
+                "恢复目标在提交前被其他任务创建：{}",
+                plan.destination.display()
+            );
+            let transaction = transaction.take().ok_or("恢复事务日志缺失")?;
+            return rollback_durable_restore(plans, index, 0, transaction, primary);
+        }
+    }
+    for (index, plan) in plans.iter().enumerate() {
+        if let Err(error) = commit_file(index, plan) {
+            let primary = format!("提交恢复文件失败 {}：{error}", plan.destination.display());
+            let transaction = transaction.take().ok_or("恢复事务日志缺失")?;
+            return rollback_durable_restore(plans, plans.len(), index + 1, transaction, primary);
+        }
+        if let Some(log) = transaction.as_mut() {
+            if let Err(error) = log.mark_new_committed(index) {
+                let primary = format!(
+                    "记录恢复文件提交状态失败 {}：{error}",
+                    plan.destination.display()
+                );
+                let transaction = transaction.take().ok_or("恢复事务日志缺失")?;
+                return rollback_durable_restore(
+                    plans,
+                    plans.len(),
+                    index + 1,
+                    transaction,
+                    primary,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore_plans_still_match_original(plans: &[RestoreFilePlan]) -> Result<(), String> {
+    for plan in plans {
+        if plan.had_previous {
+            let original_bytes = plan.original_bytes.ok_or("恢复计划缺少原文件大小")?;
+            let original_sha256 = plan
+                .original_sha256
+                .as_deref()
+                .ok_or("恢复计划缺少原文件校验值")?;
+            if !file_matches_integrity(&plan.destination, original_bytes, original_sha256)? {
+                return Err(format!(
+                    "恢复目标在提交前已被其他任务修改：{}",
+                    plan.destination.display()
+                ));
+            }
+        } else if try_exists(&plan.destination, "检查恢复目标失败")? {
+            return Err(format!(
+                "恢复目标在提交前被其他任务创建：{}",
+                plan.destination.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A restore always creates one last recovery point before replacing the live
+/// files. That snapshot deliberately updates `reader.db` metadata, so plans
+/// staged immediately before it must adopt this known-good post-snapshot
+/// state. Later changes are still rejected by `restore_plans_still_match_original`.
+fn refresh_restore_plan_originals(plans: &mut [RestoreFilePlan]) -> Result<(), String> {
+    for plan in plans {
+        let destination_exists = try_exists(&plan.destination, "检查恢复目标失败")?;
+        if plan.had_previous != destination_exists {
+            return Err(format!(
+                "创建恢复保护点后恢复目标状态异常：{}",
+                plan.destination.display()
+            ));
+        }
+        if destination_exists {
+            let (bytes, sha256) = file_sha256(&plan.destination)?;
+            plan.original_bytes = Some(bytes);
+            plan.original_sha256 = Some(sha256);
+        }
+    }
+    Ok(())
+}
+
+fn finalize_restore_plans(plans: &[RestoreFilePlan]) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for plan in plans {
+        for path in [&plan.staged, &plan.previous] {
+            if let Err(error) = std::fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    failures.push(format!("清理恢复事务文件失败 {}：{error}", path.display()));
+                }
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("；"))
+    }
+}
+
+#[cfg(test)]
+fn replace_files_transactionally_with_commit<F>(
+    pairs: &[(PathBuf, PathBuf)],
+    commit_file: F,
+) -> Result<(), String>
+where
+    F: FnMut(usize, &RestoreFilePlan) -> Result<(), String>,
+{
+    let plans = stage_restore_files(pairs)?;
+    commit_restore_plans_with(&plans, commit_file)?;
+    finalize_restore_plans(&plans)
+}
+
+#[cfg(test)]
+fn replace_files_transactionally(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    replace_files_transactionally_with_commit(pairs, |_index, plan| {
+        atomic_file::commit_temp_file(&plan.staged, &plan.destination)
+    })
+}
+
+fn remove_sqlite_sidecars(path: &Path) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar = PathBuf::from(sidecar);
+        if let Err(error) = std::fs::remove_file(&sidecar) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                failures.push(format!(
+                    "删除 SQLite 辅助文件失败 {}：{error}",
+                    sidecar.display()
+                ));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("；"))
+    }
+}
+
+fn install_restore_plans_with_validation<C, V>(
+    plans: &[RestoreFilePlan],
+    sqlite_paths: &[PathBuf],
+    commit_file: C,
+    validate: V,
+) -> Result<(), String>
+where
+    C: FnMut(usize, &RestoreFilePlan) -> Result<(), String>,
+    V: FnOnce() -> Result<(), String>,
+{
+    let transaction_plans = transaction_plan_states(plans);
+    let directory = match transaction_directory(plans) {
+        Ok(directory) => directory,
+        Err(error) => {
+            cleanup_restore_plans(plans);
+            return Err(error);
+        }
+    };
+    let mut transaction = match RestoreTransactionLog::begin(directory, transaction_plans) {
+        Ok(transaction) => Some(transaction),
+        Err(error) => {
+            cleanup_restore_plans(plans);
+            return Err(error);
+        }
+    };
+    if let Err(error) = restore_plans_still_match_original(plans) {
+        cleanup_restore_plans(plans);
+        let cleanup = transaction.take().ok_or("恢复事务日志缺失")?.finish();
+        return match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}；{cleanup}")),
+        };
+    }
+    for path in sqlite_paths {
+        if let Err(error) = remove_sqlite_sidecars(path) {
+            cleanup_restore_plans(plans);
+            let cleanup = transaction.take().ok_or("恢复事务日志缺失")?.finish();
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(format!("{error}；{cleanup}")),
+            };
+        }
+    }
+    commit_restore_plans_durable_with(plans, &mut transaction, commit_file)?;
+    match validate() {
+        Ok(()) => {
+            if let Some(log) = transaction.as_mut() {
+                if let Err(error) = log.refresh_committed_integrity() {
+                    let transaction = transaction.take().ok_or("恢复事务日志缺失")?;
+                    let error = rollback_durable_restore(
+                        plans,
+                        plans.len(),
+                        plans.len(),
+                        transaction,
+                        format!("记录恢复文件最终校验值失败：{error}"),
+                    )
+                    .expect_err("durable rollback always returns the primary error");
+                    return Err(error);
+                }
+                if let Err(error) = log.mark_validated() {
+                    let transaction = transaction.take().ok_or("恢复事务日志缺失")?;
+                    let error = rollback_durable_restore(
+                        plans,
+                        plans.len(),
+                        plans.len(),
+                        transaction,
+                        format!("记录恢复验证成功状态失败：{error}"),
+                    )
+                    .expect_err("durable rollback always returns the primary error");
+                    return Err(error);
+                }
+            }
+            // The restored database is usable now. Cleanup failure is reported
+            // diagnostically but must not turn a successful restore into an
+            // apparent failure after the live state has already changed. A
+            // validated manifest remains so the next process can retry cleanup.
+            match finalize_restore_plans(plans) {
+                Ok(()) => {
+                    if let Some(log) = transaction.take() {
+                        if let Err(error) = log.finish() {
+                            eprintln!(
+                                "[backup] restored successfully but transaction cleanup failed: {error}"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[backup] restored successfully but cleanup failed: {error}");
+                }
+            }
+            Ok(())
+        }
+        Err(validation_error) => {
+            let mut recovery_errors = Vec::new();
+            for path in sqlite_paths {
+                if let Err(error) = remove_sqlite_sidecars(path) {
+                    recovery_errors.push(error);
+                }
+            }
+            let primary = if recovery_errors.is_empty() {
+                format!("恢复后的数据库无法打开，已还原恢复前文件：{validation_error}")
+            } else {
+                format!(
+                    "恢复后的数据库无法打开：{validation_error}；辅助文件清理失败：{}",
+                    recovery_errors.join("；")
+                )
+            };
+            let transaction = transaction.take().ok_or("恢复事务日志缺失")?;
+            let error =
+                rollback_durable_restore(plans, plans.len(), plans.len(), transaction, primary)
+                    .expect_err("durable rollback always returns the primary error");
+            Err(error)
+        }
+    }
+}
+
+fn install_runtime_projections_in_directory_with<C>(
+    directory: &Path,
+    files: &[(&str, Vec<u8>)],
+    commit_file: C,
+) -> Result<(), String>
+where
+    C: FnMut(usize, &RestoreFilePlan) -> Result<(), String>,
+{
+    let plans = stage_runtime_projections(directory, files)?;
+    install_restore_plans_with_validation(&plans, &[], commit_file, || Ok(()))
+}
+
+/// Atomically publish the complete runtime projection generated from SQLite.
+///
+/// The caller must hold `core_installation_lock` before taking the library,
+/// stats and vocabulary mutexes, and must retain those mutexes until this
+/// function returns. This is a durable multi-file transaction: failures during
+/// a later replacement restore every earlier projection from its same-directory
+/// rollback copy; interrupted installations are recovered at next startup.
+pub(crate) fn install_runtime_projections_locked(files: &[(&str, Vec<u8>)]) -> Result<(), String> {
+    let directory = config_dir()?;
+    install_runtime_projections_in_directory_with(&directory, files, |_index, plan| {
+        atomic_file::commit_temp_file(&plan.staged, &plan.destination)
+    })
+}
+
+/// Restore a recovery point after first capturing the current state. The
+/// database connection is deliberately reopened before returning so the UI can
+/// immediately reload the recovered shelf without asking users to restart.
+pub(crate) fn restore(state: &AppState, id: &str) -> Result<BackupStatus, String> {
+    // Hold the backup lock across validation, staging, the recovery-before-
+    // restore snapshot and commit. This prevents another daily/manual backup
+    // from rotating the selected directory between those phases.
+    let _operation = BACKUP_LOCK
+        .lock()
+        .map_err(|_| "恢复点任务锁定失败".to_string())?;
+    let _external_dict = crate::external_dict::maintenance_lock();
+    let config = config_dir()?;
+    std::fs::create_dir_all(&config).map_err(|error| format!("创建应用数据目录失败：{error}"))?;
+    recover_interrupted_restore_in_dir(&config)?;
+    let recovery = recovery_directory(&backup_root()?, id)?;
+    let manifest = manifest_for(&recovery)?;
+    let snapshot_db = recovery.join("reader.db");
+    let snapshot = rusqlite::Connection::open(&snapshot_db)
+        .map_err(|e| format!("打开恢复点数据库失败：{e}"))?;
+    let quick_check: String = snapshot
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| format!("检查恢复点数据库失败：{e}"))?;
+    if quick_check != "ok" {
+        return Err(format!("恢复点数据库完整性检查失败：{quick_check}"));
+    }
+    drop(snapshot);
+
+    let database_path = db::database_path()?;
+    let mut replacements = vec![(snapshot_db.clone(), database_path.clone())];
+    for name in PORTABLE_FILES.iter().chain(SQLITE_FILES.iter()) {
+        if manifest_contains(&manifest, name) {
+            replacements.push((recovery.join(name), config.join(name)));
+        }
+    }
+    // Copy the selected recovery point out of its rotating directory before
+    // creating the mandatory recovery-before-restore snapshot. When seven
+    // backups already exist, rotation is allowed to remove the selected oldest
+    // directory; these same-directory staged copies remain valid.
+    let mut plans = stage_restore_files(&replacements)?;
+
+    let mut data = lock_core_data(state)?;
+    // Never overwrite the current state without a fresh, independently
+    // verified recovery point that the user can return to. Keep all core
+    // state locks from this snapshot through runtime reload.
+    if let Err(error) = create_locked_with_data(&mut data, true) {
+        cleanup_restore_plans(&plans);
+        return Err(error);
+    }
+    // The protection snapshot writes its date through SQLite's WAL. Dropping
+    // the sole AppDb connection checkpoints that WAL into reader.db. Capture
+    // the restore baseline only after this checkpoint; hashing first would
+    // mistake SQLite's own close-time write for an external concurrent edit.
+    *data.db = None;
+    if let Err(error) = refresh_restore_plan_originals(&mut plans) {
+        cleanup_restore_plans(&plans);
+        return match db::AppDb::open_existing() {
+            Ok(mut database) => {
+                state.bind_sync_auto_scheduler(&mut database);
+                *data.db = Some(database);
+                Err(error)
+            }
+            Err(reopen_error) => Err(format!("{error}；恢复前数据库无法重新打开：{reopen_error}")),
+        };
+    }
+    // Retaining the database mutex while its value is None prevents any command
+    // from opening a second connection during installation.
+    let mut sqlite_paths = vec![database_path.clone()];
+    if manifest_contains(&manifest, "external-dicts.db") {
+        sqlite_paths.push(config.join("external-dicts.db"));
+    }
+
+    let installed = install_restore_plans_with_validation(
+        &plans,
+        &sqlite_paths,
+        |_index, plan| atomic_file::commit_temp_file(&plan.staged, &plan.destination),
+        || {
+            let database = db::AppDb::open_existing()?;
+            drop(database);
+            Ok(())
+        },
+    );
+    let mut restored_db = match installed {
+        Ok(()) => db::AppDb::open_existing()
+            .map_err(|error| format!("恢复已验证但重新打开数据库失败：{error}"))?,
+        Err(primary) => {
+            // A durable manifest means recovery is still pending. Never call a
+            // SQLite open mode that can CREATE in this state.
+            if try_exists(
+                &config.join(RESTORE_TRANSACTION_FILE),
+                "检查失败恢复事务状态失败",
+            )? {
+                return Err(format!("{primary}；恢复事务仍待自救，数据库保持关闭"));
+            }
+            let reopen = db::AppDb::open_existing();
+            return match reopen {
+                Ok(mut database) => {
+                    state.bind_sync_auto_scheduler(&mut database);
+                    *data.db = Some(database);
+                    Err(primary)
+                }
+                Err(reopen_error) => Err(format!(
+                    "{primary}；恢复前数据库也无法重新打开：{reopen_error}"
+                )),
+            };
+        }
+    };
+    state.bind_sync_auto_scheduler(&mut restored_db);
+    *data.db = Some(restored_db);
+    *data.library = crate::book::Library::load();
+    *data.stats = StatsStore::load();
+    *data.vocab = VocabStore::load();
+    state.reset_runtime_caches_after_restore();
+    recovery_settings::mark_restore_pending()?;
+    status()
+}
+
+pub(crate) fn spawn_daily(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        let state = app.state::<AppState>();
+        if let Err(error) = create(state.inner(), false) {
+            eprintln!("[backup] daily recovery point failed: {error}");
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "kunpeng-backup-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    fn assert_no_restore_artifacts(directory: &Path) {
+        let artifacts = std::fs::read_dir(directory)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| {
+                name.contains(".restore-new-")
+                    || name.contains(".restore-previous-")
+                    || name == RESTORE_TRANSACTION_FILE
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            artifacts.is_empty(),
+            "restore artifacts remain: {artifacts:?}"
+        );
+    }
+
+    fn test_integrity(bytes: &[u8]) -> (u64, String) {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let sha256 = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect();
+        (bytes.len() as u64, sha256)
+    }
+
+    #[test]
+    fn backup_limit_is_small_and_bounded() {
+        assert_eq!(MAX_RECOVERY_BACKUPS, 7);
+        assert!(PORTABLE_FILES.contains(&"library.json"));
+        assert!(PORTABLE_FILES.contains(&"stats.json"));
+        assert!(PORTABLE_FILES.contains(&"vocab.json"));
+        assert!(PORTABLE_FILES.contains(&"gesture-settings-v1.json"));
+        assert!(PORTABLE_FILES.contains(&recovery_settings::MAIN_SNAPSHOT_FILE));
+        assert!(PORTABLE_FILES.contains(&recovery_settings::READER_SNAPSHOT_FILE));
+        assert!(PORTABLE_FILES.contains(&reader_backgrounds::RECOVERY_ASSET_BUNDLE_FILE));
+        assert!(SQLITE_FILES.contains(&"external-dicts.db"));
+    }
+
+    #[test]
+    fn recovery_ids_cannot_escape_the_backup_directory() {
+        assert!(catalog::is_safe_backup_id("20260720-185825-180"));
+        assert!(!catalog::is_safe_backup_id("../reader.db"));
+        assert!(!catalog::is_safe_backup_id("a/b"));
+        assert!(!catalog::is_safe_backup_id(".temporary"));
+    }
+
+    #[test]
+    fn verified_manifest_rejects_a_same_size_bit_flip() {
+        let dir = temp_test_dir("manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("reader.db"), b"valid-database").unwrap();
+        let manifest = BackupManifest {
+            format: "kunpeng-reader-recovery".into(),
+            version: BACKUP_FORMAT_VERSION,
+            app_version: "test".into(),
+            created_at: "now".into(),
+            files: vec![verified_manifest_file(&dir, "reader.db").unwrap()],
+        };
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest_for(&dir).is_ok());
+        let old_manifest = BackupManifest {
+            version: 2,
+            ..manifest
+        };
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&old_manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest_for(&dir).is_err());
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&BackupManifest {
+                version: BACKUP_FORMAT_VERSION,
+                ..old_manifest
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("reader.db"), b"valid-databasf").unwrap();
+        assert!(manifest_for(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn multi_file_restore_replaces_every_file_together() {
+        let dir = temp_test_dir("replace");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(source.join("reader.db"), b"new-db").unwrap();
+        std::fs::write(source.join("library.json"), b"new-json").unwrap();
+        std::fs::write(destination.join("reader.db"), b"old-db").unwrap();
+        std::fs::write(destination.join("library.json"), b"old-json").unwrap();
+
+        replace_files_transactionally(&[
+            (source.join("reader.db"), destination.join("reader.db")),
+            (
+                source.join("library.json"),
+                destination.join("library.json"),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            std::fs::read(destination.join("reader.db")).unwrap(),
+            b"new-db"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("library.json")).unwrap(),
+            b"new-json"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn protection_snapshot_refreshes_restore_baseline_but_later_writes_still_fail() {
+        let dir = temp_test_dir("restore-baseline");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(source.join("reader.db"), b"selected-recovery").unwrap();
+        let live = destination.join("reader.db");
+        std::fs::write(&live, b"before-protection-snapshot").unwrap();
+        let mut plans = stage_restore_files(&[(source.join("reader.db"), live.clone())]).unwrap();
+
+        // `create_locked_with_data` writes backup metadata as part of the
+        // mandatory protection snapshot; that known write must not block us.
+        std::fs::write(&live, b"after-protection-snapshot").unwrap();
+        assert!(restore_plans_still_match_original(&plans).is_err());
+        refresh_restore_plan_originals(&mut plans).unwrap();
+        assert!(restore_plans_still_match_original(&plans).is_ok());
+
+        std::fs::write(&live, b"unexpected-concurrent-write").unwrap();
+        assert!(restore_plans_still_match_original(&plans)
+            .unwrap_err()
+            .contains("已被其他任务修改"));
+        cleanup_restore_plans(&plans);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn staged_oldest_recovery_survives_rotation_of_seven_existing_backups() {
+        let dir = temp_test_dir("rotate-selected");
+        let backup_root = dir.join("backups");
+        let destination = dir.join("live");
+        std::fs::create_dir_all(&backup_root).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let mut backups = Vec::new();
+        for index in 0..MAX_RECOVERY_BACKUPS {
+            let backup = backup_root.join(format!("20260701-00000{index}-000"));
+            std::fs::create_dir_all(&backup).unwrap();
+            std::fs::write(backup.join("reader.db"), format!("snapshot-{index}")).unwrap();
+            backups.push(backup);
+        }
+        let selected = backups[0].clone();
+        let live_database = destination.join("reader.db");
+        std::fs::write(&live_database, b"current").unwrap();
+        let plans =
+            stage_restore_files(&[(selected.join("reader.db"), live_database.clone())]).unwrap();
+
+        let newest = backup_root.join("20260701-000007-000");
+        std::fs::create_dir_all(&newest).unwrap();
+        std::fs::write(newest.join("reader.db"), b"current-snapshot").unwrap();
+        backups.push(newest);
+        rotate_backup_paths(backups, None).unwrap();
+        assert!(
+            !selected.exists(),
+            "the selected oldest directory should rotate"
+        );
+
+        commit_restore_plans_with(&plans, |_index, plan| {
+            atomic_file::commit_temp_file(&plan.staged, &plan.destination)
+        })
+        .unwrap();
+        finalize_restore_plans(&plans).unwrap();
+        assert_eq!(std::fs::read(&live_database).unwrap(), b"snapshot-0");
+        assert_no_restore_artifacts(&destination);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rotation_never_deletes_the_fresh_protected_snapshot() {
+        let dir = temp_test_dir("rotate-protected");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut backups = Vec::new();
+        for index in 0..=MAX_RECOVERY_BACKUPS {
+            let path = dir.join(format!("backup-{index:02}"));
+            std::fs::create_dir_all(&path).unwrap();
+            backups.push(path);
+        }
+        let protected = backups[0].clone();
+
+        rotate_backup_paths(backups, Some(&protected)).unwrap();
+
+        assert!(protected.exists());
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            MAX_RECOVERY_BACKUPS
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn database_reopen_failure_rolls_back_all_files_and_new_sidecars() {
+        let dir = temp_test_dir("reopen-rollback");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let database = destination.join("reader.db");
+        let library = destination.join("library.json");
+        let stats = destination.join("stats.json");
+        let vocab = destination.join("vocab.json");
+        std::fs::write(source.join("reader.db"), b"new-db").unwrap();
+        std::fs::write(source.join("library.json"), b"new-json").unwrap();
+        std::fs::write(source.join("stats.json"), b"new-stats").unwrap();
+        std::fs::write(source.join("vocab.json"), b"new-vocab").unwrap();
+        std::fs::write(&database, b"old-db").unwrap();
+        std::fs::write(&library, b"old-json").unwrap();
+        std::fs::write(&stats, b"old-stats").unwrap();
+        std::fs::write(&vocab, b"old-vocab").unwrap();
+        let plans = stage_restore_files(&[
+            (source.join("reader.db"), database.clone()),
+            (source.join("library.json"), library.clone()),
+            (source.join("stats.json"), stats.clone()),
+            (source.join("vocab.json"), vocab.clone()),
+        ])
+        .unwrap();
+        let mut wal = database.as_os_str().to_os_string();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+
+        let result = install_restore_plans_with_validation(
+            &plans,
+            std::slice::from_ref(&database),
+            |_index, plan| atomic_file::commit_temp_file(&plan.staged, &plan.destination),
+            || {
+                assert_eq!(std::fs::read(&database).unwrap(), b"new-db");
+                assert_eq!(std::fs::read(&library).unwrap(), b"new-json");
+                assert_eq!(std::fs::read(&stats).unwrap(), b"new-stats");
+                assert_eq!(std::fs::read(&vocab).unwrap(), b"new-vocab");
+                assert!(plans.iter().all(|plan| plan.previous.exists()));
+                std::fs::write(&wal, b"new-database-wal").unwrap();
+                Err::<(), _>("injected AppDb::open failure".to_string())
+            },
+        );
+
+        assert!(result.unwrap_err().contains("已还原恢复前文件"));
+        assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
+        assert_eq!(std::fs::read(&library).unwrap(), b"old-json");
+        assert_eq!(std::fs::read(&stats).unwrap(), b"old-stats");
+        assert_eq!(std::fs::read(&vocab).unwrap(), b"old-vocab");
+        assert!(!wal.exists());
+        assert_no_restore_artifacts(&destination);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sidecar_delete_failure_aborts_before_any_live_file_is_replaced() {
+        let dir = temp_test_dir("sidecar-failure");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let database = destination.join("reader.db");
+        std::fs::write(source.join("reader.db"), b"new-db").unwrap();
+        std::fs::write(&database, b"old-db").unwrap();
+        let plans = stage_restore_files(&[(source.join("reader.db"), database.clone())]).unwrap();
+        let mut wal = database.as_os_str().to_os_string();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        std::fs::create_dir(&wal).unwrap();
+        let mut commit_called = false;
+
+        let result = install_restore_plans_with_validation(
+            &plans,
+            std::slice::from_ref(&database),
+            |_index, _plan| {
+                commit_called = true;
+                Ok(())
+            },
+            || Ok(()),
+        );
+
+        assert!(result.unwrap_err().contains("删除 SQLite 辅助文件失败"));
+        assert!(!commit_called);
+        assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
+        assert_no_restore_artifacts(&destination);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn second_commit_failure_restores_all_existing_targets_and_cleans_artifacts() {
+        let dir = temp_test_dir("rollback-existing");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let first = destination.join("reader.db");
+        let second = destination.join("library.json");
+        std::fs::write(source.join("reader.db"), b"new-db").unwrap();
+        std::fs::write(source.join("library.json"), b"new-json").unwrap();
+        std::fs::write(&first, b"old-db").unwrap();
+        std::fs::write(&second, b"old-json").unwrap();
+
+        let mut saw_first_commit = false;
+        let result = replace_files_transactionally_with_commit(
+            &[
+                (source.join("reader.db"), first.clone()),
+                (source.join("library.json"), second.clone()),
+            ],
+            |index, plan| {
+                if index == 1 {
+                    assert_eq!(std::fs::read(&first).unwrap(), b"new-db");
+                    saw_first_commit = true;
+                    return Err("injected second commit failure".into());
+                }
+                atomic_file::commit_temp_file(&plan.staged, &plan.destination)
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(saw_first_commit);
+        assert_eq!(std::fs::read(&first).unwrap(), b"old-db");
+        assert_eq!(std::fs::read(&second).unwrap(), b"old-json");
+        assert_no_restore_artifacts(&destination);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runtime_projection_install_failure_restores_sqlite_and_every_projection() {
+        let dir = temp_test_dir("migration-projection-rollback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        let library = dir.join("library.json");
+        let stats = dir.join("stats.json");
+        let vocab = dir.join("vocab.json");
+        std::fs::write(&database, b"old-db").unwrap();
+        std::fs::write(&library, b"old-library").unwrap();
+        std::fs::write(&stats, b"old-stats").unwrap();
+        std::fs::write(&vocab, b"old-vocab").unwrap();
+        let projections = vec![
+            ("library.json", b"new-library".to_vec()),
+            ("stats.json", b"new-stats".to_vec()),
+            ("vocab.json", b"new-vocab".to_vec()),
+        ];
+
+        let result =
+            install_runtime_projections_in_directory_with(&dir, &projections, |index, plan| {
+                if index == 2 {
+                    assert_eq!(std::fs::read(&library).unwrap(), b"new-library");
+                    assert_eq!(std::fs::read(&stats).unwrap(), b"new-stats");
+                    return Err("injected final projection commit failure".into());
+                }
+                atomic_file::commit_temp_file(&plan.staged, &plan.destination)
+            });
+
+        assert!(result.is_err());
+        // The SQLite byte image stands in for the import transaction's DB
+        // state. The projection installer never mutates it, and the complete
+        // pre-install image remains intact while every partly committed JSON
+        // projection has been restored by the same durable transaction.
+        assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
+        assert_eq!(std::fs::read(&library).unwrap(), b"old-library");
+        assert_eq!(std::fs::read(&stats).unwrap(), b"old-stats");
+        assert_eq!(std::fs::read(&vocab).unwrap(), b"old-vocab");
+        assert_no_restore_artifacts(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rollback_removes_a_committed_target_that_did_not_exist_before() {
+        let dir = temp_test_dir("rollback-new-target");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let new_target = destination.join("library.json");
+        let existing_target = destination.join("stats.json");
+        std::fs::write(source.join("library.json"), b"new-library").unwrap();
+        std::fs::write(source.join("stats.json"), b"new-stats").unwrap();
+        std::fs::write(&existing_target, b"old-stats").unwrap();
+
+        let result = replace_files_transactionally_with_commit(
+            &[
+                (source.join("library.json"), new_target.clone()),
+                (source.join("stats.json"), existing_target.clone()),
+            ],
+            |index, plan| {
+                if index == 1 {
+                    assert_eq!(std::fs::read(&new_target).unwrap(), b"new-library");
+                    return Err("injected second commit failure".into());
+                }
+                atomic_file::commit_temp_file(&plan.staged, &plan.destination)
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!new_target.exists());
+        assert_eq!(std::fs::read(&existing_target).unwrap(), b"old-stats");
+        assert_no_restore_artifacts(&destination);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_previous_copy_is_not_deleted_when_the_live_target_still_exists() {
+        let dir = temp_test_dir("stale-previous");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        let source_file = source.join("reader.db");
+        let destination_file = destination.join("reader.db");
+        let previous = staging_path(&destination_file, "restore-previous").unwrap();
+        let staged = staging_path(&destination_file, "restore-new").unwrap();
+        std::fs::write(&source_file, b"snapshot").unwrap();
+        std::fs::write(&destination_file, b"current-live-data").unwrap();
+        std::fs::write(&previous, b"recoverable-old-data").unwrap();
+
+        let result = stage_restore_file(&source_file, &destination_file);
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&destination_file).unwrap(),
+            b"current-live-data"
+        );
+        assert_eq!(std::fs::read(&previous).unwrap(), b"recoverable-old-data");
+        assert!(!staged.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn next_process_rolls_back_partial_multi_file_restore_from_foreign_pid_manifest() {
+        let dir = temp_test_dir("crash-foreign-pid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        let library = dir.join("library.json");
+        let database_previous = dir.join(".reader.db.restore-previous-424242");
+        let database_staged = dir.join(".reader.db.restore-new-424242");
+        let library_previous = dir.join(".library.json.restore-previous-424242");
+        let library_staged = dir.join(".library.json.restore-new-424242");
+
+        // Simulate a crash after reader.db was committed but before
+        // library.json was committed. The artifact PID intentionally differs
+        // from the current process.
+        std::fs::write(&database, b"new-db").unwrap();
+        std::fs::write(&database_previous, b"old-db").unwrap();
+        std::fs::write(&library_previous, b"old-library").unwrap();
+        std::fs::write(&library_staged, b"new-library").unwrap();
+        atomic_file::write_json(
+            &dir.join(RESTORE_TRANSACTION_FILE),
+            &RestoreTransactionManifest {
+                version: RESTORE_TRANSACTION_VERSION,
+                phase: RestoreTransactionPhase::Installing,
+                plans: vec![
+                    RestoreTransactionPlanState {
+                        destination: database.clone(),
+                        staged: database_staged,
+                        previous: database_previous,
+                        had_previous: true,
+                        expected_bytes: test_integrity(b"new-db").0,
+                        expected_sha256: test_integrity(b"new-db").1,
+                        original_bytes: Some(test_integrity(b"old-db").0),
+                        original_sha256: Some(test_integrity(b"old-db").1),
+                        original_moved: true,
+                        new_committed: true,
+                    },
+                    RestoreTransactionPlanState {
+                        destination: library.clone(),
+                        staged: library_staged,
+                        previous: library_previous,
+                        had_previous: true,
+                        expected_bytes: test_integrity(b"new-library").0,
+                        expected_sha256: test_integrity(b"new-library").1,
+                        original_bytes: Some(test_integrity(b"old-library").0),
+                        original_sha256: Some(test_integrity(b"old-library").1),
+                        original_moved: true,
+                        new_committed: false,
+                    },
+                ],
+            },
+            false,
+        )
+        .unwrap();
+
+        recover_interrupted_restore_in_dir(&dir).unwrap();
+
+        assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
+        assert_eq!(std::fs::read(&library).unwrap(), b"old-library");
+        assert_no_restore_artifacts(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn next_process_finishes_cleanup_after_validated_restore() {
+        let dir = temp_test_dir("crash-after-validation");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        let previous = dir.join(".reader.db.restore-previous-777777");
+        let staged = dir.join(".reader.db.restore-new-777777");
+        std::fs::write(&database, b"validated-new-db").unwrap();
+        std::fs::write(&previous, b"old-db").unwrap();
+        atomic_file::write_json(
+            &dir.join(RESTORE_TRANSACTION_FILE),
+            &RestoreTransactionManifest {
+                version: RESTORE_TRANSACTION_VERSION,
+                phase: RestoreTransactionPhase::Validated,
+                plans: vec![RestoreTransactionPlanState {
+                    destination: database.clone(),
+                    staged,
+                    previous,
+                    had_previous: true,
+                    expected_bytes: test_integrity(b"validated-new-db").0,
+                    expected_sha256: test_integrity(b"validated-new-db").1,
+                    original_bytes: Some(test_integrity(b"old-db").0),
+                    original_sha256: Some(test_integrity(b"old-db").1),
+                    original_moved: true,
+                    new_committed: true,
+                }],
+            },
+            false,
+        )
+        .unwrap();
+
+        recover_interrupted_restore_in_dir(&dir).unwrap();
+
+        assert_eq!(std::fs::read(&database).unwrap(), b"validated-new-db");
+        assert_no_restore_artifacts(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn validated_manifest_rolls_back_when_live_database_disappeared() {
+        let dir = temp_test_dir("validated-live-missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        let previous = dir.join(".reader.db.restore-previous-717171");
+        let staged = dir.join(".reader.db.restore-new-717171");
+        std::fs::write(&previous, b"old-db").unwrap();
+        atomic_file::write_json(
+            &dir.join(RESTORE_TRANSACTION_FILE),
+            &RestoreTransactionManifest {
+                version: RESTORE_TRANSACTION_VERSION,
+                phase: RestoreTransactionPhase::Validated,
+                plans: vec![RestoreTransactionPlanState {
+                    destination: database.clone(),
+                    staged,
+                    previous,
+                    had_previous: true,
+                    expected_bytes: test_integrity(b"new-db").0,
+                    expected_sha256: test_integrity(b"new-db").1,
+                    original_bytes: Some(test_integrity(b"old-db").0),
+                    original_sha256: Some(test_integrity(b"old-db").1),
+                    original_moved: true,
+                    new_committed: true,
+                }],
+            },
+            false,
+        )
+        .unwrap();
+
+        recover_interrupted_restore_in_dir(&dir).unwrap();
+
+        assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
+        assert_no_restore_artifacts(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn installing_recovery_is_idempotent_after_previous_copy_was_cleaned() {
+        let dir = temp_test_dir("rollback-idempotent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        std::fs::write(&database, b"old-db").unwrap();
+        atomic_file::write_json(
+            &dir.join(RESTORE_TRANSACTION_FILE),
+            &RestoreTransactionManifest {
+                version: RESTORE_TRANSACTION_VERSION,
+                phase: RestoreTransactionPhase::Installing,
+                plans: vec![RestoreTransactionPlanState {
+                    destination: database.clone(),
+                    staged: dir.join(".reader.db.restore-new-727272"),
+                    previous: dir.join(".reader.db.restore-previous-727272"),
+                    had_previous: true,
+                    expected_bytes: test_integrity(b"new-db").0,
+                    expected_sha256: test_integrity(b"new-db").1,
+                    original_bytes: Some(test_integrity(b"old-db").0),
+                    original_sha256: Some(test_integrity(b"old-db").1),
+                    original_moved: true,
+                    new_committed: true,
+                }],
+            },
+            false,
+        )
+        .unwrap();
+
+        recover_interrupted_restore_in_dir(&dir).unwrap();
+
+        assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
+        assert_no_restore_artifacts(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn commit_before_log_for_new_target_is_detected_by_hash_and_removed() {
+        let dir = temp_test_dir("new-target-commit-before-log");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dictionary = dir.join("external-dicts.db");
+        std::fs::write(&dictionary, b"new-dictionary").unwrap();
+        atomic_file::write_json(
+            &dir.join(RESTORE_TRANSACTION_FILE),
+            &RestoreTransactionManifest {
+                version: RESTORE_TRANSACTION_VERSION,
+                phase: RestoreTransactionPhase::Installing,
+                plans: vec![RestoreTransactionPlanState {
+                    destination: dictionary.clone(),
+                    staged: dir.join(".external-dicts.db.restore-new-737373"),
+                    previous: dir.join(".external-dicts.db.restore-previous-737373"),
+                    had_previous: false,
+                    expected_bytes: test_integrity(b"new-dictionary").0,
+                    expected_sha256: test_integrity(b"new-dictionary").1,
+                    original_bytes: None,
+                    original_sha256: None,
+                    original_moved: false,
+                    new_committed: false,
+                }],
+            },
+            false,
+        )
+        .unwrap();
+
+        recover_interrupted_restore_in_dir(&dir).unwrap();
+
+        assert!(!dictionary.exists());
+        assert_no_restore_artifacts(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_new_target_content_is_never_deleted_automatically() {
+        let dir = temp_test_dir("new-target-unknown-content");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dictionary = dir.join("external-dicts.db");
+        std::fs::write(&dictionary, b"unrelated-user-data").unwrap();
+        atomic_file::write_json(
+            &dir.join(RESTORE_TRANSACTION_FILE),
+            &RestoreTransactionManifest {
+                version: RESTORE_TRANSACTION_VERSION,
+                phase: RestoreTransactionPhase::Installing,
+                plans: vec![RestoreTransactionPlanState {
+                    destination: dictionary.clone(),
+                    staged: dir.join(".external-dicts.db.restore-new-747474"),
+                    previous: dir.join(".external-dicts.db.restore-previous-747474"),
+                    had_previous: false,
+                    expected_bytes: test_integrity(b"restored-dictionary").0,
+                    expected_sha256: test_integrity(b"restored-dictionary").1,
+                    original_bytes: None,
+                    original_sha256: None,
+                    original_moved: false,
+                    new_committed: false,
+                }],
+            },
+            false,
+        )
+        .unwrap();
+
+        let error = recover_interrupted_restore_in_dir(&dir).unwrap_err();
+
+        assert!(error.contains("未知内容"));
+        assert_eq!(std::fs::read(&dictionary).unwrap(), b"unrelated-user-data");
+        assert!(dir.join(RESTORE_TRANSACTION_FILE).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_existing_target_and_sidecars_are_preserved_for_manual_recovery() {
+        let dir = temp_test_dir("existing-target-unknown-content");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        let previous = dir.join(".reader.db.restore-previous-757575");
+        let staged = dir.join(".reader.db.restore-new-757575");
+        let wal = dir.join("reader.db-wal");
+        let shm = dir.join("reader.db-shm");
+        std::fs::write(&database, b"unrelated-user-data").unwrap();
+        std::fs::write(&previous, b"old-db").unwrap();
+        std::fs::write(&wal, b"unknown-wal").unwrap();
+        std::fs::write(&shm, b"unknown-shm").unwrap();
+        atomic_file::write_json(
+            &dir.join(RESTORE_TRANSACTION_FILE),
+            &RestoreTransactionManifest {
+                version: RESTORE_TRANSACTION_VERSION,
+                phase: RestoreTransactionPhase::Installing,
+                plans: vec![RestoreTransactionPlanState {
+                    destination: database.clone(),
+                    staged,
+                    previous: previous.clone(),
+                    had_previous: true,
+                    expected_bytes: test_integrity(b"restored-db").0,
+                    expected_sha256: test_integrity(b"restored-db").1,
+                    original_bytes: Some(test_integrity(b"old-db").0),
+                    original_sha256: Some(test_integrity(b"old-db").1),
+                    original_moved: true,
+                    new_committed: true,
+                }],
+            },
+            false,
+        )
+        .unwrap();
+
+        let error = recover_interrupted_restore_in_dir(&dir).unwrap_err();
+
+        assert!(error.contains("事务外的未知内容"));
+        assert_eq!(std::fs::read(&database).unwrap(), b"unrelated-user-data");
+        assert_eq!(std::fs::read(&previous).unwrap(), b"old-db");
+        assert_eq!(std::fs::read(&wal).unwrap(), b"unknown-wal");
+        assert_eq!(std::fs::read(&shm).unwrap(), b"unknown-shm");
+        assert!(dir.join(RESTORE_TRANSACTION_FILE).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unrecoverable_missing_database_keeps_manifest_and_refuses_empty_recreation() {
+        let dir = temp_test_dir("crash-missing-both");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        atomic_file::write_json(
+            &dir.join(RESTORE_TRANSACTION_FILE),
+            &RestoreTransactionManifest {
+                version: RESTORE_TRANSACTION_VERSION,
+                phase: RestoreTransactionPhase::Installing,
+                plans: vec![RestoreTransactionPlanState {
+                    destination: database,
+                    staged: dir.join(".reader.db.restore-new-888888"),
+                    previous: dir.join(".reader.db.restore-previous-888888"),
+                    had_previous: true,
+                    expected_bytes: test_integrity(b"new-db").0,
+                    expected_sha256: test_integrity(b"new-db").1,
+                    original_bytes: Some(test_integrity(b"old-db").0),
+                    original_sha256: Some(test_integrity(b"old-db").1),
+                    original_moved: true,
+                    new_committed: false,
+                }],
+            },
+            false,
+        )
+        .unwrap();
+
+        let error = recover_interrupted_restore_in_dir(&dir).unwrap_err();
+
+        assert!(error.contains("原文件与回滚副本均不可验证"));
+        assert!(dir.join(RESTORE_TRANSACTION_FILE).exists());
+        assert!(!dir.join("reader.db").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn next_process_recovers_legacy_foreign_pid_artifacts_without_manifest() {
+        let dir = temp_test_dir("legacy-foreign-pid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("reader.db");
+        let previous = dir.join(".reader.db.restore-previous-999999");
+        let staged = dir.join(".reader.db.restore-new-999999");
+        std::fs::write(&previous, b"old-db").unwrap();
+        std::fs::write(&staged, b"unvalidated-new-db").unwrap();
+
+        recover_interrupted_restore_in_dir(&dir).unwrap();
+
+        assert_eq!(std::fs::read(&database).unwrap(), b"old-db");
+        assert!(!previous.exists());
+        assert!(!staged.exists());
+        assert_no_restore_artifacts(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_artifacts_from_different_transactions_are_not_mixed() {
+        let dir = temp_test_dir("legacy-mixed-pids");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".reader.db.restore-previous-111111"), b"old-db").unwrap();
+        std::fs::write(
+            dir.join(".library.json.restore-previous-222222"),
+            b"old-library",
+        )
+        .unwrap();
+
+        let error = recover_interrupted_restore_in_dir(&dir).unwrap_err();
+
+        assert!(error.contains("多组旧版恢复事务"));
+        assert!(!dir.join("reader.db").exists());
+        assert!(!dir.join("library.json").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_restore_source_does_not_modify_existing_files() {
+        let dir = temp_test_dir("missing");
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(source.join("reader.db"), b"new-db").unwrap();
+        std::fs::write(destination.join("reader.db"), b"old-db").unwrap();
+        std::fs::write(destination.join("library.json"), b"old-json").unwrap();
+
+        assert!(replace_files_transactionally(&[
+            (source.join("reader.db"), destination.join("reader.db")),
+            (
+                source.join("missing.json"),
+                destination.join("library.json"),
+            ),
+        ])
+        .is_err());
+        assert_eq!(
+            std::fs::read(destination.join("reader.db")).unwrap(),
+            b"old-db"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("library.json")).unwrap(),
+            b"old-json"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

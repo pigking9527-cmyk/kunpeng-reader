@@ -1,0 +1,58 @@
+{
+  "format": "kunpeng-reader-core-data-package",
+  "version": 2,
+  "exported_at": 1786387200000,
+  "source_device_id": "fixture-desktop-b",
+  "entities": [
+    {
+      "kind": "reading_progress_v1",
+      "id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "data": {
+        "content_id": "2222222222222222222222222222222222222222222222222222222222222222",
+        "progress": 51.25,
+        "resume_chapter": 8,
+        "future_client_field": { "preserved": true }
+      },
+      "updated_at": 1786387200000,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop-b",
+      "sync_version": 3
+    },
+    {
+      "kind": "reading_data_v1",
+      "id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "data": { "bookmarks": [], "highlights": [], "future_client_field": "kept" },
+      "updated_at": 1786387200100,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop-b",
+      "sync_version": 2
+    },
+    {
+      "kind": "reading_statistics_v1",
+      "id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "data": { "read_seconds": 420, "future_counter": 7 },
+      "updated_at": 1786387200200,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop-b",
+      "sync_version": 1
+    },
+    {
+      "kind": "model_book_tags_v1",
+      "id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "data": { "labels": ["题材：历史"], "future_client_field": "must survive" },
+      "updated_at": 1786387200300,
+      "deleted_at": 0,
+      "device_id": "fixture-desktop-b",
+      "sync_version": 1
+    },
+    {
+      "kind": "vocab",
+      "id": "zh:已删除示例",
+      "data": {},
+      "updated_at": 1786387200400,
+      "deleted_at": 1786387200400,
+      "device_id": "fixture-desktop-b",
+      "sync_version": 2
+    }
+  ]
+}

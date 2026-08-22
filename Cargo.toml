@@ -1,0 +1,83 @@
+[package]
+name = "ebook-reader-tauri"
+version = "1.0.0-beta.1"
+edition = "2021"
+publish = false
+license-file = "LICENSE"
+repository = "https://github.com/pigking9527-cmyk/kunpeng-reader"
+
+[workspace]
+members = [".", "reader-core", "crates/epub-parser"]
+resolver = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+reader-core = { path = "reader-core" }
+tauri = { version = "2", features = ["unstable"] }
+tauri-runtime = "2.11"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+epub = { path = "crates/epub-parser" }
+image = "0.25"
+encoding_rs = "0.8"
+chardetng = "0.1"
+memchr = "2"
+fastembed = "5.17"
+instant-distance = { version = "0.6", features = ["with-serde"] }
+rayon = "1"
+rmp-serde = "1.3"
+bincode = "1.3" # 只用于无损读取并迁移 v1/v2 语义索引
+pdf-extract = "0.12"
+lopdf = "0.44"
+chrono = "0.4"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+sha2 = "0.11"
+base64 = "0.22"
+ureq = { version = "3.3", features = ["json"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+flate2 = "1"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+mobi = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+ammonia = "4.1"
+quick-xml = "0.41"
+libc = "0.2"
+ring = "0.17"
+ferrous-opencc = "0.3.1"
+notify = "8.2"
+uuid = { version = "1", features = ["v4"] }
+
+# Windows/Linux 发布包同时携带 ONNX Runtime CUDA Provider。Provider 只在
+# 检测到受支持的 NVIDIA 驱动时注册；缺少 CUDA/cuDNN 依赖时自动回退 CPU，
+# 因此同一安装包仍可在没有 NVIDIA 显卡的设备上运行。
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+ort = { version = "=2.0.0-rc.12", features = ["cuda"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3.2", features = ["NSEvent", "block2"] }
+
+# 正式发布档：保留优化，同时加快日常 release 构建。
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+incremental = true
+
+# 日常体验档：保留 Windows GUI 子系统（不弹控制台），比正式 release 更快。
+[profile.fast]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 256
+incremental = true
+debug = false
+strip = false

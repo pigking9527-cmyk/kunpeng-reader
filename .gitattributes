@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Mozilla pdf.js 第三方库：不计入 GitHub 语言统计
+ui/pdfjs/** linguist-vendored

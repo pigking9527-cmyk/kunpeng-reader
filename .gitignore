@@ -1,0 +1,52 @@
+# Rust / Tauri build output (large, regenerated)
+/target
+/server/*/target/
+
+# OS / editor
+Thumbs.db
+*.log
+
+# Local release copy; upload through GitHub Releases, not source history
+/鲲鹏阅读器.exe
+/onnxruntime_providers_*.dll
+/packaging/linux/runtime/
+/onnxruntime.dll
+/cudart64_12.dll
+/cudnn64_9.dll
+/ONNX-Runtime-LICENSE.txt
+/NVIDIA-CUDA-LICENSE.txt
+/NVIDIA-cuDNN-LICENSE.txt
+
+
+# Python test/runtime cache
+__pycache__/
+*.py[cod]
+
+# Local AI model conversion environment and downloaded weights
+/.tools/
+
+# Build output generated when the vendored EPUB crate is tested directly
+/vendor/*/target/
+/vendor/*/Cargo.lock
+
+# Private operations material must live outside the repository.
+*.pem
+*.p12
+*.pfx
+*.key
+.env
+.env.*
+id_rsa
+id_ed25519
+*交接*.md
+*handover*.md
+
+# Node / TypeScript build output
+node_modules/
+dist/
+/ui/bridge/
+/ui/generated-ts/
+/ui/generated-reader-page-ts/
+/ui/.generated-ts-build-*/
+/ui/.generated-reader-page-ts-build-*/
+/ui/react-bridge/

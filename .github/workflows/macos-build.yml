@@ -1,0 +1,219 @@
+name: macOS Apple Silicon build
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Replace the matching vX.Y.Z macOS assets in GitHub Release"
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Apple Silicon app and DMG
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # Normal CI remains reproducible with an ad-hoc signature. A manually
+      # published release imports a Developer ID certificate below and replaces
+      # this value with the protected repository secret.
+      APPLE_SIGNING_IDENTITY: ${{ inputs.publish_release && secrets.APPLE_SIGNING_IDENTITY || '-' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-aarch64
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked Node dependencies
+        run: npm ci
+
+      - name: Check dependency and asset licenses
+        run: npm run license:check && npm run ip:check
+
+      - name: Enforce public release hold
+        if: ${{ inputs.publish_release }}
+        run: npm run release:license-gate
+
+      - name: Verify project Tauri CLI
+        run: npm exec -- tauri --version
+
+      - name: Import Developer ID signing certificate
+        if: ${{ inputs.publish_release }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          keychain="$RUNNER_TEMP/kunpeng-release.keychain-db"
+          certificate="$RUNNER_TEMP/DeveloperID.p12"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_CERTIFICATE_PASSWORD" "$keychain"
+
+      - name: Run frontend migration gates
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run test:typed
+          npm run test:legacy-ui
+          npm run desktop-ui:build
+
+      # The semantic search runtime does not ship Intel macOS prebuilt binaries.
+      - name: Build Apple Silicon macOS bundles
+        run: npm exec -- tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Verify packaged license inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -s "$app_path/Contents/Resources/licenses/THIRD_PARTY_NOTICES.md"
+          test -s "$app_path/Contents/Resources/licenses/DEPENDENCY_LICENSES.md"
+
+      - name: Seal macOS application bundle
+        shell: bash
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+        run: |
+          set -euo pipefail
+          app_path="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app_path"
+          # Tauri's ad-hoc fallback signs the executable, but `codesign
+          # --strict` and Apple's notarization require the outer app bundle to
+          # seal Info.plist and Resources too. Publish builds additionally need
+          # Hardened Runtime and a trusted timestamp.
+          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+            codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_path"
+          else
+            codesign --force --deep --sign - "$app_path"
+          fi
+
+      - name: Verify macOS application signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app_path"
+          codesign --verify --deep --strict --verbose=4 "$app_path"
+          codesign --display --verbose=4 "$app_path"
+
+      - name: Notarize and staple published release bundles
+        if: ${{ inputs.publish_release }}
+        shell: bash
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_NOTARY_APPLE_ID"
+          test -n "$APPLE_NOTARY_TEAM_ID"
+          test -n "$APPLE_NOTARY_PASSWORD"
+          bundle_dir="target/aarch64-apple-darwin/release/bundle"
+          app_path="$(find "$bundle_dir/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg_path="$(find "$bundle_dir/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$app_path"
+          test -n "$dmg_path"
+          app_submission="$RUNNER_TEMP/Kunpeng-Reader-notarization.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$app_submission"
+          xcrun notarytool submit "$app_submission" --apple-id "$APPLE_NOTARY_APPLE_ID" --team-id "$APPLE_NOTARY_TEAM_ID" --password "$APPLE_NOTARY_PASSWORD" --wait
+          xcrun stapler staple "$app_path"
+          xcrun notarytool submit "$dmg_path" --apple-id "$APPLE_NOTARY_APPLE_ID" --team-id "$APPLE_NOTARY_TEAM_ID" --password "$APPLE_NOTARY_PASSWORD" --wait
+          xcrun stapler staple "$dmg_path"
+          codesign --verify --deep --strict --verbose=4 "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+          spctl --assess --type open --verbose=4 "$dmg_path"
+
+      - name: Prepare artifacts and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="target/aarch64-apple-darwin/release/bundle"
+          out_dir="target/macos-release"
+          mkdir -p "$out_dir"
+
+          app_path="$(find "$bundle_dir/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg_path="$(find "$bundle_dir/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$app_path"
+          test -n "$dmg_path"
+
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.app.zip"
+          cp "$dmg_path" "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.dmg"
+          (cd "$out_dir" && shasum -a 256 * > SHA256SUMS.txt)
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: Kunpeng-Reader-macOS-Apple-Silicon
+          path: target/macos-release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish macOS release assets
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download verified macOS artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: Kunpeng-Reader-macOS-Apple-Silicon
+          path: target/macos-release
+
+      - name: Replace GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          out_dir="target/macos-release"
+          mv "$out_dir/SHA256SUMS.txt" "$out_dir/SHA256SUMS-macOS.txt"
+          gh release upload "v${version}" \
+            "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.app.zip" \
+            "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.dmg" \
+            "$out_dir/SHA256SUMS-macOS.txt" \
+            --clobber

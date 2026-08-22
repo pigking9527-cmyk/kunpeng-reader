@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "鲲鹏阅读器",
+  "version": "1.0.0-beta.1",
+  "identifier": "com.kunpeng.reader",
+  "build": {
+    "beforeDevCommand": "npm run desktop-ui:build",
+    "beforeBuildCommand": "npm run desktop-ui:build",
+    "frontendDist": "./ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "鲲鹏阅读器",
+        "width": 980,
+        "height": 720,
+        "minWidth": 960,
+        "minHeight": 640,
+        "visible": false,
+        "decorations": false,
+        "url": "index.html"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' blob: reader: http://reader.localhost; style-src 'self'; img-src 'self' data: blob: reader: http://reader.localhost https:; font-src 'self' data: reader: http://reader.localhost; media-src 'self' data: blob: reader: http://reader.localhost; connect-src 'self' ipc: http://ipc.localhost reader: http://reader.localhost https:; frame-src 'self' reader: http://reader.localhost https:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "LICENSE": "licenses/Kunpeng-Reader-LICENSE.txt",
+      "THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "target/license-audit/DEPENDENCY_LICENSES.md": "licenses/DEPENDENCY_LICENSES.md",
+      "LICENSES": "licenses/third-party",
+      "src/dict/ECDICT_SOURCE.md": "licenses/sources/ECDICT_SOURCE.md",
+      "src/dict/CC_CEDICT_SOURCE.md": "licenses/sources/CC_CEDICT_SOURCE.md"
+    },
+    "fileAssociations": [
+      {
+        "ext": ["epub"],
+        "mimeType": "application/epub+zip",
+        "name": "KunpengReader.Epub",
+        "description": "EPUB 电子书"
+      },
+      {
+        "ext": ["pdf"],
+        "mimeType": "application/pdf",
+        "name": "KunpengReader.Pdf",
+        "description": "PDF 文档"
+      }
+    ],
+    "icon": ["icons/icon.ico", "icons/icon.png", "icons/icon.icns"]
+  }
+}
