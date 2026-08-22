@@ -60,7 +60,10 @@ jobs:
         run: npm ci
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        # Keep the lint baseline reproducible. A moving `stable` toolchain made
+        # an otherwise documentation-only commit fail when Rust 1.98 added a
+        # new Clippy lint that is promoted to an error by `-D warnings`.
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
 
