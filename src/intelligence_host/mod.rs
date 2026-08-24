@@ -1080,8 +1080,27 @@ const FULL_TEXT_BACKFILL_FAILURE_CATEGORIES: &[&str] = &[
     "content_extraction_failed",
     "google_news_target_unresolved",
     "archive_persist_failed",
+    // Catalogs written before the narrower public evidence taxonomy used a
+    // combined extraction/paywall outcome and a generic HTTP rejection.  Keep
+    // those durable records visible to the operator instead of collapsing
+    // them into `other`; the names intentionally state that the old data does
+    // not let us distinguish the more specific modern causes.
+    "legacy_extraction_or_paywall",
+    "legacy_http_rejected",
     "other",
 ];
+
+fn stable_backfill_failure_category(reason: &str) -> &str {
+    if FULL_TEXT_BACKFILL_FAILURE_CATEGORIES.contains(&reason) {
+        reason
+    } else {
+        match reason {
+            "body_missing_or_paywall" => "legacy_extraction_or_paywall",
+            "http_status_rejected" => "legacy_http_rejected",
+            _ => "other",
+        }
+    }
+}
 
 fn full_text_backfill_health(connection: &Connection, now_millis: i64) -> FullTextBackfillHealth {
     let mut health = FullTextBackfillHealth {
@@ -1181,11 +1200,7 @@ fn full_text_backfill_health(connection: &Connection, now_millis: i64) -> FullTe
         };
         for row in rows.flatten() {
             let (reason, count) = row;
-            let category = if FULL_TEXT_BACKFILL_FAILURE_CATEGORIES.contains(&reason.as_str()) {
-                reason.as_str()
-            } else {
-                "other"
-            };
+            let category = stable_backfill_failure_category(&reason);
             if let Some(target) = health
                 .failure_categories
                 .iter_mut()
@@ -1961,18 +1976,22 @@ mod tests {
                     ('ready','one','https://redacted.invalid/ready'),
                     ('access','two','https://redacted.invalid/access'),
                     ('delayed','three','https://redacted.invalid/delayed'),
+                    ('legacy-extraction','four','https://redacted.invalid/legacy-extraction'),
+                    ('legacy-http','five','https://redacted.invalid/legacy-http'),
                     ('no-source','four','');
                  INSERT INTO intelligence_content_backfill_state(article_id,attempts,next_retry_at,last_failure_reason) VALUES
                     ('access',1,0,'http_access_denied'),
-                    ('delayed',1,2000,'network_request_failed');
+                    ('delayed',1,2000,'network_request_failed'),
+                    ('legacy-extraction',1,0,'body_missing_or_paywall'),
+                    ('legacy-http',1,0,'http_status_rejected');
                  INSERT INTO intelligence_content_backfill_hosts(host,next_allowed_at) VALUES
                     ('redacted.invalid',2000),('available.invalid',0);",
             )
             .unwrap();
 
         let health = full_text_backfill_health(&connection, 1000);
-        assert_eq!(health.waiting_count, 3);
-        assert_eq!(health.retryable_now_count, 2);
+        assert_eq!(health.waiting_count, 5);
+        assert_eq!(health.retryable_now_count, 4);
         assert_eq!(health.delayed_count, 1);
         assert_eq!(health.limited_host_count, 1);
         let count = |category| {
@@ -1985,6 +2004,8 @@ mod tests {
         };
         assert_eq!(count("http_access_denied"), 1);
         assert_eq!(count("network_request_failed"), 1);
+        assert_eq!(count("legacy_extraction_or_paywall"), 1);
+        assert_eq!(count("legacy_http_rejected"), 1);
         assert_eq!(count("other"), 0);
 
         let encoded = serde_json::to_string(&health).unwrap();
