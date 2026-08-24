@@ -110,13 +110,34 @@ jobs:
           mkdir -p target/sync-api-v5-e2e-runners
           printf 'schema=kunpeng-reader-sync-api-e2e-runners-v1\nsource_commit=%s\n' "$GITHUB_SHA" \
             > target/sync-api-v5-e2e-runners/manifest.txt
+          lib_runner=$(cargo test --manifest-path server/reader-sync-api-rs/Cargo.toml --lib --no-run \
+            --message-format=json --locked | python3 -c '
+import json, sys
+candidates = []
+for line in sys.stdin:
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if (message.get("reason") == "compiler-artifact"
+            and "lib" in message.get("target", {}).get("kind", [])
+            and message.get("profile", {}).get("test")
+            and message.get("executable")):
+        candidates.append(message["executable"])
+if len(candidates) != 1:
+    raise SystemExit(f"expected one library test runner, found {len(candidates)}")
+print(candidates[0])')
           for stem in \
             object_store_e2e \
             postgres_intelligence_archive_recovery_e2e \
             postgres_intelligence_e2e \
             postgres_intelligence_route_e2e \
             reader_sync_api; do
-            runner=$(find server/reader-sync-api-rs/target/debug/deps -maxdepth 1 -type f -name "${stem}-*" -perm -111 | sort | head -n 1)
+            if [[ "$stem" == reader_sync_api ]]; then
+              runner=$lib_runner
+            else
+              runner=$(find server/reader-sync-api-rs/target/debug/deps -maxdepth 1 -type f -name "${stem}-*" -perm -111 | sort | head -n 1)
+            fi
             test -n "$runner"
             name="${stem}.runner"
             install -m 0755 "$runner" "target/sync-api-v5-e2e-runners/$name"
