@@ -222,7 +222,19 @@ assert monitor.parse_prometheus_labels(
 }
 assert monitor.parse_prometheus_labels('identity="not-allowed"') is None
 assert monitor.LOOPBACK_METRICS.fullmatch("http://127.0.0.1:8790/metrics")
+assert monitor.LOOPBACK_METRICS.fullmatch("https://127.0.0.1:8790/metrics")
+assert monitor.LOOPBACK_METRICS.fullmatch("https://localhost:8790/metrics")
 assert not monitor.LOOPBACK_METRICS.fullmatch("https://example.com/metrics")
+assert monitor.loopback_metrics_ssl_context("http://127.0.0.1:8790/metrics") is None
+tls_context = monitor.loopback_metrics_ssl_context("https://127.0.0.1:8790/metrics")
+assert tls_context.check_hostname is False
+assert tls_context.verify_mode == monitor.ssl.CERT_NONE
+try:
+    monitor.loopback_metrics_ssl_context("https://example.com/metrics")
+except ValueError:
+    pass
+else:
+    raise AssertionError("external HTTPS metrics URL was not rejected")
 
 # The monitor may inspect pg_stat_statements internally, but the report query
 # must never project query text or a query identifier into its JSON result.

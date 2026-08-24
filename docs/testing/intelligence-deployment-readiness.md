@@ -10,7 +10,8 @@
 
 ```bash
 server/reader-sync-api-rs/scripts/check-intelligence-deployment-readiness.sh --offline
-npm run test:intelligence-contracts
+node scripts/test-intelligence-contracts.mjs
+node scripts/test-intelligence-host-inference-contracts.mjs
 cargo test --manifest-path server/reader-sync-api-rs/Cargo.toml --lib
 cargo test --manifest-path server/reader-sync-api-rs/Cargo.toml --test intelligence_offline_contract
 cargo clippy --manifest-path server/reader-sync-api-rs/Cargo.toml --all-targets -- -D warnings

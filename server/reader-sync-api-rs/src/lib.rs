@@ -24,7 +24,7 @@ pub mod sms;
 pub mod state;
 pub mod sync;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -560,6 +560,12 @@ pub fn app(state: AppState) -> Router {
 pub async fn serve(config: Config) -> Result<()> {
     let bind = config.bind;
     let listen_backlog = config.listen_backlog;
+    let tls = config.tls.clone();
+    if tls.is_some() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .map_err(|_| anyhow::anyhow!("TLS crypto provider was already initialized"))?;
+    }
     let state = build_state(config).await?;
     let mail_worker = mail::spawn_worker(state.clone())?;
     let sms_worker = sms::spawn_worker(state.clone())?;
@@ -583,13 +589,36 @@ pub async fn serve(config: Config) -> Result<()> {
         .listen(listen_backlog)
         .with_context(|| format!("failed to listen on {bind}"))?;
     info!(%bind, "reader sync API listening");
-    let result = axum::serve(
-        listener,
-        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("HTTP server failed");
+    let app = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let result = if let Some(tls) = tls {
+        let listener = listener
+            .into_std()
+            .context("failed to preserve the configured TLS listen backlog")?;
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            tls.certificate_pem,
+            tls.private_key_pem,
+        )
+        .await
+        .context("failed to load TLS certificate or private key")?;
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+        let shutdown_task = tokio::spawn(async move {
+            shutdown_signal().await;
+            shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
+        });
+        let result = axum_server::from_tcp_rustls(listener, tls_config)
+            .handle(handle)
+            .serve(app)
+            .await
+            .context("TLS server failed");
+        shutdown_task.abort();
+        result
+    } else {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .context("HTTP server failed")
+    };
     if let Some(worker) = mail_worker {
         worker.abort();
     }

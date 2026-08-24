@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, str::FromStr, time::Duration};
+use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use secrecy::SecretString;
@@ -6,6 +6,7 @@ use secrecy::SecretString;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind: SocketAddr,
+    pub tls: Option<TlsConfig>,
     /// TCP accept queue depth. This is intentionally independent from the
     /// HTTP execution semaphores: a short connection burst should wait in the
     /// kernel queue rather than be dropped before middleware can apply its
@@ -77,6 +78,22 @@ pub struct Config {
     pub intelligence_object_storage: IntelligenceObjectStorageConfig,
     pub smtp: Option<SmtpConfig>,
     pub sms: Option<TencentSmsConfig>,
+}
+
+#[derive(Clone)]
+pub struct TlsConfig {
+    pub certificate_pem: PathBuf,
+    pub private_key_pem: PathBuf,
+}
+
+impl fmt::Debug for TlsConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsConfig")
+            .field("certificate_pem", &"[REDACTED]")
+            .field("private_key_pem", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +198,10 @@ impl Config {
             bail!("KUNPENG_SYNC_BIND must be loopback unless KUNPENG_SYNC_ALLOW_PUBLIC_BIND=1");
         }
         let database_url = required("KUNPENG_SYNC_DATABASE_URL")?;
+        let tls = tls_config(
+            optional("KUNPENG_SYNC_TLS_CERTIFICATE_PEM"),
+            optional("KUNPENG_SYNC_TLS_PRIVATE_KEY_PEM"),
+        )?;
         let token_hmac_key = required("KUNPENG_SYNC_TOKEN_HMAC_KEY")?;
         if token_hmac_key.len() < 32 {
             bail!("KUNPENG_SYNC_TOKEN_HMAC_KEY must contain at least 32 bytes");
@@ -191,6 +212,7 @@ impl Config {
         let intelligence_object_storage = intelligence_object_storage_config()?;
         Ok(Self {
             bind,
+            tls,
             listen_backlog: parsed_positive::<u32>("KUNPENG_SYNC_LISTEN_BACKLOG", "1024")?,
             database_url: SecretString::from(database_url),
             token_hmac_key: SecretString::from(token_hmac_key),
@@ -260,6 +282,7 @@ impl Config {
     pub fn for_test(database_url: &str) -> Self {
         Self {
             bind: SocketAddr::from_str("127.0.0.1:0").expect("test bind address"),
+            tls: None,
             listen_backlog: 128,
             database_url: SecretString::from(database_url.to_owned()),
             token_hmac_key: SecretString::from("test-only-key-with-at-least-32-bytes".to_owned()),
@@ -425,6 +448,22 @@ fn boolean(name: &str, default: bool) -> Result<bool> {
     }
 }
 
+fn tls_config(
+    certificate_pem: Option<String>,
+    private_key_pem: Option<String>,
+) -> Result<Option<TlsConfig>> {
+    match (certificate_pem, private_key_pem) {
+        (None, None) => Ok(None),
+        (Some(certificate_pem), Some(private_key_pem)) => Ok(Some(TlsConfig {
+            certificate_pem: PathBuf::from(certificate_pem),
+            private_key_pem: PathBuf::from(private_key_pem),
+        })),
+        _ => bail!(
+            "KUNPENG_SYNC_TLS_CERTIFICATE_PEM and KUNPENG_SYNC_TLS_PRIVATE_KEY_PEM must be set together"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +471,10 @@ mod tests {
     #[test]
     fn test_config_does_not_expose_secrets_in_debug() {
         let mut config = Config::for_test("postgresql://user:password@localhost/database");
+        config.tls = Some(TlsConfig {
+            certificate_pem: PathBuf::from("/private/certificate-path-must-not-leak"),
+            private_key_pem: PathBuf::from("/private/key-path-must-not-leak"),
+        });
         config.sms = Some(TencentSmsConfig {
             secret_id: "secret-id-must-not-leak".to_owned(),
             secret_key: SecretString::from("secret-key-must-not-leak".to_owned()),
@@ -464,9 +507,29 @@ mod tests {
             "object-access-key",
             "object-secret-key",
             "object-session-token",
+            "certificate-path",
+            "key-path",
         ] {
             assert!(!debug.contains(sensitive));
         }
+    }
+
+    #[test]
+    fn test_tls_files_must_be_configured_as_a_pair() {
+        assert!(tls_config(None, None).unwrap().is_none());
+        let tls = tls_config(
+            Some("/private/certificate.pem".to_owned()),
+            Some("/private/key.pem".to_owned()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            tls.certificate_pem,
+            PathBuf::from("/private/certificate.pem")
+        );
+        assert_eq!(tls.private_key_pem, PathBuf::from("/private/key.pem"));
+        assert!(tls_config(Some("/private/certificate.pem".to_owned()), None).is_err());
+        assert!(tls_config(None, Some("/private/key.pem".to_owned())).is_err());
     }
 
     #[test]

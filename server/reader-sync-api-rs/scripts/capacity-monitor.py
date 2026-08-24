@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import ssl
 import statistics
 import subprocess
 import time
@@ -25,7 +26,9 @@ STAGES = (("baseline", 60), ("elevated", 180), ("peak", 180),
           ("stress-500", 150), ("recovery", 90))
 
 TEST_DATABASE = re.compile(r"reader_sync_rust_test_[A-Za-z0-9_]+\Z")
-LOOPBACK_METRICS = re.compile(r"http://(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?/metrics\Z")
+LOOPBACK_METRICS = re.compile(
+    r"https?://(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?/metrics\Z"
+)
 PROMETHEUS_SAMPLE = re.compile(
     r"^(?P<name>reader_sync_[A-Za-z0-9_]+)(?:\{(?P<labels>[^}]*)\})?\s+(?P<value>[-+0-9.eE]+)$"
 )
@@ -382,6 +385,24 @@ def parse_prometheus_labels(value):
     return labels
 
 
+def loopback_metrics_ssl_context(url):
+    """Return an unverified TLS context only for a prevalidated loopback URL.
+
+    Direct capacity probes use a short-lived self-signed certificate on the
+    disposable service.  The monitor never leaves loopback, so accepting that
+    certificate here adds TLS-path observability without trusting it for any
+    external destination.
+    """
+    if not LOOPBACK_METRICS.fullmatch(url):
+        raise ValueError("metrics URL must be a loopback /metrics endpoint")
+    if not url.startswith("https://"):
+        return None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
 def metrics_snapshot(url):
     """Fetch only fixed aggregate service metrics from loopback.
 
@@ -389,10 +410,9 @@ def metrics_snapshot(url):
     Unknown metrics and labels are discarded so no route parameter, identity,
     request body, or future high-cardinality metric leaks into reports.
     """
-    if not LOOPBACK_METRICS.fullmatch(url):
-        raise ValueError("metrics URL must be a loopback /metrics endpoint")
+    context = loopback_metrics_ssl_context(url)
     try:
-        with urlopen(url, timeout=1.5) as response:  # noqa: S310 -- loopback guard above
+        with urlopen(url, timeout=1.5, context=context) as response:  # noqa: S310 -- loopback guard above
             payload = response.read().decode("utf-8")
     except (OSError, URLError, UnicodeDecodeError):
         return {"available": False, "reason": "service_metrics_unavailable", "samples": {}}
