@@ -49,7 +49,32 @@ const stageLabels = {
   publication_without_model: "模型不可用时检查已有发布包",
 };
 function stageLabel(value) { return stageLabels[value] || value || "准备中"; }
+const backfillFailureLabels = {
+  http_access_denied: "访问受限",
+  http_not_found: "页面不存在",
+  http_rate_limited: "访问限流",
+  http_server_error: "来源服务异常",
+  network_request_failed: "网络请求失败",
+  body_paywall_or_interstitial: "付费墙或跳转页",
+  body_not_found: "未提取到正文",
+  content_extraction_failed: "正文提取失败",
+  google_news_target_unresolved: "聚合来源未解析",
+  archive_persist_failed: "本地归档失败",
+  other: "其他固定错误",
+};
+function backfillHealth(status) {
+  return status && status.fullTextBackfill && typeof status.fullTextBackfill === "object" ? status.fullTextBackfill : {};
+}
+function formatBackfillFailures(health) {
+  const rows = Array.isArray(health.failureCategories) ? health.failureCategories : [];
+  const visible = rows.filter((row) => Number(row && row.count) > 0)
+    .map((row) => `${backfillFailureLabels[row.category] || "其他固定错误"} ${Number(row.count)}`);
+  return visible.length ? visible.join(" · ") : "暂无持久失败分类";
+}
 function render(status) {
+  const fullTextHealth = backfillHealth(status);
+  const waitingFullText = Number.isFinite(Number(fullTextHealth.waitingCount))
+    ? Number(fullTextHealth.waitingCount) : Number(status.awaitingFullTextCount) || 0;
   state.textContent = status.pipelineRunning
     ? `本机主机正在处理：${stageLabel(status.currentStage)}`
     : status.enabled ? "本机主机已就绪" : "主机尚未启用";
@@ -57,7 +82,9 @@ function render(status) {
   updated.textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
   metrics.replaceChildren(
     metric("永久归档", status.articleCount, `完整正文 ${status.fullTextCount} 篇`),
-    metric("待补全文", status.awaitingFullTextCount, "完成后才可进入模型初筛"),
+    metric("待补全文", waitingFullText, "有公开来源、等待归档正文"),
+    metric("文章级可重试", fullTextHealth.retryableNowCount || 0, `退避中 ${fullTextHealth.delayedCount || 0} 篇`),
+    metric("受限来源", fullTextHealth.limitedHostCount || 0, "受保护熔断中；不显示来源名称"),
     metric("模型候选总数", status.queuedCount, `其中待 8B 初筛 ${status.readyForTriageCount} 篇`),
     metric("历史归档补全", status.historicalBackfillCount, "不进入当前模型队列"),
     metric("待关系判断", status.readyForRelationCount, "已完成初筛，等待 8B 关系核验"),
@@ -65,7 +92,7 @@ function render(status) {
     metric("保留", status.keptCount, `已过滤 ${status.filteredCount} 篇`),
     metric("主机组件", status.workerAvailable ? 1 : 0, status.configurationReady ? "来源与模型已配置" : "配置尚未完成"),
   );
-  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；${status.awaitingFullTextCount} 篇阻塞模型判断，另有 ${status.historicalBackfillCount} 篇历史归档待补全。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
+  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；${waitingFullText} 篇等待全文补全，文章级可重试 ${fullTextHealth.retryableNowCount || 0} 篇、退避中 ${fullTextHealth.delayedCount || 0} 篇，受限来源 ${fullTextHealth.limitedHostCount || 0} 个。失败分类：${formatBackfillFailures(fullTextHealth)}。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
   byId("triage-detail").textContent = `待初筛 ${status.readyForTriageCount} 篇；已完成关系判断、等待综合 ${status.readyForEditorialCount} 篇。`;
   byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件；发布状态由登录账户的主机配对决定。`;
   runSummary.textContent = status.auditRun ? formatAuditRun(status.auditRun) : formatRun(status.lastRun);

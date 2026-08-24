@@ -149,6 +149,11 @@ pub(crate) struct HostStatus {
     /// dashboard never presents a 7k archive repair backlog as a handful of
     /// current candidates.
     historical_backfill_count: u64,
+    /// Aggregate-only evidence-acquisition health.  This deliberately keeps
+    /// per-article retry scheduling distinct from per-publisher protection:
+    /// the workbench must never disclose an article URL or a publisher host
+    /// merely to explain why a public body has not been archived yet.
+    full_text_backfill: FullTextBackfillHealth,
     /// Kept full-text records still waiting for 0.6B recall plus the 8B
     /// relation pass.
     ready_for_relation_count: u64,
@@ -173,6 +178,36 @@ pub(crate) struct HostStatus {
     audit_summary: Vec<AuditSummary>,
     last_run: Option<RunReport>,
     last_error: Option<String>,
+}
+
+/// Safe, fixed-shape operational counters for permanent full-text acquisition.
+/// Neither this type nor the queries that populate it project article text,
+/// titles, URLs, source identifiers, hosts, raw HTTP errors or credentials.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FullTextBackfillHealth {
+    /// Incomplete article revisions with a durable public HTTPS source that
+    /// can enter the evidence backfill lane.
+    waiting_count: u64,
+    /// Article-level retry windows that have elapsed. A host circuit can still
+    /// temporarily defer one of these rows; `limited_host_count` exposes that
+    /// separate safety boundary without naming the host.
+    retryable_now_count: u64,
+    /// Article-level retry windows still in their persisted backoff period.
+    delayed_count: u64,
+    /// Number of publisher circuits currently protecting a remote host.
+    limited_host_count: u64,
+    /// Fixed, operator-safe categories from the most recent persisted retry
+    /// state. Zero categories remain present so dashboard clients do not need
+    /// to infer the accepted failure vocabulary from raw worker errors.
+    failure_categories: Vec<FullTextBackfillFailureCount>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FullTextBackfillFailureCount {
+    category: &'static str,
+    count: u64,
 }
 
 /// Aggregate-only audit information for the local control page.  Keeping this
@@ -890,6 +925,7 @@ fn status(
         ready_for_triage_count: 0,
         awaiting_full_text_count: 0,
         historical_backfill_count: 0,
+        full_text_backfill: FullTextBackfillHealth::default(),
         ready_for_relation_count: 0,
         ready_for_editorial_count: 0,
         kept_count: 0,
@@ -1029,7 +1065,147 @@ fn status(
             |row| row.get::<_, u64>(0),
         )
         .unwrap_or(0);
+    result.full_text_backfill = full_text_backfill_health(&connection, unix_millis());
     result
+}
+
+const FULL_TEXT_BACKFILL_FAILURE_CATEGORIES: &[&str] = &[
+    "http_access_denied",
+    "http_not_found",
+    "http_rate_limited",
+    "http_server_error",
+    "network_request_failed",
+    "body_paywall_or_interstitial",
+    "body_not_found",
+    "content_extraction_failed",
+    "google_news_target_unresolved",
+    "archive_persist_failed",
+    "other",
+];
+
+fn full_text_backfill_health(connection: &Connection, now_millis: i64) -> FullTextBackfillHealth {
+    let mut health = FullTextBackfillHealth {
+        failure_categories: FULL_TEXT_BACKFILL_FAILURE_CATEGORIES
+            .iter()
+            .map(|category| FullTextBackfillFailureCount { category, count: 0 })
+            .collect(),
+        ..FullTextBackfillHealth::default()
+    };
+    if !sqlite_table_exists(connection, "intelligence_articles") {
+        return health;
+    }
+
+    let has_content_versions =
+        sqlite_table_exists(connection, "intelligence_article_content_versions");
+    let has_collection_records = sqlite_table_exists(connection, "intelligence_collection_records");
+    let has_article_state = sqlite_table_exists(connection, "intelligence_content_backfill_state");
+    let has_host_state = sqlite_table_exists(connection, "intelligence_content_backfill_hosts");
+    let complete_evidence = if has_content_versions {
+        "NOT EXISTS (SELECT 1 FROM intelligence_article_content_versions content
+          WHERE content.article_id=a.article_id
+            AND content.record_fingerprint=a.fingerprint
+            AND content.is_current=1 AND content.body_status='complete')"
+    } else {
+        "1=1"
+    };
+    let public_source = if has_collection_records {
+        "(NULLIF(a.url,'') LIKE 'https://%' OR EXISTS (
+          SELECT 1 FROM intelligence_collection_records record
+           WHERE record.article_id=a.article_id
+             AND record.normalized_url LIKE 'https://%'))"
+    } else {
+        "NULLIF(a.url,'') LIKE 'https://%'"
+    };
+
+    let pending = format!(
+        "WITH pending AS (
+           SELECT a.article_id FROM intelligence_articles a
+            WHERE {complete_evidence} AND {public_source}
+         )"
+    );
+    let article_health = if has_article_state {
+        format!(
+            "{pending}
+             SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN state.article_id IS NULL
+                                       OR state.next_retry_at<=?1 THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN state.next_retry_at>?1 THEN 1 ELSE 0 END),0)
+               FROM pending
+               LEFT JOIN intelligence_content_backfill_state state
+                 ON state.article_id=pending.article_id"
+        )
+    } else {
+        // Keep the same bound parameter shape as the stateful branch.  Status
+        // is read-only and old catalogs without the retry table treat every
+        // source-backed evidence gap as immediately eligible.
+        format!("{pending} SELECT COUNT(*),COUNT(*),0 FROM pending WHERE ?1 IS NOT NULL")
+    };
+    if let Ok((waiting, retryable, delayed)) =
+        connection.query_row(&article_health, [now_millis], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
+        })
+    {
+        health.waiting_count = waiting;
+        health.retryable_now_count = retryable;
+        health.delayed_count = delayed;
+    }
+
+    if has_host_state {
+        health.limited_host_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_content_backfill_hosts WHERE next_allowed_at>?1",
+                [now_millis],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap_or(0);
+    }
+    if has_article_state {
+        let mut failure_counts = match connection.prepare(
+            "SELECT last_failure_reason,COUNT(*)
+               FROM intelligence_content_backfill_state
+              WHERE attempts>0 AND last_failure_reason IS NOT NULL
+              GROUP BY last_failure_reason",
+        ) {
+            Ok(statement) => statement,
+            Err(_) => return health,
+        };
+        let rows = match failure_counts.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return health,
+        };
+        for row in rows.flatten() {
+            let (reason, count) = row;
+            let category = if FULL_TEXT_BACKFILL_FAILURE_CATEGORIES.contains(&reason.as_str()) {
+                reason.as_str()
+            } else {
+                "other"
+            };
+            if let Some(target) = health
+                .failure_categories
+                .iter_mut()
+                .find(|item| item.category == category)
+            {
+                target.count = target.count.saturating_add(count);
+            }
+        }
+    }
+    health
+}
+
+fn sqlite_table_exists(connection: &Connection, table: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .is_ok_and(|present| present != 0)
 }
 
 fn audit_is_running(audit: Option<&HostRunAudit>) -> bool {
@@ -1758,6 +1934,62 @@ mod tests {
             .unwrap()
             .get("readyForEditorialCount")
             .is_some_and(serde_json::Value::is_u64));
+    }
+
+    #[test]
+    fn full_text_backfill_health_is_aggregate_only_and_distinguishes_backoff() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE intelligence_articles(
+                     article_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,url TEXT
+                 );
+                 CREATE TABLE intelligence_article_content_versions(
+                     article_id TEXT,record_fingerprint TEXT,is_current INTEGER,body_status TEXT
+                 );
+                 CREATE TABLE intelligence_collection_records(
+                     article_id TEXT,normalized_url TEXT
+                 );
+                 CREATE TABLE intelligence_content_backfill_state(
+                     article_id TEXT PRIMARY KEY,attempts INTEGER NOT NULL,next_retry_at INTEGER NOT NULL,
+                     last_failure_reason TEXT
+                 );
+                 CREATE TABLE intelligence_content_backfill_hosts(
+                     host TEXT PRIMARY KEY,next_allowed_at INTEGER NOT NULL
+                 );
+                 INSERT INTO intelligence_articles(article_id,fingerprint,url) VALUES
+                    ('ready','one','https://redacted.invalid/ready'),
+                    ('access','two','https://redacted.invalid/access'),
+                    ('delayed','three','https://redacted.invalid/delayed'),
+                    ('no-source','four','');
+                 INSERT INTO intelligence_content_backfill_state(article_id,attempts,next_retry_at,last_failure_reason) VALUES
+                    ('access',1,0,'http_access_denied'),
+                    ('delayed',1,2000,'network_request_failed');
+                 INSERT INTO intelligence_content_backfill_hosts(host,next_allowed_at) VALUES
+                    ('redacted.invalid',2000),('available.invalid',0);",
+            )
+            .unwrap();
+
+        let health = full_text_backfill_health(&connection, 1000);
+        assert_eq!(health.waiting_count, 3);
+        assert_eq!(health.retryable_now_count, 2);
+        assert_eq!(health.delayed_count, 1);
+        assert_eq!(health.limited_host_count, 1);
+        let count = |category| {
+            health
+                .failure_categories
+                .iter()
+                .find(|item| item.category == category)
+                .map(|item| item.count)
+                .unwrap_or_default()
+        };
+        assert_eq!(count("http_access_denied"), 1);
+        assert_eq!(count("network_request_failed"), 1);
+        assert_eq!(count("other"), 0);
+
+        let encoded = serde_json::to_string(&health).unwrap();
+        assert!(!encoded.contains("redacted.invalid"));
+        assert!(!encoded.contains("/ready"));
     }
 
     #[test]
