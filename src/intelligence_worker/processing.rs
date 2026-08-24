@@ -45,12 +45,14 @@ const MAX_CHUNKS: usize = 256;
 // is query + every candidate document, so 64 full embedding samples can
 // silently exceed the service even when embedding itself is healthy.
 const MAX_VECTOR_RERANK_CANDIDATES: usize = 6;
-// llama.cpp's reranker formats the query/document pair internally.  With a
-// 256-token physical batch, a 240-character mixed CJK/Latin field can become
-// a 262-token request and be rejected before inference.  Leave a generous
-// token-formatting margin so an ordinary long CJK title/summary is a valid
-// relation candidate instead of a retry loop.
-const MAX_RERANK_TEXT_CHARS: usize = 192;
+// llama.cpp's reranker formats *each query/document pair* internally.  On the
+// local 0.6B service the physical batch is 256 tokens: six CJK candidates at
+// 192 characters each look harmless as a JSON request, but each individual
+// pair becomes roughly 384 tokens and the server returns HTTP 500 before it
+// can score anything.  Budget both sides of a pair for the worst CJK token
+// ratio and leave formatter headroom.  Dense recall still sees the richer
+// 0.6B representation; this cap applies only to the bounded rerank pass.
+const MAX_RERANK_TEXT_CHARS: usize = 64;
 /// The 8B judge receives two public feed records in one prompt.  Feeds can
 /// contain an unbounded HTML description despite an otherwise valid article,
 /// so this representation is independently capped from both the vector and
@@ -2746,11 +2748,11 @@ mod tests {
             body: "正文".repeat(500),
             published_at: "2026-08-24".into(),
         };
-        // The complete field is deliberately kept well below the reranker
-        // server's 256-token physical batch; its request formatter adds
-        // special tokens beyond this public representation.
+        // Both query and document are independently capped.  Their combined
+        // worst-case CJK size stays below the reranker server's 256-token
+        // physical batch after its pair formatter adds special tokens.
         assert!(rerank_text(&article).chars().count() <= MAX_RERANK_TEXT_CHARS);
-        assert!(MAX_RERANK_TEXT_CHARS < 220);
+        assert!(MAX_RERANK_TEXT_CHARS <= 64);
     }
 
     #[test]

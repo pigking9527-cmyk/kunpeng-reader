@@ -13,6 +13,7 @@ use crate::{
         ArchiveVideoInput,
     },
 };
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
@@ -758,6 +759,18 @@ fn follow_public_article_redirects(
     initial_url: &str,
 ) -> Result<ureq::http::Response<ureq::Body>, &'static str> {
     let mut current = public_fetch_url(initial_url).map_err(|_| "article_url_not_public")?;
+    // Google News RSS uses a public wrapper URL.  Keep it as the archived
+    // source URL, but require every resolved hop to stay on public HTTPS.
+    // Normal HTTP 3xx handling is preferred; the bounded legacy-token decoder
+    // below is only a fallback for wrapper pages that answer 2xx instead of a
+    // redirect.  We deliberately do not depend on Google's undocumented
+    // batchexecute RPC, which is not a stable public content API.
+    let google_news_wrapper = google_news_rss_article_token(initial_url).is_some();
+    // Decode before the first request so an initial `/rss/articles/...` hop
+    // can become `/articles/...` without losing the legacy target.  It is
+    // used only if that chain finishes on a Google wrapper page rather than
+    // on the publisher's public HTTPS response.
+    let google_news_legacy_target = google_news_legacy_public_target(initial_url);
     for redirect_count in 0..=MAX_PUBLIC_REDIRECTS {
         let response = agent
             .get(&current)
@@ -767,6 +780,16 @@ fn follow_public_article_redirects(
             .map_err(|_| "article_network_request_failed")?;
         let status = response.status().as_u16();
         if !(300..400).contains(&status) {
+            if google_news_wrapper && is_news_google_url(&current) {
+                // Older Google News RSS article IDs encode the public target
+                // in their protobuf payload.  This is intentionally an
+                // in-memory fetch target only: `article.url` is never
+                // replaced, so the original RSS source remains auditable.
+                current = google_news_legacy_target
+                    .clone()
+                    .ok_or("google_news_target_unresolved")?;
+                continue;
+            }
             return Ok(response);
         }
         if redirect_count == MAX_PUBLIC_REDIRECTS {
@@ -774,7 +797,12 @@ fn follow_public_article_redirects(
         }
         let location =
             response_header(&response, "location").ok_or("article_redirect_missing_location")?;
-        current = absolute_public_url(&current, &location).ok_or("article_redirect_not_public")?;
+        current = if google_news_wrapper {
+            absolute_public_https_url(&current, &location)
+        } else {
+            absolute_public_url(&current, &location)
+        }
+        .ok_or("article_redirect_not_public")?;
     }
     Err("article_redirect_limit")
 }
@@ -961,6 +989,63 @@ fn absolute_public_url(base: &str, value: &str) -> Option<String> {
     public_fetch_url(joined.as_str()).ok()
 }
 
+fn absolute_public_https_url(base: &str, value: &str) -> Option<String> {
+    let base = reqwest::Url::parse(base).ok()?;
+    let joined = base.join(value.trim()).ok()?;
+    public_https_fetch_url(joined.as_str()).ok()
+}
+
+/// Return the opaque ID carried by a public Google News RSS article wrapper.
+/// This is intentionally strict: other Google paths and arbitrary lookalike
+/// hosts stay on the ordinary public redirect path.
+fn google_news_rss_article_token(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value.trim()).ok()?;
+    if !is_news_google_url(value) {
+        return None;
+    }
+    let mut segments = url.path_segments()?;
+    if segments.next()? != "rss" || segments.next()? != "articles" {
+        return None;
+    }
+    let token = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    safe_text(token, 16 * 1024)
+}
+
+fn is_news_google_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value.trim()) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("news.google.com"))
+}
+
+/// Decode only the legacy Google News RSS protobuf wrapper form.  Recent
+/// opaque IDs are intentionally not guessed or sent to a private decoder;
+/// normal public HTTPS redirect handling remains their supported path.
+fn google_news_legacy_public_target(value: &str) -> Option<String> {
+    let token = google_news_rss_article_token(value)?;
+    let decoded = general_purpose::URL_SAFE_NO_PAD
+        .decode(token.as_bytes())
+        .or_else(|_| general_purpose::URL_SAFE.decode(token.as_bytes()))
+        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(token.as_bytes()))
+        .or_else(|_| general_purpose::STANDARD.decode(token.as_bytes()))
+        .ok()?;
+    let start = decoded
+        .windows(b"https://".len())
+        .position(|slice| slice == b"https://")?;
+    let end = decoded[start..]
+        .iter()
+        .position(|byte| !byte.is_ascii_graphic() || matches!(byte, b'\'' | b'\"' | b'<' | b'>'))
+        .unwrap_or(decoded.len() - start);
+    let target = std::str::from_utf8(&decoded[start..start + end]).ok()?;
+    public_https_fetch_url(target).ok()
+}
+
 fn fetch_public_image(
     agent: &ureq::Agent,
     url: &str,
@@ -1095,6 +1180,11 @@ fn classify_content_backfill_failure(reason: Option<&str>) -> ContentBackfillFai
         "response_unreadable_or_too_large"
     } else if reason == "article_body_missing_or_paywall" {
         "body_missing_or_paywall"
+    } else if reason == "google_news_target_unresolved" {
+        // Do not repeatedly download a large Google News wrapper during the
+        // short transient retry window.  Keep a precise, operator-visible
+        // evidence gap until the next scheduled repair pass can try again.
+        "google_news_target_unresolved"
     } else {
         "content_extraction_failed"
     };
@@ -1225,6 +1315,16 @@ fn public_fetch_url(value: &str) -> Result<String, ()> {
         }
     }
     Ok(normalized)
+}
+
+/// A Google News wrapper must never downgrade the article fetch to cleartext.
+/// Other explicitly configured legacy public sources retain the broader
+/// `public_fetch_url` compatibility path above.
+fn public_https_fetch_url(value: &str) -> Result<String, ()> {
+    let normalized = public_fetch_url(value)?;
+    (reqwest::Url::parse(&normalized).map_err(|_| ())?.scheme() == "https")
+        .then_some(normalized)
+        .ok_or(())
 }
 
 fn article_identity(source_id: &str, guid: &str, url: &str) -> String {
@@ -2012,9 +2112,10 @@ fn record_content_backfill_retry(
         .unwrap_or(0)
         .clamp(0, 16);
     let base_delay_ms = match reason.reason {
-        "http_access_denied" | "http_not_found" | "body_missing_or_paywall" => {
-            CONTENT_BACKFILL_TERMINAL_DELAY_MS
-        }
+        "http_access_denied"
+        | "http_not_found"
+        | "body_missing_or_paywall"
+        | "google_news_target_unresolved" => CONTENT_BACKFILL_TERMINAL_DELAY_MS,
         "http_rate_limited" => CONTENT_BACKFILL_RATE_LIMIT_BASE_DELAY_MS,
         _ => CONTENT_BACKFILL_BASE_DELAY_MS,
     };
@@ -2182,6 +2283,42 @@ mod tests {
         assert!(public_fetch_url("http://127.0.0.1/private").is_err());
         assert!(public_fetch_url("https://localhost/private").is_err());
         assert!(public_fetch_url("https://example.test/public").is_ok());
+    }
+
+    fn legacy_google_rss_wrapper(target: &str) -> String {
+        let mut payload = vec![0x08, 0x13, 0x22];
+        payload.extend_from_slice(target.as_bytes());
+        payload.extend_from_slice(&[0xd2, 0x01, 0x00]);
+        let token = general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        format!("https://news.google.com/rss/articles/{token}")
+    }
+
+    #[test]
+    fn google_news_legacy_wrapper_decodes_only_public_https_target() {
+        let wrapper = legacy_google_rss_wrapper("https://publisher.example.test/story?a=1");
+        assert_eq!(
+            google_news_legacy_public_target(&wrapper).as_deref(),
+            Some("https://publisher.example.test/story?a=1")
+        );
+        // Decoding is a fetch-only operation; the RSS wrapper remains the
+        // durable source URL used for identity and audit.
+        assert_eq!(
+            normalized_url(&wrapper).unwrap(),
+            wrapper,
+            "the original Google News source must not be replaced"
+        );
+    }
+
+    #[test]
+    fn google_news_legacy_wrapper_rejects_non_https_and_non_public_targets() {
+        let insecure = legacy_google_rss_wrapper("http://publisher.example.test/story");
+        let loopback = legacy_google_rss_wrapper("https://127.0.0.1/private");
+        assert!(google_news_legacy_public_target(&insecure).is_none());
+        assert!(google_news_legacy_public_target(&loopback).is_none());
+        assert!(
+            google_news_legacy_public_target("https://example.test/rss/articles/token").is_none()
+        );
+        assert!(google_news_rss_article_token("https://news.google.com/read/token").is_none());
     }
 
     #[test]
@@ -2624,6 +2761,10 @@ mod tests {
         assert_eq!(
             classify_content_backfill_failure(Some("article_network_request_failed")).reason,
             "network_request_failed"
+        );
+        assert_eq!(
+            classify_content_backfill_failure(Some("google_news_target_unresolved")).reason,
+            "google_news_target_unresolved"
         );
     }
 

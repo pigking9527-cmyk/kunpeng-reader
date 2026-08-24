@@ -793,12 +793,18 @@ fn status(
     pipeline_running: bool,
 ) -> HostStatus {
     let persisted_audit = read_host_audit();
+    // `--status` is normally invoked by a second short-lived host process,
+    // while the long-running host owns the actual pipeline.  The durable audit
+    // is therefore the authority for an in-progress round: treating the
+    // observer's local boolean as the whole truth made the dashboard say both
+    // "running" and "interrupted" at the same time.
+    let effective_pipeline_running = pipeline_running || audit_is_running(persisted_audit.as_ref());
     let mut result = HostStatus {
         kind: "kunpeng-intelligence-host",
         enabled: configuration.enabled,
         launch_at_login: configuration.launch_at_login,
         configuration_ready: configuration_ready(configuration),
-        pipeline_running,
+        pipeline_running: effective_pipeline_running,
         archive_present: false,
         worker_available: worker_path(configuration).is_some(),
         sources_configured: configuration.sources_file.is_some(),
@@ -829,7 +835,7 @@ fn status(
         }),
         last_error: persisted_audit
             .as_ref()
-            .filter(|audit| audit.status == "running" && !pipeline_running)
+            .filter(|audit| audit.status == "running" && !effective_pipeline_running)
             .map(|_| "上一轮本机处理已中断；可安全重新运行，已完成的归档和模型结果会复用。".into()),
     };
     // Status is displayed whenever the workbench view opens.  It must remain
@@ -948,6 +954,10 @@ fn status(
         )
         .unwrap_or(0);
     result
+}
+
+fn audit_is_running(audit: Option<&HostRunAudit>) -> bool {
+    audit.is_some_and(|value| value.status == "running")
 }
 
 fn child_output(
@@ -1613,6 +1623,15 @@ mod tests {
             .unwrap()
             .get("readyForEditorialCount")
             .is_some_and(serde_json::Value::is_u64));
+    }
+
+    #[test]
+    fn persisted_running_audit_keeps_an_observer_status_running() {
+        let mut audit = HostRunAudit::start();
+        assert!(audit_is_running(Some(&audit)));
+        audit.finish("completed", None);
+        assert!(!audit_is_running(Some(&audit)));
+        assert!(!audit_is_running(None));
     }
 
     #[test]
