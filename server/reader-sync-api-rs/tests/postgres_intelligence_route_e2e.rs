@@ -6,7 +6,7 @@
 
 use std::{
     sync::{Arc, LazyLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -32,6 +32,8 @@ const ACCOUNT_B: &str = "intelligence-route-e2e-b";
 const ACCOUNT_DISABLED: &str = "intelligence-route-e2e-disabled";
 const PUBLICATION_ID: &str = "daily:route-e2e:2026-08-24";
 const ASSET_SHA256: &str = "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a";
+const DEVICE_A: &str = "device:route-e2e-a";
+const DEVICE_B: &str = "device:route-e2e-b";
 
 fn current_ms() -> i64 {
     i64::try_from(
@@ -87,6 +89,14 @@ fn idempotent_request(
     request
 }
 
+fn with_intelligence_device_id(mut request: Request<Body>, device_id: &str) -> Request<Body> {
+    request.headers_mut().insert(
+        "x-intelligence-device-id",
+        device_id.parse().expect("valid device identifier header"),
+    );
+    request
+}
+
 async fn response_json(response: axum::response::Response) -> Value {
     let bytes = response
         .into_body()
@@ -95,6 +105,45 @@ async fn response_json(response: axum::response::Response) -> Value {
         .expect("read response")
         .to_bytes();
     serde_json::from_slice(&bytes).expect("JSON response")
+}
+
+async fn first_delivery_frame(body: &mut Body) -> String {
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await
+            .expect("SSE emitted a delivery frame")
+            .expect("SSE body did not end")
+            .expect("SSE body frame");
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        let text = String::from_utf8(data.to_vec()).expect("UTF-8 SSE frame");
+        if text.contains("event: delivery") {
+            return text;
+        }
+    }
+}
+
+async fn device_cursor(pool: &PgPool, account_id: &str, device_id: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT cursor FROM intelligence_device_delivery_cursors_v1 \
+         WHERE account_id=$1 AND device_id=$2",
+    )
+    .bind(account_id)
+    .bind(device_id)
+    .fetch_optional(pool)
+    .await
+    .expect("read device delivery cursor")
+}
+
+async fn wait_for_device_cursor(pool: &PgPool, account_id: &str, device_id: &str, expected: i64) {
+    for _ in 0..40 {
+        if device_cursor(pool, account_id, device_id).await == Some(expected) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("SSE cursor was not persisted for {account_id}/{device_id}");
 }
 
 async fn login(service: &Router, username: &str, password: &str, installation_id: &str) -> String {
@@ -278,6 +327,28 @@ async fn create_archive_request(service: &Router, token: &str, key: &str) -> Uui
             .expect("archive request id"),
     )
     .expect("UUID archive request id")
+}
+
+async fn insert_delivery_event(pool: &PgPool, account_id: &str) -> i64 {
+    sqlx::query(
+        "DELETE FROM intelligence_delivery_events_v1 WHERE account_id=$1 AND publication_id=$2",
+    )
+    .bind(account_id)
+    .bind(PUBLICATION_ID)
+    .execute(pool)
+    .await
+    .expect("remove prior synthetic delivery event");
+    sqlx::query_scalar(
+        "INSERT INTO intelligence_delivery_events_v1 \
+         (account_id,publication_id,kind,created_at) VALUES ($1,$2,'daily',$3) \
+         RETURNING cursor",
+    )
+    .bind(account_id)
+    .bind(PUBLICATION_ID)
+    .bind(current_ms())
+    .fetch_one(pool)
+    .await
+    .expect("insert synthetic delivery event")
 }
 
 #[tokio::test]
@@ -508,6 +579,205 @@ async fn permitted_readers_share_current_content_but_not_archive_request_or_ack_
         .expect("shared package content"),
         Some(content)
     );
+
+    clean_fixture(&pool).await;
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // The assertions intentionally cover each device/account boundary through real routes.
+async fn registered_devices_isolate_delivery_acknowledgements_and_sse_resume_cursors() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _guard = DATABASE_LOCK.lock().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .expect("connect to explicit route test database");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate explicit route test database");
+    seed_fixture(&pool).await;
+    let service = router(pool.clone(), &database_url);
+    let token_a = login(
+        &service,
+        ACCOUNT_A,
+        "route-e2e-password",
+        "route-e2e-devices",
+    )
+    .await;
+    let token_b = login(
+        &service,
+        ACCOUNT_B,
+        "route-e2e-password",
+        "route-e2e-other-account",
+    )
+    .await;
+
+    for (device_id, key) in [
+        (DEVICE_A, "route-e2e-register-device-a"),
+        (DEVICE_B, "route-e2e-register-device-b"),
+    ] {
+        let response = service
+            .clone()
+            .oneshot(idempotent_request(
+                "POST",
+                "/v1/intelligence/devices",
+                &token_a,
+                key,
+                json!({
+                    "schemaVersion": 1,
+                    "deviceId": device_id,
+                    "platform": "windows",
+                    "quietHours": {"start":"22:00","end":"07:00"},
+                }),
+            ))
+            .await
+            .expect("register device response");
+        assert_eq!(response.status(), StatusCode::OK, "register {device_id}");
+    }
+
+    let acknowledge_a = service
+        .clone()
+        .oneshot(with_intelligence_device_id(
+            idempotent_request(
+                "POST",
+                &format!("/v1/intelligence/deliveries/{PUBLICATION_ID}/ack"),
+                &token_a,
+                "route-e2e-device-a-ack",
+                Value::Null,
+            ),
+            DEVICE_A,
+        ))
+        .await
+        .expect("device A acknowledgement response");
+    assert_eq!(acknowledge_a.status(), StatusCode::OK);
+    assert_eq!(response_json(acknowledge_a).await["deviceId"], DEVICE_A);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM intelligence_device_delivery_state_v1 \
+             WHERE account_id=$1 AND device_id=$2 AND publication_id=$3",
+        )
+        .bind(ACCOUNT_A)
+        .bind(DEVICE_A)
+        .bind(PUBLICATION_ID)
+        .fetch_one(&pool)
+        .await
+        .expect("device A acknowledgement state"),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM intelligence_device_delivery_state_v1 \
+             WHERE account_id=$1 AND device_id=$2 AND publication_id=$3",
+        )
+        .bind(ACCOUNT_A)
+        .bind(DEVICE_B)
+        .bind(PUBLICATION_ID)
+        .fetch_one(&pool)
+        .await
+        .expect("device B acknowledgement state"),
+        0,
+        "acknowledging one device must not acknowledge its sibling device"
+    );
+
+    let cross_account_device = service
+        .clone()
+        .oneshot(with_intelligence_device_id(
+            idempotent_request(
+                "POST",
+                &format!("/v1/intelligence/deliveries/{PUBLICATION_ID}/ack"),
+                &token_b,
+                "route-e2e-cross-account-device",
+                Value::Null,
+            ),
+            DEVICE_A,
+        ))
+        .await
+        .expect("cross-account device acknowledgement response");
+    assert_eq!(cross_account_device.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM intelligence_device_delivery_state_v1 WHERE account_id=$1",
+        )
+        .bind(ACCOUNT_B)
+        .fetch_one(&pool)
+        .await
+        .expect("cross-account device state"),
+        0
+    );
+
+    let expected_cursor = insert_delivery_event(&pool, ACCOUNT_A).await;
+    let stream_a = service
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!(
+                "/v1/intelligence/stream?deviceId={}&cursor=0",
+                DEVICE_A.replace(':', "%3A")
+            ),
+            Some(&token_a),
+            Value::Null,
+        ))
+        .await
+        .expect("device A SSE response");
+    assert_eq!(stream_a.status(), StatusCode::OK);
+    let mut first_stream_body = stream_a.into_body();
+    let delivery = first_delivery_frame(&mut first_stream_body).await;
+    assert!(delivery.contains(&format!("id: {expected_cursor}\n")));
+    assert!(delivery.contains(PUBLICATION_ID));
+
+    // Poll past the yielded event. `Sse` persistence runs after yielding, and
+    // a real HTTP consumer keeps polling its open body while it is connected.
+    let drive_a = tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(2), first_stream_body.frame()).await;
+    });
+    wait_for_device_cursor(&pool, ACCOUNT_A, DEVICE_A, expected_cursor).await;
+    drive_a.abort();
+    assert_eq!(device_cursor(&pool, ACCOUNT_A, DEVICE_B).await, None);
+
+    let resumed_a = service
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!(
+                "/v1/intelligence/stream?deviceId={}&cursor=0",
+                DEVICE_A.replace(':', "%3A")
+            ),
+            Some(&token_a),
+            Value::Null,
+        ))
+        .await
+        .expect("resumed device A SSE response");
+    assert_eq!(resumed_a.status(), StatusCode::OK);
+    let mut resumed_stream_body = resumed_a.into_body();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1250), resumed_stream_body.frame())
+            .await
+            .is_err(),
+        "a persisted device cursor must prevent replay when the client asks from zero"
+    );
+
+    let stream_b = service
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!(
+                "/v1/intelligence/stream?deviceId={}&cursor=0",
+                DEVICE_B.replace(':', "%3A")
+            ),
+            Some(&token_a),
+            Value::Null,
+        ))
+        .await
+        .expect("device B SSE response");
+    assert_eq!(stream_b.status(), StatusCode::OK);
+    let mut second_stream_body = stream_b.into_body();
+    let delivery_b = first_delivery_frame(&mut second_stream_body).await;
+    assert!(delivery_b.contains(&format!("id: {expected_cursor}\n")));
+    assert!(delivery_b.contains(PUBLICATION_ID));
 
     clean_fixture(&pool).await;
 }
