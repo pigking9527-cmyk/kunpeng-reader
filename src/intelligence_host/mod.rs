@@ -70,6 +70,11 @@ struct HostConfiguration {
     max_triage_per_run: u16,
     #[serde(default = "default_stage_limit")]
     max_processing_per_run: u16,
+    /// The 27B editorial service is deliberately more expensive than the
+    /// small-model stages.  Keep each unattended round responsive: completed
+    /// relation work is durable and the next loop resumes from that boundary.
+    #[serde(default = "default_editorial_limit")]
+    max_editorial_per_run: u16,
     /// Full-text acquisition does not occupy the GPU and must be allowed to
     /// make visible progress even while editorial work is intentionally
     /// bounded.  Each batch retains its per-publisher fairness and timeout.
@@ -89,6 +94,10 @@ const fn default_stage_limit() -> u16 {
     120
 }
 
+const fn default_editorial_limit() -> u16 {
+    1
+}
+
 const fn default_backfill_batches_per_run() -> u8 {
     4
 }
@@ -103,6 +112,7 @@ impl Default for HostConfiguration {
             worker_path: None,
             max_triage_per_run: default_stage_limit(),
             max_processing_per_run: default_stage_limit(),
+            max_editorial_per_run: default_editorial_limit(),
             max_backfill_batches_per_run: default_backfill_batches_per_run(),
             triage: None,
             embedding: None,
@@ -523,6 +533,8 @@ fn validate_configuration(configuration: &HostConfiguration) -> Result<(), Strin
         || configuration.max_triage_per_run > MAX_STAGE_RUNS
         || configuration.max_processing_per_run == 0
         || configuration.max_processing_per_run > MAX_STAGE_RUNS
+        || configuration.max_editorial_per_run == 0
+        || configuration.max_editorial_per_run > MAX_STAGE_RUNS
     {
         return Err("本机情报工作台配置版本或批处理上限无效".into());
     }
@@ -1274,7 +1286,7 @@ fn run_once_with_audit(
                     }
                 }
                 if report.outcome != "editorial_runtime_unavailable" {
-                    for _ in 0..configuration.max_processing_per_run {
+                    for _ in 0..configuration.max_editorial_per_run {
                         if status(configuration, None, false).ready_for_editorial_count == 0 {
                             break;
                         }
@@ -1460,6 +1472,7 @@ mod tests {
         let configuration = HostConfiguration::default();
         assert!(!configuration.enabled);
         assert_eq!(configuration.max_backfill_batches_per_run, 4);
+        assert_eq!(configuration.max_editorial_per_run, 1);
         assert!(!configuration_ready(&configuration));
         assert!(!collection_ready(&configuration));
         validate_configuration(&configuration).unwrap();
@@ -1565,6 +1578,15 @@ mod tests {
             model: "judge-8b".into(),
             artifact_sha256: "a".repeat(64),
         });
+        assert!(validate_configuration(&configuration).is_err());
+    }
+
+    #[test]
+    fn rejects_an_unbounded_or_disabled_editorial_batch_limit() {
+        let mut configuration = HostConfiguration::default();
+        configuration.max_editorial_per_run = 0;
+        assert!(validate_configuration(&configuration).is_err());
+        configuration.max_editorial_per_run = MAX_STAGE_RUNS + 1;
         assert!(validate_configuration(&configuration).is_err());
     }
 
