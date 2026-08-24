@@ -222,7 +222,14 @@ struct HostRunAudit {
     version: u8,
     run_id: String,
     status: String,
+    /// The owning local host process.  A dashboard observer uses this to
+    /// distinguish a genuine background round from a stale file left by a
+    /// crash or forced shutdown.
+    #[serde(default)]
+    runner_pid: u32,
     started_at: i64,
+    #[serde(default)]
+    heartbeat_at: i64,
     finished_at: Option<i64>,
     current_stage: String,
     stages: Vec<HostRunStage>,
@@ -245,7 +252,9 @@ impl HostRunAudit {
             version: 1,
             run_id: uuid::Uuid::new_v4().to_string(),
             status: "running".into(),
+            runner_pid: std::process::id(),
             started_at: now,
+            heartbeat_at: now,
             finished_at: None,
             current_stage: "preparing".into(),
             stages: Vec::new(),
@@ -255,6 +264,7 @@ impl HostRunAudit {
 
     fn begin_stage(&mut self, stage: &str) {
         let now = unix_millis();
+        self.heartbeat_at = now;
         if let Some(previous) = self
             .stages
             .last_mut()
@@ -274,6 +284,7 @@ impl HostRunAudit {
 
     fn finish(&mut self, status: &str, report: Option<RunReport>) {
         let now = unix_millis();
+        self.heartbeat_at = now;
         if let Some(current) = self
             .stages
             .last_mut()
@@ -809,12 +820,12 @@ fn status(
     pipeline_running: bool,
 ) -> HostStatus {
     let persisted_audit = read_host_audit();
-    // `--status` is normally invoked by a second short-lived host process,
-    // while the long-running host owns the actual pipeline.  The durable audit
-    // is therefore the authority for an in-progress round: treating the
-    // observer's local boolean as the whole truth made the dashboard say both
-    // "running" and "interrupted" at the same time.
-    let effective_pipeline_running = pipeline_running || audit_is_running(persisted_audit.as_ref());
+    // `--status` is normally invoked by a second short-lived host process.
+    // Only a durable audit whose owner is still alive can establish that a
+    // separate host is working; a stale `running` file is interrupted work,
+    // not a future stage that the dashboard may invent.
+    let audit_running = audit_is_running(persisted_audit.as_ref());
+    let effective_pipeline_running = pipeline_running || audit_running;
     let mut result = HostStatus {
         kind: "kunpeng-intelligence-host",
         enabled: configuration.enabled,
@@ -841,7 +852,7 @@ fn status(
         processed_count: 0,
         current_stage: persisted_audit
             .as_ref()
-            .filter(|audit| audit.status == "running")
+            .filter(|_| audit_running)
             .map(|audit| audit.current_stage.clone()),
         audit_summary: Vec::new(),
         last_run: last_run.or_else(|| {
@@ -851,7 +862,7 @@ fn status(
         }),
         last_error: persisted_audit
             .as_ref()
-            .filter(|audit| audit.status == "running" && !effective_pipeline_running)
+            .filter(|audit| audit.status == "running" && !audit_running && !pipeline_running)
             .map(|_| "上一轮本机处理已中断；可安全重新运行，已完成的归档和模型结果会复用。".into()),
     };
     // Status is displayed whenever the workbench view opens.  It must remain
@@ -973,7 +984,42 @@ fn status(
 }
 
 fn audit_is_running(audit: Option<&HostRunAudit>) -> bool {
-    audit.is_some_and(|value| value.status == "running")
+    audit.is_some_and(|value| value.status == "running" && audit_owner_is_alive(value.runner_pid))
+}
+
+fn audit_owner_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        // Legacy audit records did not have an owner identity.  Fail closed:
+        // they remain visible as history but cannot hold the UI in `running`.
+        return false;
+    }
+    #[cfg(windows)]
+    unsafe {
+        type Handle = *mut core::ffi::c_void;
+        unsafe extern "system" {
+            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+            fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> i32;
+            fn CloseHandle(handle: Handle) -> i32;
+        }
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const STILL_ACTIVE: u32 = 259;
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let result = GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == STILL_ACTIVE;
+        let _ = CloseHandle(handle);
+        result
+    }
+    #[cfg(all(unix, not(windows)))]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).is_dir()
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        false
+    }
 }
 
 fn child_output(
@@ -1658,6 +1704,9 @@ mod tests {
     fn persisted_running_audit_keeps_an_observer_status_running() {
         let mut audit = HostRunAudit::start();
         assert!(audit_is_running(Some(&audit)));
+        audit.runner_pid = u32::MAX;
+        assert!(!audit_is_running(Some(&audit)));
+        audit.runner_pid = std::process::id();
         audit.finish("completed", None);
         assert!(!audit_is_running(Some(&audit)));
         assert!(!audit_is_running(None));
