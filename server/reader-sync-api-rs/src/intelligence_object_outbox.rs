@@ -549,6 +549,14 @@ mod tests {
         assert!(!archive_claim.contains("JOIN intelligence_archive_jobs_v1 j ON"));
     }
 
+    #[test]
+    fn object_storage_promotion_allows_releasing_the_postgres_copy() {
+        let migration = include_str!(
+            "../migrations/0035_intelligence_object_storage_promoted_content_nullable_v1.sql"
+        );
+        assert!(migration.contains("ALTER COLUMN content DROP NOT NULL"));
+    }
+
     #[tokio::test]
     #[ignore = "requires explicit real PostgreSQL and S3-compatible object-store confirmation"]
     async fn real_s3_asset_outbox_promotes_only_after_a_successful_put() {

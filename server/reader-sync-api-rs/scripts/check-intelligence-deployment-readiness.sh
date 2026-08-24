@@ -38,7 +38,7 @@ fi
 
 "$script_dir/check-migrations.sh"
 
-for migration in 0023_intelligence_capability_v1.sql 0024_intelligence_publications_v1.sql 0025_intelligence_delivery_v1.sql 0026_intelligence_archive_relay_v1.sql 0027_intelligence_retention_v1.sql 0028_intelligence_resumable_uploads_v1.sql 0029_intelligence_delivery_stream_v1.sql 0030_host_inference_relay_v1.sql 0031_intelligence_object_storage_foundation_v1.sql 0032_intelligence_object_write_outbox_v1.sql 0033_intelligence_archive_object_write_outbox_v1.sql 0034_intelligence_device_delivery_state_v1.sql; do
+for migration in 0023_intelligence_capability_v1.sql 0024_intelligence_publications_v1.sql 0025_intelligence_delivery_v1.sql 0026_intelligence_archive_relay_v1.sql 0027_intelligence_retention_v1.sql 0028_intelligence_resumable_uploads_v1.sql 0029_intelligence_delivery_stream_v1.sql 0030_host_inference_relay_v1.sql 0031_intelligence_object_storage_foundation_v1.sql 0032_intelligence_object_write_outbox_v1.sql 0033_intelligence_archive_object_write_outbox_v1.sql 0034_intelligence_device_delivery_state_v1.sql 0035_intelligence_object_storage_promoted_content_nullable_v1.sql; do
   require_file "$service_dir/migrations/$migration"
 done
 require_file "$repo_root/contracts/intelligence/intelligence-v1.schema.json"
@@ -59,6 +59,7 @@ object_foundation_migration="$service_dir/migrations/0031_intelligence_object_st
 object_asset_outbox_migration="$service_dir/migrations/0032_intelligence_object_write_outbox_v1.sql"
 object_archive_outbox_migration="$service_dir/migrations/0033_intelligence_archive_object_write_outbox_v1.sql"
 device_delivery_migration="$service_dir/migrations/0034_intelligence_device_delivery_state_v1.sql"
+object_storage_promotion_migration="$service_dir/migrations/0035_intelligence_object_storage_promoted_content_nullable_v1.sql"
 
 # Publication, relay and retention schema boundaries.
 require_text "$publication_migration" 'intelligence_publisher_credentials_v1'
@@ -78,6 +79,7 @@ require_text "$archive_source" "state='HOST_OFFLINE'"
 require_text "$device_delivery_migration" 'intelligence_device_delivery_cursors_v1'
 require_text "$intelligence_source" 'persist_device_cursor'
 require_text "$intelligence_source" 'ensure_active_device'
+require_text "$object_storage_promotion_migration" 'ALTER COLUMN content DROP NOT NULL'
 
 # Secrets must remain in separate publisher/relay namespaces, while the
 # runtime configuration uses a non-displayable SecretString.
