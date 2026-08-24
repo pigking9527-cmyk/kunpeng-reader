@@ -12,11 +12,15 @@ on:
       - ".github/workflows/sync-api-v5.yml"
       - "server/reader-sync-api-rs/**"
       - "contracts/fixtures/api-v5-entity-envelope.json"
+      - "contracts/fixtures/intelligence-*.json"
+      - "contracts/intelligence/**"
   pull_request:
     paths:
       - ".github/workflows/sync-api-v5.yml"
       - "server/reader-sync-api-rs/**"
       - "contracts/fixtures/api-v5-entity-envelope.json"
+      - "contracts/fixtures/intelligence-*.json"
+      - "contracts/intelligence/**"
   workflow_dispatch:
 
 permissions:
