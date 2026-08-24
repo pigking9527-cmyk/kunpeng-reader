@@ -184,12 +184,12 @@ pg_dump "$source_url" --format=custom --no-owner --no-privileges --file "$dump_f
 restore_args=(--dbname="$restore_admin_url" --clean --if-exists --no-owner --no-privileges --exit-on-error)
 pg_restore "${restore_args[@]}" "$dump_file"
 if [[ -n "$restore_role" ]]; then
-  # Extensions must be created by the restore administrator. Transfer the
-  # restored target's ownership only after that privileged phase, so the
-  # ordinary application connection verifies the same ownership boundary it
-  # will have after a real recovery.
+  # Extensions stay owned by the restore administrator because PostgreSQL
+  # system objects cannot be reassigned. Grant the constrained application
+  # role the complete data-plane access it needs for the restored public
+  # schema, then verify through that ordinary application connection.
   psql "$restore_admin_url" --no-psqlrc --quiet --set ON_ERROR_STOP=1 \
-    --command "REASSIGN OWNED BY CURRENT_USER TO \"$restore_role\";"
+    --command "GRANT USAGE ON SCHEMA public TO \"$restore_role\"; GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA public TO \"$restore_role\"; GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO \"$restore_role\";"
 fi
 target_summary=$(aggregate_snapshot "$target_url")
 [[ "$target_summary" == "$source_summary" ]] || fail 'restored aggregate verification does not match source'
