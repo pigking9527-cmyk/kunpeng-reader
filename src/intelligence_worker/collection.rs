@@ -66,6 +66,9 @@ const CONTENT_BACKFILL_MAX_DELAY_MS: i64 = 3_600_000;
 // repair pass.  Network and 5xx failures keep the short exponential retry.
 const CONTENT_BACKFILL_TERMINAL_DELAY_MS: i64 = 12 * 60 * 60 * 1_000;
 const CONTENT_BACKFILL_RATE_LIMIT_BASE_DELAY_MS: i64 = 5 * 60 * 1_000;
+const CONTENT_HOST_NETWORK_BASE_DELAY_MS: i64 = 30_000;
+const CONTENT_HOST_ACCESS_BASE_DELAY_MS: i64 = 30 * 60 * 1_000;
+const CONTENT_HOST_MAX_DELAY_MS: i64 = 12 * 60 * 60 * 1_000;
 const SOURCE_DEFAULT_INTERVAL_SECONDS: i64 = 300;
 const SOURCE_MIN_INTERVAL_SECONDS: i64 = 30;
 const SOURCE_MAX_INTERVAL_SECONDS: i64 = 86_400;
@@ -1988,6 +1991,135 @@ fn ensure_content_backfill_schema(connection: &Connection) -> Result<(), ()> {
     Ok(())
 }
 
+/// Per-article retry state prevents a single evidence gap from hot-looping;
+/// this separate, local-only table protects a publisher when many historic
+/// records point at the same host.  It never leaves the permanent archive and
+/// contains no article text or credentials.
+fn ensure_content_backfill_host_schema(connection: &Connection) -> Result<(), ()> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS intelligence_content_backfill_hosts (
+                 host TEXT PRIMARY KEY,
+                 failure_count INTEGER NOT NULL DEFAULT 0,
+                 next_allowed_at INTEGER NOT NULL DEFAULT 0,
+                 last_failure_at INTEGER,
+                 last_failure_reason TEXT,
+                 last_success_at INTEGER,
+                 updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS intelligence_content_backfill_hosts_schedule_idx
+                 ON intelligence_content_backfill_hosts(next_allowed_at);",
+        )
+        .map_err(|_| ())
+}
+
+/// The legacy Google News wrapper can safely reveal its public HTTPS target
+/// for older encoded IDs.  Use that final host for fairness and throttling so
+/// a whole mixed-publisher archive is not serialized behind news.google.com.
+/// Opaque wrappers retain their wrapper host until a safe resolver succeeds.
+fn content_backfill_host(url: &str) -> Option<String> {
+    let resolved = google_news_legacy_public_target(url).unwrap_or_else(|| url.to_owned());
+    reqwest::Url::parse(&resolved)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .filter(|host| !host.is_empty())
+}
+
+fn content_backfill_host_allowed_at(
+    path: &Path,
+    candidate: &ContentBackfillCandidate,
+) -> Result<bool, ()> {
+    let Some(host) = content_backfill_host(&candidate.url) else {
+        return Ok(false);
+    };
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_content_backfill_host_schema(&connection)?;
+    let next_allowed_at = connection
+        .query_row(
+            "SELECT next_allowed_at FROM intelligence_content_backfill_hosts WHERE host=?1",
+            [host],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|_| ())?
+        .unwrap_or(0);
+    Ok(next_allowed_at <= Utc::now().timestamp_millis())
+}
+
+fn content_host_failure_delay_ms(reason: &str, previous_failures: u32) -> Option<i64> {
+    let base = match reason {
+        "http_rate_limited" => CONTENT_BACKFILL_RATE_LIMIT_BASE_DELAY_MS,
+        "http_access_denied" => CONTENT_HOST_ACCESS_BASE_DELAY_MS,
+        "network_request_failed" | "http_server_error" => CONTENT_HOST_NETWORK_BASE_DELAY_MS,
+        _ => return None,
+    };
+    Some(
+        base.saturating_mul(1_i64 << previous_failures.min(7))
+            .min(CONTENT_HOST_MAX_DELAY_MS),
+    )
+}
+
+fn record_content_backfill_host_failure(
+    path: &Path,
+    candidate: &ContentBackfillCandidate,
+    failure: &ContentBackfillFailure,
+) -> Result<(), ()> {
+    let Some(host) = content_backfill_host(&candidate.url) else {
+        return Ok(());
+    };
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_content_backfill_host_schema(&connection)?;
+    let previous = connection
+        .query_row(
+            "SELECT failure_count FROM intelligence_content_backfill_hosts WHERE host=?1",
+            [host.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|_| ())?
+        .unwrap_or(0)
+        .clamp(0, i64::from(u32::MAX)) as u32;
+    let Some(delay_ms) = content_host_failure_delay_ms(failure.reason, previous) else {
+        return Ok(());
+    };
+    let now = Utc::now().timestamp_millis();
+    connection
+        .execute(
+            "INSERT INTO intelligence_content_backfill_hosts(
+                 host,failure_count,next_allowed_at,last_failure_at,last_failure_reason,updated_at
+             ) VALUES(?1,1,?2,?3,?4,?3)
+             ON CONFLICT(host) DO UPDATE SET failure_count=failure_count+1,
+               next_allowed_at=excluded.next_allowed_at,last_failure_at=excluded.last_failure_at,
+               last_failure_reason=excluded.last_failure_reason,updated_at=excluded.updated_at",
+            params![host, now.saturating_add(delay_ms), now, failure.reason],
+        )
+        .map_err(|_| ())?;
+    Ok(())
+}
+
+fn record_content_backfill_host_success(
+    path: &Path,
+    candidate: &ContentBackfillCandidate,
+) -> Result<(), ()> {
+    let Some(host) = content_backfill_host(&candidate.url) else {
+        return Ok(());
+    };
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_content_backfill_host_schema(&connection)?;
+    let now = Utc::now().timestamp_millis();
+    connection
+        .execute(
+            "INSERT INTO intelligence_content_backfill_hosts(
+                 host,failure_count,next_allowed_at,last_success_at,updated_at
+             ) VALUES(?1,0,0,?2,?2)
+             ON CONFLICT(host) DO UPDATE SET failure_count=0,next_allowed_at=0,
+               last_success_at=excluded.last_success_at,updated_at=excluded.updated_at",
+            params![host, now],
+        )
+        .map_err(|_| ())?;
+    Ok(())
+}
+
 fn next_content_backfill_candidates(path: &Path) -> Result<Vec<ContentBackfillCandidate>, ()> {
     next_content_backfill_candidates_for_pass(path, None)
 }
@@ -2083,9 +2215,14 @@ fn next_content_backfill_candidates_for_pass(
             oldest.push(candidate);
         }
     }
-    Ok(fair_backfill_candidates(
-        interleave_fresh_and_historical_backfill(newest, oldest),
-    ))
+    let fair = fair_backfill_candidates(interleave_fresh_and_historical_backfill(newest, oldest));
+    let mut eligible = Vec::with_capacity(fair.len());
+    for candidate in fair {
+        if content_backfill_host_allowed_at(path, &candidate)? {
+            eligible.push(candidate);
+        }
+    }
+    Ok(eligible)
 }
 
 /// Interleave both durable queue windows before source-fair selection.  Without
@@ -2115,11 +2252,7 @@ fn interleave_fresh_and_historical_backfill(
 /// fetches.  Invalid URLs never reach this path in production, but are kept in
 /// one lane for fail-safe behaviour in old catalogs and tests.
 fn backfill_source_lane(url: &str) -> String {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
-        .filter(|host| !host.is_empty())
-        .unwrap_or_else(|| "unknown-origin".into())
+    content_backfill_host(url).unwrap_or_else(|| "unknown-origin".into())
 }
 
 /// The SQL priority remains authoritative within each publisher, while the
@@ -2298,12 +2431,22 @@ fn backfill_missing_content_once_for_pass_at<P: ContentBackfillPort>(
     let candidates = next_content_backfill_candidates_for_pass(path, pass_id)?;
     let mut result = ContentBackfillResult::default();
     for wave in backfill_fetch_waves(candidates) {
-        result.attempted += wave.len() as u64;
-        for (candidate, fetched) in fetch_backfill_wave(port, wave) {
+        // Host state may have changed after a prior wave (for example a 429
+        // from the same publisher). Re-check immediately before dispatch so
+        // an already-planned later wave cannot ignore a newly opened circuit.
+        let mut allowed = Vec::with_capacity(wave.len());
+        for candidate in wave {
+            if content_backfill_host_allowed_at(path, &candidate)? {
+                allowed.push(candidate);
+            }
+        }
+        result.attempted += allowed.len() as u64;
+        for (candidate, fetched) in fetch_backfill_wave(port, allowed) {
             let evidence = match fetched {
                 Ok(value) => value,
                 Err(failure) => {
                     record_content_backfill_retry(path, &candidate.article_id, &failure, pass_id)?;
+                    record_content_backfill_host_failure(path, &candidate, &failure)?;
                     result.retried += 1;
                     continue;
                 }
@@ -2312,7 +2455,7 @@ fn backfill_missing_content_once_for_pass_at<P: ContentBackfillPort>(
                 path,
                 ArchiveArticleContentInput {
                     article_id: candidate.article_id.clone(),
-                    record_fingerprint: candidate.fingerprint,
+                    record_fingerprint: candidate.fingerprint.clone(),
                     text: evidence.text.clone(),
                     html: evidence.html,
                     body_status: Some("complete".into()),
@@ -2324,6 +2467,7 @@ fn backfill_missing_content_once_for_pass_at<P: ContentBackfillPort>(
             );
             if persisted.is_ok() {
                 clear_content_backfill_retry(path, &candidate.article_id)?;
+                record_content_backfill_host_success(path, &candidate)?;
                 result.completed += 1;
             } else {
                 record_content_backfill_retry(
@@ -3155,8 +3299,8 @@ mod tests {
         .unwrap();
         assert_eq!(first.attempted, 1);
 
-        // Model the shortest retry delay expiring while the same host round is
-        // still launching its later bounded child batches.
+        // Model both the per-article retry and the publisher circuit expiring
+        // while a later supervised round begins.
         Connection::open(&catalog)
             .unwrap()
             .execute(
@@ -3171,6 +3315,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(same_pass.attempted, 0);
+
+        Connection::open(&catalog)
+            .unwrap()
+            .execute(
+                "UPDATE intelligence_content_backfill_hosts SET next_allowed_at=0",
+                [],
+            )
+            .unwrap();
 
         let next_pass = backfill_missing_content_once_for_pass_at(
             &catalog,
@@ -3216,6 +3368,38 @@ mod tests {
             )
             .unwrap();
         assert!(retry_at >= before + CONTENT_BACKFILL_TERMINAL_DELAY_MS);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rate_limited_publisher_opens_a_durable_host_circuit() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-host-circuit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let first = backfill_candidate("one", "https://publisher.example.test/one");
+        let second = backfill_candidate("two", "https://publisher.example.test/two");
+        assert!(content_backfill_host_allowed_at(&catalog, &first).unwrap());
+        record_content_backfill_host_failure(
+            &catalog,
+            &first,
+            &ContentBackfillFailure::new("http_rate_limited"),
+        )
+        .unwrap();
+        assert!(!content_backfill_host_allowed_at(&catalog, &second).unwrap());
+        let state: (i64, String) = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT failure_count,last_failure_reason FROM intelligence_content_backfill_hosts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (1, "http_rate_limited".into()));
+        record_content_backfill_host_success(&catalog, &second).unwrap();
+        assert!(content_backfill_host_allowed_at(&catalog, &first).unwrap());
         let _ = fs::remove_dir_all(root);
     }
 
