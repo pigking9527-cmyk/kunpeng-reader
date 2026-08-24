@@ -573,24 +573,48 @@ mod tests {
         let database = database_url.rsplit('/').next().unwrap_or_default();
         assert!(database.starts_with("reader_sync_rust_test_"));
 
+        let s3_config = S3ObjectStorageConfig {
+            endpoint: endpoint.clone(),
+            region: "us-east-1".to_owned(),
+            bucket,
+            access_key_id: SecretString::from(access_key_id),
+            secret_access_key: SecretString::from(secret_access_key),
+            session_token: None,
+        };
         let mut config = Config::for_test(&database_url);
         // The protected PostgreSQL E2E suite applies migrations first.  This
         // worker test exercises only the real configured storage transition.
         config.run_migrations = false;
         config.database_max_connections = 4;
         config.database_acquire_timeout = Duration::from_secs(5);
-        config.intelligence_object_storage =
-            IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
-                endpoint,
-                region: "us-east-1".to_owned(),
-                bucket,
-                access_key_id: SecretString::from(access_key_id),
-                secret_access_key: SecretString::from(secret_access_key),
-                session_token: None,
-            });
-        let state = crate::build_state(config)
+        config.intelligence_object_storage = IntelligenceObjectStorageConfig::S3(s3_config.clone());
+
+        let state = crate::build_state(config.clone())
             .await
-            .expect("build real S3 test state");
+            .expect("build normal real S3 test state");
+
+        // A refused loopback connection provides a real request failure
+        // without putting the protected S3 fixture bucket at risk. Reuse the
+        // normal process state and inject only its real S3 adapter: the
+        // Prometheus recorder is process-global and production also creates
+        // it exactly once at startup.
+        let mut unavailable_config = config.clone();
+        unavailable_config.intelligence_object_storage =
+            IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+                endpoint: "http://127.0.0.1:1".to_owned(),
+                ..s3_config
+            });
+        let unavailable_store = Arc::from(
+            crate::intelligence_object_store::store_for_config(
+                &unavailable_config.intelligence_object_storage,
+            )
+            .expect("construct unavailable loopback S3 adapter"),
+        );
+        let unavailable_state = AppState {
+            intelligence_object_store: unavailable_store,
+            config: unavailable_config,
+            ..state.clone()
+        };
         let content = format!("outbox-real-s3-e2e:{}", Uuid::new_v4()).into_bytes();
         let sha256 =
             Sha256::digest(&content)
@@ -600,7 +624,11 @@ mod tests {
                     output
                 });
         let now = now_ms();
-        let mut tx = state.pool.begin().await.expect("begin fixture transaction");
+        let mut tx = unavailable_state
+            .pool
+            .begin()
+            .await
+            .expect("begin fixture transaction");
         sqlx::query("INSERT INTO intelligence_assets_v1 (sha256,mime,content,bytes,expires_at) VALUES ($1,'image/png',$2,$3,$4) ON CONFLICT (sha256) DO UPDATE SET content=EXCLUDED.content,bytes=EXCLUDED.bytes,expires_at=EXCLUDED.expires_at,storage_backend='postgres',object_key=NULL")
             .bind(&sha256)
             .bind(&content)
@@ -614,15 +642,87 @@ mod tests {
             .expect("enqueue durable object write");
         tx.commit().await.expect("commit object fixture");
 
-        // The protected database may retain unrelated queued writes from a
-        // deliberately interrupted prior rehearsal. A real worker processes
-        // them FIFO, so drive the bounded worker until *this* SHA has been
-        // promoted instead of assuming the next lease belongs to this test.
+        // The protected database may retain queued rows from an interrupted
+        // earlier rehearsal. The worker is FIFO, so make only this disposable
+        // fixture strictly older than any normal timestamp: it proves the
+        // exact row's retry path without failing somebody else's queued row
+        // against the deliberately unavailable loopback endpoint.
+        let prioritized = sqlx::query(
+            "UPDATE intelligence_object_write_outbox_v1 SET created_at=-1 WHERE sha256=$1 AND state='QUEUED'",
+        )
+        .bind(&sha256)
+        .execute(&unavailable_state.pool)
+        .await
+        .expect("prioritize disposable outbox fixture under FIFO");
+        assert_eq!(prioritized.rows_affected(), 1);
+
+        let mut failed_write = None;
+        for _ in 0..64 {
+            assert!(process_once(&unavailable_state, "real-s3-e2e-failure-worker").await);
+            let row: (Uuid, String, i32, Option<String>, i64, Option<String>, i64) = sqlx::query_as(
+                "SELECT outbox_id,state,attempts,last_error_code,not_before_at,claimed_by,lease_expires_at FROM intelligence_object_write_outbox_v1 WHERE sha256=$1",
+            )
+            .bind(&sha256)
+            .fetch_one(&unavailable_state.pool)
+            .await
+            .expect("read failed outbox fixture");
+            if row.1 == "QUEUED" && row.2 == 1 && row.3.as_deref() == Some("object_store_failed") {
+                failed_write = Some(row);
+                break;
+            }
+        }
+        let (
+            outbox_id,
+            state_after_failure,
+            attempts,
+            error_code,
+            retry_not_before_at,
+            claimed_by,
+            lease_expires_at,
+        ) = failed_write.expect("outbox failure fixture reached its retry state within its bound");
+        assert_eq!(state_after_failure, "QUEUED");
+        assert_eq!(attempts, 1);
+        assert_eq!(error_code.as_deref(), Some("object_store_failed"));
+        assert!(retry_not_before_at > now_ms());
+        assert_eq!(claimed_by, None);
+        assert_eq!(lease_expires_at, 0);
+        let fallback: (String, Option<Vec<u8>>) = sqlx::query_as(
+            "SELECT storage_backend,content FROM intelligence_assets_v1 WHERE sha256=$1",
+        )
+        .bind(&sha256)
+        .fetch_one(&unavailable_state.pool)
+        .await
+        .expect("read fallback asset after failed put");
+        assert_eq!(fallback.0, "postgres");
+        assert_eq!(fallback.1.as_deref(), Some(content.as_slice()));
+
+        // Do not sleep through the production backoff in an opt-in E2E test.
+        // The preceding assertions prove that it was persisted; releasing
+        // only this exact durable row models its later eligibility without
+        // waiting through the production backoff in an opt-in E2E test.
+        let released = sqlx::query(
+            "UPDATE intelligence_object_write_outbox_v1 SET not_before_at=$2 WHERE outbox_id=$1 AND state='QUEUED' AND attempts=1 AND last_error_code='object_store_failed'",
+        )
+        .bind(outbox_id)
+        .bind(now_ms())
+        .execute(&unavailable_state.pool)
+        .await
+        .expect("release only failed fixture after asserted retry");
+        assert_eq!(released.rows_affected(), 1);
+        // Continue driving the normal configured S3 endpoint until the same
+        // outbox row has atomically promoted its PostgreSQL fallback.
         let mut promoted = None;
         for _ in 0..64 {
-            assert!(process_once(&state, "real-s3-e2e-worker").await);
-            let row: (String, Option<String>) = sqlx::query_as(
-                "SELECT storage_backend,object_key FROM intelligence_assets_v1 WHERE sha256=$1",
+            // The persisted retry is released at the current millisecond;
+            // PostgreSQL can observe the preceding tick on the first probe.
+            // This bounded yield avoids treating that harmless eligibility
+            // boundary as a storage failure.
+            if !process_once(&state, "real-s3-e2e-worker").await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            let row: (String, Option<String>, Option<Vec<u8>>) = sqlx::query_as(
+                "SELECT storage_backend,object_key,content FROM intelligence_assets_v1 WHERE sha256=$1",
             )
             .bind(&sha256)
             .fetch_one(&state.pool)
@@ -633,8 +733,10 @@ mod tests {
                 break;
             }
         }
-        let (backend, object_key) = promoted.expect("outbox promoted the fixture within its bound");
+        let (backend, object_key, promoted_content) =
+            promoted.expect("outbox promoted the fixture within its bound");
         assert_eq!(backend, "s3");
+        assert!(promoted_content.is_none());
         let object_key = object_key.expect("promoted asset object key");
         let object = state
             .intelligence_object_store
