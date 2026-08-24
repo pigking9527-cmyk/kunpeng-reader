@@ -176,7 +176,7 @@ pub(crate) struct HostStatus {
     /// a completion timestamp.
     audit_run: Option<AuditRunProjection>,
     audit_summary: Vec<AuditSummary>,
-    last_run: Option<RunReport>,
+    last_run: Option<AggregateRunReport>,
     last_error: Option<String>,
 }
 
@@ -232,11 +232,20 @@ struct AuditSummary {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuditRunProjection {
-    run_id: String,
+    /// Opaque, short operator handle. The durable UUID remains local to the
+    /// audit file; the dashboard never needs the complete identifier.
+    run_code: String,
     status: String,
     started_at: i64,
     finished_at: Option<i64>,
     current_stage: Option<String>,
+    /// Ordered, consecutive-stage-compressed lifecycle evidence. This is
+    /// deliberately separate from the grouped audit summary so an operator can
+    /// see the path a round took without receiving article-level details.
+    stage_sequence: Vec<AuditSummary>,
+    /// The durable per-round aggregate is projected here rather than allowing
+    /// an `auditRun` lifecycle marker to hide the completed report.
+    report: Option<AggregateRunReport>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -268,6 +277,28 @@ struct RunReport {
     /// Historical delivery is owned by the DPAPI-capability sidecar rather
     /// than the model pipeline. It remains alive when GPU/model work fails.
     distribution_service: String,
+}
+
+/// Strictly allowlisted aggregate report for the loopback dashboard. The
+/// worker owns its raw output, so projecting only known outcome codes prevents
+/// a malformed audit file or unexpected child output from disclosing text,
+/// URLs, hosts, paths, or credentials.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AggregateRunReport {
+    outcome: String,
+    collection: String,
+    collected: u64,
+    duplicates: u64,
+    backfilled: u64,
+    backfill_retried: u64,
+    triaged: u64,
+    retried: u64,
+    relation: String,
+    editorial: String,
+    processed: u64,
+    reviewed: u64,
+    publication: String,
 }
 
 /// A durable, aggregate-only record for one explicit host round.  It is
@@ -405,17 +436,127 @@ fn read_host_audit() -> Option<HostRunAudit> {
 fn project_host_audit(audit: &HostRunAudit, owner_is_running: bool) -> AuditRunProjection {
     let interrupted = audit.status == "running" && !owner_is_running;
     AuditRunProjection {
-        run_id: audit.run_id.clone(),
+        run_code: safe_run_code(&audit.run_id),
         status: if interrupted {
             "interrupted".into()
         } else {
-            audit.status.clone()
+            safe_lifecycle_status(&audit.status)
         },
         started_at: audit.started_at,
         // A process liveness check cannot tell when a crashed owner stopped.
         // Keep the original missing timestamp instead of fabricating one.
         finished_at: audit.finished_at,
-        current_stage: owner_is_running.then(|| audit.current_stage.clone()),
+        current_stage: owner_is_running.then(|| safe_stage(&audit.current_stage)),
+        stage_sequence: sequence_from_host_audit(audit, owner_is_running),
+        report: audit.report.as_ref().map(project_run_report),
+    }
+}
+
+fn safe_run_code(run_id: &str) -> String {
+    uuid::Uuid::parse_str(run_id)
+        .map(|value| value.simple().to_string()[..8].to_string())
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+fn safe_lifecycle_status(value: &str) -> String {
+    match value {
+        "running" | "completed" | "failed" | "interrupted" => value.into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn safe_stage(value: &str) -> String {
+    match value {
+        "preparing"
+        | "collection"
+        | "full_text_backfill"
+        | "triage_runtime"
+        | "triage_runtime_ready"
+        | "small_model_triage"
+        | "vector_recall_and_relation"
+        | "editorial_runtime"
+        | "editorial_runtime_ready"
+        | "editorial_synthesis"
+        | "publication"
+        | "publication_without_model" => value.into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn safe_report_outcome(value: &str) -> String {
+    match value {
+        "disabled"
+        | "collector_not_configured"
+        | "evidence_completed"
+        | "collection_and_backfill_incomplete"
+        | "collection_incomplete"
+        | "content_backfill_incomplete"
+        | "evidence_completed_models_not_configured"
+        | "triage_runtime_unavailable"
+        | "triage_incomplete"
+        | "relation_processing_incomplete"
+        | "editorial_runtime_unavailable"
+        | "processing_incomplete" => value.into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn safe_collection_outcome(value: &str) -> String {
+    match value {
+        "collected" | "collection_failed" => value.into(),
+        "" => "not_run".into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn safe_processing_outcome(value: &str) -> String {
+    match value {
+        "processed"
+        | "processing_idle"
+        | "processing_retry_scheduled"
+        | "processing_not_configured" => value.into(),
+        "" => "not_run".into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn safe_publication_outcome(value: &str) -> String {
+    match value {
+        "daily_prepared_locally"
+        | "daily_events_unavailable"
+        | "daily_already_published"
+        | "daily_published"
+        | "publication_transport_unavailable"
+        | "publication_failed" => value.into(),
+        "" => "not_run".into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn project_run_report(report: &RunReport) -> AggregateRunReport {
+    AggregateRunReport {
+        outcome: safe_report_outcome(&report.outcome),
+        collection: safe_collection_outcome(&report.collection),
+        collected: report.collected,
+        duplicates: report.duplicates,
+        backfilled: report.backfilled,
+        backfill_retried: report.backfill_retried,
+        triaged: report.triaged,
+        retried: report.retried,
+        relation: safe_processing_outcome(&report.relation),
+        // The durable failure boundary is intentionally not returned. Its
+        // presence is enough to show a retry outcome without exposing a raw
+        // worker error; a successful synthesis is observable by its count.
+        editorial: if report.processed > 0 {
+            "processed".into()
+        } else if report.editorial_failure.is_empty() {
+            "not_run".into()
+        } else {
+            "processing_retry_scheduled".into()
+        },
+        processed: report.processed,
+        reviewed: report.reviewed,
+        publication: safe_publication_outcome(&report.publication),
     }
 }
 
@@ -423,12 +564,12 @@ fn summary_from_host_audit(audit: &HostRunAudit, owner_is_running: bool) -> Vec<
     let mut grouped = std::collections::BTreeMap::<(String, String), u64>::new();
     for stage in &audit.stages {
         let status = if !owner_is_running && stage.status == "running" {
-            "interrupted"
+            "interrupted".into()
         } else {
-            &stage.status
+            safe_lifecycle_status(&stage.status)
         };
         *grouped
-            .entry((stage.stage.clone(), status.into()))
+            .entry((safe_stage(&stage.stage), status))
             .or_default() += 1;
     }
     grouped
@@ -440,6 +581,31 @@ fn summary_from_host_audit(audit: &HostRunAudit, owner_is_running: bool) -> Vec<
             unit: "stage_invocations",
         })
         .collect()
+}
+
+fn sequence_from_host_audit(audit: &HostRunAudit, owner_is_running: bool) -> Vec<AuditSummary> {
+    let mut sequence = Vec::<AuditSummary>::new();
+    for stage in &audit.stages {
+        let status = if !owner_is_running && stage.status == "running" {
+            "interrupted".into()
+        } else {
+            safe_lifecycle_status(&stage.status)
+        };
+        let stage = safe_stage(&stage.stage);
+        if let Some(last) = sequence.last_mut().filter(|last| {
+            last.stage == stage && last.status == status && last.unit == "stage_invocations"
+        }) {
+            last.count = last.count.saturating_add(1);
+            continue;
+        }
+        sequence.push(AuditSummary {
+            stage,
+            status,
+            count: 1,
+            unit: "stage_invocations",
+        });
+    }
+    sequence
 }
 
 /// The first-run source list is deliberately small and public.  It provides a
@@ -940,10 +1106,10 @@ fn status(
             .as_ref()
             .map(|audit| project_host_audit(audit, audit_running)),
         audit_summary: Vec::new(),
-        last_run: last_run.or_else(|| {
+        last_run: last_run.as_ref().map(project_run_report).or_else(|| {
             persisted_audit
                 .as_ref()
-                .and_then(|audit| audit.report.clone())
+                .and_then(|audit| audit.report.as_ref().map(project_run_report))
         }),
         last_error: persisted_audit
             .as_ref()
@@ -2028,16 +2194,18 @@ mod tests {
     #[test]
     fn stale_running_audit_projects_as_interrupted_without_faking_completion() {
         let mut audit = HostRunAudit::start();
-        audit.run_id = "run-aggregate-only".into();
+        audit.run_id = "00000000-0000-0000-0000-000000000000".into();
         audit.started_at = 42;
         audit.begin_stage("collection");
 
         let projection = project_host_audit(&audit, false);
-        assert_eq!(projection.run_id, "run-aggregate-only");
+        assert_eq!(projection.run_code, "00000000");
         assert_eq!(projection.status, "interrupted");
         assert_eq!(projection.started_at, 42);
         assert_eq!(projection.finished_at, None);
         assert_eq!(projection.current_stage, None);
+        assert_eq!(projection.stage_sequence.len(), 1);
+        assert_eq!(projection.stage_sequence[0].status, "interrupted");
 
         let summary = summary_from_host_audit(&audit, false);
         assert_eq!(summary.len(), 1);
@@ -2050,10 +2218,11 @@ mod tests {
     #[test]
     fn live_audit_projection_keeps_the_current_stage_and_call_count() {
         let mut audit = HostRunAudit::start();
-        audit.run_id = "live-run".into();
+        audit.run_id = "11111111-1111-1111-1111-111111111111".into();
         audit.begin_stage("small_model_triage");
 
         let projection = project_host_audit(&audit, true);
+        assert_eq!(projection.run_code, "11111111");
         assert_eq!(projection.status, "running");
         assert_eq!(
             projection.current_stage.as_deref(),
@@ -2063,6 +2232,64 @@ mod tests {
         let summary = summary_from_host_audit(&audit, true);
         assert_eq!(summary[0].status, "running");
         assert_eq!(summary[0].count, 1);
+    }
+
+    #[test]
+    fn completed_audit_projects_an_ordered_safe_aggregate_report() {
+        let mut audit = HostRunAudit::start();
+        audit.run_id = "01234567-89ab-cdef-0123-456789abcdef".into();
+        audit.begin_stage("collection");
+        audit.begin_stage("small_model_triage");
+        audit.begin_stage("small_model_triage");
+        audit.finish(
+            "completed",
+            Some(RunReport {
+                outcome: "evidence_completed".into(),
+                collection: "collected".into(),
+                collected: 12,
+                duplicates: 7,
+                backfilled: 3,
+                backfill_retried: 2,
+                triaged: 5,
+                retried: 1,
+                relation: "processed".into(),
+                // This deliberately resembles data that must never cross the
+                // loopback audit boundary.
+                relation_failure: "https://private.invalid/secret".into(),
+                editorial_failure: "Bearer credential-value".into(),
+                processed: 0,
+                reviewed: 0,
+                publication: "daily_prepared_locally".into(),
+                distribution_service: "distribution_worker_start_requested".into(),
+            }),
+        );
+
+        let projection = project_host_audit(&audit, false);
+        assert_eq!(projection.run_code, "01234567");
+        assert_eq!(projection.status, "completed");
+        assert_eq!(projection.current_stage, None);
+        assert_eq!(projection.stage_sequence.len(), 2);
+        assert_eq!(projection.stage_sequence[0].stage, "collection");
+        assert_eq!(projection.stage_sequence[0].status, "completed");
+        assert_eq!(projection.stage_sequence[1].stage, "small_model_triage");
+        assert_eq!(projection.stage_sequence[1].count, 2);
+
+        let report = projection.report.unwrap();
+        assert_eq!(report.collected, 12);
+        assert_eq!(report.duplicates, 7);
+        assert_eq!(report.backfilled, 3);
+        assert_eq!(report.backfill_retried, 2);
+        assert_eq!(report.triaged, 5);
+        assert_eq!(report.retried, 1);
+        assert_eq!(report.relation, "processed");
+        assert_eq!(report.editorial, "processing_retry_scheduled");
+        assert_eq!(report.publication, "daily_prepared_locally");
+
+        let encoded = serde_json::to_string(&project_host_audit(&audit, false)).unwrap();
+        assert!(!encoded.contains("01234567-89ab-cdef-0123-456789abcdef"));
+        assert!(!encoded.contains("private.invalid"));
+        assert!(!encoded.contains("credential-value"));
+        assert!(!encoded.contains("distribution_worker_start_requested"));
     }
 
     #[test]

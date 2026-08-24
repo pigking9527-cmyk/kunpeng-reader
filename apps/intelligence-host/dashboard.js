@@ -24,15 +24,37 @@ function metric(label, value, detail) {
   const caption = document.createElement("span"); caption.textContent = detail;
   item.replaceChildren(title, count, caption); return item;
 }
+const outcomeLabels = {
+  disabled: "主机未启用", collector_not_configured: "未配置采集器", evidence_completed: "证据阶段完成",
+  collection_and_backfill_incomplete: "采集与全文补全未完成", collection_incomplete: "采集未完成",
+  content_backfill_incomplete: "全文补全未完成", evidence_completed_models_not_configured: "证据阶段完成，模型未配置",
+  triage_runtime_unavailable: "初筛模型不可用", triage_incomplete: "初筛未完成",
+  relation_processing_incomplete: "关系判断未完成", editorial_runtime_unavailable: "综合模型不可用",
+  processing_incomplete: "综合未完成", collected: "已采集", collection_failed: "采集失败",
+  processed: "已处理", processing_idle: "无待处理项", processing_retry_scheduled: "已安排重试",
+  processing_not_configured: "处理未配置", daily_prepared_locally: "已在本机准备发布包",
+  daily_events_unavailable: "暂无可发布事件", daily_already_published: "当日已发布",
+  daily_published: "已发布", publication_transport_unavailable: "发布通道不可用",
+  publication_failed: "发布失败", not_run: "未执行", unknown: "未识别的安全状态",
+};
+const lifecycleLabels = {
+  running: "运行中", completed: "已完成", failed: "失败", interrupted: "已中断", unknown: "未知",
+};
+function outcomeLabel(value) { return outcomeLabels[value] || "未识别的安全状态"; }
+function lifecycleLabel(value) { return lifecycleLabels[value] || "未知"; }
 function formatRun(report) {
   if (!report) return "尚无运行记录";
-  return `${report.outcome || "已完成"} · 采集 ${report.collected || 0} · 初筛 ${report.triaged || 0} · 综合 ${report.processed || 0} · 发布 ${report.publication || "未发布"}`;
+  return `结果 ${outcomeLabel(report.outcome)} · 采集 ${outcomeLabel(report.collection)}（新增 ${Number(report.collected) || 0}，重复 ${Number(report.duplicates) || 0}）· 全文完成 ${Number(report.backfilled) || 0}，重试 ${Number(report.backfillRetried) || 0} · 初筛 ${Number(report.triaged) || 0}，重试 ${Number(report.retried) || 0} · 关系 ${outcomeLabel(report.relation)} · 综合 ${outcomeLabel(report.editorial)}（${Number(report.processed) || 0} 项，复核 ${Number(report.reviewed) || 0}）· 发布 ${outcomeLabel(report.publication)}`;
 }
 function formatAuditRun(auditRun) {
   if (!auditRun) return "尚无运行记录";
-  const status = auditRun.status === "interrupted" ? "已中断" : auditRun.status === "running" ? "运行中" : auditRun.status === "completed" ? "已完成" : auditRun.status || "未知";
+  const status = lifecycleLabel(auditRun.status);
   const stage = auditRun.currentStage ? ` · ${stageLabel(auditRun.currentStage)}` : "";
-  return `${status}${stage}`;
+  const runCode = typeof auditRun.runCode === "string" && /^[a-f0-9]{8}$/i.test(auditRun.runCode)
+    ? auditRun.runCode.toLowerCase() : "未知";
+  const report = auditRun.report ? ` · ${formatRun(auditRun.report)}` : auditRun.status === "running"
+    ? " · 聚合结果将在本轮写入完成后显示" : "";
+  return `轮次 #${runCode} · ${status}${stage}${report}`;
 }
 const stageLabels = {
   preparing: "准备本机处理",
@@ -48,7 +70,7 @@ const stageLabels = {
   publication: "生成并投递发布包",
   publication_without_model: "模型不可用时检查已有发布包",
 };
-function stageLabel(value) { return stageLabels[value] || value || "准备中"; }
+function stageLabel(value) { return stageLabels[value] || "未知阶段"; }
 const backfillFailureLabels = {
   http_access_denied: "访问受限",
   http_not_found: "页面不存在",
@@ -96,17 +118,25 @@ function render(status) {
   byId("triage-detail").textContent = `待初筛 ${status.readyForTriageCount} 篇；已完成关系判断、等待综合 ${status.readyForEditorialCount} 篇。`;
   byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件；发布状态由登录账户的主机配对决定。`;
   runSummary.textContent = status.auditRun ? formatAuditRun(status.auditRun) : formatRun(status.lastRun);
-  const rows = Array.isArray(status.auditSummary) ? status.auditSummary : [];
+  const rows = status.auditRun && Array.isArray(status.auditRun.stageSequence)
+    ? status.auditRun.stageSequence : Array.isArray(status.auditSummary) ? status.auditSummary : [];
   if (!rows.length) { audit.className = "audit-empty"; audit.textContent = "尚无审计摘要。执行一轮处理后会显示各阶段的聚合结果。"; return; }
-  audit.className = "audit"; audit.replaceChildren(...rows.map((row) => {
+  const report = status.auditRun && status.auditRun.report;
+  const reportItem = report ? (() => {
+    const item = document.createElement("article"); item.className = "audit-item";
+    const label = document.createElement("strong"); label.textContent = "本轮聚合报告";
+    const value = document.createElement("span"); value.textContent = formatRun(report);
+    item.replaceChildren(label, value); return item;
+  })() : null;
+  audit.className = "audit"; audit.replaceChildren(...[reportItem, ...rows.map((row) => {
     const item = document.createElement("article"); item.className = "audit-item";
     const label = document.createElement("strong"); label.textContent = stageLabel(String(row.stage || ""));
     const value = document.createElement("span");
-    const phase = document.createElement("b"); phase.textContent = String(row.status || "未知");
+    const phase = document.createElement("b"); phase.textContent = lifecycleLabel(String(row.status || "unknown"));
     const unit = row.unit === "stage_invocations" ? "次调用" : "项";
     value.replaceChildren(phase, document.createTextNode(` · ${Number(row.count) || 0} ${unit}`));
     item.replaceChildren(label, value); return item;
-  }));
+  })].filter(Boolean));
 }
 async function getStatus() { const response = await fetch("/api/status", { cache: "no-store" }); if (!response.ok) throw new Error("status unavailable"); return response.json(); }
 async function getDistributionStatus() { const response = await fetch("/api/distribution-status", { cache: "no-store" }); if (!response.ok) throw new Error("distribution unavailable"); return response.json(); }
