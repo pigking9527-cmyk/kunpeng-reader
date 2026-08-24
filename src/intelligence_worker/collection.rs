@@ -832,15 +832,107 @@ fn enrich_public_article(agent: &ureq::Agent, article: &mut CollectedArticle) {
     };
     let html = String::from_utf8_lossy(&bytes).into_owned();
     let cleaned_html = clean_article_html(&html);
-    let body = strip_html(&cleaned_html);
+    let rendered_body = strip_html(&cleaned_html);
+    // Many news sites render their visible article with JavaScript but still
+    // publish the complete public text in JSON-LD for search engines and
+    // accessibility tooling.  `clean_article_html` intentionally removes
+    // script tags, so inspect the original response as a strictly local,
+    // structured fallback before classifying the article as an evidence gap.
+    // We only accept `articleBody` values; descriptions and headlines are not
+    // allowed to masquerade as a complete article.
+    let body = if rendered_body.len() >= 80 {
+        rendered_body
+    } else {
+        structured_article_body(&html).unwrap_or(rendered_body)
+    };
     if body.len() < 80 {
         article.body_status = Some("unavailable".into());
-        article.incomplete_reason = Some("article_body_missing_or_paywall".into());
+        article.incomplete_reason = Some(article_body_gap_reason(&html).into());
         return;
     }
     article.body = Some(body);
     article.html = Some(cleaned_html);
     article.body_status = Some("complete".into());
+}
+
+/// Extract only Schema.org `articleBody` values from public JSON-LD blocks.
+/// This is deliberately a narrow evidence fallback: it does not execute page
+/// JavaScript, follow a hidden API, or turn an SEO description into an article
+/// body.  The longest eligible body wins because publishers commonly include
+/// both a short item and its full `NewsArticle` in one `@graph`.
+fn structured_article_body(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut best = None;
+    while let Some(relative_start) = lower[cursor..].find("<script") {
+        let start = cursor + relative_start;
+        let Some(open_relative_end) = lower[start..].find('>') else {
+            break;
+        };
+        let open_end = start + open_relative_end + 1;
+        let Some(close_relative) = lower[open_end..].find("</script>") else {
+            break;
+        };
+        let close = open_end + close_relative;
+        let open = &lower[start..open_end];
+        if open.contains("application/ld+json") {
+            if let Ok(value) = serde_json::from_str::<Value>(&html[open_end..close]) {
+                collect_json_ld_article_bodies(&value, &mut best);
+            }
+        }
+        cursor = close + "</script>".len();
+    }
+    best
+}
+
+fn collect_json_ld_article_bodies(value: &Value, best: &mut Option<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_json_ld_article_bodies(value, best);
+            }
+        }
+        Value::Object(values) => {
+            if let Some(text) = values
+                .get("articleBody")
+                .and_then(Value::as_str)
+                .map(|text| strip_html(text))
+                .and_then(|text| safe_text(&text, MAX_TEXT_BYTES))
+                .filter(|text| text.len() >= 80)
+            {
+                if best
+                    .as_ref()
+                    .is_none_or(|current| text.len() > current.len())
+                {
+                    *best = Some(text);
+                }
+            }
+            for value in values.values() {
+                collect_json_ld_article_bodies(value, best);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Keep permanent retry telemetry actionable.  A JS shell and a publisher
+/// paywall both lack extractable text, but they need different remediation;
+/// the former can be improved by another public evidence adapter while the
+/// latter should enter the long repair cadence immediately.
+fn article_body_gap_reason(html: &str) -> &'static str {
+    let lower = html.to_ascii_lowercase();
+    let paywall_markers = [
+        "paywall",
+        "subscribe to continue",
+        "subscription required",
+        "sign in to continue",
+        "register to continue",
+    ];
+    if paywall_markers.iter().any(|marker| lower.contains(marker)) {
+        "article_paywall_or_interstitial"
+    } else {
+        "article_body_not_found"
+    }
 }
 
 /// This deliberately keeps extraction conservative: the permanent archive
@@ -1178,8 +1270,10 @@ fn classify_content_backfill_failure(reason: Option<&str>) -> ContentBackfillFai
         "http_status_rejected"
     } else if reason == "article_response_too_large_or_unreadable" {
         "response_unreadable_or_too_large"
-    } else if reason == "article_body_missing_or_paywall" {
-        "body_missing_or_paywall"
+    } else if reason == "article_paywall_or_interstitial" {
+        "body_paywall_or_interstitial"
+    } else if reason == "article_body_not_found" {
+        "body_not_found"
     } else if reason == "google_news_target_unresolved" {
         // Do not repeatedly download a large Google News wrapper during the
         // short transient retry window.  Keep a precise, operator-visible
@@ -2143,7 +2237,8 @@ fn record_content_backfill_retry(
     let base_delay_ms = match reason.reason {
         "http_access_denied"
         | "http_not_found"
-        | "body_missing_or_paywall"
+        | "body_paywall_or_interstitial"
+        | "body_not_found"
         | "google_news_target_unresolved" => CONTENT_BACKFILL_TERMINAL_DELAY_MS,
         "http_rate_limited" => CONTENT_BACKFILL_RATE_LIMIT_BASE_DELAY_MS,
         _ => CONTENT_BACKFILL_BASE_DELAY_MS,
@@ -2462,6 +2557,30 @@ mod tests {
         assert!(!body.contains("广告脚本"));
         assert!(!body.contains("相关推荐"));
         assert!(!body.contains("版权页脚"));
+    }
+
+    #[test]
+    fn structured_article_body_recovers_public_json_ld_without_executing_page_code() {
+        let html = r#"
+          <html><head><script type="application/ld+json">
+          {"@context":"https://schema.org","@type":"NewsArticle","articleBody":"第一段公开结构化正文，包含足够长的事实描述以便作为新闻证据保留。第二段继续说明公开事件细节。"}
+          </script></head><body><main><div id="app"></div></main></body></html>
+        "#;
+        let body = structured_article_body(html).expect("JSON-LD articleBody should be accepted");
+        assert!(body.contains("公开结构化正文"));
+        assert!(body.len() >= 80);
+    }
+
+    #[test]
+    fn body_gap_reason_separates_paywall_from_missing_public_body() {
+        assert_eq!(
+            article_body_gap_reason("<html>Subscribe to continue reading</html>"),
+            "article_paywall_or_interstitial"
+        );
+        assert_eq!(
+            article_body_gap_reason("<html><div id='app'></div></html>"),
+            "article_body_not_found"
+        );
     }
 
     #[test]
@@ -2870,8 +2989,8 @@ mod tests {
             "http_access_denied"
         );
         assert_eq!(
-            classify_content_backfill_failure(Some("article_body_missing_or_paywall")).reason,
-            "body_missing_or_paywall"
+            classify_content_backfill_failure(Some("article_paywall_or_interstitial")).reason,
+            "body_paywall_or_interstitial"
         );
         assert_eq!(
             classify_content_backfill_failure(Some("article_network_request_failed")).reason,
@@ -3084,7 +3203,7 @@ mod tests {
         record_content_backfill_retry(
             &catalog,
             "terminal-article",
-            &ContentBackfillFailure::new("body_missing_or_paywall"),
+            &ContentBackfillFailure::new("body_paywall_or_interstitial"),
             Some("host-round"),
         )
         .unwrap();
