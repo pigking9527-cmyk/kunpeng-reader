@@ -246,6 +246,61 @@ enum RelationJudgeFailure {
     Commit,
 }
 
+/// Fixed, aggregate-only boundaries for 27B event materialization.  The
+/// caller records only these labels so real archive text and provider output
+/// remain out of the host audit while an interrupted editorial job is still
+/// diagnosable and resumable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorialMaterializeFailure {
+    TransactionOpen,
+    LeftEvidenceReduce,
+    RightFactExtraction,
+    RightEvidenceReduce,
+    ReviewModel,
+    ReviewPayload,
+    ReviewValidation,
+    ReviewWrite,
+    ControlledInput,
+    SynthesisSerialize,
+    SynthesisModel,
+    SynthesisProjection,
+    SynthesisSummary,
+    SynthesisEmpty,
+    EventRead,
+    EventWrite,
+    RevisionWrite,
+    ArticleWrite,
+    SeriesReconcile,
+    Commit,
+}
+
+impl EditorialMaterializeFailure {
+    const fn stage(self) -> &'static str {
+        match self {
+            Self::TransactionOpen => "editorial_transaction_open",
+            Self::LeftEvidenceReduce => "editorial_left_evidence_reduce",
+            Self::RightFactExtraction => "editorial_right_fact_extraction",
+            Self::RightEvidenceReduce => "editorial_right_evidence_reduce",
+            Self::ReviewModel => "editorial_review_model",
+            Self::ReviewPayload => "editorial_review_payload",
+            Self::ReviewValidation => "editorial_review_validation",
+            Self::ReviewWrite => "editorial_review_write",
+            Self::ControlledInput => "editorial_controlled_input",
+            Self::SynthesisSerialize => "editorial_synthesis_serialize",
+            Self::SynthesisModel => "editorial_synthesis_model",
+            Self::SynthesisProjection => "editorial_synthesis_projection",
+            Self::SynthesisSummary => "editorial_synthesis_summary",
+            Self::SynthesisEmpty => "editorial_synthesis_empty",
+            Self::EventRead => "editorial_event_read",
+            Self::EventWrite => "editorial_event_write",
+            Self::RevisionWrite => "editorial_revision_write",
+            Self::ArticleWrite => "editorial_article_write",
+            Self::SeriesReconcile => "editorial_series_reconcile",
+            Self::Commit => "editorial_commit",
+        }
+    }
+}
+
 impl RelationJudgeFailure {
     const fn stage(self) -> &'static str {
         match self {
@@ -741,12 +796,12 @@ fn process_editorial_once_with<T: ProcessingTransport>(
         transport,
     ) {
         Ok(value) => value,
-        Err(_) => {
+        Err(failure) => {
             return ProcessingReport {
                 outcome: ProcessingOutcome::Retry,
                 chunks: facts.len() as u64,
                 judged: relations.len() as u64,
-                failure_stage: "editorial_materialize",
+                failure_stage: failure.stage(),
                 ..ProcessingReport::default()
             }
         }
@@ -1121,21 +1176,6 @@ fn extract_facts<T: ProcessingTransport>(
     config: &EditorialConfiguration,
     transport: &T,
 ) -> Result<Vec<String>, ()> {
-    let transaction = connection.transaction().map_err(|_| ())?;
-    let facts = extract_facts_in_transaction(&transaction, article, config, transport)?;
-    transaction.commit().map_err(|_| ())?;
-    Ok(facts)
-}
-
-/// Extract (and cache) evidence inside an existing transaction so a 27B
-/// relation review can include the complete bodies of *both* sources even
-/// when the retrieved neighbour has not yet reached its own processing turn.
-fn extract_facts_in_transaction<T: ProcessingTransport>(
-    connection: &rusqlite::Transaction<'_>,
-    article: &Article,
-    config: &EditorialConfiguration,
-    transport: &T,
-) -> Result<Vec<String>, ()> {
     if article.body.is_empty() || article.body.len() > MAX_BODY_BYTES {
         return Err(());
     }
@@ -1145,22 +1185,31 @@ fn extract_facts_in_transaction<T: ProcessingTransport>(
     }
     let mut facts = Vec::with_capacity(chunks.len());
     for (index, chunk) in chunks.iter().enumerate() {
+        // A 27B request can take long enough to be interrupted independently
+        // of the rest of the editorial pass.  Commit each successful chunk
+        // (including its model response cache) before asking for the next
+        // one, so a retry resumes from verified evidence rather than calling
+        // the model again for the already completed prefix.  The evidence is
+        // still keyed by the immutable article fingerprint, chunk input, and
+        // model artifact, so a changed source or model cannot reuse it.
+        let transaction = connection.transaction().map_err(|_| ())?;
         let input_hash = sha256(format!(
             "{}\u{1f}{}\u{1f}{}",
             article.fingerprint, index, chunk
         ));
         let key = cache_key("facts", &config.deep, CHUNK_PROMPT_VERSION, &input_hash);
-        let evidence = cached_or_call(connection, &key, "facts", || {
+        let evidence = cached_or_call(&transaction, &key, "facts", || {
             transport.complete(&config.deep, "intelligence_fulltext_facts", FACT_PROMPT, &json!({"articleId":article.id,"chunkIndex":index,"chunkCount":chunks.len(),"text":chunk}).to_string(), FACT_EXTRACTION_MAX_TOKENS)
         })?;
-        connection.execute("INSERT INTO intelligence_worker_chunk_evidence(article_id,fingerprint,chunk_index,chunk_count,input_sha256,evidence,model_id) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(article_id,fingerprint,chunk_index) DO UPDATE SET chunk_count=excluded.chunk_count,input_sha256=excluded.input_sha256,evidence=excluded.evidence,model_id=excluded.model_id", params![article.id,article.fingerprint,index as i64,chunks.len() as i64,input_hash,evidence,config.deep.model]).map_err(|_| ())?;
+        transaction.execute("INSERT INTO intelligence_worker_chunk_evidence(article_id,fingerprint,chunk_index,chunk_count,input_sha256,evidence,model_id) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(article_id,fingerprint,chunk_index) DO UPDATE SET chunk_count=excluded.chunk_count,input_sha256=excluded.input_sha256,evidence=excluded.evidence,model_id=excluded.model_id", params![article.id,article.fingerprint,index as i64,chunks.len() as i64,input_hash,evidence,config.deep.model]).map_err(|_| ())?;
+        transaction.commit().map_err(|_| ())?;
         facts.push(evidence);
     }
     Ok(facts)
 }
 
 /// The model first sees every source chunk individually in
-/// `extract_facts_in_transaction`.  Long sources are then reduced in bounded
+/// `extract_facts`. Long sources are then reduced in bounded
 /// groups, recursively, before a pair review.  This avoids a context-window
 /// truncation while retaining facts from the complete source rather than RSS
 /// snippets or a fixed leading substring.
@@ -1559,13 +1608,29 @@ fn review_and_materialize<T: ProcessingTransport>(
     relations: &[Relation],
     config: &EditorialConfiguration,
     transport: &T,
-) -> Result<u64, ()> {
-    let transaction = connection.transaction().map_err(|_| ())?;
+) -> Result<u64, EditorialMaterializeFailure> {
+    // Fetch a neighbour's full-text evidence before opening the relation and
+    // event transaction. `extract_facts` commits one source chunk at a time;
+    // keeping that durable boundary outside this larger write transaction
+    // ensures an interruption during a later review or synthesis cannot
+    // discard an already completed long-source prefix.
+    let related_facts = relations
+        .iter()
+        .filter(|relation| relation.review)
+        .map(|relation| {
+            extract_facts(connection, &relation.right_article, config, transport)
+                .map(|facts| (relation, facts))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| EditorialMaterializeFailure::RightFactExtraction)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|_| EditorialMaterializeFailure::TransactionOpen)?;
     let mut reviewed = 0;
     let mut event_articles = vec![article.id.clone()];
-    let left_evidence =
-        reduce_evidence_for_review(&transaction, facts.to_vec(), config, transport)?;
-    for relation in relations.iter().filter(|r| r.review) {
+    let left_evidence = reduce_evidence_for_review(&transaction, facts.to_vec(), config, transport)
+        .map_err(|_| EditorialMaterializeFailure::LeftEvidenceReduce)?;
+    for (relation, right_facts) in related_facts {
         let input_hash = sha256(format!(
             "{}\u{1f}{}\u{1f}{}\u{1f}{}",
             article.fingerprint,
@@ -1574,22 +1639,23 @@ fn review_and_materialize<T: ProcessingTransport>(
             REVIEW_PROMPT_VERSION
         ));
         let key = cache_key("review", &config.deep, REVIEW_PROMPT_VERSION, &input_hash);
-        let right_facts =
-            extract_facts_in_transaction(&transaction, &relation.right_article, config, transport)?;
         let right_evidence =
-            reduce_evidence_for_review(&transaction, right_facts, config, transport)?;
+            reduce_evidence_for_review(&transaction, right_facts, config, transport)
+                .map_err(|_| EditorialMaterializeFailure::RightEvidenceReduce)?;
         let raw = cached_or_call(&transaction, &key, "review", || {
             transport.complete(&config.deep,"intelligence_qwen_review",REVIEW_PROMPT,&json!({"leftEvidence":left_evidence,"rightEvidence":right_evidence,"proposal":{"relation":relation.relation,"confidence":relation.confidence,"reason":relation.reason}}).to_string(),RELATION_REVIEW_MAX_TOKENS)
-        })?;
-        let payload: ReviewPayload = parse_model_json(&raw)?;
+        })
+        .map_err(|_| EditorialMaterializeFailure::ReviewModel)?;
+        let payload: ReviewPayload =
+            parse_model_json(&raw).map_err(|_| EditorialMaterializeFailure::ReviewPayload)?;
         if !valid_relation(&payload.relation)
             || !payload.confidence.is_finite()
             || !(0.0..=1.0).contains(&payload.confidence)
         {
-            return Err(());
+            return Err(EditorialMaterializeFailure::ReviewValidation);
         }
-        transaction.execute("INSERT INTO intelligence_worker_relation_reviews(pair_id,left_article_id,right_article_id,fingerprint,relation,confidence,reason,reviewed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(pair_id) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,reason=excluded.reason,reviewed_at=excluded.reviewed_at",params![relation.id,article.id,relation.right_id,article.fingerprint,payload.relation,payload.confidence,payload.reason]).map_err(|_| ())?;
-        transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-27b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![format!("27b:{}", relation.id),article.id,relation.right_id,payload.relation,payload.confidence,config.deep.model,json!({"reason":payload.reason,"processor":PROCESSOR_VERSION,"fulltextEvidence":true}).to_string()]).map_err(|_| ())?;
+        transaction.execute("INSERT INTO intelligence_worker_relation_reviews(pair_id,left_article_id,right_article_id,fingerprint,relation,confidence,reason,reviewed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(pair_id) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,reason=excluded.reason,reviewed_at=excluded.reviewed_at",params![relation.id,article.id,relation.right_id,article.fingerprint,payload.relation,payload.confidence,payload.reason]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
+        transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-27b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![format!("27b:{}", relation.id),article.id,relation.right_id,payload.relation,payload.confidence,config.deep.model,json!({"reason":payload.reason,"processor":PROCESSOR_VERSION,"fulltextEvidence":true}).to_string()]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
         if payload.approved
             && matches!(
                 payload.relation.as_str(),
@@ -1602,7 +1668,8 @@ fn review_and_materialize<T: ProcessingTransport>(
     }
     event_articles.sort();
     event_articles.dedup();
-    let controlled = controlled_synthesis_input(&event_articles)?;
+    let controlled = controlled_synthesis_input(&event_articles)
+        .map_err(|_| EditorialMaterializeFailure::ControlledInput)?;
     let synthesis_context = json!({
         "allowedCitations": controlled.citations.iter().map(|citation| json!({
             "sourceId": citation.source_id,
@@ -1616,7 +1683,8 @@ fn review_and_materialize<T: ProcessingTransport>(
             "reason": relation.reason,
         })).collect::<Vec<_>>(),
     });
-    let synthesis_input = serde_json::to_string(&synthesis_context).map_err(|_| ())?;
+    let synthesis_input = serde_json::to_string(&synthesis_context)
+        .map_err(|_| EditorialMaterializeFailure::SynthesisSerialize)?;
     let synthesis_hash = sha256(format!(
         "{}\u{1f}{}\u{1f}{}",
         event_articles.join("\u{1f}"),
@@ -1638,10 +1706,13 @@ fn review_and_materialize<T: ProcessingTransport>(
                 &synthesis_input,
                 synthesis_token_budget(&synthesis_input),
             )
-        })?;
-    let projected = parse_and_project_synthesis(&raw_synthesis, &controlled)?;
+        })
+        .map_err(|_| EditorialMaterializeFailure::SynthesisModel)?;
+    let projected = parse_and_project_synthesis(&raw_synthesis, &controlled)
+        .map_err(|_| EditorialMaterializeFailure::SynthesisProjection)?;
     let title = projected.title.clone();
-    let summary = synthesis_summary(&projected)?;
+    let summary =
+        synthesis_summary(&projected).map_err(|_| EditorialMaterializeFailure::SynthesisSummary)?;
     let article_text = projected
         .blocks
         .iter()
@@ -1650,7 +1721,7 @@ fn review_and_materialize<T: ProcessingTransport>(
         .collect::<Vec<_>>()
         .join("\n\n");
     if article_text.trim().is_empty() {
-        return Err(());
+        return Err(EditorialMaterializeFailure::SynthesisEmpty);
     }
     let event_id = format!("event:{}", sha256(event_articles.join("\u{1f}")));
     let current: Option<i64> = transaction
@@ -1660,15 +1731,18 @@ fn review_and_materialize<T: ProcessingTransport>(
             |row| row.get(0),
         )
         .optional()
-        .map_err(|_| ())?;
+        .map_err(|_| EditorialMaterializeFailure::EventRead)?;
     let revision = current.unwrap_or(0) + 1;
-    transaction.execute("INSERT INTO intelligence_events(event_id,title,summary,importance,occurred_at,current_revision,created_at,updated_at) VALUES(?1,?2,?3,50,?4,?5,strftime('%s','now')*1000,strftime('%s','now')*1000) ON CONFLICT(event_id) DO UPDATE SET title=excluded.title,summary=excluded.summary,current_revision=excluded.current_revision,updated_at=excluded.updated_at",params![event_id,title,summary,article.published_at,revision]).map_err(|_| ())?;
-    transaction.execute("INSERT INTO intelligence_event_revisions(event_id,revision_no,body,revision_json,created_at) VALUES(?1,?2,?3,?4,strftime('%s','now')*1000)",params![event_id,revision,article_text,json!({"processor":PROCESSOR_VERSION,"articleIds":event_articles,"synthesis":{"title":projected.title,"blocks":projected.blocks.iter().map(|block| json!({"blockId":block.block_id,"segments":block.segments.iter().map(|segment| json!({"text":segment.text,"noteIds":segment.note_ids})).collect::<Vec<_>>(),"mediaIds":block.media_ids})).collect::<Vec<_>>()}}).to_string()]).map_err(|_| ())?;
+    transaction.execute("INSERT INTO intelligence_events(event_id,title,summary,importance,occurred_at,current_revision,created_at,updated_at) VALUES(?1,?2,?3,50,?4,?5,strftime('%s','now')*1000,strftime('%s','now')*1000) ON CONFLICT(event_id) DO UPDATE SET title=excluded.title,summary=excluded.summary,current_revision=excluded.current_revision,updated_at=excluded.updated_at",params![event_id,title,summary,article.published_at,revision]).map_err(|_| EditorialMaterializeFailure::EventWrite)?;
+    transaction.execute("INSERT INTO intelligence_event_revisions(event_id,revision_no,body,revision_json,created_at) VALUES(?1,?2,?3,?4,strftime('%s','now')*1000)",params![event_id,revision,article_text,json!({"processor":PROCESSOR_VERSION,"articleIds":event_articles,"synthesis":{"title":projected.title,"blocks":projected.blocks.iter().map(|block| json!({"blockId":block.block_id,"segments":block.segments.iter().map(|segment| json!({"text":segment.text,"noteIds":segment.note_ids})).collect::<Vec<_>>(),"mediaIds":block.media_ids})).collect::<Vec<_>>()}}).to_string()]).map_err(|_| EditorialMaterializeFailure::RevisionWrite)?;
     for id in event_articles {
-        transaction.execute("INSERT OR IGNORE INTO intelligence_event_articles(event_id,article_id) VALUES(?1,?2)",params![event_id,id]).map_err(|_| ())?;
+        transaction.execute("INSERT OR IGNORE INTO intelligence_event_articles(event_id,article_id) VALUES(?1,?2)",params![event_id,id]).map_err(|_| EditorialMaterializeFailure::ArticleWrite)?;
     }
-    reconcile_series_links(&transaction, &event_id, &article.id, &title, &summary)?;
-    transaction.commit().map_err(|_| ())?;
+    reconcile_series_links(&transaction, &event_id, &article.id, &title, &summary)
+        .map_err(|_| EditorialMaterializeFailure::SeriesReconcile)?;
+    transaction
+        .commit()
+        .map_err(|_| EditorialMaterializeFailure::Commit)?;
     Ok(reviewed)
 }
 
@@ -2173,6 +2247,11 @@ mod tests {
         responses: std::sync::Mutex<VecDeque<String>>,
     }
 
+    struct FailsOneFactChunk {
+        calls: std::sync::atomic::AtomicUsize,
+        fail_at: usize,
+    }
+
     struct CountingEmbeddings(std::sync::atomic::AtomicUsize);
 
     impl ProcessingTransport for CountingEmbeddings {
@@ -2259,6 +2338,32 @@ mod tests {
             _: u16,
         ) -> Result<String, ()> {
             self.responses.lock().unwrap().pop_front().ok_or(())
+        }
+    }
+
+    impl ProcessingTransport for FailsOneFactChunk {
+        fn embeddings(&self, _: &ModelRoute, _: &[String]) -> Result<Vec<Vec<f32>>, ()> {
+            Err(())
+        }
+
+        fn rerank(&self, _: &ModelRoute, _: &str, _: &[String]) -> Result<Vec<f32>, ()> {
+            Err(())
+        }
+
+        fn complete(
+            &self,
+            _: &ModelRoute,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: u16,
+        ) -> Result<String, ()> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == self.fail_at {
+                Err(())
+            } else {
+                Ok(format!("synthetic-evidence-{call}"))
+            }
         }
     }
     fn config() -> ProcessingConfiguration {
@@ -2893,6 +2998,52 @@ mod tests {
         // 5.6 KiB is deliberately well below the 4K-context input budget for
         // the worst CJK token ratio after JSON framing and a 520-token answer.
         assert!(CHUNK_CHARS <= 5_600);
+    }
+
+    #[test]
+    fn fact_extraction_reuses_committed_prefix_after_a_later_chunk_fails() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialize(&connection).unwrap();
+        let article = Article {
+            id: "synthetic-retry".into(),
+            fingerprint: "synthetic-fingerprint".into(),
+            title: "".into(),
+            summary: "".into(),
+            body: "x".repeat(CHUNK_CHARS + 17),
+            published_at: "".into(),
+        };
+        let deep = config().deep;
+        let configuration = EditorialConfiguration { deep };
+        let transport = FailsOneFactChunk {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_at: 1,
+        };
+
+        // The second source chunk fails. The first chunk's response and
+        // evidence row must nevertheless survive this interrupted pass.
+        assert!(extract_facts(&mut connection, &article, &configuration, &transport).is_err());
+        let cached_prefix: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_worker_chunk_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached_prefix, 1);
+
+        // The retry reaches the model only for the failed suffix: call 0 was
+        // the committed first chunk, call 1 failed, call 2 completes chunk 2.
+        let facts = extract_facts(&mut connection, &article, &configuration, &transport).unwrap();
+        assert_eq!(facts.len(), 2);
+        assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let cached_all: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_worker_chunk_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached_all, 2);
     }
 
     #[test]
