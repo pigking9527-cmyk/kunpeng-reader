@@ -68,6 +68,10 @@ const MAX_RERANK_TEXT_CHARS: usize = 64;
 /// a permanent context-window retry.
 const MAX_RELATION_TITLE_CHARS: usize = 320;
 const MAX_RELATION_SUMMARY_CHARS: usize = 1_200;
+/// A relation reason is durable audit metadata, not a second copy of source
+/// material.  Bound it before staging so a malformed model cannot turn the
+/// crash-recovery table into an archive of reflected input text.
+const MAX_RELATION_REASON_CHARS: usize = 1_200;
 /// The local 0.6B embedding service is intentionally started with a bounded
 /// context on modest workstations.  Sending a brand-new archive in one large
 /// OpenAI batch can exceed that context and leave the first relation job
@@ -186,6 +190,34 @@ struct Relation {
     review: bool,
 }
 
+/// The only model-derived material kept between receiving an 8B answer and
+/// writing the final relation.  It intentionally contains a small, validated
+/// classification only; public article body, URL, prompt and raw model output
+/// never enter this table.
+#[derive(Clone, Debug)]
+struct RelationDecision {
+    relation: String,
+    same_event: bool,
+    confidence: f64,
+    reason: String,
+}
+
+/// Every persisted staging row is pinned to one immutable relation input and
+/// one exact local model artifact/prompt revision.  A fingerprint, model or
+/// prompt change is a cache miss and cannot reuse an older decision.
+#[derive(Clone, Debug)]
+struct RelationStagingKey {
+    pair_id: String,
+    cache_key: String,
+    left_article_id: String,
+    left_fingerprint: String,
+    right_article_id: String,
+    right_fingerprint: String,
+    input_sha256: String,
+    model_id: String,
+    model_sha256: String,
+}
+
 /// The relation phase has two durable pieces of work: first make sure every
 /// canonical candidate has a vector for the selected model, then rerank and
 /// judge the bounded neighbours.  Do not call the 8B judge against a partial
@@ -241,6 +273,8 @@ enum RelationJudgeFailure {
     ModelTransport,
     PayloadJson,
     PayloadValidation,
+    StagingRead,
+    StagingWrite,
     ReviewLookup,
     StateWrite,
     Commit,
@@ -308,6 +342,8 @@ impl RelationJudgeFailure {
             Self::ModelTransport => "relation_judge_model_transport",
             Self::PayloadJson => "relation_judge_payload_json",
             Self::PayloadValidation => "relation_judge_payload_validation",
+            Self::StagingRead => "relation_judge_staging_read",
+            Self::StagingWrite => "relation_judge_staging_write",
             Self::ReviewLookup => "relation_judge_review_lookup",
             Self::StateWrite => "relation_judge_state_write",
             Self::Commit => "relation_judge_commit",
@@ -833,6 +869,9 @@ fn initialize(connection: &Connection) -> Result<(), ()> {
       CREATE TABLE IF NOT EXISTS intelligence_worker_model_cache(cache_key TEXT PRIMARY KEY,stage TEXT NOT NULL,result_json TEXT NOT NULL,result_sha256 TEXT NOT NULL,created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS intelligence_worker_chunk_evidence(article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,chunk_index INTEGER NOT NULL,chunk_count INTEGER NOT NULL,input_sha256 TEXT NOT NULL,evidence TEXT NOT NULL,model_id TEXT NOT NULL,PRIMARY KEY(article_id,fingerprint,chunk_index));
       CREATE TABLE IF NOT EXISTS intelligence_worker_processed_articles(article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,status TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(article_id,fingerprint));
+      CREATE TABLE IF NOT EXISTS intelligence_worker_relation_staging(pair_id TEXT PRIMARY KEY,cache_key TEXT NOT NULL,left_article_id TEXT NOT NULL,left_fingerprint TEXT NOT NULL,right_article_id TEXT NOT NULL,right_fingerprint TEXT NOT NULL,input_sha256 TEXT NOT NULL,model_id TEXT NOT NULL,model_sha256 TEXT NOT NULL,prompt_version TEXT NOT NULL,relation TEXT NOT NULL,same_event INTEGER NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS intelligence_worker_relation_staging_created_idx ON intelligence_worker_relation_staging(created_at);
+      DELETE FROM intelligence_worker_relation_staging WHERE created_at < (strftime('%s','now')*1000 - 2592000000);
       CREATE TABLE IF NOT EXISTS intelligence_worker_relation_reviews(pair_id TEXT PRIMARY KEY,left_article_id TEXT NOT NULL,right_article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,relation TEXT NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,reviewed_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS intelligence_quality_gate_state(singleton INTEGER PRIMARY KEY,review_mode TEXT NOT NULL);
       INSERT OR IGNORE INTO intelligence_quality_gate_state(singleton,review_mode) VALUES(1,'full');
@@ -1536,69 +1575,246 @@ fn judge_relations<T: ProcessingTransport>(
     config: &RelationConfiguration,
     transport: &T,
 ) -> Result<Vec<Relation>, RelationJudgeFailure> {
+    let mut output = Vec::new();
+    for candidate in candidates {
+        let staging_key = relation_staging_key(article, candidate, &config.relation);
+        let decision = match load_staged_relation_decision(connection, &staging_key)? {
+            Some(decision) => decision,
+            None => {
+                // `cached_or_call` is deliberately outside the final relation
+                // transaction.  Once it returns, the response cache survives
+                // a process death; the validated staging row below then makes
+                // the model-response -> decision-write boundary resumable.
+                let raw = cached_or_call(connection, &staging_key.cache_key, "relation", || {
+                    transport.complete(
+                        &config.relation,
+                        "intelligence_judge_event_pairs",
+                        RELATION_PROMPT,
+                        &json!({"left":public_article(article),"right":public_article(candidate)})
+                            .to_string(),
+                        700,
+                    )
+                })
+                .map_err(|_| RelationJudgeFailure::ModelTransport)?;
+                let payload: RelationPayload = match parse_model_json(&raw) {
+                    Ok(payload) => payload,
+                    Err(_) => {
+                        discard_relation_artifacts(connection, &staging_key)?;
+                        return Err(RelationJudgeFailure::PayloadJson);
+                    }
+                };
+                let decision = match normalize_relation_decision(
+                    payload.relation,
+                    payload.same_event,
+                    payload.confidence,
+                    payload.reason,
+                ) {
+                    Some(decision) => decision,
+                    None => {
+                        discard_relation_artifacts(connection, &staging_key)?;
+                        return Err(RelationJudgeFailure::PayloadValidation);
+                    }
+                };
+                stage_relation_decision(connection, &staging_key, &decision)?;
+                decision
+            }
+        };
+        output.push(write_staged_relation_decision(
+            connection,
+            article,
+            candidate,
+            &staging_key,
+            decision,
+            &config.relation,
+        )?);
+    }
+    Ok(output)
+}
+
+fn relation_staging_key(
+    article: &Article,
+    candidate: &Article,
+    route: &ModelRoute,
+) -> RelationStagingKey {
+    let input_sha256 = sha256(format!(
+        "{}\u{1f}{}\u{1f}{}",
+        article.fingerprint, candidate.fingerprint, RELATION_PROMPT_VERSION
+    ));
+    RelationStagingKey {
+        pair_id: pair_id(&article.id, &candidate.id),
+        cache_key: cache_key("relation", route, RELATION_PROMPT_VERSION, &input_sha256),
+        left_article_id: article.id.clone(),
+        left_fingerprint: article.fingerprint.clone(),
+        right_article_id: candidate.id.clone(),
+        right_fingerprint: candidate.fingerprint.clone(),
+        input_sha256,
+        model_id: route.model.clone(),
+        model_sha256: route.artifact_sha256.clone(),
+    }
+}
+
+fn normalize_relation_decision(
+    relation: String,
+    same_event: bool,
+    confidence: f64,
+    reason: String,
+) -> Option<RelationDecision> {
+    let reason = reason.trim().to_owned();
+    if !valid_relation(&relation)
+        || !confidence.is_finite()
+        || !(0.0..=1.0).contains(&confidence)
+        || reason.is_empty()
+        || reason.chars().count() > MAX_RELATION_REASON_CHARS
+    {
+        return None;
+    }
+    let relation = match relation.as_str() {
+        "exact_duplicate" | "syndicated_copy" | "same_event" if same_event => relation,
+        // A later development or the same storyline is deliberately not the
+        // identical event. Preserve it for 27B verification and the series
+        // materializer instead of treating it as unrelated.
+        "event_update" | "same_series" | "background" | "correction" => relation,
+        _ => "unrelated".into(),
+    };
+    Some(RelationDecision {
+        relation,
+        same_event,
+        confidence,
+        reason,
+    })
+}
+
+fn load_staged_relation_decision(
+    connection: &Connection,
+    key: &RelationStagingKey,
+) -> Result<Option<RelationDecision>, RelationJudgeFailure> {
+    let staged = connection
+        .query_row(
+            "SELECT relation,same_event,confidence,reason
+             FROM intelligence_worker_relation_staging
+             WHERE pair_id=?1 AND cache_key=?2
+               AND left_article_id=?3 AND left_fingerprint=?4
+               AND right_article_id=?5 AND right_fingerprint=?6
+               AND input_sha256=?7 AND model_id=?8 AND model_sha256=?9
+               AND prompt_version=?10",
+            params![
+                key.pair_id,
+                key.cache_key,
+                key.left_article_id,
+                key.left_fingerprint,
+                key.right_article_id,
+                key.right_fingerprint,
+                key.input_sha256,
+                key.model_id,
+                key.model_sha256,
+                RELATION_PROMPT_VERSION,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| RelationJudgeFailure::StagingRead)?;
+    let Some((relation, same_event, confidence, reason)) = staged else {
+        return Ok(None);
+    };
+    let valid_same_event = match same_event {
+        0 => false,
+        1 => true,
+        _ => {
+            discard_relation_artifacts(connection, key)?;
+            return Ok(None);
+        }
+    };
+    if let Some(decision) =
+        normalize_relation_decision(relation, valid_same_event, confidence, reason)
+    {
+        return Ok(Some(decision));
+    }
+    discard_relation_artifacts(connection, key)?;
+    Ok(None)
+}
+
+fn stage_relation_decision(
+    connection: &Connection,
+    key: &RelationStagingKey,
+    decision: &RelationDecision,
+) -> Result<(), RelationJudgeFailure> {
+    connection.execute("INSERT INTO intelligence_worker_relation_staging(pair_id,cache_key,left_article_id,left_fingerprint,right_article_id,right_fingerprint,input_sha256,model_id,model_sha256,prompt_version,relation,same_event,confidence,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,strftime('%s','now')*1000) ON CONFLICT(pair_id) DO UPDATE SET cache_key=excluded.cache_key,left_article_id=excluded.left_article_id,left_fingerprint=excluded.left_fingerprint,right_article_id=excluded.right_article_id,right_fingerprint=excluded.right_fingerprint,input_sha256=excluded.input_sha256,model_id=excluded.model_id,model_sha256=excluded.model_sha256,prompt_version=excluded.prompt_version,relation=excluded.relation,same_event=excluded.same_event,confidence=excluded.confidence,reason=excluded.reason,created_at=excluded.created_at",params![key.pair_id,key.cache_key,key.left_article_id,key.left_fingerprint,key.right_article_id,key.right_fingerprint,key.input_sha256,key.model_id,key.model_sha256,RELATION_PROMPT_VERSION,decision.relation,i64::from(decision.same_event),decision.confidence,decision.reason]).map(|_| ()).map_err(|_| RelationJudgeFailure::StagingWrite)
+}
+
+fn discard_relation_artifacts(
+    connection: &Connection,
+    key: &RelationStagingKey,
+) -> Result<(), RelationJudgeFailure> {
+    connection
+        .execute(
+            "DELETE FROM intelligence_worker_relation_staging WHERE pair_id=?1",
+            [&key.pair_id],
+        )
+        .map_err(|_| RelationJudgeFailure::StagingWrite)?;
+    connection
+        .execute(
+            "DELETE FROM intelligence_worker_model_cache WHERE cache_key=?1 AND stage='relation'",
+            [&key.cache_key],
+        )
+        .map_err(|_| RelationJudgeFailure::StagingWrite)?;
+    Ok(())
+}
+
+fn write_staged_relation_decision(
+    connection: &mut Connection,
+    article: &Article,
+    candidate: &Article,
+    key: &RelationStagingKey,
+    decision: RelationDecision,
+    route: &ModelRoute,
+) -> Result<Relation, RelationJudgeFailure> {
     let transaction = connection
         .transaction()
         .map_err(|_| RelationJudgeFailure::TransactionOpen)?;
-    let mut output = Vec::new();
-    for candidate in candidates {
-        let id = pair_id(&article.id, &candidate.id);
-        let input_hash = sha256(format!(
-            "{}\u{1f}{}\u{1f}{}",
-            article.fingerprint, candidate.fingerprint, RELATION_PROMPT_VERSION
-        ));
-        let key = cache_key(
-            "relation",
-            &config.relation,
-            RELATION_PROMPT_VERSION,
-            &input_hash,
-        );
-        let raw = cached_or_call(&transaction, &key, "relation", || {
-            transport.complete(
-                &config.relation,
-                "intelligence_judge_event_pairs",
-                RELATION_PROMPT,
-                &json!({"left":public_article(article),"right":public_article(candidate)})
-                    .to_string(),
-                700,
-            )
-        })
-        .map_err(|_| RelationJudgeFailure::ModelTransport)?;
-        let payload: RelationPayload =
-            parse_model_json(&raw).map_err(|_| RelationJudgeFailure::PayloadJson)?;
-        if !valid_relation(&payload.relation)
-            || !payload.confidence.is_finite()
-            || !(0.0..=1.0).contains(&payload.confidence)
-            || payload.reason.trim().is_empty()
-        {
-            return Err(RelationJudgeFailure::PayloadValidation);
-        }
-        let relation = match payload.relation.as_str() {
-            "exact_duplicate" | "syndicated_copy" | "same_event" if payload.same_event => {
-                payload.relation
-            }
-            // A later development or the same storyline is deliberately not
-            // the identical event. Preserve it for 27B verification and the
-            // series materializer instead of treating it as unrelated.
-            "event_update" | "same_series" | "background" | "correction" => payload.relation,
-            _ => "unrelated".into(),
-        };
-        let review = needs_review(&transaction, &id, &relation, payload.confidence)
-            .map_err(|_| RelationJudgeFailure::ReviewLookup)?;
-        transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-8b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![id,article.id,candidate.id,relation,payload.confidence,config.relation.model,json!({"reason":payload.reason,"processor":PROCESSOR_VERSION}).to_string()]).map_err(|_| RelationJudgeFailure::StateWrite)?;
-        output.push(Relation {
-            id,
-            right_id: candidate.id.clone(),
-            right_article: candidate.clone(),
-            relation,
-            confidence: payload.confidence,
-            reason: payload.reason,
-            review,
-        });
-    }
+    let review = needs_review(
+        &transaction,
+        &key.pair_id,
+        &decision.relation,
+        decision.confidence,
+    )
+    .map_err(|_| RelationJudgeFailure::ReviewLookup)?;
+    transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-8b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![key.pair_id,article.id,candidate.id,decision.relation,decision.confidence,route.model,json!({"reason":decision.reason,"processor":PROCESSOR_VERSION}).to_string()]).map_err(|_| RelationJudgeFailure::StateWrite)?;
+    transaction
+        .execute(
+            "DELETE FROM intelligence_worker_relation_staging
+             WHERE pair_id=?1 AND cache_key=?2
+               AND left_fingerprint=?3 AND right_fingerprint=?4
+               AND model_id=?5 AND model_sha256=?6 AND prompt_version=?7",
+            params![
+                key.pair_id,
+                key.cache_key,
+                key.left_fingerprint,
+                key.right_fingerprint,
+                key.model_id,
+                key.model_sha256,
+                RELATION_PROMPT_VERSION,
+            ],
+        )
+        .map_err(|_| RelationJudgeFailure::StateWrite)?;
     transaction
         .commit()
         .map_err(|_| RelationJudgeFailure::Commit)?;
-    Ok(output)
+    Ok(Relation {
+        id: key.pair_id.clone(),
+        right_id: candidate.id.clone(),
+        right_article: candidate.clone(),
+        relation: decision.relation,
+        confidence: decision.confidence,
+        reason: decision.reason,
+        review,
+    })
 }
 
 fn review_and_materialize<T: ProcessingTransport>(
@@ -2302,6 +2518,8 @@ mod tests {
 
     struct CountingEmbeddings(std::sync::atomic::AtomicUsize);
 
+    struct NoRelationModelCalls(std::sync::atomic::AtomicUsize);
+
     impl ProcessingTransport for CountingEmbeddings {
         fn embeddings(&self, _: &ModelRoute, input: &[String]) -> Result<Vec<Vec<f32>>, ()> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2318,6 +2536,28 @@ mod tests {
             _: &str,
             _: u16,
         ) -> Result<String, ()> {
+            Err(())
+        }
+    }
+
+    impl ProcessingTransport for NoRelationModelCalls {
+        fn embeddings(&self, _: &ModelRoute, _: &[String]) -> Result<Vec<Vec<f32>>, ()> {
+            Err(())
+        }
+
+        fn rerank(&self, _: &ModelRoute, _: &str, _: &[String]) -> Result<Vec<f32>, ()> {
+            Err(())
+        }
+
+        fn complete(
+            &self,
+            _: &ModelRoute,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: u16,
+        ) -> Result<String, ()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(())
         }
     }
@@ -2586,6 +2826,144 @@ mod tests {
             cache_key("facts", &first, "prompt-v1", "input-sha"),
             cache_key("facts", &second, "prompt-v1", "input-sha"),
         );
+    }
+
+    #[test]
+    fn relation_judgement_reuses_a_durable_validated_stage_after_restart() {
+        let path = db();
+        let configuration = config();
+        let relation = RelationConfiguration {
+            embedding: configuration.embedding,
+            reranker: configuration.reranker,
+            relation: configuration.relation,
+        };
+        let article = Article {
+            id: "a".into(),
+            fingerprint: "fa".into(),
+            title: "标题A".into(),
+            summary: "摘要A".into(),
+            body: "第一段事实。\n\n第二段事实。".into(),
+            published_at: "2026-08-24".into(),
+        };
+        let candidate = Article {
+            id: "b".into(),
+            fingerprint: "fb".into(),
+            title: "标题B".into(),
+            summary: "摘要B".into(),
+            body: "正文B".into(),
+            published_at: "2026-08-24".into(),
+        };
+        let key = relation_staging_key(&article, &candidate, &relation.relation);
+        let decision =
+            normalize_relation_decision("same_event".into(), true, 0.91, "主体与时间一致".into())
+                .unwrap();
+
+        // This is the exact crash boundary: an 8B answer has been parsed and
+        // durably staged, but the formal relation decision has not yet been
+        // written. Dropping the connection simulates process death here.
+        {
+            let connection = Connection::open(&path).unwrap();
+            initialize(&connection).unwrap();
+            stage_relation_decision(&connection, &key, &decision).unwrap();
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM intelligence_worker_relation_staging",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+
+        let mut restarted = Connection::open(&path).unwrap();
+        initialize(&restarted).unwrap();
+        let transport = NoRelationModelCalls(std::sync::atomic::AtomicUsize::new(0));
+        let relations = judge_relations(
+            &mut restarted,
+            &article,
+            &[candidate],
+            &relation,
+            &transport,
+        )
+        .unwrap();
+
+        assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].relation, "same_event");
+        assert_eq!(
+            restarted
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_relations WHERE stage='worker-8b'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            restarted
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_worker_relation_staging",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_relation_stage_is_discarded_before_it_can_be_materialized() {
+        let path = db();
+        let route = config().relation;
+        let article = Article {
+            id: "a".into(),
+            fingerprint: "fa".into(),
+            title: "标题A".into(),
+            summary: "摘要A".into(),
+            body: "正文A".into(),
+            published_at: "2026-08-24".into(),
+        };
+        let candidate = Article {
+            id: "b".into(),
+            fingerprint: "fb".into(),
+            title: "标题B".into(),
+            summary: "摘要B".into(),
+            body: "正文B".into(),
+            published_at: "2026-08-24".into(),
+        };
+        let key = relation_staging_key(&article, &candidate, &route);
+        let decision =
+            normalize_relation_decision("same_event".into(), true, 0.91, "主体与时间一致".into())
+                .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        initialize(&connection).unwrap();
+        stage_relation_decision(&connection, &key, &decision).unwrap();
+        // A damaged or tampered staging row must never be upgraded into a
+        // formal relation merely because its primary key still matches.
+        connection
+            .execute(
+                "UPDATE intelligence_worker_relation_staging SET same_event=2 WHERE pair_id=?1",
+                [&key.pair_id],
+            )
+            .unwrap();
+        assert!(load_staged_relation_decision(&connection, &key)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_worker_relation_staging",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
