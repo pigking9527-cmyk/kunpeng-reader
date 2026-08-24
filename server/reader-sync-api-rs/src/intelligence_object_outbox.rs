@@ -167,8 +167,8 @@ async fn claim_write(state: &AppState, worker_id: &str, now: i64) -> Option<Writ
          ) \
          UPDATE intelligence_object_write_outbox_v1 o \
          SET state='CLAIMED',claimed_by=$2,lease_expires_at=$3,updated_at=$1,attempts=o.attempts+1,last_error_code=NULL \
-         FROM candidate c JOIN intelligence_assets_v1 a ON a.sha256=o.sha256 \
-         WHERE o.outbox_id=c.outbox_id \
+         FROM candidate c, intelligence_assets_v1 a \
+         WHERE o.outbox_id=c.outbox_id AND a.sha256=o.sha256 \
          RETURNING o.outbox_id,o.sha256,o.object_key,a.content,o.attempts",
     )
     .bind(now)
@@ -263,8 +263,8 @@ async fn claim_archive_write(
          ) \
          UPDATE intelligence_archive_object_write_outbox_v1 o \
          SET state='CLAIMED',claimed_by=$2,lease_expires_at=$3,updated_at=$1,attempts=o.attempts+1,last_error_code=NULL \
-         FROM candidate c LEFT JOIN intelligence_archive_jobs_v1 j ON j.job_id=o.job_id \
-         WHERE o.outbox_id=c.outbox_id \
+         FROM candidate c, intelligence_archive_jobs_v1 j \
+         WHERE o.outbox_id=c.outbox_id AND j.job_id=o.job_id \
          RETURNING o.outbox_id,o.job_id,o.object_key,j.content,j.content_sha256,o.attempts",
     )
     .bind(now)
@@ -523,6 +523,30 @@ mod tests {
         assert!(finalizer.contains("intelligence_object_gc_outbox_v1"));
         assert!(finalizer.contains("finalization_unavailable"));
         assert!(!finalizer.contains("store.put"));
+    }
+
+    #[test]
+    fn claim_queries_join_source_rows_in_the_update_where_clause() {
+        // PostgreSQL does not permit the target `UPDATE` alias in a `JOIN ...
+        // ON` expression in the `FROM` clause. Keep the source joins in the
+        // `WHERE` clause so a queued row can actually be leased.
+        let source = include_str!("intelligence_object_outbox.rs");
+        let write_claim = source
+            .split("async fn claim_write")
+            .nth(1)
+            .and_then(|value| value.split("async fn mark_write_complete").next())
+            .expect("asset write claim");
+        assert!(write_claim.contains("FROM candidate c, intelligence_assets_v1 a "));
+        assert!(write_claim.contains("a.sha256=o.sha256"));
+        assert!(!write_claim.contains("JOIN intelligence_assets_v1 a ON"));
+        let archive_claim = source
+            .split("async fn claim_archive_write")
+            .nth(1)
+            .and_then(|value| value.split("async fn mark_archive_write_complete").next())
+            .expect("archive write claim");
+        assert!(archive_claim.contains("FROM candidate c, intelligence_archive_jobs_v1 j "));
+        assert!(archive_claim.contains("j.job_id=o.job_id"));
+        assert!(!archive_claim.contains("JOIN intelligence_archive_jobs_v1 j ON"));
     }
 
     #[tokio::test]
