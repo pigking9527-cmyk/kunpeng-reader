@@ -29,6 +29,8 @@ required KUNPENG_SYNC_OBJECT_STORE_E2E_ENDPOINT
 required KUNPENG_SYNC_OBJECT_STORE_E2E_BUCKET
 required KUNPENG_SYNC_OBJECT_STORE_E2E_ACCESS_KEY_ID
 required KUNPENG_SYNC_OBJECT_STORE_E2E_SECRET_ACCESS_KEY
+[[ "${KUNPENG_SYNC_OBJECT_STORE_E2E_QUIESCENT-}" == '1' ]] \
+  || fail 'KUNPENG_SYNC_OBJECT_STORE_E2E_QUIESCENT=1 is required after stopping workers that use this disposable test database'
 
 database_name=${KUNPENG_SYNC_TEST_DATABASE_URL%%\?*}
 database_name=${database_name##*/}

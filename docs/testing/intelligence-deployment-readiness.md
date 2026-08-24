@@ -17,7 +17,7 @@ cargo clippy --manifest-path server/reader-sync-api-rs/Cargo.toml --all-targets 
 server/reader-sync-api-rs/scripts/test-rehearsal-tools.sh
 ```
 
-离线门检查 0023–0033 迁移连续性、30 日可见性、PURGING 回收器、发布/中转 capability
+离线门检查 0023–0036 迁移连续性、30 日可见性、PURGING 回收器、发布/中转 capability
 命名空间、上传大小上限、历史主机离线状态、对象存储位置约束、正式图片和历史包的持久
 outbox，以及契约文件存在。`--require-object-storage` 仅证明源码存在 S3-compatible 适配器和
 双写状态机；它不是 MinIO/S3 互操作或恢复验收的替代品。
@@ -30,6 +30,8 @@ export KUNPENG_SYNC_OBJECT_STORE_E2E_ENDPOINT='http://127.0.0.1:...'
 export KUNPENG_SYNC_OBJECT_STORE_E2E_BUCKET='...'
 export KUNPENG_SYNC_OBJECT_STORE_E2E_ACCESS_KEY_ID='...'
 export KUNPENG_SYNC_OBJECT_STORE_E2E_SECRET_ACCESS_KEY='...'
+# 先停止使用这一可销毁测试库的对象写入 worker；不得对生产服务设置此变量。
+export KUNPENG_SYNC_OBJECT_STORE_E2E_QUIESCENT=1
 server/reader-sync-api-rs/scripts/run-object-store-e2e.sh \
   --confirm-real-object-store-e2e
 ```
@@ -38,6 +40,11 @@ server/reader-sync-api-rs/scripts/run-object-store-e2e.sh \
 读取和删除，并验证 durable outbox 成功 PUT 后才把资产从 bytea 晋升为 S3。它不输出 endpoint、bucket、
 密钥、数据库 URL、对象 key 或内容；缺少任一必需配置会拒绝运行。对象恢复仍需按本清单最后的
 “必须实际证明的业务恢复”执行，不能用这一轮互操作测试替代。
+
+真实 outbox 用例必须在该**可销毁测试库没有并发对象写入 worker**时运行。否则独立 worker
+可能正确领取并提升同一测试对象，却会破坏“先以故障端点领取、再由恢复端点重试”的确定性
+验证。运行脚本要求显式的 `KUNPENG_SYNC_OBJECT_STORE_E2E_QUIESCENT=1`，它只是一项人工
+安全确认，不能替代停止并核实隔离 worker 的实际操作。
 
 ## 当前存储事实与容量边界
 
@@ -67,7 +74,7 @@ server/reader-sync-api-rs/scripts/run-object-store-e2e.sh \
 
    运行器会同时执行 `postgres_intelligence_e2e`、
    `postgres_intelligence_asset_upload_e2e`、`postgres_intelligence_archive_recovery_e2e`、`postgres_intelligence_route_e2e` 与
-   `postgres_intelligence_retention_route_e2e`：前者实际查询 0023–0033 迁移后的
+   `postgres_intelligence_retention_route_e2e` 与 `postgres_host_inference_e2e`：前者实际查询 0023–0036 迁移后的
    `intelligence_publications_v1`、投递、图片、历史 job/upload、SSE event 和清理表，并确认
    当前图片/历史内容列确为 `bytea`；后者以两个已授权账号和一个禁用账号经过真实 Router 验证
    当前内容的访问边界，以及历史 request/content/ACK 不会跨账号读取或删除；资产上传测试确认完成后
