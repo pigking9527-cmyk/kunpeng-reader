@@ -12,14 +12,15 @@ use std::{
 use axum::{
     Router,
     body::Body,
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use reader_sync_api::{
     app,
-    config::Config,
+    config::{Config, IntelligenceObjectStorageConfig, S3ObjectStorageConfig},
     credentials::{hash_password, intelligence_publisher_token_digest},
+    intelligence_object_store::{IntelligenceObjectStore, store_for_config},
     state::AppState,
 };
 use secrecy::SecretString;
@@ -182,6 +183,18 @@ async fn login(service: &Router, username: &str, password: &str, installation_id
 }
 
 fn router(pool: PgPool, database_url: &str) -> Router {
+    router_with_object_store(
+        pool,
+        database_url,
+        AppState::disabled_intelligence_object_store(),
+    )
+}
+
+fn router_with_object_store(
+    pool: PgPool,
+    database_url: &str,
+    intelligence_object_store: Arc<dyn IntelligenceObjectStore>,
+) -> Router {
     let config = Config::for_test(database_url);
     let recorder = PrometheusBuilder::new().build_recorder();
     app(AppState {
@@ -199,9 +212,30 @@ fn router(pool: PgPool, database_url: &str) -> Router {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
-        intelligence_object_store: AppState::disabled_intelligence_object_store(),
+        intelligence_object_store,
         config,
     })
+}
+
+fn real_s3_store() -> Option<Arc<dyn IntelligenceObjectStore>> {
+    let endpoint = std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_ENDPOINT").ok()?;
+    let bucket = std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_BUCKET").ok()?;
+    let access_key_id = std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_ACCESS_KEY_ID").ok()?;
+    let secret_access_key =
+        std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_SECRET_ACCESS_KEY").ok()?;
+    let region = std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_REGION")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "us-east-1".to_owned());
+    let config = IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+        endpoint,
+        region,
+        bucket,
+        access_key_id: SecretString::from(access_key_id),
+        secret_access_key: SecretString::from(secret_access_key),
+        session_token: None,
+    });
+    store_for_config(&config).ok().map(Arc::from)
 }
 
 async fn clean_fixture(pool: &PgPool) {
@@ -616,6 +650,105 @@ async fn permitted_readers_share_current_content_but_not_archive_request_or_ack_
         Some(content)
     );
 
+    clean_fixture(&pool).await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit protected PostgreSQL and real S3-compatible object-store confirmation"]
+async fn real_s3_promoted_assets_remain_authorized_and_range_readable() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let store =
+        real_s3_store().expect("real S3 asset route E2E requires object-store configuration");
+    let _guard = DATABASE_LOCK.lock().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .expect("connect to explicit S3 route test database");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate explicit S3 route test database");
+    seed_fixture(&pool).await;
+
+    let object_key = format!("intelligence/assets/{ASSET_SHA256}");
+    let payload = vec![1_u8, 2, 3, 4];
+    let _ = store.delete(&object_key);
+    store
+        .put(&object_key, &payload)
+        .expect("write promoted fixture object");
+    sqlx::query(
+        "UPDATE intelligence_assets_v1 \
+         SET content=NULL,storage_backend='s3',object_key=$2 WHERE sha256=$1",
+    )
+    .bind(ASSET_SHA256)
+    .bind(&object_key)
+    .execute(&pool)
+    .await
+    .expect("promote fixture asset and release PostgreSQL copy");
+
+    let service = router_with_object_store(pool.clone(), &database_url, Arc::clone(&store));
+    let token = login(
+        &service,
+        ACCOUNT_A,
+        "route-e2e-password",
+        "route-e2e-real-s3-asset",
+    )
+    .await;
+    let full = service
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/v1/intelligence/assets/{ASSET_SHA256}"),
+            Some(&token),
+            Value::Null,
+        ))
+        .await
+        .expect("promoted S3 asset response");
+    assert_eq!(full.status(), StatusCode::OK);
+    let full_bytes = full
+        .into_body()
+        .collect()
+        .await
+        .expect("read full promoted asset")
+        .to_bytes();
+    assert_eq!(full_bytes.as_ref(), payload.as_slice());
+
+    let mut range = request(
+        "GET",
+        &format!("/v1/intelligence/assets/{ASSET_SHA256}"),
+        Some(&token),
+        Value::Null,
+    );
+    range.headers_mut().insert(
+        header::RANGE,
+        "bytes=1-2".parse().expect("valid test range"),
+    );
+    let partial = service
+        .oneshot(range)
+        .await
+        .expect("promoted S3 range response");
+    assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        partial
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes 1-2/4")
+    );
+    let partial_bytes = partial
+        .into_body()
+        .collect()
+        .await
+        .expect("read promoted S3 range")
+        .to_bytes();
+    assert_eq!(partial_bytes.as_ref(), &payload[1..=2]);
+
+    store
+        .delete(&object_key)
+        .expect("remove promoted fixture object");
     clean_fixture(&pool).await;
 }
 

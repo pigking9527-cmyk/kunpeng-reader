@@ -220,7 +220,10 @@ struct DeviceRow {
 #[derive(Debug, FromRow)]
 struct AssetRow {
     mime: String,
-    content: Vec<u8>,
+    // PostgreSQL is the required staging copy until a durable S3 outbox PUT
+    // succeeds. After promotion migration 0035 deliberately releases that
+    // duplicate, so this must stay nullable for S3-backed rows.
+    content: Option<Vec<u8>>,
     bytes: i64,
     sha256: String,
     storage_backend: String,
@@ -654,7 +657,7 @@ async fn read_asset_content(state: &AppState, row: &AssetRow, total: usize) -> R
         // Disabled installations and pre-object-store rows remain on the
         // PostgreSQL path. Do not silently fall back to this payload for an
         // S3-marked row: that would mask an object-store migration failure.
-        "postgres" => row.content.clone(),
+        "postgres" => row.content.clone().ok_or(())?,
         "s3" => {
             let object_key = row.object_key.clone().ok_or(())?;
             let end = u64::try_from(total.checked_sub(1).ok_or(())?).map_err(|_| ())?;
@@ -2417,7 +2420,7 @@ mod tests {
         let content = b"safe-image".to_vec();
         let row = AssetRow {
             mime: "image/png".to_owned(),
-            content: Vec::new(),
+            content: None,
             bytes: i64::try_from(content.len()).expect("small test content"),
             sha256: hex(&hash(&content)),
             storage_backend: "s3".to_owned(),
@@ -2433,7 +2436,7 @@ mod tests {
             .nth(1)
             .and_then(|value| value.split("fn valid_asset_content").next())
             .expect("asset read implementation");
-        assert!(read.contains("\"postgres\" => row.content.clone()"));
+        assert!(read.contains("\"postgres\" => row.content.clone().ok_or(())?"));
         assert!(read.contains("\"s3\" =>"));
         assert!(read.contains("store.get_range(&object_key, 0, Some(end))"));
         assert!(!read.contains("row.content.clone(),\n        \"s3\" => row.content"));

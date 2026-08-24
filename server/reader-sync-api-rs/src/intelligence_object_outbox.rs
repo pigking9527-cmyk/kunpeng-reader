@@ -559,6 +559,10 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires explicit real PostgreSQL and S3-compatible object-store confirmation"]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the opt-in E2E intentionally keeps failure, durable retry, recovery, and cleanup assertions in one audited transaction narrative"
+    )]
     async fn real_s3_asset_outbox_promotes_only_after_a_successful_put() {
         let database_url = std::env::var("KUNPENG_SYNC_TEST_DATABASE_URL")
             .expect("real S3 outbox E2E requires protected test database URL");

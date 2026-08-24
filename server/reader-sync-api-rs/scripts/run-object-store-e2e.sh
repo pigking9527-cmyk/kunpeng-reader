@@ -47,4 +47,7 @@ cargo +1.97.1 test --manifest-path "$service_dir/Cargo.toml" --test object_store
 cargo +1.97.1 test --manifest-path "$service_dir/Cargo.toml" --lib \
   intelligence_object_outbox::tests::real_s3_asset_outbox_promotes_only_after_a_successful_put \
   -- --ignored --exact --test-threads=1
-printf '%s\n' 'Real object-store E2E passed: PUT, Range, delete, and durable outbox promotion.'
+cargo +1.97.1 test --manifest-path "$service_dir/Cargo.toml" --test postgres_intelligence_route_e2e \
+  real_s3_promoted_assets_remain_authorized_and_range_readable \
+  -- --ignored --exact --test-threads=1
+printf '%s\n' 'Real object-store E2E passed: PUT, Range, delete, durable outbox promotion, and authorized promoted-asset HTTP Range reads.'
