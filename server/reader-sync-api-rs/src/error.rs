@@ -25,6 +25,16 @@ pub enum ApiError {
     AccountDisabled,
     #[error("verified email is required")]
     EmailVerificationRequired,
+    #[error("intelligence access is not enabled for this account")]
+    IntelligenceAccessDenied,
+    #[error("an intelligence publisher credential is required")]
+    IntelligencePublisherRequired,
+    #[error("private intelligence-host inference is disabled")]
+    IntelligenceHostInferenceDisabled,
+    #[error("an intelligence-host capability credential is required")]
+    IntelligenceHostCredentialRequired,
+    #[error("idempotency key was already used for different content")]
+    IdempotencyKeyReused,
     #[error("data generation does not match")]
     DataGenerationMismatch,
     #[error("mutation id was already used for different content")]
@@ -156,6 +166,36 @@ impl ApiError {
                 StatusCode::FORBIDDEN,
                 "EMAIL_VERIFICATION_REQUIRED",
                 "verified email is required",
+                None,
+            ),
+            Self::IntelligenceAccessDenied => (
+                StatusCode::FORBIDDEN,
+                "INTELLIGENCE_ACCESS_DENIED",
+                "intelligence access is not enabled for this account",
+                None,
+            ),
+            Self::IntelligencePublisherRequired => (
+                StatusCode::FORBIDDEN,
+                "INTELLIGENCE_PUBLISHER_REQUIRED",
+                "an intelligence publisher credential is required",
+                None,
+            ),
+            Self::IntelligenceHostInferenceDisabled => (
+                StatusCode::FORBIDDEN,
+                "INTELLIGENCE_HOST_INFERENCE_DISABLED",
+                "private intelligence-host inference is disabled",
+                None,
+            ),
+            Self::IntelligenceHostCredentialRequired => (
+                StatusCode::FORBIDDEN,
+                "INTELLIGENCE_HOST_CREDENTIAL_REQUIRED",
+                "an intelligence-host capability credential is required",
+                None,
+            ),
+            Self::IdempotencyKeyReused => (
+                StatusCode::CONFLICT,
+                "IDEMPOTENCY_KEY_REUSED",
+                "idempotency key was already used for different content",
                 None,
             ),
             Self::DataGenerationMismatch => (

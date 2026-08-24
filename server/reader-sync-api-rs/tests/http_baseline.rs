@@ -29,6 +29,7 @@ fn test_state() -> AppState {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     }
 }
@@ -170,6 +171,187 @@ async fn checkpoint_requires_v5_authentication_and_a_valid_query() {
         .await
         .unwrap();
     assert_reaches_database_boundary(reaches_auth).await;
+}
+
+#[tokio::test]
+async fn intelligence_capabilities_requires_bearer_authentication_before_database_access() {
+    let response = app(test_state())
+        .oneshot(
+            Request::get("/v1/intelligence/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(json(response).await["error"]["code"], "UNAUTHORIZED");
+}
+
+#[tokio::test]
+async fn host_inference_relay_requires_a_credential_before_feature_or_database_access() {
+    // The test configuration deliberately leaves the private relay disabled.
+    // Anonymous callers must still learn neither that fact nor any route
+    // details; every endpoint starts with its account or host credential gate.
+    for request in [
+        Request::post("/v1/intelligence/host-pairings/offers")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post(
+            "/v1/intelligence/host-pairings/offers/00000000-0000-0000-0000-000000000001/claim",
+        )
+        .body(Body::empty())
+        .unwrap(),
+        Request::get("/v1/intelligence/host-pairings")
+            .body(Body::empty())
+            .unwrap(),
+        Request::delete("/v1/intelligence/host-pairings/00000000-0000-0000-0000-000000000001")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/v1/intelligence/host-tasks")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/v1/intelligence/host-tasks")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/v1/intelligence/host-tasks/task:one/claim")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/v1/intelligence/host-tasks/task:one/result")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/v1/intelligence/host-tasks/task:one")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/v1/intelligence/host-tasks/task:one/cancel")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/v1/intelligence/host-tasks/task:one/ack")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = app(test_state()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json(response).await["error"]["code"], "UNAUTHORIZED");
+    }
+}
+
+#[tokio::test]
+async fn intelligence_publication_routes_require_bearer_before_content_or_database_access() {
+    for request in [
+        Request::get("/v1/intelligence/feed")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/v1/intelligence/stream")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/v1/intelligence/publications/daily:2026-08-23:zh-CN")
+            .body(Body::empty())
+            .unwrap(),
+        json_request(
+            "POST",
+            "/v1/intelligence/uploads/init",
+            &serde_json::json!({}),
+        ),
+        Request::post("/v1/intelligence/uploads/daily:2026-08-23:zh-CN/complete")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = app(test_state()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json(response).await["error"]["code"], "UNAUTHORIZED");
+    }
+}
+
+#[tokio::test]
+async fn intelligence_account_state_and_assets_require_bearer_before_database_access() {
+    for request in [
+        Request::get("/v1/intelligence/preferences")
+            .body(Body::empty())
+            .unwrap(),
+        json_request(
+            "PUT",
+            "/v1/intelligence/preferences",
+            &serde_json::json!({"schemaVersion":1,"topics":[],"minimumImportance":0}),
+        ),
+        Request::post("/v1/intelligence/deliveries/daily:2026-08-23:zh-CN/ack")
+            .body(Body::empty())
+            .unwrap(),
+        json_request(
+            "POST",
+            "/v1/intelligence/devices",
+            &serde_json::json!({"schemaVersion":1,"deviceId":"device:1","platform":"windows","quietHours":{}}),
+        ),
+        Request::get("/v1/intelligence/assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = app(test_state()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json(response).await["error"]["code"], "UNAUTHORIZED");
+    }
+}
+
+#[tokio::test]
+async fn intelligence_archive_and_relay_routes_reject_anonymous_requests_without_waiting() {
+    let archive_id = "00000000-0000-0000-0000-000000000001";
+    let content = serde_json::json!({
+        "contentBase64": "YQ==",
+        "contentSha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+    });
+    let mut requests = vec![
+        json_request(
+            "POST",
+            "/v1/intelligence/archive-requests",
+            &serde_json::json!({"request":{"day":"2030-01-02"}}),
+        ),
+        Request::get("/v1/intelligence/archive/calendar")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get(format!("/v1/intelligence/archive-requests/{archive_id}"))
+            .body(Body::empty())
+            .unwrap(),
+        Request::get(format!(
+            "/v1/intelligence/archive-requests/{archive_id}/content"
+        ))
+        .body(Body::empty())
+        .unwrap(),
+        Request::post(format!(
+            "/v1/intelligence/archive-requests/{archive_id}/content/ack"
+        ))
+        .header("idempotency-key", "fixture-archive-ack")
+        .body(Body::empty())
+        .unwrap(),
+        Request::get("/v1/intelligence/publisher/jobs?wait=25")
+            .body(Body::empty())
+            .unwrap(),
+        json_request(
+            "POST",
+            "/v1/intelligence/publisher/heartbeat",
+            &serde_json::json!({"schemaVersion":1,"installationId":"fixture-installation"}),
+        ),
+    ];
+    for (path, body) in [
+        ("claim", serde_json::Value::Null),
+        ("not-found", serde_json::json!({"reason":"fixture"})),
+        ("failed", serde_json::json!({"reason":"fixture"})),
+        ("content", content),
+    ] {
+        let mut request = json_request(
+            "POST",
+            &format!("/v1/intelligence/publisher/jobs/{archive_id}/{path}"),
+            &body,
+        );
+        request
+            .headers_mut()
+            .insert("idempotency-key", "fixture-relay".parse().unwrap());
+        requests.push(request);
+    }
+
+    for request in requests {
+        let response = app(test_state()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json(response).await["error"]["code"], "UNAUTHORIZED");
+    }
 }
 
 #[test]
@@ -558,6 +740,49 @@ async fn openapi_sync_protocol_headers_require_v5() {
     assert!(body["paths"]["/v1/auth/security"].is_object());
     assert!(body["paths"]["/v1/auth/usage"].is_object());
     assert!(body["paths"]["/v1/auth/account/delete"].is_object());
+    assert!(body["paths"]["/v1/intelligence/capabilities"].is_object());
+    assert_eq!(
+        bearer_security(&body["paths"]["/v1/intelligence/capabilities"]["get"]),
+        serde_json::json!([])
+    );
+    assert!(body["components"]["schemas"]["CapabilitiesResponse"].is_object());
+    assert!(body["components"]["schemas"]["ArchiveAvailability"].is_object());
+    for (path, method) in [
+        ("/v1/intelligence/feed", "get"),
+        ("/v1/intelligence/stream", "get"),
+        ("/v1/intelligence/publications/{id}", "get"),
+        ("/v1/intelligence/preferences", "get"),
+        ("/v1/intelligence/preferences", "put"),
+        ("/v1/intelligence/deliveries/{id}/ack", "post"),
+        ("/v1/intelligence/devices", "post"),
+        ("/v1/intelligence/assets/{sha256}", "get"),
+        ("/v1/intelligence/archive-requests", "post"),
+        ("/v1/intelligence/archive/calendar", "get"),
+        ("/v1/intelligence/archive-requests/{id}", "get"),
+        ("/v1/intelligence/archive-requests/{id}/content", "get"),
+        ("/v1/intelligence/archive-requests/{id}/content/ack", "post"),
+        ("/v1/intelligence/publisher/jobs", "get"),
+        ("/v1/intelligence/publisher/heartbeat", "post"),
+        ("/v1/intelligence/publisher/jobs/{id}/claim", "post"),
+        ("/v1/intelligence/publisher/jobs/{id}/content", "post"),
+        ("/v1/intelligence/publisher/jobs/{id}/not-found", "post"),
+        ("/v1/intelligence/publisher/jobs/{id}/failed", "post"),
+        ("/v1/intelligence/uploads/init", "post"),
+        ("/v1/intelligence/uploads/{id}/complete", "post"),
+    ] {
+        assert!(body["paths"][path][method].is_object(), "{method} {path}");
+        assert_eq!(
+            bearer_security(&body["paths"][path][method]),
+            serde_json::json!([]),
+            "{method} {path} must declare bearer authentication"
+        );
+    }
+    assert!(body["components"]["schemas"]["PublicationUploadResponse"].is_object());
+    assert!(body["components"]["schemas"]["FeedPage"].is_object());
+    assert!(body["components"]["schemas"]["PreferencesResponse"].is_object());
+    assert!(body["components"]["schemas"]["DeviceResponse"].is_object());
+    assert!(body["components"]["schemas"]["ArchiveRequestView"].is_object());
+    assert!(body["components"]["schemas"]["PublisherJobsResponse"].is_object());
     for route in [
         "/v1/auth/email/start",
         "/v1/auth/email/confirm",

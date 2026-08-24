@@ -33,4 +33,4 @@ database_name=${url_without_query##*/}
   || fail 'database name is not a plain test-database name'
 
 "$script_dir/check-migrations.sh"
-exec cargo test --manifest-path "$service_dir/Cargo.toml" --test postgres_e2e load_rehearsal_
+exec cargo +1.97.1 test --manifest-path "$service_dir/Cargo.toml" --test postgres_e2e load_rehearsal_

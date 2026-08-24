@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "publicationId": "daily:2030-01-02:zh-CN",
+  "kind": "daily",
+  "publishedAt": "2030-01-02T00:00:00Z",
+  "expiresAt": "2030-02-01T00:00:00Z",
+  "issuedAt": "2030-01-02T00:05:00Z",
+  "events": [{
+    "eventId": "event-demo-1", "revisionNo": 1, "seriesId": "series-demo", "title": "虚构事件示例", "occurredAt": "2030-01-01T12:00:00Z",
+    "blocks": [{ "blockId": "b1", "segments": [{ "text": "虚构来源确认了一项公开消息。", "noteIds": ["n1"] }], "mediaIds": ["img-1"] }],
+    "notes": [{ "noteId": "n1", "sourceId": "source-demo", "sourceSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "publisher": "Example News", "title": "Synthetic source", "originalUrl": "https://example.invalid/articles/demo", "publishedAt": "2030-01-01T12:00:00Z", "paragraphs": [{ "paragraphId": "p8", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }], "fallbackExcerpt": "Synthetic evidence." }]
+  }],
+  "assets": [{ "assetId": "img-1", "kind": "image", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mime": "image/webp", "bytes": 1024, "width": 640, "height": 360 }],
+  "bundleSha256": "3da6cc200df9b01f70def3a3fd852fa3fb6d84782b0dd66e4d3b4c68ae2ec692"
+}

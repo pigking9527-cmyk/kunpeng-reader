@@ -1,0 +1,57 @@
+{
+  "pairingOffer": {
+    "schemaVersion": 1,
+    "offerId": "host-offer-demo-1",
+    "expiresAt": "2030-01-02T00:10:00Z",
+    "hostInstallationId": "host-install-demo-1",
+    "hostKeyId": "key:host-demo-1",
+    "hostPublicKey": "AQIDBAUGBwgJCgsMDQ4PEA",
+    "hostKeyFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "capabilities": ["library_answer", "reading_deep_analysis"]
+  },
+  "pairing": {
+    "schemaVersion": 1,
+    "pairId": "pair-demo-1",
+    "state": "ACTIVE",
+    "hostInstallationId": "host-install-demo-1",
+    "hostKeyId": "key:host-demo-1",
+    "clientKeyId": "key:client-demo-1",
+    "capabilityRevision": 1,
+    "capabilities": ["library_answer", "reading_deep_analysis"],
+    "createdAt": "2030-01-02T00:01:00Z",
+    "updatedAt": "2030-01-02T00:01:00Z"
+  },
+  "request": {
+    "schemaVersion": 1,
+    "taskId": "task-demo-1",
+    "pairId": "pair-demo-1",
+    "operation": "library_answer",
+    "capabilityRevision": 1,
+    "expiresAt": "2030-01-02T00:16:00Z",
+    "requestEnvelope": {
+      "schemaVersion": 1,
+      "suite": "HPKE-v1-X25519-HKDF-SHA256-CHACHA20POLY1305",
+      "recipientKeyId": "key:host-demo-1",
+      "senderKeyId": "key:client-demo-1",
+      "enc": "AQIDBAUGBwgJCgsMDQ4PEA",
+      "ciphertext": "UGxhY2Vob2xkZXJDYXBoaXJ0ZXh0Tm90UGxhaW50ZXh0",
+      "ciphertextSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "compression": "zstd"
+    }
+  },
+  "result": {
+    "schemaVersion": 1,
+    "taskId": "task-demo-1",
+    "resultEnvelope": {
+      "schemaVersion": 1,
+      "suite": "HPKE-v1-X25519-HKDF-SHA256-CHACHA20POLY1305",
+      "recipientKeyId": "key:client-demo-1",
+      "senderKeyId": "key:host-demo-1",
+      "enc": "EBESExQVFhcYGRobHB0eHw",
+      "ciphertext": "RGVtb1Jlc3VsdENpcGhlcnRleHROZXZlclBsYWludGV4dA",
+      "ciphertextSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "compression": "zstd"
+    }
+  },
+  "cancel": { "schemaVersion": 1, "taskId": "task-demo-1", "requestedAt": "2030-01-02T00:03:00Z" }
+}

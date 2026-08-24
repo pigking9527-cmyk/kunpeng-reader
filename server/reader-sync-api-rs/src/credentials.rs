@@ -77,6 +77,64 @@ pub fn session_token_digest(
     Ok(mac.finalize().into_bytes().into())
 }
 
+/// Computes the domain-separated database digest of an installation-bound
+/// intelligence publisher credential.  Publisher credentials deliberately do
+/// not share a lookup namespace with ordinary user sessions.
+///
+/// # Errors
+///
+/// Returns an error if the configured HMAC key is rejected.
+pub fn intelligence_publisher_token_digest(
+    key: &SecretString,
+    token: &SecretString,
+) -> Result<[u8; 32], CredentialError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.expose_secret().as_bytes())
+        .map_err(|_| CredentialError::Hashing)?;
+    mac.update(b"reader-sync/intelligence-publisher/v1\0");
+    mac.update(token.expose_secret().as_bytes());
+    Ok(mac.finalize().into_bytes().into())
+}
+
+/// Computes the digest of an installation-bound private inference-host
+/// credential.  It deliberately uses a separate HMAC domain from sessions
+/// and the public-intelligence publisher relay.
+///
+/// # Errors
+///
+/// Returns an error if the configured HMAC key is rejected.
+pub fn intelligence_host_token_digest(
+    key: &SecretString,
+    token: &SecretString,
+) -> Result<[u8; 32], CredentialError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.expose_secret().as_bytes())
+        .map_err(|_| CredentialError::Hashing)?;
+    mac.update(b"reader-sync/intelligence-host-inference/v1\0");
+    mac.update(token.expose_secret().as_bytes());
+    Ok(mac.finalize().into_bytes().into())
+}
+
+/// Reconstructs the installation-bound capability credential issued during a
+/// host pairing claim.  The random pairing id provides the per-pair secret
+/// input; deriving the credential lets a transport retry receive the same
+/// credential without the service ever persisting its plaintext.
+///
+/// # Errors
+///
+/// Returns an error if the configured HMAC key is rejected.
+pub fn derived_intelligence_host_token(
+    key: &SecretString,
+    pair_id: uuid::Uuid,
+    host_installation_id: &str,
+) -> Result<SecretString, CredentialError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.expose_secret().as_bytes())
+        .map_err(|_| CredentialError::Hashing)?;
+    mac.update(b"reader-sync/intelligence-host-inference/credential/v1\0");
+    mac.update(pair_id.as_bytes());
+    mac.update(b"\0");
+    mac.update(host_installation_id.as_bytes());
+    Ok(SecretString::from(hex(&mac.finalize().into_bytes())))
+}
+
 /// Generates a uniformly random six-digit account verification code.
 ///
 /// # Errors
@@ -210,6 +268,10 @@ mod tests {
         assert!(digest_matches(&digest, &same));
         let other = session_token_digest(&key, &second).expect("other digest");
         assert!(!digest_matches(&digest, &other));
+        let publisher = intelligence_publisher_token_digest(&key, &first).expect("publisher");
+        assert!(!digest_matches(&digest, &publisher));
+        let host = intelligence_host_token_digest(&key, &first).expect("host");
+        assert!(!digest_matches(&publisher, &host));
     }
 
     #[test]

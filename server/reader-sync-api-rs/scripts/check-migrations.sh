@@ -37,5 +37,5 @@ done
 grep -Fq 'sqlx::migrate!("./migrations")' "$service_dir/src/lib.rs" \
   || fail "the application no longer embeds the migration directory"
 
-cargo metadata --manifest-path "$service_dir/Cargo.toml" --locked --no-deps --format-version 1 >/dev/null
+cargo +1.97.1 metadata --manifest-path "$service_dir/Cargo.toml" --locked --no-deps --format-version 1 >/dev/null
 printf 'Migration static check passed for %d contiguous SQL migrations.\n' "${#migrations[@]}"

@@ -66,6 +66,15 @@ pub struct Config {
     pub body_limit_bytes: usize,
     pub run_migrations: bool,
     pub trust_loopback_proxy_headers: bool,
+    /// Private host inference is an explicitly opt-in relay.  The server only
+    /// stores opaque HPKE envelopes; keeping the API disabled by default makes
+    /// accidental public exposure impossible during staged rollout.
+    pub intelligence_host_inference_enabled: bool,
+    /// Object storage is opt-in.  Disabled deployments retain the
+    /// `PostgreSQL` bytea path; enabled deployments use the durable
+    /// object-write worker and never expose a remote key before its PUT has
+    /// succeeded.
+    pub intelligence_object_storage: IntelligenceObjectStorageConfig,
     pub smtp: Option<SmtpConfig>,
     pub sms: Option<TencentSmsConfig>,
 }
@@ -89,6 +98,43 @@ pub struct TencentSmsConfig {
     pub template_id: String,
     pub region: String,
     pub daily_send_limit: u32,
+}
+
+#[derive(Clone)]
+pub enum IntelligenceObjectStorageConfig {
+    Disabled,
+    S3(S3ObjectStorageConfig),
+}
+
+impl std::fmt::Debug for IntelligenceObjectStorageConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => formatter.write_str("Disabled"),
+            Self::S3(config) => formatter.debug_tuple("S3").field(config).finish(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct S3ObjectStorageConfig {
+    pub endpoint: String,
+    pub region: String,
+    pub bucket: String,
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
+    pub session_token: Option<SecretString>,
+}
+
+impl std::fmt::Debug for S3ObjectStorageConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("S3ObjectStorageConfig")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("credentials", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for TencentSmsConfig {
@@ -142,6 +188,7 @@ impl Config {
 
         let smtp = smtp_config()?;
         let sms = sms_config()?;
+        let intelligence_object_storage = intelligence_object_storage_config()?;
         Ok(Self {
             bind,
             listen_backlog: parsed_positive::<u32>("KUNPENG_SYNC_LISTEN_BACKLOG", "1024")?,
@@ -198,6 +245,11 @@ impl Config {
                 "KUNPENG_SYNC_TRUST_LOOPBACK_PROXY_HEADERS",
                 false,
             )?,
+            intelligence_host_inference_enabled: boolean(
+                "KUNPENG_SYNC_INTELLIGENCE_HOST_INFERENCE_ENABLED",
+                false,
+            )?,
+            intelligence_object_storage,
             smtp,
             sms,
         })
@@ -230,6 +282,8 @@ impl Config {
             body_limit_bytes: 1024 * 1024,
             run_migrations: false,
             trust_loopback_proxy_headers: false,
+            intelligence_host_inference_enabled: false,
+            intelligence_object_storage: IntelligenceObjectStorageConfig::Disabled,
             smtp: Some(SmtpConfig {
                 host: "smtp.invalid".to_owned(),
                 port: 587,
@@ -240,6 +294,26 @@ impl Config {
             }),
             sms: None,
         }
+    }
+}
+
+fn intelligence_object_storage_config() -> Result<IntelligenceObjectStorageConfig> {
+    match value("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE", "disabled").as_str() {
+        "disabled" => Ok(IntelligenceObjectStorageConfig::Disabled),
+        "s3" => Ok(IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+            endpoint: required("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_ENDPOINT")?,
+            region: required("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_REGION")?,
+            bucket: required("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_BUCKET")?,
+            access_key_id: SecretString::from(required(
+                "KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_ACCESS_KEY_ID",
+            )?),
+            secret_access_key: SecretString::from(required(
+                "KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY",
+            )?),
+            session_token: optional("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_SESSION_TOKEN")
+                .map(SecretString::from),
+        })),
+        _ => bail!("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE must be disabled or s3"),
     }
 }
 
@@ -367,6 +441,17 @@ mod tests {
             region: "ap-guangzhou".to_owned(),
             daily_send_limit: 10,
         });
+        config.intelligence_object_storage =
+            IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+                endpoint: "https://objects.example.invalid".to_owned(),
+                region: "test-region-1".to_owned(),
+                bucket: "intelligence-test".to_owned(),
+                access_key_id: SecretString::from("object-access-key-must-not-leak".to_owned()),
+                secret_access_key: SecretString::from("object-secret-key-must-not-leak".to_owned()),
+                session_token: Some(SecretString::from(
+                    "object-session-token-must-not-leak".to_owned(),
+                )),
+            });
         let debug = format!("{config:?}");
         assert!(!debug.contains("postgresql://user:password"));
         assert!(!debug.contains("test-only-key"));
@@ -376,6 +461,9 @@ mod tests {
             "sdk-app-id",
             "sign-name",
             "template-id",
+            "object-access-key",
+            "object-secret-key",
+            "object-session-token",
         ] {
             assert!(!debug.contains(sensitive));
         }
@@ -392,5 +480,22 @@ mod tests {
             SmtpTlsMode::StartTls
         );
         assert!("plaintext".parse::<SmtpTlsMode>().is_err());
+    }
+
+    #[test]
+    fn test_object_storage_debug_redacts_credentials() {
+        let config = IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+            endpoint: "https://objects.example.invalid".to_owned(),
+            region: "test-region-1".to_owned(),
+            bucket: "intelligence-test".to_owned(),
+            access_key_id: SecretString::from("access-key-must-not-leak".to_owned()),
+            secret_access_key: SecretString::from("secret-key-must-not-leak".to_owned()),
+            session_token: Some(SecretString::from("session-token-must-not-leak".to_owned())),
+        });
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        for secret in ["access-key", "secret-key", "session-token"] {
+            assert!(!debug.contains(secret));
+        }
     }
 }
