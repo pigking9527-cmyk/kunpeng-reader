@@ -16,7 +16,12 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use metrics_exporter_prometheus::PrometheusBuilder;
-use reader_sync_api::{app, config::Config, credentials::hash_password, state::AppState};
+use reader_sync_api::{
+    app,
+    config::Config,
+    credentials::{hash_password, intelligence_publisher_token_digest},
+    state::AppState,
+};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use sha2::Digest;
@@ -34,6 +39,9 @@ const PUBLICATION_ID: &str = "daily:route-e2e:2026-08-24";
 const ASSET_SHA256: &str = "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a";
 const DEVICE_A: &str = "device:route-e2e-a";
 const DEVICE_B: &str = "device:route-e2e-b";
+const REVOCATION_PUBLICATION_ID: &str = "daily:2030-01-02:zh-CN";
+const REVOCATION_PUBLISHER_TOKEN: &str = "publisher-revocation-e2e-token";
+const REVOCATION_INSTALLATION_ID: &str = "publisher-revocation-e2e-host";
 
 fn current_ms() -> i64 {
     i64::try_from(
@@ -351,6 +359,34 @@ async fn insert_delivery_event(pool: &PgPool, account_id: &str) -> i64 {
     .expect("insert synthetic delivery event")
 }
 
+async fn clean_publisher_revocation_fixture(pool: &PgPool, digest: &[u8]) {
+    // A draft and its idempotency receipts both retain the publisher digest.
+    // Remove those rows before the credential so an interrupted earlier run
+    // cannot make this protected shared test database fail on a foreign key.
+    sqlx::query("DELETE FROM intelligence_publication_receipts_v1 WHERE publisher_token_digest=$1")
+        .bind(digest)
+        .execute(pool)
+        .await
+        .expect("remove revocation fixture receipts");
+    sqlx::query("DELETE FROM intelligence_publication_drafts_v1 WHERE publication_id=$1")
+        .bind(REVOCATION_PUBLICATION_ID)
+        .execute(pool)
+        .await
+        .expect("remove revocation fixture draft");
+    sqlx::query("DELETE FROM intelligence_publisher_credentials_v1 WHERE token_digest=$1")
+        .bind(digest)
+        .execute(pool)
+        .await
+        .expect("remove revocation fixture publisher credential");
+}
+
+fn publication_bundle_fixture() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../contracts/fixtures/intelligence-publication-bundle.v1.json"
+    ))
+    .expect("parse immutable publication bundle fixture")
+}
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // Full router lifecycle proves account isolation, not SQL predicates.
 async fn permitted_readers_share_current_content_but_not_archive_request_or_ack_state() {
@@ -581,6 +617,106 @@ async fn permitted_readers_share_current_content_but_not_archive_request_or_ack_
     );
 
     clean_fixture(&pool).await;
+}
+
+#[tokio::test]
+async fn revoked_publisher_credential_cannot_submit_the_same_immutable_publication_bundle() {
+    let Some(database_url) = explicit_test_database_url() else {
+        return;
+    };
+    let _guard = DATABASE_LOCK.lock().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .expect("connect to explicit publisher revocation test database");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate explicit publisher revocation test database");
+
+    let config = Config::for_test(&database_url);
+    let publisher_digest = intelligence_publisher_token_digest(
+        &config.token_hmac_key,
+        &SecretString::from(REVOCATION_PUBLISHER_TOKEN.to_owned()),
+    )
+    .expect("derive publisher credential digest")
+    .to_vec();
+    clean_publisher_revocation_fixture(&pool, &publisher_digest).await;
+    sqlx::query(
+        "INSERT INTO intelligence_publisher_credentials_v1 \
+         (token_digest,installation_id,capabilities,expires_at,created_at) \
+         VALUES ($1,$2,ARRAY['intelligence:publish'],$3,$4)",
+    )
+    .bind(&publisher_digest)
+    .bind(REVOCATION_INSTALLATION_ID)
+    .bind(current_ms() + 24 * 60 * 60 * 1_000_i64)
+    .bind(current_ms())
+    .execute(&pool)
+    .await
+    .expect("insert active publisher credential");
+
+    let service = router(pool.clone(), &database_url);
+    let bundle = publication_bundle_fixture();
+    let accepted = service
+        .clone()
+        .oneshot(idempotent_request(
+            "POST",
+            "/v1/intelligence/uploads/init",
+            REVOCATION_PUBLISHER_TOKEN,
+            "publisher-revocation-e2e-before-revoke",
+            bundle.clone(),
+        ))
+        .await
+        .expect("active publisher submission response");
+    assert_eq!(accepted.status(), StatusCode::CREATED);
+    assert_eq!(
+        response_json(accepted).await["publicationId"],
+        REVOCATION_PUBLICATION_ID,
+        "the active credential must be able to submit the immutable fixture"
+    );
+
+    let revoked = sqlx::query(
+        "UPDATE intelligence_publisher_credentials_v1 SET revoked_at=$2 \
+         WHERE token_digest=$1 AND revoked_at=0",
+    )
+    .bind(&publisher_digest)
+    .bind(current_ms())
+    .execute(&pool)
+    .await
+    .expect("revoke publisher credential");
+    assert_eq!(revoked.rows_affected(), 1, "revoke exactly this credential");
+
+    let rejected = service
+        .clone()
+        .oneshot(idempotent_request(
+            "POST",
+            "/v1/intelligence/uploads/init",
+            REVOCATION_PUBLISHER_TOKEN,
+            "publisher-revocation-e2e-after-revoke",
+            bundle,
+        ))
+        .await
+        .expect("revoked publisher submission response");
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response_json(rejected).await["error"]["code"],
+        "UNAUTHORIZED",
+        "a revoked bearer must not degrade into a valid publisher or reader credential"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM intelligence_publication_receipts_v1 WHERE publisher_token_digest=$1",
+        )
+        .bind(&publisher_digest)
+        .fetch_one(&pool)
+        .await
+        .expect("count publisher receipts after revocation"),
+        1,
+        "the rejected request must not leave a second idempotency receipt"
+    );
+
+    clean_publisher_revocation_fixture(&pool, &publisher_digest).await;
 }
 
 #[tokio::test]
