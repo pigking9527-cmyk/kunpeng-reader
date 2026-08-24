@@ -1157,6 +1157,17 @@ fn text(value: &serde_json::Value, key: &str) -> String {
         .to_owned()
 }
 
+/// Optional worker diagnostics must remain empty after a successful phase.
+/// Rendering a missing `processingFailure` as `unknown` made a healthy 8B or
+/// 27B pass look suspicious in the aggregate-only audit view.
+fn optional_text(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// Starts the independently guarded publisher/relay service.  It reads its
 /// own DPAPI-protected capability record; no credential or server origin is
 /// passed through this host's command line, environment, audit, or local UI.
@@ -1356,7 +1367,7 @@ fn run_once_with_audit(
                 begin_audit_stage(audit_path, audit, "vector_recall_and_relation")?;
                 let value = child_output(configuration, "--relate-once", RELATION_TIMEOUT)?;
                 report.relation = text(&value, "outcome");
-                report.relation_failure = text(&value, "processingFailure");
+                report.relation_failure = optional_text(&value, "processingFailure");
                 match report.relation.as_str() {
                     "processed" => {}
                     "processing_idle" => break,
@@ -1389,7 +1400,7 @@ fn run_once_with_audit(
                         let value =
                             child_output(configuration, "--synthesize-once", EDITORIAL_TIMEOUT)?;
                         let editorial_outcome = text(&value, "outcome");
-                        report.editorial_failure = text(&value, "processingFailure");
+                        report.editorial_failure = optional_text(&value, "processingFailure");
                         match editorial_outcome.as_str() {
                             "processed" => {
                                 report.processed += number(&value, "processed");
@@ -1799,6 +1810,15 @@ mod tests {
         let summary = summary_from_host_audit(&audit, true);
         assert_eq!(summary[0].status, "running");
         assert_eq!(summary[0].count, 1);
+    }
+
+    #[test]
+    fn absent_optional_processing_diagnostic_is_not_rendered_as_unknown() {
+        let successful = serde_json::json!({"outcome":"processed","processingFailure":""});
+        let legacy_successful = serde_json::json!({"outcome":"processed"});
+        assert_eq!(optional_text(&successful, "processingFailure"), "");
+        assert_eq!(optional_text(&legacy_successful, "processingFailure"), "");
+        assert_eq!(text(&legacy_successful, "outcome"), "processed");
     }
 
     #[test]
