@@ -37,8 +37,8 @@ expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/rea
 expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_SMTP_HOST='smtp.invalid' KUNPENG_SYNC_SMTP_FROM='noreply@example.invalid' KUNPENG_SYNC_SMTP_PORT=0 "$config_checker"
 env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' "$config_checker" >/dev/null
 "$script_dir/check-migrations.sh"
-"$intelligence_readiness_checker" --offline >/dev/null
-"$intelligence_readiness_checker" --offline --require-object-storage >/dev/null
+bash "$intelligence_readiness_checker" --offline >/dev/null
+bash "$intelligence_readiness_checker" --offline --require-object-storage >/dev/null
 "$artifact_provenance_checker"
 "$artifact_bundle_checker"
 "$backup_restore_checker"
