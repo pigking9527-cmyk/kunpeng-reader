@@ -27,6 +27,7 @@ const TRIAGE_BASE_URL_ENV: &str = "KUNPENG_INTELLIGENCE_TRIAGE_BASE_URL";
 const TRIAGE_MODEL_ENV: &str = "KUNPENG_INTELLIGENCE_TRIAGE_MODEL";
 const TRIAGE_MODEL_SHA256_ENV: &str = "KUNPENG_INTELLIGENCE_TRIAGE_MODEL_SHA256";
 const TRIAGE_PROMPT_VERSION: &str = "article-triage-v2";
+const CONTENT_FINGERPRINT_RECONCILIATION_LIMIT: usize = 64;
 
 fn triage_retry_reason(failure: TriageFailure) -> &'static str {
     match failure {
@@ -181,6 +182,15 @@ fn claim_one_at(
     if !path.is_file() {
         return Ok((false, None, 0));
     }
+    // Recover only evidence revisions whose current body projection verifies
+    // byte-for-byte against the old immutable version. This keeps a process
+    // interruption between record and evidence transactions from permanently
+    // stranding a valid article, while different bodies still require a fetch.
+    content_archive::reconcile_current_complete_content_versions_at(
+        path,
+        CONTENT_FINGERPRINT_RECONCILIATION_LIMIT,
+    )
+    .map_err(|_| ())?;
     // The collector intentionally fingerprints validators such as ETag.  Do
     // not let an ETag-only refresh put the same canonical body through the
     // 8B queue again; processing owns the persistent cross-source mapping.

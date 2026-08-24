@@ -230,6 +230,18 @@ pub(crate) fn has_current_complete_content_at(
     article_id: &str,
     record_fingerprint: &str,
 ) -> Result<bool, String> {
+    // Collection and immutable-evidence writes use separate transactions. A
+    // process interruption between them can leave an otherwise verified body
+    // under the previous feed fingerprint. Repair only the exact same body
+    // before answering this predicate; a different or absent body remains
+    // ineligible and must be fetched again.
+    if reconcile_current_complete_content_for_article_at(
+        catalog_path,
+        article_id,
+        record_fingerprint,
+    )? {
+        return Ok(true);
+    }
     let connection =
         Connection::open(catalog_path).map_err(|error| format!("打开本机情报档案失败：{error}"))?;
     ensure_catalog_schema(&connection)?;
@@ -293,6 +305,124 @@ pub(crate) fn ensure_catalog_schema_at(catalog_path: &Path) -> Result<(), String
     let connection =
         Connection::open(catalog_path).map_err(|error| format!("打开本机情报档案失败：{error}"))?;
     ensure_catalog_schema(&connection)
+}
+
+/// Repair a bounded set of interrupted record/evidence hand-offs.
+///
+/// A repair is deliberately narrower than content backfill: it is allowed
+/// only when the current `intelligence_articles.body` projection hashes to the
+/// exact current complete evidence revision. Missing, changed, or malformed
+/// bodies are left untouched so downstream claims continue to require a
+/// content version for the current record fingerprint.
+pub(crate) fn reconcile_current_complete_content_versions_at(
+    catalog_path: &Path,
+    limit: usize,
+) -> Result<u64, String> {
+    if limit == 0 {
+        return Ok(0);
+    }
+    let connection =
+        Connection::open(catalog_path).map_err(|error| format!("打开本机情报档案失败：{error}"))?;
+    ensure_catalog_schema(&connection)?;
+    let limit: i64 = limit
+        .min(1_024)
+        .try_into()
+        .map_err(|_| "正文版本补偿数量无效")?;
+    let candidates = {
+        let mut statement = connection
+            .prepare(
+                "SELECT article.article_id,article.fingerprint
+                 FROM intelligence_articles article
+                 INNER JOIN intelligence_article_content_versions content
+                   ON content.article_id=article.article_id
+                  AND content.is_current=1
+                  AND content.body_status='complete'
+                 WHERE content.record_fingerprint<>article.fingerprint
+                 ORDER BY content.created_at ASC,article.article_id ASC
+                 LIMIT ?1",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    drop(connection);
+
+    let mut repaired = 0_u64;
+    for (article_id, fingerprint) in candidates {
+        if reconcile_current_complete_content_for_article_at(
+            catalog_path,
+            &article_id,
+            &fingerprint,
+        )? {
+            repaired = repaired.saturating_add(1);
+        }
+    }
+    Ok(repaired)
+}
+
+/// Attempt one fingerprint hand-off without widening the complete-content
+/// claim. It returns `false` for every non-identical or stale state so the
+/// normal backfill path remains responsible for acquiring new evidence.
+fn reconcile_current_complete_content_for_article_at(
+    catalog_path: &Path,
+    article_id: &str,
+    expected_fingerprint: &str,
+) -> Result<bool, String> {
+    let article_id = required(article_id, "文章 ID", 200)?;
+    let expected_fingerprint = required(expected_fingerprint, "文章记录指纹", 200)?;
+    let connection =
+        Connection::open(catalog_path).map_err(|error| format!("打开本机情报档案失败：{error}"))?;
+    ensure_catalog_schema(&connection)?;
+    let candidate = connection
+        .query_row(
+            "SELECT article.fingerprint,article.body,content.record_fingerprint,content.text_sha256
+             FROM intelligence_articles article
+             INNER JOIN intelligence_article_content_versions content
+               ON content.article_id=article.article_id
+              AND content.is_current=1
+              AND content.body_status='complete'
+             WHERE article.article_id=?1",
+            [&article_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((current_fingerprint, body, previous_fingerprint, text_sha256)) = candidate else {
+        return Ok(false);
+    };
+    if current_fingerprint != expected_fingerprint || previous_fingerprint == expected_fingerprint {
+        return Ok(false);
+    }
+    let Some(body) = body else {
+        return Ok(false);
+    };
+    let canonical_body = canonical_article_text(&body);
+    if canonical_body.is_empty() || canonical_body.len() > MAX_TEXT_BYTES {
+        return Ok(false);
+    }
+    if sha256_hex(canonical_body.as_bytes()) != text_sha256 {
+        return Ok(false);
+    }
+    advance_current_complete_content_fingerprint_at(
+        catalog_path,
+        &article_id,
+        &previous_fingerprint,
+        &expected_fingerprint,
+        &canonical_body,
+    )
 }
 
 /// Move an already verified complete revision to a refreshed collected-record
@@ -1031,5 +1161,72 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn reconciles_an_interrupted_identical_body_fingerprint_handoff() {
+        let fixture = Fixture::new();
+        let first = persist_article_content_at(&fixture.catalog, input()).unwrap();
+        let connection = Connection::open(&fixture.catalog).unwrap();
+        connection
+            .execute(
+                "UPDATE intelligence_articles
+                 SET fingerprint='record-v2',body='第一段\n\n第二段'
+                 WHERE article_id='a'",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            reconcile_current_complete_content_versions_at(&fixture.catalog, 64).unwrap(),
+            1
+        );
+        assert!(has_current_complete_content_at(&fixture.catalog, "a", "record-v2").unwrap());
+        let (current_fingerprint, current_versions, copied_paragraphs): (String, i64, i64) =
+            connection
+                .query_row(
+                    "SELECT content.record_fingerprint,
+                            COUNT(*),
+                            (SELECT COUNT(*) FROM intelligence_article_paragraphs
+                              WHERE article_id='a' AND version_sha256=content.version_sha256)
+                     FROM intelligence_article_content_versions content
+                     WHERE content.article_id='a' AND content.is_current=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+        assert_eq!(current_fingerprint, "record-v2");
+        assert_eq!(current_versions, 1);
+        assert_eq!(copied_paragraphs, first.paragraphs as i64);
+    }
+
+    #[test]
+    fn does_not_reconcile_a_changed_body_under_a_new_fingerprint() {
+        let fixture = Fixture::new();
+        persist_article_content_at(&fixture.catalog, input()).unwrap();
+        let connection = Connection::open(&fixture.catalog).unwrap();
+        connection
+            .execute(
+                "UPDATE intelligence_articles
+                 SET fingerprint='record-v2',body='不同的正文'
+                 WHERE article_id='a'",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            reconcile_current_complete_content_versions_at(&fixture.catalog, 64).unwrap(),
+            0
+        );
+        assert!(!has_current_complete_content_at(&fixture.catalog, "a", "record-v2").unwrap());
+        let current_fingerprint: String = connection
+            .query_row(
+                "SELECT record_fingerprint FROM intelligence_article_content_versions
+                 WHERE article_id='a' AND is_current=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_fingerprint, "record-v1");
     }
 }
