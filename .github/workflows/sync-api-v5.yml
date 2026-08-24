@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+      # Temporary isolated-validation branch. It is never a deployment source;
+      # it only permits the provenance/E2E runner job below to be exercised
+      # before the unrelated remote main history is reconciled.
+      - codex/intelligence-e2e
     paths:
       - ".github/workflows/sync-api-v5.yml"
       - "server/reader-sync-api-rs/**"
