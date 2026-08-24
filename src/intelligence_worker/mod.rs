@@ -1485,6 +1485,15 @@ mod tests {
             parse_mode([OsString::from("worker"), OsString::from("--service-loop")]),
             Ok(Mode::ServiceLoop)
         );
+        assert_eq!(
+            parse_mode([
+                OsString::from("worker"),
+                OsString::from("--isolated-profile"),
+                OsString::from(r"C:\\fixture-profile"),
+                OsString::from("--service-loop"),
+            ]),
+            Ok(Mode::ServiceLoop)
+        );
         assert!(parse_mode([OsString::from("worker"), OsString::from("--fetch")]).is_err());
     }
     #[test]

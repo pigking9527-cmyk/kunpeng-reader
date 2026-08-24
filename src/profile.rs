@@ -127,7 +127,11 @@ pub(crate) fn instance_scope_key() -> String {
 /// The resulting values are only ever supplied as child-process arguments,
 /// never written to worker configuration, dashboard JSON, or diagnostics.
 pub(crate) fn child_profile_args() -> Vec<OsString> {
-    match current() {
+    child_profile_args_for(current())
+}
+
+fn child_profile_args_for(profile: &LaunchProfile) -> Vec<OsString> {
+    match profile {
         LaunchProfile::Default => Vec::new(),
         LaunchProfile::Isolated(profile) => vec![
             OsString::from("--isolated-profile"),
@@ -260,7 +264,9 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<LaunchPro
 }
 
 fn prepare_isolated_profile(root: &Path) -> Result<IsolatedProfile, String> {
-    if !root.is_absolute() || root == Path::new("/") {
+    // `Path::new("/")` covers Unix while `parent().is_none()` also rejects a
+    // Windows drive/share root.  Never let the profile boundary be a volume.
+    if !root.is_absolute() || root.parent().is_none() {
         return Err("--isolated-profile 必须是非根目录的绝对路径".into());
     }
     ensure_no_reparse_ancestors(root)?;
@@ -274,6 +280,9 @@ fn prepare_isolated_profile(root: &Path) -> Result<IsolatedProfile, String> {
     } else {
         std::fs::create_dir_all(root).map_err(|error| format!("无法创建隔离配置目录：{error}"))?;
     }
+    // Re-check after creation.  This also closes the ordinary create/check
+    // gap for a newly created nested path before marker or DACL writes begin.
+    ensure_no_reparse_ancestors(root)?;
     set_owner_only_permissions(root)?;
     let marker_path = root.join(MARKER_FILE);
     let identifier = match std::fs::read_to_string(&marker_path) {
@@ -309,6 +318,7 @@ fn prepare_isolated_profile(root: &Path) -> Result<IsolatedProfile, String> {
         ensure_no_reparse_ancestors(&directory)?;
         std::fs::create_dir_all(&directory)
             .map_err(|error| format!("无法创建隔离配置子目录：{error}"))?;
+        ensure_no_reparse_ancestors(&directory)?;
         set_owner_only_permissions(&directory)?;
     }
     Ok(IsolatedProfile {
@@ -492,6 +502,13 @@ mod tests {
             root.join("config").join(APP_DIRECTORY)
         );
         assert!(!id.contains(&root.display().to_string()));
+        assert_eq!(
+            child_profile_args_for(&launch_profile),
+            vec![
+                OsString::from("--isolated-profile"),
+                root.clone().into_os_string()
+            ]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

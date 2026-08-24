@@ -85,6 +85,17 @@ pub(crate) struct WorkerServiceLoopGuard {
     handle: *mut core::ffi::c_void,
 }
 
+/// Keep the historic default name byte-for-byte stable while giving every
+/// marker-derived isolated profile an independent worker lifetime.
+#[cfg(any(windows, test))]
+fn service_loop_mutex_name(scope: &str) -> String {
+    if scope == "global" {
+        "Local\\KunpengReaderIntelligenceWorkerV1".to_owned()
+    } else {
+        format!("Local\\KunpengReaderIntelligenceWorkerV1-{scope}")
+    }
+}
+
 #[cfg(windows)]
 impl Drop for WorkerServiceLoopGuard {
     fn drop(&mut self) {
@@ -117,12 +128,7 @@ pub(crate) fn acquire_service_loop_guard() -> Result<Option<WorkerServiceLoopGua
             fn GetLastError() -> u32;
             fn CloseHandle(handle: Handle) -> i32;
         }
-        let scope = profile::instance_scope_key();
-        let name = if scope == "global" {
-            "Local\\KunpengReaderIntelligenceWorkerV1".to_owned()
-        } else {
-            format!("Local\\KunpengReaderIntelligenceWorkerV1-{scope}")
-        };
+        let name = service_loop_mutex_name(&profile::instance_scope_key());
         let name = std::ffi::OsStr::new(&name)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -622,5 +628,21 @@ mod tests {
         apply_local_credential_revoke(&mut configuration, "all").unwrap();
         assert!(!configuration.enabled);
         assert!(!configuration.launch_at_login);
+    }
+
+    #[test]
+    fn service_mutex_keeps_default_name_and_scopes_isolated_profiles() {
+        assert_eq!(
+            service_loop_mutex_name("global"),
+            "Local\\KunpengReaderIntelligenceWorkerV1"
+        );
+        assert_eq!(
+            service_loop_mutex_name("isolated-0123456789abcdef"),
+            "Local\\KunpengReaderIntelligenceWorkerV1-isolated-0123456789abcdef"
+        );
+        assert_ne!(
+            service_loop_mutex_name("global"),
+            service_loop_mutex_name("isolated-0123456789abcdef")
+        );
     }
 }
