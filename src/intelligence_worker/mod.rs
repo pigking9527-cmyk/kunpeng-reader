@@ -20,7 +20,10 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
-use triage::{LoopbackTriageTransport, TriageDecision, TriageFailure, TriageHandoff, TriageModel};
+use triage::{
+    LoopbackTriageTransport, TriageDecision, TriageFailure, TriageHandoff, TriageModel,
+    TriageTransport,
+};
 
 const ENABLE_ENV: &str = "KUNPENG_INTELLIGENCE_WORKER_ENABLED";
 const TRIAGE_BASE_URL_ENV: &str = "KUNPENG_INTELLIGENCE_TRIAGE_BASE_URL";
@@ -38,6 +41,7 @@ fn triage_retry_reason(failure: TriageFailure) -> &'static str {
             "本机 7B/8B 初筛请求未完成；请检查本机模型服务，后台将按退避策略重试"
         }
         TriageFailure::InvalidResponse => "本机 7B/8B 初筛未返回合规 JSON；后台将按退避策略重试",
+        TriageFailure::Staging => "本机 7B/8B 初筛结果未能安全暂存；后台将按退避策略重试",
     }
 }
 
@@ -127,6 +131,19 @@ struct QueueStatus {
 struct ClaimedTriage {
     lease_owner: String,
     handoff: TriageHandoff,
+}
+
+/// Identifies exactly one safe-to-reuse 8B article decision.  The associated
+/// row stores only the already validated, bounded decision JSON; it never
+/// stores the article, prompt, URL, credential, or raw provider response.
+#[derive(Clone, Debug)]
+struct TriageStagingKey {
+    article_id: String,
+    fingerprint: String,
+    model_id: String,
+    model_sha256: String,
+    prompt_version: &'static str,
+    input_sha256: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -286,6 +303,152 @@ fn body_evidence_excerpt(body: &str) -> String {
     )
 }
 
+fn initialize_triage_staging(connection: &Connection) -> Result<(), ()> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS intelligence_worker_triage_staging(
+                article_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                model_sha256 TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                input_sha256 TEXT NOT NULL,
+                decision_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(article_id,fingerprint,model_id,model_sha256,prompt_version,input_sha256)
+             );
+             CREATE INDEX IF NOT EXISTS intelligence_worker_triage_staging_created_idx
+                ON intelligence_worker_triage_staging(created_at);
+             DELETE FROM intelligence_worker_triage_staging
+                WHERE created_at < (strftime('%s','now')*1000 - 172800000);",
+        )
+        .map_err(|_| ())
+}
+
+fn triage_staging_key(
+    claim: &ClaimedTriage,
+    model: &TriageModel,
+) -> Result<TriageStagingKey, TriageFailure> {
+    Ok(TriageStagingKey {
+        article_id: claim.handoff.article_id.clone(),
+        fingerprint: claim.handoff.fingerprint.clone(),
+        model_id: model.model.clone(),
+        model_sha256: model.artifact_sha256.clone(),
+        prompt_version: TRIAGE_PROMPT_VERSION,
+        input_sha256: triage::input_sha256(&claim.handoff)?,
+    })
+}
+
+fn load_staged_triage_decision(
+    connection: &Connection,
+    key: &TriageStagingKey,
+) -> Result<Option<TriageDecision>, TriageFailure> {
+    let staged: Option<String> = connection
+        .query_row(
+            "SELECT decision_json FROM intelligence_worker_triage_staging
+             WHERE article_id=?1 AND fingerprint=?2 AND model_id=?3
+               AND model_sha256=?4 AND prompt_version=?5 AND input_sha256=?6",
+            params![
+                key.article_id,
+                key.fingerprint,
+                key.model_id,
+                key.model_sha256,
+                key.prompt_version,
+                key.input_sha256,
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| TriageFailure::Staging)?;
+    let Some(staged) = staged else {
+        return Ok(None);
+    };
+    match triage::decode_staged_decision(&staged) {
+        Ok(decision) => Ok(Some(decision)),
+        Err(_) => {
+            clear_staged_triage_decision(connection, key)?;
+            Ok(None)
+        }
+    }
+}
+
+fn stage_triage_decision(
+    connection: &Connection,
+    key: &TriageStagingKey,
+    decision: &TriageDecision,
+) -> Result<(), TriageFailure> {
+    let decision_json =
+        triage::encode_staged_decision(decision).map_err(|_| TriageFailure::Staging)?;
+    connection
+        .execute(
+            "INSERT INTO intelligence_worker_triage_staging(
+                article_id,fingerprint,model_id,model_sha256,prompt_version,input_sha256,decision_json,created_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,strftime('%s','now')*1000)
+             ON CONFLICT(article_id,fingerprint,model_id,model_sha256,prompt_version,input_sha256) DO NOTHING",
+            params![
+                key.article_id,
+                key.fingerprint,
+                key.model_id,
+                key.model_sha256,
+                key.prompt_version,
+                key.input_sha256,
+                decision_json,
+            ],
+        )
+        .map_err(|_| TriageFailure::Staging)?;
+    Ok(())
+}
+
+fn clear_staged_triage_decision(
+    connection: &Connection,
+    key: &TriageStagingKey,
+) -> Result<(), TriageFailure> {
+    connection
+        .execute(
+            "DELETE FROM intelligence_worker_triage_staging
+             WHERE article_id=?1 AND fingerprint=?2 AND model_id=?3
+               AND model_sha256=?4 AND prompt_version=?5 AND input_sha256=?6",
+            params![
+                key.article_id,
+                key.fingerprint,
+                key.model_id,
+                key.model_sha256,
+                key.prompt_version,
+                key.input_sha256,
+            ],
+        )
+        .map_err(|_| TriageFailure::Staging)?;
+    Ok(())
+}
+
+/// Returns a previously validated, exact-match staged decision before asking
+/// the local model.  A normal process interruption after staging but before
+/// `apply_decision_at` therefore resumes without a second 8B request.
+///
+/// There is intentionally no raw-response cache: a machine failure in the
+/// unavoidable interval after the loopback HTTP response but before its JSON
+/// has been validated and staged can result in one retry.  Persisting raw
+/// model output to close that external-I/O transaction gap would violate the
+/// archive boundary for this worker.
+fn execute_or_reuse_triage_at<T: TriageTransport>(
+    path: &std::path::Path,
+    claim: &ClaimedTriage,
+    model: &TriageModel,
+    transport: &T,
+) -> Result<TriageDecision, TriageFailure> {
+    let key = triage_staging_key(claim, model)?;
+    let connection = Connection::open(path).map_err(|_| TriageFailure::Staging)?;
+    initialize_triage_staging(&connection).map_err(|_| TriageFailure::Staging)?;
+    if let Some(decision) = load_staged_triage_decision(&connection, &key)? {
+        return Ok(decision);
+    }
+    let decision = triage::execute(transport, model, &claim.handoff)?;
+    stage_triage_decision(&connection, &key, &decision)?;
+    // A stale competing lease must not make the fresh process select a
+    // different model answer.  Return the first durable, validated winner.
+    load_staged_triage_decision(&connection, &key)?.ok_or(TriageFailure::Staging)
+}
+
 fn apply_decision_at(
     path: &std::path::Path,
     claim: &ClaimedTriage,
@@ -294,6 +457,10 @@ fn apply_decision_at(
 ) -> Result<(AppliedState, u64), ()> {
     let timestamp = now_ms()?;
     let mut connection = Connection::open(path).map_err(|_| ())?;
+    // `apply_decision_at` is intentionally callable by recovery tests and
+    // manual operators as well as the staged executor.  Ensure committing a
+    // successful decision can always retire its short-lived staging record.
+    initialize_triage_staging(&connection)?;
     connection
         .busy_timeout(std::time::Duration::from_secs(3))
         .map_err(|_| ())?;
@@ -308,6 +475,10 @@ fn apply_decision_at(
         let remaining = queued_count(&transaction)?;
         transaction.commit().map_err(|_| ())?;
         return Ok((AppliedState::Stale, remaining));
+    };
+    let staged_key = match &decision {
+        Ok(_) => Some(triage_staging_key(claim, model).map_err(|_| ())?),
+        Err(_) => None,
     };
     let (status, stored_state, importance, confidence, reason, decision_json, retry_at, result) =
         match decision {
@@ -372,6 +543,24 @@ fn apply_decision_at(
             params![claim.handoff.article_id, claim.handoff.fingerprint, model.model, model.artifact_sha256, TRIAGE_PROMPT_VERSION,
                 status, importance, confidence, reason, decision_json, timestamp],
         ).map_err(|_| ())?;
+        if result == AppliedState::Triaged {
+            let staged_key = staged_key.as_ref().ok_or(())?;
+            transaction
+                .execute(
+                    "DELETE FROM intelligence_worker_triage_staging
+                     WHERE article_id=?1 AND fingerprint=?2 AND model_id=?3
+                       AND model_sha256=?4 AND prompt_version=?5 AND input_sha256=?6",
+                    params![
+                        staged_key.article_id,
+                        staged_key.fingerprint,
+                        staged_key.model_id,
+                        staged_key.model_sha256,
+                        staged_key.prompt_version,
+                        staged_key.input_sha256,
+                    ],
+                )
+                .map_err(|_| ())?;
+        }
     }
     let remaining = queued_count(&transaction)?;
     transaction.commit().map_err(|_| ())?;
@@ -534,12 +723,8 @@ fn service_triage_once(path: &std::path::Path) -> (u64, u64, u64) {
     let Ok((_, Some(claim), _)) = claim_one_at(path, &lease_owner) else {
         return (0, 0, 0);
     };
-    match apply_decision_at(
-        path,
-        &claim,
-        &model,
-        triage::execute(&LoopbackTriageTransport, &model, &claim.handoff),
-    ) {
+    let decision = execute_or_reuse_triage_at(path, &claim, &model, &LoopbackTriageTransport);
+    match apply_decision_at(path, &claim, &model, decision) {
         Ok((AppliedState::Triaged, _)) => (1, 1, 0),
         Ok((AppliedState::Retried, _)) => (1, 0, 1),
         _ => (1, 0, 0),
@@ -1376,7 +1561,7 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
             return 0;
         }
     };
-    let decision = triage::execute(&LoopbackTriageTransport, &model, &claim.handoff);
+    let decision = execute_or_reuse_triage_at(&path, &claim, &model, &LoopbackTriageTransport);
     match apply_decision_at(&path, &claim, &model, decision) {
         Ok((AppliedState::Triaged, remaining)) => {
             print_output(output(mode, "triaged", true, status, 1, 1, 0, remaining))
@@ -1411,6 +1596,24 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingTriageTransport {
+        calls: AtomicUsize,
+    }
+
+    impl CountingTriageTransport {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl TriageTransport for CountingTriageTransport {
+        fn complete(&self, _: &TriageModel, _: &str) -> Result<String, TriageFailure> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(r#"{"decisions":[{"id":"article-c261051fa6e3903794d1f84b1283b8ca","importance":80,"keep":true,"confidence":0.9,"topic":"国际","primaryEntities":["主体"],"time":"2026-08-23","place":"北京","reason":"可由摘要核对"}]}"#.to_string())
+        }
+    }
 
     fn setup(path: &std::path::Path) {
         let connection = Connection::open(path).unwrap();
@@ -1593,6 +1796,95 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored_model_sha, "0".repeat(64));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn triage_reuses_staged_decision_after_simulated_crash_without_second_model_call() {
+        let path = temp_path();
+        setup(&path);
+        let model = triage::model_from_parts("http://127.0.0.1:8081/v1", "Qwen3-8B-Q4").unwrap();
+        let first_claim = ClaimedTriage {
+            lease_owner: "first-process".into(),
+            handoff: TriageHandoff {
+                article_id: "article_1".into(),
+                fingerprint: "sha:test".into(),
+                title: "公开标题".into(),
+                summary: "公开摘要".into(),
+                evidence_excerpt: "完整正文".into(),
+                published_at: "2026-08-23T00:00:00Z".into(),
+                source_name: "Example".into(),
+            },
+        };
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE intelligence_articles
+                 SET triage_state='processing',lease_owner=?1,lease_until=999999999999
+                 WHERE article_id='article_1'",
+                [&first_claim.lease_owner],
+            )
+            .unwrap();
+        drop(connection);
+        let first_transport = CountingTriageTransport {
+            calls: AtomicUsize::new(0),
+        };
+
+        let first_decision =
+            execute_or_reuse_triage_at(&path, &first_claim, &model, &first_transport).unwrap();
+        assert_eq!(first_transport.calls(), 1);
+
+        let connection = Connection::open(&path).unwrap();
+        let staged: String = connection
+            .query_row(
+                "SELECT decision_json FROM intelligence_worker_triage_staging",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Crash-recovery data is an already validated decision only, never
+        // article evidence or the model's opaque response envelope.
+        assert!(!staged.contains("完整正文"));
+        assert!(!staged.contains("article_1"));
+        connection
+            .execute(
+                "UPDATE intelligence_articles
+                 SET lease_owner='resumed-process',lease_until=999999999999
+                 WHERE article_id='article_1'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let resumed_claim = ClaimedTriage {
+            lease_owner: "resumed-process".into(),
+            handoff: first_claim.handoff.clone(),
+        };
+        let resumed_transport = CountingTriageTransport {
+            calls: AtomicUsize::new(0),
+        };
+        let resumed_decision =
+            execute_or_reuse_triage_at(&path, &resumed_claim, &model, &resumed_transport).unwrap();
+        assert_eq!(resumed_transport.calls(), 0);
+        assert_eq!(resumed_decision, first_decision);
+
+        assert_eq!(
+            apply_decision_at(&path, &resumed_claim, &model, Ok(resumed_decision))
+                .unwrap()
+                .0,
+            AppliedState::Triaged
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_worker_triage_staging",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
         let _ = std::fs::remove_file(path);
     }
     #[test]

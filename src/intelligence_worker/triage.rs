@@ -5,7 +5,7 @@
 //! or remote-service capability.
 
 use crate::provider;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -61,7 +61,8 @@ pub(crate) struct TriageHandoff {
     pub(crate) source_name: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TriageDecision {
     pub(crate) keep: bool,
     pub(crate) importance: u8,
@@ -84,6 +85,7 @@ pub(crate) enum TriageFailure {
     InvalidInput,
     ModelRequest,
     InvalidResponse,
+    Staging,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +148,33 @@ pub(crate) fn execute<T: TriageTransport>(
     let expected_model_id =
         model_article_id(&handoff.article_id).map_err(|_| TriageFailure::InvalidInput)?;
     parse_decision(&response, &expected_model_id).map_err(|_| TriageFailure::InvalidResponse)
+}
+
+/// Stable digest of the bounded, typed model input.  The caller may persist
+/// this digest to bind a validated decision to one exact article revision,
+/// without writing the input itself (which contains source text) into the
+/// worker cache.
+pub(crate) fn input_sha256(handoff: &TriageHandoff) -> Result<String, TriageFailure> {
+    let context = triage_context(handoff).map_err(|_| TriageFailure::InvalidInput)?;
+    let digest = Sha256::digest(context.as_bytes());
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Encode only the already-validated structured decision for short-lived
+/// crash recovery.  It never stores the raw provider reply or the prompt /
+/// article input.
+pub(crate) fn encode_staged_decision(value: &TriageDecision) -> Result<String, ()> {
+    validate_decision(value)?;
+    serde_json::to_string(value).map_err(|_| ())
+}
+
+/// Read a staged decision only when it still satisfies exactly the same
+/// bounds used for a fresh provider response.  This makes a damaged SQLite
+/// row a cache miss instead of allowing it to alter article state.
+pub(crate) fn decode_staged_decision(value: &str) -> Result<TriageDecision, ()> {
+    let decision = serde_json::from_str::<TriageDecision>(value).map_err(|_| ())?;
+    validate_decision(&decision)?;
+    Ok(decision)
 }
 
 pub(crate) fn model_from_parts(base_url: &str, model: &str) -> Result<TriageModel, ()> {
@@ -241,23 +270,10 @@ fn parse_decision(response: &str, expected_id: &str) -> Result<TriageDecision, (
     let [decision] = payload.decisions.as_slice() else {
         return Err(());
     };
-    if decision.id != expected_id
-        || decision.importance > 100
-        || !decision.confidence.is_finite()
-        || !(0.0..=1.0).contains(&decision.confidence)
-        || !bounded_nonempty(&decision.topic, MAX_TOPIC_BYTES)
-        || !valid_event_time(&decision.time)
-        || !valid_place(&decision.place)
-        || !bounded_nonempty(&decision.reason, MAX_REASON_BYTES)
-        || decision.primary_entities.len() > MAX_ENTITIES
-        || decision
-            .primary_entities
-            .iter()
-            .any(|entity| !bounded_nonempty(entity, MAX_ENTITY_BYTES))
-    {
+    if decision.id != expected_id {
         return Err(());
     }
-    Ok(TriageDecision {
+    let decision = TriageDecision {
         keep: decision.keep,
         importance: decision.importance,
         confidence: decision.confidence,
@@ -266,7 +282,28 @@ fn parse_decision(response: &str, expected_id: &str) -> Result<TriageDecision, (
         event_time: decision.time.clone(),
         place: decision.place.clone(),
         reason: decision.reason.clone(),
-    })
+    };
+    validate_decision(&decision)?;
+    Ok(decision)
+}
+
+fn validate_decision(decision: &TriageDecision) -> Result<(), ()> {
+    if decision.importance > 100
+        || !decision.confidence.is_finite()
+        || !(0.0..=1.0).contains(&decision.confidence)
+        || !safe_metadata(&decision.topic, MAX_TOPIC_BYTES)
+        || !valid_event_time(&decision.event_time)
+        || !valid_place(&decision.place)
+        || !safe_metadata(&decision.reason, MAX_REASON_BYTES)
+        || decision.primary_entities.len() > MAX_ENTITIES
+        || decision
+            .primary_entities
+            .iter()
+            .any(|entity| !safe_metadata(entity, MAX_ENTITY_BYTES))
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 fn json_payload(value: &str) -> &str {
@@ -321,6 +358,10 @@ fn valid_place(value: &str) -> bool {
 
 fn valid_extracted_field(value: &str) -> bool {
     value == value.trim() && !value.contains("://") && !value.chars().any(char::is_control)
+}
+
+fn safe_metadata(value: &str, limit: usize) -> bool {
+    bounded_nonempty(value, limit) && valid_extracted_field(value)
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
