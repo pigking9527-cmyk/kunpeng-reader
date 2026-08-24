@@ -116,7 +116,7 @@ jobs:
             postgres_intelligence_e2e \
             postgres_intelligence_route_e2e \
             reader_sync_api; do
-            runner=$(find target/debug/deps -maxdepth 1 -type f -name "${stem}-*" -perm -111 | sort | head -n 1)
+            runner=$(find server/reader-sync-api-rs/target/debug/deps -maxdepth 1 -type f -name "${stem}-*" -perm -111 | sort | head -n 1)
             test -n "$runner"
             name="${stem}.runner"
             install -m 0755 "$runner" "target/sync-api-v5-e2e-runners/$name"
