@@ -28,6 +28,12 @@ function formatRun(report) {
   if (!report) return "尚无运行记录";
   return `${report.outcome || "已完成"} · 采集 ${report.collected || 0} · 初筛 ${report.triaged || 0} · 综合 ${report.processed || 0} · 发布 ${report.publication || "未发布"}`;
 }
+function formatAuditRun(auditRun) {
+  if (!auditRun) return "尚无运行记录";
+  const status = auditRun.status === "interrupted" ? "已中断" : auditRun.status === "running" ? "运行中" : auditRun.status === "completed" ? "已完成" : auditRun.status || "未知";
+  const stage = auditRun.currentStage ? ` · ${stageLabel(auditRun.currentStage)}` : "";
+  return `${status}${stage}`;
+}
 const stageLabels = {
   preparing: "准备本机处理",
   collection: "采集来源元数据",
@@ -62,7 +68,7 @@ function render(status) {
   byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；${status.awaitingFullTextCount} 篇阻塞模型判断，另有 ${status.historicalBackfillCount} 篇历史归档待补全。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
   byId("triage-detail").textContent = `待初筛 ${status.readyForTriageCount} 篇；已完成关系判断、等待综合 ${status.readyForEditorialCount} 篇。`;
   byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件；发布状态由登录账户的主机配对决定。`;
-  runSummary.textContent = formatRun(status.lastRun);
+  runSummary.textContent = status.auditRun ? formatAuditRun(status.auditRun) : formatRun(status.lastRun);
   const rows = Array.isArray(status.auditSummary) ? status.auditSummary : [];
   if (!rows.length) { audit.className = "audit-empty"; audit.textContent = "尚无审计摘要。执行一轮处理后会显示各阶段的聚合结果。"; return; }
   audit.className = "audit"; audit.replaceChildren(...rows.map((row) => {
@@ -70,7 +76,8 @@ function render(status) {
     const label = document.createElement("strong"); label.textContent = stageLabel(String(row.stage || ""));
     const value = document.createElement("span");
     const phase = document.createElement("b"); phase.textContent = String(row.status || "未知");
-    value.replaceChildren(phase, document.createTextNode(` · ${Number(row.count) || 0} 项`));
+    const unit = row.unit === "stage_invocations" ? "次调用" : "项";
+    value.replaceChildren(phase, document.createTextNode(` · ${Number(row.count) || 0} ${unit}`));
     item.replaceChildren(label, value); return item;
   }));
 }
