@@ -197,6 +197,14 @@ struct FullTextBackfillHealth {
     delayed_count: u64,
     /// Number of publisher circuits currently protecting a remote host.
     limited_host_count: u64,
+    /// Aggregate publisher health derived from the durable circuit table.  The
+    /// dashboard intentionally exposes only counts: a source may be public,
+    /// but listing its host here would turn a process-health view into a feed
+    /// inventory and could reveal a user's configured subscriptions.
+    known_source_count: u64,
+    healthy_source_count: u64,
+    degraded_source_count: u64,
+    circuit_open_source_count: u64,
     /// Fixed, operator-safe categories from the most recent persisted retry
     /// state. Zero categories remain present so dashboard clients do not need
     /// to infer the accepted failure vocabulary from raw worker errors.
@@ -1347,6 +1355,30 @@ fn full_text_backfill_health(connection: &Connection, now_millis: i64) -> FullTe
                 |row| row.get::<_, u64>(0),
             )
             .unwrap_or(0);
+        // Older pre-circuit catalogs can have the table but not the newer
+        // failure-count columns.  A failed read must leave this optional
+        // operator projection at zero rather than making status unavailable.
+        if let Ok((known, healthy, degraded, circuit_open)) = connection.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN failure_count<=0 THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN failure_count>0 AND next_allowed_at<=?1 THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN next_allowed_at>?1 THEN 1 ELSE 0 END),0)
+               FROM intelligence_content_backfill_hosts",
+            [now_millis],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                ))
+            },
+        ) {
+            health.known_source_count = known;
+            health.healthy_source_count = healthy;
+            health.degraded_source_count = degraded;
+            health.circuit_open_source_count = circuit_open;
+        }
     }
     if has_article_state {
         let mut failure_counts = match connection.prepare(
@@ -2136,7 +2168,7 @@ mod tests {
                      last_failure_reason TEXT
                  );
                  CREATE TABLE intelligence_content_backfill_hosts(
-                     host TEXT PRIMARY KEY,next_allowed_at INTEGER NOT NULL
+                     host TEXT PRIMARY KEY,next_allowed_at INTEGER NOT NULL,failure_count INTEGER NOT NULL
                  );
                  INSERT INTO intelligence_articles(article_id,fingerprint,url) VALUES
                     ('ready','one','https://redacted.invalid/ready'),
@@ -2150,8 +2182,8 @@ mod tests {
                     ('delayed',1,2000,'network_request_failed'),
                     ('legacy-extraction',1,0,'body_missing_or_paywall'),
                     ('legacy-http',1,0,'http_status_rejected');
-                 INSERT INTO intelligence_content_backfill_hosts(host,next_allowed_at) VALUES
-                    ('redacted.invalid',2000),('available.invalid',0);",
+                 INSERT INTO intelligence_content_backfill_hosts(host,next_allowed_at,failure_count) VALUES
+                    ('redacted.invalid',2000,3),('available.invalid',0,0),('degraded.invalid',0,2);",
             )
             .unwrap();
 
@@ -2160,6 +2192,10 @@ mod tests {
         assert_eq!(health.retryable_now_count, 4);
         assert_eq!(health.delayed_count, 1);
         assert_eq!(health.limited_host_count, 1);
+        assert_eq!(health.known_source_count, 3);
+        assert_eq!(health.healthy_source_count, 1);
+        assert_eq!(health.degraded_source_count, 1);
+        assert_eq!(health.circuit_open_source_count, 1);
         let count = |category| {
             health
                 .failure_categories

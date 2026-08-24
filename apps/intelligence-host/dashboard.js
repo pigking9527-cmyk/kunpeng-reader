@@ -106,7 +106,7 @@ function render(status) {
     metric("永久归档", status.articleCount, `完整正文 ${status.fullTextCount} 篇`),
     metric("待补全文", waitingFullText, "有公开来源、等待归档正文"),
     metric("文章级可重试", fullTextHealth.retryableNowCount || 0, `退避中 ${fullTextHealth.delayedCount || 0} 篇`),
-    metric("受限来源", fullTextHealth.limitedHostCount || 0, "受保护熔断中；不显示来源名称"),
+    metric("来源健康", `${fullTextHealth.healthySourceCount || 0}/${fullTextHealth.knownSourceCount || 0}`, `降级 ${fullTextHealth.degradedSourceCount || 0} · 熔断 ${fullTextHealth.circuitOpenSourceCount || 0}`),
     metric("模型候选总数", status.queuedCount, `其中待 8B 初筛 ${status.readyForTriageCount} 篇`),
     metric("历史归档补全", status.historicalBackfillCount, "不进入当前模型队列"),
     metric("待关系判断", status.readyForRelationCount, "已完成初筛，等待 8B 关系核验"),
@@ -114,7 +114,7 @@ function render(status) {
     metric("保留", status.keptCount, `已过滤 ${status.filteredCount} 篇`),
     metric("主机组件", status.workerAvailable ? 1 : 0, status.configurationReady ? "来源与模型已配置" : "配置尚未完成"),
   );
-  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；${waitingFullText} 篇等待全文补全，文章级可重试 ${fullTextHealth.retryableNowCount || 0} 篇、退避中 ${fullTextHealth.delayedCount || 0} 篇，受限来源 ${fullTextHealth.limitedHostCount || 0} 个。失败分类：${formatBackfillFailures(fullTextHealth)}。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
+  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；${waitingFullText} 篇等待全文补全，文章级可重试 ${fullTextHealth.retryableNowCount || 0} 篇、退避中 ${fullTextHealth.delayedCount || 0} 篇。已观测来源 ${fullTextHealth.knownSourceCount || 0} 个：健康 ${fullTextHealth.healthySourceCount || 0}、降级 ${fullTextHealth.degradedSourceCount || 0}、熔断 ${fullTextHealth.circuitOpenSourceCount || 0}；不显示来源名称。失败分类：${formatBackfillFailures(fullTextHealth)}。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
   byId("triage-detail").textContent = `待初筛 ${status.readyForTriageCount} 篇；已完成关系判断、等待综合 ${status.readyForEditorialCount} 篇。`;
   byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件；发布状态由登录账户的主机配对决定。`;
   runSummary.textContent = status.auditRun ? formatAuditRun(status.auditRun) : formatRun(status.lastRun);
