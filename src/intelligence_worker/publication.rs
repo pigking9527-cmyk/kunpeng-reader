@@ -34,7 +34,10 @@ pub(crate) struct PublisherConfiguration {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PublishOutcome {
-    NotConfigured,
+    /// The immutable local daily draft exists and can be published unchanged
+    /// after the workstation is paired.  This is intentionally distinct from
+    /// an outbound publication acknowledgement.
+    PreparedLocally,
     NoCompletedEvents,
     AlreadyPublished,
     Published,
@@ -91,15 +94,12 @@ pub(crate) fn configuration_from_parts(
     })
 }
 
-/// Finalizes yesterday's UTC daily package.  A day is recorded locally only
-/// after the server's immutable publication completion succeeds.
+/// Finalizes yesterday's UTC daily package locally first, then publishes that
+/// exact immutable draft when the operator has paired a publisher capability.
 pub(crate) fn publish_completed_daily(
     configuration: Option<&PublisherConfiguration>,
     catalog: &Path,
 ) -> PublishOutcome {
-    let Some(configuration) = configuration else {
-        return PublishOutcome::NotConfigured;
-    };
     let Some(day) = Utc::now().date_naive().checked_sub_days(Days::new(1)) else {
         return PublishOutcome::Failed;
     };
@@ -122,11 +122,11 @@ pub(crate) fn preview_daily_bundle(catalog: &Path, day: NaiveDate) -> DailyPrevi
 }
 
 fn publish_day(
-    configuration: &PublisherConfiguration,
+    configuration: Option<&PublisherConfiguration>,
     catalog: &Path,
     day: NaiveDate,
 ) -> PublishOutcome {
-    let draft = match build_daily_bundle_at(catalog, day) {
+    let draft = match load_or_prepare_daily_draft(catalog, day) {
         Ok(Some(value)) => value,
         Ok(None) => return PublishOutcome::NoCompletedEvents,
         Err(()) => return PublishOutcome::Failed,
@@ -135,7 +135,7 @@ fn publish_day(
         Ok(value) => value,
         Err(_) => return PublishOutcome::Failed,
     };
-    if ensure_publication_log(&connection).is_err() {
+    if ensure_publication_storage(&connection).is_err() {
         return PublishOutcome::Failed;
     }
     let existing = connection
@@ -152,6 +152,9 @@ fn publish_day(
         Ok(None) => {}
         Err(_) => return PublishOutcome::Failed,
     }
+    let Some(configuration) = configuration else {
+        return PublishOutcome::PreparedLocally;
+    };
     let transport = HttpsPublisher;
     for asset in &draft.assets {
         if transport
@@ -190,7 +193,7 @@ fn publish_day(
     PublishOutcome::Published
 }
 
-fn ensure_publication_log(connection: &Connection) -> Result<(), ()> {
+fn ensure_publication_storage(connection: &Connection) -> Result<(), ()> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS intelligence_daily_publications (
@@ -198,9 +201,84 @@ fn ensure_publication_log(connection: &Connection) -> Result<(), ()> {
                  publication_id TEXT NOT NULL,
                  bundle_sha256 TEXT NOT NULL,
                  published_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS intelligence_daily_drafts (
+                 day TEXT PRIMARY KEY,
+                 bundle_json TEXT NOT NULL,
+                 bundle_sha256 TEXT NOT NULL,
+                 prepared_at INTEGER NOT NULL
              );",
         )
         .map_err(|_| ())
+}
+
+/// Stores a local, immutable snapshot before any credential or network call.
+/// The permanent archive remains authoritative for assets, while the package
+/// body, references and issue timestamp are frozen per day.  Later runs reuse
+/// this exact JSON so a delayed pairing cannot silently publish a changed day.
+fn load_or_prepare_daily_draft(
+    catalog: &Path,
+    day: NaiveDate,
+) -> Result<Option<PublicationDraft>, ()> {
+    let fresh = match build_daily_bundle_at(catalog, day)? {
+        Some(draft) => draft,
+        None => return Ok(None),
+    };
+    let connection = Connection::open(catalog).map_err(|_| ())?;
+    ensure_publication_storage(&connection)?;
+    let existing = connection
+        .query_row(
+            "SELECT bundle_json,bundle_sha256 FROM intelligence_daily_drafts WHERE day=?1",
+            [&fresh.day],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    let Some((bundle_json, canonical_sha256)) = existing else {
+        connection
+            .execute(
+                "INSERT INTO intelligence_daily_drafts(day,bundle_json,bundle_sha256,prepared_at)
+                 VALUES(?1,?2,?3,strftime('%s','now')*1000)",
+                params![fresh.day, fresh.bundle.to_string(), fresh.canonical_sha256],
+            )
+            .map_err(|_| ())?;
+        return Ok(Some(fresh));
+    };
+    let bundle: Value = serde_json::from_str(&bundle_json).map_err(|_| ())?;
+    if !valid_sha256(&canonical_sha256)
+        || bundle
+            .get("bundleSha256")
+            .and_then(Value::as_str)
+            .filter(|value| *value == canonical_sha256)
+            .is_none()
+        || sha256_hex(&canonical_without_bundle_sha(&bundle)?) != canonical_sha256
+    {
+        return Err(());
+    }
+    // Archive assets are content-addressed and immutable.  Make sure every
+    // declaration in the persisted bundle is still present before uploading;
+    // otherwise fail closed rather than rebuilding a different day package.
+    let expected_assets = bundle
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or(())?
+        .iter()
+        .filter_map(|asset| asset.get("sha256").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    let available_assets = fresh
+        .assets
+        .iter()
+        .map(|asset| asset.sha256.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if !expected_assets.is_subset(&available_assets) {
+        return Err(());
+    }
+    Ok(Some(PublicationDraft {
+        day: fresh.day,
+        bundle,
+        canonical_sha256,
+        assets: fresh.assets,
+    }))
 }
 
 fn build_daily_bundle_at(catalog: &Path, day: NaiveDate) -> Result<Option<PublicationDraft>, ()> {
@@ -857,6 +935,43 @@ mod tests {
                 assets: 0
             }
         );
+        let day = NaiveDate::from_ymd_opt(2030, 1, 2).unwrap();
+        assert_eq!(
+            publish_day(None, &path, day),
+            PublishOutcome::PreparedLocally
+        );
+        let stored_sha: String = c
+            .query_row(
+                "SELECT bundle_sha256 FROM intelligence_daily_drafts WHERE day='2030-01-02'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        c.execute(
+            "UPDATE intelligence_events SET title='后续变更不覆盖日包' WHERE event_id='event-a'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            publish_day(None, &path, day),
+            PublishOutcome::PreparedLocally
+        );
+        let draft_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_daily_drafts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let persisted_sha: String = c
+            .query_row(
+                "SELECT bundle_sha256 FROM intelligence_daily_drafts WHERE day='2030-01-02'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(draft_count, 1);
+        assert_eq!(persisted_sha, stored_sha);
         drop(c);
         std::fs::remove_dir_all(root).unwrap();
     }

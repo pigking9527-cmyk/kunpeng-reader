@@ -837,7 +837,7 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
         };
         let result = publication::publish_completed_daily(publisher.as_ref(), &path);
         let outcome = match result {
-            publication::PublishOutcome::NotConfigured => "publisher_not_paired",
+            publication::PublishOutcome::PreparedLocally => "daily_prepared_locally",
             publication::PublishOutcome::NoCompletedEvents => "daily_events_unavailable",
             publication::PublishOutcome::AlreadyPublished => "daily_already_published",
             publication::PublishOutcome::Published => "daily_published",

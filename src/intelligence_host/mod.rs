@@ -1311,7 +1311,8 @@ fn run_once_with_audit(
             }
             // The worker itself reads an optional DPAPI-protected publisher pairing.
             // This control plane forwards neither a token nor a server address; an
-            // unpaired workstation simply reports `publisher_not_paired`.
+            // unpaired workstation first freezes a local daily draft and reports
+            // `daily_prepared_locally` instead of attempting any outbound call.
             begin_audit_stage(audit_path, audit, "publication")?;
             let publication = child_output(configuration, "--publish-daily-once", TRIAGE_TIMEOUT)?;
             report.publication = text(&publication, "outcome");
