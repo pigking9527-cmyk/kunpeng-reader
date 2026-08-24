@@ -37,5 +37,12 @@ done
 grep -Fq 'sqlx::migrate!("./migrations")' "$service_dir/src/lib.rs" \
   || fail "the application no longer embeds the migration directory"
 
-cargo +1.97.1 metadata --manifest-path "$service_dir/Cargo.toml" --locked --no-deps --format-version 1 >/dev/null
+if command -v cargo >/dev/null 2>&1; then
+  cargo +1.97.1 metadata --manifest-path "$service_dir/Cargo.toml" --locked --no-deps --format-version 1 >/dev/null
+else
+  # Disaster recovery and logical restore hosts deliberately need not carry a
+  # Rust toolchain. The release/build gate performs the locked Cargo check;
+  # this recovery gate still proves the catalog is contiguous and embedded.
+  printf '%s\n' 'Cargo unavailable; skipped build-manifest check after migration catalog verification.' >&2
+fi
 printf 'Migration static check passed for %d contiguous SQL migrations.\n' "${#migrations[@]}"
