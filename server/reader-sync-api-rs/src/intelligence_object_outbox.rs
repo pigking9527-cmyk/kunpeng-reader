@@ -614,14 +614,26 @@ mod tests {
             .expect("enqueue durable object write");
         tx.commit().await.expect("commit object fixture");
 
-        assert!(process_once(&state, "real-s3-e2e-worker").await);
-        let (backend, object_key): (String, Option<String>) = sqlx::query_as(
-            "SELECT storage_backend,object_key FROM intelligence_assets_v1 WHERE sha256=$1",
-        )
-        .bind(&sha256)
-        .fetch_one(&state.pool)
-        .await
-        .expect("read promoted asset");
+        // The protected database may retain unrelated queued writes from a
+        // deliberately interrupted prior rehearsal. A real worker processes
+        // them FIFO, so drive the bounded worker until *this* SHA has been
+        // promoted instead of assuming the next lease belongs to this test.
+        let mut promoted = None;
+        for _ in 0..64 {
+            assert!(process_once(&state, "real-s3-e2e-worker").await);
+            let row: (String, Option<String>) = sqlx::query_as(
+                "SELECT storage_backend,object_key FROM intelligence_assets_v1 WHERE sha256=$1",
+            )
+            .bind(&sha256)
+            .fetch_one(&state.pool)
+            .await
+            .expect("read promoted asset");
+            if row.0 == "s3" {
+                promoted = Some(row);
+                break;
+            }
+        }
+        let (backend, object_key) = promoted.expect("outbox promoted the fixture within its bound");
         assert_eq!(backend, "s3");
         let object_key = object_key.expect("promoted asset object key");
         let object = state
