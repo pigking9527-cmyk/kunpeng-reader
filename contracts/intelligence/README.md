@@ -31,8 +31,9 @@
 
 - 除 publisher job 领取外，所有端点都需要 Bearer 身份；未登录 `401`，已登录但
   `intelligence_feed_enabled=false` 为 `403 INTELLIGENCE_ACCESS_DENIED`。
-- 公共正文全局一份；`preferences`、delivery、read/favorite/hide 和 archive request
-  必须按账号隔离。
+- 公共正文全局一份；`preferences`、delivery 的确认状态与设备游标，以及 archive
+  request 必须按账号隔离。read/favorite/hide 属于客户端本地阅读状态，不是本 V1
+  服务端分发协议的接口或持久化内容。
 - 发布端只接受安装绑定、可撤销的 capability credential。普通用户 token 即使有
   资讯阅读权限，也必须得到 `403 INTELLIGENCE_PUBLISHER_REQUIRED`。
 - 每个写操作携带 `Idempotency-Key`。同 key 与同请求哈希返回原收据；同 key 不同
