@@ -43,6 +43,10 @@ const MAX_SOURCES: usize = 128;
 const MAX_IMAGES_PER_ARTICLE: usize = 12;
 const MAX_VIDEOS_PER_ARTICLE: usize = 12;
 const MAX_PUBLIC_REDIRECTS: usize = 5;
+/// A Google News wrapper is only inspected far enough to find an explicit
+/// public publisher URL.  It is not article evidence and must never turn an
+/// unbounded wrapper document into a second extraction workload.
+const MAX_GOOGLE_WRAPPER_HTML_SCAN_BYTES: usize = 256 * 1024;
 /// A background round must make meaningful progress through a historical
 /// archive, but it must not turn a single host into an unbounded crawler.
 /// Fetches are split into origin-fair waves below: at most one request to an
@@ -774,8 +778,9 @@ fn follow_public_article_redirects(
     // used only if that chain finishes on a Google wrapper page rather than
     // on the publisher's public HTTPS response.
     let google_news_legacy_target = google_news_legacy_public_target(initial_url);
+    let mut google_news_wrapper_resolved = false;
     for redirect_count in 0..=MAX_PUBLIC_REDIRECTS {
-        let response = agent
+        let mut response = agent
             .get(&current)
             .header("User-Agent", USER_AGENT)
             .header("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1")
@@ -784,13 +789,26 @@ fn follow_public_article_redirects(
         let status = response.status().as_u16();
         if !(300..400).contains(&status) {
             if google_news_wrapper && is_news_google_url(&current) {
+                if google_news_wrapper_resolved {
+                    return Err("google_news_target_unresolved");
+                }
                 // Older Google News RSS article IDs encode the public target
-                // in their protobuf payload.  This is intentionally an
-                // in-memory fetch target only: `article.url` is never
-                // replaced, so the original RSS source remains auditable.
+                // in their protobuf payload.  Newer wrappers sometimes expose
+                // the same public target in their ordinary HTML instead.  Both
+                // paths are fetch-only: `article.url` remains the original RSS
+                // wrapper for durable identity and audit.
+                let html_target = if google_news_legacy_target.is_none() {
+                    let html = google_news_wrapper_html(&mut response)
+                        .map_err(|_| "google_news_target_unresolved")?;
+                    google_news_public_target_from_wrapper_html(&current, &html)
+                } else {
+                    None
+                };
                 current = google_news_legacy_target
                     .clone()
+                    .or(html_target)
                     .ok_or("google_news_target_unresolved")?;
+                google_news_wrapper_resolved = true;
                 continue;
             }
             return Ok(response);
@@ -1139,6 +1157,133 @@ fn google_news_legacy_public_target(value: &str) -> Option<String> {
         .unwrap_or(decoded.len() - start);
     let target = std::str::from_utf8(&decoded[start..start + end]).ok()?;
     public_https_fetch_url(target).ok()
+}
+
+/// Resolve an ordinary public publisher target from a Google News wrapper
+/// document without invoking private Google endpoints.  Only canonical links,
+/// HTML refresh targets and a bounded literal HTTPS fallback are considered.
+/// The result is revalidated as a non-Google public HTTPS address before the
+/// caller fetches it through the normal redirect guard.
+fn google_news_public_target_from_wrapper_html(base: &str, html: &str) -> Option<String> {
+    if !is_news_google_url(base) {
+        return None;
+    }
+    let mut scan_len = html.len().min(MAX_GOOGLE_WRAPPER_HTML_SCAN_BYTES);
+    while scan_len > 0 && !html.is_char_boundary(scan_len) {
+        scan_len -= 1;
+    }
+    let html = &html[..scan_len];
+
+    for link in html_elements(html, "link") {
+        let canonical = element_attribute(link, "rel").is_some_and(|rel| {
+            rel.split_ascii_whitespace()
+                .any(|value| value.eq_ignore_ascii_case("canonical"))
+        });
+        if canonical {
+            if let Some(target) = element_attribute(link, "href")
+                .and_then(|value| google_news_public_target_from_value(base, &value))
+            {
+                return Some(target);
+            }
+        }
+    }
+
+    for meta in html_elements(html, "meta") {
+        let refresh = element_attribute(meta, "http-equiv")
+            .is_some_and(|value| value.eq_ignore_ascii_case("refresh"));
+        if !refresh {
+            continue;
+        }
+        let Some(content) = element_attribute(meta, "content") else {
+            continue;
+        };
+        if let Some(target) = google_news_refresh_target(&content)
+            .and_then(|value| google_news_public_target_from_value(base, value))
+        {
+            return Some(target);
+        }
+    }
+
+    google_news_public_https_literal(base, html)
+}
+
+fn google_news_wrapper_html(
+    response: &mut ureq::http::Response<ureq::Body>,
+) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take((MAX_GOOGLE_WRAPPER_HTML_SCAN_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "google_wrapper_read_failed".to_string())?;
+    if bytes.len() > MAX_GOOGLE_WRAPPER_HTML_SCAN_BYTES {
+        return Err("google_wrapper_too_large".into());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn google_news_public_target_from_value(base: &str, value: &str) -> Option<String> {
+    let target = absolute_public_https_url(base, value)?;
+    (!is_news_google_url(&target)).then_some(target)
+}
+
+fn google_news_refresh_target(content: &str) -> Option<&str> {
+    let lower = content.to_ascii_lowercase();
+    let marker = "url";
+    let mut cursor = 0;
+    while let Some(relative) = lower[cursor..].find(marker) {
+        let start = cursor + relative;
+        let before = lower.as_bytes().get(start.wrapping_sub(1)).copied();
+        let after = lower.as_bytes().get(start + marker.len()).copied();
+        if before.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            || after
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            cursor = start + marker.len();
+            continue;
+        }
+        let remainder = content[start + marker.len()..].trim_start();
+        let Some(value) = remainder.strip_prefix('=') else {
+            cursor = start + marker.len();
+            continue;
+        };
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.split('"').next())
+            .or_else(|| {
+                value
+                    .strip_prefix('\'')
+                    .and_then(|value| value.split('\'').next())
+            })
+            .unwrap_or_else(|| value.split_ascii_whitespace().next().unwrap_or_default());
+        return (!value.is_empty()).then_some(value);
+    }
+    None
+}
+
+fn google_news_public_https_literal(base: &str, html: &str) -> Option<String> {
+    let mut cursor = 0;
+    while let Some(relative) = html[cursor..].find("https://") {
+        let start = cursor + relative;
+        let end = html[start..]
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, '\'' | '"' | '<' | '>' | '\\')
+            })
+            .map_or(html.len(), |length| start + length);
+        let candidate = html[start..end].trim_end_matches(|character: char| {
+            matches!(character, ')' | ']' | '}' | ',' | ';' | '.')
+        });
+        if let Some(target) = (!candidate.is_empty())
+            .then(|| google_news_public_target_from_value(base, candidate))
+            .flatten()
+        {
+            return Some(target);
+        }
+        cursor = start + "https://".len();
+    }
+    None
 }
 
 fn fetch_public_image(
@@ -2587,6 +2732,53 @@ mod tests {
             google_news_legacy_public_target("https://example.test/rss/articles/token").is_none()
         );
         assert!(google_news_rss_article_token("https://news.google.com/read/token").is_none());
+    }
+
+    #[test]
+    fn google_news_wrapper_html_resolves_only_explicit_public_publisher_targets() {
+        let base = "https://news.google.com/rss/articles/opaque-token";
+        assert_eq!(
+            google_news_public_target_from_wrapper_html(
+                base,
+                r#"<html><head><link rel="canonical" href="https://publisher.example.test/story?a=1"></head></html>"#,
+            )
+            .as_deref(),
+            Some("https://publisher.example.test/story?a=1")
+        );
+        assert_eq!(
+            google_news_public_target_from_wrapper_html(
+                base,
+                r#"<meta http-equiv="refresh" content="0; URL='https://publisher.example.test/next'">"#,
+            )
+            .as_deref(),
+            Some("https://publisher.example.test/next")
+        );
+        assert_eq!(
+            google_news_public_target_from_wrapper_html(
+                base,
+                r#"<script>const wrapper = "https://news.google.com/ignored";</script><p>https://publisher.example.test/fallback</p>"#,
+            )
+            .as_deref(),
+            Some("https://publisher.example.test/fallback")
+        );
+    }
+
+    #[test]
+    fn google_news_wrapper_html_refuses_unsafe_or_google_targets() {
+        let base = "https://news.google.com/rss/articles/opaque-token";
+        for html in [
+            r#"<link rel="canonical" href="http://publisher.example.test/insecure">"#,
+            r#"<meta http-equiv="refresh" content="0; url=https://127.0.0.1/private">"#,
+            r#"<link rel="canonical" href="https://news.google.com/read/another-wrapper">"#,
+            r#"<p>https://localhost/private</p>"#,
+        ] {
+            assert!(google_news_public_target_from_wrapper_html(base, html).is_none());
+        }
+        assert!(google_news_public_target_from_wrapper_html(
+            "https://publisher.example.test/not-a-google-wrapper",
+            r#"<link rel="canonical" href="https://other.example.test/story">"#,
+        )
+        .is_none());
     }
 
     #[test]
