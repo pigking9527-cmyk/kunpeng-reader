@@ -295,6 +295,197 @@ pub(crate) fn ensure_catalog_schema_at(catalog_path: &Path) -> Result<(), String
     ensure_catalog_schema(&connection)
 }
 
+/// Move an already verified complete revision to a refreshed collected-record
+/// fingerprint when the collector supplied the exact same canonical body.
+///
+/// RSS validators occasionally change without changing the public article.
+/// The article row must still advance to the refreshed record fingerprint so
+/// collection metadata stays truthful, but rewriting its immutable CAS body
+/// would create needless evidence churn.  This function performs the catalog
+/// portion of that hand-off in one SQLite transaction: the existing paragraph
+/// and media provenance is copied to a new immutable revision, while the text
+/// and HTML/image CAS objects remain untouched.
+///
+/// `false` means that no matching current complete revision exists (or its
+/// canonical body differs), so the caller must persist the newly fetched
+/// evidence normally instead of assuming that it is a validator-only update.
+pub(crate) fn advance_current_complete_content_fingerprint_at(
+    catalog_path: &Path,
+    article_id: &str,
+    previous_fingerprint: &str,
+    refreshed_fingerprint: &str,
+    expected_text: &str,
+) -> Result<bool, String> {
+    let article_id = required(article_id, "文章 ID", 200)?;
+    let previous_fingerprint = required(previous_fingerprint, "旧文章记录指纹", 200)?;
+    let refreshed_fingerprint = required(refreshed_fingerprint, "新文章记录指纹", 200)?;
+    if previous_fingerprint == refreshed_fingerprint {
+        return Ok(false);
+    }
+    let expected_text = required(
+        &canonical_article_text(expected_text),
+        "完整正文",
+        MAX_TEXT_BYTES,
+    )?;
+    let expected_text_sha256 = sha256_hex(expected_text.as_bytes());
+
+    let mut connection =
+        Connection::open(catalog_path).map_err(|error| format!("打开本机情报档案失败：{error}"))?;
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
+        .map_err(|error| error.to_string())?;
+    ensure_catalog_schema(&connection)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let current_fingerprint = transaction
+        .query_row(
+            "SELECT fingerprint FROM intelligence_articles WHERE article_id=?1",
+            [&article_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if current_fingerprint.as_deref() != Some(refreshed_fingerprint.as_str()) {
+        return Err("文章记录已再次更新，拒绝推进旧正文证据".into());
+    }
+
+    let previous = transaction
+        .query_row(
+            "SELECT version_sha256,text_sha256,html_sha256,body_status,incomplete_reason
+             FROM intelligence_article_content_versions
+             WHERE article_id=?1 AND record_fingerprint=?2
+               AND body_status='complete' AND is_current=1",
+            params![article_id, previous_fingerprint],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((previous_version, text_sha256, html_sha256, body_status, incomplete_reason)) =
+        previous
+    else {
+        transaction.commit().map_err(|error| error.to_string())?;
+        return Ok(false);
+    };
+    if text_sha256 != expected_text_sha256 {
+        transaction.commit().map_err(|error| error.to_string())?;
+        return Ok(false);
+    }
+
+    let media = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT kind,image_sha256,video_url,poster_sha256,alt,caption,credit,source_url
+                 FROM intelligence_article_media
+                 WHERE article_id=?1 AND version_sha256=?2 ORDER BY media_index ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![article_id, previous_version], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    let mut version_hasher = Sha256::new();
+    version_hasher.update(refreshed_fingerprint.as_bytes());
+    version_hasher.update([0]);
+    version_hasher.update(text_sha256.as_bytes());
+    version_hasher.update([0]);
+    version_hasher.update(html_sha256.as_deref().unwrap_or_default().as_bytes());
+    for (kind, image_sha256, _, _, alt, caption, credit, source_url) in &media {
+        if kind != "image" {
+            continue;
+        }
+        let image_sha256 = image_sha256.as_deref().ok_or("本机图片档案缺少内容哈希")?;
+        version_hasher.update([0]);
+        version_hasher.update(image_sha256.as_bytes());
+        for value in [alt, caption, credit, source_url] {
+            version_hasher.update([0]);
+            version_hasher.update(value.as_deref().unwrap_or_default().as_bytes());
+        }
+    }
+    for (kind, _, video_url, poster_sha256, _, _, _, _) in &media {
+        if kind != "video" {
+            continue;
+        }
+        let video_url = video_url.as_deref().ok_or("本机视频档案缺少地址")?;
+        version_hasher.update([0]);
+        version_hasher.update(video_url.as_bytes());
+        version_hasher.update([0]);
+        version_hasher.update(poster_sha256.as_deref().unwrap_or_default().as_bytes());
+    }
+    let refreshed_version = sha256_hex(&version_hasher.finalize());
+
+    transaction
+        .execute(
+            "UPDATE intelligence_article_content_versions SET is_current=0 WHERE article_id=?1",
+            [&article_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO intelligence_article_content_versions(article_id,record_fingerprint,version_sha256,text_sha256,html_sha256,body_status,incomplete_reason,is_current,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)
+             ON CONFLICT(article_id,version_sha256) DO UPDATE SET
+               record_fingerprint=excluded.record_fingerprint,text_sha256=excluded.text_sha256,
+               html_sha256=excluded.html_sha256,body_status=excluded.body_status,
+               incomplete_reason=excluded.incomplete_reason,is_current=1",
+            params![article_id, refreshed_fingerprint, refreshed_version, text_sha256, html_sha256,
+              body_status, incomplete_reason, now_ms()],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM intelligence_article_paragraphs WHERE article_id=?1 AND version_sha256=?2",
+            params![article_id, refreshed_version],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO intelligence_article_paragraphs(article_id,version_sha256,paragraph_id,ordinal,level,text_sha256,text_path)
+             SELECT article_id,?3,paragraph_id,ordinal,level,text_sha256,text_path
+             FROM intelligence_article_paragraphs WHERE article_id=?1 AND version_sha256=?2",
+            params![article_id, previous_version, refreshed_version],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM intelligence_article_media WHERE article_id=?1 AND version_sha256=?2",
+            params![article_id, refreshed_version],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO intelligence_article_media(article_id,version_sha256,media_index,kind,paragraph_index,image_sha256,original_path,preview_640_path,preview_1280_path,mime,video_url,poster_sha256,alt,caption,credit,source_url)
+             SELECT article_id,?3,media_index,kind,paragraph_index,image_sha256,original_path,preview_640_path,preview_1280_path,mime,video_url,poster_sha256,alt,caption,credit,source_url
+             FROM intelligence_article_media WHERE article_id=?1 AND version_sha256=?2",
+            params![article_id, previous_version, refreshed_version],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn archive_root(catalog_path: &Path) -> Result<&Path, String> {
     catalog_path.parent().ok_or("本机情报档案目录无效".into())
 }

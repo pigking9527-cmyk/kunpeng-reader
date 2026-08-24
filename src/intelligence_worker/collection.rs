@@ -1559,7 +1559,7 @@ fn upsert_article(
     fingerprint: &str,
     article: &CollectedArticle,
     normalized: &str,
-) -> Result<(), ()> {
+) -> Result<Option<String>, ()> {
     let mut connection = Connection::open(path).map_err(|_| ())?;
     ensure_article_schema(&connection)?;
     let tx = connection.transaction().map_err(|_| ())?;
@@ -1571,6 +1571,10 @@ fn upsert_article(
         )
         .optional()
         .map_err(|_| ())?;
+    let previous_fingerprint = existing
+        .as_deref()
+        .filter(|existing| *existing != fingerprint)
+        .map(str::to_owned);
     let now = Utc::now().timestamp_millis();
     if existing.as_deref() == Some(fingerprint) {
         tx.execute(
@@ -1619,7 +1623,8 @@ fn upsert_article(
         params![article_id, article.title.trim(), safe_text(&article.summary, 64 * 1024), body,
           sparse_terms(&format!("{} {}", article.title, article.summary))],
     ).map_err(|_| ())?;
-    tx.commit().map_err(|_| ())
+    tx.commit().map_err(|_| ())?;
+    Ok(previous_fingerprint)
 }
 
 fn paragraphs(body: &str) -> Vec<ArchiveParagraphInput> {
@@ -1769,12 +1774,36 @@ fn collect_once_at(
             result.duplicates += 1;
             continue;
         }
-        upsert_article(path, &article_id, &fingerprint, &article, &normalized)?;
-        if let Some(body) = article
+        let previous_fingerprint =
+            upsert_article(path, &article_id, &fingerprint, &article, &normalized)?;
+        let body = article
             .body
             .as_deref()
-            .and_then(|body| safe_text(body, MAX_TEXT_BYTES))
-        {
+            .and_then(|body| safe_text(body, MAX_TEXT_BYTES));
+        // A validator-only feed refresh may repeat a body but omit the rich
+        // HTML/media evidence.  Move the verified immutable revision instead
+        // of writing a second copy.  If the refresh supplies HTML or media,
+        // persist a fresh revision below so a changed caption, image, or video
+        // can never be discarded merely because the text is unchanged.
+        let advanced_existing_evidence = match (previous_fingerprint.as_deref(), body.as_deref()) {
+            (Some(previous_fingerprint), Some(body)) => {
+                if article.html.is_none() && article.images.is_empty() && article.videos.is_empty()
+                {
+                    content_archive::advance_current_complete_content_fingerprint_at(
+                        path,
+                        &article_id,
+                        previous_fingerprint,
+                        &fingerprint,
+                        body,
+                    )
+                    .map_err(|_| ())?
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if let Some(body) = body.filter(|_| !advanced_existing_evidence) {
             content_archive::persist_article_content_at(
                 path,
                 ArchiveArticleContentInput {
@@ -2635,7 +2664,8 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let catalog = root.join("catalog.sqlite3");
-        let original = item();
+        let mut original = item();
+        original.html = None;
         let normalized = normalized_url(&original.url).unwrap();
         let article_id = article_identity(&original.source_id, &original.guid, &normalized);
         let original_fingerprint = record_fingerprint(&original, &normalized);
@@ -2691,6 +2721,91 @@ mod tests {
             &revised_fingerprint,
         )
         .unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validator_refresh_with_same_body_advances_evidence_without_model_requeue() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-validator-refresh-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let mut original = item();
+        original.html = None;
+        let normalized = normalized_url(&original.url).unwrap();
+        let article_id = article_identity(&original.source_id, &original.guid, &normalized);
+        let original_fingerprint = record_fingerprint(&original, &normalized);
+        assert_eq!(
+            collect_once_at(&catalog, "batch.original", vec![original.clone()])
+                .unwrap()
+                .collected,
+            1
+        );
+        // Establish the durable canonical identity first, as the worker does
+        // before the small-model lease.  The refresh below must become an
+        // alias of that identity and must not require a model service.
+        super::super::processing::reconcile_canonical_content_at(&catalog).unwrap();
+
+        let mut refreshed = original;
+        refreshed.etag = Some("etag-b".into());
+        refreshed.last_modified = Some("Sun, 24 Aug 2026 00:00:00 GMT".into());
+        let refreshed_fingerprint = record_fingerprint(&refreshed, &normalized);
+        assert_ne!(original_fingerprint, refreshed_fingerprint);
+        assert_eq!(
+            collect_once_at(&catalog, "batch.validator-refresh", vec![refreshed])
+                .unwrap()
+                .collected,
+            1
+        );
+
+        let connection = Connection::open(&catalog).unwrap();
+        let current: (String, String, i64) = connection
+            .query_row(
+                "SELECT a.fingerprint,v.record_fingerprint,v.is_current
+                 FROM intelligence_articles a JOIN intelligence_article_content_versions v
+                   ON v.article_id=a.article_id
+                 WHERE a.article_id=?1 AND v.is_current=1",
+                [&article_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            current,
+            (
+                refreshed_fingerprint.clone(),
+                refreshed_fingerprint.clone(),
+                1
+            )
+        );
+        let distinct_text_blobs: i64 = connection
+            .query_row(
+                "SELECT COUNT(DISTINCT text_sha256) FROM intelligence_article_content_versions
+                 WHERE article_id=?1",
+                [&article_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct_text_blobs, 1);
+        drop(connection);
+
+        super::super::processing::reconcile_canonical_content_at(&catalog).unwrap();
+        let connection = Connection::open(&catalog).unwrap();
+        let canonical: (String, String) = connection
+            .query_row(
+                "SELECT canonical_article_id,canonical_fingerprint
+                 FROM intelligence_worker_canonical_aliases
+                 WHERE article_id=?1 AND fingerprint=?2",
+                params![article_id, refreshed_fingerprint],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(canonical, (article_id.clone(), original_fingerprint));
+        drop(connection);
+        let (_, handoff, _) =
+            super::super::claim_one_at(&catalog, "test-validator-refresh").unwrap();
+        assert!(handoff.is_none());
         let _ = fs::remove_dir_all(root);
     }
 

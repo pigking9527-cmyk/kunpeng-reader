@@ -190,6 +190,10 @@ struct RunReport {
     /// fixed code instead of a raw error, so audit and dashboard views remain
     /// useful without retaining article text, provider messages, or URLs.
     relation_failure: String,
+    /// Equivalent bounded diagnostic for the 27B editorial phase.  This keeps
+    /// a complete-but-unpublished item observable without ever persisting the
+    /// provider response, article text, or prompt.
+    editorial_failure: String,
     processed: u64,
     reviewed: u64,
     publication: String,
@@ -1277,7 +1281,9 @@ fn run_once_with_audit(
                         begin_audit_stage(audit_path, audit, "editorial_synthesis")?;
                         let value =
                             child_output(configuration, "--synthesize-once", EDITORIAL_TIMEOUT)?;
-                        match text(&value, "outcome").as_str() {
+                        let editorial_outcome = text(&value, "outcome");
+                        report.editorial_failure = text(&value, "processingFailure");
+                        match editorial_outcome.as_str() {
                             "processed" => {
                                 report.processed += number(&value, "processed");
                                 report.reviewed += number(&value, "reviewed");

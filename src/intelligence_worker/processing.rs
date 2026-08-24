@@ -30,13 +30,20 @@ const DEEP_MODEL_ENV: &str = "KUNPENG_INTELLIGENCE_DEEP_MODEL";
 const DEEP_MODEL_SHA256_ENV: &str = "KUNPENG_INTELLIGENCE_DEEP_MODEL_SHA256";
 
 const PROCESSOR_VERSION: &str = "intelligence-worker-pipeline-v1";
-const CHUNK_PROMPT_VERSION: &str = "fulltext-facts-v1";
+const CHUNK_PROMPT_VERSION: &str = "fulltext-facts-v2";
 const RELATION_PROMPT_VERSION: &str = "relation-judge-v2";
 const REVIEW_PROMPT_VERSION: &str = "qwen-review-v1";
 const SYNTHESIS_PROMPT_VERSION: &str = "structured-synthesis-v1";
 const SCHEMA_VERSION: &str = "intelligence-processing-schema-v1";
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
-const CHUNK_CHARS: usize = 12_000;
+/// The 16 GiB Qwen 27B service uses a 4K context.  This is a byte ceiling
+/// (despite the legacy constant name) because CJK often consumes close to one
+/// token per character.  The former 12 KiB cap could send roughly 4K Chinese
+/// characters *before* JSON framing, the instruction and the response budget,
+/// which made ordinary full-text extraction fail without a durable reason.
+/// 5.6 KiB leaves headroom for the prompt and a 520-token fact response while
+/// every source is still covered by the recursive reduction path below.
+const CHUNK_CHARS: usize = 5_600;
 const MAX_CHUNKS: usize = 256;
 /// Candidate recall is global, then bounded before the expensive reranker.
 /// This is deliberately not a recency window: every current canonical body
@@ -673,18 +680,21 @@ fn process_editorial_once_with<T: ProcessingTransport>(
     let Ok(mut connection) = Connection::open(path) else {
         return ProcessingReport {
             outcome: ProcessingOutcome::Retry,
+            failure_stage: "editorial_catalog_open",
             ..ProcessingReport::default()
         };
     };
     if initialize(&connection).is_err() {
         return ProcessingReport {
             outcome: ProcessingOutcome::Retry,
+            failure_stage: "editorial_catalog_initialize",
             ..ProcessingReport::default()
         };
     }
     if reconcile_canonical_content(&mut connection, path).is_err() {
         return ProcessingReport {
             outcome: ProcessingOutcome::Retry,
+            failure_stage: "editorial_canonical_reconcile",
             ..ProcessingReport::default()
         };
     }
@@ -693,6 +703,7 @@ fn process_editorial_once_with<T: ProcessingTransport>(
         Err(_) => {
             return ProcessingReport {
                 outcome: ProcessingOutcome::Retry,
+                failure_stage: "editorial_article_select",
                 ..ProcessingReport::default()
             }
         }
@@ -705,6 +716,7 @@ fn process_editorial_once_with<T: ProcessingTransport>(
         Err(_) => {
             return ProcessingReport {
                 outcome: ProcessingOutcome::Retry,
+                failure_stage: "editorial_fact_extraction",
                 ..ProcessingReport::default()
             }
         }
@@ -715,6 +727,7 @@ fn process_editorial_once_with<T: ProcessingTransport>(
             return ProcessingReport {
                 outcome: ProcessingOutcome::Retry,
                 chunks: facts.len() as u64,
+                failure_stage: "editorial_relation_load",
                 ..ProcessingReport::default()
             }
         }
@@ -733,11 +746,24 @@ fn process_editorial_once_with<T: ProcessingTransport>(
                 outcome: ProcessingOutcome::Retry,
                 chunks: facts.len() as u64,
                 judged: relations.len() as u64,
+                failure_stage: "editorial_materialize",
                 ..ProcessingReport::default()
             }
         }
     };
-    let _ = connection.execute("INSERT INTO intelligence_worker_processed_articles(article_id,fingerprint,status,updated_at) VALUES(?1,?2,'completed',strftime('%s','now')*1000) ON CONFLICT(article_id,fingerprint) DO UPDATE SET status='completed',updated_at=excluded.updated_at", params![article.id, article.fingerprint]);
+    if connection
+        .execute("INSERT INTO intelligence_worker_processed_articles(article_id,fingerprint,status,updated_at) VALUES(?1,?2,'completed',strftime('%s','now')*1000) ON CONFLICT(article_id,fingerprint) DO UPDATE SET status='completed',updated_at=excluded.updated_at", params![article.id, article.fingerprint])
+        .is_err()
+    {
+        return ProcessingReport {
+            outcome: ProcessingOutcome::Retry,
+            chunks: facts.len() as u64,
+            judged: relations.len() as u64,
+            reviewed,
+            failure_stage: "editorial_state_write",
+            ..ProcessingReport::default()
+        };
+    }
     ProcessingReport {
         outcome: ProcessingOutcome::Processed,
         chunks: facts.len() as u64,
@@ -2855,6 +2881,18 @@ mod tests {
             synthesis_token_budget(&"x".repeat(100_000)),
             SYNTHESIS_MAX_TOKENS
         );
+    }
+
+    #[test]
+    fn fulltext_chunks_keep_cjk_fact_extraction_inside_the_4k_profile_budget() {
+        let source = "证".repeat(CHUNK_CHARS + 17);
+        let chunks = split_chunks(&source);
+        assert!(chunks.len() >= 2);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= CHUNK_CHARS));
+        assert_eq!(chunks.concat(), source);
+        // 5.6 KiB is deliberately well below the 4K-context input budget for
+        // the worst CJK token ratio after JSON framing and a 520-token answer.
+        assert!(CHUNK_CHARS <= 5_600);
     }
 
     #[test]
