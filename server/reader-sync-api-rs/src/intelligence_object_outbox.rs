@@ -754,4 +754,114 @@ mod tests {
             .await
             .expect("delete asset fixture");
     }
+
+    #[tokio::test]
+    #[ignore = "requires explicit real PostgreSQL and S3-compatible object-store confirmation"]
+    async fn real_s3_gc_outbox_deletes_its_durable_object() {
+        let database_url = std::env::var("KUNPENG_SYNC_TEST_DATABASE_URL")
+            .expect("real S3 GC E2E requires protected test database URL");
+        let endpoint = std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_ENDPOINT")
+            .expect("real S3 GC E2E requires protected endpoint");
+        let bucket = std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_BUCKET")
+            .expect("real S3 GC E2E requires protected bucket");
+        let access_key_id = std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_ACCESS_KEY_ID")
+            .expect("real S3 GC E2E requires protected access key");
+        let secret_access_key = std::env::var("KUNPENG_SYNC_OBJECT_STORE_E2E_SECRET_ACCESS_KEY")
+            .expect("real S3 GC E2E requires protected secret");
+        let database = database_url.rsplit('/').next().unwrap_or_default();
+        assert!(database.starts_with("reader_sync_rust_test_"));
+
+        let mut config = Config::for_test(&database_url);
+        // The protected PostgreSQL E2E suite applies migrations first. This
+        // test verifies only a real durable object deletion through the
+        // already-migrated GC outbox.
+        config.run_migrations = false;
+        config.database_max_connections = 4;
+        config.database_acquire_timeout = Duration::from_secs(5);
+        config.intelligence_object_storage =
+            IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+                endpoint,
+                region: "us-east-1".to_owned(),
+                bucket,
+                access_key_id: SecretString::from(access_key_id),
+                secret_access_key: SecretString::from(secret_access_key),
+                session_token: None,
+            });
+        let state = crate::build_state(config)
+            .await
+            .expect("build real S3 GC test state");
+
+        let object_key = format!("intelligence/e2e/gc/{}.bin", Uuid::new_v4());
+        let payload = format!("outbox-real-s3-gc-e2e:{}", Uuid::new_v4()).into_bytes();
+        state
+            .intelligence_object_store
+            .put(&object_key, &payload)
+            .expect("create disposable real S3 GC fixture object");
+        let before_gc = state
+            .intelligence_object_store
+            .get_range(&object_key, 0, None)
+            .expect("read real S3 GC fixture before durable deletion");
+        assert_eq!(before_gc.bytes, payload);
+
+        let outbox_id = Uuid::new_v4();
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO intelligence_object_gc_outbox_v1 (outbox_id,storage_backend,object_key,state,not_before_at,created_at,updated_at) VALUES ($1,'s3',$2,'QUEUED',$3,$3,$3)",
+        )
+        .bind(outbox_id)
+        .bind(&object_key)
+        .bind(now)
+        .execute(&state.pool)
+        .await
+        .expect("insert disposable GC outbox fixture");
+
+        // This protected database can retain unrelated queues from an
+        // interrupted rehearsal. Keep every other eligible candidate locked
+        // until this one process_once call is finished: it must exercise the
+        // exact fixture above rather than consuming someone else's retry.
+        let mut queue_locks = state.pool.begin().await.expect("begin queue locks");
+        let lock_now = now_ms();
+        for statement in [
+            "SELECT outbox_id FROM intelligence_object_write_outbox_v1 WHERE state='QUEUED' OR (state='CLAIMED' AND lease_expires_at <= $1) FOR UPDATE SKIP LOCKED",
+            "SELECT outbox_id FROM intelligence_archive_object_write_outbox_v1 WHERE state='QUEUED' OR (state='CLAIMED' AND lease_expires_at <= $1) FOR UPDATE SKIP LOCKED",
+            "SELECT outbox_id FROM intelligence_object_gc_outbox_v1 WHERE outbox_id <> $2 AND (state IN ('QUEUED','FAILED') OR (state='CLAIMED' AND lease_expires_at <= $1)) FOR UPDATE SKIP LOCKED",
+        ] {
+            let mut query = sqlx::query(statement).bind(lock_now);
+            if statement.contains("outbox_id <> $2") {
+                query = query.bind(outbox_id);
+            }
+            query
+                .fetch_all(&mut *queue_locks)
+                .await
+                .expect("lock unrelated durable outbox candidates");
+        }
+
+        assert!(process_once(&state, "real-s3-gc-e2e-worker").await);
+        let row: (String, i32, Option<String>, Option<String>, i64, i64) = sqlx::query_as(
+            "SELECT state,attempts,last_error_code,claimed_by,lease_expires_at,completed_at FROM intelligence_object_gc_outbox_v1 WHERE outbox_id=$1",
+        )
+        .bind(outbox_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("read completed GC outbox fixture");
+        assert_eq!(row.0, "COMPLETE");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2, None);
+        assert_eq!(row.3, None);
+        assert_eq!(row.4, 0);
+        assert!(row.5 > 0);
+        assert!(
+            state
+                .intelligence_object_store
+                .get_range(&object_key, 0, None)
+                .is_err()
+        );
+
+        queue_locks.rollback().await.expect("release queue locks");
+        sqlx::query("DELETE FROM intelligence_object_gc_outbox_v1 WHERE outbox_id=$1")
+            .bind(outbox_id)
+            .execute(&state.pool)
+            .await
+            .expect("delete completed disposable GC fixture row");
+    }
 }
