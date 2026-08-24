@@ -165,6 +165,11 @@ pub(crate) struct HostStatus {
     /// round.  This lets the loopback observer distinguish "loading 8B" from
     /// "running 8B" without exposing source content or local paths.
     current_stage: Option<String>,
+    /// The most recent locally persisted processing round.  This is an
+    /// observer projection: a dead owner turns a stale `running` record into
+    /// `interrupted` without rewriting the historical audit file or inventing
+    /// a completion timestamp.
+    audit_run: Option<AuditRunProjection>,
     audit_summary: Vec<AuditSummary>,
     last_run: Option<RunReport>,
     last_error: Option<String>,
@@ -178,7 +183,25 @@ pub(crate) struct HostStatus {
 struct AuditSummary {
     stage: String,
     status: String,
+    /// Number of times this host round entered the stage.  It is deliberately
+    /// not an article, event, or source count.
     count: u64,
+    /// A stable display hint for loopback tooling.  It lets the workbench say
+    /// "调用次数" rather than presenting stage transitions as news items.
+    unit: &'static str,
+}
+
+/// Aggregate-only lifecycle data for the most recent host round.  `status`
+/// is the effective status observed now, rather than blindly repeating a
+/// stale on-disk `running` marker after the owner process has disappeared.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditRunProjection {
+    run_id: String,
+    status: String,
+    started_at: i64,
+    finished_at: Option<i64>,
+    current_stage: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -344,11 +367,33 @@ fn read_host_audit() -> Option<HostRunAudit> {
     (value.version == 1).then_some(value)
 }
 
-fn summary_from_host_audit(audit: &HostRunAudit) -> Vec<AuditSummary> {
+fn project_host_audit(audit: &HostRunAudit, owner_is_running: bool) -> AuditRunProjection {
+    let interrupted = audit.status == "running" && !owner_is_running;
+    AuditRunProjection {
+        run_id: audit.run_id.clone(),
+        status: if interrupted {
+            "interrupted".into()
+        } else {
+            audit.status.clone()
+        },
+        started_at: audit.started_at,
+        // A process liveness check cannot tell when a crashed owner stopped.
+        // Keep the original missing timestamp instead of fabricating one.
+        finished_at: audit.finished_at,
+        current_stage: owner_is_running.then(|| audit.current_stage.clone()),
+    }
+}
+
+fn summary_from_host_audit(audit: &HostRunAudit, owner_is_running: bool) -> Vec<AuditSummary> {
     let mut grouped = std::collections::BTreeMap::<(String, String), u64>::new();
     for stage in &audit.stages {
+        let status = if !owner_is_running && stage.status == "running" {
+            "interrupted"
+        } else {
+            &stage.status
+        };
         *grouped
-            .entry((stage.stage.clone(), stage.status.clone()))
+            .entry((stage.stage.clone(), status.into()))
             .or_default() += 1;
     }
     grouped
@@ -357,6 +402,7 @@ fn summary_from_host_audit(audit: &HostRunAudit) -> Vec<AuditSummary> {
             stage,
             status,
             count,
+            unit: "stage_invocations",
         })
         .collect()
 }
@@ -854,6 +900,9 @@ fn status(
             .as_ref()
             .filter(|_| audit_running)
             .map(|audit| audit.current_stage.clone()),
+        audit_run: persisted_audit
+            .as_ref()
+            .map(|audit| project_host_audit(audit, audit_running)),
         audit_summary: Vec::new(),
         last_run: last_run.or_else(|| {
             persisted_audit
@@ -964,7 +1013,7 @@ fn status(
         .unwrap_or(0);
     result.audit_summary = persisted_audit
         .as_ref()
-        .map(summary_from_host_audit)
+        .map(|audit| summary_from_host_audit(audit, audit_running))
         .unwrap_or_default();
     result.ready_for_editorial_count = connection
         .query_row(
@@ -1710,6 +1759,46 @@ mod tests {
         audit.finish("completed", None);
         assert!(!audit_is_running(Some(&audit)));
         assert!(!audit_is_running(None));
+    }
+
+    #[test]
+    fn stale_running_audit_projects_as_interrupted_without_faking_completion() {
+        let mut audit = HostRunAudit::start();
+        audit.run_id = "run-aggregate-only".into();
+        audit.started_at = 42;
+        audit.begin_stage("collection");
+
+        let projection = project_host_audit(&audit, false);
+        assert_eq!(projection.run_id, "run-aggregate-only");
+        assert_eq!(projection.status, "interrupted");
+        assert_eq!(projection.started_at, 42);
+        assert_eq!(projection.finished_at, None);
+        assert_eq!(projection.current_stage, None);
+
+        let summary = summary_from_host_audit(&audit, false);
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].stage, "collection");
+        assert_eq!(summary[0].status, "interrupted");
+        assert_eq!(summary[0].count, 1);
+        assert_eq!(summary[0].unit, "stage_invocations");
+    }
+
+    #[test]
+    fn live_audit_projection_keeps_the_current_stage_and_call_count() {
+        let mut audit = HostRunAudit::start();
+        audit.run_id = "live-run".into();
+        audit.begin_stage("small_model_triage");
+
+        let projection = project_host_audit(&audit, true);
+        assert_eq!(projection.status, "running");
+        assert_eq!(
+            projection.current_stage.as_deref(),
+            Some("small_model_triage")
+        );
+
+        let summary = summary_from_host_audit(&audit, true);
+        assert_eq!(summary[0].status, "running");
+        assert_eq!(summary[0].count, 1);
     }
 
     #[test]
