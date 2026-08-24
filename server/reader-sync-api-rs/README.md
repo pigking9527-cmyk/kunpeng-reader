@@ -89,6 +89,19 @@ server/reader-sync-api-rs/scripts/run-capacity-test.sh --short
 server/reader-sync-api-rs/scripts/run-capacity-test.sh --full
 ```
 
+Windows 压测机需要快速复测生产等价二进制的直连链路时，从仓库根目录运行这一条命令：
+
+```powershell
+pwsh -NoProfile -File .\server\reader-sync-api-rs\scripts\run-capacity-test-windows.ps1
+```
+
+该入口固定执行 50 个独立 VU、60 秒的 `catchup` 非容量短测。它通过仓库外已配置的受限
+管理员通道自动解析直连目标，为本轮新建并验证 2048 个可销毁账户，临时启用测试服务原生
+自签 HTTPS，并只放行当前压测机来源；测试期间同步采集 Windows 压测进程、API、PostgreSQL
+和主机资源。无论成功或失败，都会精确删除本轮账户、恢复回环 HTTP、撤销临时防火墙与 TLS，
+且不会把地址、Token、连接串或私密路径写入命令行和报告。该结果只用于一分钟链路诊断，
+不能替代 20 分钟容量曲线。
+
 `--short` 固定为每个阶段 30 秒（总计 330 秒），适合确认最近改动；`--full` 固定执行
 20 分钟的 5、75、150、200、250、300、350、400、450、500、25 并发曲线。运行器先在
 测试服务主机启动 CPU/RSS/可用内存采样，再从独立压测机以 k6 保活连接运行请求混合，并保存

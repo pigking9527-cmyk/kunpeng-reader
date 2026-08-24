@@ -10,6 +10,7 @@ artifact_provenance_checker="$script_dir/test-artifact-provenance.sh"
 artifact_bundle_checker="$script_dir/test-artifact-bundle.sh"
 backup_restore_checker="$script_dir/test-postgres-backup-restore-rehearsal.sh"
 capacity_runner_checker="$script_dir/test-run-capacity-test.sh"
+intelligence_readiness_checker="$script_dir/check-intelligence-deployment-readiness.sh"
 
 expect_rejection() {
   if "$@" >/dev/null 2>&1; then
@@ -36,6 +37,8 @@ expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/rea
 expect_rejection env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' KUNPENG_SYNC_SMTP_HOST='smtp.invalid' KUNPENG_SYNC_SMTP_FROM='noreply@example.invalid' KUNPENG_SYNC_SMTP_PORT=0 "$config_checker"
 env KUNPENG_SYNC_DATABASE_URL='postgresql://offline.invalid/reader_sync_rust_test_config' KUNPENG_SYNC_TOKEN_HMAC_KEY='test-only-key-with-at-least-32-bytes' "$config_checker" >/dev/null
 "$script_dir/check-migrations.sh"
+bash "$intelligence_readiness_checker" --offline >/dev/null
+bash "$intelligence_readiness_checker" --offline --require-object-storage >/dev/null
 "$artifact_provenance_checker"
 "$artifact_bundle_checker"
 "$backup_restore_checker"

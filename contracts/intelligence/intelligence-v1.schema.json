@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kunpeng-reader.invalid/contracts/intelligence/intelligence-v1.schema.json",
+  "title": "Kunpeng intelligence distribution V1",
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "httpsUrl": { "type": "string", "pattern": "^https://[^\\s]+$", "maxLength": 4096 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "cursor": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,256}$" },
+    "note": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["noteId", "sourceId", "sourceSha256", "publisher", "title", "originalUrl", "publishedAt", "paragraphs", "fallbackExcerpt"],
+      "properties": {
+        "noteId": { "$ref": "#/$defs/id" }, "sourceId": { "$ref": "#/$defs/id" },
+        "sourceSha256": { "$ref": "#/$defs/sha256" },
+        "publisher": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "originalUrl": { "$ref": "#/$defs/httpsUrl" }, "publishedAt": { "$ref": "#/$defs/timestamp" },
+        "paragraphs": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/paragraphEvidence" } },
+        "fallbackExcerpt": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "paragraphEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["paragraphId", "sha256"],
+      "properties": { "paragraphId": { "$ref": "#/$defs/id" }, "sha256": { "$ref": "#/$defs/sha256" } }
+    },
+    "modelText": {
+      "type": "string", "minLength": 1, "maxLength": 16384,
+      "$comment": "模型生成的文本不得包含 URL；该语义规则由 contracts/intelligence/README.md 的校验器强制。"
+    },
+    "asset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["assetId", "kind", "sha256", "mime", "bytes"],
+      "properties": {
+        "assetId": { "$ref": "#/$defs/id" }, "kind": { "const": "image" },
+        "sha256": { "$ref": "#/$defs/sha256" }, "mime": { "enum": ["image/jpeg", "image/png", "image/webp"] },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 26214400 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 }
+      }
+    },
+    "segment": {
+      "type": "object", "additionalProperties": false, "required": ["text", "noteIds"],
+      "properties": { "text": { "$ref": "#/$defs/modelText" }, "noteIds": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } } }
+    },
+    "block": {
+      "type": "object", "additionalProperties": false, "required": ["blockId", "segments"],
+      "properties": {
+        "blockId": { "$ref": "#/$defs/id" }, "segments": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/segment" } },
+        "mediaIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }, "videoUrl": { "$ref": "#/$defs/httpsUrl" }
+      }
+    },
+    "eventRevision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventId", "revisionNo", "title", "occurredAt", "blocks", "notes"],
+      "properties": {
+        "eventId": { "$ref": "#/$defs/id" }, "revisionNo": { "type": "integer", "minimum": 1 }, "seriesId": { "$ref": "#/$defs/id" },
+        "title": { "$ref": "#/$defs/modelText" }, "occurredAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "blocks": { "type": "array", "minItems": 1, "maxItems": 1024, "items": { "$ref": "#/$defs/block" } },
+        "notes": { "type": "array", "minItems": 1, "maxItems": 512, "items": { "$ref": "#/$defs/note" } }
+      }
+    },
+    "publicationBundle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "publicationId", "kind", "publishedAt", "expiresAt", "issuedAt", "events", "assets", "bundleSha256"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "publicationId": { "$ref": "#/$defs/id" }, "kind": { "enum": ["event", "daily"] },
+        "publishedAt": { "$ref": "#/$defs/timestamp" }, "expiresAt": { "$ref": "#/$defs/timestamp" }, "issuedAt": { "$ref": "#/$defs/timestamp" },
+        "events": { "type": "array", "minItems": 1, "maxItems": 30, "items": { "$ref": "#/$defs/eventRevision" } },
+        "assets": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/asset" } }, "bundleSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "modelSynthesis": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "events"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "events": { "type": "array", "minItems": 1, "maxItems": 30, "items": { "$ref": "#/$defs/modelEventSynthesis" } }
+      },
+      "$comment": "这是模型允许输出的闭集：没有 originalUrl、videoUrl、publisher 或 source 内容字段。发布主机必须从已验证档案投影这些字段。"
+    },
+    "modelEventSynthesis": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventId", "revisionNo", "title", "blocks"],
+      "properties": {
+        "eventId": { "$ref": "#/$defs/id" }, "revisionNo": { "type": "integer", "minimum": 1 },
+        "title": { "$ref": "#/$defs/modelText" },
+        "blocks": { "type": "array", "minItems": 1, "maxItems": 1024, "items": { "$ref": "#/$defs/modelBlockSynthesis" } }
+      }
+    },
+    "modelBlockSynthesis": {
+      "type": "object", "additionalProperties": false,
+      "required": ["blockId", "segments"],
+      "properties": {
+        "blockId": { "$ref": "#/$defs/id" },
+        "segments": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/segment" } }
+      }
+    },
+    "archiveRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "requestId", "state", "requestedAt", "request"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "requestId": { "$ref": "#/$defs/id" },
+        "state": { "enum": ["REQUESTED", "QUEUED", "CLAIMED", "UPLOADING", "READY", "DOWNLOADED", "ACKED", "PURGED", "HOST_OFFLINE", "NOT_FOUND", "FAILED", "REQUEST_EXPIRED"] },
+        "requestedAt": { "$ref": "#/$defs/timestamp" }, "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "request": { "type": "object", "additionalProperties": false, "minProperties": 1, "properties": { "day": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }, "eventId": { "$ref": "#/$defs/id" }, "seriesId": { "$ref": "#/$defs/id" } } },
+        "contentSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "feedEnabled", "serverNow", "archive"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "feedEnabled": { "type": "boolean" }, "serverNow": { "$ref": "#/$defs/timestamp" },
+        "archive": { "type": "object", "additionalProperties": false, "required": ["availableFrom", "availableTo"], "properties": { "availableFrom": { "anyOf": [{ "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }, { "type": "null" }] }, "availableTo": { "anyOf": [{ "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }, { "type": "null" }] } } }
+      }
+    },
+    "feedItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["publicationId", "kind", "publishedAt", "expiresAt", "revisionNo", "importance"],
+      "properties": {
+        "publicationId": { "$ref": "#/$defs/id" }, "kind": { "enum": ["event", "daily"] }, "publishedAt": { "$ref": "#/$defs/timestamp" }, "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "revisionNo": { "type": "integer", "minimum": 1 }, "importance": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "feedPage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "items", "nextCursor", "serverNow"],
+      "properties": { "schemaVersion": { "const": 1 }, "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/feedItem" } }, "nextCursor": { "$ref": "#/$defs/cursor" }, "serverNow": { "$ref": "#/$defs/timestamp" } }
+    },
+    "preferences": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "topics", "minimumImportance", "updatedAt"],
+      "properties": { "schemaVersion": { "const": 1 }, "topics": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }, "minimumImportance": { "type": "integer", "minimum": 0, "maximum": 100 }, "updatedAt": { "$ref": "#/$defs/timestamp" } }
+    },
+    "deliveryAck": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "publicationId", "acknowledgedAt"],
+      "properties": { "schemaVersion": { "const": 1 }, "publicationId": { "$ref": "#/$defs/id" }, "acknowledgedAt": { "$ref": "#/$defs/timestamp" }, "deviceId": { "$ref": "#/$defs/id" } }
+    },
+    "deviceRegistration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "deviceId", "platform", "quietHours"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "deviceId": { "$ref": "#/$defs/id" },
+        "platform": { "enum": ["windows", "macos", "linux", "android", "ios"] },
+        "quietHours": { "type": "object", "maxProperties": 16 }, "updatedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "publisherJob": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "jobId", "kind", "requestId", "createdAt"],
+      "properties": { "schemaVersion": { "const": 1 }, "jobId": { "$ref": "#/$defs/id" }, "kind": { "const": "archive_relay" }, "requestId": { "$ref": "#/$defs/id" }, "createdAt": { "$ref": "#/$defs/timestamp" } }
+    }
+  }
+}

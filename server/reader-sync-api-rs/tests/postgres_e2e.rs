@@ -334,6 +334,10 @@ async fn data_reset_fixture(database_url: &str) -> (sqlx::PgPool, Router) {
         .execute(&pool)
         .await
         .expect("clear explicit test database");
+    sqlx::query("TRUNCATE rate_limit_buckets_v4")
+        .execute(&pool)
+        .await
+        .expect("clear data reset rate limits");
     let password = SecretString::from("reset-password-v4".to_owned());
     let password_hash = hash_password(&password).expect("hash password");
     sqlx::query(
@@ -361,6 +365,7 @@ async fn data_reset_fixture(database_url: &str) -> (sqlx::PgPool, Router) {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     (pool, app(state))
@@ -485,6 +490,7 @@ async fn password_reset_fixture(database_url: &str) -> (sqlx::PgPool, Router) {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     (pool, app(state))
@@ -552,6 +558,7 @@ async fn asset_fixture(database_url: &str) -> (sqlx::PgPool, Router, String) {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     let service = app(state);
@@ -608,6 +615,10 @@ async fn login_push_replay_conflict_and_pull() {
         .execute(&pool)
         .await
         .expect("clear explicit test database");
+    sqlx::query("TRUNCATE rate_limit_buckets_v4")
+        .execute(&pool)
+        .await
+        .expect("clear login rate limits");
 
     let password = SecretString::from("test-password-v4".to_owned());
     let password_hash = hash_password(&password).expect("hash password");
@@ -637,6 +648,7 @@ async fn login_push_replay_conflict_and_pull() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     let service = app(state);
@@ -841,6 +853,7 @@ async fn inventory_reconcile_and_secret_epoch_match_desktop_v5_semantics() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     });
     let token = response_json(
@@ -1005,6 +1018,10 @@ async fn account_email_rebind_and_delete_follow_desktop_v5_flow() {
         .execute(&pool)
         .await
         .expect("clear explicit test database");
+    sqlx::query("TRUNCATE rate_limit_buckets_v4")
+        .execute(&pool)
+        .await
+        .expect("clear email flow rate limits");
     let password = SecretString::from("email-flow-password-v5".to_owned());
     sqlx::query(
         "INSERT INTO users(id,username,username_key,password_hash,created_at) \
@@ -1031,6 +1048,7 @@ async fn account_email_rebind_and_delete_follow_desktop_v5_flow() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     });
     let token = response_json(
@@ -1203,10 +1221,15 @@ async fn load_rehearsal_fixture(database_url: &str) -> (sqlx::PgPool, Router, St
         .execute(&pool)
         .await
         .expect("clear explicit test database");
-    sqlx::query("TRUNCATE rate_limit_buckets_v4")
+    sqlx::query("TRUNCATE feedback_v4,rate_limit_buckets_v4")
         .execute(&pool)
         .await
-        .expect("clear load rehearsal rate limits");
+        .expect("clear load rehearsal feedback and rate limits");
+    // The authenticated admission limiter reserves small in-process leases in
+    // addition to the persistent buckets above.  Each fixture starts a fresh
+    // database state, so it must also discard a deliberately exhausted lease
+    // left by another E2E case in this same test process.
+    reader_sync_api::rate_limit::clear_authenticated_account_leases_for_test();
     let password = SecretString::from("load-rehearsal-password-v4".to_owned());
     let password_hash = hash_password(&password).expect("hash password");
     sqlx::query(
@@ -1234,6 +1257,7 @@ async fn load_rehearsal_fixture(database_url: &str) -> (sqlx::PgPool, Router, St
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     let service = app(state);
@@ -1310,6 +1334,7 @@ async fn single_connection_pool_serves_hot_routes_and_observes_session_revocatio
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     let service = app(state);
@@ -1630,6 +1655,7 @@ async fn authenticated_account_admission_is_shared_by_api_instances() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config: config.clone(),
     });
     let second_instance = app(AppState {
@@ -1647,6 +1673,7 @@ async fn authenticated_account_admission_is_shared_by_api_instances() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     });
 
@@ -1750,6 +1777,7 @@ async fn registration_uses_outbox_code_and_creates_verified_account() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     let service = app(state);
@@ -1867,6 +1895,7 @@ async fn phone_registration_requires_delivered_sms_and_stores_only_digest() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     let service = app(state);
@@ -1985,6 +2014,7 @@ async fn feedback_persists_valid_bug_attachment() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     let attachment = base64::engine::general_purpose::STANDARD.encode(br#"{"events":[]}"#);
@@ -2073,6 +2103,7 @@ async fn password_change_keeps_current_session_and_revokes_other_devices() {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store: AppState::disabled_intelligence_object_store(),
         config,
     };
     let service = app(state);

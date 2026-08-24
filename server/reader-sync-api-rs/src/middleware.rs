@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use axum::{
     extract::{MatchedPath, Request, State},
-    http::{HeaderName, HeaderValue, header},
+    http::{HeaderName, HeaderValue, Method, header},
     middleware::Next,
     response::Response,
 };
@@ -42,17 +42,28 @@ pub async fn request_context(mut request: Request, next: Next) -> Response {
     response
 }
 
+#[allow(clippy::too_many_lines)] // Queue admission, timeout, and matching metrics share one request lifecycle.
 pub async fn protect(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let context = request
         .extensions()
         .get::<RequestContext>()
         .copied()
         .unwrap_or_default();
-    let request_class = request_class(&request);
     // `MatchedPath` is the router template, never the request URI.  It keeps
     // observability useful without turning query strings or identifiers into
     // metric labels.
     let route = matched_route(&request).to_owned();
+    // Publisher archive and private host polling deliberately have their own
+    // two-slot semaphores and 25-second deadlines. Letting either enter the
+    // ordinary read lane would consume a reader slot and be cut off by the
+    // normal 15-second request timeout before its documented wait ends.
+    if route == "/v1/intelligence/publisher/jobs"
+        || route == "/v1/intelligence/stream"
+        || (route == "/v1/intelligence/host-tasks" && request.method() == Method::GET)
+    {
+        return next.run(request).await;
+    }
+    let request_class = request_class(&request);
     let request_lane = request_lane(&request, &route);
     let deadline = Instant::now() + state.config.request_queue_timeout;
     let queue_started = Instant::now();
@@ -400,6 +411,7 @@ mod tests {
             write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
             password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
             token_hmac_key: config.token_hmac_key.clone(),
+            intelligence_object_store: AppState::disabled_intelligence_object_store(),
             config,
         }
     }
@@ -522,6 +534,38 @@ mod tests {
             .expect("read response");
         assert_eq!(read.status(), StatusCode::NO_CONTENT);
         drop(held_checkpoint_slot);
+    }
+
+    #[tokio::test]
+    async fn only_host_task_get_bypasses_the_ordinary_request_deadline() {
+        let state = state(0, 0, Duration::from_millis(5));
+        let service = Router::new()
+            .route(
+                "/v1/intelligence/host-tasks",
+                get(|| async { StatusCode::NO_CONTENT }).post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(axum_middleware::from_fn_with_state(state, protect));
+
+        let poll = service
+            .clone()
+            .oneshot(
+                Request::get("/v1/intelligence/host-tasks")
+                    .body(Body::empty())
+                    .expect("poll request"),
+            )
+            .await
+            .expect("poll response");
+        assert_eq!(poll.status(), StatusCode::NO_CONTENT);
+
+        let task_submit = service
+            .oneshot(
+                Request::post("/v1/intelligence/host-tasks")
+                    .body(Body::empty())
+                    .expect("task submit request"),
+            )
+            .await
+            .expect("task submit response");
+        assert_eq!(task_submit.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

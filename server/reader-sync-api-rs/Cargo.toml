@@ -8,8 +8,10 @@ license-file = "../../LICENSE"
 
 [dependencies]
 anyhow = "1.0.104"
+async-stream = "0.3.6"
 argon2 = { version = "0.5.3", features = ["std", "zeroize"] }
 axum = { version = "0.8.9", features = ["http1", "json", "matched-path", "tokio"] }
+axum-server = { version = "0.7.2", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22.1"
 email_address = "0.2.9"
 hmac = "0.13.0"
@@ -17,6 +19,7 @@ lettre = { version = "0.11.23", default-features = false, features = ["builder",
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 rand = "0.10.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -24,7 +27,7 @@ sqlx = { version = "0.9.0", default-features = false, features = ["derive", "jso
 thiserror = "2.0.20"
 sha2 = "0.11.0"
 subtle = "2.6.1"
-time = { version = "=0.3.51", default-features = false, features = ["std"] }
+time = { version = "=0.3.51", default-features = false, features = ["formatting", "parsing", "std"] }
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.3", features = ["limit", "timeout", "util"] }
 tower-http = { version = "0.7.0", features = ["catch-panic", "compression-gzip", "request-id", "sensitive-headers", "trace"] }
