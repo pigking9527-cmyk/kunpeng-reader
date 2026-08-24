@@ -1,7 +1,7 @@
 //! Launch-profile boundary for the desktop process.
 //!
 //! The normal installation deliberately keeps using the historic `dirs` paths.
-//! `--isolated-profile <absolute-dir>` is an opt-in macOS 14+ test boundary:
+//! `--isolated-profile <absolute-dir>` is an opt-in test boundary:
 //! every application-owned persistent directory, process lock and WKWebView
 //! data-store uses a fresh profile identity rooted below that directory.
 
@@ -59,9 +59,13 @@ pub(crate) fn preflight_process_args() -> Result<(), String> {
             Err("--isolated-profile 仅支持 macOS 14 及以上；未创建窗口或应用数据".into())
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("--isolated-profile 仅支持 macOS 14 及以上；未创建窗口或应用数据".into())
+        Ok(())
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        Err("--isolated-profile 仅支持 macOS 14 及 Windows；未创建窗口或应用数据".into())
     }
 }
 
@@ -117,6 +121,38 @@ pub(crate) fn data_base_dir() -> Option<PathBuf> {
 
 pub(crate) fn instance_scope_key() -> String {
     instance_scope_key_for(current())
+}
+
+/// Keep the process-local storage boundary when the host launches a worker.
+/// The resulting values are only ever supplied as child-process arguments,
+/// never written to worker configuration, dashboard JSON, or diagnostics.
+pub(crate) fn child_profile_args() -> Vec<OsString> {
+    match current() {
+        LaunchProfile::Default => Vec::new(),
+        LaunchProfile::Isolated(profile) => vec![
+            OsString::from("--isolated-profile"),
+            profile.root.clone().into_os_string(),
+        ],
+    }
+}
+
+/// Strip the already-validated launch-profile option before business-command
+/// parsing. The profile is initialized first by every binary entry point, so
+/// accepting it here cannot silently create a second storage boundary.
+pub(crate) fn application_args(arguments: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut result = Vec::new();
+    let mut values = arguments.into_iter();
+    if let Some(program) = values.next() {
+        result.push(program);
+    }
+    while let Some(argument) = values.next() {
+        if argument == "--isolated-profile" {
+            let _ = values.next();
+        } else {
+            result.push(argument);
+        }
+    }
+    result
 }
 
 fn instance_scope_key_for(profile: &LaunchProfile) -> String {
@@ -227,9 +263,10 @@ fn prepare_isolated_profile(root: &Path) -> Result<IsolatedProfile, String> {
     if !root.is_absolute() || root == Path::new("/") {
         return Err("--isolated-profile 必须是非根目录的绝对路径".into());
     }
+    ensure_no_reparse_ancestors(root)?;
     if let Ok(metadata) = std::fs::symlink_metadata(root) {
-        if metadata.file_type().is_symlink() {
-            return Err("--isolated-profile 不接受符号链接目录".into());
+        if is_reparse_point(&metadata) {
+            return Err("--isolated-profile 不接受重解析点目录".into());
         }
         if !metadata.is_dir() {
             return Err("--isolated-profile 必须指向目录".into());
@@ -269,6 +306,7 @@ fn prepare_isolated_profile(root: &Path) -> Result<IsolatedProfile, String> {
     };
     for child in ["config", "cache", "data"] {
         let directory = root.join(child);
+        ensure_no_reparse_ancestors(&directory)?;
         std::fs::create_dir_all(&directory)
             .map_err(|error| format!("无法创建隔离配置子目录：{error}"))?;
         set_owner_only_permissions(&directory)?;
@@ -279,6 +317,39 @@ fn prepare_isolated_profile(root: &Path) -> Result<IsolatedProfile, String> {
     })
 }
 
+/// Reject links/junctions for every existing component, not merely the final
+/// directory. A Windows junction in an ancestor could otherwise redirect an
+/// isolated test archive onto the user's permanent profile.
+fn ensure_no_reparse_ancestors(path: &Path) -> Result<(), String> {
+    let mut ancestors = path.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) if is_reparse_point(&metadata) => {
+                return Err("--isolated-profile 路径包含重解析点，拒绝使用".into())
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("无法检查隔离配置目录安全属性".into()),
+        }
+    }
+    Ok(())
+}
+
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
 fn set_owner_only_permissions(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -286,7 +357,34 @@ fn set_owner_only_permissions(path: &Path) -> Result<(), String> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("无法设置隔离配置目录权限：{error}"))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        // `whoami` gives the SID-resolved current Windows identity accepted by
+        // icacls. Avoid a shell so an isolated directory is never interpolated
+        // into a command line; failure is closed rather than falling back to
+        // inherited permissions from an arbitrary parent.
+        let identity = Command::new("whoami")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
+            .ok_or("无法确定隔离配置目录所有者")?;
+        let grant = format!("{identity}:(OI)(CI)F");
+        let output = Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(grant)
+            .output()
+            .map_err(|_| "无法设置隔离配置目录 DACL")?;
+        if !output.status.success() {
+            return Err("无法设置隔离配置目录 DACL".into());
+        }
+    }
+    #[cfg(all(not(unix), not(windows)))]
     let _ = path;
     Ok(())
 }
@@ -394,6 +492,39 @@ mod tests {
             root.join("config").join(APP_DIRECTORY)
         );
         assert!(!id.contains(&root.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn application_arguments_remove_only_the_initialized_profile_switch() {
+        let values = application_args([
+            OsString::from("worker"),
+            OsString::from("--isolated-profile"),
+            OsString::from("C:\\isolated"),
+            OsString::from("--service-loop"),
+        ]);
+        assert_eq!(
+            values,
+            vec![OsString::from("worker"), OsString::from("--service-loop")]
+        );
+    }
+
+    #[test]
+    fn rejects_reparse_point_final_directory() {
+        let root = fresh_directory("reparse");
+        #[cfg(unix)]
+        {
+            let linked = root.with_extension("link");
+            std::os::unix::fs::symlink(&root, &linked).unwrap();
+            assert!(prepare_isolated_profile(&linked).is_err());
+            std::fs::remove_file(&linked).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows junction creation requires a privilege on some editions;
+            // retain a portable assertion for ordinary isolation preparation.
+            assert!(prepare_isolated_profile(&root).is_ok());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }

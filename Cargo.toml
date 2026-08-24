@@ -15,7 +15,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 reader-core = { path = "reader-core" }
-tauri = { version = "2", features = ["unstable"] }
+tauri = { version = "2", features = ["unstable", "protocol-asset"] }
 tauri-runtime = "2.11"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
@@ -50,6 +50,10 @@ ammonia = "4.1"
 quick-xml = "0.41"
 libc = "0.2"
 ring = "0.17"
+# RFC 9180 implementation for the optional, end-to-end encrypted intelligence-host
+# relay.  Keep the feature set narrowly pinned to the V1 ciphersuite; do not pull
+# post-quantum or runtime-agility suites into the desktop binary.
+hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
 ferrous-opencc = "0.3.1"
 notify = "8.2"
 uuid = { version = "1", features = ["v4"] }

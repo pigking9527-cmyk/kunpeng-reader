@@ -1,0 +1,3014 @@
+//! Durable, headless collection boundary for the local intelligence host.
+//!
+//! The desktop page is deliberately not a collector.  A scheduler supplies a
+//! [`CollectorPort`] to this module. The binary supports a strict file adapter
+//! and an explicit public HTTP source adapter; both run without a WebView,
+//! Tauri command, or page-owned credential. Material is recorded in the
+//! permanent catalog together with fetch state, validators and failure reason.
+
+use crate::{
+    archive,
+    intelligence_worker::content_archive::{
+        self, ArchiveArticleContentInput, ArchiveImageInput, ArchiveParagraphInput,
+        ArchiveVideoInput,
+    },
+};
+use chrono::{DateTime, NaiveDate, Utc};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Deserialize;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    io::Read,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+const MAX_BATCH_ITEMS: usize = 500;
+/// A feed can contain hundreds of historical entries.  A supervised round
+/// only needs its recent window; older entries would otherwise turn one
+/// source request into hundreds of serial article and image downloads.
+const MAX_FEED_ITEMS_PER_SOURCE: usize = 24;
+/// Full-text retrieval is deliberately bounded at collection time.  Missing
+/// bodies are persisted as evidence gaps and the durable backfill queue fills
+/// them in later rounds, before an item reaches 27B editorial processing.
+const MAX_INLINE_CONTENT_ENRICHMENTS_PER_SOURCE: usize = 2;
+const MAX_INLINE_IMAGES_PER_ARTICLE: usize = 2;
+const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SOURCES: usize = 128;
+const MAX_IMAGES_PER_ARTICLE: usize = 12;
+const MAX_VIDEOS_PER_ARTICLE: usize = 12;
+const MAX_PUBLIC_REDIRECTS: usize = 5;
+/// A background round must make meaningful progress through a historical
+/// archive, but it must not turn a single host into an unbounded crawler.
+/// Fetches are split into origin-fair waves below: at most one request to an
+/// origin is in flight in a wave, and no more than four public origins are
+/// fetched at once.  A lone origin therefore retains the previous sequential
+/// safety property while a mixed-source backlog can use the available time.
+const MAX_CONTENT_BACKFILL_PER_RUN: usize = 32;
+const MAX_CONTENT_BACKFILL_CANDIDATE_SCAN: usize = 128;
+// Reserve half of the durable candidate page for the newest evidence gaps and
+// half for the oldest ones.  New feeds therefore become readable promptly,
+// while a continually arriving feed cannot permanently starve legacy rows.
+const MAX_CONTENT_BACKFILL_NEWEST_SCAN: usize = MAX_CONTENT_BACKFILL_CANDIDATE_SCAN / 2;
+const MAX_CONTENT_BACKFILL_OLDEST_SCAN: usize =
+    MAX_CONTENT_BACKFILL_CANDIDATE_SCAN - MAX_CONTENT_BACKFILL_NEWEST_SCAN;
+const MAX_CONTENT_BACKFILL_PARALLEL_FETCHES: usize = 4;
+const CONTENT_BACKFILL_BASE_DELAY_MS: i64 = 30_000;
+const CONTENT_BACKFILL_MAX_DELAY_MS: i64 = 3_600_000;
+// A 403, confirmed missing page, or persistent paywall will not become
+// readable in the next active host round.  Preserve it as a durable evidence
+// gap, but stop repeatedly probing the publisher until a later scheduled
+// repair pass.  Network and 5xx failures keep the short exponential retry.
+const CONTENT_BACKFILL_TERMINAL_DELAY_MS: i64 = 12 * 60 * 60 * 1_000;
+const CONTENT_BACKFILL_RATE_LIMIT_BASE_DELAY_MS: i64 = 5 * 60 * 1_000;
+const SOURCE_DEFAULT_INTERVAL_SECONDS: i64 = 300;
+const SOURCE_MIN_INTERVAL_SECONDS: i64 = 30;
+const SOURCE_MAX_INTERVAL_SECONDS: i64 = 86_400;
+const SOURCE_MAX_BACKOFF_SECONDS: i64 = 3_600;
+const USER_AGENT: &str =
+    "KunpengIntelligenceWorker/1.0 (+https://github.com/pigking9527-cmyk/kunpeng-reader)";
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CollectedArticle {
+    pub source_id: String,
+    pub guid: String,
+    pub url: String,
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    #[serde(default = "default_fetch_status")]
+    pub fetch_status: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub html: Option<String>,
+    /// `complete`, `truncated`, or `unavailable`. A source can have been
+    /// fetched successfully while its linked article body was unavailable.
+    #[serde(default)]
+    pub body_status: Option<String>,
+    #[serde(default)]
+    pub incomplete_reason: Option<String>,
+    /// Downloaded public images are handed to the permanent content archive;
+    /// videos deliberately remain HTTPS links and are never downloaded.
+    #[serde(default)]
+    pub images: Vec<ArchiveImageInput>,
+    #[serde(default)]
+    pub videos: Vec<ArchiveVideoInput>,
+}
+
+fn default_fetch_status() -> String {
+    "fetched".into()
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CollectorFileEnvelope {
+    #[serde(default)]
+    batch_id: Option<String>,
+    articles: Vec<CollectedArticle>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HttpSourceEnvelope {
+    #[serde(default)]
+    batch_id: Option<String>,
+    sources: Vec<HttpSource>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HttpSource {
+    source_id: String,
+    /// Supported values are rss, atom, json, and web. Web means that the
+    /// configured URL itself is the public article to archive.
+    kind: String,
+    url: String,
+    #[serde(default)]
+    language: Option<String>,
+    /// The worker loop uses the lowest valid source interval. It is ignored by
+    /// one-shot collection, which keeps supervised/Task Scheduler use simple.
+    #[serde(default)]
+    interval_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HttpCollector {
+    batch_id: String,
+    sources: Vec<HttpSource>,
+    catalog_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SourceFetchState {
+    etag: Option<String>,
+    last_modified: Option<String>,
+    next_fetch_at: i64,
+    failure_count: u32,
+}
+
+#[derive(Clone, Debug)]
+struct SourceFetchResult {
+    articles: Vec<CollectedArticle>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    failure: Option<String>,
+}
+
+impl HttpCollector {
+    pub(crate) fn from_file(path: &Path) -> Result<Self, ()> {
+        let bytes = fs::read(path).map_err(|_| ())?;
+        if bytes.len() > MAX_TEXT_BYTES {
+            return Err(());
+        }
+        let envelope: HttpSourceEnvelope = serde_json::from_slice(&bytes).map_err(|_| ())?;
+        if envelope.sources.is_empty() || envelope.sources.len() > MAX_SOURCES {
+            return Err(());
+        }
+        for source in &envelope.sources {
+            if safe_text(&source.source_id, 200).is_none()
+                || public_fetch_url(&source.url).is_err()
+                || !matches!(source.kind.trim(), "rss" | "atom" | "json" | "web")
+            {
+                return Err(());
+            }
+        }
+        let catalog_path = archive::store_path().map_err(|_| ())?;
+        let connection = Connection::open(&catalog_path).map_err(|_| ())?;
+        ensure_source_state_schema(&connection)?;
+        Ok(Self {
+            batch_id: envelope
+                .batch_id
+                .as_deref()
+                .and_then(valid_batch_id)
+                .unwrap_or_else(new_batch_id),
+            sources: envelope.sources,
+            catalog_path,
+        })
+    }
+
+    pub(crate) fn recommended_interval(&self) -> Duration {
+        let seconds = self
+            .sources
+            .iter()
+            .filter_map(|source| source.interval_seconds)
+            .filter(|seconds| (30..=86_400).contains(seconds))
+            .min()
+            .unwrap_or(300);
+        Duration::from_secs(seconds)
+    }
+}
+
+/// A scheduler-owned source adapter.  The core accepts pre-fetched public
+/// material only, which keeps HTTP/source credentials out of the worker core
+/// and makes exact-deduplication fully deterministic in tests.
+pub(crate) trait CollectorPort {
+    fn collect(&self) -> Result<(String, Vec<CollectedArticle>), ()>;
+}
+
+pub(crate) struct FileCollector<'a> {
+    path: &'a Path,
+}
+
+impl<'a> FileCollector<'a> {
+    pub(crate) fn new(path: &'a Path) -> Self {
+        Self { path }
+    }
+}
+
+impl CollectorPort for FileCollector<'_> {
+    fn collect(&self) -> Result<(String, Vec<CollectedArticle>), ()> {
+        let bytes = fs::read(self.path).map_err(|_| ())?;
+        if bytes.len() > MAX_TEXT_BYTES {
+            return Err(());
+        }
+        let envelope: CollectorFileEnvelope = serde_json::from_slice(&bytes).map_err(|_| ())?;
+        if envelope.articles.is_empty() || envelope.articles.len() > MAX_BATCH_ITEMS {
+            return Err(());
+        }
+        let batch_id = envelope
+            .batch_id
+            .as_deref()
+            .and_then(valid_batch_id)
+            .unwrap_or_else(new_batch_id);
+        Ok((batch_id, envelope.articles))
+    }
+}
+
+/// Network adapter used only by the independently launched worker. The page
+/// never instantiates this adapter. Redirects are disabled so a configured
+/// public source cannot silently turn into a request to another endpoint.
+impl CollectorPort for HttpCollector {
+    fn collect(&self) -> Result<(String, Vec<CollectedArticle>), ()> {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(35)))
+            .timeout_connect(Some(Duration::from_secs(8)))
+            .timeout_recv_response(Some(Duration::from_secs(20)))
+            .timeout_recv_body(Some(Duration::from_secs(25)))
+            .max_redirects(0)
+            .build()
+            .into();
+        let mut articles = Vec::new();
+        for source in &self.sources {
+            let state =
+                source_fetch_state(&self.catalog_path, &source.source_id).unwrap_or_default();
+            if state.next_fetch_at > Utc::now().timestamp() {
+                continue;
+            }
+            let fetch = collect_http_source(&agent, source, &state);
+            update_source_fetch_state(&self.catalog_path, source, &state, &fetch).ok();
+            let mut entries = fetch.articles;
+            if entries.len() > MAX_BATCH_ITEMS.saturating_sub(articles.len()) {
+                entries.truncate(MAX_BATCH_ITEMS.saturating_sub(articles.len()));
+            }
+            articles.extend(entries);
+            if articles.len() >= MAX_BATCH_ITEMS {
+                break;
+            }
+        }
+        Ok((self.batch_id.clone(), articles))
+    }
+}
+
+fn read_response(response: &mut ureq::http::Response<ureq::Body>) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take((MAX_TEXT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "network_read_failed".to_string())?;
+    if bytes.len() > MAX_TEXT_BYTES {
+        return Err("response_too_large".into());
+    }
+    Ok(bytes)
+}
+
+fn response_header(response: &ureq::http::Response<ureq::Body>, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| safe_text(value, 4_096))
+}
+
+fn source_failure(source: &HttpSource, reason: &str) -> CollectedArticle {
+    let normalized = normalized_url(&source.url).unwrap_or_else(|_| source.url.clone());
+    let guid = format!("source-fetch:{}", sha256_hex(normalized.as_bytes()));
+    CollectedArticle {
+        source_id: source.source_id.clone(),
+        guid,
+        url: source.url.clone(),
+        title: format!("来源抓取失败：{}", source.source_id.trim()),
+        summary: String::new(),
+        published_at: None,
+        etag: None,
+        last_modified: None,
+        fetch_status: "failed".into(),
+        language: source.language.clone(),
+        body: None,
+        html: None,
+        body_status: Some("unavailable".into()),
+        incomplete_reason: Some(reason.to_owned()),
+        images: Vec::new(),
+        videos: Vec::new(),
+    }
+}
+
+fn collect_http_source(
+    agent: &ureq::Agent,
+    source: &HttpSource,
+    state: &SourceFetchState,
+) -> SourceFetchResult {
+    let Ok(source_url) = public_fetch_url(&source.url) else {
+        return SourceFetchResult {
+            articles: vec![source_failure(source, "source_url_not_public")],
+            etag: state.etag.clone(),
+            last_modified: state.last_modified.clone(),
+            failure: Some("source_url_not_public".into()),
+        };
+    };
+    let mut request = agent
+        .get(&source_url)
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "application/rss+xml,application/atom+xml,application/xml,text/xml,application/json,text/html;q=0.8,*/*;q=0.1");
+    if let Some(etag) = state.etag.as_deref() {
+        request = request.header("If-None-Match", etag);
+    }
+    if let Some(last_modified) = state.last_modified.as_deref() {
+        request = request.header("If-Modified-Since", last_modified);
+    }
+    let mut response = match request.call() {
+        Ok(response) => response,
+        Err(_) => {
+            return SourceFetchResult {
+                articles: vec![source_failure(source, "network_request_failed")],
+                etag: state.etag.clone(),
+                last_modified: state.last_modified.clone(),
+                failure: Some("network_request_failed".into()),
+            }
+        }
+    };
+    let status = response.status().as_u16();
+    if status == 304 {
+        return SourceFetchResult {
+            articles: Vec::new(),
+            etag: response_header(&response, "etag").or_else(|| state.etag.clone()),
+            last_modified: response_header(&response, "last-modified")
+                .or_else(|| state.last_modified.clone()),
+            failure: None,
+        };
+    }
+    if !(200..300).contains(&status) {
+        let reason = format!("http_status_{status}");
+        return SourceFetchResult {
+            articles: vec![source_failure(source, &reason)],
+            etag: state.etag.clone(),
+            last_modified: state.last_modified.clone(),
+            failure: Some(reason),
+        };
+    }
+    let etag = response_header(&response, "etag");
+    let last_modified = response_header(&response, "last-modified");
+    let bytes = match read_response(&mut response) {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            return SourceFetchResult {
+                articles: vec![source_failure(source, &reason)],
+                etag,
+                last_modified,
+                failure: Some(reason),
+            }
+        }
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let mut entries = match source.kind.trim() {
+        "rss" | "atom" => parse_xml_entries(source, &text),
+        "json" => parse_json_entries(source, &text),
+        "web" => vec![web_article(source, &text)],
+        _ => Vec::new(),
+    };
+    if entries.is_empty() {
+        return SourceFetchResult {
+            articles: vec![source_failure(source, "source_payload_has_no_articles")],
+            etag,
+            last_modified,
+            failure: Some("source_payload_has_no_articles".into()),
+        };
+    }
+    entries.truncate(MAX_FEED_ITEMS_PER_SOURCE);
+    let mut inline_content_remaining = MAX_INLINE_CONTENT_ENRICHMENTS_PER_SOURCE;
+    for entry in &mut entries {
+        entry.etag = etag.clone();
+        entry.last_modified = last_modified.clone();
+        if entry.body.is_none() {
+            if inline_content_remaining > 0 {
+                inline_content_remaining -= 1;
+                enrich_public_article(agent, entry);
+            } else {
+                // Do not pretend the article has no body.  The permanent
+                // archive's bounded backfill lane will retry this evidence
+                // gap without re-collecting or re-triaging the feed item.
+                entry.incomplete_reason = Some("deferred_content_backfill".into());
+            }
+        }
+        if entry.body_status.as_deref() == Some("complete") {
+            let (images, videos) = extract_public_media(
+                agent,
+                &entry.url,
+                entry.html.as_deref().unwrap_or_default(),
+                MAX_INLINE_IMAGES_PER_ARTICLE,
+            );
+            entry.images = images;
+            entry.videos = videos;
+        }
+    }
+    SourceFetchResult {
+        articles: entries,
+        etag,
+        last_modified,
+        failure: None,
+    }
+}
+
+fn element_value(fragment: &str, tag: &str) -> Option<String> {
+    let start = fragment.find(&format!("<{tag}"))?;
+    let after = &fragment[start..];
+    let content_start = after.find('>')? + 1;
+    let after_open = &after[content_start..];
+    let end = after_open.find(&format!("</{tag}"))?;
+    let text = strip_html(&after_open[..end]);
+    safe_text(&text, 64 * 1024)
+}
+
+/// Feed publishers use a mixture of RFC 3339, RFC 2822 and bare calendar
+/// dates.  The permanent archive and publication bundle have one canonical
+/// representation: UTC RFC 3339 to whole seconds.  Keeping that conversion at
+/// ingestion prevents an otherwise valid source from becoming ineligible for
+/// a later, immutable daily package merely because its feed chose `pubDate`.
+/// Unknown formats deliberately remain absent instead of inventing an event
+/// time from the collection clock.
+fn normalize_published_at(value: Option<String>) -> Option<String> {
+    let value = value.and_then(|value| safe_text(&value, 4_096))?;
+    let normalized = DateTime::parse_from_rfc3339(&value)
+        .or_else(|_| DateTime::parse_from_rfc2822(&value))
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .or_else(|_| {
+            NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|timestamp| timestamp.and_utc())
+                .ok_or(())
+        })
+        .or_else(|_| {
+            value
+                .parse::<i64>()
+                .ok()
+                .and_then(|timestamp| match value.len() {
+                    10 => DateTime::from_timestamp(timestamp, 0),
+                    13 => DateTime::from_timestamp_millis(timestamp),
+                    _ => None,
+                })
+                .ok_or(())
+        })
+        .ok()?;
+    Some(normalized.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+fn attribute_value(fragment: &str, tag: &str, attribute: &str) -> Option<String> {
+    let start = fragment.find(&format!("<{tag}"))?;
+    let element = &fragment[start..fragment[start..].find('>')? + start + 1];
+    for quote in ['\"', '\''] {
+        let key = format!("{attribute}={quote}");
+        if let Some(value) = element
+            .split(&key)
+            .nth(1)
+            .and_then(|tail| tail.split(quote).next())
+        {
+            if let Some(value) = safe_text(value, 8 * 1024) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn xml_fragments<'a>(xml: &'a str, open: &str, close: &str) -> Vec<&'a str> {
+    let mut remaining = xml;
+    let mut output = Vec::new();
+    while let Some(start) = remaining.find(open) {
+        let candidate = &remaining[start..];
+        let Some(end) = candidate.find(close) else {
+            break;
+        };
+        let end = end + close.len();
+        output.push(&candidate[..end]);
+        remaining = &candidate[end..];
+        if output.len() >= MAX_BATCH_ITEMS {
+            break;
+        }
+    }
+    output
+}
+
+fn parse_xml_entries(source: &HttpSource, xml: &str) -> Vec<CollectedArticle> {
+    let items = xml_fragments(xml, "<item", "</item>");
+    let entries = if items.is_empty() {
+        xml_fragments(xml, "<entry", "</entry>")
+    } else {
+        items
+    };
+    entries
+        .into_iter()
+        .filter_map(|fragment| {
+            let title = element_value(fragment, "title")?;
+            let url = attribute_value(fragment, "link", "href")
+                .or_else(|| element_value(fragment, "link"))?;
+            let guid = element_value(fragment, "guid")
+                .or_else(|| element_value(fragment, "id"))
+                .unwrap_or_else(|| sha256_hex(url.as_bytes()));
+            // RSS `content:encoded` is frequently the only complete public
+            // article body. Treat it as durable evidence immediately instead
+            // of throwing it away and later spending one of the scarce page
+            // backfill requests on the same source.
+            let inline_html = element_value(fragment, "content:encoded")
+                .or_else(|| element_value(fragment, "content"));
+            let inline_body = inline_html
+                .as_deref()
+                .map(clean_article_html)
+                .map(|html| strip_html(&html))
+                .and_then(|body| safe_text(&body, MAX_TEXT_BYTES))
+                .filter(|body| body.len() >= 80);
+            let summary = element_value(fragment, "description")
+                .or_else(|| element_value(fragment, "summary"))
+                .or_else(|| inline_body.clone())
+                .unwrap_or_default();
+            Some(CollectedArticle {
+                source_id: source.source_id.clone(),
+                guid,
+                url,
+                title,
+                summary,
+                published_at: normalize_published_at(
+                    element_value(fragment, "pubDate")
+                        .or_else(|| element_value(fragment, "updated"))
+                        .or_else(|| element_value(fragment, "published")),
+                ),
+                etag: None,
+                last_modified: None,
+                fetch_status: "fetched".into(),
+                language: source.language.clone(),
+                body_status: inline_body.as_ref().map(|_| "complete".into()),
+                body: inline_body,
+                html: inline_html,
+                incomplete_reason: None,
+                images: Vec::new(),
+                videos: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn json_string(value: &Value, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        value
+            .get(*name)
+            .and_then(Value::as_str)
+            .and_then(|value| safe_text(value, 64 * 1024))
+    })
+}
+
+fn parse_json_entries(source: &HttpSource, text: &str) -> Vec<CollectedArticle> {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return Vec::new();
+    };
+    let items = value
+        .as_array()
+        .or_else(|| value.get("items").and_then(Value::as_array))
+        .or_else(|| value.get("articles").and_then(Value::as_array))
+        .or_else(|| value.get("results").and_then(Value::as_array))
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    items
+        .iter()
+        .filter_map(|value| {
+            let title = json_string(value, &["title", "headline"])?;
+            let url = json_string(value, &["url", "link", "canonicalUrl"])?;
+            let guid = json_string(value, &["guid", "id", "uuid"])
+                .unwrap_or_else(|| sha256_hex(url.as_bytes()));
+            Some(CollectedArticle {
+                source_id: source.source_id.clone(),
+                guid,
+                url,
+                title,
+                summary: json_string(value, &["summary", "description", "excerpt"])
+                    .unwrap_or_default(),
+                published_at: normalize_published_at(json_string(
+                    value,
+                    &["publishedAt", "published_at", "date", "updatedAt"],
+                )),
+                etag: None,
+                last_modified: None,
+                fetch_status: "fetched".into(),
+                language: source.language.clone(),
+                body: json_string(value, &["body", "content", "text"]),
+                html: json_string(value, &["html", "contentHtml"]),
+                body_status: None,
+                incomplete_reason: None,
+                images: Vec::new(),
+                videos: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn noncontent_html(value: &str) -> String {
+    let mut cleaned = value.to_owned();
+    // These nodes contain scripts, site chrome, ads, recommendation rails or
+    // embedded players rather than article evidence. Keep the original HTML
+    // blob separately, but exclude them from the cleaned model input.
+    for tag in [
+        "script", "style", "noscript", "template", "nav", "header", "footer", "aside", "form",
+        "svg",
+    ] {
+        cleaned = remove_html_tag_blocks(&cleaned, tag);
+    }
+    while let Some(start) = cleaned.find("<!--") {
+        let Some(end) = cleaned[start + 4..].find("-->") else {
+            cleaned.truncate(start);
+            break;
+        };
+        cleaned.replace_range(start..start + 4 + end + 3, " ");
+    }
+    let lower = cleaned.to_ascii_lowercase();
+    for tag in ["article", "main"] {
+        let needle = format!("<{tag}");
+        if let Some(start) = lower.find(&needle) {
+            if let Some(open_end) = lower[start..].find('>') {
+                let body_start = start + open_end + 1;
+                if let Some(close_relative) = lower[body_start..].find(&format!("</{tag}>")) {
+                    return cleaned[body_start..body_start + close_relative].to_owned();
+                }
+            }
+        }
+    }
+    cleaned
+}
+
+fn remove_html_tag_blocks(value: &str, tag: &str) -> String {
+    let mut output = value.to_owned();
+    let lower_tag = tag.to_ascii_lowercase();
+    loop {
+        let lower = output.to_ascii_lowercase();
+        let needle = format!("<{lower_tag}");
+        let Some(start) = lower.find(&needle) else {
+            break;
+        };
+        let after_name = start + needle.len();
+        if lower
+            .as_bytes()
+            .get(after_name)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            let next = after_name.saturating_add(1);
+            output.replace_range(start..next.min(output.len()), " ");
+            continue;
+        }
+        let Some(open_end) = lower[after_name..].find('>') else {
+            output.truncate(start);
+            break;
+        };
+        let body_start = after_name + open_end + 1;
+        let closing = format!("</{lower_tag}>");
+        let end = lower[body_start..]
+            .find(&closing)
+            .map(|relative| body_start + relative + closing.len())
+            .unwrap_or(body_start);
+        output.replace_range(start..end, " ");
+    }
+    output
+}
+
+fn clean_article_html(value: &str) -> String {
+    noncontent_html(value)
+}
+
+fn strip_html(value: &str) -> String {
+    let mut text = String::with_capacity(value.len());
+    let mut in_tag = false;
+    for character in value.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn web_article(source: &HttpSource, html: &str) -> CollectedArticle {
+    let title = element_value(html, "title").unwrap_or_else(|| source.source_id.clone());
+    let body = strip_html(&clean_article_html(html));
+    CollectedArticle {
+        source_id: source.source_id.clone(),
+        guid: sha256_hex(source.url.as_bytes()),
+        url: source.url.clone(),
+        title,
+        summary: body.chars().take(1_000).collect(),
+        published_at: None,
+        etag: None,
+        last_modified: None,
+        fetch_status: "fetched".into(),
+        language: source.language.clone(),
+        body: safe_text(&body, MAX_TEXT_BYTES),
+        html: Some(html.to_owned()),
+        body_status: None,
+        incomplete_reason: None,
+        images: Vec::new(),
+        videos: Vec::new(),
+    }
+}
+
+fn follow_public_article_redirects(
+    agent: &ureq::Agent,
+    initial_url: &str,
+) -> Result<ureq::http::Response<ureq::Body>, &'static str> {
+    let mut current = public_fetch_url(initial_url).map_err(|_| "article_url_not_public")?;
+    for redirect_count in 0..=MAX_PUBLIC_REDIRECTS {
+        let response = agent
+            .get(&current)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1")
+            .call()
+            .map_err(|_| "article_network_request_failed")?;
+        let status = response.status().as_u16();
+        if !(300..400).contains(&status) {
+            return Ok(response);
+        }
+        if redirect_count == MAX_PUBLIC_REDIRECTS {
+            return Err("article_redirect_limit");
+        }
+        let location =
+            response_header(&response, "location").ok_or("article_redirect_missing_location")?;
+        current = absolute_public_url(&current, &location).ok_or("article_redirect_not_public")?;
+    }
+    Err("article_redirect_limit")
+}
+
+fn enrich_public_article(agent: &ureq::Agent, article: &mut CollectedArticle) {
+    // Redirect handling is deliberately manual.  Every hop is normalized and
+    // revalidated before it can be requested, so a public Google/RSS redirect
+    // cannot silently become a loopback or LAN fetch.
+    let mut response = match follow_public_article_redirects(agent, &article.url) {
+        Ok(response) => response,
+        Err(reason) => {
+            article.body_status = Some("unavailable".into());
+            article.incomplete_reason = Some(reason.into());
+            return;
+        }
+    };
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        article.body_status = Some("unavailable".into());
+        article.incomplete_reason = Some(format!("article_http_status_{status}"));
+        return;
+    }
+    let Ok(bytes) = read_response(&mut response) else {
+        article.body_status = Some("truncated".into());
+        article.incomplete_reason = Some("article_response_too_large_or_unreadable".into());
+        return;
+    };
+    let html = String::from_utf8_lossy(&bytes).into_owned();
+    let cleaned_html = clean_article_html(&html);
+    let body = strip_html(&cleaned_html);
+    if body.len() < 80 {
+        article.body_status = Some("unavailable".into());
+        article.incomplete_reason = Some("article_body_missing_or_paywall".into());
+        return;
+    }
+    article.body = Some(body);
+    article.html = Some(cleaned_html);
+    article.body_status = Some("complete".into());
+}
+
+/// This deliberately keeps extraction conservative: the permanent archive
+/// stores only decodable public images and HTTPS video locations.  Image URLs
+/// are downloaded once and content-addressed by the archive layer; video
+/// bytes are never fetched or retained.
+fn extract_public_media(
+    agent: &ureq::Agent,
+    article_url: &str,
+    html: &str,
+    image_limit: usize,
+) -> (Vec<ArchiveImageInput>, Vec<ArchiveVideoInput>) {
+    let mut images = Vec::new();
+    let mut seen_images = std::collections::BTreeSet::new();
+    for element in html_elements(html, "img") {
+        if images.len() >= image_limit.min(MAX_IMAGES_PER_ARTICLE) {
+            break;
+        }
+        let Some(source) = element_attribute(element, "src")
+            .or_else(|| element_attribute(element, "data-src"))
+            .or_else(|| {
+                element_attribute(element, "srcset").and_then(|value| {
+                    value
+                        .split(',')
+                        .next()
+                        .and_then(|candidate| candidate.split_whitespace().next())
+                        .map(str::to_owned)
+                })
+            })
+        else {
+            continue;
+        };
+        let Some(url) = absolute_public_url(article_url, &source) else {
+            continue;
+        };
+        if !seen_images.insert(url.clone()) {
+            continue;
+        }
+        let alt = element_attribute(element, "alt");
+        let caption = element_attribute(element, "data-caption")
+            .or_else(|| element_attribute(element, "title"))
+            .or_else(|| alt.clone());
+        let credit = element_attribute(element, "data-credit")
+            .or_else(|| element_attribute(element, "data-copyright"))
+            .or_else(|| element_attribute(element, "credit"));
+        if let Some(image) = fetch_public_image(agent, &url, alt, caption, credit) {
+            images.push(image);
+        }
+    }
+
+    let mut videos = Vec::new();
+    let mut seen_videos = std::collections::BTreeSet::new();
+    for tag in ["video", "source", "iframe"] {
+        for element in html_elements(html, tag) {
+            if videos.len() >= MAX_VIDEOS_PER_ARTICLE {
+                break;
+            }
+            let Some(raw) = element_attribute(element, "src") else {
+                continue;
+            };
+            let Some(url) = absolute_public_url(article_url, &raw) else {
+                continue;
+            };
+            let known_embed = matches!(tag, "iframe")
+                && ["youtube.", "youtu.be", "vimeo.", "dailymotion.", "tiktok."]
+                    .iter()
+                    .any(|marker| url.contains(marker));
+            if (tag == "iframe" && !known_embed) || !seen_videos.insert(url.clone()) {
+                continue;
+            }
+            videos.push(ArchiveVideoInput {
+                url,
+                paragraph_index: None,
+                poster_sha256: None,
+            });
+        }
+    }
+    (images, videos)
+}
+
+fn html_elements<'a>(html: &'a str, tag: &str) -> Vec<&'a str> {
+    let lower = html.to_ascii_lowercase();
+    let needle = format!("<{tag}");
+    let mut offset = 0;
+    let mut output = Vec::new();
+    while let Some(position) = lower[offset..].find(&needle) {
+        let start = offset + position;
+        let after_name = start + needle.len();
+        if lower
+            .as_bytes()
+            .get(after_name)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            offset = after_name;
+            continue;
+        }
+        let Some(close) = lower[after_name..].find('>') else {
+            break;
+        };
+        let end = after_name + close + 1;
+        output.push(&html[start..end]);
+        offset = end;
+    }
+    output
+}
+
+fn element_attribute(element: &str, wanted: &str) -> Option<String> {
+    let lower = element.to_ascii_lowercase();
+    let wanted = wanted.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(position) = lower[cursor..].find(&wanted) {
+        let start = cursor + position;
+        let before = lower.as_bytes().get(start.wrapping_sub(1)).copied();
+        let after = lower.as_bytes().get(start + wanted.len()).copied();
+        if before.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            || after
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            cursor = start + wanted.len();
+            continue;
+        }
+        let remaining = &element[start + wanted.len()..];
+        let equals = remaining.find('=')?;
+        if !remaining[..equals].trim().is_empty() {
+            cursor = start + wanted.len();
+            continue;
+        }
+        let value = remaining[equals + 1..].trim_start();
+        let value = if let Some(quote) = value
+            .chars()
+            .next()
+            .filter(|quote| *quote == '\"' || *quote == '\'')
+        {
+            value[quote.len_utf8()..].split(quote).next()?
+        } else {
+            value.split_whitespace().next()?.trim_end_matches('>')
+        };
+        return safe_text(value, 8 * 1024);
+    }
+    None
+}
+
+fn absolute_public_url(base: &str, value: &str) -> Option<String> {
+    let base = reqwest::Url::parse(base).ok()?;
+    let joined = base.join(value.trim()).ok()?;
+    public_fetch_url(joined.as_str()).ok()
+}
+
+fn fetch_public_image(
+    agent: &ureq::Agent,
+    url: &str,
+    alt: Option<String>,
+    caption: Option<String>,
+    credit: Option<String>,
+) -> Option<ArchiveImageInput> {
+    let mut response = agent
+        .get(url)
+        .header("User-Agent", USER_AGENT)
+        .header(
+            "Accept",
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.5",
+        )
+        .call()
+        .ok()?;
+    if !(200..300).contains(&response.status().as_u16()) {
+        return None;
+    }
+    let mime = response_header(&response, "content-type");
+    let bytes = read_response(&mut response).ok()?;
+    image::load_from_memory(&bytes).ok()?;
+    Some(ArchiveImageInput {
+        bytes,
+        mime,
+        paragraph_index: None,
+        alt,
+        caption,
+        credit,
+        source_url: Some(url.to_owned()),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CollectionResult {
+    pub received: u64,
+    pub collected: u64,
+    pub duplicates: u64,
+    pub failed: u64,
+}
+
+/// Aggregate-only result for the bounded legacy evidence backfill.  This is
+/// deliberately separate from collection: it must never create a new article
+/// fingerprint, requeue triage, or inflate the new-item count.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ContentBackfillResult {
+    pub attempted: u64,
+    pub completed: u64,
+    pub retried: u64,
+}
+
+/// A bounded, operator-safe category.  It is stored in the permanent catalog
+/// with timestamps and retry schedule, while command output remains aggregate
+/// only and never exposes an article URL or body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ContentBackfillFailure {
+    reason: &'static str,
+}
+
+impl ContentBackfillFailure {
+    fn new(reason: &'static str) -> Self {
+        Self { reason }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ContentBackfillCandidate {
+    article_id: String,
+    fingerprint: String,
+    url: String,
+    title: String,
+    summary: String,
+}
+
+#[derive(Debug)]
+struct BackfilledEvidence {
+    text: String,
+    html: Option<String>,
+    images: Vec<ArchiveImageInput>,
+    videos: Vec<ArchiveVideoInput>,
+}
+
+trait ContentBackfillPort: Sync {
+    fn fetch(
+        &self,
+        candidate: &ContentBackfillCandidate,
+    ) -> Result<BackfilledEvidence, ContentBackfillFailure>;
+}
+
+struct PublicContentBackfillPort {
+    agent: ureq::Agent,
+}
+
+impl PublicContentBackfillPort {
+    fn new() -> Self {
+        Self {
+            agent: ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(Duration::from_secs(45)))
+                .timeout_connect(Some(Duration::from_secs(8)))
+                .timeout_recv_response(Some(Duration::from_secs(20)))
+                .timeout_recv_body(Some(Duration::from_secs(25)))
+                // `follow_public_article_redirects` validates every hop.
+                .max_redirects(0)
+                .build()
+                .into(),
+        }
+    }
+}
+
+fn classify_content_backfill_failure(reason: Option<&str>) -> ContentBackfillFailure {
+    let reason = reason.unwrap_or_default();
+    let category = if reason == "article_url_not_public" {
+        "url_not_public"
+    } else if reason == "article_network_request_failed" {
+        "network_request_failed"
+    } else if reason.starts_with("article_http_status_429") {
+        "http_rate_limited"
+    } else if reason.starts_with("article_http_status_401")
+        || reason.starts_with("article_http_status_403")
+    {
+        "http_access_denied"
+    } else if reason.starts_with("article_http_status_404")
+        || reason.starts_with("article_http_status_410")
+    {
+        "http_not_found"
+    } else if reason.starts_with("article_http_status_5") {
+        "http_server_error"
+    } else if reason.starts_with("article_http_status_") {
+        "http_status_rejected"
+    } else if reason == "article_response_too_large_or_unreadable" {
+        "response_unreadable_or_too_large"
+    } else if reason == "article_body_missing_or_paywall" {
+        "body_missing_or_paywall"
+    } else {
+        "content_extraction_failed"
+    };
+    ContentBackfillFailure::new(category)
+}
+
+impl ContentBackfillPort for PublicContentBackfillPort {
+    fn fetch(
+        &self,
+        candidate: &ContentBackfillCandidate,
+    ) -> Result<BackfilledEvidence, ContentBackfillFailure> {
+        let mut article = CollectedArticle {
+            source_id: "legacy-content-backfill".into(),
+            guid: candidate.article_id.clone(),
+            url: candidate.url.clone(),
+            title: candidate.title.clone(),
+            summary: candidate.summary.clone(),
+            published_at: None,
+            etag: None,
+            last_modified: None,
+            fetch_status: "fetched".into(),
+            language: None,
+            body: None,
+            html: None,
+            body_status: None,
+            incomplete_reason: None,
+            images: Vec::new(),
+            videos: Vec::new(),
+        };
+        enrich_public_article(&self.agent, &mut article);
+        if article.body_status.as_deref() != Some("complete") {
+            return Err(classify_content_backfill_failure(
+                article.incomplete_reason.as_deref(),
+            ));
+        }
+        let text = article
+            .body
+            .take()
+            .ok_or_else(|| ContentBackfillFailure::new("content_extraction_failed"))?;
+        let html = article.html.take();
+        let (images, videos) = html
+            .as_deref()
+            .map(|html| {
+                extract_public_media(&self.agent, &candidate.url, html, MAX_IMAGES_PER_ARTICLE)
+            })
+            .unwrap_or_default();
+        Ok(BackfilledEvidence {
+            text,
+            html,
+            images,
+            videos,
+        })
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn safe_text(value: &str, max: usize) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= max).then(|| value.to_owned())
+}
+
+fn valid_batch_id(value: &str) -> Option<String> {
+    let value = safe_text(value, 120)?;
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        .then_some(value)
+}
+
+fn new_batch_id() -> String {
+    format!("collect-{}", uuid::Uuid::new_v4())
+}
+
+fn normalized_url(value: &str) -> Result<String, ()> {
+    let mut url = reqwest::Url::parse(value.trim()).map_err(|_| ())?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(());
+    }
+    url.set_fragment(None);
+    if (url.scheme() == "https" && url.port() == Some(443))
+        || (url.scheme() == "http" && url.port() == Some(80))
+    {
+        let _ = url.set_port(None);
+    }
+    Ok(url.to_string())
+}
+
+/// Worker-managed sources must be public Internet locations. This rejects
+/// obvious loopback/LAN literal URLs and disabled redirects prevent a public
+/// configured endpoint from silently hopping to a different endpoint.
+fn public_fetch_url(value: &str) -> Result<String, ()> {
+    let normalized = normalized_url(value)?;
+    let url = reqwest::Url::parse(&normalized).map_err(|_| ())?;
+    let host = url.host_str().ok_or(())?.trim_matches(['[', ']']);
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return Err(());
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let permitted = match ip {
+            IpAddr::V4(ip) => {
+                !(ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_multicast()
+                    || ip.is_broadcast())
+            }
+            IpAddr::V6(ip) => {
+                !(ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_multicast()
+                    || ip.is_unicast_link_local()
+                    || ip.is_unique_local())
+            }
+        };
+        if !permitted {
+            return Err(());
+        }
+    }
+    Ok(normalized)
+}
+
+fn article_identity(source_id: &str, guid: &str, url: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(source_id.as_bytes());
+    digest.update([0]);
+    digest.update(guid.as_bytes());
+    digest.update([0]);
+    digest.update(url.as_bytes());
+    format!("source:{}", sha256_hex(&digest.finalize()))
+}
+
+fn record_fingerprint(article: &CollectedArticle, normalized_url: &str) -> String {
+    let canonical = serde_json::json!({
+        "sourceId": article.source_id.trim(),
+        "guid": article.guid.trim(),
+        "normalizedUrl": normalized_url,
+        "title": article.title.trim(),
+        "summary": article.summary.trim(),
+        "publishedAt": article.published_at.as_deref().unwrap_or("").trim(),
+        "etag": article.etag.as_deref().unwrap_or("").trim(),
+        "lastModified": article.last_modified.as_deref().unwrap_or("").trim(),
+        "body": article.body.as_deref().unwrap_or(""),
+        "html": article.html.as_deref().unwrap_or(""),
+    });
+    sha256_hex(
+        serde_json::to_string(&canonical)
+            .unwrap_or_default()
+            .as_bytes(),
+    )
+}
+
+fn ensure_source_state_schema(connection: &Connection) -> Result<(), ()> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS intelligence_collection_sources (
+                 source_id TEXT PRIMARY KEY,
+                 source_url TEXT NOT NULL,
+                 source_kind TEXT NOT NULL,
+                 etag TEXT,
+                 last_modified TEXT,
+                 next_fetch_at INTEGER NOT NULL DEFAULT 0,
+                 failure_count INTEGER NOT NULL DEFAULT 0,
+                 last_success_at INTEGER,
+                 last_failure_at INTEGER,
+                 last_failure_reason TEXT,
+                 updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS intelligence_collection_sources_schedule_idx
+                 ON intelligence_collection_sources(next_fetch_at);",
+        )
+        .map_err(|_| ())
+}
+
+fn source_fetch_state(path: &Path, source_id: &str) -> Result<SourceFetchState, ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_source_state_schema(&connection)?;
+    connection
+        .query_row(
+            "SELECT etag,last_modified,next_fetch_at,failure_count
+             FROM intelligence_collection_sources WHERE source_id=?1",
+            [source_id.trim()],
+            |row| {
+                Ok(SourceFetchState {
+                    etag: row.get(0)?,
+                    last_modified: row.get(1)?,
+                    next_fetch_at: row.get(2)?,
+                    failure_count: row.get::<_, i64>(3)?.clamp(0, i64::from(u32::MAX)) as u32,
+                })
+            },
+        )
+        .optional()
+        .map(|value| value.unwrap_or_default())
+        .map_err(|_| ())
+}
+
+fn source_interval_seconds(source: &HttpSource) -> i64 {
+    source
+        .interval_seconds
+        .and_then(|value| i64::try_from(value).ok())
+        .filter(|value| (SOURCE_MIN_INTERVAL_SECONDS..=SOURCE_MAX_INTERVAL_SECONDS).contains(value))
+        .unwrap_or(SOURCE_DEFAULT_INTERVAL_SECONDS)
+}
+
+fn retry_delay_seconds(previous_failures: u32) -> i64 {
+    let exponent = previous_failures.min(7);
+    let seconds = SOURCE_MIN_INTERVAL_SECONDS.saturating_mul(1_i64 << exponent);
+    seconds.min(SOURCE_MAX_BACKOFF_SECONDS)
+}
+
+fn update_source_fetch_state(
+    path: &Path,
+    source: &HttpSource,
+    previous: &SourceFetchState,
+    result: &SourceFetchResult,
+) -> Result<(), ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_source_state_schema(&connection)?;
+    let now = Utc::now().timestamp();
+    let (failure_count, next_fetch_at, last_success_at, last_failure_at, last_failure_reason) =
+        if let Some(reason) = result.failure.as_deref() {
+            let failures = previous.failure_count.saturating_add(1);
+            (
+                failures,
+                now.saturating_add(retry_delay_seconds(failures.saturating_sub(1))),
+                None,
+                Some(now),
+                Some(reason),
+            )
+        } else {
+            (
+                0,
+                now.saturating_add(source_interval_seconds(source)),
+                Some(now),
+                None,
+                None,
+            )
+        };
+    connection
+        .execute(
+            "INSERT INTO intelligence_collection_sources(
+                 source_id,source_url,source_kind,etag,last_modified,next_fetch_at,failure_count,
+                 last_success_at,last_failure_at,last_failure_reason,updated_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(source_id) DO UPDATE SET
+                 source_url=excluded.source_url,source_kind=excluded.source_kind,
+                 etag=excluded.etag,last_modified=excluded.last_modified,
+                 next_fetch_at=excluded.next_fetch_at,failure_count=excluded.failure_count,
+                 last_success_at=COALESCE(excluded.last_success_at,intelligence_collection_sources.last_success_at),
+                 last_failure_at=excluded.last_failure_at,last_failure_reason=excluded.last_failure_reason,
+                 updated_at=excluded.updated_at",
+            params![
+                source.source_id.trim(), source.url.trim(), source.kind.trim(),
+                result.etag.as_deref(), result.last_modified.as_deref(), next_fetch_at,
+                i64::from(failure_count), last_success_at, last_failure_at, last_failure_reason, now,
+            ],
+        )
+        .map_err(|_| ())?;
+    Ok(())
+}
+
+fn ensure_collection_schema(connection: &Connection) -> Result<(), ()> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS intelligence_collection_records (
+                 source_id TEXT NOT NULL,
+                 guid TEXT NOT NULL,
+                 normalized_url TEXT NOT NULL,
+                 article_id TEXT NOT NULL,
+                 title TEXT NOT NULL,
+                 published_at TEXT,
+                 etag TEXT,
+                 last_modified TEXT,
+                 fetch_status TEXT NOT NULL,
+                 failure_reason TEXT,
+                 language TEXT,
+                 batch_id TEXT NOT NULL,
+                 record_fingerprint TEXT NOT NULL,
+                 collected_at INTEGER NOT NULL,
+                 PRIMARY KEY(source_id,guid,normalized_url)
+             );
+             CREATE INDEX IF NOT EXISTS intelligence_collection_batch_idx
+                 ON intelligence_collection_records(batch_id,collected_at);
+             CREATE TABLE IF NOT EXISTS intelligence_collection_batches (
+                 batch_id TEXT PRIMARY KEY,
+                 received_count INTEGER NOT NULL,
+                 collected_count INTEGER NOT NULL,
+                 duplicate_count INTEGER NOT NULL,
+                 failed_count INTEGER NOT NULL,
+                 completed_at INTEGER NOT NULL
+             );",
+        )
+        .map_err(|_| ())?;
+    // Catalogs created before failure diagnostics are upgraded in place.
+    // SQLite has no portable ADD COLUMN IF NOT EXISTS.
+    let _ = connection.execute(
+        "ALTER TABLE intelligence_collection_records ADD COLUMN failure_reason TEXT",
+        [],
+    );
+    Ok(())
+}
+
+/// Bootstrap only the tables collection itself needs. The desktop store owns
+/// the richer relation/model schema and upgrades this compatible base later.
+fn ensure_article_schema(connection: &Connection) -> Result<(), ()> {
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
+         CREATE TABLE IF NOT EXISTS intelligence_articles (
+            article_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,url TEXT,source_key TEXT,
+            source_name TEXT,title TEXT NOT NULL,summary TEXT,body TEXT,evidence_fingerprint TEXT,
+            published_at TEXT,language TEXT,media_json TEXT,
+            triage_state TEXT NOT NULL DEFAULT 'queued'
+              CHECK (triage_state IN ('queued','processing','keep','filter','failed')),
+            triage_attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER,lease_owner TEXT,
+            lease_until INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS intelligence_articles_queue_idx
+           ON intelligence_articles(triage_state,lease_until,published_at,created_at);
+         CREATE INDEX IF NOT EXISTS intelligence_articles_fingerprint_idx
+           ON intelligence_articles(fingerprint);
+         CREATE VIRTUAL TABLE IF NOT EXISTS intelligence_news_fts USING fts5(
+            article_id UNINDEXED,title,summary,body,entities,
+            tokenize='unicode61 remove_diacritics 2'
+         );",
+        )
+        .map_err(|_| ())?;
+    // The original metadata-only catalog predates the canonical URL column.
+    // Add it without rebuilding the permanent table; backfill also has a
+    // collection-record fallback for rows that remain null after this upgrade.
+    if let Err(error) =
+        connection.execute("ALTER TABLE intelligence_articles ADD COLUMN url TEXT", [])
+    {
+        if !error.to_string().contains("duplicate column name") {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn sparse_terms(value: &str) -> String {
+    value
+        .split_whitespace()
+        .take(2_000)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn upsert_article(
+    path: &Path,
+    article_id: &str,
+    fingerprint: &str,
+    article: &CollectedArticle,
+    normalized: &str,
+) -> Result<(), ()> {
+    let mut connection = Connection::open(path).map_err(|_| ())?;
+    ensure_article_schema(&connection)?;
+    let tx = connection.transaction().map_err(|_| ())?;
+    let existing = tx
+        .query_row(
+            "SELECT fingerprint FROM intelligence_articles WHERE article_id=?1",
+            [article_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    let now = Utc::now().timestamp_millis();
+    if existing.as_deref() == Some(fingerprint) {
+        tx.execute(
+            "UPDATE intelligence_articles SET url=?2,source_key=?3,title=?4,summary=?5,
+             body=COALESCE(?6,body),published_at=?7,language=?8,updated_at=?9 WHERE article_id=?1",
+            params![
+                article_id,
+                normalized,
+                article.source_id.trim(),
+                article.title.trim(),
+                safe_text(&article.summary, 64 * 1024),
+                article.body.as_deref(),
+                article.published_at.as_deref(),
+                article.language.as_deref(),
+                now
+            ],
+        )
+        .map_err(|_| ())?;
+    } else {
+        tx.execute(
+            "INSERT INTO intelligence_articles(article_id,fingerprint,url,source_key,title,summary,body,published_at,language,triage_state,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued',?10,?10)
+             ON CONFLICT(article_id) DO UPDATE SET fingerprint=excluded.fingerprint,url=excluded.url,
+               source_key=excluded.source_key,title=excluded.title,summary=excluded.summary,body=excluded.body,
+               published_at=excluded.published_at,language=excluded.language,triage_state='queued',
+               triage_attempts=0,next_retry_at=NULL,lease_owner=NULL,lease_until=NULL,updated_at=excluded.updated_at",
+            params![article_id, fingerprint, normalized, article.source_id.trim(), article.title.trim(),
+              safe_text(&article.summary, 64 * 1024), article.body.as_deref(), article.published_at.as_deref(),
+              article.language.as_deref(), now],
+        ).map_err(|_| ())?;
+    }
+    let body: Option<String> = tx
+        .query_row(
+            "SELECT body FROM intelligence_articles WHERE article_id=?1",
+            [article_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| ())?;
+    tx.execute(
+        "DELETE FROM intelligence_news_fts WHERE article_id=?1",
+        [article_id],
+    )
+    .map_err(|_| ())?;
+    tx.execute(
+        "INSERT INTO intelligence_news_fts(article_id,title,summary,body,entities) VALUES(?1,?2,?3,?4,?5)",
+        params![article_id, article.title.trim(), safe_text(&article.summary, 64 * 1024), body,
+          sparse_terms(&format!("{} {}", article.title, article.summary))],
+    ).map_err(|_| ())?;
+    tx.commit().map_err(|_| ())
+}
+
+fn paragraphs(body: &str) -> Vec<ArchiveParagraphInput> {
+    body.split("\n\n")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|text| ArchiveParagraphInput {
+            text: text.to_owned(),
+            level: None,
+        })
+        .collect()
+}
+
+fn record_changed(
+    path: &Path,
+    article: &CollectedArticle,
+    normalized: &str,
+    fingerprint: &str,
+) -> Result<bool, ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_collection_schema(&connection)?;
+    let existing = connection
+        .query_row(
+            "SELECT record_fingerprint FROM intelligence_collection_records
+             WHERE source_id=?1 AND guid=?2 AND normalized_url=?3",
+            params![article.source_id.trim(), article.guid.trim(), normalized],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    Ok(existing.as_deref() != Some(fingerprint))
+}
+
+fn store_record(
+    path: &Path,
+    batch_id: &str,
+    article: &CollectedArticle,
+    normalized: &str,
+    article_id: &str,
+    fingerprint: &str,
+) -> Result<(), ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_collection_schema(&connection)?;
+    let now = Utc::now().timestamp_millis();
+    connection
+        .execute(
+            "INSERT INTO intelligence_collection_records(
+                 source_id,guid,normalized_url,article_id,title,published_at,etag,last_modified,
+                 fetch_status,failure_reason,language,batch_id,record_fingerprint,collected_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+             ON CONFLICT(source_id,guid,normalized_url) DO UPDATE SET
+                 article_id=excluded.article_id,title=excluded.title,published_at=excluded.published_at,
+                 etag=excluded.etag,last_modified=excluded.last_modified,fetch_status=excluded.fetch_status,
+                 failure_reason=excluded.failure_reason,
+                 language=excluded.language,batch_id=excluded.batch_id,
+                 record_fingerprint=excluded.record_fingerprint,collected_at=excluded.collected_at",
+            params![
+                article.source_id.trim(), article.guid.trim(), normalized, article_id,
+                article.title.trim(), article.published_at.as_deref(), article.etag.as_deref(),
+                article.last_modified.as_deref(), article.fetch_status.trim(), article.incomplete_reason.as_deref(), article.language.as_deref(),
+                batch_id, fingerprint, now,
+            ],
+        )
+        .map_err(|_| ())?;
+    Ok(())
+}
+
+fn finalize_batch(path: &Path, batch_id: &str, result: CollectionResult) -> Result<(), ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_collection_schema(&connection)?;
+    connection
+        .execute(
+            "INSERT INTO intelligence_collection_batches(batch_id,received_count,collected_count,duplicate_count,failed_count,completed_at)
+             VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(batch_id) DO UPDATE SET received_count=excluded.received_count,
+                 collected_count=excluded.collected_count,duplicate_count=excluded.duplicate_count,
+                 failed_count=excluded.failed_count,completed_at=excluded.completed_at",
+            params![batch_id, result.received, result.collected, result.duplicates, result.failed, Utc::now().timestamp_millis()],
+        )
+        .map_err(|_| ())?;
+    Ok(())
+}
+
+/// Runs exactly one externally scheduled collection batch.  Invalid entries
+/// fail closed and do not create a queue item.  Replaying an identical record
+/// updates freshness metadata but does not add a second article or triage job.
+pub(crate) fn collect_once_with<P: CollectorPort>(collector: &P) -> Result<CollectionResult, ()> {
+    let (batch_id, articles) = collector.collect()?;
+    let path = archive::store_path().map_err(|_| ())?;
+    collect_once_at(&path, &batch_id, articles)
+}
+
+fn collect_once_at(
+    path: &Path,
+    batch_id: &str,
+    articles: Vec<CollectedArticle>,
+) -> Result<CollectionResult, ()> {
+    let mut result = CollectionResult {
+        received: articles.len() as u64,
+        ..CollectionResult::default()
+    };
+    for article in articles {
+        let source_id = safe_text(&article.source_id, 200);
+        let guid = safe_text(&article.guid, 800);
+        let title = safe_text(&article.title, 2_000);
+        let normalized = normalized_url(&article.url);
+        if source_id.is_none() || guid.is_none() || title.is_none() || normalized.is_err() {
+            result.failed += 1;
+            continue;
+        }
+        let source_id = source_id.expect("validated");
+        let guid = guid.expect("validated");
+        let normalized = normalized.expect("validated");
+        let article_id = article_identity(&source_id, &guid, &normalized);
+        let fingerprint = record_fingerprint(&article, &normalized);
+        if article.fetch_status.trim() != "fetched" {
+            store_record(
+                path,
+                batch_id,
+                &article,
+                &normalized,
+                &article_id,
+                &fingerprint,
+            )?;
+            result.failed += 1;
+            continue;
+        }
+        let changed = record_changed(path, &article, &normalized, &fingerprint)?;
+        let has_complete_body = article
+            .body
+            .as_deref()
+            .and_then(|body| safe_text(body, MAX_TEXT_BYTES))
+            .is_some();
+        let needs_evidence_backfill = !changed
+            && has_complete_body
+            && !content_archive::has_current_complete_content_at(path, &article_id, &fingerprint)
+                .map_err(|_| ())?;
+        if !changed && !needs_evidence_backfill {
+            store_record(
+                path,
+                batch_id,
+                &article,
+                &normalized,
+                &article_id,
+                &fingerprint,
+            )?;
+            result.duplicates += 1;
+            continue;
+        }
+        upsert_article(path, &article_id, &fingerprint, &article, &normalized)?;
+        if let Some(body) = article
+            .body
+            .as_deref()
+            .and_then(|body| safe_text(body, MAX_TEXT_BYTES))
+        {
+            content_archive::persist_article_content_at(
+                path,
+                ArchiveArticleContentInput {
+                    article_id: article_id.clone(),
+                    record_fingerprint: fingerprint.clone(),
+                    text: body.clone(),
+                    html: article.html.clone(),
+                    body_status: article
+                        .body_status
+                        .clone()
+                        .or_else(|| Some("complete".into())),
+                    incomplete_reason: article.incomplete_reason.clone(),
+                    paragraphs: paragraphs(&body),
+                    images: article.images.clone(),
+                    videos: article.videos.clone(),
+                },
+            )
+            .map_err(|_| ())?;
+        }
+        store_record(
+            path,
+            batch_id,
+            &article,
+            &normalized,
+            &article_id,
+            &fingerprint,
+        )?;
+        // A legacy content backfill enriches durable evidence for an already
+        // known record. It deliberately remains a duplicate in collection
+        // accounting, so it cannot inflate the downstream triage queue.
+        if needs_evidence_backfill {
+            result.duplicates += 1;
+        } else {
+            result.collected += 1;
+        }
+    }
+    finalize_batch(path, batch_id, result)?;
+    Ok(result)
+}
+
+/// Fetch a bounded page of legacy records that have no complete immutable
+/// evidence revision.  It is intentionally independent of RSS validators:
+/// a source returning 304 must not permanently strand old summary-only rows.
+pub(crate) fn backfill_missing_content_once() -> Result<ContentBackfillResult, ()> {
+    let path = archive::store_path().map_err(|_| ())?;
+    let pass_id = std::env::var("KUNPENG_INTELLIGENCE_BACKFILL_PASS_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    backfill_missing_content_once_for_pass_at(
+        &path,
+        &PublicContentBackfillPort::new(),
+        pass_id.as_deref(),
+    )
+}
+
+fn ensure_content_backfill_schema(connection: &Connection) -> Result<(), ()> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS intelligence_content_backfill_state (
+                 article_id TEXT PRIMARY KEY,
+                 attempts INTEGER NOT NULL DEFAULT 0,
+                 next_retry_at INTEGER NOT NULL DEFAULT 0,
+                 last_failure_at INTEGER,
+                 last_failure_reason TEXT,
+                 last_success_at INTEGER,
+                 last_backfill_pass_id TEXT,
+                 updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS intelligence_content_backfill_schedule_idx
+                 ON intelligence_content_backfill_state(next_retry_at);",
+        )
+        .map_err(|_| ())?;
+    // Archives that already ran the original backfill only have attempts and
+    // next_retry_at.  Upgrade them in place so operators can finally see why
+    // a legacy item is delayed, without rewriting article metadata.
+    for statement in [
+        "ALTER TABLE intelligence_content_backfill_state ADD COLUMN last_failure_at INTEGER",
+        "ALTER TABLE intelligence_content_backfill_state ADD COLUMN last_failure_reason TEXT",
+        "ALTER TABLE intelligence_content_backfill_state ADD COLUMN last_success_at INTEGER",
+        "ALTER TABLE intelligence_content_backfill_state ADD COLUMN last_backfill_pass_id TEXT",
+    ] {
+        if let Err(error) = connection.execute(statement, []) {
+            if !error.to_string().contains("duplicate column name") {
+                return Err(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn next_content_backfill_candidates(path: &Path) -> Result<Vec<ContentBackfillCandidate>, ()> {
+    next_content_backfill_candidates_for_pass(path, None)
+}
+
+fn next_content_backfill_candidates_for_pass(
+    path: &Path,
+    pass_id: Option<&str>,
+) -> Result<Vec<ContentBackfillCandidate>, ()> {
+    content_archive::ensure_catalog_schema_at(path).map_err(|_| ())?;
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_article_schema(&connection)?;
+    // Pre-collector permanent catalogs have article metadata but no collection
+    // table.  Create the empty compatibility table before the URL fallback
+    // subquery so those rows still backfill from `intelligence_articles.url`.
+    ensure_collection_schema(&connection)?;
+    ensure_content_backfill_schema(&connection)?;
+    let now = Utc::now().timestamp_millis();
+    // A content version only satisfies the exact article fingerprint it was
+    // extracted for.  Feed metadata can legitimately change after a previous
+    // version, and treating any current body as complete would make that
+    // updated record invisible to the evidence pipeline.
+    //
+    // Build a source-fair page from both ends of the durable queue.  This is
+    // deliberately not a one-time migration cursor: retry state remains the
+    // single scheduling truth, and every recurring run can service fresh news
+    // *and* make bounded progress over historical gaps.
+    let mut statement = connection
+        .prepare(
+            "WITH eligible AS (
+                 SELECT a.article_id,a.fingerprint,
+                        COALESCE(NULLIF(a.url,''),(
+                            SELECT r.normalized_url FROM intelligence_collection_records r
+                            WHERE r.article_id=a.article_id AND r.normalized_url LIKE 'https://%'
+                            ORDER BY r.collected_at DESC LIMIT 1
+                        ),'') AS url,
+                        a.title,COALESCE(a.summary,'') AS summary,
+                        COALESCE(a.published_at,'') AS published_at,a.created_at
+                 FROM intelligence_articles a
+                 LEFT JOIN intelligence_article_content_versions v
+                   ON v.article_id=a.article_id AND v.record_fingerprint=a.fingerprint
+                  AND v.is_current=1 AND v.body_status='complete'
+                 LEFT JOIN intelligence_content_backfill_state b ON b.article_id=a.article_id
+                 WHERE v.article_id IS NULL AND COALESCE(b.next_retry_at,0)<=?1
+                   AND (?2='' OR COALESCE(b.last_backfill_pass_id,'')<>?2)
+                   AND COALESCE(NULLIF(a.url,''),(
+                       SELECT r.normalized_url FROM intelligence_collection_records r
+                       WHERE r.article_id=a.article_id AND r.normalized_url LIKE 'https://%'
+                       ORDER BY r.collected_at DESC LIMIT 1
+                   ),'') LIKE 'https://%'
+             ), newest AS (
+                 SELECT article_id,fingerprint,url,title,summary,0 AS queue_segment FROM eligible
+                 ORDER BY published_at DESC,created_at DESC LIMIT ?3
+             ), oldest AS (
+                 SELECT article_id,fingerprint,url,title,summary,1 AS queue_segment FROM eligible
+                 ORDER BY published_at ASC,created_at ASC LIMIT ?4
+             )
+             SELECT article_id,fingerprint,url,title,summary,queue_segment FROM newest
+             UNION ALL
+             SELECT article_id,fingerprint,url,title,summary,queue_segment FROM oldest
+             WHERE article_id NOT IN (SELECT article_id FROM newest)",
+        )
+        .map_err(|_| ())?;
+    let segmented = statement
+        .query_map(
+            params![
+                now,
+                pass_id.unwrap_or(""),
+                MAX_CONTENT_BACKFILL_NEWEST_SCAN as i64,
+                MAX_CONTENT_BACKFILL_OLDEST_SCAN as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(5)?,
+                    ContentBackfillCandidate {
+                        article_id: row.get(0)?,
+                        fingerprint: row.get(1)?,
+                        url: row.get(2)?,
+                        title: row.get(3)?,
+                        summary: row.get(4)?,
+                    },
+                ))
+            },
+        )
+        .map_err(|_| ())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+    let mut newest = Vec::new();
+    let mut oldest = Vec::new();
+    for (segment, candidate) in segmented {
+        if segment == 0 {
+            newest.push(candidate);
+        } else {
+            oldest.push(candidate);
+        }
+    }
+    Ok(fair_backfill_candidates(
+        interleave_fresh_and_historical_backfill(newest, oldest),
+    ))
+}
+
+/// Interleave both durable queue windows before source-fair selection.  Without
+/// this step, a catalog with many different publishers would select the first
+/// 32 (newest) lanes and leave the historical half of the SQL page unused.
+fn interleave_fresh_and_historical_backfill(
+    newest: Vec<ContentBackfillCandidate>,
+    oldest: Vec<ContentBackfillCandidate>,
+) -> Vec<ContentBackfillCandidate> {
+    let mut newest = VecDeque::from(newest);
+    let mut oldest = VecDeque::from(oldest);
+    let mut candidates = Vec::with_capacity(newest.len() + oldest.len());
+    while !newest.is_empty() || !oldest.is_empty() {
+        if let Some(candidate) = newest.pop_front() {
+            candidates.push(candidate);
+        }
+        if let Some(candidate) = oldest.pop_front() {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+/// Return a conservative source lane for an already validated public article
+/// URL.  Using the network host rather than a feed's display name prevents two
+/// configured feeds pointing at the same publisher from issuing parallel page
+/// fetches.  Invalid URLs never reach this path in production, but are kept in
+/// one lane for fail-safe behaviour in old catalogs and tests.
+fn backfill_source_lane(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "unknown-origin".into())
+}
+
+/// The SQL priority remains authoritative within each publisher, while the
+/// selected page is round-robin across publishers.  This keeps one noisy feed
+/// from occupying the complete batch and still lets a one-source archive make
+/// progress when it is the only work available.
+fn fair_backfill_candidates(
+    candidates: Vec<ContentBackfillCandidate>,
+) -> Vec<ContentBackfillCandidate> {
+    let mut lanes: HashMap<String, VecDeque<ContentBackfillCandidate>> = HashMap::new();
+    let mut lane_order = Vec::new();
+    for candidate in candidates {
+        let lane = backfill_source_lane(&candidate.url);
+        if !lanes.contains_key(&lane) {
+            lane_order.push(lane.clone());
+        }
+        lanes.entry(lane).or_default().push_back(candidate);
+    }
+
+    let mut selected = Vec::with_capacity(MAX_CONTENT_BACKFILL_PER_RUN);
+    while selected.len() < MAX_CONTENT_BACKFILL_PER_RUN {
+        let mut progressed = false;
+        for lane in &lane_order {
+            if selected.len() == MAX_CONTENT_BACKFILL_PER_RUN {
+                break;
+            }
+            if let Some(candidate) = lanes.get_mut(lane).and_then(VecDeque::pop_front) {
+                selected.push(candidate);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    selected
+}
+
+/// Partition a fair candidate page into fetch waves.  A wave contains only
+/// distinct source lanes, so the host never concurrently requests two pages
+/// from the same publisher.  The number of live fetches naturally adapts to
+/// the number of distinct ready sources, up to the fixed process-wide cap.
+fn backfill_fetch_waves(
+    candidates: Vec<ContentBackfillCandidate>,
+) -> Vec<Vec<ContentBackfillCandidate>> {
+    let mut pending = VecDeque::from(candidates);
+    let mut waves = Vec::new();
+    while !pending.is_empty() {
+        let mut lanes = HashSet::new();
+        let mut wave = Vec::with_capacity(MAX_CONTENT_BACKFILL_PARALLEL_FETCHES);
+        let scan = pending.len();
+        for _ in 0..scan {
+            let candidate = pending.pop_front().expect("pending length was checked");
+            let lane = backfill_source_lane(&candidate.url);
+            if wave.len() < MAX_CONTENT_BACKFILL_PARALLEL_FETCHES && lanes.insert(lane) {
+                wave.push(candidate);
+            } else {
+                pending.push_back(candidate);
+            }
+        }
+        // Every candidate receives a lane key, so an empty wave would mean a
+        // programming error.  Keep a defensive fallback so an invalid legacy
+        // row cannot leave the background host in a hot loop.
+        if wave.is_empty() {
+            if let Some(candidate) = pending.pop_front() {
+                wave.push(candidate);
+            }
+        }
+        waves.push(wave);
+    }
+    waves
+}
+
+fn fetch_backfill_wave<P: ContentBackfillPort>(
+    port: &P,
+    candidates: Vec<ContentBackfillCandidate>,
+) -> Vec<(
+    ContentBackfillCandidate,
+    Result<BackfilledEvidence, ContentBackfillFailure>,
+)> {
+    std::thread::scope(|scope| {
+        let mut tasks = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            tasks.push(scope.spawn(move || {
+                let evidence = port.fetch(&candidate);
+                (candidate, evidence)
+            }));
+        }
+        tasks
+            .into_iter()
+            .map(|task| task.join().expect("content backfill worker panicked"))
+            .collect()
+    })
+}
+
+fn record_content_backfill_retry(
+    path: &Path,
+    article_id: &str,
+    reason: &ContentBackfillFailure,
+    pass_id: Option<&str>,
+) -> Result<(), ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_content_backfill_schema(&connection)?;
+    let now = Utc::now().timestamp_millis();
+    let previous: i64 = connection
+        .query_row(
+            "SELECT attempts FROM intelligence_content_backfill_state WHERE article_id=?1",
+            [article_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| ())?
+        .unwrap_or(0)
+        .clamp(0, 16);
+    let base_delay_ms = match reason.reason {
+        "http_access_denied" | "http_not_found" | "body_missing_or_paywall" => {
+            CONTENT_BACKFILL_TERMINAL_DELAY_MS
+        }
+        "http_rate_limited" => CONTENT_BACKFILL_RATE_LIMIT_BASE_DELAY_MS,
+        _ => CONTENT_BACKFILL_BASE_DELAY_MS,
+    };
+    let delay_ms = base_delay_ms
+        .saturating_mul(1_i64 << previous.min(7))
+        .min(CONTENT_BACKFILL_MAX_DELAY_MS.max(base_delay_ms));
+    connection
+        .execute(
+            "INSERT INTO intelligence_content_backfill_state(
+                 article_id,attempts,next_retry_at,last_failure_at,last_failure_reason,
+                 last_backfill_pass_id,updated_at
+             ) VALUES(?1,1,?2,?3,?4,?5,?3)
+             ON CONFLICT(article_id) DO UPDATE SET attempts=attempts+1,
+               next_retry_at=excluded.next_retry_at,last_failure_at=excluded.last_failure_at,
+               last_failure_reason=excluded.last_failure_reason,
+               last_backfill_pass_id=excluded.last_backfill_pass_id,updated_at=excluded.updated_at",
+            params![
+                article_id,
+                now.saturating_add(delay_ms),
+                now,
+                reason.reason,
+                pass_id.unwrap_or(""),
+            ],
+        )
+        .map_err(|_| ())?;
+    Ok(())
+}
+
+fn clear_content_backfill_retry(path: &Path, article_id: &str) -> Result<(), ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_content_backfill_schema(&connection)?;
+    connection
+        .execute(
+            "UPDATE intelligence_content_backfill_state
+             SET attempts=0,next_retry_at=0,last_failure_at=NULL,last_failure_reason=NULL,
+                 last_success_at=?2,updated_at=?2
+             WHERE article_id=?1",
+            params![article_id, Utc::now().timestamp_millis()],
+        )
+        .map_err(|_| ())?;
+    Ok(())
+}
+
+fn backfill_missing_content_once_at<P: ContentBackfillPort>(
+    path: &Path,
+    port: &P,
+) -> Result<ContentBackfillResult, ()> {
+    backfill_missing_content_once_for_pass_at(path, port, None)
+}
+
+fn backfill_missing_content_once_for_pass_at<P: ContentBackfillPort>(
+    path: &Path,
+    port: &P,
+    pass_id: Option<&str>,
+) -> Result<ContentBackfillResult, ()> {
+    let candidates = next_content_backfill_candidates_for_pass(path, pass_id)?;
+    let mut result = ContentBackfillResult::default();
+    for wave in backfill_fetch_waves(candidates) {
+        result.attempted += wave.len() as u64;
+        for (candidate, fetched) in fetch_backfill_wave(port, wave) {
+            let evidence = match fetched {
+                Ok(value) => value,
+                Err(failure) => {
+                    record_content_backfill_retry(path, &candidate.article_id, &failure, pass_id)?;
+                    result.retried += 1;
+                    continue;
+                }
+            };
+            let persisted = content_archive::persist_article_content_at(
+                path,
+                ArchiveArticleContentInput {
+                    article_id: candidate.article_id.clone(),
+                    record_fingerprint: candidate.fingerprint,
+                    text: evidence.text.clone(),
+                    html: evidence.html,
+                    body_status: Some("complete".into()),
+                    incomplete_reason: None,
+                    paragraphs: paragraphs(&evidence.text),
+                    images: evidence.images,
+                    videos: evidence.videos,
+                },
+            );
+            if persisted.is_ok() {
+                clear_content_backfill_retry(path, &candidate.article_id)?;
+                result.completed += 1;
+            } else {
+                record_content_backfill_retry(
+                    path,
+                    &candidate.article_id,
+                    &ContentBackfillFailure::new("archive_persist_failed"),
+                    pass_id,
+                )?;
+                result.retried += 1;
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub(crate) fn configured_file_from_environment() -> Option<std::path::PathBuf> {
+    let value = std::env::var("KUNPENG_INTELLIGENCE_COLLECTOR_INPUT").ok()?;
+    let path = Path::new(value.trim());
+    (path.is_absolute() && path.is_file()).then(|| path.to_path_buf())
+}
+
+/// An absolute, local JSON configuration file keeps source credentials (if a
+/// future supervised adapter needs them) out of command lines and WebView
+/// state. The built-in HTTP adapter accepts public endpoints only.
+pub(crate) fn configured_http_sources_from_environment() -> Option<PathBuf> {
+    let value = std::env::var("KUNPENG_INTELLIGENCE_COLLECTOR_SOURCES").ok()?;
+    let path = Path::new(value.trim());
+    (path.is_absolute() && path.is_file()).then(|| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixturePort {
+        items: Vec<CollectedArticle>,
+    }
+    impl CollectorPort for FixturePort {
+        fn collect(&self) -> Result<(String, Vec<CollectedArticle>), ()> {
+            Ok(("batch.test".into(), self.items.clone()))
+        }
+    }
+    fn item() -> CollectedArticle {
+        CollectedArticle {
+            source_id: "example".into(),
+            guid: "guid-1".into(),
+            url: "https://example.test/a#fragment".into(),
+            title: "公开标题".into(),
+            summary: "公开摘要".into(),
+            published_at: Some("2026-08-23T00:00:00Z".into()),
+            etag: Some("etag-a".into()),
+            last_modified: Some("Sat, 23 Aug 2026 00:00:00 GMT".into()),
+            fetch_status: "fetched".into(),
+            language: Some("zh".into()),
+            body: Some("第一段\n\n第二段".into()),
+            html: Some("<p>第一段</p><p>第二段</p>".into()),
+            body_status: Some("complete".into()),
+            incomplete_reason: None,
+            images: Vec::new(),
+            videos: Vec::new(),
+        }
+    }
+
+    fn backfill_candidate(id: &str, url: &str) -> ContentBackfillCandidate {
+        ContentBackfillCandidate {
+            article_id: id.into(),
+            fingerprint: format!("fingerprint-{id}"),
+            url: url.into(),
+            title: format!("title-{id}"),
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn normalized_url_drops_fragment_and_default_https_port() {
+        assert_eq!(
+            normalized_url("https://Example.TEST:443/a#b").unwrap(),
+            "https://example.test/a"
+        );
+        assert!(normalized_url("file:///private").is_err());
+        assert!(public_fetch_url("http://127.0.0.1/private").is_err());
+        assert!(public_fetch_url("https://localhost/private").is_err());
+        assert!(public_fetch_url("https://example.test/public").is_ok());
+    }
+
+    #[test]
+    fn identity_is_deterministic_per_source_guid_and_normalized_url() {
+        assert_eq!(
+            article_identity("a", "b", "https://example.test/a"),
+            article_identity("a", "b", "https://example.test/a")
+        );
+        assert_ne!(
+            article_identity("a", "b", "https://example.test/a"),
+            article_identity("a", "c", "https://example.test/a")
+        );
+    }
+
+    #[test]
+    fn source_state_reuses_validators_and_backs_off_failures() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-source-state-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let source = HttpSource {
+            source_id: "public-feed".into(),
+            kind: "rss".into(),
+            url: "https://example.test/feed.xml".into(),
+            language: None,
+            interval_seconds: Some(600),
+        };
+        let initial = SourceFetchState::default();
+        let failed = SourceFetchResult {
+            articles: Vec::new(),
+            etag: Some("old-etag".into()),
+            last_modified: None,
+            failure: Some("network_request_failed".into()),
+        };
+        update_source_fetch_state(&catalog, &source, &initial, &failed).unwrap();
+        let after_failure = source_fetch_state(&catalog, &source.source_id).unwrap();
+        assert_eq!(after_failure.etag.as_deref(), Some("old-etag"));
+        assert_eq!(after_failure.failure_count, 1);
+        assert!(after_failure.next_fetch_at >= Utc::now().timestamp() + 25);
+
+        let success = SourceFetchResult {
+            articles: Vec::new(),
+            etag: Some("new-etag".into()),
+            last_modified: Some("Mon, 24 Aug 2026 00:00:00 GMT".into()),
+            failure: None,
+        };
+        update_source_fetch_state(&catalog, &source, &after_failure, &success).unwrap();
+        let after_success = source_fetch_state(&catalog, &source.source_id).unwrap();
+        assert_eq!(after_success.etag.as_deref(), Some("new-etag"));
+        assert_eq!(after_success.failure_count, 0);
+        assert!(after_success.next_fetch_at >= Utc::now().timestamp() + 590);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn media_markup_parser_keeps_safe_relative_urls_and_attributes() {
+        let html = r#"<article><img data-src="/image.webp" alt="图示"><iframe src="https://www.youtube.com/embed/x"></iframe></article>"#;
+        let image = html_elements(html, "img");
+        assert_eq!(image.len(), 1);
+        assert_eq!(
+            element_attribute(image[0], "data-src").as_deref(),
+            Some("/image.webp")
+        );
+        assert_eq!(element_attribute(image[0], "alt").as_deref(), Some("图示"));
+        assert_eq!(
+            absolute_public_url("https://example.test/news/a", "/image.webp").as_deref(),
+            Some("https://example.test/image.webp")
+        );
+        assert!(absolute_public_url("https://example.test/news/a", "http://127.0.0.1/a").is_none());
+    }
+
+    #[test]
+    fn manual_redirect_targets_are_revalidated_at_every_hop() {
+        assert_eq!(
+            absolute_public_url("https://news.example.test/feed/item", "/article/one").as_deref(),
+            Some("https://news.example.test/article/one")
+        );
+        assert_eq!(
+            absolute_public_url(
+                "https://news.example.test/feed/item",
+                "https://publisher.example.test/article/one"
+            )
+            .as_deref(),
+            Some("https://publisher.example.test/article/one")
+        );
+        assert!(absolute_public_url(
+            "https://news.example.test/feed/item",
+            "http://127.0.0.1/private"
+        )
+        .is_none());
+        assert!(absolute_public_url(
+            "https://news.example.test/feed/item",
+            "http://[::1]/private"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn article_cleaner_excludes_site_chrome_and_keeps_article_evidence() {
+        let html = r#"
+            <header>站点导航与订阅按钮</header>
+            <script>window.tracker = '广告脚本'</script>
+            <main><article><p>这是应交给模型的第一段证据。</p><aside>相关推荐</aside><p>这是第二段事实。</p></article></main>
+            <footer>版权页脚</footer>
+        "#;
+        let body = strip_html(&clean_article_html(html));
+        assert!(body.contains("第一段证据"));
+        assert!(body.contains("第二段事实"));
+        assert!(!body.contains("站点导航"));
+        assert!(!body.contains("广告脚本"));
+        assert!(!body.contains("相关推荐"));
+        assert!(!body.contains("版权页脚"));
+    }
+
+    #[test]
+    fn injected_port_is_collection_boundary_without_page_or_network() {
+        let root = std::env::temp_dir().join(format!("kunpeng-collector-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let port = FixturePort {
+            items: vec![item()],
+        };
+        let (batch_id, articles) = port.collect().unwrap();
+        let first = collect_once_at(&catalog, &batch_id, articles).unwrap();
+        assert_eq!(
+            first,
+            CollectionResult {
+                received: 1,
+                collected: 1,
+                duplicates: 0,
+                failed: 0
+            }
+        );
+        let (_, replay) = port.collect().unwrap();
+        let second = collect_once_at(&catalog, "batch.replay", replay).unwrap();
+        assert_eq!(
+            second,
+            CollectionResult {
+                received: 1,
+                collected: 0,
+                duplicates: 1,
+                failed: 0
+            }
+        );
+        let count: u64 = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_collection_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let queue: u64 = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_articles WHERE triage_state='queued'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queue, 1);
+        assert!(root.join("blobs").is_dir());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unchanged_legacy_record_backfills_complete_evidence_without_requeueing() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-backfill-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let first = item();
+        let source_id = first.source_id.clone();
+        let normalized = normalized_url(&first.url).unwrap();
+        let article_id = article_identity(&source_id, &first.guid, &normalized);
+        let fingerprint = record_fingerprint(&first, &normalized);
+
+        // Simulate the pre-full-text archive: the old record and article
+        // exist, but no immutable content revision was ever written.
+        upsert_article(&catalog, &article_id, &fingerprint, &first, &normalized).unwrap();
+        store_record(
+            &catalog,
+            "batch.legacy",
+            &first,
+            &normalized,
+            &article_id,
+            &fingerprint,
+        )
+        .unwrap();
+        Connection::open(&catalog)
+            .unwrap()
+            .execute(
+                "UPDATE intelligence_articles SET triage_state='keep' WHERE article_id=?1",
+                [&article_id],
+            )
+            .unwrap();
+
+        let result = collect_once_at(&catalog, "batch.backfill", vec![first]).unwrap();
+        assert_eq!(result.collected, 0);
+        assert_eq!(result.duplicates, 1);
+        let connection = Connection::open(&catalog).unwrap();
+        let state: String = connection
+            .query_row(
+                "SELECT triage_state FROM intelligence_articles WHERE article_id=?1",
+                [&article_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let complete: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_article_content_versions
+                 WHERE article_id=?1 AND record_fingerprint=?2
+                   AND body_status='complete' AND is_current=1",
+                params![article_id, fingerprint],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "keep");
+        assert_eq!(complete, 1);
+        assert!(content_archive::has_current_complete_content_at(
+            &catalog,
+            &article_id,
+            &fingerprint,
+        )
+        .unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    struct BackfillFixture(Result<BackfilledEvidence, ContentBackfillFailure>);
+
+    impl ContentBackfillPort for BackfillFixture {
+        fn fetch(
+            &self,
+            _: &ContentBackfillCandidate,
+        ) -> Result<BackfilledEvidence, ContentBackfillFailure> {
+            self.0
+                .as_ref()
+                .map(|value| BackfilledEvidence {
+                    text: value.text.clone(),
+                    html: value.html.clone(),
+                    images: Vec::new(),
+                    videos: Vec::new(),
+                })
+                .map_err(Clone::clone)
+        }
+    }
+
+    #[test]
+    fn bounded_backfill_persists_legacy_evidence_without_changing_article_fingerprint() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-backfill-port-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let original = item();
+        let normalized = normalized_url(&original.url).unwrap();
+        let article_id = article_identity(&original.source_id, &original.guid, &normalized);
+        let fingerprint = record_fingerprint(&original, &normalized);
+        upsert_article(&catalog, &article_id, &fingerprint, &original, &normalized).unwrap();
+        Connection::open(&catalog)
+            .unwrap()
+            .execute(
+                "UPDATE intelligence_articles SET triage_state='keep' WHERE article_id=?1",
+                [&article_id],
+            )
+            .unwrap();
+
+        let result = backfill_missing_content_once_at(
+            &catalog,
+            &BackfillFixture(Ok(BackfilledEvidence {
+                text: "完整证据第一段。\n\n完整证据第二段。".into(),
+                html: Some("<article>完整证据</article>".into()),
+                images: Vec::new(),
+                videos: Vec::new(),
+            })),
+        )
+        .unwrap();
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.completed, 1);
+        assert_eq!(result.retried, 0);
+        let connection = Connection::open(&catalog).unwrap();
+        let row: (String, String, i64) = connection
+            .query_row(
+                "SELECT a.fingerprint,v.record_fingerprint,v.is_current
+                 FROM intelligence_articles a JOIN intelligence_article_content_versions v
+                 ON v.article_id=a.article_id WHERE a.article_id=?1",
+                [&article_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (fingerprint.clone(), fingerprint, 1));
+        let state: String = connection
+            .query_row(
+                "SELECT triage_state FROM intelligence_articles WHERE article_id=?1",
+                [&article_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "keep");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changed_record_fingerprint_requeues_even_when_an_old_body_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-backfill-fingerprint-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let original = item();
+        let normalized = normalized_url(&original.url).unwrap();
+        let article_id = article_identity(&original.source_id, &original.guid, &normalized);
+        let original_fingerprint = record_fingerprint(&original, &normalized);
+
+        // First persist valid evidence for a prior feed revision.
+        assert_eq!(
+            collect_once_at(&catalog, "batch.original", vec![original.clone()])
+                .unwrap()
+                .collected,
+            1
+        );
+        assert!(content_archive::has_current_complete_content_at(
+            &catalog,
+            &article_id,
+            &original_fingerprint,
+        )
+        .unwrap());
+
+        // The source then edits its record, but the newer feed payload does
+        // not carry a full body.  The old revision is still valuable history,
+        // not valid evidence for the new fingerprint.
+        let mut revised = original;
+        revised.summary = "来源补充了新事实，正文稍后回填。".into();
+        revised.body = None;
+        revised.html = None;
+        revised.body_status = None;
+        revised.incomplete_reason = Some("deferred_content_backfill".into());
+        let revised_fingerprint = record_fingerprint(&revised, &normalized);
+        assert_ne!(revised_fingerprint, original_fingerprint);
+        upsert_article(
+            &catalog,
+            &article_id,
+            &revised_fingerprint,
+            &revised,
+            &normalized,
+        )
+        .unwrap();
+
+        let result = backfill_missing_content_once_at(
+            &catalog,
+            &BackfillFixture(Ok(BackfilledEvidence {
+                text: "更新后的完整证据。".into(),
+                html: None,
+                images: Vec::new(),
+                videos: Vec::new(),
+            })),
+        )
+        .unwrap();
+        assert_eq!(result.completed, 1);
+        assert!(content_archive::has_current_complete_content_at(
+            &catalog,
+            &article_id,
+            &revised_fingerprint,
+        )
+        .unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn backfill_uses_durable_collection_url_when_a_legacy_article_url_is_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-backfill-url-fallback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let original = item();
+        let normalized = normalized_url(&original.url).unwrap();
+        let article_id = article_identity(&original.source_id, &original.guid, &normalized);
+        let fingerprint = record_fingerprint(&original, &normalized);
+        upsert_article(&catalog, &article_id, &fingerprint, &original, &normalized).unwrap();
+        store_record(
+            &catalog,
+            "batch.url-fallback",
+            &original,
+            &normalized,
+            &article_id,
+            &fingerprint,
+        )
+        .unwrap();
+        Connection::open(&catalog)
+            .unwrap()
+            .execute(
+                "UPDATE intelligence_articles SET url='' WHERE article_id=?1",
+                [&article_id],
+            )
+            .unwrap();
+
+        let result = backfill_missing_content_once_at(
+            &catalog,
+            &BackfillFixture(Ok(BackfilledEvidence {
+                text: "由归档记录恢复的完整正文。".into(),
+                html: None,
+                images: Vec::new(),
+                videos: Vec::new(),
+            })),
+        )
+        .unwrap();
+        assert_eq!(result.completed, 1);
+        assert!(content_archive::has_current_complete_content_at(
+            &catalog,
+            &article_id,
+            &fingerprint,
+        )
+        .unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_backfill_failures_have_stable_operator_safe_categories() {
+        assert_eq!(
+            classify_content_backfill_failure(Some("article_http_status_429")).reason,
+            "http_rate_limited"
+        );
+        assert_eq!(
+            classify_content_backfill_failure(Some("article_http_status_403")).reason,
+            "http_access_denied"
+        );
+        assert_eq!(
+            classify_content_backfill_failure(Some("article_body_missing_or_paywall")).reason,
+            "body_missing_or_paywall"
+        );
+        assert_eq!(
+            classify_content_backfill_failure(Some("article_network_request_failed")).reason,
+            "network_request_failed"
+        );
+    }
+
+    #[test]
+    fn backfill_selection_is_source_fair_without_stranding_a_single_source() {
+        let mut candidates = vec![
+            backfill_candidate("a-1", "https://alpha.example/1"),
+            backfill_candidate("a-2", "https://alpha.example/2"),
+            backfill_candidate("a-3", "https://alpha.example/3"),
+            backfill_candidate("b-1", "https://bravo.example/1"),
+            backfill_candidate("b-2", "https://bravo.example/2"),
+            backfill_candidate("c-1", "https://charlie.example/1"),
+        ];
+        let selected = fair_backfill_candidates(candidates.clone());
+        assert_eq!(
+            selected
+                .iter()
+                .map(|candidate| candidate.article_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-1", "b-1", "c-1", "a-2", "b-2", "a-3"]
+        );
+
+        candidates.extend((0..(MAX_CONTENT_BACKFILL_PER_RUN + 8)).map(|index| {
+            backfill_candidate(
+                &format!("only-{index}"),
+                &format!("https://only.example/{index}"),
+            )
+        }));
+        let single_source = fair_backfill_candidates(
+            candidates
+                .into_iter()
+                .filter(|candidate| backfill_source_lane(&candidate.url) == "only.example")
+                .collect(),
+        );
+        assert_eq!(single_source.len(), MAX_CONTENT_BACKFILL_PER_RUN);
+    }
+
+    #[test]
+    fn backfill_candidate_page_interleaves_fresh_and_historical_windows() {
+        let newest = vec![
+            backfill_candidate("new-1", "https://new-1.example/1"),
+            backfill_candidate("new-2", "https://new-2.example/2"),
+            backfill_candidate("new-3", "https://new-3.example/3"),
+        ];
+        let oldest = vec![
+            backfill_candidate("old-1", "https://old-1.example/1"),
+            backfill_candidate("old-2", "https://old-2.example/2"),
+        ];
+        assert_eq!(
+            interleave_fresh_and_historical_backfill(newest, oldest)
+                .iter()
+                .map(|candidate| candidate.article_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new-1", "old-1", "new-2", "old-2", "new-3"]
+        );
+    }
+
+    #[test]
+    fn backfill_waves_never_parallelize_the_same_publisher() {
+        let candidates = vec![
+            backfill_candidate("a-1", "https://alpha.example/1"),
+            backfill_candidate("a-2", "https://alpha.example/2"),
+            backfill_candidate("b-1", "https://bravo.example/1"),
+            backfill_candidate("b-2", "https://bravo.example/2"),
+            backfill_candidate("c-1", "https://charlie.example/1"),
+            backfill_candidate("d-1", "https://delta.example/1"),
+            backfill_candidate("e-1", "https://echo.example/1"),
+        ];
+        let waves = backfill_fetch_waves(candidates.clone());
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0].len(), MAX_CONTENT_BACKFILL_PARALLEL_FETCHES);
+        let flattened = waves
+            .iter()
+            .flat_map(|wave| wave.iter().map(|candidate| candidate.article_id.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(flattened.len(), candidates.len());
+        for wave in waves {
+            let lanes = wave
+                .iter()
+                .map(|candidate| backfill_source_lane(&candidate.url))
+                .collect::<HashSet<_>>();
+            assert_eq!(lanes.len(), wave.len());
+        }
+    }
+
+    #[test]
+    fn failed_backfill_is_delayed_instead_of_hot_looping() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-backfill-retry-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let original = item();
+        let normalized = normalized_url(&original.url).unwrap();
+        let article_id = article_identity(&original.source_id, &original.guid, &normalized);
+        let fingerprint = record_fingerprint(&original, &normalized);
+        upsert_article(&catalog, &article_id, &fingerprint, &original, &normalized).unwrap();
+
+        let first = backfill_missing_content_once_at(
+            &catalog,
+            &BackfillFixture(Err(ContentBackfillFailure::new("http_rate_limited"))),
+        )
+        .unwrap();
+        let second = backfill_missing_content_once_at(
+            &catalog,
+            &BackfillFixture(Err(ContentBackfillFailure::new("http_rate_limited"))),
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            ContentBackfillResult {
+                attempted: 1,
+                completed: 0,
+                retried: 1
+            }
+        );
+        assert_eq!(second.attempted, 0);
+        let state: (i64, String, i64, Option<i64>) = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT attempts,last_failure_reason,next_retry_at,last_success_at
+                 FROM intelligence_content_backfill_state",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(state.0, 1);
+        assert_eq!(state.1, "http_rate_limited");
+        assert!(state.2 > Utc::now().timestamp_millis());
+        assert_eq!(state.3, None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_host_backfill_pass_never_reclaims_a_failed_article() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-backfill-pass-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let original = item();
+        let normalized = normalized_url(&original.url).unwrap();
+        let article_id = article_identity(&original.source_id, &original.guid, &normalized);
+        let fingerprint = record_fingerprint(&original, &normalized);
+        upsert_article(&catalog, &article_id, &fingerprint, &original, &normalized).unwrap();
+
+        let first = backfill_missing_content_once_for_pass_at(
+            &catalog,
+            &BackfillFixture(Err(ContentBackfillFailure::new("http_access_denied"))),
+            Some("host-round-a"),
+        )
+        .unwrap();
+        assert_eq!(first.attempted, 1);
+
+        // Model the shortest retry delay expiring while the same host round is
+        // still launching its later bounded child batches.
+        Connection::open(&catalog)
+            .unwrap()
+            .execute(
+                "UPDATE intelligence_content_backfill_state SET next_retry_at=0",
+                [],
+            )
+            .unwrap();
+        let same_pass = backfill_missing_content_once_for_pass_at(
+            &catalog,
+            &BackfillFixture(Err(ContentBackfillFailure::new("http_access_denied"))),
+            Some("host-round-a"),
+        )
+        .unwrap();
+        assert_eq!(same_pass.attempted, 0);
+
+        let next_pass = backfill_missing_content_once_for_pass_at(
+            &catalog,
+            &BackfillFixture(Err(ContentBackfillFailure::new("http_access_denied"))),
+            Some("host-round-b"),
+        )
+        .unwrap();
+        assert_eq!(next_pass.attempted, 1);
+        let attempts: i64 = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT attempts FROM intelligence_content_backfill_state WHERE article_id=?1",
+                [&article_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminal_public_content_failures_enter_a_long_cooldown() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-backfill-cooldown-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let before = Utc::now().timestamp_millis();
+        record_content_backfill_retry(
+            &catalog,
+            "terminal-article",
+            &ContentBackfillFailure::new("body_missing_or_paywall"),
+            Some("host-round"),
+        )
+        .unwrap();
+        let retry_at: i64 = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT next_retry_at FROM intelligence_content_backfill_state WHERE article_id='terminal-article'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(retry_at >= before + CONTENT_BACKFILL_TERMINAL_DELAY_MS);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collected_archived_article_can_be_claimed_and_triaged_without_page_or_network() {
+        // This composes the worker's two durable boundaries against one
+        // temporary catalog: injected collection writes immutable paragraphs,
+        // then the headless worker claims and records a typed 7B/8B decision.
+        // Neither half constructs a WebView, opens a listener, or contacts a
+        // source/model endpoint.
+        let root =
+            std::env::temp_dir().join(format!("kunpeng-collector-triage-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let result = collect_once_at(&catalog, "batch.triage", vec![item()]).unwrap();
+        assert_eq!(result.collected, 1);
+
+        // Collection intentionally has no model-table dependency.  The main
+        // permanent-store bootstrap owns this compatible table in production;
+        // add only that schema slice here so this remains a local fixture.
+        Connection::open(&catalog)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE intelligence_triage_decisions (
+                    article_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                    model_id TEXT NOT NULL, model_sha TEXT, prompt_version TEXT NOT NULL,
+                    status TEXT NOT NULL, importance REAL, confidence REAL, reason TEXT,
+                    decision_json TEXT, decided_at INTEGER NOT NULL,
+                    PRIMARY KEY(article_id,fingerprint,model_id,prompt_version)
+                );",
+            )
+            .unwrap();
+        let (_, claim, _) = super::super::claim_one_at(&catalog, "fixture-worker").unwrap();
+        let claim = claim.expect("collection creates one queued article");
+        let model =
+            super::super::triage::model_from_parts("http://127.0.0.1:8081/v1", "Qwen3-8B-Q4")
+                .unwrap();
+        let decision = super::super::TriageDecision {
+            keep: true,
+            importance: 82,
+            confidence: 0.94,
+            topic: "国际".into(),
+            primary_entities: vec!["主体".into()],
+            event_time: "2026-08-23".into(),
+            place: "北京".into(),
+            reason: "fixture evidence".into(),
+        };
+        assert_eq!(
+            super::super::apply_decision_at(&catalog, &claim, &model, Ok(decision))
+                .unwrap()
+                .0,
+            super::super::AppliedState::Triaged
+        );
+        let connection = Connection::open(&catalog).unwrap();
+        let paragraphs: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_article_paragraphs",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let triaged: String = connection
+            .query_row(
+                "SELECT triage_state FROM intelligence_articles",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(paragraphs, 2);
+        assert_eq!(triaged, "keep");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_port_rejects_empty_or_oversized_batches() {
+        let root =
+            std::env::temp_dir().join(format!("kunpeng-collector-file-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("input.json");
+        fs::write(&input, r#"{"articles":[]}"#).unwrap();
+        assert!(FileCollector::new(&input).collect().is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_feed_parsers_keep_identity_and_do_not_merge_same_topic_items() {
+        let source = HttpSource {
+            source_id: "fixture-feed".into(),
+            kind: "rss".into(),
+            url: "https://feeds.example.test/news.xml".into(),
+            language: Some("zh".into()),
+            interval_seconds: Some(60),
+        };
+        let xml = r#"<rss><channel><item><guid>same-topic-a</guid><title>同主题的第一件事</title><link>https://news.example.test/a</link><description>摘要 A</description><pubDate>Mon, 24 Aug 2026 01:00:00 +0000</pubDate></item><item><guid>same-topic-b</guid><title>同主题的第二件事</title><link>https://news.example.test/b</link><description>摘要 B</description></item></channel></rss>"#;
+        let entries = parse_xml_entries(&source, xml);
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0].guid, entries[1].guid);
+        assert_ne!(entries[0].url, entries[1].url);
+        assert_eq!(
+            entries[0].published_at.as_deref(),
+            Some("2026-08-24T01:00:00Z")
+        );
+
+        let json = r#"{"articles":[{"id":"json-1","headline":"JSON 标题","canonicalUrl":"https://news.example.test/json","content":"可公开归档的正文","publishedAt":"2026-08-24"}]}"#;
+        let entries = parse_json_entries(&source, json);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].guid, "json-1");
+        assert_eq!(entries[0].body.as_deref(), Some("可公开归档的正文"));
+        assert_eq!(
+            entries[0].published_at.as_deref(),
+            Some("2026-08-24T00:00:00Z")
+        );
+        assert_eq!(
+            normalize_published_at(Some("1787312011470".into())).as_deref(),
+            Some("2026-08-21T11:33:31Z")
+        );
+    }
+
+    #[test]
+    fn rss_content_encoded_becomes_complete_evidence_without_page_backfill() {
+        let source = HttpSource {
+            source_id: "fixture-feed".into(),
+            kind: "rss".into(),
+            url: "https://feeds.example.test/news.xml".into(),
+            language: Some("zh".into()),
+            interval_seconds: Some(60),
+        };
+        let xml = r#"<rss><channel><item><guid>full-body</guid><title>含完整正文的 RSS</title><link>https://news.example.test/full</link><content:encoded><![CDATA[<p>这是一段由公开 RSS 直接提供的完整正文，用于验证采集器会优先归档公开内容，而不是把同一文章再次放进受限的网页全文回填队列。它包含足够多的可读文字，以满足正文完整性阈值并保留后续模型需要的原始证据。</p>]]></content:encoded></item></channel></rss>"#;
+        let entries = parse_xml_entries(&source, xml);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body_status.as_deref(), Some("complete"));
+        assert!(entries[0]
+            .body
+            .as_deref()
+            .is_some_and(|body| body.contains("公开 RSS 直接提供的完整正文")));
+    }
+
+    #[test]
+    fn failed_public_source_is_durably_audited_with_a_reason() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let source = HttpSource {
+            source_id: "public-feed".into(),
+            kind: "rss".into(),
+            url: "https://feeds.example.test/fail.xml".into(),
+            language: None,
+            interval_seconds: None,
+        };
+        let result = collect_once_at(
+            &catalog,
+            "batch.failure",
+            vec![source_failure(&source, "http_status_503")],
+        )
+        .unwrap();
+        assert_eq!(result.failed, 1);
+        let row: (String, String) = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT fetch_status, failure_reason FROM intelligence_collection_records",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("failed".into(), "http_status_503".into()));
+        let _ = fs::remove_dir_all(root);
+    }
+}

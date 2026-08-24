@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>鲲鹏本机情报工作台</title>
+    <link rel="stylesheet" href="/assets/dashboard.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">仅限本机 · 127.0.0.1</p>
+          <h1>本机情报工作台</h1>
+          <p class="lead">这台处理机负责采集、全文归档、去重、模型判断、综合报道与发布。阅读器客户端只从服务器接收已发布资讯。</p>
+        </div>
+        <div class="connection">
+          <strong id="host-state">正在连接本机主机…</strong>
+          <span id="host-updated">尚未读取</span>
+        </div>
+      </header>
+
+      <section class="action-bar" aria-label="本机主机操作">
+        <div>
+          <strong>显式操作</strong>
+          <p>打开本页只查看状态。初始化不会启用采集；“执行一轮”才会启动一次抓取、初筛、关系判断、综合和发布。</p>
+        </div>
+        <div class="actions">
+          <button id="refresh" type="button">刷新状态</button>
+          <button id="initialize" type="button" class="secondary">初始化配置</button>
+          <button id="run-once" type="button" class="primary">执行一轮处理</button>
+        </div>
+      </section>
+
+      <section class="distribution panel" aria-labelledby="distribution-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">独立分发管理</p>
+            <h2 id="distribution-title">发布与历史回源配对</h2>
+            <p>只供本机情报处理机使用，不属于阅读器客户端。输入只随本次请求进入本机原生层，随后以 Windows DPAPI 方式保存；页面、浏览器存储和日志均不保留凭据。</p>
+          </div>
+          <span id="distribution-state">正在检查…</span>
+        </div>
+        <form id="distribution-form" class="distribution-form" autocomplete="off">
+          <label>发布服务 HTTPS 地址<input id="distribution-base-url" type="url" inputmode="url" placeholder="https://…" autocomplete="off" required /></label>
+          <label>发布 capability<input id="distribution-publish-credential" type="password" autocomplete="new-password" required /></label>
+          <label>历史回源 capability<input id="distribution-relay-credential" type="password" autocomplete="new-password" required /></label>
+          <label class="choice"><input id="distribution-launch-at-login" type="checkbox" checked /> 登录 Windows 后继续处理</label>
+          <div class="actions">
+            <button id="distribution-pair" type="submit" class="primary">保存并启动本机处理</button>
+            <button id="distribution-revoke" type="button" class="secondary">撤销此电脑配对</button>
+          </div>
+          <p id="distribution-notice" class="form-notice" role="status"></p>
+        </form>
+      </section>
+
+      <section class="metrics" id="metrics" aria-live="polite"></section>
+
+      <section class="stage-grid">
+        <article>
+          <p class="eyebrow">01 采集与正文</p>
+          <h2>来源、全文与永久档案</h2>
+          <p id="collection-detail">正在读取…</p>
+        </article>
+        <article>
+          <p class="eyebrow">02 语义候选与 8B</p>
+          <h2>初筛、关联与事件候选</h2>
+          <p id="triage-detail">正在读取…</p>
+        </article>
+        <article>
+          <p class="eyebrow">03 27B 综合与发布</p>
+          <h2>综合报道、日报与分发</h2>
+          <p id="editorial-detail">正在读取…</p>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">处理审计</p>
+            <h2>最近一个本机处理批次</h2>
+          </div>
+          <span id="run-summary">尚无运行记录</span>
+        </div>
+        <div id="audit" class="audit-empty">尚无审计摘要。执行一轮处理后会显示各阶段的聚合结果。</div>
+      </section>
+
+      <section class="boundary">
+        <strong>数据与分发边界</strong>
+        <p>本机永久保存原文、证据、整合报道和图片，视频仅保存链接。服务器只保存登录账户可读取的最近 30 天发布包；过期内容由客户端请求、主机回源、服务器临时中转后删除。</p>
+      </section>
+    </main>
+    <script src="/assets/dashboard.js"></script>
+  </body>
+</html>

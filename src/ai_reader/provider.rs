@@ -61,6 +61,54 @@ pub(super) async fn call_async(request: Request<'_>) -> Result<String, String> {
         .map_err(ProviderError::user_message)
 }
 
+/// Verify that an OpenAI-compatible loopback server is alive *and* advertises
+/// the model selected for a deep local task.  This deliberately sends no
+/// reader text and does not start a completion: it is safe to use when
+/// choosing between the normal 8B profile and the optional 27B runtime.
+pub(super) async fn local_model_health_check(
+    base_url: &str,
+    api_key: &str,
+    expected_model: &str,
+) -> Result<(), String> {
+    let endpoint = endpoint_for(base_url, "/models");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(6))
+        .build()
+        .map_err(|_| "本机模型健康检查无法创建连接".to_string())?;
+    let mut call = client.get(endpoint);
+    if has_api_key(api_key) {
+        call = call.bearer_auth(api_key);
+    }
+    let response = call
+        .send()
+        .await
+        .map_err(|_| "本机模型服务未响应".to_string())?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| "本机模型健康检查未能读取响应".to_string())?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "本机模型健康检查失败：{}",
+            error_summary(status, &body)
+        ));
+    }
+    let models = model_ids_from_response(&body)
+        .ok_or_else(|| "本机模型服务未返回 OpenAI 兼容的模型列表".to_string())?;
+    if models.is_empty() {
+        return Err("本机模型服务未返回已加载模型".to_string());
+    }
+    if !models
+        .iter()
+        .any(|model| compatible_model_id(model, expected_model))
+    {
+        return Err("本机模型服务已响应，但未加载所选的深度理解模型".to_string());
+    }
+    Ok(())
+}
+
 async fn call_async_inner(request: Request<'_>) -> ProviderResult<String> {
     let endpoint = endpoint_for(
         request.base_url,
@@ -165,7 +213,9 @@ fn payload(request: Request<'_>) -> serde_json::Value {
         // response must never be rendered as a completed news article.
         if matches!(
             request.task,
-            "intelligence_generate_brief" | "intelligence_judge_event_pairs"
+            "intelligence_generate_brief"
+                | "intelligence_judge_event_pairs"
+                | "intelligence_triage_articles"
         ) {
             payload["temperature"] = serde_json::json!(0.1);
             payload["response_format"] = serde_json::json!({"type": "json_object"});
@@ -176,6 +226,37 @@ fn payload(request: Request<'_>) -> serde_json::Value {
 
 fn has_api_key(value: &str) -> bool {
     !value.trim().is_empty()
+}
+
+fn model_ids_from_response(body: &str) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let values = value.get("data")?.as_array()?;
+    Some(
+        values
+            .iter()
+            .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
+fn compatible_model_id(advertised: &str, expected: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let advertised = normalize(advertised);
+    let expected = normalize(expected);
+    !advertised.is_empty()
+        && !expected.is_empty()
+        && (advertised == expected
+            || advertised.contains(&expected)
+            || expected.contains(&advertised))
 }
 
 fn parse_response(provider: &str, status: u16, body: &str) -> ProviderResult<String> {
@@ -412,5 +493,31 @@ mod tests {
                 .and_then(|value| value.as_f64()),
             Some(0.1)
         );
+        let triage = payload(Request {
+            task: "intelligence_triage_articles",
+            ..request
+        });
+        assert_eq!(
+            triage
+                .pointer("/response_format/type")
+                .and_then(|value| value.as_str()),
+            Some("json_object")
+        );
+    }
+
+    #[test]
+    fn local_health_check_requires_an_advertised_matching_model() {
+        let body = r#"{"data":[{"id":"Qwen3.8-27B-UD-Q3_K_XL.gguf"}]}"#;
+        let ids = model_ids_from_response(body).unwrap();
+        assert!(ids
+            .iter()
+            .any(|id| compatible_model_id(id, "Qwen3.8-27B-UD-Q3_K_XL")));
+        assert!(!ids
+            .iter()
+            .any(|id| compatible_model_id(id, "Qwen3-8B-Instruct")));
+        assert!(model_ids_from_response(r#"{"data":[]}"#)
+            .unwrap()
+            .is_empty());
+        assert!(model_ids_from_response(r#"{"models":[]}"#).is_none());
     }
 }

@@ -1,0 +1,136 @@
+const byId = (id) => document.getElementById(id);
+const state = byId("host-state");
+const updated = byId("host-updated");
+const metrics = byId("metrics");
+const audit = byId("audit");
+const runSummary = byId("run-summary");
+const refresh = byId("refresh");
+const initialize = byId("initialize");
+const runOnce = byId("run-once");
+const distributionState = byId("distribution-state");
+const distributionForm = byId("distribution-form");
+const distributionBaseUrl = byId("distribution-base-url");
+const distributionPublishCredential = byId("distribution-publish-credential");
+const distributionRelayCredential = byId("distribution-relay-credential");
+const distributionLaunchAtLogin = byId("distribution-launch-at-login");
+const distributionPair = byId("distribution-pair");
+const distributionRevoke = byId("distribution-revoke");
+const distributionNotice = byId("distribution-notice");
+
+function metric(label, value, detail) {
+  const item = document.createElement("article"); item.className = "metric";
+  const title = document.createElement("strong"); title.textContent = label;
+  const count = document.createElement("span"); count.textContent = String(value);
+  const caption = document.createElement("span"); caption.textContent = detail;
+  item.replaceChildren(title, count, caption); return item;
+}
+function formatRun(report) {
+  if (!report) return "尚无运行记录";
+  return `${report.outcome || "已完成"} · 采集 ${report.collected || 0} · 初筛 ${report.triaged || 0} · 综合 ${report.processed || 0} · 发布 ${report.publication || "未发布"}`;
+}
+const stageLabels = {
+  preparing: "准备本机处理",
+  collection: "采集来源元数据",
+  full_text_backfill: "补取并归档全文",
+  triage_runtime: "校验并装载 8B 判定模型",
+  triage_runtime_ready: "8B 判定模型已就绪",
+  small_model_triage: "8B 判断重要性",
+  vector_recall_and_relation: "召回近邻并判断事件关系",
+  editorial_runtime: "校验并切换 27B 综合模型",
+  editorial_runtime_ready: "27B 综合模型已就绪",
+  editorial_synthesis: "27B 生成综合报道",
+  publication: "生成并投递发布包",
+  publication_without_model: "模型不可用时检查已有发布包",
+};
+function stageLabel(value) { return stageLabels[value] || value || "准备中"; }
+function render(status) {
+  state.textContent = status.pipelineRunning
+    ? `本机主机正在处理：${stageLabel(status.currentStage)}`
+    : status.enabled ? "本机主机已就绪" : "主机尚未启用";
+  if (status.lastError) state.textContent = String(status.lastError);
+  updated.textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
+  metrics.replaceChildren(
+    metric("永久归档", status.articleCount, `完整正文 ${status.fullTextCount} 篇`),
+    metric("待补全文", status.awaitingFullTextCount, "完成后才可进入模型初筛"),
+    metric("模型候选总数", status.queuedCount, `其中待 8B 初筛 ${status.readyForTriageCount} 篇`),
+    metric("历史归档补全", status.historicalBackfillCount, "不进入当前模型队列"),
+    metric("待关系判断", status.readyForRelationCount, "已完成初筛，等待 8B 关系核验"),
+    metric("待 27B 综合", status.readyForEditorialCount, `已生成事件 ${status.processedCount}`),
+    metric("保留", status.keptCount, `已过滤 ${status.filteredCount} 篇`),
+    metric("主机组件", status.workerAvailable ? 1 : 0, status.configurationReady ? "来源与模型已配置" : "配置尚未完成"),
+  );
+  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；${status.awaitingFullTextCount} 篇阻塞模型判断，另有 ${status.historicalBackfillCount} 篇历史归档待补全。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
+  byId("triage-detail").textContent = `待初筛 ${status.readyForTriageCount} 篇；已完成关系判断、等待综合 ${status.readyForEditorialCount} 篇。`;
+  byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件；发布状态由登录账户的主机配对决定。`;
+  runSummary.textContent = formatRun(status.lastRun);
+  const rows = Array.isArray(status.auditSummary) ? status.auditSummary : [];
+  if (!rows.length) { audit.className = "audit-empty"; audit.textContent = "尚无审计摘要。执行一轮处理后会显示各阶段的聚合结果。"; return; }
+  audit.className = "audit"; audit.replaceChildren(...rows.map((row) => {
+    const item = document.createElement("article"); item.className = "audit-item";
+    const label = document.createElement("strong"); label.textContent = stageLabel(String(row.stage || ""));
+    const value = document.createElement("span");
+    const phase = document.createElement("b"); phase.textContent = String(row.status || "未知");
+    value.replaceChildren(phase, document.createTextNode(` · ${Number(row.count) || 0} 项`));
+    item.replaceChildren(label, value); return item;
+  }));
+}
+async function getStatus() { const response = await fetch("/api/status", { cache: "no-store" }); if (!response.ok) throw new Error("status unavailable"); return response.json(); }
+async function getDistributionStatus() { const response = await fetch("/api/distribution-status", { cache: "no-store" }); if (!response.ok) throw new Error("distribution unavailable"); return response.json(); }
+async function refreshStatus() { refresh.disabled = true; try { render(await getStatus()); } catch { state.textContent = "无法连接本机主机"; updated.textContent = "请确认本机工作台仍在运行"; } finally { refresh.disabled = false; } }
+async function post(action) { const response = await fetch(action, { method: "POST", headers: { "Content-Type": "application/json", "X-Kunpeng-Host-Dashboard": "1" }, body: "{}" }); if (!response.ok) { const message = await response.text(); throw new Error(message || "操作失败"); } return response.json(); }
+function setDistributionNotice(message, error = false) { distributionNotice.textContent = message; distributionNotice.classList.toggle("error", error); }
+function renderDistribution(status) {
+  const paired = Boolean(status && status.paired);
+  distributionState.textContent = paired ? "已配对" : "尚未配对";
+  distributionRevoke.disabled = !paired;
+  if (paired) {
+    setDistributionNotice(`本机处理${status.enabled ? "已启用" : "未启用"}；发布凭据 ${status.publishCredentialPresent ? "已保存" : "缺失"}，回源凭据 ${status.relayCredentialPresent ? "已保存" : "缺失"}。`);
+  } else {
+    setDistributionNotice("未保存发布凭据。输入短期、可撤销的 capability 后才会启动本机分发。 ");
+  }
+}
+async function refreshDistribution() {
+  try { renderDistribution(await getDistributionStatus()); }
+  catch { distributionState.textContent = "无法读取"; setDistributionNotice("无法读取本机分发状态。", true); }
+}
+initialize.addEventListener("click", async () => { initialize.disabled = true; try { await post("/api/initialize"); await refreshStatus(); } catch (error) { state.textContent = `初始化失败：${error.message}`; } finally { initialize.disabled = false; } });
+runOnce.addEventListener("click", async () => { runOnce.disabled = true; try { await post("/api/run-once"); state.textContent = "已开始一轮本机处理，状态会自动刷新"; } catch (error) { state.textContent = `启动失败：${error.message}`; runOnce.disabled = false; return; } setTimeout(() => { runOnce.disabled = false; void refreshStatus(); }, 800); });
+refresh.addEventListener("click", () => { void refreshStatus(); });
+distributionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  distributionPair.disabled = true;
+  setDistributionNotice("正在保存本机配对…");
+  const request = {
+    baseUrl: distributionBaseUrl.value.trim(),
+    publishCredential: distributionPublishCredential.value,
+    relayCredential: distributionRelayCredential.value,
+    launchAtLogin: distributionLaunchAtLogin.checked,
+  };
+  try {
+    const response = await fetch("/api/distribution-pair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Kunpeng-Host-Dashboard": "1" },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) throw new Error("pairing failed");
+    distributionForm.reset();
+    distributionLaunchAtLogin.checked = true;
+    await refreshDistribution();
+  } catch {
+    setDistributionNotice("本机分发配对未完成；请核对 HTTPS 地址、短期 capability 和本机 worker 安装。", true);
+  } finally {
+    // Do not retain a capability in DOM state after this one native request.
+    distributionBaseUrl.value = "";
+    distributionPublishCredential.value = "";
+    distributionRelayCredential.value = "";
+    distributionPair.disabled = false;
+  }
+});
+distributionRevoke.addEventListener("click", async () => {
+  distributionRevoke.disabled = true;
+  try { await post("/api/distribution-revoke"); await refreshDistribution(); }
+  catch { setDistributionNotice("无法撤销本机分发配置。", true); }
+  finally { distributionRevoke.disabled = false; }
+});
+void refreshStatus(); setInterval(() => { void refreshStatus(); }, 5000);
+void refreshDistribution(); setInterval(() => { void refreshDistribution(); }, 5000);
