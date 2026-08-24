@@ -11,6 +11,7 @@ repo_root=$(git -C "$service_dir" rev-parse --show-toplevel 2>/dev/null || true)
 usage() {
   printf '%s\n' "Usage: $0 $confirmation" >&2
   printf '%s\n' 'Requires distinct KUNPENG_SYNC_BACKUP_SOURCE_DATABASE_URL and KUNPENG_SYNC_BACKUP_TARGET_DATABASE_URL values for reader_sync_rust_test_* databases.' >&2
+  printf '%s\n' 'KUNPENG_SYNC_BACKUP_RESTORE_ADMIN_DATABASE_URL is optional and is used only by pg_restore when extensions require an administrator.' >&2
   printf '%s\n' 'Requires KUNPENG_SYNC_BACKUP_REHEARSAL_DIR to name an existing private directory outside the repository.' >&2
   exit 64
 }
@@ -139,12 +140,19 @@ verify_restored_bytea_content() {
 [[ $# -eq 1 && "$1" == "$confirmation" ]] || usage
 source_url=${KUNPENG_SYNC_BACKUP_SOURCE_DATABASE_URL-}
 target_url=${KUNPENG_SYNC_BACKUP_TARGET_DATABASE_URL-}
+restore_admin_url=${KUNPENG_SYNC_BACKUP_RESTORE_ADMIN_DATABASE_URL-}
 scratch_root=${KUNPENG_SYNC_BACKUP_REHEARSAL_DIR-}
 [[ -n "$source_url" ]] || fail 'KUNPENG_SYNC_BACKUP_SOURCE_DATABASE_URL is not set'
 [[ -n "$target_url" ]] || fail 'KUNPENG_SYNC_BACKUP_TARGET_DATABASE_URL is not set'
 [[ -n "$scratch_root" ]] || fail 'KUNPENG_SYNC_BACKUP_REHEARSAL_DIR is not set'
 source_name=$(database_name_from_url "$source_url")
 target_name=$(database_name_from_url "$target_url")
+if [[ -n "$restore_admin_url" ]]; then
+  restore_name=$(database_name_from_url "$restore_admin_url")
+  [[ "$restore_name" == "$target_name" ]] || fail 'restore administrator URL must target the same test database'
+else
+  restore_admin_url=$target_url
+fi
 [[ "$source_name" != "$target_name" ]] || fail 'source and restore target databases must differ'
 [[ "$scratch_root" == /* ]] || fail 'rehearsal directory must be absolute'
 [[ -d "$scratch_root" && ! -L "$scratch_root" ]] || fail 'rehearsal directory must be a real existing directory'
@@ -169,7 +177,7 @@ source_summary=$(aggregate_snapshot "$source_url")
 require_empty_restore_target "$target_url"
 pg_dump "$source_url" --format=custom --no-owner --no-privileges --file "$dump_file"
 [[ -f "$dump_file" && ! -L "$dump_file" && -s "$dump_file" ]] || fail 'logical backup was not created as a regular file'
-pg_restore --dbname="$target_url" --clean --if-exists --no-owner --no-privileges --exit-on-error "$dump_file"
+pg_restore --dbname="$restore_admin_url" --clean --if-exists --no-owner --no-privileges --exit-on-error "$dump_file"
 target_summary=$(aggregate_snapshot "$target_url")
 [[ "$target_summary" == "$source_summary" ]] || fail 'restored aggregate verification does not match source'
 verify_restored_bytea_content "$source_url" "$target_url"
