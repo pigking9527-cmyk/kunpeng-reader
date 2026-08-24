@@ -182,8 +182,15 @@ require_empty_restore_target "$target_url"
 pg_dump "$source_url" --format=custom --no-owner --no-privileges --file "$dump_file"
 [[ -f "$dump_file" && ! -L "$dump_file" && -s "$dump_file" ]] || fail 'logical backup was not created as a regular file'
 restore_args=(--dbname="$restore_admin_url" --clean --if-exists --no-owner --no-privileges --exit-on-error)
-[[ -z "$restore_role" ]] || restore_args+=(--role="$restore_role")
 pg_restore "${restore_args[@]}" "$dump_file"
+if [[ -n "$restore_role" ]]; then
+  # Extensions must be created by the restore administrator. Transfer the
+  # restored target's ownership only after that privileged phase, so the
+  # ordinary application connection verifies the same ownership boundary it
+  # will have after a real recovery.
+  psql "$restore_admin_url" --no-psqlrc --quiet --set ON_ERROR_STOP=1 \
+    --command "REASSIGN OWNED BY CURRENT_USER TO \"$restore_role\";"
+fi
 target_summary=$(aggregate_snapshot "$target_url")
 [[ "$target_summary" == "$source_summary" ]] || fail 'restored aggregate verification does not match source'
 verify_restored_bytea_content "$source_url" "$target_url"
