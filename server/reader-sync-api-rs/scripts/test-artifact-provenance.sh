@@ -7,6 +7,17 @@ creator="$script_dir/create-artifact-provenance.sh"
 workspace=$(mktemp -d)
 trap 'rm -rf -- "$workspace"' EXIT
 
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -- "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$1" | awk '{print $1}'
+  else
+    printf '%s\n' 'requires shasum or sha256sum' >&2
+    exit 1
+  fi
+}
+
 service="$workspace/repository/server"
 fixture="$workspace/repository/contracts/fixtures/api-v5-entity-envelope.json"
 mkdir -p "$service/migrations" "$(dirname -- "$fixture")" "$workspace/output"
@@ -24,7 +35,7 @@ git -C "$workspace/repository" -c user.name=fixture -c user.email=fixture@exampl
 manifest="$workspace/output/manifest"
 "$creator" --service-dir "$service" --binary "$workspace/reader-sync-api" --output "$manifest" >/dev/null
 "$creator" --service-dir "$service" --binary "$workspace/reader-sync-api" --verify --manifest "$manifest" >/dev/null
-grep -Fqx 'contract_fixture=contracts/fixtures/api-v5-entity-envelope.json:'"$(shasum -a 256 "$fixture" | awk '{print $1}')" "$manifest"
+grep -Fqx 'contract_fixture=contracts/fixtures/api-v5-entity-envelope.json:'"$(sha256_file "$fixture")" "$manifest"
 
 printf '# modified\n' >> "$service/Cargo.lock"
 if "$creator" --service-dir "$service" --binary "$workspace/reader-sync-api" --verify --manifest "$manifest" >/dev/null 2>&1; then

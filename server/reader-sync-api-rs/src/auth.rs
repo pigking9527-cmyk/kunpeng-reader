@@ -159,6 +159,7 @@ pub(crate) struct AuthenticatedUser {
     pub username: String,
     pub sync_verified_at: i64,
     disabled_at: i64,
+    pub intelligence_feed_enabled: bool,
     pub expires_at: i64,
     // Only `/session` and `/me` request this projection. Keeping it optional
     // avoids making every sync request join the generation table merely
@@ -916,7 +917,7 @@ async fn authenticate_query(
     if touch_due {
         sqlx::query_as::<_, AuthenticatedUser>(
             "WITH authenticated AS ( \
-                 SELECT users.id,users.username,users.sync_verified_at,users.disabled_at, \
+                 SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,users.intelligence_feed_enabled, \
                         s.expires_at,NULL::BIGINT AS data_generation \
                  FROM auth_sessions_v4 s \
                  JOIN users ON users.id=s.user_id \
@@ -927,7 +928,7 @@ async fn authenticate_query(
                    AND EXISTS (SELECT 1 FROM authenticated) \
                  RETURNING s.token_digest \
              ) \
-             SELECT id,username,sync_verified_at,disabled_at,expires_at,data_generation \
+             SELECT id,username,sync_verified_at,disabled_at,intelligence_feed_enabled,expires_at,data_generation \
              FROM authenticated",
         )
         .bind(digest)
@@ -937,7 +938,7 @@ async fn authenticate_query(
         .await
     } else {
         sqlx::query_as::<_, AuthenticatedUser>(
-            "SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,s.expires_at, \
+            "SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,users.intelligence_feed_enabled,s.expires_at, \
              NULL::BIGINT AS data_generation \
              FROM auth_sessions_v4 s JOIN users ON users.id=s.user_id \
              WHERE s.token_digest=$1 AND s.revoked_at=0 AND s.expires_at>$2",
@@ -958,7 +959,7 @@ async fn authenticate_query_with_generation(
     if touch_due {
         sqlx::query_as::<_, AuthenticatedUser>(
             "WITH authenticated AS ( \
-                 SELECT users.id,users.username,users.sync_verified_at,users.disabled_at, \
+                 SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,users.intelligence_feed_enabled, \
                         s.expires_at,g.generation AS data_generation \
                  FROM auth_sessions_v4 s \
                  JOIN users ON users.id=s.user_id \
@@ -970,7 +971,7 @@ async fn authenticate_query_with_generation(
                    AND EXISTS (SELECT 1 FROM authenticated) \
                  RETURNING s.token_digest \
              ) \
-             SELECT id,username,sync_verified_at,disabled_at,expires_at,data_generation \
+             SELECT id,username,sync_verified_at,disabled_at,intelligence_feed_enabled,expires_at,data_generation \
              FROM authenticated",
         )
         .bind(digest)
@@ -980,7 +981,7 @@ async fn authenticate_query_with_generation(
         .await
     } else {
         sqlx::query_as::<_, AuthenticatedUser>(
-            "SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,s.expires_at, \
+            "SELECT users.id,users.username,users.sync_verified_at,users.disabled_at,users.intelligence_feed_enabled,s.expires_at, \
              g.generation AS data_generation \
              FROM auth_sessions_v4 s JOIN users ON users.id=s.user_id \
              LEFT JOIN account_data_generations g ON g.user_id=users.id \

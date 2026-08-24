@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, str::FromStr, time::Duration};
+use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use secrecy::SecretString;
@@ -6,6 +6,7 @@ use secrecy::SecretString;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind: SocketAddr,
+    pub tls: Option<TlsConfig>,
     /// TCP accept queue depth. This is intentionally independent from the
     /// HTTP execution semaphores: a short connection burst should wait in the
     /// kernel queue rather than be dropped before middleware can apply its
@@ -66,8 +67,33 @@ pub struct Config {
     pub body_limit_bytes: usize,
     pub run_migrations: bool,
     pub trust_loopback_proxy_headers: bool,
+    /// Private host inference is an explicitly opt-in relay.  The server only
+    /// stores opaque HPKE envelopes; keeping the API disabled by default makes
+    /// accidental public exposure impossible during staged rollout.
+    pub intelligence_host_inference_enabled: bool,
+    /// Object storage is opt-in.  Disabled deployments retain the
+    /// `PostgreSQL` bytea path; enabled deployments use the durable
+    /// object-write worker and never expose a remote key before its PUT has
+    /// succeeded.
+    pub intelligence_object_storage: IntelligenceObjectStorageConfig,
     pub smtp: Option<SmtpConfig>,
     pub sms: Option<TencentSmsConfig>,
+}
+
+#[derive(Clone)]
+pub struct TlsConfig {
+    pub certificate_pem: PathBuf,
+    pub private_key_pem: PathBuf,
+}
+
+impl fmt::Debug for TlsConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsConfig")
+            .field("certificate_pem", &"[REDACTED]")
+            .field("private_key_pem", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +115,43 @@ pub struct TencentSmsConfig {
     pub template_id: String,
     pub region: String,
     pub daily_send_limit: u32,
+}
+
+#[derive(Clone)]
+pub enum IntelligenceObjectStorageConfig {
+    Disabled,
+    S3(S3ObjectStorageConfig),
+}
+
+impl std::fmt::Debug for IntelligenceObjectStorageConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => formatter.write_str("Disabled"),
+            Self::S3(config) => formatter.debug_tuple("S3").field(config).finish(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct S3ObjectStorageConfig {
+    pub endpoint: String,
+    pub region: String,
+    pub bucket: String,
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
+    pub session_token: Option<SecretString>,
+}
+
+impl std::fmt::Debug for S3ObjectStorageConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("S3ObjectStorageConfig")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("credentials", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for TencentSmsConfig {
@@ -135,6 +198,10 @@ impl Config {
             bail!("KUNPENG_SYNC_BIND must be loopback unless KUNPENG_SYNC_ALLOW_PUBLIC_BIND=1");
         }
         let database_url = required("KUNPENG_SYNC_DATABASE_URL")?;
+        let tls = tls_config(
+            optional("KUNPENG_SYNC_TLS_CERTIFICATE_PEM"),
+            optional("KUNPENG_SYNC_TLS_PRIVATE_KEY_PEM"),
+        )?;
         let token_hmac_key = required("KUNPENG_SYNC_TOKEN_HMAC_KEY")?;
         if token_hmac_key.len() < 32 {
             bail!("KUNPENG_SYNC_TOKEN_HMAC_KEY must contain at least 32 bytes");
@@ -142,8 +209,10 @@ impl Config {
 
         let smtp = smtp_config()?;
         let sms = sms_config()?;
+        let intelligence_object_storage = intelligence_object_storage_config()?;
         Ok(Self {
             bind,
+            tls,
             listen_backlog: parsed_positive::<u32>("KUNPENG_SYNC_LISTEN_BACKLOG", "1024")?,
             database_url: SecretString::from(database_url),
             token_hmac_key: SecretString::from(token_hmac_key),
@@ -198,6 +267,11 @@ impl Config {
                 "KUNPENG_SYNC_TRUST_LOOPBACK_PROXY_HEADERS",
                 false,
             )?,
+            intelligence_host_inference_enabled: boolean(
+                "KUNPENG_SYNC_INTELLIGENCE_HOST_INFERENCE_ENABLED",
+                false,
+            )?,
+            intelligence_object_storage,
             smtp,
             sms,
         })
@@ -208,6 +282,7 @@ impl Config {
     pub fn for_test(database_url: &str) -> Self {
         Self {
             bind: SocketAddr::from_str("127.0.0.1:0").expect("test bind address"),
+            tls: None,
             listen_backlog: 128,
             database_url: SecretString::from(database_url.to_owned()),
             token_hmac_key: SecretString::from("test-only-key-with-at-least-32-bytes".to_owned()),
@@ -230,6 +305,8 @@ impl Config {
             body_limit_bytes: 1024 * 1024,
             run_migrations: false,
             trust_loopback_proxy_headers: false,
+            intelligence_host_inference_enabled: false,
+            intelligence_object_storage: IntelligenceObjectStorageConfig::Disabled,
             smtp: Some(SmtpConfig {
                 host: "smtp.invalid".to_owned(),
                 port: 587,
@@ -240,6 +317,26 @@ impl Config {
             }),
             sms: None,
         }
+    }
+}
+
+fn intelligence_object_storage_config() -> Result<IntelligenceObjectStorageConfig> {
+    match value("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE", "disabled").as_str() {
+        "disabled" => Ok(IntelligenceObjectStorageConfig::Disabled),
+        "s3" => Ok(IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+            endpoint: required("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_ENDPOINT")?,
+            region: required("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_REGION")?,
+            bucket: required("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_BUCKET")?,
+            access_key_id: SecretString::from(required(
+                "KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_ACCESS_KEY_ID",
+            )?),
+            secret_access_key: SecretString::from(required(
+                "KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_SECRET_ACCESS_KEY",
+            )?),
+            session_token: optional("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE_S3_SESSION_TOKEN")
+                .map(SecretString::from),
+        })),
+        _ => bail!("KUNPENG_SYNC_INTELLIGENCE_OBJECT_STORAGE must be disabled or s3"),
     }
 }
 
@@ -351,6 +448,22 @@ fn boolean(name: &str, default: bool) -> Result<bool> {
     }
 }
 
+fn tls_config(
+    certificate_pem: Option<String>,
+    private_key_pem: Option<String>,
+) -> Result<Option<TlsConfig>> {
+    match (certificate_pem, private_key_pem) {
+        (None, None) => Ok(None),
+        (Some(certificate_pem), Some(private_key_pem)) => Ok(Some(TlsConfig {
+            certificate_pem: PathBuf::from(certificate_pem),
+            private_key_pem: PathBuf::from(private_key_pem),
+        })),
+        _ => bail!(
+            "KUNPENG_SYNC_TLS_CERTIFICATE_PEM and KUNPENG_SYNC_TLS_PRIVATE_KEY_PEM must be set together"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +471,10 @@ mod tests {
     #[test]
     fn test_config_does_not_expose_secrets_in_debug() {
         let mut config = Config::for_test("postgresql://user:password@localhost/database");
+        config.tls = Some(TlsConfig {
+            certificate_pem: PathBuf::from("/private/certificate-path-must-not-leak"),
+            private_key_pem: PathBuf::from("/private/key-path-must-not-leak"),
+        });
         config.sms = Some(TencentSmsConfig {
             secret_id: "secret-id-must-not-leak".to_owned(),
             secret_key: SecretString::from("secret-key-must-not-leak".to_owned()),
@@ -367,6 +484,17 @@ mod tests {
             region: "ap-guangzhou".to_owned(),
             daily_send_limit: 10,
         });
+        config.intelligence_object_storage =
+            IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+                endpoint: "https://objects.example.invalid".to_owned(),
+                region: "test-region-1".to_owned(),
+                bucket: "intelligence-test".to_owned(),
+                access_key_id: SecretString::from("object-access-key-must-not-leak".to_owned()),
+                secret_access_key: SecretString::from("object-secret-key-must-not-leak".to_owned()),
+                session_token: Some(SecretString::from(
+                    "object-session-token-must-not-leak".to_owned(),
+                )),
+            });
         let debug = format!("{config:?}");
         assert!(!debug.contains("postgresql://user:password"));
         assert!(!debug.contains("test-only-key"));
@@ -376,9 +504,32 @@ mod tests {
             "sdk-app-id",
             "sign-name",
             "template-id",
+            "object-access-key",
+            "object-secret-key",
+            "object-session-token",
+            "certificate-path",
+            "key-path",
         ] {
             assert!(!debug.contains(sensitive));
         }
+    }
+
+    #[test]
+    fn test_tls_files_must_be_configured_as_a_pair() {
+        assert!(tls_config(None, None).unwrap().is_none());
+        let tls = tls_config(
+            Some("/private/certificate.pem".to_owned()),
+            Some("/private/key.pem".to_owned()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            tls.certificate_pem,
+            PathBuf::from("/private/certificate.pem")
+        );
+        assert_eq!(tls.private_key_pem, PathBuf::from("/private/key.pem"));
+        assert!(tls_config(Some("/private/certificate.pem".to_owned()), None).is_err());
+        assert!(tls_config(None, Some("/private/key.pem".to_owned())).is_err());
     }
 
     #[test]
@@ -392,5 +543,22 @@ mod tests {
             SmtpTlsMode::StartTls
         );
         assert!("plaintext".parse::<SmtpTlsMode>().is_err());
+    }
+
+    #[test]
+    fn test_object_storage_debug_redacts_credentials() {
+        let config = IntelligenceObjectStorageConfig::S3(S3ObjectStorageConfig {
+            endpoint: "https://objects.example.invalid".to_owned(),
+            region: "test-region-1".to_owned(),
+            bucket: "intelligence-test".to_owned(),
+            access_key_id: SecretString::from("access-key-must-not-leak".to_owned()),
+            secret_access_key: SecretString::from("secret-key-must-not-leak".to_owned()),
+            session_token: Some(SecretString::from("session-token-must-not-leak".to_owned())),
+        });
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        for secret in ["access-key", "secret-key", "session-token"] {
+            assert!(!debug.contains(secret));
+        }
     }
 }

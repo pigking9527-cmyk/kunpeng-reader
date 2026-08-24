@@ -33,4 +33,15 @@ database_name=${url_without_query##*/}
   || fail 'database name is not a plain test-database name'
 
 "$script_dir/check-migrations.sh"
-exec cargo test --manifest-path "$service_dir/Cargo.toml" --test postgres_e2e
+# All cases use the same destructive, explicitly approved database.  Running
+# them in parallel makes independent `TRUNCATE ... CASCADE` setup phases lock
+# each other's tables and can turn a healthy database into a false deadlock.
+exec cargo +1.97.1 test --manifest-path "$service_dir/Cargo.toml" \
+  --test postgres_e2e \
+  --test postgres_intelligence_e2e \
+  --test postgres_intelligence_asset_upload_e2e \
+  --test postgres_intelligence_archive_recovery_e2e \
+  --test postgres_host_inference_e2e \
+  --test postgres_intelligence_route_e2e \
+  --test postgres_intelligence_retention_route_e2e \
+  -- --test-threads=1

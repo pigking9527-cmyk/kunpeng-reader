@@ -7,6 +7,12 @@ pub mod config;
 pub mod credentials;
 pub mod error;
 pub mod feedback;
+pub mod host_inference;
+pub mod intelligence;
+pub mod intelligence_archive;
+pub mod intelligence_object_outbox;
+pub mod intelligence_object_store;
+pub mod intelligence_retention;
 pub mod mail;
 pub mod middleware;
 pub mod password_reset;
@@ -18,7 +24,7 @@ pub mod sms;
 pub mod state;
 pub mod sync;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -87,7 +93,35 @@ use crate::{
         account_email::rebind_old_start,
         account_email::rebind_old_confirm,
         account_email::rebind_new_start,
-        account_email::rebind_new_confirm
+        account_email::rebind_new_confirm,
+        intelligence::capabilities,
+        intelligence::feed,
+        intelligence::stream,
+        intelligence::publication,
+        intelligence::preferences,
+        intelligence::put_preferences,
+        intelligence::acknowledge_delivery,
+        intelligence::register_device,
+        intelligence::asset,
+        intelligence::init_upload,
+        intelligence::init_asset_upload,
+        intelligence::upload_asset_chunk,
+        intelligence::complete_asset_upload,
+        intelligence::complete_upload,
+        intelligence_archive::create_request,
+        intelligence_archive::request_status,
+        intelligence_archive::content,
+        intelligence_archive::ack_content,
+        intelligence_archive::jobs,
+        intelligence_archive::claim,
+        intelligence_archive::not_found,
+        intelligence_archive::failed,
+        intelligence_archive::upload_content,
+        intelligence_archive::init_chunked_upload,
+        intelligence_archive::upload_chunk,
+        intelligence_archive::complete_chunked_upload,
+        intelligence_archive::calendar,
+        intelligence_archive::heartbeat
     ),
     components(schemas(
         HealthResponse,
@@ -137,7 +171,37 @@ use crate::{
         account_email::RebindOldConfirmRequest,
         account_email::RebindNewStartRequest,
         account_email::EmailChallengeResponse,
-        account_email::RebindGrantResponse
+        account_email::RebindGrantResponse,
+        intelligence::CapabilitiesResponse,
+        intelligence::ArchiveAvailability,
+        intelligence::PublicationUploadResponse,
+        intelligence::AssetUploadInitInput,
+        intelligence::AssetUploadProgress,
+        intelligence::AssetUploadChunkInput,
+        intelligence::FeedItem,
+        intelligence::FeedPage,
+        intelligence::StreamDeliveryEvent,
+        intelligence::PreferencesRequest,
+        intelligence::PreferencesResponse,
+        intelligence::DeliveryAckResponse,
+        intelligence::DeviceRequest,
+        intelligence::DeviceResponse,
+        intelligence_archive::ArchiveRequestInput,
+        intelligence_archive::ArchiveSelector,
+        intelligence_archive::ArchiveRequestView,
+        intelligence_archive::JobQuery,
+        intelligence_archive::PublisherJobsResponse,
+        intelligence_archive::PublisherJob,
+        intelligence_archive::UploadContentInput,
+        intelligence_archive::TerminalInput,
+        intelligence_archive::ArchiveContentResponse,
+        intelligence_archive::ArchiveUploadInitInput,
+        intelligence_archive::ArchiveUploadProgress,
+        intelligence_archive::ArchiveUploadChunkInput,
+        intelligence_archive::ArchiveCalendarResponse,
+        intelligence_archive::ArchiveCalendarDay,
+        intelligence_archive::PublisherHeartbeatInput,
+        intelligence_archive::PublisherHeartbeatResponse
     )),
     tags((name = "reader-sync", description = "Kunpeng Reader synchronization API")),
     modifiers(&SecurityAddon)
@@ -164,6 +228,13 @@ impl Modify for SecurityAddon {
 /// Returns an error for an invalid database URL, a failed migration, or a
 /// process-wide metrics recorder conflict.
 pub async fn build_state(config: Config) -> Result<AppState> {
+    // Construct the configured adapter before accepting requests.  In
+    // particular, an enabled-but-invalid S3 configuration must fail startup
+    // instead of being silently treated as the PostgreSQL-only mode.
+    let intelligence_object_store = Arc::from(
+        intelligence_object_store::store_for_config(&config.intelligence_object_storage)
+            .map_err(|_| anyhow::anyhow!("invalid intelligence object storage configuration"))?,
+    );
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .acquire_timeout(config.database_acquire_timeout)
@@ -194,6 +265,7 @@ pub async fn build_state(config: Config) -> Result<AppState> {
         write_request_queue_slots: Arc::new(Semaphore::new(config.max_queued_write_requests)),
         password_slots: Arc::new(Semaphore::new(config.max_concurrent_password_operations)),
         token_hmac_key: config.token_hmac_key.clone(),
+        intelligence_object_store,
         config,
     })
 }
@@ -322,6 +394,144 @@ pub fn app(state: AppState) -> Router {
         .route("/metrics", get(routes::metrics))
         .route("/v1/feedback", axum::routing::post(feedback::submit))
         .route(
+            "/v1/intelligence/capabilities",
+            get(intelligence::capabilities),
+        )
+        .route("/v1/intelligence/feed", get(intelligence::feed))
+        .route("/v1/intelligence/stream", get(intelligence::stream))
+        .route(
+            "/v1/intelligence/publications/{id}",
+            get(intelligence::publication),
+        )
+        .route(
+            "/v1/intelligence/preferences",
+            get(intelligence::preferences).put(intelligence::put_preferences),
+        )
+        .route(
+            "/v1/intelligence/deliveries/{id}/ack",
+            axum::routing::post(intelligence::acknowledge_delivery),
+        )
+        .route(
+            "/v1/intelligence/devices",
+            axum::routing::post(intelligence::register_device),
+        )
+        .route(
+            "/v1/intelligence/assets/init",
+            axum::routing::post(intelligence::init_asset_upload),
+        )
+        .route(
+            "/v1/intelligence/assets/{sha256}",
+            get(intelligence::asset).put(intelligence::upload_asset_chunk),
+        )
+        .route(
+            "/v1/intelligence/assets/{sha256}/complete",
+            axum::routing::post(intelligence::complete_asset_upload),
+        )
+        .route(
+            "/v1/intelligence/archive-requests",
+            axum::routing::post(intelligence_archive::create_request),
+        )
+        .route(
+            "/v1/intelligence/archive/calendar",
+            get(intelligence_archive::calendar),
+        )
+        .route(
+            "/v1/intelligence/archive-requests/{id}",
+            get(intelligence_archive::request_status),
+        )
+        .route(
+            "/v1/intelligence/archive-requests/{id}/content",
+            get(intelligence_archive::content),
+        )
+        .route(
+            "/v1/intelligence/archive-requests/{id}/content/ack",
+            axum::routing::post(intelligence_archive::ack_content),
+        )
+        .route(
+            "/v1/intelligence/publisher/jobs",
+            get(intelligence_archive::jobs),
+        )
+        .route(
+            "/v1/intelligence/publisher/heartbeat",
+            axum::routing::post(intelligence_archive::heartbeat),
+        )
+        .route(
+            "/v1/intelligence/publisher/jobs/{id}/claim",
+            axum::routing::post(intelligence_archive::claim),
+        )
+        .route(
+            "/v1/intelligence/publisher/jobs/{id}/content",
+            axum::routing::post(intelligence_archive::upload_content),
+        )
+        .route(
+            "/v1/intelligence/publisher/jobs/{id}/uploads/init",
+            axum::routing::post(intelligence_archive::init_chunked_upload),
+        )
+        .route(
+            "/v1/intelligence/publisher/jobs/{id}/uploads/{upload_id}",
+            axum::routing::put(intelligence_archive::upload_chunk),
+        )
+        .route(
+            "/v1/intelligence/publisher/jobs/{id}/uploads/{upload_id}/complete",
+            axum::routing::post(intelligence_archive::complete_chunked_upload),
+        )
+        .route(
+            "/v1/intelligence/publisher/jobs/{id}/not-found",
+            axum::routing::post(intelligence_archive::not_found),
+        )
+        .route(
+            "/v1/intelligence/publisher/jobs/{id}/failed",
+            axum::routing::post(intelligence_archive::failed),
+        )
+        .route(
+            "/v1/intelligence/uploads/init",
+            axum::routing::post(intelligence::init_upload),
+        )
+        .route(
+            "/v1/intelligence/uploads/{id}/complete",
+            axum::routing::post(intelligence::complete_upload),
+        )
+        .route(
+            "/v1/intelligence/host-pairings/offers",
+            axum::routing::post(host_inference::create_offer),
+        )
+        .route(
+            "/v1/intelligence/host-pairings/offers/{id}/claim",
+            axum::routing::post(host_inference::claim_offer),
+        )
+        .route(
+            "/v1/intelligence/host-pairings",
+            get(host_inference::pairings),
+        )
+        .route(
+            "/v1/intelligence/host-pairings/{id}",
+            axum::routing::delete(host_inference::revoke_pairing),
+        )
+        .route(
+            "/v1/intelligence/host-tasks",
+            axum::routing::post(host_inference::create_task).get(host_inference::host_tasks),
+        )
+        .route(
+            "/v1/intelligence/host-tasks/{id}",
+            get(host_inference::task_status),
+        )
+        .route(
+            "/v1/intelligence/host-tasks/{id}/claim",
+            axum::routing::post(host_inference::claim_task),
+        )
+        .route(
+            "/v1/intelligence/host-tasks/{id}/result",
+            axum::routing::post(host_inference::submit_result),
+        )
+        .route(
+            "/v1/intelligence/host-tasks/{id}/cancel",
+            axum::routing::post(host_inference::cancel_task),
+        )
+        .route(
+            "/v1/intelligence/host-tasks/{id}/ack",
+            axum::routing::post(host_inference::ack_task),
+        )
+        .route(
             "/openapi.json",
             get(move || async move { axum::Json(openapi.clone()) }),
         )
@@ -350,10 +560,20 @@ pub fn app(state: AppState) -> Router {
 pub async fn serve(config: Config) -> Result<()> {
     let bind = config.bind;
     let listen_backlog = config.listen_backlog;
+    let tls = config.tls.clone();
+    if tls.is_some() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .map_err(|_| anyhow::anyhow!("TLS crypto provider was already initialized"))?;
+    }
     let state = build_state(config).await?;
     let mail_worker = mail::spawn_worker(state.clone())?;
     let sms_worker = sms::spawn_worker(state.clone())?;
     let orphan_asset_reclaimer = assets::spawn_orphan_reclaimer(state.clone());
+    let intelligence_retention_reclaimer = intelligence_retention::spawn_reclaimer(state.clone());
+    let intelligence_archive_reclaimer = intelligence_archive::spawn_reclaimer(state.clone());
+    let host_inference_reclaimer = host_inference::spawn_reclaimer(state.clone());
+    let intelligence_object_outbox_worker = intelligence_object_outbox::spawn_worker(state.clone());
     let socket = match bind {
         std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
         std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
@@ -369,13 +589,36 @@ pub async fn serve(config: Config) -> Result<()> {
         .listen(listen_backlog)
         .with_context(|| format!("failed to listen on {bind}"))?;
     info!(%bind, "reader sync API listening");
-    let result = axum::serve(
-        listener,
-        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("HTTP server failed");
+    let app = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let result = if let Some(tls) = tls {
+        let listener = listener
+            .into_std()
+            .context("failed to preserve the configured TLS listen backlog")?;
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            tls.certificate_pem,
+            tls.private_key_pem,
+        )
+        .await
+        .context("failed to load TLS certificate or private key")?;
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+        let shutdown_task = tokio::spawn(async move {
+            shutdown_signal().await;
+            shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
+        });
+        let result = axum_server::from_tcp_rustls(listener, tls_config)
+            .handle(handle)
+            .serve(app)
+            .await
+            .context("TLS server failed");
+        shutdown_task.abort();
+        result
+    } else {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .context("HTTP server failed")
+    };
     if let Some(worker) = mail_worker {
         worker.abort();
     }
@@ -383,6 +626,12 @@ pub async fn serve(config: Config) -> Result<()> {
         worker.abort();
     }
     orphan_asset_reclaimer.abort();
+    intelligence_retention_reclaimer.abort();
+    intelligence_archive_reclaimer.abort();
+    host_inference_reclaimer.abort();
+    if let Some(worker) = intelligence_object_outbox_worker {
+        worker.abort();
+    }
     result
 }
 
