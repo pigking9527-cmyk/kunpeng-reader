@@ -77,9 +77,9 @@ async fn insert_account(
     now: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO users \\
-         (id,username,password_hash,created_at,sync_verified_at,username_key,intelligence_feed_enabled) \\
-         VALUES ($1,$2,$3,$4,$4,$5,true)",
+        r"INSERT INTO users
+          (id,username,password_hash,created_at,sync_verified_at,username_key,intelligence_feed_enabled)
+          VALUES ($1,$2,$3,$4,$4,$5,true)",
     )
     .bind(account_id)
     .bind(username)
