@@ -9,6 +9,12 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 service_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 repo_root=$(git -C "$service_dir" rev-parse --show-toplevel 2>/dev/null || true)
+# Candidate deployments are deliberately built from a clean `git archive`,
+# not a mutable checkout. The offline gate must therefore locate the sibling
+# contracts and ADRs from its installed directory when Git metadata is absent.
+if [[ -z "$repo_root" ]]; then
+  repo_root=$(CDPATH= cd -- "$service_dir/../.." && pwd)
+fi
 
 usage() {
   printf '%s\n' "Usage: $0 --offline [--require-object-storage]" >&2
