@@ -47,16 +47,21 @@
 | 客户端 | `DELETE /v1/intelligence/host-pairings/{pairId}` | 撤销主机配对和未完成任务 |
 | 客户端 | `POST /v1/intelligence/host-tasks` | 提交 `TaskRequestV1` 密文请求 |
 | 主机 | `GET /v1/intelligence/host-tasks?wait=25` | 仅用 capability credential 长轮询领取本主机任务 |
-| 主机 | `POST /v1/intelligence/host-tasks/{taskId}/claim` | 原子领取仍有效、未取消的任务 |
-| 主机 | `POST /v1/intelligence/host-tasks/{taskId}/result` | 上传 `EncryptedResultV1`，不得含任何明文字段 |
+| 主机 | `POST /v1/intelligence/host-tasks/{taskId}/claim` | 原子领取；第二次使用新的幂等键确认已开始运行；收到 `CANCEL_REQUESTED` 时确认取消并物理清除请求密文 |
+| 主机 | `POST /v1/intelligence/host-tasks/{taskId}/result` | 上传 `EncryptedResultV1`，或提交固定 `failureCode`；两者互斥，均不得含任何明文字段 |
 | 客户端 | `GET /v1/intelligence/host-tasks/{taskId}` | 读取状态或端到端密封的结果 |
 | 客户端 | `POST /v1/intelligence/host-tasks/{taskId}/cancel` | 请求取消；服务端立即停止结果接受与后续投递 |
 | 客户端 | `POST /v1/intelligence/host-tasks/{taskId}/ack` | 解密、验证、持久化本地结果后确认；服务端立即清除结果密文 |
 
-状态为 `QUEUED → CLAIMED → RUNNING → RESULT_READY → PURGED`。取消走
-`QUEUED/CLAIMED/RUNNING → CANCEL_REQUESTED → CANCELLED → PURGED`；没有结果的主机可写
-`FAILED`，但失败对象不得含模型错误原文。所有写端点要求 `Idempotency-Key`，同 key 不同
-请求摘要必须返回 `409 IDEMPOTENCY_KEY_REUSED`。
+状态为 `QUEUED → CLAIMED → RUNNING → RESULT_READY → PURGED`。主机以独立的幂等
+`claim` 确认 `CLAIMED → RUNNING`；这样断线重试不会伪造运行状态。取消走
+`QUEUED/CLAIMED/RUNNING → CANCEL_REQUESTED → CANCELLED → PURGED`：客户端首先只请求取消，
+主机通过下一次队列轮询获知取消，再调用 `claim` 或携带 `failureCode: "cancelled"` 的
+`result` 确认，服务端才删除请求密文。已经 `RESULT_READY` 的任务不再有执行中的主机，取消会
+直接删除结果并进入 `CANCELLED`。没有结果的主机可写 `FAILED`，但失败对象只能是
+`host_unavailable`、`model_failed`、`input_unsupported` 或 `policy_refused` 等固定枚举，绝不含
+模型错误原文。所有写端点要求 `Idempotency-Key`，同 key 不同请求摘要必须返回
+`409 IDEMPOTENCY_KEY_REUSED`；回执只保存状态和固定协议元数据，绝不保存密文。
 
 ## TTL、取消与销毁
 

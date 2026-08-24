@@ -86,6 +86,7 @@
         "state": { "$ref": "#/$defs/taskState" },
         "createdAt": { "$ref": "#/$defs/timestamp" },
         "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "cancelRequestedAt": { "$ref": "#/$defs/timestamp" },
         "cancelledAt": { "$ref": "#/$defs/timestamp" },
         "completedAt": { "$ref": "#/$defs/timestamp" }
       }
@@ -108,11 +109,16 @@
     "encryptedResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaVersion", "taskId", "resultEnvelope"],
+      "required": ["schemaVersion", "taskId"],
+      "oneOf": [
+        { "required": ["resultEnvelope"] },
+        { "required": ["failureCode"] }
+      ],
       "properties": {
         "schemaVersion": { "const": 1 },
         "taskId": { "$ref": "#/$defs/id" },
-        "resultEnvelope": { "$ref": "#/$defs/encryptedEnvelope" }
+        "resultEnvelope": { "$ref": "#/$defs/encryptedEnvelope" },
+        "failureCode": { "enum": ["cancelled", "host_unavailable", "model_failed", "input_unsupported", "policy_refused"] }
       }
     },
     "taskResult": {

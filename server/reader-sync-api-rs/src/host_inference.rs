@@ -146,6 +146,8 @@ pub struct TaskReceipt {
     pub created_at: String,
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_requested_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cancelled_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
@@ -176,7 +178,13 @@ pub struct HostTask {
 pub struct ResultInput {
     pub schema_version: u8,
     pub task_id: String,
-    pub result_envelope: EnvelopeInput,
+    #[serde(default)]
+    pub result_envelope: Option<EnvelopeInput>,
+    /// A deliberately small, stable and content-free outcome.  It is only
+    /// accepted when no encrypted result exists, so model error text can
+    /// never be projected into the relay database or its idempotency receipt.
+    #[serde(default)]
+    pub failure_code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -251,6 +259,7 @@ struct TaskRow {
     result_envelope: Option<sqlx::types::Json<Value>>,
     created_at: i64,
     expires_at: i64,
+    cancel_requested_at: i64,
     cancelled_at: i64,
     completed_at: i64,
     result_expires_at: i64,
@@ -661,16 +670,15 @@ pub async fn create_task(
     if let Err(error) = cleanup_tx(&mut tx, now).await {
         return error.response(context);
     }
-    if let Ok(Some(value)) = account_receipt(&mut tx, &user.id, &key, request_hash).await {
-        return match tx.commit().await {
-            Ok(()) => serde_json::from_value::<TaskReceipt>(value)
-                .map(Json)
-                .map_or_else(
-                    |_| ApiError::DatabaseUnavailable.response(context),
-                    IntoResponse::into_response,
-                ),
-            Err(_) => ApiError::DatabaseUnavailable.response(context),
-        };
+    match receipt::<TaskReceipt>(&mut tx, "account", &user.id, &key, request_hash).await {
+        Ok(Some(stored)) => {
+            return match tx.commit().await {
+                Ok(()) => receipt_response(stored, context),
+                Err(_) => ApiError::DatabaseUnavailable.response(context),
+            };
+        }
+        Ok(None) => {}
+        Err(error) => return error.response(context),
     }
     let pair = sqlx::query_as::<_, PairRow>("SELECT pair_id,account_id,host_installation_id,host_key_id,host_public_key,host_key_fingerprint,client_key_id,client_public_key,capability_revision,capabilities,state,created_at,updated_at FROM intelligence_host_pairings_v1 WHERE pair_id=$1 AND account_id=$2 FOR UPDATE").bind(pair_id).bind(&user.id).fetch_optional(&mut *tx).await;
     let Ok(Some(pair)) = pair else {
@@ -693,6 +701,7 @@ pub async fn create_task(
         state: "QUEUED".to_owned(),
         created_at: format_ms(now),
         expires_at: format_ms(expires_at),
+        cancel_requested_at: None,
         cancelled_at: None,
         completed_at: None,
     };
@@ -700,7 +709,16 @@ pub async fn create_task(
     if inserted.is_err() {
         return ApiError::InvalidRequest.response(context);
     }
-    if let Err(error) = store_account_receipt(&mut tx, &user.id, &key, request_hash, &receipt).await
+    if let Err(error) = store_receipt(
+        &mut tx,
+        "account",
+        &user.id,
+        &key,
+        request_hash,
+        axum::http::StatusCode::CREATED,
+        &receipt,
+    )
+    .await
     {
         return error.response(context);
     }
@@ -770,7 +788,7 @@ async fn host_tasks_result(
 ) -> Result<HostTasksResponse, ApiError> {
     reclaim_expired(state).await?;
     let now = now_ms();
-    let rows = sqlx::query_as::<_, TaskRow>("SELECT task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancelled_at,completed_at,result_expires_at FROM intelligence_host_tasks_v1 WHERE pair_id=$1 AND capability_revision=$2 AND state='QUEUED' AND expires_at>$3 ORDER BY created_at ASC LIMIT 20").bind(credential.pair).bind(credential.capability_revision).bind(now).fetch_all(&state.pool).await.map_err(|_| ApiError::DatabaseUnavailable)?;
+    let rows = sqlx::query_as::<_, TaskRow>("SELECT task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at FROM intelligence_host_tasks_v1 WHERE pair_id=$1 AND capability_revision=$2 AND state IN ('QUEUED','CANCEL_REQUESTED') AND expires_at>$3 ORDER BY created_at ASC LIMIT 20").bind(credential.pair).bind(credential.capability_revision).bind(now).fetch_all(&state.pool).await.map_err(|_| ApiError::DatabaseUnavailable)?;
     Ok(HostTasksResponse {
         schema_version: 1,
         tasks: rows.into_iter().filter_map(host_task).collect(),
@@ -790,20 +808,74 @@ pub async fn claim_task(
     if let Err(error) = enabled(&state) {
         return error.response(context);
     }
-    let _key = match idempotency_key(&headers) {
+    let key = match idempotency_key(&headers) {
         Ok(key) => key,
         Err(error) => return error.response(context),
     };
     let now = now_ms();
-    let row = sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='CLAIMED',claimed_at=$4,updated_at=$4 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND state='QUEUED' AND expires_at>$4 RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancelled_at,completed_at,result_expires_at").bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now).fetch_optional(&state.pool).await;
-    match row {
-        Ok(Some(row)) => host_task(row).map(Json).map_or_else(
-            || ApiError::Internal.response(context),
-            IntoResponse::into_response,
-        ),
-        Ok(None) => ApiError::NotFound.response(context),
-        Err(_) => ApiError::DatabaseUnavailable.response(context),
+    let request_hash = hash(&canonical(&serde_json::json!({
+        "endpoint": "claim_task",
+        "taskId": task_id,
+    })));
+    let actor_id = credential.pair.to_string();
+    let Ok(mut tx) = state.pool.begin().await else {
+        return ApiError::DatabaseUnavailable.response(context);
+    };
+    if let Err(error) = cleanup_tx(&mut tx, now).await {
+        return error.response(context);
     }
+    match receipt::<TaskReceipt>(&mut tx, "host", &actor_id, &key, request_hash).await {
+        Ok(Some(stored)) => {
+            return match tx.commit().await {
+                Ok(()) => receipt_response(stored, context),
+                Err(_) => ApiError::DatabaseUnavailable.response(context),
+            };
+        }
+        Ok(None) => {}
+        Err(error) => return error.response(context),
+    }
+    let row = sqlx::query_as::<_, TaskRow>("SELECT task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at FROM intelligence_host_tasks_v1 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND expires_at>$4 FOR UPDATE")
+        .bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now)
+        .fetch_optional(&mut *tx).await;
+    let Ok(Some(row)) = row else {
+        return ApiError::NotFound.response(context);
+    };
+    let update = match row.state.as_str() {
+        // A second, independently idempotent claim is the explicit
+        // `CLAIMED -> RUNNING` acknowledgement.  This gives cancellation a
+        // durable state boundary without adding a new public route.
+        "QUEUED" => sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='CLAIMED',claimed_at=$4,updated_at=$4 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND state='QUEUED' RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at")
+            .bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now).fetch_optional(&mut *tx).await,
+        "CLAIMED" => sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='RUNNING',updated_at=$4 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND state='CLAIMED' RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at")
+            .bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now).fetch_optional(&mut *tx).await,
+        // Hosts learn a cancellation through their ordinary queue poll, then
+        // acknowledge it through this same stable endpoint.  Only then is
+        // the request envelope physically erased.
+        "CANCEL_REQUESTED" => sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='CANCELLED',cancelled_at=$4,request_envelope=NULL,request_ciphertext_sha256=NULL,result_envelope=NULL,result_ciphertext_sha256=NULL,updated_at=$4 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND state='CANCEL_REQUESTED' RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at")
+            .bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now).fetch_optional(&mut *tx).await,
+        _ => return ApiError::NotFound.response(context),
+    };
+    let Ok(Some(updated)) = update else {
+        return ApiError::NotFound.response(context);
+    };
+    let response = task_receipt(updated);
+    if let Err(error) = store_receipt(
+        &mut tx,
+        "host",
+        &actor_id,
+        &key,
+        request_hash,
+        axum::http::StatusCode::OK,
+        &response,
+    )
+    .await
+    {
+        return error.response(context);
+    }
+    if tx.commit().await.is_err() {
+        return ApiError::DatabaseUnavailable.response(context);
+    }
+    Json(response).into_response()
 }
 
 pub async fn submit_result(
@@ -820,7 +892,7 @@ pub async fn submit_result(
     if let Err(error) = enabled(&state) {
         return error.response(context);
     }
-    let _key = match idempotency_key(&headers) {
+    let key = match idempotency_key(&headers) {
         Ok(key) => key,
         Err(error) => return error.response(context),
     };
@@ -830,34 +902,78 @@ pub async fn submit_result(
     if input.schema_version != 1 || input.task_id != task_id {
         return ApiError::InvalidRequest.response(context);
     }
-    let Some((envelope, digest)) = validate_envelope(&input.result_envelope) else {
-        return ApiError::InvalidRequest.response(context);
+    let result = match (&input.result_envelope, input.failure_code.as_deref()) {
+        (Some(envelope), None) => {
+            let Some((envelope, digest)) = validate_envelope(envelope) else {
+                return ApiError::InvalidRequest.response(context);
+            };
+            if input.result_envelope.as_ref().is_none_or(|value| {
+                value.recipient_key_id != credential.client_key
+                    || value.sender_key_id != credential.host_key
+            }) {
+                return ApiError::InvalidRequest.response(context);
+            }
+            Some((envelope, digest))
+        }
+        (None, Some(code)) if valid_failure_code(code) => None,
+        _ => return ApiError::InvalidRequest.response(context),
     };
-    if input.result_envelope.recipient_key_id != credential.client_key
-        || input.result_envelope.sender_key_id != credential.host_key
-    {
-        return ApiError::InvalidRequest.response(context);
-    }
     let now = now_ms();
-    if cleanup(&state, now).await.is_err() {
+    let request_hash = hash(&canonical(&serde_json::json!({
+        "endpoint": "submit_result",
+        "taskId": task_id,
+        "ciphertextSha256": input.result_envelope.as_ref().map(|value| &value.ciphertext_sha256),
+        "failureCode": input.failure_code,
+    })));
+    let actor_id = credential.pair.to_string();
+    let Ok(mut tx) = state.pool.begin().await else {
+        return ApiError::DatabaseUnavailable.response(context);
+    };
+    if let Err(error) = cleanup_tx(&mut tx, now).await {
+        return error.response(context);
+    }
+    match receipt::<TaskReceipt>(&mut tx, "host", &actor_id, &key, request_hash).await {
+        Ok(Some(stored)) => {
+            return match tx.commit().await {
+                Ok(()) => receipt_response(stored, context),
+                Err(_) => ApiError::DatabaseUnavailable.response(context),
+            };
+        }
+        Ok(None) => {}
+        Err(error) => return error.response(context),
+    }
+    let row = if let Some((envelope, digest)) = result {
+        let result_expires = now + duration_ms(RESULT_TTL);
+        sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='RESULT_READY',request_envelope=NULL,request_ciphertext_sha256=NULL,result_envelope=$5,result_ciphertext_sha256=$6,completed_at=$4,result_expires_at=$7,updated_at=$4 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND state IN ('CLAIMED','RUNNING') AND expires_at>$4 RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at")
+            .bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now).bind(sqlx::types::Json(envelope)).bind(digest.as_slice()).bind(result_expires).fetch_optional(&mut *tx).await
+    } else if input.failure_code.as_deref() == Some("cancelled") {
+        sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='CANCELLED',cancelled_at=$4,request_envelope=NULL,request_ciphertext_sha256=NULL,result_envelope=NULL,result_ciphertext_sha256=NULL,updated_at=$4 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND state='CANCEL_REQUESTED' AND expires_at>$4 RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at")
+            .bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now).fetch_optional(&mut *tx).await
+    } else {
+        sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='FAILED',request_envelope=NULL,request_ciphertext_sha256=NULL,result_envelope=NULL,result_ciphertext_sha256=NULL,completed_at=$4,updated_at=$4 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND state IN ('CLAIMED','RUNNING') AND expires_at>$4 RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at")
+            .bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now).fetch_optional(&mut *tx).await
+    };
+    let Ok(Some(row)) = row else {
+        return ApiError::NotFound.response(context);
+    };
+    let response = task_receipt(row);
+    if let Err(error) = store_receipt(
+        &mut tx,
+        "host",
+        &actor_id,
+        &key,
+        request_hash,
+        axum::http::StatusCode::OK,
+        &response,
+    )
+    .await
+    {
+        return error.response(context);
+    }
+    if tx.commit().await.is_err() {
         return ApiError::DatabaseUnavailable.response(context);
     }
-    let result_expires = now + duration_ms(RESULT_TTL);
-    let changed = sqlx::query("UPDATE intelligence_host_tasks_v1 SET state='RESULT_READY',result_envelope=$5,result_ciphertext_sha256=$6,completed_at=$4,result_expires_at=$7,updated_at=$4 WHERE task_id=$1 AND pair_id=$2 AND capability_revision=$3 AND state IN ('CLAIMED','RUNNING') AND expires_at>$4").bind(&task_id).bind(credential.pair).bind(credential.capability_revision).bind(now).bind(sqlx::types::Json(envelope)).bind(digest.as_slice()).bind(result_expires).execute(&state.pool).await;
-    match changed {
-        Ok(result) if result.rows_affected() == 1 => Json(TaskReceipt {
-            schema_version: 1,
-            task_id,
-            state: "RESULT_READY".to_owned(),
-            created_at: String::new(),
-            expires_at: format_ms(result_expires),
-            cancelled_at: None,
-            completed_at: Some(format_ms(now)),
-        })
-        .into_response(),
-        Ok(_) => ApiError::NotFound.response(context),
-        Err(_) => ApiError::DatabaseUnavailable.response(context),
-    }
+    Json(response).into_response()
 }
 
 pub async fn task_status(
@@ -877,7 +993,7 @@ pub async fn task_status(
     if cleanup(&state, now).await.is_err() {
         return ApiError::DatabaseUnavailable.response(context);
     }
-    let row = sqlx::query_as::<_, TaskRow>("SELECT task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancelled_at,completed_at,result_expires_at FROM intelligence_host_tasks_v1 WHERE task_id=$1 AND account_id=$2").bind(&task_id).bind(&user.id).fetch_optional(&state.pool).await;
+    let row = sqlx::query_as::<_, TaskRow>("SELECT task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at FROM intelligence_host_tasks_v1 WHERE task_id=$1 AND account_id=$2").bind(&task_id).bind(&user.id).fetch_optional(&state.pool).await;
     let Ok(Some(row)) = row else {
         return ApiError::NotFound.response(context);
     };
@@ -909,17 +1025,70 @@ pub async fn cancel_task(
     if let Err(error) = enabled(&state) {
         return error.response(context);
     }
-    let _key = match idempotency_key(&headers) {
+    let key = match idempotency_key(&headers) {
         Ok(key) => key,
         Err(error) => return error.response(context),
     };
     let now = now_ms();
-    let row = sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='CANCELLED',cancelled_at=$3,request_envelope=NULL,request_ciphertext_sha256=NULL,result_envelope=NULL,result_ciphertext_sha256=NULL,updated_at=$3 WHERE task_id=$1 AND account_id=$2 AND state NOT IN ('PURGED','EXPIRED','CANCELLED') RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancelled_at,completed_at,result_expires_at").bind(&task_id).bind(&user.id).bind(now).fetch_optional(&state.pool).await;
-    match row {
-        Ok(Some(row)) => Json(task_receipt(row)).into_response(),
-        Ok(None) => ApiError::NotFound.response(context),
-        Err(_) => ApiError::DatabaseUnavailable.response(context),
+    let request_hash = hash(&canonical(&serde_json::json!({
+        "endpoint": "cancel_task",
+        "taskId": task_id,
+    })));
+    let Ok(mut tx) = state.pool.begin().await else {
+        return ApiError::DatabaseUnavailable.response(context);
+    };
+    if let Err(error) = cleanup_tx(&mut tx, now).await {
+        return error.response(context);
     }
+    match receipt::<TaskReceipt>(&mut tx, "account", &user.id, &key, request_hash).await {
+        Ok(Some(stored)) => {
+            return match tx.commit().await {
+                Ok(()) => receipt_response(stored, context),
+                Err(_) => ApiError::DatabaseUnavailable.response(context),
+            };
+        }
+        Ok(None) => {}
+        Err(error) => return error.response(context),
+    }
+    let row = sqlx::query_as::<_, TaskRow>("SELECT task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at FROM intelligence_host_tasks_v1 WHERE task_id=$1 AND account_id=$2 FOR UPDATE")
+        .bind(&task_id).bind(&user.id).fetch_optional(&mut *tx).await;
+    let Ok(Some(row)) = row else {
+        return ApiError::NotFound.response(context);
+    };
+    let update = match row.state.as_str() {
+        // A result is already terminal from the host's perspective.  No host
+        // needs a cancellation signal, so remove both envelopes immediately.
+        "RESULT_READY" => sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='CANCELLED',cancelled_at=$3,request_envelope=NULL,request_ciphertext_sha256=NULL,result_envelope=NULL,result_ciphertext_sha256=NULL,updated_at=$3 WHERE task_id=$1 AND account_id=$2 AND state='RESULT_READY' RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at")
+            .bind(&task_id).bind(&user.id).bind(now).fetch_optional(&mut *tx).await,
+        // Work that may still be resident in a host is first marked for
+        // cancellation.  The host sees this marker in its ordinary poll and
+        // must confirm it before the request envelope is erased.
+        "QUEUED" | "CLAIMED" | "RUNNING" => sqlx::query_as::<_, TaskRow>("UPDATE intelligence_host_tasks_v1 SET state='CANCEL_REQUESTED',cancel_requested_at=$3,result_envelope=NULL,result_ciphertext_sha256=NULL,updated_at=$3 WHERE task_id=$1 AND account_id=$2 AND state IN ('QUEUED','CLAIMED','RUNNING') RETURNING task_id,pair_id,account_id,operation,capability_revision,state,request_envelope,result_envelope,created_at,expires_at,cancel_requested_at,cancelled_at,completed_at,result_expires_at")
+            .bind(&task_id).bind(&user.id).bind(now).fetch_optional(&mut *tx).await,
+        "CANCEL_REQUESTED" | "CANCELLED" => Ok(Some(row)),
+        _ => return ApiError::NotFound.response(context),
+    };
+    let Ok(Some(updated)) = update else {
+        return ApiError::NotFound.response(context);
+    };
+    let response = task_receipt(updated);
+    if let Err(error) = store_receipt(
+        &mut tx,
+        "account",
+        &user.id,
+        &key,
+        request_hash,
+        axum::http::StatusCode::OK,
+        &response,
+    )
+    .await
+    {
+        return error.response(context);
+    }
+    if tx.commit().await.is_err() {
+        return ApiError::DatabaseUnavailable.response(context);
+    }
+    Json(response).into_response()
 }
 
 pub async fn ack_task(
@@ -935,19 +1104,55 @@ pub async fn ack_task(
     if let Err(error) = enabled(&state) {
         return error.response(context);
     }
-    let _key = match idempotency_key(&headers) {
+    let key = match idempotency_key(&headers) {
         Ok(key) => key,
         Err(error) => return error.response(context),
     };
     let now = now_ms();
-    let changed = sqlx::query("UPDATE intelligence_host_tasks_v1 SET state='PURGED',result_envelope=NULL,result_ciphertext_sha256=NULL,request_envelope=NULL,request_ciphertext_sha256=NULL,updated_at=$3 WHERE task_id=$1 AND account_id=$2 AND state='RESULT_READY'").bind(&task_id).bind(&user.id).bind(now).execute(&state.pool).await;
-    match changed {
-        Ok(value) if value.rows_affected() == 1 => {
-            axum::http::StatusCode::NO_CONTENT.into_response()
-        }
-        Ok(_) => ApiError::NotFound.response(context),
-        Err(_) => ApiError::DatabaseUnavailable.response(context),
+    let request_hash = hash(&canonical(&serde_json::json!({
+        "endpoint": "ack_task",
+        "taskId": task_id,
+    })));
+    let Ok(mut tx) = state.pool.begin().await else {
+        return ApiError::DatabaseUnavailable.response(context);
+    };
+    if let Err(error) = cleanup_tx(&mut tx, now).await {
+        return error.response(context);
     }
+    match receipt::<Value>(&mut tx, "account", &user.id, &key, request_hash).await {
+        Ok(Some(stored)) => {
+            return match tx.commit().await {
+                Ok(()) => empty_receipt_response(&stored, context),
+                Err(_) => ApiError::DatabaseUnavailable.response(context),
+            };
+        }
+        Ok(None) => {}
+        Err(error) => return error.response(context),
+    }
+    let changed = sqlx::query("UPDATE intelligence_host_tasks_v1 SET state='PURGED',result_envelope=NULL,result_ciphertext_sha256=NULL,request_envelope=NULL,request_ciphertext_sha256=NULL,updated_at=$3 WHERE task_id=$1 AND account_id=$2 AND state='RESULT_READY'").bind(&task_id).bind(&user.id).bind(now).execute(&mut *tx).await;
+    let Ok(changed) = changed else {
+        return ApiError::DatabaseUnavailable.response(context);
+    };
+    if changed.rows_affected() != 1 {
+        return ApiError::NotFound.response(context);
+    }
+    if let Err(error) = store_receipt(
+        &mut tx,
+        "account",
+        &user.id,
+        &key,
+        request_hash,
+        axum::http::StatusCode::NO_CONTENT,
+        &Value::Null,
+    )
+    .await
+    {
+        return error.response(context);
+    }
+    if tx.commit().await.is_err() {
+        return ApiError::DatabaseUnavailable.response(context);
+    }
+    axum::http::StatusCode::NO_CONTENT.into_response()
 }
 
 fn enabled(state: &AppState) -> Result<(), ApiError> {
@@ -1044,7 +1249,7 @@ fn validate_envelope(input: &EnvelopeInput) -> Option<(Value, [u8; 32])> {
 }
 fn host_task(row: TaskRow) -> Option<HostTask> {
     let request = row.request_envelope?.0;
-    (row.state == "QUEUED" || row.state == "CLAIMED").then(|| HostTask {
+    (row.state == "QUEUED" || row.state == "CANCEL_REQUESTED").then(|| HostTask {
         schema_version: 1,
         task_id: row.task_id,
         pair_id: row.pair_id.to_string(),
@@ -1062,6 +1267,8 @@ fn task_receipt(row: TaskRow) -> TaskReceipt {
         state: row.state,
         created_at: format_ms(row.created_at),
         expires_at: format_ms(row.expires_at),
+        cancel_requested_at: (row.cancel_requested_at > 0)
+            .then(|| format_ms(row.cancel_requested_at)),
         cancelled_at: (row.cancelled_at > 0).then(|| format_ms(row.cancelled_at)),
         completed_at: (row.completed_at > 0).then(|| format_ms(row.completed_at)),
     }
@@ -1142,30 +1349,6 @@ async fn cleanup_tx(
         receipts_deleted,
     })
 }
-async fn account_receipt(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    account: &str,
-    key: &str,
-    request_hash: [u8; 32],
-) -> Result<Option<Value>, ApiError> {
-    let row = sqlx::query_as::<_, (Vec<u8>, sqlx::types::Json<Value>)>("SELECT request_hash,response FROM intelligence_host_request_receipts_v1 WHERE actor_kind='account' AND actor_id=$1 AND idempotency_key=$2 FOR UPDATE").bind(account).bind(key).fetch_optional(&mut **tx).await.map_err(|_| ApiError::DatabaseUnavailable)?;
-    match row {
-        Some((stored, response)) if bytes_match(&stored, &request_hash) => Ok(Some(response.0)),
-        Some(_) => Err(ApiError::IdempotencyKeyReused),
-        None => Ok(None),
-    }
-}
-async fn store_account_receipt(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    account: &str,
-    key: &str,
-    request_hash: [u8; 32],
-    response: &TaskReceipt,
-) -> Result<(), ApiError> {
-    sqlx::query("INSERT INTO intelligence_host_request_receipts_v1 (actor_kind,actor_id,idempotency_key,request_hash,response,created_at) VALUES ('account',$1,$2,$3,$4,$5)").bind(account).bind(key).bind(request_hash.as_slice()).bind(sqlx::types::Json(serde_json::to_value(response).map_err(|_| ApiError::Internal)?)).bind(now_ms()).execute(&mut **tx).await.map_err(|_| ApiError::DatabaseUnavailable)?;
-    Ok(())
-}
-
 /// Reads an idempotency receipt for a route whose response is known to be
 /// protocol metadata.  Envelopes and credentials must never be passed to this
 /// helper: a retry can safely reconstruct a credential from server-held key
@@ -1272,6 +1455,12 @@ fn valid_capabilities(values: &[String]) -> bool {
 }
 fn valid_operation(value: &str) -> bool {
     OPERATIONS.contains(&value)
+}
+fn valid_failure_code(value: &str) -> bool {
+    matches!(
+        value,
+        "cancelled" | "host_unavailable" | "model_failed" | "input_unsupported" | "policy_refused"
+    )
 }
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
@@ -1385,6 +1574,7 @@ mod tests {
             state: "QUEUED".to_owned(),
             created_at: "2026-08-24T00:00:00Z".to_owned(),
             expires_at: "2026-08-24T00:15:00Z".to_owned(),
+            cancel_requested_at: None,
             cancelled_at: None,
             completed_at: None,
         };
@@ -1429,16 +1619,22 @@ mod tests {
         // create_task stores a receipt; all other mutating endpoint handlers
         // reject a request lacking the same required protocol header.
         assert!(source.matches("idempotency_key(&headers)").count() >= 8);
+        assert!(source.contains("\"host\", &actor_id, &key, request_hash"));
+        assert!(source.contains("receipt_response(stored, context)"));
     }
 
     #[test]
     fn migration_keeps_only_ciphertext_envelopes_and_account_scopes() {
         let migration = include_str!("../migrations/0030_host_inference_relay_v1.sql");
+        let cancellation =
+            include_str!("../migrations/0036_host_inference_cancel_requested_timestamp_v1.sql");
         assert!(migration.contains("account_id text NOT NULL REFERENCES users"));
         assert!(migration.contains("request_envelope jsonb"));
         assert!(migration.contains("result_envelope jsonb"));
         assert!(!migration.contains("prompt text"));
         assert!(!migration.contains("plaintext text"));
+        assert!(cancellation.contains("cancel_requested_at"));
+        assert!(cancellation.contains("CANCEL_REQUESTED"));
     }
 
     #[test]
@@ -1456,7 +1652,32 @@ mod tests {
             );
         }
         assert!(source.contains("state='CANCELLED',cancelled_at=$3,request_envelope=NULL"));
+        assert!(source.contains("state='CANCELLED',cancelled_at=$4,request_envelope=NULL"));
+        assert!(source.contains("state='CANCEL_REQUESTED',cancel_requested_at=$3"));
+        assert!(source.contains("state='RUNNING',updated_at=$4"));
+        assert!(source.contains("state='FAILED',request_envelope=NULL"));
         assert!(source.contains("state='PURGED',result_envelope=NULL"));
         assert!(source.contains("state='RESULT_READY' AND result_expires_at<=$1"));
+    }
+
+    #[test]
+    fn safe_failure_codes_and_receipts_cannot_carry_ciphertexts() {
+        assert!(valid_failure_code("model_failed"));
+        assert!(valid_failure_code("cancelled"));
+        assert!(!valid_failure_code("model output: private content"));
+        let source = include_str!("host_inference.rs");
+        let receipt_section = source
+            .split_once("async fn store_receipt")
+            .expect("receipt storage helper")
+            .1
+            .split_once("fn receipt_response")
+            .expect("receipt response helper")
+            .0;
+        assert!(!receipt_section.contains("HostTask"));
+        assert!(
+            source.contains(
+                "request_envelope=NULL,request_ciphertext_sha256=NULL,result_envelope=$5"
+            )
+        );
     }
 }

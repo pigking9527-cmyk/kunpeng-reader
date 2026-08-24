@@ -53,5 +53,10 @@
       "compression": "zstd"
     }
   },
+  "safeFailure": {
+    "schemaVersion": 1,
+    "taskId": "task-demo-1",
+    "failureCode": "model_failed"
+  },
   "cancel": { "schemaVersion": 1, "taskId": "task-demo-1", "requestedAt": "2030-01-02T00:03:00Z" }
 }
