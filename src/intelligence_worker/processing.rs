@@ -11,7 +11,7 @@ use super::synthesis::{
 };
 use crate::provider;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{cmp::Ordering, collections::HashMap, path::Path, time::Duration};
@@ -230,6 +230,48 @@ struct RelationStagingKey {
     model_sha256: String,
 }
 
+/// The only 27B synthesis material that may survive between the model answer
+/// and the final event transaction.  This deliberately stores the already
+/// projected, URL-free publication shape instead of an untrusted raw model
+/// response or any prompt/evidence.  The primary cache key remains bound to
+/// the complete input, model artifact, prompt, schema and processor version.
+#[derive(Clone, Debug)]
+struct EditorialStagingKey {
+    synthesis_key: String,
+    input_sha256: String,
+    event_articles_sha256: String,
+    model_id: String,
+    model_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EditorialStagingPayload {
+    title: String,
+    blocks: Vec<EditorialStagingBlock>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EditorialStagingBlock {
+    block_id: String,
+    segments: Vec<EditorialStagingSegment>,
+    media_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EditorialStagingSegment {
+    text: String,
+    note_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct EditorialReviewDecision {
+    relation: Relation,
+    payload: ReviewPayload,
+}
+
 /// The relation phase has two durable pieces of work: first make sure every
 /// canonical candidate has a vector for the selected model, then rerank and
 /// judge the bounded neighbours.  Do not call the 8B judge against a partial
@@ -365,6 +407,8 @@ enum EditorialMaterializeFailure {
     SynthesisSerialize,
     SynthesisModel,
     SynthesisProjection,
+    SynthesisStagingRead,
+    SynthesisStagingWrite,
     SynthesisSummary,
     SynthesisEmpty,
     EventRead,
@@ -390,6 +434,8 @@ impl EditorialMaterializeFailure {
             Self::SynthesisSerialize => "editorial_synthesis_serialize",
             Self::SynthesisModel => "editorial_synthesis_model",
             Self::SynthesisProjection => "editorial_synthesis_projection",
+            Self::SynthesisStagingRead => "editorial_synthesis_staging_read",
+            Self::SynthesisStagingWrite => "editorial_synthesis_staging_write",
             Self::SynthesisSummary => "editorial_synthesis_summary",
             Self::SynthesisEmpty => "editorial_synthesis_empty",
             Self::EventRead => "editorial_event_read",
@@ -427,7 +473,7 @@ struct RelationPayload {
     reason: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewPayload {
     approved: bool,
@@ -1001,6 +1047,9 @@ fn initialize(connection: &Connection) -> Result<(), ()> {
       CREATE TABLE IF NOT EXISTS intelligence_worker_relation_staging(pair_id TEXT PRIMARY KEY,cache_key TEXT NOT NULL,left_article_id TEXT NOT NULL,left_fingerprint TEXT NOT NULL,right_article_id TEXT NOT NULL,right_fingerprint TEXT NOT NULL,input_sha256 TEXT NOT NULL,model_id TEXT NOT NULL,model_sha256 TEXT NOT NULL,prompt_version TEXT NOT NULL,relation TEXT NOT NULL,same_event INTEGER NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS intelligence_worker_relation_staging_created_idx ON intelligence_worker_relation_staging(created_at);
       DELETE FROM intelligence_worker_relation_staging WHERE created_at < (strftime('%s','now')*1000 - 2592000000);
+      CREATE TABLE IF NOT EXISTS intelligence_worker_editorial_staging(synthesis_key TEXT PRIMARY KEY,input_sha256 TEXT NOT NULL,event_articles_sha256 TEXT NOT NULL,model_id TEXT NOT NULL,model_sha256 TEXT NOT NULL,prompt_version TEXT NOT NULL,schema_version TEXT NOT NULL,processor_version TEXT NOT NULL,payload_json TEXT NOT NULL,payload_sha256 TEXT NOT NULL,created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS intelligence_worker_editorial_staging_created_idx ON intelligence_worker_editorial_staging(created_at);
+      DELETE FROM intelligence_worker_editorial_staging WHERE created_at < (strftime('%s','now')*1000 - 2592000000);
       CREATE TABLE IF NOT EXISTS intelligence_worker_relation_reviews(pair_id TEXT PRIMARY KEY,left_article_id TEXT NOT NULL,right_article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,relation TEXT NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,reviewed_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS intelligence_quality_gate_state(singleton INTEGER PRIMARY KEY,review_mode TEXT NOT NULL);
       INSERT OR IGNORE INTO intelligence_quality_gate_state(singleton,review_mode) VALUES(1,'full');
@@ -1382,7 +1431,7 @@ fn extract_facts<T: ProcessingTransport>(
 /// truncation while retaining facts from the complete source rather than RSS
 /// snippets or a fixed leading substring.
 fn reduce_evidence_for_review<T: ProcessingTransport>(
-    connection: &rusqlite::Transaction<'_>,
+    connection: &Connection,
     mut evidence: Vec<String>,
     config: &EditorialConfiguration,
     transport: &T,
@@ -1431,7 +1480,7 @@ fn evidence_len(values: &[String]) -> usize {
 }
 
 fn reduce_group<T: ProcessingTransport>(
-    connection: &rusqlite::Transaction<'_>,
+    connection: &Connection,
     group: &str,
     config: &EditorialConfiguration,
     transport: &T,
@@ -2099,12 +2148,14 @@ fn review_and_materialize<T: ProcessingTransport>(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| EditorialMaterializeFailure::RightFactExtraction)?;
-    let transaction = connection
-        .transaction()
-        .map_err(|_| EditorialMaterializeFailure::TransactionOpen)?;
     let mut reviewed = 0;
+    let mut review_decisions = Vec::new();
     let mut event_articles = vec![article.id.clone()];
-    let left_evidence = reduce_evidence_for_review(&transaction, facts.to_vec(), config, transport)
+    // Every expensive 27B response is durably cached before the event write
+    // transaction begins.  A process death after a local model returns can
+    // therefore resume from the exact cache key instead of invoking the model
+    // again.  The final event/revision writes remain atomic below.
+    let left_evidence = reduce_evidence_for_review(connection, facts.to_vec(), config, transport)
         .map_err(|_| EditorialMaterializeFailure::LeftEvidenceReduce)?;
     for (relation, right_facts) in related_facts {
         let input_hash = sha256(format!(
@@ -2115,10 +2166,9 @@ fn review_and_materialize<T: ProcessingTransport>(
             REVIEW_PROMPT_VERSION
         ));
         let key = cache_key("review", &config.deep, REVIEW_PROMPT_VERSION, &input_hash);
-        let right_evidence =
-            reduce_evidence_for_review(&transaction, right_facts, config, transport)
-                .map_err(|_| EditorialMaterializeFailure::RightEvidenceReduce)?;
-        let raw = cached_or_call(&transaction, &key, "review", || {
+        let right_evidence = reduce_evidence_for_review(connection, right_facts, config, transport)
+            .map_err(|_| EditorialMaterializeFailure::RightEvidenceReduce)?;
+        let raw = cached_or_call(connection, &key, "review", || {
             transport.complete(&config.deep,"intelligence_qwen_review",REVIEW_PROMPT,&json!({"leftEvidence":left_evidence,"rightEvidence":right_evidence,"proposal":{"relation":relation.relation,"confidence":relation.confidence,"reason":relation.reason}}).to_string(),RELATION_REVIEW_MAX_TOKENS)
         })
         .map_err(|_| EditorialMaterializeFailure::ReviewModel)?;
@@ -2130,8 +2180,6 @@ fn review_and_materialize<T: ProcessingTransport>(
         {
             return Err(EditorialMaterializeFailure::ReviewValidation);
         }
-        transaction.execute("INSERT INTO intelligence_worker_relation_reviews(pair_id,left_article_id,right_article_id,fingerprint,relation,confidence,reason,reviewed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(pair_id) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,reason=excluded.reason,reviewed_at=excluded.reviewed_at",params![relation.id,article.id,relation.right_id,article.fingerprint,payload.relation,payload.confidence,payload.reason]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
-        transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-27b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![format!("27b:{}", relation.id),article.id,relation.right_id,payload.relation,payload.confidence,config.deep.model,json!({"reason":payload.reason,"processor":PROCESSOR_VERSION,"fulltextEvidence":true}).to_string()]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
         if payload.approved
             && matches!(
                 payload.relation.as_str(),
@@ -2141,6 +2189,10 @@ fn review_and_materialize<T: ProcessingTransport>(
             event_articles.push(relation.right_id.clone());
         }
         reviewed += 1;
+        review_decisions.push(EditorialReviewDecision {
+            relation: relation.clone(),
+            payload,
+        });
     }
     event_articles.sort();
     event_articles.dedup();
@@ -2174,19 +2226,36 @@ fn review_and_materialize<T: ProcessingTransport>(
         SYNTHESIS_PROMPT_VERSION,
         &synthesis_hash,
     );
-    let raw_synthesis =
-        cached_or_call(&transaction, &synthesis_key, "structured-synthesis", || {
-            transport.complete(
-                &config.deep,
-                "intelligence_qwen_structured_synthesis",
-                SYNTHESIS_PROMPT,
-                &synthesis_input,
-                synthesis_token_budget(&synthesis_input),
-            )
-        })
-        .map_err(|_| EditorialMaterializeFailure::SynthesisModel)?;
-    let projected = parse_and_project_synthesis(&raw_synthesis, &controlled)
-        .map_err(|_| EditorialMaterializeFailure::SynthesisProjection)?;
+    let staging_key = EditorialStagingKey {
+        synthesis_key: synthesis_key.clone(),
+        input_sha256: synthesis_hash,
+        event_articles_sha256: sha256(event_articles.join("\u{1f}")),
+        model_id: config.deep.model.clone(),
+        model_sha256: config.deep.artifact_sha256.clone(),
+    };
+    let projected = match load_staged_editorial_synthesis(connection, &staging_key, &controlled)
+        .map_err(|_| EditorialMaterializeFailure::SynthesisStagingRead)?
+    {
+        Some(value) => value,
+        None => {
+            let raw_synthesis =
+                cached_or_call(connection, &synthesis_key, "structured-synthesis", || {
+                    transport.complete(
+                        &config.deep,
+                        "intelligence_qwen_structured_synthesis",
+                        SYNTHESIS_PROMPT,
+                        &synthesis_input,
+                        synthesis_token_budget(&synthesis_input),
+                    )
+                })
+                .map_err(|_| EditorialMaterializeFailure::SynthesisModel)?;
+            let projected = parse_and_project_synthesis(&raw_synthesis, &controlled)
+                .map_err(|_| EditorialMaterializeFailure::SynthesisProjection)?;
+            stage_editorial_synthesis(connection, &staging_key, &projected)
+                .map_err(|_| EditorialMaterializeFailure::SynthesisStagingWrite)?;
+            projected
+        }
+    };
     let title = projected.title.clone();
     let summary =
         synthesis_summary(&projected).map_err(|_| EditorialMaterializeFailure::SynthesisSummary)?;
@@ -2199,6 +2268,13 @@ fn review_and_materialize<T: ProcessingTransport>(
         .join("\n\n");
     if article_text.trim().is_empty() {
         return Err(EditorialMaterializeFailure::SynthesisEmpty);
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|_| EditorialMaterializeFailure::TransactionOpen)?;
+    for decision in &review_decisions {
+        transaction.execute("INSERT INTO intelligence_worker_relation_reviews(pair_id,left_article_id,right_article_id,fingerprint,relation,confidence,reason,reviewed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(pair_id) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,reason=excluded.reason,reviewed_at=excluded.reviewed_at",params![decision.relation.id,article.id,decision.relation.right_id,article.fingerprint,decision.payload.relation,decision.payload.confidence,decision.payload.reason]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
+        transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-27b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![format!("27b:{}", decision.relation.id),article.id,decision.relation.right_id,decision.payload.relation,decision.payload.confidence,config.deep.model,json!({"reason":decision.payload.reason,"processor":PROCESSOR_VERSION,"fulltextEvidence":true}).to_string()]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
     }
     let event_id = format!("event:{}", sha256(event_articles.join("\u{1f}")));
     let current: Option<i64> = transaction
@@ -2217,10 +2293,188 @@ fn review_and_materialize<T: ProcessingTransport>(
     }
     reconcile_series_links(&transaction, &event_id, &article.id, &title, &summary)
         .map_err(|_| EditorialMaterializeFailure::SeriesReconcile)?;
+    // The staging record is consumed in the same transaction as the immutable
+    // event revision.  A failed commit leaves it available for a retry; a
+    // successful commit cannot leave a stale output that could be reused for
+    // a later revision.
+    transaction
+        .execute(
+            "DELETE FROM intelligence_worker_editorial_staging
+             WHERE synthesis_key=?1 AND input_sha256=?2
+               AND event_articles_sha256=?3 AND model_id=?4 AND model_sha256=?5
+               AND prompt_version=?6 AND schema_version=?7 AND processor_version=?8",
+            params![
+                staging_key.synthesis_key,
+                staging_key.input_sha256,
+                staging_key.event_articles_sha256,
+                staging_key.model_id,
+                staging_key.model_sha256,
+                SYNTHESIS_PROMPT_VERSION,
+                SCHEMA_VERSION,
+                PROCESSOR_VERSION,
+            ],
+        )
+        .map_err(|_| EditorialMaterializeFailure::EventWrite)?;
     transaction
         .commit()
         .map_err(|_| EditorialMaterializeFailure::Commit)?;
     Ok(reviewed)
+}
+
+fn editorial_staging_payload(projected: &ProjectedSynthesis) -> EditorialStagingPayload {
+    EditorialStagingPayload {
+        title: projected.title.clone(),
+        blocks: projected
+            .blocks
+            .iter()
+            .map(|block| EditorialStagingBlock {
+                block_id: block.block_id.clone(),
+                segments: block
+                    .segments
+                    .iter()
+                    .map(|segment| EditorialStagingSegment {
+                        text: segment.text.clone(),
+                        note_ids: segment.note_ids.clone(),
+                    })
+                    .collect(),
+                media_ids: block.media_ids.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Reconstruct the closed model shape and pass it through the same synthesis
+/// validator used for a fresh 27B response.  This makes an interrupted-run
+/// staging row a cache only, never a trust boundary: corrupt/tampered content
+/// is discarded before it can reach an event revision.
+fn projected_from_editorial_staging(
+    payload: EditorialStagingPayload,
+    controlled: &ControlledSynthesisInput,
+) -> Result<ProjectedSynthesis, ()> {
+    let model = ModelSynthesis {
+        title: payload.title,
+        blocks: payload
+            .blocks
+            .into_iter()
+            .map(|block| {
+                let segments = block
+                    .segments
+                    .into_iter()
+                    .map(|segment| {
+                        let citations = segment
+                            .note_ids
+                            .into_iter()
+                            .map(|note_id| {
+                                let source_id = controlled
+                                    .citations
+                                    .iter()
+                                    .find(|citation| citation.note_id == note_id)
+                                    .map(|citation| citation.source_id.clone())
+                                    .ok_or(())?;
+                                Ok(ModelCitationRef { source_id, note_id })
+                            })
+                            .collect::<Result<Vec<_>, ()>>()?;
+                        Ok(ModelSegment {
+                            text: segment.text,
+                            citations,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ()>>()?;
+                Ok(ModelBlock {
+                    block_id: block.block_id,
+                    segments,
+                    media_ids: block.media_ids,
+                })
+            })
+            .collect::<Result<Vec<_>, ()>>()?,
+    };
+    synthesis::validate_and_project(controlled, &model).map_err(|_| ())
+}
+
+fn stage_editorial_synthesis(
+    connection: &Connection,
+    key: &EditorialStagingKey,
+    projected: &ProjectedSynthesis,
+) -> Result<(), ()> {
+    let payload = serde_json::to_string(&editorial_staging_payload(projected)).map_err(|_| ())?;
+    let payload_sha256 = sha256(&payload);
+    connection
+        .execute(
+            "INSERT INTO intelligence_worker_editorial_staging(
+                synthesis_key,input_sha256,event_articles_sha256,model_id,model_sha256,
+                prompt_version,schema_version,processor_version,payload_json,payload_sha256,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,strftime('%s','now')*1000)
+             ON CONFLICT(synthesis_key) DO UPDATE SET
+                input_sha256=excluded.input_sha256,
+                event_articles_sha256=excluded.event_articles_sha256,
+                model_id=excluded.model_id,
+                model_sha256=excluded.model_sha256,
+                prompt_version=excluded.prompt_version,
+                schema_version=excluded.schema_version,
+                processor_version=excluded.processor_version,
+                payload_json=excluded.payload_json,
+                payload_sha256=excluded.payload_sha256,
+                created_at=excluded.created_at",
+            params![
+                key.synthesis_key,
+                key.input_sha256,
+                key.event_articles_sha256,
+                key.model_id,
+                key.model_sha256,
+                SYNTHESIS_PROMPT_VERSION,
+                SCHEMA_VERSION,
+                PROCESSOR_VERSION,
+                payload,
+                payload_sha256,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
+fn load_staged_editorial_synthesis(
+    connection: &Connection,
+    key: &EditorialStagingKey,
+    controlled: &ControlledSynthesisInput,
+) -> Result<Option<ProjectedSynthesis>, ()> {
+    let staged = connection
+        .query_row(
+            "SELECT payload_json,payload_sha256
+             FROM intelligence_worker_editorial_staging
+             WHERE synthesis_key=?1 AND input_sha256=?2 AND event_articles_sha256=?3
+               AND model_id=?4 AND model_sha256=?5
+               AND prompt_version=?6 AND schema_version=?7 AND processor_version=?8",
+            params![
+                key.synthesis_key,
+                key.input_sha256,
+                key.event_articles_sha256,
+                key.model_id,
+                key.model_sha256,
+                SYNTHESIS_PROMPT_VERSION,
+                SCHEMA_VERSION,
+                PROCESSOR_VERSION,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    let Some((payload, payload_sha256)) = staged else {
+        return Ok(None);
+    };
+    let decoded = (sha256(&payload) == payload_sha256)
+        .then(|| serde_json::from_str::<EditorialStagingPayload>(&payload).ok())
+        .flatten()
+        .and_then(|payload| projected_from_editorial_staging(payload, controlled).ok());
+    if let Some(projected) = decoded {
+        return Ok(Some(projected));
+    }
+    connection
+        .execute(
+            "DELETE FROM intelligence_worker_editorial_staging WHERE synthesis_key=?1",
+            [&key.synthesis_key],
+        )
+        .map_err(|_| ())?;
+    Ok(None)
 }
 
 fn controlled_synthesis_input(article_ids: &[String]) -> Result<ControlledSynthesisInput, ()> {
@@ -3059,6 +3313,85 @@ mod tests {
             )
             .unwrap(),
             "completed"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn editorial_staging_survives_a_crash_after_27b_returns_before_event_commit() {
+        let path = db();
+        let connection = Connection::open(&path).unwrap();
+        // Let relation selection and the final event read succeed, then abort
+        // precisely at the event write.  This simulates a process failure in
+        // the interval after the structured 27B answer was staged but before
+        // the enclosing event transaction can commit.
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_editorial_event_write
+                 BEFORE INSERT ON intelligence_events
+                 BEGIN SELECT RAISE(ABORT, 'simulated event write failure'); END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let first = Static {
+            responses: std::sync::Mutex::new(VecDeque::from(vec![
+                r#"{"relation":"same_event","sameEvent":true,"confidence":0.9,"reason":"主体一致"}"#.into(),
+                "事实一".into(),
+                "事实二".into(),
+                r#"{"approved":true,"relation":"same_event","confidence":0.9,"reason":"证据一致"}"#.into(),
+                r#"{"title":"可恢复综合标题","blocks":[{"blockId":"b1","segments":[{"text":"可恢复综合正文。","citations":[{"sourceId":"a","noteId":"note:ca978112ca1bbdca"}]}],"mediaIds":[]}]}"#.into(),
+            ])),
+        };
+        let failed = process_once_with(&path, &config(), &first);
+        assert_eq!(failed.outcome, ProcessingOutcome::Retry);
+        assert_eq!(failed.failure_stage, "editorial_event_write");
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_worker_editorial_staging",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        connection
+            .execute_batch("DROP TRIGGER fail_editorial_event_write")
+            .unwrap();
+        drop(connection);
+
+        // A fresh worker has no response left to give.  It must consume the
+        // durable fact/review cache and projected synthesis staging record,
+        // not make a second 27B request before committing the event.
+        let editorial = EditorialConfiguration {
+            deep: config().deep,
+        };
+        let resumed = Static {
+            responses: std::sync::Mutex::new(VecDeque::new()),
+        };
+        let completed = process_editorial_once_with(&path, &editorial, &resumed);
+        assert_eq!(completed.outcome, ProcessingOutcome::Processed);
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM intelligence_events", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_worker_editorial_staging",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
         );
         let _ = std::fs::remove_file(path);
     }
