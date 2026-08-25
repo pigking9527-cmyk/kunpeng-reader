@@ -20,6 +20,15 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+// The controller is a short-lived PowerShell process that starts/stops
+// local model services.  It must never flash a console while the unattended
+// host loop changes phase in the background.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 const CONFIG_FILE: &str = "intelligence-host-v1.json";
 const DEFAULT_SOURCES_FILE: &str = "intelligence-host-default-sources-v1.json";
 const CONFIG_VERSION: u8 = 1;
@@ -113,7 +122,11 @@ fn balanced_model_stage_limit(configured_limit: u16, awaiting_full_text: u64) ->
 }
 
 const fn default_editorial_limit() -> u16 {
-    1
+    // A single 27B editorial item per round left a healthy workstation taking
+    // many hours to turn an already-validated daily backlog into events. Two
+    // retains a strict bound (and lets the next round return to evidence
+    // acquisition) without needlessly serialising all editorial work.
+    2
 }
 
 const fn default_backfill_batches_per_run() -> u8 {
@@ -1162,6 +1175,8 @@ fn command_status_with_timeout(
     timeout_message: &str,
 ) -> Result<std::process::ExitStatus, String> {
     command.stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command
         .spawn()
         .map_err(|_| unavailable_message.to_owned())?;
@@ -2270,7 +2285,7 @@ mod tests {
         let configuration = HostConfiguration::default();
         assert!(!configuration.enabled);
         assert_eq!(configuration.max_backfill_batches_per_run, 4);
-        assert_eq!(configuration.max_editorial_per_run, 1);
+        assert_eq!(configuration.max_editorial_per_run, 2);
         assert!(!configuration_ready(&configuration));
         assert!(!collection_ready(&configuration));
         validate_configuration(&configuration).unwrap();
