@@ -862,10 +862,19 @@ fn enrich_public_article(agent: &ureq::Agent, article: &mut CollectedArticle) {
     // structured fallback before classifying the article as an evidence gap.
     // We only accept `articleBody` values; descriptions and headlines are not
     // allowed to masquerade as a complete article.
-    let body = if rendered_body.len() >= 80 {
-        rendered_body
-    } else {
-        structured_article_body(&html).unwrap_or(rendered_body)
+    let structured_body = structured_article_body(&html);
+    // Prefer a structured `articleBody` when a JavaScript shell left only a
+    // short visible fragment.  For ordinary pages, keep the rendered article
+    // when it is materially richer.  This deliberately avoids promoting a
+    // teaser-sized JSON field over a public article element.
+    let body = match structured_body {
+        Some(structured)
+            if rendered_body.len() < 240
+                || structured.len().saturating_mul(2) >= rendered_body.len() =>
+        {
+            structured
+        }
+        _ => rendered_body,
     };
     if body.len() < 80 {
         article.body_status = Some("unavailable".into());
@@ -877,11 +886,14 @@ fn enrich_public_article(agent: &ureq::Agent, article: &mut CollectedArticle) {
     article.body_status = Some("complete".into());
 }
 
-/// Extract only Schema.org `articleBody` values from public JSON-LD blocks.
-/// This is deliberately a narrow evidence fallback: it does not execute page
-/// JavaScript, follow a hidden API, or turn an SEO description into an article
-/// body.  The longest eligible body wins because publishers commonly include
-/// both a short item and its full `NewsArticle` in one `@graph`.
+/// Extract only Schema.org-style `articleBody` values from public JSON script
+/// blocks.  This is deliberately a narrow evidence fallback: it does not
+/// execute page JavaScript, follow a hidden API, or turn an SEO description
+/// into an article body.  Modern sites frequently place the identical public
+/// structured record in `application/json`, `__NEXT_DATA__` or `__NUXT_DATA__`
+/// instead of JSON-LD, so support those bounded JSON containers as well.
+/// The longest eligible body wins because publishers commonly include both a
+/// short item and its full `NewsArticle` in one `@graph`.
 fn structured_article_body(html: &str) -> Option<String> {
     let lower = html.to_ascii_lowercase();
     let mut cursor = 0;
@@ -897,7 +909,7 @@ fn structured_article_body(html: &str) -> Option<String> {
         };
         let close = open_end + close_relative;
         let open = &lower[start..open_end];
-        if open.contains("application/ld+json") {
+        if structured_json_script(open) {
             if let Ok(value) = serde_json::from_str::<Value>(&html[open_end..close]) {
                 collect_json_ld_article_bodies(&value, &mut best);
             }
@@ -905,6 +917,17 @@ fn structured_article_body(html: &str) -> Option<String> {
         cursor = close + "</script>".len();
     }
     best
+}
+
+fn structured_json_script(open_tag: &str) -> bool {
+    let open_tag = open_tag.to_ascii_lowercase();
+    open_tag.contains("application/ld+json")
+        || open_tag.contains("application/json")
+        || open_tag.contains("application/vnd.api+json")
+        || open_tag.contains("id=\"__next_data__\"")
+        || open_tag.contains("id='__next_data__'")
+        || open_tag.contains("id=\"__nuxt_data__\"")
+        || open_tag.contains("id='__nuxt_data__'")
 }
 
 fn collect_json_ld_article_bodies(value: &Value, best: &mut Option<String>) {
@@ -2922,6 +2945,26 @@ mod tests {
         let body = structured_article_body(html).expect("JSON-LD articleBody should be accepted");
         assert!(body.contains("公开结构化正文"));
         assert!(body.len() >= 80);
+    }
+
+    #[test]
+    fn structured_article_body_recovers_public_next_data_without_executing_page_code() {
+        let html = r#"
+          <html><head><script id="__NEXT_DATA__" type="application/json">
+          {"props":{"pageProps":{"article":{"articleBody":"这是公开页面内嵌的完整文章正文，包含足够长的事实描述，以便本机归档和后续模型核验。第二段继续给出可交叉验证的公开细节。"}}}}
+          </script></head><body><main><div id="app">加载中</div></main></body></html>
+        "#;
+        let body =
+            structured_article_body(html).expect("public JSON articleBody should be accepted");
+        assert!(body.contains("完整文章正文"));
+        assert!(body.len() >= 80);
+    }
+
+    #[test]
+    fn structured_json_script_rejects_executable_script_even_when_its_text_mentions_article_body() {
+        assert!(!structured_json_script(
+            "<script>window.payload = { articleBody: 'not parsed' }</script>"
+        ));
     }
 
     #[test]
