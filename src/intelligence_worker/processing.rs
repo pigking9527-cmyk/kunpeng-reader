@@ -2312,10 +2312,17 @@ fn review_and_materialize<T: ProcessingTransport>(
             let _ = record_quality_guard_failure(connection);
             EditorialMaterializeFailure::ReviewModel
         })?;
-        let payload: ReviewPayload = parse_model_json(&raw).map_err(|_| {
-            let _ = record_quality_guard_failure(connection);
-            EditorialMaterializeFailure::ReviewPayload
-        })?;
+        let payload: ReviewPayload = match parse_model_json(&raw) {
+            Ok(payload) => payload,
+            Err(_) => {
+                // Model output is not evidence.  Do not let a malformed 27B
+                // response become a permanent cache hit that prevents this
+                // event from being retried with the same controlled input.
+                discard_editorial_model_cache(connection, &key, "review");
+                let _ = record_quality_guard_failure(connection);
+                return Err(EditorialMaterializeFailure::ReviewPayload);
+            }
+        };
         if !valid_relation(&payload.relation)
             || !payload.confidence.is_finite()
             || !(0.0..=1.0).contains(&payload.confidence)
@@ -2398,8 +2405,19 @@ fn review_and_materialize<T: ProcessingTransport>(
                     )
                 })
                 .map_err(|_| EditorialMaterializeFailure::SynthesisModel)?;
-            let projected = parse_and_project_synthesis(&raw_synthesis, &controlled)
-                .map_err(|_| EditorialMaterializeFailure::SynthesisProjection)?;
+            let projected = match parse_and_project_synthesis(&raw_synthesis, &controlled) {
+                Ok(projected) => projected,
+                Err(_) => {
+                    // Keep retry behaviour symmetric with review: a malformed
+                    // structured answer must never poison a durable cache.
+                    discard_editorial_model_cache(
+                        connection,
+                        &synthesis_key,
+                        "structured-synthesis",
+                    );
+                    return Err(EditorialMaterializeFailure::SynthesisProjection);
+                }
+            };
             stage_editorial_synthesis(connection, &staging_key, &projected)
                 .map_err(|_| EditorialMaterializeFailure::SynthesisStagingWrite)?;
             projected
@@ -3677,6 +3695,17 @@ where
     connection.execute("INSERT INTO intelligence_worker_model_cache(cache_key,stage,result_json,result_sha256,created_at) VALUES(?1,?2,?3,?4,strftime('%s','now')*1000)",params![key,stage,value,sha256(&value)]).map_err(|_| ())?;
     Ok(value)
 }
+
+/// Invalid generative JSON is deliberately not reusable.  The archive keeps
+/// the controlled input and all validated lower-stage evidence, but the next
+/// editorial attempt must ask the model again instead of replaying an invalid
+/// cached answer forever.
+fn discard_editorial_model_cache(connection: &Connection, key: &str, stage: &str) {
+    let _ = connection.execute(
+        "DELETE FROM intelligence_worker_model_cache WHERE cache_key=?1 AND stage=?2",
+        params![key, stage],
+    );
+}
 fn cache_key(stage: &str, route: &ModelRoute, prompt: &str, input: &str) -> String {
     sha256(format!(
         "{stage}\u{1f}{}\u{1f}{}\u{1f}{prompt}\u{1f}{SCHEMA_VERSION}\u{1f}{PROCESSOR_VERSION}\u{1f}{input}",
@@ -4270,6 +4299,58 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_editorial_review_is_evicted_before_retrying_the_same_event() {
+        let path = db();
+        let first = Static {
+            responses: std::sync::Mutex::new(VecDeque::from(vec![
+                r#"{"relation":"same_event","sameEvent":true,"confidence":0.9,"reason":"主体一致"}"#.into(),
+                "事实一".into(),
+                "事实二".into(),
+                "这不是结构化 JSON".into(),
+            ])),
+        };
+        let failed = process_once_with(&path, &config(), &first);
+        assert_eq!(failed.outcome, ProcessingOutcome::Retry);
+        assert_eq!(failed.failure_stage, "editorial_review_payload");
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_worker_model_cache WHERE stage='review'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        drop(connection);
+
+        // Facts and the 8B relation stay durable, but the bad 27B cache entry
+        // is gone, so this retry must make exactly the editorial calls needed
+        // to materialize the original controlled event.
+        let recovered = Static {
+            responses: std::sync::Mutex::new(VecDeque::from(vec![
+                r#"{"approved":true,"relation":"same_event","confidence":0.9,"reason":"证据一致"}"#.into(),
+                r#"{"title":"重试后综合标题","blocks":[{"blockId":"b1","segments":[{"text":"重试后综合正文。","citations":[{"sourceId":"a","noteId":"note:ca978112ca1bbdca"}]}],"mediaIds":[]}]}"#.into(),
+            ])),
+        };
+        let editorial = EditorialConfiguration {
+            deep: config().deep,
+        };
+        let completed = process_editorial_once_with(&path, &editorial, &recovered);
+        assert_eq!(completed.outcome, ProcessingOutcome::Processed);
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM intelligence_events", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
         );
         let _ = std::fs::remove_file(path);
     }
