@@ -251,52 +251,53 @@ fn load_or_prepare_daily_draft(
         .map_err(|_| ())?;
     let Some((bundle_json, canonical_sha256)) = existing else {
         drop(connection);
-        let fresh = match build_daily_bundle_at(catalog, day)? {
-            Some(draft) => draft,
-            None => return Ok(None),
-        };
-        let connection = Connection::open(catalog).map_err(|_| ())?;
-        ensure_publication_storage(&connection)?;
+        return build_and_store_daily_draft(catalog, day);
+    };
+    let parsed_bundle = serde_json::from_str::<Value>(&bundle_json).ok();
+    let draft_is_valid = parsed_bundle.as_ref().is_some_and(|bundle| {
+        valid_sha256(&canonical_sha256)
+            && bundle
+                .get("bundleSha256")
+                .and_then(Value::as_str)
+                .filter(|value| *value == canonical_sha256)
+                .is_some()
+            && canonical_without_bundle_sha(bundle)
+                .map(|canonical| sha256_hex(&canonical) == canonical_sha256)
+                .unwrap_or(false)
+    });
+    if !draft_is_valid {
+        // An unpublished local draft is a cache, not an externally observable
+        // publication. Older workstation builds may have written a draft
+        // before the current canonical package rules existed. Replace that
+        // invalid cache atomically so a successful 27B synthesis can still be
+        // prepared for the day. Once a receipt exists, fail closed: published
+        // packages remain immutable even if a local cache is damaged.
+        let published: Option<String> = connection
+            .query_row(
+                "SELECT bundle_sha256 FROM intelligence_daily_publications WHERE day=?1",
+                [&day_text],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| ())?;
+        if published.is_some() {
+            return Err(());
+        }
         let transaction = connection.unchecked_transaction().map_err(|_| ())?;
         transaction
             .execute(
-                "INSERT INTO intelligence_daily_drafts(day,bundle_json,bundle_sha256,prepared_at)
-                 VALUES(?1,?2,?3,strftime('%s','now')*1000)",
-                params![fresh.day, fresh.bundle.to_string(), fresh.canonical_sha256],
+                "DELETE FROM intelligence_daily_draft_assets WHERE day=?1",
+                [&day_text],
             )
             .map_err(|_| ())?;
-        for asset in &fresh.assets {
-            transaction
-                .execute(
-                    "INSERT INTO intelligence_daily_draft_assets(day,asset_id,sha256,mime,bytes,width,height,archive_path)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                    params![
-                        fresh.day,
-                        asset.asset_id,
-                        asset.sha256,
-                        asset.mime,
-                        asset.bytes.len() as i64,
-                        asset.width.map(i64::from),
-                        asset.height.map(i64::from),
-                        asset.archive_path,
-                    ],
-                )
-                .map_err(|_| ())?;
-        }
+        transaction
+            .execute("DELETE FROM intelligence_daily_drafts WHERE day=?1", [&day_text])
+            .map_err(|_| ())?;
         transaction.commit().map_err(|_| ())?;
-        return Ok(Some(fresh));
-    };
-    let bundle: Value = serde_json::from_str(&bundle_json).map_err(|_| ())?;
-    if !valid_sha256(&canonical_sha256)
-        || bundle
-            .get("bundleSha256")
-            .and_then(Value::as_str)
-            .filter(|value| *value == canonical_sha256)
-            .is_none()
-        || sha256_hex(&canonical_without_bundle_sha(&bundle)?) != canonical_sha256
-    {
-        return Err(());
+        drop(connection);
+        return build_and_store_daily_draft(catalog, day);
     }
+    let bundle = parsed_bundle.ok_or(())?;
     // The persisted asset mapping, rather than the current event projection,
     // is authoritative for a frozen day.  Reopening a draft therefore never
     // rebuilds a changed event or asks a model to synthesize it again.
@@ -308,6 +309,46 @@ fn load_or_prepare_daily_draft(
         canonical_sha256,
         assets,
     }))
+}
+
+fn build_and_store_daily_draft(
+    catalog: &Path,
+    day: NaiveDate,
+) -> Result<Option<PublicationDraft>, ()> {
+    let fresh = match build_daily_bundle_at(catalog, day)? {
+        Some(draft) => draft,
+        None => return Ok(None),
+    };
+    let connection = Connection::open(catalog).map_err(|_| ())?;
+    ensure_publication_storage(&connection)?;
+    let transaction = connection.unchecked_transaction().map_err(|_| ())?;
+    transaction
+        .execute(
+            "INSERT INTO intelligence_daily_drafts(day,bundle_json,bundle_sha256,prepared_at)
+             VALUES(?1,?2,?3,strftime('%s','now')*1000)",
+            params![fresh.day, fresh.bundle.to_string(), fresh.canonical_sha256],
+        )
+        .map_err(|_| ())?;
+    for asset in &fresh.assets {
+        transaction
+            .execute(
+                "INSERT INTO intelligence_daily_draft_assets(day,asset_id,sha256,mime,bytes,width,height,archive_path)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    fresh.day,
+                    asset.asset_id,
+                    asset.sha256,
+                    asset.mime,
+                    asset.bytes.len() as i64,
+                    asset.width.map(i64::from),
+                    asset.height.map(i64::from),
+                    asset.archive_path,
+                ],
+            )
+            .map_err(|_| ())?;
+    }
+    transaction.commit().map_err(|_| ())?;
+    Ok(Some(fresh))
 }
 
 fn load_persisted_assets(
@@ -1136,6 +1177,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored_asset_count, 1);
+        // A draft created by an old workstation build can be invalid before
+        // it was ever published. Rebuild only that local cache from the
+        // still-present canonical event; no external receipt is changed.
+        c.execute(
+            "UPDATE intelligence_daily_drafts SET bundle_json='not-json',bundle_sha256=?1 WHERE day='2030-01-02'",
+            ["f".repeat(64)],
+        )
+        .unwrap();
+        assert_eq!(
+            publish_day(None, &path, day),
+            PublishOutcome::PreparedLocally
+        );
+        let repaired_sha: String = c
+            .query_row(
+                "SELECT bundle_sha256 FROM intelligence_daily_drafts WHERE day='2030-01-02'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repaired_sha, stored_sha);
         // A frozen package must remain usable even if its event/source rows
         // are later compacted or replaced.  It must not rebuild from current
         // data merely because the publisher is retried another day.
@@ -1164,6 +1225,21 @@ mod tests {
             .unwrap();
         assert_eq!(draft_count, 1);
         assert_eq!(persisted_sha, stored_sha);
+        // After a publication receipt exists, the same corruption must fail
+        // closed instead of rebuilding a package that may already be visible
+        // to an account on another device.
+        c.execute(
+            "INSERT INTO intelligence_daily_publications(day,publication_id,bundle_sha256,published_at)
+             VALUES('2030-01-02','daily:2030-01-02:host',?1,1)",
+            [&stored_sha],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE intelligence_daily_drafts SET bundle_sha256=?1 WHERE day='2030-01-02'",
+            ["e".repeat(64)],
+        )
+        .unwrap();
+        assert_eq!(publish_day(None, &path, day), PublishOutcome::Failed);
         drop(c);
         std::fs::remove_dir_all(root).unwrap();
     }
