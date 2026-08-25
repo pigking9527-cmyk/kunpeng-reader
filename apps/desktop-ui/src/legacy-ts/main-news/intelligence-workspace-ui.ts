@@ -13,6 +13,29 @@ import {
   vetoImpossibleIntelligenceEventMerge,
   type IntelligenceEventPairDecision,
 } from "./intelligence-event-decision-rules.ts";
+import {
+  chunkIntelligencePipelineArticles,
+  emptyIntelligencePipelineState,
+  intelligencePipelineArticleId,
+  intelligencePipelineFingerprint,
+  parseIntelligenceRelation,
+  projectStableIntelligenceEvents,
+  reduceIntelligencePipelineState,
+  runIntelligenceArticleTriageQueue,
+  type IntelligencePipelineArticle,
+  type IntelligencePipelinePort,
+  type IntelligencePipelineStageId,
+  type IntelligencePipelineState,
+  type IntelligencePipelineRelationDecision,
+  type IntelligenceStoredTriageDecision,
+} from "./intelligence-pipeline-state.ts";
+import {
+  isFavorite,
+  listFavorites,
+  toggleFavorite,
+  type FavoriteRecordInput,
+  type NewsFavoriteRecord,
+} from "../main-favorites/favorites-store.ts";
 
 type UnknownRecord = Record<string, unknown>;
 type IntelligenceLayout = "briefing" | "monitor" | "research" | "interstellar";
@@ -34,30 +57,117 @@ const INTELLIGENCE_EVENT_DECISION_CACHE_STORAGE_KEY = "kunpeng.reader.intelligen
 // lets newly arriving items be judged once by the configured local judge
 // before they can consume Qwen's full-source editing budget.
 const INTELLIGENCE_ARTICLE_TRIAGE_CACHE_STORAGE_KEY = "kunpeng.reader.intelligence.article-triage-cache.v1";
+// Scores are a disposable display-order cache.  They contain only opaque
+// local IDs and bounded integer scores, never source URLs, account data, or
+// formal-publication text.
+const INTELLIGENCE_NEWS_PREFERENCE_SCORE_CACHE_STORAGE_KEY = "kunpeng.reader.intelligence.news-preference-scores.v1";
 const INTELLIGENCE_EVENT_JUDGE_SETTINGS_STORAGE_KEY = "kunpeng.reader.intelligence.event-judge-settings.v1";
+const INTELLIGENCE_EVENT_JUDGE_DEFAULT_BASE_URL = "http://127.0.0.1:8081/v1";
+const INTELLIGENCE_EVENT_JUDGE_DEFAULT_MODEL = "Qwen3-8B-Q4_K_M";
+const INTELLIGENCE_QWEN_27B_16GB_MODEL_ID = "Qwen3.8-27B-UD-Q3_K_XL";
 const INTELLIGENCE_SNAPSHOT_VERSION = 1;
 const INTELLIGENCE_SNAPSHOT_MAX_TEXT_CHARS = 700;
 // The native cache accepts up to 24 MiB. Keep a deliberately lower client
 // budget so a growing public catalogue never turns a successful incremental
 // collection into an invisible save failure and a later full re-fetch.
 const INTELLIGENCE_SNAPSHOT_MAX_ITEMS = 12_000;
-const INTELLIGENCE_SNAPSHOT_MAX_ITEMS_PER_SOURCE = 18;
 const INTELLIGENCE_SNAPSHOT_MAX_SERIALIZED_BYTES = 20 * 1024 * 1024;
 const INTELLIGENCE_COMPLETED_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1_000;
-// Keep the UI input identical to the bounded source set supplied by Rust to
-// the local editor. This makes every visible source-difference entry traceable
-// to the evidence the model actually received.
-const INTELLIGENCE_EDITORIAL_SOURCES_PER_CANDIDATE = 8;
 // 2,000 UTF-16 code units still fit under Rust's 7 KiB UTF-8 request bound
 // for Chinese text (the densest common case), while avoiding the local
 // model's 8K context limit after system instructions and completion room.
 const INTELLIGENCE_SOURCE_EVIDENCE_CHUNK_CHARS = 2_000;
-const INTELLIGENCE_SOURCE_EVIDENCE_MAX_CHARS = 600;
+const INTELLIGENCE_SOURCE_EVIDENCE_MIN_CHARS = 240;
+const INTELLIGENCE_SOURCE_EVIDENCE_MAX_CHARS = 1_200;
 // The pair judge is intentionally serial and bounded.  A relationship that
 // was not explicitly judged never becomes an automatic event merge.
 const INTELLIGENCE_EVENT_JUDGE_BATCH_SIZE = 4;
-const INTELLIGENCE_EVENT_JUDGE_MAX_PAIRS = 24;
 const INTELLIGENCE_ARTICLE_TRIAGE_BATCH_SIZE = 12;
+const INTELLIGENCE_PIPELINE_UPSERT_BATCH_SIZE = 256;
+// Keep relation requests far below the native 2,000-pair safety ceiling. This
+// also gives the renderer and the persistent audit store a chance to advance
+// between batches when a catalogue contains thousands of near neighbours.
+const INTELLIGENCE_RELATION_JUDGE_BATCH_SIZE = 48;
+const INTELLIGENCE_QWEN_REVIEW_SAMPLE_MODULUS = 20;
+const INTELLIGENCE_QWEN_REVIEW_MAX_PER_LAYER = 50;
+const INTELLIGENCE_PREPARED_IMAGE_LIMIT = 12;
+const INTELLIGENCE_DEGRADED_EVIDENCE_RETRY_MS = 30 * 60 * 1_000;
+const INTELLIGENCE_AUDIT_LIVE_REFRESH_MS = 3_000;
+const INTELLIGENCE_TRIAGE_LEASE_SECONDS = 180;
+const INTELLIGENCE_PIPELINE_RETRY_DELAYS_MS = Object.freeze([
+  (INTELLIGENCE_TRIAGE_LEASE_SECONDS * 1_000) + 5_000,
+  5 * 60 * 1_000,
+  15 * 60 * 1_000,
+] as const);
+const INTELLIGENCE_PIPELINE_PROMPT_VERSION = "article-triage-v2";
+const INTELLIGENCE_RELATION_PROMPT_VERSION = "relation-judge-v2-eight-class";
+const INTELLIGENCE_EDITORIAL_PROMPT_VERSION = "event-editor-v3-full-source-map-reduce";
+const INTELLIGENCE_NEWS_PREFERENCE_MAX_FAVORITES = 24;
+const INTELLIGENCE_NEWS_PREFERENCE_MAX_EVENTS = 24;
+
+/**
+ * The SQLite quality gate is the authority for relation-review coverage.  Do
+ * not reintroduce a UI-only 20%/5% policy here: a missing or malformed gate
+ * projection deliberately fails closed to full review.
+ */
+export interface IntelligenceRelationReviewCandidate {
+  readonly id: string;
+  readonly sampleKey?: string;
+  readonly important: boolean;
+  readonly conflicting: boolean;
+  readonly lowConfidence: boolean;
+}
+
+function deterministicReviewSampleRank(sampleKey: string): string {
+  return intelligencePipelineFingerprint(sampleKey);
+}
+
+/**
+ * Selects the 27B relation-review queue without mutating it. During initial
+ * calibration and every quality fallback, *every* pair goes to 27B. Once the
+ * persisted gate has entered sampled mode, all important/conflicting/low-
+ * confidence pairs still go, plus a stable >=10% ordinary sample.
+ */
+export function selectIntelligenceRelationReviewIds(
+  candidates: readonly IntelligenceRelationReviewCandidate[],
+  reviewMode: unknown,
+): readonly string[] {
+  const sampledMode = reviewMode === "sample";
+  const selected = new Set<string>();
+  const uniqueCandidates: IntelligenceRelationReviewCandidate[] = [];
+  for (const candidate of candidates) {
+    if (!candidate.id || uniqueCandidates.some((value) => value.id === candidate.id)) continue;
+    uniqueCandidates.push(candidate);
+  }
+  if (!sampledMode) return uniqueCandidates.map((candidate) => candidate.id);
+
+  const ordinary: IntelligenceRelationReviewCandidate[] = [];
+  for (const candidate of uniqueCandidates) {
+    const mustReview = !sampledMode
+      || candidate.important
+      || candidate.conflicting
+      || candidate.lowConfidence;
+    if (mustReview) selected.add(candidate.id);
+    else ordinary.push(candidate);
+  }
+  // Ranking, rather than a simple `hash % 10`, makes the lower bound true for
+  // every finite batch. The selected ordinary records are still stable across
+  // reloads/retries and cannot be influenced by UI ordering.
+  const requiredSampleCount = Math.min(ordinary.length, Math.ceil(uniqueCandidates.length * 0.10));
+  ordinary
+    .slice()
+    .sort((left, right) => deterministicReviewSampleRank(left.sampleKey || left.id)
+      .localeCompare(deterministicReviewSampleRank(right.sampleKey || right.id))
+      || left.id.localeCompare(right.id))
+    .slice(0, requiredSampleCount)
+    .forEach((candidate) => selected.add(candidate.id));
+  return [...selected];
+}
+
+export function intelligencePipelineRetryDelayMs(attempt: number): number | null {
+  const index = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return INTELLIGENCE_PIPELINE_RETRY_DELAYS_MS[index] ?? null;
+}
 
 interface IntelligenceNewsItem extends UnknownRecord {
   readonly title?: unknown;
@@ -87,6 +197,9 @@ interface IntelligenceBriefingEntry {
 
 interface IntelligenceBriefCandidate {
   readonly id: string;
+  readonly eventId?: string;
+  readonly seriesId?: string;
+  readonly revision?: number;
   readonly entry: IntelligenceBriefingEntry;
   readonly title: string;
   readonly summary: string;
@@ -103,6 +216,9 @@ interface IntelligenceBriefCandidate {
     readonly leadImageDataUrl?: string;
     readonly imageUrls?: readonly string[];
     readonly videoUrls?: readonly string[];
+    readonly evidenceFingerprint?: string;
+    readonly evidenceDegraded?: boolean;
+    readonly retryAfter?: number;
   }[];
 }
 
@@ -184,6 +300,89 @@ interface IntelligenceSnapshot {
   readonly nextBatch: number;
   readonly completed: boolean;
   readonly updatedAt: number;
+}
+
+/** Native V1 cache projection. It deliberately has no endpoint, credential,
+ * cache path, delivery acknowledgement or unverified bundle JSON. */
+interface IntelligenceClientCacheStatus {
+  readonly cachePresent: boolean;
+  readonly publicationCount: number;
+  readonly unacknowledgedCount: number;
+  readonly lastRefreshAt: number;
+}
+
+interface IntelligenceClientCachedSource {
+  readonly noteId: string;
+  readonly publisher: string;
+  readonly title: string;
+  readonly originalUrl: string;
+  readonly publishedAt: string;
+  readonly fallbackExcerpt: string;
+}
+
+interface IntelligenceClientCachedSegment {
+  readonly text: string;
+  readonly noteIds: readonly string[];
+}
+
+interface IntelligenceClientCachedMedia {
+  readonly assetId: string;
+  readonly sha256: string;
+  readonly mime: "image/jpeg" | "image/png" | "image/webp";
+  readonly bytes: number;
+  readonly cached: boolean;
+  readonly videoUrl?: string;
+}
+
+interface IntelligenceClientCachedEvent {
+  readonly eventId: string;
+  readonly revisionNo: number;
+  readonly seriesId?: string;
+  readonly title: string;
+  readonly occurredAt?: string;
+  readonly body: string;
+  readonly segments: readonly IntelligenceClientCachedSegment[];
+  readonly media: readonly IntelligenceClientCachedMedia[];
+  readonly sources: readonly IntelligenceClientCachedSource[];
+}
+
+interface IntelligenceClientCachedPublication {
+  readonly publicationId: string;
+  readonly kind: "event" | "daily";
+  readonly publishedAt: string;
+  readonly expiresAt: string;
+  readonly importance: number;
+  readonly events: readonly IntelligenceClientCachedEvent[];
+}
+
+interface FormalPublicationEvent {
+  readonly publication: IntelligenceClientCachedPublication;
+  readonly event: IntelligenceClientCachedEvent;
+}
+
+interface NewsPreferenceFavoriteInput {
+  readonly id: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly category: string;
+}
+
+interface NewsPreferenceEventInput {
+  readonly id: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly sourceNames: readonly string[];
+}
+
+interface NewsPreferenceScoreResult {
+  readonly id: string;
+  readonly score: number;
+}
+
+interface NewsPreferenceScoreCache {
+  readonly version: 1;
+  readonly key: string;
+  readonly scores: readonly NewsPreferenceScoreResult[];
 }
 
 interface IntelligenceStorage {
@@ -634,7 +833,7 @@ function editorialCandidateSources(
       bySource.set(key, item);
     }
   });
-  return [...bySource.values()].slice(0, INTELLIGENCE_EDITORIAL_SOURCES_PER_CANDIDATE).map((item) => ({
+  return [...bySource.values()].map((item) => ({
     name: (text(item.source) || sourceEvidenceKey(item)).slice(0, 120),
     title: itemTitle(item).slice(0, 280),
     url: canonicalItemUrl(item).slice(0, 1_000),
@@ -652,7 +851,14 @@ export function selectIntelligenceBriefCandidates(
   briefing: IntelligenceBriefing,
   limit = DAILY_DIGEST_DEFAULT_ENTRY_COUNT,
 ): IntelligenceBriefCandidate[] {
-  return briefing.visibleEntries.slice(0, Math.max(0, limit)).map((entry) => ({
+  return briefingCandidatesForEntries(briefing.visibleEntries, limit);
+}
+
+function briefingCandidatesForEntries(
+  entries: readonly IntelligenceBriefingEntry[],
+  limit = Number.MAX_SAFE_INTEGER,
+): IntelligenceBriefCandidate[] {
+  return entries.slice(0, Math.max(0, limit)).map((entry) => ({
     id: eventCandidateId(entry),
     entry,
     title: itemTitle(entry.item).slice(0, 280),
@@ -660,6 +866,78 @@ export function selectIntelligenceBriefCandidates(
     publishedAt: publishedAtText(entry.item).slice(0, 80),
     sources: editorialCandidateSources(entry),
   }));
+}
+
+function pipelineArticleForEntry(entry: IntelligenceBriefingEntry): IntelligencePipelineArticle {
+  const candidate = briefingCandidatesForEntries([entry], 1)[0]!;
+  const item = entry.item as UnknownRecord;
+  const url = canonicalItemUrl(entry.item);
+  const sourceKey = sourceEvidenceKey(entry.item);
+  const title = candidate.title;
+  const summary = candidate.summary;
+  const publishedAt = candidate.publishedAt;
+  const media = {
+    imageUrl: openableHttpsUrl(item.imageUrl ?? item.image_url),
+    videoUrl: openableHttpsUrl(item.videoUrl ?? item.video_url),
+  };
+  const fingerprintSource = [
+    url,
+    sourceKey,
+    normalizedItemTitle(entry.item),
+    title,
+    summary,
+    publishedAt,
+  ].join("\u001f");
+  return {
+    articleId: intelligencePipelineArticleId(url, sourceKey, normalizedItemTitle(entry.item)),
+    fingerprint: intelligencePipelineFingerprint(fingerprintSource),
+    ...(url ? { url } : {}),
+    ...(sourceKey ? { sourceKey } : {}),
+    sourceName: text(entry.item.source) || sourceKey || "未知来源",
+    title,
+    ...(summary ? { summary } : {}),
+    ...(publishedAt ? { publishedAt } : {}),
+    language: /\p{Script=Han}/u.test(`${title}${summary}`) ? "zh" : "en",
+    ...(media.imageUrl || media.videoUrl ? { mediaJson: JSON.stringify(media) } : {}),
+  };
+}
+
+/** Reconstructs the exact queue identity/fingerprint for one raw evidence item. */
+function pipelineArticleForEvidenceItem(item: IntelligenceNewsItem): IntelligencePipelineArticle {
+  const sourceKey = sourceEvidenceKey(item);
+  const computed = pipelineArticleForEntry({
+    item,
+    sourceNames: [text(item.source) || sourceKey || "未知来源"],
+    sourceKeys: [sourceKey],
+    evidenceItems: [item],
+    mergedCount: 1,
+    importance: briefingImportance(item, 1),
+  });
+  // Event-source hydration comes from SQLite and carries the exact identity
+  // originally used by the persistent queue. Prefer it over reconstructing a
+  // source key that may no longer be present in today's RSS projection.
+  const fields = item as UnknownRecord;
+  return {
+    ...computed,
+    ...(text(fields.articleId ?? fields.article_id) ? { articleId: text(fields.articleId ?? fields.article_id) } : {}),
+    ...(text(fields.recordFingerprint ?? fields.record_fingerprint)
+      ? { fingerprint: text(fields.recordFingerprint ?? fields.record_fingerprint) }
+      : {}),
+  };
+}
+
+function pipelineArticlesForBriefing(briefing: IntelligenceBriefing): IntelligencePipelineArticle[] {
+  return briefing.entries.map(pipelineArticleForEntry);
+}
+
+function pipelineCandidatesByArticleId(
+  briefing: IntelligenceBriefing,
+): ReadonlyMap<string, IntelligenceBriefCandidate> {
+  const candidates = briefingCandidatesForEntries(briefing.entries);
+  return new Map(briefing.entries.map((entry, index) => [
+    pipelineArticleForEntry(entry).articleId,
+    candidates[index]!,
+  ]));
 }
 
 function numberInRange(value: unknown, minimum: number, maximum: number): number | null {
@@ -901,6 +1179,8 @@ interface IntelligenceWorkspaceController {
   readonly close: (options?: { readonly focus?: boolean }) => void;
   readonly refresh: () => Promise<void>;
   readonly layout: () => IntelligenceLayout;
+  readonly openStoredEvent: (eventId: string, revision?: string) => Promise<boolean>;
+  readonly openFavorite: (favorite: NewsFavoriteRecord) => Promise<boolean>;
 }
 
 export interface IntelligenceWorkspaceGlobal {
@@ -911,11 +1191,11 @@ export interface IntelligenceWorkspaceGlobal {
 type IntelligenceAuditStatus = "pending" | "running" | "accepted" | "rejected" | "warning" | "cached";
 
 interface IntelligenceAuditStageProjection {
-  readonly id: "collected" | "exact-dedupe" | "candidate-recall" | "small-model" | "qwen-review" | "final-events";
+  readonly id: IntelligencePipelineStageId;
   readonly status: IntelligenceAuditStatus;
   readonly summary: string;
   readonly count?: number;
-  readonly unit?: "articles" | "pairs" | "events";
+  readonly unit?: "articles" | "pairs" | "events" | "series";
   readonly inputCount?: number;
   readonly outputCount?: number;
   readonly pendingCount?: number;
@@ -939,6 +1219,15 @@ interface IntelligenceAuditControllerProjection {
     readonly summary: string;
     readonly stages: readonly IntelligenceAuditStageProjection[];
   }) => void;
+  readonly setDetailLoader?: (loader: (request: {
+    readonly runId: string;
+    readonly stageId: IntelligencePipelineStageId;
+    readonly offset: number;
+    readonly limit: number;
+  }) => Promise<{
+    readonly total: number;
+    readonly items: NonNullable<IntelligenceAuditStageProjection["items"]>;
+  }>) => void;
 }
 
 interface IntelligenceCachedArticleTriage {
@@ -948,6 +1237,16 @@ interface IntelligenceCachedArticleTriage {
   readonly topic: string;
   readonly primaryEntities: readonly string[];
   readonly reason: string;
+}
+
+interface IntelligenceStoredEventProjection {
+  readonly articleId: string;
+  readonly eventId: string;
+  readonly seriesId?: string;
+  readonly revision: number;
+  readonly title?: string;
+  readonly summary?: string;
+  readonly occurredAt?: string;
 }
 
 interface IntelligenceWorkspaceRuntime extends Record<string, unknown> {
@@ -967,6 +1266,8 @@ interface IntelligenceWorkspaceRuntime extends Record<string, unknown> {
           readonly source: string;
           readonly publishedAt?: string;
           readonly contentHtml: string;
+          readonly eventId?: string;
+          readonly revision?: number;
         },
         options?: { readonly returnToIntelligence?: boolean },
       ) => void;
@@ -981,6 +1282,7 @@ interface IntelligenceWorkspaceRuntime extends Record<string, unknown> {
   };
   ReaderIntelligenceWorkspace?: IntelligenceWorkspaceGlobal;
   addEventListener(type: string, listener: (event: KeyboardEvent) => void): void;
+  dispatchEvent?(event: Event): boolean;
 }
 
 function record(value: unknown): UnknownRecord | null {
@@ -1001,6 +1303,273 @@ function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function nonNegativeCount(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+
+function clientCacheStatus(value: unknown): IntelligenceClientCacheStatus | null {
+  const source = record(value);
+  const cachePresent = source?.cachePresent;
+  const publicationCount = source?.publicationCount;
+  const unacknowledgedCount = source?.unacknowledgedCount;
+  const lastRefreshAt = source?.lastRefreshAt;
+  if (typeof cachePresent !== "boolean"
+    || typeof publicationCount !== "number" || !Number.isInteger(publicationCount) || publicationCount < 0
+    || typeof unacknowledgedCount !== "number" || !Number.isInteger(unacknowledgedCount) || unacknowledgedCount < 0
+    || typeof lastRefreshAt !== "number" || !Number.isFinite(lastRefreshAt) || lastRefreshAt < 0) return null;
+  return { cachePresent, publicationCount, unacknowledgedCount, lastRefreshAt };
+}
+
+function clientCachedPublications(value: unknown): IntelligenceClientCachedPublication[] | null {
+  if (!Array.isArray(value)) return null;
+  const publications: IntelligenceClientCachedPublication[] = [];
+  for (const rawPublication of value) {
+    const publication = record(rawPublication);
+    const publicationId = text(publication?.publicationId);
+    const kind = text(publication?.kind);
+    const publishedAt = text(publication?.publishedAt);
+    const expiresAt = text(publication?.expiresAt);
+    const importance = publication?.importance;
+    const rawEvents = Array.isArray(publication?.events) ? publication?.events : null;
+    if (!publicationId || !publishedAt || !expiresAt || typeof importance !== "number" || !Number.isInteger(importance) || importance < 0 || importance > 100 || !rawEvents
+      || (kind !== "event" && kind !== "daily")) return null;
+    const events: IntelligenceClientCachedEvent[] = [];
+    for (const rawEvent of rawEvents) {
+      const event = record(rawEvent);
+      const eventId = text(event?.eventId);
+      const revisionNo = event?.revisionNo;
+      const title = text(event?.title);
+      const body = text(event?.body);
+      const rawSegments = Array.isArray(event?.segments) ? event?.segments : null;
+      const rawMedia = Array.isArray(event?.media) ? event?.media : null;
+      const rawSources = Array.isArray(event?.sources) ? event?.sources : null;
+      if (!eventId || typeof revisionNo !== "number" || !Number.isInteger(revisionNo) || revisionNo < 1 || !title || !body || !rawSegments || !rawMedia || !rawSources) return null;
+      const sources: IntelligenceClientCachedSource[] = [];
+      for (const rawSource of rawSources) {
+        const source = record(rawSource);
+        const noteId = text(source?.noteId);
+        const publisher = text(source?.publisher);
+        const sourceTitle = text(source?.title);
+        const originalUrl = openableHttpsUrl(source?.originalUrl);
+        const sourcePublishedAt = text(source?.publishedAt);
+        const fallbackExcerpt = text(source?.fallbackExcerpt);
+        if (!noteId || !publisher || !sourceTitle || !originalUrl || !sourcePublishedAt || !fallbackExcerpt) return null;
+        sources.push({
+          noteId,
+          publisher,
+          title: sourceTitle,
+          originalUrl,
+          publishedAt: sourcePublishedAt,
+          fallbackExcerpt,
+        });
+      }
+      if (sources.length === 0 || new Set(sources.map((source) => source.noteId)).size !== sources.length) return null;
+      const sourceNoteIds = new Set(sources.map((source) => source.noteId));
+      const segments: IntelligenceClientCachedSegment[] = [];
+      for (const rawSegment of rawSegments) {
+        const segment = record(rawSegment);
+        const segmentText = text(segment?.text);
+        const noteIds = Array.isArray(segment?.noteIds) ? segment?.noteIds.map(text) : [];
+        if (!segmentText || noteIds.length === 0 || noteIds.some((noteId) => !noteId || !sourceNoteIds.has(noteId))) return null;
+        segments.push({ text: segmentText, noteIds });
+      }
+      if (segments.length === 0 || segments.map((segment) => segment.text).join("\n\n") !== body) return null;
+      const media: IntelligenceClientCachedMedia[] = [];
+      for (const rawMediaItem of rawMedia) {
+        const item = record(rawMediaItem);
+        const assetId = text(item?.assetId);
+        const sha256 = text(item?.sha256);
+        const mime = text(item?.mime);
+        const bytes = item?.bytes;
+        const cached = item?.cached;
+        const videoUrl = openableHttpsUrl(item?.videoUrl);
+        if (!assetId || !/^[a-z0-9._:-]{1,128}$/iu.test(assetId)
+          || !/^[a-f0-9]{64}$/u.test(sha256)
+          || !(mime === "image/jpeg" || mime === "image/png" || mime === "image/webp")
+          || typeof bytes !== "number" || !Number.isInteger(bytes) || bytes < 1
+          || typeof cached !== "boolean") return null;
+        media.push({ assetId, sha256, mime, bytes, cached, ...(videoUrl ? { videoUrl } : {}) });
+      }
+      events.push({
+        eventId,
+        revisionNo,
+        ...(text(event?.seriesId) ? { seriesId: text(event?.seriesId) } : {}),
+        title,
+        ...(text(event?.occurredAt) ? { occurredAt: text(event?.occurredAt) } : {}),
+        body,
+        segments,
+        media,
+        sources,
+      });
+    }
+    publications.push({ publicationId, kind, publishedAt, expiresAt, importance, events });
+  }
+  return publications;
+}
+
+/** Keep model input under the native byte limit without splitting a character. */
+function utf8Prefix(value: unknown, maximumBytes: number): string {
+  const source = text(value);
+  if (!source || maximumBytes <= 0) return "";
+  const encoder = new TextEncoder();
+  if (encoder.encode(source).byteLength <= maximumBytes) return source;
+  let output = "";
+  for (const character of source) {
+    const candidate = output + character;
+    if (encoder.encode(candidate).byteLength > maximumBytes) break;
+    output = candidate;
+  }
+  return output;
+}
+
+/** Native preference IDs intentionally reveal neither event IDs nor URLs. */
+function opaquePreferenceId(prefix: string, value: string): string {
+  const hash = (seed: number): string => {
+    let current = seed;
+    for (let index = 0; index < value.length; index += 1) {
+      current = Math.imul(current ^ value.charCodeAt(index), 16_777_619);
+    }
+    return (current >>> 0).toString(16).padStart(8, "0");
+  };
+  return `${prefix}-${hash(2_166_136_261)}${hash(2_167_136_261)}`;
+}
+
+function preferenceEventsForPublications(
+  publications: readonly IntelligenceClientCachedPublication[],
+): Array<FormalPublicationEvent & { readonly preference: NewsPreferenceEventInput }> {
+  return publications
+    .flatMap((publication) => publication.events.map((event) => {
+      const identity = `${publication.publicationId}\u001f${event.eventId}\u001f${event.revisionNo}`;
+      return {
+        publication,
+        event,
+        preference: {
+          id: opaquePreferenceId("event", identity),
+          title: utf8Prefix(event.title, 420),
+          // The full formal text remains in the validated local cache.  The
+          // ranking model receives only a bounded display summary.
+          summary: utf8Prefix(event.body, 1_080),
+          sourceNames: event.sources
+            .map((source) => utf8Prefix(source.publisher, 100))
+            .filter(Boolean)
+            .slice(0, 8),
+        },
+      };
+    }))
+    .slice(0, INTELLIGENCE_NEWS_PREFERENCE_MAX_EVENTS);
+}
+
+function preferenceFavorites(storage: IntelligenceStorage | undefined): NewsPreferenceFavoriteInput[] {
+  return listFavorites("news", { storage: storage ?? null, eventTarget: null })
+    .slice(0, INTELLIGENCE_NEWS_PREFERENCE_MAX_FAVORITES)
+    .flatMap((favorite) => {
+      const title = utf8Prefix(favorite.title, 420);
+      if (!title) return [];
+      return [{
+        id: opaquePreferenceId("favorite", favorite.id),
+        title,
+        summary: utf8Prefix(favorite.summary, 1_080),
+        category: utf8Prefix(favorite.category, 100),
+      }];
+    });
+}
+
+function preferenceRouteAllowsLocalScoring(value: unknown): boolean {
+  const payload = record(value);
+  const routes = Array.isArray(payload?.routes) ? payload.routes.map(record) : [];
+  const route = routes.find((candidate) => text(candidate?.capability) === "news_preference");
+  // Fail closed for an absent/malformed route. Cloud/host routing is not
+  // implemented here: this cache viewer must never turn a local preference
+  // into an upload or remote inference request.
+  return text(route?.mode) === "auto" || text(route?.mode) === "local";
+}
+
+function preferenceScoreCacheKey(
+  favorites: readonly NewsPreferenceFavoriteInput[],
+  events: readonly NewsPreferenceEventInput[],
+): string {
+  const input = JSON.stringify({ favorites, events });
+  return opaquePreferenceId("cache", input);
+}
+
+function readPreferenceScoreCache(
+  storage: IntelligenceStorage | undefined,
+  key: string,
+): NewsPreferenceScoreResult[] | null {
+  try {
+    const cache = record(JSON.parse(storage?.getItem(INTELLIGENCE_NEWS_PREFERENCE_SCORE_CACHE_STORAGE_KEY) ?? "null")) as UnknownRecord | null;
+    const scores = Array.isArray(cache?.scores) ? cache.scores.map(record) : null;
+    if (cache?.version !== 1 || text(cache?.key) !== key || !scores) return null;
+    const parsed = scores.flatMap((score) => {
+      const id = text(score?.id);
+      const value = score?.score;
+      return id && typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100
+        ? [{ id, score: value }]
+        : [];
+    });
+    return parsed.length === scores.length ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function savePreferenceScoreCache(
+  storage: IntelligenceStorage | undefined,
+  key: string,
+  scores: readonly NewsPreferenceScoreResult[],
+): void {
+  try {
+    const payload: NewsPreferenceScoreCache = { version: 1, key, scores };
+    storage?.setItem(INTELLIGENCE_NEWS_PREFERENCE_SCORE_CACHE_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Scores are optional presentation cache; a later visit may safely score again.
+  }
+}
+
+function parsePreferenceScores(
+  value: unknown,
+  events: readonly NewsPreferenceEventInput[],
+): NewsPreferenceScoreResult[] | null {
+  const payload = record(value);
+  const scores = Array.isArray(payload?.scores) ? payload.scores.map(record) : null;
+  if (!scores || scores.length !== events.length) return null;
+  const requested = new Set(events.map((event) => event.id));
+  const seen = new Set<string>();
+  const parsed = scores.flatMap((score) => {
+    const id = text(score?.id);
+    const value = score?.score;
+    if (!requested.has(id) || seen.has(id) || typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) return [];
+    seen.add(id);
+    return [{ id, score: value }];
+  });
+  return parsed.length === events.length && seen.size === requested.size ? parsed : null;
+}
+
+function orderFormalPublicationEvents(
+  original: readonly FormalPublicationEvent[],
+  scored: readonly (FormalPublicationEvent & { readonly preference: NewsPreferenceEventInput })[],
+  scores: readonly NewsPreferenceScoreResult[],
+): FormalPublicationEvent[] {
+  if (scored.length === 0 || scores.length !== scored.length) return [...original];
+  const scoreById = new Map(scores.map((score) => [score.id, score.score]));
+  if (scoreById.size !== scored.length || scored.some((item) => !scoreById.has(item.preference.id))) return [...original];
+  const ranked = scored
+    .map((item, index) => ({ item, index, score: scoreById.get(item.preference.id) ?? 0 }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({ item }) => ({ publication: item.publication, event: item.event }));
+  return [...ranked, ...original.slice(scored.length)];
+}
+
+function intelligenceClientErrorMessage(error: unknown): string {
+  const message = String(error ?? "");
+  if (message.includes("未登录")) return "尚未登录，无法读取账户情报缓存。登录后可手动刷新。";
+  if (message.includes("未启用") || message.includes("ACCESS_DENIED") || message.includes("403")) {
+    return "当前账户没有情报中心访问权限；本地已缓存内容不会被删除。";
+  }
+  return "情报缓存暂时无法读取；不会因此启动网络采集或模型任务。";
+}
+
 function escapeBriefHtml(value: string): string {
   return value.replace(/[&<>"']/gu, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
@@ -1012,6 +1581,31 @@ function safePreparedImageDataUrl(value: unknown): string {
   return image.length <= 900_000 && /^data:image\/(?:jpeg|png|gif|webp);base64,[a-z0-9+/=]+$/iu.test(image)
     ? image
     : "";
+}
+
+function safePreparedImageSource(value: unknown): string {
+  return safePreparedImageDataUrl(value) || openableHttpsUrl(value);
+}
+
+function evidenceRetryAfter(value: unknown, now = Date.now()): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 10_000_000_000 ? value : value * 1_000;
+  }
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric > 10_000_000_000 ? numeric : numeric * 1_000;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return now + INTELLIGENCE_DEGRADED_EVIDENCE_RETRY_MS;
+}
+
+function pipelineSourceEvidenceFingerprint(source: IntelligenceBriefCandidate["sources"][number]): string {
+  return intelligencePipelineFingerprint([
+    openableHttpsUrl(source.url), source.name, source.title, source.body || source.summary,
+    JSON.stringify((source.imageUrls ?? []).map(openableHttpsUrl).filter(Boolean)),
+    JSON.stringify((source.videoUrls ?? []).map(openableHttpsUrl).filter(Boolean)),
+  ].join("\u001f"));
 }
 
 function isVideoNewsUrl(value: unknown): boolean {
@@ -1047,6 +1641,41 @@ function readableSummary(value: unknown): string {
   return /[\p{L}\p{N}]/u.test(visible) ? visible : "";
 }
 
+type NewsFavoriteInput = Extract<FavoriteRecordInput, { readonly kind: "news" }>;
+
+function newsFavoriteForItem(item: IntelligenceNewsItem): NewsFavoriteInput {
+  const articleId = pipelineArticleForEvidenceItem(item).articleId;
+  return {
+    kind: "news",
+    id: `article:${articleId}`,
+    title: itemTitle(item),
+    summary: readableSummary(item.summary),
+    source: text(item.source) || "未知来源",
+    publishedAt: publishedAtText(item),
+    category: text(item.category) || "综合",
+    url: openableHttpsUrl(item.url),
+  };
+}
+
+function newsFavoriteForCandidate(
+  candidate: IntelligenceBriefCandidate,
+  modelBrief: IntelligenceModelBrief | null,
+): NewsFavoriteInput {
+  const url = candidate.sources.map((source) => openableHttpsUrl(source.url)).find(Boolean) ?? "";
+  return {
+    kind: "news",
+    id: `event:${candidate.eventId || candidate.id}`,
+    title: modelBrief?.headline || candidate.title,
+    summary: modelBrief?.summary || readableSummary(candidate.summary),
+    source: `本机综合 · ${candidate.entry.sourceKeys.length} 个独立来源`,
+    publishedAt: candidate.publishedAt,
+    category: briefingTopicName(candidate.entry.item),
+    url,
+    ...(candidate.eventId ? { eventId: candidate.eventId } : {}),
+    ...(candidate.revision === undefined ? {} : { revision: candidate.revision }),
+  };
+}
+
 function sanitizeIntelligenceItem(item: IntelligenceNewsItem): IntelligenceNewsItem {
   const summary = readableSummary(item.summary);
   return summary === text(item.summary) ? item : { ...item, summary };
@@ -1080,7 +1709,10 @@ function compactSnapshotItems(items: readonly IntelligenceNewsItem[]): Intellige
   mergeEvidenceItems([], items).forEach((item) => {
     const key = sourceEvidenceKey(item);
     const group = bySource.get(key) ?? [];
-    if (group.length < INTELLIGENCE_SNAPSHOT_MAX_ITEMS_PER_SOURCE) group.push(compactSnapshotItem(item));
+    // Do not silently discard the 19th+ article of a busy source. The global
+    // 12k / 20 MiB snapshot limits remain the only bounds, and round-robin
+    // selection below still prevents one provider from starving the others.
+    if (group.length < INTELLIGENCE_SNAPSHOT_MAX_ITEMS) group.push(compactSnapshotItem(item));
     bySource.set(key, group);
   });
   const selected: IntelligenceNewsItem[] = [];
@@ -1414,6 +2046,9 @@ export function installIntelligenceWorkspaceUi(
   const init = (): IntelligenceWorkspaceController | null => {
     const root = runtime.document;
     const toolbarButton = requiredElement<HTMLButtonElement>(root, "intelligence-lab-toolbar-btn");
+    const toolbarAction = typeof toolbarButton?.closest === "function"
+      ? toolbarButton.closest<HTMLElement>("[data-toolbar-item='intelligence-lab']")
+      : null;
     const page = requiredElement<HTMLElement>(root, "intelligence-workspace-page");
     const back = requiredElement<HTMLButtonElement>(root, "intelligence-workspace-back");
     const briefing = requiredElement<HTMLButtonElement>(root, "intelligence-layout-briefing");
@@ -1428,6 +2063,13 @@ export function installIntelligenceWorkspaceUi(
     const sourceDirectorySearch = requiredElement<HTMLInputElement>(root, "intelligence-source-directory-search");
     const sourceDirectoryList = requiredElement<HTMLElement>(root, "intelligence-source-directory-list");
     const status = requiredElement<HTMLElement>(root, "intelligence-workspace-status");
+    const kindFilter = requiredElement<HTMLSelectElement>(root, "intelligence-filter-kind");
+    const importanceFilter = requiredElement<HTMLSelectElement>(root, "intelligence-filter-importance");
+    const scopeFilter = requiredElement<HTMLSelectElement>(root, "intelligence-filter-scope");
+    const archiveDay = requiredElement<HTMLSelectElement>(root, "intelligence-archive-day");
+    const archiveRequest = requiredElement<HTMLButtonElement>(root, "intelligence-archive-request");
+    const archiveRetry = requiredElement<HTMLButtonElement>(root, "intelligence-archive-retry");
+    const archiveStatus = requiredElement<HTMLElement>(root, "intelligence-archive-status");
     const digestHistory = requiredElement<HTMLElement>(root, "intelligence-digest-history");
     const digestHistorySummary = requiredElement<HTMLElement>(root, "intelligence-digest-history-summary");
     const digestHistoryDate = requiredElement<HTMLSelectElement>(root, "intelligence-digest-history-date");
@@ -1437,7 +2079,9 @@ export function installIntelligenceWorkspaceUi(
     const processingSummary = requiredElement<HTMLElement>(root, "intelligence-processing-summary");
     const modelStatus = requiredElement<HTMLElement>(root, "intelligence-briefing-model-status");
     const modelBaseUrl = requiredElement<HTMLInputElement>(root, "intelligence-local-model-base-url");
-    const modelName = requiredElement<HTMLInputElement>(root, "intelligence-local-model-name");
+    const modelName = requiredElement<HTMLSelectElement>(root, "intelligence-local-model-name");
+    const modelQwen27b = requiredElement<HTMLOptionElement>(root, "intelligence-local-model-qwen27b");
+    const modelRequirement = requiredElement<HTMLElement>(root, "intelligence-local-model-requirement");
     const eventJudgeBaseUrl = requiredElement<HTMLInputElement>(root, "intelligence-event-judge-base-url");
     const eventJudgeModel = requiredElement<HTMLInputElement>(root, "intelligence-event-judge-model");
     const modelKey = requiredElement<HTMLInputElement>(root, "intelligence-local-model-key");
@@ -1462,13 +2106,16 @@ export function installIntelligenceWorkspaceUi(
     const interstellarSourceNote = requiredElement<HTMLElement>(root, "interstellar-source-note");
     const interstellarSourceGroups = requiredElement<HTMLElement>(root, "interstellar-source-groups");
     const interstellarManageSources = requiredElement<HTMLButtonElement>(root, "interstellar-manage-sources");
+    const auditTrigger = requiredElement<HTMLButtonElement>(root, "intelligence-open-audit");
+    const auditView = requiredElement<HTMLElement>(root, "intelligence-audit-view");
+    const auditBack = requiredElement<HTMLButtonElement>(root, "intelligence-audit-back");
     const contentShell = typeof root.querySelector === "function"
       ? hiddenElement(root.querySelector(".content-shell"))
       : null;
     if (!toolbarButton || !page || !back || !briefing || !monitor || !research || !interstellar
       || !refreshButton || !sourcesButton || !sourceDirectory || !sourceDirectoryBack || !sourceDirectorySummary || !sourceDirectorySearch || !sourceDirectoryList
       || !status || !digestHistory || !digestHistorySummary || !digestHistoryDate || !digestHistoryPrevious || !digestHistoryNext || !digestHistoryReadonly
-      || !processingSummary || !modelStatus || !modelBaseUrl || !modelName || !modelKey || !modelSave || !briefingCount || !digestList || !signalList || !contextTitle
+      || !processingSummary || !modelStatus || !modelBaseUrl || !modelName || !modelQwen27b || !modelRequirement || !modelKey || !modelSave || !briefingCount || !digestList || !signalList || !contextTitle
       || !contextBody || !contextMeta || !contextReasons || !contextEvidence || !openNews || !standardView || !interstellarView || !interstellarSignalCount
       || !interstellarSignalList || !interstellarContextTitle || !interstellarContextBody || !interstellarOpenNews
       || !interstellarSourceSummary || !interstellarSourceNote || !interstellarSourceGroups || !interstellarManageSources) {
@@ -1477,23 +2124,32 @@ export function installIntelligenceWorkspaceUi(
 
     let currentLayout: IntelligenceLayout = "briefing";
     let loading = false;
-    // Returning from an article keeps this controller and its already-rendered
-    // evidence snapshot alive. Re-running `load` here used to deserialize the
-    // cache and synchronously rebuild the briefing on every return, which made
-    // hover feedback and the next link click wait behind that work.
-    let workspaceHydrated = false;
     let loadGeneration = 0;
     let cancelledLoadPending = false;
     let reloadAfterCancelledLoad = false;
     let selectedItem: IntelligenceNewsItem | null = null;
+    let selectedFormalPublication: {
+      readonly publication: IntelligenceClientCachedPublication;
+      readonly event: IntelligenceClientCachedEvent;
+    } | null = null;
+    let formalPublicationCache: {
+      readonly cache: IntelligenceClientCacheStatus;
+      readonly publications: readonly IntelligenceClientCachedPublication[];
+      readonly events: readonly FormalPublicationEvent[];
+      readonly personalized: boolean;
+    } | null = null;
+    let activeArchiveRequestId = "";
+    let selectedStandardFavorite: NewsFavoriteInput | null = null;
+    let selectedInterstellarFavorite: NewsFavoriteInput | null = null;
     let currentCandidates: IntelligenceBriefCandidate[] = [];
     let currentModelBriefs: IntelligenceModelBrief[] = [];
     let dailyDigestHistory: IntelligenceDailyDigestSnapshot[] = [];
     let selectedDigestDay = "current";
     let briefingGeneration = 0;
     let modelConfigured = false;
+    let qwen27bSelectable = false;
     let activeModelName = "";
-    let lastGeneratedCandidateKey = "";
+    let activeModelSha = "";
     const editorialCache = new Map<string, unknown>();
     const sourceEvidenceCache = new Map<string, string>();
     const eventDecisionCache = new Map<string, IntelligenceCachedEventDecision>();
@@ -1537,15 +2193,20 @@ export function installIntelligenceWorkspaceUi(
     } catch { /* triage cache is disposable; a malformed entry is never trusted */ }
     try {
       const settings = record(JSON.parse(editorialStorage?.getItem(INTELLIGENCE_EVENT_JUDGE_SETTINGS_STORAGE_KEY) ?? "null"));
-      if (eventJudgeBaseUrl) eventJudgeBaseUrl.value = text(settings?.baseUrl).slice(0, 500);
-      if (eventJudgeModel) eventJudgeModel.value = text(settings?.model).slice(0, 160);
-    } catch { /* optional judge endpoint settings can safely reset to fallback */ }
+      if (eventJudgeBaseUrl) eventJudgeBaseUrl.value = text(settings?.baseUrl).slice(0, 500) || INTELLIGENCE_EVENT_JUDGE_DEFAULT_BASE_URL;
+      if (eventJudgeModel) eventJudgeModel.value = text(settings?.model).slice(0, 160) || INTELLIGENCE_EVENT_JUDGE_DEFAULT_MODEL;
+    } catch {
+      if (eventJudgeBaseUrl) eventJudgeBaseUrl.value = INTELLIGENCE_EVENT_JUDGE_DEFAULT_BASE_URL;
+      if (eventJudgeModel) eventJudgeModel.value = INTELLIGENCE_EVENT_JUDGE_DEFAULT_MODEL;
+    }
     // A direct card click is allowed to prioritize one event while the daily
     // batch continues. Coalescing by candidate keeps repeated clicks from
     // starting duplicate GPU generations.
     const directBriefRequests = new Map<string, Promise<IntelligenceModelBrief | null>>();
-    const preparedBriefImages = new Map<string, string>();
+    const preparedBriefImages = new Map<string, string[]>();
     const preparedBriefImageInFlight = new Set<string>();
+    const preparedTimelineCache = new Map<string, string>();
+    const preparedTimelineInFlight = new Set<string>();
     let selectedInterstellarItem: IntelligenceNewsItem | null = null;
     let standardStatus = "";
     let interstellarStatus = "首版人工基线已建立；候选资讯尚未自动计分。";
@@ -1553,6 +2214,63 @@ export function installIntelligenceWorkspaceUi(
     let sourceDirectoryQuery = "";
     let sourceDirectoryCatalogue: IntelligenceCatalogSource[] = [];
     let auditStages: IntelligenceAuditStageProjection[] = [];
+    let pipelineState: IntelligencePipelineState = emptyIntelligencePipelineState();
+    let nativePipelineActive = false;
+    let pipelineWorkerActive = false;
+    let pendingPipelineBriefing: IntelligenceBriefing | null = null;
+    let pipelineWorkerPromise: Promise<void> | null = null;
+    let pipelineRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let pipelineRetryAttempt = 0;
+    let retryPipelineBriefing: IntelligenceBriefing | null = null;
+    let pendingNativeIngestion: IntelligenceBriefing | null = null;
+    let nativeIngestionActive = false;
+    let nativeIngestionFailed = false;
+    const nativeIngestedFingerprints = new Map<string, string>();
+    let nativePipelineCapability: boolean | null = null;
+    let runtimeSwitchCapability: boolean | null = null;
+    const pipelineCapabilityWaiters: Array<(available: boolean) => void> = [];
+    let auditDetailLoaderInstalled = false;
+    let nativeReviewGate: UnknownRecord | null = null;
+    let activeNativeRunId = "";
+    let auditLiveRefreshTimer: ReturnType<typeof setInterval> | null = null;
+    let auditLiveRefreshInFlight = false;
+    const favoritesOptions = {
+      storage: runtime.localStorage ?? null,
+      eventTarget: typeof runtime.dispatchEvent === "function"
+        ? { dispatchEvent: (event: Event) => runtime.dispatchEvent!(event) }
+        : null,
+    };
+    const favoriteAction = root.createElement("button");
+    favoriteAction.type = "button";
+    favoriteAction.className = "intelligence-evidence-item intelligence-evidence-link intelligence-favorite-action";
+    const interstellarFavoriteAction = root.createElement("button");
+    interstellarFavoriteAction.type = "button";
+    interstellarFavoriteAction.className = "intelligence-evidence-item intelligence-evidence-link intelligence-favorite-action";
+
+    const refreshFavoriteAction = (
+      button: HTMLButtonElement,
+      favorite: NewsFavoriteInput | null,
+    ): void => {
+      const active = favorite ? isFavorite("news", favorite.id, favoritesOptions) : false;
+      button.hidden = favorite === null;
+      button.disabled = favorite === null;
+      button.textContent = active ? "已收藏" : "添加收藏";
+      button.title = active ? "从收藏夹移除" : "添加到收藏夹";
+      button.setAttribute("aria-pressed", String(active));
+    };
+
+    favoriteAction.addEventListener("click", () => {
+      if (!selectedStandardFavorite) return;
+      toggleFavorite(selectedStandardFavorite, favoritesOptions);
+      refreshFavoriteAction(favoriteAction, selectedStandardFavorite);
+    });
+    interstellarFavoriteAction.addEventListener("click", () => {
+      if (!selectedInterstellarFavorite) return;
+      toggleFavorite(selectedInterstellarFavorite, favoritesOptions);
+      refreshFavoriteAction(interstellarFavoriteAction, selectedInterstellarFavorite);
+    });
+    refreshFavoriteAction(favoriteAction, null);
+    refreshFavoriteAction(interstellarFavoriteAction, null);
 
     const auditController = (): IntelligenceAuditControllerProjection | null => (
       activeRuntime.ReaderIntelligenceAudit?.instance
@@ -1560,9 +2278,72 @@ export function installIntelligenceWorkspaceUi(
       ?? null
     );
 
+    const installAuditDetailLoader = (): void => {
+      if (auditDetailLoaderInstalled) return;
+      const controller = auditController();
+      if (!controller?.setDetailLoader) return;
+      controller.setDetailLoader(async (request) => {
+        if (transport) {
+          try {
+            const response = record(await transport.invoke<unknown>("intelligence_store_audit_page", {
+              runId: request.runId,
+              stage: request.stageId,
+              cursor: String(Math.max(0, request.offset)),
+              limit: Math.max(1, Math.min(50, request.limit)),
+            }));
+            const rawItems = Array.isArray(response?.items) ? response.items.map(record) : [];
+            const items = rawItems.flatMap((value) => {
+              let detail: UnknownRecord | null = null;
+              try {
+                detail = record(typeof value?.detailJson === "string"
+                  ? JSON.parse(value.detailJson)
+                  : value?.detailJson ?? value?.detail_json);
+              } catch {
+                detail = null;
+              }
+              // Audit detail is deliberately allow-listed. Never surface a
+              // stored article body, model prompt, local path, URL credential,
+              // or arbitrary JSON field in the human review page.
+              const title = text(detail?.title) || text(value?.title ?? value?.itemId ?? value?.item_id);
+              if (!title) return [];
+              const status = text(value?.status) as IntelligenceAuditStatus;
+              const id = text(value?.id ?? value?.itemId ?? value?.item_id);
+              const meta = text(detail?.meta) || text(value?.meta ?? value?.unitKind ?? value?.unit_kind);
+              const reason = text(detail?.reason) || text(value?.reason);
+              const badge = text(detail?.badge) || text(value?.badge);
+              const confidence = typeof detail?.confidence === "number" ? detail.confidence : value?.confidence;
+              const sourceCount = typeof detail?.sourceCount === "number" ? detail.sourceCount : value?.sourceCount;
+              return [{
+                ...(id ? { id } : {}),
+                title,
+                ...(meta ? { meta } : {}),
+                ...(reason ? { reason } : {}),
+                ...(["pending", "running", "accepted", "rejected", "warning", "cached"].includes(status) ? { status } : {}),
+                ...(badge ? { badge } : {}),
+                ...(typeof confidence === "number" ? { confidence } : {}),
+                ...(typeof sourceCount === "number" ? { sourceCount } : {}),
+              }];
+            });
+            const total = typeof response?.total === "number" ? Math.max(0, Math.floor(response.total)) : items.length;
+            return { total, items };
+          } catch {
+            // Older binaries have no paged store command. Fall through to the
+            // bounded in-memory audit projection instead of blocking opening.
+          }
+        }
+        const stageItems = auditStages.find((stage) => stage.id === request.stageId)?.items ?? [];
+        return {
+          total: stageItems.length,
+          items: stageItems.slice(request.offset, request.offset + request.limit),
+        };
+      });
+      auditDetailLoaderInstalled = true;
+    };
+
     const publishAudit = (summary: string): void => {
+      installAuditDetailLoader();
       auditController()?.setSnapshot({
-        runId: `run-${loadGeneration}-${briefingGeneration}`,
+        runId: activeNativeRunId || `run-${loadGeneration}-${briefingGeneration}`,
         generatedAt: Date.now(),
         summary,
         stages: auditStages,
@@ -1596,6 +2377,1438 @@ export function installIntelligenceWorkspaceUi(
       } catch { /* an unavailable WebView storage simply uses the Qwen fallback */ }
     };
 
+    const pipelineJudgeBaseUrl = (): string => text(eventJudgeBaseUrl?.value) || INTELLIGENCE_EVENT_JUDGE_DEFAULT_BASE_URL;
+    const pipelineModelId = (): string => text(eventJudgeModel?.value) || INTELLIGENCE_EVENT_JUDGE_DEFAULT_MODEL;
+
+    const isRuntimeConnectionFailure = (error: unknown): boolean => (
+      /ECONNREFUSED|connection refused|unable to connect|failed to fetch|network error|server is running|10061|timed?\s*out/iu.test(String(error))
+    );
+
+    const ensureNativeRuntimePhase = async (
+      phase: "triage" | "editorial" | "core",
+      message: string,
+    ): Promise<boolean> => {
+      if (!transport || runtimeSwitchCapability === false) return false;
+      const switchOnce = async (): Promise<boolean> => {
+        const response = record(await transport.invoke<unknown>("intelligence_runtime_switch", { phase }));
+        runtimeSwitchCapability = true;
+        const established = text(response?.phase) || phase;
+        modelStatus.textContent = `${message} · ${established}`;
+        return true;
+      };
+      try {
+        // The native switch command is idempotent and doubles as a health
+        // probe. Do not trust a remembered phase after the local process has
+        // exited between two batches.
+        return await switchOnce();
+      } catch (error: unknown) {
+        const detail = String(error);
+        // Older installed builds and deterministic UI mocks do not expose the
+        // fixed native runtime controller. They may still use an externally
+        // managed loopback service, so only command absence is a soft fallback.
+        if (/unknown command|command .* not found|unhandled command|unsupported intelligence runtime/i.test(detail)) {
+          runtimeSwitchCapability = false;
+          return false;
+        }
+        if (isRuntimeConnectionFailure(error)) {
+          // A stale process/phase gets exactly one restart attempt. A second
+          // failure propagates and leaves the persistent batch pending.
+          return switchOnce();
+        }
+        throw error;
+      }
+    };
+
+    const invokeWithRuntimeRecovery = async <T>(
+      command: string,
+      args: UnknownRecord,
+      phase: "triage" | "editorial" | "core",
+      message: string,
+    ): Promise<T> => {
+      if (!transport) throw new Error("runtime transport unavailable");
+      try {
+        return await transport.invoke<T>(command, args);
+      } catch (error: unknown) {
+        if (!isRuntimeConnectionFailure(error) || runtimeSwitchCapability === false) throw error;
+        await ensureNativeRuntimePhase(phase, message);
+        // Retry the failed model operation once only. If it still fails the
+        // caller preserves the checkpoint/lease for a later run.
+        return transport.invoke<T>(command, args);
+      }
+    };
+
+    const nativePipelinePort = (): IntelligencePipelinePort | null => {
+      if (!transport) return null;
+      return {
+        upsertArticles: async (articles) => {
+          const value = record(await transport!.invoke<unknown>("intelligence_store_upsert_articles", { articles }));
+          if (!value || typeof value.received !== "number" || typeof value.queued !== "number") {
+            throw new Error("native-intelligence-store-unavailable");
+          }
+          return {
+            received: value.received,
+            inserted: typeof value.inserted === "number" ? value.inserted : 0,
+            updated: typeof value.updated === "number" ? value.updated : 0,
+            unchanged: typeof value.unchanged === "number" ? value.unchanged : 0,
+            queued: value.queued,
+          };
+        },
+        claimTriage: async (request) => {
+          const value = record(await transport!.invoke<unknown>("intelligence_store_claim_triage", request));
+          const leaseOwner = text(value?.leaseOwner);
+          if (!value || !leaseOwner || !Array.isArray(value.articles)) throw new Error("native-triage-claim-invalid");
+          const articles = value.articles.flatMap((raw) => {
+            const item = record(raw);
+            const articleId = text(item?.articleId);
+            const fingerprint = text(item?.fingerprint);
+            const title = text(item?.title);
+            if (!articleId || !fingerprint || !title) return [];
+            return [{
+              articleId,
+              fingerprint,
+              title,
+              ...(text(item?.url) ? { url: text(item?.url) } : {}),
+              ...(text(item?.sourceKey) ? { sourceKey: text(item?.sourceKey) } : {}),
+              ...(text(item?.sourceName) ? { sourceName: text(item?.sourceName) } : {}),
+              ...(text(item?.summary) ? { summary: text(item?.summary) } : {}),
+              ...(text(item?.body) ? { body: text(item?.body) } : {}),
+              ...(text(item?.publishedAt) ? { publishedAt: text(item?.publishedAt) } : {}),
+              ...(text(item?.language) ? { language: text(item?.language) } : {}),
+              ...(text(item?.mediaJson) ? { mediaJson: text(item?.mediaJson) } : {}),
+            } satisfies IntelligencePipelineArticle];
+          });
+          return {
+            leaseOwner,
+            articles,
+            remaining: typeof value.remaining === "number" ? Math.max(0, Math.floor(value.remaining)) : 0,
+          };
+        },
+        classifyArticles: async (articles) => {
+          const response = record(await invokeWithRuntimeRecovery<unknown>("intelligence_triage_articles", {
+            request: {
+              articles: articles.map((article) => ({
+                id: article.articleId,
+                title: article.title,
+                summary: article.body || article.summary || "",
+                publishedAt: article.publishedAt || "",
+                sourceNames: article.sourceName ? [article.sourceName] : [],
+              })),
+              baseUrl: pipelineJudgeBaseUrl(),
+              model: pipelineModelId(),
+            },
+          }, "triage", "8B 初筛连接已恢复，正在重试当前批次"));
+          const rawDecisions = Array.isArray(response?.decisions) ? response.decisions.map(record) : [];
+          return articles.flatMap((article) => {
+            const raw = rawDecisions.find((decision) => text(decision?.id ?? decision?.articleId) === article.articleId);
+            if (!raw) return [];
+            const importance = typeof raw.importance === "number" ? Math.max(0, Math.min(100, Math.floor(raw.importance))) : undefined;
+            const confidence = typeof raw.confidence === "number" ? Math.max(0, Math.min(1, raw.confidence)) : undefined;
+            const reason = text(raw.reason).slice(0, 600);
+            return [{
+              articleId: article.articleId,
+              fingerprint: article.fingerprint,
+              status: raw.keep === true ? "keep" as const : "filter" as const,
+              ...(importance === undefined ? {} : { importance }),
+              ...(confidence === undefined ? {} : { confidence }),
+              ...(reason ? { reason } : {}),
+              decisionJson: JSON.stringify({
+                topic: text(raw.topic),
+                primaryEntities: Array.isArray(raw.primaryEntities) ? raw.primaryEntities.map(text).filter(Boolean).slice(0, 12) : [],
+                inputFingerprint: article.fingerprint,
+                modelId: pipelineModelId(),
+                promptVersion: INTELLIGENCE_PIPELINE_PROMPT_VERSION,
+                reviewStatus: "awaiting_27b",
+              }),
+            }];
+          });
+        },
+        applyTriage: async (request) => {
+          await transport!.invoke<unknown>("intelligence_store_apply_triage", request);
+        },
+      };
+    };
+
+    const readStoredTriageDecisions = async (
+      articleIds: readonly string[],
+    ): Promise<IntelligenceStoredTriageDecision[]> => {
+      if (!transport || articleIds.length === 0) return [];
+      const decisions: IntelligenceStoredTriageDecision[] = [];
+      for (let start = 0; start < articleIds.length; start += INTELLIGENCE_PIPELINE_UPSERT_BATCH_SIZE) {
+        const response = record(await transport.invoke<unknown>("intelligence_store_triage_decisions", {
+          articleIds: articleIds.slice(start, start + INTELLIGENCE_PIPELINE_UPSERT_BATCH_SIZE),
+        }));
+        if (!response || !Array.isArray(response.decisions)) throw new Error("native-triage-decisions-unavailable");
+        response.decisions.map(record).forEach((value) => {
+          const articleId = text(value?.articleId);
+          const fingerprint = text(value?.fingerprint);
+          const status = text(value?.status);
+          if (!articleId || !fingerprint || !["keep", "filter", "failed"].includes(status)) return;
+          decisions.push({
+            articleId,
+            fingerprint,
+            status: status as IntelligenceStoredTriageDecision["status"],
+            ...(typeof value?.importance === "number" ? { importance: value.importance } : {}),
+            ...(typeof value?.confidence === "number" ? { confidence: value.confidence } : {}),
+            ...(text(value?.reason) ? { reason: text(value?.reason) } : {}),
+            ...(text(value?.decisionJson) ? { decisionJson: text(value?.decisionJson) } : {}),
+          });
+        });
+      }
+      return decisions;
+    };
+
+    const readStoredEventProjections = async (
+      articleIds: readonly string[],
+    ): Promise<IntelligenceStoredEventProjection[]> => {
+      if (!transport || articleIds.length === 0) return [];
+      const projections: IntelligenceStoredEventProjection[] = [];
+      for (let start = 0; start < articleIds.length; start += INTELLIGENCE_PIPELINE_UPSERT_BATCH_SIZE) {
+        const response = record(await transport.invoke<unknown>("intelligence_store_events_by_articles", {
+          articleIds: articleIds.slice(start, start + INTELLIGENCE_PIPELINE_UPSERT_BATCH_SIZE),
+        }));
+        if (!response || !Array.isArray(response.projections)) throw new Error("native-event-projections-unavailable");
+        response.projections.map(record).forEach((value) => {
+          const articleId = text(value?.articleId);
+          const eventId = text(value?.eventId);
+          const revision = Number(value?.revision ?? value?.currentRevision);
+          if (!articleId || !eventId || !Number.isFinite(revision)) return;
+          projections.push({
+            articleId,
+            eventId,
+            revision,
+            ...(text(value?.seriesId) ? { seriesId: text(value?.seriesId) } : {}),
+            ...(text(value?.title) ? { title: text(value?.title) } : {}),
+            ...(text(value?.summary) ? { summary: text(value?.summary) } : {}),
+            ...(text(value?.occurredAt) ? { occurredAt: text(value?.occurredAt) } : {}),
+          });
+        });
+      }
+      return projections;
+    };
+
+    const candidateFromEventMembers = (
+      eventId: string,
+      members: readonly IntelligenceBriefCandidate[],
+      importance: number,
+      stored?: IntelligenceStoredEventProjection,
+      seriesId?: string,
+    ): IntelligenceBriefCandidate | null => {
+      const representative = members[0];
+      if (!representative) return null;
+      const sources = members.flatMap((member) => member.sources).filter((source, index, values) => (
+        values.findIndex((candidate) => candidate.url === source.url && candidate.name === source.name) === index
+      ));
+      const entry: IntelligenceBriefingEntry = {
+        ...representative.entry,
+        importance,
+        sourceKeys: [...new Set(members.flatMap((member) => member.entry.sourceKeys))],
+        sourceNames: [...new Set(members.flatMap((member) => member.entry.sourceNames))],
+        evidenceItems: mergeEvidenceItems([], members.flatMap((member) => member.entry.evidenceItems)),
+        mergedCount: members.reduce((total, member) => total + member.entry.mergedCount, 0),
+      };
+      const stableSeriesId = stored?.seriesId || seriesId;
+      return {
+        ...representative,
+        id: eventId,
+        eventId,
+        ...(stableSeriesId ? { seriesId: stableSeriesId } : {}),
+        ...(stored ? { revision: stored.revision } : {}),
+        title: stored?.title || representative.title,
+        summary: stored?.summary || representative.summary,
+        publishedAt: stored?.occurredAt || representative.publishedAt,
+        entry,
+        sources,
+      };
+    };
+
+    const candidatesFromStoredEventProjections = (
+      projections: readonly IntelligenceStoredEventProjection[],
+      candidateByArticleId: ReadonlyMap<string, IntelligenceBriefCandidate>,
+      triageByArticleId: ReadonlyMap<string, IntelligenceStoredTriageDecision>,
+    ): IntelligenceBriefCandidate[] => {
+      const byEvent = new Map<string, IntelligenceStoredEventProjection[]>();
+      projections.forEach((projection) => {
+        byEvent.set(projection.eventId, [...(byEvent.get(projection.eventId) ?? []), projection]);
+      });
+      return [...byEvent.entries()].flatMap(([eventId, eventProjections]) => {
+        const members = eventProjections.map((projection) => candidateByArticleId.get(projection.articleId))
+          .filter((candidate): candidate is IntelligenceBriefCandidate => Boolean(candidate));
+        const importance = Math.max(0, ...eventProjections.map((projection) => triageByArticleId.get(projection.articleId)?.importance ?? 0));
+        const latest = eventProjections.slice().sort((left, right) => right.revision - left.revision)[0];
+        const candidate = candidateFromEventMembers(eventId, members, importance, latest);
+        return candidate ? [candidate] : [];
+      });
+    };
+
+    const refreshNativePipelineSnapshot = async (summary: string): Promise<void> => {
+      // Audit is a read-only view over the durable native store. It must stay
+      // live after the worker has failed/stopped and also when this WebView did
+      // not start the run itself; tying reads to `nativePipelineActive` leaves
+      // the page frozen on its last in-memory count.
+      if (!transport) return;
+      try {
+        const response = record(await transport.invoke<unknown>("intelligence_store_snapshot"));
+        if (!response) return;
+        const retrieval = record(response.retrievalProfile);
+        const retrievalEngines = [
+          text(retrieval?.embeddingModel),
+          text(retrieval?.rerankerModel),
+          text(retrieval?.calibrationEmbeddingModel),
+        ].filter(Boolean).join(" + ");
+        const reviewGate = record(response.reviewGate);
+        nativeReviewGate = reviewGate;
+        const queue = record(response.queue);
+        const snapshotRunId = text(response.activeRunId ?? response.active_run_id ?? response.runId ?? response.run_id);
+        if (snapshotRunId) activeNativeRunId = snapshotRunId;
+        const runStatus = text(response.runStatus ?? response.run_status);
+        const queuedArticles = Math.max(0, Number(queue?.queued) || 0);
+        const processingArticles = Math.max(0, Number(queue?.processing) || 0);
+        const pendingArticles = queuedArticles + processingArticles;
+        const totalArticles = Math.max(0, Number(queue?.total) || 0);
+        const stages = Array.isArray(response.stages) ? response.stages.map(record) : [];
+        stages.forEach((value) => {
+          const id = text(value?.id) as IntelligencePipelineStageId;
+          if (!id || !auditStages.some((stage) => stage.id === id)) return;
+          const existing = auditStages.find((stage) => stage.id === id)!;
+          const unit = existing.unit ?? "articles";
+          const countField = unit === "articles" ? value?.articles : unit === "pairs" ? value?.pairs : unit === "series" ? value?.series : value?.events;
+          let outputCount = typeof countField === "number" ? Math.max(0, Math.floor(countField)) : existing.outputCount;
+          let inputCount = existing.inputCount;
+          let pendingCount = existing.pendingCount;
+          const rawStatus = text(value?.status);
+          let status: IntelligenceAuditStatus = rawStatus === "completed" ? "accepted"
+            : rawStatus === "failed" ? "warning"
+              : ["pending", "running", "accepted", "rejected", "warning", "cached"].includes(rawStatus)
+                ? rawStatus as IntelligenceAuditStatus
+                : existing.status;
+          if (id === "collected" || id === "exact-dedupe") {
+            // Collection and exact-dedupe describe the complete catalogue
+            // currently shown in this WebView. Native stage rows are scoped
+            // to one worker run and arrive in chunks, so using their count
+            // here made a finished 7,413 -> 7,398 catalogue appear to shrink
+            // to an arbitrary in-flight batch (for example 5,632 -> 5,632).
+            // Keep the catalogue projection stable; native rows remain
+            // available only through the lazy detail pager.
+            inputCount = existing.inputCount;
+            outputCount = existing.outputCount;
+            pendingCount = 0;
+            status = existing.status;
+          } else if (id === "article-triage" && outputCount !== undefined) {
+            // `stage.articles` counts only run-scoped audit rows already
+            // materialised for detail paging; it is not the triage
+            // denominator. The durable article-state partition is complete
+            // across worker failures, leases and incremental runs.
+            inputCount = totalArticles;
+            outputCount = Math.max(0, Number(queue?.kept) || 0)
+              + Math.max(0, Number(queue?.filtered) || 0)
+              + Math.max(0, Number(queue?.failed) || 0);
+            pendingCount = pendingArticles;
+            // A failed checkpoint may still have queued work. Pending work is
+            // not evidence that the failed run is currently running.
+            status = rawStatus === "failed" || runStatus === "failed"
+              ? "warning"
+              : pendingCount > 0 ? "running" : inputCount > 0 ? "accepted" : status;
+          }
+          const { reusedCount: ignoredTriageReuse, ...existingWithoutTriageReuse } = existing;
+          void ignoredTriageReuse;
+          setAuditStage({
+            ...(id === "article-triage" ? existingWithoutTriageReuse : existing),
+            status,
+            ...(inputCount === undefined ? {} : { inputCount }),
+            ...(outputCount === undefined ? {} : { outputCount }),
+            ...(pendingCount === undefined ? {} : { pendingCount }),
+            summary: id === "relation-recall" && retrievalEngines
+              ? `${existing.summary} 当前引擎：${retrievalEngines}${response.retrievalDegraded === true ? "（降级）" : ""}。`
+              : id === "article-triage" && inputCount !== undefined && outputCount !== undefined
+                ? `本机持久文章共 ${inputCount} 篇：已完成 ${outputCount} 篇，处理中 ${processingArticles} 篇，持久队列等待 ${queuedArticles} 篇。计数来自 SQLite 文章状态；阶段审计行仅用于分页详情，不作为进度分母。`
+              : id === "qwen-review" && reviewGate
+                ? `${existing.summary} 近 30 天实际抽检 ${Math.max(0, Number(reviewGate.sampled) || 0)} 条：正确 ${Math.max(0, Number(reviewGate.correct) || 0)}、错误 ${Math.max(0, Number(reviewGate.incorrect) || 0)}、不确定 ${Math.max(0, Number(reviewGate.uncertain) || 0)}${typeof reviewGate.accuracy === "number" ? `，总体 ${(reviewGate.accuracy * 100).toFixed(2)}%` : ""}${typeof reviewGate.importantRecall === "number" ? `，重大召回 ${(reviewGate.importantRecall * 100).toFixed(2)}%` : ""}${typeof reviewGate.mergePrecision === "number" ? `，合并精度 ${(reviewGate.mergePrecision * 100).toFixed(2)}%` : ""}${typeof reviewGate.falseMergeRate === "number" ? `，误合并 ${(reviewGate.falseMergeRate * 100).toFixed(2)}%` : ""}${typeof reviewGate.jsonCompliance === "number" ? `，JSON 合规 ${(reviewGate.jsonCompliance * 100).toFixed(2)}%` : ""}；${reviewGate.eligibleForReducedReview === true ? "质量门已允许降低普通样本抽检率" : text(reviewGate.reason) || `仍在校准（至少 ${Math.max(0, Number(reviewGate.minimumSamples) || 50)} 个分层样本）`}。`
+                : existing.summary,
+          });
+        });
+        if (queue) {
+          const total = Math.max(0, Number(queue.total) || 0);
+          const completed = Math.max(0, Number(queue.kept) || 0) + Math.max(0, Number(queue.filtered) || 0) + Math.max(0, Number(queue.failed) || 0);
+          processingSummary.textContent = `本机队列 ${completed} / ${total} 篇 · 待处理 ${Math.max(0, Number(queue.queued) || 0)} · 处理中 ${Math.max(0, Number(queue.processing) || 0)}`;
+        }
+        publishAudit(runStatus === "failed"
+          ? `本机批次 ${activeNativeRunId || "当前批次"} 已失败；已完成判断和持久队列均已保留，模型/租约恢复后将从断点续跑。`
+          : runStatus === "cancelled"
+            ? `本机批次 ${activeNativeRunId || "当前批次"} 已取消；已完成判断仍保留在 SQLite。`
+            : summary);
+      } catch {
+        // The live controller projection remains available on older builds.
+      }
+    };
+
+    const stopAuditLiveRefresh = (): void => {
+      if (auditLiveRefreshTimer !== null) clearInterval(auditLiveRefreshTimer);
+      auditLiveRefreshTimer = null;
+    };
+
+    const refreshAuditLiveSnapshot = async (): Promise<void> => {
+      if (auditLiveRefreshInFlight) return;
+      auditLiveRefreshInFlight = true;
+      try {
+        await refreshNativePipelineSnapshot("正在实时读取本机持久队列；详情仍按需分页，不会随计数刷新重复加载。");
+      } finally {
+        auditLiveRefreshInFlight = false;
+      }
+    };
+
+    const startAuditLiveRefresh = (): void => {
+      stopAuditLiveRefresh();
+      void refreshAuditLiveSnapshot();
+      auditLiveRefreshTimer = setInterval(() => {
+        if (auditView?.hidden !== false) {
+          stopAuditLiveRefresh();
+          return;
+        }
+        void refreshAuditLiveSnapshot();
+      }, INTELLIGENCE_AUDIT_LIVE_REFRESH_MS);
+      // Node's deterministic DOM tests expose a Timeout object; browsers
+      // return a number. Do not let an optional audit poll keep test shutdown
+      // or app teardown alive.
+      (auditLiveRefreshTimer as unknown as { unref?: () => void }).unref?.();
+    };
+
+    const projectStoredTriage = (
+      briefingResult: IntelligenceBriefing,
+      decisions: readonly IntelligenceStoredTriageDecision[],
+    ): void => {
+      const candidates = pipelineCandidatesByArticleId(briefingResult);
+      const accepted = decisions
+        .filter((decision) => decision.status === "keep" && candidates.has(decision.articleId))
+        .sort((left, right) => (
+          (right.importance ?? 0) - (left.importance ?? 0)
+          || (right.confidence ?? 0) - (left.confidence ?? 0)
+          || left.articleId.localeCompare(right.articleId)
+        ));
+      currentCandidates = accepted.map((decision) => candidates.get(decision.articleId)!);
+      const pending = Math.max(0, briefingResult.uniqueCount - decisions.length);
+      const filtered = decisions.filter((decision) => decision.status === "filter").length;
+      const failed = decisions.filter((decision) => decision.status === "failed").length;
+      setAuditStage({
+        id: "article-triage",
+        status: pending > 0 ? "running" : failed > 0 ? "warning" : "accepted",
+        unit: "articles",
+        inputCount: briefingResult.uniqueCount,
+        outputCount: accepted.length,
+        pendingCount: pending,
+        reusedCount: pipelineState.reused,
+        summary: pending > 0
+          ? `7B/8B 本机模型已判定 ${decisions.length} / ${briefingResult.uniqueCount} 篇；仍有 ${pending} 篇在持久队列中。`
+          : `逐篇初筛完成：保留 ${accepted.length} 篇，过滤 ${filtered} 篇，失败 ${failed} 篇；未变化文章复用持久结果。`,
+        items: decisions.slice(0, 40).map((decision) => ({
+          id: decision.articleId,
+          title: candidates.get(decision.articleId)?.title || decision.articleId,
+          meta: `${pipelineModelId()} · 重要性 ${Math.round(decision.importance ?? 0)}`,
+          reason: decision.reason || "本机模型已返回结构化判定。",
+          status: decision.status === "keep" ? "accepted" : decision.status === "filter" ? "rejected" : "warning",
+          badge: decision.status === "keep" ? "进入关系召回" : decision.status === "filter" ? "已过滤" : "待重试",
+          ...(typeof decision.confidence === "number" ? { confidence: decision.confidence } : {}),
+        })),
+      });
+      setAuditStage({
+        id: "relation-recall",
+        status: pending > 0 ? "pending" : "running",
+        unit: "pairs",
+        inputCount: accepted.length,
+        outputCount: 0,
+        pendingCount: accepted.length,
+        summary: pending > 0
+          ? "等待逐篇初筛完成后，由当前配置的向量召回与重排引擎检索关系候选。"
+          : "逐篇初筛已完成；语义引擎只负责召回候选关系，不会直接合并事件。",
+      });
+      setAuditStage({
+        id: "relation-judge",
+        status: "pending",
+        unit: "pairs",
+        inputCount: 0,
+        outputCount: 0,
+        summary: "等待 7B/8B 模型按八类关系逐对判定。",
+      });
+      setAuditStage({
+        id: "historical-recall",
+        status: "pending",
+        unit: "events",
+        inputCount: accepted.length,
+        outputCount: 0,
+        summary: "等待从历史事件索引召回前情、后续与同系列候选。",
+      });
+      processingSummary.textContent = `采集 ${briefingResult.inputCount} 篇 → 精确去重 ${briefingResult.uniqueCount} 篇 → 初筛保留 ${accepted.length} 篇`;
+      renderBriefCards();
+    };
+
+    const deterministicQualitySample = (targetId: string): boolean => {
+      const sample = Number.parseInt(stableTextFingerprint(targetId).split("-").at(-1) ?? "0", 36);
+      // Store is the single authority for the quality gate. Before it passes,
+      // calibrate on 20% of ordinary items; afterwards reduce only ordinary
+      // samples to 5%. Major/low-confidence/conflicting items are always added
+      // separately and remain subject to the per-layer safety cap.
+      const modulus = nativeReviewGate?.eligibleForReducedReview === true
+        ? INTELLIGENCE_QWEN_REVIEW_SAMPLE_MODULUS
+        : 5;
+      return Number.isFinite(sample) && sample % modulus === 0;
+    };
+
+    const persistQualityReviews = async (reviews: readonly UnknownRecord[]): Promise<boolean> => {
+      if (!transport || reviews.length === 0) return true;
+      try {
+        for (let start = 0; start < reviews.length; start += INTELLIGENCE_RELATION_JUDGE_BATCH_SIZE) {
+          const response = record(await transport.invoke<unknown>("intelligence_store_record_reviews", {
+            reviews: reviews.slice(start, start + INTELLIGENCE_RELATION_JUDGE_BATCH_SIZE),
+          }));
+          if (response) nativeReviewGate = response;
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const runQwenTriageQualityReview = async (
+      briefingResult: IntelligenceBriefing,
+      decisions: readonly IntelligenceStoredTriageDecision[],
+    ): Promise<void> => {
+      if (!transport || decisions.length === 0) return;
+      const candidates = pipelineCandidatesByArticleId(briefingResult);
+      const reviewCandidates = decisions.flatMap((decision) => {
+        const highRisk = (decision.importance ?? 0) >= 80 || (decision.confidence ?? 0) < 0.9 || decision.status === "failed";
+        const sampled = deterministicQualitySample(`triage:${decision.articleId}:${decision.fingerprint}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`);
+        return highRisk || sampled ? [{ decision, highRisk }] : [];
+      }).sort((left, right) => Number(right.highRisk) - Number(left.highRisk)
+        || (right.decision.importance ?? 0) - (left.decision.importance ?? 0)
+        || left.decision.articleId.localeCompare(right.decision.articleId));
+      const selected = reviewCandidates.slice(0, INTELLIGENCE_QWEN_REVIEW_MAX_PER_LAYER).map((item) => item.decision);
+      const deferredByCap = Math.max(0, reviewCandidates.length - selected.length);
+      if (selected.length === 0) return;
+      await ensureNativeRuntimePhase("editorial", "已切换到 27B 复核/编辑阶段");
+      let reviewed = 0;
+      let pending = deferredByCap;
+      for (let start = 0; start < selected.length; start += INTELLIGENCE_ARTICLE_TRIAGE_BATCH_SIZE) {
+        const batch = selected.slice(start, start + INTELLIGENCE_ARTICLE_TRIAGE_BATCH_SIZE);
+        try {
+          // Omitting baseUrl/model is intentional: this invokes the configured
+          // 27B reviewer, not the dedicated 8B worker used by the main queue.
+          const response = record(await invokeWithRuntimeRecovery<unknown>("intelligence_triage_articles", {
+            request: {
+              articles: batch.map((decision) => {
+                const candidate = candidates.get(decision.articleId);
+                return {
+                  id: decision.articleId,
+                  title: candidate?.title || decision.articleId,
+                  summary: candidate?.summary || "",
+                  publishedAt: candidate?.publishedAt || "",
+                  sourceNames: candidate?.entry.sourceNames ?? [],
+                };
+              }),
+            },
+          }, "editorial", "27B 文章复核服务断开，正在恢复编辑阶段"));
+          const qwenDecisions = Array.isArray(response?.decisions) ? response.decisions.map(record) : [];
+          const reviews = batch.map((small) => {
+            const qwen = qwenDecisions.find((value) => text(value?.id) === small.articleId);
+            const qwenConfidence = typeof qwen?.confidence === "number" ? qwen.confidence : 0;
+            const qwenImportance = typeof qwen?.importance === "number" ? qwen.importance : null;
+            const qwenImportant = qwenImportance !== null && qwenImportance >= 80;
+            const importantCaptured = !qwenImportant || small.status === "keep";
+            const verdict = !qwen || qwenConfidence < 0.55 ? "uncertain"
+              : importantCaptured ? "correct" : "incorrect";
+            return {
+              targetKind: "important_recall",
+              targetId: `triage:${small.articleId}:${small.fingerprint}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`,
+              sampled: true,
+              verdict,
+              confidence: qwenConfidence,
+              modelId: text(response?.model) || activeModelName || "configured-qwen-reviewer",
+              detailJson: {
+                title: candidates.get(small.articleId)?.title || small.articleId,
+                meta: `${pipelineModelId()} ↔ ${text(response?.model) || activeModelName || "Qwen reviewer"}`,
+                reason: `8B=${small.status}/${Math.round(small.importance ?? 0)}；Qwen=${qwen?.keep === true ? "keep" : qwen?.keep === false ? "filter" : "unknown"}/${qwenImportance ?? "?"}；重大新闻召回=${importantCaptured ? "命中" : "漏筛"}`,
+                badge: verdict === "correct" ? "判定一致" : verdict === "incorrect" ? "判定冲突" : "复核不确定",
+                confidence: qwenConfidence,
+                reviewType: "triage",
+              },
+            };
+          });
+          reviews.push({
+            targetKind: "json_compliance",
+            targetId: `json:triage:${batch.map((decision) => `${decision.articleId}:${decision.fingerprint}`).join("|")}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`.slice(0, 500),
+            sampled: true, verdict: "compliant", confidence: 1,
+            modelId: text(response?.model) || activeModelName || "configured-qwen-reviewer",
+            detailJson: { title: `文章初筛 JSON · ${batch.length} 篇`, meta: "Qwen reviewer", reason: "结构化响应已由原生命令完整校验。", badge: "JSON 合规", confidence: 1, reviewType: "json_compliance" },
+          });
+          if (await persistQualityReviews(reviews)) reviewed += batch.length;
+          else pending += batch.length;
+        } catch {
+          pending += batch.length;
+          await persistQualityReviews([{
+            targetKind: "json_compliance",
+            targetId: `json:triage-failed:${batch.map((decision) => `${decision.articleId}:${decision.fingerprint}`).join("|")}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`.slice(0, 500),
+            sampled: true, verdict: "noncompliant", confidence: 0,
+            modelId: activeModelName || "configured-qwen-reviewer",
+            detailJson: { title: `文章初筛 JSON · ${batch.length} 篇`, meta: "Qwen reviewer", reason: "本轮未取得可校验的结构化响应。", badge: "JSON 未通过", confidence: 0, reviewType: "json_compliance" },
+          }]);
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+      setAuditStage({
+        id: "qwen-review",
+        status: pending > 0 ? "warning" : "running",
+        unit: "articles",
+        inputCount: reviewCandidates.length,
+        outputCount: reviewed,
+        pendingCount: pending,
+        summary: pending > 0
+          ? `Qwen 已完成 ${reviewed} / ${reviewCandidates.length} 篇分层抽检，${pending} 篇因每层 ${INTELLIGENCE_QWEN_REVIEW_MAX_PER_LAYER} 条上限或服务暂不可用保持待复核；失败不会放宽合并条件。`
+          : `Qwen 已真实抽检 ${reviewed} 篇重大、低置信或确定性 ${nativeReviewGate?.eligibleForReducedReview === true ? "5%" : "20% 校准"} 样本；结果已写入质量门，不把最终写稿冒充正确率复核。`,
+      });
+    };
+
+    const runNativeRelationPipeline = async (
+      briefingResult: IntelligenceBriefing,
+      triageDecisions: readonly IntelligenceStoredTriageDecision[],
+    ): Promise<boolean> => {
+      if (!transport) return false;
+      const candidateByArticleId = pipelineCandidatesByArticleId(briefingResult);
+      const kept = triageDecisions.filter((decision) => decision.status === "keep" && candidateByArticleId.has(decision.articleId));
+      const triageByArticleId = new Map(kept.map((decision) => [decision.articleId, decision]));
+      if (kept.length === 0) {
+        currentCandidates = [];
+        setAuditStage({ id: "relation-recall", status: "accepted", unit: "pairs", inputCount: 0, outputCount: 0, summary: "本轮没有通过逐篇初筛的文章，无需召回关系。" });
+        setAuditStage({ id: "relation-judge", status: "accepted", unit: "pairs", inputCount: 0, outputCount: 0, summary: "本轮没有待判定关系。" });
+        setAuditStage({ id: "historical-recall", status: "accepted", unit: "events", inputCount: 0, outputCount: 0, summary: "本轮没有待关联的历史事件。" });
+        return true;
+      }
+      const storedProjections = await readStoredEventProjections(kept.map((decision) => decision.articleId));
+      const projectedArticleIds = new Set(storedProjections.map((projection) => projection.articleId));
+      const storedCandidates = candidatesFromStoredEventProjections(storedProjections, candidateByArticleId, triageByArticleId);
+      const unresolved = kept.filter((decision) => !projectedArticleIds.has(decision.articleId));
+      const selectEditorialEvents = (candidates: readonly IntelligenceBriefCandidate[]): IntelligenceBriefCandidate[] => (
+        candidates.slice().sort((left, right) => (
+          right.entry.importance - left.entry.importance
+          || right.publishedAt.localeCompare(left.publishedAt)
+          || left.eventId!.localeCompare(right.eventId!)
+        )).slice(0, DAILY_DIGEST_DEFAULT_ENTRY_COUNT)
+      );
+      if (unresolved.length === 0) {
+        currentCandidates = selectEditorialEvents(storedCandidates);
+        setAuditStage({ id: "relation-recall", status: "cached", unit: "pairs", inputCount: kept.length, outputCount: 0, reusedCount: kept.length, summary: "全部保留文章均已有稳定事件投影；本轮未再次调用语义召回或关系模型。" });
+        setAuditStage({ id: "relation-judge", status: "cached", unit: "pairs", inputCount: 0, outputCount: 0, reusedCount: kept.length, summary: "已复用持久化八类关系判定；只有新增或正文指纹变化的文章才会重新判定。" });
+        setAuditStage({ id: "historical-recall", status: "cached", unit: "events", inputCount: currentCandidates.length, outputCount: currentCandidates.filter((candidate) => candidate.seriesId).length, summary: "已复用稳定事件与历史系列关联。" });
+        setAuditStage({ id: "series-timeline", status: "cached", unit: "series", inputCount: currentCandidates.length, outputCount: new Set(currentCandidates.map((candidate) => candidate.seriesId).filter(Boolean)).size, reusedCount: currentCandidates.length, summary: "事件时间线命中本机持久缓存；打开简报不会重复运行模型。" });
+        renderBriefCards();
+        return true;
+      }
+      const articles = unresolved.map((decision) => {
+        const candidate = candidateByArticleId.get(decision.articleId)!;
+        return {
+          articleId: decision.articleId,
+          title: candidate.title,
+          summary: candidate.summary,
+          publishedAt: candidate.publishedAt,
+        };
+      });
+      let recall: UnknownRecord;
+      try {
+        const pairByKey = new Map<string, unknown>();
+        const historicalByKey = new Map<string, unknown>();
+        const engines = new Set<string>();
+        for (const batch of chunkIntelligencePipelineArticles(articles.map((article) => ({
+          ...article,
+          fingerprint: "relation-recall",
+        })), INTELLIGENCE_PIPELINE_UPSERT_BATCH_SIZE)) {
+          const response = record(await transport.invoke<unknown>("intelligence_pipeline_recall_relations", {
+            articles: batch.map(({ fingerprint, ...article }) => {
+              void fingerprint;
+              return article;
+            }),
+            includeHistory: true,
+          }));
+          if (!response || !Array.isArray(response.pairs)) throw new Error("relation-recall-response-invalid");
+          if (text(response.engine)) engines.add(text(response.engine));
+          response.pairs.map(record).forEach((pair) => {
+            const left = text(pair?.leftArticleId);
+            const right = text(pair?.rightArticleId);
+            const key = text(pair?.id) || [left, right].sort().join("\u001f");
+            if (key) pairByKey.set(key, pair);
+          });
+          if (Array.isArray(response.historicalCandidates)) response.historicalCandidates.map(record).forEach((candidate) => {
+            const key = text(candidate?.id) || `${text(candidate?.newArticleId)}\u001f${text(candidate?.eventId)}`;
+            if (key) historicalByKey.set(key, candidate);
+          });
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+        recall = {
+          pairs: [...pairByKey.values()],
+          historicalCandidates: [...historicalByKey.values()],
+          engine: [...engines].join(" + "),
+        };
+      } catch {
+        setAuditStage({
+          id: "relation-recall", status: "warning", unit: "pairs", inputCount: kept.length, outputCount: 0,
+          summary: "语义召回与重排服务尚未就绪；为避免错误聚合，本轮不会把未核验文章交给 Qwen 生成综合报道。",
+        });
+        publishAudit("逐篇初筛已保存；关系召回尚未就绪，稍后可从此断点继续。");
+        return false;
+      }
+      const rawRecalledPairs = Array.isArray(recall.pairs) ? recall.pairs.map(record) : [];
+      const recalledPairs = rawRecalledPairs.flatMap((pair, index) => {
+        const leftArticleId = text(pair?.leftArticleId);
+        const rightArticleId = text(pair?.rightArticleId);
+        if (!candidateByArticleId.has(leftArticleId) || !candidateByArticleId.has(rightArticleId) || leftArticleId === rightArticleId) return [];
+        return [{
+          id: text(pair?.id) || `relation-${index + 1}`,
+          leftArticleId,
+          rightArticleId,
+          score: typeof pair?.score === "number" ? pair.score : 0,
+          reason: text(pair?.reason),
+        }];
+      });
+      const rawHistoricalCandidates = Array.isArray(recall.historicalCandidates)
+        ? recall.historicalCandidates.map(record)
+        : [];
+      const historicalCandidates = rawHistoricalCandidates.flatMap((value, index) => {
+        const newArticleId = text(value?.newArticleId);
+        const eventId = text(value?.eventId);
+        if (!newArticleId || !eventId || !unresolved.some((decision) => decision.articleId === newArticleId)) return [];
+        return [{
+          id: text(value?.id) || `historical-${index + 1}`,
+          newArticleId,
+          eventId,
+          syntheticArticleId: `stored-event:${eventId}`,
+          seriesId: text(value?.seriesId),
+          latestRevision: typeof value?.latestRevision === "number" ? value.latestRevision : undefined,
+          title: text(value?.title) || "历史事件",
+          summary: text(value?.summary),
+          occurredAt: text(value?.occurredAt),
+          score: typeof value?.score === "number" ? value.score : 0,
+          reason: text(value?.reason),
+        }];
+      });
+      const retrievalEngine = text(recall.engine) || "当前语义召回与重排配置";
+      setAuditStage({
+        id: "relation-recall", status: "accepted", unit: "pairs", inputCount: unresolved.length, outputCount: recalledPairs.length + historicalCandidates.length, pendingCount: recalledPairs.length + historicalCandidates.length,
+        summary: `${retrievalEngine} 只为 ${unresolved.length} 篇新增/变化文章召回 ${recalledPairs.length} 对当前候选和 ${historicalCandidates.length} 个历史候选；召回结果本身不触发合并。`,
+        items: [...recalledPairs.map((pair) => ({
+          id: pair.id,
+          title: `${candidateByArticleId.get(pair.leftArticleId)!.title} ↔ ${candidateByArticleId.get(pair.rightArticleId)!.title}`,
+          meta: `${retrievalEngine} · ${(pair.score * 100).toFixed(1)}%`,
+          reason: pair.reason,
+          status: "pending" as const,
+          badge: "待八类关系判定",
+        })), ...historicalCandidates.map((candidate) => ({
+          id: candidate.id,
+          title: `${candidateByArticleId.get(candidate.newArticleId)!.title} ↔ ${candidate.title}`,
+          meta: `${retrievalEngine} · 历史事件 · ${(candidate.score * 100).toFixed(1)}%`,
+          reason: candidate.reason,
+          status: "pending" as const,
+          badge: "待历史关系判定",
+        }))].slice(0, 40),
+      });
+      const relationDecisions: IntelligencePipelineRelationDecision[] = [];
+      const relationAuditDecisions: IntelligencePipelineRelationDecision[] = [];
+      let forcedExactDuplicateReviews = 0;
+      const judgePairs = [
+        ...recalledPairs.map((pair) => {
+          const left = candidateByArticleId.get(pair.leftArticleId)!;
+          const right = candidateByArticleId.get(pair.rightArticleId)!;
+          return {
+            id: pair.id,
+            leftArticleId: pair.leftArticleId,
+            rightArticleId: pair.rightArticleId,
+            left: { articleId: pair.leftArticleId, title: left.title, summary: left.summary, publishedAt: left.publishedAt },
+            right: { articleId: pair.rightArticleId, title: right.title, summary: right.summary, publishedAt: right.publishedAt },
+            retrievalScore: pair.score,
+            retrievalReason: pair.reason,
+            historical: false,
+          };
+        }),
+        ...historicalCandidates.map((candidate) => {
+          const left = candidateByArticleId.get(candidate.newArticleId)!;
+          return {
+            id: candidate.id,
+            leftArticleId: candidate.newArticleId,
+            rightArticleId: candidate.syntheticArticleId,
+            left: { articleId: candidate.newArticleId, title: left.title, summary: left.summary, publishedAt: left.publishedAt },
+            right: { articleId: candidate.syntheticArticleId, eventId: candidate.eventId, seriesId: candidate.seriesId, title: candidate.title, summary: candidate.summary, publishedAt: candidate.occurredAt },
+            retrievalScore: candidate.score,
+            retrievalReason: candidate.reason,
+            historical: true,
+          };
+        }),
+      ];
+      const relationInputFingerprint = (pair: (typeof judgePairs)[number]): string => (
+        intelligencePipelineFingerprint(JSON.stringify({
+          left: pair.left,
+          right: pair.right,
+          retrievalScore: pair.retrievalScore,
+          retrievalReason: pair.retrievalReason,
+        }))
+      );
+      const rawDecisionByPairId = new Map<string, UnknownRecord>();
+      if (judgePairs.length > 0) {
+        await ensureNativeRuntimePhase("triage", "已切换到 8B 全量判断阶段");
+        try {
+          for (let start = 0; start < judgePairs.length; start += INTELLIGENCE_RELATION_JUDGE_BATCH_SIZE) {
+            const batch = judgePairs.slice(start, start + INTELLIGENCE_RELATION_JUDGE_BATCH_SIZE);
+            const response = record(await invokeWithRuntimeRecovery<unknown>("intelligence_pipeline_judge_relations", {
+              pairs: batch.map(({ leftArticleId, rightArticleId, historical, ...pair }) => {
+                void leftArticleId;
+                void rightArticleId;
+                void historical;
+                return pair;
+              }),
+              baseUrl: pipelineJudgeBaseUrl(),
+              model: pipelineModelId(),
+            }, "triage", "8B 关系判断连接已恢复，正在重试当前批次"));
+            if (!response || !Array.isArray(response.decisions)) throw new Error("relation-judge-response-invalid");
+            response.decisions.map(record).forEach((decision) => {
+              const id = text(decision?.id);
+              if (id) rawDecisionByPairId.set(id, decision!);
+            });
+            const checkpoints = batch.flatMap((pair) => {
+              if (pair.historical) return [];
+              const raw = rawDecisionByPairId.get(pair.id);
+              const reportedRelation = parseIntelligenceRelation(raw?.relation);
+              if (!raw || !reportedRelation) return [];
+              const relation = reportedRelation === "exact_duplicate" ? "same_event" : reportedRelation;
+              const inputFingerprint = relationInputFingerprint(pair);
+              return [{
+                leftArticleId: pair.leftArticleId,
+                rightArticleId: pair.rightArticleId,
+                relation,
+                confidence: typeof raw.confidence === "number" ? raw.confidence : 0,
+                reason: text(raw.reason),
+                stage: "relation-judge",
+                modelId: pipelineModelId(),
+                evidenceJson: JSON.stringify({
+                  inputFingerprint,
+                  modelId: pipelineModelId(),
+                  promptVersion: INTELLIGENCE_RELATION_PROMPT_VERSION,
+                  reviewStatus: "awaiting_27b",
+                  reportedRelation,
+                }),
+              }];
+            });
+            if (checkpoints.length > 0) {
+              await transport.invoke<unknown>("intelligence_store_upsert_relations", { relations: checkpoints });
+            }
+            setAuditStage({
+              id: "relation-judge", status: "running", unit: "pairs", inputCount: judgePairs.length,
+              outputCount: rawDecisionByPairId.size, pendingCount: Math.max(0, judgePairs.length - rawDecisionByPairId.size),
+              summary: `${pipelineModelId()} 正在分批执行八类关系判定；已持久推进 ${rawDecisionByPairId.size} / ${judgePairs.length} 对。`,
+            });
+            publishAudit("关系判定按小批次持续推进；已完成批次不会因后续批次失败而丢失。");
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          }
+        } catch {
+          if (rawDecisionByPairId.size > 0) {
+            const partialPersist = judgePairs.flatMap((pair) => {
+              const raw = rawDecisionByPairId.get(pair.id);
+              const relation = parseIntelligenceRelation(raw?.relation);
+              if (!raw || !relation || pair.historical) return [];
+              return [{
+                leftArticleId: pair.leftArticleId,
+                rightArticleId: pair.rightArticleId,
+                relation,
+                confidence: typeof raw.confidence === "number" ? raw.confidence : 0,
+                reason: text(raw.reason), stage: "relation-judge", modelId: pipelineModelId(),
+                evidenceJson: JSON.stringify({
+                  inputFingerprint: relationInputFingerprint(pair),
+                  modelId: pipelineModelId(),
+                  promptVersion: INTELLIGENCE_RELATION_PROMPT_VERSION,
+                  reviewStatus: "awaiting_27b",
+                  reportedRelation: relation,
+                }),
+              }];
+            });
+            if (partialPersist.length > 0) await transport.invoke<unknown>("intelligence_store_upsert_relations", { relations: partialPersist });
+          }
+          setAuditStage({
+            id: "relation-judge", status: "warning", unit: "pairs", inputCount: judgePairs.length, outputCount: rawDecisionByPairId.size,
+            pendingCount: Math.max(0, judgePairs.length - rawDecisionByPairId.size),
+            summary: `7B/8B 已完成 ${rawDecisionByPairId.size} / ${judgePairs.length} 对；剩余批次保持待判定，所有未完整核验候选保持独立。`,
+          });
+          publishAudit("关系候选已保存；本机关系模型尚未完成判定，稍后可继续。");
+          return false;
+        }
+        judgePairs.forEach((pair) => {
+          const raw = rawDecisionByPairId.get(pair.id);
+          const reportedRelation = parseIntelligenceRelation(raw?.relation) ?? "unrelated";
+          // Canonical URL/content duplicates were already removed before the
+          // model stage.  A later exact_duplicate label therefore cannot erase
+          // a bilingual or independently reported source: keep both as
+          // same_event evidence and force the 27B event review.
+          const relation = reportedRelation === "exact_duplicate" ? "same_event" : reportedRelation;
+          if (reportedRelation === "exact_duplicate") forcedExactDuplicateReviews += 1;
+          const confidence = typeof raw?.confidence === "number" ? Math.max(0, Math.min(1, raw.confidence)) : 0;
+          const audited: IntelligencePipelineRelationDecision = {
+            leftArticleId: pair.leftArticleId,
+            rightArticleId: pair.rightArticleId,
+            relation,
+            confidence,
+            ...(text(raw?.reason) ? { reason: text(raw?.reason) } : {}),
+          };
+          relationAuditDecisions.push(audited);
+        });
+      }
+
+      // `reviewMode` is persisted by the native quality gate.  A page reload
+      // must never downgrade its full-review/fallback requirement to the old
+      // UI sampling policy.  Unknown snapshots intentionally stay in `full`.
+      const relationReviewMode = text(nativeReviewGate?.reviewMode) === "sample" ? "sample" : "full";
+      const qwenReviewPairIds = new Set(selectIntelligenceRelationReviewIds(
+        judgePairs.map((pair) => {
+          const raw = rawDecisionByPairId.get(pair.id);
+          const confidence = typeof raw?.confidence === "number" ? raw.confidence : 0;
+          const proposedRelation = text(raw?.proposedRelation);
+          const reportedRelation = text(raw?.relation);
+          const importance = Math.max(
+            triageByArticleId.get(pair.leftArticleId)?.importance ?? 0,
+            triageByArticleId.get(pair.rightArticleId)?.importance ?? 0,
+          );
+          return {
+            id: pair.id,
+            sampleKey: `pair:${pair.leftArticleId}:${pair.rightArticleId}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`,
+            important: importance >= 80,
+            conflicting: raw?.requiresQwenReview === true
+              || (proposedRelation !== "" && proposedRelation !== reportedRelation)
+              || reportedRelation === "exact_duplicate",
+            lowConfidence: confidence < 0.9,
+          } satisfies IntelligenceRelationReviewCandidate;
+        }),
+        relationReviewMode,
+      ));
+      const qwenRequiredPairs = judgePairs.filter((pair) => qwenReviewPairIds.has(pair.id)).map((pair) => {
+        const raw = rawDecisionByPairId.get(pair.id);
+        const confidence = typeof raw?.confidence === "number" ? raw.confidence : 0;
+        const highRisk = confidence < 0.9
+          || raw?.requiresQwenReview === true
+          || text(raw?.proposedRelation) !== "" && text(raw?.proposedRelation) !== text(raw?.relation)
+          || text(raw?.relation) === "exact_duplicate";
+        return { pair, highRisk };
+      }).sort((left, right) => Number(right.highRisk) - Number(left.highRisk)
+        || (Number(rawDecisionByPairId.get(left.pair.id)?.confidence) || 0) - (Number(rawDecisionByPairId.get(right.pair.id)?.confidence) || 0)
+        || left.pair.id.localeCompare(right.pair.id));
+      const qwenRequiredPairIds = new Set(qwenRequiredPairs.map((item) => item.pair.id));
+      const qwenReviewByPairId = new Map<string, UnknownRecord>();
+      let qwenRelationReviewPending = 0;
+      if (qwenReviewPairIds.size > 0) {
+        await ensureNativeRuntimePhase("editorial", "8B 判定已持久化，正在切换 27B 抽检阶段");
+      }
+      for (let start = 0; start < judgePairs.length; start += INTELLIGENCE_EVENT_JUDGE_BATCH_SIZE) {
+        const batch = judgePairs.slice(start, start + INTELLIGENCE_EVENT_JUDGE_BATCH_SIZE)
+          .filter((pair) => qwenReviewPairIds.has(pair.id));
+        if (batch.length === 0) continue;
+        try {
+          const response = record(await invokeWithRuntimeRecovery<unknown>("intelligence_judge_event_pairs", {
+            request: {
+              pairs: batch.map((pair) => ({
+                id: pair.id,
+                left: {
+                  id: pair.leftArticleId,
+                  title: pair.left.title,
+                  summary: pair.left.summary,
+                  publishedAt: pair.left.publishedAt,
+                  sourceNames: [],
+                },
+                right: {
+                  id: pair.historical ? `history-${stableEventHash(pair.rightArticleId)}` : pair.rightArticleId,
+                  title: pair.right.title,
+                  summary: pair.right.summary,
+                  publishedAt: pair.right.publishedAt,
+                  sourceNames: [],
+                },
+              })),
+            },
+          }, "editorial", "27B 关系复核服务断开，正在恢复编辑阶段"));
+          const decisions = Array.isArray(response?.decisions) ? response.decisions.map(record) : [];
+          const reviews = batch.map((pair) => {
+            const small = rawDecisionByPairId.get(pair.id);
+            const qwen = decisions.find((decision) => text(decision?.id) === pair.id);
+            if (qwen) qwenReviewByPairId.set(pair.id, qwen);
+            const smallRelation = parseIntelligenceRelation(small?.relation) ?? "unrelated";
+            const qwenReported = parseIntelligenceRelation(qwen?.relation)
+              ?? (qwen?.sameEvent === true ? "same_event" : "unrelated");
+            const qwenRelation = qwenReported === "exact_duplicate" ? "same_event" : qwenReported;
+            const normalizedSmall = smallRelation === "exact_duplicate" ? "same_event" : smallRelation;
+            const qwenConfidence = typeof qwen?.confidence === "number" ? qwen.confidence : 0;
+            const verdict = !qwen || qwenConfidence < 0.55 ? "uncertain"
+              : qwenRelation === normalizedSmall ? "correct" : "incorrect";
+            return {
+              // Broad agreement is useful audit data, but it must not inflate
+              // positive merge precision with thousands of matching
+              // `unrelated` decisions.
+              targetKind: "relation_accuracy", targetId: `relation:${pair.leftArticleId}:${pair.rightArticleId}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`,
+              sampled: true, verdict, confidence: qwenConfidence,
+              modelId: text(response?.model) || activeModelName || "configured-qwen-reviewer",
+              detailJson: {
+                title: `${pair.left.title} ↔ ${pair.right.title}`,
+                meta: `${pipelineModelId()} ↔ ${text(response?.model) || activeModelName || "Qwen reviewer"}`,
+                reason: `8B=${normalizedSmall}；Qwen=${qwenRelation}`,
+                badge: verdict === "correct" ? "关系一致" : verdict === "incorrect" ? "关系冲突，保持独立" : "复核不确定",
+                confidence: qwenConfidence, reviewType: "relation",
+              },
+            };
+          });
+          batch.forEach((pair) => {
+            const small = rawDecisionByPairId.get(pair.id);
+            const smallRelation = parseIntelligenceRelation(small?.relation) ?? "unrelated";
+            if (!["exact_duplicate", "syndicated_copy", "same_event"].includes(smallRelation)) return;
+            const qwen = qwenReviewByPairId.get(pair.id);
+            const qwenReported = parseIntelligenceRelation(qwen?.relation)
+              ?? (qwen?.sameEvent === true ? "same_event" : "unrelated");
+            const confirmed = ["exact_duplicate", "syndicated_copy", "same_event"].includes(qwenReported);
+            const qwenConfidence = typeof qwen?.confidence === "number" ? qwen.confidence : 0;
+            reviews.push({
+              targetKind: "merge_precision", targetId: `pair:${pair.leftArticleId}:${pair.rightArticleId}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`,
+              sampled: true, verdict: !qwen || qwenConfidence < 0.55 ? "uncertain" : confirmed ? "correct" : "incorrect",
+              confidence: qwenConfidence,
+              modelId: text(response?.model) || activeModelName || "configured-qwen-reviewer",
+              detailJson: { title: `${pair.left.title} ↔ ${pair.right.title}`, meta: "正向合并精确率", reason: confirmed ? "Qwen 确认属于可合并的同一事件/稿件。" : "Qwen 未确认合并，投影保持独立。", badge: confirmed ? "合并确认" : "阻止合并", confidence: qwenConfidence, reviewType: "merge_precision" },
+            });
+            reviews.push({
+              targetKind: "false_merge", targetId: `false-merge:${pair.leftArticleId}:${pair.rightArticleId}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`,
+              sampled: true, verdict: confirmed ? "no_false_merge" : "false_merge",
+              confidence: qwenConfidence,
+              modelId: text(response?.model) || activeModelName || "configured-qwen-reviewer",
+              detailJson: { title: `${pair.left.title} ↔ ${pair.right.title}`, meta: "误合并率复核", reason: confirmed ? "Qwen 确认属于可合并的同一事件/稿件。" : "Qwen 未确认合并，投影保持独立。", badge: confirmed ? "未误合并" : "阻止误合并", confidence: qwenConfidence, reviewType: "false_merge" },
+            });
+          });
+          reviews.push({
+            targetKind: "json_compliance", targetId: `json:relation:${batch.map((pair) => pair.id).join("|")}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`.slice(0, 500),
+            sampled: true, verdict: "compliant", confidence: 1,
+            modelId: text(response?.model) || activeModelName || "configured-qwen-reviewer",
+            detailJson: { title: `关系判定 JSON · ${batch.length} 对`, meta: "Qwen reviewer", reason: "结构化响应已由原生命令完整校验。", badge: "JSON 合规", confidence: 1, reviewType: "json_compliance" },
+          });
+          if (!(await persistQualityReviews(reviews))) qwenRelationReviewPending += batch.length;
+        } catch {
+          qwenRelationReviewPending += batch.length;
+          await persistQualityReviews([{
+            targetKind: "json_compliance", targetId: `json:relation-failed:${batch.map((pair) => pair.id).join("|")}:${INTELLIGENCE_PIPELINE_PROMPT_VERSION}`.slice(0, 500),
+            sampled: true, verdict: "noncompliant", confidence: 0,
+            modelId: activeModelName || "configured-qwen-reviewer",
+            detailJson: { title: `关系判定 JSON · ${batch.length} 对`, meta: "Qwen reviewer", reason: "本轮未取得可校验的结构化响应。", badge: "JSON 未通过", confidence: 0, reviewType: "json_compliance" },
+          }]);
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+
+      judgePairs.forEach((pair) => {
+        const raw = rawDecisionByPairId.get(pair.id);
+        const audited = relationAuditDecisions.find((decision) => (
+          decision.leftArticleId === pair.leftArticleId && decision.rightArticleId === pair.rightArticleId
+        ));
+        if (!audited) return;
+        const qwen = qwenReviewByPairId.get(pair.id);
+        const requiresReview = qwenRequiredPairIds.has(pair.id);
+        const qwenReported = parseIntelligenceRelation(qwen?.relation)
+          ?? (qwen?.sameEvent === true ? "same_event" : "unrelated");
+        const qwenRelation = qwenReported === "exact_duplicate" ? "same_event" : qwenReported;
+        const smallRelation = audited.relation === "exact_duplicate" ? "same_event" : audited.relation;
+        const qwenConfidence = typeof qwen?.confidence === "number" ? qwen.confidence : 0;
+        const confirmedByQwen = qwen && qwenConfidence >= 0.8 && qwenRelation === smallRelation;
+        // Before the persisted four-metric quality gate passes, an unreviewed
+        // positive relation cannot merge events even at high 8B confidence.
+        // Temporary under-merging is safer than creating a false event cluster.
+        const safeWithoutReview = relationReviewMode === "sample"
+          && !requiresReview && audited.confidence >= 0.9;
+        relationDecisions.push(confirmedByQwen || safeWithoutReview
+          ? audited
+          : { ...audited, relation: "unrelated", reason: `${audited.reason || text(raw?.reason)}；Qwen 复核未确认，保守保持独立` });
+      });
+      if (qwenRequiredPairIds.size > 0) setAuditStage({
+        id: "qwen-review",
+        status: qwenRelationReviewPending > 0 ? "warning" : "running",
+        unit: "pairs",
+        inputCount: qwenRequiredPairIds.size,
+        outputCount: qwenReviewByPairId.size,
+        pendingCount: qwenRelationReviewPending,
+        summary: qwenRelationReviewPending > 0
+          ? `Qwen 已实际复核 ${qwenReviewByPairId.size} / ${qwenRequiredPairIds.size} 对关系，${qwenRelationReviewPending} 对因服务暂不可用保持待复核；未确认关系保持独立。`
+          : relationReviewMode === "full"
+            ? `质量门处于全量复核期：Qwen 已实际复核本批全部 ${qwenReviewByPairId.size} 对关系，未套用旧的 20%/5% 或 50 条上限。`
+            : `质量门处于抽样期：Qwen 已实际复核 ${qwenReviewByPairId.size} 对重大、冲突、低置信关系及至少 10% 的确定性随机样本。`,
+      });
+      const historicalSyntheticIds = new Set(historicalCandidates.map((candidate) => candidate.syntheticArticleId));
+      const persistableRelations = relationDecisions.filter((decision) => !historicalSyntheticIds.has(decision.rightArticleId));
+      for (let start = 0; start < persistableRelations.length; start += INTELLIGENCE_RELATION_JUDGE_BATCH_SIZE) {
+        await transport.invoke<unknown>("intelligence_store_upsert_relations", {
+          relations: persistableRelations.slice(start, start + INTELLIGENCE_RELATION_JUDGE_BATCH_SIZE).map((decision) => {
+            const pair = judgePairs.find((candidate) => (
+              candidate.leftArticleId === decision.leftArticleId && candidate.rightArticleId === decision.rightArticleId
+            ));
+            const qwen = pair ? qwenReviewByPairId.get(pair.id) : undefined;
+            const qwenConfidence = typeof qwen?.confidence === "number" ? qwen.confidence : 0;
+            return {
+              ...decision,
+              stage: "relation-judge",
+              modelId: pipelineModelId(),
+              evidenceJson: JSON.stringify({
+                inputFingerprint: pair ? relationInputFingerprint(pair) : "",
+                modelId: pipelineModelId(),
+                promptVersion: INTELLIGENCE_RELATION_PROMPT_VERSION,
+                reviewStatus: qwen && qwenConfidence >= 0.8
+                  ? "confirmed_27b"
+                  : relationReviewMode === "sample" && !qwenReviewPairIds.has(pair?.id ?? "") && decision.relation !== "unrelated"
+                    ? "quality_gate_accepted"
+                    : "awaiting_27b",
+                reviewerModel: qwen ? activeModelName || "configured-qwen-reviewer" : "",
+              }),
+            };
+          }),
+        });
+      }
+      setAuditStage({
+        id: "relation-judge", status: relationAuditDecisions.some((decision) => decision.confidence < 0.9) || forcedExactDuplicateReviews > 0 ? "warning" : "accepted", unit: "pairs", inputCount: judgePairs.length, outputCount: relationAuditDecisions.length,
+        pendingCount: relationAuditDecisions.filter((decision) => decision.confidence < 0.9).length + forcedExactDuplicateReviews,
+        summary: `${pipelineModelId()} 已按八类关系判定 ${relationAuditDecisions.length} 对候选；低于 90% 置信度的关系只进待复核。${forcedExactDuplicateReviews > 0 ? ` ${forcedExactDuplicateReviews} 个非精确阶段的 exact_duplicate 已降级为 same_event，保留全部来源并强制 Qwen 复核。` : ""}`,
+        items: relationAuditDecisions.slice(0, 40).map((decision) => ({
+          title: `${candidateByArticleId.get(decision.leftArticleId)?.title || decision.leftArticleId} ↔ ${candidateByArticleId.get(decision.rightArticleId)?.title || historicalCandidates.find((candidate) => candidate.syntheticArticleId === decision.rightArticleId)?.title || decision.rightArticleId}`,
+          meta: pipelineModelId(), reason: decision.reason || "结构化关系判定", confidence: decision.confidence,
+          status: decision.confidence < 0.9 ? "warning" : decision.relation === "unrelated" ? "rejected" : "accepted", badge: decision.relation,
+        })),
+      });
+      const existingAssignments = [
+        ...storedProjections.map(({ articleId, eventId, seriesId }) => ({ articleId, eventId, ...(seriesId ? { seriesId } : {}) })),
+        ...historicalCandidates.map((candidate) => ({
+          articleId: candidate.syntheticArticleId,
+          eventId: candidate.eventId,
+          ...(candidate.seriesId ? { seriesId: candidate.seriesId } : {}),
+        })),
+      ];
+      const linkedStoredArticleIds = relationDecisions.flatMap((decision) => [decision.leftArticleId, decision.rightArticleId])
+        .filter((articleId, index, values) => projectedArticleIds.has(articleId) && values.indexOf(articleId) === index);
+      const projectionArticleIds = [
+        ...unresolved.map((decision) => decision.articleId),
+        ...linkedStoredArticleIds,
+        ...historicalCandidates.map((candidate) => candidate.syntheticArticleId),
+      ];
+      const projections = projectStableIntelligenceEvents(projectionArticleIds, relationDecisions, existingAssignments);
+      const eventCandidates: IntelligenceBriefCandidate[] = [];
+      for (const projection of projections) {
+        const currentArticleIds = projection.articleIds.filter((articleId) => !historicalSyntheticIds.has(articleId));
+        const members = currentArticleIds.map((articleId) => candidateByArticleId.get(articleId)).filter((candidate): candidate is IntelligenceBriefCandidate => Boolean(candidate));
+        if (members.length === 0) continue;
+        const representative = members[0]!;
+        const importance = Math.max(...currentArticleIds.map((articleId) => triageByArticleId.get(articleId)?.importance ?? 0));
+        const stored = record(await transport.invoke<unknown>("intelligence_store_upsert_event", {
+          eventId: projection.eventId,
+          ...(projection.seriesId ? { seriesId: projection.seriesId } : {}),
+          title: representative.title,
+          summary: representative.summary,
+          importance,
+          occurredAt: representative.publishedAt,
+          articleIds: currentArticleIds,
+          // Membership projection is metadata, not a published article
+          // revision. Supplying revisionJson here would create a new empty
+          // latest revision on every run and hide the reusable 27B body.
+        }));
+        const eventId = text(stored?.eventId) || projection.eventId;
+        const revision = Number(stored?.revision ?? stored?.currentRevision);
+        const candidate = candidateFromEventMembers(eventId, members, importance, Number.isFinite(revision) ? {
+          articleId: currentArticleIds[0]!, eventId, revision,
+          ...(text(stored?.seriesId) || projection.seriesId ? { seriesId: text(stored?.seriesId) || projection.seriesId! } : {}),
+        } : undefined, text(stored?.seriesId) || projection.seriesId);
+        if (candidate) eventCandidates.push(candidate);
+      }
+      const allCandidatesByEvent = new Map<string, IntelligenceBriefCandidate[]>();
+      [...storedCandidates, ...eventCandidates].forEach((candidate) => {
+        allCandidatesByEvent.set(candidate.eventId!, [...(allCandidatesByEvent.get(candidate.eventId!) ?? []), candidate]);
+      });
+      const mergedCandidates = [...allCandidatesByEvent.entries()].flatMap(([eventId, candidates]) => {
+        const importance = Math.max(...candidates.map((candidate) => candidate.entry.importance));
+        const latest = candidates.slice().sort((left, right) => (right.revision ?? 0) - (left.revision ?? 0))[0]!;
+        const merged = candidateFromEventMembers(eventId, candidates, importance, latest.revision === undefined ? undefined : {
+          articleId: "", eventId, revision: latest.revision, ...(latest.seriesId ? { seriesId: latest.seriesId } : {}),
+          title: latest.title, summary: latest.summary, occurredAt: latest.publishedAt,
+        }, latest.seriesId);
+        return merged ? [merged] : [];
+      });
+      const seriesEventIds = new Map<string, Set<string>>();
+      projections.forEach((projection) => {
+        if (projection.seriesId) seriesEventIds.set(projection.seriesId, new Set([
+          ...(seriesEventIds.get(projection.seriesId) ?? []),
+          projection.eventId,
+        ]));
+      });
+      mergedCandidates.forEach((candidate) => {
+        if (candidate.seriesId) seriesEventIds.set(candidate.seriesId, new Set([
+          ...(seriesEventIds.get(candidate.seriesId) ?? []),
+          candidate.eventId!,
+        ]));
+      });
+      for (const [seriesId, eventIds] of seriesEventIds) {
+        const representative = mergedCandidates.find((candidate) => candidate.seriesId === seriesId);
+        await transport.invoke<unknown>("intelligence_store_upsert_series", {
+          seriesId,
+          title: representative?.title || "新闻系列",
+          summary: representative?.summary || "",
+          eventIds: [...eventIds],
+        });
+      }
+      currentCandidates = selectEditorialEvents(mergedCandidates);
+      const historicalCount = historicalCandidates.length;
+      setAuditStage({
+        id: "historical-recall", status: rawHistoricalCandidates.length > historicalCount ? "warning" : "accepted", unit: "events", inputCount: unresolved.length, outputCount: historicalCount,
+        summary: `历史事件索引为 ${unresolved.length} 篇新增/变化文章召回 ${historicalCount} 个带稳定 eventId 的候选；缺少稳定 ID 的结果只留审计、不自动挂接。`,
+      });
+      setAuditStage({
+        id: "series-timeline", status: "accepted", unit: "series", inputCount: mergedCandidates.length, outputCount: seriesEventIds.size,
+        summary: `已保留/写入 ${mergedCandidates.length} 个稳定事件和 ${seriesEventIds.size} 个新闻系列；新增来源只创建修订，不改变既有 eventId。`,
+      });
+      renderBriefCards();
+      return true;
+    };
+
+    const scheduleNativeIngestion = (briefingResult: IntelligenceBriefing): void => {
+      pendingNativeIngestion = briefingResult;
+      if (nativeIngestionActive) return;
+      nativeIngestionActive = true;
+      nativeIngestionFailed = false;
+      void (async () => {
+        if (nativePipelineCapability === null) {
+          const available = await new Promise<boolean>((resolve) => pipelineCapabilityWaiters.push(resolve));
+          if (!available) return;
+        }
+        if (nativePipelineCapability === false) return;
+        const port = nativePipelinePort();
+        if (!port) return;
+        while (pendingNativeIngestion) {
+          const next = pendingNativeIngestion;
+          pendingNativeIngestion = null;
+          const changed = pipelineArticlesForBriefing(next).filter((article) => (
+            nativeIngestedFingerprints.get(article.articleId) !== article.fingerprint
+          ));
+          if (changed.length === 0) continue;
+          let queuedDelta = 0; let unchanged = 0;
+          try {
+            for (const batch of chunkIntelligencePipelineArticles(changed, INTELLIGENCE_PIPELINE_UPSERT_BATCH_SIZE)) {
+              const result = await port.upsertArticles(batch);
+              queuedDelta += result.inserted + result.updated;
+              unchanged += result.unchanged;
+              batch.forEach((article) => nativeIngestedFingerprints.set(article.articleId, article.fingerprint));
+            }
+          } catch (error: unknown) {
+            // Preserve the newest cumulative snapshot for the next source
+            // render or explicit refresh; never spin on a broken store.
+            if (!pendingNativeIngestion) pendingNativeIngestion = next;
+            throw error;
+          }
+          await refreshNativePipelineSnapshot(
+            queuedDelta > 0
+              ? `增量来源批次已立即写入本机持久队列：新增或变化 ${queuedDelta} 篇；${unchanged} 篇复用既有判断。`
+              : `增量来源批次已核对；${unchanged} 篇未变化文章继续复用既有判断。`,
+          );
+        }
+      })().catch((error: unknown) => {
+        // The in-memory catalogue remains available, but never claim that a
+        // failed incremental write reached SQLite. The latest full snapshot
+        // stays pending and a later render/refresh can safely retry it.
+        nativeIngestionFailed = true;
+        modelStatus.textContent = `增量来源尚未全部写入持久队列，稍后重试：${String(error)}`;
+      }).finally(() => {
+        nativeIngestionActive = false;
+        if (pendingNativeIngestion && !nativeIngestionFailed) scheduleNativeIngestion(pendingNativeIngestion);
+      });
+    };
+
+    const clearPipelineRetry = (resetAttempt = true): void => {
+      if (pipelineRetryTimer !== null) clearTimeout(pipelineRetryTimer);
+      pipelineRetryTimer = null;
+      retryPipelineBriefing = null;
+      if (resetAttempt) pipelineRetryAttempt = 0;
+    };
+
+    const schedulePipelineRetry = (briefingResult: IntelligenceBriefing, reason: string): void => {
+      retryPipelineBriefing = pendingPipelineBriefing ?? briefingResult;
+      pendingPipelineBriefing = null;
+      if (pipelineRetryTimer !== null) return;
+      const delay = intelligencePipelineRetryDelayMs(pipelineRetryAttempt);
+      if (delay === null) {
+        const message = `${reason} 自动续跑已达到本轮上限；持久队列与已完成判断均已保留，下次打开或手动刷新时继续。`;
+        modelStatus.textContent = message;
+        publishAudit(message);
+        return;
+      }
+      pipelineRetryAttempt += 1;
+      const retryAt = Date.now() + delay;
+      const retryTime = new Date(retryAt).toLocaleTimeString("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+      const message = `${reason} 已保留断点；等待当前租约到期，预计 ${retryTime} 自动续跑（第 ${pipelineRetryAttempt} / ${INTELLIGENCE_PIPELINE_RETRY_DELAYS_MS.length} 次）。`;
+      modelStatus.textContent = message;
+      publishAudit(message);
+      pipelineRetryTimer = setTimeout(() => {
+        pipelineRetryTimer = null;
+        const next = retryPipelineBriefing;
+        retryPipelineBriefing = null;
+        if (next) scheduleNativePipeline(next);
+      }, delay);
+      (pipelineRetryTimer as unknown as { unref?: () => void }).unref?.();
+    };
+
+    const runNativePipelineBriefing = async (briefingResult: IntelligenceBriefing): Promise<boolean> => {
+      const port = nativePipelinePort();
+      if (!port) return true;
+      activeNativeRunId = "";
+      try {
+        const run = record(await transport?.invoke<unknown>("intelligence_store_start_run", {}));
+        if (text(run?.runId)) activeNativeRunId = text(run?.runId);
+      } catch {
+        // Older binaries use the controller-local run id; pipeline capability
+        // detection below still decides whether the native path is available.
+      }
+      const finishNativeRun = async (status: "completed" | "failed" | "cancelled"): Promise<void> => {
+        if (!transport || !activeNativeRunId) return;
+        try {
+          await transport.invoke<unknown>("intelligence_store_finish_run", { runId: activeNativeRunId, status });
+        } catch { /* run lifecycle is audit metadata, never an article-loss path */ }
+      };
+      if (nativePipelineCapability === false) {
+        nativePipelineActive = false;
+        await generateCurrentBrief(loadGeneration);
+        await saveCurrentDailyDigest();
+        await finishNativeRun("cancelled");
+        return true;
+      }
+      const articles = pipelineArticlesForBriefing(briefingResult);
+      pipelineState = reduceIntelligencePipelineState(pipelineState, {
+        type: "upsert-started",
+        received: briefingResult.inputCount,
+        unique: articles.length,
+      });
+      let queued = 0;
+      let reused = 0;
+      try {
+        for (const batch of chunkIntelligencePipelineArticles(articles, INTELLIGENCE_PIPELINE_UPSERT_BATCH_SIZE)) {
+          const result = await port.upsertArticles(batch);
+          // `queued` is the store-wide queue depth on current native builds,
+          // not this batch's delta. Only inserted/changed records were newly
+          // enqueued by this invocation.
+          queued += result.inserted + result.updated;
+          reused += result.unchanged;
+          batch.forEach((article) => nativeIngestedFingerprints.set(article.articleId, article.fingerprint));
+        }
+        nativePipelineCapability = true;
+        pipelineCapabilityWaiters.splice(0).forEach((resolve) => resolve(true));
+      } catch {
+        // Compatibility with an installed binary from before the SQLite
+        // intelligence store: keep the previous bounded flow, but never claim
+        // that it is the persistent all-article pipeline.
+        nativePipelineActive = false;
+        nativePipelineCapability = false;
+        pipelineCapabilityWaiters.splice(0).forEach((resolve) => resolve(false));
+        pipelineState = reduceIntelligencePipelineState(pipelineState, {
+          type: "paused",
+          message: "当前安装版尚未提供本机持久情报队列，暂时使用兼容流程。",
+        });
+        await generateCurrentBrief(loadGeneration);
+        await saveCurrentDailyDigest();
+        await finishNativeRun("cancelled");
+        return true;
+      }
+      nativePipelineActive = true;
+      pipelineState = reduceIntelligencePipelineState(pipelineState, { type: "upsert-finished", queued, reused });
+      await refreshNativePipelineSnapshot("唯一文章已进入本机持久队列；审计详情按需分页读取。");
+      try {
+        if (queued > 0) await ensureNativeRuntimePhase("triage", "新增文章正在交给 8B 全量判断");
+        const before = await readStoredTriageDecisions(articles.map((article) => article.articleId));
+        projectStoredTriage(briefingResult, before);
+        pipelineState = await runIntelligenceArticleTriageQueue(port, pipelineState, {
+          modelId: pipelineModelId(),
+          promptVersion: INTELLIGENCE_PIPELINE_PROMPT_VERSION,
+          batchSize: INTELLIGENCE_ARTICLE_TRIAGE_BATCH_SIZE,
+          leaseSeconds: INTELLIGENCE_TRIAGE_LEASE_SECONDS,
+          shouldContinue: () => Boolean(transport),
+          yieldControl: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+          onState: (state) => {
+            pipelineState = state;
+            modelStatus.textContent = state.message;
+          },
+        });
+        const after = await readStoredTriageDecisions(articles.map((article) => article.articleId));
+        projectStoredTriage(briefingResult, after);
+        const previouslyReviewedInputs = new Set(before.map((decision) => `${decision.articleId}\u001f${decision.fingerprint}`));
+        const changedTriageDecisions = after.filter((decision) => !previouslyReviewedInputs.has(`${decision.articleId}\u001f${decision.fingerprint}`));
+        await refreshNativePipelineSnapshot(pipelineState.phase === "completed"
+          ? "全量文章初筛已完成；正在召回当前与历史事件关系。"
+          : pipelineState.message);
+        const relationsReady = pipelineState.phase === "completed"
+          ? await runNativeRelationPipeline(briefingResult, after)
+          : false;
+        await refreshNativePipelineSnapshot(relationsReady
+          ? "新增关系已判定并投影为稳定事件；正在复用或生成事件级综合报道。"
+          : pipelineState.message);
+        if (pipelineState.phase === "completed" && relationsReady) {
+          // Quality review is incremental and intentionally waits until every
+          // 8B relation batch is persisted. That gives the runtime one clean
+          // GPU hand-off to 27B for both auditing and final editorial work.
+          await runQwenTriageQualityReview(briefingResult, changedTriageDecisions);
+          await generateCurrentBrief(loadGeneration);
+          await saveCurrentDailyDigest();
+        }
+        const completed = pipelineState.phase === "completed" && relationsReady;
+        await finishNativeRun(completed ? "completed" : "failed");
+        if (!completed) {
+          schedulePipelineRetry(briefingResult, pipelineState.message);
+          return false;
+        }
+        clearPipelineRetry();
+        return true;
+      } catch (error: unknown) {
+        await finishNativeRun("failed");
+        pipelineState = reduceIntelligencePipelineState(pipelineState, {
+          type: "paused",
+          message: `本机增量队列已保留进度，下次从断点继续：${String(error)}`,
+        });
+        modelStatus.textContent = pipelineState.message;
+        publishAudit(pipelineState.message);
+        schedulePipelineRetry(briefingResult, pipelineState.message);
+        return false;
+      }
+    };
+
+    const scheduleNativePipeline = (briefingResult: IntelligenceBriefing): void => {
+      pendingPipelineBriefing = briefingResult;
+      if (pipelineRetryTimer !== null) {
+        retryPipelineBriefing = briefingResult;
+        scheduleNativeIngestion(briefingResult);
+        return;
+      }
+      if (pipelineWorkerActive) {
+        // Model/relation processing may take minutes, but ingestion must not
+        // wait behind it. Every cumulative source-batch render schedules an
+        // idempotent SQLite delta; the final full snapshot therefore cannot
+        // remain stranded only in the WebView.
+        scheduleNativeIngestion(briefingResult);
+        return;
+      }
+      pipelineWorkerActive = true;
+      pipelineWorkerPromise = (async () => {
+        while (pendingPipelineBriefing) {
+          const next = pendingPipelineBriefing;
+          pendingPipelineBriefing = null;
+          const completed = await runNativePipelineBriefing(next);
+          if (!completed) break;
+        }
+      })().finally(() => { pipelineWorkerActive = false; pipelineWorkerPromise = null; });
+    };
+
+    const waitForPipelineCompatibility = async (): Promise<void> => {
+      const available = nativePipelineCapability ?? await new Promise<boolean>((resolve) => {
+        pipelineCapabilityWaiters.push(resolve);
+      });
+      // Compatibility generation is part of the historical synchronous load
+      // contract. The real native pipeline is deliberately left in the
+      // background so opening never waits on thousands of model calls.
+      if (!available) await pipelineWorkerPromise;
+    };
+
     const setStatus = (value: string): void => {
       status.textContent = value;
     };
@@ -1610,29 +3823,35 @@ export function installIntelligenceWorkspaceUi(
       if (currentLayout === "interstellar") setStatus(value);
     };
 
-    const preparedImageRequest = (candidate: IntelligenceBriefCandidate): UnknownRecord | null => {
-      const item = candidate.entry.evidenceItems.find((evidence) => openableHttpsUrl(evidence.url));
-      if (!item) return null;
-      const fields = item as UnknownRecord;
-      const url = openableHttpsUrl(fields.url);
-      if (!url) return null;
-      return {
-        url,
-        imageUrl: openableHttpsUrl(fields.imageUrl ?? fields.image_url),
-        sourceId: text(fields.sourceId ?? fields.source_id),
-        itemId: text(fields.id),
-      };
-    };
+    const preparedImageRequests = (candidate: IntelligenceBriefCandidate): UnknownRecord[] => (
+      candidate.entry.evidenceItems.flatMap((item) => {
+        const fields = item as UnknownRecord;
+        const url = openableHttpsUrl(fields.url);
+        if (!url) return [];
+        return [{
+          url,
+          imageUrl: openableHttpsUrl(fields.imageUrl ?? fields.image_url),
+          sourceId: text(fields.sourceId ?? fields.source_id),
+          itemId: text(fields.id),
+        }];
+      }).filter((request, index, requests) => requests.findIndex((candidateRequest) => candidateRequest.url === request.url) === index)
+        .slice(0, INTELLIGENCE_PREPARED_IMAGE_LIMIT)
+    );
 
     const preloadPreparedBriefImage = async (candidate: IntelligenceBriefCandidate): Promise<void> => {
-      if (!transport || preparedBriefImages.has(candidate.id) || preparedBriefImageInFlight.has(candidate.id)) return;
-      const request = preparedImageRequest(candidate);
-      if (!request) return;
+      if (!transport || (preparedBriefImages.get(candidate.id)?.length ?? 0) >= INTELLIGENCE_PREPARED_IMAGE_LIMIT || preparedBriefImageInFlight.has(candidate.id)) return;
+      const requests = preparedImageRequests(candidate);
+      if (requests.length === 0) return;
       preparedBriefImageInFlight.add(candidate.id);
       try {
-        const response = record(await transport.invoke<unknown>("newsnow_preview_image", { request }));
-        const image = safePreparedImageDataUrl(response?.imageDataUrl ?? response?.image_data_url);
-        if (image) preparedBriefImages.set(candidate.id, image);
+        const images = [...(preparedBriefImages.get(candidate.id) ?? [])];
+        for (const request of requests) {
+          const response = record(await transport.invoke<unknown>("newsnow_preview_image", { request }));
+          const image = safePreparedImageDataUrl(response?.imageDataUrl ?? response?.image_data_url);
+          if (image && !images.includes(image)) images.push(image);
+          if (images.length >= INTELLIGENCE_PREPARED_IMAGE_LIMIT) break;
+        }
+        if (images.length > 0) preparedBriefImages.set(candidate.id, images);
       } catch {
         // A cover is optional. The prepared text article remains immediately readable.
       } finally {
@@ -1641,7 +3860,7 @@ export function installIntelligenceWorkspaceUi(
     };
 
     const preloadPreparedBriefImages = (candidates: readonly IntelligenceBriefCandidate[]): void => {
-      const queue = candidates.filter((candidate) => !preparedBriefImages.has(candidate.id));
+      const queue = candidates.filter((candidate) => (preparedBriefImages.get(candidate.id)?.length ?? 0) < INTELLIGENCE_PREPARED_IMAGE_LIMIT);
       const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
         while (queue.length > 0) {
           const candidate = queue.shift();
@@ -1651,40 +3870,87 @@ export function installIntelligenceWorkspaceUi(
       void Promise.all(workers);
     };
 
-    const enrichCurrentCandidates = async (): Promise<void> => {
+    const enrichCurrentCandidates = async (onlyCandidateIds?: ReadonlySet<string>): Promise<void> => {
       if (!transport || currentCandidates.length === 0) return;
       // Every selected source is collected. The native fetcher itself retains
       // a bounded worker pool and an on-disk cache; batching here merely keeps
       // the UI responsive instead of silently dropping all but the first 12.
-      const articles = currentCandidates.flatMap((candidate) => candidate.sources.map((source) => ({
+      const articles = currentCandidates.filter((candidate) => !onlyCandidateIds || onlyCandidateIds.has(candidate.id))
+        .flatMap((candidate) => candidate.sources.map((source) => ({
         url: source.url, source: source.name, title: source.title, summary: source.summary,
         publishedAt: candidate.publishedAt,
       }))).filter((article) => openableHttpsUrl(article.url)).filter((article, index, all) => (
         all.findIndex((candidate) => candidate.url === article.url) === index
       ));
       if (articles.length === 0) return;
-      try {
-        const byUrl = new Map<string, UnknownRecord>();
-        for (let start = 0; start < articles.length; start += INTELLIGENCE_SOURCE_BATCH_SIZE) {
-          const batch = articles.slice(start, start + INTELLIGENCE_SOURCE_BATCH_SIZE);
+      const byUrl = new Map<string, UnknownRecord>();
+      const failedUrls = new Set<string>();
+      for (let start = 0; start < articles.length; start += INTELLIGENCE_SOURCE_BATCH_SIZE) {
+        const batch = articles.slice(start, start + INTELLIGENCE_SOURCE_BATCH_SIZE);
+        try {
           const enrichments = await transport.invoke<unknown>("newsnow_intelligence_enrich_articles", { request: { articles: batch } });
           (Array.isArray(enrichments) ? enrichments : []).forEach((value) => {
-          const item = record(value); const url = openableHttpsUrl(item?.url);
+            const item = record(value); const url = openableHttpsUrl(item?.url);
             if (url && item) byUrl.set(url, item);
           });
+          batch.forEach((article) => {
+            const url = openableHttpsUrl(article.url);
+            if (url && !byUrl.has(url)) failedUrls.add(url);
+          });
+        } catch {
+          batch.forEach((article) => {
+            const url = openableHttpsUrl(article.url);
+            if (url) failedUrls.add(url);
+          });
         }
-        currentCandidates = currentCandidates.map((candidate) => ({ ...candidate, sources: candidate.sources.map((source) => {
-          const item = byUrl.get(source.url);
-          const body = text(item?.body).slice(0, 14_000);
-          const leadImageDataUrl = safePreparedImageDataUrl(item?.leadImageDataUrl ?? item?.lead_image_data_url);
-          if (leadImageDataUrl && !preparedBriefImages.has(candidate.id)) preparedBriefImages.set(candidate.id, leadImageDataUrl);
-          return { ...source, body, leadImageDataUrl,
-            imageUrls: Array.isArray(item?.imageUrls) ? item.imageUrls.map(openableHttpsUrl).filter(Boolean) : [],
-            videoUrls: Array.isArray(item?.videoUrls) ? item.videoUrls.map(openableHttpsUrl).filter(Boolean) : [] };
-        }) }));
-      } catch {
-        // The editor still receives the safe RSS fallback when a site blocks extraction.
       }
+      currentCandidates = currentCandidates.map((candidate) => !onlyCandidateIds || onlyCandidateIds.has(candidate.id)
+        ? ({ ...candidate, sources: candidate.sources.map((source) => {
+        const sourceUrl = openableHttpsUrl(source.url);
+        const item = byUrl.get(sourceUrl);
+        // The map pass below must see the complete extracted page. The final
+        // 27B request receives bounded per-chunk evidence, not a silently
+        // truncated first-page prefix. A blocked source retains its last
+        // usable body but is marked retryable instead of becoming a permanent
+        // RSS-only editorial revision.
+        const fetchedBody = text(item?.body);
+        const body = fetchedBody || source.body || "";
+        const explicitlyDegraded = item?.degraded === true
+          || item?.fetchFailed === true || item?.fetch_failed === true
+          || item?.complete === false;
+        const degraded = Boolean(sourceUrl) && (failedUrls.has(sourceUrl) || explicitlyDegraded || !fetchedBody);
+        const leadImageDataUrl = safePreparedImageDataUrl(item?.leadImageDataUrl ?? item?.lead_image_data_url)
+          || source.leadImageDataUrl || "";
+        if (leadImageDataUrl) {
+          const images = preparedBriefImages.get(candidate.id) ?? [];
+          if (!images.includes(leadImageDataUrl) && images.length < INTELLIGENCE_PREPARED_IMAGE_LIMIT) {
+            preparedBriefImages.set(candidate.id, [...images, leadImageDataUrl]);
+          }
+        }
+        const enrichedSource: IntelligenceBriefCandidate["sources"][number] = {
+          ...source,
+          ...(body ? { body } : {}),
+          ...(leadImageDataUrl ? { leadImageDataUrl } : {}),
+          imageUrls: Array.isArray(item?.imageUrls)
+            ? item.imageUrls.map(openableHttpsUrl).filter(Boolean)
+            : source.imageUrls ?? [],
+          videoUrls: Array.isArray(item?.videoUrls)
+            ? item.videoUrls.map(openableHttpsUrl).filter(Boolean)
+            : source.videoUrls ?? [],
+          ...(degraded ? {
+            evidenceDegraded: true,
+            retryAfter: evidenceRetryAfter(item?.retryAfter ?? item?.retry_after ?? source.retryAfter),
+          } : {
+            evidenceDegraded: false,
+          }),
+        };
+        return {
+          ...enrichedSource,
+          evidenceFingerprint: text(item?.evidenceFingerprint ?? item?.evidence_fingerprint)
+            || pipelineSourceEvidenceFingerprint(enrichedSource),
+        };
+      }) })
+        : candidate);
     };
 
     // A final event prompt cannot safely contain several complete articles on
@@ -1701,7 +3967,7 @@ export function installIntelligenceWorkspaceUi(
       }
       return `${value.length.toString(36)}-${(first >>> 0).toString(36)}-${(second >>> 0).toString(36)}`;
     };
-    const sourceEvidenceKey = (source: IntelligenceBriefCandidate["sources"][number]): string => (
+    const modelSourceEvidenceKey = (source: IntelligenceBriefCandidate["sources"][number]): string => (
       `v1:${stableTextFingerprint(`${openableHttpsUrl(source.url)}\u001f${source.title}\u001f${source.body || source.summary}`)}`
     );
     const splitSourceEvidenceChunks = (body: string): string[] => {
@@ -1720,16 +3986,16 @@ export function installIntelligenceWorkspaceUi(
       } catch { /* cache eviction never blocks a finished briefing */ }
     };
     const extractSourceEvidence = async (source: IntelligenceBriefCandidate["sources"][number]): Promise<string> => {
-      const key = sourceEvidenceKey(source);
+      const key = modelSourceEvidenceKey(source);
       const cached = sourceEvidenceCache.get(key);
       if (cached) return cached;
       const chunks = splitSourceEvidenceChunks(source.body || "");
       if (chunks.length === 0 || !transport) return source.summary;
       const evidence: string[] = [];
       for (const [index, chunk] of chunks.entries()) {
-        const response = record(await transport.invoke<unknown>("intelligence_extract_source_evidence", {
+        const response = record(await invokeWithRuntimeRecovery<unknown>("intelligence_extract_source_evidence", {
           request: { source: source.name, title: source.title, chunk, chunkIndex: index + 1, chunkCount: chunks.length },
-        }));
+        }, "editorial", "全文证据服务断开，正在恢复 27B 编辑阶段"));
         const item = text(response?.evidence).trim();
         if (item) evidence.push(item);
       }
@@ -1739,32 +4005,125 @@ export function installIntelligenceWorkspaceUi(
       // Preserve an evidence trace from every body chunk instead of keeping
       // only the beginning of a long article. This compact map-reduce output
       // is what the final event pass sees for every selected source.
-      const budget = Math.max(80, Math.floor(INTELLIGENCE_SOURCE_EVIDENCE_MAX_CHARS / evidence.length));
-      const combined = evidence.map((item) => item.slice(0, budget)).join("\n").slice(0, INTELLIGENCE_SOURCE_EVIDENCE_MAX_CHARS);
+      const target = Math.min(
+        INTELLIGENCE_SOURCE_EVIDENCE_MAX_CHARS,
+        Math.max(INTELLIGENCE_SOURCE_EVIDENCE_MIN_CHARS, Math.ceil((source.body || source.summary).length * 0.12)),
+      );
+      const budget = Math.max(80, Math.floor(target / evidence.length));
+      const combined = evidence.map((item) => item.slice(0, budget)).join("\n").slice(0, target);
       sourceEvidenceCache.set(key, combined);
       persistSourceEvidenceCache();
       return combined;
     };
-    const extractEvidenceForCurrentCandidates = async (): Promise<void> => {
+    const extractEvidenceForCurrentCandidates = async (onlyCandidateIds?: ReadonlySet<string>): Promise<void> => {
       if (!transport || currentCandidates.length === 0) return;
-      const allSources = currentCandidates.flatMap((candidate) => candidate.sources)
-        .filter((source, index, sources) => sources.findIndex((candidate) => sourceEvidenceKey(candidate) === sourceEvidenceKey(source)) === index);
+      const allSources = currentCandidates.filter((candidate) => !onlyCandidateIds || onlyCandidateIds.has(candidate.id))
+        .flatMap((candidate) => candidate.sources)
+        .filter((source, index, sources) => sources.findIndex((candidate) => modelSourceEvidenceKey(candidate) === modelSourceEvidenceKey(source)) === index);
       let completed = 0;
       const evidenceByKey = new Map<string, string>();
+      const failedKeys = new Set<string>();
       for (const source of allSources) {
+        const sourceKey = modelSourceEvidenceKey(source);
         try {
-          evidenceByKey.set(sourceEvidenceKey(source), await extractSourceEvidence(source));
+          const evidence = await extractSourceEvidence(source);
+          evidenceByKey.set(sourceKey, evidence);
+          // A HTTPS source with no extracted body is a fetch degradation even
+          // though its safe RSS summary can still be shown to the editor.
+          if (openableHttpsUrl(source.url) && !source.body) failedKeys.add(sourceKey);
         } catch {
           // A blocked page retains its RSS summary and remains eligible for a
           // later full-text retry; it is never put into the completed cache.
-          evidenceByKey.set(sourceEvidenceKey(source), source.summary);
+          evidenceByKey.set(sourceKey, source.summary);
+          failedKeys.add(sourceKey);
         }
         completed += 1;
         modelStatus.textContent = `正在读取全文并提炼证据 ${completed} / ${allSources.length} 篇…`;
       }
-      currentCandidates = currentCandidates.map((candidate) => ({ ...candidate, sources: candidate.sources.map((source) => ({
-        ...source, modelEvidence: evidenceByKey.get(sourceEvidenceKey(source)) || source.summary,
-      })) }));
+      currentCandidates = currentCandidates.map((candidate) => !onlyCandidateIds || onlyCandidateIds.has(candidate.id)
+        ? ({ ...candidate, sources: candidate.sources.map((source) => {
+          const sourceKey = modelSourceEvidenceKey(source);
+          const degraded = source.evidenceDegraded === true || failedKeys.has(sourceKey);
+          return {
+            ...source,
+            modelEvidence: evidenceByKey.get(sourceKey) || source.summary,
+            evidenceFingerprint: source.evidenceFingerprint || pipelineSourceEvidenceFingerprint(source),
+            ...(degraded ? {
+              evidenceDegraded: true,
+              retryAfter: evidenceRetryAfter(source.retryAfter),
+            } : {
+              evidenceDegraded: false,
+            }),
+          };
+        }) })
+        : candidate);
+    };
+
+    const persistEnrichedArticleEvidence = async (onlyCandidateIds?: ReadonlySet<string>): Promise<void> => {
+      if (!transport || !nativePipelineActive) return;
+      const updates = currentCandidates.filter((candidate) => !onlyCandidateIds || onlyCandidateIds.has(candidate.id))
+        .flatMap((candidate) => candidate.sources.flatMap((source) => {
+        const evidenceItem = candidate.entry.evidenceItems.find((item) => (
+          canonicalItemUrl(item) === canonicalItemUrl({ url: source.url })
+          && (text(item.source) || sourceEvidenceKey(item)) === source.name
+        ));
+        if (!evidenceItem) return [];
+        const queuedArticle = pipelineArticleForEvidenceItem(evidenceItem);
+        const mediaJson = {
+          // Base64 previews remain in the current WebView only. Persisting a
+          // 480 KiB JPEG as base64 can exceed the native 512 KiB JSON guard
+          // and would reject the article body together with its media.
+          imageUrls: (source.imageUrls ?? []).map(openableHttpsUrl).filter(Boolean),
+          videoUrls: (source.videoUrls ?? []).map(openableHttpsUrl).filter(Boolean),
+          evidenceDegraded: source.evidenceDegraded === true,
+          ...(source.evidenceDegraded === true ? { retryAfter: evidenceRetryAfter(source.retryAfter) } : {}),
+        };
+        return [{
+          articleId: queuedArticle.articleId,
+          // The evidence-only native UPDATE uses the original queue record
+          // fingerprint in its WHERE clause. A body/media hash here updates
+          // zero rows and makes every restart miss the durable revision cache.
+          recordFingerprint: queuedArticle.fingerprint,
+          evidenceFingerprint: source.evidenceFingerprint || pipelineSourceEvidenceFingerprint(source),
+          ...(source.body ? { body: source.body } : {}),
+          mediaJson,
+        }];
+      }));
+      if (updates.length === 0) return;
+      try {
+        for (let start = 0; start < updates.length; start += 16) {
+          const batch = updates.slice(start, start + 16);
+          const response = record(await transport.invoke<unknown>("intelligence_store_update_article_evidence", {
+            articles: batch,
+          }));
+          const updated = typeof response?.updated === "number" ? response.updated : batch.length;
+          const missing = typeof response?.missing === "number" ? response.missing : 0;
+          const mismatched = typeof response?.mismatched === "number" ? response.mismatched : 0;
+          if (updated !== batch.length || missing > 0 || mismatched > 0) {
+            throw new Error(`article-evidence-stale:${updated}/${batch.length};missing=${missing};mismatched=${mismatched}`);
+          }
+        }
+      } catch (error: unknown) {
+        if (String(error).includes("article-evidence-stale:")) throw error;
+        // Compatibility binaries have no evidence-only command. Never call
+        // article upsert here: that would invalidate a just-created event and
+        // put the same article back into triage. Real persistence failures
+        // remain visible and stop publication instead of silently producing
+        // an RSS-only revision.
+        if (/unknown command|command .* not found|not registered|does not exist/iu.test(String(error))) return;
+        throw error;
+      }
+    };
+
+    const editorialSourcesForModel = (candidate: IntelligenceBriefCandidate): UnknownRecord[] => {
+      // Every source remains represented.  Only its already map-reduced
+      // evidence is proportionally bounded so a many-source event cannot
+      // overflow the final editor context and silently drop later sources.
+      const evidenceBudget = Math.max(80, Math.floor(7_000 / Math.max(1, candidate.sources.length)));
+      return candidate.sources.map((source) => ({
+        ...source,
+        body: (source.modelEvidence || source.summary).slice(0, evidenceBudget),
+      }));
     };
 
     const articleTriageKey = (candidate: IntelligenceBriefCandidate): string => stableEventHash([
@@ -1782,7 +4141,7 @@ export function installIntelligenceWorkspaceUi(
         if (cached) decisions.set(candidate.id, cached);
       });
       setAuditStage({
-        id: "small-model", status: uncached.length > 0 ? "running" : "cached", unit: "articles",
+        id: "article-triage", status: uncached.length > 0 ? "running" : "cached", unit: "articles",
         inputCount: before.length, outputCount: before.length, pendingCount: uncached.length, reusedCount: before.length - uncached.length,
         summary: uncached.length > 0
           ? `本机判定模型正在逐篇初筛 ${uncached.length} 篇新候选；${before.length - uncached.length} 篇复用本地缓存。`
@@ -1797,7 +4156,7 @@ export function installIntelligenceWorkspaceUi(
         }));
         try {
           const response = record(await transport.invoke<unknown>("intelligence_triage_articles", {
-            request: { articles, baseUrl: text(eventJudgeBaseUrl?.value) || undefined, model: text(eventJudgeModel?.value) || undefined },
+            request: { articles, baseUrl: pipelineJudgeBaseUrl(), model: pipelineModelId() },
           }));
           const rawDecisions = Array.isArray(response?.decisions) ? response.decisions.map(record) : [];
           batch.forEach((candidate) => {
@@ -1826,7 +4185,7 @@ export function installIntelligenceWorkspaceUi(
           ...(decision?.confidence === undefined ? {} : { confidence: decision.confidence }), status: triageUnavailable ? "warning" as const : decision?.keep ? "accepted" as const : "rejected" as const,
           badge: triageUnavailable ? "等待本机初筛" : decision?.keep ? "进入关系召回" : "不进入简报" };
       });
-      setAuditStage({ id: "small-model", status: triageUnavailable ? "warning" : "accepted", unit: "articles",
+      setAuditStage({ id: "article-triage", status: triageUnavailable ? "warning" : "accepted", unit: "articles",
         inputCount: before.length, outputCount: accepted.length, pendingCount: before.length - decisions.size, reusedCount: before.length - uncached.length,
         summary: triageUnavailable
           ? `本机逐篇初筛暂不可用；为保持原有简报可读性，${before.length} 篇规则候选暂不作文章级排除，等待下次重试。`
@@ -1898,9 +4257,9 @@ export function installIntelligenceWorkspaceUi(
           reason: `硬冲突：${veto.reason === "distinct-high-signal-entities" ? "主体明确不同" : veto.reason === "conflicting-tickers" ? "股票代码明确不同" : "财报期明确不同"}`,
         });
         return false;
-      }).slice(0, INTELLIGENCE_EVENT_JUDGE_MAX_PAIRS);
+      });
       setAuditStage({
-        id: "candidate-recall", status: "accepted", unit: "pairs", inputCount: before.length, outputCount: eligible.length + rejected.length, pendingCount: eligible.length,
+        id: "relation-recall", status: "accepted", unit: "pairs", inputCount: before.length, outputCount: eligible.length + rejected.length, pendingCount: eligible.length,
         summary: `规则与 RAG 仅召回 ${eligible.length} 对待核候选；${rejected.length} 对因明确冲突被拦截。`,
         items: [...eligible.map((pair) => ({
           title: `${byId.get(pair.leftId)!.title} ↔ ${byId.get(pair.rightId)!.title}`,
@@ -1908,7 +4267,7 @@ export function installIntelligenceWorkspaceUi(
         })), ...rejected.map((item) => ({ ...item, status: "rejected" as const, badge: "硬冲突" }))],
       });
       if (eligible.length === 0) {
-        setAuditStage({ id: "small-model", status: "cached", unit: "pairs", inputCount: 0, outputCount: 0, summary: "没有可安全送审的相似候选；保留已通过逐篇初筛的独立事件。" });
+        setAuditStage({ id: "relation-judge", status: "cached", unit: "pairs", inputCount: 0, outputCount: 0, summary: "没有可安全送审的相似候选；保留已通过逐篇初筛的独立事件。" });
         publishAudit("采集、去重与候选召回已完成；没有未经模型确认的自动合并。");
         return;
       }
@@ -1928,7 +4287,7 @@ export function installIntelligenceWorkspaceUi(
         return false;
       });
       setAuditStage({
-        id: "small-model", status: pendingEligible.length > 0 ? "running" : "cached", unit: "pairs", inputCount: eligible.length, outputCount: 0, pendingCount: pendingEligible.length, reusedCount: eligible.length - pendingEligible.length,
+        id: "relation-judge", status: pendingEligible.length > 0 ? "running" : "cached", unit: "pairs", inputCount: eligible.length, outputCount: 0, pendingCount: pendingEligible.length, reusedCount: eligible.length - pendingEligible.length,
         summary: pendingEligible.length > 0
           ? `正在由本机事件判定模型核验 ${pendingEligible.length} 对新候选；另有 ${eligible.length - pendingEligible.length} 对复用缓存。`
           : `已复用 ${eligible.length} 对未变化候选的本机事件判定缓存。`,
@@ -1950,8 +4309,8 @@ export function installIntelligenceWorkspaceUi(
           const response = record(await transport.invoke<unknown>("intelligence_judge_event_pairs", {
             request: {
               pairs: requestPairs,
-              baseUrl: text(eventJudgeBaseUrl?.value) || undefined,
-              model: text(eventJudgeModel?.value) || undefined,
+              baseUrl: pipelineJudgeBaseUrl(),
+              model: pipelineModelId(),
             },
           }));
           const decisions = Array.isArray(response?.decisions) ? response.decisions.map(record) : [];
@@ -1981,7 +4340,7 @@ export function installIntelligenceWorkspaceUi(
       }
       if (pendingEligible.length > 0) persistEventDecisionCache();
       setAuditStage({
-        id: "small-model", status: accepted.length > 0 ? "accepted" : "warning", unit: "pairs", inputCount: eligible.length, outputCount: accepted.length, reusedCount: eligible.length - pendingEligible.length,
+        id: "relation-judge", status: accepted.length > 0 ? "accepted" : "warning", unit: "pairs", inputCount: eligible.length, outputCount: accepted.length, reusedCount: eligible.length - pendingEligible.length,
         summary: `已核验 ${eligible.length} 对候选，确认 ${accepted.length} 对同一事件；其余全部保留独立。`,
         items: judgedItems,
       });
@@ -1994,7 +4353,7 @@ export function installIntelligenceWorkspaceUi(
         const representative = members.slice().sort((left, right) => (order.get(left.id)! - order.get(right.id)!))[0]!;
         const sources = members.flatMap((member) => member.sources).filter((source, index, all) => (
           all.findIndex((candidate) => canonicalItemUrl({ url: candidate.url }) === canonicalItemUrl({ url: source.url }) && candidate.name === source.name) === index
-        )).slice(0, INTELLIGENCE_EDITORIAL_SOURCES_PER_CANDIDATE);
+        ));
         const entry: IntelligenceBriefingEntry = {
           ...representative.entry,
           sourceKeys: [...new Set(members.flatMap((member) => member.entry.sourceKeys))],
@@ -2037,6 +4396,251 @@ export function installIntelligenceWorkspaceUi(
         const entries = [...editorialCache.entries()].slice(-160).map(([key, value]) => ({ key, brief: value }));
         editorialStorage?.setItem(INTELLIGENCE_EDITORIAL_CACHE_STORAGE_KEY, JSON.stringify(entries));
       } catch { /* cache persistence is optional; the daily digest remains intact */ }
+    };
+
+    const nativeEditorialInputFingerprint = (candidate: IntelligenceBriefCandidate): string => (
+      `v5:${stableTextFingerprint([
+        INTELLIGENCE_EDITORIAL_PROMPT_VERSION,
+        activeModelSha || activeModelName,
+        ...candidate.entry.evidenceItems.map((item) => {
+          const article = pipelineArticleForEvidenceItem(item);
+          return `${article.articleId}:${article.fingerprint}`;
+        }).sort(),
+        ...candidate.sources.map((source) => (
+          `${openableHttpsUrl(source.url)}:${source.evidenceFingerprint || pipelineSourceEvidenceFingerprint(source)}`
+        )).sort(),
+      ].join("\u001f"))}`
+    );
+
+    const nativeEditorialEvidenceFingerprint = (candidate: IntelligenceBriefCandidate): string => (
+      `e1:${stableTextFingerprint(candidate.sources.map((source) => JSON.stringify({
+        url: openableHttpsUrl(source.url), title: source.title,
+        body: source.body || source.summary,
+        imageUrls: source.imageUrls ?? [], videoUrls: source.videoUrls ?? [],
+      })).sort().join("\u001f"))}`
+    );
+
+    const parseStoredRevisionJson = (value: unknown): UnknownRecord | null => {
+      try {
+        return record(typeof value === "string" ? JSON.parse(value) : value);
+      } catch {
+        return null;
+      }
+    };
+
+    const hydrateNativeEventSources = async (onlyCandidateIds?: ReadonlySet<string>): Promise<void> => {
+      if (!transport || !nativePipelineActive) return;
+      const sourcesByEvent = new Map<string, UnknownRecord[]>();
+      for (const candidate of currentCandidates) {
+        if (!candidate.eventId || onlyCandidateIds && !onlyCandidateIds.has(candidate.id) || sourcesByEvent.has(candidate.eventId)) continue;
+        const sources: UnknownRecord[] = [];
+        let cursor: number | undefined;
+        try {
+          do {
+            const response = record(await transport.invoke<unknown>("intelligence_store_event_sources", {
+              eventId: candidate.eventId,
+              ...(cursor === undefined ? {} : { cursor }),
+              limit: 64,
+            }));
+            if (!response || !Array.isArray(response.sources)) break;
+            response.sources.map(record).forEach((source) => { if (source) sources.push(source); });
+            const rawNextCursor = response.nextCursor ?? response.next_cursor;
+            const nextCursor = Number(rawNextCursor);
+            if (rawNextCursor === null || rawNextCursor === undefined || !Number.isFinite(nextCursor) || nextCursor === cursor) break;
+            cursor = nextCursor;
+          } while (sources.length < 20_000);
+        } catch {
+          // Compatibility builds do not expose event-source paging. Keep the
+          // already materialized candidate instead of abandoning the edit.
+          continue;
+        }
+        if (sources.length > 0) sourcesByEvent.set(candidate.eventId, sources);
+      }
+      if (sourcesByEvent.size === 0) return;
+      currentCandidates = currentCandidates.map((candidate) => {
+        const storedSources = candidate.eventId ? sourcesByEvent.get(candidate.eventId) : undefined;
+        if (!storedSources) return candidate;
+        const hydratedItems = storedSources.flatMap((stored) => {
+          const title = text(stored.title);
+          const articleId = text(stored.articleId ?? stored.article_id);
+          const recordFingerprint = text(stored.recordFingerprint ?? stored.record_fingerprint);
+          if (!title || !articleId || !recordFingerprint) return [];
+          return [{
+            articleId,
+            recordFingerprint,
+            ...(text(stored.evidenceFingerprint ?? stored.evidence_fingerprint)
+              ? { evidenceFingerprint: text(stored.evidenceFingerprint ?? stored.evidence_fingerprint) }
+              : {}),
+            title,
+            source: text(stored.sourceName ?? stored.source_name) || "历史来源",
+            url: openableHttpsUrl(stored.url),
+            summary: readableSummary(stored.summary),
+            ...(text(stored.body) ? { body: text(stored.body) } : {}),
+            publishedAt: text(stored.publishedAt ?? stored.published_at),
+            language: text(stored.language),
+          } satisfies IntelligenceNewsItem];
+        });
+        const storedItemsByKey = new Map(hydratedItems.map((item) => [evidenceKey(item), item]));
+        const evidenceItems = mergeEvidenceItems(candidate.entry.evidenceItems, hydratedItems).map((item) => {
+          const stored = storedItemsByKey.get(evidenceKey(item));
+          return stored ? { ...item, ...stored, summary: text(item.summary).length > text(stored.summary).length ? item.summary : stored.summary } : item;
+        });
+        const labels = sourceEvidenceLabels(evidenceItems);
+        const sourceMap = new Map(candidate.sources.map((source) => [`${source.name}\u001f${openableHttpsUrl(source.url)}`, source]));
+        storedSources.forEach((stored) => {
+          const name = text(stored.sourceName ?? stored.source_name) || "历史来源";
+          const url = openableHttpsUrl(stored.url);
+          const key = `${name}\u001f${url}`;
+          const previous = sourceMap.get(key);
+          const media = parseStoredRevisionJson(stored.mediaJson ?? stored.media_json);
+          const body = text(stored.body) || previous?.body || "";
+          const evidenceFingerprint = text(stored.evidenceFingerprint ?? stored.evidence_fingerprint)
+            || previous?.evidenceFingerprint || "";
+          const evidenceDegraded = media?.evidenceDegraded === true || media?.evidence_degraded === true;
+          const rawRetryAfter = media?.retryAfter ?? media?.retry_after;
+          const leadImageDataUrl = safePreparedImageDataUrl(media?.leadImageDataUrl ?? media?.lead_image_data_url)
+            || previous?.leadImageDataUrl || "";
+          sourceMap.set(key, {
+            name,
+            title: text(stored.title) || previous?.title || candidate.title,
+            url,
+            summary: readableSummary(stored.summary) || previous?.summary || candidate.summary,
+            ...(body ? { body } : {}),
+            ...(previous?.modelEvidence ? { modelEvidence: previous.modelEvidence } : {}),
+            ...(leadImageDataUrl ? { leadImageDataUrl } : {}),
+            imageUrls: Array.isArray(media?.imageUrls) ? media!.imageUrls.map(openableHttpsUrl).filter(Boolean) : previous?.imageUrls ?? [],
+            videoUrls: Array.isArray(media?.videoUrls) ? media!.videoUrls.map(openableHttpsUrl).filter(Boolean) : previous?.videoUrls ?? [],
+            ...(evidenceFingerprint ? { evidenceFingerprint } : {}),
+            ...(evidenceDegraded ? {
+              evidenceDegraded: true,
+              retryAfter: evidenceRetryAfter(rawRetryAfter ?? previous?.retryAfter),
+            } : {
+              evidenceDegraded: false,
+            }),
+          });
+        });
+        return {
+          ...candidate,
+          entry: {
+            ...candidate.entry,
+            sourceKeys: labels.sourceKeys,
+            sourceNames: labels.sourceNames,
+            evidenceItems,
+            mergedCount: evidenceItems.length,
+          },
+          sources: [...sourceMap.values()],
+        };
+      });
+    };
+
+    const restoreNativeEditorialCache = async (): Promise<void> => {
+      if (!transport || !nativePipelineActive) return;
+      const restored: IntelligenceModelBrief[] = [];
+      const revisionsByEvent = new Map<string, number>();
+      const mediaByEvent = new Map<string, UnknownRecord[]>();
+      for (const candidate of currentCandidates) {
+        if (!candidate.eventId) continue;
+        try {
+          const response = record(await transport.invoke<unknown>("intelligence_store_event_get", { eventId: candidate.eventId }));
+          const latest = record(response?.latestRevision ?? response?.latest_revision) ?? response;
+          const meta = parseStoredRevisionJson(latest?.revisionJson ?? latest?.revision_json ?? response?.revisionJson);
+          const body = text(latest?.revisionBody ?? latest?.revision_body ?? response?.revisionBody);
+          const evidenceState = record(meta?.evidenceState);
+          const degradedSourceCount = count(evidenceState?.degradedSourceCount);
+          const retryAfter = Number(evidenceState?.retryAfter);
+          if (!meta || !body
+            || text(meta.inputFingerprint) !== nativeEditorialInputFingerprint(candidate)
+            || text(meta.promptVersion) !== INTELLIGENCE_EDITORIAL_PROMPT_VERSION
+            // A degraded revision is a temporary displayable fallback, never
+            // a permanent cache hit. Once its retry window opens the source is
+            // fetched/map-reduced again before another revision is published.
+            || degradedSourceCount > 0 && (!Number.isFinite(retryAfter) || retryAfter <= Date.now())) continue;
+          const storedBrief = record(meta.brief);
+          if (!storedBrief) continue;
+          const parsed = parseIntelligenceModelBriefs(JSON.stringify({
+            briefs: [{ ...storedBrief, id: candidate.id, article: body }],
+          }), [candidate]);
+          if (parsed[0]) restored.push(parsed[0]);
+          if (Array.isArray(meta.media)) mediaByEvent.set(candidate.eventId, meta.media.map(record).filter((item): item is UnknownRecord => Boolean(item)));
+          const revision = Number(latest?.revision ?? latest?.revisionId ?? response?.revision ?? response?.currentRevision);
+          if (Number.isFinite(revision)) revisionsByEvent.set(candidate.eventId, revision);
+        } catch {
+          // A missing/corrupt event revision is a cache miss. The editor will
+          // create a new persistent revision from the current full evidence.
+        }
+      }
+      if (revisionsByEvent.size > 0) currentCandidates = currentCandidates.map((candidate) => {
+        const revision = candidate.eventId ? revisionsByEvent.get(candidate.eventId) : undefined;
+        if (revision === undefined) return candidate;
+        const media = candidate.eventId ? mediaByEvent.get(candidate.eventId) ?? [] : [];
+        const sources = candidate.sources.map((source) => {
+          const stored = media.find((item) => text(item.source) === source.name);
+          return !stored ? source : {
+            ...source,
+            ...(safePreparedImageDataUrl(stored.leadImageDataUrl) ? { leadImageDataUrl: safePreparedImageDataUrl(stored.leadImageDataUrl) } : {}),
+            ...(Array.isArray(stored.imageUrls) ? { imageUrls: stored.imageUrls.map(openableHttpsUrl).filter(Boolean) } : {}),
+            ...(Array.isArray(stored.videoUrls) ? { videoUrls: stored.videoUrls.map(openableHttpsUrl).filter(Boolean) } : {}),
+          };
+        });
+        const images = sources.flatMap((source) => [
+          safePreparedImageDataUrl(source.leadImageDataUrl),
+          ...(source.imageUrls ?? []).map(safePreparedImageSource),
+        ]).filter((image, index, values) => image && values.indexOf(image) === index).slice(0, INTELLIGENCE_PREPARED_IMAGE_LIMIT);
+        if (images.length > 0) preparedBriefImages.set(candidate.id, images);
+        return { ...candidate, revision, sources };
+      });
+      currentModelBriefs = restored;
+    };
+
+    const persistNativeEditorialRevision = async (
+      candidate: IntelligenceBriefCandidate,
+      brief: IntelligenceModelBrief,
+    ): Promise<void> => {
+      if (!transport || !nativePipelineActive || !candidate.eventId) return;
+      const articleIds = [...new Set(candidate.entry.evidenceItems.map((item) => (
+        pipelineArticleForEvidenceItem(item).articleId
+      )))];
+      const media = candidate.sources.map((source) => ({
+        source: source.name,
+        // Never embed base64 image payloads in revision JSON: a single source
+        // preview can approach the native 512 KiB JSON ceiling and prevent the
+        // durable editorial revision from being written. The current session
+        // retains its local data URL; restarts reuse safe media references.
+        imageUrls: (source.imageUrls ?? []).map(openableHttpsUrl).filter(Boolean),
+        videoUrls: (source.videoUrls ?? []).map(openableHttpsUrl).filter(Boolean),
+      }));
+      const degradedSources = candidate.sources.filter((source) => source.evidenceDegraded === true);
+      const retryAfterValues = degradedSources.map((source) => evidenceRetryAfter(source.retryAfter))
+        .filter((value) => Number.isFinite(value));
+      const stored = record(await transport.invoke<unknown>("intelligence_store_upsert_event", {
+        eventId: candidate.eventId,
+        ...(candidate.seriesId ? { seriesId: candidate.seriesId } : {}),
+        title: brief.headline,
+        summary: brief.summary,
+        importance: brief.importance,
+        occurredAt: candidate.publishedAt,
+        articleIds,
+        revisionBody: brief.article,
+        revisionJson: JSON.stringify({
+          inputFingerprint: nativeEditorialInputFingerprint(candidate),
+          evidenceFingerprint: nativeEditorialEvidenceFingerprint(candidate),
+          promptVersion: INTELLIGENCE_EDITORIAL_PROMPT_VERSION,
+          modelId: activeModelName,
+          modelSha: activeModelSha,
+          media,
+          evidenceState: {
+            degradedSourceCount: degradedSources.length,
+            ...(retryAfterValues.length > 0 ? { retryAfter: Math.min(...retryAfterValues) } : {}),
+          },
+          // revisionBody is authoritative; duplicating a long article here
+          // wastes the native JSON budget and can prevent durable caching.
+          brief: { ...brief, article: "" },
+        }),
+      }));
+      const revision = Number(stored?.revision ?? stored?.currentRevision);
+      if (Number.isFinite(revision)) currentCandidates = currentCandidates.map((current) => (
+        current.eventId === candidate.eventId ? { ...current, revision } : current
+      ));
     };
 
     const historicalDigestSummaries = (): IntelligenceDailyDigestSummary[] => (
@@ -2181,7 +4785,6 @@ export function installIntelligenceWorkspaceUi(
           ))
         ) return false;
         currentModelBriefs = restored.filter((entry): entry is IntelligenceModelBrief => entry !== null);
-        lastGeneratedCandidateKey = modelCandidateKey();
         modelStatus.textContent = `已复用今日简报 · ${activeModelName}`;
         renderBriefCards();
         return true;
@@ -2258,7 +4861,7 @@ export function installIntelligenceWorkspaceUi(
       if (day === "current") {
         selectedDigestDay = "current";
         renderDigestHistoryControls();
-        renderBriefCards();
+        if (!page.hidden && selectedDigestDay === "current") renderBriefCards();
         return;
       }
       if (!transport) return;
@@ -2298,18 +4901,53 @@ export function installIntelligenceWorkspaceUi(
       const cards = visible.map((candidate, index) => makeBriefingCard(candidate, briefsById.get(candidate.id) ?? null, index));
       digestList.replaceChildren(...cards);
       selectBriefCandidate(visible[0]!, briefsById.get(visible[0]!.id) ?? null, cards[0]);
-      // Covers are fetched after the text cards paint and never block the
-      // model pass or an interaction. Once complete, opening a brief needs no
-      // upstream network request at all.
-      preloadPreparedBriefImages(visible);
+      // Do not prefetch remote cover assets when the workspace opens.  This
+      // surface is intentionally a durable-state viewer; the background
+      // worker owns collection and enrichment.
+      visible.forEach((candidate) => {
+        const key = candidate.eventId || candidate.id;
+        if (preparedTimelineCache.has(key) || preparedTimelineInFlight.has(key)) return;
+        preparedTimelineInFlight.add(key);
+        void preparedTimelineHtml(candidate).then((html) => {
+          if (html) preparedTimelineCache.set(key, html);
+        }).finally(() => preparedTimelineInFlight.delete(key));
+      });
     };
 
     const refreshLocalModelStatus = async (): Promise<void> => {
       if (!transport) return;
+      qwen27bSelectable = false;
+      modelName.disabled = true;
+      modelQwen27b.disabled = true;
+      modelSave.disabled = true;
+      modelRequirement.textContent = "正在检测 NVIDIA 显卡与物理总显存…";
+      try {
+        const capabilities = record(await transport.invoke<unknown>("intelligence_local_model_capabilities"));
+        const models = Array.isArray(capabilities?.models) ? capabilities.models : [];
+        const option = models.map(record).find((candidate) => (
+          text(candidate?.id) === INTELLIGENCE_QWEN_27B_16GB_MODEL_ID
+        ));
+        qwen27bSelectable = option?.selectable === true;
+        modelQwen27b.disabled = !qwen27bSelectable;
+        modelName.disabled = !qwen27bSelectable;
+        modelSave.disabled = !qwen27bSelectable;
+        modelQwen27b.textContent = qwen27bSelectable
+          ? "千问 27B（16GB 显存版）"
+          : "千问 27B（16GB 显存版）· 显存不足或未检测到显卡";
+        const gpu = record(capabilities?.gpu);
+        const total = typeof gpu?.totalVramMib === "number" ? `${gpu.totalVramMib} MiB` : "未知";
+        const free = typeof gpu?.freeVramMib === "number" ? `${gpu.freeVramMib} MiB` : "未知";
+        const reason = text(option?.reason) || text(gpu?.message) || "无法确认显卡容量";
+        modelRequirement.textContent = `显卡：${text(gpu?.name) || "未检测到 NVIDIA GPU"}；总显存 ${total}，当前空闲 ${free}。${reason}。`;
+      } catch (error: unknown) {
+        modelQwen27b.textContent = "千问 27B（16GB 显存版）· 显卡检测失败";
+        modelRequirement.textContent = `显卡检测失败，已禁止选择大参数模型：${String(error)}`;
+      }
       try {
         const value = record(await transport.invoke<unknown>("intelligence_local_model_status"));
         modelConfigured = value?.configured === true;
         activeModelName = text(value?.model);
+        activeModelSha = text(value?.modelSha ?? value?.model_sha ?? value?.sha256);
         if (text(value?.baseUrl)) modelBaseUrl.value = text(value?.baseUrl);
         if (activeModelName) modelName.value = activeModelName;
         modelStatus.textContent = modelConfigured
@@ -2323,28 +4961,38 @@ export function installIntelligenceWorkspaceUi(
 
     const generateCurrentBrief = async (loadToken: number): Promise<void> => {
       if (!transport || !modelConfigured || selectedDigestDay !== "current" || currentCandidates.length === 0) return;
-      await triageCurrentCandidates();
-      if (loadToken !== loadGeneration || currentCandidates.length === 0) return;
-      await refineCandidatesWithEventJudge();
-      await enrichCurrentCandidates();
-      await extractEvidenceForCurrentCandidates();
-      const candidateKey = modelCandidateKey();
-      // A daily snapshot may have the same event ids but older RSS-only
-      // evidence. Rebuild from the per-event content fingerprint cache so an
-      // updated article is re-edited while unchanged events stay free.
+      if (!nativePipelineActive) {
+        await triageCurrentCandidates();
+        if (loadToken !== loadGeneration || currentCandidates.length === 0) return;
+        await refineCandidatesWithEventJudge();
+      }
       currentModelBriefs = [];
-      restoreEditorialCache();
-      if (candidateKey === lastGeneratedCandidateKey) return;
-      const pendingCandidates = currentCandidates.filter((candidate) => !currentModelBriefs.some((brief) => brief.id === candidate.id && Boolean(brief.article)));
+      // Hydrate every historical + newly appended event member from SQLite
+      // before computing the lightweight cache key. This is local I/O only;
+      // a cache hit still performs no web extraction or model call.
+      if (nativePipelineActive) await hydrateNativeEventSources();
+      // SQLite revisions are keyed by stable article ids + original record
+      // fingerprints + prompt/model revision, so this cache check is possible
+      // before any network fetch or source-evidence model call.
+      if (nativePipelineActive) await restoreNativeEditorialCache();
+      else restoreEditorialCache();
+      let pendingCandidates = currentCandidates.filter((candidate) => !currentModelBriefs.some((brief) => brief.id === candidate.id && Boolean(brief.article)));
       if (pendingCandidates.length === 0) {
-        lastGeneratedCandidateKey = candidateKey;
         modelStatus.textContent = `已复用本机编辑缓存 · ${activeModelName || "本机 Qwen 27B Q3"}`;
         setAuditStage({ id: "qwen-review", status: "cached", unit: "events", inputCount: currentCandidates.length, outputCount: currentModelBriefs.length, reusedCount: currentModelBriefs.length, summary: "已复用未变化来源的本地 Qwen 综合报道缓存。" });
         setAuditStage({ id: "final-events", status: "accepted", unit: "events", inputCount: currentCandidates.length, outputCount: currentCandidates.length, reusedCount: currentCandidates.length, summary: "已复用已验证的简报事件；新资讯到来前不会再次编辑。" });
         publishAudit("简报已从本地缓存复用；只有新增或正文变化的来源才会重新交给 Qwen。" );
-        renderBriefCards();
+        if (!page.hidden && selectedDigestDay === "current") renderBriefCards();
         return;
       }
+      await ensureNativeRuntimePhase("editorial", "正在启动 27B 全文证据与综合报道阶段");
+      const pendingIds = new Set(pendingCandidates.map((candidate) => candidate.id));
+      await enrichCurrentCandidates(pendingIds);
+      await extractEvidenceForCurrentCandidates(pendingIds);
+      // Persist only after map-reduce, so a fetch/extraction fallback carries
+      // its retry window and cannot be mistaken for final source evidence.
+      await persistEnrichedArticleEvidence(pendingIds);
+      pendingCandidates = currentCandidates.filter((candidate) => pendingIds.has(candidate.id));
       const generation = ++briefingGeneration;
       modelStatus.textContent = `正在由 ${activeModelName || "本机 Qwen 27B Q3"} 编辑 ${pendingCandidates.length} 条新增/更新资讯…`;
       setAuditStage({ id: "qwen-review", status: "running", unit: "events", inputCount: currentCandidates.length, outputCount: 0, pendingCount: pendingCandidates.length, reusedCount: currentCandidates.length - pendingCandidates.length, summary: `Qwen 正在抽检关系判定并基于全文证据编辑 ${pendingCandidates.length} 个新事件。` });
@@ -2355,38 +5003,39 @@ export function installIntelligenceWorkspaceUi(
       for (let start = 0; start < pendingCandidates.length; start += 1) {
         const batch = pendingCandidates.slice(start, start + 1);
         try {
-          const response = record(await transport.invoke<unknown>("intelligence_generate_brief", {
+          const response = record(await invokeWithRuntimeRecovery<unknown>("intelligence_generate_brief", {
             request: {
               candidates: batch.map((candidate) => ({
               id: candidate.id,
               title: candidate.title,
               summary: candidate.summary,
               publishedAt: candidate.publishedAt,
-              sources: candidate.sources.map((source) => ({ ...source, body: source.modelEvidence || source.summary })),
+              sources: editorialSourcesForModel(candidate),
               })),
             },
-          }));
-          if (generation !== briefingGeneration || loadToken !== loadGeneration || page.hidden || selectedDigestDay !== "current") return;
+          }, "editorial", "27B 综合报道服务断开，正在恢复编辑阶段"));
+          if (generation !== briefingGeneration || loadToken !== loadGeneration) return;
           const merged = new Map(currentModelBriefs.map((brief) => [brief.id, brief]));
-          parseIntelligenceModelBriefs(text(response?.content), batch)
-            .forEach((brief) => {
-              merged.set(brief.id, brief);
-              const candidate = batch.find((item) => item.id === brief.id);
-              if (candidate) saveEditorialCache(candidate, brief);
-            });
+          for (const brief of parseIntelligenceModelBriefs(text(response?.content), batch)) {
+            merged.set(brief.id, brief);
+            const candidate = batch.find((item) => item.id === brief.id);
+            if (candidate) {
+              if (nativePipelineActive) await persistNativeEditorialRevision(candidate, brief);
+              saveEditorialCache(candidate, brief);
+            }
+          }
           currentModelBriefs = [...merged.values()];
           modelStatus.textContent = `正在编辑 ${Math.min(start + batch.length, pendingCandidates.length)} / ${pendingCandidates.length} 条新增/更新资讯…`;
-          renderBriefCards();
+          if (!page.hidden && selectedDigestDay === "current") renderBriefCards();
         } catch {
           failedBatches += 1;
         }
       }
-      if (generation !== briefingGeneration || loadToken !== loadGeneration || page.hidden || selectedDigestDay !== "current") return;
+      if (generation !== briefingGeneration || loadToken !== loadGeneration) return;
       const completedCount = currentCandidates.filter((candidate) => (
         currentModelBriefs.some((brief) => brief.id === candidate.id && Boolean(brief.article))
       )).length;
       const completed = completedCount === currentCandidates.length;
-      lastGeneratedCandidateKey = completed ? candidateKey : "";
       setAuditStage({
         id: "qwen-review", status: completedCount > 0 ? (completed ? "accepted" : "warning") : "warning", unit: "events", inputCount: currentCandidates.length, outputCount: completedCount, reusedCount: currentCandidates.length - pendingCandidates.length,
         summary: completed ? `Qwen 已完成 ${completedCount} 篇事件级综合报道。` : "Qwen 没有返回可用的综合报道；当前仅保留可核查候选。",
@@ -2404,7 +5053,7 @@ export function installIntelligenceWorkspaceUi(
       modelStatus.textContent = completedCount > 0
         ? `${completed ? "已生成每日简报" : "已生成部分简报"} · ${text(activeModelName) || "本机 Qwen 27B Q3"}${failedBatches > 0 ? `；${failedBatches} 批待重试` : ""}`
         : "本机模型未响应；正在展示规则候选";
-      renderBriefCards();
+      if (!page.hidden && selectedDigestDay === "current") renderBriefCards();
     };
 
     const setLayout = (layout: IntelligenceLayout): void => {
@@ -2427,10 +5076,13 @@ export function installIntelligenceWorkspaceUi(
 
     const selectItem = (item: IntelligenceNewsItem): void => {
       selectedItem = item;
+      selectedStandardFavorite = newsFavoriteForItem(item);
       contextTitle.textContent = itemTitle(item);
       contextBody.textContent = itemContext(item);
       contextMeta.textContent = `${text(item.source) || "未知来源"} · ${text(item.category) || "综合"}`;
       contextReasons.replaceChildren();
+      refreshFavoriteAction(favoriteAction, selectedStandardFavorite);
+      contextMeta.append(favoriteAction);
       contextEvidence.replaceChildren();
       openNews.hidden = false;
       openNews.disabled = openableNewsItem(item) === null;
@@ -2442,6 +5094,7 @@ export function installIntelligenceWorkspaceUi(
       button?: HTMLButtonElement,
     ): void => {
       selectedItem = null;
+      selectedStandardFavorite = newsFavoriteForCandidate(candidate, modelBrief);
       contextTitle.textContent = modelBrief?.headline || candidate.title;
       contextBody.textContent = modelBrief
         ? `${modelBrief.summary}\n${modelBrief.whyItMatters}`
@@ -2449,6 +5102,8 @@ export function installIntelligenceWorkspaceUi(
       contextMeta.textContent = modelBrief
         ? `${modelBrief.priority} · 重要性 ${modelBrief.importance} · 可信度 ${Math.round(modelBrief.confidence * 100)}% · ${candidate.entry.sourceKeys.length} 个独立来源`
         : `规则候选 · ${candidate.entry.sourceKeys.length} 个独立来源 · ${candidate.entry.mergedCount} 条原始证据`;
+      refreshFavoriteAction(favoriteAction, selectedStandardFavorite);
+      contextMeta.append(favoriteAction);
       const reasons = modelBrief?.reasons ?? ["本机模型不可用或未返回有效 JSON；当前只展示规则候选。"];
       contextReasons.replaceChildren(...reasons.map((reason) => {
         const item = root.createElement("li");
@@ -2518,20 +5173,30 @@ export function installIntelligenceWorkspaceUi(
           modelStatus.textContent = `正在优先编辑 1 条资讯 · ${activeModelName || "本机 Qwen 27B Q3"}`;
         }
         try {
-          await extractEvidenceForCurrentCandidates();
+          if (nativePipelineActive) {
+            await hydrateNativeEventSources(new Set([candidate.id]));
+            await restoreNativeEditorialCache();
+            const restored = currentModelBriefs.find((brief) => brief.id === candidate.id && Boolean(brief.article));
+            if (restored) return restored;
+          }
+          await ensureNativeRuntimePhase("editorial", "正在启动 27B 优先编辑阶段");
+          const onlyCandidate = new Set([candidate.id]);
+          await enrichCurrentCandidates(onlyCandidate);
+          await extractEvidenceForCurrentCandidates(onlyCandidate);
+          await persistEnrichedArticleEvidence(onlyCandidate);
           const preparedCandidate = currentCandidates.find((item) => item.id === candidate.id) ?? candidate;
-          const response = record(await transport.invoke<unknown>("intelligence_generate_brief", {
+          const response = record(await invokeWithRuntimeRecovery<unknown>("intelligence_generate_brief", {
             request: {
               candidates: [{
                 id: preparedCandidate.id,
                 title: preparedCandidate.title,
                 summary: preparedCandidate.summary,
                 publishedAt: preparedCandidate.publishedAt,
-                sources: preparedCandidate.sources.map((source) => ({ ...source, body: source.modelEvidence || source.summary })),
+                sources: editorialSourcesForModel(preparedCandidate),
               }],
             },
-          }));
-          const brief = parseIntelligenceModelBriefs(text(response?.content), [candidate])
+          }, "editorial", "27B 优先编辑服务断开，正在恢复编辑阶段"));
+          const brief = parseIntelligenceModelBriefs(text(response?.content), [preparedCandidate])
             .find((result) => result.id === candidate.id) ?? null;
           if (!brief?.article) {
             setStandardStatus("本机模型没有返回可用的中文综合报道；请稍后再试。未展示原始 RSS 片段。");
@@ -2540,6 +5205,8 @@ export function installIntelligenceWorkspaceUi(
           const merged = new Map(currentModelBriefs.map((result) => [result.id, result]));
           merged.set(brief.id, brief);
           currentModelBriefs = [...merged.values()];
+          if (nativePipelineActive) await persistNativeEditorialRevision(preparedCandidate, brief);
+          saveEditorialCache(preparedCandidate, brief);
           renderBriefCards();
           return brief;
         } catch {
@@ -2553,14 +5220,142 @@ export function installIntelligenceWorkspaceUi(
       return request;
     }
 
-    async function openPreparedBrief(candidate: IntelligenceBriefCandidate, modelBrief: IntelligenceModelBrief | null): Promise<void> {
-      const video = candidate.entry.evidenceItems.find((source) => isVideoNewsUrl(source.url));
-      if (video) {
-        // Videos stay on the existing native-WebView path: the local brief
-        // never downloads, transcodes or embeds upstream media.
-        openNewsItem(video, "打开视频来源失败，请稍后重试。");
-        return;
+    const storedEventLink = (event: UnknownRecord): string => {
+      const eventId = text(event.eventId ?? event.id);
+      const rawRevision = event.revision ?? event.revisionId ?? event.revision_id;
+      const revision = typeof rawRevision === "number" && Number.isFinite(rawRevision)
+        ? String(rawRevision)
+        : text(rawRevision);
+      const title = text(event.title) || "历史综合报道";
+      if (!eventId) return escapeBriefHtml(title);
+      return `<a href="#" data-intelligence-event-id="${escapeBriefHtml(eventId)}"${revision ? ` data-intelligence-event-revision="${escapeBriefHtml(revision)}"` : ""}>${escapeBriefHtml(title)}</a>`;
+    };
+
+    const preparedTimelineHtml = async (candidate: IntelligenceBriefCandidate): Promise<string> => {
+      if (!transport) return "";
+      const eventId = candidate.eventId || candidate.id;
+      try {
+        const response = record(await transport.invoke<unknown>("intelligence_store_series_timeline", { eventId }));
+        const events = Array.isArray(response?.events) ? response.events.map(record).filter((event): event is UnknownRecord => Boolean(event)) : [];
+        if (events.length === 0) return "";
+        const currentEventId = text(response?.currentEventId) || eventId;
+        const background = (Array.isArray(response?.background) ? response.background.map(record) : events
+          .filter((event) => text(event?.eventId ?? event?.id) !== currentEventId))
+          .filter((event): event is UnknownRecord => Boolean(event))
+          .slice(-5);
+        const backgroundHtml = background.length > 0
+          ? `<section><h2>前情提要</h2><ul>${background.map((event) => {
+            const summary = text(event.summary ?? event.revisionSummary ?? event.revision_summary).slice(0, 500);
+            return `<li>${storedEventLink(event)}${summary ? `<p>${escapeBriefHtml(summary)}</p>` : ""}</li>`;
+          }).join("")}</ul></section>`
+          : "";
+        const timelineHtml = `<section><h2>事件时间线</h2><ol>${events.map((event) => {
+          const candidateEventId = text(event.eventId ?? event.id);
+          const occurredAt = text(event.occurredAt ?? event.occurred_at ?? event.publishedAt);
+          const relation = text(event.relationLabel ?? event.relation_label ?? event.relation);
+          const current = candidateEventId === currentEventId;
+          return `<li${current ? ` data-intelligence-current-event="true"` : ""}><time>${escapeBriefHtml(occurredAt || "时间待核")}</time> · ${storedEventLink(event)}${relation ? ` <span>${escapeBriefHtml(relation)}</span>` : ""}${current ? " <strong>当前事件</strong>" : ""}</li>`;
+        }).join("")}</ol></section>`;
+        return `${backgroundHtml}${timelineHtml}`;
+      } catch {
+        return "";
       }
+    };
+
+    const openStoredEvent = async (eventId: string, revision?: string): Promise<boolean> => {
+      const stableEventId = text(eventId);
+      if (!transport || !stableEventId) return false;
+      const news = activeRuntime.ReaderNewsUI?.instance;
+      if (!news?.openPreparedArticle) return false;
+      try {
+        const requestedRevisionNumber = Number(revision);
+        const response = record(await transport.invoke<unknown>("intelligence_store_event_get", {
+          eventId: stableEventId,
+          ...(Number.isFinite(requestedRevisionNumber) ? { revision: requestedRevisionNumber } : {}),
+        }));
+        if (!response) return false;
+        const revisions = Array.isArray(response.revisions) ? response.revisions.map(record).filter((item): item is UnknownRecord => Boolean(item)) : [];
+        const latestRevision = record(response.latestRevision ?? response.latest_revision);
+        const selected = Number.isFinite(requestedRevisionNumber)
+          ? revisions.find((item) => Number(item.revision ?? item.revisionId ?? item.id) === requestedRevisionNumber) ?? latestRevision ?? response
+          : latestRevision ?? revisions.at(-1) ?? response;
+        const body = text(selected.revisionBody ?? selected.revision_body ?? selected.body ?? response.revisionBody ?? response.summary);
+        const title = text(selected.title ?? response.title) || "历史综合报道";
+        if (!body) return false;
+        const meta = parseStoredRevisionJson(selected.revisionJson ?? selected.revision_json ?? response.revisionJson);
+        const media = Array.isArray(meta?.media) ? meta!.media.map(record).filter((item): item is UnknownRecord => Boolean(item)) : [];
+        const images = media.flatMap((item) => [
+          safePreparedImageDataUrl(item.leadImageDataUrl),
+          ...(Array.isArray(item.imageUrls) ? item.imageUrls.map(safePreparedImageSource) : []),
+        ]).filter((image, index, values) => image && values.indexOf(image) === index).slice(0, INTELLIGENCE_PREPARED_IMAGE_LIMIT);
+        const imageHtml = images.map((image, index) => `<figure><img src="${escapeBriefHtml(image)}" alt="${escapeBriefHtml(title)} · 图片 ${index + 1}"></figure>`).join("");
+        const videos = media.flatMap((item) => (Array.isArray(item.videoUrls) ? item.videoUrls : []).map(openableHttpsUrl)
+          .filter(Boolean).map((url) => ({ source: text(item.source) || "视频来源", url })))
+          .filter((item, index, values) => values.findIndex((candidate) => candidate.url === item.url) === index);
+        const videoHtml = videos.length > 0 ? `<section><h2>视频来源</h2><ul>${videos.map((video) => `<li><strong>${escapeBriefHtml(video.source)}</strong> · <a href="${escapeBriefHtml(video.url)}" data-newsnow-prepared-source-url="${escapeBriefHtml(video.url)}">在阅读器中打开视频</a></li>`).join("")}</ul></section>` : "";
+        const selectedRevision = Number(Number.isFinite(requestedRevisionNumber)
+          ? requestedRevisionNumber
+          : selected.revision ?? selected.revisionId ?? response.revision ?? response.currentRevision);
+        const paragraphs = body.split(/\n{2,}/u).map((paragraph) => paragraph.trim()).filter(Boolean)
+          .map((paragraph) => `<p>${escapeBriefHtml(paragraph)}</p>`).join("");
+        const timeline = await preparedTimelineHtml({
+          id: stableEventId,
+          eventId: stableEventId,
+          ...(text(response.seriesId ?? response.series_id) ? { seriesId: text(response.seriesId ?? response.series_id) } : {}),
+          title,
+          summary: text(response.summary),
+          publishedAt: text(response.occurredAt ?? response.occurred_at),
+          entry: {
+            item: { title, summary: text(response.summary) },
+            sourceNames: [], sourceKeys: [], evidenceItems: [], mergedCount: 0, importance: 0,
+          },
+          sources: [],
+        });
+        close({ focus: false });
+        news.openPreparedArticle({
+          title,
+          source: "本机历史综合报道",
+          publishedAt: text(response.occurredAt ?? response.occurred_at),
+          contentHtml: `${imageHtml}<section><h2>综合报道</h2>${paragraphs}</section>${videoHtml}${timeline}`,
+          eventId: stableEventId,
+          ...(Number.isFinite(selectedRevision)
+            ? { revision: selectedRevision }
+            : {}),
+        }, { returnToIntelligence: true });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const openFavorite = async (favorite: NewsFavoriteRecord): Promise<boolean> => {
+      if (favorite.eventId) {
+        const opened = await openStoredEvent(
+          favorite.eventId,
+          favorite.revision === undefined ? undefined : String(favorite.revision),
+        );
+        if (opened) return true;
+      }
+      const item = openableNewsItem({
+        title: favorite.title,
+        summary: favorite.summary,
+        source: favorite.source,
+        publishedAt: favorite.publishedAt,
+        category: favorite.category,
+        url: favorite.url,
+      });
+      const news = activeRuntime.ReaderNewsUI?.instance;
+      if (!item || !news?.openItem) return false;
+      try {
+        close({ focus: false });
+        await Promise.resolve(news.openItem(item, { returnToIntelligence: true }));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    async function openPreparedBrief(candidate: IntelligenceBriefCandidate, modelBrief: IntelligenceModelBrief | null): Promise<void> {
       const editorialBrief = modelBrief?.article ? modelBrief : await requestDirectBrief(candidate);
       if (!editorialBrief?.article) return;
       const news = activeRuntime.ReaderNewsUI?.instance;
@@ -2583,18 +5378,35 @@ export function installIntelligenceWorkspaceUi(
       const sourceDifferences = editorialBrief.sourceDifferences.map((difference) => (
         `<li><strong>${escapeBriefHtml(difference.source)}</strong><p>${escapeBriefHtml(difference.detail)}</p></li>`
       )).join("");
-      const image = preparedBriefImages.get(candidate.id) ?? "";
-      const imageHtml = image
-        ? `<figure><img src="${image}" alt="${escapeBriefHtml(editorialBrief.headline || candidate.title)}"></figure>`
+      const images = [
+        ...(preparedBriefImages.get(candidate.id) ?? []),
+        ...candidate.sources.map((source) => safePreparedImageDataUrl(source.leadImageDataUrl)).filter(Boolean),
+        ...candidate.sources.flatMap((source) => (source.imageUrls ?? []).map(safePreparedImageSource)).filter(Boolean),
+      ].filter((image, index, values) => values.indexOf(image) === index).slice(0, INTELLIGENCE_PREPARED_IMAGE_LIMIT);
+      const imageHtml = images.map((image, index) => (
+        `<figure><img src="${escapeBriefHtml(image)}" alt="${escapeBriefHtml(editorialBrief.headline || candidate.title)} · 图片 ${index + 1}"></figure>`
+      )).join("");
+      const videoSources = candidate.sources.flatMap((source) => (
+        (source.videoUrls ?? []).map((url) => ({ source: source.name, url }))
+      )).concat(candidate.entry.evidenceItems.flatMap((item) => (
+        isVideoNewsUrl(item.url) ? [{ source: text(item.source) || "视频来源", url: openableHttpsUrl(item.url) }] : []
+      ))).filter((item, index, values) => item.url && values.findIndex((candidateItem) => candidateItem.url === item.url) === index);
+      const videoHtml = videoSources.length > 0
+        ? `<h2>视频来源</h2><ul>${videoSources.map((video) => `<li><strong>${escapeBriefHtml(video.source)}</strong> · <a href="${escapeBriefHtml(video.url)}" data-newsnow-prepared-source-url="${escapeBriefHtml(video.url)}">在阅读器中打开视频</a></li>`).join("")}</ul>`
         : "";
       const paragraphs = article.split(/\n{2,}/u).map((paragraph) => paragraph.trim()).filter(Boolean)
         .map((paragraph) => `<p>${escapeBriefHtml(paragraph)}</p>`).join("");
+      // The optional local timeline is prefetched when the card paints, so a
+      // click never waits on SQLite before the prepared article opens.
+      const timeline = preparedTimelineCache.get(candidate.eventId || candidate.id) ?? "";
       close({ focus: false });
       news.openPreparedArticle({
         title: editorialBrief.headline || candidate.title,
         source: `本机综合 · ${candidate.entry.sourceKeys.length} 个独立来源`,
         publishedAt: candidate.publishedAt,
-        contentHtml: `${imageHtml}<section><h2>综合报道</h2>${paragraphs}${sourceDifferences ? `<h2>各来源的独有信息与差异</h2><ul>${sourceDifferences}</ul>` : ""}<h2>引用来源</h2><ul>${evidence}</ul></section>`,
+        contentHtml: `${imageHtml}<section><h2>综合报道</h2>${paragraphs}${sourceDifferences ? `<h2>各来源的独有信息与差异</h2><ul>${sourceDifferences}</ul>` : ""}${videoHtml}<h2>引用来源</h2><ul>${evidence}</ul></section>${timeline}`,
+        ...(candidate.eventId ? { eventId: candidate.eventId } : {}),
+        ...(candidate.revision === undefined ? {} : { revision: candidate.revision }),
       }, { returnToIntelligence: true });
     }
 
@@ -2670,14 +5482,318 @@ export function installIntelligenceWorkspaceUi(
       return button;
     };
 
+    const selectFormalPublicationEvent = (
+      publication: IntelligenceClientCachedPublication,
+      event: IntelligenceClientCachedEvent,
+      button?: HTMLButtonElement,
+    ): void => {
+      selectedItem = null;
+      selectedFormalPublication = { publication, event };
+      selectedStandardFavorite = null;
+      contextTitle.textContent = event.title;
+      contextBody.textContent = event.body;
+      contextMeta.textContent = `正式${publication.kind === "daily" ? "日报" : "事件快报"} · 修订 ${event.revisionNo} · ${event.sources.length} 个公开来源`;
+      contextReasons.replaceChildren(...[
+        `发布时间：${publication.publishedAt}`,
+        `本地缓存有效至：${publication.expiresAt}`,
+      ].map((value) => {
+        const reason = root.createElement("li");
+        reason.textContent = value;
+        return reason;
+      }));
+      const sources = event.sources.map((source) => {
+        const sourceButton = root.createElement("button");
+        sourceButton.type = "button";
+        sourceButton.className = "intelligence-evidence-item intelligence-evidence-link";
+        sourceButton.textContent = `${source.publisher} · ${source.title}`;
+        sourceButton.title = "在阅读器中打开此公开来源";
+        sourceButton.addEventListener("click", () => {
+          openNewsItem({
+            source: source.publisher,
+            title: source.title,
+            url: source.originalUrl,
+            summary: source.fallbackExcerpt,
+          }, "打开来源资讯失败，请稍后重试。");
+        });
+        return sourceButton;
+      });
+      contextEvidence.replaceChildren(...sources);
+      openNews.hidden = false;
+      openNews.disabled = false;
+      openNews.textContent = "打开正式报道";
+      digestList.querySelectorAll(".intelligence-digest-item[aria-current='true']")
+        .forEach((current) => current.removeAttribute("aria-current"));
+      button?.setAttribute("aria-current", "true");
+    };
+
+    const openFormalPublicationEvent = async (): Promise<void> => {
+      const selected = selectedFormalPublication;
+      if (!selected) return;
+      const news = activeRuntime.ReaderNewsUI?.instance;
+      if (!news?.openPreparedArticle) {
+        setStatus("正式报道阅读器暂不可用，请稍后重试。");
+        return;
+      }
+      const notes = new Map(selected.event.sources.map((source, index) => [source.noteId, {
+        source,
+        ordinal: index + 1,
+      }]));
+      const paragraphs = selected.event.segments.map((segment) => {
+        const inlineNotes = segment.noteIds.map((noteId) => {
+          const note = notes.get(noteId);
+          if (!note) return "";
+          // The URL and fallback excerpt originate in the Rust projection of
+          // a validated formal bundle.  The existing reader intercepts this
+          // marker and keeps source navigation inside its own article shell.
+          return ` <a href="${escapeBriefHtml(note.source.originalUrl)}" data-newsnow-prepared-source-url="${escapeBriefHtml(note.source.originalUrl)}" data-intelligence-note-id="${escapeBriefHtml(noteId)}" title="${escapeBriefHtml(`${note.source.publisher} · ${note.source.fallbackExcerpt}`)}">注${note.ordinal}</a>`;
+        }).join("");
+        return `<p>${escapeBriefHtml(segment.text)}${inlineNotes}</p>`;
+      }).join("");
+      const citations = selected.event.sources.map((source) => (
+        `<li><strong>注${notes.get(source.noteId)?.ordinal ?? ""} · ${escapeBriefHtml(source.publisher)}</strong> · <a href="${escapeBriefHtml(source.originalUrl)}" data-newsnow-prepared-source-url="${escapeBriefHtml(source.originalUrl)}" data-intelligence-note-id="${escapeBriefHtml(source.noteId)}">${escapeBriefHtml(source.title)}</a><p>${escapeBriefHtml(source.fallbackExcerpt)}</p></li>`
+      )).join("");
+      // Assets are fetched only from the account-isolated, already SHA-256
+      // verified native cache.  No service URL or cache path crosses the
+      // WebView boundary, and a corrupt/missing optional image cannot block
+      // reading the fully persisted editorial text.
+      const uniqueImages = new Map(selected.event.media
+        .filter((media) => media.cached)
+        .map((media) => [media.sha256, media]));
+      const imageUrls = transport ? await Promise.all([...uniqueImages.values()].map(async (media) => {
+        try {
+          const value = await transport!.invoke<unknown>("intelligence_client_asset_data_url", { sha256: media.sha256 });
+          const image = text(value);
+          return /^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=]+$/iu.test(image)
+            ? `<img src="${escapeBriefHtml(image)}" alt="正式资讯配图" loading="lazy">`
+            : "";
+        } catch {
+          return "";
+        }
+      })) : [];
+      const images = imageUrls.filter(Boolean).join("");
+      const videos = [...new Set(selected.event.media.map((media) => openableHttpsUrl(media.videoUrl)).filter(Boolean))]
+        .map((url) => `<p><a href="${escapeBriefHtml(url)}" data-newsnow-prepared-source-url="${escapeBriefHtml(url)}">打开关联视频</a></p>`)
+        .join("");
+      close({ focus: false });
+      news.openPreparedArticle({
+        title: selected.event.title,
+        source: `正式${selected.publication.kind === "daily" ? "日报" : "事件快报"} · ${selected.event.sources.length} 个公开来源`,
+        publishedAt: selected.event.occurredAt || selected.publication.publishedAt,
+        contentHtml: `<section><h2>正式报道</h2>${paragraphs}${images ? `<section class="newsnow-prepared-media">${images}</section>` : ""}${videos}<h2>引用来源</h2><ul>${citations}</ul></section>`,
+        eventId: selected.event.eventId,
+        revision: selected.event.revisionNo,
+      }, { returnToIntelligence: true });
+    };
+
+    const orderFormalPublicationCacheByPreference = async (
+      cache: IntelligenceClientCacheStatus,
+      publications: readonly IntelligenceClientCachedPublication[],
+    ): Promise<{ readonly events: readonly FormalPublicationEvent[]; readonly personalized: boolean }> => {
+      const original = publications.flatMap((publication) => publication.events.map((event) => ({ publication, event })));
+      // `clientCachedPublications` is the account-authenticated, native
+      // validated formal projection. Never score raw RSS/snapshot items here.
+      if (!cache.cachePresent || !transport || original.length === 0) return { events: original, personalized: false };
+      const favorites = preferenceFavorites(runtime.localStorage);
+      if (favorites.length === 0) return { events: original, personalized: false };
+      try {
+        const routes = await transport.invoke<unknown>("ai_capability_routes_status");
+        // An explicit off, unknown route, cloud, or host route must not cause
+        // an inference request from this client-side cache reader.
+        if (!preferenceRouteAllowsLocalScoring(routes)) return { events: original, personalized: false };
+        const scored = preferenceEventsForPublications(publications);
+        if (scored.length === 0) return { events: original, personalized: false };
+        const key = preferenceScoreCacheKey(favorites, scored.map((item) => item.preference));
+        const cachedScores = readPreferenceScoreCache(runtime.localStorage, key);
+        if (cachedScores) {
+          return {
+            events: orderFormalPublicationEvents(original, scored, cachedScores),
+            personalized: true,
+          };
+        }
+        const response = await transport.invoke<unknown>("score_news_preferences", {
+          request: {
+            favorites,
+            events: scored.map((item) => item.preference),
+          },
+        });
+        const scores = parsePreferenceScores(response, scored.map((item) => item.preference));
+        // Invalid JSON/model output never changes the account's formal feed.
+        if (!scores) return { events: original, personalized: false };
+        savePreferenceScoreCache(runtime.localStorage, key, scores);
+        return {
+          events: orderFormalPublicationEvents(original, scored, scores),
+          personalized: true,
+        };
+      } catch {
+        // Preference ranking is optional. Preserve the server's formal order
+        // when the local route/model is unavailable or malformed.
+        return { events: original, personalized: false };
+      }
+    };
+
+    const visibleFormalPublicationEvents = (events: readonly FormalPublicationEvent[]): FormalPublicationEvent[] => {
+      const kind = kindFilter?.value || "all";
+      const minimumImportance = Number(importanceFilter?.value ?? 0);
+      const scope = scopeFilter?.value || "all";
+      return events.filter(({ publication }) => {
+        if (kind !== "all" && publication.kind !== kind) return false;
+        if (Number.isFinite(minimumImportance) && publication.importance < minimumImportance) return false;
+        if (scope === "daily" && publication.kind !== "daily") return false;
+        if (scope === "important" && publication.importance < Math.max(80, minimumImportance || 0)) return false;
+        return true;
+      });
+    };
+
+    const renderFormalPublicationCache = (
+      cache: IntelligenceClientCacheStatus,
+      publications: readonly IntelligenceClientCachedPublication[],
+      orderedEvents?: readonly FormalPublicationEvent[],
+      personalized = false,
+    ): void => {
+      const allEvents = orderedEvents ?? publications.flatMap((publication) => publication.events.map((event) => ({ publication, event })));
+      const events = visibleFormalPublicationEvents(allEvents);
+      formalPublicationCache = { cache, publications, events: allEvents, personalized };
+      selectedFormalPublication = null;
+      selectedItem = null;
+      selectedStandardFavorite = null;
+      currentCandidates = [];
+      currentModelBriefs = [];
+      processingSummary.textContent = cache.cachePresent
+        ? `正式分发缓存 · ${publications.length} 个发布包 / 显示 ${events.length}/${allEvents.length} 个事件${personalized ? " · 已按本机收藏偏好排序" : ""}`
+        : "尚无正式分发缓存";
+      modelStatus.textContent = "本机缓存阅读模式 · 不会自动调用模型";
+      digestHistorySummary.textContent = "此处只显示当前账户已校验的正式发布包；打开页面不联网，点击“刷新”才会同步。";
+      if (events.length === 0) {
+        digestList.replaceChildren();
+        signalList.replaceChildren();
+        briefingCount.textContent = "暂无正式资讯";
+        contextTitle.textContent = "暂无本地正式情报";
+        contextBody.textContent = "登录并获得情报中心权限后，点击“刷新”下载正式发布包；本页不会自行联网。";
+        contextMeta.textContent = "";
+        contextReasons.replaceChildren();
+        contextEvidence.replaceChildren();
+        openNews.hidden = true;
+        openNews.disabled = true;
+        return;
+      }
+      briefingCount.textContent = `已缓存 ${publications.length} 个正式发布包，当前显示 ${events.length}/${allEvents.length} 个事件`;
+      const buttons = events.map(({ publication, event }, index) => {
+        const button = root.createElement("button");
+        button.type = "button";
+        button.className = "intelligence-digest-item intelligence-digest-brief";
+        const order = root.createElement("span");
+        order.className = "intelligence-digest-index";
+        order.textContent = String(index + 1).padStart(2, "0");
+        const copy = root.createElement("span");
+        copy.className = "intelligence-digest-copy";
+        const title = root.createElement("strong");
+        title.textContent = event.title;
+        const meta = root.createElement("span");
+        meta.textContent = `重要性 ${publication.importance} · ${event.sources.length} 个公开来源 · 修订 ${event.revisionNo}`;
+        copy.append(title, meta);
+        const type = root.createElement("span");
+        type.className = "intelligence-digest-kind";
+        type.textContent = publication.kind === "daily" ? "日报" : "事件";
+        button.append(order, copy, type);
+        button.addEventListener("click", () => selectFormalPublicationEvent(publication, event, button));
+        return button;
+      });
+      digestList.replaceChildren(...buttons);
+      signalList.replaceChildren(...events.slice(0, 12).map(({ publication, event }) => {
+        const button = root.createElement("button");
+        button.type = "button";
+        button.className = "intelligence-signal";
+        button.textContent = `${publication.kind === "daily" ? "日报" : "事件"} · ${event.title}`;
+        button.addEventListener("click", () => selectFormalPublicationEvent(publication, event));
+        return button;
+      }));
+      selectFormalPublicationEvent(events[0]!.publication, events[0]!.event, buttons[0]);
+    };
+
+    const rerenderFormalPublicationFilters = (): void => {
+      if (!formalPublicationCache) return;
+      renderFormalPublicationCache(
+        formalPublicationCache.cache,
+        formalPublicationCache.publications,
+        formalPublicationCache.events,
+        formalPublicationCache.personalized,
+      );
+    };
+
+    const updateArchiveStatus = async (requestId: string, { retry = false }: { readonly retry?: boolean } = {}): Promise<void> => {
+      if (!transport || !archiveStatus || !archiveRetry) return;
+      activeArchiveRequestId = requestId;
+      archiveRetry.hidden = true;
+      archiveStatus.textContent = retry ? "正在重试下载历史内容…" : "正在查询历史回源状态…";
+      try {
+        const response = record(await transport.invoke<unknown>("intelligence_archive_request_status", { requestId }));
+        const state = text(response?.state);
+        const ready = response?.contentReady === true || state === "READY" || state === "DOWNLOADED";
+        if (ready) {
+          archiveStatus.textContent = "历史内容已就绪，正在下载、校验并保存…";
+          const completed = record(await transport.invoke<unknown>("intelligence_archive_download", { requestId }));
+          if (text(completed?.state) === "ACKED") {
+            archiveStatus.textContent = "历史内容已校验、保存并确认。刷新后可在已保存资讯中查看。";
+            activeArchiveRequestId = "";
+            void load();
+            return;
+          }
+          archiveStatus.textContent = "历史内容尚未完成确认；可稍后重试。";
+          archiveRetry.hidden = false;
+          return;
+        }
+        if (state === "FAILED" || state === "EXPIRED") {
+          archiveStatus.textContent = state === "EXPIRED" ? "历史回源请求已过期，请重新创建请求。" : "历史回源失败，可重试下载。";
+          archiveRetry.hidden = false;
+          return;
+        }
+        archiveStatus.textContent = "历史回源正在准备；将在内容就绪后下载并校验。";
+        if (!page.hidden && activeArchiveRequestId === requestId) {
+          runtime.setTimeout?.(() => { void updateArchiveStatus(requestId); }, 4_000);
+        }
+      } catch (error: unknown) {
+        archiveStatus.textContent = intelligenceClientErrorMessage(error);
+        archiveRetry.hidden = false;
+      }
+    };
+
+    const loadArchiveCalendar = async (): Promise<void> => {
+      if (!transport || !archiveDay || !archiveStatus) return;
+      if (archiveDay.children.length > 1) return;
+      archiveStatus.textContent = "正在读取可申请的历史日期…";
+      try {
+        const response = record(await transport.invoke<unknown>("intelligence_archive_calendar"));
+        const days = Array.isArray(response?.days) ? response.days : [];
+        const options = days.flatMap((value) => {
+          const entry = record(value);
+          const day = text(entry?.day);
+          const count = entry?.entryCount;
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || typeof count !== "number" || !Number.isInteger(count) || count < 0) return [];
+          const option = root.createElement("option");
+          option.value = day;
+          option.textContent = `${day} · ${count} 条`;
+          return [option];
+        });
+        archiveDay.replaceChildren(Object.assign(root.createElement("option"), { value: "", textContent: "选择 30 天前日期" }), ...options);
+        archiveStatus.textContent = options.length > 0
+          ? "请选择日期后请求历史回源。"
+          : "当前账户没有可申请的历史日期。";
+      } catch (error: unknown) {
+        archiveStatus.textContent = intelligenceClientErrorMessage(error);
+      }
+    };
+
     const selectInterstellarCandidate = (
       candidate: InterstellarSignalCandidate,
       button?: HTMLButtonElement,
     ): void => {
       selectedInterstellarItem = candidate.item;
+      selectedInterstellarFavorite = newsFavoriteForItem(candidate.item);
       interstellarContextTitle.textContent = itemTitle(candidate.item);
       const domains = candidate.domains.join("、");
       interstellarContextBody.textContent = `${itemContext(candidate.item)}\n候选领域：${domains}。相关性仅用于进入审核队列，尚未改变进度。`;
+      refreshFavoriteAction(interstellarFavoriteAction, selectedInterstellarFavorite);
+      interstellarContextBody.append(interstellarFavoriteAction);
       interstellarOpenNews.disabled = false;
       interstellarSignalList.querySelectorAll(".interstellar-candidate[aria-current='true']")
         .forEach((current) => current.removeAttribute("aria-current"));
@@ -2724,6 +5840,7 @@ export function installIntelligenceWorkspaceUi(
         empty.textContent = "当前已选来源中没有达到相关性门槛的资讯。可在“信息来源”中增加航天、能源、材料与科研来源。";
         interstellarSignalList.replaceChildren(empty);
         selectedInterstellarItem = null;
+        selectedInterstellarFavorite = null;
         interstellarContextTitle.textContent = "尚未发现候选信号";
         interstellarContextBody.textContent = "当前进度仍保留人工基线；没有候选新闻不会降低进度。";
         interstellarOpenNews.disabled = true;
@@ -2843,21 +5960,27 @@ export function installIntelligenceWorkspaceUi(
         summary: `按规范 URL 或同一来源同标题精确去重：${items.length} 条变为 ${briefingResult.uniqueCount} 条；不按关键词自动合并。`,
       });
       setAuditStage({
-        id: "candidate-recall", status: "pending", unit: "pairs", inputCount: 0, outputCount: 0, pendingCount: briefingResult.visibleEntries.length,
-        summary: `等待逐篇初筛后再召回关系对；当前仅标记 ${briefingResult.visibleEntries.length} 篇规则可见文章，尚未代表关系对。`,
+        id: "article-triage", status: "pending", unit: "articles", inputCount: briefingResult.uniqueCount, outputCount: 0, pendingCount: briefingResult.uniqueCount,
+        summary: `全部 ${briefingResult.uniqueCount} 篇唯一文章进入本机持久队列；不会先按规则裁成每日 25 条。`,
       });
-      setAuditStage({ id: "small-model", status: "pending", unit: "articles", inputCount: briefingResult.visibleEntries.length, outputCount: 0, pendingCount: briefingResult.visibleEntries.length, summary: "等待本机模型逐篇判断重要性；未通过的文章不会进入关系召回。" });
-      setAuditStage({ id: "qwen-review", status: "pending", unit: "events", inputCount: 0, outputCount: 0, summary: "等待关系判定完成后，对边界样本复核并编辑全文证据。" });
+      setAuditStage({ id: "relation-recall", status: "pending", unit: "pairs", inputCount: 0, outputCount: 0, summary: "等待逐篇初筛；语义召回和重排只产生候选对，不直接合并。" });
+      setAuditStage({ id: "relation-judge", status: "pending", unit: "pairs", inputCount: 0, outputCount: 0, summary: "等待 7B/8B 模型按八类关系核验候选对。" });
+      setAuditStage({ id: "historical-recall", status: "pending", unit: "events", inputCount: 0, outputCount: 0, summary: "等待检索历史事件，识别前情、更新、更正和同系列新闻。" });
+      setAuditStage({ id: "qwen-review", status: "pending", unit: "events", inputCount: 0, outputCount: 0, summary: "校准期由 Qwen 复核全部重大、低置信和冲突样本；达标后才降低抽检率。" });
       setAuditStage({ id: "final-events", status: "pending", unit: "events", inputCount: 0, outputCount: 0, summary: "等待关系判定与 Qwen 复核完成；不会预先显示未处理事件。" });
+      setAuditStage({ id: "series-timeline", status: "pending", unit: "series", inputCount: 0, outputCount: 0, summary: "等待稳定事件写入系列，并生成前情提要与修订时间线。" });
       publishAudit("本轮公开资讯已进入可人工核查的本机处理链路。");
-      processingSummary.textContent = `已处理 ${items.length} 条 → ${briefingResult.uniqueCount} 个事件 → ${briefingResult.visibleEntries.length} 个候选`;
+      processingSummary.textContent = `采集 ${items.length} 篇 → 精确去重 ${briefingResult.uniqueCount} 篇 → 等待逐篇初筛`;
       const nextCandidates = selectIntelligenceBriefCandidates(briefingResult);
       const nextCandidateKey = nextCandidates.map((candidate) => `${candidate.id}:${candidate.sources.map((source) => `${source.url}|${source.body || source.summary}`).join("\u001f")}`).join("\n");
       if (nextCandidateKey !== modelCandidateKey()) {
         currentModelBriefs = [];
-        lastGeneratedCandidateKey = "";
       }
       currentCandidates = nextCandidates;
+      // The workspace is a reader of the durable archive, not the worker.
+      // In particular, rendering a saved snapshot must never enqueue article
+      // ingestion, triage, relationship judgement, or a local-model request.
+      // Those jobs belong to the separately scheduled intelligence worker.
       if (selectedDigestDay !== "current") return;
       if (items.length === 0 || briefingResult.visibleEntries.length === 0) {
         digestList.replaceChildren();
@@ -2875,11 +5998,14 @@ export function installIntelligenceWorkspaceUi(
       renderBriefCards();
       signalList.replaceChildren(...briefingResult.visibleEntries.slice(0, 12).map((entry, index) => makeItemButton(entry.item, "signal", index)));
       setStandardStatus(collectionComplete
-        ? `全目录资料库已完成：覆盖 ${attemptedSources} 个来源，${items.length} 条资讯归并为 ${briefingResult.uniqueCount} 个事件；默认隐藏 ${briefingResult.hiddenCount} 条低优先级资讯${failedSummary}。`
-        : `资料库建立中：已覆盖 ${attemptedSources} / ${catalogueCount} 个来源，当前 ${items.length} 条资讯归并为 ${briefingResult.uniqueCount} 个事件${failedSummary}。`);
+        ? `全目录资料库已完成：覆盖 ${attemptedSources} 个来源，${items.length} 条资讯精确去重为 ${briefingResult.uniqueCount} 篇；逐篇判定和事件关系在本机增量队列继续运行${failedSummary}。`
+        : `资料库建立中：已覆盖 ${attemptedSources} / ${catalogueCount} 个来源，当前 ${items.length} 条资讯精确去重为 ${briefingResult.uniqueCount} 篇${failedSummary}。`);
     };
 
-    const load = async ({ forceRefresh = false }: { readonly forceRefresh?: boolean } = {}): Promise<void> => {
+    // Retained only for opening historical local snapshots from existing
+    // actions. The workspace's primary open/refresh path below never invokes
+    // it: official V1 distribution renders only the native account cache.
+    const loadLegacyLocalSnapshot = async ({ forceRefresh = false }: { readonly forceRefresh?: boolean } = {}): Promise<void> => {
       if (loading) {
         if (cancelledLoadPending && !page.hidden) reloadAfterCancelledLoad = true;
         return;
@@ -2906,106 +6032,41 @@ export function installIntelligenceWorkspaceUi(
         sourceDirectoryCatalogue = catalogue;
         renderSourceDirectory();
         const allSourceIds = catalogue.map(sourceId).filter(Boolean);
-        if (allSourceIds.length === 0) throw new Error("intelligence-source-catalog-empty");
-        // Intelligence is not the manually curated reading feed. It asks the
-        // existing collector to ingest the whole local public catalogue; the
-        // ordinary news page keeps its own persisted, smaller selection.
+        // Opening and refreshing this page are deliberately read-only.  The
+        // source catalogue is display state; only the external background
+        // worker may collect from it or submit work to a model.
         const request = { ...persistedRequest, sourceIds: allSourceIds, preserveEvidence: true };
-        const batches = sourceBatches(allSourceIds);
         const savedSnapshot = await readPersistentSnapshot(transport, runtime.localStorage, allSourceIds);
         if (!isCurrentLoad()) return;
-        let collectedItems = savedSnapshot ? [...savedSnapshot.items] : [];
-        let attemptedSources = savedSnapshot?.completed
-          ? allSourceIds.length
-          : (savedSnapshot?.attemptedSources ?? 0);
-        let failedSources = savedSnapshot?.failedSources ?? 0;
-        const resumingInitialCollection = !savedSnapshot || !savedSnapshot.completed;
-        const refreshingCompletedCollection = savedSnapshot?.completed === true
-          && (forceRefresh || !hasFreshCompletedSnapshot(savedSnapshot));
-        const firstBatch = resumingInitialCollection
-          ? Math.min(savedSnapshot?.nextBatch ?? 0, batches.length)
-          : (savedSnapshot.nextBatch % batches.length);
-        const finalBatchExclusive = resumingInitialCollection
-          ? batches.length
-          : refreshingCompletedCollection ? firstBatch + 1 : firstBatch;
-        const useRefreshCommand = forceRefresh || refreshingCompletedCollection;
-        const savedFailureSummary = failedSources > 0 ? `；${failedSources} 个来源暂时不可用` : "";
-
-        if (savedSnapshot) {
-          renderInterstellarSources(sourceResult, request, collectedItems);
-          render(collectedItems, catalogue.length, attemptedSources, failedSources, savedSnapshot.completed);
-          workspaceHydrated = savedSnapshot.completed;
-          setStandardStatus(savedSnapshot.completed
-            ? refreshingCompletedCollection
-              ? `已加载本地资料库（${collectedItems.length} 条资讯${savedFailureSummary}）；正在更新第 ${firstBatch + 1} / ${batches.length} 批来源${forceRefresh ? "" : "（快照已过期）"}…`
-              : `已加载完整资料库（${collectedItems.length} 条资讯${savedFailureSummary}）；不会重新抓取，点击“刷新”可更新下一批来源。`
-            : `已加载未完成资料库${savedFailureSummary}；将从第 ${firstBatch + 1} / ${batches.length} 批继续采集。`);
-          if (savedSnapshot.completed && !refreshingCompletedCollection) {
-            await restoreCurrentDailyDigest();
-            if (!isCurrentLoad()) return;
-            await generateCurrentBrief(generation);
-            if (!isCurrentLoad()) return;
-            await saveCurrentDailyDigest();
-            if (!isCurrentLoad()) return;
-          }
+        if (!savedSnapshot) {
+          renderInterstellarSources(sourceResult, request, []);
+          render([], catalogue.length, 0, 0, false);
+          setStandardStatus("尚无可读取的本机情报快照；后台情报工作节点负责采集和模型处理，本页不会自行启动任务。");
+          return;
         }
 
-        if (refreshingCompletedCollection) failedSources = 0;
-
-        for (let index = firstBatch; index < finalBatchExclusive; index += 1) {
+        const failureSummary = savedSnapshot.failedSources > 0
+          ? `；${savedSnapshot.failedSources} 个来源暂时不可用`
+          : "";
+        renderInterstellarSources(sourceResult, request, savedSnapshot.items);
+        render(
+          [...savedSnapshot.items],
+          catalogue.length,
+          savedSnapshot.attemptedSources,
+          savedSnapshot.failedSources,
+          savedSnapshot.completed,
+        );
+        setStandardStatus(
+          `${forceRefresh ? "已重新读取" : "已读取"}本机${savedSnapshot.completed ? "完整" : "进行中"}资料快照（${savedSnapshot.items.length} 条资讯${failureSummary}）；后台情报工作节点负责后续采集与模型处理，本页不会启动任务。`,
+        );
+        if (savedSnapshot.completed) {
+          await restoreCurrentDailyDigest();
           if (!isCurrentLoad()) return;
-          const batchSourceIds = batches[index];
-          if (!batchSourceIds) continue;
-          setStatus(`正在抓取第 ${index + 1} / ${batches.length} 批（${attemptedSources} / ${allSourceIds.length} 个来源）…`);
-          const result = await transport.invoke<unknown>(
-            useRefreshCommand ? "newsnow_refresh" : "newsnow_list",
-            { request: { ...request, sourceIds: batchSourceIds } },
-          );
-          if (!isCurrentLoad()) return;
-          collectedItems = mergeEvidenceItems(collectedItems, newsItems(result));
-          const resultRecord = record(result);
-          attemptedSources = resumingInitialCollection
-            ? Math.min(allSourceIds.length, attemptedSources + batchSourceIds.length)
-            : allSourceIds.length;
-          const failedSourceList = resultRecord?.failedSources ?? resultRecord?.failed_sources;
-          failedSources += Array.isArray(failedSourceList) ? failedSourceList.length : 0;
-          const completed = resumingInitialCollection && index + 1 >= batches.length;
-          const snapshot: IntelligenceSnapshot = {
-            sourceIds: allSourceIds,
-            items: collectedItems,
-            attemptedSources: completed ? allSourceIds.length : attemptedSources,
-            failedSources,
-            nextBatch: index + 1 >= batches.length ? 0 : index + 1,
-            completed: savedSnapshot?.completed === true || completed,
-            updatedAt: Date.now(),
-          };
-          const snapshotSaved = await saveSnapshot(runtime.localStorage, transport, snapshot);
-          if (!isCurrentLoad()) return;
-          renderInterstellarSources(sourceResult, request, collectedItems);
-          render(collectedItems, catalogue.length, snapshot.attemptedSources, snapshot.failedSources, snapshot.completed);
-          workspaceHydrated = snapshot.completed;
-          const failureSummary = snapshot.failedSources > 0
-            ? `；${snapshot.failedSources} 个来源暂时不可用`
-            : "";
-          const persistenceSummary = snapshotSaved
-            ? ""
-            : "；本机快照未能保存，关闭后会从此批继续采集";
-          setStandardStatus(snapshot.completed
-            ? `全量资料库已完成：${collectedItems.length} 条去重后资讯已形成综合简报；后续将轮换来源做增量更新${failureSummary}${persistenceSummary}。`
-            : snapshotSaved
-              ? `已持久化 ${snapshot.attemptedSources} / ${allSourceIds.length} 个来源${failureSummary}：下次会从第 ${snapshot.nextBatch + 1} 批继续。`
-              : `本次已处理 ${snapshot.attemptedSources} / ${allSourceIds.length} 个来源${failureSummary}${persistenceSummary}。`);
-          if (snapshot.completed) {
-            await generateCurrentBrief(generation);
-            if (!isCurrentLoad()) return;
-            await saveCurrentDailyDigest();
-            if (!isCurrentLoad()) return;
-          }
         }
       } catch {
         if (isCurrentLoad()) {
-          setStandardStatus("全量来源抓取失败，请检查网络后重试。");
-          setInterstellarStatus("候选信号加载失败；首版人工基线仍可查看。");
+          setStandardStatus("本机情报状态暂时无法读取；后台工作节点状态不会被本页改写。");
+          setInterstellarStatus("候选信号状态暂时无法读取；首版人工基线仍可查看。");
         }
       } finally {
         loading = false;
@@ -3016,6 +6077,46 @@ export function installIntelligenceWorkspaceUi(
           reloadAfterCancelledLoad = false;
           if (restart) void load();
         }
+      }
+    };
+
+    const load = async ({ forceRefresh = false }: { readonly forceRefresh?: boolean } = {}): Promise<void> => {
+      if (loading) return;
+      if (!transport) {
+        setStandardStatus("情报服务暂不可用；无法读取本地正式缓存。");
+        return;
+      }
+      loading = true;
+      const generation = ++loadGeneration;
+      const isCurrentLoad = (): boolean => generation === loadGeneration && !page.hidden;
+      refreshButton.disabled = true;
+      try {
+        if (forceRefresh) {
+          await transport.invoke("intelligence_client_refresh");
+          if (!isCurrentLoad()) return;
+        }
+        // Both commands are native cache reads.  They do not receive a URL or
+        // token, and neither opens a network connection on page open.
+        const statusValue = clientCacheStatus(await transport.invoke<unknown>("intelligence_client_cache_status"));
+        if (!isCurrentLoad()) return;
+        const publications = clientCachedPublications(
+          await transport.invoke<unknown>("intelligence_client_cached_publications"),
+        );
+        if (!isCurrentLoad()) return;
+        if (!statusValue || !publications) throw new Error("invalid cache projection");
+        const ordered = await orderFormalPublicationCacheByPreference(statusValue, publications);
+        if (!isCurrentLoad()) return;
+        renderFormalPublicationCache(statusValue, publications, ordered.events, ordered.personalized);
+        const refreshed = forceRefresh ? "已完成手动刷新；" : "已读取本地正式缓存；";
+        const refreshTime = statusValue.lastRefreshAt > 0
+          ? `上次刷新 ${new Date(statusValue.lastRefreshAt).toLocaleString("zh-CN")}。`
+          : "尚未执行过手动刷新。";
+        setStandardStatus(`${refreshed}当前 ${publications.length} 个发布包、${statusValue.publicationCount} 条缓存记录。${refreshTime}`);
+      } catch (error: unknown) {
+        if (isCurrentLoad()) setStandardStatus(intelligenceClientErrorMessage(error));
+      } finally {
+        loading = false;
+        refreshButton.disabled = false;
       }
     };
 
@@ -3033,8 +6134,21 @@ export function installIntelligenceWorkspaceUi(
       page.hidden = false;
       root.body.classList.add("intelligence-workspace-active");
       toolbarButton.setAttribute("aria-pressed", "true");
-      if (workspaceHydrated && !loading) return;
       await load();
+    };
+
+    const refreshToolbarVisibility = async (): Promise<void> => {
+      // The toolbar item starts hidden in HTML.  A remembered display choice
+      // must never reveal the account-scoped delivery surface before a local
+      // signed-in account has been configured.  This reads only the existing
+      // local sync settings; it does not unlock a token or contact a server.
+      if (!toolbarAction || !transport) return;
+      try {
+        const settings = record(await transport.invoke<unknown>("sync_get_settings"));
+        toolbarAction.hidden = !(text(settings?.userId) && text(settings?.url));
+      } catch {
+        toolbarAction.hidden = true;
+      }
     };
 
     const close = ({ focus = true }: { readonly focus?: boolean } = {}): void => {
@@ -3043,6 +6157,7 @@ export function installIntelligenceWorkspaceUi(
         cancelledLoadPending = true;
       }
       closeSourceDirectory({ focus: false });
+      stopAuditLiveRefresh();
       page.hidden = true;
       if (contentShell) contentShell.hidden = false;
       root.body.classList.remove("intelligence-workspace-active");
@@ -3051,7 +6166,11 @@ export function installIntelligenceWorkspaceUi(
     };
 
     toolbarButton.addEventListener("click", () => { void open(); });
+    void refreshToolbarVisibility();
+    runtime.addEventListener("focus", () => { void refreshToolbarVisibility(); });
     back.addEventListener("click", () => close());
+    auditTrigger?.addEventListener("click", startAuditLiveRefresh);
+    auditBack?.addEventListener("click", stopAuditLiveRefresh);
     briefing.addEventListener("click", () => setLayout("briefing"));
     monitor.addEventListener("click", () => setLayout("monitor"));
     research.addEventListener("click", () => setLayout("research"));
@@ -3073,6 +6192,10 @@ export function installIntelligenceWorkspaceUi(
         modelStatus.textContent = "本机模型服务暂不可用";
         return;
       }
+      if (!qwen27bSelectable) {
+        modelStatus.textContent = "显卡总显存不足或检测失败，不能选择千问 27B（16GB 显存版）";
+        return;
+      }
       void (async () => {
         modelSave.disabled = true;
         try {
@@ -3086,7 +6209,6 @@ export function installIntelligenceWorkspaceUi(
           modelConfigured = result?.configured === true;
           activeModelName = text(result?.model);
           modelKey.value = "";
-          lastGeneratedCandidateKey = "";
           currentModelBriefs = [];
           modelStatus.textContent = modelConfigured
             ? `已保存 · ${activeModelName}`
@@ -3098,7 +6220,7 @@ export function installIntelligenceWorkspaceUi(
           modelConfigured = false;
           modelStatus.textContent = `保存失败：${String(error)}`;
         } finally {
-          modelSave.disabled = false;
+          modelSave.disabled = !qwen27bSelectable;
         }
       })();
     });
@@ -3110,6 +6232,10 @@ export function installIntelligenceWorkspaceUi(
       renderSourceDirectory();
     });
     openNews.addEventListener("click", () => {
+      if (selectedFormalPublication) {
+        void openFormalPublicationEvent();
+        return;
+      }
       const item = selectedItem;
       if (item) {
         openNewsItem(item, "旧资讯页暂时无法打开。");
@@ -3125,6 +6251,34 @@ export function installIntelligenceWorkspaceUi(
         void open().then(() => setStatus("旧资讯页暂时无法打开。"));
       });
     });
+    [kindFilter, importanceFilter, scopeFilter].forEach((filter) => {
+      filter?.addEventListener("change", rerenderFormalPublicationFilters);
+    });
+    archiveDay?.addEventListener("focus", () => { void loadArchiveCalendar(); });
+    archiveRequest?.addEventListener("click", () => {
+      void (async () => {
+        if (!transport || !archiveDay || !archiveStatus) return;
+        if (!archiveDay.value) {
+          await loadArchiveCalendar();
+          if (!archiveDay.value) return;
+        }
+        archiveRequest.disabled = true;
+        archiveStatus.textContent = "正在创建历史回源请求…";
+        try {
+          const request = record(await transport.invoke<unknown>("intelligence_archive_request", { request: { day: archiveDay.value } }));
+          const requestId = text(request?.requestId);
+          if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)) throw new Error("历史回源请求响应无效");
+          await updateArchiveStatus(requestId);
+        } catch (error: unknown) {
+          archiveStatus.textContent = intelligenceClientErrorMessage(error);
+        } finally {
+          archiveRequest.disabled = false;
+        }
+      })();
+    });
+    archiveRetry?.addEventListener("click", () => {
+      if (activeArchiveRequestId) void updateArchiveStatus(activeArchiveRequestId, { retry: true });
+    });
     interstellarOpenNews.addEventListener("click", () => {
       const item = selectedInterstellarItem;
       if (!item) return;
@@ -3136,7 +6290,7 @@ export function installIntelligenceWorkspaceUi(
       else close();
     });
     setLayout(currentLayout);
-    return Object.freeze({ open, close, refresh: load, layout: () => currentLayout });
+    return Object.freeze({ open, close, refresh: load, layout: () => currentLayout, openStoredEvent, openFavorite });
   };
 
   const global: IntelligenceWorkspaceGlobal = { init };

@@ -385,7 +385,7 @@
                         id="account-sync-model-tags"
                         type="checkbox"
                       /><span data-i18n="syncTags"
-                        >大模型书籍分类标签</span
+                        >AI 图书标签</span
                       ></label
                     >
                     <label class="account-sync-choice"
@@ -410,7 +410,7 @@
                       /><span
                         >自定义 RSS / Atom 订阅（可选）<small
                           >开启后才会把你添加的订阅地址同步到其他设备；不包含资讯正文、缓存或阅读记录。</small
-                        ></span
+                      ></span
                       ></label
                     >
                   </div>
@@ -843,6 +843,7 @@
 
       <div id="del-group" class="del-group">
         <button id="book-info-btn" class="btn-plain">图书信息</button>
+        <button id="batch-add-booklist-btn" class="btn-plain">加入书单</button>
         <button id="del-btn" class="btn-danger">🗑 删除选中 (0)</button>
         <button id="del-cancel" class="btn-plain">取消</button>
       </div>
@@ -1032,13 +1033,13 @@
             </svg>
           </button>
         </div>
-        <div class="toolbar-action" data-toolbar-item="intelligence-lab">
+        <div class="toolbar-action" data-toolbar-item="intelligence-lab" hidden>
           <button
             id="intelligence-lab-toolbar-btn"
             class="icon-btn intelligence-lab-toolbar-btn"
             type="button"
-            title="情报中心（测试）"
-            aria-label="打开情报中心测试"
+            title="情报中心"
+            aria-label="打开情报中心"
             aria-pressed="false"
           >
             <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
@@ -1905,19 +1906,6 @@
               </div>
               <div class="fp-settings-group fp-settings-lower-group">
                 <div class="fp-set-row">
-                  <span
-                    id="set-open-book-label"
-                    data-i18n="singleClickOpen"
-                    title="单击打开时，双击用于选中；双击打开时，单击用于选中"
-                    >单击打开图书</span
-                  ><label class="switch"
-                    ><input
-                      type="checkbox"
-                      id="set-single-click-open"
-                      checked /><span class="slider"></span
-                  ></label>
-                </div>
-                <div class="fp-set-row">
                   <span data-i18n="autoImport">自动导入</span
                   ><span class="fp-set-tail"
                     ><button
@@ -2019,42 +2007,29 @@
                   >
                 </div>
                 <div class="fp-set-row">
-                  <span data-i18n="semanticIndex">语义索引</span
+                  <span data-i18n="semanticIndex">智能搜索</span
                   ><span class="fp-set-tail"
                     ><button
                       id="semantic-gear"
                       class="fp-row-gear fp-settings-detail"
                       type="button"
-                      title="管理语义索引"
+                      title="打开智能管理"
                     >
-                      <span data-i18n="settingsManageIndex">管理索引</span
+                      <span data-i18n="settingsManageIndex">打开设置</span
                       ><span aria-hidden="true">›</span>
                     </button></span
                   >
                 </div>
                 <div class="fp-set-row">
-                  <span data-i18n="bookClassification">书籍分类</span
+                  <span data-i18n="bookClassification">AI 图书标签</span
                   ><span class="fp-set-tail"
                     ><button
                       id="book-classification-settings-open"
                       class="fp-row-gear fp-settings-detail"
                       type="button"
-                      title="管理书籍分类"
+                      title="管理 AI 图书标签"
                     >
-                      <span>管理分类</span><span aria-hidden="true">›</span>
-                    </button></span
-                  >
-                </div>
-                <div class="fp-set-row">
-                  <span>快捷书单</span
-                  ><span class="fp-set-tail"
-                    ><button
-                      id="booklist-shortcuts-open"
-                      class="fp-row-gear fp-settings-detail"
-                      type="button"
-                      title="管理快捷书单"
-                    >
-                      <span>管理书单</span><span aria-hidden="true">›</span>
+                      <span>管理标签</span><span aria-hidden="true">›</span>
                     </button></span
                   >
                 </div>
@@ -2507,28 +2482,30 @@
                 hidden
                 aria-label="手势名称和匹配设置"
               >
-                <label class="gesture-field"
-                  ><span>名称（可选）</span
-                  ><input
-                    id="gesture-name"
-                    type="text"
-                    maxlength="24"
-                    placeholder="例如：书架返回"
-                /></label>
-                <label class="gesture-field"
-                  ><span>触发方式</span
-                  ><select id="gesture-input">
-                    <option value="mouse-right">鼠标右键拖动</option>
-                  </select></label
-                >
-                <label class="gesture-field"
-                  ><span>适用范围</span
-                  ><select id="gesture-scope">
-                    <option value="auto">自动适用（推荐）</option>
-                    <option value="main">仅主窗口</option>
-                    <option value="reader">仅阅读页</option>
-                  </select></label
-                >
+                <div class="gesture-editor-primary-fields">
+                  <label class="gesture-field"
+                    ><span>名称（可选）</span
+                    ><input
+                      id="gesture-name"
+                      type="text"
+                      maxlength="24"
+                      placeholder="例如：书架返回"
+                  /></label>
+                  <label class="gesture-field"
+                    ><span>触发方式</span
+                    ><select id="gesture-input">
+                      <option value="mouse-right">鼠标右键拖动</option>
+                    </select></label
+                  >
+                  <label class="gesture-field"
+                    ><span>适用范围</span
+                    ><select id="gesture-scope">
+                      <option value="auto">自动适用（推荐）</option>
+                      <option value="main">仅主窗口</option>
+                      <option value="reader">仅阅读页</option>
+                    </select></label
+                  >
+                </div>
                 <p id="gesture-scope-hint" class="gesture-auto-scope-note">
                   自动适用会按当前页面和操作决定是否执行；不支持该操作的页面不会触发。
                 </p>
@@ -2739,12 +2716,12 @@
           <span
             id="book-classification-settings-title"
             data-i18n="bookClassification"
-            >书籍分类</span
+            >AI 图书标签</span
           ><button
             id="book-classification-settings-close"
             class="btn-plain"
             type="button"
-            aria-label="关闭书籍分类"
+            aria-label="关闭 AI 图书标签"
           >
             ✕
           </button>
@@ -2777,7 +2754,7 @@
     <div id="api-settings-modal" class="modal settings-detail-modal">
       <div class="modal-card settings-detail-card api-settings-card">
         <div class="modal-head">
-          <span data-i18n="apiSettingsTitle">大模型与翻译 API</span
+          <span id="api-settings-title" data-i18n="apiSettingsTitle">大模型与翻译 API</span
           ><button
             id="api-settings-close"
             class="btn-plain"
@@ -2867,6 +2844,11 @@
               data-i18n-placeholder="apiNewKeyPlaceholder"
               autocomplete="off"
           /></label>
+          <p class="api-settings-note">
+            本机 OpenAI 兼容服务可使用 localhost、127.0.0.1 或 ::1，模型名明确包含 7B
+            及以上参数规模时可不填 API Key，并可用于书库问答、AI 图书标签和 AI
+            推荐书单；模型名称不能证明实际加载的权重。
+          </p>
           <div class="api-settings-actions">
             <button
               id="api-ai-save"
@@ -2879,6 +2861,7 @@
           </div>
         </section>
         <section
+          id="api-translation-section"
           class="api-settings-section"
           data-i18n-aria="apiTranslationConfiguration"
         >
@@ -2984,7 +2967,7 @@
           class="startup-enhancement-note"
           data-i18n="startupEnhancementHighCostNote"
         >
-          关闭高消耗任务后，语义索引、全文索引和书籍分类等任务会在隐藏窗口时保存检查点并暂停，不会自动续建。
+          关闭高消耗任务后，语义索引、全文索引和 AI 图书标签等任务会在隐藏窗口时保存检查点并暂停，不会自动续建。
         </p>
       </div>
     </div>
@@ -3140,7 +3123,7 @@
       id="reader-shell-preload-modal"
       class="modal settings-detail-modal"
       data-gesture-info-title="预加载"
-      data-gesture-info="预加载会提前创建隐藏阅读窗口，点击图书时直接使用。开启后会增加内存占用；可选缓存最近阅读 EPUB 的续读章节排版准备资料。"
+      data-gesture-info="预加载会提前创建隐藏阅读窗口和内层阅读引擎，并准备最近阅读内容；点击图书时直接使用。"
     >
       <div
         class="modal-card settings-detail-card reader-shell-preload-settings-card"
@@ -3160,30 +3143,20 @@
           </button>
         </div>
         <p class="reader-shell-preload-modal-note">
-          预加载会提前创建隐藏阅读窗口，点击图书时直接使用。开启后会增加内存占用；关闭会释放空闲窗口，已打开的阅读窗口不受影响。
+          预加载会提前创建隐藏阅读窗口和内层阅读引擎，并准备最近阅读内容。关闭会释放这些空闲资源，已打开的阅读窗口不受影响。
         </p>
-        <section class="reader-shell-preload-status-wrap" aria-label="内存占用">
-          <strong>内存占用</strong>
-          <p id="reader-shell-preload-status" aria-live="polite">
-            正在读取预加载状态…
-          </p>
-        </section>
-        <section class="reader-shell-recent-cache" aria-label="最近阅读章节缓存">
-          <div class="reader-shell-recent-cache-head">
-            <div>
-              <strong>最近阅读章节缓存</strong>
-              <span class="reader-shell-cache-badge">仅 EPUB</span>
-              <p>保留最近 3 本书的续读章节排版准备资料；章节正文最多 6 MiB，实际进程占用以上方驻留内存为准，不保留图片或额外阅读窗口。</p>
-            </div>
-            <label class="switch" title="缓存最近阅读章节">
-              <input id="reader-shell-recent-cache-enabled" type="checkbox" aria-label="缓存最近阅读章节" />
-              <span class="slider"></span>
-            </label>
-          </div>
-          <div class="reader-shell-recent-cache-foot">
-            <span id="reader-shell-recent-cache-status" aria-live="polite">正在读取章节缓存状态…</span>
+        <section class="reader-shell-preload-overview" aria-label="预加载资源与占用">
+          <div class="reader-shell-preload-components">
+            <span id="reader-shell-preload-status" aria-live="polite">正在读取预加载状态…</span>
             <button id="reader-shell-recent-cache-clear" class="btn-plain" type="button">清理缓存</button>
           </div>
+          <strong id="reader-shell-recent-cache-status" aria-live="polite">正在统计占用…</strong>
+        </section>
+        <section class="reader-shell-actual-open" aria-label="书架实际打开耗时">
+          <strong>最近实际打开</strong>
+          <span id="reader-shell-actual-open-status" aria-live="polite"
+            >尚无本次启动后的书架实际打开记录</span
+          >
         </section>
         <section class="reader-shell-preload-benchmark" aria-label="打开速度对比">
           <div>
@@ -3245,336 +3218,371 @@
     <div
       id="semantic-index-modal"
       class="modal settings-detail-modal"
-      data-gesture-info-title="语义索引"
-      data-gesture-info="语义索引只保存在本机，用于相似搜索、相关推荐和书库问答。切换模型后需要为对应模型建立索引；删除索引不会删除图书。"
+      data-gesture-info-title="智能管理"
+      data-gesture-info="智能搜索数据只保存在本机，用于相似搜索、相关推荐和书库问答。清除搜索数据只会删除可重新生成的索引，不会删除图书、资讯、阅读进度或阅读记录。"
     >
       <div class="modal-card settings-detail-card semantic-card">
         <div class="modal-head">
-          <span data-i18n="semTitle">语义索引</span
-          ><button
+          <span data-i18n="semTitle">智能管理</span>
+          <span class="modal-head-actions">
+            <button id="sem-gpu-refresh" class="btn-plain" type="button" data-i18n="semRefreshGpu"
+              data-gesture-info-title="重新检测设备配置"
+              data-gesture-info="重新检查 CPU、内存、GPU、显存、磁盘和已安装模型状态。只读取状态，不会启动模型、占用显存或下载任何文件。">重新检测配置</button>
+            <button
             id="semantic-index-close"
             class="btn-plain"
             data-i18n-aria="close"
           >
             ✕
-          </button>
+            </button>
+          </span>
         </div>
-        <p class="ai-note" data-i18n="semDescription">
-          语义检索在本机离线运行。首次建立索引会较久，但可以暂停、续建；关闭本窗口后，正在运行的任务会继续在后台执行。
+        <p class="ai-note sem-workspace-intro">
+          这里仅管理三类本机智能能力。打开页面只检测配置，不启动模型、不占用显存，也不会自动下载大模型。
         </p>
-        <section class="sem-section">
-          <div id="sem-model-setup-title" class="sem-title">
-            轻量语义检索 · BGE Small 中文
+        <section class="smart-management-summary" aria-label="本机智能方案"
+          data-gesture-info-title="推荐方案与设备状态"
+          data-gesture-info="设备状态用于判断本机能够安全运行哪些模型。推荐方案只给出可行组合；在你确认下载量前，不会下载语义模型、27B Agent 或 H3。">
+          <div class="smart-management-summary-copy">
+            <strong id="sem-device-summary">设备状态：正在检测 CPU、内存、GPU 与磁盘…</strong>
+            <span id="sem-overview-summary">推荐方案：正在生成…</span>
           </div>
-          <div id="sem-model-setup-copy" class="sem-model-copy">
-            默认的轻量中文语义模型，适合大多数书库；下载、建索引和查询都更快，占用也更小。
-          </div>
-          <div class="sem-model-controls">
-            <label for="sem-model-select" data-i18n="semSelectModel"
-              >切换语义模型</label
-            >
-            <select
-              id="sem-model-select"
-              class="sem-model-select"
-              aria-label="切换语义模型"
-              data-i18n-aria="semSelectModel"
-            >
-              <option value="bge-small-zh-v1.5" data-i18n="semModelSmall">
-                BGE Small 中文（默认，轻量）
-              </option>
-              <option value="bge-large-zh-v1.5" data-i18n="semModelLarge">
-                BGE Large 中文（高精度）
-              </option>
-              <option value="bge-m3" data-i18n="semModelM3">
-                BGE-M3（多语言、混合检索）
-              </option>
-              <option value="multilingual-e5-small" data-i18n="semModelE5">
-                Multilingual-E5-Small（多语言，轻量）
-              </option>
-            </select>
-          </div>
+          <button id="sem-capability-setup" class="btn-primary" type="button"
+            data-gesture-info-title="按推荐方案配置"
+            data-gesture-info="先显示推荐的语义模型与预计下载量；确认后准备 Qwen3 Embedding 0.6B 并建立本机搜索库。27B Agent 和 H3 都需要通过硬件检查并另行确认，不会被静默下载。">按推荐方案配置</button>
         </section>
-        <section class="sem-section">
+        <div id="sem-status" class="ai-status sem-task-strip" aria-live="polite">当前任务：正在读取本机状态…</div>
+        <div class="smart-model-grid" aria-label="智能模型">
+        <section class="sem-section sem-local-library smart-model-card" aria-labelledby="sem-semantic-title"
+          data-gesture-info-title="语义模型"
+          data-gesture-info="Qwen3 Embedding 0.6B 把本地图书内容转成可检索的语义索引，用于智能搜索、相似内容、相关推荐和书库问答。索引与模型只保存在这台电脑；打开本页不会加载模型或开始下载。">
           <div class="sem-section-head">
             <div>
-              <div class="sem-title" data-i18n="semCurrentModel">
-                当前模型状态
+              <div id="sem-semantic-title" class="sem-title">语义模型</div>
+              <div class="sem-feature-title">Qwen3 Embedding 0.6B</div>
+              <p class="sem-feature-copy">负责智能搜索、相似内容和相关推荐。系统自动选择 CPU 或 GPU，并在后台增量更新搜索库。</p>
+              <div class="sem-library-facts" aria-live="polite">
+                <span id="sem-library-plan">当前方案：正在读取…</span>
+                <span id="sem-library-coverage">已分析：正在核验…</span>
+                <span id="sem-library-pending">待分析：正在核验…</span>
               </div>
+              <div id="sem-vector-meta" class="sem-meta" data-i18n="semNotBuilt">尚未分析</div>
               <div id="sem-model-meta" class="sem-meta">正在读取状态…</div>
+              <div id="sem-model-download-progress" class="sem-download-progress" aria-live="polite" hidden>
+                <span id="sem-model-download-label">正在读取模型下载进度…</span>
+                <div class="sem-progressbar"><span id="sem-model-download-bar"></span></div>
+                <small id="sem-model-download-note"></small>
+              </div>
+              <div id="sem-vector-gpu-meta" class="sem-index-acceleration" hidden></div>
             </div>
             <div class="sem-actions">
-              <button
-                id="sem-model-download"
-                class="btn-plain"
-                type="button"
-                data-i18n="download"
-              >
-                下载模型
-              </button>
-              <button
-                id="sem-model-delete"
-                class="btn-plain danger-lite"
-                type="button"
-                data-i18n="semDelete"
-              >
-                删除模型
-              </button>
+              <button id="sem-semantic-primary" class="btn-primary" type="button"
+                data-gesture-info-title="语义模型的主要操作"
+                data-gesture-info="按钮会按状态变为下载、建立、继续或暂停语义搜索库。首次下载会先显示体积并要求确认；建立过程可后台运行，不会改动图书文件。">准备语义模型</button>
             </div>
           </div>
+          <div id="sem-vector-progress" class="sem-progressbar"><span id="sem-vector-bar"></span></div>
+          <div id="sem-semantic-task-actions" class="sem-card-task-actions" hidden>
+            <button id="sem-vector-pause" class="btn-plain" type="button" hidden
+              data-gesture-info-title="暂停语义建库"
+              data-gesture-info="安全暂停当前建库任务并保留进度；之后可从已完成的位置继续，不会删除已经建立的索引。模型下载使用可续传文件，完成后才能开始建库。">暂停建立</button>
+            <button id="sem-vector-delete" class="btn-plain danger-lite" type="button" hidden data-i18n="semClearSearchData"
+              data-gesture-info-title="清除搜索库"
+              data-gesture-info="删除当前语义搜索库和可重新生成的向量数据，不会删除图书、封面、阅读进度或笔记。任务运行时会暂时隐藏，避免破坏正在写入的索引。">清除搜索库</button>
+          </div>
+          <details id="sem-advanced-maintenance" class="sem-advanced-tools sem-card-settings" data-sem-panel="library"
+            data-gesture-info-title="语义模型的高级与维护"
+            data-gesture-info="这里调整语义检索的模型与策略，并管理可重新建立的索引数据。只有在主动打开后才显示；普通搜索仍使用上方推荐模型。">
+            <summary>语义模型设置与维护</summary>
+            <section class="sem-section sem-advanced-models"
+              data-gesture-info-title="语义模型选择"
+              data-gesture-info="可把语义搜索切换到另一种本地模型。切换会在后台建立新搜索库，旧搜索库在新库完成前继续可用；不同模型会影响速度、磁盘占用和检索效果。">
+              <div class="sem-section-head">
+                <div>
+                  <div class="sem-title">语义模型与搜索库</div>
+                  <div id="sem-model-setup-title" class="sem-feature-title">Qwen3 Embedding 0.6B</div>
+                  <div id="sem-model-setup-copy" class="sem-meta">仅在需要时切换；新搜索库完成前，当前搜索继续可用。</div>
+                </div>
+                <div class="sem-actions">
+                  <select id="sem-library-model-select" class="sem-model-select" aria-label="语义模型"
+                    data-gesture-info-title="选择语义模型"
+                    data-gesture-info="Qwen3 Embedding 0.6B 是日常推荐；8B 提供更高精度但体积和资源要求更高；BGE-M3 支持混合检索；其它模型适合中文或多语言书库。选择本身不会下载或切换。">
+                    <option value="qwen3-embedding-0.6b">Qwen3 Embedding 0.6B（推荐）</option>
+                    <option value="qwen3-embedding-8b">Qwen3 Embedding 8B（高精度）</option>
+                    <option value="bge-m3">BGE-M3（混合检索）</option>
+                  </select>
+                  <button id="sem-library-model-apply" class="btn-plain" type="button"
+                    data-gesture-info-title="切换并建立新搜索库"
+                    data-gesture-info="按上方选择切换语义模型，并在后台为该模型建立新的搜索库。旧库会一直服务到新库完成，不会中断当前搜索。">切换并建立新搜索库</button>
+                </div>
+              </div>
+              <div class="sem-actions sem-maintenance-actions">
+                <button id="sem-model-download" class="btn-plain" type="button"
+                  data-gesture-info-title="下载语义模型"
+                  data-gesture-info="把当前选中的语义模型下载到本机。仅下载模型，不会自动分析整座书架。">下载模型</button>
+                <button id="sem-vector-build" class="btn-plain" type="button" data-i18n="semUpdateLocalContent"
+                  data-gesture-info-title="更新新增与变更"
+                  data-gesture-info="仅分析自上次建库后新增或内容变更的图书，保留已有索引，是日常维护的优先选择。">更新新增与变更</button>
+                <button id="sem-vector-rebuild" class="btn-plain" type="button" data-i18n="semRebuildAll"
+                  data-gesture-info-title="重新分析全部"
+                  data-gesture-info="重新为全部图书建立当前模型的语义索引。耗时较长，适合模型切换、索引异常或需要完全更新时使用。">重新分析全部</button>
+                <button id="sem-model-delete" class="btn-plain danger-lite" type="button"
+                  data-gesture-info-title="删除语义模型"
+                  data-gesture-info="删除本机已下载的当前语义模型以释放空间，不会删除图书或索引记录；以后使用该模型时需要重新下载。">删除模型</button>
+              </div>
+            </section>
+            <section class="sem-section" id="sem-retrieval-section"
+              data-gesture-info-title="检索策略"
+              data-gesture-info="决定书库问答和复杂搜索怎样组合全文、语义和重排结果。标准策略速度较快；高精度会增加重排；M3 选项只在已选择并准备好 BGE-M3 时可用。">
+              <div class="sem-section-head">
+                <div>
+                  <div class="sem-title" data-i18n="semRetrievalStrategy">检索策略</div>
+                  <div id="sem-retrieval-meta" class="sem-meta">标准：全文与语义结果自动融合</div>
+                </div>
+                <div class="sem-actions">
+                  <select id="sem-retrieval-mode" class="sem-model-select" aria-label="检索策略" data-i18n-aria="semRetrievalStrategy"
+                    data-gesture-info-title="选择检索策略"
+                    data-gesture-info="标准模式融合全文与语义结果；高精度模式会对候选内容重排；实验性 M3 模式增加稀疏与 ColBERT 表示，仅适用于已准备好的 BGE-M3。">
+                    <option value="standard" data-i18n="semRetrievalStandard">标准：全文＋语义融合</option>
+                    <option value="high_precision" data-i18n="semRetrievalHigh">高精度：融合＋重排</option>
+                    <option id="sem-retrieval-m3-option" value="m3_hybrid" data-i18n="semRetrievalM3">实验性：M3 稀疏＋ColBERT</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+            <section class="sem-section"
+              data-gesture-info-title="结果重排模型"
+              data-gesture-info="重排模型会在语义搜索召回候选内容后重新排序，让最符合问题的段落排在前面。它只在高精度检索时按需加载。">
+              <div class="sem-section-head">
+                <div>
+                  <div class="sem-title" data-i18n="semReranker">重排模型</div>
+                  <div id="sem-reranker-meta" class="sem-meta" data-i18n="semRerankerDescription">让最符合问题的内容排在前面，回答引用更准确。</div>
+                </div>
+                <div class="sem-actions">
+                  <button id="sem-reranker-download" class="btn-plain" type="button" data-i18n="semDownloadReranker"
+                    data-gesture-info-title="下载重排模型"
+                    data-gesture-info="下载用于高精度检索的重排模型。下载后只会在需要高精度结果时加载。">下载重排模型</button>
+                  <button id="sem-reranker-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete"
+                    data-gesture-info-title="删除重排模型"
+                    data-gesture-info="删除本机重排模型以释放空间。高精度检索会退回到未重排的结果，普通搜索不受影响。">删除</button>
+                </div>
+              </div>
+            </section>
+            <section class="sem-section" id="sem-m3-index-section"
+              data-gesture-info-title="BGE-M3 稀疏索引与 ColBERT 重排"
+              data-gesture-info="这是 BGE-M3 的扩展索引，兼顾关键词和语义匹配，适合复杂问题；仅在 BGE-M3 模型可用时出现。">
+              <div class="sem-section-head">
+                <div>
+                  <div class="sem-title" data-i18n="semM3Index">BGE-M3 稀疏索引与 ColBERT 重排</div>
+                  <div id="sem-m3-meta" class="sem-meta" data-i18n="semM3Description">建立后能更好兼顾关键词和语义，复杂问题更容易找到。</div>
+                </div>
+                <div class="sem-actions">
+                  <button id="sem-m3-build" class="btn-plain" type="button" data-i18n="semBuildM3"
+                    data-gesture-info-title="建立 M3 索引"
+                    data-gesture-info="为当前 BGE-M3 搜索库建立稀疏和 ColBERT 扩展数据，完成后可选择实验性 M3 检索策略。">建立 M3 索引</button>
+                  <button id="sem-m3-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete"
+                    data-gesture-info-title="删除 M3 索引"
+                    data-gesture-info="只删除可重新建立的 M3 扩展索引，不删除语义模型、普通搜索库或图书。">删除</button>
+                </div>
+              </div>
+              <div class="sem-progressbar"><span id="sem-m3-bar"></span></div>
+            </section>
+            <section class="sem-section"
+              data-gesture-info-title="大型书库加速"
+              data-gesture-info="为已有语义搜索库额外建立加速数据，让大型书库更快返回检索结果。它可以随时删除并重新建立。">
+              <div class="sem-section-head">
+                <div>
+                  <div class="sem-title" data-i18n="semAccelerator">加速索引</div>
+                  <div id="sem-accel-meta" class="sem-meta" data-i18n="semAcceleratorDescription">让已建立语义索引的大书库更快返回检索结果。</div>
+                </div>
+                <div class="sem-actions">
+                  <button id="sem-accel-build" class="btn-plain" type="button" data-i18n="semBuildAccelerator"
+                    data-gesture-info-title="建立加速索引"
+                    data-gesture-info="为现有语义索引建立可再生的加速数据。适合书籍较多、检索等待明显时使用。">建立加速索引</button>
+                  <button id="sem-accel-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete"
+                    data-gesture-info-title="清除加速数据"
+                    data-gesture-info="删除加速索引来释放空间，不会删除普通语义搜索库；之后搜索仍可使用，只是大书库可能较慢。">删除</button>
+                </div>
+              </div>
+              <div class="sem-progressbar"><span id="sem-accel-bar"></span></div>
+            </section>
+            <section class="sem-section"
+              data-gesture-info-title="多中心画像索引"
+              data-gesture-info="把一本书按不同主题建立多个语义中心，帮助跨主题问题找到更贴近的内容。它是可选的本机增强数据。">
+              <div class="sem-section-head">
+                <div>
+                  <div class="sem-title" data-i18n="semMultiProfile">多中心画像索引</div>
+                  <div id="sem-multi-meta" class="sem-meta" data-i18n="semMultiProfileDescription">把一本书的不同主题分别归类，跨主题提问时更容易找到对应内容。</div>
+                </div>
+                <div class="sem-actions">
+                  <button id="sem-multi-build" class="btn-plain" type="button" data-i18n="semBuildMulti"
+                    data-gesture-info-title="建立多中心画像"
+                    data-gesture-info="为每本书建立多个主题中心。它可改善跨主题检索，但会增加建立时间和磁盘占用。">建立多中心画像</button>
+                  <button id="sem-multi-delete" class="btn-plain danger-lite" type="button" data-i18n="semDelete"
+                    data-gesture-info-title="清除多中心画像"
+                    data-gesture-info="删除可重新建立的多中心画像数据，不删除图书、普通语义索引或阅读记录。">删除</button>
+                </div>
+              </div>
+              <div class="sem-progressbar"><span id="sem-multi-bar"></span></div>
+            </section>
+          </details>
         </section>
-        <section class="sem-section" id="sem-gpu-section">
+        <section class="sem-section sem-local-model-section smart-model-card" aria-labelledby="sem-agent-title"
+          data-gesture-info-title="Agent 模型"
+          data-gesture-info="Agent 负责智读、书库问答、标签、书单和综合分析。每类任务可分别指定本机或云端模型；云端密钥只写入系统安全存储，不会显示在本页。">
           <div class="sem-section-head">
             <div>
-              <div class="sem-title" data-i18n="semGpu">GPU 加速</div>
-              <div id="sem-gpu-meta" class="sem-meta" data-i18n="semGpuInitial">
-                点击“重新检测”读取本机 GPU 状态。
-              </div>
+              <div id="sem-agent-title" class="sem-title">Agent 模型</div>
+              <div class="sem-feature-title">本机或云端 · 按任务分工</div>
+              <p class="sem-feature-copy">智读、书库问答和其它任务可分别使用本机或云端模型；云端 API Key 仅保存到系统安全存储。</p>
+              <div class="sem-agent-assignment-summary" id="sem-agent-assignment-summary" role="status">正在读取已保存模型与任务分工…</div>
+              <div id="sem-understanding-capability" class="sem-meta" role="status">正在检查本机 7B/8B 理解模型服务…</div>
             </div>
             <div class="sem-actions">
-              <button
-                id="sem-gpu-install"
-                class="btn-plain"
-                type="button"
-                hidden
-                data-i18n="semInstallGpuRuntime"
-              >
-                安装 GPU 组件
-              </button>
-              <button
-                id="sem-gpu-refresh"
-                class="btn-plain"
-                type="button"
-                data-i18n="semRefreshGpu"
-              >
-                重新检测
-              </button>
+              <button id="sem-agent-primary" class="btn-primary" type="button"
+                data-gesture-info-title="配置 Agent"
+                data-gesture-info="打开已有的安全模型配置页，可添加或编辑云端 API、本地 OpenAI 兼容服务，并分别指定智读、书库问答和其它任务使用哪个 Agent。API Key 不会回显。">配置 Agent</button>
             </div>
           </div>
-        </section>
-        <section class="sem-section">
-          <div class="sem-section-head">
-            <div>
-              <div class="sem-title" data-i18n="semIndexTitle">语义索引</div>
-              <div
-                id="sem-vector-meta"
-                class="sem-meta"
-                data-i18n="semNotBuilt"
-              >
-                尚未建立
+          <details class="sem-advanced-tools sem-card-settings"
+            data-gesture-info-title="Agent 模型设置与维护"
+            data-gesture-info="这里查看运行设备、选择 CPU 或 GPU 策略，检查本机基础 Agent，并在设备满足条件时管理增强 27B Agent。不会影响已经配置的云端 Agent。">
+            <summary>Agent 模型设置与维护</summary>
+            <section class="sem-section"
+              data-gesture-info-title="Agent 运行设备"
+              data-gesture-info="显示本机 GPU 与推理组件状态。设备策略决定本机模型优先使用自动、GPU 或 CPU；它不改变云端 Agent 的运行位置。">
+              <div class="sem-section-head">
+                <div>
+                  <div class="sem-title">运行设备</div>
+                  <span class="sr-only" data-i18n="semGpu">运行设备</span>
+                  <div id="sem-gpu-meta" class="sem-meta">正在读取本机 GPU 状态。</div>
+                </div>
+                <div class="sem-actions">
+                  <button id="sem-gpu-install" class="btn-plain" type="button" hidden
+                    data-gesture-info-title="加载本机 CUDA 组件"
+                    data-gesture-info="加载本机已具备的 CUDA 推理组件以启用兼容模型的 GPU 加速；不会下载未经确认的显卡运行库。">加载本机 CUDA 组件</button>
+                  <label class="sem-device-policy" for="sem-device-policy"
+                    data-gesture-info-title="设备策略"
+                    data-gesture-info="自动选择会根据模型和设备条件决定 CPU 或 GPU；仅 GPU 会在 GPU 不可用时拒绝本机推理；仅 CPU 避开显存占用但速度通常较慢。">
+                    <span>设备策略</span>
+                    <select id="sem-device-policy">
+                      <option value="auto">自动选择</option>
+                      <option value="gpu">仅 GPU</option>
+                      <option value="cpu">仅 CPU</option>
+                    </select>
+                  </label>
+                </div>
               </div>
-              <div
-                id="sem-vector-gpu-meta"
-                class="sem-index-acceleration"
-                hidden
-              ></div>
-            </div>
-            <div class="sem-actions">
-              <button
-                id="sem-vector-build"
-                class="btn-plain"
-                type="button"
-                data-i18n="semBuildIndex"
-              >
-                建立语义索引
-              </button>
-              <button
-                id="sem-vector-pause"
-                class="btn-plain"
-                type="button"
-                hidden
-                data-i18n="semPause"
-              >
-                暂停
-              </button>
-              <button
-                id="sem-vector-delete"
-                class="btn-plain danger-lite"
-                type="button"
-                data-i18n="semDelete"
-              >
-                删除
-              </button>
-            </div>
-          </div>
-          <div id="sem-vector-progress" class="sem-progressbar">
-            <span id="sem-vector-bar"></span>
-          </div>
-        </section>
-        <details class="sem-advanced-tools">
-          <summary data-i18n="semAdvanced">
-            高级管理：检索增强、加速索引、画像索引与单项删除
-          </summary>
-          <section class="sem-section" id="sem-retrieval-section">
-            <div class="sem-section-head">
+            </section>
+            <section class="sem-section"
+              data-gesture-info-title="基础 Agent（7B/8B）"
+              data-gesture-info="基础 Agent 适合日常问答、智读、标签和书单。只有已经配置本机服务时才检查本地可用性；没有本机服务时可继续使用已保存的云端 Agent。">
+              <div class="sem-maintenance-agent">
+                <div>
+                  <strong>基础 Agent（7B/8B）</strong>
+                  <span>仅在本机 Agent 已配置时检查服务；也可以直接使用已保存的云端 Agent。</span>
+                </div>
+                <button id="sem-understanding-preflight" class="btn-plain" type="button"
+                  data-gesture-info-title="检查基础 Agent"
+                  data-gesture-info="检查当前配置的本机 7B/8B Agent 服务是否可连接和可用。不会发送图书正文，也不会启动未配置的模型。">检查基础 Agent</button>
+              </div>
+            </section>
+            <section id="sem-qwen27-card" class="sem-agent-enhanced" hidden
+              data-gesture-info-title="增强 Agent · 千问 27B"
+              data-gesture-info="增强 Agent 仅用于长文总结、跨书综合和深度分析，不参与语义索引。只有通过显存、内存、磁盘与可用显存检查后才会显示；条件不足时此项保持隐藏。">
               <div>
-                <div class="sem-title" data-i18n="semRetrievalStrategy">
-                  检索策略
-                </div>
-                <div id="sem-retrieval-meta" class="sem-meta">
-                  标准：全文与语义结果自动融合
-                </div>
+                <strong>增强 Agent · 千问 27B</strong>
+                <span id="sem-qwen27-capability">正在检测显卡、内存、磁盘和本机模型状态…</span>
               </div>
               <div class="sem-actions">
-                <select
-                  id="sem-retrieval-mode"
-                  class="sem-model-select"
-                  aria-label="检索策略"
-                  data-i18n-aria="semRetrievalStrategy"
-                >
-                  <option value="standard" data-i18n="semRetrievalStandard">
-                    标准：全文＋语义融合
-                  </option>
-                  <option value="high_precision" data-i18n="semRetrievalHigh">
-                    高精度：融合＋重排
-                  </option>
-                  <option
-                    id="sem-retrieval-m3-option"
-                    value="m3_hybrid"
-                    data-i18n="semRetrievalM3"
-                  >
-                    实验性：M3 稀疏＋ColBERT
-                  </option>
+                <button id="sem-qwen27-select" class="btn-plain" type="button" disabled
+                  data-gesture-info-title="选择增强 Agent"
+                  data-gesture-info="把本机符合条件的千问 27B 设为增强 Agent。它只会在需要长文总结、跨书综合或深度分析时按顺序运行。">选择增强 Agent</button>
+                <button id="sem-qwen27-preflight" class="btn-plain" type="button"
+                  data-gesture-info-title="检查增强 Agent 服务"
+                  data-gesture-info="检查当前增强 Agent 的本机服务与模型状态。不会下载 27B，也不会在未通过硬件门槛时启动它。">检查本机服务</button>
+              </div>
+            </section>
+          </details>
+        </section>
+        <section class="sem-section sem-media-creation-section smart-model-card" aria-labelledby="sem-media-title"
+          data-gesture-info-title="生图与视频模型"
+          data-gesture-info="MiniMax-H3 根据正文中已经理解的场景、人物、动作和对话生成图片或视频提示词，并可在本机 ComfyUI/GGUF 环境生成内容。它不会把整本图书上传到模型服务。">
+          <div class="sem-section-head">
+            <div>
+              <div id="sem-media-title" class="sem-title">生图 / 视频模型</div>
+              <div class="sem-feature-title">MiniMax-H3 · 正文情境图片与视频</div>
+              <div id="sem-media-status" class="sem-meta" role="status">正在检测本机模型与硬件</div>
+              <p class="sem-feature-copy">可以使用已配置的本地或云端大模型理解正文，提取场景、人物、动作与对话并生成图片、视频提示词。手动模式会先展示提示词；自动模式会先批量准备最多 3 章提示词，释放大模型显存后启动本机 MiniMax-H3 生成，再循环处理后续章节。</p>
+            </div>
+            <span class="sem-local-badge">提示词模型：本地或云端</span>
+          </div>
+          <div class="sem-media-card-footer">
+            <span id="sem-media-hardware-state">硬件：正在检测</span>
+            <button id="sem-media-primary" class="btn-primary" type="button"
+              data-gesture-info-title="配置或启动 H3"
+              data-gesture-info="硬件通过检查后，按钮会按状态变为配置 H3、启动本地服务或显示正在运行。配置大型模型前会说明下载量并要求确认。">正在检测配置…</button>
+          </div>
+          <details class="sem-advanced-tools sem-card-settings"
+            data-gesture-info-title="生图与视频模型设置与维护"
+            data-gesture-info="这里管理 H3 的本机运行环境、阅读时的生成方式以及已有 ComfyUI 或自定义工作流。所有安装和生成都经过本机内存、显存和磁盘检查。">
+            <summary>生图 / 视频模型设置与维护</summary>
+            <section class="sem-section"
+              data-gesture-info-title="H3 本机运行环境"
+              data-gesture-info="显示 ComfyUI/GGUF、H3 权重和本机服务的状态。H3 安装前会检查内存、显存与实际安装盘余量；条件不足时不会提供安装操作。">
+              <div class="sem-section-head">
+                <div>
+                  <div class="sem-title">生图 / 视频运行环境</div>
+                  <div id="sem-media-comfy-state" class="sem-meta">ComfyUI/GGUF：正在检测</div>
+                  <div id="sem-media-model-state" class="sem-meta">模型：正在检测</div>
+                  <div id="sem-media-runtime-state" class="sem-meta">服务：正在检测</div>
+                </div>
+                <div class="sem-actions">
+                  <button id="sem-media-download" class="btn-plain" type="button"
+                    data-gesture-info-title="一键配置 H3"
+                    data-gesture-info="在硬件满足要求后下载并配置本机 ComfyUI、GGUF 节点、量化 H3 权重与本地 API 工作流。下载量会先明确显示，确认前不会开始。">一键配置 H3</button>
+                  <button id="sem-media-start" class="btn-plain" type="button" disabled
+                    data-gesture-info-title="启动本地生图服务"
+                    data-gesture-info="启动仅监听本机回环地址的 H3/ComfyUI 服务，用于处理已生成的本地提示词。">启动本地服务</button>
+                  <button id="sem-media-stop" class="btn-plain" type="button" disabled
+                    data-gesture-info-title="停止本地生图服务"
+                    data-gesture-info="停止本机 H3/ComfyUI 服务并释放相关显存；已生成的图片、视频和提示词不会被删除。">停止服务</button>
+                  <button id="sem-media-refresh" class="btn-plain" type="button"
+                    data-gesture-info-title="重新检测 H3 环境"
+                    data-gesture-info="重新检查 H3 权重、ComfyUI、服务状态、内存、显存和安装盘空间，不会启动模型或下载文件。">重新检测</button>
+                </div>
+              </div>
+              <label class="sem-media-policy-label"
+                data-gesture-info-title="阅读时建议"
+                data-gesture-info="仅提出场景会只生成可用于图片或视频的提示建议；手动模式由你确认后生成；自动模式按阅读偏好在本机排队生成；关闭则完全不生成。">阅读时建议
+                <select id="sem-media-policy">
+                  <option value="suggest">仅提出可生成的场景（推荐）</option>
+                  <option value="manual">只在我点击时生成</option>
+                  <option value="auto">按阅读偏好自动生成并插入（本机）</option>
+                  <option value="off">关闭伴读生成</option>
                 </select>
-              </div>
-            </div>
-          </section>
-          <section class="sem-section">
-            <div class="sem-section-head">
-              <div>
-                <div class="sem-title" data-i18n="semReranker">重排模型</div>
-                <div
-                  id="sem-reranker-meta"
-                  class="sem-meta"
-                  data-i18n="semRerankerDescription"
-                >
-                  让最符合问题的内容排在前面，回答引用更准确。
+              </label>
+              <p class="sem-media-privacy">H3 只在通过内存、显存与磁盘检查后才允许安装。安装和生成均只使用本机 ComfyUI/GGUF 与本机回环服务；自动工作流固定包含 <code>__KUNPENG_PROMPT__</code> 与 <code>__KUNPENG_OUTPUT_PREFIX__</code> 占位符。</p>
+              <details class="sem-storage-tools"
+                data-gesture-info-title="已有 ComfyUI 或自定义工作流"
+                data-gesture-info="如果你已安装 ComfyUI 或准备了工作流，可在这里选择本机目录和工作流文件。保存前会验证本机路径与必需占位符。">
+                <summary>已有 ComfyUI 或自定义工作流</summary>
+                <div class="sem-actions">
+                  <button id="sem-media-choose-comfy" class="btn-plain" type="button"
+                    data-gesture-info-title="选择已有 ComfyUI"
+                    data-gesture-info="选择这台电脑上已有的 ComfyUI 根目录，仅保存本机路径，不会上传路径或文件。">选择已有 ComfyUI</button>
+                  <button id="sem-media-choose-workflow" class="btn-plain" type="button"
+                    data-gesture-info-title="选择自定义工作流"
+                    data-gesture-info="选择本机的 ComfyUI 工作流文件。自动工作流必须含有提示词和输出目录占位符，以保证安全生成。">选择自定义工作流</button>
+                  <button id="sem-media-save-comfy" class="btn-plain" type="button" disabled
+                    data-gesture-info-title="保存本机 H3 配置"
+                    data-gesture-info="保存所选 ComfyUI 与工作流的本机配置。仅在已选择有效目录和工作流时可用。">保存本机配置</button>
                 </div>
-              </div>
-              <div class="sem-actions">
-                <button
-                  id="sem-reranker-download"
-                  class="btn-plain"
-                  type="button"
-                  data-i18n="semDownloadReranker"
-                >
-                  下载重排模型
-                </button>
-                <button
-                  id="sem-reranker-delete"
-                  class="btn-plain danger-lite"
-                  type="button"
-                  data-i18n="semDelete"
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-          </section>
-          <section class="sem-section" id="sem-m3-index-section">
-            <div class="sem-section-head">
-              <div>
-                <div class="sem-title" data-i18n="semM3Index">
-                  BGE-M3 稀疏索引与 ColBERT 重排
-                </div>
-                <div
-                  id="sem-m3-meta"
-                  class="sem-meta"
-                  data-i18n="semM3Description"
-                >
-                  建立后能更好兼顾关键词和语义，复杂问题更容易找到。
-                </div>
-              </div>
-              <div class="sem-actions">
-                <button
-                  id="sem-m3-build"
-                  class="btn-plain"
-                  type="button"
-                  data-i18n="semBuildM3"
-                >
-                  建立 M3 索引
-                </button>
-                <button
-                  id="sem-m3-delete"
-                  class="btn-plain danger-lite"
-                  type="button"
-                  data-i18n="semDelete"
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-            <div class="sem-progressbar"><span id="sem-m3-bar"></span></div>
-          </section>
-          <section class="sem-section">
-            <div class="sem-section-head">
-              <div>
-                <div class="sem-title" data-i18n="semAccelerator">加速索引</div>
-                <div
-                  id="sem-accel-meta"
-                  class="sem-meta"
-                  data-i18n="semAcceleratorDescription"
-                >
-                  让已建立语义索引的大书库更快返回检索结果。
-                </div>
-              </div>
-              <div class="sem-actions">
-                <button
-                  id="sem-accel-build"
-                  class="btn-plain"
-                  type="button"
-                  data-i18n="semBuildAccelerator"
-                >
-                  建立加速索引
-                </button>
-                <button
-                  id="sem-accel-delete"
-                  class="btn-plain danger-lite"
-                  type="button"
-                  data-i18n="semDelete"
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-            <div class="sem-progressbar"><span id="sem-accel-bar"></span></div>
-          </section>
-          <section class="sem-section">
-            <div class="sem-section-head">
-              <div>
-                <div class="sem-title" data-i18n="semMultiProfile">
-                  多中心画像索引
-                </div>
-                <div
-                  id="sem-multi-meta"
-                  class="sem-meta"
-                  data-i18n="semMultiProfileDescription"
-                >
-                  把一本书的不同主题分别归类，跨主题提问时更容易找到对应内容。
-                </div>
-              </div>
-              <div class="sem-actions">
-                <button
-                  id="sem-multi-build"
-                  class="btn-plain"
-                  type="button"
-                  data-i18n="semBuildMulti"
-                >
-                  建立多中心画像
-                </button>
-                <button
-                  id="sem-multi-delete"
-                  class="btn-plain danger-lite"
-                  type="button"
-                  data-i18n="semDelete"
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-            <div class="sem-progressbar"><span id="sem-multi-bar"></span></div>
-          </section>
-        </details>
-        <div id="sem-status" class="ai-status" aria-live="polite"></div>
+              </details>
+            </section>
+          </details>
+        </section>
+        </div>
       </div>
     </div>
     <div id="external-dict-modal" class="modal settings-detail-modal">
@@ -3807,7 +3815,7 @@
     <div id="book-organization-modal" class="modal">
       <div class="modal-card book-organization-card">
         <div class="modal-head">
-          <span>标签与收藏书单</span
+          <span>标签与书单</span
           ><button id="book-organization-close" class="btn-plain">✕</button>
         </div>
         <div
@@ -3831,7 +3839,7 @@
             role="tab"
             aria-selected="false"
           >
-            收藏书单
+            书单
           </button>
         </div>
         <section
@@ -3853,7 +3861,7 @@
           hidden
         >
           <div class="book-organization-panel-head">
-            <strong>收藏书单</strong><span>勾选加入；也可新建、打开或管理</span>
+            <strong>书单</strong><span>勾选加入；也可新建、打开或管理</span>
           </div>
           <div
             id="book-info-collections"
@@ -3883,45 +3891,6 @@
           </div>
         </div>
         <div id="booklist-books" class="booklist-books"></div>
-      </div>
-    </div>
-    <div
-      id="booklist-shortcuts-modal"
-      class="modal settings-detail-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="booklist-shortcuts-title"
-    >
-      <div class="modal-card settings-detail-card booklist-shortcuts-card">
-        <div class="modal-head">
-          <span id="booklist-shortcuts-title">快捷书单</span
-          ><button
-            id="booklist-shortcuts-close"
-            class="btn-plain"
-            type="button"
-            aria-label="关闭"
-          >
-            ×
-          </button>
-        </div>
-        <p class="booklist-shortcuts-note">
-          保存常用书单；书库问答生成的推荐书单也会出现在这里。书单内容、顺序和评语会随“阅读数据”同步。
-        </p>
-        <form id="booklist-shortcuts-create" class="booklist-shortcuts-create">
-          <input
-            id="booklist-shortcuts-name"
-            type="text"
-            maxlength="96"
-            autocomplete="off"
-            placeholder="新建书单名称"
-          /><button class="btn-primary" type="submit">新建</button>
-        </form>
-        <div
-          id="booklist-shortcuts-status"
-          class="booklist-shortcuts-status"
-          aria-live="polite"
-        ></div>
-        <div id="booklist-shortcuts-list" class="booklist-shortcuts-list"></div>
       </div>
     </div>
     <div id="debug-modal" class="modal">
@@ -3994,6 +3963,25 @@
         </div>
       </div>
     </div>
+    <div id="batch-organization-modal" class="modal" aria-hidden="true">
+      <div class="modal-card batch-organization-card" role="dialog" aria-modal="true" aria-labelledby="batch-organization-title">
+        <div class="modal-head">
+          <span id="batch-organization-title">加入书单</span
+          ><button id="batch-organization-close" class="btn-plain" type="button" aria-label="关闭">✕</button>
+        </div>
+        <p id="batch-organization-note" class="organization-filter-note"></p>
+        <div id="batch-organization-options" class="organization-filter-options"></div>
+        <div class="booklist-shortcuts-create batch-organization-create">
+          <input id="batch-organization-new" type="text" maxlength="32" autocomplete="off" placeholder="新建书单">
+          <button id="batch-organization-add" class="btn-plain" type="button">新建</button>
+        </div>
+        <div class="organization-filter-actions">
+          <span></span><span></span>
+          <button id="batch-organization-cancel" class="btn-plain" type="button">取消</button>
+          <button id="batch-organization-apply" class="btn-primary" type="button">加入书单</button>
+        </div>
+      </div>
+    </div>
     <div id="drop-hint" class="drop-hint">松开即可导入书籍</div>
     <div class="content-shell">
       <div class="content" tabindex="-1">
@@ -4034,7 +4022,7 @@
               type="button"
               data-i18n="bookClassification"
             >
-              书籍分类
+              AI 图书标签
             </button>
             <button
               id="library-ai-history"
@@ -4762,9 +4750,9 @@
       id="intelligence-workspace-page"
       class="intelligence-workspace-page"
       hidden
-      aria-label="情报中心测试"
-      data-gesture-info-title="情报中心（测试）"
-      data-gesture-info="它会从本机公开来源目录抓取资讯，在本地去重、筛选热点，并只调用你配置的本机 Qwen 27B Q3 生成可追溯简报；不会上传书库或资讯到外部模型。"
+      aria-label="情报中心"
+      data-gesture-info-title="情报中心"
+      data-gesture-info="只阅读当前登录账号已保存、已校验的正式资讯包。正文、图片和段落引用先在本机完成完整性校验，再由阅读器展示；页面不会启动采集、全文回填或模型处理。"
       data-layout="briefing"
     >
       <header class="intelligence-workspace-head">
@@ -4779,13 +4767,13 @@
             ←
           </button>
           <div>
-            <div class="intelligence-workspace-kicker">情报中心 <span>测试</span></div>
-            <h1>本机热点简报</h1>
-            <p>全目录资讯先在本机去重与规则过滤，再由本机 Qwen 27B Q3 复核候选事件、合并证据并生成可追溯简报。</p>
+            <div class="intelligence-workspace-kicker">情报中心</div>
+            <h1>账号资讯</h1>
+            <p>只显示当前登录账号最近 30 天已校验并保存到本机的日报与事件；刷新、通知和历史回源均按账号与设备隔离。</p>
           </div>
         </div>
         <div class="intelligence-workspace-actions">
-          <div class="intelligence-layout-switch" role="group" aria-label="情报中心布局">
+          <div class="intelligence-layout-switch" role="group" aria-label="情报中心布局" hidden>
             <button
               id="intelligence-layout-briefing"
               type="button"
@@ -4820,12 +4808,22 @@
             class="btn-plain intelligence-audit-trigger"
             type="button"
             aria-pressed="false"
+            hidden
           >处理审计</button>
-          <button id="intelligence-open-sources" class="btn-plain" type="button">信息来源</button>
+          <button id="intelligence-open-sources" class="btn-plain" type="button" hidden>信息来源</button>
           <button id="intelligence-refresh" class="btn-plain" type="button">刷新</button>
         </div>
       </header>
       <p id="intelligence-workspace-status" class="intelligence-workspace-status" aria-live="polite"></p>
+      <section class="intelligence-delivery-controls" aria-label="资讯筛选与历史回源">
+        <label>资讯分类 <select id="intelligence-filter-kind"><option value="all">全部</option><option value="daily">日报</option><option value="event">事件</option></select></label>
+        <label>最低重要性 <select id="intelligence-filter-importance"><option value="0">全部</option><option value="50">50 及以上</option><option value="80">80 及以上</option></select></label>
+        <label>通知范围 <select id="intelligence-filter-scope"><option value="all">全部已保存资讯</option><option value="important">仅重要资讯</option><option value="daily">仅日报</option></select></label>
+        <label>历史日历 <select id="intelligence-archive-day"><option value="">选择 30 天前日期</option></select></label>
+        <button id="intelligence-archive-request" class="btn-plain" type="button">请求历史回源</button>
+        <button id="intelligence-archive-retry" class="btn-plain" type="button" hidden>重试下载</button>
+        <p id="intelligence-archive-status" aria-live="polite">历史回源仅在手动选择日期后请求；下载校验并保存成功才会确认。</p>
+      </section>
       <section
         id="intelligence-digest-history"
         class="intelligence-digest-history"
@@ -4874,7 +4872,7 @@
       >
         <header class="intelligence-audit-head">
           <div>
-            <div class="intelligence-panel-label">本机人工核查 · 六阶段流程</div>
+            <div class="intelligence-panel-label">本机人工核查 · 九阶段流程</div>
             <h2>情报处理工作台</h2>
             <p>从采集到成稿按一条流程查看。点击一个阶段，只加载该阶段的核查记录；不展示正文、网址、本机路径或模型密钥。</p>
           </div>
@@ -4901,59 +4899,62 @@
       <div id="intelligence-standard-view" class="intelligence-workspace-grid">
         <aside class="intelligence-source-rail" aria-label="情报处理链路">
           <section class="intelligence-stage-card intelligence-stage-horizon">
-            <div class="intelligence-stage-label">本机处理链路</div>
-            <h2 id="intelligence-processing-summary">等待资讯</h2>
-            <p>公开来源先去重与过滤，再提交有限的事件候选给本机模型；未进入简报的资料仍留在本机快照。</p>
+            <div class="intelligence-stage-label">正式分发缓存</div>
+            <h2 id="intelligence-processing-summary">等待已保存资讯</h2>
+            <p>只显示当前账户已经完整保存和校验的日报与事件。刷新时由原生层处理下载、图片校验和确认；本页不启动任何采集或模型任务。</p>
             <div class="intelligence-stage-pills" aria-label="Horizon 数据处理">
-              <span>采集</span><span>去重</span><span>候选</span><span>简报</span>
+              <span>账号隔离</span><span>正文校验</span><span>图片校验</span><span>确认</span>
             </div>
           </section>
           <section class="intelligence-stage-card intelligence-stage-world">
-            <div class="intelligence-stage-label">本机 Qwen 27B Q3</div>
-            <h2 id="intelligence-briefing-model-status">尚未配置</h2>
-            <p>仅接受本机 OpenAI 兼容服务；模型响应必须引用现有候选事件，失败时自动回退为规则候选。</p>
-            <label class="intelligence-model-field" for="intelligence-local-model-base-url">接口地址
+            <div class="intelligence-stage-label">阅读边界</div>
+            <h2 id="intelligence-briefing-model-status">本机缓存阅读模式</h2>
+            <p>综合正文、配图、视频入口和段落“注”均来自已校验的正式发布包。不会上传阅读内容、原始档案、模型提示词、推理或凭据。</p>
+            <label class="intelligence-model-field" for="intelligence-local-model-base-url" hidden>接口地址
               <input id="intelligence-local-model-base-url" type="url" value="http://127.0.0.1:8080/v1" autocomplete="off">
             </label>
-            <label class="intelligence-model-field" for="intelligence-local-model-name">模型名
-              <input id="intelligence-local-model-name" type="text" value="Qwen3.5-27B-Q3_K_M" autocomplete="off">
+            <label class="intelligence-model-field" for="intelligence-local-model-name" hidden>本地生成模型
+              <select id="intelligence-local-model-name" disabled>
+                <option id="intelligence-local-model-qwen27b" value="Qwen3.8-27B-UD-Q3_K_XL" disabled>千问 27B（最新版 · 16GB 显存版）· 正在检测显卡</option>
+              </select>
             </label>
-            <label class="intelligence-model-field" for="intelligence-event-judge-base-url">事件判定小模型接口（可选）
+            <p id="intelligence-local-model-requirement" class="intelligence-model-requirement" role="status" hidden></p>
+            <label class="intelligence-model-field" for="intelligence-event-judge-base-url" hidden>7B/8B 小模型接口
               <input id="intelligence-event-judge-base-url" type="url" placeholder="http://127.0.0.1:8081/v1" autocomplete="off">
             </label>
-            <label class="intelligence-model-field" for="intelligence-event-judge-model">事件判定小模型名（可选）
-              <input id="intelligence-event-judge-model" type="text" placeholder="例如 Qwen3.5-4B-Instruct" autocomplete="off">
+            <label class="intelligence-model-field" for="intelligence-event-judge-model" hidden>7B/8B 小模型名
+              <input id="intelligence-event-judge-model" type="text" placeholder="例如 Qwen 7B/8B Instruct Q4_K_M" autocomplete="off">
             </label>
-            <label class="intelligence-model-field" for="intelligence-local-model-key">接口密钥（可留空）
+            <label class="intelligence-model-field" for="intelligence-local-model-key" hidden>接口密钥（可留空）
               <input id="intelligence-local-model-key" type="password" autocomplete="off">
             </label>
-            <button id="intelligence-local-model-save" class="btn-plain" type="button">保存本机模型</button>
+            <button id="intelligence-local-model-save" class="btn-plain" type="button" hidden>保存本机模型</button>
           </section>
         </aside>
         <main class="intelligence-main-panel">
           <section class="intelligence-main-head">
             <div>
-              <div class="intelligence-panel-label">综合简报 · 本机 Qwen 27B Q3</div>
-              <h2>今日热点要点</h2>
-              <p id="intelligence-briefing-count">等待候选事件…</p>
+              <div class="intelligence-panel-label">综合正文 · 已校验发布包</div>
+              <h2>最近 30 天账号资讯</h2>
+              <p id="intelligence-briefing-count">等待已保存资讯…</p>
             </div>
           </section>
           <div id="intelligence-digest-list" class="intelligence-digest-list" aria-live="polite"></div>
         </main>
         <aside class="intelligence-context-panel" aria-label="事件简报依据">
           <section class="intelligence-context-card intelligence-signal-card">
-            <div class="intelligence-panel-label">规则候选</div>
-            <h2>候选事件</h2>
+            <div class="intelligence-panel-label">已保存资讯</div>
+            <h2>日报与事件</h2>
             <div id="intelligence-signal-list" class="intelligence-signal-list"></div>
           </section>
           <section class="intelligence-context-card intelligence-rag-card">
-            <div class="intelligence-panel-label">简报依据</div>
-            <h2 id="intelligence-context-title">选择一个热点</h2>
-            <p id="intelligence-context-body">模型简报只基于当前候选的公开资讯与来源证据；不会读取或上传书籍。</p>
+            <div class="intelligence-panel-label">正文与引用</div>
+            <h2 id="intelligence-context-title">选择一条已保存资讯</h2>
+            <p id="intelligence-context-body">打开后可阅读综合正文、查看已校验配图，并通过段落“注”打开公开来源；不会读取或上传书籍。</p>
             <p id="intelligence-context-meta" class="intelligence-context-meta"></p>
             <ul id="intelligence-context-reasons" class="intelligence-context-reasons"></ul>
             <div id="intelligence-context-evidence" class="intelligence-context-evidence"></div>
-            <button id="intelligence-open-news" class="btn-primary" type="button" disabled>查看代表原文</button>
+            <button id="intelligence-open-news" class="btn-primary" type="button" disabled>打开综合报道</button>
           </section>
         </aside>
       </div>
@@ -5115,8 +5116,8 @@
     <script src="generated-ts/shelf-ui-rules.js"></script>
     <script src="generated-ts/shelf-cover-loading-rules.js"></script>
     <script src="generated-ts/shelf-ui.js"></script>
+    <script src="generated-ts/favorites-ui.js"></script>
     <script src="generated-ts/reader-shell-preload-ui.js"></script>
-    <script src="generated-ts/booklist-settings-ui.js"></script>
     <script src="generated-ts/settings-layout-ui.js"></script>
     <script src="generated-ts/toolbar-settings-ui.js"></script>
     <script src="generated-ts/book-info-panel.js"></script>
