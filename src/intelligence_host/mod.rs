@@ -41,6 +41,7 @@ const WORKSTATION_ACTIVE_LOOP_INTERVAL: Duration = Duration::from_secs(30);
 /// need the GPU.
 const FULL_TEXT_BACKLOG_YIELD_THRESHOLD: u64 = 512;
 const BACKLOG_MODEL_STAGE_LIMIT: u16 = 24;
+const EXPANDED_BACKFILL_BATCHES_PER_RUN: u8 = 8;
 const JUDGE_8B_SHA256: &str = "D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785";
 const EMBEDDING_06_SHA256: &str =
     "06507C7B42688469C4E7298B0A1E16DEFF06CAF291CF0A5B278C308249C3E439";
@@ -118,6 +119,19 @@ fn balanced_model_stage_limit(configured_limit: u16, awaiting_full_text: u64) ->
         configured_limit.min(BACKLOG_MODEL_STAGE_LIMIT).max(1)
     } else {
         configured_limit.max(1)
+    }
+}
+
+/// Preserve an explicit operator increase, while preventing legacy host
+/// configurations (whose former default was four batches) from making a large
+/// first-pass evidence backlog wait behind GPU work. The worker still applies
+/// per-host fairness, retry windows and the eight-request concurrency ceiling.
+fn backfill_batch_limit(configured_limit: u8, awaiting_full_text: u64) -> u8 {
+    let configured_limit = configured_limit.max(1);
+    if awaiting_full_text >= FULL_TEXT_BACKLOG_YIELD_THRESHOLD {
+        configured_limit.max(EXPANDED_BACKFILL_BATCHES_PER_RUN)
+    } else {
+        configured_limit
     }
 }
 
@@ -1942,7 +1956,11 @@ fn run_once_with_audit(
         begin_audit_stage(audit_path, audit, "full_text_backfill")?;
         let mut backfill_completed = true;
         let backfill_pass_id = uuid::Uuid::new_v4().to_string();
-        for _ in 0..configuration.max_backfill_batches_per_run.max(1) {
+        let awaiting_full_text = status(configuration, None, false).awaiting_full_text_count;
+        for _ in 0..backfill_batch_limit(
+            configuration.max_backfill_batches_per_run,
+            awaiting_full_text,
+        ) {
             let backfill = child_output_args_with_backfill_pass(
                 configuration,
                 &["--backfill-content-once"],
@@ -2309,6 +2327,17 @@ mod tests {
         );
         assert_eq!(balanced_model_stage_limit(8, 10_000), 8);
         assert_eq!(balanced_model_stage_limit(0, 10_000), 1);
+    }
+
+    #[test]
+    fn large_full_text_backlog_upgrades_legacy_backfill_budget() {
+        assert_eq!(backfill_batch_limit(4, 0), 4);
+        assert_eq!(
+            backfill_batch_limit(4, FULL_TEXT_BACKLOG_YIELD_THRESHOLD),
+            EXPANDED_BACKFILL_BATCHES_PER_RUN
+        );
+        assert_eq!(backfill_batch_limit(12, 10_000), 12);
+        assert_eq!(backfill_batch_limit(0, 0), 1);
     }
 
     #[test]
