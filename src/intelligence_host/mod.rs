@@ -172,6 +172,11 @@ pub(crate) struct HostStatus {
     /// dashboard never presents a 7k archive repair backlog as a handful of
     /// current candidates.
     historical_backfill_count: u64,
+    /// Current article revisions that still lack complete evidence, while an
+    /// older revision of the same article remains archived.  This makes the
+    /// version boundary visible without silently treating stale evidence as
+    /// current model input.
+    evidence_version_mismatch_count: u64,
     /// Aggregate-only evidence-acquisition health.  This deliberately keeps
     /// per-article retry scheduling distinct from per-publisher protection:
     /// the workbench must never disclose an article URL or a publisher host
@@ -1286,6 +1291,7 @@ fn status(
         ready_for_triage_count: 0,
         awaiting_full_text_count: 0,
         historical_backfill_count: 0,
+        evidence_version_mismatch_count: 0,
         full_text_backfill: FullTextBackfillHealth::default(),
         ready_for_relation_count: 0,
         ready_for_editorial_count: 0,
@@ -1427,7 +1433,35 @@ fn status(
         )
         .unwrap_or(0);
     result.full_text_backfill = full_text_backfill_health(&connection, unix_millis());
+    result.evidence_version_mismatch_count = evidence_version_mismatch_count(&connection);
     result
+}
+
+fn evidence_version_mismatch_count(connection: &Connection) -> u64 {
+    if !sqlite_table_exists(connection, "intelligence_articles")
+        || !sqlite_table_exists(connection, "intelligence_article_content_versions")
+    {
+        return 0;
+    }
+    connection
+        .query_row(
+            "SELECT COALESCE(SUM(CASE WHEN NOT EXISTS (
+                 SELECT 1 FROM intelligence_article_content_versions current_content
+                 WHERE current_content.article_id=a.article_id
+                   AND current_content.record_fingerprint=a.fingerprint
+                   AND current_content.is_current=1
+                   AND current_content.body_status='complete'
+               ) AND EXISTS (
+                 SELECT 1 FROM intelligence_article_content_versions old_content
+                 WHERE old_content.article_id=a.article_id
+                   AND old_content.record_fingerprint<>a.fingerprint
+                   AND old_content.body_status='complete'
+               ) THEN 1 ELSE 0 END),0)
+             FROM intelligence_articles a",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .unwrap_or(0)
 }
 
 const FULL_TEXT_BACKFILL_FAILURE_CATEGORIES: &[&str] = &[
@@ -1682,7 +1716,16 @@ fn child_output_args_with_backfill_pass(
         .args(args)
         .args(crate::profile::child_profile_args())
         .env("KUNPENG_INTELLIGENCE_WORKER_ENABLED", "1");
-
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // Each host round runs short-lived workers. Their JSON output is
+        // captured below, so Windows must not create a visible console for
+        // every collection or backfill batch.
+        command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
     if let Some(pass_id) = backfill_pass_id {
         command.env("KUNPENG_INTELLIGENCE_BACKFILL_PASS_ID", pass_id);
     }
@@ -2497,6 +2540,26 @@ mod tests {
         let encoded = serde_json::to_string(&health).unwrap();
         assert!(!encoded.contains("redacted.invalid"));
         assert!(!encoded.contains("/ready"));
+    }
+
+    #[test]
+    fn evidence_version_mismatch_keeps_old_complete_body_visible_without_reusing_it() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE intelligence_articles(article_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL);
+                 CREATE TABLE intelligence_article_content_versions(
+                     article_id TEXT,record_fingerprint TEXT,is_current INTEGER,body_status TEXT
+                 );
+                 INSERT INTO intelligence_articles(article_id,fingerprint) VALUES
+                    ('revised','new-fingerprint'),('complete','same-fingerprint'),('missing','none');
+                 INSERT INTO intelligence_article_content_versions(article_id,record_fingerprint,is_current,body_status) VALUES
+                    ('revised','old-fingerprint',0,'complete'),
+                    ('revised','new-fingerprint',1,'unavailable'),
+                    ('complete','same-fingerprint',1,'complete');",
+            )
+            .unwrap();
+        assert_eq!(evidence_version_mismatch_count(&connection), 1);
     }
 
     #[test]

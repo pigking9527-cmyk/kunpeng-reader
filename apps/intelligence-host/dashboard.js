@@ -112,20 +112,20 @@ function render(status) {
   if (status.lastError) state.textContent = String(status.lastError);
   updated.textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
   metrics.replaceChildren(
-    metric("永久归档", status.articleCount, `完整正文 ${status.fullTextCount} 篇`),
-    metric("可回填全文", waitingFullText, "有公开来源、等待归档正文"),
-    metric("当前候选缺正文", status.awaitingFullTextCount, "模型队列在 8B 前被正文阻塞"),
+    metric("永久归档", status.articleCount, `当前版本完整证据 ${status.fullTextCount} 篇`),
+    metric("待补全文", waitingFullText, "有公开来源、等待归档正文"),
+    metric("版本变更待核验", status.evidenceVersionMismatchCount || 0, "保留旧正文，不把它当作当前版本证据"),
     metric("文章级可重试", fullTextHealth.retryableNowCount || 0, `退避中 ${fullTextHealth.delayedCount || 0} 篇`),
     metric("来源健康", `${fullTextHealth.healthySourceCount || 0}/${fullTextHealth.knownSourceCount || 0}`, `降级 ${fullTextHealth.degradedSourceCount || 0} · 熔断 ${fullTextHealth.circuitOpenSourceCount || 0}`),
     metric("模型候选总数", status.queuedCount, `其中待 8B 初筛 ${status.readyForTriageCount} 篇`),
-    metric("历史归档缺正文", status.historicalBackfillCount, "不进入当前模型队列；与可回填口径独立"),
+    metric("历史归档补全", status.historicalBackfillCount, "不进入当前模型队列"),
     metric("待关系判断", status.readyForRelationCount, "已完成初筛，等待 8B 关系核验"),
     metric("待 27B 综合", status.readyForEditorialCount, `已生成事件 ${status.processedCount}`),
     metric("保留", status.keptCount, `已过滤 ${status.filteredCount} 篇`),
     metric("持续处理", continuousActive ? "运行中" : status.enabled ? "待启动" : "已停止", status.launchAtLogin ? "登录 Windows 后继续" : "仅本次后台运行"),
     metric("主机组件", status.workerAvailable ? 1 : 0, status.configurationReady ? "来源与模型已配置" : "配置尚未完成"),
   );
-  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；有公开来源、可回填全文 ${waitingFullText} 篇，文章级可重试 ${fullTextHealth.retryableNowCount || 0} 篇、退避中 ${fullTextHealth.delayedCount || 0} 篇。当前模型候选缺正文 ${Number(status.awaitingFullTextCount) || 0} 篇；历史归档缺正文 ${Number(status.historicalBackfillCount) || 0} 篇，这两项按模型状态统计，可能与可回填队列不同。已观测来源 ${fullTextHealth.knownSourceCount || 0} 个：健康 ${fullTextHealth.healthySourceCount || 0}、降级 ${fullTextHealth.degradedSourceCount || 0}、熔断 ${fullTextHealth.circuitOpenSourceCount || 0}；不显示来源名称。失败分类：${formatBackfillFailures(fullTextHealth)}。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
+  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；当前版本完整证据 ${Number(status.fullTextCount) || 0} 篇，${waitingFullText} 篇等待全文补全，其中 ${Number(status.evidenceVersionMismatchCount) || 0} 篇保留旧版本正文但必须重新核验。文章级可重试 ${fullTextHealth.retryableNowCount || 0} 篇、退避中 ${fullTextHealth.delayedCount || 0} 篇。已观测来源 ${fullTextHealth.knownSourceCount || 0} 个：健康 ${fullTextHealth.healthySourceCount || 0}、降级 ${fullTextHealth.degradedSourceCount || 0}、熔断 ${fullTextHealth.circuitOpenSourceCount || 0}；不显示来源名称。失败分类：${formatBackfillFailures(fullTextHealth)}。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
   byId("triage-detail").textContent = `待初筛 ${status.readyForTriageCount} 篇；已完成关系判断、等待综合 ${status.readyForEditorialCount} 篇。`;
   byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件；发布状态由登录账户的主机配对决定。`;
   runSummary.textContent = status.auditRun ? formatAuditRun(status.auditRun) : formatRun(status.lastRun);
