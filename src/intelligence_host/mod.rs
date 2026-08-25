@@ -35,6 +35,11 @@ const CONFIG_VERSION: u8 = 1;
 const MAX_STAGE_RUNS: u16 = 500;
 const WORKSTATION_LOOP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const WORKSTATION_ACTIVE_LOOP_INTERVAL: Duration = Duration::from_secs(30);
+/// Full-text retrieval is an evidence-only lane.  It deliberately wakes more
+/// often than the editorial pipeline so a several-thousand-item historical
+/// archive can keep moving without waiting for the next 8B/27B round.
+const FULL_TEXT_BACKFILL_ACTIVE_INTERVAL: Duration = Duration::from_secs(5);
+const FULL_TEXT_BACKFILL_IDLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// When a substantial evidence backlog remains, one unattended round must
 /// yield back to fetch work promptly.  Otherwise a slow 8B relation batch can
 /// make the full-text queue appear stuck even though retrieval itself does not
@@ -42,6 +47,14 @@ const WORKSTATION_ACTIVE_LOOP_INTERVAL: Duration = Duration::from_secs(30);
 const FULL_TEXT_BACKLOG_YIELD_THRESHOLD: u64 = 512;
 const BACKLOG_MODEL_STAGE_LIMIT: u16 = 24;
 const EXPANDED_BACKFILL_BATCHES_PER_RUN: u8 = 8;
+/// Completed relation work is already durable.  Once a real editorial backlog
+/// exists, a small bounded group prevents a legacy "one article per round"
+/// setting from stretching a healthy 27B queue over many days.
+const BACKLOG_EDITORIAL_BATCH_LIMIT: u16 = 4;
+/// The independent scheduler yields the shared SQLite writer after at most
+/// two bounded worker batches.  Larger limits would simply move the old
+/// starvation problem from the model lane to the backfill lane.
+const BACKGROUND_BACKFILL_BATCHES_PER_CYCLE: u8 = 2;
 const JUDGE_8B_SHA256: &str = "D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785";
 const EMBEDDING_06_SHA256: &str =
     "06507C7B42688469C4E7298B0A1E16DEFF06CAF291CF0A5B278C308249C3E439";
@@ -132,6 +145,45 @@ fn backfill_batch_limit(configured_limit: u8, awaiting_full_text: u64) -> u8 {
         configured_limit.max(EXPANDED_BACKFILL_BATCHES_PER_RUN)
     } else {
         configured_limit
+    }
+}
+
+/// The independent evidence scheduler must be responsive to both the large
+/// historical backlog and the interactive model pipeline.  It performs one
+/// bounded batch for ordinary new work and, once the durable waiting queue is
+/// substantial, two batches before releasing the shared pipeline lock.  The
+/// worker retains the real per-source concurrency/circuit-breaker policy.
+fn background_backfill_batch_limit(configured_limit: u8, awaiting_full_text: u64) -> u8 {
+    if awaiting_full_text == 0 {
+        return 0;
+    }
+    let configured_limit = configured_limit.max(1);
+    if awaiting_full_text >= FULL_TEXT_BACKLOG_YIELD_THRESHOLD {
+        configured_limit.min(BACKGROUND_BACKFILL_BATCHES_PER_CYCLE)
+    } else {
+        1
+    }
+}
+
+fn editorial_batch_limit(configured_limit: u16, ready_for_editorial: u64) -> u16 {
+    let configured_limit = configured_limit.max(1);
+    if ready_for_editorial >= FULL_TEXT_BACKLOG_YIELD_THRESHOLD {
+        configured_limit.max(BACKLOG_EDITORIAL_BATCH_LIMIT)
+    } else {
+        configured_limit
+    }
+}
+
+/// Versions before the independent evidence lane saved conservative defaults
+/// (one editorial item and four evidence batches).  There is no operator UI
+/// for these internal values, so migrate only those old defaults; a higher
+/// future operator value is preserved.
+fn upgrade_legacy_throughput_limits(configuration: &mut HostConfiguration) {
+    if configuration.max_editorial_per_run == 1 {
+        configuration.max_editorial_per_run = default_editorial_limit();
+    }
+    if configuration.max_backfill_batches_per_run < default_backfill_batches_per_run() {
+        configuration.max_backfill_batches_per_run = default_backfill_batches_per_run();
     }
 }
 
@@ -909,6 +961,7 @@ pub(super) fn start_continuous_processing(launch_at_login: bool) -> Result<(), S
         return Err("请先初始化并配置资讯来源，再启动持续处理".into());
     }
     let mut configuration = original.clone();
+    upgrade_legacy_throughput_limits(&mut configuration);
     configuration.enabled = true;
     configuration.launch_at_login = launch_at_login;
     write_configuration(&configuration)?;
@@ -916,7 +969,7 @@ pub(super) fn start_continuous_processing(launch_at_login: bool) -> Result<(), S
         let _ = write_configuration(&original);
         return Err(error);
     }
-    if let Err(error) = spawn_continuous_loop() {
+    if let Err(error) = spawn_continuous_workers() {
         let _ = configure_login_startup(original.launch_at_login);
         let _ = write_configuration(&original);
         return Err(error);
@@ -941,7 +994,16 @@ pub(super) fn stop_continuous_processing() -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_continuous_loop() -> Result<(), String> {
+/// Starts the two independent, no-window background lanes.  The backfill lane
+/// owns only public-body acquisition; all SQLite-mutating worker invocations
+/// still acquire the shared `Pipeline` guard, so it can never race collection,
+/// 8B relation work, or 27B synthesis.
+fn spawn_continuous_workers() -> Result<(), String> {
+    spawn_background_host("--backfill-loop")?;
+    spawn_background_host("--loop")
+}
+
+fn spawn_background_host(mode: &str) -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|_| "无法定位本机情报主机程序")?
         .canonicalize()
@@ -949,7 +1011,7 @@ fn spawn_continuous_loop() -> Result<(), String> {
     let mut command = Command::new(executable);
     command
         .args(profile::child_profile_args())
-        .arg("--loop")
+        .arg(mode)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1950,48 +2012,12 @@ fn run_once_with_audit(
             duplicates: number(&collected, "duplicates"),
             ..RunReport::default()
         };
-        // Conditional feed requests may return 304 even while legacy records lack
-        // permanent full text. Backfill is bounded and evidence-only: it never
-        // creates a new item or requeues a previously judged article.
-        begin_audit_stage(audit_path, audit, "full_text_backfill")?;
-        let mut backfill_completed = true;
-        let backfill_pass_id = uuid::Uuid::new_v4().to_string();
-        let awaiting_full_text = status(configuration, None, false).awaiting_full_text_count;
-        for _ in 0..backfill_batch_limit(
-            configuration.max_backfill_batches_per_run,
-            awaiting_full_text,
-        ) {
-            let backfill = child_output_args_with_backfill_pass(
-                configuration,
-                &["--backfill-content-once"],
-                BACKFILL_TIMEOUT,
-                Some(&backfill_pass_id),
-            )?;
-            report.backfilled += number(&backfill, "backfilled");
-            report.backfill_retried += number(&backfill, "backfillRetried");
-            if text(&backfill, "outcome") != "content_backfilled" {
-                backfill_completed = false;
-                break;
-            }
-            // An empty batch means the durable eligible queue is drained for
-            // now. Avoid launching three redundant worker processes.
-            if number(&backfill, "backfillAttempted") == 0 {
-                break;
-            }
-        }
         let collection_completed = report.collection == "collected";
-        if !collection_completed || !backfill_completed {
-            report.outcome = if !collection_completed && !backfill_completed {
-                "collection_and_backfill_incomplete"
-            } else if !collection_completed {
-                "collection_incomplete"
-            } else {
-                "content_backfill_incomplete"
-            }
-            .into();
-            // Do not launch model work after an evidence-stage failure: the
-            // next round can safely retry it, while this round has still made
-            // its bounded backfill attempt and reported both outcomes.
+        if !collection_completed {
+            report.outcome = "collection_incomplete".into();
+            // Full-text repair has its own durable scheduler. A collection
+            // failure must still keep the model lane fail-closed for this
+            // round, but evidence retries do not depend on 8B/27B availability.
             return Ok(report);
         }
         if !model_processing_ready(configuration) {
@@ -2091,7 +2117,11 @@ fn run_once_with_audit(
                     }
                 }
                 if report.outcome != "editorial_runtime_unavailable" {
-                    for _ in 0..configuration.max_editorial_per_run {
+                    let editorial_limit = editorial_batch_limit(
+                        configuration.max_editorial_per_run,
+                        status(configuration, None, false).ready_for_editorial_count,
+                    );
+                    for _ in 0..editorial_limit {
                         if status(configuration, None, false).ready_for_editorial_count == 0 {
                             break;
                         }
@@ -2144,6 +2174,94 @@ fn run_once_with_audit(
         report.distribution_service = distribution_service;
         report
     })
+}
+
+/// Performs a small, evidence-only slice while holding the same guard used by
+/// the collection/model pipeline. `Ok(false)` means the main pipeline owns
+/// the guard at the moment, so the scheduler yielded without starting a
+/// worker. This is intentional: SQLite writes are never concurrent.
+fn run_backfill_scheduler_cycle(configuration: &HostConfiguration) -> Result<bool, String> {
+    if !configuration.enabled || configuration.sources_file.is_none() {
+        return Ok(false);
+    }
+    let Some(_pipeline_guard) = acquire_host_guard("Pipeline")? else {
+        return Ok(false);
+    };
+    let awaiting_full_text = status(configuration, None, false).awaiting_full_text_count;
+    let batch_limit = background_backfill_batch_limit(
+        configuration.max_backfill_batches_per_run,
+        awaiting_full_text,
+    );
+    if batch_limit == 0 {
+        return Ok(false);
+    }
+    let backfill_pass_id = uuid::Uuid::new_v4().to_string();
+    let mut attempted_work = false;
+    for _ in 0..batch_limit {
+        let value = child_output_args_with_backfill_pass(
+            configuration,
+            &["--backfill-content-once"],
+            BACKFILL_TIMEOUT,
+            Some(&backfill_pass_id),
+        )?;
+        if text(&value, "outcome") != "content_backfilled" {
+            return Err("本机情报正文补全未成功完成本轮任务".into());
+        }
+        let attempted = number(&value, "backfillAttempted");
+        attempted_work |= attempted > 0;
+        // The worker has no currently eligible rows. Do not consume the
+        // scheduler's writer turn with another identical no-op invocation.
+        if attempted == 0 {
+            break;
+        }
+    }
+    Ok(attempted_work)
+}
+
+/// Dedicated no-window loop for public full-text repair. It intentionally
+/// does not start or stop any GPU runtime. A transient download/SQLite error
+/// is retried in a later slice and never prevents the ordinary collection,
+/// 8B or 27B loop from continuing.
+fn run_backfill_loop() -> i32 {
+    let Some(_backfill_guard) = (match acquire_host_guard("Backfill") {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    }) else {
+        println!(
+            "{}",
+            serde_json::json!({"ok": true, "outcome": "backfill_already_running"})
+        );
+        return 0;
+    };
+    loop {
+        let configuration = match read_configuration() {
+            Ok(configuration) if configuration.enabled => configuration,
+            Ok(_) => return 0,
+            Err(_) => {
+                std::thread::sleep(FULL_TEXT_BACKFILL_ACTIVE_INTERVAL);
+                continue;
+            }
+        };
+        let _ = run_backfill_scheduler_cycle(&configuration);
+        let waiting = status(&configuration, None, false).awaiting_full_text_count;
+        let interval = if waiting > 0 {
+            FULL_TEXT_BACKFILL_ACTIVE_INTERVAL
+        } else {
+            FULL_TEXT_BACKFILL_IDLE_INTERVAL
+        };
+        let mut remaining = interval;
+        while remaining > Duration::ZERO {
+            let step = remaining.min(Duration::from_secs(1));
+            std::thread::sleep(step);
+            remaining = remaining.saturating_sub(step);
+            if !read_configuration().is_ok_and(|configuration| configuration.enabled) {
+                return 0;
+            }
+        }
+    }
 }
 
 /// Long-running no-UI mode for a dedicated host machine. Configuration is
@@ -2291,8 +2409,9 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
             }
         }
         "--loop" if arguments.len() == 1 => run_loop(),
+        "--backfill-loop" if arguments.len() == 1 => run_backfill_loop(),
         _ => {
-            eprintln!("用法：kunpeng-intelligence-host --init|--status|--run-once|--dashboard [端口]|--loop");
+            eprintln!("用法：kunpeng-intelligence-host --init|--status|--run-once|--dashboard [端口]|--loop|--backfill-loop");
             2
         }
     }
@@ -2341,12 +2460,56 @@ mod tests {
     }
 
     #[test]
+    fn editorial_backlog_uses_a_bounded_batch_and_migrates_legacy_defaults() {
+        assert_eq!(editorial_batch_limit(2, 0), 2);
+        assert_eq!(
+            editorial_batch_limit(2, FULL_TEXT_BACKLOG_YIELD_THRESHOLD),
+            BACKLOG_EDITORIAL_BATCH_LIMIT
+        );
+        assert_eq!(editorial_batch_limit(8, 10_000), 8);
+
+        let mut legacy = HostConfiguration {
+            max_editorial_per_run: 1,
+            max_backfill_batches_per_run: 4,
+            ..HostConfiguration::default()
+        };
+        upgrade_legacy_throughput_limits(&mut legacy);
+        assert_eq!(legacy.max_editorial_per_run, default_editorial_limit());
+        assert_eq!(
+            legacy.max_backfill_batches_per_run,
+            default_backfill_batches_per_run()
+        );
+    }
+
+    #[test]
+    fn independent_backfill_scheduler_is_adaptive_but_yields_the_writer() {
+        assert_eq!(background_backfill_batch_limit(8, 0), 0);
+        assert_eq!(background_backfill_batch_limit(8, 1), 1);
+        assert_eq!(
+            background_backfill_batch_limit(8, FULL_TEXT_BACKLOG_YIELD_THRESHOLD),
+            BACKGROUND_BACKFILL_BATCHES_PER_CYCLE
+        );
+        assert_eq!(
+            background_backfill_batch_limit(1, FULL_TEXT_BACKLOG_YIELD_THRESHOLD),
+            1
+        );
+        assert_eq!(
+            background_backfill_batch_limit(40, FULL_TEXT_BACKLOG_YIELD_THRESHOLD + 1),
+            BACKGROUND_BACKFILL_BATCHES_PER_CYCLE
+        );
+    }
+
+    #[test]
     fn host_loop_and_manual_pipeline_guards_are_distinct_and_profile_scoped() {
         let loop_name = host_mutex_name("Loop");
         let pipeline_name = host_mutex_name("Pipeline");
+        let backfill_name = host_mutex_name("Backfill");
         assert!(loop_name.starts_with("Local\\KunpengIntelligenceHostLoopV1"));
         assert!(pipeline_name.starts_with("Local\\KunpengIntelligenceHostPipelineV1"));
+        assert!(backfill_name.starts_with("Local\\KunpengIntelligenceHostBackfillV1"));
         assert_ne!(loop_name, pipeline_name);
+        assert_ne!(loop_name, backfill_name);
+        assert_ne!(pipeline_name, backfill_name);
     }
 
     #[test]
