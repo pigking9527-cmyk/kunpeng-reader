@@ -50,9 +50,10 @@ const MAX_GOOGLE_WRAPPER_HTML_SCAN_BYTES: usize = 256 * 1024;
 /// A background round must make meaningful progress through a historical
 /// archive, but it must not turn a single host into an unbounded crawler.
 /// Fetches are split into origin-fair waves below: at most one request to an
-/// origin is in flight in a wave, and no more than four public origins are
-/// fetched at once.  A lone origin therefore retains the previous sequential
-/// safety property while a mixed-source backlog can use the available time.
+/// origin is in flight in a wave, and no more than eight public origins are
+/// fetched at once. A lone origin therefore retains the sequential safety
+/// property while a mixed-source backlog can use the available time. Durable
+/// per-source intervals and circuit breakers still protect slow publishers.
 const MAX_CONTENT_BACKFILL_PER_RUN: usize = 32;
 const MAX_CONTENT_BACKFILL_CANDIDATE_SCAN: usize = 128;
 // Reserve half of the durable candidate page for the newest evidence gaps and
@@ -61,7 +62,7 @@ const MAX_CONTENT_BACKFILL_CANDIDATE_SCAN: usize = 128;
 const MAX_CONTENT_BACKFILL_NEWEST_SCAN: usize = MAX_CONTENT_BACKFILL_CANDIDATE_SCAN / 2;
 const MAX_CONTENT_BACKFILL_OLDEST_SCAN: usize =
     MAX_CONTENT_BACKFILL_CANDIDATE_SCAN - MAX_CONTENT_BACKFILL_NEWEST_SCAN;
-const MAX_CONTENT_BACKFILL_PARALLEL_FETCHES: usize = 4;
+const MAX_CONTENT_BACKFILL_PARALLEL_FETCHES: usize = 8;
 const CONTENT_BACKFILL_BASE_DELAY_MS: i64 = 30_000;
 const CONTENT_BACKFILL_MAX_DELAY_MS: i64 = 3_600_000;
 // A 403, confirmed missing page, or persistent paywall will not become
@@ -3421,7 +3422,9 @@ mod tests {
         ];
         let waves = backfill_fetch_waves(candidates.clone());
         assert_eq!(waves.len(), 2);
-        assert_eq!(waves[0].len(), MAX_CONTENT_BACKFILL_PARALLEL_FETCHES);
+        assert!(waves
+            .iter()
+            .all(|wave| wave.len() <= MAX_CONTENT_BACKFILL_PARALLEL_FETCHES));
         let flattened = waves
             .iter()
             .flat_map(|wave| wave.iter().map(|candidate| candidate.article_id.clone()))
