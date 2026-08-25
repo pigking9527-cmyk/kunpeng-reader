@@ -2360,14 +2360,30 @@ fn next_content_backfill_candidates_for_pass(
             oldest.push(candidate);
         }
     }
-    let fair = fair_backfill_candidates(interleave_fresh_and_historical_backfill(newest, oldest));
-    let mut eligible = Vec::with_capacity(fair.len());
-    for candidate in fair {
+    // Check durable publisher circuits before applying the fixed batch cap.
+    // If this happened after `fair_backfill_candidates`, 32 temporarily
+    // limited publishers could occupy every slot and make the host report an
+    // empty backfill pass even though a later ready publisher was already in
+    // the scanned page.  The later pre-dispatch check remains necessary: a
+    // circuit can open while an earlier wave is in flight.
+    let source_ready = source_ready_backfill_candidates(
+        path,
+        interleave_fresh_and_historical_backfill(newest, oldest),
+    )?;
+    Ok(fair_backfill_candidates(source_ready))
+}
+
+fn source_ready_backfill_candidates(
+    path: &Path,
+    candidates: Vec<ContentBackfillCandidate>,
+) -> Result<Vec<ContentBackfillCandidate>, ()> {
+    let mut source_ready = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
         if content_backfill_host_allowed_at(path, &candidate)? {
-            eligible.push(candidate);
+            source_ready.push(candidate);
         }
     }
-    Ok(eligible)
+    Ok(source_ready)
 }
 
 /// Interleave both durable queue windows before source-fair selection.  Without
@@ -3592,6 +3608,40 @@ mod tests {
         assert_eq!(state, (1, "http_rate_limited".into()));
         record_content_backfill_host_success(&catalog, &second).unwrap();
         assert!(content_backfill_host_allowed_at(&catalog, &first).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn candidate_selection_filters_limited_hosts_before_batch_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-backfill-limited-hosts-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let mut candidates = Vec::new();
+        for index in 0..MAX_CONTENT_BACKFILL_PER_RUN {
+            let candidate = backfill_candidate(
+                &format!("limited-{index}"),
+                &format!("https://limited-{index}.example.test/story"),
+            );
+            record_content_backfill_host_failure(
+                &catalog,
+                &candidate,
+                &ContentBackfillFailure::new("http_rate_limited"),
+            )
+            .unwrap();
+            candidates.push(candidate);
+        }
+        candidates.push(backfill_candidate(
+            "ready-after-limited-hosts",
+            "https://ready.example.test/story",
+        ));
+
+        let source_ready = source_ready_backfill_candidates(&catalog, candidates).unwrap();
+        let selected = fair_backfill_candidates(source_ready);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].article_id, "ready-after-limited-hosts");
         let _ = fs::remove_dir_all(root);
     }
 
