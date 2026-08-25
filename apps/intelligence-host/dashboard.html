@@ -24,12 +24,15 @@
       <section class="action-bar" aria-label="本机主机操作">
         <div>
           <strong>显式操作</strong>
-          <p>打开本页只查看状态。初始化不会启用采集；“执行一轮”才会启动一次抓取、初筛、关系判断、综合和发布。</p>
+          <p>打开本页只查看状态。可执行单轮核查，或启动独立持续处理；持续处理会在本机后台逐轮完成采集、全文、8B、27B 和发布，不与手动处理并发。</p>
         </div>
         <div class="actions">
           <button id="refresh" type="button">刷新状态</button>
           <button id="initialize" type="button" class="secondary">初始化配置</button>
           <button id="run-once" type="button" class="primary">执行一轮处理</button>
+          <label class="loop-login"><input id="continuous-login" type="checkbox" /> 登录 Windows 后继续</label>
+          <button id="continuous-start" type="button" class="primary">启动持续处理</button>
+          <button id="continuous-stop" type="button" class="secondary" disabled>停止持续处理</button>
         </div>
       </section>
 

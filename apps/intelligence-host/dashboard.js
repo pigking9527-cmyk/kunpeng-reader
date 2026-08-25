@@ -7,6 +7,9 @@ const runSummary = byId("run-summary");
 const refresh = byId("refresh");
 const initialize = byId("initialize");
 const runOnce = byId("run-once");
+const continuousLogin = byId("continuous-login");
+const continuousStart = byId("continuous-start");
+const continuousStop = byId("continuous-stop");
 const distributionState = byId("distribution-state");
 const distributionForm = byId("distribution-form");
 const distributionBaseUrl = byId("distribution-base-url");
@@ -97,24 +100,32 @@ function render(status) {
   const fullTextHealth = backfillHealth(status);
   const waitingFullText = Number.isFinite(Number(fullTextHealth.waitingCount))
     ? Number(fullTextHealth.waitingCount) : Number(status.awaitingFullTextCount) || 0;
+  const continuousActive = Boolean(status.continuousProcessingActive);
+  continuousLogin.checked = Boolean(status.launchAtLogin);
+  continuousStart.disabled = continuousActive || Boolean(status.pipelineRunning);
+  continuousStop.disabled = !continuousActive && !Boolean(status.enabled);
+  runOnce.disabled = continuousActive;
   state.textContent = status.pipelineRunning
     ? `本机主机正在处理：${stageLabel(status.currentStage)}`
-    : status.enabled ? "本机主机已就绪" : "主机尚未启用";
+    : continuousActive ? "本机持续处理正在等待下一轮"
+      : status.enabled ? "本机持续处理等待启动" : "主机尚未启用";
   if (status.lastError) state.textContent = String(status.lastError);
   updated.textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
   metrics.replaceChildren(
     metric("永久归档", status.articleCount, `完整正文 ${status.fullTextCount} 篇`),
-    metric("待补全文", waitingFullText, "有公开来源、等待归档正文"),
+    metric("可回填全文", waitingFullText, "有公开来源、等待归档正文"),
+    metric("当前候选缺正文", status.awaitingFullTextCount, "模型队列在 8B 前被正文阻塞"),
     metric("文章级可重试", fullTextHealth.retryableNowCount || 0, `退避中 ${fullTextHealth.delayedCount || 0} 篇`),
     metric("来源健康", `${fullTextHealth.healthySourceCount || 0}/${fullTextHealth.knownSourceCount || 0}`, `降级 ${fullTextHealth.degradedSourceCount || 0} · 熔断 ${fullTextHealth.circuitOpenSourceCount || 0}`),
     metric("模型候选总数", status.queuedCount, `其中待 8B 初筛 ${status.readyForTriageCount} 篇`),
-    metric("历史归档补全", status.historicalBackfillCount, "不进入当前模型队列"),
+    metric("历史归档缺正文", status.historicalBackfillCount, "不进入当前模型队列；与可回填口径独立"),
     metric("待关系判断", status.readyForRelationCount, "已完成初筛，等待 8B 关系核验"),
     metric("待 27B 综合", status.readyForEditorialCount, `已生成事件 ${status.processedCount}`),
     metric("保留", status.keptCount, `已过滤 ${status.filteredCount} 篇`),
+    metric("持续处理", continuousActive ? "运行中" : status.enabled ? "待启动" : "已停止", status.launchAtLogin ? "登录 Windows 后继续" : "仅本次后台运行"),
     metric("主机组件", status.workerAvailable ? 1 : 0, status.configurationReady ? "来源与模型已配置" : "配置尚未完成"),
   );
-  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；${waitingFullText} 篇等待全文补全，文章级可重试 ${fullTextHealth.retryableNowCount || 0} 篇、退避中 ${fullTextHealth.delayedCount || 0} 篇。已观测来源 ${fullTextHealth.knownSourceCount || 0} 个：健康 ${fullTextHealth.healthySourceCount || 0}、降级 ${fullTextHealth.degradedSourceCount || 0}、熔断 ${fullTextHealth.circuitOpenSourceCount || 0}；不显示来源名称。失败分类：${formatBackfillFailures(fullTextHealth)}。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
+  byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；有公开来源、可回填全文 ${waitingFullText} 篇，文章级可重试 ${fullTextHealth.retryableNowCount || 0} 篇、退避中 ${fullTextHealth.delayedCount || 0} 篇。当前模型候选缺正文 ${Number(status.awaitingFullTextCount) || 0} 篇；历史归档缺正文 ${Number(status.historicalBackfillCount) || 0} 篇，这两项按模型状态统计，可能与可回填队列不同。已观测来源 ${fullTextHealth.knownSourceCount || 0} 个：健康 ${fullTextHealth.healthySourceCount || 0}、降级 ${fullTextHealth.degradedSourceCount || 0}、熔断 ${fullTextHealth.circuitOpenSourceCount || 0}；不显示来源名称。失败分类：${formatBackfillFailures(fullTextHealth)}。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
   byId("triage-detail").textContent = `待初筛 ${status.readyForTriageCount} 篇；已完成关系判断、等待综合 ${status.readyForEditorialCount} 篇。`;
   byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件；发布状态由登录账户的主机配对决定。`;
   runSummary.textContent = status.auditRun ? formatAuditRun(status.auditRun) : formatRun(status.lastRun);
@@ -142,6 +153,7 @@ async function getStatus() { const response = await fetch("/api/status", { cache
 async function getDistributionStatus() { const response = await fetch("/api/distribution-status", { cache: "no-store" }); if (!response.ok) throw new Error("distribution unavailable"); return response.json(); }
 async function refreshStatus() { refresh.disabled = true; try { render(await getStatus()); } catch { state.textContent = "无法连接本机主机"; updated.textContent = "请确认本机工作台仍在运行"; } finally { refresh.disabled = false; } }
 async function post(action) { const response = await fetch(action, { method: "POST", headers: { "Content-Type": "application/json", "X-Kunpeng-Host-Dashboard": "1" }, body: "{}" }); if (!response.ok) { const message = await response.text(); throw new Error(message || "操作失败"); } return response.json(); }
+async function postJson(action, body) { const response = await fetch(action, { method: "POST", headers: { "Content-Type": "application/json", "X-Kunpeng-Host-Dashboard": "1" }, body: JSON.stringify(body) }); if (!response.ok) { const message = await response.text(); throw new Error(message || "操作失败"); } return response.json(); }
 function setDistributionNotice(message, error = false) { distributionNotice.textContent = message; distributionNotice.classList.toggle("error", error); }
 function renderDistribution(status) {
   const paired = Boolean(status && status.paired);
@@ -159,6 +171,8 @@ async function refreshDistribution() {
 }
 initialize.addEventListener("click", async () => { initialize.disabled = true; try { await post("/api/initialize"); await refreshStatus(); } catch (error) { state.textContent = `初始化失败：${error.message}`; } finally { initialize.disabled = false; } });
 runOnce.addEventListener("click", async () => { runOnce.disabled = true; try { await post("/api/run-once"); state.textContent = "已开始一轮本机处理，状态会自动刷新"; } catch (error) { state.textContent = `启动失败：${error.message}`; runOnce.disabled = false; return; } setTimeout(() => { runOnce.disabled = false; void refreshStatus(); }, 800); });
+continuousStart.addEventListener("click", async () => { continuousStart.disabled = true; try { await postJson("/api/continuous-start", { launchAtLogin: continuousLogin.checked }); state.textContent = "已启动本机持续处理；页面可关闭，后台会继续按轮处理"; setTimeout(() => { void refreshStatus(); }, 700); } catch (error) { state.textContent = `启动持续处理失败：${error.message}`; continuousStart.disabled = false; } });
+continuousStop.addEventListener("click", async () => { continuousStop.disabled = true; try { await post("/api/continuous-stop"); state.textContent = "本机持续处理将在当前轮完成后停止"; setTimeout(() => { void refreshStatus(); }, 1200); } catch (error) { state.textContent = `停止持续处理失败：${error.message}`; continuousStop.disabled = false; } });
 refresh.addEventListener("click", () => { void refreshStatus(); });
 distributionForm.addEventListener("submit", async (event) => {
   event.preventDefault();

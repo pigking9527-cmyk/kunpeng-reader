@@ -6,7 +6,8 @@
 //! or serves saved article text and source URLs.
 
 use super::{
-    initialize_configuration, read_configuration, run_once, status, HostStatus, RunReport,
+    HostStatus, RunReport, continuous_processing_active, initialize_configuration,
+    read_configuration, run_once, start_continuous_processing, status, stop_continuous_processing,
 };
 use crate::intelligence_worker_lifecycle::{
     self, IntelligenceWorkerCredentialRevokeRequest, IntelligenceWorkerPairingRequest,
@@ -16,8 +17,8 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -59,6 +60,13 @@ struct DashboardPairingRequest {
     base_url: String,
     publish_credential: String,
     relay_credential: String,
+    #[serde(default)]
+    launch_at_login: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DashboardContinuousRequest {
     #[serde(default)]
     launch_at_login: bool,
 }
@@ -128,6 +136,12 @@ fn handle_connection(mut stream: TcpStream, runtime: Arc<DashboardRuntime>) -> R
             }
         }
         ("POST", "/api/run-once") if request.dashboard_header => start_round(&mut stream, runtime),
+        ("POST", "/api/continuous-start") if request.dashboard_header => {
+            start_continuous(&mut stream, &runtime, &request.body)
+        }
+        ("POST", "/api/continuous-stop") if request.dashboard_header => {
+            stop_continuous(&mut stream)
+        }
         ("POST", "/api/distribution-pair") if request.dashboard_header => {
             pair_distribution_worker(&mut stream, &request.body)
         }
@@ -219,6 +233,13 @@ fn revoke_distribution_worker(stream: &mut TcpStream) -> std::io::Result<()> {
 }
 
 fn start_round(stream: &mut TcpStream, runtime: Arc<DashboardRuntime>) -> std::io::Result<()> {
+    if continuous_processing_active() {
+        return write_json(
+            stream,
+            409,
+            serde_json::json!({"error": "本机情报持续处理正在运行；请先停止后再执行手动一轮"}),
+        );
+    }
     if runtime.running.swap(true, Ordering::AcqRel) {
         return write_json(
             stream,
@@ -250,6 +271,49 @@ fn start_round(stream: &mut TcpStream, runtime: Arc<DashboardRuntime>) -> std::i
     write_json(stream, 202, serde_json::json!({"started": true}))
 }
 
+fn start_continuous(
+    stream: &mut TcpStream,
+    runtime: &DashboardRuntime,
+    body: &[u8],
+) -> std::io::Result<()> {
+    if runtime.running.load(Ordering::Acquire) {
+        return write_json(
+            stream,
+            409,
+            serde_json::json!({"error": "当前手动处理尚未完成；请等待本轮结束后再启动持续处理"}),
+        );
+    }
+    let request: DashboardContinuousRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(_) => {
+            return write_json(
+                stream,
+                400,
+                serde_json::json!({"error": "持续处理启动参数无效"}),
+            )
+        }
+    };
+    match start_continuous_processing(request.launch_at_login) {
+        Ok(()) => write_json(stream, 202, serde_json::json!({"started": true})),
+        Err(_) => write_json(
+            stream,
+            400,
+            serde_json::json!({"error": "无法启动本机情报持续处理；请先检查来源和本机配置"}),
+        ),
+    }
+}
+
+fn stop_continuous(stream: &mut TcpStream) -> std::io::Result<()> {
+    match stop_continuous_processing() {
+        Ok(()) => write_json(stream, 202, serde_json::json!({"stopping": true})),
+        Err(_) => write_json(
+            stream,
+            500,
+            serde_json::json!({"error": "无法停止本机情报持续处理"}),
+        ),
+    }
+}
+
 fn write_status(stream: &mut TcpStream, runtime: &DashboardRuntime) -> std::io::Result<()> {
     let configuration = match read_configuration() {
         Ok(configuration) => configuration,
@@ -258,7 +322,7 @@ fn write_status(stream: &mut TcpStream, runtime: &DashboardRuntime) -> std::io::
                 stream,
                 500,
                 serde_json::json!({"error": "无法读取本机情报主机配置"}),
-            )
+            );
         }
     };
     let last_run = runtime.last_run.lock().ok().and_then(|value| value.clone());
@@ -429,6 +493,19 @@ mod tests {
         assert!(request.dashboard_header);
         assert!(request.body.is_empty());
         assert_eq!(default_port(), 38_421);
+    }
+
+    #[test]
+    fn dashboard_accepts_only_explicit_continuous_control_routes() {
+        let request = parse_request(b"POST /api/continuous-start HTTP/1.1\r\nContent-Length: 22\r\nX-Kunpeng-Host-Dashboard: 1\r\n\r\n{\"launchAtLogin\":true}").unwrap();
+        assert_eq!(request.path, "/api/continuous-start");
+        let decoded: DashboardContinuousRequest = serde_json::from_slice(&request.body).unwrap();
+        assert!(decoded.launch_at_login);
+        assert!(serde_json::from_slice::<DashboardContinuousRequest>(
+            br#"{"launchAtLogin":false,"unexpected":true}"#,
+        )
+        .is_err());
+        assert!(parse_request(b"POST /api/continuous-stop?force=1 HTTP/1.1\r\nX-Kunpeng-Host-Dashboard: 1\r\n\r\n").is_err());
     }
 
     #[test]

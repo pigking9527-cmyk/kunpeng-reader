@@ -128,6 +128,11 @@ pub(crate) struct HostStatus {
     kind: &'static str,
     enabled: bool,
     launch_at_login: bool,
+    /// Whether the independent `--loop` owner is currently alive.  This is
+    /// intentionally distinct from `enabled`: the latter is an operator
+    /// preference persisted to disk, while this proves the background host
+    /// process itself is still present.
+    continuous_processing_active: bool,
     configuration_ready: bool,
     pipeline_running: bool,
     archive_present: bool,
@@ -743,6 +748,169 @@ fn write_configuration(configuration: &HostConfiguration) -> Result<(), String> 
         .map_err(|_| "无法保存本机情报工作台配置".to_string())
 }
 
+/// A host-only, profile-scoped process guard.  The dashboard, a scheduled
+/// `--loop`, and an operator's `--run-once` command must never race the same
+/// archive or model runtime.  It intentionally does not share the reader or
+/// worker-service mutexes: this is the independent processing host boundary.
+struct HostProcessGuard {
+    #[cfg(windows)]
+    handle: *mut core::ffi::c_void,
+}
+
+#[cfg(any(windows, test))]
+fn host_mutex_name(kind: &str) -> String {
+    let scope = profile::instance_scope_key();
+    let suffix = if scope == "global" {
+        ""
+    } else {
+        return format!("Local\\KunpengIntelligenceHost{kind}V1-{scope}");
+    };
+    format!("Local\\KunpengIntelligenceHost{kind}V1{suffix}")
+}
+
+#[cfg(windows)]
+impl Drop for HostProcessGuard {
+    fn drop(&mut self) {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
+        }
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+/// `Ok(None)` means a different host process currently owns this role.
+fn acquire_host_guard(kind: &str) -> Result<Option<HostProcessGuard>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        type Handle = *mut core::ffi::c_void;
+        const ERROR_ALREADY_EXISTS: u32 = 183;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateMutexW(
+                attributes: *const core::ffi::c_void,
+                initial_owner: i32,
+                name: *const u16,
+            ) -> Handle;
+            fn GetLastError() -> u32;
+            fn CloseHandle(handle: Handle) -> i32;
+        }
+        let name = host_mutex_name(kind);
+        let name = std::ffi::OsStr::new(&name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err("无法初始化本机情报主机单实例保护".into());
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Ok(None);
+        }
+        return Ok(Some(HostProcessGuard { handle }));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = kind;
+        Ok(Some(HostProcessGuard {}))
+    }
+}
+
+/// Observational probe used by the loopback dashboard.  Acquiring and
+/// immediately releasing a named mutex is safe here: only an existing host
+/// loop can make it return `true`; no input reaches an OS command line.
+fn continuous_processing_active() -> bool {
+    match acquire_host_guard("Loop") {
+        Ok(Some(guard)) => {
+            drop(guard);
+            false
+        }
+        Ok(None) | Err(_) => true,
+    }
+}
+
+fn run_once_with_pipeline_guard(configuration: &HostConfiguration) -> Result<RunReport, String> {
+    let Some(_guard) = acquire_host_guard("Pipeline")? else {
+        return Err("已有本机情报处理正在运行".into());
+    };
+    run_once_unlocked(configuration)
+}
+
+/// Starts the independent host loop after an explicit dashboard action.  The
+/// spawned executable retains no dashboard request data and receives neither
+/// credentials nor endpoints through its command line or environment.
+pub(super) fn start_continuous_processing(launch_at_login: bool) -> Result<(), String> {
+    if continuous_processing_active() {
+        return Ok(());
+    }
+    let original = read_configuration()?;
+    if !original.sources_file.is_some() {
+        return Err("请先初始化并配置资讯来源，再启动持续处理".into());
+    }
+    let mut configuration = original.clone();
+    configuration.enabled = true;
+    configuration.launch_at_login = launch_at_login;
+    write_configuration(&configuration)?;
+    if let Err(error) = configure_login_startup(launch_at_login) {
+        let _ = write_configuration(&original);
+        return Err(error);
+    }
+    if let Err(error) = spawn_continuous_loop() {
+        let _ = configure_login_startup(original.launch_at_login);
+        let _ = write_configuration(&original);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Stop requests never kill an in-flight model subprocess.  They atomically
+/// disable the durable loop and remove login startup; the active host observes
+/// this within one second, completes its current bounded round, then exits.
+pub(super) fn stop_continuous_processing() -> Result<(), String> {
+    let mut configuration = read_configuration()?;
+    configuration.enabled = false;
+    configuration.launch_at_login = false;
+    write_configuration(&configuration)?;
+    if let Err(error) = configure_login_startup(false) {
+        // Keep the conservative disabled configuration even when Windows has
+        // rejected removal of a stale Run value.  A later explicit start can
+        // retry registration; this must never resurrect continuous work.
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn spawn_continuous_loop() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|_| "无法定位本机情报主机程序")?
+        .canonicalize()
+        .map_err(|_| "无法确认本机情报主机程序路径")?;
+    let mut command = Command::new(executable);
+    command
+        .args(profile::child_profile_args())
+        .arg("--loop")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "无法启动本机情报持续处理".into())
+}
+
 /// Registers only this independently launched host loop for the current user.
 /// It never adds the reader UI to Windows startup, and the action is reachable
 /// only after an explicit click in the nonce-protected loopback page.
@@ -1085,6 +1253,7 @@ fn status(
         kind: "kunpeng-intelligence-host",
         enabled: configuration.enabled,
         launch_at_login: configuration.launch_at_login,
+        continuous_processing_active: continuous_processing_active(),
         configuration_ready: configuration_ready(configuration),
         pipeline_running: effective_pipeline_running,
         archive_present: false,
@@ -1620,6 +1789,20 @@ fn begin_audit_stage(path: &Path, audit: &mut HostRunAudit, stage: &str) -> Resu
 }
 
 fn run_once(configuration: &HostConfiguration) -> Result<RunReport, String> {
+    if continuous_processing_active() {
+        return Err("本机情报持续处理正在运行；请先停止后再执行手动一轮".into());
+    }
+    run_once_with_pipeline_guard(configuration)
+}
+
+/// The durable continuous loop already owns the `Loop` guard, so it uses the
+/// shared pipeline guard directly rather than treating itself as a conflicting
+/// manual execution.
+fn run_once_from_continuous_loop(configuration: &HostConfiguration) -> Result<RunReport, String> {
+    run_once_with_pipeline_guard(configuration)
+}
+
+fn run_once_unlocked(configuration: &HostConfiguration) -> Result<RunReport, String> {
     if !configuration.enabled {
         return Ok(RunReport {
             outcome: "disabled".into(),
@@ -1840,14 +2023,32 @@ fn run_once_with_audit(
 /// reloaded between rounds, so disabling the switch or replacing a local
 /// model route takes effect without restarting the process.
 fn run_loop() -> i32 {
+    let Some(_loop_guard) = (match acquire_host_guard("Loop") {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    }) else {
+        // A dashboard may have spawned a loop just before a login startup
+        // entry fires.  Treat that as a harmless duplicate, not a second
+        // writer of archive state or a user-visible failure.
+        println!(
+            "{}",
+            serde_json::json!({"ok": true, "outcome": "already_running"})
+        );
+        return 0;
+    };
     let initial = read_configuration().unwrap_or_default();
+    if !initial.enabled {
+        println!("{}", serde_json::json!({"ok": true, "outcome": "disabled"}));
+        return 0;
+    }
     let _ = ensure_distribution_sidecar(&initial);
     loop {
         let value = match read_configuration() {
-            Ok(configuration) if !configuration.enabled => {
-                serde_json::json!({"ok": true, "outcome": "disabled"})
-            }
-            Ok(configuration) => match run_once(&configuration) {
+            Ok(configuration) if !configuration.enabled => break,
+            Ok(configuration) => match run_once_from_continuous_loop(&configuration) {
                 Ok(report) => serde_json::json!({"ok": true, "report": report}),
                 Err(error) => serde_json::json!({"ok": false, "error": error}),
             },
@@ -1874,8 +2075,20 @@ fn run_loop() -> i32 {
             }
             Err(_) => WORKSTATION_LOOP_INTERVAL,
         };
-        std::thread::sleep(interval);
+        // A stop command changes only durable local configuration.  Polling
+        // once per second makes that command observable promptly while never
+        // force-killing collection, archive or model work mid-round.
+        let mut remaining = interval;
+        while remaining > Duration::ZERO {
+            let step = remaining.min(Duration::from_secs(1));
+            std::thread::sleep(step);
+            remaining = remaining.saturating_sub(step);
+            if !read_configuration().is_ok_and(|configuration| configuration.enabled) {
+                return 0;
+            }
+        }
     }
+    0
 }
 pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
     let arguments = crate::profile::application_args(arguments)
@@ -1972,6 +2185,15 @@ mod tests {
         assert!(!configuration_ready(&configuration));
         assert!(!collection_ready(&configuration));
         validate_configuration(&configuration).unwrap();
+    }
+
+    #[test]
+    fn host_loop_and_manual_pipeline_guards_are_distinct_and_profile_scoped() {
+        let loop_name = host_mutex_name("Loop");
+        let pipeline_name = host_mutex_name("Pipeline");
+        assert!(loop_name.starts_with("Local\\KunpengIntelligenceHostLoopV1"));
+        assert!(pipeline_name.starts_with("Local\\KunpengIntelligenceHostPipelineV1"));
+        assert_ne!(loop_name, pipeline_name);
     }
 
     #[test]
@@ -2140,6 +2362,7 @@ mod tests {
         assert!(!encoded.contains("8081"));
         assert!(encoded.contains("\"pipelineRunning\":true"));
         assert!(encoded.contains("\"launchAtLogin\":false"));
+        assert!(encoded.contains("\"continuousProcessingActive\":"));
         // `status` also intentionally projects the live, aggregate-only
         // archive state.  Do not make this privacy test depend on whichever
         // durable queue happens to exist on the developer machine.
