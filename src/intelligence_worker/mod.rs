@@ -53,6 +53,10 @@ enum Mode {
     CollectLoop,
     BackfillContentOnce,
     RelateOnce,
+    /// Bounded internal mode used by the loopback intelligence host.  It
+    /// keeps one worker-private ANN snapshot alive for several durable
+    /// relation transitions, but never accepts an unbounded operator value.
+    RelateBatch(u8),
     RelateLoop,
     SynthesizeOnce,
     SynthesizeLoop,
@@ -63,6 +67,8 @@ enum Mode {
     PreviewDaily(NaiveDate),
     ServiceLoop,
 }
+
+const MAX_RELATION_BATCH: u8 = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnableConfiguration {
@@ -597,6 +603,12 @@ fn parse_mode(arguments: impl IntoIterator<Item = OsString>) -> Result<Mode, ()>
         [value] if value == "--collect-loop" => Ok(Mode::CollectLoop),
         [value] if value == "--backfill-content-once" => Ok(Mode::BackfillContentOnce),
         [value] if value == "--relate-once" => Ok(Mode::RelateOnce),
+        [flag, count] if flag == "--relate-batch" => count
+            .parse::<u8>()
+            .ok()
+            .filter(|count| (1..=MAX_RELATION_BATCH).contains(count))
+            .map(Mode::RelateBatch)
+            .ok_or(()),
         [value] if value == "--relate-loop" => Ok(Mode::RelateLoop),
         [value] if value == "--synthesize-once" => Ok(Mode::SynthesizeOnce),
         [value] if value == "--synthesize-loop" => Ok(Mode::SynthesizeLoop),
@@ -650,6 +662,7 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::CollectLoop => "collect_loop",
         Mode::BackfillContentOnce => "backfill_content_once",
         Mode::RelateOnce => "relate_once",
+        Mode::RelateBatch(_) => "relate_batch",
         Mode::RelateLoop => "relate_loop",
         Mode::SynthesizeOnce => "synthesize_once",
         Mode::SynthesizeLoop => "synthesize_loop",
@@ -1310,6 +1323,7 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
     if matches!(
         mode,
         Mode::RelateOnce
+            | Mode::RelateBatch(_)
             | Mode::RelateLoop
             | Mode::SynthesizeOnce
             | Mode::SynthesizeLoop
@@ -1343,7 +1357,7 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
             return 0;
         };
         let has_configuration = match mode {
-            Mode::RelateOnce | Mode::RelateLoop => {
+            Mode::RelateOnce | Mode::RelateBatch(_) | Mode::RelateLoop => {
                 processing::configured_relation_from_environment().is_some()
             }
             Mode::SynthesizeOnce | Mode::SynthesizeLoop => {
@@ -1372,6 +1386,11 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
                 Mode::RelateOnce | Mode::RelateLoop => processing::process_relation_once(
                     &path,
                     processing::configured_relation_from_environment().as_ref(),
+                ),
+                Mode::RelateBatch(limit) => processing::process_relation_batch(
+                    &path,
+                    processing::configured_relation_from_environment().as_ref(),
+                    usize::from(limit),
                 ),
                 Mode::SynthesizeOnce | Mode::SynthesizeLoop => processing::process_editorial_once(
                     &path,
@@ -1409,7 +1428,7 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
             print_output(output);
             if matches!(
                 mode,
-                Mode::RelateOnce | Mode::SynthesizeOnce | Mode::ProcessOnce
+                Mode::RelateOnce | Mode::RelateBatch(_) | Mode::SynthesizeOnce | Mode::ProcessOnce
             ) {
                 return 0;
             }
@@ -1666,6 +1685,26 @@ mod tests {
             ]),
             Ok(Mode::BackfillContentOnce)
         );
+        assert_eq!(
+            parse_mode([
+                OsString::from("worker"),
+                OsString::from("--relate-batch"),
+                OsString::from("4"),
+            ]),
+            Ok(Mode::RelateBatch(4))
+        );
+        assert!(parse_mode([
+            OsString::from("worker"),
+            OsString::from("--relate-batch"),
+            OsString::from("0"),
+        ])
+        .is_err());
+        assert!(parse_mode([
+            OsString::from("worker"),
+            OsString::from("--relate-batch"),
+            OsString::from("25"),
+        ])
+        .is_err());
         assert_eq!(
             parse_mode([OsString::from("worker"), OsString::from("--process-once")]),
             Ok(Mode::ProcessOnce)

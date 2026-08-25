@@ -14,7 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{cmp::Ordering, path::Path, time::Duration};
+use std::{cmp::Ordering, collections::HashMap, path::Path, time::Duration};
 
 const EMBEDDING_BASE_URL_ENV: &str = "KUNPENG_INTELLIGENCE_EMBEDDING_BASE_URL";
 const EMBEDDING_MODEL_ENV: &str = "KUNPENG_INTELLIGENCE_EMBEDDING_MODEL";
@@ -52,6 +52,11 @@ const MAX_CHUNKS: usize = 256;
 // is query + every candidate document, so 64 full embedding samples can
 // silently exceed the service even when embedding itself is healthy.
 const MAX_VECTOR_RERANK_CANDIDATES: usize = 6;
+/// HNSW is approximate. Recall a wider stable set, then retain the existing
+/// exact cosine ordering before the bounded reranker call.  This preserves the
+/// quality boundary while avoiding an O(N) document-load/cosine pass for every
+/// relation item in a large local catalog.
+const ANN_VECTOR_OVERSAMPLE: usize = MAX_VECTOR_RERANK_CANDIDATES * 4;
 // llama.cpp's reranker formats *each query/document pair* internally.  On the
 // local 0.6B service the physical batch is 256 tokens: six CJK candidates at
 // 192 characters each look harmless as a JSON request, but each individual
@@ -235,6 +240,63 @@ enum RecallResult {
     Warming,
 }
 
+/// One canonical full-text identity represented in the worker-only ANN graph.
+/// It intentionally holds metadata plus an in-memory vector only: complete
+/// public bodies remain in the immutable content archive and are loaded only
+/// for the small set that survives ANN recall.
+#[derive(Clone)]
+struct RelationAnnEntry {
+    id: String,
+    fingerprint: String,
+    title: String,
+    summary: String,
+    published_at: String,
+    canonical_hash: String,
+    vector: Vec<f32>,
+}
+
+#[derive(Clone)]
+struct RelationAnnReference {
+    id: String,
+    fingerprint: String,
+    title: String,
+    summary: String,
+    published_at: String,
+    canonical_hash: String,
+}
+
+#[derive(Clone)]
+struct RelationAnnPoint(Vec<f32>);
+
+impl instant_distance::Point for RelationAnnPoint {
+    fn distance(&self, other: &Self) -> f32 {
+        1.0 - self
+            .0
+            .iter()
+            .zip(&other.0)
+            .map(|(left, right)| left * right)
+            .sum::<f32>()
+    }
+}
+
+type RelationAnnGraph = instant_distance::HnswMap<RelationAnnPoint, u32>;
+
+/// Scoped to one worker batch.  It deliberately has no process-global cache:
+/// a short-lived relation worker must never retain a stale snapshot after a
+/// catalog/model change, and the host can later choose the batch lifetime.
+struct RelationAnnIndex {
+    model: String,
+    model_sha256: String,
+    dimension: usize,
+    graph: RelationAnnGraph,
+    entries: Vec<RelationAnnEntry>,
+}
+
+enum RelationAnnLoad {
+    Ready(RelationAnnIndex),
+    Warming,
+}
+
 /// Fixed, aggregate-only relation-recall outcomes.  These codes are safe to
 /// expose to the local audit because they name a pipeline boundary only; they
 /// never contain a URL, article identifier, source text, model response, or
@@ -242,7 +304,6 @@ enum RecallResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecallFailure {
     CanonicalHash,
-    CandidateQuery,
     EmbeddingCacheRead,
     EmbeddingTransport,
     EmbeddingResponse,
@@ -255,7 +316,6 @@ impl RecallFailure {
     const fn stage(self) -> &'static str {
         match self {
             Self::CanonicalHash => "relation_canonical_hash",
-            Self::CandidateQuery => "relation_candidate_query",
             Self::EmbeddingCacheRead => "relation_embedding_cache_read",
             Self::EmbeddingTransport => "relation_embedding_transport",
             Self::EmbeddingResponse => "relation_embedding_response",
@@ -662,10 +722,65 @@ pub(crate) fn process_relation_once(
     process_relation_once_with(path, configuration, &LoopbackProcessingTransport)
 }
 
+/// Process a small bounded relation batch while reusing one worker-private ANN
+/// snapshot.  The caller owns the batch boundary; no index state is persisted
+/// and every article keeps the existing durable relation-ready transition.
+#[allow(dead_code)] // Host wiring lands separately; unit tests use the transport-injected helper.
+pub(crate) fn process_relation_batch(
+    path: &Path,
+    configuration: Option<&RelationConfiguration>,
+    limit: usize,
+) -> ProcessingReport {
+    let Some(configuration) = configuration else {
+        return ProcessingReport {
+            outcome: ProcessingOutcome::NotConfigured,
+            ..ProcessingReport::default()
+        };
+    };
+    process_relation_batch_with(path, configuration, &LoopbackProcessingTransport, limit)
+}
+
 fn process_relation_once_with<T: ProcessingTransport>(
     path: &Path,
     configuration: &RelationConfiguration,
     transport: &T,
+) -> ProcessingReport {
+    let mut index = None;
+    process_relation_once_with_index(path, configuration, transport, &mut index)
+}
+
+fn process_relation_batch_with<T: ProcessingTransport>(
+    path: &Path,
+    configuration: &RelationConfiguration,
+    transport: &T,
+    limit: usize,
+) -> ProcessingReport {
+    let mut index = None;
+    let mut aggregate = ProcessingReport::default();
+    for _ in 0..limit.clamp(1, 24) {
+        let report = process_relation_once_with_index(path, configuration, transport, &mut index);
+        aggregate.recalled += report.recalled;
+        aggregate.judged += report.judged;
+        if !report.failure_stage.is_empty() {
+            aggregate.failure_stage = report.failure_stage;
+        }
+        match report.outcome {
+            ProcessingOutcome::Processed => aggregate.outcome = ProcessingOutcome::Processed,
+            ProcessingOutcome::Idle => break,
+            ProcessingOutcome::Retry | ProcessingOutcome::NotConfigured => {
+                aggregate.outcome = report.outcome;
+                break;
+            }
+        }
+    }
+    aggregate
+}
+
+fn process_relation_once_with_index<T: ProcessingTransport>(
+    path: &Path,
+    configuration: &RelationConfiguration,
+    transport: &T,
+    index: &mut Option<RelationAnnIndex>,
 ) -> ProcessingReport {
     let Ok(mut connection) = Connection::open(path) else {
         return ProcessingReport {
@@ -701,7 +816,14 @@ fn process_relation_once_with<T: ProcessingTransport>(
     let Some(article) = article else {
         return ProcessingReport::default();
     };
-    let candidates = match recall(&mut connection, path, &article, configuration, transport) {
+    let candidates = match recall_with_index(
+        &mut connection,
+        path,
+        &article,
+        configuration,
+        transport,
+        index,
+    ) {
         Ok(RecallResult::Candidates(value)) => value,
         // The vector batch was safely persisted, but this article is not
         // relation-ready until all current canonical candidates are indexed.
@@ -1341,87 +1463,90 @@ fn recall<T: ProcessingTransport>(
     config: &RelationConfiguration,
     transport: &T,
 ) -> Result<RecallResult, RecallFailure> {
+    let mut index = None;
+    recall_with_index(
+        connection,
+        catalog_path,
+        article,
+        config,
+        transport,
+        &mut index,
+    )
+}
+
+fn recall_with_index<T: ProcessingTransport>(
+    connection: &mut Connection,
+    catalog_path: &Path,
+    article: &Article,
+    config: &RelationConfiguration,
+    transport: &T,
+    index: &mut Option<RelationAnnIndex>,
+) -> Result<RecallResult, RecallFailure> {
     let query_hash =
         canonical_hash_for(connection, article).map_err(|_| RecallFailure::CanonicalHash)?;
-    let mut statement = connection.prepare(
-        "SELECT a.article_id,a.fingerprint,a.title,COALESCE(a.summary,''),COALESCE(a.published_at,''),canonical.canonical_text_sha256
-         FROM intelligence_articles a JOIN intelligence_article_content_versions v
-           ON v.article_id=a.article_id AND v.record_fingerprint=a.fingerprint AND v.is_current=1 AND v.body_status='complete'
-         JOIN intelligence_worker_canonical_aliases canonical ON canonical.article_id=a.article_id AND canonical.fingerprint=a.fingerprint
-         WHERE a.triage_state='keep' AND canonical.canonical_article_id=a.article_id
-           AND canonical.canonical_fingerprint=a.fingerprint AND a.article_id<>?1
-         ORDER BY a.created_at ASC,a.article_id ASC",
-    ).map_err(|_| RecallFailure::CandidateQuery)?;
-    let candidates = statement
-        .query_map([&article.id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })
-        .map_err(|_| RecallFailure::CandidateQuery)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| RecallFailure::CandidateQuery)?
-        .into_iter()
-        .filter_map(
-            |(id, fingerprint, title, summary, published_at, canonical_hash)| {
-                super::content_archive::load_current_complete_text_at(
-                    catalog_path,
-                    &id,
-                    &fingerprint,
-                )
-                .ok()
-                .map(|body| {
-                    (
-                        Article {
-                            id,
-                            fingerprint,
-                            title,
-                            summary,
-                            body,
-                            published_at,
-                        },
-                        canonical_hash,
-                    )
-                })
-            },
+    if index.as_ref().is_none_or(|cached| {
+        cached.model != config.embedding.model
+            || cached.model_sha256 != config.embedding.artifact_sha256
+    }) {
+        *index = match load_or_warm_relation_index(
+            connection,
+            catalog_path,
+            &config.embedding,
+            transport,
         )
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Ok(RecallResult::Candidates(Vec::new()));
-    }
-    let mut entries = Vec::with_capacity(candidates.len() + 1);
-    entries.push((query_hash, article));
-    entries.extend(
-        candidates
-            .iter()
-            .map(|(candidate, hash)| (hash.clone(), candidate)),
-    );
-    let vectors = match load_or_warm_embeddings(connection, &entries, &config.embedding, transport)
         .map_err(|failure| match failure {
             EmbeddingFailure::CacheRead => RecallFailure::EmbeddingCacheRead,
             EmbeddingFailure::Transport => RecallFailure::EmbeddingTransport,
             EmbeddingFailure::Response => RecallFailure::EmbeddingResponse,
             EmbeddingFailure::CacheWrite => RecallFailure::EmbeddingCacheWrite,
         })? {
-        EmbeddingLoad::Ready(vectors) => vectors,
-        EmbeddingLoad::Warming => return Ok(RecallResult::Warming),
-    };
-    let query_vector = vectors.first().ok_or(RecallFailure::EmbeddingResponse)?;
-    if vectors
+            RelationAnnLoad::Ready(value) => Some(value),
+            RelationAnnLoad::Warming => return Ok(RecallResult::Warming),
+        };
+    }
+    let index = index.as_ref().ok_or(RecallFailure::EmbeddingCacheRead)?;
+    let query_vector = index
+        .entries
         .iter()
-        .any(|vector| vector.len() != query_vector.len())
-    {
+        .find(|candidate| candidate.canonical_hash == query_hash)
+        .map(|candidate| &candidate.vector)
+        .ok_or(RecallFailure::EmbeddingCacheRead)?;
+    if query_vector.len() != index.dimension {
         return Err(RecallFailure::EmbeddingResponse);
     }
-    let mut dense_ranked = candidates
-        .into_iter()
-        .enumerate()
-        .map(|(i, candidate)| (candidate.0, cosine(query_vector, &vectors[i + 1])))
+    let mut search = instant_distance::Search::default();
+    let query = RelationAnnPoint(query_vector.clone());
+    let mut dense_ranked = index
+        .graph
+        .search(&query, &mut search)
+        .take((ANN_VECTOR_OVERSAMPLE + 1).min(index.entries.len()))
+        .filter_map(|hit| {
+            index
+                .entries
+                .get(*hit.value as usize)
+                .and_then(|candidate| {
+                    if candidate.id == article.id && candidate.fingerprint == article.fingerprint {
+                        return None;
+                    }
+                    let body = super::content_archive::load_current_complete_text_at(
+                        catalog_path,
+                        &candidate.id,
+                        &candidate.fingerprint,
+                    )
+                    .ok()?;
+                    Some((
+                        Article {
+                            id: candidate.id.clone(),
+                            fingerprint: candidate.fingerprint.clone(),
+                            title: candidate.title.clone(),
+                            summary: candidate.summary.clone(),
+                            body,
+                            published_at: candidate.published_at.clone(),
+                        },
+                        cosine(query_vector, &candidate.vector),
+                    ))
+                })
+        })
         .collect::<Vec<_>>();
     dense_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
     dense_ranked.truncate(MAX_VECTOR_RERANK_CANDIDATES);
@@ -1429,6 +1554,9 @@ fn recall<T: ProcessingTransport>(
         .iter()
         .map(|(candidate, _)| rerank_text(candidate))
         .collect::<Vec<_>>();
+    if documents.is_empty() {
+        return Ok(RecallResult::Candidates(Vec::new()));
+    }
     let reranked = transport
         .rerank(&config.reranker, &rerank_text(article), &documents)
         .map_err(|_| RecallFailure::RerankTransport)?;
@@ -1451,66 +1579,191 @@ fn recall<T: ProcessingTransport>(
     ))
 }
 
-enum EmbeddingLoad {
-    Ready(Vec<Vec<f32>>),
-    Warming,
+fn relation_ann_references(
+    connection: &Connection,
+) -> Result<Vec<RelationAnnReference>, EmbeddingFailure> {
+    let mut statement = connection
+        .prepare(
+            "SELECT a.article_id,a.fingerprint,a.title,COALESCE(a.summary,''),COALESCE(a.published_at,''),canonical.canonical_text_sha256
+             FROM intelligence_articles a
+             JOIN intelligence_article_content_versions v
+               ON v.article_id=a.article_id AND v.record_fingerprint=a.fingerprint
+              AND v.is_current=1 AND v.body_status='complete'
+             JOIN intelligence_worker_canonical_aliases canonical
+               ON canonical.article_id=a.article_id AND canonical.fingerprint=a.fingerprint
+             WHERE a.triage_state='keep'
+               AND canonical.canonical_article_id=a.article_id
+               AND canonical.canonical_fingerprint=a.fingerprint
+             ORDER BY a.created_at ASC,a.article_id ASC",
+        )
+        .map_err(|_| EmbeddingFailure::CacheRead)?;
+    let references = statement
+        .query_map([], |row| {
+            Ok(RelationAnnReference {
+                id: row.get(0)?,
+                fingerprint: row.get(1)?,
+                title: row.get(2)?,
+                summary: row.get(3)?,
+                published_at: row.get(4)?,
+                canonical_hash: row.get(5)?,
+            })
+        })
+        .map_err(|_| EmbeddingFailure::CacheRead)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| EmbeddingFailure::CacheRead)?;
+    Ok(references)
 }
 
-/// Load the complete vector set when it is available.  For a cold global
-/// corpus, persist exactly one bounded batch and ask the queue to resume; this
-/// prevents a request that exceeds the local embedding server context or the
-/// worker's per-call timeout.  The final short batch returns `Ready` in the
-/// same invocation, so no extra idle pass is needed.
-fn load_or_warm_embeddings<T: ProcessingTransport>(
+fn relation_embedding_map(
     connection: &Connection,
-    entries: &[(String, &Article)],
+    route: &ModelRoute,
+) -> Result<HashMap<String, Vec<f32>>, EmbeddingFailure> {
+    let mut statement = connection
+        .prepare(
+            "SELECT canonical_text_sha256,vector_json
+             FROM intelligence_worker_embeddings
+             WHERE model_id=?1 AND model_sha256=?2",
+        )
+        .map_err(|_| EmbeddingFailure::CacheRead)?;
+    let rows = statement
+        .query_map(params![route.model, route.artifact_sha256], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|_| EmbeddingFailure::CacheRead)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| EmbeddingFailure::CacheRead)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(hash, encoded)| {
+            serde_json::from_str::<Vec<f32>>(&encoded)
+                .ok()
+                .filter(|vector| valid_vector(vector))
+                .map(|vector| (hash, vector))
+        })
+        .collect())
+}
+
+/// Warm the worker's own canonical corpus in bounded durable batches.  During
+/// warmup, only the two missing immutable bodies being embedded are read from
+/// disk; the global corpus is otherwise metadata and cached vectors.
+fn load_or_warm_relation_index<T: ProcessingTransport>(
+    connection: &Connection,
+    catalog_path: &Path,
     route: &ModelRoute,
     transport: &T,
-) -> Result<EmbeddingLoad, EmbeddingFailure> {
-    let mut values = vec![None; entries.len()];
-    let mut missing = Vec::new();
-    for (index, (canonical_hash, article)) in entries.iter().enumerate() {
-        if let Some(vector) = stored_embedding(connection, canonical_hash, route)
-            .map_err(|_| EmbeddingFailure::CacheRead)?
-        {
-            values[index] = Some(vector);
-        } else {
-            missing.push((index, canonical_hash.clone(), embedding_text(article)));
+) -> Result<RelationAnnLoad, EmbeddingFailure> {
+    let references = relation_ann_references(connection)?;
+    if references.is_empty() {
+        return Ok(RelationAnnLoad::Ready(RelationAnnIndex {
+            model: route.model.clone(),
+            model_sha256: route.artifact_sha256.clone(),
+            dimension: 0,
+            graph: instant_distance::Builder::default().build(Vec::new(), Vec::new()),
+            entries: Vec::new(),
+        }));
+    }
+    let mut vectors = relation_embedding_map(connection, route)?;
+    let missing = references
+        .iter()
+        .filter(|reference| !vectors.contains_key(&reference.canonical_hash))
+        .take(EMBEDDING_BATCH_SIZE)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let mut requested = Vec::with_capacity(missing.len());
+        for reference in &missing {
+            let body = super::content_archive::load_current_complete_text_at(
+                catalog_path,
+                &reference.id,
+                &reference.fingerprint,
+            )
+            .map_err(|_| EmbeddingFailure::CacheRead)?;
+            requested.push(embedding_text(&Article {
+                id: reference.id.clone(),
+                fingerprint: reference.fingerprint.clone(),
+                title: reference.title.clone(),
+                summary: reference.summary.clone(),
+                body,
+                published_at: reference.published_at.clone(),
+            }));
+        }
+        let created = transport
+            .embeddings(route, &requested)
+            .map_err(|_| EmbeddingFailure::Transport)?;
+        if created.len() != missing.len() || created.iter().any(|vector| !valid_vector(vector)) {
+            return Err(EmbeddingFailure::Response);
+        }
+        for (reference, vector) in missing.iter().zip(created) {
+            store_embedding(connection, &reference.canonical_hash, route, &vector)
+                .map_err(|_| EmbeddingFailure::CacheWrite)?;
+            vectors.insert(reference.canonical_hash.clone(), vector);
         }
     }
-    if missing.is_empty() {
-        return values
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .map(EmbeddingLoad::Ready)
-            .ok_or(EmbeddingFailure::CacheRead);
-    }
-
-    let warm_only = missing.len() > EMBEDDING_BATCH_SIZE;
-    let batch = &missing[..missing.len().min(EMBEDDING_BATCH_SIZE)];
-    let input = batch
+    if references
         .iter()
-        .map(|(_, _, text)| text.clone())
-        .collect::<Vec<_>>();
-    let vectors = transport
-        .embeddings(route, &input)
-        .map_err(|_| EmbeddingFailure::Transport)?;
-    if vectors.len() != batch.len() || vectors.iter().any(|vector| !valid_vector(vector)) {
+        .any(|reference| !vectors.contains_key(&reference.canonical_hash))
+    {
+        return Ok(RelationAnnLoad::Warming);
+    }
+    let dimension = vectors
+        .get(&references[0].canonical_hash)
+        .map(Vec::len)
+        .ok_or(EmbeddingFailure::CacheRead)?;
+    if dimension == 0
+        || references.iter().any(|reference| {
+            vectors
+                .get(&reference.canonical_hash)
+                .is_none_or(|vector| vector.len() != dimension)
+        })
+    {
         return Err(EmbeddingFailure::Response);
     }
-    for ((index, canonical_hash, _), vector) in batch.iter().zip(vectors) {
-        store_embedding(connection, canonical_hash, route, &vector)
-            .map_err(|_| EmbeddingFailure::CacheWrite)?;
-        values[*index] = Some(vector);
+    let mut entries = Vec::with_capacity(references.len());
+    let mut points = Vec::with_capacity(references.len());
+    for reference in references {
+        let vector = vectors
+            .remove(&reference.canonical_hash)
+            .ok_or(EmbeddingFailure::CacheRead)?;
+        let normalized = normalize_relation_vector(vector).ok_or(EmbeddingFailure::Response)?;
+        points.push(RelationAnnPoint(normalized.clone()));
+        entries.push(RelationAnnEntry {
+            id: reference.id,
+            fingerprint: reference.fingerprint,
+            title: reference.title,
+            summary: reference.summary,
+            published_at: reference.published_at,
+            canonical_hash: reference.canonical_hash,
+            vector: normalized,
+        });
     }
-    if warm_only {
-        return Ok(EmbeddingLoad::Warming);
+    let values = (0..points.len() as u32).collect::<Vec<_>>();
+    let graph = instant_distance::Builder::default()
+        .ef_construction(if dimension >= 768 && points.len() >= 8_000 {
+            80
+        } else {
+            100
+        })
+        .ef_search(100)
+        .seed(0x574F_524B_4552_414E)
+        .build(points, values);
+    Ok(RelationAnnLoad::Ready(RelationAnnIndex {
+        model: route.model.clone(),
+        model_sha256: route.artifact_sha256.clone(),
+        dimension,
+        graph,
+        entries,
+    }))
+}
+
+fn normalize_relation_vector(mut vector: Vec<f32>) -> Option<Vec<f32>> {
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if !norm.is_finite() || norm <= f32::EPSILON {
+        return None;
     }
-    values
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-        .map(EmbeddingLoad::Ready)
-        .ok_or(EmbeddingFailure::CacheRead)
+    for value in &mut vector {
+        *value /= norm;
+    }
+    Some(vector)
 }
 
 fn canonical_hash_for(connection: &Connection, article: &Article) -> Result<String, ()> {
@@ -2525,6 +2778,8 @@ mod tests {
 
     struct CountingEmbeddings(std::sync::atomic::AtomicUsize);
 
+    struct RelationBatchTransport(std::sync::atomic::AtomicUsize);
+
     struct NoRelationModelCalls(std::sync::atomic::AtomicUsize);
 
     struct CompactEvidenceReducer(std::sync::atomic::AtomicUsize);
@@ -2546,6 +2801,38 @@ mod tests {
             _: u16,
         ) -> Result<String, ()> {
             Err(())
+        }
+    }
+
+    impl ProcessingTransport for RelationBatchTransport {
+        fn embeddings(&self, _: &ModelRoute, input: &[String]) -> Result<Vec<Vec<f32>>, ()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(input
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    if index == 0 {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.9, 0.1]
+                    }
+                })
+                .collect())
+        }
+
+        fn rerank(&self, _: &ModelRoute, _: &str, documents: &[String]) -> Result<Vec<f32>, ()> {
+            Ok(vec![0.9; documents.len()])
+        }
+
+        fn complete(
+            &self,
+            _: &ModelRoute,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: u16,
+        ) -> Result<String, ()> {
+            Ok(r#"{"relation":"same_event","sameEvent":true,"confidence":0.9,"reason":"主体一致"}"#.into())
         }
     }
 
@@ -3179,6 +3466,38 @@ mod tests {
                 )
                 .unwrap(),
             "relation_ready"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn relation_batch_reuses_one_worker_private_ann_index() {
+        let path = db();
+        let configuration = config();
+        let relation = RelationConfiguration {
+            embedding: configuration.embedding,
+            reranker: configuration.reranker,
+            relation: configuration.relation,
+        };
+        let transport = RelationBatchTransport(std::sync::atomic::AtomicUsize::new(0));
+        let report = process_relation_batch_with(&path, &relation, &transport, 2);
+        assert_eq!(report.outcome, ProcessingOutcome::Processed);
+        assert!(report.recalled >= 2);
+        assert!(report.judged >= 2);
+        // Both canonical documents are embedded in the first bounded request.
+        // The second item reuses the in-process ANN graph rather than loading
+        // a fresh full corpus or asking the embedding model again.
+        assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_worker_embeddings",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
         );
         let _ = std::fs::remove_file(path);
     }
