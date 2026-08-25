@@ -87,7 +87,8 @@ const backfillFailureLabels = {
   body_paywall_or_interstitial: "付费墙或跳转页",
   body_not_found: "未提取到正文",
   content_extraction_failed: "正文提取失败",
-  google_news_target_unresolved: "聚合来源未解析",
+  google_news_discovery_only: "聚合来源仅作发现",
+  google_news_target_unresolved: "旧版聚合来源未解析",
   archive_persist_failed: "本地归档失败",
   other: "其他固定错误",
 };

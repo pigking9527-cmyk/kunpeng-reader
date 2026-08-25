@@ -1570,6 +1570,13 @@ const FULL_TEXT_BACKFILL_FAILURE_CATEGORIES: &[&str] = &[
     "body_paywall_or_interstitial",
     "body_not_found",
     "content_extraction_failed",
+    // A recent Google News wrapper can remain a valid discovery record while
+    // exposing no verifiable publisher target.  It is intentionally terminal
+    // for body backfill, but must remain visible as its own queue class rather
+    // than being folded into `other` and mistaken for extractor debt.
+    "google_news_discovery_only",
+    // Older catalogs persisted this narrower predecessor.  Keep it visible
+    // while the archive is upgraded instead of rewriting durable history.
     "google_news_target_unresolved",
     "archive_persist_failed",
     // Catalogs written before the narrower public evidence taxonomy used a
@@ -2716,21 +2723,23 @@ mod tests {
                     ('delayed','three','https://redacted.invalid/delayed'),
                     ('legacy-extraction','four','https://redacted.invalid/legacy-extraction'),
                     ('legacy-http','five','https://redacted.invalid/legacy-http'),
+                    ('google-discovery','six','https://redacted.invalid/google-discovery'),
                     ('no-source','four','');
                  INSERT INTO intelligence_content_backfill_state(article_id,attempts,next_retry_at,last_failure_reason) VALUES
                     ('access',1,0,'http_access_denied'),
                     ('delayed',1,2000,'network_request_failed'),
                     ('legacy-extraction',1,0,'body_missing_or_paywall'),
-                    ('legacy-http',1,0,'http_status_rejected');
+                    ('legacy-http',1,0,'http_status_rejected'),
+                    ('google-discovery',1,9223372036854775807,'google_news_discovery_only');
                  INSERT INTO intelligence_content_backfill_hosts(host,next_allowed_at,failure_count) VALUES
                     ('redacted.invalid',2000,3),('available.invalid',0,0),('degraded.invalid',0,2);",
             )
             .unwrap();
 
         let health = full_text_backfill_health(&connection, 1000);
-        assert_eq!(health.waiting_count, 5);
+        assert_eq!(health.waiting_count, 6);
         assert_eq!(health.retryable_now_count, 4);
-        assert_eq!(health.delayed_count, 1);
+        assert_eq!(health.delayed_count, 2);
         assert_eq!(health.limited_host_count, 1);
         assert_eq!(health.known_source_count, 3);
         assert_eq!(health.healthy_source_count, 1);
@@ -2748,6 +2757,7 @@ mod tests {
         assert_eq!(count("network_request_failed"), 1);
         assert_eq!(count("legacy_extraction_or_paywall"), 1);
         assert_eq!(count("legacy_http_rejected"), 1);
+        assert_eq!(count("google_news_discovery_only"), 1);
         assert_eq!(count("other"), 0);
 
         let encoded = serde_json::to_string(&health).unwrap();
