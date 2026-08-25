@@ -12,6 +12,7 @@ $address = "http://127.0.0.1:$Port/"
 $inputs = @(
   (Join-Path $projectRoot 'src\bin\kunpeng-intelligence-host.rs'),
   (Join-Path $projectRoot 'src\intelligence_host\dashboard.rs'),
+  (Join-Path $projectRoot 'src\intelligence_host\audit.rs'),
   (Join-Path $projectRoot 'src\intelligence_host\mod.rs'),
   (Join-Path $projectRoot 'src\intelligence_worker_lifecycle.rs'),
   (Join-Path $projectRoot 'src\secret_store.rs'),

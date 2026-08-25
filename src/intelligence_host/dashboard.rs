@@ -2,12 +2,13 @@
 //!
 //! This is intentionally owned by `kunpeng-intelligence-host`, not the reader
 //! client.  It exposes only aggregate queue/audit state, explicit operator
-//! actions and one-time local worker pairing.  It never binds a LAN address
-//! or serves saved article text and source URLs.
+//! actions and one-time local worker pairing. It never binds a LAN address,
+//! serves saved article text/source URLs, or exposes model prompts/reasoning.
 
+use super::audit;
 use super::{
-    HostStatus, RunReport, continuous_processing_active, initialize_configuration,
-    read_configuration, run_once, start_continuous_processing, status, stop_continuous_processing,
+    continuous_processing_active, initialize_configuration, read_configuration, run_once,
+    start_continuous_processing, status, stop_continuous_processing, HostStatus, RunReport,
 };
 use crate::intelligence_worker_lifecycle::{
     self, IntelligenceWorkerCredentialRevokeRequest, IntelligenceWorkerPairingRequest,
@@ -17,8 +18,8 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -69,6 +70,12 @@ struct DashboardPairingRequest {
 struct DashboardContinuousRequest {
     #[serde(default)]
     launch_at_login: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DashboardAuditArticleRequest {
+    handle: String,
 }
 
 pub(super) const fn default_port() -> u16 {
@@ -125,6 +132,12 @@ fn handle_connection(mut stream: TcpStream, runtime: Arc<DashboardRuntime>) -> R
         ),
         ("GET", "/api/status") => write_status(&mut stream, &runtime),
         ("GET", "/api/distribution-status") => write_distribution_status(&mut stream),
+        ("POST", "/api/audit/articles") if request.dashboard_header => {
+            write_audit_articles(&mut stream)
+        }
+        ("POST", "/api/audit/article") if request.dashboard_header => {
+            write_audit_article(&mut stream, &request.body)
+        }
         ("POST", "/api/initialize") if request.dashboard_header => {
             match initialize_configuration() {
                 Ok(_) => write_json(&mut stream, 200, serde_json::json!({"initialized": true})),
@@ -161,6 +174,47 @@ fn handle_connection(mut stream: TcpStream, runtime: Arc<DashboardRuntime>) -> R
         ),
     }
     .map_err(|_| ())
+}
+
+fn write_audit_articles(stream: &mut TcpStream) -> std::io::Result<()> {
+    match audit::list_articles() {
+        Ok(items) => write_json(
+            stream,
+            200,
+            serde_json::to_value(items).unwrap_or_else(|_| serde_json::json!({"items": []})),
+        ),
+        Err(_) => write_json(
+            stream,
+            500,
+            serde_json::json!({"error": "无法读取本机新闻处理明细"}),
+        ),
+    }
+}
+
+fn write_audit_article(stream: &mut TcpStream, body: &[u8]) -> std::io::Result<()> {
+    let request: DashboardAuditArticleRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(_) => {
+            return write_json(
+                stream,
+                400,
+                serde_json::json!({"error": "新闻审计引用无效"}),
+            )
+        }
+    };
+    match audit::article_detail(&request.handle) {
+        Ok(item) => write_json(
+            stream,
+            200,
+            serde_json::to_value(item)
+                .unwrap_or_else(|_| serde_json::json!({"error": "无法显示新闻处理明细"})),
+        ),
+        Err(_) => write_json(
+            stream,
+            404,
+            serde_json::json!({"error": "新闻审计记录不可用"}),
+        ),
+    }
 }
 
 fn write_distribution_status(stream: &mut TcpStream) -> std::io::Result<()> {
@@ -505,7 +559,10 @@ mod tests {
             br#"{"launchAtLogin":false,"unexpected":true}"#,
         )
         .is_err());
-        assert!(parse_request(b"POST /api/continuous-stop?force=1 HTTP/1.1\r\nX-Kunpeng-Host-Dashboard: 1\r\n\r\n").is_err());
+        assert!(parse_request(
+            b"POST /api/continuous-stop?force=1 HTTP/1.1\r\nX-Kunpeng-Host-Dashboard: 1\r\n\r\n"
+        )
+        .is_err());
     }
 
     #[test]

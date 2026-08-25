@@ -8,6 +8,7 @@
 //! processing machine; the reader remains a client of published content.
 
 use crate::{archive, atomic_file, profile};
+mod audit;
 mod dashboard;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};

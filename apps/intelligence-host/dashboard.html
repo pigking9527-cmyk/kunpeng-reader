@@ -89,6 +89,20 @@
         <div id="audit" class="audit-empty">尚无审计摘要。执行一轮处理后会显示各阶段的聚合结果。</div>
       </section>
 
+      <section class="panel article-review" aria-labelledby="article-review-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">逐条审阅 · 本机永久档案</p>
+            <h2 id="article-review-title">新闻处理明细</h2>
+            <p>按需读取最近 24 条记录。可核查抓取、全文、媒体、确定性去重、向量与 8B、27B 事件和本地发布包状态；不在浏览器中显示正文、链接、提示词、推理或凭据。</p>
+          </div>
+          <button id="load-article-audit" type="button" class="primary">加载新闻处理过程</button>
+        </div>
+        <p id="article-review-notice" class="audit-empty">尚未读取逐条记录，不影响后台处理。</p>
+        <div id="article-review-list" class="article-review-list" aria-live="polite"></div>
+        <aside id="article-review-detail" class="article-review-detail" hidden aria-live="polite"></aside>
+      </section>
+
       <section class="boundary">
         <strong>数据与分发边界</strong>
         <p>本机永久保存原文、证据、整合报道和图片，视频仅保存链接。服务器只保存登录账户可读取的最近 30 天发布包；过期内容由客户端请求、主机回源、服务器临时中转后删除。</p>

@@ -19,6 +19,10 @@ const distributionLaunchAtLogin = byId("distribution-launch-at-login");
 const distributionPair = byId("distribution-pair");
 const distributionRevoke = byId("distribution-revoke");
 const distributionNotice = byId("distribution-notice");
+const loadArticleAudit = byId("load-article-audit");
+const articleReviewNotice = byId("article-review-notice");
+const articleReviewList = byId("article-review-list");
+const articleReviewDetail = byId("article-review-detail");
 
 function metric(label, value, detail) {
   const item = document.createElement("article"); item.className = "metric";
@@ -154,6 +158,54 @@ async function getDistributionStatus() { const response = await fetch("/api/dist
 async function refreshStatus() { refresh.disabled = true; try { render(await getStatus()); } catch { state.textContent = "无法连接本机主机"; updated.textContent = "请确认本机工作台仍在运行"; } finally { refresh.disabled = false; } }
 async function post(action) { const response = await fetch(action, { method: "POST", headers: { "Content-Type": "application/json", "X-Kunpeng-Host-Dashboard": "1" }, body: "{}" }); if (!response.ok) { const message = await response.text(); throw new Error(message || "操作失败"); } return response.json(); }
 async function postJson(action, body) { const response = await fetch(action, { method: "POST", headers: { "Content-Type": "application/json", "X-Kunpeng-Host-Dashboard": "1" }, body: JSON.stringify(body) }); if (!response.ok) { const message = await response.text(); throw new Error(message || "操作失败"); } return response.json(); }
+function stateChip(label, value) { const chip = document.createElement("span"); chip.className = `chip ${/(complete|completed|keep|canonical|prepared|ready)/.test(String(value)) ? "done" : /(waiting|queued|retry|failed)/.test(String(value)) ? "wait" : ""}`; chip.textContent = label; return chip; }
+function auditDetailBlock(label, value) { const block = document.createElement("article"); const title = document.createElement("strong"); title.textContent = label; const detail = document.createElement("span"); detail.textContent = value; block.replaceChildren(title, detail); return block; }
+function formatCount(label, count) { return `${label} ${Number(count) || 0}`; }
+function renderArticleAudit(items) {
+  articleReviewList.replaceChildren(...items.map((item) => {
+    const row = document.createElement("article"); row.className = "article-row";
+    const summary = document.createElement("div"); const title = document.createElement("h3"); title.textContent = String(item.title || "未命名新闻");
+    const source = document.createElement("p"); source.textContent = `${String(item.source || "未标注来源")} · ${String(item.publishedAt || "未标注时间")}`;
+    const meta = document.createElement("div"); meta.className = "article-row-meta";
+    meta.replaceChildren(
+      stateChip(`全文：${item.fullText && item.fullText.status || "waiting"}`, item.fullText && item.fullText.status),
+      stateChip(`去重：${item.dedupe && item.dedupe.role || "waiting"}`, item.dedupe && item.dedupe.role),
+      stateChip(`8B：${item.triageState || "queued"}`, item.triageState),
+      stateChip(`27B：${item.editorial && item.editorial.state || "waiting"}`, item.editorial && item.editorial.state),
+    );
+    summary.replaceChildren(title, source, meta);
+    const button = document.createElement("button"); button.type = "button"; button.textContent = "查看每步明细"; button.addEventListener("click", () => { void loadArticleDetail(item.handle); });
+    row.replaceChildren(summary, button); return row;
+  }));
+}
+async function loadArticleDetail(handle) {
+  articleReviewDetail.hidden = false; articleReviewDetail.textContent = "正在读取该条新闻的固定处理投影…";
+  try {
+    const item = await postJson("/api/audit/article", { handle });
+    const title = document.createElement("h3"); title.textContent = String(item.title || "新闻处理明细");
+    const subtitle = document.createElement("p"); subtitle.textContent = `${String(item.source || "未标注来源")} · ${String(item.publishedAt || "未标注时间")}`;
+    const grid = document.createElement("div"); grid.className = "detail-grid";
+    const full = item.fullText || {}; const media = item.media || {}; const dedupe = item.dedupe || {}; const semantic = item.semantic || {}; const triage = item.triage || {}; const editorial = item.editorial || {}; const publication = item.publication || {};
+    grid.replaceChildren(
+      auditDetailBlock("01 抓取与全文", `正文：${full.status || "waiting"}；版本 ${Number(full.versions) || 0}；段落 ${Number(full.paragraphs) || 0}`),
+      auditDetailBlock("02 媒体归档", `${formatCount("图片", media.images)}；${formatCount("视频链接", media.videos)}`),
+      auditDetailBlock("03 确定性去重", `角色：${dedupe.role || "waiting"}；同正文别名 ${Number(dedupe.aliases) || 0}`),
+      auditDetailBlock("04 语义近邻与关系", `向量：${semantic.vectorReady ? `已就绪 ${semantic.vectorDimensions || ""} 维` : "等待"}；关系候选 ${Number(semantic.relationCandidates) || 0}；状态 ${semantic.relationState || "waiting"}`),
+      auditDetailBlock("05 8B 初筛", `状态：${triage.state || item.triageState || "queued"}；重要性 ${triage.importance ?? "待判定"}；置信度 ${triage.confidencePercent == null ? "待判定" : `${triage.confidencePercent}%`}；模型 ${triage.model || "尚未调用"}`),
+      auditDetailBlock("06 27B 综合与事件", `状态：${editorial.state || "waiting"}；${editorial.eventLinked ? `已归入事件：${editorial.eventTitle || "已生成"}` : "尚未归入综合事件"}`),
+      auditDetailBlock("07 本地日报包", publication.day ? `状态：${publication.state || "prepared_locally"}；最近包 ${publication.day}` : "尚未准备日报包"),
+      auditDetailBlock("审阅边界", "本页为处理证明；不显示正文、原始链接、模型提示词/推理或任何凭据。"),
+    );
+    const close = document.createElement("button"); close.type = "button"; close.className = "secondary detail-close"; close.textContent = "收起明细"; close.addEventListener("click", () => { articleReviewDetail.hidden = true; articleReviewDetail.replaceChildren(); });
+    articleReviewDetail.replaceChildren(title, subtitle, grid, close);
+  } catch { articleReviewDetail.textContent = "该条新闻的审计投影暂不可读取；本机处理未受影响。"; }
+}
+async function refreshArticleAudit() {
+  loadArticleAudit.disabled = true; articleReviewNotice.textContent = "正在读取最近 24 条新闻的处理投影…";
+  try { const result = await post("/api/audit/articles"); const items = Array.isArray(result.items) ? result.items : []; renderArticleAudit(items); articleReviewNotice.textContent = items.length ? `已加载 ${items.length} 条。点击“查看每步明细”只读取该条记录。` : "当前档案尚无可审阅新闻。"; }
+  catch { articleReviewNotice.textContent = "无法读取逐条审计；后台处理未受影响。"; }
+  finally { loadArticleAudit.disabled = false; }
+}
 function setDistributionNotice(message, error = false) { distributionNotice.textContent = message; distributionNotice.classList.toggle("error", error); }
 function renderDistribution(status) {
   const paired = Boolean(status && status.paired);
@@ -174,6 +226,7 @@ runOnce.addEventListener("click", async () => { runOnce.disabled = true; try { a
 continuousStart.addEventListener("click", async () => { continuousStart.disabled = true; try { await postJson("/api/continuous-start", { launchAtLogin: continuousLogin.checked }); state.textContent = "已启动本机持续处理；页面可关闭，后台会继续按轮处理"; setTimeout(() => { void refreshStatus(); }, 700); } catch (error) { state.textContent = `启动持续处理失败：${error.message}`; continuousStart.disabled = false; } });
 continuousStop.addEventListener("click", async () => { continuousStop.disabled = true; try { await post("/api/continuous-stop"); state.textContent = "本机持续处理将在当前轮完成后停止"; setTimeout(() => { void refreshStatus(); }, 1200); } catch (error) { state.textContent = `停止持续处理失败：${error.message}`; continuousStop.disabled = false; } });
 refresh.addEventListener("click", () => { void refreshStatus(); });
+loadArticleAudit.addEventListener("click", () => { void refreshArticleAudit(); });
 distributionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   distributionPair.disabled = true;
