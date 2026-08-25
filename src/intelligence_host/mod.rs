@@ -26,6 +26,12 @@ const CONFIG_VERSION: u8 = 1;
 const MAX_STAGE_RUNS: u16 = 500;
 const WORKSTATION_LOOP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const WORKSTATION_ACTIVE_LOOP_INTERVAL: Duration = Duration::from_secs(30);
+/// When a substantial evidence backlog remains, one unattended round must
+/// yield back to fetch work promptly.  Otherwise a slow 8B relation batch can
+/// make the full-text queue appear stuck even though retrieval itself does not
+/// need the GPU.
+const FULL_TEXT_BACKLOG_YIELD_THRESHOLD: u64 = 512;
+const BACKLOG_MODEL_STAGE_LIMIT: u16 = 24;
 const JUDGE_8B_SHA256: &str = "D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785";
 const EMBEDDING_06_SHA256: &str =
     "06507C7B42688469C4E7298B0A1E16DEFF06CAF291CF0A5B278C308249C3E439";
@@ -92,6 +98,14 @@ struct HostConfiguration {
 
 const fn default_stage_limit() -> u16 {
     120
+}
+
+fn balanced_model_stage_limit(configured_limit: u16, awaiting_full_text: u64) -> u16 {
+    if awaiting_full_text >= FULL_TEXT_BACKLOG_YIELD_THRESHOLD {
+        configured_limit.min(BACKLOG_MODEL_STAGE_LIMIT).max(1)
+    } else {
+        configured_limit.max(1)
+    }
 }
 
 const fn default_editorial_limit() -> u16 {
@@ -1887,6 +1901,19 @@ fn run_once_with_audit(
             report.outcome = "evidence_completed_models_not_configured".into();
             return Ok(report);
         }
+        let awaiting_full_text = status(configuration, None, false).awaiting_full_text_count;
+        // Network evidence acquisition and model judgment are both durable.
+        // With a large archive backlog, give the next loop a chance to fetch
+        // more bodies instead of holding the GPU for a long, monolithic
+        // triage/relation pass.
+        let triage_limit = balanced_model_stage_limit(
+            configuration.max_triage_per_run,
+            awaiting_full_text,
+        );
+        let relation_limit = balanced_model_stage_limit(
+            configuration.max_processing_per_run,
+            awaiting_full_text,
+        );
         let mut acquired_model_phase = false;
 
         // Phase 1 owns the GPU with the 7/8B judge while the 0.6B retrieval
@@ -1915,7 +1942,7 @@ fn run_once_with_audit(
         }
 
         let work = (|| -> Result<RunReport, String> {
-            for _ in 0..configuration.max_triage_per_run {
+            for _ in 0..triage_limit {
                 if status(configuration, None, false).ready_for_triage_count == 0 {
                     break;
                 }
@@ -1935,7 +1962,7 @@ fn run_once_with_audit(
             // phase.  Persist their result before the runtime swaps to 27B;
             // a restart can resume from `relation_ready` without repeating
             // either the collector or the expensive editorial work.
-            for _ in 0..configuration.max_processing_per_run {
+            for _ in 0..relation_limit {
                 begin_audit_stage(audit_path, audit, "vector_recall_and_relation")?;
                 let value = child_output(configuration, "--relate-once", RELATION_TIMEOUT)?;
                 report.relation = text(&value, "outcome");
@@ -2185,6 +2212,21 @@ mod tests {
         assert!(!configuration_ready(&configuration));
         assert!(!collection_ready(&configuration));
         validate_configuration(&configuration).unwrap();
+    }
+
+    #[test]
+    fn large_full_text_backlog_yields_model_budget_without_disabling_work() {
+        assert_eq!(balanced_model_stage_limit(120, 0), 120);
+        assert_eq!(
+            balanced_model_stage_limit(120, FULL_TEXT_BACKLOG_YIELD_THRESHOLD - 1),
+            120
+        );
+        assert_eq!(
+            balanced_model_stage_limit(120, FULL_TEXT_BACKLOG_YIELD_THRESHOLD),
+            BACKLOG_MODEL_STAGE_LIMIT
+        );
+        assert_eq!(balanced_model_stage_limit(8, 10_000), 8);
+        assert_eq!(balanced_model_stage_limit(0, 10_000), 1);
     }
 
     #[test]
