@@ -22,6 +22,7 @@ mod epub_toc;
 mod external_dict;
 mod feedback;
 mod gesture_settings;
+mod intelligence_client;
 mod html_sanitize;
 mod import;
 mod import_core;
@@ -224,6 +225,10 @@ fn main() {
             let _main_window = main_window_builder.build()?;
             startup_enhancement::retain_main_window(app.handle(), _main_window.as_ref().window());
             sync::start_silent_startup_sync(app.handle().clone());
+            // Content-free wake-ups are subscribed at app start, never by a
+            // WebView page open. Full packages still pass the native cache
+            // validation and acknowledgement order before any display.
+            intelligence_client::spawn_delivery_stream(app.handle().clone());
             backup::spawn_daily(app.handle().clone());
             semantic::spawn_semantic_profile_warmup(app.handle().clone());
             startup::spawn_associated_book_watcher(app.handle().clone());
@@ -323,6 +328,14 @@ fn main() {
             ai_reader::ai_reader_status,
             ai_reader::ai_reader_profiles,
             ai_reader::select_ai_reader_profile,
+            intelligence_client::intelligence_client_cache_status,
+            intelligence_client::intelligence_client_cached_publications,
+            intelligence_client::intelligence_client_asset_data_url,
+            intelligence_client::intelligence_client_refresh,
+            intelligence_client::intelligence_archive_calendar,
+            intelligence_client::intelligence_archive_request,
+            intelligence_client::intelligence_archive_request_status,
+            intelligence_client::intelligence_archive_download,
             ai_reader::assign_ai_reader_profile,
             ai_reader::save_ai_reader_profile,
             ai_reader::save_ai_reader_config,

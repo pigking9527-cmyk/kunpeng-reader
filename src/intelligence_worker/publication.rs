@@ -291,7 +291,10 @@ fn load_or_prepare_daily_draft(
             )
             .map_err(|_| ())?;
         transaction
-            .execute("DELETE FROM intelligence_daily_drafts WHERE day=?1", [&day_text])
+            .execute(
+                "DELETE FROM intelligence_daily_drafts WHERE day=?1",
+                [&day_text],
+            )
             .map_err(|_| ())?;
         transaction.commit().map_err(|_| ())?;
         drop(connection);
@@ -302,7 +305,44 @@ fn load_or_prepare_daily_draft(
     // is authoritative for a frozen day.  Reopening a draft therefore never
     // rebuilds a changed event or asks a model to synthesize it again.
     let assets =
-        load_persisted_assets(&connection, catalog.parent().ok_or(())?, &day_text, &bundle)?;
+        match load_persisted_assets(&connection, catalog.parent().ok_or(())?, &day_text, &bundle) {
+            Ok(assets) => assets,
+            Err(()) => {
+                // A pre-asset-map workstation could leave an otherwise canonical
+                // unpublished bundle behind. It cannot be safely published: the
+                // JSON declares images whose pinned archive payloads are absent.
+                // Treat it like the legacy invalid-cache path above and rebuild
+                // from the still-present local event archive. A published daily
+                // package is immutable, so that case still fails closed.
+                let published: Option<String> = connection
+                    .query_row(
+                        "SELECT bundle_sha256 FROM intelligence_daily_publications WHERE day=?1",
+                        [&day_text],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|_| ())?;
+                if published.is_some() {
+                    return Err(());
+                }
+                let transaction = connection.unchecked_transaction().map_err(|_| ())?;
+                transaction
+                    .execute(
+                        "DELETE FROM intelligence_daily_draft_assets WHERE day=?1",
+                        [&day_text],
+                    )
+                    .map_err(|_| ())?;
+                transaction
+                    .execute(
+                        "DELETE FROM intelligence_daily_drafts WHERE day=?1",
+                        [&day_text],
+                    )
+                    .map_err(|_| ())?;
+                transaction.commit().map_err(|_| ())?;
+                drop(connection);
+                return build_and_store_daily_draft(catalog, day);
+            }
+        };
     Ok(Some(PublicationDraft {
         day: day_text,
         bundle,
@@ -1197,6 +1237,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(repaired_sha, stored_sha);
+        // Some old local drafts had a valid canonical bundle but predated the
+        // durable per-asset rows. They are no safer to publish than malformed
+        // JSON: rebuild only while there is no external publication receipt.
+        c.execute(
+            "DELETE FROM intelligence_daily_draft_assets WHERE day='2030-01-02'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            publish_day(None, &path, day),
+            PublishOutcome::PreparedLocally
+        );
+        let repaired_asset_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_daily_draft_assets WHERE day='2030-01-02'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repaired_asset_count, 1);
         // A frozen package must remain usable even if its event/source rows
         // are later compacted or replaced.  It must not rebuild from current
         // data merely because the publisher is retried another day.
