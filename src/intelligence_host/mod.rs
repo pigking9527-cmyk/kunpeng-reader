@@ -130,7 +130,12 @@ const fn default_editorial_limit() -> u16 {
 }
 
 const fn default_backfill_batches_per_run() -> u8 {
-    4
+    // Each worker batch is already bounded to 32 candidates and eight
+    // cross-host requests.  A 5k+ evidence backlog should not make the
+    // workstation wait through GPU phases after merely 128 attempts: retain
+    // the publisher-level throttle/circuit-breaker in the worker, but let a
+    // single durable round cover 256 candidates.
+    8
 }
 
 impl Default for HostConfiguration {
@@ -2284,7 +2289,7 @@ mod tests {
     fn defaults_are_safe_and_not_enabled() {
         let configuration = HostConfiguration::default();
         assert!(!configuration.enabled);
-        assert_eq!(configuration.max_backfill_batches_per_run, 4);
+        assert_eq!(configuration.max_backfill_batches_per_run, 8);
         assert_eq!(configuration.max_editorial_per_run, 2);
         assert!(!configuration_ready(&configuration));
         assert!(!collection_ready(&configuration));
