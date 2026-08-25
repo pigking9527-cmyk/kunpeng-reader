@@ -68,11 +68,14 @@ const COLLECTION_TIMEOUT: Duration = Duration::from_secs(120);
 // that worst case plus archive writes instead of killing a healthy batch.
 const BACKFILL_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 const TRIAGE_TIMEOUT: Duration = Duration::from_secs(120);
-const RELATION_TIMEOUT: Duration = Duration::from_secs(180);
+/// One relation item can need up to three 8B pair decisions. Each decision has
+/// its own short transport deadline, so the host budget leaves room for all
+/// three and for durable cleanup without a whole batch being killed silently.
+const RELATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// Keep the worker-private ANN graph alive for a few durable relation items,
 /// while preserving regular opportunities for full-text backfill in a busy
 /// unattended loop.  This is a fixed internal bound, never dashboard input.
-const RELATION_BATCH_SIZE: u16 = 4;
+const RELATION_BATCH_SIZE: u16 = 1;
 const EDITORIAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 // A first switch verifies locally pinned GGUF artifacts.  On a mechanical
 // archive drive that can legitimately take longer than the short per-article
@@ -416,6 +419,7 @@ struct AggregateRunReport {
     triaged: u64,
     retried: u64,
     relation: String,
+    relation_failure: String,
     editorial: String,
     processed: u64,
     reviewed: u64,
@@ -641,6 +645,17 @@ fn safe_processing_outcome(value: &str) -> String {
     }
 }
 
+fn safe_relation_failure(value: &str) -> String {
+    match value {
+        "relation_judge_model_transport"
+        | "relation_worker_timeout"
+        | "relation_worker_nonzero"
+        | "relation_worker_invalid_status" => value.into(),
+        "" => "not_run".into(),
+        _ => "unknown".into(),
+    }
+}
+
 fn safe_publication_outcome(value: &str) -> String {
     match value {
         "daily_prepared_locally"
@@ -665,9 +680,7 @@ fn project_run_report(report: &RunReport) -> AggregateRunReport {
         triaged: report.triaged,
         retried: report.retried,
         relation: safe_processing_outcome(&report.relation),
-        // The durable failure boundary is intentionally not returned. Its
-        // presence is enough to show a retry outcome without exposing a raw
-        // worker error; a successful synthesis is observable by its count.
+        relation_failure: safe_relation_failure(&report.relation_failure),
         editorial: if report.processed > 0 {
             "processed".into()
         } else if report.editorial_failure.is_empty() {
@@ -1804,6 +1817,18 @@ fn child_output_args(
     child_output_args_with_backfill_pass(configuration, args, timeout, None)
 }
 
+/// The operator page needs a retry boundary, not a raw process error. Keep the
+/// mapping narrow so local paths, provider output and arguments never enter a
+/// durable audit report.
+fn relation_worker_failure_code(error: &str) -> &'static str {
+    match error {
+        "本机情报 worker 超时；已停止本轮处理" => "relation_worker_timeout",
+        "本机情报 worker 未成功完成本轮任务" => "relation_worker_nonzero",
+        "本机情报 worker 返回无效状态" => "relation_worker_invalid_status",
+        _ => "relation_judge_model_transport",
+    }
+}
+
 /// A host round can run several bounded evidence batches.  Keep their common
 /// pass identifier out of the dashboard and logs, but pass it to the worker so
 /// a failure which becomes retryable after the short backoff cannot be fetched
@@ -1997,11 +2022,20 @@ fn run_once_unlocked(configuration: &HostConfiguration) -> Result<RunReport, Str
     write_host_audit(&audit_path, &audit).map_err(|_| "无法写入本机处理审计状态".to_string())?;
     let result = run_once_with_audit(configuration, &audit_path, &mut audit);
     match &result {
-        Ok(report) => audit.finish("completed", Some(report.clone())),
+        Ok(report) => audit.finish(audit_completion_status(report), Some(report.clone())),
         Err(_) => audit.finish("failed", None),
     }
     write_host_audit(&audit_path, &audit).map_err(|_| "无法写入本机处理审计状态".to_string())?;
     result
+}
+
+fn audit_completion_status(report: &RunReport) -> &'static str {
+    match report.outcome.as_str() {
+        "relation_processing_incomplete" | "processing_incomplete" | "triage_incomplete" => {
+            "failed"
+        }
+        _ => "completed",
+    }
 }
 
 fn run_once_with_audit(
@@ -2094,11 +2128,19 @@ fn run_once_with_audit(
                 let batch = remaining_relation_runs.min(RELATION_BATCH_SIZE);
                 begin_audit_stage(audit_path, audit, "vector_recall_and_relation")?;
                 let batch_argument = batch.to_string();
-                let value = child_output_args(
+                let value = match child_output_args(
                     configuration,
                     &["--relate-batch", &batch_argument],
                     RELATION_TIMEOUT,
-                )?;
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        report.relation = "processing_retry_scheduled".into();
+                        report.relation_failure = relation_worker_failure_code(&error).into();
+                        report.outcome = "relation_processing_incomplete".into();
+                        return Ok(report);
+                    }
+                };
                 report.relation = text(&value, "outcome");
                 report.relation_failure = optional_text(&value, "processingFailure");
                 match report.relation.as_str() {
@@ -2888,6 +2930,7 @@ mod tests {
         assert_eq!(report.triaged, 5);
         assert_eq!(report.retried, 1);
         assert_eq!(report.relation, "processed");
+        assert_eq!(report.relation_failure, "unknown");
         assert_eq!(report.editorial, "processing_retry_scheduled");
         assert_eq!(report.publication, "daily_prepared_locally");
 
@@ -2896,6 +2939,33 @@ mod tests {
         assert!(!encoded.contains("private.invalid"));
         assert!(!encoded.contains("credential-value"));
         assert!(!encoded.contains("distribution_worker_start_requested"));
+    }
+
+    #[test]
+    fn relation_worker_failure_codes_are_fixed_and_redacted() {
+        assert_eq!(
+            relation_worker_failure_code("本机情报 worker 超时；已停止本轮处理"),
+            "relation_worker_timeout"
+        );
+        assert_eq!(
+            relation_worker_failure_code("本机情报 worker 未成功完成本轮任务"),
+            "relation_worker_nonzero"
+        );
+        assert_eq!(
+            relation_worker_failure_code("unexpected local path or provider body"),
+            "relation_judge_model_transport"
+        );
+        let report = RunReport {
+            outcome: "relation_processing_incomplete".into(),
+            relation: "processing_retry_scheduled".into(),
+            relation_failure: "relation_worker_timeout".into(),
+            ..RunReport::default()
+        };
+        assert_eq!(audit_completion_status(&report), "failed");
+        assert_eq!(
+            project_run_report(&report).relation_failure,
+            "relation_worker_timeout"
+        );
     }
 
     #[test]

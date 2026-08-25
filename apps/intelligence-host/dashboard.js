@@ -47,11 +47,22 @@ const outcomeLabels = {
 const lifecycleLabels = {
   running: "运行中", completed: "已完成", failed: "失败", interrupted: "已中断", unknown: "未知",
 };
+const relationFailureLabels = {
+  relation_judge_model_transport: "8B 关系判定暂不可用，已保留重试",
+  relation_worker_timeout: "关系批处理超时，已保留重试",
+  relation_worker_nonzero: "关系 worker 未完成，已保留重试",
+  relation_worker_invalid_status: "关系 worker 状态无效，已保留重试",
+  not_run: "未发生关系判断失败",
+  unknown: "关系判断出现未分类安全错误",
+};
 function outcomeLabel(value) { return outcomeLabels[value] || "未识别的安全状态"; }
 function lifecycleLabel(value) { return lifecycleLabels[value] || "未知"; }
+function relationFailureLabel(value) { return relationFailureLabels[value] || relationFailureLabels.unknown; }
 function formatRun(report) {
   if (!report) return "尚无运行记录";
-  return `结果 ${outcomeLabel(report.outcome)} · 采集 ${outcomeLabel(report.collection)}（新增 ${Number(report.collected) || 0}，重复 ${Number(report.duplicates) || 0}）· 全文完成 ${Number(report.backfilled) || 0}，重试 ${Number(report.backfillRetried) || 0} · 初筛 ${Number(report.triaged) || 0}，重试 ${Number(report.retried) || 0} · 关系 ${outcomeLabel(report.relation)} · 综合 ${outcomeLabel(report.editorial)}（${Number(report.processed) || 0} 项，复核 ${Number(report.reviewed) || 0}）· 发布 ${outcomeLabel(report.publication)}`;
+  const relationFailure = report.relationFailure && report.relationFailure !== "not_run"
+    ? `（${relationFailureLabel(report.relationFailure)}）` : "";
+  return `结果 ${outcomeLabel(report.outcome)} · 采集 ${outcomeLabel(report.collection)}（新增 ${Number(report.collected) || 0}，重复 ${Number(report.duplicates) || 0}）· 全文完成 ${Number(report.backfilled) || 0}，重试 ${Number(report.backfillRetried) || 0} · 初筛 ${Number(report.triaged) || 0}，重试 ${Number(report.retried) || 0} · 关系 ${outcomeLabel(report.relation)}${relationFailure} · 综合 ${outcomeLabel(report.editorial)}（${Number(report.processed) || 0} 项，复核 ${Number(report.reviewed) || 0}）· 发布 ${outcomeLabel(report.publication)}`;
 }
 function formatAuditRun(auditRun) {
   if (!auditRun) return "尚无运行记录";
