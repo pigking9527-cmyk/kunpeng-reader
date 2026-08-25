@@ -2341,13 +2341,21 @@ fn run_loop() -> i32 {
     }
     let _ = ensure_distribution_sidecar(&initial);
     loop {
-        let value = match read_configuration() {
+        let (value, yielded_to_backfill) = match read_configuration() {
             Ok(configuration) if !configuration.enabled => break,
             Ok(configuration) => match run_once_from_continuous_loop(&configuration) {
-                Ok(report) => serde_json::json!({"ok": true, "report": report}),
-                Err(error) => serde_json::json!({"ok": false, "error": error}),
+                Ok(report) => (serde_json::json!({"ok": true, "report": report}), false),
+                // Full-text repair and the main pipeline deliberately share a
+                // single writer guard. A failed try-lock is a normal yield, not
+                // a failed processing round; retry promptly so the fast
+                // backfill lane cannot starve 8B relation work or 27B editing.
+                Err(error) if error == "已有本机情报处理正在运行" => (
+                    serde_json::json!({"ok": true, "outcome": "yielded_to_backfill"}),
+                    true,
+                ),
+                Err(error) => (serde_json::json!({"ok": false, "error": error}), false),
             },
-            Err(error) => serde_json::json!({"ok": false, "error": error}),
+            Err(error) => (serde_json::json!({"ok": false, "error": error}), false),
         };
         println!("{}", value);
         // While durable evidence or model work is waiting, the host should
@@ -2355,20 +2363,24 @@ fn run_loop() -> i32 {
         // can process thousands of retained articles.  The worker still owns
         // per-source limits and retry scheduling; this only removes avoidable
         // idle time between safe bounded rounds.
-        let interval = match read_configuration() {
-            Ok(configuration) => {
-                let projection = status(&configuration, None, false);
-                if projection.awaiting_full_text_count > 0
-                    || projection.ready_for_triage_count > 0
-                    || projection.ready_for_relation_count > 0
-                    || projection.ready_for_editorial_count > 0
-                {
-                    WORKSTATION_ACTIVE_LOOP_INTERVAL
-                } else {
-                    WORKSTATION_LOOP_INTERVAL
+        let interval = if yielded_to_backfill {
+            Duration::from_secs(2)
+        } else {
+            match read_configuration() {
+                Ok(configuration) => {
+                    let projection = status(&configuration, None, false);
+                    if projection.awaiting_full_text_count > 0
+                        || projection.ready_for_triage_count > 0
+                        || projection.ready_for_relation_count > 0
+                        || projection.ready_for_editorial_count > 0
+                    {
+                        WORKSTATION_ACTIVE_LOOP_INTERVAL
+                    } else {
+                        WORKSTATION_LOOP_INTERVAL
+                    }
                 }
+                Err(_) => WORKSTATION_LOOP_INTERVAL,
             }
-            Err(_) => WORKSTATION_LOOP_INTERVAL,
         };
         // A stop command changes only durable local configuration.  Polling
         // once per second makes that command observable promptly while never
