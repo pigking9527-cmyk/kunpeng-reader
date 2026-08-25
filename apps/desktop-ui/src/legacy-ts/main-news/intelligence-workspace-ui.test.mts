@@ -30,6 +30,7 @@ class FakeElement {
   public readonly attributes = new Map<string, string>();
   public readonly children: FakeElement[] = [];
   public readonly classList = new FakeClassList();
+  public closestTarget: FakeElement | null = null;
   private readonly listeners = new Map<string, Array<() => void>>();
 
   public setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
@@ -40,6 +41,7 @@ class FakeElement {
   public replaceChildren(...children: FakeElement[]): void { this.children.splice(0, this.children.length, ...children); }
   public append(...children: FakeElement[]): void { this.children.push(...children); }
   public querySelectorAll(): FakeElement[] { return []; }
+  public closest<T>(): T | null { return this.closestTarget as T | null; }
   public focus(): void {}
   public emit(type: string): void { this.listeners.get(type)?.forEach((listener) => listener()); }
   public click(): void { this.emit("click"); }
@@ -73,11 +75,18 @@ const ELEMENT_IDS = [
   "intelligence-audit-view", "intelligence-audit-back", "library-ai-page",
 ];
 
-function fixture(respond: Invoke, stored: Record<string, string> = {}): Fixture {
+function fixture(
+  respond: Invoke,
+  stored: Record<string, string> = {},
+  options: { readonly withToolbarAction?: boolean } = {},
+): Fixture {
   const elements = new Map(ELEMENT_IDS.map((id) => [id, new FakeElement()]));
   const calls: Array<{ readonly command: string; readonly args?: Record<string, unknown> }> = [];
   const storage = new Map(Object.entries(stored));
   const contentShell = new FakeElement();
+  if (options.withToolbarAction) {
+    elementFrom(elements, "intelligence-lab-toolbar-btn").closestTarget = new FakeElement();
+  }
   const runtime: Record<string, unknown> = {
     document: {
       getElementById: (id: string) => elements.get(id) ?? null,
@@ -98,6 +107,12 @@ function fixture(respond: Invoke, stored: Record<string, string> = {}): Fixture 
     },
   };
   return { runtime, elements, calls, transport, storage };
+}
+
+function elementFrom(elements: Map<string, FakeElement>, id: string): FakeElement {
+  const result = elements.get(id);
+  if (!result) throw new Error(`missing ${id}`);
+  return result;
 }
 
 function workspace(view: Fixture): NonNullable<NonNullable<ReturnType<typeof installIntelligenceWorkspaceUi>>["instance"]> {
@@ -273,6 +288,20 @@ test("opening the workspace only reads the account-scoped validated cache", asyn
   assert.match(element(view, "intelligence-workspace-status").textContent, /已读取本地正式缓存/);
   assert.equal(element(view, "intelligence-briefing-model-status").textContent, "本机缓存阅读模式 · 不会自动调用模型");
   assert.equal(element(view, "intelligence-digest-list").children.length, 1);
+});
+
+test("anonymous accounts keep the push intelligence entry hidden", async () => {
+  const view = fixture(
+    (command) => command === "sync_get_settings" ? { userId: "", url: "" } : cacheStatus(),
+    {},
+    { withToolbarAction: true },
+  );
+  workspace(view);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const toolbar = element(view, "intelligence-lab-toolbar-btn");
+  assert.equal(toolbar.closestTarget?.hidden, true);
+  assert.deepEqual(view.calls.map((call) => call.command), ["sync_get_settings"]);
 });
 
 test("explicit refresh is the sole workspace action allowed to invoke native synchronization", async () => {
