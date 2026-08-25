@@ -145,6 +145,16 @@ fn canonical_article_text(value: &str) -> String {
     output.trim().to_owned()
 }
 
+/// Return the digest of the exact canonical text representation used by the
+/// immutable article archive.  Collection uses this when two independent
+/// feeds point at the same normalized public URL: only byte-equivalent
+/// canonical evidence may share the already processed article.  Keeping the
+/// normalization here avoids a second, subtly different whitespace policy at
+/// the collection boundary.
+pub(crate) fn canonical_article_text_sha256(value: &str) -> String {
+    sha256_hex(canonical_article_text(value).as_bytes())
+}
+
 fn ensure_catalog_schema(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(

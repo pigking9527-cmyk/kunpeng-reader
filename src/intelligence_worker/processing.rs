@@ -95,6 +95,16 @@ const MAX_EMBEDDING_TITLE_CHARS: usize = 240;
 const MAX_EMBEDDING_SUMMARY_CHARS: usize = 480;
 const MAX_EMBEDDING_BODY_CHARS: usize = 900;
 const MAX_RELATIONS: usize = 3;
+/// 27B is the safety oracle for the 8B relation classifier.  Sampling may
+/// only start after a deliberately conservative full-review calibration.  A
+/// single bad sampled decision immediately returns the worker to full review,
+/// so these values are a lower bound, not a target throughput setting.
+const QUALITY_GATE_MIN_FULL_SAMPLES: i64 = 40;
+const QUALITY_GATE_MIN_AGREEMENT_RATE: f64 = 0.98;
+const QUALITY_GATE_SAMPLE_DIVISOR: u64 = 10;
+/// Only an emphatic negative can be sampled.  Any merge, timeline relation,
+/// low-confidence negative, or uncertain classification remains 27B-reviewed.
+const QUALITY_GATE_SAMPLE_CONFIDENCE: f64 = 0.90;
 /// The editor has a 4K context on the 16 GiB profile.  A pair review contains
 /// two independently reduced sources, JSON structure and an answer budget,
 /// so each source must be compacted much further than an individual fact
@@ -212,6 +222,19 @@ struct RelationDecision {
     same_event: bool,
     confidence: f64,
     reason: String,
+}
+
+/// The only persistent calibration metadata for a reviewed relation.  It
+/// intentionally carries classifications and bounded numeric confidence only:
+/// article text, source URL, prompt, and raw inference never enter the
+/// quality-gate tables.
+#[derive(Clone, Debug)]
+struct QualityReviewPlan {
+    decision_sha256: String,
+    stratum: &'static str,
+    requires_review: bool,
+    relation_model_id: String,
+    relation_model_sha256: String,
 }
 
 /// Every persisted staging row is pinned to one immutable relation input and
@@ -399,6 +422,7 @@ enum EditorialMaterializeFailure {
     LeftEvidenceReduce,
     RightFactExtraction,
     RightEvidenceReduce,
+    QualityGate,
     ReviewModel,
     ReviewPayload,
     ReviewValidation,
@@ -426,6 +450,7 @@ impl EditorialMaterializeFailure {
             Self::LeftEvidenceReduce => "editorial_left_evidence_reduce",
             Self::RightFactExtraction => "editorial_right_fact_extraction",
             Self::RightEvidenceReduce => "editorial_right_evidence_reduce",
+            Self::QualityGate => "editorial_quality_gate",
             Self::ReviewModel => "editorial_review_model",
             Self::ReviewPayload => "editorial_review_payload",
             Self::ReviewValidation => "editorial_review_validation",
@@ -987,6 +1012,17 @@ fn process_editorial_once_with<T: ProcessingTransport>(
             }
         }
     };
+    // A 27B artifact change invalidates prior calibration.  Fail closed before
+    // selecting the 8B relations so a newly configured editor cannot inherit
+    // the old editor's sampling decision.
+    if ensure_editorial_quality_gate_scope(&connection, &configuration.deep).is_err() {
+        return ProcessingReport {
+            outcome: ProcessingOutcome::Retry,
+            chunks: facts.len() as u64,
+            failure_stage: "editorial_quality_gate",
+            ..ProcessingReport::default()
+        };
+    }
     let relations = match stored_relations(&connection, path, &article) {
         Ok(value) => value,
         Err(_) => {
@@ -1053,10 +1089,47 @@ fn initialize(connection: &Connection) -> Result<(), ()> {
       CREATE TABLE IF NOT EXISTS intelligence_worker_relation_reviews(pair_id TEXT PRIMARY KEY,left_article_id TEXT NOT NULL,right_article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,relation TEXT NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,reviewed_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS intelligence_quality_gate_state(singleton INTEGER PRIMARY KEY,review_mode TEXT NOT NULL);
       INSERT OR IGNORE INTO intelligence_quality_gate_state(singleton,review_mode) VALUES(1,'full');
+      CREATE TABLE IF NOT EXISTS intelligence_worker_relation_review_plans(pair_id TEXT PRIMARY KEY,decision_sha256 TEXT NOT NULL,stratum TEXT NOT NULL,requires_review INTEGER NOT NULL,relation_model_id TEXT NOT NULL,relation_model_sha256 TEXT NOT NULL,created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS intelligence_worker_relation_review_plans_model_idx ON intelligence_worker_relation_review_plans(relation_model_id,relation_model_sha256);
+      CREATE TABLE IF NOT EXISTS intelligence_worker_quality_gate_metrics(calibration_scope TEXT PRIMARY KEY,total_samples INTEGER NOT NULL,agreement_count INTEGER NOT NULL,disagreement_count INTEGER NOT NULL,eight_b_merge_count INTEGER NOT NULL,eight_b_false_merge_count INTEGER NOT NULL,safety_guard_failures INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS intelligence_worker_quality_gate_strata(calibration_scope TEXT NOT NULL,stratum TEXT NOT NULL,total_samples INTEGER NOT NULL,agreement_count INTEGER NOT NULL,disagreement_count INTEGER NOT NULL,eight_b_merge_count INTEGER NOT NULL,eight_b_false_merge_count INTEGER NOT NULL,PRIMARY KEY(calibration_scope,stratum));
+      CREATE TABLE IF NOT EXISTS intelligence_worker_quality_gate_samples(sample_key TEXT PRIMARY KEY,calibration_scope TEXT NOT NULL,stratum TEXT NOT NULL,eight_b_relation TEXT NOT NULL,eight_b_confidence REAL NOT NULL,qwen_relation TEXT NOT NULL,qwen_approved INTEGER NOT NULL,agreement INTEGER NOT NULL,eight_b_false_merge INTEGER NOT NULL,reviewed_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS intelligence_worker_quality_gate_samples_scope_idx ON intelligence_worker_quality_gate_samples(calibration_scope,reviewed_at);
       CREATE TABLE IF NOT EXISTS intelligence_worker_canonical_contents(canonical_text_sha256 TEXT PRIMARY KEY,canonical_article_id TEXT NOT NULL,canonical_fingerprint TEXT NOT NULL,created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS intelligence_worker_canonical_aliases(article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,canonical_text_sha256 TEXT NOT NULL,canonical_article_id TEXT NOT NULL,canonical_fingerprint TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(article_id,fingerprint));
       CREATE INDEX IF NOT EXISTS intelligence_worker_canonical_alias_current_idx ON intelligence_worker_canonical_aliases(article_id,fingerprint,canonical_article_id,canonical_fingerprint);
-      CREATE TABLE IF NOT EXISTS intelligence_worker_embeddings(canonical_text_sha256 TEXT NOT NULL,model_id TEXT NOT NULL,model_sha256 TEXT NOT NULL,vector_json TEXT NOT NULL,dimensions INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(canonical_text_sha256,model_id,model_sha256));").map_err(|_| ())
+      CREATE TABLE IF NOT EXISTS intelligence_worker_embeddings(canonical_text_sha256 TEXT NOT NULL,model_id TEXT NOT NULL,model_sha256 TEXT NOT NULL,vector_json TEXT NOT NULL,dimensions INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(canonical_text_sha256,model_id,model_sha256));").map_err(|_| ())?;
+    ensure_quality_gate_state_columns(connection)
+}
+
+/// Existing catalogs predate model-scoped calibration.  Add only nullable
+/// worker-private columns so opening an old local archive remains safe and
+/// starts in full review rather than inheriting an unverifiable sample mode.
+fn ensure_quality_gate_state_columns(connection: &Connection) -> Result<(), ()> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(intelligence_quality_gate_state)")
+        .map_err(|_| ())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|_| ())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+    drop(statement);
+    for (column, definition) in [
+        ("relation_model_id", "TEXT"),
+        ("relation_model_sha256", "TEXT"),
+        ("editorial_model_id", "TEXT"),
+        ("editorial_model_sha256", "TEXT"),
+    ] {
+        if !columns.iter().any(|existing| existing == column) {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE intelligence_quality_gate_state ADD COLUMN {column} {definition}"
+                ))
+                .map_err(|_| ())?;
+        }
+    }
+    Ok(())
 }
 
 /// Reconcile every current complete body to a canonical, whitespace-normalized
@@ -1366,7 +1439,11 @@ fn stored_relations(
                 )
                 .ok()
                 .map(|body| Relation {
-                    review: needs_review(connection, &id, &relation, confidence).unwrap_or(true),
+                    // A missing or mismatched durable plan is never treated as
+                    // permission to skip review.  `review_required_for_relation`
+                    // also resets the gate to full in that case.
+                    review: review_required_for_relation(connection, &id, &relation, confidence)
+                        .unwrap_or(true),
                     id,
                     right_id: right_id.clone(),
                     right_article: Article {
@@ -2087,11 +2164,12 @@ fn write_staged_relation_decision(
     let transaction = connection
         .transaction()
         .map_err(|_| RelationJudgeFailure::TransactionOpen)?;
-    let review = needs_review(
+    let review = plan_relation_review(
         &transaction,
         &key.pair_id,
         &decision.relation,
         decision.confidence,
+        route,
     )
     .map_err(|_| RelationJudgeFailure::ReviewLookup)?;
     transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-8b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![key.pair_id,article.id,candidate.id,decision.relation,decision.confidence,route.model,json!({"reason":decision.reason,"processor":PROCESSOR_VERSION}).to_string()]).map_err(|_| RelationJudgeFailure::StateWrite)?;
@@ -2171,13 +2249,20 @@ fn review_and_materialize<T: ProcessingTransport>(
         let raw = cached_or_call(connection, &key, "review", || {
             transport.complete(&config.deep,"intelligence_qwen_review",REVIEW_PROMPT,&json!({"leftEvidence":left_evidence,"rightEvidence":right_evidence,"proposal":{"relation":relation.relation,"confidence":relation.confidence,"reason":relation.reason}}).to_string(),RELATION_REVIEW_MAX_TOKENS)
         })
-        .map_err(|_| EditorialMaterializeFailure::ReviewModel)?;
-        let payload: ReviewPayload =
-            parse_model_json(&raw).map_err(|_| EditorialMaterializeFailure::ReviewPayload)?;
+        .map_err(|_| {
+            // A failed review never authorizes sample mode on a later retry.
+            let _ = record_quality_guard_failure(connection);
+            EditorialMaterializeFailure::ReviewModel
+        })?;
+        let payload: ReviewPayload = parse_model_json(&raw).map_err(|_| {
+            let _ = record_quality_guard_failure(connection);
+            EditorialMaterializeFailure::ReviewPayload
+        })?;
         if !valid_relation(&payload.relation)
             || !payload.confidence.is_finite()
             || !(0.0..=1.0).contains(&payload.confidence)
         {
+            let _ = record_quality_guard_failure(connection);
             return Err(EditorialMaterializeFailure::ReviewValidation);
         }
         if payload.approved
@@ -2273,6 +2358,13 @@ fn review_and_materialize<T: ProcessingTransport>(
         .transaction()
         .map_err(|_| EditorialMaterializeFailure::TransactionOpen)?;
     for decision in &review_decisions {
+        record_quality_review(
+            &transaction,
+            &decision.relation,
+            &decision.payload,
+            &config.deep,
+        )
+        .map_err(|_| EditorialMaterializeFailure::QualityGate)?;
         transaction.execute("INSERT INTO intelligence_worker_relation_reviews(pair_id,left_article_id,right_article_id,fingerprint,relation,confidence,reason,reviewed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(pair_id) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,reason=excluded.reason,reviewed_at=excluded.reviewed_at",params![decision.relation.id,article.id,decision.relation.right_id,article.fingerprint,decision.payload.relation,decision.payload.confidence,decision.payload.reason]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
         transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-27b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![format!("27b:{}", decision.relation.id),article.id,decision.relation.right_id,decision.payload.relation,decision.payload.confidence,config.deep.model,json!({"reason":decision.payload.reason,"processor":PROCESSOR_VERSION,"fulltextEvidence":true}).to_string()]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
     }
@@ -2786,12 +2878,43 @@ fn reconcile_series_links(
     Ok(())
 }
 
-fn needs_review(
-    connection: &Connection,
-    id: &str,
-    relation: &str,
-    confidence: f64,
-) -> Result<bool, ()> {
+fn relation_decision_sha256(relation: &str, confidence: f64) -> String {
+    sha256(format!("{relation}\u{1f}{confidence:.9}"))
+}
+
+fn quality_stratum(relation: &str, confidence: f64) -> &'static str {
+    match relation {
+        "exact_duplicate" | "syndicated_copy" | "same_event" => "merge",
+        "event_update" | "same_series" | "correction" => "storyline",
+        "unrelated" | "background" if confidence >= QUALITY_GATE_SAMPLE_CONFIDENCE => {
+            "high_confidence_negative"
+        }
+        "unrelated" | "background" => "uncertain_negative",
+        _ => "invalid",
+    }
+}
+
+fn is_merge_relation(relation: &str) -> bool {
+    matches!(
+        relation,
+        "exact_duplicate" | "syndicated_copy" | "same_event"
+    )
+}
+
+fn sampling_eligible(relation: &str, confidence: f64) -> bool {
+    quality_stratum(relation, confidence) == "high_confidence_negative"
+}
+
+fn stable_sample_selected(pair_id: &str, decision_sha256: &str) -> bool {
+    let digest = sha256(format!("{pair_id}\u{1f}{decision_sha256}"));
+    u64::from_str_radix(&digest[..8], 16)
+        .map(|value| value % QUALITY_GATE_SAMPLE_DIVISOR == 0)
+        // A malformed hash or conversion is a safety condition, never a
+        // reason to skip the Qwen review.
+        .unwrap_or(true)
+}
+
+fn quality_gate_mode(connection: &Connection) -> Result<&'static str, ()> {
     let mode: Option<String> = connection
         .query_row(
             "SELECT review_mode FROM intelligence_quality_gate_state WHERE singleton=1",
@@ -2800,15 +2923,405 @@ fn needs_review(
         )
         .optional()
         .map_err(|_| ())?;
-    if mode.as_deref() != Some("sample") {
-        return Ok(true);
+    match mode.as_deref() {
+        Some("sample") => Ok("sample"),
+        // Missing, corrupted, or future values must fail closed.
+        _ => Ok("full"),
     }
-    if !matches!(relation, "unrelated" | "background") || confidence < 0.75 {
-        return Ok(true);
+}
+
+fn force_full_review_mode(connection: &Connection) -> Result<(), ()> {
+    connection
+        .execute(
+            "UPDATE intelligence_quality_gate_state SET review_mode='full' WHERE singleton=1",
+            [],
+        )
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
+fn quality_scope_from_runtime_state(connection: &Connection) -> Result<Option<String>, ()> {
+    let state: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT relation_model_id,relation_model_sha256,editorial_model_id,editorial_model_sha256
+             FROM intelligence_quality_gate_state WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    let Some((
+        Some(relation_model),
+        Some(relation_sha),
+        Some(editorial_model),
+        Some(editorial_sha),
+    )) = state
+    else {
+        return Ok(None);
+    };
+    Ok(Some(sha256(format!(
+        "{relation_model}\u{1f}{relation_sha}\u{1f}{RELATION_PROMPT_VERSION}\u{1f}{editorial_model}\u{1f}{editorial_sha}\u{1f}{REVIEW_PROMPT_VERSION}"
+    ))))
+}
+
+/// Guard failures are persisted as aggregate-only counters when their active
+/// model scope is known.  They never include the malformed prompt, source, or
+/// model response, and they always force the next relation back to full 27B
+/// review even when a metric row cannot be recovered.
+fn record_quality_guard_failure(connection: &Connection) -> Result<(), ()> {
+    force_full_review_mode(connection)?;
+    if let Some(scope) = quality_scope_from_runtime_state(connection)? {
+        connection
+            .execute(
+                "INSERT INTO intelligence_worker_quality_gate_metrics(
+                    calibration_scope,total_samples,agreement_count,disagreement_count,
+                    eight_b_merge_count,eight_b_false_merge_count,safety_guard_failures,updated_at)
+                 VALUES(?1,0,0,0,0,0,1,strftime('%s','now')*1000)
+                 ON CONFLICT(calibration_scope) DO UPDATE SET
+                    safety_guard_failures=safety_guard_failures+1,updated_at=excluded.updated_at",
+                [scope],
+            )
+            .map_err(|_| ())?;
     }
-    Ok(u64::from_str_radix(&sha256(id)[..8], 16)
-        .map(|value| value % 10 == 0)
-        .unwrap_or(true))
+    Ok(())
+}
+
+/// Keep calibration tied to the exact 8B artifact.  A changed 8B judge cannot
+/// inherit the old judge's sampling privilege; it starts in full review.
+fn ensure_relation_quality_gate_scope(
+    connection: &Connection,
+    route: &ModelRoute,
+) -> Result<(), ()> {
+    let stored: Option<(Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT relation_model_id,relation_model_sha256
+             FROM intelligence_quality_gate_state WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    let same = matches!(
+        stored,
+        Some((Some(ref model), Some(ref artifact)))
+            if model == &route.model && artifact == &route.artifact_sha256
+    );
+    if !same {
+        connection
+            .execute(
+                "UPDATE intelligence_quality_gate_state
+                 SET review_mode='full',relation_model_id=?1,relation_model_sha256=?2
+                 WHERE singleton=1",
+                params![route.model, route.artifact_sha256],
+            )
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+/// A changed 27B editor is a new ground truth source.  Reopen every pending
+/// decision and start that editor's calibration in full mode.  Historical
+/// metrics remain model-scoped below and are never reused for the new scope.
+fn ensure_editorial_quality_gate_scope(
+    connection: &Connection,
+    route: &ModelRoute,
+) -> Result<(), ()> {
+    let stored: Option<(Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT editorial_model_id,editorial_model_sha256
+             FROM intelligence_quality_gate_state WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    let same = matches!(
+        stored,
+        Some((Some(ref model), Some(ref artifact)))
+            if model == &route.model && artifact == &route.artifact_sha256
+    );
+    if !same {
+        let transaction = connection.unchecked_transaction().map_err(|_| ())?;
+        transaction
+            .execute(
+                "UPDATE intelligence_quality_gate_state
+                 SET review_mode='full',editorial_model_id=?1,editorial_model_sha256=?2
+                 WHERE singleton=1",
+                params![route.model, route.artifact_sha256],
+            )
+            .map_err(|_| ())?;
+        // Plans can be created while the 8B phase owns the GPU.  Before the
+        // new 27B model sees any of them, force those pending low-risk samples
+        // through a full review as well.
+        transaction
+            .execute(
+                "UPDATE intelligence_worker_relation_review_plans SET requires_review=1",
+                [],
+            )
+            .map_err(|_| ())?;
+        transaction.commit().map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn plan_relation_review(
+    transaction: &rusqlite::Transaction<'_>,
+    pair_id: &str,
+    relation: &str,
+    confidence: f64,
+    route: &ModelRoute,
+) -> Result<bool, ()> {
+    ensure_relation_quality_gate_scope(transaction, route)?;
+    let decision_sha256 = relation_decision_sha256(relation, confidence);
+    let stratum = quality_stratum(relation, confidence);
+    let requires_review = match quality_gate_mode(transaction)? {
+        "sample" if sampling_eligible(relation, confidence) => {
+            stable_sample_selected(pair_id, &decision_sha256)
+        }
+        _ => true,
+    };
+    transaction
+        .execute(
+            "INSERT INTO intelligence_worker_relation_review_plans(
+                pair_id,decision_sha256,stratum,requires_review,relation_model_id,
+                relation_model_sha256,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6,strftime('%s','now')*1000)
+             ON CONFLICT(pair_id) DO UPDATE SET
+                decision_sha256=excluded.decision_sha256,stratum=excluded.stratum,
+                requires_review=excluded.requires_review,
+                relation_model_id=excluded.relation_model_id,
+                relation_model_sha256=excluded.relation_model_sha256,
+                created_at=excluded.created_at",
+            params![
+                pair_id,
+                decision_sha256,
+                stratum,
+                i64::from(requires_review),
+                route.model,
+                route.artifact_sha256
+            ],
+        )
+        .map_err(|_| ())?;
+    Ok(requires_review)
+}
+
+/// The editorial phase must consume the decision made during the 8B write,
+/// rather than re-hash a pair after mode or model state has changed.  Missing
+/// plans are deliberately treated as a quality guard failure and reviewed.
+fn review_required_for_relation(
+    connection: &Connection,
+    pair_id: &str,
+    relation: &str,
+    confidence: f64,
+) -> Result<bool, ()> {
+    let expected = relation_decision_sha256(relation, confidence);
+    let plan: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT decision_sha256,requires_review
+             FROM intelligence_worker_relation_review_plans WHERE pair_id=?1",
+            [pair_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    match plan {
+        Some((decision, required)) if decision == expected && matches!(required, 0 | 1) => {
+            Ok(required == 1)
+        }
+        _ => {
+            record_quality_guard_failure(connection)?;
+            Ok(true)
+        }
+    }
+}
+
+fn calibration_scope(plan: &QualityReviewPlan, deep: &ModelRoute) -> String {
+    sha256(format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        plan.relation_model_id,
+        plan.relation_model_sha256,
+        RELATION_PROMPT_VERSION,
+        deep.model,
+        deep.artifact_sha256,
+        REVIEW_PROMPT_VERSION
+    ))
+}
+
+fn load_quality_review_plan(
+    connection: &Connection,
+    pair_id: &str,
+    relation: &str,
+    confidence: f64,
+) -> Result<Option<QualityReviewPlan>, ()> {
+    let expected = relation_decision_sha256(relation, confidence);
+    let plan: Option<(String, String, i64, String, String)> = connection
+        .query_row(
+            "SELECT decision_sha256,stratum,requires_review,relation_model_id,relation_model_sha256
+             FROM intelligence_worker_relation_review_plans WHERE pair_id=?1",
+            [pair_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ())?;
+    match plan {
+        Some((decision_sha256, stratum, required, model, artifact))
+            if decision_sha256 == expected
+                && stratum == quality_stratum(relation, confidence)
+                && matches!(required, 0 | 1) =>
+        {
+            Ok(Some(QualityReviewPlan {
+                decision_sha256,
+                stratum: match stratum.as_str() {
+                    "merge" => "merge",
+                    "storyline" => "storyline",
+                    "high_confidence_negative" => "high_confidence_negative",
+                    "uncertain_negative" => "uncertain_negative",
+                    _ => "invalid",
+                },
+                requires_review: required == 1,
+                relation_model_id: model,
+                relation_model_sha256: artifact,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn record_quality_review(
+    connection: &Connection,
+    relation: &Relation,
+    payload: &ReviewPayload,
+    deep: &ModelRoute,
+) -> Result<(), ()> {
+    let Some(plan) = load_quality_review_plan(
+        connection,
+        &relation.id,
+        &relation.relation,
+        relation.confidence,
+    )?
+    else {
+        record_quality_guard_failure(connection)?;
+        return Ok(());
+    };
+    // This function is only called for a plan that required a review.  Treat
+    // any impossible caller/state combination as a fail-closed safety event.
+    if !plan.requires_review {
+        record_quality_guard_failure(connection)?;
+        return Ok(());
+    }
+    let agreement = payload.approved && payload.relation == relation.relation;
+    let false_merge = is_merge_relation(&relation.relation)
+        && !(payload.approved && is_merge_relation(&payload.relation));
+    let scope = calibration_scope(&plan, deep);
+    let sample_key = sha256(format!(
+        "{}\u{1f}{}\u{1f}{scope}",
+        relation.id, plan.decision_sha256
+    ));
+    let inserted = connection
+        .execute(
+            "INSERT OR IGNORE INTO intelligence_worker_quality_gate_samples(
+                sample_key,calibration_scope,stratum,eight_b_relation,eight_b_confidence,
+                qwen_relation,qwen_approved,agreement,eight_b_false_merge,reviewed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,strftime('%s','now')*1000)",
+            params![
+                sample_key,
+                scope,
+                plan.stratum,
+                relation.relation,
+                relation.confidence,
+                payload.relation,
+                i64::from(payload.approved),
+                i64::from(agreement),
+                i64::from(false_merge),
+            ],
+        )
+        .map_err(|_| ())?;
+    if inserted == 0 {
+        return Ok(());
+    }
+    let merge = is_merge_relation(&relation.relation);
+    connection
+        .execute(
+            "INSERT INTO intelligence_worker_quality_gate_metrics(
+                calibration_scope,total_samples,agreement_count,disagreement_count,
+                eight_b_merge_count,eight_b_false_merge_count,safety_guard_failures,updated_at)
+             VALUES(?1,1,?2,?3,?4,?5,0,strftime('%s','now')*1000)
+             ON CONFLICT(calibration_scope) DO UPDATE SET
+                total_samples=total_samples+1,
+                agreement_count=agreement_count+excluded.agreement_count,
+                disagreement_count=disagreement_count+excluded.disagreement_count,
+                eight_b_merge_count=eight_b_merge_count+excluded.eight_b_merge_count,
+                eight_b_false_merge_count=eight_b_false_merge_count+excluded.eight_b_false_merge_count,
+                updated_at=excluded.updated_at",
+            params![
+                scope,
+                i64::from(agreement),
+                i64::from(!agreement),
+                i64::from(merge),
+                i64::from(false_merge),
+            ],
+        )
+        .map_err(|_| ())?;
+    connection
+        .execute(
+            "INSERT INTO intelligence_worker_quality_gate_strata(
+                calibration_scope,stratum,total_samples,agreement_count,disagreement_count,
+                eight_b_merge_count,eight_b_false_merge_count)
+             VALUES(?1,?2,1,?3,?4,?5,?6)
+             ON CONFLICT(calibration_scope,stratum) DO UPDATE SET
+                total_samples=total_samples+1,
+                agreement_count=agreement_count+excluded.agreement_count,
+                disagreement_count=disagreement_count+excluded.disagreement_count,
+                eight_b_merge_count=eight_b_merge_count+excluded.eight_b_merge_count,
+                eight_b_false_merge_count=eight_b_false_merge_count+excluded.eight_b_false_merge_count",
+            params![
+                scope,
+                plan.stratum,
+                i64::from(agreement),
+                i64::from(!agreement),
+                i64::from(merge),
+                i64::from(false_merge),
+            ],
+        )
+        .map_err(|_| ())?;
+
+    // A reviewed mismatch, and especially a false merge, invalidates sample
+    // mode immediately.  It remains possible to collect calibration history
+    // in full mode, but never to silently keep sampling after a disagreement.
+    if !agreement || false_merge {
+        force_full_review_mode(connection)?;
+        return Ok(());
+    }
+    let metrics: (i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT total_samples,agreement_count,eight_b_false_merge_count,safety_guard_failures
+             FROM intelligence_worker_quality_gate_metrics WHERE calibration_scope=?1",
+            [&scope],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|_| ())?;
+    let agreement_rate = metrics.1 as f64 / metrics.0.max(1) as f64;
+    if metrics.0 >= QUALITY_GATE_MIN_FULL_SAMPLES
+        && agreement_rate >= QUALITY_GATE_MIN_AGREEMENT_RATE
+        && metrics.2 == 0
+        && metrics.3 == 0
+    {
+        connection
+            .execute(
+                "UPDATE intelligence_quality_gate_state SET review_mode='sample' WHERE singleton=1",
+                [],
+            )
+            .map_err(|_| ())?;
+    }
+    Ok(())
 }
 fn cached_or_call<F>(connection: &Connection, key: &str, stage: &str, call: F) -> Result<String, ()>
 where
@@ -4112,6 +4625,279 @@ mod tests {
     fn configuration_requires_all_loopback_models() {
         assert!(!valid_route("https://remote.test/v1", "Qwen3-27B", "27b"));
         assert!(valid_route("http://127.0.0.1:8080/v1", "Qwen3-27B", "27b"));
+    }
+
+    fn quality_relation(pair_id: String, relation: &str, confidence: f64) -> Relation {
+        Relation {
+            id: pair_id,
+            right_id: "right".into(),
+            right_article: Article {
+                id: "right".into(),
+                fingerprint: "right-fingerprint".into(),
+                title: String::new(),
+                summary: String::new(),
+                body: String::new(),
+                published_at: String::new(),
+            },
+            relation: relation.into(),
+            confidence,
+            reason: "bounded".into(),
+            review: true,
+        }
+    }
+
+    #[test]
+    fn quality_gate_requires_conservative_full_calibration_before_sampling() {
+        let path = db();
+        let connection = Connection::open(&path).unwrap();
+        initialize(&connection).unwrap();
+        let configuration = config();
+        ensure_editorial_quality_gate_scope(&connection, &configuration.deep).unwrap();
+
+        for index in 0..QUALITY_GATE_MIN_FULL_SAMPLES {
+            let pair_id = format!("quality-full-{index}");
+            let transaction = connection.unchecked_transaction().unwrap();
+            assert!(plan_relation_review(
+                &transaction,
+                &pair_id,
+                "unrelated",
+                0.96,
+                &configuration.relation,
+            )
+            .unwrap());
+            transaction.commit().unwrap();
+            record_quality_review(
+                &connection,
+                &quality_relation(pair_id, "unrelated", 0.96),
+                &ReviewPayload {
+                    approved: true,
+                    relation: "unrelated".into(),
+                    confidence: 0.97,
+                    reason: "validated".into(),
+                },
+                &configuration.deep,
+            )
+            .unwrap();
+        }
+
+        let mode: String = connection
+            .query_row(
+                "SELECT review_mode FROM intelligence_quality_gate_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "sample");
+        let metrics: (i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT total_samples,agreement_count,disagreement_count,eight_b_false_merge_count
+                 FROM intelligence_worker_quality_gate_metrics",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            metrics,
+            (
+                QUALITY_GATE_MIN_FULL_SAMPLES,
+                QUALITY_GATE_MIN_FULL_SAMPLES,
+                0,
+                0
+            )
+        );
+
+        // Sampling is deterministic but only for an emphatic negative.  Find
+        // one hash that is deliberately outside the ten-percent review set.
+        let sampled_out_pair = (0..100)
+            .map(|index| format!("quality-sampled-out-{index}"))
+            .find(|pair| {
+                !stable_sample_selected(pair, &relation_decision_sha256("unrelated", 0.96))
+            })
+            .unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        assert!(!plan_relation_review(
+            &transaction,
+            &sampled_out_pair,
+            "unrelated",
+            0.96,
+            &configuration.relation,
+        )
+        .unwrap());
+        // Identical-event proposals must never be sampled, even in sample
+        // mode and even at high confidence.
+        assert!(plan_relation_review(
+            &transaction,
+            "quality-merge",
+            "same_event",
+            0.99,
+            &configuration.relation,
+        )
+        .unwrap());
+        transaction.commit().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn quality_gate_false_merge_or_model_change_immediately_returns_to_full() {
+        let path = db();
+        let connection = Connection::open(&path).unwrap();
+        initialize(&connection).unwrap();
+        let configuration = config();
+        ensure_editorial_quality_gate_scope(&connection, &configuration.deep).unwrap();
+
+        // Directly seed a valid calibrated state; the preceding test covers
+        // the measured transition itself.
+        connection
+            .execute(
+                "UPDATE intelligence_quality_gate_state
+                 SET review_mode='sample',relation_model_id=?1,relation_model_sha256=?2",
+                params![
+                    configuration.relation.model,
+                    configuration.relation.artifact_sha256
+                ],
+            )
+            .unwrap();
+        let merge = quality_relation("quality-false-merge".into(), "same_event", 0.99);
+        let transaction = connection.unchecked_transaction().unwrap();
+        assert!(plan_relation_review(
+            &transaction,
+            &merge.id,
+            &merge.relation,
+            merge.confidence,
+            &configuration.relation,
+        )
+        .unwrap());
+        transaction.commit().unwrap();
+        record_quality_review(
+            &connection,
+            &merge,
+            &ReviewPayload {
+                approved: true,
+                relation: "unrelated".into(),
+                confidence: 0.95,
+                reason: "not same event".into(),
+            },
+            &configuration.deep,
+        )
+        .unwrap();
+        let mode: String = connection
+            .query_row(
+                "SELECT review_mode FROM intelligence_quality_gate_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "full");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT eight_b_false_merge_count
+                     FROM intelligence_worker_quality_gate_metrics",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        // A replacement 8B artifact also fails closed before it can reuse
+        // the old calibration's sample privilege.
+        connection
+            .execute(
+                "UPDATE intelligence_quality_gate_state SET review_mode='sample' WHERE singleton=1",
+                [],
+            )
+            .unwrap();
+        let replacement = ModelRoute {
+            artifact_sha256: "b".repeat(64),
+            ..configuration.relation.clone()
+        };
+        let transaction = connection.unchecked_transaction().unwrap();
+        assert!(plan_relation_review(
+            &transaction,
+            "quality-new-8b",
+            "unrelated",
+            0.99,
+            &replacement,
+        )
+        .unwrap());
+        transaction.commit().unwrap();
+        let mode: String = connection
+            .query_row(
+                "SELECT review_mode FROM intelligence_quality_gate_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "full");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn changed_editor_or_missing_plan_fails_closed_and_records_guard() {
+        let path = db();
+        let connection = Connection::open(&path).unwrap();
+        initialize(&connection).unwrap();
+        let configuration = config();
+        ensure_relation_quality_gate_scope(&connection, &configuration.relation).unwrap();
+        ensure_editorial_quality_gate_scope(&connection, &configuration.deep).unwrap();
+        connection
+            .execute(
+                "UPDATE intelligence_quality_gate_state SET review_mode='sample' WHERE singleton=1",
+                [],
+            )
+            .unwrap();
+
+        let pair_id = (0..100)
+            .map(|index| format!("quality-editor-change-{index}"))
+            .find(|pair| {
+                !stable_sample_selected(pair, &relation_decision_sha256("unrelated", 0.96))
+            })
+            .unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        assert!(!plan_relation_review(
+            &transaction,
+            &pair_id,
+            "unrelated",
+            0.96,
+            &configuration.relation,
+        )
+        .unwrap());
+        transaction.commit().unwrap();
+
+        let replacement_editor = ModelRoute {
+            artifact_sha256: "c".repeat(64),
+            ..configuration.deep.clone()
+        };
+        ensure_editorial_quality_gate_scope(&connection, &replacement_editor).unwrap();
+        assert!(review_required_for_relation(&connection, &pair_id, "unrelated", 0.96).unwrap());
+        let mode: String = connection
+            .query_row(
+                "SELECT review_mode FROM intelligence_quality_gate_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "full");
+
+        // A legacy relation without a persisted plan has no permission to
+        // skip review.  The aggregate stores only the guard count, not input.
+        assert!(
+            review_required_for_relation(&connection, "missing-plan", "unrelated", 0.99).unwrap()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT safety_guard_failures
+                     FROM intelligence_worker_quality_gate_metrics
+                     ORDER BY updated_at DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

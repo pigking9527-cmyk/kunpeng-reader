@@ -177,6 +177,17 @@ struct SourceFetchResult {
     failure: Option<String>,
 }
 
+/// The single worker-owned article that currently represents a normalized
+/// public URL.  Source records remain independent; this is only a durable
+/// fetch/model-work reuse hint.  A different canonical body is never folded
+/// into this owner merely because the URL matches.
+#[derive(Clone, Debug)]
+struct UrlAliasOwner {
+    article_id: String,
+    fingerprint: String,
+    current_text_sha256: Option<String>,
+}
+
 impl HttpCollector {
     pub(crate) fn from_file(path: &Path) -> Result<Self, ()> {
         let bytes = fs::read(path).map_err(|_| ())?;
@@ -272,13 +283,18 @@ impl CollectorPort for HttpCollector {
             .build()
             .into();
         let mut articles = Vec::new();
+        // This set contains only URLs with immutable, current complete
+        // evidence.  It is intentionally not a title/topic dedupe rule:
+        // skipping a page fetch is safe only after the archive has already
+        // recorded an exact body for that normalized public URL.
+        let mut complete_url_aliases = complete_url_aliases(&self.catalog_path).unwrap_or_default();
         for source in &self.sources {
             let state =
                 source_fetch_state(&self.catalog_path, &source.source_id).unwrap_or_default();
             if state.next_fetch_at > Utc::now().timestamp() {
                 continue;
             }
-            let fetch = collect_http_source(&agent, source, &state);
+            let fetch = collect_http_source(&agent, source, &state, &mut complete_url_aliases);
             update_source_fetch_state(&self.catalog_path, source, &state, &fetch).ok();
             let mut entries = fetch.articles;
             if entries.len() > MAX_BATCH_ITEMS.saturating_sub(articles.len()) {
@@ -342,6 +358,7 @@ fn collect_http_source(
     agent: &ureq::Agent,
     source: &HttpSource,
     state: &SourceFetchState,
+    complete_url_aliases: &mut HashSet<String>,
 ) -> SourceFetchResult {
     let Ok(source_url) = public_fetch_url(&source.url) else {
         return SourceFetchResult {
@@ -425,7 +442,16 @@ fn collect_http_source(
         entry.etag = etag.clone();
         entry.last_modified = last_modified.clone();
         if entry.body.is_none() {
-            if inline_content_remaining > 0 {
+            let normalized = normalized_url(&entry.url).ok();
+            let already_archived = normalized
+                .as_ref()
+                .is_some_and(|url| complete_url_aliases.contains(url));
+            if already_archived {
+                // The later durable collection transaction attaches this
+                // source record to the exact URL owner.  Do not download the
+                // same public page again just to create a second model job.
+                entry.incomplete_reason = Some("url_alias_complete".into());
+            } else if inline_content_remaining > 0 {
                 inline_content_remaining -= 1;
                 enrich_public_article(agent, entry);
             } else {
@@ -444,6 +470,9 @@ fn collect_http_source(
             );
             entry.images = images;
             entry.videos = videos;
+            if let Ok(normalized) = normalized_url(&entry.url) {
+                complete_url_aliases.insert(normalized);
+            }
         }
     }
     SourceFetchResult {
@@ -1754,6 +1783,14 @@ fn ensure_collection_schema(connection: &Connection) -> Result<(), ()> {
              );
              CREATE INDEX IF NOT EXISTS intelligence_collection_batch_idx
                  ON intelligence_collection_records(batch_id,collected_at);
+             CREATE TABLE IF NOT EXISTS intelligence_collection_url_aliases (
+                 normalized_url TEXT PRIMARY KEY,
+                 canonical_article_id TEXT NOT NULL,
+                 first_seen_at INTEGER NOT NULL,
+                 last_seen_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS intelligence_collection_url_alias_owner_idx
+                 ON intelligence_collection_url_aliases(canonical_article_id);
              CREATE TABLE IF NOT EXISTS intelligence_collection_batches (
                  batch_id TEXT PRIMARY KEY,
                  received_count INTEGER NOT NULL,
@@ -1771,6 +1808,177 @@ fn ensure_collection_schema(connection: &Connection) -> Result<(), ()> {
         [],
     );
     Ok(())
+}
+
+/// Load the normalized URLs that already have immutable, complete evidence.
+/// This is called by the headless HTTP adapter before it schedules its bounded
+/// inline page fetches.  A missing/old alias table simply yields no reuse; it
+/// never causes a URL, body, or source identifier to leave the local catalog.
+fn complete_url_aliases(path: &Path) -> Result<HashSet<String>, ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_article_schema(&connection)?;
+    ensure_collection_schema(&connection)?;
+    content_archive::ensure_catalog_schema_at(path).map_err(|_| ())?;
+    let aliases = connection
+        .prepare(
+            "SELECT alias.normalized_url
+             FROM intelligence_collection_url_aliases alias
+             INNER JOIN intelligence_articles article
+               ON article.article_id=alias.canonical_article_id
+             INNER JOIN intelligence_article_content_versions content
+               ON content.article_id=article.article_id
+              AND content.record_fingerprint=article.fingerprint
+              AND content.is_current=1 AND content.body_status='complete'",
+        )
+        .map_err(|_| ())?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| ())?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|_| ())?;
+    Ok(aliases)
+}
+
+/// Resolve a previously collected normalized URL to one local article owner.
+/// Existing catalogs predating the alias table are lazily adopted from their
+/// canonical article URL, so incremental deployment does not force a rebuild.
+fn url_alias_owner(path: &Path, normalized_url: &str) -> Result<Option<UrlAliasOwner>, ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_article_schema(&connection)?;
+    ensure_collection_schema(&connection)?;
+    content_archive::ensure_catalog_schema_at(path).map_err(|_| ())?;
+
+    let query_owner = |connection: &Connection, sql: &str| {
+        connection
+            .query_row(sql, [normalized_url], |row| {
+                Ok(UrlAliasOwner {
+                    article_id: row.get(0)?,
+                    fingerprint: row.get(1)?,
+                    current_text_sha256: row.get(2)?,
+                })
+            })
+            .optional()
+            .map_err(|_| ())
+    };
+    let from_alias = query_owner(
+        &connection,
+        "SELECT article.article_id,article.fingerprint,content.text_sha256
+         FROM intelligence_collection_url_aliases alias
+         INNER JOIN intelligence_articles article
+           ON article.article_id=alias.canonical_article_id
+         LEFT JOIN intelligence_article_content_versions content
+           ON content.article_id=article.article_id
+          AND content.record_fingerprint=article.fingerprint
+          AND content.is_current=1 AND content.body_status='complete'
+         WHERE alias.normalized_url=?1",
+    )?;
+    if from_alias.is_some() {
+        return Ok(from_alias);
+    }
+
+    // Do not pick an arbitrary duplicate from an old catalog: prefer the row
+    // with complete current evidence, then retain the oldest stable identity.
+    let discovered = query_owner(
+        &connection,
+        "SELECT article.article_id,article.fingerprint,content.text_sha256
+         FROM intelligence_articles article
+         LEFT JOIN intelligence_article_content_versions content
+           ON content.article_id=article.article_id
+          AND content.record_fingerprint=article.fingerprint
+          AND content.is_current=1 AND content.body_status='complete'
+         WHERE article.url=?1
+         ORDER BY CASE WHEN content.text_sha256 IS NULL THEN 1 ELSE 0 END,
+                  article.created_at ASC,article.article_id ASC LIMIT 1",
+    )?;
+    if let Some(owner) = discovered.as_ref() {
+        store_url_alias(&connection, normalized_url, &owner.article_id)?;
+    }
+    Ok(discovered)
+}
+
+fn store_url_alias(
+    connection: &Connection,
+    normalized_url: &str,
+    canonical_article_id: &str,
+) -> Result<(), ()> {
+    let now = Utc::now().timestamp_millis();
+    connection
+        .execute(
+            "INSERT INTO intelligence_collection_url_aliases(
+                 normalized_url,canonical_article_id,first_seen_at,last_seen_at
+             ) VALUES(?1,?2,?3,?3)
+             ON CONFLICT(normalized_url) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+            params![normalized_url, canonical_article_id, now],
+        )
+        .map_err(|_| ())?;
+    Ok(())
+}
+
+fn store_url_alias_at(
+    path: &Path,
+    normalized_url: &str,
+    canonical_article_id: &str,
+) -> Result<(), ()> {
+    let connection = Connection::open(path).map_err(|_| ())?;
+    ensure_collection_schema(&connection)?;
+    store_url_alias(&connection, normalized_url, canonical_article_id)
+}
+
+fn complete_body_text(article: &CollectedArticle) -> Option<String> {
+    article
+        .body
+        .as_deref()
+        .and_then(|body| safe_text(body, MAX_TEXT_BYTES))
+}
+
+/// URL equality is a fetch reuse hint, never the final content identity.  A
+/// feed-provided body may share an existing owner only if there is no current
+/// evidence yet (it can fill that gap) or its canonical SHA-256 matches the
+/// immutable current evidence.  Different text falls through to its own
+/// article and model path instead of being silently merged.
+fn can_reuse_url_alias(owner: &UrlAliasOwner, article: &CollectedArticle) -> bool {
+    match (
+        complete_body_text(article),
+        owner.current_text_sha256.as_deref(),
+    ) {
+        (Some(body), Some(current_sha)) => {
+            content_archive::canonical_article_text_sha256(&body) == current_sha
+        }
+        (Some(_), None) | (None, _) => true,
+    }
+}
+
+fn hydrate_url_alias_owner(
+    path: &Path,
+    owner: &UrlAliasOwner,
+    article: &CollectedArticle,
+) -> Result<(), ()> {
+    // Existing complete evidence was checked by `can_reuse_url_alias`; only
+    // use a secondary source body to fill an owner that has no current body.
+    if owner.current_text_sha256.is_some() {
+        return Ok(());
+    }
+    let Some(body) = complete_body_text(article) else {
+        return Ok(());
+    };
+    content_archive::persist_article_content_at(
+        path,
+        ArchiveArticleContentInput {
+            article_id: owner.article_id.clone(),
+            record_fingerprint: owner.fingerprint.clone(),
+            text: body.clone(),
+            html: article.html.clone(),
+            body_status: article
+                .body_status
+                .clone()
+                .or_else(|| Some("complete".into())),
+            incomplete_reason: article.incomplete_reason.clone(),
+            paragraphs: paragraphs(&body),
+            images: article.images.clone(),
+            videos: article.videos.clone(),
+        },
+    )
+    .map(|_| ())
+    .map_err(|_| ())
 }
 
 /// Bootstrap only the tables collection itself needs. The desktop store owns
@@ -2018,12 +2226,31 @@ fn collect_once_at(
             result.failed += 1;
             continue;
         }
+        // Source/GUID records remain independent for audit and later source
+        // comparison.  Before creating another article/model queue entry,
+        // however, reuse an existing owner only for the exact same normalized
+        // public URL and (when a body is present) the exact same canonical
+        // body SHA-256.  A changed article at a reused URL deliberately falls
+        // through to a distinct record instead of becoming an accidental
+        // cross-source merge.
+        if let Some(owner) = url_alias_owner(path, &normalized)? {
+            if owner.article_id != article_id && can_reuse_url_alias(&owner, &article) {
+                hydrate_url_alias_owner(path, &owner, &article)?;
+                store_record(
+                    path,
+                    batch_id,
+                    &article,
+                    &normalized,
+                    &owner.article_id,
+                    &fingerprint,
+                )?;
+                store_url_alias_at(path, &normalized, &owner.article_id)?;
+                result.duplicates += 1;
+                continue;
+            }
+        }
         let changed = record_changed(path, &article, &normalized, &fingerprint)?;
-        let has_complete_body = article
-            .body
-            .as_deref()
-            .and_then(|body| safe_text(body, MAX_TEXT_BYTES))
-            .is_some();
+        let has_complete_body = complete_body_text(&article).is_some();
         let needs_evidence_backfill = !changed
             && has_complete_body
             && !content_archive::has_current_complete_content_at(path, &article_id, &fingerprint)
@@ -2042,10 +2269,7 @@ fn collect_once_at(
         }
         let previous_fingerprint =
             upsert_article(path, &article_id, &fingerprint, &article, &normalized)?;
-        let body = article
-            .body
-            .as_deref()
-            .and_then(|body| safe_text(body, MAX_TEXT_BYTES));
+        let body = complete_body_text(&article);
         // A validator-only feed refresh may repeat a body but omit the rich
         // HTML/media evidence.  Move the verified immutable revision instead
         // of writing a second copy.  If the refresh supplies HTML or media,
@@ -2097,6 +2321,11 @@ fn collect_once_at(
             &article_id,
             &fingerprint,
         )?;
+        // The first local article that reaches this URL becomes its stable
+        // owner.  `ON CONFLICT` intentionally keeps that owner immutable;
+        // later same-URL records can reuse it only after their body hashes
+        // prove equality, while actual content changes retain their own row.
+        store_url_alias_at(path, &normalized, &article_id)?;
         // A legacy content backfill enriches durable evidence for an already
         // known record. It deliberately remains a duplicate in collection
         // accounting, so it cannot inflate the downstream triage queue.
@@ -3028,6 +3257,164 @@ mod tests {
             .unwrap();
         assert_eq!(queue, 1);
         assert!(root.join("blobs").is_dir());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cross_source_same_url_reuses_exact_body_without_a_second_article_or_model_queue() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-url-alias-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let first = item();
+        let mut syndicated = first.clone();
+        syndicated.source_id = "second-public-source".into();
+        syndicated.guid = "second-source-guid".into();
+        syndicated.url = "https://example.test/a#same-public-page".into();
+        syndicated.body = Some("第一段\r\n\r\n第二段\r\n".into());
+        syndicated.html = None;
+
+        let result =
+            collect_once_at(&catalog, "batch.url-alias", vec![first.clone(), syndicated]).unwrap();
+        assert_eq!(result.collected, 1);
+        assert_eq!(result.duplicates, 1);
+
+        let normalized = normalized_url(&first.url).unwrap();
+        let owner_id = article_identity(&first.source_id, &first.guid, &normalized);
+        let connection = Connection::open(&catalog).unwrap();
+        let articles: i64 = connection
+            .query_row("SELECT COUNT(*) FROM intelligence_articles", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let records: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_collection_records WHERE normalized_url=?1",
+                [&normalized],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let source_record_owner: String = connection
+            .query_row(
+                "SELECT article_id FROM intelligence_collection_records
+                 WHERE source_id='second-public-source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let aliases: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_collection_url_aliases
+                 WHERE normalized_url=?1 AND canonical_article_id=?2",
+                params![normalized, owner_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(articles, 1);
+        assert_eq!(records, 2);
+        assert_eq!(source_record_owner, owner_id);
+        assert_eq!(aliases, 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn complete_url_aliases_exposes_only_immutable_current_evidence_to_fetch_scheduler() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-url-alias-prefetch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let first = item();
+        collect_once_at(&catalog, "batch.url-prefetch", vec![first.clone()]).unwrap();
+        let normalized = normalized_url(&first.url).unwrap();
+        assert!(complete_url_aliases(&catalog)
+            .unwrap()
+            .contains(&normalized));
+
+        let mut incomplete = first;
+        incomplete.url = "https://example.test/no-body".into();
+        incomplete.guid = "without-body".into();
+        incomplete.body = None;
+        incomplete.html = None;
+        incomplete.body_status = None;
+        incomplete.incomplete_reason = Some("deferred_content_backfill".into());
+        collect_once_at(&catalog, "batch.url-incomplete", vec![incomplete.clone()]).unwrap();
+        let incomplete_url = normalized_url(&incomplete.url).unwrap();
+        assert!(!complete_url_aliases(&catalog)
+            .unwrap()
+            .contains(&incomplete_url));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn same_url_with_changed_canonical_body_is_not_merged_by_url_alias() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-url-alias-change-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let first = item();
+        let mut updated = first.clone();
+        updated.source_id = "independent-public-source".into();
+        updated.guid = "updated-guid".into();
+        updated.title = "同一 URL 的已更新公共报道".into();
+        updated.body = Some("这是不同的完整正文，不能因为 URL 相同而与旧正文合并。".into());
+        updated.html = None;
+
+        let result = collect_once_at(&catalog, "batch.url-change", vec![first, updated]).unwrap();
+        assert_eq!(result.collected, 2);
+        assert_eq!(result.duplicates, 0);
+        let connection = Connection::open(&catalog).unwrap();
+        let articles: i64 = connection
+            .query_row("SELECT COUNT(*) FROM intelligence_articles", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(articles, 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn complete_secondary_source_hydrates_incomplete_url_owner_once() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-url-alias-hydrate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let mut first = item();
+        first.body = None;
+        first.html = None;
+        first.body_status = None;
+        first.incomplete_reason = Some("deferred_content_backfill".into());
+        let mut second = item();
+        second.source_id = "secondary-full-source".into();
+        second.guid = "secondary-full-guid".into();
+
+        let result =
+            collect_once_at(&catalog, "batch.url-hydrate", vec![first.clone(), second]).unwrap();
+        assert_eq!(result.collected, 1);
+        assert_eq!(result.duplicates, 1);
+        let normalized = normalized_url(&first.url).unwrap();
+        let owner_id = article_identity(&first.source_id, &first.guid, &normalized);
+        let fingerprint = record_fingerprint(&first, &normalized);
+        assert!(content_archive::has_current_complete_content_at(
+            &catalog,
+            &owner_id,
+            &fingerprint
+        )
+        .unwrap());
+        let articles: i64 = Connection::open(&catalog)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM intelligence_articles", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(articles, 1);
         let _ = fs::remove_dir_all(root);
     }
 
