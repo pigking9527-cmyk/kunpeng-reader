@@ -69,13 +69,14 @@ const COLLECTION_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKFILL_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 const TRIAGE_TIMEOUT: Duration = Duration::from_secs(120);
 /// One relation item can need up to three 8B pair decisions. Each decision has
-/// its own short transport deadline, so the host budget leaves room for all
-/// three and for durable cleanup without a whole batch being killed silently.
-const RELATION_TIMEOUT: Duration = Duration::from_secs(120);
+/// its own short transport deadline.  A worker-private ANN snapshot is shared
+/// by two durable items, so the host budget must cover both items plus cleanup
+/// instead of aborting a healthy second item on a slower local archive drive.
+const RELATION_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 /// Keep the worker-private ANN graph alive for a few durable relation items,
 /// while preserving regular opportunities for full-text backfill in a busy
 /// unattended loop.  This is a fixed internal bound, never dashboard input.
-const RELATION_BATCH_SIZE: u16 = 1;
+const RELATION_BATCH_SIZE: u16 = 2;
 const EDITORIAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 // A first switch verifies locally pinned GGUF artifacts.  On a mechanical
 // archive drive that can legitimately take longer than the short per-article
@@ -585,7 +586,7 @@ fn safe_run_code(run_id: &str) -> String {
 
 fn safe_lifecycle_status(value: &str) -> String {
     match value {
-        "running" | "completed" | "failed" | "interrupted" => value.into(),
+        "running" | "completed" | "failed" | "interrupted" | "stopped" => value.into(),
         _ => "unknown".into(),
     }
 }
@@ -957,10 +958,21 @@ fn continuous_processing_active() -> bool {
 }
 
 fn run_once_with_pipeline_guard(configuration: &HostConfiguration) -> Result<RunReport, String> {
+    run_once_with_pipeline_guard_and_stop(configuration, false)
+}
+
+/// A dashboard stop must take effect at the next durable worker boundary, not
+/// only after a legacy multi-item round has drained.  Manual one-off runs do
+/// not use this switch: their configuration is intentionally allowed to keep
+/// `enabled` false.
+fn run_once_with_pipeline_guard_and_stop(
+    configuration: &HostConfiguration,
+    stop_when_disabled: bool,
+) -> Result<RunReport, String> {
     let Some(_guard) = acquire_host_guard("Pipeline")? else {
         return Err("已有本机情报处理正在运行".into());
     };
-    run_once_unlocked(configuration)
+    run_once_unlocked(configuration, stop_when_disabled)
 }
 
 /// Starts the independent host loop after an explicit dashboard action.  The
@@ -2001,10 +2013,13 @@ fn run_once(configuration: &HostConfiguration) -> Result<RunReport, String> {
 /// shared pipeline guard directly rather than treating itself as a conflicting
 /// manual execution.
 fn run_once_from_continuous_loop(configuration: &HostConfiguration) -> Result<RunReport, String> {
-    run_once_with_pipeline_guard(configuration)
+    run_once_with_pipeline_guard_and_stop(configuration, true)
 }
 
-fn run_once_unlocked(configuration: &HostConfiguration) -> Result<RunReport, String> {
+fn run_once_unlocked(
+    configuration: &HostConfiguration,
+    stop_when_disabled: bool,
+) -> Result<RunReport, String> {
     if !configuration.enabled {
         return Ok(RunReport {
             outcome: "disabled".into(),
@@ -2020,7 +2035,7 @@ fn run_once_unlocked(configuration: &HostConfiguration) -> Result<RunReport, Str
     let audit_path = host_audit_path()?;
     let mut audit = HostRunAudit::start();
     write_host_audit(&audit_path, &audit).map_err(|_| "无法写入本机处理审计状态".to_string())?;
-    let result = run_once_with_audit(configuration, &audit_path, &mut audit);
+    let result = run_once_with_audit(configuration, &audit_path, &mut audit, stop_when_disabled);
     match &result {
         Ok(report) => audit.finish(audit_completion_status(report), Some(report.clone())),
         Err(_) => audit.finish("failed", None),
@@ -2034,14 +2049,23 @@ fn audit_completion_status(report: &RunReport) -> &'static str {
         "relation_processing_incomplete" | "processing_incomplete" | "triage_incomplete" => {
             "failed"
         }
+        "stopped_by_operator" => "stopped",
         _ => "completed",
     }
+}
+
+/// A failed transient configuration read must not turn into a destructive
+/// cancellation.  Only a successfully read, explicitly disabled setting asks
+/// a continuous loop to stop after its current worker child returns.
+fn operator_stop_requested(stop_when_disabled: bool) -> bool {
+    stop_when_disabled && read_configuration().is_ok_and(|configuration| !configuration.enabled)
 }
 
 fn run_once_with_audit(
     configuration: &HostConfiguration,
     audit_path: &Path,
     audit: &mut HostRunAudit,
+    stop_when_disabled: bool,
 ) -> Result<RunReport, String> {
     let distribution_service = ensure_distribution_sidecar(configuration);
     let pipeline = (|| -> Result<RunReport, String> {
@@ -2060,6 +2084,10 @@ fn run_once_with_audit(
             // Full-text repair has its own durable scheduler. A collection
             // failure must still keep the model lane fail-closed for this
             // round, but evidence retries do not depend on 8B/27B availability.
+            return Ok(report);
+        }
+        if operator_stop_requested(stop_when_disabled) {
+            report.outcome = "stopped_by_operator".into();
             return Ok(report);
         }
         if !model_processing_ready(configuration) {
@@ -2104,6 +2132,10 @@ fn run_once_with_audit(
 
         let work = (|| -> Result<RunReport, String> {
             for _ in 0..triage_limit {
+                if operator_stop_requested(stop_when_disabled) {
+                    report.outcome = "stopped_by_operator".into();
+                    return Ok(report);
+                }
                 if status(configuration, None, false).ready_for_triage_count == 0 {
                     break;
                 }
@@ -2125,6 +2157,10 @@ fn run_once_with_audit(
             // either the collector or the expensive editorial work.
             let mut remaining_relation_runs = relation_limit;
             while remaining_relation_runs > 0 {
+                if operator_stop_requested(stop_when_disabled) {
+                    report.outcome = "stopped_by_operator".into();
+                    return Ok(report);
+                }
                 let batch = remaining_relation_runs.min(RELATION_BATCH_SIZE);
                 begin_audit_stage(audit_path, audit, "vector_recall_and_relation")?;
                 let batch_argument = batch.to_string();
@@ -2155,6 +2191,10 @@ fn run_once_with_audit(
             // Phase 2 stops the judge before loading 27B.  Only a kept article
             // with a complete current body can enter this phase; titles, RSS
             // snippets and incomplete legacy records are never 27B inputs.
+            if operator_stop_requested(stop_when_disabled) {
+                report.outcome = "stopped_by_operator".into();
+                return Ok(report);
+            }
             if status(configuration, None, false).ready_for_editorial_count > 0 {
                 begin_audit_stage(audit_path, audit, "editorial_runtime")?;
                 match switch_runtime_phase("EditorialGpu") {
@@ -2172,6 +2212,10 @@ fn run_once_with_audit(
                         status(configuration, None, false).ready_for_editorial_count,
                     );
                     for _ in 0..editorial_limit {
+                        if operator_stop_requested(stop_when_disabled) {
+                            report.outcome = "stopped_by_operator".into();
+                            return Ok(report);
+                        }
                         if status(configuration, None, false).ready_for_editorial_count == 0 {
                             break;
                         }
@@ -2198,6 +2242,10 @@ fn run_once_with_audit(
             // This control plane forwards neither a token nor a server address; an
             // unpaired workstation first freezes a local daily draft and reports
             // `daily_prepared_locally` instead of attempting any outbound call.
+            if operator_stop_requested(stop_when_disabled) {
+                report.outcome = "stopped_by_operator".into();
+                return Ok(report);
+            }
             begin_audit_stage(audit_path, audit, "publication")?;
             let publication = child_output(configuration, "--publish-daily-once", TRIAGE_TIMEOUT)?;
             report.publication = text(&publication, "outcome");
@@ -2978,6 +3026,21 @@ mod tests {
             project_run_report(&report).relation_failure,
             "relation_worker_timeout"
         );
+    }
+
+    #[test]
+    fn operator_stop_is_a_safe_completed_audit_boundary() {
+        let report = RunReport {
+            outcome: "stopped_by_operator".into(),
+            ..RunReport::default()
+        };
+        assert_eq!(audit_completion_status(&report), "stopped");
+
+        let mut audit = HostRunAudit::start();
+        audit.finish(audit_completion_status(&report), Some(report));
+        let projection = project_host_audit(&audit, false);
+        assert_eq!(projection.status, "stopped");
+        assert!(projection.finished_at.is_some());
     }
 
     #[test]
