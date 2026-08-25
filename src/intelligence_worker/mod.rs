@@ -63,6 +63,7 @@ enum Mode {
     ProcessOnce,
     ProcessLoop,
     RelayOnce,
+    PublishEventOnce,
     PublishDailyOnce,
     PreviewDaily(NaiveDate),
     ServiceLoop,
@@ -615,6 +616,7 @@ fn parse_mode(arguments: impl IntoIterator<Item = OsString>) -> Result<Mode, ()>
         [value] if value == "--process-once" => Ok(Mode::ProcessOnce),
         [value] if value == "--process-loop" => Ok(Mode::ProcessLoop),
         [value] if value == "--relay-once" => Ok(Mode::RelayOnce),
+        [value] if value == "--publish-event-once" => Ok(Mode::PublishEventOnce),
         [value] if value == "--publish-daily-once" => Ok(Mode::PublishDailyOnce),
         [flag, date] if flag == "--preview-daily" => NaiveDate::parse_from_str(date, "%Y-%m-%d")
             .map(Mode::PreviewDaily)
@@ -669,6 +671,7 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::ProcessOnce => "process_once",
         Mode::ProcessLoop => "process_loop",
         Mode::RelayOnce => "relay_once",
+        Mode::PublishEventOnce => "publish_event_once",
         Mode::PublishDailyOnce => "publish_daily_once",
         Mode::PreviewDaily(_) => "preview_daily",
         Mode::ServiceLoop => "service_loop",
@@ -873,26 +876,38 @@ fn run_service_loop() -> i32 {
         } else {
             processing::ProcessingReport::default()
         };
+        // Event packages make a completed same-day revision available without
+        // waiting for tomorrow's daily digest.  The daily package still runs
+        // as an independent immutable retrospective projection.
+        let event_publication_result =
+            publication::publish_next_ready_event(publisher.as_ref(), &path);
         let publication_result = publication::publish_completed_daily(publisher.as_ref(), &path);
         let relay_result = relay.as_ref().map(|relay| {
             archive_relay::execute_once(&archive_relay::HttpsRelayTransport, Some(relay), &path)
         });
-        let (outcome, claimed) = match (publication_result, relay_result) {
-            (publication::PublishOutcome::Published, _) => ("daily_published", 0),
-            (publication::PublishOutcome::TransportUnavailable, _) => {
+        let (outcome, claimed) = match (event_publication_result, publication_result, relay_result)
+        {
+            (publication::PublishOutcome::Published, _, _) => ("event_published", 0),
+            (publication::PublishOutcome::PreparedLocally, _, _) => ("event_prepared_locally", 0),
+            (publication::PublishOutcome::TransportUnavailable, _, _) => {
+                ("event_publication_transport_unavailable", 0)
+            }
+            (publication::PublishOutcome::Failed, _, _) => ("event_publication_failed", 0),
+            (_, publication::PublishOutcome::Published, _) => ("daily_published", 0),
+            (_, publication::PublishOutcome::TransportUnavailable, _) => {
                 ("publication_transport_unavailable", 0)
             }
-            (publication::PublishOutcome::Failed, _) => ("publication_failed", 0),
-            (_, Some(archive_relay::RelayOutcome::Uploaded)) => ("relay_uploaded", 1),
-            (_, Some(archive_relay::RelayOutcome::NotFound)) => ("relay_not_found", 1),
-            (_, Some(archive_relay::RelayOutcome::Failed)) => ("relay_failed", 1),
-            (_, Some(archive_relay::RelayOutcome::TerminalUnconfirmed)) => {
+            (_, publication::PublishOutcome::Failed, _) => ("publication_failed", 0),
+            (_, _, Some(archive_relay::RelayOutcome::Uploaded)) => ("relay_uploaded", 1),
+            (_, _, Some(archive_relay::RelayOutcome::NotFound)) => ("relay_not_found", 1),
+            (_, _, Some(archive_relay::RelayOutcome::Failed)) => ("relay_failed", 1),
+            (_, _, Some(archive_relay::RelayOutcome::TerminalUnconfirmed)) => {
                 ("relay_terminal_unconfirmed", 1)
             }
-            (_, Some(archive_relay::RelayOutcome::TransportUnavailable)) => {
+            (_, _, Some(archive_relay::RelayOutcome::TransportUnavailable)) => {
                 ("relay_transport_unavailable", 0)
             }
-            (_, Some(archive_relay::RelayOutcome::NotConfigured)) | (_, None)
+            (_, _, Some(archive_relay::RelayOutcome::NotConfigured)) | (_, _, None)
                 if !has_any_capability =>
             {
                 ("service_not_configured", 0)
@@ -912,7 +927,9 @@ fn run_service_loop() -> i32 {
             retried,
             0,
         );
-        report.published = u64::from(publication_result == publication::PublishOutcome::Published);
+        report.published =
+            u64::from(event_publication_result == publication::PublishOutcome::Published)
+                + u64::from(publication_result == publication::PublishOutcome::Published);
         if let Some(Ok(result)) = collection_result {
             report.collected = result.collected;
             report.duplicates = result.duplicates;
@@ -1020,7 +1037,7 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
         print_output(report);
         return 0;
     }
-    if mode == Mode::PublishDailyOnce {
+    if mode == Mode::PublishEventOnce || mode == Mode::PublishDailyOnce {
         let credentials = crate::intelligence_worker_lifecycle::runtime_credentials()
             .ok()
             .flatten();
@@ -1043,16 +1060,36 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> i32 {
             ));
             return 0;
         };
-        let result = publication::publish_completed_daily(publisher.as_ref(), &path);
-        let outcome = match result {
-            publication::PublishOutcome::PreparedLocally => "daily_prepared_locally",
-            publication::PublishOutcome::NoCompletedEvents => "daily_events_unavailable",
-            publication::PublishOutcome::AlreadyPublished => "daily_already_published",
-            publication::PublishOutcome::Published => "daily_published",
-            publication::PublishOutcome::TransportUnavailable => {
+        let result = if mode == Mode::PublishEventOnce {
+            publication::publish_next_ready_event(publisher.as_ref(), &path)
+        } else {
+            publication::publish_completed_daily(publisher.as_ref(), &path)
+        };
+        let outcome = match (mode, result) {
+            (Mode::PublishEventOnce, publication::PublishOutcome::PreparedLocally) => {
+                "event_prepared_locally"
+            }
+            (Mode::PublishEventOnce, publication::PublishOutcome::NoCompletedEvents) => {
+                "event_events_unavailable"
+            }
+            (Mode::PublishEventOnce, publication::PublishOutcome::AlreadyPublished) => {
+                "event_already_published"
+            }
+            (Mode::PublishEventOnce, publication::PublishOutcome::Published) => "event_published",
+            (Mode::PublishEventOnce, publication::PublishOutcome::TransportUnavailable) => {
+                "event_publication_transport_unavailable"
+            }
+            (Mode::PublishEventOnce, publication::PublishOutcome::Failed) => {
+                "event_publication_failed"
+            }
+            (_, publication::PublishOutcome::PreparedLocally) => "daily_prepared_locally",
+            (_, publication::PublishOutcome::NoCompletedEvents) => "daily_events_unavailable",
+            (_, publication::PublishOutcome::AlreadyPublished) => "daily_already_published",
+            (_, publication::PublishOutcome::Published) => "daily_published",
+            (_, publication::PublishOutcome::TransportUnavailable) => {
                 "publication_transport_unavailable"
             }
-            publication::PublishOutcome::Failed => "publication_failed",
+            (_, publication::PublishOutcome::Failed) => "publication_failed",
         };
         let mut report = output(
             mode,
@@ -1716,6 +1753,13 @@ mod tests {
         assert_eq!(
             parse_mode([OsString::from("worker"), OsString::from("--relay-once")]),
             Ok(Mode::RelayOnce)
+        );
+        assert_eq!(
+            parse_mode([
+                OsString::from("worker"),
+                OsString::from("--publish-event-once")
+            ]),
+            Ok(Mode::PublishEventOnce)
         );
         assert_eq!(
             parse_mode([

@@ -70,6 +70,7 @@ struct AssetPayload {
 #[derive(Clone, Debug)]
 struct PublicationDraft {
     day: String,
+    publication_id: String,
     bundle: Value,
     canonical_sha256: String,
     assets: Vec<AssetPayload>,
@@ -121,6 +122,74 @@ pub(crate) fn preview_daily_bundle(catalog: &Path, day: NaiveDate) -> DailyPrevi
         Ok(None) => DailyPreviewOutcome::NoCompletedEvents,
         Err(()) => DailyPreviewOutcome::Invalid,
     }
+}
+
+/// Freeze at most one newly-completed event revision.  A service loop invokes
+/// this bounded operation repeatedly, which prevents a large historical
+/// backlog from turning one launch into an unbounded network publication.
+///
+/// The V1 contract already permits `kind=event`; every event revision gets a
+/// distinct publication ID.  A later revision is therefore additive rather
+/// than a mutation of a package another device may already have cached.
+pub(crate) fn publish_next_ready_event(
+    configuration: Option<&PublisherConfiguration>,
+    catalog: &Path,
+) -> PublishOutcome {
+    let draft = match load_or_prepare_next_event_draft(catalog) {
+        Ok(Some(value)) => value,
+        Ok(None) => return PublishOutcome::NoCompletedEvents,
+        Err(()) => return PublishOutcome::Failed,
+    };
+    let connection = match Connection::open(catalog) {
+        Ok(value) => value,
+        Err(_) => return PublishOutcome::Failed,
+    };
+    if ensure_publication_storage(&connection).is_err() {
+        return PublishOutcome::Failed;
+    }
+    let existing = connection
+        .query_row(
+            "SELECT bundle_sha256 FROM intelligence_event_publications WHERE publication_id=?1",
+            [&draft.publication_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional();
+    match existing {
+        Ok(Some(existing_sha)) if existing_sha == draft.canonical_sha256 => {
+            return PublishOutcome::AlreadyPublished
+        }
+        Ok(Some(_)) | Err(_) => return PublishOutcome::Failed,
+        Ok(None) => {}
+    }
+    let Some(configuration) = configuration else {
+        return PublishOutcome::PreparedLocally;
+    };
+    let transport = HttpsPublisher;
+    for asset in &draft.assets {
+        if transport
+            .upload_asset(configuration, &draft.publication_id, asset)
+            .is_err()
+        {
+            return PublishOutcome::TransportUnavailable;
+        }
+    }
+    if transport
+        .upload_bundle(configuration, &draft.publication_id, &draft.bundle)
+        .is_err()
+    {
+        return PublishOutcome::TransportUnavailable;
+    }
+    if connection
+        .execute(
+            "INSERT INTO intelligence_event_publications(publication_id,bundle_sha256,published_at)
+             VALUES(?1,?2,strftime('%s','now')*1000)",
+            params![draft.publication_id, draft.canonical_sha256],
+        )
+        .is_err()
+    {
+        return PublishOutcome::Failed;
+    }
+    PublishOutcome::Published
 }
 
 fn publish_day(
@@ -225,6 +294,31 @@ fn ensure_publication_storage(connection: &Connection) -> Result<(), ()> {
                  height INTEGER,
                  archive_path TEXT NOT NULL,
                  PRIMARY KEY(day,asset_id)
+             );
+             CREATE TABLE IF NOT EXISTS intelligence_event_publications (
+                 publication_id TEXT PRIMARY KEY,
+                 bundle_sha256 TEXT NOT NULL,
+                 published_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS intelligence_event_drafts (
+                 event_id TEXT NOT NULL,
+                 revision_no INTEGER NOT NULL,
+                 publication_id TEXT NOT NULL UNIQUE,
+                 bundle_json TEXT NOT NULL,
+                 bundle_sha256 TEXT NOT NULL,
+                 prepared_at INTEGER NOT NULL,
+                 PRIMARY KEY(event_id,revision_no)
+             );
+             CREATE TABLE IF NOT EXISTS intelligence_event_draft_assets (
+                 publication_id TEXT NOT NULL,
+                 asset_id TEXT NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 mime TEXT NOT NULL,
+                 bytes INTEGER NOT NULL,
+                 width INTEGER,
+                 height INTEGER,
+                 archive_path TEXT NOT NULL,
+                 PRIMARY KEY(publication_id,asset_id)
              );",
         )
         .map_err(|_| ())
@@ -345,6 +439,12 @@ fn load_or_prepare_daily_draft(
         };
     Ok(Some(PublicationDraft {
         day: day_text,
+        publication_id: bundle
+            .get("publicationId")
+            .and_then(Value::as_str)
+            .filter(|value| valid_id(value))
+            .ok_or(())?
+            .to_owned(),
         bundle,
         canonical_sha256,
         assets,
@@ -391,11 +491,195 @@ fn build_and_store_daily_draft(
     Ok(Some(fresh))
 }
 
+fn load_or_prepare_next_event_draft(catalog: &Path) -> Result<Option<PublicationDraft>, ()> {
+    let connection = Connection::open(catalog).map_err(|_| ())?;
+    ensure_publication_storage(&connection)?;
+    // Prefer an already-frozen unpublished draft, including one created just
+    // before midnight.  Otherwise only choose revisions updated today: daily
+    // publication remains the path for old backlog, while event packages make
+    // new developments available without waiting for the next UTC day.
+    let candidate = connection
+        .query_row(
+            "SELECT e.event_id,e.current_revision
+             FROM intelligence_events e
+             LEFT JOIN intelligence_event_drafts d
+               ON d.event_id=e.event_id AND d.revision_no=e.current_revision
+             LEFT JOIN intelligence_event_publications p
+               ON p.publication_id=COALESCE(d.publication_id, 'event:' || e.event_id || ':r' || e.current_revision || ':host')
+             WHERE e.current_revision > 0
+               AND p.publication_id IS NULL
+               AND (d.publication_id IS NOT NULL OR date(e.updated_at / 1000, 'unixepoch')=date('now'))
+             ORDER BY CASE WHEN d.publication_id IS NULL THEN 1 ELSE 0 END,
+                      e.updated_at ASC,e.event_id ASC
+             LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|_| ())?;
+    let Some((event_id, revision_no)) = candidate else {
+        return Ok(None);
+    };
+    if !valid_id(&event_id) || revision_no < 1 {
+        return Err(());
+    }
+    let existing = connection
+        .query_row(
+            "SELECT publication_id,bundle_json,bundle_sha256
+             FROM intelligence_event_drafts WHERE event_id=?1 AND revision_no=?2",
+            params![event_id, revision_no],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ())?;
+    if let Some((publication_id, bundle_json, canonical_sha256)) = existing {
+        let parsed_bundle = serde_json::from_str::<Value>(&bundle_json).ok();
+        let valid = parsed_bundle.as_ref().is_some_and(|bundle| {
+            valid_id(&publication_id)
+                && valid_sha256(&canonical_sha256)
+                && bundle
+                    .get("publicationId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value == publication_id)
+                && bundle.get("kind").and_then(Value::as_str) == Some("event")
+                && bundle
+                    .get("bundleSha256")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value == canonical_sha256)
+                && canonical_without_bundle_sha(bundle)
+                    .map(|canonical| sha256_hex(&canonical) == canonical_sha256)
+                    .unwrap_or(false)
+        });
+        if valid {
+            if let Ok(assets) = load_persisted_event_assets(
+                &connection,
+                catalog.parent().ok_or(())?,
+                &publication_id,
+                parsed_bundle.as_ref().ok_or(())?,
+            ) {
+                return Ok(Some(PublicationDraft {
+                    day: event_id,
+                    publication_id,
+                    bundle: parsed_bundle.ok_or(())?,
+                    canonical_sha256,
+                    assets,
+                }));
+            }
+        }
+        // No remote receipt exists for this candidate (the query above
+        // excludes one), so replacing a damaged local cache is safe.  Do it
+        // transactionally before rebuilding from the same immutable revision.
+        let transaction = connection.unchecked_transaction().map_err(|_| ())?;
+        transaction
+            .execute(
+                "DELETE FROM intelligence_event_draft_assets WHERE publication_id=?1",
+                [&publication_id],
+            )
+            .map_err(|_| ())?;
+        transaction
+            .execute(
+                "DELETE FROM intelligence_event_drafts WHERE event_id=?1 AND revision_no=?2",
+                params![event_id, revision_no],
+            )
+            .map_err(|_| ())?;
+        transaction.commit().map_err(|_| ())?;
+    }
+    drop(connection);
+    build_and_store_event_draft(catalog, &event_id, revision_no)
+}
+
+fn build_and_store_event_draft(
+    catalog: &Path,
+    event_id: &str,
+    revision_no: i64,
+) -> Result<Option<PublicationDraft>, ()> {
+    let fresh = match build_event_bundle_at(catalog, event_id, revision_no)? {
+        Some(draft) => draft,
+        None => return Ok(None),
+    };
+    let connection = Connection::open(catalog).map_err(|_| ())?;
+    ensure_publication_storage(&connection)?;
+    let transaction = connection.unchecked_transaction().map_err(|_| ())?;
+    transaction
+        .execute(
+            "INSERT INTO intelligence_event_drafts(event_id,revision_no,publication_id,bundle_json,bundle_sha256,prepared_at)
+             VALUES(?1,?2,?3,?4,?5,strftime('%s','now')*1000)",
+            params![
+                event_id,
+                revision_no,
+                fresh.publication_id,
+                fresh.bundle.to_string(),
+                fresh.canonical_sha256
+            ],
+        )
+        .map_err(|_| ())?;
+    for asset in &fresh.assets {
+        transaction
+            .execute(
+                "INSERT INTO intelligence_event_draft_assets(publication_id,asset_id,sha256,mime,bytes,width,height,archive_path)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    fresh.publication_id,
+                    asset.asset_id,
+                    asset.sha256,
+                    asset.mime,
+                    asset.bytes.len() as i64,
+                    asset.width.map(i64::from),
+                    asset.height.map(i64::from),
+                    asset.archive_path,
+                ],
+            )
+            .map_err(|_| ())?;
+    }
+    transaction.commit().map_err(|_| ())?;
+    Ok(Some(fresh))
+}
+
 fn load_persisted_assets(
     connection: &Connection,
     root: &Path,
     day: &str,
     bundle: &Value,
+) -> Result<Vec<AssetPayload>, ()> {
+    load_persisted_assets_from_table(
+        connection,
+        root,
+        day,
+        bundle,
+        "intelligence_daily_draft_assets",
+        "day",
+    )
+}
+
+fn load_persisted_event_assets(
+    connection: &Connection,
+    root: &Path,
+    publication_id: &str,
+    bundle: &Value,
+) -> Result<Vec<AssetPayload>, ()> {
+    load_persisted_assets_from_table(
+        connection,
+        root,
+        publication_id,
+        bundle,
+        "intelligence_event_draft_assets",
+        "publication_id",
+    )
+}
+
+fn load_persisted_assets_from_table(
+    connection: &Connection,
+    root: &Path,
+    key: &str,
+    bundle: &Value,
+    table: &str,
+    key_column: &str,
 ) -> Result<Vec<AssetPayload>, ()> {
     let declarations = bundle.get("assets").and_then(Value::as_array).ok_or(())?;
     let mut expected = BTreeMap::new();
@@ -434,14 +718,15 @@ fn load_persisted_assets(
             return Err(());
         }
     }
-    let mut statement = connection
-        .prepare(
-            "SELECT asset_id,sha256,mime,bytes,width,height,archive_path
-             FROM intelligence_daily_draft_assets WHERE day=?1 ORDER BY asset_id",
-        )
-        .map_err(|_| ())?;
+    // Both identifiers come from the two fixed local tables above; no caller
+    // can control this SQL shape.
+    let statement_sql = format!(
+        "SELECT asset_id,sha256,mime,bytes,width,height,archive_path
+         FROM {table} WHERE {key_column}=?1 ORDER BY asset_id"
+    );
+    let mut statement = connection.prepare(&statement_sql).map_err(|_| ())?;
     let rows = statement
-        .query_map([day], |row| {
+        .query_map([key], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -583,11 +868,118 @@ fn build_daily_bundle_at(catalog: &Path, day: NaiveDate) -> Result<Option<Public
     let canonical_sha256 = sha256_hex(&canonical_without_bundle_sha(&bundle)?);
     bundle["bundleSha256"] = Value::String(canonical_sha256.clone());
     Ok(Some(PublicationDraft {
-        day: day_text,
+        day: day_text.clone(),
+        publication_id: format!("daily:{day_text}:host"),
         bundle,
         canonical_sha256,
         assets,
     }))
+}
+
+fn build_event_bundle_at(
+    catalog: &Path,
+    event_id: &str,
+    revision_no: i64,
+) -> Result<Option<PublicationDraft>, ()> {
+    if !valid_id(event_id) || revision_no < 1 {
+        return Err(());
+    }
+    let connection =
+        Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| ())?;
+    let row = connection
+        .query_row(
+            "SELECT e.series_id,e.title,e.occurred_at,r.revision_json
+             FROM intelligence_events e
+             JOIN intelligence_event_revisions r
+               ON r.event_id=e.event_id AND r.revision_no=e.current_revision
+             WHERE e.event_id=?1 AND e.current_revision=?2",
+            params![event_id, revision_no],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ())?;
+    let Some((series_id, title, occurred_at, revision_json)) = row else {
+        return Ok(None);
+    };
+    let root = catalog.parent().ok_or(())?;
+    let mut assets = Vec::new();
+    let Some((notes, media_ids, video_url, event_assets)) =
+        source_projection(&connection, root, event_id, &mut assets)?
+    else {
+        return Ok(None);
+    };
+    assets.extend(event_assets);
+    if assets.len() > MAX_ASSETS {
+        return Err(());
+    }
+    let blocks = revision_blocks_projection(&revision_json, &notes, media_ids, video_url)?;
+    let mut event = Map::new();
+    event.insert("eventId".into(), Value::String(event_id.to_owned()));
+    event.insert("revisionNo".into(), Value::from(revision_no));
+    if let Some(series_id) = series_id.filter(|value| valid_id(value)) {
+        event.insert("seriesId".into(), Value::String(series_id));
+    }
+    event.insert("title".into(), Value::String(model_text(&title, 2_048)?));
+    event.insert(
+        "occurredAt".into(),
+        occurred_at
+            .and_then(|value| canonical_timestamp(&value))
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    event.insert("blocks".into(), Value::Array(blocks));
+    event.insert("notes".into(), Value::Array(notes));
+    let publication_id = event_publication_id(event_id, revision_no);
+    // Freeze both timestamps in the local draft.  The exact same immutable
+    // package can be retried after pairing without silently moving its 30-day
+    // retention window.
+    let issued_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let published_at = DateTime::parse_from_rfc3339(&issued_at)
+        .map_err(|_| ())?
+        .with_timezone(&Utc);
+    let expires_at = published_at
+        .checked_add_days(Days::new(30))
+        .ok_or(())?
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut bundle = json!({
+        "schemaVersion": 1,
+        "publicationId": publication_id,
+        "kind": "event",
+        "publishedAt": issued_at,
+        "expiresAt": expires_at,
+        "issuedAt": issued_at,
+        "events": [Value::Object(event)],
+        "assets": assets.iter().map(asset_declaration).collect::<Vec<_>>(),
+        "bundleSha256": ""
+    });
+    let canonical_sha256 = sha256_hex(&canonical_without_bundle_sha(&bundle)?);
+    bundle["bundleSha256"] = Value::String(canonical_sha256.clone());
+    Ok(Some(PublicationDraft {
+        day: published_at.date_naive().format("%F").to_string(),
+        publication_id,
+        bundle,
+        canonical_sha256,
+        assets,
+    }))
+}
+
+fn event_publication_id(event_id: &str, revision_no: i64) -> String {
+    let direct = format!("event:{event_id}:r{revision_no}:host");
+    if valid_id(&direct) {
+        return direct;
+    }
+    // Event identifiers are valid archive IDs but may be too long once the
+    // immutable-revision suffix is added. Derive a bounded stable ID instead
+    // of making an otherwise valid event permanently block the queue.
+    let digest = sha256_hex(format!("{event_id}:{revision_no}").as_bytes());
+    format!("event:sha256:{}:r{revision_no}:host", &digest[..32])
 }
 
 /// Project only the revision's already validated structured synthesis.  Older
@@ -937,14 +1329,15 @@ impl HttpsPublisher {
     fn upload_asset(
         &self,
         configuration: &PublisherConfiguration,
-        day: &str,
+        scope: &str,
         asset: &AssetPayload,
     ) -> Result<(), ()> {
+        let scope = idempotency_scope(scope)?;
         let init = self.call(
             configuration,
             "POST",
             "/v1/intelligence/assets/init",
-            &format!("daily:{day}:asset:{}:init", asset.sha256),
+            &format!("publication:{scope}:asset:{}:init", &asset.sha256[..16]),
             Some(json!({"sha256":asset.sha256,"mime":asset.mime,"totalBytes":asset.bytes.len()})),
         )?;
         if !init
@@ -954,13 +1347,13 @@ impl HttpsPublisher {
         {
             for (chunk_index, chunk) in asset.bytes.chunks(UPLOAD_CHUNK_BYTES).enumerate() {
                 let offset = chunk_index.checked_mul(UPLOAD_CHUNK_BYTES).ok_or(())?;
-                self.call(configuration, "PUT", &format!("/v1/intelligence/assets/{}", asset.sha256), &format!("daily:{day}:asset:{}:{chunk_index}", asset.sha256), Some(json!({"offset":offset,"contentBase64":STANDARD.encode(chunk),"chunkSha256":sha256_hex(chunk)})))?;
+                self.call(configuration, "PUT", &format!("/v1/intelligence/assets/{}", asset.sha256), &format!("publication:{scope}:asset:{}:{chunk_index}", &asset.sha256[..16]), Some(json!({"offset":offset,"contentBase64":STANDARD.encode(chunk),"chunkSha256":sha256_hex(chunk)})))?;
             }
             self.call(
                 configuration,
                 "POST",
                 &format!("/v1/intelligence/assets/{}/complete", asset.sha256),
-                &format!("daily:{day}:asset:{}:complete", asset.sha256),
+                &format!("publication:{scope}:asset:{}:complete", &asset.sha256[..16]),
                 Some(json!({})),
             )?;
         }
@@ -970,25 +1363,26 @@ impl HttpsPublisher {
     fn upload_bundle(
         &self,
         configuration: &PublisherConfiguration,
-        day: &str,
+        scope: &str,
         bundle: &Value,
     ) -> Result<(), ()> {
         let id = bundle
             .get("publicationId")
             .and_then(Value::as_str)
             .ok_or(())?;
+        let scope = idempotency_scope(scope)?;
         self.call(
             configuration,
             "POST",
             "/v1/intelligence/uploads/init",
-            &format!("daily:{day}:init"),
+            &format!("publication:{scope}:init"),
             Some(bundle.clone()),
         )?;
         self.call(
             configuration,
             "POST",
             &format!("/v1/intelligence/uploads/{id}/complete"),
-            &format!("daily:{day}:complete"),
+            &format!("publication:{scope}:complete"),
             Some(json!({})),
         )?;
         Ok(())
@@ -1030,6 +1424,12 @@ impl HttpsPublisher {
         }
         response.into_body().read_json::<Value>().map_err(|_| ())
     }
+}
+
+fn idempotency_scope(scope: &str) -> Result<String, ()> {
+    valid_id(scope)
+        .then(|| sha256_hex(scope.as_bytes())[..24].to_owned())
+        .ok_or(())
 }
 
 fn canonical_without_bundle_sha(value: &Value) -> Result<Vec<u8>, ()> {
@@ -1202,6 +1602,34 @@ mod tests {
             publish_day(None, &path, day),
             PublishOutcome::PreparedLocally
         );
+        // The same completed revision can also be frozen as a same-day event
+        // package. It is a different immutable publication from the daily
+        // digest and therefore never mutates the latter.
+        let event_draft = build_and_store_event_draft(&path, "event-a", 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event_draft.bundle["kind"], "event");
+        assert_eq!(event_draft.bundle["events"].as_array().unwrap().len(), 1);
+        assert_eq!(event_draft.assets.len(), 1);
+        let event_published_at =
+            DateTime::parse_from_rfc3339(event_draft.bundle["publishedAt"].as_str().unwrap())
+                .unwrap();
+        let event_expires_at =
+            DateTime::parse_from_rfc3339(event_draft.bundle["expiresAt"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(event_expires_at, event_published_at + Days::new(30));
+        assert_eq!(
+            publish_next_ready_event(None, &path),
+            PublishOutcome::PreparedLocally
+        );
+        let stored_event_assets: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_event_draft_assets WHERE publication_id=?1",
+                [&event_draft.publication_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_event_assets, 1);
         let stored_sha: String = c
             .query_row(
                 "SELECT bundle_sha256 FROM intelligence_daily_drafts WHERE day='2030-01-02'",
