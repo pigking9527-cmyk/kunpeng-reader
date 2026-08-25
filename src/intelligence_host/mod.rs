@@ -45,6 +45,10 @@ const COLLECTION_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKFILL_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 const TRIAGE_TIMEOUT: Duration = Duration::from_secs(120);
 const RELATION_TIMEOUT: Duration = Duration::from_secs(180);
+/// Keep the worker-private ANN graph alive for a few durable relation items,
+/// while preserving regular opportunities for full-text backfill in a busy
+/// unattended loop.  This is a fixed internal bound, never dashboard input.
+const RELATION_BATCH_SIZE: u16 = 4;
 const EDITORIAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 // A first switch verifies locally pinned GGUF artifacts.  On a mechanical
 // archive drive that can legitimately take longer than the short per-article
@@ -1648,25 +1652,37 @@ fn child_output(
     mode: &str,
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
-    child_output_with_backfill_pass(configuration, mode, timeout, None)
+    child_output_args_with_backfill_pass(configuration, &[mode], timeout, None)
+}
+
+/// Invoke a fixed worker mode plus its validated bounded arguments.  The host
+/// never forwards dashboard text here: callers supply only static flags and
+/// decimal limits derived from trusted host configuration.
+fn child_output_args(
+    configuration: &HostConfiguration,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    child_output_args_with_backfill_pass(configuration, args, timeout, None)
 }
 
 /// A host round can run several bounded evidence batches.  Keep their common
 /// pass identifier out of the dashboard and logs, but pass it to the worker so
 /// a failure which becomes retryable after the short backoff cannot be fetched
 /// twice by later batches in the same operator-visible round.
-fn child_output_with_backfill_pass(
+fn child_output_args_with_backfill_pass(
     configuration: &HostConfiguration,
-    mode: &str,
+    args: &[&str],
     timeout: Duration,
     backfill_pass_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let worker = worker_path(configuration).ok_or("未找到本机情报 worker；请先安装阅读器组件")?;
     let mut command = Command::new(worker);
     command
-        .arg(mode)
+        .args(args)
         .args(crate::profile::child_profile_args())
         .env("KUNPENG_INTELLIGENCE_WORKER_ENABLED", "1");
+
     if let Some(pass_id) = backfill_pass_id {
         command.env("KUNPENG_INTELLIGENCE_BACKFILL_PASS_ID", pass_id);
     }
@@ -1864,9 +1880,9 @@ fn run_once_with_audit(
         let mut backfill_completed = true;
         let backfill_pass_id = uuid::Uuid::new_v4().to_string();
         for _ in 0..configuration.max_backfill_batches_per_run.max(1) {
-            let backfill = child_output_with_backfill_pass(
+            let backfill = child_output_args_with_backfill_pass(
                 configuration,
-                "--backfill-content-once",
+                &["--backfill-content-once"],
                 BACKFILL_TIMEOUT,
                 Some(&backfill_pass_id),
             )?;
@@ -1906,14 +1922,10 @@ fn run_once_with_audit(
         // With a large archive backlog, give the next loop a chance to fetch
         // more bodies instead of holding the GPU for a long, monolithic
         // triage/relation pass.
-        let triage_limit = balanced_model_stage_limit(
-            configuration.max_triage_per_run,
-            awaiting_full_text,
-        );
-        let relation_limit = balanced_model_stage_limit(
-            configuration.max_processing_per_run,
-            awaiting_full_text,
-        );
+        let triage_limit =
+            balanced_model_stage_limit(configuration.max_triage_per_run, awaiting_full_text);
+        let relation_limit =
+            balanced_model_stage_limit(configuration.max_processing_per_run, awaiting_full_text);
         let mut acquired_model_phase = false;
 
         // Phase 1 owns the GPU with the 7/8B judge while the 0.6B retrieval
@@ -1962,13 +1974,20 @@ fn run_once_with_audit(
             // phase.  Persist their result before the runtime swaps to 27B;
             // a restart can resume from `relation_ready` without repeating
             // either the collector or the expensive editorial work.
-            for _ in 0..relation_limit {
+            let mut remaining_relation_runs = relation_limit;
+            while remaining_relation_runs > 0 {
+                let batch = remaining_relation_runs.min(RELATION_BATCH_SIZE);
                 begin_audit_stage(audit_path, audit, "vector_recall_and_relation")?;
-                let value = child_output(configuration, "--relate-once", RELATION_TIMEOUT)?;
+                let batch_argument = batch.to_string();
+                let value = child_output_args(
+                    configuration,
+                    &["--relate-batch", &batch_argument],
+                    RELATION_TIMEOUT,
+                )?;
                 report.relation = text(&value, "outcome");
                 report.relation_failure = optional_text(&value, "processingFailure");
                 match report.relation.as_str() {
-                    "processed" => {}
+                    "processed" => remaining_relation_runs -= batch,
                     "processing_idle" => break,
                     _ => {
                         report.outcome = "relation_processing_incomplete".into();
