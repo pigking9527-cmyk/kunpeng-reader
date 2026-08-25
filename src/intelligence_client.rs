@@ -351,6 +351,23 @@ impl HttpTransport {
             .read_json::<Value>()
             .map_err(|_| "情报服务返回无效 JSON".to_string())
     }
+
+    /// The service keeps the SSE cursor and delivery ACK state per account and
+    /// device. Register before either operation so a newly logged-in desktop
+    /// does not silently subscribe with an unknown device identity.
+    fn register_device(&self) -> Result<(), String> {
+        let platform = intelligence_device_platform()?;
+        let response = self.post_json(
+            "/v1/intelligence/devices",
+            serde_json::json!({
+                "schemaVersion": 1,
+                "deviceId": self.device_id,
+                "platform": platform,
+                "quietHours": {},
+            }),
+        )?;
+        validate_registered_device(&response, &self.device_id, platform)
+    }
 }
 
 impl IntelligenceTransport for HttpTransport {
@@ -449,6 +466,31 @@ impl IntelligenceArchiveTransport for HttpTransport {
     }
 }
 
+fn intelligence_device_platform() -> Result<&'static str, String> {
+    match std::env::consts::OS {
+        "windows" => Ok("windows"),
+        "macos" => Ok("macos"),
+        "linux" => Ok("linux"),
+        _ => Err("当前平台不支持情报设备登记".into()),
+    }
+}
+
+fn validate_registered_device(
+    response: &Value,
+    expected_device_id: &str,
+    expected_platform: &str,
+) -> Result<(), String> {
+    if response["schemaVersion"].as_u64() != Some(1)
+        || response["deviceId"].as_str() != Some(expected_device_id)
+        || response["platform"].as_str() != Some(expected_platform)
+        || !response["quietHours"].is_object()
+        || !response["updatedAt"].as_str().is_some_and(valid_timestamp)
+    {
+        return Err("情报服务返回的设备登记无效".into());
+    }
+    Ok(())
+}
+
 fn intelligence_http_error(error: ureq::Error) -> String {
     match error {
         ureq::Error::StatusCode(401) => "登录状态失效，请重新登录后刷新情报内容".to_string(),
@@ -473,6 +515,7 @@ fn refresh_for_connection(
     let root = cache_root()?;
     let mut cache = IntelligenceCache::open(&root, &connection.account_id, &connection.base)?;
     let mut transport = HttpTransport::new(connection);
+    transport.register_device()?;
     refresh_with_transport(&mut cache, &mut transport)
 }
 
@@ -490,6 +533,7 @@ fn delivery_stream_supervisor(app: tauri::AppHandle) {
     let mut retry_index = 0usize;
     let mut cursor = String::new();
     let mut active_scope = String::new();
+    let mut registered_scope = String::new();
     loop {
         let state = app.state::<AppState>();
         let connection = match AccountConnection::current(state.inner()) {
@@ -509,7 +553,18 @@ fn delivery_stream_supervisor(app: tauri::AppHandle) {
                 .and_then(|root| IntelligenceCache::open(&root, &connection.account_id, &connection.base))
                 .and_then(|cache| cache.stream_cursor())
                 .unwrap_or_default();
-            active_scope = scope;
+            active_scope = scope.clone();
+            registered_scope.clear();
+        }
+        if registered_scope != scope {
+            if HttpTransport::new(connection.clone()).register_device().is_ok() {
+                registered_scope = scope.clone();
+            } else {
+                let delay = STREAM_BACKOFF[retry_index.min(STREAM_BACKOFF.len() - 1)];
+                retry_index = retry_index.saturating_add(1);
+                thread::sleep(delay);
+                continue;
+            }
         }
         let end = stream_once(state.inner(), &connection, &mut cursor);
         if let Ok(cache) = cache_root()
@@ -2608,6 +2663,24 @@ mod tests {
             r#"{"deliveryId":"daily:2026-08-23:zh-CN","cursor":"42","kind":"archive"}"#,
         )
         .is_none());
+    }
+
+    #[test]
+    fn registered_device_response_must_bind_the_current_device_and_platform() {
+        let response = serde_json::json!({
+            "schemaVersion": 1,
+            "deviceId": "desktop-device",
+            "platform": "windows",
+            "quietHours": {},
+            "updatedAt": "2026-08-25T00:00:00Z",
+        });
+        assert!(validate_registered_device(&response, "desktop-device", "windows").is_ok());
+        assert!(validate_registered_device(&response, "other-device", "windows").is_err());
+        assert!(validate_registered_device(&response, "desktop-device", "linux").is_err());
+
+        let mut malformed = response;
+        malformed["quietHours"] = serde_json::json!([]);
+        assert!(validate_registered_device(&malformed, "desktop-device", "windows").is_err());
     }
 
     #[test]
