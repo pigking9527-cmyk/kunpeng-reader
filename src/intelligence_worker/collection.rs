@@ -48,12 +48,17 @@ const MAX_PUBLIC_REDIRECTS: usize = 5;
 /// attempt for each revision; it is not a licence to repeatedly re-fetch a
 /// publisher page in every worker round.
 const PUBLIC_STATIC_EXTRACTOR_REVISION: i64 = 2;
+/// Resolver changes are versioned independently from article-body extraction.
+/// A Google discovery wrapper that could not safely expose its publisher at an
+/// older revision receives exactly one retry after a stronger public resolver
+/// ships; it never turns into an unbounded wrapper polling loop.
+const GOOGLE_NEWS_WRAPPER_RESOLVER_REVISION: i64 = 2;
 const MIN_STATIC_ARTICLE_BODY_CHARS: usize = 120;
 const MIN_STATIC_ARTICLE_VISIBLE_CHARS: usize = 80;
-/// A Google News wrapper is only inspected far enough to find an explicit
-/// public publisher URL.  It is not article evidence and must never turn an
+/// A Google News wrapper is only inspected far enough to find explicit public
+/// publisher metadata. It is not article evidence and must never turn an
 /// unbounded wrapper document into a second extraction workload.
-const MAX_GOOGLE_WRAPPER_HTML_SCAN_BYTES: usize = 256 * 1024;
+const MAX_GOOGLE_WRAPPER_HTML_SCAN_BYTES: usize = 1024 * 1024;
 /// A background round must make meaningful progress through a historical
 /// archive, but it must not turn a single host into an unbounded crawler.
 /// Fetches are split into origin-fair waves below: at most one request to an
@@ -1449,8 +1454,10 @@ fn google_news_legacy_public_target(value: &str) -> Option<String> {
 }
 
 /// Resolve an ordinary public publisher target from a Google News wrapper
-/// document without invoking private Google endpoints.  Only canonical links,
-/// HTML refresh targets and a bounded literal HTTPS fallback are considered.
+/// document without invoking private Google endpoints. Only canonical links,
+/// Open Graph/Twitter URL metadata and HTML refresh targets are considered.
+/// Arbitrary HTTPS literals are deliberately not followed: wrapper pages carry
+/// analytics, support and static-resource URLs that are not article evidence.
 /// The result is revalidated as a non-Google public HTTPS address before the
 /// caller fetches it through the normal redirect guard.
 fn google_news_public_target_from_wrapper_html(base: &str, html: &str) -> Option<String> {
@@ -1478,6 +1485,18 @@ fn google_news_public_target_from_wrapper_html(base: &str, html: &str) -> Option
     }
 
     for meta in html_elements(html, "meta") {
+        let publisher_url = element_attribute(meta, "property")
+            .or_else(|| element_attribute(meta, "name"))
+            .is_some_and(|value| {
+                value.eq_ignore_ascii_case("og:url") || value.eq_ignore_ascii_case("twitter:url")
+            });
+        if publisher_url {
+            if let Some(target) = element_attribute(meta, "content")
+                .and_then(|value| google_news_public_target_from_value(base, &value))
+            {
+                return Some(target);
+            }
+        }
         let refresh = element_attribute(meta, "http-equiv")
             .is_some_and(|value| value.eq_ignore_ascii_case("refresh"));
         if !refresh {
@@ -1493,7 +1512,7 @@ fn google_news_public_target_from_wrapper_html(base: &str, html: &str) -> Option
         }
     }
 
-    google_news_public_https_literal(base, html)
+    None
 }
 
 fn google_news_wrapper_html(
@@ -1548,29 +1567,6 @@ fn google_news_refresh_target(content: &str) -> Option<&str> {
             })
             .unwrap_or_else(|| value.split_ascii_whitespace().next().unwrap_or_default());
         return (!value.is_empty()).then_some(value);
-    }
-    None
-}
-
-fn google_news_public_https_literal(base: &str, html: &str) -> Option<String> {
-    let mut cursor = 0;
-    while let Some(relative) = html[cursor..].find("https://") {
-        let start = cursor + relative;
-        let end = html[start..]
-            .find(|character: char| {
-                character.is_whitespace() || matches!(character, '\'' | '"' | '<' | '>' | '\\')
-            })
-            .map_or(html.len(), |length| start + length);
-        let candidate = html[start..end].trim_end_matches(|character: char| {
-            matches!(character, ')' | ']' | '}' | ',' | ';' | '.')
-        });
-        if let Some(target) = (!candidate.is_empty())
-            .then(|| google_news_public_target_from_value(base, candidate))
-            .flatten()
-        {
-            return Some(target);
-        }
-        cursor = start + "https://".len();
     }
     None
 }
@@ -2816,8 +2812,12 @@ fn next_content_backfill_candidates_for_pass(
                            COALESCE(b.last_failure_reason,'')='body_not_found'
                            AND COALESCE(b.extractor_revision,0)<?2
                        )
+                       OR (
+                           COALESCE(b.last_failure_reason,'')='google_news_discovery_only'
+                           AND COALESCE(b.extractor_revision,0)<?3
+                       )
                    )
-                   AND (?3='' OR COALESCE(b.last_backfill_pass_id,'')<>?3)
+                   AND (?4='' OR COALESCE(b.last_backfill_pass_id,'')<>?4)
                    AND COALESCE(NULLIF(a.url,''),(
                        SELECT r.normalized_url FROM intelligence_collection_records r
                        WHERE r.article_id=a.article_id AND r.normalized_url LIKE 'https://%'
@@ -2825,10 +2825,10 @@ fn next_content_backfill_candidates_for_pass(
                    ),'') LIKE 'https://%'
              ), newest AS (
                  SELECT article_id,fingerprint,url,title,summary,0 AS queue_segment FROM eligible
-                 ORDER BY published_at DESC,created_at DESC LIMIT ?4
+                 ORDER BY published_at DESC,created_at DESC LIMIT ?5
              ), oldest AS (
                  SELECT article_id,fingerprint,url,title,summary,1 AS queue_segment FROM eligible
-                 ORDER BY published_at ASC,created_at ASC LIMIT ?5
+                 ORDER BY published_at ASC,created_at ASC LIMIT ?6
              )
              SELECT article_id,fingerprint,url,title,summary,queue_segment FROM newest
              UNION ALL
@@ -2841,6 +2841,7 @@ fn next_content_backfill_candidates_for_pass(
             params![
                 now,
                 PUBLIC_STATIC_EXTRACTOR_REVISION,
+                GOOGLE_NEWS_WRAPPER_RESOLVER_REVISION,
                 pass_id.unwrap_or(""),
                 MAX_CONTENT_BACKFILL_NEWEST_SCAN as i64,
                 MAX_CONTENT_BACKFILL_OLDEST_SCAN as i64
@@ -3054,9 +3055,11 @@ fn record_content_backfill_retry(
             .min(CONTENT_BACKFILL_MAX_DELAY_MS.max(base_delay_ms));
         now.saturating_add(delay_ms)
     };
-    let extractor_revision = (reason.reason == "body_not_found")
-        .then_some(PUBLIC_STATIC_EXTRACTOR_REVISION)
-        .unwrap_or(0);
+    let extractor_revision = match reason.reason {
+        "body_not_found" => PUBLIC_STATIC_EXTRACTOR_REVISION,
+        "google_news_discovery_only" => GOOGLE_NEWS_WRAPPER_RESOLVER_REVISION,
+        _ => 0,
+    };
     connection
         .execute(
             "INSERT INTO intelligence_content_backfill_state(
@@ -3292,10 +3295,18 @@ mod tests {
         assert_eq!(
             google_news_public_target_from_wrapper_html(
                 base,
-                r#"<script>const wrapper = "https://news.google.com/ignored";</script><p>https://publisher.example.test/fallback</p>"#,
+                r#"<meta property="og:url" content="https://publisher.example.test/open-graph">"#,
             )
             .as_deref(),
-            Some("https://publisher.example.test/fallback")
+            Some("https://publisher.example.test/open-graph")
+        );
+        let late_metadata = format!(
+            "{}<meta name=\"twitter:url\" content=\"https://publisher.example.test/late\">",
+            "x".repeat(300 * 1024)
+        );
+        assert_eq!(
+            google_news_public_target_from_wrapper_html(base, &late_metadata).as_deref(),
+            Some("https://publisher.example.test/late")
         );
     }
 
@@ -3307,6 +3318,7 @@ mod tests {
             r#"<meta http-equiv="refresh" content="0; url=https://127.0.0.1/private">"#,
             r#"<link rel="canonical" href="https://news.google.com/read/another-wrapper">"#,
             r#"<p>https://localhost/private</p>"#,
+            r#"<script>const analytics = "https://publisher.example.test/not-article";</script>"#,
         ] {
             assert!(google_news_public_target_from_wrapper_html(base, html).is_none());
         }
@@ -4403,31 +4415,52 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_google_wrapper_is_retained_once_as_discovery_only() {
+    fn unresolved_google_wrapper_is_retained_once_per_resolver_revision() {
         let root = std::env::temp_dir().join(format!(
             "kunpeng-collector-google-discovery-{}",
             uuid::Uuid::new_v4()
         ));
         fs::create_dir_all(&root).unwrap();
         let catalog = root.join("catalog.sqlite3");
+        let original = item();
+        let normalized = normalized_url(&original.url).unwrap();
+        let article_id = article_identity(&original.source_id, &original.guid, &normalized);
+        let fingerprint = record_fingerprint(&original, &normalized);
+        upsert_article(&catalog, &article_id, &fingerprint, &original, &normalized).unwrap();
         record_content_backfill_retry(
             &catalog,
-            "google-wrapper",
+            &article_id,
             &ContentBackfillFailure::new("google_news_discovery_only"),
             None,
         )
         .unwrap();
-        let state: (String, i64) = Connection::open(&catalog)
+        assert!(next_content_backfill_candidates(&catalog)
+            .unwrap()
+            .is_empty());
+        let state: (String, i64, i64) = Connection::open(&catalog)
             .unwrap()
             .query_row(
-                "SELECT last_failure_reason,next_retry_at FROM intelligence_content_backfill_state
-                 WHERE article_id='google-wrapper'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT last_failure_reason,next_retry_at,extractor_revision
+                 FROM intelligence_content_backfill_state WHERE article_id=?1",
+                [&article_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(state.0, "google_news_discovery_only");
         assert_eq!(state.1, CONTENT_BACKFILL_NEVER_RETRY_AT);
+        assert_eq!(state.2, GOOGLE_NEWS_WRAPPER_RESOLVER_REVISION);
+
+        Connection::open(&catalog)
+            .unwrap()
+            .execute(
+                "UPDATE intelligence_content_backfill_state
+                 SET extractor_revision=?2 WHERE article_id=?1",
+                params![article_id, GOOGLE_NEWS_WRAPPER_RESOLVER_REVISION - 1],
+            )
+            .unwrap();
+        let upgraded = next_content_backfill_candidates(&catalog).unwrap();
+        assert_eq!(upgraded.len(), 1);
+        assert_eq!(upgraded[0].article_id, article_id);
         let _ = fs::remove_dir_all(root);
     }
 
