@@ -58,11 +58,13 @@ pub(crate) enum DailyPreviewOutcome {
 
 #[derive(Clone, Debug)]
 struct AssetPayload {
+    asset_id: String,
     sha256: String,
     mime: String,
     bytes: Vec<u8>,
     width: Option<u32>,
     height: Option<u32>,
+    archive_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -148,7 +150,12 @@ fn publish_day(
     // One date has one immutable daily package.  Re-running the local worker
     // must reuse it rather than re-uploading different same-day content.
     match existing {
-        Ok(Some(_)) => return PublishOutcome::AlreadyPublished,
+        Ok(Some(existing_sha)) if existing_sha == draft.canonical_sha256 => {
+            return PublishOutcome::AlreadyPublished
+        }
+        // A different hash for the same immutable day indicates local storage
+        // corruption or an operator mismatch; never overwrite that receipt.
+        Ok(Some(_)) => return PublishOutcome::Failed,
         Ok(None) => {}
         Err(_) => return PublishOutcome::Failed,
     }
@@ -207,6 +214,17 @@ fn ensure_publication_storage(connection: &Connection) -> Result<(), ()> {
                  bundle_json TEXT NOT NULL,
                  bundle_sha256 TEXT NOT NULL,
                  prepared_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS intelligence_daily_draft_assets (
+                 day TEXT NOT NULL,
+                 asset_id TEXT NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 mime TEXT NOT NULL,
+                 bytes INTEGER NOT NULL,
+                 width INTEGER,
+                 height INTEGER,
+                 archive_path TEXT NOT NULL,
+                 PRIMARY KEY(day,asset_id)
              );",
         )
         .map_err(|_| ())
@@ -220,28 +238,52 @@ fn load_or_prepare_daily_draft(
     catalog: &Path,
     day: NaiveDate,
 ) -> Result<Option<PublicationDraft>, ()> {
-    let fresh = match build_daily_bundle_at(catalog, day)? {
-        Some(draft) => draft,
-        None => return Ok(None),
-    };
     let connection = Connection::open(catalog).map_err(|_| ())?;
     ensure_publication_storage(&connection)?;
+    let day_text = day.format("%F").to_string();
     let existing = connection
         .query_row(
             "SELECT bundle_json,bundle_sha256 FROM intelligence_daily_drafts WHERE day=?1",
-            [&fresh.day],
+            [&day_text],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .map_err(|_| ())?;
     let Some((bundle_json, canonical_sha256)) = existing else {
-        connection
+        drop(connection);
+        let fresh = match build_daily_bundle_at(catalog, day)? {
+            Some(draft) => draft,
+            None => return Ok(None),
+        };
+        let connection = Connection::open(catalog).map_err(|_| ())?;
+        ensure_publication_storage(&connection)?;
+        let transaction = connection.unchecked_transaction().map_err(|_| ())?;
+        transaction
             .execute(
                 "INSERT INTO intelligence_daily_drafts(day,bundle_json,bundle_sha256,prepared_at)
                  VALUES(?1,?2,?3,strftime('%s','now')*1000)",
                 params![fresh.day, fresh.bundle.to_string(), fresh.canonical_sha256],
             )
             .map_err(|_| ())?;
+        for asset in &fresh.assets {
+            transaction
+                .execute(
+                    "INSERT INTO intelligence_daily_draft_assets(day,asset_id,sha256,mime,bytes,width,height,archive_path)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![
+                        fresh.day,
+                        asset.asset_id,
+                        asset.sha256,
+                        asset.mime,
+                        asset.bytes.len() as i64,
+                        asset.width.map(i64::from),
+                        asset.height.map(i64::from),
+                        asset.archive_path,
+                    ],
+                )
+                .map_err(|_| ())?;
+        }
+        transaction.commit().map_err(|_| ())?;
         return Ok(Some(fresh));
     };
     let bundle: Value = serde_json::from_str(&bundle_json).map_err(|_| ())?;
@@ -255,30 +297,123 @@ fn load_or_prepare_daily_draft(
     {
         return Err(());
     }
-    // Archive assets are content-addressed and immutable.  Make sure every
-    // declaration in the persisted bundle is still present before uploading;
-    // otherwise fail closed rather than rebuilding a different day package.
-    let expected_assets = bundle
-        .get("assets")
-        .and_then(Value::as_array)
-        .ok_or(())?
-        .iter()
-        .filter_map(|asset| asset.get("sha256").and_then(Value::as_str))
-        .collect::<std::collections::BTreeSet<_>>();
-    let available_assets = fresh
-        .assets
-        .iter()
-        .map(|asset| asset.sha256.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    if !expected_assets.is_subset(&available_assets) {
-        return Err(());
-    }
+    // The persisted asset mapping, rather than the current event projection,
+    // is authoritative for a frozen day.  Reopening a draft therefore never
+    // rebuilds a changed event or asks a model to synthesize it again.
+    let assets =
+        load_persisted_assets(&connection, catalog.parent().ok_or(())?, &day_text, &bundle)?;
     Ok(Some(PublicationDraft {
-        day: fresh.day,
+        day: day_text,
         bundle,
         canonical_sha256,
-        assets: fresh.assets,
+        assets,
     }))
+}
+
+fn load_persisted_assets(
+    connection: &Connection,
+    root: &Path,
+    day: &str,
+    bundle: &Value,
+) -> Result<Vec<AssetPayload>, ()> {
+    let declarations = bundle.get("assets").and_then(Value::as_array).ok_or(())?;
+    let mut expected = BTreeMap::new();
+    for declaration in declarations {
+        let asset_id = declaration
+            .get("assetId")
+            .and_then(Value::as_str)
+            .filter(|value| valid_id(value))
+            .ok_or(())?;
+        let sha256 = declaration
+            .get("sha256")
+            .and_then(Value::as_str)
+            .filter(|value| valid_sha256(value))
+            .ok_or(())?;
+        let mime = declaration
+            .get("mime")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "image/jpeg" | "image/png" | "image/webp"))
+            .ok_or(())?;
+        let bytes = declaration
+            .get("bytes")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0 && *value <= MAX_ASSET_BYTES as u64)
+            .ok_or(())?;
+        let width = declaration.get("width").and_then(Value::as_u64);
+        let height = declaration.get("height").and_then(Value::as_u64);
+        if width.is_some_and(|value| value == 0 || value > 16_384)
+            || height.is_some_and(|value| value == 0 || value > 16_384)
+            || expected
+                .insert(
+                    asset_id.to_owned(),
+                    (sha256.to_owned(), mime.to_owned(), bytes, width, height),
+                )
+                .is_some()
+        {
+            return Err(());
+        }
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT asset_id,sha256,mime,bytes,width,height,archive_path
+             FROM intelligence_daily_draft_assets WHERE day=?1 ORDER BY asset_id",
+        )
+        .map_err(|_| ())?;
+    let rows = statement
+        .query_map([day], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|_| ())?;
+    let mut assets = Vec::with_capacity(expected.len());
+    for row in rows {
+        let (asset_id, sha256, mime, declared_bytes, width, height, archive_path) =
+            row.map_err(|_| ())?;
+        let Some((expected_sha, expected_mime, expected_bytes, expected_width, expected_height)) =
+            expected.remove(&asset_id)
+        else {
+            return Err(());
+        };
+        let width = width.and_then(|value| u32::try_from(value).ok());
+        let height = height.and_then(|value| u32::try_from(value).ok());
+        if sha256 != expected_sha
+            || mime != expected_mime
+            || declared_bytes < 1
+            || declared_bytes as u64 != expected_bytes
+            || width.map(u64::from) != expected_width
+            || height.map(u64::from) != expected_height
+        {
+            return Err(());
+        }
+        let path = safe_archive_file(root, &archive_path)?;
+        let bytes = std::fs::read(&path).map_err(|_| ())?;
+        if bytes.len() as i64 != declared_bytes || sha256_hex(&bytes) != sha256 {
+            return Err(());
+        }
+        let (actual_width, actual_height) = image::load_from_memory(&bytes)
+            .map_err(|_| ())?
+            .dimensions();
+        if width != Some(actual_width) || height != Some(actual_height) {
+            return Err(());
+        }
+        assets.push(AssetPayload {
+            asset_id,
+            sha256,
+            mime,
+            bytes,
+            width,
+            height,
+            archive_path,
+        });
+    }
+    expected.is_empty().then_some(assets).ok_or(())
 }
 
 fn build_daily_bundle_at(catalog: &Path, day: NaiveDate) -> Result<Option<PublicationDraft>, ()> {
@@ -513,6 +648,9 @@ fn source_projection(
         let Some(published_at) = canonical_timestamp(&published_at) else {
             continue;
         };
+        let Some(url) = public_https_url(&url) else {
+            continue;
+        };
         if !valid_id(&article_id) || !valid_sha256(&source_sha256) {
             continue;
         }
@@ -534,7 +672,7 @@ fn source_projection(
         }));
         if media_ids.len() < 16 && all_assets.len() + event_assets.len() < MAX_ASSETS {
             if let Some(asset) = first_image_asset(connection, root, &article_id)? {
-                let asset_id = format!("image:{}", &asset.sha256[..24]);
+                let asset_id = asset_id_for_sha256(&asset.sha256)?;
                 if !all_assets
                     .iter()
                     .chain(event_assets.iter())
@@ -611,16 +749,18 @@ fn first_image_asset(
         .map_err(|_| ())?
         .dimensions();
     Ok(Some(AssetPayload {
+        asset_id: asset_id_for_sha256(&sha256_hex(&bytes))?,
         sha256: sha256_hex(&bytes),
         mime: "image/webp".into(),
         bytes,
         width: Some(width),
         height: Some(height),
+        archive_path: relative,
     }))
 }
 
 fn first_video_url(connection: &Connection, article_id: &str) -> Result<Option<String>, ()> {
-    connection
+    let value = connection
         .query_row(
             "SELECT video_url FROM intelligence_article_media m
          JOIN intelligence_article_content_versions v
@@ -631,7 +771,8 @@ fn first_video_url(connection: &Connection, article_id: &str) -> Result<Option<S
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+    Ok(value.and_then(|value| public_https_url(&value)))
 }
 
 fn safe_archive_file(root: &Path, relative: &str) -> Result<PathBuf, ()> {
@@ -676,8 +817,24 @@ fn model_text(value: &str, max: usize) -> Result<String, ()> {
     (!result.is_empty()).then_some(result).ok_or(())
 }
 
+/// Source and video links come only from the archive, but still need the same
+/// strict public HTTPS shape required by the distribution contract.  The
+/// model never sees or produces these values.
+fn public_https_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 4_096 || value.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let url = reqwest::Url::parse(value).ok()?;
+    (url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then(|| url.to_string())
+}
+
 fn asset_declaration(asset: &AssetPayload) -> Value {
-    let mut value = json!({"assetId":format!("image:{}", &asset.sha256[..24]),"kind":"image","sha256":asset.sha256,"mime":asset.mime,"bytes":asset.bytes.len()});
+    let mut value = json!({"assetId":asset.asset_id,"kind":"image","sha256":asset.sha256,"mime":asset.mime,"bytes":asset.bytes.len()});
     if let Some(width) = asset.width {
         value["width"] = Value::from(width);
     }
@@ -685,6 +842,12 @@ fn asset_declaration(asset: &AssetPayload) -> Value {
         value["height"] = Value::from(height);
     }
     value
+}
+
+fn asset_id_for_sha256(sha256: &str) -> Result<String, ()> {
+    valid_sha256(sha256)
+        .then(|| format!("image:{sha256}"))
+        .ok_or(())
 }
 
 struct HttpsPublisher;
@@ -885,6 +1048,8 @@ fn canonical_timestamp(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
     #[test]
     fn daily_bundle_uses_only_persisted_source_evidence() {
         let root =
@@ -915,10 +1080,26 @@ mod tests {
             params!["a".repeat(64), "b".repeat(64)],
         )
         .unwrap();
+        let mut encoded_image = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 1)
+            .write_to(&mut encoded_image, image::ImageFormat::WebP)
+            .unwrap();
+        let image_bytes = encoded_image.into_inner();
+        let preview_relative = "blobs/images/sha256/ff/frozen-preview.1280.webp";
+        let preview_path = root.join(preview_relative);
+        std::fs::create_dir_all(preview_path.parent().unwrap()).unwrap();
+        std::fs::write(&preview_path, &image_bytes).unwrap();
+        c.execute(
+            "INSERT INTO intelligence_article_media VALUES('source-a',?1,'image',?2,NULL,0)",
+            params!["a".repeat(64), preview_relative],
+        )
+        .unwrap();
         let draft = build_daily_bundle_at(&path, NaiveDate::from_ymd_opt(2030, 1, 2).unwrap())
             .unwrap()
             .unwrap();
         assert_eq!(draft.bundle["events"].as_array().unwrap().len(), 1);
+        assert_eq!(draft.assets.len(), 1);
+        assert_eq!(draft.bundle["assets"].as_array().unwrap().len(), 1);
         assert_eq!(
             draft.bundle["events"][0]["notes"][0]["originalUrl"],
             "https://example.test/a"
@@ -932,7 +1113,7 @@ mod tests {
             preview_daily_bundle(&path, NaiveDate::from_ymd_opt(2030, 1, 2).unwrap()),
             DailyPreviewOutcome::Ready {
                 events: 1,
-                assets: 0
+                assets: 1
             }
         );
         let day = NaiveDate::from_ymd_opt(2030, 1, 2).unwrap();
@@ -947,11 +1128,22 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        c.execute(
-            "UPDATE intelligence_events SET title='后续变更不覆盖日包' WHERE event_id='event-a'",
-            [],
-        )
-        .unwrap();
+        let stored_asset_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM intelligence_daily_draft_assets WHERE day='2030-01-02'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_asset_count, 1);
+        // A frozen package must remain usable even if its event/source rows
+        // are later compacted or replaced.  It must not rebuild from current
+        // data merely because the publisher is retried another day.
+        c.execute("DELETE FROM intelligence_event_articles", [])
+            .unwrap();
+        c.execute("DELETE FROM intelligence_event_revisions", [])
+            .unwrap();
+        c.execute("DELETE FROM intelligence_events", []).unwrap();
         assert_eq!(
             publish_day(None, &path, day),
             PublishOutcome::PreparedLocally
@@ -995,5 +1187,16 @@ mod tests {
     fn publisher_configuration_rejects_non_https_and_empty_secret() {
         assert!(configuration_from_parts(Some("http://127.0.0.1"), Some("a")).is_none());
         assert!(configuration_from_parts(Some("https://example.test"), Some("")).is_none());
+    }
+
+    #[test]
+    fn archive_links_require_public_https_without_credentials() {
+        assert_eq!(
+            public_https_url("https://example.test/path").as_deref(),
+            Some("https://example.test/path")
+        );
+        assert!(public_https_url("http://example.test/path").is_none());
+        assert!(public_https_url("https://user@example.test/path").is_none());
+        assert!(public_https_url("https://example.test/has space").is_none());
     }
 }
