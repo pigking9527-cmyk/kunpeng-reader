@@ -14,7 +14,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{cmp::Ordering, collections::HashMap, path::Path, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::Duration,
+};
 
 const EMBEDDING_BASE_URL_ENV: &str = "KUNPENG_INTELLIGENCE_EMBEDDING_BASE_URL";
 const EMBEDDING_MODEL_ENV: &str = "KUNPENG_INTELLIGENCE_EMBEDDING_MODEL";
@@ -295,6 +300,33 @@ struct EditorialReviewDecision {
     payload: ReviewPayload,
 }
 
+/// A 27B-approved, identity-pinned undirected same-event edge.  This is
+/// deliberately separate from `intelligence_relations`: the latter preserves
+/// every editorial judgement, whereas this table is the durable, strict
+/// input to event-component closure.
+#[derive(Clone, Debug)]
+struct EventComponentEdge {
+    left_article_id: String,
+    left_fingerprint: String,
+    right_article_id: String,
+    right_fingerprint: String,
+    relation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+struct EventComponentMember {
+    article_id: String,
+    fingerprint: String,
+}
+
+#[derive(Clone, Debug)]
+struct EventComponent {
+    members: Vec<EventComponentMember>,
+    /// Existing event identities which this closure supersedes.  Revisions
+    /// remain immutable; non-root IDs get a worker-private redirect row.
+    existing_event_ids: Vec<String>,
+}
+
 /// The relation phase has two durable pieces of work: first make sure every
 /// canonical candidate has a vector for the selected model, then rerank and
 /// judge the bounded neighbours.  Do not call the 8B judge against a partial
@@ -439,6 +471,8 @@ enum EditorialMaterializeFailure {
     EventWrite,
     RevisionWrite,
     ArticleWrite,
+    ComponentRead,
+    ComponentWrite,
     SeriesReconcile,
     Commit,
 }
@@ -467,6 +501,8 @@ impl EditorialMaterializeFailure {
             Self::EventWrite => "editorial_event_write",
             Self::RevisionWrite => "editorial_revision_write",
             Self::ArticleWrite => "editorial_article_write",
+            Self::ComponentRead => "editorial_component_read",
+            Self::ComponentWrite => "editorial_component_write",
             Self::SeriesReconcile => "editorial_series_reconcile",
             Self::Commit => "editorial_commit",
         }
@@ -1098,7 +1134,14 @@ fn initialize(connection: &Connection) -> Result<(), ()> {
       CREATE TABLE IF NOT EXISTS intelligence_worker_canonical_contents(canonical_text_sha256 TEXT PRIMARY KEY,canonical_article_id TEXT NOT NULL,canonical_fingerprint TEXT NOT NULL,created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS intelligence_worker_canonical_aliases(article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,canonical_text_sha256 TEXT NOT NULL,canonical_article_id TEXT NOT NULL,canonical_fingerprint TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(article_id,fingerprint));
       CREATE INDEX IF NOT EXISTS intelligence_worker_canonical_alias_current_idx ON intelligence_worker_canonical_aliases(article_id,fingerprint,canonical_article_id,canonical_fingerprint);
-      CREATE TABLE IF NOT EXISTS intelligence_worker_embeddings(canonical_text_sha256 TEXT NOT NULL,model_id TEXT NOT NULL,model_sha256 TEXT NOT NULL,vector_json TEXT NOT NULL,dimensions INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(canonical_text_sha256,model_id,model_sha256));").map_err(|_| ())?;
+      CREATE TABLE IF NOT EXISTS intelligence_worker_embeddings(canonical_text_sha256 TEXT NOT NULL,model_id TEXT NOT NULL,model_sha256 TEXT NOT NULL,vector_json TEXT NOT NULL,dimensions INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(canonical_text_sha256,model_id,model_sha256));
+      CREATE TABLE IF NOT EXISTS intelligence_worker_event_component_edges(edge_id TEXT PRIMARY KEY,left_article_id TEXT NOT NULL,left_fingerprint TEXT NOT NULL,right_article_id TEXT NOT NULL,right_fingerprint TEXT NOT NULL,relation TEXT NOT NULL,model_id TEXT NOT NULL,model_sha256 TEXT NOT NULL,approved_at INTEGER NOT NULL,UNIQUE(left_article_id,left_fingerprint,right_article_id,right_fingerprint,relation,model_id,model_sha256));
+      CREATE INDEX IF NOT EXISTS intelligence_worker_event_component_edges_left_idx ON intelligence_worker_event_component_edges(left_article_id,left_fingerprint);
+      CREATE INDEX IF NOT EXISTS intelligence_worker_event_component_edges_right_idx ON intelligence_worker_event_component_edges(right_article_id,right_fingerprint);
+      CREATE TABLE IF NOT EXISTS intelligence_worker_event_component_members(root_event_id TEXT NOT NULL,article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(root_event_id,article_id,fingerprint));
+      CREATE INDEX IF NOT EXISTS intelligence_worker_event_component_members_article_idx ON intelligence_worker_event_component_members(article_id,fingerprint,root_event_id);
+      CREATE TABLE IF NOT EXISTS intelligence_worker_event_redirects(from_event_id TEXT PRIMARY KEY,to_event_id TEXT NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS intelligence_worker_event_redirects_target_idx ON intelligence_worker_event_redirects(to_event_id);").map_err(|_| ())?;
     ensure_quality_gate_state_columns(connection)
 }
 
@@ -2228,7 +2271,6 @@ fn review_and_materialize<T: ProcessingTransport>(
         .map_err(|_| EditorialMaterializeFailure::RightFactExtraction)?;
     let mut reviewed = 0;
     let mut review_decisions = Vec::new();
-    let mut event_articles = vec![article.id.clone()];
     // Every expensive 27B response is durably cached before the event write
     // transaction begins.  A process death after a local model returns can
     // therefore resume from the exact cache key instead of invoking the model
@@ -2265,22 +2307,28 @@ fn review_and_materialize<T: ProcessingTransport>(
             let _ = record_quality_guard_failure(connection);
             return Err(EditorialMaterializeFailure::ReviewValidation);
         }
-        if payload.approved
-            && matches!(
-                payload.relation.as_str(),
-                "exact_duplicate" | "syndicated_copy" | "same_event"
-            )
-        {
-            event_articles.push(relation.right_id.clone());
-        }
         reviewed += 1;
         review_decisions.push(EditorialReviewDecision {
             relation: relation.clone(),
             payload,
         });
     }
-    event_articles.sort();
-    event_articles.dedup();
+    // A pair is not an event identity.  Only explicit 27B-approved merge
+    // relations enter the durable component graph, whose transitive closure
+    // lets a later B-C review extend the original A-B event instead of
+    // creating a second, overlapping event.
+    let pending_component_edges = review_decisions
+        .iter()
+        .filter_map(|decision| approved_component_edge(article, decision))
+        .collect::<Vec<_>>();
+    let component = resolve_event_component(connection, article, &pending_component_edges)
+        .map_err(|_| EditorialMaterializeFailure::ComponentRead)?;
+    let event_id = component_root_event_id(&component);
+    let event_articles = component
+        .members
+        .iter()
+        .map(|member| member.article_id.clone())
+        .collect::<Vec<_>>();
     let controlled = controlled_synthesis_input(&event_articles)
         .map_err(|_| EditorialMaterializeFailure::ControlledInput)?;
     let synthesis_context = json!({
@@ -2366,9 +2414,8 @@ fn review_and_materialize<T: ProcessingTransport>(
         )
         .map_err(|_| EditorialMaterializeFailure::QualityGate)?;
         transaction.execute("INSERT INTO intelligence_worker_relation_reviews(pair_id,left_article_id,right_article_id,fingerprint,relation,confidence,reason,reviewed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(pair_id) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,reason=excluded.reason,reviewed_at=excluded.reviewed_at",params![decision.relation.id,article.id,decision.relation.right_id,article.fingerprint,decision.payload.relation,decision.payload.confidence,decision.payload.reason]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
-        transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-27b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![format!("27b:{}", decision.relation.id),article.id,decision.relation.right_id,decision.payload.relation,decision.payload.confidence,config.deep.model,json!({"reason":decision.payload.reason,"processor":PROCESSOR_VERSION,"fulltextEvidence":true}).to_string()]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
+        transaction.execute("INSERT INTO intelligence_relations(relation_id,left_article_id,right_article_id,stage,relation,confidence,model_id,evidence_json,updated_at) VALUES(?1,?2,?3,'worker-27b',?4,?5,?6,?7,strftime('%s','now')*1000) ON CONFLICT(left_article_id,right_article_id,stage) DO UPDATE SET relation=excluded.relation,confidence=excluded.confidence,model_id=excluded.model_id,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",params![format!("27b:{}", decision.relation.id),article.id,decision.relation.right_id,decision.payload.relation,decision.payload.confidence,config.deep.model,json!({"reason":decision.payload.reason,"approved":decision.payload.approved,"processor":PROCESSOR_VERSION,"fulltextEvidence":true}).to_string()]).map_err(|_| EditorialMaterializeFailure::ReviewWrite)?;
     }
-    let event_id = format!("event:{}", sha256(event_articles.join("\u{1f}")));
     let current: Option<i64> = transaction
         .query_row(
             "SELECT current_revision FROM intelligence_events WHERE event_id=?1",
@@ -2383,6 +2430,14 @@ fn review_and_materialize<T: ProcessingTransport>(
     for id in event_articles {
         transaction.execute("INSERT OR IGNORE INTO intelligence_event_articles(event_id,article_id) VALUES(?1,?2)",params![event_id,id]).map_err(|_| EditorialMaterializeFailure::ArticleWrite)?;
     }
+    persist_event_component(
+        &transaction,
+        &component,
+        &event_id,
+        &pending_component_edges,
+        &config.deep,
+    )
+    .map_err(|_| EditorialMaterializeFailure::ComponentWrite)?;
     reconcile_series_links(&transaction, &event_id, &article.id, &title, &summary)
         .map_err(|_| EditorialMaterializeFailure::SeriesReconcile)?;
     // The staging record is consumed in the same transaction as the immutable
@@ -2706,6 +2761,267 @@ fn valid_identifier(value: &str) -> bool {
             .iter()
             .skip(1)
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn approved_component_edge(
+    article: &Article,
+    decision: &EditorialReviewDecision,
+) -> Option<EventComponentEdge> {
+    (decision.payload.approved && is_merge_relation(&decision.payload.relation)).then(|| {
+        EventComponentEdge {
+            left_article_id: article.id.clone(),
+            left_fingerprint: article.fingerprint.clone(),
+            right_article_id: decision.relation.right_id.clone(),
+            right_fingerprint: decision.relation.right_article.fingerprint.clone(),
+            relation: decision.payload.relation.clone(),
+        }
+    })
+}
+
+fn component_edge_id(edge: &EventComponentEdge, model: &ModelRoute) -> String {
+    let mut endpoints = [
+        format!("{}\u{1f}{}", edge.left_article_id, edge.left_fingerprint),
+        format!("{}\u{1f}{}", edge.right_article_id, edge.right_fingerprint),
+    ];
+    endpoints.sort();
+    format!(
+        "event-component:{}",
+        sha256(format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            endpoints[0], endpoints[1], edge.relation, model.artifact_sha256
+        ))
+    )
+}
+
+fn current_component_edges(connection: &Connection) -> Result<Vec<EventComponentEdge>, ()> {
+    let mut statement = connection
+        .prepare(
+            "SELECT e.left_article_id,e.left_fingerprint,e.right_article_id,e.right_fingerprint,e.relation
+             FROM intelligence_worker_event_component_edges e
+             JOIN intelligence_articles l
+               ON l.article_id=e.left_article_id AND l.fingerprint=e.left_fingerprint
+              AND l.triage_state='keep'
+             JOIN intelligence_article_content_versions lv
+               ON lv.article_id=l.article_id AND lv.record_fingerprint=l.fingerprint
+              AND lv.is_current=1 AND lv.body_status='complete'
+             JOIN intelligence_articles r
+               ON r.article_id=e.right_article_id AND r.fingerprint=e.right_fingerprint
+              AND r.triage_state='keep'
+             JOIN intelligence_article_content_versions rv
+               ON rv.article_id=r.article_id AND rv.record_fingerprint=r.fingerprint
+              AND rv.is_current=1 AND rv.body_status='complete'
+             WHERE e.relation IN ('exact_duplicate','syndicated_copy','same_event')",
+        )
+        .map_err(|_| ())?;
+    let edges = statement
+        .query_map([], |row| {
+            Ok(EventComponentEdge {
+                left_article_id: row.get(0)?,
+                left_fingerprint: row.get(1)?,
+                right_article_id: row.get(2)?,
+                right_fingerprint: row.get(3)?,
+                relation: row.get(4)?,
+            })
+        })
+        .map_err(|_| ())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+    Ok(edges)
+}
+
+fn component_members_from_edges(
+    seed: EventComponentMember,
+    edges: &[EventComponentEdge],
+) -> Vec<EventComponentMember> {
+    let mut members = HashSet::from([seed]);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for edge in edges {
+            let left = EventComponentMember {
+                article_id: edge.left_article_id.clone(),
+                fingerprint: edge.left_fingerprint.clone(),
+            };
+            let right = EventComponentMember {
+                article_id: edge.right_article_id.clone(),
+                fingerprint: edge.right_fingerprint.clone(),
+            };
+            let has_left = members.contains(&left);
+            let has_right = members.contains(&right);
+            if has_left && members.insert(right) {
+                changed = true;
+            }
+            if has_right && members.insert(left) {
+                changed = true;
+            }
+        }
+    }
+    let mut members = members.into_iter().collect::<Vec<_>>();
+    members.sort();
+    members
+}
+
+fn resolve_event_redirect(connection: &Connection, event_id: &str) -> Result<String, ()> {
+    let mut current = event_id.to_owned();
+    // Redirects are inserted only towards the deterministically selected
+    // oldest root.  A finite guard nevertheless makes corrupted local rows
+    // fail closed rather than looping forever during a worker restart.
+    for _ in 0..32 {
+        let next = connection
+            .query_row(
+                "SELECT to_event_id FROM intelligence_worker_event_redirects WHERE from_event_id=?1",
+                [&current],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| ())?;
+        match next {
+            Some(next) if next != current => current = next,
+            Some(_) => return Err(()),
+            None => return Ok(current),
+        }
+    }
+    Err(())
+}
+
+fn resolve_event_component(
+    connection: &Connection,
+    article: &Article,
+    pending_edges: &[EventComponentEdge],
+) -> Result<EventComponent, ()> {
+    let mut edges = current_component_edges(connection)?;
+    edges.extend_from_slice(pending_edges);
+    let members = component_members_from_edges(
+        EventComponentMember {
+            article_id: article.id.clone(),
+            fingerprint: article.fingerprint.clone(),
+        },
+        &edges,
+    );
+    let mut candidates = HashSet::new();
+    for member in &members {
+        let roots = connection
+            .prepare(
+                "SELECT root_event_id FROM intelligence_worker_event_component_members
+                 WHERE article_id=?1 AND fingerprint=?2",
+            )
+            .map_err(|_| ())?
+            .query_map(params![member.article_id, member.fingerprint], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|_| ())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ())?;
+        for root in roots {
+            candidates.insert(resolve_event_redirect(connection, &root)?);
+        }
+    }
+    let mut existing = candidates
+        .into_iter()
+        .filter_map(|event_id| {
+            connection
+                .query_row(
+                    "SELECT created_at FROM intelligence_events WHERE event_id=?1",
+                    [&event_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .map(|created_at| (created_at, event_id))
+        })
+        .collect::<Vec<_>>();
+    existing.sort();
+    Ok(EventComponent {
+        members,
+        existing_event_ids: existing.into_iter().map(|(_, id)| id).collect(),
+    })
+}
+
+fn component_root_event_id(component: &EventComponent) -> String {
+    component
+        .existing_event_ids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| {
+            let ids = component
+                .members
+                .iter()
+                .map(|member| member.article_id.as_str())
+                .collect::<Vec<_>>();
+            format!("event:{}", sha256(ids.join("\u{1f}")))
+        })
+}
+
+fn persist_event_component(
+    connection: &rusqlite::Transaction<'_>,
+    component: &EventComponent,
+    root_event_id: &str,
+    pending_edges: &[EventComponentEdge],
+    model: &ModelRoute,
+) -> Result<(), ()> {
+    for edge in pending_edges {
+        if !is_merge_relation(&edge.relation) {
+            return Err(());
+        }
+        connection
+            .execute(
+                "INSERT INTO intelligence_worker_event_component_edges(
+                   edge_id,left_article_id,left_fingerprint,right_article_id,right_fingerprint,
+                   relation,model_id,model_sha256,approved_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,strftime('%s','now')*1000)
+                 ON CONFLICT(edge_id) DO NOTHING",
+                params![
+                    component_edge_id(edge, model),
+                    edge.left_article_id,
+                    edge.left_fingerprint,
+                    edge.right_article_id,
+                    edge.right_fingerprint,
+                    edge.relation,
+                    model.model,
+                    model.artifact_sha256,
+                ],
+            )
+            .map_err(|_| ())?;
+    }
+    let mut roots_to_replace = component.existing_event_ids.clone();
+    roots_to_replace.push(root_event_id.to_owned());
+    roots_to_replace.sort();
+    roots_to_replace.dedup();
+    for old_root in &roots_to_replace {
+        connection
+            .execute(
+                "DELETE FROM intelligence_worker_event_component_members WHERE root_event_id=?1",
+                [old_root],
+            )
+            .map_err(|_| ())?;
+    }
+    for member in &component.members {
+        connection
+            .execute(
+                "INSERT INTO intelligence_worker_event_component_members(root_event_id,article_id,fingerprint,updated_at)
+                 VALUES(?1,?2,?3,strftime('%s','now')*1000)",
+                params![root_event_id, member.article_id, member.fingerprint],
+            )
+            .map_err(|_| ())?;
+    }
+    for old_event_id in component
+        .existing_event_ids
+        .iter()
+        .filter(|event_id| event_id.as_str() != root_event_id)
+    {
+        connection
+            .execute(
+                "INSERT INTO intelligence_worker_event_redirects(from_event_id,to_event_id,reason,created_at,updated_at)
+                 VALUES(?1,?2,'same_event_component',strftime('%s','now')*1000,strftime('%s','now')*1000)
+                 ON CONFLICT(from_event_id) DO UPDATE SET
+                   to_event_id=excluded.to_event_id,reason=excluded.reason,
+                   updated_at=excluded.updated_at",
+                params![old_event_id, root_event_id],
+            )
+            .map_err(|_| ())?;
+    }
+    Ok(())
 }
 
 /// Materialize a timeline only after both sides have independently become
@@ -5052,6 +5368,235 @@ mod tests {
                 )
                 .unwrap(),
             3
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn approved_same_event_edges_merge_cross_day_components_at_a_stable_root() {
+        let path = db();
+        let connection = Connection::open(&path).unwrap();
+        initialize(&connection).unwrap();
+        connection.execute_batch("INSERT INTO intelligence_articles VALUES('c','fc','标题C','摘要C','正文C','2026-08-26','keep',3);INSERT INTO intelligence_article_content_versions VALUES('c','fc','version-c','text-c','complete',1);INSERT INTO intelligence_events VALUES('event:ab',NULL,'早期事件','',50,'2026-08-24',1,1,1);INSERT INTO intelligence_event_revisions VALUES('event:ab',1,'旧修订','{}',1);INSERT INTO intelligence_event_articles VALUES('event:ab','a');INSERT INTO intelligence_event_articles VALUES('event:ab','b');").unwrap();
+
+        let ab = EventComponentEdge {
+            left_article_id: "a".into(),
+            left_fingerprint: "fa".into(),
+            right_article_id: "b".into(),
+            right_fingerprint: "fb".into(),
+            relation: "same_event".into(),
+        };
+        let first = EventComponent {
+            members: vec![
+                EventComponentMember {
+                    article_id: "a".into(),
+                    fingerprint: "fa".into(),
+                },
+                EventComponentMember {
+                    article_id: "b".into(),
+                    fingerprint: "fb".into(),
+                },
+            ],
+            existing_event_ids: vec![],
+        };
+        let transaction = connection.unchecked_transaction().unwrap();
+        persist_event_component(&transaction, &first, "event:ab", &[ab], &config().deep).unwrap();
+        transaction.commit().unwrap();
+
+        // A separately materialized B-C event is discovered on the next day.
+        // The older A-B root must win, while the B-C event keeps its immutable
+        // old revision and becomes a redirect/supersession record.
+        connection.execute_batch("INSERT INTO intelligence_events VALUES('event:bc',NULL,'后续重叠事件','',50,'2026-08-26',1,2,2);INSERT INTO intelligence_event_revisions VALUES('event:bc',1,'保留旧修订','{}',2);INSERT INTO intelligence_event_articles VALUES('event:bc','c');").unwrap();
+        let standalone_c = EventComponent {
+            members: vec![EventComponentMember {
+                article_id: "c".into(),
+                fingerprint: "fc".into(),
+            }],
+            existing_event_ids: vec![],
+        };
+        let transaction = connection.unchecked_transaction().unwrap();
+        persist_event_component(&transaction, &standalone_c, "event:bc", &[], &config().deep)
+            .unwrap();
+        transaction.commit().unwrap();
+        let bc = EventComponentEdge {
+            left_article_id: "b".into(),
+            left_fingerprint: "fb".into(),
+            right_article_id: "c".into(),
+            right_fingerprint: "fc".into(),
+            relation: "same_event".into(),
+        };
+        let b = Article {
+            id: "b".into(),
+            fingerprint: "fb".into(),
+            title: String::new(),
+            summary: String::new(),
+            body: String::new(),
+            published_at: String::new(),
+        };
+        let merged = resolve_event_component(&connection, &b, std::slice::from_ref(&bc)).unwrap();
+        assert_eq!(
+            merged
+                .members
+                .iter()
+                .map(|member| member.article_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(component_root_event_id(&merged), "event:ab");
+        let transaction = connection.unchecked_transaction().unwrap();
+        persist_event_component(&transaction, &merged, "event:ab", &[bc], &config().deep).unwrap();
+        transaction.commit().unwrap();
+        let members = connection
+            .prepare("SELECT article_id FROM intelligence_worker_event_component_members WHERE root_event_id='event:ab' ORDER BY article_id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(members, ["a", "b", "c"]);
+        assert_eq!(
+            connection
+                .query_row("SELECT to_event_id FROM intelligence_worker_event_redirects WHERE from_event_id='event:bc'", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "event:ab"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_event_revisions WHERE event_id='event:bc'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn component_merge_is_transactional_and_restart_idempotent() {
+        let path = db();
+        let connection = Connection::open(&path).unwrap();
+        initialize(&connection).unwrap();
+        connection.execute_batch("INSERT INTO intelligence_articles VALUES('c','fc','标题C','摘要C','正文C','2026-08-26','keep',3);INSERT INTO intelligence_article_content_versions VALUES('c','fc','version-c','text-c','complete',1);INSERT INTO intelligence_events VALUES('event:ab',NULL,'早期事件','',50,'2026-08-24',1,1,1);INSERT INTO intelligence_event_articles VALUES('event:ab','a');INSERT INTO intelligence_event_articles VALUES('event:ab','b');").unwrap();
+        let ab = EventComponentEdge {
+            left_article_id: "a".into(),
+            left_fingerprint: "fa".into(),
+            right_article_id: "b".into(),
+            right_fingerprint: "fb".into(),
+            relation: "same_event".into(),
+        };
+        let bc = EventComponentEdge {
+            left_article_id: "b".into(),
+            left_fingerprint: "fb".into(),
+            right_article_id: "c".into(),
+            right_fingerprint: "fc".into(),
+            relation: "same_event".into(),
+        };
+        let b = Article {
+            id: "b".into(),
+            fingerprint: "fb".into(),
+            title: String::new(),
+            summary: String::new(),
+            body: String::new(),
+            published_at: String::new(),
+        };
+        // Persist A-B first; B-C then simulates the later cross-day bridge.
+        let first = resolve_event_component(&connection, &b, &[ab]).unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        persist_event_component(
+            &transaction,
+            &first,
+            "event:ab",
+            &[EventComponentEdge {
+                left_article_id: "a".into(),
+                left_fingerprint: "fa".into(),
+                right_article_id: "b".into(),
+                right_fingerprint: "fb".into(),
+                relation: "same_event".into(),
+            }],
+            &config().deep,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        connection.execute_batch("INSERT INTO intelligence_events VALUES('event:bc',NULL,'后续重叠事件','',50,'2026-08-26',1,2,2);INSERT INTO intelligence_event_revisions VALUES('event:bc',1,'保留旧修订','{}',2);INSERT INTO intelligence_event_articles VALUES('event:bc','c');").unwrap();
+        let standalone_c = EventComponent {
+            members: vec![EventComponentMember {
+                article_id: "c".into(),
+                fingerprint: "fc".into(),
+            }],
+            existing_event_ids: vec![],
+        };
+        let transaction = connection.unchecked_transaction().unwrap();
+        persist_event_component(&transaction, &standalone_c, "event:bc", &[], &config().deep)
+            .unwrap();
+        transaction.commit().unwrap();
+        let merged = resolve_event_component(&connection, &b, &[bc]).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_component_members BEFORE INSERT ON intelligence_worker_event_component_members BEGIN SELECT RAISE(ABORT, 'simulated component crash'); END;").unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        assert!(persist_event_component(
+            &transaction,
+            &merged,
+            "event:ab",
+            &[EventComponentEdge {
+                left_article_id: "b".into(),
+                left_fingerprint: "fb".into(),
+                right_article_id: "c".into(),
+                right_fingerprint: "fc".into(),
+                relation: "same_event".into()
+            }],
+            &config().deep
+        )
+        .is_err());
+        drop(transaction);
+        connection
+            .execute_batch("DROP TRIGGER fail_component_members")
+            .unwrap();
+        drop(connection);
+
+        let resumed = Connection::open(&path).unwrap();
+        initialize(&resumed).unwrap();
+        let merged = resolve_event_component(
+            &resumed,
+            &b,
+            &[EventComponentEdge {
+                left_article_id: "b".into(),
+                left_fingerprint: "fb".into(),
+                right_article_id: "c".into(),
+                right_fingerprint: "fc".into(),
+                relation: "same_event".into(),
+            }],
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let transaction = resumed.unchecked_transaction().unwrap();
+            persist_event_component(
+                &transaction,
+                &merged,
+                "event:ab",
+                &[EventComponentEdge {
+                    left_article_id: "b".into(),
+                    left_fingerprint: "fb".into(),
+                    right_article_id: "c".into(),
+                    right_fingerprint: "fc".into(),
+                    relation: "same_event".into(),
+                }],
+                &config().deep,
+            )
+            .unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(resumed.query_row("SELECT COUNT(*) FROM intelligence_worker_event_component_members WHERE root_event_id='event:ab'", [], |row| row.get::<_, i64>(0)).unwrap(), 3);
+        assert_eq!(resumed.query_row("SELECT COUNT(*) FROM intelligence_worker_event_redirects WHERE from_event_id='event:bc' AND to_event_id='event:ab'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            resumed
+                .query_row(
+                    "SELECT COUNT(*) FROM intelligence_event_revisions WHERE event_id='event:bc'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
         );
         let _ = std::fs::remove_file(path);
     }

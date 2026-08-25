@@ -43,6 +43,13 @@ const MAX_SOURCES: usize = 128;
 const MAX_IMAGES_PER_ARTICLE: usize = 12;
 const MAX_VIDEOS_PER_ARTICLE: usize = 12;
 const MAX_PUBLIC_REDIRECTS: usize = 5;
+/// Bump this only when the strictly-static extractor learns a materially new
+/// public markup pattern.  A durable `body_not_found` gap is allowed one new
+/// attempt for each revision; it is not a licence to repeatedly re-fetch a
+/// publisher page in every worker round.
+const PUBLIC_STATIC_EXTRACTOR_REVISION: i64 = 2;
+const MIN_STATIC_ARTICLE_BODY_CHARS: usize = 120;
+const MIN_STATIC_ARTICLE_VISIBLE_CHARS: usize = 80;
 /// A Google News wrapper is only inspected far enough to find an explicit
 /// public publisher URL.  It is not article evidence and must never turn an
 /// unbounded wrapper document into a second extraction workload.
@@ -70,6 +77,11 @@ const CONTENT_BACKFILL_MAX_DELAY_MS: i64 = 3_600_000;
 // gap, but stop repeatedly probing the publisher until a later scheduled
 // repair pass.  Network and 5xx failures keep the short exponential retry.
 const CONTENT_BACKFILL_TERMINAL_DELAY_MS: i64 = 12 * 60 * 60 * 1_000;
+/// A Google News wrapper without a safely discoverable public publisher URL
+/// is a discovery record, not article evidence.  Keep that record and its
+/// classified state, but never turn it into an infinite wrapper-download
+/// loop.  A later feed item with an ordinary publisher URL is a new record.
+const CONTENT_BACKFILL_NEVER_RETRY_AT: i64 = i64::MAX;
 const CONTENT_BACKFILL_RATE_LIMIT_BASE_DELAY_MS: i64 = 5 * 60 * 1_000;
 const CONTENT_HOST_NETWORK_BASE_DELAY_MS: i64 = 30_000;
 const CONTENT_HOST_ACCESS_BASE_DELAY_MS: i64 = 30 * 60 * 1_000;
@@ -674,7 +686,11 @@ fn parse_json_entries(source: &HttpSource, text: &str) -> Vec<CollectedArticle> 
         .collect()
 }
 
-fn noncontent_html(value: &str) -> String {
+/// Remove non-evidence markup without executing any page code.  This is the
+/// only HTML preprocessing used by the static extractor: it never invokes a
+/// browser, runs JavaScript, calls a page-private endpoint, or tries to get
+/// around a paywall/interstitial.
+fn static_evidence_html(value: &str) -> String {
     let mut cleaned = value.to_owned();
     // These nodes contain scripts, site chrome, ads, recommendation rails or
     // embedded players rather than article evidence. Keep the original HTML
@@ -692,6 +708,11 @@ fn noncontent_html(value: &str) -> String {
         };
         cleaned.replace_range(start..start + 4 + end + 3, " ");
     }
+    cleaned
+}
+
+fn noncontent_html(value: &str) -> String {
+    let cleaned = static_evidence_html(value);
     let lower = cleaned.to_ascii_lowercase();
     for tag in ["article", "main"] {
         let needle = format!("<{tag}");
@@ -768,6 +789,239 @@ fn strip_html(value: &str) -> String {
         .join(" ")
 }
 
+#[derive(Clone, Debug)]
+struct StaticBodyCandidate {
+    text: String,
+    /// Higher values represent a more explicit public article declaration,
+    /// not a model confidence score.
+    priority: u8,
+}
+
+/// Extract article evidence from ordinary public, already-downloaded HTML.
+///
+/// News sites have several static representations of the same story.  The
+/// first version only preferred `article`/`main` plus JSON-LD, which missed
+/// many publishers using class-named story containers or a continuous run of
+/// visible paragraphs.  Keep those additional candidates bounded and local:
+/// they are merely alternative slices of the same response, never a crawler
+/// or a script runtime.
+fn extract_static_article_body(html: &str) -> Option<String> {
+    let cleaned = static_evidence_html(html);
+    let mut candidates = Vec::new();
+
+    if let Some(text) = structured_article_body(html) {
+        candidates.push(StaticBodyCandidate { text, priority: 4 });
+    }
+    candidates.extend(semantic_article_body_candidates(&cleaned));
+    candidates.extend(class_named_article_body_candidates(&cleaned));
+    if let Some(text) = continuous_paragraph_body_candidate(&cleaned) {
+        candidates.push(StaticBodyCandidate { text, priority: 1 });
+    }
+    // Preserve the original conservative `article`/`main` cleaner as a final
+    // compatibility candidate.  It is lower priority because it may become a
+    // whole cleaned document when a page has no semantic container.
+    candidates.push(StaticBodyCandidate {
+        text: strip_html(&noncontent_html(html)),
+        priority: 0,
+    });
+
+    let mut best: Option<StaticBodyCandidate> = None;
+    for candidate in candidates {
+        let Some(text) = accepted_static_article_body(&candidate.text) else {
+            continue;
+        };
+        let candidate = StaticBodyCandidate {
+            text,
+            priority: candidate.priority,
+        };
+        let replace = match best.as_ref() {
+            None => true,
+            Some(current) => {
+                // Prefer an explicit article representation unless it is a
+                // teaser-sized fragment.  A much larger candidate may still
+                // win, which handles a truncated JSON-LD body without
+                // promoting generic chrome of roughly the same size.
+                (candidate.priority > current.priority
+                    && candidate.text.len().saturating_mul(2) >= current.text.len())
+                    || candidate.text.len() >= current.text.len().saturating_mul(3) / 2
+            }
+        };
+        if replace {
+            best = Some(candidate);
+        }
+    }
+    best.map(|candidate| candidate.text)
+}
+
+fn accepted_static_article_body(value: &str) -> Option<String> {
+    let text = strip_html(value);
+    let text = safe_text(&text, MAX_TEXT_BYTES)?;
+    let characters = text.chars().count();
+    let visible = text
+        .chars()
+        .filter(|character| character.is_alphanumeric() || is_cjk_ideograph(*character))
+        .count();
+    if characters < MIN_STATIC_ARTICLE_BODY_CHARS || visible < MIN_STATIC_ARTICLE_VISIBLE_CHARS {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    let shell_markers = [
+        "enable javascript",
+        "javascript is required",
+        "please enable cookies",
+        "subscribe to continue",
+        "sign in to continue",
+    ];
+    if shell_markers.iter().any(|marker| lower.contains(marker)) && text.len() < 1_200 {
+        return None;
+    }
+    Some(text)
+}
+
+fn is_cjk_ideograph(character: char) -> bool {
+    matches!(character as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff)
+}
+
+fn semantic_article_body_candidates(html: &str) -> Vec<StaticBodyCandidate> {
+    let mut candidates = Vec::new();
+    for tag in ["article", "main", "section", "div"] {
+        for (open, inner) in html_tag_blocks(html, tag) {
+            let itemprop_is_article_body = element_attribute(open, "itemprop")
+                .is_some_and(|value| value.eq_ignore_ascii_case("articleBody"));
+            let role_is_article = element_attribute(open, "role").is_some_and(|value| {
+                matches!(value.to_ascii_lowercase().as_str(), "article" | "main")
+            });
+            if !matches!(tag, "article" | "main") && !itemprop_is_article_body && !role_is_article {
+                continue;
+            }
+            candidates.push(StaticBodyCandidate {
+                text: strip_html(inner),
+                priority: 3,
+            });
+        }
+    }
+    candidates
+}
+
+fn class_named_article_body_candidates(html: &str) -> Vec<StaticBodyCandidate> {
+    let mut candidates = Vec::new();
+    for tag in ["article", "main", "section", "div"] {
+        for (open, inner) in html_tag_blocks(html, tag) {
+            let identity = [
+                element_attribute(open, "id"),
+                element_attribute(open, "class"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+            if class_name_signals_article_body(&identity) {
+                candidates.push(StaticBodyCandidate {
+                    text: strip_html(inner),
+                    priority: 2,
+                });
+            }
+        }
+    }
+    candidates
+}
+
+fn class_name_signals_article_body(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let compact = lower
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    let explicit = [
+        "articlebody",
+        "articlecontent",
+        "storybody",
+        "storycontent",
+        "postcontent",
+        "postbody",
+        "entrycontent",
+        "entrybody",
+        "newsbody",
+        "newscontent",
+    ];
+    if explicit.iter().any(|signal| compact.contains(signal)) {
+        return true;
+    }
+    let tokens = lower
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<HashSet<_>>();
+    let semantic = ["article", "story", "post", "entry", "news"];
+    let body = ["body", "content", "text"];
+    semantic.iter().any(|token| tokens.contains(token))
+        && body.iter().any(|token| tokens.contains(token))
+}
+
+/// Return a longest continuous public paragraph run.  Tiny navigation or
+/// caption paragraphs form a boundary rather than being joined into model
+/// evidence.  This covers static templates that use no semantic wrapper but
+/// do expose the article as ordinary `<p>` elements.
+fn continuous_paragraph_body_candidate(html: &str) -> Option<String> {
+    let mut best = String::new();
+    let mut current = Vec::new();
+    for (_, inner) in html_tag_blocks(html, "p") {
+        let text = strip_html(inner);
+        let visible = text
+            .chars()
+            .filter(|character| character.is_alphanumeric() || is_cjk_ideograph(*character))
+            .count();
+        if text.len() >= 36 && visible >= 24 {
+            current.push(text);
+            continue;
+        }
+        let candidate = current.join("\n\n");
+        if candidate.len() > best.len() {
+            best = candidate;
+        }
+        current.clear();
+    }
+    let candidate = current.join("\n\n");
+    if candidate.len() > best.len() {
+        best = candidate;
+    }
+    (best.split("\n\n").count() >= 2).then_some(best)
+}
+
+/// A deliberately small non-DOM block scanner. It only identifies already
+/// present tags in the downloaded document; nested containers are tolerated
+/// but never interpreted as executable code.
+fn html_tag_blocks<'a>(html: &'a str, tag: &str) -> Vec<(&'a str, &'a str)> {
+    let lower = html.to_ascii_lowercase();
+    let needle = format!("<{tag}");
+    let closing = format!("</{tag}>");
+    let mut offset = 0;
+    let mut output = Vec::new();
+    while let Some(position) = lower[offset..].find(&needle) {
+        let start = offset + position;
+        let after_name = start + needle.len();
+        if lower
+            .as_bytes()
+            .get(after_name)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            offset = after_name;
+            continue;
+        }
+        let Some(open_end_relative) = lower[after_name..].find('>') else {
+            break;
+        };
+        let open_end = after_name + open_end_relative + 1;
+        let Some(close_relative) = lower[open_end..].find(&closing) else {
+            offset = open_end;
+            continue;
+        };
+        let close = open_end + close_relative;
+        output.push((&html[start..open_end], &html[open_end..close]));
+        offset = close + closing.len();
+    }
+    output
+}
+
 fn web_article(source: &HttpSource, html: &str) -> CollectedArticle {
     let title = element_value(html, "title").unwrap_or_else(|| source.source_id.clone());
     let body = strip_html(&clean_article_html(html));
@@ -820,7 +1074,7 @@ fn follow_public_article_redirects(
         if !(300..400).contains(&status) {
             if google_news_wrapper && is_news_google_url(&current) {
                 if google_news_wrapper_resolved {
-                    return Err("google_news_target_unresolved");
+                    return Err("google_news_discovery_only");
                 }
                 // Older Google News RSS article IDs encode the public target
                 // in their protobuf payload.  Newer wrappers sometimes expose
@@ -829,7 +1083,7 @@ fn follow_public_article_redirects(
                 // wrapper for durable identity and audit.
                 let html_target = if google_news_legacy_target.is_none() {
                     let html = google_news_wrapper_html(&mut response)
-                        .map_err(|_| "google_news_target_unresolved")?;
+                        .map_err(|_| "google_news_discovery_only")?;
                     google_news_public_target_from_wrapper_html(&current, &html)
                 } else {
                     None
@@ -837,7 +1091,7 @@ fn follow_public_article_redirects(
                 current = google_news_legacy_target
                     .clone()
                     .or(html_target)
-                    .ok_or("google_news_target_unresolved")?;
+                    .ok_or("google_news_discovery_only")?;
                 google_news_wrapper_resolved = true;
                 continue;
             }
@@ -883,33 +1137,15 @@ fn enrich_public_article(agent: &ureq::Agent, article: &mut CollectedArticle) {
     };
     let html = String::from_utf8_lossy(&bytes).into_owned();
     let cleaned_html = clean_article_html(&html);
-    let rendered_body = strip_html(&cleaned_html);
-    // Many news sites render their visible article with JavaScript but still
-    // publish the complete public text in JSON-LD for search engines and
-    // accessibility tooling.  `clean_article_html` intentionally removes
-    // script tags, so inspect the original response as a strictly local,
-    // structured fallback before classifying the article as an evidence gap.
-    // We only accept `articleBody` values; descriptions and headlines are not
-    // allowed to masquerade as a complete article.
-    let structured_body = structured_article_body(&html);
-    // Prefer a structured `articleBody` when a JavaScript shell left only a
-    // short visible fragment.  For ordinary pages, keep the rendered article
-    // when it is materially richer.  This deliberately avoids promoting a
-    // teaser-sized JSON field over a public article element.
-    let body = match structured_body {
-        Some(structured)
-            if rendered_body.len() < 240
-                || structured.len().saturating_mul(2) >= rendered_body.len() =>
-        {
-            structured
-        }
-        _ => rendered_body,
-    };
-    if body.len() < 80 {
+    // Strictly-static extraction supports explicit JSON-LD/article bodies,
+    // semantic containers, class-named story containers and continuous
+    // paragraph runs.  It never executes page JavaScript or asks a hidden
+    // endpoint for content, so a public JS shell remains an evidence gap.
+    let Some(body) = extract_static_article_body(&html) else {
         article.body_status = Some("unavailable".into());
         article.incomplete_reason = Some(article_body_gap_reason(&html).into());
         return;
-    }
+    };
     article.body = Some(body);
     article.html = Some(cleaned_html);
     article.body_status = Some("complete".into());
@@ -1475,11 +1711,11 @@ fn classify_content_backfill_failure(reason: Option<&str>) -> ContentBackfillFai
         "body_paywall_or_interstitial"
     } else if reason == "article_body_not_found" {
         "body_not_found"
-    } else if reason == "google_news_target_unresolved" {
-        // Do not repeatedly download a large Google News wrapper during the
-        // short transient retry window.  Keep a precise, operator-visible
-        // evidence gap until the next scheduled repair pass can try again.
-        "google_news_target_unresolved"
+    } else if reason == "google_news_discovery_only" {
+        // The Google wrapper is valid discovery metadata, but it did not
+        // expose a safe public publisher target. Preserve that classified
+        // state in the archive instead of retrying the wrapper indefinitely.
+        "google_news_discovery_only"
     } else {
         "content_extraction_failed"
     };
@@ -2365,6 +2601,7 @@ fn ensure_content_backfill_schema(connection: &Connection) -> Result<(), ()> {
                  last_failure_reason TEXT,
                  last_success_at INTEGER,
                  last_backfill_pass_id TEXT,
+                 extractor_revision INTEGER NOT NULL DEFAULT 0,
                  updated_at INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS intelligence_content_backfill_schedule_idx
@@ -2379,6 +2616,7 @@ fn ensure_content_backfill_schema(connection: &Connection) -> Result<(), ()> {
         "ALTER TABLE intelligence_content_backfill_state ADD COLUMN last_failure_reason TEXT",
         "ALTER TABLE intelligence_content_backfill_state ADD COLUMN last_success_at INTEGER",
         "ALTER TABLE intelligence_content_backfill_state ADD COLUMN last_backfill_pass_id TEXT",
+        "ALTER TABLE intelligence_content_backfill_state ADD COLUMN extractor_revision INTEGER NOT NULL DEFAULT 0",
     ] {
         if let Err(error) = connection.execute(statement, []) {
             if !error.to_string().contains("duplicate column name") {
@@ -2386,6 +2624,18 @@ fn ensure_content_backfill_schema(connection: &Connection) -> Result<(), ()> {
             }
         }
     }
+    // Earlier releases classified unresolved wrappers as a long-delay retry.
+    // They are discovery-only records, so safely retain the existing article
+    // metadata while stopping future wrapper probes after this upgrade.
+    connection
+        .execute(
+            "UPDATE intelligence_content_backfill_state
+             SET last_failure_reason='google_news_discovery_only',
+                 next_retry_at=?1
+             WHERE last_failure_reason='google_news_target_unresolved'",
+            [CONTENT_BACKFILL_NEVER_RETRY_AT],
+        )
+        .map_err(|_| ())?;
     Ok(())
 }
 
@@ -2560,8 +2810,14 @@ fn next_content_backfill_candidates_for_pass(
                    ON v.article_id=a.article_id AND v.record_fingerprint=a.fingerprint
                   AND v.is_current=1 AND v.body_status='complete'
                  LEFT JOIN intelligence_content_backfill_state b ON b.article_id=a.article_id
-                 WHERE v.article_id IS NULL AND COALESCE(b.next_retry_at,0)<=?1
-                   AND (?2='' OR COALESCE(b.last_backfill_pass_id,'')<>?2)
+                 WHERE v.article_id IS NULL AND (
+                       COALESCE(b.next_retry_at,0)<=?1
+                       OR (
+                           COALESCE(b.last_failure_reason,'')='body_not_found'
+                           AND COALESCE(b.extractor_revision,0)<?2
+                       )
+                   )
+                   AND (?3='' OR COALESCE(b.last_backfill_pass_id,'')<>?3)
                    AND COALESCE(NULLIF(a.url,''),(
                        SELECT r.normalized_url FROM intelligence_collection_records r
                        WHERE r.article_id=a.article_id AND r.normalized_url LIKE 'https://%'
@@ -2569,10 +2825,10 @@ fn next_content_backfill_candidates_for_pass(
                    ),'') LIKE 'https://%'
              ), newest AS (
                  SELECT article_id,fingerprint,url,title,summary,0 AS queue_segment FROM eligible
-                 ORDER BY published_at DESC,created_at DESC LIMIT ?3
+                 ORDER BY published_at DESC,created_at DESC LIMIT ?4
              ), oldest AS (
                  SELECT article_id,fingerprint,url,title,summary,1 AS queue_segment FROM eligible
-                 ORDER BY published_at ASC,created_at ASC LIMIT ?4
+                 ORDER BY published_at ASC,created_at ASC LIMIT ?5
              )
              SELECT article_id,fingerprint,url,title,summary,queue_segment FROM newest
              UNION ALL
@@ -2584,6 +2840,7 @@ fn next_content_backfill_candidates_for_pass(
         .query_map(
             params![
                 now,
+                PUBLIC_STATIC_EXTRACTOR_REVISION,
                 pass_id.unwrap_or(""),
                 MAX_CONTENT_BACKFILL_NEWEST_SCAN as i64,
                 MAX_CONTENT_BACKFILL_OLDEST_SCAN as i64
@@ -2785,30 +3042,40 @@ fn record_content_backfill_retry(
         "http_access_denied"
         | "http_not_found"
         | "body_paywall_or_interstitial"
-        | "body_not_found"
-        | "google_news_target_unresolved" => CONTENT_BACKFILL_TERMINAL_DELAY_MS,
+        | "body_not_found" => CONTENT_BACKFILL_TERMINAL_DELAY_MS,
         "http_rate_limited" => CONTENT_BACKFILL_RATE_LIMIT_BASE_DELAY_MS,
         _ => CONTENT_BACKFILL_BASE_DELAY_MS,
     };
-    let delay_ms = base_delay_ms
-        .saturating_mul(1_i64 << previous.min(7))
-        .min(CONTENT_BACKFILL_MAX_DELAY_MS.max(base_delay_ms));
+    let next_retry_at = if reason.reason == "google_news_discovery_only" {
+        CONTENT_BACKFILL_NEVER_RETRY_AT
+    } else {
+        let delay_ms = base_delay_ms
+            .saturating_mul(1_i64 << previous.min(7))
+            .min(CONTENT_BACKFILL_MAX_DELAY_MS.max(base_delay_ms));
+        now.saturating_add(delay_ms)
+    };
+    let extractor_revision = (reason.reason == "body_not_found")
+        .then_some(PUBLIC_STATIC_EXTRACTOR_REVISION)
+        .unwrap_or(0);
     connection
         .execute(
             "INSERT INTO intelligence_content_backfill_state(
                  article_id,attempts,next_retry_at,last_failure_at,last_failure_reason,
-                 last_backfill_pass_id,updated_at
-             ) VALUES(?1,1,?2,?3,?4,?5,?3)
+                 last_backfill_pass_id,extractor_revision,updated_at
+             ) VALUES(?1,1,?2,?3,?4,?5,?6,?3)
              ON CONFLICT(article_id) DO UPDATE SET attempts=attempts+1,
                next_retry_at=excluded.next_retry_at,last_failure_at=excluded.last_failure_at,
                last_failure_reason=excluded.last_failure_reason,
-               last_backfill_pass_id=excluded.last_backfill_pass_id,updated_at=excluded.updated_at",
+               last_backfill_pass_id=excluded.last_backfill_pass_id,
+               extractor_revision=MAX(extractor_revision,excluded.extractor_revision),
+               updated_at=excluded.updated_at",
             params![
                 article_id,
-                now.saturating_add(delay_ms),
+                next_retry_at,
                 now,
                 reason.reason,
                 pass_id.unwrap_or(""),
+                extractor_revision,
             ],
         )
         .map_err(|_| ())?;
@@ -3162,6 +3429,68 @@ mod tests {
         assert!(!body.contains("广告脚本"));
         assert!(!body.contains("相关推荐"));
         assert!(!body.contains("版权页脚"));
+    }
+
+    #[test]
+    fn static_extractor_prefers_semantic_article_over_static_site_chrome() {
+        let html = r#"
+          <header>导航 导航 导航 订阅 广告</header>
+          <article><p>第一段公开报道解释了事件发生的时间、地点和已经由多个来源确认的基本事实，并说明后续调查仍在持续进行。</p>
+          <p>第二段继续列出有关部门公开的应对措施、仍待核实的细节，以及读者理解这次进展所需的背景信息。</p>
+          <p>第三段补充了与此前报道的联系，明确区分了已经确认的事实与目前尚不能确定的说法。</p></article>
+          <footer>隐私 Cookie 帮助</footer>
+        "#;
+        let body = extract_static_article_body(html).expect("semantic article body");
+        assert!(body.contains("多个来源确认"));
+        assert!(!body.contains("导航 导航"));
+        assert!(!body.contains("隐私 Cookie"));
+    }
+
+    #[test]
+    fn static_extractor_accepts_public_article_body_attribute_without_script_execution() {
+        let html = r#"
+          <div itemprop="articleBody"><p>第一段使用公开的 articleBody 语义属性标记，提供了足够完整的事件事实、来源背景以及已经确认的官方信息，能够直接作为静态正文归档。</p>
+          <p>第二段继续说明不同主体的公开回应和后续安排，避免仅凭页面标题或搜索摘要推断新闻细节。</p>
+          <p>第三段给出关联时间线的必要背景，使后续模型可以基于完整文本判断这是否属于旧事件的发展。</p></div>
+          <script>window.privateApi = '/not-requested';</script>
+        "#;
+        let body = extract_static_article_body(html).expect("itemprop article body");
+        assert!(body.contains("articleBody 语义属性"));
+        assert!(!body.contains("privateApi"));
+    }
+
+    #[test]
+    fn static_extractor_accepts_class_named_story_body_and_continuous_paragraphs() {
+        let class_named = r#"
+          <div class="layout"><div class="story-body article-content">
+          <p>第一段由公开页面直接提供，详细说明这项政策变化的适用范围、发布时间和已知影响，长度足以形成独立证据。</p>
+          <p>第二段补充了官方回应和市场反应，并清楚说明哪些信息来自确认公告，哪些只是后续观察。</p>
+          <p>第三段给出历史背景和下一步时间安排，帮助读者将此次发展与既有事件时间线对应起来。</p>
+          </div></div>
+        "#;
+        let body = extract_static_article_body(class_named).expect("class named body");
+        assert!(body.contains("政策变化的适用范围"));
+
+        let paragraphs = r#"
+          <div><p>第一段没有使用 article 或 class 标记，但页面静态暴露了连续的长段落，说明这项公开事件的时间和地点以及多个相关主体。</p>
+          <p>第二段继续补充官方公开资料、已确认数据和仍在等待独立核验的事项，不能被导航或短摘要替代。</p>
+          <p>第三段明确前情和后续计划，使本地归档可以保留完整上下文并交给模型进行后续事件关系判断。</p></div>
+        "#;
+        let body = extract_static_article_body(paragraphs).expect("continuous paragraphs");
+        assert!(body.contains("没有使用 article"));
+        assert!(body.contains("后续事件关系判断"));
+    }
+
+    #[test]
+    fn static_extractor_rejects_teasers_and_static_shells() {
+        assert!(extract_static_article_body(
+            "<main><p>这是一段很短的摘要，不足以作为完整新闻正文。</p></main>"
+        )
+        .is_none());
+        assert!(extract_static_article_body(
+            "<main><p>Please enable JavaScript to continue reading this public page. Please enable JavaScript to continue reading this public page. Please enable JavaScript to continue reading this public page.</p></main>"
+        )
+        .is_none());
     }
 
     #[test]
@@ -3780,8 +4109,8 @@ mod tests {
             "network_request_failed"
         );
         assert_eq!(
-            classify_content_backfill_failure(Some("google_news_target_unresolved")).reason,
-            "google_news_target_unresolved"
+            classify_content_backfill_failure(Some("google_news_discovery_only")).reason,
+            "google_news_discovery_only"
         );
     }
 
@@ -4009,6 +4338,96 @@ mod tests {
             )
             .unwrap();
         assert!(retry_at >= before + CONTENT_BACKFILL_TERMINAL_DELAY_MS);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn body_not_found_receives_one_retry_after_static_extractor_upgrade() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-extractor-revision-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        let original = item();
+        let normalized = normalized_url(&original.url).unwrap();
+        let article_id = article_identity(&original.source_id, &original.guid, &normalized);
+        let fingerprint = record_fingerprint(&original, &normalized);
+        upsert_article(&catalog, &article_id, &fingerprint, &original, &normalized).unwrap();
+        record_content_backfill_retry(
+            &catalog,
+            &article_id,
+            &ContentBackfillFailure::new("body_not_found"),
+            None,
+        )
+        .unwrap();
+        // Model a durable gap created by the immediately preceding extractor
+        // revision. Its long terminal delay must not prevent the one upgrade
+        // retry, but the new revision must then be recorded durably.
+        Connection::open(&catalog)
+            .unwrap()
+            .execute(
+                "UPDATE intelligence_content_backfill_state
+                 SET extractor_revision=?2,next_retry_at=?3 WHERE article_id=?1",
+                params![
+                    article_id,
+                    PUBLIC_STATIC_EXTRACTOR_REVISION - 1,
+                    CONTENT_BACKFILL_NEVER_RETRY_AT
+                ],
+            )
+            .unwrap();
+        let upgraded = next_content_backfill_candidates(&catalog).unwrap();
+        assert_eq!(upgraded.len(), 1);
+        assert_eq!(upgraded[0].article_id, article_id);
+
+        record_content_backfill_retry(
+            &catalog,
+            &upgraded[0].article_id,
+            &ContentBackfillFailure::new("body_not_found"),
+            None,
+        )
+        .unwrap();
+        assert!(next_content_backfill_candidates(&catalog)
+            .unwrap()
+            .is_empty());
+        let revision: i64 = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT extractor_revision FROM intelligence_content_backfill_state WHERE article_id=?1",
+                [&article_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, PUBLIC_STATIC_EXTRACTOR_REVISION);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unresolved_google_wrapper_is_retained_once_as_discovery_only() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-collector-google-discovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.sqlite3");
+        record_content_backfill_retry(
+            &catalog,
+            "google-wrapper",
+            &ContentBackfillFailure::new("google_news_discovery_only"),
+            None,
+        )
+        .unwrap();
+        let state: (String, i64) = Connection::open(&catalog)
+            .unwrap()
+            .query_row(
+                "SELECT last_failure_reason,next_retry_at FROM intelligence_content_backfill_state
+                 WHERE article_id='google-wrapper'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state.0, "google_news_discovery_only");
+        assert_eq!(state.1, CONTENT_BACKFILL_NEVER_RETRY_AT);
         let _ = fs::remove_dir_all(root);
     }
 

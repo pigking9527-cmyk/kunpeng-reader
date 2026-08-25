@@ -1638,10 +1638,10 @@ mod tests {
         let connection = Connection::open(path).unwrap();
         connection.execute_batch(
             "CREATE TABLE intelligence_articles (article_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,title TEXT NOT NULL,summary TEXT,body TEXT,published_at TEXT,source_name TEXT,triage_state TEXT NOT NULL,triage_attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER,lease_owner TEXT,lease_until INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
-             CREATE TABLE intelligence_article_content_versions (article_id TEXT NOT NULL,record_fingerprint TEXT NOT NULL,body_status TEXT NOT NULL,is_current INTEGER NOT NULL);
+             CREATE TABLE intelligence_article_content_versions (article_id TEXT NOT NULL,record_fingerprint TEXT NOT NULL,body_status TEXT NOT NULL,is_current INTEGER NOT NULL,created_at INTEGER NOT NULL);
              CREATE TABLE intelligence_triage_decisions (article_id TEXT NOT NULL,fingerprint TEXT NOT NULL,model_id TEXT NOT NULL,model_sha TEXT,prompt_version TEXT NOT NULL,status TEXT NOT NULL,importance REAL,confidence REAL,reason TEXT,decision_json TEXT,decided_at INTEGER NOT NULL,PRIMARY KEY(article_id,fingerprint,model_id,prompt_version));
              INSERT INTO intelligence_articles(article_id,fingerprint,title,summary,body,published_at,source_name,triage_state,created_at,updated_at) VALUES('article_1','sha:test','公开标题','公开摘要','完整正文','2026-08-23T00:00:00Z','Example','queued',1,1);
-             INSERT INTO intelligence_article_content_versions(article_id,record_fingerprint,body_status,is_current) VALUES('article_1','sha:test','complete',1);"
+             INSERT INTO intelligence_article_content_versions(article_id,record_fingerprint,body_status,is_current,created_at) VALUES('article_1','sha:test','complete',1,1);"
         ).unwrap();
     }
     fn temp_path() -> std::path::PathBuf {
