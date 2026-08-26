@@ -22,7 +22,11 @@ function Invoke-Step {
     [scriptblock]$Body
   )
   Write-Host "== $Name =="
+  $global:LASTEXITCODE = 0
   & $Body
+  if ($LASTEXITCODE -ne 0) {
+    throw "Release step failed ($Name) with exit code $LASTEXITCODE."
+  }
 }
 
 function Get-CargoVersion {
@@ -58,15 +62,12 @@ function Get-ChangelogNotes {
 
 function Copy-ReleaseAssets {
   param([string]$Ver)
-  $portable = Get-ChildItem -LiteralPath $repoRoot -Filter "*.exe" -File |
-    Where-Object { $_.Name -notlike "*setup*" } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
+  $portable = Get-Item -LiteralPath (Join-Path $repoRoot "鲲鹏阅读器.exe") -ErrorAction SilentlyContinue
   $installerDir = Join-Path $repoRoot "target\release\bundle\nsis"
   $installer = Get-ChildItem -LiteralPath $installerDir -Filter "*_$($Ver)_x64-setup.exe" -File |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
-  if (-not $portable) { throw "Portable exe not found in repo root." }
+  if (-not $portable) { throw "Portable reader executable not found in repo root." }
   if (-not $installer) { throw "Installer not found for version $Ver in $installerDir." }
 
   $dir = Join-Path $env:TEMP "kunpeng-release-v$Ver"
@@ -83,6 +84,17 @@ function Copy-ReleaseAssets {
   }
   [IO.File]::WriteAllLines($checksumOut, $checksumLines, [Text.UTF8Encoding]::new($false))
   return @($portableOut, $installerOut, $checksumOut)
+}
+
+function Assert-TagPointsAtHead {
+  param([string]$Tag)
+  $tagCommit = git rev-parse --verify "$Tag^{commit}"
+  if ($LASTEXITCODE -ne 0) { throw "Cannot resolve release tag $Tag." }
+  $headCommit = git rev-parse --verify HEAD
+  if ($LASTEXITCODE -ne 0) { throw "Cannot resolve HEAD for release." }
+  if ($tagCommit.Trim() -ne $headCommit.Trim()) {
+    throw "Release tag $Tag points at $($tagCommit.Trim()), not current HEAD $($headCommit.Trim())."
+  }
 }
 
 Push-Location $repoRoot
@@ -131,6 +143,7 @@ try {
     } else {
       Write-Host "Tag exists: $tag"
     }
+    Assert-TagPointsAtHead -Tag $tag
   }
 
   if (-not $SkipPush) {

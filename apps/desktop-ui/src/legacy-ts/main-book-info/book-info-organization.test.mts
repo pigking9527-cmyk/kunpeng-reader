@@ -131,6 +131,7 @@ function fixture() {
     "book-info-modal",
     "book-info-tag-summary",
     "book-info-collection-summary",
+    "book-info-collections-manage",
     "book-organization-tags-panel",
     "book-organization-collections-panel",
     "book-organization-tags-tab",
@@ -144,6 +145,7 @@ function fixture() {
   };
   const calls: CommandCall[] = [];
   const responses = new Map<string, unknown[]>([
+    ["list_booklists", []],
     ["set_book_organization", []],
     ["rename_book_organization", []],
     ["delete_book_organization", []],
@@ -223,6 +225,10 @@ function state(view: ReturnType<typeof fixture>): unknown {
       text: view.elements["book-info-collection-summary"]?.textContent,
       title: view.elements["book-info-collection-summary"]?.title,
     },
+    collectionManage: {
+      text: view.elements["book-info-collections-manage"]?.textContent,
+      title: view.elements["book-info-collections-manage"]?.title,
+    },
     tabs: {
       tags: {
         active: view.elements["book-organization-tags-tab"]?.classList.contains("active"),
@@ -301,10 +307,31 @@ async function exercise(legacy: boolean) {
   await renameSave?.fire("click");
   await settle();
 
+  enqueue(view.responses, "list_booklists", [
+    { id: "empty", name: "空书单" },
+    { id: "existing", name: "珍藏" },
+  ]);
   controller.openManager("collections");
+  await settle();
+  const emptyBooklistRow = optionRows(view.elements["book-info-collections"] as FakeElement).find(
+    (row) => row.children[0]?.children[1]?.textContent.startsWith("空书单"),
+  );
   const collectionRow = optionRows(view.elements["book-info-collections"] as FakeElement).find(
     (row) => row.children[0]?.children[1]?.textContent.startsWith("珍藏"),
   );
+  const joinExisting = emptyBooklistRow?.children[1]?.children.find(
+    ({ textContent }) => textContent === "加入",
+  );
+  const joinLabel = {
+    text: joinExisting?.textContent,
+    title: joinExisting?.title,
+  };
+  enqueue(view.responses, "set_book_organization", [
+    { id: "1", tags: ["传记"], collections: ["珍藏", "空书单"] },
+    books[1] as OrganizationBook,
+  ]);
+  await joinExisting?.fire("click");
+  await settle();
   const open = collectionRow?.children[1]?.children.find(({ textContent }) => textContent === "打开");
   await open?.fire("click");
   const remove = collectionRow?.children[1]?.children.find(({ textContent }) => textContent === "删除");
@@ -333,6 +360,11 @@ async function exercise(legacy: boolean) {
     membership,
     armed,
     opened,
+    emptyBooklist: {
+      visible: Boolean(emptyBooklistRow),
+      count: emptyBooklistRow?.children[0]?.children[1]?.textContent,
+    },
+    joinExisting: joinLabel,
     duplicateAlert,
     alerts,
     calls: view.calls,
@@ -362,8 +394,26 @@ test("typed organization transport preserves membership, rename, delete and crea
     delay: 3_000,
   });
   assert.deepEqual(result.opened, ["珍藏"]);
+  assert.deepEqual(result.emptyBooklist, { visible: true, count: "空书单（0）" });
+  assert.deepEqual(result.joinExisting, {
+    text: "加入",
+    title: "将这本书加入“空书单”",
+  });
+  assert.deepEqual(
+    (result.summaries as { readonly collectionManage: unknown }).collectionManage,
+    { text: "添加到书单", title: "加入现有书单或新建书单" },
+  );
   assert.deepEqual(result.duplicateAlert, ["这本书已经加入“传记”。"]);
   assert.equal(result.alerts.at(-1), "保存标签失败：Error: save failed");
+  assert.equal(
+    result.calls.some(
+      ({ command, args }) =>
+        command === "set_book_organization" &&
+        Array.isArray(args?.collections) &&
+        args.collections.includes("空书单"),
+    ),
+    true,
+  );
   assert.equal(
     result.calls.some(
       ({ command, args }) =>

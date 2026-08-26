@@ -2,13 +2,13 @@
 
 [中文](README.md) | **English**
 
-[**Download published builds (Windows / macOS / Linux)**](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)
+[**View three-platform test build status (Windows / macOS / Linux)**](https://github.com/pigking9527-cmyk/kunpeng-reader/actions)
 
 A high-performance local ebook reader for Windows, macOS, and Linux. The desktop app uses **Rust + Tauri 2 + the system WebView**. The shelf and reading window are independent, EPUB content is rendered natively, and chapters or virtual subchapters are loaded on demand so large books open faster.
 > **License notice:** this repository is **source-available**. The code is public only for learning, evaluation, and communication. Copying, modifying, distributing, using it commercially, or publishing derivative versions requires the author's written permission. See [LICENSE](LICENSE).
 > See [licensing scope](docs/legal/licensing-scope.md) and [third-party notices](THIRD_PARTY_NOTICES.md) for the boundaries of first-party code and third-party materials. Because historical GPL dependency remediation is still in progress, new public binary releases are currently paused by the license gate; local and CI acceptance builds are unaffected.
 
-> The current desktop version is **Beta 1.0** (technical version `1.0.0-beta.1`). Repository: [github.com/pigking9527-cmyk/kunpeng-reader](https://github.com/pigking9527-cmyk/kunpeng-reader). Public binary releases must still pass license, intellectual-property, and platform-signing gates.
+> The current desktop version is **Beta 1.1** (technical version `1.1.0-beta.1`). Repository: [github.com/pigking9527-cmyk/kunpeng-reader](https://github.com/pigking9527-cmyk/kunpeng-reader). Public binary releases must still pass license, intellectual-property, and platform-signing gates.
 
 ## Features
 

@@ -278,31 +278,56 @@ impl SemData {
     }
 }
 
-pub(super) fn directory() -> Option<std::path::PathBuf> {
+pub(super) fn directory_for_model(selected: model::SemanticModel) -> Option<std::path::PathBuf> {
     let mut directory = crate::profile::app_cache_dir()?;
     directory.push("sem");
     // 保留旧版 bge-small 的磁盘布局，其他模型各自使用独立目录。
-    if model::active() != model::SemanticModel::BgeSmallZhV15 {
-        directory.push(model::active_id());
+    if selected != model::SemanticModel::BgeSmallZhV15 {
+        directory.push(selected.id());
     }
     Some(directory)
 }
 
+pub(super) fn directory() -> Option<std::path::PathBuf> {
+    directory_for_model(model::active())
+}
+
+pub(super) fn metadata_path_for_model(
+    selected: model::SemanticModel,
+    id: u64,
+) -> Option<std::path::PathBuf> {
+    Some(directory_for_model(selected)?.join(format!("sem_{id}.json")))
+}
+
+pub(super) fn vector_path_for_model(
+    selected: model::SemanticModel,
+    id: u64,
+) -> Option<std::path::PathBuf> {
+    Some(directory_for_model(selected)?.join(format!("sem_{id}.vec")))
+}
+
+pub(super) fn build_temp_path_for_model(
+    selected: model::SemanticModel,
+    id: u64,
+) -> Option<std::path::PathBuf> {
+    Some(directory_for_model(selected)?.join(format!(".sem_build_{id}.vec")))
+}
+
 pub(super) fn metadata_path(id: u64) -> Option<std::path::PathBuf> {
-    Some(directory()?.join(format!("sem_{id}.json")))
+    metadata_path_for_model(model::active(), id)
 }
 
 pub(super) fn vector_path(id: u64) -> Option<std::path::PathBuf> {
-    Some(directory()?.join(format!("sem_{id}.vec")))
+    vector_path_for_model(model::active(), id)
 }
 
-/// 未完成书籍只写入隐藏临时文件，容量统计与检索不会将其当作已建索引。
-pub(super) fn build_temp_path(id: u64) -> Option<std::path::PathBuf> {
-    Some(directory()?.join(format!(".sem_build_{id}.vec")))
+fn read_metadata_for_model(selected: model::SemanticModel, id: u64) -> Option<Metadata> {
+    serde_json::from_str(&std::fs::read_to_string(metadata_path_for_model(selected, id)?).ok()?)
+        .ok()
 }
 
 fn read_metadata(id: u64) -> Option<Metadata> {
-    serde_json::from_str(&std::fs::read_to_string(metadata_path(id)?).ok()?).ok()
+    read_metadata_for_model(model::active(), id)
 }
 
 const STATUS_METADATA_WINDOW_BYTES: usize = 8 * 1024;
@@ -516,11 +541,14 @@ pub(super) fn source_bytes(book: &book::Book) -> u64 {
         .unwrap_or(0)
 }
 
-fn metadata_is_fresh(metadata: &Metadata, book: &book::Book) -> bool {
+fn metadata_is_fresh_for_model(
+    metadata: &Metadata,
+    book: &book::Book,
+    selected: model::SemanticModel,
+) -> bool {
     if metadata.v != SEM_VERSION
-        || metadata.model != model::active_id()
-        || (!metadata.model_revision.is_empty()
-            && metadata.model_revision != model::active().revision())
+        || metadata.model != selected.id()
+        || (!metadata.model_revision.is_empty() && metadata.model_revision != selected.revision())
         || !is_current_chunk_revision(metadata.chunk_revision)
     {
         return false;
@@ -530,6 +558,10 @@ fn metadata_is_fresh(metadata: &Metadata, book: &book::Book) -> bool {
         && (metadata.source_id.is_empty()
             || (!book.content_id.is_empty() && metadata.source_id == book.content_id))
         && (metadata.source_bytes == 0 || metadata.source_bytes == source_bytes(book))
+}
+
+fn metadata_is_fresh(metadata: &Metadata, book: &book::Book) -> bool {
+    metadata_is_fresh_for_model(metadata, book, model::active())
 }
 
 /// 文件同步、复制或解压可能改变 mtime，却不会改变导入时已记录的完整内容身份。
@@ -790,10 +822,34 @@ fn decode_vector_bytes(metadata: &Metadata, bytes: &[u8]) -> Option<Vec<f32>> {
     )
 }
 
-pub(super) fn publish_metadata(id: u64, publication: Publication) -> Result<(), String> {
+/// pending 派生索引只读自己的模型目录，不进入 committed LRU。
+pub(super) fn load_uncached_for_model(selected: model::SemanticModel, id: u64) -> Option<SemData> {
+    let metadata = read_metadata_for_model(selected, id)?;
+    if metadata.model != selected.id() || metadata.model_revision != selected.revision() {
+        return None;
+    }
+    let path = vector_path_for_model(selected, id)?;
+    if !vector_file_shape_valid(&metadata, &path) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let vecs = decode_vector_bytes(&metadata, &bytes)?;
+    Some(SemData {
+        dim: metadata.dim,
+        vecs,
+        chunks: metadata.chunks,
+        _memory_permit: None,
+    })
+}
+
+pub(super) fn publish_metadata_for_model(
+    selected: model::SemanticModel,
+    id: u64,
+    publication: Publication,
+) -> Result<(), String> {
     let metadata = Metadata {
         v: SEM_VERSION,
-        model: model::active_id().into(),
+        model: selected.id().into(),
         mtime: publication.mtime,
         dim: publication.dim,
         chunks: publication.chunks,
@@ -801,32 +857,61 @@ pub(super) fn publish_metadata(id: u64, publication: Publication) -> Result<(), 
         vector_sha256: publication.vector_sha256,
         source_id: publication.source_id,
         source_bytes: publication.source_bytes,
-        model_revision: model::active().revision().into(),
+        model_revision: selected.revision().into(),
         chunk_revision: SEM_CHUNK_PIPELINE_REVISION,
     };
-    crate::atomic_file::write_json(&metadata_path(id).ok_or("无缓存路径")?, &metadata, false)?;
+    crate::atomic_file::write_json(
+        &metadata_path_for_model(selected, id).ok_or("无缓存路径")?,
+        &metadata,
+        false,
+    )?;
     if let Ok(mut cache) = verified_vector_cache().lock() {
         cache.remove(&id);
     }
     Ok(())
 }
 
-pub(super) fn is_complete(book: &book::Book) -> bool {
-    let Some(metadata) = read_metadata(book.id) else {
+pub(super) fn is_complete_for_model(book: &book::Book, selected: model::SemanticModel) -> bool {
+    let Some(metadata) = read_metadata_for_model(selected, book.id) else {
         return false;
     };
-    if !metadata_is_fresh(&metadata, book) {
+    if !metadata_is_fresh_for_model(&metadata, book, selected) {
         return false;
     }
     if !metadata_has_vectors(&metadata) {
         return true;
     }
-    // 单中心画像只是相似图书候选筛选的派生缓存，不属于逐书语义向量本体。
-    // 画像缺失或过期时可由现有向量快速回填，不能因此把完整语义索引记成
-    // “未完成”，更不能触发整本书重新嵌入。
-    vector_path(book.id)
+    vector_path_for_model(selected, book.id)
         .map(|path| vector_file_shape_valid(&metadata, &path))
         .unwrap_or(false)
+}
+
+/// pending 方案切换前的强校验：不接受旧兼容元数据，必须核对模型 revision、
+/// 当前来源身份、向量长度和完整文件 SHA-256。
+pub(super) fn verify_complete_for_model(book: &book::Book, selected: model::SemanticModel) -> bool {
+    let Some(metadata) = read_metadata_for_model(selected, book.id) else {
+        return false;
+    };
+    if metadata.v != SEM_VERSION
+        || metadata.model != selected.id()
+        || metadata.model_revision != selected.revision()
+        || metadata.chunk_revision != SEM_CHUNK_PIPELINE_REVISION
+        || !source_is_current(&metadata, book, search::file_mtime(&book.path))
+        || metadata.source_id != book.content_id
+        || metadata.source_bytes != source_bytes(book)
+        || !integrity_sha256_is_valid(&metadata.vector_sha256)
+    {
+        return false;
+    }
+    let Some(path) = vector_path_for_model(selected, book.id) else {
+        return false;
+    };
+    vector_file_shape_valid(&metadata, &path)
+        && vector_file_integrity_valid(book.id, &metadata, &path)
+}
+
+pub(super) fn is_complete(book: &book::Book) -> bool {
+    is_complete_for_model(book, model::active())
 }
 
 /// 加速索引只需要已发布元数据中的维度和段落数，不接触磁盘格式字段。

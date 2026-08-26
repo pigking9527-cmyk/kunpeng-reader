@@ -14,7 +14,7 @@ LOCK_FILE=/run/lock/kunpeng-capacity-direct-control.lock
 usage() {
   cat <<'EOF'
 Usage:
-  capacity-direct-control.sh prepare --service DEV_TEST_SERVICE [--production-service SERVICE]
+  capacity-direct-control.sh prepare --service DEV_TEST_SERVICE [--production-service SERVICE] [--test-binary-sha256 SHA256]
   capacity-direct-control.sh status  --service DEV_TEST_SERVICE
   capacity-direct-control.sh cleanup --service DEV_TEST_SERVICE [--production-service SERVICE]
   capacity-direct-control.sh --self-test
@@ -45,6 +45,10 @@ validate_production_service_name() {
     die 'production service name is invalid'
   [[ "$value" != *dev-test* && "$value" != *test* ]] ||
     die 'production service must not be a test service'
+}
+
+validate_sha256() {
+  [[ "$1" =~ ^[a-f0-9]{64}$ ]] || die 'test binary SHA-256 is invalid'
 }
 
 derive_production_service() {
@@ -125,6 +129,12 @@ active_pid() {
   [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   printf '%s\n' "$pid"
+}
+
+running_binary_sha() {
+  local pid=$1
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+  sha256sum -- "/proc/$pid/exe" 2>/dev/null | awk '{print $1}'
 }
 
 production_pid_matches() {
@@ -334,6 +344,7 @@ caddy_port_reference_count() {
 validate_service_separation() {
   local test_pid=$1
   local production_pid=$2
+  local expected_test_sha=${3:-}
   local test_exe production_exe test_sha production_sha
   [[ "$test_pid" != "$production_pid" ]] ||
     die 'test and production services unexpectedly share one process'
@@ -341,10 +352,22 @@ validate_service_separation() {
   production_exe=$(readlink -f -- "/proc/$production_pid/exe" 2>/dev/null || true)
   [[ -n "$test_exe" && -n "$production_exe" && "$test_exe" != "$production_exe" ]] ||
     die 'test and production services must use separate binary paths'
-  test_sha=$(sha256sum -- "$test_exe" 2>/dev/null | awk '{print $1}')
-  production_sha=$(sha256sum -- "$production_exe" 2>/dev/null | awk '{print $1}')
-  [[ -n "$test_sha" && "$test_sha" == "$production_sha" ]] ||
-    die 'test and production services must run byte-identical binaries'
+  test_sha=$(running_binary_sha "$test_pid")
+  production_sha=$(running_binary_sha "$production_pid")
+  [[ -n "$test_sha" && -n "$production_sha" ]] ||
+    die 'test and production service binary hashes are unavailable'
+  if [[ -n "$expected_test_sha" ]]; then
+    validate_sha256 "$expected_test_sha"
+    [[ "$test_sha" == "$expected_test_sha" ]] ||
+      die 'test service does not run the approved candidate binary'
+    BINARY_MODE=verified-candidate
+  else
+    [[ "$test_sha" == "$production_sha" ]] ||
+      die 'test and production services must run byte-identical binaries'
+    BINARY_MODE=production-equivalent
+  fi
+  TEST_BINARY_SHA=$test_sha
+  PRODUCTION_BINARY_SHA=$production_sha
 }
 
 write_state() {
@@ -353,9 +376,13 @@ write_state() {
   temp=$(mktemp "${destination}.tmp.XXXXXX") || die 'cannot create direct-control state'
   chmod 0600 "$temp"
   {
+    printf 'ST_STATE_VERSION=%q\n' 2
     printf 'ST_SERVICE=%q\n' "$SERVICE"
     printf 'ST_PRODUCTION_SERVICE=%q\n' "$PRODUCTION_SERVICE"
     printf 'ST_PRODUCTION_PID=%q\n' "$PRODUCTION_PID"
+    printf 'ST_TEST_BINARY_SHA=%q\n' "$TEST_BINARY_SHA"
+    printf 'ST_PRODUCTION_BINARY_SHA=%q\n' "$PRODUCTION_BINARY_SHA"
+    printf 'ST_BINARY_MODE=%q\n' "$BINARY_MODE"
     printf 'ST_ENV_FILE=%q\n' "$ENV_FILE"
     printf 'ST_ENV_BACKUP=%q\n' "$ENV_BACKUP"
     printf 'ST_ORIGINAL_ENV_SHA=%q\n' "$ORIGINAL_ENV_SHA"
@@ -376,6 +403,7 @@ write_state() {
 
 load_state() {
   local destination=$1
+  local allow_legacy=${2:-0}
   [[ -f "$destination" && ! -L "$destination" ]] ||
     die 'direct-control state is missing or unsafe'
   [[ "$(stat -c %u -- "$destination")" == 0 ]] ||
@@ -395,6 +423,18 @@ load_state() {
     die 'direct-control state has an invalid server family'
   [[ "${ST_ORIGINAL_BIND_FAMILY:-}" == 4 || "${ST_ORIGINAL_BIND_FAMILY:-}" == 6 ]] ||
     die 'direct-control state has an invalid original bind family'
+  STATE_HAS_BINARY_PROVENANCE=false
+  if [[ "${ST_STATE_VERSION:-}" == 2 ]]; then
+    validate_sha256 "${ST_TEST_BINARY_SHA:-}"
+    validate_sha256 "${ST_PRODUCTION_BINARY_SHA:-}"
+    [[ "${ST_BINARY_MODE:-}" == production-equivalent || "${ST_BINARY_MODE:-}" == verified-candidate ]] ||
+      die 'direct-control state has an invalid binary mode'
+    STATE_HAS_BINARY_PROVENANCE=true
+  elif [[ -z "${ST_STATE_VERSION:-}" && "$allow_legacy" == 1 ]]; then
+    ST_BINARY_MODE=legacy-cleanup-only
+  else
+    die 'direct-control state version is unsupported'
+  fi
   [[ "${ST_CHAIN4:-}" =~ ^KPD4[A-F0-9]{12}$ &&
      "${ST_CHAIN6:-}" =~ ^KPD6[A-F0-9]{12}$ ]] ||
     die 'direct-control state has invalid firewall identifiers'
@@ -610,7 +650,7 @@ prepare_direct() {
   test_pid=$(active_pid "$SERVICE") || die 'dev-test service must be active before preparation'
   PRODUCTION_PID=$(active_pid "$PRODUCTION_SERVICE") ||
     die 'production service must be active before preparation'
-  validate_service_separation "$test_pid" "$PRODUCTION_PID"
+  validate_service_separation "$test_pid" "$PRODUCTION_PID" "$TEST_BINARY_SHA_OPTION"
   database_is_disposable "$test_pid" ||
     die 'dev-test service is not attached to a guarded disposable test database'
   ENV_FILE=$(discover_test_env_file "$SERVICE")
@@ -669,9 +709,18 @@ prepare_direct() {
   fi
   [[ "$(sha256sum -- "$ENV_FILE" | awk '{print $1}')" == "$ORIGINAL_ENV_SHA" ]] ||
     die 'test environment changed during preparation'
-  rewrite_test_environment "$ENV_FILE" "$ENV_FILE" "$public_bind" "$CERT_FILE" "$KEY_FILE"
+  local staged_environment
+  staged_environment="$STATE_DIR/environment.direct"
+  rewrite_test_environment "$ENV_FILE" "$staged_environment" "$public_bind" "$CERT_FILE" "$KEY_FILE"
+  DIRECT_ENV_SHA=$(sha256sum -- "$staged_environment" | awk '{print $1}')
+  STATE_PHASE=applying
+  write_state "$STATE_FILE"
+  [[ "$(sha256sum -- "$ENV_FILE" | awk '{print $1}')" == "$ORIGINAL_ENV_SHA" ]] ||
+    die 'test environment changed before direct activation'
+  [[ "$(stat -c %d -- "$staged_environment")" == "$(stat -c %d -- "$ENV_FILE")" ]] ||
+    die 'test environment staging and destination must share one filesystem'
   ENV_WRITTEN=1
-  DIRECT_ENV_SHA=$(sha256sum -- "$ENV_FILE" | awk '{print $1}')
+  mv -f -- "$staged_environment" "$ENV_FILE" || die 'cannot activate the test environment update'
   STATE_PHASE=prepared
   write_state "$STATE_FILE"
 
@@ -679,17 +728,25 @@ prepare_direct() {
   local direct_pid
   direct_pid=$(wait_for_service_gate "$SERVICE" "$DIRECT_PORT" all-interfaces https 1 "$SERVER_FAMILY") ||
     die 'dev-test service did not reach the temporary TLS readiness gate'
+  [[ "$(running_binary_sha "$direct_pid")" == "$TEST_BINARY_SHA" ]] ||
+    die 'dev-test binary changed during direct preparation'
   database_is_disposable "$direct_pid" || die 'dev-test database gate changed after preparation'
   [[ "$(caddy_port_reference_count "$DIRECT_PORT")" == 0 ]] ||
     die 'Caddy began referencing the dev-test port during preparation'
-  [[ "$(active_pid "$PRODUCTION_SERVICE" 2>/dev/null || true)" == "$PRODUCTION_PID" ]] ||
+  local production_pid_after
+  production_pid_after=$(active_pid "$PRODUCTION_SERVICE" 2>/dev/null || true)
+  [[ "$production_pid_after" == "$PRODUCTION_PID" ]] ||
     die 'production service state changed during preparation'
+  [[ "$(running_binary_sha "$production_pid_after")" == "$PRODUCTION_BINARY_SHA" ]] ||
+    die 'production service binary changed during direct preparation'
 
   trap - EXIT
   printf '%s\n' 'direct_control=prepared'
   printf '%s\n' 'scheme=https'
   printf 'port=%s\n' "$DIRECT_PORT"
   printf 'source_family=ipv%s\n' "$CLIENT_FAMILY"
+  printf 'binary_mode=%s\n' "$BINARY_MODE"
+  printf 'test_binary_sha256=%s\n' "$TEST_BINARY_SHA"
   printf '%s\n' 'production_unchanged=true'
   printf '%s\n' 'caddy_test_port_reference_count=0'
 }
@@ -704,6 +761,8 @@ status_direct() {
   DIRECT_PORT=$ST_PORT
   local pid caddy_refs source_match=false
   pid=$(active_pid "$SERVICE") || die 'prepared dev-test service is not active'
+  [[ "$(running_binary_sha "$pid")" == "$ST_TEST_BINARY_SHA" ]] ||
+    die 'prepared dev-test binary changed after direct preparation'
   [[ "$(listener_scope "$pid" "$DIRECT_PORT")" == all-interfaces ]] ||
     die 'prepared dev-test listener is not public'
   local_endpoint_gate https "$DIRECT_PORT" 1 "$ST_SERVER_FAMILY" ||
@@ -721,9 +780,13 @@ status_direct() {
   production_pid=$(active_pid "$ST_PRODUCTION_SERVICE" 2>/dev/null || true)
   production_pid_matches "$ST_PRODUCTION_PID" "$production_pid" ||
     die 'production service PID changed after direct preparation'
+  [[ "$(running_binary_sha "$production_pid")" == "$ST_PRODUCTION_BINARY_SHA" ]] ||
+    die 'production service binary changed after direct preparation'
   printf '%s\n' 'direct_control=prepared'
   printf '%s\n' 'scheme=https'
   printf 'port=%s\n' "$DIRECT_PORT"
+  printf 'binary_mode=%s\n' "$ST_BINARY_MODE"
+  printf 'test_binary_sha256=%s\n' "$ST_TEST_BINARY_SHA"
   printf '%s\n' 'firewall_source_matches_current_ssh=true'
   printf '%s\n' 'caddy_test_port_reference_count=0'
   printf '%s\n' 'production_active=true'
@@ -735,13 +798,18 @@ cleanup_direct() {
     printf '%s\n' 'direct_control=clean'
     return 0
   }
-  load_state "$STATE_FILE"
+  load_state "$STATE_FILE" 1
   if [[ -n "$PRODUCTION_SERVICE_OPTION" && "$PRODUCTION_SERVICE_OPTION" != "$ST_PRODUCTION_SERVICE" ]]; then
     die 'cleanup production service does not match saved state'
   fi
-  local production_pid_before production_active_before=true
+  local production_pid_before production_active_before=true production_binary_unchanged_before=false
   production_pid_before=$(active_pid "$ST_PRODUCTION_SERVICE" 2>/dev/null || true)
   [[ -n "$production_pid_before" ]] || production_active_before=false
+  if [[ "$production_active_before" == true ]]; then
+    if [[ "$STATE_HAS_BINARY_PROVENANCE" == false || "$(running_binary_sha "$production_pid_before")" == "$ST_PRODUCTION_BINARY_SHA" ]]; then
+      production_binary_unchanged_before=true
+    fi
+  fi
   [[ -f "$ST_ENV_BACKUP" && ! -L "$ST_ENV_BACKUP" ]] ||
     die 'test environment backup is unavailable'
   [[ "$(sha256sum -- "$ST_ENV_BACKUP" | awk '{print $1}')" == "$ST_ORIGINAL_ENV_SHA" ]] ||
@@ -764,10 +832,15 @@ cleanup_direct() {
     die 'test service is restored but temporary firewall cleanup is incomplete'
   local caddy_refs
   caddy_refs=$(caddy_port_reference_count "$ST_PORT")
-  local production_pid_after production_active_after=true production_unchanged=false
+  local production_pid_after production_active_after=true production_binary_unchanged_after=false production_unchanged=false
   production_pid_after=$(active_pid "$ST_PRODUCTION_SERVICE" 2>/dev/null || true)
   [[ -n "$production_pid_after" ]] || production_active_after=false
-  if production_pid_unchanged "$ST_PRODUCTION_PID" "$production_pid_before" "$production_pid_after"; then
+  if [[ "$production_active_after" == true ]] &&
+     [[ "$STATE_HAS_BINARY_PROVENANCE" == false || "$(running_binary_sha "$production_pid_after")" == "$ST_PRODUCTION_BINARY_SHA" ]]; then
+    production_binary_unchanged_after=true
+  fi
+  if production_pid_unchanged "$ST_PRODUCTION_PID" "$production_pid_before" "$production_pid_after" &&
+     [[ "$production_binary_unchanged_before" == true && "$production_binary_unchanged_after" == true ]]; then
     production_unchanged=true
   fi
   SERVICE_HASH=$(service_hash "$SERVICE")
@@ -782,7 +855,7 @@ cleanup_direct() {
   printf 'production_unchanged=%s\n' "$production_unchanged"
   printf '%s\n' 'caddy_test_port_reference_count=0'
   [[ "$production_unchanged" == true ]] ||
-    die 'cleanup completed safely, but production service PID changed'
+    die 'cleanup completed safely, but production service identity changed'
 }
 
 self_test() {
@@ -797,6 +870,16 @@ self_test() {
   if (validate_service_name 'dev-test.service;touch_bad' >/dev/null 2>&1); then
     die 'self-test failed: unsafe service name accepted'
   fi
+  validate_sha256 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  for invalid_sha in \
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde' \
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0' \
+    '0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef' \
+    'g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; do
+    if (validate_sha256 "$invalid_sha") >/dev/null 2>&1; then
+      die 'self-test failed: invalid test binary SHA-256 accepted'
+    fi
+  done
   parsed=$(printf '%s' '192.0.2.10' | canonical_ip)
   [[ "$parsed" == '4 192.0.2.10' ]] || die 'self-test failed: IPv4 canonicalization'
   parsed=$(printf '%s' '2001:db8::10' | canonical_ip)
@@ -858,6 +941,7 @@ esac
 
 SERVICE=''
 PRODUCTION_SERVICE_OPTION=''
+TEST_BINARY_SHA_OPTION=''
 while (($#)); do
   case "$1" in
     --service)
@@ -868,6 +952,11 @@ while (($#)); do
     --production-service)
       (($# >= 2)) || { usage >&2; exit 2; }
       PRODUCTION_SERVICE_OPTION=$2
+      shift
+      ;;
+    --test-binary-sha256)
+      (($# >= 2)) || { usage >&2; exit 2; }
+      TEST_BINARY_SHA_OPTION=$2
       shift
       ;;
     --help|-h)
@@ -883,6 +972,9 @@ done
 validate_service_name "$SERVICE"
 if [[ -n "$PRODUCTION_SERVICE_OPTION" ]]; then
   validate_production_service_name "$PRODUCTION_SERVICE_OPTION"
+fi
+if [[ -n "$TEST_BINARY_SHA_OPTION" ]]; then
+  validate_sha256 "$TEST_BINARY_SHA_OPTION"
 fi
 require_root
 for command_name in systemctl python3 sha256sum stat realpath ss curl caddy openssl \

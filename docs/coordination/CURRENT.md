@@ -2,7 +2,7 @@
 
 > 只记录正在进行且会影响多个端的事实；不要把日常开发日志堆在这里。
 
-**更新时间：2026-08-20**
+**更新时间：2026-08-27**
 
 ## 工程方向
 
@@ -35,16 +35,16 @@
 
 | 平台 | 状态 | 当前重点 |
 | --- | --- | --- |
-| Windows | 测试版 1.0（1.0.0-beta.1）x64 | 单一桌面 UI + TypeScript 业务边界；NVIDIA 运行库再分发暂停，使用 CPU 回退。 |
-| macOS | 测试版 1.0（1.0.0-beta.1）Apple Silicon | 与 Windows 使用同一桌面代码基线；当前为本机开发签名，后续补 Developer ID 签名与公证。 |
-| Linux | 测试版 1.0（1.0.0-beta.1）x86_64 | Ubuntu 24.04 CI 生成 AppImage/deb 和 SHA-256；NVIDIA 运行库再分发暂停。 |
+| Windows | 测试版 1.1（1.1.0-beta.1）x64 | 单一桌面 UI + TypeScript 业务边界；NVIDIA 运行库再分发暂停，使用 CPU 回退。 |
+| macOS | 测试版 1.1（1.1.0-beta.1）Apple Silicon | 与 Windows 使用同一桌面代码基线；当前为本机开发签名，后续补 Developer ID 签名与公证。 |
+| Linux | 测试版 1.1（1.1.0-beta.1）x86_64 | Ubuntu 24.04 CI 生成 AppImage/deb 和 SHA-256；NVIDIA 运行库再分发暂停。 |
 | Android | v0.3.0 Profile 测试包已发布 | 新增全文与语义检索；当前为 Android Debug/Profile 签名，后续配置生产 keystore，并继续按 contracts 校验兼容性。 |
 | iPhone / iPad | 启动阶段 | SwiftUI 书架、阅读页和 iPad 侧栏体验。 |
 
 ## 当前跨端工作项
 
 - 许可证整改：`v1.0.0` 至 `v1.16.0` 的桌面发行物曾链接 GPL-3.0 `epub` 依赖；当前开发版已切换为 Apache-2.0 `rbook` + 本仓库兼容适配层，并移除 vendored GPL 源码。新增公开 Release 资产由许可证门禁暂停，直至解析兼容、发行包第三方声明、历史资产处置与法律复核完成；本机和 CI 验收构建继续运行。详见 `docs/legal/historical-release-license-audit.md`。
-- 桌面产品当前为测试版 1.0（技术版本 `1.0.0-beta.1`）；协议 v5 客户端只使用 `/v1/auth/*` 与 `/v1/sync/*`，同步请求发送 `X-Sync-Protocol-Version: 5`。v4、协议 3 或缺少版本声明的同步请求会收到 HTTP 426；源码与“关于”页公开项目仓库地址，但不内置真实同步或更新服务地址。
+- 桌面产品当前为测试版 1.1（技术版本 `1.1.0-beta.1`）；协议 v5 客户端只使用 `/v1/auth/*` 与 `/v1/sync/*`，同步请求发送 `X-Sync-Protocol-Version: 5`。v4、协议 3 或缺少版本声明的同步请求会收到 HTTP 426；源码与“关于”页公开项目仓库地址，但不内置真实同步或更新服务地址。
 
 1. 为现有服务端 API 和同步实体补齐正式 schema、请求/响应 fixture 与兼容测试。
 2. Android/iOS 先实现本地阅读、进度、高亮、书签、标签与书单；语义索引、智读和脑图不阻塞第一阶段。

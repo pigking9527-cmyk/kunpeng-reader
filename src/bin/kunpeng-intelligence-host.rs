@@ -11,10 +11,17 @@ mod archive;
 mod atomic_file;
 #[path = "../intelligence_host/mod.rs"]
 mod intelligence_host;
+// The dashboard only owns local pairing/status/revocation. The shared
+// lifecycle module also contains worker-side service-loop entry points, which
+// are deliberately reachable only from the sibling worker binary.
+#[allow(dead_code)]
 #[path = "../intelligence_worker_lifecycle.rs"]
 mod intelligence_worker_lifecycle;
 #[path = "../profile.rs"]
 mod profile;
+// The pairing record relies on the shared platform secret adapter, while the
+// dashboard never invokes the reader's sync/media credential APIs.
+#[allow(dead_code)]
 #[path = "../secret_store.rs"]
 mod secret_store;
 

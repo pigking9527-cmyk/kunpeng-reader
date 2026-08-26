@@ -30,7 +30,8 @@
     "LICENSES/CC-BY-SA-4.0.txt",
     "LICENSES/ECDICT-MIT.txt",
     "src/dict/ECDICT_SOURCE.md",
-    "src/dict/CC_CEDICT_SOURCE.md"
+    "src/dict/CC_CEDICT_SOURCE.md",
+    "src/dict/ZHWIKTIONARY_SOURCE.md"
   ],
   "forbiddenDistributionPaths": [
     "vendor/epub",

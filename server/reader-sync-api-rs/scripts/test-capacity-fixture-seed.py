@@ -9,6 +9,7 @@ so they are safe to run on Windows development hosts.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import pathlib
@@ -27,6 +28,11 @@ SPEC.loader.exec_module(SEEDER)
 
 TEST_KEY = b"test-only-key-with-at-least-32-bytes"
 FIXTURE_ID = "a1b2c3d4"
+TEST_DATABASE_URL = (
+    b"postgresql://fixture:secret@127.0.0.1:5433/"
+    b"reader_sync_rust_test_capacity?sslmode=disable"
+)
+TARGET_FINGERPRINT = hashlib.sha256(TEST_DATABASE_URL + b"\0" + TEST_KEY).hexdigest()
 
 
 def deterministic_tokens():
@@ -98,6 +104,8 @@ class RuntimeGateTests(unittest.TestCase):
                     FIXTURE_ID,
                     "--token-output",
                     sensitive_path,
+                    "--expected-target-fingerprint",
+                    TARGET_FINGERPRINT,
                 ],
                 platform_name="win32",
                 effective_uid=0,
@@ -121,6 +129,8 @@ class RuntimeGateTests(unittest.TestCase):
                     FIXTURE_ID,
                     "--token-output",
                     sensitive_path,
+                    "--expected-target-fingerprint",
+                    TARGET_FINGERPRINT,
                 ],
                 platform_name="linux",
                 effective_uid=1000,
@@ -132,20 +142,53 @@ class RuntimeGateTests(unittest.TestCase):
 
 
 class EnvironmentGateTests(unittest.TestCase):
+    def test_target_fingerprint_requires_exact_lowercase_sha256(self):
+        self.assertEqual(
+            SEEDER.validate_target_fingerprint(TARGET_FINGERPRINT),
+            TARGET_FINGERPRINT,
+        )
+        for rejected in (
+            "",
+            TARGET_FINGERPRINT.upper(),
+            TARGET_FINGERPRINT[:-1],
+            TARGET_FINGERPRINT + "0",
+            "g" * 64,
+        ):
+            with self.subTest(rejected=rejected):
+                with self.assertRaises(SEEDER.FixtureSeedError):
+                    SEEDER.validate_target_fingerprint(rejected)
+
     def test_process_environment_extracts_only_current_test_values(self):
         blob = (
             b"UNRELATED_SECRET=must-not-be-returned\0"
             b"KUNPENG_SYNC_TOKEN_HMAC_KEY="
             + TEST_KEY
             + b"\0KUNPENG_SYNC_DATABASE_URL="
-            b"postgresql://fixture:secret@127.0.0.1:5433/"
-            b"reader_sync_rust_test_capacity?sslmode=disable\0"
+            + TEST_DATABASE_URL
+            + b"\0"
         )
         environment = SEEDER.extract_service_environment(blob)
         self.assertEqual(environment.token_hmac_key, TEST_KEY)
         self.assertEqual(environment.database.name, "reader_sync_rust_test_capacity")
         self.assertEqual(environment.database.port, 5433)
+        self.assertEqual(environment.target_fingerprint, TARGET_FINGERPRINT)
         self.assertFalse(hasattr(environment, "database_url"))
+
+    def test_fingerprint_preserves_raw_database_url_binding(self):
+        first = SEEDER.extract_service_environment(
+            b"KUNPENG_SYNC_TOKEN_HMAC_KEY="
+            + TEST_KEY
+            + b"\0KUNPENG_SYNC_DATABASE_URL=postgresql://127.0.0.1/"
+            b"reader_sync_rust_test_capacity\0"
+        )
+        second = SEEDER.extract_service_environment(
+            b"KUNPENG_SYNC_TOKEN_HMAC_KEY="
+            + TEST_KEY
+            + b"\0KUNPENG_SYNC_DATABASE_URL=postgresql://localhost/"
+            b"reader_sync_rust_test_capacity\0"
+        )
+        self.assertEqual(first.database, second.database)
+        self.assertNotEqual(first.target_fingerprint, second.target_fingerprint)
 
     def test_database_target_rejects_remote_or_non_test_database(self):
         rejected = (
@@ -297,8 +340,85 @@ class TransactionConstructionTests(unittest.TestCase):
         self.assertIn("u.id=c.user_id OR u.username=c.user_id", self.allow_absent_cleanup_sql)
         self.assertIn("OR u.username_key=c.user_id", self.allow_absent_cleanup_sql)
 
+    def test_psql_transaction_has_a_bounded_inner_deadline(self):
+        completed = mock.Mock(returncode=0, stdout=b"ok\n")
+        with (
+            mock.patch.object(
+                SEEDER,
+                "_trusted_executable",
+                side_effect=["/trusted/sudo", "/trusted/psql"],
+            ),
+            mock.patch.object(
+                SEEDER.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            output = SEEDER._execute_psql(
+                SEEDER.DatabaseTarget(
+                    name="reader_sync_rust_test_capacity",
+                    port=5432,
+                ),
+                "SELECT 1;",
+            )
+        self.assertEqual(output, b"ok\n")
+        self.assertEqual(run.call_args.kwargs["timeout"], 30)
+
 
 class CleanupRecoveryTests(unittest.TestCase):
+    @staticmethod
+    def service_environment():
+        return SEEDER.ServiceEnvironment(
+            token_hmac_key=TEST_KEY,
+            database=SEEDER.DatabaseTarget(
+                name="reader_sync_rust_test_capacity",
+                port=5432,
+            ),
+            target_fingerprint=TARGET_FINGERPRINT,
+        )
+
+    def test_seed_target_drift_fails_before_identity_token_or_sql_work(self):
+        with (
+            mock.patch.object(
+                SEEDER,
+                "read_running_service_environment",
+                return_value=self.service_environment(),
+            ),
+            mock.patch.object(SEEDER, "build_identities") as build_identities,
+            mock.patch.object(SEEDER, "_write_token_file") as write_tokens,
+            mock.patch.object(SEEDER, "_execute_psql") as execute_psql,
+        ):
+            with self.assertRaises(SEEDER.FixtureSeedError):
+                SEEDER.seed_fixture(
+                    "reader-dev-test.service",
+                    FIXTURE_ID,
+                    "/private/new-token-output",
+                    expected_target_fingerprint="f" * 64,
+                )
+        build_identities.assert_not_called()
+        write_tokens.assert_not_called()
+        execute_psql.assert_not_called()
+
+    def test_cleanup_target_drift_fails_before_identity_or_sql_work(self):
+        with (
+            mock.patch.object(
+                SEEDER,
+                "read_running_service_environment",
+                return_value=self.service_environment(),
+            ),
+            mock.patch.object(SEEDER, "build_identities") as build_identities,
+            mock.patch.object(SEEDER, "_execute_psql") as execute_psql,
+        ):
+            with self.assertRaises(SEEDER.FixtureSeedError):
+                SEEDER.cleanup_fixture(
+                    "reader-dev-test.service",
+                    FIXTURE_ID,
+                    allow_absent=True,
+                    expected_target_fingerprint="f" * 64,
+                )
+        build_identities.assert_not_called()
+        execute_psql.assert_not_called()
+
     def test_count_gate_accepts_only_absent_or_complete_when_enabled(self):
         SEEDER.validate_cleanup_target_counts(
             SEEDER.ACCOUNT_COUNT,
@@ -353,6 +473,7 @@ class CleanupRecoveryTests(unittest.TestCase):
                 name="reader_sync_rust_test_capacity",
                 port=5432,
             ),
+            target_fingerprint=TARGET_FINGERPRINT,
         )
         identities = SEEDER.build_identities(FIXTURE_ID, TEST_KEY)
         rows = SEEDER.build_seed_rows(identities, TEST_KEY, deterministic_tokens())
@@ -380,6 +501,7 @@ class CleanupRecoveryTests(unittest.TestCase):
                     "reader-dev-test.service",
                     FIXTURE_ID,
                     "/private/new-token-output",
+                    expected_target_fingerprint=TARGET_FINGERPRINT,
                 )
         write_tokens.assert_called_once()
         self.assertEqual(execute_psql.call_count, 2)
@@ -394,6 +516,7 @@ class CleanupRecoveryTests(unittest.TestCase):
                 name="reader_sync_rust_test_capacity",
                 port=5432,
             ),
+            target_fingerprint=TARGET_FINGERPRINT,
         )
         identities = SEEDER.build_identities(FIXTURE_ID, TEST_KEY)
         rows = SEEDER.build_seed_rows(identities, TEST_KEY, deterministic_tokens())
@@ -418,6 +541,7 @@ class CleanupRecoveryTests(unittest.TestCase):
                     "reader-dev-test.service",
                     FIXTURE_ID,
                     "/private/new-token-output",
+                    expected_target_fingerprint=TARGET_FINGERPRINT,
                 )
         self.assertEqual(execute_psql.call_count, 2)
         unlink_tokens.assert_called_once_with("/private/new-token-output")

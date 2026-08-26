@@ -12,6 +12,7 @@ export const TOOLBAR_ITEM_IDS = Object.freeze([
   "library",
   "news",
   "intelligence-lab",
+  "favorites",
   "filter",
   "settings",
   "menu",
@@ -125,6 +126,7 @@ const ITEM_COPY: Readonly<Record<ToolbarItemId, readonly [string, string]>> =
     library: ["书库问答", "在全书库中提问"],
     news: ["资讯", "启用资讯功能后显示"],
     "intelligence-lab": ["情报中心", "打开情报中心测试"],
+    favorites: ["收藏夹", "访问收藏的书单和情报新闻"],
     filter: ["筛选与布局", "排序、过滤和书架布局"],
     settings: ["设置", "始终显示，不能隐藏"],
     menu: ["更多菜单", "导入、笔记和关于等功能"],
@@ -137,6 +139,7 @@ const BUTTON_IDS: Readonly<Record<ToolbarItemId, string>> = Object.freeze({
   library: "library-ai-toolbar-btn",
   news: "newsnow-toolbar-btn",
   "intelligence-lab": "intelligence-lab-toolbar-btn",
+  favorites: "favorites-toolbar-btn",
   filter: "filter-btn",
   settings: "settings-toolbar-btn",
   menu: "menu-btn",
@@ -178,6 +181,7 @@ function normalizeOrder(value: unknown): ToolbarItemId[] {
       )
     : [];
   const hadIntelligenceLab = seen.has("intelligence-lab");
+  const hadFavorites = seen.has("favorites");
   if (!seen.has("account")) {
     ordered.unshift("account");
     seen.add("account");
@@ -191,6 +195,18 @@ function normalizeOrder(value: unknown): ToolbarItemId[] {
     if (currentIndex >= 0 && newsIndex >= 0 && currentIndex !== newsIndex + 1) {
       ordered.splice(currentIndex, 1);
       ordered.splice(ordered.indexOf("news") + 1, 0, "intelligence-lab");
+    }
+  }
+  if (!hadFavorites) {
+    const currentIndex = ordered.indexOf("favorites");
+    const intelligenceIndex = ordered.indexOf("intelligence-lab");
+    if (
+      currentIndex >= 0 &&
+      intelligenceIndex >= 0 &&
+      currentIndex !== intelligenceIndex + 1
+    ) {
+      ordered.splice(currentIndex, 1);
+      ordered.splice(ordered.indexOf("intelligence-lab") + 1, 0, "favorites");
     }
   }
   return ordered;

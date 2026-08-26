@@ -782,21 +782,30 @@ pub(crate) async fn open_book(
     log(&format!("open_book id={id}"));
     let id_num: u64 = id.parse().map_err(|_| "无效的图书 ID".to_string())?;
     // 源文件丢失则不开空窗，直接给出可读的提示
-    {
+    let format = {
         let lib = state.library.lock().unwrap();
         if let Some(b) = lib.get(id_num) {
             if !b.path.exists() {
                 return Err("源文件已丢失，请在书架上对这本书「重新定位」。".to_string());
             }
+            b.format.clone()
+        } else {
+            String::new()
         }
+    };
+    let result = match window_commands::ensure_reader_window(&app, state.inner(), id_num) {
+        Ok(_) => window_commands::wait_for_reader_open_completion(&app, id_num, started).await,
+        Err(error) => Err(error),
+    };
+    if let Ok(timing) = result.as_ref() {
+        window_commands::record_actual_reader_open(&app, id_num, &format, *timing);
     }
-    let result = window_commands::ensure_reader_window(&app, state.inner(), id_num).map(|_| ());
     log(&format!(
         "open_book complete id={id_num} ok={} elapsed_ms={}",
         result.is_ok(),
         started.elapsed().as_millis()
     ));
-    result
+    result.map(|_| ())
 }
 
 /// 书架全文检索点击结果：打开（或聚焦）这本书，并跳到命中所在章节、高亮搜索词。

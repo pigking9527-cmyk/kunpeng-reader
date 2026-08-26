@@ -5,6 +5,13 @@ interface ReaderPageAnchor { range?:Range; el?:Element; modeSwitchMarker?:boolea
 interface ReaderRelayoutOptions { anchor?:ReaderPageAnchor|null; anchorOffset?:number|null; modeSwitch?:boolean; forceAnchorColumn?:boolean; preserveLeadMedia?:boolean; sidePaneResize?:boolean; exactScroll?:boolean; scrollOffset?:number; alignDualAnchor?:boolean; }
 interface ReaderPageCache { sig:string; pages:number[]; complete?:boolean; }
 interface ReaderChapterPayload { body?:string; head?:string; }
+interface ReaderInitialChapterPayload extends ReaderChapterPayload { chapter?:number; conversion?:string; inline?:boolean; }
+interface ReaderEngineBindRequest {
+  id?:string|number; chapterCount?:number; resumeChapter?:number; resumeFrac?:number;
+  resumePosition?:ReaderStoredPosition|null; settings?:Partial<ReaderSettings>;
+  textConversion?:string; benchmark?:boolean; initialChapter?:ReaderInitialChapterPayload|null;
+}
+interface ReaderStylesheetLoadMetrics { stylesheet_count:number;stylesheet_reused:number;stylesheet_cssom_ready:number;stylesheet_load_event:number;stylesheet_error_event:number;stylesheet_timeout:number;layout_frame_wait_ms?:number;layout_apply_ms?:number;layout_finalize_ms?:number;layout_compute_ms?:number;display_frame_wait_ms?:number;image_total?:number;image_blocking?:number;image_deferred?:number;resource_timeout?:number;payload_inline_hit?:number; }
 interface ReaderPageLayout { l:number;r:number;gap:number;colW:number;colPitch:number;pageStep:number;width?:number; }
 interface ReaderSourceRecord { node:Text; start:number; end:number; }
 interface ReaderPageTurnTrace { id: number; direction: string; chapter: number; page: number; input: string; detail: ReaderPageTraceDetail | null; }
@@ -51,7 +58,7 @@ interface ReaderTtsMapEntry { node:Text; start:number; end:number; }
 interface ReaderTtsSentence { text:string; start:number; end:number; }
 interface ReaderTtsCacheEntry { audio:string; marks:ReaderPageMessage[]; err?:number; }
 type ReaderPageCopy=Record<string,string>;
-interface ReaderPageWindow extends Window { __CH__?: number; __ID__?: string | number; __readerSideViewportTxn?: ReaderSideViewportTransaction|null; replayPendingReaderModeInput?:(input:ReaderModeReplayInput)=>void; ReaderHighlightMenuSettings?:Readonly<{get():object;update(value:HighlightMenuPreferencesInput):object;activate():object}>; }
+interface ReaderPageWindow extends Window { __CH__?: number; __ID__?: string | number; __INITIAL_CHAPTER__?: ReaderInitialChapterPayload; __READER_ENGINE_WARM__?: boolean; __readerSideViewportTxn?: ReaderSideViewportTransaction|null; replayPendingReaderModeInput?:(input:ReaderModeReplayInput)=>void; ReaderHighlightMenuSettings?:Readonly<{get():object;update(value:HighlightMenuPreferencesInput):object;activate():object}>; }
 interface ReaderHighlightRegistry {set(name:string,highlight:Highlight):void;delete(name:string):boolean}
 interface ReaderSideViewportTransaction { id: string | number; offset: number; chapter: number; viewportOffset: number; preparedWidth: number; preparedAt: number; committed: boolean; finished: boolean; expectedWidth?: number; committedAt?: number; restoreAttempts?: number; restoreTimer?: ReturnType<typeof setTimeout>; }
 interface ReaderPreviewElement extends HTMLElement { _rrPreviewSource?: Element | null; _rrReservedBlank?: number; _rrRenderLayoutCount?:number; _rrRenderNodeCount?:number; }
@@ -98,6 +105,7 @@ export interface ReaderPageSharedRuntime {
   clearModeSwitchAnchor: () => void;
   beginTurnFx: (direction: number, move: () => void) => void;
   beginPageTurnBugTrace: (direction: string) => ReaderPageTurnTrace;
+  observePageTurnPerformance: (trace?: ReaderPageTurnTrace | null) => void;
   scrollStartEpsilonPx: () => number;
   scrollBottomSafePx: () => number;
   schedulePagedImagePreview: () => void;
@@ -144,6 +152,7 @@ export function installReaderPageLayoutAnnotations(sharedRuntime: ReaderPageShar
   const clearModeSwitchAnchor = () => runtime.clearModeSwitchAnchor();
   const beginTurnFx = (...args: Parameters<NonNullable<ReaderPageSharedRuntime["beginTurnFx"]>>) => runtime.beginTurnFx(...args);
   const beginPageTurnBugTrace = (...args: Parameters<NonNullable<ReaderPageSharedRuntime["beginPageTurnBugTrace"]>>) => runtime.beginPageTurnBugTrace(...args);
+  const observePageTurnPerformance = (...args: Parameters<NonNullable<ReaderPageSharedRuntime["observePageTurnPerformance"]>>) => runtime.observePageTurnPerformance(...args);
   const scrollStartEpsilonPx = () => runtime.scrollStartEpsilonPx();
   const scrollBottomSafePx = () => runtime.scrollBottomSafePx();
   const schedulePagedImagePreview = () => runtime.schedulePagedImagePreview();
@@ -163,11 +172,14 @@ const readerAnimationGroupByKey={annotationAdd:'readerPage',readingMode:'readerP
 let readerAnimationSettingsOverride: Record<string, boolean> | null=null;
 function readerAnimationSettingOn(key: keyof typeof readerAnimationGroupByKey): boolean{let values: Record<string,boolean>={};try{const parsed=JSON.parse(localStorage.getItem(READER_ANIMATION_SETTINGS_KEY)||'{}');if(parsed&&typeof parsed==='object')values=Object.assign(values,parsed);}catch(_){}if(readerAnimationSettingsOverride)values=readerAnimationSettingsOverride;const group=readerAnimationGroupByKey[key];return values.allAnimations!==false&&values[key]!==false&&(!group||values[group]!==false);}
 const IS_MAC_WEBKIT=/Macintosh|Mac OS X/.test(navigator.userAgent||'')&&/AppleWebKit/.test(navigator.userAgent||'')&&!/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent||'');
+const IS_CHROMIUM_WEBVIEW=/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent||'');
 let root: ReaderPageRootElement,pager: HTMLElement,scroller: HTMLElement,pageMask: HTMLElement|null=null,virtualPage: HTMLElement|null=null,scrollPreview: ReaderPreviewElement|null=null,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,dualStartColumn=0,dualContinuationChapter=-1,dualContinuationEntry=false,headSeen: Record<string, Promise<void>>={},chapChars=0,scrollBreaks: number[]=[0],scrollPages: ReaderScrollSlice[]=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache: ReaderPageFlowItem[]=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget: number|null=null,scrollActiveSlice: ReaderScrollSlice|null=null,scrollPagedView=true,sideAnchorVirtualOffset: number|null=null,macPageRenderDiagSig='',macVirtualPageCacheKey='',macVirtualPageCache: ReaderScrollSlice|null=null,fastTextNodeOffsets=new WeakMap<Text,number>(),macVirtualPageCacheByKey=new Map<string,ReaderScrollSlice>(),macVirtualPagePrefetchTimers=new Map<string,ReturnType<typeof setTimeout>>(),chapterPayloadCache=new Map<string,Required<ReaderChapterPayload>>(),chapterPayloadLoads=new Map<string,Promise<Required<ReaderChapterPayload>>>(),chapterPayloadPrefetchTimers=new Map<string,ReturnType<typeof setTimeout>>(),chapterOpeningSnapshotTimers=new Map<string,ReturnType<typeof setTimeout>>();
 let downX: number|null=null,downY: number|null=null,didDrag=false;
 let overlayOpen=false; // 外壳里搜索框/设置面板是否打开（打开时正文点击只用于关闭它）
 let ttsOn=false,ttsMap: ReaderTtsMapEntry[]=[],ttsText='',ttsSents: ReaderTtsSentence[]=[],ttsVoice: SpeechSynthesisVoice|null=null,ttsRate=1,ttsSi=0,ttsGen=0,ttsAudioEl: HTMLAudioElement|null=null,ttsCache: Record<number,ReaderTtsCacheEntry>={},ttsWaiting=-1,ttsPlayedAny=false; // 朗读状态
 let CH=window.__CH__||0, ID=window.__ID__||0;
+const readerEngineWarm=window.__READER_ENGINE_WARM__===true;
+let readerEngineBound=!readerEngineWarm;
 let VC: Array<{ch:number;frag?:string}>|null=null; // 虚拟章节列表 [{ch:spine序号, frag:锚点}]（按目录顺序），用于在大文件内细分逻辑章节
 function computeLogical(){
   if(!VC||!VC.length)return {lc:curCh,lt:CH};
@@ -377,10 +389,13 @@ function tightenPagedParagraphTails(){
     }
     return first&&last?{first:first,last:last}:null;
   }
+  const paragraphBounds=paragraphs.map(bounds);
   for(let i=0;i<paragraphs.length-1;i++){
     const previous=paragraphs[i],next=paragraphs[i+1];
     if(!previous||!next)continue;
-    const before=bounds(previous),after=bounds(next);
+    // Each paragraph participates in two adjacent pairs. Cache its Range geometry
+    // once; cold chapters previously forced Chromium to lay out the same text twice.
+    const before=paragraphBounds[i],after=paragraphBounds[i+1];
     if(!before||!after||after.first.page!==before.last.page+1)continue;
     stats.cross++;
     // Range 的 rect 是字形墨迹框（本书为 27px），不是完整的 38px 行盒。
@@ -397,6 +412,7 @@ function tightenPagedParagraphTails(){
 function applyCols(){
   let vw=window.innerWidth, vh=viewportHeight(), pageH=pagedBoxHeight(), pl=pageLayout();
   const fastLargeChapter=fastChapterLayout&&!isScrollMode();
+  const fastChromiumPageCount=IS_CHROMIUM_WEBVIEW&&!isScrollMode();
   document.body.classList.toggle('scroll-mode',isScrollMode());
   document.body.classList.toggle('line-paged-mode',false);
   if(pageMask&&!isScrollMode())pageMask.style.height='0px';
@@ -507,8 +523,11 @@ if(scroller){scroller.style.top='0';scroller.style.bottom='0';scroller.style.lef
   // rr-end 只在滚动模式中提供尾部空间；分页样式会隐藏它。
   // 页数计算必须以它是否真正参与当前分栏布局为准。
   pageStep=pl.pageStep;
-  pagesInCh=fastLargeChapter?fastPagedPageCount(root):pagedPageCountFromContent(root);
-  if(!fastLargeChapter)pagesInCh=trimTrailingBlankPagedViews(root,pagesInCh);
+  // WebView2 exposes the final multi-column width synchronously after style/font
+  // gates. Its scrollWidth avoids an O(all text nodes) Range scan and already
+  // discounts the hidden rr-end column. WebKit retains the exact fallback scan.
+  pagesInCh=(fastLargeChapter||fastChromiumPageCount)?fastPagedPageCount(root):pagedPageCountFromContent(root);
+  if(!fastLargeChapter&&!fastChromiumPageCount)pagesInCh=trimTrailingBlankPagedViews(root,pagesInCh);
 }
 function setViewOffset(){
   if(isLinePagedMode()){
@@ -2841,29 +2860,90 @@ function watchFlowMedia(){
     if(el instanceof HTMLImageElement&&el.complete&&el.naturalWidth>0)setTimeout(refreshLayoutAfterMedia,0);
   }
 }
-function activeReaderFontReady(): boolean{
-  if(!document.fonts||typeof document.fonts.check!=='function')return false;
+function activeReaderFontSpec(): string{
   try{
     const style=getComputedStyle(root),fontSize=Math.max(1,parseFloat(style.fontSize)||Number(S.fontSize)||18);
     const fontFamily=style.fontFamily||S.fontFamily||'serif';
-    return document.fonts.check(fontSize+'px '+fontFamily,'中文Aa');
-  }catch(_){return false;}
+    return fontSize+'px '+fontFamily;
+  }catch(_){return '';}
 }
-function waitForFlowResources(timeoutMs = 1600): Promise<void>{
+function activeReaderFontReady(fontSpec = activeReaderFontSpec()): boolean{
+  if(!fontSpec||!document.fonts||typeof document.fonts.check!=='function')return false;
+  try{return document.fonts.check(fontSpec,'中文Aa');}catch(_){return false;}
+}
+function waitForActiveReaderFont(): Promise<void>{
+  const fonts=document.fonts,fontSpec=activeReaderFontSpec();
+  if(!fonts||!fontSpec||activeReaderFontReady(fontSpec))return Promise.resolve();
+  // FontFaceSet.ready 会等待本书声明的所有字体，包括正文没有使用、失败前会长时间
+  // 挂起的远端字体。load(fontSpec) 只等待当前正文实际使用的字体，字体就绪后再
+  // 分页的正确性门禁不变，同时避免无关字体拖慢首屏。
+  const requested=typeof fonts.load==='function'?fonts.load(fontSpec,'中文Aa'):fonts.ready;
+  return Promise.resolve(requested).then(function(){return;},function(){return;});
+}
+function waitForReaderFonts(): Promise<void>{
+  const fonts=document.fonts;
+  if(!fonts)return Promise.resolve();
+  const active=activeReaderFontReady()?Promise.resolve():waitForActiveReaderFont();
+  return active.then(function(){
+    // 章节 CSS 可以给标题、引文等子元素指定不同字体。FontFaceSet.status 只在
+    // 字体已经被页面实际触发时进入 loading；此时必须等 ready，避免字体换入后
+    // 改变断行和页数。loaded 状态下声明但未使用的字体仍不会进入等待路径。
+    if(fonts.status==='loading'&&fonts.ready)return Promise.resolve(fonts.ready).then(function(){return;},function(){return;});
+    return;
+  });
+}
+function installChapterBodyForInitialLayout(body: string): void{
+  if(!isScrollMode()){root.innerHTML=body;return;}
+  // 在节点进入正在显示的文档前先把滚动模式图片设为 lazy。若先写入
+  // root.innerHTML，Chromium 会立刻排队整章图片请求；即使后面不等待屏外图片，
+  // 连续切换多本图书时这些不可取消的旧请求仍会压满 WebView/原生资源线程。
+  const template=document.createElement('template');template.innerHTML=body;
+  const imgs=template.content.querySelectorAll<HTMLImageElement>('img');
+  for(let i=0;i<imgs.length;i++)imgs.item(i).loading='lazy';
+  root.replaceChildren(template.content);
+}
+function prepareFlowImageForLayout(img: HTMLImageElement): boolean{
+  if(img.complete)return false;
+  const picture=img.parentElement instanceof HTMLPictureElement?img.parentElement:null;
+  if(!img.currentSrc&&!img.getAttribute('src')&&!img.getAttribute('srcset')&&!picture?.querySelector('source[srcset]'))return false;
+  return true;
+}
+function flowImageBlocksInitialLayout(img: HTMLImageElement): boolean{
+  if(!isScrollMode())return true;
+  // 滚动模式已有媒体 load/error 监听，会在后续图片到达时重建滚动分页。
+  // 首屏只需等待当前视口及其上方图片；整章后部图片不能继续阻塞显示。
+  // visibility:hidden 仍参与布局，因此这里可以在正文揭示前安全读取位置。
+  try{
+    const rect=img.getBoundingClientRect(),view=viewRect();
+    if(!Number.isFinite(rect.top)||!Number.isFinite(view.bottom))return true;
+    return rect.top<=view.bottom+Math.max(48,(view.height||0)*0.15);
+  }catch(_){return true;}
+}
+function waitForFlowResources(timeoutMs = 1600): Promise<ReaderStylesheetLoadMetrics>{
   const jobs: Promise<void>[]=[],limit=Math.max(1,Number(timeoutMs)||1600);
-  // EPUB 可能声明与当前正文无关、迟迟不结束的远端字体。活动字体已经可用时
-  // 不等待整个 FontFaceSet；真正尚未就绪的正文字体仍保持原来的等待门禁。
-  if(document.fonts&&document.fonts.ready&&!activeReaderFontReady())jobs.push(Promise.resolve(document.fonts.ready).then(function(){return;},function(){return;}));
+  const metrics: ReaderStylesheetLoadMetrics={stylesheet_count:0,stylesheet_reused:0,stylesheet_cssom_ready:0,stylesheet_load_event:0,stylesheet_error_event:0,stylesheet_timeout:0,image_total:0,image_blocking:0,image_deferred:0,resource_timeout:0};
+  if(document.fonts)jobs.push(waitForReaderFonts());
   const imgs=root.querySelectorAll<HTMLImageElement>('img');
   for(let i=0;i<imgs.length;i++){
-    var img=imgs.item(i);if(img.complete)continue;
+    var img=imgs.item(i);if(!prepareFlowImageForLayout(img))continue;
+    metrics.image_total=(metrics.image_total||0)+1;
+    if(!flowImageBlocksInitialLayout(img)){img.loading='lazy';metrics.image_deferred=(metrics.image_deferred||0)+1;continue;}
+    // 分页图片以及滚动首屏附近图片必须立即取得固有尺寸，确保初次页数与断行
+    // 正确；只有真正参与本次布局门禁的图片才提升为 eager。
+    if(img.loading==='lazy')img.loading='eager';
+    metrics.image_blocking=(metrics.image_blocking||0)+1;
     jobs.push(new Promise<void>(function(resolve){
       const target=img,done=function(){target.removeEventListener('load',done);target.removeEventListener('error',done);resolve();};
       target.addEventListener('load',done);target.addEventListener('error',done);
     }));
   }
-  if(!jobs.length)return Promise.resolve();
-  return Promise.race<void>([Promise.allSettled(jobs).then(function(){return;}),new Promise<void>(function(resolve){setTimeout(resolve,limit);})]);
+  if(!jobs.length)return Promise.resolve(metrics);
+  return new Promise<ReaderStylesheetLoadMetrics>(function(resolve){
+    let settled=false;
+    const finish=function(timedOut: boolean){if(settled)return;settled=true;clearTimeout(timer);if(timedOut)metrics.resource_timeout=1;resolve(metrics);};
+    const timer=setTimeout(function(){finish(true);},limit);
+    Promise.allSettled(jobs).then(function(){finish(false);});
+  });
 }
 function markNoteSeparators(){
   if(!root)return;
@@ -3095,6 +3175,15 @@ function rememberChapterPayload(key: string,payload: Required<ReaderChapterPaylo
   while(chapterPayloadCache.size>4){const oldest=chapterPayloadCache.keys().next().value;if(typeof oldest!=='string')break;chapterPayloadCache.delete(oldest);}
   return payload;
 }
+function seedInitialChapterPayload(): void{
+  const initial=window.__INITIAL_CHAPTER__;delete window.__INITIAL_CHAPTER__;
+  if(!initial||(initial.conversion!=='original'&&initial.conversion!=='t2s'&&initial.conversion!=='s2t')||!Number.isInteger(initial.chapter)||typeof initial.body!=='string'||typeof initial.head!=='string')return;
+  const chapter=Number(initial.chapter);
+  if(chapter<0||chapter>=CH)return;
+  const conversion=initial.conversion;
+  rememberChapterPayload(chapterPayloadKey(chapter,conversion),{body:initial.body,head:initial.head});
+  if(initial.inline)initialChapterPayloadKey=chapterPayloadKey(chapter,conversion);
+}
 function loadChapterPayload(chapter: number,conversion: 'original'|'t2s'|'s2t'): Promise<Required<ReaderChapterPayload>>{
   const key=chapterPayloadKey(chapter,conversion),cached=chapterPayloadCache.get(key);
   if(cached){chapterPayloadCache.delete(key);chapterPayloadCache.set(key,cached);return Promise.resolve(cached);}
@@ -3156,32 +3245,55 @@ function scheduleAdjacentChapterPayloadPrefetch(chapter: number,conversion: 'ori
   // 前进方向优先；反方向用于用户在章节边界立即翻回时避免再次读取正文。
   schedule(chapter+1,72);schedule(chapter-1,180);
 }
+let openingBenchmarkEnabled=false,openingPhaseReportingEnabled=true;
+let openingLayoutMetrics: ReaderStylesheetLoadMetrics|undefined;
+let initialChapterPayloadKey='';
+function reportOpeningBenchmarkPhase(phase: string,metrics?: Partial<ReaderStylesheetLoadMetrics>): void{
+  if(openingBenchmarkEnabled||openingPhaseReportingEnabled)parent.postMessage({readerPerf:phase,readerPerfMetrics:metrics},'*');
+}
 function showChapter(i: number,where: ReaderWhere,frag: string|null = null,skippedBlankChapters = 0): Promise<void>{
   i=Math.max(0,Math.min(CH-1,i));
+  if(skippedBlankChapters===0)openingLayoutMetrics=undefined;
   runtime.chapterLoadFailed=false;
   let showStarted=performance.now(),fetchDone=showStarted,bugTraceToken=beginChapterBugTrace(i,where);
   const conversion: 'original'|'t2s'|'s2t'=S.textConversion==='t2s'||S.textConversion==='s2t'?S.textConversion:'original';
+  const payloadKey=chapterPayloadKey(i,conversion),payloadInlineHit=payloadKey===initialChapterPayloadKey;
   return loadChapterPayload(i,conversion).then(function(d){
     fetchDone=performance.now();
+    if(payloadInlineHit)initialChapterPayloadKey='';
+    reportOpeningBenchmarkPhase('chapter_payload_ready',{payload_inline_hit:payloadInlineHit?1:0});
     const body=d.body||'';fastChapterLayout=largeChapterFastLayout(body);
     // EPUB 章节样式通过 reader:// link 异步加载。必须等样式成功、失败或超时后
     // 再计算分栏；否则同一章可能先按无样式正文算 36 页，随后变成 12 页，
     // 保存的章内比例在重开时就会落到相邻页甚至相邻章节。
     const headReady=d.head?injectHead(d.head,headSeen):Promise.resolve();
-    return headReady.then(function(){
+    return headReady.then(function(styleMetrics){
+      reportOpeningBenchmarkPhase('chapter_styles_ready',styleMetrics===undefined?undefined:styleMetrics);
       const enteringAfterDualContinuation=where==='after-dual-continuation';
-      curCh=i;pageInCh=0;dualStartColumn=enteringAfterDualContinuation?1:0;dualContinuationEntry=enteringAfterDualContinuation;dualContinuationChapter=-1;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;const port=scrollPort();if(port)port.scrollTop=0;/* 最终页位移确定前不绘制新章节，避免跨章时短暂露出错误页。 */root.style.visibility='hidden';root.innerHTML=body;normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();
+      curCh=i;pageInCh=0;dualStartColumn=enteringAfterDualContinuation?1:0;dualContinuationEntry=enteringAfterDualContinuation;dualContinuationChapter=-1;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;const port=scrollPort();if(port)port.scrollTop=0;/* 最终页位移确定前不绘制新章节，避免跨章时短暂露出错误页。 */root.style.visibility='hidden';installChapterBodyForInitialLayout(body);normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();reportOpeningBenchmarkPhase('chapter_dom_ready');
       if(!chapterHasVisibleContent()&&(skippedBlankChapters||0)<16){const nextBlankChapter=where==='end'?i-1:i+1;if(nextBlankChapter>=0&&nextBlankChapter<CH)return showChapter(nextBlankChapter,where==='end'?'end':'start',null,(skippedBlankChapters||0)+1);}
-      chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();
-      return appendDualChapterContinuation(conversion).then(function(){
+      chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;
+      // 只有双页末栏需要在追加下一章预览前先取得列几何。单页/滚动模式
+      // 原先会在资源门禁前后重复执行整套版式应用，首屏实际只需要最终一次。
+      if(isDualPage()){applyStyle();applyCols();}
+      clearHighlights();
+      return appendDualChapterContinuation(conversion).then(function(continuationAppended){
         // 双页末栏只预览下一章的第一栏；翻到下一跨时以偏移一栏的方式继续，
         // 不重复这段文字。顶部通过 dualContinuationChapter 明确标出左右两章。
         root.insertAdjacentHTML('beforeend','<div class="rr-end"></div>');
-        normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();
-        return waitForFlowResources().then(function(){return new Promise<void>(function(resolve){
-        requestAnimationFrame(function(){requestAnimationFrame(function(){
+        // 普通章节已经在首次 DOM 处理时完成注释规范化。只有双页模式确实
+        // 追加下一章时才重扫整棵 DOM；媒体监听则在最终 DOM 形成后只安装一次。
+        if(continuationAppended){normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();}
+        watchFlowMedia();
+        return waitForFlowResources().then(function(resourceMetrics){reportOpeningBenchmarkPhase('chapter_resources_ready',resourceMetrics);return new Promise<void>(function(resolve){
+        const layoutFrameWaitStarted=performance.now();
+        const performChapterLayout=function(){
+          const layoutFrameWaitMs=Math.max(0,performance.now()-layoutFrameWaitStarted);
+          const layoutComputeStarted=performance.now();
           applyStyle();applyCols();
+          const layoutApplyMs=Math.max(0,performance.now()-layoutComputeStarted);
           const finishChapterLayout=function(){
+            const layoutFinalizeStarted=performance.now();
             if(fastChapterLayout){
               if(!isScrollMode())pagesInCh=fastPagedPageCount(root);
             }else{
@@ -3193,6 +3305,14 @@ function showChapter(i: number,where: ReaderWhere,frag: string|null = null,skipp
             if(frag){const el=document.getElementById(frag);if(el)pageInCh=pageOf(el);}
             setViewOffset();root.style.visibility='';refreshHighlights();captureAnchor();report(true);notifyReaderEndIfReached(0);scheduleNoteNumberDisplayRefresh();stabilizeProgrammaticViewPaint();
             const rrBox=root.getBoundingClientRect(),pagerBox=pager.getBoundingClientRect(),rrStyle=getComputedStyle(root);
+            openingLayoutMetrics={
+              stylesheet_count:0,stylesheet_reused:0,stylesheet_cssom_ready:0,
+              stylesheet_load_event:0,stylesheet_error_event:0,stylesheet_timeout:0,
+              layout_frame_wait_ms:layoutFrameWaitMs,
+              layout_apply_ms:layoutApplyMs,
+              layout_finalize_ms:Math.max(0,performance.now()-layoutFinalizeStarted),
+              layout_compute_ms:Math.max(0,performance.now()-layoutComputeStarted)
+            };
             reportReaderPaintPerf(
               'chapter_ready',
               showStarted,
@@ -3218,7 +3338,12 @@ function showChapter(i: number,where: ReaderWhere,frag: string|null = null,skipp
             return;
           }
           finishChapterLayout();
-        });});
+        };
+        // Chromium 已在资源门禁后拿到最终 CSS、字体和图片尺寸；applyCols()
+        // 自身会强制同步布局。固定再等两帧会在连续开书时被 WebView 调度放大
+        // 到数百毫秒。WebKit 仍保留旧门禁，避免隐藏 DOM 的首帧几何不稳定。
+        if(IS_MAC_WEBKIT)requestAnimationFrame(function(){requestAnimationFrame(performChapterLayout);});
+        else performChapterLayout();
         });});
       });
     });
@@ -3440,7 +3565,7 @@ function relayout(opts: ReaderRelayoutOptions = {}): {modeSwitchVerified:boolean
   scheduleNoteNumberDisplayRefresh();
   return {modeSwitchVerified:modeSwitchVerified,anchorOffset:anchorOffset};
 }
-function schedulePageTurnBugTrace(trace: ReaderPageTurnTrace): void{setTimeout(function(){finishPageTurnBugTrace(trace);},520);}
+function schedulePageTurnBugTrace(trace: ReaderPageTurnTrace): void{observePageTurnPerformance(trace);setTimeout(function(){finishPageTurnBugTrace(trace);},520);}
 function nextPage(){
   if(queueChapterTurnInput(1)){readerBugTrace('click','chapter_queued');return;}
   if(chapterPending>0){readerBugTrace('click','chapter_pending');return;}
@@ -4523,26 +4648,51 @@ function sourceOffsetAnchor(offset: number): ReaderStoredAnchor{
     viewport_offset:0
   };
 }
-function injectHead(htmlStr: string,seen: Record<string,Promise<void>>): Promise<void>{
+function stylesheetCssomReady(sheet: CSSStyleSheet|null,visiting = new Set<CSSStyleSheet>()): boolean{
+  if(!sheet||visiting.has(sheet))return !!sheet;
+  visiting.add(sheet);
+  try{
+    const rules=sheet.cssRules;
+    for(let i=0;i<rules.length;i++){
+      const rule=rules.item(i);
+      if(rule&&rule.type===CSSRule.IMPORT_RULE&&!stylesheetCssomReady((rule as CSSImportRule).styleSheet,visiting))return false;
+    }
+    return true;
+  }catch(_){return false;}
+}
+function injectHead(htmlStr: string,seen: Record<string,Promise<void>>): Promise<ReaderStylesheetLoadMetrics>{
   const tmp=document.createElement('div');tmp.innerHTML=htmlStr;
   const nodes=tmp.querySelectorAll('link,style');
   const waits: Promise<void>[]=[];
+  const metrics: ReaderStylesheetLoadMetrics={stylesheet_count:0,stylesheet_reused:0,stylesheet_cssom_ready:0,stylesheet_load_event:0,stylesheet_error_event:0,stylesheet_timeout:0};
   for(let i=0;i<nodes.length;i++){
     var node=requiredArrayItem(nodes,i),key=node.outerHTML;
-    const existing=seen[key];if(existing){waits.push(existing);continue;}
+    const existing=seen[key];if(existing){metrics.stylesheet_reused++;waits.push(existing);continue;}
     if(node instanceof HTMLLinkElement&&String(node.rel||node.getAttribute('rel')||'').toLowerCase()==='stylesheet'){
+      const stylesheetNode=node;
+      metrics.stylesheet_count++;
       seen[key]=new Promise(function(resolve){
-        let settled=false,timer: ReturnType<typeof setTimeout>|null=null;
-        function done(){if(settled)return;settled=true;if(timer)clearTimeout(timer);resolve();}
-        node.addEventListener('load',done,{once:true});node.addEventListener('error',done,{once:true});
-        timer=setTimeout(done,2000);document.head.appendChild(node);
+        let settled=false,timer: ReturnType<typeof setTimeout>|null=null,pollFrame=0,pollTimer: ReturnType<typeof setTimeout>|null=null,pollDelay=4;
+        function done(reason: 'cssom'|'load'|'error'|'timeout'){
+          if(settled)return;settled=true;if(timer)clearTimeout(timer);if(pollTimer)clearTimeout(pollTimer);if(pollFrame)cancelAnimationFrame(pollFrame);
+          if(reason==='cssom')metrics.stylesheet_cssom_ready++;else if(reason==='load')metrics.stylesheet_load_event++;else if(reason==='error')metrics.stylesheet_error_event++;else metrics.stylesheet_timeout++;
+          resolve();
+        }
+        function pollCssom(){
+          if(settled)return;
+          if(stylesheetCssomReady(stylesheetNode.sheet)){done('cssom');return;}
+          if(IS_MAC_WEBKIT)pollFrame=requestAnimationFrame(pollCssom);
+          else{pollTimer=setTimeout(pollCssom,pollDelay);pollDelay=Math.min(32,pollDelay+4);}
+        }
+        stylesheetNode.addEventListener('load',function(){done('load');},{once:true});stylesheetNode.addEventListener('error',function(){done('error');},{once:true});
+        timer=setTimeout(function(){done('timeout');},2000);document.head.appendChild(stylesheetNode);queueMicrotask(pollCssom);
       });
     }else{
       document.head.appendChild(node);seen[key]=Promise.resolve();
     }
     waits.push(requiredRecordValue(seen,key));
   }
-  return Promise.all(waits).then(function(){return;});
+  return Promise.all(waits).then(function(){return metrics;});
 }
 function restoreStoredReadingAnchor(anchor: ReaderStoredAnchor): boolean{
   if(!anchor||typeof sourceRangeForOffsets!=='function')return false;
@@ -4655,13 +4805,26 @@ function nearestTextOccurrence(whole: string,probe: string,expected: number): nu
   }
   return best;
 }
-function loadInit(){
+function loadInit(binding?: ReaderEngineBindRequest){
   const p=new URLSearchParams(location.search);
-  const benchmark=p.get('benchmark')==='1';
-  try{S=Object.assign(S,JSON.parse(decodeURIComponent(p.get('s')||'{}')));}catch(e){}
-  let storedPosition: ReaderStoredPosition|null=null;try{storedPosition=JSON.parse(decodeURIComponent(p.get('ra')||'null')) as ReaderStoredPosition|null;}catch(_){storedPosition=null;}
-  let rc=parseInt(p.get('rc')||'0',10)||0, rf=parseFloat(p.get('rf')||'0')||0;
+  const benchmark=binding?binding.benchmark===true:p.get('benchmark')==='1';
+  openingBenchmarkEnabled=benchmark;
+  if(binding){
+    ID=String(binding.id??'');
+    CH=Math.max(1,Math.floor(Number(binding.chapterCount)||1));
+    window.__ID__=ID;window.__CH__=CH;
+    if(binding.initialChapter)window.__INITIAL_CHAPTER__=binding.initialChapter;
+    S=Object.assign(S,binding.settings||{});
+    if(binding.textConversion==='t2s'||binding.textConversion==='s2t')S.textConversion=binding.textConversion;
+  }else{
+    try{S=Object.assign(S,JSON.parse(decodeURIComponent(p.get('s')||'{}')));}catch(e){}
+  }
+  let storedPosition: ReaderStoredPosition|null=binding?.resumePosition||null;
+  if(!binding)try{storedPosition=JSON.parse(decodeURIComponent(p.get('ra')||'null')) as ReaderStoredPosition|null;}catch(_){storedPosition=null;}
+  let rc=binding?Math.max(0,Math.floor(Number(binding.resumeChapter)||0)):parseInt(p.get('rc')||'0',10)||0;
+  let rf=binding?Math.max(0,Math.min(1,Number(binding.resumeFrac)||0)):parseFloat(p.get('rf')||'0')||0;
   if(storedPosition&&storedPosition.anchor&&Number.isFinite(storedPosition.chapter))rc=storedPosition.chapter;
+  seedInitialChapterPayload();
   showChapter(rc,'start').then(function(){
     let resumePage=Math.round(rf*(pagesInCh-1));
     const restored=storedPosition&&storedPosition.anchor&&restoreStoredReadingAnchor(storedPosition.anchor);
@@ -4688,11 +4851,16 @@ function loadInit(){
     captureAnchor();
     report(false,true);
     reveal();
-    if(benchmark){
-      parent.postMessage({readerPerf:'page_layout_ready'},'*');
-      requestAnimationFrame(function(){requestAnimationFrame(function(){parent.postMessage({readerPerf:'page_displayed'},'*');});});
-    }
+    parent.postMessage({readerPerf:'page_layout_ready',readerPerfMetrics:openingLayoutMetrics},'*');
+    const confirmVisiblePaint=function(){const displayWaitStarted=performance.now();requestAnimationFrame(function(){requestAnimationFrame(function(){parent.postMessage({readerPerf:'page_displayed',readerPerfMetrics:{
+      stylesheet_count:0,stylesheet_reused:0,stylesheet_cssom_ready:0,
+      stylesheet_load_event:0,stylesheet_error_event:0,stylesheet_timeout:0,
+      display_frame_wait_ms:Math.max(0,performance.now()-displayWaitStarted)
+    }},'*');});});};
+    if(document.visibilityState==='visible')confirmVisiblePaint();
+    else document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')confirmVisiblePaint();},{once:true});
     parent.postMessage({ready:1},'*');
+    openingPhaseReportingEnabled=false;
     scheduleMeasure(500);
   });
 }
@@ -4710,8 +4878,23 @@ function init(){
   const initialScrollPort=scrollPort();
   if(!initialScrollPort)throw new Error('Missing reader scroll port');
   initialScrollPort.addEventListener('scroll',syncScrollPageFromTop,{passive:true});
-  loadInit();
-  setTimeout(function(){reveal();parent.postMessage({ready:1},'*');},8000); // 兜底
+  if(readerEngineWarm){
+    const bindWarmEngine=function(event: MessageEvent){
+      if(event.source!==parent||readerEngineBound)return;
+      const value=event.data&&typeof event.data==='object'?(event.data as {readerEngineBind?:ReaderEngineBindRequest}).readerEngineBind:null;
+      if(!value||value.id===undefined||!Number.isFinite(Number(value.chapterCount))||Number(value.chapterCount)<1)return;
+      readerEngineBound=true;
+      window.removeEventListener('message',bindWarmEngine);
+      loadInit(value);
+    };
+    window.addEventListener('message',bindWarmEngine);
+    const memory=(performance as Performance&{memory?:{usedJSHeapSize?:number}}).memory;
+    const heapBytes=Math.max(0,Math.floor(Number(memory?.usedJSHeapSize)||0));
+    parent.postMessage({readerEngineWarmReady:1,readerEngineHeapBytes:heapBytes},'*');
+  }else{
+    loadInit();
+  }
+  setTimeout(function(){if(readerEngineBound){reveal();parent.postMessage({ready:1},'*');}},8000); // 兜底
   // 记录是否发生了拖动（用于区分“单击翻页”与“拖动选字”）
   // 使用 Pointer Events 并捕获指针：通过触控板远程操作时，旧 mouseup 可能在
   // 指针离开正文 iframe 后丢失，外层就收不到完整手势，造成书架可用而阅读页无效。

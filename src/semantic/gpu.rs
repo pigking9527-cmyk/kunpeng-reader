@@ -32,6 +32,13 @@ pub(crate) struct SemanticGpuStatus {
     pub(crate) runtime_downloaded_bytes: u64,
     pub(crate) name: String,
     pub(crate) driver: String,
+    /// `nvidia-smi` reported physical framebuffer capacity, in MiB.
+    pub(crate) total_vram_mib: Option<u64>,
+    /// `nvidia-smi` reported currently free framebuffer capacity, in MiB.
+    pub(crate) free_vram_mib: Option<u64>,
+    /// 已加载语义模型实际采用的执行路径，而不是仅凭硬件推测的能力。
+    pub(crate) active_model_device: String,
+    pub(crate) active_model_device_label: String,
     pub(crate) message: String,
 }
 
@@ -46,10 +53,44 @@ fn driver_meets_minimum(value: &str, minimum: (u32, u32)) -> bool {
     (major, minor) >= minimum
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+fn parse_nvidia_smi_line(line: &str) -> Result<(String, String, u64, u64), String> {
+    let mut fields = line.rsplitn(4, ',').map(str::trim);
+    let free_vram_mib = fields
+        .next()
+        .ok_or_else(|| "NVIDIA 驱动没有返回空闲显存".to_string())?
+        .parse::<u64>()
+        .map_err(|_| "NVIDIA 驱动返回的空闲显存无法识别".to_string())?;
+    let total_vram_mib = fields
+        .next()
+        .ok_or_else(|| "NVIDIA 驱动没有返回总显存".to_string())?
+        .parse::<u64>()
+        .map_err(|_| "NVIDIA 驱动返回的总显存无法识别".to_string())?;
+    let driver = fields
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "NVIDIA 驱动没有返回驱动版本".to_string())?;
+    let name = fields
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "NVIDIA 驱动没有返回设备名称".to_string())?;
+    Ok((
+        name.to_string(),
+        driver.to_string(),
+        total_vram_mib,
+        free_vram_mib,
+    ))
+}
+
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn query_nvidia_smi() -> Result<(String, String), String> {
+fn query_nvidia_smi() -> Result<(String, String, u64, u64), String> {
     let mut command = Command::new("nvidia-smi");
-    command.args(["--query-gpu=name,driver_version", "--format=csv,noheader"]);
+    command.args([
+        "--query-gpu=name,driver_version,memory.total,memory.free",
+        "--format=csv,noheader,nounits",
+    ]);
     #[cfg(target_os = "windows")]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let output = command
@@ -65,17 +106,13 @@ fn query_nvidia_smi() -> Result<(String, String), String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .ok_or_else(|| "NVIDIA 驱动没有返回设备信息".to_string())?;
-    let (name, driver) = line
-        .rsplit_once(',')
-        .ok_or_else(|| "NVIDIA 驱动返回的设备信息无法识别".to_string())?;
-    Ok((name.trim().to_string(), driver.trim().to_string()))
+    parse_nvidia_smi_line(line)
 }
 
 #[cfg(target_os = "windows")]
-const PROVIDER_FILES: &[(&str, u64)] = &[
-    ("onnxruntime.dll", 15_374_408),
-    ("onnxruntime_providers_cuda.dll", 312_607_776),
-    ("onnxruntime_providers_shared.dll", 22_048),
+const PROVIDER_FILES: &[&str] = &[
+    "onnxruntime_providers_cuda.dll",
+    "onnxruntime_providers_shared.dll",
 ];
 #[cfg(target_os = "linux")]
 const PROVIDER_FILES: &[&str] = &[
@@ -83,32 +120,30 @@ const PROVIDER_FILES: &[&str] = &[
     "libonnxruntime_providers_shared.so",
 ];
 
-#[cfg(target_os = "windows")]
-fn provider_component_present() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-        .is_some_and(|dir| {
-            PROVIDER_FILES.iter().all(|(name, expected_size)| {
-                std::fs::metadata(dir.join(name))
-                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() == *expected_size)
-            })
-        })
-}
-
-#[cfg(target_os = "linux")]
-fn provider_component_present() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-        .is_some_and(|dir| PROVIDER_FILES.iter().all(|name| dir.join(name).is_file()))
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn provider_component_present_in(dir: &std::path::Path) -> bool {
+    // 文件尺寸会随 ONNX Runtime 补丁和构建方式变化，不能作为版本身份。
+    // 此处只做廉价先验；随后 `cuda_runtime_ready` 的真实 Provider 注册才是
+    // 是否可用的权威判断。
+    PROVIDER_FILES.iter().all(|name| {
+        std::fs::metadata(dir.join(name))
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+    })
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn cuda_runtime_ready() -> Result<(), String> {
+fn provider_component_present() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .is_some_and(|dir| provider_component_present_in(&dir))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(super) fn cuda_runtime_ready() -> Result<(), String> {
     use ort::ep::ExecutionProvider;
 
-    super::gpu_runtime::prepare();
+    super::gpu_runtime::prepare()?;
     let mut builder = ort::session::Session::builder().map_err(|error| error.to_string())?;
     ort::ep::CUDA::default()
         .register(&mut builder)
@@ -141,40 +176,24 @@ fn cuda_runtime_error_summary(error: &str) -> String {
     }
     "CUDA 12 或 cuDNN 动态库加载失败".into()
 }
-/// FastEmbed 创建会话时使用的 CUDA Provider。Provider 注册默认允许失败并
-/// 回退 CPU，避免用户只安装了驱动、尚未安装 CUDA/cuDNN 运行依赖时打不开模型。
+/// FastEmbed 创建会话时使用的 CUDA Provider。这里要求注册失败必须返回
+/// 错误；模型层捕获错误后会用同一模型显式重试 CPU，因而状态不会把静默
+/// 回退误报为正在使用 GPU。
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn cuda_execution_providers_with_mode(
-    error_on_failure: bool,
-) -> Vec<fastembed::ExecutionProviderDispatch> {
+pub(super) fn strict_cuda_execution_providers() -> Vec<fastembed::ExecutionProviderDispatch> {
     let supported = query_nvidia_smi()
-        .map(|(_, driver)| driver_meets_minimum(&driver, MIN_CUDA_12_DRIVER))
+        .map(|(_, driver, _, _)| driver_meets_minimum(&driver, MIN_CUDA_12_DRIVER))
         .unwrap_or(false);
     if !supported || !provider_component_present() {
         return Vec::new();
     }
-    super::gpu_runtime::prepare();
-    let provider = ort::ep::CUDA::default().build();
-    vec![if error_on_failure {
-        provider.error_on_failure()
-    } else {
-        provider.fail_silently()
-    }]
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub(super) fn cuda_execution_providers() -> Vec<fastembed::ExecutionProviderDispatch> {
-    cuda_execution_providers_with_mode(false)
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub(super) fn strict_cuda_execution_providers() -> Vec<fastembed::ExecutionProviderDispatch> {
-    cuda_execution_providers_with_mode(true)
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-pub(super) fn cuda_execution_providers() -> Vec<fastembed::ExecutionProviderDispatch> {
-    Vec::new()
+    if let Err(error) = super::gpu_runtime::prepare() {
+        crate::log(&format!(
+            "semantic_gpu local_runtime_prepare_failed fallback=cpu error={error}"
+        ));
+        return Vec::new();
+    }
+    vec![ort::ep::CUDA::default().build().error_on_failure()]
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -183,6 +202,7 @@ pub(super) fn strict_cuda_execution_providers() -> Vec<fastembed::ExecutionProvi
 }
 
 fn semantic_gpu_status_blocking() -> SemanticGpuStatus {
+    let active_device = super::model::effective_runtime_device();
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         SemanticGpuStatus {
@@ -195,13 +215,19 @@ fn semantic_gpu_status_blocking() -> SemanticGpuStatus {
             runtime_downloaded_bytes: super::gpu_runtime::downloaded_bytes(),
             name: String::new(),
             driver: String::new(),
+            total_vram_mib: None,
+            free_vram_mib: None,
+            active_model_device: active_device.id().into(),
+            active_model_device_label: active_device.label().into(),
             message: "当前平台不支持 NVIDIA CUDA 加速，语义模型使用 CPU。".into(),
         }
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     match query_nvidia_smi() {
-        Ok((name, driver)) if !driver_meets_minimum(&driver, MIN_CUDA_12_DRIVER) => {
+        Ok((name, driver, total_vram_mib, free_vram_mib))
+            if !driver_meets_minimum(&driver, MIN_CUDA_12_DRIVER) =>
+        {
             let minimum = format!("{}.{}", MIN_CUDA_12_DRIVER.0, MIN_CUDA_12_DRIVER.1);
             SemanticGpuStatus {
                 detected: true,
@@ -213,12 +239,16 @@ fn semantic_gpu_status_blocking() -> SemanticGpuStatus {
                 runtime_downloaded_bytes: super::gpu_runtime::downloaded_bytes(),
                 name,
                 driver: driver.clone(),
+                total_vram_mib: Some(total_vram_mib),
+                free_vram_mib: Some(free_vram_mib),
+                active_model_device: active_device.id().into(),
+                active_model_device_label: active_device.label().into(),
                 message: format!(
                     "已检测到 NVIDIA GPU，但驱动 {driver} 低于 CUDA 12 所需版本 {minimum}，当前使用 CPU。"
                 ),
             }
         }
-        Ok((name, driver)) => {
+        Ok((name, driver, total_vram_mib, free_vram_mib)) => {
             let component_available = provider_component_present();
             let runtime_result = if component_available {
                 cuda_runtime_ready()
@@ -239,7 +269,9 @@ fn semantic_gpu_status_blocking() -> SemanticGpuStatus {
             } else {
                 let detail = cuda_runtime_error_summary(&runtime_result.unwrap_err());
                 if runtime_install_available {
-                    "缺少 CUDA 组件".into()
+                    format!(
+                        "已检测到 {name}（驱动 {driver}）。已在本机其他软件中找到完整 CUDA 12/cuDNN 9 组件，可点击加载；加载前仍使用 CPU。详情：{detail}"
+                    )
                 } else {
                     format!(
                         "已检测到 {name}（驱动 {driver}）。CUDA Provider 已安装，但 CUDA 12/cuDNN 系统依赖未就绪，当前自动使用 CPU。详情：{detail}"
@@ -256,6 +288,10 @@ fn semantic_gpu_status_blocking() -> SemanticGpuStatus {
                 runtime_downloaded_bytes: super::gpu_runtime::downloaded_bytes(),
                 name,
                 driver,
+                total_vram_mib: Some(total_vram_mib),
+                free_vram_mib: Some(free_vram_mib),
+                active_model_device: active_device.id().into(),
+                active_model_device_label: active_device.label().into(),
                 message,
             }
         }
@@ -269,6 +305,10 @@ fn semantic_gpu_status_blocking() -> SemanticGpuStatus {
             runtime_downloaded_bytes: super::gpu_runtime::downloaded_bytes(),
             name: String::new(),
             driver: String::new(),
+            total_vram_mib: None,
+            free_vram_mib: None,
+            active_model_device: active_device.id().into(),
+            active_model_device_label: active_device.label().into(),
             message: format!("{message}，当前使用 CPU。"),
         },
     }
@@ -283,7 +323,29 @@ pub(crate) async fn semantic_gpu_status() -> Result<SemanticGpuStatus, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cuda_runtime_error_summary, driver_meets_minimum, semantic_gpu_status_blocking};
+    use super::{
+        cuda_runtime_error_summary, driver_meets_minimum, parse_nvidia_smi_line,
+        semantic_gpu_status_blocking,
+    };
+
+    #[test]
+    fn parses_gpu_identity_and_memory_from_one_nvidia_smi_sample() {
+        assert_eq!(
+            parse_nvidia_smi_line("NVIDIA GeForce RTX 5070 Ti, 610.47, 16303, 7133").unwrap(),
+            (
+                "NVIDIA GeForce RTX 5070 Ti".into(),
+                "610.47".into(),
+                16_303,
+                7_133,
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_or_non_numeric_gpu_memory_samples() {
+        assert!(parse_nvidia_smi_line("NVIDIA GPU, 610.47, 16303").is_err());
+        assert!(parse_nvidia_smi_line("NVIDIA GPU, 610.47, total, free").is_err());
+    }
 
     #[test]
     fn runtime_error_summary_keeps_only_the_actionable_dependency() {
@@ -320,5 +382,23 @@ mod tests {
         assert!(!driver_meets_minimum("525.59", (525, 60)));
         assert!(driver_meets_minimum("525.60", (525, 60)));
         assert!(driver_meets_minimum("610.47", (527, 41)));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn provider_preflight_accepts_nonempty_files_without_pinning_brittle_sizes() {
+        let dir = std::env::temp_dir().join(format!(
+            "kunpeng-semantic-provider-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in super::PROVIDER_FILES {
+            std::fs::write(dir.join(name), b"runtime-version-specific").unwrap();
+        }
+        assert!(super::provider_component_present_in(&dir));
+        std::fs::write(dir.join(super::PROVIDER_FILES[0]), []).unwrap();
+        assert!(!super::provider_component_present_in(&dir));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

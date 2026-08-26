@@ -101,6 +101,25 @@ const readerShellOrigin = (document: Document): string => {
   }
 };
 
+const CONTEXT_MEDIA_BLOCKS = new Set([
+  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DD", "DIV", "DL", "DT", "FIGCAPTION", "FOOTER",
+  "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "LI", "MAIN", "NAV", "P", "PRE", "SECTION", "TD", "TH",
+]);
+const CONTEXT_MEDIA_MAX_OFFSET = 50_000_000;
+const CONTEXT_MEDIA_MAX_SPAN = 200_000;
+
+const safeContextMediaUrl = (value: unknown): string => {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw || raw.length > 8_192) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username || parsed.password) return "";
+    if ((parsed.protocol === "asset:" || parsed.protocol === "reader:") && parsed.hostname === "localhost") return parsed.href;
+    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && (parsed.hostname === "asset.localhost" || parsed.hostname === "reader.localhost")) return parsed.href;
+  } catch { /* malformed or unsupported local asset URL */ }
+  return "";
+};
+
 export function installReaderPageRuntime(g: ReaderPageRuntime): ReaderPageRuntimeApi {
   const d = g.document;
   const w = g.window;
@@ -230,6 +249,73 @@ export function installReaderPageRuntime(g: ReaderPageRuntime): ReaderPageRuntim
   };
   const schedulePagedImagePreview = (): void => { const generation = ++pagedImagePreviewGeneration; const currentPage = num(g.pageInCh); if (pagedImagePreviewFrame) g.cancelAnimationFrame(pagedImagePreviewFrame); clearPagedImagePreview(); if (!g.root || !g.pager || fn<boolean>(g, "isScrollMode") || fn<boolean>(g, "isDualPage") || g.S.epubLayoutEngine === "modern" || g.S.imagePagination !== "continuous") { tracePagedImageLayout("schedule_skipped", { image_source_page: currentPage, image_candidate_page: -1 }); syncPreviewState(); return; } tracePagedImageLayout("scheduled", { image_source_page: currentPage, image_candidate_page: currentPage + 1 }); pagedImagePreviewFrame = g.requestAnimationFrame(() => { g.requestAnimationFrame(() => { pagedImagePreviewFrame = 0; syncPreviewState(); if (generation === pagedImagePreviewGeneration) refreshPagedImagePreview(); }); }); syncPreviewState(); };
 
+  const refreshContextMediaLayout = (anchorStart: number | null): void => {
+    cancelPagedImagePreview();
+    if (typeof g.invalidateMeasure === "function") fn(g, "invalidateMeasure");
+    g.parent.postMessage({ layoutBusy: 1 }, "*");
+    if (anchorStart != null && typeof g.relayout === "function") fn(g, "relayout", { anchorOffset: anchorStart, exactScroll: typeof g.isScrollMode === "function" && fn<boolean>(g, "isScrollMode") });
+    if (typeof g.scheduleMeasure === "function") fn(g, "scheduleMeasure", 0);
+  };
+  const contextMediaBlockForRange = (range: Range, root: HTMLElement): HTMLElement | null => {
+    const boundary = range.endContainer;
+    let element = (boundary.nodeType === 1 ? boundary : boundary.parentElement ?? boundary.parentNode) as HTMLElement | null;
+    if (!element || !root.contains(element)) return null;
+    while (element && element !== root && !CONTEXT_MEDIA_BLOCKS.has(element.tagName)) element = element.parentElement;
+    return element && root.contains(element) ? element : null;
+  };
+  const applyContextMediaAsset = (value: unknown): boolean => {
+    const asset = obj(value); const root = g.root as HTMLElement | null;
+    if (!asset || !root) return false;
+    const kind = asset.kind === "image" || asset.kind === "video" ? asset.kind : "";
+    const placement = asset.placement === "chapterStart" || asset.placement === "chapterEnd" ? asset.placement : "anchor";
+    const chapter = typeof asset.chapter === "number" ? asset.chapter : Number.NaN;
+    const anchorStart = typeof asset.anchorStart === "number" ? asset.anchorStart : Number.NaN;
+    const anchorEnd = typeof asset.anchorEnd === "number" ? asset.anchorEnd : Number.NaN;
+    const assetUrl = safeContextMediaUrl(asset.assetUrl);
+    if (!kind || !assetUrl || !Number.isSafeInteger(chapter) || chapter !== num(g.curCh)) return false;
+    let block: HTMLElement | null = null;
+    if (placement === "anchor") {
+      if (typeof g.sourceRangeForOffsets !== "function") return false;
+      if (!Number.isSafeInteger(anchorStart) || !Number.isSafeInteger(anchorEnd)
+        || anchorStart < 0 || anchorEnd <= anchorStart || anchorEnd > CONTEXT_MEDIA_MAX_OFFSET
+        || anchorEnd - anchorStart > CONTEXT_MEDIA_MAX_SPAN) return false;
+      let range: Range | null = null;
+      try { range = fn<Range | null>(g, "sourceRangeForOffsets", anchorStart, anchorEnd); } catch { range = null; }
+      if (!range) return false;
+      block = contextMediaBlockForRange(range, root); if (!block) return false;
+    }
+    const anchorIdentity = placement === "anchor" ? `[data-context-media-start="${anchorStart}"][data-context-media-end="${anchorEnd}"]` : "";
+    const selector = `figure[data-reader-context-media="1"][data-context-media-kind="${kind}"][data-context-media-chapter="${chapter}"][data-context-media-placement="${placement}"]${anchorIdentity}`;
+    let figure = root.querySelector<HTMLElement>(selector);
+    if (!figure) {
+      figure = d.createElement("figure");
+      figure.className = "reader-context-media";
+      figure.setAttribute("data-reader-context-media", "1");
+      figure.setAttribute("data-context-media-kind", kind);
+      figure.setAttribute("data-context-media-chapter", String(chapter));
+      figure.setAttribute("data-context-media-placement", placement);
+      if (placement === "anchor") { figure.setAttribute("data-context-media-start", String(anchorStart)); figure.setAttribute("data-context-media-end", String(anchorEnd)); }
+      figure.setAttribute("style", "max-width:100%;break-inside:avoid;margin:1em auto;");
+      if (placement === "chapterStart") root.insertBefore(figure, root.firstChild);
+      else if (placement === "chapterEnd" || block === root) root.appendChild(figure);
+      else if (block?.parentNode) block.parentNode.insertBefore(figure, block.nextSibling);
+      else return false;
+    }
+    const caption = typeof asset.caption === "string" ? asset.caption.trim().slice(0, 2_000) : "";
+    const media = kind === "image" ? d.createElement("img") : d.createElement("video");
+    media.className = "reader-context-media__asset";
+    media.setAttribute("style", "display:block;max-width:100%;height:auto;margin:0 auto;");
+    if (kind === "image") { const image = media as HTMLImageElement; image.src = assetUrl; image.alt = caption || "伴读图片"; image.loading = "eager"; image.decoding = "async"; }
+    else { const video = media as HTMLVideoElement; video.src = assetUrl; video.controls = true; video.preload = "metadata"; video.playsInline = true; video.setAttribute("aria-label", caption || "伴读视频"); }
+    const captionElement = caption ? d.createElement("figcaption") : null;
+    if (captionElement) { captionElement.className = "reader-context-media__caption"; captionElement.textContent = caption; }
+    figure.replaceChildren(media, ...(captionElement ? [captionElement] : []));
+    const layoutAnchor = placement === "anchor" ? anchorStart : null;
+    media.addEventListener(kind === "image" ? "load" : "loadedmetadata", () => refreshContextMediaLayout(layoutAnchor), { once: true });
+    refreshContextMediaLayout(layoutAnchor);
+    return true;
+  };
+
   const handleSettings = (data: Bag): void => { const settings = obj(data.settings); if (!settings) return; const requestedFlow = settings.flowMode || g.S.flowMode; if (data.deferModeChange && requestedFlow !== g.S.flowMode) { g.pendingReaderModeSettings = { ...settings }; return; } g.pendingReaderModeSettings = null; const previousFlow = g.S.flowMode; const previousPageMode = g.S.pageMode; const previousLayoutEngine = g.S.epubLayoutEngine === "modern" ? "modern" : "legacy"; const previousFont = g.S.fontFamily; const previousConversion = g.S.textConversion; const previousImages = g.S.imagePagination; const nextLayoutEngine = settings.epubLayoutEngine === "modern" ? "modern" : "legacy"; const layoutEngineChanged = nextLayoutEngine !== previousLayoutEngine; const imageOnly = !layoutEngineChanged && settings.imagePagination !== undefined && previousImages !== settings.imagePagination && Object.keys(settings).every((key) => key === "imagePagination" || settings[key] === g.S[key]); const gapOnly = !layoutEngineChanged && settings.dualPageGap !== undefined && Object.keys(settings).every((key) => key === "dualPageGap" || settings[key] === g.S[key]); const nextFlow = settings.flowMode || previousFlow; const nextPage = settings.pageMode || previousPageMode; const changingMode = nextFlow !== previousFlow || nextPage !== previousPageMode || layoutEngineChanged; const previousSignature = fn<string>(g, "pageCountSig"); const stored = fn<number | null>(g, "anchorTextOffset", g.curTopAnchor); let anchor: Anchor | null = null; if (changingMode && stored != null && fn<boolean>(g, "anchorValid", g.curTopAnchor)) anchor = g.curTopAnchor as Anchor; else if (changingMode && typeof g.visibleTopTextAnchor === "function") anchor = fn<Anchor | null>(g, "visibleTopTextAnchor"); if (!fn<boolean>(g, "anchorValid", anchor)) anchor = fn<Anchor | null>(g, "topAnchor"); g.modeSwitchRecoveryOffset = null; if (!fn<boolean>(g, "anchorValid", anchor) && fn<boolean>(g, "anchorValid", g.curTopAnchor)) anchor = g.curTopAnchor as Anchor; if (fn<boolean>(g, "anchorValid", anchor)) g.curTopAnchor = anchor; const offset = fn<number | null>(g, "anchorTextOffset", anchor); const imageAnchor = offset == null ? fn<unknown>(g, "captureImageVisualAnchor") : null; const preserveLeadMedia = changingMode && offset != null && typeof g.hasVisibleLeadMediaBeforeAnchor === "function" ? fn<boolean>(g, "hasVisibleLeadMediaBeforeAnchor", offset) : false; const diagnostics = changingMode && typeof g.modeSwitchDiagBegin === "function" ? fn<number>(g, "modeSwitchDiagBegin", previousFlow, nextFlow, previousPageMode, nextPage, offset, stored) : 0;
     // A shell settings replay may arrive just after a click page turn.  It must
     // not turn off scroll paging (and therefore remove its partial-line mask)
@@ -242,6 +328,7 @@ export function installReaderPageRuntime(g: ReaderPageRuntime): ReaderPageRuntim
     if (diagnostics) { fn(g, "modeSwitchDiagLog", diagnostics, "after_relayout", offset); fn(g, "modeSwitchDiagSchedule", diagnostics, offset); } if (flowChanged || pageChanged) fn(g, "scheduleImageVisualAnchorRestore", imageAnchor); fn(g, "scheduleMeasure"); const replay = g.pendingReaderModeReplay; g.pendingReaderModeReplay = null; if (replay) g.requestAnimationFrame(() => { g.pendingReaderModeApplying = false; w.replayPendingReaderModeInput?.(replay); }); else g.pendingReaderModeApplying = false; };
 
   const handleData = (data: Bag): void => {
+    if (data.contextMediaAsset !== undefined) { applyContextMediaAsset(data.contextMediaAsset); return; }
     const menu = obj(data.readerHighlightMenuSettings); if (menu) { const id = Math.max(0, Number.parseInt(String(menu.requestId), 10) || 0); const api = w.ReaderHighlightMenuSettings; if (id && api) { const operation = String(menu.operation || ""); const settings = operation === "get" ? api.get() : operation === "update" ? api.update(menu.settings) : operation === "activate" ? api.activate() : null; if (settings) g.parent.postMessage({ readerHighlightMenuSettings: { requestId: id, settings } }, "*"); } return; }
     if (data.showHighlightMenuSettings) { if (typeof g.showHlSettings === "function") fn(g, "showHlSettings", g.selMenu || g.hlMenu); return; }
     if (data.readerGestureAction === "back") { const closed = typeof g.closeReaderPageGestureSurface === "function" && Boolean(fn(g, "closeReaderPageGestureSurface")); g.parent.postMessage({ readerGestureSurfaceClosed: closed }, "*"); return; }

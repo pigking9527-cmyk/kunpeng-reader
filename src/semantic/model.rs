@@ -1,14 +1,17 @@
 //! 语义模型选择、磁盘布局和运行时装载。
 //!
-//! 阅读器只保留两种 FastEmbed 内置的 BGE 中文模型：轻量的 Small 与更高
-//! 精度的 Large。这样模型下载、索引格式与发布包保持单一路径，不依赖自定义
-//! ONNX 转换包或 GPU 运行时。
+//! BGE-M3 的稠密向量使用 BAAI 发布的非量化 ONNX：有可用 CUDA Provider 时
+//! 优先 GPU，初始化失败则用同一份 FP32 图回退 CPU。稀疏/ColBERT 继续使用
+//! FastEmbed 的联合 INT8 图并固定在 CPU，避免把 CPU 量化算子误交给 CUDA。
 
-use super::{accelerator, clear_sem_query_cache, clear_sem_status_cache, gpu, profile, retrieval};
+use super::{
+    accelerator, clear_sem_query_cache, clear_sem_status_cache, device, gpu, m3, profile,
+    retrieval, solution,
+};
 use crate::semantic_core::cosine;
 use crate::semantic_tasks::{begin_semantic_task, finish_semantic_task};
 use crate::AppState;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard};
 use tauri::Manager;
 
 pub(super) const DEFAULT_SEM_MODEL: &str = "bge-small-zh-v1.5";
@@ -23,6 +26,8 @@ pub(super) const SEMANTIC_MODEL_MISSING: &str =
 /// 模型 id 会写入向量索引元数据，避免不同维度的向量被误混用。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SemanticModel {
+    Qwen3Embedding06,
+    Qwen3Embedding8,
     BgeSmallZhV15,
     BgeLargeZhV15,
     BgeM3,
@@ -32,18 +37,105 @@ pub(super) enum SemanticModel {
 /// 统一两类 FastEmbed 运行时。BGE-M3 不能只走 TextEmbedding：它的同一次
 /// 推理还会给出稀疏词权重与 ColBERT token 向量，供混合检索使用。
 pub(crate) enum SemanticEmbedder {
-    Text(fastembed::TextEmbedding),
-    M3(fastembed::Bgem3Embedding),
+    Text(Box<fastembed::TextEmbedding>),
+    Qwen(super::qwen::QwenEmbeddingClient),
+    M3 {
+        dense: Box<fastembed::TextEmbedding>,
+        joint: Box<fastembed::Bgem3Embedding>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum SemanticRuntimeDevice {
+    #[default]
+    NotLoaded,
+    Cpu,
+    Cuda,
+    /// 由仅监听 127.0.0.1 的受管 llama-server 提供；具体 CPU/GPU 模式
+    /// 由本地运行控制器决定。
+    LocalService,
+    LocalServiceCpu,
+    LocalServiceCuda,
+    /// BGE-M3 稠密向量走 CUDA；稀疏与 ColBERT 联合图固定走 CPU。
+    CudaDenseCpuJoint,
+}
+
+impl SemanticRuntimeDevice {
+    pub(super) const fn id(self) -> &'static str {
+        match self {
+            Self::NotLoaded => "not_loaded",
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::LocalService => "local_service",
+            Self::LocalServiceCpu => "cpu",
+            Self::LocalServiceCuda => "cuda",
+            Self::CudaDenseCpuJoint => "cuda_dense_cpu_joint",
+        }
+    }
+
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::NotLoaded => "尚未加载",
+            Self::Cpu => "CPU",
+            Self::Cuda => "NVIDIA GPU",
+            Self::LocalService => "本机 Qwen 服务",
+            Self::LocalServiceCpu => "本机 Qwen 服务（CPU）",
+            Self::LocalServiceCuda => "本机 Qwen 服务（NVIDIA GPU）",
+            Self::CudaDenseCpuJoint => "NVIDIA GPU（稠密）+ CPU（M3 增强）",
+        }
+    }
+
+    pub(super) const fn actual_id(self) -> &'static str {
+        match self {
+            Self::NotLoaded => "not_loaded",
+            Self::Cpu | Self::LocalServiceCpu => "cpu",
+            Self::Cuda | Self::LocalServiceCuda => "gpu",
+            Self::LocalService => "local_service",
+            Self::CudaDenseCpuJoint => "mixed",
+        }
+    }
+}
+
+fn runtime_device_slot() -> &'static Mutex<SemanticRuntimeDevice> {
+    static SLOT: OnceLock<Mutex<SemanticRuntimeDevice>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(SemanticRuntimeDevice::NotLoaded))
+}
+
+pub(super) fn runtime_device() -> SemanticRuntimeDevice {
+    *runtime_device_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(super) fn effective_runtime_device() -> SemanticRuntimeDevice {
+    let loaded = runtime_device();
+    if loaded != SemanticRuntimeDevice::NotLoaded {
+        return loaded;
+    }
+    let qwen_model = match active() {
+        SemanticModel::Qwen3Embedding06 => Some(super::qwen::QwenEmbeddingModel::Embedding06),
+        SemanticModel::Qwen3Embedding8 => Some(super::qwen::QwenEmbeddingModel::Embedding8),
+        _ => None,
+    };
+    match qwen_model.map(super::qwen::service_device) {
+        Some(super::qwen::QwenServiceDevice::Cpu) => SemanticRuntimeDevice::LocalServiceCpu,
+        Some(super::qwen::QwenServiceDevice::Gpu) => SemanticRuntimeDevice::LocalServiceCuda,
+        Some(super::qwen::QwenServiceDevice::Unknown) | None => loaded,
+    }
+}
+
+fn set_runtime_device(device: SemanticRuntimeDevice) {
+    *runtime_device_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = device;
 }
 
 impl SemanticEmbedder {
     pub(crate) fn embed_dense(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
         match self {
             Self::Text(model) => model.embed(texts, None).map_err(|error| error.to_string()),
-            Self::M3(model) => model
-                .embed(texts, None)
-                .map(|out| out.dense)
-                .map_err(|error| error.to_string()),
+            Self::Qwen(model) => model.embed(texts),
+            Self::M3 { dense, .. } => dense.embed(texts, None).map_err(|error| error.to_string()),
         }
     }
 
@@ -52,8 +144,10 @@ impl SemanticEmbedder {
         texts: Vec<String>,
     ) -> Result<fastembed::Bgem3EmbeddingOutput, String> {
         match self {
-            Self::M3(model) => model.embed(texts, None).map_err(|error| error.to_string()),
-            Self::Text(_) => Err("当前模型不提供 BGE-M3 稀疏向量或 ColBERT 输出".into()),
+            Self::M3 { joint, .. } => joint.embed(texts, None).map_err(|error| error.to_string()),
+            Self::Text(_) | Self::Qwen(_) => {
+                Err("当前模型不提供 BGE-M3 稀疏向量或 ColBERT 输出".into())
+            }
         }
     }
 }
@@ -61,6 +155,8 @@ impl SemanticEmbedder {
 impl SemanticModel {
     pub(super) const fn id(self) -> &'static str {
         match self {
+            Self::Qwen3Embedding06 => super::qwen::EMBEDDING_06_ID,
+            Self::Qwen3Embedding8 => super::qwen::EMBEDDING_8_ID,
             Self::BgeSmallZhV15 => DEFAULT_SEM_MODEL,
             Self::BgeLargeZhV15 => "bge-large-zh-v1.5",
             Self::BgeM3 => "bge-m3",
@@ -70,9 +166,11 @@ impl SemanticModel {
 
     pub(super) const fn label(self) -> &'static str {
         match self {
+            Self::Qwen3Embedding06 => "Qwen3 Embedding 0.6B（轻量）",
+            Self::Qwen3Embedding8 => "Qwen3 Embedding 8B（高精度）",
             Self::BgeSmallZhV15 => "BGE Small 中文（默认，轻量）",
             Self::BgeLargeZhV15 => "BGE Large 中文（高精度）",
-            Self::BgeM3 => "BGE-M3（多语言、混合检索）",
+            Self::BgeM3 => "BGE-M3（GPU 优先、CPU 兼容）",
             Self::MultilingualE5Small => "Multilingual-E5-Small（多语言，轻量）",
         }
     }
@@ -81,15 +179,22 @@ impl SemanticModel {
     /// 静默混用。
     pub(super) const fn revision(self) -> &'static str {
         match self {
+            Self::Qwen3Embedding06 => "qwen3-embedding-0.6b-q8_0-llama-b10549-v1",
+            Self::Qwen3Embedding8 => "qwen3-embedding-8b-q4_k_m-llama-b10549-v1",
             Self::BgeSmallZhV15 => "bge-small-zh-v1.5-fastembed-v1",
             Self::BgeLargeZhV15 => "bge-large-zh-v1.5-fastembed-v1",
-            Self::BgeM3 => "bge-m3-fastembed-joint-v1",
+            // v2 的稠密向量来自 BAAI FP32 图，不得与旧 BGEM3Q INT8 稠密
+            // 向量混用。CPU/GPU 使用同一图、同一池化，因此设备切换不要求
+            // 再次重建；稀疏/ColBERT 仍沿用 joint-v1。
+            Self::BgeM3 => "bge-m3-baai-fp32-dense-v2+fastembed-joint-v1",
             Self::MultilingualE5Small => "multilingual-e5-small-fastembed-v1",
         }
     }
 
     pub(super) const fn dimensions(self) -> usize {
         match self {
+            Self::Qwen3Embedding06 => 1024,
+            Self::Qwen3Embedding8 => 4096,
             Self::BgeSmallZhV15 => 512,
             Self::BgeLargeZhV15 => 1024,
             Self::BgeM3 => 1024,
@@ -103,6 +208,8 @@ impl SemanticModel {
 
     pub(super) fn from_id(id: &str) -> Option<Self> {
         match id {
+            super::qwen::EMBEDDING_06_ID => Some(Self::Qwen3Embedding06),
+            super::qwen::EMBEDDING_8_ID => Some(Self::Qwen3Embedding8),
             DEFAULT_SEM_MODEL => Some(Self::BgeSmallZhV15),
             "bge-large-zh-v1.5" => Some(Self::BgeLargeZhV15),
             "bge-m3" => Some(Self::BgeM3),
@@ -143,7 +250,37 @@ pub(super) fn downloaded_bytes() -> u64 {
         })
     }
 
-    model_dir().map_or(0, |path| tree_bytes(&path))
+    match active() {
+        // Qwen3 检索权重由受控的本机运行时脚本维护，不在旧 ONNX 模型目录。
+        // 只读取当前 embedding 文件，避免把同批准备的 reranker 误算进语义模型
+        // 的 610 MB 下载进度。
+        SemanticModel::Qwen3Embedding06 => qwen_downloaded_bytes(
+            "Qwen3-Embedding-0.6B-Q8_0",
+            "Qwen3-Embedding-0.6B-Q8_0.gguf",
+        ),
+        SemanticModel::Qwen3Embedding8 => qwen_downloaded_bytes(
+            "Qwen3-Embedding-8B-Q4_K_M",
+            "Qwen3-Embedding-8B-Q4_K_M.gguf",
+        ),
+        _ => model_dir().map_or(0, |path| tree_bytes(&path)),
+    }
+}
+
+fn qwen_downloaded_bytes(alias: &str, file: &str) -> u64 {
+    let Ok(local_app_data) = std::env::var("LOCALAPPDATA") else {
+        return 0;
+    };
+    std::path::Path::new(&local_app_data)
+        .join("kunpeng-reader")
+        .join("local-llm")
+        .join("models")
+        .join(alias)
+        .join(file)
+        .metadata()
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn model_dir_for(selected: SemanticModel) -> Option<std::path::PathBuf> {
@@ -190,13 +327,31 @@ fn selection_path() -> Option<std::path::PathBuf> {
 fn selected_slot() -> &'static Mutex<SemanticModel> {
     static SLOT: OnceLock<Mutex<SemanticModel>> = OnceLock::new();
     SLOT.get_or_init(|| {
-        let model = selection_path()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|id| SemanticModel::from_id(id.trim()))
+        let model = solution::load()
+            .and_then(|solution| SemanticModel::from_id(&solution.committed_model))
+            .or_else(|| {
+                selection_path()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .and_then(|id| SemanticModel::from_id(id.trim()))
+            })
             // 已移除模型的旧选择会安全回退到默认轻量模型。
             .unwrap_or(SemanticModel::BgeSmallZhV15);
         Mutex::new(model)
     })
+}
+
+/// 方案提交只在建库完成时短暂取得写锁；一次检索从查询向量编码到读取逐书/
+/// 全局索引都持有读锁。这样切换不会出现“新模型 id + 旧 embedder/索引”的
+/// 瞬时混槽，已经开始的检索仍完整使用旧 committed 方案。
+fn runtime_transition_lock() -> &'static RwLock<()> {
+    static LOCK: OnceLock<RwLock<()>> = OnceLock::new();
+    LOCK.get_or_init(|| RwLock::new(()))
+}
+
+pub(super) fn runtime_read_guard() -> RwLockReadGuard<'static, ()> {
+    runtime_transition_lock()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(super) fn initialize_selection() {
@@ -211,6 +366,14 @@ pub(super) fn initialize_selection() {
             let _ = crate::atomic_file::write(&path, selected.id().as_bytes());
         }
     }
+}
+
+fn persist_legacy_selection(selected: SemanticModel) -> Result<(), String> {
+    let path = selection_path().ok_or("无法确定模型设置路径")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| format!("保存模型设置失败：{error}"))?;
+    }
+    crate::atomic_file::write(&path, selected.id().as_bytes())
 }
 
 pub(super) fn active() -> SemanticModel {
@@ -229,6 +392,9 @@ pub(super) fn query_input(query: &str) -> String {
 
 fn query_input_for(selected: SemanticModel, query: &str) -> String {
     match selected {
+        SemanticModel::Qwen3Embedding06 | SemanticModel::Qwen3Embedding8 => format!(
+            "Instruct: Given a search query, retrieve relevant passages from a multilingual local library.\nQuery: {query}"
+        ),
         SemanticModel::MultilingualE5Small => format!("query: {query}"),
         _ => format!("{SEM_QUERY_PREFIX}{query}"),
     }
@@ -239,7 +405,7 @@ pub(super) fn document_input(text: &str) -> String {
     document_input_for(active(), text)
 }
 
-fn document_input_for(selected: SemanticModel, text: &str) -> String {
+pub(super) fn document_input_for(selected: SemanticModel, text: &str) -> String {
     match selected {
         SemanticModel::MultilingualE5Small => format!("passage: {text}"),
         _ => text.to_string(),
@@ -267,6 +433,62 @@ fn directory_contains_model_file(path: &std::path::Path) -> bool {
     false
 }
 
+fn find_file_named(path: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(path).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if candidate.is_dir() {
+            if let Some(found) = find_file_named(&candidate, name) {
+                return Some(found);
+            }
+        } else if candidate
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value == name)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn tokenizer_files_present(snapshot: &std::path::Path) -> bool {
+    [
+        "tokenizer.json",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+    ]
+    .iter()
+    .all(|name| snapshot.join(name).is_file())
+}
+
+/// BGE-M3 的可用性必须同时覆盖主稠密图和 M3 联合增强图。两者来自不同
+/// Hugging Face 仓库；只看到任意一个 ONNX 文件不能宣称整个模型已就绪。
+fn bge_m3_artifacts_ready(base: &std::path::Path) -> bool {
+    let dense_graph = find_file_named(base, "model.onnx").filter(|path| {
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some("onnx")
+    });
+    let dense_ready = dense_graph.is_some_and(|graph| {
+        let Some(onnx_dir) = graph.parent() else {
+            return false;
+        };
+        let Some(snapshot) = onnx_dir.parent() else {
+            return false;
+        };
+        onnx_dir.join("model.onnx_data").is_file()
+            && onnx_dir.join("Constant_7_attr__value").is_file()
+            && tokenizer_files_present(snapshot)
+    });
+
+    let joint_ready = find_file_named(base, "model_quantized.onnx")
+        .is_some_and(|graph| graph.parent().is_some_and(tokenizer_files_present));
+    dense_ready && joint_ready
+}
+
 /// 只检查本地状态，不等待模型下载互斥锁，也不触发联网下载。
 pub(super) fn available(state: &AppState) -> bool {
     state
@@ -274,7 +496,153 @@ pub(super) fn available(state: &AppState) -> bool {
         .try_lock()
         .map(|slot| slot.is_some())
         .unwrap_or(false)
-        || model_artifact_dir_for(active()).is_some()
+        || if active() == SemanticModel::Qwen3Embedding06 {
+            super::qwen::embedding_available(super::qwen::QwenEmbeddingModel::Embedding06)
+        } else if active() == SemanticModel::Qwen3Embedding8 {
+            super::qwen::embedding_available(super::qwen::QwenEmbeddingModel::Embedding8)
+        } else if active() == SemanticModel::BgeM3 {
+            model_dir().is_some_and(|path| bge_m3_artifacts_ready(&path))
+        } else {
+            model_artifact_dir_for(active()).is_some()
+        }
+}
+
+fn create_text_embedding(
+    selected: SemanticModel,
+    model_kind: fastembed::EmbeddingModel,
+    execution_providers: Vec<fastembed::ExecutionProviderDispatch>,
+) -> Result<fastembed::TextEmbedding, String> {
+    use fastembed::{InitOptions, TextEmbedding};
+    let mut options = InitOptions::new(model_kind)
+        .with_show_download_progress(false)
+        .with_execution_providers(execution_providers);
+    if let Some(dir) = model_dir_for(selected) {
+        let _ = std::fs::create_dir_all(&dir);
+        options = options.with_cache_dir(dir);
+    }
+    TextEmbedding::try_new(options).map_err(|error| error.to_string())
+}
+
+fn create_text_embedding_with_cpu_fallback(
+    selected: SemanticModel,
+    model_kind: fastembed::EmbeddingModel,
+) -> Result<(fastembed::TextEmbedding, SemanticRuntimeDevice), String> {
+    match device::active() {
+        device::SemanticDevicePolicy::Cpu => {
+            create_text_embedding(selected, model_kind, Vec::new())
+                .map(|model| (model, SemanticRuntimeDevice::Cpu))
+        }
+        device::SemanticDevicePolicy::Gpu => {
+            let cuda = gpu::strict_cuda_execution_providers();
+            if cuda.is_empty() {
+                return Err("已强制使用 NVIDIA GPU，但 CUDA Provider、驱动或运行组件不可用".into());
+            }
+            create_text_embedding(selected, model_kind, cuda)
+                .map(|model| (model, SemanticRuntimeDevice::Cuda))
+                .map_err(|error| format!("已强制使用 NVIDIA GPU，CUDA 模型初始化失败：{error}"))
+        }
+        device::SemanticDevicePolicy::Auto => {
+            let cuda = gpu::strict_cuda_execution_providers();
+            if !cuda.is_empty() {
+                match create_text_embedding(selected, model_kind.clone(), cuda) {
+                    Ok(model) => return Ok((model, SemanticRuntimeDevice::Cuda)),
+                    Err(error) => crate::log(&format!(
+                        "semantic_model cuda_init_failed model={} policy=auto fallback=cpu error={error}",
+                        selected.id()
+                    )),
+                }
+            }
+            create_text_embedding(selected, model_kind, Vec::new())
+                .map(|model| (model, SemanticRuntimeDevice::Cpu))
+        }
+    }
+}
+
+fn create_m3_joint_cpu() -> Result<fastembed::Bgem3Embedding, String> {
+    use fastembed::{Bgem3Embedding, Bgem3InitOptions, Bgem3Model};
+    // FastEmbed 明确说明 BGEM3Q 是 CPU 优化的动态 INT8 图，传入 CUDA EP
+    // 会失败。它只负责稀疏/ColBERT 增强；持久稠密向量由 FP32 主图生成。
+    let mut options = Bgem3InitOptions::new(Bgem3Model::BGEM3Q)
+        .with_max_length(M3_MAX_INPUT_TOKENS)
+        .with_show_download_progress(false)
+        .with_execution_providers(Vec::new());
+    if let Some(dir) = model_dir_for(SemanticModel::BgeM3) {
+        let _ = std::fs::create_dir_all(&dir);
+        options = options.with_cache_dir(dir);
+    }
+    Bgem3Embedding::try_new(options).map_err(|error| error.to_string())
+}
+
+fn load_embedder_for(
+    selected: SemanticModel,
+) -> Result<(SemanticEmbedder, SemanticRuntimeDevice), String> {
+    use fastembed::EmbeddingModel;
+    if matches!(
+        selected,
+        SemanticModel::Qwen3Embedding06 | SemanticModel::Qwen3Embedding8
+    ) {
+        let qwen_model = if selected == SemanticModel::Qwen3Embedding06 {
+            super::qwen::QwenEmbeddingModel::Embedding06
+        } else {
+            super::qwen::QwenEmbeddingModel::Embedding8
+        };
+        let client = super::qwen::QwenEmbeddingClient::connect(qwen_model)?;
+        let runtime_device = match client.runtime_device() {
+            super::qwen::QwenServiceDevice::Cpu => SemanticRuntimeDevice::LocalServiceCpu,
+            super::qwen::QwenServiceDevice::Gpu => SemanticRuntimeDevice::LocalServiceCuda,
+            super::qwen::QwenServiceDevice::Unknown => SemanticRuntimeDevice::LocalService,
+        };
+        return Ok((SemanticEmbedder::Qwen(client), runtime_device));
+    }
+    let model_kind = match selected {
+        SemanticModel::Qwen3Embedding06 | SemanticModel::Qwen3Embedding8 => unreachable!(),
+        SemanticModel::BgeSmallZhV15 => EmbeddingModel::BGESmallZHV15,
+        SemanticModel::BgeLargeZhV15 => EmbeddingModel::BGELargeZHV15,
+        SemanticModel::BgeM3 => EmbeddingModel::BGEM3,
+        SemanticModel::MultilingualE5Small => EmbeddingModel::MultilingualE5Small,
+    };
+    let (model, runtime_device) = if selected == SemanticModel::BgeM3 {
+        let (dense, dense_device) =
+            create_text_embedding_with_cpu_fallback(selected, EmbeddingModel::BGEM3)
+                .map_err(|error| format!("加载 BGE-M3 稠密模型失败：{error}"))?;
+        let joint = create_m3_joint_cpu()
+            .map_err(|error| format!("加载 BGE-M3 混合检索模型失败：{error}"))?;
+        let device = if dense_device == SemanticRuntimeDevice::Cuda {
+            SemanticRuntimeDevice::CudaDenseCpuJoint
+        } else {
+            SemanticRuntimeDevice::Cpu
+        };
+        (
+            SemanticEmbedder::M3 {
+                dense: Box::new(dense),
+                joint: Box::new(joint),
+            },
+            device,
+        )
+    } else {
+        let (model, device) = create_text_embedding_with_cpu_fallback(selected, model_kind)
+            .map_err(|error| format!("加载语义模型失败：{error}"))?;
+        (SemanticEmbedder::Text(Box::new(model)), device)
+    };
+    Ok((model, runtime_device))
+}
+
+/// 为 pending 方案创建独立运行时。它不会写入 AppState 的 committed embedder
+/// 槽，也不会改变状态页的实际设备；失败时搜索仍继续使用旧模型。
+pub(super) fn prepare_pending_embedder(
+    selected: SemanticModel,
+) -> Result<(Arc<Mutex<SemanticEmbedder>>, SemanticRuntimeDevice), String> {
+    match selected {
+        SemanticModel::Qwen3Embedding06 => {
+            super::qwen::install_and_start(super::qwen::QwenEmbeddingModel::Embedding06)?;
+        }
+        SemanticModel::Qwen3Embedding8 => {
+            super::qwen::install_and_start(super::qwen::QwenEmbeddingModel::Embedding8)?;
+        }
+        _ => {}
+    }
+    let (model, device) = load_embedder_for(selected)?;
+    Ok((Arc::new(Mutex::new(model)), device))
 }
 
 /// 懒加载语义模型（首次会下载到 %LOCALAPPDATA%/ebook-reader/models）。
@@ -286,45 +654,17 @@ pub(super) fn embedder(state: &AppState) -> Result<Arc<Mutex<SemanticEmbedder>>,
     if let Some(model) = slot.as_ref() {
         return Ok(model.clone());
     }
-    use fastembed::{
-        Bgem3Embedding, Bgem3InitOptions, Bgem3Model, EmbeddingModel, InitOptions, TextEmbedding,
-    };
     let selected = active();
-    let model_kind = match selected {
-        SemanticModel::BgeSmallZhV15 => EmbeddingModel::BGESmallZHV15,
-        SemanticModel::BgeLargeZhV15 => EmbeddingModel::BGELargeZHV15,
-        SemanticModel::BgeM3 => EmbeddingModel::BGEM3,
-        SemanticModel::MultilingualE5Small => EmbeddingModel::MultilingualE5Small,
-    };
-    let execution_providers = gpu::cuda_execution_providers();
-    let model = if selected == SemanticModel::BgeM3 {
-        let mut options = Bgem3InitOptions::new(Bgem3Model::BGEM3Q)
-            .with_max_length(M3_MAX_INPUT_TOKENS)
-            .with_show_download_progress(false)
-            .with_execution_providers(execution_providers.clone());
-        if let Some(dir) = model_dir() {
-            let _ = std::fs::create_dir_all(&dir);
-            options = options.with_cache_dir(dir);
-        }
-        SemanticEmbedder::M3(
-            Bgem3Embedding::try_new(options)
-                .map_err(|error| format!("加载 BGE-M3 模型失败：{error}"))?,
-        )
-    } else {
-        let mut options = InitOptions::new(model_kind)
-            .with_show_download_progress(false)
-            .with_execution_providers(execution_providers);
-        if let Some(dir) = model_dir() {
-            let _ = std::fs::create_dir_all(&dir);
-            options = options.with_cache_dir(dir);
-        }
-        SemanticEmbedder::Text(
-            TextEmbedding::try_new(options)
-                .map_err(|error| format!("加载语义模型失败：{error}"))?,
-        )
-    };
+    let (model, runtime_device) = load_embedder_for(selected)?;
     let model = Arc::new(Mutex::new(model));
     *slot = Some(model.clone());
+    set_runtime_device(runtime_device);
+    crate::log(&format!(
+        "semantic_model loaded model={} revision={} device={}",
+        selected.id(),
+        selected.revision(),
+        runtime_device.id()
+    ));
     Ok(model)
 }
 
@@ -343,6 +683,21 @@ pub(super) async fn download(app: tauri::AppHandle) -> Result<(), String> {
     let worker_app = app.clone();
     if let Err(error) = task_handle.spawn_detached("semantic-model", move |task| {
         let state = worker_app.state::<AppState>();
+        let selected = active();
+        let preparation = match selected {
+            SemanticModel::Qwen3Embedding06 => {
+                super::qwen::install_and_start(super::qwen::QwenEmbeddingModel::Embedding06)
+            }
+            SemanticModel::Qwen3Embedding8 => {
+                super::qwen::install_and_start(super::qwen::QwenEmbeddingModel::Embedding8)
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = preparation {
+            finish_semantic_task(state.inner(), "语义模型未就绪", Some(error.clone()));
+            let _ = task.fail(error);
+            return;
+        }
         match embedder(state.inner()) {
             Ok(_) => {
                 finish_semantic_task(state.inner(), "语义模型已就绪", None);
@@ -371,11 +726,25 @@ pub(super) fn delete(state: tauri::State<AppState>) -> Result<(), String> {
             return Err("索引或模型任务正在运行，请稍候".into());
         }
     }
+    if matches!(
+        active(),
+        SemanticModel::Qwen3Embedding06 | SemanticModel::Qwen3Embedding8
+    ) {
+        return Err(
+            "Qwen3 向量模型与情报中心共用；请在高级模型管理中统一清理，避免中断情报处理".into(),
+        );
+    }
     *state.embedder.lock().unwrap() = None;
+    set_runtime_device(SemanticRuntimeDevice::NotLoaded);
     accelerator::mark_unprepared();
-    if let Some(dir) = model_artifact_dir_for(active()) {
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).map_err(|error| format!("删除模型失败：{error}"))?;
+    if !matches!(
+        active(),
+        SemanticModel::Qwen3Embedding06 | SemanticModel::Qwen3Embedding8
+    ) {
+        if let Some(dir) = model_artifact_dir_for(active()) {
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).map_err(|error| format!("删除模型失败：{error}"))?;
+            }
         }
     }
     clear_sem_status_cache();
@@ -394,6 +763,7 @@ fn detach_heavy_runtime_caches(state: &AppState) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
+    set_runtime_device(SemanticRuntimeDevice::NotLoaded);
     let old_sem_cache = {
         let mut cache = state
             .sem_cache
@@ -427,47 +797,156 @@ fn detach_heavy_runtime_caches(state: &AppState) {
     });
 }
 
-/// 切换模型只清除内存运行态；磁盘向量按模型目录保留，因此切回时不必重新
-/// 下载模型。索引元数据会严格比较模型 id，不能混用不同维度的向量。
-pub(super) fn select(state: tauri::State<AppState>, model_id: String) -> Result<(), String> {
+pub(super) fn reset_runtime_for_device_policy(state: &AppState) {
+    let old_reranker = state
+        .reranker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    detach_heavy_runtime_caches(state);
+    if let Some(old_reranker) = old_reranker {
+        std::thread::spawn(move || {
+            crate::set_thread_background(true);
+            drop(old_reranker);
+            crate::set_thread_background(false);
+        });
+    }
+}
+
+/// 把模型和检索模式作为一个智能搜索方案提交。磁盘向量仍按模型 id/revision
+/// 隔离保留；提交成功前不改变任何进程内运行态。
+fn validate_solution(
+    model_id: &str,
+    retrieval_mode: &str,
+) -> Result<(SemanticModel, retrieval::RetrievalMode), String> {
     let selected = SemanticModel::from_id(model_id.trim()).ok_or("未知的语义模型")?;
-    {
-        let progress = state.sem_progress.lock().unwrap();
-        if progress.building || progress.model_downloading {
-            return Err("模型下载或索引任务正在运行，请完成后再切换模型".into());
-        }
+    let mode = retrieval::RetrievalMode::from_id(retrieval_mode).ok_or("未知的检索策略")?;
+    if mode == retrieval::RetrievalMode::M3Hybrid && selected != SemanticModel::BgeM3 {
+        return Err("实验性 M3 混合检索只能与 BGE-M3 模型组成方案".into());
     }
-    if selected == active() {
-        return Ok(());
-    }
-    let path = selection_path().ok_or("无法确定模型设置路径")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|error| format!("保存模型设置失败：{error}"))?;
-    }
-    crate::atomic_file::write(&path, selected.id().as_bytes())?;
+    Ok((selected, mode))
+}
+
+fn activate_solution_runtime(
+    state: &AppState,
+    selected: SemanticModel,
+    mode: retrieval::RetrievalMode,
+) {
+    let previous_model = active();
+    let previous_mode = retrieval::active_mode();
     *selected_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = selected;
+    retrieval::commit_mode_in_memory(mode);
 
-    detach_heavy_runtime_caches(state.inner());
-    let m3_mode_disabled = retrieval::disable_m3_mode_for_non_m3();
-    accelerator::mark_unprepared();
-    clear_sem_query_cache();
-    profile::detach_caches_in_background();
-    accelerator::clear_snapshot_cache();
-    clear_sem_status_cache();
+    if selected != previous_model {
+        detach_heavy_runtime_caches(state);
+        m3::clear_memory_cache();
+        accelerator::mark_unprepared();
+        profile::detach_caches_in_background();
+        accelerator::clear_snapshot_cache();
+        clear_sem_status_cache();
+    }
+    if selected != previous_model || mode != previous_mode {
+        clear_sem_query_cache();
+    }
+}
+
+pub(super) fn promote_pending_runtime(
+    state: &AppState,
+    selected: SemanticModel,
+    mode: retrieval::RetrievalMode,
+    prepared: Option<(Arc<Mutex<SemanticEmbedder>>, SemanticRuntimeDevice)>,
+) {
+    let _transition = runtime_transition_lock()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Err(error) = persist_legacy_selection(selected) {
+        crate::log(&format!(
+            "semantic_solution legacy_model_mirror_failed error={error}"
+        ));
+    }
+    if let Err(error) = retrieval::persist_legacy_mode(mode) {
+        crate::log(&format!(
+            "semantic_solution legacy_mode_mirror_failed error={error}"
+        ));
+    }
+    activate_solution_runtime(state, selected, mode);
+    if let Some((embedder, device)) = prepared {
+        *state
+            .embedder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(embedder);
+        set_runtime_device(device);
+    }
+}
+
+pub(super) async fn request_solution(
+    app: tauri::AppHandle,
+    model_id: &str,
+    retrieval_mode: &str,
+) -> Result<(), String> {
+    let (selected, mode) = validate_solution(model_id, retrieval_mode)?;
+    if let Some((pending_model, pending_mode)) = solution::pending() {
+        let pending_label = SemanticModel::from_id(&pending_model)
+            .map(|model| model.label())
+            .unwrap_or(pending_model.as_str());
+        if pending_model == selected.id() && pending_mode == mode.id() {
+            return Err(format!("{pending_label} 新搜索库正在后台建立，请等待完成"));
+        }
+        return Err(format!(
+            "{pending_label} 新搜索库正在后台建立；旧搜索库仍可使用，请等待完成或失败后再切换"
+        ));
+    }
+    if selected == active() {
+        let state = app.state::<AppState>();
+        return select_solution(state.inner(), selected.id(), mode.id());
+    }
+    super::build::build_pending_solution(app, selected, mode).await
+}
+
+pub(super) fn select_solution(
+    state: &AppState,
+    model_id: &str,
+    retrieval_mode: &str,
+) -> Result<(), String> {
+    let (selected, mode) = validate_solution(model_id, retrieval_mode)?;
+    let _transaction = solution::transaction_guard();
+    {
+        let progress = state.sem_progress.lock().unwrap();
+        if progress.building || progress.model_downloading {
+            return Err("模型下载或索引任务正在运行，请完成后再切换智能搜索方案".into());
+        }
+    }
+    let model_changed = selected != active();
+    // 单个 JSON 原子替换是唯一提交点。旧的两个文本文件只做兼容镜像；镜像
+    // 失败不会让下次启动回到一个半新半旧的组合。
+    solution::commit(selected.id(), mode.id())?;
+    promote_pending_runtime(state, selected, mode, None);
     let mut progress = state.sem_progress.lock().unwrap();
     progress.current = format!(
-        "已切换至 {}{}；正在检查本地模型和语义索引…",
+        "已提交智能搜索方案：{}；{}{}",
         selected.label(),
-        if m3_mode_disabled {
-            "；已退出 M3 专属混合检索"
+        mode.label(),
+        if model_changed {
+            "；正在检查本地模型和对应语义索引…"
         } else {
             ""
         }
     );
     progress.error.clear();
     Ok(())
+}
+
+/// 兼容旧前端的单独模型命令。离开 BGE-M3 时沿用原有的自动退出专属模式
+/// 行为；新前端应直接调用 `select_semantic_solution`。
+pub(super) fn select(state: tauri::State<AppState>, model_id: String) -> Result<(), String> {
+    let selected = SemanticModel::from_id(model_id.trim()).ok_or("未知的语义模型")?;
+    let mut mode = retrieval::active_mode();
+    if selected != SemanticModel::BgeM3 && mode == retrieval::RetrievalMode::M3Hybrid {
+        mode = retrieval::RetrievalMode::Standard;
+    }
+    select_solution(state.inner(), selected.id(), mode.id())
 }
 
 fn probe_file() -> std::path::PathBuf {
@@ -491,25 +970,20 @@ fn probe_write(message: &str) {
 /// 验证 BGE 运行时和基本语义质量。结果写到
 /// `%LOCALAPPDATA%/ebook-reader/sem_probe.txt`。
 pub(super) fn probe() {
-    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+    use fastembed::EmbeddingModel;
     let _ = std::fs::remove_file(probe_file());
     std::panic::set_hook(Box::new(|info| probe_write(&format!("PANIC: {info}"))));
     let run = std::panic::catch_unwind(|| {
-        let execution_providers = gpu::strict_cuda_execution_providers();
-        probe_write(if execution_providers.is_empty() {
-            "starting with CPU..."
-        } else {
-            "starting with CUDA preference..."
-        });
-        let mut options = InitOptions::new(EmbeddingModel::BGESmallZHV15)
-            .with_show_download_progress(false)
-            .with_execution_providers(execution_providers);
-        if let Some(dir) = model_dir_for(SemanticModel::BgeSmallZhV15) {
-            let _ = std::fs::create_dir_all(&dir);
-            options = options.with_cache_dir(dir);
-        }
-        let mut model =
-            TextEmbedding::try_new(options).map_err(|error| format!("MODEL ERR: {error}"))?;
+        let (mut model, runtime_device) = create_text_embedding_with_cpu_fallback(
+            SemanticModel::BgeSmallZhV15,
+            EmbeddingModel::BGESmallZHV15,
+        )
+        .map_err(|error| format!("MODEL ERR: {error}"))?;
+        probe_write(&format!(
+            "starting with policy={} actual={}...",
+            device::active().id(),
+            runtime_device.id()
+        ));
         let texts = vec![
             query_input("高兴"),
             "开心".to_string(),
@@ -542,6 +1016,8 @@ mod tests {
     #[test]
     fn model_ids_roundtrip_and_unknown_ids_are_rejected() {
         for model in [
+            SemanticModel::Qwen3Embedding06,
+            SemanticModel::Qwen3Embedding8,
             SemanticModel::BgeSmallZhV15,
             SemanticModel::BgeLargeZhV15,
             SemanticModel::BgeM3,
@@ -553,6 +1029,70 @@ mod tests {
             assert!(model.dimensions() > 0);
         }
         assert_eq!(SemanticModel::from_id("unknown"), None);
+        assert!(
+            SemanticModel::BgeM3
+                .revision()
+                .contains("baai-fp32-dense-v2"),
+            "GPU/CPU 共用的 FP32 稠密图必须使用新 revision，避免混入旧 INT8 向量"
+        );
+    }
+
+    #[test]
+    fn semantic_solution_validates_the_pair_before_commit() {
+        assert_eq!(
+            validate_solution("bge-m3", "m3_hybrid"),
+            Ok((SemanticModel::BgeM3, retrieval::RetrievalMode::M3Hybrid))
+        );
+        assert_eq!(
+            validate_solution(super::super::qwen::EMBEDDING_06_ID, "high_precision"),
+            Ok((
+                SemanticModel::Qwen3Embedding06,
+                retrieval::RetrievalMode::HighPrecision
+            ))
+        );
+        assert!(validate_solution("bge-small-zh-v1.5", "m3_hybrid")
+            .unwrap_err()
+            .contains("只能与 BGE-M3"));
+        assert_eq!(
+            validate_solution("unknown", "standard").unwrap_err(),
+            "未知的语义模型"
+        );
+        assert_eq!(
+            validate_solution("bge-m3", "unknown").unwrap_err(),
+            "未知的检索策略"
+        );
+    }
+
+    #[test]
+    fn bge_m3_readiness_requires_dense_joint_and_both_tokenizers() {
+        let root = std::env::temp_dir().join(format!(
+            "kunpeng-bge-m3-artifacts-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dense_snapshot = root.join("models--BAAI--bge-m3/snapshots/test");
+        let joint_snapshot = root.join("models--gpahal--bge-m3-onnx-int8/snapshots/test");
+        std::fs::create_dir_all(dense_snapshot.join("onnx")).unwrap();
+        std::fs::create_dir_all(&joint_snapshot).unwrap();
+        for snapshot in [&dense_snapshot, &joint_snapshot] {
+            for name in [
+                "tokenizer.json",
+                "config.json",
+                "special_tokens_map.json",
+                "tokenizer_config.json",
+            ] {
+                std::fs::write(snapshot.join(name), b"ready").unwrap();
+            }
+        }
+        for name in ["model.onnx", "model.onnx_data", "Constant_7_attr__value"] {
+            std::fs::write(dense_snapshot.join("onnx").join(name), b"ready").unwrap();
+        }
+        assert!(!bge_m3_artifacts_ready(&root));
+        std::fs::write(joint_snapshot.join("model_quantized.onnx"), b"ready").unwrap();
+        assert!(bge_m3_artifacts_ready(&root));
+        std::fs::remove_file(dense_snapshot.join("onnx/model.onnx_data")).unwrap();
+        assert!(!bge_m3_artifacts_ready(&root));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -576,7 +1116,15 @@ mod tests {
 
     #[test]
     fn bge_queries_use_retrieval_instruction() {
-        assert!(query_input("天津教案").starts_with(SEM_QUERY_PREFIX));
+        assert!(
+            query_input_for(SemanticModel::BgeSmallZhV15, "天津教案").starts_with(SEM_QUERY_PREFIX)
+        );
+        assert!(query_input_for(SemanticModel::BgeM3, "天津教案").starts_with(SEM_QUERY_PREFIX));
+        assert!(
+            query_input_for(SemanticModel::Qwen3Embedding06, "天津教案").starts_with("Instruct:")
+        );
+        assert!(query_input_for(SemanticModel::Qwen3Embedding8, "天津教案")
+            .contains("\nQuery: 天津教案"));
     }
 
     #[test]

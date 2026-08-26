@@ -9,7 +9,73 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 use tokio::sync::watch;
 
-type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
+#[derive(Default)]
+pub(crate) struct TextChaptersCache {
+    entries: HashMap<u64, Arc<Vec<(String, String)>>>,
+    order: VecDeque<u64>,
+    bytes: u64,
+}
+
+impl TextChaptersCache {
+    fn chapter_bytes(chapters: &[(String, String)]) -> u64 {
+        chapters.iter().fold(0u64, |total, (title, body)| {
+            total
+                .saturating_add(u64::try_from(title.len()).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(body.len()).unwrap_or(u64::MAX))
+        })
+    }
+
+    fn touch(&mut self, id: u64) {
+        self.order.retain(|existing| *existing != id);
+        self.order.push_back(id);
+    }
+
+    pub(crate) fn get(&mut self, id: u64) -> Option<Arc<Vec<(String, String)>>> {
+        let chapters = Arc::clone(self.entries.get(&id)?);
+        self.touch(id);
+        Some(chapters)
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        id: u64,
+        chapters: Arc<Vec<(String, String)>>,
+        book_limit: usize,
+        byte_limit: u64,
+    ) {
+        self.remove(id);
+        self.bytes = self
+            .bytes
+            .saturating_add(Self::chapter_bytes(chapters.as_slice()));
+        self.entries.insert(id, chapters);
+        self.touch(id);
+        while self.order.len() > book_limit || self.bytes > byte_limit {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.remove(oldest);
+        }
+    }
+
+    pub(crate) fn remove(&mut self, id: u64) {
+        if let Some(chapters) = self.entries.remove(&id) {
+            self.bytes = self
+                .bytes
+                .saturating_sub(Self::chapter_bytes(chapters.as_slice()));
+        }
+        self.order.retain(|existing| *existing != id);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
 
 /// Process-local wake-up companion for SQLite's durable automatic-sync
 /// generation.  Entity writes persist the generation first; this object only
@@ -17,6 +83,7 @@ type TextChaptersCache = Mutex<HashMap<u64, Arc<Vec<(String, String)>>>>;
 pub(crate) struct SyncAutoScheduler {
     app: Mutex<Option<tauri::AppHandle>>,
     timer_armed: AtomicBool,
+    wake_generation: AtomicU64,
 }
 
 impl SyncAutoScheduler {
@@ -24,6 +91,7 @@ impl SyncAutoScheduler {
         Self {
             app: Mutex::new(None),
             timer_armed: AtomicBool::new(false),
+            wake_generation: AtomicU64::new(0),
         }
     }
 
@@ -35,6 +103,7 @@ impl SyncAutoScheduler {
     }
 
     pub(crate) fn note_local_entity_change(&self) {
+        self.wake_generation.fetch_add(1, Ordering::AcqRel);
         let app = self.app.lock().ok().and_then(|slot| slot.clone());
         let Some(app) = app else {
             return;
@@ -52,8 +121,13 @@ impl SyncAutoScheduler {
         });
     }
 
+    fn wake_occurred_since(&self, observed_wake_generation: u64) -> bool {
+        self.wake_generation.load(Ordering::Acquire) != observed_wake_generation
+    }
+
     async fn wait_for_due_sync(self: Arc<Self>, app: tauri::AppHandle) {
         loop {
+            let observed_wake_generation = self.wake_generation.load(Ordering::Acquire);
             let pending = app.state::<AppState>().with_db_read("sync_auto_due", |db| {
                 if db.automatic_sync_is_configured()
                     && crate::sync::automatic_sync_credentials_ready_without_prompt(db)
@@ -65,11 +139,13 @@ impl SyncAutoScheduler {
             });
             let Some(due) = pending.ok().flatten() else {
                 self.timer_armed.store(false, Ordering::Release);
-                // Close the small race between the read above and clearing the
-                // armed flag. A concurrent writer either observes false and
-                // starts its own timer, or this second kick sees its durable
-                // generation.
-                self.note_local_entity_change();
+                // A writer that persisted after our snapshot could have seen
+                // the armed flag and skipped spawning a second task. Rearm
+                // only for that real concurrent wake-up, rather than kicking
+                // ourselves forever while no automatic sync is configured.
+                if self.wake_occurred_since(observed_wake_generation) {
+                    self.note_local_entity_change();
+                }
                 return;
             };
             let now = crate::now_ms();
@@ -137,7 +213,7 @@ pub(crate) struct AppState {
     pub(crate) backfilled: AtomicBool,
     pub(crate) pending_jump: Mutex<HashMap<u64, (u32, String)>>,
     pub(crate) search_text_cache: Arc<Mutex<search_cache::SearchTextCache>>,
-    pub(crate) txt_chapters: TextChaptersCache,
+    pub(crate) txt_chapters: Mutex<TextChaptersCache>,
     pub(crate) embedder: Mutex<Option<Arc<Mutex<semantic::model::SemanticEmbedder>>>>,
     pub(crate) reranker: Mutex<Option<Arc<Mutex<fastembed::TextRerank>>>>,
     pub(crate) sem_cache: Arc<Mutex<HashMap<u64, Arc<semantic::SemData>>>>,
@@ -170,7 +246,7 @@ impl AppState {
             backfilled: AtomicBool::new(false),
             pending_jump: Mutex::new(HashMap::new()),
             search_text_cache: Arc::new(Mutex::new(search_cache::SearchTextCache::default())),
-            txt_chapters: Mutex::new(HashMap::new()),
+            txt_chapters: Mutex::new(TextChaptersCache::default()),
             embedder: Mutex::new(None),
             reranker: Mutex::new(None),
             sem_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -369,7 +445,36 @@ fn record_db_locked_access(operation: &str, started: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use super::{db, AppState};
+    use super::{db, AppState, SyncAutoScheduler, TextChaptersCache};
+    use std::sync::Arc;
+
+    #[test]
+    fn text_chapter_cache_is_bounded_by_books_and_bytes() {
+        let mut cache = TextChaptersCache::default();
+        cache.insert(1, Arc::new(vec![("一".into(), "aaaa".into())]), 2, 20);
+        cache.insert(2, Arc::new(vec![("二".into(), "bbbb".into())]), 2, 20);
+        assert!(cache.get(1).is_some());
+        cache.insert(3, Arc::new(vec![("三".into(), "cccc".into())]), 2, 20);
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_none());
+        assert!(cache.get(3).is_some());
+
+        cache.insert(4, Arc::new(vec![("四".into(), "x".repeat(32))]), 2, 20);
+        assert!(cache.get(4).is_none());
+        assert!(cache.bytes() <= 20);
+    }
+
+    #[test]
+    fn sync_auto_scheduler_only_rearms_after_a_concurrent_wake() {
+        let scheduler = SyncAutoScheduler::new();
+        let observed = scheduler
+            .wake_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert!(!scheduler.wake_occurred_since(observed));
+
+        scheduler.note_local_entity_change();
+        assert!(scheduler.wake_occurred_since(observed));
+    }
 
     #[test]
     fn database_access_helpers_preserve_read_write_callbacks() {

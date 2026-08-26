@@ -65,6 +65,7 @@ export interface ReaderPageBugTraceRuntime extends Record<string, unknown> {
   NodeFilter: { readonly SHOW_TEXT: number };
   getComputedStyle: (element: Element) => CSSStyleDeclaration;
   performance: { now(): number };
+  requestAnimationFrame: (callback: FrameRequestCallback) => number;
   parent: { postMessage(message: unknown, targetOrigin: "*"): void };
   pagedLayoutSnapshot?: () => TraceData | null;
   readerBugTrace?: (
@@ -76,6 +77,7 @@ export interface ReaderPageBugTraceRuntime extends Record<string, unknown> {
   markPageTurnInput?: (input: unknown, detail?: unknown) => void;
   pageTurnTraceData?: (token: ReaderPageTurnToken, extra?: TraceData | null) => TraceData;
   beginPageTurnBugTrace?: (direction: unknown) => ReaderPageTurnToken;
+  observePageTurnPerformance?: (token?: ReaderPageTurnToken | null) => void;
   finishPageTurnBugTrace?: (token?: ReaderPageTurnToken | null) => void;
   beginChapterBugTrace?: (chapter: unknown, where: unknown) => ReaderChapterTraceToken;
   finishChapterBugTrace?: (
@@ -91,6 +93,7 @@ export interface ReaderPageBugTraceApi {
   readonly markPageTurnInput: NonNullable<ReaderPageBugTraceRuntime["markPageTurnInput"]>;
   readonly pageTurnTraceData: NonNullable<ReaderPageBugTraceRuntime["pageTurnTraceData"]>;
   readonly beginPageTurnBugTrace: NonNullable<ReaderPageBugTraceRuntime["beginPageTurnBugTrace"]>;
+  readonly observePageTurnPerformance: NonNullable<ReaderPageBugTraceRuntime["observePageTurnPerformance"]>;
   readonly finishPageTurnBugTrace: NonNullable<ReaderPageBugTraceRuntime["finishPageTurnBugTrace"]>;
   readonly beginChapterBugTrace: NonNullable<ReaderPageBugTraceRuntime["beginChapterBugTrace"]>;
   readonly finishChapterBugTrace: NonNullable<ReaderPageBugTraceRuntime["finishChapterBugTrace"]>;
@@ -130,6 +133,15 @@ function numberOrZero(value: unknown): number {
 export function installReaderPageBugTrace(
   global: ReaderPageBugTraceRuntime,
 ): ReaderPageBugTraceApi {
+  interface PageTurnPerformanceState {
+    readonly startedAt: number;
+    observing: boolean;
+    targetChapter: unknown;
+    targetPage: unknown;
+  }
+
+  const pageTurnPerformanceStates = new WeakMap<ReaderPageTurnToken, PageTurnPerformanceState>();
+
   global.chapterPending = 0;
   global.pageTurnTraceSequence = 0;
   global.pageTurnTraceInput = "unknown";
@@ -314,8 +326,65 @@ export function installReaderPageBugTrace(
     global.pageTurnTraceSequence = token.id;
     global.pageTurnTraceInput = "unknown";
     global.pageTurnTraceDetail = null;
+    pageTurnPerformanceStates.set(token, {
+      startedAt: global.performance.now(),
+      observing: false,
+      targetChapter: token.chapter,
+      targetPage: token.page,
+    });
     readerBugTrace("turn", "requested", null, pageTurnTraceData(token, token.detail));
     return token;
+  }
+
+  function pageTurnPerformanceData(
+    token: ReaderPageTurnToken,
+    state: PageTurnPerformanceState,
+  ): TraceData {
+    return {
+      ...pageTurnTraceData(token, token.detail),
+      duration_ms: Number(Math.max(0, global.performance.now() - state.startedAt).toFixed(1)),
+      after_chapter: state.targetChapter,
+      after_page: state.targetPage,
+    };
+  }
+
+  function recordPageTurnFirstPaint(
+    token: ReaderPageTurnToken,
+    state: PageTurnPerformanceState,
+  ): void {
+    global.requestAnimationFrame(() => {
+      global.requestAnimationFrame(() => {
+        const samePosition = state.targetChapter === global.curCh && state.targetPage === global.pageInCh;
+        readerBugTrace(
+          "turn",
+          samePosition ? "first_paint" : "paint_superseded",
+          null,
+          pageTurnPerformanceData(token, state),
+        );
+      });
+    });
+  }
+
+  function observePageTurnPerformance(token?: ReaderPageTurnToken | null): void {
+    if (!token) return;
+    const state = pageTurnPerformanceStates.get(token);
+    if (!state || state.observing) return;
+    state.observing = true;
+    const sample = (): void => {
+      const moved = token.chapter !== global.curCh || token.page !== global.pageInCh;
+      if (moved) {
+        state.targetChapter = global.curCh;
+        state.targetPage = global.pageInCh;
+        readerBugTrace("turn", "position_updated", null, pageTurnPerformanceData(token, state));
+        recordPageTurnFirstPaint(token, state);
+        return;
+      }
+      const busy = numberOrZero(global.chapterPending) > 0 || Boolean(global.chapterTurnPending);
+      if (busy && global.performance.now() - state.startedAt < 2_400) {
+        global.requestAnimationFrame(sample);
+      }
+    };
+    sample();
   }
 
   function finishPageTurnBugTrace(token?: ReaderPageTurnToken | null): void {
@@ -358,6 +427,7 @@ export function installReaderPageBugTrace(
     markPageTurnInput,
     pageTurnTraceData,
     beginPageTurnBugTrace,
+    observePageTurnPerformance,
     finishPageTurnBugTrace,
     beginChapterBugTrace,
     finishChapterBugTrace,
@@ -369,6 +439,7 @@ export function installReaderPageBugTrace(
     markPageTurnInput,
     pageTurnTraceData,
     beginPageTurnBugTrace,
+    observePageTurnPerformance,
     finishPageTurnBugTrace,
     beginChapterBugTrace,
     finishChapterBugTrace,

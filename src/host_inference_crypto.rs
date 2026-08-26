@@ -7,47 +7,69 @@
 //! into a sync entity, diagnostic, or public publication bundle.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+#[cfg(test)]
 use hpke::{
-    aead::ChaCha20Poly1305,
-    kdf::HkdfSha256,
-    kem::{Kem as _, X25519HkdfSha256},
-    setup_receiver, setup_sender, Deserializable, OpModeR, OpModeS, Serializable,
+    aead::ChaCha20Poly1305, kdf::HkdfSha256, setup_receiver, setup_sender, OpModeR, OpModeS,
 };
+use hpke::{
+    kem::{Kem as _, X25519HkdfSha256},
+    Deserializable, Serializable,
+};
+#[cfg(test)]
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 const PROTOCOL_LABEL: &[u8] = b"kunpeng-intelligence-host-inference-v1";
+#[cfg(test)]
 pub const HPKE_SUITE: &str = "HPKE-v1-X25519-HKDF-SHA256-CHACHA20POLY1305";
+#[cfg(test)]
 const PAYLOAD_SCHEMA_VERSION: u8 = 1;
+#[cfg(test)]
 const NONCE_BYTES: usize = 24;
 
 type Kem = X25519HkdfSha256;
+#[cfg(test)]
 type Aead = ChaCha20Poly1305;
+#[cfg(test)]
 type Kdf = HkdfSha256;
 
 /// Deliberately stable, content-free errors.  In particular, these errors never
 /// render ciphertext, a key, a task ID, or decrypted data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostInferenceCryptoError {
+    #[cfg(test)]
     InvalidBinding,
     InvalidKey,
+    #[cfg(test)]
     InvalidEnvelope,
+    #[cfg(test)]
     IntegrityMismatch,
+    #[cfg(test)]
     EncryptionFailed,
+    #[cfg(test)]
     DecryptionFailed,
+    #[cfg(test)]
     PrivatePayloadMismatch,
 }
 
 impl std::fmt::Display for HostInferenceCryptoError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
+            #[cfg(test)]
             Self::InvalidBinding => "主机推理加密绑定无效",
             Self::InvalidKey => "主机推理密钥无效",
+            #[cfg(test)]
             Self::InvalidEnvelope => "主机推理密文信封无效",
+            #[cfg(test)]
             Self::IntegrityMismatch => "主机推理密文完整性校验失败",
+            #[cfg(test)]
             Self::EncryptionFailed => "主机推理加密失败",
+            #[cfg(test)]
             Self::DecryptionFailed => "主机推理解密失败",
+            #[cfg(test)]
             Self::PrivatePayloadMismatch => "主机推理私有载荷与任务绑定不一致",
         };
         formatter.write_str(message)
@@ -79,6 +101,9 @@ impl HostInferenceKeyId {
         Ok(Self(value))
     }
 
+    // The worker-side protocol tests only parse key IDs; pairing uses this
+    // accessor in the desktop binary when it persists public metadata.
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -91,6 +116,9 @@ pub struct HostInferencePublicKey {
     encoded: [u8; 32],
 }
 
+// The headless worker tests do not perform pairing serialization; desktop
+// pairing owns these conversions for the same shared key type.
+#[allow(dead_code)]
 impl HostInferencePublicKey {
     pub fn from_base64url(
         key_id: HostInferenceKeyId,
@@ -117,6 +145,7 @@ impl HostInferencePublicKey {
         URL_SAFE_NO_PAD.encode(self.encoded)
     }
 
+    #[cfg(test)]
     fn hpke_key(&self) -> Result<<Kem as hpke::Kem>::PublicKey, HostInferenceCryptoError> {
         <Kem as hpke::Kem>::PublicKey::from_bytes(&self.encoded)
             .map_err(|_| HostInferenceCryptoError::InvalidKey)
@@ -131,6 +160,7 @@ pub struct HostInferencePrivateKey {
     key: <Kem as hpke::Kem>::PrivateKey,
 }
 
+#[allow(dead_code)]
 impl HostInferencePrivateKey {
     pub fn generate(key_id: HostInferenceKeyId) -> Self {
         let (key, _) = Kem::gen_keypair();
@@ -194,6 +224,7 @@ pub enum HostInferenceOperation {
 
 /// The direction is authenticated in AAD and repeated inside the private
 /// payload, so a result cannot be replayed as a request (or the reverse).
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostInferenceDirection {
@@ -203,6 +234,7 @@ pub enum HostInferenceDirection {
 
 /// Public task metadata that both ends use to derive exactly the same AAD.
 /// These fields are intentionally separate from the encrypted private payload.
+#[cfg(test)]
 #[derive(Clone, Eq, PartialEq)]
 pub struct HostInferenceTaskBinding {
     task_id: String,
@@ -211,6 +243,7 @@ pub struct HostInferenceTaskBinding {
     capability_revision: u32,
 }
 
+#[cfg(test)]
 impl HostInferenceTaskBinding {
     pub fn new(
         task_id: impl Into<String>,
@@ -231,10 +264,12 @@ impl HostInferenceTaskBinding {
         })
     }
 
+    #[allow(dead_code)]
     pub fn task_id(&self) -> &str {
         &self.task_id
     }
 
+    #[allow(dead_code)]
     pub fn pair_id(&self) -> &str {
         &self.pair_id
     }
@@ -243,6 +278,7 @@ impl HostInferenceTaskBinding {
         self.operation
     }
 
+    #[allow(dead_code)]
     pub fn capability_revision(&self) -> u32 {
         self.capability_revision
     }
@@ -250,6 +286,7 @@ impl HostInferenceTaskBinding {
 
 /// Only encrypted fields are serializable.  It exactly mirrors
 /// `$defs.encryptedEnvelope` in the V1 contract.
+#[cfg(test)]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncryptedEnvelopeV1 {
@@ -264,6 +301,7 @@ pub struct EncryptedEnvelopeV1 {
     pub compression: Option<EnvelopeCompression>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvelopeCompression {
@@ -273,6 +311,7 @@ pub enum EnvelopeCompression {
 
 /// Private JSON that only exists before sealing and after opening.  Do not add
 /// `Debug` or a serde conversion to any public relay DTO.
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrivatePayloadV1 {
@@ -284,6 +323,7 @@ pub struct PrivatePayloadV1 {
     payload: serde_json::Value,
 }
 
+#[cfg(test)]
 impl PrivatePayloadV1 {
     pub fn new(
         binding: &HostInferenceTaskBinding,
@@ -324,6 +364,7 @@ impl PrivatePayloadV1 {
     }
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CanonicalAad<'a> {
@@ -338,6 +379,7 @@ struct CanonicalAad<'a> {
 /// compact canonical JSON with the contract's field order.  This function is
 /// public for a future independently implemented host, but it never accepts or
 /// returns private content.
+#[cfg(test)]
 pub fn canonical_aad(
     binding: &HostInferenceTaskBinding,
     direction: HostInferenceDirection,
@@ -359,6 +401,7 @@ pub fn canonical_aad(
 /// Seal a client-to-host request.  Both the X25519 sender identity and the task
 /// binding are authenticated; the relay server only receives the returned
 /// ciphertext envelope.
+#[cfg(test)]
 pub fn seal_request(
     binding: &HostInferenceTaskBinding,
     client_key: &HostInferencePrivateKey,
@@ -376,6 +419,7 @@ pub fn seal_request(
 
 /// Open a client-to-host request after the host has claimed the task and checked
 /// its pairing/capability state.
+#[cfg(test)]
 pub fn open_request(
     binding: &HostInferenceTaskBinding,
     host_key: &HostInferencePrivateKey,
@@ -393,6 +437,7 @@ pub fn open_request(
 
 /// Seal a host-to-client result.  It uses the same V1 suite but a distinct AAD
 /// direction, so it cannot be accepted by [`open_request`].
+#[cfg(test)]
 pub fn seal_result(
     binding: &HostInferenceTaskBinding,
     host_key: &HostInferencePrivateKey,
@@ -410,6 +455,7 @@ pub fn seal_result(
 
 /// Open a host-to-client result after the client has checked task state and
 /// capability revision.
+#[cfg(test)]
 pub fn open_result(
     binding: &HostInferenceTaskBinding,
     client_key: &HostInferencePrivateKey,
@@ -425,6 +471,7 @@ pub fn open_result(
     )
 }
 
+#[cfg(test)]
 fn seal_payload(
     binding: &HostInferenceTaskBinding,
     direction: HostInferenceDirection,
@@ -460,6 +507,7 @@ fn seal_payload(
     })
 }
 
+#[cfg(test)]
 fn open_payload(
     binding: &HostInferenceTaskBinding,
     direction: HostInferenceDirection,
@@ -508,6 +556,7 @@ fn open_payload(
     Ok(payload)
 }
 
+#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(64);
@@ -518,6 +567,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
+#[cfg(test)]
 fn is_contract_id(value: &str) -> bool {
     let mut bytes = value.bytes();
     match bytes.next() {
@@ -529,6 +579,7 @@ fn is_contract_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
+#[cfg(test)]
 fn is_lower_hex_sha256(value: &str) -> bool {
     value.len() == 64
         && value

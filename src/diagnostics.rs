@@ -55,6 +55,27 @@ const ALLOWED_NATIVE_FIELDS: &[&str] = &[
     "webview_requested",
     "webview_focused",
     "visible",
+    "bound",
+    "registered",
+    "pool_ready",
+    "engine_ready",
+    "geometry_available",
+    "requested_available",
+    "maximized",
+    "minimized",
+    "x",
+    "y",
+    "width",
+    "height",
+    "inner_width",
+    "inner_height",
+    "frame_width",
+    "frame_height",
+    "requested_x",
+    "requested_y",
+    "requested_width",
+    "requested_height",
+    "scale_milli",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -284,7 +305,7 @@ fn native_fields(message: &str) -> BTreeMap<String, NativeDiagnosticValue> {
         fields.insert("phase".to_string(), NativeDiagnosticValue::Label(phase));
     }
 
-    for token in tokens.iter().skip(1).copied() {
+    for &token in tokens.iter().skip(1) {
         if let Some(milliseconds) = token
             .strip_suffix("ms")
             .and_then(|value| value.parse::<i64>().ok())
@@ -723,6 +744,25 @@ mod tests {
     }
 
     #[test]
+    fn reader_binding_diagnostics_keep_only_fixed_role_and_boolean_state() {
+        let mut state = DiagnosticsState::default();
+        state.record_native_log(
+            "src/epub_runtime.rs",
+            "reader_book_info phase=binding_lookup outcome=binding_unbound kind=preload_pool bound=false visible=true registered=false label=reader-private path=C:\\private\\book.epub",
+            1,
+        );
+        let value = serde_json::to_value(state.snapshot(2)).unwrap();
+        let serialized = value.to_string();
+        assert!(serialized.contains("reader_book_info"));
+        assert!(serialized.contains("preload_pool"));
+        assert!(serialized.contains("binding_unbound"));
+        assert!(serialized.contains("\"bound\":false"));
+        assert!(serialized.contains("\"registered\":false"));
+        assert!(!serialized.contains("reader-private"));
+        assert!(!serialized.contains("book.epub"));
+    }
+
+    #[test]
     fn reader_reveal_keeps_only_window_activation_booleans() {
         let mut state = DiagnosticsState::default();
         state.record_native_log(
@@ -738,6 +778,54 @@ mod tests {
         assert_eq!(fields["webview_focused"], true);
         assert_eq!(fields["visible"], true);
         assert!(fields.get("title").is_none());
+    }
+
+    #[test]
+    fn reader_geometry_keeps_only_bounded_numeric_window_evidence() {
+        let mut state = DiagnosticsState::default();
+        state.record_native_log(
+            "src/window_commands.rs",
+            "reader_geometry phase=geometry_observed source=same_book outcome=after_250ms geometry_available=true requested_available=true x=196 y=196 width=1786 height=1535 inner_width=1760 inner_height=1520 frame_width=26 frame_height=15 requested_x=196 requested_y=196 requested_width=1786 requested_height=1535 scale_milli=2000 maximized=false minimized=false title=private path=C:\\private\\book.epub",
+            1,
+        );
+        let value = serde_json::to_value(state.snapshot(2)).unwrap();
+        let event = &value["recent_native_events"][0];
+        assert_eq!(event["event"], "reader_geometry");
+        let fields = &event["fields"];
+        assert_eq!(fields["phase"], "geometry_observed");
+        assert_eq!(fields["source"], "same_book");
+        assert_eq!(fields["width"], 1786);
+        assert_eq!(fields["inner_width"], 1760);
+        assert_eq!(fields["frame_width"], 26);
+        assert_eq!(fields["scale_milli"], 2000);
+        assert_eq!(fields["maximized"], false);
+        assert!(fields.get("title").is_none());
+        assert!(fields.get("path").is_none());
+        let json = value.to_string();
+        assert!(!json.contains("private"));
+        assert!(!json.contains("book.epub"));
+    }
+
+    #[test]
+    fn main_geometry_keeps_only_bounded_numeric_window_evidence() {
+        let mut state = DiagnosticsState::default();
+        state.record_native_log(
+            "src/window_commands.rs",
+            "main_geometry phase=geometry_save source=main_close outcome=ok geometry_available=true requested_available=true x=632 y=16 width=3051 height=2067 inner_width=3025 inner_height=2052 frame_width=26 frame_height=15 requested_x=632 requested_y=16 requested_width=3051 requested_height=2067 scale_milli=2000 maximized=false minimized=false title=private path=C:\\private\\library.json",
+            1,
+        );
+        let value = serde_json::to_value(state.snapshot(2)).unwrap();
+        let event = &value["recent_native_events"][0];
+        assert_eq!(event["event"], "main_geometry");
+        let fields = &event["fields"];
+        assert_eq!(fields["x"], 632);
+        assert_eq!(fields["y"], 16);
+        assert_eq!(fields["width"], 3051);
+        assert_eq!(fields["height"], 2067);
+        assert_eq!(fields["scale_milli"], 2000);
+        let json = value.to_string();
+        assert!(!json.contains("private"));
+        assert!(!json.contains("library.json"));
     }
 
     #[test]

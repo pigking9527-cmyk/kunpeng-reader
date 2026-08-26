@@ -162,6 +162,7 @@ function createHarness({
     rejectBusySync: () => { rejectedSync = "busy"; },
     rejectLogin: () => { rejectedLogin = true; },
     rejectSync: () => { rejectedSync = "offline"; },
+    storageSnapshot: () => Array.from(storageValues.entries()),
   };
 }
 

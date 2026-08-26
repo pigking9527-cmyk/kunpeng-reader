@@ -143,6 +143,9 @@ fn child_profile_args_for(profile: &LaunchProfile) -> Vec<OsString> {
 /// Strip the already-validated launch-profile option before business-command
 /// parsing. The profile is initialized first by every binary entry point, so
 /// accepting it here cannot silently create a second storage boundary.
+// The desktop, host, and worker are separate binaries. Only the host and
+// worker consume this shared parser, so it is dead from the desktop target.
+#[allow(dead_code)]
 pub(crate) fn application_args(arguments: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut result = Vec::new();
     let mut values = arguments.into_iter();
@@ -354,7 +357,7 @@ fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     false

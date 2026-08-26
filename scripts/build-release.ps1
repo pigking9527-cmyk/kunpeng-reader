@@ -6,6 +6,9 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $release = Join-Path $repo "target\release\ebook-reader-tauri.exe"
+$releaseWorker = Join-Path $repo "target\release\kunpeng-intelligence-worker.exe"
+$releaseHost = Join-Path $repo "target\release\kunpeng-intelligence-host.exe"
+$releaseRuntimeDir = Split-Path -Parent $release
 $repoExe = Join-Path $repo "鲲鹏阅读器.exe"
 $desktop = [Environment]::GetFolderPath("Desktop")
 $desktopShortcut = Join-Path $desktop "鲲鹏阅读器.lnk"
@@ -26,6 +29,29 @@ function Copy-DesktopArtifact([string]$Source, [string]$Destination) {
   catch {
     Start-Sleep -Seconds 2
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
+  }
+}
+
+function Sync-OnnxRuntimeCompanions([string]$SourceDirectory, [string]$DestinationDirectory) {
+  # `ort` discovers CUDA Provider DLLs beside the executable. The desktop
+  # shortcut points at `$repoExe`, so it must receive the matching companions
+  # from this exact build, rather than only the EXE.
+  $sourceFiles = @(Get-ChildItem -LiteralPath $SourceDirectory -Filter "onnxruntime*.dll" -File -ErrorAction Stop)
+  if ($sourceFiles.Count -eq 0) {
+    throw "ONNX Runtime companion DLLs are missing from build directory: $SourceDirectory"
+  }
+  foreach ($file in $sourceFiles) {
+    Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $DestinationDirectory $file.Name) -Force
+  }
+  $sourceNames = @($sourceFiles.Name)
+  Get-ChildItem -LiteralPath $DestinationDirectory -Filter "onnxruntime*.dll" -File -ErrorAction SilentlyContinue |
+    Where-Object { $sourceNames -notcontains $_.Name } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+
+  foreach ($required in "onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll") {
+    if (-not (Test-Path -LiteralPath (Join-Path $DestinationDirectory $required))) {
+      throw "Desktop runtime companion is missing after copy: $required"
+    }
   }
 }
 
@@ -86,16 +112,21 @@ function Clear-ExplorerIconCache {
 Push-Location $repo
 try {
   if (-not $SkipBuild) {
-    cargo build --release
+    cargo build --release --bins
   }
-  if (-not (Test-Path -LiteralPath $release)) { throw "release exe 不存在：$release" }
+  foreach ($required in @($release, $releaseWorker, $releaseHost)) {
+    if (-not (Test-Path -LiteralPath $required)) { throw "release executable 不存在：$required" }
+  }
   Assert-NewIconEmbedded
   Stop-ReaderProcesses
   Copy-Item -LiteralPath $release -Destination $repoExe -Force
+  Copy-Item -LiteralPath $releaseWorker -Destination (Join-Path $repo "kunpeng-intelligence-worker.exe") -Force
+  Sync-OnnxRuntimeCompanions $releaseRuntimeDir $repo
   Write-DesktopShortcut
   Remove-Item -LiteralPath $legacyDesktopExe -Force -ErrorAction SilentlyContinue
   if (-not $SkipIconCacheRefresh) { Clear-ExplorerIconCache }
-  Get-Item -LiteralPath $repoExe, $desktopShortcut | Select-Object FullName, Length, LastWriteTime
+  $delivered = @($repoExe, $desktopShortcut) + (Get-ChildItem -LiteralPath $repo -Filter "onnxruntime*.dll" -File | ForEach-Object FullName)
+  Get-Item -LiteralPath $delivered | Select-Object FullName, Length, LastWriteTime
 } finally {
   Pop-Location
 }

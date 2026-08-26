@@ -147,7 +147,9 @@ test("solid reader backgrounds never render body text with insufficient contrast
 });
 
 test("paged chapters discard a trailing spread with no actual text or media", () => {
-  assert.match(layout, /if\(!fastLargeChapter\)pagesInCh=trimTrailingBlankPagedViews\(root,pagesInCh\)/);
+  assert.match(layout, /const fastChromiumPageCount=IS_CHROMIUM_WEBVIEW&&!isScrollMode\(\)/);
+  assert.match(layout, /pagesInCh=\(?fastLargeChapter\|\|fastChromiumPageCount\)?\?fastPagedPageCount\(root\):pagedPageCountFromContent\(root\)/);
+  assert.match(layout, /if\(!fastLargeChapter&&!fastChromiumPageCount\)pagesInCh=trimTrailingBlankPagedViews\(root,pagesInCh\)/);
   assert.match(pagination, /const hasEnd=pagedEndOccupiesColumn\(el\)/);
   assert.doesNotMatch(pagination, /const hasEnd=!!el\.querySelector\('\.rr-end'\)/);
   assert.match(pagination, /while\(pages>1&&!pagedViewHasVisibleContent\(el,pages-1\)\)pages--/);
@@ -483,7 +485,7 @@ test("dual-page chapter endings fill the right page and label the cross-chapter 
   assert.match(layout, /body:not\(\.scroll-mode\):not\(\.line-paged-mode\) \.rr-end\{display:none !important;\}/);
   assert.match(layout, /beginChapterTurnFx\(1,visibleDualContinuationChapter\(\),'after-dual-continuation'\)/);
   assert.match(pagination, /\.rr-end,\.rr-dual-continuation/);
-  assert.match(reader, /dualChapterProgress/);
+  assert.match(reader, /dualChapterNumber/);
 });
 
 test("incremental page cache resumes incomplete books and accepts complete books", () => {

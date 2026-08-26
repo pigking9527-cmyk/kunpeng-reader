@@ -176,6 +176,56 @@ test("news article timing keeps only phase, outcome, sequence, and duration", as
   assert.doesNotMatch(JSON.stringify(snapshot), /https?:\/\/|article title|正文/iu);
 });
 
+test("reader opening stages keep only bounded cumulative and step timings", async () => {
+  const view = fixture();
+  const api = initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+  view.calls.splice(0);
+  const listener = view.listeners.get("reader-performance-trace");
+  assert.ok(listener);
+
+  const send = (stage: string, durationMs: number, extra: Record<string, unknown> = {}) => {
+    listener?.({
+      event: "reader-performance-trace",
+      id: 1,
+      payload: { openingId: 1787584000123, stage, durationMs, ...extra },
+    });
+  };
+  send("shell_activate_received", 0);
+  send("book_info", 12.4);
+  send("chapter_payload_ready", 31.8, { payload_inline_hit: 1, title: "private", path: "C:\\private.epub" });
+  send("chapter_styles_ready", 46.2);
+  send("chapter_dom_ready", 71.5);
+  send("chapter_resources_ready", 133.7);
+  send("page_layout_ready", 184.1, { layout_frame_wait_ms: 0.4, layout_apply_ms: 18.2, layout_finalize_ms: 31.4, layout_compute_ms: 49.8 });
+  send("frame_ready", 190.6);
+  send("page_displayed", 211.9, { display_frame_wait_ms: 21.3 });
+  send("untrusted private stage", 999, { token: "secret" });
+
+  const events = api._shellEventsForTests().filter((event) => event.type === "reader_performance");
+  assert.equal(events.length, 9);
+  assert.deepEqual(events.at(2)?.detail, {
+    source: "reader_shell",
+    stage: "chapter_payload_ready",
+    duration_ms: 31.8,
+    step_duration_ms: 19.4,
+    sequence: 1,
+    opening_id: 1787584000123,
+    payload_inline_hit: 1,
+  });
+  assert.deepEqual(events.at(-1)?.detail, {
+    source: "reader_shell",
+    stage: "page_displayed",
+    duration_ms: 211.9,
+    step_duration_ms: 21.3,
+    sequence: 1,
+    opening_id: 1787584000123,
+    display_frame_wait_ms: 21.3,
+  });
+  assert.doesNotMatch(JSON.stringify(events), /private|token|secret|\\private/iu);
+  assert.ok([...view.timers.keys()].length > 0);
+});
+
 test("news article timing checkpoints its redacted trace for later inspection", async () => {
   const view = fixture();
   const api = initializeProblemTraceUi(view.runtime as never, view.transport);
@@ -338,7 +388,8 @@ test("shelf pointer and click arrival retain focus state without a book identity
   const events = api._shellEventsForTests();
   const arrivals = events.filter((event) => event.type === "shelf_input");
   assert.deepEqual(arrivals.map((event) => {
-    const { focus_transition_age_ms: _age, ...detail } = event.detail;
+    const { focus_transition_age_ms, ...detail } = event.detail;
+    void focus_transition_age_ms;
     return detail;
   }), [
     {
@@ -416,11 +467,11 @@ test("reader checkpoint is re-merged with close focus handoff instead of replaci
   assert.equal(events.some((event) => event.type === "reader_window"), true);
   assert.equal(events.some((event) => event.type === "focus_handoff"), true);
   const native = events.filter((event) => event.type === "reader_window").at(-1);
-  assert.deepEqual(native?.detail, {
+  const { duration_ms: nativeDuration, ...nativeDetail } = (native?.detail ?? {}) as Record<string, unknown>;
+  assert.deepEqual(nativeDetail, {
     source: "window_backend",
     phase: "focus_restore",
     outcome: "focused_after_retry",
-    duration_ms: 0,
     window_requested: true,
     native_focused: true,
     webview_requested: true,
@@ -428,16 +479,18 @@ test("reader checkpoint is re-merged with close focus handoff instead of replaci
     visible: true,
     attempt: 3,
   });
+  assert.ok(typeof nativeDuration === "number" && Number.isSafeInteger(nativeDuration) && nativeDuration >= 0);
   const verified = events.filter((event) => event.type === "focus_handoff").at(-1);
-  assert.deepEqual(verified?.detail, {
+  const { duration_ms: verifiedDuration, ...verifiedDetail } = (verified?.detail ?? {}) as Record<string, unknown>;
+  assert.deepEqual(verifiedDetail, {
     source: "main_window",
     phase: "document_verified",
     outcome: "focused",
-    duration_ms: 0,
     attempts: 1,
     document_focused: true,
     active_element: "shelf_content",
   });
+  assert.ok(typeof verifiedDuration === "number" && Number.isSafeInteger(verifiedDuration) && verifiedDuration >= 0);
 });
 
 test("same-book window lifecycle keeps only bounded resume and relayout numbers", async () => {
@@ -508,6 +561,12 @@ test("typed checkpoint command and event envelopes remain exact", async () => {
   const response = {
     schema_version: 1,
     captured_at: new Date().toISOString(),
+    reader_state: {
+      window_role: "reader",
+      document_visible: true,
+      book_bound: true,
+      startup_failure_category: "none",
+    },
     events: [{ at: new Date().toISOString(), type: "reader_ready", detail: {} }],
   };
   view.listeners.get("reader-bug-trace-response")?.({
@@ -515,9 +574,63 @@ test("typed checkpoint command and event envelopes remain exact", async () => {
     id: 1,
     payload: { request_id: request.request_id, snapshot: response },
   });
+  view.fireTimer(Math.min(...view.timers.keys()));
   const snapshot = await pending;
   assert.equal(snapshot.schema_version, 1);
   assert.equal(api._recentReaderSnapshotForTests()?.schema_version, 1);
+});
+
+test("capture prefers the visible failed reader over a hidden preload pool response", async () => {
+  const view = fixture();
+  const api = initializeProblemTraceUi(view.runtime as never, view.transport);
+  await flush();
+
+  const pending = api.capture({ timeoutMs: 90 });
+  await flush();
+  const request = view.emitted.at(-1)?.payload as { readonly request_id: string };
+  const respond = (snapshot: Record<string, unknown>): void => {
+    view.listeners.get("reader-bug-trace-response")?.({
+      event: "reader-bug-trace-response",
+      id: 1,
+      payload: { request_id: request.request_id, snapshot },
+    });
+  };
+  respond({
+    schema_version: 1,
+    captured_at: new Date().toISOString(),
+    reader_state: {
+      window_role: "preload_pool",
+      window_visible: false,
+      document_visible: false,
+      book_bound: false,
+      startup_failure_category: "none",
+    },
+    events: [],
+  });
+  respond({
+    schema_version: 1,
+    captured_at: new Date().toISOString(),
+    reader_state: {
+      window_role: "pooled_reader",
+      window_visible: true,
+      document_visible: true,
+      book_bound: false,
+      startup_phase: "book_info",
+      startup_failure_category: "unbound_window",
+    },
+    events: [{ type: "book_load_failed", detail: { failure_category: "unbound_window" } }],
+  });
+  view.fireTimer(Math.min(...view.timers.keys()));
+
+  const snapshot = await pending;
+  assert.deepEqual(snapshot.reader_state, {
+    window_role: "pooled_reader",
+    window_visible: true,
+    document_visible: true,
+    book_bound: false,
+    startup_phase: "book_info",
+    startup_failure_category: "unbound_window",
+  });
 });
 
 test("software settings use the frozen allowlist and omit sensitive values", () => {
@@ -542,7 +655,7 @@ test("software settings use the frozen allowlist and omit sensitive values", () 
     show_cover_progress: true,
     show_cover_rating: true,
     show_cover_title: false,
-    single_click_opens_book: true,
+    book_open_interaction: "left_click_open_right_click_select",
     search_enabled: false,
   });
   assert.match(serialized, /"theme":"dark"/u);

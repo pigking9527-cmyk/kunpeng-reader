@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import { defineConfig, type LibraryFormats, type Plugin, type UserConfig } from "vite";
 
@@ -48,9 +48,15 @@ export default defineConfig(() => {
   const output = requiredEnvironment("KUNPENG_LEGACY_TS_OUTPUT");
   const globalName = requiredEnvironment("KUNPENG_LEGACY_TS_GLOBAL_NAME");
   const installExport = requiredEnvironment("KUNPENG_LEGACY_TS_INSTALL_EXPORT");
+  // Each classic entry is built in a distinct staging directory.  Keep Vite's
+  // dependency cache beside that directory as well: concurrent desktop
+  // checks otherwise share node_modules/.vite and can intermittently disturb
+  // a different entry's build on Windows.
+  const cacheDirectory = resolve(dirname(outputDirectory), `.vite-cache-${output}`);
 
   const config: UserConfig = {
     root: resolve(repositoryRoot, "apps/desktop-ui"),
+    cacheDir: cacheDirectory,
     plugins: [classicEntryPlugin(source, installExport)],
     build: {
       outDir: outputDirectory,

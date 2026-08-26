@@ -38,6 +38,7 @@ const required = [
   "docs/legal/NEW_REPOSITORY_IP_CHECKLIST.md",
   "src/dict/ECDICT_SOURCE.md",
   "src/dict/CC_CEDICT_SOURCE.md",
+  "src/dict/ZHWIKTIONARY_SOURCE.md",
   "LICENSES/ECDICT-MIT.txt",
   "LICENSES/CC-BY-SA-4.0.txt"
 ];

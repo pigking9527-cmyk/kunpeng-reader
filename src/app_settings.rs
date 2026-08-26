@@ -580,6 +580,7 @@ mod tests {
                 "library",
                 "news",
                 "intelligence-lab",
+                "favorites",
                 "filter",
                 "settings"
             ])

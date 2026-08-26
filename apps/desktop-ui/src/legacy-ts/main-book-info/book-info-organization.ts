@@ -11,6 +11,9 @@ export interface OrganizationBook extends Record<string, unknown> {
 }
 
 type OrganizationCommands = {
+  list_booklists: {
+    readonly result: readonly Readonly<{ readonly name?: unknown }>[];
+  };
   set_book_organization: {
     readonly args: {
       readonly id: string;
@@ -107,6 +110,9 @@ export function createBookInfoOrganization(
     const collectionSummary = root?.getElementById(
       "book-info-collection-summary",
     ) as HTMLElement | null;
+    const collectionManage = root?.getElementById(
+      "book-info-collections-manage",
+    ) as HTMLButtonElement | null;
     const panels: Record<OrganizationField, HTMLElement | null> = {
       tags: root?.getElementById("book-organization-tags-panel") as HTMLElement | null,
       collections: root?.getElementById(
@@ -134,6 +140,8 @@ export function createBookInfoOrganization(
 
     let bookId = "";
     let snapshot: OrganizationBook | null = null;
+    let savedBooklists: readonly Readonly<{ readonly name?: unknown }>[] = [];
+    let booklistLoadRevision = 0;
     let busy = false;
     const cleanName = (value: unknown): string =>
       String(value || "").trim().replace(/\s+/gu, " ").slice(0, 32);
@@ -141,7 +149,7 @@ export function createBookInfoOrganization(
     const kindFor = (field: OrganizationField): "tag" | "collection" =>
       field === "tags" ? "tag" : "collection";
     const labelFor = (field: OrganizationField): string =>
-      field === "tags" ? "标签" : "收藏书单";
+      field === "tags" ? "标签" : "书单";
 
     const currentBook = (): OrganizationBook | null =>
       (getBooks() || []).find((book) => String(book.id) === bookId) || snapshot;
@@ -167,6 +175,13 @@ export function createBookInfoOrganization(
         const name = cleanName(raw);
         const key = nameKey(name);
         if (key && !entries.has(key)) entries.set(key, { key, name, count: 1 });
+      }
+      if (field === "collections") {
+        for (const list of savedBooklists) {
+          const name = cleanName(list.name);
+          const key = nameKey(name);
+          if (key && !entries.has(key)) entries.set(key, { key, name, count: 0 });
+        }
       }
       return Array.from(entries.values()).sort((left, right) =>
         left.name.localeCompare(right.name, "zh-CN"),
@@ -338,12 +353,22 @@ export function createBookInfoOrganization(
         const actions = root.createElement("span");
         actions.className = "book-info-org-option-actions";
         if (field === "collections") {
+          const membership = actionButton(
+            selected.has(entry.key) ? "移出" : "加入",
+            selected.has(entry.key) ? "" : "primary",
+          );
+          membership.title = selected.has(entry.key)
+            ? `将这本书移出“${entry.name}”`
+            : `将这本书加入“${entry.name}”`;
+          membership.addEventListener("click", () =>
+            saveMembership(field, entry.name, !selected.has(entry.key)),
+          );
           const open = actionButton("打开");
           open.addEventListener("click", () => {
             modal.classList.remove("show");
             openBooklist?.(entry.name);
           });
-          actions.appendChild(open);
+          actions.append(membership, open);
         }
         const rename = actionButton("改名");
         rename.addEventListener("click", () => showInlineRename(row, field, entry));
@@ -373,7 +398,7 @@ export function createBookInfoOrganization(
       const input = root.createElement("input");
       input.type = "text";
       input.maxLength = 32;
-      input.placeholder = field === "tags" ? "新建标签" : "新建收藏书单";
+      input.placeholder = field === "tags" ? "新建标签" : "新建书单";
       const add = actionButton("新建并加入", "primary");
       const addValue = (): void => {
         const name = cleanName(input.value);
@@ -424,6 +449,18 @@ export function createBookInfoOrganization(
       modal.classList.add("show");
       renderEditor(tagEditor, "tags");
       renderEditor(collectionEditor, "collections");
+      if (field === "collections") {
+        const revision = ++booklistLoadRevision;
+        void api.invoke("list_booklists").then((lists) => {
+          if (revision !== booklistLoadRevision) return;
+          savedBooklists = Array.isArray(lists) ? lists : [];
+          if (modal.classList.contains("show")) renderEditor(collectionEditor, "collections");
+        }).catch((error) => {
+          if (revision === booklistLoadRevision) {
+            alertAction(`读取书单失败：${String(error)}`);
+          }
+        });
+      }
     };
 
     const closeManager = (): void => {
@@ -438,7 +475,11 @@ export function createBookInfoOrganization(
     };
 
     tabs.tags?.addEventListener("click", () => selectPanel("tags"));
-    tabs.collections?.addEventListener("click", () => selectPanel("collections"));
+    tabs.collections?.addEventListener("click", () => openManager("collections"));
+    if (collectionManage) {
+      collectionManage.textContent = "添加到书单";
+      collectionManage.title = "加入现有书单或新建书单";
+    }
     root.getElementById("book-organization-close")?.addEventListener("click", closeManager);
     modal.addEventListener("click", (event) => {
       if (event.target === modal) closeManager();

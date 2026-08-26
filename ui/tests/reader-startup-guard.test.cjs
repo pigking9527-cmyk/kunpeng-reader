@@ -39,7 +39,7 @@ test("reader startup failures stay diagnosable and closable", () => {
   assert.match(guard, /function beginFrameNavigation[\s\S]*?frame_ready_timeout/);
   assert.match(guard, /function closeSafely[\s\S]*?READER_CLOSE_FALLBACK_MS[\s\S]*?nativeClose/);
   assert.match(reader, /ReaderStartupGuard\?\.markScriptReady\?\.\(\);[\s\S]*?\(async \(\) =>/);
-  assert.match(reader, /ReaderStartupGuard\?\.beginBookLoad\?\.\(\);[\s\S]*?invoke\("book_info"\)/);
+  assert.match(reader, /ReaderStartupGuard\?\.beginBookLoad\?\.\(\);[\s\S]*?invoke\("book_info"(?:,|\))/);
   assert.match(reader, /beginFrameNavigation\?\.\(pdfSource\)[\s\S]*?frame\.src = pdfSource/);
   assert.match(reader, /beginFrameNavigation\?\.\(readerSource\)[\s\S]*?frame\.src = readerSource/);
   assert.match(reader, /e\.data\.ready[\s\S]*?ReaderStartupGuard\?\.markFrameReady/);

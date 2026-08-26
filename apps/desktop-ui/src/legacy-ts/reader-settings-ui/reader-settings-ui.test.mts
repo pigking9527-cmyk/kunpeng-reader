@@ -319,6 +319,77 @@ test("settings API preserves click zones, book appearance, storage, iframe and n
   );
 });
 
+test("all disabled page-info children repair the master switch to off", () => {
+  const view = fixture({
+    showPageInfo: true,
+    showChapterNumber: false,
+    showChapterPageNumber: false,
+    showProgressPercentage: false,
+    showTotalPageNumber: false,
+  });
+  const installed = installReaderSettingsUi(view.runtime, {
+    transport: view.transport,
+  });
+  assert.ok(installed);
+  assert.equal(installed.ReaderSettings.get().showPageInfo, false);
+  const stored = JSON.parse(
+    view.storageValues.get("readerSettings") ?? "null",
+  ) as Record<string, unknown>;
+  assert.equal(stored.showPageInfo, false);
+});
+
+test("context visual preferences default safely, normalize and stay device-local", async () => {
+  const view = fixture();
+  const installed = installReaderSettingsUi(view.runtime, {
+    transport: view.transport,
+  });
+  assert.ok(installed);
+  await flushPromises();
+
+  assert.equal(installed.settings.readerMediaImageDensity, "medium");
+  assert.equal(installed.settings.readerMediaVideoDensity, "medium");
+  assert.equal(installed.settings.showReaderMediaImageSummaryAtChapterStart, false);
+  assert.equal(installed.settings.showReaderMediaImageSummaryAtChapterEnd, false);
+  assert.equal(installed.settings.showReaderMediaVideoSummaryAtChapterStart, false);
+  assert.equal(installed.settings.showReaderMediaVideoSummaryAtChapterEnd, false);
+
+  installed.ReaderSettings.update({
+    readerMediaImageDensity: "high",
+    readerMediaVideoDensity: "low",
+    showReaderMediaImageSummaryAtChapterStart: true,
+    showReaderMediaImageSummaryAtChapterEnd: true,
+    showReaderMediaVideoSummaryAtChapterStart: true,
+    showReaderMediaVideoSummaryAtChapterEnd: true,
+  });
+  const stored = JSON.parse(
+    view.storageValues.get("readerSettings") ?? "null",
+  ) as Record<string, unknown>;
+  assert.equal(stored.readerMediaImageDensity, "high");
+  assert.equal(stored.readerMediaVideoDensity, "low");
+  assert.equal(stored.showReaderMediaImageSummaryAtChapterStart, true);
+  assert.equal(stored.showReaderMediaVideoSummaryAtChapterEnd, true);
+
+  installed.ReaderSettings.update({
+    readerMediaImageDensity: "invalid" as "medium",
+    readerMediaVideoDensity: "invalid" as "medium",
+  });
+  assert.equal(installed.ReaderSettings.get().readerMediaImageDensity, "medium");
+  assert.equal(installed.ReaderSettings.get().readerMediaVideoDensity, "medium");
+
+  view.fire("reader-settings-changed");
+  for (const timer of view.timers.splice(0)) timer();
+  await flushPromises();
+  const save = [...view.calls]
+    .reverse()
+    .find((call) => call.command === "app_settings_sync_save");
+  const request = save?.args?.request as Record<string, unknown> | undefined;
+  assert.ok(request);
+  assert.equal(request.readerMediaImageDensity, undefined);
+  assert.equal(request.readerMediaVideoDensity, undefined);
+  assert.equal(request.showReaderMediaImageSummaryAtChapterStart, undefined);
+  assert.equal(request.showReaderMediaVideoSummaryAtChapterEnd, undefined);
+});
+
 test("shell applies parchment or dark before dispatching the page appearance", async () => {
   const view = fixture();
   const installed = installReaderSettingsUi(view.runtime, {
@@ -355,8 +426,13 @@ test("controller source is strict, single-UI and emits a standalone classic inst
   assert.match(source, /global\.applyShellTheme = applyShellTheme/u);
   assert.match(source, /global\.initSettingsUI = initSettingsUI/u);
   const output = execFileSync(
-    "npx",
-    ["vite", "build", "--config", "apps/desktop-ui/vite.legacy-ts.config.ts"],
+    process.execPath,
+    [
+      fileURLToPath(new URL("../../../../../node_modules/vite/bin/vite.js", import.meta.url)),
+      "build",
+      "--config",
+      "apps/desktop-ui/vite.legacy-ts.config.ts",
+    ],
     {
       cwd: repositoryRoot,
       encoding: "utf8",

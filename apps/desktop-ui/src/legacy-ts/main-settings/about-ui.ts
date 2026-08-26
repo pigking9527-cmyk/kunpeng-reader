@@ -103,8 +103,12 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
     const githubLink = requiredElement<HTMLAnchorElement>(root, "about-github");
     const notesElement = requiredElement<HTMLElement>(root, "about-notes");
     const updateNotesElement = requiredElement<HTMLElement>(root, "ub-notes");
+    const aboutReleaseTitle = requiredElement<HTMLElement>(root, "about-release-title");
+    const aboutUpdateArrow = requiredElement<HTMLElement>(root, "about-update-arrow");
+    const aboutUpdateVersion = requiredElement<HTMLElement>(root, "about-update-version");
     const pendingUpdateKey = "pendingUpdateV1";
     let pendingRelease: PendingRelease | null = null;
+    let visibleAboutUpdate: UpdateInfo | null = null;
 
     const text = (
       key: string,
@@ -352,6 +356,31 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
       updateBar.classList.add("show");
     };
 
+    const showAboutUpdate = (info: UpdateInfo): void => {
+      pendingRelease = { version: info.latest, url: info.url || "" };
+      visibleAboutUpdate = info;
+      aboutUpdateArrow.classList.add("show");
+      aboutUpdateVersion.textContent = `v${String(info.latest).replace(/^v/iu, "")}`;
+      aboutUpdateVersion.classList.add("show");
+      aboutReleaseTitle.textContent = "新版更新内容";
+      aboutReleaseTitle.dataset.i18nState = "";
+      notesElement.dataset.i18nState = "";
+      renderReleaseNotes(
+        notesElement,
+        info.notes,
+        "已发布新版本，查看更新说明了解改进内容。",
+      );
+    };
+
+    const hideAboutUpdate = (): void => {
+      visibleAboutUpdate = null;
+      aboutUpdateArrow.classList.remove("show");
+      aboutUpdateVersion.textContent = "";
+      aboutUpdateVersion.classList.remove("show");
+      aboutReleaseTitle.textContent = text("aboutReleaseNotes", "本版更新内容");
+      aboutReleaseTitle.dataset.i18nState = "aboutReleaseNotes";
+    };
+
     const hideUpdateCard = (): void => {
       updateBar.classList.remove("show");
     };
@@ -363,10 +392,10 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
     const loadCurrentNotes = async (): Promise<void> => {
       const version = `v${String(await api.invoke("app_version").catch(() => "")).replace(/^v/iu, "")}`;
       const cached = storage.getItem(`notes_${version}`);
-      if (cached) {
+      if (cached && !visibleAboutUpdate) {
         notesElement.dataset.i18nState = "";
         renderReleaseNotes(notesElement, cached);
-      } else {
+      } else if (!visibleAboutUpdate) {
         setNotesState("releaseNotesLoading");
       }
       const notes = String(
@@ -374,9 +403,11 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
       ).trim();
       if (notes) {
         storage.setItem(`notes_${version}`, notes);
-        notesElement.dataset.i18nState = "";
-        renderReleaseNotes(notesElement, notes);
-      } else if (!cached) {
+        if (!visibleAboutUpdate) {
+          notesElement.dataset.i18nState = "";
+          renderReleaseNotes(notesElement, notes);
+        }
+      } else if (!cached && !visibleAboutUpdate) {
         setNotesState("releaseNotesUnavailable");
       }
     };
@@ -384,35 +415,34 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
     const openAbout = (): void => {
       menuElement?.classList.remove("show");
       modal.classList.add("show");
+      if (visibleAboutUpdate && !isIgnored(visibleAboutUpdate)) showAboutUpdate(visibleAboutUpdate);
+      else hideAboutUpdate();
       void loadCurrentNotes();
     };
 
     const reopenUpdateCard = (): void => {
       if (pendingRelease) {
         updateBar.classList.add("show");
-        return;
       }
-      const cached = cachedPendingUpdate();
-      if (cached && !isIgnored(cached)) showUpdateBanner(cached);
     };
 
-    const restorePendingUpdate = (): void => {
-      const cached = cachedPendingUpdate();
-      if (cached && !isIgnored(cached)) showUpdateBanner(cached);
-    };
-
-    const discardStalePendingUpdate = (info: UpdateInfo): void => {
-      if (info.source !== "server" || info.has_update) return;
-      const cached = cachedPendingUpdate();
-      if (!cached || String(cached.current) !== String(info.current)) return;
+    const clearPendingUpdate = (): void => {
       try {
         storage.removeItem(pendingUpdateKey);
       } catch {
         // Removal is best effort, matching the original local cache behavior.
       }
+    };
+
+    const discardStalePendingUpdate = (info: UpdateInfo): void => {
+      if (info.has_update) return;
+      const cached = cachedPendingUpdate();
+      if (!cached || String(cached.current) !== String(info.current)) return;
+      clearPendingUpdate();
       if (pendingRelease?.version === cached.latest) {
         pendingRelease = null;
         hideUpdateCard();
+        hideAboutUpdate();
       }
     };
 
@@ -439,12 +469,20 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
       }
       if (!info.has_update) {
         discardStalePendingUpdate(info);
-        if (force) setUpdateState("latestVersion");
+        if (force) {
+          hideAboutUpdate();
+          setUpdateState("latestVersion");
+        }
         return;
       }
       cachePendingUpdate(info);
-      if (force) setUpdateState();
+      if (force) {
+        setUpdateState();
+        showAboutUpdate(info);
+        return;
+      }
       if (!force && isIgnored(info)) return;
+      // 启动发现更新使用独立更新页；“关于”内只承载用户手动检查的结果。
       showUpdateBanner(info);
     };
 
@@ -482,9 +520,11 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
     runtime.addEventListener?.("app-language-changed", () => {
       setUpdateState(updateButton.dataset.i18nState || "checkUpdates");
       if (notesElement.dataset.i18nState) setNotesState(notesElement.dataset.i18nState);
+      if (aboutReleaseTitle.dataset.i18nState) {
+        aboutReleaseTitle.textContent = text(aboutReleaseTitle.dataset.i18nState);
+      }
     });
 
-    restorePendingUpdate();
     activeController = Object.freeze({ checkUpdate, hideUpdateCard, reopenUpdateCard });
     return activeController;
   };

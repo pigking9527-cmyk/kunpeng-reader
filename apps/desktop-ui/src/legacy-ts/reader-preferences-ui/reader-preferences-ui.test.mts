@@ -3,6 +3,8 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 
 const sourceUrl = new URL("./reader-preferences-ui.ts", import.meta.url);
+const readerHtmlUrl = new URL("../../../../../ui/reader.html", import.meta.url);
+const readerPreferencesCssUrl = new URL("../../../../../ui/reader-preferences.css", import.meta.url);
 
 test("reader preferences keeps the frozen original UI compatibility contract", async () => {
   const source = await readFile(sourceUrl, "utf8");
@@ -61,4 +63,45 @@ test("reader palette sync preserves the native command envelopes", async () => {
   assert.match(source, /asset\.compressed === true/);
   assert.match(source, /customBackgroundAssetId: asset\.assetId/);
   assert.match(source, /customBackgroundAssetBytes: asset\.byteSize/);
+});
+
+test("advanced preferences expose context visual density and chapter summaries", async () => {
+  const [source, html, css] = await Promise.all([
+    readFile(sourceUrl, "utf8"),
+    readFile(readerHtmlUrl, "utf8"),
+    readFile(readerPreferencesCssUrl, "utf8"),
+  ]);
+
+  assert.match(html, /data-reader-i18n="readerContextMedia">伴读/);
+  assert.match(html, /id="pref-reader-media-image-density"[^>]+data-pref-media-density="readerMediaImageDensity"/);
+  assert.match(html, /id="pref-reader-media-video-density"[^>]+data-pref-media-density="readerMediaVideoDensity"/);
+  assert.match(html, /id="pref-reader-media-mode"[^>]+data-pref-media-policy/);
+  for (const key of [
+    "showReaderMediaImageSummaryAtChapterStart",
+    "showReaderMediaImageSummaryAtChapterEnd",
+    "showReaderMediaVideoSummaryAtChapterStart",
+    "showReaderMediaVideoSummaryAtChapterEnd",
+  ]) {
+    assert.match(html, new RegExp(`data-pref-bool="${key}"`));
+  }
+  assert.match(source, /querySelectorAll<HTMLSelectElement>\("\[data-pref-media-density\]"\)/);
+  assert.match(source, /\[data-pref-media-policy\]/);
+  assert.match(source, /ReaderSettings\.update\(\{ \[key\]: value \}\)/);
+  assert.match(css, /\.reader-context-media-group select/);
+  assert.match(css, /\.reader-context-media-summary-heading/);
+});
+
+test("page progress options open from a settings popover and close the master on the last item", async () => {
+  const [source, html] = await Promise.all([
+    readFile(sourceUrl, "utf8"),
+    readFile(readerHtmlUrl, "utf8"),
+  ]);
+
+  assert.match(html, /id="pref-reader-page-info-settings"[^>]+aria-controls="reader-page-info-popover"/);
+  assert.match(html, /id="reader-page-info-popover"[^>]+role="dialog"[^>]+hidden/);
+  assert.match(source, /function setReaderPageInfoConfigExpanded\(expanded: boolean\): void/);
+  assert.match(source, /function updatePageInfoVisibilitySetting\(input: HTMLInputElement, key: string\): void/);
+  assert.match(source, /enabledCount === 0[\s\S]*?patch\.showPageInfo = false/);
+  assert.match(source, /input\.checked[\s\S]*?patch\.showPageInfo = true/);
+  assert.doesNotMatch(source, /reader-page-info-options"\)\?\.toggleAttribute\("hidden", !pageInfoVisible\)/);
 });

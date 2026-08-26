@@ -5,7 +5,7 @@ export const READER_MESSAGE_ACTIONS = new Set([
   "semanticSearch", "aiReader", "translateText", "dict", "vocabAdd", "addHighlight",
   "addHighlightCorrect", "addHighlightCorrectDraft", "addHighlightNote", "openAnnotations", "readerGestureSurfaceClosed",
   "removeHighlight", "setHighlightNote", "setHighlightText", "setHighlightColor", "addBookmark", "tocResolved",
-  "getTranslationCredentialStatus", "saveTranslationCredential", "bookEnd", "readerGesture", "readerHighlightMenuPreferences", "readerHighlightMenuPreferencesReady", "readerHighlightMenuSettings",
+  "getTranslationCredentialStatus", "saveTranslationCredential", "bookEnd", "readerGesture", "readerEngineWarmReady", "readerHighlightMenuPreferences", "readerHighlightMenuPreferencesReady", "readerHighlightMenuSettings",
 ]);
 
 export const READER_MESSAGE_MAX_CHARS = 12 * 1024 * 1024;
@@ -86,6 +86,12 @@ function validHighlightMenuPreferences(value: unknown): boolean {
 }
 
 function validActionPayload(action: string, data: MessageRecord): boolean {
+  if (action === "readerEngineWarmReady") {
+    return data.readerEngineWarmReady === 1 &&
+      Number.isFinite(data.readerEngineHeapBytes) &&
+      Number(data.readerEngineHeapBytes) >= 0 &&
+      Number(data.readerEngineHeapBytes) <= 512 * 1024 * 1024;
+  }
   if (action === "readerJump") {
     const jump = data.readerJump;
     return isReaderMessageRecord(jump) &&

@@ -44,6 +44,39 @@ interface AiAnswer extends UnknownRecord {
   readonly citationChecked?: boolean;
 }
 
+interface ReaderMediaVideoStatus extends UnknownRecord {
+  readonly taskId?: string;
+  readonly status?: string;
+  readonly absolutePath?: string;
+  readonly message?: string;
+}
+
+interface ReaderMediaImageResult extends UnknownRecord {
+  readonly images?: readonly { readonly absolutePath?: string }[];
+}
+
+interface ReaderMediaGenerationCycle extends UnknownRecord {
+  readonly cycleId?: string;
+}
+
+interface ReaderCompanionSettings extends UnknownRecord {
+  readonly bookId?: string;
+  readonly stylePrompt?: string;
+  readonly negativePrompt?: string;
+  readonly characterNotes?: string;
+}
+
+type ReaderContextMediaPlacement = "anchor" | "chapterStart" | "chapterEnd";
+interface ReaderContextMediaAsset {
+  readonly kind: "image" | "video";
+  readonly absolutePath: string;
+  readonly chapter: number;
+  readonly anchorStart: number;
+  readonly anchorEnd: number;
+  readonly caption: string;
+  readonly placement: ReaderContextMediaPlacement;
+}
+
 interface MindMapNode extends UnknownRecord {
   readonly title?: string;
   readonly children?: readonly MindMapNode[];
@@ -125,6 +158,7 @@ interface BookInfo extends UnknownRecord {
   readonly resume_position?: { readonly anchor?: ReadingAnchor }; readonly bookmarks?: readonly unknown[];
   readonly highlights?: readonly unknown[]; readonly word_count?: number; readonly url?: string;
   readonly toc?: readonly { readonly chapter?: number; readonly frag?: string }[]; readonly chapter_count?: number;
+  readonly initial_chapter?: { readonly chapter?: number; readonly conversion?: string; readonly inline?: boolean; readonly body?: string; readonly head?: string };
 }
 interface ReaderFrameData extends UnknownRecord {
   readonly progress?: number; readonly chapter?: number; readonly chFrac?: number; readonly anchor?: ReadingAnchor;
@@ -132,7 +166,7 @@ interface ReaderFrameData extends UnknownRecord {
   readonly total?: number; readonly gPage?: number; readonly gTotal?: number; readonly positionRestored?: number;
   readonly positionCommit?: number; readonly positionSnapshotRequestId?: number; readonly dualContinuationChapter?: number;
   readonly sameBookResumeState?: SameBookResumeState | null;
-  readonly readerPerf?: string; readonly ttsState?: unknown;
+  readonly readerPerf?: string; readonly readerPerfMetrics?: UnknownRecord; readonly ttsState?: unknown;
   readonly ttsSynth?: { readonly text?: unknown; readonly voice?: unknown; readonly rate?: unknown; readonly seq?: unknown; readonly idx?: unknown };
   readonly pdfState?: UnknownRecord;
   readonly pageCache?: { readonly sig?: unknown; readonly pages?: readonly unknown[]; readonly complete?: unknown };
@@ -155,6 +189,8 @@ interface ReaderFrameData extends UnknownRecord {
   readonly layoutBusy?: unknown;
   readonly readerJump?: unknown;
   readonly ready?: unknown;
+  readonly readerEngineWarmReady?: unknown;
+  readonly readerEngineHeapBytes?: unknown;
   readonly dict?: unknown;
   readonly dictContext?: unknown;
   readonly dictPrefetch?: unknown;
@@ -244,6 +280,13 @@ interface ReaderShellRuntime extends Window, UnknownRecord {
   readerDebugSettingOn?: (key: string) => boolean;
 }
 
+interface ReaderWindowDiagnosticState {
+  readonly window_role: string;
+  readonly window_visible: boolean;
+  readonly book_bound: boolean;
+  readonly registered: boolean;
+}
+
 interface ReaderEndRecommendations {
   loadAtEnd(): Promise<unknown>;
   reset(id: string, options: UnknownRecord): void;
@@ -312,25 +355,97 @@ const emitTransport = transport.emit?.bind(transport);
 if (!listen || !emitTransport) throw new Error("Reader shell requires Tauri event transport.");
 const emit = emitTransport;
 let readerShellStartedAt = performance.now();
+let readerPerformanceOpeningId = Date.now();
 const isCleanPooledShell = new URLSearchParams(window.location.search).get("pool") === "1";
 const isReaderShellBenchmark = new URLSearchParams(window.location.search).get("benchmark") === "1";
+const preloadInnerReaderEngine = isCleanPooledShell && new URLSearchParams(window.location.search).get("inner") !== "0";
 let readerBookBound = !isCleanPooledShell;
+let readerBookLoadInFlight = false;
+let readerBookActivationPending = false;
+let innerReaderEngineReady = false;
+let readerStartupPhase = "idle";
+let readerStartupFailureCategory = "none";
+function readerWindowRole(): string {
+  if (isReaderShellBenchmark) return isCleanPooledShell ? "benchmark_preloaded" : "benchmark_regular";
+  if (isCleanPooledShell) return readerBookBound ? "pooled_reader" : "preload_pool";
+  return "reader";
+}
+function readerDocumentVisible(): boolean {
+  return document.visibilityState ? document.visibilityState === "visible" : document.hidden !== true;
+}
+function readerStartupErrorCategory(error: unknown): string {
+  const message = String(error || "").toLowerCase();
+  if (message.includes("未绑定图书") || message.includes("not bound")) return "unbound_window";
+  if (message.includes("找不到这本书") || message.includes("book not found")) return "book_missing";
+  if (message.includes("正文地址") || message.includes("invalid") || message.includes("url")) return "invalid_source";
+  if (message.includes("invoke") || message.includes("ipc") || message.includes("channel")) return "ipc_failure";
+  return "unknown";
+}
+function recordReaderStartupFailure(phase: string, error: unknown): void {
+  readerStartupPhase = phase;
+  readerStartupFailureCategory = readerStartupErrorCategory(error);
+  window.ReaderBugTrace?.record?.("book_load_failed", {
+    source: "reader_shell",
+    phase,
+    outcome: "failed",
+    failure_category: readerStartupFailureCategory,
+    window_role: readerWindowRole(),
+    document_visible: readerDocumentVisible(),
+    book_bound: readerBookBound,
+    book_info_loaded: Boolean(currentBookId),
+    inner_engine_ready: innerReaderEngineReady,
+  });
+  window.ReaderBugTrace?.checkpoint?.(0);
+}
 const readerText = (key: string, fallback: string, values?: Readonly<Record<string, unknown>>): string => {
   const value = window.ReaderI18n?.t?.(key, values);
   return value && value !== key ? value : fallback;
 };
-function recordReaderPerformance(stage: string, durationMs = performance.now() - readerShellStartedAt): void {
+const READER_PERFORMANCE_METRIC_KEYS = [
+  "stylesheet_count", "stylesheet_reused", "stylesheet_cssom_ready",
+  "stylesheet_load_event", "stylesheet_error_event", "stylesheet_timeout",
+  "image_total", "image_blocking", "image_deferred", "resource_timeout",
+  "payload_inline_hit",
+  "layout_frame_wait_ms", "layout_apply_ms", "layout_finalize_ms", "layout_compute_ms", "display_frame_wait_ms",
+] as const;
+function boundedReaderPerformanceMetrics(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const source = value as UnknownRecord;
+  const metrics: Record<string, number> = {};
+  for (const key of READER_PERFORMANCE_METRIC_KEYS) {
+    const numeric = Number(source[key]);
+    if (Number.isFinite(numeric)) {
+      const limit = key.endsWith("_ms") ? 30000 : 64;
+      const bounded = Math.max(0, Math.min(limit, numeric));
+      metrics[key] = key.endsWith("_ms") ? Number(bounded.toFixed(1)) : Math.round(bounded);
+    }
+  }
+  return metrics;
+}
+function recordReaderPerformance(stage: string, durationMs = performance.now() - readerShellStartedAt, metricsValue?: unknown): void {
   const elapsed = Math.max(0, Math.min(30000, Number(durationMs) || 0));
+  const metrics = boundedReaderPerformanceMetrics(metricsValue);
   window.ReaderBugTrace?.record?.("open_stage", {
     source: "reader_shell",
     outcome: stage,
     duration_ms: Number(elapsed.toFixed(1)),
+    ...metrics,
   });
   emit("reader-performance-trace", {
+    openingId: readerPerformanceOpeningId,
     stage,
     durationMs: Number(elapsed.toFixed(1)),
+    ...metrics,
   }).catch(() => {});
 }
+const OPENING_READER_PAGE_PERFORMANCE_STAGES = new Set([
+  "chapter_payload_ready",
+  "chapter_styles_ready",
+  "chapter_dom_ready",
+  "chapter_resources_ready",
+  "page_layout_ready",
+  "page_displayed",
+]);
 let currentBookTitle = "";
 let currentBookId = "";
 let currentBookContentId = "";
@@ -437,6 +552,44 @@ const aiReaderHistory = document.getElementById("ai-reader-history");
 const aiReaderHistoryMenu = document.getElementById("ai-reader-history-menu");
 const aiReaderHistorySettingsButton = document.getElementById("ai-reader-history-settings-btn");
 const aiReaderSourcePreview = document.getElementById("ai-reader-source-preview");
+const aiReaderMediaComposer = document.getElementById("ai-reader-media-composer");
+const aiReaderMediaTitle = document.getElementById("ai-reader-media-title");
+const aiReaderMediaPrompt = document.getElementById("ai-reader-media-prompt") as unknown as HTMLTextAreaElement | null;
+const aiReaderMediaConsent = document.getElementById("ai-reader-media-consent") as unknown as HTMLInputElement | null;
+const aiReaderMediaConsentCopy = document.getElementById("ai-reader-media-consent-copy");
+const aiReaderMediaSubmit = document.getElementById("ai-reader-media-submit") as unknown as HTMLButtonElement | null;
+const aiReaderMediaResult = document.getElementById("ai-reader-media-result");
+const aiReaderCompanionSettingsPanel = document.getElementById("ai-reader-companion-settings-panel");
+const aiReaderCompanionStyle = document.getElementById("ai-reader-companion-style") as unknown as HTMLTextAreaElement | null;
+const aiReaderCompanionNegative = document.getElementById("ai-reader-companion-negative") as unknown as HTMLTextAreaElement | null;
+const aiReaderCompanionCharacters = document.getElementById("ai-reader-companion-characters") as unknown as HTMLTextAreaElement | null;
+const aiReaderCompanionSettingsStatus = document.getElementById("ai-reader-companion-settings-status");
+let aiReaderMediaKind: "image" | "video" | null = null;
+let aiReaderMediaPollToken = 0;
+let aiReaderMediaCycleToken = "";
+let readerContextMediaBatchRunning = false;
+let readerContextMediaBatchTimer = 0;
+let readerContextMediaLastChapter = -1;
+let readerContextMediaLastBookKey = "";
+let readerContextMediaBatchFailureCount = 0;
+const readerContextMediaPending = new Map<number, number>();
+const readerContextMediaProcessed = new Set<string>();
+const READER_CONTEXT_MEDIA_CACHE_KEY = "readerContextMediaCacheV1";
+let readerCompanionSettings: ReaderCompanionSettings = {};
+let readerMemoryCaptureInFlight = false;
+const readerMemoryCaptureQueued = new Set<string>();
+type ReadingMemoryCaptureJob = {
+  readonly completedChapter: number;
+  readonly observedCurrentChapter: number;
+  readonly observedCurrentFraction: number;
+  readonly retries: number;
+};
+// Chapter memories must be generated in reading order.  A fast reader can
+// complete another short chapter while the model is still handling the
+// previous one; keeping these jobs locally prevents that later chapter from
+// being silently dropped just because one capture is in flight.
+const readerMemoryCapturePending = new Map<string, ReadingMemoryCaptureJob>();
+let readerMemoryCaptureStartTimer = 0;
 let aiReaderSelectedText = "";
 let aiReaderSelectedAnchor: AnchorRange | null = null;
 let aiReaderPreviewCitation: HTMLElement | null = null;
@@ -994,6 +1147,592 @@ async function runAiReader(task: string): Promise<void> {
     aiReaderSetStatus(readerText("failed", "失败"));
   } finally { aiReaderStopProgress(); aiReaderRequestRunning = false; }
 }
+
+function readerMediaFileUrl(path: string): string {
+  const tauri = (window as unknown as {
+    readonly __TAURI__?: { readonly core?: { convertFileSrc?(value: string): string } };
+  }).__TAURI__;
+  return tauri?.core?.convertFileSrc?.(path) || path;
+}
+
+function resetReaderMediaComposer(): void {
+  aiReaderMediaPollToken += 1;
+  aiReaderMediaKind = null;
+  aiReaderMediaComposer?.setAttribute("hidden", "");
+  if (aiReaderMediaPrompt) aiReaderMediaPrompt.value = "";
+  if (aiReaderMediaConsent) aiReaderMediaConsent.checked = false;
+  if (aiReaderMediaSubmit) aiReaderMediaSubmit.disabled = true;
+  if (aiReaderMediaResult) {
+    aiReaderMediaResult.replaceChildren();
+    aiReaderMediaResult.setAttribute("hidden", "");
+  }
+}
+
+function readerCompanionBookId(): string {
+  return String(currentBookContentId || currentBookId || "").trim();
+}
+
+function setReaderCompanionSettingsStatus(message: string): void {
+  if (!aiReaderCompanionSettingsStatus) return;
+  aiReaderCompanionSettingsStatus.textContent = message;
+  aiReaderCompanionSettingsStatus.toggleAttribute("hidden", !message);
+}
+
+function renderReaderCompanionSettings(settings: ReaderCompanionSettings): void {
+  if (aiReaderCompanionStyle) aiReaderCompanionStyle.value = String(settings.stylePrompt || "");
+  if (aiReaderCompanionNegative) aiReaderCompanionNegative.value = String(settings.negativePrompt || "");
+  if (aiReaderCompanionCharacters) aiReaderCompanionCharacters.value = String(settings.characterNotes || "");
+}
+
+async function loadReaderCompanionSettings(): Promise<void> {
+  const bookId = readerCompanionBookId();
+  if (!bookId) return;
+  try {
+    const settings = await invoke<ReaderCompanionSettings>("reader_companion_settings_get", { bookId });
+    if (readerCompanionBookId() !== bookId) return;
+    readerCompanionSettings = settings;
+    renderReaderCompanionSettings(settings);
+  } catch (error) {
+    if (readerCompanionBookId() === bookId) setReaderCompanionSettingsStatus(`读取本机伴读设定失败：${error}`);
+  }
+}
+
+function companionVisualGuidance(): string {
+  const style = String(readerCompanionSettings.stylePrompt || "").trim();
+  const negative = String(readerCompanionSettings.negativePrompt || "").trim();
+  const characters = String(readerCompanionSettings.characterNotes || "").trim();
+  if (!style && !negative && !characters) return "";
+  const parts: string[] = ["必须遵守本书已保存的伴读设定；设定只约束视觉表现，不能补写正文不存在的事实。"];
+  if (style) parts.push(`画风设定：${style}`);
+  if (negative) parts.push(`避免内容：${negative}`);
+  if (characters) parts.push(`人物设定：${characters}`);
+  return parts.join("\n");
+}
+
+function companionPromptWithGuidance(prompt: string, maxLength: number): string {
+  const guidance = companionVisualGuidance();
+  return `${prompt.trim()}${guidance ? `\n\n${guidance}` : ""}`.slice(0, maxLength).trim();
+}
+
+async function openReaderCompanionSettings(): Promise<void> {
+  if (!readerCompanionBookId()) {
+    aiReaderSetStatus("请先打开图书再编辑伴读设定");
+    return;
+  }
+  aiReaderCompanionSettingsPanel?.removeAttribute("hidden");
+  setReaderCompanionSettingsStatus("正在读取当前图书的本机设定…");
+  await loadReaderCompanionSettings();
+  if (!aiReaderCompanionSettingsStatus?.textContent?.startsWith("读取本机")) {
+    setReaderCompanionSettingsStatus("仅保存在本机；保存后用于后续图片和视频提示词。");
+  }
+}
+
+async function saveReaderCompanionSettings(): Promise<void> {
+  const bookId = readerCompanionBookId();
+  if (!bookId) return;
+  const settings: ReaderCompanionSettings = {
+    bookId,
+    stylePrompt: aiReaderCompanionStyle?.value || "",
+    negativePrompt: aiReaderCompanionNegative?.value || "",
+    characterNotes: aiReaderCompanionCharacters?.value || "",
+  };
+  setReaderCompanionSettingsStatus("正在保存到本机…");
+  try {
+    const saved = await invoke<ReaderCompanionSettings>("reader_companion_settings_save", { settings });
+    if (readerCompanionBookId() !== bookId) return;
+    readerCompanionSettings = saved;
+    renderReaderCompanionSettings(saved);
+    setReaderCompanionSettingsStatus("已保存到本机；不会同步或上传。");
+  } catch (error) {
+    setReaderCompanionSettingsStatus(`保存本机伴读设定失败：${error}`);
+  }
+}
+
+async function prepareReaderMedia(kind: "image" | "video"): Promise<void> {
+  if (aiReaderRequestRunning) return;
+  aiReaderRequestRunning = true;
+  aiReaderStartProgress("summary");
+  aiReaderSetStatus(kind === "image" ? "正在提取可视化场景…" : "正在提取视频分镜…");
+  try {
+    const instruction = kind === "image"
+      ? "根据当前选中文字和已经读到的相关正文，生成一段可直接用于文生图的中文提示词。必须包含场景、人物外貌与服装、动作、环境、光线、构图和风格；只输出提示词，不要解释，不得补写原文没有的身份或情节。"
+      : "根据当前选中文字和已经读到的相关正文，生成一段可直接用于视频生成的中文分镜提示词。必须包含场景、人物外貌与服装、动作或打斗、关键对话、镜头运动、环境声音和节奏；只输出提示词，不要解释，不得补写原文没有的身份或情节。";
+    const answer = await invoke<AiAnswer>("ask_reading_assistant", { request: {
+      task: "question",
+      question: `${instruction}${companionVisualGuidance() ? `\n\n${companionVisualGuidance()}` : ""}`,
+      currentChapter: curChapter,
+      currentFraction: curChFrac,
+      selectedText: aiReaderSelectedText,
+      selectedStart: aiReaderSelectedAnchor?.start,
+      selectedEnd: aiReaderSelectedAnchor?.end,
+      sessionMemory: aiReaderSessionMemory(),
+    } });
+    const prompt = String(answer.content || "").trim();
+    if (!prompt) throw new Error("本地模型没有返回可用场景提示词");
+    aiReaderMediaKind = kind;
+    aiReaderMediaComposer?.removeAttribute("hidden");
+    if (aiReaderMediaTitle) aiReaderMediaTitle.textContent = kind === "image" ? "图片生成提示词" : "生成带声音的视频";
+    if (aiReaderMediaPrompt) {
+      aiReaderMediaPrompt.maxLength = kind === "image" ? 1500 : 7000;
+      aiReaderMediaPrompt.value = companionPromptWithGuidance(prompt, aiReaderMediaPrompt.maxLength);
+      aiReaderMediaPrompt.focus();
+    }
+    if (aiReaderMediaConsent) aiReaderMediaConsent.checked = false;
+    if (aiReaderMediaConsentCopy) {
+      aiReaderMediaConsentCopy.textContent = kind === "image"
+        ? "我已检查提示词，同意交给本机 MiniMax-H3 生成代表帧；内容不会上传"
+        : "我已检查提示词，同意交给本机 MiniMax-H3 生成；内容不会上传";
+    }
+    if (aiReaderMediaSubmit) {
+      aiReaderMediaSubmit.disabled = true;
+      aiReaderMediaSubmit.textContent = kind === "image" ? "确认生成图片" : "确认生成视频";
+    }
+    aiReaderSetStatus(kind === "image"
+      ? "图片提示词已生成，请检查后交给本机 MiniMax-H3"
+      : "视频提示词已生成，请检查后交给本机 MiniMax-H3");
+  } catch (error) {
+    aiReaderSetStatus(`准备伴读提示词失败：${error}`);
+  } finally {
+    aiReaderStopProgress();
+    aiReaderRequestRunning = false;
+  }
+}
+
+interface ReaderContextMediaCacheEntry extends ReaderContextMediaAsset { readonly bookKey: string }
+interface ReaderContextMediaPromptPlan {
+  readonly kind: "image" | "video";
+  readonly prompt: string;
+  readonly caption: string;
+  readonly placement: ReaderContextMediaPlacement;
+  readonly chapter: number;
+  readonly anchorStart: number;
+  readonly anchorEnd: number;
+}
+
+function readerContextMediaBookKey(): string {
+  return String(currentBookContentId || currentBookId || "").trim();
+}
+
+function readerContextMediaChapterKey(chapter: number): string {
+  return `${readerContextMediaBookKey()}|${chapter}`;
+}
+
+function resetReaderContextMediaQueueForBook(nextBookKey: string): void {
+  if (!readerContextMediaLastBookKey || readerContextMediaLastBookKey === nextBookKey) return;
+  readerContextMediaPending.clear();
+  window.clearTimeout(readerContextMediaBatchTimer);
+  readerContextMediaBatchTimer = 0;
+  readerContextMediaBatchFailureCount = 0;
+  readerContextMediaLastChapter = -1;
+}
+
+function readReaderContextMediaCache(): ReaderContextMediaCacheEntry[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(READER_CONTEXT_MEDIA_CACHE_KEY) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is ReaderContextMediaCacheEntry => {
+      const item = value as Partial<ReaderContextMediaCacheEntry>;
+      return typeof item.bookKey === "string" && (item.kind === "image" || item.kind === "video") &&
+        typeof item.absolutePath === "string" && Number.isInteger(item.chapter) && item.chapter! >= 0;
+    }).slice(-240);
+  } catch {
+    return [];
+  }
+}
+
+function sendReaderContextMediaAsset(asset: ReaderContextMediaAsset): void {
+  if (isPdf || asset.chapter !== curChapter || !asset.absolutePath) return;
+  sendToPage({ contextMediaAsset: {
+    kind: asset.kind,
+    assetUrl: readerMediaFileUrl(asset.absolutePath),
+    chapter: asset.chapter,
+    anchorStart: asset.anchorStart,
+    anchorEnd: asset.anchorEnd,
+    caption: asset.caption,
+    placement: asset.placement,
+  } });
+}
+
+function cacheReaderContextMediaAsset(asset: ReaderContextMediaAsset): void {
+  const bookKey = readerContextMediaBookKey();
+  if (!bookKey) return;
+  const cache = readReaderContextMediaCache();
+  const signature = `${bookKey}|${asset.chapter}|${asset.kind}|${asset.placement}|${asset.anchorStart}|${asset.anchorEnd}`;
+  const filtered = cache.filter((item) =>
+    `${item.bookKey}|${item.chapter}|${item.kind}|${item.placement}|${item.anchorStart}|${item.anchorEnd}` !== signature);
+  filtered.push({ ...asset, bookKey, caption: asset.caption.slice(0, 320) });
+  try { localStorage.setItem(READER_CONTEXT_MEDIA_CACHE_KEY, JSON.stringify(filtered.slice(-240))); } catch { /* local cache is optional */ }
+}
+
+function restoreReaderContextMediaAssets(chapter: number): void {
+  const bookKey = readerContextMediaBookKey();
+  if (!bookKey) return;
+  const assets = readReaderContextMediaCache().filter((item) => item.bookKey === bookKey && item.chapter === chapter);
+  if (assets.length) readerContextMediaProcessed.add(readerContextMediaChapterKey(chapter));
+  for (const asset of assets) sendReaderContextMediaAsset(asset);
+}
+
+function renderReaderMediaAsset(kind: "image" | "video", absolutePath: string, plan?: Omit<ReaderContextMediaAsset, "kind" | "absolutePath">): void {
+  if (!aiReaderMediaResult) return;
+  const status = document.createElement("div");
+  status.textContent = kind === "image" ? "图片已生成并保存到本机缓存" : "视频已生成并保存到本机缓存";
+  const media = document.createElement(kind === "image" ? "img" : "video");
+  media.src = readerMediaFileUrl(absolutePath);
+  if (media instanceof HTMLImageElement) media.alt = "根据当前已读场景生成的图片";
+  if (media instanceof HTMLVideoElement) media.controls = true;
+  aiReaderMediaResult.replaceChildren(status, media);
+  aiReaderMediaResult.removeAttribute("hidden");
+  if (plan) {
+    const asset: ReaderContextMediaAsset = { kind, absolutePath, ...plan };
+    cacheReaderContextMediaAsset(asset);
+    sendReaderContextMediaAsset(asset);
+  }
+}
+
+async function pollReaderMediaVideo(taskId: string, token: number): Promise<string> {
+  for (let attempt = 0; attempt < 120 && token === aiReaderMediaPollToken; attempt += 1) {
+    const result = await invoke<ReaderMediaVideoStatus>("query_reader_media_video", { taskId });
+    if (result.status === "success" && result.absolutePath) {
+      aiReaderSetStatus("视频生成完成");
+      if (aiReaderMediaSubmit) aiReaderMediaSubmit.disabled = false;
+      return result.absolutePath;
+    }
+    if (result.status === "failed") throw new Error(result.message || "MiniMax 视频生成失败");
+    if (aiReaderMediaResult) {
+      aiReaderMediaResult.textContent = `本机 MiniMax-H3 正在生成视频，首次加载或分层卸载时可能需要较长时间…（${attempt + 1}）`;
+      aiReaderMediaResult.removeAttribute("hidden");
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 4000));
+  }
+  if (token === aiReaderMediaPollToken) throw new Error("视频任务等待超时，可稍后重新查询");
+  throw new Error("视频任务已取消");
+}
+
+async function beginReaderMediaCycle(): Promise<string> {
+  const cycle = await invoke<ReaderMediaGenerationCycle>("begin_reader_media_generation_cycle");
+  const cycleId = String(cycle.cycleId || "");
+  if (!cycleId) throw new Error("本机影像生成没有返回显存轮换标识");
+  aiReaderMediaCycleToken = cycleId;
+  return cycleId;
+}
+
+async function finishReaderMediaCycle(cycleId: string): Promise<void> {
+  if (!cycleId) return;
+  await invoke("finish_reader_media_generation_cycle", { cycleId });
+  if (aiReaderMediaCycleToken === cycleId) aiReaderMediaCycleToken = "";
+}
+
+async function submitReaderMedia(): Promise<void> {
+  const prompt = aiReaderMediaPrompt?.value.trim() || "";
+  if (!aiReaderMediaKind || !prompt || !aiReaderMediaConsent?.checked) return;
+  const kind = aiReaderMediaKind;
+  const token = ++aiReaderMediaPollToken;
+  const anchorStart = Math.max(0, Math.round(aiReaderSelectedAnchor?.start ?? curReadingAnchor?.text_offset ?? 0));
+  const anchorEnd = Math.max(anchorStart + 1, Math.round(aiReaderSelectedAnchor?.end ?? anchorStart + 1));
+  const plan = { chapter: curChapter, anchorStart, anchorEnd, caption: kind === "image" ? "根据此处正文生成的情境图片" : "根据此处正文生成的情境视频", placement: "anchor" as const };
+  let cycleId = "";
+  if (aiReaderMediaSubmit) aiReaderMediaSubmit.disabled = true;
+  if (aiReaderMediaResult) {
+    aiReaderMediaResult.textContent = kind === "image" ? "正在切换显存并由本机 MiniMax-H3 生成图片…" : "正在切换显存并提交本机 MiniMax-H3 视频任务…";
+    aiReaderMediaResult.removeAttribute("hidden");
+  }
+  try {
+    cycleId = await beginReaderMediaCycle();
+    if (kind === "image") {
+      const result = await invoke<ReaderMediaImageResult>("generate_reader_media_image", { request: {
+        prompt, aspectRatio: "16:9", n: 1, promptOptimizer: true,
+      } });
+      const absolutePath = result.images?.[0]?.absolutePath;
+      if (!absolutePath) throw new Error("MiniMax-H3 未返回图片结果");
+      renderReaderMediaAsset("image", absolutePath, plan);
+      aiReaderSetStatus("图片已生成并插入对应正文下方");
+    } else {
+      const created = await invoke<ReaderMediaVideoStatus>("create_reader_media_video", { request: {
+        prompt, resolution: "768P", duration: 5, ratio: "16:9",
+      } });
+      if (!created.taskId) throw new Error("MiniMax 未返回视频任务编号");
+      const absolutePath = await pollReaderMediaVideo(created.taskId, token);
+      renderReaderMediaAsset("video", absolutePath, plan);
+    }
+  } catch (error) {
+    if (aiReaderMediaResult) {
+      aiReaderMediaResult.textContent = `生成失败：${error}`;
+      aiReaderMediaResult.removeAttribute("hidden");
+    }
+    aiReaderSetStatus("伴读生成失败");
+  } finally {
+    if (cycleId) {
+      try { await finishReaderMediaCycle(cycleId); }
+      catch (error) { aiReaderSetStatus(`影像已完成，但恢复本地模型失败：${error}`); }
+    }
+    if (aiReaderMediaSubmit) aiReaderMediaSubmit.disabled = !aiReaderMediaConsent?.checked;
+  }
+}
+
+function readerContextMediaPolicy(): string {
+  try { return localStorage.getItem("readerMediaPolicyV1") || "suggest"; }
+  catch { return "suggest"; }
+}
+
+function readerContextMediaSetting(): UnknownRecord {
+  return (window.ReaderSettings?.get?.() || {}) as UnknownRecord;
+}
+
+function contextMediaCadence(kind: "image" | "video", density: unknown): number {
+  const value = ["low", "medium", "high"].includes(String(density)) ? String(density) : "medium";
+  if (kind === "image") return value === "low" ? 3 : value === "medium" ? 2 : 1;
+  return value === "low" ? 12 : value === "medium" ? 6 : 3;
+}
+
+function requestedContextMediaPlacements(chapter: number): Array<{ kind: "image" | "video"; placement: ReaderContextMediaPlacement }> {
+  const settings = readerContextMediaSetting();
+  const placements: Array<{ kind: "image" | "video"; placement: ReaderContextMediaPlacement }> = [];
+  if (chapter % contextMediaCadence("image", settings.readerMediaImageDensity) === 0) placements.push({ kind: "image", placement: "anchor" });
+  if (chapter % contextMediaCadence("video", settings.readerMediaVideoDensity) === 0) placements.push({ kind: "video", placement: "anchor" });
+  if (settings.showReaderMediaImageSummaryAtChapterStart === true) placements.push({ kind: "image", placement: "chapterStart" });
+  if (settings.showReaderMediaImageSummaryAtChapterEnd === true) placements.push({ kind: "image", placement: "chapterEnd" });
+  if (settings.showReaderMediaVideoSummaryAtChapterStart === true) placements.push({ kind: "video", placement: "chapterStart" });
+  if (settings.showReaderMediaVideoSummaryAtChapterEnd === true) placements.push({ kind: "video", placement: "chapterEnd" });
+  return placements.slice(0, 5);
+}
+
+function parseContextMediaPromptPlans(content: string, chapter: number, anchorOffset: number): ReaderContextMediaPromptPlan[] {
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start < 0 || end <= start) return [];
+  try {
+    const parsed = JSON.parse(content.slice(start, end + 1)) as { readonly items?: readonly UnknownRecord[] };
+    if (!Array.isArray(parsed.items)) return [];
+    return parsed.items.flatMap((item): ReaderContextMediaPromptPlan[] => {
+      const kind = item.kind === "video" ? "video" : item.kind === "image" ? "image" : null;
+      const placement = ["anchor", "chapterStart", "chapterEnd"].includes(String(item.placement))
+        ? String(item.placement) as ReaderContextMediaPlacement : null;
+      const prompt = String(item.prompt || "").trim();
+      if (!kind || !placement || !prompt) return [];
+      const boundedPrompt = prompt.slice(0, kind === "image" ? 1500 : 7000);
+      return [{
+        kind,
+        placement,
+        prompt: boundedPrompt,
+        caption: String(item.caption || (kind === "image" ? "本章情境图片" : "本章情境视频")).trim().slice(0, 240),
+        chapter,
+        anchorStart: placement === "anchor" ? anchorOffset : 0,
+        anchorEnd: placement === "anchor" ? anchorOffset + 1 : 1,
+      }];
+    }).slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
+async function buildContextMediaPromptPlans(chapter: number, anchorOffset: number): Promise<ReaderContextMediaPromptPlan[]> {
+  const placements = requestedContextMediaPlacements(chapter);
+  if (!placements.length) return [];
+  const specification = placements.map((item) => `${item.kind}:${item.placement}`).join(", ");
+  const answer = await invoke<AiAnswer>("ask_reading_assistant", { request: {
+    task: "companion_prompt",
+    question: `阅读并理解已经完整读完的第 ${chapter + 1} 章正文证据，为下列位置分别生成视觉提示词：${specification}。image 要包含场景、人物外貌服装、动作、环境、光线、构图和风格；video 要包含场景、人物、动作或打斗、关键对话、镜头运动、环境声音与节奏。不得添加原文没有的身份、事实或情节。${companionVisualGuidance() ? `\n\n${companionVisualGuidance()}` : ""}\n\n只返回严格 JSON：{"items":[{"kind":"image或video","placement":"anchor或chapterStart或chapterEnd","caption":"不超过40字的中文说明","prompt":"提示词"}]}，不要 Markdown。`,
+    currentChapter: chapter,
+    currentFraction: 1,
+    selectedText: "",
+    sessionMemory: [],
+  } });
+  const plans = parseContextMediaPromptPlans(String(answer.content || ""), chapter, anchorOffset);
+  const allowed = new Set(placements.map((item) => `${item.kind}:${item.placement}`));
+  return plans
+    .filter((plan) => allowed.has(`${plan.kind}:${plan.placement}`))
+    .map((plan) => ({
+      ...plan,
+      prompt: companionPromptWithGuidance(plan.prompt, plan.kind === "image" ? 1500 : 7000),
+    }));
+}
+
+async function waitReaderContextMediaVideo(taskId: string): Promise<string> {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    const result = await invoke<ReaderMediaVideoStatus>("query_reader_media_video", { taskId });
+    if (result.status === "success" && result.absolutePath) return result.absolutePath;
+    if (result.status === "failed") throw new Error(result.message || "MiniMax-H3 视频生成失败");
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 4000));
+  }
+  throw new Error("MiniMax-H3 视频生成超时");
+}
+
+async function generateReaderContextMediaPlan(plan: ReaderContextMediaPromptPlan, expectedBookKey: string): Promise<void> {
+  if (readerContextMediaBookKey() !== expectedBookKey) throw new Error("图书已切换，取消旧书影像任务");
+  let absolutePath = "";
+  if (plan.kind === "image") {
+    const result = await invoke<ReaderMediaImageResult>("generate_reader_media_image", { request: {
+      prompt: plan.prompt, aspectRatio: "16:9", n: 1, promptOptimizer: true,
+    } });
+    absolutePath = String(result.images?.[0]?.absolutePath || "");
+  } else {
+    const created = await invoke<ReaderMediaVideoStatus>("create_reader_media_video", { request: {
+      prompt: plan.prompt, resolution: "544P", duration: 5, ratio: "16:9",
+    } });
+    if (!created.taskId) throw new Error("MiniMax-H3 未返回视频任务编号");
+    absolutePath = await waitReaderContextMediaVideo(created.taskId);
+  }
+  if (!absolutePath) throw new Error("MiniMax-H3 未返回本机媒体文件");
+  if (readerContextMediaBookKey() !== expectedBookKey) throw new Error("图书已切换，不保存旧书影像结果");
+  const asset: ReaderContextMediaAsset = { ...plan, absolutePath };
+  cacheReaderContextMediaAsset(asset);
+  sendReaderContextMediaAsset(asset);
+}
+
+async function flushReaderContextMediaBatch(): Promise<void> {
+  if (readerContextMediaBatchRunning || readerContextMediaPolicy() !== "auto" || aiReaderRequestRunning) {
+    if (readerContextMediaPending.size) readerContextMediaBatchTimer = window.setTimeout(() => void flushReaderContextMediaBatch(), 5000);
+    return;
+  }
+  const chapters = Array.from(readerContextMediaPending.entries()).slice(0, 3);
+  if (!chapters.length) return;
+  const batchBookKey = readerContextMediaBookKey();
+  if (!batchBookKey) return;
+  for (const [chapter] of chapters) readerContextMediaPending.delete(chapter);
+  readerContextMediaBatchRunning = true;
+  aiReaderRequestRunning = true;
+  let cycleId = "";
+  try {
+    // 提示词必须在大模型仍运行时按章全部准备好；只有这一阶段完成后才
+    // 释放显存并启动 H3，避免两个大模型同时驻留。
+    const plans: ReaderContextMediaPromptPlan[] = [];
+    for (const [chapter, anchorOffset] of chapters) {
+      plans.push(...await buildContextMediaPromptPlans(chapter, anchorOffset));
+      if (readerContextMediaBookKey() !== batchBookKey) throw new Error("图书已切换，取消旧书提示词批次");
+    }
+    if (!plans.length) throw new Error("大模型未返回可用的伴读提示词");
+    cycleId = await beginReaderMediaCycle();
+    const failedChapters = new Set<number>();
+    for (const plan of plans) {
+      try { await generateReaderContextMediaPlan(plan, batchBookKey); }
+      catch (error) {
+        failedChapters.add(plan.chapter);
+        window.ReaderBugTrace?.record?.("context_media", { phase: "asset_failed", kind: plan.kind, chapter: plan.chapter, error: String(error).slice(0, 160) });
+      }
+    }
+    for (const [chapter, anchor] of chapters) {
+      if (failedChapters.has(chapter)) readerContextMediaPending.set(chapter, anchor);
+      else readerContextMediaProcessed.add(readerContextMediaChapterKey(chapter));
+    }
+    readerContextMediaBatchFailureCount = failedChapters.size ? readerContextMediaBatchFailureCount + 1 : 0;
+  } catch (error) {
+    if (readerContextMediaBookKey() === batchBookKey) {
+      for (const [chapter, anchor] of chapters) readerContextMediaPending.set(chapter, anchor);
+    }
+    readerContextMediaBatchFailureCount += 1;
+    window.ReaderBugTrace?.record?.("context_media", { phase: "batch_failed", chapters: chapters.length, error: String(error).slice(0, 160) });
+  } finally {
+    if (cycleId) {
+      try { await finishReaderMediaCycle(cycleId); }
+      catch (error) { window.ReaderBugTrace?.record?.("context_media", { phase: "restore_failed", error: String(error).slice(0, 160) }); }
+    }
+    aiReaderRequestRunning = false;
+    readerContextMediaBatchRunning = false;
+    if (readerContextMediaBookKey() === batchBookKey && readerContextMediaPending.size && readerContextMediaPolicy() === "auto") {
+      const retryDelay = readerContextMediaBatchFailureCount > 0
+        ? Math.min(15 * 60_000, 30_000 * (2 ** Math.min(readerContextMediaBatchFailureCount - 1, 5)))
+        : 5000;
+      readerContextMediaBatchTimer = window.setTimeout(() => void flushReaderContextMediaBatch(), retryDelay);
+    }
+  }
+}
+
+function observeReaderContextMediaChapter(
+  chapter: number,
+  anchor: ReadingAnchor | null,
+  previousChapter = -1,
+  previousFraction = 0,
+  previousAnchor: ReadingAnchor | null = null,
+): void {
+  const bookKey = readerContextMediaBookKey();
+  if (!bookKey) return;
+  if (chapter === readerContextMediaLastChapter && bookKey === readerContextMediaLastBookKey) return;
+  readerContextMediaLastChapter = chapter;
+  readerContextMediaLastBookKey = bookKey;
+  restoreReaderContextMediaAssets(chapter);
+  // 陪读只能在读者离开且真正读完一章后处理该章；之前的实现会在刚
+  // 进入新章时把新章前 50% 提供给模型，既抢资源也可能泄露未读情节。
+  const completedChapter = previousChapter >= 0 && chapter > previousChapter && previousFraction >= 0.98
+    ? previousChapter : -1;
+  if (readerContextMediaPolicy() !== "auto" || completedChapter < 0 || readerContextMediaProcessed.has(readerContextMediaChapterKey(completedChapter))) return;
+  const anchorOffset = Math.max(0, Math.round(Number(previousAnchor?.text_offset) || 0));
+  readerContextMediaPending.set(completedChapter, anchorOffset);
+  if (readerContextMediaPending.size >= 3) void flushReaderContextMediaBatch();
+  else {
+    window.clearTimeout(readerContextMediaBatchTimer);
+    readerContextMediaBatchTimer = window.setTimeout(() => void flushReaderContextMediaBatch(), 12_000);
+  }
+}
+
+type ReadingMemoryCaptureStatus = { readonly status: string; readonly chapter: number; readonly message: string };
+
+function readerMemoryCaptureKey(chapter: number): string {
+  return `${readerContextMediaBookKey()}|${chapter}`;
+}
+
+function queueCompletedReadingMemory(
+  completedChapter: number,
+  observedCurrentChapter: number,
+  observedCurrentFraction: number,
+): void {
+  if (isPdf || completedChapter < 0 || observedCurrentChapter <= completedChapter) return;
+  const key = readerMemoryCaptureKey(completedChapter);
+  if (!key || readerMemoryCaptureQueued.has(key)) return;
+  readerMemoryCaptureQueued.add(key);
+  readerMemoryCapturePending.set(key, {
+    completedChapter,
+    observedCurrentChapter,
+    observedCurrentFraction,
+    retries: 0,
+  });
+  // Let the normal reader progress write settle first; a memory task never
+  // delays page turning, progress reporting, or user-initiated 智读.
+  window.clearTimeout(readerMemoryCaptureStartTimer);
+  readerMemoryCaptureStartTimer = window.setTimeout(() => void drainReadingMemoryCaptureQueue(), 900);
+}
+
+async function drainReadingMemoryCaptureQueue(): Promise<void> {
+  if (readerMemoryCaptureInFlight) return;
+  const next = readerMemoryCapturePending.entries().next().value as [string, ReadingMemoryCaptureJob] | undefined;
+  if (!next) return;
+  const [key, job] = next;
+  readerMemoryCapturePending.delete(key);
+  readerMemoryCaptureInFlight = true;
+  let retryScheduled = false;
+  try {
+    const result = await invoke<ReadingMemoryCaptureStatus>("capture_reading_memory", { request: {
+      completedChapter: job.completedChapter,
+      observedCurrentChapter: job.observedCurrentChapter,
+      observedCurrentFraction: job.observedCurrentFraction,
+    } });
+    // The backend checks persisted progress independently. A single delayed
+    // retry handles ordinary progress-write throttling while allowing later
+    // completed chapters to continue through the queue immediately.
+    if (result.status === "skipped" && job.retries < 1) {
+      retryScheduled = true;
+      window.setTimeout(() => {
+        readerMemoryCapturePending.set(key, { ...job, retries: job.retries + 1 });
+        void drainReadingMemoryCaptureQueue();
+      }, 3500);
+      return;
+    }
+    window.ReaderBugTrace?.record?.("reading_memory", {
+      phase: "capture",
+      chapter: job.completedChapter,
+      status: result.status,
+    });
+  } catch (error) {
+    window.ReaderBugTrace?.record?.("reading_memory", {
+      phase: "capture_failed",
+      chapter: job.completedChapter,
+      error: String(error).slice(0, 160),
+    });
+  } finally {
+    readerMemoryCaptureInFlight = false;
+    if (!retryScheduled) readerMemoryCaptureQueued.delete(key);
+    void drainReadingMemoryCaptureQueue();
+  }
+}
 document.getElementById("ai-reader-btn")?.addEventListener("click", (event) => { event.stopPropagation(); openAiReader(); });
 document.getElementById("ai-reader-close")?.addEventListener("click", closeAiReaderSide);
 document.getElementById("ai-reader-history-btn")?.addEventListener("click", () => aiReaderShowHistory());
@@ -1026,6 +1765,19 @@ aiReaderAnswer?.addEventListener("scroll", aiReaderHideSourcePreview);
 document.getElementById("ai-reader-ask")?.addEventListener("click", () => runAiReader("question"));
 document.getElementById("ai-reader-summary")?.addEventListener("click", () => runAiReader("summary"));
 document.getElementById("ai-reader-mindmap")?.addEventListener("click", () => runAiReader("mindmap"));
+document.getElementById("ai-reader-image")?.addEventListener("click", () => prepareReaderMedia("image"));
+document.getElementById("ai-reader-video")?.addEventListener("click", () => prepareReaderMedia("video"));
+document.getElementById("ai-reader-companion-settings")?.addEventListener("click", () => void openReaderCompanionSettings());
+document.getElementById("ai-reader-companion-settings-close")?.addEventListener("click", () => aiReaderCompanionSettingsPanel?.setAttribute("hidden", ""));
+document.getElementById("ai-reader-companion-settings-save")?.addEventListener("click", () => void saveReaderCompanionSettings());
+document.getElementById("ai-reader-media-cancel")?.addEventListener("click", resetReaderMediaComposer);
+aiReaderMediaConsent?.addEventListener("change", () => {
+  if (aiReaderMediaSubmit) aiReaderMediaSubmit.disabled = !aiReaderMediaConsent.checked || !aiReaderMediaPrompt?.value.trim();
+});
+aiReaderMediaPrompt?.addEventListener("input", () => {
+  if (aiReaderMediaSubmit) aiReaderMediaSubmit.disabled = !aiReaderMediaConsent?.checked || !aiReaderMediaPrompt.value.trim();
+});
+aiReaderMediaSubmit?.addEventListener("click", () => void submitReaderMedia());
 readerToolbar?.addEventListener("pointerenter", () => {
   ReaderShell.dispatch({ type: "TOOLBAR_POINTER_ENTER" });
 });
@@ -1222,8 +1974,23 @@ const bugTraceRequestReady = listen("reader-bug-trace-request", async (event) =>
   const payload = event?.payload as { readonly request_id?: unknown } | undefined;
   const requestId = String(payload?.request_id || "").slice(0, 96);
   if (!requestId || !window.ReaderBugTrace?.capture) return;
-  const snapshot = await window.ReaderBugTrace.capture("main_menu");
-  await emit("reader-bug-trace-response", { request_id: requestId, snapshot });
+  const snapshot = await window.ReaderBugTrace.capture("main_menu") as UnknownRecord;
+  const nativeWindowState = await invoke<ReaderWindowDiagnosticState>("reader_window_diagnostic_state")
+    .catch(() => null);
+  const readerState = snapshot.reader_state && typeof snapshot.reader_state === "object"
+    ? snapshot.reader_state as UnknownRecord
+    : {};
+  const enrichedSnapshot = nativeWindowState ? {
+    ...snapshot,
+    reader_state: {
+      ...readerState,
+      window_role: nativeWindowState.window_role,
+      window_visible: nativeWindowState.window_visible,
+      book_bound: nativeWindowState.book_bound,
+      window_registered: nativeWindowState.registered,
+    },
+  } : snapshot;
+  await emit("reader-bug-trace-response", { request_id: requestId, snapshot: enrichedSnapshot });
 });
 Promise.resolve(bugTraceRequestReady).then(() => window.ReaderBugTrace?.checkpoint?.(0)).catch(() => {});
 listen("reader-bug-trace-reset", () => window.ReaderBugTrace?.reset?.());
@@ -1243,11 +2010,56 @@ void tocEl;
 void backdropEl;
 void settingsEl;
 const chapterProgressEl = document.getElementById("chapter-progress");
+const chapterNumberEl = document.getElementById("chapter-number");
+const chapterPageEl = document.getElementById("chapter-page");
+const progressPercentageEl = document.getElementById("progress-percentage");
 const progressEl = document.getElementById("progress");
+const readerProgressGroupEl = document.getElementById("reader-progress-group");
+const PAGE_INFO_ITEM_IDS = ["chapter", "chapterPage", "percentage", "totalPages"] as const;
 let pageCountMeasuring = true;
+function pageInfoEnabled(key: string): boolean {
+  const settings = window.ReaderSettings?.get?.() || {};
+  return settings.showPageInfo !== false && settings[key] !== false;
+}
+function normalizedPageInfoOrder(value: unknown): readonly string[] {
+  const known = new Set<string>(PAGE_INFO_ITEM_IDS);
+  const seen = new Set<string>();
+  const order: string[] = [];
+  if (Array.isArray(value)) value.forEach((item) => {
+    const id = String(item);
+    if (known.has(id) && !seen.has(id)) { seen.add(id); order.push(id); }
+  });
+  PAGE_INFO_ITEM_IDS.forEach((id) => { if (!seen.has(id)) order.push(id); });
+  return order;
+}
+function applyPageInfoOrder(): void {
+  const settings = window.ReaderSettings?.get?.() || {};
+  const items: Readonly<Record<string, HTMLElement | null>> = {
+    chapter: chapterNumberEl,
+    chapterPage: chapterPageEl,
+    percentage: progressPercentageEl,
+    totalPages: progressEl,
+  };
+  normalizedPageInfoOrder(settings.pageInfoOrder).forEach((id) => {
+    const item = items[id];
+    if (item) readerProgressGroupEl?.append(item);
+  });
+}
+function applyPageInfoVisibility(): void {
+  const showChapter = pageInfoEnabled("showChapterNumber");
+  const showChapterPage = pageInfoEnabled("showChapterPageNumber");
+  const showPercentage = pageInfoEnabled("showProgressPercentage");
+  chapterNumberEl?.toggleAttribute("hidden", !showChapter);
+  chapterPageEl?.toggleAttribute("hidden", !showChapterPage);
+  progressPercentageEl?.toggleAttribute("hidden", !showPercentage);
+  chapterProgressEl?.toggleAttribute("hidden", !showChapter && !showChapterPage && !showPercentage);
+  progressEl?.toggleAttribute("hidden", !pageInfoEnabled("showTotalPageNumber"));
+  applyPageInfoOrder();
+}
 function showProgressLoading() {
   if (isPdf) {
     progressEl.innerHTML = '<span class="mini-spinner" aria-label="' + readerText("loading", "加载中…") + '"></span>';
+    applyPageInfoVisibility();
     return;
   }
   pageCountMeasuring = true;
@@ -1256,6 +2068,7 @@ function showProgressLoading() {
   progressEl.title = readerText("measuringPages", "全书页数统计中");
   progressEl.setAttribute("aria-label", readerText("measuringPages", "全书页数统计中"));
   progressEl.innerHTML = '<span class="mini-spinner" aria-label="' + readerText("measuringPages", "全书页数统计中") + '"></span>';
+  applyPageInfoVisibility();
 }
 function showWholeBookPages(page: unknown, total: unknown): void {
   pageCountMeasuring = false;
@@ -1265,6 +2078,7 @@ function showWholeBookPages(page: unknown, total: unknown): void {
   progressEl.title = text;
   progressEl.setAttribute("aria-label", text);
   progressEl.textContent = text;
+  applyPageInfoVisibility();
 }
 function showChapterProgress(page: unknown, total: unknown, progress: number, dualContinuationChapter: unknown): void {
   if (!chapterProgressEl) return;
@@ -1273,13 +2087,26 @@ function showChapterProgress(page: unknown, total: unknown, progress: number, du
     chapter: curVchap + 1, chapters: vchapTotal, page: page || 1, total: total || 1, progress: progress.toFixed(1),
     nextChapter: continuation + 1,
   };
-  const text = Number.isInteger(continuation) && continuation >= 0
-    ? readerText("dualChapterProgress", "第{chapter}/{chapters}章 · 左页 本章 {page}/{total}页 · 右页 第{nextChapter}章开头 · {progress}%", values)
-    : readerText("chapterProgress", "第{chapter}/{chapters}章 · 本章 {page}/{total}页 · {progress}%", values);
+  const chapterText = Number.isInteger(continuation) && continuation >= 0
+    ? readerText("dualChapterNumber", "第{chapter}/{chapters}章 · 右页 第{nextChapter}章开头", values)
+    : readerText("chapterNumber", "第{chapter}/{chapters}章", values);
+  const pageText = readerText("chapterPages", "本章 {page}/{total}页", values);
+  const percentageText = readerText("progressPercentage", "{progress}%", values);
+  if (chapterNumberEl) chapterNumberEl.textContent = chapterText;
+  if (chapterPageEl) chapterPageEl.textContent = pageText;
+  if (progressPercentageEl) progressPercentageEl.textContent = percentageText;
+  const text = [
+    pageInfoEnabled("showChapterNumber") ? chapterText : "",
+    pageInfoEnabled("showChapterPageNumber") ? pageText : "",
+    pageInfoEnabled("showProgressPercentage") ? percentageText : "",
+  ].filter(Boolean).join(" · ");
   chapterProgressEl.title = text;
   chapterProgressEl.setAttribute("aria-label", text);
-  chapterProgressEl.textContent = text;
+  applyPageInfoVisibility();
 }
+
+window.addEventListener("reader-settings-changed", applyPageInfoVisibility);
+applyPageInfoVisibility();
 
 let resumeChapter = 0;
 let resumeFrac = 0;
@@ -1356,6 +2183,13 @@ showProgressLoading();
       loading: !loadingHidden,
       is_pdf: isPdf,
       immersive: ReaderShell.isImmersive(),
+      window_role: readerWindowRole(),
+      document_visible: readerDocumentVisible(),
+      book_bound: readerBookBound,
+      book_info_loaded: Boolean(currentBookId),
+      inner_engine_ready: innerReaderEngineReady,
+      startup_phase: readerStartupPhase,
+      startup_failure_category: readerStartupFailureCategory,
       viewport: {
         width: window.innerWidth,
         height: window.innerHeight,
@@ -1520,7 +2354,24 @@ async function closeReaderWindow(): Promise<void> {
       outcome: snapshotConfirmed ? "confirmed" : "recent_position",
     });
     const saved = await sendProgressNow();
-    if (saved) await invoke("reader_shell_hidden_after_save");
+    if (saved) {
+      // 这条命令只给原生层标记“下次切书可跳过一次重复保存”，并不影响
+      // 当前关闭已完成的位置持久化。WebView2 偶发会让该 IPC 的响应迟到；
+      // 绝不能因此一直占住 closePending，导致下一次从书架打开阅读器只停在
+      // open_reuse / save_requested。
+      void invoke("reader_shell_hidden_after_save").then(() => {
+        window.ReaderBugTrace?.record?.("close_save_marker", {
+          source: "reader_shell",
+          outcome: "confirmed",
+        });
+      }).catch((error) => {
+        window.ReaderBugTrace?.record?.("close_save_marker", {
+          source: "reader_shell",
+          outcome: "failed",
+          error: String(error).slice(0, 120),
+        });
+      });
+    }
   })().catch((error) => {
     console.warn("阅读窗口隐藏后的最终保存失败", error);
   }).finally(() => {
@@ -2388,6 +3239,15 @@ function activateHighlightMenuPreferences() {
 window.addEventListener("message", (event) => {
   const data = window.ReaderMessageGuard?.normalizeEvent?.(event, frame, window.location);
   if (!data) return;
+  if (data.readerEngineWarmReady) {
+    innerReaderEngineReady = true;
+    const heapBytes = Math.max(0, Math.floor(Number(data.readerEngineHeapBytes) || 0));
+    void invoke("reader_shell_inner_engine_ready", { heapBytes: heapBytes || null });
+    if (isReaderShellBenchmark) {
+      invoke("reader_perf_log", { event: "shell_prepared" }).catch(() => {});
+    }
+    return;
+  }
   // A cached hidden reader has already persisted its final position. Late
   // iframe messages must not restart progress timers or report a delayed
   // frame-ready after the user has returned to the shelf. The one exception is
@@ -2439,6 +3299,9 @@ window.addEventListener("message", (event) => {
     return;
   }
   if (typeof e.data.readerPerf === "string") {
+    if (OPENING_READER_PAGE_PERFORMANCE_STAGES.has(e.data.readerPerf)) {
+      recordReaderPerformance(e.data.readerPerf, undefined, e.data.readerPerfMetrics);
+    }
     invoke("reader_perf_log", { event: e.data.readerPerf }).catch(() => {});
     return;
   }
@@ -2450,11 +3313,26 @@ window.addEventListener("message", (event) => {
     rememberReaderNavigationPoint(e.data.readerJump);
   }
   if (typeof e.data.progress === "number") {
+    const previousChapter = curChapter;
+    const previousFraction = curChFrac;
+    const previousAnchor = curReadingAnchor;
     curProgress = e.data.progress;
     settleBookProgressPreview();
     curChapter = e.data.chapter || 0;
     curChFrac = e.data.chFrac || 0;
     curReadingAnchor = e.data.anchor || null;
+    if (!isPdf) {
+      observeReaderContextMediaChapter(
+        curChapter,
+        curReadingAnchor,
+        previousChapter,
+        previousFraction,
+        previousAnchor,
+      );
+      if (curChapter > previousChapter && previousFraction >= 0.98) {
+        queueCompletedReadingMemory(previousChapter, curChapter, curChFrac);
+      }
+    }
     lastReportedReaderPage = Math.max(0, Math.round(Number(e.data.page) || 0));
     curTotalCh = e.data.totalCh || 1;
     if (pendingPositionSnapshot && Number(e.data.positionSnapshotRequestId) === pendingPositionSnapshot.requestId) {
@@ -2505,9 +3383,10 @@ window.addEventListener("message", (event) => {
       hiddenReaderResumePosition = null;
     }
     if (isPdf) {
-      progressEl.textContent = readerText("pdfProgress", "第 {page}/{total} 页 · {progress}%", {
-        page: e.data.page || 1, total: e.data.total || 1, progress: curProgress.toFixed(1),
-      });
+      const values = { page: e.data.page || 1, total: e.data.total || 1, progress: curProgress.toFixed(1) };
+      if (progressPercentageEl) progressPercentageEl.textContent = readerText("progressPercentage", "{progress}%", values);
+      showWholeBookPages(values.page, values.total);
+      applyPageInfoVisibility();
     } else {
       // 全书页数是补充信息，不能覆盖原有的章节、本章页数和百分比。
       showChapterProgress(e.data.page, e.data.total, curProgress, e.data.dualContinuationChapter);
@@ -2615,6 +3494,9 @@ window.addEventListener("message", (event) => {
       is_pdf: isPdf,
       chapter: curChapter,
     });
+    // 设置页的中缝预览使用另一张真实 reader:// 页面。通知其在用户拖动前
+    // 完成后台首帧，避免第一次拖动时才初始化而没有预览。
+    window.dispatchEvent(new CustomEvent("reader-frame-ready"));
     syncAnimationSettingsToPage();
     if (vchaps.length) sendToPage({ vchaps }); // 把逻辑章节表交给合并页
     sendToPage({ highlights: window.highlights }); // 把高亮交给合并页渲染
@@ -2924,17 +3806,30 @@ if (!isReaderShellBenchmark) {
 window.ReaderStartupGuard?.markScriptReady?.();
 
 async function loadBoundReaderBook() {
+  readerStartupPhase = "book_info";
+  readerStartupFailureCategory = "none";
   try {
     window.ReaderStartupGuard?.beginBookLoad?.();
-    const info = await invoke<BookInfo>("book_info");
+    const requestedTextConversion = settings.textConversion === "t2s" || settings.textConversion === "s2t"
+      ? settings.textConversion
+      : "original";
+    const info = await invoke<BookInfo>("book_info", innerReaderEngineReady ? {
+      includeInitialChapter: true,
+      textConversion: requestedTextConversion,
+    } : undefined);
+    readerStartupPhase = "book_info_loaded";
     const infoElapsedMs = performance.now() - readerShellStartedAt;
     invoke("reader_perf_log", { event: `shell_info elapsed_ms=${infoElapsedMs.toFixed(1)}` }).catch(() => {});
     recordReaderPerformance("book_info", infoElapsedMs);
+    resetReaderContextMediaQueueForBook(String(info.content_id || info.id || "").trim());
     currentBookId = info.id || "";
     window.currentBookId = currentBookId;
     currentBookContentId = info.content_id || "";
     window.currentBookContentId = currentBookContentId;
     currentBookTitle = info.title || currentBookTitle || "";
+    readerCompanionSettings = {};
+    renderReaderCompanionSettings(readerCompanionSettings);
+    void loadReaderCompanionSettings();
     window.ReaderBugTrace?.record?.("book_opened", {
       source: "reader_shell",
       format: String(info.format || "unknown"),
@@ -2978,7 +3873,11 @@ async function loadBoundReaderBook() {
         "&scale=" + pscale +
         "&dual=" + pdual +
         "&s=" + encodeURIComponent(JSON.stringify(settings));
-      if (!window.ReaderStartupGuard?.beginFrameNavigation?.(pdfSource)) return;
+      readerStartupPhase = "frame_navigation";
+      if (!window.ReaderStartupGuard?.beginFrameNavigation?.(pdfSource)) {
+        recordReaderStartupFailure("frame_navigation", "invalid source");
+        return;
+      }
       frame.src = pdfSource;
       scheduleAncillaryReaderUi();
       return;
@@ -2989,6 +3888,7 @@ async function loadBoundReaderBook() {
     curChFrac = resumeFrac;
     curProgress = Number(info.progress || 0);
     curReadingAnchor = info.resume_position?.anchor || null;
+    observeReaderContextMediaChapter(curChapter, curReadingAnchor);
     // 逻辑章节 = 目录条目按"所在文件(spine)"去重，每个文件取第一条：
     // 金庸全集每"回"是独立文件 → 保留到回级；Python Cookbook 上千个"#锚点小节"同属十几个章节文件 → 合并回章级。
     const toc = info.toc || [];
@@ -3001,16 +3901,37 @@ async function loadBoundReaderBook() {
       vchaps.push({ ch, frag: e.frag || "" });
     }
     vchapTotal = vchaps.length || (info.chapter_count || 1);
+    const textConversion = requestedTextConversion;
     // 设置 + 续读位置（章节/章内比例）随 URL 传给合并页：据此只加载该章并定位
     const q =
       "?rc=" + resumeChapter +
       "&rf=" + resumeFrac +
       "&ra=" + encodeURIComponent(JSON.stringify(info.resume_position || null)) +
       "&s=" + encodeURIComponent(JSON.stringify(settings)) +
+      "&tc=" + encodeURIComponent(textConversion) +
       (isReaderShellBenchmark ? "&benchmark=1" : "");
     const readerSource = info.url + q;
-    if (!window.ReaderStartupGuard?.beginFrameNavigation?.(readerSource)) return;
-    frame.src = readerSource;
+    readerStartupPhase = "frame_navigation";
+    if (!window.ReaderStartupGuard?.beginFrameNavigation?.(readerSource)) {
+      recordReaderStartupFailure("frame_navigation", "invalid source");
+      return;
+    }
+    if (innerReaderEngineReady && frame.contentWindow) {
+      innerReaderEngineReady = false;
+      frame.contentWindow.postMessage({ readerEngineBind: {
+        id: info.id,
+        chapterCount: info.chapter_count || 1,
+        resumeChapter,
+        resumeFrac,
+        resumePosition: info.resume_position || null,
+        settings,
+        textConversion,
+        benchmark: isReaderShellBenchmark,
+        initialChapter: info.initial_chapter || null,
+      } }, "*");
+    } else {
+      frame.src = readerSource;
+    }
     // 正文导航已经开始后再分批构建目录；超大目录不再阻塞首屏。
     // reader-notes-ui 在外壳之后加载；极快的本机 IPC 可能比 HTML 解析更早返回。
     // 先保存目录，辅助脚本就绪后会接手，避免首屏因未定义函数而中断。
@@ -3022,6 +3943,7 @@ async function loadBoundReaderBook() {
   } catch (e) {
     // Keep the native close control and outer shell alive. Replacing body here
     // used to leave an uncloseable reader with its iframe at about:blank.
+    recordReaderStartupFailure(readerStartupPhase, e);
     window.ReaderStartupGuard?.failBookLoad?.(e);
   }
 }
@@ -3034,19 +3956,38 @@ async function loadBoundReaderBook() {
     invoke("reader_perf_log", { event: `shell_bootstrap elapsed_ms=${bootstrapElapsedMs.toFixed(1)}` }).catch(() => {});
   }
   if (isCleanPooledShell) {
-    // 隐藏 WebView 已经完成外壳 HTML/CSS/脚本初始化，但没有绑定图书、创建
-    // 正文 iframe 或写入阅读进度。原生层绑定图书 ID 后用事件激活它，不再
-    // 导航和重跑整套外壳脚本。
+    // 隐藏 WebView 先完成外壳，再用同一套 reader-page 代码启动一个未绑定
+    // 图书的内层引擎。激活时只注入图书 ID、续读位置和首章缓存，不再导航
+    // 或重跑内层脚本；不会提前读取正文或写入阅读进度。
     await listen("reader-shell-activate", async () => {
-      if (readerBookBound) return;
-      readerBookBound = true;
-      readerShellStartedAt = performance.now();
-      window.ReaderGestureClose?.activate?.();
-      await loadBoundReaderBook();
+      if (currentBookId) return;
+      if (readerBookLoadInFlight) {
+        readerBookActivationPending = true;
+        return;
+      }
+      do {
+        readerBookActivationPending = false;
+        readerBookBound = true;
+        readerShellStartedAt = performance.now();
+        readerPerformanceOpeningId = Date.now();
+        recordReaderPerformance("shell_activate_received", 0);
+        window.ReaderGestureClose?.activate?.();
+        readerBookLoadInFlight = true;
+        try {
+          await loadBoundReaderBook();
+        } finally {
+          readerBookLoadInFlight = false;
+        }
+      } while (readerBookActivationPending && !currentBookId);
     });
-    await invoke("reader_shell_pool_ready").catch(() => {});
-    if (isReaderShellBenchmark) {
-      invoke("reader_perf_log", { event: "shell_prepared" }).catch(() => {});
+    if (preloadInnerReaderEngine) {
+      const engineUrl = await invoke<string>("reader_shell_inner_engine_url");
+      frame.src = engineUrl;
+    } else {
+      await invoke("reader_shell_pool_ready").catch(() => {});
+      if (isReaderShellBenchmark) {
+        invoke("reader_perf_log", { event: "shell_prepared" }).catch(() => {});
+      }
     }
     return;
   }

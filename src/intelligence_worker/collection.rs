@@ -1211,7 +1211,7 @@ fn collect_json_ld_article_bodies(value: &Value, best: &mut Option<String>) {
             if let Some(text) = values
                 .get("articleBody")
                 .and_then(Value::as_str)
-                .map(|text| strip_html(text))
+                .map(strip_html)
                 .and_then(|text| safe_text(&text, MAX_TEXT_BYTES))
                 .filter(|text| text.len() >= 80)
             {
@@ -2508,20 +2508,19 @@ fn collect_once_at(
         // persist a fresh revision below so a changed caption, image, or video
         // can never be discarded merely because the text is unchanged.
         let advanced_existing_evidence = match (previous_fingerprint.as_deref(), body.as_deref()) {
-            (Some(previous_fingerprint), Some(body)) => {
-                if article.html.is_none() && article.images.is_empty() && article.videos.is_empty()
-                {
-                    content_archive::advance_current_complete_content_fingerprint_at(
-                        path,
-                        &article_id,
-                        previous_fingerprint,
-                        &fingerprint,
-                        body,
-                    )
-                    .map_err(|_| ())?
-                } else {
-                    false
-                }
+            (Some(previous_fingerprint), Some(body))
+                if article.html.is_none()
+                    && article.images.is_empty()
+                    && article.videos.is_empty() =>
+            {
+                content_archive::advance_current_complete_content_fingerprint_at(
+                    path,
+                    &article_id,
+                    previous_fingerprint,
+                    &fingerprint,
+                    body,
+                )
+                .map_err(|_| ())?
             }
             _ => false,
         };
@@ -2764,6 +2763,7 @@ fn record_content_backfill_host_success(
     Ok(())
 }
 
+#[cfg(test)]
 fn next_content_backfill_candidates(path: &Path) -> Result<Vec<ContentBackfillCandidate>, ()> {
     next_content_backfill_candidates_for_pass(path, None)
 }
@@ -3100,6 +3100,7 @@ fn clear_content_backfill_retry(path: &Path, article_id: &str) -> Result<(), ()>
     Ok(())
 }
 
+#[cfg(test)]
 fn backfill_missing_content_once_at<P: ContentBackfillPort>(
     path: &Path,
     port: &P,

@@ -95,6 +95,13 @@ test("library assistant opens lazily in the main window and can return to the sh
   assert.match(controller, /return \{ load, refreshBooks, run, setMode, renderBooks \}/);
 });
 
+test("smart settings expose AI book tags without library Q&A or the retired quick-list page", () => {
+  assert.match(html, /id="book-classification-settings-open"[\s\S]*?>\s*<span>管理标签<\/span>/);
+  assert.match(html, /AI 图书标签/);
+  assert.doesNotMatch(html, /id="library-ai-settings-open"/);
+  assert.doesNotMatch(html, /id="booklist-shortcuts-open"|id="booklist-shortcuts-modal"|generated-ts\/booklist-settings-ui\.js/);
+});
+
 test("library assistant gives multi-stage RAG calls enough time without allowing unbounded answers", () => {
   assert.match(backend, /READING_PROVIDER_RESPONSE_TIMEOUT[^\n]*from_secs\(120\)/);
   assert.match(backend, /READING_PROVIDER_MAX_TOKENS: u16 = 1_600/);
@@ -209,7 +216,7 @@ test("library assistant readiness stays quiet when API and local indexes are ava
   assert.match(controller, /semanticStatusValue\?\.semantic_done/);
   assert.match(controller, /semanticStatusValue\?\.status_refreshing/);
   assert.match(controller, /if \(apiReady && indexReady\) return ""/);
-  assert.match(controller, /配置大模型 API、模型和密钥/);
+  assert.match(controller, /配置大模型接口和模型；远程服务还需要 API Key/);
   assert.match(controller, /为本地图书建立语义索引/);
   assert.doesNotMatch(controller, /智读已配置。建立语义索引后即可检索。/);
 });
@@ -222,7 +229,7 @@ test("library assistant classifies model tags with progress and can use them ind
   assert.match(html, /id="book-classification-settings-open"/);
   assert.match(html, /id="book-classification-settings-modal"/);
   assert.match(html, /id="set-use-model-tags"/);
-  assert.match(html, /id="library-ai-classify"[^>]*>\s*书籍分类/);
+  assert.match(html, /id="library-ai-classify"[^>]*>\s*AI 图书标签/);
   assert.doesNotMatch(html, /本地资料不足时，会检索百度和豆瓣读书/);
   assert.match(classificationSettings, /start_library_auto_classification/);
   assert.match(classificationSettings, /library_profile_status/);
@@ -253,6 +260,19 @@ test("library assistant classifies model tags with progress and can use them ind
   assert.doesNotMatch(backend, /promote_library_dark_tags/);
   assert.match(styles, /\.book-classification-settings-status\s*\{[^}]*text-overflow:\s*ellipsis/s);
   assert.match(classificationSettings, /task\?\.state === "paused"/);
+});
+
+test("library Q&A, AI book tags and recommended booklists accept only declared 7B+ loopback models", () => {
+  const profiles = fs.readFileSync(path.join(ui, "..", "src", "ai_reader", "profiles.rs"), "utf8");
+  const apiSettings = fs.readFileSync(path.join(ui, "generated-ts", "api-settings-ui.js"), "utf8");
+  assert.match(html, /本机 OpenAI 兼容服务[\s\S]*?7B[\s\S]*?可不填 API Key/);
+  assert.match(profiles, /fn validate_local_library_ai_model/);
+  assert.match(profiles, /size < 7\.0/);
+  assert.match(profiles, /名称校验不能证明实际权重/);
+  assert.match(backend, /start_library_auto_classification[\s\S]*?is_loopback_ai_base_url[\s\S]*?validate_local_library_ai_model/);
+  assert.match(backend, /ask_library_assistant[\s\S]*?is_loopback_ai_base_url[\s\S]*?validate_local_library_ai_model/);
+  assert.match(controller, /localLibraryAiEligible[\s\S]*?本地 7B\+/);
+  assert.match(apiSettings, /localLibraryAiEligible[\s\S]*?本地 7B\+/);
 });
 
 test("save-as-booklist controls are visible only in recommendation mode", () => {
@@ -294,7 +314,7 @@ test("common settings can opt into model classification tags without changing th
   assert.match(backend, /大模型标签始终参与问答/);
 });
 
-test("book information separates manual tags from model categories with an explicit source marker", () => {
+test("book information separates manual tags from model categories without an in-chip AI prefix", () => {
   const app = fs.readFileSync(path.join(ui, "generated-ts", "app.js"), "utf8");
   const reader = fs.readFileSync(path.join(ui, "generated-ts", "reader.js"), "utf8");
   const panel = fs.readFileSync(path.join(ui, "generated-ts", "book-info-panel.js"), "utf8");
@@ -302,7 +322,7 @@ test("book information separates manual tags from model categories with an expli
   assert.match(app, /bookOrganizationUI\.open\(currentInfoBookId, m\)/);
   assert.match(app, /bookInfoPanel\.render\(\{ \.\.\.book, \.\.\.m, cover: m\.cover \|\| book\.cover \}\)/);
   assert.match(reader, /readerInfoPanel\.render\(m\)/);
-  assert.match(panel, /origin\.className = "info-chip-origin"/);
+  assert.doesNotMatch(panel, /info-chip-origin/);
   assert.match(panelStyles, /\.book-info-card \.info-chip\.model-tag/);
 });
 

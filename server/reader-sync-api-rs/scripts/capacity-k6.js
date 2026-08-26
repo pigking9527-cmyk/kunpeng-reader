@@ -134,6 +134,9 @@ for (const [stage] of effectiveStages) {
 export const options = {
   scenarios,
   thresholds,
+  // Direct diagnostics must measure the selected origin itself, never a
+  // redirect target (including an accidentally reintroduced reverse proxy).
+  maxRedirects: 0,
   // http.batch defaults would silently limit same-host concurrency to six.
   batch: maxHttpInFlight,
   batchPerHost: maxHttpInFlight,
@@ -277,6 +280,7 @@ function requestFor(operation, stage, token, sequence, accountIndex, entityVersi
     tags: { stage: stage.name, profile, operation },
     responseCallback: expectedSuccess,
     timeout: requestTimeout,
+    redirects: 0,
   };
   if (operation === 'pull') {
     const cursor = profile === 'cursor-zero-replay' ? 0 : (cursors.get(token) || 0);

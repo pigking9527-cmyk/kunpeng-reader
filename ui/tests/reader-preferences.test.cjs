@@ -317,15 +317,21 @@ test("two-page pagination exposes a bounded configurable gutter", () => {
   assert.match(preferences, /function revealReaderLayoutPreviewAfterPaint\(\)/);
   assert.match(preferences, /function loadReaderLayoutPreviewFrame\(dualPageGap, source = global\.ReaderLayoutPreview\?\.source\?\.\(dualPageGap\)\)/);
   assert.match(preferences, /function readerLayoutPreviewSourceKey\(source\)[\s\S]*?searchParams\.delete\("s"\)/);
+  assert.match(preferences, /searchParams\.delete\("rc"\)[\s\S]*?searchParams\.delete\("rf"\)[\s\S]*?searchParams\.delete\("ra"\)/);
   assert.match(preferences, /preview\.dataset\.sourceKey = readerLayoutPreviewSourceKey\(source\)/);
-  assert.doesNotMatch(preferences, /openButton\.addEventListener\("click"[\s\S]{0,300}?preloadReaderLayoutPreview/);
-  assert.doesNotMatch(preferences, /if \(name === "pagination"\)[\s\S]{0,200}?preloadReaderLayoutPreview/);
+  assert.match(preferences, /function preloadCurrentReaderLayoutPreview\(\)/);
+  assert.match(preferences, /if \(name === "pagination"\) preloadCurrentReaderLayoutPreview\(\);/);
+  assert.match(preferences, /openButton\.addEventListener\("click"[\s\S]{0,360}?preloadCurrentReaderLayoutPreview/);
+  assert.match(preferences, /pref-dual-page-gap"\)\?\.addEventListener\("pointerdown"[\s\S]{0,180}?preloadReaderLayoutPreview/);
+  assert.match(reader, /window\.dispatchEvent\(new CustomEvent\("reader-frame-ready"\)\)/);
+  assert.match(preferences, /global\.addEventListener\("reader-frame-ready"[\s\S]{0,260}?preloadCurrentReaderLayoutPreview/);
+  assert.match(preferences, /ReaderBugTrace\?\.record\?\.\("layout_preview"/);
   assert.match(preferences, /readerLayoutPreview\.dataset\.source !== source/);
   assert.doesNotMatch(preferences, /readerLayoutPreviewFrame\.removeAttribute\("src"\)/);
   assert.match(preferences, /function applyDeferredReaderSettingsAfterPreviewPaint\(\)[\s\S]*?requestAnimationFrame[\s\S]*?requestAnimationFrame[\s\S]*?applyDeferredSettings/);
   assert.match(preferences, /DEFAULT_DUAL_PAGE_GAP/);
   assert.match(preferences, /dualPageGap: detail\.dualPageGap/);
-  assert.match(preferences, /if \(phase === "finished"\) \{\s*clearReaderLayoutPreview\(\);\s*return;/);
+  assert.match(preferences, /if \(phase === "finished"\) \{[\s\S]*?dismissWhenReady = "true";[\s\S]*?clearReaderLayoutPreview\(\);\s*return;/);
   assert.match(preferences, /pref-dual-page-gap"\)\?\.addEventListener\("change"[\s\S]*?phase: "finished"[\s\S]*?applyDeferredReaderSettingsAfterPreviewPaint/);
   assert.match(preferences, /pref-dual-page-gap-reset"\)\?\.addEventListener\("click"[\s\S]*?phase: "reset"[\s\S]*?deferPageApply: true[\s\S]*?applyDeferredReaderSettingsAfterPreviewPaint/);
   assert.match(preferences, /scheduleReaderLayoutPreviewClear\(READER_LAYOUT_PREVIEW_RESET_DURATION\)/);
@@ -405,7 +411,8 @@ test("appearance supports book overrides, saved palettes, image backgrounds, and
   assert.match(preferences, /event\.target === modal/);
   assert.match(preferences, /reader-palette-reading-preview/);
   assert.match(preferences, /ReaderSettings\.update\(\{ imagePagination/);
-  assert.match(preferences, /const key = input\.dataset\.prefBool;[\s\S]{0,80}?ReaderSettings\.update\(\{ \[key\]: input\.checked \}\)/);
+  assert.match(preferences, /const key = input\.dataset\.prefBool;/);
+  assert.match(preferences, /ReaderSettings\.update\(\{ \[key\]: input\.checked \}\)/);
   assert.match(settings, /Object\.entries\(bookAppearance\)\.filter\(\s*\(\[key\]\) => READER_APPEARANCE_KEYS\.has\(key\)\s*\)/);
   assert.match(settings, /Object\.entries\(patch \|\| \{\}\)\.filter\(\s*\(\[key\]\) => READER_APPEARANCE_KEYS\.has\(key\)\s*\)/);
   assert.match(layout, /customBackgroundImage/);
@@ -436,6 +443,13 @@ test("page margins are grouped with typography details instead of using a separa
 
 test("reading display settings are separated from toolbar function menus", () => {
   assert.match(html, /reader-reading-display-group[\s\S]*?data-pref-bool="showTextConversion"[\s\S]*?data-pref-bool="showPageInfo"/);
+  assert.match(html, /id="pref-reader-page-info-settings"[\s\S]*?id="reader-page-info-popover"[^>]*hidden/);
+  assert.match(preferences, /function setReaderPageInfoConfigExpanded\(expanded\)/);
+  assert.match(preferences, /function updatePageInfoVisibilitySetting\(input, key\)[\s\S]*?enabledCount === 0[\s\S]*?patch\.showPageInfo = false/);
+  assert.match(preferences, /function updatePageInfoMasterSetting\(input\)[\s\S]*?showProgressPercentage: true/);
+  assert.match(preferences, /function animatePageInfoPlaceholder\(state, beforeNode\)[\s\S]*?translateY\(\$\{dy\}px\)[\s\S]*?transform \.18s/);
+  assert.match(preferences, /movePageInfoDrag\(event\)[\s\S]*?animatePageInfoPlaceholder\(state,/);
+  assert.match(html, /\.reader-page-info-option\.dragging\s*\{[^}]*pointer-events\s*:\s*none/);
   assert.match(html, /<details class="reader-preference-group reader-toolbar-menu-group">[\s\S]*?<summary class="reader-preference-group-head"><h4 data-reader-i18n="toolbarFunctionMenu"/);
   assert.match(html, /reader-toolbar-menu-group[\s\S]*?id="reader-toolbar-order-list"[\s\S]*?data-pref-bool="showTocButton"[\s\S]*?data-pref-bool="showVocabularyButton"/);
   assert.doesNotMatch(html, /reader-toolbar-menu-group[\s\S]*?toolbarFunctionMenuHint/);

@@ -252,6 +252,14 @@ test("capture output and context sanitization remain equivalent without native t
       loading: false,
       is_pdf: false,
       immersive: true,
+      window_role: "pooled_reader",
+      window_visible: true,
+      document_visible: true,
+      book_bound: true,
+      book_info_loaded: false,
+      inner_engine_ready: true,
+      startup_phase: "book_info",
+      startup_failure_category: "unbound_window",
       viewport: { width: 1_200, height: 800 },
       secret: "no",
     },
@@ -268,6 +276,27 @@ test("capture output and context sanitization remain equivalent without native t
   assert.deepEqual(neutral(typedSnapshot), neutral(classicSnapshot));
   assert.equal(JSON.stringify(typedSnapshot).includes("/private/book.epub"), false);
   assert.equal(JSON.stringify(typedSnapshot).includes("secret"), false);
+  assert.deepEqual(typedSnapshot.reader_state, {
+    chapter: 2,
+    progress: 42.556,
+    chapter_frac: 0.5,
+    total_chapters: 100,
+    overlay: "settings",
+    toolbar: "normal",
+    frame_ready: true,
+    loading: false,
+    is_pdf: false,
+    immersive: true,
+    window_role: "pooled_reader",
+    window_visible: true,
+    document_visible: true,
+    book_bound: true,
+    book_info_loaded: false,
+    inner_engine_ready: true,
+    startup_phase: "book_info",
+    startup_failure_category: "unbound_window",
+    viewport: { width: 1_200, height: 800 },
+  });
 });
 
 test("fake typed transport preserves command and emit checkpoint semantics without direct Tauri access", async () => {

@@ -28,6 +28,7 @@ interface ShelfBookRecord extends Omit<ShelfBook, "id" | "title" | "tags" | "col
   readonly collections?: string[];
 }
 interface BooklistRecord {
+  id?: string;
   name: string;
   description?: string;
   cover_book_id?: string | number;
@@ -185,6 +186,7 @@ const organizationFilterClear = rootDoc.getElementById("organization-filter-clea
 const organizationFilterApply = rootDoc.getElementById("organization-filter-apply");
 const batchTagButton = rootDoc.getElementById("batch-tag-btn");
 const batchCollectionButton = rootDoc.getElementById("batch-collection-btn");
+const batchAddBooklistButton = required("batch-add-booklist-btn");
 const batchOrganizationModal = rootDoc.getElementById("batch-organization-modal");
 const batchOrganizationTitle = rootDoc.getElementById("batch-organization-title");
 const batchOrganizationNote = rootDoc.getElementById("batch-organization-note");
@@ -201,6 +203,7 @@ const booklistCover = rootDoc.getElementById("booklist-cover");
 const booklistDescription = required<HTMLTextAreaElement>("booklist-description");
 const booklistBooks = required("booklist-books");
 let activeBooklist: BooklistRecord | null = null;
+let pendingBooklistTarget = "";
 let books: ShelfBookRecord[] = [];
 // 旧版本会持久化不同排序，单纯修改 fallback 无法改变已有用户。按规则版本
 // 统一迁移一次到最近阅读；迁移完成后，用户重新选择的书名、
@@ -228,6 +231,8 @@ try {
 let minRating = +(localStorage.getItem("minRating") || 0);
 let searchQuery = "";
 let selected = new Set<string | number>();
+let shelfBookOpenInFlightId: string | null = null;
+let queuedShelfBookOpen: { readonly id: string; readonly run: () => void } | null = null;
 const shelfText = (key: string, fallback: string) => global.ReaderAppI18n?.t?.(key) || fallback;
 const organizationName = shelfRules.organizationName;
 const organizationKey = shelfRules.organizationKey;
@@ -249,14 +254,6 @@ let shelfLoaded = false;
 let showCoverProgress = localStorage.getItem("showCoverProgress") !== "0";
 let showCoverRating = localStorage.getItem("showCoverRating") !== "0";
 let showCoverTitle = localStorage.getItem("showCoverTitle") === "1";
-// 旧版本可能把书架留在“双击打开”状态，导致升级后第一次单击只选中、
-// 第二次才打开。按交互版本只迁移一次；之后用户仍可显式切回双击。
-const SHELF_OPEN_INTERACTION_REVISION = "single-click-default-v1";
-if (localStorage.getItem("shelfOpenInteractionRevision") !== SHELF_OPEN_INTERACTION_REVISION) {
-  localStorage.setItem("shelfSingleClickOpen", "1");
-  localStorage.setItem("shelfOpenInteractionRevision", SHELF_OPEN_INTERACTION_REVISION);
-}
-let singleClickOpensBook = localStorage.getItem("shelfSingleClickOpen") !== "0";
 // 所有封面都立即拥有 URL；原生 lazy 只调整浏览器的请求调度，不能制造空白书卡。
 const DEFAULT_FIRST_SCREEN_COVER_COUNT = 24;
 const MAX_FIRST_SCREEN_COVER_COUNT = 160;
@@ -274,12 +271,6 @@ const coverLoadingRules = coverRulesCandidate && [
 // 当成可拖对象或文本选区；多选只通过阅读器自己的选中态完成。
 shelfEl.addEventListener("dragstart", (event) => event.preventDefault());
 shelfEl.addEventListener("selectstart", (event) => event.preventDefault());
-
-function setSingleClickOpenPreference(value: boolean) {
-  singleClickOpensBook = value !== false;
-  localStorage.setItem("shelfSingleClickOpen", singleClickOpensBook ? "1" : "0");
-}
-
 
 function estimateFirstScreenCoverCount() {
   const width = Number(contentEl?.clientWidth || 0);
@@ -420,13 +411,6 @@ readingFilterAllButton?.addEventListener("click", () => {
 const setCoverProgress = required<HTMLInputElement>("set-cover-prog");
 const setCoverRating = required<HTMLInputElement>("set-cover-rating");
 const setCoverTitle = required<HTMLInputElement>("set-cover-title");
-const setSingleClickOpen = rootDoc.getElementById("set-single-click-open") as HTMLInputElement | null;
-const openBookLabel = rootDoc.getElementById("set-open-book-label");
-function reflectOpenBookPreference() {
-  if (!setSingleClickOpen || !openBookLabel) return;
-  setSingleClickOpen.checked = singleClickOpensBook;
-  openBookLabel.textContent = singleClickOpensBook ? "单击打开图书" : "双击打开图书";
-}
 setCoverProgress.checked = showCoverProgress;
 setCoverProgress.addEventListener("change", () => {
   showCoverProgress = setCoverProgress.checked;
@@ -444,11 +428,6 @@ setCoverTitle.addEventListener("change", () => {
   showCoverTitle = setCoverTitle.checked;
   localStorage.setItem("showCoverTitle", showCoverTitle ? "1" : "0");
   applyView();
-});
-reflectOpenBookPreference();
-setSingleClickOpen?.addEventListener("change", () => {
-  setSingleClickOpenPreference(setSingleClickOpen.checked);
-  reflectOpenBookPreference();
 });
 
 function updateLayoutButtons() {
@@ -601,43 +580,48 @@ function bookCard(b: ShelfBookRecord, index = 0) {
   card.appendChild(title);
   card.appendChild(prog);
 
-  // 单击打开必须立即响应；需要多选时用 Command/Ctrl+单击。
-  let selectionTimer: ReturnType<typeof setTimeout> | null = null;
-  let selectionBeforeClick = false;
-  let selectionApplied = false;
-  const restoreDeferredSelection = () => {
-    if (selectionApplied && selected.has(b.id) !== selectionBeforeClick) {
-      toggleSelect(b.id, card);
-    }
-    selectionApplied = false;
-  };
-  let openingBook = false;
   let prewarmStarted = false;
   let suppressPrimaryMouseClick = false;
-  const prewarmBook = () => {
-    if (prewarmStarted || b.missing || global.ReaderShellPreloadSettings?.enabled() === false) return;
+  const prewarmBook = (force = false) => {
+    if (prewarmStarted || b.missing) return;
+    if (!force && global.ReaderShellPreloadSettings?.enabled() === false) return;
     prewarmStarted = true;
     tauriApi.invoke("prewarm_book", { id: b.id }).catch(() => {});
   };
-  card.addEventListener("pointerenter", prewarmBook, { once: true });
-  card.addEventListener("pointerdown", prewarmBook, { once: true });
-  card.addEventListener("focus", prewarmBook, { once: true });
+  card.addEventListener("pointerenter", () => prewarmBook(), { once: true });
+  card.addEventListener("focus", () => prewarmBook(), { once: true });
   const openBook = (input: string) => {
     if (b.missing) {
       global.ReaderProblemTraceUI?.recordShelfBookOpen?.("missing", input);
       relocateBook(b);
       return;
     }
-    // 关闭阅读窗口到 Tauri 注销同名 WebView 之间有极短过渡期。以前这里
-    // 直接把“仍在关闭”显示为失败，用户只好手动再点一次；首次点击应当
-    // 自己排队重试，其他错误仍立即、明确地交给用户处理。
-    if (openingBook) return;
-    openingBook = true;
+    const bookId = String(b.id);
+    // 全书架只允许一条原生打开链执行。不同书卡原先各有自己的布尔值，
+    // 连续点击十几本时会并发销毁/创建 WebView2。忙碌期间只保留最后一本，
+    // 既符合用户最后一次选择，也避免排队积压几十次无意义的排版。
+    if (shelfBookOpenInFlightId !== null) {
+      if (shelfBookOpenInFlightId !== bookId) {
+        queuedShelfBookOpen = { id: bookId, run: () => openBook(input) };
+        global.ReaderProblemTraceUI?.recordShelfBookOpen?.("queued_latest", input);
+      } else {
+        queuedShelfBookOpen = null;
+        global.ReaderProblemTraceUI?.recordShelfBookOpen?.("coalesced", input);
+      }
+      return;
+    }
+    shelfBookOpenInFlightId = bookId;
     clearCrossReturn();
     global.ReaderProblemTraceUI?.recordShelfBookOpen?.("requested", input);
+    const finishOpen = () => {
+      shelfBookOpenInFlightId = null;
+      const queued = queuedShelfBookOpen;
+      queuedShelfBookOpen = null;
+      if (queued) void Promise.resolve().then(queued.run);
+    };
     const attemptOpen = (retry: number): Promise<void> => tauriApi.invoke("open_book", { id: b.id }).then(() => {
       global.ReaderProblemTraceUI?.recordShelfBookOpen?.("ok", input);
-      openingBook = false;
+      finishOpen();
     }).catch((err) => {
       const message = String(err);
       if (message.includes("阅读窗口仍在关闭") && retry < 3) {
@@ -645,25 +629,18 @@ function bookCard(b: ShelfBookRecord, index = 0) {
         setTimeout(() => attemptOpen(retry + 1), 180);
         return;
       }
-      openingBook = false;
       global.ReaderProblemTraceUI?.recordShelfBookOpen?.("failed", input);
       if (message.includes("丢失") || message.includes("定位")) relocateBook(b);
       else alertAction("打开失败：" + message);
+      finishOpen();
     });
     void attemptOpen(0);
   };
   card.addEventListener("pointerdown", (e) => {
-    // WebView2 在主窗口刚重新激活时可能只交付 pointerdown，不再生成
-    // click。鼠标主键因此在 pointerdown 就打开；触摸、笔和键盘继续走
-    // click，避免触摸滚动刚按下便误开图书。
     if (!shelfRules.shouldOpenBookOnPrimaryPointerDown({
-      singleClickOpensBook,
       pointerType: e.pointerType,
       button: e.button,
       isPrimary: e.isPrimary,
-      metaKey: e.metaKey,
-      ctrlKey: e.ctrlKey,
-      hasSelection: selected.size > 0,
     })) {
       if (e.pointerType !== "mouse") suppressPrimaryMouseClick = false;
       return;
@@ -671,59 +648,28 @@ function bookCard(b: ShelfBookRecord, index = 0) {
     e.stopPropagation();
     closeShelfCardFloaters();
     suppressPrimaryMouseClick = true;
+    // 左键按下即开始预热并直接打开，不再为区分双击而等待。
+    prewarmBook(true);
     openBook("pointerdown");
   });
   card.addEventListener("click", (e) => {
     e.stopPropagation();
     closeShelfCardFloaters();
-    if (!singleClickOpensBook) {
-      // 双击打开模式：先等一个很短的判定窗口。快速双击会在 dblclick
-      // 中取消这个延迟选择，因而不会出现“第一下先选中”的闪动。
-      if (e.detail !== 1) return;
-      selectionBeforeClick = selected.has(b.id);
-      selectionApplied = false;
-      selectionTimer = setTimeout(() => {
-        selectionTimer = null;
-        toggleSelect(b.id, card);
-        selectionApplied = true;
-      }, 180);
-      return;
-    }
-    if (e.metaKey || e.ctrlKey || selected.size > 0) {
-      if (e.detail === 1) toggleSelect(b.id, card);
-      return;
-    }
-    // 主鼠标这一物理序列已在 pointerdown 打开。吞掉随后派生的 click，
-    // 包括浏览器计为 detail=2 的快速第二击；触摸和键盘的 click 未设置
-    // 此标记，仍可正常打开。
+    // 主鼠标这一物理序列已在 pointerdown 打开。吞掉随后派生的
+    // click；触摸和键盘的 click 未设置此标记，仍可正常打开。
     if (suppressPrimaryMouseClick && e.detail > 0) {
       suppressPrimaryMouseClick = false;
       return;
     }
     suppressPrimaryMouseClick = false;
     if (e.detail > 1) return;
-    openBook("single");
-  });
-  card.addEventListener("dblclick", (e) => {
-    e.stopPropagation();
-    closeShelfCardFloaters();
-    if (!singleClickOpensBook) {
-      if (selectionTimer) {
-        clearTimeout(selectionTimer);
-        selectionTimer = null;
-      }
-      // 若用户的双击间隔较长，延迟选择可能已执行；还原到双击前状态，
-      // 确保最终结果仍是“直接打开、不改变选中”。
-      restoreDeferredSelection();
-      openBook("double");
-      return;
-    }
-    // 单击打开模式已在第一次 click 立即打开，dblclick 不再改变选择。
+    openBook("click");
   });
   card.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     e.stopPropagation();
     closeShelfCardFloaters();
+    toggleSelect(b.id, card);
   });
 
   return card;
@@ -988,12 +934,14 @@ organizationFilterModal?.addEventListener("click", (event) => {
 let batchOrganizationDraft: BatchOrganizationDraft | null = null;
 function closeBatchOrganization() {
   batchOrganizationDraft = null;
+  pendingBooklistTarget = "";
   batchOrganizationModal?.classList?.remove("show");
+  batchOrganizationModal?.setAttribute("aria-hidden", "true");
 }
 function batchOrganizationConfig(field: OrganizationField) {
   return field === "tags"
     ? { field, title: "标签", action: "添加标签", placeholder: "新建标签" }
-    : { field, title: "收藏书单", action: "加入收藏书单", placeholder: "新建收藏书单" };
+    : { field, title: "书单", action: "加入书单", placeholder: "新建书单" };
 }
 function renderBatchOrganizationOptions() {
   if (!batchOrganizationOptions || !batchOrganizationDraft) return;
@@ -1042,13 +990,18 @@ function renderBatchOrganizationOptions() {
 function openBatchOrganization(field: OrganizationField) {
   if (!selected.size || !batchOrganizationModal || !batchOrganizationTitle || !batchOrganizationNote || !batchOrganizationNew) return;
   const config = batchOrganizationConfig(field);
-  batchOrganizationDraft = { field, names: new Map() };
+  const names = new Map<string, string>();
+  if (field === "collections" && pendingBooklistTarget) {
+    names.set(organizationKey(pendingBooklistTarget), pendingBooklistTarget);
+  }
+  batchOrganizationDraft = { field, names };
   batchOrganizationTitle.textContent = "为已选 " + selected.size + " 本图书" + config.action;
   batchOrganizationNote.textContent = "可多选；确认后会加入全部已选图书，不会移除它们原有的标签或书单。";
   batchOrganizationNew.value = "";
   batchOrganizationNew.placeholder = config.placeholder;
   renderBatchOrganizationOptions();
   batchOrganizationModal.classList.add("show");
+  batchOrganizationModal.setAttribute("aria-hidden", "false");
 }
 function addBatchOrganizationName() {
   if (!batchOrganizationDraft || !batchOrganizationNew) return;
@@ -1064,7 +1017,7 @@ function organizationAlreadyAssigned(book: ShelfBookRecord | null, field: Organi
   return (book[field] || []).some((value) => wanted.has(organizationKey(value)));
 }
 function alreadyAssignedMessages(ids: readonly (string | number)[], field: OrganizationField, names: readonly string[]) {
-  const kind = field === "tags" ? "标签" : "收藏";
+  const kind = field === "tags" ? "标签" : "书单";
   return ids
     .map((id) => getBook(id))
     .filter((book): book is ShelfBookRecord => organizationAlreadyAssigned(book, field, names))
@@ -1093,6 +1046,7 @@ async function applyBatchOrganization() {
 }
 batchTagButton?.addEventListener("click", () => openBatchOrganization("tags"));
 batchCollectionButton?.addEventListener("click", () => openBatchOrganization("collections"));
+batchAddBooklistButton.addEventListener("click", () => openBatchOrganization("collections"));
 batchOrganizationClose?.addEventListener("click", closeBatchOrganization);
 batchOrganizationCancel?.addEventListener("click", closeBatchOrganization);
 batchOrganizationAdd?.addEventListener("click", addBatchOrganizationName);
@@ -1235,6 +1189,21 @@ function attachBooklistDrag(row: HTMLElement, grip: HTMLButtonElement) {
   grip.addEventListener("pointerup", finish);
   grip.addEventListener("pointercancel", finish);
 }
+
+function appendBooklistAddPicker(list: BooklistRecord) {
+  const controls = rootDoc.createElement("div");
+  controls.className = "booklist-shortcuts-create";
+  const add = menuButton("添加图书", "btn-plain primary");
+  add.addEventListener("click", () => {
+    // 书单页只展示和排序；添书统一在书架多选，避免两套选择流程。
+    pendingBooklistTarget = list.name;
+    booklistModal?.classList.remove("show");
+    focusShelf();
+  });
+  controls.append(add);
+  booklistBooks.appendChild(controls);
+}
+
 function renderBooklist(list: BooklistRecord) {
   if (!booklistTitle) return;
   activeBooklist = list;
@@ -1243,6 +1212,7 @@ function renderBooklist(list: BooklistRecord) {
   booklistDescription.value = list.description || "";
   setBooklistCover(list);
   booklistBooks.replaceChildren();
+  appendBooklistAddPicker(list);
   const ids = Array.isArray(list.book_ids) ? list.book_ids : [];
   if (!ids.length) {
     const empty = rootDoc.createElement("div");

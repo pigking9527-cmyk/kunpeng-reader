@@ -1805,6 +1805,21 @@ body.anim-booklist-sort-off .booklist-row {
 .about-release-card {
   margin-top: 14px;
 }
+.about-update-arrow,
+.about-update-version {
+  display: none;
+  color: #245ea9;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.about-update-arrow.show,
+.about-update-version.show {
+  display: inline;
+}
+.about-update-arrow {
+  margin-left: 2px;
+  margin-right: -3px;
+}
 .about-release-card .about-eyebrow {
   margin: 0 0 7px 2px;
 }
@@ -9314,6 +9329,15 @@ html.platform-macos .avatar-btn.active {
   line-height: 1.6;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.intelligence-delivery-state {
+  margin-top: 10px !important;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color, #d7dfec) 78%, transparent);
+  color: var(--text-secondary, #64748b) !important;
+  font-size: 12px !important;
+  line-height: 1.55;
 }
 .intelligence-stage-pills {
   display: flex;

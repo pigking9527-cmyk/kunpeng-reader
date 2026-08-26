@@ -4,7 +4,10 @@
 //! selection and the in-memory cache remain in the runtime orchestrator. This
 //! module only owns the best-effort disk representation and version fallback.
 
-use super::cache_paths::{chapter_cache_path, chapter_cache_path_for};
+use super::cache_paths::{
+    chapter_cache_path, chapter_cache_path_for, converted_chapter_cache_path,
+    converted_chapter_cache_path_for,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -12,6 +15,11 @@ use std::sync::Arc;
 pub(super) struct ProcessedChapterHtml {
     pub(super) head: String,
     pub(super) body: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ConvertedChapterBody {
+    body: String,
 }
 
 pub(super) fn load(
@@ -49,6 +57,49 @@ pub(super) fn save(
     }
 }
 
+pub(super) fn load_converted(
+    id: u64,
+    mtime: u64,
+    index: usize,
+    conversion_tag: u8,
+    compatible_versions: &[u32],
+) -> Option<Arc<str>> {
+    for version in compatible_versions {
+        let Some(path) =
+            converted_chapter_cache_path_for(id, mtime, index, *version, conversion_tag)
+        else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        if let Ok(chapter) = serde_json::from_slice::<ConvertedChapterBody>(&bytes) {
+            return Some(Arc::from(chapter.body));
+        }
+    }
+    None
+}
+
+pub(super) fn save_converted(
+    id: u64,
+    mtime: u64,
+    index: usize,
+    current_version: u32,
+    conversion_tag: u8,
+    body: &str,
+) {
+    let Some(path) =
+        converted_chapter_cache_path(id, mtime, index, current_version, conversion_tag)
+    else {
+        return;
+    };
+    if let Ok(bytes) = serde_json::to_vec(&ConvertedChapterBody {
+        body: body.to_owned(),
+    }) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +115,16 @@ mod tests {
         assert_eq!(value["head"], "<style>p{color:black}</style>");
         assert_eq!(value["body"], "<p>正文</p>");
         assert_eq!(value.as_object().map(serde_json::Map::len), Some(2));
+    }
+
+    #[test]
+    fn converted_serialized_shape_contains_only_the_derived_body() {
+        let value = serde_json::to_value(ConvertedChapterBody {
+            body: "<p>转换正文</p>".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(value["body"], "<p>转换正文</p>");
+        assert_eq!(value.as_object().map(serde_json::Map::len), Some(1));
     }
 }

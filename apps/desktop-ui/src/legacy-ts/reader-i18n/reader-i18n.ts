@@ -141,6 +141,10 @@ export function installReaderI18n(global: ReaderI18nRuntime): ReaderI18nApi | nu
   Object.assign(ZH, { dualChapterProgress: "第{chapter}/{chapters}章 · 左页 本章 {page}/{total}页 · 右页 第{nextChapter}章开头 · {progress}%" });
   Object.assign(COPY["zh-TW"], { dualChapterProgress: "第{chapter}/{chapters}章 · 左頁 本章 {page}/{total}頁 · 右頁 第{nextChapter}章開頭 · {progress}%" });
   Object.assign(COPY.ja, { dualChapterProgress: "第{chapter}/{chapters}章 · 左ページ この章 {page}/{total}ページ · 右ページ 第{nextChapter}章の冒頭 · {progress}%" });
+  Object.assign(EN, { chapterNumber: "Chapter {chapter}/{chapters}", dualChapterNumber: "Chapter {chapter}/{chapters} · right: start of chapter {nextChapter}", chapterPages: "This chapter {page}/{total} pages", progressPercentage: "{progress}%" });
+  Object.assign(ZH, { chapterNumber: "第{chapter}/{chapters}章", dualChapterNumber: "第{chapter}/{chapters}章 · 右页 第{nextChapter}章开头", chapterPages: "本章 {page}/{total}页", progressPercentage: "{progress}%" });
+  Object.assign(COPY["zh-TW"], { chapterNumber: "第{chapter}/{chapters}章", dualChapterNumber: "第{chapter}/{chapters}章 · 右頁 第{nextChapter}章開頭", chapterPages: "本章 {page}/{total}頁", progressPercentage: "{progress}%" });
+  Object.assign(COPY.ja, { chapterNumber: "第{chapter}/{chapters}章", dualChapterNumber: "第{chapter}/{chapters}章 · 右ページ 第{nextChapter}章の冒頭", chapterPages: "この章 {page}/{total}ページ", progressPercentage: "{progress}%" });
 
   const TTS_AUTO_COPY = {
     "zh-CN": { ttsMicrosoftAuto: "微软", ttsSystemOffline: "系统语音", ttsNoSystemVoice: "未找到与正文语言匹配的系统语音，将使用系统默认语音。" },
@@ -185,6 +189,14 @@ export function installReaderI18n(global: ReaderI18nRuntime): ReaderI18nApi | nu
   Object.assign(PREFERENCE_COPY.en, { restorePaletteColors: "Restore defaults" });
   Object.assign(PREFERENCE_COPY["zh-CN"], { restorePaletteColors: "恢复默认" });
   Object.assign(PREFERENCE_COPY.ja, { restorePaletteColors: "既定に戻す" });
+  Object.assign(PREFERENCE_COPY.en, { pageInfoChapter: "Chapter number", pageInfoChapterPage: "This chapter pages", pageInfoPercentage: "Percentage", pageInfoTotalPages: "Whole-book pages" });
+  Object.assign(PREFERENCE_COPY["zh-CN"], { pageInfoChapter: "章号", pageInfoChapterPage: "本章页码", pageInfoPercentage: "百分比", pageInfoTotalPages: "全书页码" });
+  Object.assign(PREFERENCE_COPY["zh-TW"], { pageInfoChapter: "章號", pageInfoChapterPage: "本章頁碼", pageInfoPercentage: "百分比", pageInfoTotalPages: "全書頁碼" });
+  Object.assign(PREFERENCE_COPY.ja, { pageInfoChapter: "章番号", pageInfoChapterPage: "この章のページ", pageInfoPercentage: "進捗率", pageInfoTotalPages: "全ページ数" });
+  Object.assign(PREFERENCE_COPY.en, { pageInfoOrder: "Page and chapter progress items", pageInfoSettings: "Page and chapter progress settings" });
+  Object.assign(PREFERENCE_COPY["zh-CN"], { pageInfoOrder: "页码与章节进度项目", pageInfoSettings: "页码与章节进度设置" });
+  Object.assign(PREFERENCE_COPY["zh-TW"], { pageInfoOrder: "頁碼與章節進度項目", pageInfoSettings: "頁碼與章節進度設定" });
+  Object.assign(PREFERENCE_COPY.ja, { pageInfoOrder: "ページ番号と章の進捗項目", pageInfoSettings: "ページ番号と章の進捗設定" });
   Object.assign(PREFERENCE_COPY.en, { paletteLimit: "You can save up to 15 custom themes." });
   Object.assign(PREFERENCE_COPY["zh-CN"], { paletteLimit: "自定义主题最多可保存 15 个。" });
   Object.assign(PREFERENCE_COPY.ja, { paletteLimit: "カスタムテーマは最大15件まで保存できます。" });
@@ -214,6 +226,81 @@ export function installReaderI18n(global: ReaderI18nRuntime): ReaderI18nApi | nu
   Object.assign(PREFERENCE_COPY["zh-CN"], { typographyDetails: "排版细节", typographyDetailsHint: "书籍样式与精细字距通常只需设置一次。", pageTurnExperience: "翻页体验", pageTurnExperienceHint: "动画样式与速度仅影响分页阅读。", pageMarginsHint: "分别控制正文与阅读窗口四周的留白。", ttsSourceHint: "音源与语速属于设备行为设置。", quickSettingsLayout: "快捷设置布局", quickSettingsCompact: "精简", quickSettingsClassic: "经典" });
   Object.assign(PREFERENCE_COPY.ja, { typographyDetails: "組版の詳細", typographyDetailsHint: "書籍スタイルと細かな間隔は通常、一度設定すれば十分です。", pageTurnExperience: "ページめくり", pageTurnExperienceHint: "アニメーションと速度はページ表示にのみ適用されます。", pageMarginsHint: "本文と読書領域の周囲の余白を調整します。", ttsSourceHint: "音声ソースと読み上げ速度は端末側の動作設定です。", quickSettingsLayout: "クイック設定のレイアウト", quickSettingsCompact: "コンパクト", quickSettingsClassic: "クラシック" });
   Object.assign(PREFERENCE_COPY["zh-TW"], { typographyDetails: "排版細節", typographyDetailsHint: "書籍樣式與精細字距通常只需設定一次。", pageTurnExperience: "翻頁體驗", pageTurnExperienceHint: "動畫樣式與速度只影響分頁閱讀。", pageMarginsHint: "分別控制正文與閱讀視窗四周的留白。", ttsSourceHint: "音源與語速屬於裝置行為設定。", quickSettingsLayout: "快速設定版面", quickSettingsCompact: "精簡", quickSettingsClassic: "經典" });
+
+  const CONTEXT_MEDIA_PREFERENCE_COPY: ReaderCopyCatalog = {
+    en: {
+      readerContextMedia: "Reading companion",
+      readerContextMediaHint: "Generate image and video prompts only from text you have read, then place the result below the passage it illustrates. In local mode, prompts are prepared from completed chapters and models take turns so the language model and H3 do not occupy GPU memory together.",
+      readerContextImageDensity: "Image density",
+      readerContextImageDensityHint: "Controls how often contextual images are generated in the text.",
+      readerContextVideoDensity: "Video density",
+      readerContextVideoDensityHint: "Controls how often contextual videos are generated in the text.",
+      densityLow: "Low",
+      densityMedium: "Medium",
+      densityHigh: "High",
+      readerContextChapterSummary: "Chapter companion summary",
+      readerContextChapterSummaryHint: "Optionally show an image or video summary at the beginning or end of a chapter.",
+      readerContextImageSummaryStart: "Show image summary at chapter start",
+      readerContextImageSummaryEnd: "Show image summary at chapter end",
+      readerContextVideoSummaryStart: "Show video summary at chapter start",
+      readerContextVideoSummaryEnd: "Show video summary at chapter end",
+    },
+    "zh-CN": {
+      readerContextMedia: "伴读",
+      readerContextMediaHint: "根据已读正文生成图片与视频提示词，成品插在对应文字描述下方。本地模式按完整章节分批生成提示词并轮换模型，避免大模型与 H3 同时占用显存。",
+      readerContextImageDensity: "图片密度",
+      readerContextImageDensityHint: "控制正文中情境图片的生成频率。",
+      readerContextVideoDensity: "视频密度",
+      readerContextVideoDensityHint: "控制正文中情境视频的生成频率。",
+      densityLow: "低",
+      densityMedium: "中",
+      densityHigh: "高",
+      readerContextChapterSummary: "章节伴读总结",
+      readerContextChapterSummaryHint: "按需在章首或章尾显示整章的图片、视频总结。",
+      readerContextImageSummaryStart: "章首显示图片总结",
+      readerContextImageSummaryEnd: "章尾显示图片总结",
+      readerContextVideoSummaryStart: "章首显示视频总结",
+      readerContextVideoSummaryEnd: "章尾显示视频总结",
+    },
+    "zh-TW": {
+      readerContextMedia: "伴讀",
+      readerContextMediaHint: "根據已讀正文產生圖片與影片提示詞，成品插在對應文字描述下方。本機模式按完整章節分批產生提示詞並輪替模型，避免大型模型與 H3 同時佔用顯示記憶體。",
+      readerContextImageDensity: "圖片密度",
+      readerContextImageDensityHint: "控制正文中情境圖片的產生頻率。",
+      readerContextVideoDensity: "影片密度",
+      readerContextVideoDensityHint: "控制正文中情境影片的產生頻率。",
+      densityLow: "低",
+      densityMedium: "中",
+      densityHigh: "高",
+      readerContextChapterSummary: "章節伴讀總結",
+      readerContextChapterSummaryHint: "按需在章首或章尾顯示整章的圖片、影片總結。",
+      readerContextImageSummaryStart: "章首顯示圖片總結",
+      readerContextImageSummaryEnd: "章尾顯示圖片總結",
+      readerContextVideoSummaryStart: "章首顯示影片總結",
+      readerContextVideoSummaryEnd: "章尾顯示影片總結",
+    },
+    ja: {
+      readerContextMedia: "シーン映像",
+      readerContextMediaHint: "本文から画像・動画プロンプトを作成し、対応する文章の直下に生成結果を配置します。ローカルモードでは章ごとにプロンプトを準備し、言語モデルと H3 が同時に GPU メモリを占有しないよう交互に実行します。",
+      readerContextImageDensity: "画像の密度",
+      readerContextImageDensityHint: "本文中でシーン画像を生成する頻度を設定します。",
+      readerContextVideoDensity: "動画の密度",
+      readerContextVideoDensityHint: "本文中でシーン動画を生成する頻度を設定します。",
+      densityLow: "低",
+      densityMedium: "中",
+      densityHigh: "高",
+      readerContextChapterSummary: "章の映像まとめ",
+      readerContextChapterSummaryHint: "章の冒頭または末尾に画像・動画のまとめを表示します。",
+      readerContextImageSummaryStart: "章の冒頭に画像まとめを表示",
+      readerContextImageSummaryEnd: "章の末尾に画像まとめを表示",
+      readerContextVideoSummaryStart: "章の冒頭に動画まとめを表示",
+      readerContextVideoSummaryEnd: "章の末尾に動画まとめを表示",
+    },
+  };
+  Object.entries(CONTEXT_MEDIA_PREFERENCE_COPY).forEach(([locale, copy]) => {
+    const target = PREFERENCE_COPY[locale];
+    if (target) Object.assign(target, copy);
+  });
 
   const JUMP_BACK_PREFERENCE_COPY: ReaderCopyCatalog = {
     en: { readerJumpBack: "Show jump back", readerJumpBackHint: "After a table-of-contents, footnote, or in-book link jump, show a back icon at the right of the page.", readerJumpBackSettings: "Jump-back settings", readerJumpBackDismissMode: "Auto-hide rule", readerJumpBackDismissPages: "After a number of page turns", readerJumpBackDismissTime: "After a period of time", readerJumpBackPages: "Page turns", readerJumpBackSeconds: "Display time", readerJumpBackSize: "Icon size", readerJumpBackPosition: "Jump-back icon position", readerJumpBackPositionHint: "Drag the icon to set its screen position", pageUnit: "pages", secondsUnit: "seconds" },

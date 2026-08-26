@@ -22,7 +22,7 @@ pub struct Config {
     pub database_acquire_timeout: Duration,
     /// Maximum concurrently executing ordinary safe/read-only HTTP requests.
     ///
-    /// The default read/checkpoint/write budgets are 12/18/10, so at most 40
+    /// The default read/checkpoint/write budgets are 15/23/12, so at most 50
     /// requests execute across all three protected lanes. The split follows
     /// the measured catch-up mix while keeping one lane from consuming the
     /// complete service budget.
@@ -224,10 +224,10 @@ impl Config {
                 "KUNPENG_SYNC_DATABASE_ACQUIRE_TIMEOUT_MILLIS",
                 "300",
             )?),
-            max_concurrent_requests: parsed_positive("KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS", "12")?,
+            max_concurrent_requests: parsed_positive("KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS", "15")?,
             max_concurrent_checkpoint_requests: parsed_positive(
                 "KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS",
-                "18",
+                "23",
             )?,
             max_queued_read_requests: parsed_positive(
                 "KUNPENG_SYNC_MAX_QUEUED_READ_REQUESTS",
@@ -239,7 +239,7 @@ impl Config {
             )?,
             max_concurrent_write_requests: parsed_positive(
                 "KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS",
-                "10",
+                "12",
             )?,
             max_queued_write_requests: parsed_positive(
                 "KUNPENG_SYNC_MAX_QUEUED_WRITE_REQUESTS",

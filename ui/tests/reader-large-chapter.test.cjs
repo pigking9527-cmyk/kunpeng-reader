@@ -79,7 +79,7 @@ test("large chapters use batched geometry and skip repeated exact layout", () =>
   assert.match(source, /if\(fastChapterLayout\)return fastDocumentTextLineRects\(\)/);
   assert.match(
     source,
-    /waitForFlowResources\(\)\.then[\s\S]*?applyStyle\(\);applyCols\(\);const finishChapterLayout=function\(\)\{if\(fastChapterLayout\)\{if\(!isScrollMode\(\)\)pagesInCh=fastPagedPageCount\(root\)/
+    /waitForFlowResources\(\)\.then[\s\S]*?const performChapterLayout=function\(\)\{[\s\S]*?applyStyle\(\);applyCols\(\);[\s\S]*?const finishChapterLayout=function\(\)\{[\s\S]*?if\(fastChapterLayout\)\{[\s\S]*?if\(!isScrollMode\(\)\)pagesInCh=fastPagedPageCount\(root\)/
   );
 });
 

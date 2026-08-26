@@ -8,6 +8,10 @@
 mod archive_relay;
 mod collection;
 pub(crate) mod content_archive;
+// Private host-task execution has a complete isolated state machine, but no
+// production transport is enabled yet. Keep its tests compiled without making
+// the local publication worker claim tasks it cannot safely acknowledge.
+#[cfg(test)]
 mod host_executor;
 mod processing;
 mod publication;
@@ -686,6 +690,10 @@ fn print_output(output: WorkerOutput) {
     );
 }
 
+// The sidecar's stable, flat aggregate schema maps directly to these fields.
+// Keeping the constructor explicit avoids a mutable intermediate projection in
+// every terminal branch of the worker state machine.
+#[allow(clippy::too_many_arguments)]
 fn output(
     mode: Mode,
     outcome: &'static str,

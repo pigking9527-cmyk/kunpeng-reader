@@ -181,8 +181,8 @@ mod tests {
 
     #[test]
     fn compiled_changelog_remains_the_offline_release_notes_source() {
-        let beta = bundled_release_notes(BUNDLED_CHANGELOG, "v1.0.0-beta.1");
-        assert!(beta.contains("测试版 1.0"));
+        let beta = bundled_release_notes(BUNDLED_CHANGELOG, "v1.1.0-beta.1");
+        assert!(beta.contains("测试版 1.1"));
         assert!(beta.contains("GitHub"));
         let notes = bundled_release_notes(BUNDLED_CHANGELOG, "v1.11.2");
         assert!(notes.contains("Windows-only 体验更新"));
@@ -190,24 +190,24 @@ mod tests {
     }
 
     #[test]
-    fn virtual_1_1_manifest_prompts_the_1_0_development_build() {
+    fn virtual_1_2_manifest_prompts_the_1_1_development_build() {
         let release = serde_json::json!({
-            "version": "1.1.0",
+            "version": "1.2.0",
             "release_notes": "一次性虚拟更新测试",
-            "download_url": "https://example.invalid/kunpeng-update-smoke-v1-1"
+            "download_url": "https://example.invalid/kunpeng-update-smoke-v1-2"
         });
 
-        let info = update_info_from_release(&release, "1.0.0-beta.1", "server", "")
+        let info = update_info_from_release(&release, "1.1.0-beta.1", "server", "")
             .expect("virtual manifest contains a version");
         assert!(info.ok);
         assert!(info.has_update);
-        assert_eq!(info.current, "1.0.0-beta.1");
-        assert_eq!(info.latest, "1.1.0");
+        assert_eq!(info.current, "1.1.0-beta.1");
+        assert_eq!(info.latest, "1.2.0");
         assert_eq!(info.source, "server");
         assert_eq!(info.notes, "一次性虚拟更新测试");
         assert_eq!(
             info.url,
-            "https://example.invalid/kunpeng-update-smoke-v1-1"
+            "https://example.invalid/kunpeng-update-smoke-v1-2"
         );
     }
 }

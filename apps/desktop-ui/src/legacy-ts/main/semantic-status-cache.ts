@@ -20,6 +20,10 @@ export interface SemanticStatus {
   model_ready: boolean;
   model_id: string;
   model_label: string;
+  solution_switching: boolean;
+  pending_model_id: string;
+  pending_model_label: string;
+  pending_retrieval_mode: string;
   model_supported: boolean;
   model_bytes: number;
   reranker_downloaded: boolean;
@@ -77,6 +81,10 @@ export function semanticStatusSnapshot(
     model_ready: Boolean(input.model_ready),
     model_id: text(input.model_id, activeModelId || DEFAULT_SEMANTIC_MODEL_ID),
     model_label: text(input.model_label, "BGE Small 中文（默认）"),
+    solution_switching: Boolean(input.solution_switching),
+    pending_model_id: text(input.pending_model_id),
+    pending_model_label: text(input.pending_model_label),
+    pending_retrieval_mode: text(input.pending_retrieval_mode),
     model_supported: input.model_supported !== false,
     model_bytes: Number(input.model_bytes) || 0,
     reranker_downloaded: Boolean(input.reranker_downloaded),

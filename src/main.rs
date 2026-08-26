@@ -22,10 +22,21 @@ mod epub_toc;
 mod external_dict;
 mod feedback;
 mod gesture_settings;
-mod intelligence_client;
+// The reader owns the authenticated pairing commands. The headless worker
+// includes the same protocol foundation independently for its execution path.
+mod host_inference_crypto;
+mod host_inference_lifecycle;
+// Pairing is active in the reader. Encrypted task relay stays deliberately
+// test-only until the worker has a complete claim/result/ACK transport, so the
+// desktop process never advertises a private-task path it cannot finish.
+#[cfg(test)]
+mod host_inference_relay_client;
 mod html_sanitize;
 mod import;
 mod import_core;
+mod intelligence_backup;
+mod intelligence_client;
+mod intelligence_worker_lifecycle;
 mod library_commands;
 mod macos_reader_wheel;
 mod memory_budget;
@@ -36,6 +47,7 @@ mod profile;
 mod reader_backgrounds;
 mod reader_commands;
 mod reader_fonts;
+mod reader_media;
 mod reader_page;
 mod reader_palettes;
 mod reader_protocol;
@@ -74,6 +86,21 @@ use tauri::menu::MenuItem;
 use tauri::{menu::Menu, Manager};
 #[cfg(target_os = "macos")]
 const MENU_MAIN_WINDOW_CLOSE: &str = "main-window-close";
+
+/// The authenticated-account check lives at the desktop boundary; the
+/// lifecycle module itself is also compiled into the no-UI worker sidecar.
+#[tauri::command]
+fn pair_intelligence_worker(
+    state: tauri::State<AppState>,
+    request: intelligence_worker_lifecycle::IntelligenceWorkerPairingRequest,
+) -> Result<intelligence_worker_lifecycle::IntelligenceWorkerLifecycleStatus, String> {
+    let connection = sync::intelligence_connection(state.inner())?;
+    intelligence_worker_lifecycle::pair_intelligence_worker_for_connection(
+        &connection.base,
+        request,
+    )
+}
+
 fn main() {
     if let Err(error) =
         profile::preflight_process_args().and_then(|()| profile::initialize_from_process_args())
@@ -206,7 +233,12 @@ fn main() {
                 .cloned()
                 .ok_or("缺少主窗口配置")?;
             if let Some(saved) = geom.as_ref().filter(|saved| {
-                saved.w >= 300.0 && saved.h >= 300.0 && saved.x > -10_000.0 && saved.y > -10_000.0
+                saved.physical.is_none()
+                    && saved.physical_outer.is_none()
+                    && saved.w >= 300.0
+                    && saved.h >= 300.0
+                    && saved.x > -10_000.0
+                    && saved.y > -10_000.0
             }) {
                 main_config.width = saved.w;
                 main_config.height = saved.h;
@@ -225,10 +257,16 @@ fn main() {
             let _main_window = main_window_builder.build()?;
             startup_enhancement::retain_main_window(app.handle(), _main_window.as_ref().window());
             sync::start_silent_startup_sync(app.handle().clone());
-            // Content-free wake-ups are subscribed at app start, never by a
-            // WebView page open. Full packages still pass the native cache
-            // validation and acknowledgement order before any display.
+            // The native subscriber carries only content-free wake-ups and
+            // writes through the already verified account cache. It is never
+            // created by opening the intelligence workspace in the WebView.
             intelligence_client::spawn_delivery_stream(app.handle().clone());
+            // This is intentionally independent from the main-window close
+            // policy.  When a verified local pairing exists, the detached
+            // sidecar owns its own lifetime and re-reads its DPAPI config.
+            if let Err(error) = intelligence_worker_lifecycle::spawn_configured_worker() {
+                log(&format!("情报后台 worker 启动已跳过：{error}"));
+            }
             backup::spawn_daily(app.handle().clone());
             semantic::spawn_semantic_profile_warmup(app.handle().clone());
             startup::spawn_associated_book_watcher(app.handle().clone());
@@ -237,6 +275,14 @@ fn main() {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_title(startup::VERSIONED_MAIN_WINDOW_TITLE);
                 window_commands::apply_geom_safe(&win, &geom);
+                window_commands::emit_main_geometry_trace(
+                    app.handle(),
+                    &win,
+                    "geometry_restore",
+                    "main_startup",
+                    "requested",
+                    geom.as_ref(),
+                );
                 // 主窗口保持隐藏到书架首帧绘制后经 main_window_show 揭示，先稳定保存的几何状态。
                 if startup_enhancement::should_start_login_background(app.handle()) {
                     startup_enhancement::begin_login_background(app.handle());
@@ -284,7 +330,10 @@ fn main() {
             library_commands::merge_duplicate_books,
             library_commands::book_reading_timeline,
             window_commands::reader_window_open,
+            window_commands::reader_window_diagnostic_state,
             window_commands::reader_shell_pool_ready,
+            window_commands::reader_shell_inner_engine_url,
+            window_commands::reader_shell_inner_engine_ready,
             app_commands::background_task_status,
             app_commands::background_task_cancel,
             app_commands::background_task_pause,
@@ -325,9 +374,76 @@ fn main() {
             newsnow::newsnow_prepare_article_shell,
             newsnow::newsnow_open_article,
             newsnow::newsnow_close_article,
+            ai_reader::ai_capability_routes_status,
+            ai_reader::intelligence_host_preflight,
+            ai_reader::intelligence_host_pairing_begin,
+            ai_reader::intelligence_host_pairing_confirm,
+            ai_reader::intelligence_host_pairings,
+            ai_reader::intelligence_host_pairing_revoke,
+            ai_reader::save_ai_capability_route,
             ai_reader::ai_reader_status,
             ai_reader::ai_reader_profiles,
             ai_reader::select_ai_reader_profile,
+            ai_reader::assign_ai_reader_profile,
+            ai_reader::save_ai_reader_profile,
+            ai_reader::save_ai_reader_config,
+            reader_media::reader_media_status,
+            reader_media::install_reader_media_model,
+            reader_media::configure_reader_media_comfyui,
+            reader_media::start_reader_media_runtime,
+            reader_media::stop_reader_media_runtime,
+            reader_media::begin_reader_media_generation_cycle,
+            reader_media::finish_reader_media_generation_cycle,
+            reader_media::generate_reader_media_image,
+            reader_media::create_reader_media_video,
+            reader_media::query_reader_media_video,
+            reader_media::reader_companion_settings_get,
+            reader_media::reader_companion_settings_save,
+            ar::intelligence_local_model_status,
+            ar::intelligence_local_model_capabilities,
+            ar::intelligence_local_model_preflight,
+            ar::local_understanding_model_preflight,
+            ar::intelligence_local_model_save,
+            ar::intelligence_extract_source_evidence,
+            ar::intelligence_generate_brief,
+            ar::intelligence_judge_event_pairs,
+            ar::intelligence_triage_articles,
+            ar::score_news_preferences,
+            ar::intelligence_cluster_news_semantically,
+            ar::intelligence_daily_digest_save,
+            ar::intelligence_daily_digest_list,
+            ar::intelligence_daily_digest_get,
+            ar::intelligence_runtime_switch,
+            ar::intelligence_store::intelligence_store_upsert_articles,
+            ar::intelligence_store::intelligence_store_update_article_evidence,
+            ar::intelligence_store::intelligence_store_claim_triage,
+            ar::intelligence_store::intelligence_store_apply_triage,
+            ar::intelligence_store::intelligence_store_triage_decisions,
+            ar::intelligence_store::intelligence_store_upsert_relations,
+            ar::intelligence_store::intelligence_store_upsert_event,
+            ar::intelligence_store::intelligence_store_event_get,
+            ar::intelligence_store::intelligence_store_event_sources,
+            ar::intelligence_store::intelligence_store_events_by_articles,
+            ar::intelligence_store::intelligence_store_event_projections,
+            ar::intelligence_store::intelligence_store_upsert_series,
+            ar::intelligence_store::intelligence_store_series_timeline,
+            ar::intelligence_store::intelligence_record_quality_review,
+            ar::intelligence_store::intelligence_store_record_reviews,
+            ar::intelligence_store::intelligence_store_snapshot,
+            ar::intelligence_store::intelligence_store_start_run,
+            ar::intelligence_store::intelligence_store_finish_run,
+            ar::intelligence_store::intelligence_store_retrieval_profile_save,
+            ar::intelligence_store::intelligence_store_retrieval_profile_get,
+            ar::intelligence_store::intelligence_store_audit_page,
+            ar::intelligence_store::intelligence_store_upsert_embeddings,
+            ar::intelligence_store::intelligence_store_dense_search,
+            ar::intelligence_store::intelligence_store_sparse_search,
+            ar::intelligence_store::intelligence_pipeline_recall_relations,
+            ar::intelligence_store::intelligence_pipeline_judge_relations,
+            intelligence_backup::intelligence_archive_backup,
+            intelligence_worker_lifecycle::intelligence_worker_lifecycle_status,
+            pair_intelligence_worker,
+            intelligence_worker_lifecycle::revoke_intelligence_worker_credential,
             intelligence_client::intelligence_client_cache_status,
             intelligence_client::intelligence_client_cached_publications,
             intelligence_client::intelligence_client_asset_data_url,
@@ -336,20 +452,8 @@ fn main() {
             intelligence_client::intelligence_archive_request,
             intelligence_client::intelligence_archive_request_status,
             intelligence_client::intelligence_archive_download,
-            ai_reader::assign_ai_reader_profile,
-            ai_reader::save_ai_reader_profile,
-            ai_reader::save_ai_reader_config,
-            ar::intelligence_local_model_status,
-            ar::intelligence_local_model_save,
-            ar::intelligence_extract_source_evidence,
-            ar::intelligence_generate_brief,
-            ar::intelligence_judge_event_pairs,
-            ar::intelligence_triage_articles,
-            ar::intelligence_cluster_news_semantically,
-            ar::intelligence_daily_digest_save,
-            ar::intelligence_daily_digest_list,
-            ar::intelligence_daily_digest_get,
             ai_reader::ask_reading_assistant,
+            ai_reader::capture_reading_memory,
             ai_reader::ask_library_assistant,
             ai_reader::cancel_library_assistant,
             ai_reader::library_history_source_preview,
@@ -491,7 +595,9 @@ fn main() {
             semantic::download_semantic_model,
             semantic::delete_semantic_model,
             semantic::select_semantic_model,
+            semantic::select_semantic_device_policy,
             semantic::select_semantic_retrieval_mode,
+            semantic::select_semantic_solution,
             semantic::set_semantic_m3_long_context,
             semantic::download_semantic_reranker,
             semantic::delete_semantic_reranker,
@@ -505,6 +611,7 @@ fn main() {
             semantic::semantic_index_done,
             semantic::gpu::semantic_gpu_status,
             semantic::gpu_runtime::install_semantic_gpu_runtime,
+            semantic::gpu_runtime::select_semantic_gpu_runtime,
             semantic::semantic_status,
             semantic::semantic_tasks,
             semantic::prepare_semantic_search,

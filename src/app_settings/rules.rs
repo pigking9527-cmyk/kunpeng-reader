@@ -31,6 +31,7 @@ pub(super) const TOOLBAR_ITEM_IDS: &[&str] = &[
     "library",
     "news",
     "intelligence-lab",
+    "favorites",
     "filter",
     "settings",
     "menu",
@@ -74,6 +75,7 @@ pub(super) fn normalized_toolbar_order(values: Vec<String>) -> Vec<String> {
         .filter(|value| seen.insert(value.clone()))
         .collect::<Vec<_>>();
     let had_intelligence_lab = seen.contains("intelligence-lab");
+    let had_favorites = seen.contains("favorites");
     if seen.insert("account".to_string()) {
         order.insert(0, "account".to_string());
     }
@@ -91,6 +93,21 @@ pub(super) fn normalized_toolbar_order(values: Vec<String>) -> Vec<String> {
                 let insert_at = order
                     .iter()
                     .position(|value| value == "news")
+                    .map_or(order.len(), |index| index + 1);
+                order.insert(insert_at, item);
+            }
+        }
+    }
+    if !had_favorites {
+        let current_index = order.iter().position(|value| value == "favorites");
+        let intelligence_index = order.iter().position(|value| value == "intelligence-lab");
+        if let (Some(current_index), Some(intelligence_index)) = (current_index, intelligence_index)
+        {
+            if current_index != intelligence_index + 1 {
+                let item = order.remove(current_index);
+                let insert_at = order
+                    .iter()
+                    .position(|value| value == "intelligence-lab")
                     .map_or(order.len(), |index| index + 1);
                 order.insert(insert_at, item);
             }
@@ -369,6 +386,7 @@ mod tests {
                 "library",
                 "news",
                 "intelligence-lab",
+                "favorites",
                 "filter",
                 "settings"
             ]
@@ -396,6 +414,7 @@ mod tests {
                 "library",
                 "news",
                 "intelligence-lab",
+                "favorites",
                 "filter",
                 "settings",
                 "menu"

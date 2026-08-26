@@ -1,14 +1,17 @@
 mod accelerator;
 mod batch;
 mod build;
+mod device;
 pub(crate) mod gpu;
 pub(crate) mod gpu_runtime;
 mod index_runtime;
 mod m3;
 pub(crate) mod model;
 mod profile;
+mod qwen;
 mod retrieval;
 mod search;
+mod solution;
 mod status;
 mod storage;
 mod vector;
@@ -25,7 +28,13 @@ use tauri::Manager;
 
 pub(crate) fn initialize_semantic_model_selection() {
     model::initialize_selection();
+    device::initialize();
     retrieval::initialize();
+    if let Err(error) = solution::commit(model::active_id(), retrieval::active_mode().id()) {
+        crate::log(&format!(
+            "semantic_solution migration_write_failed error={error}"
+        ));
+    }
 }
 
 /// Encode a bounded batch of public-news excerpts for the intelligence
@@ -165,11 +174,30 @@ pub(crate) fn select_semantic_model(
 }
 
 #[tauri::command]
+pub(crate) fn select_semantic_device_policy(
+    state: tauri::State<AppState>,
+    policy: String,
+) -> Result<(), String> {
+    device::select(state, &policy)
+}
+
+#[tauri::command]
 pub(crate) fn select_semantic_retrieval_mode(
     state: tauri::State<AppState>,
     mode: String,
 ) -> Result<(), String> {
     retrieval::select_mode(state, &mode)
+}
+
+/// 模型与检索模式必须作为一个方案提交。前端不应再连续调用两个独立命令，
+/// 否则中途失败会让用户以为已经选中了一个实际并未完整生效的组合。
+#[tauri::command]
+pub(crate) async fn select_semantic_solution(
+    app: tauri::AppHandle,
+    model_id: String,
+    retrieval_mode: String,
+) -> Result<(), String> {
+    model::request_solution(app, &model_id, &retrieval_mode).await
 }
 
 #[tauri::command]
@@ -316,6 +344,10 @@ pub(crate) fn semantic_tasks(
 /// 命令立即返回；真正工作在后台线程完成。查询若紧接着到来，会复用同一加载锁而不会重复读 9GB 索引。
 #[tauri::command]
 pub(crate) fn prepare_semantic_search(app: tauri::AppHandle) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    state.with_db_read("prepare_semantic_search_route", |db| {
+        crate::ai_reader::capabilities::ensure_local_search_enabled(db)
+    })?;
     search::prepare(app)
 }
 
@@ -331,6 +363,10 @@ pub(crate) async fn semantic_search(
     query: String,
     ids: Option<Vec<String>>,
 ) -> Result<Vec<SemBookHits>, String> {
+    let state = app.state::<AppState>();
+    state.with_db_read("semantic_search_route", |db| {
+        crate::ai_reader::capabilities::ensure_local_search_enabled(db)
+    })?;
     search::semantic_search(app, query, ids).await
 }
 

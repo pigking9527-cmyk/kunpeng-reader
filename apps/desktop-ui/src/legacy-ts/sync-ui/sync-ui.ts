@@ -862,7 +862,9 @@ export function installSyncUi(target: unknown): SyncUiGlobal | null {
         loadAccountSecurityStatus();
       }
       if (selectedTab === "data") prepareAccountDataPanel();
-      if (selectedTab === "sync") loadPrivateSyncStatus();
+      if (selectedTab === "sync") {
+        void loadPrivateSyncStatus();
+      }
     }
     let accountOpenRefreshGeneration = 0;
     async function refreshAccountPanelConnection() {

@@ -5,7 +5,8 @@ use std::sync::Arc;
 mod html_resources;
 
 pub(crate) use html_resources::{
-    collect_head_assets, extract_body_inner, guess_mime, percent_decode, rewrite_attrs,
+    collect_head_assets, collect_local_stylesheet_links, collect_local_stylesheet_paths,
+    extract_body_inner, guess_mime, inline_local_stylesheet_links, percent_decode, rewrite_attrs,
     rewrite_css_url,
 };
 
@@ -158,9 +159,9 @@ pub(crate) fn mobi_chapters(path: &std::path::Path) -> Vec<(String, String)> {
 /// 取（并缓存）一本 txt/md/mobi 的切分章节。
 pub(crate) fn get_txt_chapters(state: &AppState, id: u64) -> Option<Arc<Vec<(String, String)>>> {
     {
-        let c = state.txt_chapters.lock().unwrap();
-        if let Some(v) = c.get(&id) {
-            return Some(v.clone());
+        let mut cache = state.txt_chapters.lock().unwrap();
+        if let Some(chapters) = cache.get(id) {
+            return Some(chapters);
         }
     }
     let (path, format) = {
@@ -180,7 +181,12 @@ pub(crate) fn get_txt_chapters(state: &AppState, id: u64) -> Option<Arc<Vec<(Str
         }
     };
     let arc = Arc::new(chapters);
-    state.txt_chapters.lock().unwrap().insert(id, arc.clone());
+    let (book_limit, byte_limit) = state.epub_runtime.text_chapter_cache_limits();
+    state
+        .txt_chapters
+        .lock()
+        .unwrap()
+        .insert(id, Arc::clone(&arc), book_limit, byte_limit);
     Some(arc)
 }
 

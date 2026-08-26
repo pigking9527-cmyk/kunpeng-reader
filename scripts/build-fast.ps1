@@ -5,6 +5,8 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $fastExe = Join-Path $repo "target\fast\ebook-reader-tauri.exe"
+$fastWorker = Join-Path $repo "target\fast\kunpeng-intelligence-worker.exe"
+$fastRuntimeDir = Split-Path -Parent $fastExe
 $productName = -join @([char]0x9cb2, [char]0x9e4f, [char]0x9605, [char]0x8bfb, [char]0x5668)
 $repoExe = Join-Path $repo ($productName + ".exe")
 $desktop = [Environment]::GetFolderPath("Desktop")
@@ -26,6 +28,30 @@ function Copy-DesktopArtifact([string]$Source, [string]$Destination) {
   catch {
     Start-Sleep -Seconds 2
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
+  }
+}
+
+function Sync-OnnxRuntimeCompanions([string]$SourceDirectory, [string]$DestinationDirectory) {
+  # `ort` loads its CUDA Provider adjacent to the process executable. Copying
+  # only the EXE makes GPU probing silently fail even though the freshly built
+  # target directory is complete. Keep the approved ONNX Runtime DLL family
+  # next to the shortcut target; this is not a CUDA/cuDNN redistribution.
+  $sourceFiles = @(Get-ChildItem -LiteralPath $SourceDirectory -Filter "onnxruntime*.dll" -File -ErrorAction Stop)
+  if ($sourceFiles.Count -eq 0) {
+    throw "ONNX Runtime companion DLLs are missing from build directory: $SourceDirectory"
+  }
+  foreach ($file in $sourceFiles) {
+    Copy-DesktopArtifact $file.FullName (Join-Path $DestinationDirectory $file.Name)
+  }
+  $sourceNames = @($sourceFiles.Name)
+  Get-ChildItem -LiteralPath $DestinationDirectory -Filter "onnxruntime*.dll" -File -ErrorAction SilentlyContinue |
+    Where-Object { $sourceNames -notcontains $_.Name } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+
+  foreach ($required in "onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll") {
+    if (-not (Test-Path -LiteralPath (Join-Path $DestinationDirectory $required))) {
+      throw "Desktop runtime companion is missing after copy: $required"
+    }
   }
 }
 
@@ -65,18 +91,22 @@ try {
     }
   }
 
-  Write-Host "== cargo build --profile fast =="
-  cargo build --profile fast
+  Write-Host "== cargo build --profile fast (reader + intelligence worker) =="
+  cargo build --profile fast --bins
 
-  if (-not (Test-Path -LiteralPath $fastExe)) {
-    throw "Fast exe not found: $fastExe"
+  foreach ($required in @($fastExe, $fastWorker)) {
+    if (-not (Test-Path -LiteralPath $required)) {
+      throw "Fast executable not found: $required"
+    }
   }
 
   Stop-ReaderProcesses
   Copy-DesktopArtifact $fastExe $repoExe
+  Copy-DesktopArtifact $fastWorker (Join-Path $repo "kunpeng-intelligence-worker.exe")
+  Sync-OnnxRuntimeCompanions $fastRuntimeDir $repo
   Write-DesktopShortcut
   Remove-Item -LiteralPath $legacyDesktopExe -Force -ErrorAction SilentlyContinue
-  $delivered = @($repoExe, $desktopShortcut)
+  $delivered = @($repoExe, $desktopShortcut) + (Get-ChildItem -LiteralPath $repo -Filter "onnxruntime*.dll" -File | ForEach-Object FullName)
   Get-Item -LiteralPath $delivered | Select-Object FullName, Length, LastWriteTime
   Write-Host "Fast GUI executable stays in the repository; desktop only receives a shortcut. Use scripts/build-release.ps1 for official releases."
 } finally {

@@ -279,7 +279,6 @@ interface MainAppRuntime extends Window, UnknownRecord {
   readonly ReaderApiSettingsUI?: { init(options: UnknownRecord): unknown };
   readonly ReaderToolbarSettingsUI?: { init(options: UnknownRecord): unknown };
   readonly ReaderBookClassificationSettingsUI?: { init(options: UnknownRecord): unknown };
-  readonly ReaderBooklistSettingsUI?: { init(options: UnknownRecord): unknown };
   readonly ReaderRecoverySettings?: { flush?(force: boolean): Promise<unknown> };
   readonly ReaderSemanticUI: { init(options: UnknownRecord): unknown };
   readonly ReaderSemanticStatusCache: unknown;
@@ -697,7 +696,6 @@ appLanguageSelect?.addEventListener("change", () => window.ReaderAppI18n?.setLan
 window.ReaderApiSettingsUI?.init({ invoke });
 window.ReaderToolbarSettingsUI?.init({ invoke });
 window.ReaderBookClassificationSettingsUI?.init({ invoke });
-window.ReaderBooklistSettingsUI?.init({ invoke });
 const appText = (
   key: string,
   fallback: string,
@@ -1015,7 +1013,7 @@ async function importBookPaths(input: unknown): Promise<BookRecord[] | null | un
     shelfUI.render(list);
     const shouldShowOpenHint = shelfWasEmpty && (list || []).length > 0 && localStorage.getItem("shelfClickOpenHintSeen") !== "1";
     if (shouldShowOpenHint) localStorage.setItem("shelfClickOpenHintSeen", "1");
-    setImportStatus(shouldShowOpenHint ? "导入完成。单击打开图书；双击选中图书" : "导入完成，共 " + paths.length + " 个文件", "ok");
+    setImportStatus(shouldShowOpenHint ? "导入完成。左键打开图书；右键选中图书" : "导入完成，共 " + paths.length + " 个文件", "ok");
     hideImportStatus(shouldShowOpenHint ? 5200 : 3200);
     if (debugSettingOn("bg_fulltext_index")) {
       runWhenNoReader("keyword-index-after-import", () => invoke("build_shelf_index")); // 后台为新书建检索索引
@@ -1475,21 +1473,19 @@ window.addEventListener("DOMContentLoaded", () => {
       if (!debugSettingOn("reader_words_detect")) return;
       runWhenNoReader("word-counts", () => invoke("compute_word_counts"));
     }, 25000);
-    // 更新检查不阻塞首屏：绑定完 UI 后立刻异步请求本机发布清单。
-    // 服务端不可用时后端会短超时后再回退 GitHub，不能再让首屏等待 15 秒。
+    // 更新检查不阻塞首屏：等窗口完成首帧和书架初始化后再请求并弹出独立更新页。
+    // 太早显示会在首屏布局初始化时被覆盖，让用户误以为没有检测到更新。
     setTimeout(() => {
-      if (!debugSettingOn("bg_update_check")) return;
       startupTimed("update-check", () => aboutUI.checkUpdate(false), "background").catch(() => {});
-    }, 0);
+    }, 1200);
     // “关于”里的版本号取自后端，保持单一来源
     startupTimed("app-version", () => invoke("app_version"), "background")
       .then((v) => {
         const el = document.getElementById("about-ver");
         const version = String(v || "").replace(/^v/i, "");
         if (el && version) {
-          el.textContent = /^1\.0\.0-beta(?:\.|$)/i.test(version)
-            ? "测试版 1.0"
-            : `v${version}`;
+          const beta = /^1\.(\d+)\.0-beta(?:\.|$)/i.exec(version);
+          el.textContent = beta ? `测试版 1.${beta[1]}` : `v${version}`;
         }
       })
       .catch(() => {});

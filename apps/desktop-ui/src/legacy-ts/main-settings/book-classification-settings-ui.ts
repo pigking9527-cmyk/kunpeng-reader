@@ -163,14 +163,14 @@ export function createBookClassificationSettingsUi(
           stopPoll();
           runButton.disabled = false;
           if (task?.state === "paused") {
-            setStatus(`${task.current || "书籍分类已中断"}；可从已保存的位置继续`);
+            setStatus(`${task.current || "AI 图书标签生成已中断"}；可从已保存的位置继续`);
             runButton.textContent = "继续分类";
             return;
           }
           if (!total) {
             setStatus("尚未发现可分类的图书");
           } else if (task?.state === "failed") {
-            setStatus(task.error || "书籍分类失败，可重新开始");
+            setStatus(task.error || "AI 图书标签生成失败，可重新开始");
           } else {
             setStatus(`已完成 ${complete} / ${total} 本图书的分类`);
           }
@@ -229,7 +229,7 @@ export function createBookClassificationSettingsUi(
         } catch (error) {
           useModelTags.checked = !enabled;
           void runtime.AppDialog?.alert?.(`保存大模型分类标签设置失败：${String(error)}`, {
-            title: "书籍分类",
+            title: "AI 图书标签",
             confirmLabel: "关闭",
             tone: "error",
           });

@@ -898,6 +898,14 @@ test("Gesture settings live in common settings and close news, library, and read
   );
   assert.match(
     html,
+    /class="gesture-editor-primary-fields"[\s\S]*?id="gesture-name"[\s\S]*?id="gesture-input"[\s\S]*?id="gesture-scope"/,
+  );
+  assert.match(
+    styles,
+    /\.gesture-editor-primary-fields \{[^}]*grid-template-columns: minmax\(180px, 1fr\) minmax\(160px, 0\.9fr\) minmax\(190px, 1fr\)/,
+  );
+  assert.match(
+    html,
     /id="gesture-action-options"[\s\S]*?class="gesture-action-options"/,
   );
   assert.match(html, /data-gesture-action="back"/);
@@ -1018,7 +1026,7 @@ test("Gesture settings live in common settings and close news, library, and read
   );
   assert.match(
     script,
-    /function gestureBack\(\) \{[\s\S]*?if \(!reader\.hidden\) closeArticle/,
+    /function gestureBack\(\) \{[\s\S]*?if \(!reader\.hidden\)[\s\S]*?navigatePreparedArticleBack\(\)[\s\S]*?closeArticle/,
   );
   assert.match(
     script,
@@ -1034,7 +1042,7 @@ test("Gesture settings live in common settings and close news, library, and read
   );
   assert.match(
     readerGesture,
-    /typeof global\.closeReaderWindow === "function"[\s\S]*?root\.getElementById\("win-close"\)\?\.click\(\)/,
+    /typeof global\.closeReaderWindow === "function"[\s\S]*?const closeButton = root\.getElementById\("win-close"\);[\s\S]*?closeButton\?\.click\(\)/,
   );
   assert.match(
     readerPage,
@@ -1307,7 +1315,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     /editorClose\.addEventListener\("click", \(\) => \{\s*if \(editor\.hidden\) closeSettings\(\);\s*else closeEditor\(\);/,
   );
   assert.match(gestureUi, /globalPrecisionToggle\.addEventListener\("click"/);
-  assert.match(gestureUi, /function showHint\(name\)/);
+  assert.match(gestureUi, /function showHint\(name, untilGestureEnds = false\)/);
   assert.match(gestureUi, /function gestureInfoForTarget\(target\)/);
   assert.match(
     gestureUi,
@@ -1335,7 +1343,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     readerGesture,
     /paint\(active\.points\);\s*previewMatch\(active\);/,
   );
-  assert.match(gestureUi, /if \(!hintSettings\.enabled\) return;/);
+  assert.match(gestureUi, /if \(!hintSettings\.enabled\) return false;/);
   assert.match(
     gestureUi,
     /if \(!hintSettings\.backgroundEnabled\) return "transparent"/,
@@ -1394,7 +1402,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(gestureUi, /function placeHintPreview\(\)/);
   assert.match(gestureUi, /function updateHintPreviewPosition\(event\)/);
   assert.match(readerGesture, /function placeHint\(settings\)/);
-  assert.match(readerGesture, /if \(!settings\.enabled\) return;/);
+  assert.match(readerGesture, /if \(!settings\.enabled\) return false;/);
   assert.match(gestureUi, /function cancelGestureKeepHint\(\)/);
   assert.match(gestureUi, /scope: normalizeScope\(action, source\.scope\)/);
   assert.match(gestureUi, /自动适用会在该操作支持的页面执行/);
@@ -1411,10 +1419,13 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   );
   assert.match(gestureUi, /allowedActions: supportedActions\(\["back"\]\)/);
   assert.match(gestureUi, /function canApplyAction\(surface, action\)/);
-  assert.doesNotMatch(gestureUi, /startPointerGesture|activePointerId/);
   assert.match(
     gestureUi,
-    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", move,[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\((?:event)?\), true\);/,
+    /function startPointerGesture\(event\)[\s\S]*?if \("PointerEvent" in global\)[\s\S]*?addEventListener\("pointerdown", startPointerGesture, true\)/,
+  );
+  assert.match(
+    gestureUi,
+    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", \(event\) => move\(event, "mouse"\),[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\(event, false, "mouse"\), true\);/,
   );
   assert.match(gestureUi, /reader-closed-for-reopen/);
   assert.match(gestureUi, /invoke\("open_book", \{ id \}\)/);
@@ -1511,7 +1522,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   );
   assert.match(
     gestureUi,
-    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", move,[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\((?:event)?\), true\);/,
+    /global\.addEventListener\("mousedown", startMouseGesture, true\);[\s\S]*?global\.addEventListener\("mousemove", \(event\) => move\(event, "mouse"\),[\s\S]*?global\.addEventListener\("mouseup", \(event\) => finish\(event, false, "mouse"\), true\);/,
   );
   const matcher = gestureUi.slice(
     gestureUi.indexOf("function matchProfile"),
@@ -1523,14 +1534,14 @@ test("Gesture feedback, reopen, and contextual information are integrated across
     matcher,
     /surface\.allowedActions\.includes\(profile\.action\)/,
   );
-  assert.match(readerGesture, /async function closeReaderSurface\(source\)/);
+  assert.match(readerGesture, /async function closeReaderSurface\(gesture\)/);
   assert.match(
     readerGesture,
-    /if \(global\.ReaderShell\?\.closeSurface\?\.\(\)\) return;/,
+    /const shellHandled = global\.ReaderShell\?\.closeSurface\?\.\(\) === true;[\s\S]*?if \(shellHandled\) return;/,
   );
   assert.match(
     readerGesture,
-    /root\.getElementById\("win-close"\)\?\.click\(\)/,
+    /const closeButton = root\.getElementById\("win-close"\);[\s\S]*?closeButton\?\.click\(\)/,
   );
   assert.match(
     readerGesture,
@@ -1551,7 +1562,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   );
   assert.match(
     readerGesture,
-    /source === "frame" && await requestFrameSurfaceClose\(\)/,
+    /gesture\.source === "frame"[\s\S]*?await requestFrameSurfaceClose\(\)/,
   );
   assert.match(readerGesture, /frameSurfaceClosed/);
   assert.doesNotMatch(

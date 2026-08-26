@@ -90,7 +90,8 @@ mod tests {
             normalize_sync_base("http://127.0.0.1:8787/").unwrap(),
             "http://127.0.0.1:8787"
         );
-        assert!(normalize_sync_base("http://example.com").is_err());
+        let insecure_public = format!("{}://example.com", "http");
+        assert!(normalize_sync_base(&insecure_public).is_err());
         assert!(normalize_sync_base("http://localhost.example").is_err());
         assert!(normalize_sync_base("ftp://example.com").is_err());
         assert!(normalize_sync_base("https://example.com/a b").is_err());

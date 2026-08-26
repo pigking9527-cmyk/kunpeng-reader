@@ -93,17 +93,23 @@ test("reader toolbar buttons stay horizontal and do not flex-shrink", () => {
 });
 
 test("reader progress names the whole-book page total once it is measured", () => {
-  assert.match(html, /id="reader-progress-group" data-tauri-drag-region/);
-  assert.match(html, /id="chapter-progress" class="title epub-only"/);
+  assert.match(html, /id="reader-progress-group" class="reader-progress-group" data-tauri-drag-region/);
+  assert.match(html, /id="chapter-progress"[^>]*><span id="chapter-number" class="title epub-only"><\/span><span id="chapter-page" class="title epub-only"><\/span><span id="progress-percentage" class="title"><\/span>/);
   assert.match(html, /id="progress" class="title page-count-loading"/);
-  assert.match(html, /\.reader-progress-group\s*\{[^}]*gap:\s*8px;[^}]*flex:\s*0\s+0\s+auto;/s);
+  assert.match(html, /\.reader-progress-group\s*\{[^}]*justify-content:\s*flex-end;[^}]*gap:\s*10px;[^}]*flex:\s*0\s+0\s+auto;/s);
   assert.match(html, /\.reader-progress-group\s*\{[^}]*font-variant-numeric:\s*tabular-nums;/s);
-  assert.match(html, /#chapter-progress\s*\{[^}]*width:\s*min\(245px,\s*38vw\);[^}]*justify-content:\s*flex-start;[^}]*text-align:\s*left;/s);
+  assert.match(html, /\.reader-progress-group\s*>\s*\.title\s*\{[^}]*justify-content:\s*flex-end;[^}]*text-align:\s*right;/s);
+  assert.match(html, /id="pref-reader-page-info-settings"[^>]*aria-controls="reader-page-info-popover"[^>]*aria-expanded="false"/);
+  assert.match(html, /id="reader-page-info-popover"[^>]*role="dialog"[^>]*hidden>[\s\S]*?id="reader-page-info-options"[^>]*role="list"[^>]*>[\s\S]*?data-page-info-item="chapter"[\s\S]*?data-page-info-item="chapterPage"[\s\S]*?data-page-info-item="percentage"[\s\S]*?data-page-info-item="totalPages"/);
+  assert.match(html, /reader-page-info-drag-handle/);
   assert.match(html, /#progress\.page-count-total\s*\{[^}]*width:\s*84px;[^}]*justify-content:\s*flex-end;[^}]*text-align:\s*right;/s);
+  assert.match(html, /#progress\[hidden\]\s*\{[^}]*display:\s*none\s*!important;/s);
   assert.match(html, /#progress\.page-count-loading/);
   assert.match(reader, /function showWholeBookPages\(page, total\)/);
   assert.match(reader, /const text = readerText\("wholeBookPages", "\{page\}\/\{total\}页", \{ page, total \}\);/);
   assert.match(reader, /function showChapterProgress\(page, total, progress, dualContinuationChapter\)/);
+  assert.match(reader, /function applyPageInfoOrder\(\)/);
+  assert.match(reader, /normalizedPageInfoOrder\(\w+\.pageInfoOrder\)/);
   assert.match(reader, /showChapterProgress\(e\.data\.page, e\.data\.total, curProgress, e\.data\.dualContinuationChapter\)/);
   assert.match(reader, /else if \(pageCountMeasuring\)[\s\S]*?showProgressLoading\(\)/);
   assert.match(reader, /if \(e\.data\.pageCache\)/);
@@ -291,19 +297,19 @@ test("空白 EPUB spine 章节自动跳到首个可见内容页", () => {
 });
 
 test("跨章加载在末页定位完成前隐藏新正文", () => {
-  assert.match(layout, /root\.style\.visibility='hidden';\s*root\.innerHTML=/);
+  assert.match(layout, /root\.style\.visibility='hidden';\s*installChapterBodyForInitialLayout\(body\);/);
   assert.match(layout, /setViewOffset\(\);[\s\S]{0,300}?root\.style\.visibility='';/);
   assert.match(layout, /function\(\)\{[^}]*root\.style\.visibility='';finishChapterBugTrace\(bugTraceToken,false,0\)\}/);
 });
 
 test("章节分页等待 EPUB 样式加载，避免双页续读总页数漂移", () => {
-  assert.match(annotations, /function injectHead\(htmlStr,seen\)[\s\S]*?addEventListener\('load',done/);
+  assert.match(annotations, /function injectHead\(htmlStr,seen\)[\s\S]*?addEventListener\('load',function\(\)\{done\('load'\)\}/);
   assert.match(annotations, /addEventListener\('error',done/);
-  assert.match(annotations, /timer=setTimeout\(done,(?:2000|2e3)\)/);
+  assert.match(annotations, /timer=setTimeout\(function\(\)\{done\('timeout'\)\},(?:2000|2e3)\)/);
   assert.match(annotations, /return Promise\.all\(waits\)/);
   const showChapter = layout.slice(layout.indexOf("function showChapter("), layout.indexOf("var curTopAnchor="));
   assert.match(showChapter, /(?:const|let|var) headReady=d\.head\?injectHead\(d\.head,headSeen\):Promise\.resolve\(\);/);
-  assert.match(showChapter, /return headReady\.then\(function\(\)\{[\s\S]*?applyCols\(\)/);
+  assert.match(showChapter, /return headReady\.then\(function\(styleMetrics\)\{[\s\S]*?applyCols\(\)/);
   assert.ok(showChapter.indexOf("headReady.then") < showChapter.indexOf("curCh=i"));
 });
 test("双页续读先采集本页锚点并把锚点恢复到左页", () => {

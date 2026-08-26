@@ -58,11 +58,28 @@ const relationFailureLabels = {
 function outcomeLabel(value) { return outcomeLabels[value] || "未识别的安全状态"; }
 function lifecycleLabel(value) { return lifecycleLabels[value] || "未知"; }
 function relationFailureLabel(value) { return relationFailureLabels[value] || relationFailureLabels.unknown; }
+const publicationLabels = {
+  event_prepared_locally: "本机事件包已冻结（未出网）",
+  event_events_unavailable: "暂无可冻结的完成事件",
+  event_already_published: "事件包已确认",
+  event_published: "事件包已由服务器确认",
+  event_publication_transport_unavailable: "事件包传输暂不可用",
+  event_publication_failed: "事件包发布失败",
+  daily_prepared_locally: "本机日报包已冻结（未出网）",
+  daily_events_unavailable: "前一日暂无完成事件",
+  daily_already_published: "日报包已确认",
+  daily_published: "日报包已由服务器确认",
+  publication_transport_unavailable: "日报包传输暂不可用",
+  publication_failed: "日报包发布失败",
+  not_run: "本轮未到发布阶段",
+  unknown: "发布状态未知",
+};
+function publicationLabel(value) { return publicationLabels[value] || publicationLabels.unknown; }
 function formatRun(report) {
   if (!report) return "尚无运行记录";
   const relationFailure = report.relationFailure && report.relationFailure !== "not_run"
     ? `（${relationFailureLabel(report.relationFailure)}）` : "";
-  return `结果 ${outcomeLabel(report.outcome)} · 采集 ${outcomeLabel(report.collection)}（新增 ${Number(report.collected) || 0}，重复 ${Number(report.duplicates) || 0}）· 全文完成 ${Number(report.backfilled) || 0}，重试 ${Number(report.backfillRetried) || 0} · 初筛 ${Number(report.triaged) || 0}，重试 ${Number(report.retried) || 0} · 关系 ${outcomeLabel(report.relation)}${relationFailure} · 综合 ${outcomeLabel(report.editorial)}（${Number(report.processed) || 0} 项，复核 ${Number(report.reviewed) || 0}）· 发布 ${outcomeLabel(report.publication)}`;
+  return `结果 ${outcomeLabel(report.outcome)} · 采集 ${outcomeLabel(report.collection)}（新增 ${Number(report.collected) || 0}，重复 ${Number(report.duplicates) || 0}）· 全文完成 ${Number(report.backfilled) || 0}，重试 ${Number(report.backfillRetried) || 0} · 初筛 ${Number(report.triaged) || 0}，重试 ${Number(report.retried) || 0} · 关系 ${outcomeLabel(report.relation)}${relationFailure} · 综合 ${outcomeLabel(report.editorial)}（${Number(report.processed) || 0} 项，复核 ${Number(report.reviewed) || 0}）· 事件包 ${publicationLabel(report.eventPublication)} · 日报包 ${publicationLabel(report.publication)}`;
 }
 function formatAuditRun(auditRun) {
   if (!auditRun) return "尚无运行记录";
@@ -143,7 +160,10 @@ function render(status) {
   );
   byId("collection-detail").textContent = status.archivePresent ? `永久档案已打开；当前版本完整证据 ${Number(status.fullTextCount) || 0} 篇，${waitingFullText} 篇等待全文补全，其中 ${Number(status.evidenceVersionMismatchCount) || 0} 篇保留旧版本正文但必须重新核验。文章级可重试 ${fullTextHealth.retryableNowCount || 0} 篇、退避中 ${fullTextHealth.delayedCount || 0} 篇。已观测来源 ${fullTextHealth.knownSourceCount || 0} 个：健康 ${fullTextHealth.healthySourceCount || 0}、降级 ${fullTextHealth.degradedSourceCount || 0}、熔断 ${fullTextHealth.circuitOpenSourceCount || 0}；不显示来源名称。失败分类：${formatBackfillFailures(fullTextHealth)}。` : "尚未创建本机永久档案。请先初始化并执行一轮处理。";
   byId("triage-detail").textContent = `待初筛 ${status.readyForTriageCount} 篇；已完成关系判断、等待综合 ${status.readyForEditorialCount} 篇。`;
-  byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件；发布状态由登录账户的主机配对决定。`;
+  const latestReport = status.auditRun && status.auditRun.report || status.lastRun;
+  const eventPublication = latestReport && latestReport.eventPublication || "not_run";
+  const dailyPublication = latestReport && latestReport.publication || "not_run";
+  byId("editorial-detail").textContent = `已生成 ${status.processedCount} 个综合事件。本轮事件包：${publicationLabel(eventPublication)}；前一 UTC 日日报包：${publicationLabel(dailyPublication)}。只有服务器确认后，登录账号的阅读器刷新才会收到正式资讯。`;
   runSummary.textContent = status.auditRun ? formatAuditRun(status.auditRun) : formatRun(status.lastRun);
   const rows = status.auditRun && Array.isArray(status.auditRun.stageSequence)
     ? status.auditRun.stageSequence : Array.isArray(status.auditSummary) ? status.auditSummary : [];
@@ -224,9 +244,9 @@ function renderDistribution(status) {
   distributionState.textContent = paired ? "已配对" : "尚未配对";
   distributionRevoke.disabled = !paired;
   if (paired) {
-    setDistributionNotice(`本机处理${status.enabled ? "已启用" : "未启用"}；发布凭据 ${status.publishCredentialPresent ? "已保存" : "缺失"}，回源凭据 ${status.relayCredentialPresent ? "已保存" : "缺失"}。`);
+    setDistributionNotice(`本机处理${status.enabled ? "已启用" : "未启用"}；发布凭据 ${status.publishCredentialPresent ? "已保存" : "缺失"}，回源凭据 ${status.relayCredentialPresent ? "已保存" : "缺失"}。下一轮会先尝试冻结并发布一条完成事件，再检查前一 UTC 日日报；服务器确认前阅读器不会显示。`);
   } else {
-    setDistributionNotice("未保存发布凭据。输入短期、可撤销的 capability 后才会启动本机分发。 ");
+    setDistributionNotice("阶段 1（本机处理）可继续并生成不可变草稿；阶段 2（服务器确认）因未保存短期 capability 而未开始；阶段 3（登录账号的阅读器刷新）因此不会出现资讯。输入短期、可撤销的 capability 后才会启动本机分发。 ");
   }
 }
 async function refreshDistribution() {

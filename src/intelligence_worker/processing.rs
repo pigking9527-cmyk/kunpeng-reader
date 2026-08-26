@@ -1641,6 +1641,7 @@ fn reduce_group<T: ProcessingTransport>(
         .ok_or(())
 }
 
+#[cfg(test)]
 fn recall<T: ProcessingTransport>(
     connection: &mut Connection,
     catalog_path: &Path,
@@ -1955,6 +1956,7 @@ fn canonical_hash_for(connection: &Connection, article: &Article) -> Result<Stri
     connection.query_row("SELECT canonical_text_sha256 FROM intelligence_worker_canonical_aliases WHERE article_id=?1 AND fingerprint=?2", params![article.id, article.fingerprint], |row| row.get(0)).map_err(|_| ())
 }
 
+#[cfg(test)]
 fn load_or_create_embeddings<T: ProcessingTransport>(
     connection: &Connection,
     entries: &[(String, &Article)],
@@ -1987,6 +1989,7 @@ fn load_or_create_embeddings<T: ProcessingTransport>(
     values.into_iter().collect::<Option<Vec<_>>>().ok_or(())
 }
 
+#[cfg(test)]
 fn stored_embedding(
     connection: &Connection,
     canonical_hash: &str,
@@ -3290,8 +3293,15 @@ fn force_full_review_mode(connection: &Connection) -> Result<(), ()> {
         .map_err(|_| ())
 }
 
+type QualityGateModelScope = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 fn quality_scope_from_runtime_state(connection: &Connection) -> Result<Option<String>, ()> {
-    let state: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = connection
+    let state: Option<QualityGateModelScope> = connection
         .query_row(
             "SELECT relation_model_id,relation_model_sha256,editorial_model_id,editorial_model_sha256
              FROM intelligence_quality_gate_state WHERE singleton=1",
@@ -4348,7 +4358,8 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         assert_eq!(
             connection
-                .query_row("SELECT COUNT(*) FROM intelligence_events", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM intelligence_events", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
             1
         );
@@ -5058,7 +5069,7 @@ mod tests {
         // worst-case CJK size stays below the reranker server's 256-token
         // physical batch after its pair formatter adds special tokens.
         assert!(rerank_text(&article).chars().count() <= MAX_RERANK_TEXT_CHARS);
-        assert!(MAX_RERANK_TEXT_CHARS <= 64);
+        const { assert!(MAX_RERANK_TEXT_CHARS <= 64) };
     }
 
     #[test]
@@ -5445,7 +5456,7 @@ mod tests {
         assert_eq!(chunks.concat(), source);
         // 5.6 KiB is deliberately well below the 4K-context input budget for
         // the worst CJK token ratio after JSON framing and a 520-token answer.
-        assert!(CHUNK_CHARS <= 5_600);
+        const { assert!(CHUNK_CHARS <= 5_600) };
     }
 
     #[test]

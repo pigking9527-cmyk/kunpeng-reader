@@ -40,6 +40,7 @@ ADVISORY_LOCK_NAME = "kunpeng-capacity-fixture-seed-v1"
 SERVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\Z")
 FIXTURE_ID = re.compile(r"[a-z0-9]{8,16}\Z")
 TOKEN = re.compile(r"[0-9a-f]{96}\Z")
+TARGET_FINGERPRINT = re.compile(r"[0-9a-f]{64}\Z")
 TEST_DATABASE = re.compile(r"reader_sync_rust_test_[A-Za-z0-9_]+\Z")
 SAFE_DATABASE_HOSTS = {None, "localhost", "127.0.0.1", "::1"}
 
@@ -62,6 +63,7 @@ class DatabaseTarget:
 class ServiceEnvironment:
     token_hmac_key: bytes
     database: DatabaseTarget
+    target_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,12 @@ def validate_fixture_id(value: str) -> str:
     return value
 
 
+def validate_target_fingerprint(value: str) -> str:
+    if not TARGET_FINGERPRINT.fullmatch(value):
+        raise FixtureSeedError("expected target fingerprint is invalid")
+    return value
+
+
 def validate_token_output_path(value: str) -> str:
     """Validate a normalized POSIX absolute path without accessing it."""
     if (
@@ -204,13 +212,15 @@ def extract_service_environment(blob: bytes) -> ServiceEnvironment:
     key = required[b"KUNPENG_SYNC_TOKEN_HMAC_KEY"][0]
     if len(key) < 32:
         raise FixtureSeedError("running service HMAC key is invalid")
+    database_url_bytes = required[b"KUNPENG_SYNC_DATABASE_URL"][0]
     try:
-        database_url = required[b"KUNPENG_SYNC_DATABASE_URL"][0].decode("utf-8")
+        database_url = database_url_bytes.decode("utf-8")
     except UnicodeDecodeError:
         raise FixtureSeedError("running service database configuration is invalid") from None
     return ServiceEnvironment(
         token_hmac_key=key,
         database=parse_database_target(database_url),
+        target_fingerprint=hashlib.sha256(database_url_bytes + b"\0" + key).hexdigest(),
     )
 
 
@@ -871,7 +881,7 @@ def _execute_psql(database: DatabaseTarget, sql: str) -> bytes:
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            timeout=180,
+            timeout=30,
             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"},
         )
     except (OSError, subprocess.SubprocessError):
@@ -896,8 +906,17 @@ def seed_fixture(
     service: str,
     fixture_id: str,
     token_output: str,
+    *,
+    expected_target_fingerprint: str,
 ) -> dict[str, object]:
     environment = read_running_service_environment(service)
+    expected_target_fingerprint = validate_target_fingerprint(
+        expected_target_fingerprint
+    )
+    if not hmac.compare_digest(
+        environment.target_fingerprint, expected_target_fingerprint
+    ):
+        raise FixtureSeedError("running service target changed after recovery registration")
     identities = build_identities(fixture_id, environment.token_hmac_key)
     rows = build_seed_rows(identities, environment.token_hmac_key)
     _write_token_file(token_output, rows)
@@ -941,8 +960,16 @@ def cleanup_fixture(
     fixture_id: str,
     *,
     allow_absent: bool = False,
+    expected_target_fingerprint: str,
 ) -> dict[str, object]:
     environment = read_running_service_environment(service)
+    expected_target_fingerprint = validate_target_fingerprint(
+        expected_target_fingerprint
+    )
+    if not hmac.compare_digest(
+        environment.target_fingerprint, expected_target_fingerprint
+    ):
+        raise FixtureSeedError("running service target changed after recovery registration")
     identities = build_identities(fixture_id, environment.token_hmac_key)
     output = _execute_psql(
         environment.database,
@@ -970,10 +997,12 @@ def parser() -> argparse.ArgumentParser:
     seed.add_argument("--service", required=True)
     seed.add_argument("--fixture-id", required=True)
     seed.add_argument("--token-output", required=True)
+    seed.add_argument("--expected-target-fingerprint", required=True)
     cleanup = actions.add_parser("cleanup", allow_abbrev=False)
     cleanup.add_argument("--service", required=True)
     cleanup.add_argument("--fixture-id", required=True)
     cleanup.add_argument("--allow-absent", action="store_true")
+    cleanup.add_argument("--expected-target-fingerprint", required=True)
     return command
 
 
@@ -997,12 +1026,18 @@ def main(
         fixture_id = validate_fixture_id(arguments.fixture_id)
         if arguments.action == "seed":
             token_output = validate_token_output_path(arguments.token_output)
-            report = seed_fixture(service, fixture_id, token_output)
+            report = seed_fixture(
+                service,
+                fixture_id,
+                token_output,
+                expected_target_fingerprint=arguments.expected_target_fingerprint,
+            )
         else:
             report = cleanup_fixture(
                 service,
                 fixture_id,
                 allow_absent=arguments.allow_absent,
+                expected_target_fingerprint=arguments.expected_target_fingerprint,
             )
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
         return 0

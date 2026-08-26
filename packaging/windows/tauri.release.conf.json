@@ -7,7 +7,16 @@
       "target/license-audit/DEPENDENCY_LICENSES.md": "licenses/DEPENDENCY_LICENSES.md",
       "LICENSES": "licenses/third-party",
       "src/dict/ECDICT_SOURCE.md": "licenses/sources/ECDICT_SOURCE.md",
-      "src/dict/CC_CEDICT_SOURCE.md": "licenses/sources/CC_CEDICT_SOURCE.md"
+      "src/dict/CC_CEDICT_SOURCE.md": "licenses/sources/CC_CEDICT_SOURCE.md",
+      "src/dict/ZHWIKTIONARY_SOURCE.md": "licenses/sources/ZHWIKTIONARY_SOURCE.md",
+      "scripts/local-minimax-h3.ps1": "scripts/local-minimax-h3.ps1",
+      "scripts/local-minimax-h3-server.py": "scripts/local-minimax-h3-server.py",
+      "scripts/local-intelligence-runtime.ps1": "scripts/local-intelligence-runtime.ps1",
+      "scripts/local-intelligence-judge.ps1": "scripts/local-intelligence-judge.ps1",
+      "scripts/local-intelligence-retrieval-models.ps1": "scripts/local-intelligence-retrieval-models.ps1",
+      "scripts/local-intelligence-editor.ps1": "scripts/local-intelligence-editor.ps1",
+      "target/release/kunpeng-intelligence-worker.exe": "kunpeng-intelligence-worker.exe",
+      "target/release/kunpeng-intelligence-host.exe": "kunpeng-intelligence-host.exe"
     }
   }
 }

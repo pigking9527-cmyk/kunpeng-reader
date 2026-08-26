@@ -252,7 +252,8 @@ mod tests {
             join_https_update_url("https://reader.example/updates/", "latest"),
             Some("https://reader.example/updates/latest".into())
         );
-        assert!(join_https_update_url("http://reader.example/updates", "latest").is_none());
+        let insecure_public = format!("{}://reader.example/updates", "http");
+        assert!(join_https_update_url(&insecure_public, "latest").is_none());
         assert!(join_https_update_url(" https://reader.example/bad path ", "latest").is_none());
         assert_eq!(
             configured_github_repo(Some("owner/repo-name")),

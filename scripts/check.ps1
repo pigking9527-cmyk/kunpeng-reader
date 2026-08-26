@@ -36,6 +36,22 @@ try {
   & node (Join-Path $repo 'scripts/check-licenses.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'License policy check failed.' }
 
+  Write-Host '== packaged dictionary source notices =='
+  $dictionarySourceNotices = @(
+    'src/dict/ECDICT_SOURCE.md',
+    'src/dict/CC_CEDICT_SOURCE.md',
+    'src/dict/ZHWIKTIONARY_SOURCE.md'
+  )
+  foreach ($configPath in @('tauri.conf.json', 'packaging/windows/tauri.release.conf.json')) {
+    $config = [System.IO.File]::ReadAllText((Join-Path $repo $configPath), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    $resourceNames = @($config.bundle.resources.PSObject.Properties.Name)
+    foreach ($notice in $dictionarySourceNotices) {
+      if ($resourceNames -notcontains $notice) {
+        throw "$configPath does not package required dictionary source notice: $notice"
+      }
+    }
+  }
+
   Write-Host '== cargo fmt --check =='
   Invoke-NativeCheck 'cargo fmt --check' { cargo fmt -- --check }
 
@@ -213,7 +229,15 @@ try {
 
   Write-Host '== release asset integrity =='
   $releaseScript = [System.IO.File]::ReadAllText((Join-Path $repo 'scripts\release.ps1'), [System.Text.Encoding]::UTF8)
-  foreach ($requiredReleaseHook in @('Get-FileHash -LiteralPath $_ -Algorithm SHA256', 'SHA256SUMS.txt')) {
+  foreach ($requiredReleaseHook in @(
+    'Get-FileHash -LiteralPath $_ -Algorithm SHA256',
+    'SHA256SUMS.txt',
+    'function Invoke-Step',
+    'Release step failed',
+    '鲲鹏阅读器.exe',
+    'function Assert-TagPointsAtHead',
+    'Assert-TagPointsAtHead -Tag $tag'
+  )) {
     if ($releaseScript -notmatch [regex]::Escape($requiredReleaseHook)) {
       throw "scripts/release.ps1 missing required release integrity hook: $requiredReleaseHook"
     }
@@ -327,6 +351,9 @@ try {
     $_ -notmatch 'normalize_sync_base\("http://' -and
     $_ -notmatch 'join_https_update_url\("http://' -and
     $_ -notmatch 'src\\sync\.rs:\d+:\s*let url = format!\("http://\{address\}/sync-test"\);' -and
+    $_ -notmatch 'format!\("http://\{address\}"\)' -and
+    $_ -notmatch '(contains|strip_prefix)\("http://"\)' -and
+    $_ -notmatch 'http://[^"\s]*(example\.test|video\.invalid)' -and
     $_ -notmatch 'http://(localhost|127\.0\.0\.1|\[::1\]|reader\.localhost|ipc\.localhost|tauri\.localhost)' -and
     $_ -notmatch 'http://<scheme>\.localhost' -and
     $_ -notmatch 'http://www\.apple\.com/DTDs/PropertyList-1\.0\.dtd' -and
@@ -346,7 +373,7 @@ try {
   $mainRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\main.rs'), [System.Text.Encoding]::UTF8)
   $epubRuntimeRs = [System.IO.File]::ReadAllText((Join-Path $repo 'src\epub_runtime.rs'), [System.Text.Encoding]::UTF8)
   $readerBackendRs = $mainRs + "`n" + $epubRuntimeRs
-  if ($readerBackendRs -notmatch 'sanitize_mobi_html\(&raw\)') { throw 'MOBI render path must sanitize raw HTML before embedding.' }
+  if ($readerBackendRs -notmatch 'sanitize_mobi_html\((?:&)?raw\)') { throw 'MOBI render path must sanitize raw HTML before embedding.' }
   if ($readerBackendRs -notmatch 'sanitize_book_html\(&body\)' -or $readerBackendRs -notmatch 'sanitize_book_html\(&md_to_html') {
     throw 'EPUB and Markdown render paths must use the shared parser-based sanitizer.'
   }

@@ -96,23 +96,15 @@ test("completed migration heals an unsupported stored sort without repeating mig
 
 test("only an unmodified primary left mouse press opens immediately", () => {
   const primaryMouse = {
-    singleClickOpensBook: true,
     pointerType: "mouse",
     button: 0,
     isPrimary: true,
-    metaKey: false,
-    ctrlKey: false,
-    hasSelection: false,
   };
   assert.equal(shouldOpenBookOnPrimaryPointerDown(primaryMouse), true);
   assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, pointerType: "touch" }), false);
   assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, pointerType: "pen" }), false);
   assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, button: 2 }), false);
   assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, isPrimary: false }), false);
-  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, metaKey: true }), false);
-  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, ctrlKey: true }), false);
-  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, hasSelection: true }), false);
-  assert.equal(shouldOpenBookOnPrimaryPointerDown({ ...primaryMouse, singleClickOpensBook: false }), false);
 });
 
 test("scrollbar projection and legacy global installer are deterministic", () => {

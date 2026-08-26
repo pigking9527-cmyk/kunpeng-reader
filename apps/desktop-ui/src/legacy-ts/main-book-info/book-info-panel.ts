@@ -292,10 +292,7 @@ export function createBookInfoPanel(runtime: BookInfoRuntime): BookInfoPanelApi 
       tags.forEach((value) => {
         const chip = root.createElement("span");
         chip.className = "info-chip model-tag";
-        const origin = root.createElement("span");
-        origin.className = "info-chip-origin";
-        origin.textContent = "AI";
-        chip.append(origin, root.createTextNode(String(value)));
+        chip.textContent = String(value);
         chip.title = "大模型分类标签";
         elements.modelTags.appendChild(chip);
       });

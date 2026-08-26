@@ -62,6 +62,7 @@ interface LibraryAnswer extends Record<string, unknown> {
   readonly sources: readonly LibrarySource[];
   readonly singleBook?: boolean;
   readonly recommendation?: LibraryRecommendation;
+  readonly retrievalStages?: readonly string[];
 }
 
 interface LibraryHistoryEntry extends Record<string, unknown> {
@@ -102,6 +103,7 @@ interface AiProfile extends Record<string, unknown> {
   readonly name?: string;
   readonly model?: string;
   readonly configured?: boolean;
+  readonly localLibraryAiEligible?: boolean;
 }
 interface AiProfiles extends Record<string, unknown> {
   readonly profiles?: readonly AiProfile[];
@@ -519,9 +521,9 @@ export function createLibraryAiUi(global: LibraryAiRuntime, injectedTransport?: 
       const apiReady = Boolean(aiStatus?.configured);
       const indexReady = Boolean(semanticStatusValue?.semantic_ready) || Number(semanticStatusValue?.semantic_done || 0) > 0;
       if (apiReady && indexReady) return "";
-      if (semanticStatusValue?.status_refreshing) return apiReady ? "" : "请先在设置中配置大模型 API、模型和密钥。";
-      if (!apiReady && !indexReady) return "请先在设置中配置大模型 API、模型和密钥，并为本地图书建立语义索引。";
-      if (!apiReady) return "请先在设置中配置大模型 API、模型和密钥。";
+      if (semanticStatusValue?.status_refreshing) return apiReady ? "" : "请先在设置中配置大模型接口和模型；远程服务还需要 API Key。";
+      if (!apiReady && !indexReady) return "请先在设置中配置大模型接口和模型（远程服务还需要 API Key），并为本地图书建立语义索引。";
+      if (!apiReady) return "请先在设置中配置大模型接口和模型；远程服务还需要 API Key。";
       return "请先在设置中为本地图书建立语义索引。";
     }
 
@@ -602,7 +604,10 @@ export function createLibraryAiUi(global: LibraryAiRuntime, injectedTransport?: 
       profiles.forEach((profile) => {
         const option = root.createElement("option");
         option.value = profile.id;
-        option.textContent = profile.name || profile.model || "已配置大模型";
+        const label = profile.name || profile.model || "已配置大模型";
+        option.textContent = profile.localLibraryAiEligible
+          ? `${label} · 本地 7B+`
+          : label;
         select.appendChild(option);
       });
       const libraryId = status.assignments?.libraryId || status.activeId;
@@ -1396,6 +1401,9 @@ export function createLibraryAiUi(global: LibraryAiRuntime, injectedTransport?: 
       renderSources([]);
       try {
         const answer = await api.invoke("ask_library_assistant", { request: { task: mode, question, selectedBookIds: selectedBookIdsForRequest } });
+        const processingStages = Array.isArray(answer.retrievalStages)
+          ? answer.retrievalStages.map((stage) => String(stage).trim()).filter(Boolean).join(" → ")
+          : "";
         showingHistory = false;
         $("library-ai-history").classList.remove("active");
         $("library-ai-history").textContent = i18n("libraryHistory", "问答记录");
@@ -1405,7 +1413,7 @@ export function createLibraryAiUi(global: LibraryAiRuntime, injectedTransport?: 
           latestRecommendation = answer.recommendation;
           renderBooklistRecommendation(answer.recommendation);
           renderSources(answer.sources);
-          state(`完成。已先从本地检索得到 ${answer.sources?.length || 0} 本候选，再由大模型精选 ${answer.recommendation.items?.length || 0} 本；确认名称后可保存为书单。`);
+          state(`完成。已先从本地检索得到 ${answer.sources?.length || 0} 本候选，再由大模型精选 ${answer.recommendation.items?.length || 0} 本；${processingStages ? `处理链路：${processingStages}。` : ""}确认名称后可保存为书单。`);
           return;
         }
         renderAnswer(answer.content, answer.sources);
@@ -1423,8 +1431,8 @@ export function createLibraryAiUi(global: LibraryAiRuntime, injectedTransport?: 
           saveNote = "回答完成，但问答记录保存失败。";
         }
         state(answer.singleBook
-          ? `完成。已按《${singleBookTitle || "所选图书"}》执行单书深度问答；${saveNote}`
-          : `完成。回答仅依据下方列出的本地检索片段；${saveNote}`);
+          ? `完成。已按《${singleBookTitle || "所选图书"}》执行单书深度问答；${processingStages ? `处理链路：${processingStages}；` : ""}${saveNote}`
+          : `完成。回答仅依据下方列出的本地检索片段；${processingStages ? `处理链路：${processingStages}；` : ""}${saveNote}`);
       } catch (error) {
         answerEl.className = "library-ai-answer empty";
         answerEl.textContent = i18n("libraryQuestionFailed", "书库问答失败。");
@@ -1569,7 +1577,7 @@ export function createLibraryAiUi(global: LibraryAiRuntime, injectedTransport?: 
           reviews,
         });
         form.hidden = true;
-        state(`已保存“${name}”。书单内容和逐书评语可在设置 → 快捷书单或书架书单中继续编辑。`);
+        state(`已保存“${name}”。书单内容和逐书评语可在收藏夹的“收藏书单”中继续编辑。`);
         await refreshBooks();
       } catch (error) {
         state("保存推荐书单失败：" + String(error), true);

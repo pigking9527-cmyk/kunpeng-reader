@@ -83,6 +83,7 @@ type ActiveGesture = {
   points: GesturePoint[];
   surface: GestureSurface;
   previewProfileId: string | null;
+  committedMatch: GestureMatch | null;
   input: "mouse" | "pointer";
 };
 type ClosedPage = { name: string; reopen: () => void; key: string };
@@ -1106,17 +1107,23 @@ export function installGestureUi(
     applyHintSettings();
     publish();
   }
-  function showHint(name: string): void {
-    if (!hintSettings.enabled) return;
+  function hideHint(): void {
+    if (hintTimer) global.clearTimeout(hintTimer);
+    hintTimer = 0;
+    hint.hidden = true;
+    hint.removeAttribute("data-overlay-active");
+  }
+  function showHint(name: string, untilGestureEnds = false): boolean {
+    if (!hintSettings.enabled) return false;
     hint.textContent = name || "手势已匹配";
     hint.dataset.overlayActive = "true";
     hint.hidden = false;
     placeHintInViewport(hint, hintSettings);
     if (hintTimer) global.clearTimeout(hintTimer);
-    hintTimer = global.setTimeout(() => {
-      hint.hidden = true;
-      hint.removeAttribute("data-overlay-active");
-    }, HINT_DURATION_MS);
+    hintTimer = untilGestureEnds
+      ? 0
+      : global.setTimeout(hideHint, HINT_DURATION_MS);
+    return true;
   }
   function asElement(target: EventTarget | Node | null): Element | null {
     return target instanceof Element ? target : null;
@@ -2146,6 +2153,7 @@ export function installGestureUi(
       points: [{ x: event.clientX, y: event.clientY }],
       surface,
       previewProfileId: null,
+      committedMatch: null,
       input,
     };
     recordGesture(input, "start", "active", 1);
@@ -2158,9 +2166,16 @@ export function installGestureUi(
       return;
     }
     if (gesture.previewProfileId === matched.profile.id) return;
-    gesture.previewProfileId = matched.profile.id;
-    if (canApplyAction(gesture.surface, matched.profile.action))
-      showHint(matched.profile.name);
+    if (
+      canApplyAction(gesture.surface, matched.profile.action) &&
+      showHint(matched.profile.name, true)
+    ) {
+      gesture.previewProfileId = matched.profile.id;
+      // A visible hint is a commitment: releasing this same stroke must
+      // execute the action shown to the user, rather than rejudging it with
+      // the potentially longer final path.
+      gesture.committedMatch = matched;
+    }
   }
   function move(event: MouseEvent, input: ActiveGesture["input"]): void {
     if (!active) return;
@@ -2185,8 +2200,17 @@ export function installGestureUi(
     if (!active) return;
     if (input && active.input !== input) return;
     const gesture = active;
+    const previous = gesture.points[gesture.points.length - 1];
+    if (
+      event &&
+      previous &&
+      Math.hypot(event.clientX - previous.x, event.clientY - previous.y) >= 4
+    )
+      gesture.points.push({ x: event.clientX, y: event.clientY });
     active = null;
-    const matched = !cancelled && matchProfile(gesture.surface, gesture.points);
+    const matched = !cancelled
+      ? gesture.committedMatch || matchProfile(gesture.surface, gesture.points)
+      : null;
     recordGesture(
       gesture.input,
       cancelled ? "cancel" : "finish",
@@ -2196,6 +2220,7 @@ export function installGestureUi(
     );
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clearTrail();
+    hideHint();
     if (matched && canApplyAction(gesture.surface, matched.profile.action)) {
       gesture.surface.onMatch(matched.profile.action);
     }
@@ -2207,6 +2232,7 @@ export function installGestureUi(
     recordGesture(gesture.input, "cancel", "cancelled", gesture.points.length);
     if (gesture.points.length > 1) suppressContextMenuUntil = Date.now() + 500;
     clearTrail();
+    hideHint();
   }
   function padPoint(event: MouseEvent | PointerEvent): GesturePoint {
     const rect = pad.getBoundingClientRect();

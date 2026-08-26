@@ -50,3 +50,11 @@ dist/
 /ui/.generated-ts-build-*/
 /ui/.generated-reader-page-ts-build-*/
 /ui/react-bridge/
+
+# Local model runtimes, validation captures and desktop sidecars are rebuilt or
+# installed outside source control; keep them out of review/IP snapshots.
+/reader-media/
+/artifacts/
+/.codewhale/
+/=ro
+/kunpeng-intelligence-worker.exe

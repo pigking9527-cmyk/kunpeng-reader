@@ -11,6 +11,7 @@ interface AiReaderProfileSummary {
   readonly provider?: string;
   readonly baseUrl?: string;
   readonly model?: string;
+  readonly localLibraryAiEligible?: boolean;
 }
 
 interface AiReaderAssignments extends Record<string, unknown> {
@@ -156,6 +157,8 @@ export function createApiSettingsGlobal(
     const api = createTauriApi<VerifiedApiSettingsCommands>(resolvedTransport);
     const document = runtime.document;
     const modal = html(document.getElementById("api-settings-modal"));
+    const title = html(document.getElementById("api-settings-title"));
+    const defaultTitle = title?.textContent || "大模型与翻译 API";
     const aiProfile = select(document.getElementById("api-ai-profile"));
     const aiPreset = select(document.getElementById("api-ai-preset"));
     const aiName = input(document.getElementById("api-ai-name"));
@@ -246,7 +249,10 @@ export function createApiSettingsGlobal(
       aiProfiles.forEach((profile) => {
         const option = document.createElement("option");
         option.value = profile.id;
-        option.textContent = profile.name || profile.model || "未命名配置";
+        const label = profile.name || profile.model || "未命名配置";
+        option.textContent = profile.localLibraryAiEligible
+          ? `${label} · 本地 7B+`
+          : label;
         aiProfile.appendChild(option);
       });
       fillProfile(
@@ -284,8 +290,16 @@ export function createApiSettingsGlobal(
       renderTranslationProfiles(translation);
     };
 
+    const close = (): void => {
+      modal?.classList.remove("show");
+      modal?.removeAttribute("data-agent-config-mode");
+      if (title) title.textContent = defaultTitle;
+    };
+
     const open = async (): Promise<void> => {
       if (!modal) return;
+      const agentConfigMode = modal.getAttribute("data-agent-config-mode") === "true";
+      if (title) title.textContent = agentConfigMode ? "云端 Agent 配置" : "大模型与翻译 API";
       modal.classList.add("show");
       setStatus(aiStatus, "正在读取本机配置…");
       try {
@@ -303,9 +317,9 @@ export function createApiSettingsGlobal(
     document.getElementById("api-settings-open")?.addEventListener("click", open);
     document
       .getElementById("api-settings-close")
-      ?.addEventListener("click", () => modal?.classList.remove("show"));
+      ?.addEventListener("click", close);
     modal?.addEventListener("click", (event) => {
-      if (event.target === modal) modal.classList.remove("show");
+      if (event.target === modal) close();
     });
     aiProfile?.addEventListener("change", () => {
       fillProfile(selectedProfile());

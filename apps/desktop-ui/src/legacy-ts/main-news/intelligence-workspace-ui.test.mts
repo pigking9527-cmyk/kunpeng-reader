@@ -9,6 +9,7 @@ import {
   selectIntelligenceRelationReviewIds,
 } from "./intelligence-workspace-ui.ts";
 import { FAVORITES_STORAGE_KEY } from "../main-favorites/favorites-store.ts";
+import type { TauriEvent, TauriTransport } from "../../../../../packages/tauri-api/src/index.ts";
 
 type Invoke = (command: string, args?: Record<string, unknown>) => unknown;
 
@@ -51,8 +52,9 @@ interface Fixture {
   readonly runtime: Record<string, unknown>;
   readonly elements: Map<string, FakeElement>;
   readonly calls: Array<{ readonly command: string; readonly args?: Record<string, unknown> }>;
-  readonly transport: { readonly invoke: <TResult>(command: string, args?: Record<string, unknown>) => Promise<TResult> };
+  readonly transport: TauriTransport;
   readonly storage: Map<string, string>;
+  readonly emitDeliveryUpdated: () => void;
 }
 
 const ELEMENT_IDS = [
@@ -63,7 +65,7 @@ const ELEMENT_IDS = [
   "intelligence-workspace-status", "intelligence-digest-history", "intelligence-digest-history-summary", "intelligence-digest-history-date",
   "intelligence-filter-kind", "intelligence-filter-importance", "intelligence-filter-scope", "intelligence-archive-day", "intelligence-archive-request", "intelligence-archive-retry", "intelligence-archive-status",
   "intelligence-digest-history-previous", "intelligence-digest-history-next", "intelligence-digest-history-readonly",
-  "intelligence-processing-summary", "intelligence-briefing-model-status", "intelligence-local-model-base-url",
+  "intelligence-processing-summary", "intelligence-delivery-state", "intelligence-briefing-model-status", "intelligence-local-model-base-url",
   "intelligence-local-model-name", "intelligence-local-model-qwen27b", "intelligence-local-model-requirement",
   "intelligence-local-model-key", "intelligence-local-model-save", "intelligence-briefing-count", "intelligence-digest-list",
   "intelligence-signal-list", "intelligence-context-title", "intelligence-context-body", "intelligence-context-meta",
@@ -82,6 +84,7 @@ function fixture(
 ): Fixture {
   const elements = new Map(ELEMENT_IDS.map((id) => [id, new FakeElement()]));
   const calls: Array<{ readonly command: string; readonly args?: Record<string, unknown> }> = [];
+  const deliveryListeners: Array<() => void> = [];
   const storage = new Map(Object.entries(stored));
   const contentShell = new FakeElement();
   if (options.withToolbarAction) {
@@ -100,13 +103,32 @@ function fixture(
       setItem: (key: string, value: string) => { storage.set(key, value); },
     },
   };
-  const transport = {
+  const transport: TauriTransport = {
     invoke: async <TResult,>(command: string, args?: Record<string, unknown>): Promise<TResult> => {
       calls.push(args === undefined ? { command } : { command, args });
       return respond(command, args) as TResult;
     },
+    listen: async <TPayload,>(
+      event: string,
+      handler: (event: TauriEvent<TPayload>) => void,
+    ): Promise<() => void> => {
+      if (event !== "intelligence-delivery-updated") return () => undefined;
+      const listener = (): void => handler({ event, id: 1, payload: undefined as TPayload });
+      deliveryListeners.push(listener);
+      return () => {
+        const index = deliveryListeners.indexOf(listener);
+        if (index >= 0) deliveryListeners.splice(index, 1);
+      };
+    },
   };
-  return { runtime, elements, calls, transport, storage };
+  return {
+    runtime,
+    elements,
+    calls,
+    transport,
+    storage,
+    emitDeliveryUpdated: () => deliveryListeners.forEach((listener) => listener()),
+  };
 }
 
 function elementFrom(elements: Map<string, FakeElement>, id: string): FakeElement {
@@ -145,7 +167,12 @@ function cachedPublication() {
 }
 
 function cacheStatus() {
-  return { cachePresent: true, publicationCount: 1, unacknowledgedCount: 0, lastRefreshAt: 0 };
+  return {
+    cachePresent: true, publicationCount: 1, unacknowledgedCount: 0,
+    deliveryState: "ready", lastAttemptAt: 1, lastSuccessAt: 1, lastRefreshAt: 1,
+    lastFetched: 1, lastPersisted: 1, lastAcknowledged: 1,
+    sseState: "connected", lastSseAt: 1,
+  };
 }
 
 function favoriteStorage(): Record<string, string> {
@@ -315,12 +342,74 @@ test("explicit refresh is the sole workspace action allowed to invoke native syn
   assert.equal(view.calls.some((call) => /^(newsnow_|intelligence_store_|intelligence_generate_|intelligence_local_model_)/u.test(call.command)), false);
 });
 
+test("native delivery wake-up only re-reads the verified local cache while the workspace is open", async () => {
+  const view = fixture((command) => command === "intelligence_client_cache_status" ? cacheStatus() : cachedPublication());
+  const controller = workspace(view);
+  await controller.open();
+  view.calls.splice(0);
+
+  view.emitDeliveryUpdated();
+  await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+
+  assert.deepEqual(view.calls.map((call) => call.command), [
+    "intelligence_client_cache_status", "intelligence_client_cached_publications",
+  ]);
+  assert.equal(view.calls.some((call) => call.command === "intelligence_client_refresh"), false);
+});
+
 test("an empty validated cache remains a Chinese read-only empty state", async () => {
   const view = fixture((command) => command === "intelligence_client_cache_status" ? { cachePresent: false, publicationCount: 0, unacknowledgedCount: 0, lastRefreshAt: 0 } : []);
   const controller = workspace(view);
   await controller.open();
   assert.equal(element(view, "intelligence-briefing-count").textContent, "暂无正式资讯");
-  assert.match(element(view, "intelligence-context-body").textContent, /本页不会自行联网/);
+  assert.match(element(view, "intelligence-context-body").textContent, /本机草稿、未配对发布/);
+});
+
+test("formal delivery status distinguishes first refresh, server-empty, permission and verification failure without local drafts", async () => {
+  const cases = [
+    ["not_refreshed", /尚未手动刷新/, "暂无正式资讯"],
+    ["server_empty", /服务端当前没有可投递的正式包/, "服务端暂无正式资讯"],
+    ["permission_required", /情报中心权限/, "暂无正式资讯"],
+    ["delivery_failed", /传输或完整性校验失败/, "暂无正式资讯"],
+  ] as const;
+  for (const [deliveryState, copy, count] of cases) {
+    const view = fixture((command) => command === "intelligence_client_cache_status" ? {
+      cachePresent: false, publicationCount: 0, unacknowledgedCount: 0,
+      deliveryState, lastAttemptAt: 1, lastSuccessAt: deliveryState === "server_empty" ? 1 : 0,
+      lastRefreshAt: deliveryState === "server_empty" ? 1 : 0,
+      lastFetched: 0, lastPersisted: 0, lastAcknowledged: 0,
+      sseState: deliveryState === "permission_required" ? "permission_required" : "not_started", lastSseAt: 0,
+    } : []);
+    const controller = workspace(view);
+    await controller.open();
+    assert.match(element(view, "intelligence-delivery-state").textContent, copy);
+    assert.equal(element(view, "intelligence-briefing-count").textContent, count);
+    assert.match(element(view, "intelligence-context-body").textContent, /本机草稿、未配对发布/);
+  }
+});
+
+test("a failed manual refresh re-reads only the native delivery state and keeps the formal cache boundary", async () => {
+  const status = {
+    cachePresent: false, publicationCount: 0, unacknowledgedCount: 0,
+    deliveryState: "delivery_failed", lastAttemptAt: 1, lastSuccessAt: 0, lastRefreshAt: 0,
+    lastFetched: 0, lastPersisted: 0, lastAcknowledged: 0,
+    sseState: "reconnecting", lastSseAt: 1,
+  };
+  const view = fixture((command) => {
+    if (command === "intelligence_client_refresh") throw new Error("validated failure");
+    if (command === "intelligence_client_cache_status") return status;
+    return [];
+  });
+  const controller = workspace(view);
+  await controller.open();
+  view.calls.splice(0);
+  element(view, "intelligence-refresh").click();
+  await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+  assert.match(element(view, "intelligence-workspace-status").textContent, /手动刷新未完成/);
+  assert.match(element(view, "intelligence-delivery-state").textContent, /传输或完整性校验失败/);
+  assert.deepEqual(view.calls.map((call) => call.command), [
+    "intelligence_client_refresh", "intelligence_client_cache_status", "intelligence_client_cached_publications",
+  ]);
 });
 
 test("formal cache filters only change the visible account-local reader list", async () => {

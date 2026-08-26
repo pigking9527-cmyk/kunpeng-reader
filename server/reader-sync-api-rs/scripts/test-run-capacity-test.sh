@@ -35,8 +35,20 @@ if ! grep -Fq 'execution_model="independent-vus"' "$script" || \
   exit 1
 fi
 
+if ! grep -Fq -- '--expected-service-sha256 "$service_sha"' "$script" || \
+  ! grep -Fq 'sha256sum -- "/proc/$pid/exe"' "$script"; then
+  echo 'runner no longer pins the monitored service process image' >&2
+  exit 1
+fi
+
 if ! grep -Fq 'const minTestAccounts = 2048;' "$k6_script"; then
   echo 'k6 script no longer requires a sufficiently large independent account pool' >&2
+  exit 1
+fi
+
+if ! grep -Fq 'maxRedirects: 0,' "$k6_script" || \
+  ! grep -Fq 'redirects: 0,' "$k6_script"; then
+  echo 'k6 script may follow redirects away from the direct test origin' >&2
   exit 1
 fi
 
@@ -225,9 +237,9 @@ if ! grep -Fq 'KUNPENG_SYNC_RUN_MIGRATIONS=1' "$script"; then
   exit 1
 fi
 
-if ! grep -Fq 'set_env KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS 12' "$script" || \
-  ! grep -Fq 'set_env KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS 18' "$script" || \
-  ! grep -Fq 'set_env KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS 10' "$script" || \
+if ! grep -Fq 'set_env KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS 15' "$script" || \
+  ! grep -Fq 'set_env KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS 23' "$script" || \
+  ! grep -Fq 'set_env KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS 12' "$script" || \
   ! grep -Fq 'set_env KUNPENG_SYNC_DATABASE_ACQUIRE_TIMEOUT_MILLIS 300' "$script" || \
   ! grep -Fq 'set_env KUNPENG_SYNC_MAX_QUEUED_WRITE_REQUESTS 48' "$script" || \
   ! grep -Fq 'set_env KUNPENG_SYNC_REQUEST_QUEUE_TIMEOUT_MILLIS 200' "$script"; then

@@ -48,7 +48,6 @@
 .book-info-model-tags { min-height:28px; padding:3px 0; }
 .book-info-card .info-chip { display:inline-flex; max-width:100%; align-items:center; gap:4px; padding:4px 8px; border-radius:999px; background:#edf3ff; color:#315f9e; font-size:12px; line-height:1.2; word-break:break-word; }
 .book-info-card .info-chip.model-tag { background:#eef8f2; color:#26734d; }
-.book-info-card .info-chip-origin { margin-right:4px; padding-right:4px; border-right:1px solid currentColor; font-size:10px; font-weight:700; letter-spacing:.02em; opacity:.8; }
 .book-info-card .info-chip.empty { padding-left:0; background:transparent; color:#999; }
 .book-info-tools { background:#fbfcfe; }
 .book-info-tools .btn-plain { min-height:34px; border-radius:8px; }

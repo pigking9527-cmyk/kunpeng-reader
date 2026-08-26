@@ -21,7 +21,7 @@ const lazyDependencies = [
   "modeSwitchDiagEvent", "refreshPagedImagePreview", "pageDebugSettingOn",
   "hasPendingContinuousPagedImageSource", "finishChapterBugTrace",
   "clearPagedImagePreview", "clearModeSwitchAnchor", "beginTurnFx",
-  "beginPageTurnBugTrace", "scrollStartEpsilonPx", "scrollBottomSafePx",
+  "beginPageTurnBugTrace", "observePageTurnPerformance", "scrollStartEpsilonPx", "scrollBottomSafePx",
   "schedulePagedImagePreview", "padModeSwitchAnchorToColumnTop",
   "modeSwitchAnchorAtVisibleTop", "largeChapterFastLayout",
   "forceModeSwitchAnchorColumn", "finishPageTurnBugTrace", "beginChapterBugTrace",
@@ -99,9 +99,24 @@ test("combined reader page source keeps live, lazy, dictionary and resource gate
   }
   assert.match(source, /defaults(?:: DictSettings)?=\{plain:false,sense:false,context:false,hypernyms:false,synonyms:false,antonyms:false\}/u);
   assert.match(source, /if\(input\.checked&&!dictEnhancementAvailable\(lastDict,cfg\.key\)\)\{[\s\S]*?input\.checked=false;[\s\S]*?st\[cfg\.key\]=false;/u);
-  assert.match(source, /function activeReaderFontReady\(\): boolean\{[\s\S]*?document\.fonts\.check\(fontSize\+'px '\+fontFamily,'中文Aa'\)/u);
-  assert.match(source, /function waitForFlowResources\([^)]*\): Promise<void>\{[\s\S]*?!activeReaderFontReady\(\)[\s\S]*?querySelectorAll<HTMLImageElement>\('img'\)[\s\S]*?if\(img\.complete\)continue;[\s\S]*?addEventListener\('load',done\)[\s\S]*?Promise\.race/u);
-  assert.match(source, /waitForFlowResources\(\)\.then\(function\(\)\{return new Promise<void>\(function\(resolve\)\{\s*requestAnimationFrame\(function\(\)\{requestAnimationFrame\(function\(\)/u);
+  assert.match(source, /function activeReaderFontSpec\(\): string\{[\s\S]*?return fontSize\+'px '\+fontFamily/u);
+  assert.match(source, /function activeReaderFontReady\(fontSpec = activeReaderFontSpec\(\)\): boolean\{[\s\S]*?document\.fonts\.check\(fontSpec,'中文Aa'\)/u);
+  assert.match(source, /function waitForActiveReaderFont\(\): Promise<void>\{[\s\S]*?fonts\.load\(fontSpec,'中文Aa'\)[\s\S]*?:fonts\.ready/u);
+  assert.match(source, /function waitForReaderFonts\(\): Promise<void>\{[\s\S]*?activeReaderFontReady\(\)[\s\S]*?fonts\.status==='loading'&&fonts\.ready[\s\S]*?Promise\.resolve\(fonts\.ready\)/u);
+  assert.match(source, /function installChapterBodyForInitialLayout\(body: string\): void\{[\s\S]*?document\.createElement\('template'\)[\s\S]*?imgs\.item\(i\)\.loading='lazy'[\s\S]*?root\.replaceChildren\(template\.content\)/u);
+  assert.match(source, /function prepareFlowImageForLayout\(img: HTMLImageElement\): boolean\{[\s\S]*?return true;/u);
+  assert.doesNotMatch(source.slice(source.indexOf("function prepareFlowImageForLayout"),source.indexOf("function flowImageBlocksInitialLayout")), /loading='eager'/u);
+  assert.match(source, /function flowImageBlocksInitialLayout\(img: HTMLImageElement\): boolean\{[\s\S]*?if\(!isScrollMode\(\)\)return true;[\s\S]*?rect\.top<=view\.bottom/u);
+  assert.match(source, /function waitForFlowResources\([^)]*\): Promise<ReaderStylesheetLoadMetrics>\{[\s\S]*?waitForReaderFonts\(\)[\s\S]*?querySelectorAll<HTMLImageElement>\('img'\)[\s\S]*?prepareFlowImageForLayout\(img\)[\s\S]*?flowImageBlocksInitialLayout\(img\)[\s\S]*?img\.loading='lazy'[\s\S]*?img\.loading==='lazy'\)img\.loading='eager'[\s\S]*?addEventListener\('load',done\)[\s\S]*?resource_timeout/u);
+  assert.match(source, /function stylesheetCssomReady[\s\S]*?CSSRule\.IMPORT_RULE[\s\S]*?stylesheetCssomReady\(\(rule as CSSImportRule\)\.styleSheet/u);
+  assert.match(source, /function injectHead\(htmlStr: string,seen: Record<string,Promise<void>>\): Promise<ReaderStylesheetLoadMetrics>\{[\s\S]*?addEventListener\('load'[\s\S]*?queueMicrotask\(pollCssom\)/u);
+  assert.match(source, /if\(IS_MAC_WEBKIT\)pollFrame=requestAnimationFrame\(pollCssom\);[\s\S]*?pollTimer=setTimeout\(pollCssom,pollDelay\)/u);
+  assert.match(source, /reportOpeningBenchmarkPhase\('chapter_styles_ready',styleMetrics===undefined\?undefined:styleMetrics\)/u);
+  assert.match(source, /waitForFlowResources\(\)\.then\(function\(resourceMetrics\)\{reportOpeningBenchmarkPhase\('chapter_resources_ready',resourceMetrics\);return new Promise<void>\(function\(resolve\)\{[\s\S]*?if\(IS_MAC_WEBKIT\)requestAnimationFrame\(function\(\)\{requestAnimationFrame\(performChapterLayout\);\}\);[\s\S]*?else performChapterLayout\(\)/u);
+  assert.match(source, /layout_frame_wait_ms:[\s\S]*?layout_apply_ms:[\s\S]*?layout_finalize_ms:[\s\S]*?layout_compute_ms:/u);
+  assert.match(source, /if\(isDualPage\(\)\)\{applyStyle\(\);applyCols\(\);\}[\s\S]*?waitForFlowResources\(\)/u);
+  assert.match(source, /const paragraphBounds=paragraphs\.map\(bounds\)[\s\S]*?before=paragraphBounds\[i\],after=paragraphBounds\[i\+1\]/u);
+  assert.match(source, /const fastChromiumPageCount=IS_CHROMIUM_WEBVIEW&&!isScrollMode\(\)[\s\S]*?pagesInCh=\(fastLargeChapter\|\|fastChromiumPageCount\)\?fastPagedPageCount\(root\):pagedPageCountFromContent\(root\)/u);
   assert.match(source, /function pagedPageCountFromContent[\s\S]*?const textCount=[\s\S]*?return isModernEpubLayout\(\)\?Math\.max\(textCount,fastPagedPageCount\(el\)\):textCount;/u);
   assert.match(source, /function trimTrailingBlankPagedViews[\s\S]*?if\(isModernEpubLayout\(\)\)return pages;[\s\S]*?while\(pages>1&&!pagedViewHasVisibleContent/u);
   assert.match(source, /function buildChapterOpeningSnapshot\(body: string\): HTMLElement\|null\{[\s\S]*?body\.slice\(0,CHAPTER_OPENING_SNAPSHOT_BYTES\)[\s\S]*?querySelectorAll\('script,style,link,base,\[id\]'\)/u);
@@ -123,6 +138,121 @@ test("classic IIFE installs in a head-like VM without a reader DOM", () => {
   (runtime.gotoPage as (page: number, direction: number) => void)(2, 0);
   assert.equal(runtime.pageInCh, 2);
   assert.equal((runtime.__calls as Record<string, number>).beginTurnFx, 1);
+});
+
+test("resource gate waits only for the active font without eagerly starting every image", async () => {
+  const runtime = headRuntime();
+  const fontLoads: Array<readonly [string, string]> = [];
+  class HtmlPictureElementPort {}
+  Object.assign(runtime, {
+    HTMLPictureElement: HtmlPictureElementPort,
+    getComputedStyle: () => ({ fontSize: "20px", fontFamily: '"Reader Face", serif' }),
+  });
+  Object.assign(runtime.document as Record<string, unknown>, {
+    fonts: {
+      check: () => false,
+      load: async (font: string, sample: string) => { fontLoads.push([font, sample]); return []; },
+      get ready(): never { throw new Error("unrelated FontFaceSet.ready must not be read"); },
+    },
+  });
+  const instrumented = bundle.replace(
+    "Object.assign(global, api);",
+    "Object.assign(global, api, {waitForFlowResources,prepareFlowImageForLayout});",
+  );
+  vm.runInNewContext(instrumented, runtime);
+  runtime.root = { querySelectorAll: () => ({ length: 0 }) };
+  await (runtime.waitForFlowResources as () => Promise<void>)();
+  assert.deepEqual(fontLoads, [['20px "Reader Face", serif', "中文Aa"]]);
+
+  const image = {
+    complete: false,
+    currentSrc: "reader://localhost/res/book/image.png",
+    parentElement: null,
+    loading: "lazy",
+    getAttribute: () => null,
+  };
+  assert.equal((runtime.prepareFlowImageForLayout as (value: typeof image) => boolean)(image), true);
+  assert.equal(image.loading, "lazy");
+});
+
+test("scroll opening defers images below the first viewport while paged opening keeps the full gate", () => {
+  const runtime = headRuntime();
+  const instrumented = bundle.replace(
+    "Object.assign(global, api);",
+    "Object.assign(global, api, {flowImageBlocksInitialLayout});",
+  );
+  vm.runInNewContext(instrumented, runtime);
+  const imageAt = (top: number) => ({ getBoundingClientRect: () => ({ ...rect(), top, bottom: top + 100 }) });
+  runtime.S = { flowMode: "scroll" };
+  assert.equal((runtime.flowImageBlocksInitialLayout as (image: ReturnType<typeof imageAt>) => boolean)(imageAt(640)), true);
+  assert.equal((runtime.flowImageBlocksInitialLayout as (image: ReturnType<typeof imageAt>) => boolean)(imageAt(900)), false);
+  runtime.S = { flowMode: "paged" };
+  assert.equal((runtime.flowImageBlocksInitialLayout as (image: ReturnType<typeof imageAt>) => boolean)(imageAt(900)), true);
+});
+
+test("scroll chapter images are lazy before entering the live document", () => {
+  const installStart = source.indexOf("function installChapterBodyForInitialLayout");
+  const installEnd = source.indexOf("function prepareFlowImageForLayout", installStart);
+  const install = source.slice(installStart, installEnd);
+  assert.match(install, /document\.createElement\('template'\);template\.innerHTML=body/u);
+  assert.match(install, /imgs\.item\(i\)\.loading='lazy'/u);
+  assert.match(install, /root\.replaceChildren\(template\.content\)/u);
+  assert.match(install, /if\(!isScrollMode\(\)\)\{root\.innerHTML=body;return;\}[\s\S]*?loading='lazy'[\s\S]*?replaceChildren/u);
+  const showChapter = source.slice(source.indexOf("function showChapter"), source.indexOf("var curTopAnchor"));
+  assert.match(showChapter, /root\.style\.visibility='hidden';installChapterBodyForInitialLayout\(body\);normalizeInlineNoteRefs\(\)/u);
+});
+
+test("resource gate retains nested-font layout safety for ready and newly loaded root fonts", async () => {
+  for (const rootFontReady of [true, false]) {
+    const runtime = headRuntime();
+    let releaseReady: () => void = () => undefined;
+    let loadCalls = 0;
+    const nestedFontsReady = new Promise<void>((resolve) => { releaseReady = resolve; });
+    Object.assign(runtime.document as Record<string, unknown>, {
+      fonts: {
+        status: "loading",
+        check: () => rootFontReady,
+        load: async () => { loadCalls += 1; return []; },
+        ready: nestedFontsReady,
+      },
+    });
+    const instrumented = bundle.replace(
+      "Object.assign(global, api);",
+      "Object.assign(global, api, {waitForFlowResources});",
+    );
+    vm.runInNewContext(instrumented, runtime);
+    runtime.root = { querySelectorAll: () => ({ length: 0 }) };
+    let settled = false;
+    const waiting = (runtime.waitForFlowResources as () => Promise<void>)().then(() => { settled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(settled, false, `nested font gate must remain pending when root ready=${rootFontReady}`);
+    assert.equal(loadCalls, rootFontReady ? 0 : 1);
+    releaseReady();
+    await waiting;
+    assert.equal(settled, true);
+  }
+});
+
+test("opening benchmark splits layout work and confirms paint only while visible", () => {
+  const loadInit = source.slice(source.indexOf("function loadInit("), source.indexOf("function requiredHtmlElement"));
+  assert.match(source, /reportOpeningBenchmarkPhase\('chapter_payload_ready',\{payload_inline_hit:payloadInlineHit\?1:0\}\)/u);
+  assert.match(source, /reportOpeningBenchmarkPhase\('chapter_styles_ready',styleMetrics===undefined\?undefined:styleMetrics\)/u);
+  assert.match(source, /reportOpeningBenchmarkPhase\('chapter_dom_ready'\)/u);
+  assert.match(source, /reportOpeningBenchmarkPhase\('chapter_resources_ready',resourceMetrics\)/u);
+  assert.match(source, /openingBenchmarkEnabled\|\|openingPhaseReportingEnabled/u);
+  assert.match(loadInit, /parent\.postMessage\(\{ready:1\},'\*'\);\s*openingPhaseReportingEnabled=false/u);
+  assert.match(loadInit, /document\.visibilityState==='visible'/u);
+  assert.match(loadInit, /visibilitychange/u);
+  assert.match(loadInit, /readerPerf:'page_layout_ready'/u);
+  assert.match(loadInit, /readerPerf:'page_displayed'/u);
+});
+
+test("ordinary chapters avoid a second full note and media scan", () => {
+  const chapter = source.slice(source.indexOf("function showChapter"), source.indexOf("var curTopAnchor"));
+  assert.match(chapter, /appendDualChapterContinuation\(conversion\)\.then\(function\(continuationAppended\)/u);
+  assert.match(chapter, /if\(continuationAppended\)\{normalizeInlineNoteRefs\(\);noteNumbersReady=false;ensureNoteNumbers\(\);\}\s*watchFlowMedia\(\)/u);
+  assert.doesNotMatch(chapter.slice(0, chapter.indexOf("appendDualChapterContinuation")), /watchFlowMedia\(\)/u);
 });
 
 test("classic compatibility wrappers resolve later globals and never recurse", () => {

@@ -401,6 +401,27 @@ test("right-button gestures accept Pointer Events and retain the mouse fallback"
   );
 });
 
+test("a visible main-window hint commits its action until release", async () => {
+  const source = await readFile(
+    new URL("./gesture-ui.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /committedMatch: GestureMatch \| null;/);
+  assert.match(
+    source,
+    /showHint\(matched\.profile\.name, true\)[\s\S]*?gesture\.committedMatch = matched;/,
+  );
+  const finish = source.slice(
+    source.indexOf("function finish("),
+    source.indexOf("function cancelGestureKeepHint"),
+  );
+  assert.match(
+    finish,
+    /gesture\.committedMatch \|\| matchProfile\(gesture\.surface, gesture\.points\)/,
+  );
+  assert.match(finish, /hideHint\(\);/);
+});
+
 test("a complete Pointer Event stroke invokes the existing main-window close command", () => {
   const originalElement = Object.getOwnPropertyDescriptor(globalThis, "Element");
   const originalCustomEvent = Object.getOwnPropertyDescriptor(

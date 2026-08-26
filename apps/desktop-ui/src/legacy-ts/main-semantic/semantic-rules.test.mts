@@ -14,11 +14,43 @@ import {
   legacySemanticIndexCompleted,
   progressPercent,
   restoreLiveSemanticVectorTask,
+  SEMANTIC_MODEL_DIMENSIONS,
+  SEMANTIC_SEARCH_SOLUTIONS,
 } from "./semantic-rules.ts";
 
 test("semantic rules stay pure and preserve the frozen model dimensions", () => {
   const source = readFileSync(new URL("./semantic-rules.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /document|window|localStorage|__TAURI__|React|\.tsx|\bany\b/u);
+});
+
+test("smart search plans map to real backend model ids and dimensions", () => {
+  assert.equal(SEMANTIC_MODEL_DIMENSIONS["qwen3-embedding-0.6b"], 1024);
+  assert.equal(SEMANTIC_MODEL_DIMENSIONS["qwen3-embedding-8b"], 4096);
+  assert.deepEqual(
+    SEMANTIC_SEARCH_SOLUTIONS.map(({ id, modelId, retrievalMode }) => [
+      id,
+      modelId,
+      retrievalMode,
+    ]),
+    [
+      ["standard", "qwen3-embedding-0.6b", "high_precision"],
+      ["high_precision", "qwen3-embedding-8b", "high_precision"],
+      ["bge_m3", "bge-m3", "m3_hybrid"],
+    ],
+  );
+  assert.equal(Object.isFrozen(SEMANTIC_SEARCH_SOLUTIONS), true);
+  assert.deepEqual(
+    SEMANTIC_SEARCH_SOLUTIONS.map(({ capabilityTitle }) => capabilityTitle),
+    [
+      "智能搜索（自动）",
+      "高精度查找",
+      "中英混合查找",
+    ],
+  );
+  assert.doesNotMatch(
+    SEMANTIC_SEARCH_SOLUTIONS.map(({ capabilityCopy }) => capabilityCopy).join("\n"),
+    /向量模型|27B|情报主机/u,
+  );
 });
 
 function progress(overrides: Partial<SemanticProgress> = {}): SemanticProgress {
@@ -88,4 +120,35 @@ test("live task restoration freezes duplicate start and keeps checkpoint progres
   assert.equal(restored.progress.semantic_total, 8);
   assert.equal(restored.tasks[0]?.can_start, false);
   assert.equal(restored.tasks[0]?.can_delete, false);
+});
+
+test("pending search-solution task is not misreported as an ordinary vector build", () => {
+  const center: SemanticTaskCenter = {
+    busy: true,
+    status_refreshing: false,
+    current: "正在建立 Qwen3 Embedding 0.6B 新搜索库",
+    error: "",
+    progress: {
+      ...progress(),
+      building: true,
+      active_task: "semantic_solution",
+      solution_switching: true,
+      pending_model_id: "qwen3-embedding-0.6b",
+      pending_model_label: "Qwen3 Embedding 0.6B",
+      pending_retrieval_mode: "high_precision",
+    },
+    tasks: [{
+      id: "semantic_vectors", title: "", detail: "", status: "running", done: 2,
+      total: 8, bytes: 0, running: true, ready: false, resumable: false,
+      can_start: false, can_delete: false, primary_label: "", delete_label: "",
+    }],
+  };
+  const pending = snapshot({
+    checkpoint: '{"pending_model":"qwen3-embedding-0.6b","book_index":2}',
+    progress: { done: 2, total: 8, unit: "books" },
+  });
+  const restored = restoreLiveSemanticVectorTask(center, [pending], 8);
+  assert.equal(restored.progress.active_task, "semantic_solution");
+  assert.equal(restored.progress.solution_switching, true);
+  assert.equal(restored.progress.current, center.progress.current);
 });

@@ -50,7 +50,7 @@ interface ActiveGesture {
   readonly points: GesturePoint[];
   readonly profiles: readonly GestureProfile[];
   previewProfileId: string | null;
-  recentPreviewMatch: {
+  committedPreviewMatch: {
     readonly profile: GestureProfile;
     readonly score: number;
     readonly threshold: number;
@@ -305,9 +305,9 @@ export function installReaderGesture(
     hint.hidden = true;
     hint.removeAttribute("data-overlay-active");
   }
-  function showHint(name: string): void {
+  function showHint(name: string, untilGestureEnds = false): boolean {
     const settings = hintSettings();
-    if (!settings.enabled) return;
+    if (!settings.enabled) return false;
     hint.textContent = name || "手势已匹配";
     hint.style.fontSize = `${settings.fontSize}px`;
     hint.style.background = hintColor(settings);
@@ -318,7 +318,10 @@ export function installReaderGesture(
     hint.hidden = false;
     placeHint(settings);
     if (hintTimer) global.clearTimeout(hintTimer);
-    hintTimer = global.setTimeout(hideHint, HINT_DURATION_MS);
+    hintTimer = untilGestureEnds
+      ? 0
+      : global.setTimeout(hideHint, HINT_DURATION_MS);
+    return true;
   }
 
   const normalizeAction = (value: unknown): GestureProfile["action"] => {
@@ -486,7 +489,7 @@ export function installReaderGesture(
       points: [{ x, y }],
       profiles: currentProfiles,
       previewProfileId: null,
-      recentPreviewMatch: null,
+      committedPreviewMatch: null,
       source,
     };
     recordGesture("gesture_start", active, {
@@ -663,22 +666,23 @@ export function installReaderGesture(
       return;
     }
     const matched = best as GestureMatch;
-    gesture.recentPreviewMatch = {
-      ...matched,
-      pointCount: gesture.points.length,
-    };
     const id = `${matched.profile.action}\0${matched.profile.name}`;
     if (gesture.previewProfileId === id) return;
-    gesture.previewProfileId = id;
-    recordGesture("gesture_preview", gesture, {
-      phase: "visible",
-      action: matched.profile.action,
-      score: matched.score,
-      threshold: matched.threshold,
-      points: gesture.points.length,
-      can_apply: true,
-    });
-    if (canApplyAction(matched.profile.action)) showHint(matched.profile.name);
+    if (canApplyAction(matched.profile.action) && showHint(matched.profile.name, true)) {
+      gesture.previewProfileId = id;
+      gesture.committedPreviewMatch = {
+        ...matched,
+        pointCount: gesture.points.length,
+      };
+      recordGesture("gesture_preview", gesture, {
+        phase: "visible",
+        action: matched.profile.action,
+        score: matched.score,
+        threshold: matched.threshold,
+        points: gesture.points.length,
+        can_apply: true,
+      });
+    }
   }
   function execute(
     match: GestureMatch,
@@ -728,9 +732,8 @@ export function installReaderGesture(
     const previewMatch =
       !cancelled &&
       !directMatch &&
-      gesture.recentPreviewMatch &&
-      gesture.points.length - gesture.recentPreviewMatch.pointCount <= 8
-        ? gesture.recentPreviewMatch
+      gesture.committedPreviewMatch
+        ? gesture.committedPreviewMatch
         : null;
     const matched = directMatch || previewMatch;
     const canApply = Boolean(matched && canApplyAction(matched.profile.action));

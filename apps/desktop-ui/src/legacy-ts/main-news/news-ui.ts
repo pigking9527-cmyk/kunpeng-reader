@@ -46,6 +46,9 @@ interface NewsArticle extends NewsRecord {
 
 /** Escaped HTML assembled from an already prepared local intelligence brief. */
 export interface PreparedNewsArticle {
+  /** Stable local event identity used by the intelligence timeline. */
+  readonly eventId?: string;
+  readonly revision?: number;
   readonly title: string;
   readonly source: string;
   readonly publishedAt?: string;
@@ -125,6 +128,7 @@ interface NewsRuntime extends Window {
     readonly instance?: {
       readonly close?: (options?: { readonly focus?: boolean }) => void;
       readonly open?: () => Promise<void> | void;
+      readonly openStoredEvent?: (eventId: string, revision?: number) => Promise<void> | void;
     };
   };
   ReaderNewsUI?: NewsUiGlobal;
@@ -456,7 +460,9 @@ export function installNewsUi(
     let newsSettingsSyncReady = false, newsSettingsSyncTimer = 0;
     let layout: NewsLayout = storageGet(LAYOUT_STORAGE_KEY, "list") === "grid" ? "grid" : "list";
     let order: NewsOrder = storageGet(ORDER_STORAGE_KEY, "mixed") === "source" ? "source" : "mixed";
-    let articleScrollTop = 0, sourcePageScrollTop = 0, articleOpen = false, articleReturnsToIntelligence = false, currentArticleUrl = "", currentArticleItem: NewsItem | null = null, masonryResizeTimer = 0, renderedMasonryColumnCount = 0, feedRenderPending = false;
+    let articleScrollTop = 0, sourcePageScrollTop = 0, articleOpen = false, articleReturnsToIntelligence = false, currentArticleUrl = "", currentArticleItem: NewsItem | null = null, currentPreparedArticle: PreparedNewsArticle | null = null, masonryResizeTimer = 0, renderedMasonryColumnCount = 0, feedRenderPending = false;
+    let preparedArticleHistory: PreparedNewsArticle[] = [];
+    let preparedArticleHistoryIndex = -1;
     let articleTraceSequence = 0, articleTraceStartedAt = 0, feedReturnTraceStartedAt = 0, awaitingFeedHoverTrace = false;
     let backgroundRefreshRunning = false, prefetchDelayTimer = 0, prefetchIntervalTimer = 0, lastUserActivityAt = Date.now(), sourceRefreshTimer = 0;
     let visibleImageRunning = 0;
@@ -806,7 +812,7 @@ export function installNewsUi(
           .catch(() => traceFeedReturn("close_native_command", "failed", closeStartedAt));
       }
       const returnToIntelligence = articleReturnsToIntelligence;
-      articleOpen = false; articleReturnsToIntelligence = false; currentArticleUrl = ""; currentArticleItem = null; readerStatus.textContent = ""; readerMeta.textContent = ""; readerTitle.textContent = ""; readerContent.replaceChildren(); setReaderVisible(false);
+      articleOpen = false; articleReturnsToIntelligence = false; currentArticleUrl = ""; currentArticleItem = null; currentPreparedArticle = null; preparedArticleHistory = []; preparedArticleHistoryIndex = -1; readerStatus.textContent = ""; readerMeta.textContent = ""; readerTitle.textContent = ""; readerContent.replaceChildren(); setReaderVisible(false);
       if (returnToIntelligence && returnToIntelligenceWorkspace()) return;
       feedReturnTraceStartedAt = closeStartedAt; awaitingFeedHoverTrace = true;
       // 正文打开期间后台可能补齐了缩略图。资讯页隐藏时不能测量瀑布流
@@ -821,7 +827,23 @@ export function installNewsUi(
     async function openArticle(item: NewsItem, { returnToIntelligence = false }: { readonly returnToIntelligence?: boolean } = {}): Promise<void> {
       const url = safeHttpUrl(item.url || item.link || item.href); if (!url) return;
       articleTraceSequence += 1; articleTraceStartedAt = Date.now();
-      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; articleReturnsToIntelligence = returnToIntelligence; currentArticleUrl = url; currentArticleItem = { ...item }; readerOriginal.hidden = false; readerMeta.textContent = sourceName(item); readerTitle.textContent = text(item.title || item.name || i18n("newsReader", "资讯正文")); readerContent.replaceChildren(); readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true); traceArticle("click", "reader_shell_visible");
+      const citationEvidence = text(item.fallbackExcerpt || item.fallback_excerpt || item.summary || item.description || item.excerpt).slice(0, 4_096);
+      articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; articleReturnsToIntelligence = returnToIntelligence; currentArticleUrl = url; currentArticleItem = { ...item }; currentPreparedArticle = null; preparedArticleHistory = []; preparedArticleHistoryIndex = -1; readerOriginal.hidden = false; readerMeta.textContent = sourceName(item); readerTitle.textContent = text(item.title || item.name || i18n("newsReader", "资讯正文")); readerContent.replaceChildren();
+      // A formal intelligence citation has a validated short excerpt.  Paint
+      // it in the existing reader shell before navigating the source, so a
+      // slow or unreachable origin never leaves the reader with only an
+      // indefinite spinner. Ordinary RSS items retain the former blank shell.
+      if (citationEvidence) {
+        const evidence = root.createElement("section");
+        evidence.className = "newsnow-citation-evidence";
+        const label = root.createElement("h2");
+        label.textContent = "引用证据";
+        const copy = root.createElement("p");
+        copy.textContent = citationEvidence;
+        evidence.append(label, copy);
+        readerContent.append(evidence);
+      }
+      readerStatus.textContent = i18n("loadingNews", "加载中…"); setReaderVisible(true); traceArticle("click", "reader_shell_visible");
       try {
         const article = await invoke<NewsArticle>("newsnow_open_article", { request: {
           url,
@@ -836,7 +858,32 @@ export function installNewsUi(
         if (article?.local) { traceArticle("native_command", "local_article"); renderLocalArticle(article); }
         else { traceArticle("native_command", "navigation_queued"); readerStatus.textContent = "正在加载网页原文…可随时返回。"; }
       }
-      catch { traceArticle("native_command", "failed"); const returnToIntelligence = articleReturnsToIntelligence; articleOpen = false; articleReturnsToIntelligence = false; currentArticleUrl = ""; currentArticleItem = null; setReaderVisible(false); if (!returnToIntelligence || !returnToIntelligenceWorkspace()) setStatus(i18n("newsArticleLoadFailed", "资讯正文加载失败，请稍后重试。"), "error"); }
+      catch {
+        traceArticle("native_command", "failed");
+        if (citationEvidence) {
+          // Keep the reader shell and its already-validated evidence visible.
+          // This is deliberately not a silent fallback to a browser.
+          readerStatus.textContent = "原站暂不可访问，正在显示已校验的引用证据。";
+          currentArticleUrl = "";
+          currentArticleItem = null;
+          return;
+        }
+        const returnToIntelligence = articleReturnsToIntelligence; articleOpen = false; articleReturnsToIntelligence = false; currentArticleUrl = ""; currentArticleItem = null; setReaderVisible(false); if (!returnToIntelligence || !returnToIntelligenceWorkspace()) setStatus(i18n("newsArticleLoadFailed", "资讯正文加载失败，请稍后重试。"), "error");
+      }
+    }
+    function renderPreparedArticle(article: PreparedNewsArticle): void {
+      currentPreparedArticle = article;
+      readerOriginal.hidden = true;
+      readerMeta.textContent = [article.source.trim(), article.publishedAt?.trim() ?? ""].filter(Boolean).join(" · ");
+      readerTitle.textContent = article.title.trim() || i18n("newsReader", "资讯正文");
+      readerContent.innerHTML = article.contentHtml;
+      readerContent.scrollTop = 0;
+      readerStatus.textContent = "";
+      setReaderVisible(true);
+    }
+    function samePreparedArticle(left: PreparedNewsArticle, right: PreparedNewsArticle): boolean {
+      if (left.eventId && right.eventId) return left.eventId === right.eventId && left.revision === right.revision;
+      return left.title === right.title && left.contentHtml === right.contentHtml;
     }
     function openPreparedArticle(article: PreparedNewsArticle, { returnToIntelligence = false }: { readonly returnToIntelligence?: boolean } = {}): void {
       // Keep the shell transition identical to ordinary news links.  The
@@ -845,15 +892,31 @@ export function installNewsUi(
       // bookshelf shell over the already-populated reader.
       void open({ allowWhenDisabled: true, skipFeedLoad: true });
       articleTraceSequence += 1; articleTraceStartedAt = Date.now();
+      const continuesTimeline = articleOpen && currentPreparedArticle !== null && articleReturnsToIntelligence && returnToIntelligence;
+      if (continuesTimeline) {
+        const current = preparedArticleHistory[preparedArticleHistoryIndex];
+        if (current && samePreparedArticle(current, article)) preparedArticleHistory[preparedArticleHistoryIndex] = article;
+        else {
+          preparedArticleHistory = preparedArticleHistory.slice(0, preparedArticleHistoryIndex + 1);
+          preparedArticleHistory.push(article);
+          preparedArticleHistoryIndex = preparedArticleHistory.length - 1;
+        }
+      } else {
+        preparedArticleHistory = [article];
+        preparedArticleHistoryIndex = 0;
+      }
       articleScrollTop = page.scrollTop; page.scrollTop = 0; articleOpen = true; articleReturnsToIntelligence = returnToIntelligence; currentArticleUrl = ""; currentArticleItem = null;
-      readerOriginal.hidden = true;
-      readerMeta.textContent = [article.source.trim(), article.publishedAt?.trim() ?? ""].filter(Boolean).join(" · ");
-      readerTitle.textContent = article.title.trim() || i18n("newsReader", "资讯正文");
-      readerContent.innerHTML = article.contentHtml;
-      readerContent.scrollTop = 0;
-      readerStatus.textContent = "";
-      setReaderVisible(true);
+      renderPreparedArticle(article);
       traceArticle("prepared_brief", "ready");
+    }
+    function navigatePreparedArticleBack(): boolean {
+      if (!currentPreparedArticle || preparedArticleHistoryIndex <= 0) return false;
+      preparedArticleHistoryIndex -= 1;
+      const previous = preparedArticleHistory[preparedArticleHistoryIndex];
+      if (!previous) return false;
+      renderPreparedArticle(previous);
+      traceArticle("prepared_history", "back");
+      return true;
     }
     function applyCardImage(image: HTMLImageElement, card: HTMLElement, url: string): void {
       if (!url) return;
@@ -1105,10 +1168,20 @@ export function installNewsUi(
     function close({ focus = true }: { readonly focus?: boolean } = {}) { closeSourcePicker({ restoreScroll: false }); closeArticle({ restoreScroll: false }); page.hidden = true; shell.hidden = false; host.document.body.classList.remove("newsnow-active"); button.setAttribute("aria-pressed", "false"); if (focus && !button.hidden) button.focus({ preventScroll: true }); }
     gestureSettings.addEventListener("click", () => host.ReaderExperimentalFeatures?.instance?.openSettings?.());
     button.addEventListener("click", () => { if (!page.hidden || !reader.hidden) close({ focus: false }); else void open(); }); back.addEventListener("click", () => close()); refresh.addEventListener("click", () => void load(true)); listLayout.addEventListener("click", () => setLayout("list")); gridLayout.addEventListener("click", () => setLayout("grid")); mixedOrder.addEventListener("click", () => setOrder("mixed")); sourceOrder.addEventListener("click", () => setOrder("source"));
-    readerBack.addEventListener("click", () => closeArticle({ focus: true }));
+    readerBack.addEventListener("click", () => { if (!navigatePreparedArticleBack()) closeArticle({ focus: true }); });
     readerOriginal.addEventListener("click", () => { if (currentArticleUrl) void Promise.resolve(invoke("open_url", { url: currentArticleUrl })).catch(() => {}); });
     readerContent.addEventListener("click", (event) => {
       const link = event.target instanceof Element ? event.target.closest("a") : null; if (!link) return;
+      const eventId = (link.getAttribute("data-intelligence-event-id") ?? "").trim();
+      if (eventId.length <= 96 && /^[A-Za-z0-9_-]+$/u.test(eventId)) {
+        event.preventDefault();
+        const revisionValue = Number(link.getAttribute("data-intelligence-event-revision") ?? "");
+        const revision = Number.isSafeInteger(revisionValue) && revisionValue > 0 && revisionValue <= 999_999
+          ? revisionValue
+          : undefined;
+        void host.ReaderIntelligenceWorkspace?.instance?.openStoredEvent?.(eventId, revision);
+        return;
+      }
       const preparedSourceUrl = safeHttpUrl(link.getAttribute("data-newsnow-prepared-source-url"));
       if (preparedSourceUrl) {
         // A local intelligence brief has no current upstream URL. Its source
@@ -1236,8 +1309,11 @@ export function installNewsUi(
     if (canInvoke) void invoke("newsnow_prepare_article_shell").catch(() => undefined);
     host.addEventListener("reader-experimental-features-changed", (event) => { const detail = event instanceof CustomEvent ? record(event.detail) : null; if (detail?.key === "newsnow") applyExperimentalAvailability(); if (detail?.key === "newsnow" || detail?.key === "newsnowPrefetch") scheduleBackgroundPrefetch(); }); applyExperimentalAvailability(); applyDisplayOptions(); scheduleBackgroundPrefetch();
     function gestureBack(): void {
-      if (!reader.hidden) closeArticle({ focus: false });
-      else if (!sourcePicker.hidden) closeSourcePicker({ focus: false });
+      if (!reader.hidden) {
+        if (!navigatePreparedArticleBack()) closeArticle({ focus: false });
+        return;
+      }
+      if (!sourcePicker.hidden) closeSourcePicker({ focus: false });
       else if (!page.hidden) close({ focus: false });
     }
     function gestureReopen(): () => void {

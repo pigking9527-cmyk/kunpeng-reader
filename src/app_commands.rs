@@ -6,6 +6,8 @@ use crate::{
 use serde::Deserialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 #[tauri::command]
 pub(crate) fn reader_perf_log(window: tauri::WebviewWindow, event: String) {
@@ -141,6 +143,74 @@ fn problem_trace_has_meaningful_events(snapshot: &serde_json::Value) -> bool {
 static PROBLEM_TRACE_CACHE: std::sync::LazyLock<
     std::sync::Mutex<Option<(u64, serde_json::Value)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+static PROBLEM_TRACE_NATIVE_REFRESH_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+fn native_diagnostics_refreshed_at() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn inject_latest_runtime_diagnostics(snapshot: &mut serde_json::Value) -> Result<(), String> {
+    let object = snapshot
+        .as_object_mut()
+        .ok_or_else(|| "问题记录数据格式不正确".to_string())?;
+    object.insert(
+        "runtime_diagnostics".to_string(),
+        serde_json::to_value(diagnostics::snapshot())
+            .map_err(|_| "问题记录运行诊断数据格式不正确".to_string())?,
+    );
+    object.insert(
+        "native_diagnostics_refreshed_at".to_string(),
+        serde_json::Value::String(native_diagnostics_refreshed_at()),
+    );
+    Ok(())
+}
+
+fn native_only_problem_trace_snapshot() -> serde_json::Value {
+    let captured_at = native_diagnostics_refreshed_at();
+    serde_json::json!({
+        "schema_version": 1,
+        "captured_at": captured_at,
+        "window_ms": 120_000,
+        "privacy": "No book text, selection text, URLs, file paths, account data, or API credentials.",
+        "events": [{
+            "at": captured_at,
+            "age_ms": 0,
+            "type": "native_checkpoint",
+            "detail": { "source": "window_backend" }
+        }]
+    })
+}
+
+pub(crate) fn refresh_problem_trace_native_diagnostics() -> Result<(), String> {
+    let mut cached = PROBLEM_TRACE_CACHE
+        .lock()
+        .map_err(|_| "问题记录缓存暂时不可用".to_string())?;
+    let mut snapshot = cached
+        .as_ref()
+        .map(|(_, snapshot)| snapshot.clone())
+        .or_else(|| load_problem_trace_checkpoint().ok().flatten())
+        .unwrap_or_else(native_only_problem_trace_snapshot);
+    inject_latest_runtime_diagnostics(&mut snapshot)?;
+    validate_problem_trace_checkpoint(&snapshot)?;
+    persist_problem_trace_checkpoint(&snapshot)?;
+    *cached = Some((now_ms(), snapshot));
+    Ok(())
+}
+
+pub(crate) fn schedule_problem_trace_native_refresh() {
+    if PROBLEM_TRACE_NATIVE_REFRESH_SCHEDULED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(150));
+        if let Err(error) = refresh_problem_trace_native_diagnostics() {
+            log(&format!(
+                "problem_trace_native_refresh persist_failed {error}"
+            ));
+        }
+        PROBLEM_TRACE_NATIVE_REFRESH_SCHEDULED.store(false, Ordering::Release);
+    });
+}
 
 fn problem_trace_checkpoint_path() -> Result<PathBuf, String> {
     let directory =
@@ -221,7 +291,8 @@ pub(crate) fn problem_trace_checkpoint(
     let mut cached = PROBLEM_TRACE_CACHE
         .lock()
         .map_err(|_| "问题记录缓存暂时不可用".to_string())?;
-    if let Some(snapshot) = snapshot {
+    if let Some(mut snapshot) = snapshot {
+        inject_latest_runtime_diagnostics(&mut snapshot)?;
         validate_problem_trace_checkpoint(&snapshot)?;
         if !problem_trace_has_meaningful_events(&snapshot) {
             let preserve_cached = cached
@@ -582,5 +653,22 @@ mod tests {
         );
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn native_runtime_diagnostics_are_injected_without_sensitive_payloads() {
+        let mut snapshot = serde_json::json!({
+            "schema_version": 1,
+            "captured_at": "2026-08-23T00:00:00.000Z",
+            "events": [{"type": "reader_window", "detail": {"phase": "geometry_observed"}}]
+        });
+        inject_latest_runtime_diagnostics(&mut snapshot).unwrap();
+        assert!(snapshot["runtime_diagnostics"].is_object());
+        assert!(snapshot["native_diagnostics_refreshed_at"].is_string());
+        assert_eq!(snapshot["captured_at"], "2026-08-23T00:00:00.000Z");
+        validate_problem_trace_checkpoint(&snapshot).unwrap();
+        let json = snapshot.to_string();
+        assert!(!json.contains("book.epub"));
+        assert!(!json.contains("token="));
     }
 }

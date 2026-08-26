@@ -308,7 +308,15 @@ interface IntelligenceClientCacheStatus {
   readonly cachePresent: boolean;
   readonly publicationCount: number;
   readonly unacknowledgedCount: number;
+  readonly deliveryState: "not_refreshed" | "refreshing" | "server_empty" | "ready" | "login_required" | "permission_required" | "delivery_failed";
+  readonly lastAttemptAt: number;
+  readonly lastSuccessAt: number;
   readonly lastRefreshAt: number;
+  readonly lastFetched: number;
+  readonly lastPersisted: number;
+  readonly lastAcknowledged: number;
+  readonly sseState: "not_started" | "connecting" | "connected" | "reconnecting" | "login_required" | "permission_required";
+  readonly lastSseAt: number;
 }
 
 interface IntelligenceClientCachedSource {
@@ -1318,7 +1326,32 @@ function clientCacheStatus(value: unknown): IntelligenceClientCacheStatus | null
     || typeof publicationCount !== "number" || !Number.isInteger(publicationCount) || publicationCount < 0
     || typeof unacknowledgedCount !== "number" || !Number.isInteger(unacknowledgedCount) || unacknowledgedCount < 0
     || typeof lastRefreshAt !== "number" || !Number.isFinite(lastRefreshAt) || lastRefreshAt < 0) return null;
-  return { cachePresent, publicationCount, unacknowledgedCount, lastRefreshAt };
+  const deliveryState = text(source?.deliveryState);
+  const sseState = text(source?.sseState);
+  const integerAt = (key: string): number => {
+    const candidate = source?.[key];
+    return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : 0;
+  };
+  const delivery = ["not_refreshed", "refreshing", "server_empty", "ready", "login_required", "permission_required", "delivery_failed"].includes(deliveryState)
+    ? deliveryState as IntelligenceClientCacheStatus["deliveryState"]
+    : lastRefreshAt > 0 ? (cachePresent ? "ready" : "server_empty") : "not_refreshed";
+  const sse = ["not_started", "connecting", "connected", "reconnecting", "login_required", "permission_required"].includes(sseState)
+    ? sseState as IntelligenceClientCacheStatus["sseState"]
+    : "not_started";
+  return {
+    cachePresent,
+    publicationCount,
+    unacknowledgedCount,
+    deliveryState: delivery,
+    lastAttemptAt: integerAt("lastAttemptAt"),
+    lastSuccessAt: integerAt("lastSuccessAt") || lastRefreshAt,
+    lastRefreshAt,
+    lastFetched: integerAt("lastFetched"),
+    lastPersisted: integerAt("lastPersisted"),
+    lastAcknowledged: integerAt("lastAcknowledged"),
+    sseState: sse,
+    lastSseAt: integerAt("lastSseAt"),
+  };
 }
 
 function clientCachedPublications(value: unknown): IntelligenceClientCachedPublication[] | null {
@@ -1568,6 +1601,37 @@ function intelligenceClientErrorMessage(error: unknown): string {
     return "当前账户没有情报中心访问权限；本地已缓存内容不会被删除。";
   }
   return "情报缓存暂时无法读取；不会因此启动网络采集或模型任务。";
+}
+
+function intelligenceDeliveryStateCopy(cache: IntelligenceClientCacheStatus): string {
+  const time = (value: number): string => value > 0
+    ? new Date(value).toLocaleString("zh-CN")
+    : "暂无";
+  const sse = ({
+    not_started: "未启动",
+    connecting: "连接中",
+    connected: "已连接",
+    reconnecting: "重连中",
+    login_required: "等待登录",
+    permission_required: "权限未就绪",
+  } as const)[cache.sseState];
+  const metrics = `最近成功：获取 ${cache.lastFetched}、保存 ${cache.lastPersisted}、确认 ${cache.lastAcknowledged}；SSE ${sse}`;
+  switch (cache.deliveryState) {
+    case "not_refreshed":
+      return "尚未手动刷新。点击“刷新”后才会向服务端登记设备、拉取并校验正式发布包；本机草稿或未配对内容不属于账号资讯。";
+    case "refreshing":
+      return `正在刷新正式资讯；最近尝试：${time(cache.lastAttemptAt)}。`;
+    case "server_empty":
+      return `最近刷新成功：${time(cache.lastSuccessAt)}；服务端当前没有可投递的正式包。${metrics}`;
+    case "ready":
+      return `正式资讯已同步；最近成功：${time(cache.lastSuccessAt)}。${metrics}`;
+    case "login_required":
+      return "登录状态未就绪，尚未请求服务端正式资讯；本机草稿或未配对内容不会显示在账号资讯中。";
+    case "permission_required":
+      return `当前账号尚无情报中心权限；最近尝试：${time(cache.lastAttemptAt)}。已保存的正式缓存不会被删除。`;
+    case "delivery_failed":
+      return `最近刷新未完成（传输或完整性校验失败）；最近尝试：${time(cache.lastAttemptAt)}。已保存的正式缓存不受影响。`;
+  }
 }
 
 function escapeBriefHtml(value: string): string {
@@ -1918,6 +1982,14 @@ function sourceBatches(sourceIds: readonly string[]): string[][] {
   return batches;
 }
 
+// 以下 helpers 保留给旧的本机快照兼容路径；正式账号资讯页不调用它们，避免
+// 将旧抓取/推理流程重新带回客户端消费链。显式保留引用使编译期审计可区分
+// “兼容边界仍存在”与“已被主流程调用”。
+void mergeRelatedEventEntries;
+void nonNegativeCount;
+void saveSnapshot;
+void sourceBatches;
+
 function catalogSources(result: unknown): IntelligenceCatalogSource[] {
   const items = Array.isArray(result) ? result : [];
   return items.map(record).filter((item): item is IntelligenceCatalogSource => item !== null);
@@ -2077,6 +2149,7 @@ export function installIntelligenceWorkspaceUi(
     const digestHistoryNext = requiredElement<HTMLButtonElement>(root, "intelligence-digest-history-next");
     const digestHistoryReadonly = requiredElement<HTMLElement>(root, "intelligence-digest-history-readonly");
     const processingSummary = requiredElement<HTMLElement>(root, "intelligence-processing-summary");
+    const deliveryState = requiredElement<HTMLElement>(root, "intelligence-delivery-state");
     const modelStatus = requiredElement<HTMLElement>(root, "intelligence-briefing-model-status");
     const modelBaseUrl = requiredElement<HTMLInputElement>(root, "intelligence-local-model-base-url");
     const modelName = requiredElement<HTMLSelectElement>(root, "intelligence-local-model-name");
@@ -2124,6 +2197,10 @@ export function installIntelligenceWorkspaceUi(
 
     let currentLayout: IntelligenceLayout = "briefing";
     let loading = false;
+    // A native SSE wake-up only means that the protected Rust cache changed.
+    // Keep one pending marker while a read is in flight so the page never
+    // paints an older cache projection after the background refresh commits.
+    let deliveryCacheReloadPending = false;
     let loadGeneration = 0;
     let cancelledLoadPending = false;
     let reloadAfterCancelledLoad = false;
@@ -5661,14 +5738,15 @@ export function installIntelligenceWorkspaceUi(
       processingSummary.textContent = cache.cachePresent
         ? `正式分发缓存 · ${publications.length} 个发布包 / 显示 ${events.length}/${allEvents.length} 个事件${personalized ? " · 已按本机收藏偏好排序" : ""}`
         : "尚无正式分发缓存";
+      if (deliveryState) deliveryState.textContent = intelligenceDeliveryStateCopy(cache);
       modelStatus.textContent = "本机缓存阅读模式 · 不会自动调用模型";
-      digestHistorySummary.textContent = "此处只显示当前账户已校验的正式发布包；打开页面不联网，点击“刷新”才会同步。";
+      digestHistorySummary.textContent = "此处只显示服务端正式发布后、当前账户已校验的发布包；打开页面不联网，点击“刷新”才会同步。本机草稿和未配对内容不会进入账号资讯。";
       if (events.length === 0) {
         digestList.replaceChildren();
         signalList.replaceChildren();
-        briefingCount.textContent = "暂无正式资讯";
-        contextTitle.textContent = "暂无本地正式情报";
-        contextBody.textContent = "登录并获得情报中心权限后，点击“刷新”下载正式发布包；本页不会自行联网。";
+        briefingCount.textContent = cache.deliveryState === "server_empty" ? "服务端暂无正式资讯" : "暂无正式资讯";
+        contextTitle.textContent = cache.deliveryState === "permission_required" ? "账号尚无情报权限" : "暂无已同步正式情报";
+        contextBody.textContent = "账号资讯只展示服务端正式发布、完成校验并保存到当前账号缓存的内容；本机草稿、未配对发布或处理中的资讯不会显示在这里。";
         contextMeta.textContent = "";
         contextReasons.replaceChildren();
         contextEvidence.replaceChildren();
@@ -5749,7 +5827,7 @@ export function installIntelligenceWorkspaceUi(
         }
         archiveStatus.textContent = "历史回源正在准备；将在内容就绪后下载并校验。";
         if (!page.hidden && activeArchiveRequestId === requestId) {
-          runtime.setTimeout?.(() => { void updateArchiveStatus(requestId); }, 4_000);
+          setTimeout(() => { void updateArchiveStatus(requestId); }, 4_000);
         }
       } catch (error: unknown) {
         archiveStatus.textContent = intelligenceClientErrorMessage(error);
@@ -6080,6 +6158,12 @@ export function installIntelligenceWorkspaceUi(
       }
     };
 
+    // 正式资讯页只读取账号隔离的原生缓存；保留旧路径供已保存的历史本机动作
+    // 兼容，不在打开或刷新页面时执行。
+    void waitForPipelineCompatibility;
+    void preloadPreparedBriefImages;
+    void loadLegacyLocalSnapshot;
+
     const load = async ({ forceRefresh = false }: { readonly forceRefresh?: boolean } = {}): Promise<void> => {
       if (loading) return;
       if (!transport) {
@@ -6091,32 +6175,45 @@ export function installIntelligenceWorkspaceUi(
       const isCurrentLoad = (): boolean => generation === loadGeneration && !page.hidden;
       refreshButton.disabled = true;
       try {
+        let refreshFailed = false;
         if (forceRefresh) {
-          await transport.invoke("intelligence_client_refresh");
+          try {
+            await transport.invoke("intelligence_client_refresh");
+          } catch {
+            // The native cache records a fixed, content-free failure state.
+            // Continue with cache reads so the page can distinguish an empty
+            // server response from login, permission, or validation failure.
+            refreshFailed = true;
+          }
           if (!isCurrentLoad()) return;
         }
         // Both commands are native cache reads.  They do not receive a URL or
         // token, and neither opens a network connection on page open.
         const statusValue = clientCacheStatus(await transport.invoke<unknown>("intelligence_client_cache_status"));
         if (!isCurrentLoad()) return;
-        const publications = clientCachedPublications(
-          await transport.invoke<unknown>("intelligence_client_cached_publications"),
-        );
+        const publications = statusValue?.deliveryState === "login_required"
+          ? []
+          : clientCachedPublications(
+            await transport.invoke<unknown>("intelligence_client_cached_publications"),
+          );
         if (!isCurrentLoad()) return;
         if (!statusValue || !publications) throw new Error("invalid cache projection");
         const ordered = await orderFormalPublicationCacheByPreference(statusValue, publications);
         if (!isCurrentLoad()) return;
         renderFormalPublicationCache(statusValue, publications, ordered.events, ordered.personalized);
-        const refreshed = forceRefresh ? "已完成手动刷新；" : "已读取本地正式缓存；";
-        const refreshTime = statusValue.lastRefreshAt > 0
-          ? `上次刷新 ${new Date(statusValue.lastRefreshAt).toLocaleString("zh-CN")}。`
-          : "尚未执行过手动刷新。";
-        setStandardStatus(`${refreshed}当前 ${publications.length} 个发布包、${statusValue.publicationCount} 条缓存记录。${refreshTime}`);
+        const refreshed = forceRefresh
+          ? (refreshFailed ? "手动刷新未完成；" : "已完成手动刷新；")
+          : "已读取本地正式缓存；";
+        setStandardStatus(`${refreshed}${intelligenceDeliveryStateCopy(statusValue)}`);
       } catch (error: unknown) {
         if (isCurrentLoad()) setStandardStatus(intelligenceClientErrorMessage(error));
       } finally {
         loading = false;
         refreshButton.disabled = false;
+        if (deliveryCacheReloadPending && !page.hidden) {
+          deliveryCacheReloadPending = false;
+          void load();
+        }
       }
     };
 
@@ -6166,6 +6263,20 @@ export function installIntelligenceWorkspaceUi(
     };
 
     toolbarButton.addEventListener("click", () => { void open(); });
+    // Rust emits this only after an SSE wake-up has completed the normal
+    // authenticated download, validation and ACK path.  The payload is unit;
+    // the UI learns no server URL, token, delivery ID, or editorial content
+    // from the event and simply re-reads the existing local formal cache.
+    if (transport?.listen) {
+      void transport.listen("intelligence-delivery-updated", () => {
+        if (page.hidden) return;
+        if (loading) {
+          deliveryCacheReloadPending = true;
+          return;
+        }
+        void load();
+      }).catch(() => undefined);
+    }
     void refreshToolbarVisibility();
     runtime.addEventListener("focus", () => { void refreshToolbarVisibility(); });
     back.addEventListener("click", () => close());

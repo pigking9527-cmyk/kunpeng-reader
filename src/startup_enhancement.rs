@@ -460,6 +460,10 @@ pub(crate) fn should_keep_running(app: &tauri::AppHandle) -> bool {
     app.state::<StartupEnhancementState>().enabled()
 }
 
+fn should_destroy_reader_shell_on_main_background(is_bound_reader: bool) -> bool {
+    !is_bound_reader
+}
+
 fn finish_background_main(
     app: &tauri::AppHandle,
     enhancement: &StartupEnhancementState,
@@ -474,12 +478,15 @@ fn finish_background_main(
         if !enhancement.background_is_current(transition) {
             return;
         }
-        if label.starts_with("reader-") {
-            if crate::window_commands::reader_window_id(&reader).is_some() {
-                let _ = reader.close();
-            } else {
-                let _ = reader.destroy();
-            }
+        if label.starts_with("reader-")
+            && should_destroy_reader_shell_on_main_background(
+                crate::window_commands::reader_window_id(&reader).is_some(),
+            )
+        {
+            // A bound shell is the user's active reading page. Backgrounding
+            // the shelf must not turn it into a close request; only an unused
+            // preloaded shell is disposable here.
+            let _ = reader.destroy();
         }
     }
     if !enhancement.background_is_current(transition) {
@@ -637,6 +644,12 @@ mod tests {
             serde_json::to_value(config).unwrap(),
             serde_json::json!({"enabled": true, "continueHighCost": true, "launchAtLogin": true, "launchAtLoginBackground": true})
         );
+    }
+
+    #[test]
+    fn backgrounding_the_main_window_keeps_the_bound_reader_open() {
+        assert!(!should_destroy_reader_shell_on_main_background(true));
+        assert!(should_destroy_reader_shell_on_main_background(false));
     }
 
     #[cfg(target_os = "macos")]

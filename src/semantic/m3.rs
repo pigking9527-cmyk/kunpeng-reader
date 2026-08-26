@@ -43,14 +43,23 @@ fn global_cache() -> &'static Mutex<Option<SparseGlobal>> {
     GLOBAL.get_or_init(|| Mutex::new(None))
 }
 
+fn directory_for_model(selected: model::SemanticModel) -> Option<std::path::PathBuf> {
+    vector::directory_for_model(selected).map(|dir| dir.join("m3-hybrid"))
+}
 fn directory() -> Option<std::path::PathBuf> {
-    vector::directory().map(|dir| dir.join("m3-hybrid"))
+    directory_for_model(model::active())
+}
+fn book_path_for_model(selected: model::SemanticModel, id: u64) -> Option<std::path::PathBuf> {
+    Some(directory_for_model(selected)?.join(format!("m3_{id}.rmp")))
 }
 fn book_path(id: u64) -> Option<std::path::PathBuf> {
-    Some(directory()?.join(format!("m3_{id}.rmp")))
+    book_path_for_model(model::active(), id)
+}
+fn global_path_for_model(selected: model::SemanticModel) -> Option<std::path::PathBuf> {
+    Some(directory_for_model(selected)?.join("sparse-global.rmp"))
 }
 fn global_path() -> Option<std::path::PathBuf> {
-    Some(directory()?.join("sparse-global.rmp"))
+    global_path_for_model(model::active())
 }
 
 fn trim_sparse(indices: &[usize], values: &[f32]) -> SparseChunk {
@@ -68,8 +77,12 @@ fn trim_sparse(indices: &[usize], values: &[f32]) -> SparseChunk {
     }
 }
 
-fn write_book(id: u64, chunks: Vec<SparseChunk>) -> Result<(), String> {
-    let path = book_path(id).ok_or("无法确定 M3 索引目录")?;
+fn write_book_for_model(
+    selected: model::SemanticModel,
+    id: u64,
+    chunks: Vec<SparseChunk>,
+) -> Result<(), String> {
+    let path = book_path_for_model(selected, id).ok_or("无法确定 M3 索引目录")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -81,18 +94,27 @@ fn write_book(id: u64, chunks: Vec<SparseChunk>) -> Result<(), String> {
     crate::atomic_file::write(&path, &bytes)
 }
 
-fn read_book(id: u64) -> Option<SparseBook> {
-    let book: SparseBook = rmp_serde::from_slice(&std::fs::read(book_path(id)?).ok()?).ok()?;
+fn write_book(id: u64, chunks: Vec<SparseChunk>) -> Result<(), String> {
+    write_book_for_model(model::active(), id, chunks)
+}
+
+fn read_book_for_model(selected: model::SemanticModel, id: u64) -> Option<SparseBook> {
+    let book: SparseBook =
+        rmp_serde::from_slice(&std::fs::read(book_path_for_model(selected, id)?).ok()?).ok()?;
     (book.version == VERSION).then_some(book)
 }
 
-fn rebuild_global(ids: &[u64]) -> Result<(), String> {
+fn rebuild_global_for_model(
+    selected: model::SemanticModel,
+    ids: &[u64],
+    publish_cache: bool,
+) -> Result<(), String> {
     let mut global = SparseGlobal {
         version: VERSION,
         postings: HashMap::new(),
     };
     for &id in ids {
-        let Some(book) = read_book(id) else {
+        let Some(book) = read_book_for_model(selected, id) else {
             continue;
         };
         for (chunk, sparse) in book.chunks.iter().enumerate() {
@@ -105,13 +127,19 @@ fn rebuild_global(ids: &[u64]) -> Result<(), String> {
             }
         }
     }
-    let path = global_path().ok_or("无法确定 M3 索引目录")?;
+    let path = global_path_for_model(selected).ok_or("无法确定 M3 索引目录")?;
     let bytes = rmp_serde::to_vec(&global).map_err(|e| e.to_string())?;
     crate::atomic_file::write(&path, &bytes)?;
-    *global_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(global);
+    if publish_cache {
+        *global_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(global);
+    }
     Ok(())
+}
+
+fn rebuild_global(ids: &[u64]) -> Result<(), String> {
+    rebuild_global_for_model(model::active(), ids, true)
 }
 
 fn load_global() -> Option<SparseGlobal> {
@@ -140,6 +168,85 @@ pub(super) fn indexed_books() -> u32 {
         .flatten()
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("m3_"))
         .count() as u32
+}
+
+pub(super) fn clear_memory_cache() {
+    *global_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+pub(super) fn build_pending(
+    embedder: &Mutex<model::SemanticEmbedder>,
+    selected: model::SemanticModel,
+    books: &[book::Book],
+    state: &AppState,
+    task: &crate::background_tasks::TaskRunGuard,
+) -> Result<(), String> {
+    if selected != model::SemanticModel::BgeM3 {
+        return Err("M3 pending 索引只能使用 BGE-M3 模型".into());
+    }
+    for (book_index, book) in books.iter().enumerate() {
+        if !matches!(
+            task.control_signal(),
+            crate::background_tasks::TaskControlSignal::Continue
+        ) {
+            return Err("M3 pending 索引已停止".into());
+        }
+        let data = vector::load_uncached_for_model(selected, book.id)
+            .ok_or_else(|| format!("{}：无法读取 pending 稠密向量", book.title))?;
+        let texts = data
+            .entries()
+            .map(|(_, text, _)| text.to_string())
+            .collect::<Vec<_>>();
+        let mut chunks = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(8) {
+            let output = embedder
+                .lock()
+                .map_err(|_| "BGE-M3 pending 模型锁定失败".to_string())?
+                .embed_m3(batch.to_vec())?;
+            chunks.extend(
+                output
+                    .sparse
+                    .iter()
+                    .map(|sparse| trim_sparse(&sparse.indices, &sparse.values)),
+            );
+        }
+        if chunks.len() != texts.len() {
+            return Err(format!("{}：M3 pending 稀疏输出数量不完整", book.title));
+        }
+        write_book_for_model(selected, book.id, chunks)?;
+        let mut progress = state
+            .sem_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        progress.current = format!(
+            "正在校验 M3 混合索引 {}/{}：{}；原方案继续服务",
+            book_index + 1,
+            books.len(),
+            book.title
+        );
+    }
+    let ids = books.iter().map(|book| book.id).collect::<Vec<_>>();
+    rebuild_global_for_model(selected, &ids, false)?;
+    for book in books {
+        let sparse = read_book_for_model(selected, book.id)
+            .ok_or_else(|| format!("{}：M3 pending 索引复核失败", book.title))?;
+        let dense = vector::load_uncached_for_model(selected, book.id)
+            .ok_or_else(|| format!("{}：pending 稠密向量复核失败", book.title))?;
+        if sparse.chunks.len() != dense.len() {
+            return Err(format!("{}：M3 pending 块数量不一致", book.title));
+        }
+    }
+    let global: SparseGlobal = rmp_serde::from_slice(
+        &std::fs::read(global_path_for_model(selected).ok_or("无法确定 M3 全局索引路径")?)
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    if global.version != VERSION {
+        return Err("M3 pending 全局索引版本校验失败".into());
+    }
+    Ok(())
 }
 
 pub(super) async fn build(app: tauri::AppHandle) -> Result<(), String> {

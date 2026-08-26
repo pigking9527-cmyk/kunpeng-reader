@@ -248,8 +248,16 @@ pub struct WinGeom {
     pub maximized: bool,
     /// Physical pixels captured from the native window. `None` denotes an
     /// older logical-pixel record and remains readable for compatibility.
+    /// On Windows this legacy field stores the client-area size together with
+    /// the outer position; `physical_outer` is the stable replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physical: Option<PhysicalWinGeom>,
+    /// Windows undecorated windows have invisible resize/shadow margins. Keep
+    /// the complete outer rectangle so save -> restore cannot add those
+    /// margins again on every reopen. Other platforms may continue using the
+    /// legacy physical client rectangle above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_outer: Option<PhysicalWinGeom>,
 }
 
 impl Default for WinGeom {
@@ -261,6 +269,7 @@ impl Default for WinGeom {
             h: 760.0,
             maximized: false,
             physical: None,
+            physical_outer: None,
         }
     }
 }

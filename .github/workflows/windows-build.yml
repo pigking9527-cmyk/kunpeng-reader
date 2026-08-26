@@ -78,7 +78,7 @@ jobs:
 
       - name: Build portable executable
         shell: pwsh
-        run: cargo build --release --locked
+        run: cargo build --release --locked --bins
 
       - name: Build NSIS installer
         shell: pwsh

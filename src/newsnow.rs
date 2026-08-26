@@ -93,7 +93,11 @@ const INTELLIGENCE_ARTICLE_CACHE_MAX_ENTRIES: usize = 120;
 const INTELLIGENCE_ARTICLE_CACHE_MAX_BYTES: u64 = 48 * 1024 * 1024;
 const INTELLIGENCE_ARTICLE_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const INTELLIGENCE_ENRICHMENT_MAX_ARTICLES: usize = 12;
-const INTELLIGENCE_ENRICHMENT_MAX_BODY_CHARS: usize = 14_000;
+// Keep the cleaned article, not just an RSS-sized preview. The editorial
+// pipeline map-reduces this text in bounded chunks before the 27B final pass;
+// this guard is only for pathological pages and remains well below the native
+// store's 2 MiB per-article limit.
+const INTELLIGENCE_ENRICHMENT_MAX_BODY_CHARS: usize = 96_000;
 const INTELLIGENCE_ENRICHMENT_MAX_IMAGES: usize = 6;
 const INTELLIGENCE_ENRICHMENT_MAX_VIDEOS: usize = 3;
 const INTELLIGENCE_ENRICHMENT_IMAGE_MAX_BYTES: u64 = 480 * 1024;
@@ -163,6 +167,7 @@ fn article_webview_phase(event: PageLoadEvent) -> ArticleWebviewPhase {
     }
 }
 
+#[cfg(test)]
 fn article_shell_url() -> Result<tauri::Url, String> {
     tauri::Url::parse(ARTICLE_SHELL_URL).map_err(|_| "资讯预加载外壳地址无效".to_string())
 }
@@ -1244,7 +1249,7 @@ fn read_intelligence_article_cache(url: &str) -> Option<NewsNowIntelligenceArtic
         && age_millis <= INTELLIGENCE_ARTICLE_CACHE_TTL.as_millis() as i64
         && entry.article.url == url
         && !entry.article.body.trim().is_empty())
-    .then(|| NewsNowIntelligenceArticleEnrichment {
+    .then_some(NewsNowIntelligenceArticleEnrichment {
         cached: true,
         ..entry.article
     })
@@ -1508,16 +1513,13 @@ fn fetch_intelligence_article_enrichment(
     }
     let mut image_urls =
         deduplicated_media_urls(&html, &url, &["img"], INTELLIGENCE_ENRICHMENT_MAX_IMAGES);
-    let lead_image_url = request
-        .image_url
-        .trim()
-        .is_empty()
-        .then(|| preview_image_from_html(&html, &url))
-        .unwrap_or_else(|| {
-            url_open::validate_https_url(request.image_url.trim())
-                .map(str::to_string)
-                .unwrap_or_default()
-        });
+    let lead_image_url = if request.image_url.trim().is_empty() {
+        preview_image_from_html(&html, &url)
+    } else {
+        url_open::validate_https_url(request.image_url.trim())
+            .map(str::to_string)
+            .unwrap_or_default()
+    };
     if !lead_image_url.is_empty() {
         image_urls.retain(|image| image != &lead_image_url);
         image_urls.insert(0, lead_image_url.clone());
@@ -4442,6 +4444,17 @@ mod tests {
                 "https://media.example/video.webm".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn intelligence_enrichment_keeps_long_article_tail_for_chunked_evidence() {
+        let long_section = "可核验正文。".repeat(4_000);
+        let html = format!(
+            "<html><body><article><p>{long_section}</p><p>长文末尾唯一事实标记。</p></article></body></html>"
+        );
+        let body = cleaned_article_text(&html);
+        assert!(body.chars().count() > 14_000);
+        assert!(body.contains("长文末尾唯一事实标记。"));
     }
 
     #[test]

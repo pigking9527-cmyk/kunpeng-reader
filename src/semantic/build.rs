@@ -1,9 +1,10 @@
 use super::model::{
-    active as active_semantic_model, document_input, embedder as get_embedder, SemanticEmbedder,
+    active as active_semantic_model, document_input_for, embedder as get_embedder,
+    SemanticEmbedder, SemanticModel,
 };
 use super::{
     accelerator, batch, clear_sem_profile_cache, clear_sem_query_cache, clear_sem_status_cache,
-    profile, status, vector,
+    profile, retrieval, solution, status, vector,
 };
 use crate::semantic_core::{chunk_text, normalize};
 use crate::semantic_tasks::{begin_semantic_task, finish_semantic_task};
@@ -52,15 +53,6 @@ fn sem_build_control(
 /// 语义向量按“书”落盘；暂停时丢弃当前书的隐藏临时文件，已完成书保持可用。
 static SEM_VECTOR_PAUSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-fn sem_vec_path(id: u64) -> Option<std::path::PathBuf> {
-    vector::vector_path(id)
-}
-
-/// 未完成书籍只写入隐藏临时文件，容量统计与检索都不会将它当作已建索引。
-fn sem_build_temp_vec_path(id: u64) -> Option<std::path::PathBuf> {
-    vector::build_temp_path(id)
-}
-
 /// 该书的语义索引是否已是最新（版本/模型/源文件时间都匹配）。
 fn sem_is_fresh(book: &book::Book) -> bool {
     vector::is_complete(book)
@@ -82,6 +74,8 @@ struct SemBuildBookInput<'a> {
 
 fn sem_build_book(
     embedder: &Mutex<SemanticEmbedder>,
+    selected: SemanticModel,
+    publish_profile: bool,
     input: SemBuildBookInput<'_>,
     resume_at: &AtomicU64,
     pause_requested: &AtomicBool,
@@ -102,15 +96,18 @@ fn sem_build_book(
             items.push((ci as u32, c));
         }
     }
-    let vec_path = sem_vec_path(id).ok_or("无缓存路径")?;
+    let vec_path = vector::vector_path_for_model(selected, id).ok_or("无缓存路径")?;
     if let Some(d) = vec_path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
     sem_build_control(pause_requested, task)?;
     if items.is_empty() {
         crate::atomic_file::write(&vec_path, &[])?;
-        profile::discard_single(id);
-        vector::publish_metadata(
+        if publish_profile {
+            profile::discard_single(id);
+        }
+        vector::publish_metadata_for_model(
+            selected,
             id,
             vector::Publication::empty(mtime, source_id, source_bytes),
         )?;
@@ -118,7 +115,7 @@ fn sem_build_book(
     }
     // 保留上一代完整索引，直到新向量已完整写入并同步。暂停或进程异常只删除
     // 当前隐藏临时文件，不能再把原本可用的旧索引一起删掉。
-    let temp_vec_path = sem_build_temp_vec_path(id).ok_or("无缓存路径")?;
+    let temp_vec_path = vector::build_temp_path_for_model(selected, id).ok_or("无缓存路径")?;
     let _ = std::fs::remove_file(&temp_vec_path);
     let mut vf =
         std::io::BufWriter::new(std::fs::File::create(&temp_vec_path).map_err(|e| e.to_string())?);
@@ -127,7 +124,7 @@ fn sem_build_book(
     let mut dim = 0usize;
     let mut profile_acc: Vec<f32> = Vec::new();
     let mut profile_count = 0usize;
-    let mut batch_size = batch::AdaptiveBatch::for_model(active_semantic_model().dimensions());
+    let mut batch_size = batch::AdaptiveBatch::for_model(selected.dimensions());
     let mut offset = 0usize;
     // 一次推理无法在中间强杀；自适应小批次限制暂停延迟，并在内存不足时缩批
     // 重试同一段，不丢弃已经完整写入本书临时文件的前序批次。
@@ -152,7 +149,10 @@ fn sem_build_book(
             std::thread::sleep(std::time::Duration::from_millis((r - now).min(200)));
         }
         // bge 段落不加前缀，直接用原文
-        let inputs: Vec<String> = batch.iter().map(|(_, t)| document_input(t)).collect();
+        let inputs: Vec<String> = batch
+            .iter()
+            .map(|(_, t)| document_input_for(selected, t))
+            .collect();
         let embs = match embedder
             .lock()
             .map_err(|_| "语义模型锁定失败".to_string())?
@@ -269,10 +269,13 @@ fn sem_build_book(
         .map(|byte| format!("{byte:02X}"))
         .collect();
     crate::atomic_file::commit_temp_file(&temp_vec_path, &vec_path)?;
-    if let Some(profile) = profile {
-        profile::write_single(id, mtime, dim, profile_count, &profile)?;
+    if publish_profile {
+        if let Some(profile) = profile {
+            profile::write_single(id, mtime, dim, profile_count, &profile)?;
+        }
     }
-    vector::publish_metadata(
+    vector::publish_metadata_for_model(
+        selected,
         id,
         vector::Publication::populated(
             mtime,
@@ -284,7 +287,7 @@ fn sem_build_book(
             vector_sha256,
         ),
     )?;
-    if active_semantic_model().id() == "bge-m3" {
+    if selected == active_semantic_model() && selected.id() == "bge-m3" {
         super::m3::invalidate_book(id);
     }
     Ok(())
@@ -413,6 +416,8 @@ pub(super) async fn build_semantic_index(
                 Some(ch) => {
                     if let Err(err) = sem_build_book(
                         &embedder,
+                        active_semantic_model(),
+                        true,
                         SemBuildBookInput {
                             title: &b.title,
                             id,
@@ -499,6 +504,227 @@ pub(super) async fn build_semantic_index(
         finish_semantic_task(
             app.state::<AppState>().inner(),
             "语义索引未启动",
+            Some(error.clone()),
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn abandon_pending_solution(
+    state: &AppState,
+    task: crate::background_tasks::TaskRunGuard,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    {
+        let _transaction = solution::transaction_guard();
+        if let Err(error) = solution::clear_pending() {
+            crate::log(&format!(
+                "semantic_solution pending_clear_failed error={error}"
+            ));
+        }
+    }
+    finish_semantic_task(
+        state,
+        "新智能搜索方案未切换；继续使用原方案",
+        Some(message.clone()),
+    );
+    let _ = task.fail(message);
+}
+
+/// 在独立模型实例和独立模型目录中建立 pending 逐书向量。整个过程不修改
+/// `model::active()`、AppState committed embedder 或已加载全局索引；只有全部
+/// 图书通过模型/revision、来源与向量形状校验后，才提交并切换运行态。
+pub(super) async fn build_pending_solution(
+    app: tauri::AppHandle,
+    selected: SemanticModel,
+    mode: retrieval::RetrievalMode,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let start_message = format!(
+        "正在建立 {} 新搜索库；当前搜索库继续服务…",
+        selected.label()
+    );
+    let task_handle =
+        begin_semantic_task(state.inner(), "semantic_solution", &start_message, false)?;
+    {
+        let _transaction = solution::transaction_guard();
+        if let Err(error) = solution::stage_pending(
+            active_semantic_model().id(),
+            retrieval::active_mode().id(),
+            selected.id(),
+            mode.id(),
+        ) {
+            finish_semantic_task(state.inner(), "新智能搜索方案未启动", Some(error.clone()));
+            return Err(error);
+        }
+    }
+
+    SEM_VECTOR_PAUSE_REQUESTED.store(false, Ordering::Release);
+    let worker_app = app.clone();
+    if let Err(error) = task_handle.spawn_detached("semantic-pending-solution", move |task| {
+        let state = worker_app.state::<AppState>();
+        let (embedder, pending_device) = match super::model::prepare_pending_embedder(selected) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                abandon_pending_solution(state.inner(), task, error);
+                return;
+            }
+        };
+        let books = state
+            .library
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .books
+            .iter()
+            .filter(|book| book.format != "pdf")
+            .cloned()
+            .collect::<Vec<_>>();
+        {
+            let mut progress = state.sem_progress.lock().unwrap_or_else(|p| p.into_inner());
+            progress.total = books.len() as u32;
+            progress.done = 0;
+            progress.current = format!("正在为 {} 建立独立索引；原方案继续服务…", selected.label());
+        }
+
+        for (index, book) in books.iter().enumerate() {
+            match task.control_signal() {
+                crate::background_tasks::TaskControlSignal::Pause
+                | crate::background_tasks::TaskControlSignal::Cancel => {
+                    abandon_pending_solution(
+                        state.inner(),
+                        task,
+                        "新方案建库已停止；已完成的独立向量会在下次选择时复用",
+                    );
+                    return;
+                }
+                crate::background_tasks::TaskControlSignal::Continue => {}
+            }
+            if let Err(error) = task.checkpoint(
+                index as u64,
+                books.len() as u64,
+                book.title.clone(),
+                format!(
+                    r#"{{"pending_model":"{}","book_id":{},"book_index":{index}}}"#,
+                    selected.id(),
+                    book.id
+                ),
+            ) {
+                abandon_pending_solution(state.inner(), task, error);
+                return;
+            }
+            if !vector::verify_complete_for_model(book, selected) {
+                let Some(chapters) = search::get_semantic_book_chapters(state.inner(), book) else {
+                    abandon_pending_solution(
+                        state.inner(),
+                        task,
+                        format!("{}：无法读取正文", book.title),
+                    );
+                    return;
+                };
+                if let Err(error) = sem_build_book(
+                    &embedder,
+                    selected,
+                    false,
+                    SemBuildBookInput {
+                        title: &book.title,
+                        id: book.id,
+                        mtime: search::file_mtime(&book.path),
+                        source_id: &book.content_id,
+                        source_bytes: vector::source_bytes(book),
+                        chapters: &chapters,
+                    },
+                    &state.index_resume_at,
+                    &SEM_VECTOR_PAUSE_REQUESTED,
+                    Some(&task),
+                ) {
+                    abandon_pending_solution(
+                        state.inner(),
+                        task,
+                        format!("{}：{error}", book.title),
+                    );
+                    return;
+                }
+            }
+            let mut progress = state.sem_progress.lock().unwrap_or_else(|p| p.into_inner());
+            progress.done = (index + 1) as u32;
+            progress.current = format!(
+                "{} · 已校验 {}/{}；原方案继续服务",
+                book.title,
+                index + 1,
+                books.len()
+            );
+        }
+
+        let validation_books = state
+            .library
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .books
+            .iter()
+            .filter(|book| book.format != "pdf")
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(invalid) = validation_books
+            .iter()
+            .find(|book| !vector::verify_complete_for_model(book, selected))
+        {
+            abandon_pending_solution(
+                state.inner(),
+                task,
+                format!("{}：新索引完整性复核失败", invalid.title),
+            );
+            return;
+        }
+        if mode == retrieval::RetrievalMode::M3Hybrid {
+            if let Err(error) = super::m3::build_pending(
+                &embedder,
+                selected,
+                &validation_books,
+                state.inner(),
+                &task,
+            ) {
+                abandon_pending_solution(state.inner(), task, error);
+                return;
+            }
+        }
+        if let Err(error) = retrieval::prepare_for_solution(state.inner(), selected, mode) {
+            abandon_pending_solution(state.inner(), task, error);
+            return;
+        }
+
+        let promotion = {
+            let _transaction = solution::transaction_guard();
+            let result = solution::promote_pending(selected.id(), mode.id());
+            if result.is_ok() {
+                super::model::promote_pending_runtime(
+                    state.inner(),
+                    selected,
+                    mode,
+                    Some((embedder.clone(), pending_device)),
+                );
+            }
+            result
+        };
+        if let Err(error) = promotion {
+            abandon_pending_solution(state.inner(), task, error);
+            return;
+        }
+        finish_semantic_task(
+            state.inner(),
+            format!("已切换至 {}；加速索引将在需要时重建", selected.label()),
+            None,
+        );
+        let _ = task.complete();
+    }) {
+        {
+            let _transaction = solution::transaction_guard();
+            let _ = solution::clear_pending();
+        }
+        finish_semantic_task(
+            app.state::<AppState>().inner(),
+            "新智能搜索方案未启动",
             Some(error.clone()),
         );
         return Err(error);
@@ -643,6 +869,8 @@ async fn build_semantic_vectors_scoped(
                 Some(ch) => {
                     match sem_build_book(
                         &embedder,
+                        active_semantic_model(),
+                        true,
                         SemBuildBookInput {
                             title: &b.title,
                             id,
@@ -866,7 +1094,7 @@ mod tests {
             .expect("book build must publish by atomic rename");
         let metadata = commit
             + source[commit..]
-                .find("vector::publish_metadata(")
+                .find("vector::publish_metadata_for_model(")
                 .expect("metadata must be published after the vector");
         assert!(create < sync && sync < commit && commit < metadata);
         let book_build = &source[create..source.find("fn semantic_complete(").unwrap()];
@@ -877,6 +1105,31 @@ mod tests {
         assert!(task_builders.matches("task.checkpoint(").count() >= 3);
         assert!(task_builders.contains("\"语义索引完成\""));
         assert!(task_builders.contains("\"finished\":true"));
+    }
+
+    #[test]
+    fn pending_solution_build_never_switches_active_model_before_validation() {
+        let source = include_str!("build.rs");
+        let start = source
+            .find("pub(super) async fn build_pending_solution(")
+            .unwrap();
+        let end = source[start..]
+            .find("fn finish_vector_pause(")
+            .map(|offset| start + offset)
+            .unwrap();
+        let pending = &source[start..end];
+        assert!(pending.contains("prepare_pending_embedder(selected)"));
+        assert!(pending.contains("verify_complete_for_model(book, selected)"));
+        assert!(pending.contains("solution::promote_pending(selected.id(), mode.id())"));
+        assert!(pending.contains("promote_pending_runtime("));
+        assert!(!pending.contains("get_embedder(state.inner())"));
+        let validate = pending
+            .rfind("verify_complete_for_model(book, selected)")
+            .unwrap();
+        let commit = pending
+            .find("solution::promote_pending(selected.id(), mode.id())")
+            .unwrap();
+        assert!(validate < commit);
     }
 
     #[test]

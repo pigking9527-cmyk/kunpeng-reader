@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn test_nonce() -> u64 {
     TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
@@ -118,6 +119,10 @@ where
     result
 }
 
+// This is a shared persistence primitive used by the reader/dashboard. The
+// headless worker binary compiles the same module but streams its archive
+// writes instead, so this API is intentionally unused in that target.
+#[allow(dead_code)]
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T, pretty: bool) -> Result<(), String> {
     let bytes = if pretty {
         serde_json::to_vec_pretty(value)

@@ -14,6 +14,7 @@ const SAFE_EVENT_KEYS = new Set([
   "document_focused", "active_element", "viewport_width", "viewport_height", "layout_width", "layout_height",
   "before_anchor_offset", "after_anchor_offset", "resize_sequence", "restore_pending", "save_suppressed",
   "frame_ready", "immersive", "loading", "pages", "turn_id", "input",
+  "window_role", "window_visible", "document_visible", "book_bound", "book_info_loaded", "inner_engine_ready", "failure_category",
   "before_chapter", "before_page", "after_chapter", "after_page",
   "chapter_pending", "chapter_turn_pending", "turn_fx_active", "turn_timer_active", "scroll_paged", "flow_mode", "page_mode",
   "wheel_seq", "wheel_delta_x", "wheel_delta_y", "wheel_delta_px", "wheel_delta_mode", "wheel_gap_ms", "wheel_accumulated_px", "wheel_threshold_px", "wheel_quiet_ms", "wheel_gesture_age_ms", "wheel_gesture_active", "wheel_timer_active", "wheel_event_cancelable", "wheel_replay", "wheel_mode_pending",
@@ -163,8 +164,10 @@ export function createReaderBugTrace(
     return result;
   }
 
-  function prune(): void {
-    const cutoff = operationAnchorAt - READER_BUG_TRACE_WINDOW_MS;
+  function prune(anchorAt = operationAnchorAt): void {
+    // Keep the bounded context leading into the most recent user action.  Idle
+    // checkpoint traffic must not erase the action that a diagnostic captures.
+    const cutoff = anchorAt - READER_BUG_TRACE_WINDOW_MS;
     while (events.length && (events[0]?.at_ms ?? operationAnchorAt) < cutoff) events.shift();
   }
 
@@ -208,6 +211,14 @@ export function createReaderBugTrace(
       loading: Boolean(state.loading),
       is_pdf: Boolean(state.is_pdf),
       immersive: Boolean(state.immersive),
+      window_role: safeLabel(state.window_role || "reader"),
+      window_visible: typeof state.window_visible === "boolean" ? state.window_visible : null,
+      document_visible: Boolean(state.document_visible),
+      book_bound: Boolean(state.book_bound),
+      book_info_loaded: Boolean(state.book_info_loaded),
+      inner_engine_ready: Boolean(state.inner_engine_ready),
+      startup_phase: safeLabel(state.startup_phase || "idle"),
+      startup_failure_category: safeLabel(state.startup_failure_category || "none"),
       viewport: {
         width: safeNumber(viewport.width, 0, 100_000) || 0,
         height: safeNumber(viewport.height, 0, 100_000) || 0,
@@ -326,8 +337,7 @@ export function createReaderBugTrace(
   }
 
   function snapshotForTests(now?: unknown): readonly TraceEvent[] {
-    void now;
-    prune();
+    prune(typeof now === "number" && Number.isFinite(now) ? now : operationAnchorAt);
     return events.map((event) => ({ ...event, detail: { ...event.detail } }));
   }
 

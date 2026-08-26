@@ -177,6 +177,7 @@ pub(crate) fn decode_staged_decision(value: &str) -> Result<TriageDecision, ()> 
     Ok(decision)
 }
 
+#[cfg(test)]
 pub(crate) fn model_from_parts(base_url: &str, model: &str) -> Result<TriageModel, ()> {
     model_from_parts_with_sha256(base_url, model, &"0".repeat(MODEL_SHA256_BYTES))
 }

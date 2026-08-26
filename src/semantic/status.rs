@@ -3,7 +3,7 @@
 //! 状态扫描可能打开数百个索引元数据文件，因此通过短期快照缓存与实时运行态
 //! 合并，避免 UI 轮询阻塞模型下载、向量构建或阅读窗口。
 
-use super::{m3, model, profile, retrieval};
+use super::{device, m3, model, profile, retrieval, solution};
 use crate::background_tasks::{BackgroundTaskKind, BackgroundTaskSnapshot, BackgroundTaskState};
 use crate::semantic_tasks::SemProgress;
 use crate::{now_ms, set_thread_background, AppState};
@@ -61,7 +61,15 @@ pub(crate) struct SemanticProgressDto {
     model_ready: bool,
     model_id: String,
     model_label: String,
+    solution_switching: bool,
+    pending_model_id: String,
+    pending_model_label: String,
+    pending_retrieval_mode: String,
     model_supported: bool,
+    model_runtime_device: String,
+    model_runtime_device_label: String,
+    device_policy: String,
+    actual_device: String,
     model_bytes: u64,
     semantic_done: u32,
     semantic_total: u32,
@@ -91,6 +99,13 @@ pub(crate) struct SemanticProgressDto {
 
 impl From<&SemProgress> for SemanticProgressDto {
     fn from(progress: &SemProgress) -> Self {
+        let pending = solution::pending();
+        let pending_model = pending
+            .as_ref()
+            .and_then(|(model_id, _)| model::SemanticModel::from_id(model_id));
+        let pending_mode = pending
+            .as_ref()
+            .and_then(|(_, mode)| retrieval::RetrievalMode::from_id(mode));
         Self {
             building: progress.building,
             model_downloading: progress.model_downloading,
@@ -106,7 +121,22 @@ impl From<&SemProgress> for SemanticProgressDto {
             model_ready: progress.model_ready,
             model_id: progress.model_id.clone(),
             model_label: progress.model_label.clone(),
+            solution_switching: pending.is_some(),
+            pending_model_id: pending
+                .as_ref()
+                .map(|(model_id, _)| model_id.clone())
+                .unwrap_or_default(),
+            pending_model_label: pending_model
+                .map(|model| model.label().to_string())
+                .unwrap_or_default(),
+            pending_retrieval_mode: pending_mode
+                .map(|mode| mode.id().to_string())
+                .unwrap_or_default(),
             model_supported: progress.model_supported,
+            model_runtime_device: model::effective_runtime_device().id().into(),
+            model_runtime_device_label: model::effective_runtime_device().label().into(),
+            device_policy: device::active().id().into(),
+            actual_device: model::effective_runtime_device().actual_id().into(),
             model_bytes: progress.model_bytes,
             semantic_done: progress.semantic_done,
             semantic_total: progress.semantic_total,

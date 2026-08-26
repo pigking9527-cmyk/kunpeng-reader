@@ -50,13 +50,9 @@ export interface ShelfSortPreferenceResolution {
 }
 
 export interface ShelfPrimaryPointerOpenInput {
-  readonly singleClickOpensBook: boolean;
   readonly pointerType: string;
   readonly button: number;
   readonly isPrimary: boolean;
-  readonly metaKey: boolean;
-  readonly ctrlKey: boolean;
-  readonly hasSelection: boolean;
 }
 
 export interface ShelfFilters {
@@ -195,13 +191,9 @@ export function shouldOpenBookOnPrimaryPointerDown(
   input: ShelfPrimaryPointerOpenInput,
 ): boolean {
   return (
-    input.singleClickOpensBook &&
     input.pointerType === "mouse" &&
     input.button === 0 &&
-    input.isPrimary &&
-    !input.metaKey &&
-    !input.ctrlKey &&
-    !input.hasSelection
+    input.isPrimary
   );
 }
 

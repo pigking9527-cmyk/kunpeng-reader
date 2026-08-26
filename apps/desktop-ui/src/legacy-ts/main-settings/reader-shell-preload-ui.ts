@@ -6,7 +6,6 @@ import {
 } from "../../../../../packages/tauri-api/src/index.js";
 
 const STORAGE_KEY = "readerShellPreloadEnabledV2";
-const RECENT_READING_CACHE_STORAGE_KEY = "readerShellRecentReadingCacheEnabledV1";
 const DEFAULT_ENABLED = false;
 
 interface PreloadCacheStatus {
@@ -23,8 +22,24 @@ interface PreloadStatus {
   readonly enabled: boolean;
   readonly pooledShells: number;
   readonly readyShells: number;
+  readonly innerEngineReadyShells: number;
+  readonly innerEngineHeapBytes?: number;
   readonly processResidentBytes?: number;
+  readonly preloadMemoryLimitBytes: number;
   readonly cache: PreloadCacheStatus;
+  readonly recentOpen?: ActualReaderOpenStatus;
+}
+
+interface ActualReaderOpenStatus {
+  readonly sampleCount: number;
+  readonly format: string;
+  readonly preloadPath: "preloaded_hit" | "cold_window" | "pdf_bypass" | "unknown";
+  readonly clickToFirstScreenMs: number;
+  readonly firstScreenToRefillMs: number;
+  readonly clickToCompleteMs: number;
+  readonly refillOutcome: "ready" | "disabled" | "timeout";
+  readonly p50FirstScreenMs: number;
+  readonly p95FirstScreenMs: number;
 }
 
 interface ShellBenchmarkSample {
@@ -37,26 +52,32 @@ interface ShellBenchmarkSample {
 
 interface ShellBenchmarkTiming {
   readonly shellMs: number;
+  readonly contentMs: number;
+  readonly stylesMs: number;
+  readonly domMs: number;
+  readonly resourcesMs: number;
+  readonly paginationMs: number;
   readonly layoutMs: number;
   readonly displayMs: number;
   readonly totalMs: number;
+  readonly p95Ms: number;
+  readonly detailed: boolean;
 }
 
 interface ShellBenchmark {
   readonly regularMedianMs: number;
   readonly preloadedMedianMs: number;
+  readonly regularP95Ms: number;
+  readonly preloadedP95Ms: number;
   readonly improvementMedianMs: number;
+  readonly rounds: number;
   readonly samples: readonly ShellBenchmarkSample[];
 }
 
 type ReaderShellPreloadCommands = {
   reader_shell_preload_status: { readonly result: PreloadStatus };
   set_reader_shell_preload_enabled: {
-    readonly args: { readonly enabled: boolean };
-    readonly result: PreloadStatus;
-  };
-  set_recent_reading_chapter_cache_enabled: {
-    readonly args: { readonly enabled: boolean };
+    readonly args: { readonly enabled: boolean; readonly textConversion: "t2s" | "s2t" };
     readonly result: PreloadStatus;
   };
   clear_recent_reading_chapter_cache: { readonly result: PreloadStatus };
@@ -113,27 +134,20 @@ function safeEnabled(storage: Storage | undefined): boolean {
   }
 }
 
+function activeTextConversion(storage: Storage | undefined): "t2s" | "s2t" {
+  try {
+    const settings = JSON.parse(storage?.getItem("readerSettings") || "{}") as Record<string, unknown>;
+    return settings.textConversion === "s2t" ? "s2t" : "t2s";
+  } catch {
+    return "t2s";
+  }
+}
+
 function saveEnabled(storage: Storage | undefined, enabled: boolean): void {
   try {
     storage?.setItem(STORAGE_KEY, enabled ? "1" : "0");
   } catch {
     // Keeping the in-memory choice is still safer than failing a settings UI.
-  }
-}
-
-function safeRecentReadingCacheEnabled(storage: Storage | undefined): boolean {
-  try {
-    return storage?.getItem(RECENT_READING_CACHE_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function saveRecentReadingCacheEnabled(storage: Storage | undefined, enabled: boolean): void {
-  try {
-    storage?.setItem(RECENT_READING_CACHE_STORAGE_KEY, enabled ? "1" : "0");
-  } catch {
-    // The next launch simply uses the safe, disabled default.
   }
 }
 
@@ -153,24 +167,77 @@ export function formatStageDuration(value: number): string {
   return millis === 0 ? "<1 ms" : `${millis} ms`;
 }
 
-export function formatRecentReadingCacheStatus(cache: PreloadCacheStatus, masterEnabled: boolean): string {
-  if (!masterEnabled) return "预加载关闭时不保留最近阅读缓存。";
-  if (!cache.recentReadingChapterCacheEnabled) return "已关闭；不会额外保留最近阅读章节。";
-  return `已缓存 ${cache.recentReadingChapterBooks}/3 本 · ${formatPreloadBytes(cache.chapterHtmlBytes)} / ${formatPreloadBytes(cache.recentReadingChapterLimitBytes)}`;
+export function formatBenchmarkSummary(result: ShellBenchmark): string {
+  const improvement = Math.round(Number(result.improvementMedianMs) || 0);
+  const waitingDelta = improvement >= 0
+    ? `减少 ${Math.abs(improvement)} ms`
+    : `增加 ${Math.abs(improvement)} ms`;
+  return `${Math.max(1, Math.round(result.rounds))} 轮 EPUB 交替测速 · 完全冷开 P50 ${formatStageDuration(result.regularMedianMs)} / P95 ${formatStageDuration(result.regularP95Ms)} · 预加载命中 P50 ${formatStageDuration(result.preloadedMedianMs)} / P95 ${formatStageDuration(result.preloadedP95Ms)} · 点击后等待${waitingDelta}`;
+}
+
+export function formatActualReaderOpen(status: ActualReaderOpenStatus | undefined): string {
+  if (!status) return "尚无本次启动后的书架实际打开记录";
+  const path = status.preloadPath === "preloaded_hit"
+    ? "命中外壳＋内层引擎"
+    : status.preloadPath === "pdf_bypass"
+      ? "PDF 独立冷开（不使用 EPUB 预加载）"
+      : status.preloadPath === "cold_window"
+        ? "未命中预加载，重新建窗"
+        : "打开路径未确认";
+  const refill = status.refillOutcome === "timeout"
+    ? `补池等待 ${formatStageDuration(status.firstScreenToRefillMs)}（超时后转后台）`
+    : status.refillOutcome === "disabled"
+      ? "预加载已关闭"
+      : `首屏后补池 ${formatStageDuration(status.firstScreenToRefillMs)}`;
+  return `${status.format} · ${path} · 点击→首屏 ${formatStageDuration(status.clickToFirstScreenMs)} · ${refill} · 完整命令 ${formatStageDuration(status.clickToCompleteMs)} · 同路径最近 ${Math.max(1, Math.round(status.sampleCount))} 次 P50/P95 ${formatStageDuration(status.p50FirstScreenMs)}/${formatStageDuration(status.p95FirstScreenMs)}`;
+}
+
+export function measuredPreloadBytes(status: PreloadStatus): number {
+  return Math.max(0, Number(status.innerEngineHeapBytes) || 0)
+    + Math.max(0, Number(status.cache.chapterHtmlBytes) || 0);
+}
+
+export function formatCombinedPreloadMemory(status: PreloadStatus): string {
+  const used = status.enabled ? measuredPreloadBytes(status) : 0;
+  return `${formatPreloadBytes(used)} / ${formatPreloadBytes(status.preloadMemoryLimitBytes)}`;
+}
+
+export function formatPreloadComponents(status: PreloadStatus): string {
+  if (!status.enabled) return "外壳 已关闭 · 引擎 已关闭 · 最近阅读缓存 已关闭";
+  const cacheState = !status.cache.recentReadingChapterCacheEnabled
+    ? "已关闭"
+    : status.cache.recentReadingChapterBooks > 0
+      ? "已就绪"
+      : "准备中";
+  return `外壳 ${status.readyShells}/${status.pooledShells} · 引擎 ${status.innerEngineReadyShells}/${status.pooledShells} · 最近阅读缓存 ${cacheState}`;
 }
 
 function benchmarkTimingCell(
   document: Document,
   timing: ShellBenchmarkTiming,
-  shellPreloaded: boolean,
+  preloadKind: "none" | "shell" | "engine",
 ): HTMLTableCellElement {
   const cell = document.createElement("td");
   cell.className = "reader-shell-preload-timing";
-  const stages: readonly [string, string][] = [
-    ["外壳", shellPreloaded && timing.shellMs === 0 ? "已就绪" : formatStageDuration(timing.shellMs)],
+  const shellLabel = preloadKind === "engine" ? "外壳＋引擎" : preloadKind === "shell" ? "外壳" : "窗口与外壳";
+  const shellValue = preloadKind !== "none" && timing.shellMs === 0 ? "已就绪" : formatStageDuration(timing.shellMs);
+  const stages: readonly [string, string][] = timing.detailed ? [
+    [shellLabel, shellValue],
+    ["内容准备", formatStageDuration(timing.contentMs)],
+    ["样式等待", formatStageDuration(timing.stylesMs)],
+    ["DOM 构建", formatStageDuration(timing.domMs)],
+    ["字体与图片", formatStageDuration(timing.resourcesMs)],
+    ["分页定位", formatStageDuration(timing.paginationMs)],
+    ["排版合计", formatStageDuration(timing.layoutMs)],
+    ["显示确认", formatStageDuration(timing.displayMs)],
+    ["总计 P50", formatStageDuration(timing.totalMs)],
+    ["总计 P95", formatStageDuration(timing.p95Ms)],
+  ] : [
+    [shellLabel, shellValue],
     ["排版", formatStageDuration(timing.layoutMs)],
-    ["首屏加载", formatStageDuration(timing.displayMs)],
-    ["总计", formatStageDuration(timing.totalMs)],
+    ["显示确认", formatStageDuration(timing.displayMs)],
+    ["总计 P50", formatStageDuration(timing.totalMs)],
+    ["总计 P95", formatStageDuration(timing.p95Ms)],
   ];
   stages.forEach(([label, value]) => {
     const stage = document.createElement("div");
@@ -218,7 +285,7 @@ function renderBenchmarkRows(document: Document, target: HTMLElement, result: Sh
   table.className = "reader-shell-preload-table";
   const head = document.createElement("thead");
   const headerRow = document.createElement("tr");
-  ["封面", "普通打开", "预加载", "差值"].forEach((copy) => {
+  ["封面", "EPUB 完全冷开", "EPUB 预加载命中", "点击后等待降低"].forEach((copy) => {
     const cell = document.createElement("th");
     cell.scope = "col";
     cell.textContent = copy;
@@ -231,8 +298,8 @@ function renderBenchmarkRows(document: Document, target: HTMLElement, result: Sh
     const cover = document.createElement("td");
     cover.className = "reader-shell-preload-cover-cell";
     cover.appendChild(benchmarkCover(document, sample));
-    const regular = benchmarkTimingCell(document, sample.regular, false);
-    const preloaded = benchmarkTimingCell(document, sample.preloaded, true);
+    const regular = benchmarkTimingCell(document, sample.regular, "none");
+    const preloaded = benchmarkTimingCell(document, sample.preloaded, "engine");
     const improvement = document.createElement("td");
     improvement.className = sample.improvementMs >= 0 ? "is-faster" : "is-slower";
     improvement.textContent = formatTimingDelta(sample.improvementMs);
@@ -256,15 +323,18 @@ export function initializeReaderShellPreloadUi(
   const benchmarkButton = button(runtime.document.getElementById("reader-shell-preload-benchmark"));
   const benchmarkResult = element(runtime.document.getElementById("reader-shell-preload-benchmark-result"));
   const benchmarkRows = element(runtime.document.getElementById("reader-shell-preload-rows"));
-  const recentCacheInput = checkbox(runtime.document.getElementById("reader-shell-recent-cache-enabled"));
   const recentCacheStatus = element(runtime.document.getElementById("reader-shell-recent-cache-status"));
   const recentCacheClear = button(runtime.document.getElementById("reader-shell-recent-cache-clear"));
-  if (!enabledInput || !gear || !modal || !close || !statusElement || !benchmarkButton || !benchmarkResult || !benchmarkRows || !recentCacheInput || !recentCacheStatus || !recentCacheClear) return null;
+  const actualOpenStatus = element(runtime.document.getElementById("reader-shell-actual-open-status"));
+  if (!enabledInput || !gear || !modal || !close || !statusElement || !benchmarkButton || !benchmarkResult || !benchmarkRows || !recentCacheStatus || !recentCacheClear || !actualOpenStatus) return null;
+
+  const benchmarkDescription = benchmarkButton.closest("section")?.querySelector("p");
+  if (benchmarkDescription) {
+    benchmarkDescription.textContent = "仅以 EPUB 为样本：完全冷开会清除该书内存阅读缓存并新建窗口；预加载命中从缓存、外壳和内层引擎均已就绪后计时。下方另列书架真实点击到首屏耗时，PDF 不参与预加载命中测速。";
+  }
 
   const api = createTauriApi<VerifiedReaderShellPreloadCommands>(transport);
   let enabled = safeEnabled(runtime.localStorage);
-  let recentCacheRequested = safeRecentReadingCacheEnabled(runtime.localStorage);
-  let previousResidentBytes: number | undefined;
   let benchmarking = false;
 
   const clearBenchmark = (): void => {
@@ -275,58 +345,40 @@ export function initializeReaderShellPreloadUi(
     benchmarkRows.hidden = true;
   };
 
-  const renderStatus = (status: PreloadStatus, beforeResident?: number): void => {
+  const renderStatus = (status: PreloadStatus): void => {
     enabled = status.enabled;
     enabledInput.checked = enabled;
+    statusElement.textContent = formatPreloadComponents(status);
+    recentCacheStatus.textContent = formatCombinedPreloadMemory(status);
+    actualOpenStatus.textContent = formatActualReaderOpen(status.recentOpen);
     if (!enabled) {
-      previousResidentBytes = undefined;
-      statusElement.textContent = "预加载已关闭。开启后会创建隐藏阅读窗口，并增加进程内存占用。";
       benchmarkButton.disabled = true;
-      recentCacheInput.checked = recentCacheRequested;
-      recentCacheInput.disabled = true;
       recentCacheClear.disabled = true;
-      recentCacheStatus.textContent = formatRecentReadingCacheStatus(status.cache, false);
       clearBenchmark();
       return;
     }
-    const resident = status.processResidentBytes;
-    const delta = typeof resident === "number" && typeof beforeResident === "number"
-      ? resident - beforeResident
-      : undefined;
-    const residentText = typeof resident === "number"
-      ? `进程驻留 ${formatPreloadBytes(resident)}`
-      : "进程驻留内存暂不可读取";
-    const deltaText = typeof delta === "number" && delta !== 0
-      ? `（本次 ${delta > 0 ? "+" : "−"}${formatPreloadBytes(Math.abs(delta))}）`
-      : "";
-    statusElement.textContent = `隐藏外壳 ${status.readyShells}/${status.pooledShells} 已就绪 · ${residentText}${deltaText}`;
-    previousResidentBytes = resident;
     benchmarkButton.disabled = benchmarking;
-    recentCacheInput.checked = recentCacheRequested;
-    recentCacheInput.disabled = false;
-    recentCacheClear.disabled = !status.cache.recentReadingChapterCacheEnabled || status.cache.chapterEntries === 0;
-    recentCacheStatus.textContent = formatRecentReadingCacheStatus(status.cache, true);
+    recentCacheClear.disabled = !status.cache.recentReadingChapterCacheEnabled || status.cache.recentReadingChapterBooks === 0;
   };
 
-  const refresh = async (beforeResident?: number): Promise<void> => {
+  const refresh = async (): Promise<void> => {
     const status = await api.invoke("reader_shell_preload_status");
-    renderStatus(status, beforeResident);
+    renderStatus(status);
   };
 
   enabledInput.checked = enabled;
   enabledInput.addEventListener("change", () => {
-    const before = previousResidentBytes;
     const requested = enabledInput.checked;
     enabledInput.disabled = true;
-    void api.invoke("set_reader_shell_preload_enabled", { enabled: requested })
-      .then((status) => api.invoke("set_recent_reading_chapter_cache_enabled", {
-        enabled: status.enabled && recentCacheRequested,
-      }))
+    void api.invoke("set_reader_shell_preload_enabled", {
+      enabled: requested,
+      textConversion: activeTextConversion(runtime.localStorage),
+    })
       .then((status) => {
         saveEnabled(runtime.localStorage, status.enabled);
-        renderStatus(status, before);
+        renderStatus(status);
         // Shell creation/destruction is asynchronous on some platforms.
-        runtime.setTimeout(() => void refresh(before).catch(() => undefined), 420);
+        runtime.setTimeout(() => void refresh().catch(() => undefined), 420);
       })
       .catch((error: unknown) => {
         enabledInput.checked = enabled;
@@ -337,37 +389,19 @@ export function initializeReaderShellPreloadUi(
 
   gear.addEventListener("click", () => {
     modal.classList.add("show");
-    void refresh(previousResidentBytes).catch(() => undefined);
+    void refresh().catch(() => undefined);
   });
   close.addEventListener("click", () => modal.classList.remove("show"));
   modal.addEventListener("click", (event) => {
     if (event.target === modal) modal.classList.remove("show");
   });
 
-  recentCacheInput.checked = recentCacheRequested;
-  recentCacheInput.addEventListener("change", () => {
-    const requested = recentCacheInput.checked;
-    recentCacheInput.disabled = true;
-    void api.invoke("set_recent_reading_chapter_cache_enabled", { enabled: requested })
-      .then((status) => {
-        recentCacheRequested = requested;
-        saveRecentReadingCacheEnabled(runtime.localStorage, requested);
-        renderStatus(status, previousResidentBytes);
-        runtime.setTimeout(() => void refresh(previousResidentBytes).catch(() => undefined), 620);
-      })
-      .catch((error: unknown) => {
-        recentCacheInput.checked = recentCacheRequested;
-        recentCacheStatus.textContent = `无法更新章节缓存：${String(error)}`;
-      })
-      .finally(() => { recentCacheInput.disabled = !enabled; });
-  });
-
   recentCacheClear.addEventListener("click", () => {
     recentCacheClear.disabled = true;
     void api.invoke("clear_recent_reading_chapter_cache")
-      .then((status) => renderStatus(status, previousResidentBytes))
+      .then((status) => renderStatus(status))
       .catch((error: unknown) => {
-        recentCacheStatus.textContent = `无法清理章节缓存：${String(error)}`;
+        recentCacheStatus.textContent = `无法清理最近阅读缓存：${String(error)}`;
         recentCacheClear.disabled = !enabled;
       });
   });
@@ -378,15 +412,15 @@ export function initializeReaderShellPreloadUi(
     benchmarkButton.disabled = true;
     benchmarkResult.classList.remove("is-error");
     benchmarkResult.hidden = false;
-    benchmarkResult.textContent = "正在测速；窗口保持隐藏，不会改变阅读进度…";
+    benchmarkResult.textContent = "正在交替测试 EPUB 完全冷开与预加载命中；预加载的后台准备不计入点击后等待，PDF 不参与…";
     benchmarkRows.replaceChildren();
     benchmarkRows.hidden = true;
     void api.invoke("benchmark_reader_shell_opening")
       .then((result) => {
         renderBenchmarkRows(runtime.document, benchmarkRows, result);
-        benchmarkResult.textContent = "";
-        benchmarkResult.hidden = true;
-        return refresh(previousResidentBytes);
+        benchmarkResult.textContent = formatBenchmarkSummary(result);
+        benchmarkResult.hidden = false;
+        return refresh();
       })
       .catch((error: unknown) => {
         benchmarkResult.classList.add("is-error");
@@ -398,10 +432,10 @@ export function initializeReaderShellPreloadUi(
       });
   });
 
-  void api.invoke("set_reader_shell_preload_enabled", { enabled })
-    .then((status) => api.invoke("set_recent_reading_chapter_cache_enabled", {
-      enabled: status.enabled && recentCacheRequested,
-    }))
+  void api.invoke("set_reader_shell_preload_enabled", {
+    enabled,
+    textConversion: activeTextConversion(runtime.localStorage),
+  })
     .then((status) => renderStatus(status))
     .catch(() => void refresh().catch(() => undefined));
 

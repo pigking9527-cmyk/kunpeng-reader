@@ -278,7 +278,7 @@ test("typed classification transport preserves polling, progress, resume and tag
   assert.deepEqual(result.alerts, [
     {
       message: "保存大模型分类标签设置失败：Error: save failed",
-      options: { title: "书籍分类", confirmLabel: "关闭", tone: "error" },
+      options: { title: "AI 图书标签", confirmLabel: "关闭", tone: "error" },
     },
   ]);
   assert.equal(

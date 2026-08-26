@@ -35,9 +35,9 @@
   `X-Real-IP` 原样转发。
 - 公网 bind 必须额外显式设置 `KUNPENG_SYNC_ALLOW_PUBLIC_BIND=1`，正式部署不建议这样做。
 - 服务默认将普通安全读取、轻量 checkpoint 与状态变更放入独立的有界执行槽：
-  `KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS=12`、
-  `KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS=18`、
-  `KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS=10`，合计最多 40 个执行请求。
+  `KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS=15`、
+  `KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS=23`、
+  `KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS=12`，合计最多 50 个执行请求。
   当执行槽已满时，读取/checkpoint/写入分别最多进入 64/24/48 个等待位；写入等待位
   只吸收短时 push 突发，不增加 10 个写执行槽的 CPU 与 PostgreSQL 并发预算。请求只在
   `KUNPENG_SYNC_REQUEST_QUEUE_TIMEOUT_MILLIS=200` 内等待空位；等待位已满或超时会返回

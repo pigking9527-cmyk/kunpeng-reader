@@ -534,7 +534,7 @@ test("typed transport, activation, canvas, hint, and back keep the compatibility
   });
   assert.deepEqual(
     runtime.timers.map(({ delay, cleared }) => ({ delay, cleared })),
-    [{ delay: 1_200, cleared: false }],
+    [],
   );
 
   api.fromFrame({ phase: "end", x: 20, y: 3 });
@@ -610,19 +610,25 @@ test("frame close handshake waits for acknowledgement and does not close the win
     type === "gesture_execute" &&
     (detail as { route?: unknown }).route === "frame_surface",
   );
-  assert.deepEqual(frameResult?.detail, {
+  const { duration_ms: durationMs, ...stableDetail } = (frameResult?.detail ?? {}) as Record<string, unknown>;
+  assert.deepEqual(stableDetail, {
     gesture_id: 1,
     source: "frame",
     action: "back",
     route: "frame_surface",
     handled: true,
     outcome: "succeeded",
-    duration_ms: 0,
   });
+  assert.equal(typeof durationMs, "number");
+  assert.ok(typeof durationMs === "number" && Number.isSafeInteger(durationMs) && durationMs >= 0);
 });
 
-test("finish keeps a recent valid preview when the gesture tail drifts", async () => {
+test("finish executes the action shown by a hint after an arbitrarily long tail", async () => {
   const runtime = createRuntime();
+  runtime.localStorage.setItem(
+    "kunpeng.reader.gesture-hint.v1",
+    JSON.stringify({ enabled: true }),
+  );
   runtime.ReaderNewsGesture = {
     ...runtime.ReaderNewsGesture,
     prefixSimilarity: () => 1,
@@ -633,10 +639,28 @@ test("finish keeps a recent valid preview when the gesture tail drifts", async (
 
   api.fromFrame({ phase: "start", x: 0, y: 0 });
   api.fromFrame({ phase: "move", x: 20, y: 0 });
-  api.fromFrame({ phase: "end", x: 20, y: 0 });
+  for (let x = 24; x <= 160; x += 4)
+    api.fromFrame({ phase: "move", x, y: 0 });
+  api.fromFrame({ phase: "end", x: 160, y: 0 });
   await flush();
 
   assert.deepEqual(runtime.shellCalls, ["closeSurface"]);
+  assert.equal(documentOf(runtime).appended[0]?.hidden, true);
+});
+
+test("cancelling a hinted gesture never executes its action", async () => {
+  const runtime = createRuntime();
+  const transport = createTransport();
+  const api = installTyped(runtime, transport.transport);
+  api.activate();
+  await flush();
+
+  api.fromFrame({ phase: "start", x: 0, y: 0 });
+  api.fromFrame({ phase: "move", x: 20, y: 0 });
+  api.fromFrame({ phase: "cancel", x: 20, y: 0 });
+  await flush();
+
+  assert.deepEqual(runtime.shellCalls, []);
   assert.equal(documentOf(runtime).appended[0]?.hidden, true);
 });
 

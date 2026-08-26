@@ -90,6 +90,13 @@ export function createTauriApi<TCommands extends TauriCommandMap>(
   return new TauriApi<TCommands>(transport);
 }
 
+interface TauriCurrentWebviewWindow {
+  listen<TPayload>(
+    event: string,
+    handler: (event: TauriEvent<TPayload>) => void,
+  ): Promise<TauriUnlisten>;
+}
+
 interface TauriRuntimeShape {
   readonly core?: {
     readonly invoke?: TauriTransport["invoke"];
@@ -97,6 +104,9 @@ interface TauriRuntimeShape {
   readonly event?: {
     readonly listen?: NonNullable<TauriTransport["listen"]>;
     readonly emit?: NonNullable<TauriTransport["emit"]>;
+  };
+  readonly webviewWindow?: {
+    readonly getCurrentWebviewWindow?: () => Partial<TauriCurrentWebviewWindow>;
   };
 }
 
@@ -125,12 +135,25 @@ export function transportFromTauriGlobal(runtime: unknown = globalThis): TauriTr
       return invoke<TResult>(command, args);
     },
   };
-  const listen = tauri.event?.listen;
-  if (typeof listen === "function") {
+  // Tauri's global event.listen defaults to an `Any` target. That means even
+  // an event emitted with Rust `emit_to(label, ...)` is observed by every
+  // WebView that registered the global listener. Prefer the current
+  // WebviewWindow listener so lifecycle events remain isolated to their
+  // addressed reader while application-wide broadcasts still reach it.
+  const currentWebviewWindow = tauri.webviewWindow?.getCurrentWebviewWindow?.();
+  const currentWindowListen = currentWebviewWindow?.listen;
+  const globalListen = tauri.event?.listen;
+  if (currentWebviewWindow && typeof currentWindowListen === "function") {
+    const scopedWindow = currentWebviewWindow as TauriCurrentWebviewWindow;
     transport.listen = <TPayload>(
       event: string,
       handler: (event: TauriEvent<TPayload>) => void,
-    ): Promise<TauriUnlisten> => listen<TPayload>(event, handler);
+    ): Promise<TauriUnlisten> => scopedWindow.listen<TPayload>(event, handler);
+  } else if (typeof globalListen === "function") {
+    transport.listen = <TPayload>(
+      event: string,
+      handler: (event: TauriEvent<TPayload>) => void,
+    ): Promise<TauriUnlisten> => globalListen<TPayload>(event, handler);
   }
   const emit = tauri.event?.emit;
   if (typeof emit === "function") {

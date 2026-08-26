@@ -70,6 +70,9 @@ pub(crate) struct IntelligenceWorkerLifecycleStatus {
 
 /// Secret-bearing projection for the headless process only.  It is not
 /// serializable and must not cross a Tauri command boundary.
+// The reader binary owns pairing while the sibling worker binary owns this
+// runtime-only projection; the shared source is deliberately compiled twice.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct WorkerRuntimeCredentials {
     pub(crate) base_url: String,
@@ -80,6 +83,7 @@ pub(crate) struct WorkerRuntimeCredentials {
 /// Process-lifetime guard used only by the headless `--service-loop` sidecar.
 /// A login Run entry and a reader-started worker can race; Windows owns this
 /// kernel mutex and releases it automatically if the process crashes.
+#[allow(dead_code)]
 pub(crate) struct WorkerServiceLoopGuard {
     #[cfg(windows)]
     handle: *mut core::ffi::c_void,
@@ -88,6 +92,7 @@ pub(crate) struct WorkerServiceLoopGuard {
 /// Keep the historic default name byte-for-byte stable while giving every
 /// marker-derived isolated profile an independent worker lifetime.
 #[cfg(any(windows, test))]
+#[allow(dead_code)]
 fn service_loop_mutex_name(scope: &str) -> String {
     if scope == "global" {
         "Local\\KunpengReaderIntelligenceWorkerV1".to_owned()
@@ -97,10 +102,12 @@ fn service_loop_mutex_name(scope: &str) -> String {
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 impl Drop for WorkerServiceLoopGuard {
     fn drop(&mut self) {
         #[link(name = "kernel32")]
         extern "system" {
+            #[allow(dead_code)]
             fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
         }
         unsafe {
@@ -112,6 +119,7 @@ impl Drop for WorkerServiceLoopGuard {
 /// `Ok(None)` means another service-loop process is already active.  This is
 /// deliberately separate from the reader application's single-instance
 /// mutex: hiding or closing the reader must not stop the worker.
+#[allow(dead_code)]
 pub(crate) fn acquire_service_loop_guard() -> Result<Option<WorkerServiceLoopGuard>, String> {
     #[cfg(windows)]
     {
@@ -120,12 +128,15 @@ pub(crate) fn acquire_service_loop_guard() -> Result<Option<WorkerServiceLoopGua
         const ERROR_ALREADY_EXISTS: u32 = 183;
         #[link(name = "kernel32")]
         extern "system" {
+            #[allow(dead_code)]
             fn CreateMutexW(
                 attributes: *const core::ffi::c_void,
                 initial_owner: i32,
                 name: *const u16,
             ) -> Handle;
+            #[allow(dead_code)]
             fn GetLastError() -> u32;
+            #[allow(dead_code)]
             fn CloseHandle(handle: Handle) -> i32;
         }
         let name = service_loop_mutex_name(&profile::instance_scope_key());
@@ -143,7 +154,7 @@ pub(crate) fn acquire_service_loop_guard() -> Result<Option<WorkerServiceLoopGua
             }
             return Ok(None);
         }
-        return Ok(Some(WorkerServiceLoopGuard { handle }));
+        Ok(Some(WorkerServiceLoopGuard { handle }))
     }
     #[cfg(not(windows))]
     Ok(Some(WorkerServiceLoopGuard {}))
@@ -229,6 +240,7 @@ pub(crate) fn lifecycle_status() -> Result<IntelligenceWorkerLifecycleStatus, St
 /// Available only to the worker process.  Callers receive a fixed error rather
 /// than a platform or decryption detail, so an accidental stderr capture can
 /// never include a protected-credential implementation detail.
+#[allow(dead_code)]
 pub(crate) fn runtime_credentials() -> Result<Option<WorkerRuntimeCredentials>, String> {
     let Some(value) = read_configuration_at(&config_path()?)? else {
         return Ok(None);
@@ -236,6 +248,7 @@ pub(crate) fn runtime_credentials() -> Result<Option<WorkerRuntimeCredentials>, 
     runtime_credentials_for(value)
 }
 
+#[allow(dead_code)]
 fn runtime_credentials_for(
     value: StoredWorkerConfiguration,
 ) -> Result<Option<WorkerRuntimeCredentials>, String> {
@@ -422,6 +435,7 @@ pub(crate) fn pair_intelligence_worker_for_connection(
 /// to compare against; it is deliberately a separate local administrator
 /// surface.  It still accepts credentials only in this process, persists only
 /// DPAPI blobs, and is never exposed on a LAN address.
+#[allow(dead_code)]
 pub(crate) fn pair_intelligence_worker_for_local_operator(
     request: IntelligenceWorkerPairingRequest,
 ) -> Result<IntelligenceWorkerLifecycleStatus, String> {

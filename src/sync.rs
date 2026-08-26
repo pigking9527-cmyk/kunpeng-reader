@@ -302,6 +302,16 @@ pub(crate) struct SyncSettings {
     last_sync_ignored: usize,
 }
 
+/// Internal-only authenticated connection for non-sync account-scoped APIs.
+/// It deliberately has no `Serialize` implementation: callers in Rust may
+/// reuse the protected sync credential, but a WebView can never receive the
+/// service URL or bearer token through this type.
+pub(crate) struct IntelligenceConnection {
+    pub(crate) base: String,
+    pub(crate) account_id: String,
+    pub(crate) token: String,
+}
+
 /// A non-authenticated connection observation for the account overview.
 /// It intentionally contains neither the saved URL nor a credential: opening
 /// the panel may show whether the service answers, but must not leak or unlock
@@ -446,6 +456,19 @@ fn read_sync_settings(state: &AppState, operation: &'static str) -> Result<SyncS
     // Preserve the existing settings surface: an inaccessible OS credential
     // is represented as an empty token and therefore as a logged-out account.
     resolve_sync_settings(record)
+}
+
+pub(crate) fn intelligence_connection(state: &AppState) -> Result<IntelligenceConnection, String> {
+    let settings = read_sync_settings(state, "intelligence_client_credentials")?;
+    if settings.user_id.trim().is_empty() || settings.token.trim().is_empty() {
+        return Err("未登录，无法同步情报内容".into());
+    }
+    let base = normalize_sync_base(&settings.url)?;
+    Ok(IntelligenceConnection {
+        base,
+        account_id: settings.user_id,
+        token: settings.token,
+    })
 }
 
 fn read_sync_token(db: &db::AppDb) -> Result<String, String> {

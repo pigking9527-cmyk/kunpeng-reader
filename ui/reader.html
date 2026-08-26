@@ -190,19 +190,39 @@
       /* 阅读状态每次翻页都会更新页码与百分比；固定占位并使用等宽数字，避免
          1/9 → 10/9 或 9.9% → 10.0% 时右上角文字左右跳动。 */
       .reader-progress-group {
-        display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; margin-right: 4px;
+        display: inline-flex; align-items: center; justify-content: flex-end; gap: 10px; flex: 0 0 auto; min-width: 0; margin-right: 4px;
         font-variant-numeric: tabular-nums;
         font-feature-settings: "tnum" 1;
       }
       #chapter-progress {
-        width: min(245px, 38vw); max-width: min(38vw, 290px); flex: 0 1 min(245px, 38vw);
-        justify-content: flex-start; text-align: left;
+        display: contents;
       }
+      .reader-progress-group > .title {
+        display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px;
+        width: auto; min-width: 0; flex: 0 1 auto; text-align: right; white-space: nowrap;
+      }
+      #chapter-number { max-width: min(260px, 28vw); }
+      #chapter-page { max-width: min(118px, 17vw); }
+      #progress-percentage { max-width: 68px; }
+      #chapter-number[hidden], #chapter-page[hidden], #progress-percentage[hidden], #progress[hidden] { display: none !important; }
       #progress.page-count-loading { width: 30px; max-width: 30px; flex-basis: 30px; }
       #progress.page-count-total {
         width: 84px; max-width: 84px; flex: 0 0 84px;
         justify-content: flex-end; text-align: right;
       }
+      .reader-page-info-popover { position:fixed; z-index:100006; width:min(310px,calc(100vw - 24px)); padding:8px 12px; border:1px solid #d9e1ec; border-radius:12px; background:#fff; box-shadow:0 14px 36px rgba(38,58,88,.2); }
+      .reader-page-info-popover[hidden] { display:none; }
+      .reader-page-info-options { display:grid; gap:2px; margin:0; padding:0; }
+      .reader-page-info-option { display:flex; align-items:center; min-height:34px; gap:8px; padding:0 2px; color:#5c6a80; font-size:13px; border-radius:7px; touch-action:none; }
+      .reader-page-info-option > [data-reader-i18n] { flex:1 1 auto; }
+      .reader-page-info-option.dragging { z-index:30; pointer-events:none; background:#fff; border:1px solid #8db8ff; box-shadow:0 9px 22px rgba(46,95,170,.18); }
+      .reader-page-info-placeholder { border:1px dashed rgba(83,133,208,.5); border-radius:7px; }
+      .reader-page-info-drag-handle { width:24px; height:28px; padding:0; border:0; border-radius:6px; background:transparent; color:#8a9ab0; cursor:grab; font-size:17px; line-height:1; }
+      .reader-page-info-drag-handle:active { cursor:grabbing; }
+      .reader-page-info-drag-handle:hover, .reader-page-info-drag-handle:focus-visible { background:#e8f0ff; color:#3677d1; outline:none; }
+      .reader-page-info-option .settings-switch { transform:scale(.86); transform-origin:right center; }
+      body.theme-dark .reader-page-info-popover { border-color:#4b4f58; background:#292c32; box-shadow:0 16px 38px rgba(0,0,0,.42); }
+      body.theme-dark .reader-page-info-option.dragging { background:#303238; }
       @keyframes spin { to { transform: rotate(360deg); } }
       body.animations-all-off *, body.animations-all-off *::before, body.animations-all-off *::after {
         animation-duration: .001ms !important;
@@ -570,6 +590,16 @@
       .ai-reader-sources summary { cursor: pointer; }
       .ai-reader-sources ul { margin: 7px 0 0; padding-left: 20px; }
       .ai-reader-audit { margin-top: 8px; padding: 7px 8px; border-radius: 6px; background: #eef5ff; color: #4d6d9f; font-size: 12px; line-height: 1.5; }
+      .ai-reader-media-composer { margin-top: 10px; padding: 10px; border: 1px solid #cdd8ea; border-radius: 8px; background: #f7faff; color: #35445d; }
+      .ai-reader-media-composer[hidden] { display: none; }
+      .ai-reader-media-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .ai-reader-media-composer p { margin: 7px 0; color: #687386; font-size: 12px; line-height: 1.5; }
+      .ai-reader-media-composer > label { display: grid; gap: 4px; margin: 8px 0; color: #52647d; font-size: 12px; }
+      .ai-reader-media-composer textarea { width: 100%; min-height: 118px; box-sizing: border-box; resize: vertical; padding: 8px; border: 1px solid #bfcde1; border-radius: 7px; background: #fff; color: #2d3a51; font: 12px/1.55 system-ui, sans-serif; }
+      .ai-reader-media-consent { display: flex; margin: 8px 0; color: #52647d; font-size: 11px; line-height: 1.45; align-items: flex-start; gap: 6px; }
+      .ai-reader-media-result { margin-top: 9px; padding: 8px; border-radius: 7px; background: #fff; color: #52647d; font-size: 12px; }
+      .ai-reader-media-result[hidden] { display: none; }
+      .ai-reader-media-result img, .ai-reader-media-result video { display: block; width: 100%; max-height: 320px; margin-top: 7px; border-radius: 7px; object-fit: contain; background: #111; }
       .ai-reader-history { display: none; flex: 1 1 auto; min-height: 0; overflow: auto; margin-top: 10px; }
       .ai-reader-history.show { display: block; }
       .ai-reader-history-item { width: 100%; text-align: left; font: inherit; padding: 9px; margin: 0 0 7px; border: 1px solid #e1e4eb; border-radius: 7px; background: #fff; cursor: pointer; }
@@ -612,6 +642,8 @@
       body.theme-dark .ai-reader-mindmap-collapse { background: #2e2e30; color: #bdd4ff; border-color: #4a5363; }
       body.theme-dark .ai-reader-history-question { color: #bcd1ff; }
       body.theme-dark .ai-reader-audit { background: #29364b; color: #b9d3ff; }
+      body.theme-dark .ai-reader-media-composer { border-color: #4a5363; background: #292d34; color: #e3e8f2; }
+      body.theme-dark .ai-reader-media-composer textarea, body.theme-dark .ai-reader-media-result { border-color: #526788; background: #22262d; color: #e3e8f2; }
       body.theme-dark .book-progress-track { background: rgba(210,220,240,.28); }
       body.theme-dark .book-progress-restore { color: #b7c2d5; }
       body.theme-dark .book-progress-restore:hover { background: rgba(100,158,255,.18); color: #c8dcff; }
@@ -956,7 +988,15 @@
                 <section class="reader-preference-group reader-reading-display-group">
                   <div class="reader-preference-group-head"><h4 data-reader-i18n="readingDisplay">阅读显示</h4><p data-reader-i18n="readingDisplayHint">控制正文周边的常驻阅读信息，不属于功能菜单。</p></div>
                   <div class="reader-preference-row"><label data-reader-i18n="showTextConversion">显示简繁按钮</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showTextConversion" /><span class="settings-slider"></span></label></div>
-                  <div class="reader-preference-row"><label data-reader-i18n="showPageInfo">显示页码与章节进度</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showPageInfo" /><span class="settings-slider"></span></label></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="showPageInfo">显示页码与章节进度</label><span class="reader-preference-actions"><button id="pref-reader-page-info-settings" class="reader-preference-settings-button" type="button" title="页码与章节进度设置" aria-label="页码与章节进度设置" data-reader-i18n-title="pageInfoSettings" data-reader-i18n-aria="pageInfoSettings" aria-controls="reader-page-info-popover" aria-expanded="false">⚙</button><label class="settings-switch"><input type="checkbox" data-pref-bool="showPageInfo" /><span class="settings-slider"></span></label></span></div>
+                  <div id="reader-page-info-popover" class="reader-page-info-popover" role="dialog" aria-label="页码与章节进度设置" data-reader-i18n-aria="pageInfoSettings" hidden>
+                    <div id="reader-page-info-options" class="reader-page-info-options" role="list" aria-label="页码与章节进度项目" data-reader-i18n-aria="pageInfoOrder">
+                      <div class="reader-page-info-option" data-page-info-item="chapter" role="listitem"><button class="reader-page-info-drag-handle" type="button" aria-label="拖动章号调整显示位置"><span aria-hidden="true">⠿</span></button><span data-reader-i18n="pageInfoChapter">章号</span><label class="settings-switch"><input type="checkbox" data-pref-bool="showChapterNumber" /><span class="settings-slider"></span></label></div>
+                      <div class="reader-page-info-option" data-page-info-item="chapterPage" role="listitem"><button class="reader-page-info-drag-handle" type="button" aria-label="拖动本章页码调整显示位置"><span aria-hidden="true">⠿</span></button><span data-reader-i18n="pageInfoChapterPage">本章页码</span><label class="settings-switch"><input type="checkbox" data-pref-bool="showChapterPageNumber" /><span class="settings-slider"></span></label></div>
+                      <div class="reader-page-info-option" data-page-info-item="percentage" role="listitem"><button class="reader-page-info-drag-handle" type="button" aria-label="拖动百分比调整显示位置"><span aria-hidden="true">⠿</span></button><span data-reader-i18n="pageInfoPercentage">百分比</span><label class="settings-switch"><input type="checkbox" data-pref-bool="showProgressPercentage" /><span class="settings-slider"></span></label></div>
+                      <div class="reader-page-info-option" data-page-info-item="totalPages" role="listitem"><button class="reader-page-info-drag-handle" type="button" aria-label="拖动全书页码调整显示位置"><span aria-hidden="true">⠿</span></button><span data-reader-i18n="pageInfoTotalPages">全书页码</span><label class="settings-switch"><input type="checkbox" data-pref-bool="showTotalPageNumber" /><span class="settings-slider"></span></label></div>
+                    </div>
+                  </div>
                 </section>
                 <section class="reader-preference-group reader-tts-source-group">
                   <div class="reader-preference-group-head"><h4 data-reader-i18n="speech">朗读</h4><p data-reader-i18n="ttsSourceHint">音源属于设备能力配置，语速仍可在快捷设置中随时调整。</p></div>
@@ -1027,6 +1067,17 @@
                     <section id="pref-reader-jump-back-preview" class="reader-jump-back-preview" aria-label="跳转回退图标位置预览" data-reader-i18n-aria="readerJumpBackPosition"><p data-reader-i18n="readerJumpBackPositionHint">拖动图标调整屏幕位置</p><button id="pref-reader-jump-back-preview-icon" class="reader-jump-back-preview-icon" type="button" aria-label="拖动图标调整屏幕位置" data-reader-i18n-aria="readerJumpBackPosition"><svg class="reader-jump-back-arrow" viewBox="0 0 120 48" aria-hidden="true"><path d="M120 24H18M18 24L42 4M18 24L42 44"/></svg></button></section>
                   </div>
                 </section>
+                <section class="reader-preference-group reader-context-media-group">
+                  <div class="reader-preference-group-head"><h4 data-reader-i18n="readerContextMedia">伴读</h4><p data-reader-i18n="readerContextMediaHint">根据已读正文生成图片与视频提示词，成品插在对应文字描述下方。本地模式按完整章节分批生成提示词并轮换模型，避免大模型与 H3 同时占用显存。</p></div>
+                  <div class="reader-preference-row"><label for="pref-reader-media-mode"><span>伴读模式</span><small>关闭不会生成；提示会先让你确认；自动会在读完章节后按密度排队生成。</small></label><select id="pref-reader-media-mode" data-pref-media-policy><option value="off">关闭</option><option value="suggest">提示后生成</option><option value="auto">自动生成</option></select></div>
+                  <div class="reader-preference-row"><label for="pref-reader-media-image-density"><span data-reader-i18n="readerContextImageDensity">图片密度</span><small data-reader-i18n="readerContextImageDensityHint">控制正文中情境图片的生成频率。</small></label><select id="pref-reader-media-image-density" data-pref-media-density="readerMediaImageDensity"><option value="low" data-reader-i18n="densityLow">低</option><option value="medium" data-reader-i18n="densityMedium">中</option><option value="high" data-reader-i18n="densityHigh">高</option></select></div>
+                  <div class="reader-preference-row"><label for="pref-reader-media-video-density"><span data-reader-i18n="readerContextVideoDensity">视频密度</span><small data-reader-i18n="readerContextVideoDensityHint">控制正文中情境视频的生成频率。</small></label><select id="pref-reader-media-video-density" data-pref-media-density="readerMediaVideoDensity"><option value="low" data-reader-i18n="densityLow">低</option><option value="medium" data-reader-i18n="densityMedium">中</option><option value="high" data-reader-i18n="densityHigh">高</option></select></div>
+                  <div class="reader-context-media-summary-heading"><strong data-reader-i18n="readerContextChapterSummary">章节伴读总结</strong><small data-reader-i18n="readerContextChapterSummaryHint">按需在章首或章尾显示整章的图片、视频总结。</small></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="readerContextImageSummaryStart">章首显示图片总结</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showReaderMediaImageSummaryAtChapterStart" /><span class="settings-slider"></span></label></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="readerContextImageSummaryEnd">章尾显示图片总结</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showReaderMediaImageSummaryAtChapterEnd" /><span class="settings-slider"></span></label></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="readerContextVideoSummaryStart">章首显示视频总结</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showReaderMediaVideoSummaryAtChapterStart" /><span class="settings-slider"></span></label></div>
+                  <div class="reader-preference-row"><label data-reader-i18n="readerContextVideoSummaryEnd">章尾显示视频总结</label><label class="settings-switch"><input type="checkbox" data-pref-bool="showReaderMediaVideoSummaryAtChapterEnd" /><span class="settings-slider"></span></label></div>
+                </section>
               </section>
             </div>
             <div id="reader-preferences-scrollbar" class="reader-preferences-scrollbar" aria-hidden="true" hidden><span id="reader-preferences-scroll-thumb" class="reader-preferences-scroll-thumb"></span></div>
@@ -1034,8 +1085,8 @@
         </section>
       </div>      <button id="vocab-btn" class="tbtn" title="生词本（查过的词）" data-reader-i18n="vocabulary" data-reader-i18n-title="vocabulary">📒 生词本</button>
       <div class="reader-drag-space" data-tauri-drag-region></div>
-      <div id="reader-progress-group" data-tauri-drag-region>
-        <span id="chapter-progress" class="title epub-only" title="阅读进度" data-reader-i18n-title="readingProgress">正在定位阅读进度…</span>
+      <div id="reader-progress-group" class="reader-progress-group" data-tauri-drag-region>
+        <span id="chapter-progress" title="阅读进度" data-reader-i18n-title="readingProgress"><span id="chapter-number" class="title epub-only"></span><span id="chapter-page" class="title epub-only"></span><span id="progress-percentage" class="title"></span></span>
         <span id="progress" class="title page-count-loading" title="全书页数统计中" aria-label="全书页数统计中" data-reader-i18n-title="measuringPages" data-reader-i18n-aria="measuringPages"><span class="mini-spinner"></span></span>
       </div>
       <div class="window-controls" aria-label="窗口控制" data-reader-i18n-aria="windowControls">
@@ -1063,6 +1114,9 @@
           <button id="ai-reader-ask" class="tbtn" type="button" data-reader-i18n="ask">提问</button>
           <button id="ai-reader-summary" class="tbtn" type="button" data-reader-i18n="summary">总结</button>
           <button id="ai-reader-mindmap" class="tbtn" type="button" data-reader-i18n="mindMap">生成脑图</button>
+          <button id="ai-reader-image" class="tbtn" type="button">生成图片</button>
+          <button id="ai-reader-video" class="tbtn" type="button">生成视频</button>
+          <button id="ai-reader-companion-settings" class="tbtn" type="button">伴读设定</button>
           <span class="ai-reader-history-controls">
             <button id="ai-reader-history-btn" class="tbtn" type="button" data-reader-i18n="history">历史</button>
             <button id="ai-reader-history-settings-btn" class="tbtn ai-reader-history-settings" type="button" title="智读历史同步设置" data-reader-i18n-title="aiHistorySyncSettings" data-reader-i18n-aria="aiHistorySyncSettings">⚙</button>
@@ -1080,6 +1134,29 @@
         <div class="ai-reader-submit"><button id="ai-reader-enter-submit" class="tbtn" type="button" title="Enter" data-reader-i18n="submitQuestion" data-reader-i18n-title="submitQuestion">Enter</button></div>
         <div id="ai-reader-answer" class="ai-reader-answer empty" data-reader-i18n="aiReady">配置 API 后即可开始智读。</div>
         <div id="ai-reader-history" class="ai-reader-history"></div>
+        <section id="ai-reader-media-composer" class="ai-reader-media-composer" hidden>
+          <div class="ai-reader-media-head">
+            <strong id="ai-reader-media-title">伴读生成</strong>
+            <button id="ai-reader-media-cancel" class="tbtn" type="button">取消</button>
+          </div>
+          <p>当前配置的本地或云端大模型会根据已读内容提取场景。图片只生成可复制的提示词；视频提示词确认后才交给本机 MiniMax-H3。</p>
+          <textarea id="ai-reader-media-prompt" maxlength="7000" placeholder="场景、人物外貌、服装、动作、打斗、对话、环境和镜头"></textarea>
+          <label class="ai-reader-media-consent"><input id="ai-reader-media-consent" type="checkbox"> <span id="ai-reader-media-consent-copy">我已检查提示词</span></label>
+          <button id="ai-reader-media-submit" class="tbtn" type="button" disabled>确认生成</button>
+          <div id="ai-reader-media-result" class="ai-reader-media-result" hidden></div>
+        </section>
+        <section id="ai-reader-companion-settings-panel" class="ai-reader-media-composer" hidden>
+          <div class="ai-reader-media-head">
+            <strong>伴读设定</strong>
+            <button id="ai-reader-companion-settings-close" class="tbtn" type="button">关闭</button>
+          </div>
+          <p>仅保存在本机并按当前图书生效，不会同步或上传。自动伴读与手动生成提示词都会使用这些设定。</p>
+          <label>画风提示词<textarea id="ai-reader-companion-style" maxlength="2000" placeholder="例如：水墨写意、冷色电影光影、细腻写实插画"></textarea></label>
+          <label>负面提示词<textarea id="ai-reader-companion-negative" maxlength="2000" placeholder="例如：避免现代物品、文字水印、人物脸部变形"></textarea></label>
+          <label>人物设定<textarea id="ai-reader-companion-characters" maxlength="8000" placeholder="记录人物姓名、外貌、服装、年龄感、关系与不可改变的视觉特征"></textarea></label>
+          <button id="ai-reader-companion-settings-save" class="tbtn" type="button">保存本机伴读设定</button>
+          <div id="ai-reader-companion-settings-status" class="ai-reader-media-result" hidden></div>
+        </section>
         <div id="ai-reader-source-preview" class="ai-reader-source-preview" role="dialog" aria-live="polite" hidden></div>
         <div id="ai-reader-audit" class="ai-reader-audit" hidden></div>
         <details id="ai-reader-sources" class="ai-reader-sources" hidden><summary data-reader-i18n="sources">本次依据</summary><ul></ul></details>

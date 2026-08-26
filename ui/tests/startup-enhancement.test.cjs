@@ -125,7 +125,11 @@ test("master off means full exit while master on hides without a tray", () => {
   assert.match(enhancement, /pub\(crate\) fn reveal_main/);
   assert.match(
     enhancement,
-    /fn activate_main[\s\S]*?let _ = reveal_main\(app\);/,
+    /fn activate_main[\s\S]*?activate_window\(\)[\s\S]*?complete_activation_on_main_thread/,
+  );
+  assert.match(
+    enhancement,
+    /fn complete_activation_on_main_thread[\s\S]*?reveal_main\(&queued_app\)/,
   );
   assert.match(
     windowCommands,
@@ -147,7 +151,7 @@ test("master off means full exit while master on hides without a tray", () => {
   assert.doesNotMatch(titlebar, /syncBackend|Promise\.resolve/);
   assert.match(
     windowCommands,
-    /should_keep_running\(&app\)[\s\S]*?persist_main_window_state\(&app, &window\)[\s\S]*?background_main\(&app\)[\s\S]*?return Ok\(\(\)\)/,
+    /should_keep_running\(&app\)[\s\S]*?persist_main_window_state\(&app, &window\)[\s\S]*?background_main_from_window\(&app, &window\)[\s\S]*?return Ok\(\(\)\)/,
   );
   assert.match(
     windowCommands,
@@ -171,7 +175,7 @@ test("cold start reveals natively without waiting for a hidden WebView animation
   assert.match(reveal, /startupPerfLog\([\s\S]*?"main-window-show"[\s\S]*?"error"/);
   assert.match(
     enhancement,
-    /fn activate_main[\s\S]*?login_backgrounded[\s\S]*?store\(false[\s\S]*?reveal_main\(app\)/,
+    /fn activate_window[\s\S]*?login_backgrounded[\s\S]*?store\(false[\s\S]*?fn complete_activation_on_main_thread[\s\S]*?reveal_main\(&queued_app\)/,
   );
 });
 
@@ -263,7 +267,7 @@ test("closing pauses high-cost work by default and can explicitly allow it", () 
   );
   assert.match(
     enhancement,
-    /if !config\.continue_high_cost[\s\S]*?request_pause_high_cost\(\)/,
+    /fn background_work_allowed_at[\s\S]*?in_background && !self\.continue_high_cost[\s\S]*?return false/,
   );
   assert.match(enhancement, /HOT_ACTIVATION_HIGH_COST_GRACE_MS: u64 = 15_000/);
   assert.match(enhancement, /high-cost work delayed 15s/);

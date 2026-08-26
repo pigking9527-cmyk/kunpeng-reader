@@ -41,6 +41,13 @@ class FakeElement {
   public textContent = "";
   public title = "";
   public value = "";
+  public readonly attributes = new Map<string, string>();
+  public setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+  }
+  public getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
   public addEventListener(
     type: string,
     listener: EventListenerOrEventListenerObject,
@@ -49,6 +56,9 @@ class FakeElement {
   }
   public removeEventListener(type: string): void {
     this.handlers.delete(type);
+  }
+  public click(): void {
+    void this.fire("click");
   }
   public async fire(type: string): Promise<void> {
     await this.handlers.get(type)?.({
@@ -92,7 +102,7 @@ function progress(): Parameters<
     multi_profile_total: 0,
     multi_profile_ready: false,
     multi_profile_bytes: 0,
-    retrieval_mode: "standard",
+    retrieval_mode: "high_precision",
     retrieval_mode_label: "standard",
     reranker_ready: false,
     reranker_downloaded: false,
@@ -108,6 +118,11 @@ function progress(): Parameters<
 
 function fixture() {
   const elements = new Map<string, FakeElement>();
+  const panels = ["overview", "library", "models", "companion"].map((id) => {
+    const panel = new FakeElement();
+    panel.setAttribute("data-sem-panel", id);
+    return panel;
+  });
   const settingsModal = new FakeElement();
   const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
   const status = progress();
@@ -155,6 +170,20 @@ function fixture() {
           runtime_downloaded_bytes: 0,
           message: "CPU",
         } as TResult;
+      if (command === "ai_capability_routes_status")
+        return {
+          routes: [
+            {
+              capability: "search",
+              mode: "local",
+              allowAuto: true,
+              allowLocal: true,
+              allowIntelligenceHost: false,
+              allowCloud: false,
+              allowOff: true,
+            },
+          ],
+        } as TResult;
       return null as TResult;
     },
     listen: async () => () => undefined,
@@ -167,8 +196,9 @@ function fixture() {
       elements.set(id, element);
       return element;
     },
+    querySelectorAll: () => panels,
   } as unknown as Document;
-  return { runtime, transport, root, settingsModal, cache, elements, calls };
+  return { runtime, transport, root, settingsModal, cache, elements, calls, panels };
 }
 
 async function exercise() {
@@ -182,7 +212,11 @@ async function exercise() {
     confirmAction: () => true,
   };
   const controller = api.init(options);
-  controller.render(progress());
+  controller.render({
+    ...progress(),
+    model_id: "qwen3-embedding-0.6b",
+    retrieval_mode: "standard",
+  });
   await controller.refresh();
   return {
     api: Object.keys(api).sort(),
@@ -222,16 +256,177 @@ test("semantic controller source has one typed port and no alternate UI implemen
   );
   assert.doesNotMatch(source, /\bany\b|@ts-|eval\(|React|\.tsx|innerHTML/u);
   assert.match(source, /createSemanticPort/);
+  assert.doesNotMatch(source, /semanticCache\.use\(next\)/u);
   assert.match(
     source,
     /global\.ReaderSemanticUI = Object\.freeze\(\{ init \}\)/,
   );
 });
 
+test("smart search plans render selected state and use backend model ids", async () => {
+  const view = fixture();
+  const api = installSemanticUi(view.runtime) as SemanticUiGlobal;
+  const controller = api.init({
+    root: view.root,
+    transport: view.transport,
+    settingsModal: view.settingsModal as unknown as HTMLElement,
+    cache: view.cache,
+    confirmAction: () => true,
+  });
+  controller.render({
+    ...progress(),
+    model_id: "qwen3-embedding-0.6b",
+    retrieval_mode: "high_precision",
+  });
+  const standard = view.elements.get("sem-solution-standard");
+  const high = view.elements.get("sem-solution-high");
+  assert.equal(standard?.classList.values.has("selected"), true);
+  assert.equal(standard?.getAttribute("aria-pressed"), "true");
+  await high?.fire("click");
+  await view.elements.get("sem-solution-apply")?.fire("click");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(view.calls.at(-1), {
+    command: "background_task_status",
+  });
+  assert.ok(
+    view.calls.some(
+      (call) =>
+        call.command === "select_semantic_solution" &&
+        call.args?.modelId === "qwen3-embedding-8b" &&
+        call.args?.retrievalMode === "high_precision",
+    ),
+  );
+  controller.destroy();
+});
+
+test("pending smart-search build keeps the serving plan selected until promotion", () => {
+  const view = fixture();
+  const api = installSemanticUi(view.runtime) as SemanticUiGlobal;
+  const controller = api.init({
+    root: view.root,
+    transport: view.transport,
+    settingsModal: view.settingsModal as unknown as HTMLElement,
+    cache: view.cache,
+    confirmAction: () => true,
+  });
+  controller.render({
+    ...progress(),
+    building: true,
+    active_task: "semantic_vectors",
+    done: 38,
+    total: 100,
+    model_id: "qwen3-embedding-0.6b",
+    retrieval_mode: "high_precision",
+    solution_switching: true,
+    pending_model_id: "qwen3-embedding-8b",
+    pending_model_label: "Qwen3 Embedding 8B",
+    pending_retrieval_mode: "high_precision",
+    current: "正在分析候选搜索库",
+  });
+  const serving = view.elements.get("sem-solution-standard");
+  const pending = view.elements.get("sem-solution-high");
+  const switchStatus = view.elements.get("sem-solution-switch");
+  assert.equal(serving?.classList.values.has("selected"), true);
+  assert.equal(pending?.classList.values.has("selected"), false);
+  assert.equal(pending?.classList.values.has("pending"), true);
+  assert.equal(switchStatus?.hidden, false);
+  assert.match(switchStatus?.textContent || "", /38\/100 · 38%/u);
+  assert.match(switchStatus?.textContent || "", /当前智能搜索继续可用/u);
+  const apply = view.elements.get("sem-solution-apply");
+  assert.equal(apply?.disabled, true);
+  assert.equal(apply?.textContent, "正在建立新搜索库");
+  controller.destroy();
+});
+
+test("27B local understanding configuration is not part of a search plan", () => {
+  const source = readFileSync(new URL("./semantic-ui.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /qwen27CompositeChoice|qwen27DeepSearch|semanticQwen27DeepSearchV1/u);
+  assert.match(source, /saveIntelligenceModel/);
+  assert.match(source, /intelligencePreflight\.message/);
+  assert.match(source, /hardwareReady && intelligencePreflight\.serviceReady/);
+});
+
+test("smart management exposes a real 7B/8B local-understanding readiness check", () => {
+  const source = readFileSync(new URL("./semantic-ui.ts", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../../../../../ui/index.html", import.meta.url), "utf8");
+  assert.match(source, /localUnderstandingPreflight\(\)/);
+  assert.match(source, /localUnderstandingPreflight\.local && localUnderstandingPreflight\.serviceReady/);
+  assert.match(html, /id="sem-understanding-preflight"/u);
+  assert.match(html, /Agent 模型/u);
+  assert.match(html, /本机或云端 · 按任务分工/u);
+});
+
+test("capability cards keep technical retrieval models behind the automatic route", () => {
+  const source = readFileSync(new URL("./semantic-ui.ts", import.meta.url), "utf8");
+  assert.match(source, /capabilityTitle/);
+  assert.match(source, /当前能力：\$\{activePlanName\}/u);
+  assert.match(source, /当前智能搜索继续可用/u);
+  assert.doesNotMatch(source, /正在后台建立 .*维/u);
+  assert.doesNotMatch(source, /本地理解（7B\/8B）|深度理解（本地 27B/u);
+});
+
+test("smart management detects the three model cards without starting any model", async () => {
+  const view = fixture();
+  const api = installSemanticUi(view.runtime) as SemanticUiGlobal;
+  const controller = api.init({
+    root: view.root,
+    transport: view.transport,
+    settingsModal: view.settingsModal as unknown as HTMLElement,
+    cache: view.cache,
+    confirmAction: () => true,
+  });
+
+  controller.open();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(view.calls.some((call) => call.command === "semantic_tasks"));
+  assert.ok(view.calls.some((call) => call.command === "semantic_gpu_status"));
+  assert.ok(view.calls.some((call) => call.command === "local_understanding_model_preflight"));
+  assert.ok(view.calls.some((call) => call.command === "intelligence_local_model_capabilities"));
+  assert.ok(view.calls.some((call) => call.command === "reader_media_status"));
+  assert.ok(view.calls.some((call) => call.command === "ai_reader_profiles"));
+  assert.equal(view.calls.some((call) => /download|start|install/iu.test(call.command)), false);
+  controller.destroy();
+});
+
+test("recommended setup chooses the single semantic model without touching capability routes", () => {
+  const source = readFileSync(new URL("./semantic-ui.ts", import.meta.url), "utf8");
+  assert.match(source, /"qwen3-embedding-0\.6b"/u);
+  assert.match(source, /Qwen3 Embedding 0\.6B/u);
+  assert.doesNotMatch(source, /const searchRoute = routes\.find/u);
+  assert.match(source, /已选择推荐语义模型/u);
+});
+
+test("Agent card opens the one secure cloud-model editor in Agent-only mode", async () => {
+  const view = fixture();
+  const api = installSemanticUi(view.runtime) as SemanticUiGlobal;
+  const controller = api.init({
+    root: view.root,
+    transport: view.transport,
+    settingsModal: view.settingsModal as unknown as HTMLElement,
+    cache: view.cache,
+    confirmAction: () => true,
+  });
+  let opened = 0;
+  (view.root.getElementById("api-settings-open") as unknown as FakeElement)
+    .addEventListener("click", () => { opened += 1; });
+  view.elements.get("semantic-index-modal")?.classList.add("show");
+  await view.elements.get("sem-agent-primary")?.fire("click");
+  assert.equal(opened, 1);
+  assert.equal(view.elements.get("semantic-index-modal")?.classList.values.has("show"), false);
+  assert.equal(view.settingsModal.classList.values.has("show"), true);
+  assert.equal(view.elements.get("api-settings-modal")?.getAttribute("data-agent-config-mode"), "true");
+  controller.destroy();
+});
+
 test("semantic controller emits a standalone classic IIFE", () => {
   const output = execFileSync(
-    "npx",
-    ["vite", "build", "--config", "apps/desktop-ui/vite.legacy-ts.config.ts"],
+    process.execPath,
+    [
+      fileURLToPath(new URL("node_modules/vite/bin/vite.js", repositoryRoot)),
+      "build",
+      "--config",
+      "apps/desktop-ui/vite.legacy-ts.config.ts",
+    ],
     {
       cwd: repositoryRoot,
       encoding: "utf8",

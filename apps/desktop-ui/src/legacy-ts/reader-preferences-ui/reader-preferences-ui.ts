@@ -27,6 +27,11 @@ interface ReaderAppearance extends PreferenceRecord {
   showTtsButton?: boolean;
   showAnnotationButton?: boolean;
   showPageInfo?: boolean;
+  showChapterNumber?: boolean;
+  showChapterPageNumber?: boolean;
+  showProgressPercentage?: boolean;
+  showTotalPageNumber?: boolean;
+  pageInfoOrder?: unknown;
   readerJumpBackIconSizePx?: unknown;
   readerJumpBackPositionX?: unknown;
   readerJumpBackPositionY?: unknown;
@@ -36,6 +41,12 @@ interface ReaderAppearance extends PreferenceRecord {
   imagePagination?: string;
   dualPageGap?: unknown;
   epubLayoutEngine?: string;
+  readerMediaImageDensity?: string;
+  readerMediaVideoDensity?: string;
+  showReaderMediaImageSummaryAtChapterStart?: boolean;
+  showReaderMediaImageSummaryAtChapterEnd?: boolean;
+  showReaderMediaVideoSummaryAtChapterStart?: boolean;
+  showReaderMediaVideoSummaryAtChapterEnd?: boolean;
 }
 
 interface ReaderSettingsApi {
@@ -78,6 +89,9 @@ interface ReaderPreferencesRuntime extends Window {
   readonly ReaderPreferenceColorRules?: ReaderPreferenceColorRulesApi;
   readonly ReaderI18n?: { readonly t?: (key: string, values?: Readonly<Record<string, unknown>>) => string };
   readonly ReaderLayoutPreview?: { readonly source?: (dualPageGap: unknown) => string | undefined };
+  readonly ReaderBugTrace?: {
+    readonly record?: (kind: string, detail: Readonly<Record<string, unknown>>) => void;
+  };
   readonly ReaderShell?: {
     readonly OVERLAY: { readonly PREFERENCES: unknown; readonly SETTINGS: unknown };
     readonly isOverlay?: (overlay: unknown) => boolean;
@@ -134,6 +148,15 @@ interface ToolbarPointerDrag {
   readonly offsetY: number;
   readonly startY: number;
   moved: boolean;
+}
+
+interface PageInfoPointerDrag {
+  readonly item: HTMLElement;
+  readonly placeholder: HTMLElement;
+  readonly capture: HTMLElement;
+  readonly pointerId: number;
+  readonly offsetY: number;
+  readonly startY: number;
 }
 
 interface ScrollPointerDrag {
@@ -200,6 +223,13 @@ export function installReaderPreferencesUi(
   const MAX_BACKGROUND_IMAGE_SOURCE_BYTES = 25 * 1024 * 1024;
   const MAX_INLINE_BACKGROUND_IMAGE_CHARS = 160000; // legacy migration only
   const TOOLBAR_ITEM_IDS = Object.freeze(["toc", "chapters", "tts", "annotations", "vocabulary", "settings"]);
+  const PAGE_INFO_ITEM_IDS = Object.freeze(["chapter", "chapterPage", "percentage", "totalPages"]);
+  const PAGE_INFO_VISIBILITY_KEYS = Object.freeze([
+    "showChapterNumber",
+    "showChapterPageNumber",
+    "showProgressPercentage",
+    "showTotalPageNumber",
+  ]);
   const colorRules = colorRulesFrom(global.ReaderPreferenceColorRules);
   // 语言文件比偏好页晚更新或被旧缓存复用时，ReaderI18n 会回显键名。
   // 偏好页不能把内部键名当作可见文案，因此此处稳定退回到内置文案。
@@ -233,6 +263,7 @@ export function installReaderPreferencesUi(
   let preferencesScrollDrag: ScrollPointerDrag | null = null;
   let jumpBackPreviewDrag: number | null = null;
   let toolbarPointerDrag: ToolbarPointerDrag | null = null;
+  let pageInfoPointerDrag: PageInfoPointerDrag | null = null;
 
   function applyPreferenceNavState() {
     preferencesCard?.classList.toggle("nav-collapsed", preferenceNavCollapsed);
@@ -302,6 +333,22 @@ export function installReaderPreferencesUi(
   let readerLayoutPreview: HTMLDivElement | null = null;
   let readerLayoutPreviewFrame: HTMLIFrameElement | null = null;
 
+  // 问题记录只记录预览自身的状态机，不记录 URL、书名或正文。这样下次出现
+  // “第一次拖动无预览”时可以区分：未取得源、iframe 未载入、未收到 ready，还是
+  // 已就绪但被隐藏。
+  function traceReaderLayoutPreview(phase: string, outcome: string, detail: Readonly<Record<string, unknown>> = {}): void {
+    global.ReaderBugTrace?.record?.("layout_preview", {
+      source: "reader_preferences",
+      phase,
+      outcome,
+      has_frame: Boolean(readerLayoutPreviewFrame),
+      has_source: Boolean(readerLayoutPreview?.dataset.source),
+      is_ready: Boolean(readerLayoutPreview?.classList.contains("is-ready")),
+      is_visible: readerLayoutPreview?.hidden === false,
+      ...detail,
+    });
+  }
+
   function ensureReaderLayoutPreview() {
     if (readerLayoutPreview) return readerLayoutPreview;
     const preview = document.createElement("div");
@@ -315,6 +362,9 @@ export function installReaderPreferencesUi(
     previewFrame.setAttribute("sandbox", "allow-scripts allow-same-origin");
     previewFrame.setAttribute("referrerpolicy", "no-referrer");
     previewFrame.tabIndex = -1;
+    previewFrame.addEventListener("load", () => {
+      traceReaderLayoutPreview("iframe_load", "received");
+    });
     preview.append(previewFrame);
     document.body.append(preview);
     readerLayoutPreview = preview;
@@ -339,6 +389,12 @@ export function installReaderPreferencesUi(
     try {
       const url = new URL(source, global.location?.href);
       url.searchParams.delete("s");
+      // 中缝预览只需与当前书籍/阅读页对应；阅读进度会在每次翻页变化。
+      // 若把它纳入缓存键，首个滑块动作又会销毁已预热的 iframe，重新落入
+      // “首次拖动等待首帧”的竞态。
+      url.searchParams.delete("rc");
+      url.searchParams.delete("rf");
+      url.searchParams.delete("ra");
       return url.href;
     } catch {
       return String(source || "");
@@ -346,7 +402,10 @@ export function installReaderPreferencesUi(
   }
 
   function loadReaderLayoutPreviewFrame(dualPageGap: unknown, source = global.ReaderLayoutPreview?.source?.(dualPageGap)): boolean {
-    if (!source || !readerLayoutPreviewFrame) return false;
+    if (!source || !readerLayoutPreviewFrame) {
+      traceReaderLayoutPreview("frame_load", "unavailable", { has_source_factory: Boolean(global.ReaderLayoutPreview?.source) });
+      return false;
+    }
     global.clearTimeout(readerLayoutPreviewRevealTimer);
     readerLayoutPreviewRevealTimer = 0;
     const preview = readerLayoutPreview ?? ensureReaderLayoutPreview();
@@ -354,18 +413,30 @@ export function installReaderPreferencesUi(
     preview.dataset.source = source;
     preview.dataset.sourceKey = readerLayoutPreviewSourceKey(source);
     readerLayoutPreviewFrame.src = source;
+    traceReaderLayoutPreview("frame_load", "requested");
     return true;
   }
 
   function preloadReaderLayoutPreview(dualPageGap: unknown): boolean {
     const preview = ensureReaderLayoutPreview();
     const source = global.ReaderLayoutPreview?.source?.(dualPageGap);
-    if (!source) return false;
-    if (preview.dataset.source && preview.dataset.sourceKey === readerLayoutPreviewSourceKey(source)) return true;
+    if (!source) {
+      traceReaderLayoutPreview("preload", "unavailable", { has_source_factory: Boolean(global.ReaderLayoutPreview?.source) });
+      return false;
+    }
+    if (preview.dataset.source && preview.dataset.sourceKey === readerLayoutPreviewSourceKey(source)) {
+      traceReaderLayoutPreview("preload", "reused");
+      return true;
+    }
     preview.hidden = true;
+    traceReaderLayoutPreview("preload", "requested");
     return loadReaderLayoutPreviewFrame(dualPageGap, source);
   }
-  void preloadReaderLayoutPreview;
+
+  function preloadCurrentReaderLayoutPreview(): boolean {
+    const input = document.getElementById("pref-dual-page-gap") as HTMLInputElement | null;
+    return preloadReaderLayoutPreview(input?.value);
+  }
 
   function clearReaderLayoutPreview() {
     global.clearTimeout(readerLayoutPreviewTimer);
@@ -376,6 +447,7 @@ export function installReaderPreferencesUi(
     delete readerLayoutPreview.dataset.dismissWhenReady;
     const preview = readerLayoutPreview;
     ["left", "top", "width", "height"].forEach((part) => preview.style.removeProperty(`--reader-preference-preview-cutout-${part}`));
+    traceReaderLayoutPreview("visibility", "hidden");
   }
 
   function scheduleReaderLayoutPreviewClear(delay: number): void {
@@ -395,6 +467,7 @@ export function installReaderPreferencesUi(
       readerLayoutPreview.classList.add("is-ready");
       const gap = dualPageGapPixels((document.getElementById("pref-dual-page-gap") as HTMLInputElement | null)?.value);
       updateReaderLayoutPreviewFrame(gap);
+      traceReaderLayoutPreview("iframe_ready", "received");
       if (readerLayoutPreview.dataset.dismissWhenReady === "true") {
         delete readerLayoutPreview.dataset.dismissWhenReady;
         scheduleReaderLayoutPreviewClear(READER_LAYOUT_PREVIEW_RESET_DURATION);
@@ -404,6 +477,13 @@ export function installReaderPreferencesUi(
 
   function renderReaderLayoutPreview({ phase, dualPageGap }: { readonly phase: PalettePhase; readonly dualPageGap: unknown }): void {
     if (phase === "finished") {
+      // 首次拖动时，真实 reader:// 预览页可能仍在首帧排版。不能在它回传
+      // ready 前立刻隐藏，否则用户快速松开滑块时永远看不到整页预览。
+      if (readerLayoutPreview?.dataset.overlayActive === "true" && !readerLayoutPreview.classList.contains("is-ready")) {
+        readerLayoutPreview.dataset.dismissWhenReady = "true";
+        traceReaderLayoutPreview("finished", "waiting_for_ready");
+        return;
+      }
       clearReaderLayoutPreview();
       return;
     }
@@ -422,10 +502,14 @@ export function installReaderPreferencesUi(
       preview.style.setProperty("--reader-preference-preview-cutout-width", `${Math.min(viewportWidth, sliderRect.width + insetX * 2)}px`);
       preview.style.setProperty("--reader-preference-preview-cutout-height", `${Math.min(viewportHeight, sliderRect.height + insetY * 2)}px`);
     }
-    if (!preview.dataset.source && !loadReaderLayoutPreviewFrame(dualPageGap)) return;
+    if (!preview.dataset.source && !loadReaderLayoutPreviewFrame(dualPageGap)) {
+      traceReaderLayoutPreview("render", "unavailable");
+      return;
+    }
     updateReaderLayoutPreviewFrame(dualPageGap);
     preview.hidden = false;
     preview.dataset.overlayActive = "true";
+    traceReaderLayoutPreview("render", preview.classList.contains("is-ready") ? "shown" : "waiting_for_ready", { phase });
     if (phase === "reset") {
       if (preview.classList.contains("is-ready")) scheduleReaderLayoutPreviewClear(READER_LAYOUT_PREVIEW_RESET_DURATION);
       else preview.dataset.dismissWhenReady = "true";
@@ -451,6 +535,13 @@ export function installReaderPreferencesUi(
   global.addEventListener("message", (event) => {
     if (!readerLayoutPreviewFrame || event.source !== readerLayoutPreviewFrame.contentWindow || !event.data?.ready) return;
     revealReaderLayoutPreviewAfterPaint();
+  });
+
+  // 真正阅读页完成首帧后立即在后台准备同一本书的预览 iframe。此前只在
+  // 打开设置或按下滑块时才创建它，首次拖动必然可能与预览页首帧排版竞争。
+  global.addEventListener("reader-frame-ready", () => {
+    const preloaded = preloadCurrentReaderLayoutPreview();
+    traceReaderLayoutPreview("reader_frame_ready", preloaded ? "preloaded" : "unavailable");
   });
 
   function jumpBackIconHeight(iconSizePx: unknown): number {
@@ -685,7 +776,8 @@ export function installReaderPreferencesUi(
     visible("toc-btn", settings.showTocButton);
     visible("tts-btn", settings.showTtsButton);
     visible("hl-btn", settings.showAnnotationButton);
-    document.getElementById("reader-progress-group")?.toggleAttribute("hidden", settings.showPageInfo === false);
+    const pageInfoVisible = settings.showPageInfo !== false;
+    document.getElementById("reader-progress-group")?.toggleAttribute("hidden", !pageInfoVisible);
   }
 
   function normalizedToolbarOrder(value: unknown): string[] {
@@ -703,6 +795,135 @@ export function installReaderPreferencesUi(
 
   function toolbarOrderFromList(list: HTMLElement): string[] {
     return [...list.querySelectorAll<HTMLElement>(":scope > [data-toolbar-item]")].map((item) => item.dataset.toolbarItem || "");
+  }
+
+  function normalizedPageInfoOrder(value: unknown): string[] {
+    const source = Array.isArray(value) ? value : [];
+    const known = new Set<string>(PAGE_INFO_ITEM_IDS);
+    const seen = new Set<string>();
+    const order: string[] = [];
+    source.forEach((value) => {
+      const id = String(value);
+      if (known.has(id) && !seen.has(id)) { seen.add(id); order.push(id); }
+    });
+    PAGE_INFO_ITEM_IDS.forEach((id) => { if (!seen.has(id)) order.push(id); });
+    return order;
+  }
+
+  function pageInfoOrderFromList(list: HTMLElement): string[] {
+    return [...list.querySelectorAll<HTMLElement>(":scope > [data-page-info-item]")].map((item) => item.dataset.pageInfoItem || "");
+  }
+
+  function renderPageInfoOrder(settings: ReaderAppearance): void {
+    const list = document.getElementById("reader-page-info-options");
+    if (!list || pageInfoPointerDrag) return;
+    const items = new Map([...list.querySelectorAll<HTMLElement>("[data-page-info-item]")].map((item) => [item.dataset.pageInfoItem, item]));
+    const order = normalizedPageInfoOrder(settings.pageInfoOrder);
+    order.forEach((id, index) => {
+      const item = items.get(id);
+      if (!item) return;
+      item.setAttribute("aria-posinset", String(index + 1));
+      item.setAttribute("aria-setsize", String(order.length));
+      const handle = item.querySelector<HTMLElement>(".reader-page-info-drag-handle");
+      const name = item.querySelector<HTMLElement>("[data-reader-i18n]")?.textContent?.trim() || id;
+      if (handle) handle.setAttribute("aria-label", `${name}，按住并上下拖动调整显示位置`);
+      list.append(item);
+    });
+  }
+
+  function animatePageInfoPlaceholder(state: PageInfoPointerDrag, beforeNode: Element | null): void {
+    const list = state.placeholder.parentElement;
+    if (!list || beforeNode === state.placeholder) return;
+    if (beforeNode === state.item) beforeNode = state.item.nextElementSibling;
+    const before = new Map<Element, DOMRect>();
+    [...list.children].forEach((item) => {
+      if (item !== state.item && item !== state.placeholder) before.set(item, item.getBoundingClientRect());
+    });
+    list.insertBefore(state.placeholder, beforeNode || null);
+    [...list.children].forEach((item) => {
+      if (item === state.item || item === state.placeholder) return;
+      const first = before.get(item);
+      if (!first) return;
+      const last = item.getBoundingClientRect();
+      const dy = first.top - last.top;
+      if (!dy) return;
+      const htmlItem = item as HTMLElement;
+      htmlItem.style.transition = "none";
+      htmlItem.style.transform = `translateY(${dy}px)`;
+      item.getBoundingClientRect();
+      requestAnimationFrame(() => {
+        htmlItem.style.transition = "transform .18s cubic-bezier(.2,.8,.2,1), background .14s ease";
+        htmlItem.style.transform = "";
+      });
+    });
+  }
+
+  function movePageInfoDrag(event: PointerEvent): void {
+    const state = pageInfoPointerDrag;
+    if (!state || state.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const list = state.placeholder.parentElement;
+    if (!list) return;
+    const bounds = list.getBoundingClientRect();
+    const maxTop = Math.max(bounds.top, bounds.bottom - state.item.offsetHeight);
+    const top = Math.max(bounds.top, Math.min(maxTop, event.clientY - state.offsetY));
+    const probeY = Math.max(bounds.top, Math.min(bounds.bottom, event.clientY));
+    state.item.style.top = `${top}px`;
+    const target = document.elementFromPoint(event.clientX, probeY)?.closest<HTMLElement>("[data-page-info-item]");
+    if (target && target !== state.item && target.parentElement === list) {
+      const box = target.getBoundingClientRect();
+      animatePageInfoPlaceholder(state, probeY < box.top + box.height / 2 ? target : target.nextElementSibling);
+    } else if (probeY > bounds.bottom - 4) {
+      animatePageInfoPlaceholder(state, null);
+    }
+  }
+
+  function finishPageInfoDrag(event: PointerEvent): void {
+    const state = pageInfoPointerDrag;
+    if (!state || state.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    pageInfoPointerDrag = null;
+    try { state.capture.releasePointerCapture(event.pointerId); } catch {}
+    state.placeholder.parentElement?.insertBefore(state.item, state.placeholder);
+    state.placeholder.remove();
+    state.item.classList.remove("dragging");
+    state.item.removeAttribute("aria-grabbed");
+    state.item.style.position = "";
+    state.item.style.left = "";
+    state.item.style.top = "";
+    state.item.style.width = "";
+    state.item.style.height = "";
+    const list = document.getElementById("reader-page-info-options");
+    if (list) ReaderSettings.update({ pageInfoOrder: pageInfoOrderFromList(list) });
+  }
+
+  function beginPageInfoDrag(event: PointerEvent, item: HTMLElement, handle: HTMLElement): void {
+    if (event.button !== 0 || pageInfoPointerDrag || toolbarPointerDrag) return;
+    event.preventDefault();
+    const box = item.getBoundingClientRect();
+    const placeholder = document.createElement("div");
+    placeholder.className = "reader-page-info-placeholder";
+    placeholder.style.height = `${box.height}px`;
+    item.parentElement?.insertBefore(placeholder, item.nextSibling);
+    item.classList.add("dragging");
+    item.setAttribute("aria-grabbed", "true");
+    item.style.position = "fixed";
+    item.style.left = `${box.left}px`;
+    item.style.top = `${box.top}px`;
+    item.style.width = `${box.width}px`;
+    item.style.height = `${box.height}px`;
+    pageInfoPointerDrag = { item, placeholder, capture: handle, pointerId: event.pointerId, offsetY: event.clientY - box.top, startY: event.clientY };
+    try { handle.setPointerCapture(event.pointerId); } catch {}
+  }
+
+  function movePageInfoItemByKeyboard(item: HTMLElement, direction: number): void {
+    const list = item.parentElement;
+    const sibling = direction < 0 ? item.previousElementSibling : item.nextElementSibling;
+    if (!list || !sibling) return;
+    if (direction < 0) list.insertBefore(item, sibling);
+    else list.insertBefore(sibling, item);
+    ReaderSettings.update({ pageInfoOrder: pageInfoOrderFromList(list) });
+    item.querySelector<HTMLElement>(".reader-page-info-drag-handle")?.focus();
   }
 
   function renderToolbarOrder(settings: ReaderAppearance): void {
@@ -1217,7 +1438,19 @@ export function installReaderPreferencesUi(
     const dualPageGapValue = document.getElementById("pref-dual-page-gap-value");
     if (dualPageGapValue) dualPageGapValue.textContent = `${dualPageGap} px`;
     modalElement.querySelectorAll<HTMLInputElement>("[data-pref-bool]").forEach((input) => { input.checked = settings[input.dataset.prefBool ?? ""] !== false; });
-    renderToolbarOrder(ReaderSettings.get());
+    modalElement.querySelectorAll<HTMLSelectElement>("[data-pref-media-density]").forEach((select) => {
+      const value = settings[select.dataset.prefMediaDensity ?? ""];
+      select.value = value === "low" || value === "high" ? value : "medium";
+    });
+    const mediaPolicy = modalElement.querySelector<HTMLSelectElement>("[data-pref-media-policy]");
+    if (mediaPolicy) {
+      let savedPolicy = "suggest";
+      try { savedPolicy = global.localStorage?.getItem("readerMediaPolicyV1") || "suggest"; } catch {}
+      mediaPolicy.value = ["off", "suggest", "auto"].includes(savedPolicy) ? savedPolicy : "suggest";
+    }
+    const currentSettings = ReaderSettings.get();
+    renderToolbarOrder(currentSettings);
+    renderPageInfoOrder(currentSettings);
     const jumpBackMode = jumpBackSettings.readerJumpBackDismissMode === "time" ? "time" : "pages";
     const jumpBackModeSelect = document.getElementById("pref-reader-jump-back-dismiss-mode") as HTMLSelectElement | null;
     if (jumpBackModeSelect) jumpBackModeSelect.value = jumpBackMode;
@@ -1245,8 +1478,10 @@ export function installReaderPreferencesUi(
   }
 
   function setSection(name: string | undefined): void {
+    if (name !== "toolbar") setReaderPageInfoConfigExpanded(false);
     modalElement.querySelectorAll<HTMLElement>("[data-pref-section]").forEach((button) => button.classList.toggle("active", button.dataset.prefSection === name));
     modalElement.querySelectorAll<HTMLElement>("[data-pref-panel]").forEach((panel) => { panel.hidden = panel.dataset.prefPanel !== name; });
+    if (name === "pagination") preloadCurrentReaderLayoutPreview();
     // Panels have very different heights. Leaving the previous panel's scroll
     // offset in place can put the short Advanced panel entirely above view,
     // which makes the jump-back settings look as if they disappeared.
@@ -1258,6 +1493,7 @@ export function installReaderPreferencesUi(
     event.stopPropagation();
     global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, true);
     render();
+    preloadCurrentReaderLayoutPreview();
   });
   preferencesNavToggle?.addEventListener("click", () => {
     preferenceNavCollapsed = !preferenceNavCollapsed;
@@ -1276,6 +1512,13 @@ export function installReaderPreferencesUi(
   });
   global.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !global.ReaderShell?.isOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES)) return;
+    const pageInfoPopover = document.getElementById("reader-page-info-popover");
+    if (pageInfoPopover && !pageInfoPopover.hidden) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setReaderPageInfoConfigExpanded(false);
+      return;
+    }
     if (activeColorControl) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -1287,9 +1530,11 @@ export function installReaderPreferencesUi(
   global.addEventListener("reader-shell-statechange", ((event: CustomEvent<{ readonly previous?: { readonly overlay?: unknown }; readonly next?: { readonly overlay?: unknown } }>) => {
     const preferences = global.ReaderShell?.OVERLAY?.PREFERENCES;
     if (event.detail?.previous?.overlay !== preferences || event.detail?.next?.overlay === preferences) return;
+    setReaderPageInfoConfigExpanded(false);
     clearReaderLayoutPreview();
   }) as EventListener);
   preferencesContent?.addEventListener("scroll", updatePreferencesScrollbar, { passive: true });
+  preferencesContent?.addEventListener("scroll", positionReaderPageInfoPopover, { passive: true });
 
   preferencesScrollThumb?.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || !preferencesContent) return;
@@ -1309,6 +1554,7 @@ export function installReaderPreferencesUi(
   preferencesScrollThumb?.addEventListener("pointerup", finishPreferencesScrollDrag);
   preferencesScrollThumb?.addEventListener("pointercancel", finishPreferencesScrollDrag);
   global.addEventListener("resize", updatePreferencesScrollbar);
+  global.addEventListener("resize", positionReaderPageInfoPopover);
   global.addEventListener("reader-language-changed", applyPreferenceNavState);
   if (typeof ResizeObserver === "function" && preferencesContent) new ResizeObserver(updatePreferencesScrollbar).observe(preferencesContent);
   modalElement.querySelectorAll<HTMLElement>("[data-pref-section]").forEach((button) => button.addEventListener("click", () => setSection(button.dataset.prefSection)));
@@ -1375,6 +1621,10 @@ reader.onload = async () => {
     previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "adjusting" });
     ReaderSettings.update({ dualPageGap: value }, { deferPageApply: true });
   });
+  document.getElementById("pref-dual-page-gap")?.addEventListener("pointerdown", (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    preloadReaderLayoutPreview(input.value);
+  });
   document.getElementById("pref-dual-page-gap")?.addEventListener("change", (event) => {
     const value = dualPageGapPixels((event.currentTarget as HTMLInputElement).value);
     previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "finished" });
@@ -1389,6 +1639,81 @@ reader.onload = async () => {
     previewReaderLayout({ type: "dual-page-gap", dualPageGap: value, phase: "reset" });
     ReaderSettings.update({ dualPageGap: value }, { deferPageApply: true });
     applyDeferredReaderSettingsAfterPreviewPaint();
+  });
+  function pageInfoVisibilityInputs(): HTMLInputElement[] {
+    return PAGE_INFO_VISIBILITY_KEYS
+      .map((key) => modalElement.querySelector<HTMLInputElement>(`[data-pref-bool="${key}"]`))
+      .filter((input): input is HTMLInputElement => Boolean(input));
+  }
+
+  function positionReaderPageInfoPopover(): void {
+    const popover = document.getElementById("reader-page-info-popover");
+    const button = document.getElementById("pref-reader-page-info-settings");
+    if (!popover || !button || popover.hidden) return;
+    const anchor = button.getBoundingClientRect();
+    const width = popover.offsetWidth;
+    const height = popover.offsetHeight;
+    const left = Math.max(12, Math.min(global.innerWidth - width - 12, anchor.right - width));
+    const below = anchor.bottom + 8;
+    const top = below + height <= global.innerHeight - 12
+      ? below
+      : Math.max(12, anchor.top - height - 8);
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+  }
+
+  function setReaderPageInfoConfigExpanded(expanded: boolean): void {
+    const popover = document.getElementById("reader-page-info-popover");
+    const button = document.getElementById("pref-reader-page-info-settings");
+    if (!popover || !button) return;
+    popover.hidden = !expanded;
+    button.setAttribute("aria-expanded", String(expanded));
+    if (!expanded) return;
+    renderPageInfoOrder(read());
+    positionReaderPageInfoPopover();
+    popover.querySelector<HTMLElement>(".reader-page-info-drag-handle")?.focus({ preventScroll: true });
+  }
+
+  function updatePageInfoVisibilitySetting(input: HTMLInputElement, key: string): void {
+    const patch: ReaderAppearance = { [key]: input.checked };
+    const enabledCount = pageInfoVisibilityInputs().filter((candidate) => candidate.checked).length;
+    if (input.checked) {
+      patch.showPageInfo = true;
+    } else if (enabledCount === 0) {
+      patch.showPageInfo = false;
+      const master = modalElement.querySelector<HTMLInputElement>('[data-pref-bool="showPageInfo"]');
+      if (master) master.checked = false;
+    }
+    ReaderSettings.update(patch);
+  }
+
+  function updatePageInfoMasterSetting(input: HTMLInputElement): void {
+    if (!input.checked || pageInfoVisibilityInputs().some((candidate) => candidate.checked)) {
+      ReaderSettings.update({ showPageInfo: input.checked });
+      return;
+    }
+    const fallback = modalElement.querySelector<HTMLInputElement>('[data-pref-bool="showProgressPercentage"]')
+      || pageInfoVisibilityInputs()[0];
+    if (!fallback) {
+      ReaderSettings.update({ showPageInfo: false });
+      input.checked = false;
+      return;
+    }
+    fallback.checked = true;
+    ReaderSettings.update({ showPageInfo: true, showProgressPercentage: true });
+  }
+
+  const readerPageInfoSettingsButton = document.getElementById("pref-reader-page-info-settings");
+  readerPageInfoSettingsButton?.addEventListener("click", () => {
+    const popover = document.getElementById("reader-page-info-popover");
+    setReaderPageInfoConfigExpanded(!!popover?.hidden);
+  });
+  global.addEventListener("click", (event) => {
+    const popover = document.getElementById("reader-page-info-popover");
+    if (!popover || popover.hidden) return;
+    const targetNode = event.target as Node | null;
+    if (popover.contains(targetNode) || readerPageInfoSettingsButton?.contains(targetNode)) return;
+    setReaderPageInfoConfigExpanded(false);
   });
   function setReaderJumpBackConfigExpanded(expanded: boolean): void {
     const config = document.getElementById("pref-reader-jump-back-config");
@@ -1469,7 +1794,30 @@ reader.onload = async () => {
     event.preventDefault();
     ReaderSettings.update(patch);
   });
-  modalElement.querySelectorAll<HTMLInputElement>("[data-pref-bool]").forEach((input) => input.addEventListener("change", () => { const key = input.dataset.prefBool; if (key) ReaderSettings.update({ [key]: input.checked }); }));
+  modalElement.querySelectorAll<HTMLInputElement>("[data-pref-bool]").forEach((input) => input.addEventListener("change", () => {
+    const key = input.dataset.prefBool;
+    if (!key) return;
+    if (PAGE_INFO_VISIBILITY_KEYS.some((candidate) => candidate === key)) {
+      updatePageInfoVisibilitySetting(input, key);
+      return;
+    }
+    if (key === "showPageInfo") {
+      updatePageInfoMasterSetting(input);
+      return;
+    }
+    ReaderSettings.update({ [key]: input.checked });
+  }));
+  modalElement.querySelectorAll<HTMLSelectElement>("[data-pref-media-density]").forEach((select) => select.addEventListener("change", () => {
+    const key = select.dataset.prefMediaDensity;
+    if (!key) return;
+    const value = select.value === "low" || select.value === "high" ? select.value : "medium";
+    ReaderSettings.update({ [key]: value });
+  }));
+  modalElement.querySelector<HTMLSelectElement>("[data-pref-media-policy]")?.addEventListener("change", (event) => {
+    const select = event.currentTarget as HTMLSelectElement;
+    const value = ["off", "suggest", "auto"].includes(select.value) ? select.value : "suggest";
+    try { global.localStorage?.setItem("readerMediaPolicyV1", value); } catch {}
+  });
   document.querySelectorAll<HTMLElement>("#reader-toolbar-order-list [data-toolbar-item]").forEach((item) => {
     const handle = item.querySelector<HTMLElement>(".reader-toolbar-drag-handle");
     handle?.addEventListener("pointerdown", (event) => beginToolbarDrag(event, item, handle));
@@ -1479,9 +1827,21 @@ reader.onload = async () => {
       moveToolbarItemByKeyboard(item, event.key === "ArrowUp" ? -1 : 1);
     });
   });
+  document.querySelectorAll<HTMLElement>("#reader-page-info-options [data-page-info-item]").forEach((item) => {
+    const handle = item.querySelector<HTMLElement>(".reader-page-info-drag-handle");
+    handle?.addEventListener("pointerdown", (event) => beginPageInfoDrag(event, item, handle));
+    handle?.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      movePageInfoItemByKeyboard(item, event.key === "ArrowUp" ? -1 : 1);
+    });
+  });
   global.addEventListener("pointermove", moveToolbarDrag, true);
   global.addEventListener("pointerup", finishToolbarDrag, true);
   global.addEventListener("pointercancel", finishToolbarDrag, true);
+  global.addEventListener("pointermove", movePageInfoDrag, true);
+  global.addEventListener("pointerup", finishPageInfoDrag, true);
+  global.addEventListener("pointercancel", finishPageInfoDrag, true);
   document.getElementById("pref-reset-colors")?.addEventListener("click", () => updateAppearance({
     // 正文颜色保留；其余颜色和自定义背景恢复软件默认值。
     backgroundPreset: "light", customPaletteId: "", customBackgroundColor: "#fffdf8", customBackgroundImage: "",
@@ -1491,7 +1851,7 @@ reader.onload = async () => {
   document.getElementById("pref-clear-book-appearance")?.addEventListener("click", () => { ReaderSettings.clearBookAppearance?.(); render(); });
   global.addEventListener("reader-settings-changed", render);
   global.addEventListener("reader-language-changed", render);
-  const preferencesApi: ReaderPreferencesApi = Object.freeze({ open() { global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, true); render(); } });
+  const preferencesApi: ReaderPreferencesApi = Object.freeze({ open() { global.ReaderShell?.setOverlay?.(global.ReaderShell.OVERLAY.PREFERENCES, true); render(); preloadCurrentReaderLayoutPreview(); } });
   global.ReaderPreferences = preferencesApi;
   async function hydrateSyncedPalettes() {
     if (!api) { paletteSyncReady = true; return; }

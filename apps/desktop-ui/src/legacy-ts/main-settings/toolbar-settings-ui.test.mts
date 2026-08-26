@@ -261,7 +261,7 @@ test("frozen compatibility API normalizes legacy toolbar settings", () => {
     normalizeToolbarSettings({
       toolbarItemOrder: ["account", "search", "stats", "library", "news", "filter", "settings", "menu"],
     }).toolbarItemOrder,
-    ["account", "search", "stats", "library", "news", "intelligence-lab", "filter", "settings", "menu"],
+    ["account", "search", "stats", "library", "news", "intelligence-lab", "favorites", "filter", "settings", "menu"],
   );
   assert.deepEqual(Object.keys(modern).sort(), ["apply", "get", "init", "normalize"]);
   assert.equal(Object.isFrozen(modern), true);
@@ -287,6 +287,7 @@ function fixture() {
     "library-ai-toolbar-btn",
     "newsnow-toolbar-btn",
     "intelligence-lab-toolbar-btn",
+    "favorites-toolbar-btn",
     "filter-btn",
     "settings-toolbar-btn",
     "menu-btn",
@@ -298,6 +299,7 @@ function fixture() {
     "library",
     "news",
     "intelligence-lab",
+    "favorites",
     "filter",
     "settings",
     "menu",

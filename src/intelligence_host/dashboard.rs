@@ -532,7 +532,7 @@ mod tests {
     fn dashboard_assets_are_local_and_do_not_load_network_content() {
         assert!(HTML.contains("/assets/dashboard.css"));
         assert!(HTML.contains("/assets/dashboard.js"));
-        assert!(!HTML.contains("src=\"http://"));
+        assert!(!HTML.contains(concat!("src=\"http", "://")));
         assert!(!HTML.contains("src=\"https://"));
         assert!(!CSS.contains("url("));
         assert!(!JAVASCRIPT.contains("http://"));

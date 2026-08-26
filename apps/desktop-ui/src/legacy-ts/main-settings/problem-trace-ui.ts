@@ -9,6 +9,20 @@ import {
 
 const WINDOW_MS = 2 * 60 * 1000;
 const MAX_SHELL_EVENTS = 320;
+const READER_PERFORMANCE_STAGE_ORDER = Object.freeze([
+  "shell_activate_received",
+  "book_info",
+  "chapter_payload_ready",
+  "chapter_styles_ready",
+  "chapter_dom_ready",
+  "chapter_resources_ready",
+  "page_layout_ready",
+  "frame_ready",
+  "page_displayed",
+] as const);
+const READER_PERFORMANCE_STAGE_RANK = new Map<string, number>(
+  READER_PERFORMANCE_STAGE_ORDER.map((stage, index) => [stage, index]),
+);
 
 type ProblemTraceCommands = {
   readonly problem_trace_checkpoint: {
@@ -139,6 +153,27 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function readerSnapshotScore(snapshot: TraceSnapshot): number {
+  const state = record(snapshot.reader_state) ?? {};
+  const role = String(state.window_role || "unknown");
+  const failure = String(state.startup_failure_category || "none");
+  const events = Array.isArray(snapshot.events) ? snapshot.events : [];
+  let score = 0;
+  const windowVisible = typeof state.window_visible === "boolean"
+    ? state.window_visible
+    : state.document_visible === true;
+  if (windowVisible) score += 120;
+  else score -= 40;
+  if (state.book_bound === true) score += 35;
+  if (state.book_info_loaded === true) score += 20;
+  if (failure !== "none" && failure !== "unknown") score += 100;
+  if (events.some((event) => record(event)?.type === "book_load_failed")) score += 80;
+  if (role === "reader" || role === "pooled_reader") score += 25;
+  if (role === "preload_pool") score -= 100;
+  if (role.startsWith("benchmark_")) score -= 60;
+  return score;
+}
+
 function runtimeFrom(value: unknown): ProblemTraceRuntime | null {
   const runtime = record(value);
   if (
@@ -217,6 +252,24 @@ function summarizeReaderPerformance(events: readonly Record<string, unknown>[]) 
           event.type === "reader_performance" &&
           stringField(event.detail, "stage") === "frame_ready",
       ),
+    ),
+    chapter_payload_ready: summarizeDurations(
+      durations((event) => event.type === "reader_performance" && stringField(event.detail, "stage") === "chapter_payload_ready"),
+    ),
+    chapter_styles_ready: summarizeDurations(
+      durations((event) => event.type === "reader_performance" && stringField(event.detail, "stage") === "chapter_styles_ready"),
+    ),
+    chapter_dom_ready: summarizeDurations(
+      durations((event) => event.type === "reader_performance" && stringField(event.detail, "stage") === "chapter_dom_ready"),
+    ),
+    chapter_resources_ready: summarizeDurations(
+      durations((event) => event.type === "reader_performance" && stringField(event.detail, "stage") === "chapter_resources_ready"),
+    ),
+    page_layout_ready: summarizeDurations(
+      durations((event) => event.type === "reader_performance" && stringField(event.detail, "stage") === "page_layout_ready"),
+    ),
+    page_displayed: summarizeDurations(
+      durations((event) => event.type === "reader_performance" && stringField(event.detail, "stage") === "page_displayed"),
     ),
     close_destroy: summarizeDurations(
       durations(
@@ -415,6 +468,9 @@ export function initializeProblemTraceUi(
   let checkpointTimer: number | null = null;
   let lastWindowFocused = runtime.document?.hasFocus() === true;
   let lastWindowFocusChangedAt = Date.now();
+  let readerPerformanceSequence = 0;
+  let lastReaderPerformanceStageRank = -1;
+  let lastReaderPerformanceElapsedMs = 0;
   const api = transport ? createTauriApi<VerifiedProblemTraceCommands>(transport) : null;
   const defaultEventApi: TraceEventApi | undefined = transport?.listen && transport.emit
     ? {
@@ -621,7 +677,7 @@ export function initializeProblemTraceUi(
         show_cover_progress: storageValue(storage, "showCoverProgress") !== "0",
         show_cover_rating: storageValue(storage, "showCoverRating") !== "0",
         show_cover_title: storageValue(storage, "showCoverTitle") === "1",
-        single_click_opens_book: storageValue(storage, "shelfSingleClickOpen") !== "0",
+        book_open_interaction: "left_click_open_right_click_select",
         search_enabled: storageValue(storage, "shelfSearchEnabled") === "1",
       },
       reader: {
@@ -899,11 +955,47 @@ export function initializeProblemTraceUi(
     void eventApi
       .listen<Record<string, unknown>>("reader-performance-trace", (event) => {
         const payload = event.payload ?? {};
-        pushShellEvent("reader_performance", {
+        const stage = safeLabel(payload.stage);
+        const stageRank = READER_PERFORMANCE_STAGE_RANK.get(stage);
+        if (stageRank === undefined) return;
+        const durationMs = Math.max(0, Math.min(30000, Number(payload.durationMs) || 0));
+        if (
+          readerPerformanceSequence === 0 ||
+          stage === "shell_activate_received" ||
+          stageRank <= lastReaderPerformanceStageRank ||
+          durationMs < lastReaderPerformanceElapsedMs
+        ) {
+          readerPerformanceSequence += 1;
+          lastReaderPerformanceStageRank = -1;
+          lastReaderPerformanceElapsedMs = 0;
+        }
+        const stepDurationMs = Math.max(0, durationMs - lastReaderPerformanceElapsedMs);
+        const detail: Record<string, string | number | boolean | null> = {
           source: "reader_shell",
-          stage: safeLabel(payload.stage),
-          duration_ms: Math.max(0, Math.min(30000, Number(payload.durationMs) || 0)),
+          stage,
+          duration_ms: Number(durationMs.toFixed(1)),
+          step_duration_ms: Number(stepDurationMs.toFixed(1)),
+          sequence: readerPerformanceSequence,
+        };
+        const openingId = Math.trunc(Number(payload.openingId));
+        if (Number.isSafeInteger(openingId) && openingId > 0) detail.opening_id = openingId;
+        [
+          "stylesheet_count", "stylesheet_reused", "stylesheet_cssom_ready",
+          "stylesheet_load_event", "stylesheet_error_event", "stylesheet_timeout",
+          "image_total", "image_blocking", "image_deferred", "resource_timeout",
+          "payload_inline_hit",
+        ].forEach((key) => {
+          const numeric = Number(payload[key]);
+          if (Number.isFinite(numeric)) detail[key] = boundedInteger(numeric, 0, 0, 64);
         });
+        ["layout_frame_wait_ms", "layout_apply_ms", "layout_finalize_ms", "layout_compute_ms", "display_frame_wait_ms"].forEach((key) => {
+          const numeric = Number(payload[key]);
+          if (Number.isFinite(numeric)) detail[key] = Number(Math.max(0, Math.min(30000, numeric)).toFixed(1));
+        });
+        pushShellEvent("reader_performance", detail);
+        lastReaderPerformanceStageRank = stageRank;
+        lastReaderPerformanceElapsedMs = durationMs;
+        scheduleShellCheckpoint();
       })
       .catch(() => undefined);
   };
@@ -934,16 +1026,24 @@ export function initializeProblemTraceUi(
       let unlisten: TauriUnlisten | null = null;
       let retryTimer: number | null = null;
       let timer = 0;
+      const candidates: TraceSnapshot[] = [];
+      const bestSnapshot = (): TraceSnapshot | null => {
+        if (!candidates.length) return null;
+        return candidates.reduce((best, candidate) =>
+          readerSnapshotScore(candidate) > readerSnapshotScore(best) ? candidate : best,
+        );
+      };
       const finish = (snapshot: TraceSnapshot): void => {
         if (settled) return;
         settled = true;
         runtime.clearTimeout(timer);
         runtime.clearTimeout(retryTimer);
         try { unlisten?.(); } catch { /* Best effort. */ }
+        rememberReaderSnapshot(snapshot);
         resolve(mergeShellEvents(snapshot));
       };
       timer = runtime.setTimeout(() => {
-        finish(recentReaderSnapshot() ?? shellOnlySnapshot());
+        finish(bestSnapshot() ?? recentReaderSnapshot() ?? shellOnlySnapshot());
       }, waitMs);
       void (async () => {
         try {
@@ -954,8 +1054,7 @@ export function initializeProblemTraceUi(
             const payload = event.payload ?? {};
             const snapshot = record(payload.snapshot);
             if (payload.request_id !== requestId || !snapshot) return;
-            rememberReaderSnapshot(snapshot);
-            finish(snapshot);
+            candidates.push(snapshot);
           });
           const request = (): Promise<void> =>
             eventApi.emit("reader-bug-trace-request", { request_id: requestId });

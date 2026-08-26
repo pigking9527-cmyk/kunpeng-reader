@@ -20,11 +20,20 @@ function storage(values: Record<string, string> = {}): StorageLike {
 }
 
 test("semantic snapshot preserves explicit zero and defaults", () => {
-  const result = semanticStatusSnapshot({ model_supported: false, semantic_done: 0 }, "m", 9);
+  const result = semanticStatusSnapshot({
+    model_supported: false,
+    semantic_done: 0,
+    solution_switching: true,
+    pending_model_id: "qwen3-embedding-0.6b",
+    pending_retrieval_mode: "standard",
+  }, "m", 9);
   assert.equal(result.model_id, "m");
   assert.equal(result.model_supported, false);
   assert.equal(result.semantic_done, 0);
   assert.equal(result.saved_at, 9);
+  assert.equal(result.solution_switching, true);
+  assert.equal(result.pending_model_id, "qwen3-embedding-0.6b");
+  assert.equal(result.pending_retrieval_mode, "standard");
 });
 
 test("refresh merge falls back only for nullish values", () => {

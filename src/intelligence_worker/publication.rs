@@ -8,7 +8,7 @@
 //! or placed in a command line.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chrono::{DateTime, Days, NaiveDate, Utc};
+use chrono::{DateTime, Days, NaiveDate, NaiveDateTime, Utc};
 use image::GenericImageView;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -358,6 +358,11 @@ fn load_or_prepare_daily_draft(
             && canonical_without_bundle_sha(bundle)
                 .map(|canonical| sha256_hex(&canonical) == canonical_sha256)
                 .unwrap_or(false)
+            // Older builds limited public Chinese text by character count,
+            // while the wire contract uses UTF-8 byte ceilings.  Keep an old
+            // local draft only when it remains publishable by the server;
+            // otherwise rebuild it from the immutable event projection.
+            && bundle_text_fields_fit_wire_limits(bundle)
     });
     if !draft_is_valid {
         // An unpublished local draft is a cache, not an externally observable
@@ -1043,7 +1048,7 @@ fn revision_blocks_projection(
                 .ok_or(())?;
             if note_ids
                 .iter()
-                .any(|id| id.as_str().map_or(true, |id| !available_notes.contains(id)))
+                .any(|id| id.as_str().is_none_or(|id| !available_notes.contains(id)))
             {
                 return Err(());
             }
@@ -1052,7 +1057,7 @@ fn revision_blocks_projection(
         let requested_media = block.get("mediaIds").and_then(Value::as_array).ok_or(())?;
         if requested_media
             .iter()
-            .any(|id| id.as_str().map_or(true, |id| !available_media.contains(id)))
+            .any(|id| id.as_str().is_none_or(|id| !available_media.contains(id)))
         {
             return Err(());
         }
@@ -1080,12 +1085,17 @@ fn revision_blocks_projection(
 
 /// Returns note projections plus event-local media.  Every note points to a
 /// persisted paragraph hash; the server never receives a source body.
+type SourceProjection = (Vec<Value>, Vec<Value>, Option<String>, Vec<AssetPayload>);
+
+// `all_assets` is the outer publication accumulator. This projection appends
+// verified media to it, so a growable Vec is required rather than a slice.
+#[allow(clippy::ptr_arg)]
 fn source_projection(
     connection: &Connection,
     root: &Path,
     event_id: &str,
     all_assets: &mut Vec<AssetPayload>,
-) -> Result<Option<(Vec<Value>, Vec<Value>, Option<String>, Vec<AssetPayload>)>, ()> {
+) -> Result<Option<SourceProjection>, ()> {
     let mut sources = connection
         .prepare(
             "SELECT a.article_id,COALESCE(a.source_name,''),a.title,COALESCE(a.summary,''),
@@ -1268,12 +1278,7 @@ fn limited_nonempty(value: &str, fallback: &str, max: usize) -> String {
     } else {
         value
     };
-    value
-        .chars()
-        .take(max)
-        .collect::<String>()
-        .trim()
-        .to_owned()
+    utf8_prefix(value, max).trim().to_owned()
 }
 
 fn model_text(value: &str, max: usize) -> Result<String, ()> {
@@ -1281,13 +1286,74 @@ fn model_text(value: &str, max: usize) -> Result<String, ()> {
     if value.is_empty() || value.contains("https://") || value.contains("http://") {
         return Err(());
     }
-    let result = value
-        .chars()
-        .take(max)
-        .collect::<String>()
-        .trim()
-        .to_owned();
+    let result = utf8_prefix(value, max).trim().to_owned();
     (!result.is_empty()).then_some(result).ok_or(())
+}
+
+/// Server-side contract limits are UTF-8 byte limits (`String::len()`), not
+/// Unicode scalar counts.  Never split a character while truncating Chinese
+/// or other multibyte text for a publishable projection.
+fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let next = index + character.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    &value[..end]
+}
+
+fn bundle_text_fields_fit_wire_limits(bundle: &Value) -> bool {
+    let Some(events) = bundle.get("events").and_then(Value::as_array) else {
+        return false;
+    };
+    events.iter().all(|event| {
+        event
+            .get("title")
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.len() <= 512)
+            && event
+                .get("notes")
+                .and_then(Value::as_array)
+                .is_some_and(|notes| {
+                    notes.iter().all(|note| {
+                        note.get("publisher")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.len() <= 256)
+                            && note
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .is_some_and(|text| text.len() <= 2_048)
+                            && note
+                                .get("fallbackExcerpt")
+                                .and_then(Value::as_str)
+                                .is_some_and(|text| text.len() <= 4_096)
+                    })
+                })
+            && event
+                .get("blocks")
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| {
+                    blocks.iter().all(|block| {
+                        block
+                            .get("segments")
+                            .and_then(Value::as_array)
+                            .is_some_and(|segments| {
+                                segments.iter().all(|segment| {
+                                    segment
+                                        .get("text")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|text| text.len() <= 16_384)
+                                })
+                            })
+                    })
+                })
+    })
 }
 
 /// Source and video links come only from the archive, but still need the same
@@ -1420,6 +1486,30 @@ impl HttpsPublisher {
             .send_json(body.unwrap_or_else(|| json!({})))
             .map_err(|_| ())?;
         if !response.status().is_success() {
+            // The worker's public outcome deliberately stays content-free, but
+            // an HTTP status is essential to distinguish an unreachable
+            // publisher from a server-side package rejection.  Never include
+            // the endpoint, response body, bundle, source data or credential
+            // here: this line is consumed only by local operator diagnostics.
+            let stage = if suffix == "/v1/intelligence/assets/init" {
+                "asset_init"
+            } else if suffix.ends_with("/complete")
+                && suffix.starts_with("/v1/intelligence/assets/")
+            {
+                "asset_complete"
+            } else if suffix.starts_with("/v1/intelligence/assets/") {
+                "asset_chunk"
+            } else if suffix == "/v1/intelligence/uploads/init" {
+                "bundle_init"
+            } else if suffix.starts_with("/v1/intelligence/uploads/") {
+                "bundle_complete"
+            } else {
+                "unknown"
+            };
+            eprintln!(
+                "[intelligence publication] stage={stage} server_status={}",
+                response.status().as_u16()
+            );
             return Err(());
         }
         response.into_body().read_json::<Value>().map_err(|_| ())
@@ -1503,6 +1593,18 @@ fn canonical_timestamp(value: &str) -> Option<String> {
     let value = value.trim();
     let parsed = DateTime::parse_from_rfc3339(value)
         .or_else(|_| DateTime::parse_from_rfc2822(value))
+        // Some public feeds concatenate a RFC 2822 value with a second
+        // timestamp.  The RFC 2822 prefix is still an exact source value;
+        // retain only that complete, self-contained timestamp rather than
+        // attempting to infer a time from the trailing text.
+        .or_else(|_| {
+            let prefix = value
+                .split_whitespace()
+                .take(6)
+                .collect::<Vec<_>>()
+                .join(" ");
+            DateTime::parse_from_rfc2822(&prefix)
+        })
         .map(|timestamp| timestamp.with_timezone(&Utc))
         .or_else(|_| {
             NaiveDate::parse_from_str(value, "%Y-%m-%d")
@@ -1510,6 +1612,14 @@ fn canonical_timestamp(value: &str) -> Option<String> {
                 .and_then(|date| date.and_hms_opt(0, 0, 0))
                 .map(|timestamp| timestamp.and_utc())
                 .ok_or(())
+        })
+        // This is an explicit, documented public-feed format with no zone
+        // information.  Its wall-clock time cannot be converted to another
+        // zone, so preserve it as UTC rather than inventing an offset.
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(value, "%A, %B %d, %Y - %H:%M")
+                .map(|timestamp| timestamp.and_utc())
+                .map_err(|_| ())
         })
         .or_else(|_| {
             value
@@ -1745,6 +1855,15 @@ mod tests {
             canonical_timestamp("1787312011470").as_deref(),
             Some("2026-08-21T11:33:31Z")
         );
+        assert_eq!(
+            canonical_timestamp("Thu, 21 Sep 2023 17:21:00 +0000 2023-09-21T19:22:40.032+02:00")
+                .as_deref(),
+            Some("2023-09-21T17:21:00Z")
+        );
+        assert_eq!(
+            canonical_timestamp("Thursday, July 23, 2026 - 15:18").as_deref(),
+            Some("2026-07-23T15:18:00Z")
+        );
         assert!(canonical_timestamp("not-a-publication-time").is_none());
     }
     #[test]
@@ -1762,5 +1881,27 @@ mod tests {
         assert!(public_https_url("http://example.test/path").is_none());
         assert!(public_https_url("https://user@example.test/path").is_none());
         assert!(public_https_url("https://example.test/has space").is_none());
+    }
+
+    #[test]
+    fn public_text_limits_use_utf8_bytes_without_splitting_chinese() {
+        let value = "资讯".repeat(3_000);
+        let clipped = limited_nonempty(&value, "备用", 4_096);
+        assert!(clipped.len() <= 4_096);
+        assert!(std::str::from_utf8(clipped.as_bytes()).is_ok());
+        assert!(!clipped.is_empty());
+    }
+
+    #[test]
+    fn old_character_limited_draft_is_rebuilt_before_publication() {
+        let too_long = "资".repeat(2_000);
+        let bundle = json!({
+            "events": [{
+                "title": "标题",
+                "notes": [{"publisher":"来源","title":"标题","fallbackExcerpt":too_long}],
+                "blocks": [{"segments":[{"text":"正文"}]}]
+            }]
+        });
+        assert!(!bundle_text_fields_fit_wire_limits(&bundle));
     }
 }

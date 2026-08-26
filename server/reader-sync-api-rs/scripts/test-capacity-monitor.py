@@ -221,6 +221,7 @@ assert monitor.parse_prometheus_labels(
     "code": "SERVER_BUSY", "source": "request_queue", "operation": "auth", "phase": "query",
 }
 assert monitor.parse_prometheus_labels('identity="not-allowed"') is None
+assert monitor.process_identity(-1) is None
 assert monitor.LOOPBACK_METRICS.fullmatch("http://127.0.0.1:8790/metrics")
 assert monitor.LOOPBACK_METRICS.fullmatch("https://127.0.0.1:8790/metrics")
 assert monitor.LOOPBACK_METRICS.fullmatch("https://localhost:8790/metrics")

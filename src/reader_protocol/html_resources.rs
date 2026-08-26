@@ -151,6 +151,109 @@ fn attr_value(tag: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Extract local EPUB stylesheet archive paths from a sanitized chapter head.
+///
+/// The returned paths are decoded exactly as the custom protocol will decode
+/// them. External stylesheets and resources belonging to another book are
+/// deliberately ignored, so callers can safely prewarm only the bytes that the
+/// local `reader` protocol would otherwise read on demand.
+pub(crate) fn collect_local_stylesheet_links(head: &str, id: u64) -> Vec<(String, String)> {
+    let prefix = format!("{RES_BASE}/res/{id}/");
+    let mut links = Vec::new();
+    let mut seen = HashSet::new();
+    let mut offset = 0;
+    while let Some(relative_start) = head[offset..].find("<link") {
+        let start = offset + relative_start;
+        let Some(relative_end) = head[start..].find('>') else {
+            break;
+        };
+        let tag = &head[start..start + relative_end + 1];
+        let is_stylesheet = attr_value(tag, "rel")
+            .map(|rel| rel.eq_ignore_ascii_case("stylesheet"))
+            .unwrap_or(false);
+        if is_stylesheet {
+            if let Some(href) = attr_value(tag, "href") {
+                if let Some(encoded_path) = href.strip_prefix(&prefix) {
+                    let encoded_path = encoded_path
+                        .split_once('#')
+                        .map(|(path, _)| path)
+                        .unwrap_or(encoded_path);
+                    let path = percent_decode(encoded_path);
+                    if !path.is_empty() && seen.insert(path.clone()) {
+                        links.push((href, path));
+                    }
+                }
+            }
+        }
+        offset = start + relative_end + 1;
+    }
+    links
+}
+
+pub(crate) fn collect_local_stylesheet_paths(head: &str, id: u64) -> Vec<String> {
+    collect_local_stylesheet_links(head, id)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
+}
+
+/// Replace prepared local stylesheet links with rewritten CSS text.
+/// External, imported, oversized or otherwise unsupported styles stay on the
+/// existing link-loading path because the caller simply omits them from the map.
+pub(crate) fn inline_local_stylesheet_links(
+    head: &str,
+    id: u64,
+    stylesheets: &HashMap<String, String>,
+) -> String {
+    if stylesheets.is_empty() {
+        return head.to_string();
+    }
+    let prefix = format!("{RES_BASE}/res/{id}/");
+    let mut output =
+        String::with_capacity(head.len() + stylesheets.values().map(String::len).sum::<usize>());
+    let mut offset = 0;
+    while let Some(relative_start) = head[offset..].find("<link") {
+        let start = offset + relative_start;
+        output.push_str(&head[offset..start]);
+        let Some(relative_end) = head[start..].find('>') else {
+            output.push_str(&head[start..]);
+            return output;
+        };
+        let end = start + relative_end + 1;
+        let tag = &head[start..end];
+        let replacement = attr_value(tag, "rel")
+            .filter(|rel| rel.eq_ignore_ascii_case("stylesheet"))
+            .and_then(|_| attr_value(tag, "href"))
+            .filter(|href| href.starts_with(&prefix))
+            .and_then(|href| stylesheets.get(&href));
+        if let Some(css) = replacement {
+            output.push_str("<style");
+            if let Some(media) = attr_value(tag, "media").filter(|media| {
+                media.chars().all(|ch| {
+                    ch.is_alphanumeric()
+                        || ch.is_ascii_whitespace()
+                        || matches!(
+                            ch,
+                            '(' | ')' | '[' | ']' | ':' | '.' | ',' | '-' | '_' | '/'
+                        )
+                })
+            }) {
+                output.push_str(" media=\"");
+                output.push_str(&media);
+                output.push('"');
+            }
+            output.push('>');
+            output.push_str(css);
+            output.push_str("</style>");
+        } else {
+            output.push_str(tag);
+        }
+        offset = end;
+    }
+    output.push_str(&head[offset..]);
+    output
+}
+
 /// 从一章 HTML 里收集 <link rel=stylesheet> 与 <style> 块到合并页头部（去重）。
 pub(crate) fn collect_head_assets(html: &str, head: &mut String, seen: &mut HashSet<String>) {
     let mut i = 0;
@@ -314,5 +417,56 @@ mod tests {
         assert_eq!(head.matches("<style").count(), 1);
         assert_eq!(extract_body_inner(html), "<p>正文</p>");
         assert_eq!(guess_mime("font.woff2"), "font/woff2");
+    }
+
+    #[test]
+    fn extracts_only_local_stylesheets_for_the_current_book() {
+        let head = format!(
+            r#"<link rel="stylesheet" href="{RES_BASE}/res/7/OPS/css/main%20theme.css">
+<link rel='STYLESHEET' href='{RES_BASE}/res/7/OPS/css/print.css#sheet'>
+<link rel="stylesheet" href="{RES_BASE}/res/8/other.css">
+<link rel="stylesheet" href="https://example.test/remote.css">
+<link rel="preload" href="{RES_BASE}/res/7/ignored.css">
+<link rel="stylesheet" href="{RES_BASE}/res/7/OPS/css/main%20theme.css">"#
+        );
+
+        assert_eq!(
+            collect_local_stylesheet_paths(&head, 7),
+            vec![
+                "OPS/css/main theme.css".to_string(),
+                "OPS/css/print.css".to_string()
+            ]
+        );
+        assert_eq!(
+            collect_local_stylesheet_links(&head, 7),
+            vec![
+                (
+                    format!("{RES_BASE}/res/7/OPS/css/main%20theme.css"),
+                    "OPS/css/main theme.css".to_string()
+                ),
+                (
+                    format!("{RES_BASE}/res/7/OPS/css/print.css#sheet"),
+                    "OPS/css/print.css".to_string()
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn inlines_only_prepared_stylesheets_for_the_current_book() {
+        let local = format!("{RES_BASE}/res/7/OPS/css/main.css");
+        let other = format!("{RES_BASE}/res/8/other.css");
+        let head = format!(
+            r#"<link media="screen and (min-width: 600px)" href="{local}" rel="stylesheet">
+<link rel="stylesheet" href="{other}">
+<link rel="stylesheet" href="https://example.test/remote.css">"#
+        );
+        let stylesheets = HashMap::from([(local.clone(), "p{color:red}".to_string())]);
+        let inlined = inline_local_stylesheet_links(&head, 7, &stylesheets);
+        assert!(inlined
+            .contains(r#"<style media="screen and (min-width: 600px)">p{color:red}</style>"#));
+        assert!(!inlined.contains(&format!("href=\"{local}\"")));
+        assert!(inlined.contains(&format!("href=\"{other}\"")));
+        assert!(inlined.contains("https://example.test/remote.css"));
     }
 }

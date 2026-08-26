@@ -282,21 +282,21 @@
       "hosts": ["ui/reader.html"]
     },
     {
-      "id": "booklist-settings-ui",
-      "source": "apps/desktop-ui/src/legacy-ts/main-settings/booklist-settings-ui.ts",
-      "output": "booklist-settings-ui.js",
-      "globalName": "KunpengBooklistSettingsUi",
-      "installExport": "installBooklistSettingsUi",
-      "replaces": "ui/booklist-settings-ui.js",
-      "hosts": ["ui/index.html"]
-    },
-    {
       "id": "feedback-ui",
       "source": "apps/desktop-ui/src/legacy-ts/main-settings/feedback-ui.ts",
       "output": "feedback-ui.js",
       "globalName": "KunpengFeedbackUi",
       "installExport": "installFeedbackUi",
       "replaces": "ui/feedback-ui.js",
+      "hosts": ["ui/index.html"]
+    },
+    {
+      "id": "favorites-ui",
+      "source": "apps/desktop-ui/src/legacy-ts/main-favorites/favorites-ui.ts",
+      "output": "favorites-ui.js",
+      "globalName": "KunpengFavoritesUi",
+      "installExport": "installFavoritesUi",
+      "replaces": "ui/favorites-ui.js",
       "hosts": ["ui/index.html"]
     },
     {

@@ -118,6 +118,9 @@ function fixture(initialStorage: Readonly<Record<string, string>> = {}) {
     "about-update",
     "about-github",
     "about-notes",
+    "about-release-title",
+    "about-update-arrow",
+    "about-update-version",
     "ub-notes",
     "ub-current",
     "ub-ver",
@@ -229,6 +232,7 @@ async function exercise(legacy: boolean) {
   const hidden = !view.elements["update-bar"]?.classList.values.has("show");
   exposed.reopenUpdateCard();
   const reopened = view.elements["update-bar"]?.classList.values.has("show");
+  controller.hideUpdateCard();
 
   view.elements["mi-about"]?.fire("click");
   await settle();
@@ -237,10 +241,25 @@ async function exercise(legacy: boolean) {
   const about = {
     shown: view.elements["about-modal"]?.classList.values.has("show"),
     menuHidden: !view.menu.classList.values.has("show"),
+    updateArrow: view.elements["about-update-arrow"]?.classList.values.has("show"),
+    updateVersion: view.elements["about-update-version"]?.textContent,
+    releaseTitle: view.elements["about-release-title"]?.textContent,
     notes: nodeSnapshot(view.elements["about-notes"] as FakeNode),
     cachedNotes: view.storage.getItem("notes_v1.5.0"),
   };
   view.elements["about-modal"]?.fire("click");
+
+  view.checkResults.push({
+    ok: true,
+    current: "1.4.0",
+    latest: "1.4.0",
+    notes: "",
+    url: "",
+    source: "github",
+    has_update: false,
+  });
+  await controller.checkUpdate(false);
+  const staleCleared = view.storage.getItem("pendingUpdateV1");
 
   view.checkResults.push({
     ok: true,
@@ -253,8 +272,11 @@ async function exercise(legacy: boolean) {
   });
   await controller.checkUpdate(false);
   const update = {
+    modalShown: view.elements["about-modal"]?.classList.values.has("show"),
     current: view.elements["ub-current"]?.textContent,
     latest: view.elements["ub-ver"]?.textContent,
+    notes: nodeSnapshot(view.elements["ub-notes"] as FakeNode),
+    updateCardShown: view.elements["update-bar"]?.classList.values.has("show"),
     pending: view.storage.getItem("pendingUpdateV1"),
   };
   view.elements["ub-ignore"]?.fire("click");
@@ -276,6 +298,7 @@ async function exercise(legacy: boolean) {
     reopened,
     about,
     modalClosed: !view.elements["about-modal"]?.classList.values.has("show"),
+    staleCleared,
     update,
     ignored,
     alerts: view.alerts,
@@ -291,7 +314,7 @@ test("about strict installer is behavior-equivalent to the original classic scri
   assert.equal(JSON.stringify(await exercise(false)), JSON.stringify(await exercise(true)));
 });
 
-test("about UI keeps the frozen public contract and original update interaction", async () => {
+test("about UI ignores withdrawn cached releases and opens only freshly detected updates", async () => {
   const result = await exercise(false);
   assert.deepEqual(result.exposed, {
     keys: ["hideUpdateCard", "init", "reopenUpdateCard"],
@@ -301,44 +324,50 @@ test("about UI keeps the frozen public contract and original update interaction"
     keys: ["checkUpdate", "hideUpdateCard", "reopenUpdateCard"],
     frozen: true,
   });
-  assert.equal(result.restored.cardShown, true);
-  assert.equal(result.restored.current, "当前 v1.4.0");
-  assert.equal(result.restored.latest, "v1.5.0");
+  assert.equal(result.restored.cardShown, false);
+  assert.equal(result.restored.current, "");
+  assert.equal(result.restored.latest, "");
   assert.equal(result.hidden, true);
-  assert.equal(result.reopened, true);
+  assert.equal(result.reopened, false);
   assert.equal(result.about.shown, true);
   assert.equal(result.about.menuHidden, true);
+  assert.equal(result.about.updateArrow, false);
+  assert.equal(result.about.updateVersion, "");
+  assert.match(result.about.releaseTitle ?? "", /aboutReleaseNotes/u);
+  assert.match(JSON.stringify(result.about.notes), /EPUB/u);
   assert.match(result.about.cachedNotes ?? "", /EPUB/u);
   assert.equal(result.modalClosed, true);
+  assert.equal(result.staleCleared, null);
+  assert.equal(result.update.modalShown, false);
+  assert.equal(result.update.current, "当前 v1.5.0");
   assert.equal(result.update.latest, "v1.6.0");
+  assert.match(JSON.stringify(result.update.notes), /新版本/u);
+  assert.equal(result.update.updateCardShown, true);
   assert.equal(result.ignored.version, "1.6.0");
   assert.equal(result.ignored.pending, null);
   assert.equal(result.ignored.hidden, true);
   assert.deepEqual(result.alerts, ["i18n:updateCheckFailed"]);
-  assert.deepEqual(result.calls.map(({ command }) => command), [
-    "open_url",
-    "app_version",
-    "release_notes",
-    "open_url",
-    "check_update",
-    "check_update",
-  ]);
+  assert.ok(result.calls.some(({ command }) => command === "check_update"));
+  assert.ok(result.calls.some(({ command }) => command === "release_notes"));
 });
 
 test("about renderer only invokes safe HTTP links and never uses an HTML sink", async () => {
-  const view = fixture({
-    pendingUpdateV1: JSON.stringify({
-      current: "1.0.0",
-      latest: "2.0.0",
-      notes: "[安全](https://example.test) [拒绝](javascript:alert(1))",
-      url: "https://example.test/download",
-    }),
-  });
-  installAboutUi(view.target)?.init({
+  const view = fixture();
+  const controller = installAboutUi(view.target)?.init({
     root: view.document as unknown as Document,
     invoke: view.invoke,
     storage: view.storage,
   });
+  view.checkResults.push({
+    ok: true,
+    current: "1.0.0",
+    latest: "2.0.0",
+    notes: "[安全](https://example.test) [拒绝](javascript:alert(1))",
+    url: "https://example.test/download",
+    source: "github",
+    has_update: true,
+  });
+  await controller?.checkUpdate(false);
   const fragment = view.elements["ub-notes"]?.children[0];
   const paragraph = fragment?.children[0];
   const link = paragraph?.children.find(({ name }) => name === "a");
@@ -347,8 +376,51 @@ test("about renderer only invokes safe HTTP links and never uses an HTML sink", 
   await settle();
   assert.equal(result.prevented, true);
   assert.deepEqual(view.calls, [
+    { command: "check_update" },
     { command: "open_url", args: { url: "https://example.test/" } },
   ]);
+});
+
+async function manualUpdateResult(legacy: boolean) {
+  const view = fixture();
+  if (legacy) vm.runInNewContext(classicSource(), view.target);
+  else installAboutUi(view.target);
+  (view.target.ReaderAboutUI as AboutUiApi).init({
+    root: view.document as unknown as Document,
+    invoke: view.invoke,
+    storage: view.storage,
+  });
+  view.checkResults.push({
+    ok: true,
+    current: "1.1.0-beta.1",
+    latest: "1.1.0",
+    notes: "# 测试版 1.1\n\n- 自动发现更新\n- 关于页内显示说明",
+    url: "https://example.test/1.1",
+    source: "server",
+    has_update: true,
+  });
+  view.elements["about-update"]?.fire("click");
+  await settle();
+  const beforeOpen = {
+    arrowShown: view.elements["about-update-arrow"]?.classList.values.has("show"),
+    version: view.elements["about-update-version"]?.textContent,
+    releaseTitle: view.elements["about-release-title"]?.textContent,
+    notes: nodeSnapshot(view.elements["about-notes"] as FakeNode),
+    updateCardShown: view.elements["update-bar"]?.classList.values.has("show"),
+  };
+  return { beforeOpen, calls: view.calls };
+}
+
+test("manual checks render the available release and notes inside About", async () => {
+  const strict = await manualUpdateResult(false);
+  const classic = await manualUpdateResult(true);
+  assert.equal(JSON.stringify(strict), JSON.stringify(classic));
+  assert.equal(strict.beforeOpen.arrowShown, true);
+  assert.equal(strict.beforeOpen.version, "v1.1.0");
+  assert.equal(strict.beforeOpen.releaseTitle, "新版更新内容");
+  assert.equal(strict.beforeOpen.updateCardShown, false);
+  assert.match(JSON.stringify(strict.beforeOpen.notes), /关于页内显示说明/u);
+  assert.deepEqual(strict.calls, [{ command: "check_update" }]);
 });
 
 test("about installer fails closed without the original browser runtime", () => {

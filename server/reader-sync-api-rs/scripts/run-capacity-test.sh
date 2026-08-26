@@ -193,11 +193,11 @@ LimitNOFILE=8192
 # seconds of queued work.  The production unit is never addressed here.
 Environment=KUNPENG_SYNC_DATABASE_MAX_CONNECTIONS=48
 Environment=KUNPENG_SYNC_DATABASE_ACQUIRE_TIMEOUT_MILLIS=300
-Environment=KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS=12
-Environment=KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS=18
+Environment=KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS=15
+Environment=KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS=23
 Environment=KUNPENG_SYNC_MAX_QUEUED_READ_REQUESTS=64
 Environment=KUNPENG_SYNC_MAX_QUEUED_CHECKPOINT_REQUESTS=24
-Environment=KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS=10
+Environment=KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS=12
 Environment=KUNPENG_SYNC_MAX_QUEUED_WRITE_REQUESTS=48
 Environment=KUNPENG_SYNC_REQUEST_QUEUE_TIMEOUT_MILLIS=200
 UNIT
@@ -220,11 +220,11 @@ set_env() {
 }
 set_env KUNPENG_SYNC_DATABASE_MAX_CONNECTIONS 48
 set_env KUNPENG_SYNC_DATABASE_ACQUIRE_TIMEOUT_MILLIS 300
-set_env KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS 12
-set_env KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS 18
+set_env KUNPENG_SYNC_MAX_CONCURRENT_REQUESTS 15
+set_env KUNPENG_SYNC_MAX_CONCURRENT_CHECKPOINT_REQUESTS 23
 set_env KUNPENG_SYNC_MAX_QUEUED_READ_REQUESTS 64
 set_env KUNPENG_SYNC_MAX_QUEUED_CHECKPOINT_REQUESTS 24
-set_env KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS 10
+set_env KUNPENG_SYNC_MAX_CONCURRENT_WRITE_REQUESTS 12
 set_env KUNPENG_SYNC_MAX_QUEUED_WRITE_REQUESTS 48
 set_env KUNPENG_SYNC_REQUEST_QUEUE_TIMEOUT_MILLIS 200
 sysctl --system >/dev/null
@@ -495,7 +495,9 @@ if not re.fullmatch(r"reader_sync_rust_test_[A-Za-z0-9_]+", database):
 print(database)
 PY
 )"
-args=(python3 "$monitor" --service-pid "$pid" --postgres-database "$test_database" --metrics-url http://127.0.0.1:8790/metrics --seconds "$seconds" --output "$output")
+service_sha="$(sha256sum -- "/proc/$pid/exe" | awk '{print $1}')"
+[[ "$service_sha" =~ ^[a-f0-9]{64}$ ]] || { echo 'running service digest is invalid' >&2; exit 2; }
+args=(python3 "$monitor" --service-pid "$pid" --expected-service-sha256 "$service_sha" --postgres-database "$test_database" --metrics-url http://127.0.0.1:8790/metrics --seconds "$seconds" --output "$output")
 if [ -n "$stage_seconds" ] && [ "$mode" != bulk-data-smoke ] && [ "$mode" != smoke ] && [ "$mode" != independent-smoke ]; then
   args+=(--stage-seconds "$stage_seconds")
 fi

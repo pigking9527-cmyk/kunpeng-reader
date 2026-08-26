@@ -2,13 +2,13 @@
 
 **中文** | [English](README.en.md)
 
-[**下载已发布版本（Windows / macOS / Linux）**](https://github.com/pigking9527-cmyk/kunpeng-reader/releases)
+[**查看三平台测试构建状态（Windows / macOS / Linux）**](https://github.com/pigking9527-cmyk/kunpeng-reader/actions)
 
 一个面向 Windows、macOS 与 Linux 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
 > **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
 > 第一方代码的适用范围和第三方材料见 [许可证范围](docs/legal/licensing-scope.md) 与 [第三方声明](THIRD_PARTY_NOTICES.md)。受历史 GPL 依赖整改影响，新增公开二进制发布目前由许可证门禁暂停；本机与 CI 验收构建不受影响。
 
-> 当前桌面版本为 **测试版 1.0**（技术版本 `1.0.0-beta.1`）。项目地址：[github.com/pigking9527-cmyk/kunpeng-reader](https://github.com/pigking9527-cmyk/kunpeng-reader)。公开二进制发行仍须通过许可证、产权和平台签名门禁。
+> 当前桌面版本为 **测试版 1.1**（技术版本 `1.1.0-beta.1`）。项目地址：[github.com/pigking9527-cmyk/kunpeng-reader](https://github.com/pigking9527-cmyk/kunpeng-reader)。公开二进制发行仍须通过许可证、产权和平台签名门禁。版本沿革与当前测试边界见[开发沿革](docs/history/v1.16-to-beta-1.0-development-evolution.md)。
 
 ## 特性
 

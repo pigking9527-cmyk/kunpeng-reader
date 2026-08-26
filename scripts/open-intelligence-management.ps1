@@ -7,13 +7,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$binary = Join-Path $projectRoot 'target\debug\kunpeng-intelligence-host.exe'
+# The continuous host loop intentionally uses the ordinary debug binary and
+# may run for hours.  Building the dashboard into the same path would require
+# stopping that worker just to refresh its operator UI.  Keep this small,
+# loopback-only observer in a separate ignored target directory so opening the
+# management page never interrupts collection or flashes a console window.
+$dashboardTarget = Join-Path $projectRoot 'target\intelligence-dashboard'
+$binary = Join-Path $dashboardTarget 'debug\kunpeng-intelligence-host.exe'
 $address = "http://127.0.0.1:$Port/"
 $inputs = @(
   (Join-Path $projectRoot 'src\bin\kunpeng-intelligence-host.rs'),
   (Join-Path $projectRoot 'src\intelligence_host\dashboard.rs'),
   (Join-Path $projectRoot 'src\intelligence_host\audit.rs'),
   (Join-Path $projectRoot 'src\intelligence_host\mod.rs'),
+  (Join-Path $projectRoot 'src\bin\kunpeng-intelligence-worker.rs'),
+  (Join-Path $projectRoot 'src\intelligence_worker\mod.rs'),
+  (Join-Path $projectRoot 'src\intelligence_worker\publication.rs'),
   (Join-Path $projectRoot 'src\intelligence_worker_lifecycle.rs'),
   (Join-Path $projectRoot 'src\secret_store.rs'),
   (Join-Path $projectRoot 'apps\intelligence-host\dashboard.html'),
@@ -27,7 +36,16 @@ $binaryIsCurrent = (Test-Path -LiteralPath $binary -PathType Leaf) -and -not ($i
 if ($Build -or -not $binaryIsCurrent) {
   Push-Location $projectRoot
   try {
-    cargo build --bin kunpeng-intelligence-host
+    $previousTarget = $env:CARGO_TARGET_DIR
+    $env:CARGO_TARGET_DIR = $dashboardTarget
+    try {
+      # The dashboard may start a one-shot or continuous local processing
+      # round.  Build the sibling worker in the same isolated target so its
+      # status and actions always describe the version shown by this page.
+      cargo build --bin kunpeng-intelligence-host --bin kunpeng-intelligence-worker
+    } finally {
+      $env:CARGO_TARGET_DIR = $previousTarget
+    }
   } finally {
     Pop-Location
   }

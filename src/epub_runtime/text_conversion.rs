@@ -19,6 +19,30 @@ impl ReaderTextConversion {
             _ => Self::Original,
         }
     }
+
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::ToSimplified => "t2s",
+            Self::ToTraditional => "s2t",
+        }
+    }
+
+    pub(super) const fn cache_tag(self) -> u8 {
+        match self {
+            Self::Original => 0,
+            Self::ToSimplified => 1,
+            Self::ToTraditional => 2,
+        }
+    }
+
+    pub(super) const fn from_cache_tag(value: u8) -> Self {
+        match value {
+            1 => Self::ToSimplified,
+            2 => Self::ToTraditional,
+            _ => Self::Original,
+        }
+    }
 }
 
 fn reader_text_converter(mode: ReaderTextConversion) -> Option<&'static OpenCC> {

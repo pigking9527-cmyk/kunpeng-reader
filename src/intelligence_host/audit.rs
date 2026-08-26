@@ -420,7 +420,7 @@ fn encode_handle(article_id: &str) -> String {
 }
 fn decode_handle(handle: &str) -> Option<String> {
     if handle.is_empty()
-        || handle.len() % 2 != 0
+        || !handle.len().is_multiple_of(2)
         || handle.len() / 2 > MAX_HANDLE_BYTES
         || !handle.bytes().all(|value| value.is_ascii_hexdigit())
     {

@@ -27,6 +27,7 @@ function createRuntime(messages: PostedTrace[]): ReaderPageBugTraceRuntime {
     NodeFilter: { SHOW_TEXT: 4 },
     getComputedStyle: () => ({}) as CSSStyleDeclaration,
     performance: { now: () => (now += 25) },
+    requestAnimationFrame: () => 1,
     parent: {
       postMessage(message) {
         messages.push(message as PostedTrace);
@@ -42,7 +43,7 @@ test("installer exposes every original bare global and initializes shared state"
   assert.equal(Object.isFrozen(api), true);
   assert.deepEqual(Object.keys(api), [
     "pagedLayoutSnapshot", "readerBugTrace", "markPageTurnInput", "pageTurnTraceData",
-    "beginPageTurnBugTrace", "finishPageTurnBugTrace", "beginChapterBugTrace",
+    "beginPageTurnBugTrace", "observePageTurnPerformance", "finishPageTurnBugTrace", "beginChapterBugTrace",
     "finishChapterBugTrace",
   ]);
   for (const key of Object.keys(api) as Array<keyof typeof api>) {
@@ -213,6 +214,73 @@ test("page-turn trace keeps sequence, wheel-only detail, outcomes, and reinitial
   api.finishPageTurnBugTrace(token);
   assert.equal(messages.at(-1)?.bugTrace.outcome, "applied");
   assert.equal(messages.at(-1)?.bugTrace.after_page, 4);
+});
+
+test("page-turn performance records position update and the first committed paint without the 520ms verdict delay", () => {
+  const messages: PostedTrace[] = [];
+  const runtime = createRuntime(messages);
+  const frames: FrameRequestCallback[] = [];
+  let now = 1_000;
+  runtime.performance = { now: () => now };
+  runtime.requestAnimationFrame = (callback) => {
+    frames.push(callback);
+    return frames.length;
+  };
+  const api = installReaderPageBugTrace(runtime);
+  const token = api.beginPageTurnBugTrace("forward");
+  now = 1_004.5;
+  runtime.pageInCh = 4;
+  api.observePageTurnPerformance(token);
+  const position = messages.at(-1)?.bugTrace;
+  assert.equal(position?.outcome, "position_updated");
+  assert.equal(position?.duration_ms, 4.5);
+  assert.equal(position?.after_chapter, 2);
+  assert.equal(position?.after_page, 4);
+
+  now = 1_012;
+  frames.shift()?.(now);
+  now = 1_028;
+  frames.shift()?.(now);
+  const painted = messages.at(-1)?.bugTrace;
+  assert.equal(painted?.outcome, "first_paint");
+  assert.equal(painted?.duration_ms, 28);
+  assert.equal(painted?.turn_id, 1);
+});
+
+test("page-turn performance follows an asynchronous cross-chapter move until its first paint", () => {
+  const messages: PostedTrace[] = [];
+  const runtime = createRuntime(messages);
+  const frames: FrameRequestCallback[] = [];
+  let now = 2_000;
+  runtime.performance = { now: () => now };
+  runtime.requestAnimationFrame = (callback) => {
+    frames.push(callback);
+    return frames.length;
+  };
+  const api = installReaderPageBugTrace(runtime);
+  const token = api.beginPageTurnBugTrace("forward");
+  runtime.chapterTurnPending = true;
+  now = 2_001;
+  api.observePageTurnPerformance(token);
+  assert.equal(messages.at(-1)?.bugTrace.outcome, "requested");
+
+  now = 2_032;
+  frames.shift()?.(now);
+  runtime.curCh = 3;
+  runtime.pageInCh = 0;
+  runtime.chapterTurnPending = false;
+  now = 2_075;
+  frames.shift()?.(now);
+  assert.equal(messages.at(-1)?.bugTrace.outcome, "position_updated");
+  assert.equal(messages.at(-1)?.bugTrace.duration_ms, 75);
+  assert.equal(messages.at(-1)?.bugTrace.after_chapter, 3);
+
+  now = 2_083;
+  frames.shift()?.(now);
+  now = 2_099;
+  frames.shift()?.(now);
+  assert.equal(messages.at(-1)?.bugTrace.outcome, "first_paint");
+  assert.equal(messages.at(-1)?.bugTrace.duration_ms, 99);
 });
 
 test("chapter trace counts overlapping loads and records bounded completion metadata", () => {

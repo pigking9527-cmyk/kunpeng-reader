@@ -9,6 +9,7 @@ explicitly says so rather than silently substituting a different signal.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -193,6 +194,34 @@ def process_usage(pid):
     # should simply treat the exited process as absent.
     except (OSError, ValueError, IndexError):
         return 0, 0
+
+
+def process_identity(pid, include_sha256=False):
+    """Return stable Linux process identity without resolving the executable path."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as source:
+            stat = source.read()
+        close = stat.rfind(")")
+        if close < 0:
+            return None
+        fields = stat[close + 2:].split()
+        # The suffix begins at field 3 (`state`); starttime is field 22.
+        starttime = int(fields[19])
+        executable_stat = os.stat(f"/proc/{pid}/exe")
+        identity = {
+            "starttimeTicks": starttime,
+            "executableDevice": executable_stat.st_dev,
+            "executableInode": executable_stat.st_ino,
+        }
+        if include_sha256:
+            digest = hashlib.sha256()
+            with open(f"/proc/{pid}/exe", "rb", buffering=0) as executable:
+                while chunk := executable.read(1024 * 1024):
+                    digest.update(chunk)
+            identity["sha256"] = digest.hexdigest()
+        return identity
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def process_pss_kib(pid):
@@ -670,6 +699,7 @@ def stage_name(elapsed, stages):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--service-pid", required=True, type=int)
+    parser.add_argument("--expected-service-sha256", required=True)
     parser.add_argument("--postgres-database", required=True)
     parser.add_argument("--metrics-url", required=True)
     parser.add_argument("--seconds", required=True, type=int)
@@ -680,6 +710,8 @@ def main():
                         help="record one explicitly non-capacity workload")
     parser.add_argument("--single-stage-name", default="bulk-transfer")
     args = parser.parse_args()
+    if not re.fullmatch(r"[a-f0-9]{64}", args.expected_service_sha256):
+        parser.error("expected service SHA-256 must be 64 lowercase hexadecimal characters")
     if not (1 <= args.seconds <= 1_800):
         raise SystemExit("seconds must be between 1 and 1800")
     if not os.path.isabs(args.output) or os.path.exists(args.output):
@@ -704,14 +736,20 @@ def main():
     if not LOOPBACK_METRICS.fullmatch(args.metrics_url):
         raise SystemExit("metrics URL must be a loopback /metrics endpoint")
 
+    expected_identity = process_identity(args.service_pid, include_sha256=True)
+    if expected_identity is None or expected_identity["sha256"] != args.expected_service_sha256:
+        raise SystemExit("service identity preflight failed")
+    expected_starttime = expected_identity["starttimeTicks"]
+    expected_device = expected_identity["executableDevice"]
+    expected_inode = expected_identity["executableInode"]
+    postgres_before = postgres_snapshot(args.postgres_database)
+    service_metrics_before = metrics_snapshot(args.metrics_url)
     started = time.monotonic()
     total, idle = cpu_totals()
     _, service_ticks = process_usage(args.service_pid)
     _, _, _, postgres_ticks = postgres_usage()
     previous = (started, total, idle, service_ticks, postgres_ticks)
     samples = []
-    postgres_before = postgres_snapshot(args.postgres_database)
-    service_metrics_before = metrics_snapshot(args.metrics_url)
     service_metrics_by_stage = {
         stage_name(0, stages): {
             "before": service_metrics_before,
@@ -721,6 +759,11 @@ def main():
     }
     report = {
         "complete": False,
+        "identityStable": True,
+        "serviceIdentity": {
+            "sha256": args.expected_service_sha256,
+            "starttimeTicks": expected_starttime,
+        },
         "hardware": {"overall": {}, "byStage": {}},
         "postgres": postgres_report(postgres_before, postgres_before),
         "metricDefinitions": {
@@ -728,9 +771,20 @@ def main():
             "postgresAggregateRssKiB": "sum of PostgreSQL process RSS; shared mappings are counted more than once",
         },
     }
+    save_report(args.output, report)
     while time.monotonic() - started < args.seconds:
         time.sleep(1)
         now = time.monotonic()
+        current_identity = process_identity(args.service_pid)
+        if (current_identity is None or
+                current_identity["starttimeTicks"] != expected_starttime or
+                current_identity["executableDevice"] != expected_device or
+                current_identity["executableInode"] != expected_inode):
+            report["identityStable"] = False
+            report["identityFailure"] = "service_process_changed"
+            report["elapsedSeconds"] = round(now - started, 2)
+            save_report(args.output, report)
+            return 3
         current_stage = stage_name(now - started, stages)
         service_metrics = metrics_snapshot(args.metrics_url)
         stage_metrics = service_metrics_by_stage.setdefault(
@@ -784,6 +838,17 @@ def main():
             "quantileMethod": "Prometheus histogram bucket upper bounds; null means no samples or +Inf bucket",
         }
         save_report(args.output, report)
+    final_identity = process_identity(args.service_pid, include_sha256=True)
+    if (final_identity is None or
+            final_identity["starttimeTicks"] != expected_starttime or
+            final_identity["executableDevice"] != expected_device or
+            final_identity["executableInode"] != expected_inode or
+            final_identity["sha256"] != args.expected_service_sha256):
+        report["identityStable"] = False
+        report["identityFailure"] = "service_process_changed"
+        report["elapsedSeconds"] = round(time.monotonic() - started, 2)
+        save_report(args.output, report)
+        return 3
     report["elapsedSeconds"] = round(time.monotonic() - started, 2)
     report["complete"] = True
     postgres_after = postgres_snapshot(args.postgres_database)
@@ -799,4 +864,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main() or 0)

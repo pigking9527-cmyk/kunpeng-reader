@@ -608,6 +608,7 @@ pub(super) async fn semantic_search(
     tauri::async_runtime::spawn_blocking(move || {
         with_thread_background_priority(|| {
             let _query_activity = query_activity;
+            let _runtime = super::model::runtime_read_guard();
             let state = app.state::<AppState>();
             semantic_search_inner(state.inner(), query, ids)
         })

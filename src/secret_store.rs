@@ -4,6 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const DPAPI_PREFIX: &str = "dpapi:";
 const KEYCHAIN_MARKER: &str = "keychain:v1";
+// Reader-media setup is optional and invoked only after its dedicated local
+// workflow has been configured. Keep its storage namespace isolated even in
+// builds that do not enable that workflow yet.
+#[allow(dead_code)]
+const READER_MEDIA_KEYCHAIN_MARKER: &str = "keychain:reader-media:v1";
 // Development signing can bind a Keychain item's partition to an earlier
 // local build. Keep older slots readable for compatibility, but write fresh
 // logins and explicit-recovery migrations to the current service so an
@@ -17,6 +22,8 @@ const LEGACY_SYNC_KEYCHAIN_MARKER_V7: &str = "keychain:sync-token:v7";
 const LEGACY_SYNC_KEYCHAIN_MARKER_V8: &str = "keychain:sync-token:v8";
 const SYNC_KEYCHAIN_MARKER: &str = "keychain:sync-token:v9";
 const SECRET_TOOL_MARKER: &str = "secret-service:v1";
+#[allow(dead_code)]
+const READER_MEDIA_SECRET_TOOL_MARKER: &str = "secret-service:reader-media:v1";
 const KEYCHAIN_ACCESS_DENIED: &str = "已取消或拒绝访问 macOS 钥匙串；本次启动不再重复请求";
 const LEGACY_SYNC_CREDENTIAL: &str =
     "旧版同步凭据已停用；请退出后重新登录一次，之后同步不再重复请求钥匙串";
@@ -146,6 +153,74 @@ pub(crate) fn protect_secret(secret: &str) -> Result<String, String> {
     }
 }
 
+/// Store the MiniMax reader-media configuration in a credential slot that is
+/// isolated from sync, translation and AI-reader credentials. The returned
+/// value is an opaque local marker (macOS/Linux) or a DPAPI-protected blob
+/// (Windows); callers may persist it locally, but it never contains plaintext.
+#[allow(dead_code)]
+pub(crate) fn protect_reader_media_secret(secret: &str) -> Result<String, String> {
+    #[cfg(test)]
+    return Ok(if secret.is_empty() {
+        String::new()
+    } else {
+        format!("test:{}", STANDARD.encode(secret))
+    });
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        if secret.is_empty() {
+            macos_keychain_delete_reader_media()?;
+            return Ok(String::new());
+        }
+        macos_keychain_store_reader_media(secret)?;
+        Ok(READER_MEDIA_KEYCHAIN_MARKER.into())
+    }
+    #[cfg(all(windows, not(test)))]
+    {
+        protect_platform_secret(secret)
+    }
+    #[cfg(all(unix, not(target_os = "macos"), not(test)))]
+    {
+        linux_store_reader_media(secret)?;
+        Ok(READER_MEDIA_SECRET_TOOL_MARKER.into())
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn unprotect_reader_media_secret(stored: &str) -> Result<String, String> {
+    if stored.is_empty() {
+        return Ok(String::new());
+    }
+    #[cfg(test)]
+    if let Some(encoded) = stored.strip_prefix("test:") {
+        return STANDARD
+            .decode(encoded)
+            .map_err(|_| "测试媒体凭据解码失败".to_string())
+            .and_then(|value| {
+                String::from_utf8(value).map_err(|_| "测试媒体凭据格式无效".to_string())
+            });
+    }
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        if stored != READER_MEDIA_KEYCHAIN_MARKER {
+            return Err("阅读创作凭据存储类型与当前平台不匹配".into());
+        }
+        return macos_keychain_read_reader_media();
+    }
+    #[cfg(all(windows, not(test)))]
+    {
+        return unprotect_secret(stored);
+    }
+    #[cfg(all(unix, not(target_os = "macos"), not(test)))]
+    {
+        if stored != READER_MEDIA_SECRET_TOOL_MARKER {
+            return Err("阅读创作凭据存储类型与当前平台不匹配".into());
+        }
+        return linux_read_reader_media();
+    }
+    #[allow(unreachable_code)]
+    Err("当前平台不支持阅读创作凭据".into())
+}
+
 pub(crate) fn unprotect_secret(stored: &str) -> Result<String, String> {
     if stored.is_empty() {
         return Ok(String::new());
@@ -190,6 +265,52 @@ fn read_platform_secret(stored: &str) -> Result<String, String> {
 #[cfg(all(windows, not(test)))]
 fn clear_platform_secret() -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos"), not(test)))]
+fn linux_store_reader_media(secret: &str) -> Result<(), String> {
+    platform_command_store(
+        "secret-tool",
+        &[
+            "store",
+            "--label=鲲鹏阅读器阅读创作",
+            "application",
+            "kunpeng-reader",
+            "purpose",
+            "reader-media-v1",
+        ],
+        secret,
+        "系统 Secret Service 不可用；无法保存阅读创作配置",
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos"), not(test)))]
+fn linux_read_reader_media() -> Result<String, String> {
+    platform_command_read(
+        "secret-tool",
+        &[
+            "lookup",
+            "application",
+            "kunpeng-reader",
+            "purpose",
+            "reader-media-v1",
+        ],
+        "无法从系统 Secret Service 读取阅读创作配置",
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos"), not(test)))]
+fn linux_delete_reader_media() -> Result<(), String> {
+    platform_command_delete(
+        "secret-tool",
+        &[
+            "clear",
+            "application",
+            "kunpeng-reader",
+            "purpose",
+            "reader-media-v1",
+        ],
+    )
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -341,6 +462,10 @@ mod macos_keychain {
         crate::profile::sync_token_keychain_service().into_bytes()
     }
 
+    fn reader_media_service() -> Vec<u8> {
+        format!("{}.reader-media.v1", crate::profile::keychain_service()).into_bytes()
+    }
+
     fn operation_lock() -> &'static Mutex<()> {
         OPERATION_LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -359,6 +484,19 @@ mod macos_keychain {
         item_ref: *mut SecKeychainItemRef,
     ) -> OsStatus {
         find_for_service(&sync_service(), password_length, password_data, item_ref)
+    }
+
+    fn find_reader_media(
+        password_length: *mut u32,
+        password_data: *mut *mut c_void,
+        item_ref: *mut SecKeychainItemRef,
+    ) -> OsStatus {
+        find_for_service(
+            &reader_media_service(),
+            password_length,
+            password_data,
+            item_ref,
+        )
     }
 
     fn find_for_service(
@@ -444,6 +582,10 @@ mod macos_keychain {
 
     pub(super) fn store(secret: &str) -> Result<(), String> {
         store_for(secret, service(), find, false)
+    }
+
+    pub(super) fn store_reader_media(secret: &str) -> Result<(), String> {
+        store_for(secret, reader_media_service(), find_reader_media, false)
     }
 
     pub(super) fn store_sync(secret: &str) -> Result<(), String> {
@@ -641,6 +783,10 @@ mod macos_keychain {
         read_with(find, true)
     }
 
+    pub(super) fn read_reader_media() -> Result<String, String> {
+        read_sync_for_service(reader_media_service(), true)
+    }
+
     pub(super) fn read_sync_for_service(
         service: Vec<u8>,
         interaction_allowed: bool,
@@ -713,6 +859,10 @@ mod macos_keychain {
         delete_for(sync_service())
     }
 
+    pub(super) fn delete_reader_media() -> Result<(), String> {
+        delete_for(reader_media_service())
+    }
+
     fn delete_for(service: Vec<u8>) -> Result<(), String> {
         let _operation = operation_lock()
             .lock()
@@ -760,6 +910,15 @@ fn macos_keychain_store(secret: &str) -> Result<(), String> {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
+fn macos_keychain_store_reader_media(secret: &str) -> Result<(), String> {
+    let result = macos_keychain::store_reader_media(secret);
+    if result.is_ok() {
+        KEYCHAIN_ACCESS_DENIED_FOR_PROCESS.store(false, Ordering::Release);
+    }
+    result
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
 fn macos_keychain_read() -> Result<String, String> {
     if KEYCHAIN_ACCESS_DENIED_FOR_PROCESS.load(Ordering::Acquire) {
         return Err(KEYCHAIN_ACCESS_DENIED.into());
@@ -776,8 +935,29 @@ fn macos_keychain_read() -> Result<String, String> {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
+fn macos_keychain_read_reader_media() -> Result<String, String> {
+    if KEYCHAIN_ACCESS_DENIED_FOR_PROCESS.load(Ordering::Acquire) {
+        return Err(KEYCHAIN_ACCESS_DENIED.into());
+    }
+    let result = macos_keychain::read_reader_media();
+    if result
+        .as_deref()
+        .err()
+        .is_some_and(|error| credential_access_was_denied(error))
+    {
+        KEYCHAIN_ACCESS_DENIED_FOR_PROCESS.store(true, Ordering::Release);
+    }
+    result
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
 fn macos_keychain_delete() -> Result<(), String> {
     macos_keychain::delete()
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn macos_keychain_delete_reader_media() -> Result<(), String> {
+    macos_keychain::delete_reader_media()
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -1085,5 +1265,18 @@ mod tests {
         assert_ne!(protected, "new-token");
         assert_eq!(unprotect_sync_secret(&protected).unwrap(), "new-token");
         assert!(is_sync_secret_protected(&protected));
+    }
+
+    #[test]
+    fn reader_media_secret_test_roundtrip_is_opaque() {
+        let protected = protect_reader_media_secret("reader-media-key").unwrap();
+        assert_ne!(protected, "reader-media-key");
+        assert!(!protected.contains("reader-media-key"));
+        assert_eq!(
+            unprotect_reader_media_secret(&protected).unwrap(),
+            "reader-media-key"
+        );
+        assert!(!READER_MEDIA_KEYCHAIN_MARKER.contains("reader-media-key"));
+        assert!(!READER_MEDIA_SECRET_TOOL_MARKER.contains("reader-media-key"));
     }
 }

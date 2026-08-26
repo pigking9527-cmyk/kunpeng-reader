@@ -86,7 +86,7 @@ test("all common-settings child pages share the compact detail design system", (
   assert.match(styles, /@media \(max-width: 720px\)[\s\S]*?\.settings-detail-card\s*\{[^}]*max-width:\s*calc\(100vw - 24px\)/s);
 });
 
-test("book card clicks explicitly close main-window floaters", () => {
+test("book cards open immediately with left click and use right click for selection", () => {
   const helper = source.match(/function closeShelfCardFloaters\(\)\s*\{([\s\S]*?)\n\}/);
   assert.ok(helper, "shelf floater closer must remain explicit");
   assert.match(helper[1], /menuElement\.classList\.remove\("show"\)/);
@@ -94,29 +94,28 @@ test("book card clicks explicitly close main-window floaters", () => {
   assert.match(helper[1], /closeAccount\(\)/);
   assert.match(helper[1], /closeShelfSearch\(false\)/);
 
-  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
+  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("async function changeCover"));
   assert.match(card, /addEventListener\("click",[\s\S]*?closeShelfCardFloaters\(\)/);
-  assert.match(card, /addEventListener\("dblclick",[\s\S]*?closeShelfCardFloaters\(\)/);
-  assert.match(card, /if \(e\.metaKey \|\| e\.ctrlKey \|\| selected\.size > 0\)[\s\S]*?toggleSelect\(b\.id, card\)/);
-  assert.doesNotMatch(card, /openTimer|220/);
-  assert.match(card, /if \(e\.metaKey \|\| e\.ctrlKey \|\| selected\.size > 0\)/);
-  assert.match(card, /if \(e\.detail > 1\) return;[\s\S]*?openBook\("single"\)/);
+  assert.doesNotMatch(card, /addEventListener\("dblclick"|primaryOpenTimer|selectionTimer|160|220/);
+  assert.match(card, /shouldOpenBookOnPrimaryPointerDown\(\{[\s\S]*?pointerType: e\.pointerType,[\s\S]*?button: e\.button,[\s\S]*?isPrimary: e\.isPrimary/);
+  assert.match(card, /prewarmBook\(true\);\s*openBook\("pointerdown"\)/);
+  assert.match(card, /if \(suppressPrimaryMouseClick && e\.detail > 0\)[\s\S]*?openBook\("click"\)/);
   assert.match(card, /tauriApi\.invoke\("prewarm_book", \{ id: b\.id \}\)/);
-  assert.match(card, /let selectionTimer = null/);
-  assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?selectionTimer = setTimeout\([\s\S]*?toggleSelect\(b\.id, card\)/);
-  assert.match(card, /selectionTimer = setTimeout\([\s\S]*?\}, 180\)/);
-  assert.match(card, /clearTimeout\(selectionTimer\)[\s\S]*?restoreDeferredSelection\(\)[\s\S]*?openBook\("double"\)/);
   assert.match(card, /addEventListener\("contextmenu"/);
-  assert.match(card, /addEventListener\("contextmenu",[\s\S]*?e\.preventDefault\(\)[\s\S]*?closeShelfCardFloaters\(\)/);
+  assert.match(card, /addEventListener\("contextmenu",[\s\S]*?e\.preventDefault\(\)[\s\S]*?closeShelfCardFloaters\(\)[\s\S]*?toggleSelect\(b\.id, card\)/);
   assert.doesNotMatch(card, /openBookOrganizer/);
 });
 
 test("first shelf click retries a reader window that is still closing", () => {
-  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
-  assert.match(card, /let openingBook = false/);
+  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("async function changeCover"));
+  assert.match(source, /let shelfBookOpenInFlightId = null/);
+  assert.match(source, /let queuedShelfBookOpen = null/);
+  assert.match(card, /if \(shelfBookOpenInFlightId !== null\)[\s\S]*?queuedShelfBookOpen = \{ id: bookId, run: \(\) => openBook\(input\) \}/);
+  assert.match(card, /queued_latest[\s\S]*?queuedShelfBookOpen = null;[\s\S]*?coalesced/);
   assert.match(card, /message\.includes\("阅读窗口仍在关闭"\) && retry < 3/);
   assert.match(card, /setTimeout\(\(\) => attemptOpen\(retry \+ 1\), 180\)/);
-  assert.match(card, /openingBook = false;[\s\S]*?alertAction\("打开失败：" \+ message\)/);
+  assert.match(card, /const finishOpen = \(\) => \{[\s\S]*?Promise\.resolve\(\)\.then\(queued\.run\)/);
+  assert.match(card, /alertAction\("打开失败：" \+ message\);[\s\S]*?finishOpen\(\)/);
 });
 test("shelf covers cannot trigger native browser drag selection", () => {
   assert.match(source, /shelfEl\.addEventListener\("dragstart", \(event\) => event\.preventDefault\(\)\)/);
@@ -148,19 +147,11 @@ test("shelf assigns every cover URL and lets only non-first-screen images use na
   assert.doesNotMatch(i18n, /COVER_ON_DEMAND_COPY|coverOnDemand/);
 });
 
-test("shelf opening preference switches between single-click opening and double-click opening", () => {
-  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("// 更换封面"));
-  assert.match(html, /id="set-single-click-open"/);
-  assert.match(html, /id="set-open-book-label"[^>]*>单击打开图书/);
-  assert.match(source, /shelfSingleClickOpen/);
-  assert.match(source, /const SHELF_OPEN_INTERACTION_REVISION = "single-click-default-v1"/);
-  assert.match(source, /localStorage\.setItem\("shelfSingleClickOpen", "1"\)/);
-  assert.match(source, /function setSingleClickOpenPreference\(value\)/);
-  assert.match(card, /if \(!singleClickOpensBook\)[\s\S]*?toggleSelect\(b\.id, card\)/);
-  assert.match(card, /if \(!singleClickOpensBook\) \{[\s\S]*?openBook\("double"\);[\s\S]*?return;/);
-  assert.match(source, /reflectOpenBookPreference/);
-  assert.match(source, /setSingleClickOpenPreference\(setSingleClickOpen\.checked\)/);
-  assert.match(source, /"单击打开图书" : "双击打开图书"/);
+test("shelf exposes no single-click or double-click opening preference", () => {
+  const card = source.slice(source.indexOf("function bookCard"), source.indexOf("async function changeCover"));
+  assert.doesNotMatch(html, /id="set-single-click-open"|id="set-open-book-label"|data-i18n="singleClickOpen"/);
+  assert.doesNotMatch(source, /shelfSingleClickOpen|shelfOpenInteractionRevision|singleClickOpensBook|setSingleClickOpenPreference|reflectOpenBookPreference/);
+  assert.doesNotMatch(card, /addEventListener\("dblclick"|setTimeout\([\s\S]*?160/);
 });
 
 test("book information opens organization management on demand and right click opens no organizer", () => {
@@ -175,7 +166,8 @@ test("book information opens organization management on demand and right click o
   assert.match(manager, /role="tablist"/);
   assert.match(html, /src="generated-ts\/book-info-panel\.js"[\s\S]*?src="generated-ts\/book-info-organization\.js"/);
   assert.match(app, /ReaderBookInfoPanel\.mount\([\s\S]*?prefix: "book-info"[\s\S]*?ReaderBookOrganizationUI\.init\(/);
-  assert.doesNotMatch(html, /id="batch-tag-btn"|id="batch-collection-btn"|id="batch-organization-modal"|id="book-organizer-menu"/);
+  assert.doesNotMatch(html, /id="batch-tag-btn"|id="batch-collection-btn"|id="book-organizer-menu"/);
+  assert.match(html, /id="batch-organization-modal"[\s\S]*?id="batch-organization-apply"/);
   assert.match(organizationEditor, /invoke\("set_book_organization"/);
   assert.match(organizationEditor, /invoke\("rename_book_organization"/);
   assert.match(organizationEditor, /invoke\("delete_book_organization"/);
@@ -248,7 +240,7 @@ test("reader close caches the same book and safely rebuilds for another book", (
   assert.match(closeCommand, /update_reader_geom[\s\S]*?window\.hide\(\)/);
   assert.match(closeCommand, /hidden_cached/);
   assert.match(windows, /reader-switch-request/);
-  assert.match(windows, /pub\(crate\) fn complete_reader_switch[\s\S]*?window\.destroy\(\)[\s\S]*?ensure_reader_window\(&app, &state, id_num\)/);
+  assert.match(windows, /pub\(crate\) async fn complete_reader_switch[\s\S]*?window\.destroy\(\)[\s\S]*?ensure_reader_window\(&app, &state, id_num\)/);
   assert.doesNotMatch(windows, /window\.navigate\(reader_url\)/);
   assert.match(windows, /WindowEvent::CloseRequested \{ api, \.\. \}[\s\S]*?api\.prevent_close\(\)[\s\S]*?reader-hide-request/);
   assert.match(windows, /fn activate_shelf_after_reader_close[\s\S]*?is_visible[\s\S]*?unminimize[\s\S]*?set_focus/);
@@ -502,7 +494,9 @@ test("shelf select-all ignores the current search filter and batch-removes the w
   const ids = [
     "shelf", "empty", "shelf-scrollbar", "shelf-scrollbar-thumb", "filter-btn", "filter-stars",
     "set-cover-prog", "set-cover-rating", "set-cover-title", "grid-cols-default", "grid-cols-value",
-    "grid-cols-dec", "grid-cols-inc", "del-group", "del-btn", "book-info-btn", "del-cancel",
+    "grid-cols-dec", "grid-cols-inc", "del-group", "del-btn", "book-info-btn", "batch-add-booklist-btn", "del-cancel",
+    "batch-organization-modal", "batch-organization-title", "batch-organization-note", "batch-organization-options",
+    "batch-organization-new", "batch-organization-add", "batch-organization-close", "batch-organization-cancel", "batch-organization-apply",
     "mi-selectall", "mi-random", "booklist-description", "booklist-books",
   ];
   const elements = new Map(ids.map((id) => [id, new FakeElement()]));

@@ -48,6 +48,11 @@ interface ReaderSettingsState extends Record<string, ReaderSettingValue> {
   toolbarOrder: string[];
   clickZones: ReaderClickZone[];
   showPageInfo: boolean;
+  showChapterNumber: boolean;
+  showChapterPageNumber: boolean;
+  showProgressPercentage: boolean;
+  showTotalPageNumber: boolean;
+  pageInfoOrder: string[];
   showReaderJumpBack: boolean;
   readerJumpBackDismissMode: string;
   readerJumpBackDismissSeconds: number;
@@ -56,6 +61,12 @@ interface ReaderSettingsState extends Record<string, ReaderSettingValue> {
   readerJumpBackPositionX: number;
   readerJumpBackPositionY: number;
   epubLayoutEngine: "legacy" | "modern";
+  readerMediaImageDensity: "low" | "medium" | "high";
+  readerMediaVideoDensity: "low" | "medium" | "high";
+  showReaderMediaImageSummaryAtChapterStart: boolean;
+  showReaderMediaImageSummaryAtChapterEnd: boolean;
+  showReaderMediaVideoSummaryAtChapterStart: boolean;
+  showReaderMediaVideoSummaryAtChapterEnd: boolean;
 }
 type ReaderSettingsPatch = Partial<ReaderSettingsState>;
 type AppearanceScope = "book" | "default";
@@ -613,6 +624,11 @@ export function installReaderSettingsUi(
       Object.assign({}, zone),
     ),
     showPageInfo: true,
+    showChapterNumber: true,
+    showChapterPageNumber: true,
+    showProgressPercentage: true,
+    showTotalPageNumber: true,
+    pageInfoOrder: ["chapter", "chapterPage", "percentage", "totalPages"],
     showReaderJumpBack: true,
     readerJumpBackDismissMode: "pages",
     readerJumpBackDismissSeconds: 30,
@@ -623,6 +639,14 @@ export function installReaderSettingsUi(
     readerJumpBackPositionY: 500,
     // 缺失或不认识的旧设置始终回退到已验证的旧版布局。
     epubLayoutEngine: "legacy",
+    // 情境影像仅控制本机生成策略。默认保持适中密度，并关闭额外的
+    // 章首/章尾总结，避免在用户明确启用前消耗模型与存储资源。
+    readerMediaImageDensity: "medium",
+    readerMediaVideoDensity: "medium",
+    showReaderMediaImageSummaryAtChapterStart: false,
+    showReaderMediaImageSummaryAtChapterEnd: false,
+    showReaderMediaVideoSummaryAtChapterStart: false,
+    showReaderMediaVideoSummaryAtChapterEnd: false,
   };
 
   // Windows WebView2 的原生 switch transition 正常；仅 macOS WKWebView 需要补偿动画。
@@ -654,6 +678,14 @@ export function installReaderSettingsUi(
       const { readerJumpBackSizeLevel: _removedJumpBackSizeLevel, ...current } =
         stored;
       const merged = Object.assign({}, DEFAULTS, current);
+      const pageInfoItemsEnabled = [
+        merged.showChapterNumber,
+        merged.showChapterPageNumber,
+        merged.showProgressPercentage,
+        merged.showTotalPageNumber,
+      ].some((value) => value !== false);
+      const repairedEmptyPageInfo = !pageInfoItemsEnabled && merged.showPageInfo !== false;
+      if (repairedEmptyPageInfo) merged.showPageInfo = false;
       merged.readerJumpBackIconSizePx = normalizeReaderJumpBackIconSizePx(
         merged.readerJumpBackIconSizePx,
       );
@@ -664,7 +696,7 @@ export function installReaderSettingsUi(
       )
         merged.backgroundPreset = stored.theme;
       if (
-        _removedJumpBackSizeLevel !== undefined ||
+        _removedJumpBackSizeLevel !== undefined || repairedEmptyPageInfo ||
         sanitizeBackgroundImage(merged)
       ) {
         storage.setItem("readerSettings", JSON.stringify(merged));
@@ -784,6 +816,35 @@ export function installReaderSettingsUi(
     }
     if (settings.epubLayoutEngine !== "modern" && settings.epubLayoutEngine !== "legacy") {
       settings.epubLayoutEngine = DEFAULTS.epubLayoutEngine;
+      changed = true;
+    }
+    if (!["low", "medium", "high"].includes(settings.readerMediaImageDensity)) {
+      settings.readerMediaImageDensity = DEFAULTS.readerMediaImageDensity;
+      changed = true;
+    }
+    if (!["low", "medium", "high"].includes(settings.readerMediaVideoDensity)) {
+      settings.readerMediaVideoDensity = DEFAULTS.readerMediaVideoDensity;
+      changed = true;
+    }
+    for (const key of [
+      "showReaderMediaImageSummaryAtChapterStart",
+      "showReaderMediaImageSummaryAtChapterEnd",
+      "showReaderMediaVideoSummaryAtChapterStart",
+      "showReaderMediaVideoSummaryAtChapterEnd",
+    ] as const) {
+      if (typeof settings[key] !== "boolean") {
+        settings[key] = DEFAULTS[key];
+        changed = true;
+      }
+    }
+    const pageInfoItemsEnabled = [
+      settings.showChapterNumber,
+      settings.showChapterPageNumber,
+      settings.showProgressPercentage,
+      settings.showTotalPageNumber,
+    ].some((value) => value !== false);
+    if (!pageInfoItemsEnabled && settings.showPageInfo !== false) {
+      settings.showPageInfo = false;
       changed = true;
     }
     return changed;

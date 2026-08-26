@@ -30,6 +30,10 @@ pub(crate) fn store_path() -> Result<PathBuf, String> {
 /// legacy cache, or otherwise mutating local state.  Status pages must use
 /// this rather than `store_path`: merely opening the desktop workbench must
 /// never make an archive look initialized.
+// The worker itself creates/updates the archive and does not need this
+// observer-only lookup; the desktop and host binaries compile the same module
+// to inspect an already-created archive without side effects.
+#[allow(dead_code)]
 pub(crate) fn existing_store_path() -> Result<PathBuf, String> {
     let data_directory = crate::profile::app_data_dir().ok_or("无法定位本机情报档案目录")?;
     Ok(data_directory

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { installReaderPageRuntime, type ReaderPageRuntime } from "./reader-page-runtime.ts";
 
-function runtime(options: { readonly referrer?: string; readonly url?: string } = {}): { target: ReaderPageRuntime; messages: Record<string, unknown>[]; listeners: Record<string, EventListener>; timeouts: Array<() => void> } {
+function runtime(options: { readonly referrer?: string; readonly url?: string } = {}): { target: ReaderPageRuntime; document: Document; messages: Record<string, unknown>[]; listeners: Record<string, EventListener>; timeouts: Array<() => void> } {
   const messages: Record<string, unknown>[] = [];
   const listeners: Record<string, EventListener> = {};
   const timeouts: Array<() => void> = [];
@@ -46,7 +46,7 @@ function runtime(options: { readonly referrer?: string; readonly url?: string } 
     root: null,
     pager: null,
   };
-  return { target, messages, listeners, timeouts };
+  return { target, document, messages, listeners, timeouts };
 }
 
 test("installer freezes and restores the classic runtime API", () => {
@@ -111,6 +111,99 @@ test("message router accepts only the reader shell and its concrete origin", () 
   assert.equal(target.overlayOpen, undefined);
   receive?.({ source: target.parent, origin: "tauri://localhost", data: { overlayOpen: true } } as MessageEvent);
   assert.equal(target.overlayOpen, true);
+});
+
+test("trusted shell inserts and updates bounded local context media below the anchored text block", () => {
+  class FakeElement {
+    readonly nodeType = 1;
+    readonly attributes = new Map<string, string>();
+    readonly children: FakeElement[] = [];
+    parentElement: FakeElement | null = null;
+    parentNode: FakeElement | null = null;
+    className = "";
+    textContent = "";
+    src = "";
+    alt = "";
+    loading = "";
+    decoding = "";
+    controls = false;
+    preload = "";
+    playsInline = false;
+    constructor(readonly tagName: string) {}
+    get firstChild(): FakeElement | null { return this.children[0] ?? null; }
+    get nextSibling(): FakeElement | null { const siblings = this.parentElement?.children ?? []; const index = siblings.indexOf(this); return index >= 0 ? siblings[index + 1] ?? null : null; }
+    setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+    appendChild(child: FakeElement): FakeElement { child.parentElement = this; child.parentNode = this; this.children.push(child); return child; }
+    insertBefore(child: FakeElement, before: FakeElement | null): FakeElement { child.parentElement = this; child.parentNode = this; const index = before ? this.children.indexOf(before) : -1; if (index < 0) this.children.push(child); else this.children.splice(index, 0, child); return child; }
+    replaceChildren(...children: FakeElement[]): void { this.children.splice(0); for (const child of children) this.appendChild(child); }
+    contains(candidate: unknown): boolean { return candidate === this || this.children.some((child) => child.contains(candidate)); }
+    querySelector<T>(selector: string): T | null {
+      const all = this.children.flatMap(function visit(child): FakeElement[] { return [child, ...child.children.flatMap(visit)]; });
+      const match = all.find((candidate) => candidate.tagName === "FIGURE"
+        && [...candidate.attributes].every(() => true)
+        && [...selector.matchAll(/\[([^=]+)="([^"]+)"\]/gu)].every((entry) => candidate.attributes.get(entry[1] ?? "") === entry[2]));
+      return (match ?? null) as T | null;
+    }
+    addEventListener(): void { /* media completion is not needed for the immediate layout assertion */ }
+  }
+  const { target, document, listeners, messages } = runtime();
+  const root = new FakeElement("MAIN");
+  const paragraph = root.appendChild(new FakeElement("P"));
+  const textNode = { nodeType: 3, parentElement: paragraph, parentNode: paragraph } as unknown as Node;
+  const relayouts: unknown[] = [];
+  let invalidations = 0; let measures = 0;
+  (document as unknown as { createElement(tag: string): FakeElement }).createElement = (tag) => new FakeElement(tag.toUpperCase());
+  target.root = root as unknown as HTMLElement;
+  target.curCh = 4;
+  target.sourceRangeForOffsets = () => ({ endContainer: textNode }) as unknown as Range;
+  target.invalidateMeasure = () => { invalidations += 1; };
+  target.relayout = (options: unknown) => { relayouts.push(options); return null; };
+  target.scheduleMeasure = () => { measures += 1; };
+  installReaderPageRuntime(target);
+  const post = (source: unknown, origin: string, contextMediaAsset: Record<string, unknown>): void => listeners.message?.({ source, origin, data: { contextMediaAsset } } as MessageEvent);
+
+  const valid = { kind: "image", assetUrl: "asset://localhost/generated/scene.webp", chapter: 4, anchorStart: 120, anchorEnd: 168, caption: "雨夜中的会面" };
+  post({}, "tauri://localhost", valid);
+  post(target.parent, "https://evil.example", valid);
+  post(target.parent, "tauri://localhost", { ...valid, assetUrl: "https://example.com/tracker.png" });
+  post(target.parent, "tauri://localhost", { ...valid, chapter: 5 });
+  post(target.parent, "tauri://localhost", { ...valid, anchorEnd: 500_500 });
+  assert.equal(root.children.length, 1, "untrusted, remote, stale-chapter and unbounded assets are rejected");
+
+  post(target.parent, "tauri://localhost", valid);
+  assert.equal(root.children.length, 2);
+  const figure = root.children[1]; const image = figure?.children[0]; const caption = figure?.children[1];
+  assert.equal(figure?.tagName, "FIGURE");
+  assert.equal(image?.tagName, "IMG");
+  assert.equal(image?.src, "asset://localhost/generated/scene.webp");
+  assert.equal(image?.alt, "雨夜中的会面");
+  assert.equal(caption?.textContent, "雨夜中的会面");
+  assert.equal(invalidations, 1);
+  assert.equal(measures, 1);
+  assert.deepEqual(relayouts, [{ anchorOffset: 120, exactScroll: false }]);
+  assert.deepEqual(messages.at(-1), { layoutBusy: 1 });
+
+  post(target.parent, "tauri://localhost", { ...valid, assetUrl: "http://asset.localhost/generated/revised.webp", caption: "更新后的说明" });
+  assert.equal(root.children.length, 2, "the same anchored media is updated instead of duplicated");
+  assert.equal(figure?.children[0]?.src, "http://asset.localhost/generated/revised.webp");
+  assert.equal(figure?.children[1]?.textContent, "更新后的说明");
+
+  post(target.parent, "tauri://localhost", { kind: "video", assetUrl: "reader://localhost/generated/scene.mp4", chapter: 4, anchorStart: 120, anchorEnd: 168, caption: "场景视频" });
+  const video = root.children.find((child) => child.attributes.get("data-context-media-kind") === "video")?.children[0];
+  assert.equal(video?.tagName, "VIDEO");
+  assert.equal(video?.controls, true);
+  assert.equal(video?.preload, "metadata");
+  assert.equal(video?.playsInline, true);
+
+  post(target.parent, "tauri://localhost", { kind: "image", placement: "chapterStart", assetUrl: "asset://localhost/generated/opening.webp", chapter: 4, caption: "本章图像提要" });
+  post(target.parent, "tauri://localhost", { kind: "video", placement: "chapterEnd", assetUrl: "reader://localhost/generated/closing.mp4", chapter: 4, caption: "本章视频总结" });
+  assert.equal(root.children[0]?.attributes.get("data-context-media-placement"), "chapterStart", "chapter-start summary precedes source text without an anchor");
+  assert.equal(root.children.at(-1)?.attributes.get("data-context-media-placement"), "chapterEnd", "chapter-end summary follows all source text and anchored media");
+  assert.equal(root.children[0]?.children[0]?.tagName, "IMG");
+  assert.equal(root.children.at(-1)?.children[0]?.tagName, "VIDEO");
+  assert.equal(relayouts.length, 3, "chapter summaries refresh measurement without relocating the current reading anchor");
+  assert.equal(invalidations, 5);
+  assert.equal(measures, 5);
 });
 
 test("same-book resume accepts only a bounded numeric anchor from the trusted shell", () => {

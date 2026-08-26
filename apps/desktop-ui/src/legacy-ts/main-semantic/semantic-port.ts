@@ -41,6 +41,10 @@ export interface SemanticProgress {
   readonly model_ready: boolean;
   readonly model_id: string;
   readonly model_label: string;
+  readonly solution_switching?: boolean;
+  readonly pending_model_id?: string;
+  readonly pending_model_label?: string;
+  readonly pending_retrieval_mode?: SemanticRetrievalMode | "";
   readonly model_supported: boolean;
   readonly model_bytes: number;
   readonly semantic_done: number;
@@ -113,6 +117,162 @@ export interface SemanticGpuStatus {
   readonly name: string;
   readonly driver: string;
   readonly message: string;
+  readonly active_model_device?: string;
+  readonly active_model_device_label?: string;
+  readonly device_policy?: "auto" | "gpu" | "cpu";
+  readonly actual_device?: string;
+  readonly total_vram_mib?: number | null;
+  readonly free_vram_mib?: number | null;
+}
+
+export interface IntelligenceLocalModelCapability {
+  readonly id: string;
+  readonly label: string;
+  readonly artifact: string;
+  readonly requiredTotalVramMib: number;
+  readonly selectable: boolean;
+  readonly reason: string;
+}
+
+export interface IntelligenceLocalModelCapabilities {
+  readonly gpu: {
+    readonly detected: boolean;
+    readonly name: string;
+    readonly totalVramMib: number | null;
+    readonly freeVramMib: number | null;
+    readonly message: string;
+  };
+  readonly models: readonly IntelligenceLocalModelCapability[];
+}
+
+export interface IntelligenceLocalModelStatus {
+  readonly configured: boolean;
+  readonly baseUrl: string;
+  readonly model: string;
+}
+
+export interface IntelligenceLocalModelPreflight {
+  readonly configured: boolean;
+  readonly hardwareReady: boolean;
+  readonly serviceReady: boolean;
+  readonly message: string;
+}
+
+/** Actual service readiness for the normal local 7B/8B reader model. */
+export interface LocalUnderstandingModelPreflight {
+  readonly configured: boolean;
+  readonly local: boolean;
+  readonly serviceReady: boolean;
+  readonly model: string;
+  readonly message: string;
+}
+
+/** Local-only routing preference for one user-facing Smart Management ability. */
+export interface AiCapabilityRoute {
+  readonly capability: "search" | "understanding" | "news_preference" | "deep_analysis" | "companion";
+  readonly mode: "auto" | "local" | "intelligence_host" | "cloud" | "off";
+  readonly profileId?: string;
+  readonly hostId?: string;
+  readonly updatedAt?: number;
+  readonly allowAuto: boolean;
+  readonly allowLocal: boolean;
+  readonly allowIntelligenceHost: boolean;
+  readonly allowCloud: boolean;
+  readonly allowOff: boolean;
+  readonly unavailableReason?: string;
+}
+
+export interface AiCapabilityRoutesStatus {
+  readonly routes: readonly AiCapabilityRoute[];
+}
+
+export interface IntelligenceHostPreflight {
+  readonly configured: boolean;
+  readonly reachable: boolean;
+  readonly compatible: boolean;
+  readonly hostId?: string;
+  readonly capabilityRevision?: number;
+  readonly message: string;
+}
+
+/** Public-only pairing projection. The one-time invite is never persisted by
+ * this port; callers should display/copy it once and then discard it. */
+export interface IntelligenceHostPairingInvite {
+  readonly offerId: string;
+  readonly expiresAt: string;
+  readonly inviteCode: string;
+}
+
+export interface IntelligenceHostPairingSummary {
+  readonly pairId: string;
+  readonly state: string;
+  readonly hostInstallationId: string;
+  readonly hostKeyFingerprint: string;
+  readonly capabilityRevision: number;
+  readonly capabilities: readonly string[];
+  readonly local: boolean;
+}
+
+export interface IntelligenceHostPairingsStatus {
+  readonly pendingConfirmation: boolean;
+  readonly pairings: readonly IntelligenceHostPairingSummary[];
+  readonly message: string;
+}
+
+/** Bounded, local-only input used to rank already validated formal news. */
+export interface NewsPreferenceScoreRequest {
+  readonly favorites: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly summary: string;
+    readonly category: string;
+  }[];
+  readonly events: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly summary: string;
+    readonly sourceNames: readonly string[];
+  }[];
+}
+
+export interface NewsPreferenceScores {
+  readonly model: string;
+  readonly scores: readonly {
+    readonly id: string;
+    readonly score: number;
+    readonly reason: string;
+  }[];
+}
+
+export interface ReaderMediaStatus {
+  readonly configured: boolean;
+  readonly modelReady: boolean;
+  readonly runtimeReady: boolean;
+  readonly hardwareSupported: boolean;
+  readonly modelId: string;
+  readonly runtimeDevice: string;
+  readonly totalRamMib: number;
+  readonly requiredRamMib: number;
+  readonly totalVramMib: number;
+  readonly requiredVramMib: number;
+  readonly availableDiskMib?: number;
+  readonly requiredDiskMib?: number;
+  readonly backend?: "comfyui";
+  readonly comfyUiReady?: boolean;
+  readonly workflowReady?: boolean;
+  readonly modelArtifactsReady?: boolean;
+  readonly installationState?: "not_installed" | "queued" | "running" | "ready" | "failed";
+  readonly installationStep?: string;
+  readonly installationRoot?: string;
+  readonly selectedPreset?: string;
+  readonly message: string;
+}
+
+export interface ReaderMediaComfyUiConfig {
+  readonly comfyUiRoot: string;
+  readonly workflowPath: string;
+  readonly pythonPath?: string;
+  readonly endpoint?: string;
 }
 
 export interface SemanticGpuRuntimeProgress {
@@ -134,6 +294,17 @@ type SemanticCommands = {
     readonly args: { readonly modelId: string };
     readonly result: null;
   };
+  select_semantic_solution: {
+    readonly args: {
+      readonly modelId: string;
+      readonly retrievalMode: SemanticRetrievalMode;
+    };
+    readonly result: null;
+  };
+  select_semantic_device_policy: {
+    readonly args: { readonly policy: "auto" | "gpu" | "cpu" };
+    readonly result: null;
+  };
   build_semantic_vectors: { readonly result: null };
   pause_semantic_vectors: { readonly result: null };
   build_semantic_accelerator: { readonly result: null };
@@ -150,6 +321,63 @@ type SemanticCommands = {
   delete_semantic_reranker: { readonly result: null };
   build_semantic_m3_index: { readonly result: null };
   delete_semantic_m3_index: { readonly result: null };
+  intelligence_local_model_capabilities: {
+    readonly result: IntelligenceLocalModelCapabilities;
+  };
+  intelligence_local_model_status: {
+    readonly result: IntelligenceLocalModelStatus;
+  };
+  intelligence_local_model_preflight: {
+    readonly result: IntelligenceLocalModelPreflight;
+  };
+  local_understanding_model_preflight: {
+    readonly result: LocalUnderstandingModelPreflight;
+  };
+  intelligence_local_model_save: {
+    readonly args: {
+      readonly request: {
+        readonly baseUrl: string;
+        readonly model: string;
+        readonly apiKey: string;
+      };
+    };
+    readonly result: IntelligenceLocalModelStatus;
+  };
+  ai_capability_routes_status: { readonly result: AiCapabilityRoutesStatus };
+  save_ai_capability_route: {
+    readonly args: {
+      readonly request: {
+        readonly capability: AiCapabilityRoute["capability"];
+        readonly mode: AiCapabilityRoute["mode"];
+        readonly profileId?: string;
+        readonly hostId?: string;
+      };
+    };
+    readonly result: AiCapabilityRoutesStatus;
+  };
+  intelligence_host_preflight: { readonly result: IntelligenceHostPreflight };
+  intelligence_host_pairing_begin: { readonly result: IntelligenceHostPairingInvite };
+  intelligence_host_pairing_confirm: {
+    readonly args: { readonly request: { readonly confirmationCode: string } };
+    readonly result: IntelligenceHostPairingSummary;
+  };
+  intelligence_host_pairings: { readonly result: IntelligenceHostPairingsStatus };
+  intelligence_host_pairing_revoke: {
+    readonly args: { readonly pairId: string };
+    readonly result: IntelligenceHostPairingsStatus;
+  };
+  score_news_preferences: {
+    readonly args: { readonly request: NewsPreferenceScoreRequest };
+    readonly result: NewsPreferenceScores;
+  };
+  reader_media_status: { readonly result: ReaderMediaStatus };
+  install_reader_media_model: { readonly result: ReaderMediaStatus };
+  configure_reader_media_comfyui: {
+    readonly args: { readonly config: ReaderMediaComfyUiConfig };
+    readonly result: ReaderMediaStatus;
+  };
+  start_reader_media_runtime: { readonly result: ReaderMediaStatus };
+  stop_reader_media_runtime: { readonly result: ReaderMediaStatus };
 };
 
 type VerifiedSemanticCommands = SemanticCommands extends TauriCommandMap
@@ -164,6 +392,8 @@ export interface SemanticPort {
   downloadModel(): Promise<null>;
   deleteModel(): Promise<null>;
   selectModel(modelId: string): Promise<null>;
+  selectSolution(modelId: string, retrievalMode: SemanticRetrievalMode): Promise<null>;
+  selectDevicePolicy(policy: "auto" | "gpu" | "cpu"): Promise<null>;
   buildVectors(): Promise<null>;
   pauseVectors(): Promise<null>;
   buildAccelerator(): Promise<null>;
@@ -174,6 +404,33 @@ export interface SemanticPort {
   deleteReranker(): Promise<null>;
   buildM3Index(): Promise<null>;
   deleteM3Index(): Promise<null>;
+  intelligenceCapabilities(): Promise<IntelligenceLocalModelCapabilities>;
+  intelligenceStatus(): Promise<IntelligenceLocalModelStatus>;
+  intelligencePreflight(): Promise<IntelligenceLocalModelPreflight>;
+  localUnderstandingPreflight(): Promise<LocalUnderstandingModelPreflight>;
+  saveIntelligenceModel(request: {
+    readonly baseUrl: string;
+    readonly model: string;
+    readonly apiKey: string;
+  }): Promise<IntelligenceLocalModelStatus>;
+  capabilityRoutes(): Promise<AiCapabilityRoutesStatus>;
+  saveCapabilityRoute(request: {
+    readonly capability: AiCapabilityRoute["capability"];
+    readonly mode: AiCapabilityRoute["mode"];
+    readonly profileId?: string;
+    readonly hostId?: string;
+  }): Promise<AiCapabilityRoutesStatus>;
+  hostPreflight(): Promise<IntelligenceHostPreflight>;
+  beginHostPairing(): Promise<IntelligenceHostPairingInvite>;
+  confirmHostPairing(confirmationCode: string): Promise<IntelligenceHostPairingSummary>;
+  hostPairings(): Promise<IntelligenceHostPairingsStatus>;
+  revokeHostPairing(pairId: string): Promise<IntelligenceHostPairingsStatus>;
+  scoreNewsPreferences(request: NewsPreferenceScoreRequest): Promise<NewsPreferenceScores>;
+  readerMediaStatus(): Promise<ReaderMediaStatus>;
+  installReaderMediaModel(): Promise<ReaderMediaStatus>;
+  configureReaderMediaComfyUi(config: ReaderMediaComfyUiConfig): Promise<ReaderMediaStatus>;
+  startReaderMediaRuntime(): Promise<ReaderMediaStatus>;
+  stopReaderMediaRuntime(): Promise<ReaderMediaStatus>;
   listenGpuRuntimeProgress(
     handler: (event: TauriEvent<SemanticGpuRuntimeProgress>) => void,
   ): Promise<TauriUnlisten>;
@@ -190,6 +447,10 @@ export function createSemanticPort(transport: TauriTransport): SemanticPort {
     downloadModel: () => api.invoke("download_semantic_model"),
     deleteModel: () => api.invoke("delete_semantic_model"),
     selectModel: (modelId: string) => api.invoke("select_semantic_model", { modelId }),
+    selectSolution: (modelId: string, retrievalMode: SemanticRetrievalMode) =>
+      api.invoke("select_semantic_solution", { modelId, retrievalMode }),
+    selectDevicePolicy: (policy: "auto" | "gpu" | "cpu") =>
+      api.invoke("select_semantic_device_policy", { policy }),
     buildVectors: () => api.invoke("build_semantic_vectors"),
     pauseVectors: () => api.invoke("pause_semantic_vectors"),
     buildAccelerator: () => api.invoke("build_semantic_accelerator"),
@@ -201,6 +462,38 @@ export function createSemanticPort(transport: TauriTransport): SemanticPort {
     deleteReranker: () => api.invoke("delete_semantic_reranker"),
     buildM3Index: () => api.invoke("build_semantic_m3_index"),
     deleteM3Index: () => api.invoke("delete_semantic_m3_index"),
+    intelligenceCapabilities: () => api.invoke("intelligence_local_model_capabilities"),
+    intelligenceStatus: () => api.invoke("intelligence_local_model_status"),
+    intelligencePreflight: () => api.invoke("intelligence_local_model_preflight"),
+    localUnderstandingPreflight: () => api.invoke("local_understanding_model_preflight"),
+    saveIntelligenceModel: (request: {
+      readonly baseUrl: string;
+      readonly model: string;
+      readonly apiKey: string;
+    }) =>
+      api.invoke("intelligence_local_model_save", { request }),
+    capabilityRoutes: () => api.invoke("ai_capability_routes_status"),
+    saveCapabilityRoute: (request: {
+      readonly capability: AiCapabilityRoute["capability"];
+      readonly mode: AiCapabilityRoute["mode"];
+      readonly profileId?: string;
+      readonly hostId?: string;
+    }) => api.invoke("save_ai_capability_route", { request }),
+    hostPreflight: () => api.invoke("intelligence_host_preflight"),
+    beginHostPairing: () => api.invoke("intelligence_host_pairing_begin"),
+    confirmHostPairing: (confirmationCode: string) =>
+      api.invoke("intelligence_host_pairing_confirm", { request: { confirmationCode } }),
+    hostPairings: () => api.invoke("intelligence_host_pairings"),
+    revokeHostPairing: (pairId: string) =>
+      api.invoke("intelligence_host_pairing_revoke", { pairId }),
+    scoreNewsPreferences: (request: NewsPreferenceScoreRequest) =>
+      api.invoke("score_news_preferences", { request }),
+    readerMediaStatus: () => api.invoke("reader_media_status"),
+    installReaderMediaModel: () => api.invoke("install_reader_media_model"),
+    configureReaderMediaComfyUi: (config: ReaderMediaComfyUiConfig) =>
+      api.invoke("configure_reader_media_comfyui", { config }),
+    startReaderMediaRuntime: () => api.invoke("start_reader_media_runtime"),
+    stopReaderMediaRuntime: () => api.invoke("stop_reader_media_runtime"),
     listenGpuRuntimeProgress: (
       handler: (event: TauriEvent<SemanticGpuRuntimeProgress>) => void,
     ) => events.listen("semantic-gpu-runtime-progress", handler),

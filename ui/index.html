@@ -3625,7 +3625,9 @@
         <section class="about-version-card">
           <div>
             <span class="about-eyebrow" data-i18n="aboutVersion">版本</span
-            ><strong id="about-ver">测试版 1.0</strong>
+            ><strong id="about-ver">测试版 1.1</strong
+            ><span id="about-update-arrow" class="about-update-arrow" aria-hidden="true">→</span
+            ><strong id="about-update-version" class="about-update-version"></strong>
           </div>
           <div class="about-version-actions">
             <button
@@ -3646,7 +3648,7 @@
           </div>
         </section>
         <section class="about-release-card">
-          <span class="about-eyebrow" data-i18n="aboutReleaseNotes"
+          <span id="about-release-title" class="about-eyebrow" data-i18n="aboutReleaseNotes"
             >本版更新内容</span
           >
           <div
@@ -3657,6 +3659,16 @@
             加载中…
           </div>
         </section>
+        <a
+          id="about-github"
+          class="about-github-card"
+          href="https://github.com/pigking9527-cmyk/kunpeng-reader"
+          aria-label="在 GitHub 打开鲲鹏阅读器项目"
+        >
+          <b aria-hidden="true">◈</b>
+          <span>github.com/pigking9527-cmyk/kunpeng-reader</span>
+          <b aria-hidden="true">↗</b>
+        </a>
         <div class="about-feedback-actions">
           <button
             id="about-feedback-bug"
@@ -3675,16 +3687,6 @@
             功能建议
           </button>
         </div>
-        <a
-          id="about-github"
-          class="about-github-card"
-          href="https://github.com/pigking9527-cmyk/kunpeng-reader"
-          aria-label="在 GitHub 打开鲲鹏阅读器项目"
-        >
-          <b aria-hidden="true">◈</b>
-          <span>github.com/pigking9527-cmyk/kunpeng-reader</span>
-          <b aria-hidden="true">↗</b>
-        </a>
       </div>
     </div>
     <div id="feedback-modal" class="modal">
@@ -4901,7 +4903,8 @@
           <section class="intelligence-stage-card intelligence-stage-horizon">
             <div class="intelligence-stage-label">正式分发缓存</div>
             <h2 id="intelligence-processing-summary">等待已保存资讯</h2>
-            <p>只显示当前账户已经完整保存和校验的日报与事件。刷新时由原生层处理下载、图片校验和确认；本页不启动任何采集或模型任务。</p>
+            <p>只显示当前账户已经完整保存和校验的日报与事件。刷新时由原生层处理下载、图片校验和确认；本机草稿、未配对发布和处理中的资讯不会进入账号资讯。</p>
+            <p id="intelligence-delivery-state" class="intelligence-delivery-state" aria-live="polite">正在读取正式资讯交付状态…</p>
             <div class="intelligence-stage-pills" aria-label="Horizon 数据处理">
               <span>账号隔离</span><span>正文校验</span><span>图片校验</span><span>确认</span>
             </div>

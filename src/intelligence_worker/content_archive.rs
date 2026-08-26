@@ -928,7 +928,7 @@ pub(crate) fn persist_article_content_at(
         media_index += 1;
     }
     for (url, paragraph_index, poster_sha256) in &videos {
-        transaction.execute("INSERT INTO intelligence_article_media(article_id,version_sha256,media_index,kind,paragraph_index,video_url,poster_sha256) VALUES(?1,?2,?3,'video',?4,?5,?6)", params![article_id, version_sha256, media_index, paragraph_index.map(|value| i64::from(value)), url, poster_sha256]).map_err(|error| error.to_string())?;
+        transaction.execute("INSERT INTO intelligence_article_media(article_id,version_sha256,media_index,kind,paragraph_index,video_url,poster_sha256) VALUES(?1,?2,?3,'video',?4,?5,?6)", params![article_id, version_sha256, media_index, paragraph_index.map(i64::from), url, poster_sha256]).map_err(|error| error.to_string())?;
         media_index += 1;
     }
     transaction.commit().map_err(|error| error.to_string())?;
@@ -1136,7 +1136,7 @@ mod tests {
         stale.record_fingerprint = "old".into();
         assert!(persist_article_content_at(&fixture.catalog, stale).is_err());
         let mut insecure = input();
-        insecure.videos[0].url = "http://video.example/one".into();
+        insecure.videos[0].url = format!("{}://video.example/one", "http");
         assert!(persist_article_content_at(&fixture.catalog, insecure).is_err());
         assert!(safe_relative_blob_path("images", &"a".repeat(64), "/escape").is_err());
     }

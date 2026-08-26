@@ -47,7 +47,6 @@ const FULL_TEXT_BACKFILL_IDLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// need the GPU.
 const FULL_TEXT_BACKLOG_YIELD_THRESHOLD: u64 = 512;
 const BACKLOG_MODEL_STAGE_LIMIT: u16 = 24;
-const EXPANDED_BACKFILL_BATCHES_PER_RUN: u8 = 8;
 /// Completed relation work is already durable.  Once a real editorial backlog
 /// exists, a small bounded group prevents a legacy "one article per round"
 /// setting from stretching a healthy 27B queue over many days.
@@ -134,22 +133,9 @@ const fn default_stage_limit() -> u16 {
 
 fn balanced_model_stage_limit(configured_limit: u16, awaiting_full_text: u64) -> u16 {
     if awaiting_full_text >= FULL_TEXT_BACKLOG_YIELD_THRESHOLD {
-        configured_limit.min(BACKLOG_MODEL_STAGE_LIMIT).max(1)
+        configured_limit.clamp(1, BACKLOG_MODEL_STAGE_LIMIT)
     } else {
         configured_limit.max(1)
-    }
-}
-
-/// Preserve an explicit operator increase, while preventing legacy host
-/// configurations (whose former default was four batches) from making a large
-/// first-pass evidence backlog wait behind GPU work. The worker still applies
-/// per-host fairness, retry windows and the eight-request concurrency ceiling.
-fn backfill_batch_limit(configured_limit: u8, awaiting_full_text: u64) -> u8 {
-    let configured_limit = configured_limit.max(1);
-    if awaiting_full_text >= FULL_TEXT_BACKLOG_YIELD_THRESHOLD {
-        configured_limit.max(EXPANDED_BACKFILL_BATCHES_PER_RUN)
-    } else {
-        configured_limit
     }
 }
 
@@ -398,6 +384,15 @@ struct RunReport {
     editorial_failure: String,
     processed: u64,
     reviewed: u64,
+    /// The bounded same-day event lane.  It is kept apart from the daily
+    /// retrospective below so the operator can tell whether a completed event
+    /// is merely frozen locally, actually acknowledged by the server, or not
+    /// yet available.  It never contains IDs, article data or credentials.
+    #[serde(default)]
+    event_publication: String,
+    /// The immutable previous-UTC-day retrospective lane.  Older audit rows
+    /// only have this field, so retain it for backwards-readable status.
+    #[serde(default)]
     publication: String,
     /// Historical delivery is owned by the DPAPI-capability sidecar rather
     /// than the model pipeline. It remains alive when GPU/model work fails.
@@ -424,6 +419,7 @@ struct AggregateRunReport {
     editorial: String,
     processed: u64,
     reviewed: u64,
+    event_publication: String,
     publication: String,
 }
 
@@ -659,7 +655,13 @@ fn safe_relation_failure(value: &str) -> String {
 
 fn safe_publication_outcome(value: &str) -> String {
     match value {
-        "daily_prepared_locally"
+        "event_prepared_locally"
+        | "event_events_unavailable"
+        | "event_already_published"
+        | "event_published"
+        | "event_publication_transport_unavailable"
+        | "event_publication_failed"
+        | "daily_prepared_locally"
         | "daily_events_unavailable"
         | "daily_already_published"
         | "daily_published"
@@ -691,6 +693,7 @@ fn project_run_report(report: &RunReport) -> AggregateRunReport {
         },
         processed: report.processed,
         reviewed: report.reviewed,
+        event_publication: safe_publication_outcome(&report.event_publication),
         publication: safe_publication_outcome(&report.publication),
     }
 }
@@ -935,7 +938,7 @@ fn acquire_host_guard(kind: &str) -> Result<Option<HostProcessGuard>, String> {
             }
             return Ok(None);
         }
-        return Ok(Some(HostProcessGuard { handle }));
+        Ok(Some(HostProcessGuard { handle }))
     }
     #[cfg(not(windows))]
     {
@@ -983,7 +986,7 @@ pub(super) fn start_continuous_processing(launch_at_login: bool) -> Result<(), S
         return Ok(());
     }
     let original = read_configuration()?;
-    if !original.sources_file.is_some() {
+    if original.sources_file.is_none() {
         return Err("请先初始化并配置资讯来源，再启动持续处理".into());
     }
     let mut configuration = original.clone();
@@ -1011,12 +1014,10 @@ pub(super) fn stop_continuous_processing() -> Result<(), String> {
     configuration.enabled = false;
     configuration.launch_at_login = false;
     write_configuration(&configuration)?;
-    if let Err(error) = configure_login_startup(false) {
-        // Keep the conservative disabled configuration even when Windows has
-        // rejected removal of a stale Run value.  A later explicit start can
-        // retry registration; this must never resurrect continuous work.
-        return Err(error);
-    }
+    // Keep the conservative disabled configuration even when Windows rejects
+    // removal of a stale Run value. A later explicit start can retry
+    // registration; this must never resurrect continuous work.
+    configure_login_startup(false)?;
     Ok(())
 }
 
@@ -2061,6 +2062,17 @@ fn operator_stop_requested(stop_when_disabled: bool) -> bool {
     stop_when_disabled && read_configuration().is_ok_and(|configuration| !configuration.enabled)
 }
 
+/// Freeze/publish the two intentionally separate formal lanes in a stable
+/// order.  The current event lane is bounded to one immutable event revision;
+/// the daily lane remains the completed previous-UTC-day retrospective.  The
+/// worker alone reads any DPAPI-protected capability, so this control plane
+/// neither receives nor logs a server address or credential.
+fn publish_ready_outputs(configuration: &HostConfiguration) -> Result<(String, String), String> {
+    let event = child_output(configuration, "--publish-event-once", TRIAGE_TIMEOUT)?;
+    let daily = child_output(configuration, "--publish-daily-once", TRIAGE_TIMEOUT)?;
+    Ok((text(&event, "outcome"), text(&daily, "outcome")))
+}
+
 fn run_once_with_audit(
     configuration: &HostConfiguration,
     audit_path: &Path,
@@ -2121,10 +2133,9 @@ fn run_once_with_audit(
                 Err(_error) => {
                     report.outcome = "triage_runtime_unavailable".into();
                     begin_audit_stage(audit_path, audit, "publication_without_model")?;
-                    report.publication = text(
-                        &child_output(configuration, "--publish-daily-once", TRIAGE_TIMEOUT)?,
-                        "outcome",
-                    );
+                    let (event, daily) = publish_ready_outputs(configuration)?;
+                    report.event_publication = event;
+                    report.publication = daily;
                     return Ok(report);
                 }
             }
@@ -2247,8 +2258,9 @@ fn run_once_with_audit(
                 return Ok(report);
             }
             begin_audit_stage(audit_path, audit, "publication")?;
-            let publication = child_output(configuration, "--publish-daily-once", TRIAGE_TIMEOUT)?;
-            report.publication = text(&publication, "outcome");
+            let (event, daily) = publish_ready_outputs(configuration)?;
+            report.event_publication = event;
+            report.publication = daily;
             Ok(report)
         })();
         // Leave the machine responsive after a background round.  The next round
@@ -2559,17 +2571,6 @@ mod tests {
     }
 
     #[test]
-    fn large_full_text_backlog_upgrades_legacy_backfill_budget() {
-        assert_eq!(backfill_batch_limit(4, 0), 4);
-        assert_eq!(
-            backfill_batch_limit(4, FULL_TEXT_BACKLOG_YIELD_THRESHOLD),
-            EXPANDED_BACKFILL_BATCHES_PER_RUN
-        );
-        assert_eq!(backfill_batch_limit(12, 10_000), 12);
-        assert_eq!(backfill_batch_limit(0, 0), 1);
-    }
-
-    #[test]
     fn editorial_backlog_uses_a_bounded_batch_and_migrates_legacy_defaults() {
         assert_eq!(editorial_batch_limit(2, 0), 2);
         assert_eq!(
@@ -2688,8 +2689,10 @@ mod tests {
 
     #[test]
     fn initialization_defaults_match_the_pinned_loopback_runtime_roles() {
-        let mut configuration = HostConfiguration::default();
-        configuration.sources_file = Some(r"C:\\public-sources.json".into());
+        let mut configuration = HostConfiguration {
+            sources_file: Some(r"C:\\public-sources.json".into()),
+            ..HostConfiguration::default()
+        };
         configuration.triage.get_or_insert_with(|| ModelRoute {
             base_url: "http://127.0.0.1:8081/v1".into(),
             model: "Qwen3-8B-Q4_K_M".into(),
@@ -2716,43 +2719,54 @@ mod tests {
 
     #[test]
     fn rejects_non_loopback_model_route() {
-        let mut configuration = HostConfiguration::default();
-        configuration.triage = Some(ModelRoute {
-            base_url: "https://example.com/v1".into(),
-            model: "judge-8b".into(),
-            artifact_sha256: "a".repeat(64),
-        });
+        let configuration = HostConfiguration {
+            triage: Some(ModelRoute {
+                base_url: "https://example.com/v1".into(),
+                model: "judge-8b".into(),
+                artifact_sha256: "a".repeat(64),
+            }),
+            ..HostConfiguration::default()
+        };
         assert!(validate_configuration(&configuration).is_err());
     }
 
     #[test]
     fn rejects_an_unbounded_or_disabled_editorial_batch_limit() {
-        let mut configuration = HostConfiguration::default();
-        configuration.max_editorial_per_run = 0;
-        assert!(validate_configuration(&configuration).is_err());
-        configuration.max_editorial_per_run = MAX_STAGE_RUNS + 1;
-        assert!(validate_configuration(&configuration).is_err());
+        let disabled = HostConfiguration {
+            max_editorial_per_run: 0,
+            ..HostConfiguration::default()
+        };
+        assert!(validate_configuration(&disabled).is_err());
+        let unbounded = HostConfiguration {
+            max_editorial_per_run: MAX_STAGE_RUNS + 1,
+            ..HostConfiguration::default()
+        };
+        assert!(validate_configuration(&unbounded).is_err());
     }
 
     #[test]
     fn route_requires_model_for_its_role() {
-        let mut configuration = HostConfiguration::default();
-        configuration.deep_review = Some(ModelRoute {
-            base_url: "http://127.0.0.1:8080/v1".into(),
-            model: "qwen-8b".into(),
-            artifact_sha256: "a".repeat(64),
-        });
+        let configuration = HostConfiguration {
+            deep_review: Some(ModelRoute {
+                base_url: "http://127.0.0.1:8080/v1".into(),
+                model: "qwen-8b".into(),
+                artifact_sha256: "a".repeat(64),
+            }),
+            ..HostConfiguration::default()
+        };
         assert!(validate_configuration(&configuration).is_err());
     }
 
     #[test]
     fn configured_model_route_requires_its_verified_artifact_hash() {
-        let mut configuration = HostConfiguration::default();
-        configuration.triage = Some(ModelRoute {
-            base_url: "http://127.0.0.1:8081/v1".into(),
-            model: "judge-8b".into(),
-            artifact_sha256: "not-a-sha".into(),
-        });
+        let configuration = HostConfiguration {
+            triage: Some(ModelRoute {
+                base_url: "http://127.0.0.1:8081/v1".into(),
+                model: "judge-8b".into(),
+                artifact_sha256: "not-a-sha".into(),
+            }),
+            ..HostConfiguration::default()
+        };
         assert!(validate_configuration(&configuration).is_err());
     }
 
@@ -2967,6 +2981,7 @@ mod tests {
                 editorial_failure: "Bearer credential-value".into(),
                 processed: 0,
                 reviewed: 0,
+                event_publication: "event_prepared_locally".into(),
                 publication: "daily_prepared_locally".into(),
                 distribution_service: "distribution_worker_start_requested".into(),
             }),
@@ -2992,6 +3007,7 @@ mod tests {
         assert_eq!(report.relation, "processed");
         assert_eq!(report.relation_failure, "unknown");
         assert_eq!(report.editorial, "processing_retry_scheduled");
+        assert_eq!(report.event_publication, "event_prepared_locally");
         assert_eq!(report.publication, "daily_prepared_locally");
 
         let encoded = serde_json::to_string(&project_host_audit(&audit, false)).unwrap();
@@ -3086,13 +3102,15 @@ mod tests {
 
     #[test]
     fn distribution_sidecar_receives_only_local_pipeline_configuration() {
-        let mut configuration = HostConfiguration::default();
-        configuration.sources_file = Some(r"C:\\sources.json".into());
-        configuration.triage = Some(ModelRoute {
-            base_url: "http://127.0.0.1:8081/v1".into(),
-            model: "judge-8b".into(),
-            artifact_sha256: "a".repeat(64),
-        });
+        let configuration = HostConfiguration {
+            sources_file: Some(r"C:\\sources.json".into()),
+            triage: Some(ModelRoute {
+                base_url: "http://127.0.0.1:8081/v1".into(),
+                model: "judge-8b".into(),
+                artifact_sha256: "a".repeat(64),
+            }),
+            ..HostConfiguration::default()
+        };
         let command = distribution_sidecar_command(Path::new("worker.exe"), &configuration);
         let variables = command
             .get_envs()

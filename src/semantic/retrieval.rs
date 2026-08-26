@@ -4,7 +4,7 @@
 //! “高精度”后才会参与，并且只处理融合后的很小候选集。
 
 use super::{
-    model,
+    device, gpu, model,
     search::{SemBookHits, SemHit},
     vector,
 };
@@ -42,7 +42,7 @@ impl RetrievalMode {
         }
     }
 
-    fn from_id(value: &str) -> Option<Self> {
+    pub(super) fn from_id(value: &str) -> Option<Self> {
         match value.trim() {
             "standard" => Some(Self::Standard),
             "high_precision" => Some(Self::HighPrecision),
@@ -81,9 +81,13 @@ fn long_context_slot() -> &'static Mutex<bool> {
 fn slot() -> &'static Mutex<RetrievalMode> {
     static SLOT: OnceLock<Mutex<RetrievalMode>> = OnceLock::new();
     SLOT.get_or_init(|| {
-        let mode = settings_path()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|value| RetrievalMode::from_id(&value))
+        let mode = super::solution::load()
+            .and_then(|solution| RetrievalMode::from_id(&solution.committed_retrieval_mode))
+            .or_else(|| {
+                settings_path()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .and_then(|value| RetrievalMode::from_id(&value))
+            })
             .unwrap_or(RetrievalMode::Standard);
         Mutex::new(mode)
     })
@@ -105,6 +109,20 @@ pub(super) fn initialize() {
         }
     }
     let _ = long_context_enabled();
+}
+
+pub(super) fn persist_legacy_mode(mode: RetrievalMode) -> Result<(), String> {
+    let path = settings_path().ok_or("无法确定检索策略设置目录")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("保存检索策略失败：{error}"))?;
+    }
+    crate::atomic_file::write(&path, mode.id().as_bytes())
+}
+
+pub(super) fn commit_mode_in_memory(mode: RetrievalMode) {
+    *slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
 }
 
 pub(super) fn active_mode() -> RetrievalMode {
@@ -156,50 +174,8 @@ pub(super) fn set_long_context_enabled(
     Ok(())
 }
 
-/// 切走 BGE-M3 时将持久化的专属模式回退为标准融合。返回是否发生了回退。
-pub(super) fn disable_m3_mode_for_non_m3() -> bool {
-    if super::model::active_id() == "bge-m3" {
-        return false;
-    }
-    let mut selected = slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if *selected != RetrievalMode::M3Hybrid {
-        return false;
-    }
-    if let Some(path) = settings_path() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = crate::atomic_file::write(&path, RetrievalMode::Standard.id().as_bytes());
-    }
-    *selected = RetrievalMode::Standard;
-    true
-}
-
 pub(super) fn select_mode(state: tauri::State<AppState>, value: &str) -> Result<(), String> {
-    let mode = RetrievalMode::from_id(value).ok_or("未知的检索策略")?;
-    if mode == RetrievalMode::M3Hybrid && super::model::active_id() != "bge-m3" {
-        return Err("实验性 M3 混合检索需要先选择 BGE-M3 模型".into());
-    }
-    if let Some(path) = settings_path() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("保存检索策略失败：{error}"))?;
-        }
-        crate::atomic_file::write(&path, mode.id().as_bytes())?;
-    }
-    *slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
-    super::clear_sem_query_cache();
-    let mut progress = state
-        .sem_progress
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    progress.current = format!("已启用{}", mode.label());
-    progress.error.clear();
-    Ok(())
+    super::model::select_solution(state.inner(), super::model::active_id(), value)
 }
 
 fn reranker_dir() -> Option<PathBuf> {
@@ -225,6 +201,12 @@ fn contains_onnx(path: &std::path::Path) -> bool {
 }
 
 pub(super) fn reranker_available(state: &AppState) -> bool {
+    if matches!(
+        model::active(),
+        model::SemanticModel::Qwen3Embedding06 | model::SemanticModel::Qwen3Embedding8
+    ) {
+        return super::qwen::reranker_available();
+    }
     state
         .reranker
         .try_lock()
@@ -233,13 +215,40 @@ pub(super) fn reranker_available(state: &AppState) -> bool {
 }
 
 pub(super) fn reranker_available_disk() -> bool {
+    if matches!(
+        model::active(),
+        model::SemanticModel::Qwen3Embedding06 | model::SemanticModel::Qwen3Embedding8
+    ) {
+        return super::qwen::reranker_installed();
+    }
     reranker_dir().as_deref().is_some_and(contains_onnx)
 }
 
 /// FastEmbed 会把已完成文件写入模型缓存；中断时缓存目录会保留，下一次初始化
 /// 可复用已完成部分。这里仅用于把下载按钮标为“继续下载”，不把临时文件误认为模型就绪。
 pub(super) fn reranker_download_partial() -> bool {
+    if matches!(
+        model::active(),
+        model::SemanticModel::Qwen3Embedding06 | model::SemanticModel::Qwen3Embedding8
+    ) {
+        // Qwen 下载由共享的本地模型管理器负责；旧 BGE 缓存目录不能被当成
+        // Qwen 精排模型的“部分下载”。
+        return false;
+    }
     reranker_dir().is_some_and(|path| path.exists()) && !reranker_available_disk()
+}
+
+fn create_fastembed_reranker(
+    execution_providers: Vec<fastembed::ExecutionProviderDispatch>,
+) -> Result<fastembed::TextRerank, String> {
+    let mut options = fastembed::RerankInitOptions::new(fastembed::RerankerModel::BGERerankerV2M3)
+        .with_show_download_progress(false)
+        .with_execution_providers(execution_providers);
+    if let Some(dir) = reranker_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        options = options.with_cache_dir(dir);
+    }
+    fastembed::TextRerank::try_new(options).map_err(|error| error.to_string())
 }
 
 fn reranker(state: &AppState) -> Result<Arc<Mutex<fastembed::TextRerank>>, String> {
@@ -250,20 +259,57 @@ fn reranker(state: &AppState) -> Result<Arc<Mutex<fastembed::TextRerank>>, Strin
     if let Some(model) = slot.as_ref() {
         return Ok(model.clone());
     }
-    let mut options = fastembed::RerankInitOptions::new(fastembed::RerankerModel::BGERerankerV2M3)
-        .with_show_download_progress(false);
-    if let Some(dir) = reranker_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        options = options.with_cache_dir(dir);
+    let model = match device::active() {
+        device::SemanticDevicePolicy::Cpu => create_fastembed_reranker(Vec::new()),
+        device::SemanticDevicePolicy::Gpu => {
+            let cuda = gpu::strict_cuda_execution_providers();
+            if cuda.is_empty() {
+                Err("已强制使用 NVIDIA GPU，但 BGE 重排模型的 CUDA Provider 不可用".into())
+            } else {
+                create_fastembed_reranker(cuda).map_err(|error| {
+                    format!("已强制使用 NVIDIA GPU，BGE 重排模型初始化失败：{error}")
+                })
+            }
+        }
+        device::SemanticDevicePolicy::Auto => {
+            let cuda = gpu::strict_cuda_execution_providers();
+            if cuda.is_empty() {
+                create_fastembed_reranker(Vec::new())
+            } else {
+                create_fastembed_reranker(cuda).or_else(|error| {
+                    crate::log(&format!(
+                        "semantic_reranker cuda_init_failed policy=auto fallback=cpu error={error}"
+                    ));
+                    create_fastembed_reranker(Vec::new())
+                })
+            }
+        }
     }
-    let model = fastembed::TextRerank::try_new(options)
-        .map_err(|error| format!("加载 BGE Reranker v2-M3 失败：{error}"))?;
+    .map_err(|error| format!("加载 BGE Reranker v2-M3 失败：{error}"))?;
     let model = Arc::new(Mutex::new(model));
     *slot = Some(model.clone());
     if let Ok(mut progress) = state.sem_progress.lock() {
         progress.reranker_ready = true;
     }
     Ok(model)
+}
+
+pub(super) fn prepare_for_solution(
+    state: &AppState,
+    selected: model::SemanticModel,
+    mode: RetrievalMode,
+) -> Result<(), String> {
+    if !mode.uses_reranker() {
+        return Ok(());
+    }
+    if matches!(
+        selected,
+        model::SemanticModel::Qwen3Embedding06 | model::SemanticModel::Qwen3Embedding8
+    ) {
+        super::qwen::ensure_reranker()
+    } else {
+        reranker(state).map(|_| ())
+    }
 }
 
 pub(super) fn download_reranker(app: tauri::AppHandle) -> Result<(), String> {
@@ -277,7 +323,15 @@ pub(super) fn download_reranker(app: tauri::AppHandle) -> Result<(), String> {
     handle
         .spawn_detached("semantic-reranker", move |task| {
             let state = worker_app.state::<AppState>();
-            match reranker(state.inner()) {
+            let prepared = if matches!(
+                model::active(),
+                model::SemanticModel::Qwen3Embedding06 | model::SemanticModel::Qwen3Embedding8
+            ) {
+                super::qwen::ensure_reranker().map(|_| ())
+            } else {
+                reranker(state.inner()).map(|_| ())
+            };
+            match prepared {
                 Ok(_) => {
                     if let Ok(mut progress) = state.sem_progress.lock() {
                         progress.reranker_ready = true;
@@ -337,6 +391,12 @@ pub(super) fn delete_reranker(state: tauri::State<AppState>) -> Result<(), Strin
     {
         return Err("索引任务正在运行，请稍候".into());
     }
+    if matches!(
+        model::active(),
+        model::SemanticModel::Qwen3Embedding06 | model::SemanticModel::Qwen3Embedding8
+    ) {
+        return Err("Qwen3 结果精排与情报中心共用本地模型；请在高级模型管理中统一清理".into());
+    }
     *state
         .reranker
         .lock()
@@ -378,6 +438,38 @@ pub(super) fn rerank_hits(state: &AppState, query: &str, books: &mut [SemBookHit
         }
     }
     if docs.is_empty() {
+        return;
+    }
+    if matches!(
+        model::active(),
+        model::SemanticModel::Qwen3Embedding06 | model::SemanticModel::Qwen3Embedding8
+    ) {
+        let Ok(ranked) = super::qwen::rerank(query, &docs) else {
+            return;
+        };
+        let total = ranked.len().max(1) as f32;
+        for (rank, result) in ranked.into_iter().enumerate() {
+            let Some(&(book_index, hit_index)) = refs.get(result.index) else {
+                continue;
+            };
+            let rank_bonus = (total - rank as f32) / total;
+            let score_bonus = result.relevance_score.clamp(0.0, 1.0);
+            let hit: &mut SemHit = &mut books[book_index].hits[hit_index];
+            hit.score = hit.score * 0.25 + rank_bonus * 0.35 + score_bonus * 0.40;
+        }
+        for book in books {
+            book.score = book
+                .hits
+                .iter()
+                .map(|hit| hit.score)
+                .fold(0.0_f32, f32::max);
+            book.hits.sort_by(|left, right| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
         return;
     }
     let Ok(model) = reranker(state) else {

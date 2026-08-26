@@ -210,7 +210,7 @@ test("Bug feedback requests the reader problem-state snapshot as an attachment",
   assert.match(mainTrace, /runtime\.focus\?\.\(\)/);
   assert.match(mainTrace, /querySelector\("\.content"\)\?\.focus/);
   assert.match(mainTrace, /attempts < 6/);
-  assert.match(mainTrace, /pushShellEvent\("main_focus"/);
+  assert.match(mainTrace, /pushShellEvent\("focus_handoff"/);
   assert.match(mainTrace, /reader-performance-trace/);
   assert.match(mainTrace, /function summarizeReaderPerformance/);
   assert.match(mainTrace, /reader_performance: summarizeReaderPerformance\(recentShell\)/);
@@ -305,10 +305,12 @@ test("reader page reports why a click did not turn the page", () => {
   assert.match(pageTrace, /readerBugTrace\("chapter", "chapter_start"/);
   assert.match(pageTrace, /ready \? "chapter_ready" : "chapter_error"/);
   assert.match(pageTrace, /function beginPageTurnBugTrace\(direction\)/);
+  assert.match(pageTrace, /function observePageTurnPerformance\(token\)/);
   assert.match(pageTrace, /function finishPageTurnBugTrace\(token\)/);
   assert.match(pageTrace, /chapter_turn_pending/);
   assert.match(pageTrace, /turn_fx_active/);
   assert.match(layout, /beginPageTurnBugTrace\('forward'\)/);
+  assert.match(layout, /observePageTurnPerformance\(trace\)/);
   assert.match(layout, /finishPageTurnBugTrace\(trace\)/);
   assert.match(annotations, /markPageTurnInput\('tap'\)/);
   assert.match(annotations, /markPageTurnInput\('keyboard'\)/);

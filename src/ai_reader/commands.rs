@@ -5,24 +5,34 @@
 //! `AppState` reference and preserve the existing public command names.
 
 use super::{
-    ai_reader_profiles_inner, ai_reader_status_inner, assign_ai_reader_profile_inner,
-    intelligence_daily_digest_get_inner, intelligence_daily_digest_list_inner,
-    intelligence_daily_digest_save_inner, intelligence_extract_source_evidence_inner,
-    intelligence_generate_brief_inner, intelligence_judge_event_pairs_inner,
+    ai_capability_routes_status_inner, ai_reader_profiles_inner, ai_reader_status_inner,
+    assign_ai_reader_profile_inner, intelligence_daily_digest_get_inner,
+    intelligence_daily_digest_list_inner, intelligence_daily_digest_save_inner,
+    intelligence_extract_source_evidence_inner, intelligence_generate_brief_inner,
+    intelligence_host_preflight_inner, intelligence_judge_event_pairs_inner,
+    intelligence_local_model_capabilities_inner, intelligence_local_model_preflight_inner,
     intelligence_local_model_save_inner, intelligence_local_model_status_inner,
-    intelligence_triage_articles_inner,
+    intelligence_triage_articles_inner, local_understanding_model_preflight_inner,
     news_rag::{
         cluster_intelligence_news_semantically, IntelligenceSemanticCandidate,
         IntelligenceSemanticClusterResult,
     },
-    save_ai_reader_config_inner, save_ai_reader_profile_inner, select_ai_reader_profile_inner,
+    save_ai_capability_route_inner, save_ai_reader_config_inner, save_ai_reader_profile_inner,
+    score_news_preferences_inner, select_ai_reader_profile_inner, AiCapabilityRoutesStatus,
     AiReaderProfilesStatus, AiReaderStatus, AssignAiReaderProfileRequest,
     IntelligenceArticleTriageResults, IntelligenceDailyDigest, IntelligenceDailyDigestSaveRequest,
     IntelligenceDailyDigestSummary, IntelligenceEventPairJudgements,
     IntelligenceExtractSourceEvidenceRequest, IntelligenceGenerateBriefRequest,
-    IntelligenceGeneratedBrief, IntelligenceJudgeEventPairsRequest, IntelligenceLocalModelStatus,
-    IntelligenceSourceEvidence, IntelligenceTriageArticlesRequest, SaveAiReaderConfigRequest,
-    SaveAiReaderProfileRequest, SaveIntelligenceLocalModelRequest,
+    IntelligenceGeneratedBrief, IntelligenceHostPreflight, IntelligenceJudgeEventPairsRequest,
+    IntelligenceLocalModelCapabilities, IntelligenceLocalModelPreflight,
+    IntelligenceLocalModelStatus, IntelligenceSourceEvidence, IntelligenceTriageArticlesRequest,
+    LocalUnderstandingModelPreflight, NewsPreferenceScoreRequest, NewsPreferenceScores,
+    SaveAiCapabilityRouteRequest, SaveAiReaderConfigRequest, SaveAiReaderProfileRequest,
+    SaveIntelligenceLocalModelRequest,
+};
+use crate::host_inference_lifecycle::{
+    IntelligenceHostPairingConfirmRequest, IntelligenceHostPairingInvite,
+    IntelligenceHostPairingSummary, IntelligenceHostPairingsStatus,
 };
 use crate::AppState;
 
@@ -31,6 +41,67 @@ pub(crate) fn ai_reader_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<AiReaderStatus, String> {
     ai_reader_status_inner(state.inner())
+}
+
+/// Returns the five local Smart Management routes.  This command never
+/// touches sync configuration or contacts a model/host.
+#[tauri::command]
+pub(crate) fn ai_capability_routes_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<AiCapabilityRoutesStatus, String> {
+    ai_capability_routes_status_inner(state.inner())
+}
+
+/// Runs the explicit authenticated host check.  Only a safe status projection
+/// crosses the Tauri boundary; pairing material and account credentials stay local.
+#[tauri::command]
+pub(crate) fn intelligence_host_preflight(
+    state: tauri::State<'_, AppState>,
+) -> Result<IntelligenceHostPreflight, String> {
+    intelligence_host_preflight_inner(state.inner())
+}
+
+/// Creates a one-time, account-authenticated host invite. Its secret invite
+/// code is returned exactly once; the private HPKE key never leaves Rust.
+#[tauri::command]
+pub(crate) fn intelligence_host_pairing_begin(
+    state: tauri::State<'_, AppState>,
+) -> Result<IntelligenceHostPairingInvite, String> {
+    crate::host_inference_lifecycle::begin_pairing(state.inner())
+}
+
+/// Verifies a host-produced public confirmation against the authenticated
+/// service before persisting the DPAPI-protected client identity.
+#[tauri::command]
+pub(crate) fn intelligence_host_pairing_confirm(
+    state: tauri::State<'_, AppState>,
+    request: IntelligenceHostPairingConfirmRequest,
+) -> Result<IntelligenceHostPairingSummary, String> {
+    crate::host_inference_lifecycle::confirm_pairing(state.inner(), request)
+}
+
+#[tauri::command]
+pub(crate) fn intelligence_host_pairings(
+    state: tauri::State<'_, AppState>,
+) -> Result<IntelligenceHostPairingsStatus, String> {
+    crate::host_inference_lifecycle::list_pairings(state.inner())
+}
+
+#[tauri::command]
+pub(crate) fn intelligence_host_pairing_revoke(
+    state: tauri::State<'_, AppState>,
+    pair_id: String,
+) -> Result<IntelligenceHostPairingsStatus, String> {
+    crate::host_inference_lifecycle::revoke_pairing(state.inner(), pair_id)
+}
+
+/// Persists one local capability route after strict mode/ID validation.
+#[tauri::command]
+pub(crate) fn save_ai_capability_route(
+    state: tauri::State<'_, AppState>,
+    request: SaveAiCapabilityRouteRequest,
+) -> Result<AiCapabilityRoutesStatus, String> {
+    save_ai_capability_route_inner(state.inner(), request)
 }
 
 #[tauri::command]
@@ -80,6 +151,30 @@ pub(crate) fn intelligence_local_model_status(
 }
 
 #[tauri::command]
+pub(crate) async fn intelligence_local_model_capabilities(
+) -> Result<IntelligenceLocalModelCapabilities, String> {
+    tauri::async_runtime::spawn_blocking(intelligence_local_model_capabilities_inner)
+        .await
+        .map_err(|error| format!("本机模型显卡检测失败：{error}"))
+}
+
+#[tauri::command]
+pub(crate) async fn intelligence_local_model_preflight(
+    state: tauri::State<'_, AppState>,
+) -> Result<IntelligenceLocalModelPreflight, String> {
+    intelligence_local_model_preflight_inner(state.inner()).await
+}
+
+/// Checks only the local OpenAI-compatible `/models` endpoint for the model
+/// actually assigned to 智读与书库.  No book text or prompt is sent.
+#[tauri::command]
+pub(crate) async fn local_understanding_model_preflight(
+    state: tauri::State<'_, AppState>,
+) -> Result<LocalUnderstandingModelPreflight, String> {
+    local_understanding_model_preflight_inner(state.inner()).await
+}
+
+#[tauri::command]
 pub(crate) fn intelligence_local_model_save(
     state: tauri::State<'_, AppState>,
     request: SaveIntelligenceLocalModelRequest,
@@ -112,6 +207,16 @@ pub(crate) async fn intelligence_triage_articles(
     request: IntelligenceTriageArticlesRequest,
 ) -> Result<IntelligenceArticleTriageResults, String> {
     intelligence_triage_articles_inner(state.inner(), request).await
+}
+
+/// Scores only already-downloaded, account-validated formal publications for
+/// local display order. It never persists, hides, syncs, or uploads a score.
+#[tauri::command]
+pub(crate) async fn score_news_preferences(
+    state: tauri::State<'_, AppState>,
+    request: NewsPreferenceScoreRequest,
+) -> Result<NewsPreferenceScores, String> {
+    score_news_preferences_inner(state.inner(), request).await
 }
 
 #[tauri::command]

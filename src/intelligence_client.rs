@@ -19,9 +19,9 @@ use std::{
     thread,
     time::Duration,
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
-const CACHE_SCHEMA_VERSION: i64 = 2;
+const CACHE_SCHEMA_VERSION: i64 = 3;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_FEED_PAGES: usize = 1_000;
 const MAX_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
@@ -64,13 +64,16 @@ struct DeliveryStreamEvent {
 #[derive(Debug, PartialEq, Eq)]
 enum StreamEnd {
     Disconnected,
+    LoginRequired,
+    PermissionRequired,
     AccountChanged,
 }
 
 impl AccountConnection {
     fn current(state: &AppState) -> Result<Self, String> {
         let value = sync::intelligence_connection(state)?;
-        let device_id = state.with_db_read("intelligence_client_device_id", |db| Ok(db.device_id()))?;
+        let device_id =
+            state.with_db_read("intelligence_client_device_id", |db| Ok(db.device_id()))?;
         if !valid_id(&device_id) {
             return Err("此设备身份无效，无法同步情报内容".into());
         }
@@ -89,7 +92,36 @@ pub(crate) struct IntelligenceCacheStatus {
     pub cache_present: bool,
     pub publication_count: u64,
     pub unacknowledged_count: u64,
+    /// A fixed, content-free delivery outcome. Service address, account ID,
+    /// raw error, package contents and credentials never cross this boundary.
+    pub delivery_state: String,
+    pub last_attempt_at: i64,
+    pub last_success_at: i64,
     pub last_refresh_at: i64,
+    pub last_fetched: u64,
+    pub last_persisted: u64,
+    pub last_acknowledged: u64,
+    pub sse_state: String,
+    pub last_sse_at: i64,
+}
+
+impl IntelligenceCacheStatus {
+    fn not_logged_in() -> Self {
+        Self {
+            cache_present: false,
+            publication_count: 0,
+            unacknowledged_count: 0,
+            delivery_state: "login_required".into(),
+            last_attempt_at: 0,
+            last_success_at: 0,
+            last_refresh_at: 0,
+            last_fetched: 0,
+            last_persisted: 0,
+            last_acknowledged: 0,
+            sse_state: "login_required".into(),
+            last_sse_at: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -515,8 +547,11 @@ fn refresh_for_connection(
     let root = cache_root()?;
     let mut cache = IntelligenceCache::open(&root, &connection.account_id, &connection.base)?;
     let mut transport = HttpTransport::new(connection);
-    transport.register_device()?;
-    refresh_with_transport(&mut cache, &mut transport)
+    cache.begin_refresh_attempt()?;
+    let result = transport
+        .register_device()
+        .and_then(|()| refresh_with_transport_inner(&mut cache, &mut transport));
+    finish_refresh_attempt(&cache, result)
 }
 
 /// Starts one process-local supervisor for the content-free delivery stream.
@@ -550,26 +585,33 @@ fn delivery_stream_supervisor(app: tauri::AppHandle) {
         let scope = account_scope_hash(&connection.account_id, &connection.base);
         if active_scope != scope {
             cursor = cache_root()
-                .and_then(|root| IntelligenceCache::open(&root, &connection.account_id, &connection.base))
+                .and_then(|root| {
+                    IntelligenceCache::open(&root, &connection.account_id, &connection.base)
+                })
                 .and_then(|cache| cache.stream_cursor())
                 .unwrap_or_default();
             active_scope = scope.clone();
             registered_scope.clear();
         }
         if registered_scope != scope {
-            if HttpTransport::new(connection.clone()).register_device().is_ok() {
-                registered_scope = scope.clone();
-            } else {
-                let delay = STREAM_BACKOFF[retry_index.min(STREAM_BACKOFF.len() - 1)];
-                retry_index = retry_index.saturating_add(1);
-                thread::sleep(delay);
-                continue;
+            match HttpTransport::new(connection.clone()).register_device() {
+                Ok(()) => {
+                    registered_scope = scope.clone();
+                    set_stream_state(&connection, "connecting");
+                }
+                Err(error) => {
+                    set_stream_state(&connection, stream_state_for_error(&error));
+                    let delay = STREAM_BACKOFF[retry_index.min(STREAM_BACKOFF.len() - 1)];
+                    retry_index = retry_index.saturating_add(1);
+                    thread::sleep(delay);
+                    continue;
+                }
             }
         }
-        let end = stream_once(state.inner(), &connection, &mut cursor);
-        if let Ok(cache) = cache_root()
-            .and_then(|root| IntelligenceCache::open(&root, &connection.account_id, &connection.base))
-        {
+        let end = stream_once(&app, state.inner(), &connection, &mut cursor);
+        if let Ok(cache) = cache_root().and_then(|root| {
+            IntelligenceCache::open(&root, &connection.account_id, &connection.base)
+        }) {
             let _ = cache.set_stream_cursor(&cursor);
         }
         if end == StreamEnd::AccountChanged {
@@ -578,6 +620,15 @@ fn delivery_stream_supervisor(app: tauri::AppHandle) {
             retry_index = 0;
             continue;
         }
+        set_stream_state(
+            &connection,
+            match end {
+                StreamEnd::Disconnected => "reconnecting",
+                StreamEnd::LoginRequired => "login_required",
+                StreamEnd::PermissionRequired => "permission_required",
+                StreamEnd::AccountChanged => unreachable!("handled above"),
+            },
+        );
         let delay = STREAM_BACKOFF[retry_index.min(STREAM_BACKOFF.len() - 1)];
         retry_index = retry_index.saturating_add(1);
         thread::sleep(delay);
@@ -587,14 +638,22 @@ fn delivery_stream_supervisor(app: tauri::AppHandle) {
 /// Consume a single SSE response.  All state-changing work is guarded by a
 /// fresh account comparison, so a late frame from an old session cannot
 /// refresh or write on behalf of a newly signed-in account.
-fn stream_once(state: &AppState, session: &AccountConnection, cursor: &mut String) -> StreamEnd {
+fn stream_once(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    session: &AccountConnection,
+    cursor: &mut String,
+) -> StreamEnd {
     if !stream_session_is_current(state, session) {
         return StreamEnd::AccountChanged;
     }
     let suffix = if cursor.is_empty() {
         format!("/v1/intelligence/stream?deviceId={}", session.device_id)
     } else {
-        format!("/v1/intelligence/stream?cursor={cursor}&deviceId={}", session.device_id)
+        format!(
+            "/v1/intelligence/stream?cursor={cursor}&deviceId={}",
+            session.device_id
+        )
     };
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(STREAM_CONNECT_TIMEOUT))
@@ -606,7 +665,12 @@ fn stream_once(state: &AppState, session: &AccountConnection, cursor: &mut Strin
         .header("Accept", "text/event-stream")
         .call()
     {
-        Ok(response) => response,
+        Ok(response) => {
+            set_stream_state(session, "connected");
+            response
+        }
+        Err(ureq::Error::StatusCode(401)) => return StreamEnd::LoginRequired,
+        Err(ureq::Error::StatusCode(403)) => return StreamEnd::PermissionRequired,
         Err(_) => return StreamEnd::Disconnected,
     };
     let mut reader = BufReader::new(response.into_body().into_reader());
@@ -636,7 +700,16 @@ fn stream_once(state: &AppState, session: &AccountConnection, cursor: &mut Strin
                     // Refresh errors are deliberately not surfaced to the
                     // WebView and do not affect the cached, already verified
                     // content. The next valid delivery or reconnect retries.
-                    let _ = refresh_for_connection(session.clone());
+                    //
+                    // The notification carries no delivery data.  It only
+                    // tells an already open workspace to re-read the native,
+                    // account-isolated cache after this verified refresh has
+                    // completed.  This prevents the UI from continuing to
+                    // display an older cache count until the user clicks the
+                    // manual refresh button.
+                    if refresh_for_connection(session.clone()).is_ok() {
+                        let _ = app.emit("intelligence-delivery-updated", ());
+                    }
                 }
             }
             data.clear();
@@ -688,10 +761,71 @@ fn valid_stream_kind(value: &str) -> bool {
     matches!(value, "daily" | "event")
 }
 
+fn valid_delivery_state(value: &str) -> bool {
+    matches!(
+        value,
+        "not_refreshed"
+            | "refreshing"
+            | "server_empty"
+            | "ready"
+            | "login_required"
+            | "permission_required"
+            | "delivery_failed"
+    )
+}
+
+fn valid_sse_state(value: &str) -> bool {
+    matches!(
+        value,
+        "not_started"
+            | "connecting"
+            | "connected"
+            | "reconnecting"
+            | "login_required"
+            | "permission_required"
+    )
+}
+
+fn delivery_state_for_error(error: &str) -> &'static str {
+    if error.contains("未登录") || error.contains("登录状态失效") {
+        "login_required"
+    } else if error.contains("未启用") || error.contains("访问权限") || error.contains("403")
+    {
+        "permission_required"
+    } else {
+        "delivery_failed"
+    }
+}
+
+fn stream_state_for_error(error: &str) -> &'static str {
+    match delivery_state_for_error(error) {
+        "login_required" => "login_required",
+        "permission_required" => "permission_required",
+        _ => "reconnecting",
+    }
+}
+
+/// Persist only a fixed aggregate stream state. This path must never store an
+/// endpoint, token, delivery frame, or raw transport error.
+fn set_stream_state(connection: &AccountConnection, state: &str) {
+    if !valid_sse_state(state) {
+        return;
+    }
+    let _ = cache_root()
+        .and_then(|root| IntelligenceCache::open(&root, &connection.account_id, &connection.base))
+        .and_then(|cache| cache.set_sse_state(state));
+}
+
 /// Return only aggregate cache data for the currently authenticated account.
 /// No URL, token, or cross-account publication contents are returned here.
 pub(crate) fn current_cache_status(state: &AppState) -> Result<IntelligenceCacheStatus, String> {
-    let connection = AccountConnection::current(state)?;
+    let connection = match AccountConnection::current(state) {
+        Ok(connection) => connection,
+        Err(error) if delivery_state_for_error(&error) == "login_required" => {
+            return Ok(IntelligenceCacheStatus::not_logged_in());
+        }
+        Err(error) => return Err(error),
+    };
     IntelligenceCache::open(&cache_root()?, &connection.account_id, &connection.base)?.status()
 }
 
@@ -867,7 +1001,35 @@ pub(crate) async fn intelligence_archive_download(
     .map_err(|error| format!("下载情报历史内容失败：{error}"))?
 }
 
+#[cfg(test)]
 fn refresh_with_transport<T: IntelligenceTransport>(
+    cache: &mut IntelligenceCache,
+    transport: &mut T,
+) -> Result<IntelligenceRefreshReport, String> {
+    cache.begin_refresh_attempt()?;
+    let result = refresh_with_transport_inner(cache, transport);
+    finish_refresh_attempt(cache, result)
+}
+
+fn finish_refresh_attempt(
+    cache: &IntelligenceCache,
+    result: Result<IntelligenceRefreshReport, String>,
+) -> Result<IntelligenceRefreshReport, String> {
+    match result {
+        Ok(report) => {
+            cache.record_refresh_success(&report)?;
+            Ok(report)
+        }
+        Err(error) => {
+            // Status persistence is diagnostics only. A cache write failure
+            // must never replace the actual delivery failure or permit ACK.
+            let _ = cache.record_refresh_failure(delivery_state_for_error(&error));
+            Err(error)
+        }
+    }
+}
+
+fn refresh_with_transport_inner<T: IntelligenceTransport>(
     cache: &mut IntelligenceCache,
     transport: &mut T,
 ) -> Result<IntelligenceRefreshReport, String> {
@@ -916,7 +1078,6 @@ fn refresh_with_transport<T: IntelligenceTransport>(
         }
         cursor = Some(page.next_cursor);
     }
-    cache.set_last_refresh(now_millis())?;
     Ok(report)
 }
 
@@ -1117,23 +1278,114 @@ impl IntelligenceCache {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|_| "读取情报缓存状态失败".to_string())?;
-        let last_refresh = self
-            .conn
-            .query_row(
-                "SELECT value FROM intelligence_cache_metadata WHERE key='last_refresh_at'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|_| "读取情报缓存状态失败".to_string())?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let last_refresh = self.metadata_i64("last_refresh_at")?;
+        let last_success = self.metadata_i64("last_success_at")?.max(last_refresh);
+        let delivery_state = self
+            .metadata_text("delivery_state")?
+            .filter(|value| valid_delivery_state(value))
+            .unwrap_or_else(|| {
+                if last_success > 0 {
+                    if count > 0 {
+                        "ready".into()
+                    } else {
+                        "server_empty".into()
+                    }
+                } else {
+                    "not_refreshed".into()
+                }
+            });
+        let sse_state = self
+            .metadata_text("sse_state")?
+            .filter(|value| valid_sse_state(value))
+            .unwrap_or_else(|| "not_started".into());
         Ok(IntelligenceCacheStatus {
             cache_present: count > 0,
             publication_count: count.max(0) as u64,
             unacknowledged_count: unacknowledged.max(0) as u64,
+            delivery_state,
+            last_attempt_at: self.metadata_i64("last_attempt_at")?,
+            last_success_at: last_success,
             last_refresh_at: last_refresh,
+            last_fetched: self.metadata_u64("last_fetched")?,
+            last_persisted: self.metadata_u64("last_persisted")?,
+            last_acknowledged: self.metadata_u64("last_acknowledged")?,
+            sse_state,
+            last_sse_at: self.metadata_i64("last_sse_at")?,
         })
+    }
+
+    fn metadata_text(&self, key: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM intelligence_cache_metadata WHERE key=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| "读取情报缓存状态失败".to_string())
+    }
+
+    fn metadata_i64(&self, key: &str) -> Result<i64, String> {
+        Ok(self
+            .metadata_text(key)?
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value >= 0)
+            .unwrap_or(0))
+    }
+
+    fn metadata_u64(&self, key: &str) -> Result<u64, String> {
+        Ok(self
+            .metadata_text(key)?
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0))
+    }
+
+    fn set_metadata(&self, key: &str, value: impl ToString) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO intelligence_cache_metadata(key,value) VALUES(?1,?2) \
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value.to_string()],
+            )
+            .map_err(|_| "更新情报交付状态失败".to_string())?;
+        Ok(())
+    }
+
+    fn begin_refresh_attempt(&self) -> Result<(), String> {
+        self.set_metadata("last_attempt_at", now_millis())?;
+        self.set_metadata("delivery_state", "refreshing")
+    }
+
+    fn record_refresh_success(&self, report: &IntelligenceRefreshReport) -> Result<(), String> {
+        let now = now_millis();
+        self.set_metadata("last_refresh_at", now)?;
+        self.set_metadata("last_success_at", now)?;
+        self.set_metadata("last_fetched", report.fetched)?;
+        self.set_metadata("last_persisted", report.persisted)?;
+        self.set_metadata("last_acknowledged", report.acknowledged)?;
+        self.set_metadata(
+            "delivery_state",
+            if report.fetched == 0 {
+                "server_empty"
+            } else {
+                "ready"
+            },
+        )
+    }
+
+    fn record_refresh_failure(&self, state: &str) -> Result<(), String> {
+        if !valid_delivery_state(state) {
+            return Err("情报交付状态无效".into());
+        }
+        self.set_metadata("delivery_state", state)
+    }
+
+    fn set_sse_state(&self, state: &str) -> Result<(), String> {
+        if !valid_sse_state(state) {
+            return Err("情报 SSE 状态无效".into());
+        }
+        self.set_metadata("sse_state", state)?;
+        self.set_metadata("last_sse_at", now_millis())
     }
 
     fn persist_bundle(&mut self, bundle: &Value, importance: i64) -> Result<bool, String> {
@@ -1248,11 +1500,6 @@ impl IntelligenceCache {
         Ok(())
     }
 
-    fn set_last_refresh(&self, at: i64) -> Result<(), String> {
-        self.conn.execute("INSERT INTO intelligence_cache_metadata(key,value) VALUES('last_refresh_at',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![at.to_string()]).map_err(|_| "更新情报缓存状态失败".to_string())?;
-        Ok(())
-    }
-
     /// The cursor contains no editorial content, but it still belongs to the
     /// account-and-service cache scope.  Persisting it lets SSE reconnect
     /// after a reader restart without advancing a different account's feed.
@@ -1265,7 +1512,11 @@ impl IntelligenceCache {
             )
             .optional()
             .map_err(|_| "读取情报投递游标失败".to_string())
-            .map(|value| value.filter(|cursor| valid_cursor(cursor)).unwrap_or_default())
+            .map(|value| {
+                value
+                    .filter(|cursor| valid_cursor(cursor))
+                    .unwrap_or_default()
+            })
     }
 
     fn set_stream_cursor(&self, cursor: &str) -> Result<(), String> {
@@ -1927,7 +2178,9 @@ fn valid_https_url(value: &str) -> bool {
 }
 fn contains_model_url(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
-    value.contains("http://") || value.contains("https://") || value.contains("www.")
+    let http_scheme = ["http", "://"].concat();
+    let https_scheme = ["https", "://"].concat();
+    value.contains(&http_scheme) || value.contains(&https_scheme) || value.contains("www.")
 }
 fn valid_day_or_none(value: &Option<String>) -> bool {
     value.as_deref().is_none_or(|v| {
@@ -2403,7 +2656,12 @@ mod tests {
         let value = bundle();
         let mut a = IntelligenceCache::open(&root, "a", "https://one.example").unwrap();
         a.persist_bundle(&value, 80).unwrap();
-        assert_eq!(a.status().unwrap().publication_count, 1);
+        let status = a.status().unwrap();
+        assert_eq!(status.publication_count, 1);
+        // Older account caches have no delivery metadata. They remain safely
+        // readable and are represented as an unrefreshed cache, rather than
+        // inventing a network outcome.
+        assert_eq!(status.delivery_state, "not_refreshed");
         let b = IntelligenceCache::open(&root, "b", "https://two.example").unwrap();
         assert_eq!(b.status().unwrap().publication_count, 0);
         let _ = fs::remove_dir_all(root);
@@ -2470,7 +2728,13 @@ mod tests {
         };
         let report = refresh_with_transport(&mut cache, &mut transport).unwrap();
         assert_eq!(report.acknowledged, 1);
-        assert_eq!(cache.status().unwrap().unacknowledged_count, 0);
+        let status = cache.status().unwrap();
+        assert_eq!(status.unacknowledged_count, 0);
+        assert_eq!(status.delivery_state, "ready");
+        assert_eq!(status.last_fetched, 1);
+        assert_eq!(status.last_persisted, 1);
+        assert_eq!(status.last_acknowledged, 1);
+        assert!(status.last_attempt_at > 0 && status.last_success_at > 0);
         assert_eq!(acks.lock().unwrap().len(), 1);
         let _ = fs::remove_dir_all(root);
     }
@@ -2510,6 +2774,31 @@ mod tests {
         };
         assert!(refresh_with_transport(&mut cache, &mut transport).is_err());
         assert!(acks.lock().unwrap().is_empty());
+        let status = cache.status().unwrap();
+        assert_eq!(status.delivery_state, "delivery_failed");
+        assert!(status.last_attempt_at > 0);
+        assert_eq!(status.last_success_at, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_success_is_distinct_from_never_refreshing_and_keeps_safe_sse_state() {
+        let root = temp_root("empty-delivery-status");
+        let cache = IntelligenceCache::open(&root, "a", "https://one.example").unwrap();
+        assert_eq!(cache.status().unwrap().delivery_state, "not_refreshed");
+        cache.begin_refresh_attempt().unwrap();
+        cache
+            .record_refresh_success(&IntelligenceRefreshReport {
+                fetched: 0,
+                persisted: 0,
+                acknowledged: 0,
+            })
+            .unwrap();
+        cache.set_sse_state("connected").unwrap();
+        let status = cache.status().unwrap();
+        assert_eq!(status.delivery_state, "server_empty");
+        assert_eq!(status.sse_state, "connected");
+        assert!(status.last_success_at > 0 && status.last_sse_at > 0);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -3,7 +3,7 @@
  * controller exposes only sanitised process metadata: never article bodies,
  * URLs, local model settings, or credentials.
  *
- * Audit snapshots can be sizeable. The UI therefore renders the six-stage
+ * Audit snapshots can be sizeable. The UI therefore renders the nine-stage
  * map immediately but materialises records for only the selected stage and a
  * small page at a time. Opening the audit view remains responsive.
  */
@@ -36,7 +36,7 @@ export interface IntelligenceAuditStage {
   readonly summary?: string;
   readonly count?: number;
   /** What this stage counts. Never assume the pipeline is a linear article count. */
-  readonly unit?: "articles" | "pairs" | "events";
+  readonly unit?: "articles" | "pairs" | "events" | "series";
   readonly inputCount?: number;
   readonly outputCount?: number;
   readonly pendingCount?: number;
@@ -47,10 +47,13 @@ export interface IntelligenceAuditStage {
 export type IntelligenceAuditStageId =
   | "collected"
   | "exact-dedupe"
-  | "candidate-recall"
-  | "small-model"
+  | "article-triage"
+  | "relation-recall"
+  | "relation-judge"
+  | "historical-recall"
   | "qwen-review"
-  | "final-events";
+  | "final-events"
+  | "series-timeline";
 
 /** Narrow, in-memory hand-off from the collection/model pipeline to audit UI. */
 export interface IntelligenceAuditSnapshot {
@@ -60,10 +63,23 @@ export interface IntelligenceAuditSnapshot {
   readonly stages?: readonly IntelligenceAuditStage[];
 }
 
+export interface IntelligenceAuditDetailPage {
+  readonly total: number;
+  readonly items: readonly IntelligenceAuditItem[];
+}
+
+export type IntelligenceAuditDetailLoader = (request: Readonly<{
+  runId: string;
+  stageId: IntelligenceAuditStageId;
+  offset: number;
+  limit: number;
+}>) => Promise<IntelligenceAuditDetailPage>;
+
 export interface IntelligenceAuditController {
   readonly open: () => void;
   readonly close: (options?: { readonly focus?: boolean }) => void;
   readonly setSnapshot: (snapshot: IntelligenceAuditSnapshot | null) => void;
+  readonly setDetailLoader: (loader: IntelligenceAuditDetailLoader | null) => void;
   readonly snapshot: () => IntelligenceAuditSnapshot | null;
 }
 
@@ -90,10 +106,13 @@ const STAGES: ReadonlyArray<Readonly<{
 }>> = Object.freeze([
   { id: "collected", label: "采集", caption: "公开来源进入本机快照", purpose: "确认本轮输入量与来源覆盖范围。" },
   { id: "exact-dedupe", label: "精确去重", caption: "移除同源重复项", purpose: "同 URL 或完全相同的条目只保留一份。" },
-  { id: "candidate-recall", label: "关系候选", caption: "规则与 RAG 只找可能相关对", purpose: "这一层只召回文章关系对，不表示合并或最终事件数。" },
-  { id: "small-model", label: "本机判定", caption: "先逐篇筛选，再核验关系", purpose: "逐篇判断重要性，再判断候选对是同一事件、后续进展还是无关。" },
-  { id: "qwen-review", label: "Qwen 抽样复核", caption: "抽检小模型并编辑全文证据", purpose: "Qwen 对低置信和分层样本复核；通过后才编辑最终事件。" },
-  { id: "final-events", label: "最终事件", caption: "可进入简报的综合报道", purpose: "这里是最终保留、排除和复用结果的出口。" },
+  { id: "article-triage", label: "逐篇初筛", caption: "7B/8B 小模型覆盖全部新增文章", purpose: "逐篇判断重要性、主体、动作和是否保留；规则只负责排队，不提前删除文章。" },
+  { id: "relation-recall", label: "关系召回", caption: "Qwen3 Embedding 召回并由 Reranker 重排", purpose: "0.6B 对全部新增文章做近邻召回，8B 只处理低置信样本；这一层不直接合并。" },
+  { id: "relation-judge", label: "关系判定", caption: "小模型区分重复、同事件、进展与无关", purpose: "逐对输出结构化关系、置信度和原因，低置信结果进入复核。" },
+  { id: "historical-recall", label: "历史关联", caption: "检索旧事件与新闻系列", purpose: "判断是同一事件的新修订、同系列新事件，还是仅作为背景引用。" },
+  { id: "qwen-review", label: "Qwen 抽检", caption: "分层复核并校准小模型", purpose: "统计召回率、误过滤和错误合并；冲突、低置信和重大新闻强制复核。" },
+  { id: "final-events", label: "综合报道", caption: "全文证据生成可复用事件修订", purpose: "只增量处理变化来源，保留事实、来源差异、媒体和修订版本。" },
+  { id: "series-timeline", label: "系列时间线", caption: "生成前情提要与历史内部链接", purpose: "稳定事件和系列 ID 连接历史综合报道；每日简报固定引用当时修订。" },
 ] as const);
 
 const MAX_TITLE_CHARS = 180;
@@ -169,7 +188,7 @@ function normaliseStage(value: IntelligenceAuditStage): IntelligenceAuditStage |
   const outputCount = safeCount(value.outputCount);
   const pendingCount = safeCount(value.pendingCount);
   const reusedCount = safeCount(value.reusedCount);
-  const unit = value.unit === "pairs" || value.unit === "events" ? value.unit : "articles";
+  const unit = value.unit === "pairs" || value.unit === "events" || value.unit === "series" ? value.unit : "articles";
   return Object.freeze({
     id: value.id,
     status: auditStatus(value.status),
@@ -237,7 +256,13 @@ function stageCount(stage: IntelligenceAuditStage | undefined): number {
 }
 
 function unitLabel(stage: IntelligenceAuditStage | undefined): string {
-  return stage?.unit === "pairs" ? "关系对" : stage?.unit === "events" ? "事件" : "篇文章";
+  return stage?.unit === "pairs"
+    ? "关系对"
+    : stage?.unit === "events"
+      ? "事件"
+      : stage?.unit === "series"
+        ? "系列"
+        : "篇文章";
 }
 
 function stageResult(stage: IntelligenceAuditStage | undefined): string {
@@ -306,6 +331,13 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
     let userSelectedStage = false;
     let detailLimit = DETAIL_PAGE_SIZE;
     let queuedRender = false;
+    let detailLoader: IntelligenceAuditDetailLoader | null = null;
+    const loadedDetails = new Map<IntelligenceAuditStageId, {
+      items: IntelligenceAuditItem[];
+      total: number;
+      loading: boolean;
+      error: string;
+    }>();
     const timing = (action: string, phase: string, started: number, stageId = selectedStageId, itemCount = 0): void => {
       runtime.ReaderProblemTraceUI?.recordIntelligenceAuditTiming?.(action, phase, Date.now() - started, stageId, itemCount);
     };
@@ -327,8 +359,9 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
       const metricDefinitions: ReadonlyArray<Readonly<{ label: string; stageId: IntelligenceAuditStageId; hint: string }>> = [
         { label: "公开输入", stageId: "collected", hint: "采集" },
         { label: "去重后", stageId: "exact-dedupe", hint: "精确去重" },
-        { label: "待核验", stageId: "small-model", hint: "小模型" },
+        { label: "小模型处理", stageId: "article-triage", hint: "逐篇初筛" },
         { label: "简报事件", stageId: "final-events", hint: "最终" },
+        { label: "新闻系列", stageId: "series-timeline", hint: "时间线" },
       ];
       metricDefinitions.forEach((metric) => {
         const stage = stageMap.get(metric.stageId);
@@ -350,8 +383,10 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
       const definition = STAGES.find((stage) => stage.id === selectedStageId) ?? STAGES[0]!;
       const stage = stageMap.get(definition.id);
       const status = statusForStage(stage);
-      const items = stage?.items ?? [];
-      const visibleItems = items.slice(0, detailLimit);
+      const loaded = loadedDetails.get(definition.id);
+      const items = loaded?.items ?? stage?.items ?? [];
+      const total = loaded?.total ?? stageCount(stage);
+      const visibleItems = loaded ? items : items.slice(0, detailLimit);
       const frame = root.createElement("div");
       frame.className = "intelligence-audit-detail-frame";
       frame.dataset.status = status;
@@ -364,7 +399,7 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
         createText(root, "h3", "intelligence-audit-detail-title", definition.label),
         createText(root, "p", "intelligence-audit-detail-purpose", definition.purpose),
       );
-      const count = createText(root, "span", "intelligence-audit-detail-count", `${visibleItems.length} / ${stageCount(stage)} ${unitLabel(stage)}`);
+      const count = createText(root, "span", "intelligence-audit-detail-count", `${visibleItems.length} / ${total} ${unitLabel(stage)}`);
       header.append(titleGroup, count);
       frame.append(header);
 
@@ -395,21 +430,61 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
         });
         frame.append(list);
       } else {
-        frame.append(createText(root, "p", "intelligence-audit-detail-empty", stage ? "这一阶段没有需要展开的条目。" : "等待上游处理后显示。"));
+        frame.append(createText(
+          root,
+          "p",
+          "intelligence-audit-detail-empty",
+          loaded?.loading ? "正在读取这一阶段的审计记录…" : loaded?.error || (stage ? "这一阶段没有需要展开的条目。" : "等待上游处理后显示。"),
+        ));
       }
 
-      if (items.length > visibleItems.length) {
+      if (total > visibleItems.length) {
         const more = root.createElement("button");
         more.type = "button";
         more.className = "btn-plain intelligence-audit-more";
-        more.textContent = `再显示 ${Math.min(DETAIL_PAGE_SIZE, items.length - visibleItems.length)} 条`;
+        more.disabled = loaded?.loading === true;
+        more.textContent = loaded?.loading
+          ? "正在读取…"
+          : `再显示 ${Math.min(DETAIL_PAGE_SIZE, total - visibleItems.length)} 条`;
         more.addEventListener("click", () => {
-          detailLimit += DETAIL_PAGE_SIZE;
-          renderDetail();
+          if (detailLoader && currentSnapshot?.runId) void loadDetailPage(false);
+          else {
+            detailLimit += DETAIL_PAGE_SIZE;
+            renderDetail();
+          }
         });
         frame.append(more);
       }
       detail.replaceChildren(frame);
+    };
+
+    const loadDetailPage = async (reset: boolean): Promise<void> => {
+      const runId = currentSnapshot?.runId;
+      if (!detailLoader || !runId) return;
+      const existing = loadedDetails.get(selectedStageId);
+      if (existing?.loading) return;
+      const state = reset || !existing
+        ? { items: [] as IntelligenceAuditItem[], total: stageCount(stageMapFor(currentSnapshot).get(selectedStageId)), loading: true, error: "" }
+        : { ...existing, loading: true, error: "" };
+      loadedDetails.set(selectedStageId, state);
+      renderDetail();
+      try {
+        const page = await detailLoader({ runId, stageId: selectedStageId, offset: state.items.length, limit: DETAIL_PAGE_SIZE });
+        const normalisedItems = (Array.isArray(page?.items) ? page.items : [])
+          .slice(0, DETAIL_PAGE_SIZE)
+          .map(normaliseItem)
+          .filter((item): item is IntelligenceAuditItem => item !== null);
+        const total = safeCount(page?.total) ?? state.items.length + normalisedItems.length;
+        loadedDetails.set(selectedStageId, {
+          items: [...state.items, ...normalisedItems],
+          total,
+          loading: false,
+          error: "",
+        });
+      } catch {
+        loadedDetails.set(selectedStageId, { ...state, loading: false, error: "读取审计详情失败；汇总数据仍可查看。" });
+      }
+      renderDetail();
     };
 
     const renderFlow = (): void => {
@@ -436,6 +511,7 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
           const started = Date.now();
           renderFlow();
           renderDetail();
+          void loadDetailPage(true);
           timing("stage_select", "render", started, definition.id, stage?.items?.length ?? 0);
         });
         return node;
@@ -463,6 +539,7 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
       timing("audit_open", "visible", started, selectedStageId);
       const renderAfterVisible = (): void => {
         render();
+        void loadDetailPage(true);
         timing("audit_open", "first_frame", started, selectedStageId, stageMapFor(currentSnapshot).get(selectedStageId)?.items?.length ?? 0);
       };
       if (runtime.requestAnimationFrame) runtime.requestAnimationFrame(() => renderAfterVisible());
@@ -478,7 +555,9 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
     };
 
     const setSnapshot = (snapshot: IntelligenceAuditSnapshot | null): void => {
+      const previousRunId = currentSnapshot?.runId;
       currentSnapshot = normaliseIntelligenceAuditSnapshot(snapshot);
+      if (previousRunId !== currentSnapshot?.runId) loadedDetails.clear();
       if (!audit.hidden && !queuedRender) {
         queuedRender = true;
         const flush = (): void => { queuedRender = false; render(); };
@@ -487,12 +566,17 @@ export function installIntelligenceAuditUi(target: unknown): IntelligenceAuditGl
       }
     };
 
+    const setDetailLoader = (loader: IntelligenceAuditDetailLoader | null): void => {
+      detailLoader = loader;
+      loadedDetails.clear();
+    };
+
     trigger.addEventListener("click", open);
     closeButton.addEventListener("click", () => close());
     runtime.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !audit.hidden) close();
     });
-    controller = Object.freeze({ open, close, setSnapshot, snapshot: () => currentSnapshot });
+    controller = Object.freeze({ open, close, setSnapshot, setDetailLoader, snapshot: () => currentSnapshot });
     return controller;
   };
 

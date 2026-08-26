@@ -1790,7 +1790,7 @@ mod tests {
         let task_id;
         {
             let registry = BackgroundTaskRegistry::with_persistence(path.clone()).unwrap();
-            let handle = registry.enqueue(BackgroundTaskKind::LibraryClassification, "书籍分类");
+            let handle = registry.enqueue(BackgroundTaskKind::LibraryClassification, "AI 图书标签");
             task_id = handle.id().to_string();
             registry.start(&task_id).unwrap();
         }
@@ -1800,8 +1800,10 @@ mod tests {
             restored.snapshot(&task_id).unwrap().state,
             BackgroundTaskState::Paused
         );
-        let resumed =
-            restored.enqueue_or_resume(BackgroundTaskKind::LibraryClassification, "续建书籍分类");
+        let resumed = restored.enqueue_or_resume(
+            BackgroundTaskKind::LibraryClassification,
+            "续建 AI 图书标签",
+        );
         assert_eq!(resumed.id(), task_id);
         assert_eq!(
             resumed.snapshot().unwrap().state,
