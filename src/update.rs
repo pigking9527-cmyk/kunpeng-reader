@@ -69,6 +69,28 @@ fn configured_repository() -> Option<&'static str> {
     configured_github_repo(GITHUB_REPO).or_else(|| github_repo_from_url(PACKAGE_REPOSITORY))
 }
 
+fn update_info_from_release(
+    release: &serde_json::Value,
+    current: &str,
+    source: &str,
+    fallback_url: &str,
+) -> Option<UpdateInfo> {
+    let tag = release_tag(release);
+    if tag.is_empty() {
+        return None;
+    }
+    let latest = tag.trim_start_matches(['v', 'V']).to_string();
+    Some(UpdateInfo {
+        ok: true,
+        has_update: version_is_newer(&latest, current),
+        latest,
+        notes: parsed_release_notes(release),
+        url: release_url(release, fallback_url),
+        source: source.to_string(),
+        current: current.to_string(),
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn check_update() -> UpdateInfo {
     tokio::task::spawn_blocking(check_update_blocking)
@@ -80,18 +102,8 @@ fn check_update_blocking() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();
     if let Some(server_api) = configured_server_update_url("latest") {
         if let Some(v) = fetch_json(&quick_server_agent(), &server_api) {
-            let tag = release_tag(&v);
-            if !tag.is_empty() {
-                let latest = tag.trim_start_matches(['v', 'V']).to_string();
-                return UpdateInfo {
-                    ok: true,
-                    has_update: version_is_newer(&latest, &current),
-                    latest,
-                    notes: parsed_release_notes(&v),
-                    url: release_url(&v, ""),
-                    source: "server".to_string(),
-                    current,
-                };
+            if let Some(info) = update_info_from_release(&v, &current, "server", "") {
+                return info;
             }
         }
     }
@@ -100,38 +112,18 @@ fn check_update_blocking() -> UpdateInfo {
         let page = format!("https://github.com/{repo}/releases/latest");
         let api = format!("https://api.github.com/repos/{repo}/releases/latest");
         if let Some(v) = fetch_json(&agent, &api) {
-            let tag = release_tag(&v);
-            if !tag.is_empty() {
-                let latest = tag.trim_start_matches(['v', 'V']).to_string();
-                let notes = parsed_release_notes(&v);
-                let url = release_url(&v, &page);
-                return UpdateInfo {
-                    ok: true,
-                    has_update: version_is_newer(&latest, &current),
-                    latest,
-                    notes,
-                    url,
-                    source: "github".to_string(),
-                    current,
-                };
+            if let Some(info) = update_info_from_release(&v, &current, "github", &page) {
+                return info;
             }
         }
         if version_is_prerelease(&current) {
             let prereleases = format!("https://api.github.com/repos/{repo}/releases?per_page=10");
             if let Some(releases) = fetch_json(&agent, &prereleases) {
                 if let Some(release) = latest_prerelease(&releases) {
-                    let tag = release_tag(release);
-                    if !tag.is_empty() {
-                        let latest = tag.trim_start_matches(['v', 'V']).to_string();
-                        return UpdateInfo {
-                            ok: true,
-                            has_update: version_is_newer(&latest, &current),
-                            latest,
-                            notes: parsed_release_notes(release),
-                            url: release_url(release, &page),
-                            source: "github-prerelease".to_string(),
-                            current,
-                        };
+                    if let Some(info) =
+                        update_info_from_release(release, &current, "github-prerelease", &page)
+                    {
+                        return info;
                     }
                 }
             }
@@ -195,5 +187,27 @@ mod tests {
         let notes = bundled_release_notes(BUNDLED_CHANGELOG, "v1.11.2");
         assert!(notes.contains("Windows-only 体验更新"));
         assert!(notes.contains("书库问答"));
+    }
+
+    #[test]
+    fn virtual_1_1_manifest_prompts_the_1_0_development_build() {
+        let release = serde_json::json!({
+            "version": "1.1.0",
+            "release_notes": "一次性虚拟更新测试",
+            "download_url": "https://example.invalid/kunpeng-update-smoke-v1-1"
+        });
+
+        let info = update_info_from_release(&release, "1.0.0-beta.1", "server", "")
+            .expect("virtual manifest contains a version");
+        assert!(info.ok);
+        assert!(info.has_update);
+        assert_eq!(info.current, "1.0.0-beta.1");
+        assert_eq!(info.latest, "1.1.0");
+        assert_eq!(info.source, "server");
+        assert_eq!(info.notes, "一次性虚拟更新测试");
+        assert_eq!(
+            info.url,
+            "https://example.invalid/kunpeng-update-smoke-v1-1"
+        );
     }
 }
