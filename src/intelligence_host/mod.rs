@@ -2690,7 +2690,12 @@ mod tests {
     #[test]
     fn initialization_defaults_match_the_pinned_loopback_runtime_roles() {
         let mut configuration = HostConfiguration {
-            sources_file: Some(r"C:\\public-sources.json".into()),
+            sources_file: Some(
+                std::env::temp_dir()
+                    .join("public-sources.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             ..HostConfiguration::default()
         };
         configuration.triage.get_or_insert_with(|| ModelRoute {
