@@ -614,7 +614,13 @@ pub async fn reader_media_status() -> Result<ReaderMediaStatus, String> {
 
 #[tauri::command]
 pub async fn install_reader_media_model() -> Result<ReaderMediaStatus, String> {
-    tauri::async_runtime::spawn_blocking(invoke_runtime_install)
+    #[cfg(windows)]
+    let installation = tauri::async_runtime::spawn_blocking(invoke_runtime_install);
+    #[cfg(not(windows))]
+    let installation =
+        tauri::async_runtime::spawn_blocking(|| invoke_runtime_action("InstallAsync"));
+
+    installation
         .await
         .map_err(|error| format!("MiniMax-H3 一键安装任务启动失败：{error}"))?
 }
