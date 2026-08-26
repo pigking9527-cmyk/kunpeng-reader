@@ -46,10 +46,15 @@ fn is_loopback_http_endpoint(value: &str) -> bool {
         && matches!(port.parse::<u16>(), Ok(1..=u16::MAX))
 }
 
+fn is_https_endpoint(value: &str) -> bool {
+    value.starts_with("https://")
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=tauri.conf.json");
     println!("cargo:rerun-if-env-changed=KUNPENG_DEFAULT_SYNC_URL");
     println!("cargo:rerun-if-env-changed=KUNPENG_GITHUB_REPO");
+    println!("cargo:rerun-if-env-changed=KUNPENG_UPDATE_BASE");
     println!("cargo:rerun-if-changed=icons/icon.ico");
     println!("cargo:rerun-if-changed=icons/icon.png");
     // reader_page.rs uses include_str! for the single embedded EPUB engine.
@@ -102,6 +107,18 @@ fn main() {
             );
         }
         println!("cargo:rustc-env=KUNPENG_DEFAULT_SYNC_URL={value}");
+    }
+    if let Ok(value) = std::env::var("KUNPENG_UPDATE_BASE") {
+        let value = value.trim();
+        if value.is_empty()
+            || value
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+            || !is_https_endpoint(value)
+        {
+            panic!("KUNPENG_UPDATE_BASE must be an HTTPS URL without whitespace when set");
+        }
+        println!("cargo:rustc-env=KUNPENG_UPDATE_BASE={value}");
     }
     tauri_build::build()
 }
