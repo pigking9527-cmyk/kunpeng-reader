@@ -20,8 +20,9 @@ GitHub 预发布版本，`scripts/license-policy.json` 的公开资产门禁已�
 2. 发行前已运行仓库的依赖许可证检查、知识产权干净快照检查和包内第三方声明
    检查；这些是工程检查结果，不替代任何外部法律意见。
 3. Windows、Linux 和 macOS 资产只能由相应三平台 GitHub Actions 产出并附带
-   SHA-256 清单。macOS 仍必须完成 Developer ID 签名和 Apple 公证，工作流缺少
-   所需凭据或验证失败时不得以未签名资产替代。
+   SHA-256 清单。项目负责人另行授权 `v1.1.0-beta.1` 作为早期开发预发布采用
+   临时签名的 macOS 资产；工作流会拒绝把这一路径用于非 prerelease。稳定版仍必须
+   完成 Developer ID 签名和 Apple 公证。
 4. 该决定只授权当前新项目的 Beta 1.1 预发布；历史版本的许可证事实与本节
    "版本授权边界" 的说明保持不变。
 

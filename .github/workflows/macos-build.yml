@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      allow_unsigned_prerelease:
+        description: "Allow an ad-hoc signed asset only for an explicitly selected development prerelease"
+        required: false
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -22,10 +27,11 @@ jobs:
     timeout-minutes: 90
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
-      # Normal CI remains reproducible with an ad-hoc signature. A manually
-      # published release imports a Developer ID certificate below and replaces
-      # this value with the protected repository secret.
-      APPLE_SIGNING_IDENTITY: ${{ inputs.publish_release && secrets.APPLE_SIGNING_IDENTITY || '-' }}
+      # Normal CI remains reproducible with an ad-hoc signature. A stable
+      # published release imports a Developer ID certificate below. The only
+      # exception is an explicitly selected development prerelease, which is
+      # visibly documented as ad-hoc signed and is rejected for stable releases.
+      APPLE_SIGNING_IDENTITY: ${{ inputs.publish_release && !inputs.allow_unsigned_prerelease && secrets.APPLE_SIGNING_IDENTITY || '-' }}
 
     steps:
       - name: Checkout
@@ -108,15 +114,17 @@ jobs:
         shell: bash
         env:
           PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          ALLOW_UNSIGNED_PRERELEASE: ${{ inputs.allow_unsigned_prerelease }}
         run: |
           set -euo pipefail
           app_path="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$app_path"
           # Tauri's ad-hoc fallback signs the executable, but `codesign
           # --strict` and Apple's notarization require the outer app bundle to
-          # seal Info.plist and Resources too. Publish builds additionally need
-          # Hardened Runtime and a trusted timestamp.
-          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+          # seal Info.plist and Resources too. Stable published builds need
+          # Hardened Runtime and a trusted timestamp. The explicit prerelease
+          # path intentionally remains ad-hoc signed for early developer tests.
+          if [[ "$PUBLISH_RELEASE" == "true" && "$ALLOW_UNSIGNED_PRERELEASE" != "true" ]]; then
             codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_path"
           else
             codesign --force --deep --sign - "$app_path"
@@ -132,7 +140,7 @@ jobs:
           codesign --display --verbose=4 "$app_path"
 
       - name: Notarize and staple published release bundles
-        if: ${{ inputs.publish_release }}
+        if: ${{ inputs.publish_release && !inputs.allow_unsigned_prerelease }}
         shell: bash
         env:
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
@@ -195,6 +203,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Refuse an unsigned stable release
+        if: ${{ inputs.allow_unsigned_prerelease }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = \"\(.*\)\"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          test "$(gh release view "v${version}" --json isPrerelease --jq .isPrerelease)" = "true"
 
       - name: Download verified macOS artifacts
         uses: actions/download-artifact@v7

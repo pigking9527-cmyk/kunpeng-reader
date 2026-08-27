@@ -22,8 +22,9 @@
 ## 安装与校验
 
 - Windows：提供单文件便携版和 NSIS 安装包；使用 `SHA256SUMS-Windows.txt` 校验。
-- macOS（Apple Silicon）：提供 App ZIP 和 DMG；仅当构建已完成 Developer ID 签名
-  与 Apple 公证时才会作为发布资产出现，使用 `SHA256SUMS-macOS.txt` 校验。
+- macOS（Apple Silicon）：提供 App ZIP 和 DMG；本次为临时签名的早期开发测试包，
+  首次打开可能显示 Gatekeeper 提示，使用 `SHA256SUMS-macOS.txt` 校验。稳定版才要求
+  Developer ID 签名与 Apple 公证。
 - Linux x86_64：提供 AppImage 和 Debian 包；使用 `SHA256SUMS-Linux.txt` 校验。
 
 每个平台只下载适合自己的文件与对应清单。若安装包名称、版本号或 SHA-256
