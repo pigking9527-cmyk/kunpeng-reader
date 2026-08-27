@@ -865,7 +865,11 @@ fn build_daily_bundle_at(catalog: &Path, day: NaiveDate) -> Result<Option<Public
         "kind": "daily",
         "publishedAt": published_at,
         "expiresAt": expires_at,
-        "issuedAt": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        // A daily publication is immutable for its day.  Rebuilding an
+        // interrupted local draft must preserve its canonical hash, so its
+        // issuance time is the already-fixed daily publication time rather
+        // than the wall clock time of the retry.
+        "issuedAt": published_at,
         "events": projection,
         "assets": assets.iter().map(asset_declaration).collect::<Vec<_>>(),
         "bundleSha256": ""
