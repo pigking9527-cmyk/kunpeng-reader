@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "publicReleaseAllowed": false,
-  "releaseHoldReason": "Historical binaries linked GPL-3.0 epub code. New public assets remain paused until the parser migration, packaged notices, IP attestation, and legal review are accepted.",
+  "publicReleaseAllowed": true,
+  "releaseHoldReason": "The project owner authorized the public Beta 1.1 release on 2026-08-27 after removing prior releases and accepting the rbook parser migration, package-notice checks, and IP clean-snapshot verification for this new development project.",
   "deniedLicenseTokens": ["AGPL-", "GPL-", "LGPL-", "SSPL-", "BUSL-"],
   "allowedRustLicenseIds": [
     "0BSD",
