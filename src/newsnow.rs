@@ -2312,7 +2312,7 @@ fn tieba_md5_hex(input: &str) -> String {
     let mut b0 = 0xefcd_ab89u32;
     let mut c0 = 0x98ba_dcfeu32;
     let mut d0 = 0x1032_5476u32;
-    for chunk in bytes.chunks_exact(64) {
+    for chunk in bytes.as_chunks::<64>().0 {
         let mut words = [0u32; 16];
         for (index, word) in words.iter_mut().enumerate() {
             *word = u32::from_le_bytes(chunk[index * 4..index * 4 + 4].try_into().unwrap());

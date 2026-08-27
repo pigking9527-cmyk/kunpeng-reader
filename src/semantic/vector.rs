@@ -816,8 +816,10 @@ fn decode_vector_bytes(metadata: &Metadata, bytes: &[u8]) -> Option<Vec<f32>> {
     }
     Some(
         bytes
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect(),
     )
 }
@@ -961,8 +963,10 @@ pub(super) fn visit_entries_range(
         let mut values = Vec::with_capacity(metadata.dim);
         values.extend(
             vector
-                .chunks_exact(4)
-                .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_le_bytes(*chunk)),
         );
         visit(chunk.c, &chunk.t, &values);
     }
