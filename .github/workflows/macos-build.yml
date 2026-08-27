@@ -69,7 +69,7 @@ jobs:
         run: npm exec -- tauri --version
 
       - name: Import Developer ID signing certificate
-        if: ${{ inputs.publish_release }}
+        if: ${{ inputs.publish_release && !inputs.allow_unsigned_prerelease }}
         shell: bash
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
