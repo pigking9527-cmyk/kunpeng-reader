@@ -156,7 +156,7 @@ jobs:
           file "$out_dir/$appimage_name" "$out_dir/$deb_name"
           dpkg-deb --info "$out_dir/$deb_name"
           dpkg-deb --contents "$out_dir/$deb_name" | tee target/linux-deb-contents.txt
-          grep -Eq '[[:space:]]\./usr/bin/ebook-reader-tauri$' target/linux-deb-contents.txt
+          grep -Eq '[[:space:]]\.?/?usr/bin/ebook-reader-tauri$' target/linux-deb-contents.txt
 
           appimage_extract="$(mktemp -d)"
           (cd "$appimage_extract" && "$GITHUB_WORKSPACE/$out_dir/$appimage_name" --appimage-extract >/dev/null)
