@@ -8,12 +8,15 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $allowed = @(
   'Cargo.toml',
+  'Cargo.lock',
   'tauri.conf.json',
   'tauri.linux.conf.json',
   'README.md',
   'README.en.md',
   'CHANGELOG.md',
   'docs/release/1.1.0-beta.3.md',
+  'docs/release/1.1.0-beta.4.md',
+  'docs/coordination/ACTIVE_WORK.md',
   '更新.md',
   '开发记录.md',
   '开发文档.md',
@@ -23,6 +26,7 @@ $allowed = @(
   '.github/workflows/linux-build.yml',
   'scripts/stage-release.ps1',
   'src/newsnow.rs',
+  'src/update.rs',
   'src/pdf_support.rs',
   'src/semantic/profile.rs',
   'src/semantic/vector.rs',

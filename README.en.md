@@ -7,9 +7,9 @@ A high-performance local ebook reader for Windows, macOS, and Linux. The desktop
 > **License notice:** this repository is **source-available**. The code is public only for learning, evaluation, and communication. Copying, modifying, distributing, commercial use, or publishing derivative versions requires the author's written permission. See [LICENSE](LICENSE).
 > See [licensing scope](docs/legal/licensing-scope.md) and [third-party notices](THIRD_PARTY_NOTICES.md) for first-party and bundled-material boundaries. Historical GPL remediation, asset disposition, and review are complete; every public test package must still pass the distribution license and IP checks.
 
-> The current desktop candidate is **Beta 1.1 revision** (technical version `1.1.0-beta.3`). Repository: [github.com/pigking9527-cmyk/kunpeng-reader](https://github.com/pigking9527-cmyk/kunpeng-reader). This is an early development test package; the macOS build is ad-hoc signed and not notarized.
+> The current desktop candidate is **Beta 1.1 revision** (technical version `1.1.0-beta.4`). Repository: [github.com/pigking9527-cmyk/kunpeng-reader](https://github.com/pigking9527-cmyk/kunpeng-reader). This is an early development test package; the macOS build is ad-hoc signed and not notarized.
 
-See the [Beta 1.1 revision notes](docs/release/1.1.0-beta.3.md) and the [desktop artifact verification requirements](docs/release/desktop-artifact-verification.md) for the candidate scope, retirement of the broken packages, and release checks.
+See the [Beta 1.1 revision notes](docs/release/1.1.0-beta.4.md) and the [desktop artifact verification requirements](docs/release/desktop-artifact-verification.md) for the candidate scope, retirement of the broken packages, and release checks.
 
 ## Features
 

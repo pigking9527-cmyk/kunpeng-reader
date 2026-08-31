@@ -13,7 +13,7 @@
 ## 当前占用
 
 | 会话/分支 | 任务 | 占用范围 | 状态 | 备注 |
-| /root | P0 Beta 1.1 修正版打包与公开测试发布 | `Cargo.toml`、`tauri.conf.json`、`.github/workflows/{windows,macos,linux}-build.yml`、许可证门禁、发布说明、完整 macOS 构建与本表 | 进行中，未提交 | `1.1.0-beta.2` 的 Linux CI 因缓存恢复覆盖许可证清单而安全失败，未上传资产；已改为 `1.1.0-beta.3`，缓存恢复后再生成许可证清单。仓库所有者已于 2026-08-31 确认许可证整改与复核完成，授权发布临时签名、未公证的早期测试包。 |
+| /root | P0 Beta 1.1 修正版打包与公开测试发布 | `Cargo.toml`、`tauri.conf.json`、`.github/workflows/{windows,macos,linux}-build.yml`、许可证门禁、发布说明、完整 macOS 构建与本表 | 进行中，未提交 | `1.1.0-beta.3` 的 Linux CI 在发布前的离线更新说明断言处安全失败，未上传 Linux 资产；已改为 `1.1.0-beta.4`，补齐 GitHub 发布说明并重跑三平台构建。仓库所有者已于 2026-08-31 确认许可证整改与复核完成，授权发布临时签名、未公证的早期测试包。 |
 | /root | P0 macOS 相邻章预取前台让路 | `apps/desktop-ui/src/legacy-ts/reader-page-modules/{reader-page-layout-annotations.ts,reader-page-layout-annotations.test.mts}`、`ui/tests/reader-page-modules.test.cjs`、必要生成物与完整前端/macOS 构建、本表 | 已完成，未提交 | 最新脱敏记录确认正文预取也会在连续翻页中解析大章节（章末点击 336 ms、跨章 480 ms）。现已撤除全部自动相邻章预取，令跨章正文仅在实际跨章时读取，避免连续翻页抢占主线程；typed 430 项、legacy UI 430 项、类型检查、ESLint、完整前端构建、macOS 覆盖安装及签名校验通过，等待用户实测。 |
 | /root | P0 macOS 相邻章离屏 DOM 预热 | `apps/desktop-ui/src/legacy-ts/reader-page-modules/{reader-page-layout-annotations.ts,reader-page-layout-annotations.test.mts}`、`ui/tests/reader-toolbar.test.cjs`、必要生成物与完整前端/macOS 构建、本表 | 已完成，未提交 | 最新记录显示跨章读取和后续几何已很小，残余为新章接入页面树的 50–134 ms；现预取相邻章时离屏解析并短期缓存，跨章优先接管缓存节点，未命中才降级同步解析。typed 412 项、legacy UI 430 项、类型检查、Lint、完整前端构建、macOS 覆盖安装及签名校验通过；等待用户实测。 |
 | /root | P0 macOS 跨章遮罩冗余稳定帧移除 | `apps/desktop-ui/src/legacy-ts/reader-page-modules/reader-page-transition.ts`、`ui/tests/reader-toolbar.test.cjs`、必要生成物与完整前端/macOS 构建、本表 | 已完成，未提交 | 离屏解析后长章已降至约 234 ms；`showChapter` 已完成内部两帧稳定显示，但外层旧页遮罩仍额外等两帧，现已移除这一重复等待以缩短用户可见延迟且保持防切字保障。typed 412 项、legacy UI 430 项、类型检查、Lint、完整前端构建、macOS 覆盖安装及签名校验通过；等待用户实测。 |
