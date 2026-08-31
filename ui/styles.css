@@ -1843,7 +1843,7 @@ body.anim-booklist-sort-off .booklist-row {
   font-size: 13px;
   color: #485568;
   line-height: 1.65;
-  max-height: 180px;
+  max-height: 240px;
   overflow-y: auto;
   background: #f7f9fc;
   border: 1px solid #e5ebf3;
@@ -1935,7 +1935,7 @@ body.theme-dark .release-notes-markdown hr {
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 10px;
-  margin: 14px 18px 0;
+  margin: 12px 18px 10px;
   padding: 11px 12px;
   border: 1px solid #e3e8f0;
   border-radius: 10px;
@@ -1963,7 +1963,7 @@ body.theme-dark .release-notes-markdown hr {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding: 14px 18px 18px;
+  padding: 14px 18px 10px;
 }
 .feedback-card {
   width: min(680px, calc(100vw - 48px));
@@ -8922,15 +8922,10 @@ html.platform-macos .avatar-btn.active {
   padding: 20px;
 }
 .intelligence-main-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 18px;
   padding-bottom: 15px;
   border-bottom: 1px solid #e6e9f0;
 }
 .intelligence-main-head h2 { margin-bottom: 0; }
-.intelligence-main-head p { max-width: 176px; text-align: right; }
 .intelligence-digest-list {
   display: grid;
   gap: 9px;
@@ -9026,6 +9021,94 @@ html.platform-macos .avatar-btn.active {
   width: 100%;
   margin-top: 16px;
 }
+.intelligence-source-directory {
+  min-height: 480px;
+  padding: 24px;
+  border: 1px solid rgba(208, 216, 231, 0.92);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 16px 36px rgba(43, 55, 84, 0.07);
+}
+.intelligence-source-directory-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e6e9f0;
+}
+.intelligence-source-directory-head h2 {
+  margin: 6px 0 8px;
+  color: #293750;
+  font-size: 20px;
+}
+.intelligence-source-directory-head p,
+.intelligence-source-directory-summary,
+.intelligence-source-directory-empty {
+  margin: 0;
+  color: #718098;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.intelligence-source-directory-head p { max-width: 600px; }
+.intelligence-source-directory-summary {
+  margin-top: 14px;
+  color: #52627b;
+  font-weight: 650;
+}
+.intelligence-source-directory-search-label {
+  display: block;
+  margin-top: 18px;
+  color: #52627b;
+  font-size: 12px;
+  font-weight: 700;
+}
+.intelligence-source-directory-search {
+  width: min(460px, 100%);
+  margin-top: 7px;
+  padding: 9px 11px;
+  border: 1px solid #d8e0ec;
+  border-radius: 9px;
+  color: #30405a;
+  background: #fbfcff;
+  font: inherit;
+  font-size: 13px;
+}
+.intelligence-source-directory-search:focus {
+  outline: 2px solid rgba(109, 82, 188, 0.24);
+  border-color: #a994df;
+}
+.intelligence-source-directory-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+.intelligence-source-directory-item,
+.intelligence-source-directory-empty {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e0e5ee;
+  border-radius: 11px;
+  background: rgba(249, 251, 255, 0.86);
+}
+.intelligence-source-directory-item strong,
+.intelligence-source-directory-item span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.intelligence-source-directory-item strong {
+  color: #35425b;
+  font-size: 13px;
+}
+.intelligence-source-directory-item span {
+  margin-top: 4px;
+  color: #77859a;
+  font-size: 11px;
+}
+.intelligence-source-directory-empty { grid-column: 1 / -1; border-style: dashed; }
 .intelligence-workspace-page[data-layout="monitor"] .intelligence-workspace-grid {
   grid-template-columns: minmax(250px, 1.05fr) minmax(330px, 1.25fr) minmax(230px, 0.72fr);
 }
@@ -9089,6 +9172,7 @@ html.platform-macos .avatar-btn.active {
 .interstellar-panel > p,
 .interstellar-pillar-card p,
 .interstellar-signals-disclaimer,
+.interstellar-source-note,
 .interstellar-candidate-detail p {
   color: #6e7d95;
   font-size: 12px;
@@ -9126,7 +9210,7 @@ html.platform-macos .avatar-btn.active {
   border-radius: 50%;
   background:
     radial-gradient(circle at center, #f7f9fd 58%, transparent 59%),
-    conic-gradient(#6f63c7 0 17%, rgba(119, 132, 164, 0.14) 17% 100%);
+    conic-gradient(#6f63c7 0 8%, rgba(119, 132, 164, 0.14) 8% 100%);
   box-shadow: inset 0 0 0 1px rgba(90, 99, 151, 0.08), 0 13px 27px rgba(76, 73, 141, 0.12);
 }
 .interstellar-total-ring strong,
@@ -9327,6 +9411,66 @@ html.platform-macos .avatar-btn.active {
 .interstellar-rule-panel {
   background: linear-gradient(155deg, rgba(252, 251, 255, 0.96), rgba(243, 240, 252, 0.84));
 }
+.interstellar-source-panel {
+  background: linear-gradient(145deg, rgba(251, 252, 255, 0.95), rgba(245, 243, 253, 0.85));
+}
+.interstellar-source-panel .btn-secondary {
+  flex: 0 0 auto;
+}
+.interstellar-source-summary {
+  margin: 10px 0 3px;
+  color: #43516b;
+  font-size: 13px;
+  font-weight: 720;
+}
+.interstellar-source-note {
+  margin: 0;
+}
+.interstellar-source-groups {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 14px;
+}
+.interstellar-source-group,
+.interstellar-source-empty {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #e0e3ee;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+.interstellar-source-group strong,
+.interstellar-source-group span,
+.interstellar-source-group small {
+  display: block;
+}
+.interstellar-source-group strong {
+  color: #4d4781;
+  font-size: 11px;
+}
+.interstellar-source-group span,
+.interstellar-source-group small,
+.interstellar-source-empty {
+  color: #718098;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.interstellar-source-group span {
+  min-height: 30px;
+  margin-top: 4px;
+}
+.interstellar-source-group small {
+  overflow: hidden;
+  color: #58677e;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.interstellar-source-empty {
+  grid-column: 1 / -1;
+  border-style: dashed;
+  text-align: center;
+}
 .interstellar-signals-panel {
   min-height: 220px;
 }
@@ -9451,6 +9595,12 @@ html.platform-macos .avatar-btn.active {
   .interstellar-signal-layout {
     grid-template-columns: minmax(0, 1fr);
   }
+  .interstellar-source-groups {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .intelligence-source-directory-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .interstellar-side-stack {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -9496,6 +9646,10 @@ html.platform-macos .avatar-btn.active {
     display: inline-block;
     margin-top: 8px;
   }
+  .intelligence-source-directory { padding: 18px 14px; }
+  .intelligence-source-directory-head { display: block; }
+  .intelligence-source-directory-head .btn-plain { margin-top: 12px; }
+  .intelligence-source-directory-list { grid-template-columns: 1fr; }
 }
 .newsnow-page {
   position: relative;

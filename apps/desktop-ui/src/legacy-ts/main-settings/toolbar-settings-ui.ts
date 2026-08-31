@@ -11,6 +11,7 @@ export const TOOLBAR_ITEM_IDS = Object.freeze([
   "stats",
   "library",
   "news",
+  "intelligence-lab",
   "filter",
   "settings",
   "menu",
@@ -123,6 +124,7 @@ const ITEM_COPY: Readonly<Record<ToolbarItemId, readonly [string, string]>> =
     stats: ["阅读统计", "打开阅读数据统计"],
     library: ["书库问答", "在全书库中提问"],
     news: ["资讯", "启用资讯功能后显示"],
+    "intelligence-lab": ["情报中心", "打开情报中心测试"],
     filter: ["筛选与布局", "排序、过滤和书架布局"],
     settings: ["设置", "始终显示，不能隐藏"],
     menu: ["更多菜单", "导入、笔记和关于等功能"],
@@ -134,6 +136,7 @@ const BUTTON_IDS: Readonly<Record<ToolbarItemId, string>> = Object.freeze({
   stats: "stats-toolbar-btn",
   library: "library-ai-toolbar-btn",
   news: "newsnow-toolbar-btn",
+  "intelligence-lab": "intelligence-lab-toolbar-btn",
   filter: "filter-btn",
   settings: "settings-toolbar-btn",
   menu: "menu-btn",
@@ -174,6 +177,7 @@ function normalizeOrder(value: unknown): ToolbarItemId[] {
           isToolbarItemId(id) && !seen.has(id) && Boolean(seen.add(id)),
       )
     : [];
+  const hadIntelligenceLab = seen.has("intelligence-lab");
   if (!seen.has("account")) {
     ordered.unshift("account");
     seen.add("account");
@@ -181,6 +185,14 @@ function normalizeOrder(value: unknown): ToolbarItemId[] {
   TOOLBAR_ITEM_IDS.forEach((id) => {
     if (!seen.has(id)) ordered.push(id);
   });
+  if (!hadIntelligenceLab) {
+    const currentIndex = ordered.indexOf("intelligence-lab");
+    const newsIndex = ordered.indexOf("news");
+    if (currentIndex >= 0 && newsIndex >= 0 && currentIndex !== newsIndex + 1) {
+      ordered.splice(currentIndex, 1);
+      ordered.splice(ordered.indexOf("news") + 1, 0, "intelligence-lab");
+    }
+  }
   return ordered;
 }
 

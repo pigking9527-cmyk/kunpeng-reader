@@ -14,13 +14,13 @@ const repositoryRoot = new URL("../../../../../", import.meta.url);
 function classicSource(): string {
   try {
     return readFileSync(
-      new URL("ui/book-classification-settings-ui.js", repositoryRoot),
+      new URL("ui/generated-ts/book-classification-settings-ui.js", repositoryRoot),
       "utf8",
     );
   } catch {
     return execFileSync(
       "git",
-      ["show", "HEAD:ui/book-classification-settings-ui.js"],
+      ["show", "HEAD:ui/generated-ts/book-classification-settings-ui.js"],
       { cwd: repositoryRoot, encoding: "utf8" },
     );
   }

@@ -15,12 +15,19 @@ const repositoryRoot = new URL("../../../../../", import.meta.url);
 
 function classicSource(): string {
   try {
-    return readFileSync(new URL("ui/book-info-organization.js", repositoryRoot), "utf8");
+    return readFileSync(
+      new URL("ui/generated-ts/book-info-organization.js", repositoryRoot),
+      "utf8",
+    );
   } catch {
-    return execFileSync("git", ["show", "HEAD:ui/book-info-organization.js"], {
+    return execFileSync(
+      "git",
+      ["show", "HEAD:ui/generated-ts/book-info-organization.js"],
+      {
       cwd: repositoryRoot,
       encoding: "utf8",
-    });
+      },
+    );
   }
 }
 

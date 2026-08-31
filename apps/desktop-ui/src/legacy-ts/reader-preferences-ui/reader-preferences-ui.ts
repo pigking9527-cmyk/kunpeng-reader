@@ -71,6 +71,7 @@ interface ReaderPreferenceColorRulesApi {
   normalizedHex(value: unknown, fallback?: string): string;
   hexToHsl(value: unknown): { readonly h: number; readonly s: number; readonly l: number };
   hslToHex(hue: unknown, saturation: unknown, lightness: unknown): string;
+  contrastRatio(foreground: unknown, background: unknown): number;
 }
 
 interface ReaderPreferencesRuntime extends Window {
@@ -166,7 +167,8 @@ function colorRulesFrom(value: unknown): ReaderPreferenceColorRulesApi | null {
   return candidate &&
     typeof candidate.normalizedHex === "function" &&
     typeof candidate.hexToHsl === "function" &&
-    typeof candidate.hslToHex === "function"
+    typeof candidate.hslToHex === "function" &&
+    typeof candidate.contrastRatio === "function"
     ? candidate as unknown as ReaderPreferenceColorRulesApi
     : null;
 }
@@ -230,6 +232,7 @@ export function installReaderPreferencesUi(
   let autoPreviewThemeId = "";
   let preferencesOutsidePointerDown = false;
   let activeColorControl: HTMLElement | null = null;
+  let colorSpectrumPointer: number | null = null;
   let preferencesScrollDrag: ScrollPointerDrag | null = null;
   let jumpBackPreviewDrag: number | null = null;
   let toolbarPointerDrag: ToolbarPointerDrag | null = null;
@@ -292,6 +295,25 @@ export function installReaderPreferencesUi(
     const [red, green, blue] = h < 60 ? [chroma, x, 0] : h < 120 ? [x, chroma, 0] : h < 180 ? [0, chroma, x] : h < 240 ? [0, x, chroma] : h < 300 ? [x, 0, chroma] : [chroma, 0, x];
     const channel = (value: number): string => Math.round((value + m) * 255).toString(16).padStart(2, "0");
     return `#${channel(red)}${channel(green)}${channel(blue)}`;
+  }
+
+  function contrastRatio(foreground: unknown, background: unknown): number {
+    if (colorRules) return colorRules.contrastRatio(foreground, background);
+    const luminance = (value: unknown): number => {
+      const hex = normalizedHex(value).slice(1);
+      const channel = (offset: number): number => {
+        const encoded = parseInt(hex.slice(offset, offset + 2), 16) / 255;
+        return encoded <= 0.04045
+          ? encoded / 12.92
+          : ((encoded + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+    };
+    const foregroundLuminance = luminance(foreground);
+    const backgroundLuminance = luminance(background);
+    const lighter = Math.max(foregroundLuminance, backgroundLuminance);
+    const darker = Math.min(foregroundLuminance, backgroundLuminance);
+    return (lighter + 0.05) / (darker + 0.05);
   }
 
   const DEFAULT_DUAL_PAGE_GAP = 40;
@@ -999,11 +1021,18 @@ export function installReaderPreferencesUi(
     updateAppearance(palettePatch(theme));
   }
 
-  function colorControlValue(control: HTMLElement | null | undefined, settings = read()): string {
+  function settingColor(settingKey: string, settings = read()): string {
     const palette: ReaderPalette = paletteForSettings(settings) ?? builtinPalettes[0]!;
-    const settingKey = control?.dataset.prefColor ?? "";
     const paletteKey = colorMap[settingKey as keyof typeof colorMap] as keyof ReaderPalette | undefined;
-    return normalizedHex(control?.dataset.colorValue || settings[settingKey] || (paletteKey ? (palette as ReaderPalette)[paletteKey] : undefined));
+    const settingValue = settingKey === "customBackgroundColor" && settings.backgroundPreset !== "custom"
+      ? undefined
+      : settings[settingKey];
+    return normalizedHex(settingValue || (paletteKey ? palette[paletteKey] : undefined));
+  }
+
+  function colorControlValue(control: HTMLElement | null | undefined, settings = read()): string {
+    const settingKey = control?.dataset.prefColor ?? "";
+    return normalizedHex(control?.dataset.colorValue || settingColor(settingKey, settings));
   }
 
   function paintColorControl(control: HTMLElement | null | undefined, value: unknown): void {
@@ -1014,16 +1043,85 @@ export function installReaderPreferencesUi(
     control.setAttribute("aria-valuetext", color.toUpperCase());
   }
 
-  function paintColorPreset(button: HTMLElement | null | undefined): void {
-    if (!button) return;
-    const color = normalizedHex(button.dataset.prefColorSwatch);
-    button.style.setProperty("--color", color);
-    button.style.setProperty("background", color, "important");
-    button.setAttribute("aria-label", color.toUpperCase());
+  function effectiveColor(settingKey: keyof typeof colorMap): string {
+    const control = modalElement.querySelector<HTMLElement>(`[data-pref-color="${settingKey}"]`);
+    return colorControlValue(control);
+  }
+
+  function activeColorContrastPair(selectedColor: string): { foreground: string; background: string } {
+    const settingKey = activeColorControl?.dataset.prefColor;
+    const background = effectiveColor("customBackgroundColor");
+    const text = effectiveColor("textColor");
+    if (settingKey === "customBackgroundColor") return { foreground: text, background: selectedColor };
+    if (settingKey === "textColor" || settingKey === "linkColor") return { foreground: selectedColor, background };
+    if (settingKey === "selectionColor" || settingKey === "footnoteBackground") return { foreground: text, background: selectedColor };
+    if (settingKey === "footnoteBorder") return { foreground: selectedColor, background: effectiveColor("footnoteBackground") };
+    return { foreground: selectedColor, background };
+  }
+
+  function renderColorContrast(selectedColor: string): void {
+    if (!activeColorControl) return;
+    const contrast = document.getElementById("reader-color-contrast");
+    const value = document.getElementById("reader-color-contrast-value");
+    const level = document.getElementById("reader-color-contrast-level");
+    const preview = document.getElementById("reader-color-contrast-preview");
+    if (!contrast || !value || !level) return;
+    const pair = activeColorContrastPair(selectedColor);
+    const ratio = contrastRatio(pair.foreground, pair.background);
+    const ratioText = `${ratio.toFixed(1)}:1`;
+    const tone = ratio >= 7 ? "clear" : ratio >= 4.5 ? "readable" : "low";
+    const levelText = tone === "clear"
+      ? readerPreferenceT("colorContrastClear", "清晰")
+      : tone === "readable"
+        ? readerPreferenceT("colorContrastReadable", "可读")
+        : readerPreferenceT("colorContrastLow", "偏低");
+    contrast.dataset.level = tone;
+    value.textContent = ratioText;
+    level.textContent = levelText;
+    contrast.setAttribute("aria-label", `${readerPreferenceT("colorContrast", "对比度")} ${ratioText} · ${levelText}`);
+    if (preview) {
+      preview.style.color = pair.foreground;
+      preview.style.background = pair.background;
+    }
+  }
+
+  function renderColorEditor(color: string): void {
+    const hexInput = document.getElementById("reader-color-hex") as HTMLInputElement | null;
+    const hue = document.getElementById("reader-color-hue") as HTMLInputElement | null;
+    const saturation = document.getElementById("reader-color-saturation") as HTMLInputElement | null;
+    const lightness = document.getElementById("reader-color-lightness") as HTMLInputElement | null;
+    const spectrum = document.getElementById("reader-color-spectrum");
+    const hsl = hexToHsl(color);
+    if (hexInput) hexInput.value = color.toUpperCase();
+    if (hue) {
+      hue.value = String(hsl.h);
+      hue.style.background = "linear-gradient(to right,#f33,#ff0,#0f0,#0ff,#36f,#f0f,#f33)";
+    }
+    if (saturation) {
+      saturation.value = String(hsl.s);
+      saturation.style.background = `linear-gradient(to right,hsl(${hsl.h} 0% ${hsl.l}%),hsl(${hsl.h} 100% ${hsl.l}%))`;
+    }
+    if (lightness) {
+      lightness.value = String(hsl.l);
+      lightness.style.background = `linear-gradient(to right,#000,hsl(${hsl.h} ${hsl.s}% 50%),#fff)`;
+    }
+    if (spectrum) {
+      spectrum.style.background = "linear-gradient(to bottom,#fff 0%,rgba(255,255,255,0) 50%,#000 100%),linear-gradient(to right,#f00 0%,#ff0 16.67%,#0f0 33.33%,#0ff 50%,#00f 66.67%,#f0f 83.33%,#f00 100%)";
+      spectrum.style.setProperty("--reader-spectrum-x", `${hsl.h / 3.6}%`);
+      spectrum.style.setProperty("--reader-spectrum-y", `${100 - hsl.l}%`);
+      spectrum.style.setProperty("--reader-spectrum-color", color);
+      spectrum.setAttribute(
+        "aria-label",
+        `${readerPreferenceT("fullColorSpectrum", "完整色谱")} · ${readerPreferenceT("colorHue", "色相")} ${hsl.h}° · ${readerPreferenceT("colorLightness", "明度")} ${hsl.l}%`,
+      );
+    }
+    renderColorContrast(color);
   }
 
   function closeColorPopover() {
+    activeColorControl?.setAttribute("aria-expanded", "false");
     activeColorControl = null;
+    colorSpectrumPointer = null;
     const popover = document.getElementById("reader-color-popover");
     if (popover) popover.hidden = true;
   }
@@ -1032,40 +1130,37 @@ export function installReaderPreferencesUi(
     if (!activeColorControl) return;
     const color = normalizedHex(value, colorControlValue(activeColorControl));
     paintColorControl(activeColorControl, color);
-    const hexInput = document.getElementById("reader-color-hex") as HTMLInputElement | null;
-    const hue = document.getElementById("reader-color-hue") as HTMLInputElement | null;
-    const saturation = document.getElementById("reader-color-saturation") as HTMLInputElement | null;
-    const lightness = document.getElementById("reader-color-lightness") as HTMLInputElement | null;
-    const hsl = hexToHsl(color);
-    if (hexInput) hexInput.value = color.toUpperCase();
-    if (hue) hue.value = String(hsl.h);
-    if (saturation) saturation.value = String(hsl.s);
-    if (lightness) lightness.value = String(hsl.l);
     const settingKey = activeColorControl.dataset.prefColor;
     if (settingKey) updateAutomaticPreviewTheme({ [settingKey]: color });
+    renderColorEditor(color);
   }
 
   function openColorPopover(control: HTMLElement): void {
     const popover = document.getElementById("reader-color-popover");
     if (!popover) return;
+    if (activeColorControl && activeColorControl !== control) {
+      activeColorControl.setAttribute("aria-expanded", "false");
+    }
     activeColorControl = control;
+    control.setAttribute("aria-expanded", "true");
     const value = colorControlValue(control);
     paintColorControl(control, value);
     popover.hidden = false;
+    renderColorEditor(value);
     const rect = control.getBoundingClientRect();
     const maxLeft = Math.max(12, window.innerWidth - popover.offsetWidth - 12);
     const maxTop = Math.max(12, window.innerHeight - popover.offsetHeight - 12);
     popover.style.left = `${Math.max(12, Math.min(maxLeft, rect.right - popover.offsetWidth))}px`;
     popover.style.top = `${Math.max(12, Math.min(maxTop, rect.bottom + 8))}px`;
-    const hsl = hexToHsl(value);
-    const hexInput = document.getElementById("reader-color-hex") as HTMLInputElement | null;
-    const hue = document.getElementById("reader-color-hue") as HTMLInputElement | null;
-    const saturation = document.getElementById("reader-color-saturation") as HTMLInputElement | null;
-    const lightness = document.getElementById("reader-color-lightness") as HTMLInputElement | null;
-    if (hexInput) hexInput.value = value.toUpperCase();
-    if (hue) hue.value = String(hsl.h);
-    if (saturation) saturation.value = String(hsl.s);
-    if (lightness) lightness.value = String(hsl.l);
+  }
+
+  function setColorFromSpectrumPoint(clientX: number, clientY: number): void {
+    const spectrum = document.getElementById("reader-color-spectrum");
+    if (!spectrum) return;
+    const rect = spectrum.getBoundingClientRect();
+    const hue = Math.max(0, Math.min(359, Math.round((clientX - rect.left) / Math.max(1, rect.width) * 359)));
+    const lightness = Math.max(0, Math.min(100, Math.round((rect.bottom - clientY) / Math.max(1, rect.height) * 100)));
+    setActiveColor(hslToHex(hue, 100, lightness));
   }
 
 
@@ -1189,12 +1284,11 @@ export function installReaderPreferencesUi(
     });
     const bookScope = modalElement.querySelector<HTMLButtonElement>('[data-pref-scope="book"]');
     if (bookScope) bookScope.disabled = !global.currentBookId;
-    const palette: ReaderPalette = paletteForSettings(settings) ?? builtinPalettes[0]!;
     modalElement.querySelectorAll<HTMLElement>("[data-pref-color]").forEach((control) => {
       const settingKey = control.dataset.prefColor ?? "";
-      const paletteKey = colorMap[settingKey as keyof typeof colorMap] as keyof ReaderPalette | undefined;
-      paintColorControl(control, settings[settingKey] || (paletteKey ? palette[paletteKey] : undefined));
+      paintColorControl(control, settingColor(settingKey, settings));
     });
+    if (activeColorControl) renderColorEditor(colorControlValue(activeColorControl, settings));
     const imageName = modalElement.querySelector("#pref-background-image-name");
     if (imageName) imageName.textContent = settings.customBackgroundImage ? readerPreferenceT("backgroundImported", "已导入图片背景") : "";
     const clearBook = modalElement.querySelector<HTMLElement>("#pref-clear-book-appearance");
@@ -1309,7 +1403,10 @@ export function installReaderPreferencesUi(
   preferencesScrollThumb?.addEventListener("pointerup", finishPreferencesScrollDrag);
   preferencesScrollThumb?.addEventListener("pointercancel", finishPreferencesScrollDrag);
   global.addEventListener("resize", updatePreferencesScrollbar);
-  global.addEventListener("reader-language-changed", applyPreferenceNavState);
+  global.addEventListener("reader-language-changed", () => {
+    applyPreferenceNavState();
+    if (activeColorControl) renderColorEditor(colorControlValue(activeColorControl));
+  });
   if (typeof ResizeObserver === "function" && preferencesContent) new ResizeObserver(updatePreferencesScrollbar).observe(preferencesContent);
   modalElement.querySelectorAll<HTMLElement>("[data-pref-section]").forEach((button) => button.addEventListener("click", () => setSection(button.dataset.prefSection)));
   modalElement.querySelectorAll<HTMLButtonElement>("[data-pref-scope]").forEach((button) => button.addEventListener("click", () => { if (!button.disabled) { scope = button.dataset.prefScope ?? "default"; render(); } }));
@@ -1320,14 +1417,47 @@ export function installReaderPreferencesUi(
     if (activeColorControl === control && colorPopover && !colorPopover.hidden) closeColorPopover();
     else openColorPopover(control);
   }));
-  colorPopover?.querySelectorAll<HTMLElement>("[data-pref-color-swatch]").forEach((button) => {
-    paintColorPreset(button);
-    button.addEventListener("click", () => setActiveColor(button.dataset.prefColorSwatch));
-  });
   const colorHue = document.getElementById("reader-color-hue") as HTMLInputElement | null;
   const colorSaturation = document.getElementById("reader-color-saturation") as HTMLInputElement | null;
   const colorLightness = document.getElementById("reader-color-lightness") as HTMLInputElement | null;
   [colorHue, colorSaturation, colorLightness].forEach((input) => input?.addEventListener("input", () => setActiveColor(hslToHex(colorHue?.value, colorSaturation?.value, colorLightness?.value))));
+  const colorSpectrum = document.getElementById("reader-color-spectrum");
+  colorSpectrum?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    colorSpectrumPointer = event.pointerId;
+    try { colorSpectrum.setPointerCapture(event.pointerId); } catch {}
+    setColorFromSpectrumPoint(event.clientX, event.clientY);
+  });
+  colorSpectrum?.addEventListener("pointermove", (event) => {
+    if (colorSpectrumPointer !== event.pointerId) return;
+    event.preventDefault();
+    setColorFromSpectrumPoint(event.clientX, event.clientY);
+  });
+  const finishColorSpectrumPointer = (event: PointerEvent): void => {
+    if (colorSpectrumPointer !== event.pointerId) return;
+    colorSpectrumPointer = null;
+    try { colorSpectrum?.releasePointerCapture(event.pointerId); } catch {}
+  };
+  colorSpectrum?.addEventListener("pointerup", finishColorSpectrumPointer);
+  colorSpectrum?.addEventListener("pointercancel", finishColorSpectrumPointer);
+  colorSpectrum?.addEventListener("keydown", (event) => {
+    if (!activeColorControl || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    const current = hexToHsl(colorControlValue(activeColorControl));
+    const step = event.shiftKey ? 10 : 1;
+    const hue = event.key === "ArrowLeft"
+      ? (current.h - step + 360) % 360
+      : event.key === "ArrowRight"
+        ? (current.h + step) % 360
+        : current.h;
+    const lightness = event.key === "ArrowUp"
+      ? Math.min(100, current.l + step)
+      : event.key === "ArrowDown"
+        ? Math.max(0, current.l - step)
+        : current.l;
+    setActiveColor(hslToHex(hue, 100, lightness));
+  });
   document.getElementById("reader-color-hex")?.addEventListener("change", (event) => setActiveColor((event.currentTarget as HTMLInputElement).value));
   document.addEventListener("pointerdown", (event) => {
     const targetNode = event.target as Node | null;

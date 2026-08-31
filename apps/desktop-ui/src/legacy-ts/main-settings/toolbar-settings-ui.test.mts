@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import test from "node:test";
-import vm from "node:vm";
 
 import type {
   TauriEvent,
@@ -12,8 +10,6 @@ import {
   normalizeToolbarSettings,
   type ToolbarSettingsGlobalApi,
 } from "./toolbar-settings-ui.ts";
-
-const repositoryRoot = new URL("../../../../../", import.meta.url);
 
 class FakeClassList {
   public readonly values = new Set<string>();
@@ -225,26 +221,15 @@ class FakeElement {
   public releasePointerCapture(): void {}
 }
 
-function classicSource(): string {
-  return execFileSync("git", ["show", "HEAD:ui/toolbar-settings-ui.js"], {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  });
-}
-
 function plain(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value)) as unknown;
 }
 
-test("frozen compatibility API and normalization remain classic-VM equivalent", () => {
+test("frozen compatibility API normalizes legacy toolbar settings", () => {
   const document = {
     getElementById: () => null,
     querySelector: () => null,
   };
-  const target: Record<string, unknown> = { document };
-  target.window = target;
-  vm.runInNewContext(classicSource(), target);
-  const classic = target.ReaderToolbarSettingsUI as ToolbarSettingsGlobalApi;
   const modern = installToolbarSettingsUi({
     document,
     requestAnimationFrame: () => 0,
@@ -270,13 +255,16 @@ test("frozen compatibility API and normalization remain classic-VM equivalent", 
       toolbarContentVisible: ["text"],
     },
   ];
+  const normalized = samples.map((sample) => plain(modern.normalize(sample)));
+  assert.deepEqual(normalized, samples.map((sample) => plain(normalizeToolbarSettings(sample))));
   assert.deepEqual(
-    samples.map((sample) => plain(modern.normalize(sample))),
-    samples.map((sample) => plain(classic.normalize(sample))),
+    normalizeToolbarSettings({
+      toolbarItemOrder: ["account", "search", "stats", "library", "news", "filter", "settings", "menu"],
+    }).toolbarItemOrder,
+    ["account", "search", "stats", "library", "news", "intelligence-lab", "filter", "settings", "menu"],
   );
-  assert.deepEqual(Object.keys(modern).sort(), Object.keys(classic).sort());
+  assert.deepEqual(Object.keys(modern).sort(), ["apply", "get", "init", "normalize"]);
   assert.equal(Object.isFrozen(modern), true);
-  assert.equal(Object.isFrozen(classic), true);
 });
 
 function fixture() {
@@ -298,6 +286,7 @@ function fixture() {
     "stats-toolbar-btn",
     "library-ai-toolbar-btn",
     "newsnow-toolbar-btn",
+    "intelligence-lab-toolbar-btn",
     "filter-btn",
     "settings-toolbar-btn",
     "menu-btn",
@@ -308,6 +297,7 @@ function fixture() {
     "stats",
     "library",
     "news",
+    "intelligence-lab",
     "filter",
     "settings",
     "menu",

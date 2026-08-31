@@ -53,7 +53,6 @@ export interface ReaderPageTransitionRuntime extends Record<string, unknown> {
   scrollCaptureTimer?: ReturnType<typeof setTimeout> | null;
   turnFxTimer?: ReturnType<typeof setTimeout> | null;
   turnFxSheet?: HTMLElement | null;
-  chapterBoundarySnapshots?: Map<string, HTMLElement>;
   chapterTurnPending?: boolean;
   chapterLoadFailed?: boolean;
   pendingChapterTurnDirection?: number;
@@ -82,7 +81,6 @@ export interface ReaderPageTransitionRuntime extends Record<string, unknown> {
   ensureTurnFxSheet?: () => HTMLElement | null;
   turnFxBg?: () => string;
   captureTurnFxPage?: (role?: string) => boolean;
-  cacheChapterBoundarySnapshot?: (chapter: number, boundary: "start" | "end", page: HTMLElement) => void;
   clearTurnFx?: () => void;
   waitForChapterPaint?: () => Promise<void>;
   beginTurnFx?: (direction: number, move: () => void) => void;
@@ -125,7 +123,6 @@ export interface ReaderPageTransitionApi {
   readonly ensureTurnFxSheet: NonNullable<ReaderPageTransitionRuntime["ensureTurnFxSheet"]>;
   readonly turnFxBg: NonNullable<ReaderPageTransitionRuntime["turnFxBg"]>;
   readonly captureTurnFxPage: NonNullable<ReaderPageTransitionRuntime["captureTurnFxPage"]>;
-  readonly cacheChapterBoundarySnapshot: NonNullable<ReaderPageTransitionRuntime["cacheChapterBoundarySnapshot"]>;
   readonly clearTurnFx: NonNullable<ReaderPageTransitionRuntime["clearTurnFx"]>;
   readonly waitForChapterPaint: NonNullable<ReaderPageTransitionRuntime["waitForChapterPaint"]>;
   readonly beginTurnFx: NonNullable<ReaderPageTransitionRuntime["beginTurnFx"]>;
@@ -160,14 +157,14 @@ export function installReaderPageTransition(
 ): ReaderPageTransitionApi {
   global.turnFxTimer = null;
   global.turnFxSheet = null;
-  global.chapterBoundarySnapshots = new Map<string, HTMLElement>();
   global.chapterTurnPending = false;
   global.pendingChapterTurnDirection = 0;
   global.scrollCaptureTimer = null;
   // macOS 兼容排版会在显示当前页时再做一次逐字精确测量，因此整章页表只需
-  // 提供稳定的粗边界。较短章节也走快速页表，避免跨章首开为几 KB 正文同步
-  // 扫描整章；其他平台继续沿用更保守的阈值。
-  global.FAST_CHAPTER_LAYOUT_CHARS = (global.IS_MAC_WEBKIT ? 4 : 120) * 1024;
+  // 提供稳定的粗边界。超过 1 KiB 的章节均可走快速页表，避免跨章首开时
+  // 同步逐字符扫描整章；实际显示仍由完整行虚拟页校验。其他平台继续沿用
+  // 更保守的阈值。
+  global.FAST_CHAPTER_LAYOUT_CHARS = (global.IS_MAC_WEBKIT ? 1 : 120) * 1024;
   global.fastChapterLayout = false;
   global.modeSwitchDiagSeq = 0;
   global.modeSwitchDiagUntil = 0;
@@ -293,60 +290,6 @@ export function installReaderPageTransition(
     return true;
   }
 
-  function chapterBoundarySnapshotKey(chapter: number, boundary: "start" | "end"): string {
-    const pager = global.pager;
-    return [
-      chapter, boundary,
-      global.window.innerWidth || 0, global.window.innerHeight || 0,
-      pager?.clientWidth || 0, pager?.clientHeight || 0,
-      JSON.stringify(settings()),
-    ].join("|");
-  }
-
-  function cacheChapterBoundarySnapshot(
-    chapter: number,
-    boundary: "start" | "end",
-    page: HTMLElement,
-  ): void {
-    const cache = global.chapterBoundarySnapshots;
-    if (!cache || !page) return;
-    const key = chapterBoundarySnapshotKey(chapter, boundary);
-    cache.delete(key);
-    cache.set(key, page.cloneNode(true) as HTMLElement);
-    while (cache.size > 4) {
-      const oldest = cache.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      cache.delete(oldest);
-    }
-  }
-
-  function rememberCurrentChapterBoundarySnapshot(): void {
-    const sheet = global.turnFxSheet;
-    const page = sheet?.lastElementChild as HTMLElement | null | undefined;
-    if (!page) return;
-    const chapter = numberValue(global.curCh);
-    const pageIndex = numberValue(global.pageInCh);
-    const pageCount = Math.max(1, numberValue(global.pagesInCh));
-    const boundaries: Array<"start" | "end"> = [];
-    if (pageIndex <= 0) boundaries.push("start");
-    if (pageIndex >= pageCount - 1) boundaries.push("end");
-    for (const boundary of boundaries) {
-      cacheChapterBoundarySnapshot(chapter, boundary, page);
-    }
-  }
-
-  function showCachedChapterBoundary(chapter: number, where: ChapterPosition): boolean {
-    const boundary = where === "start" ? "start" : where === "end" ? "end" : null;
-    const cache = global.chapterBoundarySnapshots;
-    if (!boundary || !cache) return false;
-    const cached = cache.get(chapterBoundarySnapshotKey(chapter, boundary));
-    const sheet = ensureTurnFxSheet();
-    if (!cached || !sheet) return false;
-    sheet.innerHTML = "";
-    sheet.appendChild(cached.cloneNode(true));
-    return true;
-  }
-
   function clearTurnFx(): void {
     if (global.turnFxTimer) {
       global.clearTimeout(global.turnFxTimer);
@@ -422,23 +365,18 @@ export function installReaderPageTransition(
     if (effect === "off") {
       clearTurnFx();
       const held = captureTurnFxPage("turn-fx-outgoing");
-      if (held) rememberCurrentChapterBoundarySnapshot();
-      // 相邻章节已经显示过时，先把其稳定边界快照立即放到遮挡层；真实章节
-      // 仍在下面按原流程获取、重排和逐字稳定，完成后再无缝撤下快照。
-      // 必须先给 WebKit 两帧提交快照，再启动会同步占用主线程的兼容分页。
-      // fetch 即使命中本地协议缓存，也可能在下一次绘制前继续执行 promise，
-      // 旧实现因此虽然命中了快照，用户仍会看着原页等待整章重排完成。
-      const cachedTarget = showCachedChapterBoundary(chapter, where);
-      if (held || cachedTarget) global.pager.classList.add("turn-fx", "turn-fx-hold");
-      const chapterReady = cachedTarget
-        ? waitForChapterPaint().then(() => showChapter(chapter, where))
-        : showChapter(chapter, where);
+      // 新章必须先完成完整精确分页，再撤下旧页遮挡。此前会把预取的章首
+      // 临时快照先显示出来，下一帧再重排为真实页；WebKit 下这会造成底部
+      // 切字、文字重叠短暂出现后又消失。保持上一页直到真实新页稳定即可。
+      if (held) global.pager.classList.add("turn-fx", "turn-fx-hold");
+      const chapterReady = showChapter(chapter, where);
       let succeeded = false;
       return chapterReady
-        .then(async (value) => {
+        .then((value) => {
           succeeded = !global.chapterLoadFailed;
           global.notifyReaderEndIfReached?.(direction);
-          if (held || cachedTarget) await waitForChapterPaint();
+          // showChapter 在 resolve 前已完成两帧稳定显示；再等待两帧只会让
+          // 旧页遮罩无意义地盖住已就绪的新章，且不会提升文字完整性。
           return value;
         })
         .finally(() => { clearTurnFx(); done(succeeded); });
@@ -625,7 +563,7 @@ export function installReaderPageTransition(
   const api: ReaderPageTransitionApi = Object.freeze({
     pageDebugSettingOn, userNav, reportReaderPaintPerf,
     turnFxName, turnFxSpeed, turnFxDuration, ensureTurnFxSheet, turnFxBg,
-    captureTurnFxPage, cacheChapterBoundarySnapshot, clearTurnFx, waitForChapterPaint, beginTurnFx, beginChapterTurnFx,
+    captureTurnFxPage, clearTurnFx, waitForChapterPaint, beginTurnFx, beginChapterTurnFx,
     queueChapterTurnInput,
     largeChapterFastLayout, scrollPort, viewRect,
     scrollGlyphSafePx, scrollBottomSafePx, scrollStartEpsilonPx, perfLog,

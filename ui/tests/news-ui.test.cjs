@@ -233,7 +233,12 @@ function newsFixture() {
       return 3;
     },
     addEventListener() {},
-    ReaderNewsGesture: { loadEnabled: () => false, load: () => [] },
+    ReaderNewsGesture: {
+      loadEnabled: () => false,
+      load: () => [],
+      loadPrecision: () => "5",
+      matchThreshold: () => 0.78,
+    },
     ReaderExperimentalFeatures: {
       enabled: (key) => key === "newsnow" || key === "newsnowHideReturnIcon",
     },
@@ -411,6 +416,18 @@ test("NewsNow keeps the local article reader surface in the original page", () =
   assert.match(html, /id="newsnow-reader-content"/);
   assert.match(html, /id="newsnow-reader-original"/);
   assert.doesNotMatch(html, /id="newsnow-reader-frame"/);
+});
+
+test("NewsNow keeps its return surface usable while external pages load", () => {
+  assert.match(backend, /const ARTICLE_LOADING_EVENT: &str = "newsnow-article-loading"/);
+  assert.match(backend, /const ARTICLE_READY_EVENT: &str = "newsnow-article-ready"/);
+  assert.match(backend, /\.on_page_load\(move \|webview, payload\|/);
+  assert.match(backend, /ArticleWebviewPhase::Loading[\s\S]*?webview\.show\(\)/);
+  assert.match(backend, /ArticleWebviewPhase::Ready[\s\S]*?webview\.show\(\)/);
+  assert.match(backend, /Duration::from_millis\(700\)/);
+  assert.match(script, /newsnow-article-loading/);
+  assert.match(script, /newsnow-article-ready/);
+  assert.match(script, /正在加载网页原文…可随时返回。/);
 });
 
 test("News original-page return icon can be hidden while gesture close remains available", () => {
@@ -714,6 +731,7 @@ test("classic NewsNow installer opens local articles and returns to the feed", a
       publishedAt: "2026-01-01T00:00:00Z",
       gestureEnabled: false,
       gesturePoints: [],
+      gestureThreshold: 0.78,
       hideReturnIcon: true,
     },
   );
@@ -967,7 +985,7 @@ test("Gesture settings live in common settings and close news, library, and read
   );
   assert.match(
     script,
-    /function gestureReopen\(\) \{[\s\S]*?currentArticleItem[\s\S]*?openArticle\(item\)[\s\S]*?loadSources\(\)\.then\(openSourcePicker\)/,
+    /function gestureReopen\(\) \{[\s\S]*?currentArticleItem[\s\S]*?openArticle\(item, \{ returnToIntelligence \}\)[\s\S]*?loadSources\(\)\.then\(openSourcePicker\)/,
   );
   assert.match(
     gestureUi,
@@ -1216,7 +1234,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(gestureUi, /hintSettings\.quickColors\.length < 6/);
   assert.match(
     gestureUi,
-    /hintPreview\.hidden = !hintSettings\.backgroundEnabled \|\| hintDrawingFrame/,
+    /hintPreview\.hidden = hintDrawingFrame/,
   );
   assert.match(gestureUi, /function updateHintFrame\(event\)/);
   assert.match(gestureUi, /function commitHintFrame\(\)/);
@@ -1342,7 +1360,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   assert.match(readerGesture, /if \(!settings\.enabled\) return;/);
   assert.match(gestureUi, /function cancelGestureKeepHint\(\)/);
   assert.match(gestureUi, /scope: normalizeScope\(action, source\.scope\)/);
-  assert.match(gestureUi, /手势会在所有页面参与匹配/);
+  assert.match(gestureUi, /自动适用会在该操作支持的页面执行/);
   assert.match(gestureUi, /function fallbackSurface\(target\)/);
   assert.match(
     gestureUi,
@@ -1410,7 +1428,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   );
   assert.match(
     gestureUi,
-    /pad\.addEventListener\("pointermove", movePointerTraining, \{ passive: false \}\)/,
+    /pad\.addEventListener\("pointermove", movePointerTraining, \{\s*passive: false\s*\}\)/,
   );
   assert.match(
     gestureUi,
@@ -1479,7 +1497,7 @@ test("Gesture feedback, reopen, and contextual information are integrated across
   );
   assert.match(
     readerGesture,
-    /const publicApi = \{ activate: startGestureRuntime, fromFrame, frameSurfaceClosed \};[\s\S]*?global\.ReaderGestureClose = publicApi/,
+    /const publicApi = \{\s*activate: startGestureRuntime,\s*fromFrame,\s*frameSurfaceClosed\s*\};[\s\S]*?global\.ReaderGestureClose = publicApi/,
   );
   assert.match(
     readerGesture,
@@ -1570,7 +1588,7 @@ test("NewsNow prefetches enabled sources and bounds visible image requests", () 
   assert.match(backend, /const MAX_REFRESH_CONCURRENCY: usize = 12/);
   assert.match(
     backend,
-    /fetch_source\(\s*&news_feed_agent\(\),\s*&base,\s*source,\s*force_refresh,\s*&tieba_bars,\s*\)/,
+    /fetch_selected_source\(\s*&news_feed_agent\(\),\s*&base,\s*&source,\s*force_refresh,\s*&tieba_bars,\s*\)/,
   );
   assert.match(backend, /remember_preview_attempt/);
   assert.match(script, /const enqueueWhenConnected = \(\) => \{/);

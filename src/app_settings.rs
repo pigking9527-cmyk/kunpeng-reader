@@ -557,7 +557,12 @@ mod tests {
                     "search".into(),
                     "not-a-toolbar-item".into(),
                 ]),
-                toolbar_hidden_items: Some(vec!["settings".into(), "stats".into(), "stats".into()]),
+                toolbar_hidden_items: Some(vec![
+                    "settings".into(),
+                    "stats".into(),
+                    "intelligence-lab".into(),
+                    "stats".into(),
+                ]),
                 toolbar_content_order: Some(vec!["text".into(), "text".into(), "unknown".into()]),
                 toolbar_content_visible: Some(Vec::new()),
                 ..Default::default()
@@ -567,9 +572,22 @@ mod tests {
         assert_eq!(payload["toolbarIconSizePx"], 52);
         assert_eq!(
             payload["toolbarItemOrder"],
-            json!(["account", "menu", "search", "stats", "library", "news", "filter", "settings"])
+            json!([
+                "account",
+                "menu",
+                "search",
+                "stats",
+                "library",
+                "news",
+                "intelligence-lab",
+                "filter",
+                "settings"
+            ])
         );
-        assert_eq!(payload["toolbarHiddenItems"], json!(["stats"]));
+        assert_eq!(
+            payload["toolbarHiddenItems"],
+            json!(["stats", "intelligence-lab"])
+        );
         assert_eq!(payload["toolbarContentOrder"], json!(["text", "icon"]));
         assert_eq!(payload["toolbarContentVisible"], json!(["icon"]));
     }

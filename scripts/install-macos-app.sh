@@ -34,6 +34,18 @@ ensure_local_signing_identity() {
     security set-keychain-settings -lut 21600 "$local_signing_keychain" >/dev/null
   fi
   security unlock-keychain -p "$keychain_password" "$local_signing_keychain" >/dev/null
+
+  # codesign requires the identity keychain to stay on the user's search list,
+  # even when --keychain is passed. Add this app-owned keychain once and leave
+  # it there; the old add-then-restore approach caused macOS to repeatedly ask
+  # for private-key authorization on later builds.
+  local -a user_keychains
+  user_keychains=("${(@f)$(security list-keychains -d user \
+    | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')}")
+  if (( ${user_keychains[(I)$local_signing_keychain]} == 0 )); then
+    security list-keychains -d user -s "$local_signing_keychain" "${user_keychains[@]}"
+  fi
+
   if ! security find-identity -v -p codesigning "$local_signing_keychain" 2>/dev/null | grep -Fq "$local_signing_identity"; then
     local signing_key="$local_signing_dir/local-development.key"
     local signing_cert="$local_signing_dir/local-development.crt"
@@ -52,11 +64,14 @@ ensure_local_signing_identity() {
       -k "$local_signing_keychain" "$signing_cert" >/dev/null
     security import "$signing_p12" -k "$local_signing_keychain" \
       -P "$keychain_password" -T /usr/bin/codesign >/dev/null
-    security set-key-partition-list -S apple-tool:,apple:,codesign: \
-      -s -k "$keychain_password" "$local_signing_keychain" >/dev/null
     rm -f "$signing_key" "$signing_cert" "$signing_p12"
   fi
-  print -r -- "$keychain_password"
+
+  # Keep the signing key accessible to codesign without prompting on every
+  # subsequent local build. Run this after both fresh imports and existing
+  # keychains so installations created by older versions are migrated once.
+  security set-key-partition-list -S apple-tool:,apple:,codesign: \
+    -s -k "$keychain_password" "$local_signing_keychain" >/dev/null
 }
 
 local_signing_identity_hash() {
@@ -75,26 +90,11 @@ sign_with_local_identity() {
     return 1
   fi
 
-  # codesign only resolves identities from the user's search list. Add the
-  # dedicated app keychain for the duration of signing, then restore the exact
-  # previous list so installation does not change the user's Keychain setup.
-  local -a original_keychains
-  original_keychains=("${(@f)$(security list-keychains -d user \
-    | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')}")
-  security list-keychains -d user -s "$local_signing_keychain" "${original_keychains[@]}"
-
-  local sign_status restore_status
-  set +e
-  codesign --force --deep --sign "$identity_hash" "$app_path"
-  sign_status=$?
-  security list-keychains -d user -s "${original_keychains[@]}"
-  restore_status=$?
-  set -e
-  if [[ $restore_status -ne 0 ]]; then
-    print -u2 "恢复用户钥匙串搜索列表失败，请检查系统钥匙串设置。"
-    return $restore_status
-  fi
-  return $sign_status
+  # Passing the dedicated keychain directly avoids changing the user's
+  # keychain search list on every build, which can trigger repeated macOS
+  # private-key authorization prompts.
+  codesign --force --deep --keychain "$local_signing_keychain" \
+    --sign "$local_signing_identity" "$app_path"
 }
 
 if [[ "${1:-}" == "--build" ]]; then
@@ -135,8 +135,7 @@ fi
 # the finished bundle, then rename it atomically. This only replaces the app
 # package; the user's configuration, library, and account data stay outside it.
 ditto "$source_app" "$staged_app"
-local_keychain_password="$(ensure_local_signing_identity)"
-security unlock-keychain -p "$local_keychain_password" "$local_signing_keychain"
+ensure_local_signing_identity
 sign_with_local_identity "$staged_app"
 codesign --verify --deep --strict "$staged_app"
 if [[ -d "$installed_app" ]]; then

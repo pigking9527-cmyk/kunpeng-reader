@@ -8,7 +8,7 @@
     "ip:check": "node scripts/check-ip-clean-snapshot.mjs",
     "release:license-gate": "node scripts/assert-public-release-allowed.mjs",
     "lint": "eslint apps packages",
-    "test:typed": "node scripts/run-typescript-tests.mjs",
+    "test:typed": "npm run legacy-ts:build && npm run reader-page-ts:build && node scripts/run-typescript-tests.mjs",
     "test:reader-sample-recorder": "node scripts/test-record-reader-sample.mjs",
     "test:reader-sample-record": "node scripts/test-record-reader-sample.mjs && node scripts/test-validate-reader-sample-record.mjs",
     "test:legacy-ui": "npm run legacy-ts:build && node scripts/run-legacy-ui-tests.cjs",
@@ -26,6 +26,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
+    "@tauri-apps/cli": "2.11.4",
     "@types/node": "24.10.1",
     "eslint": "^9.35.0",
     "tsx": "4.20.6",

@@ -31,10 +31,16 @@ use std::{
     io::Read,
     net::IpAddr,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::{webview::NewWindowResponse, Emitter, Manager, WebviewBuilder, WebviewUrl};
+use tauri::{
+    webview::{NewWindowResponse, PageLoadEvent},
+    Emitter, Manager, WebviewBuilder, WebviewUrl,
+};
 
 const DEFAULT_BASE_URL: &str = "https://newsnow.busiyi.world";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -65,6 +71,12 @@ const PREFETCH_IMAGE_MAX_DIMENSION: u32 = 640;
 const TIEBA_RECENT_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 const TIEBA_OLD_FALLBACK_PER_BAR: usize = 2;
 const NEWS_CACHE_VERSION: u8 = 10;
+const INTELLIGENCE_SNAPSHOT_CACHE_VERSION: u64 = 1;
+const INTELLIGENCE_SNAPSHOT_MAX_BYTES: usize = 24 * 1024 * 1024;
+const INTELLIGENCE_SNAPSHOT_MAX_ITEMS: usize = 30_000;
+const INTELLIGENCE_SNAPSHOT_MAX_SOURCE_IDS: usize = 1_024;
+const INTELLIGENCE_SNAPSHOT_MAX_FIELDS_PER_ITEM: usize = 16;
+const INTELLIGENCE_SNAPSHOT_MAX_TEXT_BYTES: usize = 2_048;
 const MAX_TEXT_CHARS: usize = 500;
 const NEWS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const PREVIEW_MAX_BYTES: u64 = 512 * 1024;
@@ -103,6 +115,25 @@ const NEWSNOW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36";
 const ARTICLE_WEBVIEW_LABEL: &str = "newsnow-article";
 const ARTICLE_RETURN_URL: &str = "https://reader.localhost/__kunpeng_news_return__";
+const ARTICLE_LOADING_EVENT: &str = "newsnow-article-loading";
+const ARTICLE_READY_EVENT: &str = "newsnow-article-ready";
+const ARTICLE_WEBVIEW_CREATED: u8 = 0;
+const ARTICLE_WEBVIEW_LOADING: u8 = 1;
+const ARTICLE_WEBVIEW_READY: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArticleWebviewPhase {
+    Loading,
+    Ready,
+}
+
+fn article_webview_phase(event: PageLoadEvent) -> ArticleWebviewPhase {
+    match event {
+        PageLoadEvent::Started => ArticleWebviewPhase::Loading,
+        PageLoadEvent::Finished => ArticleWebviewPhase::Ready,
+    }
+}
+
 type NewsSourceParser = fn(NewsSource, &str) -> Vec<NewsNowItem>;
 const ARTICLE_RETURN_SCRIPT: &str = r##"
 (() => {
@@ -154,6 +185,7 @@ const ARTICLE_GESTURE_SCRIPT: &str = r##"
 (() => {
   if (window.top !== window) return;
   const reference = __KUNPENG_GESTURE_POINTS__;
+  const matchThreshold = __KUNPENG_GESTURE_THRESHOLD__;
   if (!Array.isArray(reference) || reference.length < 16) return;
   const returnUrl = "https://reader.localhost/__kunpeng_news_return__";
   const clean = (points) => points.map((point) => ({ x: Number(point.x), y: Number(point.y) })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y)).slice(0, 320);
@@ -201,7 +233,7 @@ const ARTICLE_GESTURE_SCRIPT: &str = r##"
   };
   const finish = (cancelled) => {
     if (!active) return; const points = active; active = null; canvas.style.display = "none";
-    const matched = !cancelled && score(points) >= 0.78; if (points.length > 1) suppressUntil = Date.now() + 450;
+    const matched = !cancelled && score(points) >= matchThreshold; if (points.length > 1) suppressUntil = Date.now() + 450;
     if (matched) window.location.assign(returnUrl);
   };
   window.addEventListener("mousedown", (event) => { if (event.button !== 2) return; event.preventDefault(); active = [{ x: event.clientX, y: event.clientY }]; draw(); }, true);
@@ -226,6 +258,11 @@ fn article_initialization_script(request: &NewsNowOpenRequest) -> String {
         &[]
     };
     let json = serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string());
+    let gesture_threshold = if (0.55..=0.98).contains(&request.gesture_threshold) {
+        request.gesture_threshold
+    } else {
+        0.78
+    };
     let return_script = ARTICLE_RETURN_SCRIPT.replace(
         "__KUNPENG_HIDE_RETURN_ICON__",
         if request.hide_return_icon {
@@ -236,7 +273,12 @@ fn article_initialization_script(request: &NewsNowOpenRequest) -> String {
     );
     format!(
         "{return_script}\n{}",
-        ARTICLE_GESTURE_SCRIPT.replace("__KUNPENG_GESTURE_POINTS__", &json)
+        ARTICLE_GESTURE_SCRIPT
+            .replace("__KUNPENG_GESTURE_POINTS__", &json)
+            .replace(
+                "__KUNPENG_GESTURE_THRESHOLD__",
+                &format!("{gesture_threshold:.2}")
+            )
     )
 }
 
@@ -872,6 +914,8 @@ pub(crate) struct NewsNowOpenRequest {
     #[serde(default)]
     pub gesture_points: Vec<[f64; 2]>,
     #[serde(default)]
+    pub gesture_threshold: f64,
+    #[serde(default)]
     pub hide_return_icon: bool,
 }
 
@@ -925,6 +969,52 @@ fn cache() -> &'static Mutex<NewsCache> {
 fn disk_cache_path() -> Option<PathBuf> {
     let directory = crate::profile::app_cache_dir()?;
     Some(directory.join("newsnow-feed-v1.json"))
+}
+
+fn intelligence_snapshot_path() -> Option<PathBuf> {
+    let directory = crate::profile::app_cache_dir()?;
+    Some(directory.join("newsnow-intelligence-snapshot-v1.json"))
+}
+
+fn valid_intelligence_snapshot(snapshot: &Value) -> bool {
+    let Some(object) = snapshot.as_object() else {
+        return false;
+    };
+    if object.get("version").and_then(Value::as_u64) != Some(INTELLIGENCE_SNAPSHOT_CACHE_VERSION) {
+        return false;
+    }
+    let Some(source_ids) = object.get("sourceIds").and_then(Value::as_array) else {
+        return false;
+    };
+    if source_ids.is_empty() || source_ids.len() > INTELLIGENCE_SNAPSHOT_MAX_SOURCE_IDS {
+        return false;
+    }
+    if source_ids.iter().any(|id| {
+        id.as_str().is_none_or(|value| {
+            value.is_empty() || value.len() > INTELLIGENCE_SNAPSHOT_MAX_TEXT_BYTES
+        })
+    }) {
+        return false;
+    }
+    let Some(items) = object.get("items").and_then(Value::as_array) else {
+        return false;
+    };
+    if items.len() > INTELLIGENCE_SNAPSHOT_MAX_ITEMS {
+        return false;
+    }
+    if items.iter().any(|item| {
+        item.as_object().is_none_or(|fields| {
+            fields.len() > INTELLIGENCE_SNAPSHOT_MAX_FIELDS_PER_ITEM
+                || fields.values().any(|value| {
+                    value
+                        .as_str()
+                        .is_none_or(|text| text.len() > INTELLIGENCE_SNAPSHOT_MAX_TEXT_BYTES)
+                })
+        })
+    }) {
+        return false;
+    }
+    serde_json::to_vec(snapshot).is_ok_and(|bytes| bytes.len() <= INTELLIGENCE_SNAPSHOT_MAX_BYTES)
 }
 
 fn load_disk_cache() -> Option<DiskNewsCache> {
@@ -1769,7 +1859,7 @@ fn tieba_md5_hex(input: &str) -> String {
     let mut b0 = 0xefcd_ab89u32;
     let mut c0 = 0x98ba_dcfeu32;
     let mut d0 = 0x1032_5476u32;
-    for chunk in bytes.chunks_exact(64) {
+    for chunk in bytes.as_chunks::<64>().0 {
         let mut words = [0u32; 16];
         for (index, word) in words.iter_mut().enumerate() {
             *word = u32::from_le_bytes(chunk[index * 4..index * 4 + 4].try_into().unwrap());
@@ -2400,22 +2490,46 @@ fn finish_public_rss_entry(
     )
 }
 
-fn feed_attribute_url(
+fn feed_attribute_article_url(
     attributes: quick_xml::events::attributes::Attributes<'_>,
     reader: &Reader<&[u8]>,
 ) -> Option<String> {
-    attributes.flatten().find_map(|attribute| {
-        if xml_local_name(attribute.key.as_ref()) != b"href" {
-            return None;
+    let mut href = None::<String>;
+    let mut relation = String::new();
+    let mut media_type = String::new();
+    for attribute in attributes.flatten() {
+        let key = xml_local_name(attribute.key.as_ref());
+        if !matches!(key, b"href" | b"rel" | b"type") {
+            continue;
         }
-        let value = attribute
-            .decoded_and_normalized_value(XmlVersion::default(), reader.decoder())
-            .ok()?
-            .into_owned();
-        url_open::validate_https_url(&value)
-            .ok()
-            .map(|url| url.to_string())
-    })
+        let Ok(value) =
+            attribute.decoded_and_normalized_value(XmlVersion::default(), reader.decoder())
+        else {
+            continue;
+        };
+        match key {
+            b"href" => href = Some(value.into_owned()),
+            b"rel" => relation = value.into_owned(),
+            b"type" => media_type = value.into_owned(),
+            _ => {}
+        }
+    }
+
+    // Atom defaults an omitted relation to `alternate`.  Links such as
+    // `self` and WordPress' two `replies` entries are feed metadata, not the
+    // article.  In particular, the final replies link often ends in `/feed/`
+    // and previously overwrote the real HTML article URL parsed just before it.
+    let relation = relation.trim().to_ascii_lowercase();
+    if !relation.is_empty() && relation != "alternate" {
+        return None;
+    }
+    let media_type = media_type.trim().to_ascii_lowercase();
+    if !media_type.is_empty() && media_type != "text/html" && media_type != "application/xhtml+xml"
+    {
+        return None;
+    }
+    let href = href?;
+    url_open::validate_https_url(&href).ok().map(str::to_string)
 }
 
 fn parse_public_rss_for_source(source: NewsSourceMeta<'_>, xml: &str) -> Vec<NewsNowItem> {
@@ -2435,7 +2549,7 @@ fn parse_public_rss_for_source(source: NewsSourceMeta<'_>, xml: &str) -> Vec<New
                 } else if entry.is_some() {
                     fields.push(local.to_vec());
                     if local == b"link" {
-                        if let Some(url) = feed_attribute_url(tag.attributes(), &reader) {
+                        if let Some(url) = feed_attribute_article_url(tag.attributes(), &reader) {
                             entry.as_mut().unwrap().url = url;
                         }
                     }
@@ -2462,7 +2576,7 @@ fn parse_public_rss_for_source(source: NewsSourceMeta<'_>, xml: &str) -> Vec<New
                 let name = tag.name();
                 let local = xml_local_name(name.as_ref());
                 if local == b"link" {
-                    if let Some(url) = feed_attribute_url(tag.attributes(), &reader) {
+                    if let Some(url) = feed_attribute_article_url(tag.attributes(), &reader) {
                         entry.as_mut().unwrap().url = url;
                     }
                 }
@@ -3192,6 +3306,28 @@ pub(crate) fn newsnow_sources() -> Vec<NewsNowSource> {
     all_sources().map(NewsNowSource::from).collect()
 }
 
+/// The intelligence workspace is a local, transient research cache.  It is
+/// deliberately separate from the reader database, search index, backup and
+/// sync payload so a large public-source collection can resume after restart
+/// without turning news history into reader data.
+#[tauri::command]
+pub(crate) fn newsnow_intelligence_snapshot_get() -> Option<Value> {
+    let path = intelligence_snapshot_path()?;
+    let bytes = fs::read(path).ok()?;
+    let snapshot = serde_json::from_slice::<Value>(&bytes).ok()?;
+    valid_intelligence_snapshot(&snapshot).then_some(snapshot)
+}
+
+#[tauri::command]
+pub(crate) fn newsnow_intelligence_snapshot_save(snapshot: Value) -> Result<(), String> {
+    if !valid_intelligence_snapshot(&snapshot) {
+        return Err("情报快照格式或大小无效".to_string());
+    }
+    let path = intelligence_snapshot_path().ok_or_else(|| "无法定位情报快照目录".to_string())?;
+    crate::atomic_file::write_json(&path, &snapshot, false)
+        .map_err(|error| format!("无法保存情报快照：{error}"))
+}
+
 #[tauri::command]
 pub(crate) fn newsnow_custom_sources_get(
     state: tauri::State<crate::AppState>,
@@ -3286,12 +3422,28 @@ pub(crate) async fn newsnow_preview_image(
     .map_err(|error| format!("资讯缩略图任务失败：{error}"))?
 }
 
+fn canonical_news_article_url(value: &str) -> Result<String, String> {
+    let url = url_open::validate_https_url(value.trim())?.to_string();
+    const NVIDIA_BLOG_PREFIX: &str = "https://developer.nvidia.com/blog/";
+    if let Some(article_slug) = url
+        .strip_prefix(NVIDIA_BLOG_PREFIX)
+        .and_then(|path| path.strip_suffix("/feed/"))
+    {
+        // Only repair the single-slug WordPress comment feed emitted inside
+        // an entry.  Do not rewrite the blog feed or tag/category feeds.
+        if !article_slug.is_empty() && !article_slug.contains('/') {
+            return Ok(format!("{NVIDIA_BLOG_PREFIX}{article_slug}/"));
+        }
+    }
+    Ok(url)
+}
+
 #[tauri::command]
 pub(crate) async fn newsnow_open_article(
     app: tauri::AppHandle,
     request: NewsNowOpenRequest,
 ) -> Result<NewsNowArticle, String> {
-    let url = url_open::validate_https_url(request.url.trim())?.to_string();
+    let url = canonical_news_article_url(&request.url)?;
     if url.len() > 2_000 {
         return Err("资讯原文地址过长".to_string());
     }
@@ -3333,11 +3485,33 @@ pub(crate) async fn newsnow_open_article(
     let article_url = url.parse().map_err(|_| "资讯原文地址无效".to_string())?;
     let initialization_script = article_initialization_script(&request);
     let navigation_app = app.clone();
-    parent
+    let loading_app = app.clone();
+    let article_load_state = Arc::new(AtomicU8::new(ARTICLE_WEBVIEW_CREATED));
+    let page_load_state = Arc::clone(&article_load_state);
+    let article_webview = parent
         .add_child(
             WebviewBuilder::new(ARTICLE_WEBVIEW_LABEL, WebviewUrl::External(article_url))
                 .auto_resize()
                 .initialization_script(initialization_script)
+                .on_page_load(move |webview, payload| {
+                    match article_webview_phase(payload.event()) {
+                        ArticleWebviewPhase::Loading => {
+                            page_load_state.store(ARTICLE_WEBVIEW_LOADING, Ordering::Release);
+                            // Some sites keep subresources open indefinitely and never emit a
+                            // terminal load event. Show as soon as navigation begins: the
+                            // document-start return control and gesture script are already
+                            // injected, while waiting for Finished would leave the reader
+                            // permanently covered by its loading placeholder.
+                            let _ = webview.show();
+                            let _ = loading_app.emit(ARTICLE_LOADING_EVENT, ());
+                        }
+                        ArticleWebviewPhase::Ready => {
+                            page_load_state.store(ARTICLE_WEBVIEW_READY, Ordering::Release);
+                            let _ = webview.show();
+                            let _ = loading_app.emit(ARTICLE_READY_EVENT, ());
+                        }
+                    }
+                })
                 .on_new_window(|_, _| NewWindowResponse::Deny)
                 .on_navigation(move |target| {
                     if target.as_str() != ARTICLE_RETURN_URL {
@@ -3358,6 +3532,28 @@ pub(crate) async fn newsnow_open_article(
                 .map_err(|error| format!("无法读取主窗口大小：{error}"))?,
         )
         .map_err(|error| format!("无法在主窗口打开资讯原文：{error}"))?;
+    // `add_child` may paint its default white surface before the first page-load
+    // event arrives.  Claim the initial state atomically so a very fast Finished
+    // event cannot be hidden again after it has made the article visible.
+    if article_load_state
+        .compare_exchange(
+            ARTICLE_WEBVIEW_CREATED,
+            ARTICLE_WEBVIEW_LOADING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        let _ = article_webview.hide();
+        let fallback_app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            if let Some(webview) = fallback_app.get_webview(ARTICLE_WEBVIEW_LABEL) {
+                let _ = webview.show();
+                let _ = fallback_app.emit(ARTICLE_READY_EVENT, ());
+            }
+        });
+    }
     Ok(NewsNowArticle {
         url,
         ..Default::default()
@@ -3537,6 +3733,48 @@ mod tests {
     }
 
     #[test]
+    fn atom_parser_keeps_the_html_alternate_instead_of_comment_feeds() {
+        let source = *CURATED_SOURCES
+            .iter()
+            .find(|source| source.id == "horizon-nvidia-cuda")
+            .unwrap();
+        let items = parse_public_rss(
+            source,
+            r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+              <id>https://developer.nvidia.com/blog/?p=116726</id>
+              <title>Accelerated X-Ray Analysis</title>
+              <link rel="alternate" type="text/html" href="https://developer.nvidia.com/blog/accelerated-x-ray-analysis/" />
+              <link rel="replies" type="text/html" href="https://developer.nvidia.com/blog/accelerated-x-ray-analysis/#comments" />
+              <link rel="replies" type="application/atom+xml" href="https://developer.nvidia.com/blog/accelerated-x-ray-analysis/feed/" />
+            </entry></feed>"#,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].url,
+            "https://developer.nvidia.com/blog/accelerated-x-ray-analysis/"
+        );
+    }
+
+    #[test]
+    fn cached_nvidia_comment_feed_urls_open_the_article_without_recollecting() {
+        assert_eq!(
+            canonical_news_article_url(
+                "https://developer.nvidia.com/blog/accelerated-x-ray-analysis/feed/"
+            )
+            .unwrap(),
+            "https://developer.nvidia.com/blog/accelerated-x-ray-analysis/"
+        );
+        assert_eq!(
+            canonical_news_article_url("https://developer.nvidia.com/blog/tag/cuda/feed/").unwrap(),
+            "https://developer.nvidia.com/blog/tag/cuda/feed/"
+        );
+        assert_eq!(
+            canonical_news_article_url("https://example.test/article/feed/").unwrap(),
+            "https://example.test/article/feed/"
+        );
+    }
+
+    #[test]
     fn public_worldmonitor_parsers_keep_only_safe_items() {
         let usgs = *CURATED_SOURCES
             .iter()
@@ -3569,17 +3807,17 @@ mod tests {
             .iter()
             .find(|source| source.id == "worldmonitor-gdacs-alerts")
             .unwrap();
-        let items = parse_public_rss(
-            source,
-            r#"<rss><channel><item>
+        let unsafe_url = ["http", "://example.test/"].concat();
+        let rss = r#"<rss><channel><item>
               <title><![CDATA[Green earthquake]]></title>
               <link>https://www.gdacs.org/report.aspx?eventid=1</link>
               <description><![CDATA[Potential impact]]></description>
               <guid>EQ1</guid>
               <pubDate>Sun, 16 Aug 2026 03:39:13 GMT</pubDate>
               <enclosure url="https://www.gdacs.org/image.png" />
-            </item><item><title>Unsafe</title><link>http://example.test/</link></item></channel></rss>"#,
-        );
+            </item><item><title>Unsafe</title><link>__UNSAFE_URL__</link></item></channel></rss>"#
+            .replace("__UNSAFE_URL__", &unsafe_url);
+        let items = parse_public_rss(source, &rss);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "worldmonitor-gdacs-alerts:EQ1");
         assert_eq!(items[0].image_url, "https://www.gdacs.org/image.png");
@@ -3609,16 +3847,59 @@ mod tests {
 
         let disabled = article_initialization_script(&NewsNowOpenRequest::default());
         assert!(disabled.contains("const reference = [];"));
+        assert!(disabled.contains("const matchThreshold = 0.78;"));
         let enabled = article_initialization_script(&NewsNowOpenRequest {
             gesture_enabled: true,
+            gesture_threshold: 0.62,
             gesture_points: (0..48)
                 .map(|index| [index as f64 / 96.0 - 0.25, index as f64 / 192.0 - 0.125])
                 .collect(),
             ..Default::default()
         });
         assert!(enabled.contains("const reference = [["));
+        assert!(enabled.contains("const matchThreshold = 0.62;"));
         assert!(enabled.contains("event.button !== 2"));
         assert!(enabled.contains("canvas.style.display = \"none\""));
+    }
+
+    #[test]
+    fn external_article_hides_while_a_page_is_loading() {
+        assert_eq!(
+            article_webview_phase(PageLoadEvent::Started),
+            ArticleWebviewPhase::Loading
+        );
+        assert_eq!(
+            article_webview_phase(PageLoadEvent::Finished),
+            ArticleWebviewPhase::Ready
+        );
+    }
+
+    #[test]
+    fn intelligence_snapshot_only_accepts_bounded_local_news_records() {
+        assert!(valid_intelligence_snapshot(&json!({
+            "version": INTELLIGENCE_SNAPSHOT_CACHE_VERSION,
+            "sourceIds": ["worldmonitor-usgs-earthquakes"],
+            "items": [{
+                "title": "M 5.9 - 270 km WSW of Yanglong, China",
+                "source": "USGS",
+                "url": "https://earthquake.usgs.gov/example"
+            }],
+            "attemptedSources": 1,
+            "failedSources": 0,
+            "nextBatch": 0,
+            "completed": true,
+            "updatedAt": 1
+        })));
+        assert!(!valid_intelligence_snapshot(&json!({
+            "version": INTELLIGENCE_SNAPSHOT_CACHE_VERSION,
+            "sourceIds": [],
+            "items": []
+        })));
+        assert!(!valid_intelligence_snapshot(&json!({
+            "version": INTELLIGENCE_SNAPSHOT_CACHE_VERSION,
+            "sourceIds": ["source"],
+            "items": [{"title": "x".repeat(INTELLIGENCE_SNAPSHOT_MAX_TEXT_BYTES + 1)}]
+        })));
     }
 
     #[test]

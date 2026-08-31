@@ -25,7 +25,15 @@ const READER_FONT_FAMILIES: &[&str] = &[
     "sans-serif",
 ];
 pub(super) const TOOLBAR_ITEM_IDS: &[&str] = &[
-    "account", "search", "stats", "library", "news", "filter", "settings", "menu",
+    "account",
+    "search",
+    "stats",
+    "library",
+    "news",
+    "intelligence-lab",
+    "filter",
+    "settings",
+    "menu",
 ];
 pub(super) const TOOLBAR_CONTENT_IDS: &[&str] = &["icon", "text"];
 
@@ -65,12 +73,27 @@ pub(super) fn normalized_toolbar_order(values: Vec<String>) -> Vec<String> {
         .filter(|value| TOOLBAR_ITEM_IDS.contains(&value.as_str()))
         .filter(|value| seen.insert(value.clone()))
         .collect::<Vec<_>>();
+    let had_intelligence_lab = seen.contains("intelligence-lab");
     if seen.insert("account".to_string()) {
         order.insert(0, "account".to_string());
     }
     for id in TOOLBAR_ITEM_IDS {
         if seen.insert((*id).to_string()) {
             order.push((*id).to_string());
+        }
+    }
+    if !had_intelligence_lab {
+        let current_index = order.iter().position(|value| value == "intelligence-lab");
+        let news_index = order.iter().position(|value| value == "news");
+        if let (Some(current_index), Some(news_index)) = (current_index, news_index) {
+            if current_index != news_index + 1 {
+                let item = order.remove(current_index);
+                let insert_at = order
+                    .iter()
+                    .position(|value| value == "news")
+                    .map_or(order.len(), |index| index + 1);
+                order.insert(insert_at, item);
+            }
         }
     }
     order
@@ -338,11 +361,45 @@ mod tests {
     fn toolbar_rules_complete_order_and_keep_settings_visible() {
         assert_eq!(
             normalized_toolbar_order(vec!["menu".into(), "search".into(), "search".into()]),
-            vec!["account", "menu", "search", "stats", "library", "news", "filter", "settings"]
+            vec![
+                "account",
+                "menu",
+                "search",
+                "stats",
+                "library",
+                "news",
+                "intelligence-lab",
+                "filter",
+                "settings"
+            ]
         );
         assert_eq!(
-            normalized_toolbar_hidden(vec!["settings".into(), "stats".into(), "stats".into()]),
-            vec!["stats"]
+            normalized_toolbar_hidden(vec![
+                "settings".into(),
+                "stats".into(),
+                "intelligence-lab".into(),
+                "stats".into(),
+            ]),
+            vec!["stats", "intelligence-lab"]
+        );
+        assert_eq!(
+            normalized_toolbar_order(
+                ["account", "search", "stats", "library", "news", "filter", "settings", "menu",]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            vec![
+                "account",
+                "search",
+                "stats",
+                "library",
+                "news",
+                "intelligence-lab",
+                "filter",
+                "settings",
+                "menu"
+            ]
         );
         assert_eq!(normalized_toolbar_content_visible(Vec::new()), vec!["icon"]);
     }

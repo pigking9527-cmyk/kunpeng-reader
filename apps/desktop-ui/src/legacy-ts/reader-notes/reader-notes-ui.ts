@@ -384,11 +384,13 @@ export function initializeReaderNotesUi(
   });
   requiredElement<HTMLElement>(document, "prev-btn").addEventListener("click", () => {
     runtime.keepImmersiveBarAfterNav?.();
-    host.sendToPage({ pageTurn: -1 });
+    runtime.rememberReaderJumpPosition?.({ kind: "chapter" });
+    host.sendToPage({ gotoChapter: Math.max(0, host.currentChapter - 1) });
   });
   requiredElement<HTMLElement>(document, "next-btn").addEventListener("click", () => {
     runtime.keepImmersiveBarAfterNav?.();
-    host.sendToPage({ pageTurn: 1 });
+    runtime.rememberReaderJumpPosition?.({ kind: "chapter" });
+    host.sendToPage({ gotoChapter: host.currentChapter + 1 });
   });
 
   const createTocItem = (entry: TocEntry): HTMLElement => {

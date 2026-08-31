@@ -14,9 +14,12 @@ const repositoryRoot = new URL("../../../../../", import.meta.url);
 
 function classicSource(): string {
   try {
-    return readFileSync(new URL("ui/book-info-panel.js", repositoryRoot), "utf8");
+    return readFileSync(
+      new URL("ui/generated-ts/book-info-panel.js", repositoryRoot),
+      "utf8",
+    );
   } catch {
-    return execFileSync("git", ["show", "HEAD:ui/book-info-panel.js"], {
+    return execFileSync("git", ["show", "HEAD:ui/generated-ts/book-info-panel.js"], {
       cwd: repositoryRoot,
       encoding: "utf8",
     });

@@ -136,10 +136,10 @@ fn main() {
             }
             Ok(menu)
         })
-        .on_menu_event(|app, event| {
+        .on_menu_event(|_app, _event| {
             #[cfg(target_os = "macos")]
-            if event.id() == MENU_MAIN_WINDOW_CLOSE {
-                if let Some(window) = app
+            if _event.id() == MENU_MAIN_WINDOW_CLOSE {
+                if let Some(window) = _app
                     .webview_windows()
                     .into_values()
                     .find(|window| window.is_focused().unwrap_or(false))
@@ -213,12 +213,14 @@ fn main() {
                 main_config.y = Some(saved.y);
                 main_config.maximized = saved.maximized;
             }
-            let mut main_window_builder =
-                tauri::WebviewWindowBuilder::from_config(app, &main_config)?;
+            let main_window_builder = tauri::WebviewWindowBuilder::from_config(app, &main_config)?;
             #[cfg(target_os = "macos")]
-            if let Some(identifier) = profile::webview_data_store_identifier() {
-                main_window_builder = main_window_builder.data_store_identifier(identifier);
-            }
+            let main_window_builder =
+                if let Some(identifier) = profile::webview_data_store_identifier() {
+                    main_window_builder.data_store_identifier(identifier)
+                } else {
+                    main_window_builder
+                };
             let _main_window = main_window_builder.build()?;
             sync::start_silent_startup_sync(app.handle().clone());
             backup::spawn_daily(app.handle().clone());
@@ -305,6 +307,8 @@ fn main() {
             feedback::submit_feedback,
             newsnow::newsnow_status,
             newsnow::newsnow_sources,
+            newsnow::newsnow_intelligence_snapshot_get,
+            newsnow::newsnow_intelligence_snapshot_save,
             newsnow::newsnow_list,
             newsnow::newsnow_prefetch,
             newsnow::newsnow_refresh,

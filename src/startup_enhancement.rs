@@ -155,6 +155,7 @@ fn windows_registry_command() -> Command {
 }
 
 #[cfg(windows)]
+#[allow(clippy::obfuscated_if_else)]
 fn configure_launch_at_login(
     _app: &tauri::AppHandle,
     config: StartupEnhancementConfig,

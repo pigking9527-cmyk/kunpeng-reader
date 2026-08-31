@@ -111,4 +111,14 @@ test("preference color installer preserves classic normalization and color conve
       classic.hslToHex(hue, saturation, lightness),
     );
   }
+  for (const [foreground, background] of [
+    ["#000000", "#ffffff"],
+    ["#777777", "#ffffff"],
+    ["#abc", "#123456"],
+  ]) {
+    assert.equal(
+      typed.contrastRatio(foreground, background),
+      classic.contrastRatio(foreground, background),
+    );
+  }
 });

@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   frontend:
     name: Frontend gates (${{ matrix.os }})
@@ -57,13 +61,17 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-audit
-        shell: pwsh
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@v2.79.11
+        with:
+          tool: cargo-audit
+          fallback: none
 
       - name: Repository safety check
         shell: pwsh

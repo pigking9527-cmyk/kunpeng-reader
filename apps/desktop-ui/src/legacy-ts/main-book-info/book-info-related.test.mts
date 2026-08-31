@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -136,10 +136,10 @@ function find(root: FakeElement, selector: string): FakeElement | null {
 }
 
 function classicSource(): string {
-  return execFileSync("git", ["show", "HEAD:ui/book-info-related.js"], {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  });
+  return readFileSync(
+    new URL("ui/generated-ts/book-info-related.js", repositoryRoot),
+    "utf8",
+  );
 }
 
 function fixture() {

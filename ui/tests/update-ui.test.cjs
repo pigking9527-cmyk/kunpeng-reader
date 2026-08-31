@@ -51,6 +51,9 @@ test("update card is centered, icon-free, and shows readable release notes", () 
 
 test("closing an update card is restorable and never turns its gesture into an app close", () => {
   assert.match(about, /const pendingUpdateKey = "pendingUpdateV1"/);
+  assert.match(about, /const installedVersion = async \(\) =>/);
+  assert.match(about, /cachedPendingUpdate\(currentVersion\)/);
+  assert.match(about, /storage\.removeItem\(pendingUpdateKey\)/);
   assert.match(about, /const restorePendingUpdate = \(\) =>/);
   assert.match(about, /const discardStalePendingUpdate = \(info\) =>/);
   assert.match(about, /info\.source !== "server" \|\| info\.has_update/);

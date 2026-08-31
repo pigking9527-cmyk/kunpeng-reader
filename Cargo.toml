@@ -1,9 +1,18 @@
 [package]
 name = "ebook-reader-tauri"
-version = "1.0.0"
+version = "1.1.0-beta.2"
 edition = "2021"
 publish = false
 license-file = "LICENSE"
+repository = "https://github.com/pigking9527-cmyk/kunpeng-reader"
+default-run = "ebook-reader-tauri"
+# Keep automatic binary discovery off so a future helper under `src/bin/`
+# cannot silently become the application bundled by Tauri.
+autobins = false
+
+[[bin]]
+name = "ebook-reader-tauri"
+path = "src/main.rs"
 
 [workspace]
 members = [".", "reader-core", "crates/epub-parser"]

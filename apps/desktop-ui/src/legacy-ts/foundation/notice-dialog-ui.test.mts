@@ -11,9 +11,9 @@ const repositoryRoot = new URL("../../../../../", import.meta.url);
 
 function classicSource(fileName: string): string {
   try {
-    return readFileSync(new URL(`ui/${fileName}`, repositoryRoot), "utf8");
+    return readFileSync(new URL(`ui/generated-ts/${fileName}`, repositoryRoot), "utf8");
   } catch {
-    return execFileSync("git", ["show", `HEAD:ui/${fileName}`], {
+    return execFileSync("git", ["show", `HEAD:ui/generated-ts/${fileName}`], {
       cwd: repositoryRoot,
       encoding: "utf8",
     });

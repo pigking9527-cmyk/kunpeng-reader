@@ -191,4 +191,37 @@ body.theme-dark .settings[data-quick-ui-mode="classic"] .margins input{border-co
 
 /* WebView 原生 <input type=color> 会拉起 macOS 色盘；关闭色盘时系统可能把
    鼠标事件回传给遮罩层。使用页内选择器，颜色调整全程留在阅读偏好页。 */
-.reader-color-picker{width:38px;height:28px;padding:2px;border:1px solid #cbd5e1;border-radius:7px;background:var(--reader-color,#222);box-shadow:inset 0 0 0 1px rgba(255,255,255,.38);cursor:pointer}.reader-color-picker:hover,.reader-color-picker:focus-visible{outline:0;border-color:#4e8fea;box-shadow:0 0 0 3px rgba(78,143,234,.17),inset 0 0 0 1px rgba(255,255,255,.38)}.reader-color-popover{position:fixed;z-index:82;width:252px;padding:12px;border:1px solid #c9d7ea;border-radius:12px;background:#fff;box-shadow:0 16px 38px rgba(15,35,65,.22);color:#34445d}.reader-color-popover[hidden]{display:none}.reader-color-presets{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-bottom:12px}.reader-color-presets button{width:24px;height:24px;padding:0;border:1px solid #cbd5e1;border-radius:7px;background:var(--color)!important;cursor:pointer}.reader-color-presets button:hover,.reader-color-presets button:focus-visible{outline:0;border-color:#2f6fad;box-shadow:0 0 0 3px rgba(47,111,173,.18)}.reader-color-popover>label{display:grid;grid-template-columns:31px minmax(0,1fr);align-items:center;gap:8px;margin-top:8px;font-size:12px;font-weight:600}.reader-color-popover input[type="range"]{width:100%;accent-color:#2f78cf}.reader-color-hex-label input{width:100%;height:28px;box-sizing:border-box;padding:4px 7px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;color:#25354b;font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase}.reader-color-hex-label input:focus{outline:0;border-color:#4e8fea;box-shadow:0 0 0 3px rgba(78,143,234,.15)}
+.reader-color-picker{width:38px;height:28px;padding:2px;border:1px solid #cbd5e1;border-radius:7px;background:var(--reader-color,#222);box-shadow:inset 0 0 0 1px rgba(255,255,255,.38);cursor:pointer}
+.reader-color-picker:hover,.reader-color-picker:focus-visible{outline:0;border-color:#4e8fea;box-shadow:0 0 0 3px rgba(78,143,234,.17),inset 0 0 0 1px rgba(255,255,255,.38)}
+.reader-color-popover{position:fixed;z-index:82;width:286px;padding:12px;border:1px solid #c9d7ea;border-radius:12px;background:#fff;box-shadow:0 16px 38px rgba(15,35,65,.22);color:#34445d}
+.reader-color-popover[hidden]{display:none}
+.reader-color-spectrum{position:relative;display:block;width:100%;height:136px;padding:0;overflow:hidden;border:1px solid #aebed2;border-radius:10px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.26);cursor:crosshair;touch-action:none}
+.reader-color-spectrum:hover,.reader-color-spectrum:focus-visible{outline:0;border-color:#387fd1;box-shadow:0 0 0 3px rgba(56,127,209,.18),inset 0 0 0 1px rgba(255,255,255,.32)}
+.reader-color-spectrum-thumb{position:absolute;left:clamp(11px,var(--reader-spectrum-x,0%),calc(100% - 11px));top:clamp(11px,var(--reader-spectrum-y,0%),calc(100% - 11px));width:17px;height:17px;border:2px solid #fff;border-radius:50%;background:var(--reader-spectrum-color,#f00);box-shadow:0 0 0 1px rgba(18,30,46,.82),0 2px 6px rgba(0,0,0,.28);transform:translate(-50%,-50%);pointer-events:none}
+.reader-color-popover>label{display:grid;grid-template-columns:34px minmax(0,1fr);align-items:center;gap:8px;margin-top:9px;font-size:12px;font-weight:600}
+.reader-color-popover input[type="range"]{width:100%;height:9px;margin:0;border:0;border-radius:999px;appearance:none;-webkit-appearance:none;box-shadow:inset 0 0 0 1px rgba(30,50,75,.2);cursor:pointer}
+.reader-color-popover input[type="range"]::-webkit-slider-thumb{width:17px;height:17px;border:2px solid #fff;border-radius:50%;appearance:none;-webkit-appearance:none;background:#f8fbff;box-shadow:0 0 0 1px #65758b,0 1px 4px rgba(0,0,0,.24)}
+.reader-color-hex-label input{width:100%;height:30px;box-sizing:border-box;padding:4px 7px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;color:#25354b;font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase}
+.reader-color-hex-label input:focus{outline:0;border-color:#4e8fea;box-shadow:0 0 0 3px rgba(78,143,234,.15)}
+.reader-color-contrast{display:grid;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:9px;margin-top:11px;padding:8px 9px;border:1px solid #d8e1ed;border-radius:9px;background:#f6f9fc}
+.reader-color-contrast-preview{display:grid;width:34px;height:30px;place-items:center;border:1px solid rgba(55,69,88,.22);border-radius:7px;font:700 13px/1 system-ui,sans-serif}
+.reader-color-contrast-copy{display:flex;align-items:baseline;gap:7px;min-width:0;color:#66758a;font-size:12px}
+.reader-color-contrast-copy output{color:#243751;font:700 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+.reader-color-contrast strong{padding:3px 7px;border-radius:999px;background:#dceee4;color:#21633e;font-size:12px;white-space:nowrap}
+.reader-color-contrast[data-level="readable"] strong{background:#fff0c8;color:#7a5600}
+.reader-color-contrast[data-level="low"] strong{background:#ffe0df;color:#a22f2a}
+
+/* 背景色与其余颜色共用上方完整色谱；这里仅保存自定义主题。 */
+.reader-custom-background{display:grid;grid-template-columns:max-content max-content max-content minmax(0,1fr);grid-template-areas:"title name name name" "import remove add ." "status status status status";align-items:center;gap:8px}
+.reader-custom-background-title{grid-area:title;min-width:max-content;white-space:nowrap}
+.reader-palette-name-field{grid-area:name;width:100%;min-width:134px;box-sizing:border-box}
+.reader-background-import{grid-area:import;justify-self:start}
+.reader-custom-background>#pref-clear-background-image{grid-area:remove;justify-self:start}
+.reader-custom-background>#pref-add-palette{grid-area:add;justify-self:start;align-self:center}
+.reader-background-image-name{grid-area:status}
+body.theme-dark .reader-color-popover{border-color:#596473;background:#2b3037;color:#dce3ec}
+body.theme-dark .reader-color-hex-label input{border-color:#596473;background:#24292f;color:#eef3f8}
+body.theme-dark .reader-color-contrast{border-color:#4c5664;background:#242a31}
+body.theme-dark .reader-color-contrast-copy{color:#aeb8c6}
+body.theme-dark .reader-color-contrast-copy output{color:#eef3f8}
+@media(max-width:520px){.reader-custom-background{grid-template-columns:max-content minmax(0,1fr);grid-template-areas:"title name" "import remove" "add add" "status status"}.reader-color-popover{width:min(286px,calc(100vw - 48px))}}

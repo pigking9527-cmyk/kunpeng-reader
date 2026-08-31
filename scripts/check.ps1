@@ -25,6 +25,17 @@ try {
   & (Join-Path $repo 'scripts\check-repository-safety.ps1') -AllTracked
   if ($LASTEXITCODE -ne 0) { throw 'Repository safety check failed.' }
 
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    throw 'Node.js not found: cannot generate the packaged license inventory or run frontend checks.'
+  }
+
+  # Tauri treats the generated dependency inventory as a packaged resource,
+  # so every Cargo command that evaluates build.rs needs this file first on a
+  # fresh checkout. Keep the license gate ahead of clippy/check/test.
+  Write-Host '== dependency and asset licenses =='
+  & node (Join-Path $repo 'scripts/check-licenses.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'License policy check failed.' }
+
   Write-Host '== cargo fmt --check =='
   Invoke-NativeCheck 'cargo fmt --check' { cargo fmt -- --check }
 
@@ -36,10 +47,6 @@ try {
 
   Write-Host '== cargo test =='
   Invoke-NativeCheck 'cargo test' { cargo test }
-  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw 'Node.js not found: cannot run JavaScript syntax checks.'
-  }
-
   Write-Host '== frontend TypeScript lint =='
   Invoke-NativeCheck 'frontend TypeScript lint' { npm run lint }
 
@@ -212,10 +219,6 @@ try {
     }
   }
 
-  Write-Host '== dependency and asset licenses =='
-  & node (Join-Path $repo 'scripts/check-licenses.mjs')
-  if ($LASTEXITCODE -ne 0) { throw 'License policy check failed.' }
-
   Write-Host '== IP clean snapshot =='
   & node (Join-Path $repo 'scripts/check-ip-clean-snapshot.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'IP clean-snapshot check failed.' }
@@ -372,13 +375,11 @@ try {
     $releaseExe = Join-Path $repo 'target\release\ebook-reader-tauri.exe'
     $productExe = [string]$tauri.productName + '.exe'
     $repoExe = Join-Path $repo $productExe
-    $repoOrt = Join-Path $repo 'onnxruntime.dll'
     $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) ([string]$tauri.productName + '.lnk')
-    foreach ($file in @($releaseExe, $repoExe, $repoOrt)) {
+    foreach ($file in @($releaseExe, $repoExe)) {
       if (-not (Test-Path -LiteralPath $file)) { throw "Release artifact missing: $file" }
       $item = Get-Item -LiteralPath $file
-      $minimumSize = if ($file -eq $repoOrt) { 1MB } else { 10MB }
-      if ($item.Length -lt $minimumSize) { throw "Release artifact looks too small: $file ($($item.Length) bytes)" }
+      if ($item.Length -lt 10MB) { throw "Release artifact looks too small: $file ($($item.Length) bytes)" }
     }
     if (-not (Test-Path -LiteralPath $desktopShortcut)) {
       throw "Desktop shortcut missing: $desktopShortcut"

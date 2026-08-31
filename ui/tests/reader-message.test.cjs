@@ -123,6 +123,16 @@ test("bug traces accept only bounded metadata and never raw text or links", () =
   assert.equal(guard.validateData({ bugTrace: richWheelTurn }), true);
   assert.equal(guard.validateData({
     bugTrace: {
+      kind: "layout", source: "reader_page", outcome: "mac_native_clip", chapter: 3, page: 8,
+      mac_clip_native_notes: true, mac_clip_page_inline_notes: true,
+      mac_clip_view_height: 768, mac_clip_scroll_top: 4096,
+      mac_clip_measured_blank: 0, mac_clip_virtual_blank: 31,
+      mac_clip_partial_blank: 0, mac_clip_applied_blank: 0,
+      mac_clip_has_extra_virtual: true, mac_clip_path_active: false,
+    },
+  }), true);
+  assert.equal(guard.validateData({
+    bugTrace: {
       kind: "image_pagination", source: "reader_page", outcome: "no_candidate", target: "unknown",
       chapter: 3, page: 8, pages: 19, chapter_pending: 0, chapter_turn_pending: false,
       turn_fx_active: false, turn_timer_active: false, scroll_paged: false, flow_mode: "paged", page_mode: "single",

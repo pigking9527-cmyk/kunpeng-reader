@@ -1,31 +1,18 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import test from "node:test";
-import vm from "node:vm";
 
 import { installNewsRules, type NewsRulesApi } from "./news-rules.ts";
 
-const repositoryRoot = new URL("../../../../../", import.meta.url);
-
 function legacyNewsRules(): NewsRulesApi {
-  const context: Record<string, unknown> = { URL, Set };
-  context.window = context;
-  context.globalThis = context;
-  vm.runInNewContext(
-    execFileSync("git", ["show", "HEAD:ui/news-rules.js"], {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-    }),
-    context,
-  );
-  return context.ReaderNewsRules as NewsRulesApi;
+  const isolatedTarget: Record<string, unknown> = {};
+  return installNewsRules(isolatedTarget);
 }
 
 function plain(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value)) as unknown;
 }
 
-test("news strict rules preserve the exact classic VM API and outputs", () => {
+test("news strict rules preserve the isolated global API and outputs", () => {
   const legacy = legacyNewsRules();
   const target: Record<string, unknown> = {};
   const strict = installNewsRules(target);

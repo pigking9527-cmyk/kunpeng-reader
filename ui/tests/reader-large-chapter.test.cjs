@@ -22,8 +22,8 @@ const readerPageSourceRoot = path.join(
 );
 const runtimeSource = fs.readFileSync(path.join(readerPageSourceRoot, "reader-page-runtime.ts"), "utf8");
 
-test("large chapter layout threshold selects only large HTML", () => {
-  assert.match(source, /global\.FAST_CHAPTER_LAYOUT_CHARS = \(global\.IS_MAC_WEBKIT \? 4 : 120\) \* 1024/);
+test("macOS compatibility layout uses fast boundaries from modest HTML", () => {
+  assert.match(source, /global\.FAST_CHAPTER_LAYOUT_CHARS = \(global\.IS_MAC_WEBKIT \? 1 : 120\) \* 1024/);
   assert.match(source, /function largeChapterFastLayout\(html\)[\s\S]*?String\(html \|\| ""\)\.length >= \(global\.FAST_CHAPTER_LAYOUT_CHARS/);
 });
 
@@ -79,7 +79,7 @@ test("large chapters use batched geometry and skip repeated exact layout", () =>
   assert.match(source, /if\(fastChapterLayout\)return fastDocumentTextLineRects\(\)/);
   assert.match(
     source,
-    /waitForFlowResources\(\)\.then[\s\S]*?applyStyle\(\);applyCols\(\);const finishChapterLayout=function\(\)\{if\(fastChapterLayout\)\{if\(!isScrollMode\(\)\)pagesInCh=fastPagedPageCount\(root\)/
+    /waitForFlowResources\(\)\.then[\s\S]*?applyStyle\(\);applyCols\(\);layoutStarted=performance\.now\(\);const finishChapterLayout=function\(\)\{if\(fastChapterLayout\)\{if\(!isScrollMode\(\)\)pagesInCh=fastPagedPageCount\(root\)/
   );
 });
 

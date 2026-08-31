@@ -34,10 +34,19 @@ test("reader preference color rules convert canonical hex and bounded HSL", () =
   assert.equal(color.hslToHex(480, 100, 50), "#00ff00");
 });
 
+test("reader preference color rules calculate WCAG contrast ratios", () => {
+  const color = rules();
+  assert.equal(color.contrastRatio("#000000", "#ffffff"), 21);
+  assert.equal(color.contrastRatio("#ffffff", "#ffffff"), 1);
+  assert.ok(color.contrastRatio("#777777", "#ffffff") < 4.5);
+  assert.ok(color.contrastRatio("#595959", "#ffffff") >= 7);
+});
+
 test("reader preference UI loads color rules first and retains its standalone fallback", () => {
   assert.match(readerHtml, /reader-settings-ui\.js[\s\S]*?generated-ts\/reader-preference-color-rules\.js[\s\S]*?reader-preferences-ui\.js/);
   assert.match(preferences, /const colorRules = colorRulesFrom\(global\.ReaderPreferenceColorRules\)/);
   assert.match(preferences, /if \(colorRules\) return colorRules\.normalizedHex\(value, fallback\)/);
   assert.match(preferences, /if \(colorRules\) return colorRules\.hexToHsl\(value\)/);
   assert.match(preferences, /if \(colorRules\) return colorRules\.hslToHex\(hue, saturation, lightness\)/);
+  assert.match(preferences, /if \(colorRules\) return colorRules\.contrastRatio\(foreground, background\)/);
 });

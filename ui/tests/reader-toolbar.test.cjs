@@ -256,7 +256,7 @@ test("reader settings show one state character and map off to simplified, on to 
   assert.match(settingsUi, /textConversionToggle\.checked = traditional/);
   assert.match(settingsUi, /textConversionToggle\.checked \? "s2t" : "t2s"/);
   assert.match(settingsUi, /textConversionLabel\.textContent = traditional \? "繁" : "简"/);
-  assert.match(layout, /const conversion=S\.textConversion==='t2s'\|\|S\.textConversion==='s2t'\?S\.textConversion:'original'/);
+  assert.match(layout, /function currentTextConversion\(\)\{return S\.textConversion==='t2s'\|\|S\.textConversion==='s2t'\?S\.textConversion:'original'\}/);
   assert.match(runtime, /if \(previousConversion !== g\.S\.textConversion\) \{\s*fn\(g, "showChapter", g\.curCh, g\.pageInCh\);\s*return;/);
 });
 
@@ -268,8 +268,10 @@ test("整页翻页仅保留水平滑动动画，并迁移旧动画设置", () =>
   assert.match(transition, /turnFxDuration\(360\)/);
   assert.match(transition, /captureTurnFxPage\("turn-fx-outgoing"\)[\s\S]*?move\(\);[\s\S]*?captureTurnFxPage\("turn-fx-incoming"\)/);
   assert.match(transition, /function beginChapterTurnFx[\s\S]*?captureTurnFxPage\("turn-fx-outgoing"\)[\s\S]*?showChapter\(chapter, where\)\.then[\s\S]*?captureTurnFxPage\("turn-fx-incoming"\)/);
-  assert.match(transition, /if \(effect === "off"\)[\s\S]*?captureTurnFxPage\("turn-fx-outgoing"\)[\s\S]*?turn-fx-hold[\s\S]*?waitForChapterPaint/);
-  assert.match(transition, /rememberCurrentChapterBoundarySnapshot\(\)[\s\S]*?showCachedChapterBoundary\(chapter, where\)/);
+  assert.match(transition, /if \(effect === "off"\)[\s\S]*?captureTurnFxPage\("turn-fx-outgoing"\)[\s\S]*?turn-fx-hold[\s\S]*?const chapterReady = showChapter\(chapter, where\);/);
+  assert.match(transition, /const chapterReady = showChapter\(chapter, where\);[\s\S]*?return chapterReady\.then\(\(value\) => \{[\s\S]*?global\.notifyReaderEndIfReached\?\.\(direction\);[\s\S]*?return value;[\s\S]*?\}\)\.finally\(\(\) => \{[\s\S]*?clearTurnFx\(\);[\s\S]*?done\(succeeded\d*\);/);
+  assert.doesNotMatch(transition, /if \(held\) await waitForChapterPaint\(\);/);
+  assert.doesNotMatch(transition, /showCachedChapterBoundary|rememberCurrentChapterBoundarySnapshot|chapterBoundarySnapshots/);
   assert.match(transition, /visibleVirtualPage[\s\S]*?global\.virtualPage\?\.style\.display === "block"[\s\S]*?visibleVirtualPage \?\? root/);
   assert.match(transition, /clone\.id = "virtual-page"/);
   assert.match(pageStyle, /#pager\.turn-fx-hold #turn-fx-sheet\{[^}]*opacity:1 !important/);
@@ -291,9 +293,9 @@ test("空白 EPUB spine 章节自动跳到首个可见内容页", () => {
 });
 
 test("跨章加载在末页定位完成前隐藏新正文", () => {
-  assert.match(layout, /root\.style\.visibility='hidden';\s*root\.innerHTML=/);
-  assert.match(layout, /setViewOffset\(\);[\s\S]{0,300}?root\.style\.visibility='';/);
-  assert.match(layout, /function\(\)\{root\.style\.visibility='';finishChapterBugTrace\(bugTraceToken,false,0\)\}/);
+  assert.match(layout, /root\.style\.visibility='hidden';root\.style\.opacity='0';[\s\S]*?const chapterTemplate=takePreparedChapterDom\(payloadKey,body\);root\.replaceChildren\(chapterTemplate\.content\);/);
+  assert.match(layout, /setViewOffset\(\);[\s\S]*?requestAnimationFrame\(function\(\)\{requestAnimationFrame\(function\(\)\{[\s\S]*?root\.style\.visibility='';root\.style\.opacity='';/);
+  assert.match(layout, /function\(\)\{[^}]*root\.style\.visibility='';root\.style\.opacity='';finishChapterBugTrace\(bugTraceToken,false,0\)\}/);
 });
 
 test("章节分页等待 EPUB 样式加载，避免双页续读总页数漂移", () => {
@@ -311,7 +313,7 @@ test("双页续读先采集本页锚点并把锚点恢复到左页", () => {
   const showChapter = layout.slice(layout.indexOf("function showChapter("), layout.indexOf("var curTopAnchor="));
   assert.match(gotoPage, /setViewOffset\(\);[\s\S]*?captureAnchor\(\);report\(true\)/);
   assert.doesNotMatch(gotoPage, /report\(\);[^}]*captureAnchor\(\)/);
-  assert.match(showChapter, /setViewOffset\(\);root\.style\.visibility='';refreshHighlights\(\);captureAnchor\(\);report\(true\)/);
+  assert.match(showChapter, /setViewOffset\(\);[\s\S]*?root\.style\.visibility='';root\.style\.opacity='';refreshHighlights\(\);captureAnchor\(\);report\(true\)/);
   assert.match(annotations, /restoreStoredReadingAnchor[\s\S]*?alignDualAnchorToLeftPage\(pageAnchor\)[\s\S]*?setViewOffset\(\)/);
   assert.match(annotations, /if\(restored&&isDualPage\(\)\)\{\s*dualStartColumn=0;[\s\S]*?resumePage=Math\.round\(rf\*\(pagesInCh-1\)\);[\s\S]*?pageInCh=Math\.max\(0,Math\.min\(pagesInCh-1,resumePage\)\);/);
   assert.doesNotMatch(annotations, /Math\.abs\(pageInCh-resumePage\)>1/);
@@ -689,7 +691,7 @@ test("virtual footnotes keep explicit cross-chapter targets and avoid whole-book
   assert.match(annotations, /showFootnote\(a,ciT,frag,!!m\)/);
 });
 
-test("macOS WebKit switches ordinary chapters to batched geometry earlier", () => {
+test("macOS WebKit switches modest chapters to batched geometry", () => {
   assert.match(layout, /const IS_MAC_WEBKIT=.*AppleWebKit/);
-  assert.match(transition, /global\.FAST_CHAPTER_LAYOUT_CHARS = \(global\.IS_MAC_WEBKIT \? 4 : 120\) \* 1024/);
+  assert.match(transition, /global\.FAST_CHAPTER_LAYOUT_CHARS = \(global\.IS_MAC_WEBKIT \? 1 : 120\) \* 1024/);
 });

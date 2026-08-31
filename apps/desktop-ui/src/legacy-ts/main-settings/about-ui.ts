@@ -100,6 +100,7 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
     const modal = requiredElement<HTMLElement>(root, "about-modal");
     const updateBar = requiredElement<HTMLElement>(root, "update-bar");
     const updateButton = requiredElement<HTMLButtonElement>(root, "about-update");
+    const githubLink = requiredElement<HTMLAnchorElement>(root, "about-github");
     const notesElement = requiredElement<HTMLElement>(root, "about-notes");
     const updateNotesElement = requiredElement<HTMLElement>(root, "ub-notes");
     const pendingUpdateKey = "pendingUpdateV1";
@@ -328,10 +329,24 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
       }
     };
 
-    const cachedPendingUpdate = (): UpdateInfo | null => {
+    const installedVersion = async (): Promise<string> =>
+      String(await api.invoke("app_version").catch(() => ""))
+        .trim()
+        .replace(/^v/iu, "");
+
+    const cachedPendingUpdate = (currentVersion = ""): UpdateInfo | null => {
       try {
         const info: unknown = JSON.parse(storage.getItem(pendingUpdateKey) || "null");
-        return isNewerThanCurrent(info) ? info : null;
+        if (!isNewerThanCurrent(info)) return null;
+        const cached = info as UpdateInfo;
+        if (
+          currentVersion &&
+          String(cached.current || "").replace(/^v/iu, "") !== currentVersion
+        ) {
+          storage.removeItem(pendingUpdateKey);
+          return null;
+        }
+        return cached;
       } catch {
         return null;
       }
@@ -391,18 +406,24 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
         updateBar.classList.add("show");
         return;
       }
-      const cached = cachedPendingUpdate();
-      if (cached && !isIgnored(cached)) showUpdateBanner(cached);
+      void installedVersion().then((currentVersion) => {
+        if (!currentVersion) return;
+        const cached = cachedPendingUpdate(currentVersion);
+        if (cached && !isIgnored(cached)) showUpdateBanner(cached);
+      });
     };
 
     const restorePendingUpdate = (): void => {
-      const cached = cachedPendingUpdate();
-      if (cached && !isIgnored(cached)) showUpdateBanner(cached);
+      void installedVersion().then((currentVersion) => {
+        if (!currentVersion) return;
+        const cached = cachedPendingUpdate(currentVersion);
+        if (cached && !isIgnored(cached)) showUpdateBanner(cached);
+      });
     };
 
     const discardStalePendingUpdate = (info: UpdateInfo): void => {
       if (info.source !== "server" || info.has_update) return;
-      const cached = cachedPendingUpdate();
+      const cached = cachedPendingUpdate(String(info.current || "").replace(/^v/iu, ""));
       if (!cached || String(cached.current) !== String(info.current)) return;
       try {
         storage.removeItem(pendingUpdateKey);
@@ -470,6 +491,11 @@ export function createAboutUi(runtime: AboutRuntime): AboutUiApi {
     });
     requiredElement<HTMLElement>(root, "mi-about").addEventListener("click", openAbout);
     requiredElement<HTMLElement>(root, "about-close").addEventListener("click", closeAbout);
+    githubLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      const url = safeReleaseUrl(githubLink.href);
+      if (url) void api.invoke("open_url", { url }).catch(() => undefined);
+    });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) closeAbout();
     });

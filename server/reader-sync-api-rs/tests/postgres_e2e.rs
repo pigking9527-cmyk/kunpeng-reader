@@ -589,6 +589,7 @@ fn binary_request(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn login_push_replay_conflict_and_pull() {
     let Some(database_url) = explicit_test_database_url() else {
         return;
@@ -1457,6 +1458,7 @@ async fn assert_retired_history_storage_removed(pool: &sqlx::PgPool) {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn storage_ledger_tracks_batch_push_assets_and_reset() {
     let Some(database_url) = explicit_test_database_url() else {
         return;
@@ -1705,6 +1707,7 @@ async fn load_rehearsal_feedback_limit_persists_only_allowed_requests() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn registration_uses_outbox_code_and_creates_verified_account() {
     let Some(database_url) = explicit_test_database_url() else {
         return;
@@ -2022,6 +2025,7 @@ async fn feedback_persists_valid_bug_attachment() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn password_change_keeps_current_session_and_revokes_other_devices() {
     let Some(database_url) = explicit_test_database_url() else {
         return;

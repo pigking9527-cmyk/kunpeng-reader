@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "publicReleaseAllowed": false,
-  "releaseHoldReason": "Historical binaries linked GPL-3.0 epub code. New public assets remain paused until the parser migration, packaged notices, IP attestation, and legal review are accepted.",
+  "publicReleaseAllowed": true,
+  "releaseHoldReason": "The historical GPL remediation, historical asset disposition, IP attestation, and legal review were accepted by the repository owner on 2026-08-31. Public releases remain subject to the package-license checks in this policy.",
   "deniedLicenseTokens": ["AGPL-", "GPL-", "LGPL-", "SSPL-", "BUSL-"],
   "allowedRustLicenseIds": [
     "0BSD",

@@ -8,9 +8,14 @@ on:
         required: false
         type: boolean
         default: false
+      development_release:
+        description: "Publish an explicitly labelled early-development build with an ad-hoc signature and no notarization"
+        required: false
+        type: boolean
+        default: false
   push:
-    branches:
-      - codex/macos-build
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -22,10 +27,9 @@ jobs:
     timeout-minutes: 90
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
-      # Normal CI remains reproducible with an ad-hoc signature. A manually
-      # published release imports a Developer ID certificate below and replaces
-      # this value with the protected repository secret.
-      APPLE_SIGNING_IDENTITY: ${{ inputs.publish_release && secrets.APPLE_SIGNING_IDENTITY || '-' }}
+      # Ordinary CI and explicitly labelled early-development releases use an
+      # ad-hoc signature. Stable published releases import Developer ID below.
+      APPLE_SIGNING_IDENTITY: ${{ inputs.publish_release && !inputs.development_release && secrets.APPLE_SIGNING_IDENTITY || '-' }}
 
     steps:
       - name: Checkout
@@ -34,6 +38,7 @@ jobs:
       - name: Setup Rust targets
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: rustfmt, clippy
           targets: aarch64-apple-darwin
 
       - name: Cache Cargo
@@ -58,11 +63,11 @@ jobs:
         if: ${{ inputs.publish_release }}
         run: npm run release:license-gate
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version '^2' --locked
+      - name: Verify project Tauri CLI
+        run: npm exec -- tauri --version
 
       - name: Import Developer ID signing certificate
-        if: ${{ inputs.publish_release }}
+        if: ${{ inputs.publish_release && !inputs.development_release }}
         shell: bash
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -93,13 +98,18 @@ jobs:
 
       # The semantic search runtime does not ship Intel macOS prebuilt binaries.
       - name: Build Apple Silicon macOS bundles
-        run: cargo tauri build --target aarch64-apple-darwin --bundles app,dmg
+        run: npm exec -- tauri build --target aarch64-apple-darwin --bundles app,dmg -- --bin ebook-reader-tauri
 
-      - name: Verify packaged license inventory
+      - name: Verify packaged reader application and license inventory
         shell: bash
         run: |
           set -euo pipefail
           app_path="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app_path"
+          expected_binary="ebook-reader-tauri"
+          actual_binary="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")"
+          test "$actual_binary" = "$expected_binary"
+          test -x "$app_path/Contents/MacOS/$expected_binary"
           test -s "$app_path/Contents/Resources/licenses/THIRD_PARTY_NOTICES.md"
           test -s "$app_path/Contents/Resources/licenses/DEPENDENCY_LICENSES.md"
 
@@ -113,9 +123,10 @@ jobs:
           test -n "$app_path"
           # Tauri's ad-hoc fallback signs the executable, but `codesign
           # --strict` and Apple's notarization require the outer app bundle to
-          # seal Info.plist and Resources too. Publish builds additionally need
-          # Hardened Runtime and a trusted timestamp.
-          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+          # seal Info.plist and Resources too. Stable publish builds need
+          # Hardened Runtime and a trusted timestamp; early-development
+          # releases are explicitly uploaded with an ad-hoc signature.
+          if [[ "$PUBLISH_RELEASE" == "true" && "${{ inputs.development_release }}" != "true" ]]; then
             codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_path"
           else
             codesign --force --deep --sign - "$app_path"
@@ -130,8 +141,8 @@ jobs:
           codesign --verify --deep --strict --verbose=4 "$app_path"
           codesign --display --verbose=4 "$app_path"
 
-      - name: Notarize and staple published release bundles
-        if: ${{ inputs.publish_release }}
+      - name: Notarize and staple stable published release bundles
+        if: ${{ inputs.publish_release && !inputs.development_release }}
         shell: bash
         env:
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
@@ -175,6 +186,29 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.app.zip"
           cp "$dmg_path" "$out_dir/Kunpeng-Reader-v${version}-macOS-Apple-Silicon.dmg"
           (cd "$out_dir" && shasum -a 256 * > SHA256SUMS.txt)
+
+      - name: Verify macOS release archives contain the reader executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          out_dir="target/macos-release"
+          zip_path="$(find "$out_dir" -maxdepth 1 -type f -name '*.app.zip' -print -quit)"
+          dmg_path="$(find "$out_dir" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$zip_path"
+          test -n "$dmg_path"
+          unzip -Z1 "$zip_path" | grep -E '/Contents/MacOS/ebook-reader-tauri$'
+
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" -quiet || true
+            rm -rf "$mount_dir"
+          }
+          trap cleanup EXIT
+          hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$mount_dir" >/dev/null
+          packaged_app="$(find "$mount_dir" -mindepth 1 -maxdepth 1 -type d ! -name Applications -print -quit)"
+          test -n "$packaged_app"
+          test -x "$packaged_app/Contents/MacOS/ebook-reader-tauri"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$packaged_app/Contents/Info.plist")" = 'ebook-reader-tauri'
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v6

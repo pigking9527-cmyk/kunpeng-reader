@@ -3617,7 +3617,7 @@
         <section class="about-version-card">
           <div>
             <span class="about-eyebrow" data-i18n="aboutVersion">版本</span
-            ><strong id="about-ver">v1.8.0</strong>
+            ><strong id="about-ver">测试版 1.0</strong>
           </div>
           <div class="about-version-actions">
             <button
@@ -3649,6 +3649,16 @@
             加载中…
           </div>
         </section>
+        <a
+          id="about-github"
+          class="about-github-card"
+          href="https://github.com/pigking9527-cmyk/kunpeng-reader"
+          aria-label="在 GitHub 打开鲲鹏阅读器项目"
+        >
+          <b aria-hidden="true">◈</b>
+          <span>github.com/pigking9527-cmyk/kunpeng-reader</span>
+          <b aria-hidden="true">↗</b>
+        </a>
         <div class="about-feedback-actions">
           <button
             id="about-feedback-bug"
@@ -4754,7 +4764,7 @@
       hidden
       aria-label="情报中心测试"
       data-gesture-info-title="情报中心（测试）"
-      data-gesture-info="这是统一情报工作台原型。它暂时复用资讯流数据展示简报、态势和研究布局；不会上传书库，也不会调用外部模型。"
+      data-gesture-info="这是统一情报工作台原型。它会从本机公开来源目录抓取资讯，在本地去重、排序和整理简报；不会上传书库，也不会调用外部模型。"
       data-layout="briefing"
     >
       <header class="intelligence-workspace-head">
@@ -4771,7 +4781,7 @@
           <div>
             <div class="intelligence-workspace-kicker">情报中心 <span>测试</span></div>
             <h1>从事件到阅读与书库理解</h1>
-            <p>同一批资讯在不同任务下，以简报、态势、研究和星际旅行四种视角呈现。</p>
+            <p>全目录资讯经抓取、去重、重要性判断和综合整理后，以简报、态势、研究和星际旅行四种视角呈现。</p>
           </div>
         </div>
         <div class="intelligence-workspace-actions">
@@ -4810,14 +4820,28 @@
         </div>
       </header>
       <p id="intelligence-workspace-status" class="intelligence-workspace-status" aria-live="polite"></p>
+      <section id="intelligence-source-directory" class="intelligence-source-directory" aria-label="情报中心信息来源" hidden>
+        <header class="intelligence-source-directory-head">
+          <div>
+            <div class="intelligence-panel-label">情报中心 · 独立目录</div>
+            <h2>全目录信息来源</h2>
+            <p>这里只展示情报中心可抓取的公开来源，不会更改资讯页的个人来源管理或订阅选择。</p>
+          </div>
+          <button id="intelligence-source-directory-back" class="btn-plain" type="button">返回情报中心</button>
+        </header>
+        <p id="intelligence-source-directory-summary" class="intelligence-source-directory-summary" aria-live="polite">正在读取情报来源目录…</p>
+        <label class="intelligence-source-directory-search-label" for="intelligence-source-directory-search">搜索来源</label>
+        <input id="intelligence-source-directory-search" class="intelligence-source-directory-search" type="search" placeholder="按名称、分类、提供方或类型搜索" autocomplete="off">
+        <div id="intelligence-source-directory-list" class="intelligence-source-directory-list" aria-live="polite"></div>
+      </section>
       <div id="intelligence-standard-view" class="intelligence-workspace-grid">
         <aside class="intelligence-source-rail" aria-label="情报处理链路">
           <section class="intelligence-stage-card intelligence-stage-horizon">
             <div class="intelligence-stage-label">Horizon · 后端</div>
-            <h2>今日信号筛选</h2>
-            <p>已接入公开的人道与安全信号源；未选来源不会参与抓取、去重或排序。</p>
+            <h2>全目录信号处理</h2>
+            <p>情报中心会尝试抓取公开来源目录；普通资讯页的个人选择不会限制这里的采集范围。</p>
             <div class="intelligence-stage-pills" aria-label="Horizon 数据处理">
-              <span>抓取</span><span>去重</span><span>排序</span>
+              <span>全量抓取</span><span>去重</span><span>排序</span><span>归纳</span>
             </div>
           </section>
           <section class="intelligence-stage-card intelligence-stage-world">
@@ -4832,10 +4856,9 @@
         <main class="intelligence-main-panel">
           <section class="intelligence-main-head">
             <div>
-              <div class="intelligence-panel-label">资讯 · 展示</div>
-              <h2>今日可读信号</h2>
+              <div class="intelligence-panel-label">综合简报 · 本地规则首版</div>
+              <h2>今日综合要点</h2>
             </div>
-            <p>选择一条资讯，右侧会保留其事件上下文。</p>
           </section>
           <div id="intelligence-digest-list" class="intelligence-digest-list" aria-live="polite"></div>
         </main>
@@ -4861,42 +4884,42 @@
       >
         <section class="interstellar-hero">
           <div class="interstellar-hero-copy">
-            <div class="intelligence-panel-label">INTERSTELLAR READINESS · 首版人工基线</div>
-            <h2>无人恒星际飞越探测器</h2>
-            <p>目标场景：达到约 0.05c，飞越一颗近邻恒星并返回科学数据。这里衡量的是能力成熟度，不是工程完成百分比或发布日期承诺。</p>
+            <div class="intelligence-panel-label">INTERSTELLAR READINESS · 载人基线 v2</div>
+            <h2>载人近邻恒星际飞行</h2>
+            <p>目标场景：使小型乘员组以约 0.05c 级速度抵达近邻恒星系统，并在数十年旅程中维持生存、健康、自主医疗与决策能力，传回科学数据。这里衡量的是能力成熟度，不是工程完成百分比或发布日期承诺。</p>
             <div class="interstellar-scenario-tags" aria-label="任务边界">
-              <span>无人任务</span><span>近邻恒星</span><span>0.05c 级</span><span>可追溯证据</span>
+              <span>载人任务</span><span>近邻恒星</span><span>0.05c 级</span><span>闭环生命保障</span><span>可追溯证据</span>
             </div>
           </div>
-          <div class="interstellar-total" role="img" aria-label="综合进度17%，估计区间12%到23%">
+          <div class="interstellar-total" role="img" aria-label="综合进度8%，估计区间5%到12%">
             <div class="interstellar-total-ring">
-              <strong>17<span>%</span></strong>
+              <strong>8<span>%</span></strong>
               <small>综合进度</small>
             </div>
-            <p>估计区间 12%–23%</p>
+            <p>估计区间 5%–12%</p>
           </div>
           <div class="interstellar-baseline-note">
             <span>基线日期</span>
-            <strong>2026-08-18</strong>
-            <p>下一次经审核的证据快照会形成首个可计算速度。</p>
+            <strong>2026-08-20</strong>
+            <p>由无人目标切换为载人目标；下一次经审核的证据快照会形成首个可计算速度。</p>
           </div>
         </section>
 
         <section class="interstellar-pillars" aria-label="三大推进支柱">
           <article class="interstellar-pillar-card is-research">
-            <div><span>基础研究</span><strong>34%</strong></div>
-            <div class="interstellar-meter"><i style="width: 34%"></i></div>
-            <p>相对论、推进物理、材料、生命科学与自主系统的知识基础。</p>
+            <div><span>基础研究</span><strong>27%</strong></div>
+            <div class="interstellar-meter"><i style="width: 27%"></i></div>
+            <p>推进物理、材料、生物医学、封闭生态与自主系统的知识基础。</p>
           </article>
           <article class="interstellar-pillar-card is-engineering">
-            <div><span>工程实现</span><strong>13%</strong></div>
-            <div class="interstellar-meter"><i style="width: 13%"></i></div>
-            <p>原型、相关环境验证、长期可靠性、制造与太空基础设施。</p>
+            <div><span>工程实现</span><strong>6%</strong></div>
+            <div class="interstellar-meter"><i style="width: 6%"></i></div>
+            <p>推进、减速、闭环生命保障、辐射防护、长期可靠性与太空基础设施。</p>
           </article>
           <article class="interstellar-pillar-card is-institution">
-            <div><span>制度与产业</span><strong>9%</strong></div>
-            <div class="interstellar-meter"><i style="width: 9%"></i></div>
-            <p>跨世代投资、国际协作、风险治理、资源和持续工业能力。</p>
+            <div><span>制度与产业</span><strong>5%</strong></div>
+            <div class="interstellar-meter"><i style="width: 5%"></i></div>
+            <p>跨世代投资、乘员权益、风险治理、资源和持续工业能力。</p>
           </article>
         </section>
 
@@ -4907,15 +4930,16 @@
                 <div class="intelligence-panel-label">能力图谱 · 当前瓶颈</div>
                 <h2>任何关键短板都不能被高分项抵消</h2>
               </div>
-              <span class="interstellar-model-badge">6 项关键能力</span>
+              <span class="interstellar-model-badge">7 项关键能力</span>
             </div>
             <div class="interstellar-bottlenecks">
-              <div class="interstellar-bottleneck"><span>太空工业与长期制度</span><i><b style="width: 9%"></b></i><strong>9%</strong></div>
-              <div class="interstellar-bottleneck"><span>高比冲推进与减速</span><i><b style="width: 11%"></b></i><strong>11%</strong></div>
-              <div class="interstellar-bottleneck"><span>高密度能源与散热</span><i><b style="width: 17%"></b></i><strong>17%</strong></div>
-              <div class="interstellar-bottleneck"><span>数十年可靠性与自修复</span><i><b style="width: 20%"></b></i><strong>20%</strong></div>
-              <div class="interstellar-bottleneck"><span>材料、尘埃与辐射防护</span><i><b style="width: 28%"></b></i><strong>28%</strong></div>
-              <div class="interstellar-bottleneck"><span>自主 AI、导航与通信</span><i><b style="width: 42%"></b></i><strong>42%</strong></div>
+              <div class="interstellar-bottleneck"><span>太空工业与跨世代制度</span><i><b style="width: 5%"></b></i><strong>5%</strong></div>
+              <div class="interstellar-bottleneck"><span>高比冲推进、减速与燃料</span><i><b style="width: 9%"></b></i><strong>9%</strong></div>
+              <div class="interstellar-bottleneck"><span>高密度能源与散热</span><i><b style="width: 13%"></b></i><strong>13%</strong></div>
+              <div class="interstellar-bottleneck"><span>材料、尘埃与辐射防护</span><i><b style="width: 18%"></b></i><strong>18%</strong></div>
+              <div class="interstellar-bottleneck"><span>数十年闭环生态与自修复</span><i><b style="width: 8%"></b></i><strong>8%</strong></div>
+              <div class="interstellar-bottleneck"><span>人体适应、生物工程与医疗</span><i><b style="width: 6%"></b></i><strong>6%</strong></div>
+              <div class="interstellar-bottleneck"><span>自主 AI、导航、通信与人机协作</span><i><b style="width: 24%"></b></i><strong>24%</strong></div>
             </div>
           </section>
 
@@ -4923,12 +4947,12 @@
             <section class="interstellar-panel interstellar-attribution-panel">
               <div class="intelligence-panel-label">总体贡献归因</div>
               <h2>人类与 AI</h2>
-              <div class="interstellar-attribution-bar" aria-label="人类贡献15个百分点，AI贡献2个百分点">
-                <i class="is-human" style="width: 88.24%"></i><i class="is-ai" style="width: 11.76%"></i>
+              <div class="interstellar-attribution-bar" aria-label="人类贡献7个百分点，AI贡献1个百分点">
+                <i class="is-human" style="width: 87.5%"></i><i class="is-ai" style="width: 12.5%"></i>
               </div>
               <div class="interstellar-attribution-legend">
-                <span><i class="is-human"></i>人类 15.0 点</span>
-                <span><i class="is-ai"></i>AI 2.0 点</span>
+                <span><i class="is-human"></i>人类 7.0 点</span>
+                <span><i class="is-ai"></i>AI 1.0 点</span>
               </div>
               <p>只记录有明确证据的直接或辅助贡献；未知归因不会强行分配。</p>
             </section>
@@ -4936,14 +4960,27 @@
               <div class="intelligence-panel-label">发展速度</div>
               <h2>基线建立中</h2>
               <strong>待累计 2 个审核快照</strong>
-              <p>资金、政策和灾害主要影响速度；理论、实验与成熟工程主要影响当前进度。</p>
+              <p>资金、政策和灾害主要影响速度；可重复生物医学、闭环生态与成熟工程主要影响当前进度。</p>
             </section>
             <section class="interstellar-panel interstellar-rule-panel">
               <div class="intelligence-panel-label">动态计算规则</div>
-              <p>理论贡献会随对应工程成熟度逐步释放，但不会重复加分；撤稿、失败实验和项目取消可以降低进度。</p>
+              <p>理论贡献会随对应工程成熟度逐步释放，但不会重复加分；人体安全、生命保障与乘员权益必须通过独立门槛；撤稿、失败实验和项目取消可以降低进度。</p>
             </section>
           </aside>
         </div>
+
+        <section class="interstellar-panel interstellar-source-panel">
+          <div class="interstellar-section-head">
+            <div>
+              <div class="intelligence-panel-label">来源接入 · 本地模型预备</div>
+              <h2>当前来源覆盖</h2>
+            </div>
+            <button id="interstellar-manage-sources" class="btn-secondary" type="button">管理来源</button>
+          </div>
+          <p id="interstellar-source-summary" class="interstellar-source-summary">正在读取来源目录…</p>
+          <p id="interstellar-source-note" class="interstellar-source-note">来源只决定抓取范围；它们不会自行判断进度。</p>
+          <div id="interstellar-source-groups" class="interstellar-source-groups" aria-live="polite"></div>
+        </section>
 
         <section class="interstellar-panel interstellar-signals-panel">
           <div class="interstellar-section-head">
@@ -4953,7 +4990,7 @@
             </div>
             <span id="interstellar-signal-count" class="interstellar-model-badge">等待资讯</span>
           </div>
-          <p class="interstellar-signals-disclaimer">系统只做相关性筛选。候选新闻在确认原始论文、工程数据或正式公告前，不会改变任何进度。</p>
+          <p class="interstellar-signals-disclaimer">点击候选可直接查看正文。系统只做初步相关性筛选；后续本地模型会结合原始论文、工程数据或正式公告审核证据；在此之前，候选新闻不会改变任何进度。</p>
           <div class="interstellar-signal-layout">
             <div id="interstellar-signal-list" class="interstellar-candidate-list" aria-live="polite"></div>
             <aside class="interstellar-candidate-detail">

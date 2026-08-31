@@ -136,21 +136,23 @@ test("all ten language routes and exact catalog overrides remain stable", () => 
     assert.equal(api.t("pageTitle"), title);
     assert.equal(api.t("vocabulary"), vocabulary);
     assert.equal(api.t("crossSummary", { books: 2, hits: 3 }).includes("2"), true);
+    assert.notEqual(api.t("fullColorSpectrum"), "fullColorSpectrum");
+    assert.notEqual(api.t("colorContrastLow"), "colorContrastLow");
   }
 });
 
-test("all 355 catalog entries per language match the frozen classic snapshot", () => {
+test("all 363 catalog entries per language match the frozen classic snapshot", () => {
   const expected = new Map<string, string>([
-    ["zh-CN", "7b8b4cd78c58c569995b0598123fe7962c3991cc96f2ea120bac2d0e91736772"],
-    ["zh-TW", "cc8aba9671db4c49b5ee41754879b7631db5d50be9e1e43a761fa91dca0c0e6e"],
-    ["en", "b1612513e74ddbbe9a54aea934da8deb64e126a5990753833cca0a80fad95307"],
-    ["ja", "3eea219a4dd6b5a7b4188fb332c5be32a56f81a05ab3ad0e7e7bf055230cc25d"],
-    ["ko", "521e309666c62a8c7098113df5f6a70d6ac1e0e29bfa1f6188b430efeb7c1594"],
-    ["fr", "90f0610acc3aac8e02add96267ac807d4a506086cecf6947c2716611228f2283"],
-    ["de", "7dcac6c87f31bd417d0399f7352faf6f5b7a3bb49aaeaa79a32322bcf51ade9f"],
-    ["es", "411e9ef63f833189f91834e71de6b253f79a5fdf37639bebf8c06846a4be636e"],
-    ["ru", "7edacca0055e11991fb63f4dfde29c37f9f08b4bedec0dc501fdb4a171b40692"],
-    ["pt-BR", "d5210215fbefd63e20b0dbbd77694687b64c42929b653381024150468fd15b13"],
+    ["zh-CN", "60bc3c060778ccdf97cbe022ba0a89cdd67ef241983fc421fc84ba1605dcb205"],
+    ["zh-TW", "25a9b9cad6e87b7f7017c28113ad59e60821ca333b0fdcc9e6a40a92750d5aaa"],
+    ["en", "c0f3a246311fb9c5c38f4906dc3259ebdd2fb9930d537ab700cbc38bdf1af3d7"],
+    ["ja", "5d973eaddfb7bf86bc218a42f1f3e4262209b147ba5c5ab1af427e2982144382"],
+    ["ko", "d505fcd57a322dd28dd250bbe956279ebeaba189182fd0938356257b046de2f0"],
+    ["fr", "8f5149acc7705f0c21e7ccb59d7e4ed45ffca69858721795929a0708c2c7d2e1"],
+    ["de", "21b8a1feb680ea2d6ae5d2ba6e2510270616b06c1db5cca48a08c953b45eac37"],
+    ["es", "d8e96bc431576b4fd6796809de7f2cfec5ee9507e7d706578f1f7d3367c5543d"],
+    ["ru", "30574e02d093d9e24addca6353a62b65096803a8bac1e7c19b346e440f08ffa6"],
+    ["pt-BR", "1583b96261ced24e8278f92bc445062382ed2535afff94f7c5fafdd073ba9576"],
   ]);
   const values = Object.fromEntries([
     "error", "stages", "index", "current", "total", "stage", "page", "chapter",
@@ -160,7 +162,7 @@ test("all 355 catalog entries per language match the frozen classic snapshot", (
   for (const [locale, digest] of expected) {
     const api = install(createHarness({ selected: locale }));
     const keys = api.missingKeys("__missing__");
-    assert.equal(keys.length, 355);
+    assert.equal(keys.length, 363);
     const rows = keys.map((key) => [key, api.t(key, values)]);
     assert.equal(createHash("sha256").update(JSON.stringify(rows)).digest("hex"), digest, locale);
   }

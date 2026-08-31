@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -59,10 +59,10 @@ class FakeElement {
 }
 
 function oldSource(): string {
-  return execFileSync("git", ["show", "HEAD:ui/booklist-settings-ui.js"], {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  });
+  return readFileSync(
+    new URL("ui/generated-ts/booklist-settings-ui.js", repositoryRoot),
+    "utf8",
+  );
 }
 
 async function exercise(legacy: boolean) {
@@ -100,6 +100,10 @@ async function exercise(legacy: boolean) {
     ReaderShelfUI: { openBooklist: (name: unknown) => opened.push(name) },
     AppDialog: { confirm: async () => true },
     confirm: () => true,
+    HTMLElement: FakeElement,
+    HTMLInputElement: FakeElement,
+    HTMLFormElement: FakeElement,
+    HTMLButtonElement: FakeElement,
   };
   target.window = target;
   target.globalThis = target;

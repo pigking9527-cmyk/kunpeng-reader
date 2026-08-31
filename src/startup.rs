@@ -65,6 +65,7 @@ fn associated_book_paths(args: &[String], cwd: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn supported_existing_book_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     paths
@@ -78,6 +79,7 @@ fn supported_existing_book_paths(paths: impl IntoIterator<Item = PathBuf>) -> Ve
 /// Delivers a Finder/LaunchServices open request to a running desktop reader.
 /// Initial launch paths are still kept in `StartupBookPaths`; this function is
 /// for the macOS `Opened` event, which bypasses a second process entirely.
+#[cfg(target_os = "macos")]
 pub(crate) fn open_associated_book_paths(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
     let paths = supported_existing_book_paths(paths);
     if paths.is_empty() {

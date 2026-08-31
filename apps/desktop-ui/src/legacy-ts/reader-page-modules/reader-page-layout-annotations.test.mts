@@ -25,7 +25,6 @@ const lazyDependencies = [
   "schedulePagedImagePreview", "padModeSwitchAnchorToColumnTop",
   "modeSwitchAnchorAtVisibleTop", "largeChapterFastLayout",
   "forceModeSwitchAnchorColumn", "finishPageTurnBugTrace", "beginChapterBugTrace",
-  "clearTurnFx", "cacheChapterBoundarySnapshot",
 ] as const;
 
 function rect(): DOMRect {
@@ -101,12 +100,23 @@ test("combined reader page source keeps live, lazy, dictionary and resource gate
   assert.match(source, /if\(input\.checked&&!dictEnhancementAvailable\(lastDict,cfg\.key\)\)\{[\s\S]*?input\.checked=false;[\s\S]*?st\[cfg\.key\]=false;/u);
   assert.match(source, /function activeReaderFontReady\(\): boolean\{[\s\S]*?document\.fonts\.check\(fontSize\+'px '\+fontFamily,'中文Aa'\)/u);
   assert.match(source, /function waitForFlowResources\([^)]*\): Promise<void>\{[\s\S]*?!activeReaderFontReady\(\)[\s\S]*?querySelectorAll<HTMLImageElement>\('img'\)[\s\S]*?if\(img\.complete\)continue;[\s\S]*?addEventListener\('load',done\)[\s\S]*?Promise\.race/u);
-  assert.match(source, /waitForFlowResources\(\)\.then\(function\(\)\{return new Promise<void>\(function\(resolve\)\{\s*requestAnimationFrame\(function\(\)\{requestAnimationFrame\(function\(\)/u);
+  assert.match(source, /waitForFlowResources\(\)\.then\(function\(\)\{resourceDone=performance\.now\(\);return new Promise<void>\(function\(resolve\)\{\s*requestAnimationFrame\(function\(\)\{requestAnimationFrame\(function\(\)/u);
   assert.match(source, /function pagedPageCountFromContent[\s\S]*?const textCount=[\s\S]*?return isModernEpubLayout\(\)\?Math\.max\(textCount,fastPagedPageCount\(el\)\):textCount;/u);
   assert.match(source, /function trimTrailingBlankPagedViews[\s\S]*?if\(isModernEpubLayout\(\)\)return pages;[\s\S]*?while\(pages>1&&!pagedViewHasVisibleContent/u);
-  assert.match(source, /function buildChapterOpeningSnapshot\(body: string\): HTMLElement\|null\{[\s\S]*?body\.slice\(0,CHAPTER_OPENING_SNAPSHOT_BYTES\)[\s\S]*?querySelectorAll\('script,style,link,base,\[id\]'\)/u);
-  assert.match(source, /function scheduleChapterOpeningSnapshotPrefetch[\s\S]*?cacheChapterBoundarySnapshot\(chapter,'start',page\)[\s\S]*?chapter_opening_snapshot_prefetch/u);
-  assert.match(source, /scheduleAdjacentChapterPayloadPrefetch[\s\S]*?target===chapter\+1\)scheduleChapterOpeningSnapshotPrefetch\(target,conversion,payload\)/u);
+  assert.doesNotMatch(source, /buildChapterOpeningSnapshot|scheduleChapterOpeningSnapshotPrefetch|chapter_opening_snapshot_prefetch/u);
+  assert.match(source, /const targetFrag=frag\.replace\(\/\^c\\d\+~\/i,''\);[\s\S]*?test\(targetFrag\)/u);
+  const virtualRender = source.slice(source.indexOf("function renderVirtualScrollPage"), source.indexOf("function virtualScrollPageHasCompleteText"));
+  assert.doesNotMatch(virtualRender, /virtualPageHasInlineFragment\(page\).*return false/u);
+  assert.match(source, /body\.scroll-mode \.rr img,body\.scroll-mode \.rr svg,body\.scroll-mode \.rr video,body\.scroll-mode \.rr canvas\{position:static !important;float:none !important;clear:both !important;display:block !important/u);
+  assert.match(source, /body\.scroll-mode \.rr figure,body\.scroll-mode \.rr :is\(div,p,section,article,span\):has\(>img,>svg,>video,>canvas\)\{position:static !important;float:none !important;clear:both !important;display:flow-root !important/u);
+  assert.match(source, /function flattenModernTableBackgrounds\(\): void\{[\s\S]*?querySelectorAll<HTMLTableElement>\('table'\)[\s\S]*?rr-compat-background-pair[\s\S]*?pair\.append\(image,table\)[\s\S]*?background-image','none','important'\)[\s\S]*?rrCompatBackgroundMedia/u);
+  assert.match(source, /body\.scroll-mode \.rr \.rr-compat-background-pair\{display:flex !important;align-items:flex-start !important;gap:1em !important[\s\S]*?flex:0 1 calc\(50% - \.5em\) !important/u);
+  assert.match(source, /root\.replaceChildren\(chapterTemplate\.content\);flattenModernTableBackgrounds\(\);prepDomDone/u);
+  assert.match(source, /function traceModernScrollMediaOverlap\(\): void\{[\s\S]*?candidates=root\.querySelectorAll<Element>\('img,svg,canvas,video,object,embed,iframe,figure,table,td,div,span'\)[\s\S]*?media_background_count:backgroundCount[\s\S]*?media_table_count:tableCount[\s\S]*?media_text_overlap_count:textOverlapCount/u);
+  assert.match(source, /traceModernScrollMediaOverlap\(\);[\s\S]*?refreshHighlights\(\);/u);
+  assert.match(source, /function chapterHasFloatingScrollFlow\(\): boolean\{[\s\S]*?querySelectorAll<Element>\('img,svg,figure,video,canvas,div,p,span,h1,h2,h3,h4,h5,h6'\)[\s\S]*?style\.cssFloat\|\|style\.float/u);
+  const macMask = source.slice(source.indexOf("function applyScrollPageMask"), source.indexOf("function applyMacNativeLineClip"));
+  assert.match(macMask, /const floatingFlow=isModernEpubLayout\(\)\|\|chapterHasFloatingScrollFlow\(\);[\s\S]*?const macPage=!floatingFlow&&virtualSlice\?macVirtualPageForSlice\(virtualSlice\):null;[\s\S]*?else if\(floatingFlow\)\{[\s\S]*?applyMacNativeLineClip\(false\)/u);
 });
 
 test("classic IIFE installs in a head-like VM without a reader DOM", () => {
@@ -206,6 +216,7 @@ test("macOS compatibility pages use fragment bounds and reclaim only a blocking 
   assert(start >= 0 && end > start, "virtual page packing must remain extractable");
   const context: Record<string, unknown> = {
     IS_MAC_WEBKIT: true,
+    MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX: 2,
     S: { fontSize: 23, paraSpacing: 0.4 },
     fastChapterLayout: true,
     scrollItemsCache: [],
@@ -240,7 +251,7 @@ test("macOS compatibility pages use fragment bounds and reclaim only a blocking 
 
   const packed = buildPage([line(0, 27), line(36, 63)], 0, 63, 200);
   assert.equal(packed.endIndex, 1, "the next complete line should fill space wasted only by a paragraph gap");
-  assert(Number(packed.virtualBottom) <= 59.5);
+  assert(Number(packed.virtualBottom) <= 63.5);
 
   const compactPage = buildPage([line(0, 27), line(36, 63)], 0, 70, 200);
   assert.equal(compactPage.endIndex, 1, "a complete line must not be moved merely to reserve another line");
@@ -249,7 +260,7 @@ test("macOS compatibility pages use fragment bounds and reclaim only a blocking 
 
   const overhangingGlyphBoundary = buildPage([line(0, 28), line(32, 60)], 0, 60, 200);
   assert.equal(overhangingGlyphBoundary.endIndex, 1, "glyph overhang must not hide reclaimable paragraph advance");
-  assert(Number(overhangingGlyphBoundary.virtualBottom) <= 56.5);
+  assert(Number(overhangingGlyphBoundary.virtualBottom) <= 60.5);
   assert.equal(exactTailProbe(), 39, "the exact macOS scan must include a whole compactable line below the raw viewport band");
   context.scrollItemsCache = [line(0, 27), line(190, 217), line(230, 257), line(270, 297)];
   assert(
@@ -262,8 +273,10 @@ test("macOS compatibility pages use fragment bounds and reclaim only a blocking 
   const driftedLayout = drifted.virtualLayout as Array<{ top: number }>;
   assert(driftedLayout[1] && driftedLayout[1].top < 45, "an impossible multi-line Range gap must be clamped");
 
-  const clipped = buildPage([line(0, 28), line(27, 55, 60)], 0, 57, 200);
-  assert.equal(clipped.endIndex, 0, "a fragment extending beyond the viewport must move to the next page");
+  const fullyInside = buildPage([line(0, 28), line(27, 51, 52)], 0, 57, 200);
+  assert.equal(fullyInside.endIndex, 1, "a complete final line inside the physical viewport stays on this page");
+  const clipped = buildPage([line(0, 28), line(27, 55, 59)], 0, 57, 200);
+  assert.equal(clipped.endIndex, 0, "a glyph extending outside the physical viewport moves to the next page");
   assert.equal(clipped.nextIndex, 1);
   const sourceStart = source.indexOf("function renderVirtualLine");
   const sourceEnd = source.indexOf("function sizeVirtualPreviewClone", sourceStart);
@@ -438,32 +451,107 @@ test("fast macOS pages reuse coarse flow nodes and retain exact page results", (
   const pageCacheEnd = source.indexOf("function scrollImagePreviewEligible", pageCacheStart);
   const pageCache = source.slice(pageCacheStart, pageCacheEnd);
   assert.match(pageCache, /macVirtualPageCacheByKey\.get\(key\)/u);
-  assert.match(pageCache, /while\(macVirtualPageCacheByKey\.size>48\)/u);
+  assert.match(pageCache, /while\(macVirtualPageCacheByKey\.size>8\)/u);
   assert.match(pageCache, /function scheduleMacVirtualPagePrefetch\(page: ReaderScrollSlice\|null\): void\{/u);
   assert.match(pageCache, /function queueMacVirtualPagePrefetch\([\s\S]*?macVirtualPagePrefetchTimers\.has\(key\)[\s\S]*?macVirtualPageForSlice\(page\)[\s\S]*?page_prefetch/u);
-  assert.match(pageCache, /if\(next\)queueMacVirtualPagePrefetch\(next,pageIndex\+1,18\);[\s\S]*?if\(following\)queueMacVirtualPagePrefetch\(following,pageIndex\+2,48\);/u);
+  assert.match(pageCache, /macVirtualPagePrefetchTimers\.forEach\(function\(timer\)\{clearTimeout\(timer\);\}\);macVirtualPagePrefetchTimers\.clear\(\);[\s\S]*?if\(next\)queueMacVirtualPagePrefetch\(next,pageIndex\+1,180\);/u);
   assert.match(source, /function invalidateScrollItemsCache\(\)\{[\s\S]*?macVirtualPagePrefetchTimers\.forEach[\s\S]*?macVirtualPagePrefetchTimers\.clear\(\)/u);
   const maskStart = source.indexOf("function applyScrollPageMask");
   const maskEnd = source.indexOf("function currentScrollPageClipBlank", maskStart);
   const mask = source.slice(maskStart, maskEnd);
   assert.match(mask, /if\(rendered\)scheduleMacVirtualPagePrefetch\(virtualSlice\)/u);
+  const fastRectsStart = source.indexOf("function fastDocumentTextLineRects");
+  const fastRectsEnd = source.indexOf("function documentTextLineRects", fastRectsStart);
+  const fastRects = source.slice(fastRectsStart, fastRectsEnd);
+  assert.doesNotMatch(fastRects, /getComputedStyle\(parent\)/u, "fast whole-chapter geometry must not query styles per text node");
+  const dualContinuationStart = source.indexOf("function dualContinuationNeeded");
+  const dualContinuationEnd = source.indexOf("function appendDualChapterContinuation", dualContinuationStart);
+  const dualContinuation = source.slice(dualContinuationStart, dualContinuationEnd);
+  assert.match(dualContinuation, /if\(!isDualPage\(\)\|\|fastChapterLayout\|\|curCh>=CH-1\)return false;[\s\S]*?const lastColumn=lastDualTextColumn\(\);/u);
+assert.match(source, /continuationReady\.then\(function\(appendedContinuation\)\{[\s\S]*?if\(appendedContinuation\)\{normalizeInlineNoteRefs\(\);noteNumbersReady=false;ensureNoteNumbers\(\);watchFlowMedia\(\);\}/u);
+assert.match(source, /const continuationReady=isDualPage\(\)&&!fastChapterLayout\?\(applyStyle\(\),applyCols\(\),appendDualChapterContinuation\(conversion\)\):Promise\.resolve\(false\);/u);
+assert.match(source, /const chapterTemplate=takePreparedChapterDom\(payloadKey,body\);root\.replaceChildren\(chapterTemplate\.content\);/u);
 });
 
-test("large chapter transitions reveal an exact opening page before full pagination", () => {
-  const paintStart = source.indexOf("function paintFastChapterOpeningPage");
-  const paintEnd = source.indexOf("function sourceTextAround", paintStart);
-  assert(paintStart >= 0 && paintEnd > paintStart, "opening-page paint helper must remain extractable");
-  const openingPaint = source.slice(paintStart, paintEnd);
-  assert.match(openingPaint, /initialBottom=viewH\+tail[\s\S]*?exactTextLineItemsForBand\(0,initialBottom\)/u);
-  assert.match(openingPaint, /Number\(first\.virtualBottom\|\|0\)<viewH-Math\.max\(lineHeightPx\(\)\*3,72\)[\s\S]*?exactTextLineItemsForBand\(0,viewH\*2\+tail\)/u);
-  assert.match(openingPaint, /buildVirtualPageFromIndex\(exact,0,viewH,Math\.max\(viewH,root\.scrollHeight-viewH\),0\)/u);
-  assert.match(openingPaint, /renderVirtualScrollPage\(first\)/u);
+test("chapter-boundary navigation prepares only after an idle chapter opening", () => {
+  assert.match(source, /function currentTextConversion\(\): 'original'\|'t2s'\|'s2t'\{return S\.textConversion==='t2s'\|\|S\.textConversion==='s2t'\?S\.textConversion:'original';\}/u);
+  assert.doesNotMatch(source, /scheduleAdjacentChapterPayloadPrefetch|warmAdjacentChapterPayload|chapterPayloadPrefetchTimers/u);
+  assert.match(source, /function scheduleIdleAdjacentChapterPreparation\(\): void\{[\s\S]*?pageInCh!==0[\s\S]*?setTimeout\(function\(\)\{[\s\S]*?\},1200\);/u);
+  assert.match(source, /prepareChapterDom\(key,payload\.body\|\|''\);/u);
+  assert.match(source, /function nextPage\(\)\{\s*cancelIdleAdjacentChapterPreparation\(\);/u);
+  assert.match(source, /function prevPage\(\)\{\s*cancelIdleAdjacentChapterPreparation\(\);/u);
+  assert.match(source, /function nextPage\(\)\{[\s\S]*?scrollPageBy\(1\)/u);
+  assert.match(source, /function nextPage\(\)\{[\s\S]*?if\(!\(usesLineBreakPaging\(\)&&canLeaveScrollChapter\(1\)\)\)consumeSideAnchorVirtualPage\(\);/u);
+  assert.match(source, /function prevPage\(\)\{[\s\S]*?scrollPageBy\(-1\)/u);
+});
 
+test("macOS line measurement keeps an inline note on its text row without stealing the next row", () => {
+  const start = bundle.indexOf("function sameLineKey");
+  const end = bundle.indexOf("function fastDocumentTextLineRects", start);
+  assert(start >= 0 && end > start, "overlapping inline geometry must have a dedicated line matcher");
+  const context: Record<string, unknown> = {
+    recordValue: (value: Record<string, unknown>, key: string | number) => value[key],
+  };
+  vm.runInNewContext(
+    `${bundle.slice(start, end)}\nObject.assign(globalThis, { measuredLineKey, appendMeasuredInlineLine });`,
+    context,
+  );
+  const lineKey = context.measuredLineKey as (
+    lines: Record<string, { top: number; bottom: number }>,
+    keys: number[],
+    top: number,
+    bottom: number,
+  ) => number | null;
+  const lines = { 100: { top: 100, bottom: 126 } };
+  assert.equal(lineKey(lines, [100], 107, 133), 100, "an inline note-sized baseline shift stays on the text row");
+  assert.equal(lineKey(lines, [100], 128, 154), null, "the following text row remains distinct");
+
+  const appendInline = context.appendMeasuredInlineLine as (
+    lines: Record<string, Record<string, unknown>>,
+    keys: number[],
+    element: Record<string, unknown>,
+    rectangle: Record<string, number>,
+    viewport: Record<string, number>,
+    scrollTop: number,
+  ) => void;
+  const measuredLines: Record<string, Record<string, unknown>> = {
+    100: { top: 100, bottom: 126, height: 26, left: 0, right: 200, fragments: [] },
+  };
+  const keys = [100];
+  appendInline(measuredLines, keys, {}, { top: 107, bottom: 133, left: 180, right: 194, width: 14, height: 26 }, { top: 0, left: 0 }, 0);
+  assert.deepEqual(keys, [100]);
+  assert.equal((measuredLines[100]?.fragments as unknown[]).length, 1);
+  appendInline(measuredLines, keys, {}, { top: 128, bottom: 154, left: 0, right: 14, width: 14, height: 26 }, { top: 0, left: 0 }, 0);
+  assert.deepEqual(keys, [100, 128]);
+});
+
+test("pages with inline notes remain on the complete-line virtual text layer", () => {
+  const start = bundle.indexOf("function virtualPageHasInlineFragment");
+  const end = bundle.indexOf("function renderVirtualScrollPage", start);
+  assert(start >= 0 && end > start, "inline-note virtual-page guard must remain extractable");
+  const context: Record<string, unknown> = {};
+  vm.runInNewContext(
+    `${bundle.slice(start, end)}\nObject.assign(globalThis, { virtualPageHasInlineFragment });`,
+    context,
+  );
+  const hasInline = context.virtualPageHasInlineFragment as (page: Record<string, unknown>) => boolean;
+  assert.equal(hasInline({ virtualLayout: [{ item: { fragments: [{ kind: "inline" }] } }] }), true);
+  assert.equal(hasInline({ virtualLayout: [{ item: { fragments: [{ text: "正文" }] } }] }), false);
+  const renderStart = source.indexOf("function renderVirtualScrollPage");
+  const renderEnd = source.indexOf("function virtualScrollPageHasCompleteText", renderStart);
+  const renderSource = source.slice(renderStart, renderEnd);
+  assert.doesNotMatch(renderSource, /virtualPageHasInlineFragment\(page\).*return false/u);
+  assert.match(source, /else if\(f\.kind==='inline'\)\{[\s\S]*?cloneInlineNoteFragment\(f\.el\)[\s\S]*?span\.appendChild\(clone\)/u);
+  assert.doesNotMatch(source, /chapterHasInlineNoteRefs\(\)/u);
+  assert.match(source, /else if\(pageHasInlineNotes\)\{[\s\S]*?applyMacNativeLineClip\(pageHasInlineNotes\)/u);
+});
+
+test("large chapter transitions complete pagination before revealing the new page", () => {
   const chapterStart = source.indexOf("function showChapter");
   const chapterEnd = source.indexOf("var curTopAnchor", chapterStart);
   const chapterReveal = source.slice(chapterStart, chapterEnd);
-  assert.match(chapterReveal, /where==='start'&&!frag&&paintFastChapterOpeningPage\(\)/u);
-  assert.match(chapterReveal, /clearTurnFx\(\);[\s\S]*?'chapter_first_page'[\s\S]*?line_nodes='\+lastExactBandFastNodes\+' char_nodes='\+lastExactBandCharNodes[\s\S]*?requestAnimationFrame\(finishChapterLayout\)/u);
+  assert.doesNotMatch(chapterReveal, /paintFastChapterOpeningPage|chapter_first_page|requestAnimationFrame\(finishChapterLayout\)/u);
+  assert.match(chapterReveal, /waitForFlowResources\(\)[\s\S]*?applyStyle\(\);applyCols\(\);[\s\S]*?finishChapterLayout\(\);/u);
 });
 
 test("chapter reveal schedules the same WebKit paint stabilization as in-chapter paging", () => {
@@ -473,8 +561,13 @@ test("chapter reveal schedules the same WebKit paint stabilization as in-chapter
   const chapterReveal = source.slice(start, end);
   assert.match(
     chapterReveal,
-    /setViewOffset\(\);root\.style\.visibility='';[\s\S]*?stabilizeProgrammaticViewPaint\(\);/u,
+    /root\.style\.visibility='hidden';root\.style\.opacity='0';[\s\S]*?const chapterTemplate=takePreparedChapterDom\(payloadKey,body\);root\.replaceChildren\(chapterTemplate\.content\);/u,
   );
+  assert.match(
+    chapterReveal,
+    /setViewOffset\(\);[\s\S]*?requestAnimationFrame\(function\(\)\{requestAnimationFrame\(function\(\)\{[\s\S]*?root\.style\.visibility='';root\.style\.opacity='';[\s\S]*?stabilizeProgrammaticViewPaint\(\);/u,
+  );
+  assert.doesNotMatch(chapterReveal, /setViewOffset\(\);root\.style\.visibility='';refreshHighlights/u);
 });
 
 test("chapter landing keeps real rapid taps and only consumes WebKit's duplicate click", () => {

@@ -9,35 +9,8 @@ on:
         type: boolean
         default: false
   push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/linux-build.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "package.json"
-      - "package-lock.json"
-      - "tsconfig.json"
-      - "eslint.config.mjs"
-      - "build.rs"
-      - "tauri.conf.json"
-      - "tauri.linux.conf.json"
-      - "icons/**"
-      - "packaging/linux/**"
-      - "reader-core/**"
-      - "apps/desktop-ui/**"
-      - "packages/**"
-      - "scripts/check.ps1"
-      - "scripts/run-typescript-tests.mjs"
-      - "scripts/run-legacy-ui-tests.cjs"
-      - "src/**"
-      - "ui/**"
-      - "vendor/**"
-      - "crates/**"
-      - "LICENSES/**"
-      - "THIRD_PARTY_NOTICES.md"
-      - "scripts/check-licenses.mjs"
-      - "scripts/license-policy.json"
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -82,6 +55,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: rustfmt, clippy
           targets: x86_64-unknown-linux-gnu
 
       - name: Setup Node
@@ -109,8 +83,8 @@ jobs:
           shared-key: linux-x86_64-ubuntu-24.04
           cache-on-failure: true
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version '^2' --locked
+      - name: Verify project Tauri CLI
+        run: npm exec -- tauri --version
 
       - name: Run frontend migration gates
         run: |
@@ -128,7 +102,7 @@ jobs:
           cargo test -p epub --lib --locked
 
       - name: Build AppImage and Debian package
-        run: cargo tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --config tauri.linux.conf.json --verbose
+        run: npm exec -- tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --config tauri.linux.conf.json --verbose -- --bin ebook-reader-tauri
 
       - name: Check native binary linkage
         shell: bash
@@ -182,11 +156,19 @@ jobs:
           file "$out_dir/$appimage_name" "$out_dir/$deb_name"
           dpkg-deb --info "$out_dir/$deb_name"
           dpkg-deb --contents "$out_dir/$deb_name" | tee target/linux-deb-contents.txt
+          grep -Eq '[[:space:]]\./usr/bin/ebook-reader-tauri$' target/linux-deb-contents.txt
+
+          appimage_extract="$(mktemp -d)"
+          (cd "$appimage_extract" && "$GITHUB_WORKSPACE/$out_dir/$appimage_name" --appimage-extract >/dev/null)
+          test -x "$appimage_extract/squashfs-root/usr/bin/ebook-reader-tauri"
+          rm -rf "$appimage_extract"
+
           package_name="$(dpkg-deb --field "$out_dir/$deb_name" Package)"
           test "$package_name" = "kunpeng-reader"
           [[ "$package_name" =~ ^[a-z0-9][a-z0-9+.-]+$ ]]
           sudo apt-get install -y "$PWD/$out_dir/$deb_name"
           dpkg-query -W -f='${Status}\n' "$package_name" | grep -Fx 'install ok installed'
+          test -x /usr/bin/ebook-reader-tauri
           (cd "$out_dir" && sha256sum "$appimage_name" "$deb_name" > SHA256SUMS-Linux.txt)
 
           {

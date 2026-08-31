@@ -14,7 +14,7 @@ const shelf = fs.readFileSync(path.join(root, "generated-ts", "shelf-ui.js"), "u
 const annotations = require("./reader-page-test-source.cjs").compact;
 
 test("main toolbar exposes a dedicated customizable action set", () => {
-  for (const id of ["account", "search", "stats", "library", "news", "filter", "settings", "menu"]) {
+  for (const id of ["account", "search", "stats", "library", "news", "intelligence-lab", "filter", "settings", "menu"]) {
     assert.match(html, new RegExp(`data-toolbar-item="${id}"`));
   }
   assert.match(html, /data-settings-section="toolbar"/);
@@ -42,6 +42,7 @@ test("toolbar settings keep settings visible and reflow neighboring actions", ()
   assert.match(source, /item\.animate\(/);
   assert.match(source, /app_settings_sync_save/);
   assert.match(source, /account: \["账户", "登录、同步与账户管理"\]/);
+  assert.match(source, /"intelligence-lab": \["情报中心", "打开情报中心测试"\]/);
   assert.match(source, /toolbarContentOrder: TOOLBAR_CONTENT_IDS\.slice\(\)/);
   assert.match(source, /toolbarContentVisible: \["icon"\]/);
   assert.match(source, /if \(id\) ensureToolbarButtonContent\(id\)/);

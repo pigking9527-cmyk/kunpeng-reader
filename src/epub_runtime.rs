@@ -674,6 +674,14 @@ fn process_virtual_chapter(
     Some(chapter)
 }
 
+fn chapter_title(meta: &EpubMetaCache, index: usize) -> String {
+    meta.toc
+        .iter()
+        .find(|entry| entry.chapter as usize == index)
+        .map(|entry| entry.label.trim().to_string())
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub(crate) async fn book_info(
     window: tauri::WebviewWindow,
@@ -954,9 +962,9 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
                 .unwrap_or_default();
             if format != "epub" {
                 let chapters = get_txt_chapters(state, id)?;
-                let raw = chapters
+                let (title, raw) = chapters
                     .get(index)
-                    .map(|(_, chapter)| chapter.clone())
+                    .map(|(title, chapter)| (title.clone(), chapter.clone()))
                     .unwrap_or_default();
                 let body = if is_mobi(&format) {
                     format!(
@@ -972,13 +980,16 @@ fn handle_request(state: &AppState, path: &str) -> Option<(Vec<u8>, String)> {
                     txt_body(&raw)
                 };
                 let body = convert_reader_html_text(&body, conversion);
-                let json = serde_json::json!({"head": "", "body": body}).to_string();
+                let json =
+                    serde_json::json!({"head": "", "body": body, "title": title}).to_string();
                 return Some((json.into_bytes(), "application/json".to_string()));
             }
             let meta = ensure_epub_meta(state, id).ok()?;
             let chapter = process_virtual_chapter(state, id, index, &meta)?;
             let body = convert_reader_html_text(&chapter.body, conversion);
-            let json = serde_json::json!({"head": chapter.head, "body": body}).to_string();
+            let title = chapter_title(&meta, index);
+            let json =
+                serde_json::json!({"head": chapter.head, "body": body, "title": title}).to_string();
             Some((json.into_bytes(), "application/json".to_string()))
         }
         "pdf" => {
@@ -1061,6 +1072,28 @@ mod tests {
             // A former physical chapter 1 was split into virtual chapter 3.
             physical_to_virtual: vec![0, 3, 4],
         }
+    }
+
+    #[test]
+    fn chapter_title_uses_the_matching_virtual_chapter_toc_entry() {
+        let mut meta = chapter_remap_meta();
+        meta.toc = vec![
+            TocDto {
+                label: " 第一回 灵根育孕 ".to_string(),
+                chapter: 0,
+                frag: String::new(),
+                level: 0,
+            },
+            TocDto {
+                label: "第二回 悟彻菩提".to_string(),
+                chapter: 1,
+                frag: String::new(),
+                level: 0,
+            },
+        ];
+
+        assert_eq!(chapter_title(&meta, 1), "第二回 悟彻菩提");
+        assert_eq!(chapter_title(&meta, 4), "");
     }
 
     #[test]

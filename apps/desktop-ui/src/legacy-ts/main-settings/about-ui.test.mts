@@ -13,9 +13,9 @@ const repositoryRoot = new URL("../../../../../", import.meta.url);
 
 function classicSource(): string {
   try {
-    return readFileSync(new URL("ui/about-ui.js", repositoryRoot), "utf8");
+    return readFileSync(new URL("ui/generated-ts/about-ui.js", repositoryRoot), "utf8");
   } catch {
-    return execFileSync("git", ["show", "HEAD:ui/about-ui.js"], {
+    return execFileSync("git", ["show", "HEAD:ui/generated-ts/about-ui.js"], {
       cwd: repositoryRoot,
       encoding: "utf8",
     });
@@ -116,6 +116,7 @@ function fixture(initialStorage: Readonly<Record<string, string>> = {}) {
     "about-modal",
     "update-bar",
     "about-update",
+    "about-github",
     "about-notes",
     "ub-notes",
     "ub-current",
@@ -129,6 +130,10 @@ function fixture(initialStorage: Readonly<Record<string, string>> = {}) {
   const elements = Object.fromEntries(
     ids.map((id) => [id, new FakeNode("element", id)]),
   );
+  if (elements["about-github"]) {
+    elements["about-github"].href =
+      "https://github.com/pigking9527-cmyk/kunpeng-reader";
+  }
   const document = {
     getElementById: (id: string) => elements[id] ?? null,
     createElement: (name: string) => new FakeNode("element", name),
@@ -196,8 +201,8 @@ async function settle(): Promise<void> {
 
 async function exercise(legacy: boolean) {
   const cached = JSON.stringify({
-    current: "1.4.0",
-    latest: "1.5.0",
+    current: "1.5.0",
+    latest: "1.5.1",
     notes: "## 更新\n\n- **更快**\n> 稳定",
     url: "https://example.test/download",
   });
@@ -212,6 +217,7 @@ async function exercise(legacy: boolean) {
     menuElement: view.menu as unknown as HTMLElement,
     alertAction: (message) => view.alerts.push(message),
   });
+  await settle();
   const restored = {
     cardShown: view.elements["update-bar"]?.classList.values.has("show"),
     current: view.elements["ub-current"]?.textContent,
@@ -223,9 +229,12 @@ async function exercise(legacy: boolean) {
   view.elements["ub-close"]?.fire("click");
   const hidden = !view.elements["update-bar"]?.classList.values.has("show");
   exposed.reopenUpdateCard();
+  await settle();
   const reopened = view.elements["update-bar"]?.classList.values.has("show");
 
   view.elements["mi-about"]?.fire("click");
+  await settle();
+  view.elements["about-github"]?.fire("click");
   await settle();
   const about = {
     shown: view.elements["about-modal"]?.classList.values.has("show"),
@@ -295,8 +304,8 @@ test("about UI keeps the frozen public contract and original update interaction"
     frozen: true,
   });
   assert.equal(result.restored.cardShown, true);
-  assert.equal(result.restored.current, "当前 v1.4.0");
-  assert.equal(result.restored.latest, "v1.5.0");
+  assert.equal(result.restored.current, "当前 v1.5.0");
+  assert.equal(result.restored.latest, "v1.5.1");
   assert.equal(result.hidden, true);
   assert.equal(result.reopened, true);
   assert.equal(result.about.shown, true);
@@ -309,9 +318,11 @@ test("about UI keeps the frozen public contract and original update interaction"
   assert.equal(result.ignored.hidden, true);
   assert.deepEqual(result.alerts, ["i18n:updateCheckFailed"]);
   assert.deepEqual(result.calls.map(({ command }) => command), [
+    "app_version",
     "open_url",
     "app_version",
     "release_notes",
+    "open_url",
     "check_update",
     "check_update",
   ]);
@@ -320,7 +331,7 @@ test("about UI keeps the frozen public contract and original update interaction"
 test("about renderer only invokes safe HTTP links and never uses an HTML sink", async () => {
   const view = fixture({
     pendingUpdateV1: JSON.stringify({
-      current: "1.0.0",
+      current: "1.5.0",
       latest: "2.0.0",
       notes: "[安全](https://example.test) [拒绝](javascript:alert(1))",
       url: "https://example.test/download",
@@ -331,6 +342,7 @@ test("about renderer only invokes safe HTTP links and never uses an HTML sink", 
     invoke: view.invoke,
     storage: view.storage,
   });
+  await settle();
   const fragment = view.elements["ub-notes"]?.children[0];
   const paragraph = fragment?.children[0];
   const link = paragraph?.children.find(({ name }) => name === "a");
@@ -339,8 +351,28 @@ test("about renderer only invokes safe HTTP links and never uses an HTML sink", 
   await settle();
   assert.equal(result.prevented, true);
   assert.deepEqual(view.calls, [
+    { command: "app_version" },
     { command: "open_url", args: { url: "https://example.test/" } },
   ]);
+});
+
+test("stale pending update cache is discarded when the installed version changes", async () => {
+  const view = fixture({
+    pendingUpdateV1: JSON.stringify({
+      current: "1.0.0-beta.1",
+      latest: "1.1.0-beta.1",
+      notes: "旧缓存",
+      url: "https://example.test/download",
+    }),
+  });
+  installAboutUi(view.target)?.init({
+    root: view.document as unknown as Document,
+    invoke: view.invoke,
+    storage: view.storage,
+  });
+  await settle();
+  assert.equal(view.storage.getItem("pendingUpdateV1"), null);
+  assert.equal(view.elements["update-bar"]?.classList.values.has("show"), false);
 });
 
 test("about installer fails closed without the original browser runtime", () => {

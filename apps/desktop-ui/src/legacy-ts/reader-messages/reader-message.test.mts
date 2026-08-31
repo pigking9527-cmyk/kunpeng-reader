@@ -51,6 +51,7 @@ test("message payload acceptance matches classic for every specialized validatio
     { readerPerf: "ok" },
     { bugTrace: { kind: "turn", chapter: 1, layout_fast: true } },
     { bugTrace: { kind: "footnote", chapter: 1, note_marker: true, note_virtual: true, note_link_present: true, note_fragment_present: true, note_click_consumed: true, note_popup_visible: true, note_target_chapter: 2, note_search_chapters: 8 } },
+    { bugTrace: { kind: "layout", outcome: "modern_media_overlap", chapter: 1, media_count: 2, media_background_count: 1, media_table_count: 1, media_positioned_count: 1, media_visible_count: 1, media_text_overlap_count: 1, media_background_text_overlap_count: 1 } },
     { webSearch: { term: "query", engine: "google" } },
     { semanticSearch: "query" },
     { aiReader: { text: "excerpt", anchorStart: 0, anchorEnd: 7 } },

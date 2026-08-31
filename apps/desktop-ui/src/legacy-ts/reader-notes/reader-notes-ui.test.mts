@@ -432,6 +432,16 @@ test("reader notes typed commands keep the frozen request envelopes and page mes
   assert.equal(typed.document.elements["bm-list2"]?.children[0]?.children[0]?.textContent, "saved");
 });
 
+test("reader notes chapter toolbar buttons navigate by chapter rather than page", async () => {
+  const typed = typedHarness();
+  await typed.document.elements["prev-btn"]?.fire("click");
+  await typed.document.elements["next-btn"]?.fire("click");
+  assert.deepEqual(typed.messages, [
+    { gotoChapter: 1 },
+    { gotoChapter: 3 },
+  ]);
+});
+
 test("reader notes keeps cross-script bookmark/highlight globals live", () => {
   const typed = typedHarness();
   const runtime = typed.runtime as Record<string, unknown>;

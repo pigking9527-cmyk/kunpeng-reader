@@ -16,6 +16,8 @@ const SAFE_EVENT_KEYS = new Set([
   "image_mode", "image_source_page", "image_candidate_page", "image_top", "image_width", "image_height",
   "image_free_height", "image_preview_height", "image_next_count", "image_future_count", "image_skipped_text", "image_near_top", "image_text_before", "image_probed",
   "note_marker", "note_virtual", "note_link_present", "note_fragment_present", "note_click_consumed", "note_popup_visible", "note_target_chapter", "note_search_chapters",
+  "mac_clip_native_notes", "mac_clip_page_inline_notes", "mac_clip_view_height", "mac_clip_scroll_top", "mac_clip_measured_blank", "mac_clip_virtual_blank", "mac_clip_partial_blank", "mac_clip_applied_blank", "mac_clip_has_extra_virtual", "mac_clip_path_active",
+  "media_count", "media_background_count", "media_table_count", "media_positioned_count", "media_visible_count", "media_text_overlap_count", "media_background_text_overlap_count",
   "layout_fast", "layout_view_height", "layout_root_height", "layout_root_style_height", "layout_padding_bottom", "layout_line_height", "layout_step", "layout_current_line_count", "layout_last_top", "layout_last_bottom", "layout_last_height", "layout_next_top", "layout_next_bottom", "layout_next_height", "layout_visible_free", "layout_content_free", "layout_tail_cross", "layout_tail_fit", "layout_tail_tightened",
   "preview_created", "preview_connected", "preview_parent", "preview_position", "preview_z_index", "preview_display", "preview_visibility", "preview_width", "preview_height", "preview_top", "preview_left", "preview_type", "preview_phase",
   "modal_position", "modal_z_index", "modal_display", "modal_parent", "modal_contains_preview",

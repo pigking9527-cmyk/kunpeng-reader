@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 
 const uiRoot = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(uiRoot, "index.html"), "utf8");
+const styles = fs.readFileSync(path.join(uiRoot, "styles.css"), "utf8");
 const source = fs.readFileSync(
   path.join(uiRoot, "generated-ts", "feedback-ui.js"),
   "utf8",
@@ -43,6 +44,17 @@ test("about exposes shared bug and feature feedback editor", () => {
     html,
     /id="about-feedback-feature"[^>]*data-i18n="suggestFeature"[^>]*>[\s\S]*?功能建议/,
   );
+  assert.match(
+    about,
+    /id="about-github"[^>]*href="https:\/\/github\.com\/pigking9527-cmyk\/kunpeng-reader"/,
+  );
+  assert.match(about, /github\.com\/pigking9527-cmyk\/kunpeng-reader/);
+  assert.ok(
+    about.indexOf('id="about-github"') < about.indexOf('id="about-feedback-bug"'),
+    "GitHub project link should be above the feedback actions",
+  );
+  assert.match(styles, /\.about-notes\s*\{[\s\S]*?max-height:\s*240px/);
+  assert.match(styles, /\.about-github-card\s*\{[\s\S]*?margin:\s*12px 18px 10px/);
   assert.match(html, /id="feedback-editor"[^>]*contenteditable="true"/);
   assert.match(html, /请写下 Bug 出现的步骤、操作、实际结果和期望结果/);
   assert.match(html, /id="feedback-image-input"[^>]*accept="image\/\*"/);

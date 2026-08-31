@@ -191,6 +191,31 @@ fn load_problem_trace_checkpoint() -> Result<Option<serde_json::Value>, String> 
     load_problem_trace_checkpoint_at(&problem_trace_checkpoint_path()?)
 }
 
+fn problem_trace_has_reader_activity(snapshot: &serde_json::Value) -> bool {
+    if snapshot
+        .get("reader_state")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|state| state.get("frame_ready").and_then(serde_json::Value::as_bool) == Some(true))
+    {
+        return true;
+    }
+    snapshot
+        .get("events")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|events| {
+            events.iter().any(|event| {
+                !matches!(
+                    event.get("type").and_then(serde_json::Value::as_str),
+                    Some("trace_started" | "capture")
+                )
+            })
+        })
+}
+
+fn problem_trace_should_replace(previous: &serde_json::Value, incoming: &serde_json::Value) -> bool {
+    !problem_trace_has_reader_activity(previous) || problem_trace_has_reader_activity(incoming)
+}
+
 /// Keep the latest redacted reader snapshot in memory and in the application
 /// cache so closing the reader WebView or the process does not destroy the only
 /// diagnostic copy. The file is bounded and replaced rather than accumulated.
@@ -203,9 +228,20 @@ pub(crate) fn problem_trace_checkpoint(
         .map_err(|_| "问题记录缓存暂时不可用".to_string())?;
     if let Some(snapshot) = snapshot {
         validate_problem_trace_checkpoint(&snapshot)?;
-        *cached = Some((now_ms(), snapshot.clone()));
-        if let Err(error) = persist_problem_trace_checkpoint(&snapshot) {
-            log(&format!("problem_trace_checkpoint persist_failed {error}"));
+        let previous = cached
+            .as_ref()
+            .map(|(_, value)| value.clone())
+            .or_else(|| load_problem_trace_checkpoint().ok().flatten());
+        if previous
+            .as_ref()
+            .is_some_and(|existing| !problem_trace_should_replace(existing, &snapshot))
+        {
+            *cached = Some((now_ms(), previous.expect("checked above")));
+        } else {
+            *cached = Some((now_ms(), snapshot.clone()));
+            if let Err(error) = persist_problem_trace_checkpoint(&snapshot) {
+                log(&format!("problem_trace_checkpoint persist_failed {error}"));
+            }
         }
         return Ok(None);
     }
@@ -498,6 +534,27 @@ mod tests {
             .join(format!(".{PROBLEM_TRACE_LATEST_FILE}.tmp"))
             .exists());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn problem_trace_keeps_a_recent_reader_diagnostic_when_a_new_window_is_still_loading() {
+        let active = serde_json::json!({
+            "captured_at": "2026-08-16T12:00:00.000Z",
+            "reader_state": {"frame_ready": true},
+            "events": [{"type": "page_layout", "detail": {"mac_clip_applied_blank": 24}}]
+        });
+        let loading = serde_json::json!({
+            "captured_at": "2026-08-16T12:00:01.000Z",
+            "reader_state": {"frame_ready": false},
+            "events": [{"type": "trace_started"}, {"type": "capture"}]
+        });
+        let next_reader = serde_json::json!({
+            "captured_at": "2026-08-16T12:00:02.000Z",
+            "reader_state": {"frame_ready": true},
+            "events": [{"type": "frame_ready"}]
+        });
+        assert!(!problem_trace_should_replace(&active, &loading));
+        assert!(problem_trace_should_replace(&active, &next_reader));
     }
 
     #[test]

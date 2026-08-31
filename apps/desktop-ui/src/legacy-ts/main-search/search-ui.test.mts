@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -151,10 +151,7 @@ interface TimerRecord {
 }
 
 function classicSource(): string {
-  return execFileSync("git", ["show", "HEAD:ui/search-ui.js"], {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  });
+  return readFileSync(new URL("ui/generated-ts/search-ui.js", repositoryRoot), "utf8");
 }
 
 function plain(value: unknown): unknown {

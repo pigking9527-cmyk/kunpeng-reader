@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -27,10 +27,7 @@ function legacyNewsUi(): Record<string, unknown> {
   };
   context.window = context;
   vm.runInNewContext(
-    execFileSync("git", ["show", "HEAD:ui/news-ui.js"], {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-    }),
+    readFileSync(new URL("ui/generated-ts/news-ui.js", repositoryRoot), "utf8"),
     context,
     { filename: "news-ui.js" },
   );

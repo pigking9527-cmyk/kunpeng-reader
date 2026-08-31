@@ -109,6 +109,11 @@ const copiedExtraKeys = Object.freeze([
   "image_probed",
   "note_marker", "note_virtual", "note_link_present", "note_fragment_present",
   "note_click_consumed", "note_popup_visible", "note_target_chapter", "note_search_chapters",
+  "mac_clip_native_notes", "mac_clip_page_inline_notes", "mac_clip_view_height", "mac_clip_scroll_top",
+  "mac_clip_measured_blank", "mac_clip_virtual_blank", "mac_clip_partial_blank",
+  "mac_clip_applied_blank", "mac_clip_has_extra_virtual", "mac_clip_path_active",
+  "media_count", "media_background_count", "media_table_count", "media_positioned_count",
+  "media_visible_count", "media_text_overlap_count", "media_background_text_overlap_count",
 ] as const);
 
 function record(value: unknown): TraceData | null {

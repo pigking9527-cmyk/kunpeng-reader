@@ -138,6 +138,38 @@ test("footnote target diagnostics expose only structural booleans", () => {
   assert.equal(data?.fragment, undefined);
 });
 
+test("macOS native clip diagnostics preserve only bounded geometry", () => {
+  const messages: PostedTrace[] = [];
+  const api = installReaderPageBugTrace(createRuntime(messages));
+  api.readerBugTrace("layout", "mac_native_clip", null, {
+    mac_clip_native_notes: true,
+    mac_clip_page_inline_notes: true,
+    mac_clip_view_height: 768,
+    mac_clip_scroll_top: 4_096,
+    mac_clip_measured_blank: 0,
+    mac_clip_virtual_blank: 31,
+    mac_clip_partial_blank: 0,
+    mac_clip_applied_blank: 0,
+    mac_clip_has_extra_virtual: true,
+    mac_clip_path_active: false,
+    media_count: 2,
+    media_background_count: 1,
+    media_table_count: 1,
+    media_positioned_count: 1,
+    media_visible_count: 1,
+    media_text_overlap_count: 1,
+    media_background_text_overlap_count: 1,
+    text: "正文绝不可外发",
+  });
+  const data = messages[0]?.bugTrace;
+  assert.equal(data?.mac_clip_native_notes, true);
+  assert.equal(data?.mac_clip_page_inline_notes, true);
+  assert.equal(data?.mac_clip_virtual_blank, 31);
+  assert.equal(data?.mac_clip_has_extra_virtual, true);
+  assert.equal(data?.media_background_text_overlap_count, 1);
+  assert.equal(data?.text, undefined);
+});
+
 test("page-turn trace keeps sequence, wheel-only detail, outcomes, and reinitialization", () => {
   const messages: PostedTrace[] = [];
   const runtime = createRuntime(messages);

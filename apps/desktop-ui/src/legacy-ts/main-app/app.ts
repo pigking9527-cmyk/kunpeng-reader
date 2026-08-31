@@ -1485,7 +1485,12 @@ window.addEventListener("DOMContentLoaded", () => {
     startupTimed("app-version", () => invoke("app_version"), "background")
       .then((v) => {
         const el = document.getElementById("about-ver");
-        if (el && v) el.textContent = "v" + String(v).replace(/^v/i, "");
+        const version = String(v || "").replace(/^v/i, "");
+        if (el && version) {
+          el.textContent = /^1\.0\.0-beta(?:\.|$)/i.test(version)
+            ? "测试版 1.0"
+            : `v${version}`;
+        }
       })
       .catch(() => {});
 }, { once: true });

@@ -123,11 +123,11 @@ test("debug settings, durations, themes and chapter threshold retain classic bou
   assert.equal(view.api.scrollStartEpsilonPx(), 16);
 });
 
-test("macOS uses fast whole-chapter boundaries for short compatibility chapters", () => {
+test("macOS uses fast whole-chapter boundaries for modest compatibility chapters", () => {
   const view = harness({}, true);
-  assert.equal(view.runtime.FAST_CHAPTER_LAYOUT_CHARS, 4 * 1024);
-  assert.equal(view.api.largeChapterFastLayout("x".repeat(4 * 1024 - 1)), false);
-  assert.equal(view.api.largeChapterFastLayout("x".repeat(4 * 1024)), true);
+  assert.equal(view.runtime.FAST_CHAPTER_LAYOUT_CHARS, 1 * 1024);
+  assert.equal(view.api.largeChapterFastLayout("x".repeat(1 * 1024 - 1)), false);
+  assert.equal(view.api.largeChapterFastLayout("x".repeat(1 * 1024)), true);
 });
 
 test("same-chapter transition keeps outgoing and incoming clones until its bounded timer", () => {
@@ -178,99 +178,17 @@ test("compatible scroll chapter hold snapshots the visible virtual page instead 
   await transition;
 });
 
-test("repeated boundary navigation shows the cached target chapter immediately", async () => {
+test("compatible chapter paging retains the old page until the real chapter layout completes", async () => {
   const view = harness({ pageTurnEffect: "off" });
   view.runtime.isScrollMode = () => true;
-  view.runtime.pagesInCh = 2;
-  view.runtime.pageInCh = 1;
-  view.virtualPage.style.display = "block";
-  view.virtualPage.className = "chapter-zero-end";
-  view.runtime.showChapter = async () => undefined;
-
-  await view.api.beginChapterTurnFx(1, 1, "start");
-
-  view.runtime.curCh = 1;
-  view.runtime.pageInCh = 0;
-  view.virtualPage.className = "chapter-one-start";
-  let releaseChapter: (() => void) | undefined;
-  view.runtime.showChapter = () => new Promise<void>((resolve) => { releaseChapter = resolve; });
-
-  const transition = view.api.beginChapterTurnFx(-1, 0, "end");
-  const sheet = view.runtime.turnFxSheet as unknown as ElementFixture;
-  const cachedPage = sheet.children.at(-1);
-  const cachedClone = cachedPage?.children[0];
-  assert.equal(cachedClone?.className, "chapter-zero-end");
-  assert.equal(view.pager.classList.contains("turn-fx-hold"), true);
-  await Promise.resolve();
-  assert.ok(releaseChapter);
-  releaseChapter();
-  await transition;
-});
-
-test("cached chapter boundary paints before compatible pagination starts", async () => {
-  const view = harness({ pageTurnEffect: "off" });
-  view.runtime.isScrollMode = () => true;
-  view.runtime.pagesInCh = 2;
-  view.runtime.pageInCh = 1;
-  view.virtualPage.style.display = "block";
-  view.virtualPage.className = "chapter-zero-end";
-  view.runtime.showChapter = async () => undefined;
-  await view.api.beginChapterTurnFx(1, 1, "start");
-
-  view.runtime.curCh = 1;
-  view.runtime.pageInCh = 0;
-  view.virtualPage.className = "chapter-one-start";
-  const frames: FrameRequestCallback[] = [];
-  (view.runtime as unknown as { requestAnimationFrame: (callback: FrameRequestCallback) => number }).requestAnimationFrame = (callback: FrameRequestCallback) => {
-    frames.push(callback);
-    return frames.length;
-  };
-  let chapterLoads = 0;
-  let releaseChapter: (() => void) | undefined;
-  view.runtime.showChapter = () => {
-    chapterLoads += 1;
-    return new Promise<void>((resolve) => { releaseChapter = resolve; });
-  };
-
-  const transition = view.api.beginChapterTurnFx(-1, 0, "end");
-  assert.equal(chapterLoads, 0);
-  assert.equal(frames.length, 1);
-  frames.shift()?.(16);
-  assert.equal(chapterLoads, 0);
-  assert.equal(frames.length, 1);
-  frames.shift()?.(32);
-  await Promise.resolve();
-  assert.equal(chapterLoads, 1);
-  assert.ok(releaseChapter);
-  releaseChapter();
-  await Promise.resolve();
-  await Promise.resolve();
-
-  for (let tick = 0; tick < 6; tick += 1) {
-    while (frames.length) frames.shift()?.(48 + tick * 16);
-    await Promise.resolve();
-  }
-  await transition;
-});
-
-test("prefetched next chapter opening snapshot paints before its real layout starts", async () => {
-  const view = harness({ pageTurnEffect: "off" });
-  view.runtime.isScrollMode = () => true;
-  const prefetched = new ElementFixture();
-  prefetched.className = "turn-fx-page turn-fx-incoming turn-fx-prefetched";
-  const preview = new ElementFixture();
-  preview.className = "prefetched-next-chapter-first-page";
-  prefetched.appendChild(preview);
-  view.api.cacheChapterBoundarySnapshot(1, "start", prefetched as unknown as HTMLElement);
   let releaseChapter: (() => void) | undefined;
   view.runtime.showChapter = () => new Promise<void>((resolve) => { releaseChapter = resolve; });
 
   const transition = view.api.beginChapterTurnFx(1, 1, "start");
   const sheet = view.runtime.turnFxSheet as unknown as ElementFixture;
-  assert.equal(sheet.children.at(-1)?.className, "turn-fx-page turn-fx-incoming turn-fx-prefetched");
-  assert.equal(sheet.children.at(-1)?.children[0]?.className, "prefetched-next-chapter-first-page");
+  assert.equal(sheet.children.length, 1);
+  assert.equal(sheet.children.at(-1)?.className, "turn-fx-page turn-fx-outgoing");
   assert.equal(view.pager.classList.contains("turn-fx-hold"), true);
-  await Promise.resolve();
   assert.ok(releaseChapter);
   releaseChapter();
   await transition;

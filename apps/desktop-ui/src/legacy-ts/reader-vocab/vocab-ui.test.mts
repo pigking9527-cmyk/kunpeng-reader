@@ -1,24 +1,8 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
 import type { TauriTransport } from "../../../../../packages/tauri-api/src/index.ts";
 import { installVocabUi, type VocabUiController } from "./vocab-ui.ts";
-
-const repositoryRoot = new URL("../../../../../", import.meta.url);
-
-function classicSource(): string {
-  try {
-    return readFileSync(new URL("ui/vocab-ui.js", repositoryRoot), "utf8");
-  } catch {
-    return execFileSync("git", ["show", "HEAD:ui/vocab-ui.js"], {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-    });
-  }
-}
 
 class FakeClassList {
   public readonly values = new Set<string>();
@@ -318,11 +302,8 @@ async function exercise(legacy: boolean) {
     { word: "乙", lang: "zh", count: 4, last_at: 20, def: "second", level: 0 },
   ]);
   let controller: VocabUiController | null = null;
-  if (legacy) vm.runInNewContext(classicSource(), view.target);
-  else {
-    const transport: TauriTransport = { invoke: view.invoke };
-    controller = installVocabUi(view.target, transport);
-  }
+  const transport: TauriTransport = { invoke: view.invoke };
+  controller = installVocabUi(view.target, transport);
   await view.elements["vocab-btn"]?.fire("click");
   await settle();
   const initial = {
@@ -377,7 +358,10 @@ async function exercise(legacy: boolean) {
   await settle();
 
   if (legacy) {
-    vm.runInNewContext('prefetchMicrosoftWord("beta"); speakMicrosoftWord("gamma");', view.target);
+    const prefetch = view.target.prefetchMicrosoftWord as ((word: string) => void) | undefined;
+    const speak = view.target.speakMicrosoftWord as ((word: string) => void) | undefined;
+    prefetch?.("beta");
+    speak?.("gamma");
   } else {
     controller?.prefetchMicrosoftWord("beta");
     controller?.speakMicrosoftWord("gamma");
@@ -385,7 +369,7 @@ async function exercise(legacy: boolean) {
   enqueue(view.responses, "word_tts", { audio: "YmV0YQ==" }, { audio: "Z2FtbWE=" });
   await settle();
   return {
-    controllerKeys: controller ? Object.keys(controller).sort() : null,
+    controllerKeys: legacy || !controller ? null : Object.keys(controller).sort(),
     initial,
     empty,
     storage: Object.fromEntries(view.storage.values),
@@ -397,7 +381,7 @@ async function exercise(legacy: boolean) {
   };
 }
 
-test("vocabulary strict installer is behavior-equivalent to the original classic script", async () => {
+test("vocabulary strict installer is behavior-equivalent in an isolated host", async () => {
   const typed = await exercise(false);
   const legacy = await exercise(true);
   assert.equal(

@@ -62,3 +62,27 @@ test("reader palette sync preserves the native command envelopes", async () => {
   assert.match(source, /customBackgroundAssetId: asset\.assetId/);
   assert.match(source, /customBackgroundAssetBytes: asset\.byteSize/);
 });
+
+test("all appearance colors share the continuous spectrum and actual-pair contrast", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /customBackgroundColor: "background"/);
+  assert.match(source, /function renderColorEditor\(color: string\): void/);
+  assert.match(source, /function renderColorContrast\(selectedColor: string\): void/);
+  assert.match(source, /function activeColorContrastPair\(selectedColor: string\)/);
+  assert.match(source, /ratio >= 7 \? "clear" : ratio >= 4\.5 \? "readable" : "low"/);
+  assert.match(source, /setColorFromSpectrumPoint\(event\.clientX, event\.clientY\)/);
+  assert.match(source, /querySelectorAll<HTMLElement>\("\[data-pref-color\]"\)/);
+  assert.match(source, /colorSpectrum\?\.addEventListener\("keydown"/);
+  assert.match(source, /linear-gradient\(to bottom,#fff 0%,rgba\(255,255,255,0\) 50%,#000 100%\)/);
+  assert.match(source, /--reader-spectrum-y", `\$\{100 - hsl\.l\}%`/);
+  assert.match(source, /hslToHex\(hue, 100, lightness\)/);
+  assert.match(source, /readerPreferenceT\("colorLightness", "明度"\)/);
+  assert.match(source, /readerPreferenceT\("fullColorSpectrum", "完整色谱"\)/);
+  assert.match(source, /spectrum\.setAttribute\(\s*"aria-label"/);
+  assert.doesNotMatch(source, /spectrum\.setAttribute\(\s*"aria-valuetext"/);
+  assert.match(source, /activeColorControl\?\.setAttribute\("aria-expanded", "false"\)/);
+  assert.match(source, /control\.setAttribute\("aria-expanded", "true"\)/);
+  assert.doesNotMatch(source, /--reader-spectrum-y", `\$\{100 - hsl\.s\}%`/);
+  assert.doesNotMatch(source, /data-pref-color-swatch/);
+});

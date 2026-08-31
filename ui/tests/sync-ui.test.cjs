@@ -113,7 +113,7 @@ test("账户概览用同一行承载最近同步和当前结果", () => {
   assert.match(syncSource, /const syncStatusEl = syncLastCountsEl/);
   assert.match(
     syncSource,
-    /updateSyncSummary\(\{[\s\S]*?last_sync_ignored: report\.ignored[\s\S]*?\}\);\s*syncStatusEl\.textContent = report\.message;/,
+    /updateSyncSummary\(\{[\s\S]*?last_sync_ignored: report\.ignored[\s\S]*?\}\);\s*syncStatusEl\.textContent = "";/,
   );
   assert.match(
     stylesSource,
@@ -165,7 +165,7 @@ test("账户概览把服务可达与最近同步结果分开，额度检查不�
   );
   assert.match(
     syncSource,
-    /else if \(state === "fail"\)\s*renderOverviewState\("offline", "syncFailed", title, values\)/,
+    /else if \(state === "fail"\)\s*\{[\s\S]*?syncLastCountsEl\.hidden = false;[\s\S]*?renderOverviewState\("offline", "syncFailed", title, values\)/,
   );
   assert.match(
     syncSource,

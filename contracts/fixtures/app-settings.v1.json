@@ -25,8 +25,8 @@
         "libraryAnswerFontSize": 18,
         "libraryLongContextEnabled": true,
         "toolbarIconSizePx": 36,
-        "toolbarItemOrder": ["account", "search", "stats", "library", "news", "filter", "settings", "menu"],
-        "toolbarHiddenItems": ["news"],
+        "toolbarItemOrder": ["account", "search", "stats", "library", "news", "intelligence-lab", "filter", "settings", "menu"],
+        "toolbarHiddenItems": ["news", "intelligence-lab"],
         "toolbarContentOrder": ["text", "icon"],
         "toolbarContentVisible": ["icon", "text"],
         "gestureSettings": {

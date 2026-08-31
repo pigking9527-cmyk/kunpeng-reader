@@ -819,15 +819,16 @@ pub(crate) async fn open_search_window(
         percent_encode(&term),
         percent_encode(&ids_csv)
     );
-    let mut builder =
-        tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
-            .title("书架全文检索")
-            .inner_size(1000.0, 760.0)
-            .min_inner_size(520.0, 400.0);
+    let builder = tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App(url.into()))
+        .title("书架全文检索")
+        .inner_size(1000.0, 760.0)
+        .min_inner_size(520.0, 400.0);
     #[cfg(target_os = "macos")]
-    if let Some(identifier) = crate::profile::webview_data_store_identifier() {
-        builder = builder.data_store_identifier(identifier);
-    }
+    let builder = if let Some(identifier) = crate::profile::webview_data_store_identifier() {
+        builder.data_store_identifier(identifier)
+    } else {
+        builder
+    };
     builder.build().map_err(|e| e.to_string())?;
     Ok(())
 }

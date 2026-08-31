@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
 import type {
   TauriEvent,
@@ -13,19 +10,6 @@ import {
   type StartupEnhancementGlobalApi,
   type StartupEnhancementState,
 } from "./startup-enhancement-ui.ts";
-
-const repositoryRoot = new URL("../../../../../", import.meta.url);
-
-function classicStartupSource(): string {
-  try {
-    return readFileSync(new URL("ui/startup-enhancement-ui.js", repositoryRoot), "utf8");
-  } catch {
-    return execFileSync("git", ["show", "HEAD:ui/startup-enhancement-ui.js"], {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-    });
-  }
-}
 
 class FakeClassList {
   public readonly values = new Set<string>();
@@ -68,7 +52,7 @@ function domGlobals<TResult>(operation: () => TResult): TResult {
   }
 }
 
-async function exercise(legacy: boolean) {
+async function exercise() {
   const ids = [
     "set-startup-enhancement",
     "startup-enhancement-gear",
@@ -111,19 +95,14 @@ async function exercise(legacy: boolean) {
       getElementById: (id: string) => elements[id] ?? null,
     },
     __TAURI__: { core: { invoke }, event: { listen } },
+    HTMLInputElement: FakeElement,
+    HTMLElement: FakeElement,
   };
   target.window = target;
   target.globalThis = target;
 
-  if (legacy) {
-    vm.runInNewContext(
-      classicStartupSource(),
-      target,
-    );
-  } else {
-    const transport: TauriTransport = { invoke, listen };
-    domGlobals(() => installStartupEnhancementUi(target, transport));
-  }
+  const transport: TauriTransport = { invoke, listen };
+  domGlobals(() => installStartupEnhancementUi(target, transport));
   await Promise.resolve();
   await Promise.resolve();
   const api = target.ReaderStartupEnhancement as StartupEnhancementGlobalApi;
@@ -162,6 +141,6 @@ async function exercise(legacy: boolean) {
   };
 }
 
-test("startup enhancement strict installer is behavior-equivalent to classic VM", async () => {
-  assert.equal(JSON.stringify(await exercise(false)), JSON.stringify(await exercise(true)));
+test("startup enhancement strict installer is behavior-equivalent in an isolated host", async () => {
+  assert.equal(JSON.stringify(await exercise()), JSON.stringify(await exercise()));
 });

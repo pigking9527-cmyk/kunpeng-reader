@@ -111,7 +111,7 @@ test("trace cleaning, labels, number bounds, page ingestion, reset, and pruning 
     };
     classic.record("bad label /", detail);
     typed.record("bad label /", detail);
-    const pageEvent = { kind: "footnote", chapter: 4, page: 2, note_marker: true, note_virtual: true, note_link_present: true, note_fragment_present: true, note_click_consumed: true, note_popup_visible: false, note_target_chapter: 8, note_search_chapters: 12, text: "private", href: "reader://private" };
+    const pageEvent = { kind: "layout", outcome: "mac_native_clip", chapter: 4, page: 2, note_marker: true, note_virtual: true, note_link_present: true, note_fragment_present: true, note_click_consumed: true, note_popup_visible: false, note_target_chapter: 8, note_search_chapters: 12, mac_clip_native_notes: true, mac_clip_page_inline_notes: true, mac_clip_view_height: 768, mac_clip_scroll_top: 4_096, mac_clip_measured_blank: 0, mac_clip_virtual_blank: 31, mac_clip_partial_blank: 0, mac_clip_applied_blank: 0, mac_clip_has_extra_virtual: true, mac_clip_path_active: false, text: "private", href: "reader://private" };
     classic.ingestPageEvent(pageEvent);
     typed.ingestPageEvent(pageEvent);
   });

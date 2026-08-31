@@ -154,6 +154,17 @@ test("paged chapters discard a trailing spread with no actual text or media", ()
   assert.match(pagination, /closest\('\.rr-end,\.rr-dual-continuation'\)/);
 });
 
+test("chapter-boundary navigation prepares adjacent DOM only after an idle chapter opening", () => {
+  assert.match(layoutSource, /function currentTextConversion\(\): 'original'\|'t2s'\|'s2t'\{return S\.textConversion==='t2s'\|\|S\.textConversion==='s2t'\?S\.textConversion:'original';\}/);
+  assert.doesNotMatch(layoutSource, /scheduleAdjacentChapterPayloadPrefetch|warmAdjacentChapterPayload|chapterPayloadPrefetchTimers/);
+  assert.match(layoutSource, /function scheduleIdleAdjacentChapterPreparation\(\): void\{[\s\S]*?pageInCh!==0[\s\S]*?setTimeout\(function\(\)\{[\s\S]*?\},1200\);/);
+  assert.match(layoutSource, /prepareChapterDom\(key,payload\.body\|\|''\);/);
+  assert.match(layoutSource, /function nextPage\(\)\{\s*cancelIdleAdjacentChapterPreparation\(\);/);
+  assert.match(layoutSource, /function prevPage\(\)\{\s*cancelIdleAdjacentChapterPreparation\(\);/);
+  assert.match(layoutSource, /function nextPage\(\)\{[\s\S]*?scrollPageBy\(1\)/);
+  assert.match(layoutSource, /function prevPage\(\)\{[\s\S]*?scrollPageBy\(-1\)/);
+});
+
 test("scroll-mode changes defer layout but replay the first input in the target mode", () => {
   const settings = fs.readFileSync(path.join(uiRoot, "generated-ts", "reader-settings-ui.js"), "utf8");
   const runtime = fs.readFileSync(path.join(embeddedRulesRoot, "reader-page-runtime.js"), "utf8");
@@ -245,6 +256,11 @@ test("footnote clicks stay inside the reader page, popup links can jump, and car
   const setupFn = annotations.slice(annotations.indexOf("function setupFn"), annotations.indexOf("// ---- 离线词典"));
   assert.match(setupFn, /pop\.addEventListener\('click',function\(e\)\{if\(e\.target instanceof Element&&e\.target\.closest\('a'\)\)e\.preventDefault\(\)\}\)/);
   assert.doesNotMatch(setupFn, /fnPop\.addEventListener\('click',function\(e\)\{e\.stopPropagation\(\)/);
+  assert.match(setupFn, /closest\('a,\[data-vnote-badge=['"]1['"]\],\.rr-note-badge,\.rr-note-ref,\[data-rr-note-ref=['"]1['"]\],\.vp-inline'\)/);
+  assert.match(setupFn, /note\.matches\('\[data-vnote-badge=['"]1['"]\],\.rr-note-badge,\.rr-note-ref,\[data-rr-note-ref=['"]1['"]\],\.vp-inline'\)\|\|isNoteLink\(note\)/);
+  const renderVirtual = combined.slice(combined.indexOf("function renderVirtualScrollPage"), combined.indexOf("function virtualScrollPageHasCompleteText"));
+  assert.doesNotMatch(renderVirtual, /virtualPageHasInlineFragment\(page\).*return false/);
+  assert.match(combined, /else if \(f\.kind === ["']inline["']\) \{[\s\S]*?cloneInlineNoteFragment\(f\.el\)[\s\S]*?span\.appendChild\(clone\)/);
   assert.match(annotations, /const targetPage=pageOf\(el\);hideFn\(\);if\(targetPage!==pageInCh\)\{rememberReaderJump/);
   assert.match(annotations, /const targetPage2=pageOf\(el2\);hideFn\(\);if\(targetPage2!==pageInCh\)\{rememberReaderJump/);
   const popFootnote = annotations.slice(annotations.indexOf("function popFootnote"), annotations.indexOf("function noteHtml"));
@@ -272,15 +288,24 @@ test("scroll-page taps use real long-text line geometry and leave complete glyph
   assert.match(fastLines, /if\(fastTextRangeNeedsChunks\(rects\)\)\{[\s\S]*?appendFastTextRangeLines/);
   assert.match(fastLines, /start\+=192/);
   assert.match(measurement, /for\(let i=start;i<end;i\+\+\)[\s\S]*?range\.setEnd\(node,i\+1\)/);
+  assert.match(layout, /const MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX=2/);
   assert.match(layout, /const lh=lineHeightPx\(\),glyphPad=scrollGlyphSafePx\(\),bottomGuard=IS_MAC_WEBKIT\?Math\.max\(glyphPad,scrollBottomSafePx\(\)\)/);
+  assert.match(virtualPage, /const fitLimit=viewH-bottomGuard\+\.5/);
   assert.match(virtualPage, /startBounds\.top-glyphPad/);
   assert.match(virtualPage, /nextBounds\.top-glyphPad/);
   assert.match(virtualPage, /sourceAdvance[\s\S]*?virtualLineAdvanceCap[\s\S]*?cappedTop[\s\S]*?verticalShift/);
   assert.match(virtualPage, /sourceGap[\s\S]*?compactGap[\s\S]*?renderedAdvance[\s\S]*?advanceGap[\s\S]*?reducible[\s\S]*?verticalShift\+=reduction/);
   assert.match(mask, /if\(!scrollPagedView\)\{[\s\S]*?clipPath='none'[\s\S]*?return;/);
-  assert.match(mask, /const macPage=virtualSlice\?macVirtualPageForSlice\(virtualSlice\):null/);
+  assert.match(layoutSource, /body\.scroll-mode \.rr img,body\.scroll-mode \.rr svg,body\.scroll-mode \.rr video,body\.scroll-mode \.rr canvas\{position:static !important;float:none !important;clear:both !important;display:block !important/);
+  assert.match(layoutSource, /body\.scroll-mode \.rr figure,body\.scroll-mode \.rr :is\(div,p,section,article,span\):has\(>img,>svg,>video,>canvas\)\{position:static !important;float:none !important;clear:both !important;display:flow-root !important/);
+  assert.match(mask, /const macPage=!floatingFlow&&virtualSlice\?macVirtualPageForSlice\(virtualSlice\):null/);
   assert.match(mask, /if\(rendered\)scheduleMacVirtualPagePrefetch\(virtualSlice\)/);
+  assert.match(mask, /const floatingFlow=isModernEpubLayout\(\)\|\|chapterHasFloatingScrollFlow\(\);[\s\S]*?const macPage=!floatingFlow&&virtualSlice\?macVirtualPageForSlice\(virtualSlice\):null;[\s\S]*?else if\(floatingFlow\)\{[\s\S]*?applyMacNativeLineClip\(false\)/);
+  assert.match(mask, /else if\(pageHasInlineNotes\)\{[\s\S]*?applyMacNativeLineClip\(pageHasInlineNotes\)/);
   assert.match(mask, /applyMacReadableScrollClip\(virtualSlice,maskPort\?maskPort\.clientHeight:0\)/);
+  assert.match(layout, /function applyMacNativeLineClip\(pageHasInlineNotes=false\)[\s\S]*?currentScrollPageClipBlank\(MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX,false\)[\s\S]*?currentScrollPageClipBlank\(MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX,true\)[\s\S]*?mac_clip_page_inline_notes[\s\S]*?mac_clip_virtual_blank/);
+  assert.match(layout, /function macNativePartialLineClipBlank\(\)[\s\S]*?if\(item\.top<pageBottom-1\)continue;[\s\S]*?item\.top>=pageBottom\+guard[\s\S]*?item\.bottom>pageBottom\+MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX\+\.5[\s\S]*?clipStart=Math\.max\(top,item\.top-scrollGlyphSafePx\(\)\)/);
+  assert.match(layout, /function currentScrollPageClipBlank\(visibleOverflowPx=0,includeVirtualTail=true\)[\s\S]*?overflowTolerance=Math\.max\(0,Number\(visibleOverflowPx\)\|\|0\)[\s\S]*?if\(slice&&includeVirtualTail\)/);
   assert.match(layout, /function applyMacReadableScrollClip\(slice,viewH\)/);
 });
 
@@ -405,6 +430,19 @@ test("mode switch paragraph fragments remain source text for highlights and sear
   assert.ok(generatedMatcher);
   assert.doesNotMatch(generatedMatcher[0].replace(/\/\/.*$/gm, ""), /rr-mode-switch-anchor/);
   assert.match(rawAnnotations, /rr-mode-switch-anchor 承载的是从原段落拆出的真实正文/);
+});
+
+test("chapter names are injected into the reading body without entering source offsets", () => {
+  const showChapter = layout.slice(layout.indexOf("function chapterHasVisibleContent"), layout.indexOf("var curTopAnchor="));
+  assert.match(layoutSource, /interface ReaderChapterPayload \{ body\?:string; head\?:string; title\?:string; \}/);
+  assert.match(showChapter, /function addChapterTitleToBody\(value\)/);
+  assert.match(showChapter, /heading\.className='rr-chapter-title'/);
+  assert.match(showChapter, /heading\.dataset\.rrGenerated='chapter-title'/);
+  assert.match(showChapter, /root\.prepend\(heading\)/);
+  assert.match(showChapter, /chapChars=.*?addChapterTitleToBody\(d\.title\);/);
+  const generatedMatcher = layoutSource.match(/function generatedTextNode\(node:[\s\S]*?\n\}/);
+  assert.ok(generatedMatcher);
+  assert.match(generatedMatcher[0], /\[data-rr-generated="chapter-title"\]/);
 });
 
 function paginationContext(width = 1200, pageMode = "single") {

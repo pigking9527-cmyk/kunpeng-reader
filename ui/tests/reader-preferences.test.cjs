@@ -78,7 +78,7 @@ test("quick settings place the compact and classic switch beside the preferences
 });
 
 test("advanced preferences configure the independent jump-back icon lifetime", () => {
-  assert.match(html, /data-pref-panel="advanced"[\s\S]*?reader-layout-engine-row[\s\S]*?data-pref-epub-layout-engine="legacy"[\s\S]*?兼容排版[\s\S]*?data-pref-epub-layout-engine="modern"[\s\S]*?新版排版/);
+  assert.match(html, /data-pref-panel="advanced"[\s\S]*?reader-layout-engine-row[\s\S]*?data-pref-epub-layout-engine="legacy"[\s\S]*?新版排版[\s\S]*?data-pref-epub-layout-engine="modern"[\s\S]*?兼容排版/);
   assert.match(preferences, /data-pref-epub-layout-engine/);
   assert.match(preferences, /ReaderSettings\.update\(\{ epubLayoutEngine: engine \}\)/);
   assert.match(preferencesCss, /reader-layout-engine-options/);
@@ -197,14 +197,25 @@ test("preferences preserve old themes and update the same local reader settings 
   assert.match(preferences, /function openColorPopover\(control\)/);
   assert.match(preferences, /function setActiveColor\(value\)/);
   assert.match(html, /id="reader-color-popover"/);
+  assert.match(html, /data-pref-color="customBackgroundColor"[^>]+data-reader-i18n-aria="customBackgroundColor"/);
   assert.match(html, /class="reader-color-picker" type="button" data-pref-color="textColor"/);
-  assert.match(html, /data-pref-color-swatch="#f44336"/);
-  assert.match(html, /data-pref-color-swatch="#0f766e"/);
+  assert.match(html, /id="reader-color-spectrum"[^>]+data-reader-i18n-aria="fullColorSpectrum"/);
+  assert.match(html, /id="reader-color-contrast"[^>]+aria-live="polite"[^>]+aria-atomic="true"/);
+  assert.match(html, /id="reader-color-contrast-level"[^>]+>清晰</);
+  assert.doesNotMatch(html, /data-pref-color-swatch/);
   assert.doesNotMatch(html, /type="color" data-pref-color/);
   assert.match(preferencesCss, /\.reader-color-popover\{position:fixed/);
-  assert.match(preferencesCss, /background:var\(--color\)!important/);
+  assert.match(preferencesCss, /\.reader-color-spectrum\{position:relative/);
+  assert.match(preferencesCss, /\.reader-color-spectrum-thumb\{[^}]*left:clamp\(11px,[^}]*top:clamp\(11px/);
+  assert.match(preferencesCss, /\.reader-color-contrast\[data-level="low"\] strong/);
   assert.match(preferences, /MAX_CUSTOM_PALETTES = 15/);
-  assert.match(preferences, /function paintColorPreset\(button\)/);
+  assert.match(preferences, /function renderColorContrast\(selectedColor\)/);
+  assert.match(preferences, /function setColorFromSpectrumPoint\(clientX, clientY\)/);
+  assert.match(preferences, /spectrum\.setAttribute\(\s*"aria-label"/);
+  assert.doesNotMatch(preferences, /spectrum\.setAttribute\(\s*"aria-valuetext"/);
+  assert.match(preferences, /activeColorControl\?\.setAttribute\("aria-expanded", "false"\)/);
+  assert.match(preferences, /control\.setAttribute\("aria-expanded", "true"\)/);
+  assert.doesNotMatch(preferences, /function paintColorPreset\(button\)/);
   assert.match(preferences, /event\.stopImmediatePropagation\(\)/);
   assert.doesNotMatch(html, /默认总体设置/);
   assert.doesNotMatch(html, /独立设置/);
@@ -214,6 +225,15 @@ test("preferences preserve old themes and update the same local reader settings 
   assert.match(html, /id="pref-background-image"/);
   assert.match(html, /id="pref-add-palette"/);
   assert.match(html, /id="pref-palette-name"/);
+  const colorButtons = [...html.matchAll(/<button class="reader-color-picker"[^>]*data-pref-color="[^"]+"[^>]*>/g)];
+  assert.equal(colorButtons.length, 6);
+  colorButtons.forEach(([button]) => {
+    assert.match(button, /aria-haspopup="dialog"/);
+    assert.match(button, /aria-controls="reader-color-popover"/);
+    assert.match(button, /aria-expanded="false"/);
+  });
+  assert.match(html, /data-reader-i18n="customBackground">自定义主题</);
+  assert.match(preferencesCss, /grid-template-columns:max-content max-content max-content minmax\(0,1fr\)/);
   assert.doesNotMatch(html, /添加当前配色/);
   assert.match(html, /id="reader-quick-palette"/);
   assert.match(html, /reader-preferences-btn[\s\S]*?reader-quick-palette[\s\S]*?set-font/);

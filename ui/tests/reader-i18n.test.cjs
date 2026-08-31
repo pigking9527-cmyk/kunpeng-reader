@@ -28,11 +28,11 @@ test("reader uses an independent localization entry point before reader behavior
   assert.match(html, /<script src="generated-ts\/reader-i18n\.js"><\/script>\s*<script src="bridge\/reader-protocol-bridge\.js"><\/script>\s*<script src="generated-ts\/reader-message\.js">/);
   assert.match(html, /id="prev-btn"[^>]*data-reader-i18n-title="previousChapter"/);
   assert.match(html, /id="next-btn"[^>]*data-reader-i18n-title="nextChapter"/);
-  const previousPageButton = notes.slice(notes.indexOf('requiredElement(document, "prev-btn")'), notes.indexOf('requiredElement(document, "next-btn")'));
-  const nextPageButton = notes.slice(notes.indexOf('requiredElement(document, "next-btn")'), notes.indexOf("const createTocItem"));
-  assert.match(previousPageButton, /host\.sendToPage\(\{ pageTurn: -1 \}\);/);
-  assert.match(nextPageButton, /host\.sendToPage\(\{ pageTurn: 1 \}\);/);
-  assert.doesNotMatch(previousPageButton + nextPageButton, /gotoChapter/);
+  const previousChapterButton = notes.slice(notes.indexOf('requiredElement(document, "prev-btn")'), notes.indexOf('requiredElement(document, "next-btn")'));
+  const nextChapterButton = notes.slice(notes.indexOf('requiredElement(document, "next-btn")'), notes.indexOf("const createTocItem"));
+  assert.match(previousChapterButton, /host\.sendToPage\(\{\s*gotoChapter:\s*Math\.max\(0,\s*host\.currentChapter\s*-\s*1\)\s*\}\);/);
+  assert.match(nextChapterButton, /host\.sendToPage\(\{\s*gotoChapter:\s*host\.currentChapter\s*\+\s*1\s*\}\);/);
+  assert.doesNotMatch(previousChapterButton + nextChapterButton, /pageTurn/);
   assert.match(html, /id="immersive-btn"[^>]*data-reader-i18n-title="immersive"/);
   assert.match(html, /id="vocab-gear"[^>]*data-reader-i18n-title="vocabularySettings"/);
   assert.match(html, /id="cross-return"[^>]*data-reader-i18n-title="returnToPreviousBook"/);

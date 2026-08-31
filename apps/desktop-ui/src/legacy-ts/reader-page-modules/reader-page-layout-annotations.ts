@@ -4,13 +4,12 @@ type ReaderPageTraceDetail = Record<string, string | number | boolean | null>;
 interface ReaderPageAnchor { range?:Range; el?:Element; modeSwitchMarker?:boolean; media?:boolean; }
 interface ReaderRelayoutOptions { anchor?:ReaderPageAnchor|null; anchorOffset?:number|null; modeSwitch?:boolean; forceAnchorColumn?:boolean; preserveLeadMedia?:boolean; sidePaneResize?:boolean; exactScroll?:boolean; scrollOffset?:number; alignDualAnchor?:boolean; }
 interface ReaderPageCache { sig:string; pages:number[]; complete?:boolean; }
-interface ReaderChapterPayload { body?:string; head?:string; }
+interface ReaderChapterPayload { body?:string; head?:string; title?:string; }
 interface ReaderPageLayout { l:number;r:number;gap:number;colW:number;colPitch:number;pageStep:number;width?:number; }
 interface ReaderSourceRecord { node:Text; start:number; end:number; }
 interface ReaderPageTurnTrace { id: number; direction: string; chapter: number; page: number; input: string; detail: ReaderPageTraceDetail | null; }
 interface ReaderChapterTrace { chapter: number; started: number; }
 interface ReaderPageScrollRulesPort { firstUnfinishedItemIndex(items: readonly ReaderPageFlowItem[], start: number, bottom: number): number; pageBottomForSlice(top: number, height: number, item?: ReaderPageFlowItem | null): number; pageTopForStartItem(items: readonly ReaderPageFlowItem[], start: number, max: number, pad: number): number; alignedPageStart(items: readonly ReaderPageFlowItem[], start: number, max: number, pad: number): { startIdx: number; pageTop: number }; nearestBreakIndex(breaks: readonly number[], top: number): number; pageIndexForTop(breaks: readonly number[], top: number, epsilon: number): number; }
-
 type HighlightActionKey='web'|'dict'|'translate'|'copy'|'highlight'|'correct'|'excerpt'|'cross'|'semantic'|'aiReader'|'note'|'bookmark';
 type HighlightColorKey='y'|'g'|'b'|'p'|'gray'; type HighlightMode='text'|'icon'|'both'; type HighlightLayout='row'|'grid'; type HighlightSize='small'|'medium'|'large'; type WebEngine='baidu'|'google';
 interface HighlightMenuConfig {key:HighlightActionKey;show:boolean} interface HighlightAction {key:HighlightActionKey;icon:string} interface HighlightColor {key:HighlightColorKey;labelKey:string;value:string} interface HighlightMenuPreferencesInput {displayMode?:HighlightMode;layout?:HighlightLayout;size?:HighlightSize;webSearchEngine?:WebEngine;colorful?:boolean;actions?:Array<{key?:string;visible?:boolean}>} interface HighlightMenuItem {key:HighlightActionKey;button:HTMLButtonElement;host?:HTMLElement;label?:string;labelKey?:string;icon?:string}
@@ -106,8 +105,6 @@ export interface ReaderPageSharedRuntime {
   finishPageTurnBugTrace: (trace?: ReaderPageTurnTrace | null) => void;
   chapterPending: number;
   beginChapterBugTrace: (chapter: number, where: string | number) => ReaderChapterTrace;
-  clearTurnFx: () => void;
-  cacheChapterBoundarySnapshot: (chapter: number, boundary: "start" | "end", page: HTMLElement) => void;
 }
 
 export function installReaderPageLayoutAnnotations(sharedRuntime: ReaderPageSharedRuntime): void {
@@ -152,8 +149,6 @@ export function installReaderPageLayoutAnnotations(sharedRuntime: ReaderPageShar
   const finishPageTurnBugTrace = (...args: Parameters<NonNullable<ReaderPageSharedRuntime["finishPageTurnBugTrace"]>>) => runtime.finishPageTurnBugTrace(...args);
   let chapterPending = runtime.chapterPending;
   const beginChapterBugTrace = (...args: Parameters<NonNullable<ReaderPageSharedRuntime["beginChapterBugTrace"]>>) => runtime.beginChapterBugTrace(...args);
-  const clearTurnFx = () => runtime.clearTurnFx();
-  const cacheChapterBoundarySnapshot = (...args: Parameters<NonNullable<ReaderPageSharedRuntime["cacheChapterBoundarySnapshot"]>>) => runtime.cacheChapterBoundarySnapshot(...args);
 let S: ReaderSettings={fontFamily:"",styleMode:"local",textConversion:"original",fontSize:18,noteFontSize:14,lineHeight:1.7,paraSpacing:0.6,letterSpacing:0,marginTop:18,marginBottom:24,marginLeft:28,marginRight:28,dualPageGap:40,pageMode:"single",flowMode:"paged",pageTurnEffect:"horizontal",pageTurnSpeed:1,backgroundPreset:"light",customBackgroundColor:"#fffdf8",customBackgroundImage:"",customPaletteId:"",textColor:"",linkColor:"",selectionColor:"",footnoteBackground:"",footnoteBorder:"",imagePagination:"next-page",epubLayoutEngine:"legacy",uiLanguage:"zh-CN"};
 function isModernEpubLayout(): boolean{return S.epubLayoutEngine==='modern';}
 const READER_ANIMATION_SETTINGS_KEY='readerAnimationSettingsV1';
@@ -161,7 +156,10 @@ const readerAnimationGroupByKey={annotationAdd:'readerPage',readingMode:'readerP
 let readerAnimationSettingsOverride: Record<string, boolean> | null=null;
 function readerAnimationSettingOn(key: keyof typeof readerAnimationGroupByKey): boolean{let values: Record<string,boolean>={};try{const parsed=JSON.parse(localStorage.getItem(READER_ANIMATION_SETTINGS_KEY)||'{}');if(parsed&&typeof parsed==='object')values=Object.assign(values,parsed);}catch(_){}if(readerAnimationSettingsOverride)values=readerAnimationSettingsOverride;const group=readerAnimationGroupByKey[key];return values.allAnimations!==false&&values[key]!==false&&(!group||values[group]!==false);}
 const IS_MAC_WEBKIT=/Macintosh|Mac OS X/.test(navigator.userAgent||'')&&/AppleWebKit/.test(navigator.userAgent||'')&&!/(?:Chrome|Chromium|Edg)\//.test(navigator.userAgent||'');
-let root: ReaderPageRootElement,pager: HTMLElement,scroller: HTMLElement,pageMask: HTMLElement|null=null,virtualPage: HTMLElement|null=null,scrollPreview: ReaderPreviewElement|null=null,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,dualStartColumn=0,dualContinuationChapter=-1,dualContinuationEntry=false,headSeen: Record<string, Promise<void>>={},chapChars=0,scrollBreaks: number[]=[0],scrollPages: ReaderScrollSlice[]=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache: ReaderPageFlowItem[]=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget: number|null=null,scrollActiveSlice: ReaderScrollSlice|null=null,scrollPagedView=true,sideAnchorVirtualOffset: number|null=null,macPageRenderDiagSig='',macVirtualPageCacheKey='',macVirtualPageCache: ReaderScrollSlice|null=null,fastTextNodeOffsets=new WeakMap<Text,number>(),macVirtualPageCacheByKey=new Map<string,ReaderScrollSlice>(),macVirtualPagePrefetchTimers=new Map<string,ReturnType<typeof setTimeout>>(),chapterPayloadCache=new Map<string,Required<ReaderChapterPayload>>(),chapterPayloadLoads=new Map<string,Promise<Required<ReaderChapterPayload>>>(),chapterPayloadPrefetchTimers=new Map<string,ReturnType<typeof setTimeout>>(),chapterOpeningSnapshotTimers=new Map<string,ReturnType<typeof setTimeout>>();
+// macOS 原生文本层允许最后一行最多越过页底 2px：行距、段距不参与该判断；
+// 文字仍能辨认时留在当前页，超过阈值才交给下一页完整显示。
+const MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX=2;
+let root: ReaderPageRootElement,pager: HTMLElement,scroller: HTMLElement,pageMask: HTMLElement|null=null,virtualPage: HTMLElement|null=null,scrollPreview: ReaderPreviewElement|null=null,curCh=0,pageInCh=0,pagesInCh=1,pageStep=1,viewOffset=0,dualStartColumn=0,dualContinuationChapter=-1,dualContinuationEntry=false,headSeen: Record<string, Promise<void>>={},chapChars=0,scrollBreaks: number[]=[0],scrollPages: ReaderScrollSlice[]=[],scrollBreakSig='',scrollItemsSig='',scrollItemsCache: ReaderPageFlowItem[]=[],scrollMaskSig='',scrollProgrammaticUntil=0,scrollProgrammaticTarget: number|null=null,scrollActiveSlice: ReaderScrollSlice|null=null,scrollPagedView=true,sideAnchorVirtualOffset: number|null=null,macPageRenderDiagSig='',macNativeClipDiagSig='',macModernMediaDiagSig='',macVirtualPageCacheKey='',macVirtualPageCache: ReaderScrollSlice|null=null,scrollFloatingFlowSig='',scrollHasFloatingFlow=false,fastTextNodeOffsets=new WeakMap<Text,number>(),macVirtualPageCacheByKey=new Map<string,ReaderScrollSlice>(),macVirtualPagePrefetchTimers=new Map<string,ReturnType<typeof setTimeout>>(),chapterPayloadCache=new Map<string,Required<ReaderChapterPayload>>(),chapterPayloadLoads=new Map<string,Promise<Required<ReaderChapterPayload>>>(),chapterDomCache=new Map<string,HTMLTemplateElement>(),idleAdjacentPrepareTimer: ReturnType<typeof setTimeout>|null=null,idleAdjacentPrepareEpoch=0;
 let downX: number|null=null,downY: number|null=null,didDrag=false;
 let overlayOpen=false; // 外壳里搜索框/设置面板是否打开（打开时正文点击只用于关闭它）
 let ttsOn=false,ttsMap: ReaderTtsMapEntry[]=[],ttsText='',ttsSents: ReaderTtsSentence[]=[],ttsVoice: SpeechSynthesisVoice|null=null,ttsRate=1,ttsSi=0,ttsGen=0,ttsAudioEl: HTMLAudioElement|null=null,ttsCache: Record<number,ReaderTtsCacheEntry>={},ttsWaiting=-1,ttsPlayedAny=false; // 朗读状态
@@ -265,7 +263,7 @@ function applyStyle(){
   c+='.rr .rr-note-badge,#virtual-page .rr-note-badge{display:inline-flex !important;align-items:center !important;justify-content:center !important;width:100% !important;height:100% !important;box-sizing:border-box !important;color:'+link+' !important;background:transparent !important;border:0 !important;border-radius:50% !important;font:700 9px/1 system-ui,"Microsoft YaHei",sans-serif !important;text-decoration:none !important;letter-spacing:0 !important;}';
   // 两种图片过渡方式共享同一份正文分页规则。
   c+='.rr img,.rr figure,.rr svg{break-inside:avoid !important;page-break-inside:avoid !important;-webkit-column-break-inside:avoid !important;max-height:calc(100vh - '+(mg(S.marginTop)+mg(S.marginBottom)+8)+'px) !important;max-width:100% !important;object-fit:contain !important;}';
-  if(isModernEpubLayout())c+='.rr img,.rr svg,.rr video{box-sizing:border-box !important;width:auto !important;height:auto !important;max-width:100% !important;max-height:calc('+pagedBoxHeight()+'px - 2.5em) !important;object-fit:contain !important;break-inside:avoid !important;page-break-inside:avoid !important;-webkit-column-break-inside:avoid !important;}.rr figure,.rr table{box-sizing:border-box !important;max-width:100% !important;break-inside:avoid !important;page-break-inside:avoid !important;-webkit-column-break-inside:avoid !important;}.rr a,.rr h1,.rr h2,.rr h3,.rr h4,.rr h5,.rr h6{overflow-wrap:anywhere !important;}';
+  if(isModernEpubLayout())c+='.rr img,.rr svg,.rr video{box-sizing:border-box !important;width:auto !important;height:auto !important;max-width:100% !important;max-height:calc('+pagedBoxHeight()+'px - 2.5em) !important;object-fit:contain !important;break-inside:avoid !important;page-break-inside:avoid !important;-webkit-column-break-inside:avoid !important;}.rr figure,.rr table{box-sizing:border-box !important;max-width:100% !important;break-inside:avoid !important;page-break-inside:avoid !important;-webkit-column-break-inside:avoid !important;}.rr a,.rr h1,.rr h2,.rr h3,.rr h4,.rr h5,.rr h6{overflow-wrap:anywhere !important;}body.scroll-mode .rr img,body.scroll-mode .rr svg,body.scroll-mode .rr video,body.scroll-mode .rr canvas{position:static !important;float:none !important;clear:both !important;display:block !important;margin:.6em auto !important;}body.scroll-mode .rr figure,body.scroll-mode .rr :is(div,p,section,article,span):has(>img,>svg,>video,>canvas){position:static !important;float:none !important;clear:both !important;display:flow-root !important;max-width:100% !important;height:auto !important;margin:.6em auto !important;overflow:visible !important;}body.scroll-mode .rr .rr-compat-background-pair{display:flex !important;align-items:flex-start !important;gap:1em !important;width:100% !important;max-width:100% !important;margin:.6em 0 !important;clear:both !important;}body.scroll-mode .rr .rr-compat-background-pair>.rr-compat-background-media,body.scroll-mode .rr .rr-compat-background-pair>table{box-sizing:border-box !important;flex:0 1 calc(50% - .5em) !important;width:calc(50% - .5em) !important;max-width:calc(50% - .5em) !important;margin:0 !important;}body.scroll-mode .rr .rr-compat-background-pair>.rr-compat-background-media{height:auto !important;max-height:none !important;object-fit:contain !important;}body.scroll-mode .rr .rr-compat-background-pair>table{table-layout:fixed !important;}';
   const minLines=isModernEpubLayout()?2:1;
   c+='html,body,.rr,.rr *{writing-mode:horizontal-tb !important;-webkit-writing-mode:horizontal-tb !important;-epub-writing-mode:horizontal-tb !important;text-orientation:mixed !important;}.rr{direction:ltr !important;orphans:'+minLines+' !important;widows:'+minLines+' !important;-webkit-line-box-contain:block glyphs replaced !important;}.rr p,.rr div,.rr li,.rr blockquote{orphans:'+minLines+' !important;widows:'+minLines+' !important;}';
   // 模式切换会以字符锚点直接设置 scrollTop。书籍自带的平滑滚动或滚动吸附
@@ -706,6 +704,25 @@ function computedLineStyleForElement(el: Element|null,cache: WeakMap<Element, Re
 function sameLineKey(a: number,b: number): boolean{
   return Math.abs(a-b)<2;
 }
+function measuredLineKey(linesByKey: Record<string,ReaderLineRect>,keys: number[],top: number,bottom: number): number|null{
+  const height=Math.max(1,bottom-top),center=(top+bottom)/2;
+  let matched:number|null=null,matchedDistance=Infinity;
+  for(let i=0;i<keys.length;i++){
+    const existingKey=keys[i];
+    if(existingKey===undefined)continue;
+    if(sameLineKey(existingKey,top))return existingKey;
+    const line=linesByKey[existingKey];
+    if(!line)continue;
+    const lineHeight=Math.max(1,line.bottom-line.top),shared=Math.min(bottom,line.bottom)-Math.max(top,line.top);
+    const sharedHeight=Math.min(height,lineHeight),centerDistance=Math.abs(center-(line.top+line.bottom)/2);
+    // WebKit may report an inline note and its surrounding glyphs with different
+    // top values even though they occupy the same visual row. Keep a separate
+    // virtual row only when their vertical bands do not substantially overlap.
+    if(shared<sharedHeight*.55||centerDistance>sharedHeight*.4)continue;
+    if(centerDistance<matchedDistance){matched=existingKey;matchedDistance=centerDistance;}
+  }
+  return matched;
+}
 function closestInlineNoteElement(node: Node): Element | null{
   const el: Element|null=node instanceof Element?node:node.parentElement;
   if(!el||!root)return null;
@@ -728,8 +745,7 @@ function appendMeasuredCharLine(linesByKey: Record<string,ReaderLineRect>,keys: 
   if(!ch)return;
   const top=r.top-pr.top+scrollTop,bottom=r.bottom-pr.top+scrollTop,left=r.left-pr.left,right=r.right-pr.left;
   if(!isFinite(top)||!isFinite(bottom)||bottom-top<3)return;
-  let key=null;
-  for(let i=0;i<keys.length;i++){const existingKey=keys[i];if(existingKey!==undefined&&sameLineKey(existingKey,top)){key=existingKey;break;}}
+  let key=measuredLineKey(linesByKey,keys,top,bottom);
   if(key==null){key=top;keys.push(key);linesByKey[key]={top:top,bottom:bottom,height:bottom-top,left:left,right:right,fragments:[]};}
   const line=recordValue(linesByKey,key);
   line.top=Math.min(line.top,top);line.bottom=Math.max(line.bottom,bottom);line.height=Math.max(line.height,bottom-top);line.left=Math.min(line.left,left);line.right=Math.max(line.right,right);
@@ -744,8 +760,7 @@ function appendMeasuredTextRangeLine(linesByKey: Record<string,ReaderLineRect>,k
   if(!text||end<=start)return;
   const top=r.top-pr.top+scrollTop,bottom=r.bottom-pr.top+scrollTop,left=r.left-pr.left,right=r.right-pr.left;
   if(!isFinite(top)||!isFinite(bottom)||bottom-top<3)return;
-  let key=null;
-  for(let i=0;i<keys.length;i++){const existingKey=keys[i];if(existingKey!==undefined&&sameLineKey(existingKey,top)){key=existingKey;break;}}
+  let key=measuredLineKey(linesByKey,keys,top,bottom);
   if(key==null){key=top;keys.push(key);linesByKey[key]={top:top,bottom:bottom,height:bottom-top,left:left,right:right,fragments:[]};}
   const line=recordValue(linesByKey,key);
   line.top=Math.min(line.top,top);line.bottom=Math.max(line.bottom,bottom);line.height=Math.max(line.height,bottom-top);line.left=Math.min(line.left,left);line.right=Math.max(line.right,right);
@@ -754,13 +769,10 @@ function appendMeasuredTextRangeLine(linesByKey: Record<string,ReaderLineRect>,k
 function appendMeasuredInlineLine(linesByKey: Record<string,ReaderLineRect>,keys: number[],el: Element,r: DOMRect,pr: DOMRect,scrollTop: number,kind: "inline"|"note-number" = "inline",style?: ReaderComputedLineStyle|null,text = ""): void{
   if(!el||!r||r.width<1||r.height<3)return;
   const top=r.top-pr.top+scrollTop,bottom=r.bottom-pr.top+scrollTop,left=r.left-pr.left,right=r.right-pr.left;
-  let key=null,bestOverlap=0,center=(top+bottom)/2,created=false;
-  for(let i=0;i<keys.length;i++){
-    const candidateKey=keys[i];if(candidateKey===undefined)continue;
-    const cand=recordValue(linesByKey,candidateKey),over=Math.min(bottom,cand.bottom)-Math.max(top,cand.top);
-    if(over>bestOverlap&&over>Math.min(bottom-top,cand.height)*0.18){bestOverlap=over;key=candidateKey;}
-    else if(key==null&&center>=cand.top-Math.max(2,cand.height*.35)&&center<=cand.bottom+Math.max(2,cand.height*.35)){key=candidateKey;}
-  }
+  // 脚注角标经常比正文基线高，但不能因为与下一行擦边就并入下一行。
+  // 与逐字/整段测量共用同一套“重叠比例＋中心距离”规则，确保虚拟页只生成
+  // 一条正文行，角标仍保留在该行自己的相对坐标中。
+  let key=measuredLineKey(linesByKey,keys,top,bottom),created=false;
   if(key==null){key=top;keys.push(key);linesByKey[key]={top:top,bottom:bottom,height:bottom-top,left:left,right:right,fragments:[]};created=true;}
   const line=recordValue(linesByKey,key),frags=line.fragments;
   if(created){
@@ -780,8 +792,8 @@ function fastDocumentTextLineRects(){
     if(!parent||generatedTextNode(node)||closestInlineNoteElement(node))continue;
     fastTextNodeOffsets.set(node,docPos);docPos+=text.length;
     if(!text.trim())continue;
-    const pcs=window.getComputedStyle(parent);
-    if(pcs.display==='none'||pcs.visibility==='hidden')continue;
+    // 隐藏节点不会产生 Range 矩形；直接依赖下方的空矩形过滤。逐节点读取
+    // computed style 会在长章节中反复触发 WebKit 样式查询，延长跨章首帧。
     // WKWebView 对一个很长的纯文本节点偶尔只返回一个跨越整章的矩形。它会
     // 让滚动分页器把整章当作一行，从而错误显示“本章 1/1 页”。先按节点
     // 测量以保持大章节性能；检测到退化矩形时再把该节点分段测量。
@@ -1301,23 +1313,30 @@ function invalidateScrollItemsCache(){
   scrollMaskSig='';
   macVirtualPageCacheKey='';
   macVirtualPageCache=null;
+  scrollFloatingFlowSig='';scrollHasFloatingFlow=false;
   fastTextNodeOffsets=new WeakMap<Text,number>();
   macVirtualPageCacheByKey.clear();
 }
+function chapterHasFloatingScrollFlow(): boolean{
+  if(!root||!isScrollMode())return false;const sig=[curCh,layoutSig(),root.childElementCount].join('|');
+  if(sig===scrollFloatingFlowSig)return scrollHasFloatingFlow;scrollFloatingFlowSig=sig;scrollHasFloatingFlow=false;
+  const candidates=root.querySelectorAll<Element>('img,svg,figure,video,canvas,div,p,span,h1,h2,h3,h4,h5,h6');
+  for(let i=0;i<candidates.length;i++){const candidate=candidates.item(i);if(!candidate||candidate.classList.contains('rr-end'))continue;try{const style=window.getComputedStyle(candidate);if(String(style.cssFloat||style.float||'').toLowerCase()!=='none'){scrollHasFloatingFlow=true;break;}}catch(_){}}
+  return scrollHasFloatingFlow;}function flattenModernTableBackgrounds(): void{if(!isModernEpubLayout()||!isScrollMode()||!root)return;const tables=root.querySelectorAll<HTMLTableElement>('table');for(let i=0;i<tables.length;i++){const table=tables.item(i);if(!table||table.dataset.rrCompatBackgroundMedia==='1')continue;const hosts=[table,...Array.from(table.querySelectorAll<HTMLElement>('*'))];let url='';for(let j=0;j<hosts.length;j++){const host=hosts[j];if(!host)continue;let bg='';try{bg=window.getComputedStyle(host).backgroundImage||'';}catch(_){}const match=/^url\(["']?(.*?)["']?\)$/i.exec(bg);if(match&&match[1]){url=match[1];break;}}if(!url)continue;const pair=document.createElement('div'),image=document.createElement('img');pair.className='rr-compat-background-pair';image.className='rr-compat-background-media';image.alt='';image.src=url;table.before(pair);pair.append(image,table);for(let j=0;j<hosts.length;j++){const host=hosts[j];if(host)host.style.setProperty('background-image','none','important');}table.dataset.rrCompatBackgroundMedia='1';}}
+function traceModernScrollMediaOverlap(): void{
+  if(!isModernEpubLayout()||!isScrollMode()||!scrollPagedView||!root||!pager||typeof readerBugTrace!=='function')return;
+  const port=scrollPort(),pageTop=Math.round(port?.scrollTop||0),pageBottom=pageTop+Math.max(1,port?.clientHeight||window.innerHeight||1),lines=scrollPageItems().filter(function(item){return item.type==='line'&&item.bottom>pageTop&&item.top<pageBottom;}),rectBase=viewRect(),candidates=root.querySelectorAll<Element>('img,svg,canvas,video,object,embed,iframe,figure,table,td,div,span');
+  let mediaCount=0,backgroundCount=0,positionedCount=0,visibleCount=0,textOverlapCount=0,backgroundTextOverlapCount=0;const seenTables=new Set<Element>();
+  for(let i=0;i<candidates.length;i++){const candidate=candidates.item(i);if(!candidate||candidate.classList.contains('rr-end'))continue;let style: CSSStyleDeclaration;try{style=window.getComputedStyle(candidate);}catch(_){continue;}const tag=String(candidate.tagName||'').toLowerCase(),isMedia=/^(img|svg|canvas|video|object|embed|iframe|figure)$/.test(tag),hasBackground=!!style.backgroundImage&&style.backgroundImage!=='none';if(!isMedia&&!hasBackground)continue;mediaCount++;if(hasBackground)backgroundCount++;if(candidate.closest){const table=candidate.closest('table');if(table)seenTables.add(table);}if(String(style.position||'static')!=='static'||String(style.cssFloat||style.float||'').toLowerCase()!=='none')positionedCount++;let rect: DOMRect|null=null;try{rect=candidate.getBoundingClientRect();}catch(_){}if(!rect||rect.width<2||rect.height<2)continue;const top=rect.top-rectBase.top+pageTop,bottom=rect.bottom-rectBase.top+pageTop;if(bottom<=pageTop||top>=pageBottom)continue;visibleCount++;let overlaps=false;for(let j=0;j<lines.length;j++){const line=lines[j];if(!line||line.bottom<=top||line.top>=bottom)continue;overlaps=true;break;}if(overlaps){textOverlapCount++;if(hasBackground)backgroundTextOverlapCount++;}}
+  const tableCount=seenTables.size,sig=[curCh,pageInCh,pageTop,mediaCount,backgroundCount,tableCount,positionedCount,visibleCount,textOverlapCount,backgroundTextOverlapCount].join('|');
+  if(sig===macModernMediaDiagSig)return;macModernMediaDiagSig=sig;
+  readerBugTrace('layout','modern_media_overlap',null,{media_count:mediaCount,media_background_count:backgroundCount,media_table_count:tableCount,media_positioned_count:positionedCount,media_visible_count:visibleCount,media_text_overlap_count:textOverlapCount,media_background_text_overlap_count:backgroundTextOverlapCount});
+}
 function ensureVirtualPage(){
-  if(virtualPage&&virtualPage.isConnected)return virtualPage;
-  if(!pager)return null;
-  virtualPage=document.getElementById('virtual-page');
-  if(!virtualPage){virtualPage=document.createElement('div');virtualPage.id='virtual-page';pager.appendChild(virtualPage);}
-  return virtualPage;
+  if(virtualPage&&virtualPage.isConnected)return virtualPage;if(!pager)return null;virtualPage=document.getElementById('virtual-page');if(!virtualPage){virtualPage=document.createElement('div');virtualPage.id='virtual-page';pager.appendChild(virtualPage);}return virtualPage;
 }
 function readerSideVirtualDiag(offset: number,phase: string,detail?: ReaderPageTraceDetail): void{
-  const payload: ReaderPageTraceDetail={
-    phase:phase,offset:offset,flow:S.flowMode,pageMode:S.pageMode,
-    page:pageInCh+1,pages:pagesInCh,width:Math.round(window.innerWidth||0)
-  };
-  if(detail)for(const k in detail){const value=detail[k];if(value!==undefined)payload[k]=value;}
-  parent.postMessage({readerPerf:'ai_side_virtual '+JSON.stringify(payload)},'*');
+  const payload: ReaderPageTraceDetail={phase:phase,offset:offset,flow:S.flowMode,pageMode:S.pageMode,page:pageInCh+1,pages:pagesInCh,width:Math.round(window.innerWidth||0)};if(detail)for(const k in detail){const value=detail[k];if(value!==undefined)payload[k]=value;}parent.postMessage({readerPerf:'ai_side_virtual '+JSON.stringify(payload)},'*');
 }
 function renderSideAnchorFallbackPage(offset: number,source: Range,reason: string): boolean{
   if(!source||!root||!pager)return false;
@@ -1452,6 +1471,9 @@ function buildVirtualPageFromIndex(items: readonly ReaderPageFlowItem[],startIdx
   const pageTop=forcedPageTop==null
     ?(startIdx>0?Math.max(0,Math.min(navMaxTop,Math.round(startBounds.top-glyphPad))):0)
     :Math.max(0,Math.round(forcedPageTop));
+  // 虚拟层本身受物理视口 overflow:hidden 约束；允许字形越过 viewH 即等同于
+  // 主动把它切掉。完整 fragment 必须落在页底安全区内，不能把“容许 2px”
+  // 当成可绘制到视口外的额度。
   const fitLimit=viewH-bottomGuard+0.5;
   let y=0,endIdx=startIdx-1,layout: ReaderVirtualLayoutEntry[]=[],previewIndex=-1,guard=0,verticalShift=0,previousItem: ReaderPageFlowItem|null=null,previousBounds: {top:number;bottom:number;height:number}|null=null,previousRenderedTop=0;
   for(let i=startIdx;i<items.length&&guard++<1000;i++){
@@ -1590,8 +1612,12 @@ function inlineNoteAnchor(a: Element|null|undefined): boolean{
   if(/^[\[【（(]?\s*(?:注|註)\s*\d{1,5}\s*[\]】）)]?$/.test((a.textContent||'').trim()))return true;
   let frag=href&&href.indexOf('#')>=0?href.split('#').pop():'';
   if(!frag||/back/i.test(frag))return false;
-  try{frag=decodeURIComponent(frag);}catch(_){} if(/^zww\d{1,5}$/i.test(id)&&/^zw\d{1,5}$/i.test(frag.replace(/^c\d+~/i,'')))return true;
-  return /^(note|footnote|endnote|fn|n)[_\-]?\d{1,5}$/i.test(frag);
+  try{frag=decodeURIComponent(frag);}catch(_){}
+  // 章节文件内的脚注目标会带 "c123~" 前缀；这是阅读器自己的章节定位信息，
+  // 不能参与脚注名称匹配，否则会把 #c123~note_1 当成普通链接。
+  const targetFrag=frag.replace(/^c\d+~/i,'');
+  if(/^zww\d{1,5}$/i.test(id)&&/^zw\d{1,5}$/i.test(targetFrag))return true;
+  return /^(note|footnote|endnote|fn|n)[_\-]?\d{1,5}$/i.test(targetFrag);
 }
 function ensureNoteBadgeForAnchor(a: Element): Element|null{
   if(!a||!inlineNoteAnchor(a))return null;
@@ -1791,6 +1817,17 @@ function renderVirtualPreview(page: ReaderScrollSlice,viewH: number): HTMLElemen
   box.appendChild(clone);
   return box;
 }
+function virtualPageHasInlineFragment(page: ReaderScrollSlice): boolean{
+  const layout=page&&page.virtualLayout?page.virtualLayout:[];
+  for(let i=0;i<layout.length;i++){
+    const entry=layout[i],item=entry&&entry.item,fragments=item&&item.fragments?item.fragments:[];
+    for(let j=0;j<fragments.length;j++){
+      const fragment=fragments[j];
+      if(fragment&&fragment.kind==='inline')return true;
+    }
+  }
+  return false;
+}
 function renderVirtualScrollPage(pageOverride?: ReaderScrollSlice|null): boolean{
   if(!isScrollMode()||!scrollPagedView||!pager||!root){clearVirtualPage();return false;}
   const sp=scrollPort();
@@ -1800,6 +1837,9 @@ function renderVirtualScrollPage(pageOverride?: ReaderScrollSlice|null): boolean
   const top=Math.round(sp.scrollTop||0),viewH=Math.max(1,sp.clientHeight||window.innerHeight||1);
   const page=pageOverride||activeScrollSliceAtTop(top);
   if(!page){clearVirtualPage();return false;}
+  // 精确行片段已经包含脚注角标；renderVirtualLine 会克隆角标并重新绑定弹窗。
+  // 因此脚注页也必须与普通页一样按完整行重绘。退回连续原生 DOM 后，相邻
+  // WebKit 字形带会跨页重叠，任何水平裁切都无法同时保住上下两行。
   const layout=page.virtualLayout||[];
   layer.innerHTML='';
   for(let i=0;i<layout.length;i++){
@@ -1859,7 +1899,9 @@ function macVirtualPageForSlice(page: ReaderScrollSlice): ReaderScrollSlice|null
   macVirtualPageCacheKey=key;
   macVirtualPageCache=rebuilt;
   macVirtualPageCacheByKey.set(key,rebuilt);
-  while(macVirtualPageCacheByKey.size>48){const oldest=macVirtualPageCacheByKey.keys().next().value;if(typeof oldest!=='string')break;macVirtualPageCacheByKey.delete(oldest);}
+  // 精确页片段保留最近窗口即可。整章缓存会让快速连翻时 GC 与重绘工作逐页累积，
+  // 反而拖慢临近的跨章排版。
+  while(macVirtualPageCacheByKey.size>8){const oldest=macVirtualPageCacheByKey.keys().next().value;if(typeof oldest!=='string')break;macVirtualPageCacheByKey.delete(oldest);}
   return rebuilt;
 }
 function macVirtualPagePrefetchKey(page: ReaderScrollSlice,viewH: number): string{
@@ -1881,11 +1923,11 @@ function scheduleMacVirtualPagePrefetch(page: ReaderScrollSlice|null): void{
   if(!IS_MAC_WEBKIT||!scrollPagedView||!page||!scrollPages.length)return;
   const pageIndex=scrollPages.indexOf(page);
   if(pageIndex<0)return;
-  const next=scrollPages[pageIndex+1],following=scrollPages[pageIndex+2];
-  // 每一页的预取单独排队，而不是新一页出现就撤销旧定时器。快速连续点击时，
-  // 用户下一页通常正好落在前一次预取的目标上，避免重新做逐字精确测量。
-  if(next)queueMacVirtualPagePrefetch(next,pageIndex+1,18);
-  if(following)queueMacVirtualPagePrefetch(following,pageIndex+2,48);
+  const next=scrollPages[pageIndex+1];
+  // 精确行片段的预取也会占用 WebKit 主线程。阅读连续翻页时，先取消旧任务，
+  // 只在用户停顿后准备紧接的一页，确保前台翻页和跨章排版始终优先。
+  macVirtualPagePrefetchTimers.forEach(function(timer){clearTimeout(timer);});macVirtualPagePrefetchTimers.clear();
+  if(next)queueMacVirtualPagePrefetch(next,pageIndex+1,180);
 }
 function scrollImagePreviewEligible(next: ReaderPageFlowItem,slice: ReaderScrollSlice,nextIdx: number,pageBottom: number): boolean{
   if(!next||!slice)return false;
@@ -1993,26 +2035,26 @@ function applyScrollPageMask(force = false): void{
       refreshHighlights();
       return;
     }
+    const floatingFlow=isModernEpubLayout()||chapterHasFloatingScrollFlow();
     // 大章节先用分段行几何定位页界，再只对当前页逐字取真实片段；不会逐字
     // 扫描整章，也不会退回会在页底裁到字形的原滚动正文。
-    const macPage=virtualSlice?macVirtualPageForSlice(virtualSlice):null;
+    const macPage=!floatingFlow&&virtualSlice?macVirtualPageForSlice(virtualSlice):null;
+    const pageHasInlineNotes=!!(macPage&&virtualPageHasInlineFragment(macPage));
     const rendered=!!(macPage&&renderVirtualScrollPage(macPage));
     if(rendered)scheduleMacVirtualPagePrefetch(virtualSlice);
     if(scroller){
-      if(rendered){
-        scroller.style.clipPath='none';scroller.style.setProperty("-webkit-clip-path",'none');
-      }else{
-        applyMacReadableScrollClip(virtualSlice,maskPort?maskPort.clientHeight:0);
-      }
+      if(rendered){scroller.style.clipPath='none';scroller.style.setProperty("-webkit-clip-path",'none');
+      }else if(floatingFlow){applyMacNativeLineClip(false);
+      }else if(pageHasInlineNotes){applyMacNativeLineClip(pageHasInlineNotes);
+      }else{applyMacReadableScrollClip(virtualSlice,maskPort?maskPort.clientHeight:0);}
     }
-    const diagSig=[curCh,pageInCh,rendered?1:0,macPage&&macPage.virtualLayout?macPage.virtualLayout.length:0,macPage&&macPage._rrFragmentCount||0].join('|');
-    if(diagSig!==macPageRenderDiagSig){
-      macPageRenderDiagSig=diagSig;
-      parent.postMessage({readerPerf:'mac_page_render chapter='+curCh+' page='+(pageInCh+1)+' virtual='+(rendered?1:0)
-        +' items='+(macPage&&macPage.virtualLayout?macPage.virtualLayout.length:0)
-        +' exact='+(macPage&&macPage._rrExactLineCount||0)+' fragments='+(macPage&&macPage._rrFragmentCount||0)
-        +' nodes='+(virtualPage instanceof HTMLElement&&'_rrRenderNodeCount' in virtualPage?Number((virtualPage as ReaderPreviewElement)._rrRenderNodeCount)||0:0)},'*');
+    const diagSig=[curCh,pageInCh,rendered?1:0,floatingFlow?1:0,pageHasInlineNotes?1:0,macPage&&macPage.virtualLayout?macPage.virtualLayout.length:0,macPage&&macPage._rrFragmentCount||0].join('|');
+    if(diagSig!==macPageRenderDiagSig){macPageRenderDiagSig=diagSig;
+      parent.postMessage({readerPerf:'mac_page_render chapter='+curCh+' page='+(pageInCh+1)+' virtual='+(rendered?1:0)+' float_native='+(floatingFlow?1:0)
+        +' items='+(macPage&&macPage.virtualLayout?macPage.virtualLayout.length:0)+' exact='+(macPage&&macPage._rrExactLineCount||0)+' fragments='+(macPage&&macPage._rrFragmentCount||0)
+        +' inline_page='+(pageHasInlineNotes?1:0)+' nodes='+(virtualPage instanceof HTMLElement&&'_rrRenderNodeCount' in virtualPage?Number((virtualPage as ReaderPreviewElement)._rrRenderNodeCount)||0:0)},'*');
     }
+    traceModernScrollMediaOverlap();
     refreshHighlights();
     return;
   }
@@ -2048,6 +2090,70 @@ function applyScrollPageMask(force = false): void{
   }
   refreshHighlights();
 }
+function applyMacNativeLineClip(pageHasInlineNotes = false): void{
+  if(!scroller)return;
+  // 脚注章节保留原生正文，不能采用虚拟页的尾部估算。后者为虚拟片段留的
+  // 空白会直接裁在原始正文上，形成整条横向遮挡。这里只信任真实行框。
+  const measuredBlank=currentScrollPageClipBlank(MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX,false);
+  const virtualBlank=currentScrollPageClipBlank(MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX,true);
+  const partialBlank=macNativePartialLineClipBlank();
+  const blank=Math.max(measuredBlank,partialBlank);
+  const sp=scrollPort();
+  const viewH=Math.max(1,sp?.clientHeight||window.innerHeight||1);
+  const scrollTop=Math.round(sp?.scrollTop||0);
+  const diagSig=[curCh,pageInCh,scrollTop,measuredBlank,virtualBlank,partialBlank,blank].join('|');
+  if(diagSig!==macNativeClipDiagSig&&typeof readerBugTrace==='function'){
+    macNativeClipDiagSig=diagSig;
+    readerBugTrace('layout','mac_native_clip',null,{
+      mac_clip_native_notes:true,
+      mac_clip_page_inline_notes:pageHasInlineNotes,
+      mac_clip_view_height:viewH,
+      mac_clip_scroll_top:scrollTop,
+      mac_clip_measured_blank:measuredBlank,
+      mac_clip_virtual_blank:virtualBlank,
+      mac_clip_partial_blank:partialBlank,
+      mac_clip_applied_blank:blank,
+      mac_clip_has_extra_virtual:virtualBlank>blank,
+      mac_clip_path_active:blank>1,
+    });
+  }
+  if(blank>1){
+    scroller.style.clipPath='inset(0px 0px '+blank+'px 0px)';
+    scroller.style.setProperty("-webkit-clip-path",'inset(0px 0px '+blank+'px 0px)');
+  }else{
+    scroller.style.clipPath='none';
+    scroller.style.setProperty("-webkit-clip-path",'none');
+  }
+}
+function macNativePartialLineClipBlank(): number{
+  if(!isScrollMode()||!scrollPagedView||!pager||!root)return 0;
+  const sp=scrollPort();
+  if(!sp)return 0;
+  const viewH=Math.max(1,sp.clientHeight||window.innerHeight||1);
+  const top=Math.round(sp.scrollTop||0),pageBottom=top+viewH;
+  // WebKit 在楷体与 1.0 行距下可能把下一行的字形绘制到其行框 top 之上。
+  // currentScrollPageClipBlank 已经处理行框本身跨过页底的情况；这里仅处理
+  // 行框从页底之后开始、但字形反向探入可视区的下一行。不能再以“上一条
+  // 完整行”的 bottom 裁切：该值会把允许越出 2px 的本页末行连同段距一起
+  // 挡住，形成用户看到的底部横条。
+  const guard=Math.max(scrollGlyphSafePx(),scrollBottomSafePx(),2);
+  const items=scrollPageItems();
+  for(let i=0;i<items.length;i++){
+    const item=items[i];
+    if(!item||item.type!=='line')continue;
+    if(item.bottom<=top+1)continue;
+    // 行框已在页内时交由 currentScrollPageClipBlank 判定是否超过 2px；
+    // 不重复裁切，避免把完整末行误判为下一行残片。
+    if(item.top<pageBottom-1)continue;
+    if(item.top>=pageBottom+guard)break;
+    if(item.bottom>pageBottom+MACOS_PAGE_BOTTOM_VISIBLE_OVERFLOW_PX+0.5){
+      // 从下一行可能伸入的字形上缘裁切；不计入上一段的行距或段距。
+      const clipStart=Math.max(top,item.top-scrollGlyphSafePx());
+      return Math.max(0,Math.min(viewH-1,Math.ceil(pageBottom-clipStart)));
+    }
+  }
+  return 0;
+}
 function applyMacReadableScrollClip(slice: ReaderScrollSlice|null,viewH: number): void{
   if(!scroller)return;
   viewH=Math.max(1,viewH||scroller.clientHeight||window.innerHeight||1);
@@ -2072,13 +2178,14 @@ function applyMacReadableScrollClip(slice: ReaderScrollSlice|null,viewH: number)
     scroller.style.clipPath='none';scroller.style.setProperty("-webkit-clip-path",'none');
   }
 }
-function currentScrollPageClipBlank(){
+function currentScrollPageClipBlank(visibleOverflowPx = 0,includeVirtualTail = true){
   if(!isScrollMode()||!scrollPagedView||!pager||!root)return 0;
   const sp=scrollPort();
   if(!sp)return 0;
   const viewH=Math.max(1,sp.clientHeight||window.innerHeight||1);
   const top=Math.round(sp.scrollTop||0);
   const pr=viewRect();
+  const overflowTolerance=Math.max(0,Number(visibleOverflowPx)||0);
   let maskBlank=0;
   const pageBottom=top+viewH;
   const slice=activeScrollSliceAtTop(top);
@@ -2086,7 +2193,7 @@ function currentScrollPageClipBlank(){
   // 的文本行，避免每次翻页再次调用 documentTextLineRects 扫描整章 DOM。
   const items=scrollPageItems();
   let scanStart=0,scanEnd=items.length;
-  if(slice){
+  if(slice&&includeVirtualTail){
     scanStart=Math.max(0,Math.min(items.length,slice.startIndex||0)-2);
     scanEnd=Math.min(items.length,Math.max(slice.endIndex||0,slice.nextIndex||0)+3);
   }else if(items.length){
@@ -2098,7 +2205,7 @@ function currentScrollPageClipBlank(){
     const ln=items[i];
     if(!ln||ln.type!=='line')continue;
     if(ln.top>=pageBottom-1)break;
-    if(ln.bottom>pageBottom+0.5){maskBlank=Math.max(maskBlank,Math.ceil(pageBottom-ln.top+1));break;}
+    if(ln.bottom>pageBottom+overflowTolerance+0.5){maskBlank=Math.max(maskBlank,Math.ceil(pageBottom-ln.top+1));break;}
   }
   if(maskBlank<=1&&!items.length){
     const lines=visibleTextLineRects(0,Math.ceil(lineHeightPx()*0.4));
@@ -2106,7 +2213,7 @@ function currentScrollPageClipBlank(){
       const vl=lines[j];
       if(!vl)continue;
       if(vl.top>=pr.bottom-1)continue;
-      if(vl.bottom>pr.bottom+0.5){
+      if(vl.bottom>pr.bottom+overflowTolerance+0.5){
         maskBlank=Math.max(maskBlank,Math.ceil(pr.bottom-vl.top+1));
         break;
       }
@@ -2123,7 +2230,8 @@ function currentScrollPageClipBlank(){
     const next=nextIdx>=0&&nextIdx<items.length?items[nextIdx]:null;
     const virtualBottom=Math.max(0,Math.min(viewH,Math.ceil(slice.virtualBottom||0)));
     const nextTop=next?Math.round((next.top||0)-top):viewH;
-    if(next&&next.type==='line'&&virtualBottom>0&&virtualBottom<viewH-1&&nextTop>=virtualBottom-1&&nextTop<viewH-1){
+    const nextOverflow=next?Math.max(0,(next.bottom||0)-(top+viewH)):0;
+    if(next&&next.type==='line'&&nextOverflow>overflowTolerance+0.5&&virtualBottom>0&&virtualBottom<viewH-1&&nextTop>=virtualBottom-1&&nextTop<viewH-1){
       blank=Math.max(blank,Math.ceil(viewH-virtualBottom));
     }
     const bottom=Math.max(top,Math.min(top+viewH,Math.round(slice.bottom==null?top+viewH:slice.bottom)));
@@ -2951,6 +3059,14 @@ function scheduleNoteNumberDisplayRefresh(){
   });
 }
 function chapterHasVisibleContent(){if(!root)return false;let walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null),node,parent;while((node=walker.nextNode())){parent=node.parentElement;if(parent&&parent.closest&&parent.closest('script,style,template,.rr-end,.rr-dual-continuation'))continue;if((node.nodeValue||'').replace(/[\s\u00a0\u200b\ufeff]/g,''))return true;}return !!root.querySelector('img,svg,canvas,video,object,embed,iframe,table');}
+function chapterTitleForBody(value: unknown): string{return typeof value==='string'?value.replace(/\s+/g,' ').trim().slice(0,240):'';}
+function normalizedChapterTitle(value: string): string{return value.replace(/[\s\u3000]/g,'').replace(/[“”"'‘’《》〈〉【】（）()，,。．、；;：:！？!?—_-]/g,'').toLocaleLowerCase();}
+function addChapterTitleToBody(value: unknown): void{
+  const title=chapterTitleForBody(value),needle=normalizedChapterTitle(title);if(!root||!needle)return;
+  const bodyStart=normalizedChapterTitle((root.textContent||'').slice(0,Math.max(320,title.length*3)));
+  if(bodyStart.startsWith(needle))return;
+  const heading=document.createElement('h1');heading.className='rr-chapter-title';heading.dataset.rrGenerated='chapter-title';heading.textContent=title;root.prepend(heading);
+}
 function lastDualTextColumn(){
   if(!root||!isDualPage())return -1;
   let base=root.getBoundingClientRect().left,pl=pageLayout(),right=0;
@@ -2966,8 +3082,11 @@ function lastDualTextColumn(){
   return right>0?Math.max(0,Math.floor((right-1)/pl.colPitch)):-1;
 }
 function dualContinuationNeeded(){
+  // 单页阅读无需计算双页末栏。`lastDualTextColumn()` 会遍历整章的行框；
+  // 在长章节跨页时先做这项无效测量会明显拖慢章首显示。
+  if(!isDualPage()||fastChapterLayout||curCh>=CH-1)return false;
   const lastColumn=lastDualTextColumn();
-  return !fastChapterLayout&&curCh<CH-1&&lastColumn>=0&&lastColumn%2===0;
+  return lastColumn>=0&&lastColumn%2===0;
 }
 function appendDualChapterContinuation(conversion: "original"|"t2s"|"s2t"): Promise<boolean>{
   if(!dualContinuationNeeded())return Promise.resolve(false);
@@ -2986,100 +3105,85 @@ function appendDualChapterContinuation(conversion: "original"|"t2s"|"s2t"): Prom
 function visibleDualContinuationChapter(){
   return isDualPage()&&dualContinuationChapter===curCh+1&&pageInCh===pagesInCh-1?dualContinuationChapter:-1;
 }
-function chapterPayloadKey(chapter: number,conversion: 'original'|'t2s'|'s2t'): string{
-  return chapter+'|'+conversion;
-}
+function chapterPayloadKey(chapter: number,conversion: 'original'|'t2s'|'s2t'): string{return chapter+'|'+conversion;}
 function rememberChapterPayload(key: string,payload: Required<ReaderChapterPayload>): Required<ReaderChapterPayload>{
   chapterPayloadCache.delete(key);chapterPayloadCache.set(key,payload);
-  while(chapterPayloadCache.size>4){const oldest=chapterPayloadCache.keys().next().value;if(typeof oldest!=='string')break;chapterPayloadCache.delete(oldest);}
+  while(chapterPayloadCache.size>4){const oldest=chapterPayloadCache.keys().next().value;if(typeof oldest!=='string')break;chapterPayloadCache.delete(oldest);chapterDomCache.delete(oldest);}
   return payload;
 }
+function prepareChapterDom(key: string,body: string): HTMLTemplateElement{
+  let template=chapterDomCache.get(key);
+  if(template)return template;
+  template=document.createElement('template');template.innerHTML=body;chapterDomCache.set(key,template);
+  return template;
+}
+function takePreparedChapterDom(key: string,body: string): HTMLTemplateElement{const template=prepareChapterDom(key,body);chapterDomCache.delete(key);return template;}
 function loadChapterPayload(chapter: number,conversion: 'original'|'t2s'|'s2t'): Promise<Required<ReaderChapterPayload>>{
   const key=chapterPayloadKey(chapter,conversion),cached=chapterPayloadCache.get(key);
   if(cached){chapterPayloadCache.delete(key);chapterPayloadCache.set(key,cached);return Promise.resolve(cached);}
   const loading=chapterPayloadLoads.get(key);if(loading)return loading;
   const request=fetch(location.origin+'/chapter/'+ID+'/'+chapter+'/'+conversion).then(function(r){return r.json();}).then(function(data){
-    return rememberChapterPayload(key,{body:typeof data?.body==='string'?data.body:'',head:typeof data?.head==='string'?data.head:''});
+    return rememberChapterPayload(key,{body:typeof data?.body==='string'?data.body:'',head:typeof data?.head==='string'?data.head:'',title:typeof data?.title==='string'?data.title:''});
   });
   chapterPayloadLoads.set(key,request);
   return request.then(function(payload){chapterPayloadLoads.delete(key);return payload;},function(error){chapterPayloadLoads.delete(key);throw error;});
 }
-// 跨章的真正首屏仍要由下方的精确虚拟分页生成；不过在 macOS 上那段工作可能
-// 占住主线程数百毫秒。正文预取命中后，先准备一个只读、不可交互的章首表面，
-// 供 turn-fx 在真正分页落地前遮住旧章。它完全不参与页码、锚点、脚注或正文
-// DOM，因此不会重走曾出现文字重叠的 Range 分段测量路径。
-const CHAPTER_OPENING_SNAPSHOT_BYTES=32*1024;
-function buildChapterOpeningSnapshot(body: string): HTMLElement|null{
-  if(!IS_MAC_WEBKIT||!usesLineBreakPaging()||!root||!pager||!body)return null;
-  const page=document.createElement('div');page.className='turn-fx-page turn-fx-incoming turn-fx-prefetched';
-  const preview=root.cloneNode(false) as HTMLElement;
-  preview.removeAttribute('id');preview.classList.remove('turn-fx-moving');
-  preview.style.visibility='';preview.style.display='block';preview.style.position='absolute';preview.style.left='0';preview.style.top='0';preview.style.width='100%';preview.style.height='auto';preview.style.minHeight='0';preview.style.transform='none';preview.style.pointerEvents='none';
-  // 一屏正文远小于此上限。避免在用户仍阅读当前章时解析整章数百 KiB 的 DOM，
-  // 同时保留原始 HTML 让标题、行内样式和首段排版与真实章节保持一致。
-  preview.innerHTML=body.slice(0,CHAPTER_OPENING_SNAPSHOT_BYTES);
-  // 快照被暂时插入现有 document；移除可执行/全局样式节点以及正文 ID，避免它
-  // 影响当前章的样式、锚点查找和脚注目标。真正切章时仍会完整注入原始正文与 head。
-  const unsafe=preview.querySelectorAll('script,style,link,base,[id]');
-  for(let i=0;i<unsafe.length;i++){const el=unsafe.item(i);if(!el)continue;if(/^(?:SCRIPT|STYLE|LINK|BASE)$/u.test(el.tagName))el.remove();else el.removeAttribute('id');}
-  page.appendChild(preview);return page;
-}
-function scheduleChapterOpeningSnapshotPrefetch(chapter: number,conversion: 'original'|'t2s'|'s2t',payload: Required<ReaderChapterPayload>): void{
-  if(!IS_MAC_WEBKIT||!usesLineBreakPaging()||chapter!==curCh+1||!payload.body)return;
-  const key=chapterPayloadKey(chapter,conversion);
-  if(chapterOpeningSnapshotTimers.has(key))return;
-  const started=performance.now(),timer=setTimeout(function(){
-    chapterOpeningSnapshotTimers.delete(key);
-    // 阅读器已换章、模式/字体设置已变或预取已经被反向导航替代时，不保留旧几何。
-    if(chapter!==curCh+1||!IS_MAC_WEBKIT||!usesLineBreakPaging())return;
-    const page=buildChapterOpeningSnapshot(payload.body);if(!page)return;
-    cacheChapterBoundarySnapshot(chapter,'start',page);
-    reportReaderPaintPerf('chapter_opening_snapshot_prefetch',started,'chapter='+chapter+' bytes='+Math.min(payload.body.length,CHAPTER_OPENING_SNAPSHOT_BYTES));
-  },120);
-  chapterOpeningSnapshotTimers.set(key,timer);
-}
-function scheduleAdjacentChapterPayloadPrefetch(chapter: number,conversion: 'original'|'t2s'|'s2t'): void{
-  const schedule=function(target: number,delay: number){
-    if(target<0||target>=CH)return;
-    const key=chapterPayloadKey(target,conversion);
-    if(chapterPayloadCache.has(key)||chapterPayloadLoads.has(key)||chapterPayloadPrefetchTimers.has(key))return;
-    const started=performance.now(),timer=setTimeout(function(){
-      chapterPayloadPrefetchTimers.delete(key);
-      loadChapterPayload(target,conversion).then(function(payload){
-        reportReaderPaintPerf('chapter_prefetch',started,'chapter='+target+' bytes='+payload.body.length);
-        if(target===chapter+1)scheduleChapterOpeningSnapshotPrefetch(target,conversion,payload);
-      },function(){});
-    },delay);
-    chapterPayloadPrefetchTimers.set(key,timer);
-  };
-  // 前进方向优先；反方向用于用户在章节边界立即翻回时避免再次读取正文。
-  schedule(chapter+1,72);schedule(chapter-1,180);
+function currentTextConversion(): 'original'|'t2s'|'s2t'{return S.textConversion==='t2s'||S.textConversion==='s2t'?S.textConversion:'original';}
+function cancelIdleAdjacentChapterPreparation(): void{idleAdjacentPrepareEpoch++;if(idleAdjacentPrepareTimer){clearTimeout(idleAdjacentPrepareTimer);idleAdjacentPrepareTimer=null;}}
+function scheduleIdleAdjacentChapterPreparation(): void{
+  cancelIdleAdjacentChapterPreparation();
+  if(curCh<0||curCh>=CH-1||pageInCh!==0||chapterPending>0||runtime.chapterTurnPending)return;
+  const sourceChapter=curCh,conversion=currentTextConversion(),targetChapter=sourceChapter+1,epoch=idleAdjacentPrepareEpoch;
+  // 快速连翻的下一次输入会撤销此定时器；仅章首停顿后才离屏解析相邻章。
+  idleAdjacentPrepareTimer=setTimeout(function(){
+    idleAdjacentPrepareTimer=null;
+    if(epoch!==idleAdjacentPrepareEpoch||curCh!==sourceChapter||pageInCh!==0||chapterPending>0||runtime.chapterTurnPending)return;
+    loadChapterPayload(targetChapter,conversion).then(function(payload){
+      if(epoch!==idleAdjacentPrepareEpoch||curCh!==sourceChapter||pageInCh!==0||chapterPending>0||runtime.chapterTurnPending)return;
+      idleAdjacentPrepareTimer=setTimeout(function(){
+        idleAdjacentPrepareTimer=null;
+        if(epoch!==idleAdjacentPrepareEpoch||curCh!==sourceChapter||pageInCh!==0||chapterPending>0||runtime.chapterTurnPending)return;
+        const started=performance.now(),key=chapterPayloadKey(targetChapter,conversion);
+        prepareChapterDom(key,payload.body||'');
+        reportReaderPaintPerf('chapter_idle_prepare',started,'chapter='+targetChapter+' bytes='+(payload.body||'').length);
+      },120);
+    },function(){});
+  },1200);
 }
 function showChapter(i: number,where: ReaderWhere,frag: string|null = null,skippedBlankChapters = 0): Promise<void>{
+  cancelIdleAdjacentChapterPreparation();
   i=Math.max(0,Math.min(CH-1,i));
   runtime.chapterLoadFailed=false;
-  let showStarted=performance.now(),fetchDone=showStarted,bugTraceToken=beginChapterBugTrace(i,where);
-  const conversion: 'original'|'t2s'|'s2t'=S.textConversion==='t2s'||S.textConversion==='s2t'?S.textConversion:'original';
+  let showStarted=performance.now(),fetchDone=showStarted,headDone=showStarted,prepDomDone=headDone,prepRefsDone=headDone,prepNotesDone=headDone,prepMediaDone=headDone,prepTextDone=headDone,prepTitleDone=headDone,resourceStarted=showStarted,resourceDone=showStarted,layoutStarted=showStarted,layoutDone=showStarted,bugTraceToken=beginChapterBugTrace(i,where);
+  const conversion=currentTextConversion();
   return loadChapterPayload(i,conversion).then(function(d){
     fetchDone=performance.now();
-    const body=d.body||'';fastChapterLayout=largeChapterFastLayout(body);
+    const body=d.body||'',payloadKey=chapterPayloadKey(i,conversion);fastChapterLayout=largeChapterFastLayout(body);
     // EPUB 章节样式通过 reader:// link 异步加载。必须等样式成功、失败或超时后
     // 再计算分栏；否则同一章可能先按无样式正文算 36 页，随后变成 12 页，
     // 保存的章内比例在重开时就会落到相邻页甚至相邻章节。
     const headReady=d.head?injectHead(d.head,headSeen):Promise.resolve();
     return headReady.then(function(){
+      headDone=performance.now();
       const enteringAfterDualContinuation=where==='after-dual-continuation';
-      curCh=i;pageInCh=0;dualStartColumn=enteringAfterDualContinuation?1:0;dualContinuationEntry=enteringAfterDualContinuation;dualContinuationChapter=-1;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;const port=scrollPort();if(port)port.scrollTop=0;/* 最终页位移确定前不绘制新章节，避免跨章时短暂露出错误页。 */root.style.visibility='hidden';root.innerHTML=body;normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();
+      curCh=i;pageInCh=0;dualStartColumn=enteringAfterDualContinuation?1:0;dualContinuationEntry=enteringAfterDualContinuation;dualContinuationChapter=-1;scrollBreakSig='';invalidateScrollItemsCache();sourceTextCache=null;scrollBreaks=[0];scrollActiveSlice=null;scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;const port=scrollPort();if(port)port.scrollTop=0;/* 最终页位移确定前不绘制新章节，避免跨章时短暂露出错误页。opacity 同时保证 WebKit 可计算逐行几何，却不会提交中间尺寸的首帧。 */root.style.visibility='hidden';root.style.opacity='0';/* 相邻章节在后台已离屏解析时直接接管缓存节点；未预热时才在此同步解析。 */const chapterTemplate=takePreparedChapterDom(payloadKey,body);root.replaceChildren(chapterTemplate.content);flattenModernTableBackgrounds();prepDomDone=performance.now();normalizeInlineNoteRefs();prepRefsDone=performance.now();noteNumbersReady=false;ensureNoteNumbers();prepNotesDone=performance.now();watchFlowMedia();prepMediaDone=performance.now();
       if(!chapterHasVisibleContent()&&(skippedBlankChapters||0)<16){const nextBlankChapter=where==='end'?i-1:i+1;if(nextBlankChapter>=0&&nextBlankChapter<CH)return showChapter(nextBlankChapter,where==='end'?'end':'start',null,(skippedBlankChapters||0)+1);}
-      chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;applyStyle();applyCols();clearHighlights();
-      return appendDualChapterContinuation(conversion).then(function(){
+      chapChars=(fastChapterLayout?(root.textContent||''):sourceTextAround(0,Number.MAX_SAFE_INTEGER,0,0)).replace(/\s/g,'').length;prepTextDone=performance.now();addChapterTitleToBody(d.title);clearHighlights();prepTitleDone=performance.now();
+      // 预备列布局只服务于双页末栏续章的判断。单页稍后会在稳定帧内完成唯一的
+      // 正式布局；在这里提前重排一次同一份长正文只会增加跨章停顿。
+      const continuationReady=isDualPage()&&!fastChapterLayout?(applyStyle(),applyCols(),appendDualChapterContinuation(conversion)):Promise.resolve(false);
+      return continuationReady.then(function(appendedContinuation){
         // 双页末栏只预览下一章的第一栏；翻到下一跨时以偏移一栏的方式继续，
         // 不重复这段文字。顶部通过 dualContinuationChapter 明确标出左右两章。
         root.insertAdjacentHTML('beforeend','<div class="rr-end"></div>');
-        normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();
-        return waitForFlowResources().then(function(){return new Promise<void>(function(resolve){
+        // 只有双页续章真正插入了下一章 DOM 时才需要重新扫描脚注和媒体；
+        // 单页模式已在写入本章后完成一次扫描，重复执行只会延迟跨章显示。
+        if(appendedContinuation){normalizeInlineNoteRefs();noteNumbersReady=false;ensureNoteNumbers();watchFlowMedia();}
+        resourceStarted=performance.now();
+        return waitForFlowResources().then(function(){resourceDone=performance.now();return new Promise<void>(function(resolve){
         requestAnimationFrame(function(){requestAnimationFrame(function(){
           applyStyle();applyCols();
+          layoutStarted=performance.now();
           const finishChapterLayout=function(){
             if(fastChapterLayout){
               if(!isScrollMode())pagesInCh=fastPagedPageCount(root);
@@ -3090,38 +3194,38 @@ function showChapter(i: number,where: ReaderWhere,frag: string|null = null,skipp
             pageInCh=0;
             if(where==='end')pageInCh=pagesInCh-1;else if(typeof where==='number')pageInCh=Math.max(0,Math.min(pagesInCh-1,where));
             if(frag){const el=document.getElementById(frag);if(el)pageInCh=pageOf(el);}
-            setViewOffset();root.style.visibility='';refreshHighlights();captureAnchor();report(true);notifyReaderEndIfReached(0);scheduleNoteNumberDisplayRefresh();stabilizeProgrammaticViewPaint();
-            const rrBox=root.getBoundingClientRect(),pagerBox=pager.getBoundingClientRect(),rrStyle=getComputedStyle(root);
-            reportReaderPaintPerf(
-              'chapter_ready',
-              showStarted,
-              'chapter='+i+' bytes='+body.length+' fetch_ms='+(fetchDone-showStarted).toFixed(1)
-                +' mac_webkit='+(IS_MAC_WEBKIT?1:0)+' font_px='+parseFloat(rrStyle.fontSize).toFixed(1)
-                +' line_px='+parseFloat(rrStyle.lineHeight).toFixed(1)+' viewport_h='+viewportHeight()
-                +' pager_h='+pagerBox.height.toFixed(1)+' root_h='+rrBox.height.toFixed(1)
-            );scheduleAdjacentChapterPayloadPrefetch(i,conversion);resolve();
+            setViewOffset();
+            layoutDone=performance.now();
+            // `rebuildVisibleScrollPagination()` 必须临时解除 visibility 才能得到
+            // WebKit 的真实行框。此前它会立刻把章首页提交到屏幕，随后再由
+            // setViewOffset()/虚拟页重绘改正，肉眼看起来像一次缩放。保持透明
+            // 到两帧后的稳定几何，再一次性显示最终页。
+            requestAnimationFrame(function(){requestAnimationFrame(function(){
+              if(curCh!==i){resolve();return;}
+              root.style.visibility='';root.style.opacity='';refreshHighlights();captureAnchor();report(true);notifyReaderEndIfReached(0);scheduleNoteNumberDisplayRefresh();stabilizeProgrammaticViewPaint();
+              const rrBox=root.getBoundingClientRect(),pagerBox=pager.getBoundingClientRect(),rrStyle=getComputedStyle(root);
+              reportReaderPaintPerf(
+                'chapter_ready',
+                showStarted,
+                'chapter='+i+' bytes='+body.length+' fetch_ms='+(fetchDone-showStarted).toFixed(1)
+                  +' head_ms='+(headDone-fetchDone).toFixed(1)+' prep_ms='+(resourceStarted-headDone).toFixed(1)
+                  +' prep_dom_ms='+(prepDomDone-headDone).toFixed(1)+' prep_refs_ms='+(prepRefsDone-prepDomDone).toFixed(1)
+                  +' prep_notes_ms='+(prepNotesDone-prepRefsDone).toFixed(1)+' prep_media_ms='+(prepMediaDone-prepNotesDone).toFixed(1)
+                  +' prep_text_ms='+(prepTextDone-prepMediaDone).toFixed(1)+' prep_title_ms='+(prepTitleDone-prepTextDone).toFixed(1)
+                  +' resource_ms='+(resourceDone-resourceStarted).toFixed(1)+' geometry_ms='+(layoutDone-layoutStarted).toFixed(1)
+                  +' settle_ms='+(performance.now()-layoutDone).toFixed(1)
+                  +' mac_webkit='+(IS_MAC_WEBKIT?1:0)+' font_px='+parseFloat(rrStyle.fontSize).toFixed(1)
+                  +' line_px='+parseFloat(rrStyle.lineHeight).toFixed(1)+' viewport_h='+viewportHeight()
+                  +' pager_h='+pagerBox.height.toFixed(1)+' root_h='+rrBox.height.toFixed(1)
+              );if(pageInCh===0&&where==='start'&&!frag)scheduleIdleAdjacentChapterPreparation();resolve();
+            });});
           };
-          // 向前进入大章节时先绘制精确首屏并撤掉旧章覆盖层。整章分页推迟到
-          // 下一帧继续，用户先看到新章正文；向后进入章尾仍需等待完整页表。
-          if(where==='start'&&!frag&&paintFastChapterOpeningPage()){
-            clearTurnFx();
-            reportReaderPaintPerf(
-              'chapter_first_page',
-              showStarted,
-              'chapter='+i+' bytes='+body.length+' fetch_ms='+(fetchDone-showStarted).toFixed(1)
-                +' exact='+(scrollPages[0]&&scrollPages[0]._rrExactLineCount||0)
-                +' items='+(scrollPages[0]&&scrollPages[0].virtualLayout?scrollPages[0].virtualLayout.length:0)
-                +' line_nodes='+lastExactBandFastNodes+' char_nodes='+lastExactBandCharNodes
-            );
-            requestAnimationFrame(finishChapterLayout);
-            return;
-          }
           finishChapterLayout();
         });});
         });});
       });
     });
-  }).then(function(value){runtime.chapterLoadFailed=false;finishChapterBugTrace(bugTraceToken,true,pageInCh);return value;},function(){runtime.chapterLoadFailed=true;root.style.visibility='';finishChapterBugTrace(bugTraceToken,false,0);});
+  }).then(function(value){runtime.chapterLoadFailed=false;finishChapterBugTrace(bugTraceToken,true,pageInCh);return value;},function(){runtime.chapterLoadFailed=true;root.style.visibility='';root.style.opacity='';finishChapterBugTrace(bugTraceToken,false,0);});
 }
 var curTopAnchor: ReaderPageAnchor|null=null; // 实时记录的当前页顶部锚点（精确到字符）
 // 一次模式重排若没有把目标字符放在可见首行，就保留切换前的源偏移。
@@ -3341,15 +3445,20 @@ function relayout(opts: ReaderRelayoutOptions = {}): {modeSwitchVerified:boolean
 }
 function schedulePageTurnBugTrace(trace: ReaderPageTurnTrace): void{setTimeout(function(){finishPageTurnBugTrace(trace);},520);}
 function nextPage(){
+  cancelIdleAdjacentChapterPreparation();
   if(queueChapterTurnInput(1)){readerBugTrace('click','chapter_queued');return;}
   if(chapterPending>0){readerBugTrace('click','chapter_pending');return;}
   const trace=beginPageTurnBugTrace('forward');
-  consumeSideAnchorVirtualPage();
+  // 章末的跨章遮罩优先复制当前虚拟页，而不是整章 root。若此时先消费锚点，
+  // 会清空虚拟页并退化为整章 clone，长章点击会在主线程同步冻结数百毫秒。
+  // 本章即将离开时无需再用该锚点修正章内位置，保留到新章布局接管即可。
+  if(!(usesLineBreakPaging()&&canLeaveScrollChapter(1)))consumeSideAnchorVirtualPage();
   if(usesLineBreakPaging()&&scrollPageBy(1)){schedulePageTurnBugTrace(trace);return;}
   if(pageInCh<pagesInCh-1)gotoPage(pageInCh+1,1);else if(visibleDualContinuationChapter()>=0)beginChapterTurnFx(1,visibleDualContinuationChapter(),'after-dual-continuation');else if(curCh<CH-1)beginChapterTurnFx(1,curCh+1,'start');else notifyReaderEndIfReached(1,true);
   schedulePageTurnBugTrace(trace);
 }
 function prevPage(){
+  cancelIdleAdjacentChapterPreparation();
   if(queueChapterTurnInput(-1)){readerBugTrace('click','chapter_queued');return;}
   if(chapterPending>0){readerBugTrace('click','chapter_pending');return;}
   const trace=beginPageTurnBugTrace('backward');
@@ -4098,7 +4207,7 @@ function generatedTextNode(node: Node|null): boolean{
   const el: Element|null=node instanceof Element?node:node?.parentElement??null;
   // rr-mode-switch-anchor 承载的是从原段落拆出的真实正文，不是生成文字；
   // 必须参与原文偏移、高亮和搜索，否则切换模式后所有后续偏移都会错位。
-  return !!(el&&el.closest&&el.closest('.rr-note-num,#hl-overlay,#virtual-page,#scroll-preview,#turn-fx-sheet,#page-mask'));
+  return !!(el&&el.closest&&el.closest('.rr-note-num,[data-rr-generated="chapter-title"],#hl-overlay,#virtual-page,#scroll-preview,#turn-fx-sheet,#page-mask'));
 }
 function sourceTextRecords(): ReaderSourceRecord[]{
   if(sourceTextCache)return sourceTextCache;
@@ -4117,36 +4226,6 @@ function sourceTextRecords(): ReaderSourceRecord[]{
   return out;
 }
 
-function paintFastChapterOpeningPage(): boolean{
-  if(!root||!pager||!fastChapterLayout||!IS_MAC_WEBKIT||!usesLineBreakPaging()||!isScrollMode())return false;
-  const sp=scrollPort();
-  if(!sp)return false;
-  const viewH=Math.max(1,sp.clientHeight||window.innerHeight||1);
-  root.style.visibility='';
-  invalidateScrollItemsCache();
-  // 绝大多数章首在一屏源范围内已有足够正文；先只逐字测量一屏，
-  // 避免每次跨章都为不会立即显示的第二屏付费。只有题名空 br 使收紧后的
-  // 首页仍明显未填满时，才扩展到两屏重测，保留原有兼容排版行数。
-  const tail=virtualExactBandTailProbePx(),initialBottom=viewH+tail;
-  let exact=exactTextLineItemsForBand(0,initialBottom);
-  if(!exact.length)return false;
-  let first=buildVirtualPageFromIndex(exact,0,viewH,Math.max(viewH,root.scrollHeight-viewH),0);
-  if(first&&Number(first.virtualBottom||0)<viewH-Math.max(lineHeightPx()*3,72)){
-    const expanded=exactTextLineItemsForBand(0,viewH*2+tail);
-    if(expanded.length>exact.length){exact=expanded;first=buildVirtualPageFromIndex(exact,0,viewH,Math.max(viewH,root.scrollHeight-viewH),0);}
-  }
-  if(!first||!first.virtualLayout||!first.virtualLayout.length)return false;
-  first.index=0;
-  first._rrExactLineCount=exact.length;
-  first._rrFragmentCount=first.virtualLayout.reduce(function(total,entry){
-    return total+(entry&&entry.type==='line'&&entry.item&&entry.item.fragments?entry.item.fragments.length:0);
-  },0);
-  scrollBreaks=[0];scrollPages=[first];pagesInCh=1;pageInCh=0;scrollActiveSlice=first;
-  scrollProgrammaticUntil=Date.now()+180;scrollProgrammaticTarget=0;sp.scrollTop=0;
-  const rendered=renderVirtualScrollPage(first);
-  if(rendered&&scroller){scroller.style.clipPath='none';scroller.style.setProperty('-webkit-clip-path','none');}
-  return rendered;
-}
 function sourceTextAround(s: number,e: number,pre: number,post: number): string{
   const recs=sourceTextRecords(),a=Math.max(0,(s||0)-(pre||0)),b=Math.max(a,(e||0)+(post||0)),parts=[];
   for(let i=0;i<recs.length;i++){
@@ -5815,8 +5894,8 @@ function setupFn(){
   pop.addEventListener('wheel',function(e){e.stopPropagation();},{passive:true});
   document.addEventListener('mousedown',function(e){
     if(!fnPop||fnPop.style.display!=='block'||!(e.target instanceof Node)||fnPop.contains(e.target))return;
-    const note=e.target instanceof Element?e.target.closest('a'):null;
-    if(note&&isNoteLink(note))return; // 让 click 处理同一条“注”的开关
+    const note=e.target instanceof Element?e.target.closest('a,[data-vnote-badge="1"],.rr-note-badge,.rr-note-ref,[data-rr-note-ref="1"],.vp-inline'):null;
+    if(note&&(note.matches('[data-vnote-badge="1"],.rr-note-badge,.rr-note-ref,[data-rr-note-ref="1"],.vp-inline')||isNoteLink(note)))return; // 让 click 处理同一条“注”的开关
     hideFn();
   });
   document.addEventListener('wheel',hideFn,{passive:true});

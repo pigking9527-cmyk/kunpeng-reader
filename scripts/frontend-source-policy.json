@@ -3,10 +3,10 @@
   "expectedDirectTauriOccurrences": 0,
   "visualContract": {
     "html": {
-      "ui/index.html": "3b4752ffe86e69f66504950a046b3c7425ec2749949c3961a6e10fa6bcf8f1e6",
+      "ui/index.html": "fb846afb50e9d46c720b1578ecec1acbaa170496d1c5935bf7e8e5ddb17dad81",
       "ui/pdfview.html": "d0de4f5c7e6c278e157d2ca370ee26c463afab647bff5a16b3f616a836dfab00",
       "ui/reader-page-style.html": "cee3915099b8b34970011c4f6eaf63c5f4b37b1d6a63797a528547ac3b9ab06c",
-      "ui/reader.html": "5a80480c53922433c4216b207a0c0fc4db3ea8a4b1f229279edf4447f4b6aae5",
+      "ui/reader.html": "016eccfb127b6cd20732b13dfb904f09a63597727ad932cd58562c3f80929800",
       "ui/search.html": "3ee0b49137bab1fa2c5324ec78344d715d2d3f6e62982a64613f2de7a0f46d3e"
     },
     "css": {
@@ -15,8 +15,8 @@
       "ui/book-info-related.css": "265b306f3474870ae16a397ea025ed6e3941864599a1198f728433c2ddd37467",
       "ui/overlay-stack.css": "6dd1e8166fa7d004dfc69f4e6b12aac75cd0e94d3e6b5ec2de08b0119970b92a",
       "ui/reader-click-zones.css": "f0881621eee64692f3851a90c13b84a104d0e8bc88b103627982fe2d3ae04fa7",
-      "ui/reader-preferences.css": "aa16df648f5e651fd22f07b1699cdda008f81a243d22d4962ebe448741b52a35",
-      "ui/styles.css": "955600c3e081a0c2b46b93d29b850026bddd41adedecdbdc5979743a53afb101",
+      "ui/reader-preferences.css": "70ae963d85e9e87f32db3f677660b2a353d7cab4577b378ee91147698a44da61",
+      "ui/styles.css": "98887d54d6499ebabeadf6cf45dac04ba2e050f8442eeebdd110aa8c5c99782c",
       "ui/window-resize.css": "db2a368b04f36295c8dc3a39f709838334171029fc3c6ba5960e6c8f0a7e1334"
     }
   },

@@ -465,6 +465,30 @@ fn migrate_sync_token_to_platform_store(db: &mut db::AppDb) -> Result<(), String
     db.set_metadata_batch(&[("sync_token_protected", &protected), ("sync_token", "")])
 }
 
+/// Warm the current macOS Keychain credential after an explicit user request.
+/// The current item is created with the installed app in its ACL, so writing it
+/// again would not improve access. Instead it turns every manual sync into a
+/// protected Keychain mutation, which macOS may prompt for separately from the
+/// read. Keeping the successfully read value in the process cache lets this
+/// sync and subsequent automatic work proceed without another prompt.
+fn warm_explicit_sync_credential_access_from_snapshot(stored: &str) -> Result<(), String> {
+    if !secret_store::is_current_sync_secret_platform_marker(stored) {
+        return Ok(());
+    }
+    let _ = resolve_platform_sync_token(stored)?;
+    Ok(())
+}
+
+/// A manual sync is the user's affirmative approval to access their stored
+/// credential. It may warm the in-memory cache, but never rewrites a current
+/// Keychain item. Background sync deliberately never calls this function.
+fn warm_explicit_sync_credential_access(state: &AppState) -> Result<(), String> {
+    let stored = state.with_db_read("sync_refresh_explicit_credential_snapshot", |db| {
+        Ok(db.metadata("sync_token_protected").unwrap_or_default())
+    })?;
+    warm_explicit_sync_credential_access_from_snapshot(&stored)
+}
+
 fn protect_sync_token(token: &str) -> Result<String, String> {
     let protected = secret_store::protect_sync_secret(token.trim())?;
     if token.trim().is_empty() {
@@ -761,7 +785,10 @@ pub(crate) fn auth_request_inner(
     username: String,
     password: String,
 ) -> Result<AuthResponse, String> {
-    let base = normalize_auth_base(&url, DEFAULT_SYNC_URL)?;
+    // The login form intentionally does not expose a server address.  After
+    // logout, retain the previously verified local endpoint so the user can
+    // sign in again instead of being treated as an unconfigured client.
+    let base = auth_base_from_state(state, &url)?;
     let username = username.trim().to_string();
     if username.is_empty() || password.is_empty() {
         return Err("请输入账号和密码".into());
@@ -2216,6 +2243,7 @@ pub(crate) async fn sync_now(app: tauri::AppHandle) -> Result<SyncReport, String
         .run_blocking(move |task| {
             let state = app.state::<AppState>();
             prepare_explicit_sync_credential_retry();
+            warm_explicit_sync_credential_access(state.inner())?;
             let result = sync_now_inner(state.inner(), Some(&task));
             settle_sync_task(task, &result);
             if result.is_ok() {
@@ -2269,6 +2297,20 @@ mod tests {
         assert_eq!(request.url, "https://reader.example");
         assert_eq!(request.username, "alice");
         assert_eq!(request.password, "secret");
+    }
+
+    #[test]
+    fn empty_auth_request_reuses_the_saved_sync_address() {
+        let database = db::AppDb::open_in_memory_for_tests();
+        database
+            .set_metadata("sync_url", "https://reader.example")
+            .unwrap();
+        let state = AppState::new(Some(database));
+
+        assert_eq!(
+            auth_base_from_state(&state, "").unwrap(),
+            "https://reader.example"
+        );
     }
 
     #[test]
@@ -2353,7 +2395,7 @@ mod tests {
         clear_cached_sync_token();
         let record = SyncSettingsRecord {
             url: String::new(),
-            protected_token: Some("keychain:v1".into()),
+            protected_token: Some("test:remembered".into()),
             legacy_token: String::new(),
             username: String::new(),
             user_id: String::new(),
@@ -2364,7 +2406,7 @@ mod tests {
             last_sync_accepted: 0,
             last_sync_ignored: 0,
         };
-        cache_sync_token("keychain:v1", "session-token");
+        cache_sync_token("test:remembered", "session-token");
         assert_eq!(
             resolve_sync_settings(record.clone()).unwrap().token,
             "session-token"
@@ -2393,6 +2435,18 @@ mod tests {
         assert_eq!(
             cached_sync_token("test:remembered").as_deref(),
             Some("already-unlocked")
+        );
+        clear_cached_sync_token();
+    }
+
+    #[test]
+    fn explicit_sync_warms_the_current_protected_credential_without_rewriting_it() {
+        let _test_lock = sync_token_test_lock();
+        clear_cached_sync_token();
+        warm_explicit_sync_credential_access_from_snapshot("test:cmVtZW1iZXJlZA==").unwrap();
+        assert_eq!(
+            cached_sync_token("test:cmVtZW1iZXJlZA==").as_deref(),
+            Some("remembered")
         );
         clear_cached_sync_token();
     }
@@ -2516,7 +2570,7 @@ mod tests {
         clear_cached_sync_token();
         let record = SyncSettingsRecord {
             url: "https://reader.example".into(),
-            protected_token: Some("keychain:v1".into()),
+            protected_token: Some("test:remembered".into()),
             legacy_token: String::new(),
             username: "alice".into(),
             user_id: "u1".into(),
@@ -2528,7 +2582,7 @@ mod tests {
             last_sync_ignored: 0,
         };
         assert_eq!(logout_token_without_keychain_prompt(&record), "");
-        cache_sync_token("keychain:v1", "session-token");
+        cache_sync_token("test:remembered", "session-token");
         assert_eq!(
             logout_token_without_keychain_prompt(&record),
             "session-token"

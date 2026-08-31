@@ -71,10 +71,33 @@ export function readerPreferenceHslToHex(
   return `#${channel(red)}${channel(green)}${channel(blue)}`;
 }
 
+function readerPreferenceRelativeLuminance(value: unknown): number {
+  const hex = normalizeReaderPreferenceHex(value).slice(1);
+  const channel = (offset: number): number => {
+    const encoded = Number.parseInt(hex.slice(offset, offset + 2), 16) / 255;
+    return encoded <= 0.04045
+      ? encoded / 12.92
+      : ((encoded + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+}
+
+export function readerPreferenceContrastRatio(
+  foreground: unknown,
+  background: unknown,
+): number {
+  const foregroundLuminance = readerPreferenceRelativeLuminance(foreground);
+  const backgroundLuminance = readerPreferenceRelativeLuminance(background);
+  const lighter = Math.max(foregroundLuminance, backgroundLuminance);
+  const darker = Math.min(foregroundLuminance, backgroundLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 export const readerPreferenceColorRulesApi = Object.freeze({
   normalizedHex: normalizeReaderPreferenceHex,
   hexToHsl: readerPreferenceHexToHsl,
   hslToHex: readerPreferenceHslToHex,
+  contrastRatio: readerPreferenceContrastRatio,
 });
 
 export type ReaderPreferenceColorRulesApi = typeof readerPreferenceColorRulesApi;

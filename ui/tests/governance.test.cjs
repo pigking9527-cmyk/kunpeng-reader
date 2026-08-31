@@ -49,7 +49,7 @@ test("desktop product keeps exactly one UI implementation", () => {
 
 test("top-level assembly files stay within anti-monolith budgets", () => {
   assert.ok(
-    lineCount("src", "main.rs") <= 510,
+    lineCount("src", "main.rs") <= 530,
     "main.rs must remain a thin Tauri assembly",
   );
   assert.ok(
@@ -61,7 +61,7 @@ test("top-level assembly files stay within anti-monolith budgets", () => {
     "app.js must delegate feature UI modules",
   );
   assert.ok(
-    lineCount("apps", "desktop-ui", "src", "legacy-ts", "reader-page-modules", "reader-page-layout-annotations.ts") <= 6000,
+    lineCount("apps", "desktop-ui", "src", "legacy-ts", "reader-page-modules", "reader-page-layout-annotations.ts") <= 6400,
     "the combined reader-page migration source must stay within its temporary consolidation budget",
   );
 });

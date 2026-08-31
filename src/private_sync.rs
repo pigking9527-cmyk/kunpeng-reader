@@ -944,8 +944,10 @@ mod tests {
         assert!(payload.get("bookId").is_none());
         assert!(payload.get("path").is_none());
 
-        let mut disabled = PrivateSyncOptions::default();
-        disabled.sync_progress = false;
+        let disabled = PrivateSyncOptions {
+            sync_progress: false,
+            ..PrivateSyncOptions::default()
+        };
         assert_eq!(
             entity_enabled_for_options(&disabled, READING_HANDOFF_KIND),
             Some(false)

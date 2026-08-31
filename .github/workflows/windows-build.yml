@@ -9,34 +9,8 @@ on:
         type: boolean
         default: false
   push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/windows-build.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "package.json"
-      - "package-lock.json"
-      - "tsconfig.json"
-      - "eslint.config.mjs"
-      - "build.rs"
-      - "tauri.conf.json"
-      - "packaging/windows/**"
-      - "icons/**"
-      - "apps/desktop-ui/**"
-      - "packages/**"
-      - "scripts/build-release.ps1"
-      - "scripts/prepare-windows-gpu-runtime.ps1"
-      - "scripts/run-typescript-tests.mjs"
-      - "scripts/run-legacy-ui-tests.cjs"
-      - "src/**"
-      - "ui/**"
-      - "vendor/**"
-      - "crates/**"
-      - "LICENSES/**"
-      - "THIRD_PARTY_NOTICES.md"
-      - "scripts/check-licenses.mjs"
-      - "scripts/license-policy.json"
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -57,6 +31,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -83,8 +59,8 @@ jobs:
         if: ${{ inputs.publish_release }}
         run: npm run release:license-gate
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version '^2' --locked
+      - name: Verify project Tauri CLI
+        run: npm exec -- tauri --version
 
       - name: Run frontend migration gates
         run: |
@@ -102,11 +78,11 @@ jobs:
 
       - name: Build portable executable
         shell: pwsh
-        run: ./scripts/build-release.ps1 -SkipIconCacheRefresh
+        run: cargo build --release --locked --bin ebook-reader-tauri
 
       - name: Build NSIS installer
         shell: pwsh
-        run: cargo tauri build --config packaging/windows/tauri.release.conf.json
+        run: npm exec -- tauri build --config packaging/windows/tauri.release.conf.json -- --bin ebook-reader-tauri
 
       - name: Prepare artifacts and checksums
         shell: pwsh
@@ -116,9 +92,10 @@ jobs:
           if (-not $version) { throw 'Cannot read version from Cargo.toml.' }
           $out = Join-Path $PWD 'target/windows-release'
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          $portable = Join-Path $PWD '鲲鹏阅读器.exe'
+          $portable = Join-Path $PWD 'target/release/ebook-reader-tauri.exe'
           $installer = Get-ChildItem -LiteralPath 'target/release/bundle/nsis' -Filter "*_${version}_x64-setup.exe" -File | Select-Object -First 1
           if (-not (Test-Path -LiteralPath $portable)) { throw 'Portable executable was not built.' }
+          if ((Get-Item -LiteralPath $portable).Length -lt 10MB) { throw 'Reader portable executable is unexpectedly small.' }
           if ($null -eq $installer) { throw "NSIS installer for $version was not built." }
           $portableOut = Join-Path $out "Kunpeng-Reader-v${version}-Windows-x64-portable.exe"
           $installerOut = Join-Path $out "Kunpeng-Reader-v${version}-Windows-x64-setup.exe"

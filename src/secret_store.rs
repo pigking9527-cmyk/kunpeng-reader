@@ -13,7 +13,11 @@ const LEGACY_SYNC_KEYCHAIN_MARKER_V3: &str = "keychain:sync-token:v3";
 const LEGACY_SYNC_KEYCHAIN_MARKER_V4: &str = "keychain:sync-token:v4";
 const LEGACY_SYNC_KEYCHAIN_MARKER_V5: &str = "keychain:sync-token:v5";
 const LEGACY_SYNC_KEYCHAIN_MARKER_V6: &str = "keychain:sync-token:v6";
-const SYNC_KEYCHAIN_MARKER: &str = "keychain:sync-token:v7";
+const LEGACY_SYNC_KEYCHAIN_MARKER_V7: &str = "keychain:sync-token:v7";
+const LEGACY_SYNC_KEYCHAIN_MARKER_V8: &str = "keychain:sync-token:v8";
+const LEGACY_SYNC_KEYCHAIN_MARKER_V9: &str = "keychain:sync-token:v9";
+const LEGACY_SYNC_KEYCHAIN_MARKER_V10: &str = "keychain:sync-token:v10";
+const SYNC_KEYCHAIN_MARKER: &str = "keychain:sync-token:v11";
 const SECRET_TOOL_MARKER: &str = "secret-service:v1";
 const KEYCHAIN_ACCESS_DENIED: &str = "已取消或拒绝访问 macOS 钥匙串；本次启动不再重复请求";
 const LEGACY_SYNC_CREDENTIAL: &str =
@@ -108,7 +112,11 @@ fn is_sync_keychain_marker(stored: &str) -> bool {
     matches!(
         stored,
         SYNC_KEYCHAIN_MARKER
+            | LEGACY_SYNC_KEYCHAIN_MARKER_V10
+            | LEGACY_SYNC_KEYCHAIN_MARKER_V9
+            | LEGACY_SYNC_KEYCHAIN_MARKER_V8
             | LEGACY_SYNC_KEYCHAIN_MARKER_V6
+            | LEGACY_SYNC_KEYCHAIN_MARKER_V7
             | LEGACY_SYNC_KEYCHAIN_MARKER_V5
             | LEGACY_SYNC_KEYCHAIN_MARKER_V4
             | LEGACY_SYNC_KEYCHAIN_MARKER_V3
@@ -167,12 +175,12 @@ pub(crate) fn unprotect_secret(stored: &str) -> Result<String, String> {
     String::from_utf8(plain).map_err(|e| format!("凭据不是有效 UTF-8：{e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn read_platform_secret(_stored: &str) -> Result<String, String> {
     Err("测试环境没有操作系统凭据项".into())
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn protect_platform_secret(secret: &str) -> Result<String, String> {
     protect_bytes(secret.as_bytes())
         .map(|bytes| format!("{DPAPI_PREFIX}{}", STANDARD.encode(bytes)))
@@ -183,7 +191,7 @@ fn read_platform_secret(stored: &str) -> Result<String, String> {
     Err(format!("当前平台不支持凭据标记：{stored}"))
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn clear_platform_secret() -> Result<(), String> {
     Ok(())
 }
@@ -224,6 +232,9 @@ mod macos_keychain {
     const ACCOUNT_ITEM_ATTR: u32 = u32::from_be_bytes(*b"acct");
     const SERVICE_ITEM_ATTR: u32 = u32::from_be_bytes(*b"svce");
     const ACCOUNT: &[u8] = b"sync-token";
+    const SYNC_ACCESS_LABEL: &[u8] =
+        b"\xE9\xB2\xB2\xE9\xB9\x8F\xE9\x98\x85\xE8\xAF\xBB\xE5\x99\xA8\xE5\x90\x8C\xE6\xAD\xA5\0";
+    const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
     static OPERATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[repr(C)]
@@ -237,6 +248,15 @@ mod macos_keychain {
     struct SecKeychainAttributeList {
         count: u32,
         attr: *mut SecKeychainAttribute,
+    }
+
+    #[repr(C)]
+    struct CFArrayCallBacks {
+        version: isize,
+        retain: Option<unsafe extern "C" fn(*const c_void, *const c_void) -> *const c_void>,
+        release: Option<unsafe extern "C" fn(*const c_void, *const c_void)>,
+        copy_description: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
+        equal: Option<unsafe extern "C" fn(*const c_void, *const c_void) -> u8>,
     }
 
     #[link(name = "Security", kind = "framework")]
@@ -267,6 +287,24 @@ mod macos_keychain {
             length: u32,
             data: *const c_void,
         ) -> OsStatus;
+        fn SecKeychainItemCreateFromContent(
+            item_class: u32,
+            attr_list: *mut SecKeychainAttributeList,
+            length: u32,
+            data: *const c_void,
+            keychain: *const c_void,
+            initial_access: *const c_void,
+            item_ref: *mut SecKeychainItemRef,
+        ) -> OsStatus;
+        fn SecAccessCreate(
+            descriptor: *const c_void,
+            trusted_list: *const c_void,
+            access: *mut *mut c_void,
+        ) -> OsStatus;
+        fn SecTrustedApplicationCreateFromPath(
+            path: *const c_char,
+            app: *mut *mut c_void,
+        ) -> OsStatus;
         fn SecKeychainItemFreeContent(attr_list: *const c_void, data: *mut c_void) -> OsStatus;
         fn SecKeychainItemDelete(item_ref: SecKeychainItemRef) -> OsStatus;
         fn SecKeychainSearchCreateFromAttributes(
@@ -285,6 +323,18 @@ mod macos_keychain {
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         fn CFRelease(value: *const c_void);
+        fn CFStringCreateWithCString(
+            allocator: *const c_void,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> *const c_void;
+        fn CFArrayCreate(
+            allocator: *const c_void,
+            values: *const *const c_void,
+            num_values: isize,
+            callbacks: *const CFArrayCallBacks,
+        ) -> *const c_void;
+        static kCFTypeArrayCallBacks: CFArrayCallBacks;
     }
 
     fn service() -> Vec<u8> {
@@ -397,17 +447,45 @@ mod macos_keychain {
     }
 
     pub(super) fn store(secret: &str) -> Result<(), String> {
-        store_for(secret, service(), find)
+        store_for(secret, service(), find, false)
     }
 
     pub(super) fn store_sync(secret: &str) -> Result<(), String> {
-        store_for(secret, sync_service(), find_sync)
+        let _operation = operation_lock()
+            .lock()
+            .map_err(|_| "macOS 钥匙串操作锁不可用".to_string())?;
+        let bytes = secret.as_bytes();
+        let length = u32::try_from(bytes.len()).map_err(|_| "同步凭据过大".to_string())?;
+        let mut old_length = 0;
+        let mut old_data = null_mut();
+        let mut item = null_mut();
+        let status = find_sync(&mut old_length, &mut old_data, &mut item);
+        if status == 0 {
+            if !old_data.is_null() {
+                unsafe { SecKeychainItemFreeContent(null(), old_data) };
+            }
+            let updated = unsafe {
+                SecKeychainItemModifyAttributesAndData(item, null(), length, bytes.as_ptr().cast())
+            };
+            release_item(item);
+            return if updated == 0 {
+                Ok(())
+            } else {
+                Err("macOS 钥匙串更新失败".into())
+            };
+        }
+        release_item(item);
+        if status != ERR_SEC_ITEM_NOT_FOUND {
+            return Err("macOS 钥匙串访问失败".into());
+        }
+        create_sync_item_with_current_app_access(bytes)
     }
 
     fn store_for(
         secret: &str,
         service: Vec<u8>,
         find_item: fn(*mut u32, *mut *mut c_void, *mut SecKeychainItemRef) -> OsStatus,
+        _trust_current_app: bool,
     ) -> Result<(), String> {
         let _operation = operation_lock()
             .lock()
@@ -426,10 +504,10 @@ mod macos_keychain {
                 SecKeychainItemModifyAttributesAndData(item, null(), length, bytes.as_ptr().cast())
             };
             release_item(item);
-            return if updated == 0 {
-                Ok(())
-            } else {
+            return if updated != 0 {
                 Err("macOS 钥匙串更新失败".into())
+            } else {
+                Ok(())
             };
         }
         release_item(item);
@@ -456,6 +534,111 @@ mod macos_keychain {
             release_item(created_item);
             Err("macOS 钥匙串写入失败".into())
         }
+    }
+
+    /// Create a new sync item that explicitly trusts the installed application
+    /// bundle. The default `trustedlist = NULL` records the exact build that
+    /// created the item; development rebuilds then look like a different app
+    /// and macOS asks again. Existing legacy items are never modified because
+    /// their ACL can itself reject that mutation.
+    fn create_sync_item_with_current_app_access(secret: &[u8]) -> Result<(), String> {
+        let mut service = sync_service();
+        let mut account = ACCOUNT.to_vec();
+        let mut attrs = [
+            SecKeychainAttribute {
+                tag: SERVICE_ITEM_ATTR,
+                length: service.len() as u32,
+                data: service.as_mut_ptr().cast(),
+            },
+            SecKeychainAttribute {
+                tag: ACCOUNT_ITEM_ATTR,
+                length: account.len() as u32,
+                data: account.as_mut_ptr().cast(),
+            },
+        ];
+        let mut attr_list = SecKeychainAttributeList {
+            count: attrs.len() as u32,
+            attr: attrs.as_mut_ptr(),
+        };
+        let descriptor = unsafe {
+            CFStringCreateWithCString(
+                null(),
+                SYNC_ACCESS_LABEL.as_ptr().cast(),
+                CF_STRING_ENCODING_UTF8,
+            )
+        };
+        if descriptor.is_null() {
+            return Err("macOS 钥匙串访问授权说明初始化失败".into());
+        }
+        let app_bundle = current_app_bundle_path()?;
+        let mut trusted_application = null_mut();
+        let trusted_status = unsafe {
+            SecTrustedApplicationCreateFromPath(app_bundle.as_ptr(), &mut trusted_application)
+        };
+        if trusted_status != 0 || trusted_application.is_null() {
+            unsafe { CFRelease(descriptor) };
+            return Err("macOS 钥匙串受信任应用初始化失败".into());
+        }
+        let trusted_values = [trusted_application.cast_const()];
+        // The CF type callbacks retain the temporary trusted-application
+        // reference until SecAccessCreate has consumed the list.
+        let trusted_list = unsafe {
+            CFArrayCreate(
+                null(),
+                trusted_values.as_ptr(),
+                trusted_values.len() as isize,
+                &kCFTypeArrayCallBacks,
+            )
+        };
+        if trusted_list.is_null() {
+            unsafe {
+                CFRelease(trusted_application.cast());
+                CFRelease(descriptor);
+            }
+            return Err("macOS 钥匙串受信任应用列表初始化失败".into());
+        }
+        let mut access = null_mut();
+        let created = unsafe { SecAccessCreate(descriptor, trusted_list, &mut access) };
+        unsafe {
+            CFRelease(trusted_list);
+            CFRelease(trusted_application.cast());
+            CFRelease(descriptor);
+        }
+        if created != 0 || access.is_null() {
+            return Err("macOS 钥匙串访问授权初始化失败".into());
+        }
+        let mut item = null_mut();
+        let added = unsafe {
+            SecKeychainItemCreateFromContent(
+                GENERIC_PASSWORD_ITEM_CLASS,
+                &mut attr_list,
+                u32::try_from(secret.len()).map_err(|_| "同步凭据过大".to_string())?,
+                secret.as_ptr().cast(),
+                null(),
+                access,
+                &mut item,
+            )
+        };
+        unsafe { CFRelease(access.cast()) };
+        release_item(item);
+        if added == 0 {
+            Ok(())
+        } else {
+            Err("macOS 钥匙串写入失败".into())
+        }
+    }
+
+    fn current_app_bundle_path() -> Result<std::ffi::CString, String> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let executable =
+            std::env::current_exe().map_err(|_| "无法确定当前鲲鹏阅读器的安装位置".to_string())?;
+        let bundle = executable
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+            .ok_or_else(|| "当前鲲鹏阅读器不在应用程序包中".to_string())?;
+        std::ffi::CString::new(bundle.as_os_str().as_bytes())
+            .map_err(|_| "鲲鹏阅读器安装位置无效".to_string())
     }
 
     pub(super) fn read() -> Result<String, String> {
@@ -645,6 +828,12 @@ fn macos_keychain_read_sync_without_interaction(marker: &str) -> Result<String, 
 fn macos_sync_keychain_service(marker: &str) -> Result<String, String> {
     match marker {
         SYNC_KEYCHAIN_MARKER => Ok(crate::profile::sync_token_keychain_service()),
+        LEGACY_SYNC_KEYCHAIN_MARKER_V10 => {
+            Ok(crate::profile::legacy_sync_token_keychain_service(10))
+        }
+        LEGACY_SYNC_KEYCHAIN_MARKER_V9 => Ok(crate::profile::legacy_sync_token_keychain_service(9)),
+        LEGACY_SYNC_KEYCHAIN_MARKER_V8 => Ok(crate::profile::legacy_sync_token_keychain_service(8)),
+        LEGACY_SYNC_KEYCHAIN_MARKER_V7 => Ok(crate::profile::legacy_sync_token_keychain_service(7)),
         LEGACY_SYNC_KEYCHAIN_MARKER_V6 => Ok(crate::profile::legacy_sync_token_keychain_service(6)),
         LEGACY_SYNC_KEYCHAIN_MARKER_V5 => Ok(crate::profile::legacy_sync_token_keychain_service(5)),
         LEGACY_SYNC_KEYCHAIN_MARKER_V4 => Ok(crate::profile::legacy_sync_token_keychain_service(4)),
@@ -765,7 +954,7 @@ fn platform_command_delete(program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn protect_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
     win_dpapi(input, true)
 }
@@ -883,6 +1072,14 @@ mod tests {
         assert!(!KEYCHAIN_MARKER.contains("new-token"));
         assert!(!SYNC_KEYCHAIN_MARKER.contains("new-token"));
         assert!(!SECRET_TOOL_MARKER.contains("new-token"));
+    }
+
+    #[test]
+    fn current_and_previous_sync_keychain_markers_remain_readable() {
+        assert!(is_sync_keychain_marker(SYNC_KEYCHAIN_MARKER));
+        assert!(is_sync_keychain_marker(LEGACY_SYNC_KEYCHAIN_MARKER_V10));
+        assert!(is_sync_keychain_marker(LEGACY_SYNC_KEYCHAIN_MARKER_V9));
+        assert!(is_sync_keychain_marker(LEGACY_SYNC_KEYCHAIN_MARKER_V8));
     }
 
     #[test]
