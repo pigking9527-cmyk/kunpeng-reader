@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn compiled_changelog_remains_the_offline_release_notes_source() {
-        let beta = bundled_release_notes(BUNDLED_CHANGELOG, "v1.1.0-beta.2");
+        let beta = bundled_release_notes(BUNDLED_CHANGELOG, "v1.1.0-beta.3");
         assert!(beta.contains("测试版 1.1"));
         assert!(beta.contains("GitHub"));
         let notes = bundled_release_notes(BUNDLED_CHANGELOG, "v1.11.2");

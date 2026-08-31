@@ -13,6 +13,7 @@ $allowed = @(
   'README.md',
   'README.en.md',
   'CHANGELOG.md',
+  'docs/release/1.1.0-beta.3.md',
   '更新.md',
   '开发记录.md',
   '开发文档.md',
