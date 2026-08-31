@@ -196,12 +196,17 @@ jobs:
           dmg_path="$(find "$out_dir" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
           test -n "$zip_path"
           test -n "$dmg_path"
-          unzip -Z1 "$zip_path" | grep -E '/Contents/MacOS/ebook-reader-tauri$'
+          zip_extract_dir="$(mktemp -d)"
+          unzip -qq "$zip_path" -d "$zip_extract_dir"
+          zip_app="$(find "$zip_extract_dir" -type d -name '*.app' ! -path '*/__MACOSX/*' -print -quit)"
+          test -n "$zip_app"
+          test -x "$zip_app/Contents/MacOS/ebook-reader-tauri"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$zip_app/Contents/Info.plist")" = 'ebook-reader-tauri'
 
           mount_dir="$(mktemp -d)"
           cleanup() {
             hdiutil detach "$mount_dir" -quiet || true
-            rm -rf "$mount_dir"
+            rm -rf "$mount_dir" "$zip_extract_dir"
           }
           trap cleanup EXIT
           hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$mount_dir" >/dev/null
