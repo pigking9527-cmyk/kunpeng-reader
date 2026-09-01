@@ -15,4 +15,10 @@ You may view the source code on GitHub and fork it as permitted by GitHub's Term
 
 Third-party dependencies, dictionaries, models, fonts, images, and other bundled or referenced assets remain governed by their own licenses.
 
+For the first-party code boundary and third-party material notices, see
+`docs/legal/licensing-scope.md` and `THIRD_PARTY_NOTICES.md`. Historical GPL
+remediation, asset disposition, and review are complete; every public test
+package must still pass its distribution license and intellectual-property
+checks. Early development packages may be temporarily signed and not notarized.
+
 For permission requests, contact the repository owner.

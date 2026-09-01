@@ -2,13 +2,7 @@
 
 **中文** | [English](README.en.md)
 
-一个面向 Windows、macOS 与 Linux 的高性能本地电子书阅读器。桌面端使用 **Rust + Tauri 2 + 系统 WebView**，书架与阅读页相互独立、EPUB 原生渲染、按章/虚拟小章按需加载，大书打开更快。
-> **许可说明**：本仓库为 **source-available**，代码公开仅供学习、评估和交流；未经作者书面许可，不得复制、修改、分发、商用或发布衍生版本。详见 [LICENSE](LICENSE)。
-> 第一方代码的适用范围和第三方材料见 [许可证范围](docs/legal/licensing-scope.md) 与 [第三方声明](THIRD_PARTY_NOTICES.md)。历史 GPL 依赖整改、资产处置和复核已完成；公开测试包仍须通过发行包许可证与知识产权检查。
-
-> 当前桌面候选版本为 **测试版 1.1 修订版**（技术版本 `1.1.0-beta.4`）。项目地址：[github.com/pigking9527-cmyk/kunpeng-reader](https://github.com/pigking9527-cmyk/kunpeng-reader)。这是早期开发测试包；macOS 包使用临时签名、尚未公证。
-
-测试版 1.1 修订候选的范围、旧包处置和安装包验收要求见 [修订版说明](docs/release/1.1.0-beta.4.md) 与 [桌面安装包验证要求](docs/release/desktop-artifact-verification.md)。
+最新版本下载：[测试版 1.1 修订版（v1.1.0-beta.4）](https://github.com/pigking9527-cmyk/kunpeng-reader/releases/tag/v1.1.0-beta.4)
 
 ## 特性
 
